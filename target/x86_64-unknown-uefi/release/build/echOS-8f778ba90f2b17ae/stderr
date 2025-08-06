@@ -1,0 +1,3 @@
+asm/long_mode.S:20: warning: signed dword immediate exceeds bounds [-w+number-overflow]
+asm/long_mode.S:20: warning: dword data exceeds bounds [-w+number-overflow]
+asm/long_mode.S:26: warning: label alone on a line without a colon might be in error [-w+label-orphan]
