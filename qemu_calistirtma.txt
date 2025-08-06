@@ -1,4 +1,0 @@
-qemu-system-x86_64 -drive if=pflash,format=raw,file=".\OVMF_CODE.fd",readonly=on -drive if=pflash,format=raw,file=".\OVMF_VARS.fd" -drive format=raw,file=fat:rw:efi_fat -net none -m 512 -vga std -display sdl
-
-cargo +nightly build --target x86_64-unknown-uefi --release
-copy target\x86_64-unknown-uefi\release\echos_efi.efi efi_fat\EFI\Boot\bootx64.efi
