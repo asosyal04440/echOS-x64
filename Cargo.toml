@@ -1,19 +1,29 @@
 [package]
-name = "echOS"
+name = "ech_os"
 version = "0.1.0"
-edition = "2024"
-build = "src/build.rs"
+edition = "2021"
 
-[[bin]]
-name = "echos_efi" # Oluşacak EFI dosyasının adı
-path = "src/main.rs"
+
 
 [dependencies]
 log = "0.4.27"
-uefi = { version = "0.35.0", features = ["logger","panic_handler"] }
-volatile = "0.6.1"
-lazy_static = "1.5.0"
 spin = "0.10.0"
+uefi = "0.35.0"
+pic8259 = "0.10.1"
+widestring = { version = "1", default-features = false }
+x86_64 = "0.15.2"
+lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
+pc-keyboard = "0.7.0"
+
+# GUI - Simple embedded graphics (truly no_std)
+embedded-graphics = "0.8"
+embedded-graphics-core = "0.4"
+
+ps2-mouse = "0.1"
+rlsf = "0.2.1"
+
+
+
 
 [profile.dev]
 panic = "abort"

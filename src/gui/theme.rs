@@ -1,0 +1,57 @@
+//! # echOS GUI Teması
+//! 
+//! Modern, karanlık tonlu renk paleti ve tema tanımları.
+//! VS Code ve JetBrains IDE'lerinden esinlenilmiştir.
+
+/// RGB Renk Yapısı
+#[derive(Debug, Clone, Copy)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Color {
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+    
+    /// 32-bit framebuffer formatına (0xRRGGBB) çevirir.
+    pub const fn to_u32(&self) -> u32 {
+        ((self.r as u32) << 16) | ((self.g as u32) << 8) | (self.b as u32)
+    }
+}
+
+/// Tema Renkleri
+pub struct Theme;
+
+impl Theme {
+    // Arkaplan Renkleri (Koyu Griler)
+    pub const DESKTOP_BG: Color = Color::rgb(22, 22, 26);       // Neredeyse Siyah
+    pub const WINDOW_BG: Color = Color::rgb(30, 30, 34);        // Koyu Antrasit
+    pub const TITLEBAR_BG: Color = Color::rgb(40, 40, 44);      // Orta Gri
+    pub const TITLEBAR_ACTIVE: Color = Color::rgb(0, 122, 204); // VS Code Mavisi
+    
+    // Metin Renkleri
+    pub const TEXT_PRIMARY: Color = Color::rgb(212, 212, 212);  // Açık Gri
+    pub const TEXT_SECONDARY: Color = Color::rgb(128, 128, 128); // Sönük Gri
+    pub const TEXT_ACCENT: Color = Color::rgb(86, 156, 214);    // Parlak Mavi
+    
+    // Vurgu (Accent) Renkleri
+    pub const ACCENT_PRIMARY: Color = Color::rgb(0, 150, 200);  // Camgöbeği (Cyan)
+    pub const ACCENT_SUCCESS: Color = Color::rgb(78, 201, 176); // Teal
+    pub const ACCENT_WARNING: Color = Color::rgb(220, 180, 100); // Altın
+    pub const ACCENT_ERROR: Color = Color::rgb(244, 71, 71);    // Kırmızı
+    
+    // Kenarlık ve Gölgeler
+    pub const BORDER: Color = Color::rgb(60, 60, 64);
+    pub const SHADOW: Color = Color::rgb(10, 10, 12);
+    
+    // Taskbar
+    pub const TASKBAR_BG: Color = Color::rgb(18, 18, 20);
+    
+    // Buton Kontrolleri
+    pub const BUTTON_BG: Color = Color::rgb(50, 50, 54);
+    pub const BUTTON_HOVER: Color = Color::rgb(70, 70, 75);
+    pub const BUTTON_TEXT: Color = Color::rgb(220, 220, 220);
+}

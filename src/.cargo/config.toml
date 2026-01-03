@@ -1,5 +1,11 @@
-[http]
-proxy = null
 
-[source.crates-io]
-registry = "https://github.com/rust-lang/crates.io-index"
+
+[build]
+target = "x86_64-unknown-uefi"
+
+[target.x86_64-unknown-uefi]
+rustflags = ["-C", "link-arg=-Tlink.x", "-C", "linker=lld"]
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]

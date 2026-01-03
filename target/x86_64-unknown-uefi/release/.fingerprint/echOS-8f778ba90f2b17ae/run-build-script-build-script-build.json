@@ -1,1 +1,0 @@
-{"rustc":3926191382657067107,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[12773139565626065372,"build_script_build",false,5425607718746108850]],"local":[{"RerunIfChanged":{"output":"x86_64-unknown-uefi\\release\\build\\echOS-8f778ba90f2b17ae\\output","paths":["asm/long_mode.S"]}}],"rustflags":[],"config":0,"compile_kind":0}

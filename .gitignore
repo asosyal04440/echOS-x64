@@ -1,0 +1,56 @@
+# Build Artifacts
+target/
+*.img
+*.iso
+*.pdb
+*.d
+*.rlib
+*.o
+*.a
+# We want to keep OVMF .fd files if they are in the ovmf folder, 
+# but maybe ignore generated .fd files elsewhere?
+# User said "ovmf files are needed".
+# Usually *.fd are ignored. I will add an exception for ovmf folder if needed
+# or just remove *.fd and be specific about what to ignore.
+# For now, I will remove *.fd from global ignore and ignore specific root level fd files if necessary,
+# OR I can use !ovmf/*.fd to unignore them.
+
+# Let's see what's in ovmf first. 
+# For now, I'll write a "safe" version that ignores generated stuff but keeps the explicitly requested folder.
+
+# Build Artifacts
+target/
+*.img
+*.iso
+*.pdb
+*.d
+*.rlib
+*.o
+*.a
+*.fd.old
+*.fd.bak
+
+# Logs
+serial.log
+build_errors.txt
+build_log_*.txt
+
+# IDE & Tools
+.idea/
+.vscode/
+*.iml
+.agent/
+
+# OS/Bootloader Specific
+esp/
+efi/
+# ovmf/ removed to include it
+
+# Documentation and Reports to Exclude
+UEFI_Spec_*.pdf
+ROADMAP.md
+TECHNICAL_REPORT.md
+
+# System Files
+.DS_Store
+Thumbs.db
