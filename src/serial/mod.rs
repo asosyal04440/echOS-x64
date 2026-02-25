@@ -1,5 +1,5 @@
 //! # echOS Serial Port Modülü
-//! 
+//!
 //! Debug çıktısı için serial port (COM1) desteği.
 //! `serial_print!` ve `serial_println!` makroları için altyapı.
 

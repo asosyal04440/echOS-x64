@@ -1,0 +1,74 @@
+%YAML 1.2
+---
+description: echOS UEFI boot from custom disk image
+params:
+  machine:
+    system_info:
+      type: str
+      description: echOS UEFI test system
+      default: "echOS - UEFI Boot"
+    hardware:
+      import: "%simics%/targets/qsp-x86/hardware.yml"
+      defaults:
+        name: echos
+        rtc:
+          time: auto
+        usb_tablet:
+          create: false
+        firmware:
+          bios: ^machine:software:firmware:bios
+          spi_flash: ^machine:software:firmware:spi_flash
+        consoles:
+          gfx_con:
+            create: true
+            show: true
+        simulation:
+          uefi_dev_name: simics_uefi
+          use_vmp: false
+        storage:
+          disk0:
+            size:
+          disk1:
+            size:
+    software:
+      firmware:
+        description: Firmware images
+        advanced: 2
+        bios:
+          type: file
+          description: BIOS file.
+          default: "%simics%/targets/qsp-x86/images/SIMICSX58IA32X64_1_4_0_r.fd"
+        lan_bios:
+          type: file
+          required: false
+          description: ROM BIOS file for the ICH10 LAN Ethernet adaptor
+        spi_flash:
+          type: file
+          default: "%simics%/targets/qsp-x86/images/spi-flash.bin"
+          description: The ICH10 SPI flash file to use.
+      boot_disk:
+        image:
+          type: file
+          description: echOS bootable disk image
+          default: "%script%/images/echos-efi.img"
+        medium:
+          type: str
+          values: ["USB", "HDD0", "HDD1", "CDR"]
+          default: "HDD0"
+          description: Medium for disk image
+  network:
+    switch:
+      import: "%simics%/targets/common/ethernet-setup.yml"
+      defaults:
+        create_network: false
+    service_node:
+      import: "%simics%/targets/common/sn-setup.yml"
+      defaults:
+        ethernet_switch: ^network:switch:ethernet_switch:name
+  output:
+    system:
+      type: str
+      output: yes
+      default: ^machine:hardware:output:system
+script: "%simics%/targets/qsp-x86/boot-disk-image.target.yml.include"
+...

@@ -1,11 +1,16 @@
 //! # echOS Task Yapısı
-//! 
+//!
 //! Bu modül, işletim sistemindeki task (görev) yapısını tanımlar.
 //! Her task kendi stack'ine, context'ine ve önceliğine sahiptir.
 
-use alloc::vec::Vec;
+use crate::memory::AddressSpace;
+use crate::allocator::stack::KernelStack;
+use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::ops::{Deref, DerefMut};
+use spin::Mutex;
 use x86_64::structures::paging::PhysFrame;
 
 /// Task'ların benzersiz kimlik numarası
@@ -38,6 +43,15 @@ impl Default for Priority {
     }
 }
 
+pub fn weight_for_priority(priority: Priority) -> u32 {
+    match priority {
+        Priority::High => 1536,
+        Priority::Normal => 1024,
+        Priority::Low => 768,
+        Priority::Idle => 256,
+    }
+}
+
 // ============================================================================
 // TASK STATE (DURUM)
 // ============================================================================
@@ -55,6 +69,10 @@ pub enum TaskState {
     Sleeping { wake_tick: usize },
     /// Sonlandırıldı, temizlenecek
     Terminated,
+    /// Durduruldu (SIGSTOP veya Ctrl+Z)
+    Stopped,
+    /// Zombi - sonlandı ama parent wait() yapmadı
+    Zombie,
 }
 
 // ============================================================================
@@ -84,17 +102,17 @@ pub struct TaskContext {
     pub r13: u64,
     pub r12: u64,
     pub rbx: u64,
-    pub rbp: u64,      // Base pointer
-    pub rsp: u64,      // Stack pointer
-    pub rflags: u64,   // CPU flags
-    pub rip: u64,      // Instruction pointer (dönüş adresi)
-    pub padding: u64,  // 16-byte alignment için
-    pub fx_state: FxSaveArea,  // SSE/FPU durumu
+    pub rbp: u64,             // Base pointer
+    pub rsp: u64,             // Stack pointer
+    pub rflags: u64,          // CPU flags
+    pub rip: u64,             // Instruction pointer (dönüş adresi)
+    pub padding: u64,         // 16-byte alignment için
+    pub fx_state: FxSaveArea, // SSE/FPU durumu
 }
 
 impl TaskContext {
     /// Yeni bir task context oluşturur.
-    /// 
+    ///
     /// # Parametreler
     /// - `entry_point`: Task'ın başlangıç adresi
     /// - `stack_top`: Task stack'inin tepesi
@@ -132,26 +150,76 @@ pub enum ExecutionMode {
 // TASK
 // ============================================================================
 
-/// Bir işletim sistemi task'ı (thread/process).
-pub struct Task {
-    /// Benzersiz task kimliği
+/// Task'ın "Sıcak" verileri - Scheduler tarafından sık erişilenler
+#[derive(Debug, Clone)]
+pub struct TaskHotData {
     pub id: TaskId,
-    /// Mevcut durum (Ready, Running, vb.)
     pub state: TaskState,
-    /// Öncelik seviyesi
     pub priority: Priority,
-    /// CPU register durumu
-    pub context: TaskContext,
-    /// Debug için okunabilir isim
+    pub vruntime: u64,
+    pub weight: u32,
+    pub last_start: u64,
+    pub affinity: u32,
+    pub last_cpu: u32,
+    pub kernel_stack_top: u64,
+}
+
+/// Task'ın "Soğuk" verileri - Nadiren erişilen veya sadece context switch'te gerekenler
+#[derive(Clone)]
+pub struct TaskColdData {
     pub name: &'static str,
-    /// Çalışma modu (Ring 0 veya Ring 3)
     pub mode: ExecutionMode,
-    /// Sayfa tablosu (Ring 3 için gerekli)
     pub page_table: Option<PhysFrame>,
-    /// Bekleme süresi (aging için)
+    pub address_space: Option<Arc<Mutex<AddressSpace>>>,
+    pub user_entry: Option<u64>,
+    pub user_stack_top: Option<u64>,
+    pub exit_code: Option<i32>,
     pub wait_ticks: u32,
-    /// Task'ın özel stack alanı
-    stack: Vec<u8>,
+    pub exec_runtime: u64,
+    pub ptrace_flags: u32,
+    pub tracer_pid: Option<TaskId>,
+    pub seccomp_mode: u32,
+    pub stack: KernelStack,
+    /// Background task mı (job control için)
+    pub is_background: bool,
+}
+
+/// Bir işletim sistemi task'ı (thread/process).
+/// Hot/Cold splitting uygulanmıştır.
+#[derive(Clone)]
+pub struct Task {
+    /// Sık erişilen veriler (Cache-friendly)
+    pub hot: TaskHotData,
+    /// CPU register durumu (Context switch'te kritik)
+    pub context: TaskContext,
+    /// Nadiren erişilen veriler (Pointer arkasında da olabilir ama şimdilik struct içinde)
+    pub cold: TaskColdData,
+}
+
+impl Deref for Task {
+    type Target = TaskHotData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.hot
+    }
+}
+
+impl DerefMut for Task {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.hot
+    }
+}
+
+// Geriye dönük uyumluluk için Deref trait'i kullanılabilir veya
+// doğrudan erişim metodları yazılabilir. Şimdilik doğrudan erişim.
+
+impl Task {
+    // Helper accessors to maintain compatibility with existing code where possible,
+    // or we refactor the usages. Let's provide direct accessors for common fields.
+    
+    pub fn id(&self) -> TaskId { self.hot.id }
+    pub fn state(&self) -> TaskState { self.hot.state }
+    // ... diğerleri için refactor gerekecek.
 }
 
 impl Task {
@@ -159,45 +227,101 @@ impl Task {
     pub fn new(entry_point: fn() -> !) -> Self {
         Self::with_priority(entry_point, Priority::Normal, "unnamed")
     }
-    
+
     /// Belirtilen öncelikle yeni task oluşturur.
-    /// 
-    /// # Parametreler
-    /// - `entry_point`: Task'ın başlangıç fonksiyonu (sonsuza kadar çalışır)
-    /// - `priority`: Öncelik seviyesi
-    /// - `name`: Debug için isim
     pub fn with_priority(entry_point: fn() -> !, priority: Priority, name: &'static str) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        
-        // 64KB stack ayır
-        let mut stack = vec![0u8; 65536];
-        let stack_top = stack.as_mut_ptr() as u64 + 65536;
-        
-        // 16-byte alignment (ABI gereksinimi)
-        let stack_top = stack_top & !0xF;
-        
+        Self::with_priority_and_id(entry_point, priority, name, id)
+    }
+
+    /// Belirtilen öncelik ve ID ile yeni task oluşturur.
+    ///
+    /// Stack düzeni (düşük adres → yüksek adres):
+    /// ```text
+    /// [Guard Page 4KB | Kullanılabilir Stack 64KB]
+    ///  ^-- erişilemez     ^-- stack_bottom      ^-- stack_top
+    /// ```
+    /// Guard page stack overflow'da page fault (#PF) üretir.
+    pub fn with_priority_and_id(
+        entry_point: fn() -> !,
+        priority: Priority,
+        name: &'static str,
+        id: TaskId,
+    ) -> Self {
+        // 16KB stack + 4KB guard page = 20KB toplam ayır (Daha fazla task için küçültüldü)
+        const GUARD_PAGE_SIZE: usize = 4096;
+        const STACK_SIZE: usize = 16384; // 64KB -> 16KB
+        let mut stack = KernelStack::new(GUARD_PAGE_SIZE + STACK_SIZE).expect("Failed to allocate kernel stack");
+
+        // Guard page: stack'in en altındaki 4KB
+        // Bu alanı "zehirle" — debug pattern ile doldur (0xCC = INT3 opcode)
+        // Gerçek koruma: page table'da PRESENT bit'i kaldırılarak yapılır
+        for byte in stack[..GUARD_PAGE_SIZE].iter_mut() {
+            *byte = 0xCC;
+        }
+
+        // Stack top: guard page'den sonraki 64KB'ın tepesi, 16-byte hizalı
+        let stack_bottom = stack.as_mut_ptr() as u64 + GUARD_PAGE_SIZE as u64;
+        let mut stack_top = stack_bottom + STACK_SIZE as u64;
+        stack_top &= !0xFu64;
+
         Self {
-            id,
-            state: TaskState::Ready,
-            priority,
+            hot: TaskHotData {
+                id,
+                state: TaskState::Ready,
+                priority,
+                vruntime: 0,
+                weight: weight_for_priority(priority),
+                last_start: 0,
+                affinity: 0xFFFFFFFF, // Tüm CPU'larda çalışabilir
+                last_cpu: 0,
+                kernel_stack_top: stack_top as u64,
+            },
             context: TaskContext::new(entry_point as u64, stack_top),
-            name,
-            mode: ExecutionMode::NativeRust,
-            page_table: None,
-            wait_ticks: 0,
-            stack,
+            cold: TaskColdData {
+                name,
+                mode: ExecutionMode::NativeRust,
+                page_table: None,
+                address_space: None,
+                user_entry: None,
+                user_stack_top: None,
+                exit_code: None,
+                wait_ticks: 0,
+                exec_runtime: 0,
+                ptrace_flags: 0,
+                tracer_pid: None,
+                seccomp_mode: 0, // 0 = Disabled
+                stack,
+                is_background: false,
+            },
         }
     }
-    
+
     /// CPU boşta olduğunda çalışan özel idle task'ı oluşturur.
-    /// Bu task sadece HLT instruction'ı çalıştırır.
     pub fn idle() -> Self {
+        Self::idle_with_cpu(0)
+    }
+
+    /// Belirli CPU için idle task oluşturur.
+    pub fn idle_with_cpu(cpu_id: u32) -> Self {
         fn idle_task() -> ! {
             loop {
                 x86_64::instructions::hlt();
             }
         }
-        
-        Self::with_priority(idle_task as fn() -> !, Priority::Idle, "idle")
+
+        let mut task = Self::with_priority(idle_task, Priority::Idle, "idle");
+        task.hot.affinity = 1 << cpu_id; // Sadece belirli CPU'da
+        task.hot.last_cpu = cpu_id;
+        task
     }
+}
+
+// Cold data için de helper metodlar ekleyelim
+impl Task {
+    // Cold data accessors/mutators
+    pub fn name(&self) -> &'static str { self.cold.name }
+    pub fn mode(&self) -> ExecutionMode { self.cold.mode }
+    
+    // Diğer cold field'lara doğrudan `task.cold.xxx` ile erişilir.
 }

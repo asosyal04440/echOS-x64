@@ -1,0 +1,9 @@
+$disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
+$machine_name = "board"
+run-script "targets/qsp-x86/qsp-hdd-boot.simics"
+
+help board.serconsole.con
+help board.mb.simics_uefi
+help board.mb.simics_uefi.selected_boot_option
+
+quit

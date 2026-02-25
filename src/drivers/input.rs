@@ -1,13 +1,13 @@
 //! # echOS Input Event Kuyruğu
-//! 
+//!
 //! Bu modül, keyboard ve mouse event'lerini toplayan queue yapısını sağlar.
 //! Interrupt handler'lar (IRQ1, IRQ12) event'leri buraya push eder,
 //! Compositor main loop bunları pop ederek işler.
 
-use pc_keyboard::DecodedKey;
 use alloc::collections::VecDeque;
-use spin::Mutex;
 use lazy_static::lazy_static;
+use pc_keyboard::DecodedKey;
+use spin::Mutex;
 
 // ============================================================================
 // EVENT TYPES
@@ -53,7 +53,5 @@ pub fn push_event(event: InputEvent) {
 /// Kuyruktan event çeker.
 /// Compositor main loop'tan çağrılır.
 pub fn pop_event() -> Option<InputEvent> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        INPUT_QUEUE.lock().pop_front()
-    })
+    x86_64::instructions::interrupts::without_interrupts(|| INPUT_QUEUE.lock().pop_front())
 }

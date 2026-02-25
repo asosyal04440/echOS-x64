@@ -1,0 +1,12 @@
+# Inspect object names after qsp-hdd-boot initialization
+$disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
+$machine_name = "board"
+run-script "targets/qsp-x86/qsp-hdd-boot.simics"
+
+list-objects substr = serconsole
+list-objects substr = textcon
+list-objects substr = gfx
+list-objects substr = com1
+list-objects substr = simics_uefi
+
+quit

@@ -1,0 +1,15 @@
+# echOS Boot using boot-disk-image target
+# This target is specifically designed for custom OS booting
+
+# Set boot disk image
+$machine:software:boot_disk:image = "targets/echos/images/echos-disk.img"
+$machine:software:boot_disk:medium = "HDD0"
+
+# Use boot-disk-image target
+run-target "boot-disk-image"
+
+echo "=========================================="
+echo "echOS Boot Environment Ready"
+echo "=========================================="
+echo "Type 'run' to boot"
+echo "=========================================="

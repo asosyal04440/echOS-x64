@@ -1,0 +1,68 @@
+# echOS Minimal Boot Script
+#
+# Simplified boot script for echOS using custom EFI disk
+
+# ============================================================================
+# Banner
+# ============================================================================
+
+echo ""
+echo "  ███████╗ ██████╗ ███████╗ ██████╗██╗███╗   ███╗"
+echo "  ██╔════╝██╔════╝ ██╔════╝██╔════╝██║████╗ ████║"
+echo "  █████╗  ██║  ███╗█████╗  ██║     ██║██╔████╔██║"
+echo "  ██╔══╝  ██║   ██║██╔══╝  ██║     ██║██║╚██╔╝██║"
+echo "  ███████╗╚██████╔╝███████╗╚██████╗██║██║ ╚═╝ ██║"
+echo "  ╚══════╝ ╚═════╝ ╚══════╝ ╚═════╝╚═╝╚═╝     ╚═╝"
+echo ""
+echo "  Simics Simulation Environment (Minimal)"
+echo "  ═══════════════════════════════════════════════"
+echo ""
+
+# ============================================================================
+# Load Minimal Configuration
+# ============================================================================
+
+echo "Loading minimal echOS system configuration..."
+
+# Load the minimal system configuration
+try {
+    run-script "%simics%/targets/echos/echos-system-minimal.simics"
+} catch ($error) {
+    echo "ERROR: Failed to load system configuration"
+    echo $error
+    quit
+}
+
+# ============================================================================
+# Boot Device Selection
+# ============================================================================
+
+# Force NVMe boot since that's our only disk
+echo "Setting boot device to NVMe..."
+if (variable-exists("uefi")) {
+    $uefi.set_boot_device("nvme")
+} else {
+    echo "Warning: UEFI not available, BIOS boot assumed"
+}
+
+# ============================================================================
+# Debug Configuration
+# ============================================================================
+
+# Enable basic debug output but limit verbosity
+$logger.set_log_level("info")
+echo "Debug logging enabled at info level"
+
+# ============================================================================
+# Start Simulation
+# ============================================================================
+
+echo ""
+echo "Starting echOS minimal simulation..."
+echo "=================================="
+echo "For debugging, press Ctrl+C to break into CLI"
+echo "To exit, use 'quit' command in CLI"
+echo ""
+
+# Run the simulation
+run

@@ -1,5 +1,5 @@
 //! # echOS IPC (Inter-Process Communication)
-//! 
+//!
 //! Task'lar arası iletişim altyapısı.
 //! Mesaj gönderme ve alma ile channel-based iletişim.
 
@@ -9,4 +9,4 @@ pub mod message;
 /// İletişim kanalları
 pub mod channel;
 
-pub use message::{Message, send_message, receive_message, has_message};
+pub use message::{has_message, receive_message, send_message, Message};

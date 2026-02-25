@@ -1,0 +1,46 @@
+
+ECHOS SIMICS BOOT SETUP GUIDE
+============================
+
+1. PREREQUISITES:
+   - Install WSL2 with Ubuntu
+   - Install required tools in WSL:
+     sudo apt update
+     sudo apt install parted dosfstools mtools
+
+2. PREPARE DISK IMAGE IN WSL:
+   # Convert raw image to a format that can be partitioned
+   cp C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/Simics/echos-simics/targets/echos/images/echos-disk.img /tmp/echos-disk.img
+   
+   # Create GPT partition table
+   sudo parted /tmp/echos-disk.img mklabel gpt
+   
+   # Create EFI System Partition (100MB)
+   sudo parted /tmp/echos-disk.img mkpart primary fat32 1MiB 101MiB
+   sudo parted /tmp/echos-disk.img set 1 boot on
+   
+   # Format ESP as FAT32
+   sudo losetup -P /dev/loop99 /tmp/echos-disk.img
+   sudo mkfs.fat -F32 /dev/loop99p1
+   sudo losetup -d /dev/loop99
+   
+   # Mount and copy EFI files
+   mkdir -p /tmp/esp-mount
+   sudo losetup -P /dev/loop99 /tmp/echos-disk.img
+   sudo mount /dev/loop99p1 /tmp/esp-mount
+   sudo mkdir -p /tmp/esp-mount/EFI/BOOT
+   sudo cp /mnt/c/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/Simics/echos-simics/targets/echos/images/esp-temp/* /tmp/esp-mount/ -r
+   sudo umount /tmp/esp-mount
+   sudo losetup -d /dev/loop99
+   
+   # Copy back to Windows
+   cp /tmp/echos-disk.img C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/Simics/echos-simics/targets/echos/images/echos-disk.img
+
+3. ALTERNATIVE METHOD (MANUAL):
+   - Use a tool like Rufus or BalenaEtcher to create a bootable image
+   - Or manually partition and format using disk management tools
+
+4. RUN IN SIMICS:
+   cd C:\Users\Bahadir\Desktop\dersler_ve_projeler\echOS\Simics\echos-simics
+   simics.bat --project . --target echos
+    

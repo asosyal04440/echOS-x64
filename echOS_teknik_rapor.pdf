@@ -1,0 +1,1510 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R 18 0 R 19 0 R 20 0 R 21 0 R 22 0 R 23 0 R] /Count 20 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 24 0 R >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 25 0 R >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 26 0 R >>
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 27 0 R >>
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 28 0 R >>
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 29 0 R >>
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 30 0 R >>
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 31 0 R >>
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 32 0 R >>
+endobj
+13 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 33 0 R >>
+endobj
+14 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 34 0 R >>
+endobj
+15 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 35 0 R >>
+endobj
+16 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 36 0 R >>
+endobj
+17 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 37 0 R >>
+endobj
+18 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 38 0 R >>
+endobj
+19 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 39 0 R >>
+endobj
+20 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 40 0 R >>
+endobj
+21 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 41 0 R >>
+endobj
+22 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 42 0 R >>
+endobj
+23 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 43 0 R >>
+endobj
+24 0 obj
+<< /Length 3989 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 1/20) Tj
+0 -12 Td (echOS Teknik Raporu \(Detayli ve Egitimsel\)) Tj
+0 -12 Td (Tarih: 2026-02-11) Tj
+0 -12 Td (Proje Dizini: c:\\Users\\Bahadir\\Desktop\\dersler_ve_projeler\\echOS) Tj
+0 -12 Td (Hedef Kitle: Sistemi hic bilmeyen teknik okuyucu) Tj
+0 -12 Td (Uyari: Bu rapor, mevcut kaynak kodu ve loglardan uretilmistir.) Tj
+0 -12 Td () Tj
+0 -12 Td (Icindekiler) Tj
+0 -12 Td (1. Mimari Genel Bakis ve Katmanlar) Tj
+0 -12 Td (2. Boot Akisi ve Kernel Giris Noktasi) Tj
+0 -12 Td (3. Bellek Yonetimi: PMM, Paging, Heap) Tj
+0 -12 Td (4. Interrupt Sistemi ve Zamanlayici) Tj
+0 -12 Td (5. Scheduler ve Context Switch) Tj
+0 -12 Td (6. Syscall Mekanizmasi ve POSIX Katmani) Tj
+0 -12 Td (7. Dosya Sistemi: FAT32 ve VFS) Tj
+0 -12 Td (8. Surucu Altyapisi: PCI, PS/2, USB, ATA) Tj
+0 -12 Td (9. VirtIO Block \(FFI + C Surucu\)) Tj
+0 -12 Td (10. Grafik Altyapisi: GOP, Compositor, GUI) Tj
+0 -12 Td (11. Shell ve Kullanici Alanina Gecis) Tj
+0 -12 Td (12. Linux Glue ve Shim Katmani) Tj
+0 -12 Td (13. Mevcut Durum, Log Ozetleri) Tj
+0 -12 Td (14. Riskler, Sorunlar ve Cozum Stratejileri) Tj
+0 -12 Td (15. Yol Haritasi ve Uzmana Sorular) Tj
+0 -12 Td (16. Terimler Sozlugu) Tj
+0 -12 Td () Tj
+0 -12 Td (1\) Mimari Genel Bakis ve Katmanlar) Tj
+0 -12 Td (echOS, UEFI tabanli bir x86_64 kernelidir. Proje no_std/no_main modeliyle bare-metal calisir.) Tj
+0 -12 Td (Sistem katmanlari: Boot/UEFI, Bellek Yonetimi, Interrupt/Syscall, Task/Scheduler, Surucu Altyapisi,) Tj
+0 -12 Td (Dosya Sistemi, Grafik ve GUI, Shell ve Kullanici Modu.) Tj
+0 -12 Td (Bu katmanlar birbirine net sorumluluklar uzerinden baglanir. Boot katmani donanim bilgisi ve bellek) Tj
+0 -12 Td (haritasini alir.) Tj
+0 -12 Td (Bellek katmani fiziksel frame yonetir ve paging ile sanal adres uzayi saglar.) Tj
+0 -12 Td (Interrupt ve syscall katmani donanim olaylari ile userland cagrilarini kernel icine tasir.) Tj
+0 -12 Td (Scheduler ve task sistemi calisan is parcaciklarini koordine eder.) Tj
+0 -12 Td (Surucu katmani PCI ve sabit arabirimleri kullanarak aygitlara erisir.) Tj
+0 -12 Td (Grafik katmani GOP framebuffer uzerinden compositor ve GUI saglar.) Tj
+0 -12 Td (Shell ve userland ise sistemin kullaniciya bakan arayuzleridir.) Tj
+0 -12 Td () Tj
+0 -12 Td (2\) Boot Akisi ve Kernel Giris Noktasi) Tj
+0 -12 Td (Kernel girisi main.rs icindeki #[entry] fonksiyonudur.) Tj
+0 -12 Td (Akis su adimlari izler: serial init ve interrupt disable, memory init ve global manager kaydi,) Tj
+0 -12 Td (paging init ve CR3 switch, heap init ve logger init, CPU/GDT/IDT/PIC init,) Tj
+0 -12 Td (ACPI + IOAPIC + PCI scan + USB init, syscall init, GOP framebuffer init,) Tj
+0 -12 Td (linux glue ve driver layer init, ExitBootServices, scheduler init ve task spawn.) Tj
+0 -12 Td (Grafiksel runtime kernel_main ile sonsuz compositor dongusune girer.) Tj
+0 -12 Td () Tj
+0 -12 Td (3\) Bellek Yonetimi: PMM, Paging, Heap) Tj
+0 -12 Td (PMM: Bitmap tabanli fiziksel bellek yonetimi, her 4KiB frame icin 1 bit kullanir.) Tj
+0 -12 Td (UEFI Memory Map'te CONVENTIONAL alanlari bos olarak isaretler, digerlerini rezerve eder.) Tj
+0 -12 Td (Paging: init_virtual_memory yeni PML4 yaratir ve UEFI mapping'lerini kopyalar.) Tj
+0 -12 Td (CR3 switch ile aktif sayfa tablosu degisir, KERNEL_PML4_FRAME guncellenir.) Tj
+0 -12 Td (Heap: init_heap heap araligini map eder ve TLSF allocator'a serbest bolge ekler.) Tj
+0 -12 Td (translate_addr ile virt->phys ceviri DMA ve FFI icin kritik rol oynar.) Tj
+0 -12 Td () Tj
+0 -12 Td (4\) Interrupt Sistemi ve Zamanlayici) Tj
+0 -12 Td (IDT Lazy init ile kurulup exception handler'lar set edilir.) Tj
+0 -12 Td (PIC init ile IRQ vektorleri remap edilir; IOAPIC opsiyonel etkinlestirilir.) Tj
+0 -12 Td (Timer IRQ her tick'te scheduler.tick\(\) cagirir.) Tj
+0 -12 Td (Keyboard ve mouse ISR'lari input event kuyru?una veri iter.) Tj
+0 -12 Td (User mode fault'lari task exit ile sonlandirilir, kernel mode fault'lari panic eder.) Tj
+0 -12 Td () Tj
+0 -12 Td (5\) Scheduler ve Context Switch) Tj
+ET
+endstream
+endobj
+25 0 obj
+<< /Length 3639 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 2/20) Tj
+0 -12 Td (Scheduler SMP-aware ve priority + aging algoritmasi kullanir.) Tj
+0 -12 Td (Per-CPU runqueue ve idle task mantigi vardir.) Tj
+0 -12 Td (Context switch assembly ile callee-saved register ve FPU/SSE state kaydeder.) Tj
+0 -12 Td (Ring3 task gecislerinde CR3 degistirilir.) Tj
+0 -12 Td () Tj
+0 -12 Td (6\) Syscall Mekanizmasi ve POSIX Katmani) Tj
+0 -12 Td (x86_64 SYSCALL/SYSRET mekanizmasi kullanilir.) Tj
+0 -12 Td (LSTAR, STAR ve SFMask MSR'lari ayarlanir.) Tj
+0 -12 Td (syscall_handler assembly user RSP kaydeder ve kernel stack'e gecis yapar.) Tj
+0 -12 Td (Rust dispatcher POSIX dispatch'a cagrilari aktarir.) Tj
+0 -12 Td (POSIX dispatcher Linux ABI alt kumesi sunar: read/write/open/close/stat/lseek/mmap vb.) Tj
+0 -12 Td () Tj
+0 -12 Td (7\) Dosya Sistemi: FAT32 ve VFS) Tj
+0 -12 Td (FAT32 surucu MBR ve BPB parse eder, cluster tablosu ile dosya/dizin okur.) Tj
+0 -12 Td (fatfs crate ile mount_fatfs VFS-style dizin iterasyonu saglar.) Tj
+0 -12 Td (Shell ls/cat/launch komutlari FAT32 uzerinden dosya okur ve ELF yukler.) Tj
+0 -12 Td () Tj
+0 -12 Td (8\) Surucu Altyapisi: PCI, PS/2, USB, ATA) Tj
+0 -12 Td (PCI scan ile aygitlar bulunur, Linux glue ile probe tabanli baglanir.) Tj
+0 -12 Td (PS/2 klavye ve mouse 8042 controller uzerinden init edilir.) Tj
+0 -12 Td (USB xHCI init icin MMIO region map edilir.) Tj
+0 -12 Td (ATA disk driver BlockDevice saglar; VirtIO block alternatif olarak kullanilir.) Tj
+0 -12 Td () Tj
+0 -12 Td (9\) VirtIO Block \(FFI + C Surucu\)) Tj
+0 -12 Td (Rust tarafinda virtio_ffi C surucuye FFI baglar.) Tj
+0 -12 Td (C driver legacy IO port tabanli virtio-blk uygular.) Tj
+0 -12 Td (Queue desc/avail/used ring yapilari 4K hizali buffer icinde konumlanir.) Tj
+0 -12 Td (virt_to_phys_c ile queue ve buffer adresleri fiziksel adrese cevrilir.) Tj
+0 -12 Td (used->idx polling volatile okuma ile guclendirilir.) Tj
+0 -12 Td () Tj
+0 -12 Td (10\) Grafik Altyapisi: GOP, Compositor, GUI) Tj
+0 -12 Td (UEFI GOP framebuffer alinir ve write-combining map edilir.) Tj
+0 -12 Td (Compositor linear framebuffer uzerinde pencereleri ve cursor'u cizer.) Tj
+0 -12 Td (Dirty-rect optimizasyonu ile kismi yeniden cizim uygulanir.) Tj
+0 -12 Td (GUI katmani desktop/window/theme/widgets moduleriyle organize edilir.) Tj
+0 -12 Td () Tj
+0 -12 Td (11\) Shell ve Kullanici Alanina Gecis) Tj
+0 -12 Td (Shell gap buffer tabanli editor ve basit komut parser icerir.) Tj
+0 -12 Td (launch komutu ELF dosyasini yukler ve Ring3'e gecis yapar.) Tj
+0 -12 Td (ELF loader segment map eder, user stack olusturur ve entry'e atlar.) Tj
+0 -12 Td () Tj
+0 -12 Td (12\) Linux Glue ve Shim Katmani) Tj
+0 -12 Td (Linux glue, PCI device/driver modelini taklit eder.) Tj
+0 -12 Td (pci_register_driver probe ile aygit baglar, claim mekanizmasi vardir.) Tj
+0 -12 Td (Shim layer printk/dev_info/dev_err fonksiyonlarini saglar.) Tj
+0 -12 Td () Tj
+0 -12 Td (13\) Mevcut Durum, Log Ozetleri) Tj
+0 -12 Td (serial.log ozet:) Tj
+0 -12 Td (IDT build start: YES) Tj
+0 -12 Td (IDT build done: NO) Tj
+0 -12 Td (IDT load done: NO) Tj
+0 -12 Td (VIRTIO init log: NO) Tj
+0 -12 Td (VIRTIO write/read OK: NO) Tj
+0 -12 Td (VIRTIO write/read FAILED: NO) Tj
+0 -12 Td (Son VirtIO loglari:) Tj
+0 -12 Td (\(no virtio lines in serial.log\)) Tj
+0 -12 Td () Tj
+0 -12 Td (14\) Riskler, Sorunlar ve Cozum Stratejileri) Tj
+0 -12 Td (IDT init takilma veya log ilerlememe: ekstra trace ve emergency serial dogrulama.) Tj
+0 -12 Td (VirtIO RW testinin bitmemesi: used ring volatile read, memory barrier, DMA buffer garanti.) Tj
+0 -12 Td (Identity mapping varsayiminin bozulmasi: explicit identity-mapped buffer ayirma.) Tj
+ET
+endstream
+endobj
+26 0 obj
+<< /Length 3076 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 3/20) Tj
+0 -12 Td (Syscall single-core stack: per-CPU kernel stack ve GS_BASE ayrimi.) Tj
+0 -12 Td (IOAPIC/IRQ mapping uyumsuzlugu: ACPI override dogrulama.) Tj
+0 -12 Td () Tj
+0 -12 Td (15\) Yol Haritasi ve Uzmana Sorular) Tj
+0 -12 Td (VirtIO modern PCI cfg ile native driver dogrulama.) Tj
+0 -12 Td (IRQ destekli VirtIO \(MSI-X\) ve interrupt-driven IO.) Tj
+0 -12 Td (SMP icin per-CPU scheduler state ve IDT/stack ayrimi.) Tj
+0 -12 Td (Userland ABI genisletme \(fork/exec/clone\) ve VFS altyapisi.) Tj
+0 -12 Td (Uzmana sorular: IDT lazy init UB riski, legacy virtio-blk path dogrulugu, DMA cache policy.) Tj
+0 -12 Td () Tj
+0 -12 Td (16\) Terimler Sozlugu) Tj
+0 -12 Td (IDT: Interrupt Descriptor Table) Tj
+0 -12 Td (PIC/IOAPIC: Interrupt Controller) Tj
+0 -12 Td (CR3/PML4: Sayfa tablosu root pointer) Tj
+0 -12 Td (DMA: Direct Memory Access) Tj
+0 -12 Td (GOP: UEFI Graphics Output Protocol) Tj
+0 -12 Td (PFN: Page Frame Number) Tj
+0 -12 Td (Ring0/Ring3: Kernel/User privilege levels) Tj
+0 -12 Td (SYSRET/SYSCALL: Fast syscall mekanizmasi) Tj
+0 -12 Td () Tj
+0 -12 Td (Ek A: Moduller ve Dosya Haritasi) Tj
+0 -12 Td (src/main.rs: boot ve kernel init akisi) Tj
+0 -12 Td (src/lib.rs: modul disariya acim) Tj
+0 -12 Td (src/memory/*: PMM, paging, translate_addr) Tj
+0 -12 Td (src/allocator/*: heap init ve allocator tipleri) Tj
+0 -12 Td (src/interrupts/*: IDT, PIC, IOAPIC) Tj
+0 -12 Td (src/task/*: scheduler, task, user mode) Tj
+0 -12 Td (src/syscall.rs + src/posix.rs: ABI ve syscall) Tj
+0 -12 Td (src/drivers/*: pci, ps2, usb, ata, virtio) Tj
+0 -12 Td (src/fs/fat32.rs: FAT32 surucusu) Tj
+0 -12 Td (src/gfx/* + src/gui/* + src/gop/*: grafik altyapisi) Tj
+0 -12 Td (src/shell/*: komut satiri) Tj
+0 -12 Td () Tj
+0 -12 Td (Ek B: Boot Asamalari Ayrintili Zaman Cizelgesi) Tj
+0 -12 Td (0. Serial init + interrupt disable) Tj
+0 -12 Td (1. Memory init + global MM kaydi) Tj
+0 -12 Td (2. Paging init + CR3 switch) Tj
+0 -12 Td (3. Heap init + logger) Tj
+0 -12 Td (4. CPU init + GDT/IDT/PIC) Tj
+0 -12 Td (5. ACPI + IOAPIC + PCI scan + USB) Tj
+0 -12 Td (6. Syscall init) Tj
+0 -12 Td (7. GOP + framebuffer + splash) Tj
+0 -12 Td (8. Linux glue + driver layer) Tj
+0 -12 Td (9. ExitBootServices) Tj
+0 -12 Td (10. Scheduler init + gpu_test + kernel_main) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+ET
+endstream
+endobj
+27 0 obj
+<< /Length 3592 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 4/20) Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Ek C: Modul Bazli Teknik Notlar) Tj
+0 -12 Td (Bilesen Notlari - Set 1) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 2) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 3) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 4) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+ET
+endstream
+endobj
+28 0 obj
+<< /Length 3998 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 5/20) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 5) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 6) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 7) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 8) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 9) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+ET
+endstream
+endobj
+29 0 obj
+<< /Length 3340 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 6/20) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 10) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+ET
+endstream
+endobj
+30 0 obj
+<< /Length 3340 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 7/20) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td () Tj
+0 -12 Td (Bilesen Notlari - Set 10) Tj
+0 -12 Td (- main.rs: boot akisi, ExitBootServices gecisi ve scheduler init etkileri) Tj
+0 -12 Td (- interrupts/mod.rs: IDT lazy init, IRQ handler baglama ve PIC/IOAPIC secimi) Tj
+0 -12 Td (- memory/pmm.rs: bitmap tarama ve frame tahsisi davranisi) Tj
+0 -12 Td (- memory/paging.rs: yeni PML4 ve UEFI mapping kopyalama) Tj
+0 -12 Td (- syscall.rs: SYSCALL entry ve kernel stack swap) Tj
+0 -12 Td (- posix.rs: syscall dispatcher ve FAT32 entegrasyonu) Tj
+0 -12 Td (- drivers/virtio_ffi.rs: FFI bridge ve block device implementasyonu) Tj
+0 -12 Td (- c_drivers/virtio.c: queue setup ve polling loop) Tj
+0 -12 Td (- gfx/compositor.rs: dirty-rect ve swapchain) Tj
+0 -12 Td (- gui/*: desktop/window/theme/widgets bile?enleri) Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+ET
+endstream
+endobj
+31 0 obj
+<< /Length 2879 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 8/20) Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+ET
+endstream
+endobj
+32 0 obj
+<< /Length 2973 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 9/20) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+ET
+endstream
+endobj
+33 0 obj
+<< /Length 2921 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 10/20) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+ET
+endstream
+endobj
+34 0 obj
+<< /Length 2981 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 11/20) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+ET
+endstream
+endobj
+35 0 obj
+<< /Length 2838 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 12/20) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+ET
+endstream
+endobj
+36 0 obj
+<< /Length 2981 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 13/20) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+ET
+endstream
+endobj
+37 0 obj
+<< /Length 2924 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 14/20) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+ET
+endstream
+endobj
+38 0 obj
+<< /Length 2960 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 15/20) Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+ET
+endstream
+endobj
+39 0 obj
+<< /Length 2849 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 16/20) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+ET
+endstream
+endobj
+40 0 obj
+<< /Length 2979 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 17/20) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+ET
+endstream
+endobj
+41 0 obj
+<< /Length 2968 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 18/20) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+ET
+endstream
+endobj
+42 0 obj
+<< /Length 2931 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 19/20) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+0 -12 Td (Bellek Haritalama Derinlemesine) Tj
+0 -12 Td (- UEFI memory map entry tipleri ve bellek attribute'lari) Tj
+0 -12 Td (- CONVENTIONAL alanlarin bitmap PMM ile bos ilan edilmesi) Tj
+0 -12 Td (- Bitmap'in kendi alaninin rezerve edilmesi) Tj
+0 -12 Td (- Page table flag kombinasyonlari: PRESENT, WRITABLE, USER, NO_EXECUTE) Tj
+ET
+endstream
+endobj
+43 0 obj
+<< /Length 1377 >>
+stream
+BT
+/F1 10 Tf
+50 792 Td
+(echOS Teknik Raporu - Sayfa 20/20) Tj
+0 -12 Td (- User stack map ve NX policy) Tj
+0 -12 Td (- translate_addr ile virt->phys cevirisi ve DMA onemi) Tj
+0 -12 Td () Tj
+0 -12 Td (Interrupt ve Exception Derinlemesine) Tj
+0 -12 Td (- Page fault handler user/kernel ayrimi) Tj
+0 -12 Td (- Double fault IST kullanimi) Tj
+0 -12 Td (- Keyboard ISR decode ve input queue) Tj
+0 -12 Td (- Mouse ISR ham byte fast path) Tj
+0 -12 Td (- Timer tick ve preemptive scheduling) Tj
+0 -12 Td () Tj
+0 -12 Td (IO ve Block Device Derinlemesine) Tj
+0 -12 Td (- ATA driver sector read/write) Tj
+0 -12 Td (- VirtIO Block ile IO port kontrolu) Tj
+0 -12 Td (- BlockDevice trait implementasyonu) Tj
+0 -12 Td (- FAT32 MBR/BPB alanlari ve cluster zinciri okuma) Tj
+0 -12 Td (- Dosya okuma: read + seek + cache davranisi) Tj
+0 -12 Td () Tj
+0 -12 Td (GUI ve Input Derinlemesine) Tj
+0 -12 Td (- Desktop update_mouse: window focus ve drag) Tj
+0 -12 Td (- Dirty rect birlestirme ve repaint) Tj
+0 -12 Td (- Cursor overlay) Tj
+0 -12 Td (- Theme renk paleti) Tj
+0 -12 Td (- InputEvent kuyru?u ve ISR -> GUI akisi) Tj
+0 -12 Td () Tj
+0 -12 Td (Userland Derinlemesine) Tj
+0 -12 Td (- ELF header parse ve segment map) Tj
+0 -12 Td (- Ring3 transition ve stack top) Tj
+0 -12 Td (- POSIX open/read/write baseline uyumluluk) Tj
+0 -12 Td (- Wine/Proton runtime registry ve PE parse) Tj
+0 -12 Td () Tj
+ET
+endstream
+endobj
+xref
+0 44
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000244 00000 n 
+0000000314 00000 n 
+0000000441 00000 n 
+0000000568 00000 n 
+0000000695 00000 n 
+0000000822 00000 n 
+0000000949 00000 n 
+0000001076 00000 n 
+0000001204 00000 n 
+0000001332 00000 n 
+0000001460 00000 n 
+0000001588 00000 n 
+0000001716 00000 n 
+0000001844 00000 n 
+0000001972 00000 n 
+0000002100 00000 n 
+0000002228 00000 n 
+0000002356 00000 n 
+0000002484 00000 n 
+0000002612 00000 n 
+0000002740 00000 n 
+0000002868 00000 n 
+0000006910 00000 n 
+0000010602 00000 n 
+0000013731 00000 n 
+0000017376 00000 n 
+0000021427 00000 n 
+0000024820 00000 n 
+0000028213 00000 n 
+0000031145 00000 n 
+0000034171 00000 n 
+0000037145 00000 n 
+0000040179 00000 n 
+0000043070 00000 n 
+0000046104 00000 n 
+0000049081 00000 n 
+0000052094 00000 n 
+0000054996 00000 n 
+0000058028 00000 n 
+0000061049 00000 n 
+0000064033 00000 n 
+trailer
+<< /Size 44 /Root 1 0 R >>
+startxref
+65463
+%%EOF

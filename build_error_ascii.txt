@@ -1,0 +1,85 @@
+cargo : warning: ech_os@0.1.0: src/c_driv
+ers/virtio.c:109:34: warning: taking addr
+ess of packed member 'idx' of class or st
+ructure 'virtq_used' may result in an una
+ligned pointer value [-Waddress-of-packed
+-member]
+At line:1 char:1
++ cargo check --target x86_64-unknown-uef
+i 2> build_error.txt
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecifi 
+   ed: (warning: ech_os...-packed-membe  
+  r]:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeComm 
+   andError
+ 
+warning: ech_os@0.1.0:   109 |     while 
+(*(volatile uint16_t*)&used->idx == used_
+idx) {
+warning: ech_os@0.1.0:       |           
+                       ^~~~~~~~~
+warning: ech_os@0.1.0: src/c_drivers/virt
+io.c:28:24: warning: unused function 'inl
+' [-Wunused-function]
+warning: ech_os@0.1.0:    28 | static inl
+ine uint32_t inl(uint16_t port) {
+warning: ech_os@0.1.0:       |           
+             ^~~
+warning: ech_os@0.1.0: 2 warnings generat
+ed.
+    Checking ech_os v0.1.0 (C:\Users\Baha
+dir\Desktop\dersler_ve_projeler\echOS)
+error[E0793]: reference to field of packe
+d struct is unaligned
+   --> src\cpu\acpi.rs:968:96
+    |
+968 |                     crate::serial_p
+rintln!("ACPI: Found APIC ID {} (flags={}
+)", entry.apic_id, entry.flags);
+    |                                    
+                                         
+                   ^^^^^^^^^^^
+    |
+    = note: this struct is 1-byte aligned
+, but the type of this field may require 
+higher alignment
+    = note: creating a misaligned referen
+ce is undefined behavior (even if that re
+ference is never dereferenced)
+    = help: copy the field contents to a 
+local variable, or replace the reference 
+with a raw pointer and use `read_unaligne
+d`/`write_unaligned` (loads and stores vi
+a `*p` must be properly aligned even when
+ using raw pointers)
+    = note: this error originates in the 
+macro `format_args` which comes from the 
+expansion of the macro `crate::serial_pri
+ntln` (in Nightly builds, run with -Z mac
+ro-backtrace for more info)
+
+For more information about this error, tr
+y `rustc --explain E0793`.
+warning: ech_os@0.1.0: src/c_drivers/virt
+io.c:109:34: warning: taking address of p
+acked member 'idx' of class or structure 
+'virtq_used' may result in an unaligned p
+ointer value [-Waddress-of-packed-member]
+warning: ech_os@0.1.0:   109 |     while 
+(*(volatile uint16_t*)&used->idx == used_
+idx) {
+warning: ech_os@0.1.0:       |           
+                       ^~~~~~~~~
+warning: ech_os@0.1.0: src/c_drivers/virt
+io.c:28:24: warning: unused function 'inl
+' [-Wunused-function]
+warning: ech_os@0.1.0:    28 | static inl
+ine uint32_t inl(uint16_t port) {
+warning: ech_os@0.1.0:       |           
+             ^~~
+warning: ech_os@0.1.0: 2 warnings generat
+ed.
+error: could not compile `ech_os` (lib) d
+ue to 1 previous error

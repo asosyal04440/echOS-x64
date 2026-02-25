@@ -1,0 +1,23 @@
+# echOS run script - executed after boot setup
+
+# Enable serial console output
+echos.serconsole.con.enable-cmd-line-output
+
+# Reduce noise
+log-type -disable unimpl
+log-type -disable spec-viol
+
+echo "[echOS] Starting simulation..."
+echo "[echOS] Boot medium: USB"
+
+# Timeout
+script-branch "timeout" {
+    bp.time.wait-for 120
+    echo "[echOS] Timeout reached"
+    stop
+}
+
+# Run simulation
+run
+
+echo "[echOS] Simulation stopped"

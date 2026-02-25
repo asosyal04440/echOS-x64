@@ -1,0 +1,149 @@
+# echOS Simics Main Entry Point
+#
+# Quick start script for echOS simulation
+
+# ============================================================================
+# Banner
+# ============================================================================
+
+echo ""
+echo "  ███████╗ ██████╗ ███████╗ ██████╗██╗███╗   ███╗"
+echo "  ██╔════╝██╔════╝ ██╔════╝██╔════╝██║████╗ ████║"
+echo "  █████╗  ██║  ███╗█████╗  ██║     ██║██╔████╔██║"
+echo "  ██╔══╝  ██║   ██║██╔══╝  ██║     ██║██║╚██╔╝██║"
+echo "  ███████╗╚██████╔╝███████╗╚██████╗██║██║ ╚═╝ ██║"
+echo "  ╚══════╝ ╚═════╝ ╚══════╝ ╚═════╝╚═╝╚═╝     ╚═╝"
+echo ""
+echo "  Simics Simulation Environment"
+echo "  ═════════════════════════════════"
+echo ""
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+# Default mode
+@echos_mode = "boot"
+
+# Parse arguments
+foreach $arg in $argv {
+    if $arg == "--debug" {
+        @echos_mode = "debug"
+    } elif $arg == "--test" {
+        @echos_mode = "test"
+    } elif $arg == "--setup" {
+        @echos_mode = "setup"
+    }
+}
+
+# ============================================================================
+# Mode Selection
+# ============================================================================
+
+if $echos_mode == "setup" {
+    echo "Running setup mode..."
+    run-script "%simics%/targets/echos/setup.simics"
+    setup-all
+} elif $echos_mode == "debug" {
+    echo "Running debug mode..."
+    run-script "%simics%/targets/echos/debug.simics"
+} elif $echos_mode == "test" {
+    echo "Running test mode..."
+    run-script "%simics%/targets/echos/test.simics"
+} else {
+    echo "Running boot mode..."
+    run-script "%simics%/targets/echos/boot.simics"
+}
+
+# ============================================================================
+# Help
+# ============================================================================
+
+command help-echos {
+    echo ""
+    echo "echOS Simics Commands"
+    echo "═════════════════════"
+    echo ""
+    echo "Simulation Control:"
+    echo "  run              - Start/resume simulation"
+    echo "  stop             - Pause simulation"
+    echo "  quit             - Exit Simics"
+    echo ""
+    echo "Debugging:"
+    echo "  stepi            - Step one instruction"
+    echo "  reverse-stepi    - Step backward (time travel)"
+    echo "  bp <addr>        - Set breakpoint at address"
+    echo "  wp <addr> <size> - Set watchpoint"
+    echo "  print-state      - Print system state"
+    echo ""
+    echo "Testing:"
+    echo "  test-all         - Run all tests"
+    echo "  test-quick       - Run quick tests"
+    echo "  test-boot-uefi   - Run boot tests"
+    echo ""
+    echo "Disk Management:"
+    echo "  create-images    - Create disk images"
+    echo "  format-disks     - Format disks"
+    echo "  install-echos    - Install echOS"
+    echo ""
+    echo "Connection:"
+    echo "  GDB: gdb -ex 'target remote localhost:1234'"
+    echo "  JTAG: port 5555"
+    echo ""
+}
+
+# ============================================================================
+# Quick Commands
+# ============================================================================
+
+# Set breakpoint
+command bp {
+    param address
+    $debugger.set_breakpoint(address = $address, type = "execution")
+    echo "Breakpoint set at 0x" . format_hex($address)
+}
+
+# Set watchpoint
+command wp {
+    param address
+    param size = 8
+    $debugger.set_watchpoint(address = $address, size = $size, read = TRUE, write = TRUE)
+    echo "Watchpoint set at 0x" . format_hex($address) . " size " . $size
+}
+
+# Print registers
+command regs {
+    $debugger.print_registers()
+}
+
+# Print stack
+command stack {
+    $debugger.print_call_stack()
+}
+
+# Examine memory
+command x {
+    param address
+    param count = 16
+    $debugger.print_memory($address, $count * 8)
+}
+
+# Go to symbol
+command goto-symbol {
+    param name
+    $sym = $debugger.lookup_symbol($name)
+    if $sym != NULL {
+        $debugger.goto_address($sym.address)
+        echo "Jumped to " . $name . " at 0x" . format_hex($sym.address)
+    } else {
+        echo "Symbol not found: " . $name
+    }
+}
+
+# ============================================================================
+# Ready
+# ============================================================================
+
+echo ""
+echo "Ready! Type 'help-echos' for available commands."
+echo ""

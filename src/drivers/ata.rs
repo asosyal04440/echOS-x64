@@ -1,11 +1,11 @@
 //! # echOS ATA Sürücüsü (PIO Modu)
-//! 
+//!
 //! IDE/ATA disk sürücüsü implementasyonu.
 //! Disk algılama, sektör okuma/yazma ve IDENTIFY komutlarını destekler.
 
-use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
-use alloc::vec::Vec;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 
 /// Sektör boyutu (512 byte)
 pub const BLOCK_SIZE: usize = 512;
@@ -20,10 +20,11 @@ mod commands {
 
 /// ATA status register bitleri
 mod status {
-    pub const BSY: u8 = 0x80;  // Meşgul
+    pub const BSY: u8 = 0x80; // Meşgul
+    #[allow(dead_code)]
     pub const DRDY: u8 = 0x40; // Sürücü hazır
-    pub const DRQ: u8 = 0x08;  // Veri isteği
-    pub const ERR: u8 = 0x01;  // Hata
+    pub const DRQ: u8 = 0x08; // Veri isteği
+    pub const ERR: u8 = 0x01; // Hata
 }
 
 /// ATA hata tipleri
@@ -50,8 +51,10 @@ pub struct DriveInfo {
 
 /// ATA disk kontrolcüsü yapısı.
 pub struct AtaDrive {
+    #[allow(dead_code)]
     base: u16,
     data: Port<u16>,
+    #[allow(dead_code)]
     error: PortReadOnly<u8>,
     features: PortWriteOnly<u8>,
     sector_count: Port<u8>,
@@ -70,7 +73,7 @@ impl AtaDrive {
     pub const fn new(base: u16) -> Self {
         Self::with_slave(base, false)
     }
-    
+
     /// Master veya Slave olarak yapılandırılmış sürücü oluşturur.
     /// base: 0x1F0 (Primary) veya 0x170 (Secondary)
     pub const fn with_slave(base: u16, is_slave: bool) -> Self {
@@ -109,7 +112,7 @@ impl AtaDrive {
         }
         Ok(())
     }
-    
+
     /// Hata durumunu kontrol eder.
     fn check_error(&mut self) -> Result<(), AtaError> {
         let status = unsafe { self.status.read() };
@@ -119,7 +122,7 @@ impl AtaDrive {
             Ok(())
         }
     }
-    
+
     /// Sürücüyü seçer (Master/Slave ve LBA bitleri).
     fn select_drive(&mut self, lba: u32) {
         let drive_bits = if self.is_slave { 0xF0 } else { 0xE0 };
@@ -135,30 +138,39 @@ impl AtaDrive {
             self.device.write(drive_bits);
             self.command.write(commands::IDENTIFY);
         }
-        
+
         // Kısa bir bekleme
         for _ in 0..15 {
-            unsafe { self.status.read(); }
+            unsafe {
+                self.status.read();
+            }
         }
-        
+
         let status = unsafe { self.status.read() };
         if status == 0 {
             return Ok(false); // Sürücü yok
         }
-        
-        self.wait_busy();
-        
+
+        let mut spins: u32 = 1000;
+        while unsafe { self.status.read() } & status::BSY != 0 {
+            if spins == 0 {
+                return Err(AtaError::Timeout);
+            }
+            spins = spins.saturating_sub(1);
+            core::hint::spin_loop();
+        }
+
         // ATA sürücüsü mü kontrol et (ATAPI farklı değerlere sahip)
         let lba_mid = unsafe { self.lba_mid.read() };
         let lba_high = unsafe { self.lba_high.read() };
-        
+
         if lba_mid != 0 || lba_high != 0 {
             return Err(AtaError::NotAta); // Muhtemelen ATAPI
         }
-        
+
         Ok(true)
     }
-    
+
     /// Sürücü bilgilerini (IDENTIFY) okur.
     pub fn get_info(&mut self) -> Result<DriveInfo, AtaError> {
         let drive_bits = if self.is_slave { 0xA0 } else { 0xA0 };
@@ -170,44 +182,44 @@ impl AtaDrive {
             self.lba_high.write(0);
             self.command.write(commands::IDENTIFY);
         }
-        
+
         let status = unsafe { self.status.read() };
         if status == 0 {
             return Err(AtaError::DriveNotFound);
         }
-        
+
         self.wait_busy();
         self.wait_ready()?;
-        
+
         // 256 word (512 byte) veriyi oku
         let mut data = [0u16; 256];
         for i in 0..256 {
             data[i] = unsafe { self.data.read() };
         }
-        
+
         // Bilgileri ayrıştır
         let serial = Self::parse_ata_string(&data[10..20]);
         let firmware = Self::parse_ata_string(&data[23..27]);
         let model = Self::parse_ata_string(&data[27..47]);
-        
+
         // LBA28 sektör sayısı
         let sectors_28 = (data[61] as u64) << 16 | (data[60] as u64);
-        
+
         // LBA48 desteği kontrolü
         let lba48_supported = (data[83] & (1 << 10)) != 0;
-        
+
         // LBA48 sektör sayısı
         let sectors = if lba48_supported {
-            (data[103] as u64) << 48 |
-            (data[102] as u64) << 32 |
-            (data[101] as u64) << 16 |
-            (data[100] as u64)
+            (data[103] as u64) << 48
+                | (data[102] as u64) << 32
+                | (data[101] as u64) << 16
+                | (data[100] as u64)
         } else {
             sectors_28
         };
-        
+
         let size_mb = sectors * BLOCK_SIZE as u64 / (1024 * 1024);
-        
+
         Ok(DriveInfo {
             model,
             serial,
@@ -217,7 +229,7 @@ impl AtaDrive {
             lba48_supported,
         })
     }
-    
+
     /// Byte-swapped ATA string'ini düzeltir.
     fn parse_ata_string(words: &[u16]) -> String {
         let mut chars = Vec::new();
@@ -257,18 +269,18 @@ impl AtaDrive {
 
         buffer
     }
-    
+
     /// Sektör yazar.
     pub fn write_sectors(&mut self, lba: u32, data: &[u8]) -> Result<(), AtaError> {
         if data.len() % BLOCK_SIZE != 0 {
             return Err(AtaError::InvalidParameter);
         }
-        
+
         let count = (data.len() / BLOCK_SIZE) as u8;
-        
+
         self.wait_busy();
         self.select_drive(lba);
-        
+
         unsafe {
             self.features.write(0x00);
             self.sector_count.write(count);
@@ -277,26 +289,28 @@ impl AtaDrive {
             self.lba_high.write((lba >> 16) as u8);
             self.command.write(commands::WRITE_SECTORS);
         }
-        
+
         for sector in 0..count as usize {
             self.wait_busy();
             self.wait_ready()?;
-            
+
             let sector_start = sector * BLOCK_SIZE;
             for i in 0..256 {
                 let offset = sector_start + i * 2;
                 let word = (data[offset] as u16) | ((data[offset + 1] as u16) << 8);
-                unsafe { self.data.write(word); }
+                unsafe {
+                    self.data.write(word);
+                }
             }
         }
-        
+
         // Cache flush yap
         self.flush()?;
-        
+
         self.check_error()?;
         Ok(())
     }
-    
+
     /// Disk önbelleğini diske yazar.
     pub fn flush(&mut self) -> Result<(), AtaError> {
         self.wait_busy();

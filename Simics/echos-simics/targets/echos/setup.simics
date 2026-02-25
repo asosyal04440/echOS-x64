@@ -1,0 +1,178 @@
+# echOS Disk Image Preparation
+#
+# This script creates and prepares disk images for Simics
+
+# ============================================================================
+# Create Disk Images
+# ============================================================================
+
+# Create blank disk images
+command create-images {
+    echo "Creating disk images..."
+    
+    # NVMe disk (64GB sparse)
+    $nvme_disk = new-disk-image(
+        file = "%simics%/targets/echos/images/echos-disk.img",
+        size = 64 * 1024 * 1024 * 1024,
+        sparse = TRUE
+    )
+    echo "Created NVMe disk image"
+    
+    # SATA disk (128GB sparse)
+    $sata_disk = new-disk-image(
+        file = "%simics%/targets/echos/images/echos-sata.img",
+        size = 128 * 1024 * 1024 * 1024,
+        sparse = TRUE
+    )
+    echo "Created SATA disk image"
+    
+    # USB storage (8GB sparse)
+    $usb_disk = new-disk-image(
+        file = "%simics%/targets/echos/images/usb-storage.img",
+        size = 8 * 1024 * 1024 * 1024,
+        sparse = TRUE
+    )
+    echo "Created USB storage image"
+    
+    # NVRAM
+    $nvram = new-disk-image(
+        file = "%simics%/targets/echos/images/echos-nvram.img",
+        size = 128 * 1024,
+        sparse = FALSE
+    )
+    echo "Created NVRAM image"
+    
+    echo "Disk images created successfully"
+}
+
+# ============================================================================
+# Format Disks
+# ============================================================================
+
+command format-disks {
+    echo "Formatting disk images..."
+    
+    # Create GPT partition table on NVMe
+    $nvme = open-disk-image("%simics%/targets/echos/images/echos-disk.img")
+    $nvme.create_gpt()
+    
+    # Create EFI System Partition (ESP)
+    $nvme.create_partition(
+        name = "EFI System",
+        type = "efi",
+        size = 512 * 1024 * 1024,  # 512MB
+        filesystem = "fat32"
+    )
+    
+    # Create OS partition
+    $nvme.create_partition(
+        name = "echOS",
+        type = "linux",
+        size = 0,  # Use remaining space
+        filesystem = "ext4"
+    )
+    
+    $nvme.close()
+    echo "NVMe disk formatted"
+    
+    # Create GPT on SATA
+    $sata = open-disk-image("%simics%/targets/echos/images/echos-sata.img")
+    $sata.create_gpt()
+    $sata.create_partition(
+        name = "Data",
+        type = "linux",
+        size = 0,
+        filesystem = "ext4"
+    )
+    $sata.close()
+    echo "SATA disk formatted"
+    
+    echo "Disk formatting complete"
+}
+
+# ============================================================================
+# Install echOS
+# ============================================================================
+
+command install-echos {
+    param kernel_path = "../../target/x86_64-unknown-uefi/debug/ech_os.efi"
+    
+    echo "Installing echOS..."
+    
+    # Mount EFI partition
+    $nvme = open-disk-image("%simics%/targets/echos/images/echos-disk.img")
+    $esp = $nvme.mount_partition(0)
+    
+    # Create EFI directory structure
+    $esp.create_directory("EFI")
+    $esp.create_directory("EFI/echOS")
+    $esp.create_directory("EFI/Boot")
+    
+    # Copy bootloader
+    $esp.copy_file($kernel_path, "EFI/echOS/bootx64.efi")
+    $esp.copy_file($kernel_path, "EFI/Boot/BOOTX64.EFI")
+    
+    # Create startup.nsh
+    $esp.write_file("startup.nsh", "fs0:\\EFI\\echOS\\bootx64.efi")
+    
+    $esp.unmount()
+    $nvme.close()
+    
+    echo "echOS installed successfully"
+}
+
+# ============================================================================
+# Create Symbol Files
+# ============================================================================
+
+command extract-symbols {
+    param kernel_path = "../../target/x86_64-unknown-uefi/debug/ech_os.efi"
+    
+    echo "Extracting debug symbols..."
+    
+    # Extract symbols from ELF/PE
+    $symbols = extract-elf-symbols($kernel_path)
+    
+    # Save kernel symbols
+    $symbols.save("%simics%/targets/echos/symbols/kernel.sym")
+    
+    # Create symbol map for GDB
+    $symbols.save_gdb("%simics%/targets/echos/symbols/kernel.gdb")
+    
+    echo "Symbols extracted to symbols/kernel.sym"
+}
+
+# ============================================================================
+# Full Setup
+# ============================================================================
+
+command setup-all {
+    echo "=========================================="
+    echo "echOS Simics Full Setup"
+    echo "=========================================="
+    
+    create-images
+    format-disks
+    install-echos
+    extract-symbols
+    
+    echo "=========================================="
+    echo "Setup Complete!"
+    echo "=========================================="
+    echo "Ready to boot with: run-script %simics%/targets/echos/boot.simics"
+}
+
+# ============================================================================
+# Ready
+# ============================================================================
+
+echo "=========================================="
+echo "echOS Image Preparation Ready"
+echo "=========================================="
+echo "Commands:"
+echo "  create-images   - Create blank disk images"
+echo "  format-disks    - Format with GPT partitions"
+echo "  install-echos   - Install echOS bootloader"
+echo "  extract-symbols - Extract debug symbols"
+echo "  setup-all       - Run all setup steps"
+echo "=========================================="

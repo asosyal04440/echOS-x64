@@ -4,8 +4,8 @@
 //! Mouse başlatma, paket işleme ve pozisyon takibi.
 //! Kaynak: https://wiki.osdev.org/Mouse_Input
 
-use x86_64::instructions::port::Port;
 use spin::Mutex;
+use x86_64::instructions::port::Port;
 
 // PS/2 Controller Portları
 const DATA_PORT: u16 = 0x60;
@@ -15,7 +15,11 @@ const COMMAND_PORT: u16 = 0x64;
 // Global Mouse Durumu
 pub static mut MOUSE_X: i32 = 640;
 pub static mut MOUSE_Y: i32 = 400;
-pub static mut MOUSE_BUTTONS: MouseButtons = MouseButtons { left: false, right: false, middle: false };
+pub static mut MOUSE_BUTTONS: MouseButtons = MouseButtons {
+    left: false,
+    right: false,
+    middle: false,
+};
 
 // Paket buffer (3 byte'lık döngü)
 static MOUSE_CYCLE: Mutex<u8> = Mutex::new(0);
@@ -69,14 +73,18 @@ fn wait_read() {
 fn mouse_write(cmd: u8) {
     let mut command_port = Port::<u8>::new(COMMAND_PORT);
     let mut data_port = Port::<u8>::new(DATA_PORT);
-    
+
     // Controller'a "sıradaki byte mouse'a gidecek" de
     wait_write();
-    unsafe { command_port.write(0xD4); }
-    
+    unsafe {
+        command_port.write(0xD4);
+    }
+
     // Komutu gönder
     wait_write();
-    unsafe { data_port.write(cmd); }
+    unsafe {
+        data_port.write(cmd);
+    }
 }
 
 /// Data portundan byte okur.
@@ -93,40 +101,48 @@ fn mouse_read() -> u8 {
 /// PS/2 Mouse'u başlatır.
 pub fn init() -> bool {
     crate::serial_println!("Mouse: Başlatılıyor...");
-    
+
     let mut command_port = Port::<u8>::new(COMMAND_PORT);
     let mut data_port = Port::<u8>::new(DATA_PORT);
-    
+
     // Adım 1: Auxiliary Device (Mouse) Etkinleştir
     wait_write();
-    unsafe { command_port.write(0xA8); }
-    
+    unsafe {
+        command_port.write(0xA8);
+    }
+
     // Adım 2: Compaq Status Byte Oku
     wait_write();
-    unsafe { command_port.write(0x20); }
+    unsafe {
+        command_port.write(0x20);
+    }
     wait_read();
     let mut status_byte = unsafe { data_port.read() };
-    
+
     // Adım 3: Status Byte Güncelle
     // - Bit 1 AÇ (Enable IRQ12)
     // - Bit 5 KAPAT (Enable Mouse Clock)
     status_byte |= 0x02;
     status_byte &= 0xDF;
-    
+
     // Adım 4: Yeni Status Byte'ı Yaz
     wait_write();
-    unsafe { command_port.write(0x60); }
+    unsafe {
+        command_port.write(0x60);
+    }
     wait_write();
-    unsafe { data_port.write(status_byte); }
-    
+    unsafe {
+        data_port.write(status_byte);
+    }
+
     // Adım 5: Varsayılan Ayarları Yükle (0xF6)
     mouse_write(0xF6);
-    let ack = mouse_read();
-    
+    let _ack = mouse_read();
+
     // Adım 6: Paket Akışını Başlat (0xF4)
     mouse_write(0xF4);
     let ack = mouse_read();
-    
+
     if ack == 0xFA {
         crate::serial_println!("Mouse: Başarıyla başlatıldı!");
         true
@@ -145,7 +161,7 @@ pub fn init() -> bool {
 pub fn handle_packet(packet_byte: u8) {
     let mut cycle = MOUSE_CYCLE.lock();
     let mut packet = MOUSE_PACKET.lock();
-    
+
     match *cycle {
         0 => {
             // Byte 0: Flagler
@@ -165,21 +181,25 @@ pub fn handle_packet(packet_byte: u8) {
             // Byte 2: Y Hareketi - Paket Tamamlandı!
             packet[2] = packet_byte;
             *cycle = 0;
-            
+
             // Paketi işle
             let flags = packet[0];
             let mut dx = packet[1] as i32;
             let mut dy = packet[2] as i32;
-            
+
             // Sign extension (negatif değerler için)
-            if (flags & 0x10) != 0 { dx -= 256; }  // X sign bit
-            if (flags & 0x20) != 0 { dy -= 256; }  // Y sign bit
-            
+            if (flags & 0x10) != 0 {
+                dx -= 256;
+            } // X sign bit
+            if (flags & 0x20) != 0 {
+                dy -= 256;
+            } // Y sign bit
+
             // Global pozisyonu güncelle
             unsafe {
                 MOUSE_X = (MOUSE_X + dx).clamp(0, SCREEN_WIDTH - 1);
-                MOUSE_Y = (MOUSE_Y - dy).clamp(0, SCREEN_HEIGHT - 1);  // Y ekseni ters olabilir
-                
+                MOUSE_Y = (MOUSE_Y - dy).clamp(0, SCREEN_HEIGHT - 1); // Y ekseni ters olabilir
+
                 MOUSE_BUTTONS.left = (flags & 0x01) != 0;
                 MOUSE_BUTTONS.right = (flags & 0x02) != 0;
                 MOUSE_BUTTONS.middle = (flags & 0x04) != 0;
@@ -209,7 +229,7 @@ pub fn get_buttons() -> MouseButtons {
 pub fn poll() -> bool {
     let mut status_port = Port::<u8>::new(STATUS_PORT);
     let mut data_port = Port::<u8>::new(DATA_PORT);
-    
+
     let status = unsafe { status_port.read() };
     if (status & 0x01) != 0 {
         let packet_byte = unsafe { data_port.read() };
@@ -222,34 +242,46 @@ pub fn poll() -> bool {
 /// ExitBootServices sonrası yeniden başlatma.
 pub fn reinit_streaming() {
     crate::serial_println!("Mouse: Re-init (post-ExitBS)...");
-    
+
     let mut command_port = Port::<u8>::new(COMMAND_PORT);
     let mut data_port = Port::<u8>::new(DATA_PORT);
-    
+
     // Aux tekrar etkinleştir
     wait_write();
-    unsafe { command_port.write(0xA8); }
-    
+    unsafe {
+        command_port.write(0xA8);
+    }
+
     // Status byte düzelt
     wait_write();
-    unsafe { command_port.write(0x20); }
+    unsafe {
+        command_port.write(0x20);
+    }
     wait_read();
     let mut status_byte = unsafe { data_port.read() };
-    
+
     status_byte |= 0x02; // IRQ12 enable
     status_byte &= 0xDF; // Clock enable
-    
+
     wait_write();
-    unsafe { command_port.write(0x60); }
+    unsafe {
+        command_port.write(0x60);
+    }
     wait_write();
-    unsafe { data_port.write(status_byte); }
-    
+    unsafe {
+        data_port.write(status_byte);
+    }
+
     // Streaming tekrar aç
     wait_write();
-    unsafe { command_port.write(0xD4); }
+    unsafe {
+        command_port.write(0xD4);
+    }
     wait_write();
-    unsafe { data_port.write(0xF4); }
-    
+    unsafe {
+        data_port.write(0xF4);
+    }
+
     wait_read();
     let _ack = unsafe { data_port.read() };
 }

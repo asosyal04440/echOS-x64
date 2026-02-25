@@ -1,12 +1,12 @@
 //! # echOS Mesaj Kuyrukları (IPC)
-//! 
+//!
 //! Task'lar arası mesajlaşma (Message Passing) altyapısı.
 //! Mesaj gönderme, alma ve kuyruk yönetimi.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use spin::Mutex;
 use lazy_static::lazy_static;
+use spin::Mutex;
 
 use crate::task::task::TaskId;
 
@@ -27,12 +27,12 @@ impl Message {
     pub fn new(sender: TaskId, data: Vec<u8>) -> Self {
         Self { sender, data }
     }
-    
+
     /// String'den mesaj oluşturur.
     pub fn from_str(sender: TaskId, s: &str) -> Self {
         Self::new(sender, s.as_bytes().to_vec())
     }
-    
+
     /// Mesajı string olarak okur (UTF-8 geçerliyse).
     pub fn as_str(&self) -> Option<&str> {
         core::str::from_utf8(&self.data).ok()
@@ -65,36 +65,36 @@ impl MessageRegistry {
             mailboxes: Vec::new(),
         }
     }
-    
+
     /// Task için mailbox'ı getirir veya yoksa oluşturur.
     fn get_or_create_mailbox(&mut self, task_id: TaskId) -> &mut TaskMailbox {
         if let Some(pos) = self.mailboxes.iter().position(|m| m.task_id == task_id) {
             return &mut self.mailboxes[pos];
         }
-        
+
         self.mailboxes.push(TaskMailbox::new(task_id));
         self.mailboxes.last_mut().unwrap()
     }
-    
+
     /// Hedef task'a mesaj gönderir.
     /// Kuyruk doluysa false döner.
     fn send(&mut self, target: TaskId, message: Message) -> bool {
         let mailbox = self.get_or_create_mailbox(target);
-        
+
         if mailbox.messages.len() >= MAX_QUEUE_SIZE {
             return false; // Kuyruk dolu
         }
-        
+
         mailbox.messages.push_back(message);
         true
     }
-    
+
     /// Task için bir mesaj alır (FIFO).
     fn receive(&mut self, task_id: TaskId) -> Option<Message> {
         let mailbox = self.get_or_create_mailbox(task_id);
         mailbox.messages.pop_front()
     }
-    
+
     /// Bekleyen mesaj var mı kontrol eder.
     fn has_message(&mut self, task_id: TaskId) -> bool {
         let mailbox = self.get_or_create_mailbox(task_id);

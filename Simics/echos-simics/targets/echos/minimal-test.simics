@@ -1,0 +1,31 @@
+# echOS Minimal Test Configuration
+#
+# Creates a minimal x86-64 system with echOS
+
+# Use QSP Modern Core as base
+$params = @{
+    cpu_comp_class = "x86-qsp"
+    cpu_comp_count = 1
+    memory_megs = 512
+    disk0_image = ""
+    disk0_type = "hd"
+}
+
+# Create the system
+run-script "%simics%/targets/qsp-x86/qsp-modern-core.simics" $params
+
+# Set up serial console to stdio
+$system.serconsole.con.setup backend = stdio
+
+echo "=========================================="
+echo "echOS Minimal Test System Ready"
+echo "=========================================="
+echo "CPU: 1 core"
+echo "Memory: 512MB"
+echo "Serial: stdio"
+echo ""
+echo "Commands:"
+echo "  run              - Start simulation"
+echo "  stop             - Stop simulation"
+echo "  quit             - Exit Simics"
+echo "=========================================="

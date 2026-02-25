@@ -1,0 +1,84 @@
+# Detailed debug boot script for echOS
+# Shows every step of the boot process
+
+echo "========================================="
+echo "=== echOS Boot Debug Script ==="
+echo "========================================="
+
+# Enable serial console output
+echo "[DEBUG] Enabling serial console output..."
+echos.serconsole.con.enable-cmd-line-output
+
+# Reduce log noise but keep important messages
+echo "[DEBUG] Configuring log levels..."
+log-level 2
+log-type -disable unimpl
+log-type -disable spec-viol
+
+# Show system info
+echo "[DEBUG] System information:"
+echo "  System name: echos"
+echos.info
+
+# Show disk info
+echo ""
+echo "[DEBUG] Disk configuration:"
+echos.disk0.info
+
+# Show UEFI firmware info
+echo ""
+echo "[DEBUG] UEFI firmware:"
+echos.mb.simics_uefi.info
+
+# Show selected boot option
+echo ""
+echo "[DEBUG] Boot configuration:"
+echo "  Selected boot option:"
+echos.mb.simics_uefi->selected_boot_option
+
+# Show memory map
+echo ""
+echo "[DEBUG] Memory configuration:"
+echos.mb.nb.dram.info
+
+# Set up breakpoints for debugging
+echo ""
+echo "[DEBUG] Setting up debug breakpoints..."
+
+# Break on any exception
+#echos.cpu0.core[0][0].set-exception-break -all
+
+# Monitor serial output
+echo ""
+echo "[DEBUG] Monitoring serial port COM1 (0x3F8)..."
+
+# Start simulation with timeout
+echo ""
+echo "========================================="
+echo "=== Starting Simulation ==="
+echo "========================================="
+
+script-branch "boot-monitor" {
+    local $timeout = 120
+    local $elapsed = 0
+    while $elapsed < $timeout {
+        bp.time.wait-for 5
+        $elapsed = $elapsed + 5
+        echo "[MONITOR] Elapsed: " + $elapsed + "s / " + $timeout + "s"
+        
+        # Check if system is still running
+        if (sim->running == 0) {
+            echo "[MONITOR] Simulation stopped"
+            break
+        }
+    }
+    
+    if $elapsed >= $timeout {
+        echo "[MONITOR] TIMEOUT - stopping simulation"
+    }
+    
+    stop
+}
+
+echo "[DEBUG] Running simulation..."
+run

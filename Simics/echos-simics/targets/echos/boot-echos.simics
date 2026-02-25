@@ -1,0 +1,36 @@
+# echOS Boot for Simics - Correct Syntax
+# Based on Intel QSP-x86 documentation
+
+# Disk image with echOS
+$disk_image = "targets/echos/images/echos-disk.img"
+$machine_name = "echos_board"
+
+# Load QSP-x86 system configuration  
+run-command-file "targets/qsp-x86/qsp-system.include"
+
+# Create the machine
+instantiate-components
+
+# Set faster time quantum for boot
+set-time-quantum cell = $system.cell seconds = 0.0001
+
+# Enable real-time mode
+enable-real-time-mode
+
+# Configure serial console output to file
+$echos_board.mb.serconsole.con.setup backend = file
+$echos_board.mb.serconsole.con.file = "targets/echos/logs/serial.log"
+
+# Also output to console
+$echos_board.mb.serconsole.con.setup backend = stdio
+
+echo "=========================================="
+echo "echOS Simics Environment Ready"
+echo "=========================================="
+echo "Commands:"
+echo "  run       - Start boot"
+echo "  stop      - Pause simulation"
+echo "  quit      - Exit"
+echo ""
+echo "Serial log: targets/echos/logs/serial.log"
+echo "=========================================="

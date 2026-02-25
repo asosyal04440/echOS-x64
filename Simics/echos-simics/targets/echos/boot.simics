@@ -1,0 +1,76 @@
+# echOS Simics Boot Script
+#
+# This script boots echOS from UEFI
+
+# ============================================================================
+# Boot Configuration
+# ============================================================================
+
+# Load the system configuration
+run-script "%simics%/targets/echos/echos-system.simics"
+
+# ============================================================================
+# Boot Options
+# ============================================================================
+
+# Boot from NVMe
+@echos_boot_nvme = 1
+
+# Boot from SATA
+@echos_boot_sata = 2
+
+# Boot from USB
+@echos_boot_usb = 3
+
+# Boot from Network (PXE)
+@echos_boot_network = 4
+
+# Default boot device
+@echos_boot_device = $echos_boot_nvme
+
+# ============================================================================
+# Boot Process
+# ============================================================================
+
+# Select boot device
+if $echos_boot_device == $echos_boot_nvme {
+    echo "Booting from NVMe..."
+    $uefi.set_boot_device("nvme")
+} elif $echos_boot_device == $echos_boot_sata {
+    echo "Booting from SATA..."
+    $uefi.set_boot_device("sata")
+} elif $echos_boot_device == $echos_boot_usb {
+    echo "Booting from USB..."
+    $uefi.set_boot_device("usb")
+} elif $echos_boot_device == $echos_boot_network {
+    echo "Booting from Network (PXE)..."
+    $uefi.set_boot_device("network")
+}
+
+# ============================================================================
+# Debug Configuration
+# ============================================================================
+
+# Enable verbose logging
+$logger.set_log_level("debug")
+
+# Enable CPU tracing
+foreach $cpu in $system.cpu_list {
+    $cpu.trace_enable = TRUE
+    $cpu.trace_file = "%simics%/targets/echos/logs/cpu" . $cpu.index . ".log"
+}
+
+# Enable memory access logging
+$system.memory.trace_enable = TRUE
+$system.memory.trace_file = "%simics%/targets/echos/logs/memory.log"
+
+# ============================================================================
+# Start Simulation
+# ============================================================================
+
+echo "Starting echOS simulation..."
+echo "Press Ctrl+C to stop"
+echo ""
+
+# Run simulation
+run

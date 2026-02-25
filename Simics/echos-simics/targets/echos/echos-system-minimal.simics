@@ -1,0 +1,107 @@
+# echOS Minimal System Configuration for Simics
+#
+# Simplified configuration using our custom EFI disk image
+
+# ============================================================================
+# Machine Definition
+# ============================================================================
+
+# Create x86 machine with modern components
+$machine = "qsp-x86"
+$machines = []
+$system = (create-object qsp-x86-system)
+$system.name = "echos-system"
+$machines += $system
+
+# Connect machine components
+$cpu = $system.cpu
+$mem = $system.memory
+
+# ============================================================================
+# Firmware (OVMF)
+# ============================================================================
+
+# Use OVMF firmware
+$firmware_image = "targets/echos/firmware/OVMF.fd"
+$firmware_vars = "targets/echos/firmware/OVMF_VARS.fd"
+
+if (file-exists($firmware_image)) {
+    echo "Loading OVMF firmware from: " . $firmware_image
+    $uefi = (create-object uefi-component)
+    $uefi.name = "uefi"
+    $uefi.code-image = $firmware_image
+    $uefi.vars-image = $firmware_vars
+    $uefi.connect($cpu)
+} else {
+    echo "Warning: OVMF firmware not found, using BIOS fallback"
+    $bios = $system.bios
+}
+
+# ============================================================================
+# Storage (NVMe)
+# ============================================================================
+
+# NVMe Controller
+$nvme_controller = new-nvme-controller()
+$nvme_controller.name = "nvme0"
+$nvme_controller.pci-slot = 0
+$nvme_controller.pci-function = 0
+$nvme_controller.connect_bus($system.board.mb_pci_bus)
+
+# Single bootable NVMe disk with our custom EFI image
+$nvme_ns = new-nvme-namespace(
+    name = "nvme0n1",
+    controller = $nvme_controller,
+    size = 100 * 1024 * 1024,  # 100MB - small for faster boot
+    block_size = 512,
+    image = "targets/echos/images/echos-efi.img"
+)
+
+# ============================================================================
+# Network
+# ============================================================================
+
+# Simple network configuration
+if ($system.ethernet) {
+    $eth = $system.ethernet
+    $eth.name = "eth0"
+    echo "Network interface configured: eth0"
+}
+
+# ============================================================================
+# USB
+# ============================================================================
+
+# Enable USB support if available
+if ($system.usb) {
+    $usb = $system.usb
+    echo "USB subsystem enabled"
+}
+
+# ============================================================================
+# Console and Display
+# ============================================================================
+
+# Serial console
+if ($system.serial) {
+    $serial_console = $system.serial
+    $serial_console.name = "serial0"
+    echo "Serial console enabled"
+}
+
+# VGA display
+if ($system.vga) {
+    $vga = $system.vga
+    echo "VGA display enabled"
+}
+
+# ============================================================================
+# Final Setup
+# ============================================================================
+
+echo "System configuration loaded:"
+echo "  - Machine: echos-system"
+echo "  - CPU: " . $cpu.vendor . " " . $cpu.model-name
+echo "  - Memory: " . $mem.size . " bytes"
+echo "  - Disk: NVMe with echos-efi.img"
+echo "  - Firmware: OVMF (if found)"

@@ -1,9 +1,7 @@
 //! # echOS Tile Sistemi
-//! 
+//!
 //! Tile-based rendering için temel yapılar.
 //! Ekran 32x32 piksellik tile'lara bölünür.
-
-use core::ops::Range;
 
 /// Tile boyutu (32x32 piksel = 4KB buffer)
 pub const TILE_SIZE: usize = 32;

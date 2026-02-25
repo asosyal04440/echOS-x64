@@ -1,156 +1,158 @@
-use x86_64::registers::model_specific::{Efer, EferFlags, LStar, Star, SFMask};
-use x86_64::registers::rflags::RFlags;
+use core::arch::global_asm;
+use x86_64::registers::model_specific::Msr;
 use x86_64::VirtAddr;
-use x86_64::instructions::segmentation::Segment;
-use x86_64::structures::gdt::SegmentSelector;
 
+const MSR_EFER: u32 = 0xC000_0080;
+const MSR_STAR: u32 = 0xC000_0081;
+const MSR_LSTAR: u32 = 0xC000_0082;
+const MSR_SFMASK: u32 = 0xC000_0084;
+const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
+
+#[repr(C)]
+pub struct CpuData {
+    pub user_rsp_scratch: u64,
+    pub kernel_stack_top: u64,
+    pub cpu_id: u32,
+    pub user_rip: u64,
+    pub user_rflags: u64,
+    pub irq_depth: u64,
+}
+
+pub const SYSCALL_STACK_SIZE: usize = 40960;
 pub fn init() {
-    let code_selector = crate::gdt::GDT.1.code_selector;
-    let data_selector = crate::gdt::GDT.1.data_selector;
-    let user_code_selector = crate::gdt::GDT.1.user_code_selector;
-    let user_data_selector = crate::gdt::GDT.1.user_data_selector;
+    let code_selector = crate::gdt::kernel_code_selector();
+    let user_code_selector = crate::gdt::user_code_selector();
 
     unsafe {
-        // 1. Enable System Call Extensions (SCE)
-        Efer::update(|flags| {
-            flags.insert(EferFlags::SYSTEM_CALL_EXTENSIONS);
-        });
+        let mut efer = Msr::new(MSR_EFER);
+        let mut efer_val = efer.read();
+        efer_val |= 1 << 0; // Bit 0: SCE (SYSCALL/SYSRET enable)
+        efer.write(efer_val);
 
-        // 2. Set STAR register
-        // CS (User Code) must be Base + 16 (0x10)
-        // SS (User Data) must be Base + 8  (0x08)
-        
-        // GDT layout in src/gdt.rs:
-        // [1] Kernel Code
-        // [2] Kernel Data
-        // [3] TSS
-        // [5] User Data  -> Index 5
-        // [6] User Code  -> Index 6
-        
-        // For Sysret:
-        // Base = User Data Index (5) - 1 = 4.
-        // CS = Base + 16 = 4*8 + 16 = 32+16 = 48 (Index 6). Checking logic:
-        // x86_64 logic for segments: Base Selector (16 bits) << 32 in MSR.
-        // The MSR value is actually strictly bits 48-63 = SYSRET CS, bits 32-47 = SYSCALL CS.
-        // No, Star::write handles the shift.
-        // But the selectors we pass determine the value.
-        // We need `user_base_selector` such that:
-        //   user_base + 16 = user_code
-        //   user_base + 8  = user_data
-        
-        // user_data.0 (raw) = 5 * 8 = 40.
-        // user_code.0 (raw) = 6 * 8 = 48.
-        
-        // If user_base.0 = 40 - 8 = 32 (Index 4).
-        // Then user_base + 8 = 40 (User Data). Correct.
-        // Then user_base + 16 = 48 (User Code). Correct.
-        
-        let user_base_val = user_data_selector.0 - 8;
-        let user_base_selector = SegmentSelector(user_base_val);
-        
-        // Kernel Base:
-        // SYSCALL loads CS from Bits 32-47. And SS from Bits 32-47 + 8.
-        // So Kernel CS = Base.
-        // Kernel SS = Base + 8.
-        // Kernel Code = Index 1 (8).
-        // Kernel Data = Index 2 (16).
-        // Base = 8.
-        // Base + 8 = 16. Correct.
-        
-        Star::write(
-            user_base_selector,
-            user_base_selector,
-            code_selector,
-            data_selector,
-        ).unwrap_or_else(|e| {
-             crate::serial_println!("Syscall Star::write failed: {:?} (Selectors: UserDataIdx={}, UserCodeIdx={}, BaseIdx={})", 
-                e, user_data_selector.index(), user_code_selector.index(), user_base_selector.index());
-             
-             // UNWRAP FAILED? USE THE HAMMER.
-             // Manually write to MSR 0xC0000081 (STAR)
-             // Bits 0-31:  Target EIP (Legacy - Unused in Long Mode)
-             // Bits 32-47: Kernel CS (Target for SYSCALL) -> code_selector
-             // Bits 48-63: User CS Base (Target for SYSRET) -> user_base_selector
-             
-             use x86_64::registers::model_specific::Msr;
-             let mut star_msr = Msr::new(0xC0000081);
-             
-             let kernel_base = code_selector.0 as u64;
-             let user_base = user_base_selector.0 as u64;
-             
-             let val = (user_base << 48) | (kernel_base << 32);
-             
-             crate::serial_println!("Forcing STAR MSR Write: {:#016x}", val);
-             star_msr.write(val);
-        });
+        let kernel_cs = code_selector.0 as u64;
+        let user_cs = (user_code_selector.0 | 3) as u64;
+        let star_val = ((user_cs - 16) << 48) | (kernel_cs << 32);
+        let mut star = Msr::new(MSR_STAR);
+        star.write(star_val);
 
-        // 3. Set LSTAR register (Entry Point)
         let syscall_addr = VirtAddr::new(syscall_handler as *const () as usize as u64);
-        LStar::write(syscall_addr);
+        let mut lstar = Msr::new(MSR_LSTAR);
+        lstar.write(syscall_addr.as_u64());
 
-        // 4. Set FMASK register (Flags to clear on syscall)
-        // Clear Interrupt flag (IF) to disable interrupts on entry
-        SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::TRAP_FLAG);
+        let mut sfmask = Msr::new(MSR_SFMASK);
+        sfmask.write(0x200); // Bit 9: IF (interrupt flag mask)
     }
-    
+
     crate::serial_println!("Syscall Mechanism Initialized.");
 }
 
-// Global storage for stack switching (Single Core Only!)
-// In a multicore system, this must be per-cpu (GS_BASE).
-use core::arch::global_asm;
+pub unsafe fn init_cpu_data(cpu_data: *mut CpuData) {
+    let mut kernel_gs_base = Msr::new(MSR_KERNEL_GS_BASE);
+    kernel_gs_base.write(cpu_data as u64);
+}
 
-global_asm!(r#"
+pub fn set_kernel_stack_for_current_cpu(stack_top: u64) {
+    unsafe {
+        let mut msr = Msr::new(MSR_KERNEL_GS_BASE);
+        let base = msr.read();
+        let data = base as *mut CpuData;
+        (*data).kernel_stack_top = stack_top;
+    }
+}
+
+pub fn current_user_context() -> (u64, u64, u64) {
+    unsafe {
+        let mut msr = Msr::new(MSR_KERNEL_GS_BASE);
+        let base = msr.read();
+        let data = base as *const CpuData;
+        (
+            (*data).user_rsp_scratch,
+            (*data).user_rip,
+            (*data).user_rflags,
+        )
+    }
+}
+
+global_asm!(
+    r#"
 .global syscall_handler
-.section .bss
-    .align 16
-    global_user_rsp_backup: .skip 8
-    global_kernel_stack: .skip 40960
-    global_kernel_stack_top:
 
 .section .text
 syscall_handler:
-    // SYSCALL entry point
-    // RCX = return RIP
-    // R11 = legacy RFLAGS
-    // Kernel Mode active (Ring 0), but RSP is User Stack!
-    
-    // 1. Save User Stack Pointer
-    mov [global_user_rsp_backup + rip], rsp
-    
-    // 2. Switch to Kernel Stack
-    lea rsp, [global_kernel_stack_top + rip]
-    
-    // 3. Save User Context (RCX=RIP, R11=RFLAGS)
-    push rcx // Return RIP
-    push r11 // RFLAGS
+    // SWAPGS: user GS_BASE <-> KERNEL_GS_BASE, per-CPU yapıya geçiş
+    swapgs
+    // Kullanıcı RSP'yi GS:0 scratch alanına kaydet
+    mov qword ptr gs:[0], rsp
+    mov qword ptr gs:[24], rcx
+    mov qword ptr gs:[32], r11
+    // Kernel stack top'u GS:8'den yükle
+    mov rsp, qword ptr gs:[8]
+
+    // Register preservation: callee-saved + SYSRET zorunlu RCX/R11
+    push rcx
+    push r11
+    push rbx
     push rbp
-    
-    // 4. Setup Argument handling (System V AMD64 ABI)
-    // User: RDI, RSI, RDX, R10, R8, R9
-    // Kernel: RDI, RSI, RDX, RCX, R8, R9  (R10 -> RCX)
-    mov rcx, r10 
-    
-    // 5. Call Rust Dispatcher
-    call syscall_rust_dispatcher
-    
-    // 6. Restore Context
+    push r12
+    push r13
+    push r14
+    push r15
+
+    // Stack alignment: call öncesi RSP % 16 == 8 olacak şekilde ayarlanır
+    mov r11, rdi
+    mov rdi, rax
+    mov rax, rsi
+    mov rsi, r11
+    mov r11, rdx
+    mov rdx, rax
+    mov rcx, r11
+    mov r11, r9
+    mov r9, r8
+    mov r8, r10
+    sub rsp, 8
+    mov [rsp], r11
+    call syscall_dispatcher
+    add rsp, 8
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
     pop rbp
+    pop rbx
     pop r11
     pop rcx
     
-    // 7. Restore User Stack
-    mov rsp, [global_user_rsp_backup + rip]
-    
-    // 8. Return to User Mode (Ring 3)
+    mov rsp, qword ptr gs:[0]
+    swapgs
     sysretq
-"#);
+"#
+);
 
 extern "C" {
     fn syscall_handler();
 }
 
 #[no_mangle]
-extern "C" fn syscall_rust_dispatcher() {
-    crate::serial_println!("SYSCALL TRIGGERED! (In Ring 0)");
+pub extern "sysv64" fn syscall_dispatcher(
+    num: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+    a6: u64,
+) -> i64 {
+    let ret = crate::posix::dispatch(
+        num as usize,
+        [
+            a1 as usize,
+            a2 as usize,
+            a3 as usize,
+            a4 as usize,
+            a5 as usize,
+            a6 as usize,
+        ],
+    );
+    ret as i64
 }

@@ -1,13 +1,14 @@
 //! # echOS GOP Framebuffer
-//! 
+//!
 //! UEFI Graphics Output Protocol frambuffer wrapper.
 //! Piksel çizim, metin rendering ve temel grafik operasyonları.
 
-use uefi::proto::console::gop::GraphicsOutput;
 use crate::font;
+use uefi::proto::console::gop::GraphicsOutput;
 
 /// Framebuffer yapısı.
 /// Doğrudan ekran belleğine erişim sağlar.
+#[derive(Clone, Copy)]
 pub struct Framebuffer {
     /// Framebuffer'ın fiziksel bellek adresi
     pub base_addr: usize,
@@ -66,18 +67,38 @@ impl Framebuffer {
             }
         }
     }
-    
+
+    /// Dikdörtgen çerçevesi çizer (outline).
+    pub fn draw_rect_outline(&mut self, x: usize, y: usize, width: usize, height: usize, color: u32) {
+        // Top edge
+        for i in 0..width {
+            self.plot_pixel(x + i, y, color);
+        }
+        // Bottom edge
+        for i in 0..width {
+            self.plot_pixel(x + i, y + height - 1, color);
+        }
+        // Left edge
+        for j in 0..height {
+            self.plot_pixel(x, y + j, color);
+        }
+        // Right edge
+        for j in 0..height {
+            self.plot_pixel(x + width - 1, y + j, color);
+        }
+    }
+
     /// Bir pikselin rengini okur.
     pub fn get_pixel(&self, x: usize, y: usize) -> u32 {
         if x >= self.width || y >= self.height {
             return 0x000000;
         }
-        
+
         let offset = (y * self.pixels_per_scan_line + x) * 4;
         let pixel_addr = (self.base_addr + offset) as *const u32;
         unsafe { *pixel_addr }
     }
-    
+
     /// VGA font kullanarak karakter çizer.
     pub fn draw_char(&mut self, x: usize, y: usize, c: char, color: u32) {
         let font_data = font::vga_font::get_font_data(c);
@@ -98,21 +119,30 @@ impl Framebuffer {
             current_x += 8;
         }
     }
-    
+
     /// Ekranı yukarı kaydırır.
     pub fn scroll_up(&mut self, lines: usize) {
         let bytes_per_pixel = 4;
-        let bytes_per_line = self.pixels_per_scan_line * bytes_per_pixel * lines;
-        let total_bytes = self.height * self.pixels_per_scan_line * bytes_per_pixel;
-        
+        let row_stride_bytes = self.pixels_per_scan_line * bytes_per_pixel;
+        let total_rows = self.height;
+
+        if lines == 0 {
+            return;
+        }
+
+        let scroll_rows = lines.min(total_rows);
+        let visible_rows = total_rows - scroll_rows;
+
         unsafe {
-            let src = (self.base_addr + bytes_per_line) as *const u8;
-            let dst = self.base_addr as *mut u8;
-            core::ptr::copy(src, dst, total_bytes - bytes_per_line);
-            
-            // Alt satırları temizle
-            let clear_start = (self.base_addr + total_bytes - bytes_per_line) as *mut u32;
-            for i in 0..(self.pixels_per_scan_line * lines) {
+            for row in 0..visible_rows {
+                let dst = (self.base_addr + row * row_stride_bytes) as *mut u8;
+                let src = (self.base_addr + (row + scroll_rows) * row_stride_bytes) as *const u8;
+                core::ptr::copy_nonoverlapping(src, dst, row_stride_bytes);
+            }
+
+            let clear_start = (self.base_addr + visible_rows * row_stride_bytes) as *mut u32;
+            let clear_pixels = self.pixels_per_scan_line * scroll_rows;
+            for i in 0..clear_pixels {
                 *clear_start.add(i) = 0x000000;
             }
         }
@@ -121,8 +151,6 @@ impl Framebuffer {
     /// Ham buffer'a mutable erişim sağlar.
     pub fn buffer_mut(&mut self) -> &mut [u32] {
         let len = self.pixels_per_scan_line * self.height;
-        unsafe {
-            core::slice::from_raw_parts_mut(self.base_addr as *mut u32, len)
-        }
+        unsafe { core::slice::from_raw_parts_mut(self.base_addr as *mut u32, len) }
     }
 }

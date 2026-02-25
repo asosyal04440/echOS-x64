@@ -1,0 +1,1190 @@
+//! # GPU Abstraction Layer (GAL)
+//!
+//! Hardware-accelerated graphics with software fallback
+//! Supports VirGL, software rendering, and native GPU drivers
+
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use alloc::vec;
+use core::sync::atomic::{AtomicU32, AtomicBool, AtomicU64, Ordering};
+use spin::Mutex;
+use core::mem;
+
+use super::{Surface, SwapChain, GraphicsBackend};
+
+// ============================================================================
+// GAL CONSTANTS
+// ============================================================================
+
+/// Maximum texture units
+const MAX_TEXTURE_UNITS: usize = 32;
+
+/// Maximum vertex buffer size (16MB)
+const MAX_VERTEX_BUFFER_SIZE: usize = 16 * 1024 * 1024;
+
+/// Maximum index buffer size (4MB)
+const MAX_INDEX_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+
+/// Default tile size (32x32 pixels)
+const DEFAULT_TILE_SIZE: usize = 32;
+
+// ============================================================================
+// TEXTURE HANDLE
+// ============================================================================
+
+/// GPU Texture handle
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextureHandle(pub u32);
+
+impl TextureHandle {
+    pub const INVALID: TextureHandle = TextureHandle(0);
+    
+    pub fn new(id: u32) -> Self {
+        TextureHandle(id)
+    }
+    
+    pub fn is_valid(&self) -> bool {
+        self.0 != 0
+    }
+}
+
+// ============================================================================
+// BUFFER HANDLE
+// ============================================================================
+
+/// GPU Buffer handle
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BufferHandle(pub u32);
+
+impl BufferHandle {
+    pub const INVALID: BufferHandle = BufferHandle(0);
+    
+    pub fn new(id: u32) -> Self {
+        BufferHandle(id)
+    }
+    
+    pub fn is_valid(&self) -> bool {
+        self.0 != 0
+    }
+}
+
+// ============================================================================
+// SHADER HANDLE
+// ============================================================================
+
+/// Shader program handle
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ShaderHandle(pub u32);
+
+impl ShaderHandle {
+    pub const INVALID: ShaderHandle = ShaderHandle(0);
+    
+    pub fn new(id: u32) -> Self {
+        ShaderHandle(id)
+    }
+    
+    pub fn is_valid(&self) -> bool {
+        self.0 != 0
+    }
+}
+
+// ============================================================================
+// TEXTURE FORMAT
+// ============================================================================
+
+/// Texture pixel format
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureFormat {
+    /// 8-bit Red channel
+    R8,
+    /// 8-bit Red + Green channels
+    RG8,
+    /// 8-bit RGB
+    RGB8,
+    /// 8-bit RGBA
+    RGBA8,
+    /// 16-bit floating point RGB
+    RGB16F,
+    /// 16-bit floating point RGBA
+    RGBA16F,
+    /// 32-bit floating point RGB
+    RGB32F,
+    /// 32-bit floating point RGBA
+    RGBA32F,
+    /// Depth 16-bit
+    Depth16,
+    /// Depth 24-bit
+    Depth24,
+    /// Depth 32-bit floating point
+    Depth32F,
+    /// Stencil 8-bit
+    Stencil8,
+    /// Depth 24-bit + Stencil 8-bit
+    Depth24Stencil8,
+}
+
+impl TextureFormat {
+    /// Get bytes per pixel
+    pub fn bytes_per_pixel(&self) -> usize {
+        match self {
+            TextureFormat::R8 => 1,
+            TextureFormat::RG8 => 2,
+            TextureFormat::RGB8 => 3,
+            TextureFormat::RGBA8 => 4,
+            TextureFormat::RGB16F => 6,
+            TextureFormat::RGBA16F => 8,
+            TextureFormat::RGB32F => 12,
+            TextureFormat::RGBA32F => 16,
+            TextureFormat::Depth16 => 2,
+            TextureFormat::Depth24 => 3,
+            TextureFormat::Depth32F => 4,
+            TextureFormat::Stencil8 => 1,
+            TextureFormat::Depth24Stencil8 => 4,
+        }
+    }
+    
+    /// Is depth format
+    pub fn is_depth(&self) -> bool {
+        matches!(self, 
+            TextureFormat::Depth16 | 
+            TextureFormat::Depth24 | 
+            TextureFormat::Depth32F |
+            TextureFormat::Depth24Stencil8
+        )
+    }
+    
+    /// Is stencil format
+    pub fn is_stencil(&self) -> bool {
+        matches!(self, 
+            TextureFormat::Stencil8 | 
+            TextureFormat::Depth24Stencil8
+        )
+    }
+}
+
+// ============================================================================
+// TEXTURE DESCRIPTOR
+// ============================================================================
+
+/// Texture creation descriptor
+#[derive(Clone, Debug)]
+pub struct TextureDesc {
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+    pub mip_levels: u32,
+    pub array_layers: u32,
+    pub samples: u32,
+    pub usage: TextureUsage,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct TextureUsage: u32 {
+        const SAMPLED = 1 << 0;
+        const RENDER_TARGET = 1 << 1;
+        const DEPTH_STENCIL = 1 << 2;
+        const STORAGE = 1 << 3;
+        const TRANSFER_SRC = 1 << 4;
+        const TRANSFER_DST = 1 << 5;
+    }
+}
+
+impl Default for TextureDesc {
+    fn default() -> Self {
+        TextureDesc {
+            width: 1,
+            height: 1,
+            format: TextureFormat::RGBA8,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: 1,
+            usage: TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+        }
+    }
+}
+
+impl TextureDesc {
+    pub fn new_2d(width: u32, height: u32, format: TextureFormat) -> Self {
+        TextureDesc {
+            width,
+            height,
+            format,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: 1,
+            usage: TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+        }
+    }
+    
+    pub fn render_target(width: u32, height: u32, format: TextureFormat) -> Self {
+        TextureDesc {
+            width,
+            height,
+            format,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: 1,
+            usage: TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED,
+        }
+    }
+    
+    pub fn depth_stencil(width: u32, height: u32) -> Self {
+        TextureDesc {
+            width,
+            height,
+            format: TextureFormat::Depth24Stencil8,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: 1,
+            usage: TextureUsage::DEPTH_STENCIL,
+        }
+    }
+}
+
+// ============================================================================
+// VERTEX FORMAT
+// ============================================================================
+
+/// Vertex attribute format
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VertexFormat {
+    Float,
+    Float2,
+    Float3,
+    Float4,
+    Byte4,
+    Byte4Norm,
+    UByte4,
+    UByte4Norm,
+    Short2,
+    Short2Norm,
+    Short4,
+    Short4Norm,
+    UInt,
+    UInt2,
+    UInt3,
+    UInt4,
+}
+
+impl VertexFormat {
+    /// Get size in bytes
+    pub fn size(&self) -> usize {
+        match self {
+            VertexFormat::Float => 4,
+            VertexFormat::Float2 => 8,
+            VertexFormat::Float3 => 12,
+            VertexFormat::Float4 => 16,
+            VertexFormat::Byte4 | VertexFormat::Byte4Norm => 4,
+            VertexFormat::UByte4 | VertexFormat::UByte4Norm => 4,
+            VertexFormat::Short2 | VertexFormat::Short2Norm => 4,
+            VertexFormat::Short4 | VertexFormat::Short4Norm => 8,
+            VertexFormat::UInt => 4,
+            VertexFormat::UInt2 => 8,
+            VertexFormat::UInt3 => 12,
+            VertexFormat::UInt4 => 16,
+        }
+    }
+}
+
+/// Vertex attribute descriptor
+#[derive(Clone, Debug)]
+pub struct VertexAttribute {
+    pub name: String,
+    pub format: VertexFormat,
+    pub offset: usize,
+    pub buffer_index: usize,
+}
+
+/// Vertex buffer layout
+#[derive(Clone, Debug)]
+pub struct VertexLayout {
+    pub attributes: Vec<VertexAttribute>,
+    pub stride: usize,
+    pub instanced: bool,
+}
+
+impl VertexLayout {
+    pub fn new() -> Self {
+        VertexLayout {
+            attributes: Vec::new(),
+            stride: 0,
+            instanced: false,
+        }
+    }
+    
+    pub fn add(mut self, name: &str, format: VertexFormat) -> Self {
+        let offset = self.stride;
+        self.stride += format.size();
+        self.attributes.push(VertexAttribute {
+            name: String::from(name),
+            format,
+            offset,
+            buffer_index: 0,
+        });
+        self
+    }
+    
+    pub fn add_instanced(mut self, name: &str, format: VertexFormat) -> Self {
+        self.instanced = true;
+        self.add(name, format)
+    }
+}
+
+// ============================================================================
+// PRIMITIVE TYPE
+// ============================================================================
+
+/// Primitive topology
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimitiveType {
+    Points,
+    Lines,
+    LineStrip,
+    Triangles,
+    TriangleStrip,
+    TriangleFan,
+}
+
+// ============================================================================
+// BLEND STATE
+// ============================================================================
+
+/// Blend factor
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlendFactor {
+    Zero,
+    One,
+    SrcColor,
+    OneMinusSrcColor,
+    SrcAlpha,
+    OneMinusSrcAlpha,
+    DstColor,
+    OneMinusDstColor,
+    DstAlpha,
+    OneMinusDstAlpha,
+    SrcAlphaSaturate,
+}
+
+/// Blend operation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlendOp {
+    Add,
+    Subtract,
+    ReverseSubtract,
+    Min,
+    Max,
+}
+
+/// Blend state for a single render target
+#[derive(Clone, Copy, Debug)]
+pub struct BlendState {
+    pub enabled: bool,
+    pub src_color: BlendFactor,
+    pub dst_color: BlendFactor,
+    pub color_op: BlendOp,
+    pub src_alpha: BlendFactor,
+    pub dst_alpha: BlendFactor,
+    pub alpha_op: BlendOp,
+}
+
+impl Default for BlendState {
+    fn default() -> Self {
+        BlendState {
+            enabled: false,
+            src_color: BlendFactor::One,
+            dst_color: BlendFactor::Zero,
+            color_op: BlendOp::Add,
+            src_alpha: BlendFactor::One,
+            dst_alpha: BlendFactor::Zero,
+            alpha_op: BlendOp::Add,
+        }
+    }
+}
+
+impl BlendState {
+    pub fn alpha_blend() -> Self {
+        BlendState {
+            enabled: true,
+            src_color: BlendFactor::SrcAlpha,
+            dst_color: BlendFactor::OneMinusSrcAlpha,
+            color_op: BlendOp::Add,
+            src_alpha: BlendFactor::One,
+            dst_alpha: BlendFactor::OneMinusSrcAlpha,
+            alpha_op: BlendOp::Add,
+        }
+    }
+    
+    pub fn additive() -> Self {
+        BlendState {
+            enabled: true,
+            src_color: BlendFactor::SrcAlpha,
+            dst_color: BlendFactor::One,
+            color_op: BlendOp::Add,
+            src_alpha: BlendFactor::One,
+            dst_alpha: BlendFactor::One,
+            alpha_op: BlendOp::Add,
+        }
+    }
+    
+    pub fn multiply() -> Self {
+        BlendState {
+            enabled: true,
+            src_color: BlendFactor::DstColor,
+            dst_color: BlendFactor::Zero,
+            color_op: BlendOp::Add,
+            src_alpha: BlendFactor::DstAlpha,
+            dst_alpha: BlendFactor::Zero,
+            alpha_op: BlendOp::Add,
+        }
+    }
+    
+    pub fn premultiplied() -> Self {
+        BlendState {
+            enabled: true,
+            src_color: BlendFactor::One,
+            dst_color: BlendFactor::OneMinusSrcAlpha,
+            color_op: BlendOp::Add,
+            src_alpha: BlendFactor::One,
+            dst_alpha: BlendFactor::OneMinusSrcAlpha,
+            alpha_op: BlendOp::Add,
+        }
+    }
+}
+
+// ============================================================================
+// DEPTH/STENCIL STATE
+// ============================================================================
+
+/// Compare function
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompareFunc {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+/// Stencil operation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StencilOp {
+    Keep,
+    Zero,
+    Replace,
+    IncrementClamp,
+    DecrementClamp,
+    Invert,
+    IncrementWrap,
+    DecrementWrap,
+}
+
+/// Stencil state for a single face
+#[derive(Clone, Copy, Debug)]
+pub struct StencilFaceState {
+    pub compare: CompareFunc,
+    pub fail_op: StencilOp,
+    pub depth_fail_op: StencilOp,
+    pub pass_op: StencilOp,
+    pub read_mask: u8,
+    pub write_mask: u8,
+    pub reference: u8,
+}
+
+impl Default for StencilFaceState {
+    fn default() -> Self {
+        StencilFaceState {
+            compare: CompareFunc::Always,
+            fail_op: StencilOp::Keep,
+            depth_fail_op: StencilOp::Keep,
+            pass_op: StencilOp::Keep,
+            read_mask: 0xFF,
+            write_mask: 0xFF,
+            reference: 0,
+        }
+    }
+}
+
+/// Depth/stencil state
+#[derive(Clone, Debug)]
+pub struct DepthStencilState {
+    pub depth_test: bool,
+    pub depth_write: bool,
+    pub depth_compare: CompareFunc,
+    pub stencil_test: bool,
+    pub stencil_front: StencilFaceState,
+    pub stencil_back: StencilFaceState,
+}
+
+impl Default for DepthStencilState {
+    fn default() -> Self {
+        DepthStencilState {
+            depth_test: true,
+            depth_write: true,
+            depth_compare: CompareFunc::Less,
+            stencil_test: false,
+            stencil_front: StencilFaceState::default(),
+            stencil_back: StencilFaceState::default(),
+        }
+    }
+}
+
+// ============================================================================
+// RASTERIZER STATE
+// ============================================================================
+
+/// Cull mode
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CullMode {
+    None,
+    Front,
+    Back,
+}
+
+/// Front face winding order
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrontFace {
+    Clockwise,
+    CounterClockwise,
+}
+
+/// Fill mode
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillMode {
+    Solid,
+    Wireframe,
+}
+
+/// Rasterizer state
+#[derive(Clone, Copy, Debug)]
+pub struct RasterizerState {
+    pub cull_mode: CullMode,
+    pub front_face: FrontFace,
+    pub fill_mode: FillMode,
+    pub depth_bias: i32,
+    pub depth_bias_clamp: f32,
+    pub slope_scaled_depth_bias: f32,
+    pub depth_clip_enable: bool,
+    pub scissor_enable: bool,
+    pub multisample_enable: bool,
+}
+
+impl Default for RasterizerState {
+    fn default() -> Self {
+        RasterizerState {
+            cull_mode: CullMode::Back,
+            front_face: FrontFace::CounterClockwise,
+            fill_mode: FillMode::Solid,
+            depth_bias: 0,
+            depth_bias_clamp: 0.0,
+            slope_scaled_depth_bias: 0.0,
+            depth_clip_enable: true,
+            scissor_enable: false,
+            multisample_enable: false,
+        }
+    }
+}
+
+// ============================================================================
+// RENDER PASS
+// ============================================================================
+
+/// Render pass attachment
+#[derive(Clone, Debug)]
+pub struct RenderPassAttachment {
+    pub texture: TextureHandle,
+    pub mip_level: u32,
+    pub array_layer: u32,
+    pub load_op: LoadOp,
+    pub store_op: StoreOp,
+    pub clear_value: ClearValue,
+}
+
+/// Load operation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadOp {
+    Load,
+    Clear,
+    DontCare,
+}
+
+/// Store operation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreOp {
+    Store,
+    DontCare,
+}
+
+/// Clear value
+#[derive(Clone, Copy, Debug)]
+pub enum ClearValue {
+    Color { r: f32, g: f32, b: f32, a: f32 },
+    DepthStencil { depth: f32, stencil: u8 },
+}
+
+impl Default for ClearValue {
+    fn default() -> Self {
+        ClearValue::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+    }
+}
+
+/// Render pass descriptor
+#[derive(Clone, Debug)]
+pub struct RenderPassDesc {
+    pub color_attachments: Vec<RenderPassAttachment>,
+    pub depth_stencil: Option<RenderPassAttachment>,
+}
+
+// ============================================================================
+// DRAW COMMANDS
+// ============================================================================
+
+/// Draw command for indexed drawing
+#[derive(Clone, Copy, Debug)]
+pub struct DrawIndexed {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub vertex_offset: i32,
+    pub first_instance: u32,
+}
+
+/// Draw command for non-indexed drawing
+#[derive(Clone, Copy, Debug)]
+pub struct Draw {
+    pub vertex_count: u32,
+    pub instance_count: u32,
+    pub first_vertex: u32,
+    pub first_instance: u32,
+}
+
+// ============================================================================
+// GAL TRAIT
+// ============================================================================
+
+/// GPU Abstraction Layer trait
+pub trait Gal: Send + Sync {
+    // === Resource Creation ===
+    
+    /// Create a texture
+    fn create_texture(&mut self, desc: &TextureDesc) -> Option<TextureHandle>;
+    
+    /// Destroy a texture
+    fn destroy_texture(&mut self, texture: TextureHandle);
+    
+    /// Create a vertex buffer
+    fn create_vertex_buffer(&mut self, size: usize, data: Option<&[u8]>) -> Option<BufferHandle>;
+    
+    /// Create an index buffer
+    fn create_index_buffer(&mut self, size: usize, data: Option<&[u8]>) -> Option<BufferHandle>;
+    
+    /// Create a uniform buffer
+    fn create_uniform_buffer(&mut self, size: usize) -> Option<BufferHandle>;
+    
+    /// Destroy a buffer
+    fn destroy_buffer(&mut self, buffer: BufferHandle);
+    
+    /// Create a shader program
+    fn create_shader(&mut self, vertex_src: &str, fragment_src: &str) -> Option<ShaderHandle>;
+    
+    /// Destroy a shader
+    fn destroy_shader(&mut self, shader: ShaderHandle);
+    
+    // === Resource Updates ===
+    
+    /// Update texture data
+    fn update_texture(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    );
+    
+    /// Update buffer data
+    fn update_buffer(&mut self, buffer: BufferHandle, offset: usize, data: &[u8]);
+    
+    /// Read texture data back to CPU
+    fn read_texture(&self, texture: TextureHandle, data: &mut [u8]) -> bool;
+    
+    // === Rendering ===
+    
+    /// Begin a render pass
+    fn begin_render_pass(&mut self, desc: &RenderPassDesc);
+    
+    /// End the current render pass
+    fn end_render_pass(&mut self);
+    
+    /// Bind a shader program
+    fn bind_shader(&mut self, shader: ShaderHandle);
+    
+    /// Bind vertex buffer
+    fn bind_vertex_buffer(&mut self, index: u32, buffer: BufferHandle, offset: usize);
+    
+    /// Bind index buffer
+    fn bind_index_buffer(&mut self, buffer: BufferHandle, offset: usize);
+    
+    /// Bind texture to a slot
+    fn bind_texture(&mut self, slot: u32, texture: TextureHandle);
+    
+    /// Set blend state
+    fn set_blend_state(&mut self, state: BlendState);
+    
+    /// Set depth/stencil state
+    fn set_depth_stencil_state(&mut self, state: DepthStencilState);
+    
+    /// Set rasterizer state
+    fn set_rasterizer_state(&mut self, state: RasterizerState);
+    
+    /// Set viewport
+    fn set_viewport(&mut self, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32);
+    
+    /// Set scissor rect
+    fn set_scissor(&mut self, x: i32, y: i32, width: u32, height: u32);
+    
+    /// Set vertex layout
+    fn set_vertex_layout(&mut self, layout: &VertexLayout);
+    
+    /// Draw indexed primitives
+    fn draw_indexed(&mut self, cmd: DrawIndexed);
+    
+    /// Draw primitives
+    fn draw(&mut self, cmd: Draw);
+    
+    // === Uniforms ===
+    
+    /// Set uniform float
+    fn set_uniform_float(&mut self, name: &str, value: f32);
+    
+    /// Set uniform vec2
+    fn set_uniform_vec2(&mut self, name: &str, x: f32, y: f32);
+    
+    /// Set uniform vec3
+    fn set_uniform_vec3(&mut self, name: &str, x: f32, y: f32, z: f32);
+    
+    /// Set uniform vec4
+    fn set_uniform_vec4(&mut self, name: &str, x: f32, y: f32, z: f32, w: f32);
+    
+    /// Set uniform mat4
+    fn set_uniform_mat4(&mut self, name: &str, matrix: &[f32; 16]);
+    
+    /// Set uniform buffer
+    fn set_uniform_buffer(&mut self, name: &str, buffer: BufferHandle);
+    
+    // === Presentation ===
+    
+    /// Present to screen
+    fn present(&mut self);
+    
+    /// Get current backbuffer
+    fn backbuffer(&self) -> Option<TextureHandle>;
+    
+    /// Resize backbuffer
+    fn resize(&mut self, width: u32, height: u32);
+    
+    // === Capabilities ===
+    
+    /// Get backend type
+    fn backend(&self) -> GraphicsBackend;
+    
+    /// Get maximum texture size
+    fn max_texture_size(&self) -> u32;
+    
+    /// Get maximum render target count
+    fn max_render_targets(&self) -> u32;
+    
+    /// Check if format is supported
+    fn is_format_supported(&self, format: TextureFormat, usage: TextureUsage) -> bool;
+}
+
+// ============================================================================
+// SOFTWARE GAL IMPLEMENTATION
+// ============================================================================
+
+/// Software rendering GAL (CPU fallback)
+pub struct SoftwareGal {
+    /// Screen dimensions
+    width: u32,
+    height: u32,
+    /// Framebuffer
+    framebuffer: Vec<u32>,
+    /// Depth buffer
+    depth_buffer: Vec<f32>,
+    /// Textures
+    textures: BTreeMap<u32, SoftwareTexture>,
+    /// Buffers
+    buffers: BTreeMap<u32, SoftwareBuffer>,
+    /// Shaders
+    shaders: BTreeMap<u32, SoftwareShader>,
+    /// Next handle ID
+    next_handle: AtomicU32,
+    /// Current render pass
+    current_pass: Option<RenderPassDesc>,
+    /// Current shader
+    current_shader: Option<ShaderHandle>,
+    /// Viewport
+    viewport: (f32, f32, f32, f32, f32, f32),
+    /// Scissor
+    scissor: (i32, i32, u32, u32),
+    /// Blend state
+    blend_state: BlendState,
+    /// Depth state
+    depth_state: DepthStencilState,
+}
+
+struct SoftwareTexture {
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    data: Vec<u8>,
+}
+
+struct SoftwareBuffer {
+    data: Vec<u8>,
+    is_index: bool,
+}
+
+struct SoftwareShader {
+    vertex_src: String,
+    fragment_src: String,
+}
+
+impl SoftwareGal {
+    pub fn new(width: u32, height: u32) -> Self {
+        let pixel_count = (width * height) as usize;
+        
+        SoftwareGal {
+            width,
+            height,
+            framebuffer: vec![0; pixel_count],
+            depth_buffer: vec![1.0; pixel_count],
+            textures: BTreeMap::new(),
+            buffers: BTreeMap::new(),
+            shaders: BTreeMap::new(),
+            next_handle: AtomicU32::new(1),
+            current_pass: None,
+            current_shader: None,
+            viewport: (0.0, 0.0, width as f32, height as f32, 0.0, 1.0),
+            scissor: (0, 0, width, height),
+            blend_state: BlendState::default(),
+            depth_state: DepthStencilState::default(),
+        }
+    }
+    
+    fn next_texture_handle(&self) -> TextureHandle {
+        TextureHandle::new(self.next_handle.fetch_add(1, Ordering::Relaxed))
+    }
+    
+    fn next_buffer_handle(&self) -> BufferHandle {
+        BufferHandle::new(self.next_handle.fetch_add(1, Ordering::Relaxed))
+    }
+    
+    fn next_shader_handle(&self) -> ShaderHandle {
+        ShaderHandle::new(self.next_handle.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Gal for SoftwareGal {
+    fn create_texture(&mut self, desc: &TextureDesc) -> Option<TextureHandle> {
+        let handle = self.next_texture_handle();
+        let size = (desc.width * desc.height) as usize * desc.format.bytes_per_pixel();
+        
+        self.textures.insert(handle.0, SoftwareTexture {
+            width: desc.width,
+            height: desc.height,
+            format: desc.format,
+            data: vec![0; size],
+        });
+        
+        Some(handle)
+    }
+    
+    fn destroy_texture(&mut self, texture: TextureHandle) {
+        self.textures.remove(&texture.0);
+    }
+    
+    fn create_vertex_buffer(&mut self, size: usize, data: Option<&[u8]>) -> Option<BufferHandle> {
+        let handle = self.next_buffer_handle();
+        let mut buffer = vec![0u8; size];
+        
+        if let Some(d) = data {
+            let copy_len = d.len().min(size);
+            buffer[..copy_len].copy_from_slice(&d[..copy_len]);
+        }
+        
+        self.buffers.insert(handle.0, SoftwareBuffer {
+            data: buffer,
+            is_index: false,
+        });
+        
+        Some(handle)
+    }
+    
+    fn create_index_buffer(&mut self, size: usize, data: Option<&[u8]>) -> Option<BufferHandle> {
+        let handle = self.next_buffer_handle();
+        let mut buffer = vec![0u8; size];
+        
+        if let Some(d) = data {
+            let copy_len = d.len().min(size);
+            buffer[..copy_len].copy_from_slice(&d[..copy_len]);
+        }
+        
+        self.buffers.insert(handle.0, SoftwareBuffer {
+            data: buffer,
+            is_index: true,
+        });
+        
+        Some(handle)
+    }
+    
+    fn create_uniform_buffer(&mut self, size: usize) -> Option<BufferHandle> {
+        self.create_vertex_buffer(size, None)
+    }
+    
+    fn destroy_buffer(&mut self, buffer: BufferHandle) {
+        self.buffers.remove(&buffer.0);
+    }
+    
+    fn create_shader(&mut self, vertex_src: &str, fragment_src: &str) -> Option<ShaderHandle> {
+        let handle = self.next_shader_handle();
+        
+        self.shaders.insert(handle.0, SoftwareShader {
+            vertex_src: String::from(vertex_src),
+            fragment_src: String::from(fragment_src),
+        });
+        
+        Some(handle)
+    }
+    
+    fn destroy_shader(&mut self, shader: ShaderHandle) {
+        self.shaders.remove(&shader.0);
+    }
+    
+    fn update_texture(
+        &mut self,
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) {
+        if let Some(tex) = self.textures.get_mut(&texture.0) {
+            let bpp = tex.format.bytes_per_pixel();
+            
+            for row in 0..height {
+                let dst_y = y + row;
+                if dst_y >= tex.height {
+                    break;
+                }
+                
+                let src_offset = row as usize * width as usize * bpp;
+                let dst_offset = dst_y as usize * tex.width as usize * bpp + x as usize * bpp;
+                let copy_len = (width as usize * bpp).min(tex.data.len() - dst_offset);
+                
+                if src_offset + copy_len <= data.len() {
+                    tex.data[dst_offset..dst_offset + copy_len]
+                        .copy_from_slice(&data[src_offset..src_offset + copy_len]);
+                }
+            }
+        }
+    }
+    
+    fn update_buffer(&mut self, buffer: BufferHandle, offset: usize, data: &[u8]) {
+        if let Some(buf) = self.buffers.get_mut(&buffer.0) {
+            let end = offset + data.len();
+            if end <= buf.data.len() {
+                buf.data[offset..end].copy_from_slice(data);
+            }
+        }
+    }
+    
+    fn read_texture(&self, texture: TextureHandle, data: &mut [u8]) -> bool {
+        if let Some(tex) = self.textures.get(&texture.0) {
+            let copy_len = data.len().min(tex.data.len());
+            data[..copy_len].copy_from_slice(&tex.data[..copy_len]);
+            true
+        } else {
+            false
+        }
+    }
+    
+    fn begin_render_pass(&mut self, desc: &RenderPassDesc) {
+        self.current_pass = Some(desc.clone());
+        
+        // Clear attachments
+        for attachment in &desc.color_attachments {
+            if attachment.load_op == LoadOp::Clear {
+                if let ClearValue::Color { r, g, b, a } = attachment.clear_value {
+                    let color = ((r * 255.0) as u32) << 16 
+                              | ((g * 255.0) as u32) << 8 
+                              | ((b * 255.0) as u32);
+                    
+                    // Clear framebuffer
+                    for pixel in &mut self.framebuffer {
+                        *pixel = color;
+                    }
+                }
+            }
+        }
+        
+        // Clear depth
+        if let Some(ref ds) = desc.depth_stencil {
+            if ds.load_op == LoadOp::Clear {
+                if let ClearValue::DepthStencil { depth, .. } = ds.clear_value {
+                    for d in &mut self.depth_buffer {
+                        *d = depth;
+                    }
+                }
+            }
+        }
+    }
+    
+    fn end_render_pass(&mut self) {
+        self.current_pass = None;
+    }
+    
+    fn bind_shader(&mut self, shader: ShaderHandle) {
+        self.current_shader = Some(shader);
+    }
+    
+    fn bind_vertex_buffer(&mut self, index: u32, buffer: BufferHandle, offset: usize) {
+        let _ = (index, buffer, offset);
+        // Software renderer would track this
+    }
+    
+    fn bind_index_buffer(&mut self, buffer: BufferHandle, offset: usize) {
+        let _ = (buffer, offset);
+    }
+    
+    fn bind_texture(&mut self, slot: u32, texture: TextureHandle) {
+        let _ = (slot, texture);
+    }
+    
+    fn set_blend_state(&mut self, state: BlendState) {
+        self.blend_state = state;
+    }
+    
+    fn set_depth_stencil_state(&mut self, state: DepthStencilState) {
+        self.depth_state = state;
+    }
+    
+    fn set_rasterizer_state(&mut self, state: RasterizerState) {
+        let _ = state;
+    }
+    
+    fn set_viewport(&mut self, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32) {
+        self.viewport = (x, y, width, height, min_depth, max_depth);
+    }
+    
+    fn set_scissor(&mut self, x: i32, y: i32, width: u32, height: u32) {
+        self.scissor = (x, y, width, height);
+    }
+    
+    fn set_vertex_layout(&mut self, layout: &VertexLayout) {
+        let _ = layout;
+    }
+    
+    fn draw_indexed(&mut self, cmd: DrawIndexed) {
+        let _ = cmd;
+        // Software rendering would iterate over indices and rasterize triangles
+    }
+    
+    fn draw(&mut self, cmd: Draw) {
+        let _ = cmd;
+    }
+    
+    fn set_uniform_float(&mut self, name: &str, value: f32) {
+        let _ = (name, value);
+    }
+    
+    fn set_uniform_vec2(&mut self, name: &str, x: f32, y: f32) {
+        let _ = (name, x, y);
+    }
+    
+    fn set_uniform_vec3(&mut self, name: &str, x: f32, y: f32, z: f32) {
+        let _ = (name, x, y, z);
+    }
+    
+    fn set_uniform_vec4(&mut self, name: &str, x: f32, y: f32, z: f32, w: f32) {
+        let _ = (name, x, y, z, w);
+    }
+    
+    fn set_uniform_mat4(&mut self, name: &str, matrix: &[f32; 16]) {
+        let _ = (name, matrix);
+    }
+    
+    fn set_uniform_buffer(&mut self, name: &str, buffer: BufferHandle) {
+        let _ = (name, buffer);
+    }
+    
+    fn present(&mut self) {
+        // Copy framebuffer to output
+    }
+    
+    fn backbuffer(&self) -> Option<TextureHandle> {
+        None // Software renderer uses framebuffer directly
+    }
+    
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.framebuffer.resize((width * height) as usize, 0);
+        self.depth_buffer.resize((width * height) as usize, 1.0);
+    }
+    
+    fn backend(&self) -> GraphicsBackend {
+        GraphicsBackend::Software
+    }
+    
+    fn max_texture_size(&self) -> u32 {
+        4096
+    }
+    
+    fn max_render_targets(&self) -> u32 {
+        1
+    }
+    
+    fn is_format_supported(&self, format: TextureFormat, _usage: TextureUsage) -> bool {
+        matches!(format, TextureFormat::RGBA8 | TextureFormat::RGB8)
+    }
+}
+
+// ============================================================================
+// GLOBAL GAL INSTANCE
+// ============================================================================
+
+lazy_static::lazy_static! {
+    static ref GAL_INSTANCE: Mutex<Option<Box<dyn Gal>>> = Mutex::new(None);
+}
+
+/// Initialize GAL with software backend
+pub fn init_software(width: u32, height: u32) {
+    *GAL_INSTANCE.lock() = Some(Box::new(SoftwareGal::new(width, height)));
+    crate::serial_println!("[GAL] Software renderer initialized ({}x{})", width, height);
+}
+
+/// Get GAL instance
+pub fn get() -> Option<&'static Mutex<Option<Box<dyn Gal>>>> {
+    Some(&GAL_INSTANCE)
+}
+
+/// Execute a closure with GAL access
+pub fn with_gal<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut Box<dyn Gal>) -> R,
+{
+    let mut guard = GAL_INSTANCE.lock();
+    if let Some(ref mut gal) = *guard {
+        Some(f(gal))
+    } else {
+        None
+    }
+}

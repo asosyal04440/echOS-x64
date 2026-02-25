@@ -1,0 +1,3 @@
+# Auto-generated file. Any changes will be overwritten!
+decl { substitute "D:\\Intel Simics Package Manager\\simics-qsp-cpu-7.14.0\\targets\\qsp-x86\\qsp-server-core.simics" }
+run-script "D:\\Intel Simics Package Manager\\simics-qsp-cpu-7.14.0\\targets\\qsp-x86\\qsp-server-core.simics"

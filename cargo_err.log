@@ -1,0 +1,23 @@
+warning: ech_os@0.1.0: src/c_drivers/virtio.c:109:34: warning: taking address of packed member 'idx' of class or structure 'virtq_used' may result in an unaligned pointer value [-Waddress-of-packed-member]
+warning: ech_os@0.1.0:   109 |     while (*(volatile uint16_t*)&used->idx == used_idx) {
+warning: ech_os@0.1.0:       |                                  ^~~~~~~~~
+warning: ech_os@0.1.0: src/c_drivers/virtio.c:28:24: warning: unused function 'inl' [-Wunused-function]
+warning: ech_os@0.1.0:    28 | static inline uint32_t inl(uint16_t port) {
+warning: ech_os@0.1.0:       |                        ^~~
+warning: ech_os@0.1.0: 2 warnings generated.
+    Checking ech_os v0.1.0 (C:\Users\Bahadir\Desktop\dersler_ve_projeler\echOS)
+error[E0425]: cannot find value `entry_physical` in this scope
+   --> src\cpu\smp.rs:216:58
+    |
+216 |     crate::serial_println!("  entry (physical) = {:#x}", entry_physical);
+    |                                                          ^^^^^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+warning: ech_os@0.1.0: src/c_drivers/virtio.c:109:34: warning: taking address of packed member 'idx' of class or structure 'virtq_used' may result in an unaligned pointer value [-Waddress-of-packed-member]
+warning: ech_os@0.1.0:   109 |     while (*(volatile uint16_t*)&used->idx == used_idx) {
+warning: ech_os@0.1.0:       |                                  ^~~~~~~~~
+warning: ech_os@0.1.0: src/c_drivers/virtio.c:28:24: warning: unused function 'inl' [-Wunused-function]
+warning: ech_os@0.1.0:    28 | static inline uint32_t inl(uint16_t port) {
+warning: ech_os@0.1.0:       |                        ^~~
+warning: ech_os@0.1.0: 2 warnings generated.
+error: could not compile `ech_os` (lib) due to 1 previous error

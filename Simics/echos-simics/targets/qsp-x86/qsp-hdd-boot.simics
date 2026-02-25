@@ -1,0 +1,3 @@
+# Auto-generated file. Any changes will be overwritten!
+decl { substitute "D:\\Intel Simics Package Manager\\simics-qsp-x86-7.48.0\\targets\\qsp-x86\\qsp-hdd-boot.simics" }
+run-script "D:\\Intel Simics Package Manager\\simics-qsp-x86-7.48.0\\targets\\qsp-x86\\qsp-hdd-boot.simics"

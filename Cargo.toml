@@ -7,23 +7,76 @@ edition = "2021"
 
 [dependencies]
 log = "0.4.27"
-spin = "0.10.0"
-uefi = "0.35.0"
+spin = "0.9.4"
+bitflags = "2.4"
+uefi = { version = "0.24", features = ["alloc"] }
+acpi = "4.0"
+aml = "0.16"
 pic8259 = "0.10.1"
 widestring = { version = "1", default-features = false }
-x86_64 = "0.15.2"
+x86_64 = "0.14.10"
+multiboot2 = { git = "https://github.com/rust-osdev/multiboot2", tag = "multiboot2-v0.12.2" }
+limine-protocol-for-rust = "0.2.1"
 lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 pc-keyboard = "0.7.0"
-
-# GUI - Simple embedded graphics (truly no_std)
+hashbrown = { version = "0.14", default-features = false, features = ["alloc"] }
+rand = { version = "0.8", default-features = false, features = ["small_rng"] }
 embedded-graphics = "0.8"
 embedded-graphics-core = "0.4"
-
 ps2-mouse = "0.1"
 rlsf = "0.2.1"
+virtio-drivers = "0.7.0"
+core_io = "0.1.20210325"
+rcore-fs = { git = "https://github.com/rcore-os/rcore-fs", default-features = false }
+sha2 = { version = "0.10", default-features = false, features = ["force-soft", "oid"] }
+rsa = { version = "0.9", default-features = false }
+signature = { version = "2", default-features = false }
+# TLS 1.3 crypto primitives (soft implementations for no_std)
+hkdf = { version = "0.12", default-features = false }
+generic-array = "0.14"
+typenum = "1.17"
+ironshim-rs = { path = "third_party/ironshim-rs", default-features = false, features = ["alloc"] }
+smoltcp = { version = "0.11", default-features = false, features = ["alloc", "proto-ipv4", "proto-dhcpv4", "proto-dns", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-dns", "medium-ethernet"] }
+libm = "0.2"
+bootloader = "0.9"
 
+[lib]
+test = false
+bench = false
 
+[[bin]]
+name = "ech_os"
+test = false
+bench = false
 
+[dev-dependencies]
+libc = "0.2"
+
+[target.'cfg(not(target_os = "none"))'.dev-dependencies]
+rand = "0.8"
+
+[features]
+nightly = []
+
+[[bench]]
+name = "memory_bench"
+harness = false
+required-features = ["nightly"]
+
+[[bench]]
+name = "scheduling_bench"
+harness = false
+required-features = ["nightly"]
+
+[[bench]]
+name = "filesystem_bench"
+harness = false
+required-features = ["nightly"]
+
+[[bench]]
+name = "network_bench"
+harness = false
+required-features = ["nightly"]
 
 [profile.dev]
 panic = "abort"
@@ -36,4 +89,8 @@ opt-level = "s"
 
 [build-dependencies]
 cc = "1.2.30"
+
+[patch.crates-io]
+core_io = { path = "third_party/core_io" }
+virtio-drivers = { path = "third_party/virtio-drivers" }
 

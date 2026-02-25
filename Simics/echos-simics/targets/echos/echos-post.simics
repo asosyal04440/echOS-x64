@@ -1,0 +1,22 @@
+# echOS post-boot script - runs after target setup
+
+# Enable serial console output
+echos.serconsole.con.enable-cmd-line-output
+
+# Reduce noise
+log-type -disable unimpl
+log-type -disable spec-viol
+
+echo "[echOS] Booting from HDD0..."
+echo "[echOS] System: echos"
+
+# Run simulation for 60 seconds
+script-branch "timeout" {
+    bp.time.wait-for 60
+    echo "[echOS] Timeout - stopping"
+    stop
+}
+
+run
+
+echo "[echOS] Simulation ended"

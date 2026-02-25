@@ -1,0 +1,26 @@
+# echOS Boot Script for Simics (GUI)
+# Stable launcher for qsp-hdd-boot + custom disk
+
+$disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
+$machine_name = "board"
+$use_vmp = FALSE
+$create_network = FALSE
+
+run-script "targets/qsp-x86/qsp-hdd-boot.simics"
+
+# reduce non-critical model noise in console
+log-type -disable unimpl
+log-type -disable spec-viol
+
+echo "=========================================="
+echo "echOS GUI Boot Environment Ready"
+echo "Disk image: targets/echos/images/echos-uefi-fixed.vhdx"
+echo "Auto-run enabled"
+echo "=========================================="
+
+script-branch "gui-timeout-note" {
+    bp.time.wait-for 120
+    echo "[echos-boot] 120s reached; simulation still running"
+}
+
+run

@@ -1,0 +1,24 @@
+# Quick check: ensure firmware does not fall back to PXE
+
+disable-vmp
+
+$disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
+$machine_name = "board"
+$create_network = FALSE
+$show_con0 = TRUE
+run-script "targets/qsp-x86/qsp-hdd-boot.simics"
+
+board.serconsole.con.enable-cmd-line-output
+
+log-type -disable unimpl
+log-type -disable spec-viol
+
+echo "[pxe-check] running 25s"
+
+script-branch "timeout-stop" {
+    bp.time.wait-for 25
+    stop
+}
+
+run
+quit

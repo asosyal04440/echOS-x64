@@ -1,0 +1,360 @@
+# echOS Simics Test Suite
+#
+# Automated testing framework for echOS components
+
+# ============================================================================
+# Test Configuration
+# ============================================================================
+
+# Load the system configuration
+run-script "%simics%/targets/echos/echos-system.simics"
+
+# ============================================================================
+# Test Variables
+# ============================================================================
+
+@test_count = 0
+@test_passed = 0
+@test_failed = 0
+@test_results = []
+
+# ============================================================================
+# Test Framework
+# ============================================================================
+
+# Start test run
+command test-start {
+    @test_count = 0
+    @test_passed = 0
+    @test_failed = 0
+    @test_results = []
+    echo "=========================================="
+    echo "echOS Test Suite Started"
+    echo "=========================================="
+}
+
+# End test run
+command test-end {
+    echo "=========================================="
+    echo "Test Results Summary"
+    echo "=========================================="
+    echo "Total tests: " . $test_count
+    echo "Passed: " . $test_passed
+    echo "Failed: " . $test_failed
+    echo "Success rate: " . ($test_passed * 100 / $test_count) . "%"
+    echo "=========================================="
+    
+    if $test_failed > 0 {
+        echo "FAILED TESTS:"
+        foreach $result in $test_results {
+            if $result.status == "failed" {
+                echo "  - " . $result.name . ": " . $result.message
+            }
+        }
+    }
+}
+
+# Run single test
+command test-run {
+    param test_name
+    param test_script
+    
+    @test_count = $test_count + 1
+    echo "Running test: " . $test_name
+    
+    # Run test and capture result
+    @result = try {
+        run-script $test_script
+        "passed"
+    } catch {
+        "failed"
+    }
+    
+    if $result == "passed" {
+        @test_passed = $test_passed + 1
+        echo "  PASSED"
+        @test_results.append({name: $test_name, status: "passed"})
+    } else {
+        @test_failed = $test_failed + 1
+        echo "  FAILED"
+        @test_results.append({name: $test_name, status: "failed", message: "Test threw exception"})
+    }
+}
+
+# ============================================================================
+# Boot Tests
+# ============================================================================
+
+command test-boot-uefi {
+    test-start
+    
+    echo "Test 1: UEFI Initialization"
+    # Reset system
+    $system.reset()
+    
+    # Run until UEFI console
+    run-for 100000000  # 100M cycles
+    
+    # Check if UEFI is running
+    @uefi_running = $uefi.is_running()
+    if $uefi_running {
+        echo "  UEFI initialized successfully"
+    }
+    
+    echo "Test 2: Kernel Load"
+    # Continue to kernel entry
+    $bp = $debugger.set_breakpoint(address = 0x100000, type = "execution")
+    run
+    $debugger.remove_breakpoint($bp)
+    
+    # Check kernel state
+    @rip = $system.cpu0.read_register("rip")
+    if $rip == 0x100000 {
+        echo "  Kernel loaded at correct address"
+    }
+    
+    echo "Test 3: Kernel Initialization"
+    # Continue to scheduler init
+    run-for 50000000
+    
+    test-end
+}
+
+# ============================================================================
+# Memory Tests
+# ============================================================================
+
+command test-memory {
+    test-start
+    
+    echo "Test 1: Physical Memory Detection"
+    @mem_size = $system.memory.get_size()
+    echo "  Detected memory: " . ($mem_size / 1024 / 1024) . " MB"
+    
+    if $mem_size == 4 * 1024 * 1024 * 1024 {
+        echo "  PASSED: Correct memory size"
+        @test_passed = $test_passed + 1
+    } else {
+        echo "  FAILED: Memory size mismatch"
+        @test_failed = $test_failed + 1
+    }
+    @test_count = $test_count + 1
+    
+    echo "Test 2: Page Table Setup"
+    @cr3 = $system.cpu0.read_register("cr3")
+    if $cr3 != 0 {
+        echo "  PASSED: Page tables initialized"
+        @test_passed = $test_passed + 1
+    } else {
+        echo "  FAILED: Page tables not initialized"
+        @test_failed = $test_failed + 1
+    }
+    @test_count = $test_count + 1
+    
+    echo "Test 3: Heap Allocation"
+    # Allocate and free memory
+    run-script "%simics%/targets/echos/tests/heap-test.simics"
+    
+    test-end
+}
+
+# ============================================================================
+# Driver Tests
+# ============================================================================
+
+command test-drivers {
+    test-start
+    
+    echo "Test 1: NVMe Controller"
+    @nvme_ready = $nvme_controller.is_ready()
+    if $nvme_ready {
+        echo "  PASSED: NVMe controller ready"
+        @test_passed = $test_passed + 1
+    } else {
+        echo "  FAILED: NVMe controller not ready"
+        @test_failed = $test_failed + 1
+    }
+    @test_count = $test_count + 1
+    
+    echo "Test 2: USB Controller"
+    @xhci_ready = $xhci.is_ready()
+    if $xhci_ready {
+        echo "  PASSED: xHCI controller ready"
+        @test_passed = $test_passed + 1
+    } else {
+        echo "  FAILED: xHCI controller not ready"
+        @test_failed = $test_failed + 1
+    }
+    @test_count = $test_count + 1
+    
+    echo "Test 3: Network Interface"
+    @e1000_link = $e1000.get_link_status()
+    if $e1000_link {
+        echo "  PASSED: Network link up"
+        @test_passed = $test_passed + 1
+    } else {
+        echo "  FAILED: Network link down"
+        @test_failed = $test_failed + 1
+    }
+    @test_count = $test_count + 1
+    
+    echo "Test 4: Audio Controller"
+    @hda_ready = $hda.is_ready()
+    if $hda_ready {
+        echo "  PASSED: HDA controller ready"
+        @test_passed = $test_passed + 1
+    } else {
+        echo "  FAILED: HDA controller not ready"
+        @test_failed = $test_failed + 1
+    }
+    @test_count = $test_count + 1
+    
+    test-end
+}
+
+# ============================================================================
+# Filesystem Tests
+# ============================================================================
+
+command test-filesystem {
+    test-start
+    
+    echo "Test 1: FAT32 Mount"
+    run-script "%simics%/targets/echos/tests/fat32-mount.simics"
+    
+    echo "Test 2: ext4 Mount"
+    run-script "%simics%/targets/echos/tests/ext4-mount.simics"
+    
+    echo "Test 3: NTFS Mount"
+    run-script "%simics%/targets/echos/tests/ntfs-mount.simics"
+    
+    echo "Test 4: File Read/Write"
+    run-script "%simics%/targets/echos/tests/file-io.simics"
+    
+    test-end
+}
+
+# ============================================================================
+# Network Tests
+# ============================================================================
+
+command test-network {
+    test-start
+    
+    echo "Test 1: DHCP Configuration"
+    run-script "%simics%/targets/echos/tests/dhcp-test.simics"
+    
+    echo "Test 2: TCP Connection"
+    run-script "%simics%/targets/echos/tests/tcp-test.simics"
+    
+    echo "Test 3: DNS Resolution"
+    run-script "%simics%/targets/echos/tests/dns-test.simics"
+    
+    echo "Test 4: HTTP Request"
+    run-script "%simics%/targets/echos/tests/http-test.simics"
+    
+    test-end
+}
+
+# ============================================================================
+# Security Tests
+# ============================================================================
+
+command test-security {
+    test-start
+    
+    echo "Test 1: TPM Initialization"
+    @tpm_ready = $tpm.is_ready()
+    if $tpm_ready {
+        echo "  PASSED: TPM 2.0 ready"
+        @test_passed = $test_passed + 1
+    } else {
+        echo "  FAILED: TPM not ready"
+        @test_failed = $test_failed + 1
+    }
+    @test_count = $test_count + 1
+    
+    echo "Test 2: Secure Boot"
+    run-script "%simics%/targets/echos/tests/secure-boot.simics"
+    
+    echo "Test 3: Memory Protection"
+    run-script "%simics%/targets/echos/tests/memory-protection.simics"
+    
+    echo "Test 4: Cryptographic Functions"
+    run-script "%simics%/targets/echos/tests/crypto-test.simics"
+    
+    test-end
+}
+
+# ============================================================================
+# Stress Tests
+# ============================================================================
+
+command test-stress {
+    test-start
+    
+    echo "Test 1: Memory Pressure"
+    run-script "%simics%/targets/echos/tests/memory-stress.simics"
+    
+    echo "Test 2: CPU Load"
+    run-script "%simics%/targets/echos/tests/cpu-stress.simics"
+    
+    echo "Test 3: I/O Throughput"
+    run-script "%simics%/targets/echos/tests/io-stress.simics"
+    
+    echo "Test 4: Long Run (1 hour)"
+    run-script "%simics%/targets/echos/tests/long-run.simics"
+    
+    test-end
+}
+
+# ============================================================================
+# Full Test Suite
+# ============================================================================
+
+command test-all {
+    echo "=========================================="
+    echo "Running Full echOS Test Suite"
+    echo "=========================================="
+    
+    test-boot-uefi
+    test-memory
+    test-drivers
+    test-filesystem
+    test-network
+    test-security
+    
+    echo "=========================================="
+    echo "Full Test Suite Complete"
+    echo "=========================================="
+}
+
+# ============================================================================
+# Quick Tests
+# ============================================================================
+
+command test-quick {
+    echo "Running quick tests..."
+    test-boot-uefi
+    test-memory
+    test-drivers
+}
+
+# ============================================================================
+# Ready
+# ============================================================================
+
+echo "=========================================="
+echo "echOS Test Suite Ready"
+echo "=========================================="
+echo "Available test commands:"
+echo "  test-all        - Run all tests"
+echo "  test-quick      - Run quick tests"
+echo "  test-boot-uefi  - Boot tests"
+echo "  test-memory     - Memory tests"
+echo "  test-drivers    - Driver tests"
+echo "  test-filesystem - Filesystem tests"
+echo "  test-network    - Network tests"
+echo "  test-security   - Security tests"
+echo "  test-stress     - Stress tests"
+echo "=========================================="

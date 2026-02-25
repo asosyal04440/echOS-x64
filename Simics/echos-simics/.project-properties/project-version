@@ -1,0 +1,13 @@
+Crypto Engine                    1030    7.15.0          (            7125) 2025-11-13
+Docea Base                       7801    7.0.0-pre.5     (intel.docea:4785)
+Platform: RISC-V CPU             2050    7.26.0          (            7128) 2025-11-25
+Platform: RISC-V Simple          2053    7.13.0          (            7125) 2025-11-13
+QSP CPU                          8112    7.14.0          (            7103) 2025-07-28
+Quick Start Platform for ISIM    8144    7.0.0-pre.2     (intel.docea:4787)
+Quick-Start Platform             2096    7.48.0          (            7133) 2025-12-16
+Simics Base                      1000    7.70.0          (            7133) 2025-12-16
+Simics GDB                       1031    7.10.0          (            7125) 2025-11-13
+Simics GUI External              1015    7.0.3           ( simics-gui:3334)
+Simics Python                    1033    7.14.0          (            7125) 2025-11-13
+Simics Training                  6010    7.0.0-pre.12    (            7115) 2025-09-17
+SystemC Library                  1013    7.23.0          (            7133) 2025-12-16

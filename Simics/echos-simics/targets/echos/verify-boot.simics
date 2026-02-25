@@ -1,0 +1,30 @@
+# echOS boot verification script
+
+disable-vmp
+
+$disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
+$machine_name = "board"
+$show_con0 = TRUE
+$create_network = FALSE
+run-script "targets/qsp-x86/qsp-hdd-boot.simics"
+
+# enable serial console output to command line if available
+board.serconsole.con.enable-cmd-line-output
+
+log-type -disable unimpl
+log-type -disable spec-viol
+
+echo "[verify] boot run started, timeout=120s"
+
+script-branch "timeout-stop" {
+    bp.time.wait-for 120
+    echo "[verify] timeout reached"
+    stop
+}
+
+run
+
+echo "[verify] simulation stopped, dumping CPU state"
+board.mb.cpu0.core[0][0].pregs
+
+quit

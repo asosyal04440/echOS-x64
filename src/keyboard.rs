@@ -1,15 +1,24 @@
 //! # echOS Keyboard Buffer
-//! 
+//!
 //! Keyboard input için ring buffer.
 //! Interrupt handler'dan gelen tuşları saklar.
 
-use spin::Mutex;
-use pc_keyboard::DecodedKey;
 use alloc::collections::VecDeque;
+use core::sync::atomic::{AtomicBool, Ordering};
+use pc_keyboard::DecodedKey;
+use spin::Mutex;
 use x86_64::instructions::interrupts;
 
 /// Buffer kapasitesi
 const BUFFER_SIZE: usize = 128;
+
+/// TTY'nin initialize edilip edilmediğini takip eden flag
+static TTY_READY: AtomicBool = AtomicBool::new(false);
+
+/// TTY'nin hazır olduğunu işaretle
+pub fn mark_tty_ready() {
+    TTY_READY.store(true, Ordering::SeqCst);
+}
 
 /// Keyboard tuş buffer'ı
 pub struct KeyboardBuffer {
@@ -49,6 +58,12 @@ lazy_static::lazy_static! {
 
 /// Interrupt handler'dan çağrılır - tuşu buffer'a ekler.
 pub fn push_key(key: DecodedKey) {
+    // TTY Line Discipline'e yolla - sadece TTY hazır olduğunda
+    // Bu, lazy_static initialization sırasında PAGE FAULT'u önler
+    if TTY_READY.load(Ordering::SeqCst) {
+        crate::tty::DEFAULT_TTY.receive_key(key.clone());
+    }
+
     interrupts::without_interrupts(|| {
         KEYBOARD_BUFFER.lock().push(key);
     });
@@ -56,14 +71,10 @@ pub fn push_key(key: DecodedKey) {
 
 /// Buffer'dan tuş okur (non-blocking).
 pub fn read_key() -> Option<DecodedKey> {
-    interrupts::without_interrupts(|| {
-        KEYBOARD_BUFFER.lock().pop()
-    })
+    interrupts::without_interrupts(|| KEYBOARD_BUFFER.lock().pop())
 }
 
 /// Buffer'da tuş var mı kontrol eder.
 pub fn has_key() -> bool {
-    interrupts::without_interrupts(|| {
-        !KEYBOARD_BUFFER.lock().is_empty()
-    })
+    interrupts::without_interrupts(|| !KEYBOARD_BUFFER.lock().is_empty())
 }

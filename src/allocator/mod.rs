@@ -1,15 +1,20 @@
 //! # echOS Heap Allocator
-//! 
+//!
 //! Kernel heap bellek yönetimi.
 //! TLSF (Two-Level Segregated Fit) algoritması kullanır.
 //! O(1) zaman karmaşıklığı ile allocation/deallocation.
 
 pub mod tlsf;
+pub mod stack;
 use tlsf::LockedTlsf;
 
+use crate::memory::paging;
+use core::alloc::Layout;
+use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::{
     structures::paging::{
-        mapper::MapToError, FrameAllocator, Mapper, Size4KiB, Page, PageTableFlags,
+        mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
     },
     VirtAddr,
 };
@@ -22,10 +27,23 @@ pub const HEAP_SIZE: usize = 100 * 1024 * 1024;
 
 /// Global TLSF allocator
 #[global_allocator]
-static ALLOCATOR: LockedTlsf = LockedTlsf::new();
+pub static ALLOCATOR: LockedTlsf = LockedTlsf::new();
+
+/// Check heap integrity (public wrapper)
+pub fn check_heap_integrity() -> usize {
+    LockedTlsf::check_heap_integrity()
+}
+
+/// Get allocation stats (public wrapper)
+pub fn get_alloc_stats() -> tlsf::AllocStats {
+    LockedTlsf::get_stats()
+}
+
+/// Flag to track if heap has been initialized
+static HEAP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Heap bellek alanını başlatır.
-/// 
+///
 /// Sayfa tablosunda gerekli mapping'leri yapar ve
 /// TLSF allocator'a serbest bölgeyi ekler.
 ///
@@ -36,6 +54,11 @@ pub fn init_heap(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> Result<(), MapToError<Size4KiB>> {
+    // Check if already initialized
+    if HEAP_INITIALIZED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    
     // Heap sayfa aralığını hesapla
     let page_range = {
         let heap_start = VirtAddr::new(HEAP_START as u64);
@@ -46,20 +69,67 @@ pub fn init_heap(
     };
 
     // Her sayfa için fiziksel frame map et
-    for page in page_range {
-        let frame = frame_allocator
-            .allocate_frame()
-            .ok_or(MapToError::FrameAllocationFailed)?;
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-        unsafe {
-            mapper.map_to(page, frame, flags, frame_allocator)?.flush();
+    let map_result: Result<(), MapToError<Size4KiB>> = paging::with_wp_disabled(|| {
+        let mut mapped_pages: usize = 0;
+        for page in page_range {
+            if mapped_pages == 0 {
+                crate::serial_println!("[HEAP] mapping start");
+                crate::serial_println!("[HEAP] allocating first frame");
+            }
+            let frame = frame_allocator
+                .allocate_frame()
+                .ok_or(MapToError::FrameAllocationFailed)?;
+            if mapped_pages == 0 {
+                crate::serial_println!("[HEAP] allocated first frame");
+            }
+            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+            let _ = unsafe { mapper.map_to(page, frame, flags, frame_allocator) }?;
+            mapped_pages = mapped_pages.saturating_add(1);
+            if mapped_pages == 1 {
+                crate::serial_println!("[HEAP] mapped first page");
+            }
+            if (mapped_pages & 0xFFF) == 0 {
+                crate::serial_println!("[HEAP] mapped pages: {}", mapped_pages);
+            }
         }
-    }
+        Ok(())
+    });
+    map_result?;
 
     // TLSF allocator'a serbest bölgeyi ekle
     unsafe {
         ALLOCATOR.insert_free_region_ptr(HEAP_START as *mut u8, HEAP_SIZE);
     }
+    
+    // Mark as initialized
+    HEAP_INITIALIZED.store(true, Ordering::Release);
 
     Ok(())
+}
+
+pub unsafe fn heap_alloc(size: usize) -> *mut u8 {
+    if size == 0 {
+        return ptr::null_mut();
+    }
+    let header = core::mem::size_of::<usize>();
+    let total = size.saturating_add(header);
+    let layout = Layout::from_size_align(total, core::mem::align_of::<usize>()).unwrap();
+    let raw = alloc::alloc::alloc(layout);
+    if raw.is_null() {
+        return ptr::null_mut();
+    }
+    (raw as *mut usize).write(size);
+    raw.add(header)
+}
+
+pub unsafe fn heap_free(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    let header = core::mem::size_of::<usize>();
+    let raw = ptr.sub(header);
+    let size = (raw as *mut usize).read();
+    let total = size.saturating_add(header);
+    let layout = Layout::from_size_align(total, core::mem::align_of::<usize>()).unwrap();
+    alloc::alloc::dealloc(raw, layout);
 }

@@ -1,11 +1,11 @@
 //! # echOS Fiziksel Bellek Yöneticisi (PMM)
-//! 
+//!
 //! Bitmap tabanlı fiziksel frame allocator.
 //! UEFI Memory Map'i kullanarak boş ve dolu bellek bölgelerini takip eder.
 
-use x86_64::{PhysAddr, VirtAddr};
-use x86_64::structures::paging::{PhysFrame, Size4KiB, FrameAllocator};
-use uefi::boot::{MemoryDescriptor, MemoryType};
+use uefi::table::boot::{MemoryDescriptor, MemoryType};
+use x86_64::structures::paging::{FrameAllocator, PhysFrame, Size4KiB};
+use x86_64::PhysAddr;
 
 /// Bitmap Physical Memory Manager.
 /// Her 4KiB frame için 1 bit kullanır (0=Boş, 1=Dolu).
@@ -38,11 +38,12 @@ impl BitmapPmm {
     }
 
     /// UEFI Memory Map kullanarak PMM'i başlatır.
-    /// 
+    ///
     /// # Güvenlik
     /// Memory map geçerli olmalıdır.
-    pub unsafe fn init<'a, I>(&mut self, map_iter: I) 
-    where I: Iterator<Item = &'a MemoryDescriptor> + Clone 
+    pub unsafe fn init<'a, I>(&mut self, map_iter: I)
+    where
+        I: Iterator<Item = &'a MemoryDescriptor> + Clone,
     {
         // 1. Toplam bellek boyutunu hesapla
         let mut max_phys_addr = 0;
@@ -60,11 +61,13 @@ impl BitmapPmm {
 
         // 2. Bitmap için uygun boş bir alan bul (CONVENTIONAL Memory)
         let mut bitmap_phys_start: Option<u64> = None;
-        
+
         for desc in map_iter.clone() {
             if desc.ty == MemoryType::CONVENTIONAL {
-                if desc.phys_start == 0 { continue; } // Null pointer koruması
-                
+                if desc.phys_start == 0 {
+                    continue;
+                } // Null pointer koruması
+
                 let region_size = desc.page_count * 4096;
                 if region_size >= bitmap_size_bytes as u64 {
                     bitmap_phys_start = Some(desc.phys_start);
@@ -86,9 +89,9 @@ impl BitmapPmm {
             if desc.ty == MemoryType::CONVENTIONAL {
                 let start_frame = (desc.phys_start / 4096) as usize;
                 let end_frame = start_frame + desc.page_count as usize;
-                
+
                 for frame_idx in start_frame..end_frame {
-                     self.free_frame_internal(frame_idx);
+                    self.free_frame_internal(frame_idx);
                 }
             }
         }
@@ -103,12 +106,16 @@ impl BitmapPmm {
 
     /// Dahili: Frame'i boşaltır (Bit = 0).
     fn free_frame_internal(&mut self, frame_idx: usize) {
-        if frame_idx == 0 { return; } // Frame 0'ı asla boşaltma (Null koruması)
-        if frame_idx >= self.total_frames { return; }
-        
+        if frame_idx == 0 {
+            return;
+        } // Frame 0'ı asla boşaltma (Null koruması)
+        if frame_idx >= self.total_frames {
+            return;
+        }
+
         let u64_idx = frame_idx / 64;
         let bit_idx = frame_idx % 64;
-        
+
         unsafe {
             let chunk = self.bitmap_ptr.add(u64_idx);
             let mask = !(1u64 << bit_idx);
@@ -122,19 +129,69 @@ impl BitmapPmm {
 
     /// Dahili: Frame'i dolu işaretle (Bit = 1).
     fn mark_frame_used(&mut self, frame_idx: usize) {
-        if frame_idx >= self.total_frames { return; }
-        
+        if frame_idx >= self.total_frames {
+            return;
+        }
+
         let u64_idx = frame_idx / 64;
         let bit_idx = frame_idx % 64;
-        
+
         unsafe {
             let chunk = self.bitmap_ptr.add(u64_idx);
             let mask = 1u64 << bit_idx;
-            // Eğer boşsa doldur
-             if (*chunk & mask) == 0 {
+            if (*chunk & mask) == 0 {
                 *chunk |= mask;
                 self.used_frames += 1;
             }
+        }
+    }
+
+    fn is_frame_free(&self, frame_idx: usize) -> bool {
+        if frame_idx == 0 || frame_idx >= self.total_frames {
+            return false;
+        }
+        let u64_idx = frame_idx / 64;
+        let bit_idx = frame_idx % 64;
+        unsafe {
+            let chunk = *self.bitmap_ptr.add(u64_idx);
+            (chunk & (1u64 << bit_idx)) == 0
+        }
+    }
+
+    pub fn allocate_contiguous(&mut self, pages: usize) -> Option<PhysFrame> {
+        if pages == 0 {
+            return None;
+        }
+        let mut idx = 1usize;
+        while idx + pages <= self.total_frames {
+            let mut ok = true;
+            let mut offset = 0usize;
+            while offset < pages {
+                if !self.is_frame_free(idx + offset) {
+                    idx = idx + offset + 1;
+                    ok = false;
+                    break;
+                }
+                offset += 1;
+            }
+            if ok {
+                for i in 0..pages {
+                    self.mark_frame_used(idx + i);
+                }
+                let addr = PhysAddr::new((idx as u64) * 4096);
+                return Some(PhysFrame::containing_address(addr));
+            }
+        }
+        None
+    }
+
+    pub fn deallocate_contiguous(&mut self, start: PhysFrame, pages: usize) {
+        if pages == 0 {
+            return;
+        }
+        let start_idx = (start.start_address().as_u64() / 4096) as usize;
+        for i in 0..pages {
+            self.free_frame_internal(start_idx + i);
         }
     }
 }
@@ -143,13 +200,14 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapPmm {
     /// Boş bir frame ayırır.
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         let start_idx = self.last_idx;
-        
+
         // Arama yardımcı closure'ı
         let search = |start: usize, end: usize| -> Option<usize> {
             for i in start..end {
-                 unsafe {
+                unsafe {
                     let chunk = *self.bitmap_ptr.add(i);
-                    if chunk != !0u64 { // Hepsi 1 değilse boş yer var
+                    if chunk != !0u64 {
+                        // Hepsi 1 değilse boş yer var
                         let mut bit_idx = 0;
                         while bit_idx < 64 {
                             if (chunk & (1 << bit_idx)) == 0 {
@@ -161,23 +219,23 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapPmm {
                             bit_idx += 1;
                         }
                     }
-                 }
+                }
             }
             None
         };
 
         // last_idx'ten sonuna kadar ara
         let mut frame_result = search(start_idx, self.bitmap_len);
-        
+
         // Bulunamazsa başa dön
         if frame_result.is_none() && start_idx > 0 {
-             frame_result = search(0, start_idx);
+            frame_result = search(0, start_idx);
         }
 
         if let Some(frame_idx) = frame_result {
             self.mark_frame_used(frame_idx);
             self.last_idx = frame_idx / 64;
-            
+
             let addr = PhysAddr::new(frame_idx as u64 * 4096);
             return Some(PhysFrame::containing_address(addr));
         }

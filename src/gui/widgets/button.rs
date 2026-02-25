@@ -1,10 +1,10 @@
 //! # echOS Button Widget
-//! 
+//!
 //! Tıklanabilir buton bileşeni.
 
+use super::{Rect, Widget};
 use crate::gop::framebuffer::Framebuffer;
-use super::{Widget, Rect};
-use crate::gui::theme::{Theme, Color};
+use crate::gui::theme::Theme;
 
 pub struct Button<'a> {
     rect: Rect,
@@ -34,7 +34,7 @@ impl<'a> Widget for Button<'a> {
         let y = self.rect.y as usize;
         let w = self.rect.width as usize;
         let h = self.rect.height as usize;
-        
+
         // Duruma göre renk seçimi
         let color = if self.pressed {
             Theme::BUTTON_HOVER.to_u32()
@@ -43,33 +43,37 @@ impl<'a> Widget for Button<'a> {
         } else {
             self.bg_color
         };
-        
+
         // Arkaplan
         for row in y..(y + h) {
             for col in x..(x + w) {
                 fb.plot_pixel(col, row, color);
             }
         }
-        
+
         // Kenarlık
         let border_color = Theme::BORDER.to_u32();
         for col in x..(x + w) {
-            fb.plot_pixel(col, y, border_color);          // Üst
-            fb.plot_pixel(col, y + h - 1, border_color);  // Alt
+            fb.plot_pixel(col, y, border_color); // Üst
+            fb.plot_pixel(col, y + h - 1, border_color); // Alt
         }
         for row in y..(y + h) {
-            fb.plot_pixel(x, row, border_color);          // Sol
-            fb.plot_pixel(x + w - 1, row, border_color);  // Sağ
+            fb.plot_pixel(x, row, border_color); // Sol
+            fb.plot_pixel(x + w - 1, row, border_color); // Sağ
         }
-        
+
         // Metin (Ortalanmış)
         let text_width = self.text.len() * 8;
-        let text_x = if text_width < w { x + (w - text_width) / 2 } else { x + 5 };
+        let text_x = if text_width < w {
+            x + (w - text_width) / 2
+        } else {
+            x + 5
+        };
         let text_y = y + (h - 16) / 2;
-        
+
         fb.draw_string(text_x, text_y, self.text, self.text_color);
     }
-    
+
     fn on_click(&mut self, x: i32, y: i32) -> bool {
         if self.rect.contains(x, y) {
             self.pressed = !self.pressed; // Toggle efekti
@@ -78,7 +82,7 @@ impl<'a> Widget for Button<'a> {
             false
         }
     }
-    
+
     fn bounds(&self) -> Rect {
         self.rect
     }

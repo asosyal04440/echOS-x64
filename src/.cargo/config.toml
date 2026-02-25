@@ -1,11 +1,7 @@
 
 
 [build]
-target = "x86_64-unknown-uefi"
+target = "x86_64-unknown-none"
 
-[target.x86_64-unknown-uefi]
-rustflags = ["-C", "link-arg=-Tlink.x", "-C", "linker=lld"]
-
-[unstable]
-build-std = ["core", "compiler_builtins", "alloc"]
-build-std-features = ["compiler-builtins-mem"]
+[target.x86_64-unknown-none]
+rustflags = ["-C", "link-arg=-Tlinker.ld", "-C", "linker=lld", "-C", "relocation-model=static", "-C", "link-arg=-nostdlib", "-C", "link-arg=-static", "-C", "link-arg=-no-pie"]

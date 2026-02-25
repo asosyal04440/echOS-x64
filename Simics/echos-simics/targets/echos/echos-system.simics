@@ -1,0 +1,395 @@
+# echOS Simics Target Configuration
+#
+# This target simulates a UEFI-based x86_64 system for echOS testing
+
+# ============================================================================
+# System Configuration
+# ============================================================================
+
+# Create the system
+$system = new-x86-64-system(
+    name = "echos",
+    cpu_class = "x86-64",
+    num_cpus = 4,
+    memory_megs = 4096,  # 4GB RAM
+    frequency = 3000     # 3GHz
+)
+
+# ============================================================================
+# CPU Configuration
+# ============================================================================
+
+# Configure each CPU with advanced features
+foreach $cpu in $system.cpu_list {
+    $cpu.enable_vmx = TRUE      # Enable VMX for virtualization testing
+    $cpu.enable_svm = FALSE     # AMD SVM not needed on Intel
+    $cpu.enable_fpu = TRUE
+    $cpu.enable_sse = TRUE
+    $cpu.enable_avx = TRUE
+    $cpu.enable_avx2 = TRUE
+    $cpu.enable_aes_ni = TRUE   # For crypto testing
+    $cpu.enable_sha_ni = TRUE
+    $cpu.enable_rdrand = TRUE
+    $cpu.enable_rdseed = TRUE
+}
+
+# ============================================================================
+# Memory Configuration
+# ============================================================================
+
+# Main RAM
+$system.memory = new-memory(
+    size = 4 * 1024 * 1024 * 1024,  # 4GB
+    latency = 70,  # 70ns latency
+    bandwidth = 25000000000  # 25GB/s
+)
+
+# NVRAM for persistent storage
+$nvram = new-nvram(
+    size = 128 * 1024,  # 128KB
+    image = "echos-nvram.img"
+)
+
+# ============================================================================
+# PCI Bus Configuration
+# ============================================================================
+
+$pci_bus = $system.pci_bus
+
+# PCI Express Root Complex
+$pcie_root = new-pcie-root-complex(
+    name = "pcie_root",
+    bus = $pci_bus
+)
+
+# ============================================================================
+# Storage Devices
+# ============================================================================
+
+# NVMe Controller
+$nvme_controller = new-nvme-controller(
+    name = "nvme0",
+    pci_bus = $pci_bus,
+    irq = 16,
+    num_queues = 32,
+    queue_depth = 256
+)
+
+# NVMe namespace (main disk)
+$nvme_ns = new-nvme-namespace(
+    name = "nvme0n1",
+    controller = $nvme_controller,
+    size = 64 * 1024 * 1024 * 1024,  # 64GB
+    block_size = 512,
+    image = "%simics%/targets/echos/images/echos-disk.img"
+)
+
+# SATA/AHCI Controller (for compatibility)
+$ahci_controller = new-ahci-controller(
+    name = "ahci0",
+    pci_bus = $pci_bus,
+    irq = 19
+)
+
+# SATA disk
+$sata_disk = new-disk(
+    name = "sata0",
+    controller = $ahci_controller,
+    port = 0,
+    size = 128 * 1024 * 1024 * 1024,  # 128GB
+    image = "%simics%/targets/echos/images/echos-sata.img"
+)
+
+# ============================================================================
+# Network Devices
+# ============================================================================
+
+# Intel E1000 (easily supported)
+$e1000 = new-e1000(
+    name = "eth0",
+    pci_bus = $pci_bus,
+    irq = 20,
+    mac_address = "52:54:00:12:34:56"
+)
+
+# Intel I210 (more advanced)
+$i210 = new-i210(
+    name = "eth1",
+    pci_bus = $pci_bus,
+    irq = 21,
+    mac_address = "52:54:00:12:34:57"
+)
+
+# Network backend (connect to external network)
+$network = new-network-bridge(
+    name = "net_bridge",
+    backend = "tap",
+    tap_device = "echos-tap0"
+)
+$e1000.connect($network)
+
+# ============================================================================
+# USB Configuration
+# ============================================================================
+
+# xHCI USB 3.0 Controller
+$xhci = new-xhci-controller(
+    name = "xhci0",
+    pci_bus = $pci_bus,
+    irq = 22,
+    num_ports = 8
+)
+
+# USB keyboard
+$usb_keyboard = new-usb-keyboard(
+    name = "keyboard",
+    controller = $xhci,
+    port = 0
+)
+
+# USB mouse
+$usb_mouse = new-usb-mouse(
+    name = "mouse",
+    controller = $xhci,
+    port = 1
+)
+
+# USB mass storage
+$usb_storage = new-usb-msd(
+    name = "usb_storage",
+    controller = $xhci,
+    port = 2,
+    image = "%simics%/targets/echos/images/usb-storage.img"
+)
+
+# ============================================================================
+# Graphics Configuration
+# ============================================================================
+
+# VGA compatible controller
+$vga = new-vga-controller(
+    name = "vga0",
+    pci_bus = $pci_bus,
+    vram_size = 256 * 1024 * 1024,  # 256MB VRAM
+    width = 1920,
+    height = 1080,
+    depth = 32
+)
+
+# ============================================================================
+# Audio Configuration
+# ============================================================================
+
+# Intel HDA Controller
+$hda = new-intel-hda(
+    name = "hda0",
+    pci_bus = $pci_bus,
+    irq = 23
+)
+
+# HDA Codec
+$hda_codec = new-hda-codec(
+    name = "codec0",
+    controller = $hda,
+    vendor_id = 0x8086,
+    device_id = 0x1c20
+)
+
+# ============================================================================
+# Serial Ports
+# ============================================================================
+
+# Serial console for kernel output
+$serial0 = new-serial-port(
+    name = "serial0",
+    port = 0x3F8,
+    irq = 4,
+    backend = "stdio"  # Output to console
+)
+
+# Second serial for debugger
+$serial1 = new-serial-port(
+    name = "serial1",
+    port = 0x2F8,
+    irq = 3,
+    backend = "file",
+    file = "%simics%/targets/echos/logs/debug.log"
+)
+
+# ============================================================================
+# UEFI Configuration
+# ============================================================================
+
+# UEFI Firmware
+$uefi = new-uefi-firmware(
+    name = "uefi",
+    system = $system,
+    firmware_image = "%simics%/targets/echos/firmware/OVMF.fd",
+    boot_mode = "normal",  # or "secure_boot"
+    boot_order = ["nvme", "sata", "usb", "network"]
+)
+
+# UEFI variables
+$uefi_vars = new-uefi-variables(
+    name = "uefi_vars",
+    store = "%simics%/targets/echos/data/uefi-vars.img"
+)
+
+# Boot entry for echOS
+$uefi.add_boot_entry(
+    name = "echOS",
+    loader = "\\EFI\\echOS\\bootx64.efi",
+    options = "console=serial debug=full"
+)
+
+# ============================================================================
+# ACPI Configuration
+# ============================================================================
+
+$acpi = new-acpi-tables(
+    name = "acpi",
+    system = $system
+)
+
+# Add ACPI tables
+$acpi.add_table("RSDP")   # Root System Description Pointer
+$acpi.add_table("XSDT")   # Extended System Description Table
+$acpi.add_table("FADT")   # Fixed ACPI Description Table
+$acpi.add_table("DSDT")   # Differentiated System Description Table
+$acpi.add_table("SSDT")   # Secondary System Description Table
+$acpi.add_table("MCFG")   # PCI Express Memory Mapped Configuration
+$acpi.add_table("DMAR")   # DMA Remapping
+$acpi.add_table("HPET")   # High Precision Event Timer
+$acpi.add_table("SRAT")   # System Resource Affinity Table
+$acpi.add_table("SLIT")   # System Locality Information Table
+$acpi.add_table("APIC")   # Multiple APIC Description Table
+
+# ============================================================================
+# Power Management
+# ============================================================================
+
+$power = new-power-management(
+    name = "power",
+    system = $system,
+    supported_states = ["S0", "S3", "S4", "S5"]
+)
+
+# Battery simulation (for laptop testing)
+$battery = new-battery(
+    name = "battery0",
+    capacity = 50000,  # 50Wh
+    charge_rate = 65,  # 65W charging
+    discharge_rate = 15  # 15W discharge
+)
+
+# Thermal zones
+$thermal = new-thermal-manager(
+    name = "thermal",
+    system = $system
+)
+$thermal.add_zone("CPU", passive_temp = 80, critical_temp = 95)
+$thermal.add_zone("GPU", passive_temp = 85, critical_temp = 100)
+
+# ============================================================================
+# TPM 2.0 (Security)
+# ============================================================================
+
+$tpm = new-tpm20(
+    name = "tpm0",
+    pci_bus = $pci_bus,
+    locality = 0,
+    state_file = "%simics%/targets/echos/data/tpm-state.bin"
+)
+
+# ============================================================================
+# Debugging Support
+# ============================================================================
+
+# JTAG interface for hardware debugging
+$jtag = new-jtag-debug(
+    name = "jtag",
+    system = $system,
+    port = 5555  # GDB remote protocol port
+)
+
+# Breakpoint support
+$debugger = new-system-debugger(
+    name = "debugger",
+    system = $system,
+    enable_reverse_exec = TRUE,  # Time travel debugging
+    enable_memory_tracking = TRUE,
+    enable_io_tracking = TRUE
+)
+
+# ============================================================================
+# Virtualization Support
+# ============================================================================
+
+# Enable nested virtualization testing
+$virt_support = new-virtualization-support(
+    name = "virt",
+    system = $system,
+    enable_ept = TRUE,
+    enable_vpid = TRUE,
+    enable_unrestricted_guest = TRUE
+)
+
+# ============================================================================
+# Console and Logging
+# ============================================================================
+
+# System console
+$console = new-system-console(
+    name = "console",
+    vga = $vga,
+    serial = $serial0,
+    log_file = "%simics%/targets/echos/logs/console.log"
+)
+
+# Event logger
+$logger = new-event-logger(
+    name = "logger",
+    log_file = "%simics%/targets/echos/logs/events.log",
+    log_level = "debug",
+    log_components = ["cpu", "memory", "pci", "disk", "network", "usb"]
+)
+
+# ============================================================================
+# Simulation Control
+# ============================================================================
+
+# Time synchronization
+$time_sync = new-time-sync(
+    name = "time_sync",
+    mode = "realtime",  # or "fast" for faster simulation
+    speed = 1.0
+)
+
+# Checkpoint support
+$checkpoint = new-checkpoint-manager(
+    name = "checkpoint",
+    directory = "%simics%/targets/echos/checkpoints",
+    auto_interval = 60  # Auto checkpoint every 60 seconds
+)
+
+# ============================================================================
+# Finalize Configuration
+# ============================================================================
+
+# Print configuration summary
+echo "=========================================="
+echo "echOS Simics Target Configuration"
+echo "=========================================="
+echo "CPUs: 4 cores @ 3GHz"
+echo "Memory: 4GB RAM"
+echo "Storage: NVMe 64GB + SATA 128GB"
+echo "Network: E1000 + I210"
+echo "USB: xHCI with keyboard, mouse, storage"
+echo "Graphics: VGA 1920x1080"
+echo "Audio: Intel HDA"
+echo "Security: TPM 2.0"
+echo "Debug: JTAG on port 5555"
+echo "=========================================="
+
+# Ready to boot
+echo "System configured. Use 'run' to start simulation."

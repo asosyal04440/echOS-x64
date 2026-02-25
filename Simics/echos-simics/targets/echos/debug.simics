@@ -1,0 +1,261 @@
+# echOS Simics Debug Script
+#
+# Advanced debugging with time-travel and reverse execution
+
+# ============================================================================
+# Debug Configuration
+# ============================================================================
+
+# Load the system configuration
+run-script "%simics%/targets/echos/echos-system.simics"
+
+# ============================================================================
+# Breakpoints
+# ============================================================================
+
+# Kernel entry point
+$bp_kernel_entry = $debugger.set_breakpoint(
+    address = 0x100000,  # Kernel load address
+    type = "execution"
+)
+
+# Page fault handler
+$bp_page_fault = $debugger.set_breakpoint(
+    address = 0xFFFFFFFF80000000 + 14 * 256,  # IDT vector 14
+    type = "execution"
+)
+
+# General protection fault handler
+$bp_gpf = $debugger.set_breakpoint(
+    address = 0xFFFFFFFF80000000 + 13 * 256,  # IDT vector 13
+    type = "execution"
+)
+
+# ============================================================================
+# Watchpoints
+# ============================================================================
+
+# Watch kernel heap for corruption
+$wp_kernel_heap = $debugger.set_watchpoint(
+    address = 0xFFFFFFFF80000000 + 0x1000000,  # Kernel heap start
+    size = 4096,
+    read = TRUE,
+    write = TRUE
+)
+
+# Watch IDT for modifications
+$wp_idt = $debugger.set_watchpoint(
+    address = 0xFFFFFFFF80000000,  # IDT address
+    size = 4096,
+    read = FALSE,
+    write = TRUE
+)
+
+# ============================================================================
+# Memory Regions
+# ============================================================================
+
+# Define memory regions for tracking
+$debugger.define_memory_region(
+    name = "kernel_code",
+    start = 0xFFFFFFFF80000000,
+    size = 16 * 1024 * 1024,
+    type = "read-execute"
+)
+
+$debugger.define_memory_region(
+    name = "kernel_data",
+    start = 0xFFFFFFFF80100000,
+    size = 64 * 1024 * 1024,
+    type = "read-write"
+)
+
+$debugger.define_memory_region(
+    name = "user_space",
+    start = 0x0000000000400000,
+    size = 0x00007FFFFF800000,
+    type = "user"
+)
+
+# ============================================================================
+# Symbol Loading
+# ============================================================================
+
+# Load kernel symbols
+$debugger.load_symbols(
+    file = "%simics%/targets/echos/symbols/kernel.sym",
+    base = 0xFFFFFFFF80000000
+)
+
+# Load module symbols
+$debugger.load_symbols(
+    file = "%simics%/targets/echos/symbols/drivers.sym",
+    base = 0xFFFFFFFF80200000
+)
+
+# ============================================================================
+# Event Handlers
+# ============================================================================
+
+# Breakpoint hit handler
+$debugger.on_breakpoint_hit = {
+    echo "=========================================="
+    echo "Breakpoint hit!"
+    echo "ID: " . $breakpoint.id
+    echo "Address: 0x" . format_hex($breakpoint.address)
+    echo "Hit count: " . $breakpoint.hit_count
+    echo "=========================================="
+    
+    # Print registers
+    $debugger.print_registers()
+    
+    # Print call stack
+    $debugger.print_call_stack()
+    
+    # Pause simulation
+    stop
+}
+
+# Watchpoint hit handler
+$debugger.on_watchpoint_hit = {
+    echo "=========================================="
+    echo "Watchpoint hit!"
+    echo "ID: " . $watchpoint.id
+    echo "Address: 0x" . format_hex($watchpoint.address)
+    echo "Access type: " . $watchpoint.access_type
+    echo "Data: 0x" . format_hex($watchpoint.data)
+    echo "=========================================="
+    
+    # Print memory around access
+    $debugger.print_memory($watchpoint.address - 32, 64)
+    
+    stop
+}
+
+# Exception handler
+$debugger.on_exception = {
+    echo "=========================================="
+    echo "Exception!"
+    echo "Vector: " . $exception.vector
+    echo "Error code: 0x" . format_hex($exception.error_code)
+    echo "Message: " . $exception.message
+    echo "=========================================="
+    
+    # Print full state
+    $debugger.print_registers()
+    $debugger.print_call_stack()
+    $debugger.print_memory($system.cpu0.cr2 - 256, 512)  # For page faults
+    
+    stop
+}
+
+# ============================================================================
+# Reverse Execution
+# ============================================================================
+
+# Enable reverse execution (time travel)
+$debugger.enable_reverse_execution(
+    max_history = 1000000,  # 1M instructions
+    checkpoint_interval = 10000  # Checkpoint every 10K instructions
+)
+
+# ============================================================================
+# Debug Commands
+# ============================================================================
+
+# Define custom debug commands
+
+# Step and show
+command step-show {
+    stepi
+    $debugger.print_registers()
+}
+
+# Reverse step
+command reverse-step {
+    reverse-stepi
+    $debugger.print_registers()
+}
+
+# Go to time
+command goto-time {
+    param time
+    $debugger.goto_time($time)
+    $debugger.print_registers()
+}
+
+# Find in memory
+command find-memory {
+    param pattern
+    param start_addr
+    param size
+    $results = $debugger.memory_search($pattern, $start_addr, $size)
+    foreach $result in $results {
+        echo "Found at: 0x" . format_hex($result)
+    }
+}
+
+# Trace function
+command trace-function {
+    param func_name
+    $symbol = $debugger.lookup_symbol($func_name)
+    if $symbol != NULL {
+        $debugger.trace_function($symbol.address)
+        echo "Tracing function: " . $func_name . " at 0x" . format_hex($symbol.address)
+    } else {
+        echo "Function not found: " . $func_name
+    }
+}
+
+# ============================================================================
+# Logging
+# ============================================================================
+
+# Enable detailed logging
+$debugger.enable_instruction_trace(
+    file = "%simics%/targets/echos/logs/instructions.log",
+    format = "full"  # Includes registers, memory accesses
+)
+
+$debugger.enable_memory_trace(
+    file = "%simics%/targets/echos/logs/memory-access.log",
+    filter = "write"  # Only log writes
+)
+
+$debugger.enable_io_trace(
+    file = "%simics%/targets/echos/logs/io-access.log"
+)
+
+# ============================================================================
+# GDB Integration
+# ============================================================================
+
+# Start GDB server
+$gdb_server = new-gdb-server(
+    name = "gdb",
+    port = 1234,
+    system = $system
+)
+
+echo "GDB server started on port 1234"
+echo "Connect with: gdb -ex 'target remote localhost:1234'"
+
+# ============================================================================
+# Ready
+# ============================================================================
+
+echo "=========================================="
+echo "echOS Debug Environment Ready"
+echo "=========================================="
+echo "Breakpoints: kernel_entry, page_fault, gpf"
+echo "Watchpoints: kernel_heap, idt"
+echo "Reverse execution: enabled"
+echo "GDB server: port 1234"
+echo ""
+echo "Commands:"
+echo "  step-show     - Step and show registers"
+echo "  reverse-step  - Step backwards"
+echo "  goto-time N   - Jump to time N"
+echo "  find-memory PATTERN START SIZE"
+echo "  trace-function NAME"
+echo "=========================================="

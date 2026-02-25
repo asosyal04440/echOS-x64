@@ -1,0 +1,18 @@
+# echOS Simics Boot Test - Final Configuration
+# 
+# Run this script in Simics to boot echOS
+
+# Use QSP Modern Core with echOS disk
+run-script "D:\Intel Simics Package Manager\simics-qsp-x86-7.48.0\targets\qsp-x86\qsp-modern-core.simics" disk0_image = "c:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/Simics/echos-simics/targets/echos/images/echos-disk.img"
+
+# Setup serial console
+$system.serconsole.con.setup backend = stdio
+
+echo "=========================================="
+echo "echOS Boot Test"
+echo "=========================================="
+echo "Starting simulation..."
+echo ""
+
+# Run simulation
+run

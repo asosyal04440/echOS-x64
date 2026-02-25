@@ -1,0 +1,85 @@
+# echOS Quick Boot Test
+#
+# Minimal test to verify echOS boots correctly
+
+# Load system configuration
+run-script "%simics%/targets/echos/echos-system.simics"
+
+# Boot parameters
+echo "=========================================="
+echo "echOS Boot Test"
+echo "=========================================="
+echo "Loading echOS from: images/bootx64.efi"
+echo ""
+
+# Set up serial output to console
+$serial0.set_backend("stdio")
+
+# Create minimal disk image for testing
+$test_disk = create-temp-disk(
+    size = 1 * 1024 * 1024 * 1024,  # 1GB
+    type = "gpt"
+)
+
+# Create ESP partition
+$test_disk.create_partition(
+    name = "ESP",
+    type = "efi",
+    size = 100 * 1024 * 1024,  # 100MB
+    filesystem = "fat32"
+)
+
+# Mount and copy bootloader
+$esp = $test_disk.mount_partition(0)
+$esp.copy_file("%simics%/targets/echos/images/bootx64.efi", "\\EFI\\Boot\\BOOTX64.EFI")
+$esp.unmount()
+
+# Attach disk to NVMe
+$nvme_controller.attach_namespace($test_disk, 1)
+
+# Set boot timeout
+$uefi.set_timeout(5)
+
+# Start simulation
+echo "Starting simulation..."
+echo "=========================================="
+
+# Run for 500M cycles (enough for boot)
+run-for 500000000
+
+# Check result
+echo ""
+echo "=========================================="
+echo "Boot Test Results"
+echo "=========================================="
+
+# Check if CPU is still running
+$cpu_state = $system.cpu0.get_state()
+if $cpu_state == "running" {
+    echo "CPU Status: RUNNING"
+    
+    # Get instruction pointer
+    $rip = $system.cpu0.read_register("rip")
+    echo "RIP: 0x" . format_hex($rip)
+    
+    # Get last serial output
+    echo ""
+    echo "Last Serial Output:"
+    $serial0.print_buffer(500)
+} else {
+    echo "CPU Status: " . $cpu_state
+}
+
+# Memory check
+$cr3 = $system.cpu0.read_register("cr3")
+if $cr3 != 0 {
+    echo ""
+    echo "Paging: ENABLED (CR3=0x" . format_hex($cr3) . ")"
+} else {
+    echo ""
+    echo "Paging: DISABLED"
+}
+
+echo ""
+echo "Test Complete!"
+echo "=========================================="

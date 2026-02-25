@@ -1,0 +1,177 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+[UEFI] EFI Entry Point Reached!
+[UEFI] Getting framebuffer...
+[UEFI] Finding ACPI table...
+[UEFI] Detecting secure boot...
+[UEFI] Inspecting loaded image...
+[TPM] TCG2 protocol not found
+[TPM] TCG2 protocol not found
+[KASLR] Offset: 0x0
+[BOOT] Magic: 0x55454649
+[UEFI] RSDP: 0x7fb7e014
+[UEFI] FB base=0x80000000 1280x800 stride=1280
+[UEFI] Image size: 4743168 bytes
+[UEFI] Image sha256: b61fedf74d8b607c91d0c4c61d4c4ff1f090950f0957d5233919606fb698c340
+[UEFI] Memory map total: 14335 MB
+[UEFI] init_paging
+[UEFI] init_uefi memory manager
+[0 src\memory\fibonacci_pmm.rs:157 ech_os::memory::fibonacci_pmm] [PMM] Zone init: DMA=1959 frames (0-16MB), DMA32=508786 frames (16MB-4GB), NORMAL=0 frames (4GB+)
+[UEFI] init_uefi_hhdm
+[UEFI] set_virtual_address_map
+[UEFI] Runtime services remapped
+[UEFI] Runtime services verified
+[1 src\allocator\mod.rs:66 ech_os::allocator] [HEAP] mapping start
+[2 src\allocator\mod.rs:67 ech_os::allocator] [HEAP] allocating first frame
+[3 src\allocator\mod.rs:73 ech_os::allocator] [HEAP] allocated first frame
+[4 src\allocator\mod.rs:79 ech_os::allocator] [HEAP] mapped first page
+[5 src\allocator\mod.rs:82 ech_os::allocator] [HEAP] mapped pages: 4096
+[6 src\allocator\mod.rs:82 ech_os::allocator] [HEAP] mapped pages: 8192
+[7 src\allocator\mod.rs:82 ech_os::allocator] [HEAP] mapped pages: 12288
+[8 src\allocator\mod.rs:82 ech_os::allocator] [HEAP] mapped pages: 16384
+[9 src\allocator\mod.rs:82 ech_os::allocator] [HEAP] mapped pages: 20480
+[10 src\allocator\mod.rs:82 ech_os::allocator] [HEAP] mapped pages: 24576
+[HEAP] TLSF heap initialized
+[11 src\cpu\mod.rs:113 ech_os::cpu] CPU: detect_cpu tamam
+[12 src\cpu\mod.rs:313 ech_os::cpu] SSE Enabled
+[13 src\cpu\mod.rs:115 ech_os::cpu] CPU: enable_sse tamam
+[14 src\cpu\mod.rs:321 ech_os::cpu] [SECURITY] CR0.WP (Write Protect) enabled
+[15 src\cpu\mod.rs:326 ech_os::cpu] [SECURITY] SMEP enabled (CR4 bit 20)
+[16 src\cpu\mod.rs:332 ech_os::cpu] [SECURITY] SMAP enabled (CR4 bit 21)
+[17 src\cpu\mod.rs:117 ech_os::cpu] CPU: enable_page_protections tamam
+[18 src\memory\paging.rs:275 ech_os::memory::paging] [PCID] CPU does not support PCID — disabled
+[19 src\cpu\mod.rs:394 ech_os::cpu] x2APIC Enabled
+[20 src\cpu\mod.rs:400 ech_os::cpu] APIC Enabled
+[21 src\cpu\mod.rs:120 ech_os::cpu] CPU: enable_apic tamam
+[22 src\cpu\mod.rs:358 ech_os::cpu] ╔══════════════════════════════════════╗
+[23 src\cpu\mod.rs:359 ech_os::cpu] ║     echOS Security Status            ║
+[24 src\cpu\mod.rs:360 ech_os::cpu] ╠══════════════════════════════════════╣
+[25 src\cpu\mod.rs:361 ech_os::cpu] ║  CR0.WP (Write Protect):   ON        ║
+[26 src\cpu\mod.rs:362 ech_os::cpu] ║  SMEP (Kernel exec):       ON        ║
+[27 src\cpu\mod.rs:363 ech_os::cpu] ║  SMAP (Kernel access):     ON        ║
+[28 src\cpu\mod.rs:364 ech_os::cpu] ║  NX (No-Execute):          ON        ║
+[29 src\cpu\mod.rs:365 ech_os::cpu] ║  PCID (TLB per-process):  OFF        ║
+[30 src\cpu\mod.rs:366 ech_os::cpu] ║  STAC/CLAC:              available ║
+[31 src\cpu\mod.rs:367 ech_os::cpu] ║  DMA panic-on-fail:      enforced  ║
+[32 src\cpu\mod.rs:368 ech_os::cpu] ║  Guard pages:            enforced  ║
+[33 src\cpu\mod.rs:369 ech_os::cpu] ║  Zone PMM (DMA/Normal):  enforced  ║
+[34 src\cpu\mod.rs:370 ech_os::cpu] ╚══════════════════════════════════════╝
+[35 src\cpu\mod.rs:128 ech_os::cpu] CPU: Vendor=AMD, APIC=true, x2APIC=true
+[36 src\cpu\acpi_aml.rs:228 ech_os::cpu::acpi_aml] [AML] Initializing AML interpreter...
+[37 src\cpu\acpi_aml.rs:234 ech_os::cpu::acpi_aml] [AML] FADT not found — cannot initialize AML
+[38 src\security\mod.rs:250 ech_os::security] [SEC] Initializing security subsystem...
+[39 src\security\mod.rs:207 ech_os::security] [SEC] NX/DEP enabled - Non-executable memory protection active
+[40 src\security\mod.rs:32 ech_os::security] [SEC] SMEP enabled
+[41 src\security\mod.rs:45 ech_os::security] [SEC] SMAP enabled
+[42 src\security\mod.rs:87 ech_os::security] [SEC] Stack canary initialized: 0xf0c06f97be53dcbc
+[43 src\security\mod.rs:152 ech_os::security] [SEC] ASLR enabled:
+[44 src\security\mod.rs:153 ech_os::security]   MMAP offset: 0x3eb2000
+[45 src\security\mod.rs:154 ech_os::security]   Stack offset: 0x28f8000
+[46 src\security\mod.rs:155 ech_os::security]   Heap offset: 0x328000
+[47 src\security\mod.rs:226 ech_os::security] [SEC] W^X policy enabled - Pages cannot be both writable and executable
+[48 src\security\mod.rs:270 ech_os::security] [SEC] Security subsystem initialized ✓
+[49 src\apic\lapic.rs:169 ech_os::apic::lapic] [LAPIC] Periodic timer active (fallback)
+[50 src\interrupts\mod.rs:210 ech_os::interrupts] IOAPIC enabled
+[51 src\interrupts\mod.rs:150 ech_os::interrupts] init_idt_for_cpu: cpu_id=0
+[52 src\interrupts\mod.rs:152 ech_os::interrupts] init_idt_for_cpu: acquiring lock...
+[53 src\interrupts\mod.rs:154 ech_os::interrupts] init_idt_for_cpu: lock acquired. list.len()=0
+[54 src\interrupts\mod.rs:156 ech_os::interrupts] init_idt_for_cpu: resizing list to 1
+[55 src\interrupts\mod.rs:160 ech_os::interrupts] init_idt_for_cpu: building new IDT (Box::new)
+[56 src\interrupts\mod.rs:163 ech_os::interrupts] init_idt_for_cpu: IDT allocated at 0x444444463490
+[57 src\interrupts\mod.rs:166 ech_os::interrupts] init_idt_for_cpu: returning IDT
+[58 src\interrupts\softirq.rs:323 ech_os::interrupts::softirq] [SOFTIRQ] Subsystem initialized (10 vectors, tasklet support)
+[59 src\interrupts\irq_chip.rs:212 ech_os::interrupts::irq_chip] [IRQ-CHIP] Active chip: IO-APIC
+[60 src\interrupts\irq_chip.rs:199 ech_os::interrupts::irq_chip] [IRQ-CHIP] Domain 'ioapic0' registered: chip=IO-APIC hwirq_base=0 size=24
+[61 src\interrupts\irq_chip.rs:199 ech_os::interrupts::irq_chip] [IRQ-CHIP] Domain 'msi' registered: chip=MSI hwirq_base=64 size=192
+[62 src\interrupts\irq_chip.rs:287 ech_os::interrupts::irq_chip] [IRQ-CHIP] Subsystem initialized
+[63 src\vdso.rs:62 ech_os::vdso] [vDSO] Initialized at mapped phys: 0x6f079000
+[64 src\tty\pty.rs:347 ech_os::tty::pty] [PTY] Subsystem initialized
+[65 src\tty\mod.rs:21 ech_os::tty] [TTY] Subsystem initialized
+[66 src\drivers\virtio_net.rs:418 ech_os::drivers::virtio_net] [VIRTIO-NET] Scanning PCI for VirtIO-Net device...
+[67 src\drivers\pci.rs:724 ech_os::drivers::pci] PCI SCAN 00:00.0 vendor=8086 device=1237 class=06 subclass=00 prog_if=00
+[68 src\drivers\pci.rs:724 ech_os::drivers::pci] PCI SCAN 00:01.0 vendor=8086 device=7000 class=06 subclass=01 prog_if=00
+[69 src\drivers\pci.rs:724 ech_os::drivers::pci] PCI SCAN 00:01.1 vendor=8086 device=7010 class=01 subclass=01 prog_if=80
+[70 src\drivers\pci.rs:736 ech_os::drivers::pci] PCI STORAGE FOUND: Bus/Dev/Fn 00:01.1 ID=8086:7010
+[71 src\drivers\pci.rs:724 ech_os::drivers::pci] PCI SCAN 00:01.3 vendor=8086 device=7113 class=06 subclass=80 prog_if=00
+[72 src\drivers\pci.rs:724 ech_os::drivers::pci] PCI SCAN 00:02.0 vendor=1234 device=1111 class=03 subclass=00 prog_if=00
+[73 src\drivers\pci.rs:724 ech_os::drivers::pci] PCI SCAN 00:03.0 vendor=8086 device=100e class=02 subclass=00 prog_if=00
+[74 src\drivers\virtio_net.rs:464 ech_os::drivers::virtio_net] [VIRTIO-NET] No VirtIO-Net device found
+[NET] VirtIO-Net driver not found or init failed
+[75 src\cpu\acpi.rs:1100 ech_os::cpu::acpi] Initializing ACPI...
+[76 src\cpu\acpi.rs:409 ech_os::cpu::acpi] Parsing ACPI tables...
+[77 src\cpu\acpi.rs:420 ech_os::cpu::acpi] ACPI: RSDP found at 0x7FB7E014
+[78 src\cpu\acpi.rs:432 ech_os::cpu::acpi] ACPI: RSDP rev=2 xsdt=0x7FB7D0E8 rsdt=0x7FB7D074
+[79 src\cpu\acpi.rs:483 ech_os::cpu::acpi] ACPI: XSDT entries=5
+[80 src\cpu\acpi.rs:489 ech_os::cpu::acpi] ACPI: XSDT entry 0 addr=0x7FB79000
+[81 src\cpu\acpi.rs:556 ech_os::cpu::acpi] ACPI: Table FACP at 0x7FB79000
+[82 src\cpu\acpi.rs:764 ech_os::cpu::acpi] ACPI: Parsing FADT at 0x7FB79000
+[83 src\cpu\acpi.rs:794 ech_os::cpu::acpi] ACPI: FADT PM1a_CNT=0xB004 PM1b_CNT=0x0 PM1a_EVT=0xB000 SCI=9
+[84 src\cpu\acpi.rs:798 ech_os::cpu::acpi] ACPI: FADT SMI_CMD=0xB2 ACPI_ENABLE=0xF1 flags=0x80A5
+[85 src\cpu\acpi.rs:921 ech_os::cpu::acpi] ACPI: DSDT \_S5 found — SLP_TYP_A=0 SLP_TYP_B=0
+[86 src\cpu\acpi.rs:826 ech_os::cpu::acpi] ACPI: FADT parsed OK — shutdown/reboot ready
+[87 src\cpu\acpi.rs:489 ech_os::cpu::acpi] ACPI: XSDT entry 1 addr=0x7FB78000
+[88 src\cpu\acpi.rs:556 ech_os::cpu::acpi] ACPI: Table APIC at 0x7FB78000
+[89 src\cpu\acpi.rs:942 ech_os::cpu::acpi] ACPI: Found MADT at 0x7FB78000
+[90 src\cpu\acpi.rs:972 ech_os::cpu::acpi] ACPI: Found APIC ID 0 (flags=1)
+[91 src\cpu\acpi.rs:972 ech_os::cpu::acpi] ACPI: Found APIC ID 1 (flags=1)
+[92 src\cpu\acpi.rs:972 ech_os::cpu::acpi] ACPI: Found APIC ID 2 (flags=1)
+[93 src\cpu\acpi.rs:972 ech_os::cpu::acpi] ACPI: Found APIC ID 3 (flags=1)
+[94 src\cpu\acpi.rs:489 ech_os::cpu::acpi] ACPI: XSDT entry 2 addr=0x7FB77000
+[95 src\cpu\acpi.rs:556 ech_os::cpu::acpi] ACPI: Table HPET at 0x7FB77000
+[96 src\cpu\acpi.rs:489 ech_os::cpu::acpi] ACPI: XSDT entry 3 addr=0x7FB76000
+[97 src\cpu\acpi.rs:556 ech_os::cpu::acpi] ACPI: Table WAET at 0x7FB76000
+[98 src\cpu\acpi.rs:489 ech_os::cpu::acpi] ACPI: XSDT entry 4 addr=0x7FB75000
+[99 src\cpu\acpi.rs:556 ech_os::cpu::acpi] ACPI: Table BGRT at 0x7FB75000
+[100 src\cpu\acpi.rs:456 ech_os::cpu::acpi] ACPI: Found 5 tables
+[101 src\cpu\acpi.rs:457 ech_os::cpu::acpi] ACPI: 4 CPUs detected
+[102 src\cpu\acpi.rs:1103 ech_os::cpu::acpi] ACPI initialized successfully
+[SMP] CPU ACPI tables parsed
+[IOMMU] DMAR not available
+[103 src\task\scheduler.rs:151 ech_os::task::scheduler] SMP Scheduler initialized for 1 CPUs (Chase-Lev)
+[104 src\cpu\smp.rs:1235 ech_os::cpu::smp] Initializing SMP...
+[105 src\cpu\smp.rs:1246 ech_os::cpu::smp] SMP DEBUG: bsp_apic_id = 0
+[106 src\cpu\smp.rs:1247 ech_os::cpu::smp] SMP DEBUG: cpu_list = [0, 1, 2, 3]
+[107 src\cpu\smp.rs:1272 ech_os::cpu::smp] SMP: Found 4 CPUs via ACPI, activating all
+[108 src\apic\lapic.rs:169 ech_os::apic::lapic] [LAPIC] Periodic timer active (fallback)
+[109 src\cpu\smp.rs:877 ech_os::cpu::smp] SMP: BSP per-cpu setup begin
+[110 src\cpu\smp.rs:744 ech_os::cpu::smp] SMP: Allocating 40960 bytes (10 frames) from physical memory
+[111 src\cpu\smp.rs:751 ech_os::cpu::smp] SMP: Allocated contiguous physical memory at 0x6f0a7000
+[112 src\cpu\smp.rs:767 ech_os::cpu::smp] SMP: Stack allocated at virt=0xffff80006f0a7000, top=0xffff80006f0b1000
+[113 src\cpu\smp.rs:954 ech_os::cpu::smp] SMP: BSP per-cpu setup done
+[114 src\cpu\smp.rs:798 ech_os::cpu::smp] SMP: About to read cpu_count
+[115 src\cpu\smp.rs:800 ech_os::cpu::smp] SMP: cpu_count = 4, preparing AP per-cpu data
+[116 src\cpu\smp.rs:803 ech_os::cpu::smp] SMP: Creating per_cpu_data for cpu_id 1
+[117 src\cpu\smp.rs:744 ech_os::cpu::smp] SMP: Allocating 40960 bytes (10 frames) from physical memory
+[118 src\cpu\smp.rs:751 ech_os::cpu::smp] SMP: Allocated contiguous physical memory at 0x6f0b4000
+[119 src\cpu\smp.rs:767 ech_os::cpu::smp] SMP: Stack allocated at virt=0xffff80006f0b4000, top=0xffff80006f0be000
+[120 src\cpu\smp.rs:821 ech_os::cpu::smp] SMP: cpu_id 1 stack_top = 0xffff80006f0be000
+[121 src\cpu\smp.rs:842 ech_os::cpu::smp] SMP: cpu_id 1 allocated CpuData at 0xffff80006f07c000
+[122 src\cpu\smp.rs:870 ech_os::cpu::smp] SMP: cpu_id 1 added to per_cpu_data (len=2)
+[123 src\cpu\smp.rs:803 ech_os::cpu::smp] SMP: Creating per_cpu_data for cpu_id 2
+[124 src\cpu\smp.rs:744 ech_os::cpu::smp] SMP: Allocating 40960 bytes (10 frames) from physical memory
+[125 src\cpu\smp.rs:751 ech_os::cpu::smp] SMP: Allocated contiguous physical memory at 0x6f0c9000
+[126 src\cpu\smp.rs:767 ech_os::cpu::smp] SMP: Stack allocated at virt=0xffff80006f0c9000, top=0xffff80006f0d3000
+[127 src\cpu\smp.rs:821 ech_os::cpu::smp] SMP: cpu_id 2 stack_top = 0xffff80006f0d3000
+[128 src\cpu\smp.rs:842 ech_os::cpu::smp] SMP: cpu_id 2 allocated CpuData at 0xffff80006f0a5000
+[129 src\cpu\smp.rs:870 ech_os::cpu::smp] SMP: cpu_id 2 added to per_cpu_data (len=3)
+[130 src\cpu\smp.rs:803 ech_os::cpu::smp] SMP: Creating per_cpu_data for cpu_id 3
+[131 src\cpu\smp.rs:744 ech_os::cpu::smp] SMP: Allocating 40960 bytes (10 frames) from physical memory
+[132 src\cpu\smp.rs:751 ech_os::cpu::smp] SMP: Allocated contiguous physical memory at 0x6f0de000
+[133 src\cpu\smp.rs:767 ech_os::cpu::smp] SMP: Stack allocated at virt=0xffff80006f0de000, top=0xffff80006f0e8000
+[134 src\cpu\smp.rs:821 ech_os::cpu::smp] SMP: cpu_id 3 stack_top = 0xffff80006f0e8000
+[135 src\cpu\smp.rs:842 ech_os::cpu::smp] SMP: cpu_id 3 allocated CpuData at 0xffff80006f097000
+[136 src\cpu\smp.rs:870 ech_os::cpu::smp] SMP: cpu_id 3 added to per_cpu_data (len=4)
+[137 src\cpu\smp.rs:872 ech_os::cpu::smp] SMP: AP per-cpu data preparation complete
+[138 src\task\scheduler.rs:175 ech_os::task::scheduler] Scheduler updated for 4 CPUs
+[139 src\cpu\smp.rs:563 ech_os::cpu::smp] SMP: startup_all_aps cpu_count=4
+[140 src\cpu\smp.rs:564 ech_os::cpu::smp] SMP: loading AP startup code
+[141 src\memory\mod.rs:3712 ech_os::memory] [MEMORY] split_huge_page unmap failed virt=0x0 err=ParentEntryHugePage
+[142 src\memory\mod.rs:3680 ech_os::memory] [MEMORY] map_identity split huge page failed virt=0x1000
+[143 src\cpu\smp.rs:144 ech_os::cpu::smp] SMP: copying AP startup code to phys=0x1000 (virt=0xffff800000001000)
+[144 src\cpu\smp.rs:152 ech_os::cpu::smp] SMP: Source code (128 bytes): [eb, 3c, 66, 90, 00, 00, 00, 00, 00, 00, 8d, b4, 00, 00, 66, 90, 00, 00, 00, 00, 00, 00, 00, 00, ff, ff, 00, 00, 00, 9a, cf, 00, ff, ff, 00, 00, 00, 92, cf, 00, ff, ff, 00, 00, 00, 9a, af, 00, ff, ff, 00, 00, 00, 92, cf, 00, 27, 00, 10, 10, 00, 00, fa, fc, b0, 41, e6, e9, 31, c0, 8e, d8, 8e, c0, 8e, d0, bc, 00, 7c, 66, bb, 00, 10, 00, 00, 67, 66, 8d, 9b, 10, 00, 00, 00, be, 00, 10, 8d, b4, 38, 00, 66, 89, 5c, 02, 0f, 01, 14, b0, 42, e6, e9, 0f, 20, c0, 66, 83, c8, 01, 0f, 22, c0, b0, 43, e6, e9, 66, bb, 00]
+[145 src\cpu\smp.rs:158 ech_os::cpu::smp] SMP: Dest code (128 bytes): [eb, 3c, 66, 90, 00, 00, 00, 00, 00, 00, 8d, b4, 00, 00, 66, 90, 00, 00, 00, 00, 00, 00, 00, 00, ff, ff, 00, 00, 00, 9a, cf, 00, ff, ff, 00, 00, 00, 92, cf, 00, ff, ff, 00, 00, 00, 9a, af, 00, ff, ff, 00, 00, 00, 92, cf, 00, 27, 00, 10, 10, 00, 00, fa, fc, b0, 41, e6, e9, 31, c0, 8e, d8, 8e, c0, 8e, d0, bc, 00, 7c, 66, bb, 00, 10, 00, 00, 67, 66, 8d, 9b, 10, 00, 00, 00, be, 00, 10, 8d, b4, 38, 00, 66, 89, 5c, 02, 0f, 01, 14, b0, 42, e6, e9, 0f, 20, c0, 66, 83, c8, 01, 0f, 22, c0, b0, 43, e6, e9, 66, bb, 00]
+[146 src\cpu\smp.rs:163 ech_os::cpu::smp] SMP: AP startup code copied
+[147 src\cpu\smp.rs:175 ech_os::cpu::smp] SMP: AP PML4 phys=0x7fc01000
+[148 src\cpu\smp.rs:568 ech_os::cpu::smp] SMP: AP startup code ready
+[149 src\cpu\smp.rs:576 ech_os::cpu::smp] SMP: Using PARALLEL bringup mode
+[150 src\cpu\smp.rs:635 ech_os::cpu::smp] SMP: Parallel batch 1-3 (3 APs)

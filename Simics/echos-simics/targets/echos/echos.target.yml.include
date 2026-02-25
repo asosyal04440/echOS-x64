@@ -1,0 +1,39 @@
+# echOS boot script - runs from YAML target
+
+# Run hardware setup
+run-script "%simics%/targets/qsp-x86/hardware.yml" namespace = machine:hardware
+
+local $system = (params.get machine:hardware:output:system)
+instantiate-components $system
+
+# Set boot option to HDD0
+$system.mb.simics_uefi->selected_boot_option = "UEFI Simics Turbo Harddrive VT00002"
+
+# Name system
+$system->system_info = (params.get machine:system_info)
+
+# Set time quantum
+set-time-quantum cell = ((($system->cpu_list)[0])->cell) count = 100 unit = "us"
+
+# No network - skip ethernet setup to avoid PXE
+
+# Enable serial console output
+$system.serconsole.con.enable-cmd-line-output
+
+# Reduce noise
+log-type -disable unimpl
+log-type -disable spec-viol
+
+echo "[echOS] Starting boot from HDD0..."
+echo "[echOS] Waiting for boot..."
+
+# Run with longer timeout
+script-branch "boot-timeout" {
+    bp.time.wait-for 300
+    echo "[echOS] 300s timeout reached"
+    stop
+}
+
+run
+
+echo "[echOS] Simulation stopped"

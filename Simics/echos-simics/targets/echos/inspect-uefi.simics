@@ -1,0 +1,20 @@
+# Inspect UEFI-related objects/commands for QSP boot forcing
+$disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
+$machine_name = "board"
+$show_gfx_con = TRUE
+$show_con0 = TRUE
+$create_network = FALSE
+run-script "targets/qsp-x86/qsp-hdd-boot.simics"
+
+list-objects substr = uefi
+list-objects substr = boot
+list-objects substr = shell
+list-objects substr = bios
+list-objects substr = simics
+
+# print command help for likely control points
+help board.mb.simics_uefi
+help board.mb.simics_uefi.selected_boot_option
+help board.mb.bios
+
+quit

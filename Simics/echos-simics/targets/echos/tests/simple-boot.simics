@@ -1,0 +1,36 @@
+# echOS Simple Boot Test using QSP-x86
+#
+# Uses existing QSP-x86 target with echOS binary
+
+echo "=========================================="
+echo "echOS Boot Test - QSP-x86 Target"
+echo "=========================================="
+
+# Initialize QSP-x86 system
+instantiate-components
+
+# Set up serial console
+$system.serconsole.con.setup backend = stdio
+
+# Run UEFI boot
+echo "Starting UEFI boot..."
+run
+
+# Wait for boot
+echo "Waiting for boot (10 seconds)..."
+sleep 10
+
+# Stop and check state
+stop
+
+echo ""
+echo "=========================================="
+echo "Test Results"
+echo "=========================================="
+
+# Get CPU state
+$rip = $system.cpu0.read-register rip
+echo "RIP: 0x" . format-hex($rip)
+
+echo ""
+echo "Test Complete!"

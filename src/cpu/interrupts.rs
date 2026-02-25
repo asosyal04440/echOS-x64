@@ -1,10 +1,10 @@
 //! # echOS Interrupt Tanımları
-//! 
+//!
 //! Interrupt handler nesneleri ve indeksleri.
 
-use x86_64::structures::idt::InterruptStackFrame;
 use pic8259::ChainedPics;
 use spin::Mutex;
+use x86_64::structures::idt::InterruptStackFrame;
 
 /// Master PIC offset
 pub const PIC_1_OFFSET: u8 = 32;
@@ -34,28 +34,26 @@ impl InterruptIndex {
 }
 
 /// Timer Interrupt Handler
-pub extern "x86-interrupt" fn timer_interrupt_handler(
-    _stack_frame: InterruptStackFrame)
-{
+pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     unsafe {
-        PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
 }
 
 /// Keyboard Interrupt Handler
-pub extern "x86-interrupt" fn keyboard_interrupt_handler(
-    _stack_frame: InterruptStackFrame)
-{
+pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
     // Scancode'u oku (PIC buffer'ı boşaltmak için gerekli)
     let mut port = Port::new(0x60);
     let _scancode: u8 = unsafe { port.read() };
-    
+
     // Not: Gerçek klavye işleme drivers/ps2.rs üzerinden polling ile veya
     // task listesine eklenerek yapılabilir. Şimdilik sadece PIC bildirimi yapıyoruz.
 
     unsafe {
-        PICS.lock().notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
     }
 }
