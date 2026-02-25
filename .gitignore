@@ -18,12 +18,23 @@ dism.log
 build_errors.txt
 build_log_*.txt
 rustc-ice-*.txt
+*.log
 
 # IDE & Tools
 .idea/
 .vscode/
+.kiro/
 *.iml
 .agent/
+
+# Build outputs
+build/
+disassembly.asm
+symbols.txt
+*.txt
+!Cargo.toml
+!LICENSE.txt
+!NOTICE
 
 # OS/Bootloader Specific
 esp/
