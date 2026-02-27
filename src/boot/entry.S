@@ -437,6 +437,10 @@ gdt64_end:
 tss64:
     .skip 104
 .align 16
+boot_stack:
+    .skip 16384
+stack_top:
+.align 16
 ist_stack:
     .skip 4096
 ist_stack_top:

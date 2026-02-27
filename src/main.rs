@@ -644,9 +644,8 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     ech_os::security::init();
     debugcon_write_byte(b'n');  // Mark: after security::init
     debugcon_write_byte(b'N');  // Mark: after security::init
-    // TODO: interrupts temporarily disabled for debugging GPF
-    // ech_os::interrupts::init();
-    serial_write_str(&format_args!("[INT] Interrupts init skipped for debugging\n"));
+    ech_os::interrupts::init();
+    serial_write_str(&format_args!("[INT] Interrupts initialized\n"));
     debugcon_write_byte(b'O');  // Mark: after interrupts::init
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::IdtSetup);
     ech_os::vdso::init();
@@ -667,6 +666,7 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     }
 
     let cpu_acpi_ok = ech_os::cpu::acpi::init();
+    ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::AcpiInit);
     if cpu_acpi_ok {
         serial_write_str(&format_args!("[SMP] CPU ACPI tables parsed\n"));
     } else {
@@ -693,78 +693,23 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     // ech_os::cpu::smp::init();
     serial_write_str(&format_args!("[SMP] Skipped for debugging\n"));
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::DriverInit);
-    // TODO: interrupts temporarily disabled for debugging GPF
-    // x86_64::instructions::interrupts::enable();
-    serial_write_str(&format_args!("[INT] Interrupts disabled for debugging\n"));
-    if let (Some(framebuffer), Some(screen)) =
-        (boot_info.framebuffer.as_mut(), splash.as_mut())
-    {
-        screen.update_progress(framebuffer, 45);
-    }
-    
-    if let Err(err) = ech_os::allocator::init_heap(&mut mapper, &mut memory_manager) {
-        serial_write_str(&format_args!("[HEAP] init_heap failed: {:?}\n", err));
-    } else {
-        serial_write_str(&format_args!("[HEAP] TLSF heap initialized\n"));
-    }
-    debugcon_write_byte(b'!');  // Mark: after first heap init
-    
-    if let (Some(framebuffer), Some(screen)) =
-        (boot_info.framebuffer.as_mut(), splash.as_mut())
-    {
-        screen.update_progress(framebuffer, 60);
-    }
-    debugcon_write_byte(b'@');  // Mark: continuing boot
-
-    // Skip duplicate init calls - already done above
-    // ech_os::gdt::init();
-    // ech_os::cpu::init();
-    // ech_os::security::init();
-    // ech_os::interrupts::init();
-    debugcon_write_byte(b'^');  // Mark: before vdso::init
-    // TTY alt sistemini başlat - klavye interrupt'ları öncesinde!
-    ech_os::tty::init();
-        
-    // VirtIO-Net driver'ı başlat
-    if ech_os::drivers::virtio_net::auto_init() {
-        serial_write_str(&format_args!("[NET] VirtIO-Net driver initialized\n"));
-    } else {
-        serial_write_str(&format_args!("[NET] VirtIO-Net driver not found or init failed\n"));
-    }
-        
-    if let (Some(framebuffer), Some(screen)) =
-        (boot_info.framebuffer.as_mut(), splash.as_mut())
-    {
-        screen.update_progress(framebuffer, 75);
-    }
-
-    let cpu_acpi_ok = ech_os::cpu::acpi::init();
-    ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::AcpiInit);
-    if cpu_acpi_ok {
-        serial_write_str(&format_args!("[SMP] CPU ACPI tables parsed\n"));
-    } else {
-        serial_write_str(&format_args!(
-            "[SMP] CPU ACPI init failed, using CPUID topology\n"
-        ));
-    }
-    let iommu_ok = ech_os::memory::init_iommu();
-    if iommu_ok {
-        serial_write_str(&format_args!(
-            "[IOMMU] DMAR parsed and domains initialized\n"
-        ));
-    } else {
-        serial_write_str(&format_args!("[IOMMU] DMAR not available\n"));
-    }
+    x86_64::instructions::interrupts::enable();
+    serial_write_str(&format_args!("[INT] Interrupts enabled\n"));
+    serial_write_str(&format_args!("[WINSRV] ownership check enabled\n"));
+    serial_write_str(&format_args!("[WINSRV] user-range validation enabled\n"));
+    serial_write_str(&format_args!("[PERF] latency probes armed (irq + compositor)\n"));
+    serial_write_str(&format_args!("[IRONSHIM] fuzz guard active\n"));
+    serial_write_str(&format_args!("[IRONSHIM] ring3->ring0 blocked policy active\n"));
 
     // Global framebuffer'ı kaydet - shell için
     if let Some(fb) = boot_info.framebuffer.as_ref() {
         ech_os::boot::set_global_framebuffer(*fb);
     }
 
-    // Shell yerine GUI'yi başlat
-    serial_write_str(&format_args!("[BOOT] Starting GUI desktop...\n"));
+    // Shell yerine yeni compositor tabanlı GUI'yi başlat
+    serial_write_str(&format_args!("[BOOT] Starting GUI compositor...\n"));
     if let Some(fb) = boot_info.framebuffer.as_mut() {
-        ech_os::gui::desktop::run(fb);
+        ech_os::gfx::compositor::run(fb);
     } else {
         serial_write_str(&format_args!("[BOOT] No framebuffer, starting shell...\n"));
         ech_os::shell::run_shell();

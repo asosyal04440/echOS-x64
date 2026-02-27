@@ -72,24 +72,24 @@ pub fn handle_sci() {
 
     // Hangi event'ler aktif?
     if pm1_sts & (1 << 8) != 0 {
-        // Power button event
+        // Güç düğmesi olayı (Power button pressed)
         crate::serial_println!("[SCI] Power button pressed");
         handle_power_button();
     }
 
     if pm1_sts & (1 << 9) != 0 {
-        // Sleep button event
+        // Uyku düğmesi olayı (Sleep button pressed)
         crate::serial_println!("[SCI] Sleep button pressed");
         handle_sleep_button();
     }
 
     if pm1_sts & (1 << 5) != 0 {
-        // Timer event (PM Timer)
+        // Timer olayı (PM Timer)
         // Genelde ignore edilir
     }
 
     if pm1_sts & (1 << 0) != 0 {
-        // TMR_STS — PM timer overflow
+        // TMR_STS — PM timer taşma olayı
     }
 
     // Status register'ı temizle (Write-1-to-Clear)

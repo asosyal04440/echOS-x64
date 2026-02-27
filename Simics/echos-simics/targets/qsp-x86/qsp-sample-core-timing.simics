@@ -1,3 +1,3 @@
 # Auto-generated file. Any changes will be overwritten!
-decl { substitute "D:\\Intel Simics Package Manager\\simics-qsp-x86-7.48.0\\targets\\qsp-x86\\qsp-sample-core-timing.simics" }
-run-script "D:\\Intel Simics Package Manager\\simics-qsp-x86-7.48.0\\targets\\qsp-x86\\qsp-sample-core-timing.simics"
+decl { substitute "D:\\Intel Simics Package Manager\\simics-7.70.0\\..\\simics-qsp-x86-7.48.0\\targets\\qsp-x86\\qsp-sample-core-timing.simics" }
+run-script "D:\\Intel Simics Package Manager\\simics-7.70.0\\..\\simics-qsp-x86-7.48.0\\targets\\qsp-x86\\qsp-sample-core-timing.simics"

@@ -1,23 +1,23 @@
 # echOS boot verification script
-
-disable-vmp
+# VMP auto-managed (uses hardware acceleration if driver is loaded)
 
 $disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
 $machine_name = "board"
 $show_con0 = TRUE
 $create_network = FALSE
-run-script "targets/qsp-x86/qsp-hdd-boot.simics"
+run-script "%simics%/targets/qsp-x86/qsp-hdd-boot.simics"
 
-# enable serial console output to command line if available
+# Serial capture to file + cmd-line echo
+board.serconsole.con.capture-start "targets/echos/logs/serial_verify.txt"
 board.serconsole.con.enable-cmd-line-output
 
 log-type -disable unimpl
 log-type -disable spec-viol
 
-echo "[verify] boot run started, timeout=120s"
+echo "[verify] boot run started, timeout=180s"
 
 script-branch "timeout-stop" {
-    bp.time.wait-for 120
+    bp.time.wait-for 180
     echo "[verify] timeout reached"
     stop
 }

@@ -1,31 +1,31 @@
-//! # Driver Recovery
+//! # Sürücü Kurtarma
 //!
-//! Recovery strategies for driver faults.
+//! Sürücü hatalarına yönelik kurtarma stratejileri.
 
 use crate::fault::{Fault, FaultType};
 use crate::fault::severity::RecoveryResult;
 
-/// Attempt driver recovery
+/// Sürücü kurtarmasını dener
 pub fn recover(fault: &Fault) -> RecoveryResult {
     match fault.fault_type {
         FaultType::DeviceTimeout => {
-            crate::serial_println!("[DRV_RECOVERY] Device timeout - would reset device");
-            // In real implementation, would call driver reset
+            crate::serial_println!("[DRV_RECOVERY] Cihaz zaman aşımı - sürücü sıfırlanacak");
+            // Gerçek uygulamada sürücü sıfırlama çağrılır
             RecoveryResult::Degraded
         }
         
         FaultType::DeviceError => {
-            crate::serial_println!("[DRV_RECOVERY] Device error - disabling device");
+            crate::serial_println!("[DRV_RECOVERY] Cihaz hatası - cihaz devre dışı bırakılıyor");
             RecoveryResult::Degraded
         }
         
         FaultType::DmaCorruption => {
-            crate::serial_println!("[DRV_RECOVERY] DMA corruption - critical failure");
+            crate::serial_println!("[DRV_RECOVERY] DMA bozulması - kritik hata");
             RecoveryResult::Failed
         }
         
         FaultType::DriverCrash => {
-            crate::serial_println!("[DRV_RECOVERY] Driver crash - would restart driver");
+            crate::serial_println!("[DRV_RECOVERY] Sürücü çöktü - yeniden başlatılacak");
             RecoveryResult::Degraded
         }
         
@@ -33,17 +33,17 @@ pub fn recover(fault: &Fault) -> RecoveryResult {
     }
 }
 
-/// Reset a specific driver
+/// Belirli bir sürücüyü sıfırlar
 pub fn reset_driver(name: &str) -> bool {
-    crate::serial_println!("[DRV_RECOVERY] Resetting driver: {}", name);
+    crate::serial_println!("[DRV_RECOVERY] Sürücü sıfırlanıyor: {}", name);
     
     match name {
         "virtio-net" => {
-            // Would call virtio_net reset
+            // virtio_net sıfırlama çağrılacak
             false
         }
         "nvme" => {
-            // Would call nvme reset
+            // nvme sıfırlama çağrılacak
             false
         }
         _ => false,

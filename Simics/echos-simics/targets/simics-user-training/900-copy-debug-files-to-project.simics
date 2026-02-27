@@ -1,2 +1,2 @@
 # Auto-generated file. Any changes will be overwritten!
-run-script "D:\\Intel Simics Package Manager\\simics-training-7.0.0-pre.12\\targets\\simics-user-training\\900-copy-debug-files-to-project.simics"
+run-script "D:\\Intel Simics Package Manager\\simics-7.70.0\\..\\simics-training-7.0.0-pre.12\\targets\\simics-user-training\\900-copy-debug-files-to-project.simics"

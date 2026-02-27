@@ -1,7 +1,18 @@
-//! # Control Center
+//! # Kontrol Merkezi
 //!
-//! macOS-style control center with quick settings
-//! Wi-Fi, Bluetooth, AirDrop, Display, Sound, etc.
+//! macOS tarzı hızlı ayarlar paneli.
+//! Wi-Fi, Bluetooth, AirDrop, Ekran, Ses vb. ayarları kolay erişimle sunar.
+//!
+//! ## Mimari
+//! - `ControlTile`: Tanımlayıcı, ad, simge, tür, aktiflik durumu ve değer içeren ayar karesi
+//! - `TileType`: Toggle (açma/kapama), Slider (kaydırıcı), Button (buton), Menu (menü)
+//! - `ControlGroup`: İlgili karelerin düzen bilgisiyle birleştirilmesi
+//! - `GroupLayout`: Row2 (2'li satır), Row3 (3'lü satır), Grid (2×2 ızgara), Column (dikey yığın), Large (büyük kare)
+//! - `ControlCenter`: Paneli, animasyonu ve tıklama/sürükleme olaylarını yöneten yapı
+//!
+//! ## Çizim Algoritması
+//! Panel sağ üst köşeden kayarak girer; `animation_progress` 0→1 arası artar.
+//! Kaydırıcı karelerinde alt kenarda doluluk çubuğu çizilir.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -14,39 +25,39 @@ use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::{Theme, Color};
 
 // ============================================================================
-// CONTROL CENTER CONSTANTS
+// KONTROL MERKEZİ SABİTLERİ
 // ============================================================================
 
-/// Control center width
+/// Kontrol merkezi genişliği (piksel)
 pub const CC_WIDTH: usize = 320;
 
-/// Tile size
+/// Kare boyutu (piksel)
 pub const TILE_SIZE: usize = 64;
 
-/// Tile spacing
+/// Kareler arası boşluk (piksel)
 pub const TILE_SPACING: usize = 8;
 
 // ============================================================================
-// CONTROL TILE
+// KONTROL KARESİ
 // ============================================================================
 
-/// A control tile (button/switch)
+/// Bir kontrol karesi (buton/geçiş anahtarı)
 pub struct ControlTile {
-    /// Tile ID
+    /// Kare kimliği
     pub id: u32,
-    /// Display name
+    /// Görüntü adı
     pub name: String,
-    /// Icon
+    /// Simge
     pub icon: String,
-    /// Tile type
+    /// Kare türü
     pub tile_type: TileType,
-    /// Is active/enabled
+    /// Aktif/etkin mi
     pub active: bool,
-    /// Current value (for sliders)
+    /// Geçerli değer (kaydırıcılar için)
     pub value: f32,
-    /// Subtitle (status text)
+    /// Alt başlık (durum metni)
     pub subtitle: String,
-    /// Tile color when active
+    /// Aktifken kare rengi
     pub active_color: u32,
 }
 
@@ -71,7 +82,7 @@ impl ControlTile {
             active_color: Theme::ACCENT_PRIMARY.to_u32(),
         }
     }
-    
+
     pub fn slider(id: u32, name: &str, icon: &str, value: f32) -> Self {
         ControlTile {
             id,
@@ -84,7 +95,7 @@ impl ControlTile {
             active_color: Theme::ACCENT_PRIMARY.to_u32(),
         }
     }
-    
+
     pub fn button(id: u32, name: &str, icon: &str) -> Self {
         ControlTile {
             id,
@@ -97,7 +108,7 @@ impl ControlTile {
             active_color: Theme::ACCENT_PRIMARY.to_u32(),
         }
     }
-    
+
     pub fn menu(id: u32, name: &str, icon: &str, subtitle: &str) -> Self {
         ControlTile {
             id,
@@ -110,48 +121,48 @@ impl ControlTile {
             active_color: Theme::ACCENT_PRIMARY.to_u32(),
         }
     }
-    
-    /// Toggle active state
+
+    /// Aktif durumu değiştir
     pub fn toggle_active(&mut self) {
         if self.tile_type == TileType::Toggle {
             self.active = !self.active;
             self.subtitle = if self.active { String::from("On") } else { String::from("Off") };
         }
     }
-    
-    /// Set value
+
+    /// Değer ayarla
     pub fn set_value(&mut self, value: f32) {
         self.value = value.max(0.0).min(1.0);
         self.active = self.value > 0.0;
         self.subtitle = format!("{}%", (self.value * 100.0) as i32);
     }
-    
-    /// Draw the tile
+
+    /// Kareyi çiz
     pub fn draw(&self, fb: &mut Framebuffer, x: usize, y: usize, width: usize, height: usize) {
         let bg_color = if self.active {
             self.active_color
         } else {
             Theme::SIDEBAR_BG.to_u32()
         };
-        
-        // Background
+
+        // Arka plan
         fb.draw_rect(x, y, width, height, bg_color);
-        
-        // Icon
+
+        // Simge
         let icon_color = if self.active { 0xFFFFFFFF } else { Theme::TEXT_PRIMARY.to_u32() };
         fb.draw_string(x + 8, y + 8, &self.icon, icon_color);
-        
-        // Name
+
+        // Ad
         let text_color = if self.active { 0xFFFFFFFF } else { Theme::TEXT_PRIMARY.to_u32() };
         fb.draw_string(x + 8, y + 32, &self.name, text_color);
-        
-        // Subtitle/status
+
+        // Alt başlık/durum
         let sub_color = if self.active { 0xFFCCCCCC } else { Theme::TEXT_SECONDARY.to_u32() };
         if !self.subtitle.is_empty() {
             fb.draw_string(x + 8, y + 48, &self.subtitle, sub_color);
         }
-        
-        // Slider indicator
+
+        // Kaydırıcı göstergesi
         if self.tile_type == TileType::Slider && self.value > 0.0 {
             let slider_y = y + height - 4;
             let slider_width = (width as f32 * self.value) as usize;
@@ -161,26 +172,26 @@ impl ControlTile {
 }
 
 // ============================================================================
-// CONTROL GROUP
+// KONTROL GRUBU
 // ============================================================================
 
-/// A group of related controls
+/// İlgili kontrollerin grubu
 pub struct ControlGroup {
-    /// Group name
+    /// Grup adı
     pub name: String,
-    /// Tiles in this group
+    /// Gruptaki kareler
     pub tiles: Vec<ControlTile>,
-    /// Group layout
+    /// Grup düzeni
     pub layout: GroupLayout,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupLayout {
-    Row2,    // 2 tiles in a row
-    Row3,    // 3 tiles in a row
-    Grid,    // 2x2 grid
-    Column,  // Vertical stack
-    Large,   // Single large tile
+    Row2,    // 2 kare yan yana
+    Row3,    // 3 kare yan yana
+    Grid,    // 2×2 ızgara
+    Column,  // Dikey yığın
+    Large,   // Tek büyük kare
 }
 
 impl ControlGroup {
@@ -191,12 +202,12 @@ impl ControlGroup {
             layout,
         }
     }
-    
+
     pub fn add_tile(&mut self, tile: ControlTile) {
         self.tiles.push(tile);
     }
-    
-    /// Calculate group height
+
+    /// Grup yüksekliğini hesapla
     pub fn height(&self) -> usize {
         match self.layout {
             GroupLayout::Row2 | GroupLayout::Row3 => TILE_SIZE + 16,
@@ -205,14 +216,14 @@ impl ControlGroup {
             GroupLayout::Large => 80,
         }
     }
-    
-    /// Draw the group
+
+    /// Grubu çiz
     pub fn draw(&self, fb: &mut Framebuffer, x: usize, y: usize, width: usize) {
         let group_height = self.height();
-        
-        // Group background
+
+        // Grup arka planı
         fb.draw_rect(x, y, width, group_height, Theme::SIDEBAR_BG.to_u32());
-        
+
         match self.layout {
             GroupLayout::Row2 => {
                 let tile_width = (width - TILE_SPACING * 3) / 2;
@@ -252,15 +263,15 @@ impl ControlGroup {
             }
         }
     }
-    
-    /// Hit test
+
+    /// İsabet testi
     pub fn hit_test(&self, mx: i32, my: i32, x: usize, y: usize, width: usize) -> Option<usize> {
         let group_height = self.height() as i32;
-        
+
         if mx < x as i32 || mx >= (x + width) as i32 || my < y as i32 || my >= (y as i32 + group_height) {
             return None;
         }
-        
+
         match self.layout {
             GroupLayout::Row2 => {
                 let tile_width = (width - TILE_SPACING * 3) / 2;
@@ -303,30 +314,30 @@ impl ControlGroup {
                 return Some(0);
             }
         }
-        
+
         None
     }
 }
 
 // ============================================================================
-// CONTROL CENTER
+// KONTROL MERKEZİ
 // ============================================================================
 
-/// Control Center panel
+/// Kontrol Merkezi paneli
 pub struct ControlCenter {
-    /// Is visible
+    /// Görünür mü
     pub visible: bool,
-    /// Control groups
+    /// Kontrol grupları
     pub groups: Vec<ControlGroup>,
-    /// Animation progress
+    /// Animasyon ilerlemesi
     pub animation_progress: f32,
-    /// Screen width
+    /// Ekran genişliği
     pub screen_width: usize,
-    /// Screen height
+    /// Ekran yüksekliği
     pub screen_height: usize,
-    /// Panel width
+    /// Panel genişliği
     pub panel_width: usize,
-    /// Next tile ID
+    /// Sonraki kare kimliği
     pub next_tile_id: u32,
 }
 
@@ -341,129 +352,129 @@ impl ControlCenter {
             panel_width: CC_WIDTH,
             next_tile_id: 1,
         };
-        
+
         cc.add_default_groups();
         cc
     }
-    
+
     fn add_default_groups(&mut self) {
-        // Network group (row of 2)
+        // Ağ grubu (2'li satır)
         let mut network = ControlGroup::new("Network", GroupLayout::Row2);
         let mut wifi = ControlTile::toggle(self.next_tile_id, "Wi-Fi", "📶");
         wifi.active = true;
         wifi.subtitle = String::from("echOS-WiFi");
         network.add_tile(wifi);
         self.next_tile_id += 1;
-        
+
         let mut bluetooth = ControlTile::toggle(self.next_tile_id, "Bluetooth", "🔵");
         bluetooth.active = true;
         bluetooth.subtitle = String::from("On");
         network.add_tile(bluetooth);
         self.next_tile_id += 1;
-        
+
         self.groups.push(network);
-        
-        // Media group (row of 3)
+
+        // Medya grubu (3'lü satır)
         let mut media = ControlGroup::new("Media", GroupLayout::Row3);
-        
+
         let mut airdrop = ControlTile::toggle(self.next_tile_id, "AirDrop", "📡");
         airdrop.subtitle = String::from("Contacts Only");
         media.add_tile(airdrop);
         self.next_tile_id += 1;
-        
+
         let mut focus = ControlTile::toggle(self.next_tile_id, "Focus", "🌙");
         focus.active = false;
         focus.subtitle = String::from("Off");
         media.add_tile(focus);
         self.next_tile_id += 1;
-        
+
         let mut airplane = ControlTile::toggle(self.next_tile_id, "Airplane", "✈");
         airplane.active = false;
         airplane.subtitle = String::from("Off");
         media.add_tile(airplane);
         self.next_tile_id += 1;
-        
+
         self.groups.push(media);
-        
-        // Display group (grid)
+
+        // Ekran grubu (ızgara)
         let mut display = ControlGroup::new("Display", GroupLayout::Grid);
-        
+
         let brightness = ControlTile::slider(self.next_tile_id, "Brightness", "☀", 0.8);
         display.add_tile(brightness);
         self.next_tile_id += 1;
-        
+
         let night = ControlTile::toggle(self.next_tile_id, "Night Shift", "🌙");
         display.add_tile(night);
         self.next_tile_id += 1;
-        
+
         let mut external = ControlTile::menu(self.next_tile_id, "Displays", "🖥", "Built-in");
         display.add_tile(external);
         self.next_tile_id += 1;
-        
+
         let mut hdr = ControlTile::toggle(self.next_tile_id, "HDR", "🎨");
         hdr.active = true;
         display.add_tile(hdr);
         self.next_tile_id += 1;
-        
+
         self.groups.push(display);
-        
-        // Sound group (row of 2)
+
+        // Ses grubu (2'li satır)
         let mut sound = ControlGroup::new("Sound", GroupLayout::Row2);
-        
+
         let volume = ControlTile::slider(self.next_tile_id, "Volume", "🔊", 0.7);
         sound.add_tile(volume);
         self.next_tile_id += 1;
-        
+
         let mut output = ControlTile::menu(self.next_tile_id, "Output", "🎧", "Speakers");
         sound.add_tile(output);
         self.next_tile_id += 1;
-        
+
         self.groups.push(sound);
-        
-        // Now Playing (large)
+
+        // Şu an çalınan (büyük kare)
         let mut now_playing = ControlGroup::new("Now Playing", GroupLayout::Large);
-        
+
         let mut music = ControlTile::button(self.next_tile_id, "Music", "🎵");
         music.subtitle = String::from("Not Playing");
         now_playing.add_tile(music);
         self.next_tile_id += 1;
-        
+
         self.groups.push(now_playing);
-        
-        // Quick actions (column)
+
+        // Hızlı eylemler (dikey yığın)
         let mut quick = ControlGroup::new("Quick Actions", GroupLayout::Column);
-        
+
         let mut dnd = ControlTile::toggle(self.next_tile_id, "Do Not Disturb", "🔕");
         quick.add_tile(dnd);
         self.next_tile_id += 1;
-        
+
         let mut screen = ControlTile::button(self.next_tile_id, "Screen Mirroring", "📺");
         quick.add_tile(screen);
         self.next_tile_id += 1;
-        
+
         let mut sleep = ControlTile::button(self.next_tile_id, "Sleep Display", "💤");
         quick.add_tile(sleep);
         self.next_tile_id += 1;
-        
+
         let mut lock = ControlTile::button(self.next_tile_id, "Lock Screen", "🔒");
         quick.add_tile(lock);
         self.next_tile_id += 1;
-        
+
         self.groups.push(quick);
     }
-    
-    /// Show control center
+
+    /// Kontrol merkezini göster
     pub fn show(&mut self) {
         self.visible = true;
         self.animation_progress = 0.0;
     }
-    
-    /// Hide control center
+
+    /// Kontrol merkezini gizle
     pub fn hide(&mut self) {
         self.visible = false;
     }
-    
-    /// Toggle visibility
+
+    /// Görünürlüğü değiştir
     pub fn toggle(&mut self) {
         if self.visible {
             self.hide();
@@ -471,8 +482,8 @@ impl ControlCenter {
             self.show();
         }
     }
-    
-    /// Update animation
+
+    /// Animasyonu güncelle
     pub fn update(&mut self, dt: f32) {
         if self.visible && self.animation_progress < 1.0 {
             self.animation_progress = (self.animation_progress + dt * 8.0).min(1.0);
@@ -480,20 +491,20 @@ impl ControlCenter {
             self.animation_progress = (self.animation_progress - dt * 8.0).max(0.0);
         }
     }
-    
-    /// Draw control center
+
+    /// Kontrol merkezini çiz
     pub fn draw(&self, fb: &mut Framebuffer) {
         if self.animation_progress <= 0.0 {
             return;
         }
-        
+
         let progress = self.animation_progress;
-        
-        // Calculate position (top-right, animated from top)
+
+        // Konumu hesapla (sağ üst, üstten kayarak)
         let panel_x = self.screen_width - self.panel_width;
-        let panel_y = (40.0 * (1.0 - progress)) as usize; // Animate from top
-        
-        // Dim background
+        let panel_y = (40.0 * (1.0 - progress)) as usize; // Üstten kaydır
+
+        // Arka planı karart
         let bg_alpha = 0.2 * progress;
         for y in 0..self.screen_height {
             for x in 0..panel_x {
@@ -503,58 +514,58 @@ impl ControlCenter {
                 unsafe { *ptr = dimmed; }
             }
         }
-        
-        // Panel background
+
+        // Panel arka planı
         fb.draw_rect(panel_x, panel_y, self.panel_width, self.screen_height - panel_y, Theme::WINDOW_BG.to_u32());
-        
-        // Draw groups
+
+        // Grupları çiz
         let mut y = panel_y + 16;
         let content_width = self.panel_width - 32;
         let x = panel_x + 16;
-        
+
         for group in &self.groups {
             group.draw(fb, x, y, content_width);
             y += group.height() + TILE_SPACING;
         }
     }
-    
+
     fn blend_color(bg: u32, fg: u32, alpha: f32) -> u32 {
         let br = ((bg >> 16) & 0xFF) as f32;
         let bg_ = ((bg >> 8) & 0xFF) as f32;
         let bb = (bg & 0xFF) as f32;
-        
+
         let fr = ((fg >> 16) & 0xFF) as f32;
         let fg_ = ((fg >> 8) & 0xFF) as f32;
         let fb = (fg & 0xFF) as f32;
-        
+
         let r = (br * (1.0 - alpha) + fr * alpha) as u32;
         let g = (bg_ * (1.0 - alpha) + fg_ * alpha) as u32;
         let b = (bb * (1.0 - alpha) + fb * alpha) as u32;
-        
+
         (r << 16) | (g << 8) | b
     }
-    
-    /// Handle click
+
+    /// Tıklama olayını işle
     pub fn on_click(&mut self, mx: i32, my: i32) -> ControlCenterEvent {
         let panel_x = self.screen_width - self.panel_width;
-        
-        // Check if outside panel
+
+        // Panel dışını kontrol et
         if mx < panel_x as i32 {
             self.hide();
             return ControlCenterEvent::Cancelled;
         }
-        
-        // Check groups
+
+        // Grupları kontrol et
         let mut y = 16;
         let content_width = self.panel_width - 32;
         let x = panel_x + 16;
-        
+
         for (group_idx, group) in self.groups.iter_mut().enumerate() {
             if let Some(tile_idx) = group.hit_test(mx, my, x, y, content_width) {
                 if tile_idx < group.tiles.len() {
                     let tile = &mut group.tiles[tile_idx];
                     let tile_id = tile.id;
-                    
+
                     match tile.tile_type {
                         TileType::Toggle => {
                             tile.toggle_active();
@@ -567,58 +578,58 @@ impl ControlCenter {
                             return ControlCenterEvent::MenuRequested(tile_id, tile.name.clone());
                         }
                         TileType::Slider => {
-                            // Would open slider detail view
+                            // Kaydırıcı detay görünümü açılacak
                             return ControlCenterEvent::SliderAdjusted(tile_id, tile.value);
                         }
                     }
                 }
             }
-            
+
             y += group.height() + TILE_SPACING;
         }
-        
+
         ControlCenterEvent::None
     }
-    
-    /// Handle drag (for sliders)
+
+    /// Sürükleme olayını işle (kaydırıcılar için)
     pub fn on_drag(&mut self, mx: i32, my: i32, start_x: i32, start_y: i32) -> ControlCenterEvent {
         let panel_x = self.screen_width - self.panel_width;
-        
-        // Find slider being dragged
+
+        // Sürüklenen kaydırıcıyı bul
         let mut y = 16;
         let content_width = self.panel_width - 32;
         let x = panel_x + 16;
-        
+
         for group in &mut self.groups {
             if let Some(tile_idx) = group.hit_test(start_x, start_y, x, y, content_width) {
                 if tile_idx < group.tiles.len() {
                     let tile = &mut group.tiles[tile_idx];
                     if tile.tile_type == TileType::Slider {
-                        // Calculate new value based on drag position
+                        // Sürükleme konumuna göre yeni değeri hesapla
                         let tile_width = (content_width - TILE_SPACING * 3) / 2;
                         let tile_x = x + TILE_SPACING + (tile_idx % 2) * (tile_width + TILE_SPACING);
-                        
+
                         let new_value = ((mx - tile_x as i32) as f32 / tile_width as f32).max(0.0).min(1.0);
                         tile.set_value(new_value);
-                        
+
                         return ControlCenterEvent::SliderAdjusted(tile.id, tile.value);
                     }
                 }
             }
-            
+
             y += group.height() + TILE_SPACING;
         }
-        
+
         ControlCenterEvent::None
     }
-    
-    /// Resize
+
+    /// Yeniden boyutlandır
     pub fn resize(&mut self, width: usize, height: usize) {
         self.screen_width = width;
         self.screen_height = height;
     }
-    
-    /// Get tile by ID
+
+    /// Kimliğe göre kare al
     pub fn get_tile_mut(&mut self, id: u32) -> Option<&mut ControlTile> {
         for group in &mut self.groups {
             for tile in &mut group.tiles {
@@ -631,7 +642,7 @@ impl ControlCenter {
     }
 }
 
-/// Control center events
+/// Kontrol merkezi olayları
 #[derive(Clone, Debug)]
 pub enum ControlCenterEvent {
     None,
@@ -643,21 +654,21 @@ pub enum ControlCenterEvent {
 }
 
 // ============================================================================
-// GLOBAL CONTROL CENTER
+// GLOBAL KONTROL MERKEZİ
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref CONTROL_CENTER: Mutex<ControlCenter> = Mutex::new(ControlCenter::new(1920, 1080));
 }
 
-/// Initialize control center
+/// Kontrol merkezini başlat
 pub fn init(width: usize, height: usize) {
     let mut cc = CONTROL_CENTER.lock();
     cc.resize(width, height);
     crate::serial_println!("[GUI] Control Center initialized");
 }
 
-/// Get control center
+/// Kontrol merkezine erişim sağla
 pub fn get_control_center() -> &'static Mutex<ControlCenter> {
     &CONTROL_CENTER
 }

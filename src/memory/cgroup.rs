@@ -1,6 +1,6 @@
-//! # Memory Cgroups
+//! # Bellek Cgroup'ları
 //!
-//! Resource control for process groups (cgroups v2 memory controller).
+//! Süreç grupları için kaynak kontrolü (cgroups v2 bellek denetleyicisi).
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -9,117 +9,117 @@ use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use spin::{Mutex, RwLock};
 
 // ============================================================================
-// CGROUP CONSTANTS
+// CGROUP SABİTLERİ
 // ============================================================================
 
-/// Maximum cgroups
+/// Maksimum cgroup sayısı
 pub const CGROUP_MAX: usize = 4096;
-/// Default memory limit (unlimited)
+/// Varsayılan bellek limiti (sınırsız)
 pub const MEMORY_LIMIT_UNLIMITED: u64 = u64::MAX;
-/// Default oom_score_adj
+/// Varsayılan oom_score_adj
 pub const OOM_SCORE_ADJ_DEFAULT: i32 = 0;
-/// OOM score adjustment min/max
+/// OOM skor düzeltme min/maks
 pub const OOM_SCORE_ADJ_MIN: i32 = -1000;
 pub const OOM_SCORE_ADJ_MAX: i32 = 1000;
 
 // ============================================================================
-// MEMORY CGROUP
+// BELLEK CGROUP
 // ============================================================================
 
-/// Memory cgroup
+/// Bellek cgroup'u
 #[derive(Debug)]
 pub struct MemoryCgroup {
-    /// Cgroup ID
+    /// Cgroup kimliği
     pub id: u64,
-    /// Name/path
+    /// Ad/yol
     pub name: String,
-    /// Parent cgroup
+    /// Üst cgroup
     pub parent: Option<u64>,
-    /// Children
+    /// Alt cgroup'lar
     pub children: Mutex<Vec<u64>>,
-    /// Processes in this cgroup
+    /// Bu cgroup'taki süreçler
     pub processes: Mutex<Vec<u64>>,
-    /// Memory limit
+    /// Bellek limiti
     pub limit: AtomicU64,
-    /// Current usage
+    /// Mevcut kullanım
     pub usage: AtomicU64,
-    /// Peak usage
+    /// En yüksek kullanım
     pub peak_usage: AtomicU64,
-    /// Soft limit
+    /// Yumuşak limit
     pub soft_limit: AtomicU64,
-    /// Swap limit
+    /// Takas limiti
     pub swap_limit: AtomicU64,
-    /// Swap usage
+    /// Takas kullanımı
     pub swap_usage: AtomicU64,
-    /// OOM score adjustment
+    /// OOM skor düzeltmesi
     pub oom_score_adj: AtomicI64,
-    /// OOM kill enabled
+    /// OOM kill etkin
     pub oom_kill_enable: AtomicBool,
-    /// Memory events
+    /// Bellek olayları
     pub events: Mutex<MemoryEvents>,
-    /// Stats
+    /// İstatistikler
     pub stats: Mutex<MemoryStats>,
-    /// Is root cgroup
+    /// Kök cgroup mu
     pub is_root: bool,
 }
 
-/// Memory events
+/// Bellek olayları
 #[derive(Clone, Debug, Default)]
 pub struct MemoryEvents {
-    /// Low events (below low threshold)
+    /// Düşük olaylar (düşük eşiğin altında)
     pub low: u64,
-    /// High events (above high threshold)
+    /// Yüksek olaylar (yüksek eşiğin üzerinde)
     pub high: u64,
-    /// Max events (at limit)
+    /// Maks olaylar (limitte)
     pub max: u64,
-    /// OOM events
+    /// OOM olayları
     pub oom: u64,
-    /// OOM kill events
+    /// OOM kill olayları
     pub oom_kill: u64,
-    /// OOM group kill events
+    /// OOM grup kill olayları
     pub oom_group_kill: u64,
 }
 
-/// Memory statistics
+/// Bellek istatistikleri
 #[derive(Clone, Debug, Default)]
 pub struct MemoryStats {
-    /// Anonymous memory
+    /// Anonim bellek
     pub anon: u64,
-    /// File cache
+    /// Dosya önbelleği
     pub file: u64,
-    /// Kernel memory
+    /// Çekirdek belleği
     pub kernel: u64,
-    /// Kernel stack
+    /// Çekirdek yığını
     pub kernel_stack: u64,
-    /// Page tables
+    /// Sayfa tabloları
     pub pgtable: u64,
-    /// Swap cache
+    /// Takas önbelleği
     pub swap_cache: u64,
-    /// Active anon
+    /// Etkin anonim
     pub active_anon: u64,
-    /// Inactive anon
+    /// Etkin olmayan anonim
     pub inactive_anon: u64,
-    /// Active file
+    /// Etkin dosya
     pub active_file: u64,
-    /// Inactive file
+    /// Etkin olmayan dosya
     pub inactive_file: u64,
-    /// Unevictable
+    /// Tahliye edilemez
     pub unevictable: u64,
-    /// Slab reclaimable
+    /// Geri kazanılabilir slab
     pub slab_reclaimable: u64,
-    /// Slab unreclaimable
+    /// Geri kazanılamaz slab
     pub slab_unreclaimable: u64,
-    /// Workingset refault
+    /// Çalışma kümesi yeniden hata
     pub workingset_refault: u64,
-    /// Workingset activate
+    /// Çalışma kümesi etkinleştirme
     pub workingset_activate: u64,
-    /// Workingset nodereclaim
+    /// Çalışma kümesi düğüm geri kazanım
     pub workingset_nodereclaim: u64,
-    /// Page fault count
+    /// Sayfa hatası sayısı
     pub pgfault: u64,
-    /// Major fault count
+    /// Büyük hata sayısı
     pub pgmajfault: u64,
-    /// Refault count
+    /// Yeniden hata sayısı
     pub refault: u64,
 }
 
@@ -145,7 +145,7 @@ impl MemoryCgroup {
         }
     }
 
-    /// Add process to cgroup
+    /// Süreci cgroup'a ekle
     pub fn add_process(&self, pid: u64) {
         let mut procs = self.processes.lock();
         if !procs.contains(&pid) {
@@ -153,119 +153,119 @@ impl MemoryCgroup {
         }
     }
 
-    /// Remove process from cgroup
+    /// Süreci cgroup'tan kaldır
     pub fn remove_process(&self, pid: u64) {
         self.processes.lock().retain(|&p| p != pid);
     }
 
-    /// Charge memory to this cgroup
+    /// Bu cgroup'a bellek yükle
     pub fn charge(&self, bytes: u64) -> Result<(), CgroupError> {
         let limit = self.limit.load(Ordering::SeqCst);
         let current = self.usage.load(Ordering::SeqCst);
         let new_usage = current + bytes;
-        
-        // Check limit
+
+        // Limiti kontrol et
         if limit != MEMORY_LIMIT_UNLIMITED && new_usage > limit {
-            // Memory limit exceeded
+            // Bellek limiti aşıldı
             self.events.lock().max += 1;
-            
-            // Try to reclaim
+
+            // Geri kazanmayı dene
             if self.try_reclaim(bytes) {
                 return Ok(());
             }
-            
-            // Check if OOM kill is enabled
+
+            // OOM kill'in etkinleştirilip etkinleştirilmediğini kontrol et
             if self.oom_kill_enable.load(Ordering::SeqCst) {
                 self.trigger_oom();
             }
-            
+
             return Err(CgroupError::MemoryLimitExceeded);
         }
-        
+
         self.usage.store(new_usage, Ordering::SeqCst);
-        
-        // Update peak
+
+        // En yüksek değeri güncelle
         let peak = self.peak_usage.load(Ordering::SeqCst);
         if new_usage > peak {
             self.peak_usage.store(new_usage, Ordering::SeqCst);
         }
-        
-        // Propagate to parent
+
+        // Üst cgroup'a yay
         // if let Some(parent_id) = self.parent {
         //     if let Some(parent) = CGROUP_MANAGER.get_cgroup(parent_id) {
         //         parent.charge(bytes);
         //     }
         // }
-        
+
         Ok(())
     }
 
-    /// Uncharge memory
+    /// Bellek yükünü kaldır
     pub fn uncharge(&self, bytes: u64) {
         let current = self.usage.load(Ordering::SeqCst);
         let new_usage = current.saturating_sub(bytes);
         self.usage.store(new_usage, Ordering::SeqCst);
     }
 
-    /// Try to reclaim memory
+    /// Belleği geri kazanmaya çalış
     fn try_reclaim(&self, needed: u64) -> bool {
-        // Trigger memory reclaim for this cgroup
-        // Would call into memory management
+        // Bu cgroup için bellek geri kazanımı tetikle
+        // Bellek yönetimini çağırır
         false
     }
 
-    /// Trigger OOM kill
+    /// OOM kill'i tetikle
     fn trigger_oom(&self) {
         let mut events = self.events.lock();
         events.oom += 1;
         events.oom_kill += 1;
-        
+
         crate::serial_println!(
             "[CGROUP] OOM kill triggered for cgroup '{}' (usage: {}, limit: {})",
             self.name,
             self.usage.load(Ordering::SeqCst),
             self.limit.load(Ordering::SeqCst)
         );
-        
-        // Call OOM killer for this cgroup's processes
+
+        // Bu cgroup'un süreçleri için OOM killer'ı çağır
         // crate::memory::oom::oom_kill_cgroup(self);
     }
 
-    /// Set memory limit
+    /// Bellek limitini ayarla
     pub fn set_limit(&self, limit: u64) {
         self.limit.store(limit, Ordering::SeqCst);
-        
-        // Check if we're already over limit
+
+        // Zaten limitin üzerinde miyiz kontrol et
         let usage = self.usage.load(Ordering::SeqCst);
         if limit != MEMORY_LIMIT_UNLIMITED && usage > limit {
             self.try_reclaim(usage - limit);
         }
     }
 
-    /// Get process count
+    /// Süreç sayısını al
     pub fn process_count(&self) -> usize {
         self.processes.lock().len()
     }
 
-    /// Get child count
+    /// Alt cgroup sayısını al
     pub fn child_count(&self) -> usize {
         self.children.lock().len()
     }
 }
 
 // ============================================================================
-// CGROUP MANAGER
+// CGROUP YÖNETİCİSİ
 // ============================================================================
 
-/// Cgroup manager
+/// Cgroup yöneticisi
 pub struct CgroupManager {
-    /// All cgroups
+    /// Tüm cgroup'lar
     cgroups: RwLock<BTreeMap<u64, MemoryCgroup>>,
-    /// Next cgroup ID
+    /// Sonraki cgroup kimliği
     next_id: AtomicU64,
-    /// Root cgroup
+    /// Kök cgroup
     root_id: AtomicU64,
-    /// Process to cgroup mapping
+    /// Süreç-cgroup eşlemesi
     proc_to_cgroup: Mutex<BTreeMap<u64, u64>>,
 }
 
@@ -279,121 +279,121 @@ impl CgroupManager {
         }
     }
 
-    /// Initialize with root cgroup
+    /// Kök cgroup ile başlat
     pub fn init(&self) {
         let root = MemoryCgroup::new(0, "/", None, true);
         self.cgroups.write().insert(0, root);
         self.root_id.store(0, Ordering::SeqCst);
-        
+
         crate::serial_println!("[CGROUP] Initialized root cgroup");
     }
 
-    /// Create new cgroup
+    /// Yeni cgroup oluştur
     pub fn create_cgroup(&self, name: &str, parent_id: u64) -> Result<u64, CgroupError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        
-        // Verify parent exists
+
+        // Üst cgroup'un var olduğunu doğrula
         {
             let cgroups = self.cgroups.read();
             if !cgroups.contains_key(&parent_id) {
                 return Err(CgroupError::ParentNotFound);
             }
         }
-        
+
         let cgroup = MemoryCgroup::new(id, name, Some(parent_id), false);
-        
-        // Add to parent's children
+
+        // Üst cgroup'un alt listesine ekle
         {
             let cgroups = self.cgroups.read();
             if let Some(parent) = cgroups.get(&parent_id) {
                 parent.children.lock().push(id);
             }
         }
-        
+
         self.cgroups.write().insert(id, cgroup);
-        
+
         crate::serial_println!("[CGROUP] Created cgroup '{}' (id={})", name, id);
-        
+
         Ok(id)
     }
 
-    /// Remove cgroup
+    /// Cgroup'u kaldır
     pub fn remove_cgroup(&self, id: u64) -> Result<(), CgroupError> {
         let cgroups = self.cgroups.read();
-        
+
         if let Some(cgroup) = cgroups.get(&id) {
-            // Cannot remove if has processes
+            // Süreç varsa kaldırılamaz
             if cgroup.process_count() > 0 {
                 return Err(CgroupError::NotEmpty);
             }
-            
-            // Cannot remove if has children
+
+            // Alt cgroup varsa kaldırılamaz
             if cgroup.child_count() > 0 {
                 return Err(CgroupError::HasChildren);
             }
-            
-            // Remove from parent
+
+            // Üst cgroup'tan kaldır
             if let Some(parent_id) = cgroup.parent {
                 if let Some(parent) = cgroups.get(&parent_id) {
                     parent.children.lock().retain(|&c| c != id);
                 }
             }
         }
-        
+
         drop(cgroups);
         self.cgroups.write().remove(&id);
-        
+
         Ok(())
     }
 
-    /// Get cgroup by ID
+    /// Kimliğe göre cgroup al
     pub fn get_cgroup(&self, id: u64) -> Option<MemoryCgroup> {
         self.cgroups.read().get(&id).cloned()
     }
 
-    /// Move process to cgroup
+    /// Süreci cgroup'a taşı
     pub fn move_process(&self, pid: u64, cgroup_id: u64) -> Result<(), CgroupError> {
-        // Remove from old cgroup
+        // Eski cgroup'tan kaldır
         if let Some(old_id) = self.proc_to_cgroup.lock().get(&pid).copied() {
             if let Some(old_cgroup) = self.get_cgroup(old_id) {
                 old_cgroup.remove_process(pid);
             }
         }
-        
-        // Add to new cgroup
+
+        // Yeni cgroup'a ekle
         let cgroup = self.get_cgroup(cgroup_id).ok_or(CgroupError::NotFound)?;
         cgroup.add_process(pid);
         self.proc_to_cgroup.lock().insert(pid, cgroup_id);
-        
+
         Ok(())
     }
 
-    /// Get cgroup for process
+    /// Süreç için cgroup al
     pub fn get_cgroup_for_process(&self, pid: u64) -> Option<u64> {
         self.proc_to_cgroup.lock().get(&pid).copied()
     }
 
-    /// Charge memory for process
+    /// Süreç için bellek yükle
     pub fn charge_process(&self, pid: u64, bytes: u64) -> Result<(), CgroupError> {
         let cgroup_id = self.get_cgroup_for_process(pid).unwrap_or(0);
-        
+
         if let Some(cgroup) = self.get_cgroup(cgroup_id) {
             cgroup.charge(bytes)?;
         }
-        
+
         Ok(())
     }
 
-    /// Uncharge memory for process
+    /// Süreç için bellek yükünü kaldır
     pub fn uncharge_process(&self, pid: u64, bytes: u64) {
         let cgroup_id = self.get_cgroup_for_process(pid).unwrap_or(0);
-        
+
         if let Some(cgroup) = self.get_cgroup(cgroup_id) {
             cgroup.uncharge(bytes);
         }
     }
 
-    /// Get all cgroups
+    /// Tüm cgroup'ları listele
     pub fn list_cgroups(&self) -> Vec<(u64, String)> {
         self.cgroups.read()
             .iter()
@@ -402,7 +402,7 @@ impl CgroupManager {
     }
 }
 
-// Clone implementation for MemoryCgroup (needed for get_cgroup)
+// MemoryCgroup için Clone implementasyonu (get_cgroup için gerekli)
 impl Clone for MemoryCgroup {
     fn clone(&self) -> Self {
         Self {
@@ -427,12 +427,12 @@ impl Clone for MemoryCgroup {
 }
 
 lazy_static::lazy_static! {
-    /// Global cgroup manager
+    /// Global cgroup yöneticisi
     pub static ref CGROUP_MANAGER: CgroupManager = CgroupManager::new();
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TİPİ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,21 +446,21 @@ pub enum CgroupError {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
-/// Initialize cgroup subsystem
+/// Cgroup alt sistemini başlat
 pub fn init() {
     CGROUP_MANAGER.init();
     crate::serial_println!("[CGROUP] Subsystem initialized");
 }
 
-/// Create cgroup
+/// Cgroup oluştur
 pub fn create(name: &str, parent: u64) -> Result<u64, CgroupError> {
     CGROUP_MANAGER.create_cgroup(name, parent)
 }
 
-/// Get cgroup stats
+/// Cgroup istatistiklerini al
 pub fn get_stats(cgroup_id: u64) -> Option<MemoryStats> {
     CGROUP_MANAGER.get_cgroup(cgroup_id).map(|cg| cg.stats.lock().clone())
 }

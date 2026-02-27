@@ -90,7 +90,7 @@ pub fn term_print(s: &str) {
                         cursor_y += char_height;
                     }
                 } else if c == '\x08' {
-                    // Backspace
+                    // Geri al (Backspace) — imleçi bir karakter geri çekerek önceki hücrreyi temizler
                     if cursor_x >= char_width {
                         cursor_x -= char_width;
                         // Silmek için boşluk yaz

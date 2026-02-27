@@ -1,6 +1,6 @@
-//! # Quota Management
+//! # Kota Yönetimi
 //!
-//! Disk quota support for users and groups.
+//! Kullanıcı ve gruplar için disk kotası desteği.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -9,15 +9,15 @@ use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// QUOTA CONSTANTS
+// KOTA SABİTLERİ
 // ============================================================================
 
-/// Quota types
+/// Kota türleri
 pub const USRQUOTA: u32 = 0;
 pub const GRPQUOTA: u32 = 1;
 pub const PRJQUOTA: u32 = 2;
 
-/// Quota commands
+/// Kota komutları
 pub const Q_SYNC: u32 = 0x800001;
 pub const Q_GETQUOTA: u32 = 0x800002;
 pub const Q_SETQUOTA: u32 = 0x800003;
@@ -26,40 +26,40 @@ pub const Q_SETINFO: u32 = 0x800005;
 pub const Q_GETFMT: u32 = 0x800006;
 pub const Q_GETNEXTQUOTA: u32 = 0x800007;
 
-/// Quota formats
+/// Kota formatları
 pub const QFMT_VFS_OLD: u32 = 1;
 pub const QFMT_VFS_V0: u32 = 2;
 pub const QFMT_VFS_V1: u32 = 4;
 
-/// Quota flags
+/// Kota bayrakları
 pub const Q_QUOTA_ENFD: u32 = 0x01;
 pub const Q_QUOTA_OFF: u32 = 0x02;
 pub const Q_FAKE_QUOTA: u32 = 0x04;
 
 // ============================================================================
-// QUOTA STRUCTURES
+// KOTA YAPILARI
 // ============================================================================
 
-/// Quota information for a user/group
+/// Kullanıcı/grup için kota bilgisi
 #[derive(Clone, Debug)]
 pub struct QuotaDqblk {
-    /// Hard limit (blocks)
+    /// Blok sayısı için katı sınır
     pub dqb_bhardlimit: u64,
-    /// Soft limit (blocks)
+    /// Blok sayısı için yumuşak sınır
     pub dqb_bsoftlimit: u64,
-    /// Current usage (blocks)
+    /// Mevcut blok kullanımı
     pub dqb_curspace: u64,
-    /// Hard limit (inodes)
+    /// İnode sayısı için katı sınır
     pub dqb_ihardlimit: u64,
-    /// Soft limit (inodes)
+    /// İnode sayısı için yumuşak sınır
     pub dqb_isoftlimit: u64,
-    /// Current usage (inodes)
+    /// Mevcut inode kullanımı
     pub dqb_curinodes: u64,
-    /// Time limit for soft block limit
+    /// Yumuşak blok sınırı için zaman limiti
     pub dqb_btime: u64,
-    /// Time limit for soft inode limit
+    /// Yumuşak inode sınırı için zaman limiti
     pub dqb_itime: u64,
-    /// Valid fields
+    /// Geçerli alanlar
     pub dqb_valid: u32,
 }
 
@@ -79,23 +79,23 @@ impl Default for QuotaDqblk {
     }
 }
 
-/// Quota info structure
+/// Kota bilgi yapısı
 #[derive(Clone, Debug)]
 pub struct QuotaInfo {
-    /// Number of blocks in filesystem
+    /// Dosya sistemindeki blok sayıcısı
     pub dqi_bgrace: u64,
-    /// Number of inodes in filesystem
+    /// Dosya sistemindeki inode sayıcısı
     pub dqi_igrace: u64,
-    /// Quota flags
+    /// Kota bayrakları
     pub dqi_flags: u32,
-    /// Quota format
+    /// Kota formatı
     pub dqi_fmt: u32,
 }
 
 impl Default for QuotaInfo {
     fn default() -> Self {
         Self {
-            dqi_bgrace: 7 * 24 * 3600, // 7 days
+            dqi_bgrace: 7 * 24 * 3600, // 7 gün
             dqi_igrace: 7 * 24 * 3600,
             dqi_flags: 0,
             dqi_fmt: QFMT_VFS_V1,
@@ -104,7 +104,7 @@ impl Default for QuotaInfo {
 }
 
 // ============================================================================
-// QUOTA ENTRY
+// KOTA GİRİŞİ
 // ============================================================================
 
 #[derive(Clone, Debug)]
@@ -137,19 +137,19 @@ impl QuotaEntry {
         }
     }
 
-    /// Check if block quota is exceeded
+    /// Blok kotasinin aşılıp aşılmadığını kontrol eder
     pub fn is_block_exceeded(&self) -> bool {
         let usage = self.block_usage.load(Ordering::Relaxed);
         usage > self.block_hard && self.block_hard > 0
     }
 
-    /// Check if inode quota is exceeded
+    /// Inode kotasinin aşılıp aşılmadığını kontrol eder
     pub fn is_inode_exceeded(&self) -> bool {
         let usage = self.inode_usage.load(Ordering::Relaxed);
         usage > self.inode_hard && self.inode_hard > 0
     }
 
-    /// Convert to dqblk
+    /// dqblk formatına dönüştürür
     pub fn to_dqblk(&self) -> QuotaDqblk {
         QuotaDqblk {
             dqb_bhardlimit: self.block_hard,
@@ -164,7 +164,7 @@ impl QuotaEntry {
         }
     }
 
-    /// Update from dqblk
+    /// dqblk'ten günceller
     pub fn from_dqblk(&mut self, dqblk: &QuotaDqblk) {
         self.block_hard = dqblk.dqb_bhardlimit;
         self.block_soft = dqblk.dqb_bsoftlimit;
@@ -174,7 +174,7 @@ impl QuotaEntry {
 }
 
 // ============================================================================
-// QUOTA FILESYSTEM
+// KOTA DOSYA SİSTEMİ
 // ============================================================================
 
 pub struct QuotaFilesystem {
@@ -200,25 +200,25 @@ impl QuotaFilesystem {
         }
     }
 
-    /// Enable quota
+    /// Kotayı etkinleştirir
     pub fn enable(&self, quota_type: u32) -> Result<(), QuotaError> {
         self.enabled.fetch_or(1 << quota_type, Ordering::SeqCst);
-        crate::serial_println!("[QUOTA] Enabled {} quota on {}", 
+        crate::serial_println!("[QUOTA] {} kotası etkinleştirildi: {}", 
             quota_name(quota_type), self.mount_point);
         Ok(())
     }
 
-    /// Disable quota
+    /// Kotayı devre dışı bırakır
     pub fn disable(&self, quota_type: u32) {
         self.enabled.fetch_and(!(1 << quota_type), Ordering::SeqCst);
     }
 
-    /// Check if quota is enabled
+    /// Kotanin etkin olup olmadığını kontrol eder
     pub fn is_enabled(&self, quota_type: u32) -> bool {
         (self.enabled.load(Ordering::SeqCst) & (1 << quota_type)) != 0
     }
 
-    /// Get quota entry
+    /// Kota girişini getirir
     pub fn get_quota(&self, quota_type: u32, id: u32) -> Option<QuotaEntry> {
         match quota_type {
             USRQUOTA => self.user_quotas.lock().get(&id).cloned(),
@@ -228,7 +228,7 @@ impl QuotaFilesystem {
         }
     }
 
-    /// Set quota
+    /// Kotayı ayarlar
     pub fn set_quota(&self, quota_type: u32, id: u32, dqblk: &QuotaDqblk) -> Result<(), QuotaError> {
         let entry = match quota_type {
             USRQUOTA => self.user_quotas.lock().entry(id).or_insert_with(|| QuotaEntry::new(id, quota_type)),
@@ -241,7 +241,7 @@ impl QuotaFilesystem {
         Ok(())
     }
 
-    /// Charge block usage
+    /// Blok kullanımını şarj eder
     pub fn charge_blocks(&self, quota_type: u32, id: u32, blocks: u64) -> Result<(), QuotaError> {
         if !self.is_enabled(quota_type) {
             return Ok(());
@@ -263,7 +263,7 @@ impl QuotaFilesystem {
             }
             
             if entry.block_soft > 0 && new_usage > entry.block_soft {
-                // Start timer for soft limit
+                // Yumuşak sınır için zamanlayıcı başlat
                 if entry.block_time.load(Ordering::Relaxed) == 0 {
                     entry.block_time.store(
                         crate::task::scheduler::get_ticks() as i64 + 
@@ -279,19 +279,19 @@ impl QuotaFilesystem {
         Ok(())
     }
 
-    /// Charge inode usage
+    /// Inode kullanımını şarj eder
     pub fn charge_inodes(&self, quota_type: u32, id: u32, count: u64) -> Result<(), QuotaError> {
         if !self.is_enabled(quota_type) {
             return Ok(());
         }
         
-        // Similar to charge_blocks
+        // charge_blocks'a benzer
         Ok(())
     }
 
-    /// Sync quota to disk
+    /// Kotayı diske yazarak senkronize eder
     pub fn sync(&self) -> Result<(), QuotaError> {
-        // Write quota file to disk
+        // Kota dosyasını diske yaz
         Ok(())
     }
 }
@@ -306,7 +306,7 @@ fn quota_name(t: u32) -> &'static str {
 }
 
 // ============================================================================
-// QUOTA MANAGER
+// KOTA YÖNETİCİSİ
 // ============================================================================
 
 pub struct QuotaManager {
@@ -351,7 +351,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TÜRÜ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,7 +363,7 @@ pub enum QuotaError {
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARAYÜZÜ
 // ============================================================================
 
 pub fn sys_quotactl(cmd: u32, special: &str, id: u32, addr: u64) -> i32 {
@@ -371,29 +371,28 @@ pub fn sys_quotactl(cmd: u32, special: &str, id: u32, addr: u64) -> i32 {
     let command = cmd & 0xFF;
     
     match command {
-        1 => { // Q_QUOTAON
+        1 => { // Q_QUOTAON: Kotayı etkinleştir
             if let Some(fs) = QUOTA_MANAGER.get(special) {
                 let _ = fs.enable(quota_type);
             }
             0
         }
-        2 => { // Q_QUOTAOFF
+        2 => { // Q_QUOTAOFF: Kotayı devre dışı bırak
             if let Some(fs) = QUOTA_MANAGER.get(special) {
                 fs.disable(quota_type);
             }
             0
         }
-        3 => { // Q_GETQUOTA
+        3 => { // Q_GETQUOTA: Kotayı al
             if let Some(fs) = QUOTA_MANAGER.get(special) {
                 if let Some(entry) = fs.get_quota(quota_type, id) {
-                    // Copy dqblk to addr
+                    // dqblk'i addr'ye kopyala
                     return 0;
                 }
             }
             -2 // ENOENT
         }
-        4 => { // Q_SETQUOTA
-            // Read dqblk from addr and set
+        4 => { // Q_SETQUOTA: dqblk'i addr'den oku ve ayarla
             0
         }
         _ => -22, // EINVAL
@@ -401,9 +400,9 @@ pub fn sys_quotactl(cmd: u32, special: &str, id: u32, addr: u64) -> i32 {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLAŞMA
 // ============================================================================
 
 pub fn init() {
-    crate::serial_println!("[QUOTA] Subsystem initialized");
+    crate::serial_println!("[QUOTA] Alt sistemi başlatıldı");
 }

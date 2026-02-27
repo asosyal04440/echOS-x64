@@ -143,6 +143,13 @@ const SYS_GETRANDOM: usize = 318;
 const SYS_IO_URING_SETUP: usize = 425;
 const SYS_IO_URING_ENTER: usize = 426;
 
+// echOS — Grafik / Pencere Sunucusu (Faz 5)
+const SYS_WIN_CREATE:     usize = 451;
+const SYS_WIN_DESTROY:    usize = 452;
+const SYS_WIN_GET_BUFFER: usize = 453;
+const SYS_WIN_FLUSH:      usize = 454;
+const SYS_EVENT_POLL:     usize = 455;
+
 // Process/Thread management
 const SYS_CLONE: usize = 56;
 const SYS_SET_TID_ADDRESS: usize = 218;
@@ -541,6 +548,18 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_ACCEPT => sys_accept(args[0], args[1], args[2]),
         SYS_LISTEN => sys_listen(args[0], args[1]),
         SYS_SETSOCKOPT => sys_setsockopt(args[0], args[1], args[2], args[3], args[4]),
+
+        // --- WINDOW SERVER (echOS Faz 5) ---
+        SYS_WIN_CREATE     => crate::gui::win_server::sys_win_create(
+                                  args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_WIN_DESTROY    => crate::gui::win_server::sys_win_destroy(
+                                  args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_WIN_GET_BUFFER => crate::gui::win_server::sys_win_get_buffer(
+                                  args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_WIN_FLUSH      => crate::gui::win_server::sys_win_flush(
+                                  args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_EVENT_POLL     => crate::gui::win_server::sys_event_poll(
+                                  args[0], args[1], args[2], args[3], args[4], args[5]),
 
         _ => errno(ENOSYS),
     };

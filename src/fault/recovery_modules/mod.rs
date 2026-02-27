@@ -1,6 +1,6 @@
-//! # Recovery Modules
+//! # Kurtarma Modülleri
 //!
-//! Module-specific recovery implementations.
+//! Modüle özgü kurtarma uygulamaları.
 
 pub mod memory;
 pub mod driver;
@@ -10,5 +10,5 @@ pub mod network;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub fn init() {
-    crate::serial_println!("[RECOVERY_MODULES] Initialized");
+    crate::serial_println!("[RECOVERY_MODULES] Başlatıldı");
 }

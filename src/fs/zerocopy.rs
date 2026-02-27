@@ -1,6 +1,6 @@
-//! # sendfile and splice
+//! # sendfile ve splice
 //!
-//! Zero-copy data transfer between file descriptors.
+//! Dosya tanımlayıcıları arasında sıfır kopya (zero-copy) veri transferi.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -8,18 +8,18 @@ use core::sync::atomic::{AtomicU64, Ordering};
 // SENDFILE
 // ============================================================================
 
-/// sendfile syscall - transfer data between file descriptors
+/// sendfile sistem çağrısı - dosya tanımlayıcıları arasında veri transferi
 /// 
-/// # Arguments
-/// - `out_fd`: Output file descriptor
-/// - `in_fd`: Input file descriptor  
-/// - `offset`: Offset to read from (optional)
-/// - `count`: Number of bytes to transfer
+/// # Argümanlar
+/// - `out_fd`: Çıkış dosya tanımlayıcısı
+/// - `in_fd`: Giriş dosya tanımlayıcısı  
+/// - `offset`: Okuma başlangıcı (isteğe bağlı)
+/// - `count`: Aktarılacak bayt sayısı
 /// 
-/// # Returns
-/// Number of bytes transferred, or negative errno
+/// # Döndürür
+/// Aktarilan bayt sayısı veya negatif errno
 pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset: Option<&mut u64>, count: usize) -> i64 {
-    // Validate file descriptors
+    // Dosya tanımlayıcıları doğrula
     if out_fd < 0 || in_fd < 0 {
         return -9; // EBADF
     }
@@ -28,29 +28,29 @@ pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset: Option<&mut u64>, count: us
         return 0;
     }
     
-    // Get file types
-    // in_fd must be a regular file with mmap support
-    // out_fd must be a socket or pipe
+    // Dosya türlerini al
+    // in_fd mmap destekli normal dosya olmalı
+    // out_fd soket veya boru olmalı
     
     let mut bytes_transferred: u64 = 0;
     let mut read_offset = offset.map(|o| *o).unwrap_or(0);
     
-    // Transfer in chunks
-    let chunk_size = 65536; // 64KB chunks
+    // Parçalar halinde aktar
+    let chunk_size = 65536; // 64KB parçalar
     let mut remaining = count;
     
     while remaining > 0 {
         let to_transfer = core::cmp::min(remaining, chunk_size);
         
-        // Read from input
-        // In real implementation, would use page cache directly
+        // Girişten oku
+        // Gerçek uygulamada doğrudan sayfa önbelleği kullanılır
         let read_bytes = read_from_fd(in_fd, read_offset, to_transfer as u32);
         
         if read_bytes <= 0 {
             break;
         }
         
-        // Write to output
+        // Çıkışa yaz
         let written = write_to_fd(out_fd, read_offset, read_bytes as u32);
         
         if written <= 0 {
@@ -62,7 +62,7 @@ pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset: Option<&mut u64>, count: us
         remaining -= written as usize;
         
         if written < read_bytes {
-            // Short write
+            // Kısa yazı
             break;
         }
     }
@@ -77,15 +77,15 @@ pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset: Option<&mut u64>, count: us
     bytes_transferred as i64
 }
 
-/// Read from file descriptor (placeholder)
+/// Dosya tanımlayıcısından okur (yer tutucu)
 fn read_from_fd(fd: i32, offset: u64, count: u32) -> i32 {
-    // Would call into VFS
+    // VFS'ye çağrılacak
     count as i32
 }
 
-/// Write to file descriptor (placeholder)
+/// Dosya tanımlayıcısına yazar (yer tutucu)
 fn write_to_fd(fd: i32, offset: u64, count: u32) -> i32 {
-    // Would call into VFS
+    // VFS'ye çağrılacak
     count as i32
 }
 
@@ -97,24 +97,24 @@ lazy_static::lazy_static! {
 // SPLICE
 // ============================================================================
 
-/// splice flags
+/// splice bayrakları
 pub const SPLICE_F_MOVE: u32 = 1;
 pub const SPLICE_F_NONBLOCK: u32 = 2;
 pub const SPLICE_F_MORE: u32 = 4;
 pub const SPLICE_F_GIFT: u32 = 8;
 
-/// Pipe buffer size
+/// Boru tampon boyutu
 pub const PIPE_DEF_BUFSIZE: usize = 65536;
 
-/// splice syscall - move data between pipe and file
+/// splice sistem çağrısı - boru ile dosya arasında veri taşı
 /// 
-/// # Arguments
-/// - `fd_in`: Input file descriptor
-/// - `off_in`: Input offset (optional)
-/// - `fd_out`: Output file descriptor
-/// - `off_out`: Output offset (optional)
-/// - `len`: Number of bytes
-/// - `flags`: Splice flags
+/// # Argümanlar
+/// - `fd_in`: Giriş dosya tanımlayıcısı
+/// - `off_in`: Giriş ofseti (isteğe bağlı)
+/// - `fd_out`: Çıkış dosya tanımlayıcısı
+/// - `off_out`: Çıkış ofseti (isteğe bağlı)
+/// - `len`: Bayt sayısı
+/// - `flags`: Splice bayrakları
 pub fn sys_splice(
     fd_in: i32,
     off_in: Option<&mut u64>,
@@ -127,15 +127,15 @@ pub fn sys_splice(
         return -9; // EBADF
     }
     
-    // One of the fds must be a pipe
-    // For now, assume both are valid
+    // fd'lerden biri boru olmalı
+    // Şimdilik ikisinin de geçerli olduğunu varsay
     
     let mut bytes_spliced: u64 = 0;
     let mut in_offset = off_in.map(|o| *o).unwrap_or(0);
     let mut out_offset = off_out.map(|o| *o).unwrap_or(0);
     
-    // Perform splice
-    // In real implementation, would use pipe buffers for zero-copy
+    // Splice gerçekleştir
+    // Gerçek uygulamada sıfır kopya için boru tamponları kullanılır
     
     let chunk_size = 65536;
     let mut remaining = len;
@@ -143,13 +143,13 @@ pub fn sys_splice(
     while remaining > 0 {
         let to_splice = core::cmp::min(remaining, chunk_size);
         
-        // Read into pipe buffer
+        // Boru tamponuna oku
         let read = read_from_fd(fd_in, in_offset, to_splice as u32);
         if read <= 0 {
             break;
         }
         
-        // Write from pipe buffer
+        // Boru tamponundan yaz
         let written = write_to_fd(fd_out, out_offset, read as u32);
         if written <= 0 {
             break;
@@ -165,7 +165,7 @@ pub fn sys_splice(
         }
     }
     
-    // Update offsets
+    // Ofsetleri güncelle
     if let Some(o) = off_in {
         *o = in_offset;
     }
@@ -186,14 +186,14 @@ lazy_static::lazy_static! {
 // TEE
 // ============================================================================
 
-/// tee syscall - duplicate pipe data
+/// tee sistem çağrısı - boru verisini çoğaltır
 pub fn sys_tee(fd_in: i32, fd_out: i32, len: usize, flags: u32) -> i64 {
     if fd_in < 0 || fd_out < 0 {
         return -9;
     }
     
-    // Both fds must be pipes
-    // Duplicate data from one pipe to another
+    // Her iki fd de boru olmalı
+    // Bir borudan diğerine veri çoğaltılır
     
     len as i64
 }
@@ -202,7 +202,7 @@ pub fn sys_tee(fd_in: i32, fd_out: i32, len: usize, flags: u32) -> i64 {
 // VMSPLICE
 // ============================================================================
 
-/// vmsplice syscall - splice user memory to/from pipe
+/// vmsplice sistem çağrısı - kullanıcı bellek ile boru arasında transfer
 pub fn sys_vmsplice(fd: i32, iovs: &[IoVec], flags: u32) -> i64 {
     if fd < 0 {
         return -9;
@@ -216,7 +216,7 @@ pub fn sys_vmsplice(fd: i32, iovs: &[IoVec], flags: u32) -> i64 {
     total
 }
 
-/// I/O vector
+/// G/Ç vektörü
 #[repr(C)]
 pub struct IoVec {
     pub base: u64,
@@ -227,7 +227,7 @@ pub struct IoVec {
 // COPY_FILE_RANGE
 // ============================================================================
 
-/// copy_file_range syscall - copy data between files
+/// copy_file_range sistem çağrısı - dosyalar arasında veri kopyalar
 pub fn sys_copy_file_range(
     fd_in: i32,
     off_in: Option<&mut u64>,
@@ -240,14 +240,14 @@ pub fn sys_copy_file_range(
         return -9;
     }
     
-    // Similar to sendfile but works with any file types
-    // Can use reflink for efficient copying on supported filesystems
+    // sendfile'a benzer ama herhangi bir dosya türüyle çalışır
+    // Desteklenen dosya sistemlerinde verimli kopyalama için reflink kullanılabilir
     
     sys_sendfile(fd_out, fd_in, off_in, len)
 }
 
 // ============================================================================
-// STATISTICS
+// İSTATİSTİKLER
 // ============================================================================
 
 pub struct ZeroCopyStats {
@@ -263,9 +263,9 @@ pub fn get_stats() -> ZeroCopyStats {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLAŞMA
 // ============================================================================
 
 pub fn init() {
-    crate::serial_println!("[ZEROCOPY] sendfile/splice initialized");
+    crate::serial_println!("[ZEROCOPY] sendfile/splice başlatıldı");
 }

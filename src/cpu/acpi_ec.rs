@@ -14,10 +14,10 @@ const EC_CMD_BURST_ENABLE: u8 = 0x82;
 const EC_CMD_BURST_DISABLE: u8 = 0x83;
 const EC_CMD_QUERY: u8 = 0x84;
 
-/// EC status register bit'leri
-const EC_STATUS_OBF: u8 = 0x01;  // Output buffer full
-const EC_STATUS_IBF: u8 = 0x02;  // Input buffer full
-const EC_STATUS_BURST: u8 = 0x10; // Burst mode
+/// EC durum kaydı bit'leri — EC için giriş/çıkış tampon durumunu gösterir
+const EC_STATUS_OBF: u8 = 0x01;  // Çıkış tampon dolu (Output Buffer Full)
+const EC_STATUS_IBF: u8 = 0x02;  // Giriş tampon dolu (Input Buffer Full)
+const EC_STATUS_BURST: u8 = 0x10; // Burst modu aktif
 
 /// EC başlatıldı mı
 static EC_AVAILABLE: core::sync::atomic::AtomicBool =

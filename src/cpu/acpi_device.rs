@@ -29,11 +29,11 @@ pub struct AcpiDevice {
 /// Device Power States (ACPI Spec §7.2)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DevicePowerState {
-    D0,       // Full power
-    D1,       // Light sleep
-    D2,       // Deeper sleep
-    D3Hot,    // Off but still has power
-    D3Cold,   // Completely off
+    D0,       // Tam güç (Full power)
+    D1,       // Hafif uyku (Light sleep)
+    D2,       // Derin uyku (Deeper sleep)
+    D3Hot,    // Kapalı ama güç hattı aktif
+    D3Cold,   // Tamamen güçsüz (Completely off)
     Unknown,
 }
 

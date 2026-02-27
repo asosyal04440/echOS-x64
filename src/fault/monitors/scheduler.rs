@@ -1,21 +1,22 @@
-//! # Scheduler Health Monitor
+//! # Zamanlayıcı Sağlık Monitörü
 //!
-//! Monitors task scheduler health, run queues, and task leaks.
+//! Görev zamanlayıcısı sağlığını, çalıştırma kuyruğunu ve görev sızıntılarını izler.
+//! Zombie görev birikimi ve çalıştırılabilir görev taşmasini tespit eder.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
 pub struct SchedulerMonitor {
-    /// Task leak count
+    /// Görev sızıntısı sayısı
     task_leaks: AtomicU32,
-    /// Starvation events
+    /// Açlık (starvation) olay sayısı
     starvation_events: AtomicU32,
-    /// Run queue anomalies
+    /// Çalıştırma kuyruğu anomali sayısı
     queue_anomalies: AtomicU32,
-    /// Last check timestamp
+    /// Son kontrol zaman damgası
     last_check: AtomicUsize,
-    /// Monitor enabled
+    /// Monitör etkin mi?
     enabled: AtomicBool,
 }
 
@@ -30,21 +31,21 @@ impl SchedulerMonitor {
         }
     }
     
-    /// Record task leak
+    /// Görev sızıntısı kaydeder
     pub fn record_task_leak(&self) {
         self.task_leaks.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record starvation
+    /// Açlık (starvation) olayı kaydeder
     pub fn record_starvation(&self) {
         self.starvation_events.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Check scheduler health
+    /// Zamanlayıcı sağlığını kontrol eder — zombie birikimi ve yüksek kuyruk
     fn check_scheduler(&self) -> Option<Fault> {
         let stats = crate::task::scheduler::get_stats();
         
-        // Check for zombie accumulation
+        // Zombie birikimsini kontrol et
         if stats.zombie_count > 50 {
             self.record_task_leak();
             return Some(Fault::new(
@@ -54,7 +55,7 @@ impl SchedulerMonitor {
             ));
         }
         
-        // Check for run queue issues
+        // Çalıştırma kuyruğu sorunlarını kontrol et
         if stats.runnable_tasks > 1000 {
             return Some(Fault::new(
                 FaultSource::Scheduler,

@@ -5,6 +5,7 @@
 
 pub mod capability;
 pub mod mac;
+pub mod simics_gate;
 pub mod tpm;
 
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};

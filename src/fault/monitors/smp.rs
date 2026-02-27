@@ -1,19 +1,20 @@
-//! # SMP Health Monitor
+//! # SMP Sağlık Monitörü
 //!
-//! Monitors SMP state, AP startup, and TLB shootdown.
+//! SMP (Simetrik Çoklu İşlemci) durumunu, AP başlatılmasını ve TLB atışını izler.
+//! AP başlatı hataları ve TLB shootdown zaman aşımlarını erken tespit eder.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
 pub struct SmpMonitor {
-    /// AP startup failures
+    /// AP (Application Processor - Uygulama İşlemcisi) başlatı hataları
     ap_failures: AtomicU32,
-    /// TLB shootdown timeouts
+    /// TLB shootdown zaman aşımı sayısı
     tlb_timeouts: AtomicU32,
-    /// Last check timestamp
+    /// Son kontrol zaman damgası
     last_check: AtomicUsize,
-    /// Monitor enabled
+    /// Monitör etkin mi?
     enabled: AtomicBool,
 }
 
@@ -27,17 +28,17 @@ impl SmpMonitor {
         }
     }
     
-    /// Record AP startup failure
+    /// AP başlatı hatası kaydeder
     pub fn record_ap_failure(&self) {
         self.ap_failures.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record TLB shootdown timeout
+    /// TLB shootdown zaman aşımı kaydeder
     pub fn record_tlb_timeout(&self) {
         self.tlb_timeouts.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Check SMP health
+    /// SMP sağlığını kontrol eder — çevrimdışı CPU'ları tespit eder
     fn check_smp(&self) -> Option<Fault> {
         let expected = crate::cpu::CPU_INFO.lock().topology.logical_count;
         let online = crate::cpu::smp::online_cpu_count();

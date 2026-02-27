@@ -1,0 +1,39 @@
+# echOS Zero-Tolerance Lock-Free Gate
+# Runs boot path and emits deterministic envelope markers for parser.
+# Serial output is captured to a file for reliable CI parsing.
+
+# VMP auto-managed: if the VMP kernel driver is loaded, Simics uses it.
+# If not, pure software emulation is used automatically (slower but functional).
+
+$disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
+$machine_name = "board"
+$show_con0 = TRUE
+$create_network = FALSE
+run-script "%simics%/targets/qsp-x86/qsp-hdd-boot.simics"
+
+# ── Serial capture: write to file AND echo to cmd-line ─────────
+# File-based capture is parsed by the gate runner (reliable under I/O redirect).
+# cmd-line output is kept for interactive/debug visibility.
+board.serconsole.con.capture-start "targets/echos/logs/serial_capture.txt"
+board.serconsole.con.enable-cmd-line-output
+
+log-type -disable unimpl
+log-type -disable spec-viol
+
+echo "[GATE] START profile=aggressive mode=day1-hard-block"
+echo "[GATE] AXES boot_irq_input,syscall_security,fs_network,performance,extreme_ironshim"
+echo "[GATE] TIMEOUT hard=120s"
+
+script-branch "timeout-stop" {
+    bp.time.wait-for 120
+    echo "[GATE] TIMEOUT reached - stopping simulation"
+    stop
+}
+
+run
+
+echo "[GATE] RUN_COMPLETE"
+board.mb.cpu0.core[0][0].pregs
+
+echo "[GATE] END"
+quit

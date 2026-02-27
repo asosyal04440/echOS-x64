@@ -2,6 +2,11 @@
 //!
 //! Pencereler, başlık çubuğu (titlebar), kenarlıklar ve içerik alanından oluşur.
 //! İçine `Widget` eklenebilir.
+//!
+//! ## Animasyon Algoritması
+//! Açılma animasyonu ease-out dörtlü (quadratic) enterpolasyon kullanır:
+//! t ∈ [0,1] için ease = 1 - (1-t)² — başlangıçta hızlı, sona yakın yavaş.
+//! Pencere merkezden küçük başlayıp hedef boyutuna ulaşır.
 
 use super::theme::Theme;
 use super::widgets::Widget;
@@ -9,6 +14,14 @@ use crate::gop::framebuffer::Framebuffer;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+/// Animation state for window
+#[derive(Clone, Copy, PartialEq)]
+pub enum AnimationState {
+    None,
+    Opening,    // Fade-in + scale up
+    Closing,    // Fade-out + scale down
+}
 
 /// GUI Penceresi
 pub struct Window<'a> {
@@ -21,6 +34,15 @@ pub struct Window<'a> {
     pub content_lines: Vec<String>,
     pub titlebar_height: usize,
     pub widgets: Vec<Box<dyn Widget + 'a>>,
+    /// Animation state
+    pub animation: AnimationState,
+    /// Animation progress (0.0 to 1.0)
+    pub anim_progress: f32,
+    /// Target dimensions for animation
+    pub target_x: usize,
+    pub target_y: usize,
+    pub target_width: usize,
+    pub target_height: usize,
 }
 
 impl<'a> Window<'a> {
@@ -35,7 +57,55 @@ impl<'a> Window<'a> {
             content_lines: Vec::new(),
             titlebar_height: 28,
             widgets: Vec::new(),
+            animation: AnimationState::None,
+            anim_progress: 1.0,
+            target_x: x,
+            target_y: y,
+            target_width: width,
+            target_height: height,
         }
+    }
+    
+    /// Start opening animation
+    pub fn start_open_animation(&mut self) {
+        self.animation = AnimationState::Opening;
+        self.anim_progress = 0.0;
+        // Start from center, small
+        self.x = self.target_x + self.target_width / 4;
+        self.y = self.target_y + self.target_height / 4;
+        self.width = self.target_width / 2;
+        self.height = self.target_height / 2;
+    }
+    
+    /// Update animation (call each frame)
+    /// Returns true if animation is still running
+    pub fn update_animation(&mut self) -> bool {
+        if self.animation == AnimationState::None {
+            return false;
+        }
+        
+        // Ease-out animation
+        self.anim_progress += 0.08;
+        if self.anim_progress >= 1.0 {
+            self.anim_progress = 1.0;
+            self.animation = AnimationState::None;
+            self.x = self.target_x;
+            self.y = self.target_y;
+            self.width = self.target_width;
+            self.height = self.target_height;
+            return false;
+        }
+        
+        // Interpolate size and position
+        let t = self.anim_progress;
+        let ease = 1.0 - (1.0 - t) * (1.0 - t); // Ease-out quad
+        
+        self.x = self.target_x + (self.target_width as f32 * (1.0 - ease) * 0.25) as usize;
+        self.y = self.target_y + (self.target_height as f32 * (1.0 - ease) * 0.25) as usize;
+        self.width = (self.target_width as f32 * (0.5 + 0.5 * ease)) as usize;
+        self.height = (self.target_height as f32 * (0.5 + 0.5 * ease)) as usize;
+        
+        true
     }
 
     /// Pencereye widget ekler.

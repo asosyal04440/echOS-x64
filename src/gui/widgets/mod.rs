@@ -14,6 +14,12 @@ pub struct Rect {
     pub height: i32,
 }
 
+impl Default for Rect {
+    fn default() -> Self {
+        Self { x: 0, y: 0, width: 0, height: 0 }
+    }
+}
+
 impl Rect {
     /// Yeni dikdörtgen oluşturur.
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {

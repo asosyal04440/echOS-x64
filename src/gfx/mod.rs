@@ -30,6 +30,76 @@ pub struct Surface {
 }
 
 impl Surface {
+    /// Her pikseli sabit renkle doldurur.
+    pub fn fill(&mut self, color: u32) {
+        for p in self.buffer.iter_mut() {
+            *p = color;
+        }
+    }
+
+    /// Diğer surface'i bu surface'e verilen (x, y) konumundan alpha-blend ile çizer.
+    /// `opacity` 0..=255 arası ek saydamlık katsayısı.
+    pub fn blend_from(&mut self, src: &Surface, dst_x: i32, dst_y: i32, opacity: u8) {
+        let sw = src.width as i32;
+        let sh = src.height as i32;
+        let dw = self.width as i32;
+        let dh = self.height as i32;
+
+        let clip_x0 = dst_x.max(0);
+        let clip_y0 = dst_y.max(0);
+        let clip_x1 = (dst_x + sw).min(dw);
+        let clip_y1 = (dst_y + sh).min(dh);
+
+        if clip_x0 >= clip_x1 || clip_y0 >= clip_y1 {
+            return;
+        }
+
+        let a = opacity as u32;
+        let inv_a = 255 - a;
+
+        for dy in clip_y0..clip_y1 {
+            let sy = dy - dst_y;
+            let src_row = sy as usize * src.stride;
+            let dst_row = dy as usize * self.stride;
+            for dx in clip_x0..clip_x1 {
+                let sx = dx - dst_x;
+                let src_px = src.buffer[src_row + sx as usize];
+                let dst_px = self.buffer[dst_row + dx as usize];
+                // Kaynak piksel kendi alpha değeri varsa (AARRGGBBi bit 31..24)
+                let src_a = ((src_px >> 24) & 0xFF) as u32;
+                let eff_a = (src_a * a) / 255;
+                let eff_inv = 255 - eff_a;
+                let r = (((src_px >> 16) & 0xFF) * eff_a + ((dst_px >> 16) & 0xFF) * eff_inv) / 255;
+                let g = (((src_px >>  8) & 0xFF) * eff_a + ((dst_px >>  8) & 0xFF) * eff_inv) / 255;
+                let b = (( src_px        & 0xFF) * eff_a + ( dst_px        & 0xFF) * eff_inv) / 255;
+                self.buffer[dst_row + dx as usize] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+
+    /// Tek renk dikdörtgen çizer (opak)
+    pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+        let x0 = x.max(0) as usize;
+        let y0 = y.max(0) as usize;
+        let x1 = (x + w).min(self.width as i32).max(0) as usize;
+        let y1 = (y + h).min(self.height as i32).max(0) as usize;
+        for row in y0..y1 {
+            let start = row * self.stride + x0;
+            let end = row * self.stride + x1;
+            for p in &mut self.buffer[start..end] {
+                *p = color;
+            }
+        }
+    }
+
+    /// Dikdörtgen kenarlık çizer.
+    pub fn draw_rect_outline(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+        self.fill_rect(x,         y,         w, 1, color);
+        self.fill_rect(x,         y + h - 1, w, 1, color);
+        self.fill_rect(x,         y,         1, h, color);
+        self.fill_rect(x + w - 1, y,         1, h, color);
+    }
+
     pub fn new(width: usize, height: usize, stride: usize) -> Self {
         let len = stride.saturating_mul(height);
         Self {

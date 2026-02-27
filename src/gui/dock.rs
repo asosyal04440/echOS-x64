@@ -1,4 +1,4 @@
-//! # macOS-style Dock
+//! # echOS Adaptive Dock
 //!
 //! Animated dock with magnification effect on hover
 //! Supports app indicators, badges, and drag-drop reordering
@@ -7,6 +7,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
+use core::cmp::{max, min};
 use spin::Mutex;
 use libm::{sinf, cosf};
 
@@ -32,6 +33,131 @@ pub const ICON_SPACING: usize = 8;
 
 /// Magnification radius (how far the effect spreads)
 pub const MAG_RADIUS: usize = 100;
+
+/// Medium cached icon size used for hover state.
+pub const HOVER_ICON_SIZE: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DockDirtyRect {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl DockDirtyRect {
+    fn intersects(&self, other: &DockDirtyRect) -> bool {
+        let ax2 = self.x + self.width;
+        let ay2 = self.y + self.height;
+        let bx2 = other.x + other.width;
+        let by2 = other.y + other.height;
+        self.x < bx2 && ax2 > other.x && self.y < by2 && ay2 > other.y
+    }
+
+    fn union(&self, other: &DockDirtyRect) -> DockDirtyRect {
+        let x = min(self.x, other.x);
+        let y = min(self.y, other.y);
+        let x2 = max(self.x + self.width, other.x + other.width);
+        let y2 = max(self.y + self.height, other.y + other.height);
+        DockDirtyRect { x, y, width: x2 - x, height: y2 - y }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DirtyRectSet {
+    rects: Vec<DockDirtyRect>,
+    max_rects: usize,
+}
+
+impl DirtyRectSet {
+    fn new(max_rects: usize) -> Self {
+        Self { rects: Vec::new(), max_rects }
+    }
+
+    fn add(&mut self, mut rect: DockDirtyRect, screen_w: usize, screen_h: usize) {
+        if rect.x >= screen_w || rect.y >= screen_h {
+            return;
+        }
+        rect.width = rect.width.min(screen_w - rect.x);
+        rect.height = rect.height.min(screen_h - rect.y);
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+
+        for i in 0..self.rects.len() {
+            if self.rects[i].intersects(&rect) {
+                self.rects[i] = self.rects[i].union(&rect);
+                return;
+            }
+        }
+
+        if self.rects.len() >= self.max_rects {
+            self.rects.remove(0);
+        }
+        self.rects.push(rect);
+    }
+
+    fn clear(&mut self) {
+        self.rects.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rects.is_empty()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DockSpriteCache {
+    pub small_px: usize,
+    pub hovered_px: usize,
+    pub max_px: usize,
+}
+
+impl DockSpriteCache {
+    fn default_sizes() -> Self {
+        Self {
+            small_px: ICON_SIZE,
+            hovered_px: HOVER_ICON_SIZE,
+            max_px: MAX_ICON_SIZE,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HoverAnimation {
+    pub active_index: Option<usize>,
+    pub strength_q8: u16,
+    target_q8: u16,
+}
+
+impl HoverAnimation {
+    fn new() -> Self {
+        Self {
+            active_index: None,
+            strength_q8: 0,
+            target_q8: 0,
+        }
+    }
+
+    fn set_hover(&mut self, idx: Option<usize>) {
+        self.active_index = idx;
+        self.target_q8 = if idx.is_some() { 255 } else { 0 };
+    }
+
+    fn tick(&mut self) {
+        let current = self.strength_q8 as i32;
+        let target = self.target_q8 as i32;
+        let diff = target - current;
+        if diff == 0 {
+            return;
+        }
+        let mut step = diff >> 2;
+        if step == 0 {
+            step = if diff > 0 { 1 } else { -1 };
+        }
+        self.strength_q8 = (current + step).clamp(0, 255) as u16;
+    }
+}
 
 // ============================================================================
 // DOCK ITEM
@@ -635,7 +761,7 @@ impl DockItem {
 // DOCK
 // ============================================================================
 
-/// macOS-style Dock with magnification
+/// echOS Adaptive Dock state
 pub struct Dock {
     /// Dock items
     pub items: Vec<DockItem>,
@@ -673,7 +799,16 @@ pub struct Dock {
     magnification: bool,
     /// Magnification intensity
     mag_intensity: f32,
+    /// Cached sprite-size tiers (small/hovered/max)
+    sprite_cache: DockSpriteCache,
+    /// Integer hover animation state
+    hover_anim: HoverAnimation,
+    /// Dirty rectangles for micro redraw path
+    dirty_rects: DirtyRectSet,
 }
+
+/// Explicit architecture name used by compositor integrations.
+pub type DockState = Dock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockPosition {
@@ -703,6 +838,9 @@ impl Dock {
             dock_y: screen_height as f32,
             magnification: true,
             mag_intensity: 1.0,
+            sprite_cache: DockSpriteCache::default_sizes(),
+            hover_anim: HoverAnimation::new(),
+            dirty_rects: DirtyRectSet::new(12),
         };
         
         dock.add_default_items();
@@ -710,58 +848,42 @@ impl Dock {
     }
     
     fn add_default_items(&mut self) {
-        // Finder (always first)
-        let mut finder = DockItem::app(self.next_id, "Finder", DockIcon::Finder, "finder");
-        finder.running = true;
-        self.items.push(finder);
+        // Files — echOS file manager (always first)
+        let mut files = DockItem::app(self.next_id, "Files", DockIcon::Files, "files");
+        files.running = true;
+        self.items.push(files);
         self.next_id += 1;
-        
-        // Launchpad
-        let mut launchpad = DockItem::new(self.next_id, "Launchpad", DockIcon::Launchpad);
-        launchpad.action = DockAction::ShowLaunchpad;
-        self.items.push(launchpad);
+
+        // Apps launcher (spotlight/launchpad)
+        let mut apps = DockItem::new(self.next_id, "Apps", DockIcon::Custom(200));
+        apps.action = DockAction::ShowLaunchpad;
+        self.items.push(apps);
         self.next_id += 1;
-        
-        // Safari
-        self.items.push(DockItem::app(self.next_id, "Safari", DockIcon::Safari, "safari"));
+
+        // Browser
+        self.items.push(DockItem::app(self.next_id, "Browser", DockIcon::Custom(201), "browser"));
         self.next_id += 1;
-        
-        // Mail
-        self.items.push(DockItem::app(self.next_id, "Mail", DockIcon::Mail, "mail"));
-        self.next_id += 1;
-        
-        // Messages
-        self.items.push(DockItem::app(self.next_id, "Messages", DockIcon::Messages, "messages"));
-        self.next_id += 1;
-        
-        // Music
-        self.items.push(DockItem::app(self.next_id, "Music", DockIcon::Music, "music"));
-        self.next_id += 1;
-        
+
         // Terminal
         let mut terminal = DockItem::app(self.next_id, "Terminal", DockIcon::Terminal, "terminal");
         terminal.running = true;
         self.items.push(terminal);
         self.next_id += 1;
-        
-        // Files
-        self.items.push(DockItem::app(self.next_id, "Files", DockIcon::Files, "files"));
-        self.next_id += 1;
-        
+
         // Settings
         self.items.push(DockItem::app(self.next_id, "Settings", DockIcon::Settings, "settings"));
         self.next_id += 1;
-        
+
+        // Monitor (Activity Monitor)
+        self.items.push(DockItem::app(self.next_id, "Monitor", DockIcon::Custom(202), "activity"));
+        self.next_id += 1;
+
         // Separator (trash section)
         self.items.push(DockItem::new(self.next_id, "", DockIcon::Custom(100)));
         self.next_id += 1;
-        
+
         // Trash
         self.items.push(DockItem::new(self.next_id, "Trash", DockIcon::Trash));
-        self.next_id += 1;
-        
-        // Downloads
-        self.items.push(DockItem::new(self.next_id, "Downloads", DockIcon::Downloads));
         self.next_id += 1;
     }
     
@@ -792,7 +914,8 @@ impl Dock {
             self.dock_y = (self.screen_height - DOCK_HEIGHT) as f32;
         }
         
-        // Update magnification
+        // Update hover animation and magnification
+        self.hover_anim.tick();
         if self.magnification {
             self.update_magnification();
         }
@@ -809,30 +932,61 @@ impl Dock {
         if self.items.is_empty() {
             return;
         }
-        
-        // Calculate dock center position
-        let total_width = self.items.len() * (ICON_SIZE + ICON_SPACING);
-        let dock_start = (self.screen_width - total_width) / 2;
-        
+
+        let min_size = self.sprite_cache.small_px as i32;
+        let max_size = self.sprite_cache.max_px as i32;
+        let size_delta = (max_size - min_size).max(0);
+        let active = self.hover_anim.active_index;
+        let global_q8 = self.hover_anim.strength_q8 as i32;
+
         for (i, item) in self.items.iter_mut().enumerate() {
-            let item_center_x = dock_start + i * (ICON_SIZE + ICON_SPACING) + ICON_SIZE / 2;
-            
-            // Distance from mouse
-            let dist = (self.mouse_x - item_center_x as i32).abs() as f32;
-            
-            // Calculate magnification
-            if dist < MAG_RADIUS as f32 {
-                let factor = 1.0 - (dist / MAG_RADIUS as f32);
-                let mag = 1.0 + factor * (MAX_ICON_SIZE as f32 / ICON_SIZE as f32 - 1.0) * self.mag_intensity;
-                item.target_size = ICON_SIZE as f32 * mag;
-            } else {
-                item.target_size = ICON_SIZE as f32;
+            let dist_slots = match active {
+                Some(a) if i >= a => (i - a) as i32,
+                Some(a) => (a - i) as i32,
+                None => 99,
+            };
+
+            let local_q8 = match dist_slots {
+                0 => 255,
+                1 => 168,
+                2 => 84,
+                _ => 0,
+            };
+
+            let influence_q8 = (local_q8 * global_q8) >> 8;
+            let target_size = min_size + ((size_delta * influence_q8) >> 8);
+
+            let cur = item.current_size as i32;
+            let diff = target_size - cur;
+            let mut step = diff >> 2;
+            if step == 0 && diff != 0 {
+                step = if diff > 0 { 1 } else { -1 };
             }
+            let next = (cur + step).clamp(min_size, max_size) as f32;
+            item.current_size = next;
+            item.target_size = target_size as f32;
         }
     }
     
     /// Draw the dock
-    pub fn draw(&self, fb: &mut Framebuffer) {
+    pub fn draw(&mut self, fb: &mut Framebuffer) {
+        if !self.visible {
+            return;
+        }
+
+        if self.dirty_rects.is_empty() {
+            self.draw_full(fb);
+            return;
+        }
+
+        let dirty = self.dirty_rects.rects.clone();
+        for rect in dirty {
+            self.render_dock_dirty_rect(fb, rect);
+        }
+        self.dirty_rects.clear();
+    }
+
+    fn draw_full(&self, fb: &mut Framebuffer) {
         if !self.visible {
             return;
         }
@@ -841,7 +995,7 @@ impl Dock {
         
         // Draw dock background (glass effect)
         let total_width = self.items.len() * (ICON_SIZE + ICON_SPACING) + ICON_SPACING * 2;
-        let dock_x = (self.screen_width - total_width) / 2;
+        let dock_x = self.screen_width.saturating_sub(total_width) / 2;
         
         // Background with blur effect (simplified)
         let bg_height = DOCK_HEIGHT + 4;
@@ -877,13 +1031,96 @@ impl Dock {
             let x_offset = (ICON_SIZE as i32 - size as i32) / 2;
             let y_offset = (ICON_SIZE as i32 - size as i32) / 2;
             
-            let draw_x = (item_x as i32 + x_offset) as usize;
-            let draw_y = dock_y + DOCK_HEIGHT - size - 8 + y_offset as usize;
+            let draw_x = (item_x as i32 + x_offset).max(0) as usize;
+            let draw_y = (dock_y as i32 + DOCK_HEIGHT as i32 - size as i32 - 8 + y_offset).max(0) as usize;
             
             item.draw(fb, draw_x, draw_y, size, dock_y);
             
             // Advance x position based on current size
             item_x += ((item.current_size + ICON_SPACING as f32) / 2.0 + ICON_SIZE as f32 / 2.0) as usize;
+        }
+    }
+
+    pub fn render_dock_dirty_rect(&self, fb: &mut Framebuffer, dirty: DockDirtyRect) {
+        if !self.visible {
+            return;
+        }
+
+        let dock_y = self.dock_y as usize;
+        let total_width = self.items.len() * (ICON_SIZE + ICON_SPACING) + ICON_SPACING * 2;
+        let dock_x = self.screen_width.saturating_sub(total_width) / 2;
+        let dock_rect = DockDirtyRect {
+            x: dock_x,
+            y: dock_y,
+            width: total_width,
+            height: DOCK_HEIGHT + 4,
+        };
+
+        if !dock_rect.intersects(&dirty) {
+            return;
+        }
+
+        let x0 = max(dock_rect.x, dirty.x);
+        let y0 = max(dock_rect.y, dirty.y);
+        let x1 = min(dock_rect.x + dock_rect.width, dirty.x + dirty.width);
+        let y1 = min(dock_rect.y + dock_rect.height, dirty.y + dirty.height);
+
+        for py in y0..y1 {
+            let local_y = py - dock_y;
+            let alpha = if local_y < 4 { 0x20 } else if local_y > DOCK_HEIGHT - 4 { 0x10 } else { 0x40 };
+            let row_color = (alpha << 24) | 0x00FFFFFF;
+            for px in x0..x1 {
+                if px < self.screen_width && py < self.screen_height {
+                    let ptr = unsafe { (fb.base_addr as *mut u32).add(py * fb.pixels_per_scan_line + px) };
+                    let bg = unsafe { *ptr };
+                    let blended = Self::blend_colors(bg, row_color);
+                    unsafe { *ptr = blended; }
+                }
+            }
+        }
+
+        let mut item_x = dock_x + ICON_SPACING;
+        for item in &self.items {
+            let size = item.current_size as usize;
+            let x_offset = (ICON_SIZE as i32 - size as i32) / 2;
+            let y_offset = (ICON_SIZE as i32 - size as i32) / 2;
+            let draw_x = (item_x as i32 + x_offset).max(0) as usize;
+            let draw_y = (dock_y as i32 + DOCK_HEIGHT as i32 - size as i32 - 8 + y_offset).max(0) as usize;
+            let item_rect = DockDirtyRect {
+                x: draw_x.saturating_sub(6),
+                y: draw_y.saturating_sub(6),
+                width: size + 12,
+                height: size + 20,
+            };
+            if item_rect.intersects(&dirty) {
+                item.draw(fb, draw_x, draw_y, size, dock_y);
+            }
+            item_x += ((item.current_size + ICON_SPACING as f32) / 2.0 + ICON_SIZE as f32 / 2.0) as usize;
+        }
+    }
+
+    fn mark_index_dirty(&mut self, index: usize) {
+        if index >= self.items.len() {
+            return;
+        }
+
+        let total_width = self.items.len() * (ICON_SIZE + ICON_SPACING) + ICON_SPACING * 2;
+        let dock_x = self.screen_width.saturating_sub(total_width) / 2;
+        let slot_x = dock_x + ICON_SPACING + index * (ICON_SIZE + ICON_SPACING);
+        let rect = DockDirtyRect {
+            x: slot_x.saturating_sub((MAX_ICON_SIZE - ICON_SIZE) / 2 + 8),
+            y: (self.dock_y as usize).saturating_sub(8),
+            width: MAX_ICON_SIZE + 16,
+            height: DOCK_HEIGHT + 16,
+        };
+        self.dirty_rects.add(rect, self.screen_width, self.screen_height);
+    }
+
+    fn mark_hover_band_dirty(&mut self, center: Option<usize>) {
+        if let Some(c) = center {
+            if c > 0 { self.mark_index_dirty(c - 1); }
+            self.mark_index_dirty(c);
+            if c + 1 < self.items.len() { self.mark_index_dirty(c + 1); }
         }
     }
     
@@ -922,7 +1159,7 @@ impl Dock {
         
         // Find hovered item
         let total_width = self.items.len() * (ICON_SIZE + ICON_SPACING);
-        let dock_start = (self.screen_width - total_width) / 2;
+        let dock_start = self.screen_width.saturating_sub(total_width) / 2;
         
         let mut new_hovered = None;
         for (i, item) in self.items.iter().enumerate() {
@@ -937,7 +1174,11 @@ impl Dock {
         }
         
         if new_hovered != self.hovered_index {
+            let prev_hover = self.hovered_index;
             self.hovered_index = new_hovered;
+            self.hover_anim.set_hover(new_hovered);
+            self.mark_hover_band_dirty(prev_hover);
+            self.mark_hover_band_dirty(new_hovered);
             
             if let Some(idx) = new_hovered {
                 return DockEvent::ItemHovered(idx, self.items[idx].name.clone());
@@ -954,6 +1195,7 @@ impl Dock {
             
             // Start bounce animation
             self.items[idx].start_bounce();
+            self.mark_index_dirty(idx);
             
             return DockEvent::ItemClicked(idx, self.items[idx].id);
         }
@@ -965,12 +1207,13 @@ impl Dock {
     pub fn on_mouse_up(&mut self) -> DockEvent {
         if let Some(clicked_idx) = self.clicked_index {
             if self.hovered_index == Some(clicked_idx) {
-                let item = &self.items[clicked_idx];
-                let action = item.action.clone();
+                let item_id = self.items[clicked_idx].id;
+                let action = self.items[clicked_idx].action.clone();
                 
                 self.clicked_index = None;
+                self.mark_index_dirty(clicked_idx);
                 
-                return DockEvent::ItemActivated(clicked_idx, item.id, action);
+                return DockEvent::ItemActivated(clicked_idx, item_id, action);
             }
         }
         
@@ -1032,11 +1275,26 @@ impl Dock {
     /// Set magnification
     pub fn set_magnification(&mut self, enabled: bool) {
         self.magnification = enabled;
+        if !enabled {
+            self.hover_anim.set_hover(None);
+        }
     }
     
     /// Set magnification intensity
     pub fn set_mag_intensity(&mut self, intensity: f32) {
         self.mag_intensity = intensity.max(0.0).min(1.0);
+    }
+
+    /// Configure pre-calculated sprite scaling tiers.
+    pub fn configure_sprite_cache(&mut self, small_px: usize, hovered_px: usize, max_px: usize) {
+        let s = small_px.max(24);
+        let h = hovered_px.max(s);
+        let m = max_px.max(h);
+        self.sprite_cache = DockSpriteCache {
+            small_px: s,
+            hovered_px: h,
+            max_px: m,
+        };
     }
 }
 

@@ -1,6 +1,7 @@
-//! # Fault Hub
+//! # Hata Merkezi (Fault Hub)
 //!
-//! Central fault collection, routing, and management.
+//! Merkezi hata toplama, yönlendirme ve yönetim modulu.
+//! Tüm modüllerden gelen hataları tek noktada toplar ve kurtarma motorunu tetikler.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -14,40 +15,40 @@ use super::severity::{Severity, RecoveryResult, RecommendedAction};
 use super::recovery::RecoveryEngine;
 
 // ============================================================================
-// FAULT HUB STRUCTURE
+// HATA MERKEİ YAPISI
 // ============================================================================
 
-/// Central fault management hub
+/// Merkezi hata yönetim merkezi (hub)
 pub struct FaultHub {
-    /// Module health tracking
+    /// Modül sağlık takibi — her modülün durumunu izler
     modules: Mutex<BTreeMap<&'static str, ModuleHealth>>,
-    /// Recovery engine
+    /// Kurtarma motoru (recovery engine)
     recovery_engine: Mutex<Option<RecoveryEngine>>,
-    /// Fault handlers per source
+    /// Kaynağa göre hata işleyicileri
     handlers: Mutex<BTreeMap<FaultSource, Box<dyn FaultHandler>>>,
-    /// Hub initialized
+    /// Merkez başlatıldı mı?
     initialized: AtomicBool,
-    /// Total fault count since boot
+    /// Başlangıçtan bu yana toplam hata sayısı
     fault_count: AtomicU64,
-    /// Recovery success count
+    /// Başarılı kurtarma sayısı
     recovery_success: AtomicU64,
-    /// Recovery failure count
+    /// Başarısız kurtarma sayısı
     recovery_failure: AtomicU64,
-    /// Current system severity
+    /// Mevcut sistem şiddet seviyesi
     current_severity: AtomicU32,
-    /// Last health check timestamp
+    /// Son sağlık kontrolü zaman damgası
     last_check: AtomicUsize,
 }
 
-/// Trait for custom fault handlers
+/// Özel hata işleyiciler için trait (arayüz)
 pub trait FaultHandler: Send + Sync {
-    /// Check for faults in the module
+    /// Modülün hatalarını kontrol eder
     fn check(&self) -> Option<Fault>;
-    /// Get module health status
+    /// Modül sağlık durumunu döndürür
     fn health(&self) -> HealthStatus;
-    /// Attempt recovery
+    /// Hatadan kurtarmayı dener
     fn recover(&self, fault: &Fault) -> RecoveryResult;
-    /// Get module name
+    /// Modül adını döndürür
     fn name(&self) -> &'static str;
 }
 
@@ -66,13 +67,13 @@ impl FaultHub {
         }
     }
     
-    /// Initialize the fault hub
+    /// Hata merkezini başlatır ve çekirdek modülleri kayıt eder
     pub fn init(&self) {
         if self.initialized.swap(true, Ordering::SeqCst) {
             return;
         }
         
-        // Register core modules
+        // Çekirdek modülleri kayıt et
         self.register_module(ModuleHealth::new("memory", true, false, false));
         self.register_module(ModuleHealth::new("cpu", true, false, false));
         self.register_module(ModuleHealth::new("smp", true, false, false));
@@ -84,24 +85,24 @@ impl FaultHub {
         self.register_module(ModuleHealth::new("security", true, false, false));
         self.register_module(ModuleHealth::new("acpi", false, true, false));
         
-        // Initialize recovery engine
+        // Kurtarma motorunu başlat
         *self.recovery_engine.lock() = Some(RecoveryEngine::new());
         
         crate::serial_println!("[FAULT_HUB] Initialized with {} modules", 
             self.modules.lock().len());
     }
     
-    /// Register a module for health tracking
+    /// Sağlık takibi için modül kaydeder
     pub fn register_module(&self, health: ModuleHealth) {
         self.modules.lock().insert(health.name, health);
     }
     
-    /// Register a custom fault handler
+    /// Özel bir hata işleyici kaydeder
     pub fn register_handler(&self, source: FaultSource, handler: Box<dyn FaultHandler>) {
         self.handlers.lock().insert(source, handler);
     }
     
-    /// Report a fault
+    /// Hata bildirir, modül sağlığını günceller ve kurtarmayı başlatır
     pub fn report_fault(&self, fault: Fault) -> FaultId {
         let id = fault.id;
         let severity = fault.severity;
@@ -125,7 +126,7 @@ impl FaultHub {
         }) {
             module.record_fault();
             
-            // Update status based on fault count
+            // Hata sayısına göre durumu güncelle
             if module.fault_count > 5 {
                 module.update_status(HealthStatus::Failed);
             } else if module.fault_count > 2 {
@@ -135,19 +136,19 @@ impl FaultHub {
             }
         }
         
-        // Update global severity
+        // Global şiddet seviyesini güncelle
         self.update_severity(severity);
         
-        // Log the fault
+        // Hatayı günlülere yaz
         crate::serial_println!(
             "[FAULT_HUB] Fault #{:?}: {:?}/{:?} - {} (severity: {:?})",
             id, source, fault.fault_type, fault.message, severity
         );
         
-        // Record in global state
+        // Global duruma kayıt et
         FAULT_STATE.record_fault(&fault);
         
-        // Attempt recovery
+        // Kurtarmayı dene
         if FAULT_STATE.auto_recovery.load(Ordering::SeqCst) {
             self.attempt_recovery(&fault);
         }
@@ -155,7 +156,7 @@ impl FaultHub {
         id
     }
     
-    /// Attempt to recover from a fault
+    /// Bir hata için kurtarma denemesi yapar
     pub fn attempt_recovery(&self, fault: &Fault) -> RecoveryResult {
         let result = if let Some(engine) = self.recovery_engine.lock().as_ref() {
             engine.recover(fault)
@@ -163,14 +164,14 @@ impl FaultHub {
             RecoveryResult::Failed
         };
         
-        // Update statistics
+        // İstatistikleri güncelle
         if result.is_success() {
             self.recovery_success.fetch_add(1, Ordering::SeqCst);
         } else {
             self.recovery_failure.fetch_add(1, Ordering::SeqCst);
         }
         
-        // Update module health
+        // Modül sağlığını güncelle
         if let Some(module) = self.modules.lock().get_mut(&match fault.source {
             FaultSource::Memory => "memory",
             FaultSource::Cpu => "cpu",
@@ -195,7 +196,7 @@ impl FaultHub {
         result
     }
     
-    /// Check all modules for faults
+    /// Tüm modülleri hata açısından kontrol eder
     pub fn check_all(&self) {
         if !self.initialized.load(Ordering::SeqCst) {
             return;
@@ -204,7 +205,7 @@ impl FaultHub {
         let current_tick = crate::task::scheduler::get_ticks();
         self.last_check.store(current_tick, Ordering::SeqCst);
         
-        // Check each registered handler
+        // Kayıtlı her işleyiciyi kontrol et
         for (source, handler) in self.handlers.lock().iter() {
             if let Some(fault) = handler.check() {
                 self.report_fault(fault);
@@ -212,17 +213,17 @@ impl FaultHub {
         }
     }
     
-    /// Get health status for a module
+    /// Belirtilen modülün sağlık durumunu döndürür
     pub fn get_health(&self, module: &str) -> Option<ModuleHealth> {
         self.modules.lock().get(module).cloned()
     }
     
-    /// Get all module health statuses
+    /// Tüm modül sağlık durumlarını döndürür
     pub fn get_all_health(&self) -> Vec<ModuleHealth> {
         self.modules.lock().values().cloned().collect()
     }
     
-    /// Update current severity level
+    /// Mevcut şiddet seviyesini günceller (yalnızca artış yönünde)
     fn update_severity(&self, severity: Severity) {
         let current = Severity::from(self.current_severity.load(Ordering::SeqCst) as u8);
         if severity > current {
@@ -230,12 +231,12 @@ impl FaultHub {
         }
     }
     
-    /// Get current system severity
+    /// Mevcut sistem şiddet seviyesini döndürür
     pub fn current_severity(&self) -> Severity {
         Severity::from(self.current_severity.load(Ordering::SeqCst) as u8)
     }
     
-    /// Get fault statistics
+    /// Hata istatistiklerini döndürür
     pub fn stats(&self) -> HubStats {
         HubStats {
             total_faults: self.fault_count.load(Ordering::SeqCst),
@@ -246,7 +247,7 @@ impl FaultHub {
         }
     }
     
-    /// Reset module health status
+    /// Modül sağlık durumunu sıfırlar
     pub fn reset_module(&self, module: &str) -> bool {
         if let Some(health) = self.modules.lock().get_mut(module) {
             health.status = HealthStatus::Healthy;
@@ -259,12 +260,12 @@ impl FaultHub {
         }
     }
     
-    /// Check if system is in emergency state
+    /// Sistemin acil durum modunda olup olmadığını kontrol eder
     pub fn is_emergency(&self) -> bool {
         self.current_severity() == Severity::Emergency
     }
     
-    /// Get recommended action for current state
+    /// Mevcut sistem durumu için önerilen eylemi döndürür
     pub fn recommended_action(&self) -> RecommendedAction {
         self.current_severity().recommended_action()
     }
@@ -293,7 +294,7 @@ pub struct HubStats {
 }
 
 // ============================================================================
-// GLOBAL HUB INSTANCE
+// GLOBAL MERKEZ ÖRNEKİ
 // ============================================================================
 
 lazy_static::lazy_static! {
@@ -301,41 +302,41 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// PUBLIC API
+// GENEL (PUBLIC) API
 // ============================================================================
 
-/// Initialize fault hub
+/// Hata merkezini başlatır
 pub fn init() {
     FAULT_HUB.init();
 }
 
-/// Report a fault
+/// Hata bildirir
 pub fn report(source: FaultSource, fault_type: FaultType, message: &str) -> FaultId {
     let fault = Fault::new(source, fault_type, message);
     FAULT_HUB.report_fault(fault)
 }
 
-/// Check all modules
+/// Tüm modülleri kontrol eder
 pub fn check_all() {
     FAULT_HUB.check_all();
 }
 
-/// Get module health
+/// Modül sağlığını döndürür
 pub fn health(module: &str) -> Option<ModuleHealth> {
     FAULT_HUB.get_health(module)
 }
 
-/// Get all health statuses
+/// Tüm sağlık durumlarını döndürür
 pub fn all_health() -> Vec<ModuleHealth> {
     FAULT_HUB.get_all_health()
 }
 
-/// Attempt recovery
+/// Kurtarmayı dener
 pub fn recover(fault: &Fault) -> RecoveryResult {
     FAULT_HUB.attempt_recovery(fault)
 }
 
-/// Get hub statistics
+/// Merkez istatistiklerini döndürür
 pub fn stats() -> HubStats {
     FAULT_HUB.stats()
 }

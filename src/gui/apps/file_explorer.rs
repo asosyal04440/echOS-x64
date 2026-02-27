@@ -376,23 +376,17 @@ impl FileExplorer {
         let width = self.rect.width as usize;
         let height = self.rect.height as usize;
         
-        // Window background
+        // Window background (WM Cyber titlebar is the chrome — no internal title/toolbar)
         fb.draw_rect(x, y, width, height, Theme::WINDOW_BG.to_u32());
-        
-        // Title bar
-        self.draw_title_bar(fb, x, y, width);
-        
-        // Toolbar
-        self.draw_toolbar(fb, x, y + 32, width);
-        
+
         // Sidebar
-        self.draw_sidebar(fb, x, y + 32 + self.toolbar_height);
-        
+        self.draw_sidebar(fb, x, y);
+
         // Main content
         let content_x = x + self.sidebar_width;
-        let content_y = y + 32 + self.toolbar_height;
+        let content_y = y;
         let content_width = width - self.sidebar_width;
-        let content_height = height - 32 - self.toolbar_height - self.status_height;
+        let content_height = height.saturating_sub(self.status_height);
         
         self.draw_content(fb, content_x, content_y, content_width, content_height);
         

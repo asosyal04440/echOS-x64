@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use aml::AmlValue;
 
 // ============================================================================
-// Sleep State Management
+// Uyku Durumu Yönetimi
 // ============================================================================
 
 /// Desteklenen uyku durumlarını tespit et (_S0.._S5)
@@ -367,7 +367,7 @@ pub fn get_pci_routing_table() -> Vec<PciIrqEntry> {
 }
 
 // ============================================================================
-// Helpers
+// Yardımcı Fonksiyonlar
 // ============================================================================
 
 fn aml_to_u32(val: &AmlValue) -> u32 {

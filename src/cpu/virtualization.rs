@@ -1,18 +1,24 @@
-//! # CPU Virtualization Support
+//! # CPU Sanallaştırma Desteği
 //!
-//! Intel VT-x and AMD SVM (AMD-V) virtualization extensions.
+//! Intel VT-x (VMX) ve AMD SVM (AMD-V) donanım sanallaştırma uzantıları.
+//!
+//! Bu modül echOS'un hipervizör katmanı için temel altyapıyı sağlar:
+//! - Intel için: VMXON/VMXOFF, VMCS yönetimi, VMLAUNCH/VMRESUME
+//! - AMD için: VMRUN/VMSAVE/VMLOAD, VMCB yapılandırması
+//! Her iki platform da CPUID ile algılanarak ilgili MSR'lar aracılığıyla
+//! etkinleştirilir.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ============================================================================
-// VMX CONSTANTS (Intel VT-x)
+// VMX SABİTLERİ (Intel VT-x)
 // ============================================================================
 
-/// VMX operation bit
+/// VMX operasyon biti — CR4.VMXE (bit 13) etkinleştirilmeli
 pub const VMX_CR4_FIXED0: u64 = 0x2000;
 pub const VMX_CR4_FIXED1: u64 = 0x2FFF;
 
-/// VMX MSR addresses
+/// VMX MSR adresleri — Intel SDM Vol.3C Bölüm 24
 pub const MSR_IA32_VMX_BASIC: u32 = 0x480;
 pub const MSR_IA32_VMX_PINBASED_CTLS: u32 = 0x481;
 pub const MSR_IA32_VMX_PROCBASED_CTLS: u32 = 0x482;
@@ -26,7 +32,7 @@ pub const MSR_IA32_VMX_CR4_FIXED1: u32 = 0x489;
 pub const MSR_IA32_VMX_VMCS_ENUM: u32 = 0x48A;
 pub const MSR_IA32_FEATURE_CONTROL: u32 = 0x3A;
 
-/// VMCS field encodings
+/// VMCS alan kodlamaları — Intel SDM Vol.3C Çizelge B-1
 pub const VMCS_LINK_POINTER: u32 = 0x2800;
 pub const VMCS_GUEST_ES_SELECTOR: u32 = 0x800;
 pub const VMCS_GUEST_CS_SELECTOR: u32 = 0x802;
@@ -43,35 +49,36 @@ pub const VMCS_GUEST_RSP: u32 = 0x681C;
 pub const VMCS_GUEST_RIP: u32 = 0x681E;
 pub const VMCS_GUEST_RFLAGS: u32 = 0x6820;
 
-/// VMX instruction errors
+/// VMX komut hata kodları — VMCS VM_INSTRUCTION_ERROR alanından okunur
 pub const VMXERR_VMCALL_IN_VMX_ROOT: u32 = 1;
 pub const VMXERR_VMCLEAR_INVALID_ADDR: u32 = 2;
 pub const VMXERR_VMLAUNCH_NONCLEAR_VMCS: u32 = 3;
 
 // ============================================================================
-// SVM CONSTANTS (AMD-V)
+// SVM SABİTLERİ (AMD-V)
 // ============================================================================
 
-/// SVM MSR
+/// AMD SVM MSR adresleri
 pub const MSR_VM_CR: u32 = 0xC0010114;
 pub const MSR_VM_HSAVE_PA: u32 = 0xC0010117;
 
-/// SVM features
-pub const SVM_NPT: u32 = 1 << 0;      // Nested Page Tables
-pub const SVM_LBR: u32 = 1 << 1;       // LBR Virtualization
-pub const SVM_SVM_LOCK: u32 = 1 << 2;  // SVM Lock
-pub const SVM_NRIP: u32 = 1 << 3;      // Next RIP Save
+/// AMD SVM özellik bitleri — hangi SVM yeteneklerinin desteklendiğini belirtir
+pub const SVM_NPT: u32 = 1 << 0;      // İç İçe Sayfa Tabloları (Nested Page Tables)
+pub const SVM_LBR: u32 = 1 << 1;       // LBR Sanallaştırma (Last Branch Record)
+pub const SVM_SVM_LOCK: u32 = 1 << 2;  // SVM Kilit (BIOS RM disable geçişini önler)
+pub const SVM_NRIP: u32 = 1 << 3;      // Sonraki RIP Kaydı (vmexit sonrası ilerleme için)
 
-/// VMCB (Virtual Machine Control Block)
+/// VMCB (Virtual Machine Control Block) bölüm ofsesleri
 pub const VMCB_CTRL_OFFSET: usize = 0x000;
 pub const VMCB_STATE_OFFSET: usize = 0x400;
 pub const VMCB_SIZE: usize = 4096;
 
 // ============================================================================
-// VMX STRUCTURES
+// VMX YAPILARI
 // ============================================================================
 
-/// VMCS (Virtual Machine Control Structure)
+/// VMCS (Virtual Machine Control Structure) — Intel VT-x konuk durumunu tutar
+/// 4096 bayt hizalı sayfa tahsis edilmeli ve fiziksel adres VMXON'a verilmeli
 #[repr(C, align(4096))]
 pub struct Vmcs {
     pub revision_id: u32,
@@ -82,13 +89,13 @@ pub struct Vmcs {
 impl Vmcs {
     pub fn new() -> Self {
         Self {
-            revision_id: 0, // Set from MSR_IA32_VMX_BASIC
+            revision_id: 0, // MSR_IA32_VMX_BASIC'ten sets edilmeli
             abort_indicator: 0,
             data: [0; 1022],
         }
     }
 
-    /// Write to VMCS field
+    /// VMCS alanına değer yaz (alan kodlaması → veri dizini)
     pub fn write(&mut self, field: u32, value: u64) {
         let index = (field as usize) >> 1;
         if index < self.data.len() {
@@ -96,7 +103,7 @@ impl Vmcs {
         }
     }
 
-    /// Read from VMCS field
+    /// VMCS alanından değer oku (alan kodlaması → veri dizini)
     pub fn read(&self, field: u32) -> u64 {
         let index = (field as usize) >> 1;
         if index < self.data.len() {
@@ -115,7 +122,7 @@ pub struct VmxonRegion {
 }
 
 // ============================================================================
-// SVM STRUCTURES
+// SVM YAPILARI
 // ============================================================================
 
 /// VMCB Control Area
@@ -219,10 +226,10 @@ pub struct Vmcb {
 }
 
 // ============================================================================
-// VIRTUALIZATION MANAGER
+// SANALLAŞTIRMA YÖNETİCİSİ
 // ============================================================================
 
-/// Virtualization support status
+/// Sanallaştırma destek durumu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VtxStatus {
     NotSupported,
@@ -231,19 +238,19 @@ pub enum VtxStatus {
     Active,
 }
 
-/// Virtualization manager
+/// Sanallaştırma yöneticisi — VMX ve SVM durumunu izler ve yönetir
 pub struct VtxManager {
-    /// Intel VT-x supported
+    /// Intel VT-x (VMX) destekleniyor mu?
     vmx_supported: AtomicBool,
-    /// AMD SVM supported
+    /// AMD SVM destekleniyor mu?
     svm_supported: AtomicBool,
-    /// VMX active
+    /// VMX root operasyon aktif mi?
     vmx_active: AtomicBool,
-    /// SVM active
+    /// SVM aktif mi?
     svm_active: AtomicBool,
-    /// VMXON region physical address
+    /// VMXON bölgesinin fiziksel adresi
     vmxon_region: AtomicU64,
-    /// Active VMCS count
+    /// Aktif VMCS sayısı
     active_vmcs_count: AtomicU64,
 }
 
@@ -259,9 +266,9 @@ impl VtxManager {
         }
     }
 
-    /// Detect virtualization support
+    /// CPUID ile VMX/SVM desteğini algıla
     pub fn detect(&self) {
-        // Check CPUID for VMX
+        // CPUID leaf 1 ECX bit 5: VMX desteği
         let cpuid = unsafe { core::arch::x86_64::__cpuid(1) };
         let vmx_bit = (cpuid.ecx >> 5) & 1;
         
@@ -270,7 +277,7 @@ impl VtxManager {
             crate::serial_println!("[VTX] Intel VT-x supported");
         }
         
-        // Check for SVM (AMD)
+        // CPUID ext leaf 0x80000001 ECX bit 2: SVM desteği (AMD)
         let cpuid_ext = unsafe { core::arch::x86_64::__cpuid(0x80000001) };
         let svm_bit = (cpuid_ext.ecx >> 2) & 1;
         
@@ -280,29 +287,29 @@ impl VtxManager {
         }
     }
 
-    /// Enable VMX operation
+    /// VMX operasyonunu etkinleştir — CR4.VMXE biti ile MSR kilidi kontrol edilir
     pub fn enable_vmx(&self) -> Result<(), VtxError> {
         if !self.vmx_supported.load(Ordering::SeqCst) {
             return Err(VtxError::NotSupported);
         }
         
-        // Check IA32_FEATURE_CONTROL MSR
+        // IA32_FEATURE_CONTROL MSR'ını oku (kilitleme ve etkinleştirme durumu)
         let feature_control = unsafe { 
             crate::cpu::msr::read(MSR_IA32_FEATURE_CONTROL)
         };
         
-        // Check if VMX is locked and enabled
+        // VMX kilitli ve etkin mi?
         if (feature_control & 1) == 0 {
-            // Not locked, enable VMX
+            // Kilitli değil — VMX'i etkinleştir (bit 0: lock, bit 2: VMX outside SMX)
             unsafe {
                 crate::cpu::msr::write(MSR_IA32_FEATURE_CONTROL, feature_control | 5);
             }
         } else if (feature_control & 4) == 0 {
-            // Locked but VMX outside SMX disabled
+            // Kilitli ama VMX (SMX dışı) devre dışı — BIOS tarafından engelleniyor
             return Err(VtxError::DisabledByBios);
         }
         
-        // Set CR4.VMXE bit
+        // CR4.VMXE (bit 13) bitini ayarla — VMX komutlarına izin verir
         unsafe {
             let cr4 = crate::cpu::read_cr4();
             crate::cpu::write_cr4(cr4 | (1 << 13));
@@ -312,51 +319,50 @@ impl VtxManager {
         Ok(())
     }
 
-    /// Enter VMX root operation
+    /// VMXON komutunu çalıştır — VMX root operasyona gir
     pub fn vmxon(&self, region_phys: u64) -> Result<(), VtxError> {
         self.vmxon_region.store(region_phys, Ordering::SeqCst);
         
-        // Execute VMXON instruction
-        // This would be done with inline assembly
+        // VMXON komutu inline assembly ile çalıştırılmalı
         crate::serial_println!("[VTX] VMXON at {:#x}", region_phys);
         
         self.vmx_active.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Exit VMX root operation
+    /// VMXOFF komutunu çalıştır — VMX root operasyondan çık
     pub fn vmxoff(&self) -> Result<(), VtxError> {
-        // Execute VMXOFF instruction
+        // VMXOFF komutu inline assembly ile çalıştırılmalı
         self.vmx_active.store(false, Ordering::SeqCst);
         crate::serial_println!("[VTX] VMXOFF");
         Ok(())
     }
 
-    /// Create new VMCS
+    /// Yeni VMCS tahsis et ve fiziksel adresini döndür
     pub fn create_vmcs(&self) -> u64 {
         self.active_vmcs_count.fetch_add(1, Ordering::SeqCst);
-        // Allocate and return VMCS physical address
+        // VMCS için sayfa tahsis et ve fiziksel adresini döndür
         0
     }
 
-    /// Check if VMX is active
+    /// VMX root operasyonun aktif olup olmadığını kontrol et
     pub fn is_vmx_active(&self) -> bool {
         self.vmx_active.load(Ordering::SeqCst)
     }
 
-    /// Check if SVM is active
+    /// SVM operasyonunun aktif olup olmadığını kontrol et
     pub fn is_svm_active(&self) -> bool {
         self.svm_active.load(Ordering::SeqCst)
     }
 }
 
 lazy_static::lazy_static! {
-    /// Global virtualization manager
+    /// Global sanallaştırma yöneticisi — VMX ve SVM durumunu yönetir
     pub static ref VTX_MANAGER: VtxManager = VtxManager::new();
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TİPİ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,74 +377,74 @@ pub enum VtxError {
 }
 
 // ============================================================================
-// VMX INSTRUCTION WRAPPERS
+// VMX KOMUT SARMALAYICILARI
 // ============================================================================
 
-/// Execute VMCLEAR
+/// VMCLEAR komutu — VMCS'i temizle ve "temiz" duruma getir (VMLAUNCH öncesi gerekli)
 pub unsafe fn vmclear(vmcs_phys: u64) -> Result<(), VtxError> {
-    // VMCLEAR instruction
+    // VMCLEAR komutu burada çalıştırılmalı
     Ok(())
 }
 
-/// Execute VMPTRLD
+/// VMPTRLD komutu — VMCS'i mevcut CPU'ya yükle (aktif hale getir)
 pub unsafe fn vmptrld(vmcs_phys: u64) -> Result<(), VtxError> {
-    // VMPTRLD instruction
+    // VMPTRLD komutu burada çalıştırılmalı
     Ok(())
 }
 
-/// Execute VMREAD
+/// VMREAD komutu — aktif VMCS'ten alan değeri oku
 pub unsafe fn vmread(field: u32) -> u64 {
     0
 }
 
-/// Execute VMWRITE
+/// VMWRITE komutu — aktif VMCS'e alan değeri yaz
 pub unsafe fn vmwrite(field: u32, value: u64) {
 }
 
-/// Execute VMLAUNCH
+/// VMLAUNCH komutu — VMX olmayan konuğu ilk kez başlat
 pub unsafe fn vmlaunch() -> Result<(), VtxError> {
     Ok(())
 }
 
-/// Execute VMRESUME
+/// VMRESUME komutu — daha önce başlatılmış konuğu devam ettir
 pub unsafe fn vmresume() -> Result<(), VtxError> {
     Ok(())
 }
 
 // ============================================================================
-// SVM INSTRUCTION WRAPPERS
+// SVM KOMUT SARMALAYICILARI
 // ============================================================================
 
-/// Execute VMRUN (AMD)
+/// VMRUN komutu (AMD) — VMCB fiziksel adresiyle konuğu başlat
 pub unsafe fn vmrun(vmcb_phys: u64) -> Result<(), VtxError> {
     Ok(())
 }
 
-/// Execute VMSAVE (AMD)
+/// VMSAVE komutu (AMD) — konuk CPU durumunu VMCB'ye kaydet
 pub unsafe fn vmsave(vmcb_phys: u64) {
 }
 
-/// Execute VMLOAD (AMD)
+/// VMLOAD komutu (AMD) — VMCB'den konuk CPU durumunu yükle
 pub unsafe fn vmload(vmcb_phys: u64) {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
-/// Initialize virtualization subsystem
+/// Sanallaştırma alt sistemini başlat — CPUID ile VMX/SVM varlığını algılar
 pub fn init() {
     VTX_MANAGER.detect();
     crate::serial_println!("[VTX] Subsystem initialized");
 }
 
-/// Check if virtualization is available
+/// Sanallaştırma desteği mevcut mu? (VMX veya SVM)
 pub fn is_available() -> bool {
     VTX_MANAGER.vmx_supported.load(Ordering::SeqCst) || 
     VTX_MANAGER.svm_supported.load(Ordering::SeqCst)
 }
 
-/// Get status
+/// Sanallaştırma durumunu döndür
 pub fn get_status() -> VtxStatus {
     if VTX_MANAGER.is_vmx_active() || VTX_MANAGER.is_svm_active() {
         VtxStatus::Active

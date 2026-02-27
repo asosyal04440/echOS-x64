@@ -1,7 +1,14 @@
-//! # Clipboard Manager
+//! # Pano Yöneticisi
 //!
-//! System clipboard with history and multiple formats
-//! Supports text, images, files, and custom data types
+//! Geçmişli ve çok formatlı sistem panosu.
+//! Metin, resim, dosya ve özel veri türlerini destekler.
+//!
+//! ## Mimari
+//! - `ClipboardData`: Boş, düz metin, zengin metin, resim, dosya yolu, URL ve özel format
+//! - `ClipboardItem`: Pano geçmişindeki tek öğe (kaynak uygulama, zaman damgası, sabitleme)
+//! - `ClipboardManager`: Tüm pano durumunu yönetir; LRU geçmişi, arama ve filtreleme
+//! - `ClipboardFilter`: Tür bazlı filtre (Metin, Resim, Dosya, URL, Sabitlenmiş)
+//! - `ClipboardAction`: Pano olayları (Kopyala, Yapıştır, Sabitle, Sil vb.)
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -15,35 +22,35 @@ use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::{Theme, Color};
 
 // ============================================================================
-// CLIPBOARD CONSTANTS
+// PANO SABİTLERİ
 // ============================================================================
 
-/// Maximum history items
+/// Maksimum geçmiş öğesi sayısı
 pub const MAX_HISTORY: usize = 50;
 
-/// Maximum item size (bytes)
+/// Maksimum öğe boyutu (bayt)
 pub const MAX_ITEM_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
 // ============================================================================
-// CLIPBOARD DATA
+// PANO VERİSİ
 // ============================================================================
 
-/// Clipboard data types
+/// Pano veri türleri
 #[derive(Clone, Debug)]
 pub enum ClipboardData {
-    /// No data
+    /// Veri yok
     Empty,
-    /// Plain text
+    /// Düz metin
     Text(String),
-    /// Rich text (HTML/RTF)
+    /// Zengin metin (HTML/RTF)
     RichText { html: String, plain: String },
-    /// Image data
+    /// Resim verisi
     Image { width: usize, height: usize, data: Vec<u32> },
-    /// File paths
+    /// Dosya yolları
     Files(Vec<String>),
     /// URL
     Url(String),
-    /// Custom data with format identifier
+    /// Format tanımlayıcılı özel veri
     Custom { format: String, data: Vec<u8> },
 }
 
@@ -59,7 +66,7 @@ impl ClipboardData {
             ClipboardData::Custom { data, .. } => data.is_empty(),
         }
     }
-    
+
     pub fn size(&self) -> usize {
         match self {
             ClipboardData::Empty => 0,
@@ -71,10 +78,10 @@ impl ClipboardData {
             ClipboardData::Custom { data, .. } => data.len(),
         }
     }
-    
+
     pub fn format_size(&self) -> String {
         let size = self.size();
-        
+
         if size < 1024 {
             format!("{} B", size)
         } else if size < 1024 * 1024 {
@@ -83,10 +90,10 @@ impl ClipboardData {
             format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
         }
     }
-    
+
     pub fn preview(&self, max_len: usize) -> String {
         match self {
-            ClipboardData::Empty => String::from("(empty)"),
+            ClipboardData::Empty => String::from("(boş)"),
             ClipboardData::Text(t) => {
                 if t.len() > max_len {
                     format!("{}...", &t[..max_len])
@@ -102,7 +109,7 @@ impl ClipboardData {
                 }
             }
             ClipboardData::Image { width, height, .. } => {
-                format!("Image: {}x{}", width, height)
+                format!("Resim: {}x{}", width, height)
             }
             ClipboardData::Files(files) => {
                 if files.len() == 1 {
@@ -113,7 +120,7 @@ impl ClipboardData {
                         name.to_string()
                     }
                 } else {
-                    format!("{} files", files.len())
+                    format!("{} dosya", files.len())
                 }
             }
             ClipboardData::Url(u) => {
@@ -124,23 +131,23 @@ impl ClipboardData {
                 }
             }
             ClipboardData::Custom { format, .. } => {
-                format!("Custom: {}", format)
+                format!("Özel: {}", format)
             }
         }
     }
-    
+
     pub fn data_type(&self) -> &'static str {
         match self {
-            ClipboardData::Empty => "empty",
-            ClipboardData::Text(_) => "text",
-            ClipboardData::RichText { .. } => "rich text",
-            ClipboardData::Image { .. } => "image",
-            ClipboardData::Files(_) => "files",
+            ClipboardData::Empty => "boş",
+            ClipboardData::Text(_) => "metin",
+            ClipboardData::RichText { .. } => "zengin metin",
+            ClipboardData::Image { .. } => "resim",
+            ClipboardData::Files(_) => "dosyalar",
             ClipboardData::Url(_) => "url",
-            ClipboardData::Custom { .. } => "custom",
+            ClipboardData::Custom { .. } => "özel",
         }
     }
-    
+
     pub fn icon(&self) -> &'static str {
         match self {
             ClipboardData::Empty => "📋",
@@ -155,27 +162,27 @@ impl ClipboardData {
 }
 
 // ============================================================================
-// CLIPBOARD ITEM
+// PANO ÖĞESİ
 // ============================================================================
 
-/// A clipboard history item
+/// Bir pano geçmişi öğesi
 #[derive(Clone, Debug)]
 pub struct ClipboardItem {
-    /// Item ID
+    /// Öğe kimliği
     pub id: u32,
-    /// Clipboard data
+    /// Pano verisi
     pub data: ClipboardData,
-    /// Source application
+    /// Kaynak uygulama
     pub source_app: String,
-    /// Timestamp (seconds since epoch)
+    /// Zaman damgası (epoch'tan itibaren saniye)
     pub timestamp: u64,
-    /// Is pinned (won't be removed)
+    /// Sabitlenmiş mi (kaldırılmaz)
     pub pinned: bool,
-    /// Is favorite
+    /// Favori mi
     pub favorite: bool,
-    /// Copy count
+    /// Kopyalama sayısı
     pub copy_count: u32,
-    /// Tags
+    /// Etiketler
     pub tags: Vec<String>,
 }
 
@@ -185,52 +192,52 @@ impl ClipboardItem {
             id,
             data,
             source_app: String::from(source),
-            timestamp: 0, // Would use actual time
+            timestamp: 0, // Gerçek zamanlama kullanılacak
             pinned: false,
             favorite: false,
             copy_count: 1,
             tags: Vec::new(),
         }
     }
-    
+
     pub fn touch(&mut self) {
-        self.timestamp = 0; // Would update with actual time
+        self.timestamp = 0; // Gerçek zamanlama ile güncellenecek
         self.copy_count += 1;
     }
-    
+
     pub fn format_time(&self) -> String {
-        // Would format actual timestamp
-        String::from("Just now")
+        // Gerçek zaman damgasını biçimlendirecek
+        String::from("Az önce")
     }
 }
 
 // ============================================================================
-// CLIPBOARD MANAGER
+// PANO YÖNETİCİSİ
 // ============================================================================
 
-/// Clipboard manager with history
+/// Geçmişli pano yöneticisi
 pub struct ClipboardManager {
-    /// Current clipboard content
+    /// Mevcut pano içeriği
     pub current: ClipboardData,
-    /// History items (most recent first)
+    /// Geçmiş öğeler (en yeni önce)
     pub history: VecDeque<ClipboardItem>,
-    /// Next item ID
+    /// Sonraki öğe kimliği
     pub next_id: u32,
-    /// Maximum history size
+    /// Maksimum geçmiş boyutu
     pub max_history: usize,
-    /// Sync across devices
+    /// Cihazlar arası senkronizasyon
     pub sync_enabled: bool,
-    /// Show in menu bar
+    /// Menü çubuğunda göster
     pub show_in_menu: bool,
-    /// Keyboard shortcut
+    /// Klavye kısayolu
     pub shortcut: String,
-    /// Selected item in history
+    /// Geçmişte seçili öğe
     pub selected_item: Option<u32>,
-    /// Search query
+    /// Arama sorgusu
     pub search_query: String,
-    /// Filter type
+    /// Filtre türü
     pub filter_type: Option<ClipboardFilter>,
-    /// Hovered item
+    /// Üzerine gelinmiş öğe
     pub hovered_item: Option<u32>,
 }
 
@@ -260,35 +267,35 @@ impl ClipboardManager {
             hovered_item: None,
         }
     }
-    
-    /// Copy data to clipboard
+
+    /// Panoya veri kopyala
     pub fn copy(&mut self, data: ClipboardData, source: &str) {
         if data.is_empty() || data.size() > MAX_ITEM_SIZE {
             return;
         }
-        
-        // Check if same as current
+
+        // Mevcutla aynı mı kontrol et
         if self.is_same_data(&data) {
-            // Update timestamp of existing item
+            // Mevcut öğenin zaman damgasını güncelle
             if let Some(item) = self.history.front_mut() {
                 item.touch();
             }
             return;
         }
-        
-        // Create new item
+
+        // Yeni öğe oluştur
         let item = ClipboardItem::new(self.next_id, data.clone(), source);
         self.next_id += 1;
-        
-        // Add to history
+
+        // Geçmişe ekle
         self.history.push_front(item);
-        
-        // Trim history
+
+        // Geçmişi kırp
         while self.history.len() > self.max_history {
-            // Don't remove pinned items
+            // Sabitlenmiş öğeleri kaldırma
             if let Some(last) = self.history.back() {
                 if last.pinned {
-                    // Find non-pinned item to remove
+                    // Sabitlenmemiş öğeyi bul ve kaldır
                     let idx = self.history.iter().rposition(|i| !i.pinned);
                     if let Some(idx) = idx {
                         self.history.remove(idx);
@@ -298,11 +305,11 @@ impl ClipboardManager {
                 }
             }
         }
-        
-        // Update current
+
+        // Mevcut veriyi güncelle
         self.current = data;
     }
-    
+
     fn is_same_data(&self, data: &ClipboardData) -> bool {
         match (&self.current, data) {
             (ClipboardData::Text(a), ClipboardData::Text(b)) => a == b,
@@ -311,8 +318,8 @@ impl ClipboardManager {
             _ => false,
         }
     }
-    
-    /// Paste from clipboard
+
+    /// Panodan yapıştır
     pub fn paste(&self) -> Option<&ClipboardData> {
         if self.current.is_empty() {
             None
@@ -320,8 +327,8 @@ impl ClipboardManager {
             Some(&self.current)
         }
     }
-    
-    /// Paste from history item
+
+    /// Geçmiş öğeden yapıştır
     pub fn paste_from_history(&mut self, item_id: u32) -> Option<ClipboardData> {
         for item in &mut self.history.iter_mut() {
             if item.id == item_id {
@@ -332,19 +339,19 @@ impl ClipboardManager {
         }
         None
     }
-    
-    /// Clear clipboard
+
+    /// Panoyu temizle
     pub fn clear(&mut self) {
         self.current = ClipboardData::Empty;
     }
-    
-    /// Clear history
+
+    /// Geçmişi temizle
     pub fn clear_history(&mut self) {
-        // Keep pinned items
+        // Sabitlenmiş öğeleri koru
         self.history.retain(|i| i.pinned);
     }
-    
-    /// Pin/unpin item
+
+    /// Öğeyi sabitle/sabitini kaldır
     pub fn toggle_pin(&mut self, item_id: u32) {
         for item in &mut self.history {
             if item.id == item_id {
@@ -353,8 +360,8 @@ impl ClipboardManager {
             }
         }
     }
-    
-    /// Toggle favorite
+
+    /// Favoriye ekle/çıkar
     pub fn toggle_favorite(&mut self, item_id: u32) {
         for item in &mut self.history {
             if item.id == item_id {
@@ -363,21 +370,21 @@ impl ClipboardManager {
             }
         }
     }
-    
-    /// Delete item
+
+    /// Öğeyi sil
     pub fn delete_item(&mut self, item_id: u32) {
         self.history.retain(|i| i.id != item_id);
     }
-    
-    /// Search history
+
+    /// Geçmişte ara
     pub fn search(&mut self) {
         if self.search_query.is_empty() {
             self.filter_type = None;
             return;
         }
-        
+
         let query = self.search_query.to_lowercase();
-        
+
         for item in &self.history {
             let matches = match &item.data {
                 ClipboardData::Text(t) => t.to_lowercase().contains(&query),
@@ -386,18 +393,18 @@ impl ClipboardManager {
                 ClipboardData::Files(files) => files.iter().any(|f| f.to_lowercase().contains(&query)),
                 _ => false,
             };
-            
-            // Would mark items as visible/hidden based on match
+
+            // Eşleşmeye göre öğeleri görünür/gizli olarak işaretle
         }
     }
-    
-    /// Get filtered history
+
+    /// Filtrelenmiş geçmişi al
     pub fn get_filtered_history(&self) -> Vec<&ClipboardItem> {
         let query = self.search_query.to_lowercase();
-        
+
         self.history.iter()
             .filter(|item| {
-                // Filter by type
+                // Türe göre filtrele
                 let type_match = match self.filter_type {
                     None | Some(ClipboardFilter::All) => true,
                     Some(ClipboardFilter::Text) => matches!(item.data, ClipboardData::Text(_) | ClipboardData::RichText { .. }),
@@ -406,16 +413,16 @@ impl ClipboardManager {
                     Some(ClipboardFilter::URLs) => matches!(item.data, ClipboardData::Url(_)),
                     Some(ClipboardFilter::Pinned) => item.pinned,
                 };
-                
+
                 if !type_match {
                     return false;
                 }
-                
-                // Filter by search query
+
+                // Arama sorgusuna göre filtrele
                 if query.is_empty() {
                     return true;
                 }
-                
+
                 match &item.data {
                     ClipboardData::Text(t) => t.to_lowercase().contains(&query),
                     ClipboardData::RichText { plain, .. } => plain.to_lowercase().contains(&query),
@@ -426,33 +433,33 @@ impl ClipboardManager {
             })
             .collect()
     }
-    
-    /// Draw clipboard manager UI
+
+    /// Pano yöneticisi arayüzünü çiz
     pub fn draw(&self, fb: &mut Framebuffer, x: usize, y: usize, width: usize, height: usize) {
-        // Background
+        // Arka plan
         fb.draw_rect(x, y, width, height, Theme::WINDOW_BG.to_u32());
         fb.draw_rect_outline(x, y, width, height, Theme::BORDER.to_u32());
-        
-        // Header
+
+        // Başlık
         fb.draw_rect(x, y, width, 40, Theme::TOOLBAR_BG.to_u32());
-        fb.draw_string(x + 8, y + 10, "Clipboard History", Theme::TEXT_PRIMARY.to_u32());
-        
-        // Search field
+        fb.draw_string(x + 8, y + 10, "Pano Geçmişi", Theme::TEXT_PRIMARY.to_u32());
+
+        // Arama alanı
         let search_y = y + 48;
         fb.draw_rect(x + 8, search_y, width - 16, 28, Theme::SIDEBAR_BG.to_u32());
         fb.draw_string(x + 16, search_y + 6, "🔍", Theme::TEXT_SECONDARY.to_u32());
-        
+
         if self.search_query.is_empty() {
-            fb.draw_string(x + 36, search_y + 6, "Search clipboard...", Theme::TEXT_SECONDARY.to_u32());
+            fb.draw_string(x + 36, search_y + 6, "Panoda ara...", Theme::TEXT_SECONDARY.to_u32());
         } else {
             fb.draw_string(x + 36, search_y + 6, &self.search_query, Theme::TEXT_PRIMARY.to_u32());
         }
-        
-        // Filter tabs
+
+        // Filtre sekmeleri
         let tabs_y = search_y + 36;
-        let tabs = ["All", "Text", "Images", "Files", "Pinned"];
+        let tabs = ["Tümü", "Metin", "Resimler", "Dosyalar", "Sabitlenmiş"];
         let mut tab_x = x + 8;
-        
+
         for (i, tab) in tabs.iter().enumerate() {
             let is_active = match (self.filter_type, i) {
                 (None, 0) | (Some(ClipboardFilter::All), 0) => true,
@@ -463,99 +470,99 @@ impl ClipboardManager {
                 (Some(ClipboardFilter::Pinned), 5) => true,
                 _ => false,
             };
-            
+
             let bg = if is_active { Theme::ACCENT_PRIMARY.to_u32() } else { Theme::SIDEBAR_BG.to_u32() };
             let text_color = if is_active { Theme::TEXT_ON_ACCENT.to_u32() } else { Theme::TEXT_PRIMARY.to_u32() };
-            
+
             fb.draw_rect(tab_x, tabs_y, tab.len() * 8 + 16, 24, bg);
             fb.draw_string(tab_x + 8, tabs_y + 4, tab, text_color);
-            
+
             tab_x += tab.len() * 8 + 20;
         }
-        
-        // History list
+
+        // Geçmiş listesi
         let list_y = tabs_y + 32;
         let list_height = height - 140;
         let item_height = 64;
-        
+
         let filtered = self.get_filtered_history();
-        
+
         for (i, item) in filtered.iter().enumerate() {
             let item_y = list_y + i * item_height;
-            
+
             if item_y + item_height > y + height {
                 break;
             }
-            
+
             let is_selected = self.selected_item == Some(item.id);
             let is_hovered = self.hovered_item == Some(item.id);
-            
+
             let bg = if is_selected { Theme::ACCENT_PRIMARY.to_u32() }
                      else if is_hovered { Theme::LIST_ITEM_HOVER.to_u32() }
                      else { Theme::WINDOW_BG.to_u32() };
-            
+
             fb.draw_rect(x, item_y, width, item_height, bg);
-            
+
             let text_color = if is_selected { Theme::TEXT_ON_ACCENT.to_u32() } else { Theme::TEXT_PRIMARY.to_u32() };
             let secondary_color = if is_selected { Theme::TEXT_ON_ACCENT.to_u32() } else { Theme::TEXT_SECONDARY.to_u32() };
-            
-            // Icon
+
+            // Simge
             fb.draw_string(x + 8, item_y + 8, item.data.icon(), text_color);
-            
-            // Preview
+
+            // Önizleme
             let preview = item.data.preview(40);
             fb.draw_string(x + 36, item_y + 8, &preview, text_color);
-            
-            // Type and size
+
+            // Tür ve boyut
             let info = format!("{} • {}", item.data.data_type(), item.data.format_size());
             fb.draw_string(x + 36, item_y + 28, &info, secondary_color);
-            
-            // Time and source
+
+            // Saat ve kaynak
             let meta = format!("{} • {}", item.format_time(), item.source_app);
             fb.draw_string(x + 36, item_y + 44, &meta, secondary_color);
-            
-            // Pinned indicator
+
+            // Sabitleme göstergesi
             if item.pinned {
                 fb.draw_string(x + width - 24, item_y + 8, "📌", text_color);
             }
-            
-            // Favorite indicator
+
+            // Favori göstergesi
             if item.favorite {
                 fb.draw_string(x + width - 48, item_y + 8, "⭐", text_color);
             }
         }
-        
-        // Empty state
+
+        // Boş durum
         if filtered.is_empty() {
             let empty_text = if self.search_query.is_empty() {
-                "No clipboard items"
+                "Pano öğesi yok"
             } else {
-                "No matching items"
+                "Eşleşen öğe yok"
             };
             fb.draw_string(x + width / 2 - empty_text.len() * 4, y + height / 2, empty_text, Theme::TEXT_SECONDARY.to_u32());
         }
-        
-        // Footer
+
+        // Alt çubuk
         let footer_y = y + height - 32;
         fb.draw_rect(x, footer_y, width, 32, Theme::TOOLBAR_BG.to_u32());
-        
-        let count_text = format!("{} items", self.history.len());
+
+        let count_text = format!("{} öğe", self.history.len());
         fb.draw_string(x + 8, footer_y + 8, &count_text, Theme::TEXT_SECONDARY.to_u32());
-        
-        // Keyboard shortcut hint
+
+        // Klavye kısayolu ipucu
         fb.draw_string(x + width - 80, footer_y + 8, &self.shortcut, Theme::TEXT_SECONDARY.to_u32());
     }
-    
-    /// Handle click
+
+    /// Tıklama olayını işle
     pub fn on_click(&mut self, mx: i32, my: i32, x: usize, y: usize, width: usize, height: usize) -> ClipboardAction {
-        // Search field
+        // Arama alanı
         let search_y = y + 48;
         if mx >= (x + 8) as i32 && mx < (x + width - 8) as i32
             && my >= search_y as i32 && my < (search_y + 28) as i32 {
             return ClipboardAction::FocusSearch;
         }
-        
-        // Filter tabs
+
+        // Filtre sekmeleri
         let tabs_y = search_y + 36;
         let tabs = [
             ClipboardFilter::All,
@@ -566,60 +573,60 @@ impl ClipboardManager {
             ClipboardFilter::Pinned,
         ];
         let mut tab_x = x + 8;
-        
+
         for filter in tabs {
             let tab_name = match filter {
-                ClipboardFilter::All => "All",
-                ClipboardFilter::Text => "Text",
-                ClipboardFilter::Images => "Images",
-                ClipboardFilter::Files => "Files",
-                ClipboardFilter::Pinned => "Pinned",
-                ClipboardFilter::URLs => "URLs",
+                ClipboardFilter::All => "Tümü",
+                ClipboardFilter::Text => "Metin",
+                ClipboardFilter::Images => "Resimler",
+                ClipboardFilter::Files => "Dosyalar",
+                ClipboardFilter::Pinned => "Sabitlenmiş",
+                ClipboardFilter::URLs => "URL'ler",
             };
-            
+
             let tab_width = tab_name.len() * 8 + 16;
-            
+
             if mx >= tab_x as i32 && mx < (tab_x + tab_width) as i32
                 && my >= tabs_y as i32 && my < (tabs_y + 24) as i32 {
                 self.filter_type = Some(filter);
                 return ClipboardAction::None;
             }
-            
+
             tab_x += tab_width + 4;
         }
-        
-        // History items
+
+        // Geçmiş öğeleri
         let list_y = tabs_y + 32;
         let item_height = 64;
         let filtered = self.get_filtered_history();
-        
+
         for (i, item) in filtered.iter().enumerate() {
             let item_y = list_y + i * item_height;
-            
+
             if my >= item_y as i32 && my < (item_y + item_height) as i32 {
-                // Check if clicking on pin button
+                // Sabitleme düğmesine tıklanıyor mu kontrol et
                 if mx >= (x + width - 24) as i32 {
                     return ClipboardAction::TogglePin(item.id);
                 }
-                
-                // Check if clicking on favorite button
+
+                // Favori düğmesine tıklanıyor mu kontrol et
                 if mx >= (x + width - 48) as i32 && mx < (x + width - 24) as i32 {
                     return ClipboardAction::ToggleFavorite(item.id);
                 }
-                
-                // Select and paste
+
+                // Seç ve yapıştır
                 let selected_id = item.id;
                 self.selected_item = Some(selected_id);
                 return ClipboardAction::SelectItem(selected_id);
             }
         }
-        
+
         ClipboardAction::None
     }
-    
-    /// Handle key press
+
+    /// Tuş basımını işle
     pub fn on_key_press(&mut self, c: char) -> ClipboardAction {
-        if c == '\x08' { // Backspace
+        if c == '\x08' { // Geri al
             self.search_query.pop();
         } else if c == '\x1b' { // Escape
             self.search_query.clear();
@@ -631,12 +638,12 @@ impl ClipboardManager {
         } else if !c.is_control() {
             self.search_query.push(c);
         }
-        
+
         ClipboardAction::None
     }
 }
 
-/// Clipboard actions
+/// Pano eylemleri
 #[derive(Clone, Debug)]
 pub enum ClipboardAction {
     None,
@@ -652,19 +659,19 @@ pub enum ClipboardAction {
 }
 
 // ============================================================================
-// GLOBAL CLIPBOARD
+// GLOBAL PANO
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref CLIPBOARD: Mutex<ClipboardManager> = Mutex::new(ClipboardManager::new());
 }
 
-/// Initialize clipboard
+/// Panoyu başlat
 pub fn init() {
-    crate::serial_println!("[GUI] Clipboard manager initialized");
+    crate::serial_println!("[GUI] Pano yöneticisi başlatıldı");
 }
 
-/// Get clipboard manager
+/// Pano yöneticisini al
 pub fn get_clipboard() -> &'static Mutex<ClipboardManager> {
     &CLIPBOARD
 }

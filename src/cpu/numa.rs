@@ -1,6 +1,12 @@
-//! # NUMA Topology Support
+//! # NUMA (Non-Uniform Memory Access) Topoloji Desteği
 //!
-//! ACPI SRAT/SLIT table parsing for NUMA (Non-Uniform Memory Access) awareness.
+//! ACPI SRAT ve SLIT tablolarını ayrıştırarak NUMA farkındalığı sağlar.
+//!
+//! NUMA mimarisinde her işlemci çekirdeği bazı bellek bölgelerine diğerlerinden
+//! daha hızlı erişebilir. SRAT (System Resource Affinity Table) hangi CPU'nun
+//! hangi bellek alanına yakın olduğunu; SLIT (System Locality Information Table)
+//! düğümler arası mesafe matrisini tanımlar. Bu bilgi, bellek tahsislerini
+//! CPU'ya yakın düğümlere yönlendirerek performansı artırır.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -8,30 +14,30 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// NUMA CONSTANTS
+// NUMA SABİTLERİ
 // ============================================================================
 
-/// Maximum NUMA nodes
+/// Desteklenen maksimum NUMA düğüm sayısı
 pub const MAX_NUMA_NODES: usize = 256;
-/// Maximum distance value
+/// Ulaşılamaz / bilinmeyen mesafe için kullanılan maksimum değer
 pub const NUMA_DISTANCE_MAX: u8 = 255;
-/// Local distance
+/// Aynı düğüm içindeki yerel mesafe (ACPI Spec: 10 referans değer)
 pub const NUMA_DISTANCE_LOCAL: u8 = 10;
 
 // ============================================================================
-// ACPI TABLE SIGNATURES
+// ACPI TABLO İMZALARI
 // ============================================================================
 
-/// SRAT signature
+/// SRAT tablo imzası — "SRAT" ASCII dizisi
 pub const SRAT_SIGNATURE: [u8; 4] = *b"SRAT";
-/// SLIT signature
+/// SLIT tablo imzası — "SLIT" ASCII dizisi
 pub const SLIT_SIGNATURE: [u8; 4] = *b"SLIT";
 
 // ============================================================================
-// SRAT STRUCTURES
+// SRAT YAPILARI
 // ============================================================================
 
-/// SRAT Table Header
+/// SRAT Tablo Başlığı — tüm ACPI tablolarında ortak standart başlık formatı
 #[repr(C, packed)]
 pub struct SratHeader {
     pub signature: [u8; 4],
@@ -45,7 +51,7 @@ pub struct SratHeader {
     pub creator_revision: u32,
 }
 
-/// SRAT Subtable Type
+/// SRAT Alt-Tablo Tipi — SRAT içindeki her girişin türünü tanımlar
 #[derive(Clone, Copy, Debug)]
 pub enum SratType {
     ProcessorLocalAPIC = 0,
@@ -56,7 +62,7 @@ pub enum SratType {
     GenericInitiatorAffinity = 5,
 }
 
-/// SRAT Processor Local APIC Affinity
+/// SRAT - LAPIC CPU Yakınlık Girişi: hangi CPU'nun (APIC ID) hangi NUMA düğümünde olduğunu belirtir
 #[repr(C, packed)]
 pub struct SratProcessorLocalApic {
     pub header_type: u8,
@@ -69,7 +75,7 @@ pub struct SratProcessorLocalApic {
     pub reserved2: [u8; 3],
 }
 
-/// SRAT Memory Affinity
+/// SRAT - Bellek Yakınlık Girişi: hangi fiziksel bellek aralığının hangi NUMA düğümüne ait olduğunu belirtir
 #[repr(C, packed)]
 pub struct SratMemoryAffinity {
     pub header_type: u8,
@@ -83,16 +89,16 @@ pub struct SratMemoryAffinity {
     pub reserved3: [u8; 4],
 }
 
-/// SRAT flags
+/// SRAT bayrakları — girişin etkin ve yapılandırılabilir olup olmadığını belirtir
 pub const SRAT_FLAG_ENABLED: u32 = 1 << 0;
 pub const SRAT_FLAG_HOTPLUGGABLE: u32 = 1 << 1;
 pub const SRAT_FLAG_NON_VOLATILE: u32 = 1 << 2;
 
 // ============================================================================
-// SLIT STRUCTURES
+// SLIT YAPILARI
 // ============================================================================
 
-/// SLIT Table Header
+/// SLIT Tablo Başlığı — arkasından N×N mesafe matrisi gelir (locality_count^2 bayt)
 #[repr(C, packed)]
 pub struct SlitHeader {
     pub signature: [u8; 4],
@@ -105,33 +111,33 @@ pub struct SlitHeader {
     pub creator_id: [u8; 4],
     pub creator_revision: u32,
     pub locality_count: u64,
-    // Followed by distance matrix: entry[i][j] = distance from node i to j
+    // Arkasından mesafe matrisi gelir: entry[i][j] = düğüm i'den j'ye mesafe
 }
 
 // ============================================================================
-// NUMA NODE
+// NUMA DÜĞÜMLERİ
 // ============================================================================
 
-/// NUMA Node information
+/// NUMA Düğüm bilgisi — bir NUMA yakınlık alanındaki CPU ve bellek kaynaklarını temsil eder
 #[derive(Clone, Debug)]
 pub struct NumaNode {
-    /// Node ID
+    /// Düğüm kimlik numarası (proximity domain)
     pub id: u32,
-    /// CPUs in this node (APIC IDs)
+    /// Bu düğümdeki CPU'ların APIC ID listesi
     pub cpus: Vec<u32>,
-    /// Memory ranges in this node
+    /// Bu düğümdeki fiziksel bellek aralıkları
     pub memory_ranges: Vec<MemoryRange>,
-    /// Total memory in bytes
+    /// Düğümdeki toplam bellek (bayt)
     pub total_memory: u64,
-    /// Free memory in bytes
+    /// Serbest bellek tahmini (bayt)
     pub free_memory: AtomicU64,
-    /// Distance to other nodes
+    /// Diğer düğümlere olan göreli mesafe (SLIT'ten okunur)
     pub distances: Vec<u8>,
-    /// Is this node online?
+    /// Düğüm çevrimiçi mi?
     pub online: bool,
 }
 
-/// Memory range in a NUMA node
+/// Bir NUMA düğümündeki fiziksel bellek aralığı
 #[derive(Clone, Debug)]
 pub struct MemoryRange {
     pub base: u64,
@@ -153,14 +159,14 @@ impl NumaNode {
         }
     }
 
-    /// Add CPU to this node
+    /// Bu düğüme bir CPU (APIC ID) ekle
     pub fn add_cpu(&mut self, apic_id: u32) {
         if !self.cpus.contains(&apic_id) {
             self.cpus.push(apic_id);
         }
     }
 
-    /// Add memory range to this node
+    /// Bu düğüme fiziksel bellek aralığı ekle
     pub fn add_memory(&mut self, base: u64, length: u64, flags: u32) {
         let range = MemoryRange {
             base,
@@ -172,7 +178,7 @@ impl NumaNode {
         self.memory_ranges.push(range);
     }
 
-    /// Get distance to another node
+    /// Başka bir düğüme olan mesafeyi döndür (SLIT tablosundan)
     pub fn distance_to(&self, other_node: u32) -> u8 {
         if other_node as usize >= self.distances.len() {
             return NUMA_DISTANCE_MAX;
@@ -182,18 +188,18 @@ impl NumaNode {
 }
 
 // ============================================================================
-// NUMA MANAGER
+// NUMA YÖNETİCİSİ
 // ============================================================================
 
-/// Global NUMA topology manager
+/// Global NUMA topoloji yöneticisi — tüm düğüm ve bellek haritasını tutar
 pub struct NumaManager {
-    /// Nodes indexed by node ID
+    /// Düğüm kimliğine göre indekslenmiş düğümler
     nodes: Mutex<BTreeMap<u32, NumaNode>>,
-    /// CPU to node mapping
+    /// CPU APIC ID'den NUMA düğümüne eşleme
     cpu_to_node: Mutex<BTreeMap<u32, u32>>,
-    /// Number of nodes
+    /// Toplam düğüm sayısı
     node_count: AtomicU32,
-    /// Is NUMA available?
+    /// NUMA destekleniyor mu?
     numa_available: AtomicU32,
 }
 
@@ -207,12 +213,12 @@ impl NumaManager {
         }
     }
 
-    /// Parse SRAT table
+    /// SRAT tablosunu ayrıştır - CPU ve bellek yakınlık bilgilerini çıkar
     pub fn parse_srat(&self, srat_ptr: *const u8) -> Result<(), NumaError> {
         unsafe {
             let header = &*(srat_ptr as *const SratHeader);
             
-            // Verify signature
+            // İmzayı doğrula: "SRAT" olmalı
             if header.signature != SRAT_SIGNATURE {
                 return Err(NumaError::InvalidSignature);
             }
@@ -231,7 +237,7 @@ impl NumaManager {
                 
                 match entry_type {
                     0 => {
-                        // Processor Local APIC
+                        // 0: Processor Local APIC — CPU-düğüm ilişkisi
                         let proc = &*(entry_ptr as *const SratProcessorLocalApic);
                         if proc.flags & SRAT_FLAG_ENABLED != 0 {
                             let node = self.get_or_create_node(proc.domain as u32);
@@ -240,7 +246,7 @@ impl NumaManager {
                         }
                     }
                     1 => {
-                        // Memory Affinity
+                        // 1: Memory Affinity — bellek aralığı-düğüm ilişkisi
                         let mem = &*(entry_ptr as *const SratMemoryAffinity);
                         if mem.flags & SRAT_FLAG_ENABLED != 0 {
                             let node = self.get_or_create_node(mem.domain);
@@ -248,7 +254,7 @@ impl NumaManager {
                         }
                     }
                     2 => {
-                        // Processor Local x2APIC (similar handling)
+                        // 2: Processor Local x2APIC — benzer işleme tabi tutulur
                     }
                     _ => {}
                 }
@@ -263,7 +269,7 @@ impl NumaManager {
         Ok(())
     }
 
-    /// Parse SLIT table (distance matrix)
+    /// SLIT tablosunu ayrıştır — düğümler arası mesafe matrisini yükle
     pub fn parse_slit(&self, slit_ptr: *const u8) -> Result<(), NumaError> {
         unsafe {
             let header = &*(slit_ptr as *const SlitHeader);
@@ -293,7 +299,7 @@ impl NumaManager {
         Ok(())
     }
 
-    /// Get or create a NUMA node
+    /// Yoksa yeni bir NUMA düğümü oluştur, varsa mevcut klonını döndür
     fn get_or_create_node(&self, id: u32) -> NumaNode {
         let mut nodes = self.nodes.lock();
         if !nodes.contains_key(&id) {
@@ -303,12 +309,12 @@ impl NumaManager {
         nodes.get(&id).unwrap().clone()
     }
 
-    /// Get node for a CPU
+    /// Bir CPU'nun (APIC ID) bulunduğu NUMA düğünü döndür
     pub fn get_node_for_cpu(&self, apic_id: u32) -> Option<u32> {
         self.cpu_to_node.lock().get(&apic_id).copied()
     }
 
-    /// Get node for memory address
+    /// Belirli bir fiziksel adresin hangi NUMA düğümüne ait olduğunu bul
     pub fn get_node_for_address(&self, addr: u64) -> Option<u32> {
         let nodes = self.nodes.lock();
         for (id, node) in nodes.iter() {
@@ -321,71 +327,71 @@ impl NumaManager {
         None
     }
 
-    /// Get preferred node for allocation (current CPU's node)
+    /// Tahsis için tercih edilen düğümü döndür (mevcut CPU'nun düğümü)
     pub fn get_preferred_node(&self) -> u32 {
-        // Get current CPU's APIC ID and find its node
-        // For now, return node 0
+        // Mevcut CPU'nun APIC ID'si okunarak düğümü belirlenmeli
+        // şimdilik düğüm 0 döndürülüyor
         0
     }
 
-    /// Get all nodes
+    /// Tüm düğümlerin klonlanmış listesini döndür
     pub fn get_nodes(&self) -> Vec<NumaNode> {
         self.nodes.lock().values().cloned().collect()
     }
 
-    /// Check if NUMA is available
+    /// NUMA desteklenip desteklenmediğini döndür
     pub fn is_numa(&self) -> bool {
         self.numa_available.load(Ordering::SeqCst) == 1
     }
 
-    /// Get node count
+    /// Toplam düğüm sayısını döndür
     pub fn node_count(&self) -> u32 {
         self.node_count.load(Ordering::SeqCst)
     }
 
-    /// Allocate memory on specific node
+    /// Belirli bir düğümünden bellek tahsis et (basitÇe size kontrol eder)
     pub fn alloc_on_node(&self, node_id: u32, size: usize) -> Option<u64> {
         let nodes = self.nodes.lock();
         if let Some(node) = nodes.get(&node_id) {
             if node.free_memory.load(Ordering::Relaxed) >= size as u64 {
                 node.free_memory.fetch_sub(size as u64, Ordering::Relaxed);
-                // Return actual allocation (placeholder)
+                // Gerçek tahsis adresi döndürülmeli (yer tutucu)
                 return Some(0xDEADBEEF);
             }
         }
         None
     }
 
-    /// Get memory policy for current task
+    /// Mevcut task için bellek politikasını döndür
     pub fn get_memory_policy(&self) -> MemoryPolicy {
         MemoryPolicy::default()
     }
 
-    /// Set memory policy for current task
+    /// Mevcut task için bellek politikası ayarla
     pub fn set_memory_policy(&self, _policy: &MemoryPolicy) -> Result<(), NumaError> {
         Ok(())
     }
 }
 
 lazy_static::lazy_static! {
-    /// Global NUMA manager
+    /// Global NUMA yöneticisi — tüm düğüm bilgisi burada saklanır
     pub static ref NUMA_MANAGER: NumaManager = NumaManager::new();
 }
 
 // ============================================================================
-// MEMORY POLICY
+// BELLEK POLİTİKASI
 // ============================================================================
 
-/// NUMA memory policy
+/// NUMA bellek politikası — Linux set_mempolicy() API'siyle uyumlu
 #[derive(Clone, Copy, Debug)]
 pub enum MemoryPolicy {
-    /// Default: allocate on local node
+    /// Varsayılan: yerel düğümden tahsis et
     Default,
-    /// Prefer given node
+    /// Tercih edilen düğümden tahsis et; mükemmel değilse diğer düğüme düş
     Preferred(u32),
-    /// Bind to given nodes
+    /// Yalnızca belirtilen düğümlerden tahsis et (bağlayıcı)
     Bind(Vec<u32>),
-    /// Interleave across nodes
+    /// Düğümler arasında sıradönüşsel dağıt
     Interleave(Vec<u32>),
 }
 
@@ -396,7 +402,7 @@ impl Default for MemoryPolicy {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TİPİ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,10 +414,11 @@ pub enum NumaError {
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARAYÜZÜ
 // ============================================================================
 
-/// get_mempolicy syscall
+/// `get_mempolicy` sistem çağrısı — mevcut bellek politikasını döndür
+/// POSIX NUMA API'sinin Linux uyumlu implementasyonu
 pub fn sys_get_mempolicy(mode: &mut i32, nodemask: &mut u64, addr: u64, flags: u32) -> i32 {
     let policy = NUMA_MANAGER.get_memory_policy();
     *mode = match policy {
@@ -423,7 +430,7 @@ pub fn sys_get_mempolicy(mode: &mut i32, nodemask: &mut u64, addr: u64, flags: u
     0
 }
 
-/// set_mempolicy syscall
+/// `set_mempolicy` sistem çağrısı — iş parçası için bellek politikası ayarla
 pub fn sys_set_mempolicy(mode: i32, nodemask: u64) -> i32 {
     let policy = match mode {
         0 => MemoryPolicy::Default,
@@ -439,34 +446,34 @@ pub fn sys_set_mempolicy(mode: i32, nodemask: u64) -> i32 {
     }
 }
 
-/// mbind syscall
+/// `mbind` sistem çağrısı — bellek aralığını belirli düğümlere bağla
 pub fn sys_mbind(addr: u64, len: u64, mode: i32, nodemask: u64, flags: u32) -> i32 {
-    // Bind memory range to specific nodes
+    // Bellek aralığını belirli düğümlere bağla
     0
 }
 
-/// migrate_pages syscall
+/// `migrate_pages` sistem çağrısı — sayfaları düğümler arasında taşı
 pub fn sys_migrate_pages(pid: i32, from_nodes: u64, to_nodes: u64) -> i32 {
-    // Migrate pages between nodes
+    // Belirtilen düğümler arasında sayfa taşıma
     0
 }
 
-/// move_pages syscall
+/// `move_pages` sistem çağrısı — belirli sayfaları belirtilen düğümlere taşı
 pub fn sys_move_pages(pid: i32, count: usize, pages: *const u64, nodes: *const i32, status: *mut i32, flags: u32) -> i32 {
-    // Move specific pages to nodes
+    // Belirtilen sayfaları hedef düğümlere taşı
     0
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
-/// Initialize NUMA subsystem
+/// NUMA alt sistemini başlat
 pub fn init() {
     crate::serial_println!("[NUMA] Subsystem initialized");
 }
 
-/// Initialize from ACPI tables
+/// ACPI tablolarından NUMA yapılandırmasını başlat — BSP erken başlangıcında çağrılır
 pub fn init_from_acpi(srat_addr: Option<u64>, slit_addr: Option<u64>) {
     if let Some(addr) = srat_addr {
         let _ = NUMA_MANAGER.parse_srat(addr as *const u8);

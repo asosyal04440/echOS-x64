@@ -1,6 +1,7 @@
-//! # BLAKE3 Hash Function
+//! # BLAKE3 Özet Fonksiyonu
 //!
-//! Fast and secure hash function based on BLAKE2.
+//! BLAKE2 tabanlı, hızlı ve güvenli kriptografik özet (hash) fonksiyonu.
+//! Tek geçişte özetleme, anahtarlı MAC ve anahtar türetme (key derivation) destekler.
 
 use alloc::vec::Vec;
 
@@ -8,16 +9,16 @@ const BLAKE3_BLOCK_SIZE: usize = 64;
 const BLAKE3_KEY_LEN: usize = 32;
 const BLAKE3_OUT_LEN: usize = 32;
 
-/// BLAKE3 IV
+/// BLAKE3 başlangıç vektörü (IV) — SHA-256 sabitlerinden türetilmiştir
 const IV: [u32; 8] = [
     0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
     0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
 ];
 
-/// BLAKE3 permutation
+/// BLAKE3 mesaj permütasyonu — her turda blok kelimelerinin sırasını değiştirir
 const MSG_PERM: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
 
-/// BLAKE3 round constants
+/// BLAKE3 tur sayısı — her blok için 7 tur sıkıştırma uygulanır
 const ROUNDS: usize = 7;
 
 /// BLAKE3 chunk state

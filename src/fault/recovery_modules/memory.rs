@@ -1,26 +1,26 @@
-//! # Memory Recovery
+//! # Bellek Kurtarma
 //!
-//! Recovery strategies for memory faults.
+//! Bellek hatalarına yönelik kurtarma stratejileri.
 
 use crate::fault::{Fault, FaultType};
 use crate::fault::severity::RecoveryResult;
 
-/// Attempt memory recovery
+/// Bellek kurtarmasını dener
 pub fn recover(fault: &Fault) -> RecoveryResult {
     match fault.fault_type {
         FaultType::HeapCorruption => {
-            // Cannot truly recover from heap corruption
-            // Quarantine corrupted blocks
-            crate::serial_println!("[MEM_RECOVERY] Heap corruption detected - quarantining");
+            // Yığın bozulmasından gerçek anlamda kurtarma mümkün değil
+            // Bozulan blokları karantinaya al
+            crate::serial_println!("[MEM_RECOVERY] Yığın bozulması tespit edildi - karantinaya alınıyor");
             RecoveryResult::Failed
         }
         
         FaultType::OutOfMemory => {
-            // Try to free memory
-            crate::serial_println!("[MEM_RECOVERY] OOM - attempting reclaim");
+            // Bellek serbest bırakmayı dene
+            crate::serial_println!("[MEM_RECOVERY] Bellek yetersiz (OOM) - geri kazanım deneniyor");
             crate::memory::reclaim_pages_global(64);
             
-            // Check if helped
+            // Yardımcı olup olmadığını kontrol et
             let free = crate::memory::global_memory_manager()
                 .map(|m: &crate::memory::MemoryManager| m.free_frames())
                 .unwrap_or(0);
@@ -33,8 +33,8 @@ pub fn recover(fault: &Fault) -> RecoveryResult {
         }
         
         FaultType::DoubleFree | FaultType::UseAfterFree => {
-            // Log and quarantine
-            crate::serial_println!("[MEM_RECOVERY] Memory safety violation logged");
+            // Günlüğe yaz ve karantinaya al
+            crate::serial_println!("[MEM_RECOVERY] Bellek güvenlik ihlali günlüğe yazıldı");
             RecoveryResult::Degraded
         }
         

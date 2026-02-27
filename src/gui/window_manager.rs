@@ -1,6 +1,13 @@
-//! # echOS Window Manager
+//! # echOS Pencere Yöneticisi
 //!
-//! Window management: minimize, maximize, resize, snap, alt+tab.
+//! Pencere yönetimi: simge durumuna küçültme, büyütme, boyutlandırma,
+//! yapıştırma (snap) ve Alt+Tab pencere döngüsü.
+//!
+//! ## Mimari
+//! - `WindowState`: Normal, simge, büyütülmüş, yapıştırılmış (sol/sağ/üst/alt)
+//! - `WindowInfo`: Z-sırası, odak durumu, yeniden boyutlandırılabilirlik bilgisi
+//! - `ResizeEdge`: 8 yön + merkez için kenar tespiti
+//! - `WindowManager`: Z-sırası normalizasyonu, çalışma alanı sınırlaması, yapıştırma eşiği
 
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::Theme;
@@ -9,30 +16,30 @@ use crate::gui::widgets::{Rect, Widget};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Window state
+/// Pencere durumu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowState {
     Normal,
-    Minimized,
-    Maximized,
-    SnappedLeft,
-    SnappedRight,
-    SnappedTop,
-    SnappedBottom,
+    Minimized,   // Simge durumuna küçültülmüş
+    Maximized,   // Büyütülmüş
+    SnappedLeft, // Sola yapıştırılmış
+    SnappedRight,  // Sağa yapıştırılmış
+    SnappedTop,    // Üste yapıştırılmış
+    SnappedBottom, // Alta yapıştırılmış
 }
 
-/// Window info for management
+/// Yönetim için pencere bilgisi
 pub struct WindowInfo {
     pub id: u32,
     pub title: String,
     pub state: WindowState,
-    pub normal_rect: Rect,
-    pub current_rect: Rect,
-    pub z_index: usize,
-    pub focused: bool,
-    pub resizable: bool,
-    pub minimizable: bool,
-    pub maximizable: bool,
+    pub normal_rect: Rect,    // Normal boyuttaki dikdörtgen
+    pub current_rect: Rect,   // Mevcut (görüntülenen) dikdörtgen
+    pub z_index: usize,       // Z-sırası (büyük = öndeki)
+    pub focused: bool,        // Odaklı mı
+    pub resizable: bool,      // Yeniden boyutlandırılabilir mi
+    pub minimizable: bool,    // Simge durumuna küçültülebilir mi
+    pub maximizable: bool,    // Büyütülebilir mi
 }
 
 impl WindowInfo {
@@ -53,33 +60,33 @@ impl WindowInfo {
     }
 }
 
-/// Resize edge
+/// Yeniden boyutlandırma kenarı
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResizeEdge {
-    None,
-    Top,
-    Bottom,
-    Left,
-    Right,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
+    None,        // Kenar yok
+    Top,         // Üst kenar
+    Bottom,      // Alt kenar
+    Left,        // Sol kenar
+    Right,       // Sağ kenar
+    TopLeft,     // Sol üst köşe
+    TopRight,    // Sağ üst köşe
+    BottomLeft,  // Sol alt köşe
+    BottomRight, // Sağ alt köşe
 }
 
-/// Window Manager
+/// Pencere Yöneticisi
 pub struct WindowManager {
     windows: Vec<WindowInfo>,
-    focused_id: Option<u32>,
-    resize_edge: ResizeEdge,
-    resize_start: (i32, i32),
-    resize_window_id: Option<u32>,
-    drag_offset: (i32, i32),
-    dragging_id: Option<u32>,
+    focused_id: Option<u32>,          // Odaklı pencere kimliği
+    resize_edge: ResizeEdge,          // Aktif boyutlandırma kenarı
+    resize_start: (i32, i32),         // Boyutlandırma başlangıç fare konumu
+    resize_window_id: Option<u32>,    // Boyutlandırılan pencere kimliği
+    drag_offset: (i32, i32),          // Sürükleme fare ofseti
+    dragging_id: Option<u32>,         // Sürüklenen pencere kimliği
     screen_width: usize,
     screen_height: usize,
-    taskbar_height: usize,
-    snap_threshold: i32,
+    taskbar_height: usize,            // Görev çubuğu yüksekliği (çalışma alanı kısıtlaması için)
+    snap_threshold: i32,              // Yapıştırma eşiği (piksel)
 }
 
 impl WindowManager {
@@ -110,7 +117,7 @@ impl WindowManager {
     pub fn remove_window(&mut self, id: u32) {
         self.windows.retain(|w| w.id != id);
         if self.focused_id == Some(id) {
-            // Focus topmost remaining window
+            // En üstteki kalan pencereye odaklan
             self.focused_id = self.windows.iter()
                 .max_by_key(|w| w.z_index)
                 .map(|w| w.id);
@@ -138,14 +145,14 @@ impl WindowManager {
     }
 
     pub fn focus_window(&mut self, id: u32) {
-        // Unfocus all
+        // Tümünün odağını kaldır
         for w in &mut self.windows {
             w.focused = false;
         }
-        
-        // Find window index
+
+        // Pencere indeksini bul
         if let Some(idx) = self.windows.iter().position(|w| w.id == id) {
-            // Bring to front
+            // Öne getir
             let max_z = self.windows.iter().map(|w| w.z_index).max().unwrap_or(0);
             self.windows[idx].focused = true;
             self.windows[idx].z_index = max_z + 1;
@@ -157,7 +164,7 @@ impl WindowManager {
         if let Some(window) = self.window_mut(id) {
             if window.minimizable {
                 window.state = WindowState::Minimized;
-                // Focus next window
+                // Sonraki pencereye odaklan
                 if self.focused_id == Some(id) {
                     self.focused_id = self.windows.iter()
                         .filter(|w| w.state != WindowState::Minimized)
@@ -170,6 +177,7 @@ impl WindowManager {
 
     pub fn restore(&mut self, id: u32) {
         if let Some(window) = self.window_mut(id) {
+            // Geri yükle
             window.state = WindowState::Normal;
             window.current_rect = window.normal_rect;
             self.focus_window(id);
@@ -177,18 +185,18 @@ impl WindowManager {
     }
 
     pub fn maximize(&mut self, id: u32) {
-        // Get screen dimensions first
+        // Önce ekran boyutlarını al
         let screen_w = self.screen_width as i32;
         let screen_h = (self.screen_height - self.taskbar_height) as i32;
-        
+
         if let Some(window) = self.window_mut(id) {
             if window.maximizable {
                 if window.state == WindowState::Maximized {
-                    // Restore
+                    // Geri yükle
                     window.state = WindowState::Normal;
                     window.current_rect = window.normal_rect;
                 } else {
-                    // Maximize
+                    // Büyüt
                     window.normal_rect = window.current_rect;
                     window.state = WindowState::Maximized;
                     window.current_rect = Rect::new(0, 0, screen_w, screen_h);
@@ -198,10 +206,10 @@ impl WindowManager {
     }
 
     pub fn snap_left(&mut self, id: u32) {
-        // Get screen dimensions first
+        // Önce ekran boyutlarını al
         let half_w = (self.screen_width / 2) as i32;
         let screen_h = (self.screen_height - self.taskbar_height) as i32;
-        
+
         if let Some(window) = self.window_mut(id) {
             if window.resizable {
                 window.normal_rect = window.current_rect;
@@ -212,10 +220,10 @@ impl WindowManager {
     }
 
     pub fn snap_right(&mut self, id: u32) {
-        // Get screen dimensions first
+        // Önce ekran boyutlarını al
         let half_w = (self.screen_width / 2) as i32;
         let screen_h = (self.screen_height - self.taskbar_height) as i32;
-        
+
         if let Some(window) = self.window_mut(id) {
             if window.resizable {
                 window.normal_rect = window.current_rect;
@@ -226,24 +234,24 @@ impl WindowManager {
     }
 
     pub fn start_drag(&mut self, id: u32, x: i32, y: i32) {
-        // Get window state and rect first
+        // Önce pencere durumunu ve dikdörtgenini al
         let (is_maximized, normal_rect) = self.window(id)
             .map(|w| (w.state == WindowState::Maximized, w.normal_rect))
             .unwrap_or((false, Rect::new(0, 0, 0, 0)));
-        
-        // Get current rect for drag offset
+
+        // Sürükleme ofseti için mevcut dikdörtgeni al
         let current_rect = self.window(id)
             .map(|w| w.current_rect)
             .unwrap_or(Rect::new(0, 0, 0, 0));
-        
-        // If maximized, unmaximize first
+
+        // Büyütülmüşse önce geri yükle
         if is_maximized {
             if let Some(window) = self.window_mut(id) {
                 window.state = WindowState::Normal;
                 window.current_rect = normal_rect;
             }
         }
-        
+
         self.dragging_id = Some(id);
         self.drag_offset = (x - current_rect.x, y - current_rect.y);
         self.focus_window(id);
@@ -255,6 +263,9 @@ impl WindowManager {
         let drag_offset_y = self.drag_offset.1;
         let snap_threshold = self.snap_threshold;
         let screen_width = self.screen_width as i32;
+        let screen_width_u = self.screen_width;
+        let screen_height_u = self.screen_height;
+        let taskbar_height = self.taskbar_height;
         
         if let Some(id) = dragging_id {
             if let Some(window) = self.window_mut(id) {
@@ -265,14 +276,14 @@ impl WindowManager {
                 window.normal_rect.x = new_x;
                 window.normal_rect.y = new_y;
                 window.state = WindowState::Normal;
-                
-                // Check for snap
+
+                // Yapıştırmayı kontrol et
                 if x < snap_threshold {
-                    // Snap left preview
+                    // Sola yapıştırma önizlemesi
                 } else if x > screen_width - snap_threshold {
-                    // Snap right preview
+                    // Sağa yapıştırma önizlemesi
                 }
-                
+
                 return true;
             }
         }
@@ -281,7 +292,7 @@ impl WindowManager {
 
     pub fn end_drag(&mut self, x: i32, _y: i32) {
         if let Some(id) = self.dragging_id {
-            // Check for snap
+            // Yapıştırmayı kontrol et
             if x < self.snap_threshold {
                 self.snap_left(id);
             } else if x > self.screen_width as i32 - self.snap_threshold {
@@ -295,7 +306,7 @@ impl WindowManager {
         let (resizable, state) = self.window(id)
             .map(|w| (w.resizable, w.state))
             .unwrap_or((false, WindowState::Normal));
-        
+
         if resizable && state == WindowState::Normal {
             self.resize_window_id = Some(id);
             self.resize_edge = edge;
@@ -309,15 +320,18 @@ impl WindowManager {
         let edge = self.resize_edge;
         let start_x = self.resize_start.0;
         let start_y = self.resize_start.1;
+        let screen_width = self.screen_width;
+        let screen_height = self.screen_height;
+        let taskbar_height = self.taskbar_height;
         
         if let Some(id) = resize_id {
             if let Some(window) = self.window_mut(id) {
                 let dx = x - start_x;
                 let dy = y - start_y;
-                
+
                 let min_width = 200;
                 let min_height = 150;
-                
+
                 match edge {
                     ResizeEdge::Left => {
                         let new_width = window.current_rect.width - dx;
@@ -373,14 +387,14 @@ impl WindowManager {
                     }
                     ResizeEdge::None => {}
                 }
-                
+
                 window.normal_rect = window.current_rect;
             }
         }
-        
-        // Update resize_start after the match
+
+        // Eşleşmeden sonra resize_start'ı güncelle
         self.resize_start = (x, y);
-        
+
         resize_id.is_some()
     }
 
@@ -394,15 +408,15 @@ impl WindowManager {
             if window.state != WindowState::Normal || !window.resizable {
                 return ResizeEdge::None;
             }
-            
+
             let rect = window.current_rect;
-            let border = 8;
-            
+            let border = 8; // Kenar algılama toleransı (piksel)
+
             let near_left = x >= rect.x - border && x <= rect.x + border;
             let near_right = x >= rect.x + rect.width - border && x <= rect.x + rect.width + border;
             let near_top = y >= rect.y - border && y <= rect.y + border;
             let near_bottom = y >= rect.y + rect.height - border && y <= rect.y + rect.height + border;
-            
+
             if near_top && near_left {
                 ResizeEdge::TopLeft
             } else if near_top && near_right {
@@ -428,10 +442,10 @@ impl WindowManager {
     }
 
     pub fn window_at(&self, x: i32, y: i32) -> Option<u32> {
-        // Check from top to bottom (highest z-index first)
+        // Üstten alta doğru kontrol et (en yüksek z-indeksi önce)
         let mut sorted: Vec<_> = self.windows.iter().collect();
         sorted.sort_by(|a, b| b.z_index.cmp(&a.z_index));
-        
+
         for window in sorted {
             if window.state != WindowState::Minimized {
                 if window.current_rect.contains(x, y) {
@@ -447,21 +461,21 @@ impl WindowManager {
             .filter(|w| w.state != WindowState::Minimized)
             .map(|w| w.id)
             .collect();
-        
+
         if visible.is_empty() {
             return;
         }
-        
+
         let current_idx = self.focused_id
             .and_then(|id| visible.iter().position(|&x| x == id))
             .unwrap_or(0);
-        
+
         let next_idx = if forward {
             (current_idx + 1) % visible.len()
         } else {
             (current_idx + visible.len() - 1) % visible.len()
         };
-        
+
         self.focus_window(visible[next_idx]);
     }
 

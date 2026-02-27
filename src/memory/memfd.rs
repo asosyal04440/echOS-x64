@@ -1,6 +1,6 @@
-//! # memfd_create and userfaultfd
+//! # memfd_create ve userfaultfd
 //!
-//! Anonymous file creation and user-space page fault handling.
+//! Anonim dosya oluşturma ve kullanıcı alanı sayfa hatası işleme.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,16 +10,16 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// MEMFD CONSTANTS
+// MEMFD SABİTLERİ
 // ============================================================================
 
-/// memfd_create flags
+/// memfd_create bayrakları
 pub const MFD_CLOEXEC: u32 = 0x0001;
 pub const MFD_ALLOW_SEALING: u32 = 0x0002;
 pub const MFD_HUGETLB: u32 = 0x0004;
 pub const MFD_NOEXEC_SEAL: u32 = 0x0008;
 
-/// File seals
+/// Dosya mühürleri
 pub const F_SEAL_SEAL: u32 = 0x0001;
 pub const F_SEAL_SHRINK: u32 = 0x0002;
 pub const F_SEAL_GROW: u32 = 0x0004;
@@ -28,26 +28,26 @@ pub const F_SEAL_FUTURE_WRITE: u32 = 0x0010;
 pub const F_SEAL_EXEC: u32 = 0x0020;
 
 // ============================================================================
-// MEMFD STRUCTURE
+// MEMFD YAPISI
 // ============================================================================
 
-/// memfd file
+/// memfd dosyası
 pub struct Memfd {
-    /// File descriptor
+    /// Dosya tanımlayıcısı
     pub fd: i32,
-    /// Name
+    /// Ad
     pub name: String,
-    /// Size
+    /// Boyut
     pub size: AtomicU64,
-    /// Seals applied
+    /// Uygulanan mühürler
     pub seals: AtomicU32,
-    /// Flags
+    /// Bayraklar
     pub flags: u32,
-    /// Data pages
+    /// Veri sayfaları
     pub pages: Mutex<BTreeMap<u64, Vec<u8>>>,
-    /// Reference count
+    /// Referans sayacı
     pub ref_count: AtomicU32,
-    /// Is hugetlb
+    /// Hugetlb mi
     pub hugetlb: bool,
 }
 
@@ -65,18 +65,18 @@ impl Memfd {
         }
     }
 
-    /// Read from memfd
+    /// memfd'den oku
     pub fn read(&self, offset: u64, buf: &mut [u8]) -> usize {
         let pages = self.pages.lock();
         let page_size = if self.hugetlb { 2 * 1024 * 1024 } else { 4096 };
-        
+
         let mut read = 0;
         let mut pos = offset;
-        
+
         while read < buf.len() {
             let page_idx = pos / page_size as u64;
             let page_offset = (pos % page_size as u64) as usize;
-            
+
             if let Some(page) = pages.get(&page_idx) {
                 let to_read = core::cmp::min(
                     page.len().saturating_sub(page_offset),
@@ -86,7 +86,7 @@ impl Memfd {
                 read += to_read;
                 pos += to_read as u64;
             } else {
-                // Unallocated page returns zeros
+                // Tahsis edilmemiş sayfa sıfır döndürür
                 let to_read = core::cmp::min(
                     page_size - page_offset,
                     buf.len() - read
@@ -98,76 +98,76 @@ impl Memfd {
                 pos += to_read as u64;
             }
         }
-        
+
         read
     }
 
-    /// Write to memfd
+    /// memfd'e yaz
     pub fn write(&self, offset: u64, buf: &[u8]) -> Result<usize, MemfdError> {
-        // Check seals
+        // Mühürleri kontrol et
         let seals = self.seals.load(Ordering::SeqCst);
         if seals & F_SEAL_WRITE != 0 || seals & F_SEAL_FUTURE_WRITE != 0 {
             return Err(MemfdError::Sealed);
         }
-        
+
         let page_size = if self.hugetlb { 2 * 1024 * 1024 } else { 4096 };
         let mut pages = self.pages.lock();
-        
+
         let mut written = 0;
         let mut pos = offset;
-        
+
         while written < buf.len() {
             let page_idx = pos / page_size as u64;
             let page_offset = (pos % page_size as u64) as usize;
-            
+
             let page = pages.entry(page_idx).or_insert_with(|| {
                 vec![0u8; page_size]
             });
-            
+
             let to_write = core::cmp::min(
                 page.len().saturating_sub(page_offset),
                 buf.len() - written
             );
             page[page_offset..page_offset + to_write]
                 .copy_from_slice(&buf[written..written + to_write]);
-            
+
             written += to_write;
             pos += to_write as u64;
         }
-        
-        // Update size
+
+        // Boyutu güncelle
         let current_size = self.size.load(Ordering::SeqCst);
         if pos > current_size {
             self.size.store(pos, Ordering::SeqCst);
         }
-        
+
         Ok(written)
     }
 
-    /// Set seals
+    /// Mühürleri ayarla
     pub fn set_seals(&self, new_seals: u32) -> Result<(), MemfdError> {
         let current = self.seals.load(Ordering::SeqCst);
-        
-        // Can't add seals if already sealed
+
+        // Zaten mühürlüyse mühür eklenemez
         if current & F_SEAL_SEAL != 0 {
             return Err(MemfdError::Sealed);
         }
-        
-        // Can't remove seals
+
+        // Mühürler kaldırılamaz
         if new_seals & !current != new_seals {
             return Err(MemfdError::InvalidSeal);
         }
-        
+
         self.seals.store(new_seals, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Get seals
+    /// Mühürleri al
     pub fn get_seals(&self) -> u32 {
         self.seals.load(Ordering::SeqCst)
     }
 
-    /// Truncate
+    /// Kırp
     pub fn truncate(&self, new_size: u64) -> Result<(), MemfdError> {
         let seals = self.seals.load(Ordering::SeqCst);
         if seals & F_SEAL_SHRINK != 0 && new_size < self.size.load(Ordering::SeqCst) {
@@ -176,14 +176,14 @@ impl Memfd {
         if seals & F_SEAL_GROW != 0 && new_size > self.size.load(Ordering::SeqCst) {
             return Err(MemfdError::Sealed);
         }
-        
+
         self.size.store(new_size, Ordering::SeqCst);
         Ok(())
     }
 }
 
 // ============================================================================
-// MEMFD MANAGER
+// MEMFD YÖNETİCİSİ
 // ============================================================================
 
 pub struct MemfdManager {
@@ -203,7 +203,7 @@ impl MemfdManager {
         let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
         let memfd = Arc::new(Memfd::new(fd, name, flags));
         self.memfds.lock().insert(fd, memfd);
-        
+
         crate::serial_println!("[MEMFD] Created memfd '{}' (fd={})", name, fd);
         Ok(fd)
     }
@@ -225,11 +225,11 @@ lazy_static::lazy_static! {
 // USERFAULTFD
 // ============================================================================
 
-/// userfaultfd flags
+/// userfaultfd bayrakları
 pub const O_NONBLOCK: u32 = 0x800;
 pub const UFFD_USER_MODE_ONLY: u64 = 1;
 
-/// userfaultfd operations
+/// userfaultfd işlemleri
 pub const UFFD_API: u64 = 0xAA;
 pub const UFFD_REGISTER: u64 = 0xC0;
 pub const UFFD_UNREGISTER: u64 = 0xC1;
@@ -238,18 +238,18 @@ pub const UFFD_COPY: u64 = 0xC3;
 pub const UFFD_ZEROPAGE: u64 = 0xC4;
 pub const UFFD_WRITEPROTECT: u64 = 0xC5;
 
-/// userfaultfd event types
+/// userfaultfd olay türleri
 pub const UFFD_EVENT_PAGEFAULT: u32 = 12;
 pub const UFFD_EVENT_FORK: u32 = 13;
 pub const UFFD_EVENT_REMAP: u32 = 14;
 pub const UFFD_EVENT_REMOVE: u32 = 15;
 pub const UFFD_EVENT_UNMAP: u32 = 16;
 
-/// Page fault flags
+/// Sayfa hatası bayrakları
 pub const UFFD_PAGE_FAULT_FLAG_WRITE: u64 = 1 << 0;
 pub const UFFD_PAGE_FAULT_FLAG_WP: u64 = 1 << 1;
 
-/// userfaultfd structure
+/// userfaultfd yapısı
 pub struct UserfaultFd {
     pub fd: i32,
     pub flags: u32,
@@ -279,13 +279,13 @@ impl UserfaultFd {
         }
     }
 
-    /// Register address range
+    /// Adres aralığını kaydet
     pub fn register(&self, start: u64, len: u64) -> Result<(), UserfaultError> {
         self.registered_ranges.lock().push((start, start + len));
         Ok(())
     }
 
-    /// Unregister address range
+    /// Adres aralığının kaydını sil
     pub fn unregister(&self, start: u64, len: u64) -> Result<(), UserfaultError> {
         self.registered_ranges.lock().retain(|(s, e)| {
             !(*s >= start && *e <= start + len)
@@ -293,7 +293,7 @@ impl UserfaultFd {
         Ok(())
     }
 
-    /// Generate page fault event
+    /// Sayfa hatası olayı oluştur
     pub fn generate_fault(&self, addr: u64, flags: u64) {
         let event = UserfaultEvent {
             event_type: UFFD_EVENT_PAGEFAULT,
@@ -304,25 +304,25 @@ impl UserfaultFd {
         self.pending_faults.lock().push(event);
     }
 
-    /// Read next event
+    /// Sonraki olayı oku
     pub fn read_event(&self) -> Option<UserfaultEvent> {
         self.pending_faults.lock().pop()
     }
 
-    /// Wake up waiting threads
+    /// Bekleyen iş parçacıklarını uyandır
     pub fn wakeup(&self, start: u64, len: u64) {
-        // Wake threads waiting on faults in this range
+        // Bu aralıktaki hatalarda bekleyen iş parçacıklarını uyandır
     }
 
-    /// Copy page into process
+    /// Sayfayı sürece kopyala
     pub fn copy(&self, dst: u64, src: u64, len: u64, wp: bool) -> Result<(), UserfaultError> {
-        // Copy page from source to destination
+        // Sayfayı kaynaktan hedefe kopyala
         Ok(())
     }
 
-    /// Zero page
+    /// Sıfır sayfası
     pub fn zeropage(&self, start: u64, len: u64) -> Result<(), UserfaultError> {
-        // Map zero page
+        // Sıfır sayfasını eşle
         Ok(())
     }
 }
@@ -361,7 +361,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARAYÜZÜ
 // ============================================================================
 
 pub fn sys_memfd_create(name: &str, flags: u32) -> i32 {
@@ -396,7 +396,7 @@ pub fn sys_userfaultfd(flags: u32) -> i32 {
 }
 
 // ============================================================================
-// ERROR TYPES
+// HATA TİPLERİ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,7 +414,7 @@ pub enum UserfaultError {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init() {

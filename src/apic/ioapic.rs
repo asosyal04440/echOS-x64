@@ -1,3 +1,11 @@
+//! # I/O APIC Sürücüsü
+//!
+//! I/O APIC (Input/Output Advanced Programmable Interrupt Controller),
+//! donanım kesmelerini belirli CPU'lara yönlendiren MMIO tabanlı bir birimdir.
+//! MADT tablosundan elde edilen I/O APIC bilgileriyle başlatılır; her IRQ için
+//! redirection table girişleri (vektör, polarite, tetikleme modu, hedef CPU)
+//! konfigüre edilir. Kesme kaynak geçersiz kılmaları (ISA override) da uygulanır.
+
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};

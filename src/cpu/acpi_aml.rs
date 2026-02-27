@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// Global AML Context
+// Global AML Bağlamı
 // ============================================================================
 
 /// Global AML context — tüm ACPI namespace bu struct içinde yaşar.
@@ -194,7 +194,7 @@ impl aml::Handler for EchOsAmlHandler {
         }
     }
 
-    // ── Fatal Error ──
+    // ── Ölümcul Hata ──
 
     fn handle_fatal_error(&self, fatal_type: u8, fatal_code: u32, fatal_arg: u64) {
         crate::serial_println!(
@@ -422,7 +422,7 @@ pub fn debug_dump_namespace() {
 }
 
 // ============================================================================
-// Helper: Sleep State evaluation (Faz 2'de genişletilecek)
+// Helper: Uyku Durumu Değerlendirmesi (Faz 2'de genişletilecek)
 // ============================================================================
 
 /// ACPI S5 sleep type değerlerini AML'den oku.
@@ -467,10 +467,10 @@ fn aml_value_to_u64(val: &AmlValue) -> Option<u64> {
 }
 
 // ============================================================================
-// Error tipi
+// Hata Tipi
 // ============================================================================
 
-/// echOS AML error enum
+/// echOS AML hata enumı
 #[derive(Debug)]
 pub enum AmlError {
     /// AML context henüz başlatılmadı

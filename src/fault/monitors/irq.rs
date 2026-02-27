@@ -1,23 +1,24 @@
-//! # IRQ Health Monitor
+//! # IRQ Sağlık Monitörü
 //!
-//! Monitors interrupt storms, handler timeouts, and IDT integrity.
+//! Kesme fırtınalarını (IRQ storm), işleyici zaman aşımlarını ve IDT bütünlüğünü izler.
+//! Yüksek frekanslı kesme aktivitesi sistemi bozabilir; bu modül bunu tespit eder.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, AtomicBool, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
 pub struct IrqMonitor {
-    /// IRQ storm count
+    /// IRQ fırtınası sayısı
     storm_count: AtomicU32,
-    /// Handler timeouts
+    /// İşleyici zaman aşımı sayısı
     handler_timeouts: AtomicU32,
-    /// Spurious interrupt count
+    /// Sahte (spurious) kesme sayısı
     spurious_count: AtomicU64,
-    /// Last check timestamp
+    /// Son kontrol zaman damgası
     last_check: AtomicUsize,
-    /// Monitor enabled
+    /// Monitör etkin mi?
     enabled: AtomicBool,
-    /// Storm threshold (IRQs per check)
+    /// Fırtına eşiği (kontrol başına IRQ sayısı)
     storm_threshold: u64,
 }
 
@@ -33,24 +34,24 @@ impl IrqMonitor {
         }
     }
     
-    /// Record IRQ storm
+    /// IRQ fırtınası kaydeder
     pub fn record_storm(&self) {
         self.storm_count.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record handler timeout
+    /// İşleyici zaman aşımı kaydeder
     pub fn record_handler_timeout(&self) {
         self.handler_timeouts.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record spurious interrupt
+    /// Sahte kesme kaydeder
     pub fn record_spurious(&self) {
         self.spurious_count.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Check for IRQ storms
+    /// IRQ fırtınalarını kontrol eder
     fn check_storms(&self) -> Option<Fault> {
-        // Check IRQ rates from interrupt module
+        // Kesme modülünden IRQ hızını kontrol et
         let stats = crate::interrupts::get_stats();
         
         if stats.storm_count > self.storm_threshold {
@@ -65,7 +66,7 @@ impl IrqMonitor {
         None
     }
     
-    /// Check spurious interrupts
+    /// Sahte kesmeleri kontrol eder
     fn check_spurious(&self) -> Option<Fault> {
         let spurious = self.spurious_count.load(Ordering::SeqCst);
         

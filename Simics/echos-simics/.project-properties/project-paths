@@ -1,5 +1,5 @@
 project: C:\Users\Bahadir\Desktop\dersler_ve_projeler\echOS\Simics\echos-simics
 simics-root: D:\Intel Simics Package Manager\simics-7.70.0
 simics-model-builder: D:\Intel Simics Package Manager\simics-7.70.0
-simics-python: D:\Intel Simics Package Manager\simics-python-7.14.0\win64\bin\..\..
+simics-python: D:\Intel Simics Package Manager\simics-python-7.14.0\win64\lib\python3.10
 mingw: None

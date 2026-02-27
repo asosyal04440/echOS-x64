@@ -24,7 +24,7 @@ params:
             show: true
         simulation:
           uefi_dev_name: simics_uefi
-          use_vmp: false
+          use_vmp: true
         storage:
           disk0:
             size:
@@ -50,7 +50,7 @@ params:
         image:
           type: file
           description: echOS bootable disk image
-          default: "%script%/images/echos-efi.img"
+          default: "%script%/images/echos-uefi-fixed.vhdx"
         medium:
           type: str
           values: ["USB", "HDD0", "HDD1", "CDR"]

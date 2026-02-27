@@ -94,10 +94,10 @@ impl FibonacciBuddyAllocator {
             }
         }
 
-        None // No memory available
+        None // Kullanılabilir bellek yok
     }
 
-    /// Memory deallocation - Automatic coalescing!
+    /// Bellek serbest bırakma - Otomatik birleştirme!
     pub fn deallocate(&mut self, addr: PhysAddr, size: usize) {
         if size == 0 {
             return;
@@ -139,7 +139,7 @@ impl FibonacciBuddyAllocator {
     /// Otomatik coalescing - Fragmentation'ı %57 azaltır!
     fn try_coalesce(&mut self, addr: PhysAddr, idx: usize) {
         if idx >= FIBONACCI_SERIES.len() - 1 {
-            return; // Maximum size reached
+            return; // Maksimum boyuta ulaşıldı
         }
 
         let buddy_addr = self.find_buddy(addr, idx);
@@ -152,7 +152,7 @@ impl FibonacciBuddyAllocator {
                 let coalesced_addr = if addr < buddy_addr { addr } else { buddy_addr };
                 self.free_lists[idx + 1].push(coalesced_addr);
 
-                // Recursive coalescing
+                // Özyinelemeli birleştirme
                 self.try_coalesce(coalesced_addr, idx + 1);
             }
         }
@@ -213,7 +213,7 @@ mod tests {
         let block2 = allocator.allocate(PAGE_SIZE).unwrap();
         assert_eq!(block2, PhysAddr::new(0x2000));
 
-        // Utilization test
+        // Kullanım testi
         assert!(allocator.utilization() > 90.0);
 
         // Fragmentation test - %12'nin altında olmalı!
@@ -231,7 +231,7 @@ mod tests {
         allocator.deallocate(block1, PAGE_SIZE);
         allocator.deallocate(block2, PAGE_SIZE);
 
-        // Coalescing should create larger block
+        // Birleştirme daha büyük blok oluşturmalı
         assert!(allocator.free_lists[4].len() > 0);
     }
 }

@@ -1,35 +1,32 @@
 # echOS Automated Test Script
 # Run with: simics.bat targets/echos/auto-test.simics
 
-# Use the HDD UEFI boot target with our custom bootable VHDX image
-disable-vmp
+# VMP auto-managed (uses hardware acceleration if driver is loaded)
 
 $disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
 $machine_name = "board"
 $show_con0 = TRUE
 $create_network = FALSE
-run-script "targets/qsp-x86/qsp-hdd-boot.simics"
+run-script "%simics%/targets/qsp-x86/qsp-hdd-boot.simics"
 
-# push COM1 text console to terminal output
+# Serial capture to file + cmd-line echo
+board.serconsole.con.capture-start "targets/echos/logs/serial_autotest.txt"
 board.serconsole.con.enable-cmd-line-output
 
-# reduce model-noise so boot messages are visible
 log-type -disable unimpl
 log-type -disable spec-viol
 
 echo "=========================================="
 echo "echOS Boot Test Starting"
-echo "Hard timeout: 60s"
+echo "Hard timeout: 120s"
 echo "=========================================="
 
-# Safety timeout: stop + quit no matter what
 script-branch "timeout-stop" {
-    bp.time.wait-for 60
+    bp.time.wait-for 120
     echo "[auto-test] timeout reached, stopping simulation"
     stop
 }
 
-# Start simulation now. timeout-stop branch will terminate it.
 run
 
 echo "[auto-test] simulation stopped, collecting CPU state"

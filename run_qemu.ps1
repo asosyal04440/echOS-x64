@@ -1,6 +1,8 @@
 param(
     [ValidateSet("auto", "iso", "uefi")]
     [string]$Mode = "auto",
+    [ValidateSet("fast", "debug")]
+    [string]$Profile = "fast",
     [switch]$RebuildIso,
     [switch]$NoBuild
 )
@@ -31,6 +33,11 @@ Write-Host "Log: $logPath" -ForegroundColor DarkGray
 Write-Host "Serial log: $serialLogPath" -ForegroundColor DarkGray
 Write-Host "QEMU stdout: $qemuStdoutPath" -ForegroundColor DarkGray
 Write-Host "QEMU stderr: $qemuStderrPath" -ForegroundColor DarkGray
+Write-Host "Profile: $Profile" -ForegroundColor DarkGray
+
+$traceEnabled = $Profile -eq "debug"
+$fastProfile = $Profile -eq "fast"
+$accelArgs = if ($fastProfile) { @("-accel", "tcg") } else { @("-accel", "whpx", "-accel", "tcg") }
 
 $llvmBin = "C:\Program Files\LLVM\bin"
 if (Test-Path $llvmBin) {
@@ -64,8 +71,13 @@ else { $useIso = Test-Path $isoPath }
 if ($useIso) {
     if (-Not $NoBuild) {
         Write-Host "Building echOS (multiboot)..." -ForegroundColor Yellow
-        cargo build --quiet
-        if ($LASTEXITCODE -ne 0) {
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $buildOut = cargo build --quiet 2>&1
+        $buildExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        $buildOut | Where-Object { $_ -notmatch "^warning:" } | Write-Host
+        if ($buildExitCode -ne 0) {
             Write-Error "Build failed"
             if ($transcriptStarted) { Stop-Transcript | Out-Null }
             exit 1
@@ -96,17 +108,23 @@ if ($useIso) {
 
     $qemuArgs = @(
         "-cdrom", $isoPath,
+        "-machine", "q35",
         "-m", "512M",
         "-serial", "file:$serialLogPath",
         "-debugcon", "file:$debugLogPath",
         "-global", "isa-debugcon.iobase=0xe9",
         "-display", "sdl",
         "-monitor", "none",
-        "-d", "int,guest_errors,unimp,pcall,mmu,cpu_reset",
-        "-D", $traceLogPath,
         "-no-reboot",
         "-no-shutdown"
     )
+    $qemuArgs += $accelArgs
+    if ($traceEnabled) {
+        $qemuArgs += @(
+            "-d", "int,guest_errors,unimp,pcall,mmu,cpu_reset",
+            "-D", $traceLogPath
+        )
+    }
 } else {
     $efiPath = Join-Path $projectRoot "target\x86_64-unknown-uefi\debug\ech_os.efi"
     $gpuTestSrc = Join-Path $projectRoot "userspace\gpu_test.rs"
@@ -119,12 +137,21 @@ if ($useIso) {
     $ovmfVarsTemplate = Join-Path $qemuShare "edk2-i386-vars.fd"
     $ovmfVars = Join-Path $projectRoot "OVMF_VARS.fd"
 
-    Write-Host "Building echOS (UEFI)..." -ForegroundColor Yellow
-    cargo build --quiet --target x86_64-unknown-uefi
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Build failed"
-        if ($transcriptStarted) { Stop-Transcript | Out-Null }
-        exit 1
+    if (-Not $NoBuild) {
+        Write-Host "Building echOS (UEFI)..." -ForegroundColor Yellow
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $buildOut = cargo build --quiet --target x86_64-unknown-uefi 2>&1
+        $buildExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        $buildOut | Where-Object { $_ -notmatch "^warning:" } | Write-Host
+        if ($buildExitCode -ne 0) {
+            Write-Error "Build failed"
+            if ($transcriptStarted) { Stop-Transcript | Out-Null }
+            exit 1
+        }
+    } else {
+        Write-Host "Skipping UEFI build (-NoBuild)" -ForegroundColor DarkYellow
     }
 
     if (-Not (Test-Path $efiPath)) {
@@ -136,22 +163,42 @@ if ($useIso) {
     Write-Host "Copying EFI to ESP folder..." -ForegroundColor Yellow
     Copy-Item $efiPath "esp\EFI\BOOT\BOOTX64.EFI" -Force
 
-    Write-Host "Building gpu_test..." -ForegroundColor Yellow
-    rustc $gpuTestSrc -o $gpuTestOut --target x86_64-unknown-none -C opt-level=s -C panic=abort -C relocation-model=static -C link-arg=-T$gpuTestLinker
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "gpu_test build failed"
-        if ($transcriptStarted) { Stop-Transcript | Out-Null }
-        exit 1
+    if (-Not $NoBuild) {
+        Write-Host "Building gpu_test..." -ForegroundColor Yellow
+    }
+    if ((-Not $NoBuild) -and (Test-Path $gpuTestSrc)) {
+        $prevEAP2 = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        rustc $gpuTestSrc -o $gpuTestOut --target x86_64-unknown-none -C opt-level=s -C panic=abort -C relocation-model=static -C link-arg=-T$gpuTestLinker
+        $gpuExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP2
+        if ($gpuExitCode -ne 0) {
+            Write-Error "gpu_test build failed"
+            if ($transcriptStarted) { Stop-Transcript | Out-Null }
+            exit 1
+        }
+    } elseif (-Not $NoBuild) {
+        Write-Host "  gpu_test.rs kaynak bulunamadı, mevcut binary kullanılıyor" -ForegroundColor DarkYellow
     }
 
     $echshSrc = Join-Path $projectRoot "userspace\echsh.rs"
     $echshOut = Join-Path $projectRoot "esp\echsh"
-    Write-Host "Building echsh..." -ForegroundColor Yellow
-    rustc $echshSrc -o $echshOut --target x86_64-unknown-none -C opt-level=s -C panic=abort -C relocation-model=static -C link-arg=-T$gpuTestLinker
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "echsh build failed"
-        if ($transcriptStarted) { Stop-Transcript | Out-Null }
-        exit 1
+    if (-Not $NoBuild) {
+        Write-Host "Building echsh..." -ForegroundColor Yellow
+    }
+    if ((-Not $NoBuild) -and (Test-Path $echshSrc)) {
+        $prevEAP2 = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        rustc $echshSrc -o $echshOut --target x86_64-unknown-none -C opt-level=s -C panic=abort -C relocation-model=static -C link-arg=-T$gpuTestLinker
+        $echshExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP2
+        if ($echshExitCode -ne 0) {
+            Write-Error "echsh build failed"
+            if ($transcriptStarted) { Stop-Transcript | Out-Null }
+            exit 1
+        }
+    } elseif (-Not $NoBuild) {
+        Write-Host "  echsh.rs kaynak bulunamadı, mevcut binary kullanılıyor" -ForegroundColor DarkYellow
     }
 
     if (-Not (Test-Path $ovmfVars)) {
@@ -164,7 +211,7 @@ if ($useIso) {
     $qemuArgs = @(
         "-machine", "q35",
         "-cpu", "Haswell,+smep,+smap,+pcid",
-        "-smp", "4",
+        "-smp", $(if ($fastProfile) { "2" } else { "4" }),
         "-drive", $ovmfCodeDrive,
         "-drive", $ovmfVarsDrive,
         "-drive", "format=raw,file=fat:rw:esp",
@@ -174,13 +221,18 @@ if ($useIso) {
         "-m", "2G",
         "-display", "sdl",
         "-monitor", "none",
-        "-d", "int,guest_errors,unimp,pcall,mmu,cpu_reset",
-        "-D", $traceLogPath,
         "-no-reboot",
         "-no-shutdown",
         "-netdev", "user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::4443-:443",
         "-device", "virtio-net-pci,netdev=net0,disable-modern=off,disable-legacy=on"
     )
+    $qemuArgs += $accelArgs
+    if ($traceEnabled) {
+        $qemuArgs += @(
+            "-d", "int,guest_errors,unimp,pcall,mmu,cpu_reset",
+            "-D", $traceLogPath
+        )
+    }
     $diskImg = Join-Path $ESP_PATH "disk.img"
     if (Test-Path $diskImg) {
         $qemuArgs += @(

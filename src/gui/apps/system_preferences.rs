@@ -506,17 +506,14 @@ impl SystemPreferences {
         fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
         fb.draw_rect_outline(x, y, w, h, Theme::BORDER.to_u32());
         
-        // Toolbar
-        fb.draw_rect(x, y, w, TOOLBAR_HEIGHT, Theme::TOOLBAR_BG.to_u32());
-        self.draw_toolbar(fb, x, y, w);
-        
+        // No internal toolbar — WM Cyber titlebar is the chrome
         if let Some(pane_idx) = self.selected_pane {
             // Draw pane content
-            self.draw_pane_content(fb, x, y + TOOLBAR_HEIGHT, w, h - TOOLBAR_HEIGHT, pane_idx);
+            self.draw_pane_content(fb, x, y, w, h, pane_idx);
         } else {
             // Draw pane grid
-            fb.draw_rect(x, y + TOOLBAR_HEIGHT, SIDEBAR_WIDTH, h - TOOLBAR_HEIGHT, Theme::SIDEBAR_BG.to_u32());
-            self.draw_pane_grid(fb, x, y + TOOLBAR_HEIGHT, w, h - TOOLBAR_HEIGHT);
+            fb.draw_rect(x, y, SIDEBAR_WIDTH, h, Theme::SIDEBAR_BG.to_u32());
+            self.draw_pane_grid(fb, x, y, w, h);
         }
     }
     
@@ -612,7 +609,10 @@ impl SystemPreferences {
             
             // Name
             let name = if pane.name.len() > 12 { format!("{}...", &pane.name[..9]) } else { pane.name.clone() };
-            fb.draw_string(icon_x + (PANE_ICON_SIZE + 16 - name.len() * 8) / 2, icon_y + PANE_ICON_SIZE + 12, &name, Theme::TEXT_PRIMARY.to_u32());
+            let text_w = name.len() * 8;
+            let container_w = PANE_ICON_SIZE + 16;
+            let name_x = icon_x + container_w.saturating_sub(text_w) / 2;
+            fb.draw_string(name_x, icon_y + PANE_ICON_SIZE + 12, &name, Theme::TEXT_PRIMARY.to_u32());
             
             // Next position
             icon_x += PANE_ICON_SIZE + 32;

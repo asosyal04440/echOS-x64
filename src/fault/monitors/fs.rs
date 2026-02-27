@@ -1,21 +1,22 @@
-//! # Filesystem Health Monitor
+//! # Dosya Sistemi Sağlık Monitörü
 //!
-//! Monitors filesystem integrity, I/O errors, and disk space.
+//! Dosya sistemi bütünlüğünü, G/Ç hatalarını ve disk alanını izler.
+//! Metadata bozulması ve yüksek hata oranlarını erken tespit eder.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
 pub struct FsMonitor {
-    /// I/O errors
+    /// G/Ç (I/O) hatası sayısı
     io_errors: AtomicU32,
-    /// Metadata errors
+    /// Metadata (st veri) hatası sayısı
     metadata_errors: AtomicU32,
-    /// Disk full events
+    /// Disk doldu olay sayısı
     disk_full_events: AtomicU32,
-    /// Last check timestamp
+    /// Son kontrol zaman damgası
     last_check: AtomicUsize,
-    /// Monitor enabled
+    /// Monitör etkin mi?
     enabled: AtomicBool,
 }
 
@@ -30,22 +31,22 @@ impl FsMonitor {
         }
     }
     
-    /// Record I/O error
+    /// G/Ç hatası kaydeder
     pub fn record_io_error(&self) {
         self.io_errors.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record metadata error
+    /// Metadata hatası kaydeder
     pub fn record_metadata_error(&self) {
         self.metadata_errors.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record disk full
+    /// Disk doldu olayı kaydeder
     pub fn record_disk_full(&self) {
         self.disk_full_events.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Check filesystem health
+    /// Dosya sistemi sağlığını kontrol eder — metadata ve G/Ç hatalarını değerlendirir
     fn check_fs(&self) -> Option<Fault> {
         let io = self.io_errors.load(Ordering::SeqCst);
         let meta = self.metadata_errors.load(Ordering::SeqCst);

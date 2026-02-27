@@ -1,13 +1,14 @@
-//! # Argon2 Password Hashing
+//! # Argon2 Şifre Özetleme
 //!
-//! Argon2id memory-hard password hashing function.
+//! Argon2id bellek-yoğun şifre özet fonksiyonu.
+//! Şifreleri kaba-kuvvet saldırılarına karşı korumak için RAM kullanımını zorlaştırır.
 
 use alloc::vec::Vec;
 
 const ARGON2_SYNC_POINTS: usize = 4;
 const ARGON2_BLOCK_SIZE: usize = 1024;
 
-/// Argon2 variant
+/// Argon2 varyantı: d (veri bağımlı), i (veri bağımsız), id (her ikisi — önerilen)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Argon2Variant {
     Argon2d = 0,
@@ -15,22 +16,22 @@ pub enum Argon2Variant {
     Argon2id = 2,
 }
 
-/// Argon2 version
+/// Argon2 protokol sürümü (V13 güncel standarttır)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Argon2Version {
     V10 = 0x10,
     V13 = 0x13,
 }
 
-/// Argon2 configuration
+/// Argon2 yapılandırma parametreleri — zaman/bellek/paralellik dengesini ayarlar
 #[derive(Clone, Debug)]
 pub struct Argon2Config {
     pub variant: Argon2Variant,
     pub version: Argon2Version,
-    pub time_cost: u32,      // Number of iterations
-    pub memory_cost: u32,    // Memory in KiB
-    pub parallelism: u32,    // Number of lanes
-    pub hash_len: usize,     // Output length
+    pub time_cost: u32,      // İterasyon sayısı — daha yüksek = daha yavaş hesaplama
+    pub memory_cost: u32,    // Bellek kullanımı KiB cinsinden
+    pub parallelism: u32,    // Paralel şerit (lane) sayısı
+    pub hash_len: usize,     // Çıktı hash uzunluğu (bayt)
 }
 
 impl Default for Argon2Config {
@@ -39,23 +40,23 @@ impl Default for Argon2Config {
             variant: Argon2Variant::Argon2id,
             version: Argon2Version::V13,
             time_cost: 3,
-            memory_cost: 65536,  // 64 MB
+            memory_cost: 65536,  // 64 MB bellek kullanımı
             parallelism: 4,
             hash_len: 32,
         }
     }
 }
 
-/// Argon2 context
+/// Argon2 bağlamı — bellek ve yapılandırma durumunu tutar
 pub struct Argon2 {
     config: Argon2Config,
-    memory: Vec<[u64; 128]>,  // 1024 bytes per block
+    memory: Vec<[u64; 128]>,  // Blok başına 1024 bayt (128 × 64-bit kelime)
     segment_len: usize,
     lane_len: usize,
 }
 
 impl Argon2 {
-    /// Create new Argon2 instance
+    /// Yeni bir Argon2 örneği oluşturur ve bellek alanını başlatır
     pub fn new(config: Argon2Config) -> Self {
         let memory_blocks = config.memory_cost as usize;
         let segment_len = memory_blocks / (config.parallelism as usize * ARGON2_SYNC_POINTS);
@@ -72,26 +73,26 @@ impl Argon2 {
         }
     }
 
-    /// Hash password
+    /// Şifreyi özet değerine dönüştürür
     pub fn hash(&mut self, password: &[u8], salt: &[u8], secret: &[u8], ad: &[u8]) -> Vec<u8> {
-        // Initial hashing
+        // Başlangıç özetleme — H0 başlangıç vektörünü oluşturur
         let h0 = self.initial_hash(password, salt, secret, ad);
         
-        // Fill memory blocks
+        // Bellek bloklarını doldur — hafızayı yoğun biçimde kullanır
         self.fill_memory_blocks(&h0);
         
-        // Finalize
+        // Sonlandır — son bloğu özetle
         self.finalize()
     }
 
-    /// Hash password with default config
+    /// Varsayılan yapılandırmayla şifreyi özetler (kullanım kolaylığı için)
     pub fn hash_password(password: &[u8], salt: &[u8]) -> Vec<u8> {
         let config = Argon2Config::default();
         let mut argon2 = Argon2::new(config);
         argon2.hash(password, salt, &[], &[])
     }
 
-    /// Verify password against hash
+    /// Şifreyi mevcut özet değeriyle yan kanal güvenli biçimde doğrular
     pub fn verify(password: &[u8], salt: &[u8], expected_hash: &[u8]) -> bool {
         let config = Argon2Config {
             hash_len: expected_hash.len(),
@@ -100,7 +101,7 @@ impl Argon2 {
         let mut argon2 = Argon2::new(config);
         let computed = argon2.hash(password, salt, &[], &[]);
         
-        // Constant-time comparison
+        // Sabit zamanlı karşılaştırma — zamanlama tabanlı yan kanal saldırılarına karşı
         if computed.len() != expected_hash.len() {
             return false;
         }
@@ -113,28 +114,29 @@ impl Argon2 {
     }
 
     fn initial_hash(&self, password: &[u8], salt: &[u8], secret: &[u8], ad: &[u8]) -> [u8; 64] {
-        // H0 = H(len(p) || p || len(s) || s || len(k) || k || len(X) || X || 
-        //         len(A) || A || v || y || t || m || p || L || K || X)
+        // H0 = H(|p| || p || |s| || s || |k| || k || |X| || X ||
+        //         |A| || A || v || y || t || m || p || L || K || X)
+        // Tüm giriş parametrelerini birleştirerek başlangıç özet vektörü oluşturulur
         
         let mut hasher = crate::crypto::Sha3::sha3_512();
         
-        // Password
+        // Şifre uzunluğu ve şifre verisi
         hasher.update(&(password.len() as u32).to_le_bytes());
         hasher.update(password);
         
-        // Salt
+        // Tuz (salt) uzunluğu ve tuz verisi
         hasher.update(&(salt.len() as u32).to_le_bytes());
         hasher.update(salt);
         
-        // Secret
+        // Gizli anahtar uzunluğu ve gizli anahtar
         hasher.update(&(secret.len() as u32).to_le_bytes());
         hasher.update(secret);
         
-        // Associated data
+        // İlişkili veri (associated data) uzunluğu ve verisi
         hasher.update(&(ad.len() as u32).to_le_bytes());
         hasher.update(ad);
         
-        // Parameters
+        // Yapılandırma parametreleri
         hasher.update(&[self.config.variant as u8]);
         hasher.update(&[self.config.version as u8]);
         hasher.update(&self.config.time_cost.to_le_bytes());
@@ -151,16 +153,16 @@ impl Argon2 {
     fn fill_memory_blocks(&mut self, h0: &[u8; 64]) {
         // Create first two blocks per lane
         for lane in 0..self.config.parallelism as usize {
-            // B[0]
+            // Her şerit için ilk blok B[0]
             let j0 = lane * self.lane_len;
             self.generate_block(j0, h0, lane, 0);
             
-            // B[1]
+            // Her şerit için ikinci blok B[1]
             let j1 = lane * self.lane_len + 1;
             self.generate_block(j1, h0, lane, 1);
         }
         
-        // Fill remaining blocks
+        // Kalan blokları doldur
         for pass in 0..self.config.time_cost as usize {
             for slice in 0..ARGON2_SYNC_POINTS {
                 for lane in 0..self.config.parallelism as usize {
@@ -169,7 +171,7 @@ impl Argon2 {
                         let j = lane * self.lane_len + segment_start + offset;
                         
                         if j < 2 {
-                            continue;  // Skip first two blocks
+                            continue;  // İlk iki bloğu atla (zaten oluşturuldu)
                         }
                         
                         // Compute block
@@ -181,7 +183,7 @@ impl Argon2 {
     }
 
     fn generate_block(&mut self, block_idx: usize, h0: &[u8; 64], lane: usize, counter: usize) {
-        // Generate block using G function
+        // G fonksiyonu kullanarak başlangıç bloğu oluştur
         let mut input = [0u8; 72];
         input[..64].copy_from_slice(h0);
         input[64..68].copy_from_slice(&(lane as u32).to_le_bytes());
@@ -192,7 +194,7 @@ impl Argon2 {
         hasher.update(&input);
         let hash = hasher.finalize();
         
-        // Fill block from hash
+        // Hash sonucundan bloğu doldur
         for i in 0..64 {
             let val = u64::from_le_bytes([
                 hash[i * 8],
@@ -209,14 +211,14 @@ impl Argon2 {
     }
 
     fn compute_block(&mut self, block_idx: usize, pass: usize, slice: usize, lane: usize, offset: usize) {
-        // Simplified block computation
-        // Real implementation needs proper addressing and G function
+        // Basitleştirilmiş blok hesaplama
+        // Gerçek implementasyon doğru adresleme ve G fonksiyonu gerektirir
         
-        // Get reference blocks
+        // Referans bloklarını al
         let ref1 = self.get_ref_block(block_idx, pass, slice, lane, offset, 0);
         let ref2 = self.get_ref_block(block_idx, pass, slice, lane, offset, 1);
         
-        // Apply G function (simplified)
+        // G fonksiyonunu uygula (basitleştirilmiş)
         for i in 0..128 {
             self.memory[block_idx][i] = self.memory[ref1][i]
                 .wrapping_add(self.memory[ref2][i])
@@ -225,11 +227,11 @@ impl Argon2 {
     }
 
     fn get_ref_block(&self, block_idx: usize, pass: usize, slice: usize, lane: usize, offset: usize, _ref_num: usize) -> usize {
-        // Simplified addressing - real implementation needs proper pseudo-random addressing
+        // Basitleştirilmiş adresleme — gerçek implementasyon sözde-rastgele adresleme gerektirir
         let lane_len = self.lane_len;
         let segment_start = slice * self.segment_len;
         
-        // Simple pseudo-random selection
+        // Basit sözde-rastgele seçim
         let mut hasher = crate::crypto::Sha3::sha3_256();
         hasher.update(&(pass as u32).to_le_bytes());
         hasher.update(&(slice as u32).to_le_bytes());
@@ -239,7 +241,7 @@ impl Argon2 {
         
         let pseudo_val = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) as usize;
         
-        // Select from available blocks
+        // Mevcut bloklar arasından seç
         if pass == 0 {
             pseudo_val % (segment_start + offset)
         } else {
@@ -248,7 +250,7 @@ impl Argon2 {
     }
 
     fn finalize(&self) -> Vec<u8> {
-        // XOR all last blocks in each lane
+        // Her şeridin son bloğunu XOR ile birleştir
         let mut result_block = [0u64; 128];
         
         for lane in 0..self.config.parallelism as usize {
@@ -258,7 +260,7 @@ impl Argon2 {
             }
         }
         
-        // Hash result block
+        // Sonuç bloğunu özetle
         let mut hasher = crate::crypto::Sha3::sha3_256();
         for word in result_block.iter() {
             hasher.update(&word.to_le_bytes());
@@ -271,7 +273,7 @@ impl Argon2 {
     }
 }
 
-/// Password hash with parameters
+/// Tuz ve parametrelerle birlikte saklanan şifre özet yapısı
 #[derive(Clone, Debug)]
 pub struct PasswordHash {
     pub hash: Vec<u8>,
@@ -282,9 +284,9 @@ pub struct PasswordHash {
 }
 
 impl PasswordHash {
-    /// Create new password hash
+    /// Yeni şifre özeti oluşturur — rastgele tuz üretir ve şifreyi özet değerine dönüştürür
     pub fn new(password: &[u8]) -> Self {
-        // Generate random salt
+        // Rastgele tuz oluştur
         let mut salt = [0u8; 16];
         crate::crypto::rdrand_bytes(&mut salt);
         
@@ -301,7 +303,7 @@ impl PasswordHash {
         }
     }
 
-    /// Verify password
+    /// Şifreyi saklanan özet değeriyle doğrular
     pub fn verify(&self, password: &[u8]) -> bool {
         let config = Argon2Config {
             time_cost: self.time_cost,
@@ -314,7 +316,7 @@ impl PasswordHash {
         let mut argon2 = Argon2::new(config);
         let computed = argon2.hash(password, &self.salt, &[], &[]);
         
-        // Constant-time comparison
+        // Sabit zamanlı karşılaştırma — yan kanal saldırılarına karşı
         if computed.len() != self.hash.len() {
             return false;
         }

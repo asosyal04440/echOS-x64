@@ -1,6 +1,8 @@
-//! # Graceful Degradation Manager
+//! # Zarif Bozunma (Graceful Degradation) Yöneticisi
 //!
-//! Manages system degradation levels and module disabling.
+//! Sistem bozunma seviyelerini ve modül devre dışı bırakma işlemlerini yönetir.
+//! Sistem kırılırken kritik olmayan modülleri devre dışı bırakar,
+//! çekirdek işlevselliğini korur.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -12,10 +14,10 @@ use spin::Mutex;
 use super::severity::RecoveryLevel;
 
 // ============================================================================
-// DEGRADATION STATE
+// BOZUNMA DURUMU
 // ============================================================================
 
-/// Module degradation info
+/// Modül bozunma bilgisi — bir modülün etkinlik ve bozunma durumunu takip eder
 #[derive(Clone, Debug)]
 pub struct ModuleState {
     pub name: String,
@@ -25,13 +27,13 @@ pub struct ModuleState {
     pub disable_reason: Option<String>,
 }
 
-/// Degradation manager
+/// Bozunma yöneticisi — tüm modül durumlarını ve bozunma seviyesini yönetir
 pub struct DegradationManager {
-    /// Current degradation level
+    /// Mevcut bozunma seviyesi (0-4)
     level: AtomicU32,
-    /// Module states
+    /// Modül durumları haritası
     modules: Mutex<BTreeMap<String, ModuleState>>,
-    /// Degradation enabled
+    /// Bozunma yönetimi etkin mi?
     enabled: AtomicBool,
 }
 
@@ -44,11 +46,11 @@ impl DegradationManager {
         }
     }
     
-    /// Initialize with known modules
+    /// Bilinen modülleri kayıt ederek başlatır
     pub fn init(&self) {
         let mut modules = self.modules.lock();
         
-        // Core modules (cannot be disabled)
+        // Çekirdek modüller (devre dışı bırakılamaz)
         modules.insert(String::from("memory"), ModuleState {
             name: String::from("memory"),
             enabled: true,
@@ -78,7 +80,7 @@ impl DegradationManager {
             disable_reason: None,
         });
         
-        // Non-critical modules (can be disabled)
+        // Kritik olmayan modüller (devre dışı bırakılabilir)
         modules.insert(String::from("audio"), ModuleState {
             name: String::from("audio"),
             enabled: true,
@@ -123,13 +125,13 @@ impl DegradationManager {
         });
     }
     
-    /// Set degradation level
+    /// Bozunma seviyesini ayarlar ve ilgili modüllere uygular
     pub fn set_level(&self, level: RecoveryLevel) {
         self.level.store(level as u32, Ordering::SeqCst);
         self.apply_level(level);
     }
     
-    /// Apply degradation level
+    /// Bozunma seviyesini modüllere uygular — etkilenen modülleri devre dışı bırakır/etkinleştirir
     fn apply_level(&self, level: RecoveryLevel) {
         let disabled = level.disabled_modules();
         
@@ -151,7 +153,7 @@ impl DegradationManager {
         }
     }
     
-    /// Disable a specific module
+    /// Belirli bir modülü devre dışı bırakır
     pub fn disable_module(&self, name: &str, reason: &str) -> bool {
         let mut modules = self.modules.lock();
         if let Some(state) = modules.get_mut(name) {
@@ -165,7 +167,7 @@ impl DegradationManager {
         false
     }
     
-    /// Enable a specific module
+    /// Belirli bir modülü etkinleştirir
     pub fn enable_module(&self, name: &str) -> bool {
         let mut modules = self.modules.lock();
         if let Some(state) = modules.get_mut(name) {
@@ -179,7 +181,7 @@ impl DegradationManager {
         false
     }
     
-    /// Check if module is enabled
+    /// Belirtilen modülün etkin olup olmadığını kontrol eder
     pub fn is_enabled(&self, name: &str) -> bool {
         self.modules.lock()
             .get(name)
@@ -187,17 +189,17 @@ impl DegradationManager {
             .unwrap_or(true)
     }
     
-    /// Get current level
+    /// Mevcut bozunma seviyesini döndürür
     pub fn current_level(&self) -> RecoveryLevel {
         RecoveryLevel::from(self.level.load(Ordering::SeqCst))
     }
     
-    /// Get all module states
+    /// Tüm modül durumlarını döndürür
     pub fn module_states(&self) -> Vec<ModuleState> {
         self.modules.lock().values().cloned().collect()
     }
     
-    /// Increase degradation level
+    /// Bozunma seviyesini bir kademe artırır
     pub fn increase_level(&self) {
         let current = self.current_level();
         let new_level = match current {
@@ -209,7 +211,7 @@ impl DegradationManager {
         self.set_level(new_level);
     }
     
-    /// Decrease degradation level
+    /// Bozunma seviyesini bir kademe azaltır
     pub fn decrease_level(&self) {
         let current = self.current_level();
         let new_level = match current {
@@ -224,7 +226,7 @@ impl DegradationManager {
 }
 
 // ============================================================================
-// GLOBAL INSTANCE
+// GLOBAL ÖRNEK
 // ============================================================================
 
 lazy_static::lazy_static! {
@@ -232,7 +234,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// PUBLIC API
+// GENEL (PUBLIC) API
 // ============================================================================
 
 pub fn init() {

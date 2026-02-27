@@ -105,7 +105,7 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
         if let Some(frame) = self.pmm.allocate_frame() {
             return Some(frame);
         }
-        // Reclaim attempt
+        // Geri kazanım denemesi
         if reclaim_pages(16) > 0 {
             if let Some(frame) = self.pmm.allocate_frame() {
                 return Some(frame);
@@ -3065,8 +3065,8 @@ pub fn allocate_contiguous_frames(pages: usize) -> Option<PhysFrame> {
     }
 }
 
-/// Allocate contiguous physical memory and return physical address
-/// Used by drivers like NVMe for DMA buffers
+/// Ardışık fiziksel bellek tahsis eder ve fiziksel adresi döndürür
+/// NVMe gibi sürücüler tarafından DMA tamponları için kullanılır
 pub fn alloc_phys(size: usize) -> Option<u64> {
     let page_size = 4096;
     let pages = (size + page_size - 1) / page_size;
@@ -3076,12 +3076,12 @@ pub fn alloc_phys(size: usize) -> Option<u64> {
     })
 }
 
-/// Free contiguous physical memory allocated by alloc_phys
+/// alloc_phys tarafından tahsis edilen ardışık fiziksel belleği serbest bırakır
 pub fn free_phys(phys_addr: u64, size: usize) {
     let page_size = 4096;
     let pages = (size + page_size - 1) / page_size;
     
-    // Create PhysFrame from address
+    // Adresten PhysFrame oluştur
     let frame = PhysFrame::containing_address(x86_64::addr::PhysAddr::new(phys_addr));
     deallocate_contiguous_frames(frame, pages);
 }
@@ -3384,7 +3384,7 @@ fn iommu_map_domain(domain_id: u32, vaddr: usize, paddr: usize, len: usize, owne
             return false;
         }
     }
-    // Auto-create domain if it doesn't exist
+    // Alan mevcut değilse otomatik oluştur
     if !state.domains.contains_key(&domain_id) {
         state.domains.insert(
             domain_id,
@@ -3480,7 +3480,7 @@ pub fn virt_to_phys(vaddr: usize) -> usize {
     }
 }
 
-/// Overload for u64 virtual address
+/// u64 sanal adres için aşırı yükleme
 pub fn virt_to_phys_u64(vaddr: u64) -> u64 {
     match translate_addr(vaddr) {
         Some(paddr) => paddr,
@@ -3489,6 +3489,110 @@ pub fn virt_to_phys_u64(vaddr: u64) -> u64 {
             panic!("virt_to_phys: unmapped virtual address");
         }
     }
+}
+
+/// x86_64 tipi sarmalayıcı: VirtAddr → Option<PhysAddr>.
+/// Adres mevcut sayfa tablosunda eşlenmemişse None döndürür.
+pub fn virt_to_phys_va(va: x86_64::VirtAddr) -> Option<x86_64::PhysAddr> {
+    paging::translate_addr(va)
+}
+
+// ─── dma_bridge / vfio alt sistemleri için yardımcı fonksiyonlar ─────────────
+
+/// HHDM (Higher-Half Direct Map) offset'ini döndürür.
+///
+/// ## HHDM Nedir?
+/// Kernel başlangıçta tüm fiziksel RAM'ı sanal adres uzayının üst yarısına
+/// "doğrudan eşleştirir" (Direct Map). Bu eşlemin başlangıç sabiti HHDM'dir.
+/// Bootloader bunu bize bildirir, biz `PHYSICAL_MEMORY_OFFSET` atomic'ine kaydederiz.
+///
+/// Kullanımı:
+///   fiziksel_adres + hhdm_offset() = kernel sanal adresi
+///
+/// Örnek (tipik x86_64):
+///   Fiziksel 0x0008_0000 + hhdm = 0xFFFF_8000_0008_0000
+#[inline]
+pub fn hhdm_offset() -> u64 {
+    active_physical_offset()
+}
+
+/// Tek bir sıfırlanmış 4 KB fiziksel sayfa tahsis eder.
+///
+/// ## Çalışma Mantığı:
+/// 1. `alloc_phys(4096)` ile frame allocator'dan fiziksel frame al.
+/// 2. `phys + hhdm_offset()` ile HHDM üzerinden sanal adresini hesapla.
+/// 3. O sanal adrese 4096 byte sıfır yaz (güvenli başlangıç için zorunlu).
+/// 4. HHDM sanal adresini döndür — çağırıcı buraya sayfa tablosu girdisi yazabilir.
+///
+/// ## Neden Sıfırlama Zorunlu?
+/// IOMMU ve CPU sayfa tablolarında "sıfır = geçersiz/yok" anlamına gelir.
+/// Eski frame'deki çöp veriler yanlış DMA yetkisi veya sayfa hatası üretir.
+pub fn alloc_zeroed_page() -> Option<u64> {
+    let phys = alloc_phys(4096)?;
+    let hhdm_va = phys + active_physical_offset();
+    // HHDM eşlemesi aracılığıyla sayfayı sıfırla
+    unsafe { core::ptr::write_bytes(hhdm_va as *mut u8, 0, 4096) };
+    Some(hhdm_va)
+}
+
+/// Güncel (CR3) adres uzayında `va` sanal adresine fiziksel bir sayfa ekler.
+///
+/// ## Kullanım Senaryosu — DMA Bridge (Tier 1):
+/// GOP framebuffer fiziksel bir adreste bulunur (örn: 0xB000_0000).
+/// Oyun process'inin Ring-3'ten buna yazabilmesi için bu fiziksel sayfa,
+/// process'in PML4'ine `RING3_FB_VA` adresinden eklenir.
+///
+/// ## Çalışma Adımları:
+/// 1. CR3 oku → aktif PML4'ün fiziksel adresi
+/// 2. `phys_base + hhdm` ile PML4'ün sanal adresini bul
+/// 3. `x86_64::OffsetPageTable` ile `map_to_with_table_flags` çağır
+/// 4. `flush()` ile TLB invalidate yap (aksi halde eski çeviri kullanılır)
+///
+/// ## Bayraklar (flags):
+/// - `PRESENT`          : sayfa tabloda, erişilebilir
+/// - `USER_ACCESSIBLE`  : Ring-3 erişebilir (olmadan GPF üretir)
+/// - `WRITABLE`         : yazma izni (GPU MMIO için gerekli)
+pub fn map_physical_to_user_va(va: u64, phys: u64, flags: PageTableFlags) -> bool {
+    let frame_allocator = unsafe {
+        match global_memory_manager_mut() {
+            Some(m) => m,
+            None => return false,
+        }
+    };
+    let (level_4_frame, _) = Cr3::read();
+    let phys_base = level_4_frame.start_address();
+    let virt_base = VirtAddr::new(active_physical_offset() + phys_base.as_u64());
+    let table = unsafe { &mut *(virt_base.as_mut_ptr()) };
+    let mut mapper = unsafe { OffsetPageTable::new(table, VirtAddr::new(active_physical_offset())) };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+    let frame = PhysFrame::containing_address(x86_64::addr::PhysAddr::new(phys));
+    let map_flags = (flags | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
+        & !PageTableFlags::BIT_9; // clear software bit used for lazy
+    let table_flags =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    let result = paging::with_wp_disabled(|| unsafe {
+        mapper.map_to_with_table_flags(page, frame, map_flags, table_flags, frame_allocator)
+    });
+    match result {
+        Ok(flush) => { flush.flush(); true }
+        Err(MapToError::PageAlreadyMapped(_)) => false,
+        Err(_) => false,
+    }
+}
+
+/// `va` adresindeki tek 4 KiB sayfayı adres uzayından kaldır.
+///
+/// ## Önemli: Fiziksel Sayfa Serbest Bırakılmaz
+///
+/// Bu fonksiyon yalnızca sayfa tablosu girdisini (PTE) siler ve TLB'yi temizler.
+/// **Fiziksel çerçeveyi serbest bırakmaz** — bu kasıtlıdır çünkü:
+///   - DMA Köprüsü: Framebuffer fiziksel belleği GPU'ya aittir, kernel ayırmadı.
+///   - MMIO: IOMMU/GPU kaydedicileri fiziksel adres aralıkları; serbest bırakılamaz.
+///   - Çift serbest bırakma riski: Yalnızca PTE silinir, allocator manipüle edilmez.
+///
+/// DMA Köprüsü'nün `revoke()` methodu tüm framebuffer sayfaları için bu fonksiyonu çağırır.
+pub fn unmap_user_va(va: u64) {
+    unmap_user_range(va, 4096);
 }
 
 /// Kernel'in PML4 frame'i (scheduler context switch için)

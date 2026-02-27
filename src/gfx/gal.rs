@@ -1,7 +1,16 @@
-//! # GPU Abstraction Layer (GAL)
+//! # GPU Soyutlama Katmanı (GAL)
 //!
-//! Hardware-accelerated graphics with software fallback
-//! Supports VirGL, software rendering, and native GPU drivers
+//! Yazılım geri dönüşlü donanım hızlandırmalı grafik.
+//! VirGL, yazılım render ve yerel GPU sürücülerini destekler.
+//!
+//! ## Mimari
+//! - `TextureHandle / BufferHandle / ShaderHandle`: GPU kaynak tanımlayıcıları
+//! - `TextureFormat / TextureUsage`: Piksel formatları ve kullanım bayrakları
+//! - `BlendState`: RGBA kanalları için kaynak/hedef harmanlama faktörleri
+//! - `DepthStencilState`: Derinlik testi, derinlik yazma, stencil işlemleri
+//! - `RasterizerState`: Yüz ayıklama, dolgu modu, makas
+//! - `Gal trait`: Tüm GPU arka uçlarının uyguladığı birleşik API
+//! - `SoftwareGal`: CPU tabanlı yazılım render geri dönüş uygulaması
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -15,118 +24,118 @@ use core::mem;
 use super::{Surface, SwapChain, GraphicsBackend};
 
 // ============================================================================
-// GAL CONSTANTS
+// GAL SABİTLERİ
 // ============================================================================
 
-/// Maximum texture units
+/// Maksimum doku birimi sayısı
 const MAX_TEXTURE_UNITS: usize = 32;
 
-/// Maximum vertex buffer size (16MB)
+/// Maksimum köşe tamponu boyutu (16 MB)
 const MAX_VERTEX_BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
-/// Maximum index buffer size (4MB)
+/// Maksimum indeks tamponu boyutu (4 MB)
 const MAX_INDEX_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
-/// Default tile size (32x32 pixels)
+/// Varsayılan döşeme boyutu (32x32 piksel)
 const DEFAULT_TILE_SIZE: usize = 32;
 
 // ============================================================================
-// TEXTURE HANDLE
+// DOKU TANIMLAYICISI
 // ============================================================================
 
-/// GPU Texture handle
+/// GPU doku tanımlayıcısı
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TextureHandle(pub u32);
 
 impl TextureHandle {
     pub const INVALID: TextureHandle = TextureHandle(0);
-    
+
     pub fn new(id: u32) -> Self {
         TextureHandle(id)
     }
-    
+
     pub fn is_valid(&self) -> bool {
         self.0 != 0
     }
 }
 
 // ============================================================================
-// BUFFER HANDLE
+// TAMPON TANIMLAYICISI
 // ============================================================================
 
-/// GPU Buffer handle
+/// GPU tampon tanımlayıcısı
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BufferHandle(pub u32);
 
 impl BufferHandle {
     pub const INVALID: BufferHandle = BufferHandle(0);
-    
+
     pub fn new(id: u32) -> Self {
         BufferHandle(id)
     }
-    
+
     pub fn is_valid(&self) -> bool {
         self.0 != 0
     }
 }
 
 // ============================================================================
-// SHADER HANDLE
+// GÖLGELENDIRICI TANIMLAYICISI
 // ============================================================================
 
-/// Shader program handle
+/// Gölgelendirici programı tanımlayıcısı
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ShaderHandle(pub u32);
 
 impl ShaderHandle {
     pub const INVALID: ShaderHandle = ShaderHandle(0);
-    
+
     pub fn new(id: u32) -> Self {
         ShaderHandle(id)
     }
-    
+
     pub fn is_valid(&self) -> bool {
         self.0 != 0
     }
 }
 
 // ============================================================================
-// TEXTURE FORMAT
+// DOKU FORMATI
 // ============================================================================
 
-/// Texture pixel format
+/// Doku piksel formatı
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureFormat {
-    /// 8-bit Red channel
+    /// 8-bit Kırmızı kanalı
     R8,
-    /// 8-bit Red + Green channels
+    /// 8-bit Kırmızı + Yeşil kanallar
     RG8,
     /// 8-bit RGB
     RGB8,
     /// 8-bit RGBA
     RGBA8,
-    /// 16-bit floating point RGB
+    /// 16-bit kayan nokta RGB
     RGB16F,
-    /// 16-bit floating point RGBA
+    /// 16-bit kayan nokta RGBA
     RGBA16F,
-    /// 32-bit floating point RGB
+    /// 32-bit kayan nokta RGB
     RGB32F,
-    /// 32-bit floating point RGBA
+    /// 32-bit kayan nokta RGBA
     RGBA32F,
-    /// Depth 16-bit
+    /// 16-bit derinlik
     Depth16,
-    /// Depth 24-bit
+    /// 24-bit derinlik
     Depth24,
-    /// Depth 32-bit floating point
+    /// 32-bit kayan nokta derinlik
     Depth32F,
-    /// Stencil 8-bit
+    /// 8-bit stencil
     Stencil8,
-    /// Depth 24-bit + Stencil 8-bit
+    /// 24-bit derinlik + 8-bit stencil
     Depth24Stencil8,
 }
 
 impl TextureFormat {
-    /// Get bytes per pixel
+    /// Piksel başına bayt sayısını al
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
             TextureFormat::R8 => 1,
@@ -144,31 +153,31 @@ impl TextureFormat {
             TextureFormat::Depth24Stencil8 => 4,
         }
     }
-    
-    /// Is depth format
+
+    /// Derinlik formatı mı
     pub fn is_depth(&self) -> bool {
-        matches!(self, 
-            TextureFormat::Depth16 | 
-            TextureFormat::Depth24 | 
+        matches!(self,
+            TextureFormat::Depth16 |
+            TextureFormat::Depth24 |
             TextureFormat::Depth32F |
             TextureFormat::Depth24Stencil8
         )
     }
-    
-    /// Is stencil format
+
+    /// Stencil formatı mı
     pub fn is_stencil(&self) -> bool {
-        matches!(self, 
-            TextureFormat::Stencil8 | 
+        matches!(self,
+            TextureFormat::Stencil8 |
             TextureFormat::Depth24Stencil8
         )
     }
 }
 
 // ============================================================================
-// TEXTURE DESCRIPTOR
+// DOKU TANIMI
 // ============================================================================
 
-/// Texture creation descriptor
+/// Doku oluşturma tanımı
 #[derive(Clone, Debug)]
 pub struct TextureDesc {
     pub width: u32,
@@ -218,7 +227,7 @@ impl TextureDesc {
             usage: TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
         }
     }
-    
+
     pub fn render_target(width: u32, height: u32, format: TextureFormat) -> Self {
         TextureDesc {
             width,
@@ -230,7 +239,7 @@ impl TextureDesc {
             usage: TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED,
         }
     }
-    
+
     pub fn depth_stencil(width: u32, height: u32) -> Self {
         TextureDesc {
             width,
@@ -245,10 +254,10 @@ impl TextureDesc {
 }
 
 // ============================================================================
-// VERTEX FORMAT
+// KÖŞE FORMATI
 // ============================================================================
 
-/// Vertex attribute format
+/// Köşe özellik formatı
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VertexFormat {
     Float,
@@ -270,7 +279,7 @@ pub enum VertexFormat {
 }
 
 impl VertexFormat {
-    /// Get size in bytes
+    /// Bayt cinsinden boyutu al
     pub fn size(&self) -> usize {
         match self {
             VertexFormat::Float => 4,
@@ -289,7 +298,7 @@ impl VertexFormat {
     }
 }
 
-/// Vertex attribute descriptor
+/// Köşe özellik tanımlayıcısı
 #[derive(Clone, Debug)]
 pub struct VertexAttribute {
     pub name: String,
@@ -298,7 +307,7 @@ pub struct VertexAttribute {
     pub buffer_index: usize,
 }
 
-/// Vertex buffer layout
+/// Köşe tamponu düzeni
 #[derive(Clone, Debug)]
 pub struct VertexLayout {
     pub attributes: Vec<VertexAttribute>,
@@ -314,7 +323,7 @@ impl VertexLayout {
             instanced: false,
         }
     }
-    
+
     pub fn add(mut self, name: &str, format: VertexFormat) -> Self {
         let offset = self.stride;
         self.stride += format.size();
@@ -326,7 +335,7 @@ impl VertexLayout {
         });
         self
     }
-    
+
     pub fn add_instanced(mut self, name: &str, format: VertexFormat) -> Self {
         self.instanced = true;
         self.add(name, format)
@@ -334,10 +343,10 @@ impl VertexLayout {
 }
 
 // ============================================================================
-// PRIMITIVE TYPE
+// İLKEL TÜRÜ
 // ============================================================================
 
-/// Primitive topology
+/// İlkel topoloji
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimitiveType {
     Points,
@@ -349,10 +358,10 @@ pub enum PrimitiveType {
 }
 
 // ============================================================================
-// BLEND STATE
+// HARMANLA DURUMU
 // ============================================================================
 
-/// Blend factor
+/// Harmanla faktörü
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlendFactor {
     Zero,
@@ -368,7 +377,7 @@ pub enum BlendFactor {
     SrcAlphaSaturate,
 }
 
-/// Blend operation
+/// Harmanla işlemi
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlendOp {
     Add,
@@ -378,7 +387,7 @@ pub enum BlendOp {
     Max,
 }
 
-/// Blend state for a single render target
+/// Tek bir render hedefi için harmanla durumu
 #[derive(Clone, Copy, Debug)]
 pub struct BlendState {
     pub enabled: bool,
@@ -416,7 +425,7 @@ impl BlendState {
             alpha_op: BlendOp::Add,
         }
     }
-    
+
     pub fn additive() -> Self {
         BlendState {
             enabled: true,
@@ -428,7 +437,7 @@ impl BlendState {
             alpha_op: BlendOp::Add,
         }
     }
-    
+
     pub fn multiply() -> Self {
         BlendState {
             enabled: true,
@@ -440,7 +449,7 @@ impl BlendState {
             alpha_op: BlendOp::Add,
         }
     }
-    
+
     pub fn premultiplied() -> Self {
         BlendState {
             enabled: true,
@@ -455,10 +464,10 @@ impl BlendState {
 }
 
 // ============================================================================
-// DEPTH/STENCIL STATE
+// DERİNLİK/STENCİL DURUMU
 // ============================================================================
 
-/// Compare function
+/// Karşılaştırma fonksiyonu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompareFunc {
     Never,
@@ -471,7 +480,7 @@ pub enum CompareFunc {
     Always,
 }
 
-/// Stencil operation
+/// Stencil işlemi
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StencilOp {
     Keep,
@@ -484,7 +493,7 @@ pub enum StencilOp {
     DecrementWrap,
 }
 
-/// Stencil state for a single face
+/// Tek yüz için stencil durumu
 #[derive(Clone, Copy, Debug)]
 pub struct StencilFaceState {
     pub compare: CompareFunc,
@@ -510,7 +519,7 @@ impl Default for StencilFaceState {
     }
 }
 
-/// Depth/stencil state
+/// Derinlik/stencil durumu
 #[derive(Clone, Debug)]
 pub struct DepthStencilState {
     pub depth_test: bool,
@@ -535,10 +544,10 @@ impl Default for DepthStencilState {
 }
 
 // ============================================================================
-// RASTERIZER STATE
+// RASTERLEŞTIRICI DURUMU
 // ============================================================================
 
-/// Cull mode
+/// Yüz ayıklama modu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CullMode {
     None,
@@ -546,21 +555,21 @@ pub enum CullMode {
     Back,
 }
 
-/// Front face winding order
+/// Ön yüz döngü yönü
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrontFace {
     Clockwise,
     CounterClockwise,
 }
 
-/// Fill mode
+/// Dolgu modu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FillMode {
     Solid,
     Wireframe,
 }
 
-/// Rasterizer state
+/// Rasterleştirici durumu
 #[derive(Clone, Copy, Debug)]
 pub struct RasterizerState {
     pub cull_mode: CullMode,
@@ -591,10 +600,10 @@ impl Default for RasterizerState {
 }
 
 // ============================================================================
-// RENDER PASS
+// RENDER GEÇİŞİ
 // ============================================================================
 
-/// Render pass attachment
+/// Render geçişi bağlantısı
 #[derive(Clone, Debug)]
 pub struct RenderPassAttachment {
     pub texture: TextureHandle,
@@ -605,7 +614,7 @@ pub struct RenderPassAttachment {
     pub clear_value: ClearValue,
 }
 
-/// Load operation
+/// Yükleme işlemi
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadOp {
     Load,
@@ -613,14 +622,14 @@ pub enum LoadOp {
     DontCare,
 }
 
-/// Store operation
+/// Depolama işlemi
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreOp {
     Store,
     DontCare,
 }
 
-/// Clear value
+/// Temizleme değeri
 #[derive(Clone, Copy, Debug)]
 pub enum ClearValue {
     Color { r: f32, g: f32, b: f32, a: f32 },
@@ -633,7 +642,7 @@ impl Default for ClearValue {
     }
 }
 
-/// Render pass descriptor
+/// Render geçişi tanımlayıcısı
 #[derive(Clone, Debug)]
 pub struct RenderPassDesc {
     pub color_attachments: Vec<RenderPassAttachment>,
@@ -641,10 +650,10 @@ pub struct RenderPassDesc {
 }
 
 // ============================================================================
-// DRAW COMMANDS
+// ÇİZİM KOMUTLARI
 // ============================================================================
 
-/// Draw command for indexed drawing
+/// İndeksli çizim için çizim komutu
 #[derive(Clone, Copy, Debug)]
 pub struct DrawIndexed {
     pub index_count: u32,
@@ -654,7 +663,7 @@ pub struct DrawIndexed {
     pub first_instance: u32,
 }
 
-/// Draw command for non-indexed drawing
+/// İndekssiz çizim için çizim komutu
 #[derive(Clone, Copy, Debug)]
 pub struct Draw {
     pub vertex_count: u32,
@@ -664,40 +673,40 @@ pub struct Draw {
 }
 
 // ============================================================================
-// GAL TRAIT
+// GAL TRAIT'İ
 // ============================================================================
 
-/// GPU Abstraction Layer trait
+/// GPU Soyutlama Katmanı trait'i
 pub trait Gal: Send + Sync {
-    // === Resource Creation ===
-    
-    /// Create a texture
+    // === Kaynak Oluşturma ===
+
+    /// Doku oluştur
     fn create_texture(&mut self, desc: &TextureDesc) -> Option<TextureHandle>;
-    
-    /// Destroy a texture
+
+    /// Dokuyu yok et
     fn destroy_texture(&mut self, texture: TextureHandle);
-    
-    /// Create a vertex buffer
+
+    /// Köşe tamponu oluştur
     fn create_vertex_buffer(&mut self, size: usize, data: Option<&[u8]>) -> Option<BufferHandle>;
-    
-    /// Create an index buffer
+
+    /// İndeks tamponu oluştur
     fn create_index_buffer(&mut self, size: usize, data: Option<&[u8]>) -> Option<BufferHandle>;
-    
-    /// Create a uniform buffer
+
+    /// Tekdüze tampon oluştur
     fn create_uniform_buffer(&mut self, size: usize) -> Option<BufferHandle>;
-    
-    /// Destroy a buffer
+
+    /// Tamponu yok et
     fn destroy_buffer(&mut self, buffer: BufferHandle);
-    
-    /// Create a shader program
+
+    /// Gölgelendirici programı oluştur
     fn create_shader(&mut self, vertex_src: &str, fragment_src: &str) -> Option<ShaderHandle>;
-    
-    /// Destroy a shader
+
+    /// Gölgelendiriciyi yok et
     fn destroy_shader(&mut self, shader: ShaderHandle);
-    
-    // === Resource Updates ===
-    
-    /// Update texture data
+
+    // === Kaynak Güncellemeleri ===
+
+    /// Doku verisini güncelle
     fn update_texture(
         &mut self,
         texture: TextureHandle,
@@ -707,135 +716,135 @@ pub trait Gal: Send + Sync {
         height: u32,
         data: &[u8],
     );
-    
-    /// Update buffer data
+
+    /// Tampon verisini güncelle
     fn update_buffer(&mut self, buffer: BufferHandle, offset: usize, data: &[u8]);
-    
-    /// Read texture data back to CPU
+
+    /// Doku verisini CPU'ya geri oku
     fn read_texture(&self, texture: TextureHandle, data: &mut [u8]) -> bool;
-    
-    // === Rendering ===
-    
-    /// Begin a render pass
+
+    // === Render ===
+
+    /// Render geçişi başlat
     fn begin_render_pass(&mut self, desc: &RenderPassDesc);
-    
-    /// End the current render pass
+
+    /// Mevcut render geçişini sonlandır
     fn end_render_pass(&mut self);
-    
-    /// Bind a shader program
+
+    /// Gölgelendirici programı bağla
     fn bind_shader(&mut self, shader: ShaderHandle);
-    
-    /// Bind vertex buffer
+
+    /// Köşe tamponu bağla
     fn bind_vertex_buffer(&mut self, index: u32, buffer: BufferHandle, offset: usize);
-    
-    /// Bind index buffer
+
+    /// İndeks tamponu bağla
     fn bind_index_buffer(&mut self, buffer: BufferHandle, offset: usize);
-    
-    /// Bind texture to a slot
+
+    /// Dokuyu bir slota bağla
     fn bind_texture(&mut self, slot: u32, texture: TextureHandle);
-    
-    /// Set blend state
+
+    /// Harmanla durumunu ayarla
     fn set_blend_state(&mut self, state: BlendState);
-    
-    /// Set depth/stencil state
+
+    /// Derinlik/stencil durumunu ayarla
     fn set_depth_stencil_state(&mut self, state: DepthStencilState);
-    
-    /// Set rasterizer state
+
+    /// Rasterleştirici durumunu ayarla
     fn set_rasterizer_state(&mut self, state: RasterizerState);
-    
-    /// Set viewport
+
+    /// Görüntü alanı ayarla
     fn set_viewport(&mut self, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32);
-    
-    /// Set scissor rect
+
+    /// Makas dikdörtgeni ayarla
     fn set_scissor(&mut self, x: i32, y: i32, width: u32, height: u32);
-    
-    /// Set vertex layout
+
+    /// Köşe düzeni ayarla
     fn set_vertex_layout(&mut self, layout: &VertexLayout);
-    
-    /// Draw indexed primitives
+
+    /// İndeksli ilkel çiz
     fn draw_indexed(&mut self, cmd: DrawIndexed);
-    
-    /// Draw primitives
+
+    /// İlkel çiz
     fn draw(&mut self, cmd: Draw);
-    
-    // === Uniforms ===
-    
-    /// Set uniform float
+
+    // === Tekdüzeler ===
+
+    /// Tekdüze float ayarla
     fn set_uniform_float(&mut self, name: &str, value: f32);
-    
-    /// Set uniform vec2
+
+    /// Tekdüze vec2 ayarla
     fn set_uniform_vec2(&mut self, name: &str, x: f32, y: f32);
-    
-    /// Set uniform vec3
+
+    /// Tekdüze vec3 ayarla
     fn set_uniform_vec3(&mut self, name: &str, x: f32, y: f32, z: f32);
-    
-    /// Set uniform vec4
+
+    /// Tekdüze vec4 ayarla
     fn set_uniform_vec4(&mut self, name: &str, x: f32, y: f32, z: f32, w: f32);
-    
-    /// Set uniform mat4
+
+    /// Tekdüze mat4 ayarla
     fn set_uniform_mat4(&mut self, name: &str, matrix: &[f32; 16]);
-    
-    /// Set uniform buffer
+
+    /// Tekdüze tampon ayarla
     fn set_uniform_buffer(&mut self, name: &str, buffer: BufferHandle);
-    
-    // === Presentation ===
-    
-    /// Present to screen
+
+    // === Sunum ===
+
+    /// Ekrana sun
     fn present(&mut self);
-    
-    /// Get current backbuffer
+
+    /// Mevcut arka tamponu al
     fn backbuffer(&self) -> Option<TextureHandle>;
-    
-    /// Resize backbuffer
+
+    /// Arka tamponu yeniden boyutlandır
     fn resize(&mut self, width: u32, height: u32);
-    
-    // === Capabilities ===
-    
-    /// Get backend type
+
+    // === Yetenekler ===
+
+    /// Arka uç türünü al
     fn backend(&self) -> GraphicsBackend;
-    
-    /// Get maximum texture size
+
+    /// Maksimum doku boyutunu al
     fn max_texture_size(&self) -> u32;
-    
-    /// Get maximum render target count
+
+    /// Maksimum render hedef sayısını al
     fn max_render_targets(&self) -> u32;
-    
-    /// Check if format is supported
+
+    /// Formatın desteklenip desteklenmediğini kontrol et
     fn is_format_supported(&self, format: TextureFormat, usage: TextureUsage) -> bool;
 }
 
 // ============================================================================
-// SOFTWARE GAL IMPLEMENTATION
+// YAZILIM GAL UYGULAMASI
 // ============================================================================
 
-/// Software rendering GAL (CPU fallback)
+/// Yazılım render GAL (CPU geri dönüş)
 pub struct SoftwareGal {
-    /// Screen dimensions
+    /// Ekran boyutları
     width: u32,
     height: u32,
-    /// Framebuffer
+    /// Çerçeve tamponu
     framebuffer: Vec<u32>,
-    /// Depth buffer
+    /// Derinlik tamponu
     depth_buffer: Vec<f32>,
-    /// Textures
+    /// Dokular
     textures: BTreeMap<u32, SoftwareTexture>,
-    /// Buffers
+    /// Tamponlar
     buffers: BTreeMap<u32, SoftwareBuffer>,
-    /// Shaders
+    /// Gölgelendiriciler
     shaders: BTreeMap<u32, SoftwareShader>,
-    /// Next handle ID
+    /// Sonraki tanımlayıcı kimliği
     next_handle: AtomicU32,
-    /// Current render pass
+    /// Mevcut render geçişi
     current_pass: Option<RenderPassDesc>,
-    /// Current shader
+    /// Mevcut gölgelendirici
     current_shader: Option<ShaderHandle>,
-    /// Viewport
+    /// Görüntü alanı
     viewport: (f32, f32, f32, f32, f32, f32),
-    /// Scissor
+    /// Makas
     scissor: (i32, i32, u32, u32),
-    /// Blend state
+    /// Harmanla durumu
     blend_state: BlendState,
-    /// Depth state
+    /// Derinlik durumu
     depth_state: DepthStencilState,
 }
 
@@ -859,7 +868,7 @@ struct SoftwareShader {
 impl SoftwareGal {
     pub fn new(width: u32, height: u32) -> Self {
         let pixel_count = (width * height) as usize;
-        
+
         SoftwareGal {
             width,
             height,
@@ -877,15 +886,15 @@ impl SoftwareGal {
             depth_state: DepthStencilState::default(),
         }
     }
-    
+
     fn next_texture_handle(&self) -> TextureHandle {
         TextureHandle::new(self.next_handle.fetch_add(1, Ordering::Relaxed))
     }
-    
+
     fn next_buffer_handle(&self) -> BufferHandle {
         BufferHandle::new(self.next_handle.fetch_add(1, Ordering::Relaxed))
     }
-    
+
     fn next_shader_handle(&self) -> ShaderHandle {
         ShaderHandle::new(self.next_handle.fetch_add(1, Ordering::Relaxed))
     }
@@ -895,78 +904,78 @@ impl Gal for SoftwareGal {
     fn create_texture(&mut self, desc: &TextureDesc) -> Option<TextureHandle> {
         let handle = self.next_texture_handle();
         let size = (desc.width * desc.height) as usize * desc.format.bytes_per_pixel();
-        
+
         self.textures.insert(handle.0, SoftwareTexture {
             width: desc.width,
             height: desc.height,
             format: desc.format,
             data: vec![0; size],
         });
-        
+
         Some(handle)
     }
-    
+
     fn destroy_texture(&mut self, texture: TextureHandle) {
         self.textures.remove(&texture.0);
     }
-    
+
     fn create_vertex_buffer(&mut self, size: usize, data: Option<&[u8]>) -> Option<BufferHandle> {
         let handle = self.next_buffer_handle();
         let mut buffer = vec![0u8; size];
-        
+
         if let Some(d) = data {
             let copy_len = d.len().min(size);
             buffer[..copy_len].copy_from_slice(&d[..copy_len]);
         }
-        
+
         self.buffers.insert(handle.0, SoftwareBuffer {
             data: buffer,
             is_index: false,
         });
-        
+
         Some(handle)
     }
-    
+
     fn create_index_buffer(&mut self, size: usize, data: Option<&[u8]>) -> Option<BufferHandle> {
         let handle = self.next_buffer_handle();
         let mut buffer = vec![0u8; size];
-        
+
         if let Some(d) = data {
             let copy_len = d.len().min(size);
             buffer[..copy_len].copy_from_slice(&d[..copy_len]);
         }
-        
+
         self.buffers.insert(handle.0, SoftwareBuffer {
             data: buffer,
             is_index: true,
         });
-        
+
         Some(handle)
     }
-    
+
     fn create_uniform_buffer(&mut self, size: usize) -> Option<BufferHandle> {
         self.create_vertex_buffer(size, None)
     }
-    
+
     fn destroy_buffer(&mut self, buffer: BufferHandle) {
         self.buffers.remove(&buffer.0);
     }
-    
+
     fn create_shader(&mut self, vertex_src: &str, fragment_src: &str) -> Option<ShaderHandle> {
         let handle = self.next_shader_handle();
-        
+
         self.shaders.insert(handle.0, SoftwareShader {
             vertex_src: String::from(vertex_src),
             fragment_src: String::from(fragment_src),
         });
-        
+
         Some(handle)
     }
-    
+
     fn destroy_shader(&mut self, shader: ShaderHandle) {
         self.shaders.remove(&shader.0);
     }
-    
+
     fn update_texture(
         &mut self,
         texture: TextureHandle,
@@ -978,17 +987,17 @@ impl Gal for SoftwareGal {
     ) {
         if let Some(tex) = self.textures.get_mut(&texture.0) {
             let bpp = tex.format.bytes_per_pixel();
-            
+
             for row in 0..height {
                 let dst_y = y + row;
                 if dst_y >= tex.height {
                     break;
                 }
-                
+
                 let src_offset = row as usize * width as usize * bpp;
                 let dst_offset = dst_y as usize * tex.width as usize * bpp + x as usize * bpp;
                 let copy_len = (width as usize * bpp).min(tex.data.len() - dst_offset);
-                
+
                 if src_offset + copy_len <= data.len() {
                     tex.data[dst_offset..dst_offset + copy_len]
                         .copy_from_slice(&data[src_offset..src_offset + copy_len]);
@@ -996,7 +1005,7 @@ impl Gal for SoftwareGal {
             }
         }
     }
-    
+
     fn update_buffer(&mut self, buffer: BufferHandle, offset: usize, data: &[u8]) {
         if let Some(buf) = self.buffers.get_mut(&buffer.0) {
             let end = offset + data.len();
@@ -1005,7 +1014,7 @@ impl Gal for SoftwareGal {
             }
         }
     }
-    
+
     fn read_texture(&self, texture: TextureHandle, data: &mut [u8]) -> bool {
         if let Some(tex) = self.textures.get(&texture.0) {
             let copy_len = data.len().min(tex.data.len());
@@ -1015,27 +1024,27 @@ impl Gal for SoftwareGal {
             false
         }
     }
-    
+
     fn begin_render_pass(&mut self, desc: &RenderPassDesc) {
         self.current_pass = Some(desc.clone());
-        
-        // Clear attachments
+
+        // Bağlantıları temizle
         for attachment in &desc.color_attachments {
             if attachment.load_op == LoadOp::Clear {
                 if let ClearValue::Color { r, g, b, a } = attachment.clear_value {
-                    let color = ((r * 255.0) as u32) << 16 
-                              | ((g * 255.0) as u32) << 8 
+                    let color = ((r * 255.0) as u32) << 16
+                              | ((g * 255.0) as u32) << 8
                               | ((b * 255.0) as u32);
-                    
-                    // Clear framebuffer
+
+                    // Çerçeve tamponunu temizle
                     for pixel in &mut self.framebuffer {
                         *pixel = color;
                     }
                 }
             }
         }
-        
-        // Clear depth
+
+        // Derinliği temizle
         if let Some(ref ds) = desc.depth_stencil {
             if ds.load_op == LoadOp::Clear {
                 if let ClearValue::DepthStencil { depth, .. } = ds.clear_value {
@@ -1046,137 +1055,137 @@ impl Gal for SoftwareGal {
             }
         }
     }
-    
+
     fn end_render_pass(&mut self) {
         self.current_pass = None;
     }
-    
+
     fn bind_shader(&mut self, shader: ShaderHandle) {
         self.current_shader = Some(shader);
     }
-    
+
     fn bind_vertex_buffer(&mut self, index: u32, buffer: BufferHandle, offset: usize) {
         let _ = (index, buffer, offset);
-        // Software renderer would track this
+        // Yazılım render bu bilgiyi takip eder
     }
-    
+
     fn bind_index_buffer(&mut self, buffer: BufferHandle, offset: usize) {
         let _ = (buffer, offset);
     }
-    
+
     fn bind_texture(&mut self, slot: u32, texture: TextureHandle) {
         let _ = (slot, texture);
     }
-    
+
     fn set_blend_state(&mut self, state: BlendState) {
         self.blend_state = state;
     }
-    
+
     fn set_depth_stencil_state(&mut self, state: DepthStencilState) {
         self.depth_state = state;
     }
-    
+
     fn set_rasterizer_state(&mut self, state: RasterizerState) {
         let _ = state;
     }
-    
+
     fn set_viewport(&mut self, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32) {
         self.viewport = (x, y, width, height, min_depth, max_depth);
     }
-    
+
     fn set_scissor(&mut self, x: i32, y: i32, width: u32, height: u32) {
         self.scissor = (x, y, width, height);
     }
-    
+
     fn set_vertex_layout(&mut self, layout: &VertexLayout) {
         let _ = layout;
     }
-    
+
     fn draw_indexed(&mut self, cmd: DrawIndexed) {
         let _ = cmd;
-        // Software rendering would iterate over indices and rasterize triangles
+        // Yazılım render indeksler üzerinde dolaşır ve üçgenleri rasterleştirir
     }
-    
+
     fn draw(&mut self, cmd: Draw) {
         let _ = cmd;
     }
-    
+
     fn set_uniform_float(&mut self, name: &str, value: f32) {
         let _ = (name, value);
     }
-    
+
     fn set_uniform_vec2(&mut self, name: &str, x: f32, y: f32) {
         let _ = (name, x, y);
     }
-    
+
     fn set_uniform_vec3(&mut self, name: &str, x: f32, y: f32, z: f32) {
         let _ = (name, x, y, z);
     }
-    
+
     fn set_uniform_vec4(&mut self, name: &str, x: f32, y: f32, z: f32, w: f32) {
         let _ = (name, x, y, z, w);
     }
-    
+
     fn set_uniform_mat4(&mut self, name: &str, matrix: &[f32; 16]) {
         let _ = (name, matrix);
     }
-    
+
     fn set_uniform_buffer(&mut self, name: &str, buffer: BufferHandle) {
         let _ = (name, buffer);
     }
-    
+
     fn present(&mut self) {
-        // Copy framebuffer to output
+        // Çerçeve tamponunu çıkışa kopyala
     }
-    
+
     fn backbuffer(&self) -> Option<TextureHandle> {
-        None // Software renderer uses framebuffer directly
+        None // Yazılım render çerçeve tamponunu doğrudan kullanır
     }
-    
+
     fn resize(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
         self.framebuffer.resize((width * height) as usize, 0);
         self.depth_buffer.resize((width * height) as usize, 1.0);
     }
-    
+
     fn backend(&self) -> GraphicsBackend {
         GraphicsBackend::Software
     }
-    
+
     fn max_texture_size(&self) -> u32 {
         4096
     }
-    
+
     fn max_render_targets(&self) -> u32 {
         1
     }
-    
+
     fn is_format_supported(&self, format: TextureFormat, _usage: TextureUsage) -> bool {
         matches!(format, TextureFormat::RGBA8 | TextureFormat::RGB8)
     }
 }
 
 // ============================================================================
-// GLOBAL GAL INSTANCE
+// GLOBAL GAL ÖRNEĞI
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref GAL_INSTANCE: Mutex<Option<Box<dyn Gal>>> = Mutex::new(None);
 }
 
-/// Initialize GAL with software backend
+/// GAL'ı yazılım arka ucuyla başlat
 pub fn init_software(width: u32, height: u32) {
     *GAL_INSTANCE.lock() = Some(Box::new(SoftwareGal::new(width, height)));
-    crate::serial_println!("[GAL] Software renderer initialized ({}x{})", width, height);
+    crate::serial_println!("[GAL] Yazılım render başlatıldı ({}x{})", width, height);
 }
 
-/// Get GAL instance
+/// GAL örneğini al
 pub fn get() -> Option<&'static Mutex<Option<Box<dyn Gal>>>> {
     Some(&GAL_INSTANCE)
 }
 
-/// Execute a closure with GAL access
+/// GAL erişimiyle bir closure çalıştır
 pub fn with_gal<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut Box<dyn Gal>) -> R,

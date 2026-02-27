@@ -1,6 +1,6 @@
-//! # Transparent Huge Pages (THP)
+//! # Şeffaf Büyük Sayfalar (THP)
 //!
-//! Automatic promotion to 2MB/1GB huge pages.
+//! 2MB/1GB büyük sayfalara otomatik yükseltme.
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -9,38 +9,38 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// THP CONSTANTS
+// THP SABİTLERİ
 // ============================================================================
 
-/// Huge page sizes
+/// Büyük sayfa boyutları
 pub const HPAGE_2MB: usize = 2 * 1024 * 1024;
 pub const HPAGE_1GB: usize = 1024 * 1024 * 1024;
 
-/// THP modes
+/// THP modları
 pub const THP_ALWAYS: &str = "always";
 pub const THP_MADVISE: &str = "madvise";
 pub const THP_NEVER: &str = "never";
 
-/// MADV flags for huge pages
+/// Büyük sayfalar için MADV bayrakları
 pub const MADV_HUGEPAGE: i32 = 14;
 pub const MADV_NOHUGEPAGE: i32 = 15;
 
 // ============================================================================
-// THP CONFIGURATION
+// THP YAPILANDIRMASI
 // ============================================================================
 
-/// THP configuration
+/// THP yapılandırması
 #[derive(Clone, Debug)]
 pub struct ThpConfig {
-    /// Enable THP
+    /// THP'yi etkinleştir
     pub enabled: bool,
-    /// Mode: always, madvise, never
+    /// Mod: always, madvise, never
     pub mode: ThpMode,
-    /// Use 1GB pages if available
+    /// Mevcut ise 1GB sayfa kullan
     pub use_1gb: bool,
-    /// Defrag strategy
+    /// Birleştirme stratejisi
     pub defrag: ThpDefrag,
-    /// Max percentage of memory for THP
+    /// THP için maksimum bellek yüzdesi
     pub max_percent: u32,
 }
 
@@ -72,23 +72,23 @@ impl Default for ThpConfig {
 }
 
 // ============================================================================
-// HUGE PAGE TRACKING
+// BÜYÜK SAYFA TAKİBİ
 // ============================================================================
 
-/// A huge page allocation
+/// Büyük sayfa tahsisi
 #[derive(Clone, Debug)]
 pub struct HugePage {
-    /// Physical address
+    /// Fiziksel adres
     pub phys_addr: u64,
-    /// Virtual address
+    /// Sanal adres
     pub virt_addr: u64,
-    /// Size (2MB or 1GB)
+    /// Boyut (2MB veya 1GB)
     pub size: usize,
-    /// Is it a THP (promoted from small pages)?
+    /// THP mi (küçük sayfalardan yükseltildi)?
     pub is_thp: bool,
-    /// Reference count
+    /// Referans sayacı
     pub ref_count: AtomicU32,
-    /// NUMA node
+    /// NUMA düğümü
     pub node: u32,
 }
 
@@ -106,10 +106,10 @@ impl HugePage {
 }
 
 // ============================================================================
-// THP MANAGER
+// THP YÖNETİCİSİ
 // ============================================================================
 
-/// THP statistics
+/// THP istatistikleri
 #[derive(Clone, Debug, Default)]
 pub struct ThpStats {
     pub total_huge_pages: u64,
@@ -121,17 +121,17 @@ pub struct ThpStats {
     pub bytes_in_huge_pages: u64,
 }
 
-/// THP Manager
+/// THP Yöneticisi
 pub struct ThpManager {
-    /// Configuration
+    /// Yapılandırma
     config: Mutex<ThpConfig>,
-    /// Huge pages by virtual address
+    /// Sanal adrese göre büyük sayfalar
     huge_pages: Mutex<BTreeMap<u64, HugePage>>,
-    /// Statistics
+    /// İstatistikler
     stats: Mutex<ThpStats>,
-    /// THP enabled flag
+    /// THP etkin bayrağı
     enabled: AtomicBool,
-    /// Total huge page memory
+    /// Toplam büyük sayfa belleği
     total_huge_memory: AtomicU64,
 }
 
@@ -146,7 +146,7 @@ impl ThpManager {
         }
     }
 
-    /// Check if address is huge page aligned
+    /// Adresin büyük sayfa hizalı olup olmadığını kontrol et
     pub fn is_aligned(addr: u64, size: usize) -> bool {
         match size {
             HPAGE_2MB => (addr % HPAGE_2MB as u64) == 0,
@@ -155,64 +155,64 @@ impl ThpManager {
         }
     }
 
-    /// Allocate a huge page
+    /// Büyük sayfa tahsis et
     pub fn alloc_huge_page(&self, size: usize, node: u32) -> Option<HugePage> {
-        // Check if THP enabled
+        // THP etkin mi kontrol et
         if !self.enabled.load(Ordering::SeqCst) {
             return None;
         }
 
-        // Check alignment
+        // Hizalamayı kontrol et
         if !Self::is_aligned(0, size) && size != HPAGE_2MB && size != HPAGE_1GB {
             return None;
         }
 
-        // Allocate contiguous physical memory
-        // This would call into the PMM for contiguous allocation
+        // Ardışık fiziksel bellek tahsis et
+        // PMM'den ardışık tahsis için çağrı yapılır
         let phys = self.alloc_contiguous(size)?;
         let virt = self.map_huge_page(phys, size)?;
 
         let hp = HugePage::new(phys, virt, size, false, node);
-        
+
         self.huge_pages.lock().insert(virt, hp.clone());
         self.total_huge_memory.fetch_add(size as u64, Ordering::Relaxed);
-        
+
         let mut stats = self.stats.lock();
         stats.total_huge_pages += 1;
         stats.bytes_in_huge_pages += size as u64;
 
-        crate::serial_println!("[THP] Allocated {} huge page at {:#x}", 
+        crate::serial_println!("[THP] Allocated {} huge page at {:#x}",
             if size == HPAGE_1GB { "1GB" } else { "2MB" }, virt);
 
         Some(hp)
     }
 
-    /// Allocate contiguous physical memory (placeholder)
+    /// Ardışık fiziksel bellek tahsis et (yer tutucu)
     fn alloc_contiguous(&self, size: usize) -> Option<u64> {
-        // Would call PMM for contiguous allocation
-        // For now return placeholder
+        // Ardışık tahsis için PMM çağrılır
+        // Şimdilik yer tutucu döndür
         Some(0x10000000)
     }
 
-    /// Map huge page (placeholder)
+    /// Büyük sayfayı eşle (yer tutucu)
     fn map_huge_page(&self, phys: u64, size: usize) -> Option<u64> {
-        // Would set up page tables with huge page flag
+        // Büyük sayfa bayrağı ile sayfa tabloları kurulur
         Some(0xFFFF800000000000 + phys)
     }
 
-    /// Try to collapse small pages into huge page
+    /// Küçük sayfaları büyük sayfaya daraltmayı dene
     pub fn try_collapse(&self, vaddr: u64) -> bool {
-        // Check if region is suitable for collapse
+        // Bölgenin daraltma için uygun olup olmadığını kontrol et
         if !Self::is_aligned(vaddr, HPAGE_2MB) {
             return false;
         }
 
-        // Check if all pages in range are present and suitable
+        // Aralıktaki tüm sayfaların mevcut ve uygun olup olmadığını kontrol et
         if !self.can_collapse(vaddr) {
             return false;
         }
 
-        // Perform collapse
+        // Daraltmayı gerçekleştir
         if self.do_collapse(vaddr) {
             let mut stats = self.stats.lock();
             stats.thp_collapses += 1;
@@ -224,54 +224,54 @@ impl ThpManager {
         false
     }
 
-    /// Check if region can be collapsed
+    /// Bölgenin daraltılabilir olup olmadığını kontrol et
     fn can_collapse(&self, vaddr: u64) -> bool {
-        // Check all 512 4KB pages in the 2MB range
-        // All must be present, not locked, same permissions
-        // For now, return true
+        // 2MB aralığındaki 512 adet 4KB sayfanın tamamını kontrol et
+        // Hepsi mevcut, kilitli değil ve aynı izinlere sahip olmalı
+        // Şimdilik true döndür
         true
     }
 
-    /// Perform actual collapse
+    /// Gerçek daraltmayı gerçekleştir
     fn do_collapse(&self, vaddr: u64) -> bool {
-        // 1. Allocate 2MB contiguous physical memory
-        // 2. Copy data from 512 small pages
-        // 3. Update page tables to use huge page
-        // 4. Free old small pages
+        // 1. 2MB ardışık fiziksel bellek tahsis et
+        // 2. 512 küçük sayfadan veriyi kopyala
+        // 3. Büyük sayfa kullanmak için sayfa tablolarını güncelle
+        // 4. Eski küçük sayfaları serbest bırak
         true
     }
 
-    /// Split huge page into small pages
+    /// Büyük sayfayı küçük sayfalara böl
     pub fn split_huge_page(&self, vaddr: u64) -> bool {
         let mut huge_pages = self.huge_pages.lock();
-        
+
         if let Some(hp) = huge_pages.remove(&vaddr) {
-            // Split into 512 4KB pages
+            // 512 adet 4KB sayfaya böl
             let num_pages = hp.size / 4096;
-            
-            // Update page tables
-            // Free huge page, allocate small pages
-            
+
+            // Sayfa tablolarını güncelle
+            // Büyük sayfayı serbest bırak, küçük sayfaları tahsis et
+
             let mut stats = self.stats.lock();
             stats.thp_splits += 1;
             stats.total_huge_pages -= 1;
             stats.bytes_in_huge_pages -= hp.size as u64;
-            
+
             self.total_huge_memory.fetch_sub(hp.size as u64, Ordering::Relaxed);
-            
+
             crate::serial_println!("[THP] Split huge page at {:#x}", vaddr);
             return true;
         }
-        
+
         false
     }
 
-    /// Handle THP fault
+    /// THP hatasını işle
     pub fn handle_thp_fault(&self, vaddr: u64) -> bool {
         let mut stats = self.stats.lock();
         stats.thp_faults += 1;
-        
-        // Try to allocate huge page for fault
+
+        // Hata için büyük sayfa tahsis etmeyi dene
         match self.alloc_huge_page(HPAGE_2MB, 0) {
             Some(_) => true,
             None => {
@@ -281,54 +281,54 @@ impl ThpManager {
         }
     }
 
-    /// Set THP mode
+    /// THP modunu ayarla
     pub fn set_mode(&self, mode: ThpMode) {
         self.config.lock().mode = mode;
         self.enabled.store(mode != ThpMode::Never, Ordering::SeqCst);
     }
 
-    /// Get configuration
+    /// Yapılandırmayı al
     pub fn get_config(&self) -> ThpConfig {
         self.config.lock().clone()
     }
 
-    /// Get statistics
+    /// İstatistikleri al
     pub fn get_stats(&self) -> ThpStats {
         self.stats.lock().clone()
     }
 
-    /// Compact memory for THP
+    /// THP için belleği sıkıştır
     pub fn compact_for_thp(&self) -> usize {
-        // Trigger memory compaction to create contiguous ranges
+        // Ardışık aralıklar oluşturmak için bellek sıkıştırması tetikle
         let mut compacted = 0;
-        
-        // Would call memory compaction routine
-        
+
+        // Bellek sıkıştırma rutinini çağırır
+
         crate::serial_println!("[THP] Compacted {} pages", compacted);
         compacted
     }
 }
 
 lazy_static::lazy_static! {
-    /// Global THP manager
+    /// Global THP yöneticisi
     pub static ref THP_MANAGER: ThpManager = ThpManager::new();
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARAYÜZÜ
 // ============================================================================
 
-/// madvise for huge pages
+/// Büyük sayfalar için madvise
 pub fn sys_madvise_hugepage(addr: u64, len: u64, advice: i32) -> i32 {
     match advice {
         MADV_HUGEPAGE => {
-            // Mark region as wanting huge pages
+            // Bölgeyi büyük sayfa istiyor olarak işaretle
             THP_MANAGER.try_collapse(addr);
             0
         }
         MADV_NOHUGEPAGE => {
-            // Mark region as not wanting huge pages
-            // Split any existing huge pages
+            // Bölgeyi büyük sayfa istemiyor olarak işaretle
+            // Mevcut büyük sayfaları böl
             THP_MANAGER.split_huge_page(addr);
             0
         }
@@ -336,7 +336,7 @@ pub fn sys_madvise_hugepage(addr: u64, len: u64, advice: i32) -> i32 {
     }
 }
 
-/// prctl for THP
+/// THP için prctl
 pub const PR_GET_THP_DISABLE: i32 = 42;
 pub const PR_SET_THP_DISABLE: i32 = 43;
 
@@ -354,20 +354,20 @@ pub fn sys_prctl_thp(option: i32, arg: u64) -> i64 {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
-/// Initialize THP subsystem
+/// THP alt sistemini başlat
 pub fn init() {
     crate::serial_println!("[THP] Subsystem initialized (mode: always)");
 }
 
-/// Check if address is in huge page
+/// Adresin büyük sayfada olup olmadığını kontrol et
 pub fn is_huge_page(vaddr: u64) -> bool {
     THP_MANAGER.huge_pages.lock().contains_key(&vaddr)
 }
 
-/// Get huge page info
+/// Büyük sayfa bilgisini al
 pub fn get_huge_page_info(vaddr: u64) -> Option<HugePage> {
     THP_MANAGER.huge_pages.lock().get(&vaddr).cloned()
 }

@@ -42,11 +42,17 @@ lazy_static! {
     static ref INPUT_QUEUE: Mutex<VecDeque<InputEvent>> = Mutex::new(VecDeque::new());
 }
 
+const MAX_INPUT_EVENTS: usize = 2048;
+
 /// Event'i kuyruğa ekler.
 /// Interrupt handler'lardan çağrılır.
 pub fn push_event(event: InputEvent) {
     x86_64::instructions::interrupts::without_interrupts(|| {
-        INPUT_QUEUE.lock().push_back(event);
+        let mut q = INPUT_QUEUE.lock();
+        if q.len() >= MAX_INPUT_EVENTS {
+            let _ = q.pop_front();
+        }
+        q.push_back(event);
     });
 }
 

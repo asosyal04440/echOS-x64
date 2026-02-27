@@ -1,7 +1,21 @@
-//! # Spotlight-style Global Search
+//! # Spotlight Tarzı Global Arama
 //!
-//! Full-screen search overlay for apps, files, and system commands
-//! Real-time search with categories and previews
+//! Uygulamalar, dosyalar ve sistem komutları için tam ekran arama katmanı.
+//! Kategoriler ve önizlemelerle gerçek zamanlı arama.
+//!
+//! ## Mimari
+//! - `SearchResult`: Başlık, alt başlık, tür, puan, eylem ve simge içeren arama sonucu
+//! - `SearchIndex`: Uygulamalar, dosyalar, ayarlar ve komutlar için hızlı arama dizini
+//! - `Spotlight`: Animasyonlu arama katmanı; sorgu düzenleme, klavye navigasyonu
+//!
+//! ## Matematik İfadesi Ayrıştırıcısı
+//! Özyinelemeli iniş (recursive descent) yöntemi:
+//! `parse_expr` → toplama/çıkarma
+//! `parse_term` → çarpma/bölme
+//! `parse_factor` → sayı veya parantezli ifade
+//!
+//! ## Bulanık Eşleşme (Fuzzy Match)
+//! Sorgu karakterlerini metinde sırayla arar; karakterler bitişik olmak zorunda değil.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -15,52 +29,52 @@ use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::{Theme, Color};
 
 // ============================================================================
-// SEARCH RESULT
+// ARAMA SONUCU
 // ============================================================================
 
-/// A search result item
+/// Arama sonucu öğesi
 #[derive(Clone, Debug)]
 pub struct SearchResult {
-    /// Display title
+    /// Görüntü adı
     pub title: String,
-    /// Subtitle/description
+    /// Alt başlık/açıklama
     pub subtitle: String,
-    /// Result type
+    /// Sonuç türü
     pub result_type: ResultType,
-    /// Match score (0.0 - 1.0)
+    /// Eşleşme puanı (0.0 - 1.0)
     pub score: f32,
-    /// Action to perform
+    /// Gerçekleştirilecek eylem
     pub action: SearchAction,
-    /// Icon identifier
+    /// Simge tanımlayıcısı
     pub icon: SearchIcon,
-    /// Path (for files)
+    /// Yol (dosyalar için)
     pub path: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ResultType {
-    Application,
-    File,
-    Folder,
-    SystemCommand,
-    Setting,
-    Contact,
-    Calendar,
-    WebSearch,
-    Calculator,
-    Dictionary,
+    Application,   // Uygulama
+    File,          // Dosya
+    Folder,        // Klasör
+    SystemCommand, // Sistem komutu
+    Setting,       // Ayar
+    Contact,       // Kişi
+    Calendar,      // Takvim
+    WebSearch,     // Web araması
+    Calculator,    // Hesap makinesi
+    Dictionary,    // Sözlük
 }
 
 #[derive(Clone, Debug)]
 pub enum SearchAction {
-    LaunchApp(String),
-    OpenFile(String),
-    OpenFolder(String),
-    OpenSetting(String),
-    ExecuteCommand(String),
-    WebSearch(String),
-    Calculate(String),
-    None,
+    LaunchApp(String),      // Uygulama başlat
+    OpenFile(String),       // Dosya aç
+    OpenFolder(String),     // Klasör aç
+    OpenSetting(String),    // Ayar aç
+    ExecuteCommand(String), // Komut çalıştır
+    WebSearch(String),      // Web araması yap
+    Calculate(String),      // Hesapla
+    None,                   // Eylem yok
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,7 +104,7 @@ impl SearchResult {
             path: String::new(),
         }
     }
-    
+
     pub fn file(name: &str, path: &str) -> Self {
         SearchResult {
             title: String::from(name),
@@ -102,7 +116,7 @@ impl SearchResult {
             path: String::from(path),
         }
     }
-    
+
     pub fn folder(name: &str, path: &str) -> Self {
         SearchResult {
             title: String::from(name),
@@ -114,7 +128,7 @@ impl SearchResult {
             path: String::from(path),
         }
     }
-    
+
     pub fn setting(name: &str, category: &str) -> Self {
         SearchResult {
             title: String::from(name),
@@ -126,7 +140,7 @@ impl SearchResult {
             path: String::new(),
         }
     }
-    
+
     pub fn command(name: &str, description: &str, cmd: &str) -> Self {
         SearchResult {
             title: String::from(name),
@@ -141,20 +155,20 @@ impl SearchResult {
 }
 
 // ============================================================================
-// SEARCH INDEX
+// ARAMA DİZİNİ
 // ============================================================================
 
-/// Search index for fast lookups
+/// Hızlı arama için dizin
 pub struct SearchIndex {
-    /// Applications
+    /// Uygulamalar
     apps: Vec<SearchResult>,
-    /// Files (cached)
+    /// Dosyalar (önbelleğe alınmış)
     files: Vec<SearchResult>,
-    /// Settings
+    /// Ayarlar
     settings: Vec<SearchResult>,
-    /// Commands
+    /// Komutlar
     commands: Vec<SearchResult>,
-    /// Is indexed
+    /// Dizinlendi mi
     indexed: bool,
 }
 
@@ -167,13 +181,13 @@ impl SearchIndex {
             commands: Vec::new(),
             indexed: false,
         };
-        
+
         index.build_default_index();
         index
     }
-    
+
     fn build_default_index(&mut self) {
-        // Add default apps
+        // Varsayılan uygulamaları ekle
         self.apps = vec![
             SearchResult::app("Finder", "finder"),
             SearchResult::app("Safari", "safari"),
@@ -189,8 +203,8 @@ impl SearchIndex {
             SearchResult::app("Text Editor", "textedit"),
             SearchResult::app("Calculator", "calculator"),
         ];
-        
-        // Add default settings
+
+        // Varsayılan ayarları ekle
         self.settings = vec![
             SearchResult::setting("Display", "Hardware"),
             SearchResult::setting("Sound", "Hardware"),
@@ -201,8 +215,8 @@ impl SearchIndex {
             SearchResult::setting("Users", "System"),
             SearchResult::setting("Storage", "System"),
         ];
-        
-        // Add default commands
+
+        // Varsayılan komutları ekle
         self.commands = vec![
             SearchResult::command("Sleep", "Put system to sleep", "sleep"),
             SearchResult::command("Restart", "Restart the system", "restart"),
@@ -213,20 +227,20 @@ impl SearchIndex {
             SearchResult::command("Screenshot", "Take a screenshot", "screenshot"),
             SearchResult::command("Force Quit", "Force quit application", "force_quit"),
         ];
-        
+
         self.indexed = true;
     }
-    
-    /// Search all categories
+
+    /// Tüm kategorilerde ara
     pub fn search(&self, query: &str) -> Vec<SearchResult> {
         if query.is_empty() {
             return Vec::new();
         }
-        
+
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
-        
-        // Search apps
+
+        // Uygulamalarda ara
         for app in &self.apps {
             if let Some(score) = self.match_score(&app.title, &query_lower) {
                 let mut result = app.clone();
@@ -234,8 +248,8 @@ impl SearchIndex {
                 results.push(result);
             }
         }
-        
-        // Search files
+
+        // Dosyalarda ara
         for file in &self.files {
             if let Some(score) = self.match_score(&file.title, &query_lower) {
                 let mut result = file.clone();
@@ -243,8 +257,8 @@ impl SearchIndex {
                 results.push(result);
             }
         }
-        
-        // Search settings
+
+        // Ayarlarda ara
         for setting in &self.settings {
             if let Some(score) = self.match_score(&setting.title, &query_lower) {
                 let mut result = setting.clone();
@@ -252,8 +266,8 @@ impl SearchIndex {
                 results.push(result);
             }
         }
-        
-        // Search commands
+
+        // Komutlarda ara
         for cmd in &self.commands {
             if let Some(score) = self.match_score(&cmd.title, &query_lower) {
                 let mut result = cmd.clone();
@@ -261,15 +275,15 @@ impl SearchIndex {
                 results.push(result);
             }
         }
-        
-        // Check for calculator expression
+
+        // Hesap makinesi ifadesi kontrolü
         if self.is_math_expression(query) {
             if let Some(result) = self.evaluate_math(query) {
                 results.push(result);
             }
         }
-        
-        // Check for web search
+
+        // Web araması kontrolü
         if query.len() > 2 {
             results.push(SearchResult {
                 title: format!("Search web for '{}'", query),
@@ -281,42 +295,42 @@ impl SearchIndex {
                 path: String::new(),
             });
         }
-        
-        // Sort by score
+
+        // Puana göre sırala
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(core::cmp::Ordering::Equal));
-        
-        // Limit results
+
+        // Sonuç sayısını sınırla
         results.truncate(20);
-        
+
         results
     }
-    
+
     fn match_score(&self, text: &str, query: &str) -> Option<f32> {
         let text_lower = text.to_lowercase();
-        
-        // Exact match
+
+        // Tam eşleşme
         if text_lower == query {
             return Some(1.0);
         }
-        
-        // Starts with
+
+        // Başında eşleşme
         if text_lower.starts_with(query) {
             return Some(0.9);
         }
-        
-        // Contains
+
+        // İçinde eşleşme
         if text_lower.contains(query) {
             return Some(0.7);
         }
-        
-        // Fuzzy match
+
+        // Bulanık eşleşme
         if self.fuzzy_match(&text_lower, query) {
             return Some(0.5);
         }
-        
+
         None
     }
-    
+
     fn fuzzy_match(&self, text: &str, query: &str) -> bool {
         let mut text_chars = text.chars();
         for q in query.chars() {
@@ -330,21 +344,21 @@ impl SearchIndex {
         }
         true
     }
-    
+
     fn is_math_expression(&self, query: &str) -> bool {
         let chars: Vec<char> = query.chars().collect();
         let has_digit = chars.iter().any(|c| c.is_ascii_digit());
         let has_op = chars.iter().any(|c| "+-*/^%".contains(*c));
         has_digit && has_op
     }
-    
+
     fn evaluate_math(&self, query: &str) -> Option<SearchResult> {
-        // Very simple expression evaluator
+        // Çok basit ifade değerlendirici
         let expr = query.replace(" ", "");
-        
-        // Try to parse and evaluate
+
+        // Ayrıştır ve değerlendir
         let result = self.eval_expr(&expr)?;
-        
+
         Some(SearchResult {
             title: format!("{} = {}", query, result),
             subtitle: String::from("Calculator"),
@@ -355,18 +369,18 @@ impl SearchIndex {
             path: String::new(),
         })
     }
-    
+
     fn eval_expr(&self, expr: &str) -> Option<f64> {
-        // Simple recursive descent parser for basic math
-        // Only handles + - * / and parentheses
-        
+        // Temel matematik için basit özyinelemeli iniş ayrıştırıcısı
+        // Yalnızca + - * / ve parantezleri destekler
+
         let mut pos = 0;
         self.parse_expr(expr, &mut pos)
     }
-    
+
     fn parse_expr(&self, expr: &str, pos: &mut usize) -> Option<f64> {
         let mut left = self.parse_term(expr, pos)?;
-        
+
         while *pos < expr.len() {
             let op = expr.chars().nth(*pos)?;
             if op == '+' || op == '-' {
@@ -377,13 +391,13 @@ impl SearchIndex {
                 break;
             }
         }
-        
+
         Some(left)
     }
-    
+
     fn parse_term(&self, expr: &str, pos: &mut usize) -> Option<f64> {
         let mut left = self.parse_factor(expr, pos)?;
-        
+
         while *pos < expr.len() {
             let op = expr.chars().nth(*pos)?;
             if op == '*' || op == '/' {
@@ -394,17 +408,17 @@ impl SearchIndex {
                 break;
             }
         }
-        
+
         Some(left)
     }
-    
+
     fn parse_factor(&self, expr: &str, pos: &mut usize) -> Option<f64> {
         if *pos >= expr.len() {
             return None;
         }
-        
+
         let c = expr.chars().nth(*pos)?;
-        
+
         if c == '(' {
             *pos += 1;
             let result = self.parse_expr(expr, pos)?;
@@ -413,7 +427,7 @@ impl SearchIndex {
             }
             return Some(result);
         }
-        
+
         if c.is_ascii_digit() || c == '.' {
             let mut num_str = String::new();
             while *pos < expr.len() {
@@ -427,51 +441,51 @@ impl SearchIndex {
             }
             return num_str.parse::<f64>().ok();
         }
-        
+
         None
     }
-    
-    /// Index files from filesystem
+
+    /// Dosya sisteminden dosyaları dizinle
     pub fn index_files(&mut self) {
         self.files.clear();
-        
-        // Add common folders
+
+        // Yaygın klasörleri ekle
         self.files.push(SearchResult::folder("Home", "/home"));
         self.files.push(SearchResult::folder("Documents", "/home/documents"));
         self.files.push(SearchResult::folder("Downloads", "/home/downloads"));
         self.files.push(SearchResult::folder("Pictures", "/home/pictures"));
         self.files.push(SearchResult::folder("Music", "/home/music"));
         self.files.push(SearchResult::folder("Videos", "/home/videos"));
-        
-        // Would scan filesystem here
+
+        // Dosya sistemi burada taranacak
     }
 }
 
 // ============================================================================
-// SPOTLIGHT OVERLAY
+// SPOTLIGHT KATMANI
 // ============================================================================
 
-/// Spotlight-style search overlay
+/// Spotlight tarzı arama katmanı
 pub struct Spotlight {
-    /// Is visible
+    /// Görünür mü
     pub visible: bool,
-    /// Search query
+    /// Arama sorgusu
     pub query: String,
-    /// Search results
+    /// Arama sonuçları
     pub results: Vec<SearchResult>,
-    /// Selected result index
+    /// Seçili sonuç indeksi
     pub selected_index: usize,
-    /// Search index
+    /// Arama dizini
     pub index: SearchIndex,
-    /// Animation progress (0.0 - 1.0)
+    /// Animasyon ilerlemesi (0.0 - 1.0)
     pub animation_progress: f32,
-    /// Screen width
+    /// Ekran genişliği
     pub screen_width: usize,
-    /// Screen height
+    /// Ekran yüksekliği
     pub screen_height: usize,
-    /// Cursor position in query
+    /// Sorgudaki imleç konumu
     pub cursor_pos: usize,
-    /// Show categories
+    /// Kategorileri göster
     pub show_categories: bool,
 }
 
@@ -490,8 +504,8 @@ impl Spotlight {
             show_categories: true,
         }
     }
-    
-    /// Show spotlight
+
+    /// Spotlight'ı göster
     pub fn show(&mut self) {
         self.visible = true;
         self.animation_progress = 0.0;
@@ -500,14 +514,14 @@ impl Spotlight {
         self.selected_index = 0;
         self.cursor_pos = 0;
     }
-    
-    /// Hide spotlight
+
+    /// Spotlight'ı gizle
     pub fn hide(&mut self) {
         self.visible = false;
         self.animation_progress = 0.0;
     }
-    
-    /// Toggle visibility
+
+    /// Görünürlüğü değiştir
     pub fn toggle(&mut self) {
         if self.visible {
             self.hide();
@@ -515,14 +529,23 @@ impl Spotlight {
             self.show();
         }
     }
-    
-    /// Update animation
+
+    /// Animasyonu güncelle
     pub fn update(&mut self, dt: f32) {
         if self.visible && self.animation_progress < 1.0 {
             self.animation_progress = (self.animation_progress + dt * 8.0).min(1.0);
         } else if !self.visible && self.animation_progress > 0.0 {
             self.animation_progress = (self.animation_progress - dt * 8.0).max(0.0);
         }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        (self.visible && self.animation_progress < 1.0)
+            || (!self.visible && self.animation_progress > 0.0)
+    }
+
+    pub fn needs_redraw(&self) -> bool {
+        self.visible || self.is_animating()
     }
     
     /// Update search query
@@ -532,19 +555,19 @@ impl Spotlight {
         self.results = self.index.search(query);
         self.selected_index = 0;
     }
-    
-    /// Handle key press
+
+    /// Tuş basımını işle
     pub fn on_key_press(&mut self, c: char) -> SpotlightEvent {
         if c == '\x1b' { // Escape
             self.hide();
             return SpotlightEvent::Cancelled;
         }
-        
+
         if c == '\n' || c == '\r' { // Enter
             return self.activate_selected();
         }
-        
-        if c == '\x08' { // Backspace
+
+        if c == '\x08' { // Backspace (geri silme)
             if self.cursor_pos > 0 {
                 self.cursor_pos -= 1;
                 self.query.remove(self.cursor_pos);
@@ -553,18 +576,18 @@ impl Spotlight {
             }
             return SpotlightEvent::None;
         }
-        
+
         if !c.is_control() {
             self.query.insert(self.cursor_pos, c);
             self.cursor_pos += 1;
             self.results = self.index.search(&self.query);
             self.selected_index = 0;
         }
-        
+
         SpotlightEvent::None
     }
-    
-    /// Handle special key
+
+    /// Özel tuşu işle
     pub fn on_special_key(&mut self, key: SpotlightKey) -> SpotlightEvent {
         match key {
             SpotlightKey::Up => {
@@ -587,7 +610,7 @@ impl Spotlight {
                 self.activate_selected()
             }
             SpotlightKey::Tab => {
-                // Autocomplete - use first result
+                // Otomatik tamamlama - ilk sonucu kullan
                 if !self.results.is_empty() {
                     self.query = self.results[0].title.clone();
                     self.cursor_pos = self.query.len();
@@ -596,7 +619,7 @@ impl Spotlight {
             }
         }
     }
-    
+
     fn activate_selected(&mut self) -> SpotlightEvent {
         if self.selected_index < self.results.len() {
             let result = self.results[self.selected_index].clone();
@@ -605,16 +628,16 @@ impl Spotlight {
         }
         SpotlightEvent::None
     }
-    
-    /// Draw spotlight overlay
+
+    /// Spotlight katmanını çiz
     pub fn draw(&self, fb: &mut Framebuffer) {
         if self.animation_progress <= 0.0 {
             return;
         }
-        
+
         let progress = self.animation_progress;
-        
-        // Dim background
+
+        // Arkaplanı karart
         let bg_alpha = (0.4 * progress) as f32;
         for y in 0..self.screen_height {
             for x in 0..self.screen_width {
@@ -624,104 +647,104 @@ impl Spotlight {
                 unsafe { *ptr = dimmed; }
             }
         }
-        
-        // Calculate search box position (centered, animated)
+
+        // Arama kutusu konumunu hesapla (ortalanmış, animasyonlu)
         let box_width = 600;
         let box_height = 44;
         let box_x = (self.screen_width - box_width) / 2;
         let box_y = (self.screen_height / 3) as f32;
-        
-        // Animate box sliding in
+
+        // Kutuyu kaydırarak göster
         let animated_y = (box_y + (1.0 - progress) * -50.0) as usize;
-        
-        // Draw search box background
+
+        // Arama kutusu arkaplanını çiz
         fb.draw_rect(box_x, animated_y, box_width, box_height, 0xE0FFFFFF);
         fb.draw_rect_outline(box_x, animated_y, box_width, box_height, 0x40888888);
-        
-        // Draw search icon
+
+        // Arama simgesi çiz
         fb.draw_string(box_x + 12, animated_y + 12, "🔍", 0xFF888888);
-        
-        // Draw query text
+
+        // Sorgu metnini çiz
         let text_x = box_x + 40;
         if self.query.is_empty() {
             fb.draw_string(text_x, animated_y + 12, "Search apps, files, settings...", 0xFF888888);
         } else {
             fb.draw_string(text_x, animated_y + 12, &self.query, 0xFF333333);
-            
-            // Draw cursor
+
+            // İmleci çiz
             let cursor_x = text_x + self.cursor_pos * 8;
             fb.draw_rect(cursor_x, animated_y + 10, 2, 24, 0xFF333333);
         }
-        
-        // Draw results
+
+        // Sonuçları çiz
         if !self.results.is_empty() {
             let results_y = animated_y + box_height + 8;
             let result_height = 48;
             let max_visible = 8;
             let visible_count = self.results.len().min(max_visible);
-            
+
             let results_width = box_width;
             let results_height = visible_count * result_height;
-            
-            // Results background
+
+            // Sonuçlar arkaplanı
             fb.draw_rect(box_x, results_y, results_width, results_height, 0xE0FFFFFF);
             fb.draw_rect_outline(box_x, results_y, results_width, results_height, 0x40888888);
-            
+
             for (i, result) in self.results.iter().take(max_visible).enumerate() {
                 let item_y = results_y + i * result_height;
                 let is_selected = i == self.selected_index;
-                
-                // Selection highlight
+
+                // Seçim vurgusu
                 if is_selected {
                     fb.draw_rect(box_x + 2, item_y + 2, results_width - 4, result_height - 4, Theme::ACCENT_PRIMARY.to_u32());
                 }
-                
-                // Icon
+
+                // Simge
                 let icon = self.get_icon(result.icon);
                 let icon_color = if is_selected { 0xFFFFFFFF } else { self.get_icon_color(result.result_type) };
                 fb.draw_string(box_x + 12, item_y + 12, icon, icon_color);
-                
-                // Title
+
+                // Başlık
                 let text_color = if is_selected { 0xFFFFFFFF } else { 0xFF333333 };
                 fb.draw_string(box_x + 52, item_y + 8, &result.title, text_color);
-                
-                // Subtitle
+
+                // Alt başlık
                 let sub_color = if is_selected { 0xFFCCCCCC } else { 0xFF888888 };
                 fb.draw_string(box_x + 52, item_y + 24, &result.subtitle, sub_color);
-                
-                // Type badge
+
+                // Tür rozeti
                 let badge = self.get_type_badge(result.result_type);
                 fb.draw_string(box_x + results_width - badge.len() * 8 - 12, item_y + 16, badge, sub_color);
             }
-            
-            // Show count if more results
+
+            // Daha fazla sonuç varsa sayısını göster
             if self.results.len() > max_visible {
                 let more = format!("+{} more", self.results.len() - max_visible);
                 fb.draw_string(box_x + results_width - more.len() * 8 - 12, results_y + results_height + 4, &more, 0xFF888888);
             }
         }
-        
-        // Draw keyboard shortcuts hint
+
+        // Klavye kısayolu ipuçlarını çiz
         let hint_y = animated_y + box_height + if !self.results.is_empty() { self.results.len().min(8) * 48 + 20 } else { 8 };
         fb.draw_string(box_x, hint_y, "↵ Select  ↑↓ Navigate  Tab Autocomplete  Esc Close", 0xFF888888);
     }
-    
+
     fn blend_color(bg: u32, fg: u32, alpha: f32) -> u32 {
         let br = ((bg >> 16) & 0xFF) as f32;
         let bg_ = ((bg >> 8) & 0xFF) as f32;
         let bb = (bg & 0xFF) as f32;
-        
+
         let fr = ((fg >> 16) & 0xFF) as f32;
         let fg_ = ((fg >> 8) & 0xFF) as f32;
         let fb = (fg & 0xFF) as f32;
-        
+
         let r = (br * (1.0 - alpha) + fr * alpha) as u32;
         let g = (bg_ * (1.0 - alpha) + fg_ * alpha) as u32;
         let b = (bb * (1.0 - alpha) + fb * alpha) as u32;
-        
+
         (r << 16) | (g << 8) | b
     }
-    
+
     fn get_icon(&self, icon: SearchIcon) -> &'static str {
         match icon {
             SearchIcon::App => "📱",
@@ -737,7 +760,7 @@ impl Spotlight {
             SearchIcon::Custom(_) => "⬚",
         }
     }
-    
+
     fn get_icon_color(&self, result_type: ResultType) -> u32 {
         match result_type {
             ResultType::Application => 0xFF007AFF,
@@ -752,7 +775,7 @@ impl Spotlight {
             ResultType::Dictionary => 0xFF8E8E93,
         }
     }
-    
+
     fn get_type_badge(&self, result_type: ResultType) -> &'static str {
         match result_type {
             ResultType::Application => "App",
@@ -767,59 +790,59 @@ impl Spotlight {
             ResultType::Dictionary => "Define",
         }
     }
-    
-    /// Handle mouse click
+
+    /// Mouse tıklamasını işle
     pub fn on_click(&mut self, mx: i32, my: i32) -> SpotlightEvent {
         let box_width = 600;
         let box_x = (self.screen_width - box_width) / 2;
         let box_y = self.screen_height / 3;
-        
-        // Check if clicking on results
+
+        // Sonuçlara tıklanıp tıklanmadığını kontrol et
         let results_y = box_y + 44 + 8;
         let result_height = 48;
-        
-        if mx >= box_x as i32 && mx < (box_x + box_width) as i32 
+
+        if mx >= box_x as i32 && mx < (box_x + box_width) as i32
             && my >= results_y as i32 {
-            
+
             let idx = ((my - results_y as i32) / result_height as i32) as usize;
             if idx < self.results.len() {
                 self.selected_index = idx;
                 return self.activate_selected();
             }
         }
-        
-        // Click outside - close
+
+        // Dışarı tıklandı - kapat
         if my < box_y as i32 || my > (results_y + self.results.len().min(8) * result_height) as i32 {
             self.hide();
             return SpotlightEvent::Cancelled;
         }
-        
+
         SpotlightEvent::None
     }
-    
-    /// Resize
+
+    /// Yeniden boyutlandır
     pub fn resize(&mut self, width: usize, height: usize) {
         self.screen_width = width;
         self.screen_height = height;
     }
 }
 
-/// Spotlight key codes
+/// Spotlight tuş kodları
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpotlightKey {
-    Up,
-    Down,
-    Escape,
-    Enter,
-    Tab,
+    Up,     // Yukarı ok
+    Down,   // Aşağı ok
+    Escape, // Escape tuşu
+    Enter,  // Enter tuşu
+    Tab,    // Tab tuşu
 }
 
-/// Spotlight events
+/// Spotlight olayları
 #[derive(Clone, Debug)]
 pub enum SpotlightEvent {
-    None,
-    ResultSelected(SearchResult),
-    Cancelled,
+    None,                        // Olay yok
+    ResultSelected(SearchResult), // Sonuç seçildi
+    Cancelled,                   // İptal edildi
 }
 
 // ============================================================================
@@ -830,7 +853,7 @@ lazy_static::lazy_static! {
     static ref SPOTLIGHT: Mutex<Spotlight> = Mutex::new(Spotlight::new(1920, 1080));
 }
 
-/// Initialize spotlight
+/// Spotlight'ı başlat
 pub fn init(width: usize, height: usize) {
     let mut spotlight = SPOTLIGHT.lock();
     spotlight.resize(width, height);
@@ -838,7 +861,7 @@ pub fn init(width: usize, height: usize) {
     crate::serial_println!("[GUI] Spotlight initialized");
 }
 
-/// Get spotlight
+/// Spotlight'ı al
 pub fn get_spotlight() -> &'static Mutex<Spotlight> {
     &SPOTLIGHT
 }

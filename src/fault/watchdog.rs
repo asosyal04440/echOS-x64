@@ -1,6 +1,6 @@
-//! # Watchdog System
+//! # Watchdog (Gözetleme) Sistemi
 //!
-//! Per-module watchdog timers for fault detection.
+//! Hata tespiti için modül başına watchdog zamanlayıcıları.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -9,24 +9,24 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 use spin::Mutex;
 
 // ============================================================================
-// WATCHDOG STRUCTURE
+// WATCHDOG YAPISI
 // ============================================================================
 
-/// Individual watchdog timer
+/// Bireysel watchdog zamanlayıcısı
 pub struct Watchdog {
-    /// Watchdog name
+    /// Watchdog adı
     pub name: &'static str,
-    /// Timeout in ticks
+    /// Tick cinsinden zaman aşımı
     pub timeout_ticks: u64,
-    /// Last kick timestamp
+    /// Son tetikleme zaman damgası
     last_kick: AtomicUsize,
-    /// Watchdog expired
+    /// Watchdog süresi doldu mu?
     expired: AtomicBool,
-    /// Watchdog enabled
+    /// Watchdog etkin mi?
     enabled: AtomicBool,
-    /// Expiration count
+    /// Süre dolumu sayısı
     expiration_count: AtomicU32,
-    /// Callback on expiration
+    /// Süre dolumunda çağrılacak geri çağırma (callback)
     pub on_expire: Option<fn(&str)>,
 }
 
@@ -43,7 +43,7 @@ impl Watchdog {
         }
     }
     
-    /// Kick the watchdog (reset timer)
+    /// Watchdog'u tetikler (zamanlayıcıyı sıfırlar)
     pub fn kick(&self) {
         self.last_kick.store(
             crate::task::scheduler::get_ticks(),
@@ -52,7 +52,7 @@ impl Watchdog {
         self.expired.store(false, Ordering::SeqCst);
     }
     
-    /// Check if watchdog has expired
+    /// Watchdog süresinin dolup dolmadığını kontrol eder
     pub fn check(&self) -> bool {
         if !self.enabled.load(Ordering::SeqCst) {
             return false;
@@ -66,11 +66,11 @@ impl Watchdog {
                 self.expiration_count.fetch_add(1, Ordering::SeqCst);
                 
                 crate::serial_println!(
-                    "[WATCHDOG] '{}' expired (timeout: {} ticks)",
+                    "[WATCHDOG] '{}' süresi doldu (zaman aşımı: {} tick)",
                     self.name, self.timeout_ticks
                 );
                 
-                // Call expiration callback
+                // Süre dolumu geri çağırmasını çağır
                 if let Some(callback) = self.on_expire {
                     callback(self.name);
                 }
@@ -81,17 +81,17 @@ impl Watchdog {
         false
     }
     
-    /// Enable/disable watchdog
+    /// Watchdog'u etkinleştirir/devre dışı bırakır
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::SeqCst);
     }
     
-    /// Get expiration count
+    /// Süre dolumu sayısını döndürür
     pub fn expiration_count(&self) -> u32 {
         self.expiration_count.load(Ordering::SeqCst)
     }
     
-    /// Reset watchdog
+    /// Watchdog'u sıfırlar
     pub fn reset(&self) {
         self.last_kick.store(0, Ordering::SeqCst);
         self.expired.store(false, Ordering::SeqCst);
@@ -100,18 +100,18 @@ impl Watchdog {
 }
 
 // ============================================================================
-// WATCHDOG REGISTRY
+// WATCHDOG KAYIT DEFTERİ
 // ============================================================================
 
-/// Global watchdog registry
+/// Global watchdog kayıt defteri
 pub struct WatchdogRegistry {
-    /// Registered watchdogs
+    /// Kayıtlı watchdog'lar
     watchdogs: Mutex<BTreeMap<String, &'static Watchdog>>,
-    /// Check interval in ticks
+    /// Tick cinsinden kontrol aralığı
     check_interval: AtomicUsize,
-    /// Last check timestamp
+    /// Son kontrol zaman damgası
     last_check: AtomicUsize,
-    /// Initialized
+    /// Başlatıldı mı?
     initialized: AtomicBool,
 }
 
@@ -119,18 +119,18 @@ impl WatchdogRegistry {
     pub const fn new() -> Self {
         Self {
             watchdogs: Mutex::new(BTreeMap::new()),
-            check_interval: AtomicUsize::new(100), // Check every 100 ticks
+            check_interval: AtomicUsize::new(100), // Her 100 tick'te bir kontrol
             last_check: AtomicUsize::new(0),
             initialized: AtomicBool::new(false),
         }
     }
     
-    /// Register a watchdog
+    /// Bir watchdog kaydeder
     pub fn register(&self, watchdog: &'static Watchdog) {
         self.watchdogs.lock().insert(String::from(watchdog.name), watchdog);
     }
     
-    /// Kick a specific watchdog
+    /// Belirli bir watchdog'u tetikler
     pub fn kick(&self, name: &str) -> bool {
         if let Some(wd) = self.watchdogs.lock().get(name) {
             wd.kick();
@@ -140,7 +140,7 @@ impl WatchdogRegistry {
         }
     }
     
-    /// Check all watchdogs
+    /// Tüm watchdog'ları kontrol eder
     pub fn check_all(&self) -> Vec<String> {
         let mut expired = Vec::new();
         
@@ -153,7 +153,7 @@ impl WatchdogRegistry {
         expired
     }
     
-    /// Periodic check (call from timer interrupt)
+    /// Periyodik kontrol (zamanlayıcı kesmesinden çağrılır)
     pub fn periodic_check(&self) {
         let current = crate::task::scheduler::get_ticks();
         let last = self.last_check.load(Ordering::SeqCst);
@@ -165,7 +165,7 @@ impl WatchdogRegistry {
         }
     }
     
-    /// Get all watchdog statuses
+    /// Tüm watchdog durumlarını döndürür
     pub fn statuses(&self) -> Vec<WatchdogStatus> {
         self.watchdogs.lock()
             .iter()
@@ -192,23 +192,23 @@ pub struct WatchdogStatus {
 }
 
 // ============================================================================
-// PREDEFINED WATCHDOGS
+// ÖN TANIMLI WATCHDOG'LAR
 // ============================================================================
 
-/// Memory subsystem watchdog
+/// Bellek alt sistemi watchdog'u
 pub static MEMORY_WATCHDOG: Watchdog = Watchdog::new("memory", 5000);
 
-/// Scheduler watchdog
+/// Zamanlayıcı watchdog'u
 pub static SCHEDULER_WATCHDOG: Watchdog = Watchdog::new("scheduler", 1000);
 
-/// IRQ watchdog
+/// IRQ watchdog'u
 pub static IRQ_WATCHDOG: Watchdog = Watchdog::new("irq", 2000);
 
-/// Boot watchdog
+/// Önyükleme watchdog'u
 pub static BOOT_WATCHDOG: Watchdog = Watchdog::new("boot", 30000);
 
 // ============================================================================
-// GLOBAL REGISTRY
+// GLOBAL KAYIT DEFTERİ
 // ============================================================================
 
 lazy_static::lazy_static! {
@@ -216,7 +216,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLAŞMA
 // ============================================================================
 
 pub fn init() {
@@ -224,19 +224,19 @@ pub fn init() {
         return;
     }
     
-    // Register core watchdogs
+    // Temel watchdog'ları kaydet
     WATCHDOG_REGISTRY.register(&MEMORY_WATCHDOG);
     WATCHDOG_REGISTRY.register(&SCHEDULER_WATCHDOG);
     WATCHDOG_REGISTRY.register(&IRQ_WATCHDOG);
     WATCHDOG_REGISTRY.register(&BOOT_WATCHDOG);
     
-    // Kick all watchdogs
+    // Tüm watchdog'ları tetikle
     MEMORY_WATCHDOG.kick();
     SCHEDULER_WATCHDOG.kick();
     IRQ_WATCHDOG.kick();
     BOOT_WATCHDOG.kick();
     
-    crate::serial_println!("[WATCHDOG] Initialized {} watchdogs", 
+    crate::serial_println!("[WATCHDOG] {} watchdog başlatıldı", 
         WATCHDOG_REGISTRY.watchdogs.lock().len());
 }
 

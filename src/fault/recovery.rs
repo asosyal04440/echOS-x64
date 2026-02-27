@@ -1,6 +1,7 @@
-//! # Recovery Engine
+//! # Kurtarma Motoru (Recovery Engine)
 //!
-//! Central recovery coordination and action execution.
+//! Merkezi kurtarma koordinasyonu ve aksiyon yürUtmesi.
+//! Her hata türü için strateji belirler: birincil, yedek ve son çare eylemleri.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -13,45 +14,45 @@ use super::{Fault, FaultSource, FaultType};
 use super::severity::{Severity, RecoveryResult};
 
 // ============================================================================
-// RECOVERY ACTIONS
+// KURTARMA EYLEMLERİ
 // ============================================================================
 
-/// Recovery action to execute
+/// Yürütülecek kurtarma eylemi
 #[derive(Clone, Debug)]
 pub enum RecoveryAction {
-    /// No action needed
+    /// Eylem gerekmez
     None,
-    /// Log the fault and continue
+    /// Hatayı yalnızca günlülere yaz ve devam et
     LogOnly,
-    /// Reset the module
+    /// Modülü sıfırla
     ResetModule(String),
-    /// Disable the module
+    /// Modülü devre dışı bırak
     DisableModule(String),
-    /// Switch to fallback mode
+    /// Yedek moda geç
     FallbackMode(String),
-    /// Kill specific task
+    /// Belirtilen görevi sonlandır
     KillTask(u64),
-    /// Free memory
+    /// Bellek sayfalarını serbest bırak
     FreeMemory(usize),
-    /// Sync filesystem
+    /// Dosya sistemini senkronize et
     SyncFilesystem,
-    /// Emergency sync and halt
+    /// Acil senkronizasyon ve durdurma
     EmergencyHalt,
-    /// Trigger reboot
+    /// Yeniden başlatı
     Reboot,
 }
 
-/// Recovery strategy for a fault type
+/// Bir hata türü için kurtarma stratejisi
 pub struct RecoveryStrategy {
-    /// Primary recovery action
+    /// Birincil kurtarma eylemi
     pub primary: RecoveryAction,
-    /// Fallback if primary fails
+    /// Birincil başarısız olursa yedek eylem
     pub fallback: Option<RecoveryAction>,
-    /// Last resort action
+    /// Son çare eylemi
     pub last_resort: RecoveryAction,
-    /// Maximum attempts
+    /// Maksimum deneme sayısı
     pub max_attempts: u32,
-    /// Timeout in ticks
+    /// Zaman aşımı (tick cinsinden)
     pub timeout_ticks: u64,
 }
 
@@ -66,18 +67,18 @@ impl RecoveryStrategy {
         }
     }
     
-    /// Get strategy for a fault type
+    /// Hata türüne göre uygun stratejiyi döndürür
     pub fn for_fault(fault: &Fault) -> Self {
         match &fault.fault_type {
-            // Memory faults
+            // Bellek hataları
             FaultType::HeapCorruption => Self::new(
-                RecoveryAction::LogOnly, // Cannot truly recover
+                RecoveryAction::LogOnly, // Gerçek kurtarma mümkün değil
                 None,
                 RecoveryAction::EmergencyHalt,
             ),
             FaultType::OutOfMemory => Self::new(
                 RecoveryAction::FreeMemory(64),
-                Some(RecoveryAction::KillTask(0)), // Kill largest task
+                Some(RecoveryAction::KillTask(0)), // En büyük görevi sonlandır
                 RecoveryAction::EmergencyHalt,
             ),
             FaultType::DoubleFree | FaultType::UseAfterFree => Self::new(
@@ -86,9 +87,9 @@ impl RecoveryStrategy {
                 RecoveryAction::DisableModule("memory".into()),
             ),
             
-            // CPU/SMP faults
+            // CPU/SMP hataları
             FaultType::ApStartupFailed => Self::new(
-                RecoveryAction::LogOnly, // Already handled by SMP safety
+                RecoveryAction::LogOnly, // Zaten SMP güvenliği tarafından yönetildi
                 None,
                 RecoveryAction::LogOnly,
             ),
@@ -98,7 +99,7 @@ impl RecoveryStrategy {
                 RecoveryAction::ResetModule("smp".into()),
             ),
             
-            // Interrupt faults
+            // Kesme (interrupt) hataları
             FaultType::IrqStorm => Self::new(
                 RecoveryAction::DisableModule("irq_source".into()),
                 None,
@@ -110,7 +111,7 @@ impl RecoveryStrategy {
                 RecoveryAction::DisableModule("interrupts".into()),
             ),
             
-            // Scheduler faults
+            // Zamanlayıcı hataları
             FaultType::RunQueueCorruption => Self::new(
                 RecoveryAction::EmergencyHalt,
                 None,
@@ -122,14 +123,14 @@ impl RecoveryStrategy {
                 RecoveryAction::LogOnly,
             ),
             
-            // Driver faults
+            // Sürücsü hataları
             FaultType::DeviceTimeout | FaultType::DeviceError => Self::new(
                 RecoveryAction::ResetModule("driver".into()),
                 Some(RecoveryAction::DisableModule("driver".into())),
                 RecoveryAction::LogOnly,
             ),
             
-            // Filesystem faults
+            // Dosya sistemi hataları
             FaultType::MetadataCorruption => Self::new(
                 RecoveryAction::SyncFilesystem,
                 Some(RecoveryAction::DisableModule("filesystem".into())),
@@ -141,21 +142,21 @@ impl RecoveryStrategy {
                 RecoveryAction::LogOnly,
             ),
             
-            // Network faults
+            // Ağ (network) hataları
             FaultType::ConnectionReset | FaultType::StackCorruption => Self::new(
                 RecoveryAction::ResetModule("network".into()),
                 Some(RecoveryAction::DisableModule("network".into())),
                 RecoveryAction::LogOnly,
             ),
             
-            // Security faults
+            // Güvenlik hataları
             FaultType::CanaryMismatch => Self::new(
-                RecoveryAction::EmergencyHalt, // Potential exploit
+                RecoveryAction::EmergencyHalt, // Olası istismar (exploit)
                 None,
                 RecoveryAction::EmergencyHalt,
             ),
             
-            // Default
+            // Varsayılan
             _ => Self::new(
                 RecoveryAction::LogOnly,
                 None,
@@ -166,22 +167,22 @@ impl RecoveryStrategy {
 }
 
 // ============================================================================
-// RECOVERY ENGINE
+// KURTARMA MOTORU
 // ============================================================================
 
-/// Recovery engine state
+/// Kurtarma motorunun durumu
 pub struct RecoveryEngine {
-    /// Recovery attempts per fault
+    /// Hata başına kurtarma deneme sayısı
     attempts: Mutex<BTreeMap<u64, u32>>,
-    /// Active recoveries
+    /// Aktif kurtarmalar
     active: Mutex<Vec<u64>>,
-    /// Recovery enabled
+    /// Kurtarma etkin mi?
     enabled: AtomicBool,
-    /// Total recoveries attempted
+    /// Toplam kurtarma deneme sayısı
     total_attempts: AtomicU32,
-    /// Successful recoveries
+    /// Başarılı kurtarmalar
     successful: AtomicU32,
-    /// Failed recoveries
+    /// Başarısız kurtarmalar
     failed: AtomicU32,
 }
 
@@ -208,13 +209,13 @@ impl RecoveryEngine {
             return RecoveryResult::Failed;
         }
         
-        // Mark as active
+        // Aktif olarak işaretle
         self.active.lock().push(fault.id.0);
         
-        // Get strategy
+        // Stratejiyi belirle
         let strategy = RecoveryStrategy::for_fault(fault);
         
-        // Check attempt count
+        // Deneme sayısını kontrol et
         let attempts = *self.attempts.lock().get(&fault.id.0).unwrap_or(&0);
         if attempts >= strategy.max_attempts {
             self.active.lock().retain(|&id| id != fault.id.0);
@@ -239,9 +240,9 @@ impl RecoveryEngine {
             return result;
         }
         
-        // Try fallback
+        // Yedek eylemi dene
         if let Some(fallback) = &strategy.fallback {
-            crate::serial_println!("[RECOVERY] Primary failed, trying fallback");
+            crate::serial_println!("[RECOVERY] Birincil başarısız, yedek deneniyor");
             let result = self.execute_action(fallback, fault);
             if result.is_success() {
                 self.successful.fetch_add(1, Ordering::SeqCst);
@@ -250,8 +251,8 @@ impl RecoveryEngine {
             }
         }
         
-        // Execute last resort
-        crate::serial_println!("[RECOVERY] All attempts failed, executing last resort");
+        // Son çareyi yürüt
+        crate::serial_println!("[RECOVERY] Tüm denemeler başarısız, son çare yürütülüyor");
         let result = self.execute_action(&strategy.last_resort, fault);
         
         if !result.is_success() {
@@ -262,7 +263,7 @@ impl RecoveryEngine {
         result
     }
     
-    /// Execute a recovery action
+    /// Kurtarma eylemini yürütür
     fn execute_action(&self, action: &RecoveryAction, fault: &Fault) -> RecoveryResult {
         match action {
             RecoveryAction::None => RecoveryResult::Recovered,
@@ -317,66 +318,66 @@ impl RecoveryEngine {
         }
     }
     
-    /// Reset a module
+    /// Modülü sıfırlar
     fn reset_module(&self, module: &str) -> RecoveryResult {
         match module {
             "network" => {
-                // Reset network stack
-                crate::serial_println!("[RECOVERY] Network stack reset not implemented");
+                // Ağ yığınını sıfırla
+                crate::serial_println!("[RECOVERY] Ağ yığını sıfırlama henüz uygulanmadı");
                 RecoveryResult::Degraded
             }
             "driver" => {
-                // Driver reset handled by driver recovery module
+                // Sürücsü kurtarma modülü tarafından yönetilir
                 RecoveryResult::Degraded
             }
             "interrupts" => {
-                // Re-initialize IDT
-                crate::serial_println!("[RECOVERY] IDT reset not safe, degraded mode");
+                // IDT'yi yeniden başlat
+                crate::serial_println!("[RECOVERY] IDT sıfırlaması güvenli değil, bozunmuş mod");
                 RecoveryResult::Degraded
             }
             _ => RecoveryResult::Failed,
         }
     }
     
-    /// Disable a module
+    /// Modülü devre dışı bırakır
     fn disable_module(&self, module: &str) -> RecoveryResult {
         crate::serial_println!("[RECOVERY] Module {} disabled", module);
         RecoveryResult::Degraded
     }
     
-    /// Enter fallback mode
+    /// Yedek moda geçer
     fn enter_fallback(&self, _mode: &str) -> RecoveryResult {
         RecoveryResult::Degraded
     }
     
-    /// Kill a task
+    /// Bir görevi sonlandırır
     fn kill_task(&self, task_id: u64) -> RecoveryResult {
         if task_id == 0 {
-            // Find largest memory consumer
-            crate::serial_println!("[RECOVERY] OOM: Would kill largest task");
+            // En fazla bellek kullanan görevi bul
+            crate::serial_println!("[RECOVERY] OOM: En büyük görev sonlandırılacak");
         }
         RecoveryResult::Recovered
     }
     
-    /// Free memory pages
+    /// Bellek sayfalarını serbest bırakır (OOM kurtarma)
     fn free_memory(&self, pages: usize) -> RecoveryResult {
         crate::memory::reclaim_pages_global(pages);
         RecoveryResult::Recovered
     }
     
-    /// Sync filesystem
+    /// Dosya sistemini senkronize eder
     fn sync_filesystem(&self) -> RecoveryResult {
-        // Emergency sync
-        crate::serial_println!("[RECOVERY] Filesystem sync attempted");
+        // Acil senkronizasyon
+        crate::serial_println!("[RECOVERY] Dosya sistemi senkronizasyonu denendi");
         RecoveryResult::Recovered
     }
     
-    /// Emergency halt
+    /// Acil durdurma (kurtarılamaz hata)
     fn emergency_halt(&self) -> RecoveryResult {
         crate::serial_println!("[RECOVERY] === EMERGENCY HALT ===");
         crate::serial_println!("[RECOVERY] System halted due to unrecoverable fault");
         
-        // Disable interrupts and halt
+        // Kesmeleri devre dışı bırak ve dur
         unsafe {
             x86_64::instructions::interrupts::disable();
             loop {
@@ -385,19 +386,19 @@ impl RecoveryEngine {
         }
     }
     
-    /// Reboot system
+    /// Sistemi yeniden başlatır
     fn reboot(&self) -> RecoveryResult {
-        crate::serial_println!("[RECOVERY] System reboot initiated");
-        // Use ACPI or keyboard controller to reboot
+        crate::serial_println!("[RECOVERY] Sistem yeniden başlatılması başlatıldı");
+        // ACPI veya klavye denetleyicisiyle yeniden başlat
         RecoveryResult::RequiresReboot
     }
     
-    /// Enable/disable recovery
+    /// Kurtarma motorunu etkinleştirir/devre dışı bırakır
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::SeqCst);
     }
     
-    /// Get statistics
+    /// Kurtarma istatistiklerini döndürür
     pub fn stats(&self) -> RecoveryStats {
         RecoveryStats {
             total_attempts: self.total_attempts.load(Ordering::SeqCst),
@@ -417,7 +418,7 @@ pub struct RecoveryStats {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLAŞMA
 // ============================================================================
 
 lazy_static::lazy_static! {
@@ -425,7 +426,7 @@ lazy_static::lazy_static! {
 }
 
 pub fn init() {
-    crate::serial_println!("[RECOVERY] Recovery engine initialized");
+    crate::serial_println!("[RECOVERY] Kurtarma motoru başlatıldı");
 }
 
 pub fn attempt_recovery(fault: &Fault) -> RecoveryResult {

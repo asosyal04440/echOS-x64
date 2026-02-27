@@ -1,21 +1,22 @@
-//! # Driver Health Monitor
+//! # Sürücsü Sağlık Monitörü
 //!
-//! Monitors driver health, device timeouts, and DMA integrity.
+//! Sürücsü sağlığını, cihaz zaman aşımlarını ve DMA bütünlüğünü izler.
+//! Donanım sürücsülerinin güvenilirliğini sürekli denetler.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
 pub struct DriverMonitor {
-    /// Device timeouts
+    /// Cihaz zaman aşımı sayısı
     device_timeouts: AtomicU32,
-    /// Device errors
+    /// Cihaz hatası sayısı
     device_errors: AtomicU32,
-    /// DMA errors
+    /// DMA hatası sayısı
     dma_errors: AtomicU32,
-    /// Last check timestamp
+    /// Son kontrol zaman damgası
     last_check: AtomicUsize,
-    /// Monitor enabled
+    /// Monitör etkin mi?
     enabled: AtomicBool,
 }
 
@@ -30,22 +31,22 @@ impl DriverMonitor {
         }
     }
     
-    /// Record device timeout
+    /// Cihaz zaman aşımı kaydeder
     pub fn record_timeout(&self) {
         self.device_timeouts.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record device error
+    /// Cihaz hatası kaydeder
     pub fn record_error(&self) {
         self.device_errors.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record DMA error
+    /// DMA hatası kaydeder
     pub fn record_dma_error(&self) {
         self.dma_errors.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Check driver health
+    /// Sürücsü sağlığını kontrol eder — zaman aşımı ve hata eşiklerini değerlendirir
     fn check_drivers(&self) -> Option<Fault> {
         let timeouts = self.device_timeouts.load(Ordering::SeqCst);
         let errors = self.device_errors.load(Ordering::SeqCst);

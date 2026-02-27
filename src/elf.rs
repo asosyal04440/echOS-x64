@@ -1,3 +1,9 @@
+//! # ELF Yükleyici
+//!
+//! ELF (Executable and Linkable Format) ikili dosyalarını ayrıştırır ve yükler.
+//! x86_64 mimarisi için ELF64 formatını destekler: çalıştırılabilir dosyalar,
+//! dinamik bağlanan kütüphaneler ve yeniden konumlandırma tabloları.
+
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::String;
@@ -325,10 +331,10 @@ fn read_u64(image: &[u8], offset: usize) -> Result<u64, ElfError> {
 }
 
 // ============================================================================
-// DYNAMIC LINKING SUPPORT
+// DİNAMİK BAĞLAMA DESTEĞİ
 // ============================================================================
 
-// ELF Dynamic section tags
+// ELF Dinamik bölüm (Dynamic section) etiketleri
 const DT_NULL: u64 = 0;
 const DT_NEEDED: u64 = 1;
 const DT_STRTAB: u64 = 5;
@@ -344,25 +350,25 @@ const DT_RELA: u64 = 7;
 const DT_RELASZ: u64 = 8;
 const DT_RELAENT: u64 = 9;
 
-// Relocation types for x86_64
-const R_X86_64_64: u32 = 1;       // Direct 64-bit relocation
-const R_X86_64_PC32: u32 = 2;     // PC-relative 32-bit
-const R_X86_64_GLOB_DAT: u32 = 6; // Global offset table
-const R_X86_64_JUMP_SLOT: u32 = 7; // PLT entry
-const R_X86_64_RELATIVE: u32 = 8; // Load address relative
+// x86_64 için yeniden konumlandırma (relocation) türleri
+const R_X86_64_64: u32 = 1;       // Doğrudan 64-bit yeniden konumlandırma
+const R_X86_64_PC32: u32 = 2;     // PC'ye göreli 32-bit
+const R_X86_64_GLOB_DAT: u32 = 6; // Global ofset tablosu (GOT)
+const R_X86_64_JUMP_SLOT: u32 = 7; // PLT girişi
+const R_X86_64_RELATIVE: u32 = 8; // Yükleme adresine göreli
 
-// Symbol binding
+// Sembol bağlama türleri
 const STB_LOCAL: u8 = 0;
 const STB_GLOBAL: u8 = 1;
 const STB_WEAK: u8 = 2;
 
-// Symbol type
+// Sembol türleri
 const STT_NOTYPE: u8 = 0;
 const STT_OBJECT: u8 = 1;
 const STT_FUNC: u8 = 2;
 const STT_SECTION: u8 = 3;
 
-// Program header types
+// Program header türleri
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const PT_GNU_RELRO: u32 = 0x6474e552;
@@ -436,7 +442,7 @@ impl SharedObject {
         }
     }
     
-    /// Find symbol by name
+    /// Ada göre sembol arar
     pub fn find_symbol(&self, name: &str) -> Option<u64> {
         for sym in &self.symbols {
             if sym.name == name && sym.is_defined() {
@@ -446,12 +452,12 @@ impl SharedObject {
         None
     }
     
-    /// Add reference
+    /// Başvuru sayısını artırır
     pub fn add_ref(&mut self) {
         self.ref_count += 1;
     }
     
-    /// Remove reference
+    /// Başvuru sayısını azaltır
     pub fn release(&mut self) -> u32 {
         if self.ref_count > 0 {
             self.ref_count -= 1;
@@ -460,12 +466,12 @@ impl SharedObject {
     }
 }
 
-// Global shared object registry
+// Global paylaşılan nesne kayıt defteri
 static SHARED_OBJECTS: Mutex<BTreeMap<String, SharedObject>> = Mutex::new(BTreeMap::new());
 static SYMBOL_CACHE: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
 static NEXT_LOAD_ADDRESS: Mutex<u64> = Mutex::new(0x7F0000000000);
 
-/// Parse dynamic section from ELF
+/// ELF'ten dinamik bölümü ayrıştırır
 pub fn parse_dynamic_section(image: &[u8], header: &ElfHeader64) -> Result<Vec<DynamicEntry>, ElfError> {
     let mut entries = Vec::new();
     let phoff = header.e_phoff as usize;
@@ -506,7 +512,7 @@ pub fn parse_dynamic_section(image: &[u8], header: &ElfHeader64) -> Result<Vec<D
     Ok(entries)
 }
 
-/// Parse symbol table from ELF
+/// ELF'ten sembol tablosunu ayrıştırır
 pub fn parse_symbol_table(
     image: &[u8],
     symtab_offset: u64,
@@ -514,7 +520,7 @@ pub fn parse_symbol_table(
     strtab_offset: u64,
 ) -> Result<Vec<Symbol>, ElfError> {
     let mut symbols = Vec::new();
-    let entry_size = 24u64; // ELF64 symbol entry size
+    let entry_size = 24u64; // ELF64 sembol girişi boyutu
     let count = symtab_size / entry_size;
     
     for i in 0..count {
@@ -532,7 +538,7 @@ pub fn parse_symbol_table(
         let other = image[offset_usize + 5];
         let section_index = read_u16(image, offset_usize + 6)?;
         
-        // Read symbol name from string table
+        // Sembol adını dizge tablosundan oku
         let name = read_string(image, strtab_offset as usize + name_offset as usize)?;
         
         let binding = info >> 4;
@@ -552,7 +558,7 @@ pub fn parse_symbol_table(
     Ok(symbols)
 }
 
-/// Parse relocations from ELF
+/// ELF'ten yeniden konumlandırma girişlerini ayrıştırır
 pub fn parse_relocations(
     image: &[u8],
     rel_offset: u64,
@@ -593,7 +599,7 @@ pub fn parse_relocations(
     Ok(relocs)
 }
 
-/// Read null-terminated string from image
+/// Görüntüden null ile sonlandırılmış yazı dizisini okur
 fn read_string(image: &[u8], offset: usize) -> Result<String, ElfError> {
     let mut bytes = Vec::new();
     let mut pos = offset;
@@ -610,9 +616,9 @@ fn read_string(image: &[u8], offset: usize) -> Result<String, ElfError> {
     String::from_utf8(bytes).map_err(|_| ElfError::Invalid)
 }
 
-/// Load shared object from file
+/// Paylaşılan nesneyi dosyadan yükler
 pub fn dlopen(name: &str, image: &[u8]) -> Result<*mut u8, ElfError> {
-    // Check if already loaded
+    // Zaten yüklenip yülenmediğini kontrol et
     {
         let objects = SHARED_OBJECTS.lock();
         if objects.contains_key(name) {
@@ -620,27 +626,27 @@ pub fn dlopen(name: &str, image: &[u8]) -> Result<*mut u8, ElfError> {
         }
     }
     
-    // Parse ELF
+    // ELF'i ayrıştır
     let header = parse_header(image)?;
     
-    // Check if it's a shared object
+    // Paylaşılan nesne olup olmadığını kontrol et
     if header.e_type != ET_DYN {
         return Err(ElfError::Unsupported);
     }
     
-    // Allocate load address
+    // Yükleme adresi tahsis et
     let base_address = {
         let mut next_addr = NEXT_LOAD_ADDRESS.lock();
         let addr = *next_addr;
-        *next_addr += 0x100000; // 1MB alignment
+        *next_addr += 0x100000; // 1MB hizalama
         addr
     };
     
-    // Create shared object
+    // Paylaşılan nesneyi oluştur
     let mut obj = SharedObject::new(String::from(name), base_address);
     obj.entry = header.e_entry;
     
-    // Parse dynamic section
+    // Dinamik bölümü ayrıştır
     let dyn_entries = parse_dynamic_section(image, &header)?;
     
     let mut symtab_offset = 0u64;
@@ -655,9 +661,9 @@ pub fn dlopen(name: &str, image: &[u8]) -> Result<*mut u8, ElfError> {
     for entry in &dyn_entries {
         match entry.tag {
             DT_SYMTAB => symtab_offset = entry.value,
-            DT_SYMENT => {}, // Symbol entry size
+            DT_SYMENT => {}, // Sembol girişi boyutu
             DT_STRTAB => strtab_offset = entry.value,
-            DT_STRSZ => {}, // String table size
+            DT_STRSZ => {}, // Dizge tablosu boyutu
             DT_REL => rel_offset = entry.value,
             DT_RELSZ => rel_size = entry.value,
             DT_RELENT => {},
@@ -668,18 +674,18 @@ pub fn dlopen(name: &str, image: &[u8]) -> Result<*mut u8, ElfError> {
             DT_RELASZ => rela_size = entry.value,
             DT_RELAENT => {},
             DT_NEEDED => {
-                // Dependency - would need string table lookup
+                // Bağımlılık - dizge tablosu araması gerektirir
             },
             _ => {}
         }
     }
     
-    // Parse symbols
+    // Sembolleri ayrıştır
     if symtab_offset > 0 && strtab_offset > 0 {
         obj.symbols = parse_symbol_table(image, symtab_offset, symtab_size, strtab_offset)?;
     }
     
-    // Parse relocations
+    // Yeniden konumlandırmaları ayrıştır
     if rel_offset > 0 && rel_size > 0 {
         obj.relocations = parse_relocations(image, rel_offset, rel_size, false)?;
     }
@@ -688,7 +694,7 @@ pub fn dlopen(name: &str, image: &[u8]) -> Result<*mut u8, ElfError> {
         obj.relocations.append(&mut rela_relocs);
     }
     
-    // Calculate size from segments
+    // Boyutu segmentlerden hesapla
     let segments = parse_program_headers(image, &header)?;
     for seg in &segments {
         let end = seg.vaddr + seg.memsz;
@@ -697,11 +703,11 @@ pub fn dlopen(name: &str, image: &[u8]) -> Result<*mut u8, ElfError> {
         }
     }
     
-    // Store in registry
+    // Kayıt defterine ekle
     let ptr = base_address as *mut u8;
     SHARED_OBJECTS.lock().insert(String::from(name), obj.clone());
     
-    // Update symbol cache
+    // Sembol önbelleğini güncelle
     let mut cache = SYMBOL_CACHE.lock();
     for sym in &obj.symbols {
         if sym.is_defined() && sym.is_global() {
@@ -716,9 +722,9 @@ pub fn dlopen(name: &str, image: &[u8]) -> Result<*mut u8, ElfError> {
     Ok(ptr)
 }
 
-/// Find symbol in loaded objects
+/// Yüklenen nesnelerde sembol arar
 pub fn dlsym(name: &str) -> Result<u64, ElfError> {
-    // Check cache first
+    // Önce önbelleğe bak
     {
         let cache = SYMBOL_CACHE.lock();
         if let Some(&addr) = cache.get(name) {
@@ -726,7 +732,7 @@ pub fn dlsym(name: &str) -> Result<u64, ElfError> {
         }
     }
     
-    // Search in all loaded objects
+    // Tüm yüklenen nesnelerde ara
     let objects = SHARED_OBJECTS.lock();
     for obj in objects.values() {
         if let Some(addr) = obj.find_symbol(name) {
@@ -737,7 +743,7 @@ pub fn dlsym(name: &str) -> Result<u64, ElfError> {
     Err(ElfError::SymbolNotFound)
 }
 
-/// Close shared object
+/// Paylaşılan nesneyi kapatır
 pub fn dlclose(name: &str) -> Result<(), ElfError> {
     let mut objects = SHARED_OBJECTS.lock();
     
@@ -758,12 +764,12 @@ pub fn dlclose(name: &str) -> Result<(), ElfError> {
     Ok(())
 }
 
-/// Apply relocations to loaded object
+/// Yüklenen nesneye yeniden konumlandırma uygular
 pub fn apply_relocations(obj_name: &str) -> Result<(), ElfError> {
     let objects = SHARED_OBJECTS.lock();
     let obj = objects.get(obj_name).ok_or(ElfError::NotLoaded)?;
     
-    // Clone relocations to avoid borrow issues
+    // Ödünç alma sorunlarını önlemek için yeniden konumlandırmaları klonla
     let relocs = obj.relocations.clone();
     let base = obj.base_address;
     drop(objects);
@@ -773,13 +779,13 @@ pub fn apply_relocations(obj_name: &str) -> Result<(), ElfError> {
         
         match reloc.rel_type {
             R_X86_64_RELATIVE => {
-                // Base-relative relocation
+                // Taban'a göreli yeniden konumlandırma
                 let value = (base as i64 + reloc.addend) as u64;
-                // Would write to memory at target_addr
+                // target_addr adresine yazılacak
                 let _ = (target_addr, value);
             }
             R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
-                // Symbol-based relocation
+                // Sembole dayalı yeniden konumlandırma
                 let objects = SHARED_OBJECTS.lock();
                 if let Some(obj) = objects.get(obj_name) {
                     if let Some(sym) = obj.symbols.get(reloc.symbol_index as usize) {
@@ -787,7 +793,7 @@ pub fn apply_relocations(obj_name: &str) -> Result<(), ElfError> {
                             let sym_addr = obj.base_address + sym.value;
                             let _ = (target_addr, sym_addr);
                         } else {
-                            // Look up in other objects
+                            // Diğer nesnelerde ara
                             if let Ok(addr) = dlsym(&sym.name) {
                                 let _ = (target_addr, addr);
                             }
@@ -796,7 +802,7 @@ pub fn apply_relocations(obj_name: &str) -> Result<(), ElfError> {
                 }
             }
             _ => {
-                // Unsupported relocation type
+                // Desteklenmeyen yeniden konumlandırma türü
             }
         }
     }
@@ -804,12 +810,12 @@ pub fn apply_relocations(obj_name: &str) -> Result<(), ElfError> {
     Ok(())
 }
 
-/// Get list of loaded objects
+/// Yüklenen nesnelerin listesini döndürür
 pub fn dl_loaded_objects() -> Vec<String> {
     SHARED_OBJECTS.lock().keys().cloned().collect()
 }
 
-/// Get symbol info
+/// Sembol bilgisini sorgular
 pub fn dl_symbol_info(name: &str) -> Option<(String, u64, u64)> {
     let objects = SHARED_OBJECTS.lock();
     for obj in objects.values() {

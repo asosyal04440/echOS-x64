@@ -1,30 +1,31 @@
-//! # Memory Health Monitor
+//! # Bellek Sağlık Monitörü
 //!
-//! Monitors heap integrity, OOM conditions, and memory corruption.
+//! Heap bütünlüğünü, OOM koşullarını ve bellek bozulmasını izler.
+//! TLSF allocator bütünlüğünü periyodik olarak doğrular.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, AtomicBool, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
 // ============================================================================
-// MEMORY MONITOR STATE
+// BELLEK MONİTÖR DURUMU
 // ============================================================================
 
-/// Memory monitor state
+/// Bellek monitörü durumu
 pub struct MemoryMonitor {
-    /// Heap corruption count
+    /// Heap bozulması sayısı
     corruption_count: AtomicU32,
-    /// OOM events
+    /// Bellek yetersizliği (OOM) olay sayısı
     oom_events: AtomicU32,
-    /// Page fault count
+    /// Sayfa hatası (page fault) sayısı
     page_faults: AtomicU64,
-    /// Last check timestamp
+    /// Son kontrol zaman damgası
     pub last_check_tick: AtomicUsize,
-    /// Monitor enabled
+    /// Monitör etkin mi?
     enabled: AtomicBool,
-    /// Warning threshold for corruption
+    /// Bozulma uyarı eşiği
     corruption_warning_threshold: u32,
-    /// Critical threshold for corruption
+    /// Bozulma kritik eşiği
     corruption_critical_threshold: u32,
 }
 
@@ -41,24 +42,24 @@ impl MemoryMonitor {
         }
     }
     
-    /// Record a heap corruption event
+    /// Heap bozulma olayı kaydeder
     pub fn record_corruption(&self) {
         self.corruption_count.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record an OOM event
+    /// Bellek yetersizliği (OOM) olayı kaydeder
     pub fn record_oom(&self) {
         self.oom_events.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Record a page fault
+    /// Sayfa hatası (page fault) kaydeder
     pub fn record_page_fault(&self) {
         self.page_faults.fetch_add(1, Ordering::SeqCst);
     }
     
-    /// Check heap integrity
+    /// Heap bütünlüğünü kontrol eder (TLSF integrity)
     fn check_heap(&self) -> Option<Fault> {
-        // Check TLSF integrity
+        // TLSF bütünlüğünü kontrol et
         let corruption = crate::allocator::check_heap_integrity();
         
         if corruption > 0 {
@@ -73,9 +74,9 @@ impl MemoryMonitor {
         None
     }
     
-    /// Check memory pressure
+    /// Bellek baskısını kontrol eder — düşük bellek koşullarını tespit eder
     fn check_memory_pressure(&self) -> Option<Fault> {
-        // Get memory stats
+        // Bellek istatistiklerini al
         let free = crate::memory::global_memory_manager()
             .map(|m: &crate::memory::MemoryManager| m.free_frames())
             .unwrap_or(0);
@@ -102,12 +103,12 @@ impl MemoryMonitor {
         None
     }
     
-    /// Check allocation patterns
+    /// Ayırma modellerini kontrol eder — sızıntı olabilecek durumları tespit eder
     fn check_allocations(&self) -> Option<Fault> {
-        // Check for allocation anomalies
+        // Ayırma anomalilerini kontrol et
         let stats = crate::allocator::get_alloc_stats();
         
-        // Check for suspicious allocation count
+        // Şüpheli ayırma sayısını kontrol et
         if stats.active_allocations > 10000 {
             return Some(Fault::new(
                 FaultSource::Memory,
@@ -135,17 +136,17 @@ impl super::HealthMonitor for MemoryMonitor {
             Ordering::SeqCst
         );
         
-        // Check heap integrity
+        // Heap bütünlüğünü kontrol et
         if let Some(fault) = self.check_heap() {
             return Some(fault);
         }
         
-        // Check memory pressure
+        // Bellek baskısını kontrol et
         if let Some(fault) = self.check_memory_pressure() {
             return Some(fault);
         }
         
-        // Check allocations
+        // Ayırmaları kontrol et
         if let Some(fault) = self.check_allocations() {
             return Some(fault);
         }
@@ -189,7 +190,7 @@ impl super::HealthMonitor for MemoryMonitor {
 }
 
 // ============================================================================
-// GLOBAL INSTANCE
+// GLOBAL ÖRNEK
 // ============================================================================
 
 pub static MEMORY_MONITOR: MemoryMonitor = MemoryMonitor::new();

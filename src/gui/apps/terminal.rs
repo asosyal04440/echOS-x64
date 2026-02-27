@@ -716,14 +716,10 @@ impl TerminalWindow {
         fb.draw_rect(x, y, w, h, theme.background);
         fb.draw_rect_outline(x, y, w, h, theme.background);
         
-        // Tab bar
-        fb.draw_rect(x, y, w, TAB_BAR_HEIGHT, theme.background);
-        self.draw_tabs(fb, x, y, w, theme);
-        
-        // Terminal content
-        let content_y = y + TAB_BAR_HEIGHT;
-        let content_h = h - TAB_BAR_HEIGHT;
-        
+        // Terminal content — no internal tab bar; WM Cyber titlebar is the chrome
+        let content_y = y;
+        let content_h = h;
+
         self.draw_content(fb, x, content_y, w, content_h, theme, tab);
     }
     
@@ -893,81 +889,67 @@ impl TerminalWindow {
     
     fn execute_command(&mut self, cmd: &str, theme: &TerminalTheme) {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let tab = &mut self.tabs[self.active_tab];
-        
-        if parts.is_empty() {
-            tab.write("$ ", theme);
-            return;
-        }
-        
-        match parts[0] {
-            "help" => {
-                tab.write("Available commands:\n", theme);
-                tab.write("  help     - Show this help\n", theme);
-                tab.write("  clear    - Clear screen\n", theme);
-                tab.write("  theme    - Cycle themes\n", theme);
-                tab.write("  ls       - List files\n", theme);
-                tab.write("  pwd      - Print working directory\n", theme);
-                tab.write("  echo     - Print text\n", theme);
-                tab.write("  date     - Show date\n", theme);
-                tab.write("  uname    - System info\n", theme);
-                tab.write("  exit     - Close terminal\n", theme);
-            }
-            "clear" => {
-                tab.clear(theme);
-            }
-            "theme" => {
-                if parts.len() > 1 {
-                    if let Ok(idx) = parts[1].parse::<usize>() {
-                        if idx < self.themes.len() {
-                            tab.theme_index = idx;
-                            tab.write(&format!("Theme changed to: {}\n", self.themes[idx].name), theme);
-                        } else {
-                            tab.write("Invalid theme index\n", theme);
+
+        // Terminal-yerel komutlar (tema yönetimi ve çıkış — kernel shell bilmez)
+        if let Some(&first) = parts.first() {
+            match first {
+                "theme" => {
+                    let tab = &mut self.tabs[self.active_tab];
+                    if parts.len() > 1 {
+                        if let Ok(idx) = parts[1].parse::<usize>() {
+                            if idx < self.themes.len() {
+                                tab.theme_index = idx;
+                                tab.write(&format!("Tema degistirildi: {}\n$ ", self.themes[idx].name), theme);
+                            } else {
+                                tab.write("Gecersiz tema indeksi\n$ ", theme);
+                            }
                         }
+                    } else {
+                        tab.write("Temalar:\n", theme);
+                        let theme_list: alloc::vec::Vec<alloc::string::String> = self.themes
+                            .iter()
+                            .enumerate()
+                            .map(|(i, t)| format!("  {} - {}\n", i, t.name))
+                            .collect();
+                        for s in theme_list { tab.write(&s, theme); }
+                        tab.write("$ ", theme);
                     }
-                } else {
-                    tab.write("Available themes:\n", theme);
-                    for (i, t) in self.themes.iter().enumerate() {
-                        tab.write(&format!("  {} - {}\n", i, t.name), theme);
-                    }
+                    return;
                 }
-            }
-            "ls" => {
-                tab.write("Documents/  Pictures/  Music/  Videos/  Downloads/\n", theme);
-                tab.write("readme.txt  notes.md  config/\n", theme);
-            }
-            "pwd" => {
-                tab.write(&format!("{}\n", tab.cwd), theme);
-            }
-            "echo" => {
-                if parts.len() > 1 {
-                    let text = parts[1..].join(" ");
-                    tab.write(&text, theme);
-                    tab.write("\n", theme);
+                "pwd" => {
+                    let cwd = self.tabs[self.active_tab].cwd.clone();
+                    let tab = &mut self.tabs[self.active_tab];
+                    tab.write(&format!("{}\n$ ", cwd), theme);
+                    return;
                 }
-            }
-            "date" => {
-                tab.write("Mon Jan  1 00:00:00 UTC 2024\n", theme);
-            }
-            "uname" => {
-                tab.write("echOS x86_64\n", theme);
-            }
-            "whoami" => {
-                tab.write("user\n", theme);
-            }
-            "hostname" => {
-                tab.write("echos\n", theme);
-            }
-            "exit" => {
-                // Would close terminal
-                tab.write("Goodbye!\n", theme);
-            }
-            _ => {
-                tab.write(&format!("Command not found: {}\n", parts[0]), theme);
+                "exit" | "quit" => {
+                    let tab = &mut self.tabs[self.active_tab];
+                    tab.write("Gorusuruz!\n", theme);
+                    return;
+                }
+                _ => {}
             }
         }
-        
+
+        // Kernel Shell engine'e devret (Faz 7 köprüsü)
+        let output = crate::shell::run_command(cmd);
+
+        let tab = &mut self.tabs[self.active_tab];
+        match output {
+            None => {
+                // Komut bir çıktı üretmedi (örn. set, export)
+            }
+            Some(ref o) if o == "__CLEAR__" => {
+                tab.clear(theme);
+                // Prompt'u clear sonrası tekrar yaz
+                tab.write("$ ", theme);
+                return;
+            }
+            Some(o) => {
+                tab.write(&o, theme);
+                tab.write("\n", theme);
+            }
+        }
         tab.write("$ ", theme);
     }
     

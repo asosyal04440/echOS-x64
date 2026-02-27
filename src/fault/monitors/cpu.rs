@@ -1,25 +1,26 @@
-//! # CPU Health Monitor
+//! # CPU Sağlık Monitörü
 //!
-//! Monitors CPU health, hung CPUs, and thermal events.
+//! CPU sağlığını, askıya alınmış CPU'ları ve ısıl olayları izler.
+//! SMP ortamında her CPU'nun aktifliğini takip eder.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
 // ============================================================================
-// CPU MONITOR STATE
+// CPU MONİTÖR DURUMU
 // ============================================================================
 
 pub struct CpuMonitor {
-    /// CPU count
+    /// Toplam CPU sayısı
     cpu_count: AtomicU32,
-    /// Hung CPU count
+    /// Askıya alınmış (hung) CPU sayısı
     hung_cpus: AtomicU32,
-    /// Thermal events
+    /// Isıl (thermal) olay sayısı
     thermal_events: AtomicU32,
-    /// Last check timestamp
+    /// Son kontrol zaman damgası
     last_check: AtomicUsize,
-    /// Monitor enabled
+    /// Monitör etkin mi?
     enabled: AtomicBool,
 }
 
@@ -34,7 +35,7 @@ impl CpuMonitor {
         }
     }
     
-    /// Check CPU health
+    /// CPU sağlığını kontrol eder — çevrimdişı CPU'ları tespit eder
     fn check_cpu_health(&self) -> Option<Fault> {
         let cpu_count = self.cpu_count.load(Ordering::SeqCst);
         let online = crate::cpu::smp::online_cpu_count();
@@ -51,19 +52,19 @@ impl CpuMonitor {
         None
     }
     
-    /// Check thermal status
+    /// Isıl durumu kontrol eder (ACPI termal zone entegrasyonu)
     fn check_thermal(&self) -> Option<Fault> {
-        // Check for thermal events via ACPI
-        // This would integrate with ACPI thermal zones
+        // ACPI termal zonları üzerinden isıl olayları kontrol et
+        // ACPI termal zone entegrasyonu burada gerçekleştirilecek
         None
     }
     
-    /// Update CPU count
+    /// CPU sayısını günceller
     pub fn set_cpu_count(&self, count: u32) {
         self.cpu_count.store(count, Ordering::SeqCst);
     }
     
-    /// Record thermal event
+    /// Isıl olay kaydeder
     pub fn record_thermal_event(&self) {
         self.thermal_events.fetch_add(1, Ordering::SeqCst);
     }

@@ -1,7 +1,16 @@
-//! # Drag and Drop Support
+//! # Sürükle ve Bırak Desteği
 //!
-//! System-wide drag and drop functionality for GUI elements
-//! Supports file dragging, text selection, and widget reordering
+//! GUI öğeleri için sistem genelinde sürükle ve bırak işlevselliği.
+//! Dosya sürükleme, metin seçimi ve widget sıralamayı destekler.
+//!
+//! ## Mimari
+//! - `DragData`: Sürüklenen veri türleri (Dosyalar / Metin / Resim / Widget / Özel)
+//! - `DropTarget`: Bırakma hedefi alanı; kabul edilen veri türleri ve vurgulama
+//! - `DragOperation`: Mevcut sürükleme durumu; önizleme, rozet, efekt
+//! - `DragDropManager`: Global yönetici; hedef kaydı, animasyon, bahar yükleme
+//!
+//! ## Bahar Yükleme (Spring Loading)
+//! Klasörün üzerine belirli süre tutulduğunda otomatik açılır.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -14,23 +23,23 @@ use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::{Theme, Color};
 
 // ============================================================================
-// DRAG DATA TYPES
+// SÜRÜKLEME VERİ TÜRLERİ
 // ============================================================================
 
-/// Types of data that can be dragged
+/// Sürüklenebilecek veri türleri
 #[derive(Clone, Debug)]
 pub enum DragData {
-    /// No data
+    /// Veri yok
     None,
-    /// File paths
+    /// Dosya yolları
     Files(Vec<String>),
-    /// Text string
+    /// Metin dizisi
     Text(String),
-    /// Image data (raw pixels)
+    /// Resim verisi (ham pikseller)
     Image { width: usize, height: usize, data: Vec<u32> },
-    /// Widget reference
+    /// Widget referansı
     Widget { window_id: u32, widget_id: u32 },
-    /// Custom data with MIME type
+    /// MIME türüyle özel veri
     Custom { mime_type: String, data: Vec<u8> },
 }
 
@@ -45,21 +54,21 @@ impl DragData {
             _ => false,
         }
     }
-    
+
     pub fn get_text(&self) -> Option<&str> {
         match self {
             DragData::Text(t) => Some(t),
             _ => None,
         }
     }
-    
+
     pub fn get_files(&self) -> Option<&Vec<String>> {
         match self {
             DragData::Files(f) => Some(f),
             _ => None,
         }
     }
-    
+
     pub fn description(&self) -> String {
         match self {
             DragData::None => String::from("Nothing"),
@@ -89,24 +98,24 @@ impl DragData {
 }
 
 // ============================================================================
-// DROP TARGET
+// BIRAKMA HEDEFİ
 // ============================================================================
 
-/// A drop target area
+/// Bir bırakma hedefi alanı
 #[derive(Clone, Debug)]
 pub struct DropTarget {
-    /// Target ID
+    /// Hedef kimliği
     pub id: u32,
-    /// Target bounds
+    /// Hedef sınırları
     pub x: i32,
     pub y: i32,
     pub width: usize,
     pub height: usize,
-    /// Accepted data types
+    /// Kabul edilen veri türleri
     pub accepts: Vec<DragDataType>,
-    /// Target type
+    /// Hedef türü
     pub target_type: DropTargetType,
-    /// Is highlighted
+    /// Vurgulanmış mı
     pub highlighted: bool,
 }
 
@@ -144,57 +153,57 @@ impl DropTarget {
             highlighted: false,
         }
     }
-    
+
     pub fn accepts_type(&self, data_type: DragDataType) -> bool {
         self.accepts.contains(&DragDataType::All) || self.accepts.contains(&data_type)
     }
-    
+
     pub fn contains(&self, px: i32, py: i32) -> bool {
         px >= self.x && px < self.x + self.width as i32
             && py >= self.y && py < self.y + self.height as i32
     }
-    
+
     pub fn highlight(&mut self, highlight: bool) {
         self.highlighted = highlight;
     }
 }
 
 // ============================================================================
-// DRAG OPERATION
+// SÜRÜKLEME İŞLEMİ
 // ============================================================================
 
-/// Current drag operation state
+/// Mevcut sürükleme işlemi durumu
 #[derive(Clone, Debug)]
 pub struct DragOperation {
-    /// Is a drag in progress
+    /// Sürükleme devam ediyor mu
     pub active: bool,
-    /// Dragged data
+    /// Sürüklenen veri
     pub data: DragData,
-    /// Source window/widget
+    /// Kaynak pencere/widget
     pub source: Option<DragSource>,
-    /// Current mouse position
+    /// Mevcut fare konumu
     pub position: (i32, i32),
-    /// Offset from drag start
+    /// Sürükleme başlangıcından ofset
     pub offset: (i32, i32),
-    /// Drag image offset
+    /// Sürükleme resmi ofseti
     pub image_offset: (i32, i32),
-    /// Current drop target
+    /// Mevcut bırakma hedefi
     pub target: Option<u32>,
-    /// Drag effect
+    /// Sürükleme efekti
     pub effect: DragEffect,
-    /// Drag started
+    /// Sürükleme başladı mı
     pub started: bool,
-    /// Drag preview image
+    /// Sürükleme önizleme resmi
     pub preview: Option<DragPreview>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DragSource {
-    /// Source window ID
+    /// Kaynak pencere kimliği
     pub window_id: u32,
-    /// Source widget ID
+    /// Kaynak widget kimliği
     pub widget_id: Option<u32>,
-    /// Source bounds
+    /// Kaynak sınırları
     pub bounds: (i32, i32, usize, usize),
 }
 
@@ -208,23 +217,23 @@ pub enum DragEffect {
 
 #[derive(Clone, Debug)]
 pub struct DragPreview {
-    /// Preview image width
+    /// Önizleme resmi genişliği
     pub width: usize,
-    /// Preview image height
+    /// Önizleme resmi yüksekliği
     pub height: usize,
-    /// Preview pixel data
+    /// Önizleme piksel verisi
     pub data: Vec<u32>,
-    /// Show badge
+    /// Rozet göster
     pub badge: Option<DragBadge>,
-    /// Opacity
+    /// Opaklık
     pub opacity: f32,
 }
 
 #[derive(Clone, Debug)]
 pub struct DragBadge {
-    /// Badge icon
+    /// Rozet simgesi
     pub icon: BadgeIcon,
-    /// Badge position
+    /// Rozet konumu
     pub offset: (i32, i32),
 }
 
@@ -252,8 +261,8 @@ impl DragOperation {
             preview: None,
         }
     }
-    
-    /// Start a drag operation
+
+    /// Sürükleme işlemini başlat
     pub fn start(&mut self, data: DragData, source: DragSource, start_pos: (i32, i32)) {
         self.active = true;
         self.data = data;
@@ -263,30 +272,30 @@ impl DragOperation {
         self.target = None;
         self.effect = DragEffect::Copy;
         self.started = true;
-        
-        // Create preview
+
+        // Önizleme oluştur
         self.create_preview();
     }
-    
-    /// Update drag position
+
+    /// Sürükleme konumunu güncelle
     pub fn update_position(&mut self, x: i32, y: i32) {
         if !self.active {
             return;
         }
-        
+
         self.offset = (x - self.position.0, y - self.position.1);
         self.position = (x, y);
-        
-        // Check if drag distance threshold met
+
+        // Sürükleme mesafesi eşiğine ulaşıldı mı kontrol et
         if !self.started {
             let dist = (self.offset.0 * self.offset.0 + self.offset.1 * self.offset.1) as f32;
-            if dist > 16.0 { // 4 pixel threshold
+            if dist > 16.0 { // 4 piksel eşiği
                 self.started = true;
             }
         }
     }
-    
-    /// End drag operation
+
+    /// Sürükleme işlemini bitir
     pub fn end(&mut self) -> (DragData, Option<DragSource>, Option<u32>, DragEffect) {
         let result = (
             self.data.clone(),
@@ -294,7 +303,7 @@ impl DragOperation {
             self.target,
             self.effect,
         );
-        
+
         self.active = false;
         self.data = DragData::None;
         self.source = None;
@@ -302,11 +311,11 @@ impl DragOperation {
         self.effect = DragEffect::None;
         self.started = false;
         self.preview = None;
-        
+
         result
     }
-    
-    /// Cancel drag operation
+
+    /// Sürükleme işlemini iptal et
     pub fn cancel(&mut self) {
         self.active = false;
         self.data = DragData::None;
@@ -316,13 +325,13 @@ impl DragOperation {
         self.started = false;
         self.preview = None;
     }
-    
-    /// Set drop target
+
+    /// Bırakma hedefini ayarla
     pub fn set_target(&mut self, target_id: Option<u32>, effect: DragEffect) {
         self.target = target_id;
         self.effect = effect;
-        
-        // Update badge based on effect
+
+        // Efekte göre rozeti güncelle
         if let Some(ref mut preview) = self.preview {
             preview.badge = match effect {
                 DragEffect::Copy => Some(DragBadge { icon: BadgeIcon::Copy, offset: (8, 8) }),
@@ -332,12 +341,12 @@ impl DragOperation {
             };
         }
     }
-    
+
     fn create_preview(&mut self) {
         let preview = match &self.data {
             DragData::Files(files) => {
                 if files.len() == 1 {
-                    // Single file - show file icon
+                    // Tek dosya - dosya simgesi göster
                     DragPreview {
                         width: 64,
                         height: 64,
@@ -346,7 +355,7 @@ impl DragOperation {
                         opacity: 0.8,
                     }
                 } else {
-                    // Multiple files - show count
+                    // Birden fazla dosya - sayı göster
                     DragPreview {
                         width: 80,
                         height: 80,
@@ -384,15 +393,15 @@ impl DragOperation {
                 }
             }
         };
-        
+
         self.preview = Some(preview);
     }
-    
+
     fn create_file_preview(_path: &str) -> Vec<u32> {
-        // Create a simple file icon preview
+        // Basit dosya simgesi önizlemesi oluştur
         let mut data = vec![0x00000000; 64 * 64];
-        
-        // Draw file icon outline
+
+        // Dosya simgesi çerçevesi çiz
         for y in 8..56 {
             for x in 12..52 {
                 let is_corner = (x < 16 && y < 16) || (x > 44 && y < 16);
@@ -401,18 +410,18 @@ impl DragOperation {
                 }
             }
         }
-        
+
         data
     }
-    
+
     fn create_multi_file_preview(count: usize) -> Vec<u32> {
         let mut data = vec![0x00000000; 80 * 80];
-        
-        // Draw stacked file icons
+
+        // Üst üste dizilmiş dosya simgeleri çiz
         for offset in 0..3 {
             let x_off = offset * 4;
             let y_off = offset * 4;
-            
+
             for y in 8 + y_off..56 + y_off {
                 for x in 12 + x_off..52 + x_off {
                     if y < 80 && x < 80 {
@@ -421,53 +430,53 @@ impl DragOperation {
                 }
             }
         }
-        
-        // Draw count badge
+
+        // Sayı rozeti çiz
         let count_str = format!("{}", count);
         let badge_x = 56;
         let badge_y = 56;
-        
+
         for y in badge_y..badge_y + 20 {
             for x in badge_x..badge_x + 20 {
                 data[y * 80 + x] = 0xFF007AFF;
             }
         }
-        
+
         data
     }
-    
+
     fn create_text_preview(text: &str) -> Vec<u32> {
         let width = (text.len().min(20) * 8 + 16).max(60);
         let mut data = vec![0xE0FFFFFF; width * 24];
-        
-        // Would draw actual text - for now just white background
+
+        // Gerçek metin çizilecek - şimdilik sadece beyaz arka plan
         data
     }
 }
 
 // ============================================================================
-// DRAG DROP MANAGER
+// SÜRÜKLE BIRAK YÖNETİCİSİ
 // ============================================================================
 
-/// Global drag and drop manager
+/// Global sürükle ve bırak yöneticisi
 pub struct DragDropManager {
-    /// Current drag operation
+    /// Mevcut sürükleme işlemi
     pub operation: DragOperation,
-    /// Registered drop targets
+    /// Kayıtlı bırakma hedefleri
     pub targets: Vec<DropTarget>,
-    /// Drag threshold (pixels)
+    /// Sürükleme eşiği (piksel)
     pub drag_threshold: i32,
-    /// Spring loading delay (for folders)
+    /// Bahar yükleme gecikmesi (klasörler için)
     pub spring_delay: f32,
-    /// Spring loading timer
+    /// Bahar yükleme zamanlayıcısı
     pub spring_timer: f32,
-    /// Spring loading target
+    /// Bahar yükleme hedefi
     pub spring_target: Option<u32>,
-    /// Auto scroll enabled
+    /// Otomatik kaydırma etkin
     pub auto_scroll: bool,
-    /// Auto scroll speed
+    /// Otomatik kaydırma hızı
     pub scroll_speed: i32,
-    /// Next target ID
+    /// Sonraki hedef kimliği
     pub next_target_id: u32,
 }
 
@@ -485,25 +494,25 @@ impl DragDropManager {
             next_target_id: 1,
         }
     }
-    
-    /// Register a drop target
+
+    /// Bırakma hedefini kaydet
     pub fn register_target(&mut self, x: i32, y: i32, width: usize, height: usize, accepts: Vec<DragDataType>) -> u32 {
         let id = self.next_target_id;
         self.next_target_id += 1;
-        
+
         let mut target = DropTarget::new(id, x, y, width, height);
         target.accepts = accepts;
-        
+
         self.targets.push(target);
         id
     }
-    
-    /// Unregister a drop target
+
+    /// Bırakma hedefinin kaydını sil
     pub fn unregister_target(&mut self, id: u32) {
         self.targets.retain(|t| t.id != id);
     }
-    
-    /// Update target position
+
+    /// Hedef konumunu güncelle
     pub fn update_target(&mut self, id: u32, x: i32, y: i32, width: usize, height: usize) {
         if let Some(target) = self.targets.iter_mut().find(|t| t.id == id) {
             target.x = x;
@@ -512,21 +521,21 @@ impl DragDropManager {
             target.height = height;
         }
     }
-    
-    /// Start drag
+
+    /// Sürüklemeyi başlat
     pub fn start_drag(&mut self, data: DragData, source: DragSource, start_pos: (i32, i32)) {
         self.operation.start(data, source, start_pos);
     }
-    
-    /// Update drag position
+
+    /// Sürükleme konumunu güncelle
     pub fn update_drag(&mut self, x: i32, y: i32) -> Option<DropEvent> {
         if !self.operation.active {
             return None;
         }
-        
+
         self.operation.update_position(x, y);
-        
-        // Find drop target under cursor
+
+        // İmleç altındaki bırakma hedefini bul
         let data_type = self.get_data_type();
         let mut found_target_id: Option<u32> = None;
         for target in &self.targets {
@@ -535,14 +544,14 @@ impl DragDropManager {
                 break;
             }
         }
-        
-        // Update highlights
+
+        // Vurgulamaları güncelle
         for target in &mut self.targets {
             let should_highlight = found_target_id == Some(target.id);
             target.highlight(should_highlight);
         }
-        
-        // Set target and effect
+
+        // Hedefi ve efekti ayarla
         if let Some(target_id) = found_target_id {
             let effect = if let Some(target) = self.targets.iter().find(|t| t.id == target_id) {
                 self.determine_effect(target)
@@ -550,8 +559,8 @@ impl DragDropManager {
                 DragEffect::None
             };
             self.operation.set_target(Some(target_id), effect);
-            
-            // Spring loading for folders
+
+            // Klasörler için bahar yükleme
             if let Some(target) = self.targets.iter().find(|t| t.id == target_id) {
                 if target.target_type == DropTargetType::Folder {
                     if self.spring_target != Some(target.id) {
@@ -566,7 +575,7 @@ impl DragDropManager {
                 self.spring_target = None;
                 self.spring_timer = 0.0;
             }
-            
+
             Some(DropEvent::TargetChanged(target_id, effect))
         } else {
             self.operation.set_target(None, DragEffect::None);
@@ -575,43 +584,43 @@ impl DragDropManager {
             Some(DropEvent::TargetChanged(0, DragEffect::None))
         }
     }
-    
-    /// End drag
+
+    /// Sürüklemeyi bitir
     pub fn end_drag(&mut self) -> DropEvent {
         let (data, source, target_id, effect) = self.operation.end();
-        
-        // Clear highlights
+
+        // Vurgulamaları temizle
         for target in &mut self.targets {
             target.highlight(false);
         }
-        
+
         self.spring_target = None;
         self.spring_timer = 0.0;
-        
+
         if let Some(target_id) = target_id {
             DropEvent::Dropped { data, source, target_id, effect }
         } else {
             DropEvent::Cancelled
         }
     }
-    
-    /// Cancel drag
+
+    /// Sürüklemeyi iptal et
     pub fn cancel_drag(&mut self) {
         self.operation.cancel();
-        
+
         for target in &mut self.targets {
             target.highlight(false);
         }
-        
+
         self.spring_target = None;
         self.spring_timer = 0.0;
     }
-    
-    /// Update spring loading
+
+    /// Bahar yüklemeyi güncelle
     pub fn update(&mut self, dt: f32) -> Option<DropEvent> {
         if self.spring_target.is_some() {
             self.spring_timer += dt;
-            
+
             if self.spring_timer >= self.spring_delay {
                 let target_id = self.spring_target.unwrap();
                 self.spring_target = None;
@@ -619,25 +628,25 @@ impl DragDropManager {
                 return Some(DropEvent::SpringLoaded(target_id));
             }
         }
-        
+
         None
     }
-    
-    /// Draw drag overlay
+
+    /// Sürükleme katmanını çiz
     pub fn draw(&self, fb: &mut Framebuffer) {
-        // Draw highlighted targets
+        // Vurgulanan hedefleri çiz
         for target in &self.targets {
             if target.highlighted {
                 self.draw_drop_highlight(fb, target);
             }
         }
-        
-        // Draw drag preview
+
+        // Sürükleme önizlemesini çiz
         if self.operation.active && self.operation.started {
             self.draw_drag_preview(fb);
         }
     }
-    
+
     fn draw_drop_highlight(&self, fb: &mut Framebuffer, target: &DropTarget) {
         let color = match self.operation.effect {
             DragEffect::Copy => Theme::ACCENT_PRIMARY.to_u32(),
@@ -645,43 +654,43 @@ impl DragDropManager {
             DragEffect::Link => Theme::ACCENT_SUCCESS.to_u32(),
             DragEffect::None => Theme::ERROR.to_u32(),
         };
-        
-        // Draw border
+
+        // Kenarlık çiz
         for i in 0..3 {
             let x = (target.x + i) as usize;
             let y = (target.y + i) as usize;
             let w = target.width - (i * 2) as usize;
             let h = target.height - (i * 2) as usize;
-            
+
             fb.draw_rect_outline(x, y, w, h, color);
         }
-        
-        // Draw insert indicator for lists
+
+        // Listeler için ekleme göstergesi çiz
         if target.target_type == DropTargetType::List {
             let insert_y = self.operation.position.1.min(target.y + target.height as i32 - 2).max(target.y);
             let insert_x = target.x;
             let insert_w = target.width;
-            
-            // Draw line
+
+            // Çizgi çiz
             fb.draw_rect(insert_x as usize, insert_y as usize, insert_w, 2, color);
-            
-            // Draw arrows
+
+            // Oklar çiz
             fb.draw_rect(insert_x as usize, insert_y as usize - 4, 8, 10, color);
             fb.draw_rect((insert_x + insert_w as i32 - 8) as usize, insert_y as usize - 4, 8, 10, color);
         }
     }
-    
+
     fn draw_drag_preview(&self, fb: &mut Framebuffer) {
         if let Some(ref preview) = self.operation.preview {
             let x = (self.operation.position.0 + self.operation.image_offset.0) as usize;
             let y = (self.operation.position.1 + self.operation.image_offset.1) as usize;
-            
-            // Draw preview image
+
+            // Önizleme resmini çiz
             for py in 0..preview.height {
                 for px in 0..preview.width {
                     let screen_x = x + px;
                     let screen_y = y + py;
-                    
+
                     if screen_x < fb.width && screen_y < fb.height {
                         let color = preview.data[py * preview.width + px];
                         if color != 0 {
@@ -690,16 +699,16 @@ impl DragDropManager {
                     }
                 }
             }
-            
-            // Draw badge
+
+            // Rozeti çiz
             if let Some(ref badge) = preview.badge {
                 let badge_x = x + badge.offset.0 as usize;
                 let badge_y = y + badge.offset.1 as usize;
-                
-                // Badge background
+
+                // Rozet arka planı
                 fb.draw_rect(badge_x, badge_y, 20, 20, 0xFF007AFF);
-                
-                // Badge icon
+
+                // Rozet simgesi
                 let icon = match badge.icon {
                     BadgeIcon::Copy => "+",
                     BadgeIcon::Move => "↗",
@@ -711,7 +720,7 @@ impl DragDropManager {
             }
         }
     }
-    
+
     fn get_data_type(&self) -> DragDataType {
         match &self.operation.data {
             DragData::None => DragDataType::All,
@@ -722,19 +731,19 @@ impl DragDropManager {
             DragData::Custom { .. } => DragDataType::Custom,
         }
     }
-    
+
     fn determine_effect(&self, target: &DropTarget) -> DragEffect {
-        // Default to copy, can be modified with modifier keys
-        // Option = copy, Command = move, Control+Option = link
+        // Varsayılan olarak kopyala; değiştirici tuşlarla değiştirilebilir
+        // Option = kopyala, Command = taşı, Control+Option = bağla
         DragEffect::Copy
     }
-    
-    /// Is drag in progress
+
+    /// Sürükleme devam ediyor mu
     pub fn is_dragging(&self) -> bool {
         self.operation.active && self.operation.started
     }
-    
-    /// Get current drag data
+
+    /// Mevcut sürükleme verisini al
     pub fn get_drag_data(&self) -> Option<&DragData> {
         if self.operation.active {
             Some(&self.operation.data)
@@ -744,7 +753,7 @@ impl DragDropManager {
     }
 }
 
-/// Drop events
+/// Bırakma olayları
 #[derive(Clone, Debug)]
 pub enum DropEvent {
     None,
@@ -760,19 +769,19 @@ pub enum DropEvent {
 }
 
 // ============================================================================
-// GLOBAL DRAG DROP MANAGER
+// GLOBAL SÜRÜKLE BIRAK YÖNETİCİSİ
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref DRAG_DROP: Mutex<DragDropManager> = Mutex::new(DragDropManager::new());
 }
 
-/// Initialize drag and drop
+/// Sürükle ve bırakı başlat
 pub fn init() {
-    crate::serial_println!("[GUI] Drag and drop initialized");
+    crate::serial_println!("[GUI] Sürükle ve bırak başlatıldı");
 }
 
-/// Get drag and drop manager
+/// Sürükle ve bırak yöneticisini al
 pub fn get_drag_drop() -> &'static Mutex<DragDropManager> {
     &DRAG_DROP
 }

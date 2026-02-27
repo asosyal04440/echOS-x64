@@ -27,11 +27,11 @@ const APIC_TIMER_INIT: u32 = 0x380;
 const APIC_TIMER_CURRENT: u32 = 0x390;
 const APIC_TIMER_DIV: u32 = 0x3E0;
 
-/// IA32_TSC_DEADLINE MSR
+/// IA32_TSC_DEADLINE MSR adresi — TSC-Deadline modunda son teslim tarihini bu MSR'a yazar
 const IA32_TSC_DEADLINE_MSR: u32 = 0x6E0;
-/// CPUID leaf 1, ECX bit 24 = TSC-Deadline
+/// CPUID leaf 1, ECX bit 24 = TSC-Deadline destekleniyorsa bu bit 1 olur
 const CPUID_TSC_DEADLINE_BIT: u32 = 1 << 24;
-/// LVT Timer mode: TSC-Deadline = bit 18 set
+/// LVT Timer modu: TSC-Deadline için bit 18 set edilir, periyodik yerine tek seferlik zamanlama
 const LVT_TIMER_TSC_DEADLINE: u32 = 0x40000;
 
 /// TSC-deadline mode aktif mi?
@@ -98,9 +98,9 @@ pub fn init() -> Result<ApicMode, ApicInitError> {
 
     if has_x2apic {
         let mut new_base = apic_base;
-        // Bit 11: APIC global enable
+        // Bit 11: APIC global etkinleştirme — IA32_APIC_BASE MSR'da bu bit 1 olmalı
         new_base |= 1 << 11;
-        // Bit 10: x2APIC enable
+        // Bit 10: x2APIC modunu etkinleştir — MSR tabanlı erişime geçiş sağlar
         new_base |= 1 << 10;
         unsafe { Msr::new(IA32_APIC_BASE_MSR).write(new_base) };
         set_mode(ApicMode::X2Apic);
@@ -116,9 +116,9 @@ pub fn init() -> Result<ApicMode, ApicInitError> {
         XAPIC_MMIO_BASE.store(virt_base, Ordering::SeqCst);
 
         let mut new_base = apic_base;
-        // Bit 11: APIC global enable
+        // Bit 11: APIC global etkinleştirme — xAPIC modu için de gerekli
         new_base |= 1 << 11;
-        // Bit 10: x2APIC disable
+        // Bit 10: x2APIC'yi devre dışı bırak — MMIO tabanlı xAPIC modunda kal
         new_base &= !(1 << 10);
         unsafe { Msr::new(IA32_APIC_BASE_MSR).write(new_base) };
         set_mode(ApicMode::XApic);
@@ -130,7 +130,7 @@ pub fn init() -> Result<ApicMode, ApicInitError> {
 
 /// Mod bağımsız ortak LAPIC ayarları.
 fn common_init() {
-    // Spurious Interrupt Vector: 0xFF + enable bit
+    // Spurious Interrupt (yalın kesme) vektörü: 0xFF + etkinleştirme biti (bit 8)
     write_reg(APIC_REG_SPURIOUS, 0xFF | (1 << 8));
     // TPR: 0 (tüm interrupt'ları kabul et)
     write_reg(APIC_REG_TPR, 0);
@@ -147,7 +147,7 @@ fn common_init() {
 fn init_timer() {
     // TSC-deadline desteğini kontrol et
     if has_tsc_deadline() {
-        // TSC-Deadline mode: LVT Timer = vector 32 + TSC-Deadline mode bit
+        // TSC-Deadline modu: LVT Timer = vektör 32 + TSC-Deadline mod biti
         write_reg(APIC_LVT_TIMER, 32 | LVT_TIMER_TSC_DEADLINE);
         TSC_DEADLINE_ACTIVE.store(true, Ordering::SeqCst);
         calibrate_tsc();
@@ -162,7 +162,7 @@ fn init_timer() {
             tsc_frequency() / 1_000_000
         );
     } else {
-        // Fallback: Periodic mode
+        // Geri düş: Periyodik mod (TSC-Deadline yoksa)
         write_reg(APIC_TIMER_DIV, 0xB);
         write_reg(APIC_TIMER_INIT, 10_000_000);
         write_reg(APIC_LVT_TIMER, 32 | 0x20000);
@@ -189,7 +189,7 @@ fn calibrate_tsc() {
 
     // Yöntem 2: LAPIC timer ile kaba kalibrasyon
     // Divider = 16, 10ms PIT ile ölç
-    write_reg(APIC_TIMER_DIV, 0x03); // Divide by 16
+    write_reg(APIC_TIMER_DIV, 0x03); // Böl 16 (divider = 16)
     let tsc_start = unsafe { core::arch::x86_64::_rdtsc() };
     write_reg(APIC_TIMER_INIT, 0xFFFF_FFFF);
 
@@ -198,14 +198,14 @@ fn calibrate_tsc() {
     unsafe {
         let mut pit_cmd = x86_64::instructions::port::Port::<u8>::new(0x43);
         let mut pit_ch2 = x86_64::instructions::port::Port::<u8>::new(0x42);
-        pit_cmd.write(0xB0); // Channel 2, lobyte/hibyte, one-shot
+        pit_cmd.write(0xB0); // Kanal 2, lobyte/hibyte, tek-seferlik mod
         pit_ch2.write((11932 & 0xFF) as u8);
         pit_ch2.write((11932 >> 8) as u8);
 
         // PIT tamamlanmasını bekle (port 0x61 bit 5)
         let mut gate = x86_64::instructions::port::Port::<u8>::new(0x61);
         let val = gate.read();
-        gate.write((val & 0xFC) | 0x01); // Enable speaker gate
+        gate.write((val & 0xFC) | 0x01); // Höparlor kapısını etkinleştir (speaker gate)
         // Basit spin-wait
         for _ in 0..10_000_000 {
             core::hint::spin_loop();
@@ -219,12 +219,12 @@ fn calibrate_tsc() {
 
     // TSC frekansı hesapla
     if elapsed_ticks > 0 {
-        // elapsed_ticks = LAPIC ticks (div 16) in ~10ms
-        // TSC freq ≈ tsc_delta * 100 (10ms → 1s)
+        // elapsed_ticks = LAPIC tick sayısı (bölen 16) yaklasik 10ms'de
+        // TSC frekansı ≈ tsc_delta * 100 (10ms → 1s)
         let freq = tsc_delta * 100;
         TSC_FREQ_HZ.store(freq, Ordering::SeqCst);
     } else {
-        // Fallback: 3 GHz varsayım
+        // Geri düş: 3 GHz varsayımı (kalibrasyon başarısız olduğunda)
         TSC_FREQ_HZ.store(3_000_000_000, Ordering::SeqCst);
     }
 
@@ -232,7 +232,7 @@ fn calibrate_tsc() {
     write_reg(APIC_TIMER_INIT, 0);
 }
 
-/// TSC-deadline timer'ı arm et — `ticks_from_now` TSC tick sonra fire
+/// TSC-deadline zamanlayıcısını arm et — `ticks_from_now` TSC tick sonra tetiklenir
 pub fn deadline_arm(ticks_from_now: u64) {
     if !TSC_DEADLINE_ACTIVE.load(Ordering::SeqCst) {
         return;

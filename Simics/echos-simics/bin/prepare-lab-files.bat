@@ -6,4 +6,4 @@ set SIMICS_PYTHON_PACKAGE=D:\Intel Simics Package Manager\simics-python-7.14.0\w
 if "%SIMICS_PYTHON%"=="" (
     set "SIMICS_PYTHON="
 )
-"D:\Intel Simics Package Manager\simics-training-7.0.0-pre.12\bin\prepare-lab-files.bat"  %*
+"D:\Intel Simics Package Manager\simics-7.70.0\..\simics-training-7.0.0-pre.12\bin\prepare-lab-files.bat"  %*

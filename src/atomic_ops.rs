@@ -1,7 +1,11 @@
-//! # echOS Advanced Atomic Operations Module
+//! # echOS Gelişmiş Atomik İşlemler Modülü
 //!
-//! Tier 1 OS seviyesinde atomic operations
-//! Linux atomic operations ile aynı seviyede performans ve güvenlik
+//! Tier 1 işletim sistemi düzeyinde atomik işlemler sunar.
+//! Linux atomik işlemleri ile aynı düzeyde performans ve güvenlik sağlar.
+//! Tamsayılar, işaretçiler ve bit alanları için kilit gerektirmeyen (lock-free)
+//! veri yapıları ve senkronizasyon ilkelleri içerir.
+//! Bellek bariyerleri (smp_mb, smp_rmb, smp_wmb) ile donanım sıralama garantileri
+//! zorunlu kılınır; böylece çok işlemcili ortamda veri tutarsızlığı önlenir.
 
 use core::sync::atomic::{AtomicBool, AtomicI16, AtomicI32, AtomicI64, AtomicI8, 
                          AtomicIsize, AtomicPtr, AtomicU16, AtomicU32, AtomicU64, 
@@ -9,40 +13,43 @@ use core::sync::atomic::{AtomicBool, AtomicI16, AtomicI32, AtomicI64, AtomicI8,
 use alloc::boxed::Box;
 use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
 
-/// Advanced atomic operations for integers
+/// Tamsayı türleri için gelişmiş atomik işlemler arayüzü.
+/// Her işlem, çok işlemcili ortamda veri yarışını önleyen SeqCst bellek sıralamasıyla çalışır.
 pub trait AtomicOps<T> {
-    /// Atomic add with return value
+    /// Atomik toplama — eski değeri döndürür, bellek güvenliğini garanti eder
     fn atomic_add(&self, val: T) -> T;
     
-    /// Atomic subtract with return value
+    /// Atomik çıkarma — eski değeri döndürür
     fn atomic_sub(&self, val: T) -> T;
     
-    /// Atomic increment with return value
+    /// Atomik artırma (+=1) — eski değeri döndürür
     fn atomic_inc(&self) -> T;
     
-    /// Atomic decrement with return value
+    /// Atomik azaltma (-=1) — eski değeri döndürür
     fn atomic_dec(&self) -> T;
     
-    /// Atomic compare and swap with memory barriers
+    /// Bellek bariyerli atomik karşılaştır-ve-değiştir (CAS).
+    /// `current` == mevcut değer ise `new` yazar; aksi hâlde mevcut değeri hatayla döner.
     fn atomic_compare_exchange(&self, current: T, new: T) -> Result<T, T>;
     
-    /// Atomic fetch and add
+    /// Atomik getir-ve-ekle — belirtilen `order` ile çalışır
     fn fetch_add(&self, val: T, order: Ordering) -> T;
     
-    /// Atomic fetch and subtract
+    /// Atomik getir-ve-çıkar — belirtilen `order` ile çalışır
     fn fetch_sub(&self, val: T, order: Ordering) -> T;
     
-    /// Atomic fetch and or
+    /// Atomik getir-ve-VEYA (bitwise OR) — belirtilen `order` ile çalışır
     fn fetch_or(&self, val: T, order: Ordering) -> T;
     
-    /// Atomic fetch and and
+    /// Atomik getir-ve-VE (bitwise AND) — belirtilen `order` ile çalışır
     fn fetch_and(&self, val: T, order: Ordering) -> T;
     
-    /// Atomic fetch and xor
+    /// Atomik getir-ve-XOR (bitwise XOR) — belirtilen `order` ile çalışır
     fn fetch_xor(&self, val: T, order: Ordering) -> T;
 }
 
-/// Macro to implement AtomicOps for integer types
+/// Tüm tamsayı atomik türleri için AtomicOps trait'ini otomatik uygulayan makro.
+/// Kod tekrarını önler; her tür için aynı mantık SeqCst sıralamasıyla uygulanır.
 macro_rules! impl_atomic_ops {
     ($atomic_type:ty, $primitive_type:ty) => {
         impl AtomicOps<$primitive_type> for $atomic_type {
@@ -92,7 +99,7 @@ macro_rules! impl_atomic_ops {
     };
 }
 
-// Implement AtomicOps for all integer atomic types
+// Tüm tamsayı atomik türleri için AtomicOps uygulaması — makro ile otomatik üretilir
 impl_atomic_ops!(AtomicU8, u8);
 impl_atomic_ops!(AtomicI8, i8);
 impl_atomic_ops!(AtomicU16, u16);
@@ -104,21 +111,22 @@ impl_atomic_ops!(AtomicI64, i64);
 impl_atomic_ops!(AtomicUsize, usize);
 impl_atomic_ops!(AtomicIsize, isize);
 
-/// Advanced atomic operations for pointers
+/// İşaretçi türleri için gelişmiş atomik işlemler arayüzü.
+/// RCU (Read-Copy-Update) uyumlu güncellemeler ve bellek bariyerli takas işlemleri sağlar.
 pub trait AtomicPtrOps<T> {
-    /// Atomic compare and swap for pointers
+    /// İşaretçiler için atomik karşılaştır-ve-değiştir (CAS) — bellek bariyerli
     fn atomic_compare_exchange_ptr(&self, current: *mut T, new: *mut T) -> Result<*mut T, *mut T>;
     
-    /// Atomic exchange with memory barriers
+    /// Bellek bariyerli atomik takas — eski işaretçiyi döndürür
     fn atomic_exchange(&self, new: *mut T) -> *mut T;
     
-    /// Load with acquire semantics
+    /// Acquire semantiği ile yükleme — okuma bariyeri uygulanır
     fn load_acquire(&self) -> *mut T;
     
-    /// Store with release semantics
+    /// Release semantiği ile saklama — yazma bariyeri uygulanır
     fn store_release(&self, ptr: *mut T);
     
-    /// Update pointer with RCU semantics
+    /// RCU semantiği ile işaretçi güncelleme — eski işaretçiyi döndürür, grace period başlatır
     fn rcu_update(&self, new: *mut T) -> *mut T;
 }
 
@@ -155,24 +163,25 @@ impl<T> AtomicPtrOps<T> for AtomicPtr<T> {
     }
 }
 
-/// Atomic bit operations
+/// Bit düzeyinde atomik işlemler arayüzü.
+/// Her işlem, yarış koşullarını önlemek için SeqCst sıralamasıyla atomik olarak yürütülür.
 pub trait AtomicBitOps {
-    /// Atomic set bit
+    /// Belirtilen bit konumunu atomik olarak sete çeker (1 yapar)
     fn atomic_set_bit(&self, bit: usize);
     
-    /// Atomic clear bit
+    /// Belirtilen bit konumunu atomik olarak temizler (0 yapar)
     fn atomic_clear_bit(&self, bit: usize);
     
-    /// Atomic toggle bit
+    /// Belirtilen bit konumunu atomik olarak tersine çevirir
     fn atomic_toggle_bit(&self, bit: usize);
     
-    /// Atomic test and set bit
+    /// Atomik sına-ve-sete-çek: önceki değerini döndürür, biti 1 yapar
     fn atomic_test_and_set_bit(&self, bit: usize) -> bool;
     
-    /// Atomic test and clear bit
+    /// Atomik sına-ve-temizle: önceki değerini döndürür, biti 0 yapar
     fn atomic_test_and_clear_bit(&self, bit: usize) -> bool;
     
-    /// Atomic test bit
+    /// Belirtilen bit konumunun mevcut değerini okur (Relaxed)
     fn atomic_test_bit(&self, bit: usize) -> bool;
 }
 
@@ -250,7 +259,8 @@ impl AtomicBitOps for AtomicU64 {
     }
 }
 
-/// Atomic reference counter
+/// Atomik referans sayacı — Arc benzeri, ancak kernel ortamında hafiftir.
+/// Nesne paylaşımında güvenli artırma/azaltma için kullanılır.
 pub struct AtomicRefCounter {
     count: AtomicUsize,
 }
@@ -283,7 +293,8 @@ impl AtomicRefCounter {
     }
 }
 
-/// Atomic flag with memory barriers
+/// Bellek bariyerli atomik bayrak — bool değerinin güvenli çok işlemcili paylaşımı için.
+/// set/clear işlemleri yazma bariyeri, is_set okuma bariyeri uygular.
 pub struct AtomicFlag {
     flag: AtomicBool,
 }
@@ -325,7 +336,7 @@ impl AtomicFlag {
     }
 }
 
-/// Atomic sequence number generator
+/// Atomik sıra numarası üreteci — işlem sıralamasını izlemek için monoton artan sayaç.
 pub struct AtomicSequence {
     seq: AtomicU64,
 }
@@ -350,7 +361,7 @@ impl AtomicSequence {
     }
 }
 
-/// Atomic statistics counter
+/// Atomik istatistik sayacı — işlem sayısı, başarı/başarısızlık ve toplam süreyi izler.
 pub struct AtomicStats {
     operations: AtomicU64,
     successes: AtomicU64,
@@ -395,7 +406,8 @@ impl AtomicStats {
     }
 }
 
-/// Lock-free stack using atomic operations
+/// Atomik işlemler kullanan kilit gerektirmeyen (lock-free) yığıt.
+/// CAS döngüsüyle çok işlemcili güvenli push/pop sağlar; ABA sorununu minimize eder.
 pub struct LockFreeStack<T> {
     head: AtomicPtr<Node<T>>,
 }
@@ -466,23 +478,23 @@ impl<T> LockFreeStack<T> {
 impl<T> Drop for LockFreeStack<T> {
     fn drop(&mut self) {
         while let Some(_) = self.pop() {
-            // Drain the stack
+            // Yığıttaki tüm elemanları serbest bırak
         }
     }
 }
 
-/// Initialize atomic operations subsystem
+/// Atomik işlemler alt sistemini başlatır — temel testleri çalıştırarak doğruluk kontrolü yapar.
 pub fn init() {
-    crate::serial_println!("AtomicOps: Initializing advanced atomic operations");
+    crate::serial_println!("AtomicOps: Gelişmiş atomik işlemler başlatılıyor");
     
-    // Test atomic operations
+    // Atomik işlemleri test et
     test_atomic_operations();
     
-    crate::serial_println!("AtomicOps: Advanced atomic operations ready");
+    crate::serial_println!("AtomicOps: Gelişmiş atomik işlemler hazır");
 }
 
 fn test_atomic_operations() {
-    // Test basic atomic operations
+    // Temel atomik işlem testleri — toplama, artırma, çıkarma
     let counter = AtomicU32::new(0);
     counter.atomic_add(10);
     assert_eq!(counter.load(Ordering::Relaxed), 10);
@@ -493,7 +505,7 @@ fn test_atomic_operations() {
     counter.atomic_sub(5);
     assert_eq!(counter.load(Ordering::Relaxed), 6);
     
-    // Test bit operations
+    // Bit işlem testleri — set ve clear
     let bits = AtomicU32::new(0);
     bits.atomic_set_bit(0);
     assert!(bits.atomic_test_bit(0));
@@ -501,7 +513,7 @@ fn test_atomic_operations() {
     bits.atomic_clear_bit(0);
     assert!(!bits.atomic_test_bit(0));
     
-    // Test atomic flag
+    // Atomik bayrak testi — set/clear/is_set
     let flag = AtomicFlag::new(false);
     assert!(!flag.is_set());
     
@@ -511,7 +523,7 @@ fn test_atomic_operations() {
     flag.clear();
     assert!(!flag.is_set());
     
-    crate::serial_println!("AtomicOps: All tests passed");
+    crate::serial_println!("AtomicOps: Tüm testler başarıyla geçildi");
 }
 
 #[cfg(test)]

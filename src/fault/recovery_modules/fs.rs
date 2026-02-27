@@ -1,31 +1,31 @@
-//! # Filesystem Recovery
+//! # Dosya Sistemi Kurtarma
 //!
-//! Recovery strategies for filesystem faults.
+//! Dosya sistemi hatalarına yönelik kurtarma stratejileri.
 
 use crate::fault::{Fault, FaultType};
 use crate::fault::severity::RecoveryResult;
 
-/// Attempt filesystem recovery
+/// Dosya sistemi kurtarmasını dener
 pub fn recover(fault: &Fault) -> RecoveryResult {
     match fault.fault_type {
         FaultType::MetadataCorruption => {
-            crate::serial_println!("[FS_RECOVERY] Metadata corruption - attempting journal replay");
-            // Would call journal replay
+            crate::serial_println!("[FS_RECOVERY] Meta veri bozulması - günlük (journal) yeniden oynatılıyor");
+            // Günlük yeniden oynatma çağrılacak
             RecoveryResult::Degraded
         }
         
         FaultType::JournalError => {
-            crate::serial_println!("[FS_RECOVERY] Journal error - read-only mode");
+            crate::serial_println!("[FS_RECOVERY] Günlük hatası - salt okunur mod");
             RecoveryResult::Degraded
         }
         
         FaultType::IoError => {
-            crate::serial_println!("[FS_RECOVERY] I/O error - retry or fallback");
+            crate::serial_println!("[FS_RECOVERY] G/Ç hatası - yeniden dene veya yedek mod");
             RecoveryResult::Degraded
         }
         
         FaultType::DiskFull => {
-            crate::serial_println!("[FS_RECOVERY] Disk full - cleanup needed");
+            crate::serial_println!("[FS_RECOVERY] Disk dolu - temizlik gerekiyor");
             RecoveryResult::Degraded
         }
         
@@ -33,14 +33,14 @@ pub fn recover(fault: &Fault) -> RecoveryResult {
     }
 }
 
-/// Emergency sync all filesystems
+/// Tüm dosya sistemlerini acil senkronize eder
 pub fn emergency_sync() {
-    crate::serial_println!("[FS_RECOVERY] Emergency sync initiated");
-    // Would sync all mounted filesystems
+    crate::serial_println!("[FS_RECOVERY] Acil senkronizasyon başlatıldı");
+    // Bağlı tüm dosya sistemleri senkronize edilecek
 }
 
-/// Remount filesystem read-only
+/// Dosya sistemini salt okunur olarak yeniden bağlar
 pub fn remount_readonly(mount_point: &str) -> bool {
-    crate::serial_println!("[FS_RECOVERY] Remounting {} read-only", mount_point);
+    crate::serial_println!("[FS_RECOVERY] {} salt okunur olarak yeniden bağlanıyor", mount_point);
     true
 }

@@ -1,25 +1,25 @@
-//! # Fault Severity Levels
+//! # Hata Şiddet Seviyeleri
 //!
-//! Classification of fault severity and recovery outcomes.
+//! Hata şiddetinin ve kurtarma sonuçlarının sınıflandırılması.
 
 use super::FaultType;
 
 // ============================================================================
-// SEVERITY LEVELS
+// ŞİDDET SEVİYELERİ
 // ============================================================================
 
-/// Severity level of a fault
+/// Bir hatanın şiddet seviyesi
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
-    /// Normal operation, no fault
+    /// Normal çalışma, hata yok
     Normal = 0,
-    /// Minor issue, system fully functional
+    /// Küçük sorun, sistem tam işlevsel
     Warning = 1,
-    /// Non-critical module failure, degraded operation
+    /// Kritik olmayan modül arızası, kısıtlı çalışma
     Degraded = 2,
-    /// Critical module failure, limited operation
+    /// Kritik modül arızası, sınırlı çalışma
     Critical = 3,
-    /// Unrecoverable fault, emergency shutdown
+    /// Kurtarılamaz hata, acil kapatma
     Emergency = 4,
 }
 
@@ -30,16 +30,16 @@ impl Default for Severity {
 }
 
 impl Severity {
-    /// Determine severity from fault type
+    /// Hata türünden şiddet seviyesini belirler
     pub fn from_type(fault_type: &FaultType) -> Self {
         match fault_type {
-            // Emergency - immediate halt required
+            // Acil - anında durdurma gerekli
             FaultType::HeapCorruption
             | FaultType::PmmCorruption
             | FaultType::IdtCorruption
             | FaultType::RunQueueCorruption => Severity::Emergency,
             
-            // Critical - system can barely function
+            // Kritik - sistem neredeyse işlevsiz
             FaultType::OutOfMemory
             | FaultType::ApStartupFailed
             | FaultType::CpuHung
@@ -47,7 +47,7 @@ impl Severity {
             | FaultType::CanaryMismatch
             | FaultType::ThermalEvent => Severity::Critical,
             
-            // Degraded - reduced functionality
+            // Bozunmuş - azaltılmış işlevsellik
             FaultType::DoubleFree
             | FaultType::UseAfterFree
             | FaultType::TlbShootdownTimeout
@@ -57,7 +57,7 @@ impl Severity {
             | FaultType::JournalError
             | FaultType::AmlError => Severity::Degraded,
             
-            // Warning - logged but system continues
+            // Uyarı - günlüğe yazılır, sistem devam eder
             FaultType::NullPointer
             | FaultType::InvalidPointer
             | FaultType::PageFault
@@ -68,38 +68,38 @@ impl Severity {
             | FaultType::GpeStorm
             | FaultType::BootTimeout => Severity::Warning,
             
-            // Default to warning for unknown
+            // Bilinmeyen için varsayılan: uyarı
             _ => Severity::Warning,
         }
     }
     
-    /// Check if fault requires immediate action
+    /// Hatanın anında müdahale gerektirip gerektirmediğini kontrol eder
     pub fn requires_immediate_action(&self) -> bool {
         matches!(self, Severity::Critical | Severity::Emergency)
     }
     
-    /// Check if system can continue
+    /// Sistemin devam edip edemeyeceğini kontrol eder
     pub fn can_continue(&self) -> bool {
         !matches!(self, Severity::Emergency)
     }
     
-    /// Check if recovery should be attempted
+    /// Kurtarmanın denenmesi gerekip gerekmediğini kontrol eder
     pub fn should_recover(&self) -> bool {
         matches!(self, Severity::Warning | Severity::Degraded | Severity::Critical)
     }
     
-    /// Get human-readable description
+    /// İnsan tarafından okunabilir açıklama döndürür
     pub fn description(&self) -> &'static str {
         match self {
-            Severity::Normal => "Normal operation",
-            Severity::Warning => "Minor issue detected",
-            Severity::Degraded => "Module failure, degraded operation",
-            Severity::Critical => "Critical failure, limited operation",
-            Severity::Emergency => "Unrecoverable fault, emergency shutdown",
+            Severity::Normal => "Normal çalışma",
+            Severity::Warning => "Küçük sorun tespit edildi",
+            Severity::Degraded => "Modül arızası, kısıtlı çalışma",
+            Severity::Critical => "Kritik arıza, sınırlı çalışma",
+            Severity::Emergency => "Kurtarılamaz hata, acil kapatma",
         }
     }
     
-    /// Get recommended action
+    /// Önerilen eylemi döndürür
     pub fn recommended_action(&self) -> RecommendedAction {
         match self {
             Severity::Normal => RecommendedAction::None,
@@ -112,76 +112,76 @@ impl Severity {
 }
 
 // ============================================================================
-// RECOMMENDED ACTIONS
+// ÖNERİLEN EYLEMLER
 // ============================================================================
 
-/// Recommended action for a fault
+/// Bir hata için önerilen eylem
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecommendedAction {
-    /// No action needed
+    /// Eylem gerekmez
     None,
-    /// Log the fault and continue
+    /// Hatayı günlüğe yaz ve devam et
     Log,
-    /// Disable the faulty module
+    /// Hatalı modülü devre dışı bırak
     DisableModule,
-    /// Switch to fallback mode
+    /// Yedek moda geç
     FallbackMode,
-    /// Emergency halt
+    /// Acil durdurma
     EmergencyHalt,
 }
 
 // ============================================================================
-// RECOVERY RESULTS
+// KURTARMA SONUÇLARI
 // ============================================================================
 
-/// Result of a recovery attempt
+/// Kurtarma girişiminin sonucu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveryResult {
-    /// Fault was fully recovered
+    /// Hata tamamen kurtarıldı
     Recovered,
-    /// System is in degraded mode
+    /// Sistem bozunmuş modda
     Degraded,
-    /// Recovery failed, module disabled
+    /// Kurtarma başarısız, modül devre dışı
     Failed,
-    /// System reboot required
+    /// Sistem yeniden başlatma gerektirir
     RequiresReboot,
-    /// Recovery not possible
+    /// Kurtarma mümkün değil
     Unrecoverable,
 }
 
 impl RecoveryResult {
-    /// Check if recovery was successful
+    /// Kurtarmanın başarılı olup olmadığını kontrol eder
     pub fn is_success(&self) -> bool {
         matches!(self, RecoveryResult::Recovered | RecoveryResult::Degraded)
     }
     
-    /// Check if system can continue
+    /// Sistemin devam edip edemeyeceğini kontrol eder
     pub fn can_continue(&self) -> bool {
         matches!(self, RecoveryResult::Recovered | RecoveryResult::Degraded | RecoveryResult::Failed)
     }
     
-    /// Check if reboot is needed
+    /// Yeniden başlatma gerekip gerekmediğini kontrol eder
     pub fn needs_reboot(&self) -> bool {
         matches!(self, RecoveryResult::RequiresReboot | RecoveryResult::Unrecoverable)
     }
 }
 
 // ============================================================================
-// RECOVERY LEVELS
+// KURTARMA SEVİYELERİ
 // ============================================================================
 
-/// System recovery level (0-4)
+/// Sistem kurtarma seviyesi (0-4)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RecoveryLevel {
-    /// Normal operation
+    /// Normal çalışma
     Level0 = 0,
-    /// Warning state
+    /// Uyarı durumu
     Level1 = 1,
-    /// Degraded state
+    /// Bozunmuş durum
     Level2 = 2,
-    /// Critical state
+    /// Kritik durum
     Level3 = 3,
-    /// Emergency state
+    /// Acil durum
     Level4 = 4,
 }
 
@@ -199,18 +199,18 @@ impl From<u32> for RecoveryLevel {
 }
 
 impl RecoveryLevel {
-    /// Get description of current level
+    /// Mevcut seviyenin açıklamasını döndürür
     pub fn description(&self) -> &'static str {
         match self {
-            RecoveryLevel::Level0 => "Normal operation",
-            RecoveryLevel::Level1 => "Warning: Faults detected but system functional",
-            RecoveryLevel::Level2 => "Degraded: Some modules disabled",
-            RecoveryLevel::Level3 => "Critical: Minimal functionality only",
-            RecoveryLevel::Level4 => "Emergency: System halt imminent",
+            RecoveryLevel::Level0 => "Normal çalışma",
+            RecoveryLevel::Level1 => "Uyarı: Hatalar tespit edildi, sistem işlevsel",
+            RecoveryLevel::Level2 => "Bozunmuş: Bazı modüller devre dışı",
+            RecoveryLevel::Level3 => "Kritik: Yalnızca minimal işlevsellik",
+            RecoveryLevel::Level4 => "Acil: Sistem durdurma yakın",
         }
     }
     
-    /// Get modules that should be disabled at this level
+    /// Bu seviyede devre dışı bırakılması gereken modülleri döndürür
     pub fn disabled_modules(&self) -> &'static [&'static str] {
         match self {
             RecoveryLevel::Level0 => &[],
@@ -221,7 +221,7 @@ impl RecoveryLevel {
         }
     }
     
-    /// Check if module should be active at this level
+    /// Modülün bu seviyede aktif olup olmayacağını kontrol eder
     pub fn is_module_active(&self, module: &str) -> bool {
         !self.disabled_modules().contains(&module)
     }

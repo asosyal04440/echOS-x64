@@ -69,7 +69,7 @@ pub struct AcpiState {
     pub pm1a_evt_blk: u16,
     /// RESET register adresi (Generic Address Structure)
     pub reset_reg_addr: u64,
-    /// RESET register address space (0=memory, 1=I/O)
+    /// RESET register adres uzayı (0=bellek, 1=I/O)
     pub reset_reg_space: u8,
     /// RESET register değeri
     pub reset_value: u8,
@@ -1109,7 +1109,7 @@ pub fn init() -> bool {
 }
 
 // ============================================================================
-// Power Management — Shutdown / Reboot / Sleep
+// Güç Yönetimi — Kapatma / Yeniden Başlatma / Uyku
 // ============================================================================
 
 /// ACPI S5 (Soft Off) ile sistemi kapat.

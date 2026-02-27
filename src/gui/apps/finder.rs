@@ -627,22 +627,13 @@ impl FinderWindow {
         let w = self.rect.width as usize;
         let h = self.rect.height as usize;
         
-        // Window background
+        // Window background (WM Cyber titlebar is drawn above this by compositor)
         fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
         fb.draw_rect_outline(x, y, w, h, Theme::BORDER.to_u32());
-        
-        // Toolbar
-        fb.draw_rect(x, y, w, TOOLBAR_HEIGHT, Theme::TOOLBAR_BG.to_u32());
-        self.draw_toolbar(fb, x, y, w);
-        
-        // Tab bar
-        let tab_y = y + TOOLBAR_HEIGHT;
-        fb.draw_rect(x, tab_y, w, TAB_BAR_HEIGHT, Theme::SIDEBAR_BG.to_u32());
-        self.draw_tabs(fb, x, tab_y, w);
-        
-        // Sidebar
-        let content_y = tab_y + TAB_BAR_HEIGHT;
-        let content_h = h - TOOLBAR_HEIGHT - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+
+        // Content starts right at the top — no built-in toolbar/tab-bar (WM provides chrome)
+        let content_y = y;
+        let content_h = h.saturating_sub(STATUS_BAR_HEIGHT);
         
         if self.show_sidebar {
             fb.draw_rect(x, content_y, SIDEBAR_WIDTH, content_h, Theme::SIDEBAR_BG.to_u32());

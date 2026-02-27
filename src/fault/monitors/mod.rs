@@ -1,6 +1,7 @@
-//! # Health Monitors
+//! # Sağlık Monitörleri
 //!
-//! Per-module health monitoring and fault detection.
+//! Modül başına sağlık izleme ve hata tespiti.
+//! Her modül için ayrı bir monitör çalışarak periyodik kontrol yapar.
 
 pub mod memory;
 pub mod cpu;
@@ -16,32 +17,32 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
 // ============================================================================
-// MONITOR TRAIT
+// MONİTÖR TRAIT'İ
 // ============================================================================
 
-/// Trait for health monitors
+/// Sağlık monitörleri için ortak trait (arayüz)
 pub trait HealthMonitor: Send + Sync {
-    /// Get module name
+    /// Modül adını döndürür
     fn name(&self) -> &'static str;
     
-    /// Check for faults
+    /// Hataları kontrol eder
     fn check(&self) -> Option<Fault>;
     
-    /// Get current health status
+    /// Mevcut sağlık durumunu döndürür
     fn health(&self) -> HealthStatus;
     
-    /// Get module health info
+    /// Modül sağlık bilgisini döndürür
     fn module_health(&self) -> ModuleHealth;
     
-    /// Reset monitor state
+    /// Monitör durumunu sıfırlar
     fn reset(&self);
 }
 
 // ============================================================================
-// MONITOR REGISTRY
+// MONİTÖR KAYIT DEFTERİ
 // ============================================================================
 
-/// Global monitor registry
+/// Global monitör kayıt defteri
 pub struct MonitorRegistry {
     monitors: spin::Mutex<Vec<&'static dyn HealthMonitor>>,
     initialized: AtomicBool,
@@ -86,7 +87,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLAŞMA
 // ============================================================================
 
 pub fn init() {
@@ -94,7 +95,7 @@ pub fn init() {
         return;
     }
     
-    // Register monitors
+    // Monitörleri kayıt et
     MONITORS.register(&memory::MEMORY_MONITOR);
     MONITORS.register(&cpu::CPU_MONITOR);
     MONITORS.register(&smp::SMP_MONITOR);

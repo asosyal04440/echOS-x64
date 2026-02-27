@@ -3,6 +3,18 @@
 //! Bare-metal grafiksel kullanıcı arayüzü.
 //! Window yönetimi, tema sistemi ve widget desteği.
 
+/// Cyber-Industrial WM temel veri yapıları (WindowId, WindowFrame, SnapTarget, ShortcutId vs.)
+pub mod echos_wm;
+
+/// Borderless pencere kontrolleri için üst komut çubuğu
+pub mod global_command_bar;
+
+/// Üst sistem paneli: CPU sparkline, RAM bar, workspace göstergesi, saat
+pub mod cyber_panel;
+
+/// Kullanıcı-alanı ELF süreçleri için çekirdek pencere sunucusu (Faz 5)
+pub mod win_server;
+
 /// Mouse cursor rendering
 pub mod cursor;
 

@@ -1,7 +1,17 @@
-//! # Tile-Based Rendering System
+//! # Döşeme Tabanlı Render Sistemi
 //!
-//! Efficient rendering using tile-based approach (like mobile GPUs)
-//! Reduces memory bandwidth by 60-80% through cache-friendly access patterns
+//! Mobil GPU'lara benzer döşeme tabanlı yaklaşım kullanarak verimli render.
+//! Önbellek dostu erişim desenleri sayesinde bellek bant genişliğini %60-80 azaltır.
+//!
+//! ## Mimari
+//! - `Tile`: Tek bir render döşemesi (piksel tamponu + kirlilik bayrağı + içerik karması)
+//! - `DirtyRect`: Kirli bölge takibi için dikdörtgen; birleştirme destekli
+//! - `TileCache`: Tüm döşemeleri yönetir; bit maskesi ile hızlı kirlilik takibi
+//! - `HierarchicalTileCache`: 3 seviyeli hiyerarşik önbellek (16x16 / 32x32 / 64x64)
+//!   - Küçük kirli alan: ince döşemeler (seviye 0)
+//!   - Orta kirli alan: varsayılan döşemeler (seviye 1)
+//!   - Büyük kirli alan: kaba döşemeler (seviye 2)
+//! - `TileRenderer`: Ana render nesnesi; kare başlatma/bitirme, geçersiz kılma
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -13,47 +23,47 @@ use super::gal::{TextureHandle, TextureDesc, TextureFormat, TextureUsage, Gal};
 use super::{Surface, SwapChain};
 
 // ============================================================================
-// TILE CONSTANTS
+// DÖŞEME SABİTLERİ
 // ============================================================================
 
-/// Default tile size (32x32 pixels - optimal for cache line size)
+/// Varsayılan döşeme boyutu (32x32 piksel - önbellek satırı için optimal)
 pub const DEFAULT_TILE_SIZE: usize = 32;
 
-/// Minimum tile size (for high detail areas)
+/// Minimum döşeme boyutu (yüksek ayrıntılı alanlar için)
 pub const MIN_TILE_SIZE: usize = 16;
 
-/// Maximum tile size (for large uniform areas)
+/// Maksimum döşeme boyutu (büyük tekdüze alanlar için)
 pub const MAX_TILE_SIZE: usize = 64;
 
-/// Maximum tiles per dimension
+/// Boyut başına maksimum döşeme sayısı
 pub const MAX_TILES: usize = 256;
 
 // ============================================================================
-// TILE STRUCTURE
+// DÖŞEME YAPISI
 // ============================================================================
 
-/// Single render tile
+/// Tek render döşemesi
 #[derive(Clone, Debug)]
 pub struct Tile {
-    /// Tile X position in tile coordinates
+    /// Döşeme koordinatlarında X konumu
     pub tx: usize,
-    /// Tile Y position in tile coordinates
+    /// Döşeme koordinatlarında Y konumu
     pub ty: usize,
-    /// Pixel X offset
+    /// Piksel X ofseti
     pub x: usize,
-    /// Pixel Y offset
+    /// Piksel Y ofseti
     pub y: usize,
-    /// Tile width in pixels
+    /// Piksel cinsinden döşeme genişliği
     pub width: usize,
-    /// Tile height in pixels
+    /// Piksel cinsinden döşeme yüksekliği
     pub height: usize,
-    /// Dirty flag
+    /// Kirlilik bayrağı
     pub dirty: bool,
-    /// Content hash for change detection
+    /// Değişim tespiti için içerik karması
     pub content_hash: u64,
-    /// Tile surface buffer
+    /// Döşeme yüzey tamponu
     pub buffer: Vec<u32>,
-    /// Last frame rendered
+    /// Son render edilen kare
     pub last_frame: u64,
 }
 
@@ -72,8 +82,8 @@ impl Tile {
             last_frame: 0,
         }
     }
-    
-    /// Clear tile to a color
+
+    /// Döşemeyi bir renkle temizle
     #[inline]
     pub fn clear(&mut self, color: u32) {
         for pixel in &mut self.buffer {
@@ -81,8 +91,8 @@ impl Tile {
         }
         self.dirty = true;
     }
-    
-    /// Set pixel in tile-local coordinates
+
+    /// Döşeme yerel koordinatlarında piksel ayarla
     #[inline]
     pub fn set_pixel(&mut self, local_x: usize, local_y: usize, color: u32) {
         if local_x < self.width && local_y < self.height {
@@ -90,8 +100,8 @@ impl Tile {
             self.dirty = true;
         }
     }
-    
-    /// Get pixel from tile-local coordinates
+
+    /// Döşeme yerel koordinatlarından piksel al
     #[inline]
     pub fn get_pixel(&self, local_x: usize, local_y: usize) -> u32 {
         if local_x < self.width && local_y < self.height {
@@ -100,32 +110,32 @@ impl Tile {
             0
         }
     }
-    
-    /// Copy tile to framebuffer
+
+    /// Döşemeyi çerçeve tamponuna kopyala
     pub fn blit_to_framebuffer(&self, fb: &mut [u32], fb_stride: usize, fb_width: usize, fb_height: usize) {
         for row in 0..self.height {
             let fb_y = self.y + row;
             if fb_y >= fb_height {
                 break;
             }
-            
+
             let fb_offset = fb_y * fb_stride + self.x;
             let tile_offset = row * self.width;
-            
+
             for col in 0..self.width {
                 let fb_x = self.x + col;
                 if fb_x >= fb_width {
                     break;
                 }
-                
+
                 fb[fb_offset + col] = self.buffer[tile_offset + col];
             }
         }
     }
-    
-    /// Compute content hash for change detection
+
+    /// Değişim tespiti için içerik karmasını hesapla
     pub fn compute_hash(&mut self) {
-        // Simple hash: XOR of all pixels
+        // Basit karma: tüm piksellerin XOR'u
         let mut hash: u64 = 0;
         for (i, pixel) in self.buffer.iter().enumerate() {
             hash ^= (*pixel as u64).wrapping_add((i as u64).wrapping_mul(31));
@@ -135,10 +145,10 @@ impl Tile {
 }
 
 // ============================================================================
-// DIRTY RECTANGLE
+// KİRLİ DİKDÖRTGEN
 // ============================================================================
 
-/// Rectangle for dirty region tracking
+/// Kirli bölge takibi için dikdörtgen
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DirtyRect {
     pub x: i32,
@@ -151,29 +161,29 @@ impl DirtyRect {
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
         DirtyRect { x, y, width, height }
     }
-    
+
     pub fn empty() -> Self {
         DirtyRect { x: 0, y: 0, width: 0, height: 0 }
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.width <= 0 || self.height <= 0
     }
-    
-    /// Check if point is inside
+
+    /// Noktanın içinde olup olmadığını kontrol et
     pub fn contains(&self, px: i32, py: i32) -> bool {
         px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
     }
-    
-    /// Check if two rectangles intersect
+
+    /// İki dikdörtgenin kesişip kesişmediğini kontrol et
     pub fn intersects(&self, other: &DirtyRect) -> bool {
         self.x < other.x + other.width
             && self.x + self.width > other.x
             && self.y < other.y + other.height
             && self.y + self.height > other.y
     }
-    
-    /// Union of two rectangles
+
+    /// İki dikdörtgenin birleşimi
     pub fn union(&self, other: &DirtyRect) -> DirtyRect {
         if self.is_empty() {
             return *other;
@@ -181,30 +191,30 @@ impl DirtyRect {
         if other.is_empty() {
             return *self;
         }
-        
+
         let x = min(self.x, other.x);
         let y = min(self.y, other.y);
         let right = max(self.x + self.width, other.x + other.width);
         let bottom = max(self.y + self.height, other.y + other.height);
-        
+
         DirtyRect::new(x, y, right - x, bottom - y)
     }
-    
-    /// Intersection of two rectangles
+
+    /// İki dikdörtgenin kesişimi
     pub fn intersection(&self, other: &DirtyRect) -> DirtyRect {
         if !self.intersects(other) {
             return DirtyRect::empty();
         }
-        
+
         let x = max(self.x, other.x);
         let y = max(self.y, other.y);
         let right = min(self.x + self.width, other.x + other.width);
         let bottom = min(self.y + self.height, other.y + other.height);
-        
+
         DirtyRect::new(x, y, right - x, bottom - y)
     }
-    
-    /// Expand rectangle by amount
+
+    /// Dikdörtgeni belirli miktarda genişlet
     pub fn expand(&self, amount: i32) -> DirtyRect {
         DirtyRect::new(
             self.x - amount,
@@ -216,61 +226,61 @@ impl DirtyRect {
 }
 
 // ============================================================================
-// TILE CACHE
+// DÖŞEME ÖNBELLEĞİ
 // ============================================================================
 
-/// Tile cache for efficient rendering
+/// Verimli render için döşeme önbelleği
 pub struct TileCache {
-    /// All tiles
+    /// Tüm döşemeler
     tiles: Vec<Tile>,
-    /// Number of tiles per row
+    /// Satır başına döşeme sayısı
     tiles_x: usize,
-    /// Number of tiles per column
+    /// Sütun başına döşeme sayısı
     tiles_y: usize,
-    /// Tile size in pixels
+    /// Piksel cinsinden döşeme boyutu
     tile_size: usize,
-    /// Screen width
+    /// Ekran genişliği
     width: usize,
-    /// Screen height
+    /// Ekran yüksekliği
     height: usize,
-    /// Dirty rectangles (for merging)
+    /// Kirli dikdörtgenler (birleştirme için)
     dirty_rects: Vec<DirtyRect>,
-    /// Dirty tile mask (bit per tile)
+    /// Kirli döşeme maskesi (döşeme başına bir bit)
     dirty_mask: Vec<u64>,
-    /// Frame counter
+    /// Kare sayacı
     frame_count: u64,
-    /// Adaptive tile sizes per region
+    /// Bölge başına uyarlanabilir döşeme boyutları
     adaptive_sizes: BTreeMap<(usize, usize), usize>,
 }
 
 impl TileCache {
-    /// Create new tile cache
+    /// Yeni döşeme önbelleği oluştur
     pub fn new(width: usize, height: usize) -> Self {
         Self::with_tile_size(width, height, DEFAULT_TILE_SIZE)
     }
-    
-    /// Create tile cache with specific tile size
+
+    /// Belirli döşeme boyutuyla döşeme önbelleği oluştur
     pub fn with_tile_size(width: usize, height: usize, tile_size: usize) -> Self {
         let tiles_x = (width + tile_size - 1) / tile_size;
         let tiles_y = (height + tile_size - 1) / tile_size;
         let total_tiles = tiles_x * tiles_y;
-        
+
         let mut tiles = Vec::with_capacity(total_tiles);
-        
+
         for ty in 0..tiles_y {
             for tx in 0..tiles_x {
                 let x = tx * tile_size;
                 let y = ty * tile_size;
                 let w = min(tile_size, width - x);
                 let h = min(tile_size, height - y);
-                
+
                 tiles.push(Tile::new(tx, ty, x, y, w, h));
             }
         }
-        
-        // Calculate number of u64 words needed for dirty mask
+
+        // Kirli maske için gereken u64 kelime sayısını hesapla
         let mask_words = (total_tiles + 63) / 64;
-        
+
         TileCache {
             tiles,
             tiles_x,
@@ -284,104 +294,104 @@ impl TileCache {
             adaptive_sizes: BTreeMap::new(),
         }
     }
-    
-    /// Get tile count
+
+    /// Döşeme sayısını al
     pub fn tile_count(&self) -> usize {
         self.tiles.len()
     }
-    
-    /// Get tile at pixel coordinates
+
+    /// Piksel koordinatlarındaki döşemeyi al
     pub fn get_tile_at(&self, x: usize, y: usize) -> Option<&Tile> {
         if x >= self.width || y >= self.height {
             return None;
         }
-        
+
         let tx = x / self.tile_size;
         let ty = y / self.tile_size;
         let idx = ty * self.tiles_x + tx;
-        
+
         self.tiles.get(idx)
     }
-    
-    /// Get mutable tile at pixel coordinates
+
+    /// Piksel koordinatlarındaki döşemeyi değiştirilebilir olarak al
     pub fn get_tile_at_mut(&mut self, x: usize, y: usize) -> Option<&mut Tile> {
         if x >= self.width || y >= self.height {
             return None;
         }
-        
+
         let tx = x / self.tile_size;
         let ty = y / self.tile_size;
         let idx = ty * self.tiles_x + tx;
-        
+
         self.tiles.get_mut(idx)
     }
-    
-    /// Get tile by tile coordinates
+
+    /// Döşeme koordinatlarıyla döşemeyi al
     pub fn get_tile(&self, tx: usize, ty: usize) -> Option<&Tile> {
         if tx >= self.tiles_x || ty >= self.tiles_y {
             return None;
         }
-        
+
         let idx = ty * self.tiles_x + tx;
         self.tiles.get(idx)
     }
-    
-    /// Get mutable tile by tile coordinates
+
+    /// Döşeme koordinatlarıyla döşemeyi değiştirilebilir olarak al
     pub fn get_tile_mut(&mut self, tx: usize, ty: usize) -> Option<&mut Tile> {
         if tx >= self.tiles_x || ty >= self.tiles_y {
             return None;
         }
-        
+
         let idx = ty * self.tiles_x + tx;
         self.tiles.get_mut(idx)
     }
-    
-    /// Mark a region as dirty
+
+    /// Bir bölgeyi kirli olarak işaretle
     pub fn mark_dirty(&mut self, x: i32, y: i32, width: i32, height: i32) {
-        // Clip to screen bounds
+        // Ekran sınırlarına kırp
         let x = max(0, x) as usize;
         let y = max(0, y) as usize;
         let width = min(width as usize, self.width.saturating_sub(x));
         let height = min(height as usize, self.height.saturating_sub(y));
-        
+
         if width == 0 || height == 0 {
             return;
         }
-        
-        // Calculate affected tiles
+
+        // Etkilenen döşemeleri hesapla
         let tx1 = x / self.tile_size;
         let ty1 = y / self.tile_size;
         let tx2 = (x + width - 1) / self.tile_size;
         let ty2 = (y + height - 1) / self.tile_size;
-        
-        // Mark tiles dirty in mask
+
+        // Döşemeleri maskede kirli olarak işaretle
         for ty in ty1..=ty2 {
             for tx in tx1..=tx2 {
                 let idx = ty * self.tiles_x + tx;
                 let word = idx / 64;
                 let bit = idx % 64;
-                
+
                 if word < self.dirty_mask.len() {
                     self.dirty_mask[word] |= 1u64 << bit;
                 }
-                
-                // Also mark the tile struct
+
+                // Döşeme yapısını da işaretle
                 if let Some(tile) = self.tiles.get_mut(idx) {
                     tile.dirty = true;
                 }
             }
         }
-        
-        // Add to dirty rectangles for merging
+
+        // Birleştirme için kirli dikdörtgenlere ekle
         self.push_dirty_rect(DirtyRect::new(x as i32, y as i32, width as i32, height as i32));
     }
-    
-    /// Add dirty rectangle with merging
+
+    /// Birleştirmeli kirli dikdörtgen ekle
     fn push_dirty_rect(&mut self, rect: DirtyRect) {
-        // Try to merge with existing rectangles
+        // Mevcut dikdörtgenlerle birleştirmeyi dene
         let mut merged = rect;
         let mut i = 0;
-        
+
         while i < self.dirty_rects.len() {
             if merged.intersects(&self.dirty_rects[i]) {
                 merged = merged.union(&self.dirty_rects[i]);
@@ -390,12 +400,12 @@ impl TileCache {
                 i += 1;
             }
         }
-        
+
         self.dirty_rects.push(merged);
-        
-        // Limit number of dirty rectangles
+
+        // Kirli dikdörtgen sayısını sınırla
         if self.dirty_rects.len() > 32 {
-            // Merge all into one
+            // Hepsini tek bir dikdörtgene birleştir
             let mut all = DirtyRect::empty();
             for r in self.dirty_rects.drain(..) {
                 all = all.union(&r);
@@ -403,26 +413,26 @@ impl TileCache {
             self.dirty_rects.push(all);
         }
     }
-    
-    /// Check if tile is dirty
+
+    /// Döşemenin kirli olup olmadığını kontrol et
     pub fn is_tile_dirty(&self, tx: usize, ty: usize) -> bool {
         let idx = ty * self.tiles_x + tx;
         let word = idx / 64;
         let bit = idx % 64;
-        
+
         if word < self.dirty_mask.len() {
             (self.dirty_mask[word] & (1u64 << bit)) != 0
         } else {
             false
         }
     }
-    
-    /// Get all dirty rectangles
+
+    /// Tüm kirli dikdörtgenleri al
     pub fn get_dirty_rects(&self) -> &[DirtyRect] {
         &self.dirty_rects
     }
-    
-    /// Get dirty tile count
+
+    /// Kirli döşeme sayısını al
     pub fn dirty_tile_count(&self) -> usize {
         let mut count = 0;
         for &mask in &self.dirty_mask {
@@ -430,8 +440,8 @@ impl TileCache {
         }
         count
     }
-    
-    /// Clear dirty flags
+
+    /// Kirlilik bayraklarını temizle
     pub fn clear_dirty(&mut self) {
         for mask in &mut self.dirty_mask {
             *mask = 0;
@@ -441,23 +451,23 @@ impl TileCache {
         }
         self.dirty_rects.clear();
     }
-    
-    /// Render all dirty tiles to framebuffer
+
+    /// Tüm kirli döşemeleri çerçeve tamponuna render et
     pub fn render_to_framebuffer(&mut self, fb: &mut [u32], fb_stride: usize) -> usize {
         let mut rendered = 0;
         self.frame_count += 1;
-        
+
         for (idx, tile) in self.tiles.iter_mut().enumerate() {
-            // Check if dirty using mask
+            // Maske kullanarak kirli olup olmadığını kontrol et
             let word = idx / 64;
             let bit = idx % 64;
-            
+
             let is_dirty = if word < self.dirty_mask.len() {
                 (self.dirty_mask[word] & (1u64 << bit)) != 0
             } else {
                 false
             };
-            
+
             if is_dirty || tile.dirty {
                 tile.blit_to_framebuffer(fb, fb_stride, self.width, self.height);
                 tile.dirty = false;
@@ -465,51 +475,51 @@ impl TileCache {
                 rendered += 1;
             }
         }
-        
-        // Clear dirty mask
+
+        // Kirli maskeyi temizle
         self.clear_dirty();
-        
+
         rendered
     }
-    
-    /// Resize tile cache
+
+    /// Döşeme önbelleğini yeniden boyutlandır
     pub fn resize(&mut self, width: usize, height: usize) {
         if width == self.width && height == self.height {
             return;
         }
-        
+
         *self = Self::with_tile_size(width, height, self.tile_size);
     }
-    
-    /// Get screen dimensions
+
+    /// Ekran boyutlarını al
     pub fn dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
     }
-    
-    /// Get tile dimensions
+
+    /// Döşeme boyutlarını al
     pub fn tile_dimensions(&self) -> (usize, usize) {
         (self.tiles_x, self.tiles_y)
     }
-    
-    /// Get tile size
+
+    /// Döşeme boyutunu al
     pub fn tile_size(&self) -> usize {
         self.tile_size
     }
 }
 
 // ============================================================================
-// HIERARCHICAL TILE CACHE
+// HİYERARŞİK DÖŞEME ÖNBELLEĞİ
 // ============================================================================
 
-/// Multi-level tile cache for adaptive rendering
+/// Uyarlanabilir render için çok seviyeli döşeme önbelleği
 pub struct HierarchicalTileCache {
-    /// Level 0: Fine detail (16x16 tiles)
+    /// Seviye 0: İnce ayrıntı (16x16 döşemeler)
     level0: TileCache,
-    /// Level 1: Medium detail (32x32 tiles)
+    /// Seviye 1: Orta ayrıntı (32x32 döşemeler)
     level1: TileCache,
-    /// Level 2: Coarse detail (64x64 tiles)
+    /// Seviye 2: Kaba ayrıntı (64x64 döşemeler)
     level2: TileCache,
-    /// Current active level
+    /// Mevcut aktif seviye
     active_level: u8,
 }
 
@@ -522,18 +532,18 @@ impl HierarchicalTileCache {
             active_level: 1,
         }
     }
-    
-    /// Mark region dirty at all levels
+
+    /// Tüm seviyelerde bölgeyi kirli olarak işaretle
     pub fn mark_dirty(&mut self, x: i32, y: i32, width: i32, height: i32) {
         self.level0.mark_dirty(x, y, width, height);
         self.level1.mark_dirty(x, y, width, height);
         self.level2.mark_dirty(x, y, width, height);
     }
-    
-    /// Select appropriate level based on dirty region size
+
+    /// Kirli bölge boyutuna göre uygun seviyeyi seç
     pub fn select_level(&mut self, dirty_area: usize) {
-        // Small dirty area: use fine tiles
-        // Large dirty area: use coarse tiles
+        // Küçük kirli alan: ince döşemeler kullan
+        // Büyük kirli alan: kaba döşemeler kullan
         if dirty_area < 100 * 100 {
             self.active_level = 0;
         } else if dirty_area < 300 * 300 {
@@ -542,8 +552,8 @@ impl HierarchicalTileCache {
             self.active_level = 2;
         }
     }
-    
-    /// Get active level cache
+
+    /// Aktif seviye önbelleğini al
     pub fn active(&mut self) -> &mut TileCache {
         match self.active_level {
             0 => &mut self.level0,
@@ -552,7 +562,7 @@ impl HierarchicalTileCache {
         }
     }
 
-    /// Get active level cache (read-only)
+    /// Aktif seviye önbelleğini salt okunur olarak al
     pub fn active_ref(&self) -> &TileCache {
         match self.active_level {
             0 => &self.level0,
@@ -560,18 +570,18 @@ impl HierarchicalTileCache {
             _ => &self.level1,
         }
     }
-    
-    /// Render to framebuffer using best level
+
+    /// En iyi seviyeyi kullanarak çerçeve tamponuna render et
     pub fn render_to_framebuffer(&mut self, fb: &mut [u32], fb_stride: usize) -> usize {
-        // Select level based on dirty area
+        // Kirli alana göre seviye seç
         let dirty_count = self.level1.dirty_tile_count();
         self.select_level(dirty_count * DEFAULT_TILE_SIZE * DEFAULT_TILE_SIZE);
-        
-        // Render from active level
+
+        // Aktif seviyeden render et
         self.active().render_to_framebuffer(fb, fb_stride)
     }
-    
-    /// Resize all levels
+
+    /// Tüm seviyeleri yeniden boyutlandır
     pub fn resize(&mut self, width: usize, height: usize) {
         self.level0.resize(width, height);
         self.level1.resize(width, height);
@@ -580,20 +590,20 @@ impl HierarchicalTileCache {
 }
 
 // ============================================================================
-// TILE RENDERER
+// DÖŞEME RENDER EDİCİ
 // ============================================================================
 
-/// Main tile-based renderer
+/// Ana döşeme tabanlı render edici
 pub struct TileRenderer {
-    /// Tile cache
+    /// Döşeme önbelleği
     cache: HierarchicalTileCache,
-    /// Frame counter
+    /// Kare sayacı
     frame: u64,
-    /// Last frame time in microseconds
+    /// Mikrosaniye cinsinden son kare süresi
     last_frame_time: u64,
-    /// Average frame time
+    /// Ortalama kare süresi
     avg_frame_time: u64,
-    /// Frames since last stats update
+    /// Son istatistik güncellemesinden bu yana kare sayısı
     stats_frames: u64,
 }
 
@@ -607,69 +617,69 @@ impl TileRenderer {
             stats_frames: 0,
         }
     }
-    
-    /// Begin a new frame
+
+    /// Yeni kare başlat
     pub fn begin_frame(&mut self) {
         self.frame += 1;
     }
-    
-    /// End frame and render
+
+    /// Kareyi bitir ve render et
     pub fn end_frame(&mut self, fb: &mut [u32], fb_stride: usize) -> usize {
         let rendered = self.cache.render_to_framebuffer(fb, fb_stride);
-        
-        // Update stats
+
+        // İstatistikleri güncelle
         self.stats_frames += 1;
         if self.stats_frames >= 60 {
-            self.avg_frame_time = self.last_frame_time; // Simplified
+            self.avg_frame_time = self.last_frame_time; // Basitleştirilmiş
             self.stats_frames = 0;
         }
-        
+
         rendered
     }
-    
-    /// Mark region for redraw
+
+    /// Bölgeyi yeniden çizim için geçersiz kıl
     pub fn invalidate(&mut self, x: i32, y: i32, width: i32, height: i32) {
-        // Expand by 1 pixel to handle anti-aliasing
+        // Kenar yumuşatmayı işlemek için 1 piksel genişlet
         let rect = DirtyRect::new(x, y, width, height).expand(1);
         self.cache.mark_dirty(rect.x, rect.y, rect.width, rect.height);
     }
-    
-    /// Invalidate entire screen
+
+    /// Tüm ekranı geçersiz kıl
     pub fn invalidate_all(&mut self, width: usize, height: usize) {
         self.cache.mark_dirty(0, 0, width as i32, height as i32);
     }
-    
-    /// Get tile at coordinates
+
+    /// Koordinatlardaki döşemeyi al
     pub fn get_tile(&mut self, x: usize, y: usize) -> Option<&mut Tile> {
         self.cache.active().get_tile_at_mut(x, y)
     }
-    
-    /// Resize renderer
+
+    /// Render ediciyi yeniden boyutlandır
     pub fn resize(&mut self, width: usize, height: usize) {
         self.cache.resize(width, height);
     }
-    
-    /// Get frame count
+
+    /// Kare sayısını al
     pub fn frame(&self) -> u64 {
         self.frame
     }
-    
-    /// Get dirty tile count
+
+    /// Kirli döşeme sayısını al
     pub fn dirty_count(&self) -> usize {
         self.cache.active_ref().dirty_tile_count()
     }
-    
-    /// Get dirty rectangles
+
+    /// Kirli dikdörtgenleri al
     pub fn dirty_rects(&self) -> &[DirtyRect] {
         self.cache.active_ref().get_dirty_rects()
     }
 }
 
 // ============================================================================
-// UTILITY FUNCTIONS
+// ARAÇ FONKSİYONLARI
 // ============================================================================
 
-/// Calculate tile index from pixel coordinates
+/// Piksel koordinatlarından döşeme indeksini hesapla
 #[inline]
 pub fn pixel_to_tile(x: usize, y: usize, tile_size: usize, tiles_per_row: usize) -> usize {
     let tx = x / tile_size;
@@ -677,7 +687,7 @@ pub fn pixel_to_tile(x: usize, y: usize, tile_size: usize, tiles_per_row: usize)
     ty * tiles_per_row + tx
 }
 
-/// Calculate pixel coordinates from tile index
+/// Döşeme indeksinden piksel koordinatlarını hesapla
 #[inline]
 pub fn tile_to_pixel(tile_idx: usize, tile_size: usize, tiles_per_row: usize) -> (usize, usize) {
     let tx = tile_idx % tiles_per_row;
@@ -685,7 +695,7 @@ pub fn tile_to_pixel(tile_idx: usize, tile_size: usize, tiles_per_row: usize) ->
     (tx * tile_size, ty * tile_size)
 }
 
-/// Calculate number of tiles needed
+/// Gereken döşeme sayısını hesapla
 #[inline]
 pub fn calculate_tile_count(width: usize, height: usize, tile_size: usize) -> (usize, usize, usize) {
     let tiles_x = (width + tile_size - 1) / tile_size;

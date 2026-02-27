@@ -6,4 +6,4 @@ set SIMICS_PYTHON_PACKAGE=D:\Intel Simics Package Manager\simics-python-7.14.0\w
 if "%SIMICS_PYTHON%"=="" (
     set "SIMICS_PYTHON="
 )
-"D:\Intel Simics Package Manager\simics-systemc-library-7.23.0\bin\build-systemc-libraries.bat"  %*
+"D:\Intel Simics Package Manager\simics-7.70.0\..\simics-systemc-library-7.23.0\bin\build-systemc-libraries.bat"  %*

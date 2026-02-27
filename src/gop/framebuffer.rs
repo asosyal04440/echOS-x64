@@ -153,4 +153,19 @@ impl Framebuffer {
         let len = self.pixels_per_scan_line * self.height;
         unsafe { core::slice::from_raw_parts_mut(self.base_addr as *mut u32, len) }
     }
+
+    /// Çift tamponlamayı etkinleştirir (stub — GOP tek tampon kullanır).
+    /// desktop::run() tarafından çağrılır; GOP doğrudan fiziksel belleğe yazar
+    /// bu yüzden ek bir arka tampon gerekmez.
+    pub fn enable_double_buffering(&mut self) {
+        // GOP framebuffer tek tamponda çalışır; bu fonksiyon gelecekteki
+        // shadow-buffer implementasyonu için yer tutucudur.
+    }
+
+    /// Arka tamponu ön tampona kopyalar (stub — GOP tek tampon kullanır).
+    /// desktop::run() her kare sonunda bunu çağırır.
+    pub fn swap_buffers(&mut self) {
+        // Tek tampon modunda yazılan her piksel zaten ekrana gider;
+        // gerçek bir double-buffer için burada blit yapılacak.
+    }
 }

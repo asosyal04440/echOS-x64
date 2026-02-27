@@ -1,7 +1,7 @@
-//! # Fault Injection
+//! # Hata Enjeksiyonu (Fault Injection)
 //!
-//! Testing framework for fault injection and recovery verification.
-//! Only available in debug builds.
+//! Hata enjeksiyonu ve kurtarma doğrulaması için test çerçevesi.
+//! Yalnızca debug (hata ayıklama) derlemelerinde kullanılabilir.
 
 #[cfg(debug_assertions)]
 use alloc::string::String;
@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use crate::fault::{Fault, FaultSource, FaultType};
 
 // ============================================================================
-// FAULT INJECTION (DEBUG ONLY)
+// HATA ENJEKSİYONU (YALNİZCA DEBUG)
 // ============================================================================
 
 #[cfg(debug_assertions)]
@@ -29,12 +29,12 @@ impl FaultInjector {
         }
     }
     
-    /// Enable/disable fault injection
+    /// Hata enjeksiyonunu etkinleştirir/devre dışı bırakır
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, core::sync::atomic::Ordering::SeqCst);
     }
     
-    /// Inject a specific fault
+    /// Belirtilen kaynaktan belirtilen türde bir hata enjekte eder
     pub fn inject(&self, source: FaultSource, fault_type: FaultType, message: &str) {
         if !self.enabled.load(core::sync::atomic::Ordering::SeqCst) {
             return;
@@ -50,43 +50,43 @@ impl FaultInjector {
         crate::fault::hub::report(source, fault_type, message);
     }
     
-    /// Inject memory fault
+    /// Bellek hatası enjekte eder (heap bozulması)
     pub fn inject_memory_fault(&self) {
         self.inject(
             FaultSource::Memory,
             FaultType::HeapCorruption,
-            "Injected heap corruption for testing"
+            "Test amacıyla heap bozulması enjekte edildi"
         );
     }
     
-    /// Inject OOM
+    /// Bellek yetersizliği (OOM) hatası enjekte eder
     pub fn inject_oom(&self) {
         self.inject(
             FaultSource::Memory,
             FaultType::OutOfMemory,
-            "Injected OOM for testing"
+            "Test amacıyla OOM enjekte edildi"
         );
     }
     
-    /// Inject driver fault
+    /// Aygıt sürücsü hatası enjekte eder
     pub fn inject_driver_fault(&self) {
         self.inject(
             FaultSource::Driver,
             FaultType::DeviceTimeout,
-            "Injected device timeout for testing"
+            "Test amacıyla cihaz zaman aşımı enjekte edildi"
         );
     }
     
-    /// Inject scheduler fault
+    /// Zamanlayıcı hatası enjekte eder
     pub fn inject_scheduler_fault(&self) {
         self.inject(
             FaultSource::Scheduler,
             FaultType::TaskLeak,
-            "Injected task leak for testing"
+            "Test amacıyla görev sızıntısı enjekte edildi"
         );
     }
     
-    /// Get injection count
+    /// Toplam enjeksiyon sayısını döndürür
     pub fn count(&self) -> u64 {
         self.injection_count.load(core::sync::atomic::Ordering::SeqCst)
     }
@@ -98,41 +98,41 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// TEST SCENARIOS
+// TEST SENARYOLARI
 // ============================================================================
 
 #[cfg(debug_assertions)]
 pub fn run_test_scenarios() {
-    crate::serial_println!("[FAULT_INJECT] Running fault injection test scenarios");
+    crate::serial_println!("[FAULT_INJECT] Hata enjeksiyonu test senaryoları çalıştırılıyor");
     
-    // Enable injection
+    // Enjeksiyonu etkinleştir
     FAULT_INJECTOR.set_enabled(true);
     
-    // Test 1: Memory fault
-    crate::serial_println!("[FAULT_INJECT] Test 1: Memory fault");
+    // Test 1: Bellek hatası
+    crate::serial_println!("[FAULT_INJECT] Test 1: Bellek hatası");
     FAULT_INJECTOR.inject_oom();
     
-    // Test 2: Driver fault
-    crate::serial_println!("[FAULT_INJECT] Test 2: Driver fault");
+    // Test 2: Sürücsü hatası
+    crate::serial_println!("[FAULT_INJECT] Test 2: Sürücsü hatası");
     FAULT_INJECTOR.inject_driver_fault();
     
-    // Test 3: Scheduler fault
-    crate::serial_println!("[FAULT_INJECT] Test 3: Scheduler fault");
+    // Test 3: Zamanlayıcı hatası
+    crate::serial_println!("[FAULT_INJECT] Test 3: Zamanlayıcı hatası");
     FAULT_INJECTOR.inject_scheduler_fault();
     
-    // Report results
+    // Sonuçları raporla
     let stats = crate::fault::get_stats();
     crate::serial_println!(
-        "[FAULT_INJECT] Test complete: {} faults injected, {} recoveries",
+        "[FAULT_INJECT] Test tamamlandı: {} hata enjekte edildi, {} kurtarma",
         FAULT_INJECTOR.count(),
         stats.total_recoveries
     );
     
-    // Disable injection
+    // Enjeksiyonu devre dışı bırak
     FAULT_INJECTOR.set_enabled(false);
 }
 
 #[cfg(not(debug_assertions))]
 pub fn run_test_scenarios() {
-    // No-op in release builds
+    // Release derlemesinde işlem yok
 }

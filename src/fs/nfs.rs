@@ -1,6 +1,6 @@
-//! # NFS Client
+//! # NFS İstemcisi
 //!
-//! NFSv4 client implementation for network file systems.
+//! Ağ dosya sistemleri için NFSv4 istemci uygulaması.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// NFS CONSTANTS
+// NFS SABİTLERİ
 // ============================================================================
 
 /// NFS version
@@ -78,7 +78,7 @@ pub const NFS4ERR_ROFS: i32 = 30;
 pub const NFS4ERR_STALE: i32 = 10008;
 
 // ============================================================================
-// NFS FILE HANDLE
+// NFS DOSYA TUTACAĞI
 // ============================================================================
 
 #[derive(Clone, Debug)]
@@ -97,7 +97,7 @@ impl NfsFh {
 }
 
 // ============================================================================
-// NFS ATTRIBUTES
+// NFS ATTRİBUTLE RI
 // ============================================================================
 
 #[derive(Clone, Debug)]
@@ -114,41 +114,41 @@ pub struct NfsAttr {
     pub fileid: u64,
 }
 
-/// File types
-pub const NF4REG: u32 = 1;  // Regular file
-pub const NF4DIR: u32 = 2;  // Directory
-pub const NF4BLK: u32 = 3;  // Block device
-pub const NF4CHR: u32 = 4;  // Character device
-pub const NF4LNK: u32 = 5;  // Symbolic link
-pub const NF4SOCK: u32 = 6; // Socket
-pub const NF4FIFO: u32 = 7; // Named pipe
+/// Dosya türleri
+pub const NF4REG: u32 = 1;  // Normal dosya
+pub const NF4DIR: u32 = 2;  // Dizin
+pub const NF4BLK: u32 = 3;  // Blok aygıt
+pub const NF4CHR: u32 = 4;  // Karakter aygıt
+pub const NF4LNK: u32 = 5;  // Sembolik bağ
+pub const NF4SOCK: u32 = 6; // Soket
+pub const NF4FIFO: u32 = 7; // İsimsiz boru (FIFO)
 
 // ============================================================================
-// NFS CLIENT
+// NFS İSTEM CİSİ
 // ============================================================================
 
 pub struct NfsClient {
-    /// Server address
+    /// Sunucu adresi
     pub server_addr: [u8; 4],
-    /// Server port
+    /// Sunucu portu
     pub server_port: u16,
-    /// Client ID
+    /// İstemci ID'si
     pub client_id: AtomicU64,
-    /// Verifier
+    /// Doğrulama kodu
     pub verifier: AtomicU64,
-    /// Current file handle
+    /// Mevcut dosya tutacağı
     pub current_fh: Mutex<NfsFh>,
-    /// Saved file handle
+    /// Kaydedilen dosya tutacağı
     pub saved_fh: Mutex<Option<NfsFh>>,
-    /// Mount point
+    /// Bağlama noktası
     pub mount_point: String,
-    /// Connected flag
+    /// Bağlantı durumu
     pub connected: AtomicBool,
-    /// Sequence ID
+    /// Sıra ID'si
     pub seqid: AtomicU32,
-    /// Open files
+    /// Açık dosyalar
     pub open_files: Mutex<BTreeMap<u64, NfsOpenFile>>,
-    /// Statistics
+    /// İstatistikler
     pub stats: Mutex<NfsStats>,
 }
 
@@ -187,9 +187,9 @@ impl NfsClient {
         }
     }
 
-    /// Connect to server
+    /// Sunucuya bağlanır
     pub fn connect(&self) -> Result<(), NfsError> {
-        // Establish TCP connection to server
+        // Sunucuya TCP bağlantısı kur
         self.connected.store(true, Ordering::SeqCst);
         
         crate::serial_println!("[NFS] Connected to {}.{}.{}.{}:{}", 
@@ -200,35 +200,35 @@ impl NfsClient {
         Ok(())
     }
 
-    /// Set client ID
+    /// İstemci ID'sini ayarlar
     pub fn setclientid(&self) -> Result<u64, NfsError> {
-        // Send SETCLIENTID request
-        let id = 1u64; // Would be generated
+        // SETCLIENTID isteği gönder
+        let id = 1u64; // Oluşturulacak
         self.client_id.store(id, Ordering::SeqCst);
         Ok(id)
     }
 
-    /// Get root file handle
+    /// Kök dosya tutacağını alır
     pub fn get_root_fh(&self) -> Result<NfsFh, NfsError> {
-        // PUTROOTFH operation
+        // PUTROOTFH işlemi
         let fh = NfsFh::root();
         *self.current_fh.lock() = fh.clone();
         Ok(fh)
     }
 
-    /// Lookup path component
+    /// Yol bileşenini arar
     pub fn lookup(&self, name: &str) -> Result<NfsFh, NfsError> {
-        // LOOKUP operation
+        // LOOKUP işlemi
         let mut stats = self.stats.lock();
         stats.ops += 1;
         
-        // Would send LOOKUP request
+        // LOOKUP isteği gönderilecek
         Ok(NfsFh::new(vec![0; 32]))
     }
 
-    /// Get attributes
+    /// Dosya özelliklerini getirir
     pub fn getattr(&self, fh: &NfsFh) -> Result<NfsAttr, NfsError> {
-        // GETATTR operation
+        // GETATTR işlemi
         Ok(NfsAttr {
             type_: NF4REG,
             size: 0,
@@ -243,9 +243,9 @@ impl NfsClient {
         })
     }
 
-    /// Read from file
+    /// Dosyadan okur
     pub fn read(&self, fh: &NfsFh, offset: u64, buf: &mut [u8]) -> Result<usize, NfsError> {
-        // READ operation
+        // READ işlemi
         let mut stats = self.stats.lock();
         stats.ops += 1;
         stats.reads += 1;
@@ -254,9 +254,9 @@ impl NfsClient {
         Ok(buf.len())
     }
 
-    /// Write to file
+    /// Dosyaya yazar
     pub fn write(&self, fh: &NfsFh, offset: u64, data: &[u8]) -> Result<usize, NfsError> {
-        // WRITE operation
+        // WRITE işlemi
         let mut stats = self.stats.lock();
         stats.ops += 1;
         stats.writes += 1;
@@ -265,33 +265,33 @@ impl NfsClient {
         Ok(data.len())
     }
 
-    /// Create file
+    /// Dosya oluşturur
     pub fn create(&self, name: &str, mode: u32) -> Result<NfsFh, NfsError> {
-        // CREATE operation
+        // CREATE işlemi
         Ok(NfsFh::new(vec![0; 32]))
     }
 
-    /// Remove file
+    /// Dosyayı siler
     pub fn remove(&self, name: &str) -> Result<(), NfsError> {
-        // REMOVE operation
+        // REMOVE işlemi
         Ok(())
     }
 
-    /// Read directory
+    /// Dizin okur
     pub fn readdir(&self, fh: &NfsFh, cookie: u64) -> Result<Vec<NfsDirEntry>, NfsError> {
-        // READDIR operation
+        // READDIR işlemi
         Ok(Vec::new())
     }
 
-    /// Close file
+    /// Dosyayı kapatir
     pub fn close(&self, stateid: [u8; 16]) -> Result<(), NfsError> {
-        // CLOSE operation
+        // CLOSE işlemi
         Ok(())
     }
 
-    /// Commit data
+    /// Veriyi diske zorünlu yazar
     pub fn commit(&self, fh: &NfsFh) -> Result<(), NfsError> {
-        // COMMIT operation
+        // COMMIT işlemi
         Ok(())
     }
 }
@@ -305,7 +305,7 @@ pub struct NfsDirEntry {
 }
 
 // ============================================================================
-// NFS MANAGER
+// NFS YÖNETİCİSİ
 // ============================================================================
 
 pub struct NfsManager {
@@ -352,7 +352,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TÜRÜ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,9 +367,9 @@ pub enum NfsError {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLAŞMA
 // ============================================================================
 
 pub fn init() {
-    crate::serial_println!("[NFS] Subsystem initialized");
+    crate::serial_println!("[NFS] Alt sistemi başlatıldı");
 }

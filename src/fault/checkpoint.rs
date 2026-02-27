@@ -1,6 +1,7 @@
-//! # Checkpoint System
+//! # Checkpoint (Kontrol Noktası) Sistemi
 //!
-//! State checkpointing for recovery to known-good states.
+//! Bilinen kararlı durumlara geri dönüş için sistem durum kaydı (checkpointing).
+//! Hata kurtarma sırasında sistemin tutarlı bir duruma geri yüklenmesini sağlar.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,23 +11,23 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, AtomicBool, Ordering
 use spin::Mutex;
 
 // ============================================================================
-// CHECKPOINT STRUCTURE
+// CHECKPOINT YAPISI
 // ============================================================================
 
-/// A system state checkpoint
+/// Sistem durum kontrol noktası — belirli bir andaki sistem anlık görüntüsü
 #[derive(Clone)]
 pub struct Checkpoint {
-    /// Checkpoint ID
+    /// Kontrol noktası benzersiz kimliği
     pub id: u64,
-    /// Checkpoint name
+    /// Kontrol noktası adı
     pub name: String,
-    /// Creation timestamp
+    /// Oluşturulma zaman damgası (tick cinsinden)
     pub timestamp: usize,
-    /// Module states at checkpoint
+    /// Kontrol noktasındaki modül durumları
     pub module_states: BTreeMap<String, Vec<u8>>,
-    /// Is this a valid checkpoint
+    /// Bu kontrol noktası geçerli mi?
     pub valid: bool,
-    /// Checksum for integrity
+    /// Bütünlük doğrulama sağlama toplamı (checksum)
     pub checksum: u64,
 }
 
@@ -44,7 +45,7 @@ impl Checkpoint {
         }
     }
     
-    /// Add module state to checkpoint
+    /// Kontrol noktasına modül durumu ekler ve checksum'ı günceller
     pub fn add_state(&mut self, module: &str, state: Vec<u8>) {
         self.checksum = self.checksum.wrapping_add(
             state.iter().fold(0u64, |acc, &b| acc.wrapping_add(b as u64))
@@ -52,12 +53,12 @@ impl Checkpoint {
         self.module_states.insert(String::from(module), state);
     }
     
-    /// Get module state from checkpoint
+    /// Kontrol noktasından belirtilen modülün durumunu getirir
     pub fn get_state(&self, module: &str) -> Option<&Vec<u8>> {
         self.module_states.get(module)
     }
     
-    /// Verify checkpoint integrity
+    /// Checksum kontrolü ile kontrol noktasının bütünlüğünü doğrular
     pub fn verify(&self) -> bool {
         let calculated = self.module_states.values()
             .flat_map(|v| v.iter())
@@ -68,22 +69,22 @@ impl Checkpoint {
 }
 
 // ============================================================================
-// CHECKPOINT MANAGER
+// CHECKPOINT YÖNETİCİSİ
 // ============================================================================
 
-/// Checkpoint manager
+/// Checkpoint yöneticisi — kontrol noktalarını saklar ve yönetir
 pub struct CheckpointManager {
-    /// Saved checkpoints
+    /// Kaydedilmiş kontrol noktaları listesi
     checkpoints: Mutex<Vec<Checkpoint>>,
-    /// Maximum checkpoints to keep
+    /// Saklanacak maksimum kontrol noktası sayısı
     max_checkpoints: AtomicU32,
-    /// Auto-checkpoint enabled
+    /// Otomatik kontrol noktası alımı etkin mi?
     auto_checkpoint: AtomicBool,
-    /// Auto-checkpoint interval in ticks
+    /// Otomatik kontrol noktası aralığı (tick cinsinden)
     checkpoint_interval: AtomicUsize,
-    /// Last checkpoint timestamp
+    /// Son kontrol noktası zaman damgası
     last_checkpoint: AtomicUsize,
-    /// Checkpoint on fault
+    /// Hata durumunda otomatik kontrol noktası al
     checkpoint_on_fault: AtomicBool,
 }
 
@@ -93,24 +94,24 @@ impl CheckpointManager {
             checkpoints: Mutex::new(Vec::new()),
             max_checkpoints: AtomicU32::new(10),
             auto_checkpoint: AtomicBool::new(false),
-            checkpoint_interval: AtomicUsize::new(60000), // 1 minute
+            checkpoint_interval: AtomicUsize::new(60000), // 1 dakika
             last_checkpoint: AtomicUsize::new(0),
             checkpoint_on_fault: AtomicBool::new(true),
         }
     }
     
-    /// Create a new checkpoint
+    /// Yeni bir kontrol noktası oluşturur ve kaydeder
     pub fn create(&self, name: &str) -> Checkpoint {
         let mut checkpoint = Checkpoint::new(name);
         
-        // Capture module states
+        // Modül durumlarını yakala
         self.capture_states(&mut checkpoint);
         
-        // Store checkpoint
+        // Kontrol noktasını kaydet
         {
             let mut checkpoints = self.checkpoints.lock();
             if checkpoints.len() >= self.max_checkpoints.load(Ordering::SeqCst) as usize {
-                checkpoints.remove(0); // Remove oldest
+                checkpoints.remove(0); // En eski kontrol noktasını sil
             }
             checkpoints.push(checkpoint.clone());
         }
@@ -122,24 +123,24 @@ impl CheckpointManager {
         checkpoint
     }
     
-    /// Capture current system states
+    /// Mevcut sistem durumlarını yakalar (zamanlayıcı, bellek, hata istatistikleri)
     fn capture_states(&self, checkpoint: &mut Checkpoint) {
-        // Capture scheduler state
+        // Zamanlayıcı durumunu yakala
         let scheduler_state = self.capture_scheduler_state();
         checkpoint.add_state("scheduler", scheduler_state);
         
-        // Capture memory state
+        // Bellek durumunu yakala
         let memory_state = self.capture_memory_state();
         checkpoint.add_state("memory", memory_state);
         
-        // Capture fault state
+        // Hata yönetim durumunu yakala
         let fault_state = self.capture_fault_state();
         checkpoint.add_state("fault", fault_state);
     }
     
     fn capture_scheduler_state(&self) -> Vec<u8> {
         let stats = crate::task::scheduler::get_stats();
-        // Serialize stats (simplified)
+        // İstatistikleri serileştir (basitleştirilmiş)
         let mut state = Vec::new();
         state.extend_from_slice(&stats.total_tasks.to_le_bytes());
         state.extend_from_slice(&stats.running_tasks.to_le_bytes());
@@ -170,17 +171,17 @@ impl CheckpointManager {
         state
     }
     
-    /// Get latest checkpoint
+    /// En son oluşturulan kontrol noktasını getirir
     pub fn latest(&self) -> Option<Checkpoint> {
         self.checkpoints.lock().last().cloned()
     }
     
-    /// Get checkpoint by ID
+    /// Belirtilen ID ile kontrol noktasını getirir
     pub fn get(&self, id: u64) -> Option<Checkpoint> {
         self.checkpoints.lock().iter().find(|c| c.id == id).cloned()
     }
     
-    /// Restore to checkpoint (limited - can't fully restore kernel state)
+    /// Kontrol noktasına geri döner (sınırlı — çekirdek durumunu tam olarak geri yükleyemez)
     pub fn restore(&self, id: u64) -> bool {
         if let Some(checkpoint) = self.get(id) {
             if !checkpoint.verify() {
@@ -190,8 +191,8 @@ impl CheckpointManager {
             
             crate::serial_println!("[CHECKPOINT] Restoring to checkpoint {}", id);
             
-            // Limited restoration - mainly informational
-            // Full restoration would require much more complex state management
+            // Sınırlı geri yükleme — çoğunlukla bilgilendirici amaçlı
+            // Tam geri yükleme çok daha karmaşık durum yönetimi gerektirir
             
             true
         } else {
@@ -199,17 +200,17 @@ impl CheckpointManager {
         }
     }
     
-    /// List all checkpoints
+    /// Tüm kontrol noktalarını listeler
     pub fn list(&self) -> Vec<Checkpoint> {
         self.checkpoints.lock().clone()
     }
     
-    /// Clear all checkpoints
+    /// Tüm kontrol noktalarını siler
     pub fn clear(&self) {
         self.checkpoints.lock().clear();
     }
     
-    /// Periodic checkpoint check
+    /// Periyodik kontrol noktası kontrolü — otomatik zamanlama için çağrılır
     pub fn periodic_check(&self) {
         if !self.auto_checkpoint.load(Ordering::SeqCst) {
             return;
@@ -226,7 +227,7 @@ impl CheckpointManager {
 }
 
 // ============================================================================
-// GLOBAL INSTANCE
+// GLOBAL ÖRNEK
 // ============================================================================
 
 lazy_static::lazy_static! {
@@ -234,7 +235,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// PUBLIC API
+// GENEL (PUBLIC) API
 // ============================================================================
 
 pub fn create(name: &str) -> Checkpoint {

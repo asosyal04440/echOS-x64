@@ -1,3 +1,7 @@
+//! # Sayfalama Kurulumu
+//!
+//! x86_64 mimarisinde sayfa tablosu başlatma rutinleri.
+
 use core::arch::asm;
 
 pub unsafe fn setup_paging() {

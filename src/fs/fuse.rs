@@ -1,6 +1,6 @@
-//! # FUSE (Filesystem in Userspace)
+//! # FUSE (Kullanıcı Alanında Dosya Sistemi)
 //!
-//! Userspace filesystem driver support.
+//! Kullanıcı alanı dosya sistemi sürücüsü desteği.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// FUSE CONSTANTS
+// FUSE SABİTLERİ
 // ============================================================================
 
 /// FUSE version
@@ -63,7 +63,7 @@ pub const FUSE_FLOCK_LOCKS: u64 = 1 << 10;
 pub const FUSE_IOCTL_DIR: u64 = 1 << 11;
 
 // ============================================================================
-// FUSE HEADER
+// FUSE BAŞLIK YAPI LARI
 // ============================================================================
 
 #[repr(C)]
@@ -86,7 +86,7 @@ pub struct FuseOutHeader {
 }
 
 // ============================================================================
-// FUSE ATTRIBUTES
+// FUSE ATTRİBUTLE RI
 // ============================================================================
 
 #[repr(C)]
@@ -129,31 +129,31 @@ pub struct FuseAttrOut {
 }
 
 // ============================================================================
-// FUSE CONNECTION
+// FUSE BAĞLANTISI
 // ============================================================================
 
 pub struct FuseConnection {
-    /// Connection ID
+    /// Bağlantı ID'si
     pub id: u64,
-    /// Mount point
+    /// Bağlama noktası
     pub mount_point: String,
-    /// Device fd
+    /// Cihaz fd'si
     pub dev_fd: i32,
-    /// Capabilities
+    /// Özellikler (capabilities)
     pub caps: AtomicU64,
-    /// Max read size
+    /// Maksimum okuma boyutu
     pub max_read: AtomicU32,
-    /// Max write size
+    /// Maksimum yazma boyutu
     pub max_write: AtomicU32,
-    /// Max pages
+    /// Maksimum sayfa sayısı
     pub max_pages: AtomicU32,
-    /// Connected
+    /// Bağlantı kuruldu mu?
     pub connected: AtomicBool,
-    /// Pending requests
+    /// Bekleyen istekler
     pub pending: Mutex<Vec<FuseRequest>>,
-    /// Node ID counter
+    /// Düğüm ID sayıcısı
     pub next_nodeid: AtomicU64,
-    /// Node map
+    /// Düğüm haritası
     pub nodes: Mutex<BTreeMap<u64, FuseNode>>,
 }
 
@@ -194,9 +194,9 @@ impl FuseConnection {
         }
     }
 
-    /// Initialize connection
+    /// Bağlantıyı başlatir
     pub fn init(&self) -> Result<(), FuseError> {
-        // Send FUSE_INIT to userspace daemon
+        // Kullanıcı alanı daemon'una FUSE_INIT gönder
         let caps = FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_SPLICE_READ | 
                    FUSE_SPLICE_WRITE | FUSE_SPLICE_MOVE;
         self.caps.store(caps, Ordering::SeqCst);
@@ -206,7 +206,7 @@ impl FuseConnection {
         Ok(())
     }
 
-    /// Send request to userspace
+    /// Kullanıcı alanına istek gönderir
     pub fn send_request(&self, req: FuseRequest) -> Result<(), FuseError> {
         if !self.connected.load(Ordering::SeqCst) {
             return Err(FuseError::NotConnected);
@@ -216,13 +216,13 @@ impl FuseConnection {
         Ok(())
     }
 
-    /// Receive reply from userspace
+    /// Kullanıcı alanından yanıt alır
     pub fn recv_reply(&self, unique: u64) -> Option<Vec<u8>> {
-        // Would read from /dev/fuse
+        // /dev/fuse'dan okunacak
         None
     }
 
-    /// Lookup path
+    /// Yolu arar
     pub fn lookup(&self, parent: u64, name: &str) -> Result<FuseEntryOut, FuseError> {
         let req = FuseRequest {
             unique: self.next_nodeid.fetch_add(1, Ordering::SeqCst),
@@ -248,7 +248,7 @@ impl FuseConnection {
         })
     }
 
-    /// Read file
+    /// Dosya okur
     pub fn read(&self, nodeid: u64, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>, FuseError> {
         let req = FuseRequest {
             unique: self.next_nodeid.fetch_add(1, Ordering::SeqCst),
@@ -264,7 +264,7 @@ impl FuseConnection {
         Ok(vec![0u8; size as usize])
     }
 
-    /// Write file
+    /// Dosyaya yazar
     pub fn write(&self, nodeid: u64, fh: u64, offset: u64, data: &[u8]) -> Result<u32, FuseError> {
         let req = FuseRequest {
             unique: self.next_nodeid.fetch_add(1, Ordering::SeqCst),
@@ -280,14 +280,14 @@ impl FuseConnection {
         Ok(data.len() as u32)
     }
 
-    /// Destroy connection
+    /// Bağlantıyı yıkar
     pub fn destroy(&self) {
         self.connected.store(false, Ordering::SeqCst);
     }
 }
 
 // ============================================================================
-// FUSE MANAGER
+// FUSE YÖNETİCİSİ
 // ============================================================================
 
 pub struct FuseManager {
@@ -330,7 +330,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TÜRÜ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,9 +343,9 @@ pub enum FuseError {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLAŞMA
 // ============================================================================
 
 pub fn init() {
-    crate::serial_println!("[FUSE] Subsystem initialized");
+    crate::serial_println!("[FUSE] Alt sistemi başlatıldı");
 }

@@ -1,7 +1,8 @@
-//! # echOS Fault Management Subsystem
+//! # echOS Hata Yönetimi Alt Sistemi
 //!
-//! Comprehensive fault detection, isolation, and recovery system.
-//! Provides anti-crash protection through health monitoring and graceful degradation.
+//! Kapsamlı hata tespiti, izolasyonu ve kurtarma sistemi.
+//! Sağlık izleme ve zarif bozunma (graceful degradation) aracılığıyla
+//! çökme korumalı (anti-crash) bir yapı sağlar.
 
 pub mod hub;
 pub mod severity;
@@ -26,14 +27,14 @@ pub use severity::{Severity, RecoveryResult};
 pub use recovery::{RecoveryAction, RecoveryEngine};
 
 // ============================================================================
-// FAULT TYPES
+// HATA TÜRLERİ
 // ============================================================================
 
-/// Unique fault identifier
+/// Benzersiz hata tanımlayıcısı
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FaultId(pub u64);
 
-/// Source module that generated the fault
+/// Hatayı üreten kaynak modül
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FaultSource {
     Memory,
@@ -50,10 +51,10 @@ pub enum FaultSource {
     Unknown,
 }
 
-/// Specific fault types
+/// Özel hata türleri — hangi tür bir hatanın oluştuğunu belirtir
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultType {
-    // Memory faults
+    // Bellek hataları
     HeapCorruption,
     DoubleFree,
     UseAfterFree,
@@ -63,81 +64,81 @@ pub enum FaultType {
     PageFault,
     PmmCorruption,
     
-    // CPU/SMP faults
+    // CPU/SMP hataları
     ApStartupFailed,
     TlbShootdownTimeout,
     CpuHung,
     MicrocodeError,
     
-    // Interrupt faults
+    // Kesme (interrupt) hataları
     IdtCorruption,
     IrqStorm,
     HandlerTimeout,
     SpuriousInterrupt,
     
-    // Scheduler faults
+    // Zamanlayıcı (scheduler) hataları
     RunQueueCorruption,
     TaskLeak,
     PriorityInversion,
     Starvation,
     
-    // Driver faults
+    // Sürücsü (driver) hataları
     DmaCorruption,
     DeviceTimeout,
     DeviceError,
     DriverCrash,
     
-    // Filesystem faults
+    // Dosya sistemi (filesystem) hataları
     MetadataCorruption,
     JournalError,
     IoError,
     DiskFull,
     
-    // Network faults
+    // Ağ (network) hataları
     ConnectionReset,
     StackCorruption,
     SocketLeak,
     
-    // Security faults
+    // Güvenlik (security) hataları
     CanaryMismatch,
     SmepViolation,
     SmapViolation,
     
-    // ACPI faults
+    // ACPI hataları
     AmlError,
     GpeStorm,
     ThermalEvent,
     
-    // Boot faults
+    // Açılış (boot) hataları
     BootTimeout,
     InitFailed,
     
-    // Generic
+    // Genel
     Unknown,
 }
 
-/// A detected fault
+/// Tespit edilmiş bir hata olayini temsil eder
 #[derive(Clone, Debug)]
 pub struct Fault {
-    /// Unique fault ID
+    /// Benzersiz hata kimliği
     pub id: FaultId,
-    /// Source module
+    /// Kaynak modül
     pub source: FaultSource,
-    /// Fault type
+    /// Hata türü
     pub fault_type: FaultType,
-    /// Severity level
+    /// Şiddet seviyesi
     pub severity: Severity,
-    /// Human-readable message
+    /// İnsan okunabilir mesaj
     pub message: String,
-    /// Timestamp (ticks)
+    /// Zaman damgası (tick cinsinden)
     pub timestamp: usize,
-    /// CPU where fault occurred
+    /// Hatanın gerçekleştiği CPU kimliği
     pub cpu_id: u32,
-    /// Additional context
+    /// Ek bağlam bilgisi
     pub context: Vec<u64>,
-    /// Recovery attempted
+    /// Kurtarma denendi mi?
     pub recovery_attempted: bool,
-    /// Recovery successful
+    /// Kurtarma başarılı oldu mu?
     pub recovery_success: bool,
 }
 
@@ -166,21 +167,21 @@ impl Fault {
 }
 
 // ============================================================================
-// MODULE HEALTH STATUS
+// MODÜL SAĞLIK DURUMU
 // ============================================================================
 
-/// Health status of a module
+/// Bir modülün sağlık durumu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HealthStatus {
-    /// Module is functioning normally
+    /// Modül normal çalışıyor
     Healthy,
-    /// Module has minor issues but is operational
+    /// Modülde küçük sorunlar var ancak işlevsel
     Warning,
-    /// Module is operating with reduced functionality
+    /// Modül azaltılmış işlevselliğle çalışıyor
     Degraded,
-    /// Module has failed and is disabled
+    /// Modül başarısız oldu ve devre dışı
     Failed,
-    /// Module is intentionally disabled
+    /// Modül kasıtlı olarak devre dışı bırakıldı
     Disabled,
 }
 
@@ -190,26 +191,26 @@ impl Default for HealthStatus {
     }
 }
 
-/// Health information for a module
+/// Bir modülün sağlık bilgisi — hata sayıları ve kurtarma durumu
 #[derive(Clone, Debug)]
 pub struct ModuleHealth {
-    /// Module name
+    /// Modül adı
     pub name: &'static str,
-    /// Current health status
+    /// Mevcut sağlık durumu
     pub status: HealthStatus,
-    /// Number of faults detected
+    /// Tespit edilen hata sayısı
     pub fault_count: u32,
-    /// Number of successful recoveries
+    /// Başarılı kurtarma sayısı
     pub recovery_count: u32,
-    /// Last fault timestamp
+    /// Son hata zaman damgası
     pub last_fault_tick: usize,
-    /// Module uptime in ticks
+    /// Modül çalışma süresi (tick cinsinden)
     pub uptime_ticks: usize,
-    /// Is module critical for system operation
+    /// Bu modül sistem çalışması için kritik mi?
     pub is_critical: bool,
-    /// Can module be restarted
+    /// Modül yeniden başlatılabilir mi?
     pub can_restart: bool,
-    /// Fallback module available
+    /// Yedek modül mevcut mu?
     pub has_fallback: bool,
 }
 
@@ -245,26 +246,26 @@ impl ModuleHealth {
 }
 
 // ============================================================================
-// GLOBAL FAULT STATE
+// GLOBAL HATA DURUMU
 // ============================================================================
 
-/// Global fault management state
+/// Global hata yönetim durumu
 pub struct FaultState {
-    /// Total faults detected
+    /// Toplam tespit edilen hata sayısı
     pub total_faults: AtomicU64,
-    /// Total successful recoveries
+    /// Toplam başarılı kurtarma sayısı
     pub total_recoveries: AtomicU64,
-    /// Current system recovery level (0-4)
+    /// Mevcut sistem kurtarma seviyesi (0-4)
     pub recovery_level: AtomicU32,
-    /// System in emergency mode
+    /// Sistem acil durum modunda mı?
     pub emergency_mode: AtomicBool,
-    /// Fault detection enabled
+    /// Hata tespiti etkin mi?
     pub detection_enabled: AtomicBool,
-    /// Auto-recovery enabled
+    /// Otomatik kurtarma etkin mi?
     pub auto_recovery: AtomicBool,
-    /// Last fault timestamp
+    /// Son hata zaman damgası
     pub last_fault_tick: AtomicUsize,
-    /// Fault history
+    /// Hata geçmişi (son 100 hata)
     pub fault_history: Mutex<Vec<Fault>>,
 }
 
@@ -286,7 +287,7 @@ impl FaultState {
         self.total_faults.fetch_add(1, Ordering::SeqCst);
         self.last_fault_tick.store(fault.timestamp, Ordering::SeqCst);
         
-        // Add to history (limit to 100 entries)
+        // Geçmişe ekle (maksimum 100 giriş)
         let mut history = self.fault_history.lock();
         if history.len() >= 100 {
             history.remove(0);
@@ -315,41 +316,41 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLAŞMA (INITIALIZATION)
 // ============================================================================
 
-/// Initialize fault management subsystem
+/// Hata yönetimi alt sistemini başlatır
 pub fn init() {
     crate::serial_println!("[FAULT] Initializing fault management subsystem");
     
-    // Initialize fault hub
+    // Hata merkezini başlat
     hub::init();
     
-    // Initialize watchdog system
+    // Watchdog sistemini başlat
     watchdog::init();
     
-    // Initialize recovery engine
+    // Kurtarma motorunu başlat
     recovery::init();
     
-    // Initialize monitors
+    // Monitor/izleme modüllerini başlat
     monitors::init();
     
     crate::serial_println!("[FAULT] Fault management subsystem initialized");
 }
 
-/// Perform periodic fault check
+/// Periyodik hata kontrolü yapılır (zamanlama timer'dan çağrılır)
 pub fn periodic_check() {
     if !FAULT_STATE.detection_enabled.load(Ordering::SeqCst) {
         return;
     }
     
-    // Check all monitors
+    // Tüm monitorrlerı kontrol et
     monitors::check_all();
     
-    // Check watchdogs
+    // Watchdog'ları kontrol et
     watchdog::check_all();
     
-    // Update recovery level
+    // Kurtarma seviyesini güncelle
     update_recovery_level();
 }
 
@@ -357,25 +358,25 @@ fn update_recovery_level() {
     let history = FAULT_STATE.fault_history.lock();
     let current = crate::task::scheduler::get_ticks();
     
-    // Count faults in last 10 seconds
+    // Son 10 saniyedeki hataları say
     let recent_faults = history.iter()
         .filter(|f| current.saturating_sub(f.timestamp) <= 10000)
         .count();
     
-    // Count critical faults
+    // Kritik hataları say
     let critical_faults = history.iter()
         .filter(|f| f.severity == Severity::Critical || f.severity == Severity::Emergency)
         .count();
     
-    // Determine recovery level
+    // Kurtarma seviyesini belirle
     let level = if critical_faults > 0 {
-        4 // Emergency
+        4 // Acil durum (Emergency)
     } else if recent_faults > 10 {
-        3 // Critical
+        3 // Kritik (Critical)
     } else if recent_faults > 5 {
-        2 // Degraded
+        2 // Bozunmuş (Degraded)
     } else if recent_faults > 0 {
-        1 // Warning
+        1 // Uyarı (Warning)
     } else {
         0 // Normal
     };
@@ -388,7 +389,7 @@ fn update_recovery_level() {
     }
 }
 
-/// Report a fault
+/// Hata bildirir, otomatik kurtarma dener
 pub fn report_fault(source: FaultSource, fault_type: FaultType, message: &str) -> FaultId {
     let fault = Fault::new(source, fault_type, message);
     FAULT_STATE.record_fault(&fault);
@@ -398,7 +399,7 @@ pub fn report_fault(source: FaultSource, fault_type: FaultType, message: &str) -
         fault.severity, fault.source, fault.message
     );
     
-    // Attempt automatic recovery if enabled
+    // Etkinse otomatik kurtarma dene
     if FAULT_STATE.auto_recovery.load(Ordering::SeqCst) {
         recovery::attempt_recovery(&fault);
     }
@@ -406,7 +407,7 @@ pub fn report_fault(source: FaultSource, fault_type: FaultType, message: &str) -
     fault.id
 }
 
-/// Get fault statistics
+/// Hata istatistiklerini döndürür
 pub fn get_stats() -> FaultStats {
     FaultStats {
         total_faults: FAULT_STATE.total_faults.load(Ordering::SeqCst),

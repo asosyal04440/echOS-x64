@@ -1,0 +1,43 @@
+name: simics-zero-tolerance
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  zero_tolerance_gate:
+    name: Zero-Tolerance Simics Gate
+    runs-on: [self-hosted, windows, simics]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build UEFI target (release)
+        shell: powershell
+        run: |
+          $env:CARGO_INCREMENTAL = "0"
+          cargo build --target x86_64-unknown-uefi --release
+
+      - name: Create bootable VHDX (admin)
+        shell: powershell
+        run: |
+          $efi = Join-Path $env:GITHUB_WORKSPACE "target\x86_64-unknown-uefi\release\ech_os.efi"
+          $vhdx = Join-Path $env:GITHUB_WORKSPACE "Simics\echos-simics\targets\echos\images\echos-uefi-fixed.vhdx"
+          powershell -ExecutionPolicy Bypass -File `
+            "Simics\echos-simics\targets\echos\Build-EfiVhdx.ps1" `
+            -EfiPath $efi -VhdxPath $vhdx -SkipCraff
+
+      - name: Run Simics Zero-Tolerance Gate
+        shell: cmd
+        run: Simics\echos-simics\bin\run-gate.bat
+
+      - name: Upload gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simics-zero-tolerance-logs
+          path: |
+            Simics/echos-simics/targets/echos/logs/gate_*.log
+            Simics/echos-simics/targets/echos/logs/gate_*.json
+            Simics/echos-simics/targets/echos/logs/serial_capture.txt

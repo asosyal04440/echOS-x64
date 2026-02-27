@@ -25,9 +25,9 @@ pub static mut MOUSE_BUTTONS: MouseButtons = MouseButtons {
 static MOUSE_CYCLE: Mutex<u8> = Mutex::new(0);
 static MOUSE_PACKET: Mutex<[u8; 3]> = Mutex::new([0; 3]);
 
-// Ekran sınırları (Mouse clamp için)
-const SCREEN_WIDTH: i32 = 1280;
-const SCREEN_HEIGHT: i32 = 800;
+// Ekran sınırları (Mouse clamp için) — runtime'da güncellenir.
+pub static mut SCREEN_WIDTH: i32 = 1280;
+pub static mut SCREEN_HEIGHT: i32 = 800;
 
 /// Mouse buton durumları
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -211,6 +211,16 @@ pub fn handle_packet(packet_byte: u8) {
     }
 }
 
+/// Mouse clamp sınırlarını runtime ekran boyutuna göre ayarlar.
+pub fn set_bounds(width: i32, height: i32) {
+    unsafe {
+        SCREEN_WIDTH = width.max(1);
+        SCREEN_HEIGHT = height.max(1);
+        MOUSE_X = MOUSE_X.clamp(0, SCREEN_WIDTH - 1);
+        MOUSE_Y = MOUSE_Y.clamp(0, SCREEN_HEIGHT - 1);
+    }
+}
+
 // =============================================================================
 // PUBLIC API
 // =============================================================================
@@ -231,12 +241,26 @@ pub fn poll() -> bool {
     let mut data_port = Port::<u8>::new(DATA_PORT);
 
     let status = unsafe { status_port.read() };
+    // Bazı emülasyonlarda AUX bit'i (bit5) güvenilir raporlanmıyor.
+    // Hareketin kaçmaması için output-buffer doluysa byte'ı tüketiyoruz.
     if (status & 0x01) != 0 {
         let packet_byte = unsafe { data_port.read() };
         handle_packet(packet_byte);
         return true;
     }
     false
+}
+
+/// Bir kare içinde sınırlı sayıda AUX byte'ı tüketir.
+pub fn poll_burst(max_bytes: usize) -> usize {
+    let mut count = 0usize;
+    while count < max_bytes {
+        if !poll() {
+            break;
+        }
+        count += 1;
+    }
+    count
 }
 
 /// ExitBootServices sonrası yeniden başlatma.

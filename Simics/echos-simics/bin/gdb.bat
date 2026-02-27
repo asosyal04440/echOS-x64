@@ -6,4 +6,4 @@ set SIMICS_PYTHON_PACKAGE=D:\Intel Simics Package Manager\simics-python-7.14.0\w
 if "%SIMICS_PYTHON%"=="" (
     set "SIMICS_PYTHON="
 )
-"D:\Intel Simics Package Manager\simics-gdb-7.10.0\bin\gdb.bat" --project "C:\Users\Bahadir\Desktop\dersler_ve_projeler\echOS\Simics\echos-simics" %*
+"D:\Intel Simics Package Manager\simics-7.70.0\..\simics-gdb-7.10.0\bin\gdb.bat" --project "C:\Users\Bahadir\Desktop\dersler_ve_projeler\echOS\Simics\echos-simics" %*

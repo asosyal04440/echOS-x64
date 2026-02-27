@@ -1716,3 +1716,25 @@ pub fn warning_msg(msg: &str) -> String {
 pub fn info_msg(msg: &str) -> String {
     format!("{}{}{}", colors::CYAN, msg, colors::RESET)
 }
+
+// ============================================================================
+// TERMINAL GUI BRIDGE  (Faz 7)
+// ============================================================================
+
+/// UEFI GUI Terminal'inden doğrudan komut satırı çağırma köprüsü.
+///
+/// String tabanlı komut satırını alır, Shell alias/env/glob/pipe mantığından
+/// geçirir ve çıktıyı `Option<String>` olarak döndürür.
+/// `"__CLEAR__"` özel çıktısı terminali temizle anlamına gelir.
+///
+/// # Örnek
+/// ```rust
+/// let out = crate::shell::run_command("ls /");
+/// ```
+pub fn run_command(cmd_line: &str) -> Option<String> {
+    let mut s = Shell::new();
+    for c in cmd_line.chars() {
+        s.editor.insert(c);
+    }
+    s.execute()
+}

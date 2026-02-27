@@ -1,0 +1,30 @@
+# echOS GUI Boot — Ekrani gormek icin bu scripti kullan
+# Kullanim: simics.bat targets/echos/gui-boot.simics
+# Simics GUI penceresi acilir, VGA ekraninda echOS u gorursun.
+
+$disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
+$machine_name = "board"
+$show_con0 = TRUE
+$create_network = FALSE
+run-script "%simics%/targets/qsp-x86/qsp-hdd-boot.simics"
+
+# Serial ciktiyi terminale yaz
+board.serconsole.con.enable-cmd-line-output
+
+# Gereksiz loglari kapat
+log-type -disable unimpl
+log-type -disable spec-viol
+
+echo "================================================"
+echo "  echOS GUI Boot - Simulasyon basliyor..."
+echo "  VGA penceresi echOS ekranini gosterecek."
+echo "================================================"
+
+# 120 saniye simulasyon calistir, sonra dur (GUI acik kalir)
+script-branch "auto-stop" {
+    bp.time.wait-for 120
+    echo "[GUI-BOOT] 120s simulation complete - stopping (GUI stays open)"
+    stop
+}
+
+run

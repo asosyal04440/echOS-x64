@@ -1,6 +1,16 @@
-//! # echOS Notification System
+//! # echOS Bildirim Sistemi
 //!
-//! Toast notifications and alerts.
+//! Durum bildirimleri (toast notifications) ve uyarılar.
+//! Bildirimler ekranın sağ alt köşesinde gösterilir ve otomatik olarak kapanır.
+//!
+//! ## Mimari
+//! - `Notification`: Başlık, mesaj, tür, öncelik ve zaman aşımı içeren bildirim verisi
+//! - `NotificationPopup`: Tek bir bildirimi görüntüleyen widget; sol kenar rengi ve eylem butonu içerir
+//! - `NotificationManager`: Birden fazla bildirimi kuyruk halinde yöneten yönetici
+//!
+//! ## Çizim Algoritması
+//! Bildirim; sol kenar vurgu çubuğu (türe özgü renk), gölge, kenarlık,
+//! başlık metni, kelime kaydırmalı mesaj ve isteğe bağlı eylem butonu içerir.
 
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::Theme;
@@ -8,25 +18,25 @@ use crate::gui::widgets::{Rect, Widget};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Notification priority
+/// Bildirim önceliği
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationPriority {
-    Low,
-    Normal,
-    High,
-    Urgent,
+    Low,    // Düşük
+    Normal, // Normal
+    High,   // Yüksek
+    Urgent, // Acil
 }
 
-/// Notification type
+/// Bildirim türü
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationType {
-    Info,
-    Success,
-    Warning,
-    Error,
+    Info,    // Bilgi
+    Success, // Başarı
+    Warning, // Uyarı
+    Error,   // Hata
 }
 
-/// Notification data
+/// Bildirim verisi
 #[derive(Clone)]
 pub struct Notification {
     pub id: u32,
@@ -34,10 +44,10 @@ pub struct Notification {
     pub message: String,
     pub notification_type: NotificationType,
     pub priority: NotificationPriority,
-    pub timeout_ms: u32,
-    pub elapsed_ms: u32,
-    pub action_text: Option<String>,
-    pub on_action: Option<u32>, // Action ID
+    pub timeout_ms: u32,     // Otomatik kapanma süresi (milisaniye)
+    pub elapsed_ms: u32,     // Geçen süre
+    pub action_text: Option<String>, // Eylem butonu metni
+    pub on_action: Option<u32>, // Eylem kimliği
 }
 
 impl Notification {
@@ -81,14 +91,14 @@ impl Notification {
     }
 }
 
-/// Notification popup widget
+/// Bildirim açılır penceresi (widget)
 pub struct NotificationPopup {
     rect: Rect,
     notification: Option<Notification>,
     visible: bool,
-    hovered: bool,
-    on_dismiss: Option<fn(u32)>,
-    on_action: Option<fn(u32, u32)>,
+    hovered: bool,             // Üzerine gelinmiş mi
+    on_dismiss: Option<fn(u32)>,     // Kapatıldığında çağrılan geri çağrım
+    on_action: Option<fn(u32, u32)>, // Eylem tıklandığında çağrılan geri çağrım
 }
 
 impl NotificationPopup {
@@ -104,7 +114,7 @@ impl NotificationPopup {
     }
 
     pub fn show(&mut self, notification: Notification, screen_width: usize, screen_height: usize) {
-        // Position at bottom-right corner
+        // Sağ alt köşeye konumlandır
         self.rect.x = (screen_width as i32 - self.rect.width - 10).max(0);
         self.rect.y = (screen_height as i32 - self.rect.height - 50).max(0);
         self.notification = Some(notification);
@@ -198,17 +208,17 @@ impl Widget for NotificationPopup {
         let w = self.rect.width as usize;
         let h = self.rect.height as usize;
 
-        // Shadow
+        // Gölge
         fb.draw_rect(x + 4, y + 4, w, h, Theme::SHADOW.to_u32());
 
-        // Background
+        // Arkaplan
         fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
 
-        // Left accent bar
+        // Sol kenar vurgu çubuğu (türe özgü renk)
         let accent_color = self.type_color();
         fb.draw_rect(x, y, 4, h, accent_color);
 
-        // Border
+        // Kenarlık
         for col in x..(x + w) {
             fb.plot_pixel(col, y, Theme::BORDER.to_u32());
             fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
@@ -219,10 +229,10 @@ impl Widget for NotificationPopup {
         }
 
         if let Some(ref notif) = self.notification {
-            // Title
+            // Başlık
             fb.draw_string(x + 12, y + 8, &notif.title, Theme::TEXT_PRIMARY.to_u32());
 
-            // Message (word wrap)
+            // Mesaj (kelime kaydırma)
             let msg_y = y + 28;
             let max_width = w - 20;
             let mut line_y = msg_y;
@@ -241,7 +251,7 @@ impl Widget for NotificationPopup {
                 }
             }
 
-            // Action button
+            // Eylem butonu
             if let Some(ref text) = notif.action_text {
                 let action_rect = self.action_rect();
                 fb.draw_rect(
@@ -259,7 +269,7 @@ impl Widget for NotificationPopup {
                 );
             }
 
-            // Close button
+            // Kapatma butonu
             let close_rect = self.close_rect();
             fb.draw_rect(
                 close_rect.x as usize,
@@ -282,7 +292,7 @@ impl Widget for NotificationPopup {
             return false;
         }
 
-        // Close button
+        // Kapatma butonu
         if self.close_rect().contains(click_x, click_y) {
             if let Some(ref notif) = self.notification {
                 if let Some(handler) = self.on_dismiss {
@@ -293,7 +303,7 @@ impl Widget for NotificationPopup {
             return true;
         }
 
-        // Action button
+        // Eylem butonu
         if let Some(ref notif) = self.notification {
             if self.action_rect().contains(click_x, click_y) {
                 if let (Some(handler), Some(action_id)) = (self.on_action, notif.on_action) {
@@ -318,11 +328,11 @@ impl Widget for NotificationPopup {
     }
 }
 
-/// Notification manager (handles multiple notifications in queue)
+/// Bildirim yöneticisi (birden fazla bildirimi kuyruk halinde yönetir)
 pub struct NotificationManager {
     notifications: Vec<Notification>,
-    next_id: u32,
-    max_visible: usize,
+    next_id: u32,              // Sonraki bildirim kimliği
+    max_visible: usize,        // Aynı anda görünen maksimum bildirim sayısı
 }
 
 impl NotificationManager {

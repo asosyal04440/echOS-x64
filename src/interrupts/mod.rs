@@ -892,6 +892,7 @@ fn init_global_once() {
         if enable_ioapic() {
             crate::apic::ioapic::enable_irq(0);
             crate::apic::ioapic::enable_irq(1);
+            crate::apic::ioapic::enable_irq(12);
         } else {
             pic::init();
         }
@@ -901,6 +902,7 @@ fn init_global_once() {
         if enable_ioapic() {
             crate::apic::ioapic::enable_irq(0);
             crate::apic::ioapic::enable_irq(1);
+            crate::apic::ioapic::enable_irq(12);
         } else {
             pic::init();
         }

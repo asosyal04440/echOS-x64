@@ -18,7 +18,7 @@ use alloc::boxed::Box;
 use spin::Mutex;
 
 // ============================================================================
-// CPU HOTPLUG STATES (Linux-style)
+// CPU HOTPLUG DURUMLAR (Linux-style)
 // ============================================================================
 
 /// CPU hotplug state'leri - Linux kernel'den esinlenilmiş
@@ -151,7 +151,7 @@ impl CpuHotplugState {
 }
 
 // ============================================================================
-// CPU HOTPLUG CALLBACK
+// CPU HOTPLUG GERİÇAĞRI
 // ============================================================================
 
 /// CPU hotplug callback tipi
@@ -166,7 +166,7 @@ pub struct HotplugCallbackEntry {
 }
 
 // ============================================================================
-// CPU STATE MACHINE
+// CPU DURUM MAKİNESİ
 // ============================================================================
 
 /// CPU state machine yöneticisi
@@ -426,7 +426,7 @@ impl CpuStateMachine {
 pub static CPU_STATES: CpuStateMachine = CpuStateMachine::new();
 
 // ============================================================================
-// CPU AFFINITY MASK
+// CPU YAKINSALIK MASKESİ
 // ============================================================================
 
 /// CPU affinity mask (hangi CPU'larda çalışabilir)
@@ -560,7 +560,7 @@ impl CpuAffinity {
 }
 
 // ============================================================================
-// CPU HOTPLUG API
+// CPU HOTPLUG API’Sİ
 // ============================================================================
 
 /// CPU hotplug işlemleri
@@ -604,7 +604,7 @@ impl CpuHotplug {
 }
 
 // ============================================================================
-// CPU ISOLATION
+// CPU İZOLASYONU
 // ============================================================================
 
 /// CPU isolation yönetimi
@@ -637,7 +637,7 @@ impl CpuIsolation {
 }
 
 // ============================================================================
-// STARTUP VERIFICATION
+// BAŞLATMA DOĞRULAMASI
 // ============================================================================
 
 /// CPU startup verification
@@ -674,7 +674,7 @@ pub struct CpuHealth {
 }
 
 // ============================================================================
-// LEGACY COMPATIBILITY
+// ESKI UYUMLULUK
 // ============================================================================
 
 /// Eski CpuState enum'u (backward compatibility için)
