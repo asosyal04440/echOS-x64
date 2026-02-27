@@ -36,6 +36,7 @@ hkdf = { version = "0.12", default-features = false }
 generic-array = "0.14"
 typenum = "1.17"
 ironshim-rs = { path = "third_party/ironshim-rs", default-features = false, features = ["alloc"] }
+goblin = { version = "0.8", default-features = false, features = ["pe32", "pe64", "elf32", "elf64", "alloc"] }
 smoltcp = { version = "0.11", default-features = false, features = ["alloc", "proto-ipv4", "proto-dhcpv4", "proto-dns", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-dns", "medium-ethernet"] }
 libm = "0.2"
 bootloader = "0.9"

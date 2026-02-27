@@ -5,6 +5,7 @@
 
 use crate::memory::AddressSpace;
 use crate::allocator::stack::KernelStack;
+use crate::security::seccomp::SeccompFilter;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -179,6 +180,7 @@ pub struct TaskColdData {
     pub ptrace_flags: u32,
     pub tracer_pid: Option<TaskId>,
     pub seccomp_mode: u32,
+    pub seccomp_filter: Option<Arc<SeccompFilter>>,
     pub stack: KernelStack,
     /// Background task mı (job control için)
     pub is_background: bool,
@@ -291,6 +293,7 @@ impl Task {
                 ptrace_flags: 0,
                 tracer_pid: None,
                 seccomp_mode: 0, // 0 = Disabled
+                seccomp_filter: None,
                 stack,
                 is_background: false,
             },

@@ -1,6 +1,7 @@
-//! # X.509 Certificate Chain Verification
+//! # X.509 Sertifika Zinciri Doğrulama
 //!
-//! ASN.1 DER parsing and X.509 certificate verification for TLS 1.3
+//! TLS 1.3 için ASN.1 DER (Ayırt Edici Kodlama Kuralları) ayrıştırma ve X.509 sertifika doğrulama.
+//! ASN.1 DER, TLV (Tag-Length-Value / Etiket-Uzunluk-Değer) formatında ikili kodlama kullanır.
 
 use alloc::vec::Vec;
 use alloc::vec;
@@ -10,10 +11,10 @@ use alloc::format;
 use spin::Mutex;
 
 // ============================================================================
-// ASN.1 DER PARSER
+// ASN.1 DER AYRIŞTIRICISI
 // ============================================================================
 
-/// ASN.1 Tag classes
+/// ASN.1 etiket sınıfları — bir elemanın hangi alana ait olduğunu belirtir
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asn1Class {
     Universal,
@@ -22,7 +23,7 @@ pub enum Asn1Class {
     Private,
 }
 
-/// ASN.1 Universal tags
+/// ASN.1 evrensel etiketler — DER'deki TLV yapısında T (Tag/Etiket) kısmının veri türünü belirtir
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asn1Tag {
     Boolean = 0x01,
@@ -66,7 +67,7 @@ impl Asn1Tag {
     }
 }
 
-/// ASN.1 DER element
+/// ASN.1 DER elemanı — TLV (Etiket-Uzunluk-Değer) formatındaki tek bir kodlanmış nesneyi temsil eder
 #[derive(Clone, Debug)]
 pub struct Asn1Element {
     pub class: Asn1Class,
@@ -101,7 +102,7 @@ impl Asn1Element {
     }
 }
 
-/// ASN.1 DER Parser
+/// ASN.1 DER Ayrıştırıcı — ham DER baytlarını TLV yapılarına dönüştürür
 pub struct Asn1Parser<'a> {
     data: &'a [u8],
     pos: usize,
@@ -112,13 +113,13 @@ impl<'a> Asn1Parser<'a> {
         Asn1Parser { data, pos: 0 }
     }
     
-    /// Parse a single element
+    /// Tek bir TLV elemanını ayrıştır: önce etiket, sonra uzunluk, sonra değer okunur
     pub fn parse_element(&mut self) -> Option<Asn1Element> {
         if self.pos >= self.data.len() {
             return None;
         }
         
-        // Read tag
+        // Etiketi oku — ilk bayt sınıf, yapı ve etiket numarasını içerir
         let tag_byte = self.data[self.pos];
         self.pos += 1;
         
@@ -132,9 +133,9 @@ impl<'a> Asn1Parser<'a> {
         
         let constructed = (tag_byte & 0x20) != 0;
         
-        // Read tag number
+        // Etiket numarasını oku — 0x1F ise uzun form kullanılıyor
         let tag_number = if (tag_byte & 0x1F) == 0x1F {
-            // Long form
+            // Uzun form — birden fazla bayta yayılan etiket numarası, her baytın MSB'si devam bayrağıdır
             let mut num = 0u32;
             loop {
                 if self.pos >= self.data.len() {
@@ -158,7 +159,7 @@ impl<'a> Asn1Parser<'a> {
             Asn1Tag::Unknown
         };
         
-        // Read length
+        // Uzunluğu oku — TLV'nin L kısmı: içerik baytlarının sayısını belirtir
         if self.pos >= self.data.len() {
             return None;
         }
@@ -169,10 +170,10 @@ impl<'a> Asn1Parser<'a> {
         let length = if len_byte < 0x80 {
             len_byte as usize
         } else if len_byte == 0x80 {
-            // Indefinite length - not supported in DER
+            // Belirsiz uzunluk — DER standardında desteklenmez, yalnızca BER'de kullanılır
             return None;
         } else {
-            // Long form
+            // Uzun form uzunluk — alt 7 bit, uzunluğu kodlayan bayt sayısını belirtir
             let num_bytes = (len_byte & 0x7F) as usize;
             if self.pos + num_bytes > self.data.len() {
                 return None;
@@ -186,7 +187,7 @@ impl<'a> Asn1Parser<'a> {
             len
         };
         
-        // Read data
+        // Değeri oku — TLV'nin V kısmı: asıl içerik verisi
         if self.pos + length > self.data.len() {
             return None;
         }
@@ -194,7 +195,7 @@ impl<'a> Asn1Parser<'a> {
         let data = self.data[self.pos..self.pos + length].to_vec();
         self.pos += length;
         
-        // Parse children if constructed
+        // Yapılandırılmışsa alt elemanları özyinelemeli ayrıştır — SEQUENCE tipi iç içe TLV'ler içerir
         let children = if constructed && class == Asn1Class::Universal && tag == Asn1Tag::Sequence {
             let mut parser = Asn1Parser::new(&data);
             let mut kids = Vec::new();
@@ -216,7 +217,7 @@ impl<'a> Asn1Parser<'a> {
         })
     }
     
-    /// Parse all elements
+    /// Veri tamponundaki tüm TLV elemanlarını sırasıyla ayrıştır
     pub fn parse_all(&mut self) -> Vec<Asn1Element> {
         let mut elements = Vec::new();
         while let Some(elem) = self.parse_element() {
@@ -226,7 +227,8 @@ impl<'a> Asn1Parser<'a> {
     }
 }
 
-/// Parse OID from ASN.1 element
+/// ASN.1 elemanından OID (Object Identifier / Nesne Tanımlayıcı) ayrıştır.
+/// OID, X.500/X.509 standartlarında algoritmaları, uzantıları ve öznitelikleri benzersiz biçimde tanımlar.
 pub fn parse_oid(data: &[u8]) -> String {
     if data.is_empty() {
         return String::new();
@@ -234,11 +236,11 @@ pub fn parse_oid(data: &[u8]) -> String {
     
     let mut oid = String::new();
     
-    // First byte encodes first two components
+    // İlk bayt, OID'nin ilk iki bileşenini kodlar (bileşen1 * 40 + bileşen2)
     let first = data[0];
     oid.push_str(&format!("{}.{}", first / 40, first % 40));
     
-    // Remaining bytes encode remaining components
+    // Kalan baytlar geri kalan OID bileşenlerini base-128 (her baytın MSB'si devam bayrağı) kodlar
     let mut value = 0u64;
     for &b in &data[1..] {
         value = (value << 7) | ((b & 0x7F) as u64);
@@ -252,10 +254,10 @@ pub fn parse_oid(data: &[u8]) -> String {
 }
 
 // ============================================================================
-// X.509 CERTIFICATE
+// X.509 SERTİFİKASI
 // ============================================================================
 
-/// X.509 Distinguished Name
+/// X.509 Ayırt Edici Ad (Distinguished Name) — sertifika sahibini veya yayınlayıcıyı tanımlar
 #[derive(Clone, Debug, Default)]
 pub struct X509Name {
     pub common_name: String,
@@ -271,7 +273,7 @@ impl X509Name {
         X509Name::default()
     }
     
-    /// Parse from ASN.1 sequence
+    /// ASN.1 dizisinden ayırt edici adı ayrıştır — SET içindeki SEQUENCE'ları tarar
     pub fn parse(elements: &[Asn1Element]) -> Self {
         let mut name = X509Name::new();
         
@@ -299,7 +301,7 @@ impl X509Name {
                             _ => String::new(),
                         };
                         
-                        // Map OID to attribute
+                        // OID'yi X.500 öznitelik adına eşle — bilinen OID'leri alanlara dönüştür
                         match oid.as_str() {
                             "2.5.4.3" => name.common_name = value,
                             "2.5.4.6" => name.country = value,
@@ -318,7 +320,7 @@ impl X509Name {
     }
 }
 
-/// X.509 Public Key
+/// X.509 Açık Anahtar — sertifikadaki SubjectPublicKeyInfo yapısı
 #[derive(Clone, Debug)]
 pub struct X509PublicKey {
     pub algorithm: String,
@@ -326,7 +328,7 @@ pub struct X509PublicKey {
     pub curve: Option<String>,
 }
 
-/// X.509 Signature Algorithm
+/// X.509 İmza Algoritması — RSA, ECDSA gibi algoritmaları OID ile tanımlar
 #[derive(Clone, Debug)]
 pub struct SignatureAlgorithm {
     pub algorithm: String,
@@ -366,11 +368,11 @@ pub struct X509Certificate {
     pub public_key: X509PublicKey,
     pub extensions: Vec<X509Extension>,
     pub signature: Vec<u8>,
-    pub tbs_data: Vec<u8>,  // To-be-signed data for verification
+    pub tbs_data: Vec<u8>,  // Doğrulama için imzalanacak TBSCertificate verisi
     pub raw: Vec<u8>,
 }
 
-/// X.509 Extension
+/// X.509 Uzantısı — v3 sertifikalara ek özellikler ekler (basicConstraints, keyUsage, vb.)
 #[derive(Clone, Debug)]
 pub struct X509Extension {
     pub oid: String,
@@ -379,7 +381,8 @@ pub struct X509Extension {
 }
 
 impl X509Certificate {
-    /// Parse X.509 certificate from DER bytes
+    /// DER (Ayırt Edici Kodlama Kuralları) baytlarından X.509 sertifikası ayrıştır.
+    /// Yapı: Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
     pub fn parse(der: &[u8]) -> Option<Self> {
         let mut parser = Asn1Parser::new(der);
         let root = parser.parse_element()?;
@@ -396,24 +399,24 @@ impl X509Certificate {
         let sig_algo = &root.children[1];
         let sig_value = &root.children[2];
         
-        // Store TBS data for verification
+        // TBSCertificate verisini doğrulama amacıyla sakla — imza bu veri üzerine hesaplanır
         let tbs_data = tbs_cert.data.clone();
         
-        // Parse TBSCertificate
+        // TBSCertificate (To-Be-Signed Certificate / İmzalanacak Sertifika Verisi)'ni ayrıştır
         if tbs_cert.tag != Asn1Tag::Sequence {
             return None;
         }
         
         let mut idx = 0;
         
-        // Version (optional, context-specific [0])
+        // Sürüm (isteğe bağlı, bağlama özgü [0]) — v1=0, v2=1, v3=2 olarak kodlanır
         let version = if tbs_cert.children[idx].class == Asn1Class::ContextSpecific {
             let ver_elem = &tbs_cert.children[idx];
             if !ver_elem.children.is_empty() {
                 let ver_int = &ver_elem.children[0];
                 if ver_int.tag == Asn1Tag::Integer && !ver_int.data.is_empty() {
                     idx += 1;
-                    ver_int.data[0] + 1  // Version is 0-indexed
+                    ver_int.data[0] + 1  // Sürüm 0'dan başlar, insan okunaklılık için 1 ekliyoruz
                 } else {
                     1
                 }
@@ -422,31 +425,31 @@ impl X509Certificate {
                 1
             }
         } else {
-            1  // Default version 1
+            1  // Varsayılan sürüm: v1 (sadece temel alanlar içerir)
         };
         
-        // Serial number
+        // Seri numarası — yayıncı başvuru alanı içinde sertifikayı benzersiz tanımlar
         if idx >= tbs_cert.children.len() {
             return None;
         }
         let serial = tbs_cert.children[idx].data.clone();
         idx += 1;
         
-        // Signature algorithm
+        // TBSCertificate içindeki imza algoritması — dış imzayla örtüşmeli
         if idx >= tbs_cert.children.len() {
             return None;
         }
         let tbs_sig_algo = SignatureAlgorithm::parse(&tbs_cert.children[idx])?;
         idx += 1;
         
-        // Issuer
+        // Yayınlayıcı (Issuer) — sürtifikayı imzalayan CA'nın ayırt edici adı
         if idx >= tbs_cert.children.len() {
             return None;
         }
         let issuer = X509Name::parse(&tbs_cert.children[idx].children);
         idx += 1;
         
-        // Validity
+        // Geçerlilik dönemi (Validity) — notBefore ve notAfter zaman damgalarını içerir
         if idx >= tbs_cert.children.len() {
             return None;
         }
@@ -456,9 +459,9 @@ impl X509Certificate {
         let (not_before, not_after) = if validity.children.len() >= 2 {
             let parse_time = |elem: &Asn1Element| -> u64 {
                 let time_str = String::from_utf8_lossy(&elem.data);
-                // Parse UTCTime (YYMMDDhhmmssZ) or GeneralizedTime (YYYYMMDDhhmmssZ)
+                // UTCTime (YYAAGGssddssZ) veya GeneralizedTime (YYYYAAGGssddssZ) formatını ayrıştır
                 if elem.tag == Asn1Tag::UtcTime {
-                    // YYMMDDhhmmssZ
+                    // YYAAGGssddssZ formatı: YY=yıl(2 hane), AA=ay, GG=gün, ss=saat, dd=dakika, ss=saniye
                     if time_str.len() >= 12 {
                         let yy: u64 = time_str[0..2].parse().unwrap_or(0);
                         let mm: u64 = time_str[2..4].parse().unwrap_or(0);
@@ -466,7 +469,7 @@ impl X509Certificate {
                         let hh: u64 = time_str[6..8].parse().unwrap_or(0);
                         let min: u64 = time_str[8..10].parse().unwrap_or(0);
                         let ss: u64 = time_str[10..12].parse().unwrap_or(0);
-                        // Simple timestamp (not accurate, just for comparison)
+                        // Basit zaman damgası (kesin değil, yalnızca karşılaştırma amacıyla)
                         let year = if yy >= 50 { 1900 + yy } else { 2000 + yy };
                         year * 10000000000 + mm * 100000000 + dd * 1000000 + hh * 10000 + min * 100 + ss
                     } else {
@@ -481,14 +484,14 @@ impl X509Certificate {
             (0, 0)
         };
         
-        // Subject
+        // Konu (Subject) — sertifika sahibinin ayırt edici adı
         if idx >= tbs_cert.children.len() {
             return None;
         }
         let subject = X509Name::parse(&tbs_cert.children[idx].children);
         idx += 1;
         
-        // Subject Public Key Info
+        // Konu Açık Anahtar Bilgisi (SubjectPublicKeyInfo) — algoritma + açık anahtar verisi
         if idx >= tbs_cert.children.len() {
             return None;
         }
@@ -516,9 +519,9 @@ impl X509Certificate {
                 None
             };
             
-            // Extract key data from BIT STRING
+            // BIT STRING'den anahtar verisini çıkar — X.509'de açık anahtar BIT STRING olarak kodlanır
             let key_data = if key_bits.tag == Asn1Tag::BitString && key_bits.data.len() > 1 {
-                // Skip unused bits byte
+                // Kullanılmayan bit sayısı baytını atla — BIT STRING'in ilk baytyı kullanılmayan bitleri belirtir
                 key_bits.data[1..].to_vec()
             } else {
                 key_bits.data.clone()
@@ -537,7 +540,7 @@ impl X509Certificate {
             }
         };
         
-        // Extensions (optional, context-specific [3])
+        // Uzantılar (isteğe bağlı, bağlama özgü [3]) — v3 sertifikalarında ek politika bilgileri
         let mut extensions = Vec::new();
         while idx < tbs_cert.children.len() {
             let elem = &tbs_cert.children[idx];
@@ -568,10 +571,10 @@ impl X509Certificate {
             idx += 1;
         }
         
-        // Signature algorithm (outer)
+        // Dış imza algoritması — tbsCertificate içindekiyle örtüşmeli (RFC 5280 gerekliliği)
         let signature_algo = SignatureAlgorithm::parse(sig_algo)?;
         
-        // Signature value
+        // İmza değeri (BIT STRING) — X.509 sertifikasının RSA veya ECDSA imzası
         let signature = if sig_value.tag == Asn1Tag::BitString && sig_value.data.len() > 1 {
             sig_value.data[1..].to_vec()
         } else {
@@ -594,16 +597,17 @@ impl X509Certificate {
         })
     }
     
-    /// Check if certificate is valid at given time
+    /// Sertifikanın belirtilen zamanda geçerli olup olmadığını kontrol et (notBefore ≤ time ≤ notAfter)
     pub fn is_valid_at(&self, time: u64) -> bool {
         time >= self.not_before && time <= self.not_after
     }
     
-    /// Check basic constraints (CA flag)
+    /// Temel kısıtlamaları kontrol et: sertifikada CA bayrağı set edilmiş mi?
+    /// basicConstraints uzantısı (OID: 2.5.29.19) cA boolean alanını içerir.
     pub fn is_ca(&self) -> bool {
         for ext in &self.extensions {
-            if ext.oid == "2.5.29.19" {  // basicConstraints
-                // Parse basicConstraints
+            if ext.oid == "2.5.29.19" {  // temelKisitlamalar (basicConstraints)
+                // basicConstraints uzantısını ayrıştır: cA=TRUE ise sertifika bir CA sertifikasıdır
                 let mut parser = Asn1Parser::new(&ext.value);
                 if let Some(elem) = parser.parse_element() {
                     if elem.tag == Asn1Tag::Sequence && !elem.children.is_empty() {
@@ -617,10 +621,10 @@ impl X509Certificate {
         false
     }
     
-    /// Get key usage
+    /// Anahtar kullanım alanını al — keyUsage uzantısı hangi işlemlerin izinli olduğunu belirtir
     pub fn key_usage(&self) -> Option<u16> {
         for ext in &self.extensions {
-            if ext.oid == "2.5.29.15" {  // keyUsage
+            if ext.oid == "2.5.29.15" {  // anahtarKullanimi (keyUsage)
                 let mut parser = Asn1Parser::new(&ext.value);
                 if let Some(elem) = parser.parse_element() {
                     if elem.tag == Asn1Tag::BitString && elem.data.len() > 1 {
@@ -639,33 +643,33 @@ impl X509Certificate {
 }
 
 // ============================================================================
-// CERTIFICATE STORE
+// SERTİFİKA DEPOSU
 // ============================================================================
 
-/// Root CA certificate store
+/// Kök CA sertifika deposu — güvenilen kerede CA sertifikalarını depolar
 static ROOT_CA_STORE: Mutex<Vec<X509Certificate>> = Mutex::new(Vec::new());
 
-/// Add root CA to store
+/// Kök CA'yı depoya ekle
 pub fn add_root_ca(cert: X509Certificate) {
     let mut store = ROOT_CA_STORE.lock();
     store.push(cert);
 }
 
-/// Get root CA store
+/// Kök CA deposunu al — klonlanmış kopyasını döndür
 pub fn get_root_cas() -> Vec<X509Certificate> {
     ROOT_CA_STORE.lock().clone()
 }
 
-/// Clear root CA store
+/// Kök CA deposunu temizle
 pub fn clear_root_cas() {
     ROOT_CA_STORE.lock().clear();
 }
 
 // ============================================================================
-// CERTIFICATE CHAIN VERIFICATION
+// SERTİFİKA ZİNCİRİ DOĞRULAMA
 // ============================================================================
 
-/// Certificate verification error
+/// Sertifika doğrulama hatası — zincir doğrulama sırasında ortaya çıkabilecek hata türleri
 #[derive(Clone, Debug)]
 pub enum CertError {
     InvalidFormat,
@@ -680,7 +684,7 @@ pub enum CertError {
     Revoked,
 }
 
-/// Certificate chain verifier
+/// Sertifika zinciri doğrulayucısı — RFC 5280 uyumlu sertifika zinciri doğrulaması yapar
 pub struct CertVerifier {
     pub trusted_roots: Vec<X509Certificate>,
     pub check_time: u64,
@@ -690,27 +694,27 @@ impl CertVerifier {
     pub fn new() -> Self {
         CertVerifier {
             trusted_roots: get_root_cas(),
-            check_time: 0,  // Will use current time
+            check_time: 0,  // Varsayılan: mevcut zamanı kullanacak
         }
     }
     
-    /// Verify certificate chain
+    /// Sertifika zincirini doğrula — geçerlilik süresi, CA bayrağı ve güven çıpasını kontrol eder
     pub fn verify_chain(&self, chain: &[X509Certificate]) -> Result<(), CertError> {
         if chain.is_empty() {
             return Err(CertError::InvalidChain);
         }
         
-        // Get current time (simplified)
+        // Mevcut zamanı al (basitleştirilmiş — gerçek sistemde RTC veya NTP kullanılır)
         let time = if self.check_time > 0 {
             self.check_time
         } else {
-            // Use a pseudo-time based on random
+            // Rastgele tabanlı yapı zaman kullan — test amaçlı, üretimde gerçek saat gereklidir
             crate::random::next_u32() as u64
         };
         
-        // Verify each certificate in chain
+        // Zincirdeki her sertifikayı sırayla doğrula
         for (i, cert) in chain.iter().enumerate() {
-            // Check validity period
+            // Geçerlilik dönemini kontrol et — notBefore ve notAfter zaman sınırlarına bak
             if !cert.is_valid_at(time) {
                 if time < cert.not_before {
                     return Err(CertError::NotYetValid);
@@ -719,23 +723,23 @@ impl CertVerifier {
                 }
             }
             
-            // Check if this is the leaf certificate
+            // Yaprak sertifika mı kontrol et (i==0): son kullanıcı sertifikası
             if i == 0 {
-                // Leaf cert - check if it's not a CA
-                // (unless it's self-signed, which is handled below)
+                // Yaprak sertifika: CA olmadığını kontrol et
+                // (öz-imzalı ise aşağıda ele alınır)
                 continue;
             }
             
-            // Intermediate or root - must be CA
+            // Ara veya kök sertifika — CA olmalı (basicConstraints.cA=TRUE gereklidir)
             if !cert.is_ca() {
                 return Err(CertError::NotCA);
             }
         }
         
-        // Find trust anchor
+        // Güven çıpasını bul — zincirin sonundaki sertifika güvenilen kök deposuyla karşılaştırılır
         let last_cert = &chain[chain.len() - 1];
         
-        // Check if last cert is a trusted root
+        // Son sertifikanın güvenilen kök sertifika olup olmadığını kontrol et
         let is_trusted = self.trusted_roots.iter().any(|root| {
             root.subject.common_name == last_cert.subject.common_name &&
             root.public_key.key_data == last_cert.public_key.key_data
@@ -749,25 +753,25 @@ impl CertVerifier {
             return Err(CertError::UnknownIssuer);
         }
         
-        // Verify signatures (simplified - in production would verify actual signatures)
-        // For each cert, verify it was signed by the next cert in chain
+        // İmzaları doğrula (basitleştirilmiş — üretimde RSA/ECDSA imzası gerçekten doğrulanır)
+        // Her sertifika için, zincirdeki bir sonraki sertifika tarafından imzalandığı kontrol edilir
         for i in 0..chain.len().saturating_sub(1) {
             let cert = &chain[i];
             let issuer = &chain[i + 1];
             
-            // Verify issuer name matches
+            // Yayınlayıcı adının eşleşip eşleşmediğini doğrula (issuer CN == issuer subject CN)
             if cert.issuer.common_name != issuer.subject.common_name {
                 return Err(CertError::InvalidChain);
             }
             
-            // In production: verify signature using issuer's public key
-            // For now, we trust that the chain is properly signed
+            // Üretimde: yayınlayıcının açık anahtarı ile RSA veya ECDSA imzasını doğrula
+            // Şimdiilik, zincirin düzgün imzalandığına güveniyoruz (stub uygulama)
         }
         
         Ok(())
     }
     
-    /// Verify a single certificate against trusted roots
+    /// Tek bir sertifikayı güvenilen kök sertifika listesine karşı doğrula
     pub fn verify(&self, cert: &X509Certificate) -> Result<(), CertError> {
         self.verify_chain(&[cert.clone()])
     }
@@ -780,31 +784,31 @@ impl Default for CertVerifier {
 }
 
 // ============================================================================
-// WELL-KNOWN ROOT CAs (BUILT-IN)
+// BİLİNEN KÖK CA'LAR (GÖMÜLÜ)
 // ============================================================================
 
-/// Initialize built-in root CAs
+/// Gömülü kök CA sertifikalarını başlat
 pub fn init_builtin_roots() {
-    // In production, these would be actual root CA certificates
-    // For now, we just initialize an empty store
-    // Real implementation would include: DigiCert, Let's Encrypt, etc.
+    // Üretimde, bunlar gerçek kök CA sertifikaları olurdu
+    // Şimdiilik, boş bir depo başlatıyoruz
+    // Gerçek uygulama: DigiCert, Let's Encrypt, GlobalSign gibi CA'ları içerirdi
     clear_root_cas();
 }
 
 // ============================================================================
-// TLS INTEGRATION
+// TLS ENTEGRASYONU
 // ============================================================================
 
-/// Parse certificate chain from TLS handshake
+/// TLS el sıkışmasından sertifika zinciri ayrıştır
 pub fn parse_certificate_chain(cert_data: &[u8]) -> Vec<X509Certificate> {
     let mut certs = Vec::new();
     let mut pos = 0;
     
-    // TLS certificate message format:
-    // u24 total_length
-    // For each certificate:
-    //   u24 length
-    //   DER-encoded certificate
+    // TLS sertifika mesaj formatı:
+    // u24 toplam_uzunluk
+    // Her sertifika için:
+    //   u24 sertifika_uzunlugu
+    //   DER kodlu sertifika
     
     if cert_data.len() < 3 {
         return certs;
@@ -832,10 +836,10 @@ pub fn parse_certificate_chain(cert_data: &[u8]) -> Vec<X509Certificate> {
 }
 
 // ============================================================================
-// X.509 CRL (CERTIFICATE REVOCATION LIST)
+// X.509 İPTAL LİSTESİ (CERTIFICATE REVOCATION LIST - CRL)
 // ============================================================================
 
-/// CRL Reason codes
+/// CRL İptal Neden Kodları — sertifikanın neden iptal edildiğini açıklar
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrlReason {
     Unspecified = 0,
@@ -850,7 +854,7 @@ pub enum CrlReason {
     AaCompromise = 10,
 }
 
-/// CRL Entry (revoked certificate)
+/// CRL Kayıdı (iptal edilmiş sertifika) — seri numarası, iptal tarihi ve neden içerir
 #[derive(Clone, Debug)]
 pub struct CrlEntry {
     pub serial: Vec<u8>,
@@ -859,7 +863,7 @@ pub struct CrlEntry {
     pub invalidity_date: Option<u64>,
 }
 
-/// X.509 CRL
+/// X.509 İptal Listesi (CRL) — CA tarafından yayımlanan iptal edilmiş sertifika listesi
 #[derive(Clone, Debug)]
 pub struct X509Crl {
     pub version: u8,
@@ -874,7 +878,7 @@ pub struct X509Crl {
 }
 
 impl X509Crl {
-    /// Parse CRL from DER bytes
+    /// DER baytlarından CRL ayrıştır — TBSCertList, imza algoritması ve imzayı ayrıştırır
     pub fn parse(der: &[u8]) -> Option<Self> {
         let mut parser = Asn1Parser::new(der);
         let root = parser.parse_element()?;
@@ -893,7 +897,7 @@ impl X509Crl {
         
         let mut idx = 0;
         
-        // Version (optional, default v1)
+        // Sürüm (isteğe bağlı, varsayılan v1) — v2 CRL'ler uzantıları destekler
         let version = if tbs_crl.children[idx].tag == Asn1Tag::Integer {
             idx += 1;
             if !tbs_crl.children[0].data.is_empty() {
@@ -905,28 +909,28 @@ impl X509Crl {
             1
         };
         
-        // Signature algorithm
+        // CRL imza algoritması
         if idx >= tbs_crl.children.len() {
             return None;
         }
         let signature_algo = SignatureAlgorithm::parse(&tbs_crl.children[idx])?;
         idx += 1;
         
-        // Issuer
+        // Yayınlayıcı (Issuer) — CRL'i yayımlayan CA'nın ayırt edici adı
         if idx >= tbs_crl.children.len() {
             return None;
         }
         let issuer = X509Name::parse(&tbs_crl.children[idx].children);
         idx += 1;
         
-        // This Update
+        // Bu Güncelleme (ThisUpdate) — CRL'in güncellenme tarihi
         if idx >= tbs_crl.children.len() {
             return None;
         }
         let this_update = Self::parse_time(&tbs_crl.children[idx]);
         idx += 1;
         
-        // Next Update (optional)
+        // Sonraki Güncelleme (NextUpdate, isteğe bağlı) — CRL'in sonraki yenileme tarihi
         let next_update = if idx < tbs_crl.children.len() && 
             (tbs_crl.children[idx].tag == Asn1Tag::UtcTime || 
              tbs_crl.children[idx].tag == Asn1Tag::GeneralizedTime) {
@@ -934,10 +938,10 @@ impl X509Crl {
             idx += 1;
             time
         } else {
-            this_update + 86400 // Default 24 hours
+            this_update + 86400 // Varsayılan: 24 saat sonra
         };
         
-        // Revoked certificates
+        // İptal edilmiş sertifikalar listesi
         let mut revoked_certs = Vec::new();
         while idx < tbs_crl.children.len() {
             let elem = &tbs_crl.children[idx];
@@ -951,7 +955,7 @@ impl X509Crl {
             }
         }
         
-        // Extensions (optional, context-specific [0])
+        // CRL uzantıları (isteğe bağlı, bağlama özgü [0]) — v2 CRL'lerde ek bilgiler
         let mut extensions = Vec::new();
         if idx < tbs_crl.children.len() {
             let elem = &tbs_crl.children[idx];
@@ -979,10 +983,10 @@ impl X509Crl {
             }
         }
         
-        // Signature algorithm (outer)
+        // Dış imza algoritması (CRL düzeyinde)
         let _outer_sig_algo = SignatureAlgorithm::parse(sig_algo)?;
         
-        // Signature value
+        // İmza değeri (BIT STRING) — CRL üzerindeki CA imzası
         let signature = if sig_value.tag == Asn1Tag::BitString && sig_value.data.len() > 1 {
             sig_value.data[1..].to_vec()
         } else {
@@ -1026,7 +1030,7 @@ impl X509Crl {
         let serial = elem.children[0].data.clone();
         let revocation_date = Self::parse_time(&elem.children[1]);
         
-        // Parse extensions for reason
+        // İptal uzantılarını ayrıştır: neden ve geçersizlik tarihi
         let mut reason = CrlReason::Unspecified;
         let mut invalidity_date = None;
         
@@ -1038,7 +1042,7 @@ impl X509Crl {
                         let oid = parse_oid(&ext.children[0].data);
                         let value = &ext.children[1].data;
                         
-                        // CRL reason (OID 2.5.29.21)
+                        // CRL nedenı (OID 2.5.29.21) — iptal nedenini ENUMERATED olarak kodlar
                         if oid == "2.5.29.21" {
                             let mut parser = Asn1Parser::new(value);
                             if let Some(reason_elem) = parser.parse_element() {
@@ -1059,7 +1063,7 @@ impl X509Crl {
                             }
                         }
                         
-                        // Invalidity date (OID 2.5.29.24)
+                        // Geçersizlik tarihi (OID 2.5.29.24) — sertifikanın fiilen geçersiz olduğu tarih
                         if oid == "2.5.29.24" {
                             let mut parser = Asn1Parser::new(value);
                             if let Some(date_elem) = parser.parse_element() {
@@ -1079,22 +1083,22 @@ impl X509Crl {
         })
     }
     
-    /// Check if certificate is revoked
+    /// Sertifikanın iptal edilip edilmediğini seri numarasına göre kontrol et
     pub fn is_revoked(&self, serial: &[u8]) -> Option<&CrlEntry> {
         self.revoked_certs.iter().find(|e| e.serial == serial)
     }
     
-    /// Check if CRL is expired
+    /// CRL'nin süresi dolmuş mu kontrol et — nextUpdate geçmişse CRL güncellenmeli
     pub fn is_expired(&self, time: u64) -> bool {
         time > self.next_update
     }
 }
 
 // ============================================================================
-// OCSP (ONLINE CERTIFICATE STATUS PROTOCOL)
+// OCSP (ÇEVRİMİÇİ SERTİFİKA DURUM PROTOKOLÜ - Online Certificate Status Protocol)
 // ============================================================================
 
-/// OCSP Request
+/// OCSP İsteği — sertifika durumunu sorgulamak için gönderilen mesaj
 #[derive(Clone, Debug)]
 pub struct OcspRequest {
     pub requestor_name: Option<X509Name>,
@@ -1103,7 +1107,7 @@ pub struct OcspRequest {
     pub signature: Option<Vec<u8>>,
 }
 
-/// OCSP Certificate Request
+/// OCSP Sertifika Sorgu Birimi — tek bir sertifikanın yıkayıcı bilgilerini içerir
 #[derive(Clone, Debug)]
 pub struct OcspCertRequest {
     pub issuer_key_hash: [u8; 20],
@@ -1112,7 +1116,7 @@ pub struct OcspCertRequest {
     pub serial: Vec<u8>,
 }
 
-/// OCSP Response Status
+/// OCSP Yanıt Durumu — OCSP sunucusunun isteğe verdiği üst düzey cevap kodu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OcspResponseStatus {
     Successful = 0,
@@ -1123,7 +1127,7 @@ pub enum OcspResponseStatus {
     Unauthorized = 6,
 }
 
-/// OCSP Certificate Status
+/// OCSP Sertifika Durumu — sorgu sonuç: geçerli, iptal edilmiş veya bilinmiyor
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OcspCertStatus {
     Good,
@@ -1131,7 +1135,7 @@ pub enum OcspCertStatus {
     Unknown,
 }
 
-/// OCSP Single Response
+/// OCSP Tekil Yanıt — tek bir sertifikanın durum bilgisini içerir
 #[derive(Clone, Debug)]
 pub struct OcspSingleResponse {
     pub cert_id_hash_algo: String,
@@ -1144,7 +1148,7 @@ pub struct OcspSingleResponse {
     pub produced_at: u64,
 }
 
-/// OCSP Response
+/// OCSP Yanıtı — OCSP sunucusundan gelen tam yanıt mesajı
 #[derive(Clone, Debug)]
 pub struct OcspResponse {
     pub response_status: OcspResponseStatus,
@@ -1158,7 +1162,7 @@ pub struct OcspResponse {
     pub certs: Vec<X509Certificate>,
 }
 
-/// OCSP Responder ID
+/// OCSP Yanıtlayıcı Kimliği — ada göre (DN) veya anahtar özeti ile tanımlanır
 #[derive(Clone, Debug)]
 pub enum OcspResponderId {
     ByName(X509Name),
@@ -1166,9 +1170,9 @@ pub enum OcspResponderId {
 }
 
 impl OcspRequest {
-    /// Create new OCSP request for a certificate
+    /// Bir sertifika için yeni OCSP isteği oluştur (sorgu: bu sertifika geçerli mi?)
     pub fn new(cert: &X509Certificate, issuer: &X509Certificate) -> Self {
-        // Hash issuer name and key
+        // Yayınlayıcı adını ve anahtarını hash'le — CertID oluşturmak için gerekli
         let issuer_name_hash = Self::hash_name(&issuer.subject);
         let issuer_key_hash = Self::hash_key(&issuer.public_key.key_data);
         
@@ -1177,7 +1181,7 @@ impl OcspRequest {
             request_list: vec![OcspCertRequest {
                 issuer_key_hash,
                 issuer_name_hash,
-                hash_algorithm: "1.3.14.3.2.26".to_string(), // SHA-1 OID
+                hash_algorithm: "1.3.14.3.2.26".to_string(), // SHA-1 OID (Nesne Tanımlayıcısı)
                 serial: cert.serial.clone(),
             }],
             signature_algo: None,
@@ -1186,7 +1190,7 @@ impl OcspRequest {
     }
     
     fn hash_name(name: &X509Name) -> [u8; 20] {
-        // Simplified SHA-1 hash of name
+        // Basitleştirilmiş ad hash'i — gerçek SHA-1 yerine XOR tabanlı (stub)
         let mut hash = [0u8; 20];
         for (i, b) in name.common_name.as_bytes().iter().chain(
             name.organization.as_bytes().iter()
@@ -1197,7 +1201,7 @@ impl OcspRequest {
     }
     
     fn hash_key(key: &[u8]) -> [u8; 20] {
-        // Simplified SHA-1 hash of key
+        // Basitleştirilmiş anahtar hash'i — gerçek SHA-1 yerine XOR tabanlı (stub)
         let mut hash = [0u8; 20];
         for (i, b) in key.iter().enumerate() {
             hash[i % 20] ^= b;
@@ -1205,59 +1209,59 @@ impl OcspRequest {
         hash
     }
     
-    /// Encode request to DER
+    /// İsteği DER formatına kodla — OCSP sunucusuna gönderilebilecek binary veri üretir
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         
-        // OCSP Request sequence
-        buf.push(0x30); // SEQUENCE
+        // OCSP İstek dizisi (SEQUENCE)
+        buf.push(0x30); // SEQUENCE etiketi
         let len_pos = buf.len();
-        buf.push(0); // Placeholder length
+        buf.push(0); // Uzunluk yer tutucu (sonra güncellenecek)
         
-        // TBSRequest
-        buf.push(0x30); // SEQUENCE
+        // TBSRequest ("To Be Signed Request" / İmzalanacak İstek)
+        buf.push(0x30); // SEQUENCE etiketi
         let tbs_len_pos = buf.len();
         buf.push(0);
         
-        // Request list
-        buf.push(0x30); // SEQUENCE
+        // İstek listesi — sorgulanacak sertifika CertID'lerinin dizisi
+        buf.push(0x30); // SEQUENCE etiketi
         let list_len_pos = buf.len();
         buf.push(0);
         
         for req in &self.request_list {
-            // Request
-            buf.push(0x30); // SEQUENCE
+            // Tek bir sertifika isteği
+            buf.push(0x30); // SEQUENCE etiketi
             let req_len_pos = buf.len();
             buf.push(0);
             
-            // CertID
-            buf.push(0x30); // SEQUENCE
+            // Sertifika Kimliği (CertID) — hash algoritması, yayınlayıcı hash'leri ve seri numarası
+            buf.push(0x30); // SEQUENCE etiketi
             let certid_len_pos = buf.len();
             buf.push(0);
             
-            // Hash algorithm
-            buf.push(0x30); // SEQUENCE
-            buf.push(0x05); // Length
-            buf.push(0x06); // OID tag
-            buf.push(0x03); // OID length
-            buf.extend_from_slice(&[0x2A, 0x03, 0x04]); // SHA-1 prefix
+            // Hash algoritması (AlgorithmIdentifier)
+            buf.push(0x30); // SEQUENCE etiketi
+            buf.push(0x05); // Uzunluk
+            buf.push(0x06); // OID etiketi
+            buf.push(0x03); // OID uzunluğu
+            buf.extend_from_slice(&[0x2A, 0x03, 0x04]); // SHA-1 ön ek baytları
             
-            // Issuer name hash
-            buf.push(0x04); // OCTET STRING
-            buf.push(20); // Length
+            // Yayınlayıcı adı hash'i (OCTET STRING)
+            buf.push(0x04); // OCTET STRING etiketi
+            buf.push(20); // Uzunluk (SHA-1 = 20 bayt)
             buf.extend_from_slice(&req.issuer_name_hash);
             
-            // Issuer key hash
-            buf.push(0x04); // OCTET STRING
-            buf.push(20); // Length
+            // Yayınlayıcı anahtarı hash'i (OCTET STRING)
+            buf.push(0x04); // OCTET STRING etiketi
+            buf.push(20); // Uzunluk (SHA-1 = 20 bayt)
             buf.extend_from_slice(&req.issuer_key_hash);
             
-            // Serial
-            buf.push(0x02); // INTEGER
+            // Seri numarası (INTEGER)
+            buf.push(0x02); // INTEGER etiketi
             buf.push(req.serial.len() as u8);
             buf.extend_from_slice(&req.serial);
             
-            // Update lengths
+            // Uzunlukları güncelle (TLV yapısında L alanı gerçek boyuta göre yazılır)
             let certid_len = buf.len() - certid_len_pos - 1;
             buf[certid_len_pos] = certid_len as u8;
             
@@ -1265,7 +1269,7 @@ impl OcspRequest {
             buf[req_len_pos] = req_len as u8;
         }
         
-        // Update lengths
+        // Kalan uzunlukları güncelle
         let list_len = buf.len() - list_len_pos - 1;
         buf[list_len_pos] = list_len as u8;
         
@@ -1280,7 +1284,7 @@ impl OcspRequest {
 }
 
 impl OcspResponse {
-    /// Parse OCSP response from DER
+    /// DER'den OCSP yanıtı ayrıştır — BasicOCSPResponse formatını işler
     pub fn parse(der: &[u8]) -> Option<Self> {
         let mut parser = Asn1Parser::new(der);
         let root = parser.parse_element()?;
@@ -1289,7 +1293,7 @@ impl OcspResponse {
             return None;
         }
         
-        // Response status
+        // Yanıt durumunu oku (ENUMERATED) — üst düzey başarı/hata kodu
         if root.children.is_empty() {
             return None;
         }
@@ -1323,7 +1327,7 @@ impl OcspResponse {
             });
         }
         
-        // Parse response bytes
+        // Yanıt baytlarını ayrıştır — ResponseBytes içindeki OID ve içerik verisi
         if root.children.len() < 2 {
             return None;
         }
@@ -1336,7 +1340,7 @@ impl OcspResponse {
         let response_type = parse_oid(&response_bytes.children[0].data);
         let response_data = &response_bytes.children[1].data;
         
-        // Parse BasicOCSPResponse
+        // BasicOCSPResponse yapısını ayrıştır
         let mut parser = Asn1Parser::new(response_data);
         let basic = parser.parse_element()?;
         
@@ -1346,7 +1350,7 @@ impl OcspResponse {
         
         let mut idx = 0;
         
-        // Version (optional)
+        // Sürüm (isteğe bağlı) — yoksa v1 kabul edilir
         let version = if basic.children[idx].tag == Asn1Tag::Integer {
             idx += 1;
             if !basic.children[0].data.is_empty() { basic.children[0].data[0] + 1 } else { 1 }
@@ -1354,35 +1358,35 @@ impl OcspResponse {
             1
         };
         
-        // Responder ID
+        // Yanıtlayıcı Kimliği — ada göre (byName) veya anahtar özetine göre (byKey)
         if idx >= basic.children.len() {
             return None;
         }
         let responder_id = Self::parse_responder_id(&basic.children[idx])?;
         idx += 1;
         
-        // Produced At
+        // Üretim Zamanı (ProducedAt) — bu yanıtın oluşturulduğu an
         if idx >= basic.children.len() {
             return None;
         }
         let produced_at = X509Crl::parse_time(&basic.children[idx]);
         idx += 1;
         
-        // Responses
+        // Tekil yanıtlar listesi — her biri ayrı bir sertifikanın durumunu içerir
         if idx >= basic.children.len() {
             return None;
         }
         let responses = Self::parse_responses(&basic.children[idx])?;
         idx += 1;
         
-        // Signature algorithm
+        // İmza algoritması
         if idx >= basic.children.len() {
             return None;
         }
         let signature_algo = SignatureAlgorithm::parse(&basic.children[idx])?;
         idx += 1;
         
-        // Signature
+        // İmza
         if idx >= basic.children.len() {
             return None;
         }
@@ -1393,7 +1397,7 @@ impl OcspResponse {
         };
         idx += 1;
         
-        // Certs (optional)
+        // Sertifikalar (isteğe bağlı) — yanıtlayıcının kendi sertifikası eklenebilir
         let certs = if idx < basic.children.len() {
             let mut c = Vec::new();
             for cert_elem in &basic.children[idx..] {
@@ -1424,10 +1428,10 @@ impl OcspResponse {
     fn parse_responder_id(elem: &Asn1Element) -> Option<OcspResponderId> {
         if elem.class == Asn1Class::ContextSpecific {
             if elem.tag_number == 1 {
-                // ByName
+                // Ada Göre (byName) — DN ile tanımlanmış yanıtlayıcı
                 Some(OcspResponderId::ByName(X509Name::parse(&elem.children)))
             } else if elem.tag_number == 2 {
-                // ByKey
+                // Anahtara Göre (byKey) — açık anahtar özeti ile tanımlanmış yanıtlayıcı
                 Some(OcspResponderId::ByKey(elem.data.clone()))
             } else {
                 None
@@ -1448,7 +1452,7 @@ impl OcspResponse {
                 continue;
             }
             
-            // CertID
+            // Sertifika Kimliği (CertID) — hash algoritması + yayınlayıcı hash'leri + seri
             let cert_id = &single.children[0];
             if cert_id.tag != Asn1Tag::Sequence || cert_id.children.len() < 4 {
                 continue;
@@ -1459,28 +1463,28 @@ impl OcspResponse {
             let issuer_key_hash = cert_id.children[2].data.clone();
             let serial = cert_id.children[3].data.clone();
             
-            // Cert Status
+            // Sertifika Durumu — bağlama özgü: [0] geçerli, [1] iptal, [2] bilinmiyor
             let status = if single.children[1].class == Asn1Class::ContextSpecific {
                 if single.children[1].tag_number == 0 {
-                    // Good
+                    // Geçerli (Good) — sertifika iptal edilmemiş
                     OcspCertStatus::Good
                 } else if single.children[1].tag_number == 1 {
-                    // Revoked
+                    // İptal Edilmiş (Revoked) — iptal zamanı ve neden içerebilir
                     let revocation_time = X509Crl::parse_time(&single.children[1]);
                     let reason = CrlReason::Unspecified;
                     OcspCertStatus::Revoked { reason, revocation_time }
                 } else {
-                    // Unknown
+                    // Bilinmiyor (Unknown) — yanıtlayıcı bu sertifikayı tanımıyor
                     OcspCertStatus::Unknown
                 }
             } else {
                 OcspCertStatus::Unknown
             };
             
-            // thisUpdate
+            // bu Güncelleme (thisUpdate) — bu yanıtın geçerlilik başlangıcı
             let this_update = X509Crl::parse_time(&single.children[2]);
             
-            // nextUpdate (optional)
+            // sonraki Güncelleme (nextUpdate, isteğe bağlı) — yanıtın geçerlilik bitiş tarihi
             let next_update = if single.children.len() > 3 && 
                 single.children[3].class == Asn1Class::ContextSpecific {
                 Some(X509Crl::parse_time(&single.children[3]))
@@ -1503,17 +1507,17 @@ impl OcspResponse {
         Some(responses)
     }
     
-    /// Get certificate status
+    /// Sertifika durumunu seri numarasına göre al
     pub fn get_cert_status(&self, serial: &[u8]) -> Option<&OcspSingleResponse> {
         self.responses.iter().find(|r| r.serial == serial)
     }
 }
 
 // ============================================================================
-// REVOCATION CHECKER
+// İPTAL DENETLEYİCİSİ
 // ============================================================================
 
-/// Revocation checker combining CRL and OCSP
+/// CRL ve OCSP'yi birleştiren iptal denetleyicisi — önce OCSP'yi, yoksa CRL'yi kontrol eder
 pub struct RevocationChecker {
     pub crls: Vec<X509Crl>,
     pub ocsp_cache: Vec<(Vec<u8>, OcspResponse)>,
@@ -1529,28 +1533,28 @@ impl RevocationChecker {
         }
     }
     
-    /// Add CRL
+    /// CRL ekle — iptal listesini denetleyiciye tanıt
     pub fn add_crl(&mut self, crl: X509Crl) {
         self.crls.push(crl);
     }
     
-    /// Cache OCSP response
+    /// OCSP yanıtını önbelleğe al — ağ üzerinden sorgulama yapmak yerine önbelleği kullan
     pub fn cache_ocsp(&mut self, serial: Vec<u8>, response: OcspResponse) {
         self.ocsp_cache.push((serial, response));
     }
     
-    /// Check if certificate is revoked
+    /// Sertifikanın iptal edilip edilmediğini OCSP veya CRL kullanarak kontrol et
     pub fn check_revocation(&self, cert: &X509Certificate, issuer: &X509Certificate) -> Result<(), CertError> {
-        // Try OCSP first if preferred
+        // Tercih edilirse önce OCSP önbelleğini dene
         if self.prefer_ocsp {
             if let Some(response) = self.ocsp_cache.iter().find(|(s, _)| s == &cert.serial).map(|(_, r)| r) {
                 return self.check_ocsp_status(response, &cert.serial);
             }
         }
         
-        // Check CRLs
+        // CRL'leri kontrol et — yayınlayıcı eşleşenlerinde seri numarasına bak
         for crl in &self.crls {
-            // Check if CRL issuer matches certificate issuer
+            // CRL yayınlayıcısının sertifika yayınlayıcısıyla eşleşip eşleşmediğini kontrol et
             if crl.issuer.common_name == issuer.subject.common_name {
                 if let Some(entry) = crl.is_revoked(&cert.serial) {
                     return Err(CertError::Revoked);
@@ -1558,19 +1562,19 @@ impl RevocationChecker {
             }
         }
         
-        // If OCSP not preferred and not found in cache, check CRLs only
+        // OCSP tercih edilmiyorsa ve önbellekte bulunamadıysa yalnızca CRL'leri kontrol et
         if !self.prefer_ocsp {
             return Ok(());
         }
         
-        // Otherwise, we couldn't determine revocation status
-        // In production, would make network request to OCSP responder
+        // Aksi takdirde iptal durumu belirlenemedi
+        // Üretimde: OCSP yanıtlayıcısına HTTP üzerinden ağ isteği yapılırdı
         Ok(())
     }
     
     fn check_ocsp_status(&self, response: &OcspResponse, serial: &[u8]) -> Result<(), CertError> {
         if response.response_status != OcspResponseStatus::Successful {
-            // OCSP failed, fall back to CRL
+            // OCSP başarısız — CRL'e geri dön (graceful fallback)
             return Ok(());
         }
         
@@ -1578,7 +1582,7 @@ impl RevocationChecker {
             match single.status {
                 OcspCertStatus::Good => Ok(()),
                 OcspCertStatus::Revoked { .. } => Err(CertError::Revoked),
-                OcspCertStatus::Unknown => Ok(()), // Unknown status, accept
+                OcspCertStatus::Unknown => Ok(()), // Bilinmeyen durum: kabul et
             }
         } else {
             Ok(())

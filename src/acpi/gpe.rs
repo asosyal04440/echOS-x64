@@ -1,6 +1,8 @@
-//! # ACPI Events (GPE)
+//! # ACPI Olayları (GPE)
 //!
-//! General Purpose Events and ACPI event handling.
+//! Genel Amaçlı Olaylar (General Purpose Events) ve ACPI olay işleme.
+//! GPE, ACPI donanım olaylarını (uyandırma, sıcaklık bildirimi vb.) işlemek için
+//! kullanılan bir mekanizmadır. GPE blokları, sabit olaylar ve olay yöneticisini içerir.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,47 +12,47 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// GPE CONSTANTS
+// GPE SABİTLERİ
 // ============================================================================
 
-/// GPE block registers
+/// GPE blok yazmaçları
 pub const GPE0_BLK: &str = "GPE0_BLK";
 pub const GPE1_BLK: &str = "GPE1_BLK";
 
-/// GPE register offsets
+/// GPE yazmaç ofsetleri
 pub const GPE_STS_OFFSET: usize = 0;
 pub const GPE_EN_OFFSET: usize = 2;
 
-/// GPE event types
+/// GPE olay tipleri
 pub const GPE_TYPE_WAKE: u8 = 0x01;
 pub const GPE_TYPE_RUNTIME: u8 = 0x02;
 pub const GPE_TYPE_WAKE_RUNTIME: u8 = 0x03;
 
-/// Fixed event numbers
+/// Sabit olay numaraları
 pub const ACPI_EVENT_PMTIMER: u32 = 0;
 pub const ACPI_EVENT_POWER_BUTTON: u32 = 2;
 pub const ACPI_EVENT_SLEEP_BUTTON: u32 = 3;
 pub const ACPI_EVENT_RTC: u32 = 4;
 
 // ============================================================================
-// GPE EVENT
+// GPE OLAYI
 // ============================================================================
 
 #[derive(Clone, Debug)]
 pub struct GpeEvent {
-    /// GPE number
+    /// GPE numarası
     pub number: u32,
-    /// GPE block (0 or 1)
+    /// GPE bloğu (0 veya 1)
     pub block: u8,
-    /// Event type
+    /// Olay tipi
     pub event_type: u8,
-    /// Handler method
+    /// İşleyici metod
     pub handler: Option<String>,
-    /// Is enabled
+    /// Etkin mi
     pub enabled: AtomicBool,
-    /// Is wake capable
+    /// Uyandırma yapabilir mi
     pub wake_capable: AtomicBool,
-    /// Handler type (0=none, 1=method, 2=handler)
+    /// İşleyici tipi (0=yok, 1=metod, 2=işleyici)
     pub handler_type: AtomicU32,
 }
 
@@ -67,39 +69,39 @@ impl GpeEvent {
         }
     }
 
-    /// Enable event
+    /// Olayı etkinleştir
     pub fn enable(&self) {
         self.enabled.store(true, Ordering::SeqCst);
     }
 
-    /// Disable event
+    /// Olayı devre dışı bırak
     pub fn disable(&self) {
         self.enabled.store(false, Ordering::SeqCst);
     }
 
-    /// Set wake capable
+    /// Uyandırma kapasitesini ayarla
     pub fn set_wake(&self, wake: bool) {
         self.wake_capable.store(wake, Ordering::SeqCst);
     }
 }
 
 // ============================================================================
-// FIXED EVENT
+// SABİT OLAY
 // ============================================================================
 
 #[derive(Clone, Debug)]
 pub struct FixedEvent {
-    /// Event number
+    /// Olay numarası
     pub number: u32,
-    /// Event name
+    /// Olay adı
     pub name: String,
-    /// Status register address
+    /// Durum kayıt adresi
     pub status_reg: u32,
-    /// Enable register address
+    /// Etkinleştirme kayıt adresi
     pub enable_reg: u32,
-    /// Handler method
+    /// İşleyici metod
     pub handler: Option<String>,
-    /// Is enabled
+    /// Etkin mi
     pub enabled: AtomicBool,
 }
 
@@ -115,46 +117,46 @@ impl FixedEvent {
         }
     }
 
-    /// Enable event
+    /// Olayı etkinleştir
     pub fn enable(&self) {
-        // Write to enable register
+        // Etkinleştirme kaydına yaz
         self.enabled.store(true, Ordering::SeqCst);
         crate::serial_println!("[GPE] Fixed event {} enabled", self.name);
     }
 
-    /// Disable event
+    /// Olayı devre dışı bırak
     pub fn disable(&self) {
         self.enabled.store(false, Ordering::SeqCst);
     }
 
-    /// Check status
+    /// Durumu kontrol et
     pub fn check_status(&self) -> bool {
-        // Read status register
+        // Durum kaydını oku
         false
     }
 
-    /// Clear status
+    /// Durumu temizle
     pub fn clear_status(&self) {
-        // Write to status register
+        // Durum kaydına yaz
     }
 }
 
 // ============================================================================
-// GPE BLOCK
+// GPE BLOĞU
 // ============================================================================
 
 pub struct GpeBlock {
-    /// Block number
+    /// Blok numarası
     pub block_number: u8,
-    /// Base address
+    /// Taban adresi
     pub base_address: u32,
-    /// Number of GPEs
+    /// GPE sayısı
     pub gpe_count: u32,
-    /// GPE events
+    /// GPE olayları
     pub events: Mutex<BTreeMap<u32, GpeEvent>>,
-    /// Status register cached value
+    /// Durum kaydı önbellek değeri
     pub status_cache: AtomicU32,
-    /// Enable register cached value
+    /// Etkinleştirme kaydı önbellek değeri
     pub enable_cache: AtomicU32,
 }
 
@@ -170,95 +172,95 @@ impl GpeBlock {
         }
     }
 
-    /// Initialize GPE events
+    /// GPE olaylarını başlat
     pub fn init(&self) {
         let mut events = self.events.lock();
-        
+
         for i in 0..self.gpe_count {
             events.insert(i, GpeEvent::new(i, self.block_number));
         }
     }
 
-    /// Get GPE event
+    /// GPE olayını al
     pub fn get_event(&self, number: u32) -> Option<GpeEvent> {
         self.events.lock().get(&number).cloned()
     }
 
-    /// Enable GPE
+    /// GPE'yi etkinleştir
     pub fn enable_gpe(&self, number: u32) {
         if let Some(event) = self.events.lock().get(&number) {
             event.enable();
-            
-            // Update enable register
+
+            // Etkinleştirme kaydını güncelle
             let bit = 1u32 << (number % 32);
             self.enable_cache.fetch_or(bit, Ordering::SeqCst);
-            
+
             crate::serial_println!("[GPE] GPE{} enabled", number);
         }
     }
 
-    /// Disable GPE
+    /// GPE'yi devre dışı bırak
     pub fn disable_gpe(&self, number: u32) {
         if let Some(event) = self.events.lock().get(&number) {
             event.disable();
-            
+
             let bit = 1u32 << (number % 32);
             self.enable_cache.fetch_and(!bit, Ordering::SeqCst);
         }
     }
 
-    /// Clear GPE status
+    /// GPE durumunu temizle
     pub fn clear_gpe(&self, number: u32) {
         let bit = 1u32 << (number % 32);
         self.status_cache.fetch_and(!bit, Ordering::SeqCst);
     }
 
-    /// Handle GPE events
+    /// GPE olaylarını işle
     pub fn handle_events(&self) -> Vec<u32> {
         let mut triggered = Vec::new();
-        
-        // Read status register
+
+        // Durum kaydını oku
         let status = self.status_cache.load(Ordering::SeqCst);
         let enabled = self.enable_cache.load(Ordering::SeqCst);
-        
+
         let active = status & enabled;
-        
+
         for i in 0..self.gpe_count {
             let bit = 1u32 << (i % 32);
             if active & bit != 0 {
                 triggered.push(i);
-                
-                // Execute handler
+
+                // İşleyiciyi çalıştır
                 if let Some(event) = self.events.lock().get(&i) {
                     if let Some(ref handler) = event.handler {
                         crate::serial_println!("[GPE] Executing handler {} for GPE{}", handler, i);
-                        // Execute AML method
+                        // AML metodunu çalıştır
                     }
                 }
-                
-                // Clear status
+
+                // Durumu temizle
                 self.clear_gpe(i);
             }
         }
-        
+
         triggered
     }
 }
 
 // ============================================================================
-// ACPI EVENT MANAGER
+// ACPI OLAY YÖNETİCİSİ
 // ============================================================================
 
 pub struct AcpiEventManager {
-    /// GPE blocks
+    /// GPE blokları
     pub gpe_blocks: Mutex<Vec<GpeBlock>>,
-    /// Fixed events
+    /// Sabit olaylar
     pub fixed_events: Mutex<BTreeMap<u32, FixedEvent>>,
-    /// Event handlers
+    /// Olay işleyicileri
     pub handlers: Mutex<BTreeMap<String, Arc<dyn AcpiEventHandler>>>,
-    /// Is initialized
+    /// Başlatıldı mı
     pub initialized: AtomicBool,
-    /// Statistics
+    /// İstatistikler
     pub stats: Mutex<GpeStats>,
 }
 
@@ -284,23 +286,23 @@ impl AcpiEventManager {
         }
     }
 
-    /// Initialize from FADT
+    /// FADT'den başlat
     pub fn init(&self, gpe0_base: u32, gpe0_count: u32, gpe1_base: u32, gpe1_count: u32) {
-        // Create GPE block 0
+        // GPE blok 0 oluştur
         if gpe0_count > 0 {
             let block0 = GpeBlock::new(0, gpe0_base, gpe0_count);
             block0.init();
             self.gpe_blocks.lock().push(block0);
         }
-        
-        // Create GPE block 1
+
+        // GPE blok 1 oluştur
         if gpe1_count > 0 {
             let block1 = GpeBlock::new(1, gpe1_base, gpe1_count);
             block1.init();
             self.gpe_blocks.lock().push(block1);
         }
-        
-        // Initialize fixed events
+
+        // Sabit olayları başlat
         let mut fixed = self.fixed_events.lock();
         fixed.insert(ACPI_EVENT_PMTIMER, FixedEvent::new(
             ACPI_EVENT_PMTIMER, "PMTIMER", 0, 0
@@ -314,16 +316,16 @@ impl AcpiEventManager {
         fixed.insert(ACPI_EVENT_RTC, FixedEvent::new(
             ACPI_EVENT_RTC, "RTC", 0, 0
         ));
-        
+
         self.initialized.store(true, Ordering::SeqCst);
-        
+
         crate::serial_println!("[GPE] Event manager initialized");
     }
 
-    /// Install GPE handler
+    /// GPE işleyicisi yükle
     pub fn install_gpe_handler(&self, gpe_number: u32, block: u8, handler: &str) -> Result<(), AcpiEventError> {
         let blocks = self.gpe_blocks.lock();
-        
+
         if let Some(gpe_block) = blocks.iter().find(|b| b.block_number == block) {
             if let Some(event) = gpe_block.events.lock().get_mut(&gpe_number) {
                 event.handler = Some(String::from(handler));
@@ -331,84 +333,84 @@ impl AcpiEventManager {
                 return Ok(());
             }
         }
-        
+
         Err(AcpiEventError::InvalidGpe)
     }
 
-    /// Enable GPE
+    /// GPE'yi etkinleştir
     pub fn enable_gpe(&self, gpe_number: u32, block: u8) -> Result<(), AcpiEventError> {
         let blocks = self.gpe_blocks.lock();
-        
+
         if let Some(gpe_block) = blocks.iter().find(|b| b.block_number == block) {
             gpe_block.enable_gpe(gpe_number);
             return Ok(());
         }
-        
+
         Err(AcpiEventError::InvalidGpe)
     }
 
-    /// Disable GPE
+    /// GPE'yi devre dışı bırak
     pub fn disable_gpe(&self, gpe_number: u32, block: u8) -> Result<(), AcpiEventError> {
         let blocks = self.gpe_blocks.lock();
-        
+
         if let Some(gpe_block) = blocks.iter().find(|b| b.block_number == block) {
             gpe_block.disable_gpe(gpe_number);
             return Ok(());
         }
-        
+
         Err(AcpiEventError::InvalidGpe)
     }
 
-    /// Handle all events
+    /// Tüm olayları işle
     pub fn handle_events(&self) {
-        // Handle GPE events
+        // GPE olaylarını işle
         for block in self.gpe_blocks.lock().iter() {
             let triggered = block.handle_events();
-            
+
             let mut stats = self.stats.lock();
             stats.gpes_handled += triggered.len() as u64;
         }
-        
-        // Handle fixed events
+
+        // Sabit olayları işle
         for event in self.fixed_events.lock().values() {
             if event.check_status() {
                 event.clear_status();
-                
+
                 if let Some(ref handler) = event.handler {
                     crate::serial_println!("[GPE] Fixed event {} triggered", event.name);
                 }
-                
+
                 let mut stats = self.stats.lock();
                 stats.fixed_events_handled += 1;
             }
         }
     }
 
-    /// Enable fixed event
+    /// Sabit olayı etkinleştir
     pub fn enable_fixed_event(&self, event_number: u32) -> Result<(), AcpiEventError> {
         let events = self.fixed_events.lock();
-        
+
         if let Some(event) = events.get(&event_number) {
             event.enable();
             return Ok(());
         }
-        
+
         Err(AcpiEventError::InvalidEvent)
     }
 
-    /// Disable fixed event
+    /// Sabit olayı devre dışı bırak
     pub fn disable_fixed_event(&self, event_number: u32) -> Result<(), AcpiEventError> {
         let events = self.fixed_events.lock();
-        
+
         if let Some(event) = events.get(&event_number) {
             event.disable();
             return Ok(());
         }
-        
+
         Err(AcpiEventError::InvalidEvent)
     }
 
-    /// Get statistics
+    /// İstatistikleri al
     pub fn get_stats(&self) -> GpeStats {
         self.stats.lock().clone()
     }
@@ -419,7 +421,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TİPİ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,7 +433,7 @@ pub enum AcpiEventError {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init(gpe0_base: u32, gpe0_count: u32, gpe1_base: u32, gpe1_count: u32) {

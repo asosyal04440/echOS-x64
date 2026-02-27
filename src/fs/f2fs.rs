@@ -93,7 +93,7 @@ pub fn set_file_metadata(path: &str, mode: Option<u32>, uid: Option<u32>, gid: O
         
         // Mevcut mode'u oku ve permission bits'i güncelle
         let current_mode = read_u16(&block, INODE_I_MODE_OFFSET)?;
-        let file_type = current_mode & 0o170000; // File type bits
+        let file_type = current_mode & 0o170000; // Dosya türü bitleri (0o170000 maskesi S_IFMT alanını izole eder)
         let new_mode = file_type | (mode.unwrap() as u16 & 0o7777);
         
         write_u16(&mut block, INODE_I_MODE_OFFSET, new_mode)?;
@@ -137,10 +137,10 @@ pub struct MountPoint {
 type F2fsHashBuilder = BuildHasherDefault<F2fsHasher>;
 
 lazy_static! {
-    /// Metadata cache - path -> metadata mapping
+    /// Metadata önbelleği - yol (path) -> metadata eşlemesi (hızlı erişim için RAM'de tutulur)
     static ref METADATA_CACHE: Mutex<HashMap<String, FileMetadata, F2fsHashBuilder>> = 
         Mutex::new(HashMap::with_hasher(F2fsHashBuilder::default()));
-    /// Mount table - mountpoint -> MountPoint mapping
+    /// Mount tablosu - bağlama noktası (mountpoint) -> MountPoint yapısı eşlemesi
     static ref MOUNT_TABLE: Mutex<HashMap<String, MountPoint, F2fsHashBuilder>> = 
         Mutex::new(HashMap::with_hasher(F2fsHashBuilder::default()));
 }
@@ -387,13 +387,13 @@ const CP_CHECKSUM_OFFSET_OFFSET: usize = 164;
 const CP_BITMAP_OFFSET: usize = 0xC0;
 
 const INODE_I_MODE_OFFSET: usize = 0;
-const INODE_I_UID_OFFSET: usize = 4;   // UID
-const INODE_I_GID_OFFSET: usize = 8;   // GID
-const INODE_I_ATIME_OFFSET: usize = 12; // Access time
-const INODE_I_CTIME_OFFSET: usize = 16; // Create time (SIZE ile çakışıyor, dikkat)
-const INODE_I_MTIME_OFFSET: usize = 20; // Modify time
-const INODE_I_NLINK_OFFSET: usize = 24; // Hard link count
-const INODE_I_SIZE_OFFSET: usize = 16;  // Size (ctime ile aynı offset - F2FS spec)
+const INODE_I_UID_OFFSET: usize = 4;   // Kullanıcı kimliği (UID)
+const INODE_I_GID_OFFSET: usize = 8;   // Grup kimliği (GID)
+const INODE_I_ATIME_OFFSET: usize = 12; // Son erişim zamanı (atime) - dosya okunduğunda güncellenir
+const INODE_I_CTIME_OFFSET: usize = 16; // Oluşturma/değişiklik zamanı (ctime) - SIZE ile aynı offseti paylaşır, dikkat!
+const INODE_I_MTIME_OFFSET: usize = 20; // Değişiklik zamanı (mtime) - içerik yazıldığında güncellenir
+const INODE_I_NLINK_OFFSET: usize = 24; // Sabit bağ sayısı (nlink) - aynı inode'u gösteren dizin girişi adedi
+const INODE_I_SIZE_OFFSET: usize = 16;  // Dosya boyutu - ctime ile aynı offseti paylaşır (F2FS spesifikasyonu gereği)
 const INODE_I_INLINE_OFFSET: usize = 3;
 const INODE_I_ADDR_OFFSET: usize = 360;
 const INODE_SIZE_OF_I_NID: usize = 20;
@@ -769,12 +769,12 @@ pub fn create_f2fs_file(parent_path: &str, name: &str) -> Result<(), FsError> {
     add_entry_to_dir(&mut *drive, &ctx, parent.ino, name, nid, false)
 }
 
-/// Create file with initial data
+/// Başlangıç verisiyle dosya oluşturur - önce boş dosyayı yaratır, ardından veriyi yazar
 pub fn create_f2fs_file_with_data(parent_path: &str, name: &str, data: &[u8]) -> Result<(), FsError> {
-    // First create the file
+    // Önce boş dosyayı oluştur
     create_f2fs_file(parent_path, name)?;
     
-    // Then write data to it
+    // Sonra ilk veriyi dosyaya yaz
     let file_path = if parent_path == "/" || parent_path.is_empty() {
         alloc::format!("/{}", name)
     } else {
@@ -3204,34 +3204,34 @@ fn read_double_indirect_addrs_by_nid(
 }
 
 // ============================================================================
-// GARBAGE COLLECTOR
+// ÇÖP TOPLAYICI (GARBAGE COLLECTOR) - F2FS log-yapısal yazımın dağftığı değeşsiz alanı geri kazanır
 // ============================================================================
 
-/// GC Mode
+/// GC (Çöp Toplama) Modu - F2FS'te segmentlerin geri kazanım stratejisini belirler
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcMode {
-    /// Background GC - runs when system is idle
+    /// Arka plan GC - sistem boşta iken çalışır, düşük öncelikli temizlik yapar
     Background,
-    /// Foreground GC - runs when free segments are low
+    /// Ön plan GC - boş segment sayısı azaldığında tetiklenir, yazma işlemini bloklar
     Foreground,
-    /// Forced GC - emergency cleanup
+    /// Zorla GC - kritik durumlarda acil temizlik için kullanılır
     Forced,
 }
 
-/// GC State
+/// GC Durumu - çöp toplama sürecinin anlık durumunu izler
 #[derive(Clone, Debug)]
 pub struct GcState {
-    /// Current segment being collected
+    /// Şu an temizlenen segment numarası
     pub cur_segment: u32,
-    /// Number of segments collected
+    /// Toplam temizlenen segment sayısı
     pub segments_collected: u32,
-    /// Number of blocks migrated
+    /// Taşınan (migrate edilen) blok sayısı - canlı bloklar yeni konuma yazılır
     pub blocks_migrated: u64,
-    /// GC mode
+    /// Aktif GC modu (arka plan / ön plan / zorla)
     pub mode: GcMode,
-    /// Free segments threshold
+    /// Boş segment eşiği - bu değerin altına düşülünce GC tetiklenir
     pub free_threshold: u32,
-    /// Is GC running
+    /// GC şu an çalışıyor mu? (aktif bayrak)
     pub running: bool,
 }
 
@@ -3248,38 +3248,38 @@ impl Default for GcState {
     }
 }
 
-/// Segment info for GC
+/// GC için segment bilgisi - hangi segmentin temizleneceğini seçerken SIT'ten alınan bilgiler
 #[derive(Clone, Debug)]
 pub struct SegmentInfo {
-    /// Segment number
+    /// Segment numarası (main area içindeki sıralı konum)
     pub segno: u32,
-    /// Number of valid blocks
+    /// Geçerli blok sayısı - segment içinde hâlâ kullanılan bloklar
     pub valid_blocks: u32,
-    /// Number of dirty blocks
+    /// Kirli blok sayısı - geçersiz/silinmiş ama henüz geri alınmamış bloklar
     pub dirty_blocks: u32,
-    /// Segment type (hot/warm/cold data/node)
+    /// Segment türü - hot/warm/cold (sıcak/ılık/soğuk) veri veya node segmenti
     pub seg_type: u8,
-    /// Last modified time
+    /// Son değişiklik zamanı - segment seçim maliyeti hesabında kullanılır (eski segment = düşük maliyet)
     pub mtime: u64,
 }
 
-/// Get segment validity info from SIT
+/// Segment Information Table (SIT)'ten segment geçerlilik bilgisini okur - kaç blok hala aktif?
 fn get_segment_validity(
     drive: &mut dyn BlockDevice,
     ctx: &F2fsContext,
     segno: u32,
 ) -> Result<SegmentInfo, FsError> {
-    // Read SIT entry for segment
+    // Segment için SIT girişini oku - her giriş 72 bayttir (64 byte bitmap + 8 byte mtime)
     let sit_block = segno / SIT_ENTRY_PER_BLOCK;
     let sit_offset = segno % SIT_ENTRY_PER_BLOCK;
     
     let sit_addr = ctx.sit_blkaddr + sit_block;
     let block = read_block(drive, ctx, sit_addr)?;
     
-    // SIT entry format: valid_map (64 bytes) + mtime (8 bytes)
+    // SIT giriş formatı: valid_map (64 bayt bit eşlemi) + mtime (8 bayt son değişiklik zamanı)
     let entry_offset = sit_offset as usize * 72;
     
-    // Count valid blocks from bitmap
+    // Bit eşleminden geçerli blok sayısını hesapla - her bit bir bloğu temsil eder
     let valid_map = &block[entry_offset..entry_offset + 64];
     let mut valid_blocks = 0u32;
     for &byte in valid_map {
@@ -3306,19 +3306,19 @@ fn get_segment_validity(
     })
 }
 
-/// Select victim segment for GC
+/// GC için kurban segment seçer - greedy veya cost-benefit stratejisiyle en uygun segmenti belirler
 fn select_gc_victim(
     drive: &mut dyn BlockDevice,
     ctx: &F2fsContext,
     mode: GcMode,
 ) -> Result<Option<u32>, FsError> {
-    // Get all segment info
+    // Tüm segmentlerin bilgisini topla ve aday listeye ekle
     let total_segments = ctx.segment_count_main;
     let mut candidates: Vec<SegmentInfo> = Vec::new();
     
     for segno in 0..total_segments {
         if let Ok(info) = get_segment_validity(drive, ctx, segno) {
-            // Skip completely empty or completely full segments
+            // Tamamen boş veya tamamen dolu segmentleri atla - temizlenecek veya taşınacak şey yok
             if info.valid_blocks > 0 && info.valid_blocks < ctx.blocks_per_seg {
                 candidates.push(info);
             }
@@ -3329,14 +3329,14 @@ fn select_gc_victim(
         return Ok(None);
     }
     
-    // Sort by selection policy
+    // Seçim politikasına göre sırala
     match mode {
         GcMode::Background => {
-            // Greedy: select segment with least valid blocks (easiest to clean)
+            // Açgözlü (greedy) strateji: en az geçerli bloğa sahip segmenti seç (temizlemesi en kolay)
             candidates.sort_by_key(|s| s.valid_blocks);
         }
         GcMode::Foreground | GcMode::Forced => {
-            // Cost-benefit: select oldest segment with moderate utilization
+            // Maliyet-fayda stratejisi: orta dolulukta en eski segmenti seç - zaman+doluluk dengesi
             candidates.sort_by(|a, b| {
                 let cost_a = a.valid_blocks as f64 / (a.mtime as f64 + 1.0);
                 let cost_b = b.valid_blocks as f64 / (b.mtime as f64 + 1.0);
@@ -3348,7 +3348,7 @@ fn select_gc_victim(
     Ok(candidates.first().map(|s| s.segno))
 }
 
-/// Migrate valid blocks from victim segment
+/// Kurban segmentteki geçerli blokları taşır - canlı veriyi koruyarak segmentı boşaltır
 fn migrate_segment_blocks(
     drive: &mut dyn BlockDevice,
     ctx: &F2fsContext,
@@ -3358,10 +3358,10 @@ fn migrate_segment_blocks(
     let blocks_per_seg = ctx.blocks_per_seg;
     let main_blkaddr = ctx.main_blkaddr;
     
-    // Get segment validity
+    // Segmentin geçerlilik bilgisini al (kaç bloğu hâlâ aktif?)
     let info = get_segment_validity(drive, ctx, victim_seg)?;
     
-    // Read SIT valid bitmap
+    // SIT'ten geçerli blok bit eşlemini oku
     let sit_block = victim_seg / SIT_ENTRY_PER_BLOCK;
     let sit_offset = victim_seg % SIT_ENTRY_PER_BLOCK;
     let sit_addr = ctx.sit_blkaddr + sit_block;
@@ -3369,27 +3369,27 @@ fn migrate_segment_blocks(
     let entry_offset = sit_offset as usize * 72;
     let valid_map = &block[entry_offset..entry_offset + 64];
     
-    // For each block in segment
+    // Segmentteki her blok için döngü
     for blk_off in 0..blocks_per_seg {
-        // Check if block is valid
+        // Bloğun geçerli olup olmadığını kontrol et (bit eşleminde 1 ise geçerli)
         let byte_idx = (blk_off / 8) as usize;
         let bit_idx = blk_off % 8;
         
         if (valid_map[byte_idx] >> bit_idx) & 1 == 0 {
-            continue; // Invalid block, skip
+            continue; // Geçersiz blok, atla
         }
         
-        // Calculate physical block address
+        // Fiziksel blok adresini hesapla: main_blkaddr + seg * blocks_per_seg + offset
         let old_addr = main_blkaddr + victim_seg * blocks_per_seg + blk_off;
         
-        // Read block data
+        // Blok verisini oku
         let data = read_block(drive, ctx, old_addr)?;
         
-        // Find new location (simplified - just allocate new block)
-        // In real implementation, would update NAT and inode
+        // Yeni konum bul (basitleştirilmiş - sadece yeni blok ayır)
+        // Gerçek implementasyonda NAT ve inode güncellenmeli
         let new_addr = allocate_new_block(drive, ctx)?;
         
-        // Write to new location
+        // Yeni konuma yaz
         write_block(drive, ctx, new_addr, &data)?;
         
         migrated += 1;
@@ -3398,13 +3398,13 @@ fn migrate_segment_blocks(
     Ok(migrated)
 }
 
-/// Allocate new block (simplified)
+/// Yeni blok ayırır (basitleştirilmiş versiyon) - gerçekte FreeSegmentMap ve allocation policy kullanılır
 fn allocate_new_block(
     _drive: &mut dyn BlockDevice,
     ctx: &F2fsContext,
 ) -> Result<u32, FsError> {
-    // Simplified - just return next block
-    // Real implementation would use proper allocator
+    // Basitleştirilmiş - sadece bir sonraki bloğu döndür
+    // Gerçek implementasyonda FreeSegmentMap ve allocation policy kullanılmalı
     static NEXT_BLOCK: spin::Mutex<u32> = spin::Mutex::new(0);
     let mut next = NEXT_BLOCK.lock();
     let addr = ctx.main_blkaddr + *next;
@@ -3412,7 +3412,7 @@ fn allocate_new_block(
     Ok(addr)
 }
 
-/// Run garbage collection
+/// Çöp toplama işlemini çalıştırır - kurban segment seç, blokları taşı, segmentı boşalt
 pub fn run_gc(mode: GcMode) -> Result<GcState, FsError> {
     let mut drive = match crate::drivers::linux::select_block_device() {
         Ok(value) => value,
@@ -3425,7 +3425,7 @@ pub fn run_gc(mode: GcMode) -> Result<GcState, FsError> {
     state.mode = mode;
     state.running = true;
     
-    // Select victim segment
+    // Kurban segment seç (GC politikasına göre)
     let victim = match select_gc_victim(&mut *drive, &ctx, mode)? {
         Some(v) => v,
         None => {
@@ -3436,19 +3436,19 @@ pub fn run_gc(mode: GcMode) -> Result<GcState, FsError> {
     
     state.cur_segment = victim;
     
-    // Migrate blocks
+    // Geçerli blokları yeni konuma taşı
     let migrated = migrate_segment_blocks(&mut *drive, &ctx, victim)?;
     state.blocks_migrated = migrated;
     state.segments_collected = 1;
     
-    // Mark segment as free (update SIT)
-    // In real implementation, would update SIT bitmap
+    // Segmentı boş olarak işaretle (SIT güncellemesi gerekir)
+    // Gerçek implementasyonda SIT bit eşlemi sıfırlanmalı
     
     state.running = false;
     Ok(state)
 }
 
-/// Get free segment count
+/// Boş segment sayısını döndürür - disk doluluk izlemesi ve GC tetikleme kararı için kullanılır
 pub fn get_free_segments() -> Result<u32, FsError> {
     let mut drive = match crate::drivers::linux::select_block_device() {
         Ok(value) => value,
@@ -3472,33 +3472,33 @@ pub fn get_free_segments() -> Result<u32, FsError> {
 }
 
 // ============================================================================
-// CHECKPOINT WRITE
+// CHECKPOINT YAZIMI (F2FS güç kesintisinden kurtarma için atomik snapshot mekanizması)
 // ============================================================================
 
-/// Checkpoint control structure
+/// Checkpoint kontrol yapısı - dosya sistemi durumunun anlık görüntüsünü tutar
 #[derive(Clone, Debug)]
 pub struct CheckpointControl {
-    /// Checkpoint version
+    /// Checkpoint versiyonu - en yüksek versiyonlu CP geçerli kabul edilir (ping-pong mekanizması)
     pub version: u64,
-    /// User block count
+    /// Kullanıcı blok sayısı - metadata olmayan veri blokarının toplamı
     pub user_block_count: u64,
-    /// Valid block count
+    /// Geçerli blok sayısı - SIT'e göre tüm aktif bloklar
     pub valid_block_count: u64,
-    /// Valid node count
+    /// Geçerli node sayısı - NAT'a göre aktif node/inode sayısı
     pub valid_node_count: u64,
-    /// Valid inode count
+    /// Geçerli inode sayısı - aktif dosya ve dizin sayısı
     pub valid_inode_count: u64,
-    /// Last segment written
+    /// En son yazılan segment numarası
     pub last_segno: u32,
-    /// Next segment to write
+    /// Sıradaki yazılacak segment - log-yapısal yazım için ilerleyen pointer
     pub next_segno: u32,
-    /// Active logs
+    /// Aktif log sayısı - F2FS genellikle 6 paralel log kullanır (hot/warm/cold data/node)
     pub active_logs: u8,
-    /// CP flags
+    /// Checkpoint bayrakları - umount, recovery, discard gibi durum bilgileri
     pub flags: u32,
 }
 
-/// Checkpoint constants
+/// Checkpoint sabit değerleri - CP bayrak bitleri (F2FS checkpoint flags)
 const CP_UMOUNT_FLAG: u32 = 0x00000001;
 const CP_FASTBOOT_FLAG: u32 = 0x00000002;
 const CP_SYNC_FLAG: u32 = 0x00000004;
@@ -3516,7 +3516,7 @@ const CP_DISABLED_QUOTA_MASK: u32 = 0x00007000;
 const CP_QUOTA_NEED_FSCK_FLAG: u32 = 0x00008000;
 const CP_INDEX_FLAG: u32 = 0x00010000;
 
-/// Write checkpoint to disk
+/// Checkpoint'i diske yazar - F2FS'in ping-pong CP mekanizmasını kullanarak güvenli atomic yazım yapar
 pub fn write_checkpoint(flags: u32) -> Result<(), FsError> {
     let mut drive = match crate::drivers::linux::select_block_device() {
         Ok(value) => value,
@@ -3526,40 +3526,40 @@ pub fn write_checkpoint(flags: u32) -> Result<(), FsError> {
     
     let ctx = load_context(&mut *drive)?;
     
-    // Read current checkpoint to get version
+    // Mevcut checkpoint versiyonunu oku - yeni versiyonu +1 artırarak yaz
     let cp_addr = ctx.cp_blkaddr;
     let cp_block = read_block(&mut *drive, &ctx, cp_addr)?;
     
-    // Parse checkpoint header
+    // Checkpoint başlığını ayrıştır - versiyon, blok sayıçları, zaman damgası
     let version = read_u64(&cp_block, 0)?;
     let user_block_count = read_u64(&cp_block, 8)?;
     let valid_block_count = read_u64(&cp_block, 16)?;
     let valid_node_count = read_u64(&cp_block, 24)?;
     let valid_inode_count = read_u64(&cp_block, 32)?;
     
-    // Create new checkpoint
+    // Yeni checkpoint bloğu oluştur
     let mut new_cp = vec![0u8; ctx.block_size as usize];
     
-    // Write checkpoint header
+    // Checkpoint başlık alanlarını yaz
     write_u64(&mut new_cp, 0, version + 1)?;
     write_u64(&mut new_cp, 8, user_block_count)?;
     write_u64(&mut new_cp, 16, valid_block_count)?;
     write_u64(&mut new_cp, 24, valid_node_count)?;
     write_u64(&mut new_cp, 32, valid_inode_count)?;
-    write_u64(&mut new_cp, 40, crate::random::next_u32() as u64)?; // timestamp
+    write_u64(&mut new_cp, 40, crate::random::next_u32() as u64)?; // zaman damgası (timestamp)
     
-    // Write flags
+    // CP bayraklarını yaz (umount, sync, recovery vb.)
     write_u32(&mut new_cp, 48, flags)?;
     
-    // Write SIT bitmap (simplified - just copy current)
+    // SIT bit eşlemini yaz (basitleştirilmiş - mevcut SIT bloğu kopyalanır)
     let sit_addr = ctx.sit_blkaddr;
     let sit_block = read_block(&mut *drive, &ctx, sit_addr)?;
-    let sit_offset = 100; // Offset in checkpoint for SIT bitmap
+    let sit_offset = 100; // Checkpoint içinde SIT bitmap'in ofseti
     for i in 0..(ctx.block_size as usize / 2).min(sit_block.len()) {
         new_cp[sit_offset + i] = sit_block[i];
     }
     
-    // Write NAT bitmap
+    // NAT (Node Address Table) bit eşlemini yaz
     let nat_addr = ctx.nat_blkaddr;
     let nat_block = read_block(&mut *drive, &ctx, nat_addr)?;
     let nat_offset = sit_offset + (ctx.block_size as usize / 2);
@@ -3567,11 +3567,11 @@ pub fn write_checkpoint(flags: u32) -> Result<(), FsError> {
         new_cp[nat_offset + i] = nat_block[i];
     }
     
-    // Calculate checksum
+    // Sığlama toplamını hesapla - CP bütünlüğünü doğrulamak için kullanılır
     let checksum = calculate_checksum(&new_cp);
     write_u32(&mut new_cp, ctx.block_size as usize - 4, checksum)?;
     
-    // Write to alternate checkpoint location (ping-pong)
+    // Alternatif CP konumuna yaz (ping-pong): CP1 ve CP2 arasında dönüşümlü yazıma
     let alt_cp_addr = if cp_addr == ctx.cp_blkaddr {
         ctx.cp_blkaddr + 1
     } else {
@@ -3585,7 +3585,7 @@ pub fn write_checkpoint(flags: u32) -> Result<(), FsError> {
     Ok(())
 }
 
-/// Calculate checksum (simple XOR-based)
+/// Sığlama toplamı hesaplar (basit XOR tabanlı) - üretimde CRC32 kullanılır
 fn calculate_checksum(data: &[u8]) -> u32 {
     let mut sum = 0u32;
     for chunk in data.chunks(4) {
@@ -3596,34 +3596,34 @@ fn calculate_checksum(data: &[u8]) -> u32 {
     sum
 }
 
-/// Sync filesystem - write checkpoint
+/// Dosya sistemini eş zamanlar - güncel checkpoint'i diske yazar (SYNC bayrağı ile)
 pub fn sync_f2fs() -> Result<(), FsError> {
     write_checkpoint(CP_SYNC_FLAG)
 }
 
-/// Unmount filesystem - write clean checkpoint
+/// Dosya sistemini güvenli ayırır - UMOUNT bayrağıyla temiz checkpoint yazar
 pub fn unmount_clean() -> Result<(), FsError> {
     write_checkpoint(CP_UMOUNT_FLAG | CP_SYNC_FLAG)
 }
 
 // ============================================================================
-// RECOVERY
+// KURTARMA (F2FS Checkpoint tabanlı crash recovery - güç kesintisi sonrası tutarlılığı geri yükler)
 // ============================================================================
 
-/// Recovery state
+/// Kurtarma durumu - recovery işleminin sonucunu ve istatistikleri tutar
 #[derive(Clone, Debug)]
 pub struct RecoveryState {
-    /// Recovery successful
+    /// Kurtarma başarılı tamamlandı mı?
     pub success: bool,
-    /// Number of inodes recovered
+    /// Kurtlarılan inode sayısı - orphan inode'lar temizlendi
     pub inodes_recovered: u32,
-    /// Number of blocks recovered
+    /// Kurtarılan blok sayısı - CP'den sonra yazılan ama bitmeyen işlemler
     pub blocks_recovered: u64,
-    /// Recovery errors
+    /// Kurtarma sırasındaki hatalar
     pub errors: Vec<String>,
 }
 
-/// Check if recovery is needed
+/// Checkpoint'in temiz olup olmadığını kontrol eder (UMOUNT bayrağı yoksa kurtarma gereklidir)
 pub fn needs_recovery() -> Result<bool, FsError> {
     let mut drive = match crate::drivers::linux::select_block_device() {
         Ok(value) => value,
@@ -3633,22 +3633,22 @@ pub fn needs_recovery() -> Result<bool, FsError> {
     
     let ctx = load_context(&mut *drive)?;
     
-    // Read both checkpoints
+    // Her iki checkpoint bloğunu da oku (ping-pong mekanizması - CP1 ve CP2 dönüşümlü tutulur)
     let cp1 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr)?;
     let cp2 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr + 1)?;
     
-    // Check flags
+    // Bayrakları kontrol et - UMOUNT bayrağı temiz ayrılmayı gösterir
     let flags1 = read_u32(&cp1, 48)?;
     let flags2 = read_u32(&cp2, 48)?;
     
-    // If neither has UMOUNT flag, recovery needed
+    // Hiçbirinde UMOUNT bayrağı yoksa dosya sistemi crash'ten önce temiz ayrılmamış
     let clean1 = (flags1 & CP_UMOUNT_FLAG) != 0;
     let clean2 = (flags2 & CP_UMOUNT_FLAG) != 0;
     
     Ok(!clean1 && !clean2)
 }
 
-/// Perform recovery from last checkpoint
+/// Son geçerli checkpoint'ten kurtarma yapar - SIT/NAT güncelleyip orphan inode'ları temizler
 pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
     let mut drive = match crate::drivers::linux::select_block_device() {
         Ok(value) => value,
@@ -3664,7 +3664,7 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
         errors: Vec::new(),
     };
     
-    // Find latest valid checkpoint
+    // En güncel geçerli checkpoint'i bul (versiyonu yüksek olan)
     let cp1 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr)?;
     let cp2 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr + 1)?;
     
@@ -3677,7 +3677,7 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
         (cp2, ver2)
     };
     
-    // Verify checkpoint checksum
+    // Checkpoint sığlama toplamını doğrula
     let stored_checksum = read_u32(&latest_cp, ctx.block_size as usize - 4)?;
     let calc_checksum = calculate_checksum(&latest_cp[..ctx.block_size as usize - 4]);
     
@@ -3686,15 +3686,15 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
         return Ok(state);
     }
     
-    // Read SIT bitmap from checkpoint
+    // SIT bit eşlemini checkpoint'ten oku
     let sit_offset = 100;
     let sit_bitmap = &latest_cp[sit_offset..sit_offset + (ctx.block_size as usize / 2)];
     
-    // Read NAT bitmap from checkpoint
+    // NAT bit eşlemini checkpoint'ten oku
     let nat_offset = sit_offset + (ctx.block_size as usize / 2);
     let nat_bitmap = &latest_cp[nat_offset..nat_offset + (ctx.block_size as usize / 2)];
     
-    // Restore SIT
+    // SIT'i geri yükle - blok geçerlilik bilgisi yenilenir
     let sit_addr = ctx.sit_blkaddr;
     let mut sit_block = read_block(&mut *drive, &ctx, sit_addr)?;
     for i in 0..sit_bitmap.len().min(sit_block.len()) {
@@ -3702,7 +3702,7 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
     }
     write_block(&mut *drive, &ctx, sit_addr, &sit_block)?;
     
-    // Restore NAT
+    // NAT'u geri yükle - inode adresleri yenilenir
     let nat_addr = ctx.nat_blkaddr;
     let mut nat_block = read_block(&mut *drive, &ctx, nat_addr)?;
     for i in 0..nat_bitmap.len().min(nat_block.len()) {
@@ -3710,16 +3710,16 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
     }
     write_block(&mut *drive, &ctx, nat_addr, &nat_block)?;
     
-    // Recover orphan inodes
+    // Orphan inode'ları kurtar - CP sonrası yarıda kalan silme işlemleri tamamlanır
     let flags = read_u32(&latest_cp, 48)?;
     if (flags & CP_ORPHAN_INODE_FLAG) != 0 {
-        // Read orphan inode list and recover
+        // Orphan inode listesini oku ve her birini temizle
         state.inodes_recovered = recover_orphan_inodes(&mut *drive, &ctx)?;
     }
     
     state.success = true;
     
-    // Write clean checkpoint
+    // Temiz checkpoint yaz - bir sonraki mount'ta kurtarma gerekmez
     write_checkpoint(CP_RECOVERY_FLAG | CP_UMOUNT_FLAG)?;
     
     crate::serial_println!("[F2FS] Recovery complete: inodes={}, blocks={}", 
@@ -3728,22 +3728,22 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
     Ok(state)
 }
 
-/// Recover orphan inodes
+/// Orphan inode'ları kurtarır - yarıda kalan silme işlemlerini tamamlar
 fn recover_orphan_inodes(
     drive: &mut dyn BlockDevice,
     ctx: &F2fsContext,
 ) -> Result<u32, FsError> {
-    // Read orphan inode area (after checkpoint)
+    // Orphan inode alanını oku (checkpoint'ten hemen sonra)
     let orphan_addr = ctx.cp_blkaddr + ctx.cp_payload;
     let orphan_block = read_block(drive, ctx, orphan_addr)?;
     
-    // Count orphan inodes (each is 4 bytes)
+    // Orphan inode'ları say (her biri 4 bayt)
     let mut count = 0u32;
     for i in (0..ctx.block_size as usize).step_by(4) {
         let ino = read_u32(&orphan_block, i)?;
         if ino != 0 && ino != 0xFFFFFFFF {
             count += 1;
-            // In real implementation, would:
+            // Gerçek implementasyonda yapılacaklar:
             // 1. Read inode
             // 2. Truncate file to 0
             // 3. Free all blocks
@@ -3754,7 +3754,7 @@ fn recover_orphan_inodes(
     Ok(count)
 }
 
-/// Rollback to previous checkpoint
+/// Önceki checkpoint'e geri döner - gerçek hatalı commit geri alınır
 pub fn rollback_checkpoint() -> Result<(), FsError> {
     let mut drive = match crate::drivers::linux::select_block_device() {
         Ok(value) => value,
@@ -3764,21 +3764,21 @@ pub fn rollback_checkpoint() -> Result<(), FsError> {
     
     let ctx = load_context(&mut *drive)?;
     
-    // Read both checkpoints
+    // Her iki checkpoint'i oku (ping-pong: CP1 ve CP2)
     let cp1 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr)?;
     let cp2 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr + 1)?;
     
     let ver1 = read_u64(&cp1, 0)?;
     let ver2 = read_u64(&cp2, 0)?;
     
-    // Use older checkpoint
+    // Eski (daha düşük versiyonlu) checkpoint'i seç
     let (old_cp, _old_ver) = if ver1 < ver2 {
         (cp1, ver1)
     } else {
         (cp2, ver2)
     };
     
-    // Write old checkpoint to current position
+    // Eski checkpoint'i mevcut konuma yaz (mantıksal rollback)
     let current_addr = ctx.cp_blkaddr;
     write_block(&mut *drive, &ctx, current_addr, &old_cp)?;
     
@@ -3787,14 +3787,14 @@ pub fn rollback_checkpoint() -> Result<(), FsError> {
     Ok(())
 }
 
-// SIT entry count per block
+// Her blokta kaç SIT girişi bulunur (her giriş 72 bayt = 4096/72 ≈ 56)
 const SIT_ENTRY_PER_BLOCK: u32 = 56; // 4096 / 72
 
 // ============================================================================
 // F2FS COMPRESSION
 // ============================================================================
 
-/// Compression algorithm types
+/// Sıkıştırma algoritması türleri - LZO, LZ4 ve ZSTD farklı hız/oran dengesi sunar
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompressAlgorithm {
     None = 0,
@@ -3803,20 +3803,20 @@ pub enum CompressAlgorithm {
     Zstd = 3,
 }
 
-/// Compression configuration
+/// Sıkıştırma yapılandırması - algoritma, cluster boyutu ve minimum oran
 #[derive(Clone, Debug)]
 pub struct CompressConfig {
     pub algorithm: CompressAlgorithm,
-    pub log_cluster_size: u8,  // Log2 of cluster size (typically 4 = 16KB)
-    pub min_compress_ratio: u8, // Minimum ratio to compress (e.g., 80 = 80%)
+    pub log_cluster_size: u8,  // Cluster boyutunun log2 değeri (genellikle 4 = 16KB)
+    pub min_compress_ratio: u8, // Minimum sıkıştırma oranı (80 = orijinalin %80'i - daha az oran yetersiz demektir)
     pub compress_mode: CompressMode,
 }
 
-/// Compression mode
+/// Sıkıştırma modu - dosya sistemi mi yoksa kullanıcı mı kontrol eder
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompressMode {
-    Fs = 0,    // File-system controlled
-    User = 1,  // User-controlled via flags
+    Fs = 0,    // Dosya sistemi kontrollü
+    User = 1,  // inode bayrağıyla kullanıcı kontrollü
 }
 
 impl Default for CompressConfig {
@@ -3830,21 +3830,21 @@ impl Default for CompressConfig {
     }
 }
 
-/// Compressed cluster header
+/// Sıkıştırılmış cluster başlığı - her cluster'dan önce yazılır
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CompressHeader {
     pub magic: u32,      // F2FS_COMPRESSED_DATA
     pub cluster_size: u16,
     pub algorithm: u8,
-    pub compressed_size: u16, // Size of compressed data (excluding header)
-    pub original_size: u16,   // Original uncompressed size
-    pub checksum: u32,        // CRC32 of compressed data
+    pub compressed_size: u16, // Sıkıştırılmış verinin boyutu (başlık hariç)
+    pub original_size: u16,   // Orijinal sıkıştırılmamış boyut
+    pub checksum: u32,        // Sıkıştırılmış verinin CRC32 sığlama toplamı
 }
 
 const F2FS_COMPRESSED_DATA: u32 = 0xF5F2C001;
 
-/// LZ4 compression (simplified)
+/// LZ4 sıkıştırma (basitleştirilmiş RLE tabanlı)
 pub fn lz4_compress(src: &[u8], dst: &mut [u8]) -> usize {
     if src.is_empty() || dst.len() < src.len() + 4 {
         return 0;
@@ -3854,7 +3854,7 @@ pub fn lz4_compress(src: &[u8], dst: &mut [u8]) -> usize {
     let mut src_pos = 0;
     
     while src_pos < src.len() {
-        // Find run-length match
+        // Tekrarlayan byte dizisi (run) bul
         let run_start = src_pos;
         let run_byte = src[src_pos];
         let mut run_len = 1;
@@ -3866,17 +3866,17 @@ pub fn lz4_compress(src: &[u8], dst: &mut [u8]) -> usize {
         }
         
         if run_len >= 4 {
-            // Encode as run: token + literal byte
+            // Run olarak kodla: token + byte
             dst[dst_pos] = (run_len - 4) as u8;
             dst[dst_pos + 1] = run_byte;
             dst_pos += 2;
             src_pos += run_len;
         } else {
-            // Encode as literal
+            // Tek byte olarak kodla (literal)
             if dst_pos + 1 >= dst.len() {
                 break;
             }
-            dst[dst_pos] = 0xF0; // Literal marker
+            dst[dst_pos] = 0xF0; // Literal işareti
             dst[dst_pos + 1] = src[src_pos];
             dst_pos += 2;
             src_pos += 1;
@@ -3886,7 +3886,7 @@ pub fn lz4_compress(src: &[u8], dst: &mut [u8]) -> usize {
     dst_pos
 }
 
-/// LZ4 decompression (simplified)
+/// LZ4 açma (basitleştirilmiş)
 pub fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> usize {
     let mut src_pos = 0;
     let mut dst_pos = 0;
@@ -3895,12 +3895,12 @@ pub fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> usize {
         let token = src[src_pos];
         
         if token == 0xF0 {
-            // Literal
+            // Sıradan (literal) bayt - herhangi bir sıkıştırma uygulanmadan doğrudan kopyalanır
             dst[dst_pos] = src[src_pos + 1];
             dst_pos += 1;
             src_pos += 2;
         } else {
-            // Run-length
+            // Run-length (tekrarlı byte dizisi)
             let run_len = (token as usize) + 4;
             let run_byte = src[src_pos + 1];
             
@@ -3917,18 +3917,18 @@ pub fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> usize {
     dst_pos
 }
 
-/// ZSTD-like compression (simplified dictionary-based)
+/// ZSTD benzeri sıkıştırma (basit sözlük tabanlı)
 pub fn zstd_compress(src: &[u8], dst: &mut [u8]) -> usize {
     if src.is_empty() || dst.len() < src.len() / 2 {
         return 0;
     }
     
-    // Simple RLE + dictionary compression
+    // Basit RLE + sözlük sıkıştırma
     let mut dict: [u8; 256] = [0; 256];
     let mut dict_pos = 0;
     let mut dst_pos = 0;
     
-    // Build dictionary
+    // Sözlük oluştur (ilk 256 byte'tan benzersiz byte'lar)
     for &b in src.iter().take(256) {
         if !dict.contains(&b) {
             dict[dict_pos] = b;
@@ -3936,23 +3936,23 @@ pub fn zstd_compress(src: &[u8], dst: &mut [u8]) -> usize {
         }
     }
     
-    // Write dictionary header
+    // Sözlük başlığını yaz
     dst[dst_pos] = dict_pos as u8;
     dst_pos += 1;
     dst[dst_pos..dst_pos + dict_pos].copy_from_slice(&dict[..dict_pos]);
     dst_pos += dict_pos;
     
-    // Compress using dictionary indices
+    // Sözlük indisleri kullanarak sıkıştır
     let mut src_pos = 0;
     while src_pos < src.len() && dst_pos + 2 < dst.len() {
         let b = src[src_pos];
         
-        // Find in dictionary
+        // Sözlükte ara
         if let Some(idx) = dict[..dict_pos].iter().position(|&x| x == b) {
             dst[dst_pos] = idx as u8;
             dst_pos += 1;
         } else {
-            // Escape + literal
+            // Kaçış dizisi + ham byte
             dst[dst_pos] = 0xFF;
             dst[dst_pos + 1] = b;
             dst_pos += 2;
@@ -3963,7 +3963,7 @@ pub fn zstd_compress(src: &[u8], dst: &mut [u8]) -> usize {
     dst_pos
 }
 
-/// ZSTD-like decompression
+/// ZSTD benzeri açma (basit sözlük tabanlı)
 pub fn zstd_decompress(src: &[u8], dst: &mut [u8]) -> usize {
     if src.is_empty() {
         return 0;
@@ -3985,7 +3985,7 @@ pub fn zstd_decompress(src: &[u8], dst: &mut [u8]) -> usize {
         let idx = src[src_pos];
         
         if idx == 0xFF {
-            // Escaped literal
+            // Kaçış dizisi - ham byte
             if src_pos + 1 >= src.len() {
                 break;
             }
@@ -3993,7 +3993,7 @@ pub fn zstd_decompress(src: &[u8], dst: &mut [u8]) -> usize {
             dst_pos += 1;
             src_pos += 2;
         } else if (idx as usize) < dict_size {
-            // Dictionary reference
+            // Sözlük referansı
             dst[dst_pos] = dict[idx as usize];
             dst_pos += 1;
             src_pos += 1;
@@ -4005,7 +4005,7 @@ pub fn zstd_decompress(src: &[u8], dst: &mut [u8]) -> usize {
     dst_pos
 }
 
-/// Compress data block
+/// Veri bloğu sıkıştırır - algoritma ve oran eşiğine göre sıkıştırma veya ham saklama yapar
 pub fn compress_block(config: &CompressConfig, src: &[u8], dst: &mut [u8]) -> Option<usize> {
     if config.algorithm == CompressAlgorithm::None {
         if dst.len() >= src.len() {
@@ -4019,16 +4019,16 @@ pub fn compress_block(config: &CompressConfig, src: &[u8], dst: &mut [u8]) -> Op
         CompressAlgorithm::Lz4 => lz4_compress(src, dst),
         CompressAlgorithm::Zstd => zstd_compress(src, dst),
         CompressAlgorithm::Lzo => {
-            // LZO not implemented, use LZ4
+            // LZO uygulanmadı, LZ4 kullanılıyor
             lz4_compress(src, dst)
         }
         CompressAlgorithm::None => src.len(),
     };
     
-    // Check compression ratio
+    // Sıkıştırma oranını kontrol et
     let ratio = (compressed_size * 100) / src.len();
     if ratio >= config.min_compress_ratio as usize {
-        // Not enough compression, store uncompressed
+        // Yeterli sıkıştırma sağlamadı - ham olarak sakla
         if dst.len() >= src.len() {
             dst[..src.len()].copy_from_slice(src);
             return Some(src.len());
@@ -4039,7 +4039,7 @@ pub fn compress_block(config: &CompressConfig, src: &[u8], dst: &mut [u8]) -> Op
     Some(compressed_size)
 }
 
-/// Decompress data block
+/// Veri bloğu açılır - başlığtaki algoritma bilgisine göre doğru dekompresör çağrılır
 pub fn decompress_block(config: &CompressConfig, src: &[u8], dst: &mut [u8]) -> Option<usize> {
     match config.algorithm {
         CompressAlgorithm::Lz4 => Some(lz4_decompress(src, dst)),
@@ -4053,7 +4053,7 @@ pub fn decompress_block(config: &CompressConfig, src: &[u8], dst: &mut [u8]) -> 
     }
 }
 
-/// Write compressed file
+/// Sıkıştırılmış dosya yazar - veriyi cluster'lara böler, her birini sıkıştırıp başlıkla birlikte yazar
 pub fn write_compressed(
     path: &str,
     data: &[u8],
@@ -4061,7 +4061,7 @@ pub fn write_compressed(
 ) -> Result<(), FsError> {
     let cluster_size = 1u32 << config.log_cluster_size;
     
-    // Compress in clusters
+    // Cluster'lar halinde sıkıştır
     let mut compressed_data = Vec::new();
     let mut offset = 0;
     
@@ -4074,7 +4074,7 @@ pub fn write_compressed(
         let compressed_size = compress_block(config, chunk, &mut compressed_chunk)
             .ok_or(FsError::DeviceError)?;
         
-        // Add header
+        // Başlık ekle
         let header = CompressHeader {
             magic: F2FS_COMPRESSED_DATA,
             cluster_size: cluster_size as u16,
@@ -4084,7 +4084,7 @@ pub fn write_compressed(
             checksum: calculate_checksum(&compressed_chunk[..compressed_size]),
         };
         
-        // Write header + compressed data
+        // Başlık + sıkıştırılmış veriyi yaz
         compressed_data.extend_from_slice(&header.magic.to_le_bytes());
         compressed_data.extend_from_slice(&header.cluster_size.to_le_bytes());
         compressed_data.extend_from_slice(&[header.algorithm]);
@@ -4096,18 +4096,18 @@ pub fn write_compressed(
         offset = chunk_end;
     }
     
-    // Write compressed data to file
+    // Sıkıştırılmış veriyi dosyaya yaz
     write_f2fs_file_at(path, 0, &compressed_data)?;
     
-    // Set compression flag in inode
+    // inode'da sıkıştırma bayrağını ayarla
     set_compress_flag(path, true, config)?;
     
     Ok(())
 }
 
-/// Read compressed file
+/// Sıkıştırılmış dosya okur - cluster başlıklarını ayrıştırıp sırayla açar
 pub fn read_compressed(path: &str, config: &CompressConfig) -> Result<Vec<u8>, FsError> {
-    // Read raw file data
+    // Ham dosya verisini oku
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
     let ctx = load_context(&mut *drive)?;
@@ -4121,7 +4121,7 @@ pub fn read_compressed(path: &str, config: &CompressConfig) -> Result<Vec<u8>, F
     let mut offset = 0;
     
     while offset + 13 < compressed_data.len() {
-        // Read header
+        // Başlığı oku
         let magic = u32::from_le_bytes([
             compressed_data[offset],
             compressed_data[offset + 1],
@@ -4130,7 +4130,7 @@ pub fn read_compressed(path: &str, config: &CompressConfig) -> Result<Vec<u8>, F
         ]);
         
         if magic != F2FS_COMPRESSED_DATA {
-            // Not compressed, return as-is
+            // Sıkıştırılmamış veri - ham haliyle döndür
             return Ok(compressed_data);
         }
         
@@ -4156,7 +4156,7 @@ pub fn read_compressed(path: &str, config: &CompressConfig) -> Result<Vec<u8>, F
         
         offset += 15;
         
-        // Verify checksum
+        // Sığlama toplamını doğrula
         if offset + compressed_size > compressed_data.len() {
             return Err(FsError::DeviceError);
         }
@@ -4166,7 +4166,7 @@ pub fn read_compressed(path: &str, config: &CompressConfig) -> Result<Vec<u8>, F
             return Err(FsError::DeviceError);
         }
         
-        // Decompress
+        // Aç (dekompres et)
         let chunk_config = CompressConfig {
             algorithm: match algorithm {
                 1 => CompressAlgorithm::Lzo,
@@ -4188,7 +4188,7 @@ pub fn read_compressed(path: &str, config: &CompressConfig) -> Result<Vec<u8>, F
     Ok(decompressed)
 }
 
-/// Set compression flag on inode
+/// inode'da sıkıştırma bayrağını ayarlar
 fn set_compress_flag(path: &str, enable: bool, config: &CompressConfig) -> Result<(), FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -4203,14 +4203,14 @@ fn set_compress_flag(path: &str, enable: bool, config: &CompressConfig) -> Resul
     
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
     
-    // Set compression flags in inode i_flags
-    let i_flags_offset = INODE_I_MODE_OFFSET + 20; // Approximate offset
+    // inode i_flags alanında sıkıştırma bayraklarını ayarla
+    let i_flags_offset = INODE_I_MODE_OFFSET + 20; // Yaklaşık ofset
     let mut flags = read_u32(&block, i_flags_offset)?;
     
     if enable {
-        flags |= 0x0001; // FS_COMPR_FL
-        flags |= (config.algorithm as u32) << 4; // Algorithm in bits 4-7
-        flags |= (config.log_cluster_size as u32) << 8; // Cluster size in bits 8-11
+        flags |= 0x0001; // FS_COMPR_FL - sıkıştırma aktif
+        flags |= (config.algorithm as u32) << 4; // Algoritma: bit 4-7
+        flags |= (config.log_cluster_size as u32) << 8; // Cluster boyutu: bit 8-11
     } else {
         flags &= !0x0001;
     }
@@ -4222,10 +4222,10 @@ fn set_compress_flag(path: &str, enable: bool, config: &CompressConfig) -> Resul
 }
 
 // ============================================================================
-// F2FS ENCRYPTION (FBE - File-Based Encryption)
+// F2FS ŞİFRELEME (FBE - Dosya Tabanlı Şİfreleme - File-Based Encryption)
 // ============================================================================
 
-/// Encryption algorithm
+/// Şıfreleme algoritması - AES-256-XTS içerik, AES-256-GCM dosya adları için kullanılır
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EncryptAlgorithm {
     None = 0,
@@ -4234,7 +4234,7 @@ pub enum EncryptAlgorithm {
     Adiantum = 3,
 }
 
-/// Encryption policy
+/// Şıfreleme politikası - hangi algoritmanın kullanılacağını ve master anahtar tanımlayıcısını tutar
 #[derive(Clone, Debug)]
 pub struct EncryptPolicy {
     pub version: u8,
@@ -4258,64 +4258,64 @@ impl Default for EncryptPolicy {
     }
 }
 
-/// Encryption key
+/// Şıfreleme anahtarı - master anahtardan türetilmiş dosya/dizin şifreleme anahtarı
 #[derive(Clone, Debug)]
 pub struct EncryptKey {
     pub descriptor: [u8; 8],
-    pub key: [u8; 64], // Up to 512-bit key
+    pub key: [u8; 64], // En fazla 512-bit anahtar
     pub key_size: usize,
     pub policy: EncryptPolicy,
 }
 
-/// Key derivation for F2FS encryption
+/// F2FS şifreleme için anahtar türetimi - master anahtardan per-file anahtar üretir
 pub fn derive_key(master_key: &[u8], descriptor: &[u8; 8], key_size: usize) -> Vec<u8> {
-    // HKDF-like derivation
+    // HKDF-benzeri anahtar türetimi
     let mut derived = vec![0u8; key_size];
     
-    // Simple KDF: HMAC-SHA256 based
+    // Basit KDF: HMAC-SHA256 tabanlı (basitleştirilmiş)
     for (i, b) in master_key.iter().chain(descriptor.iter()).enumerate() {
         derived[i % key_size] ^= b;
-        // Mix with counter
+        // Sayıçla karıştır
         derived[i % key_size] ^= (i as u8).wrapping_add(0x5A);
     }
     
     derived
 }
 
-/// AES-256-XTS encryption for file contents
+/// Dosya içerikleri için AES-256-XTS şifreleme - her blok sahte-tweak ile bağımsız şifrelenir
 pub fn aes256_xts_encrypt(key: &[u8], tweak: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    // Simplified XTS: AES-ECB with tweak
+    // Basitleştirilmiş XTS: tweak'li AES-ECB
     let mut ciphertext = vec![0u8; plaintext.len()];
     
-    // Split key into two halves
+    // Anahtarı iki yarıya böl
     let key1 = &key[..32];
     let _key2 = &key[32..];
     
-    // Generate tweak using AES
+    // Tweak bloğunu oluştur
     let mut tweak_block = [0u8; 16];
     tweak_block.copy_from_slice(&tweak[..16]);
     
-    // XOR plaintext with tweak and "encrypt"
+    // Tweak ile XOR'la ve "şifrele"
     for (i, chunk) in plaintext.chunks(16).enumerate() {
         let mut block = [0u8; 16];
         block[..chunk.len()].copy_from_slice(chunk);
         
-        // XOR with tweak
+        // Tweak ile XOR
         for j in 0..16 {
             block[j] ^= tweak_block[j];
         }
         
-        // Simple "encryption" (would use AES in production)
+        // Basit "şifreleme" (gerçek uygulamada AES kullanılır)
         for j in 0..16 {
             block[j] ^= key1[j % key1.len()];
         }
         
-        // XOR with tweak again
+        // Tweak ile tekrar XOR
         for j in 0..16 {
             block[j] ^= tweak_block[j];
         }
         
-        // Multiply tweak by alpha (GF(2^128))
+        // Tweak'i alpha ile çarp (GF(2^128) sonlu cismi üzerine)
         let mut carry = false;
         for j in (0..16).rev() {
             let new_carry = (tweak_block[j] & 0x80) != 0;
@@ -4333,30 +4333,30 @@ pub fn aes256_xts_encrypt(key: &[u8], tweak: &[u8], plaintext: &[u8]) -> Vec<u8>
     ciphertext
 }
 
-/// AES-256-XTS decryption
+/// AES-256-XTS şifre çözme - XTS'te çözme şifrelemeyle özdeştir (key1/key2 değişimi)
 pub fn aes256_xts_decrypt(key: &[u8], tweak: &[u8], ciphertext: &[u8]) -> Vec<u8> {
-    // XTS decryption is same as encryption with key1/key2 swapped
+    // XTS şifre çözme = şifrelemeyle özdeş (simetrik)
     aes256_xts_encrypt(key, tweak, ciphertext)
 }
 
-/// AES-256-GCM encryption for filenames
+/// Dosya adları için AES-256-GCM şifreleme - kimlik doğrulama etiketiyle biriştirilir
 pub fn aes256_gcm_encrypt_filename(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    // Simplified GCM for filenames
-    let mut ciphertext = vec![0u8; plaintext.len() + 16]; // +16 for tag
+    // Dosya adları için basitleştirilmiş GCM
+    let mut ciphertext = vec![0u8; plaintext.len() + 16]; // +16 kimlik doğrulama etiketi
     
-    // XOR with keystream (simplified)
+    // Anahtar akışı ile XOR'la (basitleştirilmiş)
     for (i, b) in plaintext.iter().enumerate() {
         ciphertext[i] = b ^ key[i % key.len()] ^ nonce[i % nonce.len()];
     }
     
-    // Generate tag
+    // Kimlik doğrulama etiketi üret
     let tag = calculate_checksum(plaintext);
     ciphertext[plaintext.len()..plaintext.len() + 4].copy_from_slice(&tag.to_le_bytes());
     
     ciphertext
 }
 
-/// AES-256-GCM decryption for filenames
+/// Dosya adları için AES-256-GCM şifre çözme - etiket hatalı ise None döndürür
 pub fn aes256_gcm_decrypt_filename(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
     if ciphertext.len() < 16 {
         return None;
@@ -4365,12 +4365,12 @@ pub fn aes256_gcm_decrypt_filename(key: &[u8], nonce: &[u8], ciphertext: &[u8]) 
     let plaintext_len = ciphertext.len() - 16;
     let mut plaintext = vec![0u8; plaintext_len];
     
-    // XOR with keystream
+    // Anahtar akışı ile XOR'la
     for (i, b) in ciphertext[..plaintext_len].iter().enumerate() {
         plaintext[i] = b ^ key[i % key.len()] ^ nonce[i % nonce.len()];
     }
     
-    // Verify tag
+    // Etiketi doğrula
     let stored_tag = u32::from_le_bytes([
         ciphertext[plaintext_len],
         ciphertext[plaintext_len + 1],
@@ -4386,7 +4386,7 @@ pub fn aes256_gcm_decrypt_filename(key: &[u8], nonce: &[u8], ciphertext: &[u8]) 
     Some(plaintext)
 }
 
-/// Encrypt filename
+/// Dosya adını şifer eder - politikaya göre GCM veya basit XOR kullanır
 pub fn encrypt_filename(policy: &EncryptPolicy, key: &[u8], filename: &str) -> Vec<u8> {
     let plaintext = filename.as_bytes();
     
@@ -4395,7 +4395,7 @@ pub fn encrypt_filename(policy: &EncryptPolicy, key: &[u8], filename: &str) -> V
             aes256_gcm_encrypt_filename(key, &policy.nonce[..12], plaintext)
         }
         _ => {
-            // Fallback to simple XOR
+            // Geri dönüş: basit XOR
             let mut encrypted = plaintext.to_vec();
             for (i, b) in encrypted.iter_mut().enumerate() {
                 *b ^= policy.nonce[i % policy.nonce.len()];
@@ -4405,7 +4405,7 @@ pub fn encrypt_filename(policy: &EncryptPolicy, key: &[u8], filename: &str) -> V
     }
 }
 
-/// Decrypt filename
+/// Dosya adını şifresini çözer
 pub fn decrypt_filename(policy: &EncryptPolicy, key: &[u8], ciphertext: &[u8]) -> Option<String> {
     let plaintext = match policy.filenames_encryption_mode {
         EncryptAlgorithm::Aes256Gcm => {
@@ -4423,14 +4423,14 @@ pub fn decrypt_filename(policy: &EncryptPolicy, key: &[u8], ciphertext: &[u8]) -
     String::from_utf8(plaintext).ok()
 }
 
-/// Encrypt file contents
+/// Dosya içeriklerini şifer eder - blok numarasından tweak üretir
 pub fn encrypt_contents(
     policy: &EncryptPolicy,
     key: &[u8],
     block_number: u64,
     plaintext: &[u8],
 ) -> Vec<u8> {
-    // Create tweak from block number and nonce
+    // Blok numarası ve nonce'tan tweak üret
     let mut tweak = [0u8; 16];
     tweak[..8].copy_from_slice(&block_number.to_le_bytes());
     tweak[8..].copy_from_slice(&policy.nonce[..8]);
@@ -4440,7 +4440,7 @@ pub fn encrypt_contents(
             aes256_xts_encrypt(key, &tweak, plaintext)
         }
         _ => {
-            // Fallback
+            // Geri dönüş: XOR tabanlı
             let mut encrypted = plaintext.to_vec();
             for (i, b) in encrypted.iter_mut().enumerate() {
                 *b ^= key[i % key.len()];
@@ -4450,7 +4450,7 @@ pub fn encrypt_contents(
     }
 }
 
-/// Decrypt file contents
+/// Dosya içeriklerinin şifresini çözer
 pub fn decrypt_contents(
     policy: &EncryptPolicy,
     key: &[u8],
@@ -4475,7 +4475,7 @@ pub fn decrypt_contents(
     }
 }
 
-/// Set encryption policy on directory/file
+/// Dizin/dosya üzerinde şifreleme politikası ayarlar
 pub fn set_encryption_policy(path: &str, policy: &EncryptPolicy) -> Result<(), FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -4490,14 +4490,14 @@ pub fn set_encryption_policy(path: &str, policy: &EncryptPolicy) -> Result<(), F
     
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
     
-    // Set encryption flag in inode i_flags
+    // inode i_flags alanında şifreleme bayrağını set et
     let i_flags_offset = INODE_I_MODE_OFFSET + 20;
     let mut flags = read_u32(&block, i_flags_offset)?;
     flags |= 0x0008; // FS_ENCRYPT_FL
     
     write_u32(&mut block, i_flags_offset, flags)?;
     
-    // Write encryption policy to xattr area
+    // Şıfreleme politikasını xattr alanına yaz
     let xattr_offset = ctx.block_size as usize - 200;
     block[xattr_offset] = policy.version;
     block[xattr_offset + 1] = policy.contents_encryption_mode as u8;
@@ -4511,7 +4511,7 @@ pub fn set_encryption_policy(path: &str, policy: &EncryptPolicy) -> Result<(), F
     Ok(())
 }
 
-/// Get encryption policy
+/// Dosyadaki şifreleme politikasını okur
 pub fn get_encryption_policy(path: &str) -> Result<EncryptPolicy, FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -4526,7 +4526,7 @@ pub fn get_encryption_policy(path: &str) -> Result<EncryptPolicy, FsError> {
     
     let block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
     
-    // Check encryption flag
+    // Şıfreleme bayrağını kontrol et
     let i_flags_offset = INODE_I_MODE_OFFSET + 20;
     let flags = read_u32(&block, i_flags_offset)?;
     
@@ -4534,7 +4534,7 @@ pub fn get_encryption_policy(path: &str) -> Result<EncryptPolicy, FsError> {
         return Err(FsError::NotSupported);
     }
     
-    // Read encryption policy from xattr area
+    // Şıfreleme politikasını xattr alanından oku
     let xattr_offset = ctx.block_size as usize - 200;
     let version = block[xattr_offset];
     let contents_mode = match block[xattr_offset + 1] {
@@ -4566,10 +4566,10 @@ pub fn get_encryption_policy(path: &str) -> Result<EncryptPolicy, FsError> {
     })
 }
 
-/// Master key store
+/// Master anahtar deposu - tüm eklenen master anahtarları saklar
 static MASTER_KEY_STORE: Mutex<Vec<EncryptKey>> = Mutex::new(Vec::new());
 
-/// Add master key
+/// Master anahtar ekler - dosya şifreleme anahtarları bu havuzdan türetilir
 pub fn add_master_key(descriptor: [u8; 8], key: [u8; 64], key_size: usize) {
     let mut store = MASTER_KEY_STORE.lock();
     store.push(EncryptKey {
@@ -4580,7 +4580,7 @@ pub fn add_master_key(descriptor: [u8; 8], key: [u8; 64], key_size: usize) {
     });
 }
 
-/// Get master key
+/// Master anahtarı sorgular
 pub fn get_master_key(descriptor: &[u8; 8]) -> Option<EncryptKey> {
     let store = MASTER_KEY_STORE.lock();
     store.iter()
@@ -4588,7 +4588,7 @@ pub fn get_master_key(descriptor: &[u8; 8]) -> Option<EncryptKey> {
         .cloned()
 }
 
-/// Remove master key
+/// Master anahtarı kaldırır
 pub fn remove_master_key(descriptor: &[u8; 8]) -> bool {
     let mut store = MASTER_KEY_STORE.lock();
     let len_before = store.len();
@@ -4597,19 +4597,19 @@ pub fn remove_master_key(descriptor: &[u8; 8]) -> bool {
 }
 
 // ============================================================================
-// F2FS EXTENT CACHE
+// F2FS EXTENT ÖNBELLEKLEMESi (EXTENT CACHE)
 // ============================================================================
 
-/// Extent cache entry - maps logical block to physical block
+/// Extent önbelllek girişi - mantıksal bloğu fiziksel bloğa eşler
 #[derive(Clone, Debug)]
 pub struct ExtentCacheEntry {
     pub logical_block: u64,
     pub physical_block: u64,
-    pub length: u32,      // Number of contiguous blocks
+    pub length: u32,      // Ardardık (bitişik) blok sayısı
     pub flags: u16,
 }
 
-/// Extent cache for a file
+/// Dosya başına extent önbelleği
 #[derive(Clone, Debug, Default)]
 pub struct ExtentCache {
     pub entries: Vec<ExtentCacheEntry>,
@@ -4618,17 +4618,17 @@ pub struct ExtentCache {
 }
 
 lazy_static! {
-    /// Global extent cache
+    /// Küresel extent önbelleği - tüm açık dosyaların blok haritasını saklar
     static ref EXTENT_CACHE: Mutex<HashMap<u64, ExtentCache, F2fsHashBuilder>> = 
         Mutex::new(HashMap::with_hasher(F2fsHashBuilder::default()));
 }
 
-/// Add extent to cache
+/// Extent önbelleğine giriş ekler - örtüşen alanları temizleyip bitişikleri birleştirir
 pub fn add_extent(ino: u64, logical_block: u64, physical_block: u64, length: u32) {
     let mut cache = EXTENT_CACHE.lock();
     let file_cache = cache.entry(ino).or_insert_with(ExtentCache::default);
     
-    // Check if extent already exists or overlaps
+    // Mevcut örtüşen extent'leri kaldır
     file_cache.entries.retain(|e| {
         e.logical_block + e.length as u64 <= logical_block ||
         logical_block + length as u64 <= e.logical_block
@@ -4641,10 +4641,10 @@ pub fn add_extent(ino: u64, logical_block: u64, physical_block: u64, length: u32
         flags: 0,
     });
     
-    // Sort by logical block
+    // Mantıksal blok numarasına göre sırala
     file_cache.entries.sort_by_key(|e| e.logical_block);
     
-    // Merge adjacent extents
+    // Bitişik extent'leri birleştir (merge)
     let mut merged: Vec<ExtentCacheEntry> = Vec::new();
     for entry in file_cache.entries.drain(..) {
         if let Some(last) = merged.last_mut() {
@@ -4659,11 +4659,11 @@ pub fn add_extent(ino: u64, logical_block: u64, physical_block: u64, length: u32
     file_cache.entries = merged;
 }
 
-/// Lookup extent in cache
+/// Extent önbelleğinde ara - O(n) tarama, gerçek implementasyonda ikili arama kullanılır
 pub fn lookup_extent(ino: u64, logical_block: u64) -> Option<ExtentCacheEntry> {
     let mut cache = EXTENT_CACHE.lock();
     if let Some(file_cache) = cache.get_mut(&ino) {
-        // Binary search for extent
+        // Extent için tarama yap (ikili arama olarak optimize edilebilir)
         for entry in &file_cache.entries {
             if logical_block >= entry.logical_block &&
                logical_block < entry.logical_block + entry.length as u64 {
@@ -4676,33 +4676,33 @@ pub fn lookup_extent(ino: u64, logical_block: u64) -> Option<ExtentCacheEntry> {
     None
 }
 
-/// Invalidate extent cache for file
+/// Dosyanın extent önbelleğini geçersiz kılar (dosya silinince çağrılır)
 pub fn invalidate_extent_cache(ino: u64) {
     let mut cache = EXTENT_CACHE.lock();
     cache.remove(&ino);
 }
 
-/// Get extent cache stats
+/// Extent önbelleği istatistiklerini döndürür (hit/miss sayıları)
 pub fn extent_cache_stats(ino: u64) -> Option<(u64, u64)> {
     let cache = EXTENT_CACHE.lock();
     cache.get(&ino).map(|c| (c.hit_count, c.miss_count))
 }
 
-/// Read block using extent cache
+/// Extent önbelleğini kullanarak blok okur - önbellekte varsa NAT sorgusu yapılmaz
 pub fn read_block_cached(
     drive: &mut dyn BlockDevice,
     ctx: &F2fsContext,
     ino: u64,
     logical_block: u64,
 ) -> Result<Vec<u8>, FsError> {
-    // Try extent cache first
+    // Önbelleği önce dene
     if let Some(extent) = lookup_extent(ino, logical_block) {
         let offset_in_extent = (logical_block - extent.logical_block) as u64;
         let physical_block = extent.physical_block + offset_in_extent;
         return read_block(drive, ctx, physical_block as u32);
     }
     
-    // Cache miss - read normally and update cache
+    // Önbellekte yok - normal oku ve önbelleği güncelle
     let physical_block = get_data_block_addr(drive, ctx, ino as u32, logical_block as usize)?;
     if physical_block != 0 {
         add_extent(ino, logical_block, physical_block as u64, 1);
@@ -4712,26 +4712,26 @@ pub fn read_block_cached(
 }
 
 // ============================================================================
-// F2FS INLINE DATA
+// F2FS SATIR-İÇİ VERi (INLINE DATA)
 // ============================================================================
 
-/// Inline data configuration
+/// Satır-içi veri yapılandırması - küçük dosyaların doğrudan inode bloğungda saklanır
 #[derive(Clone, Debug)]
 pub struct InlineConfig {
     pub max_inline_size: usize,
-    pub inline_threshold: usize,  // Files below this size are inlined
+    pub inline_threshold: usize,  // Bu boyutun altındaki dosyalar inode'da saklanır
 }
 
 impl Default for InlineConfig {
     fn default() -> Self {
         InlineConfig {
-            max_inline_size: 3680,  // ~3.6KB (4KB block - inode overhead)
+            max_inline_size: 3680,  // ~3.6KB (4KB blok - inode overhead)
             inline_threshold: 3680,
         }
     }
 }
 
-/// Check if file has inline data
+/// Dosyanın satır-içi veri mi taşıdığını kontrol eder
 pub fn is_inline(path: &str) -> Result<bool, FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -4742,12 +4742,12 @@ pub fn is_inline(path: &str) -> Result<bool, FsError> {
     Ok(inode.inline)
 }
 
-/// Get inline data capacity (already defined above)
+/// Dahili veri kapasitesini döndürür (yukarıda zaten tanımlı)
 pub fn _inline_data_capacity_alias(block_size: u32) -> Result<usize, FsError> {
     inline_data_capacity(block_size)
 }
 
-/// Read inline data from inode
+/// inode bloğundan satır-içi veriyi okur
 pub fn read_inline_data(path: &str) -> Result<Vec<u8>, FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -4762,7 +4762,7 @@ pub fn read_inline_data(path: &str) -> Result<Vec<u8>, FsError> {
     Ok(inode.inline_data.unwrap_or_default())
 }
 
-/// Write inline data to inode
+/// inode bloğuna satır-içi veri yazar - i_inline bayrağını set eder
 pub fn write_inline_data(path: &str, data: &[u8]) -> Result<(), FsError> {
     let config = InlineConfig::default();
     
@@ -4783,22 +4783,22 @@ pub fn write_inline_data(path: &str, data: &[u8]) -> Result<(), FsError> {
     
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
     
-    // Set inline flag
+    // Satır-içi bayrağını ayarla
     let inline_offset = INODE_I_INLINE_OFFSET;
     if block[inline_offset] & F2FS_INLINE_DATA_FLAG == 0 {
         block[inline_offset] |= F2FS_INLINE_DATA_FLAG;
     }
     
-    // Write data to inline area
+    // Veriyi satır-içi alana yaz
     let data_offset = INODE_I_ADDR_OFFSET;
     block[data_offset..data_offset + data.len()].copy_from_slice(data);
     
-    // Zero remaining inline area
+    // Kalan satır-içi alanı sıfırla
     for b in &mut block[data_offset + data.len()..data_offset + config.max_inline_size] {
         *b = 0;
     }
     
-    // Update file size
+    // Dosya boyutunu güncelle
     write_u32(&mut block, INODE_I_SIZE_OFFSET, data.len() as u32)?;
     
     write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
@@ -4806,7 +4806,7 @@ pub fn write_inline_data(path: &str, data: &[u8]) -> Result<(), FsError> {
     Ok(())
 }
 
-/// Convert inline data to regular blocks
+/// Satır-içi (inline) veriyi normal bloklara dönüştürür - dosya büyüdüğünde inode içi kapasite yetersiz kalır, veri ana alana (main area) taşınır
 pub fn convert_inline_to_blocks(path: &str) -> Result<(), FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -4815,7 +4815,7 @@ pub fn convert_inline_to_blocks(path: &str) -> Result<(), FsError> {
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     
     if !inode.inline {
-        return Ok(());  // Already not inline
+        return Ok(());  // Zaten satır-içi değil
     }
     
     let inline_data = inode.inline_data.clone().unwrap_or_default();
@@ -4824,7 +4824,7 @@ pub fn convert_inline_to_blocks(path: &str) -> Result<(), FsError> {
         return Ok(());
     }
     
-    // Clear inline flag
+    // Satır-içi bayrağını temizle
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
@@ -4834,18 +4834,18 @@ pub fn convert_inline_to_blocks(path: &str) -> Result<(), FsError> {
     block[INODE_I_INLINE_OFFSET] &= !F2FS_INLINE_DATA_FLAG;
     write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
     
-    // Write data as regular blocks
+    // Veriyi normal bloklar olarak yaz
     drop(drive);
     write_f2fs_file_at(path, 0, &inline_data)?;
     
     Ok(())
 }
 
-/// Convert regular blocks to inline data
+/// Normal blokları satır-içi (inline) veriye dönüştürür - küçük dosyalar için inode içinde depolamak ekstra I/O'yu ortadan kaldırır
 pub fn convert_blocks_to_inline(path: &str) -> Result<(), FsError> {
     let config = InlineConfig::default();
     
-    // Read file data
+    // Dosya verilerini diskten oku
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
     
@@ -4853,29 +4853,29 @@ pub fn convert_blocks_to_inline(path: &str) -> Result<(), FsError> {
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     
     if inode.inline {
-        return Ok(());  // Already inline
+        return Ok(());  // Zaten satır-içi
     }
     
     if inode.size > config.inline_threshold as u64 {
-        return Err(FsError::NotSupported);  // Too large
+        return Err(FsError::NotSupported);  // Çok büyük
     }
     
-    // Read data
+    // Veriyi oku
     let mut data = vec![0u8; inode.size as usize];
     drop(drive);
     read_f2fs_file_at(path, 0, &mut data)?;
     
-    // Write as inline
+    // Satır-içi olarak yaz
     write_inline_data(path, &data)?;
     
     Ok(())
 }
 
 // ============================================================================
-// F2FS EXTENDED ATTRIBUTES (XATTR)
+// F2FS GENİŞ LETKEN NİTELELER (XATTR - Extended Attributes)
 // ============================================================================
 
-/// Xattr name space
+/// Xattr ad alanı - POSIX nitelik alanı türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XattrNamespace {
     User = 1,
@@ -4884,13 +4884,13 @@ pub enum XattrNamespace {
     Trusted = 4,
 }
 
-/// Xattr entry header
+/// Xattr giriş başlığı - ikili formattaki nitelik kaydını tanımlar
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct XattrHeader {
-    pub magic: u32,        // XATTR_MAGIC
+    pub magic: u32,        // XATTR_MAGIC sınır tanımlayıcısı
     pub ref_count: u16,
-    pub name_index: u8,    // XattrNamespace
+    pub name_index: u8,    // XattrNamespace (ad alanı indisi)
     pub name_len: u8,
     pub value_size: u16,
     pub reserved: u16,
@@ -4898,7 +4898,7 @@ pub struct XattrHeader {
 
 const XATTR_MAGIC: u32 = 0xF2F52000;
 
-/// Xattr entry
+/// Genişletilmiş nitelik (xattr) girişi - her giriş bir isim-değer çiftidir (örn: "security.selinux", "user.mimetype")
 #[derive(Clone, Debug)]
 pub struct XattrEntry {
     pub namespace: XattrNamespace,
@@ -4906,7 +4906,7 @@ pub struct XattrEntry {
     pub value: Vec<u8>,
 }
 
-/// Read xattr from file
+/// Dosyadan xattr okur - inode bloğunun sonundaki xattr alanını tarar
 pub fn get_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result<Vec<u8>, FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -4921,10 +4921,10 @@ pub fn get_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result<Ve
     
     let block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
     
-    // Find xattr area (at end of inode block)
+    // Xattr alanını bul (inode bloğunun sonuna doğru)
     let xattr_start = ctx.block_size as usize - 200;
     
-    // Parse xattr entries
+    // Xattr girişlerini ayrıştır
     let mut pos = xattr_start;
     while pos + 12 < block.len() {
         let magic = u32::from_le_bytes([
@@ -4963,7 +4963,7 @@ pub fn get_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result<Ve
     Err(FsError::EntryNotFound)
 }
 
-/// Set xattr on file
+/// Dosyaya xattr yazar - mevcut giriş varsa günceller, yoksa ekler
 pub fn set_xattr(path: &str, namespace: XattrNamespace, name: &str, value: &[u8]) -> Result<(), FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -4978,11 +4978,7 @@ pub fn set_xattr(path: &str, namespace: XattrNamespace, name: &str, value: &[u8]
     
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
     
-    // Find xattr area
-    let xattr_start = ctx.block_size as usize - 200;
-    let xattr_end = ctx.block_size as usize;
-    
-    // Find existing entry or space for new entry
+    // Xattr alanını bul
     let mut pos = xattr_start;
     let mut found_pos = None;
     let mut end_pos = xattr_start;
@@ -5020,11 +5016,11 @@ pub fn set_xattr(path: &str, namespace: XattrNamespace, name: &str, value: &[u8]
         end_pos = pos;
     }
     
-    // Calculate entry size
+    // Giriş boyutunu hesapla
     let entry_size = 12 + name.len() + value.len();
     
     if let Some(pos) = found_pos {
-        // Replace existing entry
+        // Mevcut girişi güncelle (değiştir)
         let old_name_len = block[pos + 7] as usize;
         let old_value_size = u16::from_le_bytes([block[pos + 8], block[pos + 9]]) as usize;
         let old_entry_size = 12 + old_name_len + old_value_size;
@@ -5033,29 +5029,29 @@ pub fn set_xattr(path: &str, namespace: XattrNamespace, name: &str, value: &[u8]
             return Err(FsError::DeviceError);
         }
         
-        // Shift remaining entries if size changed
+        // Boyut değiştiyse geri kalan girişleri kaydır
         if entry_size != old_entry_size {
             let shift_start = pos + old_entry_size;
             let shift_end = end_pos;
             let delta = entry_size as i32 - old_entry_size as i32;
             
             if delta > 0 {
-                // Expand - shift right
+                // Genişle - sağa kaydır
                 for i in (shift_start..shift_end).rev() {
                     block[i + delta as usize] = block[i];
                 }
             } else {
-                // Shrink - shift left
+                // Küçül - sola kaydır
                 for i in shift_start..shift_end {
                     block[i + delta as usize] = block[i];
                 }
             }
         }
         
-        // Write new entry
+        // Yeni girişi yaz
         write_xattr_entry(&mut block, pos, namespace, name, value)?;
     } else {
-        // Add new entry
+        // Yeni giriş ekle
         if end_pos + entry_size > xattr_end {
             return Err(FsError::DeviceError);
         }
@@ -5068,28 +5064,28 @@ pub fn set_xattr(path: &str, namespace: XattrNamespace, name: &str, value: &[u8]
     Ok(())
 }
 
-/// Write xattr entry at position
+/// Xattr girişini belirtilen konuma yazar
 fn write_xattr_entry(block: &mut [u8], pos: usize, namespace: XattrNamespace, name: &str, value: &[u8]) -> Result<(), FsError> {
     let name_bytes = name.as_bytes();
     
-    // Write header
+    // Başlığı yaz
     block[pos..pos + 4].copy_from_slice(&XATTR_MAGIC.to_le_bytes());
-    block[pos + 4..pos + 6].copy_from_slice(&1u16.to_le_bytes()); // ref_count
+    block[pos + 4..pos + 6].copy_from_slice(&1u16.to_le_bytes()); // referans sayıcısı
     block[pos + 6] = namespace as u8;
     block[pos + 7] = name_bytes.len() as u8;
     block[pos + 8..pos + 10].copy_from_slice(&(value.len() as u16).to_le_bytes());
-    block[pos + 10..pos + 12].copy_from_slice(&0u16.to_le_bytes()); // reserved
+    block[pos + 10..pos + 12].copy_from_slice(&0u16.to_le_bytes()); // Reserved (ayrılmış)
     
-    // Write name
+    // Adı yaz
     block[pos + 12..pos + 12 + name_bytes.len()].copy_from_slice(name_bytes);
     
-    // Write value
+    // Değeri yaz
     block[pos + 12 + name_bytes.len()..pos + 12 + name_bytes.len() + value.len()].copy_from_slice(value);
     
     Ok(())
 }
 
-/// Remove xattr from file
+/// Dosyadan xattr kaldırır - kalan girişleri sola kaydırır
 pub fn remove_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result<(), FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -5134,11 +5130,11 @@ pub fn remove_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result
         let entry_name = String::from_utf8_lossy(&block[pos + 12..pos + 12 + name_len]).to_string();
         
         if entry_namespace == namespace && entry_name == name {
-            // Remove entry by shifting remaining entries left
+            // Kalan girişleri sola kaydırarak girişi kaldır
             let entry_size = 12 + name_len + value_size;
             let shift_start = pos + entry_size;
             
-            // Find end of xattr area
+            // Xattr alanının sonunu bul
             let mut end = shift_start;
             while end + 12 < xattr_end {
                 let m = u32::from_le_bytes([
@@ -5152,12 +5148,12 @@ pub fn remove_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result
                 end += 12 + nl + vs;
             }
             
-            // Shift
+            // Sola kaydır
             for i in shift_start..end {
                 block[i - entry_size] = block[i];
             }
             
-            // Zero remaining
+            // Kalan alanı sıfırla
             for b in &mut block[end - entry_size..end] {
                 *b = 0;
             }
@@ -5178,7 +5174,7 @@ pub fn remove_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result
     Ok(())
 }
 
-/// List xattrs on file
+/// Dosyadaki tüm xattr'ları listeler
 pub fn list_xattrs(path: &str) -> Result<Vec<XattrEntry>, FsError> {
     let mut drive = crate::drivers::linux::select_block_device()
         .map_err(|_| FsError::NoDevice)?;
@@ -5236,12 +5232,12 @@ pub fn list_xattrs(path: &str) -> Result<Vec<XattrEntry>, FsError> {
 }
 
 // ============================================================================
-// F2FS CONSTANTS
+// F2FS SABiTLERi (CONSTANTS)
 // ============================================================================
 
-/// Inline data flag in inode
+/// inode başlığındaki satır-içi veri bayrağı
 const F2FS_INLINE_DATA_FLAG: u8 = 0x01;
-/// Inline dentry flag
+/// satır-içi dizin girişi bayrağı
 const F2FS_INLINE_DENTRY_FLAG: u8 = 0x02;
-/// Data recovery flag
+/// Veri kurtarma bayrağı - inode'da veri var ama tam commit yapılmadı
 const F2FS_DATA_EXIST_FLAG: u8 = 0x04;

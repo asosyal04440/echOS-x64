@@ -1,6 +1,8 @@
-//! # AML (ACPI Machine Language) Interpreter
+//! # AML (ACPI Makine Dili) Yorumlayıcı
 //!
-//! Full AML bytecode interpreter for ACPI.
+//! ACPI için tam AML bayt kodu yorumlayıcısı.
+//! AML, ACPI tablolarında donanım yapılandırmasını tanımlamak için kullanılan
+//! bir sanal makine dilidir. Bu modül, AML bayt kodunu ayrıştırır ve çalıştırır.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -11,10 +13,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// AML CONSTANTS
+// AML SABİTLERİ
 // ============================================================================
 
-/// AML opcodes
+/// AML işlem kodları
 pub const AML_ZERO_OP: u8 = 0x00;
 pub const AML_ONE_OP: u8 = 0x01;
 pub const AML_ALIAS_OP: u8 = 0x06;
@@ -93,7 +95,7 @@ pub const AML_BREAK_OP: u8 = 0xA5;
 pub const AML_BREAK_POINT_OP: u8 = 0xA6;
 pub const AML_ONES_OP: u8 = 0xFF;
 
-/// Extended opcodes
+/// Genişletilmiş işlem kodları
 pub const AML_EXT_OP: u8 = 0x5B;
 pub const AML_EXT_MUTEX_OP: u16 = 0x5B01;
 pub const AML_EXT_EVENT_OP: u16 = 0x5B02;
@@ -122,7 +124,7 @@ pub const AML_EXT_POWER_RES_OP: u16 = 0x5B84;
 pub const AML_EXT_THERMAL_ZONE_OP: u16 = 0x5B85;
 
 // ============================================================================
-// AML VALUE
+// AML DEĞERİ
 // ============================================================================
 
 #[derive(Clone, Debug)]
@@ -141,7 +143,7 @@ pub enum AmlValue {
     PowerResource(PowerResDesc),
     ThermalZone(String),
     Debug,
-    Reference(u64), // Reference to object
+    Reference(u64), // Nesne referansı
 }
 
 #[derive(Clone, Debug)]
@@ -192,13 +194,13 @@ pub struct PowerResDesc {
 }
 
 // ============================================================================
-// AML NAMESPACE
+// AML İSİM UZAYI
 // ============================================================================
 
 pub struct AmlNamespace {
-    /// Named objects
+    /// İsimlendirilmiş nesneler
     pub objects: Mutex<BTreeMap<String, AmlValue>>,
-    /// Current scope
+    /// Mevcut kapsam
     pub scope: Mutex<Vec<String>>,
 }
 
@@ -210,33 +212,33 @@ impl AmlNamespace {
         }
     }
 
-    /// Add object
+    /// Nesne ekle
     pub fn add(&self, name: &str, value: AmlValue) {
         let full_name = self.resolve_name(name);
         self.objects.lock().insert(full_name, value);
     }
 
-    /// Get object
+    /// Nesne al
     pub fn get(&self, name: &str) -> Option<AmlValue> {
         let full_name = self.resolve_name(name);
         self.objects.lock().get(&full_name).cloned()
     }
 
-    /// Resolve name to full path
+    /// İsmi tam yola çözümle
     fn resolve_name(&self, name: &str) -> String {
         if name.starts_with('\\') {
             return String::from(name);
         }
-        
+
         if name.starts_with('^') {
-            // Parent scope
+            // Üst kapsam
             let mut scope = self.scope.lock();
             if scope.len() > 1 {
                 scope.pop();
             }
             return self.resolve_name(&name[1..]);
         }
-        
+
         let scope = self.scope.lock();
         if scope.is_empty() {
             String::from("\\") + name
@@ -245,32 +247,32 @@ impl AmlNamespace {
         }
     }
 
-    /// Push scope
+    /// Kapsam ekle (stack'e it)
     pub fn push_scope(&self, name: &str) {
         let full_name = self.resolve_name(name);
         self.scope.lock().push(full_name);
     }
 
-    /// Pop scope
+    /// Kapsamı çıkar (stack'ten al)
     pub fn pop_scope(&self) {
         self.scope.lock().pop();
     }
 }
 
 // ============================================================================
-// AML INTERPRETER
+// AML YORUMLAYICI
 // ============================================================================
 
 pub struct AmlInterpreter {
-    /// Namespace
+    /// İsim uzayı
     pub namespace: AmlNamespace,
-    /// Local variables (per execution)
+    /// Yerel değişkenler (her çalıştırma için)
     pub locals: Mutex<[AmlValue; 8]>,
-    /// Arguments
+    /// Argümanlar
     pub args: Mutex<[AmlValue; 7]>,
-    /// Execution state
+    /// Çalıştırma durumu
     pub state: Mutex<ExecutionState>,
-    /// Statistics
+    /// İstatistikler
     pub stats: Mutex<AmlStats>,
 }
 
@@ -324,7 +326,7 @@ impl AmlInterpreter {
         }
     }
 
-    /// Execute AML bytecode
+    /// AML bayt kodunu çalıştır
     pub fn execute(&self, code: &[u8]) -> Result<AmlValue, AmlError> {
         let mut state = self.state.lock();
         state.pc = 0;
@@ -335,9 +337,9 @@ impl AmlInterpreter {
         while self.state.lock().pc < code.len() {
             let pc = self.state.lock().pc;
             let opcode = code[pc];
-            
+
             self.execute_opcode(code, opcode)?;
-            
+
             let mut stats = self.stats.lock();
             stats.opcodes_executed += 1;
         }
@@ -345,7 +347,7 @@ impl AmlInterpreter {
         Ok(self.state.lock().return_value.clone().unwrap_or(AmlValue::Uninitialized))
     }
 
-    /// Execute single opcode
+    /// Tek işlem kodunu çalıştır
     fn execute_opcode(&self, code: &[u8], opcode: u8) -> Result<(), AmlError> {
         let mut state = self.state.lock();
         state.pc += 1;
@@ -392,15 +394,15 @@ impl AmlInterpreter {
                     s.push(code[state.pc] as char);
                     state.pc += 1;
                 }
-                state.pc += 1; // Skip null terminator
+                state.pc += 1; // Null sonlandırıcıyı atla
                 self.push_value(AmlValue::String(s));
             }
             AML_NAME_OP => {
-                // Parse name and value
+                // İsim ve değeri ayrıştır
                 let name = self.parse_name(code, &mut state.pc)?;
                 let value = self.pop_value()?;
                 self.namespace.add(&name, value);
-                
+
                 let mut stats = self.stats.lock();
                 stats.objects_created += 1;
             }
@@ -408,8 +410,8 @@ impl AmlInterpreter {
                 let pkg_len = self.parse_pkg_len(code, &mut state.pc);
                 let name = self.parse_name(code, &mut state.pc)?;
                 self.namespace.push_scope(&name);
-                
-                // Execute scope contents
+
+                // Kapsam içeriğini çalıştır
                 let end_pc = state.pc + pkg_len;
                 while state.pc < end_pc {
                     let op = code[state.pc];
@@ -418,34 +420,34 @@ impl AmlInterpreter {
                     self.execute_opcode(code, op)?;
                     state = self.state.lock();
                 }
-                
+
                 self.namespace.pop_scope();
             }
             AML_METHOD_OP => {
                 let pkg_len = self.parse_pkg_len(code, &mut state.pc);
                 let name = self.parse_name(code, &mut state.pc)?;
-                
+
                 let flags = code[state.pc];
                 state.pc += 1;
-                
+
                 let args = flags & 0x07;
                 let serialized = (flags & 0x08) != 0;
-                
+
                 let method_code = code[state.pc..state.pc + pkg_len - (name.len() + 2)].to_vec();
-                
+
                 let method = AmlValue::Method(MethodDesc {
                     name: name.clone(),
                     args,
                     serialized,
                     code: method_code,
                 });
-                
+
                 self.namespace.add(&name, method);
             }
             AML_STORE_OP => {
                 let value = self.pop_value()?;
                 let dest = self.pop_value()?;
-                // Store value to destination
+                // Değeri hedefe yaz
                 self.push_value(value);
             }
             AML_ADD_OP => {
@@ -546,7 +548,7 @@ impl AmlInterpreter {
             AML_IF_OP => {
                 let pkg_len = self.parse_pkg_len(code, &mut state.pc);
                 let condition = self.pop_int()?;
-                
+
                 if condition != 0 {
                     let end_pc = state.pc + pkg_len;
                     while state.pc < end_pc {
@@ -564,18 +566,18 @@ impl AmlInterpreter {
                 let pkg_len = self.parse_pkg_len(code, &mut state.pc);
                 let cond_start = state.pc;
                 let end_pc = state.pc + pkg_len;
-                
+
                 loop {
-                    // Evaluate condition
+                    // Koşulu değerlendir
                     state.pc = cond_start;
                     drop(state);
                     let cond = self.pop_int()?;
                     state = self.state.lock();
-                    
+
                     if cond == 0 {
                         break;
                     }
-                    
+
                     state.pc = cond_start;
                     while state.pc < end_pc {
                         if state.break_flag {
@@ -586,7 +588,7 @@ impl AmlInterpreter {
                             state.continue_flag = false;
                             break;
                         }
-                        
+
                         let op = code[state.pc];
                         state.pc += 1;
                         drop(state);
@@ -594,7 +596,7 @@ impl AmlInterpreter {
                         state = self.state.lock();
                     }
                 }
-                
+
                 state.pc = end_pc;
             }
             AML_RETURN_OP => {
@@ -624,7 +626,7 @@ impl AmlInterpreter {
                 self.push_value(val);
             }
             _ => {
-                // Try to parse as name
+                // İsim olarak ayrıştırmaya çalış
                 state.pc -= 1;
                 let name = self.parse_name(code, &mut state.pc)?;
                 if let Some(obj) = self.namespace.get(&name) {
@@ -636,26 +638,26 @@ impl AmlInterpreter {
         Ok(())
     }
 
-    /// Execute extended opcode
+    /// Genişletilmiş işlem kodunu çalıştır
     fn execute_ext_opcode(&self, code: &[u8], ext_op: u16, state: &mut ExecutionState) -> Result<(), AmlError> {
         match ext_op {
             AML_EXT_SLEEP_OP => {
                 let ms = self.pop_int()?;
-                // Sleep for ms milliseconds
+                // ms milisaniye bekle
                 crate::serial_println!("[AML] Sleep {} ms", ms);
             }
             AML_EXT_STALL_OP => {
                 let us = self.pop_int()?;
-                // Stall for us microseconds
+                // us mikrosaniye dur
             }
             AML_EXT_ACQUIRE_OP => {
                 let timeout = self.pop_int()?;
                 let mutex_name = self.pop_value()?;
-                // Acquire mutex
+                // Mutex'i kilitle
             }
             AML_EXT_RELEASE_OP => {
                 let mutex_name = self.pop_value()?;
-                // Release mutex
+                // Mutex'i serbest bırak
             }
             AML_EXT_REGION_OP => {
                 let pkg_len = self.parse_pkg_len(code, &mut state.pc);
@@ -664,7 +666,7 @@ impl AmlInterpreter {
                 state.pc += 1;
                 let offset = self.pop_int()?;
                 let length = self.pop_int()?;
-                
+
                 crate::serial_println!("[AML] OperationRegion {} space={} offset={:#x} len={:#x}",
                     name, space_id, offset, length);
             }
@@ -673,17 +675,17 @@ impl AmlInterpreter {
                 let region_name = self.parse_name(code, &mut state.pc)?;
                 let flags = code[state.pc];
                 state.pc += 1;
-                
-                // Parse field elements
+
+                // Alan elemanlarını ayrıştır
                 crate::serial_println!("[AML] Field {} flags={:#x}", region_name, flags);
             }
             AML_EXT_DEVICE_OP => {
                 let pkg_len = self.parse_pkg_len(code, &mut state.pc);
                 let name = self.parse_name(code, &mut state.pc)?;
-                
+
                 self.namespace.push_scope(&name);
                 self.namespace.add(&name, AmlValue::Device(name.clone()));
-                
+
                 let end_pc = state.pc + pkg_len;
                 while state.pc < end_pc {
                     let op = code[state.pc];
@@ -692,7 +694,7 @@ impl AmlInterpreter {
                     self.execute_opcode(code, op)?;
                     state = self.state.lock();
                 }
-                
+
                 self.namespace.pop_scope();
             }
             AML_EXT_PROCESSOR_OP => {
@@ -706,14 +708,14 @@ impl AmlInterpreter {
                 state.pc += 4;
                 let pblk_len = code[state.pc];
                 state.pc += 1;
-                
+
                 let proc = AmlValue::Processor(ProcessorDesc {
                     name: name.clone(),
                     id,
                     pblk_addr,
                     pblk_len,
                 });
-                
+
                 self.namespace.add(&name, proc);
             }
             AML_EXT_POWER_RES_OP => {
@@ -723,22 +725,22 @@ impl AmlInterpreter {
                 state.pc += 1;
                 let resource_order = u16::from_le_bytes([code[state.pc], code[state.pc + 1]]);
                 state.pc += 2;
-                
+
                 let pr = AmlValue::PowerResource(PowerResDesc {
                     name: name.clone(),
                     system_level,
                     resource_order,
                 });
-                
+
                 self.namespace.add(&name, pr);
             }
             AML_EXT_THERMAL_ZONE_OP => {
                 let pkg_len = self.parse_pkg_len(code, &mut state.pc);
                 let name = self.parse_name(code, &mut state.pc)?;
-                
+
                 self.namespace.push_scope(&name);
                 self.namespace.add(&name, AmlValue::ThermalZone(name.clone()));
-                
+
                 let end_pc = state.pc + pkg_len;
                 while state.pc < end_pc {
                     let op = code[state.pc];
@@ -747,45 +749,45 @@ impl AmlInterpreter {
                     self.execute_opcode(code, op)?;
                     state = self.state.lock();
                 }
-                
+
                 self.namespace.pop_scope();
             }
             AML_EXT_DEBUG_OP => {
-                // Debug output
+                // Hata ayıklama çıktısı
                 let val = self.pop_value()?;
                 crate::serial_println!("[AML DEBUG] {:?}", val);
             }
             _ => {}
         }
-        
+
         Ok(())
     }
 
-    /// Parse package length
+    /// Paket uzunluğunu ayrıştır
     fn parse_pkg_len(&self, code: &[u8], pc: &mut usize) -> usize {
         let lead = code[*pc];
         *pc += 1;
-        
+
         let count = (lead >> 6) as usize;
         let mut len = (lead & 0x3F) as usize;
-        
+
         for i in 0..count {
             len |= (code[*pc + i] as usize) << (8 * i + 4);
         }
         *pc += count;
-        
+
         len
     }
 
-    /// Parse name
+    /// İsim ayrıştır
     fn parse_name(&self, code: &[u8], pc: &mut usize) -> Result<String, AmlError> {
         let mut name = String::new();
-        
+
         if code[*pc] == AML_ROOT_CHAR {
             name.push('\\');
             *pc += 1;
         }
-        
+
         if code[*pc] == AML_DUAL_NAME_PREFIX {
             *pc += 1;
             for _ in 0..2 {
@@ -807,7 +809,7 @@ impl AmlInterpreter {
                 *pc += 4;
             }
         } else {
-            // Single name
+            // Tekil isim
             for _ in 0..4 {
                 if code[*pc] != 0 {
                     name.push(code[*pc] as char);
@@ -815,21 +817,21 @@ impl AmlInterpreter {
                 *pc += 1;
             }
         }
-        
+
         Ok(name)
     }
 
-    /// Push value onto stack (simplified)
+    /// Stack'e değer it (basitleştirilmiş)
     fn push_value(&self, value: AmlValue) {
-        // Simplified - would use actual stack
+        // Basitleştirilmiş - gerçek stack kullanılırdı
     }
 
-    /// Pop value from stack
+    /// Stack'ten değer al
     fn pop_value(&self) -> Result<AmlValue, AmlError> {
         Ok(AmlValue::Uninitialized)
     }
 
-    /// Pop integer value
+    /// Stack'ten tamsayı değeri al
     fn pop_int(&self) -> Result<u64, AmlError> {
         match self.pop_value()? {
             AmlValue::Integer(v) => Ok(v),
@@ -837,12 +839,12 @@ impl AmlInterpreter {
         }
     }
 
-    /// Execute method
+    /// Metodu çalıştır
     pub fn execute_method(&self, name: &str, args: &[AmlValue]) -> Result<AmlValue, AmlError> {
         let method = self.namespace.get(name);
-        
+
         if let Some(AmlValue::Method(m)) = method {
-            // Set arguments
+            // Argümanları ayarla
             {
                 let mut a = self.args.lock();
                 for (i, arg) in args.iter().enumerate() {
@@ -851,31 +853,31 @@ impl AmlInterpreter {
                     }
                 }
             }
-            
-            // Reset locals
+
+            // Yerel değişkenleri sıfırla
             {
                 let mut l = self.locals.lock();
                 for i in 0..8 {
                     l[i] = AmlValue::Uninitialized;
                 }
             }
-            
-            // Execute method code
+
+            // Metod kodunu çalıştır
             let result = self.execute(&m.code)?;
-            
+
             let mut stats = self.stats.lock();
             stats.methods_executed += 1;
-            
+
             Ok(result)
         } else {
             Err(AmlError::MethodNotFound)
         }
     }
 
-    /// Evaluate object
+    /// Nesneyi değerlendir
     pub fn evaluate(&self, name: &str) -> Result<AmlValue, AmlError> {
         let obj = self.namespace.get(name);
-        
+
         match obj {
             Some(AmlValue::Method(m)) => self.execute_method(name, &[]),
             Some(v) => Ok(v),
@@ -883,7 +885,7 @@ impl AmlInterpreter {
         }
     }
 
-    /// Get statistics
+    /// İstatistikleri al
     pub fn get_stats(&self) -> AmlStats {
         self.stats.lock().clone()
     }
@@ -894,7 +896,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TİPİ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -910,7 +912,7 @@ pub enum AmlError {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init() {

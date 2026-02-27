@@ -6,7 +6,7 @@
 
 use super::theme::Theme;
 use super::window::Window;
-use super::dock::{Dock, DockAction, DockIcon};
+use super::dock::{Dock, DockAction, DockEvent, DockIcon};
 use super::menu_bar::{MenuBar, MenuBarEvent, MenuAction};
 use super::spotlight::{Spotlight, SpotlightEvent, SpotlightKey};
 use super::apps::finder::FinderWindow;
@@ -18,6 +18,7 @@ use super::apps::activity_monitor::ActivityMonitor;
 use super::apps::font_book::FontBookWindow;
 use super::drag_drop::{DragDropManager, DragData, DragSource, DropEvent};
 use super::clipboard::{ClipboardManager, ClipboardData};
+use super::widgets::Rect;
 use pc_keyboard::KeyCode;
 use crate::gop::framebuffer::Framebuffer;
 use alloc::boxed::Box;
@@ -111,6 +112,19 @@ impl AppWindow {
             AppWindow::Simple(win) => { win.x = x; win.y = y; }
         }
     }
+
+    pub fn set_size(&mut self, width: usize, height: usize) {
+        match self {
+            AppWindow::Finder(app) => { app.rect.width = width as i32; app.rect.height = height as i32; }
+            AppWindow::Browser(app) => { app.rect.width = width as i32; app.rect.height = height as i32; }
+            AppWindow::Terminal(app) => { app.rect.width = width as i32; app.rect.height = height as i32; }
+            AppWindow::Preferences(app) => { app.rect.width = width as i32; app.rect.height = height as i32; }
+            AppWindow::Preview(app) => { app.rect.width = width as i32; app.rect.height = height as i32; }
+            AppWindow::ActivityMonitor(app) => { app.rect.width = width as i32; app.rect.height = height as i32; }
+            AppWindow::FontBook(app) => { app.rect.width = width as i32; app.rect.height = height as i32; }
+            AppWindow::Simple(win) => { win.width = width; win.height = height; }
+        }
+    }
     
     pub fn on_click(&mut self, mx: i32, my: i32) -> bool {
         match self {
@@ -169,11 +183,18 @@ pub struct Desktop {
     // State
     dragging_window_idx: Option<usize>,
     drag_start_offset: (i32, i32),
+    resizing_window_idx: Option<usize>,
+    resize_start_mouse: (i32, i32),
+    resize_start_size: (usize, usize),
+    resize_handle_hover_idx: Option<usize>,
     last_mouse_left: bool,
     active_window_idx: Option<usize>,
     spotlight_open: bool,
     menu_open: bool,
     last_time: f32,
+    window_damage_rects: Vec<Rect>,
+    last_menu_mouse_pos: Option<(i32, i32)>,
+    last_dock_mouse_pos: Option<(i32, i32)>,
 }
 
 impl Desktop {
@@ -191,11 +212,148 @@ impl Desktop {
             clipboard: ClipboardManager::new(),
             dragging_window_idx: None,
             drag_start_offset: (0, 0),
+            resizing_window_idx: None,
+            resize_start_mouse: (0, 0),
+            resize_start_size: (0, 0),
+            resize_handle_hover_idx: None,
             last_mouse_left: false,
             active_window_idx: None,
             spotlight_open: false,
             menu_open: false,
             last_time: 0.0,
+            window_damage_rects: Vec::new(),
+            last_menu_mouse_pos: None,
+            last_dock_mouse_pos: None,
+        }
+    }
+
+    fn add_window_damage(&mut self, rect: Rect) {
+        let mut merged = rect;
+        let mut index = 0;
+        while index < self.window_damage_rects.len() {
+            if merged.intersects(&self.window_damage_rects[index]) {
+                merged = merged.union(&self.window_damage_rects[index]);
+                self.window_damage_rects.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
+        self.window_damage_rects.push(merged);
+    }
+
+    fn add_fullscreen_damage(&mut self) {
+        self.add_window_damage(Rect::new(0, 0, self.width as i32, self.height as i32));
+    }
+
+    fn window_rect_at(&self, idx: usize) -> Option<Rect> {
+        self.app_windows.get(idx).map(|window| {
+            let (x, y, width, height) = window.get_rect();
+            Rect::new(x as i32, y as i32, width as i32, height as i32)
+        })
+    }
+
+    fn remap_index_after_move(index: Option<usize>, from: usize, to: usize) -> Option<usize> {
+        let idx = index?;
+        if idx == from {
+            return Some(to);
+        }
+
+        if from < to {
+            if idx > from && idx <= to {
+                return Some(idx - 1);
+            }
+        } else if from > to && idx >= to && idx < from {
+            return Some(idx + 1);
+        }
+
+        Some(idx)
+    }
+
+    fn remap_index_after_remove(index: Option<usize>, removed: usize) -> Option<usize> {
+        let idx = index?;
+        if idx == removed {
+            return None;
+        }
+        if idx > removed {
+            return Some(idx - 1);
+        }
+        Some(idx)
+    }
+
+    fn bring_window_to_front(&mut self, idx: usize) -> Option<usize> {
+        if idx >= self.app_windows.len() {
+            return None;
+        }
+
+        let top_idx = self.app_windows.len().saturating_sub(1);
+        if idx == top_idx {
+            self.active_window_idx = Some(idx);
+            return Some(idx);
+        }
+
+        let window = self.app_windows.remove(idx);
+        self.app_windows.push(window);
+        let new_idx = self.app_windows.len().saturating_sub(1);
+        self.dragging_window_idx = Self::remap_index_after_move(self.dragging_window_idx, idx, new_idx);
+        self.resizing_window_idx = Self::remap_index_after_move(self.resizing_window_idx, idx, new_idx);
+        self.resize_handle_hover_idx = Self::remap_index_after_move(self.resize_handle_hover_idx, idx, new_idx);
+        self.active_window_idx = Some(new_idx);
+        Some(new_idx)
+    }
+
+    fn is_in_resize_handle(&self, x: i32, y: i32, wx: usize, wy: usize, ww: usize, wh: usize) -> bool {
+        const RESIZE_HANDLE_SIZE: usize = 14;
+
+        if ww < RESIZE_HANDLE_SIZE || wh < RESIZE_HANDLE_SIZE {
+            return false;
+        }
+
+        let handle_x = wx + ww - RESIZE_HANDLE_SIZE;
+        let handle_y = wy + wh - RESIZE_HANDLE_SIZE;
+        x >= handle_x as i32
+            && y >= handle_y as i32
+            && x < (wx + ww) as i32
+            && y < (wy + wh) as i32
+    }
+
+    fn clamp_window_size_for_screen(&self, wx: usize, wy: usize, width: usize, height: usize) -> (usize, usize) {
+        const MIN_WINDOW_WIDTH: usize = 320;
+        const MIN_WINDOW_HEIGHT: usize = 220;
+
+        let max_w = self.width.saturating_sub(wx).max(MIN_WINDOW_WIDTH);
+        let max_h = self.height.saturating_sub(wy).max(MIN_WINDOW_HEIGHT);
+
+        let clamped_w = width.clamp(MIN_WINDOW_WIDTH, max_w);
+        let clamped_h = height.clamp(MIN_WINDOW_HEIGHT, max_h);
+        (clamped_w, clamped_h)
+    }
+
+    fn set_resize_hover_idx(&mut self, new_hover: Option<usize>) -> bool {
+        if self.resize_handle_hover_idx == new_hover {
+            return false;
+        }
+
+        if let Some(prev_idx) = self.resize_handle_hover_idx {
+            if let Some(prev_rect) = self.window_rect_at(prev_idx) {
+                self.add_window_damage(prev_rect);
+            }
+        }
+
+        if let Some(new_idx) = new_hover {
+            if let Some(new_rect) = self.window_rect_at(new_idx) {
+                self.add_window_damage(new_rect);
+            }
+        }
+
+        self.resize_handle_hover_idx = new_hover;
+        true
+    }
+
+    pub fn take_window_damage(&mut self) -> Option<Vec<Rect>> {
+        if self.window_damage_rects.is_empty() {
+            None
+        } else {
+            Some(core::mem::take(&mut self.window_damage_rects))
         }
     }
     
@@ -247,18 +405,35 @@ impl Desktop {
         }
         
         // Set as active
-        self.active_window_idx = Some(self.app_windows.len() - 1);
+        let new_idx = self.app_windows.len() - 1;
+        self.active_window_idx = Some(new_idx);
+        if let Some(new_rect) = self.window_rect_at(new_idx) {
+            self.add_window_damage(new_rect);
+        }
     }
     
     /// Close window by index
     pub fn close_window(&mut self, idx: usize) {
         if idx < self.app_windows.len() {
+            if let Some(closed_rect) = self.window_rect_at(idx) {
+                self.add_window_damage(closed_rect);
+            }
+
             self.app_windows.remove(idx);
-            if self.active_window_idx == Some(idx) {
+            let was_active = self.active_window_idx == Some(idx);
+            self.dragging_window_idx = Self::remap_index_after_remove(self.dragging_window_idx, idx);
+            self.resizing_window_idx = Self::remap_index_after_remove(self.resizing_window_idx, idx);
+            self.resize_handle_hover_idx = Self::remap_index_after_remove(self.resize_handle_hover_idx, idx);
+
+            if was_active {
                 self.active_window_idx = self.app_windows.len().checked_sub(1);
-            } else if let Some(active) = self.active_window_idx {
-                if active > idx {
-                    self.active_window_idx = Some(active - 1);
+            } else {
+                self.active_window_idx = Self::remap_index_after_remove(self.active_window_idx, idx);
+            }
+
+            if let Some(active_idx) = self.active_window_idx {
+                if let Some(active_rect) = self.window_rect_at(active_idx) {
+                    self.add_window_damage(active_rect);
                 }
             }
         }
@@ -334,6 +509,7 @@ impl Desktop {
         
         // 2. Menu Bar kontrolü
         if y >= 0 && y < 25 {
+            self.last_dock_mouse_pos = None;
             if left_down && !self.last_mouse_left {
                 let event = self.menu_bar.on_mouse_down(x, y);
                 match event {
@@ -348,7 +524,14 @@ impl Desktop {
                     _ => {}
                 }
             } else {
-                self.menu_bar.on_mouse_move(x, y);
+                let moved = self.last_menu_mouse_pos != Some((x, y));
+                if moved {
+                    self.last_menu_mouse_pos = Some((x, y));
+                    if !matches!(self.menu_bar.on_mouse_move(x, y), MenuBarEvent::None) {
+                        redraw = true;
+                    }
+                    redraw = true;
+                }
             }
             self.last_mouse_left = left_down;
             return redraw;
@@ -357,9 +540,25 @@ impl Desktop {
         // 3. Dock kontrolü
         let dock_y = self.height - self.dock_height();
         if y >= dock_y as i32 {
+            self.last_menu_mouse_pos = None;
+            // Hover/magnification state update
+            let moved = self.last_dock_mouse_pos != Some((x, y));
+            if moved {
+                self.last_dock_mouse_pos = Some((x, y));
+                if !matches!(self.dock.on_mouse_move(x, y), DockEvent::None) {
+                    redraw = true;
+                }
+                redraw = true;
+            }
+
             if left_down && !self.last_mouse_left {
-                // Dock click
-                if let Some(action) = self.handle_dock_click(x, y) {
+                // Press starts bounce/click state
+                if !matches!(self.dock.on_mouse_down(x, y), DockEvent::None) {
+                    redraw = true;
+                }
+            } else if !left_down && self.last_mouse_left {
+                // Release activates action if still hovering the same item
+                if let DockEvent::ItemActivated(_, _, action) = self.dock.on_mouse_up() {
                     self.handle_dock_action(action);
                     redraw = true;
                 }
@@ -367,6 +566,9 @@ impl Desktop {
             self.last_mouse_left = left_down;
             return redraw;
         }
+
+        self.last_menu_mouse_pos = None;
+        self.last_dock_mouse_pos = None;
         
         let just_pressed = left_down && !self.last_mouse_left;
         let just_released = !left_down && self.last_mouse_left;
@@ -374,24 +576,53 @@ impl Desktop {
         // 4. Bırakma (Release)
         if just_released {
             self.dragging_window_idx = None;
+            self.resizing_window_idx = None;
         }
 
-        // 5. Sürükleme (Dragging)
-        if let Some(idx) = self.dragging_window_idx {
+        // 5. Resize (bottom-right handle)
+        if let Some(idx) = self.resizing_window_idx {
             if left_down {
-                let (win_x, win_y, _, _) = self.app_windows[idx].get_rect();
-                let new_x = (x - self.drag_start_offset.0).max(0) as usize;
-                let new_y = (y - self.drag_start_offset.1).max(25) as usize; // Below menu bar
+                let (win_x, win_y, win_w, win_h) = self.app_windows[idx].get_rect();
+                let dx = x - self.resize_start_mouse.0;
+                let dy = y - self.resize_start_mouse.1;
+
+                let target_w = ((self.resize_start_size.0 as i32) + dx).max(1) as usize;
+                let target_h = ((self.resize_start_size.1 as i32) + dy).max(1) as usize;
+                let (new_w, new_h) = self.clamp_window_size_for_screen(win_x, win_y, target_w, target_h);
+
+                if win_w != new_w || win_h != new_h {
+                    let old_rect = Rect::new(win_x as i32, win_y as i32, win_w as i32, win_h as i32);
+                    self.app_windows[idx].set_size(new_w, new_h);
+                    let new_rect = Rect::new(win_x as i32, win_y as i32, new_w as i32, new_h as i32);
+                    self.add_window_damage(old_rect.union(&new_rect));
+                    redraw = true;
+                }
+            } else {
+                self.resizing_window_idx = None;
+            }
+        }
+        // 6. Sürükleme (Dragging)
+        else if let Some(idx) = self.dragging_window_idx {
+            if left_down {
+                let (win_x, win_y, win_w, win_h) = self.app_windows[idx].get_rect();
+                let max_x = self.width.saturating_sub(win_w);
+                let min_y = 25usize;
+                let max_y = self.height.saturating_sub(win_h).max(min_y);
+                let new_x = (x - self.drag_start_offset.0).clamp(0, max_x as i32) as usize;
+                let new_y = (y - self.drag_start_offset.1).clamp(min_y as i32, max_y as i32) as usize;
 
                 if win_x != new_x || win_y != new_y {
+                    let old_rect = Rect::new(win_x as i32, win_y as i32, win_w as i32, win_h as i32);
                     self.app_windows[idx].set_position(new_x, new_y);
+                    let new_rect = Rect::new(new_x as i32, new_y as i32, win_w as i32, win_h as i32);
+                    self.add_window_damage(old_rect.union(&new_rect));
                     redraw = true;
                 }
             } else {
                 self.dragging_window_idx = None;
             }
         }
-        // 6. Yeni Tıklama (Click / Drag Start / Focus)
+        // 7. Yeni Tıklama (Click / Drag Start / Resize / Focus)
         else if just_pressed {
             // Pencereleri sondan başa (üstten alta) kontrol et
             let mut hit_idx = None;
@@ -406,42 +637,65 @@ impl Desktop {
 
             if let Some(idx) = hit_idx {
                 // Pencereyi en öne getir
-                let (wx, wy, _, _) = self.app_windows[idx].get_rect();
+                let clicked_rect = self.window_rect_at(idx);
                 let titlebar_height = 28; // Default titlebar height
-                
-                // Aktiflik durumunu güncelle
-                self.active_window_idx = Some(idx);
+                let prev_active = self.active_window_idx;
+                let active_idx = self.bring_window_to_front(idx).unwrap_or(idx);
+                let (wx, wy, ww, wh) = self.app_windows[active_idx].get_rect();
+                let _ = self.set_resize_hover_idx(None);
+
+                if prev_active != self.active_window_idx {
+                    if let Some(prev_idx) = prev_active {
+                        if let Some(prev_rect) = self.window_rect_at(prev_idx) {
+                            self.add_window_damage(prev_rect);
+                        }
+                    }
+                    if let Some(curr_rect) = clicked_rect {
+                        self.add_window_damage(curr_rect);
+                    }
+                }
                 
                 // Titlebar'dan sürükleme başlat
                 if y >= wy as i32 && y < (wy + titlebar_height) as i32 {
-                    self.dragging_window_idx = Some(idx);
+                    self.dragging_window_idx = Some(active_idx);
                     self.drag_start_offset = (x - wx as i32, y - wy as i32);
+                } else if self.is_in_resize_handle(x, y, wx, wy, ww, wh) {
+                    self.resizing_window_idx = Some(active_idx);
+                    self.resize_start_mouse = (x, y);
+                    self.resize_start_size = (ww, wh);
+                    let _ = self.set_resize_hover_idx(Some(active_idx));
                 } else {
                     // İçerik tıklaması
-                    self.app_windows[idx].on_click(x, y);
+                    self.app_windows[active_idx].on_click(x, y);
                 }
                 
                 redraw = true;
             }
         }
 
+        if self.dragging_window_idx.is_none() && self.resizing_window_idx.is_none() {
+            let mut hovered_resize: Option<usize> = None;
+            for (i, window) in self.app_windows.iter().enumerate().rev() {
+                let (wx, wy, ww, wh) = window.get_rect();
+                let in_window = x >= wx as i32
+                    && x < (wx + ww) as i32
+                    && y >= wy as i32
+                    && y < (wy + wh) as i32;
+                if in_window {
+                    if self.is_in_resize_handle(x, y, wx, wy, ww, wh) {
+                        hovered_resize = Some(i);
+                    }
+                    break;
+                }
+            }
+
+            if self.set_resize_hover_idx(hovered_resize) {
+                redraw = true;
+            }
+        }
+
         self.last_mouse_left = left_down;
         redraw
-    }
-    
-    /// Handle dock click
-    fn handle_dock_click(&mut self, mx: i32, _my: i32) -> Option<DockAction> {
-        let total_width = self.dock.items.len() * (48 + 8) + 8 * 2;
-        let dock_x = (self.width - total_width) / 2;
-        
-        let mut item_x = dock_x + 8;
-        for item in &self.dock.items {
-            if mx >= item_x as i32 && mx < (item_x + 48) as i32 {
-                return Some(item.action.clone());
-            }
-            item_x += 48 + 8;
-        }
-        None
     }
     
     /// Handle dock action
@@ -453,6 +707,7 @@ impl Desktop {
             DockAction::ShowLaunchpad => {
                 self.spotlight.show();
                 self.spotlight_open = true;
+                self.add_fullscreen_damage();
             }
             DockAction::OpenFolder(path) => {
                 self.launch_app("finder");
@@ -486,6 +741,7 @@ impl Desktop {
             super::menu_bar::RightItemAction::OpenSpotlight => {
                 self.spotlight.show();
                 self.spotlight_open = true;
+                self.add_fullscreen_damage();
             }
             super::menu_bar::RightItemAction::OpenControlCenter => {
                 self.launch_app("settings");
@@ -518,10 +774,12 @@ impl Desktop {
                         _ => {}
                     }
                     self.spotlight_open = false;
+                    self.add_fullscreen_damage();
                     return true;
                 }
                 SpotlightEvent::Cancelled => {
                     self.spotlight_open = false;
+                    self.add_fullscreen_damage();
                     return true;
                 }
                 _ => return true,
@@ -538,6 +796,9 @@ impl Desktop {
             } else {
                 self.app_windows[idx].on_key(c);
             }
+            if let Some(active_rect) = self.window_rect_at(idx) {
+                self.add_window_damage(active_rect);
+            }
             return true;
         }
         
@@ -551,6 +812,7 @@ impl Desktop {
             if !self.spotlight_open {
                 self.spotlight.show();
                 self.spotlight_open = true;
+                self.add_fullscreen_damage();
                 return true;
             }
         }
@@ -572,10 +834,12 @@ impl Desktop {
                         self.launch_app(&app_id);
                     }
                     self.spotlight_open = false;
+                    self.add_fullscreen_damage();
                     return true;
                 }
                 SpotlightEvent::Cancelled => {
                     self.spotlight_open = false;
+                    self.add_fullscreen_damage();
                     return true;
                 }
                 _ => return true,
@@ -588,16 +852,41 @@ impl Desktop {
     /// Update desktop state
     pub fn update(&mut self, dt: f32) -> bool {
         let mut needs_redraw = false;
+
+        let old_rects: Vec<(usize, Rect)> = self.app_windows
+            .iter()
+            .enumerate()
+            .map(|(idx, window)| {
+                let (x, y, width, height) = window.get_rect();
+                (idx, Rect::new(x as i32, y as i32, width as i32, height as i32))
+            })
+            .collect();
         
         // Update dock animation
-        self.dock.update(dt);
+        needs_redraw |= self.dock.update(dt);
         
         // Update spotlight animation
         self.spotlight.update(dt);
+        if self.spotlight.needs_redraw() {
+            needs_redraw = true;
+        }
         
         // Update app windows
         for window in &mut self.app_windows {
             window.update(dt);
+        }
+
+        for (idx, old_rect) in old_rects {
+            if let Some(new_rect) = self.window_rect_at(idx) {
+                let rect_changed = old_rect.x != new_rect.x
+                    || old_rect.y != new_rect.y
+                    || old_rect.width != new_rect.width
+                    || old_rect.height != new_rect.height;
+                if rect_changed {
+                    self.add_window_damage(old_rect.union(&new_rect));
+                    needs_redraw = true;
+                }
+            }
         }
         
         // Update drag & drop
@@ -630,12 +919,20 @@ impl Desktop {
     pub fn active_window(&self) -> Option<&AppWindow> {
         self.active_window_idx.and_then(|idx| self.app_windows.get(idx))
     }
+
+    pub fn active_window_rect(&self) -> Option<Rect> {
+        self.active_window_idx.and_then(|idx| self.window_rect_at(idx))
+    }
 }
 
 /// Run desktop main loop (standalone function)
 pub fn run(fb: &mut Framebuffer) -> ! {
     let width = fb.width;
     let height = fb.height;
+    
+    // Enable double buffering for smooth rendering
+    fb.enable_double_buffering();
+    
     let mut desktop = Desktop::new(width, height);
     
     // Launch default apps
@@ -643,20 +940,104 @@ pub fn run(fb: &mut Framebuffer) -> ! {
     
     crate::serial_println!("[GUI] Desktop initialized ({}x{}), entering main loop", width, height);
     
+    // Initialize PS/2 keyboard and mouse
+    crate::drivers::ps2::init();
+    crate::drivers::mouse::init();
+    crate::keyboard::mark_tty_ready();
+    
     let mut frame_count = 0u32;
+    let mut last_frame_time = 0u64;
+    const TARGET_FPS: u64 = 60;
+    const FRAME_TIME_US: u64 = 1_000_000 / TARGET_FPS; // ~16.67ms per frame
+    
     loop {
+        // Get current time (simple tick counter for now)
+        let current_time = unsafe { 
+            // Read TSC as rough time source
+            let mut tsc: u64;
+            core::arch::asm!("rdtsc", out("rax") tsc, options(nomem, nostack));
+            tsc
+        };
+        
+        // Frame rate limiting - skip if too soon
+        // Note: TSC frequency varies, this is approximate
+        let elapsed = current_time.wrapping_sub(last_frame_time);
+        if frame_count > 0 && elapsed < 500_000 { // Rough ~60fps on typical CPU
+            // Process input but skip render
+            // Process keyboard input
+            while let Some(key) = crate::keyboard::read_key() {
+                match key {
+                    pc_keyboard::DecodedKey::Unicode(c) => {
+                        desktop.on_key(c);
+                    }
+                    pc_keyboard::DecodedKey::RawKey(kc) => {
+                        desktop.on_special_key(kc);
+                    }
+                }
+            }
+            
+            // Process mouse input
+            while let Some(event) = crate::drivers::input::pop_event() {
+                if let crate::drivers::input::InputEvent::MouseByte(byte) = event {
+                    crate::drivers::mouse::handle_packet(byte);
+                }
+            }
+            continue;
+        }
+        last_frame_time = current_time;
+        
+        // Process keyboard input
+        while let Some(key) = crate::keyboard::read_key() {
+            match key {
+                pc_keyboard::DecodedKey::Unicode(c) => {
+                    desktop.on_key(c);
+                }
+                pc_keyboard::DecodedKey::RawKey(kc) => {
+                    desktop.on_special_key(kc);
+                }
+            }
+        }
+        
+        // Process mouse input from interrupt queue
+        while let Some(event) = crate::drivers::input::pop_event() {
+            match event {
+                crate::drivers::input::InputEvent::MouseByte(byte) => {
+                    // Process raw mouse byte
+                    crate::drivers::mouse::handle_packet(byte);
+                }
+                crate::drivers::input::InputEvent::Mouse(packet) => {
+                    // Already processed packet
+                }
+                _ => {}
+            }
+        }
+        
+        // Get mouse position and buttons
+        let (mx, my) = crate::drivers::mouse::get_position();
+        let buttons = crate::drivers::mouse::get_buttons();
+        
+        // Handle mouse click
+        static mut LAST_CLICK: bool = false;
+        unsafe {
+            if buttons.left && !LAST_CLICK {
+                desktop.on_click(mx, my);
+            }
+            LAST_CLICK = buttons.left;
+        }
+        
         // Draw desktop
         desktop.draw(fb);
         
-        frame_count += 1;
-        if frame_count % 1000 == 0 {
-            // Log every 1000 frames to confirm loop is running
-            crate::serial_println!("[GUI] Frame {}", frame_count);
-        }
+        // Draw mouse cursor on top
+        crate::gui::cursor::draw(fb);
         
-        // Small delay
-        for _ in 0..100000 {
-            unsafe { core::arch::asm!("nop", options(nomem, nostack)); }
+        // Swap back buffer to front buffer (double buffering)
+        fb.swap_buffers();
+        
+        frame_count += 1;
+        if frame_count % 60 == 0 {
+            // Log every 60 frames (~1 second at 60fps)
+            crate::serial_println!("[GUI] Frame {} mouse=({},{})", frame_count, mx, my);
         }
     }
 }

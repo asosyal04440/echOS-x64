@@ -55,9 +55,23 @@ pub fn set_global_framebuffer(fb: Framebuffer) {
     *GLOBAL_FRAMEBUFFER.lock() = Some(fb);
 }
 
-/// Global framebuffer'a erişim
-pub fn get_global_framebuffer() -> Option<Framebuffer> {
-    GLOBAL_FRAMEBUFFER.lock().clone()
+/// Global framebuffer'a erişim (mutable guard)
+pub fn get_global_framebuffer() -> spin::MutexGuard<'static, Option<Framebuffer>> {
+    GLOBAL_FRAMEBUFFER.lock()
+}
+
+/// Global framebuffer'a erişim (immutable reference helper)
+pub fn with_framebuffer<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut Framebuffer) -> R,
+{
+    let mut guard = GLOBAL_FRAMEBUFFER.lock();
+    if let Some(ref mut fb) = *guard {
+        f(fb)
+    } else {
+        // Framebuffer yoksa hata fırlat
+        panic!("No framebuffer available");
+    }
 }
 
 /// Framebuffer'a thread-safe yazı yaz
@@ -103,7 +117,7 @@ pub fn term_print(s: &str) {
                     }
                     
                     if cursor_y > max_y {
-                        // Scroll up
+                        // Ekranı yukarı kaydır
                         fb.scroll_up(char_height);
                         cursor_y = max_y.saturating_sub(char_height) + 1;
                         // Yeni satırı temizle

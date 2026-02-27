@@ -56,11 +56,11 @@ pub struct PerCpuData {
     pub apic_id: u32,
     /// Çalışan task sayısı
     pub task_count: u32,
-    /// Load average (0-100)
+    /// Yük ortalaması (0-100)
     pub load: u32,
     /// Online durumu
     pub online: bool,
-    /// Stack pointer
+    /// Yığıt işaretiçisi
     pub stack_top: u64,
     pub dma_domain: u32,
     /// Cache-line padding (false sharing önlemek için)
@@ -76,7 +76,7 @@ pub struct SmpState {
     /// APIC base adresi
     pub apic_base: u64,
     pub apic_virt: u64,
-    /// Per-CPU data array
+    /// CPU başına veri dizisi
     pub per_cpu_data: Vec<&'static mut PerCpuData>,
     pub syscall_cpu_data: Vec<&'static mut crate::syscall::CpuData>,
     pub syscall_stacks: Vec<&'static mut [u8]>,
@@ -85,11 +85,11 @@ pub struct SmpState {
     pub ap_started: Vec<AtomicBool>,
 }
 
-/// Get current CPU ID
+/// Mevcut CPU kimliğini döndürür
 pub fn get_current_cpu_id() -> u32 {
-    // Read from GS base (set by per-CPU data)
-    // For BSP, returns 0
-    // For APs, returns their CPU ID
+    // GS tabanından oku (per-CPU verisi tarafından ayarlanır)
+    // BSP için 0 döndürür
+    // AP'ler için kendi CPU kimliğini döndürür
     unsafe {
         let cpu_id: u32;
         core::arch::asm!("mov {0}, gs:0", out(reg) cpu_id, options(nostack, pure, readonly));
@@ -97,12 +97,12 @@ pub fn get_current_cpu_id() -> u32 {
     }
 }
 
-/// Get online CPU count
+/// Çevrimiiçi CPU sayısını döndürür
 pub fn online_cpu_count() -> u32 {
     SMP_STATE.lock().online_cpus.load(Ordering::SeqCst)
 }
 
-/// Get total CPU count (including offline)
+/// Toplam CPU sayısını döndürür (çevrimdışı dahil)
 pub fn total_cpu_count() -> u32 {
     SMP_STATE.lock().cpu_count
 }
@@ -168,17 +168,17 @@ unsafe fn load_ap_startup_code() {
         dest_ptr as u64
     );
 
-    // Debug: Dump source code
+    // Hata ayıklama: Kaynak kodu dök (AP startup baytlarını kopyalama öncesi doğrula)
             let src_slice = core::slice::from_raw_parts(src_ptr, 128);
             crate::serial_println!("SMP: Source code (128 bytes): {:02x?}", src_slice);
 
             core::ptr::copy_nonoverlapping(src_ptr, dest_ptr, size);
 
-            // Debug: Dump dest code
+            // Hata ayıklama: Hedef kodu dök (kopyalamanın doğru gerçekleştiğini doğrula)
             let dest_slice = core::slice::from_raw_parts(dest_ptr, 128);
             crate::serial_println!("SMP: Dest code (128 bytes): {:02x?}", dest_slice);
 
-    // Ensure memory visibility
+    // Bellek görünürlüğünü garantile
     core::sync::atomic::fence(Ordering::SeqCst);
 
     crate::serial_println!("SMP: AP startup code copied");
@@ -205,34 +205,34 @@ unsafe fn load_ap_startup_code() {
 unsafe fn prepare_ap_startup_data(stack_top: u64, cpu_data: u64) {
     let data = &mut *ap_startup_data_ptr();
 
-    // Get PML4 physical address
+    // PML4 fiziksel adresini al
     let mut pml4_phys = crate::memory::KERNEL_PML4_PHYS;
     if pml4_phys == 0 {
         let (pml4_frame, _) = Cr3::read();
         pml4_phys = pml4_frame.start_address().as_u64();
     }
 
-    // Convert ap_entry virtual address to HHDM address
-    // In UEFI mode, the kernel is loaded by UEFI at a physical address and may be identity-mapped
-    // or mapped at a low virtual address. We need to convert this to an HHDM virtual address
-    // that the AP can access after enabling paging with the kernel PML4.
+    // ap_entry sanal adresini HHDM adresine çevir
+    // UEFI modunda çekirdek, UEFI tarafından fiziksel bir adrese yüklenir ve kimlik eşlenmiş
+    // veya düşk bir sanal adrese haritalanmış olabilir. AP'nin çekirdek PML4 ile
+    // sayfalama aktifleştirildikten sonra erişebileceği HHDM sanal adresine çevirmemiz gerekir.
     //
-    // For UEFI, the kernel is typically loaded at a low physical address (e.g., 0x7d461ff0),
-    // and the function pointer we get is already at that address (not in higher half).
-    // We can use this address directly as the physical address and convert to HHDM.
-    // In echOS, the kernel's `.text` section is mapped as executable.
-    // However, the entire HHDM (Higher Half Direct Mapping) is explicitly mapped with
-    // the NX (No-Execute) bit set for security.
-    // If we pass the HHDM address to the AP, it will immediately triple-fault upon `call rax`.
-    // We MUST pass the original virtual address of `ap_entry` which resides in the `.text` section.
+    // UEFI için çekirdek tipik olarak düşk bir fiziksel adrese yüklenir (orn. 0x7d461ff0)
+    // ve elde ettiğimiz fonksiyon işareti zaten o adreste (yüksek yarıda değil).
+    // Bu adresi doğrudan fiziksel adres olarak kullanabilir ve HHDM'e çevirebiliriz.
+    // echOS'ta çekirdek `.text` bölümü çalıştırılabilir olarak haritalanmıştır.
+    // Ancak tüm HHDM (Yüksek Yarı Doğrudan Eşleme) güvenlik için NX (No-Execute)
+    // biti ayarlanarak açıkça haritalanmıştır.
+    // AP'ye HHDM adresini geçersek `call rax` anında üçlü hata oluşur.
+    // AP'nin çalıştime erimi içinde bulunan `ap_entry`nin gerçek sanal adresini geçmeliyiz.
     let entry_virtual = crate::cpu::ap::ap_entry as *const () as u64;
 
     data.pml4_phys = pml4_phys;
-    data.entry = entry_virtual;  // Store the true executable virtual address
+    data.entry = entry_virtual;  // Gerçek çalıştırılabilir sanal adresi sakla
     data.stack_top = stack_top;
     data.cpu_data = cpu_data;
 
-    // Read values into local variables to avoid alignment issues
+    // packed struct hizalama sorunlarından kaçınmak için değerleri yerel değişkenlere oku
     let pml4 = data.pml4_phys;
     let entry = data.entry;
     let stack = data.stack_top;
@@ -309,10 +309,10 @@ unsafe fn send_ipi(dest_apic_id: u32, delivery_mode: u32, vector: u32) {
         }
         return;
     }
-    // ICR_HIGH: destination APIC ID
+    // ICR_HIGH: hedef APIC kimliği
     write_apic_reg(APIC_ICR_HIGH, dest_apic_id << 24);
 
-    // ICR_LOW: delivery mode + vector
+    // ICR_LOW: teslim modu + vektör
     let icr_low = delivery_mode | vector;
     write_apic_reg(APIC_ICR_LOW, icr_low);
 
@@ -464,7 +464,7 @@ pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
         .saturating_add(1);
     prepare_ap_startup_data(stack_top, cpu_data);
 
-    // Send INIT-SIPI-SIPI sequence with retries
+    // INIT-SIPI-SIPI dizisini yeniden deneme ile gönder
     const MAX_RETRIES: u32 = 3;
     
     for attempt in 0..MAX_RETRIES {
@@ -472,7 +472,7 @@ pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
             crate::serial_println!("SMP: Retry attempt {} for AP {}", attempt, cpu_id);
         }
         
-        // Send INIT
+        // INIT gönder
         send_ipi(
             apic_id,
             APIC_DELIVERY_INIT | APIC_LEVEL_ASSERT | APIC_TRIGGER_LEVEL,
@@ -485,17 +485,17 @@ pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
         crate::serial_println!("SMP: INIT deassert sent to AP {}", cpu_id);
         delay_ms(1);
 
-        // Send first SIPI
+        // Birinci SIPI'yi gönder
         send_ipi(apic_id, APIC_DELIVERY_STARTUP, AP_STARTUP_SEGMENT as u32);
         crate::serial_println!("SMP: SIPI 1 sent to AP {}", cpu_id);
         delay_us(200);
 
-        // Send second SIPI
+        // İkinci SIPI'yi gönder
         send_ipi(apic_id, APIC_DELIVERY_STARTUP, AP_STARTUP_SEGMENT as u32);
         crate::serial_println!("SMP: SIPI 2 sent to AP {}", cpu_id);
         delay_us(200);
 
-        // Wait for AP to come online
+        // AP'nin çevrimiiçi olmasını bekle
         if wait_for_online(target_online) {
             crate::serial_println!("SMP: AP {} successfully started on attempt {}", cpu_id, attempt + 1);
             // State zaten mark_cpu_online'da ONLINE olarak ayarlanacak
@@ -512,7 +512,7 @@ pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
 
 /// AP başladı mı kontrol et (timeout ile)
 fn wait_for_online(target_online: u32) -> bool {
-    // Increased timeout significantly. AP boot does memory allocations, console output, etc.
+    // Zaman aşımı önemli ölçüde artırıldı. AP başlatılması bellek tahsisi, konsol çıktısı vb. yapar.
     const MAX_SPIN_ITERATIONS: u32 = 500;
     
     x86_64::instructions::interrupts::without_interrupts(|| {
@@ -559,19 +559,19 @@ pub fn mark_cpu_online(cpu_id: u32, apic_id: u32) {
 
 /// Tüm AP'leri başlat
 pub fn startup_all_aps() {
-    // BSP per-cpu setup - call separate function to ensure stack switch
-    // occurs in a different stack frame from the AP initialization loop
+    // BSP per-cpu kurulumu - yığıt geçişinin AP başlatma döngüsünden
+    // farklı bir yığıt çerçevesinde gerçekleşmesini sağlamak için ayrı fonksiyon çağır
     initialize_bsp_per_cpu();
     
-    // CRITICAL: After stack switch, we MUST re-read cpu_count from SMP_STATE
-    // because the stack switch invalidates any local variables from before
+    // KRİTİK: Yığıt geçişinden sonra SMP_STATE'ten cpu_count'u YENİDEN OKUMAMIZ GEREKIYOR
+    // çünkü yığıt geçişi önceki yerel değişkenleri geçersiz kılar
     prepare_ap_per_cpu_data();
 
-    // Initialize scheduler
+    // Zamanlayıcıyı başlat
     let cpu_count_for_scheduler = SMP_STATE.lock().cpu_count;
     crate::task::scheduler::update_cpu_count(cpu_count_for_scheduler);
 
-    // Early return for single CPU
+    // Tek CPU için erken dönüş
     if cpu_count_for_scheduler <= 1 {
         crate::serial_println!("SMP: startup_all_aps cpu_count={}", cpu_count_for_scheduler);
         crate::serial_println!("SMP: {}/{} CPUs online", 
@@ -580,7 +580,7 @@ pub fn startup_all_aps() {
         return;
     }
 
-    // Load AP startup code
+    // AP başlatma kodunu yükle
     crate::serial_println!("SMP: startup_all_aps cpu_count={}", cpu_count_for_scheduler);
     crate::serial_println!("SMP: loading AP startup code");
     unsafe {
@@ -588,16 +588,16 @@ pub fn startup_all_aps() {
     }
     crate::serial_println!("SMP: AP startup code ready");
 
-    // Parallel or sequential AP startup based on configuration
+    // Yapılandırmaya göre paralel veya sıralı AP başlatma
     let mut successful_aps = 0;
     let mut failed_aps = 0;
     
     if CPU_STATES.is_parallel_bringup() && cpu_count_for_scheduler > 2 {
-        // PARALLEL BRINGUP: Start multiple APs simultaneously
+        // PARALEİL BRINGUP: Birden fazla AP'yi aynı anda başlat
         crate::serial_println!("SMP: Using PARALLEL bringup mode");
         successful_aps = parallel_startup_aps(cpu_count_for_scheduler);
     } else {
-        // SEQUENTIAL BRINGUP: Start APs one by one (traditional)
+        // SıRALI BRINGUP: AP'leri birer birer başlat (geleneksel yöntem)
         crate::serial_println!("SMP: Using SEQUENTIAL bringup mode");
         for cpu_id in 1..cpu_count_for_scheduler {
             let apic_id = SMP_STATE
@@ -632,17 +632,18 @@ pub fn startup_all_aps() {
         crate::serial_println!("SMP: System will continue with {} CPU(s)", final_online);
     }
     
-    // REMOVED BSP STACK SWITCH: Overwriting the stack pointer here destroys the return address to kernel_main!
-    // The BSP will continue to use the stack provided by UEFI.
+    // BSP YIĞIT GEÇİŞİ KALDIRILDI: Burada yığıt işaretçisinin üzerine yazmak
+    // kernel_main'e dönüş adresini yok eder!
+    // BSP, UEFI tarafından sağlanan yığıtı kullanmaya devam edecek.
 }
 
-/// Parallel AP startup - birden fazla AP'yi aynı anda başlat
+/// Paralel AP başlatma - birden fazla AP'yi aynı anda başlat
 /// Linux kernel parallel bringup benzeri implementasyon
 fn parallel_startup_aps(cpu_count: u32) -> u32 {
     use core::sync::atomic::AtomicU32;
     
     // Batch size: aynı anda kaç AP başlatılacak
-    // Intel recommends max 4 parallel SIPIs
+    // Intel en fazla 4 paralel SIPI önerir
     const BATCH_SIZE: u32 = 4;
     
     let mut successful = 0u32;
@@ -755,8 +756,8 @@ fn wait_for_batch_online(target_online: u32, batch_size: u32) -> u32 {
     }
 }
 
-/// Allocate stack from physical memory (bypass TLSF to avoid heap corruption)
-/// Uses global memory manager for frame allocation
+/// Fiziksel bellekten yığıt ayırır (yığın bozulmasını önlemek için TLSF atlanır)
+/// Global bellek yöneticisi çerçeve tahsisi için kullanılır
 unsafe fn allocate_stack_phys() -> Option<(&'static mut [u8], u64)> {
     let stack_size = crate::syscall::SYSCALL_STACK_SIZE;
     let frame_size = 4096u64;
@@ -764,24 +765,24 @@ unsafe fn allocate_stack_phys() -> Option<(&'static mut [u8], u64)> {
     
     crate::serial_println!("SMP: Allocating {} bytes ({} frames) from physical memory", stack_size, frames_needed);
     
-    // Allocate contiguous frames using global memory manager
+    // Global bellek yöneticisini kullanarak bitişik çerçeveler tahsis et
     let mm = crate::memory::global_memory_manager_mut()?;
     let start_frame = mm.allocate_contiguous_frames(frames_needed)?;
     let phys_start = start_frame.start_address().as_u64();
     
     crate::serial_println!("SMP: Allocated contiguous physical memory at {:#x}", phys_start);
     
-    // Map via HHDM
+    // HHDM üzerinden eşle
     let hhdm = crate::memory::active_physical_offset();
     let virt_start = phys_start + hhdm;
     
-    // Zero the memory
+    // Belleği sıfırla
     core::ptr::write_bytes(virt_start as *mut u8, 0, stack_size);
     
     let stack_ptr = virt_start as *mut u8;
     let stack_slice = core::slice::from_raw_parts_mut(stack_ptr, stack_size);
     
-    // Calculate aligned stack top
+    // Hizalanmış yığıt üstünü hesapla
     let mut stack_top = virt_start + stack_size as u64;
     stack_top &= !0xFu64;
     
@@ -790,31 +791,31 @@ unsafe fn allocate_stack_phys() -> Option<(&'static mut [u8], u64)> {
     Some((stack_slice, stack_top))
 }
 
-/// Allocate a small struct from physical memory (bypass TLSF)
-/// Returns a mutable reference to the allocated memory
+/// Fiziksel bellekten küçük bir yapı ayırır (TLSF atlanır)
+/// Ayrılan belleğe değiştirilebilir bir referans döndürür
 unsafe fn allocate_struct_phys<T>() -> Option<&'static mut T> {
     let align = core::mem::align_of::<T>() as u64;
     
-    // Allocate one frame (4096 bytes) - more than enough for any struct
+    // Bir çerçeve tahsis et (4096 bayt) - herhangi bir yapı için fazlasıyla yeterli
     let mm = crate::memory::global_memory_manager_mut()?;
     let frame = mm.allocate_contiguous_frames(1)?;
     let phys = frame.start_address().as_u64();
     
-    // Map via HHDM
+    // HHDM üzerinden eşle
     let hhdm = crate::memory::active_physical_offset();
     let virt = phys + hhdm;
     
-    // Zero the memory
+    // Belleği sıfırla
     core::ptr::write_bytes(virt as *mut u8, 0, 4096);
     
-    // Ensure alignment
+    // Hizalamayı sağla
     let aligned_virt = (virt + (align - 1)) & !(align - 1);
     
     Some(&mut *(aligned_virt as *mut T))
 }
 
-/// Prepare per-CPU data structures for all APs
-/// Using physical memory for ALL allocations to avoid TLSF corruption
+/// Tüm AP'ler için CPU başına veri yapılarını hazırlar
+/// TLSF bozulmasını önlemek için tüm tahsisler için fiziksel bellek kullanılır
 fn prepare_ap_per_cpu_data() {
     crate::serial_println!("SMP: About to read cpu_count");
     let cpu_count = SMP_STATE.lock().cpu_count;
@@ -828,7 +829,7 @@ fn prepare_ap_per_cpu_data() {
             .copied()
             .unwrap_or(cpu_id);
         
-        // Allocate stack from physical memory (bypass TLSF)
+        // Fiziksel bellekten yığıt ayır (TLSF atlanır)
         let (stack, stack_top) = unsafe {
             match allocate_stack_phys() {
                 Some(s) => s,
@@ -841,7 +842,7 @@ fn prepare_ap_per_cpu_data() {
         
         crate::serial_println!("SMP: cpu_id {} stack_top = {:#x}", cpu_id, stack_top);
         
-        // Allocate CpuData from physical memory (bypass TLSF)
+        // Fiziksel bellekten CpuData ayır (TLSF atlanır)
         let cpu_data = unsafe {
             match allocate_struct_phys::<crate::syscall::CpuData>() {
                 Some(d) => {
@@ -862,7 +863,7 @@ fn prepare_ap_per_cpu_data() {
         
         crate::serial_println!("SMP: cpu_id {} allocated CpuData at {:#x}", cpu_id, cpu_data as *const _ as u64);
         
-        // Allocate PerCpuData from physical memory (bypass TLSF)
+        // Fiziksel bellekten PerCpuData ayır (TLSF atlanır)
         let per_cpu = unsafe {
             match allocate_struct_phys::<PerCpuData>() {
                 Some(d) => {
@@ -892,8 +893,8 @@ fn prepare_ap_per_cpu_data() {
     }
     crate::serial_println!("SMP: AP per-cpu data preparation complete");
 }
-/// Initialize BSP (Bootstrap Processor) per-CPU data structures
-/// Using physical memory for ALL allocations to avoid TLSF corruption
+/// BSP (Bootstrap Processor) için CPU başına veri yapılarını başlatır
+/// TLSF bozulmasını önlemek için tüm tahsisler için fiziksel bellek kullanılır
 fn initialize_bsp_per_cpu() {
     crate::serial_println!("SMP: BSP per-cpu setup begin");
     let need_setup = SMP_STATE.lock().per_cpu_data.is_empty();
@@ -901,7 +902,7 @@ fn initialize_bsp_per_cpu() {
     if need_setup {
         let bsp_apic_id = SMP_STATE.lock().cpu_apic_ids.get(0).copied().unwrap_or(0);
 
-        // Allocate PerCpuData from physical memory (bypass TLSF)
+        // Fiziksel bellekten PerCpuData ayır (TLSF atlanır)
         let per_cpu = unsafe {
             match allocate_struct_phys::<PerCpuData>() {
                 Some(d) => {
@@ -922,7 +923,7 @@ fn initialize_bsp_per_cpu() {
             }
         };
 
-        // Allocate stack from physical memory (bypass TLSF)
+        // Fiziksel bellekten yığıt ayır (TLSF atlanır)
         let (stack, stack_top) = unsafe {
             match allocate_stack_phys() {
                 Some(s) => s,
@@ -933,7 +934,7 @@ fn initialize_bsp_per_cpu() {
             }
         };
 
-        // Allocate CpuData from physical memory (bypass TLSF)
+        // Fiziksel bellekten CpuData ayır (TLSF atlanır)
         let cpu_data = unsafe {
             match allocate_struct_phys::<crate::syscall::CpuData>() {
                 Some(d) => {
@@ -964,7 +965,7 @@ fn initialize_bsp_per_cpu() {
             state.syscall_stacks.push(stack);
         }
 
-        // syscall init
+        // syscall başlat
         unsafe {
             crate::syscall::init_cpu_data(cpu_data_ptr);
         }
@@ -1006,7 +1007,7 @@ pub fn balance_load() {
         return; // SMP yok
     }
 
-    // Load statistics
+    // Yük istatistikleri
     let mut total_load: u32 = 0;
     let mut max_load: u32 = 0;
     let mut min_load: u32 = u32::MAX;
@@ -1061,7 +1062,7 @@ pub fn balance_load() {
         }
     }
     
-    // Load average güncelle (exponential moving average)
+    // Yük ortalamasını güncelle (exponential moving average)
     update_load_average(loads, load_count);
 }
 
@@ -1088,7 +1089,7 @@ fn update_load_average(loads: [(u32, u32); 256], count: usize) {
         let (cpu_id, load) = loads[i];
         let idx = cpu_id as usize;
         if idx < 256 {
-            // Exponential moving average: new = 0.9 * old + 0.1 * current
+            // Exponential moving average: yeni = 0.9 * eski + 0.1 * güncel
             let old = history[idx].1 as f32;
             let new = 0.9 * old + 0.1 * load as f32;
             history[idx] = (history[idx].0 + 1, new as u32);
@@ -1196,7 +1197,7 @@ impl SimpleRcu {
 
 /// Delay fonksiyonları
 pub fn delay_ms(ms: u32) {
-    // Increase delay loop significantly for QEMU TCG
+    // QEMU TCG (yazılım emülasyonu) için gecikme döngüsünü önemli ölçüde artır
     for _ in 0..ms * 100000 {
         core::hint::spin_loop();
         unsafe {
@@ -1274,20 +1275,20 @@ pub fn init() {
         // CPU state machine'i güncelle
         CPU_STATES.set_cpu_count(cpu_count as u32);
         
-        // Pre-allocate Vecs with exact capacity to avoid resize
-        state.per_cpu_data = Vec::with_capacity(cpu_count);
+    // Önceden tahsis edilmiş Vec’lerin tam kapasitesi (yeniden boyutlandırmayı önler)
+    state.per_cpu_data = Vec::with_capacity(cpu_count);
         state.syscall_cpu_data = Vec::with_capacity(cpu_count);
         state.syscall_stacks = Vec::with_capacity(cpu_count);
         state.ap_started = Vec::with_capacity(cpu_count);
         
-        // Use fixed-size array for APIC IDs to avoid Vec operations
+        // APIC kimliklerini sabit boyutlu dizide tut (Vec işlemlerinden kaçın)
         for (i, &id) in acpi_info.cpu_list.iter().enumerate() {
             if i < 16 {
                 state.cpu_apic_ids.push(id);
             }
         }
         
-        // Use all detected CPUs (Linux supports up to 8192 CPUs)
+        // Tespit edilen tüm CPU'ları kullan (Linux 8192 CPU'ya kadar destekler)
         state.cpu_count = cpu_count as u32;
         
         crate::serial_println!("SMP: Found {} CPUs via ACPI, activating all", state.cpu_count);
@@ -1296,7 +1297,7 @@ pub fn init() {
         crate::serial_println!("SMP: Using CPUID detection");
         // CPUID'den CPU sayısını tahmin et
         let mut state = SMP_STATE.lock();
-        state.cpu_count = 1;  // Single CPU
+        state.cpu_count = 1;  // Tek CPU
         state.cpu_apic_ids = vec![0];
         1
     };

@@ -22,6 +22,9 @@ pub mod gal;
 /// Desktop compositor (linear framebuffer)
 pub mod compositor;
 
+/// Zero-copy DMA bridge: GOP ↔ Ring-3 user framebuffer (Tier 1)
+pub mod dma_bridge;
+
 pub struct Surface {
     pub width: usize,
     pub height: usize,

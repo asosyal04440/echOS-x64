@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-check:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Check tests build
+        run: cargo check --tests
+
+  cargo-check-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace (release)
+        run: cargo check --workspace --release
+
+      - name: Check tests build (release)
+        run: cargo check --tests --release
+
+  smoke-all-targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Smoke check all targets
+        run: cargo check --workspace --all-targets
+
+  target-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check no_std target
+        run: cargo check --workspace --target x86_64-unknown-none
+
+      - name: Check UEFI target
+        run: cargo check --workspace --target x86_64-unknown-uefi
+
+  compatibility-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [dev, release]
+        target: [x86_64-unknown-none, x86_64-unknown-uefi]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check core compatibility surface
+        if: matrix.profile == 'dev'
+        run: cargo check --lib --target ${{ matrix.target }}
+
+      - name: Check core compatibility surface (release)
+        if: matrix.profile == 'release'
+        run: cargo check --lib --release --target ${{ matrix.target }}
+
+      - name: Check interoperability tests build
+        if: matrix.profile == 'dev' && matrix.target == 'x86_64-unknown-none'
+        run: cargo check --tests
+
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy workspace
+        run: cargo clippy --workspace
+
+  rustfmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Rustfmt check
+        run: cargo fmt --all -- --check

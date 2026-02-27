@@ -35,6 +35,14 @@ unsafe impl Hal for VirtioHal {
     }
 
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, _size: usize) -> NonNull<u8> {
+        if !crate::ironshim_bridge::is_mmio_allowed(paddr as usize, _size) {
+            crate::serial_println!(
+                "[IronShim/MMIO] map denied: base={:#x} size={}",
+                paddr,
+                _size
+            );
+            return NonNull::dangling();
+        }
         let ptr = map_mmio(paddr as u64, _size);
         NonNull::new(ptr).unwrap()
     }

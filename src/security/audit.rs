@@ -1,6 +1,6 @@
-//! # Audit Subsystem
+//! # Denetim Alt Sistemi (Audit Subsystem)
 //!
-//! Security event logging and auditing.
+//! Güvenlik olaylarının günlüklenmesi ve denetimi.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,10 +10,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// AUDIT CONSTANTS
+// DENETİM SABİTLERİ
 // ============================================================================
 
-/// Audit message types
+/// Denetim ileti türleri
 pub const AUDIT_SYSCALL: u16 = 1300;
 pub const AUDIT_FS_WATCH: u16 = 1301;
 pub const AUDIT_PATH: u16 = 1302;
@@ -26,12 +26,12 @@ pub const AUDIT_INTEGRITY_DATA: u16 = 1800;
 pub const AUDIT_INTEGRITY_METADATA: u16 = 1801;
 pub const AUDIT_INTEGRITY_STATUS: u16 = 1802;
 
-/// Audit filter actions
+/// Denetim filtresi eylemleri
 pub const AUDIT_NEVER: u32 = 0;
 pub const AUDIT_POSSIBLE: u32 = 1;
 pub const AUDIT_ALWAYS: u32 = 2;
 
-/// Audit filter rules
+/// Denetim filtresi kuralları
 pub const AUDIT_FILTER_USER: u32 = 0;
 pub const AUDIT_FILTER_TASK: u32 = 1;
 pub const AUDIT_FILTER_ENTRY: u32 = 2;
@@ -40,38 +40,38 @@ pub const AUDIT_FILTER_EXIT: u32 = 4;
 pub const AUDIT_FILTER_PREPEND: u32 = 0x80000000;
 
 // ============================================================================
-// AUDIT RECORD
+// DENETİM KAYDI
 // ============================================================================
 
 #[derive(Clone, Debug)]
 pub struct AuditRecord {
-    /// Record type
+    /// Kayıt türü
     pub msg_type: u16,
-    /// Sequence number
+    /// Sıra numarası
     pub serial: u32,
-    /// Timestamp
+    /// Zaman damgası
     pub timestamp: u64,
-    /// Session ID
+    /// Oturum kimliği
     pub session_id: u32,
-    /// Process ID
+    /// İşlem kimliği
     pub pid: u32,
-    /// User ID
+    /// Kullanıcı kimliği
     pub uid: u32,
-    /// Effective UID
+    /// Etkin kullanıcı kimliği
     pub euid: u32,
-    /// Group ID
+    /// Grup kimliği
     pub gid: u32,
-    /// Effective GID
+    /// Etkin grup kimliği
     pub egid: u32,
-    /// System call number
+    /// Sistem çağrısı numarası
     pub syscall: i32,
-    /// Return value
+    /// Dönüş değeri
     pub ret: i64,
-    /// Executable path
+    /// Çalıştırılabilir dosya yolu
     pub exe: String,
-    /// Command line
+    /// Komut satırı
     pub comm: String,
-    /// Additional fields
+    /// Ek alanlar
     pub fields: Vec<(String, String)>,
 }
 
@@ -95,12 +95,12 @@ impl AuditRecord {
         }
     }
 
-    /// Add field
+    /// Alan ekler
     pub fn add_field(&mut self, name: &str, value: &str) {
         self.fields.push((String::from(name), String::from(value)));
     }
 
-    /// Format as string
+    /// Dizeye biçimlendirir
     pub fn format(&self) -> String {
         let mut s = alloc::format!(
             "audit({}.{}:{}): type={} serial={} pid={} uid={} euid={} gid={} egid={} syscall={} ret={}",
@@ -117,36 +117,36 @@ impl AuditRecord {
             self.syscall,
             self.ret
         );
-        
+
         for (name, value) in &self.fields {
             s.push_str(&alloc::format!(" {}={}", name, value));
         }
-        
+
         s.push_str(&alloc::format!(" exe=\"{}\" comm=\"{}\"", self.exe, self.comm));
-        
+
         s
     }
 }
 
 // ============================================================================
-// AUDIT RULE
+// DENETİM KURALI
 // ============================================================================
 
 #[derive(Clone, Debug)]
 pub struct AuditRule {
-    /// Rule ID
+    /// Kural kimliği
     pub id: u32,
-    /// Filter type
+    /// Filtre türü
     pub filter: u32,
-    /// Action
+    /// Eylem
     pub action: u32,
-    /// System call mask
+    /// Sistem çağrısı maskesi
     pub syscall_mask: [u64; 2],
-    /// Field count
+    /// Alan sayısı
     pub field_count: u32,
-    /// Fields
+    /// Alanlar
     pub fields: Vec<AuditRuleField>,
-    /// Enabled
+    /// Etkin mi
     pub enabled: AtomicBool,
 }
 
@@ -158,7 +158,7 @@ pub struct AuditRuleField {
     pub value_str: String,
 }
 
-/// Audit field types
+/// Denetim alanı türleri
 pub const AUDIT_PID: u32 = 0;
 pub const AUDIT_UID: u32 = 1;
 pub const AUDIT_GID: u32 = 2;
@@ -187,31 +187,31 @@ impl AuditRule {
         }
     }
 
-    /// Check if syscall matches
+    /// Sistem çağrısının eşleşip eşleşmediğini kontrol eder
     pub fn matches_syscall(&self, syscall: i32) -> bool {
         if syscall < 0 || syscall >= 128 {
             return false;
         }
-        
+
         let word = syscall as usize / 64;
         let bit = syscall as usize % 64;
-        
+
         (self.syscall_mask[word] & (1 << bit)) != 0
     }
 
-    /// Add syscall to mask
+    /// Sistem çağrısını maskeye ekler
     pub fn add_syscall(&mut self, syscall: i32) {
         if syscall < 0 || syscall >= 128 {
             return;
         }
-        
+
         let word = syscall as usize / 64;
         let bit = syscall as usize % 64;
-        
+
         self.syscall_mask[word] |= 1 << bit;
     }
 
-    /// Add field
+    /// Alan ekler
     pub fn add_field(&mut self, field: AuditRuleField) {
         self.fields.push(field);
         self.field_count += 1;
@@ -219,20 +219,20 @@ impl AuditRule {
 }
 
 // ============================================================================
-// AUDIT WATCH
+// DENETİM İZLEME
 // ============================================================================
 
 #[derive(Clone, Debug)]
 pub struct AuditWatch {
-    /// Watch ID
+    /// İzleme kimliği
     pub id: u32,
-    /// Path to watch
+    /// İzlenecek yol
     pub path: String,
-    /// Permissions to watch
-    pub perms: u32, // r=4, w=2, x=1
-    /// Filter key
+    /// İzlenecek izinler (r=4, w=2, x=1)
+    pub perms: u32,
+    /// Filtre anahtarı
     pub key: String,
-    /// Is directory
+    /// Dizin mi
     pub is_dir: bool,
 }
 
@@ -247,36 +247,36 @@ impl AuditWatch {
         }
     }
 
-    /// Check if access matches
+    /// Erişimin eşleşip eşleşmediğini kontrol eder
     pub fn matches(&self, path: &str, perms: u32) -> bool {
         path.starts_with(&self.path) && (perms & self.perms) != 0
     }
 }
 
 // ============================================================================
-// AUDIT MANAGER
+// DENETİM YÖNETİCİSİ
 // ============================================================================
 
 pub struct AuditManager {
-    /// Enabled
+    /// Etkin mi
     pub enabled: AtomicBool,
-    /// Audit rules
+    /// Denetim kuralları
     pub rules: Mutex<Vec<AuditRule>>,
-    /// Audit watches
+    /// Denetim izlemeleri
     pub watches: Mutex<Vec<AuditWatch>>,
-    /// Audit log
+    /// Denetim günlüğü
     pub log: Mutex<Vec<AuditRecord>>,
-    /// Next serial number
+    /// Sonraki sıra numarası
     pub next_serial: AtomicU32,
-    /// Next rule ID
+    /// Sonraki kural kimliği
     pub next_rule_id: AtomicU32,
-    /// Next watch ID
+    /// Sonraki izleme kimliği
     pub next_watch_id: AtomicU32,
-    /// Rate limit (records/second)
+    /// Hız sınırı (kayıt/saniye)
     pub rate_limit: AtomicU32,
-    /// Backlog limit
+    /// Biriktirme sınırı
     pub backlog_limit: AtomicU32,
-    /// Statistics
+    /// İstatistikler
     pub stats: Mutex<AuditStats>,
 }
 
@@ -304,51 +304,51 @@ impl AuditManager {
         }
     }
 
-    /// Enable audit
+    /// Denetimi etkinleştirir
     pub fn enable(&self) {
         self.enabled.store(true, Ordering::SeqCst);
         crate::serial_println!("[AUDIT] Enabled");
     }
 
-    /// Disable audit
+    /// Denetimi devre dışı bırakır
     pub fn disable(&self) {
         self.enabled.store(false, Ordering::SeqCst);
     }
 
-    /// Is enabled
+    /// Etkin mi kontrol eder
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
     }
 
-    /// Log syscall
+    /// Sistem çağrısını günlükler
     pub fn log_syscall(&self, syscall: i32, ret: i64, args: &[u64]) {
         if !self.is_enabled() {
             return;
         }
-        
+
         let serial = self.next_serial.fetch_add(1, Ordering::SeqCst);
         let mut record = AuditRecord::new(AUDIT_SYSCALL, serial);
         record.syscall = syscall;
         record.ret = ret;
-        
-        // Add arguments
+
+        // Bağımsız değişkenleri ekle
         for (i, arg) in args.iter().enumerate() {
             record.add_field(&alloc::format!("a{}", i), &arg.to_string());
         }
-        
+
         self.log.lock().push(record);
-        
+
         let mut stats = self.stats.lock();
         stats.records_sent += 1;
     }
 
-    /// Log file access
+    /// Dosya erişimini günlükler
     pub fn log_file_access(&self, path: &str, perms: u32, ret: i64) {
         if !self.is_enabled() {
             return;
         }
-        
-        // Check watches
+
+        // İzlemeleri kontrol et
         for watch in self.watches.lock().iter() {
             if watch.matches(path, perms) {
                 let serial = self.next_serial.fetch_add(1, Ordering::SeqCst);
@@ -357,61 +357,61 @@ impl AuditManager {
                 record.add_field("perms", &perms.to_string());
                 record.add_field("key", &watch.key);
                 record.ret = ret;
-                
+
                 self.log.lock().push(record);
-                
+
                 let mut stats = self.stats.lock();
                 stats.records_sent += 1;
             }
         }
     }
 
-    /// Add rule
+    /// Kural ekler
     pub fn add_rule(&self, mut rule: AuditRule) -> u32 {
         let id = self.next_rule_id.fetch_add(1, Ordering::SeqCst);
         rule.id = id;
         self.rules.lock().push(rule);
-        
+
         let mut stats = self.stats.lock();
         stats.rules_count += 1;
-        
+
         id
     }
 
-    /// Remove rule
+    /// Kural kaldırır
     pub fn remove_rule(&self, id: u32) {
         self.rules.lock().retain(|r| r.id != id);
-        
+
         let mut stats = self.stats.lock();
         stats.rules_count = stats.rules_count.saturating_sub(1);
     }
 
-    /// Add watch
+    /// İzleme ekler
     pub fn add_watch(&self, path: &str, perms: u32, key: &str) -> u32 {
         let id = self.next_watch_id.fetch_add(1, Ordering::SeqCst);
         let watch = AuditWatch::new(id, path, perms, key);
         self.watches.lock().push(watch);
-        
+
         let mut stats = self.stats.lock();
         stats.watches_count += 1;
-        
+
         id
     }
 
-    /// Remove watch
+    /// İzleme kaldırır
     pub fn remove_watch(&self, id: u32) {
         self.watches.lock().retain(|w| w.id != id);
-        
+
         let mut stats = self.stats.lock();
         stats.watches_count = stats.watches_count.saturating_sub(1);
     }
 
-    /// Get records
+    /// Kayıtları getirir
     pub fn get_records(&self) -> Vec<AuditRecord> {
         self.log.lock().drain(..).collect()
     }
 
-    /// Get statistics
+    /// İstatistikleri getirir
     pub fn get_stats(&self) -> AuditStats {
         self.stats.lock().clone()
     }
@@ -422,25 +422,25 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARAYÜZÜ
 // ============================================================================
 
 pub fn sys_audit_write(msg_type: u16, data: &[u8]) -> i32 {
     if !AUDIT.is_enabled() {
         return 0;
     }
-    
+
     let serial = AUDIT.next_serial.fetch_add(1, Ordering::SeqCst);
     let mut record = AuditRecord::new(msg_type, serial);
     record.add_field("data", &core::str::from_utf8(data).unwrap_or(""));
-    
+
     AUDIT.log.lock().push(record);
-    
+
     0
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init() {

@@ -1,7 +1,7 @@
-//! # Glyph Atlas with Subpixel Antialiasing
+//! # Alt Piksel Kenar Yumuşatmalı Glyph Atlası
 //!
-//! Efficient text rendering using cached glyph bitmaps
-//! Supports subpixel rendering (ClearType-like) for crisp text
+//! Önbelleğe alınmış glyph bitmap'leri kullanarak verimli metin render
+//! Keskin metin için alt piksel render destekler (ClearType benzeri)
 
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
@@ -13,29 +13,29 @@ use spin::Mutex;
 use libm::ceilf;
 
 // ============================================================================
-// GLYPH ATLAS CONSTANTS
+// GLYPH ATLASI SABİTLERİ
 // ============================================================================
 
-/// Atlas width in pixels
+/// Piksel cinsinden atlas genişliği
 pub const ATLAS_WIDTH: u16 = 1024;
 
-/// Atlas height in pixels
+/// Piksel cinsinden atlas yüksekliği
 pub const ATLAS_HEIGHT: u16 = 1024;
 
-/// Maximum number of atlases
+/// Maksimum atlas sayısı
 pub const MAX_ATLASES: usize = 4;
 
-/// Maximum glyph cache entries
+/// Maksimum glyph önbellek girişi
 pub const MAX_GLYPH_CACHE: usize = 4096;
 
-/// Padding around glyphs (pixels)
+/// Glyph'ler etrafındaki dolgu (piksel)
 pub const GLYPH_PADDING: u8 = 1;
 
 // ============================================================================
-// FONT STYLE
+// YAZI TİPİ STİLİ
 // ============================================================================
 
-/// Font style flags
+/// Yazı tipi stil bayrakları
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FontStyle {
     pub weight: FontWeight,
@@ -90,19 +90,19 @@ impl FontStyle {
 }
 
 // ============================================================================
-// GLYPH KEY
+// GLYPH ANAHTARI
 // ============================================================================
 
-/// Key for glyph cache lookup
+/// Glyph önbellek araması için anahtar
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GlyphKey {
-    /// Unicode codepoint
+    /// Unicode kod noktası
     pub codepoint: u32,
-    /// Font size
+    /// Yazı tipi boyutu
     pub size: u16,
-    /// Font weight (0-9 mapping to 100-900)
+    /// Yazı tipi ağırlığı (0-9 arası 100-900'e eşlenir)
     pub weight: u8,
-    /// Style flags
+    /// Stil bayrakları
     pub style_flags: u8,
 }
 
@@ -122,30 +122,30 @@ impl GlyphKey {
 }
 
 // ============================================================================
-// GLYPH INFO
+// GLYPH BİLGİSİ
 // ============================================================================
 
-/// Cached glyph information
+/// Önbelleğe alınmış glyph bilgisi
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphInfo {
-    /// Position in atlas (x, y)
+    /// Atlas içindeki konum (x, y)
     pub atlas_x: u16,
     pub atlas_y: u16,
-    /// Atlas index (for multi-atlas)
+    /// Atlas indeksi (çoklu atlas için)
     pub atlas_index: u8,
-    /// Glyph width in pixels
+    /// Piksel cinsinden glyph genişliği
     pub width: u16,
-    /// Glyph height in pixels
+    /// Piksel cinsinden glyph yüksekliği
     pub height: u16,
-    /// Horizontal advance (pixels, 16.16 fixed point)
+    /// Yatay ilerleme (piksel, 16.16 sabit nokta)
     pub advance: i32,
-    /// Left bearing (pixels, 16.16 fixed point)
+    /// Sol taşma (piksel, 16.16 sabit nokta)
     pub bearing_x: i32,
-    /// Top bearing (pixels, 16.16 fixed point)
+    /// Üst taşma (piksel, 16.16 sabit nokta)
     pub bearing_y: i32,
-    /// Is this a colored glyph (emoji)
+    /// Bu renkli bir glyph mi (emoji)
     pub is_colored: bool,
-    /// LRU timestamp
+    /// LRU zaman damgası
     pub last_used: u64,
 }
 
@@ -165,7 +165,7 @@ impl GlyphInfo {
         }
     }
     
-    /// Get the bounding box for rendering
+    /// Render için sınırlayıcı kutuyu al
     pub fn bounds(&self, x: i32, y: i32) -> (i32, i32, i32, i32) {
         let min_x = x + (self.bearing_x >> 16);
         let min_y = y - (self.bearing_y >> 16);
@@ -176,21 +176,21 @@ impl GlyphInfo {
 }
 
 // ============================================================================
-// GLYPH BITMAP
+// GLYPH BİTMAP
 // ============================================================================
 
-/// Rendered glyph bitmap
+/// Render edilmiş glyph bitmap
 #[derive(Clone, Debug)]
 pub struct GlyphBitmap {
-    /// Width in pixels
+    /// Piksel cinsinden genişlik
     pub width: u16,
-    /// Height in pixels
+    /// Piksel cinsinden yükseklik
     pub height: u16,
-    /// Pitch (bytes per row)
+    /// Adım (satır başına bayt)
     pub pitch: i32,
-    /// Pixel data (grayscale or BGRA)
+    /// Piksel verisi (gri tonlama veya BGRA)
     pub data: Vec<u8>,
-    /// Is colored (BGRA format)
+    /// Renkli mi (BGRA formatı)
     pub is_colored: bool,
 }
 
@@ -206,7 +206,7 @@ impl GlyphBitmap {
         }
     }
     
-    /// Get grayscale value at position
+    /// Konumdaki gri tonlama değerini al
     pub fn get_grayscale(&self, x: u16, y: u16) -> u8 {
         if x >= self.width || y >= self.height || self.is_colored {
             return 0;
@@ -214,7 +214,7 @@ impl GlyphBitmap {
         self.data[y as usize * self.pitch as usize + x as usize]
     }
     
-    /// Get BGRA value at position
+    /// Konumdaki BGRA değerini al
     pub fn get_bgra(&self, x: u16, y: u16) -> (u8, u8, u8, u8) {
         if x >= self.width || y >= self.height || !self.is_colored {
             return (0, 0, 0, 0);
@@ -223,68 +223,68 @@ impl GlyphBitmap {
         (self.data[offset], self.data[offset + 1], self.data[offset + 2], self.data[offset + 3])
     }
     
-    /// Get subpixel coverage at position (3x horizontal resolution)
+    /// Konumdaki alt piksel kapsamını al (3x yatay çözünürlük)
     pub fn get_subpixel(&self, x: u16, y: u16, subpixel: u8) -> u8 {
         if x >= self.width || y >= self.height {
             return 0;
         }
         
-        // For subpixel rendering, we need 3x horizontal resolution
-        // This is typically provided by the font rasterizer
-        // Here we approximate by sampling
+        // Alt piksel render için 3x yatay çözünürlük gerekir
+        // Bu genellikle yazı tipi rasterleştirici tarafından sağlanır
+        // Burada örnekleme ile yaklaşıyoruz
         let base = self.get_grayscale(x, y);
         
-        // Simple subpixel approximation
+        // Basit alt piksel yaklaşımı
         match subpixel {
-            0 => base.saturating_mul(3) / 4, // Left subpixel
-            1 => base,                        // Center subpixel
-            2 => base.saturating_mul(3) / 4, // Right subpixel
+            0 => base.saturating_mul(3) / 4, // Sol alt piksel
+            1 => base,                        // Merkez alt piksel
+            2 => base.saturating_mul(3) / 4, // Sağ alt piksel
             _ => base,
         }
     }
 }
 
 // ============================================================================
-// SUBPIXEL LAYOUT
+// ALT PİKSEL DÜZENİ
 // ============================================================================
 
-/// LCD subpixel arrangement
+/// LCD alt piksel düzeni
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubpixelLayout {
-    /// Standard RGB horizontal
+    /// Standart RGB yatay
     RgbHorizontal,
-    /// BGR horizontal
+    /// BGR yatay
     BgrHorizontal,
-    /// RGB vertical
+    /// RGB dikey
     RgbVertical,
-    /// BGR vertical
+    /// BGR dikey
     BgrVertical,
-    /// No subpixel (OLED, unknown)
+    /// Alt piksel yok (OLED, bilinmiyor)
     None,
 }
 
 impl SubpixelLayout {
-    /// Get default layout
+    /// Varsayılan düzeni al
     pub fn default_layout() -> Self {
         SubpixelLayout::RgbHorizontal
     }
     
-    /// Get subpixel color for position
+    /// Konum için alt piksel rengini al
     pub fn subpixel_color(&self, x: i32) -> (u8, u8, u8) {
         match self {
             SubpixelLayout::RgbHorizontal => {
                 match x % 3 {
-                    0 => (255, 0, 0),   // Red
-                    1 => (0, 255, 0),   // Green
-                    2 => (0, 0, 255),   // Blue
+                    0 => (255, 0, 0),   // Kırmızı
+                    1 => (0, 255, 0),   // Yeşil
+                    2 => (0, 0, 255),   // Mavi
                     _ => (255, 255, 255),
                 }
             }
             SubpixelLayout::BgrHorizontal => {
                 match x % 3 {
-                    0 => (0, 0, 255),   // Blue
-                    1 => (0, 255, 0),   // Green
-                    2 => (255, 0, 0),   // Red
+                    0 => (0, 0, 255),   // Mavi
+                    1 => (0, 255, 0),   // Yeşil
+                    2 => (255, 0, 0),   // Kırmızı
                     _ => (255, 255, 255),
                 }
             }
@@ -310,24 +310,24 @@ impl SubpixelLayout {
 }
 
 // ============================================================================
-// GLYPH ATLAS
+// GLYPH ATLASI
 // ============================================================================
 
-/// Single glyph atlas texture
+/// Tek glyph atlas dokusu
 pub struct GlyphAtlas {
-    /// Atlas texture data (RGBA)
+    /// Atlas doku verisi (RGBA)
     texture: Vec<u32>,
-    /// Width in pixels
+    /// Piksel cinsinden genişlik
     width: u16,
-    /// Height in pixels
+    /// Piksel cinsinden yükseklik
     height: u16,
-    /// Next available X position
+    /// Sonraki kullanılabilir X konumu
     next_x: u16,
-    /// Next available Y position
+    /// Sonraki kullanılabilir Y konumu
     next_y: u16,
-    /// Current row height
+    /// Mevcut satır yüksekliği
     row_height: u16,
-    /// Number of glyphs stored
+    /// Depolanan glyph sayısı
     glyph_count: usize,
 }
 
@@ -344,17 +344,17 @@ impl GlyphAtlas {
         }
     }
     
-    /// Check if atlas has space for glyph
+    /// Atlas'ta glyph için alan var mı kontrol et
     pub fn has_space(&self, width: u16, height: u16) -> bool {
         let padded_w = width + GLYPH_PADDING as u16 * 2;
         let padded_h = height + GLYPH_PADDING as u16 * 2;
         
-        // Check current row
+        // Mevcut satırı kontrol et
         if self.next_x + padded_w <= self.width {
             return true;
         }
         
-        // Check new row
+        // Yeni satırı kontrol et
         if self.next_y + self.row_height + padded_h <= self.height {
             return true;
         }
@@ -362,12 +362,12 @@ impl GlyphAtlas {
         false
     }
     
-    /// Allocate space for a glyph
+    /// Glyph için alan tahsis et
     pub fn allocate(&mut self, width: u16, height: u16) -> Option<(u16, u16)> {
         let padded_w = width + GLYPH_PADDING as u16 * 2;
         let padded_h = height + GLYPH_PADDING as u16 * 2;
         
-        // Try current row
+        // Mevcut satırı dene
         if self.next_x + padded_w <= self.width {
             let x = self.next_x + GLYPH_PADDING as u16;
             let y = self.next_y + self.row_height + GLYPH_PADDING as u16;
@@ -379,7 +379,7 @@ impl GlyphAtlas {
             return Some((x, y));
         }
         
-        // Start new row
+        // Yeni satır başlat
         if self.next_y + self.row_height + padded_h <= self.height {
             self.next_y += self.row_height;
             self.next_x = padded_w;
@@ -395,7 +395,7 @@ impl GlyphAtlas {
         None
     }
     
-    /// Copy glyph bitmap to atlas
+    /// Glyph bitmap'ini atlasa kopyala
     pub fn copy_glyph(&mut self, x: u16, y: u16, bitmap: &GlyphBitmap) {
         for row in 0..bitmap.height {
             let dst_y = y + row;
@@ -411,11 +411,11 @@ impl GlyphAtlas {
                 
                 let pixel = if bitmap.is_colored {
                     let (b, g, r, a) = bitmap.get_bgra(col, row);
-                    // Convert to 0xAABBGGRR
+                    // 0xAABBGGRR formatına dönüştür
                     ((a as u32) << 24) | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32)
                 } else {
                     let alpha = bitmap.get_grayscale(col, row);
-                    // White glyph with alpha
+                    // Alfa kanallı beyaz glyph
                     ((alpha as u32) << 24) | 0x00FFFFFF
                 };
                 
@@ -425,7 +425,7 @@ impl GlyphAtlas {
         }
     }
     
-    /// Get pixel from atlas
+    /// Atlas'tan piksel al
     pub fn get_pixel(&self, x: u16, y: u16) -> u32 {
         if x >= self.width || y >= self.height {
             return 0;
@@ -433,27 +433,27 @@ impl GlyphAtlas {
         self.texture[y as usize * self.width as usize + x as usize]
     }
     
-    /// Get texture data
+    /// Doku verisini al
     pub fn texture(&self) -> &[u32] {
         &self.texture
     }
     
-    /// Get dimensions
+    /// Boyutları al
     pub fn dimensions(&self) -> (u16, u16) {
         (self.width, self.height)
     }
     
-    /// Get glyph count
+    /// Glyph sayısını al
     pub fn count(&self) -> usize {
         self.glyph_count
     }
     
-    /// Check if atlas is empty
+    /// Atlas boş mu kontrol et
     pub fn is_empty(&self) -> bool {
         self.glyph_count == 0
     }
     
-    /// Clear atlas
+    /// Atlası temizle
     pub fn clear(&mut self) {
         self.texture.fill(0);
         self.next_x = 0;
@@ -464,28 +464,28 @@ impl GlyphAtlas {
 }
 
 // ============================================================================
-// GLYPH ATLAS MANAGER
+// GLYPH ATLASI YÖNETİCİSİ
 // ============================================================================
 
-/// Manages multiple glyph atlases with LRU eviction
+/// LRU çıkarmalı çoklu glyph atlaslarını yönetir
 pub struct GlyphAtlasManager {
-    /// All atlases
+    /// Tüm atlaslar
     atlases: Vec<GlyphAtlas>,
-    /// Current atlas index
+    /// Mevcut atlas indeksi
     current_atlas: usize,
-    /// Glyph cache (key -> info)
+    /// Glyph önbelleği (anahtar -> bilgi)
     cache: BTreeMap<GlyphKey, GlyphInfo>,
-    /// LRU access order
+    /// LRU erişim sırası
     lru: VecDeque<GlyphKey>,
-    /// Frame counter for LRU
+    /// LRU için kare sayıcı
     frame: u64,
-    /// Subpixel layout
+    /// Alt piksel düzeni
     subpixel_layout: SubpixelLayout,
-    /// Enable subpixel rendering
+    /// Alt piksel renderi etkinleştir
     subpixel_enabled: bool,
-    /// Cache hits
+    /// Önbellek isabetleri
     hits: u64,
-    /// Cache misses
+    /// Önbellek ıskaları
     misses: u64,
 }
 
@@ -503,27 +503,27 @@ impl GlyphAtlasManager {
             misses: 0,
         };
         
-        // Create first atlas
+        // İlk atlası oluştur
         manager.atlases.push(GlyphAtlas::new());
         
         manager
     }
     
-    /// Enable/disable subpixel rendering
+    /// Alt piksel renderi etkinleştir/devre dışı bırak
     pub fn set_subpixel(&mut self, enabled: bool) {
         self.subpixel_enabled = enabled;
     }
     
-    /// Set subpixel layout
+    /// Alt piksel düzenini ayarla
     pub fn set_subpixel_layout(&mut self, layout: SubpixelLayout) {
         self.subpixel_layout = layout;
     }
     
-    /// Get or render a glyph
+    /// Glyph al veya render et
     pub fn get_glyph(&mut self, key: GlyphKey, rasterizer: &mut dyn GlyphRasterizer) -> Option<GlyphInfo> {
-        // Check cache
+        // Önbelleği kontrol et
         if let Some(mut info) = self.cache.get(&key).copied() {
-            // Cache hit
+            // Önbellek isabeti
             self.hits += 1;
             info.last_used = self.frame;
             self.cache.insert(key, info);
@@ -531,13 +531,13 @@ impl GlyphAtlasManager {
             return Some(info);
         }
         
-        // Cache miss
+        // Önbellek ıskandı
         self.misses += 1;
         
-        // Render glyph
+        // Glyph'i render et
         let bitmap = rasterizer.render(key.codepoint, key.size, key.weight, key.style_flags)?;
         
-        // Find space in current atlas
+        // Mevcut atlasta alan bul
         let mut atlas_idx = self.current_atlas;
         let mut pos = None;
         
@@ -545,7 +545,7 @@ impl GlyphAtlasManager {
             pos = atlas.allocate(bitmap.width, bitmap.height);
         }
         
-        // If no space, try other atlases or create new
+        // Alan yoksa, diğer atlasları dene ya da yeni oluştur
         if pos.is_none() {
             for (i, atlas) in self.atlases.iter_mut().enumerate() {
                 if i != self.current_atlas {
@@ -558,7 +558,7 @@ impl GlyphAtlasManager {
             }
         }
         
-        // Create new atlas if needed
+        // Gerekirse yeni atlas oluştur
         if pos.is_none() && self.atlases.len() < MAX_ATLASES {
             let mut new_atlas = GlyphAtlas::new();
             pos = new_atlas.allocate(bitmap.width, bitmap.height);
@@ -566,7 +566,7 @@ impl GlyphAtlasManager {
             atlas_idx = self.atlases.len() - 1;
         }
         
-        // Evict LRU if still no space
+        // Hâlâ alan yoksa LRU'yu çıkar
         if pos.is_none() {
             self.evict_lru();
             if let Some(atlas) = self.atlases.get_mut(atlas_idx) {
@@ -574,15 +574,15 @@ impl GlyphAtlasManager {
             }
         }
         
-        // Get position
+        // Konumu al
         let (x, y) = pos?;
         
-        // Copy to atlas
+        // Atlasa kopyala
         if let Some(atlas) = self.atlases.get_mut(atlas_idx) {
             atlas.copy_glyph(x, y, &bitmap);
         }
         
-        // Create info
+        // Bilgi oluştur
         let info = GlyphInfo {
             atlas_x: x,
             atlas_y: y,
@@ -596,11 +596,11 @@ impl GlyphAtlasManager {
             last_used: self.frame,
         };
         
-        // Cache it
+        // Önbelleğe al
         self.cache.insert(key, info);
         self.lru.push_back(key);
         
-        // Check cache size
+        // Önbellek boyutunu kontrol et
         if self.cache.len() > MAX_GLYPH_CACHE {
             self.evict_lru();
         }
@@ -608,24 +608,24 @@ impl GlyphAtlasManager {
         Some(info)
     }
     
-    /// Touch LRU entry
+    /// LRU girdisini güncelle
     fn touch_lru(&mut self, key: GlyphKey) {
         self.lru.retain(|&k| k != key);
         self.lru.push_back(key);
     }
     
-    /// Evict least recently used glyphs
+    /// En az kullanılan glyph'leri çıkar
     fn evict_lru(&mut self) {
         if let Some(key) = self.lru.pop_front() {
             if let Some(info) = self.cache.remove(&key) {
-                // Mark atlas region as free (simplified - just clear the glyph)
-                // In a real implementation, we'd track free regions
+                // Atlas bölgesini serbest olarak işaretle (basitleştirilmiş - sadece glyph'i temizle)
+                // Gerçek bir uygulamada serbest bölgeleri takip ederiz
                 self.cache.remove(&key);
             }
         }
     }
     
-    /// Render text using cached glyphs
+    /// Önbelleğe alınmış glyph'leri kullanarak metin render et
     pub fn render_text(
         &mut self,
         text: &str,
@@ -649,7 +649,7 @@ impl GlyphAtlasManager {
                 // Render glyph
                 self.render_glyph(&info, x, y, color, fb, fb_width, fb_height);
                 
-                // Advance
+                // İlerlet
                 x += info.advance >> 16;
                 max_x = max(max_x, x);
             }
@@ -658,7 +658,7 @@ impl GlyphAtlasManager {
         max_x
     }
     
-    /// Render a single glyph
+    /// Tek bir glyph render et
     pub fn render_glyph(
         &self,
         info: &GlyphInfo,
@@ -674,11 +674,11 @@ impl GlyphAtlasManager {
             None => return,
         };
         
-        // Calculate position
+        // Konumu hesapla
         let draw_x = x + (info.bearing_x >> 16);
         let draw_y = y - (info.bearing_y >> 16);
         
-        // Extract color components
+        // Renk bileşenlerini çıkar
         let cr = ((color >> 16) & 0xFF) as u8;
         let cg = ((color >> 8) & 0xFF) as u8;
         let cb = (color & 0xFF) as u8;
@@ -705,12 +705,12 @@ impl GlyphAtlasManager {
                 let fb_idx = fb_y as usize * fb_width + fb_x as usize;
                 let bg = fb[fb_idx];
                 
-                // Extract background
+                // Arka planı çıkar
                 let br = ((bg >> 16) & 0xFF) as u8;
                 let bg_ = ((bg >> 8) & 0xFF) as u8;
                 let bb = (bg & 0xFF) as u8;
                 
-                // Alpha blend
+                // Alfa harmanla
                 let a = alpha as u32;
                 let inv_a = 255 - a;
                 
@@ -723,7 +723,7 @@ impl GlyphAtlasManager {
         }
     }
     
-    /// Render with subpixel antialiasing
+    /// Alt piksel kenar yumuşatma ile render et
     pub fn render_glyph_subpixel(
         &self,
         info: &GlyphInfo,
@@ -746,7 +746,7 @@ impl GlyphAtlasManager {
         let draw_x = x + (info.bearing_x >> 16);
         let draw_y = y - (info.bearing_y >> 16);
         
-        // Extract color components
+        // Renk bileşenlerini çıkar
         let cr = ((color >> 16) & 0xFF) as f32;
         let cg = ((color >> 8) & 0xFF) as f32;
         let cb = (color & 0xFF) as f32;
@@ -773,15 +773,15 @@ impl GlyphAtlasManager {
                 let fb_idx = fb_y as usize * fb_width + fb_x as usize;
                 let bg = fb[fb_idx];
                 
-                // Extract background
+                // Arka planı çıkar
                 let br = ((bg >> 16) & 0xFF) as f32;
                 let bg_ = ((bg >> 8) & 0xFF) as f32;
                 let bb = (bg & 0xFF) as f32;
                 
-                // Get subpixel weights based on position
+                // Konuma göre alt piksel ağırlıklarını al
                 let (sr, sg, sb) = self.subpixel_layout.subpixel_color(fb_x);
                 
-                // Apply subpixel blending
+                // Alt piksel harmanlamayı uygula
                 let r = br * (1.0 - alpha * sr as f32 / 255.0) + cr * alpha * sr as f32 / 255.0;
                 let g = bg_ * (1.0 - alpha * sg as f32 / 255.0) + cg * alpha * sg as f32 / 255.0;
                 let b = bb * (1.0 - alpha * sb as f32 / 255.0) + cb * alpha * sb as f32 / 255.0;
@@ -791,24 +791,24 @@ impl GlyphAtlasManager {
         }
     }
     
-    /// Get cache statistics
+    /// Önbellek istatistiklerini al
     pub fn stats(&self) -> (u64, u64, f32) {
         let total = self.hits + self.misses;
         let hit_rate = if total > 0 { self.hits as f32 / total as f32 } else { 0.0 };
         (self.hits, self.misses, hit_rate)
     }
     
-    /// Get cache size
+    /// Önbellek boyutunu al
     pub fn cache_size(&self) -> usize {
         self.cache.len()
     }
     
-    /// Get atlas count
+    /// Atlas sayısını al
     pub fn atlas_count(&self) -> usize {
         self.atlases.len()
     }
     
-    /// Clear all caches
+    /// Tüm önbellekleri temizle
     pub fn clear(&mut self) {
         for atlas in &mut self.atlases {
             atlas.clear();
@@ -822,32 +822,32 @@ impl GlyphAtlasManager {
 }
 
 // ============================================================================
-// GLYPH RASTERIZER TRAIT
+// GLYPH RASTERLEŞTİRİCİ TRAIT
 // ============================================================================
 
-/// Trait for glyph rasterization
+/// Glyph rasterleştirme için trait
 pub trait GlyphRasterizer: Send + Sync {
-    /// Render a glyph to bitmap
+    /// Glyph'i bitmap'e render et
     fn render(&mut self, codepoint: u32, size: u16, weight: u8, style: u8) -> Option<GlyphBitmap>;
     
-    /// Get horizontal advance (16.16 fixed point)
+    /// Yatay ilerleme al (16.16 sabit nokta)
     fn get_advance(&self, codepoint: u32, size: u16) -> i32;
     
-    /// Get left bearing (16.16 fixed point)
+    /// Sol taşmayı al (16.16 sabit nokta)
     fn get_bearing_x(&self, codepoint: u32, size: u16) -> i32;
     
-    /// Get top bearing (16.16 fixed point)
+    /// Üst taşmayı al (16.16 sabit nokta)
     fn get_bearing_y(&self, codepoint: u32, size: u16) -> i32;
     
-    /// Get line height
+    /// Satır yüksekliğini al
     fn line_height(&self, size: u16) -> i32;
 }
 
 // ============================================================================
-// BUILT-IN RASTERIZER (VGA Font)
+// GÖMÜLÜ RASTERLEŞTİRİCİ (VGA Yazı Tipi)
 // ============================================================================
 
-/// Simple VGA font rasterizer
+/// Basit VGA yazı tipi rasterleştiricisi
 pub struct VgaFontRasterizer;
 
 impl VgaFontRasterizer {
@@ -855,9 +855,9 @@ impl VgaFontRasterizer {
         VgaFontRasterizer
     }
     
-    /// Get VGA font data for character
+    /// Karakter için VGA yazı tipi verisi al
     fn get_font_data(c: char) -> [u8; 16] {
-        // Use crate's VGA font
+        // Crate'in VGA yazı tipini kullan
         crate::font::vga_font::get_font_data(c)
     }
 }
@@ -866,7 +866,7 @@ impl GlyphRasterizer for VgaFontRasterizer {
     fn render(&mut self, codepoint: u32, size: u16, _weight: u8, _style: u8) -> Option<GlyphBitmap> {
         let c = char::from_u32(codepoint)?;
         
-        // VGA font is 8x16, scale if needed
+        // VGA yazı tipi 8x16, gerekirse ölekekle
         let scale = size as f32 / 16.0;
         let width = ceilf(8.0 * scale) as u16;
         let height = ceilf(16.0 * scale) as u16;
@@ -875,7 +875,7 @@ impl GlyphRasterizer for VgaFontRasterizer {
         
         let font_data = Self::get_font_data(c);
         
-        // Simple nearest-neighbor scaling
+        // Basit en yakın komşu ölekleme
         for row in 0..height {
             let src_row = (row as f32 / scale).min(15.0) as usize;
             let byte = font_data[src_row];
@@ -897,8 +897,8 @@ impl GlyphRasterizer for VgaFontRasterizer {
     }
     
     fn get_advance(&self, _codepoint: u32, size: u16) -> i32 {
-        // VGA font is monospace
-        (size as i32 * 8 / 16) << 16 // 8 pixels scaled
+        // VGA yazı tipi tek aralıklıdır
+        (size as i32 * 8 / 16) << 16 // 8 piksel öleklenmiş
     }
     
     fn get_bearing_x(&self, _codepoint: u32, _size: u16) -> i32 {
@@ -906,7 +906,7 @@ impl GlyphRasterizer for VgaFontRasterizer {
     }
     
     fn get_bearing_y(&self, _codepoint: u32, size: u16) -> i32 {
-        (size as i32) << 16 // Top of character
+        (size as i32) << 16 // Karakterin üstü
     }
     
     fn line_height(&self, size: u16) -> i32 {
@@ -915,14 +915,14 @@ impl GlyphRasterizer for VgaFontRasterizer {
 }
 
 // ============================================================================
-// GLOBAL GLYPH ATLAS
+// GLOBAL GLYPH ATLASI
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref GLYPH_ATLAS: Mutex<GlyphAtlasManager> = Mutex::new(GlyphAtlasManager::new());
 }
 
-/// Initialize glyph atlas
+/// Glyph atlasını başlat
 pub fn init() {
     let mut atlas = GLYPH_ATLAS.lock();
     atlas.set_subpixel(true);
@@ -930,12 +930,12 @@ pub fn init() {
         ATLAS_WIDTH, ATLAS_HEIGHT, atlas.subpixel_layout);
 }
 
-/// Get glyph atlas manager
+/// Glyph atlas yöneticisini al
 pub fn get_atlas() -> &'static Mutex<GlyphAtlasManager> {
     &GLYPH_ATLAS
 }
 
-/// Render text using global atlas
+/// Global atlası kullanarak metin render et
 pub fn render_text(
     text: &str,
     style: &FontStyle,

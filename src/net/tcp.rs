@@ -1,6 +1,8 @@
-//! # TCP Protocol
+//! # TCP Protokolü
 //!
-//! TCP state machine and connection handling with SACK support
+//! SACK desteği ile TCP durum makinesi ve bağlantı yönetimi.
+//! TCP (Transmission Control Protocol), güvenilir, sıralı ve hata denetimli
+//! veri iletimi sağlayan bağlantı yönelimli bir taşıma katmanı protokolüdür.
 
 use super::{Ipv4Addr, Port, SocketAddr, NetError, allocate_socket_id};
 use super::ip::{IpProtocol, Ipv4Packet};
@@ -12,10 +14,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// TCP OPTIONS
+// TCP SEÇENEKLERİ
 // ============================================================================
 
-/// TCP option kinds
+/// TCP seçenek türleri - RFC 793 ve uzantılarında tanımlanan başlık seçenekleri
 pub const TCPOPT_EOL: u8 = 0;
 pub const TCPOPT_NOP: u8 = 1;
 pub const TCPOPT_MSS: u8 = 2;
@@ -25,10 +27,12 @@ pub const TCPOPT_SACK: u8 = 5;
 pub const TCPOPT_TIMESTAMP: u8 = 8;
 
 // ============================================================================
-// TCP SACK (Selective Acknowledgment)
+// TCP SACK (Seçici Onaylama - Selective Acknowledgment)
 // ============================================================================
 
-/// SACK block: [start, end) sequence numbers
+/// SACK bloğu: [başlangıç, son) sıra numarası aralığı.
+/// SACK, alıcının sadece eksik segmentlerin yeniden iletilmesini talep
+/// etmesine olanak tanıyarak ağ verimliliğini artırır (RFC 2018).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SackBlock {
     pub start: u32,
@@ -40,9 +44,9 @@ impl SackBlock {
         SackBlock { start, end }
     }
     
-    /// Check if sequence number is within this block
+    /// Verilen sıra numarasının bu SACK bloğu içinde olup olmadığını kontrol eder
     pub fn contains(&self, seq: u32) -> bool {
-        // Handle wraparound
+        // Sıra numarası taşması (wraparound) durumunu ele al
         if self.start <= self.end {
             seq >= self.start && seq < self.end
         } else {
@@ -50,22 +54,24 @@ impl SackBlock {
         }
     }
     
-    /// Get block length
+    /// Bloğun bayt cinsinden uzunluğunu döndürür
     pub fn len(&self) -> u32 {
         self.end.wrapping_sub(self.start)
     }
 }
 
-/// SACK scoreboard - tracks received segments for selective retransmission
+/// SACK puan tablosu - seçici yeniden iletim için alınan segmentleri izler.
+/// Puan tablosu, hangi veri bloklarının alındığını takip ederek
+/// yalnızca kayıp olan segmentlerin yeniden gönderilmesini sağlar.
 #[derive(Clone, Debug)]
 pub struct SackScoreboard {
-    /// Received SACK blocks (max 4 per RFC 2018)
+    /// Alınan SACK blokları (RFC 2018'e göre maksimum 4 blok)
     pub blocks: Vec<SackBlock>,
-    /// Maximum blocks we can store
+    /// Saklanabilecek maksimum blok sayısı
     pub max_blocks: usize,
-    /// Highest SACKed sequence number
+    /// En yüksek SACK'lı sıra numarası
     pub high_sack: u32,
-    /// Number of bytes SACKed
+    /// SACK'lı toplam bayt sayısı
     pub sacked_bytes: u32,
 }
 
@@ -85,14 +91,15 @@ impl SackScoreboard {
         }
     }
     
-    /// Add a SACK block, merging overlaps
+    /// Yeni bir SACK bloğu ekler; çakışan blokları birleştirir.
+    /// RFC 2018: Alıcı en fazla 4 SACK bloğu bildirebilir.
     pub fn add_block(&mut self, block: SackBlock) {
-        // Check for overlap with existing blocks and merge
+        // Mevcut bloklarla çakışmayı kontrol et ve gerekirse birleştir
         let mut merged = false;
         for existing in &mut self.blocks {
-            // Check if blocks overlap or are adjacent
+            // Blokların çakıştığını veya bitişik olduğunu kontrol et
             if Self::blocks_overlap_or_adjacent(existing, &block) {
-                // Merge: expand existing block
+                // Birleştir: mevcut bloğu genişlet
                 existing.start = existing.start.min(block.start);
                 existing.end = existing.end.max(block.end);
                 merged = true;
@@ -101,47 +108,48 @@ impl SackScoreboard {
         }
         
         if !merged {
-            // Add new block if we have space
+            // Yer varsa yeni bloğu ekle
             if self.blocks.len() < self.max_blocks {
                 self.blocks.push(block);
             } else {
-                // Remove oldest block and add new one
+                // En eski bloğu sil ve yeni bloğu ekle
                 self.blocks.remove(0);
                 self.blocks.push(block);
             }
         }
         
-        // Sort blocks by start sequence
+        // Blokları başlangıç sıra numarasına göre sırala
         self.blocks.sort_by_key(|b| b.start);
         
-        // Update high_sack
+        // high_sack değerini güncelle
         for block in &self.blocks {
             if block.end.wrapping_sub(self.high_sack) as i32 > 0 {
                 self.high_sack = block.end;
             }
         }
         
-        // Recalculate sacked bytes
+        // SACK'lı bayt sayısını yeniden hesapla
         self.sacked_bytes = self.blocks.iter().map(|b| b.len()).sum();
     }
     
-    /// Check if two blocks overlap or are adjacent
+    /// İki bloğun çakıştığını veya bitişik olduğunu kontrol eder.
+    /// Sıra numarası taşması (32-bit döngüsellik) göz önünde bulundurulur.
     fn blocks_overlap_or_adjacent(a: &SackBlock, b: &SackBlock) -> bool {
-        // Handle wraparound
+        // Sıra numarası taşmasını ele al
         let a_before_b = a.end.wrapping_sub(b.start) as i32 >= 0;
         let b_before_a = b.end.wrapping_sub(a.start) as i32 >= 0;
         
-        // Adjacent: a.end == b.start or b.end == a.start
+        // Bitişik: a.end == b.start veya b.end == a.start
         let adjacent = a.end.wrapping_sub(b.start) == 0 || b.end.wrapping_sub(a.start) == 0;
         
-        // Overlap: intervals intersect
+        // Çakışma: aralıklar kesişiyor
         let overlap = (a.start <= b.start && a.end > b.start) ||
                       (b.start <= a.start && b.end > a.start);
         
         overlap || adjacent
     }
     
-    /// Check if a sequence range is covered by SACK blocks
+    /// Verilen sıra numarası aralığının SACK blokları tarafından kapsanıp kapsanmadığını kontrol eder
     pub fn is_sacked(&self, start: u32, end: u32) -> bool {
         for block in &self.blocks {
             if block.start <= start && block.end >= end {
@@ -151,28 +159,30 @@ impl SackScoreboard {
         false
     }
     
-    /// Get gaps in received data (for retransmission)
+    /// Alınan verideki boşlukları döndürür (yeniden iletim için).
+    /// SND.UNA ile SND.NXT arasındaki onaylanmamış aralıklarda
+    /// SACK bloklarının kapsamadığı bölgeler yeniden iletilmelidir.
     pub fn get_gaps(&self, snd_una: u32, snd_nxt: u32) -> Vec<SackBlock> {
         let mut gaps = Vec::new();
         
         if self.blocks.is_empty() {
-            // No SACK info, entire window is a gap
+            // SACK bilgisi yok, tüm pencere boşluk olarak değerlendiriliyor
             gaps.push(SackBlock::new(snd_una, snd_nxt));
             return gaps;
         }
         
-        // Start from SND.UNA
+        // SND.UNA noktasından başla
         let mut current = snd_una;
         
         for block in &self.blocks {
             if current < block.start {
-                // Gap between current and block.start
+                // current ile block.start arasındaki boşluk
                 gaps.push(SackBlock::new(current, block.start));
             }
             current = current.max(block.end);
         }
         
-        // Gap after last block to SND.NXT
+        // Son bloktan SND.NXT'ye kadar olan boşluk
         if current < snd_nxt {
             gaps.push(SackBlock::new(current, snd_nxt));
         }
@@ -180,30 +190,31 @@ impl SackScoreboard {
         gaps
     }
     
-    /// Clear scoreboard
+    /// Puan tablosunu sıfırlar
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.high_sack = 0;
         self.sacked_bytes = 0;
     }
     
-    /// Serialize SACK blocks to TCP option format
+    /// SACK bloklarını TCP seçenek formatına serileştirir.
+    /// Her blok 8 bayt: 4 bayt başlangıç + 4 bayt bitiş sıra numarası.
     pub fn serialize(&self) -> Vec<u8> {
         let mut data = Vec::new();
         
-        // Option type
+        // Seçenek türü
         data.push(TCPOPT_SACK);
-        // Length: 2 (header) + 8 * num_blocks
+        // Uzunluk: 2 (başlık) + 8 * blok_sayısı
         let len = 2 + 8 * self.blocks.len();
         data.push(len as u8);
         
-        // Each block: 4 bytes start + 4 bytes end
+        // Her blok: 4 bayt başlangıç + 4 bayt bitiş
         for block in &self.blocks {
             data.extend_from_slice(&block.start.to_be_bytes());
             data.extend_from_slice(&block.end.to_be_bytes());
         }
         
-        // Pad to 4-byte boundary
+        // 4 baytlık hizaya kadar doldur
         while data.len() % 4 != 0 {
             data.push(TCPOPT_NOP);
         }
@@ -211,7 +222,7 @@ impl SackScoreboard {
         data
     }
     
-    /// Parse SACK blocks from TCP option data
+    /// TCP seçenek verisinden SACK bloklarını ayrıştırır
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 2 || data[0] != TCPOPT_SACK {
             return None;
@@ -241,7 +252,9 @@ impl SackScoreboard {
     }
 }
 
-/// SACK Permitted option for SYN packets
+/// SYN paketlerinde SACK kullanımına izin verildiğini bildiren seçenek.
+/// Bağlantı kurulumu sırasında her iki taraf da bu seçeneği göndererek
+/// SACK özelliğini müzakere eder.
 #[derive(Clone, Copy, Debug)]
 pub struct SackPermitted;
 
@@ -252,21 +265,23 @@ impl SackPermitted {
 }
 
 // ============================================================================
-// TCP FAST RETRANSMIT
+// TCP HİZLI YENİDEN İLETİM (FAST RETRANSMIT)
 // ============================================================================
 
-/// Fast retransmit state
+/// Hızlı yeniden iletim durumu.
+/// Üç veya daha fazla yinelenen ACK alındığında zaman aşımı beklenmeden
+/// kayıp segment hemen yeniden iletilir (RFC 5681).
 #[derive(Clone, Debug)]
 pub struct FastRetransmitState {
-    /// Duplicate ACK counter
+    /// Yinelenen ACK sayıcısı
     pub dup_ack_count: u32,
-    /// Last ACK number received
+    /// Son alınan ACK numarası
     pub last_ack: u32,
-    /// Sequence number at last fast retransmit
+    /// Son hızlı yeniden iletimde ki sıra numarası (kurtarma noktası)
     pub recover: u32,
-    /// Is fast recovery in progress?
+    /// Hızlı kurtarma devam ediyor mu?
     pub in_recovery: bool,
-    /// Threshold for fast retransmit (typically 3)
+    /// Hızlı yeniden iletim eşiği (genellikle 3)
     pub threshold: u32,
 }
 
@@ -287,27 +302,28 @@ impl FastRetransmitState {
         }
     }
     
-    /// Process incoming ACK, returns true if fast retransmit needed
+    /// Gelen ACK'yi işler; hızlı yeniden iletim gerekiyorsa true döndürür.
+    /// Yinelenen ACK: aynı ACK numarasının tekrarı = segment kaybına işaret eder.
     pub fn on_ack(&mut self, ack: u32, sack_blocks: &[SackBlock], snd_una: u32) -> bool {
         if ack == self.last_ack && ack != snd_una {
-            // Duplicate ACK
-            // Check if it carries new SACK info
+            // Yinelenen ACK
+            // Yeni SACK bilgisi taşıyıp taşımadığını kontrol et
             let has_new_sack = !sack_blocks.is_empty();
             
             self.dup_ack_count += 1;
             
-            // Fast retransmit when dup_ack_count reaches threshold
+            // Yinelenen ACK sayısı eşiğe ulaşınca hızlı yeniden iletim başlat
             if self.dup_ack_count >= self.threshold && !self.in_recovery {
                 self.in_recovery = true;
                 self.recover = snd_una;
                 return true;
             }
         } else if ack > self.last_ack {
-            // New ACK - reset duplicate counter
+            // Yeni ACK - yineleme sayıcısını sıfırla
             self.dup_ack_count = 0;
             self.last_ack = ack;
             
-            // Exit fast recovery if ACK covers recover point
+            // ACK kurtarma noktasını geçiyorsa hızlı kurtarmadan çık
             if self.in_recovery && ack >= self.recover {
                 self.in_recovery = false;
             }
@@ -316,7 +332,7 @@ impl FastRetransmitState {
         false
     }
     
-    /// Reset state
+    /// Durumu sıfırlar
     pub fn reset(&mut self) {
         self.dup_ack_count = 0;
         self.in_recovery = false;
@@ -324,10 +340,12 @@ impl FastRetransmitState {
 }
 
 // ============================================================================
-// TCP FAST OPEN (TFO)
+// TCP HİZLI AÇILMA (TFO - TCP Fast Open)
 // ============================================================================
 
-/// TFO Cookie (8 bytes)
+/// TFO Çerezi (8 bayt).
+/// TCP Fast Open, üçlü el sıkışması tamamlanmadan SYN paketi içinde
+/// veri gönderilmesine olanak tanıyarak bağlantı kurulum gecikmesini azaltır.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TfoCookie(pub [u8; 8]);
 
@@ -341,12 +359,12 @@ impl TfoCookie {
     }
     
     pub fn generate(server_ip: Ipv4Addr, time_ms: u64) -> Self {
-        // Simple cookie: hash of IP + time
+        // Basit çerez: IP + zaman damgası özeti
         let mut cookie = [0u8; 8];
         cookie[..4].copy_from_slice(&server_ip.0);
         cookie[4..8].copy_from_slice(&(time_ms as u32).to_be_bytes());
         
-        // XOR with random
+        // Rastgele değerle XOR ile güvenlik katmanı ekle
         let rand = crate::random::next_u32();
         for i in 0..4 {
             cookie[i] ^= (rand >> (i * 8)) as u8;
@@ -356,24 +374,24 @@ impl TfoCookie {
     }
     
     pub fn verify(&self, server_ip: Ipv4Addr, time_window: u64) -> bool {
-        // Simplified verification - in production would use crypto
+        // Basitleştirilmiş doğrulama - üretim ortamında kriptografik yöntemler kullanılırdı
         let expected = TfoCookie::generate(server_ip, time_window);
         self.0 == expected.0
     }
 }
 
-/// TFO state for connection
+/// Bağlantı için TFO durumu
 #[derive(Clone, Debug)]
 pub struct TfoState {
-    /// Cookies per server IP
+    /// Sunucu IP adresine göre saklı çerezler
     pub cookies: BTreeMap<u32, TfoCookie>,
-    /// Pending data to send in SYN
+    /// SYN ile gönderilecek bekleyen veri
     pub pending_data: Vec<u8>,
-    /// TFO enabled
+    /// TFO etkin mi
     pub enabled: bool,
-    /// TFO cookie request sent
+    /// TFO çerez isteği gönderildi mi
     pub cookie_requested: bool,
-    /// TFO data sent in SYN
+    /// SYN içinde veri gönderildi mi
     pub data_in_syn: bool,
 }
 
@@ -394,36 +412,38 @@ impl TfoState {
         }
     }
     
-    /// Get cookie for server
+    /// Sunucuya ait çerezi getirir
     pub fn get_cookie(&self, server_ip: Ipv4Addr) -> Option<TfoCookie> {
         let ip_key = u32::from_be_bytes(server_ip.0);
         self.cookies.get(&ip_key).copied()
     }
     
-    /// Store cookie from server
+    /// Sunucudan gelen çerezi saklar
     pub fn store_cookie(&mut self, server_ip: Ipv4Addr, cookie: TfoCookie) {
         let ip_key = u32::from_be_bytes(server_ip.0);
         self.cookies.insert(ip_key, cookie);
     }
     
-    /// Serialize TFO cookie option
+    /// TFO çerez seçeneğini serileştirir
     pub fn serialize_cookie_option(cookie: &TfoCookie) -> Vec<u8> {
         let mut data = Vec::new();
-        data.push(TCPOPT_FAST_OPEN); // 34
-        data.push(10); // Length: 2 + 8
+        data.push(TCPOPT_FAST_OPEN); // 34 - TFO seçenek kodu
+        data.push(10); // Uzunluk: 2 + 8
         data.extend_from_slice(&cookie.0);
         data
     }
 }
 
-/// TFO option kind
+/// TFO seçenek kodu (IANA tarafından tahsis edilmiş)
 pub const TCPOPT_FAST_OPEN: u8 = 34;
 
 // ============================================================================
-// TCP WINDOW SCALING
+// TCP PENCERE ÖLÇEKLENDİRME (WINDOW SCALING)
 // ============================================================================
 
-/// Window scaling option
+/// Pencere ölçeklendirme seçeneği.
+/// RFC 7323: TCP başlığındaki 16-bit pencere alanını genişleterek
+/// 1 GB'a kadar alıcı penceresi bildirmeye olanak tanır.
 #[derive(Clone, Copy, Debug)]
 pub struct WindowScaleOption {
     pub scale: u8,
@@ -434,12 +454,12 @@ impl WindowScaleOption {
         WindowScaleOption { scale: scale.min(14) }
     }
     
-    /// Serialize window scale option
+    /// Pencere ölçeklendirme seçeneğini serileştirir
     pub fn serialize(&self) -> [u8; 3] {
         [TCPOPT_WINDOW_SCALE, 3, self.scale]
     }
     
-    /// Parse from option data
+    /// Seçenek verisinden pencere boyutu ölçeğini ayrıştırır
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 3 || data[0] != TCPOPT_WINDOW_SCALE {
             return None;
@@ -447,21 +467,22 @@ impl WindowScaleOption {
         Some(WindowScaleOption { scale: data[2] })
     }
     
-    /// Calculate effective window size
+    /// Gerçek pencere boyutunu hesaplar: base_window << scale_factor
     pub fn effective_window(base: u16, scale: u8) -> u32 {
         (base as u32) << (scale as u32)
     }
 }
 
 // ============================================================================
-// TCP TIMESTAMPS
+// TCP ZAMAN DAMGALARI (TIMESTAMPS)
 // ============================================================================
 
-/// TCP Timestamp option
+/// TCP Zaman Damgası seçeneği (RFC 7323).
+/// RTT ölçümü ve PAWS (Eski Segmentlere Karşı Koruma) için kullanılır.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TimestampOption {
-    pub ts_val: u32,  // Timestamp value (sender's)
-    pub ts_ecr: u32,  // Timestamp echo reply
+    pub ts_val: u32,  // Gönderenin zaman damgası değeri
+    pub ts_ecr: u32,  // Zaman damgası yankısı (echo reply)
 }
 
 impl TimestampOption {
@@ -469,24 +490,24 @@ impl TimestampOption {
         TimestampOption { ts_val, ts_ecr }
     }
     
-    /// Create with current time
+    /// Geçerli zamanla zaman damgası oluşturur
     pub fn now(ts_ecr: u32) -> Self {
-        // Use random as pseudo-timestamp for now
+        // Şu an için rastgele sayi sözde-zaman damgası olarak kullanılıyor
         let ts_val = crate::random::next_u32();
         TimestampOption { ts_val, ts_ecr }
     }
     
-    /// Serialize timestamp option
+    /// Zaman damgası seçeneğini baytlara serileştirir
     pub fn serialize(&self) -> [u8; 10] {
         let mut data = [0u8; 10];
         data[0] = TCPOPT_TIMESTAMP;
-        data[1] = 10; // Length
+        data[1] = 10; // Uzunluk
         data[2..6].copy_from_slice(&self.ts_val.to_be_bytes());
         data[6..10].copy_from_slice(&self.ts_ecr.to_be_bytes());
         data
     }
     
-    /// Parse from option data
+    /// Seçenek verisinden zaman damgasını ayrıştırır
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 10 || data[0] != TCPOPT_TIMESTAMP {
             return None;
@@ -496,19 +517,20 @@ impl TimestampOption {
         Some(TimestampOption { ts_val, ts_ecr })
     }
     
-    /// Calculate RTT from timestamp
+    /// Zaman damgasından RTT'yi hesaplar.
+    /// Gönderim anının yankısı kullanılarak hassas RTT ölçümü yapılır.
     pub fn calculate_rtt(&self) -> u32 {
-        // Simplified RTT calculation
+        // Basitleştirilmiş RTT hesaplaması
         let now = crate::random::next_u32();
         now.wrapping_sub(self.ts_ecr)
     }
 }
 
 // ============================================================================
-// TCP OPTIONS PARSER
+// TCP SEÇENEKLERİ AYRICI (OPTIONS PARSER)
 // ============================================================================
 
-/// Parsed TCP options
+/// Ayrıştırılmış TCP seçenekleri
 #[derive(Clone, Debug, Default)]
 pub struct TcpOptions {
     pub mss: Option<u16>,
@@ -520,7 +542,7 @@ pub struct TcpOptions {
 }
 
 impl TcpOptions {
-    /// Parse options from TCP header
+    /// TCP başlığındaki seçenekleri ayrıştırır
     pub fn parse(header_data: &[u8], header_len: usize) -> Self {
         let mut options = TcpOptions::default();
         
@@ -591,28 +613,29 @@ impl TcpOptions {
         options
     }
     
-    /// Build options for SYN packet
+    /// SYN paketi için seçenek bytesı oluşturur.
+    /// Bağlantı kurulurken MSS, pencere ölçeği, SACK ve TFO müzakere edilir.
     pub fn build_syn_options(mss: u16, ws_scale: u8, enable_sack: bool, enable_tfo: bool) -> Vec<u8> {
         let mut opts = Vec::new();
         
-        // MSS option
+        // MSS seçeneği - Maksimum Segment Boyutu
         opts.push(TCPOPT_MSS);
         opts.push(4);
         opts.extend_from_slice(&mss.to_be_bytes());
         
-        // Window scale
+        // Pencere ölçeği
         opts.extend_from_slice(&WindowScaleOption::new(ws_scale).serialize());
         
-        // SACK permitted
+        // SACK destekleniyor
         if enable_sack {
             opts.extend_from_slice(&SackPermitted::serialize());
         }
         
-        // Timestamps
+        // Zaman damgaları
         let ts = TimestampOption::now(0);
         opts.extend_from_slice(&ts.serialize());
         
-        // Pad to 4-byte boundary
+        // 4 baytlık hizaya kadar doldur
         while opts.len() % 4 != 0 {
             opts.push(TCPOPT_NOP);
         }
@@ -620,15 +643,15 @@ impl TcpOptions {
         opts
     }
     
-    /// Build options for data packet
+    /// Veri paketi için seçenek bytesı oluşturur
     pub fn build_data_options(ts_echo: u32, sack_blocks: &[SackBlock]) -> Vec<u8> {
         let mut opts = Vec::new();
         
-        // Timestamps
+        // Zaman damgaları
         let ts = TimestampOption::now(ts_echo);
         opts.extend_from_slice(&ts.serialize());
         
-        // SACK blocks if any
+        // Varsa SACK blokları
         if !sack_blocks.is_empty() {
             let scoreboard = SackScoreboard {
                 blocks: sack_blocks.to_vec(),
@@ -639,7 +662,7 @@ impl TcpOptions {
             opts.extend_from_slice(&scoreboard.serialize());
         }
         
-        // Pad to 4-byte boundary
+        // 4 baytlık hizaya kadar doldur
         while opts.len() % 4 != 0 {
             opts.push(TCPOPT_NOP);
         }
@@ -648,21 +671,25 @@ impl TcpOptions {
     }
 }
 
-/// TCP header (20 bytes minimum)
+/// TCP başlığı (minimum 20 bayt).
+/// Her TCP segmenti bu yapı ile başlar; kaynak/hedef port,
+/// sıra/onay numaraları ve kontrol bayraklarını taşır.
 #[derive(Clone, Copy, Debug)]
 pub struct TcpHeader {
     pub src_port: Port,
     pub dst_port: Port,
     pub seq_num: u32,
     pub ack_num: u32,
-    pub data_offset: u8,        // 4 bits, header length in 32-bit words
+    pub data_offset: u8,        // 4 bit; başlık uzunluğu 32-bit sözcük cinsinden
     pub flags: TcpFlags,
     pub window_size: u16,
     pub checksum: u16,
     pub urgent_ptr: u16,
 }
 
-/// TCP flags
+/// TCP kontrol bayrakları.
+/// Her bayrak bağlantı yönetiminde farklı anlam taşır:
+/// SYN=bağlantı başlat, ACK=onayla, FIN=bitir, RST=sıfırla, PSH=hemen ilet, URG=acil.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TcpFlags {
     pub fin: bool,
@@ -728,7 +755,7 @@ impl TcpFlags {
 impl TcpHeader {
     pub const MIN_SIZE: usize = 20;
     
-    /// Parse TCP header from bytes
+    /// TCP başlığını baytlardan ayrıştırır
     pub fn parse(data: &[u8]) -> Result<Self, NetError> {
         if data.len() < Self::MIN_SIZE {
             return Err(NetError::InvalidPacket);
@@ -757,7 +784,7 @@ impl TcpHeader {
         })
     }
     
-    /// Serialize header to bytes
+    /// Başlığı baytlara serileştirir
     pub fn serialize(&self, buf: &mut [u8]) -> Result<(), NetError> {
         if buf.len() < Self::MIN_SIZE {
             return Err(NetError::BufferFull);
@@ -767,7 +794,7 @@ impl TcpHeader {
         buf[2..4].copy_from_slice(&self.dst_port.0.to_be_bytes());
         buf[4..8].copy_from_slice(&self.seq_num.to_be_bytes());
         buf[8..12].copy_from_slice(&self.ack_num.to_be_bytes());
-        buf[12] = (self.data_offset << 4) | 0x00; // Reserved bits
+        buf[12] = (self.data_offset << 4) | 0x00; // Ayrılmış bitler (rezerved)
         buf[13] = self.flags.to_u8();
         buf[14..16].copy_from_slice(&self.window_size.to_be_bytes());
         buf[16..18].copy_from_slice(&self.checksum.to_be_bytes());
@@ -776,51 +803,55 @@ impl TcpHeader {
         Ok(())
     }
     
-    /// Get header length in bytes
+    /// Başlık uzunluğunu bayt cinsinden döndürür
     pub fn header_len(&self) -> usize {
         (self.data_offset as usize) * 4
     }
 }
 
-/// Compute TCP checksum
+/// TCP sınamasını hesaplar.
+/// TCP, doğrulamak için IP sözde-başlığı (sahte başlık) dahil
+/// Internet checksum algoritmasını kullanır.
 pub fn compute_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, segment: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     
-    // Pseudo-header
+    // Sahte-başlık (pseudo-header): kaynak IP, hedef IP, protokol, uzunluk
     sum += u16::from_be_bytes([src_ip.0[0], src_ip.0[1]]) as u32;
     sum += u16::from_be_bytes([src_ip.0[2], src_ip.0[3]]) as u32;
     sum += u16::from_be_bytes([dst_ip.0[0], dst_ip.0[1]]) as u32;
     sum += u16::from_be_bytes([dst_ip.0[2], dst_ip.0[3]]) as u32;
-    sum += 6u32; // TCP protocol number
+    sum += 6u32; // TCP protokol numarası (RFC 793)
     sum += segment.len() as u32;
     
-    // TCP segment
+    // TCP segment verisi
     let mut i = 0;
     while i + 1 < segment.len() {
         sum += u16::from_be_bytes([segment[i], segment[i + 1]]) as u32;
         i += 2;
     }
     
-    // Odd byte
+    // Tek kalan bayt (eğer segment uzunluğu tek sayıysa)
     if i < segment.len() {
         sum += (segment[i] as u32) << 8;
     }
     
-    // Fold carries
+    // Elde bitlerini kat
     while (sum >> 16) != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     
-    // One's complement
+    // Birlerin tamamlayıcısı
     !(sum as u16)
 }
 
-/// Verify TCP checksum
+/// TCP sınamasını doğrular; hesaplanan değer sıfır ise geçerlidir
 pub fn verify_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, segment: &[u8]) -> bool {
     compute_checksum(src_ip, dst_ip, segment) == 0
 }
 
-/// TCP connection state
+/// TCP bağlantı durumu (RFC 793 durum makinesi).
+/// Her durum, bağlantının yaşam döngüsündeki bir aşamayı temsil eder:
+/// Closed → SynSent → Established → FinWait1 → TimeWait → Closed
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TcpState {
     Closed,
@@ -836,7 +867,8 @@ pub enum TcpState {
     TimeWait,
 }
 
-/// TCP connection
+/// TCP bağlantısı.
+/// Her bağlantı, durum makinesi, tamponlar ve tıkanma kontrolcü durumunu içerir.
 #[derive(Clone, Debug)]
 pub struct TcpConnection {
     pub id: u32,
@@ -849,30 +881,30 @@ pub struct TcpConnection {
     pub rx_buffer: Vec<u8>,
     pub tx_buffer: Vec<u8>,
     pub listen_backlog: usize,
-    // Congestion control
-    pub cwnd: u32,           // Congestion window
-    pub ssthresh: u32,       // Slow start threshold
-    pub rtt: u32,            // Round-trip time (ms)
-    pub rtt_var: u32,        // RTT variance
-    pub rto: u32,            // Retransmission timeout (ms)
-    pub retransmit_count: u8, // Retransmission counter
-    // Window scaling
-    pub ws_scale: u8,        // Window scale factor
-    pub peer_ws_scale: u8,   // Peer's window scale
-    // SACK support
-    pub sack_permitted: bool,     // SACK negotiated
-    pub sack_scoreboard: SackScoreboard,  // Received SACK blocks
-    pub rx_sack_blocks: Vec<SackBlock>,   // SACK blocks to send
-    // Fast retransmit
+    // Tıkanma kontrolcüsü
+    pub cwnd: u32,           // Tıkanma penceresi (Congestion Window)
+    pub ssthresh: u32,       // Yavaş başlama eşiği (Slow Start Threshold)
+    pub rtt: u32,            // Gidiş-dönüş süresi - ms (Round-Trip Time)
+    pub rtt_var: u32,        // RTT varyansı
+    pub rto: u32,            // Yeniden iletim zaman aşımı - ms (Retransmission Timeout)
+    pub retransmit_count: u8, // Yeniden iletim sayıcısı
+    // Pencere ölçeklendirme
+    pub ws_scale: u8,        // Pencere ölçek katsayısı
+    pub peer_ws_scale: u8,   // Karşı tarafın pencere ölçeği
+    // SACK desteği
+    pub sack_permitted: bool,     // SACK müzakere edildi mi
+    pub sack_scoreboard: SackScoreboard,  // Alınan SACK blokları
+    pub rx_sack_blocks: Vec<SackBlock>,   // Gönderilecek SACK blokları
+    // Hızlı yeniden iletim
     pub fast_retx: FastRetransmitState,
-    // Send state
-    pub snd_una: u32,        // Oldest unacknowledged sequence
-    pub snd_nxt: u32,        // Next sequence to send
-    pub snd_wnd: u32,        // Send window
-    // Timestamps
-    pub ts_recent: u32,      // Recent timestamp from peer
-    pub ts_echo: u32,        // Timestamp to echo
-    pub ts_val: u32,         // Our timestamp value
+    // Gönderme durumu (RFC 793 değişkenleri)
+    pub snd_una: u32,        // En eski onaylanmamış sıra numarası (SND.UNA)
+    pub snd_nxt: u32,        // Gönderilecek sıradaki sıra numarası (SND.NXT)
+    pub snd_wnd: u32,        // Gönderme penceresi (SND.WND)
+    // Zaman damgaları
+    pub ts_recent: u32,      // Karşı taraftan gelen son zaman damgası
+    pub ts_echo: u32,        // Yankılanacak zaman damgası
+    pub ts_val: u32,         // Kendi zaman damgası değerimiz
 }
 
 impl TcpConnection {
@@ -888,12 +920,12 @@ impl TcpConnection {
             rx_buffer: Vec::new(),
             tx_buffer: Vec::new(),
             listen_backlog: 0,
-            // Congestion control defaults
-            cwnd: 10 * 1460,        // Initial window (10 MSS)
-            ssthresh: 65535,        // High threshold
-            rtt: 100,               // Initial RTT estimate (100ms)
-            rtt_var: 50,            // Initial RTT variance
-            rto: 200,               // Initial RTO (200ms)
+            // Tıkanma kontrolcüsü varsayılanları
+            cwnd: 10 * 1460,        // Başlangıç penceresi (10 MSS)
+            ssthresh: 65535,        // Yüksek başlangıç eşiği
+            rtt: 100,               // Başlangıç RTT tahmini (100ms)
+            rtt_var: 50,            // Başlangıç RTT varyansı
+            rto: 200,               // Başlangıç RTO (200ms)
             retransmit_count: 0,
             ws_scale: 0,
             peer_ws_scale: 0,
@@ -901,13 +933,13 @@ impl TcpConnection {
             sack_permitted: false,
             sack_scoreboard: SackScoreboard::new(),
             rx_sack_blocks: Vec::new(),
-            // Fast retransmit
+            // Hızlı yeniden iletim
             fast_retx: FastRetransmitState::new(),
-            // Send state
+            // Gönderme durumu
             snd_una: 0,
             snd_nxt: 0,
             snd_wnd: 65535,
-            // Timestamps
+            // Zaman damgaları
             ts_recent: 0,
             ts_echo: 0,
             ts_val: 0,
@@ -923,7 +955,7 @@ impl TcpConnection {
         self.seq_num = crate::random::rand_u64() as u32;
         self.state = TcpState::SynSent;
         
-        // Send SYN
+        // Üçlü el sıkışmasını başlatmak için SYN gönder
         self.send_packet(TcpFlags::syn(), &[])?;
         
         Ok(())
@@ -945,8 +977,8 @@ impl TcpConnection {
             return Err(NetError::ProtocolError);
         }
         
-        // Check for pending connections
-        // TODO: Implement accept queue
+        // Bekleyen bağlantıları kontrol et
+        // TODO: Kabul kuyruğunu (accept queue) uygula
         
         Err(NetError::WouldBlock)
     }
@@ -1008,17 +1040,17 @@ impl TcpConnection {
             urgent_ptr: 0,
         };
         
-        // Build TCP segment
+        // TCP segmentini oluştur
         let mut segment = vec![0u8; TcpHeader::MIN_SIZE + data.len()];
         header.serialize(&mut segment)?;
         segment[TcpHeader::MIN_SIZE..].copy_from_slice(data);
         
-        // Compute checksum with pseudo-header
+        // Sahte başlıkla sınama hesapla
         let src_ip = super::local_ip();
         header.checksum = compute_checksum(src_ip, self.remote.ip, &segment);
         header.serialize(&mut segment)?;
         
-        // Send via IP layer
+        // IP katmanı üzerinden gönder
         let mut ip_buf = vec![0u8; 1500];
         let len = super::ip::build_packet(
             self.remote.ip,
@@ -1027,25 +1059,24 @@ impl TcpConnection {
             &mut ip_buf,
         )?;
         
-        // Build Ethernet frame and send
+        // Ethernet çerçevesini oluştur ve gönder
         super::send_packet(&ip_buf[..len])?;
         
         Ok(())
     }
     
     fn on_packet(&mut self, header: &TcpHeader, data: &[u8]) -> Result<(), NetError> {
-        // Update ACK number
+        // ACK numarasını güncelle
         if header.flags.ack {
             self.ack_num = header.ack_num;
         }
         
-        // State machine
-        match self.state {
+        // Durum makinesi: gelen pakete göre durum geçişi yap
             TcpState::Listen => {
                 if header.flags.syn {
-                    // New connection attempt
+                    // Yeni bağlantı girişimi
                     self.remote = SocketAddr::new(
-                        // IP would come from IP layer
+                        // IP, IP katmanından gelecek
                         Ipv4Addr::UNSPECIFIED,
                         header.src_port,
                     );
@@ -1053,37 +1084,37 @@ impl TcpConnection {
                     self.ack_num = header.seq_num.wrapping_add(1);
                     self.state = TcpState::SynReceived;
                     
-                    // Send SYN-ACK
+                    // SYN-ACK gönder
                     self.send_packet(TcpFlags::syn_ack(), &[])?;
                 }
             }
             TcpState::SynSent => {
                 if header.flags.syn && header.flags.ack {
-                    // SYN-ACK received
+                    // SYN-ACK alındı - üçlü el sıkışmasının ikinci adımı
                     self.ack_num = header.seq_num.wrapping_add(1);
                     self.state = TcpState::Established;
                     
-                    // Send ACK
+                    // ACK gönder - üçlü el sıkışması tamamlandı
                     self.send_packet(TcpFlags::ack(), &[])?;
                 }
             }
             TcpState::SynReceived => {
                 if header.flags.ack {
-                    // Connection established
+                    // Bağlantı kuruldu
                     self.state = TcpState::Established;
                 }
             }
             TcpState::Established => {
-                // Receive data
+                // Veri al
                 if !data.is_empty() {
                     self.rx_buffer.extend_from_slice(data);
                     self.ack_num = self.ack_num.wrapping_add(data.len() as u32);
                     
-                    // Send ACK
+                    // ACK gönder
                     self.send_packet(TcpFlags::ack(), &[])?;
                 }
                 
-                // FIN received
+                // FIN alındı - karşı taraf bağlantıyı kapatmak istiyor
                 if header.flags.fin {
                     self.state = TcpState::CloseWait;
                     self.ack_num = self.ack_num.wrapping_add(1);
@@ -1113,7 +1144,9 @@ impl TcpConnection {
         Ok(())
     }
     
-    /// Update RTT estimate (Jacobson/Karels algorithm)
+    /// RTT tahminini günceller (Jacobson/Karels algoritması).
+    /// Bu algoritma, kayan ortalama ile RTT varyansını takip ederek
+    /// RTO'yu (Yeniden İletim Zaman Aşımı) dinamik olarak ayarlar.
     pub fn update_rtt(&mut self, measured_rtt: u32) {
         let delta = if measured_rtt > self.rtt {
             measured_rtt - self.rtt
@@ -1125,43 +1158,46 @@ impl TcpConnection {
         self.rtt = (7 * self.rtt + measured_rtt) / 8;
         self.rto = self.rtt + 4 * self.rtt_var;
         
-        // Clamp RTO
+        // RTO'yu sınırlandır: çok küçük (<200ms) veya çok büyük (>60s) olmasını önle
         if self.rto < 200 { self.rto = 200; }
         if self.rto > 60000 { self.rto = 60000; }
     }
 }
 
 // ============================================================================
-// TCP CUBIC CONGESTION CONTROL
+// TCP CUBIC TIKANMA KONTROLÜ
 // ============================================================================
 
-/// CUBIC congestion control state
+/// CUBIC tıkanma kontrol durumu.
+/// CUBIC, Linux'un varsayılan TCP tıkanma kontrol algoritmasıdır.
+/// Küpsel bir fonksiyon kullanarak bant genişliğine hızlı erişir,
+/// ağ dostu davranış için TCP-dostu mod da içerir (RFC 8312).
 #[derive(Clone, Debug)]
 pub struct CubicState {
-    /// CUBIC window increase constant (beta_cubic)
+    /// CUBIC beta sabiti = 0.7 (beta_cubic) - çoğaltmalı azaltma oranı
     pub beta: f64,
-    /// CUBIC window decrease constant (C)
+    /// CUBIC C sabiti = 0.4 - pencere büyüme katsayısı
     pub c: f64,
-    /// Window maximum before last congestion event (W_max)
+    /// Son tıkanma olayından önce ulaşılan maksimum pencere boyutu (W_max)
     pub w_max: f64,
-    /// Time of last congestion event (in ms)
+    /// Son tıkanma olayının zamanı (ms cinsinden)
     pub t_last: u64,
-    /// Current cwnd in bytes
+    /// Bayt cinsinden mevcut tıkanma penceresi (cwnd)
     pub cwnd: u32,
-    /// Slow start threshold
+    /// Yavaş başlama eşiği
     pub ssthresh: u32,
-    /// Minimum RTT observed
+    /// Gözlenen minimum RTT
     pub min_rtt: u32,
-    /// TCP-friendly window estimate
+    /// TCP-dostu pencere tahmini
     pub tcp_cwnd: f64,
 }
 
 impl CubicState {
-    /// CUBIC beta = 0.7 (multiplicative decrease factor)
+    /// CUBIC beta = 0.7 (çoğaltmalı azaltma katsayısı; Reno'nun 0.5'ine göre daha yumuşak)
     const BETA: f64 = 0.7;
-    /// CUBIC C = 0.4 (window growth factor)
+    /// CUBIC C = 0.4 (pencere büyüme hızını belirleyen sabit)
     const C: f64 = 0.4;
-    /// MSS for calculations
+    /// Hesaplamalar için MSS (Maksimum Segment Boyutu)
     const MSS: u32 = 1460;
     
     pub fn new() -> Self {
@@ -1170,19 +1206,20 @@ impl CubicState {
             c: Self::C,
             w_max: 0.0,
             t_last: 0,
-            cwnd: Self::MSS * 10, // Initial 10 MSS
+            cwnd: Self::MSS * 10, // Başlangıç penceresi: 10 MSS
             ssthresh: Self::MSS * 100,
             min_rtt: 1000,
             tcp_cwnd: Self::MSS as f64 * 10.0,
         }
     }
     
-    /// Cube root approximation (Newton-Raphson)
+    /// Küp kökü yaklaşımı (Newton-Raphson yöntemi).
+    /// CUBIC pencere hesaplamasında K = cbrt(W_max * beta / C) için kullanılır.
     fn cbrt(x: f64) -> f64 {
         if x <= 0.0 {
             return 0.0;
         }
-        // Initial guess using bit manipulation
+        // Başlangıç tahminini bit manipülasyonu ile hesapla
         let mut y = x;
         for _ in 0..10 {
             let y3 = y * y * y;
@@ -1194,7 +1231,7 @@ impl CubicState {
         y
     }
     
-    /// Integer power for f64
+    /// f64 için tam sayı üsseli kuvvet hesaplaması
     fn powi(base: f64, exp: i32) -> f64 {
         if exp == 0 {
             return 1.0;
@@ -1211,9 +1248,10 @@ impl CubicState {
         }
     }
     
-    /// Calculate CUBIC window at time t
+    /// T anında CUBIC pencere boyutunu hesaplar:
     /// W(t) = C*(t-K)^3 + W_max
-    /// where K = cubic_root(W_max*beta/C)
+    /// burada K = cubic_root(W_max*beta/C)
+    /// T anı, son tıkanma olayından bu yana geçen süredir.
     pub fn cubic_window(&self, t_ms: u64) -> f64 {
         if self.w_max == 0.0 {
             return self.cwnd as f64;
@@ -1222,8 +1260,8 @@ impl CubicState {
         // K = cubic_root(W_max * beta / C)
         let k = Self::cbrt(self.w_max * self.beta / self.c);
         
-        // Time since last congestion event
-        let t = (t_ms as f64 - self.t_last as f64) / 1000.0; // Convert to seconds
+        // Son tıkanma olayından bu yana geçen süre
+        let t = (t_ms as f64 - self.t_last as f64) / 1000.0; // Saniyeye çevir
         
         // W(t) = C * (t - K)^3 + W_max
         let w = self.c * Self::powi(t - k, 3) + self.w_max;
@@ -1231,8 +1269,9 @@ impl CubicState {
         w.max(Self::MSS as f64)
     }
     
-    /// Calculate TCP-friendly window (for TCP friendliness)
+    /// TCP-dostu pencere boyutunu hesaplar (TCP arkadaşlığı için):
     /// W_tcp(t) = W_max * (1 - beta) + 3 * beta / (2 - beta) * (t / RTT)
+    /// Bu formül, CUBIC'in klasik TCP Reno ile aynı hızda büyümesini sağlar.
     pub fn tcp_friendly_window(&self, t_ms: u64, rtt_ms: u32) -> f64 {
         let t = (t_ms as f64 - self.t_last as f64) / 1000.0;
         let rtt = rtt_ms as f64 / 1000.0;
@@ -1241,109 +1280,117 @@ impl CubicState {
             return self.tcp_cwnd;
         }
         
-        // TCP-friendly increase rate
+        // TCP-dostu artış oranı
         let alpha = 3.0 * self.beta / (2.0 - self.beta);
         let w_tcp = self.w_max * (1.0 - self.beta) + alpha * t / rtt;
         
         w_tcp.max(Self::MSS as f64)
     }
     
-    /// Update cwnd on ACK (CUBIC algorithm)
+    /// ACK alındığında cwnd'yi günceller (CUBIC algoritması).
+    /// Yavaş başlama aflamasında üssel, tıkanma kaçınma aflamasında küpsel büyüme.
     pub fn on_ack(&mut self, acked_bytes: u32, current_time_ms: u64, rtt_ms: u32) {
-        // Update min RTT
+        // Minimum RTT'yi güncelle
         if rtt_ms < self.min_rtt && rtt_ms > 0 {
             self.min_rtt = rtt_ms;
         }
         
-        // Slow start phase
+        // Yavaş başlama aflaması: her ACK'de bir MSS ekle
         if self.cwnd < self.ssthresh {
             self.cwnd += acked_bytes;
             return;
         }
         
-        // CUBIC congestion avoidance
+        // CUBIC tıkanma kaçınma aflaması
         let cubic_w = self.cubic_window(current_time_ms);
         let tcp_w = self.tcp_friendly_window(current_time_ms, rtt_ms);
         
-        // Take the maximum of CUBIC and TCP-friendly
+        // CUBIC ve TCP-dostu değerlerin maksimumunu al
         let target_w = cubic_w.max(tcp_w);
         
-        // Convert to bytes and update
+        // Bayta çevir ve güncelle
         let current_w = self.cwnd as f64;
         let new_w = current_w + (target_w - current_w) * (acked_bytes as f64 / self.cwnd as f64);
         self.cwnd = new_w.max(Self::MSS as f64) as u32;
     }
     
-    /// Handle congestion event (packet loss)
+    /// Tıkanma olayını (paket kaybı) ele alır.
+    /// CUBIC, Reno'dan daha yumuşak bir azaltma uygular (beta=0.7 vs 0.5).
     pub fn on_loss(&mut self, current_time_ms: u64) {
-        // Save current window as W_max
+        // Mevcut pencereyi W_max olarak kaydet
         self.w_max = self.cwnd as f64;
         
-        // Multiplicative decrease: W_max = W_max * beta
+        // Çoğaltmalı azaltma: W_max = W_max * beta
         self.w_max *= self.beta;
         
-        // Set new cwnd
+        // Yeni cwnd'yi ayarla
         self.cwnd = (self.cwnd as f64 * self.beta).max(Self::MSS as f64) as u32;
         self.ssthresh = self.cwnd;
         
-        // Record time of congestion event
+        // Tıkanma olayı zamanını kaydet
         self.t_last = current_time_ms;
     }
     
-    /// Handle timeout
+    /// Zaman aşımını ele alır (Retransmission Timeout - RTO).
+    /// TCP Tahoe davranışı: Zaman aşımında pencere 1 MSS'e sıfırlanır.
     pub fn on_timeout(&mut self, current_time_ms: u64) {
-        // Save current window
+        // Mevcut pencereyi kaydet
         self.w_max = self.cwnd as f64;
         
-        // Reset to 1 MSS
+        // 1 MSS'e sıfırla
         self.cwnd = Self::MSS;
         self.ssthresh = Self::MSS * 2;
         
-        // Record time
+        // Zamanı kaydet
         self.t_last = current_time_ms;
     }
 }
 
 // ============================================================================
-// TCP BBR CONGESTION CONTROL
+// TCP BBR TIKANMA KONTROLÜ
 // ============================================================================
 
-/// BBR congestion control state
+/// BBR tıkanma kontrolcüsü durumu.
+/// BBR (Bottleneck Bandwidth and Round-trip propagation time),
+/// Google tarafından geliştirilmiş, bant genişliği ve minimum
+/// RTT ölçümüne dayanan model-tabanlı bir tıkanma kontrol algoritmasıdır.
 #[derive(Clone, Debug, Default)]
 pub struct BbrState {
-    /// BBR mode
+    /// BBR çalışma modu
     pub mode: BbrMode,
-    /// Estimated bandwidth (bytes/second)
+    /// Tahmini bant genişliği (bayt/saniye)
     pub bw: u64,
-    /// Minimum RTT observed (microseconds)
+    /// Gözlenen minimum RTT (mikrosaniye cinsinden)
     pub min_rtt: u64,
-    /// Round trip time counter
+    /// Gidiş-dönüş yayılım süresi sayacı (RTprop)
     pub rtprop: u64,
-    /// Time of last RTprop update
+    /// Son RTprop güncellemesinin zamanı
     pub rtprop_stamp: u64,
-    /// Pacing rate (bytes/second)
+    /// Veri gönderim hızı (bayt/saniye)
     pub pacing_rate: u64,
-    /// Send quantum (bytes)
+    /// Gönderim kuantası (bayt)
     pub send_quantum: u32,
-    /// Cwnd gain
+    /// Cwnd kazanç katsayısı
     pub cwnd_gain: f64,
-    /// Pacing gain
+    /// Pacing (hız düzeltme) kazanç katsayısı
     pub pacing_gain: f64,
-    /// BBR round counter
+    /// BBR tur sayıcısı
     pub round_count: u64,
-    /// Next round delimiter
+    /// Sonraki turun başlangıç sınırı
     pub next_round_delivered: u64,
-    /// Bandwidth filter
+    /// Bant genişliği filtresi
     pub bw_filter: BbrBwFilter,
-    /// RTT filter
+    /// RTT filtresi
     pub rtt_filter: BbrRttFilter,
-    /// ProbeRTT state
+    /// ProbeRTT tamamlandı mı
     pub probe_rtt_done: bool,
-    /// ProbeRTT round stamp
+    /// ProbeRTT tur damgası
     pub probe_rtt_round_stamp: u64,
 }
 
-/// BBR modes
+/// BBR çalışma modları.
+/// Startup: Ağ kapasitesini keşfet. Drain: Kuyruğu boşalt.
+/// ProbeBW: Bant genişliğini sürekli ölç. ProbeRTT: Minimum RTT'yi güncelle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BbrMode {
     #[default]
@@ -1353,7 +1400,8 @@ pub enum BbrMode {
     ProbeRTT,
 }
 
-/// BBR bandwidth filter (max bandwidth over last 10 rounds)
+/// BBR bant genişliği filtresi (son 10 turda maksimum bant genişliği).
+/// Geçici düşüşleri eleyerek gerçek bant genişliği tahmini yapar.
 #[derive(Clone, Debug)]
 pub struct BbrBwFilter {
     pub samples: [u64; 10],
@@ -1380,7 +1428,8 @@ impl BbrBwFilter {
     }
 }
 
-/// BBR RTT filter (min RTT over 10-second window)
+/// BBR RTT filtresi (10 saniyelik pencerede minimum RTT).
+/// PAWS benzeri mekanizma ile eski RTT ölçümlerini temizler.
 #[derive(Clone, Debug)]
 pub struct BbrRttFilter {
     pub min_rtt: u64,
@@ -1398,7 +1447,7 @@ impl Default for BbrRttFilter {
 
 impl BbrRttFilter {
     pub fn update(&mut self, rtt: u64, now: u64) {
-        // 10-second window
+        // 10 saniyelik zaman penceresi
         if now - self.stamp > 10_000_000 {
             self.min_rtt = rtt;
             self.stamp = now;
@@ -1409,9 +1458,9 @@ impl BbrRttFilter {
 }
 
 impl BbrState {
-    /// BBR constants
-    const BBR_HIGH_GAIN: f64 = 2.89;      // 2/ln(2) for startup
-    const BBR_DRAIN_GAIN: f64 = 0.35;     // 1/2.89 for drain
+    /// BBR sabitleri
+    const BBR_HIGH_GAIN: f64 = 2.89;      // 2/ln(2) - başlangıç aflaması için yüksek kazanç
+    const BBR_DRAIN_GAIN: f64 = 0.35;     // 1/2.89 - boşaltma aflaması için düşük kazanç
     const BBR_CWND_GAIN_TARGET: f64 = 2.0;
     const BBR_PROBE_RTT_CWND_GAIN: f64 = 0.5;
     const BBR_PROBE_RTT_MODE_DURATION_MS: u64 = 200;
@@ -1437,54 +1486,58 @@ impl BbrState {
         }
     }
     
-    /// Calculate pacing rate
+    /// Pacing hızını hesaplar ve ayarlar.
+    /// Pacing, veri gönderimini düzgün dağıtır; ani burst'ler yerine
+    /// sürekli akış sağlar.
     pub fn set_pacing_rate(&mut self) {
         let bw = self.bw as f64;
         let gain = self.pacing_gain;
         self.pacing_rate = (bw * gain) as u64;
     }
     
-    /// Calculate send quantum
+    /// Gönderim kuantasını hesaplar
     pub fn set_send_quantum(&mut self) {
-        // Send quantum = min(64KB, pacing_rate / 1000)
+        // Gönderim kuantası = min(64KB, pacing_rate / 1000)
         let quantum = (self.pacing_rate / 1000).min(65536) as u32;
         self.send_quantum = quantum.max(1460);
     }
     
-    /// Calculate target cwnd
+    /// Hedef cwnd boyutunu hesaplar.
+    /// BDP (Bant Genişliği-Gecikme Ürünü) = bant_genişliği * min_RTT
     pub fn target_cwnd(&self) -> u32 {
-        // BDP = bw * min_rtt (in bytes)
+        // BDP = bw * min_rtt (bayt cinsinden)
         let bdp = if self.min_rtt > 0 {
-            (self.bw * self.min_rtt / 1_000_000) as u32 // Convert us to ms
+            (self.bw * self.min_rtt / 1_000_000) as u32 // Mikrosaniyeden milisaniyeye çevir
         } else {
             1460
         };
         
-        // target_cwnd = cwnd_gain * BDP
+        // hedef_cwnd = cwnd_gain * BDP
         let target = (self.cwnd_gain * bdp as f64) as u32;
         target.max(1460)
     }
     
-    /// BBR on ACK processing
+    /// ACK işleme sırasında BBR durumunu günceller.
+    /// Bant genişliği ve RTT ölçümleri sürekli güncellenir.
     pub fn on_ack(&mut self, delivered: u32, rtt_us: u64, now_us: u64) {
-        // Update bandwidth estimate
+        // Bant genişliği tahminini güncelle
         if rtt_us > 0 {
             let bw_sample = (delivered as u64 * 1_000_000) / rtt_us;
             self.bw_filter.update(bw_sample);
             self.bw = self.bw_filter.max();
         }
         
-        // Update RTT estimate
+        // RTT tahminini güncelle
         self.rtt_filter.update(rtt_us, now_us);
         self.min_rtt = self.rtt_filter.min_rtt;
         
-        // Check for round trip
+        // Tur geçişini kontrol et
         self.round_count += 1;
         
-        // Mode-specific processing
+        // Moda özgü işleme
         match self.mode {
             BbrMode::Startup => {
-                // Check if we've found the bottleneck
+                // Darboğazın bulunup bulunmadığını kontrol et
                 if self.is_full_bw_reached() {
                     self.mode = BbrMode::Drain;
                     self.pacing_gain = Self::BBR_DRAIN_GAIN;
@@ -1492,7 +1545,7 @@ impl BbrState {
                 }
             }
             BbrMode::Drain => {
-                // Wait for queue to drain
+                // Kuyruğun boşalmasını bekle
                 if self.target_cwnd() <= 1460 {
                     self.mode = BbrMode::ProbeBW;
                     self.pacing_gain = 1.0;
@@ -1500,7 +1553,7 @@ impl BbrState {
                 }
             }
             BbrMode::ProbeBW => {
-                // Cycle through gains: 1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+                // Kazanç döngüsü: 1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0
                 let cycle_idx = (self.round_count / 8) % 8;
                 self.pacing_gain = match cycle_idx {
                     0 => 1.25,
@@ -1508,14 +1561,14 @@ impl BbrState {
                     _ => 1.0,
                 };
                 
-                // Check if we need to probe RTT
+                // RTT yoklaması gerekiyor mu kontrol et
                 if now_us - self.rtprop_stamp > Self::BBR_MIN_RTT_WIN_SEC * 1_000_000 {
                     self.mode = BbrMode::ProbeRTT;
                     self.cwnd_gain = Self::BBR_PROBE_RTT_CWND_GAIN;
                 }
             }
             BbrMode::ProbeRTT => {
-                // Stay in ProbeRTT for 200ms
+                // 200ms boyunca ProbeRTT modunda kal
                 if now_us - self.rtprop_stamp > Self::BBR_PROBE_RTT_MODE_DURATION_MS * 1000 {
                     self.mode = BbrMode::ProbeBW;
                     self.cwnd_gain = Self::BBR_CWND_GAIN_TARGET;
@@ -1523,47 +1576,54 @@ impl BbrState {
             }
         }
         
-        // Update pacing rate
+        // Pacing hızını güncelle
         self.set_pacing_rate();
         self.set_send_quantum();
     }
     
-    /// Check if full bandwidth is reached (startup phase)
+    /// Tam bant genişliğine ulaşılıp ulaşılmadığını kontrol eder (startup aflaması).
+    /// Gerçek BBR'de bant genişliği büyüme oranı izlenir.
     fn is_full_bw_reached(&self) -> bool {
-        // Simplified: check if bandwidth hasn't increased significantly
-        // In real BBR, this tracks bandwidth growth rate
+        // Basitleştirilmiş: bant genişliği önemli ölçüde artmadıysa durdur
+        // Gerçek BBR'de bant genişliği büyüme oranı takip edilir
         self.bw > 0 && self.round_count > 3
     }
     
-    /// Handle loss (BBR doesn't reduce on loss, uses bandwidth estimation)
+    /// Paket kaybını ele alır.
+    /// BBR, kayba doğrudan tepki vermez; bant genişliği ölçümüne güvenir.
+    /// Bu, kayıp tabanlı tıkanma kontrolclerinden temel farkıdır.
     pub fn on_loss(&mut self) {
-        // BBR doesn't react to loss directly
-        // It relies on bandwidth estimation
+        // BBR kayıba doğrudan tepki vermez
+        // Bant genişliği tahminine güvenir
     }
     
-    /// Handle timeout
+    /// Zaman aşımını ele alır.
+    /// BBR zaman aşımında başlangıç moduna (Startup) geri döner.
     pub fn on_timeout(&mut self, now_us: u64) {
-        // Reset to startup mode
+        // Başlangıç moduna sıfırla
         self.mode = BbrMode::Startup;
         self.cwnd_gain = Self::BBR_HIGH_GAIN;
         self.pacing_gain = Self::BBR_HIGH_GAIN;
         self.rtprop_stamp = now_us;
     }
     
-    /// Get current cwnd
+    /// Mevcut tıkanma penceresini döndürür
     pub fn cwnd(&self) -> u32 {
         match self.mode {
-            BbrMode::ProbeRTT => 1460, // 4 segments minimum
+            BbrMode::ProbeRTT => 1460, // ProbeRTT sırasında minimum 4 segment
             _ => self.target_cwnd(),
         }
     }
 }
 
 // ============================================================================
-// CONGESTION CONTROL ALGORITHM SELECTION
+// TIKANMA KONTROLCÜŞÜ ALGORİTMA SEÇİMİ
 // ============================================================================
 
-/// Congestion control algorithm
+/// Tıkanma kontrolcü algoritması seçimi.
+/// Reno: Klasik TCP tıkanma kontrolcüsü (RFC 5681)
+/// Cubic: Linux varsayılanı, yüksek hızlı ağlarda verimli (RFC 8312)
+/// BBR: Google'dan model-tabanlı, bant genişliği ölçümü odaklı
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CcAlgorithm {
     #[default]
@@ -1572,7 +1632,7 @@ pub enum CcAlgorithm {
     Bbr,
 }
 
-/// Congestion control state
+/// Tıkanma kontrolcü durumu - seçilen algoritmaya göre delőge
 #[derive(Clone, Debug)]
 pub struct CcState {
     pub algorithm: CcAlgorithm,
@@ -1581,7 +1641,9 @@ pub struct CcState {
     pub bbr: BbrState,
 }
 
-/// Reno state (basic TCP congestion control)
+/// Reno durumu - temel TCP tıkanma kontrolcüsü.
+/// Yavaş başlama ve tıkanma kaçınma aflaması ile paket kaybına
+/// çoğaltmalı azaltmayla tepki verir.
 #[derive(Clone, Debug)]
 pub struct RenoState {
     pub cwnd: u32,
@@ -1671,18 +1733,18 @@ impl CcState {
 }
 
 // ============================================================================
-// TCP MANAGER
+// TCP YÖNETİCİSİ (TCP MANAGER)
 // ============================================================================
 
 static TCP_CONNECTIONS: Mutex<BTreeMap<u32, Box<TcpConnection>>> = Mutex::new(BTreeMap::new());
 static TCP_LISTENERS: Mutex<BTreeMap<Port, u32>> = Mutex::new(BTreeMap::new());
 
-/// Initialize TCP subsystem
+/// TCP alt sistemini başlatır
 pub fn init() {
     crate::serial_println!("[TCP] Initialized");
 }
 
-/// Create TCP socket
+/// TCP soketi oluşturur
 pub fn create_socket() -> u32 {
     let conn = TcpConnection::new(SocketAddr::default());
     let id = conn.id;
@@ -1690,7 +1752,7 @@ pub fn create_socket() -> u32 {
     id
 }
 
-/// Bind TCP socket
+/// TCP soketini bir adrese bağlar
 pub fn bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
     let mut conns = TCP_CONNECTIONS.lock();
     let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
@@ -1698,27 +1760,27 @@ pub fn bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
     Ok(())
 }
 
-/// Connect TCP socket
+/// TCP sokuyle bağlantı kurar (aktif açılım)
 pub fn connect(socket_id: u32, remote: SocketAddr) -> Result<(), NetError> {
     let mut conns = TCP_CONNECTIONS.lock();
     let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
     conn.connect(remote)
 }
 
-/// Listen on TCP socket
+/// TCP soketini dinleme moduna alır (pasif açılım)
 pub fn listen(socket_id: u32, backlog: usize) -> Result<(), NetError> {
     let mut conns = TCP_CONNECTIONS.lock();
     let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
     conn.listen(backlog)?;
     
-    // Register listener
+    // Dinleyiciyi kayıt et
     let mut listeners = TCP_LISTENERS.lock();
     listeners.insert(conn.local.port, socket_id);
     
     Ok(())
 }
 
-/// Accept connection
+/// Bağlantıyı kabul eder
 pub fn accept(socket_id: u32) -> Result<(u32, SocketAddr), NetError> {
     let conns = TCP_CONNECTIONS.lock();
     let conn = conns.get(&socket_id).ok_or(NetError::ProtocolError)?;
@@ -1727,25 +1789,25 @@ pub fn accept(socket_id: u32) -> Result<(u32, SocketAddr), NetError> {
         return Err(NetError::ProtocolError);
     }
     
-    // TODO: Check accept queue
+    // TODO: Kabul kuyruğunu kontrol et
     Err(NetError::WouldBlock)
 }
 
-/// Send data
+/// Veri gönderir
 pub fn send(socket_id: u32, data: &[u8]) -> Result<usize, NetError> {
     let mut conns = TCP_CONNECTIONS.lock();
     let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
     conn.send(data)
 }
 
-/// Receive data
+/// Veri alır
 pub fn recv(socket_id: u32, buf: &mut [u8]) -> Result<usize, NetError> {
     let mut conns = TCP_CONNECTIONS.lock();
     let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
     conn.recv(buf)
 }
 
-/// Close socket
+/// Soketi kapatır (FIN el sıkışmasını başlatır)
 pub fn close(socket_id: u32) -> Result<(), NetError> {
     let mut conns = TCP_CONNECTIONS.lock();
     if let Some(conn) = conns.get_mut(&socket_id) {
@@ -1754,27 +1816,29 @@ pub fn close(socket_id: u32) -> Result<(), NetError> {
     Ok(())
 }
 
-/// Get connection by ID (for event checking)
+/// Bağlantıyı ID ile getirir (olay denetimi için)
 pub fn get_connection(socket_id: u32) -> Option<TcpConnection> {
     let conns = TCP_CONNECTIONS.lock();
     conns.get(&socket_id).map(|c| (**c).clone())
 }
 
-/// Get all connections (for ss utility)
+/// Tüm bağlantıları döndürür (ss/netstat yardımcı programı için)
 pub fn get_all_connections() -> Vec<TcpConnection> {
     let conns = TCP_CONNECTIONS.lock();
     conns.values().map(|c| (**c).clone()).collect()
 }
 
-/// Process incoming TCP packet
+/// Gelen TCP paketini işler.
+/// Kaynak/hedef port eşleşmesine göre ilgili bağlantıyı bulur
+/// ve durum makinesini günceller.
 pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
     let tcp_header = TcpHeader::parse(ip_packet.payload)?;
     let data = &ip_packet.payload[tcp_header.header_len()..];
     
-    // Find connection
+    // Bağlantıyı bul
     let conns = TCP_CONNECTIONS.lock();
     
-    // Look for established connection
+    // Kurulmuş bağlantıyı ara
     let mut found_id = None;
     for (_, conn) in conns.iter() {
         if conn.local.port == tcp_header.dst_port && 
@@ -1793,7 +1857,7 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
         }
     }
     
-    // Check for listener
+    // Dinleyici var mı kontrol et
     let listeners = TCP_LISTENERS.lock();
     if let Some(&_socket_id) = listeners.get(&tcp_header.dst_port) {
         drop(listeners);
@@ -1806,6 +1870,6 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
         }
     }
     
-    // No matching connection - send RST
+    // Eşleşen bağlantı bulunamadı - RST gönderilmesi gerekir
     Ok(())
 }

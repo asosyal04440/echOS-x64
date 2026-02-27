@@ -1,6 +1,8 @@
-//! # echOS CPU Affinity and Scheduling Integration Module
+//! # echOS CPU Affinite ve Zamanlama Entegrasyon Modulu
 //!
-//! Tier 1 OS seviyesinde CPU affinity ve scheduling entegrasyonu
+//! Tier 1 OS seviyesinde CPU affinite ve scheduling entegrasyonu.
+//! sched_setaffinity benzeri bir arayuz ile gorevlerin hangi CPU'larda
+//! calisabilecegi belirlenir; NUMA, onbellek ve paket farkindaliği desteklenir.
 //! Linux CPU affinity ile aynı seviyede yetenekler
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -12,69 +14,73 @@ use crate::preempt::{PreemptDisableGuard, preempt_enabled};
 use crate::rcu::{RcuPtr, synchronize_rcu};
 use crate::topology::{get_system_topology, get_cache_sharing_cpus, get_package_cpus, get_core_cpus};
 
-/// CPU affinity mask type
-pub type CpuMask = u64; // Support up to 64 CPUs, can be extended
+/// CPU affinite maskesi turu -- hangi CPU'larin izinli olduğunu bit konumlarıyla ifade eder.
+/// Bit N = 1 ise CPU N izinlidir (en dusuk bit = CPU 0).
+pub type CpuMask = u64; // 64 CPU'ya kadar destek; genisletilebilir
 
-/// CPU affinity policies
+/// CPU affinite politikaları -- bir gorevin CPU secimini hangi kurala gore yapacagını belirler.
+/// Linux'ta sched_setaffinity ile yapılan cagrılar bu politikalara denk duser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum AffinityPolicy {
-    /// No affinity restriction (can run on any CPU)
+    /// Affinite kısıtlaması yok -- gorev herhangi bir CPU'da calısabilir (varsayılan)
     Any = 0,
-    /// Must run on specific CPUs
+    /// Gorev yalnızca belirtilen CPU'larda calısmalı -- gercek zamanlı gorevler icin idealdir
     Fixed = 1,
-    /// Prefer specific CPUs but can run elsewhere
+    /// Belirli CPU'lar tercih edilir; ancak gerekirse baskalarında da calısabilir
     Preferred = 2,
-    /// Avoid specific CPUs
+    /// Belirtilen CPU'lardan kacınılır -- yuk dagılımında kritik CPU'ları rezerve etmek icin
     Avoid = 3,
-    /// NUMA-aware affinity
+    /// NUMA farkında affinite -- bellek erisim gecikmesini azaltmak icin aynı NUMA dugumunde kal
     Numa = 4,
-    /// Cache-aware affinity
+    /// Onbellek farkında affinite -- L2/L3 onbellegini paylasan CPU'lar tercih edilir
     Cache = 5,
-    /// Package-aware affinity
+    /// Paket farkında affinite -- aynı soket/paket icindeki CPU'lar tercih edilir
     Package = 6,
 }
 
-/// Task affinity descriptor
+/// Gorev affinite tanımlayıcısı -- bir gorevin CPU affinite politikasını,
+/// izin verilen/tercih edilen/kacınılan CPU maskelerini ve calısma istatistiklerini tutar.
+/// Islemci basına bir ornek bulunur; satır boyutu hizalamasıyla yanlıs paylasim onlenir.
 #[repr(C, align(64))]
 pub struct TaskAffinity {
-    /// Task ID
+    /// Gorev kimliği -- scheduler tarafından atanan benzersiz task ID
     pub task_id: u64,
-    /// Current affinity policy
-    pub policy: AtomicU32, // AffinityPolicy as u32
-    /// CPU affinity mask (bitmask of allowed CPUs)
+    /// Mevcut affinite politikası -- hangi CPU secim kuralının gecerli olduğunu gosterir
+    pub policy: AtomicU32, // AffinityPolicy u32 olarak atomik saklanır
+    /// CPU affinite maskesi -- izinli CPU'ların bit maskesi; bit N = CPU N izinli
     pub cpu_mask: AtomicU64,
-    /// Preferred CPU mask (for Preferred policy)
+    /// Tercih edilen CPU maskesi -- Preferred politikasında once denenen CPU'lar
     pub preferred_mask: AtomicU64,
-    /// Avoid CPU mask (for Avoid policy)
+    /// Kacınılacak CPU maskesi -- Avoid politikasında atlanan CPU'lar
     pub avoid_mask: AtomicU64,
-    /// NUMA node preference
+    /// NUMA dugumu tercihi -- hangi NUMA dugumunde calısılmak istendiğini belirtir
     pub numa_node: AtomicU32,
-    /// Cache level preference
+    /// Onbellek seviyesi tercihi -- paylasilan onbellek seviyesi (0=yok, 1=L1, 2=L2, 3=L3)
     pub cache_level: AtomicU32,
-    /// Package preference
+    /// Paket tercihi -- tercih edilen soket/paket kimliği
     pub package_id: AtomicU32,
-    /// Last CPU this task ran on
+    /// Bu gorevin en son calıstıgı CPU -- yapıskan affinite hesaplamalarında kullanılır
     pub last_cpu: AtomicU32,
-    /// Migration count
+    /// Goc sayısı -- gorevin kac kez farklı bir CPU'ya tasındıgını sayar
     pub migrations: AtomicU64,
-    /// Affinity changes count
+    /// Affinite degisim sayısı -- politika veya maske kac kez guncellendi
     pub affinity_changes: AtomicU64,
-    /// Load balancing enabled
+    /// Yuk dengeleme etkin mi -- false ise gorev hicbir zaman baska CPU'ya tasinmaz
     pub load_balance: AtomicBool,
-    /// Sticky affinity (prefer last CPU)
+    /// Yapıskan affinite -- true ise gorev mumkunse son calıstıgı CPU'yu tercih eder
     pub sticky: AtomicBool,
-    /// Padding to avoid false sharing
+    /// Yanlıs paylasimi onlemek icin satır dolgusu -- farklı gorev kayıtları aynı onbellek satırına dusmez
     _padding: [u8; 64 - 56],
 }
 
 impl TaskAffinity {
-    /// Create new task affinity
+    /// Yeni gorev affinitesi olusturur; baslangicta tum CPU'lara izin verilir (Any politikası)
     pub fn new(task_id: u64) -> Self {
         Self {
             task_id,
             policy: AtomicU32::new(AffinityPolicy::Any as u32),
-            cpu_mask: AtomicU64::new(!0u64), // All CPUs allowed
+            cpu_mask: AtomicU64::new(!0u64), // Tum CPU'lara izin verilir; tum bitler 1
             preferred_mask: AtomicU64::new(0),
             avoid_mask: AtomicU64::new(0),
             numa_node: AtomicU32::new(0),
@@ -89,7 +95,7 @@ impl TaskAffinity {
         }
     }
     
-    /// Get current affinity policy
+    /// Mevcut affinite politikasını dondurur -- atomik okuma ile veri tutarlılıği saglanır
     pub fn get_policy(&self) -> AffinityPolicy {
         match self.policy.load(Ordering::Acquire) {
             0 => AffinityPolicy::Any,
@@ -103,86 +109,87 @@ impl TaskAffinity {
         }
     }
     
-    /// Set affinity policy
+    /// Affinite politikasını ayarlar ve degisim sayıcısını arttırır;
+    /// smp_wmb() ile diger cekirdeklerin yeni politikayı gormesi garanti altına alınır
     pub fn set_policy(&self, policy: AffinityPolicy) {
         self.policy.store(policy as u32, Ordering::Release);
         self.affinity_changes.fetch_add(1, Ordering::Relaxed);
         smp_wmb();
     }
     
-    /// Get CPU mask
+    /// CPU maskesini dondurur -- hangi CPU'lara izin verildiğini bit duzeninde gosterir
     pub fn get_cpu_mask(&self) -> CpuMask {
         self.cpu_mask.load(Ordering::Acquire)
     }
     
-    /// Set CPU mask
+    /// CPU maskesini ayarlar -- sched_setaffinity cagrısının dogrudan karsiligıdır
     pub fn set_cpu_mask(&self, mask: CpuMask) {
         self.cpu_mask.store(mask, Ordering::Release);
         self.affinity_changes.fetch_add(1, Ordering::Relaxed);
         smp_wmb();
     }
     
-    /// Get preferred CPU mask
+    /// Tercih edilen CPU maskesini dondurur -- Preferred politikasında once denenen CPU'lar
     pub fn get_preferred_mask(&self) -> CpuMask {
         self.preferred_mask.load(Ordering::Acquire)
     }
     
-    /// Set preferred CPU mask
+    /// Tercih edilen CPU maskesini ayarlar -- zorunlu degil, oncelikli CPU listesi
     pub fn set_preferred_mask(&self, mask: CpuMask) {
         self.preferred_mask.store(mask, Ordering::Release);
         smp_wmb();
     }
     
-    /// Get avoid CPU mask
+    /// Kacınılacak CPU maskesini dondurur -- bu CPU'lar mumkunse secilmez
     pub fn get_avoid_mask(&self) -> CpuMask {
         self.avoid_mask.load(Ordering::Acquire)
     }
     
-    /// Set avoid CPU mask
+    /// Kacınılacak CPU maskesini ayarlar -- kritik is akısları icin bazı CPU'ları devre dısı bırakmak icin kullanılır
     pub fn set_avoid_mask(&self, mask: CpuMask) {
         self.avoid_mask.store(mask, Ordering::Release);
         smp_wmb();
     }
     
-    /// Get NUMA node preference
+    /// NUMA dugumu tercihini dondurur -- bellek lokalitesini korumak icin kullanılır
     pub fn get_numa_node(&self) -> u32 {
         self.numa_node.load(Ordering::Acquire)
     }
     
-    /// Set NUMA node preference
+    /// NUMA dugumu tercihini ayarlar -- farklı NUMA dugumlerine erisim uzak bellek gecikmesi dogurur
     pub fn set_numa_node(&self, node: u32) {
         self.numa_node.store(node, Ordering::Release);
         smp_wmb();
     }
     
-    /// Get cache level preference
+    /// Onbellek seviyesi tercihini dondurur (0=yok, 1=L1, 2=L2, 3=L3)
     pub fn get_cache_level(&self) -> u32 {
         self.cache_level.load(Ordering::Acquire)
     }
     
-    /// Set cache level preference
+    /// Onbellek seviyesi tercihini ayarlar -- aynı L3 onbellegini paylasan CPU'larda calismak icin 3 sec
     pub fn set_cache_level(&self, level: u32) {
         self.cache_level.store(level, Ordering::Release);
         smp_wmb();
     }
     
-    /// Get package preference
+    /// Paket tercihini dondurur -- aynı fiziksel sokette kalmak gecikmeyi azaltır
     pub fn get_package_id(&self) -> u32 {
         self.package_id.load(Ordering::Acquire)
     }
     
-    /// Set package preference
+    /// Paket tercihini ayarlar -- gorevi belirli bir fiziksel sokete baglar
     pub fn set_package_id(&self, package: u32) {
         self.package_id.store(package, Ordering::Release);
         smp_wmb();
     }
     
-    /// Get last CPU
+    /// Son calısılan CPU'yu dondurur -- yapıskan affinite ve gecis istatistiklerinde kullanılır
     pub fn get_last_cpu(&self) -> u32 {
         self.last_cpu.load(Ordering::Acquire)
     }
     
-    /// Set last CPU
+    /// Son calısılan CPU'yu gunceller; CPU degismisse goc sayıcısı arttırılır
     pub fn set_last_cpu(&self, cpu: u32) {
         let old_cpu = self.last_cpu.load(Ordering::Acquire);
         if old_cpu != cpu {
@@ -192,12 +199,13 @@ impl TaskAffinity {
         }
     }
     
-    /// Get migration count
+    /// Goc sayısını dondurur -- yuksek deger affinite politikasının yetersiz kaldigını gosterebilir
     pub fn get_migration_count(&self) -> u64 {
         self.migrations.load(Ordering::Acquire)
     }
     
-    /// Check if CPU is allowed by affinity
+    /// CPU'nun affinite kuralları tarafından izin verilip verilmediğini kontrol eder.
+    /// Politikaya gore farklı maskeler ve topoloji bilgisi kullanılarak karar verilir.
     pub fn is_cpu_allowed(&self, cpu: u32) -> bool {
         let policy = self.get_policy();
         let cpu_bit = 1u64 << cpu;
@@ -217,7 +225,8 @@ impl TaskAffinity {
         }
     }
     
-    /// Check if CPU belongs to preferred NUMA node
+    /// CPU'nun tercih edilen NUMA dugumune ait olup olmadıgını kontrol eder.
+    /// NUMA dugumler arası gecis uzak bellege erisim (remote memory access) demektir.
     fn is_numa_cpu(&self, cpu: u32) -> bool {
         if let Some(topology) = get_system_topology() {
             if let Some(cpu_topology) = topology.get_cpu_topology(cpu) {
@@ -228,14 +237,15 @@ impl TaskAffinity {
         false
     }
     
-    /// Check if CPU shares preferred cache level
+    /// CPU'nun tercih edilen onbellek seviyesini paylasip paylasmadıgını kontrol eder.
+    /// Ayni L3 onbellegini paylasan CPU'lar arasi gecis bellek gecikmesini minimize eder.
     fn is_cache_cpu(&self, cpu: u32) -> bool {
         let cache_level = self.get_cache_level();
         if cache_level == 0 {
-            return true; // No preference
+            return true; // Tercih belirtilmemis; tum CPU'lara izin ver
         }
         
-        // Check if CPU shares cache with last CPU
+        // Bu CPU'nun son calısılan CPU ile aynı onbellek havuzunu paylasip paylasmadıgını kontrol et
         let last_cpu = self.get_last_cpu();
         if last_cpu == cpu {
             return true;
@@ -250,11 +260,12 @@ impl TaskAffinity {
         false
     }
     
-    /// Check if CPU is in preferred package
+    /// CPU'nun tercih edilen pakette (sokette) olup olmadıgını kontrol eder.
+    /// Aynı fiziksel soketteki CPU'lar arasi iletisim daha duş uk gecikmeli olmaktadır.
     fn is_package_cpu(&self, cpu: u32) -> bool {
         let package_id = self.get_package_id();
         if package_id == 0 {
-            return true; // No preference
+            return true; // Tercih belirtilmemis; tum CPU'lara izin ver
         }
         
         if let Some(topology) = get_system_topology() {
@@ -267,7 +278,7 @@ impl TaskAffinity {
         false
     }
     
-    /// Get best CPU for this task
+    /// Bu gorev icin en iyi CPU'yu secip dondurur; politikaya gore farklı secim stratejileri uygulanır
     pub fn get_best_cpu(&self, available_cpus: &[u32]) -> Option<u32> {
         let policy = self.get_policy();
         
@@ -282,7 +293,7 @@ impl TaskAffinity {
         }
     }
     
-    /// Get any available CPU
+    /// Herhangi bir musait CPU'yu dondurur; sticky ise son CPU once denenir
     fn get_any_cpu(&self, available_cpus: &[u32]) -> Option<u32> {
         if self.sticky.load(Ordering::Acquire) {
             let last_cpu = self.get_last_cpu();
@@ -291,15 +302,15 @@ impl TaskAffinity {
             }
         }
         
-        // Return first available CPU
+        // Listedeki ilk musait CPU'yu dondur
         available_cpus.first().copied()
     }
     
-    /// Get fixed affinity CPU
+    /// Sabit affinite politikası icin CPU sec -- yalnızca cpu_mask'te isaretli CPU'lar gecerlidir
     fn get_fixed_cpu(&self, available_cpus: &[u32]) -> Option<u32> {
         let mask = self.get_cpu_mask();
         
-        // Try last CPU first if sticky
+        // Sticky ise once son CPU'yu dene
         if self.sticky.load(Ordering::Acquire) {
             let last_cpu = self.get_last_cpu();
             if available_cpus.contains(&last_cpu) && ((mask >> last_cpu) & 1) != 0 {
@@ -307,7 +318,7 @@ impl TaskAffinity {
             }
         }
         
-        // Find first allowed CPU
+        // Maskede isaretli ilk CPU'yu bul
         for &cpu in available_cpus {
             if ((mask >> cpu) & 1) != 0 {
                 return Some(cpu);
@@ -317,12 +328,12 @@ impl TaskAffinity {
         None
     }
     
-    /// Get preferred CPU
+    /// Tercihli affinite politikası icin CPU sec -- once tercihli, sonra kacınılmayan, en son herhangi biri
     fn get_preferred_cpu(&self, available_cpus: &[u32]) -> Option<u32> {
         let preferred_mask = self.get_preferred_mask();
         let avoid_mask = self.get_avoid_mask();
         
-        // Try last CPU first if sticky and not avoided
+        // Sticky ise ve kacınılmıyorsa once son CPU'yu dene
         if self.sticky.load(Ordering::Acquire) {
             let last_cpu = self.get_last_cpu();
             if available_cpus.contains(&last_cpu) && ((avoid_mask >> last_cpu) & 1) == 0 {
@@ -330,14 +341,14 @@ impl TaskAffinity {
             }
         }
         
-        // Try preferred CPUs
+        // Tercihli CPU'ları dene (avoid maskesinde olmayan)
         for &cpu in available_cpus {
             if ((preferred_mask >> cpu) & 1) != 0 && ((avoid_mask >> cpu) & 1) == 0 {
                 return Some(cpu);
             }
         }
         
-        // Try non-avoided CPUs
+        // Kacınılmayan herhangi bir CPU'yu dene
         for &cpu in available_cpus {
             if ((avoid_mask >> cpu) & 1) == 0 {
                 return Some(cpu);
@@ -347,11 +358,11 @@ impl TaskAffinity {
         None
     }
     
-    /// Get avoid CPU
+    /// Kacınma affinite politikası icin CPU sec -- avoid maskesinde olmayan CPU'lar tercih edilir
     fn get_avoid_cpu(&self, available_cpus: &[u32]) -> Option<u32> {
         let avoid_mask = self.get_avoid_mask();
         
-        // Try last CPU first if sticky and not avoided
+        // Sticky ise ve kacınılmıyorsa once son CPU'yu dene
         if self.sticky.load(Ordering::Acquire) {
             let last_cpu = self.get_last_cpu();
             if available_cpus.contains(&last_cpu) && ((avoid_mask >> last_cpu) & 1) == 0 {
@@ -359,7 +370,7 @@ impl TaskAffinity {
             }
         }
         
-        // Find first non-avoided CPU
+        // Kacınılmayan ilk CPU'yu bul
         for &cpu in available_cpus {
             if ((avoid_mask >> cpu) & 1) == 0 {
                 return Some(cpu);
@@ -369,11 +380,11 @@ impl TaskAffinity {
         None
     }
     
-    /// Get NUMA-aware CPU
+    /// NUMA farkında CPU sec -- once tercih edilen NUMA dugumundeki CPU'lar denenir
     fn get_numa_cpu(&self, available_cpus: &[u32]) -> Option<u32> {
         let numa_node = self.get_numa_node();
         
-        // Find CPUs in preferred NUMA node
+        // Tercih edilen NUMA dugumundeki CPU'ları bul
         let numa_cpus: Vec<u32> = available_cpus.iter()
             .filter(|&&cpu| self.is_numa_cpu(cpu))
             .copied()
@@ -383,11 +394,11 @@ impl TaskAffinity {
             return self.get_any_cpu(&numa_cpus);
         }
         
-        // Fallback to any CPU
+        // NUMA eslesme yoksa herhangi bir CPU'ya don
         self.get_any_cpu(available_cpus)
     }
     
-    /// Get cache-aware CPU
+    /// Onbellek farkında CPU sec -- son CPU ile aynı onbellek havuzunu paylasan CPU'lar tercih edilir
     fn get_cache_cpu(&self, available_cpus: &[u32]) -> Option<u32> {
         let cache_level = self.get_cache_level();
         if cache_level == 0 {
@@ -398,7 +409,7 @@ impl TaskAffinity {
         let cache_level_u8 = cache_level.min(u8::MAX as u32) as u8;
         let cache_cpus = get_cache_sharing_cpus(last_cpu, cache_level_u8);
         
-        // Find CPUs sharing cache
+        // Ayni onbellek havuzunu paylasan CPU'ları bul
         let shared_cpus: Vec<u32> = available_cpus.iter()
             .filter(|&&cpu| cache_cpus.contains(&cpu))
             .copied()
@@ -408,11 +419,11 @@ impl TaskAffinity {
             return self.get_any_cpu(&shared_cpus);
         }
         
-        // Fallback to any CPU
+        // Eslesme yoksa herhangi bir CPU'ya don
         self.get_any_cpu(available_cpus)
     }
     
-    /// Get package-aware CPU
+    /// Paket farkında CPU sec -- ayni fiziksel soketteki CPU'lar onceliklidir
     fn get_package_cpu(&self, available_cpus: &[u32]) -> Option<u32> {
         let package_id = self.get_package_id();
         if package_id == 0 {
@@ -421,7 +432,7 @@ impl TaskAffinity {
         
         let package_cpus = get_package_cpus(self.get_last_cpu());
         
-        // Find CPUs in same package
+        // Ayni paketteki CPU'ları bul -- bu CPU'lar arasi L3 paylasimi ve QPI/UPI gecikmeleri daha dusuktur
         let same_package_cpus: Vec<u32> = available_cpus.iter()
             .filter(|&&cpu| package_cpus.contains(&cpu))
             .copied()
@@ -431,23 +442,25 @@ impl TaskAffinity {
             return self.get_any_cpu(&same_package_cpus);
         }
         
-        // Fallback to any CPU
+        // Ayni pakette CPU yoksa herhangi birine don
         self.get_any_cpu(available_cpus)
     }
     
-    /// Set load balancing
+    /// Yuk dengelemeyi etkinlestirir/devre dısı bırakır;
+    /// devre dısı bırakılirsa gorev hicbir zaman baska CPU'ya tasinmaz
     pub fn set_load_balance(&self, enabled: bool) {
         self.load_balance.store(enabled, Ordering::Release);
         smp_wmb();
     }
     
-    /// Set sticky affinity
+    /// Yapıskan affiniteyi ayarlar -- true ise gorev mumkunse son calıstıgı CPU'ya donmeye calısır;
+    /// bu, onbellek ısınmasını (cache warm-up) koruyarak performansı artırır
     pub fn set_sticky(&self, enabled: bool) {
         self.sticky.store(enabled, Ordering::Release);
         smp_wmb();
     }
     
-    /// Get affinity statistics
+    /// Affinite istatistiklerini dondurur -- politika, maskeler, goc sayısı ve diger metrikler
     pub fn get_stats(&self) -> AffinityStats {
         AffinityStats {
             policy: self.get_policy(),
@@ -466,7 +479,7 @@ impl TaskAffinity {
     }
 }
 
-/// Affinity statistics
+/// Affinite istatistik kaydı -- bir gorevin affinite politikası ve calısma gecmisinin anlik goruntusunu tutar
 #[derive(Debug, Clone, Copy)]
 pub struct AffinityStats {
     pub policy: AffinityPolicy,
@@ -483,25 +496,26 @@ pub struct AffinityStats {
     pub sticky: bool,
 }
 
-/// CPU affinity manager
+/// CPU affinite yoneticisi -- sistemdeki tum gorevlerin affinite politikalarını merkezi olarak yonetir.
+/// Yuk dengeleme tetiklemesi, gorev gecisi ve CPU yuk izleme bu yapiyla gerceklestirilir.
 pub struct AffinityManager {
-    /// Maximum number of CPUs
+    /// Sistemdeki maksimum CPU sayısı -- basılatma sırasında topolojiden alinir
     max_cpus: u32,
-    /// Task affinity descriptors
+    /// Gorev affinite tanımlayıcıları -- gorev kimligine gore indekslenir
     task_affinities: Vec<RcuPtr<TaskAffinity>>,
-    /// CPU load tracking
+    /// CPU yuk izleme -- her CPU'nun mevcut gorev yogunlugunu tutar
     cpu_loads: Vec<AtomicU32>,
-    /// Global affinity policy
-    global_policy: AtomicU32, // AffinityPolicy as u32
-    /// Load balancing enabled
+    /// Genel affinite politikası -- tum gorevlere uygulanabilecek varsayilan politika
+    global_policy: AtomicU32, // AffinityPolicy u32 olarak atomik saklanır
+    /// Yuk dengeleme etkin mi -- false ise hicbir gorev baska CPU'ya tasinmaz
     load_balance_enabled: AtomicBool,
-    /// Migration threshold
+    /// Gecis esligi -- bu yuzdeyi asan CPU'lardaki gorevler tasinır
     migration_threshold: AtomicU32,
-    /// Statistics
+    /// Istatistikler -- affinite olaylarının sayisal ozetini tutar
     stats: AffinityManagerStats,
 }
 
-/// Affinity manager statistics
+/// Affinite yoneticisi istatistikleri -- toplu affinite aktivitesinin sayisal takibi
 #[derive(Debug)]
 pub struct AffinityManagerStats {
     pub total_affinities: AtomicU64,
@@ -547,12 +561,12 @@ impl AffinityManagerStats {
 }
 
 impl AffinityManager {
-    /// Create new affinity manager
+    /// Yeni affinite yoneticisi olusturur; baslangicta tum CPU'lar icin yuk sayaclari sıfırlanır
     pub fn new(max_cpus: u32) -> Self {
         let mut task_affinities = Vec::new();
         let mut cpu_loads = Vec::new();
         
-        // Initialize CPU load tracking
+        // Her CPU icin yuk sayıcıları basılat -- yuk dengeleme kararlarında kullanılır
         for _ in 0..max_cpus {
             cpu_loads.push(AtomicU32::new(0));
         }
@@ -563,17 +577,17 @@ impl AffinityManager {
             cpu_loads,
             global_policy: AtomicU32::new(AffinityPolicy::Any as u32),
             load_balance_enabled: AtomicBool::new(true),
-            migration_threshold: AtomicU32::new(80), // 80% load threshold
+            migration_threshold: AtomicU32::new(80), // %80 yuk esligi -- bu degerin ustundeki CPU'lardan gorev tasinir
             stats: AffinityManagerStats::new(),
         }
     }
     
-    /// Create task affinity
+    /// Gorev affinitesi olusturur -- yeni bir gorev icin varsayilan affinite kaydı basılatır
     pub fn create_task_affinity(&mut self, task_id: u64) -> RcuPtr<TaskAffinity> {
         let affinity = Box::new(TaskAffinity::new(task_id));
         let affinity_ptr = RcuPtr::new(Box::into_raw(affinity));
         
-        // Ensure vector is large enough
+        // Vektoru gorev kimligini karsilayacak buyuklukte genislet
         while self.task_affinities.len() <= task_id as usize {
             self.task_affinities.push(RcuPtr::new(core::ptr::null_mut()));
         }
@@ -584,7 +598,7 @@ impl AffinityManager {
         affinity_ptr
     }
     
-    /// Get task affinity
+    /// Gorev affinitesini dondurur -- gorev kimligine gore RCU korumalı affinite isaretcisini al
     pub fn get_task_affinity(&self, task_id: u64) -> Option<RcuPtr<TaskAffinity>> {
         if task_id as usize >= self.task_affinities.len() {
             return None;
@@ -598,21 +612,21 @@ impl AffinityManager {
         Some(affinity_ptr)
     }
     
-    /// Remove task affinity
+    /// Gorev affinitesini siler -- gorev sonlandirildıginda kaynagi serbest bırakmak icin cagir
     pub fn remove_task_affinity(&mut self, task_id: u64) {
         if (task_id as usize) < self.task_affinities.len() {
             self.task_affinities[task_id as usize] = RcuPtr::new(core::ptr::null_mut());
         }
     }
     
-    /// Get best CPU for task
+    /// Gorev icin en iyi CPU'yu bulur -- affinite politikası, CPU yukleri ve topoloji bilgisi kullanılır
     pub fn get_best_cpu_for_task(&self, task_id: u64) -> Option<u32> {
         let affinity = match self.get_task_affinity(task_id) {
             Some(affinity) => affinity,
             None => return None,
         };
         
-        // Get available CPUs (online and not overloaded)
+        // Musait CPU'ları getir (actif ve asirı yuklu olmayan)
         let available_cpus = self.get_available_cpus();
         
         if available_cpus.is_empty() {
@@ -622,27 +636,27 @@ impl AffinityManager {
         let best_cpu = affinity.read().get_best_cpu(&available_cpus);
         
         if let Some(cpu) = best_cpu {
-            // Update last CPU
+            // Son calısılan CPU kaydını guncelle
             affinity.read().set_last_cpu(cpu);
             
-            // Update CPU load
+            // CPU yukunu arttır -- bu gorev artık bu CPU'ya atandı
             self.update_cpu_load(cpu, 1);
         }
         
         best_cpu
     }
     
-    /// Get available CPUs
+    /// Musait CPU'ları dondurur -- acik ve asirı yuklu olmayan CPU'lar secim havuzuna girer
     fn get_available_cpus(&self) -> Vec<u32> {
         let mut available = Vec::new();
         
         for cpu_id in 0..self.max_cpus {
-            // Check if CPU is online
+            // CPU'nun acik olup olmadıgını kontrol et
             if !self.is_cpu_online(cpu_id) {
                 continue;
             }
             
-            // Check if CPU is overloaded (if load balancing is enabled)
+            // Yuk dengeleme aktifse CPU'nun asirı yuklu olup olmadıgını kontrol et
             if self.load_balance_enabled.load(Ordering::Acquire) {
                 let load = self.cpu_loads[cpu_id as usize].load(Ordering::Acquire);
                 let threshold = self.migration_threshold.load(Ordering::Acquire);
@@ -658,14 +672,14 @@ impl AffinityManager {
         available
     }
     
-    /// Check if CPU is online
+    /// CPU'nun acik (online) olup olmadıgını kontrol eder.
+    /// Gercek uygulamada hotplug yoneticisiyle entegre edilir.
     fn is_cpu_online(&self, cpu_id: u32) -> bool {
-        // This would check with hotplug manager
-        // For now, assume all CPUs are online
+        // Hotplug yoneticisiyle denetlenmeli; simdilik tum CPU'lar acik kabul edilir
         cpu_id < self.max_cpus
     }
     
-    /// Update CPU load
+    /// CPU yukunu gunceller -- pozitif delta ekleme, negatif delta cıkarma anlamına gelir
     fn update_cpu_load(&self, cpu_id: u32, delta: i32) {
         if cpu_id as usize >= self.cpu_loads.len() {
             return;
@@ -682,7 +696,8 @@ impl AffinityManager {
         smp_wmb();
     }
     
-    /// Balance load across CPUs
+    /// CPU'lar arası yuku dengeler -- asirı yuklu CPU'lardan az yuklu olanlara gorev tasinir.
+    /// Linux'taki load_balance() fonksiyonuna benzer sekilde calısır.
     pub fn balance_load(&self) {
         if !self.load_balance_enabled.load(Ordering::Acquire) {
             return;
@@ -692,7 +707,7 @@ impl AffinityManager {
         let mut overloaded_cpus = Vec::new();
         let mut underloaded_cpus = Vec::new();
         
-        // Find overloaded and underloaded CPUs
+        // Asirı yuklu ve az yuklu CPU'ları bul -- tasinım kararı buradan verilir
         for cpu_id in 0..self.max_cpus {
             let load = self.cpu_loads[cpu_id as usize].load(Ordering::Acquire);
             
@@ -703,13 +718,13 @@ impl AffinityManager {
             }
         }
         
-        // Migrate tasks from overloaded to underloaded CPUs
+        // Asirı yuklu CPU'lardan az yuklu olanlara gorevleri tasin
         for &(overloaded_cpu, _) in &overloaded_cpus {
             if underloaded_cpus.is_empty() {
                 break;
             }
             
-            // Find tasks that can be migrated
+            // Tasinabilecek gorevleri bul -- affinite izin veriyorsa gecis gerceklestirilir
             let migratable_tasks = self.find_migratable_tasks(overloaded_cpu);
             
             for task_id in migratable_tasks {
@@ -726,36 +741,37 @@ impl AffinityManager {
         }
     }
     
-    /// Find tasks that can be migrated from CPU
+    /// Belirli bir CPU'dan tasinabilecek gorevleri bulur.
+    /// Gercek uygulamada o CPU'da calısan gorevler zamanlayicidan sorgulanır.
     fn find_migratable_tasks(&self, cpu_id: u32) -> Vec<u64> {
         let mut migratable = Vec::new();
         
-        // This would find tasks running on the specified CPU
-        // For now, return empty list
+        // O CPU'da calısan gorevler zamanlayicidan alinmali; su an bos liste dondur
         migratable
     }
     
-    /// Migrate task to different CPU
+    /// Gorevi farklı bir CPU'ya tasinır -- affinite politikası uygunsa gorev gecisi gerceklestirilir.
+    /// task_migration_notify() cagrılarıyla benzer semantige sahiptir.
     fn migrate_task(&self, task_id: u64, target_cpu: u32) -> bool {
         let affinity = match self.get_task_affinity(task_id) {
             Some(affinity) => affinity,
             None => return false,
         };
         
-        // Check if task can run on target CPU
+        // Gorevin hedef CPU'da calısıp calısamayacagını kontrol et
         if !affinity.read().is_cpu_allowed(target_cpu) {
             return false;
         }
         
-        // Update CPU loads
+        // CPU yuklerini guncelle -- kaynak CPU'dan cıkar, hedef CPU'ya ekle
         let current_cpu = affinity.read().get_last_cpu();
         self.update_cpu_load(current_cpu, -1);
         self.update_cpu_load(target_cpu, 1);
         
-        // Update affinity
+        // Affinite kaydini guncelle -- gorev bir sonraki zamanlama turunda yeni CPU'ya atanir
         affinity.read().set_last_cpu(target_cpu);
         
-        // Record migration
+        // Goc olayini kaydet -- istatistik ve hata ayıklama icin
         affinity.read().migrations.fetch_add(1, Ordering::Relaxed);
         self.stats.record_migration();
         
@@ -765,13 +781,13 @@ impl AffinityManager {
         true
     }
     
-    /// Set global affinity policy
+    /// Genel affinite politikasını ayarlar -- tum yeni gorevler bu politikayla baslatilabilir
     pub fn set_global_policy(&self, policy: AffinityPolicy) {
         self.global_policy.store(policy as u32, Ordering::Release);
         smp_wmb();
     }
     
-    /// Get global affinity policy
+    /// Genel affinite politikasını dondurur
     pub fn get_global_policy(&self) -> AffinityPolicy {
         match self.global_policy.load(Ordering::Acquire) {
             0 => AffinityPolicy::Any,
@@ -785,19 +801,20 @@ impl AffinityManager {
         }
     }
     
-    /// Enable/disable load balancing
+    /// Yuk dengelemeyi etkinlestirir veya devre dısı bırakır;
+    /// devre dısında hicbir gorev otomatik olarak tasinmaz
     pub fn set_load_balance_enabled(&self, enabled: bool) {
         self.load_balance_enabled.store(enabled, Ordering::Release);
         smp_wmb();
     }
     
-    /// Set migration threshold
+    /// Gecis esligini ayarlar -- bu yuzdeyi asan yuk, gorev tasinimini tetikler
     pub fn set_migration_threshold(&self, threshold: u32) {
         self.migration_threshold.store(threshold, Ordering::Release);
         smp_wmb();
     }
     
-    /// Get CPU load
+    /// Belirtilen CPU'nun mevcut yukunu dondurur
     pub fn get_cpu_load(&self, cpu_id: u32) -> Option<u32> {
         if cpu_id as usize >= self.cpu_loads.len() {
             return None;
@@ -806,7 +823,7 @@ impl AffinityManager {
         Some(self.cpu_loads[cpu_id as usize].load(Ordering::Acquire))
     }
     
-    /// Get all CPU loads
+    /// Tum CPU'lar icin (cpu_id, yuk) cifti listesini dondurur
     pub fn get_all_cpu_loads(&self) -> Vec<(u32, u32)> {
         let mut loads = Vec::new();
         
@@ -819,17 +836,18 @@ impl AffinityManager {
         loads
     }
     
-    /// Get manager statistics
+    /// Yonetici istatistiklerini dondurur: (toplam_affinite, toplam_goc, yuk_dengeleme, affinite_degisim)
     pub fn get_stats(&self) -> (u64, u64, u64, u64) {
         self.stats.get_stats()
     }
 }
 
-/// Global affinity manager instance
+/// Global affinite yonetici ornegi -- tum gorevlerin affinite bilgisi buradan erisilen tek ornekle yonetilir
 static mut AFFINITY_MANAGER: Option<AffinityManager> = None;
 static AFFINITY_INIT: AtomicBool = AtomicBool::new(false);
 
-/// Initialize affinity subsystem
+/// CPU affinite alt sistemini baslatir -- maksimum CPU sayısı icin AffinityManager ornegi olusturulur.
+/// Bu fonksiyon topoloji baslatma (topology::init) sonrasında cagrilmalidir.
 pub fn init(max_cpus: u32) {
     if AFFINITY_INIT.load(Ordering::Acquire) {
         return;
@@ -849,7 +867,7 @@ pub fn init(max_cpus: u32) {
     crate::serial_println!("Affinity: CPU affinity initialized");
 }
 
-/// Get affinity manager
+/// Global affinite yoneticisine erisim saglar; baslatılmamissa None dondurur
 pub fn get_manager() -> Option<&'static AffinityManager> {
     if !AFFINITY_INIT.load(Ordering::Acquire) {
         return None;
@@ -858,11 +876,10 @@ pub fn get_manager() -> Option<&'static AffinityManager> {
     unsafe { AFFINITY_MANAGER.as_ref() }
 }
 
-/// Convenience functions
+/// Kolaylik fonksiyonları -- modul duzeyi API'si, calisan koda yoneticiye dogrudan erisim gerektirmez
 pub fn create_task_affinity(task_id: u64) -> Option<RcuPtr<TaskAffinity>> {
     if let Some(manager) = get_manager() {
-        // This would need mutable access in real implementation
-        // For now, return None
+        // Gercek uygulamada degistirilebilir erisim gerekir; su an None dondurulur
         None
     } else {
         None

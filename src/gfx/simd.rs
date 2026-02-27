@@ -108,3 +108,42 @@ pub unsafe fn stream_copy(src: *const u8, dst: *mut u8, len: usize) {
         core::ptr::copy_nonoverlapping(src, dst, len);
     }
 }
+
+/// `count` adet ardarda gelen `u32` hücresiö `val` ile doldurur.
+///
+/// ## `rep stosd` Nedir?
+///
+/// `STOSD` = “Store String Double-word” — `[RDI] = EAX` yaz, `RDI += 4`, `RCX--`.
+/// `REP` öneki bunu `RCX` sıfır olana kadar tekrarlar — tek bir talimat olarak.
+///
+/// ```asm
+///   mov rcx, count    ; kaç kez
+///   mov rdi, dst      ; nereye
+///   mov eax, val      ; ne yaz
+///   rep stosd         ; döngü (CPU mikroop özel-case ile optimize eder)
+/// ```
+///
+/// ## Neden AVX/SSE Değil?
+///
+/// `rep stosd` basit fill için AVX2 yaklasan hızda çalışır ve CPU bunu
+/// dahili olarak özel “fast string” mikroop'larıyla işler. Ayrıca YMM
+/// register kaydetme/yükleme overhead'i gerekmez.
+///
+/// Framebuffer temizleme (tek renk) için ideal, çok renklerde
+/// `stream_copy` + src buffer daha verimlidir.
+///
+/// # Safety
+/// `dst`, `count * 4` byte yazım için geçerli ve hizalı olmalıdır.
+pub unsafe fn fill_u32(dst: *mut u32, val: u32, count: usize) {
+    if count == 0 {
+        return;
+    }
+    // Use rep stosd for bulk fill
+    core::arch::asm!(
+        "rep stosd",
+        inout("rcx") count => _,
+        inout("rdi") dst   => _,
+        in("eax") val,
+        options(nostack, preserves_flags)
+    );
+}

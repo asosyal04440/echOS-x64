@@ -406,7 +406,7 @@ pub struct SeccompStats {
 }
 
 impl SeccompManager {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             filters: Mutex::new(BTreeMap::new()),
             next_filter_id: AtomicU32::new(1),

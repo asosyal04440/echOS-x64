@@ -196,52 +196,7 @@ pub(crate) fn claim_device(driver: *mut PciDriver, dev: *mut PciDev, bus: u8, de
 
 #[no_mangle]
 pub unsafe extern "C" fn pci_register_driver(driver: *mut PciDriver) -> i32 {
-    if driver.is_null() {
-        return -1;
-    }
-    let id_table = (*driver).id_table;
-    if id_table.is_null() {
-        return -1;
-    }
-    let devices = crate::drivers::pci::scan();
-    let mut claimed = 0;
-    for dev in devices {
-        if is_claimed(dev.bus, dev.device, dev.function) {
-            continue;
-        }
-        let mut id_ptr = id_table;
-        loop {
-            let id_ref = &*id_ptr;
-            if id_table_end(id_ref) {
-                break;
-            }
-            if id_match(&dev, id_ref) {
-                let linux_dev = create_pci_dev(dev.bus, dev.device, dev.function);
-                if linux_dev.is_null() {
-                    break;
-                }
-                (*linux_dev).dev.driver = driver as *mut c_void;
-                if let Some(probe) = (*driver).probe {
-                    let rc = probe(linux_dev, id_ref as *const PciDeviceId);
-                    if rc == 0 {
-                        claim_device(driver, linux_dev, dev.bus, dev.device, dev.function);
-                        crate::shim_layer::printk(
-                            b"pci_register_driver: bound device\n\0".as_ptr() as *const c_char,
-                        );
-                        claimed += 1;
-                        break;
-                    }
-                }
-                destroy_pci_dev(linux_dev);
-            }
-            id_ptr = id_ptr.add(1);
-        }
-    }
-    if claimed > 0 {
-        0
-    } else {
-        -1
-    }
+    crate::ironshim_bridge::safe_pci_register_driver(driver)
 }
 
 #[no_mangle]
@@ -262,6 +217,16 @@ pub unsafe extern "C" fn pci_unregister_driver(driver: *mut PciDriver) {
             continue;
         }
         i += 1;
+    }
+
+    let name = driver_name(driver);
+    let removed = crate::ironshim_bridge::unregister_isolated_driver_by_name(&name);
+    if removed > 0 {
+        crate::serial_println!(
+            "[linux_glue] Isolated slots removed for '{}': {}",
+            name,
+            removed
+        );
     }
 }
 
@@ -343,6 +308,7 @@ static mut VIRTIO_GPU_DRIVER: PciDriver = PciDriver {
 };
 
 pub fn init() {
+    crate::ironshim_bridge::init_ironshim_bridge();
     unsafe {
         let _ = pci_register_driver(&raw mut VIRTIO_GPU_DRIVER as *mut PciDriver);
     }

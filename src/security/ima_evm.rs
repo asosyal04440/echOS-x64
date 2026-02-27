@@ -1,6 +1,7 @@
 //! # IMA/EVM
 //!
-//! Integrity Measurement Architecture and Extended Verification Module.
+//! Bütünlük Ölçüm Mimarisi (Integrity Measurement Architecture) ve
+//! Genişletilmiş Doğrulama Modülü (Extended Verification Module).
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,10 +11,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// IMA CONSTANTS
+// IMA SABİTLERİ
 // ============================================================================
 
-/// IMA actions
+/// IMA eylemleri
 pub const IMA_MEASURE: u32 = 0x01;
 pub const IMA_DONT_MEASURE: u32 = 0x02;
 pub const IMA_APPRAISE: u32 = 0x04;
@@ -22,7 +23,7 @@ pub const IMA_AUDIT: u32 = 0x10;
 pub const IMA_HASH: u32 = 0x20;
 pub const IMA_DIGSIG: u32 = 0x40;
 
-/// IMA appraisal flags
+/// IMA değerlendirme bayrakları
 pub const IMA_APPRAISE_ENFORCE: u32 = 0x01;
 pub const IMA_APPRAISE_FIX: u32 = 0x02;
 pub const IMA_APPRAISE_LOG: u32 = 0x04;
@@ -31,31 +32,31 @@ pub const IMA_APPRAISE_FIRMWARE: u32 = 0x10;
 pub const IMA_APPRAISE_POLICY: u32 = 0x20;
 pub const IMA_APPRAISE_KEXEC: u32 = 0x40;
 
-/// IMA hash algorithms
+/// IMA özet algoritmaları
 pub const IMA_HASH_SHA1: u32 = 1;
 pub const IMA_HASH_SHA256: u32 = 2;
 pub const IMA_HASH_SHA512: u32 = 3;
 
-/// EVM types
+/// EVM türleri
 pub const EVM_XATTR_HMAC: u32 = 0x01;
 pub const EVM_XATTR_SIG: u32 = 0x02;
 pub const EVM_XATTR_DIGSIG: u32 = 0x03;
 
 // ============================================================================
-// IMA TEMPLATE
+// IMA ŞABLonu
 // ============================================================================
 
 #[derive(Clone, Debug)]
 pub struct ImaTemplateEntry {
-    /// PCR index
+    /// PCR indeksi
     pub pcr: u32,
-    /// Template name
+    /// Şablon adı
     pub template_name: String,
-    /// Digest
+    /// Özet değeri
     pub digest: Vec<u8>,
-    /// Event name
+    /// Olay adı
     pub event_name: String,
-    /// Event data
+    /// Olay verisi
     pub event_data: Vec<u8>,
 }
 
@@ -72,23 +73,23 @@ impl ImaTemplateEntry {
 }
 
 // ============================================================================
-// IMA MEASUREMENT
+// IMA ÖLÇÜMÜ
 // ============================================================================
 
 pub struct ImaMeasurement {
-    /// File path
+    /// Dosya yolu
     pub path: String,
-    /// File hash
+    /// Dosya özeti
     pub hash: [u8; 32],
-    /// Hash algorithm
+    /// Özet algoritması
     pub hash_algo: u32,
-    /// PCR index
+    /// PCR indeksi
     pub pcr: u32,
-    /// Template
+    /// Şablon
     pub template: String,
-    /// Timestamp
+    /// Zaman damgası
     pub timestamp: u64,
-    /// Is valid
+    /// Geçerli mi
     pub valid: AtomicBool,
 }
 
@@ -107,26 +108,26 @@ impl ImaMeasurement {
 }
 
 // ============================================================================
-// IMA RULE
+// IMA KURALI
 // ============================================================================
 
 #[derive(Clone, Debug)]
 pub struct ImaRule {
-    /// Rule ID
+    /// Kural kimliği
     pub id: u32,
-    /// Action mask
+    /// Eylem maskesi
     pub action: u32,
-    /// Measurement flags
+    /// Ölçüm bayrakları
     pub flags: u32,
-    /// Path pattern
+    /// Yol deseni
     pub path: String,
-    /// UID
+    /// Kullanıcı kimliği
     pub uid: Option<u32>,
-    /// Function
+    /// İşlev
     pub func: Option<String>,
-    /// Mask
+    /// Maske
     pub mask: Option<String>,
-    /// FSMagic
+    /// Dosya sistemi sihri
     pub fsmagic: Option<u64>,
 }
 
@@ -144,18 +145,18 @@ impl ImaRule {
         }
     }
 
-    /// Check if file matches rule
+    /// Dosyanın kuralla eşleşip eşleşmediğini kontrol eder
     pub fn matches(&self, path: &str, _uid: u32, _func: &str, _mask: &str) -> bool {
         if self.path == "*" {
             return true;
         }
-        
-        // Simple glob matching
+
+        // Basit glob eşleşmesi
         if self.path.ends_with('*') {
             let prefix = &self.path[..self.path.len() - 1];
             return path.starts_with(prefix);
         }
-        
+
         path == self.path
     }
 }
@@ -165,24 +166,24 @@ impl ImaRule {
 // ============================================================================
 
 pub struct EvmHmac {
-    /// HMAC value
+    /// HMAC değeri
     pub hmac: [u8; 32],
-    /// Protected xattrs hash
+    /// Korunan genişletilmiş öznitelikler özeti
     pub xattr_hash: [u8; 32],
-    /// Is valid
+    /// Geçerli mi
     pub valid: AtomicBool,
 }
 
 impl EvmHmac {
     pub fn calculate(_xattrs: &BTreeMap<String, Vec<u8>>, key: &[u8]) -> Self {
-        // Calculate HMAC over xattrs
+        // Genişletilmiş öznitelikler üzerinden HMAC hesapla
         let mut hmac = [0u8; 32];
-        
-        // Simplified HMAC calculation
+
+        // Basitleştirilmiş HMAC hesaplaması
         for (i, byte) in key.iter().enumerate() {
             hmac[i % 32] ^= byte;
         }
-        
+
         Self {
             hmac,
             xattr_hash: [0u8; 32],
@@ -190,36 +191,36 @@ impl EvmHmac {
         }
     }
 
-    /// Verify HMAC
+    /// HMAC doğrular
     pub fn verify(&self, _xattrs: &BTreeMap<String, Vec<u8>>, _key: &[u8]) -> bool {
         self.valid.load(Ordering::Relaxed)
     }
 }
 
 // ============================================================================
-// IMA/EVM MANAGER
+// IMA/EVM YÖNETİCİSİ
 // ============================================================================
 
 pub struct ImaEvmManager {
-    /// IMA measurements list
+    /// IMA ölçüm listesi
     pub measurements: Mutex<Vec<ImaMeasurement>>,
-    /// IMA rules
+    /// IMA kuralları
     pub rules: Mutex<Vec<ImaRule>>,
-    /// EVM HMAC cache
+    /// EVM HMAC önbelleği
     pub evm_cache: Mutex<BTreeMap<String, EvmHmac>>,
-    /// EVM key
+    /// EVM anahtarı
     pub evm_key: Mutex<Vec<u8>>,
-    /// PCR bank
+    /// PCR bankası
     pub pcr_values: Mutex<[Vec<u8>; 24]>,
-    /// Is IMA enabled
+    /// IMA etkin mi
     pub ima_enabled: AtomicBool,
-    /// Is EVM enabled
+    /// EVM etkin mi
     pub evm_enabled: AtomicBool,
-    /// Appraisal mode
+    /// Değerlendirme modu
     pub appraisal_mode: AtomicU32,
-    /// Next rule ID
+    /// Sonraki kural kimliği
     pub next_rule_id: AtomicU32,
-    /// Statistics
+    /// İstatistikler
     pub stats: Mutex<ImaEvmStats>,
 }
 
@@ -252,14 +253,14 @@ impl ImaEvmManager {
         }
     }
 
-    /// Initialize
+    /// Başlatır
     pub fn init(&self) {
-        // Add default rules
+        // Varsayılan kuralları ekle
         self.add_default_rules();
-        
+
         self.ima_enabled.store(true, Ordering::SeqCst);
         self.evm_enabled.store(true, Ordering::SeqCst);
-        
+
         crate::serial_println!("[IMA/EVM] Initialized");
     }
 
@@ -272,50 +273,50 @@ impl ImaEvmManager {
             ("appraise fsmagic=0x9fa1", IMA_APPRAISE), // procfs
             ("appraise fsmagic=0x62656572", IMA_APPRAISE), // sysfs
         ];
-        
+
         for (rule_str, action) in default_rules {
             let id = self.next_rule_id.fetch_add(1, Ordering::SeqCst);
             let rule = ImaRule::new(id, action, "*");
             self.rules.lock().push(rule);
         }
-        
+
         let mut stats = self.stats.lock();
         stats.rules_count = default_rules.len() as u32;
     }
 
-    /// Measure file
+    /// Dosyayı ölçer
     pub fn measure_file(&self, path: &str, data: &[u8]) -> Result<(), ImaEvmError> {
         if !self.ima_enabled.load(Ordering::SeqCst) {
             return Ok(());
         }
-        
-        // Calculate hash
+
+        // Özet hesapla
         let hash = self.calculate_hash(data);
-        
-        // Create measurement
+
+        // Ölçüm oluştur
         let measurement = ImaMeasurement::new(path, hash, 10); // PCR 10
-        
-        // Extend PCR
+
+        // PCR genişlet
         self.extend_pcr(10, &hash);
-        
-        // Store measurement
+
+        // Ölçümü sakla
         self.measurements.lock().push(measurement);
-        
+
         let mut stats = self.stats.lock();
         stats.measurements += 1;
-        
+
         Ok(())
     }
 
-    /// Appraise file
+    /// Dosyayı değerlendirir
     pub fn appraise_file(&self, path: &str, _xattrs: &BTreeMap<String, Vec<u8>>) -> Result<(), ImaEvmError> {
         let mode = self.appraisal_mode.load(Ordering::SeqCst);
-        
+
         if mode == 0 {
             return Ok(());
         }
-        
-        // Check EVM HMAC
+
+        // EVM HMAC'ı kontrol et
         if self.evm_enabled.load(Ordering::SeqCst) {
             if let Some(hmac) = self.evm_cache.lock().get(path) {
                 if !hmac.valid.load(Ordering::Relaxed) {
@@ -325,22 +326,22 @@ impl ImaEvmManager {
                 }
             }
         }
-        
+
         let mut stats = self.stats.lock();
         stats.appraisals += 1;
-        
+
         Ok(())
     }
 
-    /// Add rule
+    /// Kural ekler
     pub fn add_rule(&self, rule: ImaRule) {
         self.rules.lock().push(rule);
-        
+
         let mut stats = self.stats.lock();
         stats.rules_count += 1;
     }
 
-    /// Calculate hash
+    /// Özet hesaplar
     fn calculate_hash(&self, data: &[u8]) -> [u8; 32] {
         let mut hash = [0u8; 32];
         for (i, byte) in data.iter().enumerate() {
@@ -349,11 +350,11 @@ impl ImaEvmManager {
         hash
     }
 
-    /// Extend PCR
+    /// PCR genişletir
     fn extend_pcr(&self, pcr: usize, hash: &[u8; 32]) {
         let mut pcrs = self.pcr_values.lock();
         if pcr < 24 {
-            // Extend: new_value = SHA256(old_value || hash)
+            // Genişlet: yeni_değer = SHA256(eski_değer || özet)
             for (i, byte) in hash.iter().enumerate() {
                 if i < pcrs[pcr].len() {
                     pcrs[pcr][i] ^= byte;
@@ -364,7 +365,7 @@ impl ImaEvmManager {
         }
     }
 
-    /// Get measurements
+    /// Ölçümleri getirir
     pub fn get_measurements(&self) -> Vec<ImaMeasurement> {
         self.measurements.lock().iter().map(|m| ImaMeasurement {
             path: m.path.clone(),
@@ -377,7 +378,7 @@ impl ImaEvmManager {
         }).collect()
     }
 
-    /// Get statistics
+    /// İstatistikleri getirir
     pub fn get_stats(&self) -> ImaEvmStats {
         self.stats.lock().clone()
     }
@@ -388,7 +389,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TÜRÜ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,7 +402,7 @@ pub enum ImaEvmError {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init() {

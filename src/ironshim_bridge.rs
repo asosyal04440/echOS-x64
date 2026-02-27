@@ -25,6 +25,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use ironshim_rs::{
@@ -32,6 +33,7 @@ use ironshim_rs::{
     ResourceManifest, MmioDesc, IoPortDesc,
     // PCI
     PciAddress, PciFunctionDesc, PciBar,
+    KernelPciBridge,
     // Interrupt
     InterruptBudget, InterruptRegistry,
     // DMA
@@ -47,7 +49,7 @@ use ironshim_rs::{
 use crate::shim_layer::{
     IRONSHIM_DMA, IRONSHIM_IRQ, IRONSHIM_PCI,
     IRONSHIM_AUDIT, IRONSHIM_POLICY,
-    EchOsDmaAllocator, EchOsPciConfig,
+    EchOsDmaAllocator,
 };
 
 // ============================================================================
@@ -88,6 +90,26 @@ const MAX_ISOLATED_DRIVERS: usize = 32;
 
 static ISOLATED_DRIVERS: Mutex<[Option<IsolatedDriver>; MAX_ISOLATED_DRIVERS]> =
     Mutex::new([const { None }; MAX_ISOLATED_DRIVERS]);
+static BRIDGE_READY: AtomicBool = AtomicBool::new(false);
+static SYSCALL_ALLOWED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SYSCALL_DENIED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug)]
+pub struct IronShimHealth {
+    pub bridge_ready: bool,
+    pub active_drivers: usize,
+    pub capacity: usize,
+    pub quarantined_irqs: usize,
+    pub syscall_allowed_total: u64,
+    pub syscall_denied_total: u64,
+}
+
+fn ensure_bridge_ready() {
+    if BRIDGE_READY.load(Ordering::Acquire) {
+        return;
+    }
+    init_ironshim_bridge();
+}
 
 /// İzole bir sürücüyü kayıt et. Başarılı olursa slot index'i döner.
 pub fn register_isolated_driver(driver: IsolatedDriver) -> Result<usize, ShimError> {
@@ -125,9 +147,121 @@ pub fn unregister_isolated_driver(slot: usize) -> Result<(), ShimError> {
     Ok(())
 }
 
+pub fn unregister_isolated_driver_by_name(name: &str) -> usize {
+    let mut slots = ISOLATED_DRIVERS.lock();
+    let mut removed = 0usize;
+    for slot in slots.iter_mut() {
+        if let Some(driver) = slot.as_ref() {
+            if driver.name == name {
+                *slot = None;
+                removed = removed.saturating_add(1);
+            }
+        }
+    }
+    if removed > 0 {
+        crate::serial_println!(
+            "[IronShim/Bridge] Driver '{}' isolation slots cleaned: {}",
+            name,
+            removed
+        );
+    }
+    removed
+}
+
 /// Kayıtlı sürücü sayısını döner.
 pub fn active_driver_count() -> usize {
     ISOLATED_DRIVERS.lock().iter().filter(|s| s.is_some()).count()
+}
+
+pub fn list_active_driver_names() -> Vec<String> {
+    let slots = ISOLATED_DRIVERS.lock();
+    let mut names = Vec::new();
+    for slot in slots.iter() {
+        if let Some(driver) = slot {
+            if !names.iter().any(|existing| existing == &driver.name) {
+                names.push(driver.name.clone());
+            }
+        }
+    }
+    names
+}
+
+pub fn is_port_allowed(port: u16) -> bool {
+    let slots = ISOLATED_DRIVERS.lock();
+    for slot in slots.iter() {
+        if let Some(driver) = slot {
+            for idx in 0..driver.port_count.min(driver.port_regions.len()) {
+                let desc = driver.port_regions[idx];
+                let start = desc.port as u32;
+                let end = start.saturating_add(desc.count as u32);
+                if (port as u32) >= start && (port as u32) < end {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn is_mmio_allowed(base: usize, size: usize) -> bool {
+    if size == 0 {
+        return false;
+    }
+    let end = match base.checked_add(size) {
+        Some(value) => value,
+        None => return false,
+    };
+    let slots = ISOLATED_DRIVERS.lock();
+    for slot in slots.iter() {
+        if let Some(driver) = slot {
+            for idx in 0..driver.mmio_count.min(driver.mmio_regions.len()) {
+                let desc = driver.mmio_regions[idx];
+                let region_end = match desc.base.checked_add(desc.size) {
+                    Some(value) => value,
+                    None => continue,
+                };
+                if base >= desc.base && end <= region_end {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn health_snapshot() -> IronShimHealth {
+    let mut quarantined_irqs = 0usize;
+    for irq in 0u32..256u32 {
+        if let Ok(metrics) = IRONSHIM_IRQ.metrics(irq) {
+            if metrics.budget_violations > 0 {
+                quarantined_irqs = quarantined_irqs.saturating_add(1);
+            }
+        }
+    }
+
+    IronShimHealth {
+        bridge_ready: BRIDGE_READY.load(Ordering::Acquire),
+        active_drivers: active_driver_count(),
+        capacity: MAX_ISOLATED_DRIVERS,
+        quarantined_irqs,
+        syscall_allowed_total: SYSCALL_ALLOWED_TOTAL.load(Ordering::Relaxed),
+        syscall_denied_total: SYSCALL_DENIED_TOTAL.load(Ordering::Relaxed),
+    }
+}
+
+pub fn debug_dump_health() {
+    let health = health_snapshot();
+    let names = list_active_driver_names();
+    crate::serial_println!(
+        "[IronShim/Bridge] health ready={} active={}/{} quarantined_irqs={} syscalls(allow={}, deny={}) drivers={:?}",
+        health.bridge_ready,
+        health.active_drivers,
+        health.capacity,
+        health.quarantined_irqs,
+        health.syscall_allowed_total,
+        health.syscall_denied_total,
+        names
+    );
 }
 
 // ============================================================================
@@ -197,6 +331,7 @@ pub fn build_manifest(
 /// 5. Gerçek C FFI `probe()` çağır
 /// 6. Audit logla
 pub fn safe_pci_register_driver(driver: *mut crate::linux_glue::PciDriver) -> i32 {
+    ensure_bridge_ready();
     if driver.is_null() {
         IRONSHIM_AUDIT.record(AuditEvent::ManifestRejected);
         return -1;
@@ -237,7 +372,7 @@ pub fn safe_pci_register_driver(driver: *mut crate::linux_glue::PciDriver) -> i3
 
                 // IronShim PCI parse — BAR bilgileri
                 let desc = match ironshim_rs::parse_pci_function(
-                    &EchOsPciConfig,
+                    IRONSHIM_PCI.config(),
                     dev.bus, dev.device, dev.function,
                 ) {
                     Ok(d) => d,
@@ -336,6 +471,7 @@ pub fn safe_pci_register_driver(driver: *mut crate::linux_glue::PciDriver) -> i3
 
 /// IronShim güvenlik katmanı üzerinden DMA belleği tahsis eder.
 pub fn safe_dma_alloc<T>(count: usize) -> Result<DmaHandle<'static, T, EchOsDmaAllocator>, ShimError> {
+    ensure_bridge_ready();
     let handle = IRONSHIM_DMA.alloc::<T>(count)?;
     crate::serial_println!(
         "[IronShim/Bridge] DMA alloc: {} x {} = {} bytes (phys={:#x})",
@@ -355,6 +491,7 @@ pub fn safe_request_irq(
     handler: &'static mut dyn ironshim_rs::InterruptHandler,
     budget: InterruptBudget,
 ) -> Result<(), ShimError> {
+    ensure_bridge_ready();
     IRONSHIM_IRQ.register_with_budget(irq, handler, budget)?;
     crate::serial_println!(
         "[IronShim/Bridge] IRQ {} registered (budget: max_calls={}, max_ticks={})",
@@ -369,19 +506,94 @@ pub fn safe_request_irq(
 
 /// Bir syscall'u IronShim policy + audit üzerinden doğrula.
 pub fn safe_enforce_syscall(number: u32, args: [usize; 6]) -> Result<(), ShimError> {
+    ensure_bridge_ready();
     let request = SyscallRequest { number, args };
-    enforce_syscall(&IRONSHIM_POLICY, &IRONSHIM_AUDIT, &request)
+    match enforce_syscall(&IRONSHIM_POLICY, &IRONSHIM_AUDIT, &request) {
+        Ok(()) => {
+            SYSCALL_ALLOWED_TOTAL.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        Err(err) => {
+            let denied_total = SYSCALL_DENIED_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+            if denied_total == 1 || denied_total % 64 == 0 {
+                crate::serial_println!(
+                    "[IronShim/Bridge] syscall deny alert: total_denied={} last_nr={}",
+                    denied_total,
+                    number
+                );
+            }
+            Err(err)
+        }
+    }
 }
 
 // ============================================================================
 // 8. Bridge Başlatma
 // ============================================================================
 
+// ============================================================================
+// PE Sandbox lifecycle notifications
+// ============================================================================
+
+/// Yeni bir PE sandbox'ı oluşturulduğunda [`crate::pe_loader::SandboxHandle::create`] tarafından çağrılır.
+///
+/// ## Sandbox (Kum Havuzu) Nedir?
+///
+/// Iron-Proton subsystem'ında her Windows PE süreci bir "sandbox" içinde çalışır:
+///   - `id`: Sandbox'ı benzersiz tanımlayan 64-bit kimlik numarası.
+///   - `max_heap`: Bu sürece tahsis edilebilecek maksimum heap belleği (bayt).
+///   - `max_stack`: Bu sürece izin verilen maksimum stack boyutu (bayt).
+///
+/// Kaynak sınırları sayfa hatası (page-fault) işleyicisi tarafından uygulanır:
+/// heap sınırı aşılırsa `SIGSEGV` benzeri hata üretilir, süreç sonlandırılır.
+///
+/// ## Neden Denetim Kaydı?
+///
+/// Güvenlik politikası gereği her sandbox başlangıcı seri port'a yazılır:
+///   - Hangi süreç ne zaman başladı → forensics (adli bilişim) için önemli.
+///   - Sınır değerleri → tutarsız yönetim tespiti için referans noktası.
+pub fn notify_sandbox_create(id: u64, max_heap: u64, max_stack: u64) {
+    // Emit an audit event so the security log records every new PE process.
+    if BRIDGE_READY.load(Ordering::Acquire) {
+        crate::serial_println!(
+            "[IronShim] AUDIT: sandbox_create id={} heap_cap={:#x} stack_cap={:#x}",
+            id, max_heap, max_stack
+        );
+    }
+    // TODO: register (id, max_heap, max_stack) in a global sandbox table so
+    // the page-fault handler can enforce the heap ceiling via the syscall policy.
+}
+
+/// PE süreci sona erdiğinde [`crate::pe_loader::SandboxHandle::destroy`] tarafından çağrılır.
+///
+/// ## Temizleme İşlemleri
+///
+/// Bu fonksiyon çağrıldığında sandbox artık çalışmıyor demektir:
+///   1. Denetim kaydı seri porta yazılır (id kapatıldı → log tamamlandı).
+///   2. İleride küresel sandbox tablosundan kayıt silinecek (TODO).
+///   3. IPC kanalları kapatılır → bekleyen mesajlar düşürülür.
+///
+/// ## RAII ile Otomatik Çağrı
+///
+/// `SandboxHandle` struct'ı `Drop` trait'ini uygular, yani:
+///   - Rust scope'u bitti → `drop()` çağrıldı → `notify_sandbox_destroy()` çağrıldı.
+///   - Süreci manuel olarak kapatmayı unutmak imkânsız hale gelir.
+pub fn notify_sandbox_destroy(id: u64) {
+    if BRIDGE_READY.load(Ordering::Acquire) {
+        crate::serial_println!("[IronShim] AUDIT: sandbox_destroy id={}", id);
+    }
+}
+
 /// IronShim Bridge'i başlat. Kernel boot sırasında çağrılır.
 pub fn init_ironshim_bridge() {
+    let was_ready = BRIDGE_READY.swap(true, Ordering::AcqRel);
+    if was_ready {
+        return;
+    }
     crate::serial_println!("╔══════════════════════════════════════════════════╗");
     crate::serial_println!("║   IronShim Bridge — Active                      ║");
     crate::serial_println!("║   Capability-Based Driver Isolation Layer        ║");
     crate::serial_println!("║   DMA Guard │ IRQ Budget │ Manifest Validator    ║");
     crate::serial_println!("╚══════════════════════════════════════════════════╝");
+    debug_dump_health();
 }

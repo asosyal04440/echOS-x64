@@ -211,7 +211,7 @@ impl CpuStateMachine {
                 arr
             },
             callbacks: Mutex::new(Vec::new()),
-            parallel_bringup: AtomicBool::new(true),
+            parallel_bringup: AtomicBool::new(false),  // Disabled for stability
             max_cpus: 256,
         }
     }

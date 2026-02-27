@@ -48,14 +48,13 @@ pub mod acpi;
 /// PE/COFF loader for Windows binaries
 pub mod pe_loader;
 
+/// PE32+ user-mode executor (Ring-3 IAT patching + Win32 stub dispatch)
+pub mod pe_exec;
+
 /// Win32 API emulation
 pub mod win32;
 
-/// Doom game port
-pub mod doom;
 
-/// Doom downloader and launcher
-pub mod doom_launcher;
 
 pub struct KernelBootContext {
     pub physical_memory_offset: u64,
@@ -156,3 +155,6 @@ pub mod virt;
 
 /// GPU 3D API (Vulkan-like)
 pub mod gpu3d;
+
+/// VFIO / IOMMU GPU passthrough + CPUID stealth (Tier 3)
+pub mod vfio;

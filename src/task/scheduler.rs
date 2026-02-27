@@ -9,6 +9,8 @@
 
 use super::task::{ExecutionMode, Priority, Task, TaskContext, TaskId, TaskState};
 use super::deque::{Worker, Stealer};
+use crate::security::seccomp::SeccompFilter;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use core::arch::global_asm;
@@ -420,6 +422,12 @@ pub fn exit(code: i32) -> ! {
     }
 }
 
+/// Spawn a Win32 user-mode thread (stub — logs entry point and returns a fake TID).
+pub fn spawn_win32_thread(entry: u64, _arg: u64) -> usize {
+    crate::serial_println!("[W32] CreateThread entry={:#x} (stub)", entry);
+    NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 pub fn wait_for_terminated(pid: isize) -> Option<(TaskId, i32)> {
     let mut terminated = TERMINATED_TASKS.lock();
     if pid == -1 {
@@ -482,6 +490,27 @@ pub fn set_current_seccomp_mode(mode: u32) {
     x86_64::instructions::interrupts::without_interrupts(|| unsafe {
         if let Some(mut current) = PER_CPU_CURRENT_TASK[cpu_id as usize].take() {
             current.cold.seccomp_mode = mode;
+            PER_CPU_CURRENT_TASK[cpu_id as usize] = Some(current);
+        }
+    });
+}
+
+pub fn get_current_seccomp_filter() -> Option<Arc<SeccompFilter>> {
+    let cpu_id = get_current_cpu_id();
+    let mut filter: Option<Arc<SeccompFilter>> = None;
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        if let Some(current) = PER_CPU_CURRENT_TASK.get(cpu_id as usize).and_then(|t| t.as_ref()) {
+            filter = current.cold.seccomp_filter.clone();
+        }
+    });
+    filter
+}
+
+pub fn set_current_seccomp_filter(filter: Option<Arc<SeccompFilter>>) {
+    let cpu_id = get_current_cpu_id();
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        if let Some(mut current) = PER_CPU_CURRENT_TASK[cpu_id as usize].take() {
+            current.cold.seccomp_filter = filter;
             PER_CPU_CURRENT_TASK[cpu_id as usize] = Some(current);
         }
     });

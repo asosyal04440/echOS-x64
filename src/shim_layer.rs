@@ -263,6 +263,14 @@ unsafe impl Hal for VirtioHal {
     }
 
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
+        if !crate::ironshim_bridge::is_mmio_allowed(paddr as usize, size) {
+            crate::serial_println!(
+                "[IronShim/MMIO] map denied: base={:#x} size={}",
+                paddr,
+                size
+            );
+            return NonNull::dangling();
+        }
         let ptr = crate::memory::map_mmio(paddr as u64, size);
         NonNull::new(ptr).unwrap()
     }
@@ -559,21 +567,45 @@ pub struct EchOsPortIo;
 
 impl PortIo for EchOsPortIo {
     fn inb(&self, port: u16) -> u8 {
+        if !crate::ironshim_bridge::is_port_allowed(port) {
+            crate::serial_println!("[IronShim/Port] inb denied: port={:#x}", port);
+            return 0;
+        }
         unsafe { x86_64::instructions::port::Port::new(port).read() }
     }
     fn inw(&self, port: u16) -> u16 {
+        if !crate::ironshim_bridge::is_port_allowed(port) {
+            crate::serial_println!("[IronShim/Port] inw denied: port={:#x}", port);
+            return 0;
+        }
         unsafe { x86_64::instructions::port::Port::new(port).read() }
     }
     fn inl(&self, port: u16) -> u32 {
+        if !crate::ironshim_bridge::is_port_allowed(port) {
+            crate::serial_println!("[IronShim/Port] inl denied: port={:#x}", port);
+            return 0;
+        }
         unsafe { x86_64::instructions::port::Port::new(port).read() }
     }
     fn outb(&self, port: u16, value: u8) {
+        if !crate::ironshim_bridge::is_port_allowed(port) {
+            crate::serial_println!("[IronShim/Port] outb denied: port={:#x}", port);
+            return;
+        }
         unsafe { x86_64::instructions::port::Port::new(port).write(value) }
     }
     fn outw(&self, port: u16, value: u16) {
+        if !crate::ironshim_bridge::is_port_allowed(port) {
+            crate::serial_println!("[IronShim/Port] outw denied: port={:#x}", port);
+            return;
+        }
         unsafe { x86_64::instructions::port::Port::new(port).write(value) }
     }
     fn outl(&self, port: u16, value: u32) {
+        if !crate::ironshim_bridge::is_port_allowed(port) {
+            crate::serial_println!("[IronShim/Port] outl denied: port={:#x}", port);
+            return;
+        }
         unsafe { x86_64::instructions::port::Port::new(port).write(value) }
     }
 }
@@ -587,18 +619,46 @@ pub struct EchOsSyscallPolicy;
 
 impl SyscallPolicy for EchOsSyscallPolicy {
     fn check(&self, request: &SyscallRequest) -> Result<(), ShimError> {
+        use crate::security::seccomp::{
+            SeccompData, SECCOMP_MODE_DISABLED, SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT,
+            SECCOMP_RET_ACTION, SECCOMP_RET_ALLOW, SECCOMP_RET_LOG, SECCOMP_RET_TRACE,
+            SECCOMP_STRICT_ALLOWED,
+        };
+
         let mode = crate::task::scheduler::get_current_seccomp_mode();
-        if mode == 0 {
+        if mode == SECCOMP_MODE_DISABLED {
             return Ok(());
         }
-        if mode == 1 {
-            match request.number {
-                0 | 1 | 60 | 15 => Ok(()),
-                _ => Err(ShimError::AccessDenied),
+
+        if mode == SECCOMP_MODE_STRICT {
+            if SECCOMP_STRICT_ALLOWED.contains(&(request.number as i32)) {
+                return Ok(());
             }
-        } else {
-            Ok(())
+            return Err(ShimError::AccessDenied);
         }
+
+        if mode == SECCOMP_MODE_FILTER {
+            let filter = crate::task::scheduler::get_current_seccomp_filter();
+            let Some(filter) = filter else {
+                return Err(ShimError::AccessDenied);
+            };
+            let args = [
+                request.args[0] as u64,
+                request.args[1] as u64,
+                request.args[2] as u64,
+                request.args[3] as u64,
+                request.args[4] as u64,
+                request.args[5] as u64,
+            ];
+            let data = SeccompData::new(request.number as i32, args);
+            let action = filter.evaluate(&data) & SECCOMP_RET_ACTION;
+            if action == SECCOMP_RET_ALLOW || action == SECCOMP_RET_LOG || action == SECCOMP_RET_TRACE {
+                return Ok(());
+            }
+            return Err(ShimError::AccessDenied);
+        }
+
+        Ok(())
     }
 }
 

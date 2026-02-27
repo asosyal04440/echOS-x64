@@ -170,6 +170,15 @@ pub fn init_idt_for_cpu(cpu_id: u32) -> &'static InterruptDescriptorTable {
 /// Interrupt sistemini başlatır.
 /// IDT'yi yükler ve PIC'i yapılandırır.
 pub fn init() {
+    // KRİTİK: IDT oluşturulmadan önce CS seçicisinin doğru olduğunu doğrula
+    // CS 0x18 ise (TSS seçicisi), IDT kapıları yanlış segmente işaret eder
+    use x86_64::instructions::segmentation::Segment;
+    let cs = x86_64::instructions::segmentation::CS::get_reg();
+    crate::serial_println!("[INT] CS selector before init: {:#x}", cs.0);
+    if cs.0 != 0x08 {
+        crate::serial_println!("[INT] WARNING: CS is not 0x08, potential GPF risk!");
+    }
+    
     init_global_once();
     init_per_cpu();
     start_irq_worker();
@@ -824,7 +833,8 @@ fn build_idt() -> InterruptDescriptorTable {
             .set_handler_fn(page_fault_handler)
             .set_stack_index(crate::gdt::PAGE_FAULT_IST_INDEX);
         idt.general_protection_fault
-            .set_handler_fn(general_protection_fault_handler);
+            .set_handler_fn(general_protection_fault_handler)
+            .set_stack_index(crate::gdt::GENERAL_PROTECTION_IST_INDEX);
     }
     idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
     idt[32].set_handler_fn(timer_interrupt_handler);
@@ -890,8 +900,9 @@ fn init_global_once() {
     #[cfg(not(target_os = "uefi"))]
     {
         if enable_ioapic() {
-            crate::apic::ioapic::enable_irq(0);
-            crate::apic::ioapic::enable_irq(1);
+            crate::apic::ioapic::enable_irq(0);  // Timer
+            crate::apic::ioapic::enable_irq(1);  // Keyboard
+            crate::apic::ioapic::enable_irq(12); // Mouse
         } else {
             pic::init();
         }
@@ -899,8 +910,9 @@ fn init_global_once() {
     #[cfg(target_os = "uefi")]
     {
         if enable_ioapic() {
-            crate::apic::ioapic::enable_irq(0);
-            crate::apic::ioapic::enable_irq(1);
+            crate::apic::ioapic::enable_irq(0);  // Timer
+            crate::apic::ioapic::enable_irq(1);  // Keyboard
+            crate::apic::ioapic::enable_irq(12); // Mouse
         } else {
             pic::init();
         }
@@ -1752,10 +1764,10 @@ extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFram
 }
 
 // ============================================================================
-// IRQ STATISTICS FOR MONITORING
+// İZLEME İÇİN IRQ İSTATİSTİKLERİ
 // ============================================================================
 
-/// IRQ statistics for monitoring
+/// İzleme için IRQ istatistikleri
 #[derive(Clone, Debug)]
 pub struct IrqStats {
     pub storm_count: u64,
@@ -1763,7 +1775,7 @@ pub struct IrqStats {
     pub spurious_count: u64,
 }
 
-/// Get IRQ statistics for monitoring
+/// İzleme için IRQ istatistiklerini al
 pub fn get_stats() -> IrqStats {
     let mut total = 0u64;
     let mut storms = 0u64;
@@ -1776,7 +1788,7 @@ pub fn get_stats() -> IrqStats {
     IrqStats {
         storm_count: storms,
         total_irqs: total,
-        spurious_count: 0, // Would need tracking
+        spurious_count: 0, // İzleme gerektirir
     }
 }
 

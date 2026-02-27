@@ -1,6 +1,6 @@
-//! # Capability-Based Security
+//! # Yetenek Tabanlı Güvenlik (Capability-Based Security)
 //!
-//! Fine-grained capability system for resource access control.
+//! Kaynak erişim denetimi için ince taneli yetenek sistemi.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -8,10 +8,10 @@ use alloc::vec::Vec;
 use alloc::vec;
 use spin::Mutex;
 
-/// Capability ID
+/// Yetenek kimliği
 pub type CapId = u64;
 
-/// Capability rights
+/// Yetenek hakları
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CapRights {
     pub read: bool,
@@ -29,7 +29,7 @@ impl CapRights {
     pub const ALL: Self = CapRights { read: true, write: true, execute: true, share: true, transfer: true };
 }
 
-/// Resource type
+/// Kaynak türü
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResourceType {
     File,
@@ -44,19 +44,19 @@ pub enum ResourceType {
     Service,
 }
 
-/// Capability object
+/// Yetenek nesnesi
 #[derive(Clone, Debug)]
 pub struct Capability {
     pub id: CapId,
     pub resource_type: ResourceType,
     pub resource_id: u64,
     pub rights: CapRights,
-    pub owner: u64,  // Process ID
+    pub owner: u64,  // İşlem kimliği
     pub generation: u32,
     pub children: Vec<CapId>,
 }
 
-/// Capability table per process
+/// İşlem başına yetenek tablosu
 #[derive(Clone, Debug)]
 pub struct CapabilityTable {
     pub process_id: u64,
@@ -73,7 +73,7 @@ impl CapabilityTable {
         }
     }
 
-    /// Create new capability
+    /// Yeni yetenek oluşturur
     pub fn create(&mut self, resource_type: ResourceType, resource_id: u64, rights: CapRights) -> CapId {
         let id = self.next_cap_id;
         self.next_cap_id += 1;
@@ -92,12 +92,12 @@ impl CapabilityTable {
         id
     }
 
-    /// Get capability by ID
+    /// Kimliğe göre yetenek getirir
     pub fn get(&self, id: CapId) -> Option<&Capability> {
         self.capabilities.get(&id)
     }
 
-    /// Check if capability exists and has rights
+    /// Yetkinin var olup olmadığını ve haklara sahip olup olmadığını kontrol eder
     pub fn check(&self, id: CapId, required: CapRights) -> bool {
         if let Some(cap) = self.capabilities.get(&id) {
             let r = cap.rights;
@@ -111,11 +111,11 @@ impl CapabilityTable {
         }
     }
 
-    /// Derive child capability (subset of rights)
+    /// Alt yetenek türetir (hakların alt kümesi)
     pub fn derive(&mut self, parent_id: CapId, subset_rights: CapRights) -> Option<CapId> {
         let parent = self.capabilities.get(&parent_id)?;
-        
-        // Check if subset is valid
+
+        // Alt kümenin geçerli olup olmadığını kontrol et
         if subset_rights.read && !parent.rights.read { return None; }
         if subset_rights.write && !parent.rights.write { return None; }
         if subset_rights.execute && !parent.rights.execute { return None; }
@@ -140,10 +140,10 @@ impl CapabilityTable {
         Some(child_id)
     }
 
-    /// Revoke capability and all children
+    /// Yetkiyi ve tüm alt yetkilerini iptal eder
     pub fn revoke(&mut self, id: CapId) -> bool {
         if let Some(cap) = self.capabilities.remove(&id) {
-            // Revoke all children recursively
+            // Tüm alt yetkilerini özyinelemeli olarak iptal et
             for child_id in cap.children {
                 self.revoke(child_id);
             }
@@ -153,7 +153,7 @@ impl CapabilityTable {
         }
     }
 
-    /// Transfer capability to another process
+    /// Yetkiyi başka bir işleme aktarır
     pub fn transfer(&mut self, id: CapId, target_pid: u64) -> Option<Capability> {
         let cap = self.capabilities.remove(&id)?;
         if !cap.rights.transfer {
@@ -168,30 +168,30 @@ impl CapabilityTable {
     }
 }
 
-// Global capability manager
+// Global yetenek yöneticisi
 lazy_static::lazy_static! {
     static ref CAP_TABLES: Mutex<BTreeMap<u64, CapabilityTable>> = Mutex::new(BTreeMap::new());
 }
 
-/// Initialize capability table for process
+/// İşlem için yetenek tablosu başlatır
 pub fn init_process(pid: u64) {
     let mut tables = CAP_TABLES.lock();
     tables.insert(pid, CapabilityTable::new(pid));
 }
 
-/// Get capability table for process
+/// İşlem için yetenek tablosu getirir
 pub fn get_table(pid: u64) -> Option<CapabilityTable> {
     CAP_TABLES.lock().get(&pid).cloned()
 }
 
-/// Create capability for process
+/// İşlem için yetenek oluşturur
 pub fn create_capability(pid: u64, resource_type: ResourceType, resource_id: u64, rights: CapRights) -> Option<CapId> {
     let mut tables = CAP_TABLES.lock();
     let table = tables.get_mut(&pid)?;
     Some(table.create(resource_type, resource_id, rights))
 }
 
-/// Check capability
+/// Yetkiyi kontrol eder
 pub fn check_capability(pid: u64, cap_id: CapId, rights: CapRights) -> bool {
     let tables = CAP_TABLES.lock();
     if let Some(table) = tables.get(&pid) {
@@ -201,14 +201,14 @@ pub fn check_capability(pid: u64, cap_id: CapId, rights: CapRights) -> bool {
     }
 }
 
-/// Derive capability
+/// Yetenek türetir
 pub fn derive_capability(pid: u64, parent_id: CapId, subset_rights: CapRights) -> Option<CapId> {
     let mut tables = CAP_TABLES.lock();
     let table = tables.get_mut(&pid)?;
     table.derive(parent_id, subset_rights)
 }
 
-/// Revoke capability
+/// Yetkiyi iptal eder
 pub fn revoke_capability(pid: u64, cap_id: CapId) -> bool {
     let mut tables = CAP_TABLES.lock();
     if let Some(table) = tables.get_mut(&pid) {
@@ -218,10 +218,10 @@ pub fn revoke_capability(pid: u64, cap_id: CapId) -> bool {
     }
 }
 
-/// Transfer capability between processes
+/// İşlemler arasında yetki aktarır
 pub fn transfer_capability(from_pid: u64, cap_id: CapId, to_pid: u64) -> bool {
     let mut tables = CAP_TABLES.lock();
-    
+
     let transferred = {
         let from_table = tables.get_mut(&from_pid);
         if let Some(table) = from_table {
@@ -241,18 +241,18 @@ pub fn transfer_capability(from_pid: u64, cap_id: CapId, to_pid: u64) -> bool {
     false
 }
 
-/// Cleanup process capabilities
+/// İşlemin yetkilerini temizler
 pub fn cleanup_process(pid: u64) {
     CAP_TABLES.lock().remove(&pid);
 }
 
-/// Capability seal (make immutable)
+/// Yetkiyi mühürler (değiştirilemez yapar)
 pub fn seal_capability(pid: u64, cap_id: CapId) -> bool {
     let tables = CAP_TABLES.lock();
     if let Some(table) = tables.get(&pid) {
         if let Some(cap) = table.capabilities.get(&cap_id) {
-            // Sealed capabilities cannot be transferred
-            // This is enforced by checking the transfer flag
+            // Mühürlenmiş yetkiler aktarılamaz
+            // Bu, transfer bayrağı kontrol edilerek zorlanır
             return !cap.rights.transfer;
         }
     }

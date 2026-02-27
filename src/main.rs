@@ -644,9 +644,9 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     ech_os::security::init();
     debugcon_write_byte(b'n');  // Mark: after security::init
     debugcon_write_byte(b'N');  // Mark: after security::init
-    // TODO: interrupts temporarily disabled for debugging GPF
-    // ech_os::interrupts::init();
-    serial_write_str(&format_args!("[INT] Interrupts init skipped for debugging\n"));
+    // Enable interrupts - GPF should be fixed with IST stack for GPF handler
+    ech_os::interrupts::init();
+    serial_write_str(&format_args!("[INT] Interrupts initialized\n"));
     debugcon_write_byte(b'O');  // Mark: after interrupts::init
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::IdtSetup);
     ech_os::vdso::init();
@@ -682,20 +682,22 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     } else {
         serial_write_str(&format_args!("[IOMMU] DMAR not available\n"));
     }
+    ech_os::ironshim_bridge::init_ironshim_bridge();
 
     // CRITICAL: Scheduler ve Workers SMP'den ÖNCE init edilmeli!
     // AP'ler başlatıldığında scheduler kullanıma hazır olmalı
     ech_os::task::scheduler::init();
     ech_os::interrupts::kick_irq_worker();
+    ech_os::interrupts::softirq::start_ksoftirqd();
     ech_os::task::worker::init_workers(4);
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::SmpInit);
-    // TODO: SMP temporarily disabled for debugging
-    // ech_os::cpu::smp::init();
-    serial_write_str(&format_args!("[SMP] Skipped for debugging\n"));
+    // Enable SMP - AP startup with proper GDT/IDT initialization
+    ech_os::cpu::smp::init();
+    serial_write_str(&format_args!("[SMP] Initialized\n"));
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::DriverInit);
-    // TODO: interrupts temporarily disabled for debugging GPF
-    // x86_64::instructions::interrupts::enable();
-    serial_write_str(&format_args!("[INT] Interrupts disabled for debugging\n"));
+    // Enable interrupts now that IDT is properly configured
+    x86_64::instructions::interrupts::enable();
+    serial_write_str(&format_args!("[INT] Interrupts enabled (sti)\n"));
     if let (Some(framebuffer), Some(screen)) =
         (boot_info.framebuffer.as_mut(), splash.as_mut())
     {
@@ -755,15 +757,12 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     } else {
         serial_write_str(&format_args!("[IOMMU] DMAR not available\n"));
     }
-
-    // Global framebuffer'ı kaydet - shell için
-    if let Some(fb) = boot_info.framebuffer.as_ref() {
-        ech_os::boot::set_global_framebuffer(*fb);
-    }
+    ech_os::ironshim_bridge::init_ironshim_bridge();
 
     // Shell yerine GUI'yi başlat
     serial_write_str(&format_args!("[BOOT] Starting GUI desktop...\n"));
     if let Some(fb) = boot_info.framebuffer.as_mut() {
+        // Note: Framebuffer is moved to desktop::run, no longer available globally
         ech_os::gui::desktop::run(fb);
     } else {
         serial_write_str(&format_args!("[BOOT] No framebuffer, starting shell...\n"));
@@ -903,10 +902,12 @@ unsafe fn boot_pipeline_limine(kaslr_offset: u64) -> ! {
     } else {
         serial_write_str(&format_args!("[IOMMU] DMAR not available\n"));
     }
+    ech_os::ironshim_bridge::init_ironshim_bridge();
 
     // CRITICAL: Scheduler ve Workers SMP'den ÖNCE init edilmeli!
     ech_os::task::scheduler::init();
     ech_os::interrupts::kick_irq_worker();
+    ech_os::interrupts::softirq::start_ksoftirqd();
     ech_os::task::worker::init_workers(4);
     ech_os::cpu::smp::init();
     x86_64::instructions::interrupts::enable();
@@ -998,10 +999,12 @@ unsafe fn boot_pipeline_multiboot(boot_info_addr: usize, kaslr_offset: u64) -> !
             "[SMP] CPU ACPI init failed, using CPUID topology\n"
         ));
     }
+    ech_os::ironshim_bridge::init_ironshim_bridge();
 
     // CRITICAL: Scheduler ve Workers SMP'den ÖNCE init edilmeli!
     ech_os::task::scheduler::init();
     ech_os::interrupts::kick_irq_worker();
+    ech_os::interrupts::softirq::start_ksoftirqd();
     ech_os::task::worker::init_workers(4);
     ech_os::cpu::smp::init();
     ech_os::memory::start_reclaim_daemon();

@@ -19,10 +19,35 @@ pub mod madt;
 static RSDP_PHYS: AtomicU64 = AtomicU64::new(0);
 pub static APIC_INFO: Mutex<madt::ApicInfo> = Mutex::new(madt::ApicInfo::empty());
 
+/// RSDP fiziksel adresini çekirdek genelinde paylaşılan atomik değişkene yaz.
+///
+/// UEFI Boot Services `get_config_table()` ile ACPI2_GUID'e sahip tablo
+/// bulunduğunda çağrılır. `SeqCst` sıralama kullanılır çünkü bu değer
+/// ikincil CPU'lar başlamadan önce tamamen görünür olmalıdır.
 pub fn set_rsdp_address(rsdp_phys: u64) {
     if rsdp_phys != 0 {
         RSDP_PHYS.store(rsdp_phys, Ordering::SeqCst);
     }
+}
+
+/// RSDP'nin fiziksel adresini döndür, henüz ayarlanmadıysa 0 döner.
+///
+/// ## Neden AtomicU64 + SeqCst?
+///
+/// RSDP adresi `Init` domain'inde yalnızca bir kez yazılır, üzerine yazılmaz.
+/// Ancak:
+///   - Farklı CPU çekirdekleri (SMP) bu değeri okuyabilir.
+///   - Compiler, `static mut` okuma/yazmada yeniden sıralama yapabilir.
+///
+/// `AtomicU64` + `SeqCst` ile hem donanım hemde derleyici bellek bariyeri
+/// garanti edilir → okuma her zaman en güncel adresi döndürür.
+///
+/// Örnek kullanım:
+/// ```
+/// let rsdp = acpi::get_rsdp_address(); // → 0xE0000 (BIOS) veya 0x7FE9000 (UEFI)
+/// ```
+pub fn get_rsdp_address() -> u64 {
+    RSDP_PHYS.load(Ordering::SeqCst)
 }
 
 pub fn init() -> bool {

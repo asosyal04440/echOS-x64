@@ -178,7 +178,7 @@ if ($useIso) {
         "-D", $traceLogPath,
         "-no-reboot",
         "-no-shutdown",
-        "-netdev", "user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::4443-:443",
+        "-netdev", "user,id=net0,hostfwd=tcp::18080-:80,hostfwd=tcp::14443-:443",
         "-device", "virtio-net-pci,netdev=net0,disable-modern=off,disable-legacy=on"
     )
     $diskImg = Join-Path $ESP_PATH "disk.img"

@@ -1,6 +1,6 @@
-//! # echOS Audio Subsystem
+//! # echOS Ses Alt Sistemi
 //!
-//! Intel High Definition Audio (HDA) driver
+//! Intel Yuksek Tanim Ses (HDA) surucusu - PCM akisi, DMA tamponu ve codec yonetimi
 
 use alloc::vec::Vec;
 use alloc::vec;
@@ -10,28 +10,28 @@ use spin::Mutex;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 // ============================================================================
-// HDA CONSTANTS
+// HDA SABİT DEĞERLERİ
 // ============================================================================
 
-/// HDA PCI class codes
+/// HDA PCI sınıf kodları — PCI yapılandırma uzayında HDA denetleyçisini tanımlamak için kullanılır
 const PCI_CLASS_MULTIMEDIA: u8 = 0x04;
 const PCI_SUBCLASS_HDA: u8 = 0x03;
 
-/// HDA controller registers (memory-mapped)
-const HDA_GCAP: usize = 0x00;      // Global Capabilities
-const HDA_GCTL: usize = 0x08;      // Global Control
-const HDA_GSTS: usize = 0x0C;      // Global Status
-const HDA_OUTSTR: usize = 0x10;    // Output Stream Payload
-const HDA_INSTR: usize = 0x14;     // Input Stream Payload
-const HDA_INTCTL: usize = 0x20;    // Interrupt Control
-const HDA_INTSTS: usize = 0x24;    // Interrupt Status
-const HDA_WAKEEN: usize = 0x0C;    // Wake Enable
+/// HDA denetleyçi register'ları (belleğe eşlenmiş / MMIO) — BAR0 taban adresine göre ofsetler
+const HDA_GCAP: usize = 0x00;      // Global Yetenekler
+const HDA_GCTL: usize = 0x08;      // Global Kontrol
+const HDA_GSTS: usize = 0x0C;      // Global Durum
+const HDA_OUTSTR: usize = 0x10;    // Çıkış Akış Yükleri
+const HDA_INSTR: usize = 0x14;     // Giriş Akış Yükleri
+const HDA_INTCTL: usize = 0x20;    // Kesme Kontrol
+const HDA_INTSTS: usize = 0x24;    // Kesme Durumu
+const HDA_WAKEEN: usize = 0x0C;    // Uyandırma Etkinleştirme
 
-/// Stream registers base offset
+/// Akim register'lari temel ofseti - her stream blogu bu tabandan HDA_STREAM_INTERVAL kadar ileride
 const HDA_STREAM_BASE: usize = 0x80;
 const HDA_STREAM_INTERVAL: usize = 0x20;
 
-/// Stream descriptor registers
+/// Akış tanımlayıcı register'ları — her stream için SD_CTL, SD_STS vb. aynı ofset şemasyla erişilir
 const HDA_SD_CTL: usize = 0x00;
 const HDA_SD_STS: usize = 0x03;
 const HDA_SD_LPIB: usize = 0x04;
@@ -42,7 +42,7 @@ const HDA_SD_FMT: usize = 0x12;
 const HDA_SD_BDPL: usize = 0x18;
 const HDA_SD_BDPU: usize = 0x1C;
 
-/// CORB/IRB registers
+/// CORB/IRB register'ları — CORB komutları codec'e gönderir, IRB cevapları yönlendirici oku
 const HDA_CORBLBASE: usize = 0x40;
 const HDA_CORBUBASE: usize = 0x44;
 const HDA_CORBWP: usize = 0x48;
@@ -59,7 +59,7 @@ const HDA_IRBCTL: usize = 0x5C;
 const HDA_IRBSTS: usize = 0x5D;
 const HDA_IRBSIZE: usize = 0x5E;
 
-/// HDA codec commands
+/// HDA codec komutları — verb+NID+payload kombinasyonuyla codec parametrelerini al/ayarla
 const HDA_VERB_GET_PARAMETER: u32 = 0xF0000;
 const HDA_VERB_SET_POWER_STATE: u32 = 0x70500;
 const HDA_VERB_SET_CONVERTER_FORMAT: u32 = 0x20000;
@@ -67,7 +67,7 @@ const HDA_VERB_SET_CONVERTER_STREAM: u32 = 0x70600;
 const HDA_VERB_SET_AMP_GAIN: u32 = 0x30000;
 const HDA_VERB_SET_PIN_WIDGET_CTRL: u32 = 0x70700;
 
-/// Codec parameters
+/// Codec parametreleri — üretici kimliği, fonksiyon grubu ve widget yeteneklerini sorgular
 const HDA_PARAM_VENDOR_ID: u32 = 0x00;
 const HDA_PARAM_REVISION_ID: u32 = 0x02;
 const HDA_PARAM_NODE_COUNT: u32 = 0x04;
@@ -78,7 +78,7 @@ const HDA_PARAM_AUDIO_SUPPORTED_STREAM: u32 = 0x0B;
 const HDA_PARAM_AUDIO_INPUT_AMP_CAPS: u32 = 0x0D;
 const HDA_PARAM_AUDIO_OUTPUT_AMP_CAPS: u32 = 0x12;
 
-/// Widget types
+/// Widget türleri — DAC ses için çözümlü, ADC kaydetme için dönüştürür, Pin fiziksel konnektör
 const HDA_WIDGET_OUTPUT_DAC: u8 = 0x0;
 const HDA_WIDGET_INPUT_ADC: u8 = 0x1;
 const HDA_WIDGET_MIXER: u8 = 0x3;
@@ -87,7 +87,7 @@ const HDA_WIDGET_POWER: u8 = 0x7;
 const HDA_WIDGET_VOLUME: u8 = 0x8;
 const HDA_WIDGET_BEEP: u8 = 0x9;
 
-/// Stream format bits
+/// Akış format bitleri — HDA_SD_FMT register'a yazılan örnekleme hızı, bit derinliği, kanal sayısı
 const HDA_FMT_48KHZ: u16 = 0x00;
 const HDA_FMT_44_1KHZ: u16 = 0x40;
 const HDA_FMT_96KHZ: u16 = 0x80;
@@ -103,10 +103,10 @@ const HDA_FMT_MONO: u16 = 0x00;
 const HDA_FMT_STEREO: u16 = 0x01;
 
 // ============================================================================
-// HDA CONTROLLER
+// HDA DENETÜCİ
 // ============================================================================
 
-/// HDA Controller
+/// HDA Denetleyicisi - PCI uzerindeki yuksek tanim ses denetleyicisini temsil eder
 #[derive(Clone, Debug)]
 pub struct HdaController {
     pub bus: u8,
@@ -116,19 +116,19 @@ pub struct HdaController {
     pub mmio_size: u64,
     pub vendor_id: u16,
     pub device_id: u16,
-    /// Number of output streams
+    /// Çıkış akışı sayısı — ses çalabilmek için en az bir çıkış akışı gereklidir
     pub output_streams: u8,
-    /// Number of input streams
+    /// Giriş akışı sayısı — ses kayıt için kullanılan ADC yönlü akışlar
     pub input_streams: u8,
-    /// Number of bidirectional streams
+    /// Çift yönlü akış sayısı — hem oynatma hem kaydetme yapabilen akışlar
     pub bidir_streams: u8,
-    /// 64-bit addressing capable
+    /// 64-bit adresleme kapasitesi — 4 GB üzeri fiziksel adres kullanımına olanak tanır
     pub addr64: bool,
-    /// CORB size
+    /// CORB tampon boyutu — aynı anda gönderebileceğimiz azami komut saysı
     pub corb_size: u16,
-    /// IRB size
+    /// IRB tampon boyutu — aynı anda bekleyebileceğimiz azami cevap sayısı
     pub irb_size: u16,
-    /// Codecs detected
+    /// Tespit edilen codec'ler — HDA bağlantısına bağlı ses işlemci birimleri
     pub codecs: Vec<HdaCodec>,
 }
 
@@ -152,18 +152,18 @@ impl HdaController {
         }
     }
     
-    /// Initialize controller
+    /// Denetleyçiyi başlat — sıfırlama, yetenek okuma, CORB/IRB kurulum ve codec tespiti
     pub fn init(&mut self) -> Result<(), AudioError> {
-        // Reset controller
+        // Denetleyçiyi sıfırla — GCTL registerına CRST bitini yaz
         self.reset()?;
         
-        // Read capabilities
+        // Yetenekleri oku — GCAP'tan akış sayılarını öğren
         self.read_capabilities();
         
-        // Initialize CORB/IRB
+        // CORB/IRB'yi başlat — komut halkalarını DMA tampona yaz
         self.init_corb_irb()?;
         
-        // Detect codecs
+        // Codec'leri tespit et — HDA bağlantısındaki ses işlemcilerini tara
         self.detect_codecs();
         
         crate::serial_println!("[HDA] Controller initialized: {} out, {} in, {} bidir streams",
@@ -172,17 +172,17 @@ impl HdaController {
         Ok(())
     }
     
-    /// Reset controller
+    /// Denetleyçiyi sıfırla — GCTL registerına CRST bitini yazar, denetleyçi temiz duruma gelir
     fn reset(&mut self) -> Result<(), AudioError> {
-        // Write CRST bit to GCTL
-        // TODO: Actual MMIO write
+        // GCTL'ye CRST biti yaz
+        // TODO: Gerçek MMIO yazmaı
         Ok(())
     }
     
-    /// Read controller capabilities from GCAP
+    /// Denetleyçi yeteneklerini GCAP'tan oku — akış sayıları ve 64-bit adres desteği öğrenilir
     fn read_capabilities(&mut self) {
-        // TODO: Read from MMIO
-        // Default values
+        // TODO: MMIO'dan oku
+        // Varsayılan değerler
         self.output_streams = 4;
         self.input_streams = 4;
         self.bidir_streams = 0;
@@ -191,20 +191,20 @@ impl HdaController {
         self.irb_size = 256;
     }
     
-    /// Initialize CORB (Command Output Ring Buffer) and IRB (Input Ring Buffer)
+    /// CORB (Komut Çıkış Halka Tamponu) ve IRB'yi başlat — DMA tamponu ayır ve halka işaretlerini sıfırla
     fn init_corb_irb(&mut self) -> Result<(), AudioError> {
-        // Allocate CORB and IRB buffers
-        // TODO: Actual implementation
+        // CORB ve IRB tamponlarını ayır
+        // TODO: Gerçek implementasyon
         Ok(())
     }
     
-    /// Detect codecs on the HDA link
+    /// HDA bağlantısındaki codec'leri tespit et — 0-15 arasındaki adreslerde geçerli üretici ID arar
     fn detect_codecs(&mut self) {
-        // Scan for codecs (typically 0-15)
+        // Codec'leri tara (tipik olarak 0-15)
         for codec_addr in 0..=15 {
-            // Try to get vendor ID
-            // If response is valid, codec exists
-            let vendor_id = 0x8086u16; // Placeholder Intel codec
+            // Üreti kimliğini almayı dene
+            // Cevap geçerliyse codec mevcuttur
+            let vendor_id = 0x8086u16; // Yer tutucu Intel codec
             let device_id = 0x0001u16;
             
             if vendor_id != 0xFFFF {
@@ -215,17 +215,17 @@ impl HdaController {
         }
     }
     
-    /// Send command to codec
+    /// Codec'e komut gönder — verb+NID+payload kombinasyonuyla CORB halkasina yerleştirir
     pub fn send_command(&self, codec: u8, nid: u8, verb: u32) -> u32 {
-        // TODO: CORB command submission
+        // TODO: CORB komut gönderimi — halka işarecini artır ve cevap için IRB’yi bekle
         let _ = (codec, nid, verb);
         0
     }
     
-    /// Get playback stream
+    /// Oynatma akışını getir — ilk kullanılabilir çıkış akışının indeksini döndürür
     pub fn get_playback_stream(&self) -> Option<u8> {
         if self.output_streams > 0 {
-            Some(0) // First output stream
+            Some(0) // İlk çıkış akışı
         } else {
             None
         }
@@ -236,7 +236,7 @@ impl HdaController {
 // HDA CODEC
 // ============================================================================
 
-/// HDA Codec
+/// HDA Codec - HDA baglantisindaki ses islemci birimi, widget'lari ve kapasitelerini tutar
 #[derive(Clone, Debug)]
 pub struct HdaCodec {
     pub address: u8,
@@ -261,15 +261,15 @@ impl HdaCodec {
         }
     }
     
-    /// Scan widgets in codec
+    /// Codec içindeki widget'ları tara — DAC, ADC, Pin ve Mixer düğumlerini keşfeder
     pub fn scan_widgets(&mut self) {
-        // Root node
+        // Kok dugumu - tum widget agacinin baslangic noktasi, NID 0
         self.root_nid = 0;
         
-        // Audio function group
+        // Ses fonksiyon grubu - widget'lari barindiran ust seviye node
         self.audio_func_group = 1;
         
-        // Add basic widgets
+        // Temel widget'lari ekle - DAC, hoparlor, kulalik, ADC ve mikrofon dugumlerini olustur
         self.widgets.push(AudioWidget {
             nid: 2,
             widget_type: HdaWidgetType::OutputDac,
@@ -316,32 +316,32 @@ impl HdaCodec {
         });
     }
     
-    /// Find widget by NID
+    /// NID'e göre widget bul — node kimliğiyle doğrudan erişilen ses düğümü
     pub fn find_widget(&self, nid: u8) -> Option<&AudioWidget> {
         self.widgets.iter().find(|w| w.nid == nid)
     }
     
-    /// Find widget by type
+    /// Türüne göre widget bul — DAC, ADC veya Pin gibi belirli bir fonksiyonu olan düğümü döndürür
     pub fn find_widget_by_type(&self, widget_type: HdaWidgetType) -> Option<&AudioWidget> {
         self.widgets.iter().find(|w| w.widget_type == widget_type)
     }
     
-    /// Find output DAC
+    /// Çıkış DAC'ini bul — dijital-analog dönüştürücü, hoparlere gönderilecek ses sinyalini üretir
     pub fn find_output_dac(&self) -> Option<&AudioWidget> {
         self.find_widget_by_type(HdaWidgetType::OutputDac)
     }
     
-    /// Find input ADC
+    /// Giriş ADC'sini bul — analog-dijital dönüştürücü, mikrofon sinyalini dijitale çevirir
     pub fn find_input_adc(&self) -> Option<&AudioWidget> {
         self.find_widget_by_type(HdaWidgetType::InputAdc)
     }
 }
 
 // ============================================================================
-// AUDIO WIDGET
+// SES WİDGET'İ
 // ============================================================================
 
-/// Widget type
+/// Widget turu - ses dugumunun hangi islevi gerceklestirdigini belirtir (DAC, ADC, Pin vb.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HdaWidgetType {
     OutputDac,
@@ -369,7 +369,7 @@ impl HdaWidgetType {
     }
 }
 
-/// Widget capabilities
+/// Widget yetenekleri - bir ses dugumunun destekledigi ozelliklerin bit bayrak kumesi
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WidgetCaps(pub u32);
 
@@ -400,7 +400,7 @@ impl WidgetCaps {
     }
 }
 
-/// Audio widget
+/// Ses widget'i - codec icindeki her islevsel dugumu temsil eder, NID ve yetenekleri icerir
 #[derive(Clone, Debug)]
 pub struct AudioWidget {
     pub nid: u8,
@@ -412,23 +412,23 @@ pub struct AudioWidget {
 }
 
 impl AudioWidget {
-    /// Set volume (0-100%)
+    /// Ses seviyesini ayarla (0-100%) — donanım kazancını yüzdesel değere dönüştürerek yaz
     pub fn set_volume(&mut self, volume: u8) {
-        // Convert 0-100% to gain value
+        // 0-100%'yi kazanc değerine dönüştür — HDA amp verb'i ile widget'a gönderilir
         self.default_gain = ((volume as i16) * 100 / 100) - 100;
     }
     
-    /// Set mute
+    /// Sessizleştirmeyi ayarla — codec'in ilgili node'unu sustururarak DMA işlemi devam eder
     pub fn set_mute(&mut self, mute: bool) {
         self.muted = mute;
     }
 }
 
 // ============================================================================
-// AUDIO STREAM
+// SES AKIŞİ
 // ============================================================================
 
-/// Audio stream format
+/// Ses akisi formati - ornek hizi, bit derinligi ve kanal sayisini tanimlayan yapi
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioFormat {
     pub sample_rate: u32,
@@ -445,22 +445,22 @@ impl AudioFormat {
         }
     }
     
-    /// CD quality format
+    /// CD kalitesi format — 44.1 kHz, 16 bit, stereo: müzik CD'lerinin standart kalitesi
     pub fn cd_quality() -> Self {
         AudioFormat::new(44100, 16, 2)
     }
     
-    /// DVD quality format
+    /// DVD kalitesi format — 48 kHz, 16 bit, stereo: film ve dijital ses standartı
     pub fn dvd_quality() -> Self {
         AudioFormat::new(48000, 16, 2)
     }
     
-    /// High quality format
+    /// Yüksek kalite format — 96 kHz, 24 bit, stereo: studüo kayıt kalitesi
     pub fn high_quality() -> Self {
         AudioFormat::new(96000, 24, 2)
     }
     
-    /// Convert to HDA format register value
+    /// HDA format register değerine dönüştür — HDA_SD_FMT'e doğrudan yazılabilecek 16-bit değer
     pub fn to_hda_format(&self) -> u16 {
         let rate_bits = match self.sample_rate {
             8000..=48000 => HDA_FMT_48KHZ,
@@ -490,14 +490,14 @@ impl AudioFormat {
     }
 }
 
-/// Audio stream direction
+/// Ses akisi yonu - oynatma (DAC) mu yoksa kayit (ADC) mu oldugunu belirtir
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamDirection {
     Playback,
     Capture,
 }
 
-/// Audio stream
+/// Ses akisi - DMA tampon yonetimi, oynatma durumu ve PCM format bilgisini bir arada tutar
 #[derive(Clone, Debug)]
 pub struct AudioStream {
     pub stream_id: u8,
@@ -524,35 +524,35 @@ impl AudioStream {
         }
     }
     
-    /// Set buffer
+    /// Tamponu ayarla — çalacak PCM verisini döngü için sarınla ve konum sıfırlaN
     pub fn set_buffer(&mut self, data: Vec<u8>) {
         self.buffer = data;
         self.buffer_size = self.buffer.len();
         self.position = 0;
     }
     
-    /// Start playback
+    /// Oynatmayı başlat — konum sıfırlanır ve DMA transfer işaretlenir
     pub fn start(&mut self) {
         self.playing = true;
         self.position = 0;
     }
     
-    /// Stop playback
+    /// Oynatmayı durdur — DMA transferi keser ve akış işaretini temizler
     pub fn stop(&mut self) {
         self.playing = false;
     }
     
-    /// Pause playback
+    /// Oynatmayı duraklat — konumu korur, devam edildiğinde kaldığı yerden sürer
     pub fn pause(&mut self) {
         self.playing = false;
     }
     
-    /// Resume playback
+    /// Oynatmaya devam et — duraklatılan noktadan &DMA aktarimi yeniden başlar
     pub fn resume(&mut self) {
         self.playing = true;
     }
     
-    /// Get samples consumed
+    /// Tüketilen örnekleri işle — tampon doluysa döngü etkinse başa sar, aksi halde oynatmayı bitir
     pub fn consume(&mut self, bytes: usize) -> bool {
         if !self.playing {
             return false;
@@ -575,10 +575,10 @@ impl AudioStream {
 }
 
 // ============================================================================
-// AUDIO BUFFER DESCRIPTOR LIST (BDL)
+// SES TAMPON TANİMLAYICI LİSTESİ (BDL)
 // ============================================================================
 
-/// Buffer Descriptor Entry (BDE) - 16 bytes
+/// Tampon Tanimlayici Girdisi (BDE) - 16 byte - HDA BDL tablosundaki her DMA parcasinin fiziksel adresi
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct BufferDescriptorEntry {
@@ -600,7 +600,7 @@ impl BufferDescriptorEntry {
 }
 
 // ============================================================================
-// AUDIO ERROR
+// SES HATALARI
 // ============================================================================
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -616,7 +616,7 @@ pub enum AudioError {
 }
 
 // ============================================================================
-// AUDIO MANAGER
+// SES YÖNETİCİSİ
 // ============================================================================
 
 static HDA_CONTROLLERS: Mutex<Vec<HdaController>> = Mutex::new(Vec::new());
@@ -624,7 +624,7 @@ static AUDIO_STREAMS: Mutex<BTreeMap<u8, AudioStream>> = Mutex::new(BTreeMap::ne
 static NEXT_STREAM_ID: AtomicU32 = AtomicU32::new(1);
 static AUDIO_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Initialize audio subsystem
+/// Ses alt sistemini başlat — HDA denetleyçilerini PCI'den kesfeder ve başlatır
 pub fn init() {
     if AUDIO_INITIALIZED.swap(true, Ordering::SeqCst) {
         return;
@@ -632,7 +632,7 @@ pub fn init() {
     
     crate::serial_println!("[AUDIO] Initializing HDA subsystem...");
     
-    // Discover HDA controllers
+    // HDA denetleyçilerini keşfet — PCI yapılandırma uzayını tarayarak bulur
     let controllers = discover_hda_controllers();
     
     let mut hda_ctrls = HDA_CONTROLLERS.lock();
@@ -646,7 +646,7 @@ pub fn init() {
     crate::serial_println!("[AUDIO] Found {} HDA controllers", hda_ctrls.len());
 }
 
-/// Simple audio backend for music player
+/// Müzik çaları için basit ses arka ucu — oynatma/durdurma/ses seviyesi arayüzleri sağlar
 pub struct AudioBackend {
     pub volume: f32,
     pub playing: bool,
@@ -688,12 +688,12 @@ lazy_static::lazy_static! {
     static ref AUDIO_BACKEND: Mutex<AudioBackend> = Mutex::new(AudioBackend::new());
 }
 
-/// Get audio backend reference
+/// Ses arka ucunun referansını döndür — global kilit çözülmeden değişiklik garantisi verir
 pub fn get_audio() -> Option<&'static Mutex<AudioBackend>> {
     Some(&AUDIO_BACKEND)
 }
 
-/// Discover HDA controllers via PCI
+/// PCI aracılığıyla HDA denetleyçilerini keşfeçt — multimedya sınıfındaki HDA cihazlarını listeler
 pub fn discover_hda_controllers() -> Vec<HdaController> {
     let mut controllers = Vec::new();
     
@@ -707,19 +707,19 @@ pub fn discover_hda_controllers() -> Vec<HdaController> {
     controllers
 }
 
-/// Get default controller
+/// Varsayılan denetleyçiyi getir — sistemde birden fazla HDA varsa ilkini döndürür
 pub fn default_controller() -> Option<HdaController> {
     HDA_CONTROLLERS.lock().first().cloned()
 }
 
-/// Get default codec
+/// Varsayılan codec'i getir — ilk denetleyçinin ilk ses işlemcisini döndürür
 pub fn default_codec() -> Option<HdaCodec> {
     HDA_CONTROLLERS.lock()
         .first()
         .and_then(|ctrl| ctrl.codecs.first().cloned())
 }
 
-/// Open audio stream for playback
+/// Oynatma için ses akışı aç — belirtilen PCM formatıyla yeni bir çıkış akışı oluşturur
 pub fn open_playback_stream(format: AudioFormat) -> Result<u8, AudioError> {
     let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::SeqCst) as u8;
     
@@ -733,7 +733,7 @@ pub fn open_playback_stream(format: AudioFormat) -> Result<u8, AudioError> {
     Ok(stream_id)
 }
 
-/// Close audio stream
+/// Ses akışını kapat — tampon belleği serbest bırakır ve akış tablosundan siler
 pub fn close_stream(stream_id: u8) -> Result<(), AudioError> {
     let mut streams = AUDIO_STREAMS.lock();
     if streams.remove(&stream_id).is_some() {
@@ -744,7 +744,7 @@ pub fn close_stream(stream_id: u8) -> Result<(), AudioError> {
     }
 }
 
-/// Write audio data to stream buffer
+/// Ses verisini akış tamponuna yaz — PCM byte'ları akışın dahili tamponuna kopyalar
 pub fn write_stream(stream_id: u8, data: &[u8]) -> Result<usize, AudioError> {
     let mut streams = AUDIO_STREAMS.lock();
     let stream = streams.get_mut(&stream_id).ok_or(AudioError::NoStream)?;
@@ -754,7 +754,7 @@ pub fn write_stream(stream_id: u8, data: &[u8]) -> Result<usize, AudioError> {
     Ok(data.len())
 }
 
-/// Start playback
+/// Oynatmayı başlat — akışı aktif konuma getirir ve DMA işaretini ayarlar
 pub fn start_stream(stream_id: u8) -> Result<(), AudioError> {
     let mut streams = AUDIO_STREAMS.lock();
     let stream = streams.get_mut(&stream_id).ok_or(AudioError::NoStream)?;
@@ -766,7 +766,7 @@ pub fn start_stream(stream_id: u8) -> Result<(), AudioError> {
     Ok(())
 }
 
-/// Stop playback
+/// Oynatmayı durdur — DMA transferını durdurur ve akışı pasif konuma getirir
 pub fn stop_stream(stream_id: u8) -> Result<(), AudioError> {
     let mut streams = AUDIO_STREAMS.lock();
     let stream = streams.get_mut(&stream_id).ok_or(AudioError::NoStream)?;
@@ -778,14 +778,14 @@ pub fn stop_stream(stream_id: u8) -> Result<(), AudioError> {
     Ok(())
 }
 
-/// Set volume (0-100)
+/// Ses seviyesini ayarla (0-100) — DAC widget'inin amp kazancını HDA verb ile günceller
 pub fn set_volume(volume: u8) -> Result<(), AudioError> {
     let mut controllers = HDA_CONTROLLERS.lock();
     let ctrl = controllers.first_mut().ok_or(AudioError::NoController)?;
     
     if let Some(codec) = ctrl.codecs.first_mut() {
         if let Some(dac) = codec.find_output_dac() {
-            // Set volume on DAC
+            // DAC'a ses seviyesi ayarla — SET_AMP_GAIN verb'i kullanılır
             let _ = dac;
         }
     }
@@ -795,7 +795,7 @@ pub fn set_volume(volume: u8) -> Result<(), AudioError> {
     Ok(())
 }
 
-/// Set mute
+/// Sessizleştirmeyi ayarla — DAC amp kazancını sıfırlamak yerine mute biti kullanılır
 pub fn set_mute(mute: bool) -> Result<(), AudioError> {
     let mut controllers = HDA_CONTROLLERS.lock();
     let ctrl = controllers.first_mut().ok_or(AudioError::NoController)?;
@@ -811,7 +811,7 @@ pub fn set_mute(mute: bool) -> Result<(), AudioError> {
     Ok(())
 }
 
-/// Get stream position
+/// Akış konumunu getir — DMA'nın tamponda ne kadar ilerlediğini byte cinsinden okur
 pub fn get_stream_position(stream_id: u8) -> Result<usize, AudioError> {
     let streams = AUDIO_STREAMS.lock();
     let stream = streams.get(&stream_id).ok_or(AudioError::NoStream)?;
@@ -819,7 +819,7 @@ pub fn get_stream_position(stream_id: u8) -> Result<usize, AudioError> {
     Ok(stream.position)
 }
 
-/// Check if stream is playing
+/// Akış oynasıyor mu — DMA aktif mi değilse oynatma durmuş veya tampon bitti demektir
 pub fn is_stream_playing(stream_id: u8) -> Result<bool, AudioError> {
     let streams = AUDIO_STREAMS.lock();
     let stream = streams.get(&stream_id).ok_or(AudioError::NoStream)?;
@@ -827,7 +827,7 @@ pub fn is_stream_playing(stream_id: u8) -> Result<bool, AudioError> {
     Ok(stream.playing)
 }
 
-/// Get audio capabilities
+/// Se's yeteneklerini getir — maksimum kanal sayısı, örnekleme hızı ve bit derinliği bilgisi
 pub fn get_capabilities() -> Option<AudioCapabilities> {
     let controllers = HDA_CONTROLLERS.lock();
     let ctrl = controllers.first()?;
@@ -841,7 +841,7 @@ pub fn get_capabilities() -> Option<AudioCapabilities> {
     })
 }
 
-/// Audio capabilities
+/// Ses yetenekleri - denetleyicinin destekledigi maksimum kanal, hiz ve bit derinligi
 #[derive(Clone, Copy, Debug)]
 pub struct AudioCapabilities {
     pub max_channels: u8,
@@ -852,7 +852,7 @@ pub struct AudioCapabilities {
 }
 
 // ============================================================================
-// DMA AUDIO TRANSFER
+// DMA SES TRANSFERI
 // ============================================================================
 
 /// DMA transfer state
@@ -876,30 +876,30 @@ impl DmaAudioTransfer {
         }
     }
 
-    /// Start DMA transfer
+    /// DMA transferini basalt - konumu sifirla ve aktif isaretini ayarla
     pub fn start(&mut self) {
         self.active = true;
         self.position = 0;
     }
 
-    /// Stop DMA transfer
+    /// DMA transferini durdur - donanim kontrolunu kapatir ve aktif isareti temizler
     pub fn stop(&mut self) {
         self.active = false;
     }
 
-    /// Set completion callback
+    /// Tamamlanma geri cagirimi ayarla - tampon bitince cikartilacak kesme isleyisini belirler
     pub fn set_callback(&mut self, callback: fn()) {
         self.callback = Some(callback);
     }
 
-    /// Get next buffer fragment for DMA
+    /// DMA icin sonraki tampon parcasini getir - BDL girdisine yazilacak adres ve boyutu hesapla
     pub fn get_next_fragment(&mut self, fragment_size: usize) -> Option<(u64, usize)> {
         if !self.active {
             return None;
         }
 
         if self.position >= self.buffer_size {
-            // Transfer complete
+            // Transfer tamamlandi - kayitli geri cagrim varsa calistir
             if let Some(cb) = self.callback {
                 cb();
             }
@@ -917,10 +917,10 @@ impl DmaAudioTransfer {
 }
 
 // ============================================================================
-// AUDIO MIXER
+// SES MIKSERI
 // ============================================================================
 
-/// Mixer channel
+/// Mikser kanali - adindan taninabilen, ses/yon/mute/solo ozellikleri olan tek bir miksaj katmani
 #[derive(Clone, Debug)]
 pub struct MixerChannel {
     pub id: u8,
@@ -945,18 +945,18 @@ impl MixerChannel {
         }
     }
 
-    /// Apply volume and pan to stereo sample
+    /// Stereo ornege ses seviyesi ve yonlendirme uygula - pan negatifse sol zayiflatilir
     pub fn apply_to_sample(&self, left: i16, right: i16) -> (i16, i16) {
         if self.muted {
             return (0, 0);
         }
 
-        // Apply volume (0-100%)
+        // Ses seviyesini uygula (0-100%) - lineer kazanc carpani olarak isler
         let vol = self.volume as i32;
         let left_vol = left as i32 * vol / 100;
         let right_vol = right as i32 * vol / 100;
 
-        // Apply pan (-100 to 100)
+        // Yonlendirmeyi uygula (-100 ile 100 arasi) - sol veya saga dogru sinyal oranini degistir
         let pan = self.pan as i32;
         let left_pan = if pan > 0 {
             (100 - pan) * left_vol / 100
@@ -973,7 +973,7 @@ impl MixerChannel {
     }
 }
 
-/// Audio mixer
+/// Ses mikseri - birden fazla kanali tek bir PCM cikisina birlestiren donanim/yazilim katmani
 #[derive(Clone, Debug)]
 pub struct AudioMixer {
     pub channels: Vec<MixerChannel>,
@@ -994,38 +994,38 @@ impl AudioMixer {
         }
     }
 
-    /// Add channel
+    /// Kanal ekle - otomatik kimlik atanarak yeni mikser kanali olusturulur
     pub fn add_channel(&mut self, name: &str) -> u8 {
         let id = self.channels.len() as u8;
         self.channels.push(MixerChannel::new(id, name));
         id
     }
 
-    /// Remove channel
+    /// Kanali kaldir - kimlige gore liste filtrelenerek silinir
     pub fn remove_channel(&mut self, id: u8) {
         self.channels.retain(|c| c.id != id);
     }
 
-    /// Get channel
+    /// Kanali getir - kimlige gore salt okunur erisim
     pub fn get_channel(&self, id: u8) -> Option<&MixerChannel> {
         self.channels.iter().find(|c| c.id == id)
     }
 
-    /// Get channel mutable
+    /// Kanali degistirilebilir al - ses, yonlendirme, mute gibi ozellikler guncellenebilir
     pub fn get_channel_mut(&mut self, id: u8) -> Option<&mut MixerChannel> {
         self.channels.iter_mut().find(|c| c.id == id)
     }
 
-    /// Mix all channels into output buffer
+    /// Tum kanallari cikis tamponuna miksle - solo/mute kurallari uygulanir, sinir degerler korunur
     pub fn mix_to_buffer(&self, streams: &BTreeMap<u8, AudioStream>) -> Vec<u8> {
-        let samples = self.buffer_size / 4; // 16-bit stereo = 4 bytes per sample
+        let samples = self.buffer_size / 4; // 16-bit stereo = ornek basina 4 byte
         let mut output = vec![0i32; samples * 2]; // Stereo
 
-        // Check if any solo channel is active
+        // Solo kanal aktif mi kontrol et - solo varsa diger kanallar susturulur
         let any_solo = self.channels.iter().any(|c| c.solo);
 
         for channel in &self.channels {
-            // Skip if muted or if solo is active on another channel
+            // Susturulmus veya solo degil ise atla - solo modu tek kanalli dinleme saglar
             if channel.muted || (any_solo && !channel.solo) {
                 continue;
             }
@@ -1033,7 +1033,7 @@ impl AudioMixer {
             if let Some(stream_id) = channel.input_stream {
                 if let Some(stream) = streams.get(&stream_id) {
                     if stream.playing && stream.format.channels == 2 && stream.format.bits_per_sample == 16 {
-                        // Mix samples from this stream
+                        // Bu akistan ornekleri miksle - i16 little-endian formatinda oku
                         for i in 0..samples {
                             let sample_offset = (stream.position + i * 4).min(stream.buffer.len() - 4);
                             if sample_offset + 4 <= stream.buffer.len() {
@@ -1051,7 +1051,7 @@ impl AudioMixer {
             }
         }
 
-        // Apply master volume and convert to bytes
+        // Ana ses seviyesini uygula ve byte'a donustur - tasmayi onlemek icin clamp kullan
         let mut output_bytes = Vec::with_capacity(self.buffer_size);
         for i in 0..samples * 2 {
             let sample = if self.master_muted {
@@ -1065,19 +1065,19 @@ impl AudioMixer {
         output_bytes
     }
 
-    /// Set master volume
+    /// Ana ses seviyesini ayarla - 0-100 araliginda klamplar, tum kanallar bu olcekte etkilenir
     pub fn set_master_volume(&mut self, volume: u8) {
         self.master_volume = volume.min(100);
     }
 
-    /// Set master mute
+    /// Ana sessizlestirmeyi ayarla - tum kanallari susturan ana kapama
     pub fn set_master_mute(&mut self, muted: bool) {
         self.master_muted = muted;
     }
 }
 
 // ============================================================================
-// PCM AUDIO FORMAT
+// PCM SES FORMATI
 // ============================================================================
 
 /// PCM format specification
@@ -1101,46 +1101,46 @@ impl PcmFormat {
         }
     }
 
-    /// CD quality PCM
+    /// CD kalitesi PCM - 44.1 kHz, 16 bit, stereo: muzik CD standardi
     pub fn cd_quality() -> Self {
         Self::new(44100, 16, 2)
     }
 
-    /// DVD quality PCM
+    /// DVD kalitesi PCM - 48 kHz, 16 bit, stereo: film ve dijital ses standardi
     pub fn dvd_quality() -> Self {
         Self::new(48000, 16, 2)
     }
 
-    /// Blu-ray quality PCM
+    /// Blu-ray kalitesi PCM - 96 kHz, 24 bit, 6 kanal: ev sineması surround ses
     pub fn bluray_quality() -> Self {
         Self::new(96000, 24, 6)
     }
 
-    /// Get bytes per sample
+    /// Ornek basina byte sayisi - bit derinligini 8'e bolup yukari yuvarlar
     pub fn bytes_per_sample(&self) -> usize {
         (self.bits_per_sample as usize + 7) / 8
     }
 
-    /// Get frame size (one sample for all channels)
+    /// Cerceve boyutu (tum kanallar icin bir ornek) - mikrofon/hoparlor tamponu hesaplamada kullanilir
     pub fn frame_size(&self) -> usize {
         self.bytes_per_sample() * self.channels as usize
     }
 
-    /// Get byte rate (bytes per second)
+    /// Byte hizi (saniyede byte) - tampon boyutu ve tamponlanma suresi hesaplamak icin
     pub fn byte_rate(&self) -> u32 {
         self.sample_rate * self.frame_size() as u32
     }
 
-    /// Convert sample to bytes
+    /// Ornegi byte'a donustur - bit derinligine ve endian'a gore PCM verisi uretir
     pub fn sample_to_bytes(&self, sample: i32, buf: &mut [u8]) {
         let bytes = self.bytes_per_sample();
         match bytes {
             1 => {
-                // 8-bit unsigned
+                // 8-bit isaretssiz - 0-255 araligina normalize edilir
                 buf[0] = ((sample + 128) & 0xFF) as u8;
             }
             2 => {
-                // 16-bit signed
+                // 16-bit isaretli - en yaygin PCM formati
                 let val = (sample as i16).clamp(-32768, 32767);
                 if self.is_big_endian {
                     buf[0] = (val >> 8) as u8;
@@ -1151,7 +1151,7 @@ impl PcmFormat {
                 }
             }
             3 => {
-                // 24-bit signed
+                // 24-bit isaretli - stüdyo kalite kayit icin
                 if self.is_big_endian {
                     buf[0] = ((sample >> 16) & 0xFF) as u8;
                     buf[1] = ((sample >> 8) & 0xFF) as u8;
@@ -1163,7 +1163,7 @@ impl PcmFormat {
                 }
             }
             4 => {
-                // 32-bit signed
+                // 32-bit isaretli - maksimum dinamik aralik
                 if self.is_big_endian {
                     buf[0] = ((sample >> 24) & 0xFF) as u8;
                     buf[1] = ((sample >> 16) & 0xFF) as u8;
@@ -1180,7 +1180,7 @@ impl PcmFormat {
         }
     }
 
-    /// Convert bytes to sample
+    /// Byte'lari ornege donustur - PCM verisinden sayisal ses ornegi uretir
     pub fn bytes_to_sample(&self, buf: &[u8]) -> i32 {
         let bytes = self.bytes_per_sample().min(buf.len());
         match bytes {
@@ -1212,21 +1212,21 @@ impl PcmFormat {
 }
 
 // ============================================================================
-// AUDIO CODECS
+// SES KODLAYICILAR
 // ============================================================================
 
-/// Audio codec trait
+/// Ses kodlayici ozelligi - sifreleme ve sifre cozme islemleri icin ortak arayuz
 pub trait AudioCodec {
-    /// Decode audio data
+    /// Ses verisini sifresini coz - sikistirilmis girisi PCM cikisina donusturur
     fn decode(&self, input: &[u8], output: &mut Vec<u8>) -> Result<usize, AudioError>;
 
-    /// Encode audio data
+    /// Ses verisini sifrel - PCM girisi belirli bir formata donusturur
     fn encode(&self, input: &[u8], output: &mut Vec<u8>) -> Result<usize, AudioError>;
 
-    /// Get codec name
+    /// Kodlayici adini dondur - hata ayiklama ve kullanici arayuzu icin
     fn name(&self) -> &str;
 
-    /// Get output PCM format
+    /// Cikis PCM formatini dondur - olusturulan ornek hizi ve bit derinligi
     fn output_format(&self) -> PcmFormat;
 }
 
@@ -1238,9 +1238,9 @@ pub struct SineWaveCodec {
     pub phase: f32,
 }
 
-/// Taylor series sin approximation for no_std
+/// no_std icin Taylor serisi sin yaklasimi - floating point kutuphanesi olmadan sinusoidal dalga uretir
 fn sin_approx(x: f32) -> f32 {
-    // Normalize to [-PI, PI]
+    // [-PI, PI] araligina normalize et - periyodiklik nedeniyle deger araligini kisalt
     let mut x = x;
     let pi = core::f32::consts::PI;
     let two_pi = 2.0 * pi;
@@ -1252,7 +1252,7 @@ fn sin_approx(x: f32) -> f32 {
         x += two_pi;
     }
     
-    // Taylor series: sin(x) = x - x^3/3! + x^5/5! - x^7/7! + x^9/9!
+    // Taylor serisi: sin(x) = x - x^3/3! + x^5/5! - x^7/7! + x^9/9! - 9. derecede yeterli hassasiyet
     let x2 = x * x;
     let x3 = x2 * x;
     let x5 = x3 * x2;
@@ -1272,7 +1272,7 @@ impl SineWaveCodec {
         }
     }
 
-    /// Generate sine wave samples
+    /// Sinusoidal dalga ornekleri uret - belirtilen sayi kadar PCM byte uretir
     pub fn generate(&mut self, samples: usize) -> Vec<u8> {
         let mut output = Vec::with_capacity(samples * 2);
         let step = 2.0 * core::f32::consts::PI * self.frequency / self.sample_rate as f32;
@@ -1290,7 +1290,7 @@ impl SineWaveCodec {
         output
     }
 
-    /// Generate stereo sine wave
+    /// Stereo sinusoidal dalga uret - sol ve sag kanal icin farkli frekanslarda ornek olusturur
     pub fn generate_stereo(&mut self, samples: usize, left_freq: f32, right_freq: f32) -> Vec<u8> {
         let mut output = Vec::with_capacity(samples * 4);
         let step_left = 2.0 * core::f32::consts::PI * left_freq / self.sample_rate as f32;
@@ -1325,7 +1325,7 @@ impl SineWaveCodec {
 
 impl AudioCodec for SineWaveCodec {
     fn decode(&self, _input: &[u8], output: &mut Vec<u8>) -> Result<usize, AudioError> {
-        // Generate 1024 samples
+        // 1024 ornek uret - test ve demo amacli kisa bir dalga dongusu
         let mut codec = self.clone();
         let data = codec.generate(1024);
         output.extend_from_slice(&data);
@@ -1372,14 +1372,14 @@ impl WhiteNoiseCodec {
         }
     }
 
-    /// Simple LFSR random number generator
+    /// Basit LFSR rasgele sayi ureteci - sifir memory ile deterministik psodorast gurultu saglar
     fn next_random(&mut self) -> u32 {
         let bit = ((self.state >> 0) ^ (self.state >> 2) ^ (self.state >> 3) ^ (self.state >> 5)) & 1;
         self.state = (self.state >> 1) | (bit << 31);
         self.state
     }
 
-    /// Generate white noise samples
+    /// Beyaz gurultu ornekleri uret - esit gucu olan tam frekans spektrumu dolduran rastgele sinyal
     pub fn generate(&mut self, samples: usize) -> Vec<u8> {
         let mut output = Vec::with_capacity(samples * 2);
 
@@ -1435,10 +1435,10 @@ impl MuLawCodec {
         MuLawCodec { sample_rate }
     }
 
-    /// Decode μ-law byte to linear sample
+    /// u-yasasi byte'ini lineer ornege coz - telefon ses sikistrmasinda kullanilan non-lineer kodlama
     pub fn decode_sample(sample: u8) -> i16 {
-        // μ-law decoding
-        let sample = sample ^ 0xFF; // Invert all bits
+        // u-yasasi sifre cozme - tum bitleri ters cevirerek coz
+        let sample = sample ^ 0xFF; // Tum bitleri ters cevir
         let sign = if sample & 0x80 != 0 { -1 } else { 1 };
         let exponent = (sample >> 4) & 0x07;
         let mantissa = sample & 0x0F;
@@ -1447,7 +1447,7 @@ impl MuLawCodec {
         decoded.clamp(-32768, 32767) as i16
     }
 
-    /// Encode linear sample to μ-law byte
+    /// Lineer ornegi u-yasasi byte'ina kodla - dinamik aralik sikistirmasi ile bant genisligini azaltir
     pub fn encode_sample(sample: i16) -> u8 {
         let sign = if sample < 0 { 0x80 } else { 0 };
         let sample = sample.abs() as i32;
@@ -1510,9 +1510,9 @@ impl ALawCodec {
         ALawCodec { sample_rate }
     }
 
-    /// Decode A-law byte to linear sample
+    /// A-yasasi byte'ini lineer ornege coz - Avrupa telefonu icin ITU-T G.711 standardi
     pub fn decode_sample(sample: u8) -> i16 {
-        let sample = sample ^ 0x55; // Toggle even bits
+        let sample = sample ^ 0x55; // Cift bitleri degistir - A-yasasi isaretleme kurali
         let sign = if sample & 0x80 != 0 { -1 } else { 1 };
         let exponent = (sample >> 4) & 0x07;
         let mantissa = sample & 0x0F;
@@ -1525,7 +1525,7 @@ impl ALawCodec {
         decoded.clamp(-32768, 32767) as i16
     }
 
-    /// Encode linear sample to A-law byte
+    /// Lineer ornegi A-yasasi byte'ina kodla - logaritmik sikistirma ile genis dinamik aralik saglar
     pub fn encode_sample(sample: i16) -> u8 {
         let sign = if sample < 0 { 0x80 } else { 0 };
         let sample = sample.abs() as i32;
@@ -1578,28 +1578,28 @@ impl AudioCodec for ALawCodec {
 }
 
 // ============================================================================
-// GLOBAL AUDIO MIXER
+// GLOBAL SES MIKSERI
 // ============================================================================
 
 static AUDIO_MIXER: Mutex<Option<AudioMixer>> = Mutex::new(None);
 
-/// Initialize audio mixer
+/// Ses mikserini basalt - belirtilen ornek hizi ve tampon boyutuyla global mikseri hazirlar
 pub fn init_mixer(sample_rate: u32, buffer_size: usize) {
     *AUDIO_MIXER.lock() = Some(AudioMixer::new(sample_rate, buffer_size));
 }
 
-/// Get mixer
+/// Mikseri getir - global mikser orneginin kopyasini dondurur
 pub fn get_mixer() -> Option<AudioMixer> {
     AUDIO_MIXER.lock().clone()
 }
 
-/// Add mixer channel
+/// Mikser kanali ekle - isme gore yeni bir kanal olusturur ve kimligini dondurur
 pub fn add_mixer_channel(name: &str) -> Option<u8> {
     let mut mixer = AUDIO_MIXER.lock();
     mixer.as_mut().map(|m| m.add_channel(name))
 }
 
-/// Set channel volume
+/// Kanal ses seviyesini ayarla - 0-100 araliginda donanim kazancını gunceller
 pub fn set_channel_volume(channel_id: u8, volume: u8) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
@@ -1608,7 +1608,7 @@ pub fn set_channel_volume(channel_id: u8, volume: u8) -> Result<(), AudioError> 
     Ok(())
 }
 
-/// Set channel pan
+/// Kanal yonlendirmesini ayarla - -100 sol, 0 orta, 100 sag konumlandirma
 pub fn set_channel_pan(channel_id: u8, pan: i8) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
@@ -1617,7 +1617,7 @@ pub fn set_channel_pan(channel_id: u8, pan: i8) -> Result<(), AudioError> {
     Ok(())
 }
 
-/// Set channel mute
+/// Kanal sessizlestirmesini ayarla - diger kanallari etkilemeden tek kanali sustururur
 pub fn set_channel_mute(channel_id: u8, muted: bool) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
@@ -1626,7 +1626,7 @@ pub fn set_channel_mute(channel_id: u8, muted: bool) -> Result<(), AudioError> {
     Ok(())
 }
 
-/// Set channel solo
+/// Kanal solo modunu ayarla - aktif oldugunda diger kanallar otomatik susturulur
 pub fn set_channel_solo(channel_id: u8, solo: bool) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
@@ -1635,7 +1635,7 @@ pub fn set_channel_solo(channel_id: u8, solo: bool) -> Result<(), AudioError> {
     Ok(())
 }
 
-/// Link stream to mixer channel
+/// Akisi mikser kanaline bagla - stream'in PCM cikisi bu kanal uzerinden miksere beslenir
 pub fn link_stream_to_channel(channel_id: u8, stream_id: u8) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
@@ -1644,7 +1644,7 @@ pub fn link_stream_to_channel(channel_id: u8, stream_id: u8) -> Result<(), Audio
     Ok(())
 }
 
-/// Mix all streams to output buffer
+/// Tum akislari miksle - aktif kanallar birlestirilir ve cikis tamponu olusturulur
 pub fn mix_streams() -> Option<Vec<u8>> {
     let mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_ref()?;

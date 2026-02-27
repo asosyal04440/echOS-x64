@@ -1,6 +1,6 @@
-//! # IRQ Domains
+//! # IRQ Alanları
 //!
-//! Hierarchical IRQ domain management.
+//! Hiyerarşik IRQ alan yönetimi.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,15 +10,15 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// IRQ DOMAIN CONSTANTS
+// IRQ ALAN SABİTLERİ
 // ============================================================================
 
-/// IRQ domain types
+/// IRQ alan türleri
 pub const IRQ_DOMAIN_TYPE_HIERARCHY: u32 = 0x01;
 pub const IRQ_DOMAIN_TYPE_MSI: u32 = 0x02;
 pub const IRQ_DOMAIN_TYPE_DMAR: u32 = 0x04;
 
-/// IRQ flags
+/// IRQ bayrakları
 pub const IRQ_TYPE_NONE: u32 = 0;
 pub const IRQ_TYPE_EDGE_RISING: u32 = 1;
 pub const IRQ_TYPE_EDGE_FALLING: u32 = 2;
@@ -26,12 +26,12 @@ pub const IRQ_TYPE_EDGE_BOTH: u32 = 3;
 pub const IRQ_TYPE_LEVEL_HIGH: u32 = 4;
 pub const IRQ_TYPE_LEVEL_LOW: u32 = 8;
 
-/// IRQ status flags
+/// IRQ durum bayrakları
 pub const IRQ_IRQFLAGS_TRIGGER_MASK: u32 = 0x0F;
 pub const IRQ_IRQFLAGS_PER_CPU: u32 = 0x10;
 pub const IRQ_IRQFLAGS_NOAUTOEN: u32 = 0x20;
 
-/// IRQ data flags
+/// IRQ veri bayrakları
 pub const IRQD_TRIGGER_MASK: u32 = 0x0F;
 pub const IRQD_LEVEL: u32 = 0x10;
 pub const IRQD_PER_CPU: u32 = 0x20;
@@ -44,23 +44,23 @@ pub const IRQD_WAKEUP_STATE: u32 = 0x800;
 pub const IRQD_AFFINITY_SET: u32 = 0x1000;
 
 // ============================================================================
-// IRQ DATA
+// IRQ VERİSİ
 // ============================================================================
 
 pub struct IrqData {
-    /// IRQ number
+    /// IRQ numarası
     pub irq: u32,
-    /// Hardware IRQ number
+    /// Donanım IRQ numarası
     pub hwirq: u32,
-    /// Domain
+    /// Alan
     pub domain: AtomicU32,
-    /// State flags
+    /// Durum bayrakları
     pub state_flags: AtomicU32,
-    /// Trigger type
+    /// Tetikleyici türü
     pub trigger_type: AtomicU32,
-    /// Affinity mask
+    /// Benzeşim maskesi
     pub affinity: AtomicU32,
-    /// Chip data
+    /// Çip verisi
     pub chip_data: Mutex<Option<Arc<dyn ChipData>>>,
 }
 
@@ -81,22 +81,22 @@ impl IrqData {
         }
     }
 
-    /// Check if IRQ is disabled
+    /// IRQ devre dışı mı kontrol et
     pub fn is_disabled(&self) -> bool {
         self.state_flags.load(Ordering::Relaxed) & IRQD_IRQ_DISABLED != 0
     }
 
-    /// Check if IRQ is masked
+    /// IRQ maskelenmiş mi kontrol et
     pub fn is_masked(&self) -> bool {
         self.state_flags.load(Ordering::Relaxed) & IRQD_IRQ_MASKED != 0
     }
 
-    /// Check if IRQ is in progress
+    /// IRQ işlemde mi kontrol et
     pub fn is_in_progress(&self) -> bool {
         self.state_flags.load(Ordering::Relaxed) & IRQD_IRQ_INPROGRESS != 0
     }
 
-    /// Set disabled
+    /// Devre dışı ayarla
     pub fn set_disabled(&self, disabled: bool) {
         if disabled {
             self.state_flags.fetch_or(IRQD_IRQ_DISABLED, Ordering::SeqCst);
@@ -105,7 +105,7 @@ impl IrqData {
         }
     }
 
-    /// Set masked
+    /// Maskelenmiş ayarla
     pub fn set_masked(&self, masked: bool) {
         if masked {
             self.state_flags.fetch_or(IRQD_IRQ_MASKED, Ordering::SeqCst);
@@ -114,7 +114,7 @@ impl IrqData {
         }
     }
 
-    /// Set in progress
+    /// İşlemde ayarla
     pub fn set_in_progress(&self, in_progress: bool) {
         if in_progress {
             self.state_flags.fetch_or(IRQD_IRQ_INPROGRESS, Ordering::SeqCst);
@@ -123,12 +123,12 @@ impl IrqData {
         }
     }
 
-    /// Set trigger type
+    /// Tetikleyici türü ayarla
     pub fn set_trigger_type(&self, trigger: u32) {
         self.trigger_type.store(trigger, Ordering::SeqCst);
     }
 
-    /// Set affinity
+    /// Benzeşim ayarla
     pub fn set_affinity(&self, mask: u32) {
         self.affinity.store(mask, Ordering::SeqCst);
         self.state_flags.fetch_or(IRQD_AFFINITY_SET, Ordering::SeqCst);
@@ -136,29 +136,29 @@ impl IrqData {
 }
 
 // ============================================================================
-// IRQ CHIP
+// IRQ ÇİPİ
 // ============================================================================
 
 pub struct IrqChip {
-    /// Chip name
+    /// Çip adı
     pub name: String,
-    /// Acknowledge interrupt
+    /// Kesmeyi onayla
     pub irq_ack: Option<Arc<dyn Fn(&IrqData) + Send + Sync>>,
-    /// Mask interrupt
+    /// Kesmeyi maskele
     pub irq_mask: Option<Arc<dyn Fn(&IrqData) + Send + Sync>>,
-    /// Unmask interrupt
+    /// Kesme maskesini kaldır
     pub irq_unmask: Option<Arc<dyn Fn(&IrqData) + Send + Sync>>,
-    /// Enable interrupt
+    /// Kesmeyi etkinleştir
     pub irq_enable: Option<Arc<dyn Fn(&IrqData) + Send + Sync>>,
-    /// Disable interrupt
+    /// Kesmeyi devre dışı bırak
     pub irq_disable: Option<Arc<dyn Fn(&IrqData) + Send + Sync>>,
-    /// Set affinity
+    /// Benzeşim ayarla
     pub irq_set_affinity: Option<Arc<dyn Fn(&IrqData, u32) -> bool + Send + Sync>>,
-    /// Set trigger type
+    /// Tetikleyici türü ayarla
     pub irq_set_type: Option<Arc<dyn Fn(&IrqData, u32) -> i32 + Send + Sync>>,
-    /// Set wake
+    /// Uyanma ayarla
     pub irq_set_wake: Option<Arc<dyn Fn(&IrqData, bool) -> i32 + Send + Sync>>,
-    /// EOI (End of Interrupt)
+    /// EOI (Kesme Sonu)
     pub irq_eoi: Option<Arc<dyn Fn(&IrqData) + Send + Sync>>,
 }
 
@@ -178,14 +178,14 @@ impl IrqChip {
         }
     }
 
-    /// Acknowledge
+    /// Onayla
     pub fn ack(&self, data: &IrqData) {
         if let Some(ref ack) = self.irq_ack {
             ack(data);
         }
     }
 
-    /// Mask
+    /// Maskele
     pub fn mask(&self, data: &IrqData) {
         if let Some(ref mask) = self.irq_mask {
             mask(data);
@@ -193,7 +193,7 @@ impl IrqChip {
         data.set_masked(true);
     }
 
-    /// Unmask
+    /// Maskesini kaldır
     pub fn unmask(&self, data: &IrqData) {
         if let Some(ref unmask) = self.irq_unmask {
             unmask(data);
@@ -201,7 +201,7 @@ impl IrqChip {
         data.set_masked(false);
     }
 
-    /// Enable
+    /// Etkinleştir
     pub fn enable(&self, data: &IrqData) {
         if let Some(ref enable) = self.irq_enable {
             enable(data);
@@ -209,7 +209,7 @@ impl IrqChip {
         data.set_disabled(false);
     }
 
-    /// Disable
+    /// Devre dışı bırak
     pub fn disable(&self, data: &IrqData) {
         if let Some(ref disable) = self.irq_disable {
             disable(data);
@@ -217,7 +217,7 @@ impl IrqChip {
         data.set_disabled(true);
     }
 
-    /// Set affinity
+    /// Benzeşim ayarla
     pub fn set_affinity(&self, data: &IrqData, mask: u32) -> bool {
         if let Some(ref set_affinity) = self.irq_set_affinity {
             if set_affinity(data, mask) {
@@ -228,7 +228,7 @@ impl IrqChip {
         false
     }
 
-    /// Set trigger type
+    /// Tetikleyici türü ayarla
     pub fn set_type(&self, data: &IrqData, trigger: u32) -> i32 {
         if let Some(ref set_type) = self.irq_set_type {
             let ret = set_type(data, trigger);
@@ -249,29 +249,29 @@ impl IrqChip {
 }
 
 // ============================================================================
-// IRQ DOMAIN
+// IRQ ALANI
 // ============================================================================
 
 pub struct IrqDomain {
-    /// Domain ID
+    /// Alan kimliği
     pub id: u32,
-    /// Domain name
+    /// Alan adı
     pub name: String,
-    /// Domain type
+    /// Alan türü
     pub domain_type: u32,
-    /// IRQ chip
+    /// IRQ çipi
     pub chip: Mutex<Option<Arc<IrqChip>>>,
-    /// Parent domain
+    /// Üst alan
     pub parent: AtomicU32,
-    /// IRQ data entries
+    /// IRQ veri girdileri
     pub irq_data: Mutex<BTreeMap<u32, Arc<IrqData>>>,
-    /// Reverse map (hwirq -> irq)
+    /// Ters eşleme (hwirq -> irq)
     pub hwirq_map: Mutex<BTreeMap<u32, u32>>,
-    /// Next IRQ number
+    /// Sonraki IRQ numarası
     pub next_irq: AtomicU32,
-    /// Number of IRQs
+    /// IRQ sayısı
     pub nr_irqs: AtomicU32,
-    /// Is active
+    /// Aktif mi
     pub active: AtomicBool,
 }
 
@@ -291,19 +291,19 @@ impl IrqDomain {
         }
     }
 
-    /// Set chip
+    /// Çip ayarla
     pub fn set_chip(&self, chip: Arc<IrqChip>) {
         *self.chip.lock() = Some(chip);
     }
 
-    /// Set parent domain
+    /// Üst alanı ayarla
     pub fn set_parent(&self, parent_id: u32) {
         self.parent.store(parent_id, Ordering::SeqCst);
     }
 
-    /// Create mapping
+    /// Eşleme oluştur
     pub fn create_mapping(&self, hwirq: u32) -> u32 {
-        // Check if already mapped
+        // Zaten eşlenmiş mi kontrol et
         if let Some(&irq) = self.hwirq_map.lock().get(&hwirq) {
             return irq;
         }
@@ -320,18 +320,18 @@ impl IrqDomain {
         irq
     }
 
-    /// Get IRQ data
+    /// IRQ verisini al
     pub fn get_irq_data(&self, irq: u32) -> Option<Arc<IrqData>> {
         self.irq_data.lock().get(&irq).cloned()
     }
 
-    /// Get IRQ data by hwirq
+    /// hwirq'a göre IRQ verisini al
     pub fn get_irq_data_by_hwirq(&self, hwirq: u32) -> Option<Arc<IrqData>> {
         let irq = self.hwirq_map.lock().get(&hwirq).copied()?;
         self.irq_data.lock().get(&irq).cloned()
     }
 
-    /// Activate IRQ
+    /// IRQ'yu etkinleştir
     pub fn activate_irq(&self, irq: u32) -> bool {
         if let Some(data) = self.get_irq_data(irq) {
             data.set_disabled(false);
@@ -340,14 +340,14 @@ impl IrqDomain {
         false
     }
 
-    /// Deactivate IRQ
+    /// IRQ'yu devre dışı bırak
     pub fn deactivate_irq(&self, irq: u32) {
         if let Some(data) = self.get_irq_data(irq) {
             data.set_disabled(true);
         }
     }
 
-    /// Handle IRQ
+    /// IRQ'yu işle
     pub fn handle_irq(&self, irq: u32) {
         if let Some(data) = self.get_irq_data(irq) {
             if data.is_disabled() || data.is_masked() {
@@ -356,13 +356,13 @@ impl IrqDomain {
 
             data.set_in_progress(true);
 
-            // Get chip and acknowledge
+            // Çip al ve onayla
             if let Some(chip) = self.chip.lock().as_ref() {
                 chip.ack(&data);
             }
 
-            // Handle the interrupt
-            // Would call the handler
+            // Kesmeyi işle
+            // Handler çağrılacak
 
             // EOI
             if let Some(chip) = self.chip.lock().as_ref() {
@@ -375,17 +375,17 @@ impl IrqDomain {
 }
 
 // ============================================================================
-// IRQ DOMAIN MANAGER
+// IRQ ALAN YÖNETİCİSİ
 // ============================================================================
 
 pub struct IrqDomainManager {
-    /// Domains
+    /// Alanlar
     pub domains: Mutex<BTreeMap<u32, Arc<IrqDomain>>>,
-    /// Next domain ID
+    /// Sonraki alan kimliği
     pub next_domain_id: AtomicU32,
-    /// Linear IRQ to domain map
+    /// Doğrusal IRQ'dan alana eşleme
     pub irq_to_domain: Mutex<BTreeMap<u32, u32>>,
-    /// Statistics
+    /// İstatistikler
     pub stats: Mutex<IrqDomainStats>,
 }
 
@@ -406,7 +406,7 @@ impl IrqDomainManager {
         }
     }
 
-    /// Create domain
+    /// Alan oluştur
     pub fn create_domain(&self, name: &str, domain_type: u32) -> Arc<IrqDomain> {
         let id = self.next_domain_id.fetch_add(1, Ordering::SeqCst);
         let domain = Arc::new(IrqDomain::new(id, name, domain_type));
@@ -421,12 +421,12 @@ impl IrqDomainManager {
         domain
     }
 
-    /// Get domain
+    /// Alanı al
     pub fn get_domain(&self, id: u32) -> Option<Arc<IrqDomain>> {
         self.domains.lock().get(&id).cloned()
     }
 
-    /// Create IRQ mapping
+    /// IRQ eşlemesi oluştur
     pub fn create_mapping(&self, domain_id: u32, hwirq: u32) -> Option<u32> {
         let domain = self.get_domain(domain_id)?;
         let irq = domain.create_mapping(hwirq);
@@ -439,14 +439,14 @@ impl IrqDomainManager {
         Some(irq)
     }
 
-    /// Get IRQ data
+    /// IRQ verisini al
     pub fn get_irq_data(&self, irq: u32) -> Option<Arc<IrqData>> {
         let domain_id = self.irq_to_domain.lock().get(&irq).copied()?;
         let domain = self.get_domain(domain_id)?;
         domain.get_irq_data(irq)
     }
 
-    /// Handle IRQ
+    /// IRQ'yu işle
     pub fn handle_irq(&self, irq: u32) {
         if let Some(domain_id) = self.irq_to_domain.lock().get(&irq).copied() {
             if let Some(domain) = self.get_domain(domain_id) {
@@ -458,7 +458,7 @@ impl IrqDomainManager {
         }
     }
 
-    /// Set IRQ affinity
+    /// IRQ benzeşimi ayarla
     pub fn set_affinity(&self, irq: u32, mask: u32) -> bool {
         if let Some(data) = self.get_irq_data(irq) {
             let domain_id = data.domain.load(Ordering::Relaxed);
@@ -471,7 +471,7 @@ impl IrqDomainManager {
         false
     }
 
-    /// Set IRQ trigger type
+    /// IRQ tetikleyici türünü ayarla
     pub fn set_trigger_type(&self, irq: u32, trigger: u32) -> i32 {
         if let Some(data) = self.get_irq_data(irq) {
             let domain_id = data.domain.load(Ordering::Relaxed);
@@ -484,7 +484,7 @@ impl IrqDomainManager {
         -1
     }
 
-    /// Get statistics
+    /// İstatistikleri al
     pub fn get_stats(&self) -> IrqDomainStats {
         self.stats.lock().clone()
     }
@@ -495,18 +495,18 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init() {
-    // Create root domain
+    // Kök alanı oluştur
     let root = IRQ_DOMAINS.create_domain("root", IRQ_DOMAIN_TYPE_HIERARCHY);
 
-    // Create IOAPIC domain
+    // IOAPIC alanı oluştur
     let ioapic = IRQ_DOMAINS.create_domain("IOAPIC", IRQ_DOMAIN_TYPE_HIERARCHY);
     ioapic.set_parent(root.id);
 
-    // Create MSI domain
+    // MSI alanı oluştur
     let msi = IRQ_DOMAINS.create_domain("MSI", IRQ_DOMAIN_TYPE_MSI);
     msi.set_parent(root.id);
 

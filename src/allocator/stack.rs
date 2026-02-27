@@ -1,3 +1,10 @@
+//! # Çekirdek Yığını (Kernel Stack) Ayırıcı
+//!
+//! PMM (Fiziksel Bellek Yöneticisi) üzerinden doğrudan ardışık fiziksel
+//! bellek sayfaları ayırır. Global heap allocator'ı devre dışı bırakarak
+//! parçalanmayı (fragmantasyonu) önler.
+//! Belleğe erişmek için doğrudan eşleme (Fiziksel Adres + Offset) kullanır.
+
 use crate::memory::{global_memory_manager_mut, PHYSICAL_MEMORY_OFFSET};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -7,46 +14,46 @@ use core::slice;
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
 use x86_64::PhysAddr;
 
-/// Kernel Stack Allocator.
+/// Çekirdek Yığın (Stack) Ayırıcı.
 ///
-/// Allocates contiguous physical memory pages for kernel stacks directly from PMM,
-/// bypassing the global heap allocator to prevent fragmentation.
+/// PMM'den doğrudan ardışık fiziksel bellek sayfaları ayırır,
+/// parçalanmayı önlemek için global heap allocator'ı atlar.
 ///
-/// Uses direct mapping (Physical Address + Offset) to access memory.
+/// Belleğe erişmek için doğrudan eşleme (Fiziksel Adres + Offset) kullanır.
 #[derive(Debug)]
 pub struct KernelStack {
     ptr: NonNull<u8>,
     pages: usize,
-    layout: core::alloc::Layout, // Not used, but kept for future alignment
+    layout: core::alloc::Layout, // Kullanılmıyor, gelecekteki hizalama için saklandı
 }
 
-// Send + Sync because it owns the memory
+// Belleğin sahibi olduğu için Send + Sync
 unsafe impl Send for KernelStack {}
 unsafe impl Sync for KernelStack {}
 
 impl KernelStack {
-    /// Allocates a new Kernel Stack with the given size (in bytes).
-    /// Size will be rounded up to page boundaries.
+    /// Verilen boyutta (bayt cinsinden) yeni bir Kernel Stack ayırır.
+    /// Boyut sayfa sınırlarına yuvarlanır.
     pub fn new(size_in_bytes: usize) -> Option<Self> {
         if size_in_bytes == 0 {
             return None;
         }
 
         let pages = (size_in_bytes + 4095) / 4096;
-        
+
         let mm = unsafe { global_memory_manager_mut() }?;
         let frame = mm.allocate_contiguous_frames(pages)?;
-        
+
         let phys_addr = frame.start_address();
         let virt_addr = phys_addr.as_u64() + PHYSICAL_MEMORY_OFFSET;
-        
+
         let ptr = NonNull::new(virt_addr as *mut u8)?;
 
-        // Zero the memory for security and determinism
+        // Güvenlik ve belirlilik için belleği sıfırla
         unsafe {
             ptr::write_bytes(ptr.as_ptr(), 0, pages * 4096);
         }
-        
+
         Some(Self {
             ptr,
             pages,
@@ -54,32 +61,32 @@ impl KernelStack {
         })
     }
 
-    /// Returns the physical address of the stack start.
+    /// Yığının fiziksel adresini döndürür.
     pub fn phys_addr(&self) -> PhysAddr {
         let virt_addr = self.ptr.as_ptr() as u64;
-        
+
         if virt_addr >= PHYSICAL_MEMORY_OFFSET {
-            // HHDM-mapped stack: use direct offset calculation
+            // HHDM eşlemeli yığın: doğrudan offset hesaplaması kullan
             PhysAddr::new(virt_addr - PHYSICAL_MEMORY_OFFSET)
         } else {
-            // Heap-allocated stack: use page table translation
+            // Heap'te ayrılan yığın: sayfa tablosu çevirisi kullan
             use x86_64::VirtAddr;
             crate::memory::paging::translate_addr(VirtAddr::new(virt_addr))
                 .expect("KernelStack virtual address is not mapped")
         }
     }
 
-    /// Returns the virtual address of the stack start.
+    /// Yığının sanal başlangıç adresini döndürür.
     pub fn as_ptr(&self) -> *const u8 {
         self.ptr.as_ptr()
     }
 
-    /// Returns the mutable virtual address of the stack start.
+    /// Yığının değiştirilebilir sanal başlangıç adresini döndürür.
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.ptr.as_ptr()
     }
 
-    /// Returns the size of the stack in bytes.
+    /// Yığının bayt cinsinden boyutunu döndürür.
     pub fn len(&self) -> usize {
         self.pages * 4096
     }
@@ -111,7 +118,7 @@ impl DerefMut for KernelStack {
 
 impl Clone for KernelStack {
     fn clone(&self) -> Self {
-        // Deep copy needed because we own the memory
+        // Belleğin sahibi olduğumuz için derin kopya gerekli
         let new_stack = Self::new(self.len()).expect("Failed to allocate stack clone");
         unsafe {
             ptr::copy_nonoverlapping(self.as_ptr(), new_stack.ptr.as_ptr(), self.len());

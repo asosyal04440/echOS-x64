@@ -1,39 +1,46 @@
+//! # AP (Application Processor) Başlatma Modülü
+//!
+//! SMP sistemlerde BSP dışındaki her işlemci çekirdeği için çalışan giriş noktasını
+//! tanımlar. AP'ler INIT-SIPI-SIPI dizisi ile uyandırılıp bu fonksiyona atlarlar.
+//! GDT ve IDT sırasıyla yüklenir, ardından LAPIC, per-CPU veri ve kesme sistemi
+//! başlatılır; son adımda zamanlayıcının boşta döngüsüne girilir.
+
 use crate::syscall::{init_cpu_data, CpuData};
 use x86_64::VirtAddr;
 
 #[no_mangle]
 pub extern "sysv64" fn ap_entry(cpu_data: &'static mut CpuData) -> ! {
-    // CRITICAL: Initialize per-CPU data FIRST (required for per-CPU access)
+    // KRİTİK: Per-CPU verisi İLK olarak başlatılmalı (per-CPU erişimi için zorunlu)
     unsafe {
         init_cpu_data(cpu_data as *mut CpuData);
     }
 
     let cpu_id = cpu_data.cpu_id;
-    
-    // CRITICAL ORDER: We must load the GDT BEFORE the IDT!
-    // The early boot AP trampoline uses CS=0x18. The kernel GDT uses CS=0x08,
-    // and defines 0x18 as the TSS. If IDT is created while CS=0x18, all interrupt
-    // gates will point to the TSS selector in the new GDT, causing #GP(0x18) on any interrupt.
+
+    // KRİTİK SIRA: GDT'yi IDT'den ÖNCE yüklemeliyiz!
+    // Erken boot AP trampolin kodu CS=0x18 kullanır. Kernel GDT ise CS=0x08 kullanır
+    // ve 0x18'i TSS olarak tanımlar. IDT CS=0x18 iken oluşturulursa, tüm interrupt
+    // kapıları yeni GDT'deki TSS selektörüne işaret eder ve her interrupt'ta #GP(0x18) oluşur.
     crate::gdt::init_for_cpu(cpu_id, VirtAddr::new(cpu_data.kernel_stack_top));
 
     unsafe {
-        // Manually load IDT for this CPU using the cpu_id from cpu_data
+        // Bu CPU için cpu_data içindeki cpu_id kullanılarak IDT elle yüklenir
         let idt = crate::interrupts::init_idt_for_cpu(cpu_id);
         idt.load();
     }
 
-    // Now safe to perform operations that might trigger exceptions
-    // RAW UART DEBUG: Print 'A' directly to COM1 (0x3f8)
+    // Artık istisna tetikleyebilecek işlemler güvenle yapılabilir
+    // HAM UART HATA AYIKLAMA: COM1 portuna (0x3f8) doğrudan 'A' yaz
     unsafe {
         x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'A');
     }
-    // RAW UART DEBUG: Print 'B' directly to COM1 (0x3f8)
+    // HAM UART HATA AYIKLAMA: COM1 portuna (0x3f8) doğrudan 'B' yaz
     unsafe {
         x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'B');
     }
 
-    // We already know our CPU ID from cpu_data. 
-    // We can get our APIC ID from the global state instead of doing MMIO/MSR reads during early boot.
+    // cpu_data'dan CPU kimliğini zaten biliyoruz.
+    // Erken boot sırasında MMIO/MSR okumak yerine APIC kimliğini küresel durumdan alabiliriz.
     let apic_id = {
         let mut id = cpu_id;
         if let Some(state) = crate::cpu::smp::SMP_STATE.try_lock() {
@@ -42,7 +49,7 @@ pub extern "sysv64" fn ap_entry(cpu_data: &'static mut CpuData) -> ! {
         id
     };
 
-    // RAW UART DEBUG: Print 'C' directly to COM1 (0x3f8)
+    // HAM UART HATA AYIKLAMA: COM1 portuna (0x3f8) doğrudan 'C' yaz
     unsafe {
         x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'C');
     }
@@ -53,13 +60,13 @@ pub extern "sysv64" fn ap_entry(cpu_data: &'static mut CpuData) -> ! {
     unsafe {
         crate::debug::serial::EMERGENCY_SERIAL.write_byte(b'E');
     }
-    // Set GS_BASE to point to cpu_data for kernel usage (critical for per-cpu data access)
+    // GS_BASE'i cpu_data'ya yönlendir — kernel per-CPU veri erişimi için kritik
     unsafe {
         use x86_64::registers::model_specific::Msr;
         Msr::new(0xC0000101).write(cpu_data as *mut CpuData as u64);
     }
-    // Note: GDT and IDT already loaded at the beginning - no need to call init_per_cpu() again
-    // Note: IDT already loaded at the beginning - no need to call init_per_cpu() again
+    // Not: GDT ve IDT başlangıçta zaten yüklendi — init_per_cpu() tekrar çağrılmamalı
+    // Not: IDT başlangıçta zaten yüklendi — init_per_cpu() tekrar çağrılmamalı
     unsafe {
         crate::debug::serial::EMERGENCY_SERIAL.write_byte(b'G');
         x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'W');

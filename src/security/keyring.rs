@@ -1,6 +1,6 @@
-//! # Keyring
+//! # Anahtar Halkası (Keyring)
 //!
-//! Kernel key retention service.
+//! Çekirdek anahtar saklama hizmeti.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,10 +10,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// KEYRING CONSTANTS
+// ANAHTARLIK SABİTLERİ
 // ============================================================================
 
-/// Key types
+/// Anahtar türleri
 pub const KEY_TYPE_KEYRING: &str = "keyring";
 pub const KEY_TYPE_USER: &str = "user";
 pub const KEY_TYPE_ENCRYPTED: &str = "encrypted";
@@ -21,7 +21,7 @@ pub const KEY_TYPE_TRUSTED: &str = "trusted";
 pub const KEY_TYPE_LOGON: &str = "logon";
 pub const KEY_TYPE_BIG_KEY: &str = "big_key";
 
-/// Key permissions
+/// Anahtar izinleri
 pub const KEY_POS_VIEW: u32 = 0x01000000;
 pub const KEY_POS_READ: u32 = 0x02000000;
 pub const KEY_POS_WRITE: u32 = 0x04000000;
@@ -50,7 +50,7 @@ pub const KEY_OTH_SEARCH: u32 = 0x00000008;
 pub const KEY_OTH_LINK: u32 = 0x00000010;
 pub const KEY_OTH_SETATTR: u32 = 0x00000020;
 
-/// Special keyring IDs
+/// Özel anahtarlık kimlikleri
 pub const KEY_SPEC_THREAD_KEYRING: i32 = -1;
 pub const KEY_SPEC_PROCESS_KEYRING: i32 = -2;
 pub const KEY_SPEC_SESSION_KEYRING: i32 = -3;
@@ -61,33 +61,33 @@ pub const KEY_SPEC_REQKEY_AUTH_KEY: i32 = -7;
 pub const KEY_SPEC_REQUESTOR_KEYRING: i32 = -8;
 
 // ============================================================================
-// KEY
+// ANAHTAR
 // ============================================================================
 
 pub struct Key {
-    /// Key serial number
+    /// Anahtar seri numarası
     pub serial: AtomicU64,
-    /// Key type
+    /// Anahtar türü
     pub key_type: String,
-    /// Key description
+    /// Anahtar açıklaması
     pub description: String,
-    /// Key data
+    /// Anahtar verisi
     pub payload: Mutex<Vec<u8>>,
-    /// Permissions
+    /// İzinler
     pub permissions: AtomicU32,
-    /// UID
+    /// Kullanıcı kimliği
     pub uid: AtomicU32,
-    /// GID
+    /// Grup kimliği
     pub gid: AtomicU32,
-    /// Creation time
+    /// Oluşturulma zamanı
     pub created: AtomicU64,
-    /// Expiration time (0 = never)
+    /// Son kullanma zamanı (0 = hiçbir zaman)
     pub expiry: AtomicU64,
-    /// Is revoked
+    /// İptal edildi mi
     pub revoked: AtomicBool,
-    /// Is instantiated
+    /// Örneklendi mi
     pub instantiated: AtomicBool,
-    /// Reference count
+    /// Başvuru sayısı
     pub ref_count: AtomicU32,
 }
 
@@ -114,23 +114,23 @@ impl Key {
         }
     }
 
-    /// Check permission
+    /// İzni kontrol eder
     pub fn check_permission(&self, perm: u32, uid: u32, gid: u32) -> bool {
         let perms = self.permissions.load(Ordering::Relaxed);
-        
+
         if uid == self.uid.load(Ordering::Relaxed) {
-            // Owner permissions
+            // Sahip izinleri
             (perms & (perm << 16)) != 0
         } else if gid == self.gid.load(Ordering::Relaxed) {
-            // Group permissions
+            // Grup izinleri
             (perms & (perm << 8)) != 0
         } else {
-            // Other permissions
+            // Diğer izinler
             (perms & perm) != 0
         }
     }
 
-    /// Read payload
+    /// Yük verisini okur
     pub fn read(&self) -> Option<Vec<u8>> {
         if self.revoked.load(Ordering::Relaxed) {
             return None;
@@ -138,18 +138,18 @@ impl Key {
         Some(self.payload.lock().clone())
     }
 
-    /// Write payload
+    /// Yük verisini yazar
     pub fn write(&self, data: &[u8]) {
         *self.payload.lock() = data.to_vec();
         self.instantiated.store(true, Ordering::SeqCst);
     }
 
-    /// Revoke key
+    /// Anahtarı iptal eder
     pub fn revoke(&self) {
         self.revoked.store(true, Ordering::SeqCst);
     }
 
-    /// Update payload
+    /// Yük verisini günceller
     pub fn update(&self, data: &[u8]) -> Result<(), KeyError> {
         if self.revoked.load(Ordering::Relaxed) {
             return Err(KeyError::Revoked);
@@ -158,20 +158,20 @@ impl Key {
         Ok(())
     }
 
-    /// Get serial
+    /// Seri numarasını getirir
     pub fn get_serial(&self) -> u64 {
         self.serial.load(Ordering::Relaxed)
     }
 }
 
 // ============================================================================
-// KEYRING
+// ANAHTARLIK
 // ============================================================================
 
 pub struct Keyring {
-    /// The key structure
+    /// Anahtar yapısı
     pub key: Arc<Key>,
-    /// Linked keys (serial -> key)
+    /// Bağlı anahtarlar (seri -> anahtar)
     pub links: Mutex<BTreeMap<u64, Arc<Key>>>,
 }
 
@@ -179,25 +179,25 @@ impl Keyring {
     pub fn new(serial: u64, description: &str) -> Self {
         let key = Arc::new(Key::new(serial, KEY_TYPE_KEYRING, description));
         key.instantiated.store(true, Ordering::SeqCst);
-        
+
         Self {
             key,
             links: Mutex::new(BTreeMap::new()),
         }
     }
 
-    /// Link a key
+    /// Anahtar bağlar
     pub fn link(&self, key: Arc<Key>) {
         let serial = key.get_serial();
         self.links.lock().insert(serial, key);
     }
 
-    /// Unlink a key
+    /// Anahtar bağlantısını kaldırır
     pub fn unlink(&self, serial: u64) -> Option<Arc<Key>> {
         self.links.lock().remove(&serial)
     }
 
-    /// Search for key by description
+    /// Açıklamaya göre anahtar arar
     pub fn search(&self, description: &str) -> Option<Arc<Key>> {
         for key in self.links.lock().values() {
             if key.description == description {
@@ -207,32 +207,32 @@ impl Keyring {
         None
     }
 
-    /// List all keys
+    /// Tüm anahtarları listeler
     pub fn list(&self) -> Vec<u64> {
         self.links.lock().keys().copied().collect()
     }
 }
 
 // ============================================================================
-// KEY MANAGER
+// ANAHTAR YÖNETİCİSİ
 // ============================================================================
 
 pub struct KeyManager {
-    /// All keys by serial
+    /// Seri numarasına göre tüm anahtarlar
     keys: Mutex<BTreeMap<u64, Arc<Key>>>,
-    /// All keyrings by serial
+    /// Seri numarasına göre tüm anahtarlıklar
     keyrings: Mutex<BTreeMap<u64, Arc<Keyring>>>,
-    /// Per-thread keyring
+    /// İş parçacığı başına anahtarlık
     thread_keyrings: Mutex<BTreeMap<u32, u64>>,
-    /// Per-process keyring
+    /// İşlem başına anahtarlık
     process_keyrings: Mutex<BTreeMap<u32, u64>>,
-    /// Per-session keyring
+    /// Oturum başına anahtarlık
     session_keyrings: Mutex<BTreeMap<u32, u64>>,
-    /// User keyrings
+    /// Kullanıcı anahtarlıkları
     user_keyrings: Mutex<BTreeMap<u32, u64>>,
-    /// Next serial
+    /// Sonraki seri numarası
     next_serial: AtomicU64,
-    /// Statistics
+    /// İstatistikler
     stats: Mutex<KeyStats>,
 }
 
@@ -258,48 +258,48 @@ impl KeyManager {
         }
     }
 
-    /// Create key
+    /// Anahtar oluşturur
     pub fn create_key(&self, key_type: &str, description: &str, payload: &[u8]) -> Arc<Key> {
         let serial = self.next_serial.fetch_add(1, Ordering::SeqCst);
         let key = Arc::new(Key::new(serial, key_type, description));
-        
+
         if !payload.is_empty() {
             key.write(payload);
         }
-        
+
         self.keys.lock().insert(serial, key.clone());
-        
+
         let mut stats = self.stats.lock();
         stats.keys_count += 1;
-        
+
         key
     }
 
-    /// Create keyring
+    /// Anahtarlık oluşturur
     pub fn create_keyring(&self, description: &str) -> Arc<Keyring> {
         let serial = self.next_serial.fetch_add(1, Ordering::SeqCst);
         let keyring = Arc::new(Keyring::new(serial, description));
-        
+
         self.keyrings.lock().insert(serial, keyring.clone());
         self.keys.lock().insert(serial, keyring.key.clone());
-        
+
         let mut stats = self.stats.lock();
         stats.keyrings_count += 1;
-        
+
         keyring
     }
 
-    /// Get key by serial
+    /// Seri numarasına göre anahtar getirir
     pub fn get_key(&self, serial: u64) -> Option<Arc<Key>> {
         self.keys.lock().get(&serial).cloned()
     }
 
-    /// Get keyring by serial
+    /// Seri numarasına göre anahtarlık getirir
     pub fn get_keyring(&self, serial: u64) -> Option<Arc<Keyring>> {
         self.keyrings.lock().get(&serial).cloned()
     }
 
-    /// Get special keyring
+    /// Özel anahtarlık getirir
     pub fn get_special_keyring(&self, spec: i32, pid: u32) -> Option<Arc<Keyring>> {
         let serial = match spec {
             KEY_SPEC_THREAD_KEYRING => self.thread_keyrings.lock().get(&pid).copied()?,
@@ -308,52 +308,52 @@ impl KeyManager {
             KEY_SPEC_USER_KEYRING => self.user_keyrings.lock().get(&pid).copied()?,
             _ => return None,
         };
-        
+
         self.get_keyring(serial)
     }
 
-    /// Link key to keyring
+    /// Anahtarlığa anahtar bağlar
     pub fn link_key(&self, keyring_serial: u64, key_serial: u64) -> Result<(), KeyError> {
         let keyring = self.get_keyring(keyring_serial).ok_or(KeyError::NotFound)?;
         let key = self.get_key(key_serial).ok_or(KeyError::NotFound)?;
-        
+
         keyring.link(key);
         Ok(())
     }
 
-    /// Unlink key from keyring
+    /// Anahtarlıktan anahtar bağlantısını kaldırır
     pub fn unlink_key(&self, keyring_serial: u64, key_serial: u64) -> Result<(), KeyError> {
         let keyring = self.get_keyring(keyring_serial).ok_or(KeyError::NotFound)?;
         keyring.unlink(key_serial);
         Ok(())
     }
 
-    /// Search for key in keyring
+    /// Anahtarlıkta anahtar arar
     pub fn search(&self, keyring_serial: u64, description: &str) -> Option<Arc<Key>> {
         let keyring = self.get_keyring(keyring_serial)?;
         keyring.search(description)
     }
 
-    /// Revoke key
+    /// Anahtarı iptal eder
     pub fn revoke_key(&self, serial: u64) -> Result<(), KeyError> {
         let key = self.get_key(serial).ok_or(KeyError::NotFound)?;
         key.revoke();
         Ok(())
     }
 
-    /// Update key
+    /// Anahtarı günceller
     pub fn update_key(&self, serial: u64, payload: &[u8]) -> Result<(), KeyError> {
         let key = self.get_key(serial).ok_or(KeyError::NotFound)?;
         key.update(payload)
     }
 
-    /// Read key
+    /// Anahtarı okur
     pub fn read_key(&self, serial: u64) -> Result<Vec<u8>, KeyError> {
         let key = self.get_key(serial).ok_or(KeyError::NotFound)?;
         key.read().ok_or(KeyError::Revoked)
     }
 
-    /// Get statistics
+    /// İstatistikleri getirir
     pub fn get_stats(&self) -> KeyStats {
         self.stats.lock().clone()
     }
@@ -364,7 +364,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TÜRÜ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,27 +377,27 @@ pub enum KeyError {
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARAYÜZÜ
 // ============================================================================
 
 pub fn sys_add_key(key_type: &str, description: &str, payload: &[u8], keyring_serial: u64) -> i64 {
     let key = KEY_MANAGER.create_key(key_type, description, payload);
     let serial = key.get_serial();
-    
+
     if keyring_serial != 0 {
         let _ = KEY_MANAGER.link_key(keyring_serial, serial);
     }
-    
+
     serial as i64
 }
 
 pub fn sys_request_key(key_type: &str, description: &str, callout: &str, dest_keyring: u64) -> i64 {
-    // Search for existing key
+    // Mevcut anahtarı ara
     if let Some(key) = KEY_MANAGER.search(dest_keyring, description) {
         return key.get_serial() as i64;
     }
-    
-    // Would create new key via callout
+
+    // Çağrı aracılığıyla yeni anahtar oluşturulur
     -2 // ENOENT
 }
 
@@ -425,19 +425,19 @@ pub fn sys_keyctl(cmd: i32, arg2: u64, arg3: u64, arg4: u64) -> i64 {
             0
         }
         4 => { // KEYCTL_CHOWN
-            // Change ownership
+            // Sahipliği değiştir
             0
         }
         5 => { // KEYCTL_SETPERM
-            // Set permissions
+            // İzinleri ayarla
             0
         }
         6 => { // KEYCTL_DESCRIBE
-            // Describe key
+            // Anahtarı açıkla
             0
         }
         7 => { // KEYCTL_CLEAR
-            // Clear keyring
+            // Anahtarlığı temizle
             0
         }
         8 => { // KEYCTL_LINK
@@ -469,13 +469,13 @@ pub fn sys_keyctl(cmd: i32, arg2: u64, arg3: u64, arg4: u64) -> i64 {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init() {
-    // Create default user keyring
+    // Varsayılan kullanıcı anahtarlığını oluştur
     let user_keyring = KEY_MANAGER.create_keyring("_uid.0");
     KEY_MANAGER.user_keyrings.lock().insert(0, user_keyring.key.get_serial());
-    
+
     crate::serial_println!("[KEYRING] Subsystem initialized");
 }

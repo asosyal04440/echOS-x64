@@ -1,7 +1,7 @@
-//! # Music Player Application
+//! # Müzik Çalar Uygulaması
 //!
-//! Audio player with playlist support, visualizations, and controls
-//! Integrates with the audio backend for playback
+//! Çalma listesi desteği, görselleştirmeler ve kontrollerle ses çalar
+//! Oynatma için ses arka ucuyla entegre olur
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -18,10 +18,10 @@ use crate::gui::theme::{Theme, Color};
 use crate::gui::widgets::{Widget, Rect};
 
 // ============================================================================
-// AUDIO FORMAT
+// SES FORMATI
 // ============================================================================
 
-/// Supported audio formats
+/// Desteklenen ses formatları
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioFormat {
     Unknown,
@@ -57,37 +57,37 @@ impl AudioFormat {
 }
 
 // ============================================================================
-// TRACK INFO
+// PARÇA BİLGİSİ
 // ============================================================================
 
-/// Track metadata
+/// Parça meta verisi
 #[derive(Clone, Debug)]
 pub struct TrackInfo {
-    /// File path
+    /// Dosya yolu
     pub path: String,
-    /// Title
+    /// Başlık
     pub title: String,
-    /// Artist
+    /// Sanatçı
     pub artist: String,
-    /// Album
+    /// Albüm
     pub album: String,
-    /// Duration in seconds
+    /// Saniye cinsinden süre
     pub duration: f32,
-    /// Sample rate
+    /// Örnekleme hızı
     pub sample_rate: u32,
-    /// Channels
+    /// Kanal sayısı
     pub channels: u8,
-    /// Bitrate (kbps)
+    /// Bit hızı (kbps)
     pub bitrate: u32,
     /// Format
     pub format: AudioFormat,
-    /// Track number
+    /// Parça numarası
     pub track_number: Option<u32>,
-    /// Year
+    /// Yıl
     pub year: Option<u32>,
-    /// Genre
+    /// Tür
     pub genre: String,
-    /// Album art (placeholder - would be image data)
+    /// Albüm kapağı (yer tutucu - görüntü verisi olacak)
     pub has_album_art: bool,
 }
 
@@ -122,10 +122,10 @@ impl TrackInfo {
 }
 
 // ============================================================================
-// PLAYBACK STATE
+// OYNATMA DURUMU
 // ============================================================================
 
-/// Playback state
+/// Oynatma durumu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackState {
     Stopped,
@@ -133,7 +133,7 @@ pub enum PlaybackState {
     Paused,
 }
 
-/// Repeat mode
+/// Tekrar modu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepeatMode {
     None,
@@ -141,7 +141,7 @@ pub enum RepeatMode {
     All,
 }
 
-/// Shuffle mode
+/// Karıştırma modu
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ShuffleMode {
     #[default]
@@ -150,24 +150,24 @@ pub enum ShuffleMode {
 }
 
 // ============================================================================
-// PLAYLIST
+// ÇALMA LİSTESİ
 // ============================================================================
 
-/// Playlist manager
+/// Çalma listesi yöneticisi
 pub struct Playlist {
-    /// Tracks
+    /// Parçalar
     tracks: Vec<TrackInfo>,
-    /// Current track index
+    /// Mevcut parça indeksi
     current_index: Option<usize>,
-    /// Play order (for shuffle)
+    /// Çalma sırası (karıştırma için)
     play_order: Vec<usize>,
-    /// Order position
+    /// Sıra konumu
     order_position: usize,
-    /// Shuffle mode
+    /// Karıştırma modu
     shuffle: ShuffleMode,
-    /// Repeat mode
+    /// Tekrar modu
     repeat: RepeatMode,
-    /// Name
+    /// Ad
     name: String,
 }
 
@@ -184,13 +184,13 @@ impl Playlist {
         }
     }
     
-    /// Add track
+    /// Parça ekle
     pub fn add_track(&mut self, track: TrackInfo) {
         self.tracks.push(track);
         self.rebuild_play_order();
     }
     
-    /// Remove track
+    /// Parça kaldır
     pub fn remove_track(&mut self, index: usize) {
         if index < self.tracks.len() {
             self.tracks.remove(index);
@@ -204,7 +204,7 @@ impl Playlist {
         }
     }
     
-    /// Clear playlist
+    /// Çalma listesini temizle
     pub fn clear(&mut self) {
         self.tracks.clear();
         self.current_index = None;
@@ -212,34 +212,34 @@ impl Playlist {
         self.order_position = 0;
     }
     
-    /// Get track count
+    /// Parça sayısını al
     pub fn count(&self) -> usize {
         self.tracks.len()
     }
     
-    /// Get current track
+    /// Mevcut parçayı al
     pub fn current(&self) -> Option<&TrackInfo> {
         self.current_index.and_then(|i| self.tracks.get(i))
     }
     
-    /// Get track by index
+    /// İndekse göre parça al
     pub fn get(&self, index: usize) -> Option<&TrackInfo> {
         self.tracks.get(index)
     }
     
-    /// Set current track
+    /// Mevcut parçayı ayarla
     pub fn set_current(&mut self, index: usize) {
         if index < self.tracks.len() {
             self.current_index = Some(index);
             
-            // Update order position
+            // Sıra konumunu güncelle
             if self.shuffle == ShuffleMode::On {
                 self.order_position = self.play_order.iter().position(|&i| i == index).unwrap_or(0);
             }
         }
     }
     
-    /// Next track
+    /// Sonraki parça
     pub fn next(&mut self) -> Option<usize> {
         match self.repeat {
             RepeatMode::One => self.current_index,
@@ -268,7 +268,7 @@ impl Playlist {
         }
     }
     
-    /// Previous track
+    /// Önceki parça
     pub fn prev(&mut self) -> Option<usize> {
         if self.shuffle == ShuffleMode::On {
             if self.order_position > 0 {
@@ -286,60 +286,60 @@ impl Playlist {
         self.current_index
     }
     
-    /// Set shuffle mode
+    /// Karıştırma modunu ayarla
     pub fn set_shuffle(&mut self, mode: ShuffleMode) {
         self.shuffle = mode;
         self.rebuild_play_order();
     }
     
-    /// Set repeat mode
+    /// Tekrar modunu ayarla
     pub fn set_repeat(&mut self, mode: RepeatMode) {
         self.repeat = mode;
     }
     
-    /// Rebuild play order
+    /// Çalma sırasını yeniden oluştur
     fn rebuild_play_order(&mut self) {
         self.play_order = (0..self.tracks.len()).collect();
         
         if self.shuffle == ShuffleMode::On {
-            // Fisher-Yates shuffle
+            // Fisher-Yates karıştırma algoritması
             for i in (1..self.play_order.len()).rev() {
                 let j = (self.get_random() as usize) % (i + 1);
                 self.play_order.swap(i, j);
             }
         }
         
-        // Reset position
+        // Konumu sıfırla
         if let Some(current) = self.current_index {
             self.order_position = self.play_order.iter().position(|&i| i == current).unwrap_or(0);
         }
     }
     
     fn get_random(&self) -> u64 {
-        // Simple random - would use proper RNG
+        // Basit rastgele - gerçek RNG kullanılacak
         crate::cpu::tsc::read() as u64
     }
 }
 
 // ============================================================================
-// AUDIO VISUALIZER
+// SES GÖRSELLEŞTİRİCİSİ
 // ============================================================================
 
-/// Audio visualizer
+/// Ses görselleştiricisi
 pub struct AudioVisualizer {
-    /// Frequency data (simplified)
+    /// Frekans verisi (basitleştirilmiş)
     bars: Vec<f32>,
-    /// Number of bars
+    /// Çubuk sayısı
     bar_count: usize,
-    /// History for smoothing
+    /// Yumuşatma için geçmiş
     history: Vec<Vec<f32>>,
-    /// Smoothing factor
+    /// Yumuşatma faktörü
     smoothing: f32,
-    /// Peak values
+    /// Tepe değleri
     peaks: Vec<f32>,
-    /// Peak hold time
+    /// Tepe tutma süresi
     peak_hold: Vec<u32>,
-    /// Visualization mode
+    /// Görselleştirme modu
     mode: VisualizationMode,
 }
 
@@ -363,9 +363,9 @@ impl AudioVisualizer {
         }
     }
     
-    /// Update with new audio data
+    /// Yeni ses verisiyle güncelle
     pub fn update(&mut self, audio_data: &[f32]) {
-        // Simple FFT approximation - split into bands
+        // Basit FFT yaklaşımı - bantlara böl
         let samples_per_bar = audio_data.len() / self.bar_count;
         
         for i in 0..self.bar_count {
@@ -379,10 +379,10 @@ impl AudioVisualizer {
             
             let avg = sum / (end - start).max(1) as f32;
             
-            // Smooth
+            // Yumuşat
             self.bars[i] = self.bars[i] * self.smoothing + avg * (1.0 - self.smoothing);
             
-            // Update peak
+            // Tepeyi güncelle
             if self.bars[i] > self.peaks[i] {
                 self.peaks[i] = self.bars[i];
                 self.peak_hold[i] = 30;
@@ -394,7 +394,7 @@ impl AudioVisualizer {
         }
     }
     
-    /// Generate dummy visualization data
+    /// Sahte görselleştirme verisi üret
     pub fn generate_dummy(&mut self, time: f64) {
         for i in 0..self.bar_count {
             let freq = (i + 1) as f64 * 0.5;
@@ -414,7 +414,7 @@ impl AudioVisualizer {
         }
     }
     
-    /// Draw visualization
+    /// Görselleştirmeyi çiz
     pub fn draw(&self, fb: &mut Framebuffer, x: usize, y: usize, width: usize, height: usize) {
         match self.mode {
             VisualizationMode::Bars => self.draw_bars(fb, x, y, width, height),
@@ -432,11 +432,11 @@ impl AudioVisualizer {
             let bar_height = (self.bars[i] * height as f32 * 0.9) as usize;
             let bar_y = y + height - bar_height;
             
-            // Draw bar
+            // Çubuğu çiz
             let color = self.get_bar_color(i, self.bars[i]);
             fb.draw_rect(bar_x, bar_y, bar_width - bar_gap, bar_height, color);
             
-            // Draw peak
+            // Tepeyi çiz
             if self.peaks[i] > 0.01 {
                 let peak_y = y + height - (self.peaks[i] * height as f32 * 0.9) as usize;
                 fb.draw_rect(bar_x, peak_y, bar_width - bar_gap, 2, Theme::ACCENT_PRIMARY.to_u32());
@@ -452,7 +452,7 @@ impl AudioVisualizer {
             let bar_idx = (i * self.bar_count / width).min(self.bar_count - 1);
             let amplitude = (self.bars[bar_idx] * half_height as f32) as usize;
             
-            // Draw line from center
+            // Merkezden çizgi çiz
             let color = self.get_bar_color(bar_idx, self.bars[bar_idx]);
             fb.draw_rect(x + i, center_y - amplitude, 1, amplitude * 2, color);
         }
@@ -474,7 +474,7 @@ impl AudioVisualizer {
             
             let color = self.get_bar_color(i, self.bars[i]);
             
-            // Draw line from inner to outer
+            // İçten dışa çizgi çiz
             let dx = outer_x as i32 - inner_x as i32;
             let dy = outer_y as i32 - inner_y as i32;
             let steps = (dx.abs().max(dy.abs()).max(1)) as usize;
@@ -496,7 +496,7 @@ impl AudioVisualizer {
         let saturation = 0.8;
         let lightness = 0.5 + value * 0.3;
         
-        // HSL to RGB (simplified)
+        // HSL'den RGB'ye dönüşüm (basitleştirilmiş)
         let c = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
         let x = c * (1.0 - ((hue as f32 / 60.0) % 2.0 - 1.0).abs());
         let m = lightness - c / 2.0;
@@ -517,43 +517,43 @@ impl AudioVisualizer {
         (r << 16) | (g << 8) | b
     }
     
-    /// Set visualization mode
+    /// Görselleştirme modunu ayarla
     pub fn set_mode(&mut self, mode: VisualizationMode) {
         self.mode = mode;
     }
 }
 
 // ============================================================================
-// MUSIC PLAYER
+// MÜZİK ÇALAR
 // ============================================================================
 
-/// Music Player Application
+/// Müzik Çalar Uygulaması
 pub struct MusicPlayer {
-    /// Window position and size
+    /// Pencere konumu ve boyutu
     rect: Rect,
-    /// Playlist
+    /// Çalma listesi
     playlist: Playlist,
-    /// Playback state
+    /// Oynatma durumu
     state: PlaybackState,
-    /// Current position (seconds)
+    /// Mevcut konum (saniye)
     position: f32,
-    /// Volume (0.0 - 1.0)
+    /// Ses seviyesi (0.0 - 1.0)
     volume: f32,
-    /// Visualizer
+    /// Görselleştirici
     visualizer: AudioVisualizer,
-    /// Show visualizer
+    /// Görselleştiriciy göster
     show_visualizer: bool,
-    /// Show playlist
+    /// Çalma listesini göster
     show_playlist: bool,
-    /// Show equalizer
+    /// Ekalizeörü göster
     show_equalizer: bool,
-    /// Equalizer bands
+    /// Ekalizeör bantları
     eq_bands: Vec<f32>,
-    /// Time for visualization
+    /// Görselleştirme için zaman
     time: f64,
-    /// Selected playlist index
+    /// Seçili çalma listesi indeksi
     selected_index: Option<usize>,
-    /// Scroll offset
+    /// Kaydırma ofseti
     scroll_offset: usize,
 }
 
@@ -576,7 +576,7 @@ impl MusicPlayer {
         }
     }
     
-    /// Load file
+    /// Dosya yükle
     pub fn load_file(&mut self, path: &str) {
         let track = TrackInfo::new(path);
         self.playlist.add_track(track);
@@ -584,11 +584,11 @@ impl MusicPlayer {
         self.play();
     }
     
-    /// Play
+    /// Oynat
     pub fn play(&mut self) {
         self.state = PlaybackState::Playing;
         
-        // Initialize audio backend if needed
+        // Gerekirse ses arka ucunu başlat
         if let Some(audio) = crate::drivers::audio::get_audio() {
             let mut audio = audio.lock();
             if let Some(track) = self.playlist.current() {
@@ -597,7 +597,7 @@ impl MusicPlayer {
         }
     }
     
-    /// Pause
+    /// Duraklat
     pub fn pause(&mut self) {
         self.state = PlaybackState::Paused;
         
@@ -606,7 +606,7 @@ impl MusicPlayer {
         }
     }
     
-    /// Stop
+    /// Durdur
     pub fn stop(&mut self) {
         self.state = PlaybackState::Stopped;
         self.position = 0.0;
@@ -616,7 +616,7 @@ impl MusicPlayer {
         }
     }
     
-    /// Toggle play/pause
+    /// Oynat/Duraklat geçişi
     pub fn toggle_play(&mut self) {
         match self.state {
             PlaybackState::Playing => self.pause(),
@@ -629,7 +629,7 @@ impl MusicPlayer {
         }
     }
     
-    /// Next track
+    /// Sonraki parça
     pub fn next(&mut self) {
         if self.playlist.next().is_some() {
             self.position = 0.0;
@@ -639,10 +639,10 @@ impl MusicPlayer {
         }
     }
     
-    /// Previous track
+    /// Önceki parça
     pub fn prev(&mut self) {
         if self.position > 3.0 {
-            // Restart current track if more than 3 seconds in
+            // 3 saniyeden fazla ilerlemişse mevcut parçayı baştan başlat
             self.position = 0.0;
         } else if self.playlist.prev().is_some() {
             self.position = 0.0;
@@ -653,7 +653,7 @@ impl MusicPlayer {
         }
     }
     
-    /// Set volume
+    /// Ses seviyesini ayarla
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.max(0.0).min(1.0);
         
@@ -662,7 +662,7 @@ impl MusicPlayer {
         }
     }
     
-    /// Seek to position
+    /// Konuma atla
     pub fn seek(&mut self, position: f32) {
         self.position = position.max(0.0);
         
@@ -671,54 +671,54 @@ impl MusicPlayer {
         }
     }
     
-    /// Update (call each frame)
+    /// Güncelle (her karede çağrılır)
     pub fn update(&mut self, dt: f64) {
         if self.state == PlaybackState::Playing {
             self.position += dt as f32;
             self.time += dt;
             
-            // Check if track ended
+            // Parçanın bitip bitmediğini kontrol et
             if let Some(track) = self.playlist.current() {
                 if self.position >= track.duration && track.duration > 0.0 {
                     self.next();
                 }
             }
             
-            // Update visualizer
+            // Görselleştiriciy güncelle
             self.visualizer.generate_dummy(self.time);
         }
     }
     
-    /// Draw the player
+    /// Oynatıcıyı çiz
     pub fn draw(&self, fb: &mut Framebuffer) {
         let x = self.rect.x as usize;
         let y = self.rect.y as usize;
         let width = self.rect.width as usize;
         let height = self.rect.height as usize;
         
-        // Window background
+        // Pencere arka planı
         fb.draw_rect(x, y, width, height, Theme::WINDOW_BG.to_u32());
         
-        // Title bar
+        // Başlık çubağı
         fb.draw_rect(x, y, width, 32, Theme::TITLEBAR_BG.to_u32());
         fb.draw_string(x + 12, y + 8, "Music Player", Theme::TEXT_PRIMARY.to_u32());
         
-        // Close button
+        // Kapat düğmesi
         fb.draw_rect(x + width - 28, y + 4, 24, 24, Theme::ERROR.to_u32());
         fb.draw_string(x + width - 20, y + 8, "×", Theme::TEXT_ON_ACCENT.to_u32());
         
-        // Current track info
+        // Mevcut parça bilgisi
         let info_y = y + 32;
         let info_height = 120;
         fb.draw_rect(x, info_y, width, info_height, Theme::SIDEBAR_BG.to_u32());
         
         if let Some(track) = self.playlist.current() {
-            // Album art placeholder
+            // Albüm kapağı yer tutucu
             let art_size = 80;
             let art_x = x + 20;
             let art_y = info_y + 20;
             
-            // Draw placeholder album art
+            // Yer tutucu albüm kapağı çiz
             for py in 0..art_size {
                 for px in 0..art_size {
                     let color = if (px / 10 + py / 10) % 2 == 0 {
@@ -730,7 +730,7 @@ impl MusicPlayer {
                 }
             }
             
-            // Track info
+            // Parça bilgisi
             let text_x = art_x + art_size + 20;
             fb.draw_string(text_x, art_y, &track.title, Theme::TEXT_PRIMARY.to_u32());
             fb.draw_string(text_x, art_y + 20, &track.artist, Theme::TEXT_SECONDARY.to_u32());
@@ -739,7 +739,7 @@ impl MusicPlayer {
             fb.draw_string(x + 20, info_y + 40, "No track playing", Theme::TEXT_SECONDARY.to_u32());
         }
         
-        // Progress bar
+        // İlerleme çubağı
         let progress_y = info_y + info_height;
         let progress_height = 40;
         fb.draw_rect(x, progress_y, width, progress_height, Theme::WINDOW_BG.to_u32());
@@ -747,7 +747,7 @@ impl MusicPlayer {
         let track_duration = self.playlist.current().map(|t| t.duration).unwrap_or(1.0).max(1.0);
         let progress = self.position / track_duration;
         
-        // Progress bar background
+        // İlerleme çubağı arka planı
         let bar_x = x + 20;
         let bar_width = width - 40;
         let bar_y = progress_y + 10;
@@ -756,14 +756,14 @@ impl MusicPlayer {
         fb.draw_rect(bar_x, bar_y, bar_width, bar_height, Theme::BORDER.to_u32());
         fb.draw_rect(bar_x, bar_y, (bar_width as f32 * progress) as usize, bar_height, Theme::ACCENT_PRIMARY.to_u32());
         
-        // Time labels
+        // Zaman etiketleri
         let current_time = self.format_time(self.position);
         let total_time = self.playlist.current().map(|t| t.format_duration()).unwrap_or_else(|| String::from("0:00"));
         
         fb.draw_string(bar_x, bar_y + 14, &current_time, Theme::TEXT_SECONDARY.to_u32());
         fb.draw_string(bar_x + bar_width - 30, bar_y + 14, &total_time, Theme::TEXT_SECONDARY.to_u32());
         
-        // Controls
+        // Kontroller
         let controls_y = progress_y + progress_height;
         let controls_height = 60;
         fb.draw_rect(x, controls_y, width, controls_height, Theme::TOOLBAR_BG.to_u32());
@@ -771,30 +771,30 @@ impl MusicPlayer {
         let center_x = x + width / 2;
         let center_y = controls_y + controls_height / 2;
         
-        // Previous button
+        // Önceki düğme
         self.draw_control_button(fb, center_x - 80, center_y - 15, "◀◀");
         
-        // Play/Pause button
+        // Oynat/Duraklat düğmesi
         let play_icon = match self.state {
             PlaybackState::Playing => "❚❚",
             _ => "▶",
         };
         self.draw_control_button_large(fb, center_x - 15, center_y - 20, play_icon);
         
-        // Next button
+        // Sonraki düğme
         self.draw_control_button(fb, center_x + 50, center_y - 15, "▶▶");
         
-        // Volume
+        // Ses seviyesi
         let vol_x = x + width - 100;
         fb.draw_string(vol_x, center_y - 8, "🔊", Theme::TEXT_PRIMARY.to_u32());
         
-        // Volume bar
+        // Ses çubağı
         let vol_bar_x = vol_x + 24;
         let vol_bar_width = 60;
         fb.draw_rect(vol_bar_x, center_y - 4, vol_bar_width, 8, Theme::BORDER.to_u32());
         fb.draw_rect(vol_bar_x, center_y - 4, (vol_bar_width as f32 * self.volume) as usize, 8, Theme::ACCENT_PRIMARY.to_u32());
         
-        // Visualizer
+        // Görselleştirici
         if self.show_visualizer {
             let viz_y = controls_y + controls_height;
             let viz_height = 100;
@@ -803,18 +803,18 @@ impl MusicPlayer {
             self.visualizer.draw(fb, x + 10, viz_y + 10, width - 20, viz_height - 20);
         }
         
-        // Playlist
+        // Çalma listesi
         if self.show_playlist {
             let list_y = controls_y + controls_height + if self.show_visualizer { 100 } else { 0 };
             let list_height = height - (list_y - y);
             
             fb.draw_rect(x, list_y, width, list_height, Theme::WINDOW_BG.to_u32());
             
-            // Playlist header
+            // Çalma listesi başlığı
             fb.draw_rect(x, list_y, width, 24, Theme::TOOLBAR_BG.to_u32());
             fb.draw_string(x + 12, list_y + 4, &format!("Playlist ({} tracks)", self.playlist.count()), Theme::TEXT_PRIMARY.to_u32());
             
-            // Playlist items
+            // Çalma listesi öğeleri
             let item_height = 28;
             let visible_items = (list_height - 24) / item_height;
             
@@ -841,10 +841,10 @@ impl MusicPlayer {
                 if let Some(track) = self.playlist.get(item_idx) {
                     let text_color = if is_current { Theme::TEXT_ON_ACCENT.to_u32() } else { Theme::TEXT_PRIMARY.to_u32() };
                     
-                    // Track number
+                    // Parça numarası
                     fb.draw_string(x + 8, item_y + 6, &format!("{:2}", item_idx + 1), Theme::TEXT_SECONDARY.to_u32());
                     
-                    // Title
+                    // Başlık
                     let title = if track.title.len() > 30 {
                         format!("{}...", &track.title[..27])
                     } else {
@@ -852,7 +852,7 @@ impl MusicPlayer {
                     };
                     fb.draw_string(x + 40, item_y + 6, &title, text_color);
                     
-                    // Duration
+                    // Süre
                     fb.draw_string(x + width - 60, item_y + 6, &track.format_duration(), Theme::TEXT_SECONDARY.to_u32());
                 }
             }
@@ -876,38 +876,38 @@ impl MusicPlayer {
         format!("{}:{:02}", mins, s)
     }
     
-    /// Handle click
+    /// Tıklamayı işle
     pub fn on_click(&mut self, mx: i32, my: i32) -> MusicPlayerAction {
-        // Close button
+        // Kapat düğmesi
         let close_x = self.rect.x + self.rect.width - 28;
         if mx >= close_x && mx < close_x + 24 && my >= self.rect.y + 4 && my < self.rect.y + 28 {
             return MusicPlayerAction::Close;
         }
         
-        // Controls
+        // Kontroller
         let controls_y = self.rect.y + 32 + 120 + 40;
         let center_x = self.rect.x + self.rect.width / 2;
         let center_y = controls_y + 30;
         
-        // Previous
+        // Önceki
         if mx >= center_x - 80 - 15 && mx < center_x - 80 + 15 && my >= center_y - 15 && my < center_y + 15 {
             self.prev();
             return MusicPlayerAction::None;
         }
         
-        // Play/Pause
+        // Oynat/Duraklat
         if mx >= center_x - 15 && mx < center_x + 25 && my >= center_y - 20 && my < center_y + 20 {
             self.toggle_play();
             return MusicPlayerAction::None;
         }
         
-        // Next
+        // Sonraki
         if mx >= center_x + 50 - 15 && mx < center_x + 50 + 15 && my >= center_y - 15 && my < center_y + 15 {
             self.next();
             return MusicPlayerAction::None;
         }
         
-        // Progress bar
+        // İlerleme çubağı
         let bar_x = self.rect.x + 20;
         let bar_width = self.rect.width - 40;
         let bar_y = self.rect.y + 32 + 120 + 10;
@@ -919,7 +919,7 @@ impl MusicPlayer {
             return MusicPlayerAction::None;
         }
         
-        // Volume bar
+        // Ses çubağı
         let vol_x = self.rect.x + self.rect.width - 100 + 24;
         let vol_width = 60;
         let vol_y = controls_y + 22;
@@ -930,7 +930,7 @@ impl MusicPlayer {
             return MusicPlayerAction::None;
         }
         
-        // Playlist items
+        // Çalma listesi öğeleri
         let list_y = controls_y + 60 + if self.show_visualizer { 100 } else { 0 } + 24;
         let item_height = 28;
         
@@ -950,34 +950,34 @@ impl MusicPlayer {
         MusicPlayerAction::None
     }
     
-    /// Handle scroll
+    /// Kaydırmayı işle
     pub fn on_scroll(&mut self, delta: i32) {
         self.scroll_offset = (self.scroll_offset as i32 + delta * 3).max(0) as usize;
         self.scroll_offset = self.scroll_offset.min(self.playlist.count().saturating_sub(1));
     }
     
-    /// Get rect
+    /// Dikdörtgeni al
     pub fn rect(&self) -> Rect {
         self.rect
     }
     
-    /// Set rect
+    /// Dikdörtgeni ayarla
     pub fn set_rect(&mut self, rect: Rect) {
         self.rect = rect;
     }
     
-    /// Get state
+    /// Durumu al
     pub fn state(&self) -> PlaybackState {
         self.state
     }
     
-    /// Get volume
+    /// Ses seviyesini al
     pub fn volume(&self) -> f32 {
         self.volume
     }
 }
 
-/// Actions from music player
+/// Müzik çalardan eylemler
 #[derive(Clone, Debug)]
 pub enum MusicPlayerAction {
     None,
@@ -998,28 +998,28 @@ impl Default for MusicPlayer {
 }
 
 // ============================================================================
-// GLOBAL MUSIC PLAYER
+// GLOBAL MÜZİK ÇALAR
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref MUSIC_PLAYER: Mutex<MusicPlayer> = Mutex::new(MusicPlayer::new());
 }
 
-/// Get music player
+/// Müzik çaları al
 pub fn get_player() -> &'static Mutex<MusicPlayer> {
     &MUSIC_PLAYER
 }
 
-/// Initialize music player
+/// Müzik çaları başlat
 pub fn init() {
     crate::serial_println!("[GUI] Music Player initialized");
 }
 
 // ============================================================================
-// AUDIO MODULE STUB
+// SES MODÜLÜ İYONLAMA KATMANI
 // ============================================================================
 
-/// Audio module stub (would be in separate file)
+/// Ses modülü iyonlama katmanı (ayrı dosyada olacak)
 pub mod audio {
     use spin::Mutex;
     

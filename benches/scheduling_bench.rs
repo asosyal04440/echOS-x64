@@ -1,5 +1,8 @@
 #![cfg(not(target_os = "none"))]
-//! Task Scheduling Benchmark Suite - echOS vs Linux CFS vs Windows Scheduler
+//! Görev Zamanlama Kıyaslama Paketi - echOS vs Linux CFS vs Windows Schedulerı
+//!
+//! Bu modül; görev oluşturma verimi, gerçek zamanlı gecikme ölçümü ve
+//! öncelik bazlı adil dağılım (fairness) testlerini içerir.
 
 #![feature(test)]
 extern crate test;
@@ -13,7 +16,7 @@ fn bench_scheduler_throughput(b: &mut Bencher) {
     b.iter(|| {
         let mut scheduler = Scheduler::new();
 
-        // Create 1000 tasks with different priorities
+        // Farklı önceliklerle 1000 görev oluştur
         for i in 0..1000 {
             let priority = match i % 4 {
                 0 => TaskPriority::RealTime,
@@ -24,7 +27,7 @@ fn bench_scheduler_throughput(b: &mut Bencher) {
 
             let task = Task::new(
                 move || {
-                    // CPU-intensive work
+                    // İşlemci yoğun iş
                     let mut result = 0;
                     for j in 0..1000 {
                         result = result.wrapping_add(j);
@@ -37,7 +40,7 @@ fn bench_scheduler_throughput(b: &mut Bencher) {
             scheduler.add_task(task);
         }
 
-        // Run scheduler for 1000 time slices
+        // Zamanlayıcıyı 1000 zaman dilimi boyunca çalıştır
         let mut total_work = 0;
         for _ in 0..1000 {
             if let Some(mut task) = scheduler.next_task() {
@@ -54,11 +57,11 @@ fn bench_scheduler_latency(b: &mut Bencher) {
     b.iter(|| {
         let mut scheduler = Scheduler::new();
 
-        // Create real-time tasks
+        // Gerçek zamanlı görevler oluştur
         for i in 0..100 {
             let task = Task::new(
                 move || {
-                    // Measure latency by counting cycles
+                    // Döngü sayarak gecikmeyi ölç
                     let start = x86_64::instructions::rdtsc();
                     let mut result = 0;
                     for j in 0..100 {
@@ -73,7 +76,7 @@ fn bench_scheduler_latency(b: &mut Bencher) {
             scheduler.add_task(task);
         }
 
-        // Measure scheduling latency
+        // Zamanlama gecikmesini ölç
         let mut total_latency = 0;
         for _ in 0..100 {
             if let Some(mut task) = scheduler.next_task() {
@@ -92,7 +95,7 @@ fn bench_scheduler_fairness(b: &mut Bencher) {
         let mut scheduler = Scheduler::new();
         let mut task_execution_counts = [0; 4];
 
-        // Create tasks for each priority level
+        // Her öncelik seviyesi için görev oluştur
         for priority_level in 0..4 {
             for _ in 0..250 {
                 let priority = match priority_level {
@@ -114,14 +117,14 @@ fn bench_scheduler_fairness(b: &mut Bencher) {
             }
         }
 
-        // Run scheduler for fair distribution test
+        // Adil dağılım testi için zamanlayıcıyı çalıştır
         for _ in 0..1000 {
             if let Some(mut task) = scheduler.next_task() {
                 task.run();
             }
         }
 
-        // Calculate fairness (lower is better)
+        // Adilliği hesapla (düşük değer daha iyidir)
         let avg = task_execution_counts.iter().sum::<usize>() as f64 / 4.0;
         let fairness: f64 = task_execution_counts
             .iter()

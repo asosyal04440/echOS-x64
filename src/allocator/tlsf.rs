@@ -8,9 +8,9 @@
 //! - Heap sınırları kontrolü (main heap dışına dealloc engellenir)
 //! - Null pointer koruması
 //! - Alignment doğrulaması
-//! - Heap canary (buffer overflow detection)
-//! - Allocation integrity tracking
-//! - Corruption detection and reporting
+//! - Heap canary (buffer overflow tespiti)
+//! - Allocation bütünlük izleme
+//! - Bozulma tespiti ve raporlama
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
@@ -21,10 +21,10 @@ use spin::Mutex;
 /// Early heap boyutu (512 KiB - önyükleme için yeterli)
 const EARLY_HEAP_SIZE: usize = 512 * 1024;
 
-/// Heap canary magic value
+/// Heap canary sihirli değeri
 const HEAP_CANARY_MAGIC: u64 = 0xDEADBEEF_CAFEBABE;
 
-/// Maximum tracked allocations for integrity checking
+/// Bütünlük kontrolü için izlenen maksimum allocation sayısı
 const MAX_TRACKED_ALLOCATIONS: usize = 4096;
 
 /// Early heap belleği (static, BSS section'da)
@@ -46,16 +46,16 @@ static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "heap_stats")]
 static FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Corruption detection counter
+/// Bozulma (corruption) tespit sayacı
 static CORRUPTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Total bytes allocated
+/// Toplam ayrılan bayt sayısı
 static TOTAL_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 
-/// Peak memory usage
+/// En yüksek bellek kullanımı
 static PEAK_USAGE: AtomicUsize = AtomicUsize::new(0);
 
-/// Allocation tracking for integrity checking
+/// Bütünlük kontrolü için allocation takibi
 struct AllocationEntry {
     ptr: AtomicUsize,
     size: AtomicUsize,
@@ -78,7 +78,7 @@ static ALLOCATION_TRACKER: Mutex<[AllocationEntry; MAX_TRACKED_ALLOCATIONS]> = M
 
 static TRACKER_INDEX: AtomicUsize = AtomicUsize::new(0);
 
-/// Thread-safe TLSF allocator wrapper.
+/// Thread-safe (iş parçacığı güvenli) TLSF allocator sarmalayıcı.
 pub struct LockedTlsf(Mutex<Option<Tlsf<'static, usize, usize, 32, 32>>>);
 
 unsafe impl Send for LockedTlsf {}
@@ -105,14 +105,14 @@ impl LockedTlsf {
         let slice_ptr = core::ptr::slice_from_raw_parts_mut(ptr, size);
         if let Some(nonnull_slice) = NonNull::new(slice_ptr) {
             tlsf.insert_free_block_ptr(nonnull_slice);
-            
+
             // Main heap sınırlarını kaydet
             MAIN_HEAP_START.store(ptr as usize, Ordering::Release);
             MAIN_HEAP_END.store(ptr as usize + size, Ordering::Release);
             HEAP_READY.store(true, Ordering::Release);
         }
     }
-    
+
     /// Pointer'ın early heap'te olup olmadığını kontrol et
     #[inline]
     fn is_early_heap(ptr: usize) -> bool {
@@ -120,7 +120,7 @@ impl LockedTlsf {
         let early_end = early_start + EARLY_HEAP_SIZE;
         ptr >= early_start && ptr < early_end
     }
-    
+
     /// Pointer'ın main heap'te olup olmadığını kontrol et
     #[inline]
     fn is_main_heap(ptr: usize) -> bool {
@@ -131,23 +131,23 @@ impl LockedTlsf {
         let end = MAIN_HEAP_END.load(Ordering::Acquire);
         ptr >= start && ptr < end
     }
-    
+
     /// Pointer'ın geçerli bir heap bölgesinde olup olmadığını kontrol et
     #[inline]
     fn is_valid_heap_ptr(ptr: usize) -> bool {
         Self::is_early_heap(ptr) || Self::is_main_heap(ptr)
     }
-    
-    /// Track allocation for integrity checking
+
+    /// Bütünlük kontrolü için allocation'ı izle
     fn track_allocation(ptr: usize, size: usize) {
         let idx = TRACKER_INDEX.fetch_add(1, Ordering::SeqCst) % MAX_TRACKED_ALLOCATIONS;
         let tracker = &mut ALLOCATION_TRACKER.lock();
         tracker[idx].ptr.store(ptr, Ordering::SeqCst);
         tracker[idx].size.store(size, Ordering::SeqCst);
         tracker[idx].canary.store(HEAP_CANARY_MAGIC, Ordering::SeqCst);
-        
+
         TOTAL_ALLOCATED.fetch_add(size, Ordering::SeqCst);
-        
+
         let current = TOTAL_ALLOCATED.load(Ordering::SeqCst);
         let mut peak = PEAK_USAGE.load(Ordering::SeqCst);
         while current > peak {
@@ -157,8 +157,8 @@ impl LockedTlsf {
             }
         }
     }
-    
-    /// Untrack allocation
+
+    /// Allocation izlemesini kaldır
     fn untrack_allocation(ptr: usize) -> Option<usize> {
         let tracker = ALLOCATION_TRACKER.lock();
         for entry in tracker.iter() {
@@ -173,8 +173,8 @@ impl LockedTlsf {
         }
         None
     }
-    
-    /// Check integrity of all tracked allocations
+
+    /// İzlenen tüm allocation'ların bütünlüğünü kontrol et
     pub fn check_integrity() -> IntegrityReport {
         let mut report = IntegrityReport {
             total_tracked: 0,
@@ -182,15 +182,15 @@ impl LockedTlsf {
             total_bytes: 0,
             corruptions: alloc::vec::Vec::new(),
         };
-        
+
         let tracker = ALLOCATION_TRACKER.lock();
         for (i, entry) in tracker.iter().enumerate() {
             let ptr = entry.ptr.load(Ordering::SeqCst);
             if ptr != 0 {
                 report.total_tracked += 1;
                 report.total_bytes += entry.size.load(Ordering::SeqCst);
-                
-                // Check canary
+
+                // Canary'yi kontrol et
                 let canary = entry.canary.load(Ordering::SeqCst);
                 if canary != HEAP_CANARY_MAGIC {
                     report.corrupted += 1;
@@ -199,22 +199,22 @@ impl LockedTlsf {
                 }
             }
         }
-        
+
         report
     }
-    
-    /// Get corruption count
+
+    /// Bozulma sayısını al
     pub fn corruption_count() -> usize {
         CORRUPTION_COUNT.load(Ordering::SeqCst)
     }
-    
-    /// Check heap integrity (returns corruption count)
+
+    /// Heap bütünlüğünü kontrol et (bozulma sayısını döndürür)
     pub fn check_heap_integrity() -> usize {
         let report = Self::check_integrity();
         report.corrupted
     }
-    
-    /// Get allocation stats for monitoring
+
+    /// İzleme için allocation istatistiklerini al
     pub fn get_stats() -> AllocStats {
         AllocStats {
             active_allocations: ALLOCATION_TRACKER.lock().iter()
@@ -225,8 +225,8 @@ impl LockedTlsf {
             corruption_count: CORRUPTION_COUNT.load(Ordering::SeqCst),
         }
     }
-    
-    /// Get memory statistics
+
+    /// Bellek istatistiklerini al
     pub fn memory_stats() -> MemoryStats {
         MemoryStats {
             total_allocated: TOTAL_ALLOCATED.load(Ordering::SeqCst),
@@ -265,11 +265,11 @@ pub struct AllocStats {
 fn early_alloc(layout: Layout) -> *mut u8 {
     let align = layout.align().max(1);
     let size = layout.size();
-    
+
     // Alignment en az 8 olmalı (TLSF gereksinimi)
     let align = align.max(8);
-    let size = (size + 7) & !7; // 8-byte align
-    
+    let size = (size + 7) & !7; // 8-byte hizala
+
     loop {
         let current = EARLY_OFFSET.load(Ordering::Relaxed);
         let base = EARLY_HEAP.as_ptr() as usize;
@@ -277,12 +277,12 @@ fn early_alloc(layout: Layout) -> *mut u8 {
         let aligned = (absolute + align - 1) & !(align - 1);
         let next = aligned.saturating_add(size);
         let next_offset = next.saturating_sub(base);
-        
+
         if next_offset > EARLY_HEAP_SIZE {
             // Early heap doldu!
             return core::ptr::null_mut();
         }
-        
+
         if EARLY_OFFSET
             .compare_exchange(current, next_offset, Ordering::SeqCst, Ordering::Relaxed)
             .is_ok()
@@ -299,19 +299,19 @@ unsafe impl GlobalAlloc for LockedTlsf {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Alignment düzelt (TLSF en az 8-byte alignment gerektirir)
         let align = layout.align().max(8);
-        let size = (layout.size() + 7) & !7; // 8-byte align
-        
+        let size = (layout.size() + 7) & !7; // 8-byte hizala
+
         // Layout'u düzeltilmiş değerlerle yeniden oluştur
         let layout = match Layout::from_size_align(size, align) {
             Ok(l) => l,
             Err(_) => return core::ptr::null_mut(),
         };
-        
+
         // Early heap modu
         if !HEAP_READY.load(Ordering::Acquire) {
             return early_alloc(layout);
         }
-        
+
         // Main heap modu
         let mut lock = self.0.lock();
         if lock.is_none() {
@@ -335,33 +335,33 @@ unsafe impl GlobalAlloc for LockedTlsf {
     /// Bellek serbest bırakır.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let ptr_addr = ptr as usize;
-        
+
         // Null pointer kontrolü
         if ptr_addr == 0 {
             return;
         }
-        
+
         // Early heap kontrolü - asla serbest bırakılmaz
         if Self::is_early_heap(ptr_addr) {
-            // Early heap allocations are never freed
+            // Erken heap allocation'ları asla serbest bırakılmaz
             // Bu bir hata değil, normal davranış
             return;
         }
-        
+
         // Main heap kontrolü - sadece main heap'ten ayrılanlar serbest bırakılır
         if !Self::is_main_heap(ptr_addr) {
             // Geçersiz pointer - muhtemelen corruption veya double-free
             // sessizce geri dön (panic heap'i daha fazla bozabilir)
             return;
         }
-        
+
         if !HEAP_READY.load(Ordering::Acquire) {
             return;
         }
-        
+
         // Alignment düzelt (alloc ile aynı)
         let align = layout.align().max(8);
-        
+
         let mut lock = self.0.lock();
         if let Some(tlsf) = lock.as_mut() {
             if let Some(ptr) = NonNull::new(ptr) {

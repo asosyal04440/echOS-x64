@@ -284,6 +284,10 @@ static KSOFTIRQD_STARTED: core::sync::atomic::AtomicBool =
 
 /// ksoftirqd thread'ini başlat
 pub fn start_ksoftirqd() {
+    // Scheduler hazır değilse spawn etme — early boot sırasında WORKERS boş olabilir
+    if !crate::task::scheduler::is_ready() {
+        return;
+    }
     if KSOFTIRQD_STARTED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()

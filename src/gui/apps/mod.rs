@@ -29,6 +29,9 @@ pub mod system_preferences;
 /// Terminal app with tabs and themes
 pub mod terminal;
 
+/// Calculator app
+pub mod calculator;
+
 /// Preview app for documents
 pub mod preview;
 

@@ -6,9 +6,9 @@ use pic8259::ChainedPics;
 use spin::Mutex;
 use x86_64::structures::idt::InterruptStackFrame;
 
-/// Master PIC offset
+/// Ana (Master) PIC kesme vektörü başlangıç ofseti
 pub const PIC_1_OFFSET: u8 = 32;
-/// Slave PIC offset
+/// Bağımlı (Slave) PIC kesme vektörü başlangıç ofseti
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 /// Global Programmable Interrupt Controller (PIC)

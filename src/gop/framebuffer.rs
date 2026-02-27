@@ -2,13 +2,16 @@
 //!
 //! UEFI Graphics Output Protocol frambuffer wrapper.
 //! Piksel çizim, metin rendering ve temel grafik operasyonları.
+//! Double buffering destekli - tearing önler ve smooth rendering sağlar.
 
 use crate::font;
 use uefi::proto::console::gop::GraphicsOutput;
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// Framebuffer yapısı.
 /// Doğrudan ekran belleğine erişim sağlar.
-#[derive(Clone, Copy)]
 pub struct Framebuffer {
     /// Framebuffer'ın fiziksel bellek adresi
     pub base_addr: usize,
@@ -18,6 +21,10 @@ pub struct Framebuffer {
     pub height: usize,
     /// Satır başına piksel sayısı (stride)
     pub pixels_per_scan_line: usize,
+    /// Double buffering için arka tampon (heap'te tahsis edilir)
+    back_buffer: Option<Box<[u32]>>,
+    /// Double buffering etkin bayrağı
+    double_buffered: bool,
 }
 
 impl Framebuffer {
@@ -34,19 +41,93 @@ impl Framebuffer {
             width,
             height,
             pixels_per_scan_line: stride,
+            back_buffer: None,
+            double_buffered: false,
         }
     }
 
-    /// Tek bir piksel çizer.
+    /// Double buffering'i etkinleştirir ve back buffer allocate eder
+    pub fn enable_double_buffering(&mut self) -> bool {
+        if self.double_buffered {
+            return true;
+        }
+        
+        let buffer_size = self.pixels_per_scan_line * self.height;
+        let buffer = vec![0u32; buffer_size];
+        self.back_buffer = Some(buffer.into_boxed_slice());
+        self.double_buffered = true;
+        crate::serial_println!("[FB] Double buffering enabled ({}x{}, {} pixels)", 
+            self.width, self.height, buffer_size);
+        true
+    }
+
+    /// Back buffer'ı front buffer'a kopyalar (swap)
+    /// Bu işlem vsync ile senkronize edilmeli (gelecek)
+    pub fn swap_buffers(&mut self) {
+        if !self.double_buffered {
+            return;
+        }
+        
+        if let Some(ref back) = self.back_buffer {
+            let front = unsafe { 
+                core::slice::from_raw_parts_mut(self.base_addr as *mut u32, 
+                    self.pixels_per_scan_line * self.height)
+            };
+            
+            // Arka tamponu ön tampona kopyala
+            front.copy_from_slice(back.as_ref());
+        }
+    }
+
+    /// Back buffer'ı temizler (front buffer'a dokunmaz)
+    pub fn clear_back(&mut self, color: u32) {
+        if let Some(ref mut back) = self.back_buffer {
+            for pixel in back.iter_mut() {
+                *pixel = color;
+            }
+        } else {
+            // Double buffering yoksa doğrudan temizlemeye geri dön
+            self.clear(color);
+        }
+    }
+
+    /// Tek bir piksel çizer (back buffer veya direkt)
     pub fn plot_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x >= self.width || y >= self.height {
             return;
         }
 
-        let offset = (y * self.pixels_per_scan_line + x) * 4;
-        let pixel_addr = (self.base_addr + offset) as *mut u32;
-        unsafe {
-            *pixel_addr = color;
+        let offset = y * self.pixels_per_scan_line + x;
+        
+        if self.double_buffered {
+            if let Some(ref mut back) = self.back_buffer {
+                back[offset] = color;
+            }
+        } else {
+            let pixel_addr = (self.base_addr + offset * 4) as *mut u32;
+            unsafe {
+                *pixel_addr = color;
+            }
+        }
+    }
+
+    /// Piksel okur (back buffer veya front buffer'dan)
+    pub fn get_pixel(&self, x: usize, y: usize) -> u32 {
+        if x >= self.width || y >= self.height {
+            return 0x000000;
+        }
+
+        let offset = y * self.pixels_per_scan_line + x;
+        
+        if self.double_buffered {
+            if let Some(ref back) = self.back_buffer {
+                back[offset]
+            } else {
+                0
+            }
+        } else {
+            let pixel_addr = (self.base_addr + offset * 4) as *const u32;
+            unsafe { *pixel_addr }
         }
     }
 
@@ -70,33 +151,22 @@ impl Framebuffer {
 
     /// Dikdörtgen çerçevesi çizer (outline).
     pub fn draw_rect_outline(&mut self, x: usize, y: usize, width: usize, height: usize, color: u32) {
-        // Top edge
+        // Üst kenar
         for i in 0..width {
             self.plot_pixel(x + i, y, color);
         }
-        // Bottom edge
+        // Alt kenar
         for i in 0..width {
             self.plot_pixel(x + i, y + height - 1, color);
         }
-        // Left edge
+        // Sol kenar
         for j in 0..height {
             self.plot_pixel(x, y + j, color);
         }
-        // Right edge
+        // Sağ kenar
         for j in 0..height {
             self.plot_pixel(x + width - 1, y + j, color);
         }
-    }
-
-    /// Bir pikselin rengini okur.
-    pub fn get_pixel(&self, x: usize, y: usize) -> u32 {
-        if x >= self.width || y >= self.height {
-            return 0x000000;
-        }
-
-        let offset = (y * self.pixels_per_scan_line + x) * 4;
-        let pixel_addr = (self.base_addr + offset) as *const u32;
-        unsafe { *pixel_addr }
     }
 
     /// VGA font kullanarak karakter çizer.

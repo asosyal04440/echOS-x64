@@ -363,7 +363,7 @@ impl Shell {
         let parts: Vec<&str> = expanded_cmd.split_whitespace().collect();
         match parts[0] {
             "help" => Some(String::from(
-                "Mevcut komutlar: help, ver, echo, clear, ls, cat, launch, wine, proton, linux",
+                "Mevcut komutlar: help, ver, echo, clear, ls, cat, launch, exe, wine, proton, linux",
             )),
             "ver" => Some(String::from("echOS v0.2.0 (Legendary Edition)")),
             "echo" => {
@@ -403,11 +403,134 @@ impl Shell {
             }
             "launch" => {
                 if parts.len() < 2 {
-                    return Some(String::from("Kullanim: launch <elf_dosyasi>"));
+                    return Some(String::from("Kullanim: launch <elf_dosyasi> [args...]"));
                 }
-                match load_and_run_elf(parts[1]) {
+                let argv: alloc::vec::Vec<&str> = parts[1..].to_vec();
+                match load_and_run_elf_with_argv(parts[1], &argv) {
                     Ok(()) => None,
                     Err(msg) => Some(msg),
+                }
+            }
+            "exe" => {
+                // Kullanim:
+                //   exe [--runtime wine|proton] [--save-only] <url> [dosya_adi]
+                //   exe [--runtime wine|proton] --file <yerel_yol>
+                if parts.len() < 2 {
+                    return Some(String::from(
+                        "Kullanim:\n  exe [--runtime wine|proton] [--save-only] <url> [dosya_adi]\n  exe [--runtime wine|proton] --file <yerel_yol>",
+                    ));
+                }
+                // Parse flags
+                let mut idx = 1usize;
+                let mut runtime_kind: Option<crate::posix::WineRuntimeKind> = None;
+                let mut save_only = false;
+                let mut local_file: Option<&str> = None;
+
+                while idx < parts.len() {
+                    match parts[idx] {
+                        "--runtime" => {
+                            idx += 1;
+                            runtime_kind = match parts.get(idx).copied() {
+                                Some("wine")   => Some(crate::posix::WineRuntimeKind::Wine),
+                                Some("proton") => Some(crate::posix::WineRuntimeKind::Proton),
+                                other => return Some(format!(
+                                    "Bilinmeyen runtime: {}", other.unwrap_or("(yok)")
+                                )),
+                            };
+                            idx += 1;
+                        }
+                        "--save-only" => { save_only = true; idx += 1; }
+                        "--file" => {
+                            idx += 1;
+                            local_file = parts.get(idx).copied();
+                            if local_file.is_none() {
+                                return Some(String::from("--file: yol eksik"));
+                            }
+                            idx += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                // Activate requested runtime
+                if let Some(kind) = runtime_kind {
+                    if let Err(e) = select_runtime_by_kind(kind) {
+                        return Some(e);
+                    }
+                }
+
+                // Helper: run PE image and return result string
+                let run_image = |data: &[u8], path: &str| -> String {
+                    crate::serial_println!("[EXE] Launching PE: {} ({} bytes)", path, data.len());
+                    match crate::posix::run_windows_app_image(data) {
+                        Ok(()) => {
+                            if let Some(launch) = crate::posix::last_windows_launch() {
+                                format!(
+                                    "launch ok path={} runtime={} pid={} tid={} entry=0x{:08x} base=0x{:016x} imports={} exports={}",
+                                    path,
+                                    launch.runtime_name,
+                                    launch.process_id,
+                                    launch.thread_id,
+                                    launch.entry_rva,
+                                    launch.image_base,
+                                    launch.import_count,
+                                    launch.export_count,
+                                )
+                            } else {
+                                format!("launch ok path={}", path)
+                            }
+                        }
+                        Err(crate::posix::WineRuntimeError::NotFound) =>
+                            String::from("HATA: Runtime secilmedi (once 'wine set <kok>' calistirin)"),
+                        Err(crate::posix::WineRuntimeError::Invalid) =>
+                            String::from("HATA: Gecersiz PE dosyasi"),
+                        Err(crate::posix::WineRuntimeError::NotSupported) =>
+                            String::from("HATA: PE calistirma henuz desteklenmiyor"),
+                        Err(crate::posix::WineRuntimeError::SecureBootViolation) =>
+                            String::from("HATA: Secure Boot aktif, imzasiz PE reddedildi"),
+                    }
+                };
+
+                if let Some(fpath) = local_file {
+                    // --file: yerel dosyayi oku ve calistir
+                    crate::serial_println!("[EXE] --file mode: {}", fpath);
+                    let data = match load_file(fpath) {
+                        Ok(d) => d,
+                        Err(msg) => return Some(format!("HATA: dosya okunamadi: {}", msg)),
+                    };
+                    crate::serial_println!("[EXE] Loaded {} bytes from {}", data.len(), fpath);
+                    Some(run_image(&data, fpath))
+                } else {
+                    // URL modu
+                    let url = match parts.get(idx) {
+                        Some(u) => *u,
+                        None => return Some(String::from("HATA: URL eksik")),
+                    };
+                    let filename = match parts.get(idx + 1).copied() {
+                        Some(name) => sanitize_filename(name),
+                        None => filename_from_url(url),
+                    };
+                    let path = format!("/{}", filename);
+
+                    crate::serial_println!("[EXE] Indiriliyor: {} -> {}", url, path);
+                    let data = match crate::net::http::HttpClient::new().get(url) {
+                        Ok(resp) => {
+                            crate::serial_println!("[EXE] Indirildi: {} bytes", resp.body.len());
+                            resp.body
+                        }
+                        Err(_) => return Some(format!("HATA: Indirme basarisiz ({})", url)),
+                    };
+
+                    if let Err(e) = save_bytes_to_path(&path, &data) {
+                        return Some(format!("HATA: Kaydetme basarisiz: {}", e));
+                    }
+                    crate::serial_println!("[EXE] Kaydedildi: {}", path);
+
+                    if save_only {
+                        Some(format!("kaydedildi={} boyut={} bytes", path, data.len()))
+                    } else {
+                        Some(run_image(&data, &path))
+                    }
                 }
             }
             "wine" => handle_wine_command(crate::posix::WineRuntimeKind::Wine, &parts),
@@ -991,10 +1114,6 @@ impl Shell {
                 let host = parts[1];
                 Some(format!("PING {}: TODO (icmp modulu gerekli)", host))
             }
-            // Doom Commands
-            "doom" => {
-                Some(crate::doom_launcher::cmd_doom(&parts[1..]))
-            }
             // Write to file (echo redirect alternative)
             "write" => {
                 if parts.len() < 3 {
@@ -1030,6 +1149,22 @@ impl Shell {
     }
 }
 
+/// ELF dosyasını yükler, argv'yi stack'e yazar ve Ring 3'e geçer.
+fn load_and_run_elf_with_argv(path: &str, argv: &[&str]) -> Result<(), String> {
+    let data = load_file(path)?;
+    if data.is_empty() {
+        return Err(String::from("ELF bos veya okunamadi"));
+    }
+    if argv.is_empty() {
+        crate::task::user::enter_user_elf_from_image(&data)
+            .map_err(|_| String::from("ELF yukleme basarisiz"))?;
+    } else {
+        crate::task::user::enter_user_elf_from_image_with_argv(&data, argv)
+            .map_err(|_| String::from("ELF yukleme basarisiz"))?;
+    }
+    Ok(())
+}
+
 /// FAT32 üzerinden ELF dosyasını yükler ve Ring 3'e geçirir.
 fn load_and_run_elf(path: &str) -> Result<(), String> {
     let data = load_file(path)?;
@@ -1058,6 +1193,53 @@ fn load_file(path: &str) -> Result<Vec<u8>, String> {
     }
     data.truncate(offset);
     Ok(data)
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        String::from("app.exe")
+    } else {
+        out
+    }
+}
+
+fn filename_from_url(url: &str) -> String {
+    let without_query = url.split('?').next().unwrap_or(url);
+    let without_fragment = without_query.split('#').next().unwrap_or(without_query);
+    let raw = without_fragment.rsplit('/').next().unwrap_or("");
+    sanitize_filename(raw)
+}
+
+fn save_bytes_to_path(path: &str, data: &[u8]) -> Result<(), String> {
+    let trimmed = path.trim_start_matches('/');
+    let (parent, name) = if let Some(pos) = trimmed.rfind('/') {
+        (&trimmed[..pos], &trimmed[pos + 1..])
+    } else {
+        ("", trimmed)
+    };
+    if name.is_empty() {
+        return Err(String::from("Gecersiz dosya adi"));
+    }
+    crate::fs::f2fs::create_f2fs_file_with_data(&format!("/{}", parent), name, data)
+        .map_err(|_| String::from("Dosya kaydedilemedi"))
+}
+
+fn select_runtime_by_kind(kind: crate::posix::WineRuntimeKind) -> Result<(), String> {
+    let runtimes = crate::posix::list_wine_runtimes();
+    let target = runtimes.into_iter().find(|runtime| runtime.kind == kind);
+    let Some(runtime) = target else {
+        return Err(String::from("Runtime bulunamadi"));
+    };
+    crate::posix::select_wine_runtime(&runtime.name)
+        .map_err(|_| String::from("Runtime bulunamadi"))
 }
 
 fn list_directory(path: Option<&str>) -> Result<String, String> {
@@ -1158,7 +1340,22 @@ fn handle_wine_command(kind: crate::posix::WineRuntimeKind, parts: &[&str]) -> O
                 Err(err) => return Some(err),
             };
             match crate::posix::run_windows_app_image(&data) {
-                Ok(()) => None,
+                Ok(()) => {
+                    if let Some(launch) = crate::posix::last_windows_launch() {
+                        Some(format!(
+                            "launch ok runtime={} pid={} tid={} entry=0x{:08x} base=0x{:016x} imports={} exports={}",
+                            launch.runtime_name,
+                            launch.process_id,
+                            launch.thread_id,
+                            launch.entry_rva,
+                            launch.image_base,
+                            launch.import_count,
+                            launch.export_count
+                        ))
+                    } else {
+                        Some(String::from("launch ok"))
+                    }
+                }
                 Err(crate::posix::WineRuntimeError::NotFound) => {
                     Some(String::from("Runtime secilmedi"))
                 }

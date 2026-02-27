@@ -3,13 +3,13 @@
 //! Bare-metal grafiksel kullanıcı arayüzü.
 //! Window yönetimi, tema sistemi ve widget desteği.
 
-/// Mouse cursor rendering
+/// Fare imleci çizimi
 pub mod cursor;
 
-/// Desktop environment (background, taskbar)
+/// Masaüstü ortamı (arka plan, görev çubuğu)
 pub mod desktop;
 
-/// Window component (title bar, content area)
+/// Pencere bileşeni (başlık çubuğu, içerik alanı)
 pub mod window;
 
 /// Renk teması (VS Code inspired dark theme)
@@ -18,85 +18,91 @@ pub mod theme;
 /// Widget sistemi (button, label, matrix)
 pub mod widgets;
 
-/// File manager widget
+/// Dosya yöneticisi widget'ı
 pub mod file_manager;
 
-/// Start menu widget
+/// Başlat menüsü widget'ı
 pub mod start_menu;
 
-/// System tray icons
+/// Sistem tepsisi simgeleri
 pub mod system_tray;
 
-/// Notification system
+/// Bildirim sistemi
 pub mod notification;
 
-/// Window manager (minimize, maximize, resize)
+/// Pencere yöneticisi (küçültme, büyütme, yeniden boyutlandırma)
 pub mod window_manager;
 
-/// Font rendering (TrueType, rasterizer, layout)
+/// Yazı tipi işleme (TrueType, rasterleştirici, düzen)
 pub mod font;
 
-/// Animation system (easing, timeline, frame pacing)
+/// Animasyon sistemi (yumuşatma, zaman çizelgesi, kare hızlandırma)
 pub mod animation;
 
-/// Retained mode widget tree with dirty tracking
+/// Kirlilik takibiyle korunan mod widget ağacı
 pub mod widget_tree;
 
-/// Glyph atlas with subpixel antialiasing
+/// Alt piksel kenar yumuşatmalı glyph atlası
 pub mod glyph_atlas;
 
-/// Desktop icons system
+/// Masaüstü simgeleri sistemi
 pub mod desktop_icons;
 
-/// Enhanced taskbar with start menu and system tray
+/// Pencere döşeme ve yaslama
+pub mod tiling;
+
+/// Sanal masaüstü desteği
+pub mod virtual_desktop;
+
+/// Başlat menüsü ve sistem tepsili gelişmiş görev çubuğu
 pub mod taskbar;
 
-/// Built-in applications
+/// Yerleşik uygulamalar
 pub mod apps;
 
-/// macOS-style Dock with magnification
+/// Büyütme efektli macOS tarzı Dock
 pub mod dock;
 
-/// Global menu bar with app menus
+/// Uygulama menülü global menü çubuğu
 pub mod menu_bar;
 
-/// Spotlight-style global search overlay
+/// Spotlight tarzı global arama katmanı
 pub mod spotlight;
 
-/// Notification Center with widgets
+/// Widget'lı Bildirim Merkezi
 pub mod notification_center;
 
-/// Control Center panel (quick settings)
+/// Kontrol Merkezi paneli (hızlı ayarlar)
 pub mod control_center;
 
-/// Launchpad app grid launcher
+/// Launchpad uygulama ızgara başlatıcısı
 pub mod launchpad;
 
-/// Window shadows and blur effects
+/// Pencere gölgeleri ve bulanıklık efektleri
 pub mod effects;
 
-/// Mission Control (window overview)
+/// Görev Kontrolü (pencere genel görünümü)
 pub mod mission_control;
 
-/// Virtual Desktops/Spaces support
+/// Sanal Masaüstleri/Uzaylar desteği
 pub mod spaces;
 
-/// Screenshot tool with selection
+/// Seçimli ekran görüntüsü aracı
 pub mod screenshot;
 
-/// File dialogs (Open/Save)
+/// Dosya iletişim kutuları (Aç/Kaydet)
 pub mod dialogs;
 
-/// Desktop wallpapers with transitions
+/// Geçişli masaüstü duvar kağıtları
 pub mod wallpaper;
 
-/// Login screen with user selection
+/// Kullanıcı seçimli giriş ekranı
 pub mod login;
 
-/// Drag and drop support
+/// Sürükle ve bırak desteği
 pub mod drag_drop;
 
-/// Clipboard manager
+/// Pano yöneticisi
 pub mod clipboard;
 
 pub use desktop::Desktop;

@@ -1,3 +1,10 @@
+//! # MADT (Multiple APIC Description Table) Ayrıştırıcı
+//!
+//! ACPI MADT tablosunu ayrıştırarak APIC yapılandırmasını çıkarır.
+//! MADT tablosu, sistemdeki tüm APIC (yerel ve G/Ç APIC) bilgilerini
+//! ve kesme yönlendirme geçersiz kılmalarını (interrupt source overrides) içerir.
+//! Bu bilgiler çok işlemcili başlatma (SMP) için kullanılır.
+
 use acpi::platform::interrupt::{Apic, Polarity, TriggerMode};
 use alloc::vec::Vec;
 

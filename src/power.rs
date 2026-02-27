@@ -10,34 +10,34 @@ use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
 use crate::preempt::{PreemptDisableGuard, preempt_enabled};
 use crate::rcu::{RcuPtr, synchronize_rcu};
 
-/// CPU power states (Linux C-states ile uyumlu)
+/// CPU guc durumlari (Linux C-states ile uyumlu) - her seviye farkli miktarda enerji tasarrufu saglar
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum CpuState {
-    /// C0: Active state
+    /// C0: Aktif durum — CPU tam hızda çalışıyor, görev yürütülüyor
     C0 = 0,
-    /// C1: Basic idle state
+    /// C1: Temel boşta durumu — CPU talimat işlemeyi durdurdu, ancak önbellek sıcak kaldı
     C1 = 1,
-    /// C2: Deeper idle state
+    /// C2: Daha derin boşta durumu — dahili saat durdurulabilir, giriş gecikmesi artar
     C2 = 2,
-    /// C3: Deep idle state
+    /// C3: Derin boşta durumu — önbellek boşaltılabilir, daha fazla güç tasarrufu
     C3 = 3,
-    /// C6: Very deep idle state
+    /// C6: Çok derin boşta durumu — çekirdek voltajı sıfıra indirilir, bağlam kaydedilir
     C6 = 4,
-    /// C7: Deepest idle state
+    /// C7: En derin boşta durumu — LLC boşaltılır, maksimum güç tasarrufu sağlanır
     C7 = 5,
 }
 
-/// CPU frequency states (P-states)
+/// CPU frekans durumlari (P-durumlari) - ACPI _PSS metodundan alinan performans durumu tanimlayicisi
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuFrequency {
-    /// Frequency in MHz
+    /// Frekans MHz cinsinden — CPU'nun saniyede kaç milyon döngü gerçekleştirdiğini gösterir
     pub frequency_mhz: u32,
-    /// Voltage in millivolts
+    /// Voltaj milivolt cinsinden — daha yüksek frekans daha yüksek voltaj gerektirir
     pub voltage_mv: u32,
-    /// Power consumption in milliwatts
+    /// Güç tüketimi miliwatt cinsinden — frekans ve voltaja göre üssel artar
     pub power_mw: u32,
-    /// Whether this is the turbo frequency
+    /// Bu frekansın turbo modu olup olmadığı — kısa süreli aşırı performans için kullanılır
     pub is_turbo: bool,
 }
 
@@ -61,24 +61,24 @@ impl CpuFrequency {
     }
 }
 
-/// CPU idle state descriptor
+/// CPU bosta durum tanimlayicisi - C-durumunun gecikme, guc ve hedef kalis suresi bilgilerini tutar
 #[derive(Debug)]
 pub struct CpuIdleState {
-    /// State identifier (C1, C2, etc.)
+    /// Durum tanımlayıcısı (C1, C2, vb.) — hangi güç seviyesinde çalıştığımızı belirtir
     pub state: CpuState,
-    /// Exit latency in microseconds
+    /// Mikrosaniye cinsinden çıkış gecikmesi — uyku sonrası CPU'nun aktif hale gelme süresi
     pub exit_latency_us: u32,
-    /// Power consumption in milliwatts
+    /// Miliwatt cinsinden güç tüketimi — bu durumda ne kadar enerji harcandığını gösterir
     pub power_mw: u32,
-    /// Target residency in microseconds
+    /// Mikrosaniye cinsinden hedef kalış süresi — bu durum, bu süreden kısa boşta kalmalarda seçilmez
     pub target_residency_us: u32,
-    /// Whether this state disables caches
+    /// Bu durumun önbelleği devre dışı bırakıp bırakmadığı — C3+ genellikle LLC önbelleğini boşaltır
     pub disables_cache: bool,
-    /// Whether this state flushes TLB
+    /// Bu durumun TLB'yi temizleyip temizlemediği — uyanış sonrası sayfa tablosu yeniden yüklenir
     pub flushes_tlb: bool,
-    /// Usage count
+    /// Kullanım sayacı — bu duruma kaç kez girildiğini izler
     pub usage_count: AtomicU64,
-    /// Total time spent in this state (ticks)
+    /// Bu durumda geçirilen toplam süre (tick cinsinden) — güç tasarrufu analizinde kullanılır
     pub total_time: AtomicU64,
 }
 
@@ -96,11 +96,11 @@ impl CpuIdleState {
         }
     }
     
-    /// Check if this state is better than another for given idle time
+    /// Verilen boşta kalma süresi için bu durumun diğerinden daha uygun olup olmadığını kontrol eder
     pub fn is_better_than(&self, other: &CpuIdleState, idle_time_us: u32) -> bool {
-        // Prefer deeper states if idle time is sufficient
+        // Boşta kalma süresi yeterliyse daha derin durumu tercih et — hedef kalış süresinden uzun bekleme varsa
         if idle_time_us >= self.target_residency_us && idle_time_us >= other.target_residency_us {
-            // Deeper state (higher enum value) is better
+            // Daha derin durum (yüksek enum değeri) daha iyi — daha az enerji tüketir
             (self.state as u32) > (other.state as u32)
         } else if idle_time_us >= self.target_residency_us {
             true
@@ -109,17 +109,17 @@ impl CpuIdleState {
         }
     }
     
-    /// Record entry into this idle state
+    /// Bu boşta durumuna girişi kaydeder — istatistik takibi için sayıcıyı artırır
     pub fn enter(&self) {
         self.usage_count.fetch_add(1, Ordering::Relaxed);
     }
     
-    /// Record exit from this idle state
+    /// Bu boşta durumundan çıkışı kaydeder — geçirilen süreyi toplamışsal süreye ekler
     pub fn exit(&self, duration_ticks: u64) {
         self.total_time.fetch_add(duration_ticks, Ordering::Relaxed);
     }
     
-    /// Get usage statistics
+    /// Kullanım istatistiklerini döndürür — (toplam giriş sayısı, toplam geçirilen süre) çifti
     pub fn get_stats(&self) -> (u64, u64) {
         (
             self.usage_count.load(Ordering::Relaxed),
@@ -128,83 +128,83 @@ impl CpuIdleState {
     }
 }
 
-/// CPU frequency governor types
+/// CPU frekans valisator turleri - hangi algoritmanin P-durumunu kontrol edecegini belirler
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum FreqGovernor {
-    /// Performance governor (always max frequency)
+    /// Performans valisatörü — her zaman maksimum frekansda çalışır, gecikmeye duyarlı işler için
     Performance = 0,
-    /// Powersave governor (always min frequency)
+    /// Güç tasarrufu valisatörü — her zaman minimum frekansda çalışır, pil ömrünü uzatır
     Powersave = 1,
-    /// Userspace governor (user-controlled)
+    /// Kullanıcı alanı valisatörü — kullanıcı uygulaması frekansı doğrudan kontrol eder
     Userspace = 2,
-    /// On-demand governor (dynamic)
+    /// İsteğe bağlı valisatörü — yüke göre frekansı dinamik ayarlar, genel amaçlı kullanım
     OnDemand = 3,
-    /// Conservative governor (gradual changes)
+    /// Muhafazakâr valisatörü — frekansı kademeli değiştirir, ani artışlanmayı önler
     Conservative = 4,
-    /// Schedutil governor (scheduler-driven)
+    /// Zamanlama tabanlı valisatörü — Linux schedutil gibi görev zamanınlığı tarafından sürülür
     Schedutil = 5,
 }
 
-/// CPU power management descriptor
+/// CPU guc yonetimi tanimlayicisi - bir mantiksal CPU'nun tum P/C-durum bilgilerini icerir
 #[repr(C, align(64))]
 pub struct CpuPowerDesc {
-    /// CPU ID
+    /// CPU kimliği — hangi işlem birimine ait olduğunu belirtir
     pub cpu_id: u32,
-    /// Current C-state
+    /// Mevcut C-durumu — CPU'nun şu anda bulunduğu güç tasarrufu seviyesi
     pub current_cstate: AtomicU32, // CpuState as u32
-    /// Target C-state for idle
+    /// Hedef C-durumu — boşta kalma süresine göre seçilen ideal uyku seviyesi
     pub target_cstate: AtomicU32,
-    /// Current P-state (frequency index)
+    /// Mevcut P-durumu (frekans indeksi) — aktif frekans tablosundaki pozisyon
     pub current_pstate: AtomicU32,
-    /// Target P-state
+    /// Hedef P-durumu — valisörün hesapladığı ideal frekans indeksi
     pub target_pstate: AtomicU32,
-    /// Available idle states
+    /// Kullanılabilir boşta durumları — C1'den C7'ye kadar desteklenen uyku seviyeleri
     pub idle_states: Vec<CpuIdleState>,
-    /// Available frequencies
+    /// Kullanılabilir frekanslar — desteklenen P-durumlarının tam listesi
     pub frequencies: Vec<CpuFrequency>,
-    /// Current frequency governor
+    /// Mevcut frekans valisatörü — yüke göre frekans kararını veren politika
     pub governor: AtomicU32, // FreqGovernor as u32
-    /// Minimum frequency index
+    /// Minimum frekans indeksi — en düşük güç tasarrufu noktası
     pub min_freq_idx: u32,
-    /// Maximum frequency index
+    /// Maksimum frekans indeksi — temel yüksek performans noktası
     pub max_freq_idx: u32,
-    /// Turbo frequency index (if available)
+    /// Turbo frekans indeksi (varsa) — kısa süreli aşırı yük için ek hız
     pub turbo_freq_idx: Option<u32>,
-    /// Current load (0-100%)
+    /// Mevcut yük (0-100%) — CPU'nun ne kadar meşgul olduğunun göstergesi
     pub current_load: AtomicU32,
-    /// Average load (for on-demand governor)
+    /// Ortalama yük (isteğe bağlı valisator için) — ani değişimleri yumulatmak için EMA
     pub avg_load: AtomicU32,
-    /// Time in each C-state
+    /// Her C-durumunda geçirilen süre — güç profilleme için C0-C7 zaman istatistikleri
     pub cstate_time: [AtomicU64; 6], // C0-C7
-    /// C-state entry count
+    /// C-durumu giriş sayısı — her seviyeye kaç kez girildiğini kaydeder
     pub cstate_count: [AtomicU64; 6],
-    /// Frequency transitions count
+    /// Frekans geçiş sayısı — P-durum değişikliklerinin toplamı
     pub freq_transitions: AtomicU64,
-    /// Last frequency change timestamp
+    /// Son frekans değişikliği zaman damgası — valisator döngü periyodunu hesaplamak için
     pub last_freq_change: AtomicU64,
-    /// Power management enabled
+    /// Güç yönetimi etkin mi — devre dışı bırakılırsa CPU tam frekansda kalır
     pub pm_enabled: AtomicBool,
-    /// Idle loop running
+    /// Boşta döngüsü yürütülüyor mu — CPU'nun boşta olup olmadığını işaretler
     pub in_idle: AtomicBool,
-    /// Padding to avoid false sharing
+    /// Yanlış paylaşımı önlemek için dolgu — farklı CPU'ların aynı cache satırına dokunmamasını sağlar
     _padding: [u8; 0],
 }
 
 impl CpuPowerDesc {
-    /// Create new CPU power descriptor
+    /// Yeni CPU güç tanımlayıcısı oluştur
     pub fn new(cpu_id: u32) -> Self {
         let mut idle_states = Vec::new();
         let mut frequencies = Vec::new();
         
-        // Default idle states (typical x86 values)
+        // Varsayılan boşta durumları (tipik x86 değerleri) — gerçek donanımda ACPI'dan okunur
         idle_states.push(CpuIdleState::new(CpuState::C1, 1, 100, 2));
         idle_states.push(CpuIdleState::new(CpuState::C2, 10, 50, 10));
         idle_states.push(CpuIdleState::new(CpuState::C3, 50, 20, 100));
         idle_states.push(CpuIdleState::new(CpuState::C6, 100, 10, 200));
         idle_states.push(CpuIdleState::new(CpuState::C7, 150, 5, 300));
         
-        // Default frequencies (typical desktop CPU)
+        // Varsayılan frekanslar (tipik masaistü CPU) — gerçek donanımda MSR veya ACPI _PSS'dan alınır
         frequencies.push(CpuFrequency::new(800, 800, 5000));   // Min
         frequencies.push(CpuFrequency::new(1200, 900, 8000));
         frequencies.push(CpuFrequency::new(1600, 1000, 12000));
@@ -218,7 +218,7 @@ impl CpuPowerDesc {
             cpu_id,
             current_cstate: AtomicU32::new(CpuState::C0 as u32),
             target_cstate: AtomicU32::new(CpuState::C1 as u32),
-            current_pstate: AtomicU32::new(3), // Start at middle frequency
+            current_pstate: AtomicU32::new(3), // Orta frekanstan basla - ne cok dusuk ne cok yuksek
             target_pstate: AtomicU32::new(3),
             idle_states,
             frequencies,
@@ -238,7 +238,7 @@ impl CpuPowerDesc {
         }
     }
     
-    /// Get current C-state
+    /// Mevcut C-durumunu oku — atomik satın alma semantikle güvenli okuma yapılır
     pub fn get_current_cstate(&self) -> CpuState {
         match self.current_cstate.load(Ordering::Acquire) {
             0 => CpuState::C0,
@@ -251,25 +251,25 @@ impl CpuPowerDesc {
         }
     }
     
-    /// Set current C-state
+    /// Mevcut C-durumunu yaz — Release+smp_wmb ile diğer çekirdeklere görünür kılır
     pub fn set_current_cstate(&self, state: CpuState) {
         self.current_cstate.store(state as u32, Ordering::Release);
         smp_wmb();
     }
     
-    /// Get current frequency
+    /// Mevcut frekans bilgisini döndür — frekans tablosundan P-durum indeksine göre arar
     pub fn get_current_frequency(&self) -> Option<CpuFrequency> {
         let idx = self.current_pstate.load(Ordering::Acquire) as usize;
         self.frequencies.get(idx).copied()
     }
     
-    /// Set frequency
+    /// Frekansı ayarla — indeks geçerliyse P-durumunu atomik günceller ve istatistik kaydeder
     pub fn set_frequency(&self, freq_idx: u32) -> Result<(), PowerError> {
         if freq_idx > self.max_freq_idx {
             return Err(PowerError::InvalidFrequency);
         }
         
-        // Check turbo availability
+        // Turbo kullanılabilirliğini kontrol et — yüksek yüklerde enerji bütçesi aşılabilir
         if let Some(turbo_idx) = self.turbo_freq_idx {
             if freq_idx == turbo_idx && !self.can_use_turbo() {
                 return Err(PowerError::TurboUnavailable);
@@ -290,22 +290,22 @@ impl CpuPowerDesc {
         Ok(())
     }
     
-    /// Check if turbo can be used
+    /// Turbo modunun kullanılıp kullanılamayacağını kontrol eder
     pub fn can_use_turbo(&self) -> bool {
-        // Simple turbo availability check
-        // In real implementation, this would check thermal limits, power budget, etc.
+        // Basit turbo kullanılabilirlik kontrolü
+        // Gerçek uygulamada sıcaklık sınırları, güç bütçesi vb. kontrol edilirdi
         let load = self.current_load.load(Ordering::Acquire);
-        load < 80 // Only use turbo if load is not too high
+        load < 80 // Sadece yük çok yüksek değilse turbo kullan — termal baskıyı önler
     }
     
-    /// Enter idle state
+    /// Boşta durumuna gir — tahmini boşta kalma süresine göre en uygun C-durumunu seçer
     pub fn enter_idle(&self, idle_time_us: u32) -> CpuState {
         if !self.pm_enabled.load(Ordering::Acquire) {
             return CpuState::C0;
         }
         
-        // Find best idle state for given time
-        let mut best_state = &self.idle_states[0]; // C1 as default
+        // Verilen süre için en iyi boşta durumunu bul — daha derin = daha az enerji
+        let mut best_state = &self.idle_states[0]; // Varsayılan olarak C1
         
         for state in &self.idle_states {
             if state.is_better_than(best_state, idle_time_us) {
@@ -313,7 +313,7 @@ impl CpuPowerDesc {
             }
         }
         
-        // Enter selected state
+        // Seçilen duruma gir — istatistikleri güncelle ve çekirdek durumunu işaretle
         best_state.enter();
         self.set_current_cstate(best_state.state);
         self.in_idle.store(true, Ordering::Release);
@@ -321,42 +321,42 @@ impl CpuPowerDesc {
         best_state.state
     }
     
-    /// Exit idle state
+    /// Boşta durumundan çık — geçirilen süreyi kaydeder ve CPU'yu C0'a döndürür
     pub fn exit_idle(&self, duration_ticks: u64) {
         let current_state = self.get_current_cstate();
         
-        // Update statistics for current state
+        // Mevcut durum için istatistikleri güncelle — enerji tasarrufu profilleme için
         if let Some(state) = self.idle_states.iter().find(|s| s.state == current_state) {
             state.exit(duration_ticks);
         }
         
-        // Update C-state statistics
+        // C-durum istatistiklerini güncelle — her seviyede kaç tick geçirildiğini takip eder
         let state_idx = current_state as usize;
         if state_idx < 6 {
             self.cstate_time[state_idx].fetch_add(duration_ticks, Ordering::Relaxed);
             self.cstate_count[state_idx].fetch_add(1, Ordering::Relaxed);
         }
         
-        // Return to C0
+        // C0'a dön — CPU aktif çalışmaya hazır, boşta değil işaretini kaldır
         self.set_current_cstate(CpuState::C0);
         self.in_idle.store(false, Ordering::Release);
         smp_mb();
     }
     
-    /// Update CPU load
+    /// CPU yükleme oranını güncelle — valisator hesapları için EMA tablaylı ortalama tutar
     pub fn update_load(&self, load: u32) {
         self.current_load.store(load, Ordering::Release);
         
-        // Update average load (exponential moving average)
+        // Ortalama yükü güncelle (katlamalı hareketli ortalama) — 0.75 ağırlıkla eski değeri koru
         let current_avg = self.avg_load.load(Ordering::Acquire);
-        let new_avg = (current_avg * 3 + load) / 4; // 0.75 weight to old value
+        let new_avg = (current_avg * 3 + load) / 4; // Eski değere 0.75 ağırlık ver
         self.avg_load.store(new_avg, Ordering::Release);
         
-        // Apply frequency governor
+        // Frekans valisatorunu uygula — yeni yükü dikkate alarak frekansı belirle
         self.apply_governor();
     }
     
-    /// Apply frequency governor
+    /// Frekans valisatorunu uygula — seçili politikaya göre CPU frekansını ayarlar
     fn apply_governor(&self) {
         let governor = self.get_governor();
         let load = self.avg_load.load(Ordering::Acquire);
@@ -378,29 +378,29 @@ impl CpuPowerDesc {
                 self.apply_schedutil_governor(load);
             }
             FreqGovernor::Userspace => {
-                // User-controlled, no automatic changes
+                // Kullanıcı tarafından kontrol edilir, otomatik değişiklik yok
             }
         }
     }
     
-    /// Apply on-demand governor
+    /// İsteğe bağlı valisatoru uygula — yüke göre frekansı agresif biçimde yukarı/aşağı ayarlar
     fn apply_ondemand_governor(&self, load: u32) {
         let current_idx = self.current_pstate.load(Ordering::Acquire);
         
         if load > 80 && current_idx < self.max_freq_idx {
-            // Increase frequency
+            // Frekansı artır — yüksek yük, daha fazla performans gerektirir
             self.set_frequency(current_idx + 1);
         } else if load < 20 && current_idx > self.min_freq_idx {
-            // Decrease frequency
+            // Frekansı azalt — düşük yükte enerji tasarrufu yap
             self.set_frequency(current_idx - 1);
         }
     }
     
-    /// Apply conservative governor
+    /// Muhafazakâr valisatoru uygula — frekansı kademeli döngülerle ayarlar, aşırı sallanmayı önler
     fn apply_conservative_governor(&self, load: u32) {
         let current_idx = self.current_pstate.load(Ordering::Acquire);
         
-        // More gradual changes than on-demand
+        // İsteğe bağlıya göre daha yavaş değişiklikler — yüksek eşik 90, düşük eşik 10 ile karar alınır
         if load > 90 && current_idx < self.max_freq_idx {
             self.set_frequency(current_idx + 1);
         } else if load < 10 && current_idx > self.min_freq_idx {
@@ -408,17 +408,17 @@ impl CpuPowerDesc {
         }
     }
     
-    /// Apply schedutil governor
+    /// Schedutil valisatorunu uygula — Linux'daki gibi yüklemeyi doğrudan frekans aralığına eşler
     fn apply_schedutil_governor(&self, load: u32) {
-        // Scheduler-driven frequency selection
-        // Use load to directly map to frequency
+        // Zamanlama tabanlı frekans seçimi — görev çalıştırılabilirlik bilgisi kullanılır
+        // Yükü doğrudan frekansa eşle — proporaşiyonel bir model
         let freq_range = self.max_freq_idx - self.min_freq_idx;
         let target_idx = self.min_freq_idx + (load * freq_range / 100);
         
         self.set_frequency(target_idx);
     }
     
-    /// Get current governor
+    /// Mevcut valisatörü döndür — atomik değerden FreqGovernor enum'unu çözümler
     pub fn get_governor(&self) -> FreqGovernor {
         match self.governor.load(Ordering::Acquire) {
             0 => FreqGovernor::Performance,
@@ -431,30 +431,30 @@ impl CpuPowerDesc {
         }
     }
     
-    /// Set frequency governor
+    /// Frekans valisatorünü ayarla — politikayı hemen uygular ve log yazar
     pub fn set_governor(&self, governor: FreqGovernor) {
         self.governor.store(governor as u32, Ordering::Release);
         smp_wmb();
         
-        // Apply new governor immediately
+        // Yeni valisatörü anında uygula — mevcut yüke göre ilk frekans kararını ver
         self.apply_governor();
         
         crate::serial_println!("Power: CPU {} governor changed to {:?}", self.cpu_id, governor);
     }
     
-    /// Enable/disable power management
+    /// Güç yönetimini etkinleştir/devre dışı bırak — test veya debug sırasında tam kontrol için
     pub fn set_pm_enabled(&self, enabled: bool) {
         self.pm_enabled.store(enabled, Ordering::Release);
         smp_wmb();
         
         if !enabled {
-            // Return to C0 and max frequency when disabled
+            // Devre dışı bırakıldığında C0'a ve maksimum frekansa geri dön — öngörülebilir performans sağlar
             self.set_current_cstate(CpuState::C0);
             self.set_frequency(self.max_freq_idx);
         }
     }
     
-    /// Get power statistics
+    /// Güç istatistiklerini döndür — tüm C-durumu ve frekans geçiş verilerini özetle
     pub fn get_power_stats(&self) -> PowerStats {
         let mut cstate_times = [0u64; 6];
         let mut cstate_counts = [0u64; 6];
@@ -476,7 +476,7 @@ impl CpuPowerDesc {
     }
 }
 
-/// Power statistics
+/// Guc istatistikleri - mevcut frekans, yuklenme ve C-durum sure verilerini ozetler
 #[derive(Debug, Clone)]
 pub struct PowerStats {
     pub current_frequency: Option<CpuFrequency>,
@@ -488,26 +488,26 @@ pub struct PowerStats {
     pub idle_state_stats: Vec<(u64, u64)>,
 }
 
-/// Power management manager
+/// Guc yonetimi yoneticisi - tum CPU'larin P/C-durum politikasini merkezi olarak yonetir
 pub struct PowerManager {
-    /// Maximum number of CPUs
+    /// Maksimum CPU sayısı — sistem başlangıcında belirlenir, dinamik olarak değişmez
     max_cpus: u32,
-    /// CPU power descriptors
+    /// CPU güç tanımlayıcıları — her mantiksal çekirdek için ayrı bir tanımlayıcı tutulur
     cpu_descs: Vec<RcuPtr<CpuPowerDesc>>,
-    /// Global power management enabled
+    /// Global güç yönetimi etkin mi — tüm CPU'lar için ortak açma/kapama dümeşi
     pm_enabled: AtomicBool,
-    /// Global power policy
+    /// Global güç politikası — tüm çekirdeklere aynı valisatörü uygulamak için
     global_policy: AtomicU32, // FreqGovernor as u32
-    /// Power statistics
+    /// Güç istatistikleri — sistem genelinde enerji tasarrufu ve geçiş sayıları
     stats: PowerManagerStats,
 }
 
-/// Power manager statistics
+/// Guc yoneticisi istatistikleri - sistem genelinde toplam bosta gecis, frekans degisikligi ve enerji tasarrufu
 #[derive(Debug)]
 pub struct PowerManagerStats {
     pub total_idle_transitions: AtomicU64,
     pub total_freq_changes: AtomicU64,
-    pub total_energy_saved: AtomicU64, // In milliwatt-hours (approximate)
+    pub total_energy_saved: AtomicU64, // Miliwatt-saat cinsinden (yaklasik deger)
 }
 
 impl PowerManagerStats {
@@ -541,11 +541,11 @@ impl PowerManagerStats {
 }
 
 impl PowerManager {
-    /// Create new power manager
+    /// Yeni güç yöneticisi oluştur — tüm CPU'lar için varsayılan OnDemand valisatörüyle başlat
     pub fn new(max_cpus: u32) -> Self {
         let mut cpu_descs = Vec::with_capacity(max_cpus as usize);
         
-        // Initialize CPU power descriptors
+        // CPU güç tanımlayıcılarını başlat — her çekirdek kendi bağımsız durumunu yönetir
         for cpu_id in 0..max_cpus {
             let desc = Box::new(CpuPowerDesc::new(cpu_id));
             cpu_descs.push(RcuPtr::new(Box::into_raw(desc)));
@@ -560,7 +560,7 @@ impl PowerManager {
         }
     }
     
-    /// Get CPU power descriptor
+    /// CPU güç tanımlayıcısını getir — geçersiz kimlikde None döndürür
     pub fn get_cpu_desc(&self, cpu_id: u32) -> Option<RcuPtr<CpuPowerDesc>> {
         if cpu_id >= self.max_cpus {
             return None;
@@ -569,7 +569,7 @@ impl PowerManager {
         Some(self.cpu_descs[cpu_id as usize].clone())
     }
     
-    /// Enter idle state for CPU
+    /// CPU için boşta durumuna gir — en uygun C-durumunu seçer ve istatistik kaydeder
     pub fn cpu_idle_enter(&self, cpu_id: u32, idle_time_us: u32) -> Result<CpuState, PowerError> {
         if !self.pm_enabled.load(Ordering::Acquire) {
             return Ok(CpuState::C0);
@@ -586,7 +586,7 @@ impl PowerManager {
         Ok(state)
     }
     
-    /// Exit idle state for CPU
+    /// CPU için boşta durumundan çık — geçirilen süreyi kaydeder ve C0'a döndürür
     pub fn cpu_idle_exit(&self, cpu_id: u32, duration_ticks: u64) -> Result<(), PowerError> {
         let desc = match self.get_cpu_desc(cpu_id) {
             Some(desc) => desc,
@@ -597,7 +597,7 @@ impl PowerManager {
         Ok(())
     }
     
-    /// Update CPU load
+    /// CPU yükleme oranını güncelle — valisator kararını tetikler
     pub fn update_cpu_load(&self, cpu_id: u32, load: u32) -> Result<(), PowerError> {
         let desc = match self.get_cpu_desc(cpu_id) {
             Some(desc) => desc,
@@ -608,7 +608,7 @@ impl PowerManager {
         Ok(())
     }
     
-    /// Set CPU frequency governor
+    /// Belirli bir CPU için frekans valisatörünü ayarla
     pub fn set_cpu_governor(&self, cpu_id: u32, governor: FreqGovernor) -> Result<(), PowerError> {
         let desc = match self.get_cpu_desc(cpu_id) {
             Some(desc) => desc,
@@ -619,12 +619,12 @@ impl PowerManager {
         Ok(())
     }
     
-    /// Set global frequency governor
+    /// Tüm CPU'lar için global frekans valisatörünü ayarla — sistem politikasını tek noktadan yönetir
     pub fn set_global_governor(&self, governor: FreqGovernor) {
         self.global_policy.store(governor as u32, Ordering::Release);
         smp_wmb();
         
-        // Apply to all CPUs
+        // Tüm CPU'lara uygula — sistemi tuğarlı bir güç politikasyla yönetir
         for cpu_id in 0..self.max_cpus {
             if let Some(desc) = self.get_cpu_desc(cpu_id) {
                 let _ = self.set_cpu_governor(cpu_id, governor);
@@ -634,12 +634,12 @@ impl PowerManager {
         crate::serial_println!("Power: Global governor changed to {:?}", governor);
     }
     
-    /// Enable/disable power management
+    /// Güç yönetimini etkinleştir/devre dışı bırak — sistem genelinde enerji tasarrufu modunu kontrol eder
     pub fn set_pm_enabled(&self, enabled: bool) {
         self.pm_enabled.store(enabled, Ordering::Release);
         smp_wmb();
         
-        // Apply to all CPUs
+        // Tüm CPU'lara uygula — her çekirdek kendi durumunu günceller
         for cpu_id in 0..self.max_cpus {
             if let Some(desc) = self.get_cpu_desc(cpu_id) {
                 desc.read().set_pm_enabled(enabled);
@@ -649,7 +649,7 @@ impl PowerManager {
         crate::serial_println!("Power: Power management {}", if enabled { "enabled" } else { "disabled" });
     }
     
-    /// Get power statistics for CPU
+    /// Belirli bir CPU için güç istatistiklerini al
     pub fn get_cpu_stats(&self, cpu_id: u32) -> Result<PowerStats, PowerError> {
         let desc = match self.get_cpu_desc(cpu_id) {
             Some(desc) => desc,
@@ -659,38 +659,38 @@ impl PowerManager {
         Ok(desc.read().get_power_stats())
     }
     
-    /// Get global power statistics
+    /// Global güç yöneticisi istatistiklerini al — (boşta geçiş, frekans değişikliği, tasarruf) üçlüsü
     pub fn get_global_stats(&self) -> (u64, u64, u64) {
         self.stats.get_stats()
     }
     
-    /// Suspend system (simplified)
+    /// Sistemi askıya al (basitleştirilmiş) — gerçekte ACPI S3/S4 hazırlık adımları izlenir
     pub fn system_suspend(&self) -> Result<(), PowerError> {
         crate::serial_println!("Power: Preparing system suspend...");
         
-        // Save state of all CPUs
+        // Tüm CPU'ların durumunu kaydet — en derin uykuya hazırlık yap
         for cpu_id in 0..self.max_cpus {
             if let Some(desc) = self.get_cpu_desc(cpu_id) {
                 let desc_guard = desc.read();
                 desc_guard.set_pm_enabled(false);
-                desc_guard.set_current_cstate(CpuState::C7); // Deepest sleep
+                desc_guard.set_current_cstate(CpuState::C7); // En derin uyku - tam gucu kapat
             }
         }
         
-        // In real implementation, this would:
-        // 1. Save all device states
-        // 2. Flush caches
-        // 3. Enter platform-specific suspend state
+        // Gerçek uygulamada şu adımlar izlenirdi:
+        // 1. Tüm cihaz durumlarını kaydet — PCI, USB, ağ kartı vb.
+        // 2. Önbellekleri boşalt — RAM'e temiz yazım garantisi
+        // 3. Platforma özgü askıya alma durumuna gir — ACPI Sx güç durumu
         
         crate::serial_println!("Power: System suspended");
         Ok(())
     }
     
-    /// Resume system (simplified)
+    /// Sistemi sürdür (basitleştirilmiş) — askıya alınan cihazları ve CPU'ları yeniden etkinleştirir
     pub fn system_resume(&self) -> Result<(), PowerError> {
         crate::serial_println!("Power: Resuming system...");
         
-        // Restore all CPUs
+        // Tüm CPU'ları geri yükle — C0'a ve tam performansa dön
         for cpu_id in 0..self.max_cpus {
             if let Some(desc) = self.get_cpu_desc(cpu_id) {
                 let desc_guard = desc.read();
@@ -700,28 +700,28 @@ impl PowerManager {
             }
         }
         
-        // In real implementation, this would:
-        // 1. Restore device states
-        // 2. Reinitialize caches
-        // 3. Wake up other CPUs
+        // Gerçek uygulamada şu adımlar izlenirdi:
+        // 1. Cihaz durumlarını geri yükle — kaydedilen register değerlerini yaz
+        // 2. Önbellekleri yeniden başlat — TLB ve cache tutarlılığını yenile
+        // 3. Diğer CPU'ları uyandır — IPI göndererek diğer çekirdekleri aktif et
         
         crate::serial_println!("Power: System resumed");
         Ok(())
     }
 }
 
-/// Power management errors
+/// Guc yonetimi hatalari - gecersiz islem veya erisilemez durum hatalarini temsil eder
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerError {
-    /// Invalid CPU ID
+    /// Geçersiz CPU kimliği — istenen CPU mevcut değil
     InvalidCpuId,
-    /// Invalid frequency
+    /// Geçersiz frekans — desteklenmeyen frekans indeksi talep edildi
     InvalidFrequency,
-    /// Turbo mode unavailable
+    /// Turbo modu kullanılamaz — sıcaklık veya güç baskısı engelliyor
     TurboUnavailable,
-    /// Power management disabled
+    /// Güç yönetimi devre dışı — işlem yapılabilmesi için önce etkinleştirilmeli
     PowerManagementDisabled,
-    /// Invalid state transition
+    /// Geçersiz durum geçişi — izin verilmeyen bir C-durum geçişi denendi
     InvalidStateTransition,
 }
 
@@ -729,7 +729,7 @@ pub enum PowerError {
 static mut POWER_MANAGER: Option<PowerManager> = None;
 static POWER_INIT: AtomicBool = AtomicBool::new(false);
 
-/// Initialize power management subsystem
+/// Güç yönetimi alt sistemini başlat — belirtilen sayıda CPU için tanımlayıcıları oluşturur
 pub fn init(max_cpus: u32) {
     if POWER_INIT.load(Ordering::Acquire) {
         return;
@@ -749,7 +749,7 @@ pub fn init(max_cpus: u32) {
     crate::serial_println!("Power: Power management initialized");
 }
 
-/// Get power manager
+/// Global güç yöneticisini döndür — başlatma yapılmadıysa None gelir
 pub fn get_manager() -> Option<&'static PowerManager> {
     if !POWER_INIT.load(Ordering::Acquire) {
         return None;
@@ -758,7 +758,7 @@ pub fn get_manager() -> Option<&'static PowerManager> {
     unsafe { POWER_MANAGER.as_ref() }
 }
 
-/// Convenience functions for common operations
+/// Yaygın işlemler için kolaylık fonksiyonları — güç yöneticisini doğrudan sarıp kullanıcıya sunar
 pub fn cpu_idle_enter(cpu_id: u32, idle_time_us: u32) -> Result<CpuState, PowerError> {
     let manager = get_manager().ok_or(PowerError::PowerManagementDisabled)?;
     manager.cpu_idle_enter(cpu_id, idle_time_us)
@@ -835,13 +835,13 @@ mod tests {
 /// ACPI sleep states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepState {
-    /// S1: Power On Suspend - CPU stopped, RAM preserved
+    /// S1: Güç Askıya Alınması — CPU durdurulur, RAM korunur, hızlı geri dönüş
     S1,
-    /// S2: CPU powered off, context saved to RAM
+    /// S2: CPU kapatılır, bağlam RAM'e kaydedilir, S1'den daha derin uyku
     S2,
-    /// S3: Suspend to RAM (STR) - Low power, fast resume
+    /// S3: RAM'e Askıya Alınma (STR) — düşuk güç, birkaç saniyede geri dönüş
     S3,
-    /// S4: Suspend to Disk (Hibernate) - Lowest power
+    /// S4: Diske Askıya Alınma (Hibernate) — en düşük güç, RAM içeriği diske yazılır
     S4,
 }
 
@@ -1068,36 +1068,36 @@ lazy_static::lazy_static! {
     static ref COOLING_DEVICES: Mutex<BTreeMap<u32, CoolingDeviceInfo>> = Mutex::new(BTreeMap::new());
 }
 
-/// Initialize ACPI power management
+/// ACPI güç yönetimini başlat — termal bölgeler, souğutma cihazları ve batarya kayıtlarını oluşturur
 pub fn init_acpi_power() {
-    // Initialize default thermal zone for CPU
+    // CPU için varsayılan termal bölgeyi başlat — sıcaklık aşımında pasif souğutma tetiklenir
     let mut zone = ThermalZoneInfo::new(0, "CPU");
     zone.add_trip_point(ThermalTripPoint::new(ThermalTripType::Passive, 80));
     zone.add_trip_point(ThermalTripPoint::new(ThermalTripType::Critical, 95));
     THERMAL_ZONES.lock().insert(0, zone);
 
-    // Initialize default cooling device
+    // Varsayılan souğutma cihazını başlat — fan ve işlemci hızı kademeli kontrol edilir
     let cooling = CoolingDeviceInfo::new(0, CoolingType::Processor, "CPU Cooling");
     COOLING_DEVICES.lock().insert(0, cooling);
 
-    // Initialize default battery
+    // Varsayılan batarya kaydını başlat — laptop veya güç kaynağı bilgileri için yer tutucu
     let battery = BatteryInfo::new(0);
     BATTERIES.lock().insert(0, battery);
 
     crate::serial_println!("[PWR] ACPI power management initialized");
 }
 
-/// Get battery info
+/// Batarya bilgisini getir — ACPI BIF/BST metodlarından alınan kapasite ve durum verileri
 pub fn get_battery(id: u32) -> Option<BatteryInfo> {
     BATTERIES.lock().get(&id).cloned()
 }
 
-/// Get all batteries
+/// Tüm batarya kayıtlarını getir — çoklu bataryalı sistemlerde tümünü döndürür
 pub fn get_all_batteries() -> Vec<BatteryInfo> {
     BATTERIES.lock().values().cloned().collect()
 }
 
-/// Get average battery percent
+/// Ortalama batarya yüzdesini getir — birden fazla batarya varsa aritmeti ortalama alınır
 pub fn get_battery_percent() -> u32 {
     let batteries = BATTERIES.lock();
     let batteries: Vec<_> = batteries.values().filter(|b| b.present).collect();
@@ -1107,27 +1107,27 @@ pub fn get_battery_percent() -> u32 {
     batteries.iter().map(|b| b.capacity_percent).sum::<u32>() / batteries.len() as u32
 }
 
-/// Is battery low
+/// Batarya düşük mü — %20'nin altında uyarı tetiklenir
 pub fn is_battery_low() -> bool {
     get_battery_percent() < 20
 }
 
-/// Is battery critical
+/// Batarya kritik seviyede mi — %5'in altında acil durum işlemleri başlatılabilir
 pub fn is_battery_critical() -> bool {
     get_battery_percent() < 5
 }
 
-/// Get thermal zone
+/// Termal bölge bilgisini getir — ACPI TZ nesnelerinden alınan sıcaklık ve eşik verileri
 pub fn get_thermal_zone(id: u32) -> Option<ThermalZoneInfo> {
     THERMAL_ZONES.lock().get(&id).cloned()
 }
 
-/// Get all thermal zones
+/// Tüm termal bölgeleri getir — CPU, GPU, batarya gibi farklı sıcaklık noktaları
 pub fn get_all_thermal_zones() -> Vec<ThermalZoneInfo> {
     THERMAL_ZONES.lock().values().cloned().collect()
 }
 
-/// Get average temperature
+/// Ortalama sıcaklığı getir — tüm termal bölgelerden basit ortalama hesaplanır
 pub fn get_average_temperature() -> i32 {
     let zones = THERMAL_ZONES.lock();
     let zones: Vec<_> = zones.values().collect();
@@ -1137,12 +1137,12 @@ pub fn get_average_temperature() -> i32 {
     zones.iter().map(|z| z.temperature_celsius).sum::<i32>() / zones.len() as i32
 }
 
-/// Is system overheating
+/// Sistem aşırı ısınıyor mu — herhangi bir bölge kritik eşiğini aştıysa true dönür
 pub fn is_overheating() -> bool {
     THERMAL_ZONES.lock().values().any(|z| z.is_overheating())
 }
 
-/// Update thermal zones and apply cooling
+/// Termal bölgeleri güncelle ve souğutma uygula — sıcaklığa göre fan hızını veya CPU oranını ayarla
 pub fn update_thermal() {
     let mut zones = THERMAL_ZONES.lock();
     let mut cooling = COOLING_DEVICES.lock();
@@ -1160,26 +1160,26 @@ pub fn update_thermal() {
     }
 }
 
-/// Get cooling device
+/// Souğutma cihazı bilgisini getir — fan durumu ve çalışma seviyesi bilgisi
 pub fn get_cooling_device(id: u32) -> Option<CoolingDeviceInfo> {
     COOLING_DEVICES.lock().get(&id).cloned()
 }
 
-/// Get all cooling devices
+/// Tüm souğutma cihazlarını getir — fan, işlemci hızı ve LCD titiz parıltısı gibi mekanizmalar
 pub fn get_all_cooling_devices() -> Vec<CoolingDeviceInfo> {
     COOLING_DEVICES.lock().values().cloned().collect()
 }
 
-/// Enter sleep state
+/// Uyku durumuna gir — S1-S4 arasında ACPI uyku geçişini başlatır
 pub fn enter_sleep(state: SleepState) -> Result<(), PowerError> {
     crate::serial_println!("[PWR] Entering sleep state S{}", state.to_acpi());
-    // In real implementation, this would call ACPI methods
+    // Gerçek uygulamada ACPI metodları çağrılırdı — \_SB.SLP veya FADT SLP_TYP yazımı
     Ok(())
 }
 
-/// Shutdown system
+/// Sistemi kapat — ACPI S5 (Soft Off) durumuna geçişi başlatır
 pub fn system_shutdown() -> Result<(), PowerError> {
     crate::serial_println!("[PWR] System shutdown requested");
-    // In real implementation, this would call ACPI methods
+    // Gerçek uygulamada ACPI metodları çağrılırdı — PM1a_CNT register'ına SLP_EN yazılır
     Ok(())
 }

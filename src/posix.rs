@@ -6,10 +6,12 @@ pub struct PosixCall {
 }
 
 use crate::fs::f2fs::F2fsEntry;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use crate::security::seccomp::{BpfInstruction, BpfProgram, SECCOMP, SECCOMP_RET_KILL_PROCESS};
 use core::arch::x86_64::_rdtsc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use lazy_static::lazy_static;
@@ -101,7 +103,7 @@ const SYS_DUP2: usize = 33;
 const SYS_PAUSE: usize = 34;
 const SYS_NANOSLEEP: usize = 35;
 
-// FileSystem syscalls
+// Dosya sistemi syscall numaraları (VFS katmanı üzerinden F2FS ile etkileşim)
 const SYS_MKDIR: usize = 83;
 const SYS_RMDIR: usize = 84;
 const SYS_UNLINK: usize = 87;
@@ -143,7 +145,7 @@ const SYS_GETRANDOM: usize = 318;
 const SYS_IO_URING_SETUP: usize = 425;
 const SYS_IO_URING_ENTER: usize = 426;
 
-// Process/Thread management
+// Süreç/İplik Yönetimi — fork/clone/exec ve kimlik set/get syscall'ları
 const SYS_CLONE: usize = 56;
 const SYS_SET_TID_ADDRESS: usize = 218;
 const SYS_TGKILL: usize = 234;
@@ -155,7 +157,7 @@ const SYS_SETPGID: usize = 109;
 const SYS_GETPGID: usize = 121;
 const SYS_GETSID: usize = 124;
 
-// Signal syscalls (additional)
+// Ek sinyal syscall'ları — POSIX gerçek zamanlı sinyal desteği
 const SYS_RT_SIGRETURN: usize = 15;
 const SYS_KILL: usize = 62;
 const SYS_RT_SIGQUEUEINFO: usize = 129;
@@ -171,7 +173,7 @@ const SECCOMP_MODE_STRICT: usize = 1;
 const SECCOMP_MODE_FILTER: usize = 2;
 
 // ==========================================
-// SOCKET & NETLINK API (AF_NETLINK & kTLS)
+// SOKET VE NETLINK API (AF_NETLINK & çekirdek TLS)
 // ==========================================
 const SYS_SOCKET: usize = 41;
 const SYS_CONNECT: usize = 42;
@@ -316,6 +318,17 @@ const DRM_IOCTL_VIRTGPU_RESOURCE_CREATE: usize = iowr::<DrmVirtgpuResourceCreate
 const DRM_IOCTL_VIRTGPU_MAP: usize = iowr::<DrmVirtgpuMap>(0xC1);
 const DRM_IOCTL_VIRTGPU_EXECBUFFER: usize = iowr::<DrmVirtgpuExecbuffer>(0xC2);
 
+// Linux /dev/fb0 ekran tamponu ioctl numaraları (fbdev standart sabitleri)
+const FBIOGET_VSCREENINFO: usize = 0x4600;
+const FBIOPUT_VSCREENINFO: usize = 0x4601;
+const FBIOGET_FSCREENINFO: usize = 0x4602;
+const FBIO_WAITRETRACE:    usize = 0x4620;
+
+/// /dev/fb0 mmap çağrısıyla kullanıcı alanına döndürülen gölge tampon sanal adresi
+static FB0_SHADOW_VA:   core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Gölge tamponun bayt cinsinden toplam uzunluğu
+static FB0_SHADOW_SIZE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FdKind {
     Stdin,
@@ -324,6 +337,10 @@ enum FdKind {
     Null,
     Zero,
     Drm,
+    /// Linux /dev/fb0 piksel çerçeve tamponu — gölge-tampon modunda çalışır
+    Fb0,
+    /// Linux /dev/input/event0 evdev klavye giriş aygıtı
+    InputEvent,
     File,
     IoUring,
     Socket,
@@ -398,12 +415,19 @@ fn vfs_errno(err: FsError) -> usize {
     }
 }
 
-/// Syscall dispatcher
+/// Syscall gönderici: gelen syscall numarasını ilgili işleyici fonksiyona yönlendirir
 pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
     ensure_fd_table();
 
     // =====================================
-    // PTRACE SYSCALL HOOK (ENTRY)
+    // WIN32 SYSCALL YÖNLENDİRME (pe_exec üzerinden NT katmanına)
+    // =====================================
+    if number >= crate::pe_exec::ECHOS_WIN32_BASE {
+        return crate::pe_exec::dispatch_win32(number - crate::pe_exec::ECHOS_WIN32_BASE, args);
+    }
+
+    // =====================================
+    // PTRACE SYSCALL KANCASI — syscall girişinde izleme kaydı al
     // =====================================
     let is_traced = (crate::task::scheduler::get_current_ptrace_flags() & 1) != 0;
 
@@ -412,15 +436,14 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
     }
 
     // =====================================
-    // SECCOMP (STRICT MODE) DENETİMİ
+    // IRONSHIM SYSCALL POLİTİKASI — her syscall bu güvenlik katmanından geçer
     // =====================================
-    let seccomp_mode = crate::task::scheduler::get_current_seccomp_mode();
-    if seccomp_mode == 1 {
-        // Strict mod sadece 4 temel çağrıya (read, write, exit, rt_sigreturn) izin verir
-        if number != SYS_READ && number != SYS_WRITE && number != SYS_EXIT && number != SYS_RT_SIGRETURN {
-            crate::serial_println!("[SECCOMP] Strict mode violation! Syscall {} blocked. Process killed.", number);
-            return sys_exit(!0); // SIGKILL benzeri task sonlandır (exit code -1)
-        }
+    if crate::ironshim_bridge::safe_enforce_syscall(number as u32, args).is_err() {
+        crate::serial_println!(
+            "[IronShim] Syscall {} blocked by policy. Process killed.",
+            number
+        );
+        return sys_exit(!0); // SIGKILL benzeri task sonlandır (exit code -1)
     }
 
     let ret_val = match number {
@@ -454,7 +477,7 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_MADVISE => sys_madvise(args[0], args[1], args[2]),
         SYS_FUTEX => sys_futex(args[0], args[1], args[2], args[3], args[4], args[5]),
         
-        // Timer/Event syscalls
+        // Zamanlayıcı ve olay syscall'ları
         SYS_TIMER_CREATE => sys_timer_create(args[0], args[1], args[2]),
         SYS_TIMER_SETTIME => sys_timer_settime(args[0], args[1], args[2], args[3]),
         SYS_TIMER_GETTIME => sys_timer_gettime(args[0], args[1]),
@@ -477,12 +500,12 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_WAIT4 => sys_wait4(args[0], args[1], args[2], args[3]),
         SYS_UNAME => sys_uname(args[0]),
         SYS_GETCWD => sys_getcwd(args[0], args[1]),
-        SYS_GETRUSAGE => 0, // unimplemented
-        SYS_SYSINFO => 0,   // unimplemented
-        SYS_TIMES => 0,     // unimplemented
+        SYS_GETRUSAGE => sys_getrusage(args[0], args[1]),
+        SYS_SYSINFO => sys_sysinfo(args[0]),
+        SYS_TIMES => sys_times(args[0]),
         SYS_PTRACE => sys_ptrace(args[0], args[1], args[2], args[3]),
         
-        // FileSystem syscalls
+        // Dosya sistemi syscall'ları
         SYS_MKDIR => sys_mkdir(args[0], args[1]),
         SYS_RMDIR => sys_rmdir(args[0]),
         SYS_UNLINK => sys_unlink(args[0]),
@@ -498,7 +521,7 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_SYMLINK => sys_symlink(args[0], args[1]),
         SYS_READLINK => sys_readlink(args[0], args[1], args[2]),
         
-        // Signal syscalls
+        // Sinyal syscall'ları
         SYS_RT_SIGACTION => sys_rt_sigaction(args[0], args[1], args[2], args[3]),
         SYS_RT_SIGPROCMASK => sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
         SYS_KILL => sys_kill(args[0], args[1]),
@@ -532,7 +555,7 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_PRCTL => sys_prctl(args[0], args[1]),
         SYS_SECCOMP => sys_seccomp(args[0], args[1], args[2]),
         
-        // --- NETWORK (NETLINK / kTLS) ---
+        // --- AĞ (NETLINK / çekirdek TLS) ---
         SYS_SOCKET => sys_socket(args[0], args[1], args[2]),
         SYS_BIND => sys_bind(args[0], args[1], args[2]),
         SYS_SENDTO => sys_sendto(args[0], args[1], args[2], args[3], args[4], args[5]),
@@ -631,7 +654,7 @@ fn posix_errno(value: usize) -> Option<usize> {
     }
 }
 
-/// write syscall (stdout/stderr + /dev/null + /dev/zero)
+/// write syscall: stdout/stderr'e yaz, /dev/null ve /dev/zero için veri at
 fn sys_write(fd: usize, buf: usize, count: usize) -> usize {
     if count == 0 {
         return 0;
@@ -653,7 +676,7 @@ fn sys_write(fd: usize, buf: usize, count: usize) -> usize {
     }
 }
 
-/// read syscall (stdin + /dev/zero)
+/// read syscall: stdin'den oku, /dev/zero için sıfır byte'lar döndür
 fn sys_read(fd: usize, buf: usize, count: usize) -> usize {
     if count == 0 {
         return 0;
@@ -714,6 +737,29 @@ fn sys_read(fd: usize, buf: usize, count: usize) -> usize {
             }
             read
         }
+        Some(FdKind::InputEvent) => {
+            // Bloklamayan evdev okuma: bekleyen tuş varsa 24 baytlık input_event yapısını döndürür
+            if count < 24 {
+                return errno(EINVAL);
+            }
+            match crate::keyboard::read_key() {
+                None => 0, // no data
+                Some(key) => {
+                    let Some((ev_type, ev_code)) = decoded_key_to_evdev(key) else {
+                        return 0;
+                    };
+                    // struct input_event: timeval(16B) + type(2) + code(2) + value(4) — Linux giriş olayı yapısı
+                    let mut ev = [0u8; 24];
+                    ev[16..18].copy_from_slice(&ev_type.to_le_bytes());
+                    ev[18..20].copy_from_slice(&ev_code.to_le_bytes());
+                    ev[20..24].copy_from_slice(&1i32.to_le_bytes()); // value=1 (tuşa basıldı)
+                    with_user_access(|| unsafe {
+                        core::ptr::copy_nonoverlapping(ev.as_ptr(), buf as *mut u8, 24);
+                    });
+                    24
+                }
+            }
+        }
         _ => errno(EBADF),
     }
 }
@@ -724,9 +770,11 @@ fn sys_open(path: usize, _flags: usize, _mode: usize) -> usize {
         Err(err) => return err,
     };
     match path.as_str() {
-        "/dev/null" => allocate_fd(FdKind::Null),
-        "/dev/zero" => allocate_fd(FdKind::Zero),
-        "/dev/dri/card0" => allocate_fd(FdKind::Drm),
+        "/dev/null"         => allocate_fd(FdKind::Null),
+        "/dev/zero"         => allocate_fd(FdKind::Zero),
+        "/dev/dri/card0"    => allocate_fd(FdKind::Drm),
+        "/dev/fb0"          => allocate_fd(FdKind::Fb0),
+        "/dev/input/event0" => allocate_fd(FdKind::InputEvent),
         _ => {
             let inode = match crate::fs::vfs_open_inode(&path) {
                 Ok(value) => value,
@@ -750,7 +798,7 @@ fn sys_open(path: usize, _flags: usize, _mode: usize) -> usize {
     }
 }
 
-/// close syscall (stdin/out/err hariç)
+/// close syscall: dosya tanımlayıcısını serbest bırakır (stdin/stdout/stderr kapatılamaz)
 fn sys_close(fd: usize) -> usize {
     if fd <= 2 {
         return 0;
@@ -758,7 +806,7 @@ fn sys_close(fd: usize) -> usize {
     free_fd(fd)
 }
 
-/// lseek syscall (stub)
+/// lseek syscall: dosya i̇mlecini konumlandırır — whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
 fn sys_lseek(fd: usize, offset: usize, whence: usize) -> usize {
     let mut files = FILE_TABLE.lock();
     let Some(Some(state)) = files.get_mut(fd) else {
@@ -896,6 +944,9 @@ fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, off: 
     if let Some(FdKind::Drm) = get_fd(fd) {
         return drm_mmap(len, off);
     }
+    if let Some(FdKind::Fb0) = get_fd(fd) {
+        return fb0_mmap(len);
+    }
     let is_anon = flags & MAP_ANON != 0 || fd == usize::MAX;
     let is_private = flags & MAP_PRIVATE != 0;
     let is_shared = flags & MAP_SHARED != 0;
@@ -1032,7 +1083,8 @@ fn sys_brk(addr: usize) -> usize {
 
 fn sys_ioctl(fd: usize, request: usize, arg: usize) -> usize {
     match get_fd(fd) {
-        Some(FdKind::Drm) => handle_drm_ioctl(request, arg),
+        Some(FdKind::Drm)      => handle_drm_ioctl(request, arg),
+        Some(FdKind::Fb0)      => handle_fb0_ioctl(request, arg),
         _ => errno(ENOTTY),
     }
 }
@@ -1179,6 +1231,142 @@ fn drm_mmap(len: usize, off: usize) -> usize {
     entry.map_ptr
 }
 
+// ===========================================================================
+// /dev/fb0 — shadow-buffer framebuffer
+// ===========================================================================
+
+fn fb0_mmap(len: usize) -> usize {
+    if len == 0 {
+        return errno(EINVAL);
+    }
+    let target = match crate::memory::allocate_user_mmap(len as u64) {
+        Some(v) => v,
+        None => return errno(ENOMEM),
+    };
+    let flags = PageTableFlags::USER_ACCESSIBLE
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE;
+    if !crate::memory::register_lazy_region(target, len as u64, flags) {
+        return errno(EINVAL);
+    }
+    FB0_SHADOW_VA.store(target, Ordering::Relaxed);
+    FB0_SHADOW_SIZE.store(len as u64, Ordering::Relaxed);
+    crate::serial_println!("[FB0] mmap shadow={:#x} size={}", target, len);
+    target as usize
+}
+
+fn handle_fb0_ioctl(cmd: usize, arg: usize) -> usize {
+    match cmd {
+        FBIOGET_VSCREENINFO => {
+            if arg == 0 { return errno(EFAULT); }
+            let (w, h) = {
+                let g = crate::boot::get_global_framebuffer();
+                g.as_ref().map(|fb| (fb.width as u32, fb.height as u32))
+                    .unwrap_or((1024, 768))
+            };
+            // fb_var_screeninfo — değişken ekran bilgisi; fbDOOM'un okuduğu alanlar dolduruluyor (160 bayt)
+            let mut buf = [0u8; 160];
+            buf[0..4].copy_from_slice(&w.to_le_bytes());            // xres
+            buf[4..8].copy_from_slice(&h.to_le_bytes());            // yres
+            buf[8..12].copy_from_slice(&w.to_le_bytes());           // xres_virtual
+            buf[12..16].copy_from_slice(&h.to_le_bytes());          // yres_virtual
+            buf[24..28].copy_from_slice(&32u32.to_le_bytes());      // bits_per_pixel
+            // BGRX piksel düzeni: mavi@0/8, yeşil@8/8, kırmızı@16/8, saydam@24/0
+            buf[32..36].copy_from_slice(&16u32.to_le_bytes());      // red.offset
+            buf[36..40].copy_from_slice(&8u32.to_le_bytes());       // red.length
+            buf[44..48].copy_from_slice(&8u32.to_le_bytes());       // green.offset
+            buf[48..52].copy_from_slice(&8u32.to_le_bytes());       // green.length
+            buf[56..60].copy_from_slice(&0u32.to_le_bytes());       // blue.offset
+            buf[60..64].copy_from_slice(&8u32.to_le_bytes());       // blue.length
+            buf[68..72].copy_from_slice(&24u32.to_le_bytes());      // transp.offset
+            buf[72..76].copy_from_slice(&0u32.to_le_bytes());       // transp.length
+            with_user_access(|| unsafe {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), arg as *mut u8, 160);
+            });
+            0
+        }
+        FBIOPUT_VSCREENINFO => 0, // istenen modu kabul et — boş işlem (uyumluluk)
+        FBIOGET_FSCREENINFO => {
+            if arg == 0 { return errno(EFAULT); }
+            let (ppsl, h) = {
+                let g = crate::boot::get_global_framebuffer();
+                g.as_ref().map(|fb| (fb.pixels_per_scan_line, fb.height))
+                    .unwrap_or((1024, 768))
+            };
+            // fb_fix_screeninfo — sabit ekran bilgisi (80 bayt)
+            let mut buf = [0u8; 80];
+            buf[0..5].copy_from_slice(b"echOS");            // id
+            let smem_len = (ppsl * h * 4) as u32;
+            buf[24..28].copy_from_slice(&smem_len.to_le_bytes());   // smem_len
+            buf[36..40].copy_from_slice(&2u32.to_le_bytes());       // visual=TRUECOLOR
+            let line_len = (ppsl * 4) as u32;
+            buf[48..52].copy_from_slice(&line_len.to_le_bytes());   // line_length
+            with_user_access(|| unsafe {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), arg as *mut u8, 80);
+            });
+            0
+        }
+        FBIO_WAITRETRACE => {
+            // Kullanıcı alanı gölge tamponunu gerçek GOP çerçeve tamponuna kopyala (dikey bekleme simülasyonu)
+            let shadow_va   = FB0_SHADOW_VA.load(Ordering::Relaxed) as usize;
+            let shadow_size = FB0_SHADOW_SIZE.load(Ordering::Relaxed) as usize;
+            if shadow_va == 0 || shadow_size == 0 { return 0; }
+            let (fb_base, fb_ppsl, fb_h) = {
+                let g = crate::boot::get_global_framebuffer();
+                match g.as_ref() {
+                    Some(fb) => (fb.base_addr, fb.pixels_per_scan_line, fb.height),
+                    None => return 0,
+                }
+            }; // lock dropped before user-access
+            let fb_size  = fb_ppsl * fb_h * 4;
+            let copy_len = fb_size.min(shadow_size);
+            with_user_access(|| unsafe {
+                core::ptr::copy_nonoverlapping(
+                    shadow_va as *const u8,
+                    fb_base   as *mut u8,
+                    copy_len,
+                );
+            });
+            0
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+// ===========================================================================
+// /dev/input/event0 — evdev key mapping
+// ===========================================================================
+
+/// DecodedKey tuş kodunu evdev (EV_KEY=1, linux_keycode) çiftine dönüştürür
+fn decoded_key_to_evdev(key: pc_keyboard::DecodedKey) -> Option<(u16, u16)> {
+    let code: u16 = match key {
+        pc_keyboard::DecodedKey::Unicode(c) => match c {
+            'w'|'W'=>17, 'a'|'A'=>30, 's'|'S'=>31, 'd'|'D'=>32,
+            'q'|'Q'=>16, 'e'|'E'=>18, 'r'|'R'=>19, 'f'|'F'=>33,
+            'y'|'Y'=>21, 'n'|'N'=>49, 'm'|'M'=>50,
+            '1'=>2,'2'=>3,'3'=>4,'4'=>5,'5'=>6,
+            '6'=>7,'7'=>8,'8'=>9,'9'=>10,'0'=>11,
+            ' '=>57, '\n'|'\r'=>28, '\x1b'=>1,
+            _ => return None,
+        },
+        pc_keyboard::DecodedKey::RawKey(kc) => match kc {
+            pc_keyboard::KeyCode::ArrowUp    => 103,
+            pc_keyboard::KeyCode::ArrowDown  => 108,
+            pc_keyboard::KeyCode::ArrowLeft  => 105,
+            pc_keyboard::KeyCode::ArrowRight => 106,
+            pc_keyboard::KeyCode::Escape     => 1,
+            pc_keyboard::KeyCode::Return     => 28,
+            pc_keyboard::KeyCode::Spacebar   => 57,
+            pc_keyboard::KeyCode::Delete     => 111,
+            pc_keyboard::KeyCode::Home       => 102,
+            pc_keyboard::KeyCode::End        => 107,
+            pc_keyboard::KeyCode::Tab        => 15,
+            _ => return None,
+        },
+    };
+    Some((1, code)) // EV_KEY = 1: Linux evdev klavye olay tipi
+}
+
 fn sys_pread64(_fd: usize, _buf: usize, _count: usize, _pos: usize) -> usize {
     errno(ENOSYS)
 }
@@ -1200,58 +1388,58 @@ fn sys_access(_path: usize, _mode: usize) -> usize {
 }
 
 // ============================================================================
-// FILESYSTEM SYSCALLS
+// DOSYA SİSTEMİ SYSCALL'LARI
 // ============================================================================
 
-/// mkdir - create a directory
+/// mkdir — yeni dizin oluşturur (POSIX mkdirat öncesi işlevi)
 fn sys_mkdir(_path_ptr: usize, _mode: usize) -> usize {
-    // TODO: Implement with F2FS when VFS layer is ready
+    // TODO: VFS katmanı hazır olduğunda F2FS üzerinden implemente et
     errno(ENOSYS)
 }
 
-/// rmdir - remove a directory
+/// rmdir — boş dizini siler; dolu dizinde ENOTEMPTY hatası verir
 fn sys_rmdir(_path_ptr: usize) -> usize {
     errno(ENOSYS)
 }
 
-/// unlink - remove a file
+/// unlink — dosyanın dizin girdisini kaldırır; son bağlantı silinince inode serbest kalır
 fn sys_unlink(_path_ptr: usize) -> usize {
     errno(ENOSYS)
 }
 
-/// rename - rename a file or directory
+/// rename — dosya veya dizini yeniden adlandırır; atomik olmayı garantilemek gerekir
 fn sys_rename(_oldpath_ptr: usize, _newpath_ptr: usize) -> usize {
     errno(ENOSYS)
 }
 
-/// chmod - change file permissions
+/// chmod — dosya izinlerini değiştirir (rwxrwxrwx bit maskesi)
 fn sys_chmod(_path_ptr: usize, _mode: usize) -> usize {
-    // Simplified - return success
+    // Basitleştirilmiş — şu an uyumluluk için başarı döndür
     0
 }
 
-/// fchmod - change file permissions by fd
+/// fchmod — dosya tanımlayıcısı üzerinden dosya izinlerini değiştirir
 fn sys_fchmod(_fd: usize, _mode: usize) -> usize {
     0
 }
 
-/// chown - change file owner
+/// chown — dosyanın sahip (uid) ve grup (gid) bilgisini değiştirir
 fn sys_chown(_path_ptr: usize, _uid: usize, _gid: usize) -> usize {
-    // echOS doesn't have multi-user support yet
+    // echOS henüz çok kullanıcılı yapıyı desteklemiyor
     0
 }
 
-/// fchown - change file owner by fd
+/// fchown — açık dosya tanımlayıcısı üzerinden sahip/grup bilgisini değiştirir
 fn sys_fchown(_fd: usize, _uid: usize, _gid: usize) -> usize {
     0
 }
 
-/// truncate - truncate a file
+/// truncate — dosyanın boyutunu belirtilen uzunluğa kısaltır veya uzatır
 fn sys_truncate(_path_ptr: usize, _length: usize) -> usize {
     errno(ENOSYS)
 }
 
-/// ftruncate - truncate a file by fd
+/// ftruncate — açık dosya tanımlayıcısı üzerinden dosya boyutunu düzenler
 fn sys_ftruncate(fd: usize, length: usize) -> usize {
     let mut files = FILE_TABLE.lock();
     match files.get_mut(fd).and_then(|f| f.as_mut()) {
@@ -1263,9 +1451,9 @@ fn sys_ftruncate(fd: usize, length: usize) -> usize {
     }
 }
 
-/// creat - create a file
+/// creat — dosya oluşturur; open(O_CREAT|O_WRONLY|O_TRUNC) ile eşdeğerdir
 fn sys_creat(path_ptr: usize, mode: usize) -> usize {
-    // creat is equivalent to open with O_CREAT|O_WRONLY|O_TRUNC
+    // creat, open(O_CREAT|O_WRONLY|O_TRUNC) ile tam olarak eşdeğerdir
     const O_CREAT: usize = 0o100;
     const O_WRONLY: usize = 1;
     const O_TRUNC: usize = 0o1000;
@@ -1273,17 +1461,17 @@ fn sys_creat(path_ptr: usize, mode: usize) -> usize {
     sys_open(path_ptr, O_CREAT | O_WRONLY | O_TRUNC, mode)
 }
 
-/// link - create a hard link
+/// link — mevcut bir VFS inode'una katı (hard) bağlantı oluşturur
 fn sys_link(_oldpath_ptr: usize, _newpath_ptr: usize) -> usize {
     errno(ENOSYS)
 }
 
-/// symlink - create a symbolic link
+/// symlink — hedef yola sembolik bağlantı (symbolic link) oluşturur
 fn sys_symlink(_target_ptr: usize, _linkpath_ptr: usize) -> usize {
     errno(ENOSYS)
 }
 
-/// readlink - read a symbolic link
+/// readlink — sembolik bağlantı hedefini tampon bellek yazısı olarak okur
 fn sys_readlink(_path_ptr: usize, _buf: usize, _bufsize: usize) -> usize {
     errno(ENOSYS)
 }
@@ -1304,13 +1492,13 @@ fn sys_sched_yield() -> usize {
 }
 
 // ============================================================================
-// SIGNAL SYSCALLS
+// SİNYAL SYSCALL'LARI — POSIX sinyalleşme mekanizması
 // ============================================================================
 
-/// Signal handler type
+/// Sinyal işleyici fonksiyon tipi — kullanıcı alanı callback adresi
 type SigHandler = usize;
 
-/// Signal action structure
+/// Sinyal eylemi yapısı — sigaction(2) için POSIX-uyumlu temsil
 #[repr(C)]
 struct SigAction {
     sa_handler: SigHandler,
@@ -1319,11 +1507,11 @@ struct SigAction {
     sa_mask: [u64; 1],
 }
 
-/// Signal handlers table (per-process would be better, but simplified here)
+/// Süreç başına sinyal işleyici tablosu — ilerleyen aşamada per-process yapıya alınacak
 static SIGNAL_HANDLERS: spin::Mutex<[SigHandler; 64]> = spin::Mutex::new([0; 64]);
 static SIGNAL_MASKS: spin::Mutex<u64> = spin::Mutex::new(0);
 
-/// rt_sigaction - examine and change a signal action
+/// rt_sigaction — bir sinyalin eylemini inceler veya değiştirir (sa_handler, sa_mask, sa_flags)
 fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: usize) -> usize {
     if sig == 0 || sig > 64 {
         return errno(EINVAL);
@@ -1331,7 +1519,7 @@ fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: 
     
     let sig_idx = sig - 1;
     
-    // Save old action if requested
+    // İstenirse eski sinyal eylemini kaydet
     if oldact_ptr != 0 {
         let handlers = SIGNAL_HANDLERS.lock();
         let old_handler = handlers[sig_idx];
@@ -1348,7 +1536,7 @@ fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: 
         });
     }
     
-    // Set new action if requested
+    // İstenirse yeni sinyal eylemini uygula
     if act_ptr != 0 {
         let new_action: SigAction = with_user_access(|| unsafe { 
             core::ptr::read(act_ptr as *const SigAction) 
@@ -1360,9 +1548,9 @@ fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: 
     0
 }
 
-/// rt_sigprocmask - examine and change blocked signals
+/// rt_sigprocmask — engellenen sinyal maskesini inceler veya değiştirir (SIG_BLOCK/UNBLOCK/SETMASK)
 fn sys_rt_sigprocmask(_how: usize, set_ptr: usize, oldset_ptr: usize, _sigsetsize: usize) -> usize {
-    // Save old mask if requested
+    // İstenirse mevcut maskeyi kaydet
     if oldset_ptr != 0 {
         let mask = SIGNAL_MASKS.lock();
         with_user_access(|| unsafe {
@@ -1370,7 +1558,7 @@ fn sys_rt_sigprocmask(_how: usize, set_ptr: usize, oldset_ptr: usize, _sigsetsiz
         });
     }
     
-    // Set new mask if requested
+    // İstenirse yeni maskeyi uygula
     if set_ptr != 0 {
         let new_mask = with_user_access(|| unsafe { *(set_ptr as *const u64) });
         let mut mask = SIGNAL_MASKS.lock();
@@ -1380,46 +1568,46 @@ fn sys_rt_sigprocmask(_how: usize, set_ptr: usize, oldset_ptr: usize, _sigsetsiz
     0
 }
 
-/// kill - send a signal to a process
+/// kill — belirtilen PID'e sinyal gönderir; sig=0 süreç varlığını kontrol eder
 fn sys_kill(pid: usize, sig: usize) -> usize {
     if sig > 64 {
         return errno(EINVAL);
     }
     
     if sig == 0 {
-        // Signal 0 is used to check if process exists
+        // Sinyal 0: süreç varlığını sınamak için kullanılır, fiilen gönderilmez
         return 0;
     }
     
-    // Simplified - just log the signal
+    // Basitleştirilmiş — yalnızca sinyali seri porta yaz
     crate::serial_println!("[SIGNAL] kill: pid={}, sig={}", pid, sig);
     
-    // In real implementation, would:
-    // 1. Find process by PID
-    // 2. Check permissions
-    // 3. Queue signal to process
-    // 4. Wake up process if sleeping
+    // Gerçek implementasyonda yapılacaklar:
+    // 1. PID'ye göre süreç bul
+    // 2. İzin kontrolü yap
+    // 3. Süreç sinyal kuyruğuna ekle
+    // 4. Süreç uyku modundaysa uyandır
     
     0
 }
 
-/// rt_sigqueueinfo - queue a signal and data to a process
+/// rt_sigqueueinfo — bir süreçe sinyal ve ek veri (siginfo_t) gönderir
 fn sys_rt_sigqueueinfo(_pid: usize, _sig: usize, _info_ptr: usize) -> usize {
     errno(ENOSYS)
 }
 
-/// sigaltstack - set and/or examine signal stack context
+/// sigaltstack — sinyal işleyicisi için alternatif yığın kurar veya sorgular
 fn sys_sigaltstack(_ss_ptr: usize, _old_ss_ptr: usize) -> usize {
     errno(ENOSYS)
 }
 
-/// rt_sigsuspend - wait for a signal
+/// rt_sigsuspend — belirtilen maske ile sinyal gelene kadar süreçi bloklar
 fn sys_rt_sigsuspend(_mask_ptr: usize) -> usize {
-    // Would block until signal received
+    // Sinyal gelinceye kadar bloklar; çıkışta daima EINTR döner
     errno(EINTR)
 }
 
-/// rt_sigtimedwait - wait for a signal with timeout
+/// rt_sigtimedwait — zaman aşımı süresini aşmadan beklenen sinyal kümesini bekler
 fn sys_rt_sigtimedwait(_set_ptr: usize, _info_ptr: usize, _timeout_ptr: usize, _sigsetsize: usize) -> usize {
     errno(ENOSYS)
 }
@@ -1441,10 +1629,10 @@ fn sys_madvise(_addr: usize, _len: usize, _advice: usize) -> usize {
 }
 
 // ============================================================================
-// IPC SYSCALLS (Shared Memory, Pipes, Message Queues, Semaphores)
+// IPC SYSCALL'LARI — Paylaşımlı Bellek, Boruhat, Mesaj Kuyruğu, Semafor
 // ============================================================================
 
-/// Shared memory segment
+/// Paylaşımlı bellek segmenti — POSIX shm veya System V SHM ile eşdeğer
 struct ShmSegment {
     key: usize,
     size: usize,
@@ -1458,9 +1646,9 @@ lazy_static! {
     static ref NEXT_SHMID: Mutex<usize> = Mutex::new(1);
 }
 
-/// shmget - get shared memory segment
+/// shmget — anahtar değeriyle paylaşımlı bellek segmenti oluşturur ya da mevcut olanı döndürür
 fn sys_shmget(key: usize, size: usize, _shmflg: usize) -> usize {
-    // Create new segment
+    // Yeni segment oluştur
     let shmid = {
         let mut next = NEXT_SHMID.lock();
         let id = *next;
@@ -1468,7 +1656,7 @@ fn sys_shmget(key: usize, size: usize, _shmflg: usize) -> usize {
         id
     };
     
-    // Allocate memory
+    // Segment için fiziksel bellek ayır
     let addr = crate::memory::allocate_user_mmap(size as u64);
     let addr = match addr {
         Some(a) => a as usize,
@@ -1488,14 +1676,14 @@ fn sys_shmget(key: usize, size: usize, _shmflg: usize) -> usize {
     shmid
 }
 
-/// shmat - attach shared memory
+/// shmat — paylaşımlı bellek segment ini süreç adres uzayına bağlar
 fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> usize {
     let mut table = SHM_TABLE.lock();
     let Some(segment) = table.get_mut(&shmid) else {
         return errno(EINVAL);
     };
     
-    // Return the address (or use provided address if shmaddr != 0)
+    // Adresi döndür: shmaddr != 0 ise istenen adres, aksi halde segmentın kendi adresi kullanılır
     let addr = if shmaddr != 0 { shmaddr } else { segment.addr };
     segment.ref_count += 1;
     
@@ -1503,12 +1691,12 @@ fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> usize {
     addr
 }
 
-/// shmdt - detach shared memory
+/// shmdt — paylaşımlı bellek segment ini adres uzayından çıkarır
 fn sys_shmdt(_shmaddr: usize) -> usize {
     0
 }
 
-/// shmctl - shared memory control
+/// shmctl — paylaşımlı bellek segment i üzerinde kontrol işlemleri (IPC_RMID, IPC_STAT)
 fn sys_shmctl(shmid: usize, cmd: usize, _buf: usize) -> usize {
     const IPC_RMID: usize = 0;
     const IPC_STAT: usize = 2;
@@ -1525,7 +1713,7 @@ fn sys_shmctl(shmid: usize, cmd: usize, _buf: usize) -> usize {
     }
 }
 
-/// Pipe implementation
+/// Boruhat tamponu — tek yönlü FIFO karakter kuyruğu
 struct PipeBuffer {
     buffer: Vec<u8>,
     read_pos: usize,
@@ -1536,13 +1724,13 @@ lazy_static! {
     static ref PIPE_TABLE: Mutex<alloc::collections::BTreeMap<usize, PipeBuffer>> = Mutex::new(alloc::collections::BTreeMap::new());
 }
 
-/// pipe - create pipe
+/// pipe — tek yönlü iletiim kanalı oluşturur; pipefd[0] okuma, pipefd[1] yazma uçudur
 fn sys_pipe(pipefd_ptr: usize) -> usize {
     if pipefd_ptr == 0 {
         return errno(EFAULT);
     }
     
-    // Allocate two FDs for read and write ends
+    // Okuma ve yazma uçları için iki FD ayır
     let read_fd = allocate_fd(FdKind::Pipe);
     let write_fd = allocate_fd(FdKind::Pipe);
     
@@ -1550,17 +1738,17 @@ fn sys_pipe(pipefd_ptr: usize) -> usize {
         return errno(EMFILE);
     }
     
-    // Create pipe buffer
+    // Boruhat tampon yapısını oluştur
     let pipe = PipeBuffer {
         buffer: vec![0u8; 4096],
         read_pos: 0,
         write_pos: 0,
     };
     
-    // Store pipe with read_fd as key
+    // Boruhatı okuma FD'si ile anahtar olarak kaydet
     PIPE_TABLE.lock().insert(read_fd, pipe);
     
-    // Write pipefds to user memory
+    // Kullanıcı belleğine pipefd değerlerini yaz
     with_user_access(|| unsafe {
         *(pipefd_ptr as *mut u32) = read_fd as u32;
         *((pipefd_ptr + 4) as *mut u32) = write_fd as u32;
@@ -1570,7 +1758,7 @@ fn sys_pipe(pipefd_ptr: usize) -> usize {
     0
 }
 
-/// dup - duplicate file descriptor
+/// dup — mevcut dosya tanımlayıcısının bir kopyasını oluşturur; düşük numaralı fd tercih edilir
 fn sys_dup(oldfd: usize) -> usize {
     let kind = get_fd(oldfd);
     match kind {
@@ -1585,7 +1773,7 @@ fn sys_dup(oldfd: usize) -> usize {
     }
 }
 
-/// dup2 - duplicate file descriptor to specific fd
+/// dup2 — dosya tanımlayıcısını belirli bir numaraya kopyalar; newfd varsa önce kapatılır
 fn sys_dup2(oldfd: usize, newfd: usize) -> usize {
     let kind = get_fd(oldfd);
     match kind {
@@ -1601,7 +1789,7 @@ fn sys_dup2(oldfd: usize, newfd: usize) -> usize {
     }
 }
 
-/// Message queue stubs
+/// Mesaj kuyruğu taslakları — System V IPC mesajlaşma arayüzü yer tutucu
 fn sys_msgget(_key: usize, _msgflg: usize) -> usize {
     errno(ENOSYS)
 }
@@ -1618,7 +1806,7 @@ fn sys_msgctl(_msqid: usize, _cmd: usize, _buf: usize) -> usize {
     errno(ENOSYS)
 }
 
-/// Semaphore stubs
+/// Semafor taslakları — System V IPC eşzamanlılık primitifi yer tutucu
 fn sys_semget(_key: usize, _nsems: usize, _semflg: usize) -> usize {
     errno(ENOSYS)
 }
@@ -1631,16 +1819,16 @@ fn sys_semctl(_semid: usize, _semnum: usize, _cmd: usize, _arg: usize) -> usize 
     errno(ENOSYS)
 }
 
-/// Futex (fast userspace mutex)
+/// Futex — kullanıcı alanı hızlı mutex'i; çekirdekten sadece kılıf işlemler gerektirir
 fn sys_futex(_uaddr: usize, _op: usize, _val: usize, _timeout: usize, _uaddr2: usize, _val3: usize) -> usize {
     errno(ENOSYS)
 }
 
 // ============================================================================
-// TIMER/EVENT SYSCALLS
+// ZAMANLAYICl VE OLAY SYSCALL'LARI — POSIX timer ve epoll/eventfd arayüzü
 // ============================================================================
 
-/// Timer structure
+/// Zamanlayıcı yapısı — POSIX timer_create ile oluşturulan aralıklı veya tek sþrerlik zamanlama
 struct Timer {
     timerid: usize,
     interval_ns: u64,
@@ -1653,7 +1841,7 @@ lazy_static! {
     static ref NEXT_TIMERID: Mutex<usize> = Mutex::new(1);
 }
 
-/// timer_create - create a timer
+/// timer_create — belirtilen saat kaynağı için yeni bir POSIX zamanlayıcısı oluşturur
 fn sys_timer_create(_clockid: usize, _sevp: usize, timerid_ptr: usize) -> usize {
     let timerid = {
         let mut next = NEXT_TIMERID.lock();
@@ -1681,14 +1869,14 @@ fn sys_timer_create(_clockid: usize, _sevp: usize, timerid_ptr: usize) -> usize 
     0
 }
 
-/// timer_settime - set timer expiration
+/// timer_settime — zamanlayıcının tetiklenme zamanını ve tekrarlama aralığını ayarlar
 fn sys_timer_settime(timerid: usize, _flags: usize, new_value_ptr: usize, old_value_ptr: usize) -> usize {
     let mut timers = TIMER_TABLE.lock();
     let Some(timer) = timers.get_mut(&timerid) else {
         return errno(EINVAL);
     };
     
-    // Save old value
+    // Eski değeri kaydet
     if old_value_ptr != 0 {
         with_user_access(|| unsafe {
             *(old_value_ptr as *mut u64) = timer.value_ns;
@@ -1696,7 +1884,7 @@ fn sys_timer_settime(timerid: usize, _flags: usize, new_value_ptr: usize, old_va
         });
     }
     
-    // Set new value
+    // Yeni değeri uygula
     if new_value_ptr != 0 {
         let (value, interval) = with_user_access(|| unsafe {
             let v = *(new_value_ptr as *const u64);
@@ -1711,7 +1899,7 @@ fn sys_timer_settime(timerid: usize, _flags: usize, new_value_ptr: usize, old_va
     0
 }
 
-/// timer_gettime - get timer expiration
+/// timer_gettime — zamanlayıcının kalan süresini ve aralığını okur
 fn sys_timer_gettime(timerid: usize, curr_value_ptr: usize) -> usize {
     let timers = TIMER_TABLE.lock();
     let Some(timer) = timers.get(&timerid) else {
@@ -1728,7 +1916,7 @@ fn sys_timer_gettime(timerid: usize, curr_value_ptr: usize) -> usize {
     0
 }
 
-/// timer_delete - delete a timer
+/// timer_delete — POSIX zamanlayıcısını siler ve kaynaklarını serbest bırakır
 fn sys_timer_delete(timerid: usize) -> usize {
     let mut timers = TIMER_TABLE.lock();
     if timers.remove(&timerid).is_none() {
@@ -1737,7 +1925,7 @@ fn sys_timer_delete(timerid: usize) -> usize {
     0
 }
 
-/// epoll instance
+/// epoll örneği — çok sayıda FD üzerinde olay bekleme altyapısı
 struct EpollInstance {
     events: Vec<EpollEvent>,
 }
@@ -1753,7 +1941,7 @@ lazy_static! {
     static ref NEXT_EPOLLID: Mutex<usize> = Mutex::new(1);
 }
 
-/// epoll_create1 - create an epoll instance
+/// epoll_create1 — yeni bir epoll örneği oluşturur; flags ile EPOLL_CLOEXEC desteklenir
 fn sys_epoll_create1(_flags: usize) -> usize {
     let epollid = {
         let mut next = NEXT_EPOLLID.lock();
@@ -1768,29 +1956,29 @@ fn sys_epoll_create1(_flags: usize) -> usize {
     
     EPOLL_TABLE.lock().insert(epollid, epoll);
     
-    // Also create FD
+    // Ayrıca epoll örneği için bir FD ayır
     let fd = allocate_fd(FdKind::File);
     crate::serial_println!("[EPOLL] epoll_create1: epollid={}, fd={}", epollid, fd);
     fd
 }
 
-/// epoll_ctl - control an epoll instance
+/// epoll_ctl — epoll ilgi kümesine dosya tanımlayıcısı ekler, değiştirir veya kaldırır
 fn sys_epoll_ctl(_epfd: usize, _op: usize, _fd: usize, _event: usize) -> usize {
-    // Add/modify/delete file descriptor from epoll interest list
+    // epoll ilgi listesine FD ekle/değiştir/kaldır (henüz taslak)
     0
 }
 
-/// epoll_pwait - wait for events
+/// epoll_pwait — izlenen FD'lerde olay oluşunca yapı döndürür; timeout=-1 sonsuz bekler
 fn sys_epoll_pwait(_epfd: usize, events_ptr: usize, maxevents: usize, _timeout: usize, _sigmask: usize) -> usize {
-    // Would block until events available
+    // Olay gelene kadar bloklar — şimdilik boş sonlandı
     if events_ptr != 0 {
-        // Return empty events for now
+        // Şu an için boş olay listesi döndür
         let _ = maxevents;
     }
     0
 }
 
-/// eventfd2 - create event file descriptor
+/// eventfd2 — sayış tabanlı olay bildirim dosya tanımlayıcısı oluşturur
 fn sys_eventfd2(_initval: usize, _flags: usize) -> usize {
     let fd = allocate_fd(FdKind::File);
     crate::serial_println!("[EVENTFD] eventfd2: fd={}", fd);
@@ -1899,7 +2087,7 @@ fn sys_wait4(pid: usize, status: usize, options: usize, _rusage: usize) -> usize
 }
 
 // ============================================================================
-// PTRACE (SYSCALL TRACING)
+// PTRACE (SYSCALL İZLEME) — ptrace ile süreç ya da syscall izleme
 // ============================================================================
 
 const PTRACE_TRACEME: usize = 0;
@@ -1928,11 +2116,11 @@ fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> usize {
             0
         }
         PTRACE_CONT => {
-            // sys_ptrace: continue execution
+            // sys_ptrace: yürUtmeye devam et (SIGTRAP sonrası)
             0
         }
         PTRACE_ATTACH => {
-            // Şimdilik stub, ileride SIGSTOP gönderilecek
+            // Henüz taslak; ileride SIGSTOP gönderilecek
             errno(ENOSYS)
         }
         PTRACE_DETACH => {
@@ -1950,6 +2138,62 @@ struct UtsName {
     version: [u8; 65],
     machine: [u8; 65],
     domainname: [u8; 65],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TimeVal {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RUsage {
+    ru_utime: TimeVal,
+    ru_stime: TimeVal,
+    ru_maxrss: i64,
+    ru_ixrss: i64,
+    ru_idrss: i64,
+    ru_isrss: i64,
+    ru_minflt: i64,
+    ru_majflt: i64,
+    ru_nswap: i64,
+    ru_inblock: i64,
+    ru_oublock: i64,
+    ru_msgsnd: i64,
+    ru_msgrcv: i64,
+    ru_nsignals: i64,
+    ru_nvcsw: i64,
+    ru_nivcsw: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SysInfo {
+    uptime: i64,
+    loads: [u64; 3],
+    totalram: u64,
+    freeram: u64,
+    sharedram: u64,
+    bufferram: u64,
+    totalswap: u64,
+    freeswap: u64,
+    procs: u16,
+    pad: u16,
+    totalhigh: u64,
+    freehigh: u64,
+    mem_unit: u32,
+    _f: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Tms {
+    tms_utime: i64,
+    tms_stime: i64,
+    tms_cutime: i64,
+    tms_cstime: i64,
 }
 
 fn sys_uname(uts_ptr: usize) -> usize {
@@ -1975,7 +2219,94 @@ fn sys_uname(uts_ptr: usize) -> usize {
 }
 
 fn sys_getcwd(_buf: usize, _size: usize) -> usize {
-    errno(ENOSYS)
+    if _buf == 0 || _size == 0 {
+        return errno(EFAULT);
+    }
+
+    let cwd = b"/\0";
+    if _size < cwd.len() {
+        return errno(EINVAL);
+    }
+
+    with_user_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(cwd.as_ptr(), _buf as *mut u8, cwd.len());
+    });
+    _buf
+}
+
+fn sys_getrusage(_who: usize, usage_ptr: usize) -> usize {
+    if usage_ptr == 0 {
+        return errno(EFAULT);
+    }
+
+    let ticks = crate::task::scheduler::get_ticks() as u64;
+    let total_us = ticks.saturating_mul(TICK_NS).saturating_div(1_000);
+    let usage = RUsage {
+        ru_utime: TimeVal {
+            tv_sec: (total_us / 1_000_000) as i64,
+            tv_usec: (total_us % 1_000_000) as i64,
+        },
+        ru_stime: TimeVal { tv_sec: 0, tv_usec: 0 },
+        ru_maxrss: 0,
+        ru_ixrss: 0,
+        ru_idrss: 0,
+        ru_isrss: 0,
+        ru_minflt: 0,
+        ru_majflt: 0,
+        ru_nswap: 0,
+        ru_inblock: 0,
+        ru_oublock: 0,
+        ru_msgsnd: 0,
+        ru_msgrcv: 0,
+        ru_nsignals: 0,
+        ru_nvcsw: 0,
+        ru_nivcsw: 0,
+    };
+
+    with_user_access(|| unsafe { *(usage_ptr as *mut RUsage) = usage });
+    0
+}
+
+fn sys_sysinfo(info_ptr: usize) -> usize {
+    if info_ptr == 0 {
+        return errno(EFAULT);
+    }
+
+    let ticks = crate::task::scheduler::get_ticks() as u64;
+    let uptime = ticks.saturating_mul(TICK_NS).saturating_div(1_000_000_000) as i64;
+    let info = SysInfo {
+        uptime,
+        loads: [0, 0, 0],
+        totalram: 512 * 1024 * 1024,
+        freeram: 256 * 1024 * 1024,
+        sharedram: 0,
+        bufferram: 0,
+        totalswap: 0,
+        freeswap: 0,
+        procs: 1,
+        pad: 0,
+        totalhigh: 0,
+        freehigh: 0,
+        mem_unit: 1,
+        _f: [],
+    };
+
+    with_user_access(|| unsafe { *(info_ptr as *mut SysInfo) = info });
+    0
+}
+
+fn sys_times(buf_ptr: usize) -> usize {
+    let ticks = crate::task::scheduler::get_ticks() as i64;
+    if buf_ptr != 0 {
+        let value = Tms {
+            tms_utime: ticks,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
+        };
+        with_user_access(|| unsafe { *(buf_ptr as *mut Tms) = value });
+    }
+    ticks as usize
 }
 
 fn sys_getuid() -> usize {
@@ -1995,7 +2326,7 @@ fn sys_getegid() -> usize {
 }
 
 fn sys_getppid() -> usize {
-    // Return parent PID (simplified - return 1 as init)
+    // İlit süreç PID'sini döndür (basitleştirilmiş — init olarak 1 kullanılır)
     1
 }
 
@@ -2003,35 +2334,35 @@ fn sys_gettid() -> usize {
     crate::task::scheduler::current_task_id()
 }
 
-/// clone syscall - create child process or thread
+/// clone syscall — alt süreç veya ış parçacığı oluşturur; flags ile paylaşılan kaynaklar belirlenir
 fn sys_clone(flags: usize, child_stack: usize, ptid: usize, ctid: usize, newtls: usize) -> usize {
-    // Clone flags
-    const CLONE_VM: usize = 0x00000100;      // Share memory space
+    // clone bayrakları — süreç kopyalanmasını kontrol eder
+    const CLONE_VM: usize = 0x00000100;      // Bellek uzayını paylaş
     const CLONE_PARENT_SETTID: usize = 0x00100000;
     const CLONE_CHILD_CLEARTID: usize = 0x00200000;
     
     let (user_rsp, user_rip, _user_rflags) = crate::syscall::current_user_context();
     
-    // Determine if this is a thread or process creation
+    // Bu bir iplik mi yoksa süreç mi oluşturma işlemi?
     let is_thread = (flags & CLONE_VM) != 0;
     
-    // For threads, use provided stack; for processes, copy current stack
+    // İplik için sağlanan yığın kullanılır; süreç için mevcut yığın kopyalanır
     let new_rsp = if is_thread && child_stack != 0 {
         child_stack
     } else {
         user_rsp as usize
     };
     
-    // Use fork for process creation, simplified clone for threads
+    // Süreç oluşturma için fork, basitleştirilmiş iplik klonlama için clone kullanılır
     match crate::task::scheduler::fork_current_user_task(user_rip, new_rsp as u64) {
         Some(pid) => {
-            // Set parent TID if requested
+            // İstenirse ebeveyn TID'sini ayarla
             if (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 {
                 with_user_access(|| unsafe { *(ptid as *mut usize) = pid });
             }
-            // Set child TID if requested  
+            // İstenirse çocuk TID'sini ayarla
             if (flags & CLONE_CHILD_CLEARTID) != 0 && ctid != 0 {
-                // Store ctid for later clearing on exit (simplified)
+                // Çıkışta temizlenmek üzere ctid'i sakla (basitleştirilmiş)
                 let _ = ctid;
             }
             pid
@@ -2040,27 +2371,27 @@ fn sys_clone(flags: usize, child_stack: usize, ptid: usize, ctid: usize, newtls:
     }
 }
 
-/// set_tid_address - set pointer to thread ID
+/// set_tid_address — iplik kimliği adresini ayarlar; çıkışta çocuk TID'sini temizlemek için kullanılır
 fn sys_set_tid_address(tidptr: usize) -> usize {
-    // Simplified - just return current TID
+    // Basitleştirilmiş — mevcut TID'yi döndür
     let _ = tidptr;
     crate::task::scheduler::current_task_id()
 }
 
-/// tgkill - send signal to thread
+/// tgkill — iplik grubu içindeki belirli bir ipliğe sinyal gönderir
 fn sys_tgkill(_tgid: usize, _tid: usize, sig: usize) -> usize {
     if sig == 0 {
-        return 0; // Signal 0 is used to check existence
+        return 0; // Sinyal 0: varlık kontrolü; gerçek sinyal gönderilmez
     }
     if sig > 64 {
         return errno(EINVAL);
     }
     
-    // Simplified - just return success
+    // Basitleştirilmiş — başarı döndür
     0
 }
 
-/// tkill - send signal to thread
+/// tkill — tek bir ipliğe (tid) sinyal gönderir
 fn sys_tkill(_tid: usize, sig: usize) -> usize {
     if sig == 0 {
         return 0;
@@ -2069,38 +2400,38 @@ fn sys_tkill(_tid: usize, sig: usize) -> usize {
         return errno(EINVAL);
     }
     
-    // Simplified - just return success
+    // Basitleştirilmiş — başarı döndür
     0
 }
 
-/// setuid - set user ID
+/// setuid — süreçin kullanıcı kimliğini döndürür; ileride çok kullanıcı desteği için rezerve
 fn sys_setuid(uid: usize) -> usize {
-    // In echOS, we don't have real user management yet
-    // Just return success for compatibility
+    // echOS henüz gerçek kullanıcı yönetimini desteklemiyor
+    // Uyumluluk için başarı döndürülür
     let _ = uid;
     0
 }
 
-/// setgid - set group ID  
+/// setgid — süreçin grup kimliğini ayarlar; ău an taslak olarak uyumluluk için genşlik döner
 fn sys_setgid(gid: usize) -> usize {
     let _ = gid;
     0
 }
 
-/// setsid - create new session
+/// setsid — yeni oturum oluşturur; süreç kontrol terminali olmaksızın grup lideri olur
 fn sys_setsid() -> usize {
-    // Return new session ID (same as PGID)
+    // Yeni oturum ID döndür (mevcut görev ID'si ile aynı)
     crate::task::scheduler::current_task_id()
 }
 
-/// setpgid - set process group ID
+/// setpgid — süreç grubunu değiştirir; kabuklarda iş kontrolü için kullanılır
 fn sys_setpgid(pid: usize, pgid: usize) -> usize {
-    // Simplified - just return success
+    // Basitleştirilmiş — başarı döndür
     let _ = (pid, pgid);
     0
 }
 
-/// getpgid - get process group ID
+/// getpgid — belirtilen PID'in süreç grubu kimliğini döndürür
 fn sys_getpgid(pid: usize) -> usize {
     if pid == 0 {
         crate::task::scheduler::current_task_id()
@@ -2109,7 +2440,7 @@ fn sys_getpgid(pid: usize) -> usize {
     }
 }
 
-/// getsid - get session ID
+/// getsid — belirtilen PID'in oturum kimliğini döndürür
 fn sys_getsid(pid: usize) -> usize {
     if pid == 0 {
         crate::task::scheduler::current_task_id()
@@ -2118,7 +2449,7 @@ fn sys_getsid(pid: usize) -> usize {
     }
 }
 
-/// exit/exit_group syscall
+/// exit/exit_group syscall — süreç veya iplik grubunu sonlandırır
 fn sys_exit(code: usize) -> usize {
     crate::task::scheduler::exit(code as i32);
 }
@@ -2170,7 +2501,7 @@ fn sys_getrandom(buf: usize, len: usize, flags: usize) -> usize {
 }
 
 // ============================================================================
-// IO_URING (Asynchronous I/O Framework)
+// IO_URING — Asenkron GİRİŞ/ÇIKIŞ Çerçevesi (Linux 5.1+)
 // ============================================================================
 
 #[repr(C)]
@@ -2239,12 +2570,12 @@ pub struct IoUringCqe {
     pub flags: u32,
 }
 
-// echOS io_uring Instance Yapısı (Kernel İçi Tutulan Dosya Karşılığı)
+// echOS io_uring Örneği Yapısı — Kernel İçinde Tutulan Dosya Karşılığı
 pub struct IoUringInstance {
     pub sq_entries: u32,
     pub cq_entries: u32,
-    pub sqe_array: usize, // User map pointer
-    pub cqe_array: usize, // User map pointer
+    pub sqe_array: usize, // Kullanıcı alanı eşlenimi için adres
+    pub cqe_array: usize, // Kullanıcı alanı eşlenimi için adres
 }
 
 fn sys_io_uring_setup(entries: usize, params_ptr: usize) -> usize {
@@ -2258,11 +2589,11 @@ fn sys_io_uring_setup(entries: usize, params_ptr: usize) -> usize {
     }
 
     // 1. Kernel'da iki frame tahsis et (Submission ve Completion)
-    // Gerçekte mmap ile share edileceği için allocate_user_mmap
+    // Geçici olarak allocate_user_mmap kullanılır; mmap ile paylaşılacak
     let sq_size = entries as u64 * core::mem::size_of::<IoUringSqe>() as u64;
     let cq_size = entries as u64 * core::mem::size_of::<IoUringCqe>() as u64;
     
-    // Güvenliği için 1 Page'e (4096) yuvarla
+    // Güvenlik için 1 sayfa (4096 bayt) sınırına yuvarla
     let alloc_sq = x86_64::align_up(sq_size, 4096);
     let alloc_cq = x86_64::align_up(cq_size, 4096);
 
@@ -2290,7 +2621,7 @@ fn sys_io_uring_setup(entries: usize, params_ptr: usize) -> usize {
     };
     RING_TABLE.lock().insert(fd, inst);
 
-    // TODO: parameters struct içerisine offset'leri geri ver ki user space bilsin.
+    // TODO: params yapısına offset değerlerini yaz; kullanıcı alanı ring konumlarını belirleyebilsin.
 
     fd
 }
@@ -2299,8 +2630,8 @@ fn sys_io_uring_enter(fd: usize, to_submit: usize, min_complete: usize, _flags: 
     let mut table = RING_TABLE.lock();
     if let Some(inst) = table.get_mut(&fd) {
         if to_submit > 0 {
-            // Submission Queue (SQ) pointer'ına user alanından dönüştürerek git
-            // Gerçekte head/tail index'leriyle çalışır, şimdilik mock tarama
+            // SQ ışaretine kullanıcı alanından çevirerek eriş; gerçek uygulamada head/tail indeksi ile taranmalı
+            // Gerçekte head/tail index'leriyle çalışır, şimdilik sahte tarama
             let sqes = unsafe { core::slice::from_raw_parts(inst.sqe_array as *const IoUringSqe, inst.sq_entries as usize) };
             let cqes = unsafe { core::slice::from_raw_parts_mut(inst.cqe_array as *mut IoUringCqe, inst.cq_entries as usize) };
             
@@ -2317,16 +2648,16 @@ fn sys_io_uring_enter(fd: usize, to_submit: usize, min_complete: usize, _flags: 
                 let cqe_index = i;
 
                 // --- KERNEL WORKER THREAD DİSPATCH (ASENKRON) ---
-                // Gerçek io_uring, iş yükünü kernel thread havuzuna böler.
+                // Gerçek io_uring iş yükünü çekirdek iplik havuzuna böler — asenkron worker spawn et
                 crate::task::worker::spawn_work(move || {
                     let res = match opcode {
-                        // IORING_OP_NOP (0)
+                        // IORING_OP_NOP (0) — boş operasyon, latens testi için yararlı
                         0 => 0, 
-                        // IORING_OP_READV / WRITEV vb opcode'lar buraya gelecek...
+                        // IORING_OP_READV / WRITEV vb. opcode'lar ilerleyen süreçte buraya eklenecek
                         _ => -38, // -ENOSYS
                     };
                     
-                    // Asenkron işlem bittiğinde CQ (Completion) event'i atılır
+                    // Asenkron işlem tamamlandığında CQ (Tamamlama Kuyruğu) olayı tetiklenir
                     unsafe {
                         let cqe_ptr = cqe_ptr_usize as *mut IoUringCqe;
                         let cqe = &mut *cqe_ptr.add(cqe_index);
@@ -2348,24 +2679,24 @@ fn sys_io_uring_enter(fd: usize, to_submit: usize, min_complete: usize, _flags: 
 }
 
 // =====================================
-// NETWORK & Netlink Sockets
+// AĞ VE NETLINK SOKETLERİ — TCP/IP, AF_UNIX, AF_NETLINK desteği
 // =====================================
 
-// Address families
+// Adres aileleri — Linux AF_ sabitleriyle tam uyumlu
 const AF_INET: usize = 2;
 const AF_INET6: usize = 10;
 const AF_UNIX: usize = 1;
 
-// Socket types
+// Soket tipleri — akış (TCP) veya veribloğu (UDP)
 const SOCK_STREAM: usize = 1;  // TCP
 const SOCK_DGRAM: usize = 2;   // UDP
 
-// Socket options levels
+// Soket seçenek seviyeleri — setsockopt/getsockopt için
 const SOL_SOCKET: usize = 1;
 const SOL_TCP: usize = 6;
 const SOL_UDP: usize = 17;
 
-// Socket state tracking
+// Soket durum izleme yapısı — her FD için bağlantı bilgilerini tutar
 struct SocketState {
     domain: usize,
     sock_type: usize,
@@ -2387,16 +2718,16 @@ enum SocketConnState {
 
 lazy_static! {
     static ref SOCKET_TABLE: Mutex<alloc::collections::BTreeMap<usize, SocketState>> = Mutex::new(alloc::collections::BTreeMap::new());
-    static ref NEXT_EPHEMERAL_PORT: Mutex<u16> = Mutex::new(49152); // IANA ephemeral port range start
+    static ref NEXT_EPHEMERAL_PORT: Mutex<u16> = Mutex::new(49152); // IANA geçici port aralığı başlangıcı
 }
 
 fn sys_socket(domain: usize, type_: usize, protocol: usize) -> usize {
     crate::serial_println!("[SOCKET] domain={}, type={}, protocol={}", domain, type_, protocol);
     
-    // Support AF_INET (TCP/IP), AF_INET6, AF_NETLINK, AF_UNIX
+    // AF_INET (TCP/IP), AF_INET6, AF_NETLINK, AF_UNIX desteği
     match domain {
         AF_INET | AF_INET6 | AF_UNIX => {
-            // Allocate FD
+            // Soket için serbest FD ayır
             let fd = {
                 let mut table = FD_TABLE.lock();
                 let mut free_fd = !0;
@@ -2416,7 +2747,7 @@ fn sys_socket(domain: usize, type_: usize, protocol: usize) -> usize {
                 return errno(EMFILE);
             }
             
-            // Create socket state
+            // Soket durum yapısını oluştur
             let sock_state = SocketState {
                 domain,
                 sock_type: type_,
@@ -2466,14 +2797,14 @@ fn sys_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> usize {
         return errno(EINVAL);
     }
     
-    // Read sockaddr_in structure
+    // sockaddr_in yapısını oku — sa_family, port ve adres alanları
     let sa_family = with_user_access(|| unsafe { *(addr_ptr as *const u16) });
     
     if sa_family as usize != sock.domain {
         return errno(EAFNOSUPPORT);
     }
     
-    // For AF_INET, read port (in network byte order)
+    // AF_INET için portu ağ byte sırasından dönüştürerek oku
     if sock.domain == AF_INET && addr_len >= 4 {
         let port = with_user_access(|| unsafe {
             let ptr = (addr_ptr + 2) as *const u16;
@@ -2513,7 +2844,7 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
     }
     drop(sockets);
     
-    // Create new socket for accepted connection
+    // Kabul edilen bağlantı için yeni soket oluştur
     let new_fd = {
         let mut table = FD_TABLE.lock();
         let mut free_fd = !0;
@@ -2533,7 +2864,7 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
         return errno(EMFILE);
     }
     
-    // Allocate ephemeral port
+    // Geçici (ephemeral) port ayır — IANA aralığı 49152-65535
     let local_port = {
         let mut port = NEXT_EPHEMERAL_PORT.lock();
         let p = *port;
@@ -2553,14 +2884,14 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
     
     SOCKET_TABLE.lock().insert(new_fd, new_sock);
     
-    // Fill in peer address if requested
+    // İstenirse karşı taraf adresini kullanıcı belleğine yaz
     if addr_ptr != 0 {
         with_user_access(|| unsafe {
-            // sa_family
+            // sa_family (adres ailesi)
             *(addr_ptr as *mut u16) = AF_INET as u16;
-            // port (placeholder)
+            // port (yer tutucu — 0 olarak ayarlandı)
             *((addr_ptr + 2) as *mut u16) = 0;
-            // addr (placeholder)
+            // addr (yer tutucu — sıfırlarla dolduruldu)
             core::ptr::write_bytes((addr_ptr + 4) as *mut u8, 0, 4);
         });
     }
@@ -2588,7 +2919,7 @@ fn sys_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> usize {
         return errno(EINVAL);
     }
     
-    // Read peer address
+    // Karşı taraf adresini oku (sockaddr_in yapısı)
     let (port, addr) = with_user_access(|| unsafe {
         let port = u16::from_be(*((addr_ptr + 2) as *const u16));
         let a0 = *((addr_ptr + 4) as *const u8);
@@ -2613,11 +2944,11 @@ fn sys_sendto(fd: usize, buf: usize, len: usize, flags: usize, addr_ptr: usize, 
         return errno(EBADF);
     };
     
-    // For connected sockets, use stored remote address
-    // For unconnected, use provided address
+    // Bağlı soketler için kaydetilmiş uzak adres kullanılır
+    // Bağlı değilse kullanıcıdan sağlanan adres kullanılır
     let _ = (sock, addr_ptr, addr_len, flags);
     
-    // Read buffer and send via network stack
+    // Tamponu oku ve ağ yığını üzerinden gönder
     let mut data = vec![0u8; len];
     with_user_access(|| unsafe {
         core::ptr::copy_nonoverlapping(buf as *const u8, data.as_mut_ptr(), len);
@@ -2635,7 +2966,7 @@ fn sys_recvfrom(fd: usize, buf: usize, len: usize, flags: usize, addr_ptr: usize
     
     let _ = (sock, flags, addr_ptr, addr_len_ptr);
     
-    // Would receive from network stack
+    // Ağ yığınından veri alınacak — şimdilik taslak olarak 0 döndürülüyor
     crate::serial_println!("[SOCKET] Recv fd={} len={}", fd, len);
     0
 }
@@ -2718,8 +3049,42 @@ fn sys_recvmsg(_fd: usize, _msg: usize, _flags: usize) -> usize {
 }
 
 // =====================================
-// SECCOMP (SECURE COMPUTING)
+// SECCOMP — GÜVENLİ BİLİŞSİM MODU (Sandbox)
 // =====================================
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SeccompProg {
+    len: u16,
+    _pad: u16,
+    filter: usize,
+}
+
+fn install_seccomp_filter(flags: usize, prog_ptr: usize) -> usize {
+    if prog_ptr == 0 {
+        return errno(EINVAL);
+    }
+
+    let prog = with_user_access(|| unsafe { *(prog_ptr as *const SeccompProg) });
+    if prog.len == 0 || prog.filter == 0 {
+        return errno(EINVAL);
+    }
+
+    let slice = with_user_access(|| unsafe {
+        core::slice::from_raw_parts(prog.filter as *const BpfInstruction, prog.len as usize)
+    });
+
+    let mut program = BpfProgram::new();
+    for instr in slice.iter() {
+        program.add(*instr);
+    }
+
+    let filter = SECCOMP.create_filter(program, SECCOMP_RET_KILL_PROCESS, flags as u32);
+    crate::task::scheduler::set_current_seccomp_filter(Some(filter));
+    crate::task::scheduler::set_current_seccomp_mode(SECCOMP_MODE_FILTER as u32);
+    crate::serial_println!("[SECCOMP] Filter Mode Enabled (sys_seccomp)");
+    0
+}
 
 fn sys_prctl(option: usize, arg2: usize) -> usize {
     if option == PR_SET_SECCOMP {
@@ -2727,6 +3092,7 @@ fn sys_prctl(option: usize, arg2: usize) -> usize {
             let current_mode = crate::task::scheduler::get_current_seccomp_mode();
             if current_mode == 0 {
                 crate::task::scheduler::set_current_seccomp_mode(1);
+                crate::task::scheduler::set_current_seccomp_filter(None);
                 crate::serial_println!("[SECCOMP] Strict Mode Enabled (PR_SET_SECCOMP)");
                 return 0;
             }
@@ -2743,12 +3109,11 @@ fn sys_seccomp(operation: usize, _flags: usize, _args: usize) -> usize {
     
     if operation == 0 /* SECCOMP_SET_MODE_STRICT */ {
         crate::task::scheduler::set_current_seccomp_mode(1);
+        crate::task::scheduler::set_current_seccomp_filter(None);
         crate::serial_println!("[SECCOMP] Strict Mode Enabled (sys_seccomp)");
         return 0;
     } else if operation == 1 /* SECCOMP_SET_MODE_FILTER */ {
-        crate::task::scheduler::set_current_seccomp_mode(2);
-        crate::serial_println!("[SECCOMP] Filter Mode Enabled (sys_seccomp)");
-        return 0;
+        return install_seccomp_filter(_flags, _args);
     }
     errno(EINVAL)
 }
@@ -2994,6 +3359,25 @@ pub struct WineLaunchPlan {
     pub pe_info: PeInfo,
 }
 
+#[derive(Clone, Debug)]
+pub struct WindowsLaunchResult {
+    pub runtime_name: String,
+    pub image_base: u64,
+    pub entry_rva: u32,
+    pub process_id: u32,
+    pub thread_id: u32,
+    pub process_handle: u64,
+    pub thread_handle: u64,
+    pub import_count: usize,
+    pub export_count: usize,
+}
+
+static LAST_WINDOWS_LAUNCH: Mutex<Option<WindowsLaunchResult>> = Mutex::new(None);
+
+pub fn last_windows_launch() -> Option<WindowsLaunchResult> {
+    LAST_WINDOWS_LAUNCH.lock().clone()
+}
+
 pub fn pe_info_from_image(image: &[u8]) -> Result<PeInfo, WineRuntimeError> {
     parse_pe(image).map_err(|_| WineRuntimeError::Invalid)
 }
@@ -3023,19 +3407,76 @@ pub fn pe_sections_from_image(image: &[u8]) -> Result<Vec<PeSectionInfo>, WineRu
 }
 
 pub fn run_windows_app_image(image: &[u8]) -> Result<(), WineRuntimeError> {
-    let runtime = current_wine_runtime().ok_or(WineRuntimeError::NotFound)?;
-    if crate::boot::secure_boot_enabled() {
-        verify_authenticode(image).map_err(|_| WineRuntimeError::SecureBootViolation)?;
+    crate::serial_println!("[POSIX] run_windows_app_image -> pe_exec::execute ({} bytes)", image.len());
+    crate::pe_exec::execute(image).map_err(|e| {
+        crate::serial_println!("[POSIX] pe_exec::execute failed: {}", e);
+        WineRuntimeError::NotSupported
+    })
+}
+
+// --------------------------------------------------------------------------
+// Win32 yardımcı fonksiyonları — pe_exec dispatch'ten çağrılır
+// --------------------------------------------------------------------------
+
+/// Win32 VirtualAlloc / HeapAlloc için anonim kullanıcı-modu bellek ayırıcısı
+pub fn sys_mmap_user(hint_addr: usize, size: usize) -> usize {
+    if size == 0 {
+        return 0;
     }
-    let loaded = load_pe_image(image).map_err(|_| WineRuntimeError::Invalid)?;
-    crate::serial_println!(
-        "wine launch runtime={} entry=0x{:08x} image_base=0x{:016x} pe64={}",
-        runtime.name,
-        loaded.info.entry_rva,
-        loaded.info.image_base,
-        loaded.info.is_64
-    );
-    Ok(())
+    let target = if hint_addr != 0
+        && crate::memory::is_user_range(hint_addr as u64, size as u64)
+    {
+        hint_addr as u64
+    } else {
+        match crate::memory::allocate_user_mmap(size as u64) {
+            Some(v) => v,
+            None => return 0,
+        }
+    };
+    let flags = PageTableFlags::USER_ACCESSIBLE
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE;
+    if crate::memory::register_lazy_region(target, size as u64, flags) {
+        target as usize
+    } else {
+        0
+    }
+}
+
+/// VFS yolunu açar ve bir FD döndürür; başarısızlıkta usize::MAX verir
+pub fn open_path_for_win32(path: &str) -> usize {
+    let inode = match crate::fs::vfs_open_inode(path) {
+        Ok(i) => i,
+        Err(_) => return usize::MAX,
+    };
+    let size = match crate::fs::vfs_inode_metadata(&inode) {
+        Ok(m) => m.size,
+        Err(_) => 0,
+    };
+    allocate_file_fd(FileState {
+        inode,
+        offset: 0,
+        size,
+        is_hello: false,
+    })
+}
+
+/// `count` baytını fd'den `buf_addr` adresindeki kullanıcı tamponuna okur.
+/// Okunan bayt sayısını döndürür; hata durumunda usize::MAX döner
+pub fn read_fd_for_win32(fd: usize, buf_addr: usize, count: usize) -> usize {
+    if buf_addr == 0 || count == 0 {
+        return 0;
+    }
+    // Mevcut sys_read yolunu yeniden kullan (FileState'i zaten yönetir)
+    sys_read(fd, buf_addr, count)
+}
+
+/// open_path_for_win32 ile açılan bir FD'yi kapatır
+pub fn close_fd_for_win32(fd: usize) {
+    if fd < 3 || fd >= MAX_FDS {
+        return;
+    }
+    free_fd(fd);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

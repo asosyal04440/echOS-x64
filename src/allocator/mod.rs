@@ -29,17 +29,17 @@ pub const HEAP_SIZE: usize = 100 * 1024 * 1024;
 #[global_allocator]
 pub static ALLOCATOR: LockedTlsf = LockedTlsf::new();
 
-/// Check heap integrity (public wrapper)
+/// Heap bütünlüğünü kontrol et (genel sarmalayıcı)
 pub fn check_heap_integrity() -> usize {
     LockedTlsf::check_heap_integrity()
 }
 
-/// Get allocation stats (public wrapper)
+/// Allocation istatistiklerini al (genel sarmalayıcı)
 pub fn get_alloc_stats() -> tlsf::AllocStats {
     LockedTlsf::get_stats()
 }
 
-/// Flag to track if heap has been initialized
+/// Heap'in başlatılıp başlatılmadığını izlemek için bayrak
 static HEAP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Heap bellek alanını başlatır.
@@ -48,17 +48,17 @@ static HEAP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// TLSF allocator'a serbest bölgeyi ekler.
 ///
 /// # Parametreler
-/// - `mapper`: Sayfa tablosu mapper'ı  
+/// - `mapper`: Sayfa tablosu mapper'ı
 /// - `frame_allocator`: Fiziksel frame allocator
 pub fn init_heap(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> Result<(), MapToError<Size4KiB>> {
-    // Check if already initialized
+    // Zaten başlatıldı mı kontrol et
     if HEAP_INITIALIZED.load(Ordering::Acquire) {
         return Ok(());
     }
-    
+
     // Heap sayfa aralığını hesapla
     let page_range = {
         let heap_start = VirtAddr::new(HEAP_START as u64);
@@ -100,8 +100,8 @@ pub fn init_heap(
     unsafe {
         ALLOCATOR.insert_free_region_ptr(HEAP_START as *mut u8, HEAP_SIZE);
     }
-    
-    // Mark as initialized
+
+    // Başlatıldı olarak işaretle
     HEAP_INITIALIZED.store(true, Ordering::Release);
 
     Ok(())

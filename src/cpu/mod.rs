@@ -436,3 +436,80 @@ unsafe fn xgetbv() -> u64 {
     );
     ((edx as u64) << 32) | (eax as u64)
 }
+
+// ─── x86 Port I/O (PCI konfig alanı ve cihaz sorgulama için) ────────────
+//
+// x86 mimarisinde iki türlü I/O mekanizması vardır:
+//
+// 1. **MMIO (Memory-Mapped I/O)**: Cihaz register'ları normal bellek gibi
+//    adreslenir. Pointer ile erişilir. (Modern GPU, NVMe vs.)
+//
+// 2. **Port I/O**: 16-bit port adres uzayı (0x0000–0xFFFF). Özel
+//    `IN`/`OUT` talimatları ile erişilir. (PCI konfig, PS/2, PIC vs.)
+//    Ring-3 bu talimatı doğrudan çalıştiramaz — sadece Ring-0 (kernel).
+//
+// Bu fonksiyonlar `unsafe` çünkü yanlış port'a yazılmak sistemi çökebilir.
+// PCI konfig port'ları (0xCF8/0xCFC) standart ve güvenlidir.
+
+/// x86 I/O portuna 32-bit değer yazar.
+///
+/// ## Inline Assembly Açıklaması:
+///   `out dx, eax`  → x86 "OUT" opcode'u
+///   `in("dx")  port`  → port adresi DX register'ına yüklenir
+///   `in("eax") val`   → yazılacak değer EAX'e yüklenir
+///   `options(nostack, preserves_flags)` → stack değiştirme, flag bozma yok
+///
+/// # Safety
+/// Geçerli bir I/O portu ve güvenli bir yazım olduğundan emin olunmalıdır.
+#[inline]
+pub unsafe fn outl(port: u16, val: u32) {
+    core::arch::asm!(
+        "out dx, eax",
+        in("dx")  port,
+        in("eax") val,
+        options(nostack, preserves_flags)
+    );
+}
+
+/// Write a 8-bit value to an x86 I/O port.
+#[inline]
+pub unsafe fn outb(port: u16, val: u8) {
+    core::arch::asm!(
+        "out dx, al",
+        in("dx") port,
+        in("al") val,
+        options(nostack, preserves_flags)
+    );
+}
+
+/// x86 I/O portundan 32-bit değer okur.
+///
+/// PCI konfig veri portu (0xCFC) gibi port'lardan cihaz cevabını almak için kullanılır.
+/// `outl(0xCF8, adres)` ile hedef seçildikten sonra `inl(0xCFC)` ile veri gelir.
+///
+/// # Safety
+/// Port okunabilir ve yan etkisi kabul edilebilir olmalıdır.
+#[inline]
+pub unsafe fn inl(port: u16) -> u32 {
+    let val: u32;
+    core::arch::asm!(
+        "in eax, dx",
+        out("eax") val,
+        in("dx")   port,
+        options(nostack, preserves_flags)
+    );
+    val
+}
+
+/// Read a 8-bit value from an x86 I/O port.
+#[inline]
+pub unsafe fn inb(port: u16) -> u8 {
+    let val: u8;
+    core::arch::asm!(
+        "in al, dx",
+        out("al") val,
+        in("dx")  port,
+        options(nostack, preserves_flags)
+    );
+    val
+}

@@ -83,6 +83,30 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    fn workspace_bounds(screen_width: usize, screen_height: usize, taskbar_height: usize) -> (i32, i32) {
+        let w = screen_width.max(1) as i32;
+        let h = screen_height.saturating_sub(taskbar_height).max(1) as i32;
+        (w, h)
+    }
+
+    fn clamp_rect_to_workspace(rect: &mut Rect, screen_width: usize, screen_height: usize, taskbar_height: usize) {
+        let (workspace_w, workspace_h) = Self::workspace_bounds(screen_width, screen_height, taskbar_height);
+        let min_w = 200;
+        let min_h = 150;
+
+        rect.width = rect.width.max(min_w).min(workspace_w);
+        rect.height = rect.height.max(min_h).min(workspace_h);
+        rect.x = rect.x.clamp(0, workspace_w.saturating_sub(rect.width));
+        rect.y = rect.y.clamp(0, workspace_h.saturating_sub(rect.height));
+    }
+
+    fn normalize_z_order(&mut self) {
+        self.windows.sort_by_key(|w| w.z_index);
+        for (idx, window) in self.windows.iter_mut().enumerate() {
+            window.z_index = idx;
+        }
+    }
+
     pub fn new(screen_width: usize, screen_height: usize) -> Self {
         Self {
             windows: Vec::new(),
@@ -100,15 +124,24 @@ impl WindowManager {
     }
 
     pub fn add_window(&mut self, mut window: WindowInfo) -> u32 {
+        Self::clamp_rect_to_workspace(
+            &mut window.current_rect,
+            self.screen_width,
+            self.screen_height,
+            self.taskbar_height,
+        );
+        window.normal_rect = window.current_rect;
         window.z_index = self.windows.len();
         let id = window.id;
         self.windows.push(window);
+        self.normalize_z_order();
         self.focus_window(id);
         id
     }
 
     pub fn remove_window(&mut self, id: u32) {
         self.windows.retain(|w| w.id != id);
+        self.normalize_z_order();
         if self.focused_id == Some(id) {
             // Focus topmost remaining window
             self.focused_id = self.windows.iter()
@@ -149,6 +182,7 @@ impl WindowManager {
             let max_z = self.windows.iter().map(|w| w.z_index).max().unwrap_or(0);
             self.windows[idx].focused = true;
             self.windows[idx].z_index = max_z + 1;
+            self.normalize_z_order();
             self.focused_id = Some(id);
         }
     }
@@ -169,9 +203,19 @@ impl WindowManager {
     }
 
     pub fn restore(&mut self, id: u32) {
+        let screen_width = self.screen_width;
+        let screen_height = self.screen_height;
+        let taskbar_height = self.taskbar_height;
         if let Some(window) = self.window_mut(id) {
             window.state = WindowState::Normal;
             window.current_rect = window.normal_rect;
+            Self::clamp_rect_to_workspace(
+                &mut window.current_rect,
+                screen_width,
+                screen_height,
+                taskbar_height,
+            );
+            window.normal_rect = window.current_rect;
             self.focus_window(id);
         }
     }
@@ -255,6 +299,9 @@ impl WindowManager {
         let drag_offset_y = self.drag_offset.1;
         let snap_threshold = self.snap_threshold;
         let screen_width = self.screen_width as i32;
+        let screen_width_u = self.screen_width;
+        let screen_height_u = self.screen_height;
+        let taskbar_height = self.taskbar_height;
         
         if let Some(id) = dragging_id {
             if let Some(window) = self.window_mut(id) {
@@ -262,8 +309,15 @@ impl WindowManager {
                 let new_y = y - drag_offset_y;
                 window.current_rect.x = new_x;
                 window.current_rect.y = new_y;
+                Self::clamp_rect_to_workspace(
+                    &mut window.current_rect,
+                    screen_width_u,
+                    screen_height_u,
+                    taskbar_height,
+                );
                 window.normal_rect.x = new_x;
                 window.normal_rect.y = new_y;
+                window.normal_rect = window.current_rect;
                 window.state = WindowState::Normal;
                 
                 // Check for snap
@@ -309,6 +363,9 @@ impl WindowManager {
         let edge = self.resize_edge;
         let start_x = self.resize_start.0;
         let start_y = self.resize_start.1;
+        let screen_width = self.screen_width;
+        let screen_height = self.screen_height;
+        let taskbar_height = self.taskbar_height;
         
         if let Some(id) = resize_id {
             if let Some(window) = self.window_mut(id) {
@@ -374,6 +431,13 @@ impl WindowManager {
                     ResizeEdge::None => {}
                 }
                 
+                window.normal_rect = window.current_rect;
+                Self::clamp_rect_to_workspace(
+                    &mut window.current_rect,
+                    screen_width,
+                    screen_height,
+                    taskbar_height,
+                );
                 window.normal_rect = window.current_rect;
             }
         }
@@ -468,5 +532,15 @@ impl WindowManager {
     pub fn update_screen_size(&mut self, width: usize, height: usize) {
         self.screen_width = width;
         self.screen_height = height;
+        for window in &mut self.windows {
+            Self::clamp_rect_to_workspace(
+                &mut window.current_rect,
+                self.screen_width,
+                self.screen_height,
+                self.taskbar_height,
+            );
+            window.normal_rect = window.current_rect;
+        }
+        self.normalize_z_order();
     }
 }

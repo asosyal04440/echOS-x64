@@ -1,6 +1,6 @@
-//! # Interrupt Remapping
+//! # Kesme Yeniden Yönlendirme
 //!
-//! Intel VT-d and AMD-Vi interrupt remapping support.
+//! Intel VT-d ve AMD-Vi kesme yeniden yönlendirme desteği.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,10 +10,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// INTR REMAPPING CONSTANTS
+// KES. YENİDEN YÖNL. SABİTLERİ
 // ============================================================================
 
-/// Intel VT-d registers
+/// Intel VT-d yazmaçları
 pub const VTD_VER_REG: u32 = 0x00;
 pub const VTD_CAP_REG: u32 = 0x08;
 pub const VTD_ECAP_REG: u32 = 0x10;
@@ -30,27 +30,27 @@ pub const VTD_AFLOG_REG: u32 = 0x58;
 pub const VTD_IVA_REG: u32 = 0x60;
 pub const VTD_IRTA_REG: u32 = 0xB8;
 
-/// VT-d capability flags
-pub const VTD_CAP_RWBF: u64 = 1 << 4;      // Required Write-Buffer Flushing
-pub const VTD_CAP_AFL: u64 = 1 << 3;        // Advanced Fault Logging
-pub const VTD_CAP_MGAW_MASK: u64 = 0x3F << 16; // Maximum Guest Address Width
-pub const VTD_CAP_SAGAW_MASK: u64 = 0x1F << 8;  // Supported Adjusted Guest Address Width
+/// VT-d yetenek bayrakları
+pub const VTD_CAP_RWBF: u64 = 1 << 4;      // Zorunlu Yazma-Buffer Temizleme
+pub const VTD_CAP_AFL: u64 = 1 << 3;        // Gelişmiş Hata Günlüğü
+pub const VTD_CAP_MGAW_MASK: u64 = 0x3F << 16; // Maksimum Misafir Adres Genişliği
+pub const VTD_CAP_SAGAW_MASK: u64 = 0x1F << 8;  // Desteklenen Ayarlanmış Misafir Adres Genişliği
 
-/// VT-d extended capability flags
-pub const VTD_ECAP_IR: u64 = 1 << 3;        // Interrupt Remapping
-pub const VTD_ECAP_EIM: u64 = 1 << 4;       // Extended Interrupt Mode
-pub const VTD_ECAP_DT: u64 = 1 << 2;        // Device-TLBs
+/// VT-d genişletilmiş yetenek bayrakları
+pub const VTD_ECAP_IR: u64 = 1 << 3;        // Kesme Yeniden Yönlendirme
+pub const VTD_ECAP_EIM: u64 = 1 << 4;       // Genişletilmiş Kesme Modu
+pub const VTD_ECAP_DT: u64 = 1 << 2;        // Aygıt-TLB'leri
 
-/// Global command register bits
-pub const VTD_GCMD_TE: u32 = 1 << 31;       // Translation Enable
-pub const VTD_GCMD_SRTP: u32 = 1 << 30;     // Set Root Table Pointer
-pub const VTD_GCMD_SFL: u32 = 1 << 29;     // Set Fault Log
-pub const VTD_GCMD_EAFL: u32 = 1 << 28;    // Enable Advanced Fault Log
-pub const VTD_GCMD_WBF: u32 = 1 << 27;     // Write Buffer Flush
-pub const VTD_GCMD_IRE: u32 = 1 << 25;     // Interrupt Remapping Enable
-pub const VTD_GCMD_SIRTP: u32 = 1 << 24;  // Set Interrupt Remap Table Pointer
+/// Global komut yazmacı bitleri
+pub const VTD_GCMD_TE: u32 = 1 << 31;       // Çeviri Etkinleştirme
+pub const VTD_GCMD_SRTP: u32 = 1 << 30;     // Kök Tablo İşaretçisi Ayarla
+pub const VTD_GCMD_SFL: u32 = 1 << 29;     // Hata Günlüğü Ayarla
+pub const VTD_GCMD_EAFL: u32 = 1 << 28;    // Gelişmiş Hata Günlüğünü Etkinleştir
+pub const VTD_GCMD_WBF: u32 = 1 << 27;     // Yazma Buffer Temizleme
+pub const VTD_GCMD_IRE: u32 = 1 << 25;     // Kesme Yeniden Yönlendirme Etkinleştir
+pub const VTD_GCMD_SIRTP: u32 = 1 << 24;  // Kesme Yeniden Yönl. Tablo İşaretçisi Ayarla
 
-/// Global status register bits
+/// Global durum yazmacı bitleri
 pub const VTD_GSTS_TES: u32 = 1 << 31;
 pub const VTD_GSTS_RTPS: u32 = 1 << 30;
 pub const VTD_GSTS_FLS: u32 = 1 << 29;
@@ -59,23 +59,23 @@ pub const VTD_GSTS_WBFS: u32 = 1 << 27;
 pub const VTD_GSTS_IRES: u32 = 1 << 25;
 pub const VTD_GSTS_IRTPS: u32 = 1 << 24;
 
-/// IRTE (Interrupt Remapping Table Entry) size
+/// IRTE (Kesme Yeniden Yönl. Tablo Girdisi) boyutu
 pub const IRTE_SIZE: usize = 16;
 
-/// IRTE flags
-pub const IRTE_P: u64 = 1 << 0;             // Present
-pub const IRTE_FPD: u64 = 1 << 1;           // Fault Processing Disable
-pub const IRTE_DM: u64 = 1 << 2;            // Delivery Mode
-pub const IRTE_TM: u64 = 1 << 4;            // Trigger Mode
-pub const IRTE_RH: u64 = 1 << 6;            // Redirection Hint
+/// IRTE bayrakları
+pub const IRTE_P: u64 = 1 << 0;             // Mevcut
+pub const IRTE_FPD: u64 = 1 << 1;           // Hata İşleme Devre Dışı
+pub const IRTE_DM: u64 = 1 << 2;            // Teslim Modu
+pub const IRTE_TM: u64 = 1 << 4;            // Tetikleyici Modu
+pub const IRTE_RH: u64 = 1 << 6;            // Yönlendirme İpucu
 
-/// Source validation types
+/// Kaynak doğrulama türleri
 pub const SVT_NONE: u8 = 0;
 pub const SVT_RID: u8 = 1;
 pub const SVT_BUS: u8 = 2;
 
 // ============================================================================
-// IRTE (Interrupt Remapping Table Entry)
+// IRTE (Kesme Yeniden Yönl. Tablo Girdisi)
 // ============================================================================
 
 #[repr(C)]
@@ -90,7 +90,7 @@ impl Irte {
         Self { low: 0, high: 0 }
     }
 
-    /// Set present
+    /// Mevcut ayarla
     pub fn set_present(&mut self, present: bool) {
         if present {
             self.low |= IRTE_P;
@@ -99,17 +99,17 @@ impl Irte {
         }
     }
 
-    /// Set vector
+    /// Vektör ayarla
     pub fn set_vector(&mut self, vector: u8) {
         self.low = (self.low & !0xFF00) | ((vector as u64) << 8);
     }
 
-    /// Set delivery mode
+    /// Teslim modunu ayarla
     pub fn set_delivery_mode(&mut self, mode: u8) {
         self.low = (self.low & !(0x7 << 5)) | ((mode as u64) << 5);
     }
 
-    /// Set trigger mode (0=edge, 1=level)
+    /// Tetikleyici modunu ayarla (0=kenar, 1=seviye)
     pub fn set_trigger_mode(&mut self, level: bool) {
         if level {
             self.low |= IRTE_TM;
@@ -118,33 +118,33 @@ impl Irte {
         }
     }
 
-    /// Set destination ID
+    /// Hedef kimliğini ayarla
     pub fn set_dest_id(&mut self, dest: u32) {
         self.high = (self.high & !0xFFFF) | (dest as u64);
     }
 
-    /// Set source validation
+    /// Kaynak doğrulamasını ayarla
     pub fn set_source(&mut self, svt: u8, sid: u16, sq: u8) {
         let val = ((svt as u64) << 18) | ((sid as u64) << 32) | ((sq as u64) << 17);
         self.high = (self.high & !(0x3FFFF << 17)) | val;
     }
 
-    /// Set interrupt remap handle (for posted interrupts)
+    /// Kesme yeniden yönl. tanıtıcısını ayarla (yayınlanan kesmeler için)
     pub fn set_ir_handle(&mut self, handle: u64) {
         self.high = (self.high & !0xFFFF0000) | (handle << 16);
     }
 }
 
 // ============================================================================
-// INTERRUPT REMAP TABLE
+// KES. YENİDEN YÖNL. TABLOSU
 // ============================================================================
 
 pub struct IntrRemapTable {
-    /// Table entries
+    /// Tablo girdileri
     pub entries: Mutex<Vec<Irte>>,
-    /// Physical address
+    /// Fiziksel adres
     pub phys_addr: AtomicU64,
-    /// Size (number of entries)
+    /// Boyut (girdi sayısı)
     pub size: usize,
 }
 
@@ -162,7 +162,7 @@ impl IntrRemapTable {
         }
     }
 
-    /// Get entry
+    /// Girdi al
     pub fn get_entry(&self, index: usize) -> Option<Irte> {
         if index < self.size {
             self.entries.lock().get(index).copied()
@@ -171,7 +171,7 @@ impl IntrRemapTable {
         }
     }
 
-    /// Set entry
+    /// Girdi ayarla
     pub fn set_entry(&self, index: usize, entry: Irte) -> Result<(), IrError> {
         if index >= self.size {
             return Err(IrError::InvalidIndex);
@@ -181,7 +181,7 @@ impl IntrRemapTable {
         Ok(())
     }
 
-    /// Allocate free entry
+    /// Boş girdi tahsis et
     pub fn allocate_entry(&self) -> Option<usize> {
         let mut entries = self.entries.lock();
 
@@ -196,23 +196,23 @@ impl IntrRemapTable {
 }
 
 // ============================================================================
-// INTERRUPT REMAPPING UNIT
+// KES. YENİDEN YÖNL. BİRİMİ
 // ============================================================================
 
 pub struct IntrRemapUnit {
-    /// Unit ID
+    /// Birim kimliği
     pub id: u32,
-    /// Base address (MMIO)
+    /// Baz adresi (MMIO)
     pub base_addr: u64,
-    /// Capability register
+    /// Yetenek yazmacı
     pub cap: AtomicU64,
-    /// Extended capability register
+    /// Genişletilmiş yetenek yazmacı
     pub ecap: AtomicU64,
-    /// Interrupt remap table
+    /// Kesme yeniden yönlendirme tablosu
     pub irt: Mutex<Option<Arc<IntrRemapTable>>>,
-    /// Is enabled
+    /// Etkin mi
     pub enabled: AtomicBool,
-    /// Fault queue
+    /// Hata kuyruğu
     pub fault_queue: Mutex<Vec<FaultRecord>>,
 }
 
@@ -238,16 +238,16 @@ impl IntrRemapUnit {
         }
     }
 
-    /// Initialize unit
+    /// Birimi başlat
     pub fn init(&self) -> Result<(), IrError> {
-        // Read capabilities
+        // Yetenekleri oku
         let cap = self.read_reg(VTD_CAP_REG);
         let ecap = self.read_reg(VTD_ECAP_REG);
 
         self.cap.store(cap, Ordering::SeqCst);
         self.ecap.store(ecap, Ordering::SeqCst);
 
-        // Check if interrupt remapping is supported
+        // Kesme yeniden yönlendirmenin desteklenip desteklenmediğini kontrol et
         if ecap & VTD_ECAP_IR == 0 {
             return Err(IrError::NotSupported);
         }
@@ -257,11 +257,11 @@ impl IntrRemapUnit {
         Ok(())
     }
 
-    /// Create interrupt remap table
+    /// Kesme yeniden yönlendirme tablosu oluştur
     pub fn create_irt(&self, size: usize) -> Arc<IntrRemapTable> {
         let irt = Arc::new(IntrRemapTable::new(size));
 
-        // Set table pointer
+        // Tablo işaretçisi ayarla
         let addr = irt.phys_addr.load(Ordering::SeqCst);
         let irta = addr | (size.trailing_zeros() as u64);
 
@@ -272,18 +272,18 @@ impl IntrRemapUnit {
         irt
     }
 
-    /// Enable interrupt remapping
+    /// Kesme yeniden yönlendirmeyi etkinleştir
     pub fn enable(&self) -> Result<(), IrError> {
-        // Set interrupt remap table pointer first
+        // Önce kesme yeniden yönl. tablo işaretçisini ayarla
         self.write_reg(VTD_GCMD_REG, VTD_GCMD_SIRTP);
 
-        // Wait for completion
+        // Tamamlanmayı bekle
         self.wait_status(VTD_GSTS_IRTPS);
 
-        // Enable interrupt remapping
+        // Kesme yeniden yönlendirmeyi etkinleştir
         self.write_reg(VTD_GCMD_REG, VTD_GCMD_IRE);
 
-        // Wait for enable
+        // Etkinleştirmeyi bekle
         self.wait_status(VTD_GSTS_IRES);
 
         self.enabled.store(true, Ordering::SeqCst);
@@ -293,13 +293,13 @@ impl IntrRemapUnit {
         Ok(())
     }
 
-    /// Disable interrupt remapping
+    /// Kesme yeniden yönlendirmeyi devre dışı bırak
     pub fn disable(&self) {
         self.write_reg(VTD_GCMD_REG, 0);
         self.enabled.store(false, Ordering::SeqCst);
     }
 
-    /// Program interrupt
+    /// Kesmeyi programla
     pub fn program_interrupt(&self, index: usize, vector: u8, dest: u32, trigger: bool) -> Result<(), IrError> {
         let irt = self.irt.lock();
         let table = irt.as_ref().ok_or(IrError::TableNotSet)?;
@@ -316,12 +316,12 @@ impl IntrRemapUnit {
         Ok(())
     }
 
-    /// Handle fault
+    /// Hatayı işle
     pub fn handle_fault(&self) -> Option<FaultRecord> {
         let fsts = self.read_reg(VTD_FSTS_REG) as u32;
 
         if fsts & 0x80000000 != 0 {
-            // Fault pending
+            // Hata bekliyor
             let reason = ((fsts >> 1) & 0xFF) as u8;
             let source = ((fsts >> 9) & 0xFFFF) as u16;
 
@@ -333,7 +333,7 @@ impl IntrRemapUnit {
                 timestamp: crate::task::scheduler::get_ticks(),
             };
 
-            // Clear fault
+            // Hatayı temizle
             self.write_reg(VTD_FSTS_REG, 0xFFFFFFFF);
 
             self.fault_queue.lock().push(record.clone());
@@ -344,7 +344,7 @@ impl IntrRemapUnit {
         None
     }
 
-    /// Read register
+    /// Yazmaç oku
     fn read_reg(&self, offset: u32) -> u64 {
         // unsafe {
         //     core::ptr::read_volatile((self.base_addr + offset as u64) as *const u64)
@@ -352,14 +352,14 @@ impl IntrRemapUnit {
         0
     }
 
-    /// Write register
+    /// Yazmaç yaz
     fn write_reg(&self, offset: u32, value: u64) {
         // unsafe {
         //     core::ptr::write_volatile((self.base_addr + offset as u64) as *mut u64, value);
         // }
     }
 
-    /// Wait for status bit
+    /// Durum biti bekle
     fn wait_status(&self, bit: u32) {
         // for _ in 0..1000 {
         //     let status = self.read_reg(VTD_GSTS_REG) as u32;
@@ -371,15 +371,15 @@ impl IntrRemapUnit {
 }
 
 // ============================================================================
-// INTERRUPT REMAPPING MANAGER
+// KES. YENİDEN YÖNL. YÖNETİCİSİ
 // ============================================================================
 
 pub struct IntrRemapManager {
-    /// Remapping units
+    /// Yeniden yönlendirme birimleri
     pub units: Mutex<BTreeMap<u32, Arc<IntrRemapUnit>>>,
-    /// Global interrupt index allocator
+    /// Global kesme indeks tahsis edici
     pub next_index: AtomicU32,
-    /// Statistics
+    /// İstatistikler
     pub stats: Mutex<IrStats>,
 }
 
@@ -398,7 +398,7 @@ impl IntrRemapManager {
         }
     }
 
-    /// Register unit
+    /// Birim kaydet
     pub fn register_unit(&self, id: u32, base_addr: u64) -> Result<Arc<IntrRemapUnit>, IrError> {
         let unit = Arc::new(IntrRemapUnit::new(id, base_addr));
         unit.init()?;
@@ -408,17 +408,17 @@ impl IntrRemapManager {
         Ok(unit)
     }
 
-    /// Get unit
+    /// Birim al
     pub fn get_unit(&self, id: u32) -> Option<Arc<IntrRemapUnit>> {
         self.units.lock().get(&id).cloned()
     }
 
-    /// Allocate interrupt index
+    /// Kesme indeksi tahsis et
     pub fn allocate_index(&self) -> u32 {
         self.next_index.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Map interrupt
+    /// Kesme eşle
     pub fn map_interrupt(&self, unit_id: u32, vector: u8, dest: u32, trigger: bool) -> Result<u32, IrError> {
         let unit = self.get_unit(unit_id).ok_or(IrError::UnitNotFound)?;
 
@@ -431,7 +431,7 @@ impl IntrRemapManager {
         Ok(index)
     }
 
-    /// Handle faults
+    /// Hataları işle
     pub fn handle_faults(&self) {
         for unit in self.units.lock().values() {
             while let Some(_fault) = unit.handle_fault() {
@@ -441,7 +441,7 @@ impl IntrRemapManager {
         }
     }
 
-    /// Get statistics
+    /// İstatistikleri al
     pub fn get_stats(&self) -> IrStats {
         self.stats.lock().clone()
     }
@@ -452,7 +452,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TİPİ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,7 +465,7 @@ pub enum IrError {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init() {

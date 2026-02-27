@@ -1,125 +1,133 @@
-// Preservation Property Tests
-// Property 2: HHDM Stack Direct Translation Preservation
-// Validates: Requirements 3.1, 3.2, 3.3
+//! Koruma Özelliği Testleri
+//!
+//! Bu test dosyası; HHDM eşlemeli yığınların, heap yığını fiziksel adres çevirisi
+//! için yapılan düzeltmeden sonra da aynı şekilde çalışmaya devam ettiğini doğrular.
+//! HHDM sınır davranışını ve doğrudan çeviri formülünü test eder.
+//!
+//! Doğrulanan Gereksinimler: 3.1, 3.2, 3.3
+
+// Koruma Özelliği Testleri
+// Özellik 2: HHDM Yığını Doğrudan Çeviri Koruması
+// Doğrulama: Gereksinimler 3.1, 3.2, 3.3
 //
-// This test verifies that HHDM-mapped stacks continue to work identically
-// after implementing the fix for heap stack physical address translation.
+// Bu test; heap yığını fiziksel adres çevirisi için düzeltme uygulandıktan sonra
+// HHDM eşlemeli yığınların aynı şekilde çalışmaya devam ettiğini doğrular.
 
 const PHYSICAL_MEMORY_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
 fn main() {
-    println!("Preservation Property Tests");
-    println!("Property 2: HHDM Stack Direct Translation Preservation");
+    println!("Koruma Özelliği Testleri");
+    println!("Özellik 2: HHDM Yığını Doğrudan Çeviri Koruması");
     println!("========================================\n");
-    
+
     let mut all_passed = true;
-    
-    // Property 1: HHDM Direct Translation Formula
+
+    // Özellik 1: HHDM Doğrudan Çeviri Formülü
     all_passed &= test_hhdm_direct_translation();
-    
-    // Property 6: Boundary Behavior
+
+    // Özellik 6: Sınır Davranışı
     all_passed &= test_boundary_behavior();
-    
+
     println!("\n========================================");
     if all_passed {
-        println!("✓ ALL PRESERVATION PROPERTIES VERIFIED!");
-        println!("HHDM stack behavior remains unchanged after fix");
+        println!("✓ TÜM KORUMA ÖZELLİKLERİ DOĞRULANDI!");
+        println!("HHDM yığını davranışı düzeltmeden sonra da değişmedi");
     } else {
-        println!("✗ SOME PRESERVATION PROPERTIES FAILED!");
-        println!("HHDM stack behavior may have regressed");
+        println!("✗ BAZI KORUMA ÖZELLİKLERİ BAŞARISIZ OLDU!");
+        println!("HHDM yığını davranışı gerilemiş olabilir");
         std::process::exit(1);
     }
 }
 
 fn test_hhdm_direct_translation() -> bool {
-    println!("Property 1: HHDM Direct Translation Formula");
-    println!("Testing that HHDM addresses use direct calculation\n");
-    
+    println!("Özellik 1: HHDM Doğrudan Çeviri Formülü");
+    println!("HHDM adreslerinin doğrudan hesaplama kullandığı test ediliyor\n");
+
     let test_cases = vec![
-        ("Exactly at PHYSICAL_MEMORY_OFFSET", 0xFFFF_8000_0000_0000u64, 0x0000_0000_0000_0000u64),
-        ("Typical HHDM address", 0xFFFF_8000_0010_0000u64, 0x0000_0000_0010_0000u64),
-        ("Another HHDM address", 0xFFFF_8000_0100_0000u64, 0x0000_0000_0100_0000u64),
-        ("Higher HHDM address", 0xFFFF_8000_1000_0000u64, 0x0000_0000_1000_0000u64),
-        ("Near top of address space", 0xFFFF_FFFF_FFFF_F000u64, 0x0000_7FFF_FFFF_F000u64),
+        ("Tam olarak PHYSICAL_MEMORY_OFFSET'te", 0xFFFF_8000_0000_0000u64, 0x0000_0000_0000_0000u64),
+        ("Tipik HHDM adresi", 0xFFFF_8000_0010_0000u64, 0x0000_0000_0010_0000u64),
+        ("Başka bir HHDM adresi", 0xFFFF_8000_0100_0000u64, 0x0000_0000_0100_0000u64),
+        ("Daha yüksek HHDM adresi", 0xFFFF_8000_1000_0000u64, 0x0000_0000_1000_0000u64),
+        ("Adres alanının tepesine yakın", 0xFFFF_FFFF_FFFF_F000u64, 0x0000_7FFF_FFFF_F000u64),
     ];
-    
+
     let mut all_passed = true;
-    
+
     for (name, virt_addr, expected_phys) in test_cases {
         println!("  Test: {}", name);
-        println!("    Virtual address: {:#018x}", virt_addr);
-        println!("    Is HHDM (>= PHYSICAL_MEMORY_OFFSET): {}", 
+        println!("    Sanal adres: {:#018x}", virt_addr);
+        println!("    HHDM mi (>= PHYSICAL_MEMORY_OFFSET): {}",
                  virt_addr >= PHYSICAL_MEMORY_OFFSET);
-        
-        // Verify the direct translation formula
+
+        // Doğrudan çeviri formülünü doğrula
         let calculated_phys = virt_addr - PHYSICAL_MEMORY_OFFSET;
-        println!("    Expected physical: {:#018x}", expected_phys);
-        println!("    Calculated physical: {:#018x}", calculated_phys);
-        
+        println!("    Beklenen fiziksel: {:#018x}", expected_phys);
+        println!("    Hesaplanan fiziksel: {:#018x}", calculated_phys);
+
         if calculated_phys == expected_phys {
-            println!("    ✓ PASS: Direct translation formula preserved\n");
+            println!("    ✓ GEÇTI: Doğrudan çeviri formülü korundu\n");
         } else {
-            println!("    ✗ FAIL: Direct translation formula broken!\n");
+            println!("    ✗ BAŞARISIZ: Doğrudan çeviri formülü bozuldu!\n");
             all_passed = false;
         }
     }
-    
+
     all_passed
 }
 
 fn test_boundary_behavior() -> bool {
-    println!("Property 6: Boundary Behavior at PHYSICAL_MEMORY_OFFSET");
-    println!("Testing correct distinction at boundary\n");
-    
+    println!("Özellik 6: PHYSICAL_MEMORY_OFFSET'te Sınır Davranışı");
+    println!("Sınırda doğru ayrımın test edilmesi\n");
+
     let mut all_passed = true;
-    
-    // Test address just below HHDM threshold (heap)
+
+    // HHDM eşiğinin hemen altındaki adresi test et (heap)
     let heap_boundary: u64 = 0xFFFF_7FFF_FFFF_FFFF;
-    println!("  Address just below HHDM threshold:");
-    println!("    Virtual address: {:#018x}", heap_boundary);
+    println!("  HHDM eşiğinin hemen altındaki adres:");
+    println!("    Sanal adres: {:#018x}", heap_boundary);
     let is_heap = heap_boundary < PHYSICAL_MEMORY_OFFSET;
-    println!("    Is heap (< PHYSICAL_MEMORY_OFFSET): {}", is_heap);
-    
+    println!("    Heap mi (< PHYSICAL_MEMORY_OFFSET): {}", is_heap);
+
     if is_heap {
-        println!("    ✓ PASS: Correctly identified as heap address\n");
+        println!("    ✓ GEÇTI: Doğru şekilde heap adresi olarak tanımlandı\n");
     } else {
-        println!("    ✗ FAIL: Should be identified as heap address!\n");
+        println!("    ✗ BAŞARISIZ: Heap adresi olarak tanımlanmalıydı!\n");
         all_passed = false;
     }
-    
-    // Test address exactly at HHDM threshold
+
+    // Tam olarak HHDM eşiğindeki adresi test et
     let hhdm_boundary: u64 = PHYSICAL_MEMORY_OFFSET;
-    println!("  Address exactly at HHDM threshold:");
-    println!("    Virtual address: {:#018x}", hhdm_boundary);
+    println!("  Tam olarak HHDM eşiğindeki adres:");
+    println!("    Sanal adres: {:#018x}", hhdm_boundary);
     let is_hhdm = hhdm_boundary >= PHYSICAL_MEMORY_OFFSET;
-    println!("    Is HHDM (>= PHYSICAL_MEMORY_OFFSET): {}", is_hhdm);
-    
+    println!("    HHDM mi (>= PHYSICAL_MEMORY_OFFSET): {}", is_hhdm);
+
     if is_hhdm {
-        println!("    ✓ PASS: Correctly identified as HHDM address\n");
+        println!("    ✓ GEÇTI: Doğru şekilde HHDM adresi olarak tanımlandı\n");
     } else {
-        println!("    ✗ FAIL: Should be identified as HHDM address!\n");
+        println!("    ✗ BAŞARISIZ: HHDM adresi olarak tanımlanmalıydı!\n");
         all_passed = false;
     }
-    
-    // Test address just above HHDM threshold
+
+    // HHDM eşiğinin hemen üzerindeki adresi test et
     let hhdm_above: u64 = 0xFFFF_8000_0000_0001;
-    println!("  Address just above HHDM threshold:");
-    println!("    Virtual address: {:#018x}", hhdm_above);
+    println!("  HHDM eşiğinin hemen üzerindeki adres:");
+    println!("    Sanal adres: {:#018x}", hhdm_above);
     let is_hhdm_above = hhdm_above >= PHYSICAL_MEMORY_OFFSET;
-    println!("    Is HHDM (>= PHYSICAL_MEMORY_OFFSET): {}", is_hhdm_above);
-    
+    println!("    HHDM mi (>= PHYSICAL_MEMORY_OFFSET): {}", is_hhdm_above);
+
     if is_hhdm_above {
-        println!("    ✓ PASS: Correctly identified as HHDM address\n");
+        println!("    ✓ GEÇTI: Doğru şekilde HHDM adresi olarak tanımlandı\n");
     } else {
-        println!("    ✗ FAIL: Should be identified as HHDM address!\n");
+        println!("    ✗ BAŞARISIZ: HHDM adresi olarak tanımlanmalıydı!\n");
         all_passed = false;
     }
-    
-    // Verify the boundary check logic
-    println!("  Boundary check verification:");
-    println!("    Addresses < {:#018x} should use page table translation", PHYSICAL_MEMORY_OFFSET);
-    println!("    Addresses >= {:#018x} should use direct translation", PHYSICAL_MEMORY_OFFSET);
-    println!("    ✓ PASS: Boundary behavior correct\n");
-    
+
+    // Sınır kontrolü mantığını doğrula
+    println!("  Sınır kontrolü doğrulaması:");
+    println!("    {:#018x} altındaki adresler sayfa tablosu çevirisini kullanmalı", PHYSICAL_MEMORY_OFFSET);
+    println!("    {:#018x} ve üzerindeki adresler doğrudan çeviriyi kullanmalı", PHYSICAL_MEMORY_OFFSET);
+    println!("    ✓ GEÇTI: Sınır davranışı doğru\n");
+
     all_passed
 }

@@ -524,6 +524,15 @@ impl Spotlight {
             self.animation_progress = (self.animation_progress - dt * 8.0).max(0.0);
         }
     }
+
+    pub fn is_animating(&self) -> bool {
+        (self.visible && self.animation_progress < 1.0)
+            || (!self.visible && self.animation_progress > 0.0)
+    }
+
+    pub fn needs_redraw(&self) -> bool {
+        self.visible || self.is_animating()
+    }
     
     /// Update search query
     pub fn set_query(&mut self, query: &str) {

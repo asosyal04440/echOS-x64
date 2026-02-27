@@ -1,5 +1,9 @@
 #![cfg(not(target_os = "none"))]
-//! Memory Allocation Benchmark Suite - Fibonacci Buddy vs Linux Buddy vs Windows Heap
+//! Bellek Tahsis Kıyaslama Paketi - Fibonacci Buddy vs Linux Buddy vs Windows Heap
+//!
+//! Bu modül; echOS'un Fibonacci Buddy tahsis algoritmasının küçük/orta/büyük
+//! tahsis senaryolarında ve hafıza parçalanması (fragmentation) durumlarında
+//! performansını ölçen kıyaslama fonksiyonlarını içerir.
 
 #![feature(test)]
 extern crate test;
@@ -10,25 +14,25 @@ use x86_64::PhysAddr;
 
 #[bench]
 fn bench_fibonacci_buddy_allocation(b: &mut Bencher) {
-    const MEMORY_SIZE: usize = 1024 * 1024 * 64; // 64MB
+    const MEMORY_SIZE: usize = 1024 * 1024 * 64; // 64 MB
     let base_addr = PhysAddr::new(0x1000000);
 
     b.iter(|| {
         let mut allocator = FibonacciBuddyAllocator::new(base_addr, MEMORY_SIZE);
 
-        // Small allocations (1-256 bytes)
+        // Küçük tahsisler (1-256 bayt)
         for _ in 0..1000 {
             let size = (test::black_box(rand::random::<usize>()) % 256) + 1;
             let _ = allocator.allocate(size);
         }
 
-        // Medium allocations (1-4KB)
+        // Orta tahsisler (1-4 KB)
         for _ in 0..100 {
             let size = (test::black_box(rand::random::<usize>()) % 4096) + 1;
             let _ = allocator.allocate(size);
         }
 
-        // Large allocations (4KB-64KB)
+        // Büyük tahsisler (4 KB - 64 KB)
         for _ in 0..10 {
             let size = (test::black_box(rand::random::<usize>()) % 65536) + 4096;
             let _ = allocator.allocate(size);
@@ -38,21 +42,21 @@ fn bench_fibonacci_buddy_allocation(b: &mut Bencher) {
 
 #[bench]
 fn bench_fibonacci_buddy_fragmentation(b: &mut Bencher) {
-    const MEMORY_SIZE: usize = 1024 * 1024 * 128; // 128MB
+    const MEMORY_SIZE: usize = 1024 * 1024 * 128; // 128 MB
     let base_addr = PhysAddr::new(0x1000000);
 
     b.iter(|| {
         let mut allocator = FibonacciBuddyAllocator::new(base_addr, MEMORY_SIZE);
         let mut allocations = Vec::new();
 
-        // Fragment memory with mixed size allocations
+        // Karışık boyutlu tahsislerle belleği parçala
         for i in 0..5000 {
             let size = if i % 5 == 0 {
-                (test::black_box(rand::random::<usize>()) % 65536) + 4096 // Large
+                (test::black_box(rand::random::<usize>()) % 65536) + 4096 // Büyük
             } else if i % 3 == 0 {
-                (test::black_box(rand::random::<usize>()) % 4096) + 1 // Medium
+                (test::black_box(rand::random::<usize>()) % 4096) + 1 // Orta
             } else {
-                (test::black_box(rand::random::<usize>()) % 256) + 1 // Small
+                (test::black_box(rand::random::<usize>()) % 256) + 1 // Küçük
             };
 
             if let Some(addr) = allocator.allocate(size) {
@@ -60,7 +64,7 @@ fn bench_fibonacci_buddy_fragmentation(b: &mut Bencher) {
             }
         }
 
-        // Calculate fragmentation
+        // Parçalanma oranını hesapla
         let total_allocated: usize = allocations.iter().map(|(_, size)| size).sum();
         let external_fragmentation = 1.0 - (total_allocated as f64 / MEMORY_SIZE as f64);
 
@@ -70,14 +74,14 @@ fn bench_fibonacci_buddy_fragmentation(b: &mut Bencher) {
 
 #[bench]
 fn bench_fibonacci_buddy_deallocation(b: &mut Bencher) {
-    const MEMORY_SIZE: usize = 1024 * 1024 * 64; // 64MB
+    const MEMORY_SIZE: usize = 1024 * 1024 * 64; // 64 MB
     let base_addr = PhysAddr::new(0x1000000);
 
     b.iter(|| {
         let mut allocator = FibonacciBuddyAllocator::new(base_addr, MEMORY_SIZE);
         let mut allocations = Vec::new();
 
-        // Allocate mixed sizes
+        // Karışık boyutlarda tahsis yap
         for _ in 0..1000 {
             let size = (test::black_box(rand::random::<usize>()) % 8192) + 1;
             if let Some(addr) = allocator.allocate(size) {
@@ -85,7 +89,7 @@ fn bench_fibonacci_buddy_deallocation(b: &mut Bencher) {
             }
         }
 
-        // Deallocate in random order
+        // Rastgele sırayla serbest bırak
         while let Some((idx, _)) = allocations
             .iter()
             .enumerate()

@@ -1,7 +1,7 @@
-//! # macOS-style Dock
+//! # macOS Tarzı Dock
 //!
-//! Animated dock with magnification effect on hover
-//! Supports app indicators, badges, and drag-drop reordering
+//! Fare üzerine gelince büyütme efektli animasyonlu dock
+//! Uygulama göstergeleri, rozetler ve sürükle-bırak sıralamayı destekler
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -15,55 +15,55 @@ use crate::gui::theme::{Theme, Color};
 use crate::gui::animation::{Animation, EasingType, AnimationTarget, AnimationTargetType};
 
 // ============================================================================
-// DOCK CONSTANTS
+// DOCK SABİTLERİ
 // ============================================================================
 
-/// Default dock height
+/// Varsayılan dock yüksekliği
 pub const DOCK_HEIGHT: usize = 70;
 
-/// Default icon size
+/// Varsayılan simge boyutu
 pub const ICON_SIZE: usize = 48;
 
-/// Maximum magnified icon size
+/// Maksimum büyütülmüş simge boyutu
 pub const MAX_ICON_SIZE: usize = 80;
 
-/// Icon spacing
+/// Simge aralığı
 pub const ICON_SPACING: usize = 8;
 
-/// Magnification radius (how far the effect spreads)
+/// Büyütme yarıçapı (efektin ne kadar yayıldığı)
 pub const MAG_RADIUS: usize = 100;
 
 // ============================================================================
-// DOCK ITEM
+// DOCK ÖĞESİ
 // ============================================================================
 
-/// A single dock item
+/// Tek bir dock öğesi
 pub struct DockItem {
-    /// Unique ID
+    /// Benzersiz kimlik
     pub id: u32,
-    /// Display name
+    /// Görüntü adı
     pub name: String,
-    /// Icon type
+    /// Simge türü
     pub icon: DockIcon,
-    /// Is application running
+    /// Uygulama çalışıyor mu
     pub running: bool,
-    /// Is application active (frontmost)
+    /// Uygulama etkin mi (öndeki)
     pub active: bool,
-    /// Badge count (notifications)
+    /// Rozet sayısı (bildirimler)
     pub badge_count: u32,
-    /// Progress (0.0 - 1.0)
+    /// İlerleme (0.0 - 1.0)
     pub progress: f32,
-    /// Action when clicked
+    /// Tıklandığında gerçekleşecek eylem
     pub action: DockAction,
-    /// Current display size (for animation)
+    /// Mevcut görüntü boyutu (animasyon için)
     pub current_size: f32,
-    /// Target size (for animation)
+    /// Hedef boyut (animasyon için)
     pub target_size: f32,
-    /// Current Y offset (for bounce animation)
+    /// Mevcut Y ofseti (zıplama animasyonu için)
     pub bounce_offset: f32,
-    /// Bounce velocity
+    /// Zıplama hızı
     pub bounce_velocity: f32,
-    /// Is bouncing
+    /// Zıplıyor mu
     pub bouncing: bool,
 }
 
@@ -118,42 +118,42 @@ impl DockItem {
         }
     }
     
-    /// Create app dock item
+    /// Uygulama dock öğesi oluştur
     pub fn app(id: u32, name: &str, icon: DockIcon, app_id: &str) -> Self {
         let mut item = Self::new(id, name, icon);
         item.action = DockAction::LaunchApp(String::from(app_id));
         item
     }
     
-    /// Create folder dock item
+    /// Klasör dock öğesi oluştur
     pub fn folder(id: u32, name: &str, path: &str) -> Self {
         let mut item = Self::new(id, name, DockIcon::Files);
         item.action = DockAction::OpenFolder(String::from(path));
         item
     }
     
-    /// Start bounce animation
+    /// Zıplama animasyonunu başlat
     pub fn start_bounce(&mut self) {
         self.bouncing = true;
-        self.bounce_velocity = -15.0; // Initial upward velocity
+        self.bounce_velocity = -15.0; // Başlangıç yukarı doğru hızı
     }
     
-    /// Update bounce animation
+    /// Zıplama animasyonunu güncelle
     pub fn update_bounce(&mut self, dt: f32) {
         if !self.bouncing {
             return;
         }
         
-        // Apply gravity
-        self.bounce_velocity += 0.8; // Gravity
+        // Yerçekimini uygula
+        self.bounce_velocity += 0.8; // Yerçekimi
         self.bounce_offset += self.bounce_velocity;
         
-        // Check if landed
+        // Yere değip değmediğini kontrol et
         if self.bounce_offset >= 0.0 {
             self.bounce_offset = 0.0;
-            self.bounce_velocity = -self.bounce_velocity * 0.5; // Bounce with damping
+            self.bounce_velocity = -self.bounce_velocity * 0.5; // Sönümlü zıplama
             
-            // Stop if velocity is too low
+            // Hız çok düşükse dur
             if self.bounce_velocity.abs() < 2.0 {
                 self.bouncing = false;
                 self.bounce_offset = 0.0;
@@ -162,42 +162,42 @@ impl DockItem {
         }
     }
     
-    /// Update size with smooth animation
+    /// Yumuşak animasyonla boyutu güncelle
     pub fn update_size(&mut self, dt: f32) {
         let diff = self.target_size - self.current_size;
         if diff.abs() > 0.1 {
-            self.current_size += diff * 0.3; // Smooth interpolation
+            self.current_size += diff * 0.3; // Yumuşak enterpolasyon
         } else {
             self.current_size = self.target_size;
         }
     }
     
-    /// Draw the dock item
+    /// Dock öğesini çiz
     pub fn draw(&self, fb: &mut Framebuffer, x: usize, y: usize, size: usize, dock_y: usize) {
         let icon_size = size;
         let icon_x = x;
         let icon_y = y as i32 - (self.bounce_offset as i32);
         
-        // Draw shadow
+        // Gölge çiz
         let shadow_size = icon_size + 4;
         let shadow_y = dock_y + DOCK_HEIGHT - 10;
         fb.draw_rect(icon_x - 2, shadow_y, shadow_size, 4, 0x40000000);
         
-        // Draw icon background (rounded rect)
+        // Simge arka planını çiz (yuvarlak dikdörtgen)
         let bg_color = if self.active {
-            0x40FFFFFF // Brighter for active
+            0x40FFFFFF // Etkin için daha parlak
         } else if self.running {
-            0x20FFFFFF // Dimmer for running
+            0x20FFFFFF // Çalışanlar için daha soluk
         } else {
-            0x10FFFFFF // Very dim for not running
+            0x10FFFFFF // Çalışmayanlar için çok soluk
         };
         
         self.draw_rounded_icon_bg(fb, icon_x, icon_y as usize, icon_size, bg_color);
         
-        // Draw icon
+        // Simgeyi çiz
         self.draw_icon(fb, icon_x, icon_y as usize, icon_size);
         
-        // Draw running indicator (dot below)
+        // Çalışma göstergesini çiz (alttaki nokta)
         if self.running {
             let dot_y = dock_y + DOCK_HEIGHT - 6;
             let dot_size = if self.active { 5 } else { 4 };
@@ -211,12 +211,12 @@ impl DockItem {
             self.draw_dot(fb, dot_x, dot_y, dot_size, dot_color);
         }
         
-        // Draw badge
+        // Rozeti çiz
         if self.badge_count > 0 {
             let badge_x = icon_x + icon_size - 16;
             let badge_y = icon_y as usize - 4;
             
-            // Badge background
+            // Rozet arka planı
             for py in 0..16 {
                 for px in 0..16 {
                     let dx = px as i32 - 8;
@@ -227,7 +227,7 @@ impl DockItem {
                 }
             }
             
-            // Badge text
+            // Rozet metni
             if self.badge_count < 10 {
                 let digit = char::from(b'0' + self.badge_count as u8);
                 fb.draw_char(badge_x + 5, badge_y + 2, digit, Theme::TEXT_ON_ACCENT.to_u32());
@@ -236,7 +236,7 @@ impl DockItem {
             }
         }
         
-        // Draw progress bar
+        // İlerleme çubuğunu çiz
         if self.progress > 0.0 {
             let bar_width = (icon_size as f32 * self.progress) as usize;
             let bar_y = dock_y + DOCK_HEIGHT - 3;
@@ -286,22 +286,22 @@ impl DockItem {
         
         match self.icon {
             DockIcon::Finder => {
-                // Smiley face icon
-                let face_color = 0xFF3D67FF; // Blue
+                // Gülen yüz simgesi
+                let face_color = 0xFF3D67FF; // Mavi
                 self.draw_circle(fb, center_x, center_y, (size as f32 * 0.4) as usize, face_color);
                 
-                // Eyes
+                // Gözler
                 let eye_y = center_y - size / 8;
                 fb.draw_rect(center_x - size / 5, eye_y, 4, 4, 0xFFFFFFFF);
                 fb.draw_rect(center_x + size / 5 - 4, eye_y, 4, 4, 0xFFFFFFFF);
                 
-                // Smile
+                // Gülümseme
                 let smile_y = center_y + size / 10;
                 fb.draw_rect(center_x - size / 6, smile_y, size / 3, 2, 0xFFFFFFFF);
             }
             
             DockIcon::Launchpad => {
-                // Grid of dots
+                // Nokta ızgalası
                 let dot_size = (6.0 * icon_scale) as usize;
                 let spacing = (14.0 * icon_scale) as usize;
                 let start_x = center_x - spacing;
@@ -322,11 +322,11 @@ impl DockItem {
             }
             
             DockIcon::Settings => {
-                // Gear icon
+                // Dişli simgesi
                 let outer_r = (size as f32 * 0.35) as usize;
                 let inner_r = (size as f32 * 0.15) as usize;
                 
-                // Outer gear teeth
+                // Dış dişli dişleri
                 for angle in 0..8 {
                     let a = angle as f32 * core::f32::consts::PI / 4.0;
                     let tooth_x = center_x as i32 + (cosf(a) * outer_r as f32) as i32;
@@ -340,22 +340,22 @@ impl DockItem {
                     );
                 }
                 
-                // Center circle
+                // Merkez daire
                 self.draw_circle(fb, center_x, center_y, inner_r, 0xFF666666);
             }
             
             DockIcon::Safari => {
-                // Compass icon
+                // Pusula simgesi
                 let r = (size as f32 * 0.35) as usize;
                 self.draw_circle_outline(fb, center_x, center_y, r, 0xFF007AFF);
                 
-                // Compass needle
+                // Pusula iğnesi
                 fb.draw_rect(center_x - 2, center_y - r + 4, 4, r - 4, 0xFFFF3B30);
                 fb.draw_rect(center_x - 2, center_y + 4, 4, r - 4, 0xFFFFFFFF);
             }
             
             DockIcon::Mail => {
-                // Envelope icon
+                // Zarf simgesi
                 let w = (size as f32 * 0.6) as usize;
                 let h = (size as f32 * 0.4) as usize;
                 let mail_x = center_x - w / 2;
@@ -363,7 +363,7 @@ impl DockItem {
                 
                 fb.draw_rect(mail_x, mail_y, w, h, 0xFF007AFF);
                 
-                // Envelope flap
+                // Zarf kapağı
                 for i in 0..w/2 {
                     let flap_y = mail_y + i * h / w;
                     fb.plot_pixel(mail_x + i, flap_y, 0xFF0055D5);
@@ -372,32 +372,32 @@ impl DockItem {
             }
             
             DockIcon::Messages => {
-                // Speech bubble
+                // Konuşma balonu
                 let r = (size as f32 * 0.3) as usize;
                 self.draw_circle(fb, center_x - 4, center_y - 4, r, 0xFF34C759);
                 
-                // Tail
+                // Kuyruk
                 fb.draw_rect(center_x + r / 2, center_y + r / 2, 8, 8, 0xFF34C759);
             }
             
             DockIcon::Music => {
-                // Music note
+                // Müzik notası
                 let note_color = 0xFFFC3C44;
                 let note_size = (size as f32 * 0.3) as usize;
                 
-                // Note head
+                // Nota başı
                 self.draw_ellipse(fb, center_x - note_size / 3, center_y + note_size / 2, 
                                   note_size, note_size / 2, note_color);
                 
-                // Stem
+                // Nota sapı
                 fb.draw_rect(center_x + note_size / 3, center_y - note_size, 3, note_size * 2, note_color);
                 
-                // Flag
+                // Nota bayrağı
                 fb.draw_rect(center_x + note_size / 3, center_y - note_size, note_size / 2, 4, note_color);
             }
             
             DockIcon::Terminal => {
-                // Terminal window
+                // Terminal penceresi
                 let w = (size as f32 * 0.7) as usize;
                 let h = (size as f32 * 0.6) as usize;
                 let term_x = center_x - w / 2;
@@ -406,38 +406,38 @@ impl DockItem {
                 fb.draw_rect(term_x, term_y, w, h, 0xFF1E1E1E);
                 fb.draw_rect(term_x, term_y, w, h / 4, 0xFF333333);
                 
-                // Prompt
+                // Komut istemi
                 fb.draw_string(term_x + 4, term_y + h / 4 + 2, ">_", 0xFF00FF00);
             }
             
             DockIcon::Files => {
-                // Folder icon
+                // Klasör simgesi
                 let folder_color = 0xFF007AFF;
                 let w = (size as f32 * 0.7) as usize;
                 let h = (size as f32 * 0.55) as usize;
                 let folder_x = center_x - w / 2;
                 let folder_y = center_y - h / 2;
                 
-                // Tab
+                // Sekme
                 fb.draw_rect(folder_x, folder_y, w / 2, h / 4, folder_color);
-                // Body
+                // Gövde
                 fb.draw_rect(folder_x, folder_y + h / 4, w, h * 3 / 4, folder_color);
             }
             
             DockIcon::Trash => {
-                // Trash can
+                // Çöp kutusu
                 let trash_color = 0xFF8E8E93;
                 let w = (size as f32 * 0.5) as usize;
                 let h = (size as f32 * 0.6) as usize;
                 let trash_x = center_x - w / 2;
                 let trash_y = center_y - h / 2;
                 
-                // Lid
+                // Kapak
                 fb.draw_rect(trash_x - 2, trash_y, w + 4, h / 5, trash_color);
-                // Body
+                // Gövde
                 fb.draw_rect(trash_x, trash_y + h / 5, w, h * 4 / 5, trash_color);
                 
-                // Lines
+                // Çizgiler
                 for i in 1..4 {
                     let line_x = trash_x + i as usize * w / 4;
                     fb.draw_rect(line_x, trash_y + h / 5 + 2, 2, h * 3 / 5, 0xFF666666);
@@ -445,7 +445,7 @@ impl DockItem {
             }
             
             DockIcon::TextEdit => {
-                // Document with text
+                // Metinli belge
                 let doc_color = 0xFFFFCC00;
                 let w = (size as f32 * 0.5) as usize;
                 let h = (size as f32 * 0.65) as usize;
@@ -454,10 +454,10 @@ impl DockItem {
                 
                 fb.draw_rect(doc_x, doc_y, w, h, doc_color);
                 
-                // Fold corner
+                // Katlanmış köşe
                 fb.draw_rect(doc_x + w - 6, doc_y, 6, 6, 0xFFE6B800);
                 
-                // Text lines
+                // Metin satırları
                 for i in 0..3 {
                     let line_y = doc_y + 10 + i * 6;
                     let line_w = w - 4 - i as usize * 3;
@@ -466,7 +466,7 @@ impl DockItem {
             }
             
             DockIcon::Calculator => {
-                // Calculator
+                // Hesap makinesisi
                 let calc_color = 0xFF1C1C1E;
                 let w = (size as f32 * 0.6) as usize;
                 let h = (size as f32 * 0.75) as usize;
@@ -475,10 +475,10 @@ impl DockItem {
                 
                 fb.draw_rect(calc_x, calc_y, w, h, calc_color);
                 
-                // Display
+                // Ekran
                 fb.draw_rect(calc_x + 2, calc_y + 2, w - 4, h / 4, 0xFF505050);
                 
-                // Buttons
+                // Düğmeler
                 let btn_size = (w - 8) / 4;
                 for row in 0..4 {
                     for col in 0..4 {
@@ -491,7 +491,7 @@ impl DockItem {
             }
             
             DockIcon::Calendar => {
-                // Calendar icon with current day
+                // Güncel günü gösteren takvim simgesi
                 let cal_color = 0xFFFFFFFF;
                 let w = (size as f32 * 0.65) as usize;
                 let h = (size as f32 * 0.65) as usize;
@@ -500,19 +500,19 @@ impl DockItem {
                 
                 fb.draw_rect(cal_x, cal_y, w, h, cal_color);
                 
-                // Red top bar
+                // Kırmızı üst çubuk
                 fb.draw_rect(cal_x, cal_y, w, h / 4, 0xFFFF3B30);
                 
-                // Day number (placeholder - would use real date)
+                // Gün numarası (yer tutucu - gerçek tarih kullanılacak)
                 fb.draw_string(center_x - 8, center_y, "25", 0xFF333333);
             }
             
             DockIcon::Downloads => {
-                // Down arrow in circle
+                // Daire içinde aşağı ok
                 let r = (size as f32 * 0.35) as usize;
                 self.draw_circle(fb, center_x, center_y, r, 0xFF007AFF);
                 
-                // Arrow
+                // Ok
                 let arrow_h = r;
                 let arrow_w = r / 2;
                 fb.draw_rect(center_x - 3, center_y - arrow_h / 2, 6, arrow_h, 0xFFFFFFFF);
@@ -521,14 +521,14 @@ impl DockItem {
             }
             
             DockIcon::Maps => {
-                // Map pin
+                // Harita iğnesi
                 let pin_color = 0xFFFF3B30;
                 let pin_r = (size as f32 * 0.25) as usize;
                 
-                // Pin head
+                // İğne başı
                 self.draw_circle(fb, center_x, center_y - pin_r, pin_r, pin_color);
                 
-                // Pin point
+                // İğne ucu
                 for i in 0..pin_r {
                     let w = pin_r * 2 - i * 2;
                     fb.draw_rect(center_x - w / 2, center_y + i, w, 1, pin_color);
@@ -536,7 +536,7 @@ impl DockItem {
             }
             
             DockIcon::Photos => {
-                // Flower/petals icon
+                // Çiçek/yaprak simgesi
                 let petal_r = (size as f32 * 0.2) as usize;
                 let center_r = (size as f32 * 0.12) as usize;
                 
@@ -549,12 +549,12 @@ impl DockItem {
                     self.draw_circle(fb, px.max(0) as usize, py.max(0) as usize, petal_r, color);
                 }
                 
-                // Center
+                // Merkez
                 self.draw_circle(fb, center_x, center_y, center_r, 0xFFFFFFFF);
             }
             
             DockIcon::Notes => {
-                // Yellow notepad
+                // Sarı not defteri
                 let note_color = 0xFFFFCC00;
                 let w = (size as f32 * 0.6) as usize;
                 let h = (size as f32 * 0.7) as usize;
@@ -563,7 +563,7 @@ impl DockItem {
                 
                 fb.draw_rect(note_x, note_y, w, h, note_color);
                 
-                // Lines
+                // Satırlar
                 for i in 1..4 {
                     let line_y = note_y + i as usize * h / 4;
                     fb.draw_rect(note_x + 4, line_y, w - 8, 1, 0xFFB38F00);
@@ -571,7 +571,7 @@ impl DockItem {
             }
             
             DockIcon::Custom(code) => {
-                // Custom icon - colored square with letter
+                // Özel simge - harfli renkli kare
                 let color = match code % 8 {
                     0 => 0xFFFF3B30,
                     1 => 0xFFFF9500,
@@ -586,7 +586,7 @@ impl DockItem {
                 let r = (size as f32 * 0.35) as usize;
                 self.draw_circle(fb, center_x, center_y, r, color);
                 
-                // Letter
+                // Harf
                 let letter = char::from(b'A' + (code % 26) as u8);
                 fb.draw_char(center_x - 4, center_y - 6, letter, 0xFFFFFFFF);
             }
@@ -635,43 +635,43 @@ impl DockItem {
 // DOCK
 // ============================================================================
 
-/// macOS-style Dock with magnification
+/// Büyütme efektli macOS tarzı Dock
 pub struct Dock {
-    /// Dock items
+    /// Dock öğeleri
     pub items: Vec<DockItem>,
-    /// Next item ID
+    /// Sonraki öğe kimliği
     next_id: u32,
-    /// Dock position
+    /// Dock konumu
     position: DockPosition,
-    /// Dock visibility
+    /// Dock görünürlüğü
     visible: bool,
-    /// Auto-hide enabled
+    /// Otomatik gizleme etkin
     auto_hide: bool,
-    /// Is hidden (for auto-hide)
+    /// Gizlenmiş mi (otomatik gizleme için)
     hidden: bool,
-    /// Hide animation progress (0.0 - 1.0)
+    /// Gizleme animasyonu ilerlemesi (0.0 - 1.0)
     hide_progress: f32,
-    /// Current mouse X position
+    /// Mevcut fare X konumu
     mouse_x: i32,
-    /// Current mouse Y position
+    /// Mevcut fare Y konumu
     mouse_y: i32,
-    /// Hovered item index
+    /// Üzerine durulan öğe indeksi
     hovered_index: Option<usize>,
-    /// Clicked item index
+    /// Tıklanan öğe indeksi
     clicked_index: Option<usize>,
-    /// Dragging item index
+    /// Sürüklenen öğe indeksi
     dragging_index: Option<usize>,
-    /// Drag start position
+    /// Sürükleme başlangıç konumu
     drag_start_x: i32,
-    /// Screen width
+    /// Ekran genişliği
     screen_width: usize,
-    /// Screen height
+    /// Ekran yüksekliği
     screen_height: usize,
-    /// Dock Y position (animated)
+    /// Dock Y konumu (animasyonlu)
     dock_y: f32,
-    /// Magnification enabled
+    /// Büyütme etkin
     magnification: bool,
-    /// Magnification intensity
+    /// Büyütme yoğunluğu
     mag_intensity: f32,
 }
 
@@ -710,76 +710,79 @@ impl Dock {
     }
     
     fn add_default_items(&mut self) {
-        // Finder (always first)
+        // Finder (her zaman birinci)
         let mut finder = DockItem::app(self.next_id, "Finder", DockIcon::Finder, "finder");
         finder.running = true;
         self.items.push(finder);
         self.next_id += 1;
         
-        // Launchpad
+        // Launchpad (başlatma paneli)
         let mut launchpad = DockItem::new(self.next_id, "Launchpad", DockIcon::Launchpad);
         launchpad.action = DockAction::ShowLaunchpad;
         self.items.push(launchpad);
         self.next_id += 1;
         
-        // Safari
+        // Safari (tarayıcı)
         self.items.push(DockItem::app(self.next_id, "Safari", DockIcon::Safari, "safari"));
         self.next_id += 1;
         
-        // Mail
+        // Mail (e-posta)
         self.items.push(DockItem::app(self.next_id, "Mail", DockIcon::Mail, "mail"));
         self.next_id += 1;
         
-        // Messages
+        // Messages (mesajlar)
         self.items.push(DockItem::app(self.next_id, "Messages", DockIcon::Messages, "messages"));
         self.next_id += 1;
         
-        // Music
+        // Music (müzik)
         self.items.push(DockItem::app(self.next_id, "Music", DockIcon::Music, "music"));
         self.next_id += 1;
         
-        // Terminal
+        // Terminal (uçbirim)
         let mut terminal = DockItem::app(self.next_id, "Terminal", DockIcon::Terminal, "terminal");
         terminal.running = true;
         self.items.push(terminal);
         self.next_id += 1;
         
-        // Files
+        // Files (dosyalar)
         self.items.push(DockItem::app(self.next_id, "Files", DockIcon::Files, "files"));
         self.next_id += 1;
         
-        // Settings
+        // Settings (ayarlar)
         self.items.push(DockItem::app(self.next_id, "Settings", DockIcon::Settings, "settings"));
         self.next_id += 1;
         
-        // Separator (trash section)
+        // Ayırıcı (çöp bölümü)
         self.items.push(DockItem::new(self.next_id, "", DockIcon::Custom(100)));
         self.next_id += 1;
         
-        // Trash
+        // Trash (çöp kutusu)
         self.items.push(DockItem::new(self.next_id, "Trash", DockIcon::Trash));
         self.next_id += 1;
         
-        // Downloads
+        // Downloads (indirilenler)
         self.items.push(DockItem::new(self.next_id, "Downloads", DockIcon::Downloads));
         self.next_id += 1;
     }
     
-    /// Add item to dock
+    /// Dock'a öğe ekle
     pub fn add_item(&mut self, item: DockItem) {
-        // Insert before trash section
+        // Çöp bölümünden önce ekle
         let insert_pos = self.items.len().saturating_sub(2);
         self.items.insert(insert_pos, item);
     }
     
-    /// Remove item from dock
+    /// Dock'tan öğe kaldır
     pub fn remove_item(&mut self, id: u32) {
         self.items.retain(|i| i.id != id);
     }
     
-    /// Update dock state
-    pub fn update(&mut self, dt: f32) {
-        // Update hide animation
+    /// Dock durumunu güncelle
+    pub fn update(&mut self, dt: f32) -> bool {
+        let mut changed = false;
+        let prev_dock_y = self.dock_y;
+
+        // Gizleme animasyonunu güncelle
         if self.auto_hide {
             let target_y = if self.hidden {
                 self.screen_height as f32
@@ -791,36 +794,55 @@ impl Dock {
         } else {
             self.dock_y = (self.screen_height - DOCK_HEIGHT) as f32;
         }
+
+        if (self.dock_y - prev_dock_y).abs() > 0.01 {
+            changed = true;
+        }
         
-        // Update magnification
+        // Büyütmeyi güncelle
         if self.magnification {
             self.update_magnification();
         }
         
-        // Update bounce animations
+        // Zıplama animasyonlarını güncelle
         for item in &mut self.items {
+            let prev_size = item.current_size;
+            let prev_target = item.target_size;
+            let prev_bounce = item.bounce_offset;
+            let prev_bouncing = item.bouncing;
+
             item.update_bounce(dt);
             item.update_size(dt);
+
+            if (item.current_size - prev_size).abs() > 0.01
+                || (item.target_size - prev_target).abs() > 0.01
+                || (item.bounce_offset - prev_bounce).abs() > 0.01
+                || item.bouncing != prev_bouncing
+            {
+                changed = true;
+            }
         }
+
+        changed
     }
     
-    /// Calculate magnification for each item
+    /// Her öğe için büyütmeyi hesapla
     fn update_magnification(&mut self) {
         if self.items.is_empty() {
             return;
         }
         
-        // Calculate dock center position
+        // Dock merkez konumunu hesapla
         let total_width = self.items.len() * (ICON_SIZE + ICON_SPACING);
         let dock_start = (self.screen_width - total_width) / 2;
         
         for (i, item) in self.items.iter_mut().enumerate() {
             let item_center_x = dock_start + i * (ICON_SIZE + ICON_SPACING) + ICON_SIZE / 2;
             
-            // Distance from mouse
+            // Fareden uzaklık
             let dist = (self.mouse_x - item_center_x as i32).abs() as f32;
             
-            // Calculate magnification
+            // Büyütmeyi hesapla
             if dist < MAG_RADIUS as f32 {
                 let factor = 1.0 - (dist / MAG_RADIUS as f32);
                 let mag = 1.0 + factor * (MAX_ICON_SIZE as f32 / ICON_SIZE as f32 - 1.0) * self.mag_intensity;
@@ -831,7 +853,7 @@ impl Dock {
         }
     }
     
-    /// Draw the dock
+    /// Dock'u çiz
     pub fn draw(&self, fb: &mut Framebuffer) {
         if !self.visible {
             return;
@@ -839,15 +861,15 @@ impl Dock {
         
         let dock_y = self.dock_y as usize;
         
-        // Draw dock background (glass effect)
+        // Dock arka planını çiz (cam efekti)
         let total_width = self.items.len() * (ICON_SIZE + ICON_SPACING) + ICON_SPACING * 2;
         let dock_x = (self.screen_width - total_width) / 2;
         
-        // Background with blur effect (simplified)
+        // Bulanıklık efektli arka plan (basitleştirilmiş)
         let bg_height = DOCK_HEIGHT + 4;
         let bg_y = dock_y;
         
-        // Draw semi-transparent background
+        // Yarı saydam arka plan çiz
         for y in 0..bg_height {
             let alpha = if y < 4 { 0x20 } else if y > bg_height - 8 { 0x10 } else { 0x40 };
             let row_color = (alpha << 24) | 0x00FFFFFF;
@@ -857,7 +879,7 @@ impl Dock {
                 let py = bg_y + y;
                 
                 if px < self.screen_width && py < self.screen_height {
-                    // Blend with background
+                    // Arka planla karıştır
                     let ptr = unsafe { (fb.base_addr as *mut u32).add(py * fb.pixels_per_scan_line + px) };
                     let bg = unsafe { *ptr };
                     let blended = Self::blend_colors(bg, row_color);
@@ -866,10 +888,10 @@ impl Dock {
             }
         }
         
-        // Draw border
+        // Kenarık çiz
         fb.draw_rect(dock_x, dock_y, total_width, 1, 0x60FFFFFF);
         
-        // Draw items with magnification
+        // Büyütme ile öğeleri çiz
         let mut item_x = dock_x + ICON_SPACING;
         
         for (i, item) in self.items.iter().enumerate() {
@@ -882,7 +904,7 @@ impl Dock {
             
             item.draw(fb, draw_x, draw_y, size, dock_y);
             
-            // Advance x position based on current size
+            // Mevcut boyuta göre x konumunu ilerlet
             item_x += ((item.current_size + ICON_SPACING as f32) / 2.0 + ICON_SIZE as f32 / 2.0) as usize;
         }
     }
@@ -905,12 +927,12 @@ impl Dock {
         (r << 16) | (g << 8) | b
     }
     
-    /// Handle mouse move
+    /// Fare hareketini işle
     pub fn on_mouse_move(&mut self, mx: i32, my: i32) -> DockEvent {
         self.mouse_x = mx;
         self.mouse_y = my;
         
-        // Check if mouse is near dock for auto-hide
+        // Otomatik gizleme için fare dock yakınında mı kontrol et
         if self.auto_hide {
             let dock_top = self.screen_height as i32 - DOCK_HEIGHT as i32 - 20;
             if my >= dock_top {
@@ -920,7 +942,7 @@ impl Dock {
             }
         }
         
-        // Find hovered item
+        // Üzerine durulan öğeyi bul
         let total_width = self.items.len() * (ICON_SIZE + ICON_SPACING);
         let dock_start = (self.screen_width - total_width) / 2;
         
@@ -947,12 +969,12 @@ impl Dock {
         DockEvent::None
     }
     
-    /// Handle mouse down
+    /// Fare tıklamasını işle
     pub fn on_mouse_down(&mut self, mx: i32, my: i32) -> DockEvent {
         if let Some(idx) = self.hovered_index {
             self.clicked_index = Some(idx);
             
-            // Start bounce animation
+            // Zıplama animasyonunu başlat
             self.items[idx].start_bounce();
             
             return DockEvent::ItemClicked(idx, self.items[idx].id);
@@ -961,7 +983,7 @@ impl Dock {
         DockEvent::None
     }
     
-    /// Handle mouse up
+    /// Fare bırakmasını işle
     pub fn on_mouse_up(&mut self) -> DockEvent {
         if let Some(clicked_idx) = self.clicked_index {
             if self.hovered_index == Some(clicked_idx) {
@@ -978,7 +1000,7 @@ impl Dock {
         DockEvent::None
     }
     
-    /// Set item running state
+    /// Öğenin çalışma durumunu ayarla
     pub fn set_item_running(&mut self, id: u32, running: bool) {
         if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
             item.running = running;
@@ -988,9 +1010,9 @@ impl Dock {
         }
     }
     
-    /// Set item active state
+    /// Öğenin etkin durumunu ayarla
     pub fn set_item_active(&mut self, id: u32, active: bool) {
-        // Deactivate all others first
+        // Önce diğerlerini devre dışı bırak
         for item in &mut self.items {
             item.active = false;
         }
@@ -1000,27 +1022,27 @@ impl Dock {
         }
     }
     
-    /// Set item badge
+    /// Öğe rozetini ayarla
     pub fn set_item_badge(&mut self, id: u32, count: u32) {
         if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
             item.badge_count = count;
         }
     }
     
-    /// Set item progress
+    /// Öğe ilerlemesini ayarla
     pub fn set_item_progress(&mut self, id: u32, progress: f32) {
         if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
             item.progress = progress;
         }
     }
     
-    /// Resize dock
+    /// Dock'u yeniden boyutlandır
     pub fn resize(&mut self, width: usize, height: usize) {
         self.screen_width = width;
         self.screen_height = height;
     }
     
-    /// Get dock height
+    /// Dock yüksekliğini al
     pub fn height(&self) -> usize {
         if self.visible && !self.hidden {
             DOCK_HEIGHT
@@ -1029,18 +1051,18 @@ impl Dock {
         }
     }
     
-    /// Set magnification
+    /// Büyütmeyi ayarla
     pub fn set_magnification(&mut self, enabled: bool) {
         self.magnification = enabled;
     }
     
-    /// Set magnification intensity
+    /// Büyütme yoğunluğunu ayarla
     pub fn set_mag_intensity(&mut self, intensity: f32) {
         self.mag_intensity = intensity.max(0.0).min(1.0);
     }
 }
 
-/// Dock events
+/// Dock olayları
 #[derive(Clone, Debug)]
 pub enum DockEvent {
     None,
@@ -1057,14 +1079,14 @@ lazy_static::lazy_static! {
     static ref DOCK: Mutex<Dock> = Mutex::new(Dock::new(1920, 1080));
 }
 
-/// Initialize dock
+/// Dock'u başlat
 pub fn init(width: usize, height: usize) {
     let mut dock = DOCK.lock();
     dock.resize(width, height);
     crate::serial_println!("[GUI] Dock initialized ({}x{})", width, height);
 }
 
-/// Get dock
+/// Dock'u al
 pub fn get_dock() -> &'static Mutex<Dock> {
     &DOCK
 }

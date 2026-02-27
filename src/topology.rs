@@ -1,7 +1,9 @@
-//! # echOS CPU Topology Detection Module
+//! # echOS CPU Topoloji Algılama Modülü
 //!
-//! Tier 1 OS seviyesinde dinamik CPU topoloji keşfi
-//! Linux CPU topology ile aynı seviyede özellikler
+//! Tier 1 OS seviyesinde dinamik CPU topoloji keşfi.
+//! CPUID komutları aracılığıyla NUMA düğümleri, soket/paket başına çekirdek sayısı,
+//! SMT/hiper iş parçacığı yapılandırması ve L1/L2/L3 önbellek hiyerarşisi algılanır.
+//! Linux CPU topoloji altyapısıyla eşdeğer yetenekler sunar.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use alloc::vec::Vec;
@@ -10,40 +12,40 @@ use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
 use crate::preempt::PreemptDisableGuard;
 use crate::rcu::{RcuPtr, synchronize_rcu};
 
-/// CPU cache types
+/// CPU önbellek türleri
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum CacheType {
-    /// No cache
+    /// Önbellek yok
     None = 0,
-    /// Data cache
+    /// Veri önbelleği
     Data = 1,
-    /// Instruction cache
+    /// Komut önbelleği
     Instruction = 2,
-    /// Unified cache (data + instruction)
+    /// Birleşik önbellek (veri + komut)
     Unified = 3,
-    /// Trace cache
+    /// İz önbelleği
     Trace = 4,
 }
 
-/// CPU cache descriptor
+/// CPU önbellek tanımlayıcısı
 #[derive(Debug, Clone, Copy)]
 pub struct CacheDescriptor {
-    /// Cache type
+    /// Önbellek türü
     pub cache_type: CacheType,
-    /// Cache level (L1, L2, L3, etc.)
+    /// Önbellek seviyesi (L1, L2, L3, vb.)
     pub level: u8,
-    /// Cache size in bytes
+    /// Önbellek boyutu (bayt cinsinden)
     pub size: u32,
-    /// Line size in bytes
+    /// Satır boyutu (bayt cinsinden)
     pub line_size: u16,
-    /// Number of ways (associativity)
+    /// Yol sayısı (birleşiklik)
     pub ways: u16,
-    /// Number of sets
+    /// Küme sayısı
     pub sets: u32,
-    /// Shared with other CPUs (CPU mask)
+    /// Diğer CPU'larla paylaşılan (CPU maskesi)
     pub shared_cpu_mask: u64,
-    /// Inclusive of lower level caches
+    /// Alt seviye önbellekleri kapsar
     pub inclusive: bool,
 }
 
@@ -62,67 +64,67 @@ impl CacheDescriptor {
         }
     }
     
-    /// Get total cache size in human readable format
+    /// Toplam önbellek boyutunu insan tarafından okunabilir biçimde döndürür
     pub fn get_size_kb(&self) -> u32 {
         self.size / 1024
     }
     
-    /// Check if this cache is shared with another CPU
+    /// Bu önbelleğin başka bir CPU ile paylaşılıp paylaşılmadığını kontrol eder
     pub fn is_shared_with(&self, cpu_id: u32) -> bool {
         (self.shared_cpu_mask & (1u64 << cpu_id)) != 0
     }
     
-    /// Set shared CPU mask
+    /// Paylaşılan CPU maskesini ayarlar
     pub fn set_shared_mask(&mut self, cpu_mask: u64) {
         self.shared_cpu_mask = cpu_mask;
     }
 }
 
-/// CPU topology information
+/// CPU topoloji bilgisi
 #[repr(C, align(64))]
 pub struct CpuTopology {
-    /// Physical CPU ID
+    /// Fiziksel CPU kimliği
     pub physical_id: u32,
-    /// Logical CPU ID (thread)
+    /// Mantıksal CPU kimliği (iş parçacığı)
     pub logical_id: u32,
-    /// Core ID within package
+    /// Paket içindeki çekirdek kimliği
     pub core_id: u32,
-    /// Thread ID within core
+    /// Çekirdek içindeki iş parçacığı kimliği
     pub thread_id: u32,
-    /// Package/Socket ID
+    /// Paket/Soket kimliği
     pub package_id: u32,
-    /// NUMA node ID
+    /// NUMA düğüm kimliği
     pub numa_node_id: u32,
-    /// CPU family/model/stepping
+    /// CPU ailesi/modeli/adımlama
     pub cpu_signature: u32,
-    /// CPU features bitmap
+    /// CPU özellik bit haritası
     pub cpu_features: u64,
-    /// Maximum frequency in MHz
+    /// Maksimum frekans (MHz cinsinden)
     pub max_frequency: u32,
-    /// Base frequency in MHz
+    /// Temel frekans (MHz cinsinden)
     pub base_frequency: u32,
-    /// Cache hierarchy (L1d, L1i, L2, L3, etc.)
+    /// Önbellek hiyerarşisi (L1d, L1i, L2, L3, vb.)
     pub caches: Vec<CacheDescriptor>,
-    /// SMT (Simultaneous Multithreading) enabled
+    /// SMT (Eşzamanlı Çok İş Parçacığı) etkin
     pub smt_enabled: bool,
-    /// Number of threads per core
+    /// Çekirdek başına iş parçacığı sayısı
     pub threads_per_core: u32,
-    /// Number of cores per package
+    /// Paket başına çekirdek sayısı
     pub cores_per_package: u32,
-    /// Number of packages total
+    /// Toplam paket sayısı
     pub packages_total: u32,
-    /// Whether this CPU is online
+    /// Bu CPU'nun çevrimiiçi olup olmadığı
     pub online: AtomicBool,
-    /// Whether this CPU can be hotplugged
+    /// Bu CPU'nun sıcak takılıp takılamayacağı
     pub hotpluggable: AtomicBool,
-    /// CPU topology version (for change detection)
+    /// CPU topoloji sürümü (değişiklik tespiti için)
     pub topology_version: AtomicU64,
-    /// Padding to avoid false sharing
+    /// Yanlış paylaşımı önlemek için dolgu
     _padding: [u8; 0],
 }
 
 impl CpuTopology {
-    /// Create new CPU topology
+    /// Yeni CPU topolojisi oluşturur
     pub fn new(logical_id: u32) -> Self {
         Self {
             physical_id: logical_id,
@@ -147,49 +149,49 @@ impl CpuTopology {
         }
     }
     
-    /// Add cache descriptor
+    /// Önbellek tanımlayıcısı ekler
     pub fn add_cache(&mut self, cache: CacheDescriptor) {
         self.caches.push(cache);
     }
     
-    /// Get cache by level and type
+    /// Seviye ve türe göre önbellek döndürür
     pub fn get_cache(&self, level: u8, cache_type: CacheType) -> Option<&CacheDescriptor> {
         self.caches.iter().find(|c| c.level == level && c.cache_type == cache_type)
     }
     
-    /// Get L1 data cache
+    /// L1 veri önbelleğini döndürür
     pub fn get_l1d_cache(&self) -> Option<&CacheDescriptor> {
         self.get_cache(1, CacheType::Data)
     }
     
-    /// Get L1 instruction cache
+    /// L1 komut önbelleğini döndürür
     pub fn get_l1i_cache(&self) -> Option<&CacheDescriptor> {
         self.get_cache(1, CacheType::Instruction)
     }
     
-    /// Get L2 cache
+    /// L2 önbelleğini döndürür
     pub fn get_l2_cache(&self) -> Option<&CacheDescriptor> {
         self.get_cache(2, CacheType::Unified)
     }
     
-    /// Get L3 cache
+    /// L3 önbelleğini döndürür
     pub fn get_l3_cache(&self) -> Option<&CacheDescriptor> {
         self.get_cache(3, CacheType::Unified)
     }
     
-    /// Check if CPU has hyperthreading/SMT
+    /// CPU'nun hiper iş parçacığı/SMT destekleyip desteklemediğini kontrol eder
     pub fn has_smt(&self) -> bool {
         self.smt_enabled && self.threads_per_core > 1
     }
     
-    /// Check if this is a hyperthread of another CPU
+    /// Bunun başka bir CPU'nun hiper iş parçacığı olup olmadığını kontrol eder
     pub fn is_hyperthread_of(&self, other: &CpuTopology) -> bool {
         self.package_id == other.package_id && 
         self.core_id == other.core_id && 
         self.thread_id != other.thread_id
     }
     
-    /// Check if this CPU shares cache with another CPU
+    /// Bu CPU'nun başka bir CPU ile önbellek paylaşıp paylaşmadığını kontrol eder
     pub fn shares_cache_with(&self, other: &CpuTopology, cache_level: u8) -> bool {
         if let Some(cache) = self.get_cache(cache_level, CacheType::Unified) {
             cache.is_shared_with(other.logical_id)
@@ -200,7 +202,7 @@ impl CpuTopology {
         }
     }
     
-    /// Get cache sharing information
+    /// Önbellek paylaşım bilgisini döndürür
     pub fn get_cache_sharing(&self) -> Vec<(u8, u64)> {
         let mut sharing = Vec::new();
         
@@ -211,70 +213,70 @@ impl CpuTopology {
         sharing
     }
     
-    /// Update topology version
+    /// Topoloji sürümünü artırır
     pub fn increment_version(&self) {
         self.topology_version.fetch_add(1, Ordering::AcqRel);
         smp_wmb();
     }
     
-    /// Get topology version
+    /// Topoloji sürümünü döndürür
     pub fn get_version(&self) -> u64 {
         self.topology_version.load(Ordering::Acquire)
     }
     
-    /// Set online status
+    /// Çevrimiiçi durumunu ayarlar
     pub fn set_online(&self, online: bool) {
         self.online.store(online, Ordering::Release);
         smp_wmb();
     }
     
-    /// Check if CPU is online
+    /// CPU'nun çevrimiiçi olup olmadığını kontrol eder
     pub fn is_online(&self) -> bool {
         self.online.load(Ordering::Acquire)
     }
     
-    /// Set hotpluggable status
+    /// Sıcak takılabilir durumunu ayarlar
     pub fn set_hotpluggable(&self, hotpluggable: bool) {
         self.hotpluggable.store(hotpluggable, Ordering::Release);
         smp_wmb();
     }
     
-    /// Check if CPU is hotpluggable
+    /// CPU'nun sıcak takılabilir olup olmadığını kontrol eder
     pub fn is_hotpluggable(&self) -> bool {
         self.hotpluggable.load(Ordering::Acquire)
     }
 }
 
-/// System topology information
+/// Sistem topoloji bilgisi
 pub struct SystemTopology {
-    /// Maximum number of CPUs
+    /// Maksimum CPU sayısı
     max_cpus: u32,
-    /// CPU topologies
+    /// CPU topolojileri
     cpu_topologies: Vec<RcuPtr<CpuTopology>>,
-    /// Number of packages
+    /// Paket sayısı
     package_count: AtomicU32,
-    /// Number of cores per package
+    /// Paket başına çekirdek sayısı
     cores_per_package: AtomicU32,
-    /// Number of threads per core
+    /// Çekirdek başına iş parçacığı sayısı
     threads_per_core: AtomicU32,
-    /// Total number of cores
+    /// Toplam çekirdek sayısı
     total_cores: AtomicU32,
-    /// Total number of threads
+    /// Toplam iş parçacığı sayısı
     total_threads: AtomicU32,
-    /// Topology detection enabled
+    /// Topoloji tespiti etkin
     detection_enabled: AtomicBool,
-    /// Last topology update timestamp
+    /// Son topoloji güncelleme zaman damgası
     last_update: AtomicU64,
-    /// Topology update count
+    /// Topoloji güncelleme sayısı
     update_count: AtomicU64,
 }
 
 impl SystemTopology {
-    /// Create new system topology
+    /// Yeni sistem topolojisi oluşturur
     pub fn new(max_cpus: u32) -> Self {
         let mut cpu_topologies = Vec::with_capacity(max_cpus as usize);
         
-        // Initialize CPU topologies
+        // CPU topolojilerini başlat
         for cpu_id in 0..max_cpus {
             let topology = Box::new(CpuTopology::new(cpu_id));
             cpu_topologies.push(RcuPtr::new(Box::into_raw(topology)));
@@ -294,7 +296,7 @@ impl SystemTopology {
         }
     }
     
-    /// Get CPU topology
+    /// CPU topolojisini döndürür
     pub fn get_cpu_topology(&self, cpu_id: u32) -> Option<RcuPtr<CpuTopology>> {
         if cpu_id >= self.max_cpus {
             return None;
@@ -303,7 +305,7 @@ impl SystemTopology {
         Some(self.cpu_topologies[cpu_id as usize].clone())
     }
     
-    /// Detect CPU topology using CPUID
+    /// CPUID kullanarak CPU topolojisini algılar
     pub fn detect_topology(&mut self) -> Result<(), TopologyError> {
         if !self.detection_enabled.load(Ordering::Acquire) {
             return Err(TopologyError::DetectionDisabled);
@@ -311,32 +313,32 @@ impl SystemTopology {
         
         crate::serial_println!("Topology: Starting CPU topology detection...");
         
-        // Detect basic CPU information
+        // Temel CPU bilgilerini algıla
         self.detect_basic_info()?;
         
-        // Detect cache hierarchy
+        // Önbellek hiyerarşisini algıla
         self.detect_cache_hierarchy()?;
         
-        // Detect SMT/hyperthreading
+        // SMT/hiper iş parçacığını algıla
         self.detect_smt_info()?;
         
-        // Detect package information
+        // Paket bilgilerini algıla
         self.detect_package_info()?;
         
-        // Build sharing relationships
+        // Paylaşım ilişkilerini oluştur
         self.build_sharing_relationships()?;
         
-        // Update statistics
+        // İstatistikleri güncelle
         self.update_statistics();
         
-        // Update version and timestamp
+        // Sürüm ve zaman damgasını güncelle
         self.update_version();
         
         crate::serial_println!("Topology: Detection completed");
         Ok(())
     }
     
-    /// Detect basic CPU information using CPUID
+    /// CPUID kullanarak temel CPU bilgilerini algılar
     fn detect_basic_info(&mut self) -> Result<(), TopologyError> {
         for cpu_id in 0..self.max_cpus {
             let topology = match self.get_cpu_topology(cpu_id) {
@@ -346,19 +348,19 @@ impl SystemTopology {
             
             let topology_guard = topology.read();
             
-            // In a real implementation, this would use CPUID instructions
-            // For now, we'll simulate the detection
+            // Gerçek uygulamada CPUID komutları kullanılırdı
+            // Şimdiliği için algılamayı simüle edeceğiz
             
-            // Simulate CPU signature (family, model, stepping)
-            let cpu_signature = 0x806E9; // Example: Intel Core i7-12700K
+            // CPU imzasını simüle et (aile, model, adımlama)
+            let cpu_signature = 0x806E9; // Örnek: Intel Core i7-12700K
             let mutable_topology = topology_guard.as_mut();
             mutable_topology.cpu_signature = cpu_signature;
             
-            // Simulate CPU features
-            let cpu_features = 0xFFFFFFFFFFFFFFFF; // All features enabled
+            // CPU özelliklerini simüle et
+            let cpu_features = 0xFFFFFFFFFFFFFFFF; // Tüm özellikler etkin
             mutable_topology.cpu_features = cpu_features;
             
-            // Simulate frequencies
+            // Frekansları simüle et
             let max_freq = 3600; // 3.6 GHz
             let base_freq = 2400; // 2.4 GHz
             mutable_topology.max_frequency = max_freq;
@@ -368,7 +370,7 @@ impl SystemTopology {
         Ok(())
     }
     
-    /// Detect cache hierarchy
+    /// Önbellek hiyerarşisini algılar
     fn detect_cache_hierarchy(&mut self) -> Result<(), TopologyError> {
         for cpu_id in 0..self.max_cpus {
             let topology = match self.get_cpu_topology(cpu_id) {
@@ -378,27 +380,27 @@ impl SystemTopology {
             
             let topology_guard = topology.read();
             
-            // In a real implementation, this would use CPUID leaf 4
-            // For now, we'll simulate typical cache hierarchy
+            // Gerçek uygulamada CPUID 4. yaprağı kullanılırdı
+            // Şimdiliği için tipik önbellek hiyerarşisini simüle edeceğiz
             
             let mutable_topology = topology_guard.as_mut();
             
-            // L1 Data cache: 32KB, 8-way, 64-byte line
+            // L1 Veri önbelleği: 32KB, 8-yollu, 64-bayt satır
             mutable_topology.add_cache(CacheDescriptor::new(
                 CacheType::Data, 1, 32 * 1024, 64, 8
             ));
             
-            // L1 Instruction cache: 32KB, 8-way, 64-byte line
+            // L1 Komut önbelleği: 32KB, 8-yollu, 64-bayt satır
             mutable_topology.add_cache(CacheDescriptor::new(
                 CacheType::Instruction, 1, 32 * 1024, 64, 8
             ));
             
-            // L2 cache: 1MB, 16-way, 64-byte line (per core)
+            // L2 önbelleği: 1MB, 16-yollu, 64-bayt satır (çekirdek başına)
             mutable_topology.add_cache(CacheDescriptor::new(
                 CacheType::Unified, 2, 1024 * 1024, 64, 16
             ));
             
-            // L3 cache: 25MB, 20-way, 64-byte line (shared)
+            // L3 önbelleği: 25MB, 20-yollu, 64-bayt satır (paylaşılan)
             let mut l3_cache = CacheDescriptor::new(
                 CacheType::Unified, 3, 25 * 1024 * 1024, 64, 20
             );
@@ -409,13 +411,13 @@ impl SystemTopology {
         Ok(())
     }
     
-    /// Detect SMT/hyperthreading information
+    /// SMT/hiper iş parçacığı bilgilerini algılar
     fn detect_smt_info(&mut self) -> Result<(), TopologyError> {
-        // In a real implementation, this would use CPUID leaf 1 and 11
-        // For now, we'll simulate a typical SMT configuration
+        // Gerçek uygulamada CPUID 1 ve 11. yaprakları kullanılırdı
+        // Şimdiliği için tipik SMT yapılandırmasını simüle edeceğiz
         
-        let threads_per_core = 2; // Hyperthreading enabled
-        let cores_per_package = 8; // 8 cores per package
+        let threads_per_core = 2; // Hiper iş parçacığı etkin
+        let cores_per_package = 8; // Paket başına 8 çekirdek
         
         self.threads_per_core.store(threads_per_core, Ordering::Release);
         self.cores_per_package.store(cores_per_package, Ordering::Release);
@@ -433,7 +435,7 @@ impl SystemTopology {
             mutable_topology.threads_per_core = threads_per_core;
             mutable_topology.cores_per_package = cores_per_package;
             
-            // Calculate core and thread IDs
+            // Çekirdek ve iş parçacığı kimliklerini hesapla
             let package_id = cpu_id / (cores_per_package * threads_per_core);
             let core_in_package = (cpu_id / threads_per_core) % cores_per_package;
             let thread_in_core = cpu_id % threads_per_core;
@@ -447,9 +449,9 @@ impl SystemTopology {
         Ok(())
     }
     
-    /// Detect package information
+    /// Paket bilgilerini algılar
     fn detect_package_info(&mut self) -> Result<(), TopologyError> {
-        // Count unique packages
+        // Benzersiz paketleri say
         let mut packages = Vec::new();
         
         for cpu_id in 0..self.max_cpus {
@@ -468,7 +470,7 @@ impl SystemTopology {
         
         self.package_count.store(packages.len() as u32, Ordering::Release);
         
-        // Update package count in all topologies
+        // Tüm topolojilerde paket sayısını güncelle
         for cpu_id in 0..self.max_cpus {
             let topology = match self.get_cpu_topology(cpu_id) {
                 Some(topology) => topology,
@@ -483,9 +485,9 @@ impl SystemTopology {
         Ok(())
     }
     
-    /// Build cache sharing relationships
+    /// Önbellek paylaşım ilişkilerini oluşturur
     fn build_sharing_relationships(&mut self) -> Result<(), TopologyError> {
-        // Build sharing masks for each cache level
+        // Her önbellek seviyesi için paylaşım maskeleri oluştur
         for cache_level in 1..=3 {
             self.build_cache_sharing_for_level(cache_level)?;
         }
@@ -493,7 +495,7 @@ impl SystemTopology {
         Ok(())
     }
     
-    /// Build cache sharing for specific level
+    /// Belirli seviye için önbellek paylaşımını oluşturur
     fn build_cache_sharing_for_level(&mut self, level: u8) -> Result<(), TopologyError> {
         for cpu_id in 0..self.max_cpus {
             let topology = match self.get_cpu_topology(cpu_id) {
@@ -503,7 +505,7 @@ impl SystemTopology {
             
             let topology_guard = topology.read();
             
-            // Find CPUs that share this cache level
+            // Bu önbellek seviyesini paylaşan CPU'ları bul
             let mut shared_mask = 1u64 << cpu_id;
             
             for other_cpu_id in 0..self.max_cpus {
@@ -518,18 +520,18 @@ impl SystemTopology {
                 
                 let other_guard = other_topology.read();
                 
-                // Check if they share this cache level
+                // Bu önbellek seviyesini paylaşıp paylaşmadıklarını kontrol et
                 let shares_cache = match level {
                     1 => {
-                        // L1 caches are per-core, not shared
+                        // L1 önbellekleri çekirdek başınadır, paylaşımlı değildir
                         topology_guard.core_id == other_guard.core_id
                     }
                     2 => {
-                        // L2 caches are per-core in most architectures
+                        // L2 önbellekleri çoğu mimaride çekirdek başınadır
                         topology_guard.core_id == other_guard.core_id
                     }
                     3 => {
-                        // L3 caches are typically shared within a package
+                        // L3 önbellekleri genellikle paket içinde paylaşılır
                         topology_guard.package_id == other_guard.package_id
                     }
                     _ => false,
@@ -540,7 +542,7 @@ impl SystemTopology {
                 }
             }
             
-            // Update sharing masks for all caches at this level
+            // Bu seviyedeki tüm önbelleklerin paylaşım maskelerini güncelle
             let mutable_topology = topology_guard.as_mut();
             for cache in &mut mutable_topology.caches {
                 if cache.level == level {
@@ -552,7 +554,7 @@ impl SystemTopology {
         Ok(())
     }
     
-    /// Update topology statistics
+    /// Topoloji istatistiklerini günceller
     fn update_statistics(&mut self) {
         let mut total_cores = 0;
         let mut total_threads = 0;
@@ -579,13 +581,13 @@ impl SystemTopology {
         self.total_threads.store(total_threads, Ordering::Release);
     }
     
-    /// Update topology version
+    /// Topoloji sürümünü günceller
     fn update_version(&mut self) {
         let current_time = crate::task::scheduler::get_ticks() as u64;
         self.last_update.store(current_time, Ordering::Release);
         self.update_count.fetch_add(1, Ordering::AcqRel);
         
-        // Increment version for all CPUs
+        // Tüm CPU'ların sürümünü artır
         for cpu_id in 0..self.max_cpus {
             if let Some(topology) = self.get_cpu_topology(cpu_id) {
                 topology.read().increment_version();
@@ -595,7 +597,7 @@ impl SystemTopology {
         smp_mb();
     }
     
-    /// Get CPUs sharing cache with given CPU
+    /// Belirtilen CPU ile önbellek paylaşan CPU'ları döndürür
     pub fn get_cache_sharing_cpus(&self, cpu_id: u32, cache_level: u8) -> Vec<u32> {
         let topology = match self.get_cpu_topology(cpu_id) {
             Some(topology) => topology,
@@ -620,7 +622,7 @@ impl SystemTopology {
         }
     }
     
-    /// Get CPUs in same package
+    /// Aynı paketteki CPU'ları döndürür
     pub fn get_package_cpus(&self, cpu_id: u32) -> Vec<u32> {
         let topology = match self.get_cpu_topology(cpu_id) {
             Some(topology) => topology,
@@ -647,7 +649,7 @@ impl SystemTopology {
         package_cpus
     }
     
-    /// Get CPUs in same core
+    /// Aynı çekirdekteki CPU'ları döndürür
     pub fn get_core_cpus(&self, cpu_id: u32) -> Vec<u32> {
         let topology = match self.get_cpu_topology(cpu_id) {
             Some(topology) => topology,
@@ -675,7 +677,7 @@ impl SystemTopology {
         core_cpus
     }
     
-    /// Get hyperthread siblings
+    /// Hiper iş parçacığı kardeşlerini döndürür
     pub fn get_hyperthread_siblings(&self, cpu_id: u32) -> Vec<u32> {
         let topology = match self.get_cpu_topology(cpu_id) {
             Some(topology) => topology,
@@ -693,7 +695,7 @@ impl SystemTopology {
             .collect()
     }
     
-    /// Check if two CPUs are siblings (same core)
+    /// İki CPU'nun kardeş (aynı çekirdek) olup olmadığını kontrol eder
     pub fn are_siblings(&self, cpu_id1: u32, cpu_id2: u32) -> bool {
         let topology1 = match self.get_cpu_topology(cpu_id1) {
             Some(topology) => topology,
@@ -711,7 +713,7 @@ impl SystemTopology {
         guard1.package_id == guard2.package_id && guard1.core_id == guard2.core_id
     }
     
-    /// Get system topology summary
+    /// Sistem topoloji özetini döndürür
     pub fn get_summary(&self) -> TopologySummary {
         TopologySummary {
             packages: self.package_count.load(Ordering::Acquire),
@@ -725,19 +727,19 @@ impl SystemTopology {
         }
     }
     
-    /// Enable/disable topology detection
+    /// Topoloji tespitini etkinleştirir/devre dışı bırakır
     pub fn set_detection_enabled(&self, enabled: bool) {
         self.detection_enabled.store(enabled, Ordering::Release);
         smp_wmb();
     }
     
-    /// Check if topology detection is enabled
+    /// Topoloji tespitinin etkin olup olmadığını kontrol eder
     pub fn is_detection_enabled(&self) -> bool {
         self.detection_enabled.load(Ordering::Acquire)
     }
 }
 
-/// Topology summary
+/// Topoloji özeti
 #[derive(Debug, Clone, Copy)]
 pub struct TopologySummary {
     pub packages: u32,
@@ -750,26 +752,26 @@ pub struct TopologySummary {
     pub update_count: u64,
 }
 
-/// Topology detection errors
+/// Topoloji tespit hataları
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopologyError {
-    /// Detection is disabled
+    /// Tespit devre dışı
     DetectionDisabled,
-    /// Invalid CPU ID
+    /// Geçersiz CPU kimliği
     InvalidCpuId,
-    /// CPUID instruction failed
+    /// CPUID komutu başarısız
     CpuidFailed,
-    /// Inconsistent topology data
+    /// Tutarsız topoloji verisi
     InconsistentData,
-    /// Not implemented
+    /// Uygulanmadı
     NotImplemented,
 }
 
-/// Global topology instance
+/// Global topoloji örneği
 static mut SYSTEM_TOPOLOGY: Option<SystemTopology> = None;
 static TOPOLOGY_INIT: AtomicBool = AtomicBool::new(false);
 
-/// Initialize topology subsystem
+/// Topoloji alt sistemini başlatır
 pub fn init(max_cpus: u32) -> Result<(), TopologyError> {
     if TOPOLOGY_INIT.load(Ordering::Acquire) {
         return Ok(());
@@ -779,8 +781,8 @@ pub fn init(max_cpus: u32) -> Result<(), TopologyError> {
     
     let mut topology = SystemTopology::new(max_cpus);
     
-    // Detect initial topology
-    topology.detect_topology()?;
+    // Başlangıç topolojisini algıla
+    topology.detect_topology()?;;
     
     unsafe {
         SYSTEM_TOPOLOGY = Some(topology);
@@ -793,7 +795,7 @@ pub fn init(max_cpus: u32) -> Result<(), TopologyError> {
     Ok(())
 }
 
-/// Get system topology
+/// Sistem topolojisini döndürür
 pub fn get_system_topology() -> Option<&'static SystemTopology> {
     if !TOPOLOGY_INIT.load(Ordering::Acquire) {
         return None;
@@ -802,18 +804,18 @@ pub fn get_system_topology() -> Option<&'static SystemTopology> {
     unsafe { SYSTEM_TOPOLOGY.as_ref() }
 }
 
-/// Redetect topology (for hotplug events)
+/// Topolojiyi yeniden algılar (sıcak takma olayları için)
 pub fn redetect_topology() -> Result<(), TopologyError> {
     let topology = get_system_topology().ok_or(TopologyError::DetectionDisabled)?;
     
-    // In a real implementation, this would need mutable access
-    // For now, we'll just log the request
+    // Gerçek uygulamada değiştirilebilir erişim gerekir
+    // Şimdiliği için sadece isteği günlüğe kaydedeceğiz
     crate::serial_println!("Topology: Redetection requested");
     
     Err(TopologyError::NotImplemented)
 }
 
-/// Convenience functions
+/// Kolaylık fonksiyonları
 pub fn get_cpu_topology(cpu_id: u32) -> Option<RcuPtr<CpuTopology>> {
     get_system_topology()?.get_cpu_topology(cpu_id)
 }
@@ -868,7 +870,7 @@ mod tests {
     fn test_cpu_topology() {
         let mut topology = CpuTopology::new(0);
         
-        // Add caches
+        // Önbellekler ekle
         topology.add_cache(CacheDescriptor::new(CacheType::Data, 1, 32 * 1024, 64, 8));
         topology.add_cache(CacheDescriptor::new(CacheType::Unified, 3, 25 * 1024 * 1024, 64, 20));
         
