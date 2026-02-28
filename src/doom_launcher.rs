@@ -1,6 +1,12 @@
-//! # echOS Doom Downloader & Launcher
+//! # echOS Doom İndirici ve Başlatıcı
 //!
-//! Downloads Doom shareware WAD and launches the game
+//! Doom shareware WAD dosyasını indirir ve oyunu başlatır.
+//!
+//! ## WAD Dosyası Nedir?
+//! WAD (Where's All the Data?), Doom'un tüm oyun verilerini
+//! (haritalar, sesler, görseller) depolayan özel dosya formatıdır.
+//! IWAD (Internal WAD): Resmi id Software dosyası.
+//! PWAD (Patch WAD): Kullanıcı tarafından oluşturulan ek içerik.
 
 use alloc::vec::Vec;
 use alloc::vec;
@@ -10,52 +16,56 @@ use alloc::boxed::Box;
 use spin::Mutex;
 
 // ============================================================================
-// DOOM URLs
+// DOOM URL'LERİ
 // ============================================================================
 
-/// Doom shareware WAD URL (DOOM1.WAD)
+/// Doom shareware WAD indirme URL'si (DOOM1.WAD)
 const DOOM_SHAREWARE_URL: &str = "http://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad";
 
-/// Alternative Doom WAD mirror
+/// Alternatif Doom WAD aynası (sunucu erişilemez olduğunda kullanılır)
 const DOOM_MIRROR_URL: &str = "http://ftp.gwdg.de/pub/misc/idsoftware/idstuff/doom/doom1.wad";
 
-/// Doom WAD file name
+/// Doom WAD dosya adı
 const DOOM_WAD_FILENAME: &str = "doom1.wad";
 
-/// Expected WAD size (shareware)
+/// Shareware sürümünün beklenen dosya boyutu (bayt cinsinden)
 const DOOM_SHAREWARE_SIZE: usize = 4_196_020;
 
 // ============================================================================
-// WAD HEADER
+// WAD BAŞLIĞI
 // ============================================================================
 
-/// WAD file header
+/// WAD dosya başlığı.
+/// packed repr: C derleyicisi gibi bellek hizalaması — dosyadaki ham baytlarla
+/// doğrudan eşleme için zorunludur.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct WadHeader {
-    pub identification: [u8; 4],  // "IWAD" or "PWAD"
+    pub identification: [u8; 4],  // "IWAD" veya "PWAD" — dosya türünü belirler
     pub num_lumps: u32,
     pub info_table_offset: u32,
 }
 
 impl WadHeader {
-    /// Check if valid WAD
+    /// WAD başlığının geçerli olup olmadığını kontrol eder.
+    /// Geçerli bir WAD ya IWAD ya da PWAD olmalıdır.
     pub fn is_valid(&self) -> bool {
         self.identification == *b"IWAD" || self.identification == *b"PWAD"
     }
-    
-    /// Check if is IWAD (official)
+
+    /// Resmi (official) IWAD olup olmadığını kontrol eder.
     pub fn is_iwad(&self) -> bool {
         self.identification == *b"IWAD"
     }
-    
-    /// Check if is PWAD (patch)
+
+    /// Yama (patch) PWAD olup olmadığını kontrol eder.
     pub fn is_pwad(&self) -> bool {
         self.identification == *b"PWAD"
     }
 }
 
-/// WAD lump entry
+/// WAD lump (veri parçası) dizin girişi.
+/// Her lump; ofset, boyut ve isim bilgisi içerir.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct WadLumpEntry {
@@ -65,7 +75,7 @@ pub struct WadLumpEntry {
 }
 
 impl WadLumpEntry {
-    /// Get lump name as string
+    /// Lump adını null-sonlandırmalı bayt dizisinden String'e dönüştürür.
     pub fn name_as_string(&self) -> String {
         let mut name = String::new();
         for &b in &self.name {
@@ -79,10 +89,11 @@ impl WadLumpEntry {
 }
 
 // ============================================================================
-// WAD LOADER
+// WAD YÜKLEYİCİ
 // ============================================================================
 
-/// Loaded WAD file
+/// Belleğe yüklenmiş WAD dosyası.
+/// Başlık, lump dizini ve ham veri tamponunu bir arada tutar.
 #[derive(Clone, Debug)]
 pub struct WadFile {
     pub data: Vec<u8>,
@@ -92,44 +103,55 @@ pub struct WadFile {
 }
 
 impl WadFile {
-    /// Parse WAD from data
+    /// Ham veri dizisini WAD olarak ayrıştırır (parse eder).
+    ///
+    /// Ayrıştırma akışı:
+    /// ```text
+    /// Ham veri tamponu
+    ///   ├── Başlık oku (ilk 12 bayt)
+    ///   │     ├── Geçerlilik kontrolü ("IWAD"/"PWAD")
+    ///   │     └── Lump tablosu ofsetini al
+    ///   └── Lump tablosunu oku
+    ///         ├── Her giriş için ofset, boyut, isim oku
+    ///         └── Vec<WadLumpEntry> olarak sakla
+    /// ```
     pub fn parse(data: Vec<u8>, filename: &str) -> Option<Self> {
         if data.len() < core::mem::size_of::<WadHeader>() {
             return None;
         }
-        
-        // Parse header
+
+        // Başlığı ayrıştır — unsafe: C-benzeri ham bellek okuma
         let header = unsafe {
             core::ptr::read(data.as_ptr() as *const WadHeader)
         };
-        
+
         if !header.is_valid() {
-            crate::serial_println!("[WAD] Invalid WAD header");
+            crate::serial_println!("[WAD] Geçersiz WAD başlığı");
             return None;
         }
-        
-        // Parse lump table
+
+        // Lump tablosunu ayrıştır
         let lump_table_offset = header.info_table_offset as usize;
         let lump_size = core::mem::size_of::<WadLumpEntry>();
         let num_lumps = header.num_lumps as usize;
-        
+
         let mut lumps = Vec::with_capacity(num_lumps);
-        
+
         for i in 0..num_lumps {
             let offset = lump_table_offset + i * lump_size;
             if offset + lump_size > data.len() {
                 break;
             }
-            
+
             let entry = unsafe {
                 core::ptr::read(data.as_ptr().add(offset) as *const WadLumpEntry)
             };
-            
+
             lumps.push(entry);
         }
-        
-        crate::serial_println!("[WAD] Loaded {} lumps from {}", num_lumps, filename);
-        
+
+        crate::serial_println!("[WAD] {}'dan {} lump yüklendi", filename, num_lumps);
+
         Some(WadFile {
             data,
             header,
@@ -137,8 +159,8 @@ impl WadFile {
             filename: filename.to_string(),
         })
     }
-    
-    /// Get lump by name
+
+    /// İsme göre lump verisini döndürür.
     pub fn get_lump(&self, name: &str) -> Option<&[u8]> {
         for lump in &self.lumps {
             if lump.name_as_string() == name {
@@ -151,25 +173,25 @@ impl WadFile {
         }
         None
     }
-    
-    /// Get lump data by index
+
+    /// Dizin sırasına göre lump verisini döndürür.
     pub fn get_lump_by_index(&self, index: usize) -> Option<&[u8]> {
         if index >= self.lumps.len() {
             return None;
         }
-        
+
         let lump = &self.lumps[index];
         let start = lump.offset as usize;
         let end = start + lump.size as usize;
-        
+
         if end <= self.data.len() {
             Some(&self.data[start..end])
         } else {
             None
         }
     }
-    
-    /// Find lump index by name
+
+    /// İsme göre lump dizin numarasını bulur.
     pub fn find_lump(&self, name: &str) -> Option<usize> {
         for (i, lump) in self.lumps.iter().enumerate() {
             if lump.name_as_string() == name {
@@ -181,10 +203,11 @@ impl WadFile {
 }
 
 // ============================================================================
-// DOOM LAUNCHER
+// DOOM BAŞLATICI
 // ============================================================================
 
-/// Doom launcher state
+/// Doom başlatıcı durum makinesi.
+/// İndirme → Yükleme → Çalışma akışını yönetir.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DoomLauncherState {
     Idle,
@@ -195,7 +218,8 @@ pub enum DoomLauncherState {
     Error(String),
 }
 
-/// Doom launcher
+/// Doom başlatıcı.
+/// WAD indirme, yükleme ve oyun başlatma işlemlerini yönetir.
 pub struct DoomLauncher {
     state: DoomLauncherState,
     wad: Option<WadFile>,
@@ -212,97 +236,97 @@ impl DoomLauncher {
             download_size: 0,
         }
     }
-    
-    /// Check if WAD exists locally
+
+    /// Yerel dosya sisteminde WAD dosyasının bulunup bulunmadığını kontrol eder.
     pub fn check_local_wad(&mut self) -> bool {
-        // Try to load from filesystem
-        // In real implementation, would check /games/doom/doom1.wad
+        // Gerçek uygulamada /games/doom/doom1.wad kontrol edilir
         false
     }
-    
-    /// Download Doom shareware WAD
+
+    /// Doom shareware WAD dosyasını HTTP üzerinden indirir.
     pub fn download_wad(&mut self) -> Result<(), String> {
         self.state = DoomLauncherState::Downloading;
         self.download_size = DOOM_SHAREWARE_SIZE;
         self.download_progress = 0;
-        
-        crate::serial_println!("[DOOM] Downloading WAD from {}", DOOM_SHAREWARE_URL);
-        
-        // Use HTTP client to download
+
+        crate::serial_println!("[DOOM] WAD indiriliyor: {}", DOOM_SHAREWARE_URL);
+
+        // HTTP istemcisi ile indir
         let client = crate::net::http::HttpClient::new();
-        
+
         match client.download(DOOM_SHAREWARE_URL) {
             Ok(data) => {
-                crate::serial_println!("[DOOM] Downloaded {} bytes", data.len());
-                
-                // Parse WAD
+                crate::serial_println!("[DOOM] {} bayt indirildi", data.len());
+
+                // WAD'ı ayrıştır ve doğrula
                 if let Some(wad) = WadFile::parse(data, DOOM_WAD_FILENAME) {
                     self.wad = Some(wad);
                     self.state = DoomLauncherState::DownloadComplete;
                     Ok(())
                 } else {
-                    self.state = DoomLauncherState::Error("Invalid WAD file".to_string());
-                    Err("Invalid WAD file".to_string())
+                    self.state = DoomLauncherState::Error("Geçersiz WAD dosyası".to_string());
+                    Err("Geçersiz WAD dosyası".to_string())
                 }
             }
             Err(e) => {
-                let err_msg = alloc::format!("Download failed: {:?}", e);
+                let err_msg = alloc::format!("İndirme başarısız: {:?}", e);
                 crate::serial_println!("[DOOM] {}", err_msg);
                 self.state = DoomLauncherState::Error(err_msg.clone());
                 Err(err_msg)
             }
         }
     }
-    
-    /// Load WAD from filesystem
+
+    /// Belirtilen yoldan WAD dosyasını yükler.
     pub fn load_wad(&mut self, path: &str) -> Result<(), String> {
         self.state = DoomLauncherState::Loading;
-        
-        // In real implementation, would load from filesystem
-        // For now, just return error
-        let err = "Filesystem not available".to_string();
+
+        // Gerçek uygulamada dosya sisteminden yüklenır.
+        // Şimdilik hata döner
+        let err = "Dosya sistemi kullanılamıyor".to_string();
         self.state = DoomLauncherState::Error(err.clone());
         Err(err)
     }
-    
-    /// Launch Doom
+
+    /// Doom oyununu başlatır.
+    /// WAD yüklü değilse hata döner.
     pub fn launch(&mut self) -> Result<(), String> {
         if self.wad.is_none() {
-            return Err("No WAD loaded".to_string());
+            return Err("WAD yüklenmedi".to_string());
         }
-        
+
         self.state = DoomLauncherState::Running;
-        
-        // Initialize Doom engine
+
+        // Doom motorunu başlat
         if !crate::doom::init_doom() {
-            self.state = DoomLauncherState::Error("Failed to initialize Doom".to_string());
-            return Err("Failed to initialize Doom".to_string());
+            self.state = DoomLauncherState::Error("Doom başlatılamadı".to_string());
+            return Err("Doom başlatılamadı".to_string());
         }
-        
-        crate::serial_println!("[DOOM] Game launched");
+
+        crate::serial_println!("[DOOM] Oyun başlatıldı");
         Ok(())
     }
-    
-    /// Stop Doom
+
+    /// Doom oyununu durdurur.
     pub fn stop(&mut self) {
         crate::doom::shutdown_doom();
         self.state = DoomLauncherState::Idle;
     }
-    
-    /// Get state
+
+    /// Mevcut başlatıcı durumunu döndürür.
     pub fn state(&self) -> &DoomLauncherState {
         &self.state
     }
-    
-    /// Get download progress (0-100)
+
+    /// İndirme ilerleme yüzdesini (0-100) döndürür.
     pub fn download_progress(&self) -> usize {
         if self.download_size == 0 {
             return 0;
         }
         (self.download_progress * 100) / self.download_size
     }
-    
-    /// Get WAD
+
+    /// Yüklü WAD referansını döndürür.
     pub fn wad(&self) -> Option<&WadFile> {
         self.wad.as_ref()
     }
@@ -315,9 +339,10 @@ impl Default for DoomLauncher {
 }
 
 // ============================================================================
-// GLOBAL LAUNCHER
+// GLOBAL BAŞLATICI
 // ============================================================================
 
+/// Global Doom başlatıcısı — Mutex ile güvenli çok iş parçacıklı erişim.
 static DOOM_LAUNCHER: Mutex<DoomLauncher> = Mutex::new(DoomLauncher {
     state: DoomLauncherState::Idle,
     wad: None,
@@ -325,38 +350,39 @@ static DOOM_LAUNCHER: Mutex<DoomLauncher> = Mutex::new(DoomLauncher {
     download_size: 0,
 });
 
-/// Initialize launcher
+/// Başlatıcıyı hazırlar.
 pub fn init() {
-    crate::serial_println!("[DOOM] Launcher initialized");
+    crate::serial_println!("[DOOM] Başlatıcı hazır");
 }
 
-/// Download and launch Doom
+/// WAD dosyasını indirir ve oyunu başlatır.
+/// WAD zaten varsa doğrudan başlatır.
 pub fn download_and_launch() -> Result<(), String> {
     let mut launcher = DOOM_LAUNCHER.lock();
-    
-    // Check if already downloaded
+
+    // Zaten indirilmiş mi kontrol et
     if launcher.wad.is_some() {
         return launcher.launch();
     }
-    
-    // Download WAD
+
+    // WAD'ı indir
     launcher.download_wad()?;
-    
-    // Launch
+
+    // Başlat
     launcher.launch()
 }
 
-/// Get launcher state
+/// Başlatıcı durumunu döndürür.
 pub fn get_state() -> DoomLauncherState {
     DOOM_LAUNCHER.lock().state.clone()
 }
 
-/// Stop game
+/// Oyunu durdurur.
 pub fn stop() {
     DOOM_LAUNCHER.lock().stop();
 }
 
-/// Get WAD lump
+/// Belirtilen isimde WAD lump verisini döndürür.
 pub fn get_wad_lump(name: &str) -> Option<Vec<u8>> {
     let launcher = DOOM_LAUNCHER.lock();
     if let Some(wad) = &launcher.wad {
@@ -367,37 +393,38 @@ pub fn get_wad_lump(name: &str) -> Option<Vec<u8>> {
 }
 
 // ============================================================================
-// CLI COMMAND
+// KOMUTSATIRı KOMUTU
 // ============================================================================
 
-/// CLI command: doom
+/// `doom` shell komutunu işler.
+/// Kullanım: doom [download|launch|stop|status]
 pub fn cmd_doom(args: &[&str]) -> String {
     if args.is_empty() {
-        return "Usage: doom [download|launch|stop|status]\n".to_string();
+        return "Kullanım: doom [download|launch|stop|status]\n".to_string();
     }
-    
+
     match args[0] {
         "download" => {
             match download_and_launch() {
-                Ok(()) => "Doom downloaded and launched!\n".to_string(),
-                Err(e) => alloc::format!("Error: {}\n", e),
+                Ok(()) => "Doom indirildi ve başlatıldı!\n".to_string(),
+                Err(e) => alloc::format!("Hata: {}\n", e),
             }
         }
         "launch" => {
             let mut launcher = DOOM_LAUNCHER.lock();
             match launcher.launch() {
-                Ok(()) => "Doom launched!\n".to_string(),
-                Err(e) => alloc::format!("Error: {}\n", e),
+                Ok(()) => "Doom başlatıldı!\n".to_string(),
+                Err(e) => alloc::format!("Hata: {}\n", e),
             }
         }
         "stop" => {
             stop();
-            "Doom stopped.\n".to_string()
+            "Doom durduruldu.\n".to_string()
         }
         "status" => {
             let state = get_state();
-            alloc::format!("Doom status: {:?}\n", state)
+            alloc::format!("Doom durumu: {:?}\n", state)
         }
-        _ => "Unknown command. Use: download, launch, stop, status\n".to_string(),
+        _ => "Bilinmeyen komut. Kullanın: download, launch, stop, status\n".to_string(),
     }
 }

@@ -1,6 +1,19 @@
 //! # Finder Application
 //!
 //! macOS Finder-like file browser with sidebar, tabs, and column/list/icon views
+//!
+//! Bu modül, macOS Finder'a benzer bir dosya tarayıcısını uygular.
+//! Finder, echOS masaüstünün birincil dosya yönetim aracıdır.
+//!
+//! Temel özellikler:
+//! - **Kenar çubuğu (Sidebar)**: Sık kullanılan konumlara hızlı erişim.
+//! - **Sekmeli gezinme**: Birden fazla dizini aynı anda açık tutabilirsiniz.
+//! - **Çoklu görünüm**: Liste, simge, sütun ve galeri görünümleri.
+//! - **Etiket sistemi (Tags)**: Dosyalara renk etiketleri ile hızlı kategorileme.
+//! - **Etiketlenmiş gezinme (History)**: Her sekme bağımsız ileri/geri geçmişi tutar.
+//!
+//! Mimari not: `FinderWindow`, `FinderTab` nesnelerinin listesini sahiplenir (owns).
+//! Her sekme gezinme geçmişini kendi içinde tutar; bu, bağımsız gezinmeye olanak tanır.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -18,58 +31,63 @@ use crate::gui::Rect;
 // ============================================================================
 // FINDER CONSTANTS
 // ============================================================================
+// Finder arayüzünün temel ölçüleri.
+// Bu sabitler, pencere içindeki bileşenlerin piksel boyutlarını belirler.
 
-/// Sidebar width
+/// Kenar çubuğunun genişliği (sık kullanılanlar ve konumlar listesi)
 pub const SIDEBAR_WIDTH: usize = 180;
 
-/// Toolbar height
+/// Araç çubuğunun yüksekliği (geri/ileri butonları ve görünüm seçici)
 pub const TOOLBAR_HEIGHT: usize = 40;
 
-/// Tab bar height
+/// Sekme çubuğunun yüksekliği
 pub const TAB_BAR_HEIGHT: usize = 28;
 
-/// Status bar height
+/// Durum çubuğunun yüksekliği (seçili öğe sayısı ve disk alanı)
 pub const STATUS_BAR_HEIGHT: usize = 24;
 
-/// Row height in list view
+/// Liste görünümünde her satırın yüksekliği
 pub const LIST_ROW_HEIGHT: usize = 22;
 
-/// Icon size in icon view
+/// Simge görünümünde simgelerin boyutu
 pub const ICON_VIEW_SIZE: usize = 96;
 
-/// Column width in column view
+/// Sütun görünümünde her sütunun genişliği
 pub const COLUMN_WIDTH: usize = 200;
 
 // ============================================================================
 // FILE ENTRY
 // ============================================================================
+// Finder'da gösterilen her dosya veya klasörü temsil eden yapı.
+// `Vec<FileTag>` alanı, bir dosyanın birden fazla renk etiketine sahip
+// olabilmesini sağlar. Etiketler macOS Finder'daki renkli noktalara karşılık gelir.
 
-/// File or folder entry
+/// Finder'da listelenen bir dosya veya klasör girişi
 #[derive(Clone, Debug)]
 pub struct FinderEntry {
-    /// Entry name
+    /// Giriş adı
     pub name: String,
-    /// Full path
+    /// Tam dosya yolu
     pub path: String,
-    /// Is directory
+    /// Klasör mü?
     pub is_dir: bool,
-    /// File size
+    /// Dosya boyutu (bayt)
     pub size: u64,
-    /// Modified timestamp
+    /// Son değiştirme zamanı
     pub modified: u64,
-    /// Created timestamp
+    /// Oluşturulma zamanı
     pub created: u64,
-    /// File extension
+    /// Dosya uzantısı (küçük harf, nokta olmadan)
     pub extension: String,
-    /// Is hidden
+    /// Gizli dosya mı? (nokta ile başlıyor mu)
     pub hidden: bool,
-    /// Is selected
+    /// Seçili mi?
     pub selected: bool,
-    /// Is expanded (for folders in list view)
+    /// Genişletilmiş mi? (liste görünümünde alt içeriği göster)
     pub expanded: bool,
-    /// Icon type
+    /// Dosya türüne göre simge
     pub icon: FileIcon,
-    /// Tags/colors
+    /// Dosyaya atanmış renk etiketleri
     pub tags: Vec<FileTag>,
 }
 
@@ -89,15 +107,18 @@ pub enum FileIcon {
     Custom(u16),
 }
 
+// Renk etiketleri: macOS Finder'daki etiket sistemi.
+// Kullanıcılar dosyalara renk etiketleri atayarak proje veya öncelik
+// bazında gruplandırabilir. Her etiket bir u32 renk değeriyle de temsil edilir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileTag {
-    Red,
-    Orange,
-    Yellow,
-    Green,
-    Blue,
-    Purple,
-    Gray,
+    Red,    // Kırmızı etiket
+    Orange, // Turuncu etiket
+    Yellow, // Sarı etiket
+    Green,  // Yeşil etiket
+    Blue,   // Mavi etiket
+    Purple, // Mor etiket
+    Gray,   // Gri etiket
 }
 
 impl FinderEntry {
@@ -174,21 +195,24 @@ impl FinderEntry {
 // ============================================================================
 // SIDEBAR ITEM
 // ============================================================================
+// Kenar çubuğu öğesi: sabit konumlara (Masaüstü, Belgeler vb.) veya
+// bağlı sürücülere hızlı erişim için kullanılan kısayol yapısı.
+// `is_header` öğeleri tıklanamaz; sadece bölüm başlığı olarak gösterilir.
 
-/// Sidebar item
+/// Kenar çubuğundaki bir giriş (konum, aygıt veya bölüm başlığı)
 #[derive(Clone, Debug)]
 pub struct SidebarItem {
-    /// Item name
+    /// Öğenin gösterilen adı (örn. "Belgeler", "Masaüstü")
     pub name: String,
-    /// Path or action
+    /// Öğenin işaret ettiği yol veya tetiklediği eylem
     pub path: String,
-    /// Icon
+    /// Öğeyi temsil eden simge türü
     pub icon: SidebarIcon,
-    /// Is selected
+    /// Şu an seçili mi? (vurgulanmış görünür)
     pub selected: bool,
-    /// Is section header
+    /// Bu öğe tıklanamaz bir bölüm başlığı mı?
     pub is_header: bool,
-    /// Can eject (for external drives)
+    /// Harici sürücü veya ağ konumu ise çıkarılabilir mi?
     pub can_eject: bool,
 }
 
@@ -239,29 +263,32 @@ impl SidebarItem {
 // ============================================================================
 // FINDER TAB
 // ============================================================================
+// Her sekme, bağımsız bir gezinme geçmişi ve görünüm durumu tutar.
+// Bu yapı, bir tarayıcı sekmesine benzer şekilde çalışır.
+// `history: Vec<String>` ile geri/ileri gezinme O(1) erişimle mümkündür.
 
-/// A tab in Finder
+/// Finder penceresinde bağımsız bir sekme
 #[derive(Clone, Debug)]
 pub struct FinderTab {
-    /// Tab ID
+    /// Sekmenin benzersiz kimliği
     pub id: u32,
-    /// Current path
+    /// Şu an gösterilen dizin yolu
     pub path: String,
-    /// Tab title
+    /// Sekme başlığı (genellikle dizin adı)
     pub title: String,
-    /// View mode
+    /// Aktif görünüm modu (Liste, Simge, Sütun, Galeri)
     pub view_mode: ViewMode,
-    /// Scroll position
+    /// Liste/simge görünümündeki kaydırma pozisyonu
     pub scroll_offset: usize,
-    /// Sort column
+    /// Hangi sütuna göre sıralanıyor
     pub sort_column: SortColumn,
-    /// Sort ascending
+    /// Artan sıralama mı?
     pub sort_ascending: bool,
-    /// Selected entries
+    /// Seçili giriş indeksleri
     pub selected_entries: Vec<usize>,
-    /// History
+    /// Bu sekmenin gezinme geçmişi
     pub history: Vec<String>,
-    /// History position
+    /// Geçmiş listesinde bulunulan konum
     pub history_pos: usize,
 }
 
@@ -341,48 +368,51 @@ impl FinderTab {
 // ============================================================================
 // FINDER WINDOW
 // ============================================================================
+// Ana Finder penceresi: sekmeleri, kenar çubuğunu ve içerik alanını yönetir.
+// Sütun görünümünde birden fazla sütun olabilir; her sütun bir alt dizini temsil eder.
+// Sürükle-bırak için `dragging_entry` ve `drop_target` alanları kullanılır.
 
-/// Finder window
+/// Finder ana penceresi
 pub struct FinderWindow {
-    /// Window rect
+    /// Pencerenin ekrandaki konumu ve boyutu
     pub rect: Rect,
-    /// Tabs
+    /// Açık sekmelerin listesi
     pub tabs: Vec<FinderTab>,
-    /// Active tab index
+    /// Aktif sekmenin indeksi
     pub active_tab: usize,
-    /// Sidebar items
+    /// Kenar çubuğu öğeleri (Yerler, Etiketler vb.)
     pub sidebar: Vec<SidebarItem>,
-    /// Current directory entries
+    /// Mevcut dizindeki giriş listesi
     pub entries: Vec<FinderEntry>,
-    /// Show sidebar
+    /// Kenar çubuğu gösterilsin mi?
     pub show_sidebar: bool,
-    /// Show status bar
+    /// Durum çubuğu gösterilsin mi?
     pub show_status_bar: bool,
-    /// Show hidden files
+    /// Gizli dosyalar gösterilsin mi?
     pub show_hidden: bool,
-    /// Search query
+    /// Arama kutusu metni
     pub search_query: String,
-    /// Is searching
+    /// Arama modu aktif mi?
     pub searching: bool,
-    /// Search results
+    /// Arama sonuçları (arama modunda doldurulur)
     pub search_results: Vec<FinderEntry>,
-    /// Hovered sidebar item
+    /// Kenar çubuğunda fare üzerindeki öğenin indeksi
     pub hovered_sidebar: Option<usize>,
-    /// Hovered entry
+    /// İçerik alanında fare üzerindeki öğenin indeksi
     pub hovered_entry: Option<usize>,
-    /// Column scroll offsets (for column view)
+    /// Sütun görünümünde her sütunun kaydırma pozisyonu
     pub column_offsets: Vec<usize>,
-    /// Column paths (for column view)
+    /// Sütun görünümünde her sütunun gösterdiği yol
     pub column_paths: Vec<String>,
-    /// Next tab ID
+    /// Bir sonraki sekme oluşturulurken atanacak ID
     pub next_tab_id: u32,
-    /// Dragging entry
+    /// Sürüklenen öğenin indeksi (sürükle-bırak için)
     pub dragging_entry: Option<usize>,
-    /// Drop target
+    /// Bırakma hedefinin indeksi
     pub drop_target: Option<usize>,
-    /// Rename target
+    /// Yeniden adlandırılmakta olan öğenin indeksi
     pub rename_target: Option<usize>,
-    /// Rename text
+    /// Yeniden adlandırma metin kutusu içeriği
     pub rename_text: String,
 }
 
@@ -1154,6 +1184,9 @@ pub enum FinderAction {
 // ============================================================================
 // GLOBAL FINDER
 // ============================================================================
+// Finder'ın global statik örneği. Her bileşen `get_finder()` ile bu
+// örneği kilitleyip (lock) içeriye erişebilir. Kilit bırakıldığında
+// (MutexGuard scope'dan çıkınca) otomatik olarak serbest bırakılır.
 
 lazy_static::lazy_static! {
     static ref FINDER: Mutex<FinderWindow> = Mutex::new(FinderWindow::new(Rect {

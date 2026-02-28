@@ -76,7 +76,7 @@ pub enum TaskState {
 }
 
 // ============================================================================
-// FPU/SSE STATE
+// FPU/SSE DURUMU
 // ============================================================================
 
 /// x86_64 FXSAVE/FXRSTOR için 512 byte'lık alan.
@@ -102,10 +102,10 @@ pub struct TaskContext {
     pub r13: u64,
     pub r12: u64,
     pub rbx: u64,
-    pub rbp: u64,             // Base pointer
-    pub rsp: u64,             // Stack pointer
-    pub rflags: u64,          // CPU flags
-    pub rip: u64,             // Instruction pointer (dönüş adresi)
+    pub rbp: u64,             // Taban işaretçisi (base pointer)
+    pub rsp: u64,             // Yığın işaretçisi (stack pointer)
+    pub rflags: u64,          // İşlemci bayrakları (CPU flags)
+    pub rip: u64,             // Komut işaretçisi (instruction pointer / dönüş adresi)
     pub padding: u64,         // 16-byte alignment için
     pub fx_state: FxSaveArea, // SSE/FPU durumu
 }
@@ -214,9 +214,9 @@ impl DerefMut for Task {
 // doğrudan erişim metodları yazılabilir. Şimdilik doğrudan erişim.
 
 impl Task {
-    // Helper accessors to maintain compatibility with existing code where possible,
-    // or we refactor the usages. Let's provide direct accessors for common fields.
-    
+    // Geriye dönük uyumluluk için yardımcı erişici metodlar.
+    // Mevcut kodu refactor etmeden uyumluluğu koruyan doğrudan erişici metodlar.
+
     pub fn id(&self) -> TaskId { self.hot.id }
     pub fn state(&self) -> TaskState { self.hot.state }
     // ... diğerleri için refactor gerekecek.
@@ -290,7 +290,7 @@ impl Task {
                 exec_runtime: 0,
                 ptrace_flags: 0,
                 tracer_pid: None,
-                seccomp_mode: 0, // 0 = Disabled
+                seccomp_mode: 0, // 0 = Devre dışı
                 stack,
                 is_background: false,
             },
@@ -317,11 +317,11 @@ impl Task {
     }
 }
 
-// Cold data için de helper metodlar ekleyelim
+// Cold data için de yardımcı metodlar
 impl Task {
-    // Cold data accessors/mutators
+    // Cold data erişici/değiştirici metodlar
     pub fn name(&self) -> &'static str { self.cold.name }
     pub fn mode(&self) -> ExecutionMode { self.cold.mode }
-    
+
     // Diğer cold field'lara doğrudan `task.cold.xxx` ile erişilir.
 }

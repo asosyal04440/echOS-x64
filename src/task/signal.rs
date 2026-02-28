@@ -1,7 +1,45 @@
-//! Signal Handling and Job Control
+//! # echOS Sinyal İşleme ve İş Kontrolü (Signal Handling & Job Control)
 //!
-//! POSIX uyumlu signal ve job control sistemi.
-//! SIGINT, SIGTERM, SIGKILL, SIGTSTP, SIGCONT, SIGCHLD vb.
+//! POSIX uyumlu sinyal (signal) ve iş kontrolü (job control) sistemi.
+//! SIGINT, SIGTERM, SIGKILL, SIGTSTP, SIGCONT, SIGCHLD vb. sinyalleri destekler.
+//!
+//! ## POSIX Sinyal Teslim Mekanizması
+//!
+//! ```text
+//!  ┌──────────────────────────────────────────────────────────────┐
+//!  │             POSIX SİNYAL TESLİM AKIŞI                       │
+//!  │                                                              │
+//!  │  Sinyal Kaynakları:                                          │
+//!  │  kill(pid, SIGTERM)  ─→  sys_kill()                         │
+//!  │  Ctrl+C              ─→  generate_terminal_signal(SIGINT)   │
+//!  │  donanım hatası      ─→  SIGSEGV / SIGFPE / SIGILL          │
+//!  │                           ↓                                  │
+//!  │  Hedef process'in sigpending kuyruğuna eklenir               │
+//!  │                           ↓                                  │
+//!  │  Kernel → Kullanıcı alanına dönüşte deliver_signals() çağrılır│
+//!  │        ├── Sinyal maskelenmiş (sigmask)?  → Bekle            │
+//!  │        ├── Eylem: SIG_IGN?               → Yoksay           │
+//!  │        ├── Eylem: SIG_DFL?               → Varsayılan uygula│
+//!  │        └── Eylem: Catch(handler_addr)?   → Handler çağır    │
+//!  │                           ↓                                  │
+//!  │  Handler çalışırken sinyal otomatik maskelenir               │
+//!  │  (SA_NODEFER bayraksız), handler bitince maske geri yüklenir │
+//!  └──────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Signal Mask (Sinyal Maskesi)
+//!
+//! ```text
+//!  64-bit mask: her bit bir sinyal numarasını temsil eder
+//!  bit 0 = SIGHUP (1), bit 1 = SIGINT (2), ..., bit 30 = SIGSYS (31)
+//!
+//!  Örnek: SIGINT ve SIGTERM maskele (blokla)
+//!  mask = (1 << (SIGINT-1)) | (1 << (SIGTERM-1)) = 0x4002
+//!
+//!  SIG_BLOCK   → mevcut mask | yeni_mask (sinyaller eklenir)
+//!  SIG_UNBLOCK → mevcut mask & ~yeni_mask (sinyaller kaldırılır)
+//!  SIG_SETMASK → mask tamamen yeni_mask olarak ayarlanır
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -21,61 +59,61 @@ pub enum Signal {
     SIGINT = 2,
     /// Quit (Ctrl+\)
     SIGQUIT = 3,
-    /// Illegal instruction
+    /// Geçersiz komut (talimat)
     SIGILL = 4,
-    /// Trace trap (debugger)
+    /// İzleme kapanı (hata ayıklayıcı)
     SIGTRAP = 5,
-    /// Abort
+    /// Durdurma (programın kendisini durdurması)
     SIGABRT = 6,
-    /// Bus error
+    /// Veri yolu hatası
     SIGBUS = 7,
-    /// Floating-point exception
+    /// Kayan nokta istisnası
     SIGFPE = 8,
-    /// Kill (uncatchable)
+    /// Sonlandırma (yakalanamaz)
     SIGKILL = 9,
-    /// User-defined 1
+    /// Kullanıcı tanımlı sinyal 1
     SIGUSR1 = 10,
-    /// Segmentation fault
+    /// Segmentasyon hatası
     SIGSEGV = 11,
-    /// User-defined 2
+    /// Kullanıcı tanımlı sinyal 2
     SIGUSR2 = 12,
-    /// Pipe write with no reader
+    /// Okuyucusu olmayan boru yazma
     SIGPIPE = 13,
-    /// Alarm clock
+    /// Alarm saati
     SIGALRM = 14,
-    /// Termination
+    /// Sonlandırma (nezaket isteği)
     SIGTERM = 15,
-    /// Stack fault
+    /// Yığın hatası
     SIGSTKFLT = 16,
-    /// Child stopped or terminated
+    /// Alt süreç durdu veya sonlandı
     SIGCHLD = 17,
-    /// Continue (from stop)
+    /// Devam et (durdurulmuştan)
     SIGCONT = 18,
     /// Stop (Ctrl+Z)
     SIGSTOP = 19,
     /// Terminal stop (Ctrl+Z)
     SIGTSTP = 20,
-    /// Background read from tty
+    /// Terminal okuma (arka plan, terminalden okuma engeli)
     SIGTTIN = 21,
-    /// Background write to tty
+    /// Terminal yazma (arka plan, terminale yazma engeli)
     SIGTTOU = 22,
-    /// Urgent condition
+    /// Acil durum (out-of-band veri)
     SIGURG = 23,
-    /// CPU limit exceeded
+    /// CPU limiti aşıldı
     SIGXCPU = 24,
-    /// File size limit exceeded
+    /// Dosya boyutu limiti aşıldı
     SIGXFSZ = 25,
-    /// Virtual timer expired
+    /// Sanal zamanlayıcı süre aşımı
     SIGVTALRM = 26,
-    /// Profiling timer expired
+    /// Profilleme zamanlayıcısı süre aşımı
     SIGPROF = 27,
-    /// Window size change
+    /// Pencere boyutu değişikliği
     SIGWINCH = 28,
-    /// I/O possible
+    /// Asenkron G/Ç (I/O) mümkün
     SIGIO = 29,
-    /// Power failure
+    /// Güç arızası
     SIGPWR = 30,
-    /// Bad system call
+    /// Hatalı sistem çağrısı
     SIGSYS = 31,
 }
 
@@ -176,14 +214,14 @@ impl Signal {
     }
 }
 
-/// Signal action
+/// Sinyal eylemi (Signal action)
 #[derive(Clone, Copy, Debug)]
 pub enum SignalAction {
-    /// Default action
+    /// Varsayılan eylem (SIG_DFL)
     Default,
-    /// Ignore signal
+    /// Sinyali yoksay (SIG_IGN)
     Ignore,
-    /// Catch with handler (user-space address)
+    /// Kullanıcı alanı işleyicisi (handler) ile yakala — adres belirtilir
     Catch(usize),
 }
 
@@ -236,26 +274,26 @@ pub struct SigInfo {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct SigAction {
-    pub sa_handler: usize,  // Function pointer or SIG_IGN/SIG_DFL
+    pub sa_handler: usize,  // Fonksiyon işaretçisi veya SIG_IGN/SIG_DFL
     pub sa_mask: u64,
     pub sa_flags: u32,
     pub sa_restorer: usize,
 }
 
-// Special handler values
-pub const SIG_DFL: usize = 0;  // Default
-pub const SIG_IGN: usize = 1;  // Ignore
+// Özel işleyici değerleri
+pub const SIG_DFL: usize = 0;  // Varsayılan eylem
+pub const SIG_IGN: usize = 1;  // Sinyali yoksay
 
-// sigaction flags (sa_flags)
-pub const SA_NOCLDSTOP: u32 = 0x00000001;  // Don't send SIGCHLD when child stops
-pub const SA_NOCLDWAIT: u32 = 0x00000002;  // Don't create zombie on child death
-pub const SA_SIGINFO: u32   = 0x00000004;  // Use sa_sigaction handler
-pub const SA_RESTART: u32   = 0x10000000;  // Restart syscalls on signal
-pub const SA_NODEFER: u32   = 0x40000000;  // Don't block signal while handling
-pub const SA_RESETHAND: u32 = 0x80000000;  // Reset to SIG_DFL after handling
-pub const SA_ONSTACK: u32   = 0x08000000;  // Use alternate signal stack
+// sigaction bayrakları (sa_flags)
+pub const SA_NOCLDSTOP: u32 = 0x00000001;  // Alt süreç durunca SIGCHLD gönderme
+pub const SA_NOCLDWAIT: u32 = 0x00000002;  // Alt süreç ölünce zombi oluşturma
+pub const SA_SIGINFO: u32   = 0x00000004;  // sa_sigaction işleyicisini kullan
+pub const SA_RESTART: u32   = 0x10000000;  // Sinyal sonrası sistem çağrısını yeniden başlat
+pub const SA_NODEFER: u32   = 0x40000000;  // İşleyici çalışırken sinyali bloklamaz
+pub const SA_RESETHAND: u32 = 0x80000000;  // İşleyici sonrası SIG_DFL'ye döner
+pub const SA_ONSTACK: u32   = 0x08000000;  // Değişken sinyal yığınını kullan
 
-// sigprocmask how values
+// sigprocmask yöntemi değerleri
 pub const SIG_BLOCK: i32   = 0;
 pub const SIG_UNBLOCK: i32 = 1;
 pub const SIG_SETMASK: i32 = 2;
@@ -570,40 +608,40 @@ pub fn init() {
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARAYÜZÜ
 // ============================================================================
 
-/// sigaction syscall implementation
-/// 
-/// # Arguments
-/// - `signum`: Signal number (1-31)
-/// - `act`: New signal action (optional)
-/// - `oldact`: Buffer to store old action (optional)
-/// 
-/// # Returns
-/// 0 on success, negative errno on failure
+/// sigaction(2) sistem çağrısı uygulaması.
+///
+/// # Parametreler
+/// - `signum`: Sinyal numarası (1-31)
+/// - `act`: Yeni sinyal eylemi (isteğe bağlı)
+/// - `oldact`: Eski eylemi saklamak için tampon (isteğe bağlı)
+///
+/// # Dönen Değer
+/// Başarıda 0, hata durumunda negatif errno
 pub fn sys_sigaction(
     handlers: &mut SignalHandlers,
     signum: i32,
     act: Option<SigAction>,
     oldact: Option<&mut SigAction>,
 ) -> i32 {
-    // Validate signal number
+    // Sinyal numarası doğrulama
     if signum < 1 || signum > 31 {
         return -22; // EINVAL
     }
-    
+
     let sig = match Signal::from_number(signum as u8) {
         Some(s) => s,
         None => return -22, // EINVAL
     };
-    
-    // SIGKILL and SIGSTOP cannot be caught
+
+    // SIGKILL ve SIGSTOP yakalanamaz
     if !sig.is_catchable() && act.is_some() {
         return -22; // EINVAL
     }
-    
-    // Store old action if requested
+
+    // İsteniyorsa eski eylemi sakla
     if let Some(old) = oldact {
         let current = handlers.get_action(sig);
         *old = match current {
@@ -628,7 +666,7 @@ pub fn sys_sigaction(
         };
     }
     
-    // Set new action if provided
+    // Yeni eylem varsa uygula
     if let Some(new_act) = act {
         let action = if new_act.sa_handler == SIG_DFL {
             SignalAction::Default
@@ -637,15 +675,15 @@ pub fn sys_sigaction(
         } else {
             SignalAction::Catch(new_act.sa_handler)
         };
-        
+
         handlers.set_action(sig, action);
-        
-        // Apply signal mask from sa_mask
+
+        // sa_mask'tan sinyal maskesini uygula
         if new_act.sa_flags & SA_NODEFER == 0 {
-            // Add signal to mask during handler execution
+            // İşleyici çalışırken sinyali maske içine ekle
             let mut mask = new_act.sa_mask;
             if new_act.sa_flags & SA_RESETHAND != 0 {
-                // Reset to default after handler
+                // İşleyici sonrası varsayılana döner
             }
             handlers.set_mask(mask);
         }
@@ -656,41 +694,41 @@ pub fn sys_sigaction(
     0 // Success
 }
 
-/// sigprocmask syscall implementation
-/// 
-/// # Arguments
-/// - `how`: SIG_BLOCK, SIG_UNBLOCK, or SIG_SETMASK
-/// - `set`: New signal set (optional)
-/// - `oldset`: Buffer to store old mask (optional)
-/// 
-/// # Returns
-/// 0 on success, negative errno on failure
+/// sigprocmask(2) sistem çağrısı uygulaması.
+///
+/// # Parametreler
+/// - `how`: SIG_BLOCK, SIG_UNBLOCK veya SIG_SETMASK
+/// - `set`: Yeni sinyal kümesi (isteğe bağlı)
+/// - `oldset`: Eski maskeyi saklamak için tampon (isteğe bağlı)
+///
+/// # Dönen Değer
+/// Başarıda 0, hata durumunda negatif errno
 pub fn sys_sigprocmask(
     handlers: &SignalHandlers,
     how: i32,
     set: Option<u64>,
     oldset: Option<&mut u64>,
 ) -> i32 {
-    // Store old mask if requested
+    // İsteniyorsa eski maskeyi sakla
     if let Some(old) = oldset {
         *old = handlers.get_mask();
     }
-    
-    // Apply new mask if provided
+
+    // Yeni maske varsa uygula
     if let Some(new_mask) = set {
         match how {
             SIG_BLOCK => {
-                // Add signals to mask
+                // Sinyalleri maskeye ekle
                 let current = handlers.get_mask();
                 handlers.set_mask(current | new_mask);
             }
             SIG_UNBLOCK => {
-                // Remove signals from mask
+                // Sinyalleri maskeden çıkar
                 let current = handlers.get_mask();
                 handlers.set_mask(current & !new_mask);
             }
             SIG_SETMASK => {
-                // Replace mask entirely
+                // Maskeyi tamamen değiştir
                 handlers.set_mask(new_mask);
             }
             _ => return -22, // EINVAL
@@ -702,33 +740,33 @@ pub fn sys_sigprocmask(
     0 // Success
 }
 
-/// sigpending syscall implementation
-/// 
-/// Returns the set of pending signals that are blocked
+/// sigpending(2) sistem çağrısı uygulaması.
+///
+/// Maskelenmiş bekleyen sinyallerin kümesini döndürür.
 pub fn sys_sigpending(handlers: &SignalHandlers) -> u64 {
     handlers.get_pending()
 }
 
-/// sigsuspend syscall implementation
-/// 
-/// Atomically replaces signal mask and suspends the process
-/// until a signal is caught
+/// sigsuspend(2) sistem çağrısı uygulaması.
+///
+/// Sinyal maskesini atomik olarak değiştirir ve bir sinyal yakalanana
+/// kadar process'i askıya alır.
 pub fn sys_sigsuspend(handlers: &SignalHandlers, mask: u64) -> i32 {
     let old_mask = handlers.get_mask();
     handlers.set_mask(mask);
-    
-    // TODO: Actually suspend the process
-    // This should be integrated with the scheduler
-    
-    // When we return, restore the old mask
+
+    // TODO: Process'i gerçekten askıya al
+    // Zamanlayıcı entegrasyonu gerektirir
+
+    // Geri dönerken eski maskeyi geri yükle
     handlers.set_mask(old_mask);
-    
-    -4 // EINTR (interrupted by signal)
+
+    -4 // EINTR (sinyal tarafından kesildi)
 }
 
-/// kill syscall implementation
-/// 
-/// Send a signal to a process or process group
+/// kill(2) sistem çağrısı uygulaması.
+///
+/// Bir process veya process grubuna sinyal gönderir.
 pub fn sys_kill(pid: i32, signum: i32) -> i32 {
     if signum < 0 || signum > 31 {
         return -22; // EINVAL
@@ -740,11 +778,11 @@ pub fn sys_kill(pid: i32, signum: i32) -> i32 {
             None => return -22, // EINVAL
         }
     } else {
-        None // Signal 0 = existence check
+        None // Sinyal 0 = process varlık kontrolü
     };
     
     if pid > 0 {
-        // Send to specific process
+        // Belirli bir process'e gönder
         if let Some(signal) = sig {
             match send_signal(pid as usize, signal) {
                 Ok(()) => 0,
@@ -753,20 +791,20 @@ pub fn sys_kill(pid: i32, signum: i32) -> i32 {
                 Err(SignalError::InvalidSignal) => -22, // EINVAL
             }
         } else {
-            // Signal 0: just check if process exists
-            // TODO: Check if process exists
+            // Sinyal 0: sadece process'in var olup olmadığını kontrol et
+            // TODO: Process varlığını kontrol et
             0
         }
     } else if pid == 0 {
-        // Send to current process group
+        // Mevcut process grubuna gönder
         if let Some(signal) = sig {
-            // TODO: Get current process group
+            // TODO: Mevcut process grubunu al
             0
         } else {
             0
         }
     } else if pid == -1 {
-        // Send to all processes (except init)
+        // Tüm process'lere gönder (init hariç)
         if let Some(signal) = sig {
             match send_signal_all(signal) {
                 Ok(()) => 0,
@@ -776,7 +814,7 @@ pub fn sys_kill(pid: i32, signum: i32) -> i32 {
             0
         }
     } else {
-        // pid < -1: Send to process group -pid
+        // pid < -1: -pid'li process grubuna gönder
         if let Some(signal) = sig {
             match send_signal_pgroup((-pid) as usize, signal) {
                 Ok(()) => 0,
@@ -789,88 +827,88 @@ pub fn sys_kill(pid: i32, signum: i32) -> i32 {
     }
 }
 
-/// raise syscall implementation
-/// 
-/// Send a signal to the current process
+/// raise(2) sistem çağrısı uygulaması.
+///
+/// Mevcut process'e sinyal gönderir.
 pub fn sys_raise(signum: i32) -> i32 {
     let pid = crate::task::scheduler::current_task_id() as i32;
     sys_kill(pid, signum)
 }
 
-/// pause syscall implementation
-/// 
-/// Suspend the process until a signal is caught
+/// pause(2) sistem çağrısı uygulaması.
+///
+/// Bir sinyal yakalanana kadar process'i askıya alır.
 pub fn sys_pause() -> i32 {
-    // TODO: Integrate with scheduler to actually suspend
+    // TODO: Gerçekten askıya almak için zamanlayıcı entegrasyonu gerektirir
     -4 // EINTR
 }
 
-/// alarm syscall implementation
-/// 
-/// Schedule SIGALRM after specified seconds
+/// alarm(2) sistem çağrısı uygulaması.
+///
+/// Belirtilen saniye sonra SIGALRM gönderilmesini zamanlar.
 pub fn sys_alarm(seconds: u32) -> u32 {
-    // TODO: Implement timer-based alarm
-    // For now, return 0 (no previous alarm)
+    // TODO: Zamanlayıcı tabanlı alarm uygulaması
+    // Şimdilik 0 döndür (önceki alarm yok)
     0
 }
 
-/// sigaltstack syscall implementation
-/// 
-/// Set/get alternate signal stack
+/// sigaltstack(2) sistem çağrısı uygulaması.
+///
+/// Değişken sinyal yığınını ayarlar/alır.
 pub fn sys_sigaltstack(ss: Option<usize>, old_ss: Option<&mut usize>) -> i32 {
-    // TODO: Implement alternate signal stack
+    // TODO: Değişken sinyal yığınını uygula
     0
 }
 
 // ============================================================================
-// SIGNAL DELIVERY
+// SİNYAL TESLİMİ
 // ============================================================================
 
-/// Deliver pending signals to a process
-/// 
-/// This should be called before returning to userspace
-/// 
-/// # Returns
-/// - `Some(handler_addr)`: Signal handler to call
-/// - `None`: No signal to deliver
+/// Bekleyen sinyalleri process'e teslim eder.
+///
+/// Kullanıcı alanına dönmeden önce çağrılmalıdır.
+///
+/// # Dönen Değer
+/// - `Some((handler_addr, siginfo))`: Çağrılacak sinyal işleyicisi
+/// - `None`: Teslim edilecek sinyal yok
 pub fn deliver_signals(handlers: &mut SignalHandlers) -> Option<(usize, SigInfo)> {
-    // Get next pending signal that's not blocked
+    // Maskelenmemiş bir sonraki bekleyen sinyali al
     let sig = handlers.next_pending()?;
-    
-    // Clear pending flag
+
+    // Bekleyen durumu temizle
     handlers.clear_pending(sig);
-    
-    // Get handler
+
+    // İşleyiciyi al
     let action = handlers.get_action(sig).clone();
-    
+
     match action {
         SignalAction::Default => {
-            // Perform default action
+            // Varsayılan eylemi gerçekleştir
             let disposition = default_action(sig);
             match disposition {
                 SignalDisposition::Ignore => {
-                    // Do nothing
+                    // Hiçbir şey yapma
                     return None;
                 }
                 SignalDisposition::Terminate => {
-                    // Terminate process
-                    crate::serial_println!("[SIGNAL] Default action: terminate due to {}", sig.name());
-                    // TODO: Actually terminate the process
+                    // Process'i sonlandır
+                    crate::serial_println!("[SIGNAL] Varsayılan eylem: {} sebebiyle sonlandırıldı", sig.name());
+                    // TODO: Process'i gerçekten sonlandır
                     return None;
                 }
                 SignalDisposition::Stop => {
-                    // Stop process
-                    crate::serial_println!("[SIGNAL] Default action: stop due to {}", sig.name());
-                    // TODO: Stop the process
+                    // Process'i durdur
+                    crate::serial_println!("[SIGNAL] Varsayılan eylem: {} sebebiyle durduruldu", sig.name());
+                    // TODO: Process'i durdur
                     return None;
                 }
                 SignalDisposition::Continue => {
-                    // Continue if stopped
+                    // Durmuşsa devam et
                     return None;
                 }
                 SignalDisposition::CoreDump => {
-                    // Terminate with core dump
-                    crate::serial_println!("[SIGNAL] Default action: core dump due to {}", sig.name());
+                    // Bellek dökümü alarak sonlandır
+                    crate::serial_println!("[SIGNAL] Varsayılan eylem: {} sebebiyle bellek dökümü", sig.name());
                     // TODO: Core dump
                     return None;
                 }
@@ -880,7 +918,7 @@ pub fn deliver_signals(handlers: &mut SignalHandlers) -> Option<(usize, SigInfo)
             return None;
         }
         SignalAction::Catch(handler_addr) => {
-            // Build siginfo
+            // siginfo yapısını oluştur
             let siginfo = SigInfo {
                 si_signo: sig.number() as i32,
                 si_errno: 0,
@@ -890,20 +928,20 @@ pub fn deliver_signals(handlers: &mut SignalHandlers) -> Option<(usize, SigInfo)
                 si_status: 0,
                 si_value: 0,
             };
-            
-            // Block the signal during handler (unless SA_NODEFER)
+
+            // İşleyici çalışırken sinyali maskele (SA_NODEFER yoksa)
             handlers.block(sig);
-            
-            crate::serial_println!("[SIGNAL] Delivering {} to handler {:#x}", sig.name(), handler_addr);
-            
+
+            crate::serial_println!("[SIGNAL] {} sinyali {:#x} işleyicisine teslim ediliyor", sig.name(), handler_addr);
+
             return Some((handler_addr, siginfo));
         }
     }
-    
+
     None
 }
 
-/// Check if process has pending signals
+/// Process'in bekleyen sinyali olup olmadığını kontrol eder.
 pub fn has_pending_signals(handlers: &SignalHandlers) -> bool {
     let pending = handlers.get_pending();
     let mask = handlers.get_mask();
@@ -913,7 +951,7 @@ pub fn has_pending_signals(handlers: &SignalHandlers) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // ... (rest of the code remains the same)
+    // ... (kodun geri kalanı aynı kalır)
     #[test]
     fn test_signal_numbers() {
         assert_eq!(Signal::SIGINT.number(), 2);

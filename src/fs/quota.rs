@@ -1,6 +1,43 @@
 //! # Kota Yönetimi
 //!
 //! Kullanıcı ve gruplar için disk kotası desteği.
+//!
+//! ## Kota Uygulama Akışı
+//!
+//! ```text
+//!  Dosya yazma / inode oluşturma isteği
+//!          │
+//!          ▼
+//!  ┌──────────────────────────────────────────────────────┐
+//!  │  charge_blocks() / charge_inodes() çağrısı           │
+//!  │                                                      │
+//!  │  1. Kota etkin mi?   (is_enabled)                    │
+//!  │       Hayır ──► geç (Ok(()))                         │
+//!  │       Evet  ──► devam et                             │
+//!  │                                                      │
+//!  │  2. Katı sınır kontrolü (block_hard)                 │
+//!  │       yeni_kullanım > block_hard ──► OverQuota hata  │
+//!  │                                                      │
+//!  │  3. Yumuşak sınır kontrolü (block_soft)              │
+//!  │       yeni_kullanım > block_soft ──► zamanlayıcı     │
+//!  │       başlat (bgrace süresi)                         │
+//!  │                                                      │
+//!  │  4. Kullanımı güncelle (block_usage.store)           │
+//!  └──────────────────────────────────────────────────────┘
+//!
+//!  Kota türleri ve ID'leri:
+//!  ┌──────────────┬────────────┬──────────────────────────┐
+//!  │  Kota Türü   │  Sabit     │  ID alanı                │
+//!  ├──────────────┼────────────┼──────────────────────────┤
+//!  │  Kullanıcı   │  USRQUOTA  │  UID (user ID)           │
+//!  │  Grup        │  GRPQUOTA  │  GID (group ID)          │
+//!  │  Proje       │  PRJQUOTA  │  Proje ID'si             │
+//!  └──────────────┴────────────┴──────────────────────────┘
+//!
+//!  QuotaDqblk disk formatı (quotactl arayüzü):
+//!  [ bhardlimit | bsoftlimit | curspace | ihardlimit |
+//!    isoftlimit | curinodes  | btime    | itime      | valid ]
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

@@ -1,7 +1,53 @@
-//! # echOS io_uring Implementation
+//! # echOS io_uring Gerçekleştirimi
 //!
-//! High-performance async I/O using submission/completion queues
-//! Linux-compatible io_uring interface
+//! Yüksek performanslı asenkron G/Ç, gönderim/tamamlama kuyrukları kullanır.
+//! Linux uyumlu io_uring arayüzü.
+//!
+//! ## io_uring Nedir?
+//!
+//! io_uring, Linux 5.1 ile eklenen bir çekirdek-kullanıcı uzayı G/Ç arayüzüdür.
+//! Geleneksel `read()/write()` çağrılarına göre çok daha verimlidir:
+//! - Sistem çağrısı sayısını dramatik biçimde azaltır
+//! - Sıfır kopyalama (zero-copy) destekler
+//! - Çekirdek ile tek mmap üzerinden iletişim kurar
+//!
+//! ## Temel Mimari
+//!
+//! ```
+//! Kullanıcı Uzayı              Çekirdek
+//! ┌──────────────────┐         ┌──────────────────┐
+//! │  Uygulama        │         │  io_uring sürücü │
+//! │                  │         │                  │
+//! │  SQ (Gönderim)   │──mmap──►│  SQE işleme      │
+//! │  [SQE][SQE][SQE] │         │  (read/write/...) │
+//! │                  │         │                  │
+//! │  CQ (Tamamlama)  │◄─mmap──│  CQE üret        │
+//! │  [CQE][CQE][CQE] │         │  (sonuç + hata)  │
+//! └──────────────────┘         └──────────────────┘
+//!
+//! SQ  = Submission Queue  (Gönderim Kuyruğu)
+//! CQ  = Completion Queue  (Tamamlama Kuyruğu)
+//! SQE = Submission Queue Entry  (Gönderim Kuyruğu Girdisi)
+//! CQE = Completion Queue Entry  (Tamamlama Kuyruğu Girdisi)
+//! ```
+//!
+//! ## Tipik Kullanım Akışı
+//!
+//! ```
+//! 1. io_uring_setup(entries, params) → fd
+//!                    │
+//! 2. get_sqe(fd)     ▼
+//!    SQE doldur (opcode, fd, buf, len...)
+//!                    │
+//! 3. submit_sqe(fd, sqe)
+//!    SQ kuyruğuna ekle
+//!                    │
+//! 4. io_uring_enter(fd, to_submit, min_complete, flags)
+//!    Çekirdeğe bildir, isteğe bağlı bekle
+//!                    │
+//! 5. get_cqe(fd)     ▼
+//!    CQE'yi oku → res (dönüş değeri veya -errno)
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -13,66 +59,93 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// IO_URING CONSTANTS
+// IO_URING SABİTLERİ
 // ============================================================================
 
-/// io_uring opcode
-pub const IORING_OP_NOP: u8 = 0;
-pub const IORING_OP_READV: u8 = 1;
-pub const IORING_OP_WRITEV: u8 = 2;
-pub const IORING_OP_FSYNC: u8 = 3;
-pub const IORING_OP_READ_FIXED: u8 = 4;
-pub const IORING_OP_WRITE_FIXED: u8 = 5;
-pub const IORING_OP_POLL_ADD: u8 = 6;
-pub const IORING_OP_POLL_REMOVE: u8 = 7;
-pub const IORING_OP_SENDMSG: u8 = 8;
-pub const IORING_OP_RECVMSG: u8 = 9;
-pub const IORING_OP_TIMEOUT: u8 = 11;
-pub const IORING_OP_TIMEOUT_REMOVE: u8 = 12;
-pub const IORING_OP_ACCEPT: u8 = 13;
-pub const IORING_OP_ASYNC_CANCEL: u8 = 14;
-pub const IORING_OP_LINK_TIMEOUT: u8 = 15;
-pub const IORING_OP_CONNECT: u8 = 16;
-pub const IORING_OP_SEND: u8 = 17;
-pub const IORING_OP_RECV: u8 = 18;
-pub const IORING_OP_OPENAT: u8 = 19;
-pub const IORING_OP_CLOSE: u8 = 20;
-pub const IORING_OP_STATX: u8 = 21;
-pub const IORING_OP_SOCKET: u8 = 26;
-pub const IORING_OP_PROVIDE_BUFFERS: u8 = 31;
-pub const IORING_OP_REMOVE_BUFFERS: u8 = 32;
+/// io_uring işlem kodları (opcode'lar)
+///
+/// Her SQE'nin `opcode` alanı hangi sistem çağrısının asenkron olarak
+/// yapılacağını belirtir. Linux io_uring API'siyle tam uyumludur.
+pub const IORING_OP_NOP: u8 = 0;         // Hiçbir şey yapma (test için)
+pub const IORING_OP_READV: u8 = 1;       // Dağıtık okuma (scatter read)
+pub const IORING_OP_WRITEV: u8 = 2;      // Dağıtık yazma (gather write)
+pub const IORING_OP_FSYNC: u8 = 3;       // Dosya senkronizasyonu
+pub const IORING_OP_READ_FIXED: u8 = 4;  // Kayıtlı tamponla okuma
+pub const IORING_OP_WRITE_FIXED: u8 = 5; // Kayıtlı tamponla yazma
+pub const IORING_OP_POLL_ADD: u8 = 6;    // Olay izlemeye ekle (epoll benzeri)
+pub const IORING_OP_POLL_REMOVE: u8 = 7; // Olay izlemeden çıkar
+pub const IORING_OP_SENDMSG: u8 = 8;     // Socket mesajı gönder
+pub const IORING_OP_RECVMSG: u8 = 9;     // Socket mesajı al
+pub const IORING_OP_TIMEOUT: u8 = 11;    // Zaman aşımı ekle
+pub const IORING_OP_TIMEOUT_REMOVE: u8 = 12; // Zaman aşımını iptal et
+pub const IORING_OP_ACCEPT: u8 = 13;     // TCP bağlantısı kabul et
+pub const IORING_OP_ASYNC_CANCEL: u8 = 14; // Bekleyen işlemi iptal et
+pub const IORING_OP_LINK_TIMEOUT: u8 = 15; // Bağlı işlem için zaman aşımı
+pub const IORING_OP_CONNECT: u8 = 16;    // TCP bağlantısı başlat
+pub const IORING_OP_SEND: u8 = 17;       // Socket'e veri gönder
+pub const IORING_OP_RECV: u8 = 18;       // Socket'ten veri al
+pub const IORING_OP_OPENAT: u8 = 19;     // Dosya aç
+pub const IORING_OP_CLOSE: u8 = 20;      // Dosya tanımlayıcısını kapat
+pub const IORING_OP_STATX: u8 = 21;      // Dosya meta verisi al
+pub const IORING_OP_SOCKET: u8 = 26;     // Socket oluştur
+pub const IORING_OP_PROVIDE_BUFFERS: u8 = 31; // Tampon sağla
+pub const IORING_OP_REMOVE_BUFFERS: u8 = 32;  // Tamponu geri al
 
-/// io_uring sqe flags
-pub const IOSQE_FIXED_FILE: u8 = 1 << 0;
-pub const IOSQE_ASYNC: u8 = 1 << 1;
-pub const IOSQE_IO_LINK: u8 = 1 << 2;
-pub const IOSQE_IO_HARDLINK: u8 = 1 << 3;
-pub const IOSQE_ASYNC_NORMAL: u8 = 1 << 4;
-pub const IOSQE_BUFFER_SELECT: u8 = 1 << 5;
+/// io_uring SQE bayrakları (sqe flags)
+///
+/// Bu bayraklar SQE'nin nasıl işleneceğini kontrol eder:
+pub const IOSQE_FIXED_FILE: u8 = 1 << 0;   // Kayıtlı dosya tablosu kullan
+pub const IOSQE_ASYNC: u8 = 1 << 1;        // Her zaman asenkron işle
+pub const IOSQE_IO_LINK: u8 = 1 << 2;      // Sonraki SQE'yi bu işleme bağla
+pub const IOSQE_IO_HARDLINK: u8 = 1 << 3;  // Hatalarda da zinciri devam ettir
+pub const IOSQE_ASYNC_NORMAL: u8 = 1 << 4; // Asenkron modda normal öncelik
+pub const IOSQE_BUFFER_SELECT: u8 = 1 << 5; // Sağlanan tampon grubundan seç
 
-/// io_uring features
-pub const IORING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
-pub const IORING_FEAT_NODROP: u32 = 1 << 1;
-pub const IORING_FEAT_SUBMIT_STABLE: u32 = 1 << 2;
-pub const IORING_FEAT_RW_CUR_POS: u32 = 1 << 3;
-pub const IORING_FEAT_CUR_PERSONALITY: u32 = 1 << 4;
-pub const IORING_FEAT_FAST_POLL: u32 = 1 << 5;
-pub const IORING_FEAT_POLL_32BITS: u32 = 1 << 6;
+/// io_uring özellik bayrakları (features)
+///
+/// Çekirdek bu bayraklarla hangi optimizasyonların desteklendiğini bildirir.
+pub const IORING_FEAT_SINGLE_MMAP: u32 = 1 << 0;    // Tek mmap yeterli
+pub const IORING_FEAT_NODROP: u32 = 1 << 1;         // CQE düşürmeme garantisi
+pub const IORING_FEAT_SUBMIT_STABLE: u32 = 1 << 2;  // Gönderim sonrası tampon serbest bırakılabilir
+pub const IORING_FEAT_RW_CUR_POS: u32 = 1 << 3;     // -1 offset = mevcut konum
+pub const IORING_FEAT_CUR_PERSONALITY: u32 = 1 << 4; // Kimlik kalıtımı
+pub const IORING_FEAT_FAST_POLL: u32 = 1 << 5;      // Hızlı poll modu
+pub const IORING_FEAT_POLL_32BITS: u32 = 1 << 6;    // 32 bitlik poll olayları
 
-/// io_uring params flags
-pub const IORING_SETUP_IOPOLL: u32 = 1 << 0;
-pub const IORING_SETUP_SQPOLL: u32 = 1 << 1;
-pub const IORING_SETUP_SQ_AFF: u32 = 1 << 2;
-pub const IORING_SETUP_CQSIZE: u32 = 1 << 3;
-pub const IORING_SETUP_CLAMP: u32 = 1 << 4;
-pub const IORING_SETUP_ATTACH_WQ: u32 = 1 << 5;
-pub const IORING_SETUP_R_DISABLED: u32 = 1 << 6;
+/// io_uring kurulum bayrakları (setup flags)
+///
+/// io_uring_setup() çağrısında kullanılır:
+pub const IORING_SETUP_IOPOLL: u32 = 1 << 0;  // Yoklama (polling) modu - interrupt yok
+pub const IORING_SETUP_SQPOLL: u32 = 1 << 1;  // SQ'yu ayrı çekirdek iş parçacığıyla yokla
+pub const IORING_SETUP_SQ_AFF: u32 = 1 << 2;  // SQ iş parçacığını CPU'ya bağla
+pub const IORING_SETUP_CQSIZE: u32 = 1 << 3;  // CQ boyutunu params'tan al
+pub const IORING_SETUP_CLAMP: u32 = 1 << 4;   // Boyutu en fazla desteklenenle sınırla
+pub const IORING_SETUP_ATTACH_WQ: u32 = 1 << 5; // Mevcut io_uring'e bağlan
+pub const IORING_SETUP_R_DISABLED: u32 = 1 << 6; // Devre dışı başlat
 
 // ============================================================================
-// IO_URING DATA STRUCTURES
+// IO_URING VERİ YAPILARI
 // ============================================================================
 
-/// Submission Queue Entry (SQE)
+/// Gönderim Kuyruğu Girdisi (Submission Queue Entry - SQE)
+///
+/// Kullanıcı, tek bir asenkron işlem istemek için bu yapıyı doldurur.
+/// `user_data` alanı tamamlanınca CQE'de aynen geri döner (istek takibi için).
+///
+/// ```
+/// ┌─────────────────────────────────────────────────┐
+/// │ opcode  (1B): İşlem kodu (IORING_OP_*)          │
+/// │ flags   (1B): SQE bayrakları (IOSQE_*)          │
+/// │ ioprio  (2B): G/Ç önceliği                      │
+/// │ fd      (4B): Dosya tanımlayıcısı               │
+/// │ off     (8B): Ofset (okuma/yazma için)          │
+/// │ addr    (8B): Tampon adresi veya iovec işareti  │
+/// │ len     (4B): Tampon boyutu veya iovec sayısı   │
+/// │ rw_flags(4B): İşleme özel bayraklar             │
+/// │ user_data(8B): Kullanıcı verisi (CQE'ye aktarılır)│
+/// │ ...     : Ek alanlar                            │
+/// └─────────────────────────────────────────────────┘
+/// ```
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IoUringSqe {
@@ -104,7 +177,18 @@ pub struct IoUringSqe {
     pub pad: u32,
 }
 
-/// Completion Queue Entry (CQE)
+/// Tamamlama Kuyruğu Girdisi (Completion Queue Entry - CQE)
+///
+/// Çekirdek, bir işlem tamamlandığında bu yapıyı CQ'ya yazar.
+/// `res` alanı başarıda dönüş değerini, hatalarda `-errno` içerir.
+///
+/// ```
+/// ┌──────────────────────────────────────────┐
+/// │ user_data (8B): SQE'deki user_data aynen │
+/// │ res       (4B): Sonuç (>=0) veya -errno  │
+/// │ flags     (4B): Tamamlama bayrakları      │
+/// └──────────────────────────────────────────┘
+/// ```
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IoUringCqe {
@@ -116,7 +200,11 @@ pub struct IoUringCqe {
     pub flags: u32,
 }
 
-/// io_uring params structure
+/// io_uring params yapısı
+///
+/// `io_uring_setup()` çağrısına hem giriş hem çıkış olarak geçirilir.
+/// Giriş: kaç giriş isteniyor, hangi bayraklar kullanılacak.
+/// Çıkış: çekirdek gerçekte ne tahsis ettiğini ve hangi özellikleri desteklediğini yazar.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IoUringParams {
@@ -140,7 +228,10 @@ pub struct IoUringParams {
     pub cq_off: IoUringCqOffsets,
 }
 
-/// SQ ring offsets
+/// SQ halka ofsetleri
+///
+/// Belleğin hangi ofsettinde SQ halkasının hangi parçasının bulunduğunu
+/// tanımlar; mmap yapıldıktan sonra bu ofsetler kullanılarak erişilir.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IoUringSqOffsets {
@@ -155,7 +246,10 @@ pub struct IoUringSqOffsets {
     pub resv2: u64,
 }
 
-/// CQ ring offsets
+/// CQ halka ofsetleri
+///
+/// Tamamlama kuyruğu belleğinin düzenini tanımlar.
+/// `overflow` alanı, CQ dolu olduğunda düşürülen CQE sayısını izler.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IoUringCqOffsets {
@@ -163,7 +257,7 @@ pub struct IoUringCqOffsets {
     pub tail: u32,
     pub ring_mask: u32,
     pub ring_entries: u32,
-    pub overflow: u32,
+    pub overflow: u32,  // CQ taştığında bu sayaç artar
     pub cqes: u32,
     pub flags: u32,
     pub resv1: u32,
@@ -171,10 +265,27 @@ pub struct IoUringCqOffsets {
 }
 
 // ============================================================================
-// IO_URING RING BUFFER
+// IO_URING HALKA TAMPONU
 // ============================================================================
 
-/// Ring buffer for SQ/CQ
+/// SQ/CQ için genel amaçlı dairesel halka tamponu (ring buffer)
+///
+/// Dairesel tampon, üretici-tüketici modelinde paylaşılan bellek üzerinde
+/// senkronizasyonsuz çalışmayı mümkün kılar.
+///
+/// ```
+/// entries = 8  (2'nin kuvveti olmalı)
+/// mask    = 7  (entries - 1)
+///
+///   head                    tail
+///    │                       │
+///    ▼                       ▼
+/// ┌────┬────┬────┬────┬────┬────┬────┬────┐
+/// │[0] │[1] │[2] │[3] │[4] │[5] │[6] │[7] │
+/// └────┴────┴────┴────┴────┴────┴────┴────┘
+///  gerçek indeks = sayaç & mask
+///  sayaç sonsuz artabilir, wrap-around sorun değil
+/// ```
 pub struct IoUringRing<T> {
     /// Ring buffer memory
     buffer: *mut T,
@@ -204,18 +315,21 @@ impl<T> Clone for IoUringRing<T> {
 }
 
 impl<T> IoUringRing<T> {
-    /// Create a new ring buffer
+    /// Yeni bir halka tamponu oluşturur.
+    ///
+    /// `entries` sayısı 2'nin kuvveti olmalıdır; mask = entries - 1 ile
+    /// modulo işlemi yerine verimli AND maskesi kullanılır.
     pub fn new(entries: u32) -> Option<Self> {
         let size = entries as usize * size_of::<T>();
         let pages = (size + 4095) / 4096;
-        
+
         let (paddr, vaddr) = crate::memory::dma_alloc(pages)?;
-        
+
         // Zero the buffer
         unsafe {
             core::ptr::write_bytes(vaddr.as_ptr(), 0, size);
         }
-        
+
         Some(IoUringRing {
             buffer: vaddr.as_ptr() as *mut T,
             paddr,
@@ -225,58 +339,58 @@ impl<T> IoUringRing<T> {
             tail: 0,
         })
     }
-    
-    /// Get entry at index
+
+    /// `index & mask` ile gerçek bellek konumunu hesaplar ve girdiye referans verir.
     pub unsafe fn get(&self, index: u32) -> &T {
         &*(self.buffer.add((index & self.mask) as usize))
     }
-    
-    /// Get mutable entry at index
+
+    /// `index & mask` ile gerçek bellek konumunu hesaplar ve değiştirilebilir referans verir.
     pub unsafe fn get_mut(&mut self, index: u32) -> &mut T {
         &mut *(self.buffer.add((index & self.mask) as usize))
     }
-    
-    /// Get head
+
+    /// Mevcut okuma başını döner.
     pub fn head(&self) -> u32 {
         self.head
     }
-    
-    /// Get tail
+
+    /// Mevcut yazma kuyruğunu döner.
     pub fn tail(&self) -> u32 {
         self.tail
     }
-    
-    /// Advance head
+
+    /// Okuma başını bir ilerletir (tüketici bir girdi okuduğunda).
     pub fn advance_head(&mut self) {
         self.head = self.head.wrapping_add(1);
     }
-    
-    /// Advance tail
+
+    /// Yazma kuyruğunu bir ilerletir (üretici bir girdi eklediğinde).
     pub fn advance_tail(&mut self) {
         self.tail = self.tail.wrapping_add(1);
     }
-    
-    /// Check if empty
+
+    /// Kuyruk boş mu? (head == tail)
     pub fn is_empty(&self) -> bool {
         self.head == self.tail
     }
-    
-    /// Check if full
+
+    /// Kuyruk dolu mu? (tail - head == entries)
     pub fn is_full(&self) -> bool {
         self.tail.wrapping_sub(self.head) == self.entries
     }
-    
-    /// Get count
+
+    /// Kuyrukta kaç girdi var?
     pub fn count(&self) -> u32 {
         self.tail.wrapping_sub(self.head)
     }
-    
-    /// Get entries
+
+    /// Toplam kapasite.
     pub fn entries(&self) -> u32 {
         self.entries
     }
-    
-    /// Get mask
+
+    /// İndeks maskesi (AND ile hızlı modulo için).
     pub fn mask(&self) -> u32 {
         self.mask
     }
@@ -296,10 +410,22 @@ unsafe impl<T: Send> Send for IoUringRing<T> {}
 unsafe impl<T: Sync> Sync for IoUringRing<T> {}
 
 // ============================================================================
-// IO_URING INSTANCE
+// IO_URING ÖRNEĞİ
 // ============================================================================
 
-/// io_uring instance
+/// io_uring örneği
+///
+/// Tek bir io_uring bağlamını temsil eder.
+/// Her bağlam bağımsız SQ ve CQ halkalarına sahiptir.
+///
+/// ```
+/// IoUring
+/// ├── sq_ring: IoUringRing<IoUringSqe>  ← Kullanıcı buraya SQE ekler
+/// ├── cq_ring: IoUringRing<IoUringCqe>  ← Kullanıcı buradan CQE okur
+/// ├── sq_array: Vec<u32>                ← SQE indeks dizisi
+/// ├── pending: BTreeMap<u64, IoUringSqe> ← İşlenmekte olan istekler
+/// └── params: IoUringParams              ← Yapılandırma
+/// ```
 #[derive(Clone)]
 pub struct IoUring {
     /// Instance ID
@@ -321,24 +447,28 @@ pub struct IoUring {
 }
 
 impl IoUring {
-    /// Create a new io_uring instance
+    /// Yeni bir io_uring örneği oluşturur.
+    ///
+    /// `entries` sayısı istenilen SQ boyutunu belirtir; 2'nin kuvvetine yuvarlanır.
+    /// CQ, SQ'nun 2 katı büyüklüktedir (ekstra tampon).
     pub fn new(entries: u32, params: Option<IoUringParams>) -> Option<Self> {
         let sq_entries = entries.next_power_of_two();
         let cq_entries = sq_entries * 2; // CQ is usually 2x SQ size
-        
+
         let sq_ring = IoUringRing::new(sq_entries)?;
         let cq_ring = IoUringRing::new(cq_entries)?;
-        
+
         // Allocate SQ array as Vec
         let sq_array = alloc::vec![0u32; sq_entries as usize];
-        
+
         let mut io_uring_params = params.unwrap_or_default();
         io_uring_params.sq_entries = sq_entries;
         io_uring_params.cq_entries = cq_entries;
-        io_uring_params.features = IORING_FEAT_SINGLE_MMAP 
-            | IORING_FEAT_NODROP 
+        // Desteklenen özellikleri bildir
+        io_uring_params.features = IORING_FEAT_SINGLE_MMAP
+            | IORING_FEAT_NODROP
             | IORING_FEAT_FAST_POLL;
-        
+
         Some(IoUring {
             id: 0,
             sq_ring,
@@ -350,82 +480,94 @@ impl IoUring {
             sq_poll_active: false,
         })
     }
-    
-    /// Get next user data
+
+    /// Bir sonraki benzersiz kullanıcı verisini döner ve sayacı artırır.
+    ///
+    /// `user_data` değeri SQE ile CQE arasındaki bağı kurar:
+    /// hangi tamamlanma hangi isteğe aittir?
     pub fn next_user_data(&mut self) -> u64 {
         let ud = self.next_user_data;
         self.next_user_data += 1;
         ud
     }
-    
-    /// Submit SQE to SQ
+
+    /// SQ kuyruğuna yeni bir SQE ekler.
+    ///
+    /// Kuyruğa ekleme başarılı olursa, işlem `pending` haritasında takip edilir.
+    /// Kuyruk doluysa `QueueFull` hatası döner.
     pub fn submit_sqe(&mut self, sqe: IoUringSqe) -> Result<(), IoUringError> {
         if self.sq_ring.is_full() {
             return Err(IoUringError::QueueFull);
         }
-        
+
         // Get next SQ slot
         let tail = self.sq_ring.tail();
         let idx = (tail & self.sq_ring.mask()) as usize;
-        
+
         // Write SQE
         unsafe {
             *self.sq_ring.get_mut(idx as u32) = sqe;
         }
-        
+
         // Update SQ array
         self.sq_array[idx] = idx as u32;
-        
+
         // Advance tail
         self.sq_ring.advance_tail();
-        
+
         // Track pending
         self.pending.insert(sqe.user_data, sqe);
-        
+
         Ok(())
     }
-    
-    /// Get CQE from CQ
+
+    /// CQ kuyruğundan bir CQE alır ve kuyruktan çıkarır.
+    ///
+    /// Kuyruk boşsa `None` döner.
+    /// Alınan CQE'nin `user_data`'sına göre `pending` haritasından SQE silinir.
     pub fn get_cqe(&mut self) -> Option<IoUringCqe> {
         if self.cq_ring.is_empty() {
             return None;
         }
-        
+
         let head = self.cq_ring.head();
         let idx = head & self.cq_ring.mask();
-        
+
         let cqe = unsafe { *self.cq_ring.get(idx) };
-        
+
         // Remove from pending
         self.pending.remove(&cqe.user_data);
-        
+
         // Advance head
         self.cq_ring.advance_head();
-        
+
         Some(cqe)
     }
-    
-    /// Peek CQE without removing
+
+    /// CQ kuyruğuna bakar ama çıkarmaz (peek).
     pub fn peek_cqe(&self) -> Option<IoUringCqe> {
         if self.cq_ring.is_empty() {
             return None;
         }
-        
+
         let head = self.cq_ring.head();
         let idx = head & self.cq_ring.mask();
-        
+
         Some(unsafe { *self.cq_ring.get(idx) })
     }
-    
-    /// Wait for CQE
+
+    /// CQE için belirtilen milisaniye kadar bekler.
+    ///
+    /// `timeout_ms == 0` ise süresiz bekler.
+    /// Zaman aşımında `None` döner.
     pub fn wait_cqe(&mut self, timeout_ms: u64) -> Option<IoUringCqe> {
         let start = crate::interrupts::get_ticks();
-        
+
         loop {
             if let Some(cqe) = self.get_cqe() {
                 return Some(cqe);
             }
-            
+
             // Check timeout
             if timeout_ms > 0 {
                 let elapsed = crate::interrupts::get_ticks() - start;
@@ -433,31 +575,34 @@ impl IoUring {
                     return None;
                 }
             }
-            
+
             // Yield CPU
             crate::task::scheduler::schedule();
         }
     }
-    
-    /// Process pending SQEs
+
+    /// Bekleyen tüm SQE'leri işleyerek CQE üretir.
+    ///
+    /// Her SQE için `execute_op()` çağrılır, sonuç CQE olarak CQ'ya yazılır.
+    /// Dönen değer işlenen SQE sayısıdır.
     pub fn process_pending(&mut self) -> u32 {
         let mut processed = 0u32;
-        
+
         // Process all pending SQEs
         let pending: Vec<(u64, IoUringSqe)> = self.pending.iter()
             .map(|(k, v)| (*k, *v))
             .collect();
-        
+
         for (user_data, sqe) in pending {
             let result = self.execute_op(&sqe);
-            
+
             // Create CQE
             let cqe = IoUringCqe {
                 user_data,
                 res: result,
                 flags: 0,
             };
-            
+
             // Add to CQ
             if !self.cq_ring.is_full() {
                 let tail = self.cq_ring.tail();
@@ -469,75 +614,78 @@ impl IoUring {
                 processed += 1;
             }
         }
-        
+
         processed
     }
-    
-    /// Execute operation
+
+    /// Tek bir SQE'yi çalıştırır ve sonucu döner.
+    ///
+    /// Başarıda >=0 (dönen bayt sayısı veya yeni fd), hatalarda -errno döner.
+    /// Linux errno değerleri kullanılır: -5 = EIO, -11 = EAGAIN, -22 = EINVAL, vb.
     fn execute_op(&self, sqe: &IoUringSqe) -> i32 {
         match sqe.opcode {
             IORING_OP_NOP => 0,
-            
+
             IORING_OP_READ => {
                 // Read from file/socket
                 let fd = sqe.fd as u32;
                 let buf = sqe.addr as *mut u8;
                 let len = sqe.len as usize;
-                
+
                 // Try socket read
-                if let Ok(n) = crate::net::socket::recv(fd, unsafe { 
-                    core::slice::from_raw_parts_mut(buf, len) 
+                if let Ok(n) = crate::net::socket::recv(fd, unsafe {
+                    core::slice::from_raw_parts_mut(buf, len)
                 }, 0) {
                     n as i32
                 } else {
                     -5 // -EIO
                 }
             }
-            
+
             IORING_OP_WRITE => {
                 // Write to file/socket
                 let fd = sqe.fd as u32;
                 let buf = sqe.addr as *const u8;
                 let len = sqe.len as usize;
-                
+
                 // Try socket write
-                if let Ok(n) = crate::net::socket::send(fd, unsafe { 
-                    core::slice::from_raw_parts(buf, len) 
+                if let Ok(n) = crate::net::socket::send(fd, unsafe {
+                    core::slice::from_raw_parts(buf, len)
                 }, 0) {
                     n as i32
                 } else {
                     -5 // -EIO
                 }
             }
-            
+
             IORING_OP_SEND => {
                 let fd = sqe.fd as u32;
                 let buf = sqe.addr as *const u8;
                 let len = sqe.len as usize;
-                
-                if let Ok(n) = crate::net::socket::send(fd, unsafe { 
-                    core::slice::from_raw_parts(buf, len) 
+
+                if let Ok(n) = crate::net::socket::send(fd, unsafe {
+                    core::slice::from_raw_parts(buf, len)
                 }, 0) {
                     n as i32
                 } else {
                     -5
                 }
             }
-            
+
             IORING_OP_RECV => {
                 let fd = sqe.fd as u32;
                 let buf = sqe.addr as *mut u8;
                 let len = sqe.len as usize;
-                
-                if let Ok(n) = crate::net::socket::recv(fd, unsafe { 
-                    core::slice::from_raw_parts_mut(buf, len) 
+
+                if let Ok(n) = crate::net::socket::recv(fd, unsafe {
+                    core::slice::from_raw_parts_mut(buf, len)
                 }, 0) {
                     n as i32
                 } else {
                     -5
                 }
             }
-            
+
             IORING_OP_ACCEPT => {
                 let fd = sqe.fd as u32;
                 match crate::net::socket::accept(fd) {
@@ -545,57 +693,57 @@ impl IoUring {
                     Err(_) => -11, // -EAGAIN
                 }
             }
-            
+
             IORING_OP_CONNECT => {
                 let fd = sqe.fd as u32;
                 // Parse sockaddr from sqe.addr
                 // Simplified: assume IPv4
-                let addr_bytes = unsafe { 
-                    core::slice::from_raw_parts(sqe.addr as *const u8, 16) 
+                let addr_bytes = unsafe {
+                    core::slice::from_raw_parts(sqe.addr as *const u8, 16)
                 };
                 let ip = crate::net::Ipv4Addr::from_bytes([
                     addr_bytes[4], addr_bytes[5], addr_bytes[6], addr_bytes[7]
                 ]);
                 let port = u16::from_be_bytes([addr_bytes[2], addr_bytes[3]]);
                 let addr = crate::net::SocketAddr::new(ip, crate::net::Port(port));
-                
+
                 match crate::net::socket::connect(fd, addr) {
                     Ok(()) => 0,
                     Err(_) => -111, // -ECONNREFUSED
                 }
             }
-            
+
             IORING_OP_SOCKET => {
                 // Create socket
                 let domain = sqe.fd;
                 let sock_type = (sqe.len >> 16) as i32;
                 let protocol = (sqe.len & 0xFFFF) as i32;
-                
+
                 let af = match domain {
                     2 => crate::net::socket::AddressFamily::IPV4,
                     10 => crate::net::socket::AddressFamily::IPV6,
                     _ => return -22, // -EINVAL
                 };
-                
+
                 let st = match sock_type {
                     1 => crate::net::socket::SocketType::STREAM,
                     2 => crate::net::socket::SocketType::DGRAM,
                     _ => return -22,
                 };
-                
+
                 let proto = match protocol {
                     0 => crate::net::socket::Protocol::DEFAULT,
                     6 => crate::net::socket::Protocol::TCP,
                     17 => crate::net::socket::Protocol::UDP,
                     _ => return -22,
                 };
-                
+
                 match crate::net::socket::socket(af, st, proto) {
                     Ok(fd) => fd as i32,
                     Err(_) => -24, // -EMFILE
                 }
             }
-            
+
             IORING_OP_CLOSE => {
                 let fd = sqe.fd as u32;
                 match crate::net::socket::close(fd) {
@@ -603,37 +751,37 @@ impl IoUring {
                     Err(_) => -9, // -EBADF
                 }
             }
-            
+
             IORING_OP_POLL_ADD => {
                 let fd = sqe.fd as u32;
                 let events = sqe.len as u16;
-                
+
                 // Check if events are ready
                 let ready = if events & 1 != 0 {
                     crate::net::socket::can_read(fd)
                 } else {
                     false
                 };
-                
+
                 let ready = ready || if events & 4 != 0 {
                     crate::net::socket::can_write(fd)
                 } else {
                     false
                 };
-                
+
                 if ready {
                     events as i32
                 } else {
                     -11 // -EAGAIN
                 }
             }
-            
+
             IORING_OP_TIMEOUT => {
                 // Timeout operation
                 let ts = unsafe { &*(sqe.addr as *const IoUringTimeout) };
                 let timeout_ns = ts.ts_nsec;
                 let timeout_ms = timeout_ns / 1_000_000;
-                
+
                 // Wait for timeout
                 let start = crate::interrupts::get_ticks();
                 loop {
@@ -643,16 +791,19 @@ impl IoUring {
                     }
                     crate::task::scheduler::schedule();
                 }
-                
+
                 -62 // -ETIME
             }
-            
+
             _ => -22, // -EINVAL
         }
     }
 }
 
-/// io_uring timeout structure
+/// io_uring zaman aşımı yapısı
+///
+/// IORING_OP_TIMEOUT işleminde `sqe.addr` bu yapıya işaret eder.
+/// saniye + nanosaniye çiftiyle hassas zamanlama sağlar.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct IoUringTimeout {
@@ -662,49 +813,64 @@ pub struct IoUringTimeout {
     pub count: u32,
 }
 
-/// io_uring error
+/// io_uring hata türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IoUringError {
-    QueueFull,
-    QueueEmpty,
-    InvalidParam,
-    NoMemory,
-    NotReady,
+    QueueFull,     // SQ kuyruğu dolu
+    QueueEmpty,    // CQ kuyruğu boş
+    InvalidParam,  // Geçersiz parametre
+    NoMemory,      // Bellek yetersiz
+    NotReady,      // Hazır değil
 }
 
 // ============================================================================
-// IO_URING MANAGER
+// IO_URING YÖNETİCİSİ
 // ============================================================================
 
+/// Global io_uring örne kleri haritası (fd → IoUring)
+///
+/// Her io_uring_setup() çağrısı yeni bir örnek oluşturur ve benzersiz ID döner.
+/// Bu ID, sonraki tüm işlemlerde "fd" olarak kullanılır.
 static IO_URING_INSTANCES: Mutex<BTreeMap<u32, Box<IoUring>>> = Mutex::new(BTreeMap::new());
+
+/// Bir sonraki io_uring örneğine verilecek ID.
 static NEXT_IO_URING_ID: AtomicU32 = AtomicU32::new(1);
 
-/// Create io_uring instance
+/// Yeni bir io_uring örneği oluşturur.
+///
+/// `entries`: istenen kuyruk derinliği (2'nin kuvvetine yuvarlanır)
+/// `params`: opsiyonel yapılandırma; `None` ise varsayılanlar kullanılır
+///
+/// Başarıda örneğin ID'sini (fd) döner.
 pub fn io_uring_setup(entries: u32, params: Option<IoUringParams>) -> Result<u32, IoUringError> {
     let mut instances = IO_URING_INSTANCES.lock();
-    
+
     let id = NEXT_IO_URING_ID.fetch_add(1, Ordering::Relaxed);
     let mut io_uring = IoUring::new(entries, params).ok_or(IoUringError::NoMemory)?;
     io_uring.id = id;
-    
+
     instances.insert(id, Box::new(io_uring));
-    
+
     Ok(id)
 }
 
-/// Enter io_uring (submit/wait)
+/// io_uring'e giriş: SQE gönderir ve/veya CQE bekler.
+///
+/// - `to_submit > 0`: bekleyen SQE'leri işle
+/// - `min_complete > 0`: en az bu kadar CQE hazır olana dek bekle
+/// - `flags & 1 != 0`: bloklamayan mod (CQE yoksa hemen dön)
 pub fn io_uring_enter(fd: u32, to_submit: u32, min_complete: u32, flags: u32) -> Result<u32, IoUringError> {
     let mut instances = IO_URING_INSTANCES.lock();
     let io_uring = instances.get_mut(&fd).ok_or(IoUringError::InvalidParam)?;
-    
+
     let mut submitted = 0u32;
     let mut completed = 0u32;
-    
+
     // Submit SQEs
     if to_submit > 0 {
         submitted = io_uring.process_pending();
     }
-    
+
     // Wait for completions
     if min_complete > 0 {
         for _ in 0..min_complete {
@@ -721,25 +887,28 @@ pub fn io_uring_enter(fd: u32, to_submit: u32, min_complete: u32, flags: u32) ->
                         completed += 1;
                         break;
                     }
-                    
+
                     // Timeout check (30 seconds)
                     if crate::interrupts::get_ticks() - start > 30000 {
                         break;
                     }
-                    
+
                     crate::task::scheduler::schedule();
                 }
             }
         }
     }
-    
+
     Ok(submitted.max(completed))
 }
 
-/// Register buffers/files
+/// Tampon veya dosya kayıt eder.
+///
+/// Kayıtlı tamponlar/dosyalar io_uring'e önceden bildirilir;
+/// bu sayede her işlemde bellek haritalama maliyeti ortadan kalkar.
 pub fn io_uring_register(fd: u32, opcode: u32, arg: u64, nr_args: u32) -> Result<i32, IoUringError> {
     let _instances = IO_URING_INSTANCES.lock();
-    
+
     match opcode {
         0 => {
             // Register files
@@ -755,52 +924,55 @@ pub fn io_uring_register(fd: u32, opcode: u32, arg: u64, nr_args: u32) -> Result
     }
 }
 
-/// Close io_uring instance
+/// io_uring örneğini siler ve kaynakları serbest bırakır.
 pub fn io_uring_close(fd: u32) -> Result<(), IoUringError> {
     let mut instances = IO_URING_INSTANCES.lock();
     instances.remove(&fd).map(|_| ()).ok_or(IoUringError::InvalidParam)
 }
 
-/// Get io_uring instance
+/// io_uring örneğinin bir kopyasını döner.
 pub fn get_io_uring(fd: u32) -> Option<IoUring> {
     let instances = IO_URING_INSTANCES.lock();
     instances.get(&fd).map(|i| (**i).clone())
 }
 
-/// Get SQE for submission
+/// Doldurulmak üzere boş bir SQE şablonu döner.
+///
+/// Kuyruk doluysa `None` döner.
+/// Dönen SQE doldurulduktan sonra `submit_sqe()` ile kuyruğa eklenir.
 pub fn get_sqe(fd: u32) -> Option<IoUringSqe> {
     let instances = IO_URING_INSTANCES.lock();
     let io_uring = instances.get(&fd)?;
-    
+
     if io_uring.sq_ring.is_full() {
         return None;
     }
-    
+
     Some(IoUringSqe::default())
 }
 
-/// Submit SQE
+/// Doldurulmuş bir SQE'yi kuyruğa gönderir.
 pub fn submit_sqe(fd: u32, sqe: IoUringSqe) -> Result<(), IoUringError> {
     let mut instances = IO_URING_INSTANCES.lock();
     let io_uring = instances.get_mut(&fd).ok_or(IoUringError::InvalidParam)?;
     io_uring.submit_sqe(sqe)
 }
 
-/// Get CQE
+/// CQ kuyruğundan tamamlanmış bir işlemin sonucunu alır.
 pub fn get_cqe(fd: u32) -> Option<IoUringCqe> {
     let mut instances = IO_URING_INSTANCES.lock();
     let io_uring = instances.get_mut(&fd)?;
     io_uring.get_cqe()
 }
 
-/// Wait for CQE
+/// Belirtilen süre boyunca CQ kuyruğundan sonuç bekler.
 pub fn wait_cqe(fd: u32, timeout_ms: u64) -> Option<IoUringCqe> {
     let mut instances = IO_URING_INSTANCES.lock();
     let io_uring = instances.get_mut(&fd)?;
     io_uring.wait_cqe(timeout_ms)
 }
 
-/// Initialize io_uring subsystem
+/// io_uring alt sistemini başlatır.
 pub fn init() {
     crate::serial_println!("[IO_URING] Initialized");
 }

@@ -1,6 +1,55 @@
-//! # IPsec
+//! # IPsec - IP Güvenlik Protokolü
 //!
-//! IP Security Protocol (ESP/AH) implementation.
+//! IP Güvenlik Protokolü (ESP/AH) gerçekleştirimi.
+//!
+//! ## IPsec Nedir?
+//!
+//! IPsec, IP katmanında kimlik doğrulama ve şifreleme sağlayan protokol takımıdır.
+//! İki ana protokolden oluşur:
+//! - **ESP** (Encapsulating Security Payload): Hem şifreleme hem kimlik doğrulama sunar.
+//! - **AH** (Authentication Header): Yalnızca bütünlük/kimlik doğrulama sağlar, şifrelemez.
+//!
+//! ## Çalışma Modları
+//!
+//! ```
+//! Transport Modu (uçtan uca - host to host):
+//! ┌──────────┬──────────┬────────────────────────────┐
+//! │ IP Başlık│ ESP/AH   │ TCP/UDP + Veri (şifreli)   │
+//! └──────────┴──────────┴────────────────────────────┘
+//!
+//! Tünel Modu (VPN - gateway to gateway):
+//! ┌──────────┬─────────┬──────────────────────────────┐
+//! │ Dış IP   │ ESP/AH  │ İç IP Başlık + TCP/UDP + Veri│
+//! │(tünel)   │         │       (tamamen şifreli)       │
+//! └──────────┴─────────┴──────────────────────────────┘
+//! ```
+//!
+//! ## ESP Paket Yapısı
+//!
+//! ```
+//! ┌──────────────────────────────────────────────────┐
+//! │         SPI (32 bit) - Güvenlik Parametresi      │
+//! ├──────────────────────────────────────────────────┤
+//! │      Sıra Numarası (32 bit) - Tekrar saldırısı   │
+//! ├─────────────────╔═════════════════════╗──────────┤
+//! │  IV (Başlangıç  ║  Şifrelenmiş Yük    ║ Dolgu    │
+//! │  Vektörü)       ║  (TCP/UDP + Veri)   ║          │
+//! ├─────────────────╚═════════════════════╝──────────┤
+//! │           ICV (Bütünlük Doğrulama Değeri)         │
+//! └──────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Güvenlik İlişkilendirmesi (SA) ve Politika (SP)
+//!
+//! ```
+//! SP (ne zaman IPsec uygula?)
+//!    │
+//!    ▼
+//! SA (nasıl uygula? hangi anahtar ve algoritma?)
+//!    │
+//!    ├── Şifreleme: AES-CBC / AES-GCM / ChaCha20-Poly1305
+//!    └── Kimlik doğrulama: HMAC-SHA256 / HMAC-SHA512
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -9,84 +58,106 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// IPSEC CONSTANTS
+// IPsec SABİTLERİ
 // ============================================================================
 
-/// IPsec protocols
-pub const IPPROTO_ESP: u8 = 50;
-pub const IPPROTO_AH: u8 = 51;
+/// IPsec protokol numaraları (IPv4 başlığındaki `protocol` alanına yazılır)
+pub const IPPROTO_ESP: u8 = 50; // Kapsülleme Güvenlik Yükü
+pub const IPPROTO_AH: u8 = 51;  // Kimlik Doğrulama Başlığı
 
-/// IPsec modes
-pub const IPSEC_MODE_TRANSPORT: u8 = 0;
-pub const IPSEC_MODE_TUNNEL: u8 = 1;
+/// IPsec çalışma modları
+pub const IPSEC_MODE_TRANSPORT: u8 = 0; // Uçtan uca - yalnızca yük korunur
+pub const IPSEC_MODE_TUNNEL: u8 = 1;    // Tünel - tüm IP paketi kapsüllenir
 
-/// IPsec directions
-pub const IPSEC_DIR_INBOUND: u8 = 0;
-pub const IPSEC_DIR_OUTBOUND: u8 = 1;
+/// IPsec yönleri
+pub const IPSEC_DIR_INBOUND: u8 = 0;  // Gelen trafik
+pub const IPSEC_DIR_OUTBOUND: u8 = 1; // Giden trafik
 
-/// Encryption algorithms
-pub const IPSEC_ENC_NULL: u16 = 0;
-pub const IPSEC_ENC_DES_CBC: u16 = 1;
-pub const IPSEC_ENC_3DES_CBC: u16 = 2;
-pub const IPSEC_ENC_AES_CBC: u16 = 3;
-pub const IPSEC_ENC_AES_CTR: u16 = 4;
-pub const IPSEC_ENC_AES_GCM: u16 = 5;
-pub const IPSEC_ENC_CHACHA20_POLY1305: u16 = 6;
+/// Şifreleme algoritmaları
+/// Güvenlik sırasına göre sıralanmıştır; NULL yalnızca test için kullanılır.
+pub const IPSEC_ENC_NULL: u16 = 0;               // Şifreleme yok (test)
+pub const IPSEC_ENC_DES_CBC: u16 = 1;            // DES-CBC (zayıf, kullanılmamalı)
+pub const IPSEC_ENC_3DES_CBC: u16 = 2;           // 3DES-CBC (zayıf, kullanılmamalı)
+pub const IPSEC_ENC_AES_CBC: u16 = 3;            // AES-CBC (yaygın, güvenli)
+pub const IPSEC_ENC_AES_CTR: u16 = 4;            // AES-CTR (hızlı, güvenli)
+pub const IPSEC_ENC_AES_GCM: u16 = 5;            // AES-GCM (AEAD, en iyi seçim)
+pub const IPSEC_ENC_CHACHA20_POLY1305: u16 = 6;  // ChaCha20-Poly1305 (donanımsız sistemlerde hızlı)
 
-/// Authentication algorithms
-pub const IPSEC_AUTH_HMAC_MD5: u16 = 1;
-pub const IPSEC_AUTH_HMAC_SHA1: u16 = 2;
-pub const IPSEC_AUTH_HMAC_SHA256: u16 = 3;
-pub const IPSEC_AUTH_HMAC_SHA384: u16 = 4;
-pub const IPSEC_AUTH_HMAC_SHA512: u16 = 5;
-pub const IPSEC_AUTH_AES_XCBC: u16 = 6;
+/// Kimlik doğrulama algoritmaları (HMAC tabanlı)
+/// HMAC: Hash tabanlı Mesaj Kimlik Doğrulama Kodu
+pub const IPSEC_AUTH_HMAC_MD5: u16 = 1;    // MD5 (zayıf, kullanılmamalı)
+pub const IPSEC_AUTH_HMAC_SHA1: u16 = 2;   // SHA-1 (zayıf, kullanılmamalı)
+pub const IPSEC_AUTH_HMAC_SHA256: u16 = 3; // SHA-256 (güvenli, yaygın)
+pub const IPSEC_AUTH_HMAC_SHA384: u16 = 4; // SHA-384
+pub const IPSEC_AUTH_HMAC_SHA512: u16 = 5; // SHA-512 (en güçlü)
+pub const IPSEC_AUTH_AES_XCBC: u16 = 6;   // AES-XCBC-96
 
 // ============================================================================
-// SECURITY ASSOCIATION (SA)
+// GÜVENLİK İLİŞKİLENDİRMESİ (SA - Security Association)
 // ============================================================================
 
+/// Güvenlik İlişkilendirmesi (SA)
+///
+/// SA, iki uç arasındaki tek yönlü güvenli kanal tanımıdır.
+/// Her güvenli bağlantı için 2 SA gerekir: biri giden, biri gelen.
+///
+/// SA benzersiz olarak (SPI, hedef IP, protokol) üçlüsüyle tanımlanır.
+/// SPI değeri alıcı tarafından seçilir ve pakete yazılır.
+///
+/// ```
+/// Host A                 Host B
+///   │   SA(SPI=100, A→B) │
+///   │──── ESP paket ─────►│ SPI=100 ile şifrele
+///   │                     │
+///   │   SA(SPI=200, B→A) │
+///   │◄─── ESP paket ──────│ SPI=200 ile şifrele
+/// ```
 #[derive(Clone, Debug)]
 pub struct SecurityAssociation {
-    /// SPI (Security Parameter Index)
+    /// SPI (Güvenlik Parametre İndeksi) - alıcı tarafından belirlenir
     pub spi: u32,
-    /// Protocol (ESP/AH)
+    /// Protokol (ESP/AH)
     pub proto: u8,
-    /// Mode (Transport/Tunnel)
+    /// Mod (Transport/Tunnel)
     pub mode: u8,
-    /// Source IP
+    /// Kaynak IP
     pub src_ip: u32,
-    /// Destination IP
+    /// Hedef IP
     pub dst_ip: u32,
-    /// Encryption algorithm
+    /// Şifreleme algoritması
     pub enc_alg: u16,
-    /// Encryption key
+    /// Şifreleme anahtarı
     pub enc_key: Vec<u8>,
-    /// Authentication algorithm
+    /// Kimlik doğrulama algoritması
     pub auth_alg: u16,
-    /// Authentication key
+    /// Kimlik doğrulama anahtarı
     pub auth_key: Vec<u8>,
-    /// Replay window size
+    /// Tekrar penceresi boyutu (replay window)
     pub replay_window: u32,
-    /// Replay bitmap
+    /// Tekrar bitmap'i (hangi sıra numaraları görüldü)
     pub replay_bitmap: AtomicU64,
-    /// Last sequence number
+    /// Son görülen sıra numarası
     pub last_seq: AtomicU32,
-    /// Expiration time
+    /// Geçerlilik süresi (Unix zaman damgası)
     pub expires: u64,
-    /// Is active
+    /// SA etkin mi?
     pub active: AtomicBool,
-    /// Statistics
+    /// İstatistikler
     pub stats: Mutex<SaStats>,
 }
 
+/// SA istatistikleri
+///
+/// Her SA'nın işlediği paket ve bayt sayısını takip eder.
+/// Kimlik doğrulama ve tekrar saldırısı hatalarını da sayar.
 #[derive(Clone, Debug, Default)]
 pub struct SaStats {
     pub packets_in: u64,
     pub packets_out: u64,
     pub bytes_in: u64,
     pub bytes_out: u64,
-    pub auth_errors: u64,
-    pub replay_errors: u64,
+    pub auth_errors: u64,   // Kimlik doğrulama başarısız sayısı
+    pub replay_errors: u64, // Tekrar saldırısı tespit sayısı
 }
 
 impl SecurityAssociation {
@@ -110,12 +181,28 @@ impl SecurityAssociation {
         }
     }
 
-    /// Check for replay attack
+    /// Tekrar saldırısını (replay attack) kontrol eder.
+    ///
+    /// Tekrar saldırısı: saldırgan daha önce yakaladığı geçerli bir paketyi
+    /// yeniden göndererek sistemi yanıltmaya çalışır.
+    ///
+    /// Sliding window (kayan pencere) yöntemi:
+    /// ```
+    /// last_seq = 100, window = 64
+    ///
+    ///   36 ... 100
+    ///   └──────────┘ geçerli pencere
+    ///
+    /// seq=101 → yeni, kabul et, window ilerle
+    /// seq=99  → pencere içinde, bitmap'e bak
+    /// seq=35  → pencereden önce, BEL
+    /// seq=50  → bitmap'de var mı? Varsa tekrar saldırısı!
+    /// ```
     pub fn check_replay(&self, seq: u32) -> bool {
         let last = self.last_seq.load(Ordering::Relaxed);
-        
+
         if seq > last {
-            // New packet, update bitmap
+            // Yeni paket: pencereyi ilerlet ve bitmap güncelle
             let diff = seq - last;
             let mut bitmap = self.replay_bitmap.load(Ordering::Relaxed);
             
@@ -131,13 +218,15 @@ impl SecurityAssociation {
         }
         
         // Check if in window
+        // Pencere dışında eski paket: reddet
         let diff = last - seq;
         if diff >= self.replay_window {
             return false;
         }
         
-        // Check if already seen
-        let bitmap = self.replay_bitmap.load(Ordering::Relaxed);
+    // Check if already seen
+    // Bitmap'te kontrol et: bu pozisyon 1 ise daha önce görülmüş → tekrar saldırısı
+    let bitmap = self.replay_bitmap.load(Ordering::Relaxed);
         let mask = 1u64 << diff;
         
         if bitmap & mask != 0 {

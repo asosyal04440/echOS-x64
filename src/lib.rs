@@ -45,16 +45,18 @@ pub mod allocator;
 
 pub mod acpi;
 
-/// PE/COFF loader for Windows binaries
+/// Windows PE/COFF ikili dosyalarını yükleyen loader.
+/// PE formatı, Windows .exe ve .dll dosyalarında kullanılan yürütülebilir format standardıdır.
 pub mod pe_loader;
 
-/// Win32 API emulation
+/// Win32 API öykünmesi (emulation) — Windows programlarının echOS üzerinde çalışmasını sağlar.
+/// Sistem çağrılarını yakalayıp echOS karşılıklarına yönlendirir.
 pub mod win32;
 
-/// Doom game port
+/// Doom oyun portu — klasik id Software oyununun echOS üzerindeki versiyonu.
 pub mod doom;
 
-/// Doom downloader and launcher
+/// Doom WAD dosyası indirici ve oyun başlatıcısı.
 pub mod doom_launcher;
 
 pub struct KernelBootContext {
@@ -78,7 +80,8 @@ pub mod gop;
 
 pub mod splash;
 
-/// PS/2 keyboard handler
+/// PS/2 klavye sürücüsü — tuş basma/bırakma olaylarını interrupt üzerinden alır
+/// ve bir ring buffer'da saklar.
 pub mod keyboard;
 
 /// Bellek ve sayfa tablosu yönetimi
@@ -98,10 +101,11 @@ pub mod drivers;
 
 pub mod apic;
 
-/// x86_64 interrupt handlers
+/// x86_64 interrupt handler'ları — donanım kesintilerini ve CPU istisnalarını yönetir.
+/// Her interrupt vektörü için IDT kaydı barındırır.
 pub mod interrupts;
 
-/// Inter-process communication
+/// Inter-process communication (süreçler arası iletişim)
 pub mod ipc;
 
 /// Grafiksel kullanıcı arayüzü
@@ -113,7 +117,7 @@ pub mod gfx;
 /// Global Descriptor Table
 pub mod gdt;
 
-/// System call interface
+/// Sistem çağrısı arayüzü — kullanıcı alanından çekirdek servislerine erişim kapısı.
 pub mod syscall;
 
 /// Rastgele sayı üretici
@@ -135,7 +139,8 @@ pub mod debug;
 /// Güvenlik alt sistemi (SMEP/SMAP, Stack Canary, ASLR, NX/DEP, W^X)
 pub mod security;
 
-/// Fault management and anti-crash system
+/// Hata yönetimi ve çökmeden koruma sistemi — kernel paniklerini yakalar
+/// ve sistemi kurtarmaya çalışır.
 pub mod fault;
 
 /// Ağ alt sistemi (TCP/IP, Socket API, DNS, DHCP)
@@ -151,8 +156,10 @@ pub mod shim_layer;
 pub mod ironshim_bridge;
 pub mod vdso;
 
-/// Virtualization support (VMX/SVM, EPT)
+/// Sanallaştırma desteği (VMX/SVM, EPT) — hypervisor yetenekleri sağlar.
+/// Intel VT-x ve AMD-V donanım sanallaştırmasını kullanır.
 pub mod virt;
 
-/// GPU 3D API (Vulkan-like)
+/// GPU 3D API — Vulkan benzeri grafik API'si.
+/// Shader, render pass ve pipeline kavramlarını uygular.
 pub mod gpu3d;

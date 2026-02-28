@@ -1,6 +1,35 @@
-//! # echOS USB Driver Module
+//! # echOS USB Sürücü Modülü
 //!
-//! xHCI controller, device enumeration, HID, mass storage, CDC, hub.
+//! Bu modül USB altyapısının tamamını barındırır: xHCI denetleyici, cihaz
+//! listeleme (enumeration), HID (klavye/fare), yığın depolama (mass storage),
+//! CDC (seri port emülasyonu) ve hub desteği.
+//!
+//! ## USB Mimarisine Genel Bakış
+//!
+//! ```
+//!  ┌───────────────────────────────────────────────────┐
+//!  │  Uygulama katmanı: dosya sistemi, HID, ağ, vb.   │
+//!  ├───────────────────────────────────────────────────┤
+//!  │  USB Sınıf Sürücüleri: HID | MSC | CDC | Hub     │
+//!  ├───────────────────────────────────────────────────┤
+//!  │  USB Çekirdek: enumeration, adres atama          │
+//!  ├───────────────────────────────────────────────────┤
+//!  │  Host Controller: xHCI (PCIe 0x0C:0x03:0x30)    │
+//!  ├───────────────────────────────────────────────────┤
+//!  │  Donanım: USB portları, kablo, cihaz             │
+//!  └───────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## xHCI Nedir?
+//!
+//! xHCI (eXtensible Host Controller Interface), USB 3.x için Intel tarafından
+//! tanımlanmış host controller standardıdır. USB 1.1, 2.0 ve 3.x cihazlarını
+//! tek bir kontroller üzerinden yönetir.
+//!
+//! ## TRB (Transfer Request Block)
+//!
+//! xHCI'de tüm komutlar ve transferler TRB yapıları üzerinden gerçekleşir.
+//! Her TRB 16 byte'tır ve ring adı verilen döngüsel kuyruklarda saklanır.
 
 mod cdc;
 pub mod hid;
@@ -27,103 +56,131 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
-// PCI sınıf kodları (USB denetleyicileri)
-const PCI_CLASS_SERIAL_BUS: u8 = 0x0C;
-const PCI_SUBCLASS_USB: u8 = 0x03;
-const PCI_PROG_IF_XHCI: u8 = 0x30;
+// PCI sınıf kodları (USB denetleyicileri bulmak için)
+// PCI konfigürasyon alanında class=0x0C, subclass=0x03, progif=0x30 → xHCI
+const PCI_CLASS_SERIAL_BUS: u8 = 0x0C;   // Seri veri yolu kontrolörü sınıfı
+const PCI_SUBCLASS_USB: u8 = 0x03;        // USB alt sınıfı
+const PCI_PROG_IF_XHCI: u8 = 0x30;       // xHCI programlama arabirimi kodu
 
 // ============================================================================
-// xHCI REGISTER DEFINITIONS
+// xHCI REGISTER TANIMI
+// MMIO (Memory-Mapped I/O) üzerinden erişilen xHCI donanım register yapıları.
+// Tüm yapılar #[repr(C)] ile C ABI uyumlu bellek düzenine sahiptir.
 // ============================================================================
 
-/// xHCI Capability Registers (read-only)
+/// xHCI Kapasite Kayıtları (Capability Registers) - salt okunur (read-only).
+///
+/// MMIO alanının en başında yer alır. `cap_length` alanı, Operasyonel
+/// Kayıtların başlangıç ofsetini verir: `op_regs = mmio_base + cap_length`.
 #[repr(C)]
 pub struct XhciCapabilityRegs {
-    /// Capability length
+    /// Kapasite kayıtları bloğunun byte uzunluğu (Operasyonel Kayıt ofseti)
     pub cap_length: u8,
-    /// Reserved
+    /// Rezerve
     pub reserved: u8,
-    /// HCI version
+    /// HCI arayüz sürümü (BCD formatı, örn. 0x0100 = v1.0)
     pub hci_version: u16,
-    /// Structural parameters 1
+    /// Yapısal parametre 1: max_slots (bit7-0), max_intrs (bit18-8), max_ports (bit31-24)
     pub hcs_params1: u32,
-    /// Structural parameters 2
+    /// Yapısal parametre 2: IST, ERST_MAX, SPR, Max_Scratchpad
     pub hcs_params2: u32,
-    /// Structural parameters 3
+    /// Yapısal parametre 3: u1/u2 uyku gecikme değerleri
     pub hcs_params3: u32,
-    /// Capability parameters 1
+    /// Kapasite parametre 1: 64-bit adresleme, bant genişliği müz., güç yönetimi
     pub hcc_params1: u32,
-    /// Database context base address
+    /// Doorbell kayıt dizisinin MMIO başlangıcından ofseti
     pub dboff: u32,
-    /// Runtime register base address
+    /// Çalışma zamanı (Runtime) kayıtlarının MMIO başlangıcından ofseti
     pub rtsoff: u32,
-    /// Capability parameters 2
+    /// Kapasite parametre 2: CIC, LEC, CTC, FSC, CMC, ETC desteği
     pub hcc_params2: u32,
 }
 
-/// xHCI Operational Registers
+/// xHCI Operasyonel Kayıtlar (Operational Registers) - okuma/yazma.
+///
+/// Kapasite kayıtlarından hemen sonra gelir: `mmio_base + cap_length`.
+/// Denetleyiciyi başlatmak, durdurmak ve yapılandırmak için kullanılır.
 #[repr(C)]
 pub struct XhciOperationalRegs {
-    /// USB command
+    /// USB Komut Kaydı: RS (başlat/durdur), HCRST (sıfırla), INTE (kesme etkin)
     pub usbcmd: u32,
-    /// USB status
+    /// USB Durum Kaydı: HCH (durduruldu), HSE (sistem hatası), CNR (hazır değil)
     pub usbsts: u32,
-    /// Page size
+    /// Sayfa boyutu: bit0=4KB, bit1=8KB, ... host sisteme göre belirlenir
     pub pagesize: u32,
-    /// Reserved
+    /// Rezerve (2 x u32)
     pub reserved1: [u32; 2],
-    /// Device notification control
+    /// Cihaz Bildirim Kontrolü: hangi bildirim türleri etkin?
     pub dnctrl: u32,
-    /// Command ring control
+    /// Komut Ring Kontrol Kaydı: ring fiziksel adresi + cycle bit + RCS
     pub crcr: u64,
-    /// Reserved
+    /// Rezerve (4 x u32)
     pub reserved2: [u32; 4],
-    /// Device context base address array pointer
+    /// Cihaz Bağlamı Taban Adresi Dizisi İşaretçisi (64-bit fiziksel adres)
     pub dcbaap: u64,
-    /// Configure
+    /// Yapılandırma Kaydı: MaxSlotsEn (bit7-0) — etkin cihaz slotu sayısı
     pub config: u32,
 }
 
-/// xHCI Runtime Registers
+/// xHCI Çalışma Zamanı Kayıtları (Runtime Registers).
+///
+/// `rtsoff` ofseti ile MMIO'dan erişilir.
+/// `mfindex`: Mikro çerçeve sayacı (125 µs'de bir artar, USB 2.0/3.0 zamanlama için).
+/// `irs[0]`: Birincil interrupter — MSI/MSI-X kesme kaynağı.
 #[repr(C)]
 pub struct XhciRuntimeRegs {
-    /// Microframe index
+    /// Mikro çerçeve indeksi (0-3FFF, her 125 µs'de artar)
     pub mfindex: u32,
-    /// Reserved
+    /// Rezerve (7 x u32)
     pub reserved1: [u32; 7],
-    /// Interrupter register sets
+    /// Interrupter kayıt kümeleri (max 1024 adet: irs[0] birincil)
     pub irs: [InterrupterRegSet; 1024],
 }
 
-/// Interrupter Register Set
+/// Interrupter Kayıt Kümesi - her kesme kaynağına ait kontrol yapısı.
+///
+/// xHCI'de her kesme kaynağı ayrı bir Event Ring'e sahiptir.
+/// `ERST` (Event Ring Segment Table): ring'in fiziksel adreslerini tanımlar.
 #[repr(C)]
 pub struct InterrupterRegSet {
-    /// Interrupt management
+    /// Kesme yönetimi: IP (interrupt pending) + IE (interrupt enable)
     pub iman: u32,
-    /// Interrupt moderation
+    /// Kesme moderasyonu: IMODI (interval) + IMODC (counter)
     pub imod: u32,
-    /// Event ring segment table size
+    /// Event Ring Segment Tablosu boyutu (kaç ERST girdisi var?)
     pub erstsz: u32,
-    /// Event ring segment table base address
+    /// Event Ring Segment Tablosu taban adresi (fiziksel, 64-bit, 64-byte hizalı)
     pub erstba: u64,
-    /// Event ring dequeue pointer
+    /// Event Ring dequeue işaretçisi + DESI (segment indeksi) + EHB (event handler busy)
     pub erdp: u64,
 }
 
-/// xHCI Doorbell Register
+/// xHCI Doorbell Kaydı.
+///
+/// Her slot için ayrı bir doorbell kaydı vardır (slot_id × 4 ofseti).
+/// Sürücü, xHCI'ye "işlenecek TRB var" demek için doorbell'a yazar.
 #[repr(C)]
 pub struct Doorbell {
+    /// Hedef endpoint (0=komut ring, 1-31=endpoint ring)
     pub target: u8,
+    /// Akış kimliği (streams için; genel kullanımda 0)
     pub tid: u8,
+    /// Rezerve (16-bit)
     pub reserved: u16,
 }
 
-/// xHCI Port Status and Control Register
+/// Port Durum ve Kontrol Kaydı (PortRegs).
+///
+/// Her port için 0x10 byte ayrılır: `cap_length + 0x400 + port * 0x10`.
 #[repr(C)]
 pub struct PortRegs {
+    /// Port Durum ve Kontrol Kaydı (PORTSC): bağlantı, hız, reset, güç bitleri
     pub portsc: u32,
+    /// Port PM Durum ve Kontrolü: bant genişliği yönetimi
     pub portpmsc: u32,
+    /// Port Bağlantı Bilgisi (link info): hata sayacı
     pub portli: u32,
+    /// Port Donanım LPM Kontrolü (USB 2.0 LPM için)
     pub porthlpmc: u32,
 }
 

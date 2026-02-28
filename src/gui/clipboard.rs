@@ -1,4 +1,4 @@
-//! # Pano Yöneticisi
+//! # Pano Yöneticisi (Clipboard Manager)
 //!
 //! Geçmişli ve çok formatlı sistem panosu.
 //! Metin, resim, dosya ve özel veri türlerini destekler.
@@ -9,6 +9,20 @@
 //! - `ClipboardManager`: Tüm pano durumunu yönetir; LRU geçmişi, arama ve filtreleme
 //! - `ClipboardFilter`: Tür bazlı filtre (Metin, Resim, Dosya, URL, Sabitlenmiş)
 //! - `ClipboardAction`: Pano olayları (Kopyala, Yapıştır, Sabitle, Sil vb.)
+//!
+//! ## Geçmiş Yönetimi (LRU)
+//! Her `copy()` çağrısında yeni öğe kuyruğun başına eklenir; kuyruk boyutu
+//! `MAX_HISTORY` (50) sınırını aşarsa en eski öğe kaldırılır. Sabitlenen
+//! (`pinned`) öğeler bu tahliyeden muaftır ve her zaman geçmişte kalır.
+//!
+//! ## Veri Boyutu Güvenliği
+//! `MAX_ITEM_SIZE` (10 MB) sınırı aşılırsa `copy()` işlemi reddedilir.
+//! Bu, çekirdek belleğinin pano verisiyle doldurulmasını önler.
+//!
+//! ## `ClipboardData::Image` Formatı
+//! Piksel verisi `Vec<u32>` olarak `0xRRGGBB` formatında saklanır.
+//! Genişlik × yükseklik adet piksel beklenir; tutarsızlık önizleme
+//! çiziminde sınır dışı erişimi tetikleyebileceğinden boyut doğrulanır.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};

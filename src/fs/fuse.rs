@@ -1,6 +1,37 @@
 //! # FUSE (Kullanıcı Alanında Dosya Sistemi)
 //!
 //! Kullanıcı alanı dosya sistemi sürücüsü desteği.
+//!
+//! ## FUSE İstek/Yanıt Akışı
+//!
+//! ```text
+//!  Kullanıcı prosesi (örn. SSHFS daemon)
+//!          │  /dev/fuse okuma/yazma
+//!          ▼
+//!  ┌───────────────────────────────────────────────────┐
+//!  │  FuseConnection (çekirdek tarafı)                 │
+//!  │                                                   │
+//!  │  Çekirdek VFS isteği (LOOKUP, READ, WRITE...)     │
+//!  │          │                                        │
+//!  │          ▼                                        │
+//!  │  FuseRequest ──► pending kuyruğuna ekle           │
+//!  │          │       (unique ID ile)                  │
+//!  │          ▼                                        │
+//!  │  Kullanıcı daemon'u /dev/fuse'dan okur            │
+//!  │          │  isteği işler                          │
+//!  │          ▼                                        │
+//!  │  FuseOutHeader + veri ──► /dev/fuse'a yazar       │
+//!  │          │  (unique ID ile eşleştirilir)          │
+//!  │          ▼                                        │
+//!  │  recv_reply(unique) ──► sonucu VFS'e döndür       │
+//!  └───────────────────────────────────────────────────┘
+//!
+//!  İstek yapısı (FuseInHeader):
+//!  [ len | opcode | unique | nodeid | uid | gid | pid | pad ]
+//!
+//!  Yanıt yapısı (FuseOutHeader):
+//!  [ len | error | unique ]
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -14,11 +45,11 @@ use spin::Mutex;
 // FUSE SABİTLERİ
 // ============================================================================
 
-/// FUSE version
+/// FUSE sürüm numarası
 pub const FUSE_KERNEL_VERSION: u32 = 7;
 pub const FUSE_KERNEL_MINOR_VERSION: u32 = 37;
 
-/// FUSE commands
+/// FUSE işlem kodları (opcode'lar)
 pub const FUSE_LOOKUP: u32 = 1;
 pub const FUSE_FORGET: u32 = 2;
 pub const FUSE_GETATTR: u32 = 3;
@@ -48,7 +79,7 @@ pub const FUSE_READDIR: u32 = 28;
 pub const FUSE_RELEASEDIR: u32 = 29;
 pub const FUSE_FSYNCDIR: u32 = 30;
 
-/// FUSE flags
+/// FUSE özellik bayrakları (capability flags)
 pub const FUSE_ASYNC_READ: u64 = 1 << 0;
 pub const FUSE_POSIX_LOCKS: u64 = 1 << 1;
 pub const FUSE_FILE_OPS: u64 = 1 << 2;
@@ -157,6 +188,7 @@ pub struct FuseConnection {
     pub nodes: Mutex<BTreeMap<u64, FuseNode>>,
 }
 
+/// FUSE istek yapısı — çekirdekten kullanıcı daemon'una gönderilen işlem
 #[derive(Clone, Debug)]
 pub struct FuseRequest {
     pub unique: u64,
@@ -168,6 +200,7 @@ pub struct FuseRequest {
     pub data: Vec<u8>,
 }
 
+/// FUSE dosya sistemi düğümü — inode'u temsil eder
 #[derive(Clone, Debug)]
 pub struct FuseNode {
     pub nodeid: u64,
@@ -236,7 +269,7 @@ impl FuseConnection {
         
         self.send_request(req)?;
         
-        // Wait for reply
+        // Yanıtı bekle
         Ok(FuseEntryOut {
             nodeid: 0,
             generation: 0,
@@ -290,6 +323,7 @@ impl FuseConnection {
 // FUSE YÖNETİCİSİ
 // ============================================================================
 
+/// Tüm FUSE bağlantılarını yöneten global yönetici
 pub struct FuseManager {
     connections: Mutex<BTreeMap<u64, Arc<FuseConnection>>>,
     next_id: AtomicU64,
@@ -333,6 +367,7 @@ lazy_static::lazy_static! {
 // HATA TÜRÜ
 // ============================================================================
 
+/// FUSE alt sistemi hata türleri
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FuseError {
     NotConnected,

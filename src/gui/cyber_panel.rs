@@ -1,9 +1,22 @@
-//! # echOS CyberPanel
+//! # echOS CyberPanel (Üst Durum Çubuğu)
 //!
-//! Ekranın üstünde duran minimal, mat koyu Cyber-Industrial panel.
-//! Sol: ⬡ logo + aktif pencere başlığı
-//! Orta: Workspace göstergesi (animasyonlu bullet nokta geçişi)
-//! Sağ: CPU sparkline | RAM bar | Saat | Bildirim göstergesi
+//! Ekranın üstünde 32 piksel yüksekliğinde duran minimal, mat koyu Cyber-Industrial panel.
+//!
+//! ## Panel Bölgeleri
+//! - **Sol**: `⬡` logo sembolü + aktif pencere başlığı (WM'dan alınır)
+//! - **Orta**: Workspace göstergesi; animasyonlu geçişli bullet nokta serisi
+//! - **Sağ**: CPU sparkline grafiği | RAM doluluk çubuğu | Saat | Bildirim sayacı
+//!
+//! ## SparkBuf (Kayan Örnek Tamponu)
+//! `SparkBuf`, sabit boyutlu dairesel bir tampondur (`SPARKLINE_SAMPLES = 60` kare).
+//! `push()` çağrıldığında baş (`head`) indeksi bir ilerler; bu sayede hiçbir bellek
+//! kopyalaması olmadan son 60 örnek her zaman hazır tutulur. `ordered()` metodu
+//! bu dairesel tamponu doğrusal görünümlü bir dizi olarak sunar.
+//!
+//! ## Workspace Animasyonu
+//! `WorkspaceAnim.t` değişkeni 0.0→1.0 arası linear olarak artar. Geçiş sırasında
+//! eski nokta soluklaşırken (`1-t` parlaklığı) yeni nokta belirginleşir (`t` parlaklığı).
+//! `t >= 1.0` olunca `prev = current` atanır ve animasyon tamamlanmış sayılır.
 
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::echos_wm::CyberTheme;

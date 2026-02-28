@@ -1,16 +1,49 @@
-//! # CPU State Machine - Linux-style Tier-1 Implementation
+//! # CPU Durum Makinesi — Linux Çekirdeği Uyumlu Kapsamlı Uygulama
 //!
-//! Kapsamlı CPU hotplug state machine implementation.
+//! Kapsamlı CPU hotplug durum makinesi uygulaması.
 //! Linux kernel CPU hotplug state machine'den esinlenilmiştir.
 //!
 //! ## Özellikler
-//! - 50+ CPU state (PREPARE, STARTING, ONLINE, DYING, POST_DEAD)
-//! - CPU hotplug callbacks (startup/teardown)
-//! - Parallel CPU bringup
-//! - CPU affinity mask (256 CPU desteği)
-//! - CPU isolation (nohz_full style)
-//! - Startup verification ve heartbeat
-//! - Error recovery ve state rollback
+//! - 50+ CPU durumu (PREPARE, STARTING, ONLINE, DYING, POST_DEAD)
+//! - CPU hotplug geri çağırıcıları (startup/teardown)
+//! - Paralel CPU başlatma (parallel bringup)
+//! - CPU yakınlık maskesi (256 CPU desteği)
+//! - CPU izolasyonu (nohz_full tarzı)
+//! - Başlangıç doğrulama ve kalp atışı (heartbeat)
+//! - Hata kurtarma ve durum geri alma (state rollback)
+//!
+//! ## CPU Durum Geçiş Diyagramı
+//!
+//! ```text
+//!  ┌──────────┐  hotplug online   ┌──────────┐
+//!  │ OFFLINE  │ ────────────────► │ PREPARE  │
+//!  └──────────┘                   └────┬─────┘
+//!       ▲                              │ BSP per-CPU hazırlık
+//!       │                              ▼
+//!  ┌────┴─────┐   timeout/fail   ┌──────────┐
+//!  │  BROKEN  │ ◄──────────────  │ BRINGUP  │ ← INIT-SIPI-SIPI gönderildi
+//!  └──────────┘                  └────┬─────┘
+//!                                     │ AP 64-bit moda geçti
+//!                                     ▼
+//!                               ┌──────────┐
+//!                               │ STARTING │ (GDT/IDT/LAPIC yükleniyor)
+//!                               └────┬─────┘
+//!                                    │ kesmeler etkin
+//!                                    ▼
+//!                               ┌──────────┐
+//!                               │  ONLINE  │ ► Normal çalışma
+//!                               └────┬─────┘
+//!                                    │ hotplug offline
+//!                                    ▼
+//!                               ┌──────────┐
+//!                               │  DYING   │ (zamanlayıcı/LAPIC durduruluyor)
+//!                               └────┬─────┘
+//!                                    │
+//!                                    ▼
+//!                               ┌──────────┐
+//!                               │ POST_DEAD│ → kaynaklar serbest
+//!                               └──────────┘
+//! ```
 
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
 use alloc::vec::Vec;

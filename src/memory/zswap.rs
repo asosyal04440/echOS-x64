@@ -1,6 +1,70 @@
-//! # zswap/zram - Sıkıştırılmış Takas
+//! # ZSwap / ZRam — Sıkıştırılmış Bellek Tasas Havuzu
 //!
-//! Takas sayfaları için bellek sıkıştırması.
+//! Kirli sayfaları diske yazmadan önce RAM içinde sıkıştıran ara katman.
+//!
+//! ## ZSwap Neden Gerekli?
+//!
+//! Geleneksel swap akışı çok yavaştır:
+//! ```
+//! kirli sayfa → diske yaz (ms cinsinden gecikme) → disk oku → RAM'e geri yükle
+//! ```
+//!
+//! ZSwap bu akışa sıkıştırma enjekte eder:
+//! ```
+//! kirli sayfa → sıkıştır (LZ4/ZSTD) → zpool'a yaz (RAM'de)
+//!                                          ↓ havuz doldu
+//!                                       takas alanına geri yaz (disk)
+//! ```
+//!
+//! ## ZSwap Boru Hattı (Pipeline):
+//!
+//! ```
+//! Uygulama sayfası (4 KB)
+//!        │
+//!        ▼
+//!   ┌──────────────┐    Ratio ~%50   ┌──────────────────────┐
+//!   │  Compressor  │ ─────────────── │  zpool (RAM içinde)  │
+//!   │  LZ4 / ZSTD  │                 │  zbud / zsmalloc     │
+//!   └──────────────┘                 └──────────────────────┘
+//!                                              │
+//!                          havuz dolu veya bellek baskısı
+//!                                              ▼
+//!                               ┌──────────────────────────┐
+//!                               │  Disk Swap (blok cihaz)  │
+//!                               │  /dev/swap veya dosya    │
+//!                               └──────────────────────────┘
+//! ```
+//!
+//! ## Sıkıştırma Algoritmaları:
+//!
+//! | Algoritma | Sıkıştırma Hızı | Sıkıştırma Oranı | Çözme Hızı |
+//! |-----------|----------------|-----------------|------------|
+//! | `lz4`     | Çok hızlı      | ~%50 küçültme   | Çok hızlı  |
+//! | `zstd`    | Orta           | ~%67 küçültme   | Hızlı      |
+//!
+//! ## ZPool Ayırıcıları:
+//!
+//! - **zbud**: Her sayfa 2 sıkıştırılmış nesne barındırır; basit, düşük meta-veri
+//! - **zsmalloc**: Değişken boyutlu nesneler; daha yüksek yoğunluk
+//!
+//! ## ZRam Farkı:
+//!
+//! ZRam, tüm takas alanını RAM'de tutar (diske hiç yazmaz).
+//! ZSwap ise RAM'i ara tampon olarak kullanır; havuz dolunca diske iter.
+//!
+//! ## Performans Örneği:
+//!
+//! ```
+//! 4 KB sayfa, LZ4 ile ~2 KB'ye sıkıştırılmış:
+//!   RAM tasarrufu: %50
+//!   Gecikme:       ~1 µs (LZ4) vs ~10 ms (disk)
+//!   Bellek baskısı azaltma: havuz %20 → toplam swap kapasitesi 5× artar
+//! ```
+//!
+//! ## İlgili Modüller:
+//! - `mod.rs`: `reclaim_pages_scoped()` — LRU sayfalarını takar/sıkıştırır
+//! - `fibonacci_pmm.rs`: Fiziksel çerçeve tahsisi
+//! - `oom.rs`: OOM Killer — zswap başarısız olunca devreye girer
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;

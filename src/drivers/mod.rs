@@ -1,53 +1,90 @@
 //! # echOS Donanım Sürücüleri
 //!
 //! Bu modül, sistem donanım sürücülerini içerir.
-//! PS/2 keyboard/mouse, ATA disk ve APIC desteği.
+//!
+//! ## Sürücü Katmanı Mimarisi
+//!
+//! echOS'ta sürücüler iki katmanlı bir yapıda organize edilmiştir:
+//!
+//! ```
+//!   Üst Katman (linux submodülü)
+//!     |-- LinuxDriver trait  -> probe() + attach() arayüzü
+//!     |-- DRIVER_REGISTRY    -> kayıtlı sürücüler listesi
+//!     |-- DEVICE_REGISTRY    -> keşfedilen cihazlar listesi
+//!     +-- probe_and_attach() -> sürücü-cihaz eşleştirme döngüsü
+//!
+//!   Alt Katman (donanım sürücüleri)
+//!     |-- ps2   -> PS/2 klavye denetleyicisi (IRQ1)
+//!     |-- mouse -> PS/2 mouse sürücüsü (IRQ12)
+//!     |-- ata   -> IDE/ATA HDD sürücüsü (PIO mod, DMA yok)
+//!     |-- apic  -> Yerel APIC ve IO-APIC yönetimi
+//!     |-- pci   -> PCI konfigürasyon uzayı tarayıcı
+//!     |-- usb   -> xHCI USB host controller
+//!     |-- nvme  -> NVMe SSD sürücüsü (PCIe)
+//!     +-- audio -> Intel HDA ses sürücüsü
+//! ```
+//!
+//! ## Aygıt Başlatma Sırası
+//!
+//! `init_linux_driver_layer()` çağrıldığında şu adımlar gerçekleşir:
+//!   1. PS/2 platform cihazları kayıt edilir (sabit major:minor numaralarıyla)
+//!   2. PCI bus taranır; class_code'a göre cihazlar sınıflandırılır
+//!   3. VirtIO blok/ağ cihazları legacy I/O BAR ile başlatılır
+//!   4. Sürücüler kayıt edilir (probe_and_attach döngüsüne girer)
+//!   5. Her sürücünün probe() fonksiyonu her cihaza karşı çalıştırılır
+//!   6. Eşleşme varsa attach() çağrılır ve ATTACHMENTS listesine eklenir
 
-/// Input event kuyruğu (keyboard, mouse)
+/// Input event kuyruğu (keyboard, mouse): IRQ işleyicilerinden gelen olayları tampona alır
 pub mod input;
 
-/// PS/2 controller sürücüsü
+/// PS/2 controller sürücüsü: i8042 denetleyicisi aracılığıyla klavye/mouse iletişimi
 pub mod ps2;
 
-/// PS/2 mouse sürücüsü
+/// PS/2 mouse sürücüsü: IRQ12 ile mouse paketlerini alır ve pozisyonu günceller
 pub mod mouse;
 
-/// ATA disk sürücüsü
+/// ATA/IDE disk sürücüsü: PIO mod okuma/yazma (DMA yok, senkron)
 pub mod ata;
 
-/// Advanced PIC (Local APIC)
+/// Advanced PIC (Local APIC): modern x86 kesme kontrolörü; 8259 PIC'in yerine geçer
 pub mod apic;
 
+// PCI yapılandırma uzayı tarayıcısı ve BAR okuma yardımcıları
 pub mod pci;
+// PCI kök otobüs yöneticisi (PCI Root Bridge)
 pub mod pci_root;
 
-/// USB (xHCI) sürücüsü
+/// USB (xHCI) sürücüsü: USB 3.0 eXtensible Host Controller Interface
 pub mod usb;
 
-/// Audio (Intel HDA) sürücüsü
+/// Audio (Intel HDA) sürücüsü: High Definition Audio codec yönetimi
 pub mod audio;
 
-/// Bluetooth sürücüsü
+/// Bluetooth sürücüsü: HCI katmanı ve temel bağlantı yönetimi
 pub mod bluetooth;
 
-/// NVMe sürücüsü
+/// NVMe sürücüsü: PCIe üzerinden Non-Volatile Memory Express SSD erişimi
 pub mod nvme;
 
-/// VirtIO-Net network driver
+/// VirtIO-Net network driver: QEMU/KVM sanal ağ kartı sürücüsü
 pub mod virtio_net;
 
-/// VirGL 3D acceleration
+/// VirGL 3D acceleration: QEMU virgl aracılığıyla konaktan GPU komutları
 pub mod virgl;
 
+// VirtIO blok cihazı sürücüsü (disk R/W)
 pub mod virtio_blk;
+// VirtIO FFI köprüsü: C uyumlu VirtIO sürücü arayüzü
 pub mod virtio_ffi;
+// VirtIO GPU sürücüsü (sanal grafik kartı)
 pub mod virtio_gpu;
+// VirtIO HAL (Hardware Abstraction Layer): sanal DMA/bellek yönetimi
 pub mod virtio_hal;
 
-/// Block device abstraction
+/// Blok cihaz soyutlaması: tüm disk türleri için ortak trait (BlockDevice)
 pub mod block;
 
-// Re-export block device types for convenience
+// Sık kullanılan blok cihaz türlerini doğrudan dışa aktar
 pub use block::{BlockDevice, BlockDeviceError, BlockDeviceType};
 
 pub mod linux {
@@ -62,39 +99,64 @@ pub mod linux {
     use lazy_static::lazy_static;
     use spin::Mutex;
 
+    // ============================================================================
+    // LİNUX CİHAZ MODELİ (LINUX DEVICE MODEL)
+    // ============================================================================
+
+    // Bu alt modül, Linux çekirdek aygıt modelini (probe/attach mekanizması)
+    // basit biçimde uygular. Amacı:
+    //   - PCI taramasından gelen cihazları kayıt etmek
+    //   - Her cihaz için doğru sürücüyü bulmak (probe)
+    //   - Bulunan sürücüyü başlatmak (attach)
+    //
+    // Cihaz türleri Linux major/minor numaralandırmasına uygundur:
+    //   PS/2 klavye : major=10, minor=1  (misc device)
+    //   PS/2 mouse  : major=13, minor=0  (input)
+    //   Blok cihaz  : major=8, minor=0-N (sd, nvme...)
+
+    /// Linux cihaz sınıflandırması: karakter, blok veya diğer
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum LinuxDeviceKind {
-        Character,
-        Block,
-        Other,
+        Character, // /dev/tty, /dev/input/... byte bazlı erişim
+        Block,     // /dev/sda, /dev/nvme0n1 sektör bazlı erişim
+        Other,     // Ağ, ses vb. özel cihazlar
     }
 
+    /// Sistem üzerinde keşfedilen cihaz kaydı.
+    /// PCI taramasından veya platform (ACPI) tablolarından doldurulur.
     #[derive(Debug, Clone)]
     pub struct LinuxDevice {
-        pub name: String,
-        pub major: u16,
-        pub minor: u16,
+        pub name: String,       // Cihaz adı (örn. "pci-00:02.0")
+        pub major: u16,         // Linux major numarası (cihaz türü)
+        pub minor: u16,         // Linux minor numarası (cihaz örneği)
         pub kind: LinuxDeviceKind,
-        pub bus: u8,
-        pub device: u8,
-        pub function: u8,
-        pub class_code: u8,
-        pub subclass: u8,
-        pub prog_if: u8,
-        pub vendor_id: u16,
-        pub device_id: u16,
+        pub bus: u8,            // PCI bus numarası
+        pub device: u8,         // PCI cihaz numarası
+        pub function: u8,       // PCI fonksiyon numarası
+        pub class_code: u8,     // PCI class (0x01=depolama, 0x0C=seri bus...)
+        pub subclass: u8,       // PCI alt sınıf
+        pub prog_if: u8,        // PCI programlama arayüzü
+        pub vendor_id: u16,     // PCI üretici ID (örn. 0x8086=Intel)
+        pub device_id: u16,     // PCI cihaz ID
     }
 
+    /// Sürücü işlem hataları; Linux errno değerleriyle kavramsal uyum
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum LinuxDriverError {
-        NotSupported,
-        Io,
-        Busy,
-        Invalid,
-        NotFound,
-        Unknown,
+        NotSupported, // -ENOSYS: donanım desteklenmiyor
+        Io,           // -EIO:    I/O hatası
+        Busy,         // -EBUSY:  cihaz meşgul
+        Invalid,      // -EINVAL: geçersiz parametre
+        NotFound,     // -ENODEV: cihaz bulunamadı
+        Unknown,      // Bilinmeyen hata
     }
 
+    /// Sürücü arayüzü: her sürücü bu trait'i uygular.
+    ///
+    /// Linux'taki `struct device_driver` yapısının Rust karşılığı:
+    ///   probe()  -> cihazın bu sürücüyle uyumlu olup olmadığını kontrol eder
+    ///   attach() -> sürücüyü başlatır, donanımı kullanıma hazırlar
+    ///   detach() -> sürücüyü kapatır, kaynakları serbest bırakır
     pub trait LinuxDriver: Send + Sync {
         fn name(&self) -> &str;
         fn probe(&self, device: &LinuxDevice) -> bool;
@@ -104,15 +166,18 @@ pub mod linux {
         }
     }
 
+    /// Blok cihaz okuma/yazma arayüzü (disk soyutlama katmanı)
     pub trait BlockDevice: Send {
         fn read_sectors(&mut self, lba: u32, count: u8) -> Vec<u8>;
         fn write_sectors(&mut self, lba: u32, data: &[u8]) -> Result<(), ()>;
     }
 
+    /// VirtIO blok cihazı sarmalayıcısı (QEMU sanal disk)
     pub struct VirtioBlockDevice {
         inner: virtio_ffi::VirtioBlock,
     }
 
+    // ATA sürücüsü için BlockDevice trait implementasyonu
     impl BlockDevice for AtaDrive {
         fn read_sectors(&mut self, lba: u32, count: u8) -> Vec<u8> {
             AtaDrive::read_sectors(self, lba, count)
@@ -123,6 +188,8 @@ pub mod linux {
         }
     }
 
+    // VirtIO blok cihazı için BlockDevice trait implementasyonu.
+    // Dahili olarak sector bazlı VirtIO FFI fonksiyonlarını kullanır.
     impl BlockDevice for VirtioBlockDevice {
         fn read_sectors(&mut self, lba: u32, count: u8) -> Vec<u8> {
             let mut buffer = Vec::with_capacity(count as usize * BLOCK_SIZE);
@@ -149,6 +216,7 @@ pub mod linux {
         }
     }
 
+    /// Sürücü-cihaz eşleştirme kaydı: hangi cihaza hangi sürücünün bağlandığını tutar
     #[derive(Debug, Clone)]
     pub struct LinuxAttachment {
         pub device: String,
@@ -156,26 +224,34 @@ pub mod linux {
     }
 
     lazy_static! {
+        // Kayıtlı sürücüler listesi (probe_and_attach tarafından taranır)
         static ref DRIVER_REGISTRY: Mutex<Vec<Box<dyn LinuxDriver>>> = Mutex::new(Vec::new());
+        // Keşfedilen cihazlar listesi (PCI/platform taramasından doldurulur)
         static ref DEVICE_REGISTRY: Mutex<Vec<LinuxDevice>> = Mutex::new(Vec::new());
+        // Başarılı sürücü bağlamalarının kaydı (debug/status için)
         static ref ATTACHMENTS: Mutex<Vec<LinuxAttachment>> = Mutex::new(Vec::new());
     }
+    // init_linux_driver_layer() yalnızca bir kez çalışmasını garantiler
     static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
+    /// Sürücüyü kayıt eder; probe_and_attach() döngüsüne dahil edilir
     pub fn register_driver(driver: Box<dyn LinuxDriver>) {
         DRIVER_REGISTRY.lock().push(driver);
     }
 
+    /// Cihazı kayıt eder; döner: cihazın kayıt dizisindeki indeksi
     pub fn register_device(device: LinuxDevice) -> usize {
         let mut devices = DEVICE_REGISTRY.lock();
         devices.push(device);
         devices.len() - 1
     }
 
+    /// Kayıtlı tüm cihazların kopyasını döner
     pub fn list_devices() -> Vec<LinuxDevice> {
         DEVICE_REGISTRY.lock().clone()
     }
 
+    /// Kayıtlı sürücü adlarını listeler
     pub fn list_drivers() -> Vec<String> {
         DRIVER_REGISTRY
             .lock()
@@ -184,10 +260,16 @@ pub mod linux {
             .collect()
     }
 
+    /// Başarılı bağlamaların (attachment) listesini döner
     pub fn list_attachments() -> Vec<LinuxAttachment> {
         ATTACHMENTS.lock().clone()
     }
 
+    /// Uygun blok cihazı seçer: önce VirtIO, bulamazsa ATA'ya düşer.
+    ///
+    /// VirtIO seçimi:
+    ///   vendor_id=0x1AF4 (Red Hat/QEMU), device_id=0x1001 veya 0x1042
+    ///   MBR geçerliliği (sektör 0'ın son 2 byte'ı 0x55 0xAA olmalı) doğrulanır
     pub fn select_block_device() -> Result<Box<dyn BlockDevice>, LinuxDriverError> {
         let devices = list_devices();
         crate::serial_println!("BLOCK DEV COUNT: {}", devices.len());
@@ -246,6 +328,7 @@ pub mod linux {
         }
         virtio.write_sector(test_lba, &backup);
         crate::serial_println!("VIRTIO FFI: write/read test restore done lba={}", test_lba);
+        // MBR imzası: geleneksel MBR'nin son 2 byte'ı 0x55, 0xAA olmalı
         if probe[510] != 0x55 || probe[511] != 0xAA {
             crate::serial_println!("BLOCK DEVICE INIT FAILED: MBR signature invalid");
             return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
@@ -255,9 +338,11 @@ pub mod linux {
         Ok(Box::new(VirtioBlockDevice { inner: virtio }))
     }
 
+    /// VirtIO bulunamazsa ATA/IDE denetleyicisini dener.
+    /// AtaDrive::detect() -> sürücünün varlığını doğrular.
     fn try_ata_block_device() -> Result<Box<dyn BlockDevice>, LinuxDriverError> {
         crate::serial_println!("BLOCK DEVICE FALLBACK: ATA");
-        let mut drive = AtaDrive::new(0x1F0);
+        let mut drive = AtaDrive::new(0x1F0); // Primary ATA I/O portu: 0x1F0
         match drive.detect() {
             Ok(true) => {
                 crate::serial_println!("BLOCK DEVICE ATA OK");
@@ -274,6 +359,14 @@ pub mod linux {
         }
     }
 
+    /// Sürücü-cihaz eşleştirme döngüsü.
+    ///
+    /// Her kayıtlı sürücü, her kayıtlı cihaza karşı test edilir:
+    ///   1. driver.probe(device) -> uyum var mı?
+    ///   2. driver.attach(device) -> sürücüyü başlat
+    ///   3. Başarılı ise ATTACHMENTS listesine ekle
+    ///
+    /// Döner: başarılı bağlama (attachment) sayısı
     pub fn probe_and_attach() -> usize {
         let devices = DEVICE_REGISTRY.lock().clone();
         let drivers = DRIVER_REGISTRY.lock();
@@ -313,6 +406,15 @@ pub mod linux {
         attached
     }
 
+    // ============================================================================
+    // PLATFORM SÜRÜCÜ UYGULAMALARI (PLATFORM DRIVER IMPLEMENTATIONS)
+    // ============================================================================
+
+    // Her platform sürücüsü LinuxDriver trait'ini uygular.
+    // probe(): cihaz adı veya PCI kodu eşleşmesini kontrol eder
+    // attach(): donanımı başlatır
+
+    /// PS/2 i8042 kontrol cihazı sürücüsü
     struct Ps2ControllerDriver;
 
     impl LinuxDriver for Ps2ControllerDriver {
@@ -321,6 +423,7 @@ pub mod linux {
         }
 
         fn probe(&self, device: &LinuxDevice) -> bool {
+            // Platforma kayıtlı "ps2" isimli cihazı tanır
             device.name == "ps2"
         }
 
@@ -333,6 +436,7 @@ pub mod linux {
         }
     }
 
+    /// PS/2 mouse sürücüsü (IRQ12 tabanlı)
     struct Ps2MouseDriver;
 
     impl LinuxDriver for Ps2MouseDriver {
@@ -341,6 +445,7 @@ pub mod linux {
         }
 
         fn probe(&self, device: &LinuxDevice) -> bool {
+            // "ps2-mouse" platform cihazını tanır
             device.name == "ps2-mouse"
         }
 
@@ -353,6 +458,7 @@ pub mod linux {
         }
     }
 
+    /// ATA PIO sürücüsü: PATA hard disk okuma/yazma (non-DMA)
     struct AtaPioDriver;
 
     impl LinuxDriver for AtaPioDriver {
@@ -374,6 +480,7 @@ pub mod linux {
         }
     }
 
+    /// PCI depolama cihazı sürücüsü: class_code=0x01 olan tüm PCI cihazları
     struct StoragePciDriver;
 
     impl LinuxDriver for StoragePciDriver {
@@ -382,6 +489,7 @@ pub mod linux {
         }
 
         fn probe(&self, device: &LinuxDevice) -> bool {
+            // PCI class 0x01 = Mass Storage Controller
             device.class_code == 0x01
         }
 
@@ -390,6 +498,7 @@ pub mod linux {
         }
     }
 
+    /// xHCI (USB 3.0) PCI sürücüsü: class=0x0C (seri bus), sub=0x03 (USB), prog_if=0x30 (xHCI)
     struct XhciPciDriver;
 
     impl LinuxDriver for XhciPciDriver {
@@ -398,6 +507,7 @@ pub mod linux {
         }
 
         fn probe(&self, device: &LinuxDevice) -> bool {
+            // PCI: class=0x0C (Serial Bus), subclass=0x03 (USB), prog_if=0x30 (xHCI)
             device.class_code == 0x0C && device.subclass == 0x03 && device.prog_if == 0x30
         }
 
@@ -407,6 +517,11 @@ pub mod linux {
         }
     }
 
+    /// PCI bus tarandıktan sonra bulunan cihazları kayıt eder.
+    ///
+    /// - IDE (subclass=0x01) denetleyicileri atlanır (ATA PIO ile yönetilir)
+    /// - VirtIO blok cihazları (vendor=0x1AF4) için legacy I/O BAR başlatılır
+    /// - Her cihaz için LinuxDevice kaydı oluşturulur
     fn register_pci_devices() {
         let mut storage_minor: u16 = 0;
         for dev in pci::scan() {
@@ -421,6 +536,7 @@ pub mod linux {
                 dev.subclass,
                 dev.prog_if
             );
+            // IDE denetleyicisi (subclass=0x01): ATA PIO sürücüsü yönetir, burada atla
             if dev.class_code == 0x01 && dev.subclass == 0x01 {
                 crate::serial_println!(
                     "Skipping IDE controller {:02x}:{:02x}.{}",
@@ -430,6 +546,8 @@ pub mod linux {
                 );
                 continue;
             }
+            // VirtIO blok cihazı başlatma:
+            // Bit 0: I/O Space Enable, Bit 1: Memory Space, Bit 2: Bus Master (DMA için)
             if dev.vendor_id == 0x1AF4 && (dev.device_id == 0x1001 || dev.device_id == 0x1042) {
                 let mut command = pci::read_config_dword(dev.bus, dev.device, dev.function, 0x04);
                 command |= (1 << 0) | (1 << 1) | (1 << 2);
@@ -459,9 +577,10 @@ pub mod linux {
                     dev.device_id
                 );
             }
+            // PCI class'a göre cihaz türü belirlenir
             let kind = match dev.class_code {
-                0x01 => LinuxDeviceKind::Block,
-                0x0C => LinuxDeviceKind::Character,
+                0x01 => LinuxDeviceKind::Block,     // Depolama (ATA, NVMe, SCSI)
+                0x0C => LinuxDeviceKind::Character, // Seri bus (USB, FireWire)
                 _ => LinuxDeviceKind::Other,
             };
             register_device(LinuxDevice {
@@ -478,6 +597,7 @@ pub mod linux {
                 vendor_id: dev.vendor_id,
                 device_id: dev.device_id,
             });
+            // Depolama cihazı için ikinci bir kayıt: major=8 (block cihaz numarası)
             if dev.class_code == 0x01 {
                 register_device(LinuxDevice {
                     name: format!("block-{:02x}:{:02x}.{}", dev.bus, dev.device, dev.function),
@@ -498,13 +618,18 @@ pub mod linux {
         }
     }
 
+    /// Linux sürücü katmanını başlatır.
+    ///
+    /// INIT_DONE atomik bayrağıyla çift başlatma önlenir.
+    /// Döner: başarılı probe_and_attach sayısı (0 = tüm sürücüler başlatılamadı)
     pub fn init_linux_driver_layer() -> usize {
         if INIT_DONE.swap(true, Ordering::SeqCst) {
-            return 0;
+            return 0; // Daha önce çağrıldı; yeniden başlatma atlandı
         }
+        // Platform cihazlarını kayıt et (PCI'dan farklı; ACPI/sabit cihazlar)
         register_device(LinuxDevice {
             name: "ps2".to_string(),
-            major: 10,
+            major: 10,      // misc device major
             minor: 1,
             kind: LinuxDeviceKind::Character,
             bus: 0,
@@ -518,7 +643,7 @@ pub mod linux {
         });
         register_device(LinuxDevice {
             name: "ps2-mouse".to_string(),
-            major: 13,
+            major: 13,      // input device major
             minor: 0,
             kind: LinuxDeviceKind::Character,
             bus: 0,
@@ -530,11 +655,14 @@ pub mod linux {
             vendor_id: 0,
             device_id: 0,
         });
+        // PCI bus'u tara ve cihazları kayıt et
         register_pci_devices();
+        // Sürücüleri kayıt et (probe sırası önemli değil, hepsi denenir)
         register_driver(Box::new(Ps2ControllerDriver));
         register_driver(Box::new(Ps2MouseDriver));
         register_driver(Box::new(StoragePciDriver));
         register_driver(Box::new(XhciPciDriver));
+        // Probe+attach döngüsünü çalıştır ve başarılı bağlama sayısını döndür
         probe_and_attach()
     }
 }

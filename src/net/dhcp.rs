@@ -1,6 +1,67 @@
-//! # DHCP Client
+//! # DHCP İstemcisi (Dynamic Host Configuration Protocol)
 //!
-//! Dynamic Host Configuration Protocol for automatic IP configuration
+//! DHCP, bir ağa bağlanan cihazların IP adresi, alt ağ maskesi, ağ geçidi
+//! ve DNS sunucusu bilgilerini otomatik olarak almasını sağlayan protokoldür.
+//! RFC 2131 ile tanımlanmıştır. UDP üzerinde çalışır (Port 67/68).
+//!
+//! ## DORA El Sıkışma Süreci
+//!
+//! ```text
+//! İstemci (Client)                    DHCP Sunucusu (Server)
+//!      |                                       |
+//!      |--- DISCOVER (broadcast UDP 255.255.255.255:67) --->|
+//!      |    "Ağda DHCP sunucusu var mı?"        |
+//!      |                                       |
+//!      |<--- OFFER (broadcast/unicast) ---------|
+//!      |    "Sana 192.168.1.100 verebilirim"   |
+//!      |                                       |
+//!      |--- REQUEST (broadcast) -------------->|
+//!      |    "192.168.1.100'ü istiyorum"        |
+//!      |                                       |
+//!      |<--- ACK (broadcast/unicast) ----------|
+//!      |    "Onaylandı, IP senin!"             |
+//!      |                                       |
+//! ```
+//!
+//! ## DHCP Mesaj Yapısı (Minimum 236 Byte + Options)
+//!
+//! ```text
+//! Offset  Uzunluk  Alan
+//! ------  -------  -------
+//!  0       1       op      (1=istek, 2=yanıt)
+//!  1       1       htype   (Donanım türü: 1=Ethernet)
+//!  2       1       hlen    (MAC adresi uzunluğu: 6)
+//!  3       1       hops    (Ağ geçidi sayısı)
+//!  4       4       xid     (Oturum kimliği / transaction ID)
+//!  8       2       secs    (Geçen süre)
+//! 10       2       flags   (0x8000 = broadcast bayrağı)
+//! 12       4       ciaddr  (İstemci IP'si, zaten varsa)
+//! 16       4       yiaddr  (Sunucunun teklif ettiği IP "Your IP")
+//! 20       4       siaddr  (Sunucu IP'si)
+//! 24       4       giaddr  (Ağ geçidi IP'si)
+//! 28      16       chaddr  (İstemci MAC adresi, 16 byte'a padded)
+//! 44      64       sname   (Sunucu adı, opsiyonel)
+//!108     128       file    (Önyükleme dosya adı, opsiyonel)
+//!236     var.      options (DHCP seçenekleri, sihirli çerez ile başlar)
+//!
+//! Options başlangıcı:
+//!   0x63 0x82 0x53 0x63  <-- DHCP Sihirli Çerez (Magic Cookie)
+//!   53   1    1          <-- Option 53: Mesaj Türü = DISCOVER
+//!   55   4    1,3,6,15   <-- Option 55: Parametre İstek Listesi
+//!  255                   <-- End option (seçeneklerin sonu)
+//! ```
+//!
+//! ## Kira (Lease) Zaman Çizelgesi
+//!
+//! ```text
+//! 0         T1(~%50)     T2(~%87.5)   Kira Sonu
+//! |------------|------------|------------|
+//! ^            ^            ^            ^
+//! ACK alındı   Yenileme     Yeniden      IP sona
+//! (Kira başlar) başlar       bağlanma     erer
+//!              (sunucuya    (broadcast
+//!              unicast)     REQUEST)
+//! ```
 
 use super::{Ipv4Addr, MacAddr, Port, NetError, SocketAddr};
 use super::udp;
@@ -11,24 +72,28 @@ use alloc::boxed::Box;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// DHCP client port
+/// DHCP istemci portu: istemci bu portu dinler (RFC 2131)
 const DHCP_CLIENT_PORT: u16 = 68;
-/// DHCP server port
+/// DHCP sunucu portu: tüm istek ve yanıtlar bu porta gönderilir (RFC 2131)
 const DHCP_SERVER_PORT: u16 = 67;
 
-/// DHCP message types
+/// DHCP mesaj türleri (Option 53).
+///
+/// DORA süreci: Discover -> Offer -> Request -> Ack
+/// İptal durumu: Nak (negatif onay)
+/// Serbest bırakma: Release
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DhcpMessageType {
-    Discover = 1,
-    Offer = 2,
-    Request = 3,
-    Decline = 4,
-    Ack = 5,
-    Nak = 6,
-    Release = 7,
-    Inform = 8,
-    Unknown = 0,
+    Discover = 1, // İstemci: "Ağda DHCP sunucusu var mı?" (broadcast)
+    Offer = 2,    // Sunucu: "Sana şu IP'yi verebilirim"
+    Request = 3,  // İstemci: "O IP'yi istiyorum / kira yeniliyorum"
+    Decline = 4,  // İstemci: "Teklif ettiğin IP kullanımda, reddediyorum"
+    Ack = 5,      // Sunucu: "Onaylandı, IP senin"
+    Nak = 6,      // Sunucu: "Reddedildi, yeniden dene"
+    Release = 7,  // İstemci: "IP'yi geri veriyorum"
+    Inform = 8,   // İstemci: "IP'm var ama diğer konfigürasyona ihtiyacım var"
+    Unknown = 0,  // Bilinmeyen tür
 }
 
 impl DhcpMessageType {
@@ -47,56 +112,66 @@ impl DhcpMessageType {
     }
 }
 
-/// DHCP header
+/// DHCP mesaj yapısı.
+///
+/// 236 byte sabit başlık + değişken uzunluklu options alanından oluşur.
+/// `options` alanı DHCP sihirli çerezini (0x63825363) ve TLV kodlanmış
+/// seçenekleri içerir.
 #[derive(Clone, Debug)]
 pub struct DhcpMessage {
-    pub op: u8,           // 1=request, 2=reply
-    pub htype: u8,        // Hardware type (1=Ethernet)
-    pub hlen: u8,         // Hardware address length (6)
-    pub hops: u8,
-    pub xid: u32,         // Transaction ID
-    pub secs: u16,
-    pub flags: u16,
-    pub ciaddr: Ipv4Addr, // Client IP
-    pub yiaddr: Ipv4Addr, // Your IP
-    pub siaddr: Ipv4Addr, // Server IP
-    pub giaddr: Ipv4Addr, // Gateway IP
-    pub chaddr: [u8; 16], // Client hardware address
-    pub sname: [u8; 64],  // Server name
-    pub file: [u8; 128],  // Boot file
-    pub options: Vec<u8>,
+    pub op: u8,           // 1=istemci isteği (BOOTREQUEST), 2=sunucu yanıtı (BOOTREPLY)
+    pub htype: u8,        // Donanım türü (1=Ethernet)
+    pub hlen: u8,         // Donanım adres uzunluğu (6 = MAC adresi)
+    pub hops: u8,         // DHCP relay agent'ların sayısı (tipik 0)
+    pub xid: u32,         // Transaction ID: istek/yanıtı eşleştirmek için rastgele sayı
+    pub secs: u16,        // IP almaya çalışmaya başladıktan bu yana geçen saniye
+    pub flags: u16,       // 0x8000 = Broadcast bayrağı (sunucunun broadcast ile yanıt vermesi)
+    pub ciaddr: Ipv4Addr, // Client IP: istemcinin mevcut IP adresi (yenileme için)
+    pub yiaddr: Ipv4Addr, // Your IP: sunucunun istemciye teklif ettiği IP
+    pub siaddr: Ipv4Addr, // Server IP: bir sonraki önyükleme aşamasının sunucusu
+    pub giaddr: Ipv4Addr, // Gateway IP: DHCP relay agent'ın adresi
+    pub chaddr: [u8; 16], // Client Hardware Address: istemci MAC adresi (16 byte, padded)
+    pub sname: [u8; 64],  // Server Name: opsiyonel sunucu host adı (null terminated)
+    pub file: [u8; 128],  // Boot File: opsiyonel önyükleme dosya adı
+    pub options: Vec<u8>, // DHCP Seçenekleri: sihirli çerez + TLV kodlanmış seçenekler
 }
 
 impl DhcpMessage {
+    /// Sabit başlık boyutu (sihirli çerez dahil değil)
     pub const MIN_SIZE: usize = 236;
+    /// DHCP sihirli çerezi: her DHCP mesajının options alanı bu 4 byte ile başlar
     pub const MAGIC_COOKIE: [u8; 4] = [0x63, 0x82, 0x53, 0x63];
-    
+
+    /// Yeni bir DHCP Discover mesajı oluşturur.
+    ///
+    /// İstemci ağa ilk bağlandığında IP almak için broadcast olarak gönderilir.
+    /// Ağdaki tüm DHCP sunucuları bu mesajı alır ve Offer ile yanıt verir.
     pub fn new_discover(mac: MacAddr, xid: u32) -> Self {
         let mut chaddr = [0u8; 16];
         chaddr[..6].copy_from_slice(mac.as_bytes());
-        
+
         let mut options = Vec::new();
-        // Magic cookie
+        // DHCP sihirli çerezi ile başla (RFC 2131 zorunlu)
         options.extend_from_slice(&Self::MAGIC_COOKIE);
-        // DHCP Message Type option
+        // Option 53: Mesaj Türü = DISCOVER
         options.push(53); // Option: Message Type
         options.push(1);  // Length
         options.push(DhcpMessageType::Discover as u8);
-        // Client Identifier
+        // Option 61: İstemci Tanımlayıcısı (MAC adresi üzerinden)
         options.push(61); // Option: Client Identifier
         options.push(7);  // Length
         options.push(1);  // Hardware type: Ethernet
         options.extend_from_slice(mac.as_bytes());
-        // Parameter Request List
+        // Option 55: Parametre İstek Listesi (sunucudan istenen bilgiler)
         options.push(55); // Option: Parameter Request List
         options.push(4);  // Length
-        options.push(1);  // Subnet Mask
-        options.push(3);  // Router
-        options.push(6);  // DNS Server
-        options.push(15); // Domain Name
-        // End option
+        options.push(1);  // Subnet Mask (alt ağ maskesi)
+        options.push(3);  // Router (ağ geçidi)
+        options.push(6);  // DNS Server (isim sunucusu)
+        options.push(15); // Domain Name (alan adı)
+        // Option 255: Seçeneklerin sonu
         options.push(255);
-        
+
         DhcpMessage {
             op: 1,
             htype: 1,
@@ -104,7 +179,7 @@ impl DhcpMessage {
             hops: 0,
             xid,
             secs: 0,
-            flags: 0x8000, // Broadcast flag
+            flags: 0x8000, // Broadcast bayrağı: sunucu broadcast ile yanıt versin
             ciaddr: Ipv4Addr::UNSPECIFIED,
             yiaddr: Ipv4Addr::UNSPECIFIED,
             siaddr: Ipv4Addr::UNSPECIFIED,
@@ -115,28 +190,32 @@ impl DhcpMessage {
             options,
         }
     }
-    
+
+    /// Yeni bir DHCP Request mesajı oluşturur.
+    ///
+    /// Offer alındıktan sonra gönderilir. İstenen IP ve sunucu IP'si belirtilir.
+    /// Broadcast olarak gönderilir ki diğer DHCP sunucuları da tekliflerini geri çeksin.
     pub fn new_request(mac: MacAddr, xid: u32, requested_ip: Ipv4Addr, server_ip: Ipv4Addr) -> Self {
         let mut chaddr = [0u8; 16];
         chaddr[..6].copy_from_slice(mac.as_bytes());
-        
+
         let mut options = Vec::new();
         options.extend_from_slice(&Self::MAGIC_COOKIE);
-        // DHCP Message Type
+        // DHCP Mesaj Türü: REQUEST
         options.push(53);
         options.push(1);
         options.push(DhcpMessageType::Request as u8);
-        // Requested IP
+        // Option 50: Requested IP Address (istenen IP adresi)
         options.push(50);
         options.push(4);
         options.extend_from_slice(requested_ip.as_bytes());
-        // Server Identifier
+        // Option 54: Server Identifier (hangi DHCP sunucusundan istendiği)
         options.push(54);
         options.push(4);
         options.extend_from_slice(server_ip.as_bytes());
-        // End
+        // Seçeneklerin sonu
         options.push(255);
-        
+
         DhcpMessage {
             op: 1,
             htype: 1,
@@ -155,12 +234,15 @@ impl DhcpMessage {
             options,
         }
     }
-    
+
+    /// Ham byte dizisinden DHCP mesajını ayrıştırır.
+    ///
+    /// Minimum 236 byte gerektirir. Options alanı sihirli çerezden sonra başlar.
     pub fn parse(data: &[u8]) -> Result<Self, NetError> {
         if data.len() < Self::MIN_SIZE {
             return Err(NetError::InvalidPacket);
         }
-        
+
         let op = data[0];
         let htype = data[1];
         let hlen = data[2];
@@ -172,28 +254,32 @@ impl DhcpMessage {
         let yiaddr = Ipv4Addr::from_bytes([data[16], data[17], data[18], data[19]]);
         let siaddr = Ipv4Addr::from_bytes([data[20], data[21], data[22], data[23]]);
         let giaddr = Ipv4Addr::from_bytes([data[24], data[25], data[26], data[27]]);
-        
+
         let mut chaddr = [0u8; 16];
         chaddr.copy_from_slice(&data[28..44]);
-        
+
         let mut sname = [0u8; 64];
         sname.copy_from_slice(&data[44..108]);
-        
+
         let mut file = [0u8; 128];
         file.copy_from_slice(&data[108..236]);
-        
+
         let options = data[236..].to_vec();
-        
+
         Ok(DhcpMessage {
             op, htype, hlen, hops, xid, secs, flags,
             ciaddr, yiaddr, siaddr, giaddr,
             chaddr, sname, file, options,
         })
     }
-    
+
+    /// DHCP mesajını byte dizisine seri hale getirir.
+    ///
+    /// Ağ üzerinden göndermeden önce çağrılır.
+    /// Tüm alanlar ağ byte sırası (big-endian) ile yazılır.
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(Self::MIN_SIZE + self.options.len());
-        
+
         buf.push(self.op);
         buf.push(self.htype);
         buf.push(self.hlen);
@@ -209,10 +295,16 @@ impl DhcpMessage {
         buf.extend_from_slice(&self.sname);
         buf.extend_from_slice(&self.file);
         buf.extend(&self.options);
-        
+
         buf
     }
-    
+
+    /// Options alanından mesaj türünü (Option 53) okur.
+    ///
+    /// Options alanı TLV (Type-Length-Value) formatında kodlanmıştır:
+    /// - Type (1 byte): Seçenek numarası
+    /// - Length (1 byte): Değer uzunluğu
+    /// - Value (Length byte): Değer
     pub fn get_message_type(&self) -> DhcpMessageType {
         for i in 0..self.options.len() {
             if self.options[i] == 53 && i + 2 < self.options.len() {
@@ -221,16 +313,20 @@ impl DhcpMessage {
         }
         DhcpMessageType::Unknown
     }
-    
+
+    /// Options alanından belirtilen kod numarasına sahip seçeneği döner.
+    ///
+    /// TLV formatını okuyarak sihirli çerezi (ilk 4 byte) atlayıp
+    /// istenen seçeneğin değerini döner. Seçenek bulunamazsa `None` döner.
     pub fn get_option(&self, code: u8) -> Option<&[u8]> {
-        let mut i = 4; // Skip magic cookie
+        let mut i = 4; // Sihirli çerezi atla (Magic Cookie, 4 byte)
         while i < self.options.len() {
             let opt_code = self.options[i];
             if opt_code == 255 {
-                break;
+                break; // End option: seçeneklerin sonu
             }
             if opt_code == 0 {
-                i += 1;
+                i += 1; // Pad option: tek byte dolgu, atla
                 continue;
             }
             if i + 1 >= self.options.len() {
@@ -240,32 +336,48 @@ impl DhcpMessage {
             if opt_code == code {
                 return Some(&self.options[i + 2..i + 2 + opt_len]);
             }
-            i += 2 + opt_len;
+            i += 2 + opt_len; // Sonraki seçeneğe geç
         }
         None
     }
 }
 
 // ============================================================================
-// DHCP CLIENT
+// DHCP CLIENT (DHCP İSTEMCİSİ)
 // ============================================================================
+//
+// DHCP istemci durumu:
+//
+//   INIT --> SELECTING --> REQUESTING --> BOUND
+//                                          |
+//                            <--RENEWING---+
+//                           |              |
+//                           +--REBINDING-->+
+//
+// BOUND: Geçerli kira var, normal iletişim
+// RENEWING: T1 geçti, sunucudan unicast ile yenileme isteniyor
+// REBINDING: T2 geçti, herhangi bir sunucudan broadcast ile yenileme
+// INIT: Kira bitti veya NAK alındı, yeniden baştan
 
 static DHCP_SOCKET: Mutex<Option<u32>> = Mutex::new(None);
 static DHCP_CONFIGURED: AtomicBool = AtomicBool::new(false);
 
-/// DHCP lease state
+/// DHCP kira durumu.
+///
+/// DHCP sunucusundan alınan IP adresi ve ağ konfigürasyon bilgilerini
+/// ile kira süre bilgilerini tutar.
 #[derive(Clone, Debug)]
 pub struct DhcpLease {
-    pub ip: Ipv4Addr,
-    pub subnet_mask: Ipv4Addr,
-    pub gateway: Ipv4Addr,
-    pub dns_servers: Vec<Ipv4Addr>,
-    pub server_ip: Ipv4Addr,
-    pub lease_time: u32,        // seconds
-    pub renewal_time: u32,      // T1 (typically 0.5 * lease_time)
-    pub rebinding_time: u32,    // T2 (typically 0.875 * lease_time)
-    pub obtained_at: u64,       // timestamp when lease was obtained
-    pub xid: u32,               // transaction ID for renewal
+    pub ip: Ipv4Addr,              // Atanan IP adresi
+    pub subnet_mask: Ipv4Addr,     // Alt ağ maskesi (Option 1)
+    pub gateway: Ipv4Addr,         // Varsayılan ağ geçidi (Option 3)
+    pub dns_servers: Vec<Ipv4Addr>,// DNS sunucuları (Option 6)
+    pub server_ip: Ipv4Addr,       // Kira veren DHCP sunucusunun IP'si (Option 54)
+    pub lease_time: u32,           // Toplam kira süresi (Option 51, saniye cinsinden)
+    pub renewal_time: u32,         // T1: Yenileme zamanı, tipik olarak kira_süresi * 0.5
+    pub rebinding_time: u32,       // T2: Yeniden bağlanma zamanı, tipik olarak kira_süresi * 0.875
+    pub obtained_at: u64,          // Kiranın alındığı zaman damgası (sistem saati)
+    pub xid: u32,                  // Yenileme işlemleri için orijinal transaction ID
 }
 
 impl DhcpLease {
@@ -283,13 +395,17 @@ impl DhcpLease {
             xid: 0,
         }
     }
-    
-    /// Check if lease is valid
+
+    /// Kiranın geçerli olup olmadığını kontrol eder.
+    ///
+    /// Geçerli kira: Atanmış bir IP adresi olmalı ve kira süresi > 0.
     pub fn is_valid(&self) -> bool {
         !self.ip.is_unspecified() && self.lease_time > 0
     }
-    
-    /// Check if lease needs renewal
+
+    /// Kiranın yenilenmesi gerekip gerekmediğini kontrol eder (T1 zamanı).
+    ///
+    /// T1 geçtiyse sunucuya doğrudan unicast Request göndererek yenileme yapılır.
     pub fn needs_renewal(&self, current_time: u64) -> bool {
         if !self.is_valid() {
             return false;
@@ -297,8 +413,10 @@ impl DhcpLease {
         let elapsed = current_time.saturating_sub(self.obtained_at);
         elapsed >= self.renewal_time as u64
     }
-    
-    /// Check if lease needs rebinding
+
+    /// Yeniden bağlanma gerekip gerekmediğini kontrol eder (T2 zamanı).
+    ///
+    /// T2 geçtiyse herhangi bir DHCP sunucusuna broadcast Request gönderilir.
     pub fn needs_rebinding(&self, current_time: u64) -> bool {
         if !self.is_valid() {
             return false;
@@ -306,8 +424,10 @@ impl DhcpLease {
         let elapsed = current_time.saturating_sub(self.obtained_at);
         elapsed >= self.rebinding_time as u64
     }
-    
-    /// Check if lease is expired
+
+    /// Kiranın süresi dolup dolmadığını kontrol eder.
+    ///
+    /// Süresi dolmuş kira: IP artık kullanılamaz, INIT'ten yeniden başlanmalı.
     pub fn is_expired(&self, current_time: u64) -> bool {
         if !self.is_valid() {
             return true;
@@ -315,8 +435,8 @@ impl DhcpLease {
         let elapsed = current_time.saturating_sub(self.obtained_at);
         elapsed >= self.lease_time as u64
     }
-    
-    /// Get remaining lease time
+
+    /// Kiranın kalan süresini saniye olarak döner.
     pub fn remaining_time(&self, current_time: u64) -> u32 {
         if !self.is_valid() {
             return 0;
@@ -332,37 +452,40 @@ impl Default for DhcpLease {
     }
 }
 
-/// Global DHCP lease state
+/// Global DHCP kira durumu: en son geçerli kira bilgisi saklanır.
 static DHCP_LEASE: Mutex<Option<DhcpLease>> = Mutex::new(None);
 
-/// Initialize DHCP client
+/// DHCP istemcisini başlatır.
 pub fn init() {
     crate::serial_println!("[DHCP] Client initialized");
 }
 
-/// Get current DHCP lease
+/// Mevcut DHCP kirasını döner.
 pub fn get_lease() -> Option<DhcpLease> {
     DHCP_LEASE.lock().clone()
 }
 
-/// Create DHCP release message
+/// DHCP Release mesajı oluşturur.
+///
+/// İstemci IP adresini sunucuya geri verirken gönderilir.
+/// RFC 2131: Release mesajı unicast olarak sunucuya gönderilir (broadcast değil).
 pub fn new_release(mac: MacAddr, xid: u32, client_ip: Ipv4Addr, server_ip: Ipv4Addr) -> DhcpMessage {
     let mut chaddr = [0u8; 16];
     chaddr[..6].copy_from_slice(mac.as_bytes());
-    
+
     let mut options = Vec::new();
     options.extend_from_slice(&DhcpMessage::MAGIC_COOKIE);
-    // DHCP Message Type
+    // DHCP Mesaj Türü: RELEASE
     options.push(53);
     options.push(1);
     options.push(DhcpMessageType::Release as u8);
-    // Server Identifier
+    // Option 54: Hangi sunucuya release gönderildiği
     options.push(54);
     options.push(4);
     options.extend_from_slice(server_ip.as_bytes());
-    // End
+    // Seçeneklerin sonu
     options.push(255);
-    
+
     DhcpMessage {
         op: 1,
         htype: 1,
@@ -370,8 +493,8 @@ pub fn new_release(mac: MacAddr, xid: u32, client_ip: Ipv4Addr, server_ip: Ipv4A
         hops: 0,
         xid,
         secs: 0,
-        flags: 0,
-        ciaddr: client_ip,
+        flags: 0, // Release unicast'tır, broadcast bayrağı gereksiz
+        ciaddr: client_ip, // Release'de mevcut IP adresi ciaddr'a konur
         yiaddr: Ipv4Addr::UNSPECIFIED,
         siaddr: server_ip,
         giaddr: Ipv4Addr::UNSPECIFIED,
@@ -382,29 +505,33 @@ pub fn new_release(mac: MacAddr, xid: u32, client_ip: Ipv4Addr, server_ip: Ipv4A
     }
 }
 
-/// Create DHCP renew request
+/// DHCP Renew isteği oluşturur.
+///
+/// T1 süresinden sonra kirayı yenilemek için kullanılır.
+/// Mevcut IP'nin ciaddr'a konması bu mesajı Discover'dan ayırır.
+/// Unicast ile doğrudan kira veren sunucuya gönderilir.
 pub fn new_renew(mac: MacAddr, xid: u32, client_ip: Ipv4Addr, server_ip: Ipv4Addr) -> DhcpMessage {
     let mut chaddr = [0u8; 16];
     chaddr[..6].copy_from_slice(mac.as_bytes());
-    
+
     let mut options = Vec::new();
     options.extend_from_slice(&DhcpMessage::MAGIC_COOKIE);
-    // DHCP Message Type
+    // DHCP Mesaj Türü: REQUEST (yenileme için de Request kullanılır)
     options.push(53);
     options.push(1);
     options.push(DhcpMessageType::Request as u8);
-    // Client Identifier
+    // Option 61: İstemci tanımlayıcısı
     options.push(61);
     options.push(7);
     options.push(1);
     options.extend_from_slice(mac.as_bytes());
-    // Server Identifier (for unicast renewal)
+    // Option 54: Unicast yenileme için sunucu tanımlayıcısı
     options.push(54);
     options.push(4);
     options.extend_from_slice(server_ip.as_bytes());
-    // End
+    // Seçeneklerin sonu
     options.push(255);
-    
+
     DhcpMessage {
         op: 1,
         htype: 1,
@@ -412,8 +539,8 @@ pub fn new_renew(mac: MacAddr, xid: u32, client_ip: Ipv4Addr, server_ip: Ipv4Add
         hops: 0,
         xid,
         secs: 0,
-        flags: 0, // No broadcast for renewal
-        ciaddr: client_ip,
+        flags: 0, // Yenileme için broadcast bayrağı yok (unicast)
+        ciaddr: client_ip, // Yenilenecek IP adresi
         yiaddr: Ipv4Addr::UNSPECIFIED,
         siaddr: Ipv4Addr::UNSPECIFIED,
         giaddr: Ipv4Addr::UNSPECIFIED,
@@ -424,87 +551,94 @@ pub fn new_renew(mac: MacAddr, xid: u32, client_ip: Ipv4Addr, server_ip: Ipv4Add
     }
 }
 
-/// Start DHCP discovery
+/// DHCP Discover sürecini başlatır.
+///
+/// Rastgele bir transaction ID üretir, UDP socketi açar ve
+/// broadcast adrese DHCP Discover mesajı gönderir.
 pub fn discover() -> Result<(), NetError> {
     let mac = super::default_interface()
         .ok_or(NetError::NoInterface)?
         .lock()
         .mac();
-    
-    // Create UDP socket
+
+    // UDP soketi oluştur
     let sock_id = socket(
         super::socket::AddressFamily::IPV4,
         super::socket::SocketType::DGRAM,
         super::socket::Protocol::UDP,
     )?;
-    
-    // Bind to DHCP client port
+
+    // DHCP istemci portuna bağlan (68)
     bind(sock_id, SocketAddr::new(Ipv4Addr::UNSPECIFIED, Port(DHCP_CLIENT_PORT)))?;
-    
+
     *DHCP_SOCKET.lock() = Some(sock_id);
-    
-    // Create discover message
+
+    // Discover mesajı oluştur (rastgele XID ile)
     let xid = crate::random::rand_u64() as u32;
     let discover = DhcpMessage::new_discover(mac, xid);
     let data = discover.serialize();
-    
-    // Send to broadcast
+
+    // Broadcast adresine DHCP sunucu portuna gönder
     let dst = SocketAddr::new(Ipv4Addr::BROADCAST, Port(DHCP_SERVER_PORT));
     sendto(sock_id, &data, dst, 0)?;
-    
+
     crate::serial_println!("[DHCP] Discover sent (xid={:#x})", xid);
-    
+
     Ok(())
 }
 
-/// Process DHCP response
+/// DHCP sunucusundan gelen yanıtı işler.
+///
+/// Offer gelirse Request ile devam eder (DORA'nın 3. adımı).
+/// Ack gelirse ağ konfigürasyonu tamamlanır ve sonuç döner.
+/// Nak gelirse hata döner.
 pub fn process_response() -> Result<super::NetworkConfig, NetError> {
     let sock_id = DHCP_SOCKET.lock().ok_or(NetError::ProtocolError)?;
-    
+
     let mut buf = vec![0u8; 1500];
     let (len, _src) = recvfrom(sock_id, &mut buf, 0)?;
-    
+
     let msg = DhcpMessage::parse(&buf[..len])?;
-    
+
     match msg.get_message_type() {
         DhcpMessageType::Offer => {
             crate::serial_println!("[DHCP] Offer received: {}",
                 super::socket::format_ipv4(msg.yiaddr));
-            
-            // Send request
+
+            // Offer aldık: Request göndererek IP'yi talep et
             let mac = super::default_interface()
                 .ok_or(NetError::NoInterface)?
                 .lock()
                 .mac();
-            
+
             let request = DhcpMessage::new_request(mac, msg.xid, msg.yiaddr, msg.siaddr);
             let data = request.serialize();
-            
+
             let dst = SocketAddr::new(Ipv4Addr::BROADCAST, Port(DHCP_SERVER_PORT));
             sendto(sock_id, &data, dst, 0)?;
-            
-            crate::serial_println!("[DHCP] Request sent for {}", 
+
+            crate::serial_println!("[DHCP] Request sent for {}",
                 super::socket::format_ipv4(msg.yiaddr));
-            
-            Err(NetError::WouldBlock)
+
+            Err(NetError::WouldBlock) // ACK bekleniyor
         }
         DhcpMessageType::Ack => {
             crate::serial_println!("[DHCP] ACK received!");
-            
+
             let mut config = super::NetworkConfig::new();
             config.ip_addr = *msg.yiaddr.as_bytes();
-            
-            // Get subnet mask
+
+            // Option 1: Alt ağ maskesi
             if let Some(mask) = msg.get_option(1) {
                 config.netmask = [mask[0], mask[1], mask[2], mask[3]];
             }
-            
-            // Get gateway
+
+            // Option 3: Varsayılan ağ geçidi
             if let Some(gw) = msg.get_option(3) {
                 config.gateway = [gw[0], gw[1], gw[2], gw[3]];
             }
-            
-            // Get DNS servers
+
+            // Option 6: DNS sunucuları (her biri 4 byte, ardışık)
             if let Some(dns) = msg.get_option(6) {
                 for i in (0..dns.len()).step_by(4) {
                     if i + 4 <= dns.len() {
@@ -512,24 +646,24 @@ pub fn process_response() -> Result<super::NetworkConfig, NetError> {
                     }
                 }
             }
-            
+
             DHCP_CONFIGURED.store(true, Ordering::SeqCst);
-            
-            // Close socket
+
+            // Soketi kapat, DHCP tamamlandı
             close(sock_id)?;
             *DHCP_SOCKET.lock() = None;
-            
+
             Ok(config)
         }
         DhcpMessageType::Nak => {
             crate::serial_println!("[DHCP] NAK received");
-            Err(NetError::ProtocolError)
+            Err(NetError::ProtocolError) // Sunucu reddetti, yeniden dene
         }
-        _ => Err(NetError::WouldBlock),
+        _ => Err(NetError::WouldBlock), // Beklenmedik mesaj türü
     }
 }
 
-/// Check if DHCP is configured
+/// DHCP yapılandırmasının tamamlanıp tamamlanmadığını kontrol eder.
 pub fn is_configured() -> bool {
     DHCP_CONFIGURED.load(Ordering::SeqCst)
 }

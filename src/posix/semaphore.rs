@@ -1,6 +1,7 @@
-//! # POSIX Semaphores
+//! # POSIX Semaforları
 //!
-//! Named and unnamed semaphores.
+//! İsimli (named) ve isimsiz (unnamed) POSIX semafor uygulaması.
+//! Süreçler arası ve iş parçacıkları arası senkronizasyon için kullanılır.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

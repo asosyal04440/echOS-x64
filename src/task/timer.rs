@@ -7,6 +7,29 @@
 //! ekleme ve silme işlemleri sunar. Milyonlarca task uyusa bile sistem performansı düşmez.
 //!
 //! Kaynak: "Hashed and Hierarchical Timing Wheels", Varghese & Lauck (1987)
+//!
+//! ## Hiyerarşik Zaman Çarkı Algoritması
+//!
+//! ```text
+//!  ┌──────────────────────────────────────────────────────────────┐
+//!  │             HİYERARŞİK ZAMAN ÇARKI (4 SEVİYE)              │
+//!  │                                                              │
+//!  │  Seviye 1 (Hızlı Çark):  0 - 255 tick      → 256 slot       │
+//!  │  Seviye 2:                256 - 65535 tick  → 256 slot       │
+//!  │  Seviye 3:                65536 - 16M tick  → 256 slot       │
+//!  │  Seviye 4:                16M - 4G tick     → 256 slot       │
+//!  │                                                              │
+//!  │  Her tick'te:                                                │
+//!  │    1. Seviye 1'deki şu anki slot işlenir → O(1)             │
+//!  │    2. Çark başa döndüğünde Cascade (Şelale) tetiklenir:     │
+//!  │       Seviye 2 → Seviye 1'e taşınır → yeniden schedule     │
+//!  │                                                              │
+//!  │  Örnek: 300 tick sonra uyanacak task T1                     │
+//!  │    diff=300 >= 256 → Seviye 2'ye eklenir                    │
+//!  │    Tick 256'da Cascade → Seviye 1'e indirilir               │
+//!  │    Tick 300'de Seviye 1 slot 44'ten alınır → T1 uyanır      │
+//!  └──────────────────────────────────────────────────────────────┘
+//! ```
 
 use super::task::{Task, TaskState};
 use alloc::collections::VecDeque;
@@ -95,7 +118,7 @@ impl TimingWheel {
     }
 
     /// Çarkı bir tick ilerletir ve uyanması gereken task'ları döndürür.
-    /// O(1) amortized complexity.
+    /// O(1) amortize karmaşıklık.
     pub fn tick(&mut self) -> Vec<Box<Task>> {
         let current = self.current_tick;
         self.current_tick += 1;

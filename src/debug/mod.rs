@@ -1,20 +1,61 @@
 //! # echOS Debug Modülü
-//! 
-//! Hata ayıklama araçları: serial output ve sistem analizörü.
+//!
+//! Hata ayıklama araçları: seri port çıkışı ve sistem durum analizörü.
+//!
+//! ## Modül Ağaç Yapısı
+//!
+//! ```text
+//! debug/
+//! ├── mod.rs        ← Bu dosya: önyükleme testleri ve genel hata ayıklama
+//! ├── serial.rs     ← Acil durum seri port sürücüsü (COM1, 0x3F8)
+//! └── analyzer.rs   ← Sistem durumu analizörü
+//! ```
+//!
+//! ## Önyükleme Hata Ayıklama Akışı
+//!
+//! ```text
+//!  [UEFI/BIOS Önyükleyici]
+//!         │
+//!         ▼
+//!  boot_self_check()           ← Temel sistem bütünlüğünü doğrular
+//!         │
+//!         ▼
+//!  run_ring3_smoketest()       ← Kullanıcı alanı (Ring 3) temel işlevsellik testi
+//!         │
+//!         ├──► run_vm_security_tests()   ← Sanal bellek güvenlik denetimleri
+//!         ├──► run_vm_stress_tests()     ← Sanal bellek yük/stres testleri
+//!         └──► run_irq_stress_tests()    ← Kesme denetleyicisi (IRQ) stres testleri
+//! ```
+//!
+//! ## Tasarım Notları
+//!
+//! - Tüm fonksiyonlar şu an **stub** (iskelet) aşamasındadır; `serial_println!` ile
+//!   yalnızca seri porta ilerleme mesajı yazarlar.
+//! - Gerçek test mantığı ilerleyen sürümlerde bu fonksiyonların içine eklenecektir.
+//! - `serial_println!` makrosu `debug::serial` modülüne bağlıdır; o yüzden bu
+//!   modül çağrılmadan önce seri portun başlatılmış olması gerekir.
 
 /// Sistem durumu analizörü
 pub mod analyzer;
 
-/// Serial port debug output
+/// Acil durum seri port hata ayıklama çıkışı (COM1).
+/// Interrupt gerektirmeyen, doğrudan I/O portuna erişen basit sürücü.
 pub mod serial;
 
-/// Boot self-check - verifies basic system integrity
+/// Önyükleme öz-denetimi — temel sistem bütünlüğünü doğrular.
+///
+/// Çekirdek tamamen başlamadan önce çağrılır. Başarılı olursa `true` döner.
+/// İleride bellek haritası, IDT ve GDT doğrulamaları bu fonksiyona eklenecektir.
 pub fn boot_self_check() -> bool {
     crate::serial_println!("[DEBUG] Boot self-check passed");
     true
 }
 
-/// Ring3 smoketest - basic userspace functionality test
+/// Ring 3 duman testi — temel kullanıcı alanı işlevselliğini doğrular.
+///
+/// x86-64 mimarisinde Ring 3, en düşük ayrıcalık seviyesidir (CPL=3).
+/// Bu test ilerleyen sürümlerde gerçek kullanıcı süreçleri başlatarak
+/// sistem çağrısı geçişlerini (syscall/sysret) denetleyecektir.
 pub fn run_ring3_smoketest() {
     crate::serial_println!("[DEBUG] Ring3 smoketest (stub)");
 }

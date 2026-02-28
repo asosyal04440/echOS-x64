@@ -229,6 +229,9 @@ impl CalendarWidget {
         }
     }
 
+    /// Verilen ay ve yıl için o aydaki gün sayısını döndürür.
+    /// Şubat için artık yıl hesabı: 4'e bölünebilen ama 100'e bölünemeyen,
+    /// ya da 400'e bölünebilen yıllar artık yıldır (Gregoryen takvimi).
     fn days_in_month(&self, month: u8, year: u32) -> u8 {
         match month {
             1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -247,6 +250,8 @@ impl CalendarWidget {
         ((h + 5) % 7) as u8 // 0 = Pazartesi, 6 = Pazar
     }
 
+    /// Geçerli ay numarasını İngilizce ay adına dönüştürür.
+    /// Takvim başlığında "Ocak 2024" gibi görüntülemek için kullanılır.
     fn month_name(&self) -> &'static str {
         match self.current_month {
             1 => "January", 2 => "February", 3 => "March", 4 => "April",
@@ -402,6 +407,9 @@ impl WeatherWidget {
         }
     }
 
+    /// Hava durumu koşuluna karşılık gelen Unicode sembolünü döndürür.
+    /// Bu semboller UTF-8 çok baytlı karakterlerdir; framebuffer'a çizilirken
+    /// font sistemi Unicode desteği gerektirdiğini unutmayın.
     fn condition_icon(&self, condition: WeatherCondition) -> &'static str {
         match condition {
             WeatherCondition::Sunny => "☀",
@@ -653,6 +661,9 @@ impl NotificationCenter {
         center
     }
 
+    /// Varsayılan widget'ları panele ekler: Takvim, Hava Durumu, Notlar, Sistem Durumu.
+    /// `Box<dyn Widget>` kullanılır çünkü her widget farklı bir somut tiptir;
+    /// heap tahsisi ile dinamik dispatch (vtable) sağlanır.
     fn add_default_widgets(&mut self) {
         self.widgets.push(Box::new(CalendarWidget::new()));
         self.widgets.push(Box::new(WeatherWidget::new()));
@@ -660,6 +671,8 @@ impl NotificationCenter {
         self.widgets.push(Box::new(SystemStatusWidget::new()));
     }
 
+    /// Geliştirme/test amaçlı örnek bildirimler ekler.
+    /// Gerçek sistemde bu bildirimler uygulamalardan veya çekirdekten gelir.
     fn add_test_notifications(&mut self) {
         self.notifications.push(Notification::message(
             self.next_id, "John Doe", "Hey, how's the GUI coming along?"
@@ -818,6 +831,9 @@ impl NotificationCenter {
         }
     }
 
+    /// İki rengi lineer alfa karıştırma (alpha blending) ile birleştirir.
+    /// `alpha` 0.0 ise tamamen arka plan, 1.0 ise tamamen ön plan rengi kullanılır.
+    /// Her renk kanalı (R, G, B) ayrı ayrı interpolasyon yapılarak hesaplanır.
     fn blend_color(bg: u32, fg: u32, alpha: f32) -> u32 {
         let br = ((bg >> 16) & 0xFF) as f32;
         let bg_ = ((bg >> 8) & 0xFF) as f32;
@@ -834,6 +850,8 @@ impl NotificationCenter {
         (r << 16) | (g << 8) | b
     }
 
+    /// Bildirim simge türüne karşılık gelen Unicode sembolünü döndürür.
+    /// Custom(_) varyantı özel uygulama simgesi için ayrılmıştır; şimdilik raptiye gösterilir.
     fn get_notification_icon(&self, icon: NotificationIcon) -> &'static str {
         match icon {
             NotificationIcon::App => "📱",

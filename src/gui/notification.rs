@@ -58,34 +58,42 @@ impl Notification {
             message: String::from(message),
             notification_type: NotificationType::Info,
             priority: NotificationPriority::Normal,
-            timeout_ms: 5000,
+            timeout_ms: 5000,  // Varsayılan: 5 saniye sonra otomatik kapat
             elapsed_ms: 0,
             action_text: None,
             on_action: None,
         }
     }
 
+    /// Bildirim türünü ayarlar (builder deseni — zincirleme çağrı destekler).
     pub fn with_type(mut self, notification_type: NotificationType) -> Self {
         self.notification_type = notification_type;
         self
     }
 
+    /// Bildirim önceliğini ayarlar.
+    /// Urgent öncelikli bildirimler en üstte tutulabilir.
     pub fn with_priority(mut self, priority: NotificationPriority) -> Self {
         self.priority = priority;
         self
     }
 
+    /// Otomatik kapanma süresini (ms) ayarlar. 0 verilirse hiç kapanmaz.
     pub fn with_timeout(mut self, timeout_ms: u32) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
+    /// Bildirime eylem butonu ekler.
+    /// `text`: Buton etiketi, `action_id`: Tıklandığında geri çağrıma iletilen kimlik.
     pub fn with_action(mut self, text: &str, action_id: u32) -> Self {
         self.action_text = Some(String::from(text));
         self.on_action = Some(action_id);
         self
     }
 
+    /// Bildirimin süresi dolmuş mu kontrol eder.
+    /// timeout_ms = 0 ise süresiz gösterilir (asla sona ermez).
     fn is_expired(&self) -> bool {
         self.timeout_ms > 0 && self.elapsed_ms >= self.timeout_ms
     }
@@ -113,6 +121,8 @@ impl NotificationPopup {
         }
     }
 
+    /// Belirtilen bildirimi gösterir ve popup'ı sağ alt köşeye konumlandırır.
+    /// Ekran boyutları parametre olarak verilir; taşma engellenir.
     pub fn show(&mut self, notification: Notification, screen_width: usize, screen_height: usize) {
         // Sağ alt köşeye konumlandır
         self.rect.x = (screen_width as i32 - self.rect.width - 10).max(0);
@@ -159,6 +169,8 @@ impl NotificationPopup {
         self
     }
 
+    /// Bildirimin türüne karşılık gelen vurgu rengini döndürür.
+    /// Bu renk sol kenar çubuğunda ve eylem butonunda kullanılır.
     fn type_color(&self) -> u32 {
         if let Some(ref notif) = self.notification {
             match notif.notification_type {
@@ -172,6 +184,8 @@ impl NotificationPopup {
         }
     }
 
+    /// Eylem butonunun piksel dikdörtgenini hesaplar.
+    /// Eğer bildirimde eylem butonu yoksa sıfır boyutlu boş bir Rect döner.
     fn action_rect(&self) -> Rect {
         if let Some(ref notif) = self.notification {
             if let Some(ref text) = notif.action_text {
@@ -187,6 +201,8 @@ impl NotificationPopup {
         Rect::new(0, 0, 0, 0)
     }
 
+    /// Kapatma (X) butonunun piksel dikdörtgenini döndürür.
+    /// Sağ üst köşeye sabitlenmiş 15×15 piksellik bir alandır.
     fn close_rect(&self) -> Rect {
         Rect::new(
             self.rect.x + self.rect.width - 20,
@@ -344,30 +360,37 @@ impl NotificationManager {
         }
     }
 
+    /// Var olan bir `Notification` nesnesini kuyruğa ekler; kimliğini döner.
     pub fn push(&mut self, notification: Notification) -> u32 {
         let id = notification.id;
         self.notifications.push(notification);
         id
     }
 
+    /// Yeni benzersiz kimlikli bir `Notification` taslağı oluşturur.
+    /// Builder zinciriyle tür, öncelik ve süre eklenebilir; ardından `push` ile kuyruğa alınır.
     pub fn create(&mut self, title: &str, message: &str) -> Notification {
         let id = self.next_id;
         self.next_id += 1;
         Notification::new(id, title, message)
     }
 
+    /// Kimliğe göre bildirimi kuyrudan kaldırır (kullanıcı kapattıysa vb.).
     pub fn dismiss(&mut self, id: u32) {
         self.notifications.retain(|n| n.id != id);
     }
 
+    /// Tüm bildirimleri kuyruktan temizler.
     pub fn clear_all(&mut self) {
         self.notifications.clear();
     }
 
+    /// Mevcut bildirim listesine salt-okunur erişim sağlar.
     pub fn notifications(&self) -> &Vec<Notification> {
         &self.notifications
     }
 
+    /// Aynı anda gösterilecek bildirim sayısını döner (`max_visible` üst sınırıyla).
     pub fn visible_count(&self) -> usize {
         self.notifications.len().min(self.max_visible)
     }

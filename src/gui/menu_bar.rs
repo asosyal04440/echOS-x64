@@ -63,35 +63,45 @@ pub struct MenuItem {
     pub icon: Option<String>,
 }
 
+/// Menü öğesi eylemleri.
+/// Her varyant, kullanıcının menüden seçeceği bir komutu temsil eder.
+/// `Custom(String)` ile uygulama katmanı kendi komutlarını tanımlayabilir.
 #[derive(Clone, Debug)]
 pub enum MenuAction {
-    None,
-    NewFile,
-    OpenFile,
-    SaveFile,
-    SaveAs,
-    Close,
-    Quit,
-    Undo,
-    Redo,
-    Cut,
-    Copy,
-    Paste,
-    SelectAll,
-    Find,
-    Replace,
-    Preferences,
-    About,
-    HideApp,
-    HideOthers,
-    ShowAll,
-    Zoom,
-    Minimize,
-    FullScreen,
-    Custom(String),
+    None,        // Eylem yok (salt gösterim öğesi için)
+    NewFile,     // Yeni dosya oluştur
+    OpenFile,    // Mevcut dosyayı aç
+    SaveFile,    // Geçerli dosyayı kaydet
+    SaveAs,      // Farklı adla kaydet
+    Close,       // Geçerli pencereyi kapat
+    Quit,        // Uygulamadan çık
+    Undo,        // Son işlemi geri al
+    Redo,        // Geri alınan işlemi yeniden uygula
+    Cut,         // Seçili metni kes
+    Copy,        // Seçili metni kopyala
+    Paste,       // Panodan yapıştır
+    SelectAll,   // Tümünü seç
+    Find,        // Metin ara
+    Replace,     // Metin bul ve değiştir
+    Preferences, // Uygulama ayarlarını aç
+    About,       // Hakkında penceresini göster
+    HideApp,     // Uygulamayı gizle
+    HideOthers,  // Diğer uygulamaları gizle
+    ShowAll,     // Gizli uygulamaları göster
+    Zoom,        // Pencereyi büyüt/küçült
+    Minimize,    // Pencereyi küçük simgeye al
+    FullScreen,  // Tam ekran moduna geç
+    Custom(String), // Uygulamaya özgü özel eylem; String, eylem tanımlayıcısıdır
 }
 
 impl MenuItem {
+    // --- Builder (Yapıcı) Metodları ---
+    // Rust'ta yaygın kullanılan "builder pattern" ile her metot
+    // belirli alanları doldurulmuş bir MenuItem döndürür.
+    // Bu sayede menü öğeleri zincir halinde oluşturulabilir.
+
+    /// Yalnızca etiket içeren, eylemsiz bir menü öğesi oluşturur.
+    /// Başlık satırları veya pasif gösterim öğeleri için kullanılır.
     pub fn new(label: &str) -> Self {
         MenuItem {
             label: String::from(label),
@@ -106,6 +116,8 @@ impl MenuItem {
         }
     }
 
+    /// Etiket ve eylem içeren temel menü öğesi oluşturur.
+    /// Çoğu standart komut bu yapıcıyla tanımlanır.
     pub fn action(label: &str, action: MenuAction) -> Self {
         MenuItem {
             label: String::from(label),
@@ -120,12 +132,18 @@ impl MenuItem {
         }
     }
 
+    /// Klavye kısayolu olan menü öğesi oluşturur.
+    /// `shortcut` parametresi "⌘S", "⇧⌘Z" gibi sembolik dizelerdir.
+    /// Kısayol, menüde metnin sağ tarafında küçük olarak gösterilir.
     pub fn shortcut(label: &str, action: MenuAction, shortcut: &str) -> Self {
         let mut item = Self::action(label, action);
         item.shortcut = String::from(shortcut);
         item
     }
 
+    /// Menü içi yatay çizgi (ayırıcı) oluşturur.
+    /// Ayırıcılar mantıksal olarak ilişkili komut gruplarını birbirinden ayırmak için kullanılır.
+    /// `enabled: false` ile tıklanamaz yapılır; `separator: true` onu özel kılar.
     pub fn separator() -> Self {
         MenuItem {
             label: String::new(),
@@ -140,6 +158,9 @@ impl MenuItem {
         }
     }
 
+    /// Alt menüsü olan bir menü öğesi oluşturur.
+    /// `items` vektörü alt menüdeki MenuItem'lardan oluşur.
+    /// Fare bu öğenin üzerine gelince ▶ oku gösterilir ve alt menü açılır.
     pub fn submenu(label: &str, items: Vec<MenuItem>) -> Self {
         MenuItem {
             label: String::from(label),
@@ -154,12 +175,18 @@ impl MenuItem {
         }
     }
 
+    /// Onay kutusu (checkmark) durumu tutan menü öğesi oluşturur.
+    /// `checked: true` ise öğenin yanında ✓ sembolü görünür.
+    /// Araç çubuğu göster/gizle gibi açma/kapama durumları için kullanılır.
     pub fn checked(label: &str, action: MenuAction, checked: bool) -> Self {
         let mut item = Self::action(label, action);
         item.checked = Some(checked);
         item
     }
 
+    /// Tıklanamaz (pasif) menü öğesi oluşturur.
+    /// `enabled: false` olduğundan soluk renkte gösterilir.
+    /// Henüz uygulanmayan veya koşullara bağlı komutlar için kullanılır.
     pub fn disabled(label: &str) -> Self {
         let mut item = Self::new(label);
         item.enabled = false;
@@ -408,9 +435,11 @@ impl MenuBar {
         ];
     }
 
-    /// Menü çubuğunu çiz
+    /// Menü çubuğunu çiz.
+    /// Çizim sırası: arka plan → sol menüler → sağ durum öğeleri → açık dropdown.
+    /// Yalnızca seçili/üzerine gelinen menüler vurgu rengiyle boyandır.
     pub fn draw(&self, fb: &mut Framebuffer) {
-        // Arka plan
+        // Arka plan: tüm ekran genişliğinde sabit yükseklikte dolgu
         fb.draw_rect(0, 0, self.screen_width, MENU_BAR_HEIGHT, Theme::TITLEBAR_BG.to_u32());
 
         // Menüleri çiz
@@ -453,7 +482,9 @@ impl MenuBar {
             }
         }
 
-        // Sağ taraf öğelerini çiz
+        // Sağ taraf öğelerini çiz.
+        // Öğeler sağdan sola doğru yerleştirilir (ters sırada döngü).
+        // Her öğenin genişliği metin uzunluğuna göre dinamik hesaplanır.
         let mut x = self.screen_width - MENU_PADDING;
 
         for item in self.right_items.iter().rev() {
@@ -470,6 +501,9 @@ impl MenuBar {
         }
     }
 
+    /// Açılır menü listesini çizer.
+    /// Genişlik, içindeki en uzun etiket+kısayol çiftine göre otomatik hesaplanır.
+    /// Ayırıcılar yatay ince çizgi olarak, vurgulanan öğe aksan rengiyle gösterilir.
     fn draw_menu_dropdown(&self, fb: &mut Framebuffer, menu: &Menu) {
         if menu.items.is_empty() {
             return;
@@ -683,7 +717,9 @@ impl MenuBar {
         MenuBarEvent::None
     }
 
-    /// Menü aç
+    /// Menü aç.
+    /// Önce tüm açık menüler kapatılır; bu sayede aynı anda yalnızca
+    /// bir menü dropdown'ı görünür olur (macOS standardı).
     pub fn open_menu(&mut self, index: usize) {
         self.close_all_menus();
         if index < self.menus.len() {
@@ -708,7 +744,9 @@ impl MenuBar {
         self.app_name = String::from(name);
     }
 
-    /// Uygulama menülerini güncelle
+    /// Uygulama menülerini güncelle.
+    /// macOS'te ön planda olan uygulama değiştiğinde menü çubuğu da güncellenir.
+    /// İlk indeks (uygulama menüsü simgesi) korunur; sonraki menüler değiştirilir.
     pub fn update_app_menus(&mut self, menus: Vec<Menu>) {
         // Uygulama menüsünü koru, diğerlerini değiştir
         self.menus.truncate(1);
@@ -726,7 +764,9 @@ impl MenuBar {
     }
 }
 
-/// Menü çubuğu olayları
+/// Menü çubuğu olayları.
+/// Olay tabanlı mimari: kullanıcı eylemlerini çağrı yığını yerine olay değerleriyle döndürür.
+/// Bu yaklaşım, GUI bileşenlerini birbirinden bağımsız tutmayı kolaylaştırır.
 #[derive(Clone, Debug)]
 pub enum MenuBarEvent {
     None,
@@ -737,20 +777,25 @@ pub enum MenuBarEvent {
 
 // ============================================================================
 // GLOBAL MENÜ ÇUBUĞU
+// Bare-metal ortamda global durum, `lazy_static!` + `Mutex` ile korunur.
+// `lazy_static!` makrosu, statik değişkeni ilk erişimde başlatır.
+// `spin::Mutex` ise çekirdek alanında standart kütüphane olmadan çalışır.
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref MENU_BAR: Mutex<MenuBar> = Mutex::new(MenuBar::new(1920));
 }
 
-/// Menü çubuğunu başlat
+/// Menü çubuğunu başlat.
+/// Ekran genişliği boot zamanında belirlenir; bu metot ile güncellenir.
 pub fn init(width: usize) {
     let mut menubar = MENU_BAR.lock();
     menubar.resize(width);
     crate::serial_println!("[GUI] Menu Bar initialized ({}px)", width);
 }
 
-/// Menü çubuğuna erişim sağla
+/// Menü çubuğuna erişim sağla.
+/// Kilidi çağıran kod bloğu içinde tutulmalı; uzun süreli kilit diğer çekirdek olaylarını engeller.
 pub fn get_menu_bar() -> &'static Mutex<MenuBar> {
     &MENU_BAR
 }

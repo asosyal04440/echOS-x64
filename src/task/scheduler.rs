@@ -1,8 +1,49 @@
 //! # echOS Görev Zamanlayıcı (Task Scheduler)
 //!
 //! Bu modül, işletim sisteminin preemptive multitasking desteğini sağlar.
-//! Priority-Based Aging algoritması kullanarak task'ları adil bir şekilde zamanlar.
+//! Öncelik tabanlı yaşlandırma (Priority-Based Aging) ve
+//! Chase-Lev iş çalma (Work Stealing) algoritmasıyla görevleri adil biçimde zamanlar.
 //!
+//! ## Zamanlayıcı Seçim Mantığı
+//!
+//! ```text
+//!  ┌──────────────────────────────────────────────────────────┐
+//!  │          ZAMANLAYICI SEÇİM KARAR AKIŞI                  │
+//!  │                                                          │
+//!  │  Timer Interrupt geldi (tick)                           │
+//!  │       ↓                                                  │
+//!  │  1. RT görevi var mı? (rt_scheduler)                   │
+//!  │     Evet → en yüksek öncelikli RT görevi çalışır       │
+//!  │     (SCHED_FIFO: bloke edilene kadar, SCHED_RR: dilime) │
+//!  │       ↓ Hayır                                           │
+//!  │  2. Yerel Worker kuyruğunda görev var mı?              │
+//!  │     Evet → pop() ile al (LIFO — önbellek dostu)        │
+//!  │       ↓ Hayır                                           │
+//!  │  3. En yüklü CPU'dan iş çal (Work Stealing)            │
+//!  │     steal() → başka CPU'nun kuyruğunun başından al     │
+//!  │       ↓ Yoksa                                           │
+//!  │  4. Boşta görevi çalıştır (idle loop: hlt)             │
+//!  └──────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## SMP İş Çalma (Work Stealing) Diyagramı
+//!
+//! ```text
+//!  CPU0 [W0:T1,T2,T3]   CPU1 [W1: ]   CPU2 [W2:T4,T5]
+//!        pop↑                steal→          pop↑
+//!        T3 çalışır      T1 çalınır     T5 çalışır
+//! ```
+//!
+//! ## Bağlam Değişimi (Context Switch)
+//!
+//! ```text
+//!  Eski Görev             Yeni Görev
+//!  ──────────              ──────────
+//!  R15,R14..RBP  →save→  RSP, RFLAGS
+//!  RSP, RFLAGS   ←load←  R15,R14..RBP
+//!  SSE/FPU durumu        SSE/FPU durumu
+//!  CR3 (sayfa tablosu)   CR3 (sayfa tablosu)
+//! ```
 
 #![allow(unused)]
 #![allow(static_mut_refs)]
@@ -26,7 +67,7 @@ const MAX_CPUS: usize = 8192;
 static mut WORKERS: Vec<Option<Worker<Task>>> = Vec::new();
 static mut STEALERS: Vec<Option<Stealer<Task>>> = Vec::new();
 
-// Global task ID counter
+// Global görev ID sayacı
 static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 
 // ============================================================================
@@ -60,7 +101,7 @@ impl SmpScheduler {
         }
     }
     
-    // Internal helper for already boxed tasks (e.g. from timer)
+    // Zaten box'lanmış görevler için dahili yardımcı (örn. timer'dan gelen görevler)
     pub fn spawn_boxed(&self, task: Box<Task>) {
         let cpu_id = get_current_cpu_id() as usize;
         unsafe {
@@ -89,7 +130,7 @@ lazy_static! {
     static ref SLEEPING_TASKS: Mutex<TimingWheel> = Mutex::new(TimingWheel::new(256));
 }
 
-/// Per-CPU current task (CPU ID -> Task)
+/// CPU başına mevcut görev durumu (CPU ID -> Görev)
 static mut PER_CPU_CURRENT_TASK: Vec<Option<Box<Task>>> = Vec::new();
 
 static TERMINATED_TASKS: Mutex<Vec<(TaskId, i32)>> = Mutex::new(Vec::new());
@@ -115,7 +156,7 @@ const VRUNTIME_NORMALIZE_INTERVAL: usize = 2000;
 
 /// Scheduler'ı başlatır.
 pub fn init() {
-    // Check if already initialized (e.g., by update_cpu_count called from smp::init)
+    // Zaten başlatılmış mı kontrol et (örn. smp::init tarafından update_cpu_count çağrıldıysa)
     unsafe {
         if !PER_CPU_IDLE_TASK.is_empty() {
             crate::serial_println!("SMP Scheduler already initialized, skipping");
@@ -126,7 +167,7 @@ pub fn init() {
     // CPU sayısını al (başlangıçta 1, SMP başlatılınca güncellenecek)
     let cpu_count = crate::cpu::CPU_INFO.lock().topology.logical_count.max(1).min(MAX_CPUS as u32);
 
-    // Per-CPU data structures initialize
+    // CPU başına veri yapılarını başlat
     unsafe {
         PER_CPU_CURRENT_TASK = Vec::with_capacity(cpu_count as usize);
         PER_CPU_IDLE_TASK = Vec::with_capacity(cpu_count as usize);
@@ -549,7 +590,7 @@ pub fn schedule() {
     let now = get_ticks() as u64;
 
     x86_64::instructions::interrupts::without_interrupts(|| {
-        // Full memory barrier before scheduling
+        // Zamanlama öncesi tam bellek bariyeri
         smp_mb();
         
         unsafe {
@@ -593,12 +634,12 @@ pub fn schedule() {
                 old_context_ptr = &mut idle_task.context;
             }
 
-            // Try to pop from local worker
+            // Yerel worker kuyruğundan almayı dene
             if let Some(worker) = WORKERS.get(cpu_id as usize).and_then(|w| w.as_ref()) {
                 next_task_opt = worker.pop();
             }
 
-            // If empty, try steal
+            // Boşsa iş çalmayı dene
             if next_task_opt.is_none() {
                 let cpu_limit = SMP_SCHEDULER.cpu_count.load(Ordering::Relaxed).max(1) as usize;
                 let mut best_victim = None;
@@ -660,7 +701,7 @@ pub fn schedule() {
                     ExecutionMode::NativeRust => crate::memory::KERNEL_PML4_FRAME.unwrap(),
                 };
                 if target_frame != current_frame {
-                    // Memory barriers before CR3 switch
+                    // CR3 değişimi öncesi bellek bariyerleri
                     smp_wmb();
                     Cr3::write(target_frame, Cr3Flags::empty());
                     tlb::flush_all();
@@ -689,7 +730,7 @@ pub fn schedule() {
             crate::gdt::set_kernel_stack(VirtAddr::new(target_kernel_stack_top));
             crate::syscall::set_kernel_stack_for_current_cpu(target_kernel_stack_top);
             
-            // Final memory barrier before context switch
+            // Bağlam değişiminden önce son bellek bariyeri
             smp_mb();
             switch_context(old_context_ptr, new_context_ptr);
         }
@@ -722,11 +763,11 @@ switch_context:
     pop rax
     mov [rdi + 56], rax      // RFLAGS
     mov rax, [rsp]
-    mov [rdi + 64], rax      // Return address (RIP)
-    fxsave64 [rdi + 80]      // SSE/FPU state
+    mov [rdi + 64], rax      // Dönüş adresi (RIP)
+    fxsave64 [rdi + 80]      // SSE/FPU durumunu kaydet
     
     // Yeni context'i yükle (RSI'dan)
-    fxrstor64 [rsi + 80]     // SSE/FPU state
+    fxrstor64 [rsi + 80]     // SSE/FPU durumunu yükle
     mov r15, [rsi + 0]
     mov r14, [rsi + 8]
     mov r13, [rsi + 16]
@@ -774,7 +815,7 @@ pub fn list_tasks() -> Vec<TaskInfo> {
                     name: task.cold.name,
                     state: task.state,
                     priority: task.hot.priority,
-                    cpu_usage: 0, // TODO: CPU usage hesapla
+                    cpu_usage: 0, // TODO: CPU kullanımını hesapla
                 });
             }
         }
@@ -895,7 +936,7 @@ pub fn get_cpu_count() -> u32 {
     SMP_SCHEDULER.cpu_count.load(Ordering::Relaxed)
 }
 
-/// Scheduler statistics for monitoring
+/// Scheduler izleme istatistik yapısı
 #[derive(Clone, Debug)]
 pub struct SchedulerStats {
     pub total_tasks: usize,
@@ -904,7 +945,7 @@ pub struct SchedulerStats {
     pub runnable_tasks: usize,
 }
 
-/// Get scheduler statistics
+/// Scheduler istatistiklerini döndürür.
 pub fn get_stats() -> SchedulerStats {
     let mut total = 0;
     let mut running = 0;

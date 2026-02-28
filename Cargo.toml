@@ -1,45 +1,89 @@
+# echOS - İşletim Sistemi Çekirdeği için Cargo Manifest Dosyası
+# Bu dosya, projenin bağımlılıklarını, derleme profillerini ve
+# benchmark/test yapılandırmalarını tanımlar.
+
 [package]
 name = "ech_os"
 version = "0.1.0"
 edition = "2021"
 
 
-
+# ============================================================
+# BAĞIMLILIKLAR (DEPENDENCIES)
+# ============================================================
+# Her bağımlılık, çekirdeğin belirli bir işlevini sağlar.
+# `no_std` ortamında çalışan kütüphaneler özellikle seçilmiştir;
+# çünkü işletim sistemi çekirdeği standart kütüphane (std) olmadan çalışır.
 [dependencies]
 log = "0.4.27"
 spin = "0.9.4"
+# Bit düzeyinde bayrak (flag) yönetimi için - donanım kayıt defterlerinde çok kullanılır
 bitflags = "2.4"
+# UEFI (Unified Extensible Firmware Interface) desteği - modern sistemlerde BIOS'un yerini alan arayüz
 uefi = { version = "0.24", features = ["alloc"] }
+# ACPI tabloları okumak için - güç yönetimi ve donanım keşfi sağlar
 acpi = "4.0"
+# AML (ACPI Machine Language) yorumlayıcı - ACPI cihaz tanımlarını çalıştırır
 aml = "0.16"
+# 8259 Programlanabilir Kesinti Denetleyicisi (PIC) sürücüsü - legacy donanım kesintilerini yönetir
 pic8259 = "0.10.1"
+# Geniş karakter dizileri (UTF-16) için - UEFI, dizeleri UTF-16 olarak kullanır
 widestring = { version = "1", default-features = false }
+# x86_64 mimarisi için düşük seviye soyutlamalar - sayfa tabloları, GDT, IDT vb.
 x86_64 = "0.14.10"
+# Multiboot2 önyükleyici protokolü - çekirdeğin bellek haritasını ve diğer bilgileri almasını sağlar
 multiboot2 = { git = "https://github.com/rust-osdev/multiboot2", tag = "multiboot2-v0.12.2" }
+# Limine önyükleyici protokolü - modern UEFI/BIOS önyükleme için alternatif protokol
 limine-protocol-for-rust = "0.2.1"
+# Tembel (lazy) başlatma için - statik değişkenleri ilk erişimde başlatır (spin ile no_std uyumlu)
 lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
+# PS/2 klavye protokolü sürücüsü - klavye tarama kodlarını ASCII'ye çevirir
 pc-keyboard = "0.7.0"
+# std::HashMap yerine no_std uyumlu hash tablosu implementasyonu
 hashbrown = { version = "0.14", default-features = false, features = ["alloc"] }
+# Rastgele sayı üreteci - no_std için küçük boyutlu SmallRng kullanır
 rand = { version = "0.8", default-features = false, features = ["small_rng"] }
+# Gömülü sistemler için grafik çizim kütüphanesi - pikseller, şekiller, yazı tipi desteği
 embedded-graphics = "0.8"
 embedded-graphics-core = "0.4"
+# PS/2 fare protokolü sürücüsü - fare hareketini ve tıklamalarını okur
 ps2-mouse = "0.1"
+# RLSF (Real-time Lock-free memory allocator) - no_std ortamında heap yönetimi
 rlsf = "0.2.1"
+# VirtIO sürücüleri - QEMU gibi sanallaştırma ortamlarında sanal donanım desteği
 virtio-drivers = "0.7.0"
+# no_std uyumlu temel I/O işlemleri
 core_io = "0.1.20210325"
+# rCore işletim sisteminden taşınan dosya sistemi çerçevesi
 rcore-fs = { git = "https://github.com/rcore-os/rcore-fs", default-features = false }
+# SHA-2 hash algoritması - dijital imza doğrulaması için kullanılır, yazılım implementasyonu (no_std uyumlu)
 sha2 = { version = "0.10", default-features = false, features = ["force-soft", "oid"] }
+# RSA açık anahtarlı şifreleme - önyükleyici imzası doğrulaması için
 rsa = { version = "0.9", default-features = false }
+# Dijital imza trait'leri - RSA ve diğer imza algoritmalarını standart arayüzle kullanır
 signature = { version = "2", default-features = false }
-# TLS 1.3 crypto primitives (soft implementations for no_std)
+# TLS 1.3 kriptografik ilkelleri (no_std için yazılım implementasyonları)
+# HKDF: Anahtar türetme fonksiyonu - şifreleme anahtarlarını güvenli biçimde üretir
 hkdf = { version = "0.12", default-features = false }
+# Sabit boyutlu generic diziler - kriptografi kütüphanelerinde yaygın kullanılır
 generic-array = "0.14"
+# Derleme zamanı sayı sabitleri - generic-array boyut parametreleri için gereklidir
 typenum = "1.17"
+# IronShim: Güvenli yürütme katmanı (third_party altında özel paket)
 ironshim-rs = { path = "third_party/ironshim-rs", default-features = false, features = ["alloc"] }
+# smoltcp: no_std uyumlu hafif TCP/IP yığını
+# IPv4, DHCP, DNS, TCP ve UDP soket desteği; Ethernet orta katmanı
 smoltcp = { version = "0.11", default-features = false, features = ["alloc", "proto-ipv4", "proto-dhcpv4", "proto-dns", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-dns", "medium-ethernet"] }
+# libm: Matematiksel fonksiyonların yazılım implementasyonu - no_std'de f64::sin() gibi işlemler için
 libm = "0.2"
+# Önyükleyici kütüphanesi - çekirdeği yüklemek için temel altyapı sunar
 bootloader = "0.9"
 
+# ============================================================
+# KÜTÜPHANELERİ VE İKİLİLERİ YAPILANDIRMA
+# ============================================================
+# `test = false` ve `bench = false`: Çekirdek kodu doğrudan test edilemez
+# çünkü no_std ortamında çalışır. Testler ve benchmark'lar ayrı hedeflerde tanımlanır.
 [lib]
 test = false
 bench = false
@@ -49,15 +93,30 @@ name = "ech_os"
 test = false
 bench = false
 
+# ============================================================
+# GELİŞTİRME BAĞIMLILIKLARI (Sadece test/bench için)
+# ============================================================
 [dev-dependencies]
 libc = "0.2"
 
+# Linux/Windows (host) üzerinde çalışan testler için rand bağımlılığı
+# `cfg(not(target_os = "none"))`: "none" hedefi = bare-metal çekirdek ortamı
 [target.'cfg(not(target_os = "none"))'.dev-dependencies]
 rand = "0.8"
 
+# ============================================================
+# ÖZELLİK BAYRAKLARI (FEATURES)
+# ============================================================
+# `nightly`: Gece derleyici özelliklerini etkinleştiren bayrak
+# Benchmark'lar için gerekli çünkü `#![feature(test)]` nightly gerektirir
 [features]
 nightly = []
 
+# ============================================================
+# BENCHMARK TANIMLARI
+# ============================================================
+# `harness = false`: Rust'ın varsayılan test koşucusu yerine özel main() kullanılır
+# `required-features = ["nightly"]`: Sadece nightly etkinken derlenir
 [[bench]]
 name = "memory_bench"
 harness = false
@@ -78,19 +137,35 @@ name = "network_bench"
 harness = false
 required-features = ["nightly"]
 
+# ============================================================
+# DERLEME PROFİLLERİ
+# ============================================================
+# `panic = "abort"`: Panik durumunda yığın açımı (stack unwinding) yapılmaz.
+# Çekirdekte yığın açımı için gerekli altyapı olmadığından doğrudan durdurulur.
 [profile.dev]
 panic = "abort"
+# Hata ayıklama sembolleri dahil edilir - GDB/LLDB ile çekirdek hata ayıklaması için
 debug = true
 
 [profile.release]
 panic = "abort"
+# Hata ayıklama sembolleri çıkarılır - üretim derlemesi için
 debug = false
+# `opt-level = "s"`: Boyut için optimize et - çekirdek görüntüsü küçük tutulur
 opt-level = "s"
 
+# ============================================================
+# DERLEME BAĞIMLILIKLARI
+# ============================================================
+# `cc`: C kodunu Rust projesiyle derlemek için kullanılır (assembly bridge'ler vb.)
 [build-dependencies]
 cc = "1.2.30"
 
+# ============================================================
+# YEREL PAKET YAMALARI
+# ============================================================
+# `patch.crates-io`: crates.io üzerindeki paketleri yerel kopyalarla geçersiz kılar.
+# Bu sayede third_party klasöründeki özelleştirilmiş/düzeltilmiş sürümler kullanılır.
 [patch.crates-io]
 core_io = { path = "third_party/core_io" }
 virtio-drivers = { path = "third_party/virtio-drivers" }
-

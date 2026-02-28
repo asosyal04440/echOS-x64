@@ -1,6 +1,64 @@
-//! HHDM tabanlı sayfalama yardımcıları.
+//! # HHDM Tabanlı Sayfa Tablosu Yardımcıları
 //!
-//! Bu dosya, VMM kurulumunda kullanılacak küçük ve güvenli yardımcılar sunar.
+//! Çekirdek VMM (Virtual Memory Manager) kurulumunda kullanılan sayfa tablosu işlemleri.
+//!
+//! ## Adres Çevirisi: 4 Seviyeli Sayfa Tablosu Yürüyüşü
+//!
+//! `translate_addr(virt)` işlevi sanal adresi fiziksel adrese çevirir:
+//!
+//! ```
+//! Sanal Adres: 0xFFFF_8001_2345_6789
+//!
+//!   CR3 → PML4[indeks_511] → PDPT[indeks_1] → PD[indeks_0x91] → PT[indeks_0x56]
+//!                                                 │                    │
+//!                                       büyük sayfa?             fiziksel sayfa
+//!                                       evet → doğrudan döndür   + 0x789 ofset
+//! ```
+//!
+//! ## HHDM (Higher-Half Direct Map)
+//!
+//! Tüm fiziksel RAM, sanal adres uzayının üst yarısına `PHYSICAL_MEMORY_OFFSET`
+//! ofsetiyle "doğrudan eşlenir":
+//!
+//! ```
+//! Fiziksel:  0x0000_0000_0000_0000  →  0x0000_0000_XXXX_XXXX
+//!                   + HHDM ofset
+//! Sanal:     0xFFFF_8000_0000_0000  →  0xFFFF_8000_XXXX_XXXX
+//!
+//! Çekirdek bu sanal adresler üzerinden fiziksel belleğe doğrudan erişir.
+//! ```
+//!
+//! ## CR0.WP (Write Protect) Bayrağı
+//!
+//! `with_wp_disabled()` geçici olarak CR0'ın WP bitini temizler:
+//!
+//! ```
+//! CR0.WP = 1 (normal)  → Çekirdek salt okunur sayfalara yazamaz (güvenlik)
+//! CR0.WP = 0 (geçici)  → Sayfa tablosu yapılandırması sırasında gerekli
+//!
+//! Kullanım: sayfa eşleme/kaldırma, bayrak güncelleme işlemlerinde
+//! ```
+//!
+//! ## PCID — Process Context Identifier
+//!
+//! PCID, her adres uzayına 12-bit benzersiz kimlik verir.
+//! CR3 değişikliğinde TLB tamamen temizlemek yerine yalnızca geçersiz girişler temizlenir:
+//!
+//! ```
+//! CR4.PCIDE = 1 → PCID etkin
+//!
+//! load_cr3_with_pcid(pml4, pcid):
+//!   CR3 = (pml4_phys & ADDR_MASK) | pcid | NOFLUSH_BIT(63)
+//!
+//! NOFLUSH_BIT = 1 → TLB temizlenmez (aynı PCID sayfaları korunur)
+//! NOFLUSH_BIT = 0 → TLB temizlenir   (farklı süreç, önbellek geçersiz)
+//!
+//! Performans kazancı: context switch başına ~10-30% daha az TLB miss
+//! ```
+//!
+//! ## İlgili Modüller:
+//! - `mod.rs`: `init_paging()`, `map_physical_to_user_va()`, `split_huge_page()`
+//! - `pagging.rs`: Bootstrap sayfa tablosu kurulumu
 
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr3};
 use x86_64::structures::paging::mapper::{MapToError, MapperFlush, Translate, UnmapError};

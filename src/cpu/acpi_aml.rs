@@ -1,5 +1,26 @@
-//! # echOS AML (ACPI Machine Language) Interpreter Modülü
+//! # echOS AML (ACPI Machine Language) Yorumlayıcı Modülü
 //!
+//! ## AML Nedir?
+//! AML (ACPI Machine Language — ACPI Makine Dili), ACPI spesifikasyonunun tanımladığı
+//! sıkıştırılmış bir bytecode formatıdır. Tıpkı Java'nın bytecode'u gibi platform bağımsızdır.
+//! BIOS/UEFI firmware, donanım tanımlarını ve güç yönetimi prosedürlerini DSDT (Differentiated
+//! System Description Table) ile isteğe bağlı SSDT tablolarına AML olarak gömülü biçimde sunar.
+//!
+//! ## AML Namespace Yapısı
+//! ```text
+//!  \_SB          → System Bus (tüm donanım cihazları burada)
+//!    └─ PCI0     → PCI kök köprüsü (IRQ routing, _PRT)
+//!         ├─ ISA → ISA köprüsü
+//!         └─ EC  → Embedded Controller (dizüstü fan/batarya)
+//!  \_TZ          → Thermal Zone (sıcaklık bölgeleri, fan kontrolü)
+//!  \_PR          → Processor (CPU P-state / C-state tanımları)
+//!  \_GPE         → General Purpose Event handler'ları
+//!  \_S0.._S5     → Desteklenen uyku durumu tanımları
+//!  \_PTS         → Prepare To Sleep (uyku öncesi çağrılır)
+//!  \_WAK         → Wake (uyanma sonrası çağrılır)
+//! ```
+//!
+//! ## Bu Modülün Görevi
 //! `aml` crate (MIT lisanslı) kullanarak DSDT/SSDT tablolarını parse eder,
 //! ACPI namespace'i oluşturur ve control method'larını çalıştırır.
 //! Bu modül echOS'a Windows seviyesinde ACPI desteği kazandırır.
@@ -15,14 +36,16 @@ use spin::Mutex;
 // Global AML Bağlamı
 // ============================================================================
 
-/// Global AML context — tüm ACPI namespace bu struct içinde yaşar.
-/// Mutex ile korunur çünkü method invocation sırasında mutable erişim gerekir.
+/// Global AML bağlamı — tüm ACPI namespace bu yapı içinde yaşar.
+/// Mutex ile korunur; method çağrısı (invocation) sırasında mutable erişim gerektiğinden
+/// herhangi bir CPU'dan güvenli erişim sağlanır.
 static AML_CONTEXT: Mutex<Option<AmlContext>> = Mutex::new(None);
 
-/// AML başarıyla başlatıldı mı?
+/// AML yorumlayıcısının başarıyla başlatılıp başlatılmadığını atom olarak izler.
 static AML_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// AML başlatıldı mı kontrol et
+/// AML yorumlayıcısının hazır olup olmadığını döndürür.
+/// Diğer modüller bu fonksiyonu kontrol ederek AML çağrısı yapabilirler.
 pub fn is_initialized() -> bool {
     AML_INITIALIZED.load(Ordering::SeqCst)
 }
@@ -31,17 +54,21 @@ pub fn is_initialized() -> bool {
 // EchOsAmlHandler — aml::Handler trait implementasyonu
 // ============================================================================
 
-/// echOS AML Handler — AML interpreter'ın donanıma erişimi için gerekli callback'ler.
+/// echOS AML Yöneticisi — AML yorumlayıcısının donanıma erişimi için gereken geri çağırım (callback) yapısı.
 ///
-/// 21 method implemente eder:
-/// - Memory R/W (u8, u16, u32, u64) — HHDM üzerinden fiziksel bellek erişimi
-/// - I/O Port R/W (u8, u16, u32) — x86 port I/O
-/// - PCI Config R/W (u8, u16, u32) — CF8/CFC mekanizması
-/// - Fatal error handler
+/// `aml` crate AML baytcodunu yorumlarken donanıma ya da platforma özgü işlemler için
+/// bu trait'in metotlarını çağırır. echOS bu metotları şu şekilde uygular:
+///
+/// - Bellek Okuma/Yazma (u8, u16, u32, u64) — HHDM üzerinden fiziksel belleğe erişim
+/// - G/Ç Port Okuma/Yazma (u8, u16, u32) — x86 `in`/`out` komutları
+/// - PCI Yapılandırma Okuma/Yazma (u8, u16, u32) — CF8/CFC mekanizması
+/// - Ölümcül hata yöneticisi
 pub struct EchOsAmlHandler;
 
 impl aml::Handler for EchOsAmlHandler {
-    // ── Memory Access (fiziksel adres → HHDM sanal adres) ──
+    // ── Bellek Erişimi (fiziksel adres → HHDM sanal adres dönüşümü ile) ──
+    // HHDM (Higher Half Direct Map) ile fiziksel adresler yüksek yarı sanal adreslere örtülür.
+    // Örn: fiziksel 0x1000 → sanal 0xFFFF_8000_0000_1000 (HHDM offset eklenerek)
 
     fn read_u8(&self, address: usize) -> u8 {
         let virt = crate::memory::phys_to_virt(address);
@@ -83,7 +110,9 @@ impl aml::Handler for EchOsAmlHandler {
         unsafe { core::ptr::write_volatile(virt as *mut u64, value) }
     }
 
-    // ── I/O Port Access ──
+    // ── G/Ç Port Erişimi ──
+    // x86 mimarisinde I/O uzayı bellek uzayından ayrıdır; `in`/`out` komutlarıyla erişilir.
+    // Port adresi 16 bit (0x0000-0xFFFF); erişim genişliği 8, 16 veya 32 bit olabilir.
 
     fn read_io_u8(&self, port: u16) -> u8 {
         unsafe { x86_64::instructions::port::Port::<u8>::new(port).read() }
@@ -109,7 +138,17 @@ impl aml::Handler for EchOsAmlHandler {
         unsafe { x86_64::instructions::port::Port::<u32>::new(port).write(value) }
     }
 
-    // ── PCI Configuration Space Access (CF8/CFC mekanizması) ──
+    // ── PCI Yapılandırma Uzayı Erişimi (CF8/CFC mekanizması) ──
+    //
+    // x86'da PCI yapılandırma uzayına iki port üzerinden erişilir:
+    //   CF8h (CONFIG_ADDRESS) → 32-bit adres kaydı
+    //   CFCh (CONFIG_DATA)    → 32-bit veri kaydı
+    //
+    // Adres formatı:
+    //   ┌───────────────────────────────────────────────────┐
+    //   │ 31:Enable │ 30:24 Saklı │ 23:16 Bus │ 15:11 Dev  │
+    //   │ 10:8 Fonk │  7:2 Offset │  1:0 Sıfır             │
+    //   └───────────────────────────────────────────────────┘
 
     fn read_pci_u8(&self, segment: u16, bus: u8, device: u8, function: u8, offset: u16) -> u8 {
         let addr = pci_config_address(segment, bus, device, function, offset);
@@ -146,7 +185,7 @@ impl aml::Handler for EchOsAmlHandler {
         offset: u16,
         value: u8,
     ) {
-        // Read-modify-write: 32-bit okuyup ilgili byte'ı değiştir
+        // Oku-değiştir-yaz (Read-Modify-Write): 32-bit okuyup yalnızca ilgili baytı güncelle
         let addr = pci_config_address(segment, bus, device, function, offset);
         unsafe {
             x86_64::instructions::port::Port::<u32>::new(0xCF8).write(addr);
@@ -194,11 +233,11 @@ impl aml::Handler for EchOsAmlHandler {
         }
     }
 
-    // ── Ölümcul Hata ──
+    // ── Ölümcül Hata Yöneticisi ──
 
     fn handle_fatal_error(&self, fatal_type: u8, fatal_code: u32, fatal_arg: u64) {
         crate::serial_println!(
-            "[AML] FATAL ERROR: type={} code=0x{:X} arg=0x{:X}",
+            "[AML] ÖLÜMCÜL HATA: tip={} kod=0x{:X} arg=0x{:X}",
             fatal_type,
             fatal_code,
             fatal_arg
@@ -206,8 +245,17 @@ impl aml::Handler for EchOsAmlHandler {
     }
 }
 
-/// PCI CF8 adres hesapla
-/// Format: [31:enable] [30:24 reserved] [23:16 bus] [15:11 device] [10:8 function] [7:0 offset]
+/// PCI CF8 adres değeri hesaplar.
+///
+/// Format:
+/// ```text
+/// [31]    Enable bit — her zaman 1 olmalı
+/// [30:24] Saklı (sıfır)
+/// [23:16] Bus numarası (0-255)
+/// [15:11] Cihaz numarası (0-31)
+/// [10:8]  Fonksiyon numarası (0-7)
+/// [7:0]   Register offset (4 bayt hizalı, bit 1:0 = 0)
+/// ```
 fn pci_config_address(_segment: u16, bus: u8, device: u8, function: u8, offset: u16) -> u32 {
     0x8000_0000
         | ((bus as u32) << 16)
@@ -217,17 +265,21 @@ fn pci_config_address(_segment: u16, bus: u8, device: u8, function: u8, offset: 
 }
 
 // ============================================================================
-// AML Context Başlatma
+// AML Bağlamı Başlatma
 // ============================================================================
 
-/// AML interpreter'ı başlat — DSDT ve tüm SSDT'leri parse et.
+/// AML yorumlayıcısını başlatır — DSDT ve bulunan tüm SSDT tablolarını parse eder.
 ///
-/// Bu fonksiyon `cpu::init()` sonrasında, ACPI tabloları parse edildikten sonra çağrılmalı.
-/// FADT'den DSDT adresini alır, XSDT/RSDT'den SSDT'leri bulur.
+/// Bu fonksiyon `cpu::init()` sonrasında, ACPI tabloları parse edildikten sonra çağrılmalıdır.
+/// Başlatma adımları:
+/// 1. FADT'den DSDT fiziksel adresini oku (32-bit veya 64-bit X_DSDT alanı)
+/// 2. DSDT baytlarını AmlContext'e yükle ve parse et
+/// 3. Tüm SSDT tablolarını sırayla parse et (cihaz ve P-state tanımları burada)
+/// 4. `initialize_objects()` ile _INI, _STA gibi namespace nesnelerini başlat
 pub fn init_aml() {
     crate::serial_println!("[AML] Initializing AML interpreter...");
 
-    // FADT'den DSDT adresi al
+    // FADT'den DSDT adresini al
     let state = crate::cpu::acpi::ACPI_STATE.lock();
 
     if state.fadt_address == 0 {
@@ -235,7 +287,9 @@ pub fn init_aml() {
         return;
     }
 
-    // DSDT adresini FADT'den oku
+    // DSDT adresini FADT'den oku — iki olası alan var:
+    //   FADT offset 0x28 → DSDT (32-bit, ACPI 1.0 uyumlu)
+    //   FADT offset 0x8C → X_DSDT (64-bit, ACPI 2.0+ tercih edilen alan)
     let fadt_virt = crate::memory::phys_to_virt(state.fadt_address as usize);
     let dsdt_addr = unsafe {
         // FADT offset 0x28 = DSDT (32-bit)
@@ -258,7 +312,7 @@ pub fn init_aml() {
 
     crate::serial_println!("[AML] DSDT at 0x{:X}", dsdt_addr);
 
-    // DSDT byte slice oluştur
+    // DSDT'yi ham bayt dilimi (slice) olarak hazırla
     let dsdt_virt = crate::memory::phys_to_virt(dsdt_addr as usize);
     let dsdt_len = unsafe { core::ptr::read_unaligned((dsdt_virt + 4) as *const u32) } as usize;
 
@@ -270,24 +324,25 @@ pub fn init_aml() {
     let dsdt_bytes = unsafe { core::slice::from_raw_parts(dsdt_virt as *const u8, dsdt_len) };
     crate::serial_println!("[AML] DSDT size: {} bytes", dsdt_len);
 
-    // AmlContext oluştur
+    // AmlContext oluştur — DebugVerbosity::None ile ayrıntılı AML log'u kapatılır
     let handler = Box::new(EchOsAmlHandler);
     let mut context = AmlContext::new(handler, DebugVerbosity::None);
 
-    // DSDT parse et
+    // DSDT'yi parse et ve namespace'e yükle
     match context.parse_table(dsdt_bytes) {
         Ok(()) => {
             crate::serial_println!("[AML] DSDT parsed successfully");
         }
         Err(e) => {
             crate::serial_println!("[AML] DSDT parse error: {:?}", e);
-            // Hata olsa bile devam et — kısmi namespace kullanılabilir
+            // Parse hatası ölümcül değil; kısmi namespace yine de kullanışlı olabilir
         }
     }
 
-    // SSDT'leri bul ve parse et
+    // Tüm SSDT tablolarını bul ve parse et
+    // SSDT = Secondary System Description Table; ek cihaz tanımları ve P-state tabloları içerir
     let tables = state.tables.clone();
-    drop(state); // lock'u bırak
+    drop(state); // Kilit serbest bırakılır; sonraki AML çağrıları için gerekli
 
     let mut ssdt_count = 0u32;
     for table in &tables {
@@ -321,7 +376,8 @@ pub fn init_aml() {
         }
     }
 
-    // Namespace objelerini başlat (_INI, _STA gibi method'ları çalıştır)
+    // Namespace nesnelerini başlat: _INI (başlatma), _STA (durum) gibi metotlar çalıştırılır.
+    // Bu adım cihazların hazır duruma geçmesi için gereklidir.
     match context.initialize_objects() {
         Ok(()) => {
             crate::serial_println!("[AML] Namespace objects initialized");
@@ -331,14 +387,14 @@ pub fn init_aml() {
         }
     }
 
-    // Namespace istatistikleri
+    // Namespace istatistiklerini kaydı için referans al (henüz kullanılmıyor)
     let ns = &context.namespace;
     crate::serial_println!(
         "[AML] Namespace ready — DSDT + {} SSDTs loaded",
         ssdt_count
     );
 
-    // Global context'e kaydet
+    // Global bağlama kaydet ve başlatıldı bayrağını set et
     *AML_CONTEXT.lock() = Some(context);
     AML_INITIALIZED.store(true, Ordering::SeqCst);
 
@@ -358,14 +414,19 @@ pub fn init_aml() {
 }
 
 // ============================================================================
-// AML Method Invocation — Genel API
+// AML Metot Çağrısı — Genel API
 // ============================================================================
 
-/// ACPI control method'u çalıştır.
+/// Bir ACPI kontrol metodunu çalıştırır ve sonucunu döndürür.
 ///
-/// # Örnek
+/// AML metodları DSDT/SSDT içinde tanımlanmış küçük programlardır.
+/// İşletim sistemi bu metodları çağırarak donanımı yönetir.
+///
+/// # Örnekler
 /// ```
-/// let result = invoke_method("\\_SB.PCI0._PRT", &[]);
+/// // PCI IRQ yönlendirme tablosunu oku
+/// let prt = invoke_method("\\_SB.PCI0._PRT", &[]);
+/// // Termal bölge sıcaklığını oku (Kelvin * 10 döner, örn: 3232 = 323.2K = 50.2°C)
 /// let temp = invoke_method("\\_TZ.TZ00._TMP", &[]);
 /// ```
 pub fn invoke_method(path: &str, args: &[AmlValue]) -> Result<AmlValue, AmlError> {
@@ -382,14 +443,14 @@ pub fn invoke_method(path: &str, args: &[AmlValue]) -> Result<AmlValue, AmlError
         .map_err(|e| AmlError::AmlCrateError(e))
 }
 
-/// ACPI namespace'te bir objeyi oku (invoke_method wrapper — sadece lookup).
-/// Eğer path bir method değilse, doğrudan namespace value döner.
+/// ACPI namespace'teki bir nesneyi okur.
+/// Belirtilen yol bir metot ise çalıştırır; değer ise doğrudan döndürür.
 pub fn lookup(path: &str) -> Result<AmlValue, AmlError> {
-    // invoke_method ile deneriz — method ise çalıştırır, değilse namespace value döner
+    // invoke_method ile deneriz — metot ise çalıştırılır, değer ise namespace'ten döner
     invoke_method(path, &[])
 }
 
-/// Namespace'teki tüm objeleri serial log'a yaz (debug için).
+/// Namespace'teki bilinen tüm kök nesneleri seri porta yazdırır (hata ayıklama için).
 pub fn debug_dump_namespace() {
     if !is_initialized() {
         crate::serial_println!("[AML] Context not initialized");
@@ -398,23 +459,23 @@ pub fn debug_dump_namespace() {
 
     crate::serial_println!("[AML] === Namespace Dump ===");
 
-    // Bilinen root objeleri kontrol et
+    // Bilinen ACPI kök nesneleri — bunların varlığı donanım özelliklerini gösterir
     let paths = [
-        "\\_SB",
-        "\\_TZ",
-        "\\_PR",
-        "\\_GPE",
-        "\\_SI",
-        "\\_S0",
-        "\\_S3",
-        "\\_S4",
-        "\\_S5",
+        "\\_SB",  // System Bus
+        "\\_TZ",  // Thermal Zone
+        "\\_PR",  // Processor (P-state/C-state tanımları)
+        "\\_GPE", // General Purpose Events
+        "\\_SI",  // System Indicators
+        "\\_S0",  // S0 uyku durumu tanımı
+        "\\_S3",  // S3 (Askı/Suspend to RAM) tanımı
+        "\\_S4",  // S4 (Hazırda Bekletme) tanımı
+        "\\_S5",  // S5 (Soft Off/Kapatma) tanımı
     ];
 
     for path in &paths {
         match lookup(path) {
             Ok(val) => crate::serial_println!("[AML]   {} = {:?}", path, val),
-            Err(_) => {} // tanımlı değil — sessizce geç
+            Err(_) => {} // Bu nesne tanımlanmamış — sessizce geç
         }
     }
 
@@ -422,17 +483,18 @@ pub fn debug_dump_namespace() {
 }
 
 // ============================================================================
-// Helper: Uyku Durumu Değerlendirmesi (Faz 2'de genişletilecek)
+// Yardımcı: Uyku Durumu Değerlendirmesi
 // ============================================================================
 
-/// ACPI S5 sleep type değerlerini AML'den oku.
-/// Fallback: mevcut statik parse sonuçlarını kullan.
+/// ACPI S5 (Soft Off) uyku türü değerlerini AML namespace üzerinden okur.
+/// Bu değerler PM1_CNT kaydına yazılarak sistemin S5 durumuna girmesi sağlanır.
+/// AML başlatılmamışsa `None` döner; çağıran kod statik parse sonucuna geri döner.
 pub fn get_s5_sleep_type() -> Option<(u16, u16)> {
     if !is_initialized() {
         return None;
     }
 
-    // \_S5 paketini evaluate et
+    // \_S5 paketi değerlendir — paket iki tam sayı içermelidir: [SLP_TYP_A, SLP_TYP_B]
     match invoke_method("\\_S5", &[]) {
         Ok(AmlValue::Package(elements)) => {
             if elements.len() >= 2 {
@@ -458,7 +520,8 @@ pub fn get_s5_sleep_type() -> Option<(u16, u16)> {
     }
 }
 
-/// AmlValue'yi u64'e dönüştür
+/// AmlValue'yu u64 tam sayısına dönüştürür.
+/// Yalnızca `AmlValue::Integer` varyantı için tanımlıdır; diğerleri `None` döndürür.
 fn aml_value_to_u64(val: &AmlValue) -> Option<u64> {
     match val {
         AmlValue::Integer(n) => Some(*n),
@@ -467,18 +530,19 @@ fn aml_value_to_u64(val: &AmlValue) -> Option<u64> {
 }
 
 // ============================================================================
-// Hata Tipi
+// Hata Türü
 // ============================================================================
 
-/// echOS AML hata enumı
+/// echOS AML hata numaralandırması.
+/// AML metot çağrıları başarısız olduğunda bu hata türleri döndürülür.
 #[derive(Debug)]
 pub enum AmlError {
-    /// AML context henüz başlatılmadı
+    /// AML bağlamı henüz başlatılmadı — `init_aml()` önce çağrılmalı
     AmlNotInitialized,
-    /// Geçersiz AML path
+    /// Geçersiz AML namespace yolu (örn: yanlış biçim veya geçersiz karakter)
     InvalidPath,
-    /// Geçersiz argümanlar
+    /// Metoda geçilen argüman listesi uyumsuz
     InvalidArgs,
-    /// `aml` crate hatası
+    /// `aml` crate'in döndürdüğü düşük seviyeli AML yorumlayıcı hatası
     AmlCrateError(aml::AmlError),
 }

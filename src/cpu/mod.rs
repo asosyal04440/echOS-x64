@@ -2,16 +2,16 @@
 //!
 //! CPU yapılandırması: GDT, IDT, SSE/AVX ve SMP desteği.
 
-/// Interrupt handlers
+/// Kesme işleyicileri — PIC ofseti, IDT vektörleri ve donanım kesme handler'ları
 pub mod interrupts;
 
-/// TSC (Time Stamp Counter) for high-resolution timing
+/// TSC (Zaman Damgası Sayacı) — yüksek çözünürlüklü zamanlama, frekans kalibrasyonu
 pub mod tsc;
 
 /// SMP (Symmetric Multi-Processing) desteği
 pub mod smp;
 
-/// CPU State Machine ve Affinity
+/// CPU Durum Makinesi (State Machine) ve İşlemci Benzeşimi (Affinity) yönetimi
 pub mod smp_state;
 
 pub mod ap;
@@ -139,6 +139,9 @@ pub fn init() {
     acpi_aml::init_aml();
 }
 
+/// AVX (Advanced Vector Extensions) komutlarının hem CPU hem OS tarafından desteklenip desteklenmediğini sorgular.
+/// CPUID ile donanım desteği kontrol edilir; ardından XCR0 kaydından OS'un YMM registerlarını
+/// kaydettiği doğrulanır (OSXSAVE). Her ikisi de gereklidir.
 pub fn has_avx() -> bool {
     let features = cpuid(1, 0);
     let osxsave = (features.ecx & (1 << 27)) != 0;
@@ -150,6 +153,8 @@ pub fn has_avx() -> bool {
     (xcr0 & 0x6) == 0x6
 }
 
+/// AVX2 (256-bit tamsayı vektör uzantısı) desteklenip desteklenmediğini sorgular.
+/// Önce AVX desteği kontrol edilir; ardından CPUID leaf 7 EBX bit 5 sorgulanır.
 pub fn has_avx2() -> bool {
     if !has_avx() {
         return false;
@@ -158,16 +163,22 @@ pub fn has_avx2() -> bool {
     (features.ebx & (1 << 5)) != 0
 }
 
+/// SSE2 (128-bit kayan nokta vektör işlemleri) desteklenip desteklenmediğini döndürür.
+/// CPUID leaf 1 EDX bit 26 sorgulanır.
 pub fn has_sse2() -> bool {
     let features = cpuid(1, 0);
     (features.edx & (1 << 26)) != 0
 }
 
+/// SSSE3 (Supplemental SSE3) desteklenip desteklenmediğini döndürür.
+/// CPUID leaf 1 ECX bit 9 sorgulanır.
 pub fn has_ssse3() -> bool {
     let features = cpuid(1, 0);
     (features.ecx & (1 << 9)) != 0
 }
 
+/// SSE4.1 (gelişmiş yatay toplama, blend vb.) desteklenip desteklenmediğini döndürür.
+/// CPUID leaf 1 ECX bit 19 sorgulanır.
 pub fn has_sse41() -> bool {
     let features = cpuid(1, 0);
     (features.ecx & (1 << 19)) != 0
@@ -256,12 +267,12 @@ fn detect_intel_topology(info: &mut CpuInfo) {
 
         match level_type {
             1 => {
-                // SMT level
+                // SMT (Hiper-İş Parçacığı) seviyesi — mantıksal çekirdek başına iş parçacığı sayısı
                 info.topology.smt_level = level;
                 logical_count = result.ebx & 0xFFFF;
             }
             2 => {
-                // Core level
+                // Çekirdek (Core) seviyesi — fiziksel çekirdek başına mantıksal işlemci sayısı
                 info.topology.core_level = level;
                 info.topology.core_count = result.ebx & 0xFFFF;
             }

@@ -1,7 +1,60 @@
-//! # echOS Mesaj Kuyrukları (IPC)
+//! # echOS Mesaj Kuyrukları (IPC — Message Passing)
 //!
 //! Task'lar arası mesajlaşma (Message Passing) altyapısı.
 //! Mesaj gönderme, alma ve kuyruk yönetimi.
+//!
+//! ## Mailbox Mimarisi
+//!
+//! ```text
+//!  REGISTRY (global, Mutex korumalı)
+//!  ┌────────────────────────────────────────────────────────┐
+//!  │  mailboxes: Vec<TaskMailbox>                           │
+//!  │                                                        │
+//!  │  ┌────────────────────────────────┐                    │
+//!  │  │ TaskMailbox { task_id: 1 }     │                    │
+//!  │  │   messages: [Msg1, Msg2, ...]  │ ← FIFO, max 32    │
+//!  │  └────────────────────────────────┘                    │
+//!  │  ┌────────────────────────────────┐                    │
+//!  │  │ TaskMailbox { task_id: 2 }     │                    │
+//!  │  │   messages: [Msg3]             │                    │
+//!  │  └────────────────────────────────┘                    │
+//!  │  ...                                                   │
+//!  └────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Mesaj Yapısı
+//!
+//! ```text
+//!  Message {
+//!    sender: TaskId   — Mesajı kimin gönderdiği (yanıt için gerekli)
+//!    data: Vec<u8>    — Ham byte verisi (text, binary, struct serialize)
+//!  }
+//! ```
+//!
+//! ## API Kullanımı
+//!
+//! ```text
+//!  Task A                              Task B (target_id)
+//!  ──────                              ─────────────────
+//!  send_message(B_id, A_id, data) ──► B'nin mailbox'ına eklenir
+//!
+//!  (Task B çalışınca)
+//!  has_message(B_id)  → true
+//!  receive_message(B_id) → Some(Message { sender: A_id, data })
+//!
+//!  (Kuyruğu tamamen boşalt)
+//!  while let Some(msg) = receive_message(B_id) { ... }
+//! ```
+//!
+//! ## Kapasite Sınırı (Backpressure)
+//!
+//! ```text
+//!  MAX_QUEUE_SIZE = 32 mesaj / mailbox
+//!
+//!  Kuyruk dolduğunda send_message() → false döner.
+//!  Alıcı task'ın mesajları zamanında tüketmesi beklenir.
+//!  Bu sayede bellek tükenmesi (OOM) önlenir.
+//! ```
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -108,7 +161,16 @@ lazy_static! {
 }
 
 // ============================================================================
-// PUBLIC API
+// PUBLIC API — Dışarıya açık mesajlaşma fonksiyonları
+//
+// Tüm fonksiyonlar REGISTRY Mutex'ini kısa süreliğine kilitler.
+// Interrupt context'ten değil, normal task context'ten çağrılmalıdır.
+//
+// send_message(target, sender, data) → Byte slice gönder
+// send_str(target, sender, s)        → String mesaj gönder (UTF-8)
+// receive_message(task_id)           → Bir mesaj al (non-blocking, FIFO)
+// has_message(task_id)               → Bekleyen mesaj var mı?
+// message_count(task_id)             → Kuyruktaki mesaj sayısı
 // ============================================================================
 
 /// Hedef task'a mesaj gönderir.

@@ -1,7 +1,27 @@
 //! # echOS Mouse Cursor Modülü
 //!
-//! Mouse cursor rendering ve backup/restore işlemleri.
-//! Sprite-based cursor çizimi yapılır.
+//! Sprite tabanlı fare imleci çizimi ve piksel yedekleme/geri yükleme işlemleri.
+//! Çekirdek seviyesinde çalıştığından GPU hızlandırması veya işletim sistemi sürücüsü
+//! kullanılamaz; tüm çizim doğrudan framebuffer bellek adresi üzerinden yapılır.
+//!
+//! ## Çalışma Prensibi
+//! 1. İmleç çizilmeden önce altındaki pikseller `CURSOR_BACKUP` tamponuna yedeklenir.
+//! 2. `CURSOR_SPRITE` bitmap'i (12×19 piksel) framebuffer'a yazılır:
+//!    - `0` = şeffaf (piksel yazılmaz, arka plan korunur)
+//!    - `1` = beyaz (`0xFFFFFF`)
+//!    - `2` = siyah dış çizgi (`0x000000`)
+//! 3. Sonraki karede imleç yeni konuma taşınmadan önce eski konum yedekten geri yüklenir.
+//!
+//! ## Neden Yedekleme Gerekir?
+//! Framebuffer doğrudan ekrana yazılan bir bellek bölgesidir; çift tamponlama (double
+//! buffering) olmadığında imlecin üzerine yazıldığı pikseller kalıcı olarak bozulur.
+//! Yedekleme sayesinde imleç her konumda iz bırakmadan hareket eder.
+//!
+//! ## Güvenlik: `unsafe` Kullanımı
+//! `CURSOR_BACKUP`, `LAST_X`, `LAST_Y`, `CURSOR_VISIBLE` değişkenleri `static mut`
+//! olarak tanımlanmıştır. Çekirdek tek çekirdekli (single-core) ve kesme-güvenli
+//! bağlamda çalıştığından veri yarışı riski yoktur; yine de erişimler `unsafe` blok
+//! içinde yapılmaktadır.
 
 use crate::drivers::mouse;
 use crate::gop::framebuffer::Framebuffer;
@@ -10,8 +30,11 @@ use crate::gop::framebuffer::Framebuffer;
 const CURSOR_WIDTH: usize = 12;
 const CURSOR_HEIGHT: usize = 19;
 
-/// Cursor sprite bitmap.
-/// 0 = transparent, 1 = beyaz, 2 = siyah
+/// İmleç sprite bitmap'i; her hücre bir pikseli temsil eder.
+/// - `0` = şeffaf (bu pikseli çizme, arka planı koru)
+/// - `1` = beyaz dolgu (#FFFFFF)
+/// - `2` = siyah dış çizgi (#000000)
+/// Klasik ok imleci şekli: sol üstten başlayan ince bir ok.
 const CURSOR_SPRITE: [[u8; CURSOR_WIDTH]; CURSOR_HEIGHT] = [
     [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     [2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -43,8 +66,9 @@ static mut LAST_Y: i32 = -1;
 /// Cursor görünür mü?
 static mut CURSOR_VISIBLE: bool = false;
 
-/// Mouse cursor'u mevcut pozisyona çizer.
-/// Önceki pozisyondaki pikselleri geri yükler.
+/// Mouse cursor'u mevcut fare pozisyonuna çizer.
+/// Her çağrıda: (1) eski konumu yedekten geri yükle, (2) yeni konumu yedekle, (3) sprite çiz.
+/// Bu üç adım her kare çağrılmalıdır; aksi hâlde eski imlecin izi ekranda kalır.
 pub fn draw(fb: &mut Framebuffer) {
     let (mx, my) = mouse::get_position();
     let x = mx as usize;

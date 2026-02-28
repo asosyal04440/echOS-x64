@@ -1,7 +1,8 @@
-//! # echOS CPU Topology Detection Module
+//! # CPU Topoloji Algılama Modülü
 //!
-//! Tier 1 OS seviyesinde dinamik CPU topoloji keşfi
-//! Linux CPU topology ile aynı seviyede özellikler
+//! Çok işlemcili sistemlerde dinamik CPU topolojisi keşfi.
+//! Çekirdek, NUMA düğümü, L1/L2/L3 önbellek ve SMT ilişkilerini tespit eder.
+//! Linux CPU topology subsystem ile eşdeğer Tier-1 OS düzeyinde özellikler sunar.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use alloc::vec::Vec;

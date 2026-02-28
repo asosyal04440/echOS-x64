@@ -1,12 +1,23 @@
-//! # TrueType/OpenType Font Parser
+//! # TrueType/OpenType Font Parser (Yazı Tipi Ayrıştırıcı)
 //!
-//! Parses TrueType font files for glyph outlines and metrics.
+//! TrueType (.ttf) ve OpenType (.otf) yazı tipi dosyalarını ayrıştırır.
+//! Glif (harf şekli) konturlarını, metrik bilgilerini ve karakter eşlemelerini çıkarır.
+//!
+//! ## Desteklenen Tablolar
+//! - `head`: Yazı tipi genel bilgileri (EM boyutu, sınır kutusu)
+//! - `hhea`: Yatay metrik sayısı
+//! - `hmtx`: Her glif için ilerleme genişliği ve sol taşma
+//! - `cmap`: Unicode → glif indeks eşlemesi (Format 4 ve 12)
+//! - `glyf`: Glif kontur verileri
+//! - `loca`: Glif ofset tablosu
+//! - `name`: Yazı tipi aile ve stil ismi
+//! - `maxp`: Maksimum glif sayısı
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
 
-/// TrueType font structure
+/// TrueType yazı tipi yapısı; ayrıştırılmış tablolar ve glif listesini barındırır
 pub struct TrueTypeFont {
     pub family_name: String,
     pub style_name: String,
@@ -16,12 +27,12 @@ pub struct TrueTypeFont {
     pub descent: i16,
     pub line_gap: i16,
     pub glyphs: Vec<Glyph>,
-    pub cmap: Vec<(u32, u16)>, // Unicode -> glyph index
+    pub cmap: Vec<(u32, u16)>, // Unicode → glif indeksi eşlemesi
     pub h_metrics: Vec<HorizontalMetric>,
     pub head: FontHeader,
 }
 
-/// Font header data
+/// `head` tablosundan alınan yazı tipi başlık verisi (EM boyutu, sınır kutusu, stil bayrakları)
 #[derive(Clone, Copy, Debug)]
 pub struct FontHeader {
     pub units_per_em: u16,
@@ -34,7 +45,7 @@ pub struct FontHeader {
     pub index_to_loc_format: i16,
 }
 
-/// Glyph outline
+/// Tek bir glif için kontur (şekil) verisi, metrik bilgileri ve sınır kutusu
 #[derive(Clone, Debug)]
 pub struct Glyph {
     pub index: u16,
@@ -44,7 +55,7 @@ pub struct Glyph {
     pub contours: Vec<GlyphContour>,
 }
 
-/// Glyph bounding box
+/// Glif sınır kutusu (piksel koordinatlarında minimum/maksimum x ve y değerleri)
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GlyphBounds {
     pub x_min: i16,
@@ -53,13 +64,13 @@ pub struct GlyphBounds {
     pub y_max: i16,
 }
 
-/// Glyph contour (closed path)
+/// Kapalı yol (kontur); glif çizgisini oluşturan noktalar dizisi
 #[derive(Clone, Debug)]
 pub struct GlyphContour {
     pub points: Vec<GlyphPoint>,
 }
 
-/// Point in glyph outline
+/// Glif konturundaki tek nokta; koordinatlar ve eğri üzerinde mi bilgisi
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphPoint {
     pub x: i16,
@@ -67,7 +78,7 @@ pub struct GlyphPoint {
     pub on_curve: bool,
 }
 
-/// Horizontal metric
+/// `hmtx` tablosundan gelen yatay metrik: ilerleme genişliği ve sol taşma
 #[derive(Clone, Copy, Debug)]
 pub struct HorizontalMetric {
     pub advance_width: u16,
@@ -75,22 +86,23 @@ pub struct HorizontalMetric {
 }
 
 impl TrueTypeFont {
-    /// Parse TrueType font from bytes
+    /// Ham bayt dizisinden TrueType/OpenType yazı tipini ayrıştırır.
+    /// Tablo dizinini okur, gerekli tabloları bulur ve glif verilerini yükler.
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 12 {
             return None;
         }
 
-        // Check version
+        // Sürüm numarasını kontrol et (0x00010000 → TrueType, 0x4F54544F → OpenType/CFF)
         let version = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         if version != 0x00010000 && version != 0x4F54544F {
-            // Not TrueType or OpenType
+            // TrueType veya OpenType formatı değil
             return None;
         }
 
         let num_tables = u16::from_be_bytes([data[4], data[5]]) as usize;
         
-        // Find required tables
+        // Gerekli tabloları bul (head, hhea, hmtx, cmap, glyf, loca, name, maxp)
         let mut head_offset = None;
         let mut hhea_offset = None;
         let mut hmtx_offset = None;
@@ -133,38 +145,38 @@ impl TrueTypeFont {
             }
         }
 
-        // Parse head table
+        // head tablosunu ayrıştır (EM boyutu, sınır kutusu, loca format)
         let head = head_offset.and_then(|(off, _)| Self::parse_head(data, off))?;
-        
-        // Parse maxp for glyph count
+
+        // maxp tablosundan glif sayısını al
         let num_glyphs = maxp_offset.and_then(|(off, _)| Self::parse_maxp(data, off)).unwrap_or(256);
-        
-        // Parse name table for family
+
+        // name tablosundan aile adını ayrıştır
         let (family_name, style_name) = name_offset
             .map(|(off, len)| Self::parse_name(data, off, len))
             .unwrap_or((String::from("Unknown"), String::new()));
 
-        // Parse hhea for metrics count
+        // hhea tablosundan yatay metrik sayısını al
         let hhea_count = hhea_offset
             .and_then(|(off, _)| Self::parse_hhea(data, off))
             .unwrap_or(num_glyphs);
 
-        // Parse hmtx
+        // hmtx tablosunu ayrıştır
         let h_metrics = hmtx_offset
             .map(|(off, _)| Self::parse_hmtx(data, off, hhea_count as usize, num_glyphs as usize))
             .unwrap_or_default();
 
-        // Parse cmap
+        // cmap tablosunu ayrıştır
         let cmap = cmap_offset
             .and_then(|(off, len)| Self::parse_cmap(data, off, len))
             .unwrap_or_default();
 
-        // Parse loca
+        // loca tablosunu ayrıştır (glif ofsetleri)
         let loca = loca_offset
             .map(|(off, len)| Self::parse_loca(data, off, len, head.index_to_loc_format, num_glyphs as usize))
             .unwrap_or_default();
 
-        // Parse glyf (simplified - just bounds)
+        // glyf tablosunu ayrıştır (sadece sınır kutuları)
         let glyphs = glyf_offset
             .map(|(off, _)| Self::parse_glyf(data, off, &loca, &h_metrics))
             .unwrap_or_default();
@@ -172,7 +184,7 @@ impl TrueTypeFont {
         Some(Self {
             family_name,
             style_name,
-            is_monospace: false, // Would need to check all advance widths
+            is_monospace: false, // Tüm ilerleme genişliklerinin eşit olup olmadığı kontrol edilmeli
             units_per_em: head.units_per_em,
             ascent: 0,
             descent: 0,
@@ -229,7 +241,7 @@ impl TrueTypeFont {
             metrics.push(HorizontalMetric { advance_width: advance, left_side_bearing: lsb });
         }
         
-        // Fill remaining with last advance width
+        // Kalan glif sayısı kadar son ilerleme genişliğiyle doldur
         while metrics.len() < total {
             let lsb_off = offset + count * 4 + (metrics.len() - count) * 2;
             let lsb = if lsb_off + 2 <= data.len() {
@@ -253,7 +265,7 @@ impl TrueTypeFont {
 
         let num_subtables = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
         
-        // Find Unicode subtable
+        // Unicode alt tablosunu bul (Windows Unicode veya genel Unicode platformu)
         for i in 0..num_subtables {
             let sub_off = offset + 4 + i * 8;
             if sub_off + 8 > data.len() {
@@ -264,7 +276,7 @@ impl TrueTypeFont {
             let encoding = u16::from_be_bytes([data[sub_off + 2], data[sub_off + 3]]);
             let table_offset = u32::from_be_bytes([data[sub_off + 4], data[sub_off + 5], data[sub_off + 6], data[sub_off + 7]]) as usize;
             
-            // Windows Unicode or Unicode BMP
+            // Windows Unicode (platform 3, encoding 1) veya Unicode BMP (platform 0)
             if (platform == 3 && encoding == 1) || (platform == 0) {
                 return Self::parse_cmap_subtable(data, offset + table_offset);
             }
@@ -308,7 +320,7 @@ impl TrueTypeFont {
 
             for code in start..=end {
                 let glyph_idx = if range == 0 {
-                    // Use wrapping arithmetic for glyph index calculation
+                    // Sarmalı aritmetikle glif indeksi hesapla
                     (code as u16).wrapping_add(delta as u16)
                 } else {
                     let range_off = offset + range as usize + (code - start) as usize * 2;
@@ -356,7 +368,7 @@ impl TrueTypeFont {
         
         for i in 0..=num_glyphs {
             let off = if format == 0 {
-                // Short format (divided by 2)
+                // Kısa format: ofset 2'ye bölünmüş olarak saklanır
                 let idx = offset + i * 2;
                 if idx + 2 <= data.len() && idx < offset + len {
                     u16::from_be_bytes([data[idx], data[idx + 1]]) as u32 * 2
@@ -364,7 +376,7 @@ impl TrueTypeFont {
                     0
                 }
             } else {
-                // Long format
+                // Uzun format: ofset tam 32 bit olarak saklanır
                 let idx = offset + i * 4;
                 if idx + 4 <= data.len() && idx < offset + len {
                     u32::from_be_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]])
@@ -437,8 +449,8 @@ impl TrueTypeFont {
             contour_ends.push(u16::from_be_bytes([data[idx], data[idx + 1]]) as usize);
         }
 
-        // Simplified: just return empty contours
-        // Full implementation would parse point data
+        // Basitleştirilmiş uygulama: boş konturlar döndürür
+        // Tam uygulama nokta verilerini de ayrıştırır
         let contours = contour_ends.iter().map(|_| GlyphContour { points: Vec::new() }).collect();
         
         (bounds, contours)
@@ -466,16 +478,16 @@ impl TrueTypeFont {
             let str_len = u16::from_be_bytes([data[rec_off + 8], data[rec_off + 9]]) as usize;
             let str_off = u16::from_be_bytes([data[rec_off + 10], data[rec_off + 11]]) as usize;
 
-            // Family name (1) or Style (2)
+            // Aile adı (name_id=1) veya stil adı (name_id=2)
             if name_id == 1 || name_id == 2 {
                 let start = offset + string_offset + str_off;
                 if start + str_len <= data.len() {
                     let bytes = &data[start..start + str_len];
                     let s = if platform == 3 {
-                        // Windows UTF-16BE
+                        // Windows platformu: UTF-16BE kodlaması
                         String::from_utf8_lossy(bytes).into_owned()
                     } else {
-                        // Mac Roman or other
+                        // Mac Roman veya diğer platformlar
                         String::from_utf8_lossy(bytes).into_owned()
                     };
                     
@@ -495,7 +507,7 @@ impl TrueTypeFont {
         (family, style)
     }
 
-    /// Get glyph for character
+    /// Verilen karakter için glif yapısını döndürür; cmap tablosundan Unicode → glif indeksi arar
     pub fn glyph(&self, c: char) -> Option<&Glyph> {
         let code = c as u32;
         for (unicode, idx) in &self.cmap {
@@ -506,7 +518,8 @@ impl TrueTypeFont {
         None
     }
 
-    /// Get advance width for character at given size
+    /// Verilen karakter ve yazı tipi boyutu için piksel cinsinden ilerleme genişliğini döndürür.
+    /// `units_per_em` normalleştirmesi ile boyut ölçeklenir.
     pub fn advance(&self, c: char, size: f32) -> f32 {
         let glyph = self.glyph(c);
         let units = glyph.map(|g| g.advance_width).unwrap_or(0);

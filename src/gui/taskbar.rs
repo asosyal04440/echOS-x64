@@ -1,7 +1,32 @@
-//! # Enhanced Taskbar
+//! # Gelişmiş Görev Çubuğu (Taskbar)
 //!
-//! Modern taskbar with start menu, pinned apps, system tray, and clock
-//! Supports window previews, jump lists, and notifications
+//! Başlat menüsü, sabitlenmiş uygulamalar, sistem tepsisi ve saati içeren modern görev çubuğu.
+//! Pencere önizlemeleri, hızlı liste (jump list) ve bildirim rozeti destekler.
+//!
+//! ## Görev Çubuğu Düzeni
+//!
+//! ```text
+//!  ┌─────────────────────────────────────────────────────────────────┐
+//!  │ [⊞] [🔍] [⧉] │ [💾] [🌐] [⌨] [⚙] │ [Uyg1] [Uyg2] │ [🔋][🔊] 00:00 │
+//!  └─────────────────────────────────────────────────────────────────┘
+//!    ◄── sol_buttons ──►          ◄── center_buttons ──►  ◄─ system_tray ─►
+//!
+//!  Sol:    Başlat / Ara / Görev Görünümü + Sabitlenmiş Uygulamalar
+//!  Orta:   Çalışan uygulamalar (pencere düğmeleri)
+//!  Sağ:    Sistem tepsisi + Saat + Masaüstünü Göster
+//! ```
+//!
+//! ## Düğme Durumları
+//!
+//! ```text
+//!  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐
+//!  │      │  │ HOVER│  │PRESS │  │ACTIVE│
+//!  │  bg  │  │  bg  │  │  bg  │  │accent│
+//!  └──────┘  └──────┘  └──────┘  └──┬───┘
+//!  Saydam    BUTTON    BUTTON        │
+//!            _HOVER    _HOVER     alt çizgi
+//!                                 (aktif göstergesi)
+//! ```
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -17,66 +42,79 @@ use crate::gui::theme::Theme;
 use crate::gui::widgets::{Widget, Rect};
 
 // ============================================================================
-// TASKBAR CONSTANTS
+// GÖREV ÇUBUĞU SABİTLERİ
 // ============================================================================
 
-/// Default taskbar height
+/// Varsayılan görev çubuğu yüksekliği (piksel)
 pub const TASKBAR_HEIGHT: usize = 48;
 
-/// Icon size in taskbar
+/// Görev çubuğu simge boyutu (piksel)
 pub const ICON_SIZE: usize = 32;
 
-/// Button width
+/// Düğme genişliği (piksel)
 pub const BUTTON_WIDTH: usize = 44;
 
-/// Spacing between elements
+/// Öğeler arası boşluk (piksel)
 pub const SPACING: usize = 4;
 
 // ============================================================================
-// TASKBAR BUTTON
+// GÖREV ÇUBUĞU DÜĞMESİ
 // ============================================================================
 
-/// A button in the taskbar
+/// Görev çubuğundaki tek bir düğme.
+/// Sol sabit düğmeler ve orta çalışan uygulama düğmeleri bu yapıyla temsil edilir.
 #[derive(Clone)]
 pub struct TaskbarButton {
-    /// Button ID
+    /// Düğme kimliği
     id: u32,
-    /// Button type
+    /// Düğme türü
     button_type: ButtonType,
-    /// Position
+    /// X konumu (görev çubuğuna göre)
     x: usize,
+    /// Y konumu (görev çubuğuna göre)
     y: usize,
-    /// Size
+    /// Genişlik
     width: usize,
+    /// Yükseklik
     height: usize,
-    /// Is hovered
+    /// Fare üzerinde mi (hover)
     hovered: bool,
-    /// Is pressed
+    /// Basılı mı (mousedown)
     pressed: bool,
-    /// Is active (for window buttons)
+    /// Aktif mi (odaklanmış pencere)
     active: bool,
-    /// Icon (simplified - would be texture)
+    /// Simge türü (çizim için)
     icon_type: IconType,
-    /// Tooltip text
+    /// Araç ipucu metni
     tooltip: String,
-    /// Badge count (for notifications)
+    /// Bildirim rozeti sayısı (0 = gizli)
     badge_count: u32,
-    /// Progress (0.0 - 1.0)
+    /// İlerleme çubuğu değeri (0.0 - 1.0, 0 = gizli)
     progress: f32,
 }
 
+/// Görev çubuğu düğme türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonType {
+    /// Başlat menüsü düğmesi
     Start,
+    /// Spotlight/Arama düğmesi
     Search,
+    /// Görev görünümü düğmesi (çalışan uygulamalar)
     TaskView,
+    /// Sabitlenmiş uygulama (çalışmıyor)
     PinnedApp,
+    /// Çalışan uygulama (aktif pencere var)
     RunningApp,
+    /// Sistem tepsisi alanı
     SystemTray,
+    /// Saat düğmesi
     Clock,
+    /// Masaüstünü göster düğmesi (en sağ şerit)
     ShowDesktop,
 }
 
+/// Simge çizim türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IconType {
     Start,
@@ -114,8 +152,8 @@ impl TaskbarButton {
             progress: 0.0,
         }
     }
-    
-    /// Create start button
+
+    /// Başlat düğmesi oluştur
     pub fn start(id: u32, x: usize) -> Self {
         TaskbarButton {
             id,
@@ -133,8 +171,8 @@ impl TaskbarButton {
             progress: 0.0,
         }
     }
-    
-    /// Create search button
+
+    /// Arama düğmesi oluştur
     pub fn search(id: u32, x: usize) -> Self {
         TaskbarButton {
             id,
@@ -152,8 +190,8 @@ impl TaskbarButton {
             progress: 0.0,
         }
     }
-    
-    /// Create pinned app button
+
+    /// Sabitlenmiş uygulama düğmesi oluştur
     pub fn pinned_app(id: u32, x: usize, icon: IconType, tooltip: &str) -> Self {
         TaskbarButton {
             id,
@@ -171,8 +209,8 @@ impl TaskbarButton {
             progress: 0.0,
         }
     }
-    
-    /// Create running app button
+
+    /// Çalışan uygulama düğmesi oluştur
     pub fn running_app(id: u32, x: usize, icon: IconType, tooltip: &str, active: bool) -> Self {
         TaskbarButton {
             id,
@@ -190,49 +228,56 @@ impl TaskbarButton {
             progress: 0.0,
         }
     }
-    
-    /// Set hovered state
+
+    /// Hover durumunu ayarla
     pub fn set_hovered(&mut self, hovered: bool) {
         self.hovered = hovered;
     }
-    
-    /// Set pressed state
+
+    /// Basılı durumu ayarla
     pub fn set_pressed(&mut self, pressed: bool) {
         self.pressed = pressed;
     }
-    
-    /// Set active state
+
+    /// Aktif durumu ayarla
     pub fn set_active(&mut self, active: bool) {
         self.active = active;
     }
-    
-    /// Set badge count
+
+    /// Bildirim rozeti sayısını ayarla (0 = gizle)
     pub fn set_badge(&mut self, count: u32) {
         self.badge_count = count;
     }
-    
-    /// Set progress
+
+    /// İlerleme çubuğu değerini ayarla (0.0 - 1.0)
     pub fn set_progress(&mut self, progress: f32) {
         self.progress = progress.max(0.0).min(1.0);
     }
-    
-    /// Check if point is inside button
+
+    /// Verilen koordinatın düğme içinde olup olmadığını kontrol et
     pub fn hit_test(&self, x: i32, y: i32) -> bool {
         x >= self.x as i32 && x < (self.x + self.width) as i32
             && y >= self.y as i32 && y < (self.y + self.height) as i32
     }
-    
-    /// Get bounds
+
+    /// Düğme sınırlarını döndür
     pub fn bounds(&self) -> Rect {
         Rect::new(self.x as i32, self.y as i32, self.width as i32, self.height as i32)
     }
-    
-    /// Draw the button
+
+    /// Düğmeyi çiz.
+    ///
+    /// Çizim katmanları (altan üste):
+    /// 1. Yuvarlak köşeli arka plan (durum rengine göre)
+    /// 2. Simge (merkeze hizalanmış)
+    /// 3. Aktif göstergesi (alt alt çizgi)
+    /// 4. İlerleme çubuğu (alt şerit)
+    /// 5. Bildirim rozeti (üst sağ)
     pub fn draw(&self, fb: &mut Framebuffer, fb_width: usize, fb_height: usize) {
         let x = self.x;
         let y = fb_height - TASKBAR_HEIGHT + self.y;
-        
-        // Draw background
+
+        // Arka plan rengi: basılı/hover → BUTTON_HOVER, aktif → ACCENT, normal → saydam
         let bg_color = if self.pressed {
             Theme::BUTTON_HOVER.to_u32()
         } else if self.hovered {
@@ -242,47 +287,47 @@ impl TaskbarButton {
         } else {
             Theme::TRANSPARENT.to_u32()
         };
-        
-        // Draw rounded rectangle background
+
+        // Yuvarlak köşeli dikdörtgen ile arka planı çiz
         self.draw_rounded_rect(fb, x, y, self.width, self.height, 4, bg_color);
-        
-        // Draw icon
+
+        // Simgeyi merkeze hizalayarak çiz
         let icon_x = x + (self.width - ICON_SIZE) / 2;
         let icon_y = y + (self.height - ICON_SIZE) / 2;
         self.draw_icon(fb, icon_x, icon_y, ICON_SIZE);
-        
-        // Draw active indicator (underline)
+
+        // Aktif pencere göstergesi: alt kısımda accent renkli şerit
         if self.active {
             let indicator_y = y + self.height - 3;
             let indicator_width = self.width / 2;
             let indicator_x = x + (self.width - indicator_width) / 2;
-            
+
             fb.draw_rect(
                 indicator_x, indicator_y,
                 indicator_width, 3,
                 Theme::ACCENT_PRIMARY.to_u32()
             );
         }
-        
-        // Draw progress bar
+
+        // İlerleme çubuğu (düğme altında ince şerit)
         if self.progress > 0.0 {
             let progress_width = (self.width as f32 * self.progress) as usize;
             let progress_y = y + self.height - 2;
-            
+
             fb.draw_rect(
                 x, progress_y,
                 progress_width, 2,
                 Theme::ACCENT_PRIMARY.to_u32()
             );
         }
-        
-        // Draw badge
+
+        // Bildirim rozeti (kırmızı daire, üst sağ köşe)
         if self.badge_count > 0 {
             let badge_x = x + self.width - 16;
             let badge_y = y + 4;
             let badge_radius = 8;
-            
-            // Badge background
+
+            // Daire dolgusu (Pisagor mesafe formülüyle)
             for py in 0..badge_radius * 2 {
                 for px in 0..badge_radius * 2 {
                     let dx = px as i32 - badge_radius as i32;
@@ -292,8 +337,8 @@ impl TaskbarButton {
                     }
                 }
             }
-            
-            // Badge text (simplified - just show count)
+
+            // Rozet sayısı metni
             if self.badge_count < 10 {
                 let digit = char::from(b'0' + self.badge_count as u8);
                 fb.draw_char(badge_x + 3, badge_y + 2, digit, Theme::TEXT_ON_ACCENT.to_u32());
@@ -302,8 +347,9 @@ impl TaskbarButton {
             }
         }
     }
-    
-    /// Draw rounded rectangle
+
+    /// Yuvarlak köşeli dikdörtgen çiz.
+    /// Merkez dikdörtgen + 4 köşe daire (radius yarıçaplı) birleştirilir.
     fn draw_rounded_rect(
         &self,
         fb: &mut Framebuffer,
@@ -312,69 +358,69 @@ impl TaskbarButton {
         radius: usize,
         color: u32,
     ) {
-        // Draw main rectangle
+        // Merkez dikdörtgenler (yatay ve dikey)
         fb.draw_rect(x + radius, y, width - radius * 2, height, color);
         fb.draw_rect(x, y + radius, width, height - radius * 2, color);
-        
-        // Draw corners (circle approximation)
+
+        // Dört köşe (daire çeyreği)
         for py in 0..radius {
             for px in 0..radius {
                 let dx = px as i32 - radius as i32;
                 let dy = py as i32 - radius as i32;
-                
+
                 if dx * dx + dy * dy <= (radius * radius) as i32 {
-                    // Top-left
+                    // Sol üst köşe
                     fb.plot_pixel(x + px, y + py, color);
-                    // Top-right
+                    // Sağ üst köşe
                     fb.plot_pixel(x + width - radius + px, y + py, color);
-                    // Bottom-left
+                    // Sol alt köşe
                     fb.plot_pixel(x + px, y + height - radius + py, color);
-                    // Bottom-right
+                    // Sağ alt köşe
                     fb.plot_pixel(x + width - radius + px, y + height - radius + py, color);
                 }
             }
         }
     }
-    
-    /// Draw icon
+
+    /// Simgeyi çiz. Her `IconType` için piksel bazlı vektörel simge çizimi yapılır.
     fn draw_icon(&self, fb: &mut Framebuffer, x: usize, y: usize, size: usize) {
         let color = Theme::TEXT_PRIMARY.to_u32();
         let accent = Theme::ACCENT_PRIMARY.to_u32();
-        
+
         match self.icon_type {
             IconType::Start => {
-                // Draw start icon (grid of 4 squares)
+                // 4 kareli Windows/echOS başlat simgesi
                 let square_size = size / 3;
                 let gap = 2;
-                
-                // Top-left
+
+                // Sol üst (accent)
                 fb.draw_rect(x + gap, y + gap, square_size - gap, square_size - gap, accent);
-                // Top-right
+                // Sağ üst (normal)
                 fb.draw_rect(x + square_size + gap, y + gap, square_size - gap, square_size - gap, color);
-                // Bottom-left
+                // Sol alt (normal)
                 fb.draw_rect(x + gap, y + square_size + gap, square_size - gap, square_size - gap, color);
-                // Bottom-right
+                // Sağ alt (accent)
                 fb.draw_rect(x + square_size + gap, y + square_size + gap, square_size - gap, square_size - gap, accent);
             }
-            
+
             IconType::Search => {
-                // Draw search icon (magnifying glass)
+                // Büyüteç simgesi: daire + sap
                 let center = size / 3;
                 let radius = size / 4;
-                
-                // Circle
+
+                // Dairenin dış çerçevesi (2px kalınlık)
                 for py in 0..size {
                     for px in 0..size {
                         let dx = px as i32 - center as i32;
                         let dy = py as i32 - center as i32;
-                        if dx * dx + dy * dy <= (radius * radius) as i32 
+                        if dx * dx + dy * dy <= (radius * radius) as i32
                             && dx * dx + dy * dy > ((radius - 2) * (radius - 2)) as i32 {
                             fb.plot_pixel(x + px, y + py, color);
                         }
                     }
                 }
-                
-                // Handle
+
+                // Sap (çapraz çizgi)
                 let handle_x = x + center + radius / 2;
                 let handle_y = y + center + radius / 2;
                 for i in 0..(size / 3) {
@@ -382,42 +428,43 @@ impl TaskbarButton {
                     fb.plot_pixel(handle_x + i + 1, handle_y + i, color);
                 }
             }
-            
+
             IconType::TaskView => {
-                // Draw task view icon (two overlapping rectangles)
+                // Görev görünümü: üst üste iki dikdörtgen
                 let rect_w = size / 2;
                 let rect_h = size / 2;
-                
+
                 fb.draw_rect(x + 2, y + 2, rect_w - 2, rect_h - 2, color);
                 fb.draw_rect(x + size / 3, y + size / 3, rect_w - 2, rect_h - 2, accent);
             }
-            
+
             IconType::FileExplorer => {
-                // Draw folder icon
+                // Klasör simgesi: sekme + ana gövde
                 let tab_h = size / 4;
                 fb.draw_rect(x + 2, y + 2, size / 2, tab_h, 0xFFC107);
                 fb.draw_rect(x + 2, y + tab_h, size - 4, size - tab_h - 2, 0xFFC107);
             }
-            
+
             IconType::Settings => {
-                // Draw gear icon
+                // Dişli simgesi: 8 diş + merkez daire
                 let center = size / 2;
                 let outer_r = size / 3;
                 let inner_r = size / 6;
-                
+
+                // 8 adet eşit açıyla dağılmış dişler
                 for angle in 0..8 {
                     let a = angle as f32 * core::f32::consts::PI / 4.0;
                     let tooth_x = x as i32 + center as i32 + (cosf(a) * outer_r as f32) as i32;
                     let tooth_y = y as i32 + center as i32 + (sinf(a) * outer_r as f32) as i32;
-                    
+
                     fb.draw_rect(
                         (tooth_x - 2).max(0) as usize,
                         (tooth_y - 2).max(0) as usize,
                         4, 4, color
                     );
                 }
-                
-                // Center circle
+
+                // Merkez dolu daire
                 for py in 0..size {
                     for px in 0..size {
                         let dx = px as i32 - center as i32;
@@ -428,45 +475,45 @@ impl TaskbarButton {
                     }
                 }
             }
-            
+
             IconType::Terminal => {
-                // Draw terminal icon
+                // Terminal simgesi: koyu arka plan + prompt
                 fb.draw_rect(x + 2, y + 2, size - 4, size - 4, 0x1E1E1E);
-                
-                // Prompt
+                // ">_" terminal imleci
                 fb.draw_string(x + 4, y + 6, ">_", color);
             }
-            
+
             IconType::Browser => {
-                // Draw globe icon
+                // Tarayıcı simgesi: dünya küresi (daire + yatay/dikey çizgiler)
                 let center = size / 2;
                 let radius = size / 3;
-                
+
+                // Dış çerçeve
                 for py in 0..size {
                     for px in 0..size {
                         let dx = px as i32 - center as i32;
                         let dy = py as i32 - center as i32;
-                        if dx * dx + dy * dy <= (radius * radius) as i32 
+                        if dx * dx + dy * dy <= (radius * radius) as i32
                             && dx * dx + dy * dy > ((radius - 2) * (radius - 2)) as i32 {
                             fb.plot_pixel(x + px, y + py, accent);
                         }
                     }
                 }
-                
-                // Horizontal and vertical lines
+
+                // Ekvatör ve meridyen çizgileri
                 for i in 0..(radius * 2) {
                     fb.plot_pixel(x + center - radius + i, y + center, accent);
                     fb.plot_pixel(x + center, y + center - radius + i, accent);
                 }
             }
-            
+
             IconType::Music => {
-                // Draw music note
+                // Müzik notu simgesi: elips baş + dikey sap + bayrak
                 let note_x = x + size / 3;
                 let note_y = y + size / 4;
                 let note_size = size / 4;
-                
-                // Note head
+
+                // Not başı (dolu daire)
                 for py in 0..note_size {
                     for px in 0..note_size {
                         let dx = px as i32 - note_size as i32 / 2;
@@ -476,42 +523,47 @@ impl TaskbarButton {
                         }
                     }
                 }
-                
-                // Stem
+
+                // Dikey sap
                 fb.draw_rect(note_x + note_size - 2, note_y, 2, size / 2, accent);
-                
-                // Flag
+
+                // Bayrak (yatay çizgi)
                 fb.draw_rect(note_x + note_size - 2, note_y, size / 4, 3, accent);
             }
-            
+
             _ => {
-                // Default: colored square
+                // Varsayılan: accent renkli dolu kare
                 fb.draw_rect(x + 4, y + 4, size - 8, size - 8, accent);
             }
         }
     }
-    
-    /// Get button type
+
+    /// Düğme türünü döndür
     pub fn button_type(&self) -> ButtonType {
         self.button_type
     }
-    
-    /// Get ID
+
+    /// Düğme kimliğini döndür
     pub fn id(&self) -> u32 {
         self.id
     }
 }
 
 // ============================================================================
-// SYSTEM TRAY ITEM
+// SİSTEM TEPSİSİ ÖĞESİ (Görev çubuğu içi)
 // ============================================================================
 
-/// System tray item
+/// Görev çubuğunun sağında görünen küçük sistem tepsisi simgesi (16×16)
 pub struct SystemTrayItem {
+    /// Simge kimliği
     id: u32,
+    /// Simge türü
     icon_type: IconType,
+    /// Araç ipucu
     tooltip: String,
+    /// X konumu (hesaplanan)
     x: usize,
+    /// Hover durumu
     hovered: bool,
 }
 
@@ -525,14 +577,14 @@ impl SystemTrayItem {
             hovered: false,
         }
     }
-    
+
+    /// Küçük tepsi simgesini çiz (16×16 piksel)
     pub fn draw(&self, fb: &mut Framebuffer, x: usize, y: usize) {
-        // Draw small icon (16x16)
         let color = Theme::TEXT_PRIMARY.to_u32();
-        
+
         match self.icon_type {
             IconType::Custom(100) => {
-                // WiFi icon
+                // Wi-Fi sinyal çubukları (4 adet, soldan sağa yükselen)
                 let bars = [4, 8, 12, 16];
                 for (i, &bar_h) in bars.iter().enumerate() {
                     let bar_x = x + i * 4;
@@ -541,75 +593,86 @@ impl SystemTrayItem {
                 }
             }
             IconType::Custom(101) => {
-                // Volume icon
+                // Ses hoparlörü simgesi (iki dikdörtgen blok)
                 fb.draw_rect(x + 2, y + 6, 6, 8, color);
                 fb.draw_rect(x + 8, y + 4, 6, 12, color);
             }
             IconType::Custom(102) => {
-                // Battery icon
+                // Pil simgesi (gövde + doluluk + başlık)
                 fb.draw_rect(x + 2, y + 4, 12, 12, color);
                 fb.draw_rect(x + 14, y + 6, 2, 8, color);
-                // Fill level
+                // Doluluk göstergesi (yeşil)
                 fb.draw_rect(x + 4, y + 6, 8, 8, Theme::ACCENT_SUCCESS.to_u32());
             }
             IconType::Custom(103) => {
-                // Network icon
+                // Ağ simgesi (yatay çubuk + dikey bağlantı)
                 fb.draw_rect(x + 2, y + 10, 12, 6, color);
                 fb.draw_rect(x + 6, y + 4, 4, 6, color);
             }
             _ => {
-                // Default icon
+                // Varsayılan: dolu kare
                 fb.draw_rect(x + 2, y + 2, 12, 12, color);
             }
         }
     }
-    
+
+    /// Verilen koordinatın bu simge üzerinde olup olmadığını kontrol et
     pub fn hit_test(&self, mx: i32, my: i32, x: usize, y: usize) -> bool {
         mx >= x as i32 && mx < (x + 16) as i32 && my >= y as i32 && my < (y + 16) as i32
     }
 }
 
 // ============================================================================
-// ENHANCED TASKBAR
+// GELİŞMİŞ GÖREV ÇUBUĞU
 // ============================================================================
 
-/// Enhanced taskbar with all features
+/// Tüm özellikleri barındıran gelişmiş görev çubuğu.
+///
+/// ## Otomatik Gizleme (auto_hide)
+/// Görev çubuğu, fare ekranın alt kenarına yaklaşınca ortaya çıkar.
+/// Fare uzaklaştığında gizlenir. `visible` bayrağı ve `draw()`
+/// birlikte kullanılarak animasyonsuz gösterme/gizleme yapılır.
 pub struct EnhancedTaskbar {
-    /// Taskbar position
+    /// Görev çubuğu konumu
     position: TaskbarPosition,
-    /// Height
+    /// Yükseklik (piksel)
     height: usize,
-    /// Width (screen width)
+    /// Genişlik (ekran genişliği)
     width: usize,
-    /// Left buttons (start, search, task view, pinned apps)
+    /// Sol düğmeler: Başlat, Ara, Görev Görünümü, Sabitlenmiş uygulamalar
     left_buttons: Vec<TaskbarButton>,
-    /// Center buttons (running apps)
+    /// Orta düğmeler: Çalışan uygulama pencereleri
     center_buttons: Vec<TaskbarButton>,
-    /// System tray items
+    /// Sistem tepsisi simgeleri
     system_tray: Vec<SystemTrayItem>,
-    /// Clock string
+    /// Saat metni (HH:MM)
     clock_string: String,
-    /// Date string
+    /// Tarih metni (Ay GG)
     date_string: String,
-    /// Next button ID
+    /// Sonraki düğme kimliği (otomatik artırılan sayaç)
     next_id: u32,
-    /// Hovered button
+    /// Üzerine gelinen düğme kimliği
     hovered_button: Option<u32>,
-    /// Pressed button
+    /// Basılı tutulan düğme kimliği
     pressed_button: Option<u32>,
-    /// Auto-hide enabled
+    /// Otomatik gizleme etkin mi
     auto_hide: bool,
-    /// Is visible (for auto-hide)
+    /// Görünür mü (otomatik gizleme için)
     visible: bool,
-    /// Last mouse position
+    /// Son fare konumu
     last_mouse: (i32, i32),
 }
 
+/// Görev çubuğu konumu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskbarPosition {
+    /// Ekranın alt kısmı (varsayılan)
     Bottom,
+    /// Ekranın üst kısmı
     Top,
+    /// Ekranın sol kısmı
     Left,
+    /// Ekranın sağ kısmı
     Right,
 }
 
@@ -631,58 +694,58 @@ impl EnhancedTaskbar {
             visible: true,
             last_mouse: (0, 0),
         };
-        
-        // Add default buttons
+
+        // Varsayılan düğmeleri ekle
         taskbar.add_default_buttons();
-        
-        // Add default system tray
+
+        // Varsayılan sistem tepsisini ekle
         taskbar.add_default_tray();
-        
+
         taskbar
     }
-    
-    /// Add default buttons
+
+    /// Sol bölüme varsayılan düğmeleri ekle (Başlat, Ara, Görev, Sabitlenmiş uygulamalar)
     fn add_default_buttons(&mut self) {
         let mut x = SPACING;
-        
-        // Start button
+
+        // Başlat düğmesi
         self.left_buttons.push(TaskbarButton::start(self.next_id, x));
         self.next_id += 1;
         x += BUTTON_WIDTH + SPACING;
-        
-        // Search button
+
+        // Arama düğmesi
         self.left_buttons.push(TaskbarButton::search(self.next_id, x));
         self.next_id += 1;
         x += BUTTON_WIDTH + SPACING;
-        
-        // Task view button
+
+        // Görev görünümü düğmesi
         self.left_buttons.push(TaskbarButton::new(self.next_id, ButtonType::TaskView, x));
         self.next_id += 1;
         x += BUTTON_WIDTH + SPACING;
-        
-        // Pinned apps
+
+        // Sabitlenmiş uygulamalar
         let pinned_apps = [
             (IconType::FileExplorer, "File Explorer"),
             (IconType::Browser, "Browser"),
             (IconType::Terminal, "Terminal"),
             (IconType::Settings, "Settings"),
         ];
-        
+
         for (icon, tooltip) in pinned_apps {
             self.left_buttons.push(TaskbarButton::pinned_app(self.next_id, x, icon, tooltip));
             self.next_id += 1;
             x += BUTTON_WIDTH + SPACING;
         }
     }
-    
-    /// Add default system tray items
+
+    /// Varsayılan sistem tepsisi öğelerini ekle (Ağ, Ses, Pil)
     fn add_default_tray(&mut self) {
         self.system_tray.push(SystemTrayItem::new(100, IconType::Custom(100), "Network"));
         self.system_tray.push(SystemTrayItem::new(101, IconType::Custom(101), "Volume"));
         self.system_tray.push(SystemTrayItem::new(102, IconType::Custom(102), "Battery"));
     }
-    
-    /// Add running app
+
+    /// Çalışan uygulamayı orta bölüme ekle. Düğme kimliğini döndürür.
     pub fn add_running_app(&mut self, icon: IconType, tooltip: &str, active: bool) -> u32 {
         let x = self.center_buttons.len() * (BUTTON_WIDTH + SPACING);
         let button = TaskbarButton::running_app(self.next_id, x, icon, tooltip, active);
@@ -690,32 +753,32 @@ impl EnhancedTaskbar {
         self.next_id += 1;
         self.next_id - 1
     }
-    
-    /// Remove running app
+
+    /// Çalışan uygulamayı kimliğe göre kaldır. Sonraki düğmelerin konumlarını yeniden hesaplar.
     pub fn remove_running_app(&mut self, id: u32) {
         self.center_buttons.retain(|b| b.id != id);
-        // Recalculate positions
+        // Kaldırılan düğme sonrasındaki konumları güncelle
         for (i, button) in self.center_buttons.iter_mut().enumerate() {
             button.x = i * (BUTTON_WIDTH + SPACING);
         }
     }
-    
-    /// Update clock
+
+    /// Saati ve tarihi güncelle (görev çubuğu sağ kısmında gösterilir)
     pub fn update_clock(&mut self, hours: u8, minutes: u8, month: u8, day: u8) {
         self.clock_string = format!("{:02}:{:02}", hours, minutes);
-        
-        let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+
+        let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
         if month > 0 && month <= 12 {
             self.date_string = format!("{} {}", month_names[(month - 1) as usize], day);
         }
     }
-    
-    /// Handle mouse move
+
+    /// Fare hareketi işle. Otomatik gizleme ve hover durumlarını günceller.
     pub fn on_mouse_move(&mut self, x: i32, y: i32, fb_height: usize) -> TaskbarEvent {
         self.last_mouse = (x, y);
-        
-        // Check auto-hide
+
+        // Otomatik gizleme kontrolü
         if self.auto_hide {
             let taskbar_y = fb_height as i32 - self.height as i32;
             if y >= taskbar_y {
@@ -724,14 +787,14 @@ impl EnhancedTaskbar {
                 self.visible = false;
             }
         }
-        
-        // Check button hover
+
+        // Düğme hover durumlarını güncelle
         let mut found_hover = false;
-        
+
         for button in self.left_buttons.iter_mut() {
             let was_hovered = button.hovered;
             button.hovered = button.hit_test(x, y);
-            
+
             if button.hovered && !was_hovered {
                 self.hovered_button = Some(button.id);
                 return TaskbarEvent::ButtonHovered(button.id, button.tooltip.clone());
@@ -740,11 +803,11 @@ impl EnhancedTaskbar {
                 found_hover = true;
             }
         }
-        
+
         for button in self.center_buttons.iter_mut() {
             let was_hovered = button.hovered;
             button.hovered = button.hit_test(x, y);
-            
+
             if button.hovered && !was_hovered {
                 self.hovered_button = Some(button.id);
                 return TaskbarEvent::ButtonHovered(button.id, button.tooltip.clone());
@@ -753,22 +816,22 @@ impl EnhancedTaskbar {
                 found_hover = true;
             }
         }
-        
+
         if !found_hover {
             self.hovered_button = None;
         }
-        
+
         TaskbarEvent::None
     }
-    
-    /// Handle mouse down
+
+    /// Fare sol tuşu basış işle. İlgili düğme türüne göre olay döndürür.
     pub fn on_mouse_down(&mut self, x: i32, y: i32) -> TaskbarEvent {
-        // Check left buttons
+        // Sol düğmeleri kontrol et
         for button in self.left_buttons.iter_mut() {
             if button.hit_test(x, y) {
                 button.pressed = true;
                 self.pressed_button = Some(button.id);
-                
+
                 return match button.button_type {
                     ButtonType::Start => TaskbarEvent::StartMenuRequested,
                     ButtonType::Search => TaskbarEvent::SearchRequested,
@@ -778,8 +841,8 @@ impl EnhancedTaskbar {
                 };
             }
         }
-        
-        // Check center buttons (running apps)
+
+        // Orta düğmeleri (çalışan uygulamalar) kontrol et
         for button in self.center_buttons.iter_mut() {
             if button.hit_test(x, y) {
                 button.pressed = true;
@@ -787,8 +850,8 @@ impl EnhancedTaskbar {
                 return TaskbarEvent::WindowActivated(button.id);
             }
         }
-        
-        // Check system tray
+
+        // Sistem tepsisini kontrol et
         let tray_x = self.width - 100;
         let tray_y = y as usize;
         for item in &self.system_tray {
@@ -796,11 +859,11 @@ impl EnhancedTaskbar {
                 return TaskbarEvent::TrayItemClicked(item.id);
             }
         }
-        
+
         TaskbarEvent::None
     }
-    
-    /// Handle mouse up
+
+    /// Fare sol tuşu bırakış işle. Tüm düğmelerin basılı durumunu sıfırla.
     pub fn on_mouse_up(&mut self) {
         for button in self.left_buttons.iter_mut() {
             button.pressed = false;
@@ -810,59 +873,60 @@ impl EnhancedTaskbar {
         }
         self.pressed_button = None;
     }
-    
-    /// Draw the taskbar
+
+    /// Görev çubuğunu çiz.
+    /// Arka plan → sol düğmeler → orta düğmeler (ortalanmış) → sistem tepsisi → saat sırası.
     pub fn draw(&self, fb: &mut Framebuffer) {
         if !self.visible {
             return;
         }
-        
+
         let y = fb.height - self.height;
-        
-        // Draw background
+
+        // Arka plan
         fb.draw_rect(0, y, self.width, self.height, Theme::TASKBAR_BG.to_u32());
-        
-        // Draw top border
+
+        // Üst kenarlık çizgisi
         fb.draw_rect(0, y, self.width, 1, Theme::BORDER.to_u32());
-        
-        // Draw left buttons
+
+        // Sol düğmeleri çiz
         for button in &self.left_buttons {
             button.draw(fb, self.width, fb.height);
         }
-        
-        // Draw center buttons (running apps)
+
+        // Orta düğmeleri ekranda yatayda ortala
         let center_start = self.width / 2 - (self.center_buttons.len() * (BUTTON_WIDTH + SPACING)) / 2;
         for (i, button) in self.center_buttons.iter().enumerate() {
             let mut btn = button.clone();
             btn.x = center_start + i * (BUTTON_WIDTH + SPACING);
             btn.draw(fb, self.width, fb.height);
         }
-        
-        // Draw system tray
+
+        // Sistem tepsisi simgelerini sağdan sola çiz
         let mut tray_x = self.width - 16;
         for item in self.system_tray.iter().rev() {
             item.draw(fb, tray_x, y + (self.height - 16) / 2);
             tray_x -= 20;
         }
-        
-        // Draw clock and date
+
+        // Saat ve tarih metni
         let clock_x = self.width - 100;
         let clock_y = y + 8;
-        
+
         fb.draw_string(clock_x, clock_y, &self.clock_string, Theme::TEXT_PRIMARY.to_u32());
         fb.draw_string(clock_x, clock_y + 14, &self.date_string, Theme::TEXT_SECONDARY.to_u32());
-        
-        // Draw show desktop button (far right)
+
+        // Masaüstünü göster düğmesi (en sağda ince şerit)
         let desktop_btn_x = self.width - 4;
         fb.draw_rect(desktop_btn_x, y + 4, 2, self.height - 8, Theme::BORDER.to_u32());
     }
-    
-    /// Resize taskbar
+
+    /// Görev çubuğu genişliğini güncelle (ekran yeniden boyutlandırma)
     pub fn resize(&mut self, width: usize) {
         self.width = width;
     }
-    
-    /// Get height
+
+    /// Görünür yüksekliği döndür. Otomatik gizleme aktifse gizliyken 0 döner.
     pub fn height(&self) -> usize {
         if self.visible {
             self.height
@@ -870,48 +934,59 @@ impl EnhancedTaskbar {
             0
         }
     }
-    
-    /// Set auto-hide
+
+    /// Otomatik gizlemeyi etkinleştir/devre dışı bırak
     pub fn set_auto_hide(&mut self, enabled: bool) {
         self.auto_hide = enabled;
     }
-    
-    /// Get running app button by ID
+
+    /// Kimliğe göre çalışan uygulama düğmesini döndür (badge/progress güncelleme için)
     pub fn get_app_button(&mut self, id: u32) -> Option<&mut TaskbarButton> {
         self.center_buttons.iter_mut().find(|b| b.id == id)
     }
 }
 
-/// Events from taskbar
+/// Görev çubuğundan yayılan olaylar
 #[derive(Clone, Debug)]
 pub enum TaskbarEvent {
+    /// Olay yok
     None,
+    /// Genel düğme tıklaması
     ButtonPressed(u32),
+    /// Düğme üzerine gelinidi (araç ipucu gösterimi için)
     ButtonHovered(u32, String),
+    /// Başlat menüsü açılması istendi
     StartMenuRequested,
+    /// Arama (Spotlight) açılması istendi
     SearchRequested,
+    /// Görev görünümü açılması istendi
     TaskViewRequested,
+    /// Sabitlenmiş uygulama başlatılması istendi
     AppLaunched(IconType),
+    /// Çalışan uygulama penceresi etkinleştirilmeli
     WindowActivated(u32),
+    /// Sistem tepsisi simgesine tıklandı
     TrayItemClicked(u32),
 }
 
 // ============================================================================
-// GLOBAL TASKBAR
+// GLOBAL GÖREV ÇUBUĞU (Spin Mutex Singleton)
 // ============================================================================
 
 lazy_static::lazy_static! {
+    /// `spin::Mutex` ile korunan global görev çubuğu örneği.
+    /// Çekirdek modunda tek bir görev çubuğuna global erişim sağlar.
     static ref TASKBAR: Mutex<EnhancedTaskbar> = Mutex::new(EnhancedTaskbar::new(1920));
 }
 
-/// Initialize taskbar
+/// Görev çubuğunu başlat (ekran genişliğini ayarla)
 pub fn init(width: usize) {
     let mut taskbar = TASKBAR.lock();
     taskbar.resize(width);
     crate::serial_println!("[GUI] Taskbar initialized ({}px wide)", width);
 }
 
-/// Get taskbar
+/// Global görev çubuğuna erişim sağla
 pub fn get() -> &'static Mutex<EnhancedTaskbar> {
     &TASKBAR
 }

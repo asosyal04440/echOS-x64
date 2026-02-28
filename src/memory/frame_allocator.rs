@@ -1,10 +1,51 @@
 #![cfg(not(target_os = "uefi"))]
-//! Multiboot2 tabanlı fiziksel frame allocator.
+//! # Multiboot2 / Limine Fiziksel Frame Ayırıcısı
 //!
-//! Bu allocator yalnızca ileri doğru büyüyen, basit bir tahsis stratejisi uygular.
-//! Amaç: Multiboot2 bellek haritasından güvenli frame dağıtımı yapmak.
+//! Kernel önyükleme aşamasına özel, basit bir ileri-doğru büyüyen (bump) ayırıcı.
 //!
-//! Not: Serbest bırakma (deallocation) desteklenmiyor; kernel bootstrap evresi için yeterlidir.
+//! ## Neden Bump Ayırıcı?
+//!
+//! Kernel başlarken henüz yığın (heap) veya PMM hazır değildir.
+//! Bu aşamada yalnızca sıralı frame tahsis yeterlidir:
+//!
+//! ```
+//! Multiboot2 Bellek Haritası:
+//!
+//!  [Bölge 1: Available] → [Bölge 2: Reserved] → [Bölge 3: Available] → ...
+//!
+//!  next_frame işaretçisi ileri doğru ilerler:
+//!
+//!  │ frame[0] │ frame[1] │ frame[2] │ frame[3] │ ... │
+//!  │ kernel   │ kernel   │ ← next_frame         │
+//!
+//!  Tahsis: next_frame alınır, next_frame += FRAME_SIZE
+//!  Serbest bırakma: DESTEKLENMIYOR (bootstrap fazı için gereksiz)
+//! ```
+//!
+//! ## Kernel Fiziksel Aralık Koruması
+//!
+//! Kernel'in kendi fiziksel adresleri tahsis edilmemelidir.
+//! Linker sembolleri `kernel_start` ve `kernel_end` (KASLR offset düzeltmeli)
+//! bu aralığı tanımlar; ayırıcı bu aralığı otomatik olarak atlar:
+//!
+//! ```
+//! [0x0000 ... kernel_start_phys ... kernel_end_phys ... RAM_END]
+//!                    │                     │
+//!                    └─── bu aralığı atla──┘
+//! ```
+//!
+//! ## Multiboot2 vs UEFI Karşılaştırması
+//!
+//! | Özellik              | Multiboot2FrameAllocator | MemoryManager (UEFI)        |
+//! |----------------------|--------------------------|-----------------------------|
+//! | Bellek haritası      | Multiboot2 tag            | UEFI MemoryMap              |
+//! | Serbest bırakma      | Yok (bump)               | FibonacciPmm üzerinden var  |
+//! | Zone desteği         | Yok                       | ZONE_DMA/DMA32/NORMAL       |
+//! | Kullanım amacı       | Bootstrap / Multiboot2   | Ana kernel (UEFI)           |
+//!
+//! ## İlgili Modüller:
+//! - `fibonacci_pmm.rs`: UEFI ortamlarında kullanılan zone tabanlı PMM
+//! - `mod.rs`: Global memory manager; `set_global_mb2_frame_allocator()` ile kaydedilir
 
 use alloc::vec::Vec;
 use multiboot2::{BootInformation, MemoryAreaType};

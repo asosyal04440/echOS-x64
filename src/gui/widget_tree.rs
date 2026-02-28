@@ -1,7 +1,8 @@
 //! # Tutulumlu Mod Widget Ağacı
 //!
 //! Kirlilik takibiyle verimli widget yönetimi.
-//! Yalnızca değişen widget'ları yeniden çizer.
+//! Yalnızca değişen widget'ları yeniden çizer; değişmeyenlere dokunulmaz.
+//! Bu yaklaşım çerçeve başına gereksiz yeniden çizimi engeller ve CPU/GPU kullanımını azaltır.
 //!
 //! ## Mimari
 //! - `WidgetId`: Her widget için benzersiz 64-bit tanımlayıcı
@@ -15,6 +16,11 @@
 //! 2. `render()` yalnızca kirli widget'ları z-index sırasına göre render eder
 //! 3. Render sonrası içerik karması (`compute_hash`) güncellenir
 //! 4. Bir son kez render kuyruğu ve kirli küme temizlenir
+//!
+//! ## Ağaç Yapısı Hakkında
+//! Widget'lar ebeveyn-çocuk ilişkisiyle bir ağaç oluşturur. Kök widget (ROOT) tüm ekranı kaplar.
+//! Her widget kendi `WidgetId`'si üzerinden O(log n) hızında BTreeMap ile erişilebilir.
+//! Z-index; hangi widget'ın üstte görüneceğini, tıklama testlerinde öncelik sırasını belirler.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -31,7 +37,10 @@ use crate::gop::framebuffer::Framebuffer;
 // WIDGET KİMLİĞİ
 // ============================================================================
 
-/// Benzersiz widget tanımlayıcısı
+/// Benzersiz widget tanımlayıcısı.
+/// u64 kullanılır çünkü milyonlarca widget oluşturulsa bile taşma (overflow) yaşanmaz.
+/// `WidgetId(0)` değeri özel anlamla ayrılmıştır: kök (root) widget.
+/// BTreeMap ve BTreeSet sıralama desteği için `Ord` türetilmiştir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WidgetId(pub u64);
 
@@ -51,7 +60,11 @@ impl WidgetId {
 // WIDGET DÜĞÜMÜ
 // ============================================================================
 
-/// Widget ağacındaki düğüm
+/// Widget ağacındaki düğüm.
+/// Her düğüm; kimliğini, ebeveynini, çocuklarını, gerçek widget nesnesini
+/// ve render/yerleşim durumunu bir arada tutar.
+/// `Box<dyn Widget>` — çalışma zamanında farklı widget türleri (Button, Label vb.)
+/// aynı slot içinde saklanabilsin diye dinamik dispatch (vtable) kullanılır.
 pub struct WidgetNode {
     /// Benzersiz kimlik
     pub id: WidgetId,
@@ -97,7 +110,11 @@ impl WidgetNode {
         }
     }
 
-    /// Değişim tespiti için içerik karmasını hesapla
+    /// Değişim tespiti için içerik karmasını hesapla.
+    /// Polynomial rolling hash yöntemi kullanılır: her alan 31 ile çarpılıp eklenir.
+    /// Sonuç `content_hash` alanına kaydedilir; bir sonraki karede bu değer
+    /// eski karmayla karşılaştırılarak widget'ın değişip değişmediği anlaşılır.
+    /// Standart Rust `Hash` trait'i yerine `wrapping_mul/add` (taşmaya karşı güvenli) kullanılır.
     pub fn compute_hash(&mut self) {
         // Sınırları/durumu temel alan basit manual karma
         let mut hash = 0u64;
@@ -121,7 +138,15 @@ impl WidgetNode {
 // WIDGET AĞACI
 // ============================================================================
 
-/// Ana widget ağacı yapısı
+/// Ana widget ağacı yapısı.
+/// Tüm widget'ların yaşam döngüsünü (oluşturma, güncelleme, kaldırma) ve
+/// render hattını (kirlilik kontrolü → yerleşim → çizim) yönetir.
+///
+/// Veri yapıları:
+/// - `BTreeMap<WidgetId, WidgetNode>`: kimlikten düğüme O(log n) erişim
+/// - `BTreeSet<WidgetId>`: kirli widget kümesi (kopyadan kaçınmak için set tercih edilir)
+/// - `VecDeque<WidgetId>`: FIFO yerleşim kuyruğu (sıralı işleme için deque)
+/// - `Vec<WidgetId>`: render kuyruğu (z-index'e göre sıralanabilir dinamik dizi)
 pub struct WidgetTree {
     /// Tüm widget düğümleri
     nodes: BTreeMap<WidgetId, WidgetNode>,
@@ -324,7 +349,12 @@ impl WidgetTree {
         Some(node.widget.as_mut())
     }
 
-    /// Konumdaki widget'ı bul (hit test)
+    /// Konumdaki widget'ı bul (hit test).
+    /// İki aşamalı strateji kullanır:
+    /// 1. Önbellek (hover_cache): aynı koordinat tekrar sorgulanırsa O(1) cevap verir.
+    /// 2. Doğrusal tarama: z-index tabanlı; en yüksek z-index'li (en üstteki) widget kazanır.
+    /// Not: Daha büyük widget hiyerarşilerinde BVH (Bounding Volume Hierarchy) gibi
+    /// uzamsal veri yapıları kullanmak performansı iyileştirebilir.
     pub fn hit_test(&self, x: i32, y: i32) -> Option<WidgetId> {
         // Önce önbelleği kontrol et
         if let Some(&id) = self.hover_cache.get(&(x, y)) {

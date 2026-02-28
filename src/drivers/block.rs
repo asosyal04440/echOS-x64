@@ -1,80 +1,104 @@
-//! # Block Device Abstraction
+//! # Blok Aygıt Soyutlaması
 //!
-//! Generic block device interface for storage drivers
+//! Depolama sürücüleri için genel blok aygıt arayüzü.
+//!
+//! ## Blok Aygıt Katmanı
+//!
+//! ```
+//!  Dosya Sistemi (ext2, FAT32...)
+//!         |
+//!  BlockDevice trait  <--- Soyut arayüz
+//!         |
+//!  +------+--------+----------+
+//!  |      |        |          |
+//! ATA   NVMe    Virtio    USB-MSC
+//! (HDD) (SSD)  (Sanal)   (Bellek)
+//! ```
+//!
+//! - Tüm depolama sürücüleri `BlockDevice` trait'ini uygular.
+//! - Dosya sistemi katmanı doğrudan sürücüyle değil, bu soyut arayüzle çalışır.
+//! - `lba`: Mantıksal Blok Adresi — her blok genellikle 512 bayttır.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
 
-/// Block device error types
+/// Blok aygıtı hata türleri.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockDeviceError {
-    /// Device not found
+    /// Aygıt bulunamadı
     DeviceNotFound,
-    /// I/O error
+    /// Giriş/Çıkış hatası
     IoError,
-    /// Invalid sector
+    /// Geçersiz sektör numarası
     InvalidSector,
-    /// Device busy
+    /// Aygıt meşgul
     DeviceBusy,
-    /// Write protected
+    /// Yazma korumalı
     WriteProtected,
-    /// Timeout
+    /// İşlem zaman aşımına uğradı
     Timeout,
-    /// Unknown error
+    /// Bilinmeyen hata
     Unknown,
 }
 
-/// Block device type
+/// Blok aygıt türü.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockDeviceType {
-    /// Hard disk drive
+    /// Sabit disk sürücüsü (manyetik)
     Hdd,
-    /// Solid state drive
+    /// Katı hal disk (flaş bellek)
     Ssd,
-    /// USB mass storage
+    /// USB yığın depolama
     Usb,
-    /// Virtual disk (virtio, etc.)
+    /// Sanal disk (virtio, vb.)
     Virtual,
-    /// CD/DVD drive
+    /// CD/DVD optik sürücü
     Optical,
-    /// NVMe drive
+    /// NVMe PCIe SSD sürücüsü
     Nvme,
-    /// Unknown type
+    /// Bilinmeyen tür
     Unknown,
 }
 
-/// Block device trait
+/// Blok aygıtı trait'i.
+///
+/// Depolama sürücülerinin uygulaması gereken soyut arayüz.
+/// Dosya sistemi katmanı bu arayüz üzerinden tüm depolama aygıtlarına erişir.
+///
+/// # Güvenli Olmayan İşlemler
+/// `read_block`/`write_block` düşük seviyeli ham I/O yapar;
+/// doğru LBA değerleri çağıranın sorumluluğundadır.
 pub trait BlockDevice: Send {
-    /// Read a single block
+    /// Tek bir bloğu okur.
     fn read_block(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError>;
-    
-    /// Write a single block
+
+    /// Tek bir bloğa yazar.
     fn write_block(&mut self, lba: u64, buffer: &[u8]) -> Result<(), BlockDeviceError>;
-    
-    /// Get block size in bytes
+
+    /// Blok boyutunu bayt cinsinden döndürür (genellikle 512).
     fn block_size(&self) -> u32;
-    
-    /// Get total block count
+
+    /// Toplam blok sayısını döndürür.
     fn block_count(&self) -> u64;
-    
-    /// Get device name
+
+    /// Aygıt adını döndürür.
     fn device_name(&self) -> String;
-    
-    /// Get device type
+
+    /// Aygıt türünü döndürür.
     fn device_type(&self) -> BlockDeviceType;
-    
-    /// Check if device is read-only
+
+    /// Aygıtın salt-okunur olup olmadığını kontrol eder.
     fn is_read_only(&self) -> bool {
         false
     }
-    
-    /// Flush write cache
+
+    /// Yazma önbelleğini temizler (flush).
     fn flush(&mut self) -> Result<(), BlockDeviceError> {
         Ok(())
     }
-    
-    /// Read multiple sectors (convenience method)
+
+    /// Birden fazla sektörü art arda okur (kolaylık metodu).
     fn read_sectors(&mut self, lba: u64, count: u32) -> Result<Vec<u8>, BlockDeviceError> {
         let block_size = self.block_size() as usize;
         let mut buffer = vec![0u8; count as usize * block_size];
@@ -84,8 +108,9 @@ pub trait BlockDevice: Send {
         }
         Ok(buffer)
     }
-    
-    /// Write multiple sectors (convenience method)
+
+    /// Veri tamponunu birden fazla sektöre yazar (kolaylık metodu).
+    /// Veri uzunluğu blok boyutunun tam katı olmalıdır.
     fn write_sectors(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockDeviceError> {
         let block_size = self.block_size() as usize;
         if data.len() % block_size != 0 {
@@ -98,13 +123,13 @@ pub trait BlockDevice: Send {
         }
         Ok(())
     }
-    
-    /// Get device capacity in sectors
+
+    /// Aygıt kapasitesini sektör sayısı olarak döndürür.
     fn capacity(&self) -> u64 {
         self.block_count()
     }
-    
-    /// Get device name as &str
+
+    /// Aygıt adını `&str` olarak döndürür.
     fn name(&self) -> &str {
         "block device"
     }

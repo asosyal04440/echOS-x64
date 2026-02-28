@@ -2,6 +2,19 @@
 //!
 //! Modern file browser with navigation, search, and file operations
 //! Supports multiple view modes and context menus
+//!
+//! Bu modül, dosya sistemi gezginini uygular. Dosya gezgini, işletim
+//! sisteminin dosya hiyerarşisine kullanıcı dostu bir pencere sunar.
+//!
+//! Desteklenen görünüm modları:
+//! - **Icons**: Her dosya büyük simge ve altında ismiyle gösterilir.
+//! - **List**: Dosyalar küçük simgeli tek sütun halinde listelenir.
+//! - **Details**: Ad, boyut, tür ve değiştirilme tarihi sütunlu görünüm.
+//! - **Tiles**: Orta boy simge yanında dosya bilgileri.
+//!
+//! Rust'ta `VecDeque` (çift uçlu kuyruk), gezinme geçmişi gibi
+//! hem baştan hem sondan eleman ekleme/çıkarma gerektiren yapılar için
+//! `Vec`'e kıyasla daha verimlidir.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -18,33 +31,47 @@ use crate::gui::widgets::{Widget, Rect};
 // ============================================================================
 // FILE ENTRY
 // ============================================================================
+// Dosya sistemi girişini (dosya veya dizin) temsil eden yapı.
+// `is_directory` alanı, girişin klasör mü dosya mı olduğunu belirler.
+// `file_type` alanı ise dosyanın uzantısına göre kategorisini tutar.
 
-/// File or directory entry
+/// Bir dosya veya dizin girişini temsil eder
 #[derive(Clone, Debug)]
 pub struct FileEntry {
+    /// Dosya/dizin adı (yol içermez)
     pub name: String,
+    /// Tam yol (örn. "/home/kullanici/belgeler/dosya.txt")
     pub path: String,
+    /// true ise bu giriş bir dizindir
     pub is_directory: bool,
+    /// Dosya boyutu (bayt cinsinden; dizinler için 0)
     pub size: u64,
+    /// Son değiştirme zamanı (UNIX timestamp)
     pub modified: u64,
+    /// Dosya türü (metin, resim, ses vb.)
     pub file_type: FileType,
+    /// Adı nokta ile başlayan gizli dosya mı?
     pub is_hidden: bool,
+    /// Salt okunur (yazma yasak) mı?
     pub is_readonly: bool,
 }
 
+// Dosya türü enum'u: uzantıya göre kategorilendirme.
+// `PartialOrd + Ord` trait'leri, sıralama işlemlerinde kullanılabilmesi için eklendi.
+// Bu sayede dosyalar `FileType`'a göre sıralanabilir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FileType {
-    Unknown,
-    Directory,
-    File,
-    Text,
-    Image,
-    Audio,
-    Video,
-    Archive,
-    Code,
-    Executable,
-    Document,
+    Unknown,    // Bilinmeyen tür
+    Directory,  // Klasör
+    File,       // Genel dosya
+    Text,       // Metin dosyaları (.txt, .md, .log)
+    Image,      // Resim dosyaları (.png, .jpg vb.)
+    Audio,      // Ses dosyaları (.mp3, .wav vb.)
+    Video,      // Video dosyaları (.mp4, .mkv vb.)
+    Archive,    // Arşiv dosyaları (.zip, .tar vb.)
+    Code,       // Kaynak kodu (.rs, .c, .py vb.)
+    Executable, // Çalıştırılabilir (.exe, .sh vb.)
+    Document,   // Belge (.pdf, .doc vb.)
 }
 
 impl FileType {
@@ -162,44 +189,48 @@ impl ViewMode {
 // ============================================================================
 // FILE EXPLORER
 // ============================================================================
+// Ana dosya gezgini yapısı. Gezinme geçmişi için `VecDeque` kullanılır;
+// bu sayede ileri/geri gezinme O(1) karmaşıklıkta gerçekleşir.
+// `context_menu: Option<ContextMenu>` alanı, sağ tık menüsünün
+// açık/kapalı durumunu `None`/`Some` ile ifade eder.
 
-/// File Explorer Application
+/// Dosya gezgini uygulama penceresi
 pub struct FileExplorer {
-    /// Window position and size
+    /// Pencerenin ekrandaki konumu ve boyutu
     rect: Rect,
-    /// Current path
+    /// Şu an görüntülenen dizin yolu
     current_path: String,
-    /// Navigation history
+    /// Gezinme geçmişi (geri/ileri için)
     history: VecDeque<String>,
-    /// History position
+    /// Geçmiş listesinde bulunulan konum
     history_pos: usize,
-    /// File entries
+    /// Mevcut dizindeki dosya ve klasör girişleri
     entries: Vec<FileEntry>,
-    /// Selected entries
+    /// Seçili girişlerin indeksleri
     selected: Vec<usize>,
-    /// Scroll offset
+    /// Kaydırma miktarı (piksel veya satır sayısı)
     scroll_offset: usize,
-    /// View mode
+    /// Aktif görünüm modu (simge, liste, detay, kutucuk)
     view_mode: ViewMode,
-    /// Show hidden files
+    /// Gizli dosyalar gösterilsin mi?
     show_hidden: bool,
-    /// Sort by
+    /// Hangi kritere göre sıralanıyor
     sort_by: SortBy,
-    /// Sort ascending
+    /// Artan sıralama mı?
     sort_ascending: bool,
-    /// Search query
+    /// Arama kutusu metni
     search_query: String,
-    /// Hovered entry
+    /// Fare imlecinin üzerinde olduğu girişin indeksi
     hovered_entry: Option<usize>,
-    /// Editing name
+    /// Yeniden adlandırılmakta olan girişin indeksi
     editing_name: Option<usize>,
-    /// Context menu
+    /// Sağ tık bağlam menüsü (varsa açık)
     context_menu: Option<ContextMenu>,
-    /// Toolbar height
+    /// Araç çubuğunun yüksekliği
     toolbar_height: usize,
-    /// Status bar height
+    /// Durum çubuğunun yüksekliği
     status_height: usize,
-    /// Sidebar width
+    /// Kenar çubuğunun genişliği (hızlı erişim kısayolları)
     sidebar_width: usize,
 }
 
@@ -1010,6 +1041,8 @@ impl Default for FileExplorer {
 // ============================================================================
 // GLOBAL FILE EXPLORER
 // ============================================================================
+// Dosya gezgininin global örneği; ilk erişimde `lazy_static!` ile oluşturulur.
+// `init()` fonksiyonu çağrıldığında kök dizin "/" içeriği yüklenir.
 
 lazy_static::lazy_static! {
     static ref FILE_EXPLORER: Mutex<FileExplorer> = Mutex::new(FileExplorer::new());

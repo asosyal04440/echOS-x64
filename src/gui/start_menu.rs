@@ -1,6 +1,31 @@
-//! # echOS Start Menu
+//! # echOS Başlat Menüsü
 //!
-//! Application launcher and system menu.
+//! Uygulama başlatıcı ve sistem menüsü.
+//!
+//! ## Düzen Şeması
+//!
+//! ```text
+//!  ┌──────────────────────────┐  ◄─ genişlik: 280px
+//!  │  echOS         başlık   │  ◄─ accent rengi, yükseklik: 50px
+//!  │  Applications           │
+//!  ├──────────────────────────┤
+//!  │  [ Ara...             ] │  ◄─ arama kutusu (y=55)
+//!  ├──────────────────────────┤
+//!  │  [■] Uygulama 1         │  ◄─ öğe yüksekliği: 32px
+//!  │  [■] Uygulama 2         │    simge (24×24) + isim
+//!  │  [■] Uygulama 3         │
+//!  │  ...                    │
+//!  ├──────────────────────────┤
+//!  │               [Power]   │  ◄─ alt panel: 35px
+//!  └──────────────────────────┘
+//! ```
+//!
+//! ## Klavye Navigasyonu
+//! - Herhangi bir tuş → arama metnine eklenir, liste anında filtrelenir
+//! - Yukarı/Aşağı ok → seçili öğeyi değiştirir, gerekirse kaydırma yapar
+//! - Enter → seçili uygulamayı başlatır
+//! - Backspace → son karakteri siler
+//! - Dışarı tıklama → menü kapanır
 
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::Theme;
@@ -11,15 +36,20 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
 
-/// Application entry
+/// Başlat menüsündeki uygulama kaydı
 #[derive(Clone)]
 pub struct AppEntry {
+    /// Görüntü adı
     pub name: String,
+    /// Simge tanımlayıcısı
     pub icon: String,
+    /// Çalıştırılacak komut
     pub exec: String,
+    /// Uygulama kategorisi
     pub category: AppCategory,
 }
 
+/// Uygulama kategori türleri (menüde ilerleyen sürümlerde gruplamak için)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppCategory {
     System,
@@ -54,17 +84,30 @@ impl AppEntry {
     }
 }
 
-/// Start Menu widget
+/// Başlat Menüsü widget'ı.
+///
+/// Uygulamaları listeler, arama kutusundan canlı filtreler
+/// ve seçim yapıldığında `on_launch` geri çağırımını tetikler.
 pub struct StartMenu {
+    /// Menünün ekrandaki sınırları
     rect: Rect,
+    /// Görünür mü
     visible: bool,
+    /// Tüm uygulamalar
     apps: Vec<AppEntry>,
+    /// Filtrelenmiş uygulamaların `apps` dizisindeki indeksleri
     filtered_apps: Vec<usize>,
+    /// Seçili öğe indeksi
     selected_index: Option<usize>,
+    /// Üzerine gelinen öğe indeksi (hover)
     hovered_index: Option<usize>,
+    /// Arama kutusu metni
     search_text: String,
+    /// Arama kutusuna odaklanıldı mı
     search_focused: bool,
+    /// Kaydırma ofseti (uzun listeler için)
     scroll_offset: usize,
+    /// Uygulama başlatma geri çağırımı
     on_launch: Option<fn(&AppEntry)>,
 }
 
@@ -93,6 +136,7 @@ impl StartMenu {
         self.update_filter();
     }
 
+    /// Menüyü belirtilen konumda göster ve durumu sıfırla
     pub fn show(&mut self, x: i32, y: i32) {
         self.rect.x = x;
         self.rect.y = y;
@@ -104,11 +148,13 @@ impl StartMenu {
         self.update_filter();
     }
 
+    /// Menüyü gizle
     pub fn hide(&mut self) {
         self.visible = false;
         self.search_focused = false;
     }
 
+    /// Görünürlüğü değiştir (göster ↔ gizle)
     pub fn toggle(&mut self, x: i32, y: i32) {
         if self.visible {
             self.hide();
@@ -121,30 +167,35 @@ impl StartMenu {
         self.visible
     }
 
+    /// Uygulama başlatma geri çağırımını ayarla
     pub fn with_launch_handler(mut self, handler: fn(&AppEntry)) -> Self {
         self.on_launch = Some(handler);
         self
     }
 
+    /// Arama metnine göre uygulama listesini filtrele.
+    /// Büyük/küçük harf duyarsız; metin boşsa tüm uygulamalar gösterilir.
     fn update_filter(&mut self) {
         self.filtered_apps.clear();
-        
+
         let search_lower = self.search_text.to_lowercase();
-        
+
         for (i, app) in self.apps.iter().enumerate() {
             if search_lower.is_empty() || app.name.to_lowercase().contains(&search_lower) {
                 self.filtered_apps.push(i);
             }
         }
-        
+
         self.scroll_offset = 0;
         self.selected_index = None;
     }
 
+    /// Görünür öğe sayısını hesapla (menü boyutuna göre)
     fn visible_items(&self) -> usize {
         (self.rect.height as usize - 80) / 32
     }
 
+    /// Verilen Y koordinatındaki öğe indeksini döndür
     fn item_at(&self, y: i32) -> Option<usize> {
         let relative_y = y - self.rect.y - 70;
         if relative_y < 0 {
@@ -158,10 +209,11 @@ impl StartMenu {
         }
     }
 
+    /// Öğeyi seç ve gerekirse kaydırma yaparak görünür kıl
     fn select(&mut self, index: usize) {
         if index < self.filtered_apps.len() {
             self.selected_index = Some(index);
-            
+
             let visible = self.visible_items();
             if index < self.scroll_offset {
                 self.scroll_offset = index;
@@ -171,6 +223,7 @@ impl StartMenu {
         }
     }
 
+    /// Seçili uygulamayı başlat ve menüyü kapat
     fn launch(&mut self, index: usize) {
         if let Some(&app_idx) = self.filtered_apps.get(index) {
             if let Some(handler) = self.on_launch {
@@ -198,13 +251,13 @@ impl Widget for StartMenu {
         let w = self.rect.width as usize;
         let h = self.rect.height as usize;
 
-        // Shadow
+        // Gölge (ofsetli arka plan dikdörtgeni)
         fb.draw_rect(x + 6, y + 6, w, h, Theme::SHADOW.to_u32());
 
-        // Background
+        // Arka plan
         fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
 
-        // Border
+        // Kenarlık (üst, alt, sol, sağ)
         for col in x..(x + w) {
             fb.plot_pixel(col, y, Theme::BORDER.to_u32());
             fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
@@ -214,20 +267,20 @@ impl Widget for StartMenu {
             fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
         }
 
-        // Header
+        // Başlık alanı (accent rengi)
         fb.draw_rect(x, y, w, 50, Theme::ACCENT_PRIMARY.to_u32());
         fb.draw_string(x + 10, y + 15, "echOS", Theme::DESKTOP_BG.to_u32());
         fb.draw_string(x + 10, y + 30, "Applications", Theme::DESKTOP_BG.to_u32());
 
-        // Search box
+        // Arama kutusu
         let search_y = y + 55;
         fb.draw_rect(x + 10, search_y, w - 20, 24, if self.search_focused {
             Theme::WINDOW_BG.to_u32()
         } else {
             Theme::BUTTON_BG.to_u32()
         });
-        
-        // Search border
+
+        // Arama kutusu kenarlığı (odaklanıldığında accent rengi)
         for col in (x + 10)..(x + w - 10) {
             fb.plot_pixel(col, search_y, if self.search_focused {
                 Theme::ACCENT_PRIMARY.to_u32()
@@ -236,14 +289,14 @@ impl Widget for StartMenu {
             });
             fb.plot_pixel(col, search_y + 23, Theme::BORDER.to_u32());
         }
-        
-        // Search text
+
+        // Arama metni veya yer tutucu
         let search_display = if self.search_text.is_empty() && !self.search_focused {
             "Search..."
         } else {
             &self.search_text
         };
-        fb.draw_string(x + 15, search_y + 4, search_display, 
+        fb.draw_string(x + 15, search_y + 4, search_display,
             if self.search_text.is_empty() && !self.search_focused {
                 Theme::TEXT_SECONDARY.to_u32()
             } else {
@@ -251,7 +304,7 @@ impl Widget for StartMenu {
             }
         );
 
-        // App list
+        // Uygulama listesi
         let item_height = 32;
         let visible = self.visible_items();
         let item_y_start = y + 85;
@@ -266,17 +319,17 @@ impl Widget for StartMenu {
             let app = &self.apps[app_idx];
             let item_y = item_y_start + i * item_height;
 
-            // Selection/hover background
+            // Seçim veya hover arka planı
             if self.selected_index == Some(item_index) {
                 fb.draw_rect(x + 2, item_y, w - 4, item_height, Theme::ACCENT_PRIMARY.to_u32());
             } else if self.hovered_index == Some(item_index) {
                 fb.draw_rect(x + 2, item_y, w - 4, item_height, Theme::BUTTON_HOVER.to_u32());
             }
 
-            // Icon placeholder
+            // Simge yer tutucu (24×24 kutucuk)
             fb.draw_rect(x + 8, item_y + 4, 24, 24, Theme::TEXT_SECONDARY.to_u32());
-            
-            // App name
+
+            // Uygulama adı
             let text_color = if self.selected_index == Some(item_index) {
                 Theme::DESKTOP_BG.to_u32()
             } else {
@@ -285,11 +338,11 @@ impl Widget for StartMenu {
             fb.draw_string(x + 40, item_y + 8, &app.name, text_color);
         }
 
-        // Footer - Power options
+        // Alt panel — güç seçenekleri
         let footer_y = y + h - 35;
         fb.draw_rect(x, footer_y, w, 35, Theme::TITLEBAR_BG.to_u32());
-        
-        // Power button
+
+        // Güç düğmesi
         fb.draw_rect(x + w - 80, footer_y + 5, 70, 25, Theme::ACCENT_ERROR.to_u32());
         fb.draw_string(x + w - 60, footer_y + 10, "Power", Theme::TEXT_PRIMARY.to_u32());
     }
@@ -309,7 +362,7 @@ impl Widget for StartMenu {
         let w = self.rect.width;
         let h = self.rect.height;
 
-        // Search box
+        // Arama kutusuna tıklandı mı
         if click_x >= x + 10 && click_x < x + w - 10 && click_y >= y + 55 && click_y < y + 79 {
             self.search_focused = true;
             return true;
@@ -317,15 +370,15 @@ impl Widget for StartMenu {
             self.search_focused = false;
         }
 
-        // App list
+        // Uygulama listesine tıklandı mı
         if let Some(index) = self.item_at(click_y) {
             self.select(index);
             return true;
         }
 
-        // Power button
+        // Güç düğmesine tıklandı mı
         if click_x >= x + w - 80 && click_x < x + w - 10 && click_y >= y + h - 30 && click_y < y + h - 5 {
-            // Power action - could trigger shutdown dialog
+            // Kapatma diyaloğu açılabilir
             self.hide();
             return true;
         }
@@ -339,14 +392,14 @@ impl Widget for StartMenu {
         }
 
         match scancode {
-            0x0E => { // Backspace
+            0x0E => { // Geri silme (Backspace)
                 if !self.search_text.is_empty() {
                     self.search_text.pop();
                     self.update_filter();
                 }
                 true
             }
-            0x1C => { // Enter
+            0x1C => { // Enter — seçili uygulamayı başlat
                 if let Some(index) = self.selected_index {
                     self.launch(index);
                 } else if !self.filtered_apps.is_empty() {
@@ -354,7 +407,7 @@ impl Widget for StartMenu {
                 }
                 true
             }
-            0x48 => { // Up arrow
+            0x48 => { // Yukarı ok
                 if let Some(idx) = self.selected_index {
                     if idx > 0 {
                         self.select(idx - 1);
@@ -364,7 +417,7 @@ impl Widget for StartMenu {
                 }
                 true
             }
-            0x50 => { // Down arrow
+            0x50 => { // Aşağı ok
                 if let Some(idx) = self.selected_index {
                     if idx < self.filtered_apps.len() - 1 {
                         self.select(idx + 1);

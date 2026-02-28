@@ -61,27 +61,37 @@ impl Theme {
     pub const BUTTON_HOVER: Color = Color::rgb(70, 70, 75);
     pub const BUTTON_TEXT: Color = Color::rgb(220, 220, 220);
     
-    // Scrollbar
+    // Kaydırma Çubuğu (Scrollbar) Renkleri
+    // Kaydırma çubuğunun arka plan ve sürükleme topuzu (thumb) renkleridir.
+    // Thumb, kullanıcının tıklayıp sürüklediği hareketli bölümdür.
     pub const SCROLLBAR_BG: Color = Color::rgb(40, 40, 44);
     pub const SCROLLBAR_THUMB: Color = Color::rgb(80, 80, 85);
-    
-    // Selection
+
+    // Seçim (Selection) Rengi
+    // Metin ya da liste öğesi seçildiğinde gösterilen arka plan rengidir.
+    // VS Code'un seçim mavisiyle aynı tondadır.
     pub const SELECTION_BG: Color = Color::rgb(38, 79, 120);
-    
-    // List items
+
+    // Liste Öğesi (List Item) Renkleri
+    // Fare üzerine geldiğinde (hover) ve seçildiğinde (selected) uygulanan
+    // arka plan renkleridir. Hover daha soluk, selected daha belirgindir.
     pub const LIST_ITEM_HOVER: Color = Color::rgb(45, 45, 50);
     pub const LIST_ITEM_SELECTED: Color = Color::rgb(50, 80, 120);
-    
-    // Input fields
+
+    // Giriş Alanı (Input Field) Renkleri
+    // Metin kutusu ve arama çubuğu gibi giriş bileşenlerinde kullanılır.
+    // INPUT_FOCUS, odaklanıldığında kenarlığı vurgular (VS Code'un mavi odak rengi).
     pub const INPUT_BG: Color = Color::rgb(35, 35, 40);
     pub const INPUT_BORDER: Color = Color::rgb(60, 60, 65);
     pub const INPUT_FOCUS: Color = Color::rgb(0, 122, 204);
-    
-    // Menu
+
+    // Menü (Menu) Renkleri
+    // Açılır menülerin (dropdown/context menu) arka plan ve hover renkleridir.
     pub const MENU_BG: Color = Color::rgb(30, 30, 34);
     pub const MENU_ITEM_HOVER: Color = Color::rgb(50, 50, 55);
-    
-    // Progress bar
+
+    // İlerleme Çubuğu (Progress Bar) Renkleri
+    // PROGRESS_BG boş/dolu ayrımını belirtir; PROGRESS_FG dolgu rengidir (camgöbeği).
     pub const PROGRESS_BG: Color = Color::rgb(40, 40, 44);
     pub const PROGRESS_FG: Color = Color::rgb(0, 150, 200);
 }

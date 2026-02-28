@@ -1,4 +1,4 @@
-//! # Dosya İletişim Kutuları
+//! # Dosya İletişim Kutuları (File Dialogs)
 //!
 //! Gezinti ve filtreleme destekli Aç/Kaydet dosya iletişim kutuları.
 //! Kenar çubuğu ve önizleme içeren macOS tarzı dosya tarayıcı.
@@ -13,6 +13,20 @@
 //! - `SortColumn`: Ad / Boyut / Değiştirilme / Tür sütunlarına göre sıralama
 //! - `apply_filter()`: Dosya filtresi ve uzantı kontrolü
 //! - `sort_entries()`: Klasörler her zaman önce gelir
+//!
+//! ## Gezinti Geçmişi
+//! Her `navigate_to()` çağrısında `history` yığıtına yeni yol itilir; `go_back()`
+//! yığıtın tepesini çıkararak önceki dizine döner. Bu, tarayıcı tarzı geri/ileri
+//! tuşu davranışını taklit eder.
+//!
+//! ## Çoklu Seçim
+//! `DialogMode::OpenMultiple` modunda Ctrl tıklaması ile birden fazla dosya
+//! seçilebilir. Seçimler `selected_entries: Vec<usize>` listesinde tutulur;
+//! `DialogResult::OpenMultiple(Vec<String>)` ile tüm yollar döndürülür.
+//!
+//! ## Dosya Boyutu Gösterimi
+//! `format_size()` yardımcı fonksiyonu baytı insan okunabilir biçime çevirir:
+//! < 1 KB → bayt, < 1 MB → KB, < 1 GB → MB, aksi hâlde → GB.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};

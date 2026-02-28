@@ -2,6 +2,16 @@
 //!
 //! Sistem izleme ve hata ayıklama yardımcı araçları.
 //! Şu an için basit loglama fonksiyonları içerir.
+//!
+//! ## Mimari Özet
+//!
+//! ```
+//! [log!()] --> [log()] --> [LOG_RING (halka tampon)]
+//!                    \--> [serial UART çıkışı]
+//! ```
+//!
+//! Halka tampon (ring buffer) sabit bellekle çalışır;
+//! dolunca en eski kaydın üstüne yazar.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -10,6 +20,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
+/// Log seviyesi: bir mesajın önemini belirtir.
+/// Trace en düşük, Error en yüksek önceliğe sahiptir.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogLevel {
     Trace,
@@ -19,6 +31,9 @@ pub enum LogLevel {
     Error,
 }
 
+/// Tek bir log kaydını temsil eder.
+/// `seq` ile kayıtlar sıralı izlenebilir; `file`/`line`/`module`
+/// hangi kaynak satırından üretildiğini gösterir.
 #[derive(Clone)]
 pub struct LogEntry {
     pub seq: u64,
@@ -29,14 +44,34 @@ pub struct LogEntry {
     pub message: String,
 }
 
+/// Sabit kapasiteli halka tampon (ring buffer) log deposu.
+///
+/// ## Çalışma Prensibi
+///
+/// ```
+/// Kapasite = 4 örnek:
+///
+/// [A][B][C][D]   <- tampon dolu, next=0, filled=true
+///  ^
+///  Bir sonraki push buraya yazar (A'nın üstüne).
+///
+/// push(E) => [E][B][C][D], next=1
+/// push(F) => [E][F][C][D], next=2
+/// ```
+///
+/// `snapshot()` çağrıldığında `next` indeksinden başlayıp
+/// kronolojik sırayla tüm kayıtlar döndürülür.
 struct LogRing {
     entries: Vec<LogEntry>,
     capacity: usize,
+    /// Bir sonraki yazma konumu (halkanın başı)
     next: usize,
+    /// Tampon en az bir kez dolup taştı mı?
     filled: bool,
 }
 
 impl LogRing {
+    /// Belirtilen kapasitede boş bir halka tampon oluşturur.
     fn new(capacity: usize) -> Self {
         Self {
             entries: Vec::with_capacity(capacity),
@@ -46,6 +81,8 @@ impl LogRing {
         }
     }
 
+    /// Tampona yeni bir kayıt ekler.
+    /// Dolu değilse sonuna, doluysa en eski kaydın üstüne yazar.
     fn push(&mut self, entry: LogEntry) {
         if self.capacity == 0 {
             return;
@@ -62,6 +99,8 @@ impl LogRing {
         }
     }
 
+    /// Tamponu kronolojik sırayla klonlar ve döndürür.
+    /// Tampon dolu ise `next` konumundan başlayarak sarma (wrap) yapar.
     fn snapshot(&self) -> Vec<LogEntry> {
         if !self.filled {
             return self.entries.clone();
@@ -75,6 +114,8 @@ impl LogRing {
         out
     }
 
+    /// Tamponu yeni kapasiteye göre yeniden boyutlandırır.
+    /// Mevcut kayıtlar korunur; kapasiteden fazlası ise en eskiden başlanarak düşürülür.
     fn resize(&mut self, capacity: usize) {
         let mut snapshot = self.snapshot();
         if capacity == 0 {
@@ -98,12 +139,18 @@ impl LogRing {
     }
 }
 
+/// Global log halkası; 512 girdi kapasiteli, Mutex ile korumalı.
+/// `lazy_static!` sayesinde ilk erişimde başlatılır.
 lazy_static! {
     static ref LOG_RING: Mutex<LogRing> = Mutex::new(LogRing::new(512));
 }
 
+/// Monoton artan log sıra numarası. `Relaxed` sıralama yeterlidir
+/// çünkü yalnızca tekil artış önemlidir, bellek senkronizasyonu değil.
 static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Log seviyesini insan okunabilir ön ek dizgisine çevirir.
+/// Seri portda/loglarda görünen `[INFO]`, `[ERROR]` gibi etiketleri üretir.
 fn level_prefix(level: LogLevel) -> &'static str {
     match level {
         LogLevel::Trace => "TRACE",
@@ -114,6 +161,18 @@ fn level_prefix(level: LogLevel) -> &'static str {
     }
 }
 
+/// Çekirdek log fonksiyonu: mesajı hem halka tampona hem seri porta gönderir.
+///
+/// ## Akış
+/// ```
+/// log() çağrısı
+///   |
+///   +---> seq numarası al (atomic fetch_add)
+///   |
+///   +---> LOG_RING.lock() -> push(entry)
+///   |
+///   +---> serial UART üzerinden yazdır
+/// ```
 pub fn log(
     level: LogLevel,
     args: fmt::Arguments,
@@ -144,6 +203,8 @@ pub fn log(
     );
 }
 
+/// Kolaylık fonksiyonu: Trace seviyesinde statik mesaj gönderir.
+/// Performans açısından kritik olmayan izleme noktaları için kullanılır.
 pub fn trace(msg: &str) {
     log(
         LogLevel::Trace,
@@ -154,22 +215,27 @@ pub fn trace(msg: &str) {
     );
 }
 
+/// Halka tampondaki tüm kayıtların anlık görüntüsünü (snapshot) döndürür.
+/// Döndürülen Vec, çağrı anındaki kronolojik sıradadır.
 pub fn snapshot() -> Vec<LogEntry> {
     LOG_RING.lock().snapshot()
 }
 
+/// Halka tamponun kapasitesini ayarlar. Mevcut kayıtlar mümkün olduğunca korunur.
 pub fn set_capacity(capacity: usize) {
     LOG_RING.lock().resize(capacity);
 }
 
+/// Son `max` adet log kaydını seri porta basar.
+/// Hata ayıklamada sistem durumunu hızlıca görmek için kullanılır.
 pub fn dump_recent(max: usize) {
     let snapshot = LOG_RING.lock().snapshot();
     if snapshot.is_empty() {
-        crate::serial_println!("[LOG] empty");
+        crate::serial_println!("[LOG] boş");
         return;
     }
     let count = max.min(snapshot.len());
-    crate::serial_println!("[LOG] begin count={}", count);
+    crate::serial_println!("[LOG] başlangıç kayıt_sayısı={}", count);
     for entry in snapshot.into_iter().rev().take(count).rev() {
         crate::serial_println!(
             "[LOG] {} {} {}:{} {}",
@@ -180,9 +246,12 @@ pub fn dump_recent(max: usize) {
             entry.message
         );
     }
-    crate::serial_println!("[LOG] end");
+    crate::serial_println!("[LOG] son");
 }
 
+/// Halka tamponu dosya sistemine kalıcı olarak yazar.
+/// `path` bir VFS düğümüne işaret etmelidir.
+/// Başarıda `true`, herhangi bir yazma hatasında `false` döner.
 pub fn flush_to_path(path: &str) -> bool {
     let snapshot = LOG_RING.lock().snapshot();
     if snapshot.is_empty() {
@@ -210,6 +279,16 @@ pub fn flush_to_path(path: &str) -> bool {
     true
 }
 
+/// RAII (Resource Acquisition Is Initialization) tabanlı kapsam izleyici.
+///
+/// `TraceGuard` oluşturulduğunda "ENTER", düşürüldüğünde "EXIT" logu
+/// otomatik atılır. Bu sayede kod bloğunun başını ve sonunu elle
+/// loglamak gerekmez; Rust'ın `Drop` mekanizması bunu güvenle yapar.
+///
+/// ## Kullanım
+/// ```rust
+/// trace_scope!("my_function"); // makro aracılığıyla kullanılır
+/// ```
 pub struct TraceGuard {
     label: &'static str,
     file: &'static str,
@@ -218,6 +297,7 @@ pub struct TraceGuard {
 }
 
 impl TraceGuard {
+    /// Yeni bir kapsam izleyici oluşturur ve ENTER logu atar.
     pub fn new(label: &'static str, file: &'static str, line: u32, module: &'static str) -> Self {
         log(
             LogLevel::Trace,
@@ -235,6 +315,7 @@ impl TraceGuard {
     }
 }
 
+/// `TraceGuard` kapsam dışına çıktığında otomatik EXIT logu atar.
 impl Drop for TraceGuard {
     fn drop(&mut self) {
         log(
@@ -247,6 +328,8 @@ impl Drop for TraceGuard {
     }
 }
 
+/// Makro: Trace seviyesinde biçimlendirilmiş log mesajı gönderir.
+/// `file!()`, `line!()`, `module_path!()` derleyici tarafından otomatik doldurulur.
 #[macro_export]
 macro_rules! trace {
     ($($arg:tt)*) => {
@@ -260,6 +343,8 @@ macro_rules! trace {
     };
 }
 
+/// Makro: Bulunulan kapsamı RAII ile izler (giriş/çıkış logları atar).
+/// `_trace_guard` değişkeni kapsam sonunda `Drop` çalıştırır.
 #[macro_export]
 macro_rules! trace_scope {
     ($label:expr) => {
@@ -268,6 +353,7 @@ macro_rules! trace_scope {
     };
 }
 
+/// Makro: Debug seviyesinde biçimlendirilmiş log mesajı gönderir.
 #[macro_export]
 macro_rules! log_debug {
     ($($arg:tt)*) => {
@@ -281,6 +367,7 @@ macro_rules! log_debug {
     };
 }
 
+/// Makro: Info seviyesinde biçimlendirilmiş log mesajı gönderir.
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {
@@ -294,6 +381,7 @@ macro_rules! log_info {
     };
 }
 
+/// Makro: Uyarı (Warn) seviyesinde biçimlendirilmiş log mesajı gönderir.
 #[macro_export]
 macro_rules! log_warn {
     ($($arg:tt)*) => {
@@ -307,6 +395,7 @@ macro_rules! log_warn {
     };
 }
 
+/// Makro: Hata (Error) seviyesinde biçimlendirilmiş log mesajı gönderir.
 #[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => {

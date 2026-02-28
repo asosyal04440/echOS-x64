@@ -1,6 +1,53 @@
-//! # HTTP/2 Protocol
+//! # HTTP/2 Protokolü
 //!
-//! HTTP/2 with multiplexing, HPACK header compression, and stream prioritization.
+//! HTTP/2, multiplexing (çoklama), HPACK başlık sıkıştırma ve akış önceliklendirme sunar.
+//!
+//! ## HTTP/1.1 vs HTTP/2 Temel Fark
+//!
+//! ```
+//! HTTP/1.1 (Sıralı - Head-of-Line Blocking var):
+//! ┌──────────────────────────────────────────────────┐
+//! │ İstek 1 → Yanıt 1 → İstek 2 → Yanıt 2 → ...   │
+//! └──────────────────────────────────────────────────┘
+//!
+//! HTTP/2 (Eşzamanlı - Multiplexing):
+//! ┌──────────────────────────────────────────────────┐
+//! │                  TEK TCP Bağlantısı               │
+//! │  Akış 1: ██████████░░░░████████                  │
+//! │  Akış 2: ░░░░████████████░░░░░░                  │
+//! │  Akış 3: ████░░░░████░░░░████                    │
+//! └──────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## HTTP/2 Çerçeve Yapısı (9 Bayt Başlık)
+//!
+//! ```
+//! 0       8       16      24      32
+//! ┌───────────────────────┬────────┐
+//! │    Uzunluk (24 bit)   │ Tür    │
+//! ├───────────────────────┴────────┤
+//! │ Bayraklar (8 bit)              │
+//! ├────────────────────────────────┤
+//! │ R │    Akış ID (31 bit)        │
+//! ├───┴────────────────────────────┤
+//! │        Yük (Payload)           │
+//! └────────────────────────────────┘
+//! ```
+//!
+//! ## Bağlantı Katmanları
+//!
+//! ```
+//! Uygulama
+//!    │
+//!    ▼
+//! HTTP/2 Çerçeveleme ◄── HPACK (başlık sıkıştırma)
+//!    │
+//!    ▼
+//! TLS (isteğe bağlı)
+//!    │
+//!    ▼
+//! TCP
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -8,7 +55,18 @@ use alloc::vec::Vec;
 use alloc::vec;
 use spin::Mutex;
 
-// HTTP/2 Frame Types
+// HTTP/2 Çerçeve Türleri
+// Her çerçeve türü farklı bir amaca hizmet eder:
+// - DATA: Asıl uygulama verisi taşır
+// - HEADERS: HTTP başlıklarını iletir (HPACK ile sıkıştırılmış)
+// - PRIORITY: Akış önceliğini değiştirir
+// - RST_STREAM: Akışı hemen sonlandırır
+// - SETTINGS: Bağlantı parametrelerini müzakere eder
+// - PUSH_PROMISE: Sunucu push'unu bildirir
+// - PING: Keep-alive ve RTT ölçümü için
+// - GOAWAY: Bağlantıyı düzgünce kapatır
+// - WINDOW_UPDATE: Akış kontrolü penceresi günceller
+// - CONTINUATION: Büyük başlık bloklarını devam ettirir
 const FRAME_DATA: u8 = 0x00;
 const FRAME_HEADERS: u8 = 0x01;
 const FRAME_PRIORITY: u8 = 0x02;
@@ -20,7 +78,9 @@ const FRAME_GOAWAY: u8 = 0x07;
 const FRAME_WINDOW_UPDATE: u8 = 0x08;
 const FRAME_CONTINUATION: u8 = 0x09;
 
-// HTTP/2 Settings
+// HTTP/2 Ayarları (Settings)
+// Bağlantı kurulurken her iki taraf da kendi kapasitesini bildirir.
+// Örneğin: kaç eş zamanlı akış desteklenir, başlık tablosu ne kadar büyük olabilir.
 const SETTINGS_HEADER_TABLE_SIZE: u16 = 0x01;
 const SETTINGS_ENABLE_PUSH: u16 = 0x02;
 const SETTINGS_MAX_CONCURRENT_STREAMS: u16 = 0x03;
@@ -28,7 +88,9 @@ const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 0x04;
 const SETTINGS_MAX_FRAME_SIZE: u16 = 0x05;
 const SETTINGS_MAX_HEADER_LIST_SIZE: u16 = 0x06;
 
-// HTTP/2 Error Codes
+// HTTP/2 Hata Kodları
+// Bir sorun oluştuğunda RST_STREAM veya GOAWAY çerçevesiyle gönderilir.
+// NO_ERROR bağlantının temiz kapandığını ifade eder.
 const NO_ERROR: u32 = 0x00;
 const PROTOCOL_ERROR: u32 = 0x01;
 const INTERNAL_ERROR: u32 = 0x02;
@@ -44,10 +106,26 @@ const ENHANCE_YOUR_CALM: u32 = 0x0b;
 const INADEQUATE_SECURITY: u32 = 0x0c;
 const HTTP_1_1_REQUIRED: u32 = 0x0d;
 
-// HTTP/2 Connection Preface
+// HTTP/2 Bağlantı Ön Söz (Connection Preface)
+// İstemci bağlantı açar açmaz bu sabit diziyi gönderir.
+// Sunucu da bu diziyi alınca HTTP/2 konuşulduğunu anlar.
+// "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" (24 bayt)
 const CONNECTION_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-/// HTTP/2 Frame
+/// HTTP/2 Çerçeve (Frame)
+///
+/// Tüm HTTP/2 iletişimi çerçeveler üzerinden yürütülür.
+/// Her çerçeve 9 bayt sabit başlık + değişken uzunluklu yükten oluşur.
+///
+/// ```
+/// ┌──────────────────────────────────┐
+/// │ length  (24 bit): Yük bayt sayısı│
+/// │ type     (8 bit): Çerçeve türü   │
+/// │ flags    (8 bit): Durum bayrakları│
+/// │ stream_id(31bit): Akış tanımlayıcı│
+/// │ payload        : Asıl veri       │
+/// └──────────────────────────────────┘
+/// ```
 #[derive(Clone, Debug)]
 pub struct Http2Frame {
     pub length: u32,
@@ -58,7 +136,8 @@ pub struct Http2Frame {
 }
 
 impl Http2Frame {
-    /// Create new frame
+    /// Yeni bir HTTP/2 çerçevesi oluşturur.
+    /// Uzunluk otomatik olarak yük boyutundan hesaplanır.
     pub fn new(frame_type: u8, stream_id: u32, payload: Vec<u8>) -> Self {
         Http2Frame {
             length: payload.len() as u32,
@@ -69,34 +148,56 @@ impl Http2Frame {
         }
     }
 
-    /// Create SETTINGS frame
+    /// SETTINGS çerçevesi oluşturur.
+    ///
+    /// Bağlantı parametrelerini karşı tarafa bildirir.
+    /// Her ayar 6 bayt: 2 bayt ID + 4 bayt değer.
+    ///
+    /// ```
+    /// ┌─────────┬──────────────────────┐
+    /// │ ID (2B) │    Değer (4B)        │
+    /// ├─────────┼──────────────────────┤
+    /// │ 0x0001  │ Başlık tablo boyutu  │
+    /// │ 0x0002  │ Push etkin mi?       │
+    /// │ 0x0003  │ Max eş zamanlı akış  │
+    /// │ 0x0004  │ Başlangıç penceresi  │
+    /// │ 0x0005  │ Max çerçeve boyutu   │
+    /// └─────────┴──────────────────────┘
+    /// ```
     pub fn settings(settings: &Http2Settings) -> Self {
         let mut payload = Vec::new();
-        
-        // Header table size
+
+        // Header table size (başlık tablosu boyutu - HPACK için)
         payload.extend_from_slice(&SETTINGS_HEADER_TABLE_SIZE.to_be_bytes()[2..]);
         payload.extend_from_slice(&settings.header_table_size.to_be_bytes());
-        
-        // Enable push
+
+        // Enable push (sunucu push'u etkinleştir/devre dışı bırak)
         payload.extend_from_slice(&SETTINGS_ENABLE_PUSH.to_be_bytes()[2..]);
         payload.extend_from_slice(&(settings.enable_push as u32).to_be_bytes());
-        
-        // Max concurrent streams
+
+        // Max concurrent streams (aynı anda kaç akış açık olabilir)
         payload.extend_from_slice(&SETTINGS_MAX_CONCURRENT_STREAMS.to_be_bytes()[2..]);
         payload.extend_from_slice(&settings.max_concurrent_streams.to_be_bytes());
-        
-        // Initial window size
+
+        // Initial window size (akış kontrolü başlangıç penceresi)
         payload.extend_from_slice(&SETTINGS_INITIAL_WINDOW_SIZE.to_be_bytes()[2..]);
         payload.extend_from_slice(&settings.initial_window_size.to_be_bytes());
-        
-        // Max frame size
+
+        // Max frame size (tek bir çerçevenin maksimum yük boyutu)
         payload.extend_from_slice(&SETTINGS_MAX_FRAME_SIZE.to_be_bytes()[2..]);
         payload.extend_from_slice(&settings.max_frame_size.to_be_bytes());
-        
+
         Http2Frame::new(FRAME_SETTINGS, 0, payload)
     }
 
-    /// Create HEADERS frame
+    /// HEADERS çerçevesi oluşturur.
+    ///
+    /// HTTP başlıklarını HPACK ile sıkıştırılmış biçimde taşır.
+    /// `end_stream` bayrağı set edilirse bu akış için daha veri gelmeyecek demektir.
+    ///
+    /// Bayraklar:
+    /// - 0x01 = END_STREAM: Bu akışın son verisi
+    /// - 0x04 = END_HEADERS: Başlık bloğu tamamlandı
     pub fn headers(stream_id: u32, header_block: Vec<u8>, end_stream: bool) -> Self {
         let mut frame = Http2Frame::new(FRAME_HEADERS, stream_id, header_block);
         if end_stream {
@@ -106,7 +207,10 @@ impl Http2Frame {
         frame
     }
 
-    /// Create DATA frame
+    /// DATA çerçevesi oluşturur.
+    ///
+    /// Asıl uygulama verisini (örn. HTTP yanıt gövdesi) taşır.
+    /// Akış kontrolüne tabidir: alıcı hazır değilse veri gönderilemez.
     pub fn data(stream_id: u32, data: Vec<u8>, end_stream: bool) -> Self {
         let mut frame = Http2Frame::new(FRAME_DATA, stream_id, data);
         if end_stream {
@@ -115,14 +219,30 @@ impl Http2Frame {
         frame
     }
 
-    /// Create WINDOW_UPDATE frame
+    /// WINDOW_UPDATE çerçevesi oluşturur.
+    ///
+    /// Akış kontrolü: alıcı daha fazla veri almaya hazır olduğunu bildirir.
+    /// `stream_id == 0` ise bağlantı düzeyinde güncelleme yapılır.
+    ///
+    /// ```
+    /// Gönderen          Alıcı
+    ///    │                │
+    ///    │── Veri ───────►│ (pencere azalır)
+    ///    │                │
+    ///    │◄── WINDOW_UPDATE (pencere büyür)
+    ///    │                │
+    ///    │── Daha fazla veri ──►│
+    /// ```
     pub fn window_update(stream_id: u32, increment: u32) -> Self {
         let mut payload = Vec::new();
         payload.extend_from_slice(&increment.to_be_bytes()[..]);
         Http2Frame::new(FRAME_WINDOW_UPDATE, stream_id, payload)
     }
 
-    /// Create PING frame
+    /// PING çerçevesi oluşturur.
+    ///
+    /// Bağlantının canlı olup olmadığını kontrol eder (keep-alive).
+    /// 8 bayt opaque veri içerir; karşı taraf aynı veriyle ACK döner.
     pub fn ping(opaque: [u8; 8], ack: bool) -> Self {
         let mut frame = Http2Frame::new(FRAME_PING, 0, opaque.to_vec());
         if ack {
@@ -131,7 +251,18 @@ impl Http2Frame {
         frame
     }
 
-    /// Create GOAWAY frame
+    /// GOAWAY çerçevesi oluşturur.
+    ///
+    /// Bağlantıyı düzgünce kapatır.
+    /// `last_stream_id` son işlenen akış ID'sini, `error_code` neden kapandığını belirtir.
+    ///
+    /// ```
+    /// İstemci          Sunucu
+    ///    │                │
+    ///    │◄── GOAWAY ────│ (son_akış_id, hata_kodu)
+    ///    │                │
+    ///    │ (last_stream_id'den büyük akışlar yeniden denenebilir)
+    /// ```
     pub fn goaway(last_stream_id: u32, error_code: u32, debug_data: Vec<u8>) -> Self {
         let mut payload = Vec::new();
         payload.extend_from_slice(&last_stream_id.to_be_bytes()[..]);
@@ -140,38 +271,55 @@ impl Http2Frame {
         Http2Frame::new(FRAME_GOAWAY, 0, payload)
     }
 
-    /// Create RST_STREAM frame
+    /// RST_STREAM çerçevesi oluşturur.
+    ///
+    /// Tek bir akışı anında sonlandırır (tüm bağlantıyı değil).
+    /// GOAWAY'den farkı: sadece belirtilen akışı etkiler.
     pub fn rst_stream(stream_id: u32, error_code: u32) -> Self {
         let mut payload = Vec::new();
         payload.extend_from_slice(&error_code.to_be_bytes()[..]);
         Http2Frame::new(FRAME_RST_STREAM, stream_id, payload)
     }
 
-    /// Encode frame to bytes
+    /// Çerçeveyi bayt dizisine dönüştürür (serileştirme).
+    ///
+    /// HTTP/2 çerçeve wire formatı:
+    /// ```
+    /// ┌────────────────────────────────────────────┐
+    /// │ [0..3) Uzunluk: 3 bayt, büyük-endian       │
+    /// │ [3]    Tür: 1 bayt                         │
+    /// │ [4]    Bayraklar: 1 bayt                   │
+    /// │ [5..9) Akış ID: 4 bayt (MSB sıfır/reserved)│
+    /// │ [9..]  Yük: length bayt                    │
+    /// └────────────────────────────────────────────┘
+    /// ```
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(9 + self.payload.len());
-        
-        // Length (24 bits)
+
+        // Length (24 bits) - büyük-endian, 3 bayt
         buf.push(((self.length >> 16) & 0xFF) as u8);
         buf.push(((self.length >> 8) & 0xFF) as u8);
         buf.push((self.length & 0xFF) as u8);
-        
-        // Type (8 bits)
+
+        // Type (8 bits) - çerçeve türü
         buf.push(self.frame_type);
-        
-        // Flags (8 bits)
+
+        // Flags (8 bits) - bayraklar
         buf.push(self.flags);
-        
-        // Stream ID (32 bits, R bit reserved)
+
+        // Stream ID (32 bits, R bit reserved) - en yüksek bit her zaman 0
         buf.extend_from_slice(&self.stream_id.to_be_bytes()[..]);
-        
-        // Payload
+
+        // Payload - asıl veri
         buf.extend_from_slice(&self.payload);
-        
+
         buf
     }
 
-    /// Decode frame from bytes
+    /// Bayt dizisinden çerçeve ayrıştırır (çözümleme).
+    ///
+    /// Başarılı olursa `(çerçeve, tüketilen_bayt_sayısı)` döner.
+    /// Veri yetersizse veya bozuksa `None` döner.
     pub fn decode(data: &[u8]) -> Option<(Self, usize)> {
         if data.len() < 9 {
             return None;
@@ -180,6 +328,7 @@ impl Http2Frame {
         let length = ((data[0] as u32) << 16) | ((data[1] as u32) << 8) | (data[2] as u32);
         let frame_type = data[3];
         let flags = data[4];
+        // Akış ID'nin en yüksek biti (R biti) RFC'de tanımsız; maskelenerek sıfırlanır
         let stream_id = u32::from_be_bytes([data[5], data[6], data[7], data[8]]) & 0x7FFFFFFF;
 
         if data.len() < 9 + length as usize {
@@ -198,23 +347,37 @@ impl Http2Frame {
         Some((frame, 9 + length as usize))
     }
 
-    /// Check END_STREAM flag
+    /// END_STREAM bayrağını kontrol eder.
+    /// Bu bayrak set edilmişse akışta daha fazla veri gelmeyecek demektir.
     pub fn is_end_stream(&self) -> bool {
         (self.flags & 0x01) != 0
     }
 
-    /// Check END_HEADERS flag
+    /// END_HEADERS bayrağını kontrol eder.
+    /// Bu bayrak set edilmişse başlık bloğu tamamlanmıştır.
     pub fn is_end_headers(&self) -> bool {
         (self.flags & 0x04) != 0
     }
 
-    /// Check ACK flag
+    /// ACK bayrağını kontrol eder (PING ve SETTINGS için).
     pub fn is_ack(&self) -> bool {
         (self.flags & 0x01) != 0
     }
 }
 
-/// HTTP/2 Settings
+/// HTTP/2 Ayarları (Settings)
+///
+/// Her iki taraf da bağlantı başlangıcında bir SETTINGS çerçevesi gönderir.
+/// Varsayılan değerler RFC 7540 tarafından tanımlanmıştır.
+///
+/// | Ayar                    | Varsayılan | Açıklama                          |
+/// |-------------------------|------------|-----------------------------------|
+/// | header_table_size       | 4096       | HPACK dinamik tablo boyutu (bayt) |
+/// | enable_push             | true       | Sunucu push etkin?                |
+/// | max_concurrent_streams  | 100        | Aynı anda max açık akış           |
+/// | initial_window_size     | 65535      | Akış kontrolü başlangıç penceresi |
+/// | max_frame_size          | 16384      | En büyük çerçeve yükü (bayt)      |
+/// | max_header_list_size    | 65536      | Max başlık listesi boyutu         |
 #[derive(Clone, Debug)]
 pub struct Http2Settings {
     pub header_table_size: u32,
@@ -238,7 +401,34 @@ impl Default for Http2Settings {
     }
 }
 
-/// HTTP/2 Stream State
+/// HTTP/2 Akış Durumu (Stream State)
+///
+/// Her HTTP/2 akışı bir durum makinesinden geçer:
+///
+/// ```
+///              ┌─────────┐
+///              │  Idle   │
+///              └────┬────┘
+///                   │ open / reserved
+///          ┌────────┴────────┐
+///          ▼                 ▼
+/// ┌──────────────┐    ┌─────────────────┐
+/// │ReservedLocal │    │ ReservedRemote  │
+/// └──────┬───────┘    └────────┬────────┘
+///        │ open                │ open
+///        ▼                     ▼
+///     ┌──────────────────────────┐
+///     │           Open           │
+///     └─────────────┬────────────┘
+///              END_STREAM│
+///       ┌───────────┴──────────┐
+///       ▼                      ▼
+/// HalfClosedLocal       HalfClosedRemote
+///       │                      │
+///       └──────────┬───────────┘
+///                  ▼
+///               Closed
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamState {
     Idle,
@@ -250,7 +440,15 @@ pub enum StreamState {
     Closed,
 }
 
-/// HTTP/2 Stream
+/// HTTP/2 Akışı (Stream)
+///
+/// HTTP/2'de her istek-yanıt çifti tek bir "akış" üzerinde taşınır.
+/// Birden fazla akış aynı TCP bağlantısını paylaşır (multiplexing).
+///
+/// Akış ID kuralları:
+/// - İstemci başlatır: tek sayılar (1, 3, 5, ...)
+/// - Sunucu başlatır: çift sayılar (2, 4, 6, ...)
+/// - Akış 0: bağlantı düzeyinde kontrol mesajları için ayrılmıştır
 #[derive(Clone, Debug)]
 pub struct Http2Stream {
     pub stream_id: u32,
@@ -275,10 +473,43 @@ impl Http2Stream {
 }
 
 // ============================================================================
-// HPACK Header Compression
+// HPACK Başlık Sıkıştırma
 // ============================================================================
+//
+// HPACK (RFC 7541), HTTP/2 başlıklarını sıkıştırmak için tasarlanmıştır.
+// İki tablo kullanır:
+//
+// 1. Statik Tablo: Yaygın başlıkları sabit indekslerle içerir (":method: GET" = 2 gibi).
+// 2. Dinamik Tablo: Oturum boyunca öğrenilen başlıklar eklenir ve önbelleklenir.
+//
+// Kodlama stratejileri:
+//
+// a) İndeksli başlık (tam eşleşme):
+//    ┌────────────────────────────┐
+//    │ 1 │     İndeks (7 bit)     │
+//    └────────────────────────────┘
+//
+// b) Artan indeksleme (isim tabloda, değer yeni):
+//    ┌──────┬──────────────────────┐
+//    │ 01   │   İsim İndeksi       │
+//    ├──────┴──────────────────────┤
+//    │     Değer (string)          │
+//    └─────────────────────────────┘
+//
+// c) Yeni başlık (hem isim hem değer yeni):
+//    ┌──────┬──────┐
+//    │ 0100 0000   │
+//    ├─────────────┤
+//    │ İsim (str)  │
+//    ├─────────────┤
+//    │ Değer (str) │
+//    └─────────────┘
 
-/// HPACK Static Table (partial - first 20 entries)
+/// HPACK Statik Tablo (ilk 20 giriş)
+///
+/// Tüm HTTP/2 uygulamalarında önceden tanımlıdır.
+/// Sık kullanılan `:method: GET` gibi başlıklar kısa indekslerle ifade edilir.
+/// Tam tablo 61 giriş içerir (burada sadece ilk 20'si).
 const STATIC_TABLE: [(&str, &str); 20] = [
     (":authority", ""),
     (":method", "GET"),
@@ -302,7 +533,10 @@ const STATIC_TABLE: [(&str, &str); 20] = [
     ("access-control-allow-origin", ""),
 ];
 
-/// HPACK Encoder
+/// HPACK Kodlayıcı (Encoder)
+///
+/// HTTP başlıklarını ikili forma sıkıştırır.
+/// Sıkıştırma oranını artırmak için dinamik tablo yönetir.
 pub struct HpackEncoder {
     dynamic_table: Vec<(String, String)>,
     dynamic_table_size: usize,
@@ -318,21 +552,24 @@ impl HpackEncoder {
         }
     }
 
-    /// Encode headers
+    /// Başlık haritasını HPACK ikili formatına kodlar.
+    ///
+    /// Her başlık için önce statik tablo kontrol edilir.
+    /// Bulunamazsa dinamik tabloya yeni giriş eklenir.
     pub fn encode(&mut self, headers: &BTreeMap<String, String>) -> Vec<u8> {
         let mut encoded = Vec::new();
 
         for (name, value) in headers {
-            // Check static table first
+            // Önce statik tabloyu tara: tam eşleşme veya sadece isim eşleşmesi ara
             let mut found_static = false;
             for (i, (s_name, s_value)) in STATIC_TABLE.iter().enumerate() {
                 if name == s_name && value == s_value {
-                    // Indexed header field
+                    // Tam eşleşme: sadece indeks gönder (çok verimli)
                     encoded.push(0x80 | (i as u8 + 1));
                     found_static = true;
                     break;
                 } else if name == s_name {
-                    // Literal with incremental indexing
+                    // İsim eşleşmesi: indeks + yeni değer gönder, dinamik tabloya ekle
                     encoded.push(0x40 | (i as u8 + 1));
                     self.encode_string(value, &mut encoded);
                     found_static = true;
@@ -341,12 +578,12 @@ impl HpackEncoder {
             }
 
             if !found_static {
-                // Literal with incremental indexing (new name)
+                // Hiç eşleşme yok: hem isim hem değer olduğu gibi gönderilecek
                 encoded.push(0x40);
                 self.encode_string(name, &mut encoded);
                 self.encode_string(value, &mut encoded);
 
-                // Add to dynamic table
+                // Yeterli yer varsa dinamik tabloya ekle
                 if self.dynamic_table_size + name.len() + value.len() + 32 <= self.max_table_size {
                     self.dynamic_table.push((name.clone(), value.clone()));
                     self.dynamic_table_size += name.len() + value.len() + 32;
@@ -359,7 +596,7 @@ impl HpackEncoder {
 
     fn encode_string(&self, s: &str, buf: &mut Vec<u8>) {
         let bytes = s.as_bytes();
-        
+
         // Use Huffman encoding for efficiency (simplified - just use literal)
         if bytes.len() < 127 {
             buf.push(bytes.len() as u8);
@@ -378,7 +615,10 @@ impl HpackEncoder {
     }
 }
 
-/// HPACK Decoder
+/// HPACK Çözücü (Decoder)
+///
+/// HPACK ikili formatını HTTP başlık haritasına çevirir.
+/// Kodlayıcıyla senkronize dinamik tablo yönetir.
 pub struct HpackDecoder {
     dynamic_table: Vec<(String, String)>,
     max_table_size: usize,
@@ -392,7 +632,13 @@ impl HpackDecoder {
         }
     }
 
-    /// Decode header block
+    /// HPACK başlık bloğunu çözer ve başlık haritası döner.
+    ///
+    /// İlk baytın yüksek bitlerine bakarak kodlama türü belirlenir:
+    /// - 1xxxxxxx: İndeksli başlık (tam tablo araması)
+    /// - 01xxxxxx: Artan indeksleme (dinamik tabloya ekle)
+    /// - 0000xxxx: İndeksleme yok (tabloya ekleme)
+    /// - 0001xxxx: Asla indeksleme (hassas veriler için)
     pub fn decode(&mut self, data: &[u8]) -> Result<BTreeMap<String, String>, HpackError> {
         let mut headers = BTreeMap::new();
         let mut pos = 0;
@@ -401,14 +647,14 @@ impl HpackDecoder {
             let byte = data[pos];
 
             if byte & 0x80 != 0 {
-                // Indexed header field
+                // İndeksli başlık alanı: tüm başlık tabloda
                 let index = (byte & 0x7F) as usize;
                 if let Some((name, value)) = self.get_header(index) {
                     headers.insert(name.to_string(), value.to_string());
                 }
                 pos += 1;
             } else if byte & 0xC0 == 0x40 {
-                // Literal with incremental indexing
+                // Artan indeksleme ile literal: dinamik tabloya ekle
                 let index = (byte & 0x3F) as usize;
                 pos += 1;
 
@@ -427,7 +673,7 @@ impl HpackDecoder {
                 headers.insert(name.clone(), value.clone());
                 self.dynamic_table.insert(0, (name, value));
             } else if byte & 0xF0 == 0x00 {
-                // Literal without indexing
+                // İndeksleme olmadan literal: dinamik tabloya eklenmez
                 let index = (byte & 0x0F) as usize;
                 pos += 1;
 
@@ -444,7 +690,7 @@ impl HpackDecoder {
 
                 headers.insert(name, value);
             } else if byte & 0xF0 == 0x10 {
-                // Literal never indexed
+                // Asla indeksleme: ara proxy'ler bu başlığı tabloya ekleyemez
                 let index = (byte & 0x0F) as usize;
                 pos += 1;
 
@@ -461,7 +707,7 @@ impl HpackDecoder {
 
                 headers.insert(name, value);
             } else if byte == 0x20 {
-                // Dynamic table size update
+                // Dinamik tablo boyutu güncelleme: yeni max boyutu uygula
                 pos += 1;
                 let _size = self.decode_integer(data, &mut pos, 5)?;
             } else {
@@ -541,6 +787,10 @@ impl HpackDecoder {
     }
 }
 
+/// HPACK Hata Türleri
+///
+/// Başlık sıkıştırma/çözme sırasında oluşabilecek hatalar.
+/// `CompressionError` HTTP/2 bağlantısını sonlandırabilecek ciddi bir hata kodu taşır.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HpackError {
     InvalidIndex,
@@ -549,7 +799,22 @@ pub enum HpackError {
     InvalidUtf8,
 }
 
+/// HTTP/2 Bağlantısı
+///
+/// Tek bir TCP bağlantısı üzerinde birden fazla akış yönetir.
+/// HPACK encoder/decoder'ı bağlantı ömrü boyunca paylaşır.
+///
+/// ```
 /// HTTP/2 Connection
+/// ├── Settings (yerel + uzak)
+/// ├── Akışlar BTreeMap<u32, Http2Stream>
+/// │   ├── Akış 1: GET /index.html
+/// │   ├── Akış 3: GET /style.css
+/// │   └── Akış 5: GET /script.js
+/// ├── HPACK Encoder (başlık sıkıştırma)
+/// ├── HPACK Decoder (başlık çözme)
+/// └── Bağlantı penceresi (akış kontrolü)
+/// ```
 pub struct Http2Connection {
     pub settings: Http2Settings,
     pub streams: BTreeMap<u32, Http2Stream>,
@@ -564,14 +829,17 @@ impl Http2Connection {
         Http2Connection {
             settings: Http2Settings::default(),
             streams: BTreeMap::new(),
-            next_stream_id: 1,
+            next_stream_id: 1, // İstemci tek sayılarla başlar
             window_size: 65535,
             encoder: HpackEncoder::new(4096),
             decoder: HpackDecoder::new(4096),
         }
     }
 
-    /// Create new stream
+    /// Yeni bir HTTP/2 akışı oluşturur ve akış ID'sini döner.
+    ///
+    /// İstemci tarafı tek sayı ID'ler kullanır (1, 3, 5...).
+    /// Her yeni akışta ID 2 artırılır.
     pub fn create_stream(&mut self) -> u32 {
         let stream_id = self.next_stream_id;
         self.next_stream_id += 2; // Client-initiated streams use odd numbers
@@ -579,17 +847,23 @@ impl Http2Connection {
         stream_id
     }
 
-    /// Get stream
+    /// Akışı salt okunur olarak döner.
     pub fn get_stream(&self, stream_id: u32) -> Option<&Http2Stream> {
         self.streams.get(&stream_id)
     }
 
-    /// Get stream mutable
+    /// Akışı değiştirilebilir olarak döner.
     pub fn get_stream_mut(&mut self, stream_id: u32) -> Option<&mut Http2Stream> {
         self.streams.get_mut(&stream_id)
     }
 
-    /// Build request headers
+    /// Verilen akış üzerinde HTTP isteği için başlık bloğu oluşturur.
+    ///
+    /// HTTP/2 sözde-başlıkları (pseudo-headers) ':' ile başlar:
+    /// - `:method` → HTTP metodu (GET, POST...)
+    /// - `:path`   → İstek yolu (/index.html)
+    /// - `:scheme` → http veya https
+    /// - `:authority` → Host başlığına karşılık gelir
     pub fn build_request(&mut self, stream_id: u32, method: &str, path: &str, host: &str) -> Vec<u8> {
         let mut headers = BTreeMap::new();
         headers.insert(":method".to_string(), method.to_string());
@@ -601,7 +875,15 @@ impl Http2Connection {
         self.encoder.encode(&headers)
     }
 
-    /// Process received frame
+    /// Gelen HTTP/2 çerçevesini işler.
+    ///
+    /// Çerçeve türüne göre uygun işlem yapılır:
+    /// - SETTINGS: yerel ayarlar güncellenir
+    /// - HEADERS: akış başlıkları HPACK ile çözülür
+    /// - DATA: akış veri tamponu güncellenir
+    /// - WINDOW_UPDATE: akış kontrolü penceresi büyütülür
+    /// - RST_STREAM: akış kaldırılır
+    /// - GOAWAY: bağlantı kapatma hatası
     pub fn process_frame(&mut self, frame: &Http2Frame) -> Result<(), Http2Error> {
         match frame.frame_type {
             FRAME_SETTINGS => {
@@ -673,6 +955,10 @@ impl Default for Http2Connection {
     }
 }
 
+/// HTTP/2 Hata Türleri
+///
+/// RFC 7540 bölüm 7'deki tüm hata kodlarını kapsar.
+/// `GoAway` tüm bağlantının sonlandığını, diğerleri akış düzeyindeki hataları ifade eder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Http2Error {
     ProtocolError,
@@ -691,7 +977,10 @@ pub enum Http2Error {
     GoAway,
 }
 
-/// Get connection preface
+/// HTTP/2 bağlantı ön sözünü döner.
+///
+/// İstemci ilk bağlandığında tam olarak bu 24 baytı göndermelidir.
+/// Bu, sunucunun HTTP/2 konuşulduğunu anlamasını sağlar.
 pub fn connection_preface() -> &'static [u8] {
     CONNECTION_PREFACE
 }

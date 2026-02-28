@@ -1,47 +1,81 @@
-//! # echOS Preemption and Interrupt Safety Module
+//! # echOS Ön İşleme Engelleme (Preemption) ve Kesme Güvenliği Modülü
 //!
-//! Tier 1 OS seviyesinde preempt_count ve interrupt safety
-//! Linux preempt_count ile aynı mantık, Rust optimizasyonları
+//! Tier 1 OS seviyesinde `preempt_count` ve kesme güvenliği yönetimi.
+//! Linux `preempt_count` ile aynı mantık, Rust optimizasyonları ile iyileştirilmiş.
+//!
+//! ## Önişleme (Preemption) Nedir?
+//! Ön işleme, çalışan bir görevin (task) başka bir görev lehine yarıda kesilmesidir.
+//! Bazı kritik bölümlerde (örn: kilit tutarken, kesme işlerken) bu engellenmeli,
+//! aksi hâlde kilitlenme (deadlock) veya veri bozulması yaşanabilir.
+//!
+//! ## preempt_count Bit Düzeni
+//! ```ascii
+//! Bit 0: PREEMPT_DISABLE  - Ön işleme devre dışı
+//! Bit 1: NEED_RESCHED     - Yeniden zamanlama gerekiyor
+//! Bit 2: HARDIRQ          - Donanım kesmesi (IRQ) içinde
+//! Bit 3: SOFTIRQ          - Yazılım kesmesi içinde
+//! Bit 4: NMI              - Maskelenemeyen kesme içinde
+//! Bit 5+: COUNT_OFFSET    - Sayaç ofseti
+//! ```
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
 
-/// Per-CPU preemption counter
+/// Her CPU için ayrı ön işleme sayacı dizisi.
+///
+/// 8192 CPU'ya kadar destek verir. Her CPU kendi sayacına yazar,
+/// bu sayede kilit gerektirmez (lock-free).
 static mut PREEMPT_COUNT: [AtomicU32; 8192] = [const { AtomicU32::new(0) }; 8192];
 
-/// Preemption disable flags (Linux ile uyumlu)
+/// Ön işleme devre dışı bırakma biti (Linux ile uyumlu).
 pub const PREEMPT_DISABLE_BITS: u32 = 1 << 0;      // PREEMPT_DISABLE
+/// Yeniden zamanlama gerektiğini belirten bit.
 pub const PREEMPT_NEED_RESCHED: u32 = 1 << 1;     // NEED_RESCHED
+/// Donanım kesmesi (Hard IRQ) içinde olunduğunu belirten bit.
 pub const PREEMPT_HARDIRQ: u32 = 1 << 2;          // HARDIRQ
+/// Yazılım kesmesi (Soft IRQ) içinde olunduğunu belirten bit.
 pub const PREEMPT_SOFTIRQ: u32 = 1 << 3;          // SOFTIRQ
+/// Maskelenemeyen kesme (NMI) içinde olunduğunu belirten bit.
 pub const PREEMPT_NMI: u32 = 1 << 4;              // NMI
+/// Sayaç ofset biti.
 pub const PREEMPT_COUNT_OFFSET: u32 = 1 << 5;    // COUNT_OFFSET
 
-/// Interrupt context levels
+/// Kesme bağlamı (interrupt context) seviyesi.
+///
+/// Mevcut kodun hangi kesme düzeyinde çalıştığını tanımlar.
+/// None = normal görev bağlamı.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptContext {
+    /// Normal görev bağlamı (kesme yok)
     None,
+    /// Donanım kesmesi bağlamı
     HardIRQ,
+    /// Yazılım kesmesi bağlamı
     SoftIRQ,
+    /// Maskelenemeyen kesme bağlamı
     NMI,
 }
 
-/// Preemption context guard
+/// Ön işleme devre dışı bırakma muhafızı (RAII guard).
+///
+/// Oluşturulduğunda ön işlemeyi devre dışı bırakır,
+/// düşürüldüğünde (Drop) otomatik olarak yeniden etkinleştirir.
+/// Bu pattern, erken dönüş veya panic durumlarında güvenlik sağlar.
 pub struct PreemptDisableGuard {
     cpu_id: u32,
     old_count: u32,
 }
 
 impl PreemptDisableGuard {
-    /// Disable preemption
+    /// Ön işlemeyi devre dışı bırakıp yeni bir muhafız oluşturur.
     pub fn new() -> Self {
         let cpu_id = crate::cpu::smp::current_cpu_id();
         let old_count = preempt_count_inc(cpu_id, PREEMPT_DISABLE_BITS);
-        
+
         Self { cpu_id, old_count }
     }
-    
-    /// Check if preemption is disabled
+
+    /// Ön işlemenin şu an devre dışı olup olmadığını kontrol eder.
     pub fn is_disabled(&self) -> bool {
         let current_count = get_preempt_count(self.cpu_id);
         (current_count & PREEMPT_DISABLE_BITS) != 0
@@ -49,110 +83,129 @@ impl PreemptDisableGuard {
 }
 
 impl Drop for PreemptDisableGuard {
+    /// Muhafız düşürüldüğünde ön işlemeyi otomatik yeniden etkinleştirir.
     fn drop(&mut self) {
         preempt_count_dec(self.cpu_id, PREEMPT_DISABLE_BITS);
     }
 }
 
-/// HardIRQ context guard
+/// Donanım kesmesi (Hard IRQ) bağlamı muhafızı.
+///
+/// Donanım kesmesi işleyicisi çalışırken bu muhafız aktif olur.
+/// `PREEMPT_HARDIRQ` bitini set eder, düşürüldüğünde temizler.
 pub struct HardIRQGuard {
     cpu_id: u32,
     old_count: u32,
 }
 
 impl HardIRQGuard {
-    /// Enter HardIRQ context
+    /// Donanım kesmesi bağlamına girer ve muhafız oluşturur.
     pub fn new() -> Self {
         let cpu_id = crate::cpu::smp::current_cpu_id();
         let old_count = preempt_count_inc(cpu_id, PREEMPT_HARDIRQ);
-        
-        // Memory barrier to ensure ordering
+
+        // Bellek bariyeri: kesme işleyicisi içindeki işlemler dışarıdan önce görülmeli
         smp_mb();
-        
+
         Self { cpu_id, old_count }
     }
-    
-    /// Get current context level
+
+    /// Mevcut kesme bağlamı seviyesini döner.
     pub fn context_level(&self) -> InterruptContext {
         InterruptContext::HardIRQ
     }
 }
 
 impl Drop for HardIRQGuard {
+    /// Donanım kesmesi bağlamından çıkar ve bellek bariyeri uygular.
     fn drop(&mut self) {
         preempt_count_dec(self.cpu_id, PREEMPT_HARDIRQ);
         smp_mb();
     }
 }
 
-/// SoftIRQ context guard
+/// Yazılım kesmesi (Soft IRQ) bağlamı muhafızı.
+///
+/// Ağ paket işleme, zamanlayıcı geri çağrısı gibi ertelenmiş işler
+/// için Soft IRQ bağlamı kullanılır.
 pub struct SoftIRQGuard {
     cpu_id: u32,
     old_count: u32,
 }
 
 impl SoftIRQGuard {
-    /// Enter SoftIRQ context
+    /// Yazılım kesmesi bağlamına girer ve muhafız oluşturur.
     pub fn new() -> Self {
         let cpu_id = crate::cpu::smp::current_cpu_id();
         let old_count = preempt_count_inc(cpu_id, PREEMPT_SOFTIRQ);
-        
+
         smp_mb();
-        
+
         Self { cpu_id, old_count }
     }
-    
-    /// Get current context level
+
+    /// Mevcut kesme bağlamı seviyesini döner.
     pub fn context_level(&self) -> InterruptContext {
         InterruptContext::SoftIRQ
     }
 }
 
 impl Drop for SoftIRQGuard {
+    /// Yazılım kesmesi bağlamından çıkar ve bellek bariyeri uygular.
     fn drop(&mut self) {
         preempt_count_dec(self.cpu_id, PREEMPT_SOFTIRQ);
         smp_mb();
     }
 }
 
-/// NMI context guard
+/// Maskelenemeyen Kesme (NMI) bağlamı muhafızı.
+///
+/// NMI, donanım hataları veya watchdog gibi acil durumlarda tetiklenir.
+/// Bu bağlamda uyku ya da kilit alma gibi işlemler yapılamaz.
 pub struct NMIGuard {
     cpu_id: u32,
     old_count: u32,
 }
 
 impl NMIGuard {
-    /// Enter NMI context
+    /// NMI bağlamına girer ve muhafız oluşturur.
     pub fn new() -> Self {
         let cpu_id = crate::cpu::smp::current_cpu_id();
         let old_count = preempt_count_inc(cpu_id, PREEMPT_NMI);
-        
+
         smp_mb();
-        
+
         Self { cpu_id, old_count }
     }
-    
-    /// Get current context level
+
+    /// Mevcut kesme bağlamı seviyesini döner.
     pub fn context_level(&self) -> InterruptContext {
         InterruptContext::NMI
     }
 }
 
 impl Drop for NMIGuard {
+    /// NMI bağlamından çıkar ve bellek bariyeri uygular.
     fn drop(&mut self) {
         preempt_count_dec(self.cpu_id, PREEMPT_NMI);
         smp_mb();
     }
 }
 
-/// Get current preemption count for CPU
+/// Belirtilen CPU için mevcut ön işleme sayacını döner.
+///
+/// Bu fonksiyon Relaxed sıralama kullanır; çağıran taraf
+/// gerektiğinde bariyer uygulamalıdır.
 pub fn get_preempt_count(cpu_id: u32) -> u32 {
     unsafe {
         PREEMPT_COUNT[cpu_id as usize].load(Ordering::Relaxed)
     }
 }
 
-/// Increment preemption count
+/// Ön işleme sayacını belirtilen bitler kadar artırır.
+///
+/// Sayacı artırdıktan sonra yazma bariyeri uygulayarak
+/// değişikliğin diğer CPU'lara görünür olmasını sağlar.
 pub fn preempt_count_inc(cpu_id: u32, bits: u32) -> u32 {
     unsafe {
         let old_count = PREEMPT_COUNT[cpu_id as usize].fetch_add(bits, Ordering::Relaxed);
@@ -161,7 +214,10 @@ pub fn preempt_count_inc(cpu_id: u32, bits: u32) -> u32 {
     }
 }
 
-/// Decrement preemption count
+/// Ön işleme sayacını belirtilen bitler kadar azaltır.
+///
+/// Sayacı azalttıktan sonra yazma bariyeri uygulayarak
+/// değişikliğin diğer CPU'lara görünür olmasını sağlar.
 pub fn preempt_count_dec(cpu_id: u32, bits: u32) -> u32 {
     unsafe {
         let old_count = PREEMPT_COUNT[cpu_id as usize].fetch_sub(bits, Ordering::Relaxed);
@@ -170,25 +226,29 @@ pub fn preempt_count_dec(cpu_id: u32, bits: u32) -> u32 {
     }
 }
 
-/// Check if preemption is enabled
+/// Geçerli CPU'da ön işlemenin etkin olup olmadığını kontrol eder.
+///
+/// `PREEMPT_DISABLE_BITS` biti temizse ön işleme etkindir.
 pub fn preempt_enabled() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
     (count & PREEMPT_DISABLE_BITS) == 0
 }
 
-/// Check if we're in interrupt context
+/// Geçerli CPU'nun kesme bağlamında (IRQ, SoftIRQ veya NMI) olup olmadığını kontrol eder.
 pub fn in_interrupt() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
     (count & (PREEMPT_HARDIRQ | PREEMPT_SOFTIRQ | PREEMPT_NMI)) != 0
 }
 
-/// Get current interrupt context level
+/// Geçerli CPU'nun kesme bağlamı seviyesini döner.
+///
+/// NMI > HardIRQ > SoftIRQ > None öncelik sırasıyla kontrol edilir.
 pub fn get_interrupt_context() -> InterruptContext {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
-    
+
     if (count & PREEMPT_NMI) != 0 {
         InterruptContext::NMI
     } else if (count & PREEMPT_HARDIRQ) != 0 {
@@ -200,28 +260,30 @@ pub fn get_interrupt_context() -> InterruptContext {
     }
 }
 
-/// Check if we're in NMI context
+/// Geçerli CPU'nun NMI bağlamında olup olmadığını kontrol eder.
 pub fn in_nmi() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
     (count & PREEMPT_NMI) != 0
 }
 
-/// Check if we're in HardIRQ context
+/// Geçerli CPU'nun donanım kesmesi (HardIRQ) bağlamında olup olmadığını kontrol eder.
 pub fn in_hardirq() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
     (count & PREEMPT_HARDIRQ) != 0
 }
 
-/// Check if we're in SoftIRQ context
+/// Geçerli CPU'nun yazılım kesmesi (SoftIRQ) bağlamında olup olmadığını kontrol eder.
 pub fn in_softirq() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
     (count & PREEMPT_SOFTIRQ) != 0
 }
 
-/// Set need reschedule flag
+/// Geçerli CPU için yeniden zamanlama (reschedule) bayrağını ayarlar.
+///
+/// Bu bayrak set edildiğinde, ön işleme etkinleşince zamanlayıcı çalıştırılır.
 pub fn set_need_resched() {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     unsafe {
@@ -230,14 +292,14 @@ pub fn set_need_resched() {
     smp_mb();
 }
 
-/// Check if reschedule is needed
+/// Geçerli CPU'da yeniden zamanlama bayrağının set olup olmadığını kontrol eder.
 pub fn need_resched() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
     (count & PREEMPT_NEED_RESCHED) != 0
 }
 
-/// Clear need reschedule flag
+/// Geçerli CPU için yeniden zamanlama bayrağını temizler.
 pub fn clear_need_resched() {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     unsafe {
@@ -246,17 +308,23 @@ pub fn clear_need_resched() {
     smp_mb();
 }
 
-/// Check if it's safe to preempt
+/// Geçerli bağlamda ön işlemenin güvenli olup olmadığını kontrol eder.
+///
+/// Kesme bağlamında değilse VE ön işleme etkinse güvenlidir.
 pub fn preemptible() -> bool {
     !in_interrupt() && preempt_enabled()
 }
 
-/// Check if it's safe to schedule
+/// Geçerli bağlamda zamanlamanın güvenli olup olmadığını kontrol eder.
+///
+/// NMI veya HardIRQ bağlamında zamanlama yapılamaz.
 pub fn schedulable() -> bool {
     !in_nmi() && !in_hardirq()
 }
 
-/// Preemption statistics
+/// Bir CPU'nun ön işleme durumunu özetleyen yapı.
+///
+/// Hata ayıklama ve izleme amaçlı kullanılır.
 #[derive(Debug, Clone, Copy)]
 pub struct PreemptStats {
     pub cpu_id: u32,
@@ -268,10 +336,11 @@ pub struct PreemptStats {
 }
 
 impl PreemptStats {
+    /// Geçerli CPU'nun ön işleme durumunu anlık görüntü olarak alır.
     pub fn current() -> Self {
         let cpu_id = crate::cpu::smp::current_cpu_id();
         let count = get_preempt_count(cpu_id);
-        
+
         Self {
             cpu_id,
             preempt_count: count,
@@ -281,10 +350,11 @@ impl PreemptStats {
             need_resched: (count & PREEMPT_NEED_RESCHED) != 0,
         }
     }
-    
+
+    /// Belirtilen CPU'nun ön işleme durumunu anlık görüntü olarak alır.
     pub fn for_cpu(cpu_id: u32) -> Self {
         let count = get_preempt_count(cpu_id);
-        
+
         Self {
             cpu_id,
             preempt_count: count,
@@ -304,25 +374,27 @@ impl PreemptStats {
     }
 }
 
-/// Initialize preemption subsystem
+/// Ön işleme alt sistemini başlatır.
+///
+/// Tüm CPU'ların sayaçlarını sıfırlar. Sistem açılışında çağrılmalıdır.
 pub fn init() {
     crate::serial_println!("Preempt: Initializing preemption subsystem");
-    
+
     let cpu_count = crate::cpu::smp::get_cpu_count();
     for cpu_id in 0..cpu_count {
         unsafe {
             PREEMPT_COUNT[cpu_id as usize].store(0, Ordering::Relaxed);
         }
     }
-    
+
     crate::serial_println!("Preempt: Initialized for {} CPUs", cpu_count);
 }
 
-/// Preemption debug utilities
+/// Ön işleme hata ayıklama yardımcıları.
 pub mod debug {
     use super::*;
-    
-    /// Print current preemption state
+
+    /// Geçerli CPU'nun ön işleme durumunu güzel biçimde seri porta yazdırır.
     pub fn print_preempt_state() {
         let stats = PreemptStats::current();
         crate::serial_println!("Preempt State:");
@@ -333,58 +405,66 @@ pub mod debug {
         crate::serial_println!("  Context: {:?}", stats.interrupt_context);
         crate::serial_println!("  Need Resched: {}", stats.need_resched);
     }
-    
-    /// Print all CPU preemption states
+
+    /// Tüm CPU'ların ön işleme durumunu seri porta yazdırır.
     pub fn print_all_cpu_states() {
         let cpu_count = crate::cpu::smp::get_cpu_count();
-        
+
         crate::serial_println!("=== All CPU Preempt States ===");
         for cpu_id in 0..cpu_count {
             let stats = PreemptStats::for_cpu(cpu_id);
-            crate::serial_println!("CPU {}: count=0x{:x}, disabled={}, interrupt={:?}, need_resched={}", 
-                cpu_id, stats.preempt_count, stats.preempt_disabled, 
+            crate::serial_println!("CPU {}: count=0x{:x}, disabled={}, interrupt={:?}, need_resched={}",
+                cpu_id, stats.preempt_count, stats.preempt_disabled,
                 stats.interrupt_context, stats.need_resched);
         }
         crate::serial_println!("=== End CPU States ===");
     }
-    
-    /// Validate preemption consistency
+
+    /// Tüm CPU'lardaki ön işleme durumlarının tutarlılığını doğrular.
+    ///
+    /// Çelişkili durum kombinasyonları (örn: hem kesme bağlamı hem devre dışı)
+    /// bulunursa uyarı yazdırır ve `false` döner.
     pub fn validate_preempt_state() -> bool {
         let cpu_count = crate::cpu::smp::get_cpu_count();
         let mut valid = true;
-        
+
         for cpu_id in 0..cpu_count {
             let stats = PreemptStats::for_cpu(cpu_id);
-            
-            // Check for invalid state combinations
+
+            // Geçersiz durum kombinasyonlarını kontrol et
             if stats.in_interrupt && stats.preempt_disabled {
                 crate::serial_println!("Preempt Warning: CPU {} has both interrupt and disabled", cpu_id);
                 valid = false;
             }
-            
+
             if stats.interrupt_context == InterruptContext::None && stats.in_interrupt {
                 crate::serial_println!("Preempt Error: CPU {} inconsistent interrupt state", cpu_id);
                 valid = false;
             }
         }
-        
+
         valid
     }
 }
 
-/// Preemption-safe sleep
+/// Ön işleme-güvenli uyku fonksiyonu.
+///
+/// Ön işleme etkinse zamanlayıcıyı çağırır; devre dışıysa
+/// döngü ile meşgul bekler (spin wait). Kesme bağlamında çağrılmamalıdır.
 pub fn preemptible_sleep(ticks: usize) {
     if preemptible() {
         crate::task::scheduler::sleep(ticks);
     } else {
-        // Can't sleep, just spin
+        // Uyku yapılamaz, döngü ile meşgul bekle
         for _ in 0..ticks {
             core::hint::spin_loop();
         }
     }
 }
 
-/// Preemption-safe schedule
+/// Ön işleme-güvenli zamanlama fonksiyonu.
+///
+/// Yalnızca zamanlama güvenli bağlamda (NMI veya HardIRQ değilse) çalışır.
 pub fn preemptible_schedule() {
     if schedulable() {
         crate::task::scheduler::schedule();
@@ -394,13 +474,13 @@ pub fn preemptible_schedule() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_preempt_disable() {
         let _guard = PreemptDisableGuard::new();
         assert!(!preempt_enabled());
     }
-    
+
     #[test]
     fn test_interrupt_context() {
         let _guard = HardIRQGuard::new();
@@ -408,7 +488,7 @@ mod tests {
         assert!(in_interrupt());
         assert!(in_hardirq());
     }
-    
+
     #[test]
     fn test_need_resched() {
         set_need_resched();

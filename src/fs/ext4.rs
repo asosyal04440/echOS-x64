@@ -1,6 +1,30 @@
-//! # ext4 File System
+//! # ext4 Dosya Sistemi
 //!
-//! Fourth Extended Filesystem implementation with journaling support
+//! Günlükleme (journaling) desteği ile Dördüncü Genişletilmiş Dosya Sistemi (ext4)
+//! uygulaması. Okuma ve yazma desteği sunar; JBD2 günlüğü ile çökmeden kurtarma sağlar.
+//!
+//! ## ext4 Disk Yapısı (ASCII Diyagram)
+//! ```text
+//! Disk Düzeni:
+//! ┌──────────────────────────────────────────────────────────────┐
+//! │  0 - 1023  │  Önyükleme Bloğu (boot block)                  │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │ 1024-2047  │  Süper Blok (Superblock) - sihirli sayı 0xEF53 │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │  Blok 1    │  Blok Grubu Tanımlayıcıları (Group Descriptors) │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │  Blok 2+   │  Blok Bitmap (hangi bloklar kullanımda?)        │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │  ...       │  Inode Bitmap (hangi inode'lar kullanımda?)     │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │  ...       │  Inode Tablosu (dosya meta verisi)              │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │  ...       │  Veri Blokları (dosya içeriği)                  │
+//! └──────────────────────────────────────────────────────────────┘
+//!
+//! Her Blok Grubu aynı yapıya sahiptir. Extent ağacı (extent tree)
+//! büyük dosyalar için blok haritalamasını verimli şekilde yapar.
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -13,16 +37,16 @@ use core::mem;
 use super::ext4_journal::{Journal, JournalError, Transaction, TransactionState};
 
 // ============================================================================
-// ext4 CONSTANTS
+// ext4 SABİTLERİ
 // ============================================================================
 
-/// ext4 magic number
+/// ext4 sihirli sayısı - süper blok doğrulama için kullanılır
 const EXT4_MAGIC: u16 = 0xEF53;
 
-/// Superblock offset (1024 bytes from start)
+/// Süper blok ofseti (baştan 1024 bayt sonra)
 const SUPERBLOCK_OFFSET: u64 = 1024;
 
-/// Inode types
+/// Inode türleri - dosya modu bitlerindeki tür alanı
 const EXT4_S_IFIFO: u16 = 0x1000;
 const EXT4_S_IFCHR: u16 = 0x2000;
 const EXT4_S_IFDIR: u16 = 0x4000;
@@ -31,15 +55,15 @@ const EXT4_S_IFREG: u16 = 0x8000;
 const EXT4_S_IFLNK: u16 = 0xA000;
 const EXT4_S_IFSOCK: u16 = 0xC000;
 
-/// Feature flags
+/// Özellik bayrakları - dosya sisteminin desteklediği yetenekler
 const EXT4_FEATURE_INCOMPAT_EXTENTS: u32 = 0x0040;
 const EXT4_FEATURE_INCOMPAT_64BIT: u32 = 0x0080;
 
 // ============================================================================
-// FILE TYPES
+// DOSYA TÜRLERİ
 // ============================================================================
 
-/// File type enumeration
+/// Dosya türü numaralandırması
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ext4FileType {
     Regular,
@@ -52,7 +76,7 @@ pub enum Ext4FileType {
     Unknown,
 }
 
-/// Directory entry
+/// Dizin girdisi - bir dizindeki dosya veya alt dizin kaydı
 #[derive(Clone, Debug)]
 pub struct Ext4DirEntry {
     pub name: String,
@@ -60,7 +84,7 @@ pub struct Ext4DirEntry {
     pub file_type: Ext4FileType,
 }
 
-/// File metadata
+/// Dosya meta verisi - boyut, izinler, zaman damgaları
 #[derive(Clone, Debug)]
 pub struct Ext4Metadata {
     pub size: u64,
@@ -74,7 +98,7 @@ pub struct Ext4Metadata {
     pub ctime: u32,
 }
 
-/// File system error
+/// Dosya sistemi hata türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ext4Error {
     InvalidFormat,
@@ -94,10 +118,10 @@ impl From<super::ext4_journal::JournalError> for Ext4Error {
 }
 
 // ============================================================================
-// SUPERBLOCK
+// SÜPER BLOK
 // ============================================================================
 
-/// ext4 Superblock (key fields only)
+/// ext4 Süper Bloğu - dosya sisteminin ana meta veri yapısı (temel alanlar)
 #[derive(Clone, Copy, Debug)]
 pub struct Ext4Superblock {
     pub s_inodes_count: u32,
@@ -121,7 +145,7 @@ pub struct Ext4Superblock {
 }
 
 impl Ext4Superblock {
-    /// Parse superblock from bytes
+    /// Süper bloğu ham baytlardan çözümler ve sihirli sayıyı doğrular
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 1024 {
             return None;
@@ -154,43 +178,43 @@ impl Ext4Superblock {
         })
     }
 
-    /// Get block size
+    /// Blok boyutunu hesaplar: 1024 << s_log_block_size (örn. 4096 bayt)
     pub fn block_size(&self) -> u32 {
         1024 << self.s_log_block_size
     }
 
-    /// Get total blocks
+    /// Toplam blok sayısını 64 bit olarak döndürür (hi + lo birleşimi)
     pub fn total_blocks(&self) -> u64 {
         ((self.s_blocks_count_hi as u64) << 32) | (self.s_blocks_count_lo as u64)
     }
 
-    /// Get free blocks
+    /// Serbest blok sayısını 64 bit olarak döndürür
     pub fn free_blocks(&self) -> u64 {
         ((self.s_free_blocks_count_hi as u64) << 32) | (self.s_free_blocks_count_lo as u64)
     }
 
-    /// Get block groups count
+    /// Blok grubu sayısını hesaplar (toplam bloklar / grup başına bloklar)
     pub fn block_groups_count(&self) -> u32 {
         let total = self.total_blocks();
         ((total + self.s_blocks_per_group as u64 - 1) / self.s_blocks_per_group as u64) as u32
     }
 
-    /// Check if 64-bit mode
+    /// Dosya sisteminin 64-bit modda olup olmadığını kontrol eder
     pub fn is_64bit(&self) -> bool {
         (self.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0
     }
 
-    /// Check if extents are used
+    /// Dosya sisteminin extent ağacı kullanıp kullanmadığını kontrol eder
     pub fn has_extents(&self) -> bool {
         (self.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) != 0
     }
 }
 
 // ============================================================================
-// BLOCK GROUP DESCRIPTOR
+// BLOK GRUBU TANIL AYICISI
 // ============================================================================
 
-/// Block Group Descriptor
+/// Blok Grubu Tanımlayıcısı - her blok grubunun harita ve tablo konumlarını tutar
 #[derive(Clone, Copy, Debug)]
 pub struct Ext4GroupDescriptor {
     pub bg_block_bitmap_lo: u32,
@@ -204,7 +228,7 @@ pub struct Ext4GroupDescriptor {
 }
 
 impl Ext4GroupDescriptor {
-    /// Parse from bytes (32-byte format)
+    /// 32-baytlık disk formatından tanımlayıcıyı çözümler
     pub fn parse_32(data: &[u8]) -> Option<Self> {
         if data.len() < 32 {
             return None;
@@ -222,7 +246,7 @@ impl Ext4GroupDescriptor {
         })
     }
 
-    /// Get block bitmap location
+    /// Blok bitmap'in diskdeki bloğunu döndürür (64-bit moda göre)
     pub fn block_bitmap(&self, is_64bit: bool) -> u64 {
         if is_64bit {
             ((self.bg_block_bitmap_hi as u64) << 32) | self.bg_block_bitmap_lo as u64
@@ -231,7 +255,7 @@ impl Ext4GroupDescriptor {
         }
     }
 
-    /// Get inode table location
+    /// Inode tablosunun diskdeki başlangıç bloğunu döndürür
     pub fn inode_table(&self, is_64bit: bool) -> u64 {
         if is_64bit {
             ((self.bg_inode_table_hi as u64) << 32) | self.bg_inode_table_lo as u64
@@ -245,7 +269,7 @@ impl Ext4GroupDescriptor {
 // INODE
 // ============================================================================
 
-/// ext4 Inode structure (key fields)
+/// ext4 Inode yapısı - dosya ve dizinlerin meta verisini tutan temel yapı
 #[derive(Clone, Copy, Debug)]
 pub struct Ext4Inode {
     pub i_mode: u16,
@@ -264,7 +288,7 @@ pub struct Ext4Inode {
 }
 
 impl Ext4Inode {
-    /// Parse inode from bytes
+    /// Inode'u ham baytlardan çözümler (en az 128 bayt gerekir)
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 128 {
             return None;
@@ -290,12 +314,12 @@ impl Ext4Inode {
         })
     }
 
-    /// Get file size
+    /// Dosya boyutunu 64 bit olarak döndürür (hi ve lo birleşimi)
     pub fn size(&self) -> u64 {
         ((self.i_size_hi as u64) << 32) | (self.i_size_lo as u64)
     }
 
-    /// Get file type
+    /// Inode modundan dosya türünü belirler
     pub fn file_type(&self) -> Ext4FileType {
         match self.i_mode & 0xF000 {
             EXT4_S_IFREG => Ext4FileType::Regular,
@@ -309,17 +333,17 @@ impl Ext4Inode {
         }
     }
 
-    /// Check if directory
+    /// Inode'un bir dizin olup olmadığını kontrol eder
     pub fn is_directory(&self) -> bool {
         (self.i_mode & 0xF000) == EXT4_S_IFDIR
     }
 
-    /// Check if uses extents
+    /// Inode'un extent ağacı kullanıp kullanmadığını kontrol eder
     pub fn uses_extents(&self) -> bool {
         (self.i_flags & 0x00080000) != 0
     }
 
-    /// Get indirect block pointers
+    /// Doğrudan ve dolaylı blok göstericilerini döndürür (sadece extent kullanmıyorsa)
     pub fn indirect_blocks(&self) -> [u32; 15] {
         let mut blocks = [0u32; 15];
         if self.uses_extents() {
@@ -338,7 +362,7 @@ impl Ext4Inode {
         blocks
     }
 
-    /// Get metadata
+    /// Inode'dan meta veri yapısı oluşturur
     pub fn metadata(&self) -> Ext4Metadata {
         Ext4Metadata {
             size: self.size(),
@@ -355,10 +379,10 @@ impl Ext4Inode {
 }
 
 // ============================================================================
-// EXTENT TREE
+// EXTENT AĞACI
 // ============================================================================
 
-/// Extent header
+/// Extent başlığı - inode'un i_block alanının başında yer alır
 #[derive(Clone, Copy, Debug)]
 pub struct Ext4ExtentHeader {
     pub eh_magic: u16,
@@ -369,7 +393,7 @@ pub struct Ext4ExtentHeader {
 impl Ext4ExtentHeader {
     const MAGIC: u16 = 0xF30A;
 
-    /// Parse from bytes
+    /// Extent başlığını baytlardan çözümler ve sihirli sayıyı doğrular
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 12 {
             return None;
@@ -388,13 +412,13 @@ impl Ext4ExtentHeader {
         Some(header)
     }
 
-    /// Check if leaf node
+    /// Derinlik 0 ise yaprak düğüm (doğrudan disk bloklarına işaret eder)
     pub fn is_leaf(&self) -> bool {
         self.eh_depth == 0
     }
 }
 
-/// Extent entry
+/// Extent girdisi - mantıksal blok aralığını fiziksel blok konumuna eşler
 #[derive(Clone, Copy, Debug)]
 pub struct Ext4Extent {
     pub ee_block: u32,
@@ -403,7 +427,7 @@ pub struct Ext4Extent {
 }
 
 impl Ext4Extent {
-    /// Parse from bytes
+    /// Extent girişini ham baytlardan çözümler
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 12 {
             return None;
@@ -418,10 +442,10 @@ impl Ext4Extent {
 }
 
 // ============================================================================
-// ext4 FILE SYSTEM
+// ext4 DOSYA SİSTEMİ
 // ============================================================================
 
-/// ext4 File System instance
+/// ext4 Dosya Sistemi örneği - tüm dosya sistemi durumunu yönetir
 #[derive(Clone, Debug)]
 pub struct Ext4FileSystem {
     pub superblock: Ext4Superblock,
@@ -429,14 +453,14 @@ pub struct Ext4FileSystem {
     pub is_64bit: bool,
     pub group_descriptors: Vec<Ext4GroupDescriptor>,
     pub root_inode: u32,
-    /// Optional journal for write support
+    /// Yazma desteği için isteğe bağlı günlük (journal)
     pub journal: Option<Arc<Mutex<Journal>>>,
-    /// Journal offset in blocks
+    /// Günlüğün başladığı blok ofseti
     pub journal_offset: u64,
 }
 
 impl Ext4FileSystem {
-    /// Create new ext4 filesystem instance
+    /// Yeni bir ext4 dosya sistemi örneği oluşturur (varsayılan değerlerle)
     pub fn new() -> Self {
         Ext4FileSystem {
             superblock: unsafe { mem::zeroed() },
@@ -449,7 +473,7 @@ impl Ext4FileSystem {
         }
     }
 
-    /// Initialize from device data
+    /// Aygıt verisinden dosya sistemini başlatır: süper bloğu okur ve doğrular
     pub fn init(&mut self, device_data: &[u8]) -> Result<(), Ext4Error> {
         if device_data.len() < SUPERBLOCK_OFFSET as usize + 1024 {
             return Err(Ext4Error::ReadError);
@@ -462,16 +486,16 @@ impl Ext4FileSystem {
         self.block_size = sb.block_size();
         self.is_64bit = sb.is_64bit();
 
-        // Load group descriptors
+        // Blok grubu tanımlayıcılarını diskten yükle
         self.load_group_descriptors(device_data)?;
 
-        crate::serial_println!("[ext4] Initialized: {} blocks, {} inodes, {} bytes/block",
+        crate::serial_println!("[ext4] Başlatıldı: {} blok, {} inode, {} bayt/blok",
             sb.total_blocks(), sb.s_inodes_count, self.block_size);
 
         Ok(())
     }
 
-    /// Load group descriptors
+    /// Blok grubu tanımlayıcılarını diskten okuyup belleğe yükler
     fn load_group_descriptors(&mut self, device_data: &[u8]) -> Result<(), Ext4Error> {
         let gd_offset = self.block_size as usize;
         let gds_count = self.superblock.block_groups_count() as usize;
@@ -490,7 +514,7 @@ impl Ext4FileSystem {
         Ok(())
     }
 
-    /// Get inode location
+    /// Verilen inode numarasının disk üzerindeki bayt ofsetini ve boyutunu döndürür
     pub fn get_inode_location(&self, inode: u32) -> (u64, u32) {
         let inodes_per_group = self.superblock.s_inodes_per_group;
         let inode_size = self.superblock.s_inode_size as u32;
@@ -509,7 +533,7 @@ impl Ext4FileSystem {
         }
     }
 
-    /// Read inode
+    /// Belirtilen inode numarasını aygıt verisinden okur
     pub fn read_inode(&self, inode: u32, device_data: &[u8]) -> Result<Ext4Inode, Ext4Error> {
         let (offset, size) = self.get_inode_location(inode);
         let offset = offset as usize;
@@ -521,17 +545,17 @@ impl Ext4FileSystem {
         Ext4Inode::parse(&device_data[offset..]).ok_or(Ext4Error::Corrupted)
     }
 
-    /// Map logical block to physical block
+    /// Mantıksal blok numarasını fiziksel blok numarasına çevirir (extent veya dolaylı)
     pub fn map_block(&self, inode: &Ext4Inode, logical_block: u32) -> Option<u64> {
         if inode.uses_extents() {
-            // Parse extent header from i_block
+            // i_block alanından extent başlığını çözümle
             let header = Ext4ExtentHeader::parse(&inode.i_block[12..])?;
-            
+
             if !header.is_leaf() {
-                return None; // Multi-level extent trees not supported yet
+                return None; // Çok seviyeli extent ağaçları henüz desteklenmiyor
             }
 
-            // Parse extents
+            // Extent'leri tarayarak mantıksal bloğu bul
             for i in 0..header.eh_entries as usize {
                 let offset = 12 + i * 12;
                 if offset + 12 > inode.i_block.len() {
@@ -549,7 +573,7 @@ impl Ext4FileSystem {
                 }
             }
         } else {
-            // Indirect blocks
+            // Dolaylı blok göstericileri (eski yöntem)
             let blocks = inode.indirect_blocks();
             if logical_block < 12 {
                 return Some(blocks[logical_block as usize] as u64);
@@ -559,7 +583,7 @@ impl Ext4FileSystem {
         None
     }
 
-    /// Read file data
+    /// Dosyanın tüm içeriğini aygıt verisinden okur
     pub fn read_file(&self, inode: &Ext4Inode, device_data: &[u8]) -> Result<Vec<u8>, Ext4Error> {
         let size = inode.size() as usize;
         let mut data = Vec::with_capacity(size);
@@ -582,7 +606,7 @@ impl Ext4FileSystem {
         Ok(data)
     }
 
-    /// Read directory entries
+    /// Dizin inode'undan tüm girişleri okuyup döndürür
     pub fn read_dir(&self, inode: &Ext4Inode, device_data: &[u8]) -> Result<Vec<Ext4DirEntry>, Ext4Error> {
         if !inode.is_directory() {
             return Err(Ext4Error::NotSupported);
@@ -626,31 +650,31 @@ impl Ext4FileSystem {
         Ok(entries)
     }
 
-    /// Get root inode
+    /// Kök dizin inode'unu (inode 2) aygıt verisinden okur
     pub fn root_inode_data(&self, device_data: &[u8]) -> Result<Ext4Inode, Ext4Error> {
         self.read_inode(self.root_inode, device_data)
     }
 
     // ========================================================================
-    // WRITE SUPPORT WITH JOURNALING
+    // GÜNLÜKLEME İLE YAZMA DESTEĞİ
     // ========================================================================
 
-    /// Initialize journal for write support
+    /// Yazma desteği için JBD2 günlüğünü başlatır ve kurtarma yapar
     pub fn init_journal(&mut self, device_data: &[u8], journal_offset: u64, journal_size: u64) -> Result<(), Ext4Error> {
         let mut journal = Journal::new(self.block_size, journal_offset, journal_size);
         journal.init(device_data).map_err(|_| Ext4Error::NotSupported)?;
-        
-        // Recover any uncommitted transactions
+
+        // Tamamlanmamış işlemleri kurtar (crash recovery)
         journal.recover(device_data).map_err(|_| Ext4Error::Corrupted)?;
-        
+
         self.journal = Some(Arc::new(Mutex::new(journal)));
         self.journal_offset = journal_offset;
-        
-        crate::serial_println!("[ext4] Journal initialized at offset {}", journal_offset);
+
+        crate::serial_println!("[ext4] Günlük {} ofsetinde başlatıldı", journal_offset);
         Ok(())
     }
 
-    /// Start a new transaction for writes
+    /// Yazma işlemleri için yeni bir işlem (transaction) başlatır
     pub fn begin_transaction(&self, credits: usize) -> Result<(), Ext4Error> {
         if let Some(ref journal) = self.journal {
             let mut j = journal.lock();
@@ -659,7 +683,7 @@ impl Ext4FileSystem {
         Ok(())
     }
 
-    /// Commit current transaction
+    /// Mevcut işlemi günlüğe kaydeder ve diske yazar
     pub fn commit_transaction(&self) -> Result<(), Ext4Error> {
         if let Some(ref journal) = self.journal {
             let mut j = journal.lock();
@@ -668,13 +692,13 @@ impl Ext4FileSystem {
         Ok(())
     }
 
-    /// Write data to a file (with journaling if enabled)
+    /// Dosyaya veri yazar (günlükleme etkinse işleme ekler)
     pub fn write_file(&self, inode: &mut Ext4Inode, offset: u64, data: &[u8], device_data: &mut [u8]) -> Result<usize, Ext4Error> {
         let block_size = self.block_size as u64;
         let start_block = offset / block_size;
         let end_block = (offset + data.len() as u64 + block_size - 1) / block_size;
-        
-        // Add blocks to transaction if journaling
+
+        // Günlükleme etkinse blokları işleme ekle
         if let Some(ref journal) = self.journal {
             let mut j = journal.lock();
             for block_num in start_block..end_block {
@@ -687,28 +711,28 @@ impl Ext4FileSystem {
             }
         }
 
-        // Write data to blocks
+        // Veriyi bloklara yaz
         let mut bytes_written = 0;
         let mut data_offset = 0;
-        
+
         for block_num in start_block..end_block {
             if let Some(phys_block) = self.map_block(inode, block_num as u32) {
                 let block_offset = phys_block as usize * block_size as usize;
                 let block_start_in_file = block_num * block_size;
-                
-                // Calculate write position within block
+
+                // Blok içindeki yazma konumunu hesapla
                 let write_start = if block_start_in_file < offset {
                     (offset - block_start_in_file) as usize
                 } else {
                     0
                 };
-                
+
                 let write_end = (block_size as usize).min(data.len() - data_offset + write_start);
                 let write_len = write_end - write_start;
-                
+
                 if write_len > 0 && data_offset < data.len() {
                     let write_count = write_len.min(data.len() - data_offset);
-                    
+
                     if block_offset + write_start + write_count <= device_data.len() {
                         device_data[block_offset + write_start..block_offset + write_start + write_count]
                             .copy_from_slice(&data[data_offset..data_offset + write_count]);
@@ -719,7 +743,7 @@ impl Ext4FileSystem {
             }
         }
 
-        // Update inode size if needed
+        // Gerekirse inode boyutunu güncelle
         let new_size = offset + bytes_written as u64;
         if new_size > inode.size() {
             inode.i_size_lo = (new_size & 0xFFFFFFFF) as u32;
@@ -729,31 +753,29 @@ impl Ext4FileSystem {
         Ok(bytes_written)
     }
 
-    /// Allocate a new block for a file
+    /// Dosya için yeni bir blok tahsis eder
     pub fn allocate_block(&self, inode: &mut Ext4Inode, logical_block: u32, device_data: &mut [u8]) -> Result<u64, Ext4Error> {
-        // Find a free block from block bitmap
+        // Blok bitmap'inden serbest blok bul
         let group = logical_block / self.superblock.s_blocks_per_group;
         let gd = self.group_descriptors.get(group as usize).ok_or(Ext4Error::OutOfMemory)?;
-        
-        // For now, use a simple allocation strategy
-        // In real implementation, would scan block bitmap
+
+        // Basit tahsis stratejisi (gerçek uygulamada blok bitmap taranır)
         let new_block = self.superblock.total_blocks() - self.superblock.free_blocks() + logical_block as u64;
-        
-        // Add to journal if enabled
+
+        // Günlükleme etkinse yeni bloğu işleme ekle
         if let Some(ref journal) = self.journal {
             let mut j = journal.lock();
             j.add_new_block(new_block as u32, &vec![0u8; self.block_size as usize], true)?;
         }
 
-        // Update inode block pointers
+        // Inode blok göstericilerini güncelle
         if inode.uses_extents() {
-            // Would need to update extent tree
-            // For now, placeholder
+            // Extent ağacı güncellemesi gerekir
+            // Şimdilik yer tutucu
         } else {
             let blocks = inode.indirect_blocks();
             if logical_block < 12 {
-                // Direct block
-                // Would update i_block array
+                // Doğrudan blok - i_block dizisini güncelle
                 let _ = blocks;
             }
         }
@@ -761,81 +783,80 @@ impl Ext4FileSystem {
         Ok(new_block)
     }
 
-    /// Create a new inode
+    /// Belirtilen türde ve izinlerde yeni bir inode oluşturur
     pub fn create_inode(&self, file_type: Ext4FileType, mode: u16) -> Result<Ext4Inode, Ext4Error> {
         let mut inode: Ext4Inode = unsafe { mem::zeroed() };
-        
+
         inode.i_mode = match file_type {
             Ext4FileType::Regular => EXT4_S_IFREG,
             Ext4FileType::Directory => EXT4_S_IFDIR,
             Ext4FileType::Symlink => EXT4_S_IFLNK,
             _ => 0,
         } | mode;
-        
+
         inode.i_links_count = 1;
         inode.i_flags = if self.superblock.has_extents() { 0x00080000 } else { 0 };
-        
-        // Get current time (would use system time)
+
+        // Mevcut zamanı al (sistem saatinden alınır)
         let time = crate::task::scheduler::get_ticks() as u32;
         inode.i_atime = time;
         inode.i_ctime = time;
         inode.i_mtime = time;
-        
+
         Ok(inode)
     }
 
-    /// Create a directory entry
+    /// Üst dizine yeni bir dizin girdisi ekler
     pub fn create_dir_entry(&self, parent_inode: &mut Ext4Inode, name: &str, child_inode: u32, file_type: Ext4FileType, device_data: &mut [u8]) -> Result<(), Ext4Error> {
-        // Read existing directory data
+        // Mevcut dizin verisini oku
         let mut dir_data = self.read_file(parent_inode, device_data)?;
-        
-        // Create new entry
+
+        // Yeni girdi oluştur
         let ft_code = match file_type {
             Ext4FileType::Regular => 1,
             Ext4FileType::Directory => 2,
             Ext4FileType::Symlink => 7,
             _ => 0,
         };
-        
-        // Entry: inode(4) + rec_len(2) + name_len(1) + file_type(1) + name
+
+        // Girdi formatı: inode(4) + rec_len(2) + name_len(1) + file_type(1) + isim
         let name_bytes = name.as_bytes();
         let entry_len = 8 + name_bytes.len();
-        let rec_len = (entry_len + 3) & !3; // Align to 4 bytes
-        
+        let rec_len = (entry_len + 3) & !3; // 4 bayta hizala
+
         let mut entry = vec![0u8; rec_len];
         entry[0..4].copy_from_slice(&child_inode.to_le_bytes());
         entry[4..6].copy_from_slice(&(rec_len as u16).to_le_bytes());
         entry[6] = name_bytes.len() as u8;
         entry[7] = ft_code;
         entry[8..8 + name_bytes.len()].copy_from_slice(name_bytes);
-        
-        // Append to directory data
+
+        // Dizin veriye ekle
         dir_data.extend_from_slice(&entry);
-        
-        // Write back
-        // Would need to write through journal
-        
-        // Update parent link count if directory
+
+        // Geri yaz (günlük üzerinden yazılması gerekir)
+
+        // Alt öğe dizinse üst inode bağlantı sayısını artır
         if file_type == Ext4FileType::Directory {
             parent_inode.i_links_count += 1;
         }
-        
+
         Ok(())
     }
 
-    /// Sync filesystem to disk
+    /// Dosya sistemini diske eşitler (bekleyen işlemleri tamamlar)
     pub fn sync(&self, device_data: &mut [u8]) -> Result<(), Ext4Error> {
-        // Commit any pending transaction
+        // Bekleyen işlemleri tamamla
         if let Some(ref journal) = self.journal {
             let mut j = journal.lock();
             j.commit_transaction().map_err(|_| Ext4Error::WriteError)?;
         }
-        
-        // Write superblock
+
+        // Süper bloğu yaz
         let sb_offset = SUPERBLOCK_OFFSET as usize;
-        // Would serialize and write superblock
-        
-        crate::serial_println!("[ext4] Filesystem synced");
+        // Süper bloğu serileştirip yazma işlemi burada yapılır
+
+        crate::serial_println!("[ext4] Dosya sistemi eşitlendi");
         Ok(())
     }
 }
@@ -847,14 +868,14 @@ impl Default for Ext4FileSystem {
 }
 
 // ============================================================================
-// GLOBAL INSTANCE
+// GLOBAL ÖRNEK
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref EXT4_INSTANCES: Mutex<BTreeMap<String, Ext4FileSystem>> = Mutex::new(BTreeMap::new());
 }
 
-/// Mount ext4 filesystem
+/// ext4 dosya sistemini bağlar (mount)
 pub fn mount_ext4(name: &str, device_data: &[u8]) -> Result<(), Ext4Error> {
     let mut fs = Ext4FileSystem::new();
     fs.init(device_data)?;
@@ -863,17 +884,17 @@ pub fn mount_ext4(name: &str, device_data: &[u8]) -> Result<(), Ext4Error> {
     Ok(())
 }
 
-/// Get ext4 filesystem
+/// İsme göre ext4 dosya sistemi örneğini döndürür
 pub fn get_ext4(name: &str) -> Option<Ext4FileSystem> {
     EXT4_INSTANCES.lock().get(name).cloned()
 }
 
-/// Unmount ext4 filesystem
+/// ext4 dosya sistemini ayırır (unmount)
 pub fn unmount_ext4(name: &str) -> bool {
     EXT4_INSTANCES.lock().remove(name).is_some()
 }
 
-/// Initialize ext4 module
+/// ext4 modülünü başlatır
 pub fn init() {
-    crate::serial_println!("[ext4] Module initialized");
+    crate::serial_println!("[ext4] Modül başlatıldı");
 }

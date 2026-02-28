@@ -2,6 +2,25 @@
 //!
 //! IDE/ATA disk sürücüsü implementasyonu.
 //! Disk algılama, sektör okuma/yazma ve IDENTIFY komutlarını destekler.
+//!
+//! ## ATA PIO Komut Akışı
+//!
+//! ```
+//!  CPU                     ATA Denetleyici               Disk
+//!   |                           |                           |
+//!   |-- select_drive(lba) ----->|                           |
+//!   |-- cmd yazma ------------->|-- komut fiziksel gönder ->|
+//!   |                           |<-- BSY=1 (meşgul) --------|
+//!   |-- wait_busy() loop ------>|                           |
+//!   |                           |<-- DRQ=1 (veri hazır) ----|
+//!   |-- data okuma (256 word) ->|<-- 512 byte veri ---------|
+//!   |   (her word 16 bit)       |                           |
+//! ```
+//!
+//! - **LBA28**: 28-bit mantıksal blok adresleme, ~128 GB'a kadar disk desteği.
+//! - **LBA48**: 48-bit adresleme, günümüz büyük diskler için.
+//! - **PIO**: Programmed I/O — DMA olmadan CPU tüm veriyi port üzerinden taşır.
+//!   Yavaş ama basit; eğitim amaçlı idealdir.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -27,7 +46,10 @@ mod status {
     pub const ERR: u8 = 0x01; // Hata
 }
 
-/// ATA hata tipleri
+/// ATA sürücüsü hata türleri.
+///
+/// PIO modunda disk okuma/yazma işlemleri sırasında oluşabilecek hatalar.
+/// Her varyant farklı bir hata durumunu temsil eder.
 #[derive(Debug, Clone, Copy)]
 pub enum AtaError {
     DriveNotFound,

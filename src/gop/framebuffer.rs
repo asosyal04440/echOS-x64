@@ -70,19 +70,19 @@ impl Framebuffer {
 
     /// Dikdörtgen çerçevesi çizer (outline).
     pub fn draw_rect_outline(&mut self, x: usize, y: usize, width: usize, height: usize, color: u32) {
-        // Top edge
+        // Üst kenar
         for i in 0..width {
             self.plot_pixel(x + i, y, color);
         }
-        // Bottom edge
+        // Alt kenar
         for i in 0..width {
             self.plot_pixel(x + i, y + height - 1, color);
         }
-        // Left edge
+        // Sol kenar
         for j in 0..height {
             self.plot_pixel(x, y + j, color);
         }
-        // Right edge
+        // Sağ kenar
         for j in 0..height {
             self.plot_pixel(x + width - 1, y + j, color);
         }

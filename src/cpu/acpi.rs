@@ -1,5 +1,44 @@
 //! # echOS ACPI (Advanced Configuration and Power Interface) Modülü
 //!
+//! ## ACPI Nedir?
+//! ACPI (Gelişmiş Yapılandırma ve Güç Arabirimi), Intel ve Microsoft tarafından 1996 yılında
+//! tasarlanan, işletim sisteminin donanımı keşfetmesine ve güç yönetimini kontrol etmesine
+//! olanak tanıyan bir standarttır. BIOS/firmware ile işletim sistemi arasındaki "köprü" rolünü
+//! üstlenir. Sabit kodlanmış donanım bilgisi yerine, firmware içindeki tablolar ve küçük
+//! programlar (AML bytecode) aracılığıyla donanım tanımlanır.
+//!
+//! ## ACPI Tablo Hiyerarşisi
+//! ```text
+//!  ┌─────────────────────────────────────────────────────────────┐
+//!  │  RSDP (Root System Description Pointer)                     │
+//!  │  → Bellekte sabit adreste (BIOS ROM / UEFI Config Table)    │
+//!  └───────────────┬─────────────────────────────────────────────┘
+//!                  │
+//!          ┌───────▼────────┐
+//!          │  XSDT / RSDT   │  ← Tüm diğer tablolara işaret eder
+//!          │  (Root Table)  │
+//!          └───┬───┬───┬────┘
+//!              │   │   │
+//!    ┌─────────▼┐ ┌▼──▼──────────────────────────────────┐
+//!    │  FADT    │ │  MADT  │  SRAT  │  MCFG  │  DMAR  ...│
+//!    │(Güç Yön.)│ │(APIC)  │(NUMA)  │(PCIe)  │(IOMMU)    │
+//!    └────┬─────┘ └────────────────────────────────────────┘
+//!         │
+//!    ┌────▼─────┐
+//!    │   DSDT   │  ← AML bytecode içerir (cihaz tanımları, güç methodları)
+//!    └──────────┘
+//! ```
+//!
+//! ## Güç Durumları (Sleep States / S-States)
+//! ```text
+//!  S0  → Tam Açık   : Sistem çalışıyor, en yüksek güç tüketimi
+//!  S1  → Uyku       : CPU durduruldu, önbellek temizlendi, RAM güçlü
+//!  S2  → Uyku       : S1'e benzer; CPU kapalı, platform bağımlı
+//!  S3  → Askı       : RAM hariç tüm güç kapalı (DRAM Refresh devam)
+//!  S4  → Hazırda Bek: RAM içeriği diske yazıldı; bellek de kapalı
+//!  S5  → Soft Off   : Sistem kapalı; güç düğmesiyle açılabilir
+//! ```
+//!
 //! ACPI tablo parsing, power management ve CPU/Memory topology discovery.
 //! Minimal ACPICA subset implementasyonu.
 
@@ -9,79 +48,88 @@ use core::mem;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-/// RSDP (Root System Description Pointer) signature
+/// RSDP (Root System Description Pointer) — ACPI'nin bellekteki başlangıç noktası.
+/// Bu imza, BIOS ROM bölgesinde veya UEFI yapılandırma tablosunda aranır.
 const RSDP_SIGNATURE: &[u8; 8] = b"RSD PTR ";
 
-/// ACPI tablo signature'ları
-const FADT_SIGNATURE: &[u8; 4] = b"FACP";
-const MADT_SIGNATURE: &[u8; 4] = b"APIC";
-const SRAT_SIGNATURE: &[u8; 4] = b"SRAT";
-const SLIT_SIGNATURE: &[u8; 4] = b"SLIT";
+/// ACPI tablo imzaları — her tablonun ilk 4 baytı bu sabit dizelerle eşleşir.
+/// Firmware bu tablolara bellek adreslerini XSDT/RSDT üzerinden bildirir.
+const FADT_SIGNATURE: &[u8; 4] = b"FACP"; // Fixed ACPI Description Table (Güç yönetimi kayıtları)
+const MADT_SIGNATURE: &[u8; 4] = b"APIC"; // Multiple APIC Description Table (CPU/IO APIC listesi)
+const SRAT_SIGNATURE: &[u8; 4] = b"SRAT"; // System Resource Affinity Table (NUMA topolojisi)
+const SLIT_SIGNATURE: &[u8; 4] = b"SLIT"; // System Locality Information Table (NUMA mesafeleri)
 #[allow(dead_code)]
-const SSDT_SIGNATURE: &[u8; 4] = b"SSDT";
-const MCFG_SIGNATURE: &[u8; 4] = b"MCFG";
-const DMAR_SIGNATURE: &[u8; 4] = b"DMAR";
+const SSDT_SIGNATURE: &[u8; 4] = b"SSDT"; // Secondary System Description Table (ek AML kod)
+const MCFG_SIGNATURE: &[u8; 4] = b"MCFG"; // PCIe Memory-Mapped Config adresi
+const DMAR_SIGNATURE: &[u8; 4] = b"DMAR"; // DMA Remapping (Intel VT-d / IOMMU tablosu)
+
+/// Hatalı/devasa tabloların parse edilmesini önlemek için maksimum tablo boyutu (1 MB)
 const MAX_ACPI_TABLE_SIZE: u32 = 1024 * 1024;
+
+/// UEFI firmware tarafından sağlanan RSDP adresi; boot aşamasında set_uefi_rsdp_address ile doldurulur.
 static UEFI_RSDP_ADDRESS: AtomicU64 = AtomicU64::new(0);
 
-/// Global ACPI durumu
+/// Global ACPI durumu — Mutex ile korunur; herhangi bir CPU'dan güvenli erişim sağlar.
 pub static ACPI_STATE: Mutex<AcpiState> = Mutex::new(AcpiState::new());
 
-/// ACPI durum yapısı
+/// Tüm ACPI tablo parse sonuçlarını ve güç yönetimi parametrelerini tutan ana yapı.
+/// Bu yapıdaki veriler `parse_acpi_tables()` tarafından doldurulur ve
+/// `acpi_shutdown()`, `acpi_reboot()` gibi fonksiyonlar tarafından kullanılır.
 pub struct AcpiState {
-    /// RSDP adresi
+    /// RSDP'nin bellekteki fiziksel adresi
     pub rsdp_address: u64,
-    /// XSDT (Extended System Description Table) adresi
+    /// XSDT (Extended System Description Table) fiziksel adresi — 64-bit pointer listesi
     pub xsdt_address: u64,
-    /// FADT (Fixed ACPI Description Table) adresi
+    /// FADT (Fixed ACPI Description Table) fiziksel adresi — güç kayıtları burada
     pub fadt_address: u64,
-    /// MADT (Multiple APIC Description Table) adresi
+    /// MADT (Multiple APIC Description Table) fiziksel adresi — CPU APIC ID'leri burada
     pub madt_address: u64,
-    /// SRAT (System Resource Affinity Table) adresi
+    /// SRAT (System Resource Affinity Table) fiziksel adresi — NUMA node haritası
     pub srat_address: u64,
-    /// SLIT (System Locality Information Table) adresi
+    /// SLIT (System Locality Information Table) fiziksel adresi — NUMA mesafe matrisi
     pub slit_address: u64,
     pub mcfg_address: u64,
     pub dmar_address: u64,
-    /// Tespit edilen tablolar
+    /// Bellekte tespit edilen tüm ACPI tablolarının listesi
     pub tables: Vec<AcpiTable>,
-    /// CPU bilgileri
+    /// MADT'den çıkarılan CPU bilgileri (APIC ID'ler, sayısı, BSP)
     pub cpu_info: AcpiCpuInfo,
     pub ioapics: Vec<IoApicInfo>,
     pub interrupt_overrides: Vec<InterruptOverride>,
     pub mcfg_entries: Vec<PciEcamInfo>,
     pub dmar_units: Vec<DmarDrhd>,
 
-    // ── Power Management (FADT'den okunur) ──
-    /// PM1a Control Block I/O port adresi
+    // ── Güç Yönetimi Kayıtları (FADT'den okunur) ──
+    /// PM1a Kontrol Bloğu I/O port adresi — SLP_TYP ve SLP_EN bitleri buraya yazılır
     pub pm1a_cnt_blk: u16,
-    /// PM1b Control Block I/O port adresi (0 = yok)
+    /// PM1b Kontrol Bloğu I/O port adresi (0 = bu blok yok)
     pub pm1b_cnt_blk: u16,
-    /// ACPI S5 (shutdown) sleep type A değeri (DSDT \_S5'den okunur)
+    /// ACPI S5 (Soft Off / kapatma) uyku türü A değeri — DSDT \_S5 nesnesinden okunur
     pub slp_typ_s5_a: u16,
-    /// ACPI S5 sleep type B değeri
+    /// ACPI S5 uyku türü B değeri — PM1b_CNT'ye yazılır
     pub slp_typ_s5_b: u16,
-    /// ACPI Enable komutu (SMI CMD ile gönderilir)
+    /// ACPI etkinleştirme komutu — bu değer SMI_CMD portuna yazılarak ACPI modu aktifleştirilir
     pub acpi_enable_cmd: u8,
-    /// SMI Command port
+    /// SMI Komut Portu — ACPI_ENABLE ve ACPI_DISABLE komutları bu port üzerinden gönderilir
     pub smi_cmd_port: u32,
-    /// PM1a Event Block adresi
+    /// PM1a Olay Bloğu I/O adresi — güç düğmesi, uyku düğmesi olayları buradan okunur
     pub pm1a_evt_blk: u16,
-    /// RESET register adresi (Generic Address Structure)
+    /// RESET kaydının fiziksel adresi (Generic Address Structure formatında)
     pub reset_reg_addr: u64,
-    /// RESET register adres uzayı (0=bellek, 1=I/O)
+    /// RESET kaydının adres uzayı: 0=sistem belleği, 1=I/O uzayı, 2=PCI yapılandırma uzayı
     pub reset_reg_space: u8,
-    /// RESET register değeri
+    /// RESET kaydına yazılacak sihirli değer
     pub reset_value: u8,
-    /// FADT flags (bit 10 = RESET_REG_SUP)
+    /// FADT bayrakları — bit 10 (RESET_REG_SUP) donanım sıfırlama desteğini gösterir
     pub fadt_flags: u32,
-    /// SCI interrupt numarası
+    /// SCI (System Control Interrupt) numarası — ACPI olayları bu IRQ üzerinden gelir
     pub sci_interrupt: u16,
-    /// FADT başarıyla parse edildi mi?
+    /// FADT başarıyla parse edildi mi; false ise güç yönetimi işlemleri fallback kullanır
     pub fadt_parsed: bool,
 }
 
-/// ACPI tablo yapısı
+/// Parse edilen bir ACPI tablosunu temsil eden hafif yapı.
+/// Gerçek tablo verisi bellekte orijinal adresinde durur; buradan sadece işaret edilir.
 #[derive(Debug, Clone)]
 pub struct AcpiTable {
     pub signature: [u8; 4],
@@ -89,21 +137,24 @@ pub struct AcpiTable {
     pub length: u32,
 }
 
-/// ACPI CPU bilgileri
+/// MADT'den çıkarılan CPU topoloji bilgileri.
+/// Çok çekirdekli/çok işlemcili sistemlerde AP'leri başlatmak için kullanılır.
 #[derive(Debug, Clone)]
 pub struct AcpiCpuInfo {
-    /// Toplam CPU sayısı
+    /// Sistemde tespit edilen toplam CPU sayısı (BSP + AP'ler)
     pub cpu_count: u32,
-    /// BSP (Bootstrap Processor) APIC ID
+    /// BSP (Bootstrap Processor) APIC ID — işletim sistemini ilk başlatan CPU
     pub bsp_apic_id: u32,
-    /// APIC base adresi
+    /// Local APIC'in MMIO taban adresi (varsayılan: 0xFEE00000)
     pub apic_base: u64,
-    /// CPU listesi (APIC ID'ler)
+    /// Her CPU'nun APIC ID'sini içeren liste — AP başlatma sırasında kullanılır
     pub cpu_list: Vec<u32>,
-    /// NUMA node bilgileri
+    /// NUMA düğüm bilgileri — hangi CPU hangi bellek bankasına yakın
     pub numa_nodes: Vec<NumaNode>,
 }
 
+/// Bir IO-APIC biriminin kimlik ve adres bilgisi.
+/// Sistemde birden fazla IO-APIC olabilir; her biri farklı IRQ aralıklarını (GSI) yönetir.
 #[derive(Debug, Clone)]
 pub struct IoApicInfo {
     pub id: u8,
@@ -111,6 +162,8 @@ pub struct IoApicInfo {
     pub gsi_base: u32,
 }
 
+/// ISA IRQ'larının GSI'ye yeniden eşlenmesini tanımlar.
+/// Örneğin: IRQ0 (PIT zamanlayıcı) genelde GSI 2'ye yönlendirilir.
 #[derive(Debug, Clone)]
 pub struct InterruptOverride {
     pub bus: u8,
@@ -119,6 +172,8 @@ pub struct InterruptOverride {
     pub flags: u16,
 }
 
+/// PCIe ECAM (Enhanced Configuration Access Mechanism) bölge tanımı.
+/// MCFG tablosundan okunur; PCIe yapılandırma uzayına MMIO ile erişimi sağlar.
 #[derive(Debug, Clone)]
 pub struct PciEcamInfo {
     pub base_address: u64,
@@ -127,6 +182,7 @@ pub struct PciEcamInfo {
     pub end_bus: u8,
 }
 
+/// DMAR tablosu içindeki bir PCI cihazının konum bilgisi (bus:device.function)
 #[derive(Debug, Clone)]
 pub struct DmarDeviceScope {
     pub bus: u8,
@@ -134,6 +190,8 @@ pub struct DmarDeviceScope {
     pub function: u8,
 }
 
+/// DMAR DRHD (DMA Remapping Hardware Unit Definition) kaydı.
+/// Her DRHD, bir VT-d donanım birimini ve onun kapsamındaki cihazları tanımlar.
 #[derive(Debug, Clone)]
 pub struct DmarDrhd {
     pub segment: u16,
@@ -142,7 +200,9 @@ pub struct DmarDrhd {
     pub devices: Vec<DmarDeviceScope>,
 }
 
-/// NUMA node yapısı
+/// NUMA (Non-Uniform Memory Access) düğüm tanımı.
+/// Büyük sunucu sistemlerinde her CPU kümesinin kendi lokal belleği vardır;
+/// lokal belleğe erişim, uzak belleğe erişimden çok daha hızlıdır.
 #[derive(Debug, Clone)]
 pub struct NumaNode {
     pub node_id: u32,
@@ -152,7 +212,8 @@ pub struct NumaNode {
 }
 
 impl AcpiState {
-    /// Yeni ACPI durumu oluşturur
+    /// Varsayılan (sıfır) değerlerle yeni bir ACPI durum nesnesi oluşturur.
+    /// Bu fonksiyon `const` olduğundan derleme zamanında statik değişken olarak kullanılabilir.
     pub const fn new() -> Self {
         Self {
             rsdp_address: 0,
@@ -192,7 +253,11 @@ impl AcpiState {
     }
 }
 
-/// RSDP (Root System Description Pointer) yapısı
+/// RSDP (Root System Description Pointer) ham bellek yapısı.
+///
+/// ACPI 1.0'da 20 bayt, ACPI 2.0+'da 36 bayt uzunluğundadır.
+/// `revision` alanı sürümü belirtir: 0 = ACPI 1.0, 2 = ACPI 2.0+.
+/// ACPI 2.0+'da `xsdt_address` kullanılır (64-bit); 1.0'da `rsdt_address` (32-bit).
 #[repr(C, packed)]
 struct Rsdp {
     signature: [u8; 8],
@@ -206,7 +271,9 @@ struct Rsdp {
     reserved: [u8; 3],
 }
 
-/// SDT (System Description Table) header yapısı
+/// SDT (System Description Table) ortak başlık yapısı.
+/// FADT, MADT, SRAT dahil tüm ACPI tablolarının başında bu 36 baytlık başlık bulunur.
+/// `checksum` alanı, tablo baytlarının toplamının 0'a eşit olmasını zorunlu kılar.
 #[repr(C, packed)]
 struct SdtHeader {
     signature: [u8; 4],
@@ -220,45 +287,47 @@ struct SdtHeader {
     creator_revision: u32,
 }
 
-/// MADT (Multiple APIC Description Table) yapısı
+/// MADT (Multiple APIC Description Table) tablo başlığı.
+/// Bu tablo sistemdeki tüm Local APIC ve IO-APIC birimlerini listeler.
+/// Çok CPU'lu sistemlerde SMP başlatma için kritik tablodur.
 #[repr(C, packed)]
 struct Madt {
     header: SdtHeader,
     local_apic_address: u32,
     flags: u32,
-    // Entries follow
+    // Kayıtlar devamında gelir (değişken uzunluklu girişler)
 }
 
-/// MADT entry tipleri
-const MADT_ENTRY_LOCAL_APIC: u8 = 0;
-const MADT_ENTRY_IO_APIC: u8 = 1;
-const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;
+/// MADT giriş tipi sabitleri — her giriş farklı bir donanım bileşenini tanımlar.
+const MADT_ENTRY_LOCAL_APIC: u8 = 0;             // 32-bit APIC ID'li CPU
+const MADT_ENTRY_IO_APIC: u8 = 1;               // IO-APIC birimi
+const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;    // IRQ → GSI yönlendirme
 #[allow(dead_code)]
-const MADT_ENTRY_NMI: u8 = 4;
+const MADT_ENTRY_NMI: u8 = 4;                   // Non-Maskable Interrupt kaynağı
 #[allow(dead_code)]
-const MADT_ENTRY_LOCAL_APIC_NMI: u8 = 5;
-const MADT_ENTRY_LOCAL_APIC_ADDRESS_OVERRIDE: u8 = 6;
+const MADT_ENTRY_LOCAL_APIC_NMI: u8 = 5;        // CPU'ya bağlı NMI
+const MADT_ENTRY_LOCAL_APIC_ADDRESS_OVERRIDE: u8 = 6; // APIC taban adresi geçersizleme
 #[allow(dead_code)]
-const MADT_ENTRY_IO_SAPIC: u8 = 7;
+const MADT_ENTRY_IO_SAPIC: u8 = 7;              // IA-64 IO-SAPIC
 #[allow(dead_code)]
-const MADT_ENTRY_LOCAL_SAPIC: u8 = 8;
+const MADT_ENTRY_LOCAL_SAPIC: u8 = 8;           // IA-64 Local SAPIC
 #[allow(dead_code)]
-const MADT_ENTRY_PLATFORM_INTERRUPT: u8 = 9;
-const MADT_ENTRY_LOCAL_X2APIC: u8 = 10;
+const MADT_ENTRY_PLATFORM_INTERRUPT: u8 = 9;    // Platform interrupt kaynakları
+const MADT_ENTRY_LOCAL_X2APIC: u8 = 10;         // x2APIC (>255 CPU desteği için)
 #[allow(dead_code)]
-const MADT_ENTRY_LOCAL_X2APIC_NMI: u8 = 11;
+const MADT_ENTRY_LOCAL_X2APIC_NMI: u8 = 11;     // x2APIC NMI kaynağı
 
-/// MADT Local APIC entry
+/// Klasik Local APIC giriş yapısı — 32-bit APIC ID (maksimum 255 CPU)
 #[repr(C, packed)]
 struct MadtLocalApic {
     entry_type: u8,
     length: u8,
     processor_id: u8,
     apic_id: u8,
-    flags: u32,
+    flags: u32, // bit 0: enabled, bit 1: online capable
 }
 
-/// MADT Local x2APIC entry
+/// x2APIC giriş yapısı — 32-bit genişletilmiş APIC ID (255+ CPU desteği)
 #[repr(C, packed)]
 struct MadtLocalX2Apic {
     entry_type: u8,
@@ -312,18 +381,21 @@ struct McfgEntry {
     reserved: u32,
 }
 
-/// RSDP'yi bul (UEFI veya legacy BIOS)
+/// RSDP'yi bellek içinde arar — önce UEFI yapılandırma tablosuna, ardından eski BIOS bölgesine bakar.
+/// UEFI sistemlerde RSDP, EFI_ACPI_TABLE_GUID veya EFI_ACPI_20_TABLE_GUID ile işaretlenmiş
+/// konfigürasyon tablosunda yer alır.
 pub fn find_rsdp() -> Option<u64> {
-    // UEFI sistemlerde RSDP Configuration Table'da
+    // UEFI sistemlerde RSDP EFI Yapılandırma Tablosundadır
     if let Some(uefi_rsdp) = find_rsdp_uefi() {
         return Some(uefi_rsdp);
     }
 
-    // Legacy BIOS: 0xE0000 - 0xFFFFF arasında ara
+    // Eski BIOS: 0xE0000 - 0xFFFFF arasında 16 bayt hizalı noktalarda ara
     find_rsdp_bios()
 }
 
-/// UEFI Configuration Table'dan RSDP bul
+/// UEFI boot aşamasında kaydedilen RSDP adresini döndürür.
+/// Bu adres, UEFI loader tarafından `set_uefi_rsdp_address()` ile önceden ayarlanmış olmalıdır.
 fn find_rsdp_uefi() -> Option<u64> {
     let addr = UEFI_RSDP_ADDRESS.load(Ordering::Relaxed);
     if addr != 0 {
@@ -338,12 +410,13 @@ pub fn set_uefi_rsdp_address(address: u64) {
     }
 }
 
-/// Legacy BIOS bölgesinde RSDP ara
+/// Eski BIOS bellein iki kritik bölgesini tarayarak RSDP'yi arar.
+/// EBDA (Extended BIOS Data Area) ilk 1KB'ı ve BIOS ROM alanı kontrol edilir.
 fn find_rsdp_bios() -> Option<u64> {
-    // EBDA (Extended BIOS Data Area) ve BIOS ROM bölgesinde ara
+    // EBDA (Genişletilmiş BIOS Veri Alanı) ve BIOS ROM bölgelerini tara
     let search_areas = [
-        (0x000E0000, 0x000FFFFF), // BIOS ROM
-        (0x00080000, 0x0009FFFF), // Possible EBDA
+        (0x000E0000, 0x000FFFFF), // BIOS ROM — en yaygın konum
+        (0x00080000, 0x0009FFFF), // Olası EBDA bölgesi
     ];
 
     for (start, end) in search_areas.iter() {
@@ -355,21 +428,22 @@ fn find_rsdp_bios() -> Option<u64> {
     None
 }
 
-/// Bellek bölgesinde RSDP ara
+/// Verilen bellek aralığını 16 bayt adım aralıklarla tarayarak RSDP'yi arar.
+/// ACPI spesifikasyonu RSDP'nin her zaman 16 bayt sınırında hizalanmış olduğunu garanti eder.
 fn scan_for_rsdp(start: u64, end: u64) -> Option<u64> {
-    // 16-byte boundary'lerde ara
+    // ACPI spec: RSDP her zaman 16 bayt sınırına (paragraph boundary) hizalanmıştır
     for addr in (start..end).step_by(16) {
         unsafe {
             let ptr = phys_to_virt_ptr::<Rsdp>(addr);
 
-            // Signature kontrolü
+            // İmza eşleşmesini kontrol et ("RSD PTR ")
             if (*ptr).signature == *RSDP_SIGNATURE {
-                // Checksum kontrolü
+                // ACPI 1.0 checksum: ilk 20 baytın toplamı 0 olmalı
                 if validate_checksum(ptr as *const u8, 20) {
                     return Some(addr);
                 }
 
-                // ACPI 2.0+ için extended checksum
+                // ACPI 2.0+ için tüm yapı üzerinde genişletilmiş checksum kontrolü
                 if (*ptr).revision >= 2 {
                     let length = (*ptr).length as usize;
                     if validate_checksum(ptr as *const u8, length) {
@@ -383,7 +457,8 @@ fn scan_for_rsdp(start: u64, end: u64) -> Option<u64> {
     None
 }
 
-/// Checksum doğrula
+/// ACPI checksum doğrulama: verilen uzunluktaki tüm baytların aritmetik toplamı 0 olmalıdır.
+/// Bu, tabloların bütünlüğünü sağlamak için ACPI spesifikasyonunun temel gereksinimidir.
 fn validate_checksum(data: *const u8, length: usize) -> bool {
     let mut sum: u8 = 0;
 
@@ -404,11 +479,13 @@ fn read_sdt_signature(header: *const SdtHeader) -> [u8; 4] {
     unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*header).signature)) }
 }
 
-/// ACPI tablolarını parse et
+/// Tüm ACPI tablolarını parse eder ve `ACPI_STATE` global değişkenini doldurur.
+/// Bu fonksiyon ilk olarak RSDP'yi bulur, oradan XSDT/RSDT'ye, oradan da
+/// FADT, MADT, SRAT gibi alt tablolara ulaşır.
 pub fn parse_acpi_tables() -> bool {
     crate::serial_println!("Parsing ACPI tables...");
 
-    // RSDP'yi bul
+    // İlk adım: RSDP'yi bul — bu olmadan ACPI kullanılamaz
     let rsdp_addr = match find_rsdp() {
         Some(addr) => addr,
         None => {
@@ -422,7 +499,7 @@ pub fn parse_acpi_tables() -> bool {
     let mut state = ACPI_STATE.lock();
     state.rsdp_address = rsdp_addr;
 
-    // RSDP'yi oku
+    // RSDP yapısını oku ve XSDT/RSDT adresini çıkar
     let rsdp = unsafe { &*phys_to_virt_ptr::<Rsdp>(rsdp_addr) };
     let rsdp_revision = rsdp.revision;
     let rsdp_xsdt = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(rsdp.xsdt_address)) };
@@ -435,6 +512,7 @@ pub fn parse_acpi_tables() -> bool {
         rsdp_xsdt,
         rsdp_rsdt
     );
+    // ACPI 2.0+ ise XSDT tercih edilir (64-bit adresler); aksi hâlde RSDT (32-bit adresler)
     if rsdp_revision >= 2 && rsdp_xsdt != 0 && is_canonical_lower_half(rsdp_xsdt) {
         state.xsdt_address = rsdp_xsdt;
         parsed = parse_xsdt(rsdp_xsdt, &mut state);
@@ -450,7 +528,7 @@ pub fn parse_acpi_tables() -> bool {
         return false;
     }
 
-    // CPU bilgilerini çıkar
+    // MADT'den CPU sayısını ve APIC ID'leri çıkar
     extract_cpu_info(&mut state);
 
     crate::serial_println!("ACPI: Found {} tables", state.tables.len());
@@ -459,7 +537,8 @@ pub fn parse_acpi_tables() -> bool {
     true
 }
 
-/// XSDT (Extended System Description Table) parse et
+/// XSDT (Extended System Description Table) parse eder.
+/// XSDT, 8 baytlık (64-bit) tablo adres işaretçileri içerir; bu sayede 4 GB üstü adreslere erişilebilir.
 fn parse_xsdt(xsdt_addr: u64, state: &mut AcpiState) -> bool {
     if !is_canonical_lower_half(xsdt_addr) {
         return false;
@@ -478,7 +557,7 @@ fn parse_xsdt(xsdt_addr: u64, state: &mut AcpiState) -> bool {
         return false;
     }
 
-    // Entry sayısı hesapla (64-bit pointers)
+    // XSDT giriş sayısı: (toplam uzunluk - başlık boyutu) / 8 bayt (her giriş 64-bit işaretçi)
     let entry_count = (xsdt_len as usize - mem::size_of::<SdtHeader>()) / 8;
     crate::serial_println!("ACPI: XSDT entries={}", entry_count);
 
@@ -492,7 +571,9 @@ fn parse_xsdt(xsdt_addr: u64, state: &mut AcpiState) -> bool {
     true
 }
 
-/// RSDT (Root System Description Table) parse et
+/// RSDT (Root System Description Table) parse eder.
+/// Eski ACPI 1.0 tablosudur; 4 baytlık (32-bit) tablo adresi işaretçileri içerir.
+/// Günümüzde yalnızca eski BIOS sistemlerde veya XSDT yoksa kullanılır.
 fn parse_rsdt(rsdt_addr: u64, state: &mut AcpiState) -> bool {
     if !is_canonical_lower_half(rsdt_addr) {
         return false;
@@ -511,7 +592,7 @@ fn parse_rsdt(rsdt_addr: u64, state: &mut AcpiState) -> bool {
         return false;
     }
 
-    // Entry sayısı hesapla (32-bit pointers)
+    // RSDT giriş sayısı: (toplam uzunluk - başlık boyutu) / 4 bayt (her giriş 32-bit işaretçi)
     let entry_count = (rsdt_len as usize - mem::size_of::<SdtHeader>()) / 4;
     crate::serial_println!("ACPI: RSDT entries={}", entry_count);
 
@@ -525,7 +606,8 @@ fn parse_rsdt(rsdt_addr: u64, state: &mut AcpiState) -> bool {
     true
 }
 
-/// Tekil tabloyu parse et
+/// Tek bir ACPI tablosunu imzasına göre parse eder ve uygun işleyiciye yönlendirir.
+/// Bilinmeyen imzalı tablolar listeye eklenir ama içeriği işlenmez.
 fn parse_table(table_addr: u64, state: &mut AcpiState) {
     if !is_canonical_lower_half(table_addr) {
         return;
@@ -542,7 +624,7 @@ fn parse_table(table_addr: u64, state: &mut AcpiState) {
         return;
     }
 
-    // Tabloyu kaydet
+    // Tabloyu genel listeye kaydet
     let signature = read_sdt_signature(header_ptr);
     let length = read_sdt_length(header_ptr);
     let table = AcpiTable {
@@ -555,7 +637,7 @@ fn parse_table(table_addr: u64, state: &mut AcpiState) {
     let sig = core::str::from_utf8(&signature).unwrap_or("????");
     crate::serial_println!("ACPI: Table {} at 0x{:X}", sig, table_addr);
 
-    // Önemli tabloları işaretle
+    // İmzaya göre ilgili işleyiciye yönlendir
     match &header.signature {
         FADT_SIGNATURE => {
             state.fadt_address = table_addr;
@@ -674,7 +756,8 @@ fn parse_dmar(table_addr: u64, state: &mut AcpiState) {
     }
 }
 
-/// Tablo doğrula (signature ve checksum)
+/// ACPI tablosunun geçerliliğini doğrular: imza boş değil, uzunluk makul, checksum doğru.
+/// Bu kontroller, bozuk veya kasıtlı olarak hatalı firmware tablolarına karşı koruma sağlar.
 fn validate_table(header: *const SdtHeader) -> bool {
     let length = read_sdt_length(header);
     if length < mem::size_of::<SdtHeader>() as u32 || length > MAX_ACPI_TABLE_SIZE {
@@ -683,7 +766,7 @@ fn validate_table(header: *const SdtHeader) -> bool {
     if read_sdt_signature(header) == [0; 4] {
         return false;
     }
-    // Checksum kontrolü
+    // Tüm tablo baytlarının toplamı 0 olmalı (ACPI checksum kuralı)
     let data = header as *const u8;
     if !validate_checksum(data, length as usize) {
         return false;
@@ -704,28 +787,49 @@ fn phys_to_virt_ptr<T>(addr: u64) -> *const T {
 }
 
 // ============================================================================
-// FADT (Fixed ACPI Description Table) — Power Management kayıt defteri
-// ACPI Spec 6.5 §5.2.9 — offset'ler sabit, struct minimum 116 byte
+// FADT (Fixed ACPI Description Table) — Güç Yönetimi Kayıt Defteri
+//
+// ACPI Spec 6.5 §5.2.9 — Offsetler sabittir; yapı en az 116 bayttır.
+// FADT; güç düğmesi, uyku kontrol blokları ve donanım sıfırlama
+// kaydının adres ve değerlerini içerir. Kapatma/yeniden başlatma için
+// bu tablodaki adresler ve değerler kritiktir.
 // ============================================================================
 
-/// FADT yapısı — sadece ihtiyaç duyulan alanlar
+/// FADT yapısı — yalnızca ihtiyaç duyulan alanlar; ofsetler ACPI spec'e göre sabit.
+///
+/// ```text
+/// Offset  Alan                 Açıklama
+/// ------  -------------------  --------------------------------
+/// 0x00    header               SDT ortak başlık (36 bayt)
+/// 0x24    firmware_ctrl        FACS (Firmware ACPI Control Struct) adresi
+/// 0x28    dsdt                 DSDT fiziksel adresi (32-bit)
+/// 0x2E    sci_interrupt        SCI (System Control Interrupt) IRQ numarası
+/// 0x30    smi_cmd              SMI Komut Portu
+/// 0x34    acpi_enable          ACPI modunu etkinleştirme komutu
+/// 0x38    pm1a_evt_blk         PM1a Olay Bloğu portu
+/// 0x40    pm1a_cnt_blk         PM1a Kontrol Bloğu portu ← kapatma/uyku için
+/// 0x44    pm1b_cnt_blk         PM1b Kontrol Bloğu portu (opsiyonel)
+/// 0x70    flags                FADT bayrakları (bit10=RESET_REG_SUP)
+/// 0x74    reset_reg_*          Donanım sıfırlama kaydı (GAS formatı)
+/// 0x80    reset_value          Sıfırlama için kayda yazılacak değer
+/// ```
 #[repr(C, packed)]
 struct Fadt {
-    header: SdtHeader,        // 0x00 (36 byte)
+    header: SdtHeader,        // 0x00 (36 bayt)
     firmware_ctrl: u32,       // 0x24
-    dsdt: u32,                // 0x28  ← DSDT adresi (32-bit)
+    dsdt: u32,                // 0x28  ← DSDT fiziksel adresi (32-bit)
     reserved1: u8,            // 0x2C
     preferred_pm_profile: u8, // 0x2D
-    sci_interrupt: u16,       // 0x2E  ← SCI IRQ
-    smi_cmd: u32,             // 0x30  ← SMI Command Port
-    acpi_enable: u8,          // 0x34  ← ACPI enable komutu
+    sci_interrupt: u16,       // 0x2E  ← SCI IRQ numarası
+    smi_cmd: u32,             // 0x30  ← SMI Komut Portu
+    acpi_enable: u8,          // 0x34  ← ACPI etkinleştirme komutu
     acpi_disable: u8,         // 0x35
     s4bios_req: u8,           // 0x36
     pstate_cnt: u8,           // 0x37
-    pm1a_evt_blk: u32,        // 0x38  ← PM1a Event Block
+    pm1a_evt_blk: u32,        // 0x38  ← PM1a Olay Bloğu
     pm1b_evt_blk: u32,        // 0x3C
-    pm1a_cnt_blk: u32,        // 0x40  ← PM1a Control Block
-    pm1b_cnt_blk: u32,        // 0x44  ← PM1b Control Block
+    pm1a_cnt_blk: u32,        // 0x40  ← PM1a Kontrol Bloğu
+    pm1b_cnt_blk: u32,        // 0x44  ← PM1b Kontrol Bloğu
     pm2_cnt_blk: u32,         // 0x48
     pm_tmr_blk: u32,          // 0x4C
     gpe0_blk: u32,            // 0x50
@@ -749,24 +853,26 @@ struct Fadt {
     century: u8,              // 0x6C
     iapc_boot_arch: u16,      // 0x6D
     reserved2: u8,            // 0x6F
-    flags: u32,               // 0x70  ← FADT flags (bit 10 = RESET_REG_SUP)
-    // offset 0x74: RESET_REG (Generic Address Structure 12 bytes)
-    reset_reg_space: u8,      // 0x74  ← Address space (0=mem, 1=I/O, 2=PCI)
+    flags: u32,               // 0x70  ← FADT bayrakları (bit 10 = RESET_REG_SUP)
+    // Offset 0x74: RESET_REG (Generic Address Structure — 12 bayt)
+    reset_reg_space: u8,      // 0x74  ← Adres uzayı (0=bellek, 1=I/O, 2=PCI)
     reset_reg_bit_width: u8,  // 0x75
     reset_reg_bit_offset: u8, // 0x76
     reset_reg_access_size: u8,// 0x77
-    reset_reg_addr: u64,      // 0x78  ← RESET register adresi
-    reset_value: u8,          // 0x80  ← RESET'e yazılacak değer
+    reset_reg_addr: u64,      // 0x78  ← Sıfırlama kaydının fiziksel adresi
+    reset_value: u8,          // 0x80  ← Sıfırlama için kayda yazılacak değer
 }
 
-/// FADT'yi parse et — PM1a/PM1b, RESET_REG, SLP_TYP bilgilerini çıkar
+/// FADT'yi parse eder ve güç yönetimi parametrelerini `AcpiState`'e aktarır.
+/// PM1a/PM1b kontrol/olay blokları, RESET_REG ve SCI numarası bu fonksiyondan gelir.
+/// Son olarak DSDT içindeki `\_S5` nesnesi okunarak S5 uyku türü değerleri elde edilir.
 fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
     crate::serial_println!("ACPI: Parsing FADT at 0x{:X}", fadt_addr);
 
     let header_ptr = phys_to_virt_ptr::<SdtHeader>(fadt_addr);
     let fadt_len = read_sdt_length(header_ptr);
 
-    // FADT minimum 116 byte olmalı (ACPI 1.0)
+    // FADT en az 116 bayt olmalıdır (ACPI 1.0 minimum boyutu)
     if fadt_len < 116 {
         crate::serial_println!("ACPI: FADT too small ({}B)", fadt_len);
         return;
@@ -774,7 +880,7 @@ fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
 
     let fadt = unsafe { &*phys_to_virt_ptr::<Fadt>(fadt_addr) };
 
-    // PM1a/PM1b Control Block
+    // PM1a/PM1b Kontrol Bloklarını oku — kapatma/uyku komutları bu portlara yazılır
     let pm1a = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.pm1a_cnt_blk)) };
     let pm1b = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.pm1b_cnt_blk)) };
     let pm1a_evt = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.pm1a_evt_blk)) };
@@ -800,7 +906,8 @@ fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
         smi_cmd, acpi_enable, flags
     );
 
-    // RESET register (FADT uzunluğu >= 129 byte gerektirir, 0x80+1)
+    // RESET_REG alanını oku — bu kayda reset_value yazmak sistemi yeniden başlatır.
+    // FADT uzunluğu >= 129 bayt ise RESET_REG alanı mevcuttur (ACPI 2.0+).
     if fadt_len >= 129 {
         let reset_space = fadt.reset_reg_space;
         let reset_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.reset_reg_addr)) };
@@ -816,7 +923,7 @@ fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
         );
     }
 
-    // DSDT'den \_S5 (shutdown) sleep type'ı çıkar
+    // DSDT'yi oku ve içindeki \_S5 (Soft Off) paketi için AML bayt dizisini tara
     let dsdt_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.dsdt)) } as u64;
     if dsdt_addr != 0 && is_canonical_lower_half(dsdt_addr) {
         parse_dsdt_s5(dsdt_addr, state);
@@ -826,13 +933,15 @@ fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
     crate::serial_println!("ACPI: FADT parsed OK — shutdown/reboot ready");
 }
 
-/// DSDT'den \_S5 paketini bul — S5 sleep type değerlerini çıkar
+/// DSDT AML bayt dizisini doğrusal tarayarak `\_S5` paketini bulur ve S5 uyku türü
+/// değerlerini çıkarır. Bu değerler kapatma sırasında PM1_CNT kaydına yazılır.
 ///
-/// DSDT AML'de \_S5 şöyle görünür:
+/// DSDT içinde \_S5 şu formatta saklanır:
 /// ```text
-/// "_S5_" 0x12 <PkgLength> <NumElements> <BytePrefix> <SLP_TYP_A> ...
+/// "_S5_"  0x12  <PkgLength>  <ElemSayısı>  [0x0A <SLP_TYP_A>]  [0x0A <SLP_TYP_B>]
+///  ^imza   ^DefPackage opkodu  ^paket uzunluğu  ^eleman sayısı  ^BytePrefix
 /// ```
-/// Byte prefix = 0x0A
+/// `0x0A` = BytePrefix (8-bit değer), `0x0B` = WordPrefix (16-bit değer)
 fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
     let header_ptr = phys_to_virt_ptr::<SdtHeader>(dsdt_addr);
     let dsdt_len = read_sdt_length(header_ptr) as usize;
@@ -846,7 +955,7 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
     let data_start = dsdt_base + mem::size_of::<SdtHeader>();
     let data_end = dsdt_base + dsdt_len;
 
-    // "\_S5_" byte pattern: 0x5F 0x53 0x35 0x5F veya "_S5_" ASCII
+    // `_S5_` imzasının ASCII/bayt karşılığı: 0x5F 0x53 0x35 0x5F
     let s5_sig: [u8; 4] = [b'_', b'S', b'5', b'_'];
     let mut found = false;
 
@@ -856,31 +965,32 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
 
     for i in 0..data_slice.len().saturating_sub(20) {
         if data_slice[i..i+4] == s5_sig {
-            // \_S5_ bulundu — paket veriyi parse et
-            // Format: _S5_ 0x12 PkgLen NumElements 0x0A SLP_TYP_A [0x0A SLP_TYP_B] ...
+            // `_S5_` bulundu — paket içeriğini parse et
+            // Format: _S5_ 0x12 PkgLen ElemSayısı 0x0A SLP_TYP_A [0x0A SLP_TYP_B] ...
             let mut offset = i + 4;
 
-            // DefPackage opcode
+            // DefPackage opkodu (0x12) doğrulaması
             if offset < data_slice.len() && data_slice[offset] == 0x12 {
                 offset += 1;
 
-                // PkgLength (1-4 byte encoding, basit versiyon: 1 byte)
+                // PkgLength alanı 1-4 bayt kodlanabilir; basit 1-bayt versiyonu işlenir
                 if offset < data_slice.len() {
                     let pkg_len_byte = data_slice[offset];
                     if (pkg_len_byte & 0xC0) == 0 {
-                        offset += 1; // 1-byte encoding
+                        offset += 1; // 1 bayt uzunluk kodlaması
                     } else {
+                        // Üst 2 bit, arkasından kaç bayt daha olduğunu belirtir
                         let following = ((pkg_len_byte >> 6) & 3) as usize;
                         offset += 1 + following;
                     }
                 }
 
-                // Num Elements
+                // Eleman sayısı baytını atla
                 if offset < data_slice.len() {
                     offset += 1;
                 }
 
-                // SLP_TYP_A (0x0A prefix = BytePrefix)
+                // SLP_TYP_A değerini oku (0x0A = BytePrefix, 0x0B = WordPrefix)
                 if offset + 1 < data_slice.len() {
                     let slp_a = if data_slice[offset] == 0x0A {
                         offset += 1;
@@ -888,7 +998,7 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
                         offset += 1;
                         v
                     } else if data_slice[offset] == 0x0B {
-                        // WordPrefix
+                        // WordPrefix: iki bayt, little-endian
                         offset += 1;
                         let v = u16::from_le_bytes([data_slice[offset], data_slice[offset+1]]);
                         offset += 2;
@@ -899,7 +1009,7 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
                         v
                     };
 
-                    // SLP_TYP_B
+                    // SLP_TYP_B değerini oku (PM1b_CNT için; bazı platformlarda aynıdır)
                     let slp_b = if offset + 1 < data_slice.len() {
                         if data_slice[offset] == 0x0A {
                             offset += 1;
@@ -929,15 +1039,17 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
     }
 
     if !found {
-        // QEMU i440fx/q35 default: SLP_TYP_A = 0 (piix4) veya 5
-        // Fallback: QEMU genelde SLP_TYP=0 veya 5 kullanır
+        // \_S5 bulunamadı; QEMU i440fx/q35 için bilinen varsayılan değerler kullanılıyor.
+        // QEMU piix4'te SLP_TYP genellikle 0, q35'te 5'tir; 5 daha güvenli bir varsayılandır.
         state.slp_typ_s5_a = 5;
         state.slp_typ_s5_b = 5;
         crate::serial_println!("ACPI: DSDT \\_S5 not found — using QEMU default SLP_TYP=5");
     }
 }
 
-/// MADT (Multiple APIC Description Table) parse et
+/// MADT'yi parse eder; Local APIC, IO-APIC ve kesme yönlendirme bilgilerini çıkarır.
+/// Bu bilgiler: AP'leri (Application Processor) başlatmak, IO-APIC'i yapılandırmak ve
+/// SMP (Simetrik Çoklu İşlem) altyapısını kurmak için kullanılır.
 fn parse_madt(madt_addr: u64, state: &mut AcpiState) {
     crate::serial_println!("ACPI: Found MADT at 0x{:X}", madt_addr);
 
@@ -947,7 +1059,7 @@ fn parse_madt(madt_addr: u64, state: &mut AcpiState) {
         unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(madt.local_apic_address)) };
     state.cpu_info.apic_base = local_apic_address as u64;
 
-    // MADT entries'leri parse et
+    // MADT başlığının hemen ardından değişken uzunluklu girişler gelir
     let header_ptr = unsafe { core::ptr::addr_of!((*madt_ptr).header) };
     let madt_len = read_sdt_length(header_ptr) as usize;
     let entries_start = phys_to_virt(madt_addr) + mem::size_of::<Madt>();
@@ -963,12 +1075,12 @@ fn parse_madt(madt_addr: u64, state: &mut AcpiState) {
             MADT_ENTRY_LOCAL_APIC => {
                 let entry = unsafe { &*(offset as *const MadtLocalApic) };
 
-                // Copy to local to avoid unaligned reference
+                // Hizasız erişimi önlemek için yerel kopyaya al
                 let apic_id = entry.apic_id;
                 let flags = entry.flags;
 
                 if (flags & 1) != 0 || (flags & 2) != 0 {
-                    // Enabled or Online Capable
+                    // bit 0 = Etkin, bit 1 = Online Capable (başlatılabilir ama henüz kapalı)
                     crate::serial_println!("ACPI: Found APIC ID {} (flags={})", apic_id, flags);
                     state.cpu_info.cpu_list.push(apic_id as u32);
                 }
@@ -978,11 +1090,11 @@ fn parse_madt(madt_addr: u64, state: &mut AcpiState) {
                 let entry = unsafe { &*(offset as *const MadtLocalX2Apic) };
 
                 if (entry.flags & 1) != 0 {
-                    // Enabled
+                    // Etkin x2APIC birimi
                     state.cpu_info.cpu_list.push(entry.x2apic_id);
 
                     if (entry.flags & 2) != 0 {
-                        // BSP
+                        // Bu BSP (önyükleme işlemcisi)
                         state.cpu_info.bsp_apic_id = entry.x2apic_id;
                     }
                 }
@@ -1010,7 +1122,7 @@ fn parse_madt(madt_addr: u64, state: &mut AcpiState) {
             }
 
             _ => {
-                // Diğer entry tipleri şimdilik ignore
+                // Diğer giriş tipleri şimdilik işlenmez
             }
         }
 
@@ -1044,32 +1156,38 @@ fn parse_mcfg(mcfg_addr: u64, state: &mut AcpiState) {
     }
 }
 
-/// SRAT (System Resource Affinity Table) parse et
+/// SRAT (System Resource Affinity Table) parse eder.
+/// Hangi CPU kümesinin hangi bellek aralığına doğrudan erişebildiğini tanımlar (NUMA).
+/// Bu bilgi, bellek yöneticisinin lokal NUMA düğümünden bellek ayırmasını sağlar.
 fn parse_srat(srat_addr: u64, _state: &mut AcpiState) {
     crate::serial_println!("ACPI: Found SRAT at 0x{:X}", srat_addr);
-    // NUMA node bilgilerini parse et
-    // Şimdilik basit implementasyon
+    // NUMA düğüm bilgilerini parse et
+    // Şimdilik basit implementasyon — gelecekte genişletilecek
 }
 
-/// SLIT (System Locality Information Table) parse et
+/// SLIT (System Locality Information Table) parse eder.
+/// N×N boyutunda bir matris ile her NUMA düğüm çifti arasındaki göreli erişim gecikmesini verir.
+/// Değer düşükse erişim hızlı (lokal), yüksekse yavaştır (uzak).
 fn parse_slit(slit_addr: u64, _state: &mut AcpiState) {
     crate::serial_println!("ACPI: Found SLIT at 0x{:X}", slit_addr);
-    // NUMA distance bilgilerini parse et
-    // Şimdilik basit implementasyon
+    // NUMA mesafe bilgilerini parse et
+    // Şimdilik basit implementasyon — gelecekte genişletilecek
 }
 
-/// CPU bilgilerini çıkar
+/// MADT parse sonucuna göre CPU bilgilerini tamamlar.
+/// MADT yoksa veya boşsa, BSP (CPU 0) için temel değerler atanır.
 fn extract_cpu_info(state: &mut AcpiState) {
     // MADT'den CPU bilgilerini kullan
     if state.cpu_info.cpu_count == 0 {
-        // Fallback: CPUID'den bilgi al
+        // MADT bulunamazsa CPUID'den temel bilgi al (tek işlemcili sistem varsayımı)
         state.cpu_info.cpu_count = 1;
         state.cpu_info.bsp_apic_id = 0;
         state.cpu_info.cpu_list.push(0);
     }
 }
 
-/// CPU bilgilerini döndür
+/// ACPI'den elde edilen CPU topoloji bilgilerini döndürür.
+/// SMP başlatma kodunun AP'leri (yardımcı işlemciler) bulmak için kullandığı bilgiler burada.
 pub fn get_cpu_info() -> Option<AcpiCpuInfo> {
     let state = ACPI_STATE.lock();
 
@@ -1095,7 +1213,8 @@ pub fn get_mcfg_entries() -> Vec<PciEcamInfo> {
     state.mcfg_entries.clone()
 }
 
-/// ACPI başlatma
+/// ACPI altyapısını başlatır: tabloları parse eder, CPU/güç bilgilerini doldurur.
+/// Bu fonksiyon yalnızca bir kez, çekirdek başlatma sürecinde çağrılmalıdır.
 pub fn init() -> bool {
     crate::serial_println!("Initializing ACPI...");
 
@@ -1110,13 +1229,25 @@ pub fn init() -> bool {
 
 // ============================================================================
 // Güç Yönetimi — Kapatma / Yeniden Başlatma / Uyku
+//
+// ACPI güç yönetimi için temel mekanizma:
+//   1. PM1a_CNT (ve varsa PM1b_CNT) kontrol kaydına yazılır.
+//   2. Kayıt formatı: [15:11 reserved] [12 SLP_EN] [12:10 SLP_TYP] [9:0 diğer]
+//   3. SLP_EN bitini set etmek, SLP_TYP'nin gösterdiği uyku durumuna girişi tetikler.
+//
+//   PM1_CNT bit düzeni:
+//   ┌────────────────────────────────────────┐
+//   │  15..14  │ 13 SLP_EN │ 12..10 SLP_TYP │
+//   └────────────────────────────────────────┘
+//   SLP_TYP değeri firmware'e özgüdür; DSDT'deki \_S5 gibi nesnelerden okunur.
 // ============================================================================
 
-/// ACPI S5 (Soft Off) ile sistemi kapat.
-/// QEMU'da bu QEMU'yu "stopped" durumuna sokar (= poweroff).
+/// ACPI S5 (Soft Off) güç durumuna geçerek sistemi kapatır.
+/// S5 durumunda tüm güç (DRAM dahil) kesilir; yalnızca güç düğmesi ile açılabilir.
+/// QEMU'da bu durum "durduruldu" anlamına gelir ve sanal makineyi sonlandırır.
 ///
-/// # Safety
-/// Tüm I/O durdurulmalı ve interrupt'lar kapatılmalı.
+/// # Güvenlik Notu
+/// Bu fonksiyon çağrılmadan önce tüm G/Ç işlemleri durdurulmalı ve kesmeler kapatılmalıdır.
 pub fn acpi_shutdown() -> ! {
     let state = ACPI_STATE.lock();
 
@@ -1132,7 +1263,7 @@ pub fn acpi_shutdown() -> ! {
     let mut slp_typ_b = state.slp_typ_s5_b;
     drop(state);
 
-    // Faz 2: AML'den _S5 değerini oku — statik parse'ın üzerine yaz
+    // AML interpreter başlatılmışsa, \_S5 değerini AML üzerinden sorgu (daha güvenilir)
     if let Some((aml_a, aml_b)) = crate::cpu::acpi_aml::get_s5_sleep_type() {
         slp_typ_a = aml_a;
         slp_typ_b = aml_b;
@@ -1145,16 +1276,17 @@ pub fn acpi_shutdown() -> ! {
         pm1a, slp_typ_a, pm1b, slp_typ_b
     );
 
-    // Interrupt'ları kapat
+    // Kesmeleri devre dışı bırak — kapatma sırasında kesme kabul edilmemeli
     x86_64::instructions::interrupts::disable();
 
-    // PM1a_CNT: SLP_TYP (bit 10-12) | SLP_EN (bit 13)
+    // PM1a_CNT'ye yaz: SLP_TYP (bit 10-12) | SLP_EN (bit 13)
+    // Bu yazma işlemi donanımı S5 durumuna geçirir
     let sleep_value_a = (slp_typ_a << 10) | (1 << 13);
     unsafe {
         x86_64::instructions::port::Port::<u16>::new(pm1a).write(sleep_value_a);
     }
 
-    // PM1b_CNT varsa ona da yaz
+    // PM1b_CNT varsa ona da yaz (bazı platformlar çift kontrol bloğu kullanır)
     if pm1b != 0 {
         let sleep_value_b = (slp_typ_b << 10) | (1 << 13);
         unsafe {
@@ -1162,18 +1294,20 @@ pub fn acpi_shutdown() -> ! {
         }
     }
 
-    // Bu noktaya ulaşılmamalı — ulaşılırsa fallback
+    // Bu noktaya ulaşılmamalı; CPU S5 durumuna geçince tüm çalışma durur.
+    // Ulaşılırsa QEMU'ya özgü fallback portları denenir.
     crate::serial_println!("[ACPI] S5 did not work — trying QEMU fallback");
     qemu_shutdown_fallback();
 }
 
-/// QEMU özel shutdown portları (fallback)
+/// QEMU'ya özgü kapatma portlarını dener (ACPI S5 başarısız olursa yedek yol).
+/// Port 0x604 QEMU q35/piix4 ACPI kapatma portudur; 0xB004 daha eski QEMU/Bochs içindir.
 fn qemu_shutdown_fallback() -> ! {
-    // QEMU ISA debug exit device (isa-debug-exit)
+    // QEMU ISA debug çıkış aygıtı (isa-debug-exit)
     unsafe {
-        // Port 0x604: QEMU ACPI shutdown (piix4/q35)
+        // Port 0x604: QEMU ACPI kapatma (piix4/q35 makineleri)
         x86_64::instructions::port::Port::<u16>::new(0x604).write(0x2000u16);
-        // Port 0xB004: Bochs/older QEMU
+        // Port 0xB004: Bochs/eski QEMU
         x86_64::instructions::port::Port::<u16>::new(0xB004).write(0x2000u16);
     }
     loop {
@@ -1181,8 +1315,9 @@ fn qemu_shutdown_fallback() -> ! {
     }
 }
 
-/// ACPI reboot: FADT RESET_REG kullanarak sistemi yeniden başlat.
-/// Desteklenmezse keyboard controller (0x64) fallback.
+/// ACPI RESET_REG üzerinden sistemi yeniden başlatır.
+/// Reset kaydı üç farklı adres uzayında olabilir: sistem belleği, I/O portu veya PCI yapılandırması.
+/// RESET_REG desteklenmiyorsa 8042 klavye denetleyicisi üzerinden triple-fault tetiklenir.
 pub fn acpi_reboot() -> ! {
     let state = ACPI_STATE.lock();
 
@@ -1200,18 +1335,18 @@ pub fn acpi_reboot() -> ! {
 
         unsafe {
             match space {
-                // System Memory
+                // Adres uzayı 0: Sistem Belleği — doğrudan MMIO yazımı
                 0 => {
                     let ptr = phys_to_virt(addr) as *mut u8;
                     core::ptr::write_volatile(ptr, value);
                 }
-                // System I/O
+                // Adres uzayı 1: Sistem I/O Uzayı — x86 port komutu
                 1 => {
                     x86_64::instructions::port::Port::<u8>::new(addr as u16).write(value);
                 }
-                // PCI Configuration Space (bus 0, dev 31, func 0)
+                // Adres uzayı 2: PCI Yapılandırma Uzayı — CF8/CFC mekanizması
                 2 => {
-                    // PCI config space erişimi — CF8/CFC
+                    // PCI yapılandırma uzayı erişimi CF8 (adres) ve CFC (veri) portları aracılığıyla
                     let pci_addr = 0x8000_0000u32 | ((addr as u32) & 0xFFFF);
                     x86_64::instructions::port::Port::<u32>::new(0xCF8).write(pci_addr);
                     x86_64::instructions::port::Port::<u8>::new(0xCFC).write(value);
@@ -1224,22 +1359,24 @@ pub fn acpi_reboot() -> ! {
         crate::serial_println!("[ACPI] RESET_REG not available — keyboard controller reset");
     }
 
-    // Fallback: 8042 keyboard controller reset (triple fault tetikler)
+    // Yedek: 8042 klavye denetleyicisi sıfırlama komutu.
+    // 0xFE komutu CPU sıfırlamasını tetikler (triple fault oluşturur).
     crate::serial_println!("[ACPI] Fallback: keyboard controller reset (0x64)");
     x86_64::instructions::interrupts::disable();
     unsafe {
-        // 8042 reset command
+        // 8042 PS/2 denetleyicisi sıfırlama komutu
         x86_64::instructions::port::Port::<u8>::new(0x64).write(0xFE);
     }
 
-    // Son çare: triple fault
+    // Son çare: sonsuz döngü — bu noktaya ulaşılmamalı
     loop {
         x86_64::instructions::hlt();
     }
 }
 
-/// Uyku durumuna geç (S1-S4).
-/// Sadece FADT parsed ve PM1a_CNT mevcut olmalı.
+/// Belirli bir ACPI uyku durumuna (S1-S4) girer.
+/// S1: CPU durdurulur; S3: RAM hariç her şey kapalı; S4: bellek diske yazılmış, tam kapalı.
+/// Yalnızca FADT parse edilmişse ve PM1a_CNT mevcutsa çalışır.
 pub unsafe fn enter_sleep_state(sleep_state: u8) -> bool {
     if sleep_state < 1 || sleep_state > 4 {
         return false;
@@ -1257,7 +1394,7 @@ pub unsafe fn enter_sleep_state(sleep_state: u8) -> bool {
 
     crate::serial_println!("[ACPI] Entering sleep state S{}", sleep_state);
 
-    // SLP_TYP (bit 10-12) | SLP_EN (bit 13)
+    // SLP_TYP (bit 10-12) | SLP_EN (bit 13) birlikte yazılır
     let sleep_value = ((sleep_state as u16) << 10) | (1 << 13);
 
     x86_64::instructions::port::Port::<u16>::new(pm1a).write(sleep_value);
@@ -1269,22 +1406,24 @@ pub unsafe fn enter_sleep_state(sleep_state: u8) -> bool {
     false
 }
 
-/// CPU frekans scaling (P-state değiştirme)
+/// CPU frekans ölçeklendirmesi için P-state (Performance State) değiştirir.
+/// IA32_PERF_CTL MSR (0x199) üzerinden hedef P-state yazılır.
+/// P-state 0 en yüksek frekansı, N en düşük frekansı temsil eder (DVFS).
 pub fn set_pstate(pstate: u8) -> bool {
-    // CPUID leaf 6'dan P-state desteğini kontrol et
+    // CPUID yaprak 6'da P-state kontrolünün desteklenip desteklenmediğini sorgula
     let cpuid_result = crate::cpu::cpuid(6, 0);
 
     if (cpuid_result.eax & (1 << 1)) == 0 {
-        return false; // P-state kontrolü desteklenmiyor
+        return false; // P-state donanım kontrolü (IDA/Turbo) desteklenmiyor
     }
 
-    // MSR 0x199 (IA32_PERF_CTL) ile P-state ayarla
+    // MSR 0x199 (IA32_PERF_CTL) — Intel SpeedStep P-state kontrol kaydı
     unsafe {
         use x86_64::registers::model_specific::Msr;
-        // MSR yazımı için mut gerekli.
+        // MSR yazımı için mut gerekli
         let mut perf_ctl = Msr::new(0x199);
 
-        // P-state değeri (0 = highest, N = lowest)
+        // P-state değeri (0 = en yüksek performans, N = en düşük güç tüketimi)
         let value = (pstate as u64) & 0xFF;
         perf_ctl.write(value);
     }
@@ -1292,52 +1431,55 @@ pub fn set_pstate(pstate: u8) -> bool {
     true
 }
 
-/// Thermal management
+/// Termal bölge (Thermal Zone) yapısı — bir sıcaklık kaynağını ve eşik noktalarını tutar.
 pub struct ThermalZone {
-    pub temperature: i32, // Celsius × 10
+    pub temperature: i32, // Santigrat × 10 (örn: 450 = 45.0°C)
     pub trip_points: Vec<TripPoint>,
 }
 
+/// Termal eşik noktası — belirli bir sıcaklıkta alınacak eylemi tanımlar.
 pub struct TripPoint {
     pub temperature: i32,
-    pub trip_type: u8, // 0: critical, 1: hot, 2: passive, 3: active
+    pub trip_type: u8, // 0: kritik (kapat), 1: sıcak (uyar), 2: pasif (kısıtla), 3: aktif (fan)
 }
 
-/// Thermal zone'ları tespit et
+/// Sistemdeki termal bölgeleri listeler.
+/// Gerçek implementasyonda ACPI \_TZ namespace'inden termal bölgeler keşfedilir.
 pub fn detect_thermal_zones() -> Vec<ThermalZone> {
     let mut zones = Vec::new();
 
-    // ACPI thermal zone'larını ara
-    // Şimdilik basit dummy zone
+    // ACPI termal bölgelerini ara
+    // Şimdilik örnek bir termal bölge ekleniyor
     zones.push(ThermalZone {
         temperature: 450, // 45.0°C
         trip_points: vec![
             TripPoint {
                 temperature: 800,
                 trip_type: 0,
-            }, // Critical 80°C
+            }, // Kritik: 80°C — sistem kapatılır
             TripPoint {
                 temperature: 700,
                 trip_type: 1,
-            }, // Hot 70°C
+            }, // Sıcak: 70°C — uyarı verilir
         ],
     });
 
     zones
 }
 
-/// Battery durumu (laptop'lar için)
+/// Pil (batarya) bilgi yapısı — dizüstü bilgisayarlar için güç kaynağı durumunu tutar.
 pub struct BatteryInfo {
     pub present: bool,
     pub charging: bool,
-    pub capacity: u8, // Yüzde
-    pub voltage: u16, // mV
+    pub capacity: u8, // Yüzde cinsinden şarj seviyesi
+    pub voltage: u16, // Milivolt cinsinden gerilim
 }
 
-/// Battery bilgilerini al
+/// ACPI pil durumunu okur.
+/// Gerçek implementasyonda ACPI\_SB.BAT0._BST AML metodu çağrılır.
 pub fn get_battery_info() -> Option<BatteryInfo> {
-    // ACPI battery device'larını kontrol et
-    // Şimdilik basit implementasyon
+    // ACPI pil aygıtlarını kontrol et
+    // Şimdilik basit implementasyon — sistemde pil yok
     Some(BatteryInfo {
         present: false,
         charging: false,
@@ -1346,7 +1488,8 @@ pub fn get_battery_info() -> Option<BatteryInfo> {
     })
 }
 
-/// ACPI tablo bilgilerini debug için yazdır
+/// Tüm ACPI tablo adreslerini ve CPU bilgilerini seri porta yazdırır.
+/// Hata ayıklama ve donanım tanılama için kullanılır.
 pub fn debug_print_tables() {
     let state = ACPI_STATE.lock();
 

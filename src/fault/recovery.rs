@@ -2,6 +2,49 @@
 //!
 //! Merkezi kurtarma koordinasyonu ve aksiyon yürUtmesi.
 //! Her hata türü için strateji belirler: birincil, yedek ve son çare eylemleri.
+//!
+//! ## Kurtarma Stratejisi Nedir?
+//!
+//! Her `FaultType` için önceden tanımlanmış bir `RecoveryStrategy` vardır.
+//! Strateji üç eylem katmanından oluşur:
+//!
+//! ```text
+//!  Hata geldi
+//!       │
+//!       ▼
+//!  1. BİRİNCİL eylem dene ──▶ Başarılı? ──evet──▶ Bitti (Recovered/Degraded)
+//!       │ hayır
+//!       ▼
+//!  2. YEDEK eylem dene    ──▶ Başarılı? ──evet──▶ Bitti
+//!       │ hayır (yedek yoksa da buraya)
+//!       ▼
+//!  3. SON ÇARE eylem      ──▶ Genellikle EmergencyHalt veya LogOnly
+//! ```
+//!
+//! ## Yeniden Giriş Koruması (Re-entrancy Guard)
+//!
+//! `active: Vec<u64>` listesi kurtarılmakta olan hata ID'lerini tutar.
+//! Aynı hata için eşzamanlı iki kurtarma girişimi engellenir.
+//!
+//! ## Deneme Sınırı
+//!
+//! Her hata için `attempts: BTreeMap<FaultId, u32>` ile kaç kez deneme
+//! yapıldığı izlenir. `max_attempts` (varsayılan: 3) aşıldığında direkt `Failed` döner.
+//!
+//! ## Eylem Türleri
+//!
+//! | Eylem           | Açıklama                                          |
+//! |-----------------|---------------------------------------------------|
+//! | None            | İşlem yok, başarı say                            |
+//! | LogOnly         | Sadece kaydet, devam et                          |
+//! | ResetModule     | Modülü yeniden başlat                            |
+//! | DisableModule   | Modülü kapat                                     |
+//! | FallbackMode    | Yedek moda geç                                   |
+//! | KillTask        | Belirtilen görevi sonlandır (OOM kurtarma)       |
+//! | FreeMemory(n)   | n sayfa belleği geri al                          |
+//! | SyncFilesystem  | Dosya sistemini diske yaz                        |
+//! | EmergencyHalt   | Kesmeler kapalı, sonsuz hlt döngüsü              |
+//! | Reboot          | ACPI/triple-fault ile yeniden başlat             |
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -198,13 +241,13 @@ impl RecoveryEngine {
         }
     }
     
-    /// Attempt recovery for a fault
+    /// Hata için kurtarma girişimi yapar
     pub fn recover(&self, fault: &Fault) -> RecoveryResult {
         if !self.enabled.load(Ordering::SeqCst) {
             return RecoveryResult::Failed;
         }
-        
-        // Check if already being recovered
+
+        // Zaten kurtarılıyor mu kontrol et (yeniden giriş koruması)
         if self.active.lock().contains(&fault.id.0) {
             return RecoveryResult::Failed;
         }
@@ -222,7 +265,7 @@ impl RecoveryEngine {
             return RecoveryResult::Failed;
         }
         
-        // Increment attempts
+        // Deneme sayısını artır ve kaydını güncelle
         self.attempts.lock().insert(fault.id.0, attempts + 1);
         self.total_attempts.fetch_add(1, Ordering::SeqCst);
         
@@ -231,7 +274,7 @@ impl RecoveryEngine {
             fault.id, attempts + 1, strategy.max_attempts
         );
         
-        // Execute primary action
+        // Birincil eylemi yürüt
         let result = self.execute_action(&strategy.primary, fault);
         
         if result.is_success() {

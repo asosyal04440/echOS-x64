@@ -2,6 +2,48 @@
 //!
 //! Tile-based rendering için temel yapılar.
 //! Ekran 32x32 piksellik tile'lara bölünür.
+//!
+//! ## Tile-Based Rendering Nedir?
+//!
+//! Tile-based rendering (döşeme tabanlı çizim), ekranı sabit boyutlu dikdörtgen
+//! bloklara (tile/döşeme) bölen ve yalnızca değişen döşemeleri yeniden çizen
+//! bir optimizasyon tekniğidir. Mobil GPU'larda (ARM Mali, Qualcomm Adreno) yaygın
+//! kullanılır; echOS bunu CPU'da yazılımsal olarak uygular.
+//!
+//! ## Ekran Tile Izgara Diyagramı (640x480, 32x32 tile)
+//!
+//! ```text
+//!  Ekran: 640×480 piksel  →  20×15 = 300 tile
+//!
+//!  ┌───┬───┬───┬───┬───┐  ◄── her hücre = 32×32 piksel
+//!  │0,0│1,0│2,0│...│19,0│
+//!  ├───┼───┼───┼───┼───┤
+//!  │0,1│1,1│   │   │   │
+//!  ├───┼───┼───┼───┼───┤
+//!  │ . │   │   │   │   │
+//!  │ . │   │   │   │   │
+//!  ├───┼───┼───┼───┼───┤
+//!  │0,14...       │19,14│
+//!  └───┴───┴───┴───┴───┘
+//!
+//!  Tile(tx=3, ty=2) → pixel_x = 96, pixel_y = 64
+//!  Tile indeksi = ty × tiles_per_row + tx = 2×20 + 3 = 43
+//! ```
+//!
+//! ## Kirlilik Takibi (Dirty Tracking)
+//!
+//! ```text
+//!  Pencere hareket ettiğinde sadece etkilenen tile'lar kirli işaretlenir:
+//!
+//!  ┌───┬───┬───┬───┬───┐
+//!  │   │   │   │   │   │
+//!  ├───┼───┼[D]┼[D]┼───┤   [D] = Dirty (kirli, yeniden çizilecek)
+//!  ├───┼───┼[D]┼[D]┼───┤   [ ] = Temiz (değişmedi, atlanır)
+//!  ├───┼───┼───┼───┼───┤
+//!  └───┴───┴───┴───┴───┘
+//!
+//!  Yalnızca 4 tile yeniden çizilir,  300 tile değil  →  %99 tasarruf
+//! ```
 
 /// Tile boyutu (32x32 piksel = 4KB buffer)
 pub const TILE_SIZE: usize = 32;

@@ -1,6 +1,13 @@
-//! # GPU 3D API
+//! # GPU 3D API — Donanım Hızlandırmalı 3D Grafik API'si
 //!
-//! Vulkan-like graphics API for hardware-accelerated 3D rendering
+//! Vulkan benzeri grafik API'si — donanım hızlandırmalı 3D render için.
+//!
+//! ## Vulkan Mimarisi Hakkında
+//! Bu modül, Vulkan API tasarım felsefesini takip eder:
+//! - **Handle tabanlı kaynak yönetimi**: Her kaynak benzersiz bir u64 handle ile tanımlanır
+//! - **Explicit senkronizasyon**: Bariyer ve fence'lar programcı tarafından yönetilir
+//! - **Render Pass**: Render hedefleri ve alt geçişler açıkça tanımlanır
+//! - **SPIR-V shader**: Shader kodu doğrudan SPIR-V bayt kodu olarak verilir
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -11,58 +18,78 @@ use spin::Mutex;
 use core::mem;
 
 // ============================================================================
-// GPU CONSTANTS
+// GPU SABİTLERİ
 // ============================================================================
 
-/// Max texture size
+/// Desteklenen maksimum doku (texture) boyutu — piksel cinsinden (4096x4096)
 const MAX_TEXTURE_SIZE: u32 = 4096;
 
-/// Max vertex buffers
+/// Aynı anda bağlanabilecek maksimum köşe noktası (vertex) tampon sayısı
 const MAX_VERTEX_BUFFERS: usize = 16;
 
-/// Max descriptor sets
+/// Maksimum tanımlayıcı küme (descriptor set) sayısı
 const MAX_DESCRIPTOR_SETS: usize = 8;
 
-/// Max push constant size
+/// Push constant için maksimum veri boyutu (bayt).
+/// Push constant, pipeline'a çok hızlı küçük veri geçirmek için kullanılır.
 const MAX_PUSH_CONSTANT_SIZE: usize = 128;
 
-/// Max render targets
+/// Maksimum render hedefi sayısı (çoklu render target — MRT)
 const MAX_RENDER_TARGETS: usize = 8;
 
-/// Max viewports
+/// Maksimum viewport sayısı
 const MAX_VIEWPORTS: usize = 16;
 
-/// Max scissors
+/// Maksimum makas (scissor) sayısı
 const MAX_SCISSORS: usize = 16;
 
 // ============================================================================
-// GPU ERROR
+// GPU HATALARI
 // ============================================================================
 
+/// GPU işlem hatası türleri.
+/// Her varyant, farklı bir hata koşulunu temsil eder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuError {
+    /// GPU cihazı kayboldu (genellikle donanım arızası)
     DeviceLost,
+    /// GPU belleği yetersiz
     OutOfMemory,
+    /// Geçersiz kaynak handle'ı
     InvalidHandle,
+    /// Desteklenmeyen format
     InvalidFormat,
+    /// Geçersiz kullanım bayrağı
     InvalidUsage,
+    /// Shader derleme başarısız
     ShaderCompileFailed,
+    /// Pipeline oluşturma başarısız
     PipelineCreateFailed,
+    /// Render pass eksik yapılandırma
     RenderPassIncomplete,
+    /// Komut tamponu dolu
     CommandBufferFull,
+    /// Zaman aşımı
     Timeout,
+    /// İşlem desteklenmiyor
     NotSupported,
 }
 
 // ============================================================================
-// GPU FORMATS
+// GPU FORMATLARI
 // ============================================================================
+
+/// Piksel ve doku formatları.
+/// Unorm = Normalleştirilmemiş işaretsiz tam sayı (0-255 → 0.0-1.0 aralığına normalize edilir).
+/// Snorm = Normalleştirilmiş işaretli tam sayı (-127..127 → -1.0..1.0).
+/// Sfloat = İşaretli kayan noktalı sayı (IEEE 754 formatı).
+/// Srgb = sRGB renk uzayı (gama düzeltmeli).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Undefined,
     
-    // Color formats
+    // Renk formatları
     R8Unorm,
     R8Snorm,
     R8Uint,
@@ -79,7 +106,7 @@ pub enum Format {
     B8G8R8A8Srgb,
     R8G8B8A8Srgb,
     
-    // Depth formats
+    // Derinlik formatları (Depth) — z-buffer ve stencil için kullanılır
     D16Unorm,
     D24Unorm,
     D32Sfloat,
@@ -87,7 +114,7 @@ pub enum Format {
     D24UnormS8Uint,
     D32SfloatS8Uint,
     
-    // Compressed formats
+    // Sıkıştırılmış formatlar (BC = Block Compression) — sabit oranlı GPU doku sıkıştırması
     BC1RgbUnorm,
     BC1RgbaUnorm,
     BC2Unorm,
@@ -98,7 +125,7 @@ pub enum Format {
     BC6HSfloat,
     BC7Unorm,
     
-    // Floating point
+    // Kayan noktalı (floating point) formatlar — HDR render için
     R16Sfloat,
     R16G16Sfloat,
     R16G16B16Sfloat,
@@ -132,7 +159,7 @@ impl Format {
             Format::R32G32Sfloat => 8,
             Format::R32G32B32Sfloat => 12,
             Format::R32G32B32A32Sfloat => 16,
-            _ => 0, // Compressed formats vary
+            _ => 0, // Sıkıştırılmış formatlar değişkendir
         }
     }
 
@@ -155,8 +182,11 @@ impl Format {
 }
 
 // ============================================================================
-// GPU RESOURCES
+// GPU KAYNAKLARI — HANDLE TANIMLARI
 // ============================================================================
+
+/// Her kaynak türü için ayrı tip güvenlikli handle.
+/// Wrap edilmiş u64, farklı handle türlerinin karıştırılmasını derleme zamanında önler.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BufferHandle(pub u64);
@@ -195,8 +225,13 @@ pub struct FenceHandle(pub u64);
 pub struct SemaphoreHandle(pub u64);
 
 // ============================================================================
-// BUFFER
+// TAMPON (BUFFER)
 // ============================================================================
+
+/// Tampon kullanım bayrakları.
+/// Her boolean, tamponu belirli bir amaçla bağlamaya izin verir.
+/// Bu tasarım, GPU'nun optimizasyon yapmasını sağlar — sadece gerekli
+/// erişim türleri etkinleştirilir.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufferUsage {
@@ -290,8 +325,13 @@ impl Buffer {
 }
 
 // ============================================================================
-// IMAGE
+// GÖRÜNTÜ (IMAGE / TEXTURE)
 // ============================================================================
+
+/// GPU görüntüsü (image) — 1D/2D/3D doku veya render hedefi olarak kullanılır.
+/// Vulkan'da image ve framebuffer ayrımı vardır:
+/// - Image: ham piksel verisi
+/// - ImageView: image'ın belirli bir alt kümesine bakış (view)
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageType {
@@ -382,8 +422,11 @@ impl Image {
 }
 
 // ============================================================================
-// IMAGE VIEW
+// GÖRÜNTÜ GÖRÜNÜMÜ (IMAGE VIEW)
 // ============================================================================
+
+/// ImageView, bir Image'ın belirli bir katman/mip seviyesini veya biçim
+/// dönüşümünü temsil eder. Shader'da bağlı olan ImageView'dir, Image değil.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageViewType {
@@ -414,8 +457,12 @@ pub struct ImageView {
 }
 
 // ============================================================================
-// SAMPLER
+// ÖRNEKLEYICI (SAMPLER)
 // ============================================================================
+
+/// Doku örnekleyici — shader'ın dokuya nasıl erişeceğini tanımlar.
+/// Filtreleme modu (yakın/doğrusal), MIP haritası, adres modu ve
+/// anizotropik filtreleme gibi ayarları içerir.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
@@ -474,8 +521,14 @@ pub struct Sampler {
 }
 
 // ============================================================================
-// SHADER
+// SHADER (GÖLGELENDIRICI)
 // ============================================================================
+
+/// Shader programı — GPU'da çalışan paralel işlemci kodu.
+/// SPIR-V formatında derlenir ve GPU'ya iletilir.
+/// Vertex shader: köşe noktalarını dönüştürür.
+/// Fragment shader: piksel renklerini hesaplar.
+/// Compute shader: genel amaçlı GPU hesaplaması (GPGPU).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShaderStage {
@@ -490,7 +543,7 @@ pub enum ShaderStage {
 #[derive(Clone, Debug)]
 pub struct ShaderDesc {
     pub stage: ShaderStage,
-    pub code: Vec<u32>,  // SPIR-V bytecode
+    pub code: Vec<u32>,  // SPIR-V bayt kodu — assembler benzeri GPU instruction seti
     pub entry_point: String,
     pub name: String,
 }
@@ -502,8 +555,12 @@ pub struct Shader {
 }
 
 // ============================================================================
-// PIPELINE
+// GRAFİK PIPELINE
 // ============================================================================
+
+/// Grafik pipeline — tüm render durumunu (vertex giriş, shader, rasterizasyon,
+/// harmanlama) tek bir değişmez nesneye bağlar. Pipeline değiştirilmez;
+/// farklı render durumu için yeni pipeline oluşturulur.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimitiveTopology {
@@ -712,8 +769,12 @@ pub struct Pipeline {
 }
 
 // ============================================================================
-// RENDER PASS
+// RENDER GEÇİŞİ (RENDER PASS)
 // ============================================================================
+
+/// Render pass — hangi renk/derinlik eklerinin kullanılacağını ve
+/// bunların nasıl yükleneceğini/depolanacanğını tanımlar.
+/// Alt geçişler (subpass) arası bağımlılıklar da burada belirtilir.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachmentLoadOp {
@@ -822,8 +883,12 @@ pub struct RenderPass {
 }
 
 // ============================================================================
-// FRAMEBUFFER
+// ÇERÇEVE TAMPONU (FRAMEBUFFER)
 // ============================================================================
+
+/// Framebuffer — render pass'in çizim yaptığı ekler kümesi.
+/// ImageView'lere referans tutar; bu sayede farklı framebuffer'lar
+/// aynı görüntüye farklı perspektiflerden bakabilir.
 
 #[derive(Clone, Debug)]
 pub struct FramebufferDesc {
@@ -842,8 +907,12 @@ pub struct Framebuffer {
 }
 
 // ============================================================================
-// COMMAND BUFFER
+// KOMUT TAMPONU (COMMAND BUFFER)
 // ============================================================================
+
+/// Komut tamponu — GPU komutlarının kayıt edildiği sıralı liste.
+/// Komutlar önceden kayıt edilir ve toplu olarak GPU'ya gönderilir.
+/// Bu yaklaşım, CPU-GPU iletişim maliyetini azaltır.
 
 #[derive(Clone, Debug)]
 pub struct CommandBuffer {
@@ -1130,8 +1199,12 @@ pub struct ImageSubresourceRange {
 }
 
 // ============================================================================
-// DESCRIPTOR SET
+// TANIMLAYICI KÜMESİ (DESCRIPTOR SET)
 // ============================================================================
+
+/// Descriptor set — shader kaynaklarını (tampon, doku, örnekleyici) bağlar.
+/// Set düzeni, shader kodundaki binding numaraları ile eşleşmelidir.
+/// Vulkan descriptor sistemi, kaynakların yeniden kullanımını verimli kılar.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DescriptorType {
@@ -1177,8 +1250,12 @@ pub enum DescriptorBinding {
 }
 
 // ============================================================================
-// SYNC OBJECTS
+// SENKRONIZASYON NESNELERİ
 // ============================================================================
+
+/// Fence — CPU ve GPU arasında senkronizasyon.
+/// CPU, fence sinyal verene kadar bekleyebilir.
+/// Semaphore ise GPU-GPU senkronizasyonu için kullanılır.
 
 #[derive(Clone, Debug)]
 pub struct Fence {
@@ -1193,8 +1270,12 @@ pub struct Semaphore {
 }
 
 // ============================================================================
-// GPU DEVICE
+// GPU CİHAZI (GPU DEVICE)
 // ============================================================================
+
+/// GPU cihazı — tüm GPU kaynaklarını yöneten merkezi yapı.
+/// BTreeMap kullanılır: O(log n) erişim, deterministik sıralama.
+/// Kaynak handle'larını gerçek nesnelere eşler.
 
 #[derive(Clone, Debug)]
 pub struct GpuDevice {
@@ -1325,76 +1406,82 @@ impl Default for GpuDevice {
 }
 
 // ============================================================================
-// GLOBAL GPU INSTANCE
+// GLOBAL GPU ÖRNEĞİ
 // ============================================================================
+
+/// Global GPU aygıtı — lazy_static ile ilk erişimde başlatılır.
+/// Mutex ile çoklu iş parçacıklı erişim güvence altına alınır.
 
 lazy_static::lazy_static! {
     static ref GPU_DEVICE: Mutex<GpuDevice> = Mutex::new(GpuDevice::new("default"));
 }
 
-/// Initialize GPU
+/// GPU 3D alt sistemini başlatır. Çekirdek başlatma sırasında çağrılır.
 pub fn init() {
-    crate::serial_println!("[GPU3D] Initialized 3D graphics API");
+    crate::serial_println!("[GPU3D] 3D grafik API'si başlatıldı");
 }
 
-/// Create buffer
+/// Yeni bir GPU tamponu oluşturur ve handle'ını döndürür.
+/// Tampon içeriği başlangıçta sıfırlanmış olarak gelir.
 pub fn create_buffer(desc: BufferDesc) -> BufferHandle {
     GPU_DEVICE.lock().create_buffer(desc)
 }
 
-/// Create image
+/// Yeni bir GPU görüntüsü (texture) oluşturur ve handle'ını döndürür.
 pub fn create_image(desc: ImageDesc) -> ImageHandle {
     GPU_DEVICE.lock().create_image(desc)
 }
 
-/// Create shader
+/// Yeni bir shader programı oluşturur ve handle'ını döndürür.
+/// SPIR-V bayt kodu ShaderDesc.code içinde sağlanmalıdır.
 pub fn create_shader(desc: ShaderDesc) -> ShaderHandle {
     GPU_DEVICE.lock().create_shader(desc)
 }
 
-/// Create render pass
+/// Yeni bir render pass oluşturur ve handle'ını döndürür.
 pub fn create_render_pass(desc: RenderPassDesc) -> RenderPassHandle {
     GPU_DEVICE.lock().create_render_pass(desc)
 }
 
-/// Create pipeline
+/// Yeni bir grafik pipeline oluşturur ve handle'ını döndürür.
 pub fn create_pipeline(desc: PipelineDesc) -> PipelineHandle {
     GPU_DEVICE.lock().create_pipeline(desc)
 }
 
-/// Create framebuffer
+/// Yeni bir framebuffer oluşturur ve handle'ını döndürür.
 pub fn create_framebuffer(desc: FramebufferDesc) -> FramebufferHandle {
     GPU_DEVICE.lock().create_framebuffer(desc)
 }
 
-/// Create command buffer
+/// Yeni bir komut tamponu oluşturur.
+/// Komutlar begin_command_buffer() sonrası kayıt edilir.
 pub fn create_command_buffer() -> CommandBufferHandle {
     GPU_DEVICE.lock().create_command_buffer()
 }
 
-/// Get buffer
+/// Handle ile tamponu sorgular; bulunamazsa None döner.
 pub fn get_buffer(handle: BufferHandle) -> Option<Buffer> {
     GPU_DEVICE.lock().get_buffer(handle).cloned()
 }
 
-/// Get image
+/// Handle ile görüntüyü sorgular; bulunamazsa None döner.
 pub fn get_image(handle: ImageHandle) -> Option<Image> {
     GPU_DEVICE.lock().get_image(handle).cloned()
 }
 
-/// Write to buffer
+/// Belirtilen ofsetten başlayarak tampona veri yazar.
 pub fn write_buffer(handle: BufferHandle, offset: u64, data: &[u8]) -> Result<(), GpuError> {
     GPU_DEVICE.lock().get_buffer_mut(handle)
         .ok_or(GpuError::InvalidHandle)?
         .write(offset, data)
 }
 
-/// Destroy buffer
+/// Tamponu yok eder ve GPU belleğini serbest bırakır.
 pub fn destroy_buffer(handle: BufferHandle) {
     GPU_DEVICE.lock().destroy_buffer(handle)
 }
 
-/// Destroy image
+/// Görüntüyü yok eder ve GPU belleğini serbest bırakır.
 pub fn destroy_image(handle: ImageHandle) {
     GPU_DEVICE.lock().destroy_image(handle)
 }

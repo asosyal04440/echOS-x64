@@ -1,6 +1,74 @@
-//! # DNS over TLS (DoT)
+//! # DNS over TLS (DoT) - TLS Üzerinden DNS
 //!
-//! RFC 7858 - DNS queries over TLS
+//! DoT, DNS sorgularını TLS (Transport Layer Security) protokolüyle şifreler.
+//! RFC 7858 ile tanımlanmıştır. Standart port: 853.
+//!
+//! ## DoT ve Geleneksel DNS Karşılaştırması
+//!
+//! ```text
+//! Geleneksel DNS (Port 53, şifresiz UDP/TCP):
+//!   Uygulama --> [DNS Sorgu, düz metin] --> 8.8.8.8:53
+//!              [İSS her sorguyu görür: gizlilik yok!]
+//!
+//! DoT (Port 853, TLS ile şifreli TCP):
+//!   Uygulama --> [TCP bağlantısı] --> 8.8.8.8:853
+//!             --> [TLS El Sıkışma (TLS Handshake)]
+//!             --> [Şifreli DNS Sorgu (TLS kanal içinde)]
+//!              [İSS sadece 853 portuna bağlandığını görür, içerik görünmez]
+//! ```
+//!
+//! ## DoT ile DoH Farkı
+//!
+//! ```text
+//! DoT (DNS over TLS, RFC 7858):
+//!   - Port: 853 (ayrı ve belirgin, İSS kolayca tespit edebilir)
+//!   - Protokol: TLS + DNS wire format (basit)
+//!   - İzleme: İSS 853 portuna bakarak DoT kullanıldığını anlar
+//!
+//! DoH (DNS over HTTPS, RFC 8484):
+//!   - Port: 443 (normal HTTPS trafiğiyle karışır)
+//!   - Protokol: HTTP/HTTPS + DNS wire format (daha karmaşık)
+//!   - İzleme: İSS HTTPS trafiğinden DoH'u ayırt etmek güçtür
+//! ```
+//!
+//! ## DoT Bağlantı Akışı
+//!
+//! ```text
+//! İstemci                              DoT Sunucusu (853/TCP)
+//!    |                                        |
+//!    |--- TCP SYN ---------------------------->|
+//!    |<-- TCP SYN-ACK ------------------------|
+//!    |--- TCP ACK ---------------------------->|
+//!    |          [TCP Bağlantısı Kuruldu]       |
+//!    |                                        |
+//!    |--- TLS ClientHello -------------------->|
+//!    |<-- TLS ServerHello + Certificate -------|
+//!    |--- TLS Finished (Key Exchange) -------->|
+//!    |<-- TLS Finished ------------------------|
+//!    |          [TLS Kanalı Aktif]             |
+//!    |                                        |
+//!    |--- [2-byte length][DNS Query] --------->|  TLS içinde
+//!    |<-- [2-byte length][DNS Response] -------|  şifreli
+//!    |                                        |
+//! ```
+//!
+//! ## TCP Üzerinde DNS Mesaj Biçimi (RFC 7858 Bölüm 3.3)
+//!
+//! ```text
+//! TLS kanalı içinde DNS mesajları şu formatta taşınır:
+//!
+//! +------------------+----------------------------+
+//! | Uzunluk (2 byte) | DNS Mesajı (değişken byte) |
+//! +------------------+----------------------------+
+//!  ^
+//!  Bu 2-byte big-endian uzunluk alanı TCP/TLS üzerinde DNS'e özgüdür.
+//!  UDP'de bu alan yoktur (paket boyutu dolaylı olarak bilinir).
+//!
+//! Örnek: 30 byte'lık DNS mesajı:
+//!   [0x00, 0x1E, ...30 byte DNS data...]
+//!    ^^^^
+//!    0x001E = 30 (decimal)
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -15,79 +83,109 @@ use super::{Ipv4Addr, NetError, Port, SocketAddr};
 use super::ipv6::Ipv6Addr;
 use super::socket::{socket, connect, send, recv, close, AddressFamily, SocketType, Protocol};
 
-/// DoT port
+/// DoT standart portu (RFC 7858)
 const DOT_PORT: u16 = 853;
 
-/// DoT Client
+/// DoT istemcisi.
+///
+/// Belirtilen DoT sunucusuna kalıcı TLS bağlantısı kurar ve
+/// DNS sorgularını şifreli olarak gönderir.
+/// Yanıtlar önbelleklenerek tekrar eden sorgular hızlandırılır.
 pub struct DotClient {
-    pub server_ip: Ipv4Addr,
-    pub server_name: String,
-    pub port: u16,
-    pub timeout_ms: u64,
-    pub connected: bool,
-    pub socket_id: Option<u32>,
-    pub cache: BTreeMap<String, CachedResponse>,
+    pub server_ip: Ipv4Addr,   // DoT sunucusunun IPv4 adresi (örn. 1.1.1.1 Cloudflare)
+    pub server_name: String,   // TLS SNI için sunucu adı (örn. "cloudflare-dns.com")
+    pub port: u16,             // DoT portu (varsayılan: 853)
+    pub timeout_ms: u64,       // Sorgu zaman aşımı (milisaniye)
+    pub connected: bool,       // TLS bağlantısı kuruldu mu?
+    pub socket_id: Option<u32>,// TCP soket tanımlayıcısı
+    pub cache: BTreeMap<String, CachedResponse>, // DNS yanıt önbelleği
 }
 
-/// Cached DoT response
+/// Önbelleklenen DoT yanıtı.
+///
+/// DNS yanıtı ham wire formatında saklanır.
+/// `expiry`: Unix zaman damgası cinsinden son geçerlilik zamanı.
 #[derive(Clone, Debug)]
 pub struct CachedResponse {
-    pub response: Vec<u8>,
-    pub expiry: u64,
+    pub response: Vec<u8>, // DNS wire format yanıt verisi
+    pub expiry: u64,       // Bu zamandan sonra önbellek içeriği eskidir
 }
 
 impl DotClient {
-    /// Create new DoT client
+    /// Yeni bir DoT istemcisi oluşturur.
+    ///
+    /// `server_name`: TLS SNI (Server Name Indication) için sunucu adı.
+    /// TLS el sıkışmasında sunucu sertifikasını doğrulamak için kullanılır.
     pub fn new(server_ip: Ipv4Addr, server_name: &str) -> Self {
         DotClient {
             server_ip,
             server_name: server_name.to_string(),
             port: DOT_PORT,
-            timeout_ms: 5000,
+            timeout_ms: 5000,  // Varsayılan 5 saniye zaman aşımı
             connected: false,
             socket_id: None,
             cache: BTreeMap::new(),
         }
     }
 
-    /// Create with common providers
+    /// Cloudflare DoT istemcisi oluşturur (1.1.1.1:853).
+    ///
+    /// Cloudflare, gizlilik odaklı ve hızlı bir DoT sağlayıcısıdır.
     pub fn cloudflare() -> Self {
         Self::new(Ipv4Addr::from_bytes([1, 1, 1, 1]), "cloudflare-dns.com")
     }
 
+    /// Google DoT istemcisi oluşturur (8.8.8.8:853).
     pub fn google() -> Self {
         Self::new(Ipv4Addr::from_bytes([8, 8, 8, 8]), "dns.google")
     }
 
+    /// Quad9 DoT istemcisi oluşturur (9.9.9.9:853).
+    ///
+    /// Quad9, zararlı domain filtreleme özelliği sunar.
     pub fn quad9() -> Self {
         Self::new(Ipv4Addr::from_bytes([9, 9, 9, 9]), "dns.quad9.net")
     }
 
-    /// Connect to DoT server
+    /// DoT sunucusuna TCP bağlantısı kurar, ardından TLS el sıkışmasını başlatır.
+    ///
+    /// Adımlar:
+    /// 1. TCP soketi oluştur (port 853)
+    /// 2. DoT sunucusuna TCP bağlan
+    /// 3. TLS ClientHello gönder (henüz desteklenmiyor)
+    /// 4. TLS Handshake tamamla (TODO)
+    ///
+    /// NOT: TLS henüz desteklenmediğinden DotError::TlsNotSupported döner.
     pub fn connect(&mut self) -> Result<(), DotError> {
         if self.connected {
             return Ok(());
         }
 
-        // Create TCP socket
+        // TCP soketi oluştur (STREAM = TCP bağlantı yönelimli)
         let sock_id = socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::TCP)
             .map_err(|_| DotError::SocketError)?;
 
-        // Connect to server
+        // DoT sunucusuna TCP bağlantısı kur (Port 853)
         let addr = SocketAddr::new(self.server_ip, Port(self.port));
         connect(sock_id, addr).map_err(|_| DotError::ConnectionFailed)?;
 
-        // TODO: Perform TLS handshake
-        // This requires TLS implementation
-        // For now, we'll mark as needing TLS
+        // TODO: TLS el sıkışmasını gerçekleştir
+        // Gereksinimler:
+        //   - TLS 1.2 veya 1.3 (RFC 7858: minimum TLS 1.2)
+        //   - SNI: server_name alanı kullanılarak sunucu adı bildirilmeli
+        //   - Sertifika doğrulaması: sunucu kimliği PKIX ile doğrulanmalı
+        // Gerçek TLS için rustls veya mbedTLS entegrasyonu gerekli
 
         self.socket_id = Some(sock_id);
-        // self.connected = true; // Only set after TLS handshake
+        // self.connected = true; // Yalnızca TLS el sıkışması tamamlandıktan sonra etkinleştirilmeli
 
         Err(DotError::TlsNotSupported)
     }
 
-    /// Disconnect from server
+    /// DoT sunucusundan bağlantıyı kapatır.
+    ///
+    /// TCP soketi kapatılır ve bağlantı durumu sıfırlanır.
+    /// TLS aktifse önce TLS close_notify alert'i gönderilmeli (truncation saldırılarına karşı).
     pub fn disconnect(&mut self) {
         if let Some(sock_id) = self.socket_id {
             let _ = close(sock_id);
@@ -96,11 +194,14 @@ impl DotClient {
         }
     }
 
-    /// Build DNS query wire format
+    /// DNS sorgu paketini wire formatında oluşturur.
+    ///
+    /// Oluşturulan paket sadece DNS mesajıdır.
+    /// TCP üzerinden gönderilirken `query()` içinde 2-byte uzunluk alanı öne eklenir.
     pub fn build_query(domain: &str, qtype: DnsRecordType) -> Vec<u8> {
         let mut query = Vec::new();
 
-        // DNS Header (12 bytes)
+        // DNS başlığı (12 byte): ID=0x1234, RD=1 (özyinelemeli), 1 soru
         let header = DnsHeader::new_query(0x1234);
         query.push((header.id >> 8) as u8);
         query.push((header.id & 0xFF) as u8);
@@ -115,57 +216,65 @@ impl DotClient {
         query.push((header.arcount >> 8) as u8);
         query.push((header.arcount & 0xFF) as u8);
 
-        // Question section
+        // Soru bölümü: alan adını DNS etiket formatında kodla
         for label in domain.split('.') {
             if !label.is_empty() {
-                query.push(label.len() as u8);
+                query.push(label.len() as u8); // Etiket uzunluğu
                 for c in label.chars() {
                     query.push(c as u8);
                 }
             }
         }
-        query.push(0);
+        query.push(0); // Root label (alan adını sonlandırır)
 
-        // QTYPE
+        // QTYPE: hangi kayıt türü isteniyor
         query.push((qtype as u16 >> 8) as u8);
         query.push((qtype as u16 & 0xFF) as u8);
 
-        // QCLASS (IN = 1)
+        // QCLASS: IN = 1 (Internet)
         query.push(0);
         query.push(1);
 
         query
     }
 
-    /// Send DNS query over TLS
+    /// TCP+TLS üzerinden DNS sorgusu gönderir.
+    ///
+    /// Önce önbellekte mevcut yanıt var mı kontrol edilir.
+    /// Önbellekte yoksa bağlantı kurulur ve DNS sorgusu gönderilir.
+    ///
+    /// TCP DNS formatı (RFC 7858): 2 byte uzunluk + DNS wire data
     pub fn query(&mut self, domain: &str, qtype: DnsRecordType) -> Result<Vec<u8>, DotError> {
-        // Check cache
+        // Önbellek kontrolü: daha önce sorulmuş mu?
         let cache_key = format!("{}:{}", domain, qtype as u16);
         if let Some(cached) = self.cache.get(&cache_key) {
             return Ok(cached.response.clone());
         }
 
-        // Ensure connected
+        // Bağlantı kurulu değilse bağlan
         if !self.connected {
             self.connect()?;
         }
 
         let sock_id = self.socket_id.ok_or(DotError::NotConnected)?;
 
-        // Build DNS query
+        // DNS sorgusu oluştur
         let dns_query = Self::build_query(domain, qtype);
 
-        // DoT uses 2-byte length prefix over TCP
+        // TCP üzerinde DNS: mesaj başına 2-byte big-endian uzunluk alanı ekle
         let mut tls_record = Vec::new();
         tls_record.extend_from_slice(&(dns_query.len() as u16).to_be_bytes());
         tls_record.extend_from_slice(&dns_query);
 
-        // TODO: Encrypt with TLS before sending
-        // For now, return error
+        // TODO: TLS ile şifrele ve gönder
+        // Şu an TLS implementasyonu olmadığından hata döner
         Err(DotError::TlsNotSupported)
     }
 
-    /// Parse DNS response
+    /// DNS wire format yanıtını ayrıştırır.
+    ///
+    /// Başlık, soru bölümü ve yanıt kayıtları ayrıştırılır.
+    /// A ve AAAA kayıtları için IP adresi çıkarılır.
     pub fn parse_response(data: &[u8]) -> Result<DotResponse, DotError> {
         if data.len() < 12 {
             return Err(DotError::InvalidResponse);
@@ -178,23 +287,24 @@ impl DotClient {
             answers: Vec::new(),
         };
 
-        // Parse questions (skip)
+        // Soru bölümünü atla (parse etme, sadece offset ilerlet)
         let mut offset = 12;
         for _ in 0..header.qdcount {
+            // Alan adı etiketlerini atla
             while offset < data.len() && data[offset] != 0 {
                 if (data[offset] & 0xC0) == 0xC0 {
-                    offset += 2;
+                    offset += 2; // Sıkıştırma işaretçisi (2 byte)
                     break;
                 }
                 offset += 1 + data[offset] as usize;
             }
             if offset < data.len() && data[offset] == 0 {
-                offset += 1;
+                offset += 1; // Root label
             }
-            offset += 4;
+            offset += 4; // QTYPE + QCLASS
         }
 
-        // Parse answers
+        // Yanıt kayıtlarını ayrıştır
         for _ in 0..header.ancount {
             if offset >= data.len() {
                 break;
@@ -206,6 +316,9 @@ impl DotClient {
         Ok(response)
     }
 
+    /// Tek bir DNS yanıt kaydını (Resource Record) ayrıştırır.
+    ///
+    /// NAME, TYPE, CLASS, TTL, RDLENGTH ve RDATA alanlarını okur.
     fn parse_answer(data: &[u8], offset: &mut usize) -> Result<DotAnswer, DotError> {
         let name = Self::parse_name(data, offset)?;
 
@@ -226,16 +339,19 @@ impl DotClient {
         let rdata = data[*offset..*offset + rdlength].to_vec();
         *offset += rdlength;
 
+        // Kayıt türüne göre IP adresi çıkar
         let ip = match rtype {
             1 if rdlength == 4 => {
+                // A kaydı: 4 byte IPv4 adresi
                 Some(IpAddr::V4(Ipv4Addr::from_bytes([rdata[0], rdata[1], rdata[2], rdata[3]])))
             }
             28 if rdlength == 16 => {
+                // AAAA kaydı: 16 byte IPv6 adresi
                 let mut addr = [0u8; 16];
                 addr.copy_from_slice(&rdata);
                 Some(IpAddr::V6(Ipv6Addr::new(addr)))
             }
-            _ => None,
+            _ => None, // Diğer kayıt türleri (CNAME, MX, TXT vb.)
         };
 
         Ok(DotAnswer {
@@ -246,10 +362,14 @@ impl DotClient {
         })
     }
 
+    /// DNS wire formatındaki alan adı etiketlerini metne çevirir.
+    ///
+    /// DNS sıkıştırması (0xC0 prefix işaretçileri) desteklenir.
+    /// Sonsuz döngüye karşı en fazla 5 atlama sınırı uygulanır.
     fn parse_name(data: &[u8], offset: &mut usize) -> Result<String, DotError> {
         let mut name = String::new();
-        let mut jumped = false;
-        let mut max_jumps = 5;
+        let mut jumped = false;   // Sıkıştırma atlaması yapıldı mı?
+        let mut max_jumps = 5;    // Döngü koruması: en fazla 5 işaretçi atlaması
 
         loop {
             if *offset >= data.len() {
@@ -259,23 +379,24 @@ impl DotClient {
             let len = data[*offset] as usize;
 
             if len == 0 {
-                *offset += 1;
+                *offset += 1; // Root label: alan adının sonu
                 break;
             }
 
+            // DNS sıkıştırma işaretçisi: ilk 2 bit = 11 (0xC0)
             if (len & 0xC0) == 0xC0 {
                 if *offset + 1 >= data.len() {
                     return Err(DotError::InvalidResponse);
                 }
                 let ptr = (((data[*offset] & 0x3F) as usize) << 8) | (data[*offset + 1] as usize);
                 if !jumped {
-                    *offset += 2;
+                    *offset += 2; // Normal akışta 2 byte ilerliyoruz
                     jumped = true;
                 }
-                *offset = ptr;
+                *offset = ptr; // İşaretçinin gösterdiği konuma atla
                 max_jumps -= 1;
                 if max_jumps == 0 {
-                    return Err(DotError::InvalidResponse);
+                    return Err(DotError::InvalidResponse); // Muhtemel döngü
                 }
                 continue;
             }
@@ -296,38 +417,44 @@ impl DotClient {
         }
 
         if name.is_empty() {
-            name.push('.');
+            name.push('.'); // Kök zone: tek nokta
         }
 
         Ok(name)
     }
 }
 
-/// IP Address wrapper
+/// IP adresi sarmalayıcısı: IPv4 veya IPv6 adresini birlikte tutar.
 #[derive(Clone, Debug)]
 pub enum IpAddr {
-    V4(Ipv4Addr),
-    V6(Ipv6Addr),
+    V4(Ipv4Addr), // 32-bit IPv4 adresi
+    V6(Ipv6Addr), // 128-bit IPv6 adresi
 }
 
-/// DNS Answer
+/// DoT DNS yanıt kaydı (Resource Record).
+///
+/// İsim, kayıt türü, ham RDATA ve çözümlenmiş IP adresini içerir.
 #[derive(Clone, Debug)]
 pub struct DotAnswer {
-    pub name: String,
-    pub rtype: u16,
-    pub rdata: Vec<u8>,
-    pub ip: Option<IpAddr>,
+    pub name: String,       // Yanıtın ait olduğu alan adı
+    pub rtype: u16,         // Kayıt türü (1=A, 28=AAAA, 5=CNAME vb.)
+    pub rdata: Vec<u8>,     // Ham kayıt verisi (RDATA)
+    pub ip: Option<IpAddr>, // Çözümlenmiş IP (sadece A ve AAAA için)
 }
 
-/// DNS Response
+/// DoT DNS sorgu yanıtı.
+///
+/// DNS başlığı ve yanıt kayıtları listesini içerir.
 #[derive(Clone, Debug)]
 pub struct DotResponse {
-    pub header: DnsHeader,
-    pub answers: Vec<DotAnswer>,
+    pub header: DnsHeader,      // DNS yanıt başlığı
+    pub answers: Vec<DotAnswer>,// Yanıt kayıtları (A, AAAA, CNAME vb.)
 }
 
 impl DotResponse {
-    /// Get first A record IP
+    /// İlk A kaydının IPv4 adresini döner.
+    ///
+    /// Birden fazla A kaydı varsa yalnızca ilki döner.
     pub fn get_a(&self) -> Option<Ipv4Addr> {
         for answer in &self.answers {
             if let Some(IpAddr::V4(ip)) = &answer.ip {
@@ -337,7 +464,7 @@ impl DotResponse {
         None
     }
 
-    /// Get first AAAA record IP
+    /// İlk AAAA kaydının IPv6 adresini döner.
     pub fn get_aaaa(&self) -> Option<Ipv6Addr> {
         for answer in &self.answers {
             if let Some(IpAddr::V6(ip)) = &answer.ip {
@@ -348,35 +475,44 @@ impl DotResponse {
     }
 }
 
-/// DoT Error
+/// DoT hata türleri.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DotError {
-    TlsNotSupported,
-    NotConnected,
-    SocketError,
-    ConnectionFailed,
-    InvalidResponse,
-    Timeout,
-    TlsHandshakeFailed,
+    TlsNotSupported,    // TLS henüz desteklenmiyor (TODO: rustls/mbedtls entegrasyonu)
+    NotConnected,       // Sorgu öncesinde bağlantı kurulmamış
+    SocketError,        // TCP soket oluşturulamadı
+    ConnectionFailed,   // TCP bağlantısı kurulamadı
+    InvalidResponse,    // Geçersiz DNS yanıt formatı
+    Timeout,            // Sorgu zaman aşımına uğradı
+    TlsHandshakeFailed, // TLS el sıkışması başarısız oldu
 }
 
+/// DotClient düşürüldüğünde TCP bağlantısını otomatik olarak kapatır.
+///
+/// Bu Drop implementasyonu kaynak sızıntısını önler:
+/// DotClient kapsam dışına çıkınca TCP soketi temiz şekilde kapatılır.
 impl Drop for DotClient {
     fn drop(&mut self) {
         self.disconnect();
     }
 }
 
-// Global DoT client
+// Global DoT istemcisi: lazy_static ile thread-safe şekilde başlatılır
 lazy_static::lazy_static! {
     static ref DOT_CLIENT: Mutex<Option<DotClient>> = Mutex::new(None);
 }
 
-/// Initialize DoT client
+/// Global DoT istemcisini başlatır.
+///
+/// `server_name` parametresi TLS SNI doğrulaması için kullanılır.
 pub fn init_dot(server_ip: Ipv4Addr, server_name: &str) {
     *DOT_CLIENT.lock() = Some(DotClient::new(server_ip, server_name));
 }
 
-/// Resolve domain using DoT
+/// Global DoT istemcisi üzerinden alan adını çözümler.
+///
+/// İstemci başlatılmamışsa DotError::NotConnected döner.
+/// TLS desteklenene kadar gerçek sorgu yapılamaz.
 pub fn resolve_dot(domain: &str, qtype: DnsRecordType) -> Result<DotResponse, DotError> {
     let mut client = DOT_CLIENT.lock();
     if let Some(client) = client.as_mut() {

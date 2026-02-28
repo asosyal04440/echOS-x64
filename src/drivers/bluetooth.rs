@@ -1,6 +1,22 @@
-//! # Bluetooth Subsystem
+//! # Bluetooth Alt Sistemi
 //!
-//! HCI, L2CAP, RFCOMM, and BLE support
+//! HCI, L2CAP, RFCOMM ve BLE (Bluetooth Düşük Enerji) desteği.
+//!
+//! ## Bluetooth Protokol Yığını
+//!
+//! ```
+//!  Uygulama  (RFCOMM üzerinde seri port, BLE GATT servisleri)
+//!      |
+//!  RFCOMM   (Seri bağlantı öykünmesi — SPP profili)
+//!      |
+//!  L2CAP    (Mantıksal Bağlantı ve Uyum Protokolü — çoklama)
+//!      |
+//!  HCI      (Host Controller Interface — donanım komutları)
+//!      |
+//!  Donanım  (USB/UART Bluetooth adaptörü)
+//! ```
+//!
+//! BLE (Düşük Enerji) için ek katman: ATT/GATT → L2CAP → HCI LE.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -10,17 +26,17 @@ use spin::Mutex;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 // ============================================================================
-// BLUETOOTH CONSTANTS
+// BLUETOOTH SABİTLERİ
 // ============================================================================
 
-/// HCI packet types
+/// HCI paket türleri
 const HCI_CMD_PKT: u8 = 0x01;
 const HCI_ACL_PKT: u8 = 0x02;
 const HCI_SCO_PKT: u8 = 0x03;
 const HCI_EVT_PKT: u8 = 0x04;
 const HCI_ISO_PKT: u8 = 0x05;
 
-/// HCI OGF (OpCode Group Field)
+/// HCI OGF (İşlem Kodu Grup Alanı — OpCode Group Field)
 const OGF_LINK_CONTROL: u8 = 0x01;
 const OGF_LINK_POLICY: u8 = 0x02;
 const OGF_CONTROLLER_BASEBAND: u8 = 0x03;
@@ -29,19 +45,19 @@ const OGF_STATUS_PARAMS: u8 = 0x05;
 const OGF_TESTING: u8 = 0x06;
 const OGF_LE: u8 = 0x08;
 
-/// HCI OCF (OpCode Command Field)
+/// HCI OCF (İşlem Kodu Komut Alanı — OpCode Command Field)
 const OCF_RESET: u16 = 0x0003;
 const OCF_READ_LOCAL_VERSION: u16 = 0x0001;
 const OCF_READ_LOCAL_FEATURES: u16 = 0x0003;
 const OCF_READ_BD_ADDR: u16 = 0x0009;
 
-/// LE OCF
+/// LE OCF komutları
 const OCF_LE_SET_EVENT_MASK: u16 = 0x0001;
 const OCF_LE_SET_ADV_ENABLE: u16 = 0x000A;
 const OCF_LE_SET_ADV_DATA: u16 = 0x0008;
 const OCF_LE_CREATE_CONN: u16 = 0x000D;
 
-/// L2CAP channels
+/// L2CAP kanal kimlikleri (CID)
 const L2CAP_CID_SIGNALING: u16 = 0x0001;
 const L2CAP_CID_CONN_LESS: u16 = 0x0002;
 const L2CAP_CID_ATT: u16 = 0x0004;
@@ -49,7 +65,7 @@ const L2CAP_CID_LE_SIGNALING: u16 = 0x0005;
 const L2CAP_CID_SMP: u16 = 0x0006;
 const L2CAP_CID_SMP_BREDR: u16 = 0x0007;
 
-/// L2CAP signaling commands
+/// L2CAP sinyalleşme komutları
 const L2CAP_CMD_REJECT: u8 = 0x01;
 const L2CAP_CONN_REQ: u8 = 0x02;
 const L2CAP_CONN_RSP: u8 = 0x03;
@@ -62,7 +78,7 @@ const L2CAP_ECHO_RSP: u8 = 0x09;
 const L2CAP_INFO_REQ: u8 = 0x0A;
 const L2CAP_INFO_RSP: u8 = 0x0B;
 
-/// RFCOMM constants
+/// RFCOMM sabitleri (seri bağlantı çerçeve türleri)
 const RFCOMM_DLPMASK: u8 = 0x01;
 const RFCOMM_UIH: u8 = 0xEF;
 const RFCOMM_SABM: u8 = 0x2F;
@@ -70,11 +86,11 @@ const RFCOMM_DISC: u8 = 0x43;
 const RFCOMM_DM: u8 = 0x0F;
 const RFCOMM_UA: u8 = 0x63;
 
-/// RFCOMM DLCI
+/// RFCOMM DLCI değerleri
 const RFCOMM_DLCI_PN: u8 = 0;
 const RFCOMM_DLCI_MX: u8 = 0;
 
-/// BLE advertising types
+/// BLE reklam paketi türleri
 const BLE_ADV_IND: u8 = 0x00;
 const BLE_ADV_DIRECT_IND: u8 = 0x01;
 const BLE_ADV_SCAN_IND: u8 = 0x02;
@@ -82,9 +98,11 @@ const BLE_ADV_NONCONN_IND: u8 = 0x03;
 const BLE_ADV_SCAN_RSP: u8 = 0x04;
 
 // ============================================================================
-// BLUETOOTH ADDRESS
+// BLUETOOTH ADRESİ
 // ============================================================================
 
+/// Bluetooth cihaz adresi (BD_ADDR).
+/// 6 baytlık benzersiz donanım tanımlayıcısı.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BdAddr {
     pub bytes: [u8; 6],
@@ -113,9 +131,11 @@ impl Default for BdAddr {
 }
 
 // ============================================================================
-// HCI LAYER
+// HCI KATMANI
 // ============================================================================
 
+/// HCI hata kodları.
+/// Bluetooth spec Cilt 2, Bölüm E, Tablo 1.1'den türetilmiştir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HciError {
     UnknownCommand,
@@ -161,7 +181,8 @@ impl HciError {
     }
 }
 
-/// HCI Command header
+/// HCI komut başlığı.
+/// `opcode`: OGF (10-bit) ve OCF (6-bit) birleşiminden oluşur.
 #[derive(Clone, Copy, Debug)]
 pub struct HciCommandHeader {
     pub opcode: u16,
@@ -187,7 +208,8 @@ impl HciCommandHeader {
     }
 }
 
-/// HCI Event header
+/// HCI olay başlığı.
+/// Adaptörden gelen yanıt olayını açıklar.
 #[derive(Clone, Copy, Debug)]
 pub struct HciEventHeader {
     pub evt_code: u8,
@@ -206,7 +228,8 @@ impl HciEventHeader {
     }
 }
 
-/// HCI Controller
+/// HCI denetleyicisi.
+/// Yerel Bluetooth adaptörünü temsil eder.
 #[derive(Clone, Debug)]
 pub struct HciController {
     pub address: BdAddr,
@@ -229,90 +252,90 @@ impl HciController {
         }
     }
 
-    /// Create HCI Reset command
+    /// HCI Sıfırlama (Reset) komutu oluşturur.
     pub fn cmd_reset(&self) -> Vec<u8> {
         let header = HciCommandHeader::new(OGF_CONTROLLER_BASEBAND, OCF_RESET);
         header.to_bytes(&[])
     }
 
-    /// Create Read Local Version command
+    /// Yerel versiyon bilgisini okuma komutu oluşturur.
     pub fn cmd_read_local_version(&self) -> Vec<u8> {
         let header = HciCommandHeader::new(OGF_INFO_PARAMS, OCF_READ_LOCAL_VERSION);
         header.to_bytes(&[])
     }
 
-    /// Create Read BD ADDR command
+    /// Yerel BD adresi okuma komutu oluşturur.
     pub fn cmd_read_bd_addr(&self) -> Vec<u8> {
         let header = HciCommandHeader::new(OGF_INFO_PARAMS, OCF_READ_BD_ADDR);
         header.to_bytes(&[])
     }
 
-    /// Create LE Set Advertising Enable command
+    /// LE Reklam Etkinleştirme komutunu oluşturur.
     pub fn cmd_le_set_adv_enable(&self, enable: bool) -> Vec<u8> {
         let header = HciCommandHeader::new(OGF_LE, OCF_LE_SET_ADV_ENABLE);
         header.to_bytes(&[if enable { 1 } else { 0 }])
     }
 
-    /// Create LE Set Advertising Data command
+    /// LE Reklam Verisi ayarlama komutunu oluşturur.
     pub fn cmd_le_set_adv_data(&self, data: &[u8]) -> Vec<u8> {
         let header = HciCommandHeader::new(OGF_LE, OCF_LE_SET_ADV_DATA);
         let mut params = vec![data.len() as u8];
         params.extend_from_slice(data);
-        params.resize(32, 0); // Max 31 bytes of data
+        params.resize(32, 0); // Maksimum 31 bayt veri
         header.to_bytes(&params)
     }
 
-    /// Create LE Create Connection command
+    /// LE Bağlantı Oluşturma komutunu oluşturur.
     pub fn cmd_le_create_conn(&self, addr: &BdAddr, addr_type: u8) -> Vec<u8> {
         let header = HciCommandHeader::new(OGF_LE, OCF_LE_CREATE_CONN);
         let mut params = Vec::with_capacity(25);
-        
-        // Scan interval and window (in 0.625ms units)
-        params.extend_from_slice(&60u16.to_le_bytes()); // 37.5ms interval
-        params.extend_from_slice(&30u16.to_le_bytes()); // 18.75ms window
-        
-        // Initiator filter policy (0 = use address from command)
+
+        // Tarama aralığı ve penceresi (0.625 ms biriminde)
+        params.extend_from_slice(&60u16.to_le_bytes()); // 37.5ms aralık
+        params.extend_from_slice(&30u16.to_le_bytes()); // 18.75ms pencere
+
+        // Başlatıcı filtre politikası (0 = komuttaki adresi kullan)
         params.push(0);
-        
-        // Peer address type and address
+
+        // Karşı taraf adres türü ve adresi
         params.push(addr_type);
         params.extend_from_slice(&addr.bytes);
-        
-        // Own address type
+
+        // Kendi adres türü
         params.push(0);
-        
-        // Connection interval min, max, latency, timeout
-        params.extend_from_slice(&24u16.to_le_bytes());  // 30ms min
-        params.extend_from_slice(&40u16.to_le_bytes());  // 50ms max
-        params.extend_from_slice(&0u16.to_le_bytes());   // 0 latency
-        params.extend_from_slice(&500u16.to_le_bytes()); // 5s timeout
-        
-        // Min/max CE length
+
+        // Bağlantı aralığı min, max, gecikme, zaman aşımı
+        params.extend_from_slice(&24u16.to_le_bytes());  // 30ms minimum
+        params.extend_from_slice(&40u16.to_le_bytes());  // 50ms maksimum
+        params.extend_from_slice(&0u16.to_le_bytes());   // Gecikme yok
+        params.extend_from_slice(&500u16.to_le_bytes()); // 5 sn zaman aşımı
+
+        // Min/max CE uzunluğu
         params.extend_from_slice(&0u16.to_le_bytes());
         params.extend_from_slice(&0u16.to_le_bytes());
-        
+
         header.to_bytes(&params)
     }
 
-    /// Parse Command Complete event
+    /// Komut Tamamlandı (Command Complete) olayını ayrıştırır.
     pub fn parse_cmd_complete(&mut self, data: &[u8]) -> Option<(u16, u8)> {
         if data.len() < 5 {
             return None;
         }
-        
+
         let num_cmds = data[0];
         let opcode = u16::from_le_bytes([data[1], data[2]]);
         let status = data[3];
-        
+
         Some((opcode, status))
     }
 
-    /// Parse Read BD ADDR response
+    /// BD adresini yanıttan okur.
     pub fn parse_bd_addr(&mut self, data: &[u8]) -> Option<()> {
         if data.len() < 6 {
             return None;
         }
-        
+
         self.address.bytes.copy_from_slice(&data[0..6]);
         Some(())
     }
@@ -325,9 +348,11 @@ impl Default for HciController {
 }
 
 // ============================================================================
-// L2CAP LAYER
+// L2CAP KATMANI
 // ============================================================================
 
+/// L2CAP kanalı.
+/// Mantıksal bağlantı kanalını temsil eder; çoklama ve akış kontrolü sağlar.
 #[derive(Clone, Debug)]
 pub struct L2capChannel {
     pub cid: u16,
@@ -360,7 +385,7 @@ impl L2capChannel {
     }
 }
 
-/// L2CAP Signaling header
+/// L2CAP sinyalleşme başlığı.
 #[derive(Clone, Copy, Debug)]
 pub struct L2capSignalHeader {
     pub code: u8,
@@ -390,7 +415,7 @@ impl L2capSignalHeader {
     }
 }
 
-/// L2CAP Connection Request
+/// L2CAP bağlantı isteği paketi.
 #[derive(Clone, Copy, Debug)]
 pub struct L2capConnReq {
     pub psm: u16,
@@ -416,7 +441,7 @@ impl L2capConnReq {
     }
 }
 
-/// L2CAP Connection Response
+/// L2CAP bağlantı yanıtı paketi.
 #[derive(Clone, Copy, Debug)]
 pub struct L2capConnRsp {
     pub dcid: u16,
@@ -448,7 +473,8 @@ impl L2capConnRsp {
     }
 }
 
-/// L2CAP Manager
+/// L2CAP yöneticisi.
+/// Tüm L2CAP kanallarını yönetir ve dinamik CID tahsis eder.
 #[derive(Clone, Debug)]
 pub struct L2capManager {
     pub channels: BTreeMap<u16, L2capChannel>,
@@ -459,11 +485,11 @@ impl L2capManager {
     pub fn new() -> Self {
         L2capManager {
             channels: BTreeMap::new(),
-            next_cid: 0x0040, // Dynamic channels start at 0x0040
+            next_cid: 0x0040, // Dinamik kanallar 0x0040'dan başlar
         }
     }
 
-    /// Allocate new CID
+    /// Yeni CID (Kanal Kimliği) tahsis eder.
     pub fn alloc_cid(&mut self) -> u16 {
         let cid = self.next_cid;
         self.next_cid += 1;
@@ -473,7 +499,7 @@ impl L2capManager {
         cid
     }
 
-    /// Create connection request
+    /// Bağlantı isteği paketi oluşturur, yeni bir kanal açar.
     pub fn create_conn_req(&mut self, psm: u16) -> (u16, Vec<u8>) {
         let cid = self.alloc_cid();
         let channel = L2capChannel::new(cid, psm);
@@ -487,7 +513,7 @@ impl L2capManager {
         (cid, req.to_bytes())
     }
 
-    /// Handle connection response
+    /// Gelen bağlantı yanıtını işler, kanal durumunu WaitConfig'e geçirir.
     pub fn handle_conn_rsp(&mut self, rsp: &L2capConnRsp) -> Option<u16> {
         if let Some(channel) = self.channels.get_mut(&rsp.scid) {
             channel.remote_cid = rsp.dcid;
@@ -499,7 +525,7 @@ impl L2capManager {
         None
     }
 
-    /// Get channel by CID
+    /// CID'ye göre kanal referansını döndürür.
     pub fn get_channel(&self, cid: u16) -> Option<&L2capChannel> {
         self.channels.get(&cid)
     }

@@ -2,12 +2,61 @@
 //!
 //! Linux `kernel/irq/chip.c` + `kernel/irq/irqdomain.c` karşılığı.
 //! Birden fazla interrupt controller'ı tek bir soyut katman altında birleştirir.
+//!
+//! ## Interrupt Controller Hiyerarşisi
+//!
+//! ```text
+//!  ┌──────────────────────────────────────────────────────────┐
+//!  │               IrqChip Trait (Soyut Katman)               │
+//!  │        irq_ack | irq_mask | irq_unmask | irq_eoi         │
+//!  └────────────┬──────────────────┬────────────┬─────────────┘
+//!               │                  │            │
+//!               ▼                  ▼            ▼
+//!          PicChip            IoApicChip     MsiChip
+//!        (8259 PIC)          (I/O APIC)    (PCI MSI/X)
+//!          │                    │               │
+//!          ▼                    ▼               ▼
+//!     Port 0x20/0xA0     IOAPIC MMIO      LAPIC MSI Msg
+//!     (master/slave)    redirect tbl     (addr+data yaz)
+//! ```
+//!
+//! ## Neden Soyutlama?
+//!
+//! Eski PC sistemlerde 8259 PIC kullanılırken, modern sistemler
+//! I/O APIC ve LAPIC ile çalışır. PCI Express aygıtları ise MSI
+//! (Message Signaled Interrupts) kullanır. Bu trait sayesinde
+//! üst katman hangisi olduğunu bilmeden interrupt yönetebilir.
+//!
+//! ## IRQ Yaşam Döngüsü
+//!
+//! ```text
+//!  Aygıt sürücüsü               IrqChip             Donanım
+//!  ──────────────               ───────              ──────
+//!  request_irq(vector, handler) ──►  irq_unmask(irq) ──► IRQ hattı aktif
+//!                                                        │
+//!  interrupt gelir ◄─────────────────────────────────────┘
+//!       │
+//!       ▼
+//!  handler(vector) çalışır
+//!       │
+//!       ▼
+//!  irq_eoi(irq)  ──►  PIC/LAPIC EOI gönder
+//! ```
 
 use alloc::vec::Vec;
 use spin::Mutex;
 
 // ============================================================================
-// IrqChip Trait — Linux struct irq_chip
+// IrqChip Trait — Linux struct irq_chip karşılığı
+//
+// Her interrupt controller bu trait'i implemente eder.
+// Trait metotlarının anlamları:
+//   irq_ack()      : CPU, interrupt'ı aldığını onaylar ("acknowledge")
+//   irq_mask()     : Controller seviyesinde IRQ'yu sustur (kapat)
+//   irq_unmask()   : Controller seviyesinde IRQ'yu aç
+//   irq_eoi()      : "End of Interrupt" — handler bitti, yeni interrupt alınabilir
+//   irq_set_type() : Edge / Level tetikleme modunu ayarla
+//   irq_set_affinity(): Hangi CPU'ya yönlendirilecek (SMP)
 // ============================================================================
 
 /// Interrupt controller soyutlaması.
@@ -50,7 +99,14 @@ pub trait IrqChip: Send + Sync {
 }
 
 // ============================================================================
-// PIC Chip
+// PIC Chip — Intel 8259A Programmable Interrupt Controller
+//
+// İki adet 8259 çipten oluşur: Master (IRQ 0-7) ve Slave (IRQ 8-15).
+// Slave, Master'ın IRQ2 hattına bağlıdır (cascade/zincir).
+// Port adresleri:
+//   Master: komut=0x20, veri(mask)=0x21
+//   Slave:  komut=0xA0, veri(mask)=0xA1
+// Bit maskesi: 1=maskelenmiş(kapalı), 0=aktif
 // ============================================================================
 
 /// 8259 PIC interrupt controller
@@ -102,7 +158,20 @@ impl IrqChip for PicChip {
 }
 
 // ============================================================================
-// I/O APIC Chip
+// I/O APIC Chip — Advanced Programmable Interrupt Controller
+//
+// Modern x86_64 sistemlerin interrupt controller'ı.
+// MMIO (Memory-Mapped I/O) üzerinden programlanır.
+// Her IRQ için bir "redirection table entry" (RTE) bulunur:
+//   RTE = {vektör, teslim modu, maskeleme, hedef APIC ID}
+//
+// I/O APIC edge-triggered interrupt'ları için LAPIC EOI yeterlidir.
+// Level-triggered için I/O APIC'e ek olarak level clear gerekebilir.
+//
+// Avantajları (PIC'e göre):
+//   • 24'e kadar IRQ (PIC: 15)
+//   • SMP: Her IRQ farklı CPU'ya yönlendirilebilir (affinity)
+//   • MSI ile birlikte kullanılabilir
 // ============================================================================
 
 /// I/O APIC interrupt controller
@@ -142,7 +211,20 @@ impl IrqChip for IoApicChip {
 }
 
 // ============================================================================
-// MSI Chip
+// MSI Chip — Message Signaled Interrupts (Mesaj Tabanlı Kesmeler)
+//
+// MSI/MSI-X, PCI Express aygıtlarının geleneksel pin-tabanlı IRQ yerine
+// bellek yazma işlemiyle (memory write) interrupt göndermesidir.
+//
+// MSI mesajı yapısı:
+//   Hedef Adres: 0xFEEE_XXXX  (LAPIC MSI adres formatı)
+//   Hedef Veri : {trigger, level, delivery_mode, vector}
+//
+// Avantajları:
+//   • Pin paylaşımı yok (her aygıt kendi vektörüne sahip)
+//   • MSI-X: Aygıt başına 2048'e kadar bağımsız kesme
+//   • CPU affinity kolayca ayarlanır
+//   • Level-triggered sorunları yok (hepsi edge)
 // ============================================================================
 
 /// MSI/MSI-X interrupt controller (virtual)
@@ -173,7 +255,18 @@ impl IrqChip for MsiChip {
 }
 
 // ============================================================================
-// IRQ Domain — Linux irqdomain.c
+// IRQ Domain — Linux irqdomain.c karşılığı
+//
+// IRQ Domain, bir interrupt controller'ın yönettiği IRQ aralığını
+// ve bu aralığa ait chip'i bir arada tutan yapıdır.
+//
+// Örnek domain yapısı:
+//   PIC domain   : hwirq_base=0, size=16, chip=PicChip
+//   IOAPIC domain: hwirq_base=0, size=24, chip=IoApicChip
+//   MSI domain   : hwirq_base=64, size=192, chip=MsiChip
+//
+// Domain'ler IRQ_DOMAINS listesinde tutulur. Bir IRQ numarası
+// find_domain_for_irq() ile hangi domain'e ait olduğu bulunur.
 // ============================================================================
 
 /// IRQ domain — bir interrupt controller'ın yönettiği IRQ aralığı
@@ -245,7 +338,10 @@ pub fn find_domain_for_irq(irq: u32) -> Option<usize> {
 }
 
 // ============================================================================
-// Statik chip instance'ları
+// Statik chip instance'ları — 'static ömürlü global controller nesneleri
+//
+// Rust'ta trait nesneleri referans olarak tutulduğundan 'static gerekir.
+// Bu instance'lar compile-time'da oluşturulur, heap allocator gerekmez.
 // ============================================================================
 
 /// Global PIC chip

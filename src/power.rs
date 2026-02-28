@@ -1,7 +1,7 @@
-//! # echOS Power Management Module
+//! # Güç Yönetimi Modülü
 //!
-//! Tier 1 OS seviyesinde CPU power management
-//! Linux cpufreq ile aynı seviyede yetenekler
+//! CPU güç durumları (C-state/P-state), frekans ölçeklendirme ve enerji tasarrufu.
+//! Linux cpufreq ile eşdeğer Tier-1 OS düzeyinde yetenekler sunar.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use alloc::vec::Vec;

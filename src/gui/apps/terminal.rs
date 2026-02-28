@@ -1,7 +1,21 @@
-//! # Terminal Application
+//! # Terminal Uygulaması
 //!
-//! Terminal app with tabs, themes, and shell integration
-//! Supports multiple terminal sessions with customizable appearance
+//! Sekmeli terminal — tema desteği, scrollback tamponu ve kabuk entegrasyonu.
+//! Birden fazla terminal oturumunu özelleştirilebilir görünüm seçenekleriyle sunar.
+//!
+//! ## Mimari
+//! - `TerminalTheme`: Renk teması (16 ANSI rengi + seçim/arka plan renkleri)
+//! - `TerminalCell`: Tek bir terminal hücresi (karakter + renk + nitelikler)
+//! - `TerminalTab`: Tek bir terminal sekmesi/oturumu (ızgara + scrollback)
+//! - `TerminalWindow`: Ana pencere; sekmeler ve temalar yönetilir
+//!
+//! ## Önemli Tasarım Kararları
+//! - Scrollback tamponu: Yukarı kaydırılan satırlar `VecDeque` yerine `Vec`'te
+//!   saklanır; `SCROLLBACK_LINES` sabiti ile sınırlandırılır.
+//! - Kursor yanıp sönmesi: Delta zamanı (`dt`) kullanılarak 0.5 saniyelik
+//!   döngü ile kursor görünürlüğü değiştirilir.
+//! - Komut işleme: Terminal-yerel komutlar (tema, çıkış) burada işlenir;
+//!   diğer tüm komutlar `crate::shell::run_command()` ile kernel shell'e aktarılır.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -19,75 +33,86 @@ use crate::gui::Rect;
 // TERMINAL CONSTANTS
 // ============================================================================
 
-/// Tab bar height
+/// Sekme çubuğu yüksekliği (piksel).
+/// Her sekme bu yükseklikte gösterilir.
 pub const TAB_BAR_HEIGHT: usize = 28;
 
-/// Default font size
+/// Varsayılan yazı tipi boyutu (piksel).
 pub const DEFAULT_FONT_SIZE: usize = 14;
 
-/// Default columns
+/// Varsayılan sütun sayısı (standart 80 sütun terminal).
 pub const DEFAULT_COLS: usize = 80;
 
-/// Default rows
+/// Varsayılan satır sayısı (standart 24 satır terminal).
 pub const DEFAULT_ROWS: usize = 24;
 
-/// Scrollback buffer lines
+/// Scrollback tamponu için maksimum satır sayısı.
+/// Bu sınırı aşan eski satırlar silinir (FIFO mantığı).
 pub const SCROLLBACK_LINES: usize = 1000;
 
 // ============================================================================
 // TERMINAL THEME
 // ============================================================================
 
-/// Terminal color theme
+/// Terminal renk teması.
+///
+/// ANSI terminaller 16 standart renk kullanır: 8 normal + 8 parlak (bright).
+/// Bu yapı hem temel renkleri hem de arka plan, ön plan, kursor gibi
+/// özel renkleri bir arada saklar.
+///
+/// `#[derive(Clone, Debug)]`: `Clone` kopyalamaya, `Debug` yazdırmaya izin verir.
+/// Tema tüm sekmelere kopyalanabilir olması için `Clone` gereklidir.
 #[derive(Clone, Debug)]
 pub struct TerminalTheme {
-    /// Theme name
+    /// Tema adı (kullanıcıya gösterilir)
     pub name: String,
-    /// Background color
+    /// Terminal arka plan rengi (0xRRGGBB)
     pub background: u32,
-    /// Foreground (text) color
+    /// Metin ön plan rengi
     pub foreground: u32,
-    /// Cursor color
+    /// Kursor rengi
     pub cursor: u32,
-    /// Selection background
+    /// Seçim arka planı
     pub selection_bg: u32,
-    /// Selection foreground
+    /// Seçim ön planı
     pub selection_fg: u32,
-    /// Black (normal)
+    /// ANSI renk 0: Siyah (normal)
     pub black: u32,
-    /// Red (normal)
+    /// ANSI renk 1: Kırmızı (normal)
     pub red: u32,
-    /// Green (normal)
+    /// ANSI renk 2: Yeşil (normal)
     pub green: u32,
-    /// Yellow (normal)
+    /// ANSI renk 3: Sarı (normal)
     pub yellow: u32,
-    /// Blue (normal)
+    /// ANSI renk 4: Mavi (normal)
     pub blue: u32,
-    /// Magenta (normal)
+    /// ANSI renk 5: Eflatun (normal)
     pub magenta: u32,
-    /// Cyan (normal)
+    /// ANSI renk 6: Camgöbeği (normal)
     pub cyan: u32,
-    /// White (normal)
+    /// ANSI renk 7: Beyaz (normal)
     pub white: u32,
-    /// Bright black
+    /// ANSI renk 8: Parlak Siyah (gri)
     pub bright_black: u32,
-    /// Bright red
+    /// ANSI renk 9: Parlak Kırmızı
     pub bright_red: u32,
-    /// Bright green
+    /// ANSI renk 10: Parlak Yeşil
     pub bright_green: u32,
-    /// Bright yellow
+    /// ANSI renk 11: Parlak Sarı
     pub bright_yellow: u32,
-    /// Bright blue
+    /// ANSI renk 12: Parlak Mavi
     pub bright_blue: u32,
-    /// Bright magenta
+    /// ANSI renk 13: Parlak Eflatun
     pub bright_magenta: u32,
-    /// Bright cyan
+    /// ANSI renk 14: Parlak Camgöbeği
     pub bright_cyan: u32,
-    /// Bright white
+    /// ANSI renk 15: Parlak Beyaz
     pub bright_white: u32,
 }
 
 impl TerminalTheme {
+    /// Klasik siyah/beyaz terminal teması.
+    /// En eski ve en evrensel terminal renk şemasıdır.
     pub fn basic() -> Self {
         TerminalTheme {
             name: String::from("Basic"),
@@ -114,7 +139,10 @@ impl TerminalTheme {
             bright_white: 0xFFFFFF,
         }
     }
-    
+
+    /// Solarized Dark teması.
+    /// Ethan Schoonover tarafından tasarlanmış; göz yormayan renk dengesiyle
+    /// popüler bir tema. Koyu yeşil taban üzerine ılımlı renkler kullanır.
     pub fn solarized_dark() -> Self {
         TerminalTheme {
             name: String::from("Solarized Dark"),
@@ -141,7 +169,9 @@ impl TerminalTheme {
             bright_white: 0xFDF6E3,
         }
     }
-    
+
+    /// Dracula teması.
+    /// Şeffaf lavanta arka plan ve canlı morla tanınan popüler karanlık tema.
     pub fn dracula() -> Self {
         TerminalTheme {
             name: String::from("Dracula"),
@@ -168,7 +198,9 @@ impl TerminalTheme {
             bright_white: 0xF8F8F2,
         }
     }
-    
+
+    /// Gruvbox Dark teması.
+    /// Sıcak turuncu/sarı tonları ile doğal bir his veren retro renk şeması.
     pub fn gruvbox_dark() -> Self {
         TerminalTheme {
             name: String::from("Gruvbox Dark"),
@@ -195,7 +227,9 @@ impl TerminalTheme {
             bright_white: 0xEBDBB2,
         }
     }
-    
+
+    /// Monokai teması.
+    /// Sublime Text editörünün ikonik renk şeması; canlı yeşil ve pembeyle tanınır.
     pub fn monokai() -> Self {
         TerminalTheme {
             name: String::from("Monokai"),
@@ -222,7 +256,9 @@ impl TerminalTheme {
             bright_white: 0xF9F8F5,
         }
     }
-    
+
+    /// Nord teması.
+    /// İskandinav tasarım ilhamlı soğuk mavi/gri tonları; sakin ve profesyonel görünüm.
     pub fn nord() -> Self {
         TerminalTheme {
             name: String::from("Nord"),
@@ -249,8 +285,11 @@ impl TerminalTheme {
             bright_white: 0xECEFF4,
         }
     }
-    
-    /// Get color by ANSI code
+
+    /// ANSI renk koduna karşılık gelen rengi döndürür.
+    ///
+    /// Standart ANSI terminallerde renkler 0–15 arası numaralandırılır.
+    /// `_` (wildcard) varyantı: bilinmeyen kodlar için ön plan rengi döner.
     pub fn get_color(&self, code: u8) -> u32 {
         match code {
             0 => self.black,
@@ -278,26 +317,35 @@ impl TerminalTheme {
 // TERMINAL CELL
 // ============================================================================
 
-/// A single terminal cell
+/// Tek bir terminal hücresi.
+///
+/// Terminal ızgarası `rows × cols` adet `TerminalCell`'den oluşur.
+/// Her hücre bir karakter, iki renk (ön plan + arka plan) ve
+/// dört görsel nitelik (kalın, italik, altı çizili, ters video) saklar.
+///
+/// `#[derive(Clone, Copy)]`: `Copy` türetmesi bu yapının yığında kopyalanmasını
+/// sağlar; `Vec::resize` ve ızgara başlatma operasyonları için kritiktir.
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalCell {
-    /// Character
+    /// Hücrede gösterilen karakter
     pub char: char,
-    /// Foreground color (ANSI code or RGB)
+    /// Ön plan (metin) rengi — 0xRRGGBB formatında
     pub fg_color: u32,
-    /// Background color
+    /// Arka plan rengi
     pub bg_color: u32,
-    /// Is bold
+    /// Kalın metin niteliği
     pub bold: bool,
-    /// Is italic
+    /// İtalik metin niteliği
     pub italic: bool,
-    /// Is underline
+    /// Altı çizili niteliği
     pub underline: bool,
-    /// Is reverse video
+    /// Ters video: ön plan ve arka plan renklerini değiştirir
     pub reverse: bool,
 }
 
 impl TerminalCell {
+    /// Belirtilen renklerde yeni bir hücre oluşturur.
+    /// Tüm nitelikler `false` (varsayılan) olarak başlatılır.
     pub fn new(char: char, fg: u32, bg: u32) -> Self {
         TerminalCell {
             char,
@@ -309,7 +357,9 @@ impl TerminalCell {
             reverse: false,
         }
     }
-    
+
+    /// Temadan varsayılan boş hücre oluşturur.
+    /// Boşluk karakteri ve tema renkleriyle başlatılır.
     pub fn default(theme: &TerminalTheme) -> Self {
         TerminalCell {
             char: ' ',
@@ -327,61 +377,75 @@ impl TerminalCell {
 // TERMINAL TAB
 // ============================================================================
 
-/// A terminal tab/session
+/// Bir terminal sekmesi/oturumu.
+///
+/// `grid: Vec<Vec<TerminalCell>>`: 2D hücre ızgarası.
+/// `rows` satır, her satır `cols` hücre içerir.
+/// `scrollback: Vec<Vec<TerminalCell>>`: görünür alandan yukarı kayan
+/// satırların tarihsel tamponu. Kullanıcı tekerlek kaydırarak buraya erişebilir.
+///
+/// `history: Vec<String>`: komut geçmişi (yukarı/aşağı ok tuşuyla gezilir).
+/// `history_pos`: geçmişte şu an hangi konumdasın.
 #[derive(Clone, Debug)]
 pub struct TerminalTab {
-    /// Tab ID
+    /// Sekmenin benzersiz ID'si
     pub id: u32,
-    /// Tab title
+    /// Sekme çubuğunda gösterilen başlık
     pub title: String,
-    /// Current directory
+    /// Mevcut çalışma dizini
     pub cwd: String,
-    /// Shell process ID (would be actual PID)
+    /// Kabuk sürecinin ID'si (gerçek PID olacak)
     pub shell_pid: u32,
-    /// Grid of cells
+    /// Terminal hücre ızgarası [satır][sütun]
     pub grid: Vec<Vec<TerminalCell>>,
-    /// Cursor position
+    /// Kursor X konumu (sütun, 0 tabanlı)
     pub cursor_x: usize,
+    /// Kursor Y konumu (satır, 0 tabanlı)
     pub cursor_y: usize,
-    /// Cursor visible
+    /// Kursor görünür mü?
     pub cursor_visible: bool,
-    /// Scroll position
+    /// Kaydırma konumu (scrollback'te kaç satır yukarıda)
     pub scroll_offset: usize,
-    /// Scrollback buffer
+    /// Scrollback tamponu (görünür alandan çıkan eski satırlar)
     pub scrollback: Vec<Vec<TerminalCell>>,
-    /// Selection start
+    /// Metin seçimi başlangıç noktası (sütun, satır)
     pub selection_start: Option<(usize, usize)>,
-    /// Selection end
+    /// Metin seçimi bitiş noktası
     pub selection_end: Option<(usize, usize)>,
-    /// Is bell ringing
+    /// Zil çalıyor mu? (BEL karakteri `\x07`)
     pub bell: bool,
-    /// Bell timer
+    /// Zil geri sayım zamanlayıcısı (saniye)
     pub bell_timer: f32,
-    /// Columns
+    /// Terminal genişliği (sütun sayısı)
     pub cols: usize,
-    /// Rows
+    /// Terminal yüksekliği (satır sayısı)
     pub rows: usize,
-    /// Font size
+    /// Yazı tipi boyutu
     pub font_size: usize,
-    /// Line height
+    /// Satır yüksekliği (piksel)
     pub line_height: usize,
-    /// Char width
+    /// Karakter genişliği (piksel)
     pub char_width: usize,
-    /// Input buffer
+    /// Kullanıcının yazdığı ama henüz çalıştırılmayan giriş tamponu
     pub input_buffer: String,
-    /// History (command history)
+    /// Komut geçmişi listesi
     pub history: Vec<String>,
-    /// History position
+    /// Geçmişte bulunulan konum (0 = en eski, len() = güncel)
     pub history_pos: usize,
-    /// Current theme index
+    /// Bu sekme için kullanılan tema indeksi
     pub theme_index: usize,
 }
 
 impl TerminalTab {
+    /// Yeni terminal sekmesi oluşturur.
+    ///
+    /// Izgara `rows × cols` adet boş hücreyle doldurulur.
+    /// İç içe `Vec::with_capacity` ile gereksiz yeniden tahsis önlenir:
+    /// kapasite önceden ayrılır, ekleme sırasında bellek taşması olmaz.
     pub fn new(id: u32, theme: &TerminalTheme) -> Self {
         let cols = DEFAULT_COLS;
         let rows = DEFAULT_ROWS;
-        
+
         // Initialize grid with empty cells
         let mut grid = Vec::with_capacity(rows);
         for _ in 0..rows {
@@ -391,7 +455,7 @@ impl TerminalTab {
             }
             grid.push(row);
         }
-        
+
         TerminalTab {
             id,
             title: String::from("Terminal"),
@@ -418,13 +482,15 @@ impl TerminalTab {
             theme_index: 0,
         }
     }
-    
-    /// Write character at cursor
+
+    /// Kursor konumuna tek karakter yazar.
+    ///
+    /// Kursor sütun sınırına ulaştığında otomatik satır atlanır (soft wrap).
     pub fn write_char(&mut self, c: char, theme: &TerminalTheme) {
         if self.cursor_x >= self.cols {
             self.newline(theme);
         }
-        
+
         if self.cursor_y < self.rows {
             self.grid[self.cursor_y][self.cursor_x] = TerminalCell::new(
                 c,
@@ -434,8 +500,14 @@ impl TerminalTab {
             self.cursor_x += 1;
         }
     }
-    
-    /// Write string
+
+    /// Bir string yazar; özel karakterleri işler.
+    ///
+    /// - `'\n'`: yeni satır — `newline()` çağrısıyla satır atla + kaydır
+    /// - `'\r'`: satır başı — kursoru sütun 0'a götür (üzerine yaz)
+    /// - `'\t'`: sekme — `(cursor_x + 8) & !7` formülü ile 8 sütunluk
+    ///   sekme durağına ilerler. `& !7` bit maskesiyle 8'in katına yuvarlar.
+    /// - `'\x08'`: geri tuşu — kursoru bir sola götür
     pub fn write(&mut self, s: &str, theme: &TerminalTheme) {
         for c in s.chars() {
             match c {
@@ -457,11 +529,15 @@ impl TerminalTab {
             }
         }
     }
-    
-    /// New line
+
+    /// Yeni satıra geçer.
+    ///
+    /// Son satırda değilse kursoru bir satır aşağı iner.
+    /// Son satırdaysa `scroll_up()` ile ekranı bir satır yukarı kaydırır;
+    /// alt kısımda boş bir satır belirtir.
     pub fn newline(&mut self, theme: &TerminalTheme) {
         self.cursor_x = 0;
-        
+
         if self.cursor_y < self.rows - 1 {
             self.cursor_y += 1;
         } else {
@@ -469,18 +545,26 @@ impl TerminalTab {
             self.scroll_up(theme);
         }
     }
-    
-    /// Scroll up one line
+
+    /// Ekranı bir satır yukarı kaydırır.
+    ///
+    /// En üst satır scrollback tamponuna taşınır.
+    /// `SCROLLBACK_LINES` aşıldığında en eski scrollback satırı silinir.
+    /// Alt kısıma boş yeni bir satır eklenir.
+    ///
+    /// `grid.remove(0)`: O(n) işlemidir çünkü tüm elemanları sola kaydırır.
+    /// Büyük terminallerde performans sorunu yaratabilir; VecDeque ile optimize
+    /// edilebilir.
     pub fn scroll_up(&mut self, theme: &TerminalTheme) {
         // Move top line to scrollback
         let top_line = self.grid.remove(0);
         self.scrollback.push(top_line);
-        
+
         // Limit scrollback size
         if self.scrollback.len() > SCROLLBACK_LINES {
             self.scrollback.remove(0);
         }
-        
+
         // Add new empty line at bottom
         let mut new_line = Vec::with_capacity(self.cols);
         for _ in 0..self.cols {
@@ -488,8 +572,12 @@ impl TerminalTab {
         }
         self.grid.push(new_line);
     }
-    
-    /// Clear screen
+
+    /// Ekranı temizler ve kursoru sol üste götürür.
+    ///
+    /// `for row in &mut self.grid`: değiştirilebilir yineleyici;
+    /// her satıra değiştirilebilir referans (`&mut Vec<TerminalCell>`) verir.
+    /// `*cell = ...`: dereference ile hücrenin değerini günceller.
     pub fn clear(&mut self, theme: &TerminalTheme) {
         for row in &mut self.grid {
             for cell in row {
@@ -499,45 +587,56 @@ impl TerminalTab {
         self.cursor_x = 0;
         self.cursor_y = 0;
     }
-    
-    /// Ring bell
+
+    /// Zil çalar (BEL karakteri işlenir).
+    /// `bell_timer = 0.2`: 0.2 saniye boyunca zil durumu aktif kalır.
     pub fn ring_bell(&mut self) {
         self.bell = true;
         self.bell_timer = 0.2;
     }
-    
-    /// Resize terminal
+
+    /// Terminal boyutunu yeniden ayarlar.
+    ///
+    /// `Vec::resize(new_len, value)`: dizinin uzunluğunu değiştirir.
+    /// Kısalırsa sondan keser; uzarsa `value` klonlarıyla doldurur.
+    /// `Copy` türetmesi `TerminalCell`'in klonsuz kopyalanmasını sağlar.
     pub fn resize(&mut self, cols: usize, rows: usize, theme: &TerminalTheme) {
         // Resize grid
         self.grid.resize(rows, vec![TerminalCell::default(theme); cols]);
         for row in &mut self.grid {
             row.resize(cols, TerminalCell::default(theme));
         }
-        
+
         self.cols = cols;
         self.rows = rows;
-        
+
         // Clamp cursor
         self.cursor_x = self.cursor_x.min(cols - 1);
         self.cursor_y = self.cursor_y.min(rows - 1);
     }
-    
-    /// Process input
+
+    /// Giriş tamponundaki komutu işler (Enter'a basıldığında çağrılır).
+    ///
+    /// Giriş tamponu ekroya yansıtılır ve komut geçmişine eklenir.
+    /// `history_pos = history.len()`: geçmişin sonuna tutanç kurar;
+    /// sonraki yukarı-ok komutu en son girilen komutu gösterir.
     pub fn process_input(&mut self, theme: &TerminalTheme) {
         // Echo input
         let input = self.input_buffer.clone();
         self.write(&input, theme);
-        
+
         // Add to history
         if !self.input_buffer.is_empty() {
             self.history.push(self.input_buffer.clone());
             self.history_pos = self.history.len();
         }
-        
+
         self.input_buffer.clear();
     }
-    
-    /// History up
+
+    /// Komut geçmişinde bir önceki komuta gider (yukarı ok).
+    ///
+    /// `history_pos > 0` kontrolü: listenin başının ötesine geçilmez.
     pub fn history_up(&mut self) {
         if self.history_pos > 0 {
             self.history_pos -= 1;
@@ -546,8 +645,10 @@ impl TerminalTab {
             }
         }
     }
-    
-    /// History down
+
+    /// Komut geçmişinde bir sonraki komuta gider (aşağı ok).
+    ///
+    /// Listenin sonuna gelince giriş tamponu temizlenir (yeni komut durumu).
     pub fn history_down(&mut self) {
         if self.history_pos < self.history.len() {
             self.history_pos += 1;
@@ -564,31 +665,40 @@ impl TerminalTab {
 // TERMINAL WINDOW
 // ============================================================================
 
-/// Terminal window
+/// Terminal penceresi.
+///
+/// Birden fazla sekmeyi ve temayı yönetir.
+/// `cursor_blink_timer: f32` — delta zamanı ile kursor yanıp sönmesini
+/// sağlar. 0.5 saniyede bir `cursor_visible` değiştirilir.
+/// `next_tab_id: u32` — monoton artan sekme ID üreteci.
 pub struct TerminalWindow {
-    /// Window rect
+    /// Pencerenin konumu ve boyutu
     pub rect: Rect,
-    /// Tabs
+    /// Açık terminal sekmeleri
     pub tabs: Vec<TerminalTab>,
-    /// Active tab index
+    /// Aktif sekme indeksi
     pub active_tab: usize,
-    /// Themes
+    /// Mevcut temalar listesi
     pub themes: Vec<TerminalTheme>,
-    /// Cursor blink timer
+    /// Kursor yanıp sönme zamanlayıcısı (saniye)
     pub cursor_blink_timer: f32,
-    /// Cursor visible (for blinking)
+    /// Kursor şu an görünür mü?
     pub cursor_visible: bool,
-    /// Next tab ID
+    /// Bir sonraki sekmeye atanacak ID
     pub next_tab_id: u32,
-    /// Hovered tab
+    /// Üzerine gelinmiş sekme indeksi
     pub hovered_tab: Option<usize>,
-    /// Show inspector
+    /// Denetleyici (inspector) görünüyor mu?
     pub show_inspector: bool,
-    /// Font size
+    /// Yazı tipi boyutu
     pub font_size: usize,
 }
 
 impl TerminalWindow {
+    /// Yeni terminal penceresi oluşturur.
+    ///
+    /// Tüm yerleşik temalar `themes` vektörüne eklenir.
+    /// Başlangıçta bir sekme oluşturulur ve hoşgeldiniz mesajı yazılır.
     pub fn new(rect: Rect) -> Self {
         let themes = vec![
             TerminalTheme::basic(),
@@ -598,7 +708,7 @@ impl TerminalWindow {
             TerminalTheme::monokai(),
             TerminalTheme::nord(),
         ];
-        
+
         let mut terminal = TerminalWindow {
             rect,
             tabs: Vec::new(),
@@ -611,17 +721,19 @@ impl TerminalWindow {
             show_inspector: false,
             font_size: DEFAULT_FONT_SIZE,
         };
-        
+
         terminal.new_tab();
         terminal.show_welcome();
-        
+
         terminal
     }
-    
+
+    /// Yeni sekme açıldığında hoşgeldiniz mesajı yazar.
+    /// `&self.themes[0]`: ilk temayla (Basic) başlatılır.
     fn show_welcome(&mut self) {
         let theme = &self.themes[0];
         let tab = &mut self.tabs[0];
-        
+
         tab.write("echOS Terminal v1.0\n", theme);
         tab.write("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n", theme);
         tab.write("Welcome to echOS Terminal!\n\n", theme);
@@ -638,7 +750,9 @@ impl TerminalWindow {
         tab.write("\n", theme);
         tab.write("$ ", theme);
     }
-    
+
+    /// Yeni terminal sekmesi açar.
+    /// `next_tab_id` artırılarak benzersiz ID garanti edilir.
     pub fn new_tab(&mut self) {
         let theme = &self.themes[0];
         let tab = TerminalTab::new(self.next_tab_id, theme);
@@ -646,7 +760,10 @@ impl TerminalWindow {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
     }
-    
+
+    /// Belirtilen sekmeyi kapatır.
+    /// En az bir sekme kalması garanti edilir (`tabs.len() > 1` kontrolü).
+    /// Aktif sekme kapatılırsa en sona gidilir.
     pub fn close_tab(&mut self, index: usize) {
         if self.tabs.len() > 1 {
             self.tabs.remove(index);
@@ -655,34 +772,46 @@ impl TerminalWindow {
             }
         }
     }
-    
+
+    /// Belirtilen sekmeyi aktif yapar.
     pub fn select_tab(&mut self, index: usize) {
         if index < self.tabs.len() {
             self.active_tab = index;
         }
     }
-    
+
+    /// Bir sonraki sekmeye geçer (dairesel).
+    /// `% self.tabs.len()`: Rust'ta modülo operatörü, sona ulaşıldığında
+    /// başa döner.
     pub fn next_tab(&mut self) {
         self.active_tab = (self.active_tab + 1) % self.tabs.len();
     }
-    
+
+    /// Bir önceki sekmeye geçer (dairesel).
     pub fn prev_tab(&mut self) {
         self.active_tab = if self.active_tab == 0 { self.tabs.len() - 1 } else { self.active_tab - 1 };
     }
-    
+
+    /// Aktif sekme için temayı değiştirir.
     pub fn set_theme(&mut self, theme_index: usize) {
         if theme_index < self.themes.len() {
             self.tabs[self.active_tab].theme_index = theme_index;
         }
     }
-    
+
+    /// Aktif sekmenin temasını sırayla değiştirir.
+    /// `(current + 1) % self.themes.len()`: tema listesinde dairesel dolaşım.
     pub fn cycle_theme(&mut self) {
         let current = self.tabs[self.active_tab].theme_index;
         let next = (current + 1) % self.themes.len();
         self.set_theme(next);
     }
-    
-    /// Update cursor blink
+
+    /// Terminal durumunu günceller (her kare çağrılır).
+    ///
+    /// `dt` (delta time): son kare ile bu kare arasındaki süre (saniye).
+    /// Kursor yanıp sönmesi ve zil zamanlayıcısı bu değere göre güncellenir.
+    /// Delta zamanı kullanmak, farklı kare hızlarında tutarlı animasyon sağlar.
     pub fn update(&mut self, dt: f32) {
         // Cursor blink
         self.cursor_blink_timer += dt;
@@ -690,7 +819,7 @@ impl TerminalWindow {
             self.cursor_blink_timer = 0.0;
             self.cursor_visible = !self.cursor_visible;
         }
-        
+
         // Bell timer
         for tab in &mut self.tabs {
             if tab.bell {
@@ -701,87 +830,104 @@ impl TerminalWindow {
             }
         }
     }
-    
-    /// Draw terminal
+
+    /// Terminal penceresini framebuffer'a çizer.
+    ///
+    /// WM (pencere yöneticisi) başlık çubuğunu kendisi sağlar;
+    /// bu yüzden dahili sekme çubuğu çizilmez.
+    /// Tüm içerik `draw_content()` ile çizilir.
     pub fn draw(&self, fb: &mut Framebuffer) {
         let x = self.rect.x as usize;
         let y = self.rect.y as usize;
         let w = self.rect.width as usize;
         let h = self.rect.height as usize;
-        
+
         let tab = &self.tabs[self.active_tab];
         let theme = &self.themes[tab.theme_index];
-        
+
         // Window background (terminal bg)
         fb.draw_rect(x, y, w, h, theme.background);
         fb.draw_rect_outline(x, y, w, h, theme.background);
-        
+
         // Terminal content — no internal tab bar; WM Cyber titlebar is the chrome
         let content_y = y;
         let content_h = h;
 
         self.draw_content(fb, x, content_y, w, content_h, theme, tab);
     }
-    
+
+    /// Sekme çubuğunu çizer.
+    ///
+    /// Her sekme için `tab_width` hesaplanır; toplam genişlik `cols` sekmeye eşit bölünür.
+    /// `blend_color` kullanılarak hover efekti uygulanır.
     fn draw_tabs(&self, fb: &mut Framebuffer, x: usize, y: usize, w: usize, theme: &TerminalTheme) {
         let tab_width = 150.min(w / self.tabs.len().max(1));
         let mut tab_x = x + 8;
-        
+
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == self.active_tab;
             let is_hovered = self.hovered_tab == Some(i);
-            
-            let bg = if is_active { theme.background } 
+
+            let bg = if is_active { theme.background }
                      else if is_hovered { Self::blend_color(theme.background, theme.foreground, 0.1) }
                      else { Self::blend_color(theme.background, theme.foreground, 0.05) };
-            
+
             fb.draw_rect(tab_x, y, tab_width, TAB_BAR_HEIGHT, bg);
-            
+
             // Tab title
             let title = if tab.title.len() > 12 { format!("{}...", &tab.title[..9]) } else { tab.title.clone() };
             fb.draw_string(tab_x + 8, y + 6, &title, theme.foreground);
-            
+
             // Close button
             if self.tabs.len() > 1 {
                 fb.draw_string(tab_x + tab_width - 20, y + 6, "×", theme.foreground);
             }
-            
+
             // Bell indicator
             if tab.bell {
                 fb.draw_string(tab_x + tab_width - 36, y + 6, "🔔", 0xFFFFAA00);
             }
-            
+
             tab_x += tab_width + 2;
         }
-        
+
         // New tab button
         fb.draw_string(tab_x + 4, y + 6, "+", theme.foreground);
     }
-    
+
+    /// Terminal içeriğini (hücreler + kursor + seçim) çizer.
+    ///
+    /// Her hücre için:
+    /// 1. Arka plan rengi tema ile aynıysa atlanır (optimizasyon)
+    /// 2. Karakter varsa (boşluk değil) çizilir
+    /// 3. `reverse` niteliği: ön plan ve arka plan renkleri değiştirilir
+    ///
+    /// Seçim çizimi: `unsafe` blok kullanarak framebuffer piksellerine
+    /// doğrudan erişilir ve alfa karışımı (blend) uygulanır.
     fn draw_content(&self, fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, theme: &TerminalTheme, tab: &TerminalTab) {
         let char_w = tab.char_width;
         let line_h = tab.line_height;
-        
+
         // Draw cells
         for (row_idx, row) in tab.grid.iter().enumerate() {
             let row_y = y + row_idx * line_h;
-            
+
             if row_y + line_h > y + h {
                 break;
             }
-            
+
             for (col_idx, cell) in row.iter().enumerate() {
                 let cell_x = x + col_idx * char_w;
-                
+
                 if cell_x + char_w > x + w {
                     break;
                 }
-                
+
                 // Background
                 if cell.bg_color != theme.background {
                     fb.draw_rect(cell_x, row_y, char_w, line_h, cell.bg_color);
                 }
-                
+
                 // Character
                 if cell.char != ' ' {
                     let fg = if cell.reverse { cell.bg_color } else { cell.fg_color };
@@ -789,37 +935,37 @@ impl TerminalWindow {
                 }
             }
         }
-        
+
         // Draw cursor
         if self.cursor_visible && tab.cursor_visible {
             let cursor_x = x + tab.cursor_x * char_w;
             let cursor_y = y + tab.cursor_y * line_h;
-            
+
             // Cursor block
             fb.draw_rect(cursor_x, cursor_y, char_w, line_h, theme.cursor);
         }
-        
+
         // Draw selection
         if let (Some(start), Some(end)) = (tab.selection_start, tab.selection_end) {
             let (sx, sy) = start;
             let (ex, ey) = end;
-            
+
             let min_y = sy.min(ey);
             let max_y = sy.max(ey);
-            
+
             for row_y in min_y..=max_y {
                 let min_x = if row_y == min_y { sx.min(ex) } else { 0 };
                 let max_x = if row_y == max_y { sx.max(ex) } else { tab.cols };
-                
+
                 let sel_x = x + min_x * char_w;
                 let sel_y = y + row_y * line_h;
                 let sel_w = (max_x - min_x) * char_w;
-                
+
                 // Selection overlay
                 for py in 0..line_h {
                     for px in 0..sel_w {
-                        let ptr = unsafe { 
-                            (fb.base_addr as *mut u32).add((sel_y + py) * fb.pixels_per_scan_line + sel_x + px) 
+                        let ptr = unsafe {
+                            (fb.base_addr as *mut u32).add((sel_y + py) * fb.pixels_per_scan_line + sel_x + px)
                         };
                         let bg = unsafe { *ptr };
                         unsafe { *ptr = Self::blend_color(bg, theme.selection_bg, 0.5); }
@@ -828,39 +974,49 @@ impl TerminalWindow {
             }
         }
     }
-    
+
+    /// İki rengi verilen alfa değeriyle karıştırır (LERP).
+    ///
+    /// Formül: `result = bg * (1 - alpha) + fg * alpha`
+    /// R, G, B kanalları ayrı ayrı hesaplanır, ardından birleştirilir.
+    /// `>> 16`, `>> 8`, `& 0xFF`: bit kaydırma ile renk kanalları ayrıştırılır.
     fn blend_color(bg: u32, fg: u32, alpha: f32) -> u32 {
         let br = ((bg >> 16) & 0xFF) as f32;
         let bg_ = ((bg >> 8) & 0xFF) as f32;
         let bb = (bg & 0xFF) as f32;
-        
+
         let fr = ((fg >> 16) & 0xFF) as f32;
         let fg_ = ((fg >> 8) & 0xFF) as f32;
         let fb = (fg & 0xFF) as f32;
-        
+
         let r = (br * (1.0 - alpha) + fr * alpha) as u32;
         let g = (bg_ * (1.0 - alpha) + fg_ * alpha) as u32;
         let b = (bb * (1.0 - alpha) + fb * alpha) as u32;
-        
+
         (r << 16) | (g << 8) | b
     }
-    
-    /// Handle key press
+
+    /// Klavye girişini işler.
+    ///
+    /// - Enter (`'\n'`/`'\r'`): komutu çalıştır → `execute_command()`
+    /// - Geri tuşu (`'\x08'`): son karakteri sil ve ızgaradan kaldır
+    /// - Kaçış (`'\x1b'`): şimdilik yok sayılır (ANSI kaçış dizileri için yorumlanacak)
+    /// - Diğer yazdırılabilir karakterler: giriş tamponuna ve ızgaraya ekle
     pub fn on_key_press(&mut self, c: char) -> TerminalAction {
         let theme = self.themes[self.tabs[self.active_tab].theme_index].clone();
-        
+
         match c {
             '\n' | '\r' => {
                 // Execute command
                 let cmd = self.tabs[self.active_tab].input_buffer.trim().to_string();
-                
+
                 if !cmd.is_empty() {
                     self.tabs[self.active_tab].write("\n", &theme);
                     self.execute_command(&cmd, &theme);
                 } else {
                     self.tabs[self.active_tab].write("\n$ ", &theme);
                 }
-                
+
                 self.tabs[self.active_tab].input_buffer.clear();
             }
             '\x08' => { // Backspace
@@ -883,10 +1039,17 @@ impl TerminalWindow {
             }
             _ => {}
         }
-        
+
         TerminalAction::None
     }
-    
+
+    /// Komutu işler ve çıktıyı terminal ekranına yazar.
+    ///
+    /// İki katmanlı işleme:
+    /// 1. Terminal-yerel komutlar (tema yönetimi, pwd, exit): burada işlenir
+    /// 2. Diğer komutlar: `crate::shell::run_command(cmd)` ile kernel shell'e aktarılır
+    ///
+    /// `__CLEAR__` özel çıktısı: kernel shell'in ekranı temizle sinyali.
     fn execute_command(&mut self, cmd: &str, theme: &TerminalTheme) {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
 
@@ -952,18 +1115,21 @@ impl TerminalWindow {
         }
         tab.write("$ ", theme);
     }
-    
-    /// Handle click
+
+    /// Fare tıklamasını işler.
+    ///
+    /// Sekme çubuğu tıklamaları: sekme seç veya kapat.
+    /// Yeni sekme düğmesi: artı `+` simgesi.
     pub fn on_click(&mut self, mx: i32, my: i32) -> TerminalAction {
         let x = self.rect.x;
         let y = self.rect.y;
         let w = self.rect.width;
-        
+
         // Tab bar
         if my >= y && my < y + TAB_BAR_HEIGHT as i32 {
             let tab_width = 150.min(w as usize / self.tabs.len().max(1)) as i32;
             let mut tab_x = x + 8;
-            
+
             for i in 0..self.tabs.len() {
                 if mx >= tab_x && mx < tab_x + tab_width {
                     // Close button
@@ -976,7 +1142,7 @@ impl TerminalWindow {
                 }
                 tab_x += tab_width + 2;
             }
-            
+
             // New tab
             if mx >= tab_x {
                 self.new_tab();
@@ -984,29 +1150,37 @@ impl TerminalWindow {
                 self.tabs[self.active_tab].write("$ ", &theme);
             }
         }
-        
+
         TerminalAction::None
     }
-    
-    /// Resize
+
+    /// Pencereyi yeniden boyutlandırır.
+    ///
+    /// Piksel boyutundan hücre boyutuna dönüşüm:
+    /// `cols = width / 8` (sabit 8 piksel karakter genişliği)
+    /// `rows = content_h / 16` (sabit 16 piksel satır yüksekliği)
     pub fn resize(&mut self, width: usize, height: usize) {
         self.rect.width = width as i32;
         self.rect.height = height as i32;
-        
+
         // Recalculate terminal size
         let content_h = height - TAB_BAR_HEIGHT;
         let theme = self.themes[0].clone();
-        
+
         let cols = width / 8;
         let rows = content_h / 16;
-        
+
         for tab in &mut self.tabs {
             tab.resize(cols, rows, &theme);
         }
     }
 }
 
-/// Terminal actions
+/// Terminal uygulamasından dönen olaylar.
+///
+/// `CommandExecuted(String)`: çalıştırılan komut metnini taşır.
+/// `TabClosed(u32)`: kapatılan sekmenin ID'sini taşır.
+/// `ExitRequested`: terminal kapatma isteği.
 #[derive(Clone, Debug)]
 pub enum TerminalAction {
     None,
@@ -1019,6 +1193,11 @@ pub enum TerminalAction {
 // GLOBAL TERMINAL
 // ============================================================================
 
+/// Global terminal penceresi singleton'ı.
+///
+/// `lazy_static!` + `spin::Mutex`: ilk kullanımda başlatılan global
+/// değişken; `no_std` ortamında çoklu çekirdek güvenli erişim.
+/// Başlangıç pencere konumu ve boyutu `Rect` struct literal ile verilir.
 lazy_static::lazy_static! {
     static ref TERMINAL: Mutex<TerminalWindow> = Mutex::new(TerminalWindow::new(Rect {
         x: 100,
@@ -1028,12 +1207,12 @@ lazy_static::lazy_static! {
     }));
 }
 
-/// Initialize Terminal
+/// Modülü başlatır ve seri porta log yazar.
 pub fn init() {
     crate::serial_println!("[GUI] Terminal initialized");
 }
 
-/// Get Terminal
+/// Global terminal penceresine referans döndürür.
 pub fn get_terminal() -> &'static Mutex<TerminalWindow> {
     &TERMINAL
 }

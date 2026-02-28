@@ -2,6 +2,74 @@
 //!
 //! Bu modül, x86_64 exception ve hardware interrupt'larını yönetir.
 //! IDT (Interrupt Descriptor Table) ve PIC (Programmable Interrupt Controller) yapılandırması.
+//!
+//! ## Genel Interrupt Akışı (Interrupt Flow)
+//!
+//! ```text
+//!  Donanım/CPU                  CPU (x86_64)               echOS Kernel
+//!  ──────────                   ────────────               ─────────────
+//!  IRQ sinyali        ──►  RFLAGS.IF kontrolü  ──►  IDT[vector] lookup
+//!  (ör: timer)              (maskeli mi?)             │
+//!                                                      ▼
+//!                                              handler fn(stack_frame)
+//!                                                      │
+//!                                          ┌───────────┼───────────────┐
+//!                                          ▼           ▼               ▼
+//!                                     record_irq  dispatch_irq    softirq?
+//!                                     (istatistik) (handler çağır) (ertelenmiş)
+//!                                                      │
+//!                                                      ▼
+//!                                                  EOI gönder
+//!                                             (PIC veya LAPIC)
+//! ```
+//!
+//! ## IDT (Interrupt Descriptor Table) Yapısı
+//!
+//! ```text
+//!  Vektör  │ İsim                    │ Tür
+//!  ────────┼─────────────────────────┼──────────────────────────
+//!  0x00    │ Divide Error (#DE)      │ CPU istisnası (hata)
+//!  0x01    │ Debug (#DB)             │ CPU istisnası
+//!  0x02    │ NMI                     │ Maskelenemez interrupt
+//!  0x03    │ Breakpoint (#BP)        │ INT 3 tuzağı
+//!  0x04    │ Overflow (#OF)          │ CPU istisnası
+//!  0x05    │ Bound Range (#BR)       │ CPU istisnası
+//!  0x06    │ Invalid Opcode (#UD)    │ CPU istisnası
+//!  0x07    │ Device N/A (#NM)        │ FPU/SSE lazy save
+//!  0x08    │ Double Fault (#DF)      │ KRİTİK — kurtarılamaz
+//!  0x0B    │ Segment Not Present     │ GDT/LDT segment hatası
+//!  0x0C    │ Stack Segment Fault     │ Stack segment hatası
+//!  0x0D    │ General Protection (#GP)│ Koruma ihlali
+//!  0x0E    │ Page Fault (#PF)        │ Bellek erişim hatası
+//!  0x10    │ x87 FP Error (#MF)      │ FPU hatası
+//!  0x11    │ Alignment Check (#AC)   │ Hizalama hatası
+//!  0x12    │ Machine Check (#MC)     │ DONANIM HATASI — ölümcül
+//!  0x13    │ SIMD FP Error (#XM)     │ SSE/AVX hatası
+//!  0x14    │ Virtualization (#VE)    │ VMX sanallaştırma
+//!  ────────┼─────────────────────────┼──────────────────────────
+//!  0x20    │ IRQ0 — Timer            │ Donanım kesmesi (PIT/LAPIC)
+//!  0x21    │ IRQ1 — Keyboard         │ PS/2 klavye
+//!  0x2C    │ IRQ12 — Mouse           │ PS/2 fare
+//!  0x20-   │ IRQ2..IRQ15             │ PIC/IOAPIC donanım IRQ'ları
+//!  0x2F    │                         │
+//!  0x30-   │ IRQ16..IRQ31 (MSI)      │ PCI MSI vektörleri
+//!  0x3F    │                         │
+//!  0x30-   │ MSI Vektörleri          │ PCI MSI/MSI-X (dinamik)
+//!  0xEF    │                         │
+//!  0xF1    │ IPI_TLB_SHOOTDOWN       │ SMP — TLB fluşlama
+//!  0xFF    │ Spurious                │ Sahte interrupt (APIC)
+//! ```
+//!
+//! ## IRQ Bayrakları (IRQF_*)
+//!
+//! ```text
+//!  IRQF_THREADED  (bit 0): Handler ayrı kernel thread'inde çalışır
+//!  IRQF_FAST_EOI  (bit 1): Handler öncesi EOI gönderilir (edge-triggered)
+//!  IRQF_PERCPU    (bit 2): Per-CPU IRQ (her CPU kendi handler'ını çalıştırır)
+//!  IRQF_EDGE      (bit 3): Kenar tetiklemeli (edge-triggered)
+//!  IRQF_LEVEL     (bit 4): Seviye tetiklemeli (level-triggered)
+//!  IRQF_SHARED    (bit 5): Birden fazla handler aynı vektörü paylaşır
+//! ```
 
 pub mod idt;
 pub mod pic;
@@ -17,7 +85,15 @@ use spin::Mutex;
 use x86_64::structures::idt::InterruptDescriptorTable;
 
 // ============================================================================
-// IDT YAPISI
+// IDT YAPISI — Global ve per-CPU durum değişkenleri
+//
+// USE_IOAPIC    : IOAPIC etkin mi? (false = eski 8259 PIC kullanılır)
+// INIT_STATE    : 0=başlatılmadı, 1=başlatılıyor, 2=hazır (CAS ile race-free)
+// IPI_TLB_VECTOR: SMP sistemlerde TLB shootdown için kullanılan özel IPI vektörü
+// SPURIOUS_VECTOR: APIC'in gönderdiği sahte interrupt vektörü (0xFF — Intel spec)
+// MSI_VECTOR_START/END: PCI MSI aygıtlarına dinamik atanan vektör aralığı
+// IRQ_LOG_CAP   : Ring-buffer şeklinde tutulan IRQ olay log kapasitesi
+// DEFAULT_STORM_LIMIT: Aynı tick'te bu kadar IRQ gelirse "fırtına" sayılır
 // ============================================================================
 
 static USE_IOAPIC: AtomicBool = AtomicBool::new(false);
@@ -55,13 +131,30 @@ static IRQ_DYNAMIC_FLOW_ENABLED: AtomicBool = AtomicBool::new(true);
 
 // ============================================================================
 // IRQ DISABLE DEPTH TRACKING (Linux local_irq_save/restore)
+//
+// Nested (iç içe) interrupt devre dışı bırakma takibi.
+// Bir interrupt-safe kritik bölüme girildiğinde derinlik +1,
+// çıkıldığında -1 artar. Sadece derinlik 0 olduğunda interrupt'lar
+// gerçekten yeniden açılır — bu sayede iç içe kullanım güvendedir.
+//
+//   Örnek:
+//     local_irq_save()  → derinlik=1, interrupt'lar kapalı
+//       local_irq_save()  → derinlik=2, kapalı kalmaya devam
+//       local_irq_restore() → derinlik=1, hâlâ kapalı
+//     local_irq_restore() → derinlik=0, interrupt'lar açılır
+//
+// Linux karşılığı: local_irq_save() / local_irq_restore()
 // ============================================================================
 
 /// Per-CPU IRQ disable depth (nested disable tracking)
 static IRQ_DISABLE_DEPTH: AtomicU64 = AtomicU64::new(0);
 
-/// Interrupt'ları devre dışı bırak ve önceki durumu kaydet (nested)
-/// Linux `local_irq_save()` karşılığı
+/// Interrupt'ları devre dışı bırak ve önceki durumu kaydet (nested).
+/// Linux `local_irq_save()` karşılığı.
+///
+/// Döndürülen `flags` değeri RFLAGS registerının anlık bir kopyasıdır.
+/// IF (Interrupt Flag) biti bu değer içinde saklanır, böylece geri
+/// yüklendiğinde orijinal durum korunur.
 pub fn local_irq_save() -> u64 {
     let flags = x86_64::registers::rflags::read().bits();
     x86_64::instructions::interrupts::disable();
@@ -69,8 +162,12 @@ pub fn local_irq_save() -> u64 {
     flags
 }
 
-/// Interrupt durumunu geri yükle (nested)
-/// Linux `local_irq_restore()` karşılığı
+/// Interrupt durumunu geri yükle (nested).
+/// Linux `local_irq_restore()` karşılığı.
+///
+/// Disable derinliği 0'a düşerse ve orijinal RFLAGS'ta IF seti ise
+/// interrupt'lar yeniden etkinleştirilir. Böylece iç içe kritik
+/// bölümler birbirinin interrupt durumunu bozmaz.
 pub fn local_irq_restore(flags: u64) {
     let depth = IRQ_DISABLE_DEPTH.fetch_sub(1, Ordering::SeqCst);
     if depth <= 1 {
@@ -452,6 +549,28 @@ pub fn msi_target_apic_id(vector: u8) -> u32 {
 
 // ============================================================================
 // EXCEPTION HANDLERS (CPU Hataları)
+//
+// x86_64 CPU'nun ürettiği istisnalar bu handler'larla yakalanır.
+// Her handler "extern x86-interrupt" ABI kullanır — bu Rust'ın özel
+// calling convention'ıdır ve CPU'nun otomatik olarak stack'e bastığı
+// InterruptStackFrame yapısını alır.
+//
+// İki temel kategori:
+//   • Fault  : Hatalı instruction yeniden çalıştırılabilir (örn: Page Fault)
+//   • Abort  : Kurtarılamaz durum, sistem durur    (örn: Double Fault, #MC)
+//
+// Kernel vs User mode ayrımı:
+//   cs & 3 == 3  →  user mode (Ring 3)  →  task sonlandırılır
+//   cs & 3 == 0  →  kernel mode (Ring 0) →  panic!, sistem durur
+//
+// Stack'e otomatik basılan bilgiler (InterruptStackFrame):
+//   ┌──────────────────┐  ← stack_frame.stack_pointer (RSP öncesi)
+//   │ SS (stack seg)   │
+//   │ RSP              │
+//   │ RFLAGS           │
+//   │ CS (code seg)    │
+//   │ RIP (hata adresi)│
+//   └──────────────────┘
 // ============================================================================
 
 use core::arch::asm;
@@ -696,6 +815,28 @@ extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStac
 
 // ============================================================================
 // HARDWARE INTERRUPT HANDLERS (IRQs)
+//
+// Donanımdan gelen kesmeler bu handler'larla işlenir.
+// PIC modunda vektörler 32-47 aralığına, IOAPIC modunda da
+// aynı aralığa eşlenir (PIC offseti sayesinde).
+//
+// Her donanım IRQ handler'ı şu adımları izler:
+//
+//   1. record_irq(vector)      — istatistik güncelle, fırtına tespiti
+//   2. dispatch_irq(vector)    — kayıtlı handler'ı çağır
+//   3. if needs_eoi → irq_eoi  — EOI (End of Interrupt) gönder
+//
+// EOI mekanizması:
+//   • PIC modunda  : PICS.notify_end_of_interrupt(vector)
+//   • IOAPIC modunda: LAPIC.eoi()
+//
+// IRQ→Vektör Eşleşmesi (PIC/IOAPIC):
+//   IRQ0  (Timer)    → vektör 0x20 (32)
+//   IRQ1  (Keyboard) → vektör 0x21 (33)
+//   IRQ2  (Cascade)  → vektör 0x22 (34)
+//   IRQ3..IRQ11      → vektör 0x23..0x2B
+//   IRQ12 (Mouse)    → vektör 0x2C (44)
+//   IRQ13..IRQ15     → vektör 0x2D..0x2F
 // ============================================================================
 
 /// Sistem tick sayacı
@@ -703,6 +844,19 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Timer interrupt handler (IRQ0)
 /// Her tick'te scheduler'ı çağırır.
+///
+/// Bu handler sistemin kalp atışıdır. Her 10ms'de bir tetiklenir (100Hz).
+/// Görevleri:
+///   1. IRQ istatistiğini güncelle
+///   2. Kayıtlı kullanıcı handler'larını çalıştır (dispatch_irq)
+///   3. Sistem tick sayacını artır (TICKS)
+///   4. Rasgelelik entropi havuzunu besle (TSC ile)
+///   5. Task scheduler'a tick bildir (ön-alım için)
+///   6. Watchdog: IRQ fırtına ve gecikme kontrolü
+///   7. vDSO zaman damgasını güncelle (kullanıcı uzayı hızlı saat)
+///   8. EOI gönder (PIC veya LAPIC)
+///   9. Bekleyen softirq'ları çalıştır (bottom-half işleme)
+///  10. TSC-deadline modunda sonraki timer deadline'ını arm et
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(32);
     let needs_eoi = dispatch_irq(32);
@@ -1592,6 +1746,22 @@ extern "x86-interrupt" fn irq31_interrupt_handler(_stack_frame: InterruptStackFr
 // ============================================================================
 // EXCEPTION HARDENING — 10 Eksik CPU Exception Handler
 // Linux kernel/traps.c karşılığı
+//
+// Intel SDM Vol. 3A Tablo 6-1'deki tüm vektörleri kapsar.
+// Eksik handler → CPU "Unknown Interrupt" ile double-fault yaratır.
+// Bu handler'lar sayesinde kernel, tanımsız exception'ları yakalar ve
+// user/kernel ayrımı yaparak güvenli şekilde ele alır.
+//
+//   #OF  (INT 4)  — INTO komutu taşma kontrolü
+//   #BR  (INT 5)  — BOUND komutu dizi sınırı kontrolü
+//   #NM  (INT 7)  — FPU/SSE kullanılmadan CR0.TS=1 iken erişim
+//   #NP  (INT 11) — Mevcut olmayan segment erişimi
+//   #SS  (INT 12) — Stack segment erişim hatası
+//   #MF  (INT 16) — x87 FPU kayan nokta hatası
+//   #AC  (INT 17) — Hizalanmamış bellek erişimi (CR0.AM=1 gerekir)
+//   #MC  (INT 18) — Donanım hatası, MCi_STATUS MSR'larından okunur
+//   #XM  (INT 19) — SSE/SIMD MXCSR register'dan kayan nokta hatası
+//   #VE  (INT 20) — VMX sanallaştırma istisnası
 // ============================================================================
 
 /// #OF — Overflow (INT 4)
@@ -1755,6 +1925,19 @@ extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFram
 
 // ============================================================================
 // IRQ STATISTICS FOR MONITORING
+//
+// IRQ izleme altyapısı — her vektör için tutulan istatistikler:
+//
+//   IRQ_COUNTS[]       : Toplam interrupt sayısı (vektör başına)
+//   IRQ_STORMS[]       : Tespit edilen fırtına sayısı
+//   IRQ_TOTAL_LATENCY[]: Handler gecikmesi toplamı (TSC cycle)
+//   IRQ_MAX_LATENCY[]  : Handler'ın en yüksek gecikmesi
+//   IRQ_LATENCY_SAMPLES: Gecikme ölçümü örnek sayısı
+//
+// IRQ Fırtınası (Storm) Tespiti:
+//   Aynı tick içinde DEFAULT_STORM_LIMIT (500) adetten fazla
+//   IRQ gelirse, bu IRQ için IOAPIC devre dışı bırakılır.
+//   watchdog_poll() her WATCHDOG_INTERVAL tick'te kontrol eder.
 // ============================================================================
 
 /// IRQ statistics for monitoring

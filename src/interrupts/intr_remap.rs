@@ -1,6 +1,60 @@
-//! # Interrupt Remapping
+//! # Interrupt Remapping (Kesme Yönlendirme)
 //!
-//! Intel VT-d and AMD-Vi interrupt remapping support.
+//! Intel VT-d ve AMD-Vi interrupt remapping desteği.
+//!
+//! ## Interrupt Remapping Nedir?
+//!
+//! Interrupt Remapping (IR), DMA (Direct Memory Access) saldırılarına
+//! karşı güvenlik sağlamak ve sanallaştırma ortamlarında interrupt
+//! yönlendirmesini doğru yapmak için kullanılır.
+//! Intel VT-d (Virtualization Technology for Directed I/O) özelliğinin
+//! bir parçasıdır.
+//!
+//! Geleneksel interrupt akışı:
+//! ```text
+//!   PCI Aygıt ──► IOAPIC ──► LAPIC ──► CPU Exception Handler
+//! ```
+//!
+//! Interrupt Remapping ile akış:
+//! ```text
+//!   PCI Aygıt ──► IOAPIC ──► DMAR Unit ──► IRT Lookup ──► LAPIC ──► CPU
+//!                               (VT-d)       (IRTE)
+//! ```
+//!
+//! ## IRTE (Interrupt Remapping Table Entry) Yapısı
+//!
+//! ```text
+//!  127                                64 63                           0
+//!  ┌──────────────────────────────────┬──────────────────────────────┐
+//!  │  High: SID | SVT | SQ | DestID  │  Low: Vector|DM|TM|RH|FPD|P  │
+//!  └──────────────────────────────────┴──────────────────────────────┘
+//!    P   (bit  0): Present — giriş geçerli mi?
+//!    FPD (bit  1): Fault Processing Disable
+//!    DM  (bit  2): Delivery Mode (Fixed=0, LowestPriority=1)
+//!    TM  (bit  4): Trigger Mode  (Edge=0, Level=1)
+//!    RH  (bit  6): Redirection Hint
+//!    Vector[15:8] : Hedef IDT vektörü
+//!    DestID       : Hedef APIC ID (hangi CPU'ya gidecek)
+//!    SVT          : Source Validation Type (0=none, 1=RID, 2=Bus)
+//!    SID          : Source ID (PCI BDF — Bus:Device:Function)
+//! ```
+//!
+//! ## VT-d MMIO Register Haritası
+//!
+//! ```text
+//!  Offset  │ Register   │ Açıklama
+//!  ────────┼────────────┼──────────────────────────────────
+//!  0x00    │ VER        │ Versiyon
+//!  0x08    │ CAP        │ Yetenekler (max page level, vb.)
+//!  0x10    │ ECAP       │ Genişletilmiş Yetenekler (IR desteği)
+//!  0x18    │ GCMD       │ Global Komut (translation/IR etkinleştir)
+//!  0x1C    │ GSTS       │ Global Durum (komut tamamlandı mı?)
+//!  0x20    │ RTADDR     │ Root Table Adres
+//!  0x28    │ CCMD       │ Context Komutu
+//!  0x34    │ FSTS       │ Hata Durumu
+//!  0x38    │ FECTL      │ Hata Kontrolü
+//!  0xB8    │ IRTA       │ Interrupt Remap Table Adres + boyut
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,7 +64,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// INTR REMAPPING CONSTANTS
+// INTR REMAPPING CONSTANTS — VT-d MMIO Register offsetleri ve flag bitleri
+//
+// Intel VT-d spesifikasyonu (bkz. Intel VT-d Architecture Spec Rev 3.x)
+// tüm sabitler için kaynak: IOMMU Spec Tablo 10-1 ve 10-2
 // ============================================================================
 
 /// Intel VT-d registers
@@ -75,7 +132,11 @@ pub const SVT_RID: u8 = 1;
 pub const SVT_BUS: u8 = 2;
 
 // ============================================================================
-// IRTE (Interrupt Remapping Table Entry)
+// IRTE (Interrupt Remapping Table Entry) — 16 byte'lık tablo girişi
+//
+// Her IRTE, bir interrupt kaynağını (PCI aygıtı) belirli bir CPU ve
+// vektöre yönlendirir. IntrRemapTable içinde dizi olarak tutulur.
+// VT-d donanımı bu tabloyu MMIO aracılığıyla okur.
 // ============================================================================
 
 #[repr(C)]
@@ -136,7 +197,11 @@ impl Irte {
 }
 
 // ============================================================================
-// INTERRUPT REMAP TABLE
+// INTERRUPT REMAP TABLE — IRTE girişlerini tutan bellek yapısı
+//
+// Fiziksel adresi IRTA register'a yazılır. Boyutu 2'nin kuvveti
+// olmalıdır (ör: 256 giriş = 4KB). VT-d donanımı interrupt geldiğinde
+// bu tabloya bakarak hangi CPU'ya, hangi vektörle göndereceğine karar verir.
 // ============================================================================
 
 pub struct IntrRemapTable {
@@ -196,7 +261,18 @@ impl IntrRemapTable {
 }
 
 // ============================================================================
-// INTERRUPT REMAPPING UNIT
+// INTERRUPT REMAPPING UNIT — Tek bir VT-d donanım birimini temsil eder
+//
+// Sunucuda birden fazla VT-d birimi olabilir (her PCIe root complex için bir).
+// Her birim kendi MMIO alanına, IRT'sine ve hata kuyruğuna sahiptir.
+//
+// Hayat döngüsü:
+//   1. new(id, base_addr)  — Birim nesnesi oluştur
+//   2. init()              — CAP/ECAP register'larını oku, IR destekli mi?
+//   3. create_irt(size)    — IRT allocate et, IRTA register'a yaz
+//   4. enable()            — GCMD.SIRTP → GCMD.IRE → GSTS ile onayla
+//   5. program_interrupt() — IRTE'yi doldur (vektör, dest, trigger)
+//   6. handle_fault()      — FSTS kontrol et, hata kaydı oluştur
 // ============================================================================
 
 pub struct IntrRemapUnit {
@@ -371,7 +447,15 @@ impl IntrRemapUnit {
 }
 
 // ============================================================================
-// INTERRUPT REMAPPING MANAGER
+// INTERRUPT REMAPPING MANAGER — Tüm VT-d birimlerini yönetir
+//
+// Singleton (global INTR_REMAP) olarak kullanılır.
+// Birden fazla VT-d birimini BTreeMap ile ID→Arc<Unit> eşleşmesiyle tutar.
+// İşletim sistemi yeni bir PCI aygıtı eklendiğinde buraya başvurur:
+//
+//   INTR_REMAP.register_unit(id, base)   → Yeni VT-d birimini kaydet
+//   INTR_REMAP.map_interrupt(...)        → Aygıt için IRTE tahsis et
+//   INTR_REMAP.handle_faults()           → Hataları işle (periyodik)
 // ============================================================================
 
 pub struct IntrRemapManager {
@@ -452,7 +536,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// ERROR TYPE — VT-d işlemlerinden dönebilecek hata türleri
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

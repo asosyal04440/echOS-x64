@@ -1,36 +1,50 @@
-//! # echOS Task Modülü
+//! # echOS Görev Modülü
 //!
-//! Preemptive multitasking altyapısı.
-//! Task yapısı, scheduler ve context switch.
+//! Preemptive (önleyici) çoklu görev altyapısı.
+//! Görev yapısı, zamanlayıcı ve bağlam değişimi (context switch) içerir.
+//!
+//! ## Zamanlayıcı Seçim Hiyerarşisi
+//!
+//! ```text
+//!  RT Görevler (öncelik 1-99)         Normal Görevler (nice -20..+19)
+//!  ┌──────────────────────┐           ┌──────────────────────────────┐
+//!  │  rt_scheduler.rs     │           │  scheduler.rs (CFS benzeri)  │
+//!  │  SCHED_FIFO          │  >önce>   │  vruntime bazlı seçim        │
+//!  │  SCHED_RR            │           │  Work-stealing deque         │
+//!  └──────────────────────┘           └──────────────────────────────┘
+//!        ▲                                       ▲
+//!        │ yüksek öncelik önce çalışır           │ en düşük vruntime önce
+//!        └───────────────────────────────────────┘
+//! ```
 
-/// Task yapısı ve context
+/// Görev yapısı ve bağlam (context)
 pub mod task;
 
-/// Priority-based aging scheduler
+/// Öncelik + yaşlandırma (aging) tabanlı zamanlayıcı
 pub mod scheduler;
 
-/// Real-Time Scheduler (SCHED_FIFO/RR)
+/// Gerçek Zamanlı Zamanlayıcı (SCHED_FIFO / SCHED_RR)
 pub mod rt_scheduler;
 
-/// User mode task desteği
+/// Kullanıcı modu görev desteği (Ring3)
 pub mod user;
 
-/// Asenkron Worker Havuzu (io_uring)
+/// Asenkron İşçi Havuzu (io_uring benzeri)
 pub mod worker;
 
-/// Zaman Çarkı (Timing Wheel) - Yüksek performanslı timer yönetimi
+/// Zaman Çarkı (Timing Wheel) — Yüksek performanslı O(1) zamanlayıcı yönetimi
 pub mod timer;
 
-/// Chase-Lev Lock-Free Deque
+/// Chase-Lev Kilit-Serbest (Lock-Free) Çift Uçlu Kuyruk — İş Çalma (Work Stealing)
 pub mod deque;
 
-/// Google GhOSt (Global Herbert Operating System Threading) Benzeri Userspace Scheduling
+/// Google GhOSt Benzeri Kullanıcı Alanı Zamanlayıcısı
 pub mod ghost;
 
-/// Signal Handling and Job Control
+/// Sinyal İşleme ve İş Kontrolü (Job Control)
 pub mod signal;
 
-/// Futex and pthread support
+/// Futex ve pthread desteği (hızlı kullanıcı alanı mutex)
 pub mod futex;
 
 pub use scheduler::{

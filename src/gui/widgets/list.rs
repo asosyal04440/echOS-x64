@@ -1,6 +1,25 @@
-//! # echOS ListView and TreeView Widgets
+//! # echOS ListView ve TreeView Widget'ları
 //!
-//! List and tree selection widgets.
+//! Liste ve ağaç yapısında seçim widget'ları.
+//!
+//! ## ListView
+//!
+//! Sabit yükseklikte satırlar halinde öğe listesi gösterir. Sanal kaydırma
+//! (virtual scrolling) ile yalnızca görünür satırlar çizilir; performans için
+//! tüm öğeler değil, yalnızca `scroll_offset..scroll_offset+visible` aralığı işlenir.
+//!
+//! ## TreeView
+//!
+//! Ağaç yapısındaki hiyerarşik veriyi girintili satırlarla gösterir. `TreeNode`
+//! özyinelemeli (recursive) bir veri yapısıdır: her düğüm alt düğümler listesi tutar.
+//! `flattened` vektörü ağacın görünür düğümlerini düz listeye "açar"; bu sayede
+//! `ListView` ile aynı satır bazlı çizim mantığı kullanılabilir.
+//!
+//! ## Sanal Kaydırma (Virtual Scrolling)
+//!
+//! `scroll_offset` görünümün başlangıç indeksini tutar. `visible_items()` kaç
+//! satırın ekranda sığdığını hesaplar. Yalnızca bu aralıktaki öğeler çizilir;
+//! bu yaklaşım binlerce öğeyi verimli göstermeye olanak tanır.
 
 use super::{Rect, Widget};
 use crate::gop::framebuffer::Framebuffer;
@@ -8,7 +27,11 @@ use crate::gui::theme::Theme;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// List item
+/// Listede görüntülenen tek bir satır öğesi.
+///
+/// `#[derive(Clone)]` sayesinde öğeler kopyalanabilir; `TreeNode.flatten()`
+/// gibi yerlerde vektöre push edilirken kopyalama kullanılır.
+/// `icon: Option<u8>` ikon indeksini isteğe bağlı tutar; `None` ise ikon yok.
 #[derive(Clone)]
 pub struct ListItem {
     pub text: String,
@@ -18,6 +41,7 @@ pub struct ListItem {
 }
 
 impl ListItem {
+    /// Yeni liste öğesi oluşturur; seçilmemiş, ikonsuz başlar.
     pub fn new(id: usize, text: &str) -> Self {
         Self {
             text: String::from(text),
@@ -27,13 +51,20 @@ impl ListItem {
         }
     }
 
+    /// Builder: ikon indeksi ekler.
     pub fn with_icon(mut self, icon: u8) -> Self {
         self.icon = Some(icon);
         self
     }
 }
 
-/// ListView widget (single/multi-column list)
+/// Liste görünümü widget'ı; tek veya çok sütunlu öğe listesi.
+///
+/// `scroll_offset: usize` görünümün kaçıncı öğeyle başladığını tutar.
+/// `item_height: usize` her satırın piksel yüksekliği; değiştirilemez (sabit).
+/// `multi_select: bool` çoklu seçimi etkinleştirip etkinleştirmediği.
+/// `hovered_index: Option<usize>` fare imlecinin üzerinde olduğu öğeyi tutar.
+/// `on_select` ve `on_double_click` öğe seçim callback'leridir.
 pub struct ListView {
     rect: Rect,
     items: Vec<ListItem>,
@@ -47,6 +78,7 @@ pub struct ListView {
 }
 
 impl ListView {
+    /// Yeni liste görünümü oluşturur; boş, tek seçimli.
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
         Self {
             rect: Rect::new(x, y, width, height),
@@ -61,37 +93,56 @@ impl ListView {
         }
     }
 
+    /// Builder: çoklu seçimi etkinleştirir/devre dışı bırakır.
     pub fn with_multi_select(mut self, enabled: bool) -> Self {
         self.multi_select = enabled;
         self
     }
 
+    /// Listeye yeni öğe ekler.
     pub fn add_item(&mut self, item: ListItem) {
         self.items.push(item);
     }
 
+    /// Tüm öğeleri, seçimi ve kaydırmayı sıfırlar.
     pub fn clear(&mut self) {
         self.items.clear();
         self.selected_index = None;
         self.scroll_offset = 0;
     }
 
+    /// Tüm öğelere salt okunur referans döndürür.
     pub fn items(&self) -> &Vec<ListItem> {
         &self.items
     }
 
+    /// Seçili öğenin indeksini döndürür; seçim yoksa None.
     pub fn selected_index(&self) -> Option<usize> {
         self.selected_index
     }
 
+    /// Seçili öğeye referans döndürür; seçim yoksa None.
+    ///
+    /// `and_then`: `selected_index` `Some(i)` ise `items.get(i)` çağrılır,
+    /// `None` ise zincirleme de None döner. Bu, iç içe Option kontrolü yerine
+    /// daha temiz Option zincirleme deyimidir.
     pub fn selected_item(&self) -> Option<&ListItem> {
         self.selected_index.and_then(|i| self.items.get(i))
     }
 
+    /// Ekranda kaç öğenin göründüğünü hesaplar.
+    ///
+    /// `(height - 4)`: 2 piksel üst ve alt iç boşluk için çıkartılır.
+    /// Tamsayı bölmesi `(h - 4) / item_height` satır sayısını verir.
     fn visible_items(&self) -> usize {
         (self.rect.height as usize - 4) / self.item_height
     }
 
+    /// Verilen y koordinatındaki öğenin indeksini döndürür.
+    ///
+    /// `relative_y`: y koordinatından liste başlangıcı ve iç boşluk çıkarılır.
+    /// `relative_y / item_height`: hangi satırda olduğunu hesaplar.
+    /// `scroll_offset` eklenerek gerçek liste indeksine çevrilir.
     fn item_at(&self, y: i32) -> Option<usize> {
         let relative_y = y - self.rect.y - 2;
         if relative_y < 0 {
@@ -105,19 +156,25 @@ impl ListView {
         }
     }
 
+    /// Belirtilen indeksteki öğeyi seçer; kaydırma görünümünü günceller.
+    ///
+    /// Tek seçim modunda önce tüm seçimler temizlenir ("deselect all").
+    /// "Scroll to visible" mantığı: seçili öğe görünür alanın dışındaysa,
+    /// görünümü öğeyi gösterecek şekilde kaydırır. Bu, programatik seçimde
+    /// kullanıcının öğeyi görmesini sağlar.
     fn select(&mut self, index: usize) {
-        // Clear previous selection
+        // Çok seçimli değilse önceki seçimi temizle
         if !self.multi_select {
             for item in &mut self.items {
                 item.selected = false;
             }
         }
-        
+
         if index < self.items.len() {
             self.items[index].selected = true;
             self.selected_index = Some(index);
-            
-            // Scroll to visible
+
+            // Seçili öğeyi görünür alana kaydır
             let visible = self.visible_items();
             if index < self.scroll_offset {
                 self.scroll_offset = index;
@@ -139,10 +196,10 @@ impl Widget for ListView {
         let w = self.rect.width as usize;
         let h = self.rect.height as usize;
 
-        // Background
+        // Arka plan
         fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
 
-        // Border
+        // Kenarlık: dört kenar
         for col in x..(x + w) {
             fb.plot_pixel(col, y, Theme::BORDER.to_u32());
             fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
@@ -152,10 +209,11 @@ impl Widget for ListView {
             fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
         }
 
-        // Draw items
+        // Görünür öğeleri çiz: sanal kaydırma ile yalnızca görünür aralık işlenir.
+        // `scroll_offset..scroll_offset+visible` aralığındaki öğeler çizilir.
         let visible = self.visible_items();
         let item_y_start = y + 2;
-        
+
         for i in 0..visible {
             let item_index = self.scroll_offset + i;
             if item_index >= self.items.len() {
@@ -165,14 +223,14 @@ impl Widget for ListView {
             let item = &self.items[item_index];
             let item_y = item_y_start + i * self.item_height;
 
-            // Selection background
+            // Seçili öğe vurgu rengiyle; hover öğe daha hafif rengiyle gösterilir
             if item.selected {
                 fb.draw_rect(x + 1, item_y, w - 2, self.item_height, Theme::ACCENT_PRIMARY.to_u32());
             } else if self.hovered_index == Some(item_index) {
                 fb.draw_rect(x + 1, item_y, w - 2, self.item_height, Theme::BUTTON_HOVER.to_u32());
             }
 
-            // Icon (if any)
+            // İkon alanı: varsa 16x16 piksel yer tutucu çizilir, metin ötelenir
             let mut text_x = x + 4;
             if let Some(_icon) = item.icon {
                 // Draw icon placeholder
@@ -180,7 +238,7 @@ impl Widget for ListView {
                 text_x += 20;
             }
 
-            // Text
+            // Metin: dikey ortalama, seçiliyse kontrast renk
             let text_y = item_y + (self.item_height - 16) / 2;
             let text_color = if item.selected {
                 Theme::DESKTOP_BG.to_u32()
@@ -190,7 +248,9 @@ impl Widget for ListView {
             fb.draw_string(text_x, text_y, &item.text, text_color);
         }
 
-        // Scroll indicator
+        // Dikey kaydırma çubuğu göstergesi: öğe sayısı görünür alandan fazlaysa.
+        // Kaydırma çubuğu yüksekliği: `h * visible / items.len()` oranıyla.
+        // `max(20)` minimum yüksekliği garanti eder (çok küçük olmasın).
         if self.items.len() > visible {
             let scroll_bar_height = (h * visible / self.items.len()).max(20);
             let scroll_bar_y = y + (h * self.scroll_offset / self.items.len());
@@ -209,6 +269,7 @@ impl Widget for ListView {
         }
     }
 
+    /// Hover durumunu günceller; hangi öğenin üzerinde olunduğunu takip eder.
     fn on_hover(&mut self, x: i32, y: i32) -> bool {
         let old_hovered = self.hovered_index;
         self.hovered_index = if self.rect.contains(x, y) {
@@ -219,10 +280,14 @@ impl Widget for ListView {
         old_hovered != self.hovered_index
     }
 
+    /// Kaydırma çarkı ile listeyi kaydırır.
+    ///
+    /// `saturating_sub(visible)`: alttan taşmayı önler; `max_scroll` negatif olamaz.
+    /// `delta > 0`: yukarı kaydırma (önceki öğeye), `delta < 0`: aşağı kaydırma.
     fn on_scroll(&mut self, delta: i32) -> bool {
         let visible = self.visible_items();
         let max_scroll = self.items.len().saturating_sub(visible);
-        
+
         if delta > 0 && self.scroll_offset > 0 {
             self.scroll_offset -= 1;
             return true;
@@ -238,7 +303,13 @@ impl Widget for ListView {
     }
 }
 
-/// Tree node
+/// Ağaç düğümü; alt düğümleri olan hiyerarşik veri birimi.
+///
+/// `#[derive(Clone)]` sayesinde düğümler kopyalanabilir; `flatten()` metodunda
+/// alt düğümler tekrar tekrar kopyalanarak düz listeye eklenebilir.
+///
+/// `expanded: bool` alt düğümlerin görünüp görünmediğini kontrol eder.
+/// `level: usize` girintileme için kullanılır; kök düğüm level=0'dır.
 #[derive(Clone)]
 pub struct TreeNode {
     pub text: String,
@@ -250,6 +321,7 @@ pub struct TreeNode {
 }
 
 impl TreeNode {
+    /// Yeni ağaç düğümü oluşturur; daraltılmış, seçilmemiş, kök seviyede.
     pub fn new(id: usize, text: &str) -> Self {
         Self {
             text: String::from(text),
@@ -261,6 +333,11 @@ impl TreeNode {
         }
     }
 
+    /// Builder: alt düğüm ekler; child'ın seviyesi otomatik ayarlanır.
+    ///
+    /// `child.level = self.level + 1`: her alt düğüm bir seviye daha derin.
+    /// Builder pattern: `node.add_child(child1).add_child(child2)` zincirleme
+    /// ile ağaç yapısı oluşturulabilir.
     pub fn add_child(mut self, child: TreeNode) -> Self {
         let mut child = child;
         child.level = self.level + 1;
@@ -268,6 +345,12 @@ impl TreeNode {
         self
     }
 
+    /// Düğümü ve genişletilmiş alt düğümlerini sonuç vektörüne düz olarak ekler.
+    ///
+    /// Özyinelemeli (recursive) yöntem: self eklenip sonra expanded ise
+    /// her alt düğüm için `child.flatten(&mut result)` çağrılır.
+    /// Bu DFS (Depth-First Search) sıralamasını üretir; ağaç görünümü
+    /// için doğal sıralama budur.
     fn flatten(&self, result: &mut Vec<(usize, String, bool, bool, usize)>) {
         result.push((self.id, self.text.clone(), self.expanded, self.selected, self.level));
         if self.expanded {
@@ -278,7 +361,15 @@ impl TreeNode {
     }
 }
 
-/// TreeView widget
+/// Ağaç görünümü widget'ı; hiyerarşik veriyi girintili liste olarak gösterir.
+///
+/// `root_nodes: Vec<TreeNode>` ağaç yapısını tutar (gerçek veri).
+/// `flattened` sadece görünür düğümlerin düz listesidir; çizim ve hit-testing
+/// için kullanılır. Bu "view model" ayrımı ağaç verisini görüntü verisiyle
+/// gevşek (loose) bağlar.
+///
+/// Tuple formatı `(id, text, expanded, selected, level)`:
+/// `id` düğüm kimliği, `level` girintileme miktarını belirler.
 pub struct TreeView {
     rect: Rect,
     root_nodes: Vec<TreeNode>,
@@ -290,6 +381,7 @@ pub struct TreeView {
 }
 
 impl TreeView {
+    /// Yeni ağaç görünümü oluşturur; boş, kaydırılmamış.
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
         Self {
             rect: Rect::new(x, y, width, height),
@@ -302,11 +394,13 @@ impl TreeView {
         }
     }
 
+    /// Kök düğüm ekler ve düz listeyi yeniden oluşturur.
     pub fn add_root(&mut self, node: TreeNode) {
         self.root_nodes.push(node);
         self.rebuild_flattened();
     }
 
+    /// Tüm düğümleri, seçimleri ve kaydırmayı sıfırlar.
     pub fn clear(&mut self) {
         self.root_nodes.clear();
         self.flattened.clear();
@@ -314,6 +408,11 @@ impl TreeView {
         self.scroll_offset = 0;
     }
 
+    /// Düz listeyi tüm kök düğümlerden yeniden oluşturur.
+    ///
+    /// `TreeNode::flatten` özyinelemeli olarak çağrılır; genişletilmiş
+    /// alt düğümler de dahil edilir. Daraltılan/genişletilen her değişimde
+    /// bu yöntem çağrılarak düz liste güncellenir.
     fn rebuild_flattened(&mut self) {
         self.flattened.clear();
         for node in &self.root_nodes {
@@ -321,17 +420,28 @@ impl TreeView {
         }
     }
 
+    /// Belirtilen indeksteki görünür düğümün genişleme durumunu tersine çevirir.
+    ///
+    /// Düğüm ID'si bulunur, `root_nodes` ağacında özyinelemeli arana
+    /// (`toggle_node_recursive_static`), durumu güncellenir, sonra düz liste
+    /// yeniden oluşturulur. Bu "mutate then rebuild" kalıbı basit ama
+    /// büyük ağaçlarda O(n) yeniden inşa nedeniyle pahalı olabilir.
     fn toggle_expand(&mut self, index: usize) {
-        // Find and toggle the node
+        // Görünür liste indeksinden düğüm ID'sini bul ve durumu çevir
         if index < self.flattened.len() {
             let id = self.flattened[index].0;
             let expanded = self.flattened[index].2;
-            // Toggle in root_nodes
+            // Kök düğümler listesinde özyinelemeli ara ve güncelle
             Self::toggle_node_recursive_static(&mut self.root_nodes, id, !expanded);
             self.rebuild_flattened();
         }
     }
 
+    /// Ağaçta ID ile düğümü bulup genişleme durumunu günceller (özyinelemeli).
+    ///
+    /// `-> bool` dönüş değeri: düğüm bulunduğunda `true` döner; üst çağrılar
+    /// bunu arama erken sonlandırma (short-circuit) işareti olarak kullanır.
+    /// Bu "early return recursion" desenidir, gereksiz alt ağaç aramasını engeller.
     fn toggle_node_recursive_static(nodes: &mut Vec<TreeNode>, id: usize, new_expanded: bool) -> bool {
         for node in nodes {
             if node.id == id {
@@ -345,10 +455,12 @@ impl TreeView {
         false
     }
 
+    /// Ekranda kaç düğümün göründüğünü hesaplar.
     fn visible_items(&self) -> usize {
         (self.rect.height as usize - 4) / self.item_height
     }
 
+    /// Verilen y koordinatındaki görünür düğümün indeksini döndürür.
     fn item_at(&self, y: i32) -> Option<usize> {
         let relative_y = y - self.rect.y - 2;
         if relative_y < 0 {
@@ -370,10 +482,10 @@ impl Widget for TreeView {
         let w = self.rect.width as usize;
         let h = self.rect.height as usize;
 
-        // Background
+        // Arka plan
         fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
 
-        // Border
+        // Kenarlık
         for col in x..(x + w) {
             fb.plot_pixel(col, y, Theme::BORDER.to_u32());
             fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
@@ -383,7 +495,7 @@ impl Widget for TreeView {
             fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
         }
 
-        // Draw items
+        // Görünür düğümleri çiz: `flattened` düz listesi üzerinden iterasyon
         let visible = self.visible_items();
         let item_y_start = y + 2;
 
@@ -393,28 +505,32 @@ impl Widget for TreeView {
                 break;
             }
 
+            // Tuple destructuring: (id, text, expanded, selected, level)
             let (id, text, expanded, selected, level) = &self.flattened[item_index];
             let item_y = item_y_start + i * self.item_height;
 
-            // Selection background
+            // Seçili veya hover durumu arka plan rengi
             if *selected {
                 fb.draw_rect(x + 1, item_y, w - 2, self.item_height, Theme::ACCENT_PRIMARY.to_u32());
             } else if self.hovered_index == Some(item_index) {
                 fb.draw_rect(x + 1, item_y, w - 2, self.item_height, Theme::BUTTON_HOVER.to_u32());
             }
 
-            // Indent
+            // Girintileme: her seviye 16 piksel öteleme yapar.
+            // `level * 16`: kök=0px, birinci alt=16px, ikinci alt=32px vb.
             let indent = level * 16;
             let text_x = x + 4 + indent;
 
-            // Expand/collapse indicator
+            // Genişle/daralt göstergesi: + veya - karakteri.
+            // Not: `has_children` şu an sabit false; gerçek implementasyonda
+            // flattened'dan sonraki öğenin level'ına bakılarak çocuk var mı anlaşılır.
             let has_children = false; // Would need to check actual children
             if has_children {
                 let indicator = if *expanded { "-" } else { "+" };
                 fb.draw_string(text_x, item_y + 3, indicator, Theme::TEXT_SECONDARY.to_u32());
             }
 
-            // Text
+            // Düğüm metni: girintinin sağına 12 piksel ek boşlukla
             let text_y = item_y + (self.item_height - 16) / 2;
             let text_color = if *selected {
                 Theme::DESKTOP_BG.to_u32()
@@ -428,15 +544,17 @@ impl Widget for TreeView {
     fn on_click(&mut self, x: i32, y: i32) -> bool {
         if self.rect.contains(x, y) {
             if let Some(index) = self.item_at(y) {
-                // Check if clicked on expand indicator
+                // Tıklanan alanın genişlet/daralt göstergesinde mi olduğunu kontrol et.
+                // Girintiye göre gösterge x konumu hesaplanır.
                 let (_, _, _, _, level) = self.flattened[index];
                 let indent = level * 16;
                 let indicator_x = self.rect.x + 4 + indent as i32;
-                
+
                 if x >= indicator_x && x < indicator_x + 12 {
+                    // Genişlet/daralt göstergesine tıklandı
                     self.toggle_expand(index);
                 } else {
-                    // Select item
+                    // Düğüm metnine tıklandı: seçimi güncelle
                     for item in &mut self.flattened {
                         item.3 = false;
                     }
@@ -450,6 +568,7 @@ impl Widget for TreeView {
         }
     }
 
+    /// Hover durumunu günceller.
     fn on_hover(&mut self, x: i32, y: i32) -> bool {
         let old_hovered = self.hovered_index;
         self.hovered_index = if self.rect.contains(x, y) {
@@ -460,10 +579,13 @@ impl Widget for TreeView {
         old_hovered != self.hovered_index
     }
 
+    /// Kaydırma çarkı ile ağaç görünümünü kaydırır.
+    ///
+    /// `flattened.len()` görünür tüm düğüm sayısı; `max_scroll` son sayfa başlangıcı.
     fn on_scroll(&mut self, delta: i32) -> bool {
         let visible = self.visible_items();
         let max_scroll = self.flattened.len().saturating_sub(visible);
-        
+
         if delta > 0 && self.scroll_offset > 0 {
             self.scroll_offset -= 1;
             return true;

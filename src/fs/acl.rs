@@ -1,6 +1,40 @@
 //! # POSIX ACL (Erişim Kontrol Listeleri)
 //!
-//! Sahip/grup/diğerül modelinin ötesinde dosyalar için ayrıntılı izin denetimi.
+//! Sahip/grup/diğer modelinin ötesinde dosyalar için ayrıntılı izin denetimi.
+//!
+//! ## ACL İzin Kontrol Akışı
+//!
+//! ```text
+//!  Erişim İsteği (uid, gid, perm)
+//!          │
+//!          ▼
+//!  ┌─────────────────────────────────────────────────────┐
+//!  │  Adım 1: ACL_USER_OBJ  — dosya sahibi eşleşmesi    │
+//!  │          uid == dosya_uid  ──► perm & sahip_bits    │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  Adım 2: ACL_USER      — belirli kullanıcı girişi   │
+//!  │          uid == entry.qualifier ──► perm & MASK     │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  Adım 3: ACL_GROUP_OBJ — dosya sahibi grubu         │
+//!  │          gid == dosya_gid  ──► perm & MASK          │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  Adım 4: ACL_GROUP     — belirli grup girişi        │
+//!  │          gid == entry.qualifier ──► perm & MASK     │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  Adım 5: ACL_OTHER     — hiçbiriyle eşleşmedi       │
+//!  │          son çare ──► perm & other_bits             │
+//!  └─────────────────────────────────────────────────────┘
+//!
+//!  ACL_MASK: USER ve GROUP girişlerine uygulanan etkin izin üst sınırı.
+//!            Örnek: perm=rwx, MASK=r-x  ──►  sonuç=r-x
+//!
+//!  İkili disk formatı (to_binary / from_binary):
+//!  ┌────────────┬────────────┬──────────────────────────┐
+//!  │ access_cnt │ default_cnt│  giriş_1 ... giriş_n     │
+//!  │  (4 bayt)  │  (4 bayt)  │  her biri 12 bayt:       │
+//!  │            │            │  tag(4) + perm(4) + q(4) │
+//!  └────────────┴────────────┴──────────────────────────┘
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

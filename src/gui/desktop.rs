@@ -272,7 +272,7 @@ impl Desktop {
             }
         }
         
-        // Set as active
+        // Aktif olarak ayarla
         let new_idx = self.app_windows.len() - 1;
         self.active_window_idx = Some(new_idx);
         if let Some(new_rect) = self.window_rect_at(new_idx) {
@@ -444,7 +444,7 @@ impl Desktop {
         let dock_y = self.height - self.dock_height();
         if y >= dock_y as i32 {
             self.last_menu_mouse_pos = None;
-            // Hover/magnification state update
+            // Hover/büyüteç durum güncellemesi
             let moved = self.last_dock_mouse_pos != Some((x, y));
             if moved {
                 self.last_dock_mouse_pos = Some((x, y));
@@ -455,12 +455,12 @@ impl Desktop {
             }
 
             if left_down && !self.last_mouse_left {
-                // Press starts bounce/click state
+                // Basma, zıplama/tıklama durumunu başlatır
                 if !matches!(self.dock.on_mouse_down(x, y), DockEvent::None) {
                     redraw = true;
                 }
             } else if !left_down && self.last_mouse_left {
-                // Release activates action if still hovering the same item
+                // Bırakma, üzerinde hover varsa eylemi etkinleştirir
                 if let DockEvent::ItemActivated(_, _, action) = self.dock.on_mouse_up() {
                     self.handle_dock_action(action);
                     redraw = true;
@@ -486,7 +486,7 @@ impl Desktop {
             if left_down {
                 let (win_x, win_y, _, _) = self.app_windows[idx].get_rect();
                 let new_x = (x - self.drag_start_offset.0).max(0) as usize;
-                let new_y = (y - self.drag_start_offset.1).max(25) as usize; // Below menu bar
+                let new_y = (y - self.drag_start_offset.1).max(25) as usize; // Menü çubuğunun altında
 
                 if win_x != new_x || win_y != new_y {
                     self.app_windows[idx].set_position(new_x, new_y);
@@ -512,7 +512,7 @@ impl Desktop {
             if let Some(idx) = hit_idx {
                 // Pencereyi en öne getir
                 let clicked_rect = self.window_rect_at(idx);
-                let titlebar_height = 28; // Default titlebar height
+                let titlebar_height = 28; // Varsayılan başlık çubuğu yüksekliği
                 let prev_active = self.active_window_idx;
                 let active_idx = self.bring_window_to_front(idx).unwrap_or(idx);
                 let (wx, wy, ww, wh) = self.app_windows[active_idx].get_rect();
@@ -546,7 +546,7 @@ impl Desktop {
         redraw
     }
     
-    /// Handle dock click
+    /// Dock tıklamasını işle
     fn handle_dock_click(&mut self, mx: i32, _my: i32) -> Option<DockAction> {
         let total_width = self.dock.items.len() * (48 + 8) + 8 * 2;
         let dock_x = (self.width - total_width) / 2;
@@ -723,13 +723,13 @@ impl Desktop {
         self.dock.update(dt);
         needs_redraw = true;
         
-        // Update spotlight animation
+        // Spotlight animasyonunu güncelle
         self.spotlight.update(dt);
         if self.spotlight.needs_redraw() {
             needs_redraw = true;
         }
-        
-        // Update app windows
+
+        // Uygulama pencerelerini güncelle
         for window in &mut self.app_windows {
             window.update(dt);
         }
@@ -747,7 +747,7 @@ impl Desktop {
             }
         }
         
-        // Update drag & drop
+        // Sürükle ve bırak güncellemesi
         if let Some(event) = self.drag_drop.update(dt) {
             match event {
                 DropEvent::SpringLoaded(target_id) => {
@@ -793,6 +793,23 @@ impl Desktop {
     }
 
     /// idx penceresini en öne getirir (z-order). Yeni indeksini döndürür.
+    ///
+    /// ## Z-Order (Katman Sırası) Yönetimi
+    ///
+    /// `app_windows` Vec'i, Z-sırasını (ön/arka katman) doğrudan temsil eder.
+    /// En düşük indeks (0) = en altta (arkada), son indeks = en üstte (önde, aktif).
+    ///
+    /// ```text
+    ///  Önce (idx=1 ortada)     Sonra (idx=1 öne alındı)
+    ///  ┌────────────────┐      ┌────────────────┐
+    ///  │ [2] Win C  ←   │      │ [2] Win B  ←── aktif (öne alındı)
+    ///  │ [1] Win B  ←── │  →   │ [1] Win C      │
+    ///  │ [0] Win A      │      │ [0] Win A      │
+    ///  └────────────────┘      └────────────────┘
+    /// ```
+    ///
+    /// Algoritma: remove(idx) → push(sonuna) → active_window_idx = son indeks
+    /// Karmaşıklık: O(n) (Vec kaydırma)
     pub fn bring_window_to_front(&mut self, idx: usize) -> Option<usize> {
         if idx >= self.app_windows.len() { return None; }
         let win = self.app_windows.remove(idx);
@@ -910,7 +927,7 @@ pub fn run(fb: &mut Framebuffer) -> ! {
     let width = fb.width;
     let height = fb.height;
     
-    // Enable double buffering for smooth rendering
+    // Pürüzsüz çizim için çift tamponlamayı etkinleştir
     fb.enable_double_buffering();
     
     let mut desktop = Desktop::new(width, height);
@@ -920,31 +937,31 @@ pub fn run(fb: &mut Framebuffer) -> ! {
 
     crate::serial_println!("[GUI] Desktop initialized ({}x{}), entering main loop", width, height);
     
-    // Initialize PS/2 keyboard and mouse
+    // PS/2 klavye ve fareyi başlat
     crate::drivers::ps2::init();
     crate::drivers::mouse::init();
     crate::keyboard::mark_tty_ready();
-    
+
     let mut frame_count = 0u32;
     let mut last_frame_time = 0u64;
     const TARGET_FPS: u64 = 60;
-    const FRAME_TIME_US: u64 = 1_000_000 / TARGET_FPS; // ~16.67ms per frame
-    
+    const FRAME_TIME_US: u64 = 1_000_000 / TARGET_FPS; // Kare başına yaklaşık 16.67ms
+
     loop {
-        // Get current time (simple tick counter for now)
-        let current_time = unsafe { 
-            // Read TSC as rough time source
+        // Mevcut zamanı al (şimdilik basit sayaç)
+        let current_time = unsafe {
+            // Kaba zaman kaynağı olarak TSC'yi oku (Time Stamp Counter)
             let mut tsc: u64;
             core::arch::asm!("rdtsc", out("rax") tsc, options(nomem, nostack));
             tsc
         };
-        
-        // Frame rate limiting - skip if too soon
-        // Note: TSC frequency varies, this is approximate
+
+        // Kare hızı sınırlaması - çok erkense girişi işle, çizimi atla
+        // Not: TSC frekansı CPU'ya göre değişir, bu değer yaklaşıktır
         let elapsed = current_time.wrapping_sub(last_frame_time);
-        if frame_count > 0 && elapsed < 500_000 { // Rough ~60fps on typical CPU
-            // Process input but skip render
-            // Process keyboard input
+        if frame_count > 0 && elapsed < 500_000 { // Tipik CPU'da yaklaşık 60fps
+            // Girişi işle ama çizimi atla
+            // Klavye girdisini işle
             while let Some(key) = crate::keyboard::read_key() {
                 match key {
                     pc_keyboard::DecodedKey::Unicode(c) => {
@@ -955,8 +972,8 @@ pub fn run(fb: &mut Framebuffer) -> ! {
                     }
                 }
             }
-            
-            // Process mouse input
+
+            // Fare girdisini işle
             while let Some(event) = crate::drivers::input::pop_event() {
                 if let crate::drivers::input::InputEvent::MouseByte(byte) = event {
                     crate::drivers::mouse::handle_packet(byte);
@@ -965,8 +982,8 @@ pub fn run(fb: &mut Framebuffer) -> ! {
             continue;
         }
         last_frame_time = current_time;
-        
-        // Process keyboard input
+
+        // Klavye girdisini işle
         while let Some(key) = crate::keyboard::read_key() {
             match key {
                 pc_keyboard::DecodedKey::Unicode(c) => {
@@ -977,26 +994,26 @@ pub fn run(fb: &mut Framebuffer) -> ! {
                 }
             }
         }
-        
-        // Process mouse input from interrupt queue
+
+        // Kesme kuyruğundan fare girdisini işle
         while let Some(event) = crate::drivers::input::pop_event() {
             match event {
                 crate::drivers::input::InputEvent::MouseByte(byte) => {
-                    // Process raw mouse byte
+                    // Ham fare baytını işle
                     crate::drivers::mouse::handle_packet(byte);
                 }
                 crate::drivers::input::InputEvent::Mouse(packet) => {
-                    // Already processed packet
+                    // Zaten işlenmiş paket
                 }
                 _ => {}
             }
         }
-        
-        // Get mouse position and buttons
+
+        // Fare konumunu ve düğme durumlarını al
         let (mx, my) = crate::drivers::mouse::get_position();
         let buttons = crate::drivers::mouse::get_buttons();
-        
-        // Handle mouse click
+
+        // Fare tıklamasını işle
         static mut LAST_CLICK: bool = false;
         unsafe {
             if buttons.left && !LAST_CLICK {
@@ -1004,19 +1021,19 @@ pub fn run(fb: &mut Framebuffer) -> ! {
             }
             LAST_CLICK = buttons.left;
         }
-        
-        // Draw desktop
+
+        // Masaüstünü çiz
         desktop.draw(fb);
-        
-        // Draw mouse cursor on top
+
+        // Fare imlecini en üste çiz
         crate::gui::cursor::draw(fb);
-        
-        // Swap back buffer to front buffer (double buffering)
+
+        // Arka tamponu ön tampona aktar (çift tamponlama)
         fb.swap_buffers();
-        
+
         frame_count += 1;
         if frame_count % 60 == 0 {
-            // Log every 60 frames (~1 second at 60fps)
+            // Her 60 karede bir kayıt yaz (60fps'de yaklaşık 1 saniye)
             crate::serial_println!("[GUI] Frame {} mouse=({},{})", frame_count, mx, my);
         }
     }

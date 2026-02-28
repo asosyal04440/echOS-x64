@@ -90,6 +90,9 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    /// Ekran boyutlarını alarak pencere yöneticisini başlatır.
+    /// `taskbar_height` = 40 px; pencerelerin görev çubuğunun altına inmemesi için kullanılır.
+    /// `snap_threshold` = 20 px; ekran kenarına bu kadar yaklaşıldığında yapıştırma tetiklenir.
     pub fn new(screen_width: usize, screen_height: usize) -> Self {
         Self {
             windows: Vec::new(),
@@ -106,6 +109,8 @@ impl WindowManager {
         }
     }
 
+    /// Yeni pencereyi z-sırasına ekler ve odağı ona verir.
+    /// Z-indeksi = mevcut pencere sayısı; yani yeni pencere en üstte başlar.
     pub fn add_window(&mut self, mut window: WindowInfo) -> u32 {
         window.z_index = self.windows.len();
         let id = window.id;
@@ -114,6 +119,7 @@ impl WindowManager {
         id
     }
 
+    /// Pencereyi listeden kaldırır; odaklıysa en yüksek z-indeksli kalan pencereye odak verilir.
     pub fn remove_window(&mut self, id: u32) {
         self.windows.retain(|w| w.id != id);
         if self.focused_id == Some(id) {
@@ -124,26 +130,33 @@ impl WindowManager {
         }
     }
 
+    /// Tüm pencere listesine salt-okunur erişim sağlar.
     pub fn windows(&self) -> &Vec<WindowInfo> {
         &self.windows
     }
 
+    /// Kimliğe göre pencereye değiştirilebilir erişim sağlar.
     pub fn window_mut(&mut self, id: u32) -> Option<&mut WindowInfo> {
         self.windows.iter_mut().find(|w| w.id == id)
     }
 
+    /// Kimliğe göre pencereye salt-okunur erişim sağlar.
     pub fn window(&self, id: u32) -> Option<&WindowInfo> {
         self.windows.iter().find(|w| w.id == id)
     }
 
+    /// Odaklı pencereye salt-okunur erişim sağlar; hiç odak yoksa `None` döner.
     pub fn focused_window(&self) -> Option<&WindowInfo> {
         self.focused_id.and_then(|id| self.window(id))
     }
 
+    /// Odaklı pencereye değiştirilebilir erişim sağlar.
     pub fn focused_window_mut(&mut self) -> Option<&mut WindowInfo> {
         self.focused_id.and_then(|id| self.window_mut(id))
     }
 
+    /// Belirtilen pencereye odak verir: tüm odakları kaldırır, seçileni öne taşır.
+    /// Z-indeksi mevcut en büyük değer + 1 yapılarak pencere en üste çıkarılır.
     pub fn focus_window(&mut self, id: u32) {
         // Tümünün odağını kaldır
         for w in &mut self.windows {
@@ -160,6 +173,8 @@ impl WindowManager {
         }
     }
 
+    /// Pencereyi simge durumuna küçültür; `minimizable` = false ise işlem yapılmaz.
+    /// Simge durumundaki pencereler `window_at` ve çizim döngüsünde atlanır.
     pub fn minimize(&mut self, id: u32) {
         if let Some(window) = self.window_mut(id) {
             if window.minimizable {
@@ -175,6 +190,7 @@ impl WindowManager {
         }
     }
 
+    /// Simge durumundaki veya yapıştırılmış pencereyi normal konuma/boyutuna geri yükler.
     pub fn restore(&mut self, id: u32) {
         if let Some(window) = self.window_mut(id) {
             // Geri yükle
@@ -184,6 +200,8 @@ impl WindowManager {
         }
     }
 
+    /// Pencereyi tam ekrana büyütür ya da büyütülmüşse `normal_rect`'e geri yükler.
+    /// Görev çubuğu yüksekliği çalışma alanından düşülür; taskbar kaplı alan boşta kalır.
     pub fn maximize(&mut self, id: u32) {
         // Önce ekran boyutlarını al
         let screen_w = self.screen_width as i32;
@@ -205,6 +223,8 @@ impl WindowManager {
         }
     }
 
+    /// Pencereyi ekranın sol yarısına yapıştırır (Windows 11 / macOS benzeri snap).
+    /// `normal_rect` saklanır; geri yükleme sırasında bu değer kullanılır.
     pub fn snap_left(&mut self, id: u32) {
         // Önce ekran boyutlarını al
         let half_w = (self.screen_width / 2) as i32;
@@ -219,6 +239,7 @@ impl WindowManager {
         }
     }
 
+    /// Pencereyi ekranın sağ yarısına yapıştırır.
     pub fn snap_right(&mut self, id: u32) {
         // Önce ekran boyutlarını al
         let half_w = (self.screen_width / 2) as i32;
@@ -233,6 +254,9 @@ impl WindowManager {
         }
     }
 
+    /// Fareyle sürüklemeyi başlatır.
+    /// Büyütülmüş pencere önce normal boyutuna geri düşürülür, ardından sürükleme başlar.
+    /// `drag_offset` = fare konumu − pencerenin sol üst köşesi; sürükleme sırasında sabit kalır.
     pub fn start_drag(&mut self, id: u32, x: i32, y: i32) {
         // Önce pencere durumunu ve dikdörtgenini al
         let (is_maximized, normal_rect) = self.window(id)
@@ -257,6 +281,9 @@ impl WindowManager {
         self.focus_window(id);
     }
 
+    /// Sürükleme sırasında her fare hareketi olayında çağrılır.
+    /// Pencerenin konumunu günceller; yapıştırma önizlemesi için kenar kontrolü yapılır.
+    /// Hareket gerçekleştiyse `true` döner.
     pub fn drag(&mut self, x: i32, y: i32) -> bool {
         let dragging_id = self.dragging_id;
         let drag_offset_x = self.drag_offset.0;
@@ -290,6 +317,8 @@ impl WindowManager {
         false
     }
 
+    /// Fare bırakıldığında sürüklemeyi sonlandırır.
+    /// Ekran kenarına `snap_threshold`'dan yakınsa yapıştırma uygulanır.
     pub fn end_drag(&mut self, x: i32, _y: i32) {
         if let Some(id) = self.dragging_id {
             // Yapıştırmayı kontrol et
@@ -302,6 +331,8 @@ impl WindowManager {
         self.dragging_id = None;
     }
 
+    /// Yeniden boyutlandırmayı başlatır.
+    /// Pencere `Normal` durumunda ve `resizable` = true ise boyutlandırma kilidini ayarlar.
     pub fn start_resize(&mut self, id: u32, edge: ResizeEdge, x: i32, y: i32) {
         let (resizable, state) = self.window(id)
             .map(|w| (w.resizable, w.state))
@@ -315,6 +346,9 @@ impl WindowManager {
         }
     }
 
+    /// Her fare hareketi olayında boyutlandırmakta olduğumuz kenarı fare deltasına göre günceller.
+    /// `min_width` = 200 px, `min_height` = 150 px; bu sınırın altına inilmez.
+    /// `resize_start` her çağrıdan sonra güncellenir (delta hesabı süreklidir).
     pub fn resize(&mut self, x: i32, y: i32) -> bool {
         let resize_id = self.resize_window_id;
         let edge = self.resize_edge;
@@ -398,11 +432,15 @@ impl WindowManager {
         resize_id.is_some()
     }
 
+    /// Fare bırakıldığında boyutlandırmayı sonlandırır ve kilidi serbest bırakır.
     pub fn end_resize(&mut self) {
         self.resize_window_id = None;
         self.resize_edge = ResizeEdge::None;
     }
 
+    /// Fare konumuna göre hangi kenar/köşede olduğunu tespit eder.
+    /// `border` = 8 px; kenara bu kadar yakın olmak yeterlidir.
+    /// Yapılandırılmamış ya da Normal olmayan pencereler için `None` döner.
     pub fn detect_resize_edge(&self, id: u32, x: i32, y: i32) -> ResizeEdge {
         if let Some(window) = self.window(id) {
             if window.state != WindowState::Normal || !window.resizable {
@@ -441,6 +479,8 @@ impl WindowManager {
         }
     }
 
+    /// Verilen fare koordinatındaki en üst (z-indeksi en yüksek) pencereyi döndürür.
+    /// Simge durumundaki pencereler atlanır; tıklama hedefi tespitinde kullanılır.
     pub fn window_at(&self, x: i32, y: i32) -> Option<u32> {
         // Üstten alta doğru kontrol et (en yüksek z-indeksi önce)
         let mut sorted: Vec<_> = self.windows.iter().collect();
@@ -456,6 +496,9 @@ impl WindowManager {
         None
     }
 
+    /// Alt+Tab benzeri döngüsel pencere odak değiştirme.
+    /// `forward` = true ise sonraki, false ise önceki pencereye geçer.
+    /// Simge durumundaki pencereler bu döngüde atlanır.
     pub fn cycle_windows(&mut self, forward: bool) {
         let visible: Vec<_> = self.windows.iter()
             .filter(|w| w.state != WindowState::Minimized)
@@ -479,6 +522,8 @@ impl WindowManager {
         self.focus_window(visible[next_idx]);
     }
 
+    /// Ekran boyutu değiştiğinde (örn. çözünürlük değişimi) pencere yöneticisini günceller.
+    /// Mevcut pencereler yeni sınırlarla kısıtlanabilir; çağrıdan sonra doğrulamak önerilir.
     pub fn update_screen_size(&mut self, width: usize, height: usize) {
         self.screen_width = width;
         self.screen_height = height;

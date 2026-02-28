@@ -1,24 +1,53 @@
-//! # Font Rasterizer
+//! # Font Rasterleyici (Rasterizer)
 //!
-//! Converts glyph outlines to pixel bitmaps.
+//! Glyph (harf şekli) dış hat vektörlerini piksel bitmap'lerine dönüştürür.
+//!
+//! ## Rasterizasyon Nedir?
+//! Vektör tabanlı font verileri (bezier eğrileri, doğru parçaları) matematiksel
+//! formüllere dayanır; ekrana çizmek için bu formülleri piksel ızgarasına
+//! dönüştürmek gerekir. Bu işleme "rasterizasyon" denir.
+//!
+//! ## Temel Kavramlar
+//! - **Glyph**: Tek bir karakterin görsel temsili (örn. 'A' harfinin şekli)
+//! - **Contour**: Bir glyphin kapalı yolunu oluşturan nokta dizisi
+//! - **Scanline algoritması**: Her yatay tarama satırı için yol kesişimlerini
+//!   bulur ve doldurulacak pikselleri belirler
+//! - **Winding number**: Bir noktanın contour içinde mi dışında mı olduğunu
+//!   belirleyen sayı; imzalı kesişim sayısıyla hesaplanır
+//! - **Anti-aliasing**: Kenar piksellerine kısmi saydamlık değeri atanarak
+//!   kademeli geçiş oluşturulması ve pürüzlü görünümün azaltılması
+//! - **Advance width**: Bir karakterden sonra bir sonrakini yerleştirmek için
+//!   ilerlenecek yatay piksel mesafesi
 
 use super::truetype::{TrueTypeFont, Glyph, GlyphPoint, GlyphContour};
 use alloc::vec::Vec;
 use alloc::vec;
 
-/// Custom ceil for no_std
+/// no_std ortamı için özel tavan (ceiling) fonksiyonu.
+/// Standart kütüphanede `f32::ceil()` bulunur; ancak çekirdek modunda
+/// kayan nokta runtime desteği olmadığından cast hilesine başvuruyoruz:
+/// tamsayıya dönüşüm otomatik olarak `truncate` (sıfıra yuvarlama)
+/// yapar; pozitif sayılar için truncate == floor olduğundan bir ekleme
+/// ile tavan elde edilir.
 fn ceil_f32(x: f32) -> f32 {
     let i = x as i32 as f32;
     if x > i { i + 1.0 } else { i }
 }
 
-/// Custom floor for no_std
+/// no_std ortamı için özel taban (floor) fonksiyonu.
+/// `ceil_f32` ile aynı mantık; negatif sayılarda truncate değeri
+/// matematiksel tabandan büyük olduğundan bunu düzeltmek için
+/// bir çıkarma yapılır.
 fn floor_f32(x: f32) -> f32 {
     let i = x as i32 as f32;
     if x < i { i - 1.0 } else { i }
 }
 
-/// Rasterized glyph bitmap
+/// Rasterize edilmiş (pikselleştirilmiş) glyph bitmap'i.
+///
+/// Vektörden piksel ızgarasına dönüştürülmüş harf verisi.
+/// `bitmap` alanı, her piksel için 0–255 arası alfa (saydamlık)
+/// değerleri içerir: 0 = tam saydam, 255 = tam opak.
 #[derive(Clone, Debug)]
 pub struct RasterGlyph {
     pub width: usize,
@@ -26,10 +55,13 @@ pub struct RasterGlyph {
     pub offset_x: i32,
     pub offset_y: i32,
     pub advance: f32,
-    pub bitmap: Vec<u8>, // Alpha values 0-255
+    pub bitmap: Vec<u8>, // Her piksel için alfa değeri (0-255)
 }
 
-/// Rasterization metrics
+/// Rasterizasyon metrik verileri.
+///
+/// Bitmap'in framebuffer üzerindeki konumunu belirlemek için kullanılır:
+/// `offset_x`/`offset_y` glyphin sol altından ölçülen imzero-point ofsetidir.
 #[derive(Clone, Copy, Debug)]
 pub struct RasterMetrics {
     pub width: usize,
@@ -38,11 +70,17 @@ pub struct RasterMetrics {
     pub offset_y: i32,
 }
 
-/// Glyph rasterizer
+/// Glyph rasterleyici ana yapısı.
+///
+/// Dahili tamponları yeniden kullanarak her rasterizasyon için
+/// heap ayırma maliyetini düşürür. `scanline` tamponu bir satırdaki
+/// her sütun için kaplama (coverage) değerini tutar;
+/// `winding` tamponu ise o noktanın contour içinde olup olmadığını
+/// belirlemek için imzalı kesişim sayısını depolar.
 pub struct Rasterizer {
-    // Internal buffer for scanline processing
+    // Tarama satırı işleme için dahili tampon; her çağrıda temizlenir
     scanline: Vec<f32>,
-    // Winding number buffer
+    // Winding sayı tamponu; pozitif = sola döndürme, negatif = sağa döndürme
     winding: Vec<i32>,
 }
 
@@ -54,15 +92,21 @@ impl Rasterizer {
         }
     }
 
-    /// Rasterize a glyph at given size
+    /// Belirli bir boyutta glyph'i rasterize eder (vektörden piksele dönüştürür).
+    ///
+    /// `size` noktasal font büyüklüğüne karşılık gelir (örn. 16.0 = 16pt).
+    /// `scale = size / units_per_em` formülüyle font koordinat birimlerinden
+    /// piksel koordinatlarına dönüşüm katsayısı hesaplanır.
+    /// Sıfır boyutlu glyphler (boşluk karakteri gibi) için boş bitmap döndürülür.
     pub fn rasterize(&mut self, font: &TrueTypeFont, glyph: &Glyph, size: f32) -> Option<RasterGlyph> {
         let scale = size / font.units_per_em as f32;
-        
-        // Calculate bitmap dimensions
+
+        // Bitmap boyutunu hesapla: glyphin sınırlayıcı kutusunu ölçeklendirip
+        // tavan alma yoluyla tam piksel boyutuna yuvarlıyoruz
         let bounds = &glyph.bounds;
         let width = ceil_f32((bounds.x_max - bounds.x_min) as f32 * scale) as usize;
         let height = ceil_f32((bounds.y_max - bounds.y_min) as f32 * scale) as usize;
-        
+
         if width == 0 || height == 0 {
             return Some(RasterGlyph {
                 width: 0,
@@ -76,13 +120,13 @@ impl Rasterizer {
 
         let offset_x = floor_f32(glyph.left_side_bearing as f32 * scale) as i32;
         let offset_y = floor_f32(bounds.y_max as f32 * scale) as i32;
-        
+
         let mut bitmap = vec![0u8; width * height];
-        
-        // Simple bitmap font fallback - draw a rectangle for each glyph
-        // Real implementation would use outline rendering
+
+        // Gerçek outline rendering yerine şimdilik sade dikdörtgen çizimi;
+        // ileride bezier eğrileriyle tam vektör rasterizasyonu yapılacak
         self.render_simple(&mut bitmap, width, height, glyph, scale);
-        
+
         Some(RasterGlyph {
             width,
             height,
@@ -93,68 +137,81 @@ impl Rasterizer {
         })
     }
 
-    /// Simple rectangle rendering (placeholder for proper outline rendering)
+    /// Sade dikdörtgen dolgu ile basit rasterizasyon (tam outline rendering için yer tutucu).
+    ///
+    /// Gerçek bir FontRenderer bezier eğrilerini örnekleyerek her piksel için
+    /// kaplama değeri hesaplar. Bu basit sürüm tüm glyphi dolu bir kutu olarak
+    /// çizer; kenar piksellerine 128 (yarı saydam) değeri atanarak ham bir
+    /// anti-aliasing taklidi yapılır.
     fn render_simple(&mut self, bitmap: &mut [u8], width: usize, height: usize, glyph: &Glyph, scale: f32) {
         let bounds = &glyph.bounds;
-        
-        // Draw filled rectangle based on bounds
+
+        // Sınırlayıcı kutu değişkenleri; ileride bezier örnekleme için kullanılacak
         let x_start = 0usize;
         let x_end = width;
         let y_start = 0usize;
         let y_end = height;
-        
-        // Fill with solid color
+
+        // Tüm pikselleri tam opak (255) ile doldur
         for y in y_start..y_end {
             for x in x_start..x_end {
                 let idx = y * width + x;
                 if idx < bitmap.len() {
-                    // Simple fill - could add anti-aliasing at edges
+                    // Gelecekte buraya anti-aliasing kaplama değeri gelecek
                     bitmap[idx] = 255;
                 }
             }
         }
-        
-        // Add simple anti-aliasing at edges
+
+        // Kenar pikselleri için basit anti-aliasing: 128 = %50 saydamlık
+        // Gerçek AA, piksel merkezinin eğriye olan mesafesine göre hesaplanır
         if width > 2 && height > 2 {
             for x in 0..width {
-                // Top edge
+                // Üst kenar
                 bitmap[x] = 128;
-                // Bottom edge
+                // Alt kenar
                 bitmap[(height - 1) * width + x] = 128;
             }
             for y in 0..height {
-                // Left edge
+                // Sol kenar
                 bitmap[y * width] = 128;
-                // Right edge
+                // Sağ kenar
                 bitmap[y * width + width - 1] = 128;
             }
         }
     }
 
-    /// Render glyph outline using scanline algorithm
+    /// Scanline algoritmasıyla glyph dış hatlarını rasterize eder.
+    ///
+    /// Klasik dolu-çokgen rasterizasyon yöntemi:
+    /// 1. Her yatay tarama satırı (scanline) için tüm contour kenarlarını dolaş.
+    /// 2. Kenarın o satırla kesişip kesişmediğini kontrol et.
+    /// 3. Kesişim noktasındaki winding sayısını güncelle.
+    /// 4. Winding ≠ 0 olan sütunlar çizgi içindedir → pikseli doldur.
+    /// Bu yöntem TrueType'ın "non-zero winding" doldurma kuralına uygundur.
     #[allow(dead_code)]
     fn render_outline(&mut self, bitmap: &mut [u8], width: usize, height: usize, contours: &[GlyphContour], scale: f32) {
-        // Ensure scanline buffer is large enough
+        // Tarama satırı tamponu büyüklüğünü güvence altına al
         if self.scanline.len() < width {
             self.scanline.resize(width, 0.0);
             self.winding.resize(width, 0);
         }
-        
-        // For each scanline
+
+        // Her tarama satırını işle
         for y in 0..height {
-            // Clear scanline
+            // Tamponu temizle: bir önceki satırdan kalan veriler silinir
             for i in 0..width {
                 self.scanline[i] = 0.0;
                 self.winding[i] = 0;
             }
-            
-            // Process all contours
+
+            // Font koordinat sistemindeki y değeri (ölçeklenmiş gerçek koordinat)
             let scan_y = y as f32 / scale;
             for contour in contours {
                 self.process_contour(&contour.points, scan_y, scale);
             }
-            
-            // Fill scanline based on winding numbers
+
+            // Winding sıfırdan farklıyken içi doldur; değişim noktaları kenar pikseli
             let mut inside = false;
             for x in 0..width {
                 if self.winding[x] != 0 {
@@ -172,24 +229,25 @@ impl Rasterizer {
         if points.len() < 2 {
             return;
         }
-        
+
         let n = points.len();
         for i in 0..n {
             let p0 = &points[i];
-            let p1 = &points[(i + 1) % n];
-            
-            // Check if edge crosses scanline
+            let p1 = &points[(i + 1) % n]; // Kapalı yol: son nokta ilk noktaya bağlanır
+
+            // Kenarın tarama satırını kesip kesmediğini kontrol et:
+            // Bir kenar ancak bir ucu satırın üstünde, diğeri altındaysa keser
             let y0 = p0.y as f32;
             let y1 = p1.y as f32;
-            
+
             if (y0 <= scan_y && y1 > scan_y) || (y1 <= scan_y && y0 > scan_y) {
-                // Calculate x intersection
+                // Lineer interpolasyonla kesişim x koordinatı: x = x0 + t*(x1-x0)
                 let t = (scan_y - y0) / (y1 - y0);
                 let x = (p0.x as f32 + t * (p1.x as f32 - p0.x as f32)) * scale;
                 let x_idx = x as usize;
-                
+
                 if x_idx < self.winding.len() {
-                    // Update winding number
+                    // Non-zero winding kuralı: yukarı gide → +1, aşağı gide → -1
                     if y0 < y1 {
                         self.winding[x_idx] += 1;
                     } else {
@@ -200,18 +258,25 @@ impl Rasterizer {
         }
     }
 
-    /// Rasterize a simple bitmap font character (8x8)
+    /// 8×8 piksel bitmap font karakterini rasterize eder.
+    ///
+    /// Bitmap fontlar, her karakteri 8 baytlık bir dizi ile temsil eder:
+    /// her bayt bir satırı, her bit ise o satırdaki bir pikseli gösterir.
+    /// `0x80 >> col` maskesi ile sütun biti test edilir; `scale` faktörü
+    /// ile büyütme yapılarak her bit birden fazla piksel kapsar.
+    /// Bu yöntem TrueType ayrıştırma başarısız olduğunda geri dönüş olarak kullanılır.
     pub fn rasterize_bitmap(&self, char_bits: &[u8; 8], size: f32) -> RasterGlyph {
         let scale = (size / 8.0).max(1.0) as usize;
         let width = 8 * scale;
         let height = 8 * scale;
         
         let mut bitmap = vec![0u8; width * height];
-        
+
         for (row, &bits) in char_bits.iter().enumerate() {
             for col in 0..8 {
                 if bits & (0x80 >> col) != 0 {
-                    // Fill scaled pixel
+                    // Ölçeklenmiş piksel bloğunu doldur:
+                    // scale=2 ise her bit 2×2 piksel bloğuna genişler
                     for dy in 0..scale {
                         for dx in 0..scale {
                             let x = col * scale + dx;
@@ -243,7 +308,20 @@ impl Default for Rasterizer {
     }
 }
 
-/// Built-in 8x8 bitmap font data (96 printable ASCII characters)
+/// Yerleşik 8×8 piksel bitmap font verisi (96 yazdırılabilir ASCII karakter).
+///
+/// ASCII tablosunda 0x20 (boşluk) ile 0x7F (DEL) arasındaki karakterleri içerir.
+/// Her karakter 8 baytla temsil edilir: bir bayt = bir yatay satır,
+/// bir bit = bir piksel (1=dolu, 0=boş). En yüksek değerlikli bit (MSB) solda.
+///
+/// Örnek: 'A' (0x41)
+/// ```text
+/// 0x38 = 00111000  →   ***
+/// 0x6C = 01101100  →  ** **
+/// 0xC6 = 11000110  → **   **
+/// 0xFE = 11111110  → *******
+/// ... vb.
+/// ```
 pub const BITMAP_FONT: [[u8; 8]; 96] = [
     // Space (0x20)
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],

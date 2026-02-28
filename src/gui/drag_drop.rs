@@ -1,4 +1,4 @@
-//! # Sürükle ve Bırak Desteği
+//! # Sürükle ve Bırak Desteği (Drag & Drop)
 //!
 //! GUI öğeleri için sistem genelinde sürükle ve bırak işlevselliği.
 //! Dosya sürükleme, metin seçimi ve widget sıralamayı destekler.
@@ -9,8 +9,21 @@
 //! - `DragOperation`: Mevcut sürükleme durumu; önizleme, rozet, efekt
 //! - `DragDropManager`: Global yönetici; hedef kaydı, animasyon, bahar yükleme
 //!
+//! ## Sürükleme Akışı
+//! 1. `mouse_down` + `is_drag_threshold_met()` → sürükleme başlatılır
+//! 2. Sürükleme boyunca `update_drag(mx, my)` çağrılır; önizleme ekranda güncellenir
+//! 3. `mouse_up` → `find_drop_target()` ile hedef bulunur; `DragEffect` uygulanır
+//! 4. Bırakma başarısızsa `cancel_drag()` ile önizleme kaldırılır
+//!
 //! ## Bahar Yükleme (Spring Loading)
-//! Klasörün üzerine belirli süre tutulduğunda otomatik açılır.
+//! Klasörün üzerine belirli süre (`SPRING_LOAD_DELAY`) tutulduğunda klasör
+//! otomatik olarak açılır. `spring_timer` her karede güncellenir; zamanlayıcı
+//! dolunca `springload_target` üzerinde `DragDropEvent::SpringLoad` olayı üretilir.
+//!
+//! ## Önizleme Oluşturma
+//! Sürüklenen öğenin ağırlık merkezine göre ofsetlenmiş yarı saydam bir kopya
+//! fare imlecinin yanında çizilir. Birden fazla öğe için üst üste yığılmış
+//! görünüm ve dosya sayısını gösteren bir rozet eklenir.
 
 use alloc::boxed::Box;
 use alloc::string::String;

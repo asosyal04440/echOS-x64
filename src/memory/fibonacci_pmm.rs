@@ -1,8 +1,60 @@
-//! # FIBONACCI PMM - Zone-based Physical Memory Management
+//! # Fibonacci PMM — Zone Tabanlı Fiziksel Bellek Yönetimi
 //!
-//! Fibonacci Buddy System + Linux-style Zone allocation.
-//! DMA cihazları için zone ayrımı: ZONE_DMA (0-16MB), ZONE_DMA32 (0-4GB), ZONE_NORMAL (4GB+).
-//! Fallback chain: NORMAL → DMA32 → DMA (Linux mm/page_alloc.c referans).
+//! Fibonacci Buddy System + Linux tarzı Zone tahsis mekanizması.
+//!
+//! ## Bellek Bölgeleri (Memory Zones)
+//!
+//! x86_64'te DMA cihazlarının erişebildiği adres aralıkları donanıma bağlıdır.
+//! Linux'un `mm/mmzone.h` tasarımı esas alınmıştır:
+//!
+//! ```
+//! Fiziksel Adres Uzayı:
+//!
+//!  0x0000_0000          0x100_0000 (16 MB)     0x1_0000_0000 (4 GB)
+//!       │                    │                        │
+//!       ▼                    ▼                        ▼
+//!  ┌────────────────────┬───────────────────────┬──────────────── ···
+//!  │    ZONE_DMA        │     ZONE_DMA32         │   ZONE_NORMAL
+//!  │  0 → 16 MB         │  16 MB → 4 GB          │   4 GB → ∞
+//!  │  ISA DMA (24-bit)  │  PCI 32-bit DMA        │   sınırsız
+//!  └────────────────────┴───────────────────────┴──────────────── ···
+//! ```
+//!
+//! ## Zone Seçim Mantığı (Fallback Zinciri)
+//!
+//! Bir cihaz tahsis istediğinde, gereken zone'dan başlayarak yukarı çıkar:
+//!
+//! ```
+//! İstek: NORMAL zone
+//!   ↓ NORMAL dolu veya yetersiz?
+//!   → DMA32 dene
+//!      ↓ DMA32 da dolu?
+//!      → DMA dene (son çare)
+//!         ↓ DMA da dolu?
+//!         → None (tahsis başarısız)
+//! ```
+//!
+//! ## Fibonacci Buddy ile Entegrasyon
+//!
+//! Her zone kendi `FibonacciBuddyAllocator`'ına sahiptir.
+//! Fibonacci serileri (1, 1, 2, 3, 5, 8, 13, 21, ...) blok boyutlarını tanımlar;
+//! standart 2^n buddy sistemine göre daha az dahili parçalanma üretir:
+//!
+//! ```
+//! Standart Buddy (2^n):  1KB, 2KB, 4KB, 8KB, 16KB, ...  → %28 ortalama parçalanma
+//! Fibonacci Buddy:       4KB, 4KB, 8KB,12KB, 20KB, ...  → %12 ortalama parçalanma
+//! ```
+//!
+//! ## Zone İstatistikleri
+//!
+//! Her zone `free_frames`, `used_frames`, `total_frames` takibi yapar.
+//! Fallback gerçekleştiğinde `fallback_count` artar — yüksek fallback oranı
+//! bellek baskısının işaretidir (kswapd'yi tetikler).
+//!
+//! ## İlgili Modüller:
+//! - `fibonacci_buddy.rs`: Fibonacci tabanlı buddy ayırıcı
+//! - `mod.rs`: `MemoryManager` — bu PMM'i sarar ve x86_64 FrameAllocator trait'ini uygular
+//! - `frame_allocator.rs`: Multiboot2 bootstrap ayırıcısı (bu modülün öncüsü)
 
 use super::fibonacci_buddy::FibonacciBuddyAllocator;
 use alloc::vec::Vec;

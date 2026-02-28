@@ -1,3 +1,32 @@
+//! # echOS Kullanıcı Modu Yürütme (User Mode Task Execution)
+//!
+//! Bu modül, çekirdek modundan (Ring 0) kullanıcı moduna (Ring 3) geçiş
+//! mekanizmasını sağlar. IRETQ komutu ile ayrıcalık seviyesi değiştirilir.
+//!
+//! ## Ring 0 → Ring 3 Geçiş Mekanizması (IRETQ)
+//!
+//! ```text
+//!  ┌──────────────────────────────────────────────────────────────┐
+//!  │             IRETQ İLE KULLANICI MODUNA GEÇİŞ                │
+//!  │                                                              │
+//!  │  Kernel Stack (Ring 0):                                      │
+//!  │  ┌───────────┐                                               │
+//!  │  │   SS      │ ← Kullanıcı veri segmenti (RPL=3)            │
+//!  │  │   RSP     │ ← Kullanıcı yığın işaretçisi (stack_top)     │
+//!  │  │  RFLAGS   │ ← 0x202 (IF=1, IOPL=0)                      │
+//!  │  │   CS      │ ← Kullanıcı kod segmenti (RPL=3)             │
+//!  │  │   RIP     │ ← Kullanıcı giriş noktası (entry_point)      │
+//!  │  └───────────┘                                               │
+//!  │       ↓ iretq                                                │
+//!  │  CPU: Ring 0 → Ring 3 geçişi gerçekleşir                    │
+//!  │  Segment register'ları kullanıcı segmentlerine ayarlanır     │
+//!  │  RSP = user_stack_top, RIP = entry_point                     │
+//!  └──────────────────────────────────────────────────────────────┘
+//!
+//!  NOT: IOPL=0 ile kullanıcı modu, IN/OUT gibi G/Ç komutlarını
+//!       çalıştıramaz. Sistem çağrısı (SYSCALL) kullanması gerekir.
+//! ```
+
 use core::arch::asm;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Size4KiB};
@@ -17,12 +46,12 @@ pub unsafe fn enter_user_mode(entry_point: VirtAddr, user_stack_top: VirtAddr) -
     let user_cs = crate::gdt::user_code_selector().0;
     let user_ds = crate::gdt::user_data_selector().0;
 
-    // RPL = 3 (Ring 3)
+    // RPL = 3 (Ring 3 — kullanıcı ayrıcalık seviyesi)
     let user_cs = user_cs | 3;
     let user_ds = user_ds | 3;
 
-    // RFLAGS: Interrupt açık (bit 9) ve reserved (bit 1) -> 0x202
-    // IOPL=0 (kullanıcı modunda IO portu kullanımını engeller)
+    // RFLAGS: Kesme bayrağı açık (bit 9) ve rezerv bit (bit 1) → 0x202
+    // IOPL=0: kullanıcı modunda doğrudan G/Ç portu erişimini engeller
     let rflags: u64 = 0x202;
     crate::serial_println!(
         "SWITCHING TO USER MODE now... RIP={:#x} RSP={:#x}",

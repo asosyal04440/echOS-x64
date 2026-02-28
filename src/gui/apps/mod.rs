@@ -1,41 +1,48 @@
 //! # GUI Applications
 //!
 //! Built-in applications for echOS desktop environment
+//!
+//! Bu modül, echOS masaüstü ortamının yerleşik uygulamalarını barındırır.
+//! Her uygulama kendi alt modülünde tanımlanmış olup `pub use` ile dışa aktarılır.
+//!
+//! Rust'ta modül sistemi: `pub mod` ile bir alt modül dışarıya açılır,
+//! `pub use` ile ise o modülün içindeki tipler bu modül düzeyinden
+//! doğrudan erişilebilir hale getirilir (re-export).
 
-/// Settings application
+/// Ayarlar uygulaması - sistem tercihlerini yönetir
 pub mod settings;
 
-/// File Explorer application
+/// Dosya gezgini uygulaması - dizin gezinme ve dosya işlemleri
 pub mod file_explorer;
 
-/// Image Viewer application
+/// Resim görüntüleyici - zoom, pan ve slayt gösterisi destekler
 pub mod image_viewer;
 
-/// Text Editor application
+/// Metin düzenleyici uygulaması
 pub mod text_editor;
 
-/// Music Player application
+/// Müzik çalar uygulaması
 pub mod music_player;
 
-/// Finder-like file browser
+/// macOS Finder benzeri dosya tarayıcısı (kenar çubuğu, sekmeler, sütun görünümü)
 pub mod finder;
 
-/// Safari-like web browser
+/// Safari benzeri sekmeli web tarayıcısı
 pub mod browser;
 
-/// System Preferences app
+/// Sistem tercihleri uygulaması
 pub mod system_preferences;
 
-/// Terminal app with tabs and themes
+/// Sekmeli ve temalı terminal uygulaması
 pub mod terminal;
 
-/// Preview app for documents
+/// Belgeler için önizleme uygulaması
 pub mod preview;
 
-/// Activity Monitor app
+/// Sistem etkinlik izleyicisi - CPU, bellek, disk ve ağ kullanımını gösterir
 pub mod activity_monitor;
 
-/// Font Book app
+/// Font kitaplığı - yazı tiplerini görüntüleme ve yönetme
 pub mod font_book;
 
 pub use settings::SettingsApp;

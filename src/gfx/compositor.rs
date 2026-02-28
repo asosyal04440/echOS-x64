@@ -1,8 +1,49 @@
 ﻿//! # echOS Cyber Compositor
 //!
-//! Katmanlı, alpha-blended rendering engine.
+//! Katmanlı, alpha-blended rendering motoru.
 //!
-//! Render pipeline (her kare):
+//! ## Compositor Nedir?
+//!
+//! Compositor (pencere birleştirici), birden fazla pencerenin tek bir ekranda
+//! üst üste doğru şekilde görüntülenmesini sağlayan grafik yazılım bileşenidir.
+//! Her pencere kendi arka tamponuna (back buffer) çizilir; compositor bunları
+//! Z-sırasına (derinlik sırasına) göre birleştirerek nihai kareyi oluşturur.
+//!
+//! ## Z-Sırası Katman Diyagramı (yukarıdan aşağıya doğru bakış)
+//!
+//! ```text
+//!  ┌─────────────────────────────────────────────────────┐
+//!  │  7. MOUSE CURSOR          (en üstte, her zaman)    │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  6. SNAP OVERLAY          (sürükleme animasyonu)   │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  5. CYBERPANEL + CMD BAR  (üst sistem çubuğu)      │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  4. DOCK + SPOTLIGHT      (alt uygulama çubuğu)    │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  3. PENCERE DEKORASYONLARı (başlık, butonlar)      │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  2b. PENCERE İÇERİĞİ (app çizimi, cam efekti)      │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  2a. PENCERE GÖLGESİ     (yayılma efekti)          │
+//!  ├─────────────────────────────────────────────────────┤
+//!  │  1. DUVAR KAĞIDI          (en altta)                │
+//!  └─────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Alpha Blend Formülü
+//!
+//! ```text
+//!  Çıktı = (Kaynak × α + Hedef × (255 − α)) / 255
+//!
+//!  Örnek: yarı saydam kırmızı (α=128) üzerine beyaz arka plan:
+//!  R = (255 × 128 + 255 × 127) / 255 = 255
+//!  G = (0   × 128 + 255 × 127) / 255 = 127
+//!  B = (0   × 128 + 255 × 127) / 255 = 127
+//!  Sonuç: açık pembe (#FF7F7F)
+//! ```
+//!
+//! ## Render Pipeline (her kare)
 //!   1. Wallpaper katmanı
 //!   2. Gölge katmanları (pencere başına)
 //!   3. Pencere içeriği (alpha-blend, cam efekti)
@@ -11,7 +52,7 @@
 //!   6. Snap overlay (sürükleme sırasında)
 //!   7. Mouse cursor (en üst)
 //!
-//! Input pipeline (her kare, render öncesi):
+//! ## Input Pipeline (her kare, render öncesi)
 //!   1. Global kısayol filtresi → ShortcutId
 //!   2. WM katmanı (drag, resize, snap)
 //!   3. Desktop katmanı (panel, dock, spotlight vs.)
@@ -468,10 +509,10 @@ fn draw_shadow(fb: &mut Framebuffer, rect: &Rect, spread: i32, opacity: u8) {
         let lw = rect.width  + (spread - layer) * 2;
         let lh = rect.height + (spread - layer) * 2;
         if lw <= 0 || lh <= 0 { continue; }
-        // Top/bottom lines
+        // Üst/alt çizgiler
         draw_hline_alpha(fb, lx, ly,          lw, 0, a, fw, fh);
         draw_hline_alpha(fb, lx, ly + lh - 1, lw, 0, a, fw, fh);
-        // Left/right lines
+        // Sol/sağ çizgiler
         draw_vline_alpha(fb, lx,          ly, lh, 0, a, fw, fh);
         draw_vline_alpha(fb, lx + lw - 1, ly, lh, 0, a, fw, fh);
     }
@@ -549,7 +590,7 @@ fn draw_frosted_glass(fb: &mut Framebuffer, rect: &Rect, tint: u32, tint_alpha: 
 fn draw_titlebar(fb: &mut Framebuffer, frame: &WindowFrame, mx: i32, my: i32) {
     let r = &frame.rect;
     draw_frosted_glass(fb, &Rect::new(r.x, r.y, r.width, TITLEBAR_H), 0x0E1117, 140);
-    // Bottom border line
+    // Alt kenarlık çizgisi
     let border_c = if frame.focused { CyberTheme::BORDER_ACTIVE } else { CyberTheme::BORDER };
     let fw = fb.width as i32;
     let border_y = r.y + TITLEBAR_H - 1;
@@ -1072,9 +1113,9 @@ pub fn run(fb: &mut Framebuffer) -> ! {
                 // set_app_rect ile Desktop, pencereyi doğru konumda render eder;
                 // aynı rect WM frame_rect'e de geri yazılır (drag/snap sonrası senkron).
                 if let Some(app_idx) = wm.desktop_idx_of(id) {
-                    // Set app rect to vis_rect so the app draws from window top.
-                    // The WM Cyber titlebar is drawn AFTER the app and covers the
-                    // app's own built-in chrome (toolbar/tab-bar) naturally.
+                    // Uygulama rect'ini vis_rect'e ayarla; uygulama pencere tepesinden çizer.
+                    // WM Cyber başlık çubuğu uygulamadan SONRA çizilir ve
+                    // uygulamanın kendi chrome'unu (araç çubuğu/sekme çubuğu) doğal olarak örter.
                     desktop.set_app_rect(app_idx, vis_rect);
                     desktop.draw_app_window(&mut frame_fb, app_idx);
                 }
@@ -1115,7 +1156,7 @@ pub fn run(fb: &mut Framebuffer) -> ! {
         // 3e. Cursor
         draw_cursor(&mut frame_fb, mx, my);
 
-        // Front-buffer present (single blit)
+        // Ön tamponu güncelle (tek blit işlemi — arka tampon → fiziksel bellek)
         fb.buffer_mut().copy_from_slice(&backbuf);
 
         // Frame pacing — timer tick 10ms, interaktif karelerde daha düşük gecikme

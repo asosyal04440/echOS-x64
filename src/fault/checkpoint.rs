@@ -2,6 +2,44 @@
 //!
 //! Bilinen kararlı durumlara geri dönüş için sistem durum kaydı (checkpointing).
 //! Hata kurtarma sırasında sistemin tutarlı bir duruma geri yüklenmesini sağlar.
+//!
+//! ## Kontrol Noktası Nedir?
+//!
+//! Kontrol noktası (checkpoint), sistemin belirli bir andaki "anlık fotoğrafıdır".
+//! Önemli modüllerin sayısal istatistikleri serileştirilerek saklanır.
+//! Bir hata sonrasında bu noktaya referans alınarak durum analizi yapılabilir.
+//!
+//! ## Veri Akışı
+//!
+//! ```text
+//!  create("boot_complete")
+//!       │
+//!       ▼
+//!  ┌─────────────────────────────────────┐
+//!  │  capture_states()                   │
+//!  │  ├─ capture_scheduler_state()       │
+//!  │  │    → total_tasks, running, zombie│
+//!  │  ├─ capture_memory_state()          │
+//!  │  │    → free_frames, total_frames   │
+//!  │  └─ capture_fault_state()           │
+//!  │       → total_faults, recoveries    │
+//!  └─────────────────────────────────────┘
+//!       │
+//!       ▼
+//!  Checksum hesapla (add_state içinde)
+//!       │
+//!       ▼
+//!  Vec<Checkpoint>'e ekle (maks 10 adet)
+//!       │  eski en eskisini sil
+//!       ▼
+//!  İstediğinde restore(id) ile analiz et
+//! ```
+//!
+//! ## Önemli Not
+//!
+//! Bu implementasyon "bilgilendirici checkpointing" yapar: durum okunabilir
+//! ancak gerçek çekirdek durumunu (register'lar, yığın, sayfa tabloları)
+//! geri yükleyemez. Tam geri yükleme çok daha karmaşık donanım desteği gerektirir.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -15,6 +53,12 @@ use spin::Mutex;
 // ============================================================================
 
 /// Sistem durum kontrol noktası — belirli bir andaki sistem anlık görüntüsü
+///
+/// `module_states` alanı modül adlarını `Vec<u8>` (little-endian serileştirilmiş
+/// istatistikler) ile eşleştiren bir haritadır.
+///
+/// `checksum`, tüm modül verilerinin baytlarının wrapping toplamıdır.
+/// `verify()` ile bütünlük kontrolü yapılır; bozuk noktalar reddedilir.
 #[derive(Clone)]
 pub struct Checkpoint {
     /// Kontrol noktası benzersiz kimliği
@@ -73,6 +117,12 @@ impl Checkpoint {
 // ============================================================================
 
 /// Checkpoint yöneticisi — kontrol noktalarını saklar ve yönetir
+///
+/// En fazla `max_checkpoints` kadar (varsayılan: 10) kontrol noktası tutar.
+/// Limit aşılırsa FIFO (ilk giren ilk çıkar) stratejisiyle en eskisi silinir.
+///
+/// `auto_checkpoint = true` yapılırsa her `checkpoint_interval` tick'te
+/// "auto" adlı bir kontrol noktası otomatik alınır.
 pub struct CheckpointManager {
     /// Kaydedilmiş kontrol noktaları listesi
     checkpoints: Mutex<Vec<Checkpoint>>,

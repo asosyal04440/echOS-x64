@@ -2,6 +2,27 @@
 //!
 //! Advanced Programmable Interrupt Controller (APIC) sürücüsü.
 //! Timer ve interrupt yönlendirme işlemlerini yönetir.
+//!
+//! ## Mimari Genel Bakış
+//!
+//! ```
+//! +------------------+        +------------------+
+//! |   CPU Çekirdeği  |        |   I/O APIC       |
+//! |  +------------+  |        |  (IRQ Yönlendirme)|
+//! |  | Local APIC |<-------->|  GSI -> IDT Vec  |
+//! |  +------------+  |        +------------------+
+//! |   Timer, IPI   |                  ^
+//! +------------------+                |
+//!           ^                 Donanım Sinyalleri
+//!           |                 (klavye, ağ, vb.)
+//!     EOI Sinyali
+//!     (interrupt bitti)
+//! ```
+//!
+//! - **Local APIC**: Her CPU çekirdeğinde bulunur. Timer, IPI (Inter-Processor
+//!   Interrupt) ve spurious interrupt yönetimi yapar.
+//! - **I/O APIC**: Sistem genelinde donanım IRQ'larını ilgili CPU'ya yönlendirir.
+//! - **LAPIC_BASE**: MMIO adresi 0xFEE00000 (standart), MSR ile okunur.
 
 use core::ptr::{read_volatile, write_volatile};
 use x86_64::instructions::port::Port;
@@ -73,6 +94,8 @@ pub unsafe fn disable_pic() {
     p2.write(0xFF);
 }
 
+/// Local APIC'i belirli bir spurious vector ile başlatır.
+/// Bu düşük seviyeli versiyon, harici konfigürasyon için kullanılır.
 pub unsafe fn init_local_apic(spurious_vector: u8) {
     disable_pic();
     let apic_base_msr = Msr::new(0x1B);
@@ -101,6 +124,16 @@ pub unsafe fn eoi() {
     write_reg(LAPIC_EOI, 0);
 }
 
+/// I/O APIC yapısı.
+///
+/// I/O APIC, sistem kartındaki donanım IRQ'larını (klavye, ağ, disk vb.)
+/// belirli CPU'lara ve IDT vektörlerine yönlendiren ikincil APIC birimidir.
+/// Her sistemde birden fazla I/O APIC bulunabilir.
+///
+/// # Alanlar
+/// - `id`: ACPI'den gelen I/O APIC kimliği
+/// - `address`: MMIO taban adresi (genellikle 0xFEC00000)
+/// - `gsi_base`: Bu I/O APIC'in yönettiği ilk Global System Interrupt numarası
 #[derive(Clone, Copy)]
 pub struct IoApic {
     pub id: u8,
@@ -109,6 +142,7 @@ pub struct IoApic {
 }
 
 impl IoApic {
+    /// Yeni bir I/O APIC nesnesi oluşturur (const, çalışma zamanı öncesi kullanılabilir).
     pub const fn new(id: u8, address: u32, gsi_base: u32) -> Self {
         Self {
             id,
@@ -131,11 +165,24 @@ impl IoApic {
         write_volatile(data, value);
     }
 
+    /// I/O APIC'in desteklediği maksimum yönlendirme girişi sayısını döndürür.
+    /// Bu değer, kaç IRQ hattının yönetilebileceğini belirtir.
     pub unsafe fn max_redirection_entries(&self) -> u32 {
         let version = self.read_reg(1);
         ((version >> 16) & 0xFF) + 1
     }
 
+    /// Belirtilen GSI (Global System Interrupt) için yönlendirme tablosunu yapılandırır.
+    ///
+    /// # Parametreler
+    /// - `gsi`: Yönlendirilecek Global System Interrupt numarası
+    /// - `vector`: Hedef IDT vektör numarası (32-255 arası)
+    /// - `dest_apic_id`: Interruptr'ı alacak CPU'nun APIC ID'si
+    /// - `polarity_low`: Sinyal polaritesi (true = düşük aktif, false = yüksek aktif)
+    /// - `level_trigger`: Tetikleme modu (true = seviye, false = kenar)
+    ///
+    /// IOREDTBL (I/O Redirection Table) yazmacına read-modify-write ile yazar;
+    /// rezerve bitler korunur.
     pub unsafe fn set_redirection(
         &self,
         gsi: u32,

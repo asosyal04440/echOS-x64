@@ -73,17 +73,21 @@ pub struct WindowThumbnail {
     pub app_icon: AppIcon,
 }
 
+/// Uygulama simge türleri.
+/// Her varyant bir uygulamayı temsil eder; `draw_app_icon` metodu
+/// bu değere bakarak simgeye özgü rengi seçer.
+/// `Custom(u16)` ile bilinmeyen uygulamalar için renk otomatik atanır.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppIcon {
-    Finder,
-    Safari,
-    Mail,
-    Terminal,
-    Settings,
-    Files,
-    TextEdit,
-    Music,
-    Custom(u16),
+    Finder,   // Dosya yöneticisi
+    Safari,   // Web tarayıcı
+    Mail,     // E-posta istemcisi
+    Terminal, // Komut satırı
+    Settings, // Sistem ayarları
+    Files,    // Dosyalar
+    TextEdit, // Metin düzenleyici
+    Music,    // Müzik oynatıcı
+    Custom(u16), // Bilinmeyen uygulama; kod % 8 ile renk havuzundan seçilir
 }
 
 impl WindowThumbnail {
@@ -108,7 +112,10 @@ impl WindowThumbnail {
         }
     }
 
-    /// Animasyonu güncelle
+    /// Animasyonu güncelle.
+    /// Üstel yaklaşım (exponential easing): her karede kalan mesafenin %15'i kadar ilerlenir.
+    /// Bu yöntem, animasyonu başta hızlı sonunda yavaşlatır — doğal bir görünüm sağlar.
+    /// `dt` (delta time) parametresi henüz kullanılmamaktadır; hız sabit katsayıyla belirlenir.
     pub fn update(&mut self, dt: f32, target_pos: (f32, f32)) {
         // Yumuşak konum animasyonu (üstel yaklaşım)
         let dx = target_pos.0 - self.thumbnail_pos.0;
@@ -220,6 +227,8 @@ impl WindowThumbnail {
         }
     }
 
+    // `blend_color`: Renk kanallarını alfa ile ölçekler (siyah zemin üzerinde opaklık efekti).
+    // Bu işlev sadece opaklık için kullanılır; tam alfa karıştırma için arka planla birleştirme gerekir.
     fn blend_color(color: u32, alpha: f32) -> u32 {
         let r = (((color >> 16) & 0xFF) as f32 * alpha) as u32;
         let g = (((color >> 8) & 0xFF) as f32 * alpha) as u32;
@@ -227,7 +236,9 @@ impl WindowThumbnail {
         (r << 16) | (g << 8) | b
     }
 
-    /// İsabet testi
+    /// İsabet testi (hit test).
+    /// Noktanın küçük resim dikdörtgeni içinde olup olmadığını kontrol eder.
+    /// Fare tıklama olaylarında hangi küçük resme tıklandığını belirlemek için kullanılır.
     pub fn hit_test(&self, mx: i32, my: i32) -> bool {
         let x = self.thumbnail_pos.0 as i32;
         let y = self.thumbnail_pos.1 as i32;
@@ -432,7 +443,12 @@ impl MissionControl {
         self.windows.retain(|w| w.window_id != window_id);
     }
 
-    /// Pencereleri ızgaraya yerleştir
+    /// Pencereleri ızgaraya yerleştir.
+    /// Izgara düzeni algoritması:
+    /// 1. Ekranda kaç sütun (cols) ve satır (rows) sığacağı hesaplanır.
+    /// 2. Pencerelerin toplam alanı ortalanır (start_x, start_y).
+    /// 3. Her pencere satır/sütun indeksinden hedef konumuna atanır.
+    /// Animasyon bu fonksiyon çağrıldıktan sonra `update()` döngüsünde ilerler.
     fn layout_windows(&mut self) {
         if self.windows.is_empty() {
             return;
@@ -496,7 +512,12 @@ impl MissionControl {
         }
     }
 
-    /// Mission Control'ü çiz
+    /// Mission Control'ü çiz.
+    /// Çizim adımları:
+    /// 1. Tüm pikseller %60 oranında kararltılır (dimming overlay).
+    /// 2. Pencere küçük resimleri z-sırası (z_order) ile küçükten büyüğe çizilir.
+    /// 3. Alan çubuğu arka planı ve alan küçük resimleri çizilir.
+    /// 4. "Masaüstü Ekle" düğmesi en sona eklenir.
     pub fn draw(&self, fb: &mut Framebuffer) {
         if self.animation_progress <= 0.0 {
             return;
@@ -649,19 +670,25 @@ impl MissionControl {
     }
 }
 
-/// Mission Control olayları
+/// Mission Control olayları.
+/// Kullanıcı etkileşimleri bu enum ile üst katmana iletilir.
+/// `WindowSelected` → pencere odağa alınır;
+/// `SpaceSelected` → ilgili masaüstüne geçiş yapılır;
+/// `SpaceCreated` → yeni masaüstü başlatılır.
 #[derive(Clone, Debug)]
 pub enum MissionControlEvent {
     None,
-    WindowSelected(u32),
-    SpaceSelected(usize),
-    SpaceCreated(u32),
-    SpaceDeleted(u32),
-    Cancelled,
+    WindowSelected(u32),   // Tıklanan pencerenin kimliği
+    SpaceSelected(usize),  // Seçilen masaüstünün indeksi
+    SpaceCreated(u32),     // Oluşturulan yeni masaüstünün kimliği
+    SpaceDeleted(u32),     // Silinen masaüstünün kimliği
+    Cancelled,             // Dışarı tıklama ile iptal
 }
 
 // ============================================================================
 // GLOBAL MISSION CONTROL
+// Tek örnek (singleton) yapısı: kernel içinde yalnızca bir Mission Control örneği yaşar.
+// `lazy_static!` ile ilk erişimde başlatılır; `Mutex` ile eş zamanlı erişim korunur.
 // ============================================================================
 
 lazy_static::lazy_static! {

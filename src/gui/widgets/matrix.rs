@@ -2,27 +2,46 @@
 //!
 //! Görsel stres testi ve demo amaçlı "Matrix" efekti bileşeni.
 //! Rastgele karakterleri aşağı doğru yağdırır.
+//!
+//! ## Nasıl Çalışır?
+//! Ekran, eşit genişlikte dikey sütunlara bölünür. Her sütun,
+//! bağımsız bir hız ve uzunlukta aşağı doğru akan bir karakter
+//! zinciri ("trail") taşır. Bu efekt; framebuffer'a doğrudan
+//! piksel yazılarak, standart kütüphane olmadan (no_std) elde edilir.
 
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::widgets::{Rect, Widget};
 use crate::random;
 use alloc::vec::Vec;
 
+/// Tek bir düşen karakter sütununu temsil eder.
+/// Her sütunun kendi konumu, hızı ve karakter listesi vardır.
 struct Column {
     x: i32,
-    y: i32, // Başlangıç Y pozisyonu
+    y: i32, // Başlangıç Y pozisyonu (pikanın en alt noktası)
+    /// Kaç piksel/kare hızla aşağı ineceği (1–4 arası rastgele)
     speed: i32,
+    /// Sütunun iz uzunluğu — kaç karakter gösterileceği
     len: i32,
+    /// Sütunda gösterilecek karakter havuzu; zaman içinde rastgele değişir
     chars: Vec<char>,
 }
 
+/// Matrix yağmuru widget'ı.
+/// Birden fazla `Column` barındırır ve her kareyi çizerek
+/// animasyonu ilerletir.
 pub struct MatrixRain {
     rect: Rect,
     columns: Vec<Column>,
+    /// Kaç güncelleme döngüsü geçtiğini sayan sayaç.
+    /// Belirli tick sayısında kareyi yavaşlatmak için kullanılır.
     tick: usize,
 }
 
 impl MatrixRain {
+    /// Verilen dikdörtgen alanı kaplayan bir MatrixRain oluşturur.
+    /// Sütunlar, `col_width` (10 px) aralıklarla otomatik yerleştirilir.
+    /// Her sütun rastgele bir başlangıç Y'si, hızı ve uzunluğuyla başlar.
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
         let mut columns = Vec::new();
         let col_width = 10;
@@ -46,6 +65,9 @@ impl MatrixRain {
     }
 }
 
+/// Rastgele semboller ve sayılardan oluşan `len` uzunluklu bir karakter vektörü üretir.
+/// Yalnızca ASCII heksadesimal ve birkaç özel sembol kullanılır;
+/// bu sayede "Matrix" estetiği korunur.
 fn generate_random_chars(len: usize) -> Vec<char> {
     let mut v = Vec::with_capacity(len);
     let symbols = [
@@ -60,8 +82,11 @@ fn generate_random_chars(len: usize) -> Vec<char> {
 }
 
 impl Widget for MatrixRain {
+    /// Her kareyi framebuffer'a çizer.
+    /// Önce tüm alan siyaha boyanır (önceki kare temizlenir),
+    /// ardından her sütunun izi üstten alta doğru renklendirilir.
     fn draw(&self, fb: &mut Framebuffer) {
-        // Arkaplanı siyah boya
+        // Arkaplanı siyah boya — önceki karenin üzerine yaz
         fb.draw_rect(
             self.rect.x as usize,
             self.rect.y as usize,
@@ -71,20 +96,20 @@ impl Widget for MatrixRain {
         );
 
         for col in &self.columns {
-            // İzi (Trail) çiz
+            // İzi (Trail) çiz: baştaki karakter en parlak, arkasındakiler solar
             for i in 0..col.len {
                 let char_y = col.y - (i * 12); // 12px karakter yüksekliği
                 if char_y >= self.rect.y && char_y < self.rect.y + self.rect.height {
-                    // İze göre renk belirle
+                    // İze göre derinlik rengi: baş beyaz, yakın parlak yeşil, uzak koyu yeşil
                     let color = if i == 0 {
-                        0xFFFFFF // Baş: Beyaz
+                        0xFFFFFF // Baş: Beyaz — en yeni ve en parlak karakter
                     } else if i < 4 {
-                        0x88FF88 // Parlak Yeşil
+                        0x88FF88 // Parlak Yeşil — iz başına yakın
                     } else {
-                        0x00AA00 // Koyu Yeşil
+                        0x00AA00 // Koyu Yeşil — iz kuyruğu
                     };
 
-                    // Karakter seçimi
+                    // Karakter havuzunu döngülü kullan; len > chars.len() olabilir
                     let char_idx = (i as usize) % col.chars.len();
                     fb.draw_char(
                         col.x as usize,
@@ -97,24 +122,27 @@ impl Widget for MatrixRain {
         }
     }
 
+    /// Her oyun döngüsünde sütunları günceller.
+    /// Çift tick'lerde sütun aşağı kayar; rastgele karakterler değişir;
+    /// ekran dışına çıkan sütun yukarıdan yeniden başlatılır.
     fn update(&mut self) {
         self.tick += 1;
 
         // Sütunları güncelle
         for col in &mut self.columns {
-            // Aşağı hareket
+            // Aşağı hareket — her iki tick'te bir kaydır (hızı yarıya düşürür)
             if self.tick % 2 == 0 {
                 // Biraz yavaşlat
                 col.y += col.speed;
             }
 
-            // Rastgele karakter değişimi
+            // Rastgele karakter değişimi (%5 olasılıkla bir karakteri '0'↔'1' değiştir)
             if random::next_range(100) < 5 {
                 let idx = random::next_range(col.chars.len() as u32) as usize;
                 col.chars[idx] = if col.chars[idx] == '0' { '1' } else { '0' };
             }
 
-            // Aşağıdan çıkınca yukarı taşı
+            // Aşağıdan çıkınca yukarı taşı — sonsuz döngü efekti sağlar
             if col.y - (col.len * 12) > self.rect.y + self.rect.height {
                 col.y = self.rect.y - (random::next_range(50) as i32);
                 col.speed = (random::next_range(4) + 2) as i32;
@@ -122,10 +150,13 @@ impl Widget for MatrixRain {
         }
     }
 
+    /// Tıklama olayını yakala; MatrixRain interaktif değildir ama
+    /// tıklamayı "tüketir" (true döndürür) — altındaki widget'lara geçmez.
     fn on_click(&mut self, _x: i32, _y: i32) -> bool {
         true
     }
 
+    /// Widget'ın kapladığı dikdörtgen alanı döndürür.
     fn bounds(&self) -> Rect {
         self.rect
     }

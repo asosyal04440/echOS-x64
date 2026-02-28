@@ -1,4 +1,51 @@
+//! # echOS POSIX Uyumluluk Katmanı
+//!
+//! Bu modül, echOS çekirdeğinin Linux/POSIX uyumlu sistem çağrısı (syscall)
+//! arayüzünü uygular. Kullanıcı alanındaki programlar, bu arayüz sayesinde
+//! standart C kütüphanesi (libc) çağrılarını echOS üzerinde çalıştırabilir.
+//!
+//! ## Syscall Akışı (Genel Diyagram)
+//!
+//! ```text
+//! Kullanıcı Programı
+//!   │
+//!   │  syscall talimatı (x86_64: SYSCALL)
+//!   ▼
+//! ┌─────────────────────────────────────────┐
+//! │  syscall entry (src/syscall.rs)         │
+//! │  rax = syscall numarası                 │
+//! │  rdi,rsi,rdx,r10,r8,r9 = argümanlar    │
+//! └────────────────┬────────────────────────┘
+//!                  │
+//!                  ▼
+//! ┌─────────────────────────────────────────┐
+//! │  posix::dispatch(number, args)          │  <- Bu dosya
+//! │  1) PTRACE hook kontrolü                │
+//! │  2) SECCOMP kısıtlama kontrolü          │
+//! │  3) Syscall numarasına göre eşleşme     │
+//! └────────────────┬────────────────────────┘
+//!                  │
+//!          ┌───────┴────────┐
+//!          ▼                ▼
+//!    sys_read()        sys_write()  ... (diğerleri)
+//! ```
+//!
+//! ## Desteklenen API'ler
+//! - Dosya I/O: open, read, write, close, lseek, stat, fstat
+//! - Bellek: mmap, munmap, mprotect, brk
+//! - Süreç: fork, exec, wait4, exit, getpid
+//! - Sinyal: rt_sigaction, rt_sigprocmask, kill
+//! - IPC: pipe, shmget/shmat, futex
+//! - Soket: socket, bind, connect, sendto, recvfrom
+//! - Zamanlayıcı: clock_gettime, nanosleep, timer_create
+//! - io_uring: Asenkron I/O çerçevesi
+//! - Win32/NT uyumu: dispatch_nt() ile Windows çağrıları
+
 /// POSIX syscall çağrısı taşıyıcı yapısı.
+///
+/// Kullanıcı alanından gelen bir sistem çağrısını temsil eder.
+/// `number` alanı hangi syscall'ın çağrıldığını belirtir,
+/// `args` ise en fazla 6 adet argümanı tutar (x86_64 ABI gereği).
 #[derive(Clone, Copy)]
 pub struct PosixCall {
     pub number: usize,
@@ -30,7 +77,21 @@ enum VariableVendor {
     IMAGE_SECURITY_DATABASE,
 }
 
-// Standart errno kodları
+// ============================================================
+// Standart errno Hata Kodları (POSIX.1 / Linux uyumlu)
+//
+// errno nedir?
+//   Sistem çağrısı başarısız olduğunda, negatif bir değer döner.
+//   Örneğin ENOENT için: -(2) = !0usize - 1  (wrapping subtract)
+//
+//   Kullanıcı alanında (libc):
+//     if (read(...) < 0) perror("hata");  // errno global değişken
+//
+//   echOS çekirdeğinde errno() yardımcı fonksiyonu bu dönüşümü yapar.
+//
+//   Örnek errno dönüşümü:
+//     ENOENT = 2  ->  errno(2) = !0 - 1 = 0xFFFF...FFFE
+// ============================================================
 const EPERM: usize = 1;
 const ENOENT: usize = 2;
 const ESRCH: usize = 3;
@@ -55,7 +116,18 @@ const EAFNOSUPPORT: usize = 97;
 const EOPNOTSUPP: usize = 95;
 const ENOTCONN: usize = 107;
 
-// Syscall numaraları (x86_64 Linux uyumlu alt küme)
+// ============================================================
+// Syscall Numaraları — x86_64 Linux ABI uyumlu alt küme
+//
+// Linux'ta syscall numaraları sabit ve ABI'nin bir parçasıdır.
+// Kullanıcı alanı bir syscall'ı şöyle başlatır:
+//   mov rax, <numara>     ; syscall numarası
+//   mov rdi, <arg1>       ; 1. argüman
+//   mov rsi, <arg2>       ; 2. argüman
+//   syscall               ; çekirdek moduna geçiş
+//
+// echOS bu numaraları `dispatch()` fonksiyonunda eşleştirir.
+// ============================================================
 const SYS_READ: usize = 0;
 const SYS_WRITE: usize = 1;
 const SYS_OPEN: usize = 2;
@@ -101,7 +173,8 @@ const SYS_DUP2: usize = 33;
 const SYS_PAUSE: usize = 34;
 const SYS_NANOSLEEP: usize = 35;
 
-// FileSystem syscalls
+// Dosya Sistemi Syscall'ları
+// Bu çağrılar VFS (Virtual File System) katmanı üzerinden F2FS'e yönlendirilir.
 const SYS_MKDIR: usize = 83;
 const SYS_RMDIR: usize = 84;
 const SYS_UNLINK: usize = 87;
@@ -143,14 +216,29 @@ const SYS_GETRANDOM: usize = 318;
 const SYS_IO_URING_SETUP: usize = 425;
 const SYS_IO_URING_ENTER: usize = 426;
 
-// echOS — Grafik / Pencere Sunucusu (Faz 5)
+// ============================================================
+// echOS Grafik / Pencere Sunucusu Syscall'ları (Faz 5)
+//
+// Wayland/X11'e benzer şekilde, echOS 451-455 arası özel
+// syscall numaralarını GUI yönetimi için ayırmıştır.
+//
+// Pencere yaşam döngüsü:
+//   SYS_WIN_CREATE  -> pencere oluştur
+//   SYS_WIN_GET_BUFFER -> çizim tamponu al
+//   SYS_WIN_FLUSH  -> tamponu ekrana bas
+//   SYS_EVENT_POLL -> kullanıcı girdilerini (fare/klavye) oku
+//   SYS_WIN_DESTROY -> pencereyi kapat
+// ============================================================
 const SYS_WIN_CREATE:     usize = 451;
 const SYS_WIN_DESTROY:    usize = 452;
 const SYS_WIN_GET_BUFFER: usize = 453;
 const SYS_WIN_FLUSH:      usize = 454;
 const SYS_EVENT_POLL:     usize = 455;
 
-// Process/Thread management
+// Süreç ve İş Parçacığı (Thread) Yönetimi
+// fork()  -> mevcut süreci kopyalar (copy-on-write)
+// clone() -> fork + thread bayrakları ile ince kontrol sağlar
+// execve() -> mevcut süreç görüntüsünü yeni bir ELF ile değiştirir
 const SYS_CLONE: usize = 56;
 const SYS_SET_TID_ADDRESS: usize = 218;
 const SYS_TGKILL: usize = 234;
@@ -162,7 +250,13 @@ const SYS_SETPGID: usize = 109;
 const SYS_GETPGID: usize = 121;
 const SYS_GETSID: usize = 124;
 
-// Signal syscalls (additional)
+// Sinyal Syscall'ları — Süreçler Arası Anlık Bildirim Mekanizması
+//
+// UNIX sinyalleri, bir süreci veya süreç grubunu asenkron olarak
+// bilgilendirmek için kullanılır. Örn: SIGTERM (15) süreci düzgün
+// kapatır, SIGKILL (9) anında sonlandırır.
+//
+// rt_ önekli sürümler "real-time" sinyalleri de destekler.
 const SYS_RT_SIGRETURN: usize = 15;
 const SYS_KILL: usize = 62;
 const SYS_RT_SIGQUEUEINFO: usize = 129;
@@ -179,6 +273,20 @@ const SECCOMP_MODE_FILTER: usize = 2;
 
 // ==========================================
 // SOCKET & NETLINK API (AF_NETLINK & kTLS)
+//
+// echOS ağ yığını bu syscall'lar üzerinden kullanılır.
+//
+// Soket Türleri:
+//   AF_INET  (2)  -> IPv4  (TCP/UDP)
+//   AF_INET6 (10) -> IPv6
+//   AF_UNIX  (1)  -> Yerel IPC
+//   AF_NETLINK(16)-> Çekirdek ↔ Kullanıcı mesajlaşması
+//
+// TCP bağlantı akışı (sunucu tarafı):
+//   socket() -> bind() -> listen() -> accept() -> recv/send
+//
+// TCP bağlantı akışı (istemci tarafı):
+//   socket() -> connect() -> send/recv
 // ==========================================
 const SYS_SOCKET: usize = 41;
 const SYS_CONNECT: usize = 42;
@@ -208,14 +316,18 @@ const NT_SET_INFORMATION_FILE: u32 = 0x0005;
 const NT_CREATE_SECTION: u32 = 0x0006;
 const NT_MAP_VIEW_OF_SECTION: u32 = 0x0007;
 
-// clock_gettime saat tipleri
+// CLOCK_REALTIME  (0): Gerçek dünya saati (Unix epoch'tan itibaren nanosaniye)
+// CLOCK_MONOTONIC (1): Sistem başlatılışından bu yana geçen süre (geri sarılmaz)
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
 
-// Scheduler tick süresi (ns)
+// Scheduler tick süresi: Her tick 10 milisaniyeye (10_000_000 ns) karşılık gelir.
+// nanosleep(2) ve clock_gettime(2) tick sayısına göre hesaplanır.
 const TICK_NS: u64 = 10_000_000;
 
-// Maksimum açık dosya sayısı
+// Maksimum açık dosya sayısı (FD tablosu büyüklüğü)
+// Linux'ta varsayılan: 1024, hard limit: 1_048_576
+// echOS şimdilik 64 FD ile başlar (gelecekte artırılabilir).
 const MAX_FDS: usize = 64;
 const STAT_BLKSIZE: i64 = 512;
 const S_IFREG: u32 = 0o100000;
@@ -362,7 +474,11 @@ struct DrmResource {
 
 static DRM_RESOURCES: Mutex<Vec<DrmResource>> = Mutex::new(Vec::new());
 
-/// POSIX timespec yapısı
+/// POSIX timespec yapısı — Nanosaniye hassasiyetli zaman gösterimi.
+///
+/// Linux ABI'sinde clock_gettime(2), nanosleep(2) vb. çağrılarda kullanılır.
+/// tv_sec  : Unix epoch'tan (1 Ocak 1970) saniye cinsinden zaman.
+/// tv_nsec : Saniyenin nanosaniye kısmı (0..=999_999_999).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Timespec {
@@ -390,7 +506,13 @@ struct Stat {
     __unused: [i64; 3],
 }
 
-/// Hata kodunu Linux errno dönüşüne çevirir.
+/// Hata kodunu Linux errno formatına dönüştürür.
+///
+/// Linux'ta başarısız syscall'lar negatif değer döner:
+///   ret = -(errno_code)  örn: ENOENT için ret = -2
+///
+/// Rust/x86_64'te bu wrapping aritmetiğiyle yapılır:
+///   errno(2) = (!0usize).wrapping_sub(2 - 1) = 0xFFFF...FFFE = -2 (isize)
 fn errno(code: usize) -> usize {
     (!0usize).wrapping_sub(code - 1)
 }
@@ -405,12 +527,22 @@ fn vfs_errno(err: FsError) -> usize {
     }
 }
 
-/// Syscall dispatcher
+/// Ana Syscall Dağıtıcısı (Dispatcher)
+///
+/// Kullanıcı alanından gelen her sistem çağrısı bu fonksiyona ulaşır.
+/// İşlem sırası:
+///   1. FD tablosu başlatılmamışsa başlat (ilk çağrıda)
+///   2. PTRACE hook aktifse, syscall girişini logla
+///   3. SECCOMP strict mod aktifse, izin verilmeyen çağrıları engelle
+///   4. Syscall numarasını `match` ile doğru handler'a yönlendir
+///   5. PTRACE hook aktifse, dönüş değerini logla
 pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
     ensure_fd_table();
 
     // =====================================
     // PTRACE SYSCALL HOOK (ENTRY)
+    // ptrace(PTRACE_SYSCALL) bitini kontrol et.
+    // Ayıklama (debugging) amacıyla her syscall giriş/çıkışı loglanır.
     // =====================================
     let is_traced = (crate::task::scheduler::get_current_ptrace_flags() & 1) != 0;
 
@@ -420,6 +552,9 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
 
     // =====================================
     // SECCOMP (STRICT MODE) DENETİMİ
+    // Güvenli hesaplama: strict modda yalnızca 4 syscall'a izin verilir:
+    //   read(0), write(1), exit(60), rt_sigreturn(15)
+    // Diğer tüm çağrılar süreç sonlandırılarak engellenir.
     // =====================================
     let seccomp_mode = crate::task::scheduler::get_current_seccomp_mode();
     if seccomp_mode == 1 {
@@ -650,7 +785,14 @@ fn posix_errno(value: usize) -> Option<usize> {
     }
 }
 
-/// write syscall (stdout/stderr + /dev/null + /dev/zero)
+/// write(2) — Dosya tanımlayıcısına veri yazar.
+///
+/// Desteklenen FD türleri:
+///   stdout (1) / stderr (2) -> seri port üzerinden yazdırır
+///   /dev/null               -> veriyi sessizce yutar (yazmayı yok sayar)
+///   /dev/zero               -> write başarılı sayılır, veri atılır
+///
+/// Dönüş: yazılan byte sayısı, ya da negatif errno kodu.
 fn sys_write(fd: usize, buf: usize, count: usize) -> usize {
     if count == 0 {
         return 0;
@@ -672,7 +814,15 @@ fn sys_write(fd: usize, buf: usize, count: usize) -> usize {
     }
 }
 
-/// read syscall (stdin + /dev/zero)
+/// read(2) — Dosya tanımlayıcısından veri okur.
+///
+/// Desteklenen FD türleri:
+///   stdin (0)   -> TTY'den karakter okur (klavye girişi)
+///   /dev/null   -> her zaman 0 (EOF) döner
+///   /dev/zero   -> tamponu sıfır (0x00) baytlarla doldurur
+///   Dosya (VFS) -> inode'dan offset'e göre okur, offset ilerletir
+///
+/// Dönüş: okunan byte sayısı (0 = EOF), ya da negatif errno kodu.
 fn sys_read(fd: usize, buf: usize, count: usize) -> usize {
     if count == 0 {
         return 0;

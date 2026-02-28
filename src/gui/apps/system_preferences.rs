@@ -1,7 +1,18 @@
-//! # System Preferences Application
+//! # Sistem Tercihleri Uygulaması
 //!
-//! macOS-style System Preferences with preference panes
-//! Organized settings for display, sound, network, users, etc.
+//! macOS tarzı Sistem Tercihleri — tercih panelleriyle düzenlenmiş ayarlar.
+//! Ekran, ses, ağ, kullanıcılar gibi kategorilere ayrılmış yapılandırılmış
+//! ayarlar sunar.
+//!
+//! ## Mimari
+//! - `PreferencePane`: Tek bir tercih paneli (örn. Ekran, Ses)
+//! - `Setting`: Bir panel içindeki tek bir ayar değeri
+//! - `SystemPreferences`: Ana pencere; panel ızgarası ve içerik alanını yönetir
+//!
+//! ## Tasarım Kararı
+//! `selected_pane: Option<usize>` — `None` ızgara görünümünü,
+//! `Some(i)` ise seçili panelin detay görünümünü temsil eder.
+//! Bu, iki farklı ekran modunu tek bir alan üzerinden yönetir.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -19,39 +30,51 @@ use crate::gui::Rect;
 // PREFERENCES CONSTANTS
 // ============================================================================
 
-/// Sidebar width
+/// Sol kenar çubuğu genişliği (piksel).
+/// Kategori başlıkları ve panel listesi bu alanda gösterilir.
 pub const SIDEBAR_WIDTH: usize = 220;
 
-/// Toolbar height
+/// Araç çubuğu yüksekliği (piksel).
+/// Geri butonu, başlık ve arama kutusunu barındırır.
 pub const TOOLBAR_HEIGHT: usize = 44;
 
-/// Search field height
+/// Arama alanının yüksekliği (piksel).
 pub const SEARCH_HEIGHT: usize = 28;
 
-/// Preference pane icon size
+/// Tercih paneli ikon boyutu (piksel × piksel).
+/// Izgara görünümünde her pane bu boyutta bir ikon ile temsil edilir.
 pub const PANE_ICON_SIZE: usize = 64;
 
 // ============================================================================
 // PREFERENCE PANE
 // ============================================================================
 
-/// A preference pane
+/// Bir tercih paneli.
+///
+/// Her panel; bir kimlik, görünen ad, ikon, kategori ve `Setting`
+/// listesi içerir. `visible: bool` arama filtresi uyguluyken
+/// panelin gösterilip gösterilmeyeceğini kontrol eder.
 #[derive(Clone, Debug)]
 pub struct PreferencePane {
-    /// Pane ID
+    /// Benzersiz metin kimliği (örn. "general", "sound")
     pub id: String,
-    /// Display name
+    /// Kullanıcıya gösterilen ad
     pub name: String,
-    /// Icon
+    /// Panel ikonu (enum varyantı olarak tanımlanmış)
     pub icon: PreferenceIcon,
-    /// Category
+    /// Panelin ait olduğu üst düzey kategori
     pub category: PreferenceCategory,
-    /// Settings
+    /// Bu panele ait ayar listesi
     pub settings: Vec<Setting>,
-    /// Is visible in search
+    /// Arama sonucunda görünür mü?
     pub visible: bool,
 }
 
+/// Tercih panellerinin ikon türleri.
+///
+/// Her panel için bir enum varyantı tanımlanmıştır.
+/// `Custom(u16)`: kullanıcı tanımlı özel ikon ID'si için tuple varyantı.
+/// Bu yaklaşım, sabit sayıda ikonun derleme zamanında belirlenmesini sağlar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreferenceIcon {
     General,
@@ -82,6 +105,10 @@ pub enum PreferenceIcon {
     Custom(u16),
 }
 
+/// Tercih kategorileri.
+///
+/// `PartialEq` türetmesi `==` operatörünü sağlar;
+/// `draw_pane_grid`'de kategoriye göre filtreleme için kullanılır.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreferenceCategory {
     General,
@@ -92,6 +119,8 @@ pub enum PreferenceCategory {
 }
 
 impl PreferencePane {
+    /// Yeni bir tercih paneli oluşturur.
+    /// Ayarlar başlangıçta boş; `add_setting` ile eklenir.
     pub fn new(id: &str, name: &str, icon: PreferenceIcon, category: PreferenceCategory) -> Self {
         PreferencePane {
             id: String::from(id),
@@ -102,7 +131,9 @@ impl PreferencePane {
             visible: true,
         }
     }
-    
+
+    /// Panele bir ayar ekler.
+    /// `push`: `Vec`'in sonuna sahipliği alarak eleman ekler.
     pub fn add_setting(&mut self, setting: Setting) {
         self.settings.push(setting);
     }
@@ -112,27 +143,36 @@ impl PreferencePane {
 // SETTING
 // ============================================================================
 
-/// A setting item
+/// Tek bir ayar değeri.
+///
+/// `requires_restart: bool` — bazı ayarlar yeniden başlatma gerektirir.
+/// Bu bayrak, değişiklik sonrasında kullanıcıya uyarı göstermek için kullanılır.
+/// `enabled: bool` — ayarın etkileşime kapalı (gri) gösterilip gösterilmeyeceği.
 #[derive(Clone, Debug)]
 pub struct Setting {
-    /// Setting ID
+    /// Benzersiz metin kimliği (örn. "brightness", "auto_hide_dock")
     pub id: String,
-    /// Display name
+    /// Kullanıcıya gösterilen ad
     pub name: String,
-    /// Description
+    /// Kısa açıklama metni
     pub description: String,
-    /// Setting type
+    /// Ayarın görsel/etkileşim türü
     pub setting_type: SettingType,
-    /// Current value
+    /// Mevcut değer
     pub value: SettingValue,
-    /// Default value
+    /// Fabrika varsayılan değeri (sıfırlama için)
     pub default: SettingValue,
-    /// Requires restart
+    /// Bu ayarı değiştirmek yeniden başlatma gerektiriyor mu?
     pub requires_restart: bool,
-    /// Is enabled
+    /// Ayar etkileşime açık mı?
     pub enabled: bool,
 }
 
+/// Ayarın türü ve ilgili meta verisi.
+///
+/// `Group { settings: Vec<Setting> }`: özyinelemeli yapı — ayarlar
+/// başka ayar grupları içerebilir. Bu, hiyerarşik tercih panellerini
+/// modellemek için kullanılır.
 #[derive(Clone, Debug)]
 pub enum SettingType {
     Toggle,
@@ -146,6 +186,10 @@ pub enum SettingType {
     Group { settings: Vec<Setting> },
 }
 
+/// Ayarın tutabileceği değer türleri.
+///
+/// `Shortcut { modifiers: u8, key: char }`: struct-like enum varyantı.
+/// `modifiers` bit maskesiyle Ctrl/Alt/Shift/Meta tuşlarını kodlar.
 #[derive(Clone, Debug)]
 pub enum SettingValue {
     Bool(bool),
@@ -157,6 +201,10 @@ pub enum SettingValue {
     None,
 }
 
+/// Bir liste ayarındaki tek öğe.
+///
+/// `selected: bool` — çoklu seçim listelerinde bu öğenin seçili
+/// olup olmadığını gösterir.
 #[derive(Clone, Debug)]
 pub struct ListItem {
     pub id: String,
@@ -166,6 +214,10 @@ pub struct ListItem {
 }
 
 impl Setting {
+    /// Toggle (açma/kapama) ayarı oluşturucu.
+    ///
+    /// Hem `value` hem `default` aynı başlangıç değeriyle başlatılır;
+    /// bu sıfırlama (reset) işlemini mümkün kılar: `value = default.clone()`.
     pub fn toggle(id: &str, name: &str, default: bool) -> Self {
         Setting {
             id: String::from(id),
@@ -178,7 +230,9 @@ impl Setting {
             enabled: true,
         }
     }
-    
+
+    /// Kaydırma çubuğu ayarı oluşturucu.
+    /// `step: 1.0` sabit varsayılan; slider için adım büyüklüğünü belirler.
     pub fn slider(id: &str, name: &str, min: f32, max: f32, default: f32) -> Self {
         Setting {
             id: String::from(id),
@@ -191,7 +245,11 @@ impl Setting {
             enabled: true,
         }
     }
-    
+
+    /// Açılır liste ayarı oluşturucu.
+    /// `options.iter().map(|s| String::from(*s)).collect()`: `&str` dilimini
+    /// `Vec<String>`'e dönüştürür; her dilim `String::from` ile sahipli
+    /// `String`'e kopyalanır.
     pub fn dropdown(id: &str, name: &str, options: Vec<&str>, default: &str) -> Self {
         Setting {
             id: String::from(id),
@@ -206,7 +264,9 @@ impl Setting {
             enabled: true,
         }
     }
-    
+
+    /// Metin girişi ayarı oluşturucu.
+    /// `placeholder`: boş alanda rehber metin gösterir.
     pub fn input(id: &str, name: &str, placeholder: &str, default: &str) -> Self {
         Setting {
             id: String::from(id),
@@ -219,31 +279,40 @@ impl Setting {
             enabled: true,
         }
     }
-    
+
+    /// Açıklama metni ekler (method chaining / builder pattern).
+    ///
+    /// `mut self` — sahipliği alır, değiştirir ve geri döndürür.
+    /// Bu yöntemle zincirleme çağrı mümkün olur:
+    /// `Setting::toggle(...).with_description("...").with_restart()`
     pub fn with_description(mut self, desc: &str) -> Self {
         self.description = String::from(desc);
         self
     }
-    
+
+    /// Bu ayarın yeniden başlatma gerektirdiğini işaretler.
     pub fn with_restart(mut self) -> Self {
         self.requires_restart = true;
         self
     }
-    
+
+    /// `Bool` değerini döndürür; diğer türler `false` döner.
     fn get_bool(&self) -> bool {
         match &self.value {
             SettingValue::Bool(b) => *b,
             _ => false,
         }
     }
-    
+
+    /// `Float` değerini döndürür; diğer türler `0.0` döner.
     fn get_float(&self) -> f32 {
         match &self.value {
             SettingValue::Float(f) => *f,
             _ => 0.0,
         }
     }
-    
+
+    /// `String` değerini `&str` olarak döndürür.
     fn get_string(&self) -> &str {
         match &self.value {
             SettingValue::String(s) => s,
@@ -256,31 +325,39 @@ impl Setting {
 // SYSTEM PREFERENCES WINDOW
 // ============================================================================
 
-/// System Preferences window
+/// Sistem Tercihleri penceresi.
+///
+/// İki görünüm modu:
+/// - `selected_pane == None`: panel ızgarası (ana ekran)
+/// - `selected_pane == Some(i)`: seçili panelin detay görünümü
+///
+/// `show_all: bool` — tüm panelleri görüntüleme butonu durumu.
 pub struct SystemPreferences {
-    /// Window title
+    /// Pencere başlığı
     pub title: String,
-    /// Window rect
+    /// Pencerenin konumu ve boyutu
     pub rect: Rect,
-    /// Preference panes
+    /// Tercih panelleri listesi
     pub panes: Vec<PreferencePane>,
-    /// Selected pane index
+    /// Seçili panel indeksi (`None` = panel ızgarası)
     pub selected_pane: Option<usize>,
-    /// Search query
+    /// Arama sorgusu
     pub search_query: String,
-    /// Search focused
+    /// Arama alanı odaklanmış mı?
     pub search_focused: bool,
-    /// Hovered pane
+    /// Üzerine gelinmiş panel indeksi
     pub hovered_pane: Option<usize>,
-    /// Hovered setting
+    /// Üzerine gelinmiş ayar indeksi
     pub hovered_setting: Option<usize>,
-    /// Scroll offset
+    /// Kaydırma konumu
     pub scroll_offset: usize,
-    /// Show all button state
+    /// "Tümünü Göster" düğmesi aktif mi?
     pub show_all: bool,
 }
 
 impl SystemPreferences {
+    /// Yeni Sistem Tercihleri penceresi oluşturur.
+    /// Tüm paneller `init_panes()` ile başlatılır.
     pub fn new(rect: Rect) -> Self {
         let mut prefs = SystemPreferences {
             title: String::from("System Preferences"),
@@ -294,15 +371,20 @@ impl SystemPreferences {
             scroll_offset: 0,
             show_all: true,
         };
-        
+
         prefs.init_panes();
         prefs
     }
-    
+
+    /// Tüm tercih panellerini ve varsayılan ayarlarını başlatır.
+    ///
+    /// Her panel `PreferencePane::new(...)` ile oluşturulur, ardından
+    /// `add_setting(Setting::...)` çağrılarıyla ayarlar eklenir.
+    /// Ayarlar builder pattern ile `with_description()` zinciri kurabilir.
     fn init_panes(&mut self) {
         // General
         let mut general = PreferencePane::new("general", "General", PreferenceIcon::General, PreferenceCategory::General);
-        general.add_setting(Setting::dropdown("appearance", "Appearance", 
+        general.add_setting(Setting::dropdown("appearance", "Appearance",
             vec!["Light", "Dark", "Auto"], "Dark"));
         general.add_setting(Setting::dropdown("accent", "Accent color",
             vec!["Blue", "Purple", "Pink", "Red", "Orange", "Yellow", "Green", "Gray"], "Blue"));
@@ -313,7 +395,7 @@ impl SystemPreferences {
         general.add_setting(Setting::toggle("ask_save_changes", "Ask to keep changes when closing documents", true));
         general.add_setting(Setting::toggle("close_confirms", "Close windows when quitting an app", false));
         self.panes.push(general);
-        
+
         // Desktop & Screen Saver
         let mut desktop = PreferencePane::new("desktop", "Desktop & Screen Saver", PreferenceIcon::DesktopScreenSaver, PreferenceCategory::Personal);
         desktop.add_setting(Setting::dropdown("wallpaper", "Desktop",
@@ -322,7 +404,7 @@ impl SystemPreferences {
             vec!["None", "Flurry", "Stars", "Matrix", "Photos"], "None"));
         desktop.add_setting(Setting::slider("screensaver_delay", "Start after (minutes)", 1.0, 60.0, 5.0));
         self.panes.push(desktop);
-        
+
         // Dock & Menu Bar
         let mut dock = PreferencePane::new("dock", "Dock & Menu Bar", PreferenceIcon::DockMenuBar, PreferenceCategory::Personal);
         dock.add_setting(Setting::slider("dock_size", "Size", 0.3, 1.0, 0.6));
@@ -334,7 +416,7 @@ impl SystemPreferences {
         dock.add_setting(Setting::toggle("animate_opening", "Animate opening applications", true));
         dock.add_setting(Setting::toggle("show_indicator", "Show indicators for open applications", true));
         self.panes.push(dock);
-        
+
         // Mission Control
         let mut mission = PreferencePane::new("mission_control", "Mission Control", PreferenceIcon::MissionControl, PreferenceCategory::Personal);
         mission.add_setting(Setting::toggle("auto_arrange", "Automatically rearrange Spaces", true));
@@ -343,7 +425,7 @@ impl SystemPreferences {
         mission.add_setting(Setting::dropdown("displays", "Displays have separate Spaces",
             vec!["Yes", "No"], "Yes"));
         self.panes.push(mission);
-        
+
         // Notifications
         let mut notifications = PreferencePane::new("notifications", "Notifications", PreferenceIcon::Notifications, PreferenceCategory::Personal);
         notifications.add_setting(Setting::toggle("do_not_disturb", "Do Not Disturb", false));
@@ -352,7 +434,7 @@ impl SystemPreferences {
         notifications.add_setting(Setting::dropdown("alert_style", "Alert Style",
             vec!["None", "Banners", "Alerts"], "Banners"));
         self.panes.push(notifications);
-        
+
         // Network
         let mut network = PreferencePane::new("network", "Network", PreferenceIcon::Network, PreferenceCategory::Hardware);
         network.add_setting(Setting::dropdown("wifi", "Wi-Fi",
@@ -362,7 +444,7 @@ impl SystemPreferences {
         network.add_setting(Setting::dropdown("ethernet", "Ethernet",
             vec!["Connected", "Disconnected"], "Connected"));
         self.panes.push(network);
-        
+
         // Bluetooth
         let mut bluetooth = PreferencePane::new("bluetooth", "Bluetooth", PreferenceIcon::Bluetooth, PreferenceCategory::Hardware);
         bluetooth.add_setting(Setting::dropdown("bluetooth", "Bluetooth",
@@ -370,7 +452,7 @@ impl SystemPreferences {
         bluetooth.add_setting(Setting::toggle("discoverable", "Discoverable", true));
         bluetooth.add_setting(Setting::toggle("show_in_menu", "Show Bluetooth in menu bar", true));
         self.panes.push(bluetooth);
-        
+
         // Sound
         let mut sound = PreferencePane::new("sound", "Sound", PreferenceIcon::Sound, PreferenceCategory::Hardware);
         sound.add_setting(Setting::slider("output_volume", "Output Volume", 0.0, 100.0, 75.0));
@@ -382,7 +464,7 @@ impl SystemPreferences {
         sound.add_setting(Setting::dropdown("input_device", "Input Device",
             vec!["Internal Microphone", "External Microphone"], "Internal Microphone"));
         self.panes.push(sound);
-        
+
         // Displays
         let mut displays = PreferencePane::new("displays", "Displays", PreferenceIcon::Displays, PreferenceCategory::Hardware);
         displays.add_setting(Setting::slider("brightness", "Brightness", 0.0, 100.0, 80.0));
@@ -394,7 +476,7 @@ impl SystemPreferences {
         displays.add_setting(Setting::toggle("night_shift", "Night Shift", false));
         displays.add_setting(Setting::toggle("true_tone", "True Tone", true));
         self.panes.push(displays);
-        
+
         // Keyboard
         let mut keyboard = PreferencePane::new("keyboard", "Keyboard", PreferenceIcon::Keyboard, PreferenceCategory::Hardware);
         keyboard.add_setting(Setting::slider("key_repeat", "Key Repeat", 0.0, 100.0, 50.0));
@@ -404,7 +486,7 @@ impl SystemPreferences {
         keyboard.add_setting(Setting::dropdown("modifier_keys", "Modifier Keys...",
             vec!["Configure...", "Default"], "Default"));
         self.panes.push(keyboard);
-        
+
         // Mouse
         let mut mouse = PreferencePane::new("mouse", "Mouse", PreferenceIcon::Mouse, PreferenceCategory::Hardware);
         mouse.add_setting(Setting::slider("tracking_speed", "Tracking Speed", 0.0, 100.0, 50.0));
@@ -414,7 +496,7 @@ impl SystemPreferences {
         mouse.add_setting(Setting::dropdown("click", "Click",
             vec!["Light", "Medium", "Firm"], "Medium"));
         self.panes.push(mouse);
-        
+
         // Users & Groups
         let mut users = PreferencePane::new("users", "Users & Groups", PreferenceIcon::UsersGroups, PreferenceCategory::System);
         users.add_setting(Setting::dropdown("current_user", "Current User",
@@ -424,7 +506,7 @@ impl SystemPreferences {
         users.add_setting(Setting::dropdown("login_items", "Login Items",
             vec!["Manage...", "None"], "None"));
         self.panes.push(users);
-        
+
         // Security & Privacy
         let mut security = PreferencePane::new("security", "Security & Privacy", PreferenceIcon::SecurityPrivacy, PreferenceCategory::System);
         security.add_setting(Setting::toggle("require_password", "Require password", true));
@@ -434,7 +516,7 @@ impl SystemPreferences {
         security.add_setting(Setting::toggle("firewall", "Firewall", true));
         security.add_setting(Setting::toggle("location_services", "Location Services", true));
         self.panes.push(security);
-        
+
         // Date & Time
         let mut datetime = PreferencePane::new("datetime", "Date & Time", PreferenceIcon::Date, PreferenceCategory::System);
         datetime.add_setting(Setting::toggle("set_auto", "Set date and time automatically", true));
@@ -445,7 +527,7 @@ impl SystemPreferences {
         datetime.add_setting(Setting::toggle("show_date", "Show date in menu bar", true));
         datetime.add_setting(Setting::toggle("show_day", "Show day of week", true));
         self.panes.push(datetime);
-        
+
         // Battery
         let mut battery = PreferencePane::new("battery", "Battery", PreferenceIcon::Battery, PreferenceCategory::Hardware);
         battery.add_setting(Setting::slider("brightness", "Display brightness", 0.0, 100.0, 80.0));
@@ -456,7 +538,7 @@ impl SystemPreferences {
             vec!["1 min", "5 min", "10 min", "30 min", "Never"], "30 min"));
         battery.add_setting(Setting::toggle("show_percentage", "Show battery percentage in menu bar", true));
         self.panes.push(battery);
-        
+
         // Sharing
         let mut sharing = PreferencePane::new("sharing", "Sharing", PreferenceIcon::Sharing, PreferenceCategory::System);
         sharing.add_setting(Setting::toggle("screen_sharing", "Screen Sharing", false));
@@ -466,19 +548,29 @@ impl SystemPreferences {
         sharing.add_setting(Setting::input("computer_name", "Computer Name", "Computer Name", "echOS"));
         self.panes.push(sharing);
     }
-    
+
+    /// Belirtilen paneli seçer ve kaydırmayı sıfırlar.
+    ///
+    /// `index < self.panes.len()` kontrolü sınır dışı erişimi önler.
+    /// `no_std` ortamında panic varsayılan olarak farklı davranır.
     pub fn select_pane(&mut self, index: usize) {
         if index < self.panes.len() {
             self.selected_pane = Some(index);
             self.scroll_offset = 0;
         }
     }
-    
+
+    /// Panel ızgara görünümüne döner (geri butonu işlevi).
     pub fn go_back(&mut self) {
         self.selected_pane = None;
         self.scroll_offset = 0;
     }
-    
+
+    /// Arama sorgusuna göre panelleri filtreler.
+    ///
+    /// `to_lowercase()`: büyük/küçük harf duyarsız arama için.
+    /// `contains(&query)`: alt dize araması.
+    /// Hem panel adı hem de ayar adları aranır.
     pub fn search(&mut self) {
         if self.search_query.is_empty() {
             for pane in &mut self.panes {
@@ -486,26 +578,33 @@ impl SystemPreferences {
             }
             return;
         }
-        
+
         let query = self.search_query.to_lowercase();
-        
+
         for pane in &mut self.panes {
             pane.visible = pane.name.to_lowercase().contains(&query) ||
                 pane.settings.iter().any(|s| s.name.to_lowercase().contains(&query));
         }
     }
-    
-    /// Draw System Preferences
+
+    /// Sistem Tercihlerini çizer.
+    ///
+    /// İki mod:
+    /// - `selected_pane == None` → panel ızgarası
+    /// - `selected_pane == Some(i)` → detay içerik görünümü
+    ///
+    /// WM (pencere yöneticisi) başlık çubuğunu kendisi çizer;
+    /// bu yüzden iç başlık çubuğu çizilmez.
     pub fn draw(&self, fb: &mut Framebuffer) {
         let x = self.rect.x as usize;
         let y = self.rect.y as usize;
         let w = self.rect.width as usize;
         let h = self.rect.height as usize;
-        
+
         // Window background
         fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
         fb.draw_rect_outline(x, y, w, h, Theme::BORDER.to_u32());
-        
+
         // No internal toolbar — WM Cyber titlebar is the chrome
         if let Some(pane_idx) = self.selected_pane {
             // Draw pane content
@@ -516,14 +615,17 @@ impl SystemPreferences {
             self.draw_pane_grid(fb, x, y, w, h);
         }
     }
-    
+
+    /// Araç çubuğunu çizer (geri butonu, başlık, arama alanı).
+    ///
+    /// `if self.selected_pane.is_some()`: panel seçiliyse geri butonu gösterilir.
     fn draw_toolbar(&self, fb: &mut Framebuffer, x: usize, y: usize, w: usize) {
         // Back button (if pane selected)
         if self.selected_pane.is_some() {
             fb.draw_rect(x + 8, y + 8, 28, 28, Theme::SIDEBAR_BG.to_u32());
             fb.draw_string(x + 14, y + 12, "◀", Theme::TEXT_PRIMARY.to_u32());
         }
-        
+
         // Title
         let title = if let Some(idx) = self.selected_pane {
             &self.panes[idx].name
@@ -531,24 +633,31 @@ impl SystemPreferences {
             "System Preferences"
         };
         fb.draw_string(x + w / 2 - title.len() * 4, y + 12, title, Theme::TEXT_PRIMARY.to_u32());
-        
+
         // Search field
         let search_x = x + w - 180;
         fb.draw_rect(search_x, y + 8, 160, SEARCH_HEIGHT, Theme::SIDEBAR_BG.to_u32());
         fb.draw_string(search_x + 8, y + 12, "🔍", Theme::TEXT_SECONDARY.to_u32());
-        
+
         if self.search_query.is_empty() && !self.search_focused {
             fb.draw_string(search_x + 28, y + 12, "Search", Theme::TEXT_SECONDARY.to_u32());
         } else {
             fb.draw_string(search_x + 28, y + 12, &self.search_query, Theme::TEXT_PRIMARY.to_u32());
         }
-        
+
         if self.search_focused {
             let cursor_x = search_x + 28 + self.search_query.len() * 8;
             fb.draw_rect(cursor_x, y + 12, 2, 14, Theme::TEXT_PRIMARY.to_u32());
         }
     }
-    
+
+    /// Panel ızgarasını ve sol kenar çubuğunu çizer.
+    ///
+    /// Sol taraf: kategori başlıkları + panel listesi.
+    /// Sağ taraf: `PANE_ICON_SIZE + 32` genişliğinde ikon ızgarası.
+    ///
+    /// `cols = main_w / (PANE_ICON_SIZE + 32)`: sütun sayısı
+    /// pencerenin genişliğine göre otomatik hesaplanır.
     fn draw_pane_grid(&self, fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize) {
         // Sidebar with categories
         let categories = [
@@ -557,63 +666,63 @@ impl SystemPreferences {
             (PreferenceCategory::Hardware, "Hardware"),
             (PreferenceCategory::System, "System"),
         ];
-        
+
         let mut item_y = y + 8;
-        
+
         for (cat, cat_name) in &categories {
             // Category header
             fb.draw_string(x + 12, item_y, cat_name, Theme::TEXT_SECONDARY.to_u32());
             item_y += 20;
-            
+
             for (i, pane) in self.panes.iter().enumerate() {
                 if pane.category == *cat && pane.visible {
                     let is_hovered = self.hovered_pane == Some(i);
                     let bg = if is_hovered { Theme::LIST_ITEM_HOVER.to_u32() } else { Theme::TRANSPARENT.to_u32() };
-                    
+
                     fb.draw_rect(x, item_y, SIDEBAR_WIDTH, 28, bg);
-                    
+
                     let icon = self.get_pane_icon(pane.icon);
                     fb.draw_string(x + 12, item_y + 4, icon, Theme::TEXT_PRIMARY.to_u32());
                     fb.draw_string(x + 40, item_y + 4, &pane.name, Theme::TEXT_PRIMARY.to_u32());
-                    
+
                     item_y += 28;
                 }
             }
-            
+
             item_y += 8;
         }
-        
+
         // Main area with icons
         let main_x = x + SIDEBAR_WIDTH;
         let main_w = w - SIDEBAR_WIDTH;
-        
+
         let cols = main_w / (PANE_ICON_SIZE + 32);
         let mut icon_x = main_x + 16;
         let mut icon_y = y + 16;
-        
+
         for (i, pane) in self.panes.iter().enumerate() {
             if !pane.visible {
                 continue;
             }
-            
+
             let is_hovered = self.hovered_pane == Some(i);
-            
+
             // Background
             if is_hovered {
                 fb.draw_rect(icon_x, icon_y, PANE_ICON_SIZE + 16, PANE_ICON_SIZE + 32, Theme::LIST_ITEM_HOVER.to_u32());
             }
-            
+
             // Icon
             let icon = self.get_pane_icon(pane.icon);
             fb.draw_string(icon_x + 8, icon_y + 8, icon, Theme::TEXT_PRIMARY.to_u32());
-            
+
             // Name
             let name = if pane.name.len() > 12 { format!("{}...", &pane.name[..9]) } else { pane.name.clone() };
             let text_w = name.len() * 8;
             let container_w = PANE_ICON_SIZE + 16;
             let name_x = icon_x + container_w.saturating_sub(text_w) / 2;
             fb.draw_string(name_x, icon_y + PANE_ICON_SIZE + 12, &name, Theme::TEXT_PRIMARY.to_u32());
-            
+
             // Next position
             icon_x += PANE_ICON_SIZE + 32;
             if icon_x + PANE_ICON_SIZE > main_x + main_w {
@@ -622,69 +731,76 @@ impl SystemPreferences {
             }
         }
     }
-    
+
+    /// Seçili panelin detay içeriğini çizer.
+    ///
+    /// Sol taraf: ayar adları listesi (kenar çubuğu).
+    /// Sağ taraf: seçili ayarın kontrolü (toggle, slider, dropdown, input).
+    ///
+    /// `skip(scroll)`: yineleyiciyi kaydırma konumundan başlatır;
+    /// bu sayede tüm listeyi gezmeden görünür öğelere direkt erişilir.
     fn draw_pane_content(&self, fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, pane_idx: usize) {
         let pane = &self.panes[pane_idx];
-        
+
         // Sidebar with setting categories
         fb.draw_rect(x, y, SIDEBAR_WIDTH, h, Theme::SIDEBAR_BG.to_u32());
-        
+
         let mut setting_y = y + 8;
         let visible_settings = pane.settings.len();
         let visible_height = h - 16;
         let scroll = self.scroll_offset;
-        
+
         for (i, setting) in pane.settings.iter().skip(scroll).enumerate() {
             if setting_y + 40 > y + visible_height {
                 break;
             }
-            
+
             let is_hovered = self.hovered_setting == Some(scroll + i);
             let bg = if is_hovered { Theme::LIST_ITEM_HOVER.to_u32() } else { Theme::TRANSPARENT.to_u32() };
-            
+
             fb.draw_rect(x + 4, setting_y, SIDEBAR_WIDTH - 8, 32, bg);
             fb.draw_string(x + 12, setting_y + 8, &setting.name, Theme::TEXT_PRIMARY.to_u32());
-            
+
             setting_y += 36;
         }
-        
+
         // Main content area
         let content_x = x + SIDEBAR_WIDTH;
         let content_w = w - SIDEBAR_WIDTH;
-        
+
         fb.draw_rect(content_x, y, content_w, h, Theme::WINDOW_BG.to_u32());
-        
+
         // Draw selected setting details
         setting_y = y + 20;
-        
+
         for (i, setting) in pane.settings.iter().skip(scroll).enumerate() {
             if setting_y + 60 > y + h {
                 break;
             }
-            
+
             // Setting name
             fb.draw_string(content_x + 20, setting_y, &setting.name, Theme::TEXT_PRIMARY.to_u32());
-            
+
             // Setting control
             let control_x = content_x + content_w - 200;
-            
+
             match &setting.setting_type {
                 SettingType::Toggle => {
                     let is_on = setting.get_bool();
                     let toggle_color = if is_on { Theme::ACCENT_PRIMARY.to_u32() } else { Theme::BORDER.to_u32() };
-                    
+
                     fb.draw_rect(control_x, setting_y + 4, 44, 24, toggle_color);
-                    
+
                     let knob_x = if is_on { control_x + 20 } else { control_x + 2 };
                     fb.draw_rect(knob_x, setting_y + 6, 20, 20, 0xFFFFFFFF);
                 }
                 SettingType::Slider { min, max, step: _ } => {
                     let value = setting.get_float();
                     let pct = (value - *min) / (max - min);
-                    
+
                     fb.draw_rect(control_x, setting_y + 12, 180, 8, Theme::BORDER.to_u32());
                     fb.draw_rect(control_x, setting_y + 12, (180.0 * pct) as usize, 8, Theme::ACCENT_PRIMARY.to_u32());
-                    
+
                     let value_text = format!("{:.0}", value);
                     fb.draw_string(control_x + 190, setting_y + 4, &value_text, Theme::TEXT_SECONDARY.to_u32());
                 }
@@ -695,7 +811,7 @@ impl SystemPreferences {
                 }
                 SettingType::Input { placeholder } => {
                     fb.draw_rect(control_x, setting_y + 2, 180, 24, Theme::SIDEBAR_BG.to_u32());
-                    
+
                     let text = setting.get_string();
                     if text.is_empty() {
                         fb.draw_string(control_x + 8, setting_y + 6, placeholder, Theme::TEXT_SECONDARY.to_u32());
@@ -705,16 +821,20 @@ impl SystemPreferences {
                 }
                 _ => {}
             }
-            
+
             // Description
             if !setting.description.is_empty() {
                 fb.draw_string(content_x + 20, setting_y + 20, &setting.description, Theme::TEXT_SECONDARY.to_u32());
             }
-            
+
             setting_y += 60;
         }
     }
-    
+
+    /// Panel ikonu için Unicode simge döndürür.
+    ///
+    /// Tüm `PreferenceIcon` varyantları kapsanmalıdır (exhaustive match).
+    /// Rust derleyicisi eksik varyant olduğunda derleme hatası verir.
     fn get_pane_icon(&self, icon: PreferenceIcon) -> &'static str {
         match icon {
             PreferenceIcon::General => "⚙",
@@ -745,13 +865,19 @@ impl SystemPreferences {
             PreferenceIcon::Custom(_) => "📄",
         }
     }
-    
-    /// Handle click
+
+    /// Fare tıklamasını işler ve `PreferencesAction` döndürür.
+    ///
+    /// İşlem sırası:
+    /// 1. Panel görünümündeyse geri butonu kontrolü
+    /// 2. Arama alanı odak kontrolü
+    /// 3. Panel ızgarasında tıklama → panel seç
+    /// 4. Panel detayında ayar kontrolü tıklaması
     pub fn on_click(&mut self, mx: i32, my: i32) -> PreferencesAction {
         let x = self.rect.x;
         let y = self.rect.y;
         let w = self.rect.width;
-        
+
         // Back button
         if self.selected_pane.is_some() {
             if mx >= x + 8 && mx < x + 36
@@ -760,7 +886,7 @@ impl SystemPreferences {
                 return PreferencesAction::None;
             }
         }
-        
+
         // Search field
         let search_x = x + w - 180;
         if mx >= search_x && mx < search_x + 160
@@ -768,20 +894,20 @@ impl SystemPreferences {
             self.search_focused = true;
             return PreferencesAction::None;
         }
-        
+
         // Pane grid or content
         let content_y = y + TOOLBAR_HEIGHT as i32;
-        
+
         if self.selected_pane.is_none() {
             // Sidebar
             if mx >= x && mx < x + SIDEBAR_WIDTH as i32 && my >= content_y {
                 let mut item_y = content_y + 8;
-                
+
                 for pane in self.panes.iter() {
                     if !pane.visible {
                         continue;
                     }
-                    
+
                     // Skip category headers
                     if my >= item_y && my < item_y + 28 {
                         if let Some(idx) = self.panes.iter().position(|p| p.id == pane.id) {
@@ -792,22 +918,22 @@ impl SystemPreferences {
                     item_y += 28;
                 }
             }
-            
+
             // Icon grid
             let main_x = x + SIDEBAR_WIDTH as i32;
             let main_w = (w as usize) - SIDEBAR_WIDTH;
             let cols = main_w / (PANE_ICON_SIZE + 32);
-            
+
             if mx >= main_x && my >= content_y {
                 let rel_x = mx - main_x;
                 let rel_y = my - content_y;
-                
+
                 let col = rel_x as usize / (PANE_ICON_SIZE + 32);
                 let row = rel_y as usize / (PANE_ICON_SIZE + 48);
-                
+
                 let idx = row * cols + col;
                 let mut visible_idx = 0;
-                
+
                 for (i, pane) in self.panes.iter().enumerate() {
                     if pane.visible {
                         if visible_idx == idx {
@@ -822,13 +948,13 @@ impl SystemPreferences {
             // Setting controls
             let content_x = x + SIDEBAR_WIDTH as i32;
             let content_w = (w as usize) - SIDEBAR_WIDTH;
-            
+
             let mut setting_y = content_y + 20;
             let pane = &self.panes[pane_idx];
-            
+
             for setting in &pane.settings {
                 let control_x = content_x + (content_w - 200) as i32;
-                
+
                 if my >= setting_y && my < setting_y + 40 {
                     match &setting.setting_type {
                         SettingType::Toggle => {
@@ -852,15 +978,20 @@ impl SystemPreferences {
                         _ => {}
                     }
                 }
-                
+
                 setting_y += 60;
             }
         }
-        
+
         PreferencesAction::None
     }
-    
-    /// Handle key press
+
+    /// Klavye girişini işler (arama odaklanmışken).
+    ///
+    /// Kaçış tuşu (`'\x1b'`): odağı temizler ve aramayı sıfırlar.
+    /// Enter (`'\n'`): arama odağını kapatır ama sorguyu korur.
+    /// Geri tuşu (`'\x08'`): son karakteri siler, aramayı günceller.
+    /// `c.is_control()`: kontrol karakterlerini filtreler.
     pub fn on_key_press(&mut self, c: char) -> PreferencesAction {
         if self.search_focused {
             if c == '\x1b' { // Escape
@@ -878,18 +1009,22 @@ impl SystemPreferences {
             }
             return PreferencesAction::None;
         }
-        
+
         PreferencesAction::None
     }
-    
-    /// Resize
+
+    /// Pencereyi yeniden boyutlandırır.
+    /// `as i32`: `usize` → `i32` dönüşümü; `Rect` `i32` alanlar kullanır.
     pub fn resize(&mut self, width: usize, height: usize) {
         self.rect.width = width as i32;
         self.rect.height = height as i32;
     }
 }
 
-/// Preferences actions
+/// Tercihler uygulamasından dönen olaylar.
+///
+/// `SettingChanged(String)`: değişen ayarın ID'sini taşır.
+/// `RestartRequired`: ayar değişikliği yeniden başlatma gerektirir.
 #[derive(Clone, Debug)]
 pub enum PreferencesAction {
     None,
@@ -901,6 +1036,11 @@ pub enum PreferencesAction {
 // GLOBAL SYSTEM PREFERENCES
 // ============================================================================
 
+/// Global Sistem Tercihleri singleton'ı.
+///
+/// `lazy_static!` + `spin::Mutex`: çalışma zamanı başlatılan global
+/// değişken, `no_std` çoklu çekirdek ortamında güvenli erişim sağlar.
+/// `Rect { x, y, width, height }` ile başlangıç pencere konumu belirlenir.
 lazy_static::lazy_static! {
     static ref PREFERENCES: Mutex<SystemPreferences> = Mutex::new(SystemPreferences::new(Rect {
         x: 100,
@@ -910,12 +1050,12 @@ lazy_static::lazy_static! {
     }));
 }
 
-/// Initialize System Preferences
+/// Modülü başlatır ve seri porta log yazar.
 pub fn init() {
     crate::serial_println!("[GUI] System Preferences initialized");
 }
 
-/// Get System Preferences
+/// Global Sistem Tercihleri'ne referans döndürür.
 pub fn get_preferences() -> &'static Mutex<SystemPreferences> {
     &PREFERENCES
 }

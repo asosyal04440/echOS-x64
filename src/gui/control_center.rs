@@ -1,4 +1,4 @@
-//! # Kontrol Merkezi
+//! # Kontrol Merkezi (Control Center)
 //!
 //! macOS tarzı hızlı ayarlar paneli.
 //! Wi-Fi, Bluetooth, AirDrop, Ekran, Ses vb. ayarları kolay erişimle sunar.
@@ -10,9 +10,20 @@
 //! - `GroupLayout`: Row2 (2'li satır), Row3 (3'lü satır), Grid (2×2 ızgara), Column (dikey yığın), Large (büyük kare)
 //! - `ControlCenter`: Paneli, animasyonu ve tıklama/sürükleme olaylarını yöneten yapı
 //!
-//! ## Çizim Algoritması
-//! Panel sağ üst köşeden kayarak girer; `animation_progress` 0→1 arası artar.
-//! Kaydırıcı karelerinde alt kenarda doluluk çubuğu çizilir.
+//! ## Kayma Animasyonu
+//! Panel sağ üst köşeden kayarak girer; `animation_progress` 0.0→1.0 arası her kare
+//! `dt * 5.0` kadar artar. Çizim sırasında panelin X konumu şöyle hesaplanır:
+//! `panel_x = screen_w - CC_WIDTH - 8 + (1.0 - ease) * (CC_WIDTH + 20)`
+//! `ease` değeri `animation_progress^2 × (3 - 2×animation_progress)` (smoothstep).
+//!
+//! ## Toggle ve Slider Etkileşimi
+//! `on_mouse_down` tıklanan kareyi bulur; `TileType::Toggle` için `active` terslenır.
+//! `TileType::Slider` için `on_mouse_move` çağrıldığında `value`, tıklama X pozisyonu
+//! ile kare genişliğine bölünerek 0.0–1.0 aralığında güncellenir.
+//!
+//! ## Kaydırıcı Çizimi
+//! Kaydırıcı karelerinde alt kenarda bir doluluk çubuğu çizilir:
+//! `dolu_genişlik = kare_genişliği × value` pikseli accent rengiyle doldurulur.
 
 use alloc::boxed::Box;
 use alloc::string::String;

@@ -1,7 +1,25 @@
-//! # echOS Security Subsystem
+//! # echOS Güvenlik Alt Sistemi
 //!
-//! Kapsamlı güvenlik özellikleri: SMEP/SMAP, Stack Canary, ASLR, NX/DEP, W^X
-//! Capability-based security, SELinux-like MAC, TPM 2.0 support
+//! Bu modül, işletim sistemi çekirdeğinin güvenlik katmanını oluşturur.
+//! Birden fazla katmanlı savunma (defense-in-depth) mimarisi uygulanır:
+//!
+//! ```
+//! +----------------------------------------------------+
+//! |              Güvenlik Katmanları                   |
+//! +----------------------------------------------------+
+//! |  [NX/DEP]   Veri sayfaları çalıştırılamaz          |
+//! |  [SMEP]     Kernel, user-space kodu çalıştıramaz   |
+//! |  [SMAP]     Kernel, user-space'e doğrudan erişemez |
+//! |  [W^X]      Sayfa aynı anda yazılabilir+çalışamaz  |
+//! |  [ASLR]     Bellek düzeni rastgele ofsetlenir       |
+//! |  [CANARY]   Stack taşmasını algılar ve durdurur     |
+//! |  [MAC]      Politika tabanlı zorunlu erişim kontrolü|
+//! |  [CAPABILITY] Kaynak bazlı yetki sistemi            |
+//! |  [TPM 2.0]  Donanım güvenlik modülü entegrasyonu   |
+//! +----------------------------------------------------+
+//! ```
+//!
+//! Tüm bu özellikler boot sırasında `security::init()` ile etkinleştirilir.
 
 pub mod capability;
 pub mod mac;
@@ -15,15 +33,34 @@ use x86_64::registers::model_specific::Msr;
 
 // ============================================================================
 // SMEP/SMAP - Supervisor Mode Execution/Access Prevention
+//
+// Bu iki mekanizma, çekirdek (Ring 0) kodun kullanıcı alanına (Ring 3)
+// erişimini kısıtlayarak privilege escalation saldırılarını engeller.
+//
+//  CPU Koruma Halkalar Diyagramı:
+//  +---------------------------+
+//  |  Ring 0 (Kernel)          |  <- Tam yetki, donanım erişimi
+//  |  +---------------------+  |
+//  |  |  Ring 3 (Kullanıcı) |  |  <- Kısıtlı yetki
+//  |  +---------------------+  |
+//  +---------------------------+
+//
+//  SMEP: Ring 0 iken Ring 3 sayfalarındaki kodu ÇALIŞTIRAMAZ  (CR4.bit20)
+//  SMAP: Ring 0 iken Ring 3 sayfalarına doğrudan ERİŞEMEZ     (CR4.bit21)
+//  CLAC/STAC: SMAP'ı geçici olarak devre dışı/aktif bırakır   (EFLAGS.AC)
 // ============================================================================
 
-/// SMEP aktif mi
+/// SMEP'in aktif olup olmadığını izleyen atomik bayrak.
+/// `AtomicBool` kullanılır çünkü çok çekirdekli ortamda yarış koşulsuz okunmalıdır.
 static SMEP_ENABLED: AtomicBool = AtomicBool::new(false);
-/// SMAP aktif mi  
+/// SMAP'ın aktif olup olmadığını izleyen atomik bayrak.
 static SMAP_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// SMEP (Supervisor Mode Execution Prevention) aktifleştir
-/// Ring 0'dayken user space sayfalarında kod çalıştırmayı engeller
+/// SMEP (Supervisor Mode Execution Prevention) aktifleştir.
+///
+/// CR4 kaydının 20. biti (SUPERVISOR_MODE_EXECUTION_PROTECTION) set edilir.
+/// Bu bit set edildikten sonra çekirdek, kullanıcı alanı bellekten asla
+/// talimat çekemez; böylece "ret2user" ve JIT-spray saldırıları engellenir.
 pub fn enable_smep() {
     use x86_64::registers::control::{Cr4, Cr4Flags};
     unsafe {
@@ -35,68 +72,106 @@ pub fn enable_smep() {
     // Removed serial_println to avoid potential issues
 }
 
-/// SMAP (Supervisor Mode Access Prevention) aktifleştir
-/// Ring 0'dayken user space sayfalarına erişimi engeller
+/// SMAP (Supervisor Mode Access Prevention) aktifleştir.
+///
+/// CR4 kaydının 21. biti (SUPERVISOR_MODE_ACCESS_PREVENTION) set edilir.
+/// SMAP aktif olduğunda, çekirdek kodu kullanıcı sayfalarına erişmek için
+/// özel assembly talimatları (STAC/CLAC) kullanmalıdır; bu sayede
+/// çekirdek hatası/exploit sonucu oluşan yetkisiz kullanıcı belleği
+/// okumaları önlenir.
 pub fn enable_smap() {
     use x86_64::registers::control::{Cr4, Cr4Flags};
     unsafe {
-        // Debug before SMAP
+        // SMAP'ı etkinleştirmeden önce debugcon üzerinden izleme yapılıyor
         x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'A');
         Cr4::update(|cr4| cr4.insert(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION));
-        // Debug after CR4 update
+        // CR4 güncellemesinden sonra debugcon'a bildir
         x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'B');
-        // clac (Clear AC flag) ile varsayılan olarak user data erişimini kapat
+        // CLAC: AC (Alignment Check) flag'ini temizler -> kullanıcı belleğine erişimi kapatır
+        // STAC komutu ile geçici olarak açılabilir (copy_to_user/copy_from_user gibi yerlerde)
         core::arch::asm!("clac", options(nomem, nostack));
-        // Debug after clac
+        // CLAC sonrası debugcon bildirimi
         x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'C');
     }
     SMAP_ENABLED.store(true, Ordering::SeqCst);
-    // Note: serial_println removed to avoid potential SMAP issues
+    // Not: SMAP etkin olduğunda serial_println gibi işlevler kullanıcı
+    // alanına erişmeye çalışabilir; bu yüzden bu fonksiyon içinde serial_println kaldırıldı.
 }
 
-/// SMAP'ı geçici olarak devre dışı bırak (AC flag set/clear)
-/// Kullanıcı buffer'ına güvenli erişim için
+/// SMAP korumasını geçici olarak devre dışı bırakmak için EFLAGS.AC bitini TEMİZLER (CLAC).
+///
+/// SMAP etkinken AC=0 ise çekirdek kullanıcı sayfalarına ERİŞEMEZ.
+/// Kullanıcı tamponuna güvenli kopyalama yaparken smap_enable/smap_disable
+/// çifti birlikte kullanılır.
 #[inline(always)]
 pub unsafe fn smap_disable() {
     core::arch::asm!("clac", options(nomem, nostack));
 }
 
-/// SMAP'ı tekrar aktifleştir
+/// SMAP korumasını geçici erişim için geçersiz kılar; EFLAGS.AC bitini SETLER (STAC).
+///
+/// AC=1 iken SMAP koruması atlanır ve çekirdek kullanıcı sayfasına erişebilir.
+/// Bu pencereyi kısa tutmak kritiktir - işlem sonrası smap_disable() çağrılmalıdır.
 #[inline(always)]
 pub unsafe fn smap_enable() {
     core::arch::asm!("stac", options(nomem, nostack));
 }
 
-/// SMEP aktif mi kontrol et
+/// SMEP'in şu an aktif olup olmadığını SeqCst sıralaması ile okur.
 pub fn is_smep_enabled() -> bool {
     SMEP_ENABLED.load(Ordering::SeqCst)
 }
 
-/// SMAP aktif mi kontrol et
+/// SMAP'ın şu an aktif olup olmadığını SeqCst sıralaması ile okur.
 pub fn is_smap_enabled() -> bool {
     SMAP_ENABLED.load(Ordering::SeqCst)
 }
 
 // ============================================================================
-// STACK CANARY - Buffer Overflow Protection
+// STACK CANARY - Buffer Overflow Protection (Tampon Taşması Koruması)
+//
+// Stack canary, bir fonksiyon çağrısında yerel değişkenlerle dönüş adresi
+// arasına yerleştirilen gizli bir değerdir. Fonksiyon dönmeden önce bu
+// değer kontrol edilir; farklıysa bellek taşması yaşandığı anlaşılır.
+//
+// Stack çerçeve düzeni (x86-64):
+//
+//   +------------------+  <-- Yüksek adres
+//   |   Dönüş Adresi   |  <- Exploit bunu değiştirmeye çalışır
+//   +------------------+
+//   |   Kaydedilmiş RBP|
+//   +------------------+
+//   |  *** CANARY  ***  |  <- Taşma bu değeri bozacaktır
+//   +------------------+
+//   |   Yerel Değişk.  |  <- Buradan taşma başlar (buffer overflow)
+//   +------------------+  <-- Düşük adres
+//
+// Canary değeri:
+//  - Boot sırasında CSPRNG ile randomize edilir
+//  - Her CPU için farklı türetilmiş değerler kullanılır (per-CPU)
+//  - Bozulursa __stack_chk_fail() çağrılarak çekirdek durdurulur
 // ============================================================================
 
-/// Global stack canary değeri (boot'ta randomize edilir)
+/// Global stack canary değeri (boot sırasında rastgeleleştirilir).
+/// Varsayılan DEADBEEF_CAFEBABE değeri salt başlangıç yer tutucusudur;
+/// `init_stack_canary()` çağrısı bu değeri gerçek rastgele ile değiştirir.
 static STACK_CANARY: AtomicU64 = AtomicU64::new(0xDEADBEEF_CAFEBABE);
 
-/// Per-CPU canary değerleri
+/// Her CPU için ayrı canary değerleri. CPU ID'ye göre türetilerek
+/// aynı sistemde farklı çekirdeklerin canary'leri farklı olur.
 static PER_CPU_CANARIES: Mutex<alloc::vec::Vec<u64>> = Mutex::new(alloc::vec::Vec::new());
 
-/// Stack canary'yi initialize et
+/// Stack canary'yi başlatır: rastgele bir değer üretip global değişkene yazar.
 pub fn init_stack_canary() {
     // Random canary oluştur
     let canary = crate::random::rand_u64() ^ 0xCAFEBABE_DEADBEEF;
     STACK_CANARY.store(canary, Ordering::SeqCst);
-    
+
     crate::serial_println!("[SEC] Stack canary initialized: {:#x}", canary);
 }
 
-/// Per-CPU canary oluştur
+/// CPU başına farklı canary değeri türetir.
+/// Her CPU, global canary + sabit çarpan * cpu_id formülüyle hesaplanır.
 pub fn init_per_cpu_canary(cpu_id: u32) {
     let canary = STACK_CANARY.load(Ordering::SeqCst).wrapping_add(cpu_id as u64 * 0x12345678);
     
@@ -110,45 +185,69 @@ pub fn init_per_cpu_canary(cpu_id: u32) {
     crate::serial_println!("[SEC] CPU {} stack canary: {:#x}", cpu_id, canary);
 }
 
-/// Mevcut CPU'nun canary'sini al
+/// Mevcut CPU'nun canary değerini döndürür.
+/// CPU ID'ye göre per-CPU tablosuna bakılır; bulunamazsa global canary kullanılır.
 pub fn get_current_canary() -> u64 {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let canaries = PER_CPU_CANARIES.lock();
     canaries.get(cpu_id as usize).copied().unwrap_or_else(|| STACK_CANARY.load(Ordering::SeqCst))
 }
 
-/// Stack canary doğrulama hatası
+/// GCC/Clang'ın ürettiği stack-protector epilogu bu sembolü çağırır.
+///
+/// Derleyici, fonksiyon prolog'unda canary değerini stack'e yazar;
+/// epilog'da ise orijinal değerle karşılaştırır. Bozulmuşsa bu
+/// fonksiyon tetiklenir ve çekirdek paniğe girerek saldırıyı durdurur.
+/// Dönüş tipi `!` (never) = bu fonksiyon asla geri dönmez.
 #[no_mangle]
 pub extern "C" fn __stack_chk_fail() -> ! {
     crate::serial_println!("[SEC] *** STACK CANARY VIOLATION ***");
     crate::serial_println!("[SEC] Buffer overflow detected! Halting...");
     
-    // Kernel panic
+    // Kernel panic - saldırı tespit edildi, sistem güvenli biçimde durduruldu
     panic!("Stack buffer overflow detected - possible exploit attempt!");
 }
 
-/// GCC/Clang stack protector için canary değeri
+/// GCC/Clang'ın `__stack_chk_guard` sembolü için canary değeri sağlar.
+///
+/// Derleyici bazı mimarilerde canary değerini bu sembolden okur.
+/// Her çekirdek çağrısında mevcut CPU'nun canary'si döndürülür.
 #[no_mangle]
 pub extern "C" fn __stack_chk_guard() -> u64 {
     get_current_canary()
 }
 
 // ============================================================================
-// ASLR (Address Space Layout Randomization)
+// ASLR (Address Space Layout Randomization) - Adres Alanı Düzeni Rastgeleleştirme
+//
+// ASLR, saldırganın bellek adreslerini tahmin edememesini sağlar.
+// Her process başlatılışında stack, heap ve mmap alanları rastgele
+// ofsetlerle yerleştirilir.
+//
+// Koruma yokken (sabit adresler):        ASLR ile:
+//  Stack  -> 0x7FFF_0000_0000 (sabit)    Stack  -> 0x7FFF_0000_0000 + rastgele_ofset
+//  Heap   -> 0x0000_1234_0000 (sabit)    Heap   -> 0x0000_1234_0000 + rastgele_ofset
+//  Code   -> 0xFFFF_8000_0000 (sabit)    Code   -> KASLR ile kernel de taşınabilir
+//
+// Bu mod, kullanıcı alanı ASLR ofsetlerini yönetir.
+// Ofsetler sayfa sınırına (4KB) hizalanır: `& !0xFFF`
 // ============================================================================
 
-/// User space mmap random offset
+/// Kullanıcı alanı mmap bölgesi için rastgele ofset (ASLR).
 static MMAP_ASLR_OFFSET: AtomicU64 = AtomicU64::new(0);
-/// User stack random offset
+/// Kullanıcı stack bölgesi için rastgele ofset (ASLR).
 static STACK_ASLR_OFFSET: AtomicU64 = AtomicU64::new(0);
-/// User heap random offset
+/// Kullanıcı heap bölgesi için rastgele ofset (ASLR).
 static HEAP_ASLR_OFFSET: AtomicU64 = AtomicU64::new(0);
-/// ASLR aktif mi
+/// ASLR'ın aktif olup olmadığını izleyen bayrak.
 static ASLR_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// ASLR'ı initialize et
+/// ASLR'ı başlatır: mmap, stack ve heap için rastgele ofsetler oluşturur.
+///
+/// Tüm ofsetler sayfa sınırına (`& !0xFFF`) hizalanır; böylece
+/// page table eşlemesi tutarlı kalır.
 pub fn init_aslr() {
-    // Random offset'ler oluştur (page-aligned)
+    // Her alan için bağımsız rastgele ofset üret, sayfa sınırına hizala
     let mmap_offset = (crate::random::rand_u64() % crate::memory::USER_MMAP_RANDOM_RANGE) & !0xFFF;
     let stack_offset = (crate::random::rand_u64() % crate::memory::USER_STACK_RANDOM_RANGE) & !0xFFF;
     let heap_offset = (crate::random::rand_u64() % (64 * 1024 * 1024)) & !0xFFF;
@@ -164,7 +263,8 @@ pub fn init_aslr() {
     crate::serial_println!("  Heap offset: {:#x}", heap_offset);
 }
 
-/// ASLR uygulanmış mmap adresi
+/// ASLR uygulanmış mmap başlangıç adresini hesaplar.
+/// `base` üzerine random ofset eklenerek döndürülür.
 pub fn aslr_mmap_addr(base: u64) -> u64 {
     if ASLR_ENABLED.load(Ordering::SeqCst) {
         base + MMAP_ASLR_OFFSET.load(Ordering::SeqCst)
@@ -173,7 +273,8 @@ pub fn aslr_mmap_addr(base: u64) -> u64 {
     }
 }
 
-/// ASLR uygulanmış stack adresi
+/// ASLR uygulanmış stack başlangıç adresini hesaplar.
+/// Stack aşağı büyüdüğünden `base` üzerinden ofset ÇIKARILIR.
 pub fn aslr_stack_addr(base: u64) -> u64 {
     if ASLR_ENABLED.load(Ordering::SeqCst) {
         base - STACK_ASLR_OFFSET.load(Ordering::SeqCst)
@@ -182,7 +283,8 @@ pub fn aslr_stack_addr(base: u64) -> u64 {
     }
 }
 
-/// ASLR uygulanmış heap adresi
+/// ASLR uygulanmış heap başlangıç adresini hesaplar.
+/// Heap yukarı büyüdüğünden `base` üzerine ofset EKLENİR.
 pub fn aslr_heap_addr(base: u64) -> u64 {
     if ASLR_ENABLED.load(Ordering::SeqCst) {
         base + HEAP_ASLR_OFFSET.load(Ordering::SeqCst)
@@ -191,117 +293,179 @@ pub fn aslr_heap_addr(base: u64) -> u64 {
     }
 }
 
-/// ASLR aktif mi
+/// ASLR'ın şu an aktif olup olmadığını döndürür.
 pub fn is_aslr_enabled() -> bool {
     ASLR_ENABLED.load(Ordering::SeqCst)
 }
 
 // ============================================================================
-// NX/DEP (No-Execute / Data Execution Prevention)
+// NX/DEP (No-Execute / Data Execution Prevention) - Çalıştırma Engeli
+//
+// NX (No-Execute), sayfa tablosu girişlerindeki bit 63 (XD/NX bit) üzerinden
+// çalışır. Bu bit set edilen sayfalara CPU'nun talimat getirmesi engellenir.
+//
+// Etkinleştirme: EFER MSR (0xC000_0080) bit 11 = NXE set edilmelidir.
+// Ardından her sayfa tablosu girişinde bireysel NX biti kullanılabilir.
+//
+//  Sayfa Tablosu Girişi (PTE) düzeni (64-bit):
+//  Bit 63 : NX (No-Execute) -- bu bit set ise kod çalıştırılamaz
+//  Bit  0 : Present
+//  Bit  1 : Read/Write
+//  ...
+//
+// NX olmadan bir saldırgan veri bölgesine shellcode yazıp oradan atlatabilir.
 // ============================================================================
 
-/// NX desteği aktif mi
+/// NX desteğinin aktif olup olmadığını izleyen bayrak.
 static NX_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// NX bit'i aktifleştir (EFER.NXE)
+/// EFER MSR'ın NXE bitini (bit 11) set ederek NX/DEP'i etkinleştirir.
+///
+/// EFER = Extended Feature Enable Register (MSR 0xC000_0080).
+/// NXE bit set edildikten sonra sayfa tablosundaki her PTE'nin bit 63'ü
+/// bağımsız olarak "bu sayfada kod çalışmasın" anlamı taşır.
 pub fn enable_nx() {
     const MSR_EFER: u32 = 0xC000_0080;
-    
+
     unsafe {
         let mut efer = Msr::new(MSR_EFER);
         let val = efer.read();
-        // Bit 11 = NXE (No-Execute Enable)
+        // Bit 11 = NXE (No-Execute Enable) - tüm PTE'lerin NX bitini aktifleştirir
         efer.write(val | (1 << 11));
         NX_ENABLED.store(true, Ordering::SeqCst);
         crate::serial_println!("[SEC] NX/DEP enabled - Non-executable memory protection active");
     }
 }
 
-/// NX aktif mi
+/// NX/DEP'in etkin olup olmadığını döndürür.
 pub fn is_nx_enabled() -> bool {
     NX_ENABLED.load(Ordering::SeqCst)
 }
 
 // ============================================================================
-// W^X (Write XOR Execute) Policy
+// W^X (Write XOR Execute) Policy - Yaz ya da Çalıştır, İkisi Birden Olmaz
+//
+// W^X: Bir bellek sayfası aynı anda hem yazılabilir (W) hem çalıştırılabilir (X)
+// olamaz. Bu kural, JIT derleyicileri bile içerir; çalışma zamanı kod üretimi
+// yapılacaksa önce W açık kod yazılır, ardından W kapatılıp X açılır.
+//
+//  Geçerli durumlar:
+//    W=1, X=0  -> Veri sayfası (değiştirilebilir, çalıştırılamaz)
+//    W=0, X=1  -> Kod sayfası  (değiştirilemez, çalıştırılabilir)
+//    W=0, X=0  -> Salt okunur  (ne değişebilir ne çalışabilir)
+//
+//  GEÇERSİZ durum:
+//    W=1, X=1  -> YASAK - bu kombinasyon saldırı yüzeyini genişletir
 // ============================================================================
 
-/// W^X policy aktif mi
+/// W^X politikasının aktif olup olmadığını izleyen bayrak.
 static WXORX_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// W^X policy aktifleştir
+/// W^X politikasını etkinleştirir.
+/// Etkinleştirildikten sonra `check_wxorx()` ile her sayfa eşlemesi denetlenir.
 pub fn enable_wxorx() {
     WXORX_ENABLED.store(true, Ordering::SeqCst);
     crate::serial_println!("[SEC] W^X policy enabled - Pages cannot be both writable and executable");
 }
 
-/// W^X kontrolü - sayfa hem yazılabilir hem çalıştırılabilir olamaz
+/// W^X kuralını kontrol eder: hem yazılabilir hem çalıştırılabilir ise `false` döner.
+///
+/// Sayfa haritalama kodunda her yeni eşleme öncesi çağrılmalıdır.
+/// Politika kapalıysa her kombinasyona izin verilir (geliştirme modunda kullanışlı).
 pub fn check_wxorx(writable: bool, executable: bool) -> bool {
     if !WXORX_ENABLED.load(Ordering::SeqCst) {
-        return true; // Policy kapalı, her şey serbest
+        return true; // Politika kapalı, her şey serbest
     }
-    
-    // W^X: writable XOR executable
+
+    // W^X: writable XOR executable - ikisi aynı anda set olamaz
     !(writable && executable)
 }
 
-/// W^X aktif mi
+/// W^X politikasının etkin olup olmadığını döndürür.
 pub fn is_wxorx_enabled() -> bool {
     WXORX_ENABLED.load(Ordering::SeqCst)
 }
 
 // ============================================================================
-// SECURITY INITIALIZATION
+// SECURITY INITIALIZATION - Güvenlik Alt Sistemi Başlatma
+//
+// Güvenlik özellikleri belirli bir sırayla etkinleştirilmelidir.
+// Örneğin SMAP, stack canary'den önce gelmelidir; çünkü canary
+// başlatılırken kullanıcı bellek erişimi gerekmeyebilir.
+//
+// Başlatma sırası:
+//   1. NX/DEP   -> EFER.NXE (MSR yazma, her VM çekirdeğinde güvenli)
+//   2. SMEP     -> CR4.bit20 (kullanıcı kod çalıştırma yasağı)
+//   3. SMAP     -> CR4.bit21 + CLAC (kullanıcı bellek erişim yasağı)
+//   4. Canary   -> Rastgele değer CSPRNG ile üretilir
+//   5. ASLR     -> Kullanıcı alanı ofsetleri üretilir
+//   6. W^X      -> Politika bayrağı set edilir
 // ============================================================================
 
-/// Tüm güvenlik özelliklerini başlat
+/// Tüm güvenlik özelliklerini sırayla başlatır.
+///
+/// Bu fonksiyon çekirdek başlangıcında (boot) yalnızca bir kez çağrılır.
+/// Debugcon (port 0xE9) üzerinden her adım izlenir; Simics/QEMU ile
+/// donanım hata ayıklaması yapılabilir.
 pub fn init() {
-    // Debugcon output via port 0xE9 - FIRST before anything else
-    unsafe { 
+    // Debugcon 'S' baytı: security::init() girildi (seri port hazır olmadan önce izleme)
+    unsafe {
         use x86_64::instructions::port::PortWriteOnly;
         PortWriteOnly::<u8>::new(0xE9).write(b'S');  // Entered security::init
     }
     crate::serial_println!("[SEC] Initializing security subsystem...");
-    
+
     unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'1'); }
-    // 1. NX/DEP (EFER.NXE)
+    // Adım 1: NX/DEP - EFER MSR'ın NXE bitini set eder
     enable_nx();
-    
+
     unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'2'); }
-    // 2. SMEP (CR4 bit 20)
+    // Adım 2: SMEP - CR4 bit 20'yi set eder (kullanıcı kodu çalıştırma yasağı)
     enable_smep();
-    
+
     unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'3'); }
-    // 3. SMAP (CR4 bit 21)
+    // Adım 3: SMAP - CR4 bit 21'i set eder + CLAC ile varsayılan koruma aktif
     enable_smap();
-    
+
     unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'4'); }
-    // 4. Stack Canary
+    // Adım 4: Stack Canary - CSPRNG ile rastgele değer üretilir
     init_stack_canary();
-    
+
     unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'5'); }
-    // 5. ASLR
+    // Adım 5: ASLR - mmap/stack/heap için rastgele page-aligned ofsetler
     init_aslr();
-    
+
     unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'6'); }
-    // 6. W^X Policy
+    // Adım 6: W^X - hem yazılabilir hem çalıştırılabilir sayfa politikası engeli
     enable_wxorx();
-    
+
     unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'7'); }
     crate::serial_println!("[SEC] Security subsystem initialized ✓");
 }
 
-/// Per-CPU güvenlik başlatma
+/// Her CPU'ya özgü güvenlik başlatması yapar (per-CPU canary türetme).
+/// SMP sistemlerde her fiziksel çekirdek başlatıldığında çağrılır.
 pub fn init_cpu_security(cpu_id: u32) {
     init_per_cpu_canary(cpu_id);
     crate::serial_println!("[SEC] CPU {} security initialized", cpu_id);
 }
 
 // ============================================================================
-// SECURITY AUDIT LOGGING
+// SECURITY AUDIT LOGGING - Güvenlik Olay Günlüğü
+//
+// Kernel, güvenlik ihlallerini bu enum üzerinden sınıflandırır.
+// Her olay tipi farklı bir saldırı vektörüne karşılık gelir:
+//
+//  StackCanaryViolation  -> Buffer overflow (stack bozuldu)
+//  NxViolation           -> DEP ihlali (veri sayfası çalıştırılmaya çalışıldı)
+//  SmepViolation         -> Kernel, kullanıcı kodu çalıştırmaya çalıştı
+//  SmapViolation         -> Kernel, kullanıcı belleğine doğrudan erişti
+//  WxorxViolation        -> W^X kuralı ihlal edildi
+//  SeccompViolation(n)   -> n numaralı syscall BPF filtresi tarafından engellendi
+//  SuspiciousSyscall(n)  -> n numaralı syscall şüpheli örüntü tespit edildi
 // ============================================================================
 
-/// Güvenlik olayı türleri
+/// Çekirdek güvenlik ihlali olay türleri.
 #[derive(Debug, Clone, Copy)]
 pub enum SecurityEvent {
     StackCanaryViolation,
@@ -313,7 +477,10 @@ pub enum SecurityEvent {
     SuspiciousSyscall(u64),
 }
 
-/// Güvenlik olayını logla
+/// Güvenlik olayını seri porta yazar (denetim kaydı).
+///
+/// Gelecekte bu fonksiyon kalıcı günlük deposuna (ring buffer vb.) yazacak.
+/// Şu an için serial çıktıyla sınırlıdır; üretim ortamında genişletilmeli.
 pub fn log_security_event(event: SecurityEvent) {
     match event {
         SecurityEvent::StackCanaryViolation => {
@@ -341,10 +508,21 @@ pub fn log_security_event(event: SecurityEvent) {
 }
 
 // ============================================================================
-// SECURITY STATUS
+// SECURITY STATUS - Güvenlik Durumu Özeti
+//
+// SecurityStatus yapısı, etkin güvenlik özelliklerini tek bir veri
+// yapısında toplar. `score()` metodu 0-10 arası puan üretir:
+//  NX    -> +2  (kritik: shellcode önleme)
+//  SMEP  -> +2  (kritik: ring0 kaçışı engeli)
+//  SMAP  -> +2  (kritik: user bellek erişim engeli)
+//  ASLR  -> +1  (orta: adres tahmin güçleştirme)
+//  W^X   -> +1  (orta: JIT-spray engeli)
+//  Canary-> +2  (kritik: stack overflow tespiti)
+//  Toplam: 10 = maksimum güvenlik skoru
 // ============================================================================
 
-/// Güvenlik durumu özeti
+/// Tüm güvenlik özelliklerinin anlık durumunu döndürür.
+/// Canary başlatılmışsa varsayılan DEADBEEF değerinden farklı olur.
 pub fn security_status() -> SecurityStatus {
     SecurityStatus {
         nx: is_nx_enabled(),
@@ -380,12 +558,31 @@ impl SecurityStatus {
 }
 
 // ============================================================================
-// THE ETERNAL SEAL - Kernel Code Integrity Protection
+// THE ETERNAL SEAL - Kernel Kod Bütünlüğü Koruması (Runtime Integrity Check)
+//
+// Eternal Seal, çekirdek kod bölgelerini çalışma zamanında izleyen
+// bir bütünlük denetim sistemidir. Üç katmanlı hiyerarşik doğrulama kullanır:
+//
+//  Düzey 0 - XOR Parity (~1 döngü/64 bayt, ultra hızlı):
+//    Her 4KB sayfa için 64-bit XOR özeti tutulur.
+//    Yanlış pozitif (tesadüfi değişim) olasılığı: 2^-64
+//
+//  Düzey 1 - CRC32 (SSE4.2 HW hızlandırmalı, ~3 döngü/bayt):
+//    Parity uyuşmazlığında CRC32 ile çapraz doğrulama yapılır.
+//
+//  Düzey 2 - SHA-256 (yalnızca şüpheli sayfalarda):
+//    İki düzey de uyuşmazsa kriptografik kanıt toplanır.
+//
+//  Öncelik tabanlı tarama:
+//    priority=0 (kritik): Her tick kontrol
+//    priority=1 (yüksek): Her tick'te %50 olasılıkla kontrol
+//    priority=2 (normal) : Konfigüre edilebilir örnekleme oranı
 // ============================================================================
 
 use alloc::collections::BTreeMap;
 
-/// Kernel kod bölgesi tanımı
+/// Kernel kod bölgesi tanımı.
+/// `priority` alanı: 0=kritik (her tick), 1=yüksek (%50), 2=normal (örneklemeli).
 #[derive(Clone, Copy, Debug)]
 pub struct KernelRegion {
     pub start: u64,
@@ -394,43 +591,50 @@ pub struct KernelRegion {
     pub priority: u8, // 0=critical, 1=high, 2=normal
 }
 
-/// Checksum seviyeleri
+/// Checksum doğrulama düzeyleri (hızdan güvenliğe doğru sıralı).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChecksumLevel {
-    /// Level 0: XOR Parity - 1 cycle/64 bytes
+    /// Düzey 0: XOR Parity - ~1 döngü/64 bayt (en hızlı)
     Parity,
-    /// Level 1: CRC32 Hardware - ~3 cycles/byte
+    /// Düzey 1: CRC32 Donanım Hızlandırmalı (SSE4.2) - ~3 döngü/bayt
     Crc32,
-    /// Level 2: SHA-256 - Only on suspicious pages
+    /// Düzey 2: SHA-256 - Yalnızca şüpheli sayfalarda kullanılır
     Sha256,
 }
 
-/// Sayfa integrity durumu
+/// Bir sayfanın bütünlük bilgisi (checksum + ihlal sayacı).
 #[derive(Clone, Debug)]
 pub struct PageIntegrity {
-    pub parity: u64,      // XOR parity (8 bytes for 4KB page)
-    pub crc32: u32,       // CRC32 checksum
-    pub last_check: u64,  // Tick when last checked
-    pub violations: u32,  // Violation count
+    pub parity: u64,      // 4KB sayfa için 64-bit XOR parity (8 bayt)
+    pub crc32: u32,       // CRC32 sağlama toplamı (donanım hızlandırmalı)
+    pub last_check: u64,  // Son kontrol edildiği syscall tick sayısı
+    pub violations: u32,  // Bu sayfada toplam ihlal sayısı
 }
 
-/// Eternal Seal state
+/// Eternal Seal global durumu (kilitli koleksiyon değişkenleri)
 static SEAL_REGIONS: Mutex<alloc::vec::Vec<KernelRegion>> = Mutex::new(alloc::vec::Vec::new());
+/// Adres -> PageIntegrity haritası (BTreeMap = sıralı, önbellek dostu)
 static SEAL_INTEGRITY: Mutex<BTreeMap<u64, PageIntegrity>> = Mutex::new(BTreeMap::new());
+/// Eternal Seal'ın etkin olup olmadığı
 static SEAL_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Normal öncelikli sayfalar için tick başına örnekleme oranı (varsayılan: %5)
 static SEAL_SAMPLING_RATE: AtomicU64 = AtomicU64::new(5); // %5 per tick
 
-/// Kritik kernel bölgelerini kaydet
+/// Yeni bir kernel bölgesini Eternal Seal'a kaydeder.
+/// Boot sonrası kod bölgeleri, syscall tablosu vb. için çağrılır.
 pub fn seal_register_region(start: u64, size: u64, name: &'static str, priority: u8) {
     let region = KernelRegion { start, size, name, priority };
     SEAL_REGIONS.lock().push(region);
     crate::serial_println!("[SEAL] Region registered: {} @ {:#x} (priority {})", name, start, priority);
 }
 
-/// XOR Parity hesapla - En hızlı (O(n/8))
+/// XOR Parity hesaplar - O(n/8) karmaşıklık, en hızlı yöntem.
+///
+/// 8 baytlık bloklar halinde XOR işlemi uygulanır; son kısım sıfır-pad
+/// edilmiş 8 baytlık tamponla tamamlanır. Sonuç 64-bit XOR özetidir.
 #[inline(always)]
 fn compute_parity(data: &[u8]) -> u64 {
-    // 64-bit chunks halinde XOR
+    // 64-bit bloklar halinde XOR - en hızlı yol
     let chunks = data.chunks_exact(8);
     let remainder = chunks.remainder();
     
@@ -438,7 +642,7 @@ fn compute_parity(data: &[u8]) -> u64 {
         acc ^ u64::from_le_bytes(chunk.try_into().unwrap())
     });
     
-    // Kalan byte'lar
+    // Kalan baytlar (8'in katı olmayan son parça) sıfırla doldurulup XOR'lanır
     if !remainder.is_empty() {
         let mut last = [0u8; 8];
         last[..remainder.len()].copy_from_slice(remainder);
@@ -448,17 +652,21 @@ fn compute_parity(data: &[u8]) -> u64 {
     parity
 }
 
-/// CRC32 hesapla - Hardware accelerated (SSE4.2)
+/// CRC32-C hesaplar - SSE4.2 `_mm_crc32_u64` talimatı ile donanım hızlandırmalı.
+///
+/// CRC-32C (Castagnoli) polinom kullanılır; Ethernet CRC32'den farklıdır.
+/// SSE4.2 desteği olmayan mimarilerde yazılım fallback devreye girer.
+/// Dönen değer: `!crc` (sonuç inversinin alınması standarttır).
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn compute_crc32(data: &[u8]) -> u32 {
     use core::arch::x86_64::_mm_crc32_u64;
-    
+
     let mut crc = 0xFFFFFFFFu32;
     let len = data.len();
     let mut i = 0;
-    
-    // 8-byte chunks
+
+    // 8 baytlık bloklar: _mm_crc32_u64 ile tek talimat işlemi
     while i + 8 <= len {
         unsafe {
             let val = u64::from_le_bytes(data[i..i+8].try_into().unwrap());
@@ -467,7 +675,7 @@ fn compute_crc32(data: &[u8]) -> u32 {
         i += 8;
     }
     
-    // Kalan byte'lar
+    // Kalan baytlar (8'in katı olmayan son parça) tek tek işlenir
     while i < len {
         unsafe {
             crc = core::arch::x86_64::_mm_crc32_u8(crc, data[i]);
@@ -478,9 +686,12 @@ fn compute_crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// CRC32-C yazılım geri dönüşü (x86_64 dışı mimari veya SSE4.2 yok ise).
+///
+/// CRC-32C polinom sabiti: 0x82F63B78 (Castagnoli polinom ters yansıması)
 #[cfg(not(target_arch = "x86_64"))]
 fn compute_crc32(data: &[u8]) -> u32 {
-    // Software fallback - CRC-32C polynomial
+    // Yazılım fallback - CRC-32C polinom (0x1EDC6F41 ters yansıma = 0x82F63B78)
     let mut crc = 0xFFFFFFFFu32;
     for &byte in data {
         crc = (crc >> 8) ^ CRC_TABLE[(crc as u8 ^ byte) as usize];
@@ -505,21 +716,25 @@ const CRC_TABLE: [u32; 256] = {
     table
 };
 
-/// Basit SHA-256 (sadece Level 2 için)
+/// Basitleştirilmiş SHA-256 benzeri hash (yalnızca Düzey 2 doğrulama için).
+///
+/// UYARI: Bu gerçek bir SHA-256 uygulaması DEĞİLDİR.
+/// Parity + CRC32 + avalanche efekti tabanlı bir pseudo-hash'tir.
+/// Üretim ortamı için `crate::crypto::sha256` ile değiştirilmelidir.
 fn compute_sha256_simple(data: &[u8]) -> [u8; 32] {
-    // Mini SHA-256 implementasyonu
+    // Basitleştirilmiş: XOR tabanlı pseudo-hash (production'da değiştirilmeli)
     // Not: Gerçek implementasyon için crate::crypto::sha256 kullanılmalı
     let mut hash = [0u8; 32];
-    
-    // Simplified: XOR-based pseudo hash (gerçek üretimde değiştirilmeli)
+
+    // Parity + CRC32 sonuçları hash dizisine yazılır
     let parity = compute_parity(data);
     let crc = compute_crc32(data);
-    
+
     hash[..8].copy_from_slice(&parity.to_le_bytes());
     hash[8..12].copy_from_slice(&crc.to_le_bytes());
     hash[12..16].copy_from_slice(&(data.len() as u32).to_le_bytes());
-    
-    // Avalanche effect için ek rounds
+
+    // Avalanche efekti: bitlerin yayılmasını artırmak için ek geçişler
     for i in 16..32 {
         hash[i] = hash[i - 8] ^ hash[i - 4] ^ (i as u8);
     }
@@ -527,36 +742,39 @@ fn compute_sha256_simple(data: &[u8]) -> [u8; 32] {
     hash
 }
 
-/// Eternal Seal'ı başlat
+/// Eternal Seal'ı başlatır: kritik bölgeleri kaydeder ve ilk checksum'ları hesaplar.
+///
+/// Bölge adresleri linker script veya memory map'ten alınmalıdır.
+/// Boot sonrası tek kez çağrılır; SEAL_ENABLED bayrağı set edilerek
+/// `seal_guardian_tick()` aktifleştirilir.
 pub fn seal_init() {
     crate::serial_println!("[SEAL] Initializing Eternal Seal...");
-    
-    // Kernel'in kritik bölgelerini kaydet
-    // Bu değerler linker script'ten veya memory map'ten alınmalı
+
+    // Kernel kritik bölgelerini kaydet (adresler linker script'ten gelmeli)
     seal_register_region(
-        0xFFFF_FFFF_8000_0000, // Kernel start
-        0x0010_0000,           // 1MB kernel code
+        0xFFFF_FFFF_8000_0000, // Kernel başlangıç adresi
+        0x0010_0000,           // 1MB çekirdek kod alanı
         "kernel_code",
-        0, // Critical - her tick kontrol
+        0, // Kritik öncelik - her tick kontrol edilir
     );
-    
+
     seal_register_region(
         0xFFFF_FFFF_8010_0000,
-        0x0008_0000,           // 512KB syscall handlers
+        0x0008_0000,           // 512KB syscall işleyici bölgesi
         "syscall_table",
-        0, // Critical
+        0, // Kritik öncelik
     );
-    
-    // İlk checksum'ları hesapla
+
+    // İlk referans checksum'larını hesapla (boot sonrası "iyi" durumu kaydet)
     let regions = SEAL_REGIONS.lock();
     let mut integrity = SEAL_INTEGRITY.lock();
-    
+
     for region in regions.iter() {
         let page_count = region.size / 4096;
         for i in 0..page_count {
             let addr = region.start + i * 4096;
-            
-            // Güvenli okuma (kernel space)
+
+            // Kernel alanı güvenli okuma (fiziksel adresten doğrudan erişim)
             let ptr = addr as *const u8;
             let data = unsafe { core::slice::from_raw_parts(ptr, 4096) };
             
@@ -573,7 +791,13 @@ pub fn seal_init() {
     crate::serial_println!("[SEAL] {} pages sealed", integrity.len());
 }
 
-/// Guardian check - Her tick'te çağrılır
+/// Zamanlayıcı tick'inde güvenlik denetimi yapar.
+///
+/// Her sistem tick'inde çağrılır; öncelik bazlı olasılıksal örnekleme ile
+/// yüksek performans korunur. İhlal tespit akışı:
+///   1) Düzey 0: XOR Parity hızlı kontrol
+///   2) Eşleşmezse Düzey 1: CRC32 doğrulama
+///   3) İki düzey de uyuşmazsa ihlal loglanır
 pub fn seal_guardian_tick(current_tick: u64) {
     if !SEAL_ENABLED.load(Ordering::SeqCst) {
         return;
@@ -583,84 +807,89 @@ pub fn seal_guardian_tick(current_tick: u64) {
     let mut integrity = SEAL_INTEGRITY.lock();
     let sampling_rate = SEAL_SAMPLING_RATE.load(Ordering::SeqCst);
     
-    // Rastgele sayı üretici
+    // Olasılıksal örnekleme için rastgele sayı üret
     let rand_val = crate::random::next_u32();
-    
+
     for region in regions.iter() {
         let page_count = region.size / 4096;
-        
-        // Priority-based sampling
-        // Critical (0): her tick, High (1): %50, Normal (2): %5
+
+        // Öncelik bazlı örnekleme olasılığı:
+        // Kritik (0): her tick kontrol edilir, Yüksek (1): %50, Normal (2): yapılandırılabilir
         let check_prob = match region.priority {
-            0 => 100,  // Always check
-            1 => 50,   // 50% chance
-            _ => sampling_rate as u32, // Configurable
+            0 => 100,  // Her zaman kontrol et
+            1 => 50,   // %50 olasılıkla kontrol et
+            _ => sampling_rate as u32, // Yapılandırılabilir örnekleme
         };
-        
+
         for i in 0..page_count {
             let addr = region.start + i * 4096;
-            
-            // Probabilistic skip
+
+            // Olasılıksal atlama: check_prob < 100 ise random'a göre atla
             if check_prob < 100 && (rand_val % 100) >= check_prob {
                 continue;
             }
-            
-            // Level 0: XOR Parity (hızlı)
+
+            // Düzey 0: XOR Parity (ultra hızlı ilk kontrol)
             let ptr = addr as *const u8;
             let data = unsafe { core::slice::from_raw_parts(ptr, 4096) };
             let current_parity = compute_parity(data);
-            
+
             if let Some(stored) = integrity.get_mut(&addr) {
                 if stored.parity != current_parity {
-                    // Level 1: CRC32 doğrulama
+                    // Düzey 1: CRC32 çapraz doğrulama (false positive azaltmak için)
                     let current_crc = compute_crc32(data);
-                    
+
                     if stored.crc32 != current_crc {
-                        // VIOLATION DETECTED!
+                        // BÜTÜNLÜK İHLALİ TESPİT EDİLDİ!
                         stored.violations += 1;
-                        
+
                         crate::serial_println!(
                             "[SEAL] *** INTEGRITY VIOLATION *** {} @ {:#x}",
                             region.name, addr
                         );
-                        
+
                         log_security_event(SecurityEvent::NxViolation);
-                        
-                        // TODO: Self-healing - shadow copy'den geri yükle
+
+                        // TODO: Kendi kendini iyileştirme - gölge kopya'dan geri yükle
                         // seal_self_heal(addr);
                     }
                 }
-                
+
                 stored.last_check = current_tick;
             }
         }
     }
 }
 
-/// Self-healing (shadow copy'den geri yükle)
+/// Bütünlüğü bozulan sayfayı gölge kopyasından geri yükler (kendi kendini iyileştirme).
+///
+/// TODO: Gölge kopya desteği henüz eklenmemiştir.
+/// Gerçek implementasyonda boot sırasında oluşturulan değiştirilemez (immutable)
+/// kopya kullanılacak; ihlal edilen sayfa o kopyayla üzerine yazılacaktır.
 pub fn seal_self_heal(addr: u64) -> Result<(), &'static str> {
     crate::serial_println!("[SEAL] Self-healing page at {:#x}", addr);
-    
+
     // TODO: Shadow copy'den orijinali geri yükle
     // Bu, boot sırasında oluşturulan immutable kopyadan olacak
-    
-    // Şimdilik sadece log
+
+    // Şimdilik sadece ihlali logla
     log_security_event(SecurityEvent::NxViolation);
-    
+
     Ok(())
 }
 
-/// Eternal Seal aktif mi
+/// Eternal Seal'ın etkin olup olmadığını döndürür.
 pub fn is_seal_enabled() -> bool {
     SEAL_ENABLED.load(Ordering::SeqCst)
 }
 
-/// Sampling rate ayarla
+/// Normal öncelikli sayfalarda örnekleme oranını ayarlar (0-100 arası yüzde değeri).
+/// 100 = her tick tüm sayfalar, 5 = her tick %5 örnekleme (varsayılan).
 pub fn seal_set_sampling_rate(rate: u64) {
     SEAL_SAMPLING_RATE.store(rate.min(100), Ordering::SeqCst);
 }
 
-/// Seal istatistikleri
+/// Toplam mühürlü sayfa sayısını ve toplam ihlal sayısını döndürür.
 pub fn seal_stats() -> SealStats {
     let integrity = SEAL_INTEGRITY.lock();
     let total = integrity.len();

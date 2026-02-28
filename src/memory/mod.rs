@@ -1,7 +1,123 @@
-//! # echOS Bellek Yönetimi
+//! # echOS Bellek Yönetimi — Ana Modül
 //!
-//! Bu modül, fiziksel ve sanal bellek yönetimini sağlar.
-//! UEFI memory map'i kullanarak sayfa tablosu ve frame allocation yapar.
+//! Fiziksel ve sanal bellek yönetiminin tüm katmanlarını barındıran ana modül.
+//! UEFI/Multiboot2 bellek haritasından başlayarak kullanıcı alanı sayfa hatalarına
+//! kadar tüm bellek yönetim akışını koordine eder.
+//!
+//! ## Modül Mimarisi
+//!
+//! ```
+//! ┌─────────────────────────────────────────────────────────┐
+//! │                    Kullanıcı Alanı                      │
+//! │  mmap / munmap / mprotect / brk / madvise              │
+//! └──────────────────────┬──────────────────────────────────┘
+//!                        │ sistem çağrısı
+//! ┌──────────────────────▼──────────────────────────────────┐
+//! │              AddressSpace + VMA Yönetimi                │
+//! │  Vma { start, end, flags, kind, cow, shared }           │
+//! │  VmaKind::Anonymous | File | Image                      │
+//! └──────────────────────┬──────────────────────────────────┘
+//!                        │ sayfa hatası → handle_user_page_fault()
+//! ┌──────────────────────▼──────────────────────────────────┐
+//! │               Sayfa Hatası İşleyici                     │
+//! │  handle_anon_lazy_fault()  → sıfır sayfa tahsis        │
+//! │  handle_image_lazy_fault() → ELF segmentini yükle      │
+//! │  handle_file_lazy_fault()  → dosya sayfasını yükle     │
+//! │  handle_cow_fault()        → kopyala-yaz                │
+//! └──────────────────────┬──────────────────────────────────┘
+//!                        │
+//! ┌──────────────────────▼──────────────────────────────────┐
+//! │       THP (Transparent Huge Pages)                      │
+//! │  try_map_thp_anon() → 512 × 4KB → 1 × 2MB              │
+//! └──────────────────────┬──────────────────────────────────┘
+//!                        │
+//! ┌──────────────────────▼──────────────────────────────────┐
+//! │         MemoryManager (FrameAllocator impl)             │
+//! │  FibonacciPmm (zone: DMA / DMA32 / NORMAL)             │
+//! └──────────────────────┬──────────────────────────────────┘
+//!                        │ bellek baskısı
+//! ┌──────────────────────▼──────────────────────────────────┐
+//! │    kswapd (memory_reclaim_daemon) + LRU                 │
+//! │  LruState: active/inactive listeleri                    │
+//! │  reclaim_pages_scoped() → swap veya writeback           │
+//! └──────────────────────┬──────────────────────────────────┘
+//!                        │ son çare
+//! ┌──────────────────────▼──────────────────────────────────┐
+//! │              OOM Killer (oom.rs)                        │
+//! │  En yüksek skorlu süreci öldür                         │
+//! └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Sanal Adres Uzayı Düzeni
+//!
+//! ```
+//! 0x0000_0000_0000_0000 ─── Kullanıcı alanı başlangıcı
+//! 0x0000_1000_0000_0000 ─── USER_HEAP_BASE (yığın)
+//! 0x0000_4000_0000_0000 ─── USER_MMAP_BASE (rastgele başlangıç)
+//! 0x0000_7fff_ffff_f000 ─── USER_STACK_TOP (yığın üstü)
+//! 0x0000_7fff_ffff_ffff ─── Kullanıcı alanı sonu
+//! ─────────── Kanonik boşluk ──────────────
+//! 0xFFFF_8000_0000_0000 ─── HHDM başlangıcı (fiziksel bellek doğrudan eşlem)
+//! 0xFFFF_FFFF_8000_0000 ─── Çekirdek kodu/verisi (KASLR ile kaydırılabilir)
+//! ```
+//!
+//! ## LRU Sayfa Geri Kazanımı
+//!
+//! `kswapd` arka plan görevi su eşiği tabanlı geri kazanım yapar:
+//!
+//! ```
+//! Boş frame < yüksek eşik (toplam/5)?
+//!   → kswapd uyanır → reclaim_pages_global(128) çalıştırır
+//!
+//! Boş frame < düşük eşik (toplam/10)?
+//!   → allocate_frame() senkron geri kazanım yapar
+//!
+//! Geri kazanım kararı:
+//!   Anonim sayfa → swap alanına yaz (disk/RAM)
+//!   Dosya sayfası (paylaşımlı + kirli) → writeback kuyruğuna ekle
+//!   Dosya sayfası (özel + kirli) → swap'a yaz
+//!   Görüntü (image) sayfası → serbest bırak (yeniden yüklenebilir)
+//! ```
+//!
+//! ## COW (Copy-on-Write) Mekanizması
+//!
+//! ```
+//! fork() çağrıldı:
+//!   1. AddressSpace klonlanır, tüm yazılabilir VMA'lar cow=true olur
+//!   2. Sayfa tablosunda WRITABLE biti kaldırılır (write-protect)
+//!   3. Çocuk süreç aynı fiziksel sayfalara read-only erişir
+//!
+//! Çocuk süreci bir sayfaya yazdı:
+//!   4. Yazma hatası → handle_cow_fault(addr)
+//!   5. frame_refcount > 1 → yeni fiziksel sayfa tahsis et
+//!   6. Eski sayfayı kopyala → yeni çerçeveye yaz → WRITABLE ekle
+//!   7. Eski sayfanın refcount'u azal → 0 ise serbest bırak
+//! ```
+//!
+//! ## Sayfa Önbelleği (Page Cache)
+//!
+//! Dosya sayfaları `PageCache` yapısında önbelleğe alınır.
+//! Dirty tracking ve writeback mekanizması ile senkronize edilir:
+//!
+//! ```
+//! Dosya okundu → `read_cached_file_page()` → PageCache'e ekle
+//! Dosya yazıldı → `mark_cache_dirty()` → WritebackQueue'ya koy
+//! kswapd → `process_writeback_budget()` → diske geri yaz
+//! ```
+//!
+//! ## IOMMU ve DMA Desteği
+//!
+//! `dma_alloc()`, `dma_share()`, `iommu_register_device()` ile DMA tamponları
+//! IOMMU alanlarına kaydedilir; cihazların yalnızca kısıtlı fiziksel alanlara
+//! erişmesi garanti edilir.
+//!
+//! ## İlgili Alt Modüller:
+//! - `fibonacci_pmm.rs` — Zone tabanlı fiziksel bellek yöneticisi
+//! - `paging.rs`        — Sayfa tablosu yardımcıları (HHDM, WP, PCID)
+//! - `thp.rs`           — Şeffaf büyük sayfalar (2MB/1GB)
+//! - `oom.rs`           — OOM Killer
+//! - `zswap.rs`         — Sıkıştırılmış takas havuzu
+//! - `memfd.rs`         — Anonim dosya tanımlayıcıları ve userfaultfd
 
 use crate::drivers::ata::BLOCK_SIZE;
 use crate::drivers::linux::{select_block_device, BlockDevice};

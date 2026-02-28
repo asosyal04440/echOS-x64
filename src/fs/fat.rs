@@ -1,6 +1,30 @@
-//! # echOS FAT32/exFAT File System
+//! # echOS FAT32/exFAT Dosya Sistemi
 //!
-//! FAT32 and exFAT file system implementation for USB drives and SD cards.
+//! USB sürücüler ve SD kartlar için FAT32 ve exFAT dosya sistemi uygulaması.
+//!
+//! ## FAT32 Disk Yapısı (ASCII Diyagram)
+//! ```text
+//! FAT32 Bölüm Düzeni:
+//! ┌────────────────────────────────────────────────────────────┐
+//! │  Sektör 0      │  Önyükleme Sektörü (BPB + imza 0xAA55)  │
+//! ├────────────────────────────────────────────────────────────┤
+//! │  FSInfo         │  Serbest küme sayısı ve sonraki boş       │
+//! ├────────────────────────────────────────────────────────────┤
+//! │  Ayrılmış       │  reserved_sector_count kadar sektör       │
+//! ├────────────────────────────────────────────────────────────┤
+//! │  FAT 1          │  Dosya Tahsis Tablosu (küme zinciri)      │
+//! ├────────────────────────────────────────────────────────────┤
+//! │  FAT 2          │  FAT yedek kopyası                        │
+//! ├────────────────────────────────────────────────────────────┤
+//! │  Veri Bölgesi   │  Kümeler: Dizinler ve dosya verileri      │
+//! │  (Küme 2+)      │  Root dizin: root_cluster (genellikle 2)  │
+//! └────────────────────────────────────────────────────────────┘
+//!
+//! Küme Zinciri: FAT tablosunda her küme, bir sonraki kümeye işaret eder.
+//!   0x0FFFFFF8+ = Zincir sonu (EOF)
+//!   0x00000000  = Serbest küme
+//!   0x0FFFFFF7  = Bozuk küme
+//! ```
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -8,7 +32,7 @@ use alloc::vec;
 use alloc::format;
 
 // ============================================================================
-// FAT32 CONSTANTS
+// FAT32 SABİTLERİ
 // ============================================================================
 
 const FAT32_BOOT_SECTOR: usize = 0;
@@ -16,14 +40,14 @@ const FAT32_SIGNATURE: u16 = 0x28;
 const FAT32_CLUSTER_SIZE: u32 = 4096;
 const FAT32_ROOT_DIR_CLUSTER: u32 = 2;
 
-// FAT entry values
+// FAT girişi özel değerleri
 const FAT32_FREE: u32 = 0x00000000;
 const FAT32_RESERVED: u32 = 0x0FFFFFF0;
 const FAT32_BAD: u32 = 0x0FFFFFF7;
 const FAT32_EOF: u32 = 0x0FFFFFF8;
 const FAT32_EOF_MASK: u32 = 0x0FFFFFFF;
 
-// Directory entry attributes
+// Dizin girdisi öznitelikleri
 const ATTR_READ_ONLY: u8 = 0x01;
 const ATTR_HIDDEN: u8 = 0x02;
 const ATTR_SYSTEM: u8 = 0x04;
@@ -33,17 +57,18 @@ const ATTR_ARCHIVE: u8 = 0x20;
 const ATTR_LONG_NAME: u8 = 0x0F;
 
 // ============================================================================
-// FAT32 BOOT SECTOR
+// FAT32 ÖNYÜKLEME SEKTÖRÜ
 // ============================================================================
 
+/// FAT32 Önyükleme Sektörü - BIOS Parametre Bloğu (BPB) ve genişletilmiş BPB içerir
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct Fat32BootSector {
-    // Jump instruction and OEM name
+    // Atlama komutu ve OEM adı
     pub jump_boot: [u8; 3],
     pub oem_name: [u8; 8],
-    
-    // BIOS Parameter Block (BPB)
+
+    // BIOS Parametre Bloğu (BPB)
     pub bytes_per_sector: u16,
     pub sectors_per_cluster: u8,
     pub reserved_sector_count: u16,
@@ -56,8 +81,8 @@ pub struct Fat32BootSector {
     pub num_heads: u16,
     pub hidden_sectors: u32,
     pub total_sectors_32: u32,
-    
-    // FAT32 extended BPB
+
+    // FAT32 genişletilmiş BPB
     pub sectors_per_fat_32: u32,
     pub ext_flags: u16,
     pub fs_version: u16,
@@ -76,9 +101,10 @@ pub struct Fat32BootSector {
 }
 
 // ============================================================================
-// FAT32 DIRECTORY ENTRY
+// FAT32 DİZİN GİRDİSİ
 // ============================================================================
 
+/// FAT32 Dizin Girdisi - 8.3 dosya adı, öznitelik, zaman ve küme bilgisi tutar
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct Fat32DirEntry {
@@ -97,47 +123,47 @@ pub struct Fat32DirEntry {
 }
 
 impl Fat32DirEntry {
-    /// Check if entry is empty
+    /// Girdinin boş olup olmadığını kontrol eder (ilk bayt 0x00 ise boş)
     pub fn is_empty(&self) -> bool {
         self.name[0] == 0x00
     }
 
-    /// Check if entry is deleted
+    /// Girdinin silinmiş olup olmadığını kontrol eder (ilk bayt 0xE5 ise silinmiş)
     pub fn is_deleted(&self) -> bool {
         self.name[0] == 0xE5
     }
 
-    /// Check if entry is a directory
+    /// Girdinin bir dizin olup olmadığını kontrol eder
     pub fn is_directory(&self) -> bool {
         (self.attr & ATTR_DIRECTORY) != 0
     }
 
-    /// Check if entry is a volume label
+    /// Girdinin bir birim etiketi olup olmadığını kontrol eder
     pub fn is_volume_label(&self) -> bool {
         (self.attr & ATTR_VOLUME_ID) != 0
     }
 
-    /// Check if entry is long name
+    /// Girdinin uzun dosya adı (LFN) girdisi olup olmadığını kontrol eder
     pub fn is_long_name(&self) -> bool {
         self.attr == ATTR_LONG_NAME
     }
 
-    /// Get cluster number
+    /// Girdi için küme numarasını döndürür (yüksek ve düşük 16 bit birleşimi)
     pub fn cluster(&self) -> u32 {
         ((self.cluster_high as u32) << 16) | (self.cluster_low as u32)
     }
 
-    /// Get file size
+    /// Dosya boyutunu döndürür
     pub fn file_size(&self) -> u32 {
         self.file_size
     }
 
-    /// Get name as string (8.3 format)
+    /// Dosya adını 8.3 formatında string olarak döndürür
     pub fn name_str(&self) -> String {
         let mut result = String::new();
         let name = &self.name;
-        
-        // Extract base name (first 8 chars, strip trailing spaces)
+
+        // Ana adı al (ilk 8 karakter, sondaki boşlukları çıkar)
         let mut base_end = 8;
         while base_end > 0 && name[base_end - 1] == b' ' {
             base_end -= 1;
@@ -147,8 +173,8 @@ impl Fat32DirEntry {
                 result.push(name[i] as char);
             }
         }
-        
-        // Extract extension (last 3 chars, strip trailing spaces)
+
+        // Uzantıyı al (son 3 karakter, sondaki boşlukları çıkar)
         let mut ext_end = 3;
         while ext_end > 0 && name[8 + ext_end - 1] == b' ' {
             ext_end -= 1;
@@ -161,15 +187,16 @@ impl Fat32DirEntry {
                 }
             }
         }
-        
+
         result
     }
 }
 
 // ============================================================================
-// FAT32 FILE SYSTEM
+// FAT32 DOSYA SİSTEMİ
 // ============================================================================
 
+/// FAT32 Dosya Sistemi örneği - bölüm parametrelerini ve hesaplanan ofsesleri tutar
 #[derive(Clone, Debug)]
 pub struct Fat32Fs {
     pub boot_sector: Fat32BootSector,
@@ -183,30 +210,30 @@ pub struct Fat32Fs {
 }
 
 impl Fat32Fs {
-    /// Parse FAT32 boot sector
+    /// FAT32 önyükleme sektörünü çözümler ve dosya sistemi parametrelerini hesaplar
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 512 {
             return None;
         }
 
         let boot: Fat32BootSector = unsafe { core::ptr::read(data.as_ptr() as *const Fat32BootSector) };
-        
-        // Validate signature
+
+        // İmzayı doğrula
         if boot.signature != 0xAA55 {
             return None;
         }
 
-        // Check for FAT32
+        // FAT32 parametrelerini hesapla
         let bytes_per_sector = boot.bytes_per_sector as u32;
         let sectors_per_cluster = boot.sectors_per_cluster as u32;
         let reserved_sectors = boot.reserved_sector_count as u32;
         let sectors_per_fat = boot.sectors_per_fat_32;
-        
+
         let fat_start = reserved_sectors;
         let data_start = fat_start + (boot.num_fats as u32 * sectors_per_fat);
         let cluster_size = bytes_per_sector * sectors_per_cluster;
-        
-        // Calculate total clusters
+
+        // Toplam küme sayısını hesapla
         let total_sectors = if boot.total_sectors_16 != 0 {
             boot.total_sectors_16 as u32
         } else {
@@ -227,7 +254,7 @@ impl Fat32Fs {
         })
     }
 
-    /// Read FAT entry
+    /// FAT tablosundaki belirtilen kümenin değerini okur
     pub fn read_fat_entry(&self, fat_data: &[u8], cluster: u32) -> u32 {
         let offset = (cluster * 4) as usize;
         if offset + 4 > fat_data.len() {
@@ -236,7 +263,7 @@ impl Fat32Fs {
         u32::from_le_bytes([fat_data[offset], fat_data[offset + 1], fat_data[offset + 2], fat_data[offset + 3]]) & 0x0FFFFFFF
     }
 
-    /// Write FAT entry
+    /// FAT tablosundaki belirtilen kümenin değerini yazar
     pub fn write_fat_entry(&self, fat_data: &mut [u8], cluster: u32, value: u32) {
         let offset = (cluster * 4) as usize;
         if offset + 4 <= fat_data.len() {
@@ -249,22 +276,22 @@ impl Fat32Fs {
         }
     }
 
-    /// Check if cluster is EOF
+    /// Kümenin zincir sonu olup olmadığını kontrol eder (0x0FFFFFF8 ve üzeri)
     pub fn is_eof(&self, cluster: u32) -> bool {
         cluster >= FAT32_EOF
     }
 
-    /// Check if cluster is free
+    /// Kümenin serbest olup olmadığını kontrol eder (değer 0)
     pub fn is_free(&self, cluster: u32) -> bool {
         cluster == FAT32_FREE
     }
 
-    /// Convert cluster to sector
+    /// Küme numarasını sektör numarasına dönüştürür
     pub fn cluster_to_sector(&self, cluster: u32) -> u32 {
         self.data_start + (cluster - 2) * (self.cluster_size / self.sector_size)
     }
 
-    /// Find free cluster
+    /// FAT tablosunda ilk serbest kümeyi bulur
     pub fn find_free_cluster(&self, fat_data: &[u8]) -> Option<u32> {
         for cluster in 2..self.total_clusters {
             if self.read_fat_entry(fat_data, cluster) == FAT32_FREE {
@@ -274,7 +301,7 @@ impl Fat32Fs {
         None
     }
 
-    /// Allocate cluster chain
+    /// Belirtilen sayıda kümeyi zincirleme olarak tahsis eder
     pub fn allocate_clusters(&self, fat_data: &mut [u8], count: u32) -> Option<u32> {
         let mut first_cluster: Option<u32> = None;
         let mut prev_cluster: u32 = 0;
@@ -285,29 +312,29 @@ impl Fat32Fs {
                 if first_cluster.is_none() {
                     first_cluster = Some(cluster);
                 } else {
-                    // Link to previous cluster
+                    // Önceki kümeye bağla
                     self.write_fat_entry(fat_data, prev_cluster, cluster);
                 }
                 prev_cluster = cluster;
                 allocated += 1;
-                
+
                 if allocated >= count {
-                    // Mark end of chain
+                    // Zincir sonunu işaretle
                     self.write_fat_entry(fat_data, cluster, FAT32_EOF);
                     return first_cluster;
                 }
             }
         }
 
-        // Not enough free clusters
+        // Yeterli serbest küme yok
         if allocated > 0 {
-            // Mark end of partial chain
+            // Kısmi zincirin sonunu işaretle
             self.write_fat_entry(fat_data, prev_cluster, FAT32_EOF);
         }
         first_cluster
     }
 
-    /// Free cluster chain
+    /// Başlangıç kümesinden itibaren tüm küme zincirini serbest bırakır
     pub fn free_clusters(&self, fat_data: &mut [u8], start_cluster: u32) {
         let mut cluster = start_cluster;
         while !self.is_eof(cluster) && !self.is_free(cluster) {
@@ -319,9 +346,10 @@ impl Fat32Fs {
 }
 
 // ============================================================================
-// FAT32 FILE
+// FAT32 DOSYASI
 // ============================================================================
 
+/// FAT32 dosya/dizin bilgisi - dizin girdisinden oluşturulan yapı
 #[derive(Clone, Debug)]
 pub struct Fat32File {
     pub name: String,
@@ -332,6 +360,7 @@ pub struct Fat32File {
 }
 
 impl Fat32File {
+    /// Dizin girdisinden dosya bilgisi oluşturur
     pub fn from_entry(entry: &Fat32DirEntry) -> Self {
         Fat32File {
             name: entry.name_str(),
@@ -344,15 +373,16 @@ impl Fat32File {
 }
 
 // ============================================================================
-// exFAT CONSTANTS
+// exFAT SABİTLERİ
 // ============================================================================
 
 const EXFAT_SIGNATURE: u32 = 0xAA550000;
 
 // ============================================================================
-// exFAT BOOT SECTOR
+// exFAT ÖNYÜKLEME SEKTÖRÜ
 // ============================================================================
 
+/// exFAT Önyükleme Sektörü - büyük birimler için geliştirilmiş FAT yapısı
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct ExFatBootSector {
@@ -379,9 +409,10 @@ pub struct ExFatBootSector {
 }
 
 // ============================================================================
-// exFAT FILE ATTRIBUTE
+// exFAT DOSYA ÖZNİTELİĞİ
 // ============================================================================
 
+/// exFAT Dosya Öznitelik Girdisi - oluşturma/değiştirme zamanları ve özellikler
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct ExFatFileAttribute {
@@ -401,9 +432,10 @@ pub struct ExFatFileAttribute {
 }
 
 // ============================================================================
-// exFAT STREAM EXTENSION
+// exFAT AKIŞ UZANTISI
 // ============================================================================
 
+/// exFAT Akış Uzantısı Girdisi - veri uzunluğu ve küme bilgisi tutar
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct ExFatStreamExtension {
@@ -420,9 +452,10 @@ pub struct ExFatStreamExtension {
 }
 
 // ============================================================================
-// exFAT FILE NAME
+// exFAT DOSYA ADI
 // ============================================================================
 
+/// exFAT Dosya Adı Girdisi - UTF-16LE kodlamalı dosya adını tutar
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct ExFatFileName {
@@ -432,9 +465,10 @@ pub struct ExFatFileName {
 }
 
 // ============================================================================
-// exFAT FILE SYSTEM
+// exFAT DOSYA SİSTEMİ
 // ============================================================================
 
+/// exFAT Dosya Sistemi örneği - parametreler ve hesaplanan değerler
 #[derive(Clone, Debug)]
 pub struct ExFatFs {
     pub boot_sector: ExFatBootSector,
@@ -448,15 +482,15 @@ pub struct ExFatFs {
 }
 
 impl ExFatFs {
-    /// Parse exFAT boot sector
+    /// exFAT önyükleme sektörünü çözümler ve dosya sistemi parametrelerini hesaplar
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 512 {
             return None;
         }
 
         let boot: ExFatBootSector = unsafe { core::ptr::read(data.as_ptr() as *const ExFatBootSector) };
-        
-        // Validate signature
+
+        // İmzayı doğrula
         if boot.signature != 0xAA55 {
             return None;
         }
@@ -476,7 +510,7 @@ impl ExFatFs {
         })
     }
 
-    /// Read FAT entry
+    /// FAT tablosundaki belirtilen kümenin değerini okur
     pub fn read_fat_entry(&self, fat_data: &[u8], cluster: u32) -> u32 {
         let offset = (cluster * 4) as usize;
         if offset + 4 > fat_data.len() {
@@ -485,7 +519,7 @@ impl ExFatFs {
         u32::from_le_bytes([fat_data[offset], fat_data[offset + 1], fat_data[offset + 2], fat_data[offset + 3]])
     }
 
-    /// Write FAT entry
+    /// FAT tablosundaki belirtilen kümenin değerini yazar
     pub fn write_fat_entry(&self, fat_data: &mut [u8], cluster: u32, value: u32) {
         let offset = (cluster * 4) as usize;
         if offset + 4 <= fat_data.len() {
@@ -497,26 +531,27 @@ impl ExFatFs {
         }
     }
 
-    /// Check if cluster is EOF
+    /// Kümenin zincir sonu olup olmadığını kontrol eder (0xFFFFFFF8 ve üzeri)
     pub fn is_eof(&self, cluster: u32) -> bool {
         cluster >= 0xFFFFFFF8
     }
 
-    /// Check if cluster is free
+    /// Kümenin serbest olup olmadığını kontrol eder (değer 0)
     pub fn is_free(&self, cluster: u32) -> bool {
         cluster == 0
     }
 
-    /// Convert cluster to sector
+    /// Küme numarasını sektör numarasına dönüştürür
     pub fn cluster_to_sector(&self, cluster: u32) -> u32 {
         self.cluster_heap_offset + (cluster - 2) * (self.cluster_size / self.sector_size)
     }
 }
 
 // ============================================================================
-// FILE SYSTEM ERROR
+// DOSYA SİSTEMİ HATASI
 // ============================================================================
 
+/// FAT/exFAT işlemlerinde oluşabilecek hata türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FatError {
     InvalidBootSector,
@@ -531,7 +566,7 @@ pub enum FatError {
 }
 
 // ============================================================================
-// FAT MANAGER
+// FAT YÖNETİCİSİ
 // ============================================================================
 
 use spin::Mutex;
@@ -539,20 +574,20 @@ use spin::Mutex;
 static FAT32_INSTANCES: Mutex<Vec<Fat32Fs>> = Mutex::new(Vec::new());
 static EXFAT_INSTANCES: Mutex<Vec<ExFatFs>> = Mutex::new(Vec::new());
 
-/// Detect file system type from boot sector
+/// Önyükleme sektöründen dosya sistemi türünü tespit eder
 pub fn detect_filesystem(data: &[u8]) -> Option<FilesystemType> {
     if data.len() < 512 {
         return None;
     }
 
-    // Check for exFAT first (has specific signature pattern)
+    // Önce exFAT'ı kontrol et (özel imza dizisi: "EXFAT   ")
     if data[3..11] == *b"EXFAT   " {
         return Some(FilesystemType::ExFat);
     }
 
-    // Check for FAT32
+    // FAT32'yi kontrol et
     if data[510] == 0x55 && data[511] == 0xAA {
-        // Check file system type string
+        // Dosya sistemi türü dizesini kontrol et
         if &data[54..62] == b"FAT32   " || &data[82..90] == b"FAT32   " {
             return Some(FilesystemType::Fat32);
         }
@@ -561,18 +596,19 @@ pub fn detect_filesystem(data: &[u8]) -> Option<FilesystemType> {
     None
 }
 
+/// Desteklenen FAT tabanlı dosya sistemi türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilesystemType {
     Fat32,
     ExFat,
 }
 
-/// Initialize FAT file system
+/// FAT dosya sistemi modülünü başlatır
 pub fn init() {
-    crate::serial_println!("[FAT] File system module initialized");
+    crate::serial_println!("[FAT] Dosya sistemi modülü başlatıldı");
 }
 
-/// Mount FAT32 file system
+/// FAT32 dosya sistemini bağlar ve örnekler listesine ekler
 pub fn mount_fat32(data: &[u8]) -> Option<usize> {
     let fs = Fat32Fs::parse(data)?;
     let mut instances = FAT32_INSTANCES.lock();
@@ -580,7 +616,7 @@ pub fn mount_fat32(data: &[u8]) -> Option<usize> {
     Some(instances.len() - 1)
 }
 
-/// Mount exFAT file system
+/// exFAT dosya sistemini bağlar ve örnekler listesine ekler
 pub fn mount_exfat(data: &[u8]) -> Option<usize> {
     let fs = ExFatFs::parse(data)?;
     let mut instances = EXFAT_INSTANCES.lock();
@@ -588,12 +624,12 @@ pub fn mount_exfat(data: &[u8]) -> Option<usize> {
     Some(instances.len() - 1)
 }
 
-/// Get FAT32 instance
+/// İndekse göre FAT32 örneğini döndürür
 pub fn get_fat32(index: usize) -> Option<Fat32Fs> {
     FAT32_INSTANCES.lock().get(index).cloned()
 }
 
-/// Get exFAT instance
+/// İndekse göre exFAT örneğini döndürür
 pub fn get_exfat(index: usize) -> Option<ExFatFs> {
     EXFAT_INSTANCES.lock().get(index).cloned()
 }

@@ -1,6 +1,36 @@
-//! # Power Management S3/S4
+//! # Güç Yönetimi S3/S4 (Power Management)
 //!
-//! Suspend to RAM (S3) and Suspend to Disk (S4) support.
+//! RAM'e Askı (S3 - Suspend to RAM) ve Diske Askı (S4 - Suspend to Disk) desteği.
+//!
+//! ## ACPI Uyku Durumları
+//! ```ascii
+//! S0: Çalışıyor (Working)
+//! S1: Uyku — işlemci bağlamı korunuyor
+//! S2: Uyku — işlemci bağlamı kaybedildi
+//! S3: RAM'e Askı — tüm sistem durumu RAM'de saklanır
+//! S4: Diske Askı — sistem durumu diske yazılır, güç tamamen kesilir
+//! S5: Yazılımsal Kapatma (Soft Off)
+//! ```
+//!
+//! ## Uyku Geçiş Akışı
+//! ```ascii
+//! enter_state(S3/S4)
+//!      |
+//!      v
+//! prepare_sleep() — işlemleri dondur, aygıtları askıya al
+//!      |
+//!      v
+//! save_context() — CPU yazmaçlarını kaydet
+//!      |            (S4 için → write_suspend_image())
+//!      v
+//! enter_sleep() — PM1_CNT yazmaçlarına uyku türü yaz
+//!      |
+//!      v
+//! [Donanım Gücü Kesilir / RAM Yenileme Devam Eder]
+//!      |
+//!      v (Uyandırma sinyali)
+//! wake_from_sleep() — bağlamı geri yükle, işlemleri çöz
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,18 +40,22 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// SLEEP STATE CONSTANTS
+// UYKU DURUMU SABİTLERİ
 // ============================================================================
 
-/// Sleep states
-pub const ACPI_STATE_S0: u8 = 0;  // Working
-pub const ACPI_STATE_S1: u8 = 1;  // Sleeping (Processor Context Maintained)
-pub const ACPI_STATE_S2: u8 = 2;  // Sleeping (Processor Context Lost)
-pub const ACPI_STATE_S3: u8 = 3;  // Suspend to RAM
-pub const ACPI_STATE_S4: u8 = 4;  // Suspend to Disk
-pub const ACPI_STATE_S5: u8 = 5;  // Soft Off
+/// ACPI uyku durumu sabitleri.
+///
+/// Her sabit bir ACPI güç durumuna karşılık gelir; sistem yönetimine göre ayarlanır.
+pub const ACPI_STATE_S0: u8 = 0;  // Çalışıyor
+pub const ACPI_STATE_S1: u8 = 1;  // Uyku (İşlemci Bağlamı Korunuyor)
+pub const ACPI_STATE_S2: u8 = 2;  // Uyku (İşlemci Bağlamı Kaybedildi)
+pub const ACPI_STATE_S3: u8 = 3;  // RAM'e Askı
+pub const ACPI_STATE_S4: u8 = 4;  // Diske Askı
+pub const ACPI_STATE_S5: u8 = 5;  // Yazılımsal Kapatma
 
-/// Sleep type values (from FADT)
+/// FADT'tan alınan uyku türü değerleri (SLP_TYP alanı).
+///
+/// Bu değerler PM1_CNT_BLK yazmacına yazılarak uyku geçişini tetikler.
 pub const SLEEP_TYPE_S0: u8 = 0;
 pub const SLEEP_TYPE_S1: u8 = 1;
 pub const SLEEP_TYPE_S2: u8 = 2;
@@ -29,39 +63,48 @@ pub const SLEEP_TYPE_S3: u8 = 3;
 pub const SLEEP_TYPE_S4: u8 = 4;
 pub const SLEEP_TYPE_S5: u8 = 5;
 
-/// PM1 control register bits
+/// PM1 denetim yazmacı bit maskeleri.
+///
+/// PM1a_CNT_BLK ve PM1b_CNT_BLK yazmaçlarına yazılan değerlerin formatı:
+/// - `SLP_TYP`: Uyku türü (bit 12:10)
+/// - `SLP_EN`: Uyku etkinleştirme biti — set edildiğinde uyku başlar (bit 13)
 pub const PM1_SLP_TYP_SHIFT: u16 = 10;
 pub const PM1_SLP_EN: u16 = 0x2000;
 pub const PM1_SLP_TYP_MASK: u16 = 0x1C00;
 
-/// PM1 status register bits
-pub const PM1_WAK_STS: u16 = 0x8000;
-pub const PM1_PWRBTN_STS: u16 = 0x0100;
-pub const PM1_RTC_STS: u16 = 0x0400;
+/// PM1 durum yazmacı bit maskeleri — uyandırma olaylarını tespit etmek için kullanılır.
+pub const PM1_WAK_STS: u16 = 0x8000;    // Uyandırma durumu biti
+pub const PM1_PWRBTN_STS: u16 = 0x0100; // Güç düğmesi durumu biti
+pub const PM1_RTC_STS: u16 = 0x0400;    // RTC alarm durumu biti
 
 // ============================================================================
-// SLEEP STATE INFO
+// UYKU DURUMU BİLGİSİ
 // ============================================================================
 
+/// Tek bir ACPI uyku durumuna ait yapılandırma ve destek bilgisi.
+///
+/// `sleep_type_a` ve `sleep_type_b` FADT'tan okunur; PM1a ve PM1b yazmacına yazılır.
+/// `wake_vector` uyandırma sonrası çalıştırılacak kodun adresidir.
 #[derive(Clone, Debug)]
 pub struct SleepStateInfo {
-    /// State number
+    /// Uyku durumu numarası (0-5)
     pub state: u8,
-    /// Sleep type A
+    /// PM1a için uyku türü değeri (FADT'tan)
     pub sleep_type_a: u8,
-    /// Sleep type B
+    /// PM1b için uyku türü değeri (FADT'tan)
     pub sleep_type_b: u8,
-    /// Supported
+    /// Bu uyku durumu destekleniyor mu?
     pub supported: bool,
-    /// Wake vector address
+    /// Uyandırma vektörü adresi (fiziksel)
     pub wake_vector: u64,
-    /// Wake vector for S3
+    /// S3 uyandırma vektörü
     pub wake_vector_s3: u64,
-    /// Wake vector for S4
+    /// S4 uyandırma vektörü
     pub wake_vector_s4: u64,
 }
 
 impl SleepStateInfo {
+    /// Belirtilen uyku durumu için başlangıç değerleriyle `SleepStateInfo` oluşturur.
     pub fn new(state: u8) -> Self {
         Self {
             state,
@@ -76,39 +119,44 @@ impl SleepStateInfo {
 }
 
 // ============================================================================
-// SUSPEND CONTEXT
+// ASKIYA ALMA BAĞLAMI
 // ============================================================================
 
+/// Askıya alma (suspend) sırasında kaydedilen CPU bağlamı.
+///
+/// S3/S4'ten dönüşte `restore()` çağrılarak CPU durumu geri yüklenir.
+/// Kontrol yazmaçları, genel amaçlı yazmaçlar, segment tabloları ve FPU durumu içerir.
 #[derive(Clone, Debug)]
 pub struct SuspendContext {
-    /// Processor state
+    /// İşlemci kontrol yazmaçları
     pub cr0: u64,
     pub cr2: u64,
     pub cr3: u64,
     pub cr4: u64,
     pub efer: u64,
-    /// General purpose registers
+    /// Genel amaçlı yazmaçlar
     pub rax: u64, pub rbx: u64, pub rcx: u64, pub rdx: u64,
     pub rsi: u64, pub rdi: u64, pub rbp: u64, pub rsp: u64,
     pub r8: u64, pub r9: u64, pub r10: u64, pub r11: u64,
     pub r12: u64, pub r13: u64, pub r14: u64, pub r15: u64,
-    /// RIP
+    /// Talimat işaretçisi ve bayraklar
     pub rip: u64,
     pub rflags: u64,
-    /// IDT
+    /// Kesme tanımlayıcı tablosu (IDT) tabanı ve limiti
     pub idtr: (u64, u16),
-    /// GDT
+    /// Küresel tanımlayıcı tablosu (GDT) tabanı ve limiti
     pub gdtr: (u64, u16),
-    /// Page tables
+    /// Sayfa tablosu kök adresi (PML4)
     pub pml4: u64,
-    /// LAPIC state
+    /// Yerel APIC kimliği ve zamanlayıcı durumu
     pub lapic_id: u32,
     pub lapic_timer: u64,
-    /// FPU/SSE state
+    /// FPU/SSE durum alanı (512 bayt, FXSAVE formatı)
     pub fpu_state: [u8; 512],
 }
 
 impl SuspendContext {
+    /// Sıfırlanmış bir `SuspendContext` oluşturur.
     pub fn new() -> Self {
         Self {
             cr0: 0, cr2: 0, cr3: 0, cr4: 0, efer: 0,
@@ -126,9 +174,11 @@ impl SuspendContext {
         }
     }
 
-    /// Save current state
+    /// Geçerli CPU durumunu kaydeder.
+    ///
+    /// Gerçek uygulamada `mov {}, cr0` vb. assembly talimatları kullanılmalıdır.
     pub fn save(&mut self) {
-        // Would save actual CPU state
+        // Gerçek CPU durumu kaydedilecek
         // unsafe {
         //     core::arch::asm!(
         //         "mov {0}, cr0",
@@ -141,38 +191,45 @@ impl SuspendContext {
         // }
     }
 
-    /// Restore saved state
+    /// Kaydedilmiş CPU durumunu geri yükler.
+    ///
+    /// S3/S4 uyandırma sonrası çağrılır; yazmaçlar kayıtlı değerlere döner.
     pub fn restore(&self) {
-        // Would restore actual CPU state
+        // Gerçek CPU durumu geri yüklenecek
     }
 }
 
 // ============================================================================
-// SWAP HEADER (for S4)
+// TAKAS BAŞLIĞI (S4 için)
 // ============================================================================
 
+/// S4 (Diske Askı) görüntü başlığı — takas aygıtına yazılan askı görüntüsünün başlığıdır.
+///
+/// `magic` alanı 0x50535553 ("SUSP") değerine sahip olmalıdır;
+/// bu değer uyandırma sırasında geçerli bir askı görüntüsü olduğunu doğrular.
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct SwapHeader {
-    /// Magic
-    pub magic: u32,        // "SUSP"
-    /// Version
+    /// Sihirli sayı: "SUSP" (0x50535553)
+    pub magic: u32,
+    /// Görüntü format sürümü
     pub version: u32,
-    /// Image size
+    /// Görüntü toplam boyutu (bayt)
     pub image_size: u64,
-    /// Page count
+    /// Görüntüdeki sayfa sayısı
     pub page_count: u64,
-    /// Checksum
+    /// Bütünlük doğrulama sağlama toplamı
     pub checksum: u32,
-    /// Timestamp
+    /// Görüntünün oluşturulma zaman damgası (tick)
     pub timestamp: u64,
-    /// Resume device
+    /// Uyandırma aygıtı tanımlayıcısı
     pub resume_device: u64,
-    /// Original boot parameters
+    /// Orijinal önyükleme parametreleri (4 KiB)
     pub boot_params: [u8; 4096],
 }
 
 impl SwapHeader {
+    /// Varsayılan değerlerle yeni bir takas başlığı oluşturur.
     pub fn new() -> Self {
         Self {
             magic: 0x50535553, // "SUSP"
@@ -188,32 +245,38 @@ impl SwapHeader {
 }
 
 // ============================================================================
-// POWER STATE MANAGER
+// GÜÇ DURUMU YÖNETİCİSİ
 // ============================================================================
 
+/// Güç Durumu Yöneticisi — ACPI uyku durumları ve askıya alma döngüsünü yönetir.
+///
+/// PM1a/PM1b denetim ve durum blok adresleri FADT'tan alınır.
+/// Her CPU için ayrı askıya alma bağlamları tutulur.
+/// S4 için disk tabanlı askıya alma görüntüsü dosyası yapılandırılabilir.
 pub struct PowerStateManager {
-    /// Sleep state info
+    /// Desteklenen uyku durumları ve yapılandırma bilgisi
     pub sleep_states: Mutex<BTreeMap<u8, SleepStateInfo>>,
-    /// PM1a control block address
+    /// PM1a denetim bloğu I/O adresi
     pub pm1a_cnt_blk: AtomicU64,
-    /// PM1b control block address
+    /// PM1b denetim bloğu I/O adresi
     pub pm1b_cnt_blk: AtomicU64,
-    /// PM1a status block address
+    /// PM1a olay bloğu I/O adresi (durum/etkinleştirme yazmaçları)
     pub pm1a_evt_blk: AtomicU64,
-    /// PM1b status block address
+    /// PM1b olay bloğu I/O adresi
     pub pm1b_evt_blk: AtomicU64,
-    /// Suspend context for each CPU
+    /// CPU başına askıya alma bağlamları
     pub suspend_contexts: Mutex<Vec<SuspendContext>>,
-    /// Is suspended
+    /// Sistem askıya alındı mı?
     pub suspended: AtomicBool,
-    /// Current state
+    /// Geçerli güç durumu (ACPI_STATE_S*)
     pub current_state: AtomicU32,
-    /// Swap device for S4
+    /// S4 için takas aygıtı yolu
     pub swap_device: Mutex<Option<String>>,
-    /// Statistics
+    /// Güç yönetimi istatistikleri
     pub stats: Mutex<PmStats>,
 }
 
+/// Güç yönetimi istatistikleri — uyku/uyandırma döngüsünü izlemek için.
 #[derive(Clone, Debug, Default)]
 pub struct PmStats {
     pub s3_entries: u64,
@@ -224,6 +287,7 @@ pub struct PmStats {
 }
 
 impl PowerStateManager {
+    /// Sabit başlatıcı — global static ataması için `const fn` gereklidir.
     pub const fn new() -> Self {
         Self {
             sleep_states: Mutex::new(BTreeMap::new()),
@@ -239,20 +303,22 @@ impl PowerStateManager {
         }
     }
 
-    /// Initialize from FADT
+    /// FADT adreslerinden güç yöneticisini başlatır.
+    ///
+    /// PM1 yazmaç adreslerini kaydeder, S3/S4/S5 durumlarını desteklenen olarak işaretler.
     pub fn init(&self, pm1a_cnt: u64, pm1b_cnt: u64, pm1a_evt: u64, pm1b_evt: u64) {
         self.pm1a_cnt_blk.store(pm1a_cnt, Ordering::SeqCst);
         self.pm1b_cnt_blk.store(pm1b_cnt, Ordering::SeqCst);
         self.pm1a_evt_blk.store(pm1a_evt, Ordering::SeqCst);
         self.pm1b_evt_blk.store(pm1b_evt, Ordering::SeqCst);
 
-        // Initialize sleep states
+        // Uyku durumlarını başlat
         let mut states = self.sleep_states.lock();
         for i in 1..=5 {
             states.insert(i, SleepStateInfo::new(i));
         }
 
-        // Mark supported states (would read from FADT)
+        // FADT'tan okunacak desteklenen durumları işaretle
         if let Some(s3) = states.get_mut(&3) {
             s3.supported = true;
         }
@@ -266,7 +332,10 @@ impl PowerStateManager {
         crate::serial_println!("[PM] Power state manager initialized");
     }
 
-    /// Enter sleep state
+    /// Belirtilen ACPI uyku durumuna geçer.
+    ///
+    /// Durum desteklenmiyorsa `UnsupportedState` hatası döner.
+    /// Sıra: uyku hazırlığı → bağlam kaydı → (S4 için görüntü yazma) → uyku girişi → uyandırma.
     pub fn enter_state(&self, state: u8) -> Result<(), PmError> {
         let states = self.sleep_states.lock();
         let info = states.get(&state).ok_or(PmError::UnsupportedState)?;
@@ -277,69 +346,71 @@ impl PowerStateManager {
 
         crate::serial_println!("[PM] Entering S{}", state);
 
-        // Prepare for sleep
+        // Uyku için hazırlık yap
         self.prepare_sleep(state)?;
 
-        // Save context
+        // Bağlamı kaydet
         self.save_context()?;
 
-        // For S4, write to swap
+        // S4 için takas alanına görüntü yaz
         if state == ACPI_STATE_S4 {
             self.write_suspend_image()?;
         }
 
-        // Enter sleep
+        // Uyku durumuna gir
         self.enter_sleep(info)?;
 
-        // We should not reach here for S3/S4
-        // For S1, we continue here after wake
+        // S3/S4 için buraya ulaşılmamalı
+        // S1 için uyandırma sonrası buradan devam edilir
         self.wake_from_sleep(state)?;
 
         Ok(())
     }
 
-    /// Prepare for sleep
+    /// Uyku öncesi hazırlık: işlemleri dondurur, aygıtları askıya alır, kesmelereri devre dışı bırakır.
     fn prepare_sleep(&self, state: u8) -> Result<(), PmError> {
-        // Freeze processes
+        // İşlemleri dondur
         crate::serial_println!("[PM] Freezing processes for S{}", state);
 
-        // Suspend devices
+        // Aygıtları askıya al
         crate::serial_println!("[PM] Suspending devices");
 
-        // Disable interrupts
+        // Kesmelereri devre dışı bırak
         // x86_64::instructions::interrupts::disable();
 
-        // Save LAPIC state
-        // Save HPET state
-        // Save other hardware state
+        // LAPIC durumunu kaydet
+        // HPET durumunu kaydet
+        // Diğer donanım durumunu kaydet
 
         Ok(())
     }
 
-    /// Save CPU context
+    /// CPU bağlamını kaydeder — her CPU için bir `SuspendContext` oluşturur.
     fn save_context(&self) -> Result<(), PmError> {
         let mut contexts = self.suspend_contexts.lock();
 
-        // For each CPU, save context
+        // Her CPU için bağlam kaydet
         contexts.clear();
         contexts.push(SuspendContext::new());
 
-        // Save context for CPU 0
+        // CPU 0 bağlamını kaydet
         contexts[0].save();
 
         Ok(())
     }
 
-    /// Write suspend image to swap (S4)
+    /// Askıya alma görüntüsünü takas aygıtına yazar (S4).
+    ///
+    /// Görüntü boyutunu hesaplar, bellek sayfalarını yazar ve başlığı kaydeder.
     fn write_suspend_image(&self) -> Result<(), PmError> {
         crate::serial_println!("[PM] Writing suspend image to disk");
 
         let mut header = SwapHeader::new();
         header.timestamp = crate::task::scheduler::get_ticks();
 
-        // Calculate image size
-        // Write memory pages to swap
-        // Write header
+        // Görüntü boyutunu hesapla
+        // Bellek sayfalarını takas alanına yaz
+        // Başlığı yaz
 
         let mut stats = self.stats.lock();
         stats.s4_entries += 1;
@@ -347,24 +418,25 @@ impl PowerStateManager {
         Ok(())
     }
 
-    /// Enter sleep state
+    /// PM1 denetim yazmaçlarına uyku türü ve etkinleştirme biti yazarak uyku durumuna girer.
+    ///
+    /// `SLP_TYP` ve `SLP_EN` bitleri set edildikten sonra donanım uyku durumuna geçer.
     fn enter_sleep(&self, info: &SleepStateInfo) -> Result<(), PmError> {
         let pm1a_cnt = self.pm1a_cnt_blk.load(Ordering::SeqCst);
         let pm1b_cnt = self.pm1b_cnt_blk.load(Ordering::SeqCst);
 
-        // Write sleep type to PM1 control registers
+        // PM1 denetim yazmaçlarına uyku türü yaz
         let sleep_type_a = (info.sleep_type_a as u16) << PM1_SLP_TYP_SHIFT;
         let sleep_type_b = (info.sleep_type_b as u16) << PM1_SLP_TYP_SHIFT;
 
-        // PM1a_CNT_BLK
-        // Write sleep_type_a | PM1_SLP_EN
+        // PM1a_CNT_BLK'a yaz: sleep_type_a | PM1_SLP_EN
 
-        // PM1b_CNT_BLK (if exists)
+        // PM1b_CNT_BLK'a yaz (varsa)
         if pm1b_cnt != 0 {
-            // Write sleep_type_b | PM1_SLP_EN
+            // sleep_type_b | PM1_SLP_EN yaz
         }
 
-        // Wait for sleep
+        // Uykuyu bekle
         // unsafe { core::arch::asm!("hlt"); }
 
         self.suspended.store(true, Ordering::SeqCst);
@@ -378,26 +450,26 @@ impl PowerStateManager {
         Ok(())
     }
 
-    /// Wake from sleep
+    /// Uyku durumundan uyandırma: bağlamı geri yükler, aygıtları sürdürür, işlemleri çözer.
     fn wake_from_sleep(&self, state: u8) -> Result<(), PmError> {
         crate::serial_println!("[PM] Waking from S{}", state);
 
-        // Restore context
+        // Bağlamı geri yükle
         let contexts = self.suspend_contexts.lock();
         if !contexts.is_empty() {
             contexts[0].restore();
         }
 
-        // Restore devices
+        // Aygıtları sürdür
         crate::serial_println!("[PM] Resuming devices");
 
-        // Thaw processes
+        // İşlemleri çöz
         crate::serial_println!("[PM] Thawing processes");
 
         self.suspended.store(false, Ordering::SeqCst);
         self.current_state.store(ACPI_STATE_S0 as u32, Ordering::SeqCst);
 
-        // Update statistics
+        // İstatistikleri güncelle
         let mut stats = self.stats.lock();
         stats.wake_events += 1;
         if state == ACPI_STATE_S3 {
@@ -409,16 +481,18 @@ impl PowerStateManager {
         Ok(())
     }
 
-    /// Check wake events
+    /// PM1 durum yazmacını okuyarak bekleyen uyandırma olaylarını döner.
+    ///
+    /// Her uyandırma kaynağı (güç düğmesi, RTC alarmı vb.) için bit maskesi döner.
     pub fn check_wake_events(&self) -> Vec<u16> {
         let mut events = Vec::new();
 
         let pm1a_evt = self.pm1a_evt_blk.load(Ordering::SeqCst);
 
-        // Read PM1 status register
+        // PM1 durum yazmacını oku
         // let status: u16 = unsafe { core::ptr::read_volatile(pm1a_evt as *const u16) };
 
-        // Check wake status
+        // Uyandırma durumlarını kontrol et
         // if status & PM1_WAK_STS != 0 { events.push(PM1_WAK_STS); }
         // if status & PM1_PWRBTN_STS != 0 { events.push(PM1_PWRBTN_STS); }
         // if status & PM1_RTC_STS != 0 { events.push(PM1_RTC_STS); }
@@ -426,12 +500,12 @@ impl PowerStateManager {
         events
     }
 
-    /// Set swap device for S4
+    /// S4 uyku görüntüsünün yazılacağı takas aygıtını ayarlar.
     pub fn set_swap_device(&self, device: &str) {
         *self.swap_device.lock() = Some(String::from(device));
     }
 
-    /// Get supported states
+    /// Sistemde desteklenen uyku durumlarının listesini döner.
     pub fn get_supported_states(&self) -> Vec<u8> {
         self.sleep_states.lock()
             .iter()
@@ -440,20 +514,24 @@ impl PowerStateManager {
             .collect()
     }
 
-    /// Get statistics
+    /// Güç yönetimi istatistiklerinin anlık görüntüsünü döner.
     pub fn get_stats(&self) -> PmStats {
         self.stats.lock().clone()
     }
 }
 
+/// Küresel güç durumu yöneticisi örneği.
+///
+/// `lazy_static` ile ilk erişimde oluşturulur; tüm güç yönetimi işlemleri bu örnek üzerinden yapılır.
 lazy_static::lazy_static! {
     pub static ref PM_STATE: PowerStateManager = PowerStateManager::new();
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TÜRÜ
 // ============================================================================
 
+/// Güç yönetimi hata türleri.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PmError {
     UnsupportedState,
@@ -464,9 +542,12 @@ pub enum PmError {
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARABIRIMI
 // ============================================================================
 
+/// Kullanıcı alanından askıya alma sistem çağrısı arabirimi.
+///
+/// Başarıda 0, `UnsupportedState` hatası için -22 (EINVAL), diğer hatalar için -5 (EIO) döner.
 pub fn sys_suspend(state: u8) -> i32 {
     match PM_STATE.enter_state(state) {
         Ok(()) => 0,
@@ -476,9 +557,10 @@ pub fn sys_suspend(state: u8) -> i32 {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
+/// Güç yönetimi alt sistemini FADT adresleriyle başlatır.
 pub fn init(pm1a_cnt: u64, pm1b_cnt: u64, pm1a_evt: u64, pm1b_evt: u64) {
     PM_STATE.init(pm1a_cnt, pm1b_cnt, pm1a_evt, pm1b_evt);
 }

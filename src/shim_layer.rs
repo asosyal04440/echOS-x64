@@ -1,3 +1,19 @@
+//! # Virtio C Sürücüsü Shim Katmanı
+//!
+//! Bu modül, C ile yazılmış VirtIO sürücüsünü (`c_drivers/virtio.c`) Rust
+//! çekirdek ortamına bağlayan köprü (shim/glue) katmanıdır.
+//!
+//! ## Görevler
+//! - C sürücüsünden gelen IRQ (kesme) handler fonksiyonlarını kayıt eder
+//! - IRQ vektör → C callback yönlendirmesi yapar (`shim_irq_trampoline`)
+//! - VirtIO için `Hal` trait implementasyonu sağlar: DMA bellek ayırma/serbest bırakma,
+//!   fiziksel↔sanal adres dönüşümü
+//! - C kütüphanesine `malloc`/`free`/`printf` gibi standart fonksiyon öykünmesi sunar
+//!
+//! ## Güvenlik
+//! Bu modülün büyük bölümü `unsafe` bloklar içerir; C ABI uyumluluğu ve
+//! ham işaretçi (raw pointer) manipülasyonu zorunludur.
+
 use alloc::string::String;
 use core::ffi::{c_char, c_void, CStr};
 use core::fmt::Write;

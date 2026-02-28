@@ -1,6 +1,45 @@
-//! # IRQ Domains
+//! # IRQ Domain Yönetimi (Hiyerarşik IRQ Domainleri)
 //!
-//! Hierarchical IRQ domain management.
+//! Linux `kernel/irq/irqdomain.c` karşılığı — hiyerarşik IRQ domain yönetimi.
+//!
+//! ## IRQ Domain Nedir?
+//!
+//! Bir IRQ domain, bir interrupt controller'ın sahip olduğu donanım
+//! IRQ numaralarını (hwirq) işletim sisteminin mantıksal IRQ numaralarına
+//! eşleyen bir haritalama katmanıdır.
+//!
+//! ## Domain Hiyerarşisi
+//!
+//! ```text
+//!  ┌────────────────────────────────────────┐
+//!  │         root domain (tüm IRQ'lar)      │
+//!  └──────────────┬──────────────┬──────────┘
+//!                 │              │
+//!        ┌────────┴──────┐  ┌───┴────────────┐
+//!        │  IOAPIC domain│  │   MSI domain   │
+//!        │  hwirq: 0-23  │  │  hwirq: 64-255 │
+//!        └───────────────┘  └────────────────┘
+//! ```
+//!
+//! ## hwirq → irq Eşleşmesi (Mapping)
+//!
+//! ```text
+//!  Donanım IRQ (hwirq)  ──►  create_mapping()  ──►  mantıksal IRQ
+//!       (0..23)                   Domain                (örn: 5)
+//!                                   │
+//!                                   ▼
+//!                           hwirq_map: BTreeMap<u32, u32>
+//!                           irq_data:  BTreeMap<u32, Arc<IrqData>>
+//! ```
+//!
+//! ## IrqData Yapısı
+//!
+//! Her mantıksal IRQ için bir `IrqData` nesnesi bulunur:
+//!   - `irq`         : Mantıksal IRQ numarası
+//!   - `hwirq`       : Donanım IRQ numarası
+//!   - `state_flags` : Devre dışı / maskelenmiş / işlemde halleri
+//!   - `trigger_type`: Edge rising/falling, Level high/low
+//!   - `affinity`    : Hangi CPU çekirdeğine yönlendirilecek (CPU maskesi)
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,7 +49,26 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// IRQ DOMAIN CONSTANTS
+// IRQ DOMAIN CONSTANTS — Tip ve bayrak sabitleri
+//
+// Domain türleri:
+//   HIERARCHY : Üst (parent) domain'e sahip hiyerarşik domain
+//   MSI       : PCI Message Signaled Interrupt domain'i
+//   DMAR      : DMA Remapping (VT-d) domain'i
+//
+// IRQ tetikleme türleri (trigger types):
+//   EDGE_RISING  : Yükselen kenar — sinyal 0→1 geçişinde tetikler
+//   EDGE_FALLING : Düşen kenar   — sinyal 1→0 geçişinde tetikler
+//   EDGE_BOTH    : Her iki kenar da tetikler
+//   LEVEL_HIGH   : Sinyal yüksek (1) kaldığı sürece tetikler
+//   LEVEL_LOW    : Sinyal düşük  (0) kaldığı sürece tetikler
+//
+// IRQ durum bayrakları (state flags — IRQD_*):
+//   IRQ_DISABLED  : IRQ devre dışı
+//   IRQ_MASKED    : IRQ maskelenmiş (controller seviyesinde susturulmuş)
+//   IRQ_INPROGRESS: IRQ handler şu an çalışıyor
+//   WAKEUP_STATE  : Bu IRQ sistemi uyandırabilir (wakeup source)
+//   AFFINITY_SET  : CPU affinity kullanıcı tarafından ayarlandı
 // ============================================================================
 
 /// IRQ domain types
@@ -44,7 +102,11 @@ pub const IRQD_WAKEUP_STATE: u32 = 0x800;
 pub const IRQD_AFFINITY_SET: u32 = 0x1000;
 
 // ============================================================================
-// IRQ DATA
+// IRQ DATA — Bir mantıksal IRQ'nun tüm meta bilgilerini tutar
+//
+// Linux `struct irq_data` karşılığı.
+// Her IrqDomain içinde Arc<IrqData> olarak saklanır, bu sayede
+// domain silinse bile referans tutan kod geçerli kalır.
 // ============================================================================
 
 pub struct IrqData {
@@ -136,7 +198,15 @@ impl IrqData {
 }
 
 // ============================================================================
-// IRQ CHIP
+// IRQ CHIP (irq_domain.rs versiyonu) — Fonksiyon tabanlı chip tanımı
+//
+// Bu IrqChip, `irq_chip.rs`'teki trait tabanlı versiyondan farklıdır.
+// Burada chip işlemleri Arc<dyn Fn(...)> closure'larıyla tanımlanır,
+// bu da runtime'da dinamik olarak atanmasına imkân tanır.
+//
+// Kullanım:
+//   let chip = IrqChip::new("my-chip");
+//   chip.irq_mask = Some(Arc::new(|data| { /* mask impl */ }));
 // ============================================================================
 
 pub struct IrqChip {
@@ -249,7 +319,24 @@ impl IrqChip {
 }
 
 // ============================================================================
-// IRQ DOMAIN
+// IRQ DOMAIN — Hiyerarşik interrupt domain yapısı
+//
+// IrqDomain, bir interrupt controller alanını temsil eder.
+// İçinde şunları barındırır:
+//   • chip          : Bu domain'in interrupt controller'ı
+//   • parent        : Üst domain ID (0 = kök domain)
+//   • irq_data      : mantıksal IRQ → IrqData eşleşmesi
+//   • hwirq_map     : donanım IRQ → mantıksal IRQ ters eşleşmesi
+//   • active        : Domain aktif mi?
+//
+// handle_irq() çağrı zinciri:
+//   1. IrqData al
+//   2. Devre dışı veya maskelenmiş → dön
+//   3. in_progress = true yap
+//   4. chip.ack() çağır
+//   5. Handler çalıştırılır (üst katmandan)
+//   6. chip.eoi() çağır
+//   7. in_progress = false yap
 // ============================================================================
 
 pub struct IrqDomain {
@@ -375,7 +462,17 @@ impl IrqDomain {
 }
 
 // ============================================================================
-// IRQ DOMAIN MANAGER
+// IRQ DOMAIN MANAGER — Tüm domainleri yöneten tekil yönetici (singleton)
+//
+// Global IRQ_DOMAINS nesnesi olarak kullanılır.
+// API özeti:
+//   create_domain(name, type)       → Yeni domain oluştur, ID ata
+//   get_domain(id)                  → ID ile domain getir
+//   create_mapping(domain_id, hwirq)→ hwirq için mantıksal IRQ ata
+//   get_irq_data(irq)               → Mantıksal IRQ'nun meta bilgisi
+//   handle_irq(irq)                 → IRQ'yu domain zincirinden işle
+//   set_affinity(irq, mask)         → CPU affinity ayarla
+//   set_trigger_type(irq, trigger)  → Tetikleme türü değiştir
 // ============================================================================
 
 pub struct IrqDomainManager {

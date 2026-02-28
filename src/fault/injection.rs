@@ -2,6 +2,49 @@
 //!
 //! Hata enjeksiyonu ve kurtarma doğrulaması için test çerçevesi.
 //! Yalnızca debug (hata ayıklama) derlemelerinde kullanılabilir.
+//!
+//! ## Hata Enjeksiyonu Nedir?
+//!
+//! Hata enjeksiyonu (fault injection), bir sistemin hata kurtarma mekanizmalarını
+//! test etmek için kasıtlı olarak hata üretme tekniğidir.
+//! Gerçek donanım hatalarını beklemek yerine, yazılım olarak hata simüle edilir.
+//!
+//! Örnek: NASA ve ESA uzay yazılımlarında yoğun olarak kullanılır.
+//!
+//! ## Koşullu Derleme (#[cfg(debug_assertions)])
+//!
+//! ```text
+//!  Debug derlemesi:        Release derlemesi:
+//!  ─────────────────       ─────────────────────
+//!  FaultInjector var       FaultInjector yok
+//!  FAULT_INJECTOR var      run_test_scenarios() → boş fn
+//!  run_test_scenarios()    (sıfır overhead)
+//!    gerçek testler
+//! ```
+//!
+//! `#[cfg(debug_assertions)]` Rust'ın standart debug/release ayırma mekanizmasıdır.
+//! Release derlemesinde (`--release`) `debug_assertions` devre dışıdır ve
+//! bu bloklar derlemeye dahil edilmez → kod boyutu ve performans etkilenmez.
+//!
+//! ## Test Senaryosu Akışı
+//!
+//! ```text
+//!  run_test_scenarios()
+//!       │
+//!       ├─▶ set_enabled(true)
+//!       │
+//!       ├─▶ inject_oom()          ──▶ hub::report(Memory, OOM)
+//!       │                              └──▶ RecoveryEngine::recover()
+//!       │                                    └──▶ FreeMemory(64 sayfa)
+//!       │
+//!       ├─▶ inject_driver_fault() ──▶ hub::report(Driver, DeviceTimeout)
+//!       │                              └──▶ RecoveryEngine::recover()
+//!       │                                    └──▶ ResetModule("driver")
+//!       │
+//!       ├─▶ inject_scheduler_fault() ──▶ ...
+//!       │
+//!       └─▶ istatistikleri raporla + set_enabled(false)
+//! ```
 
 #[cfg(debug_assertions)]
 use alloc::string::String;

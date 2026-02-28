@@ -1,7 +1,39 @@
-//! Advanced Shell Features
+//! # echOS Gelişmiş Shell Özellikleri
 //!
-//! Pipe, Redirect, Tab Completion, Environment Variables, Globbing, History Search.
-//! Linux-level shell capabilities.
+//! Pipe, Yönlendirme (Redirect), Tab Tamamlama, Ortam Değişkenleri,
+//! Glob (Joker Karakter), Geçmiş Arama gibi Linux seviyesinde shell
+//! yetenekleri sağlar.
+//!
+//! ## Modül Bağımlılık Diyagramı
+//!
+//! ```
+//!  shell/mod.rs
+//!       │
+//!       ├── Environment (ENV)     -- $VAR genişletme
+//!       ├── History (HISTORY)     -- Yukarı/Aşağı ok; Ctrl+R arama
+//!       ├── Glob                  -- *.txt → file1.txt file2.txt
+//!       ├── Completer             -- Tab tuşu tamamlama
+//!       ├── Tokenizer             -- Lexer  (| > >> < & && || ; \n)
+//!       ├── Parser                -- Pipeline AST
+//!       └── AliasManager (ALIASES)-- ll → ls -la
+//!
+//!  Her bileşen `spin::Mutex` ile korunur → no_std + thread-safe
+//! ```
+//!
+//! ## Desteklenen Token Türleri
+//!
+//! | Token          | Sembol | Açıklama                              |
+//! |----------------|--------|---------------------------------------|
+//! | Pipe           | `\|`   | Stdout→Stdin bağlantısı               |
+//! | RedirectOut    | `>`    | Stdout'u dosyaya yaz (üstüne yaz)     |
+//! | RedirectAppend | `>>`   | Stdout'u dosyaya ekle (append)        |
+//! | RedirectIn     | `<`    | Dosyadan stdin oku                    |
+//! | RedirectErr    | `2>`   | Stderr'i yönlendir                    |
+//! | RedirectAll    | `&>`   | Stdout+Stderr'i yönlendir             |
+//! | Background     | `&`    | Arka planda çalıştır                  |
+//! | And            | `&&`   | Kısa devre AND (önceki başarılıysa)   |
+//! | Or             | `\|\|` | Kısa devre OR (önceki başarısızsa)    |
+//! | Semicolon      | `;`    | Sıralı çalıştırma                     |
 
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
@@ -12,10 +44,29 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 // ============================================================================
-// ENVIRONMENT VARIABLES
+// ENVIRONMENT VARIABLES (ORTAM DEĞİŞKENLERİ)
 // ============================================================================
 
-/// Environment variable manager
+/// Ortam değişkeni yöneticisi.
+///
+/// Linux'taki `environ` dizisinin basit bir kernel implementasyonudur.
+/// `BTreeMap<String, String>` ile anahtar/değer çiftleri tutar.
+/// `spin::Mutex` ile no_std ortamında thread-safe erişim sağlanır.
+///
+/// ## Standart Önceden Tanımlı Değişkenler
+///
+/// | Değişken   | Varsayılan Değer      | Açıklama                              |
+/// |------------|-----------------------|---------------------------------------|
+/// | PATH       | /bin:/usr/bin:/sbin   | Komut arama yolları                   |
+/// | HOME       | /root                 | Kullanıcı ev dizini                   |
+/// | USER       | root                  | Mevcut kullanıcı adı                  |
+/// | SHELL      | /bin/echsh            | Aktif shell çalıştırılabiliri         |
+/// | PWD        | /                     | Mevcut çalışma dizini                 |
+/// | HOSTNAME   | echos                 | Makine adı                            |
+/// | TERM       | xterm-256color        | Terminal tipi                         |
+/// | LANG       | en_US.UTF-8           | Dil/karakter kodlaması                |
+/// | EDITOR     | nano                  | Varsayılan metin düzenleyici          |
+/// | PAGER      | less                  | Sayfalama programı                    |
 pub struct Environment {
     vars: Mutex<BTreeMap<String, String>>,
 }
@@ -26,32 +77,46 @@ impl Environment {
             vars: Mutex::new(BTreeMap::new()),
         }
     }
-    
+
     /// Değişken ayarlar
     pub fn set(&self, key: &str, value: &str) {
         self.vars.lock().insert(key.to_string(), value.to_string());
     }
-    
+
     /// Değişken döndürür
     pub fn get(&self, key: &str) -> Option<String> {
         self.vars.lock().get(key).cloned()
     }
-    
+
     /// Değişken siler
     pub fn unset(&self, key: &str) {
         self.vars.lock().remove(key);
     }
-    
+
     /// Tüm değişkenleri döndürür
     pub fn list(&self) -> Vec<(String, String)> {
         self.vars.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
-    
-    /// String içindeki $VAR'ları expand eder
+
+    /// String içindeki `$VAR` ve `${VAR}` referanslarını gerçek değerleriyle değiştirir.
+    ///
+    /// ## Genişletme Algoritması
+    ///
+    /// ```
+    /// Input: "Hello $USER, home is ${HOME}/docs"
+    ///
+    /// 1. '$' karakterine rastlanır
+    /// 2. Sonraki karakter '{' ise  →  ${...}  modunda '}' ye kadar oku
+    ///    Aksi hâlde              →  $VAR    modunda alfasayısal/_ bitene kadar oku
+    /// 3. BTreeMap'ten değeri bul ve sonucu result'a ekle
+    /// 4. Değişken tanımlı değilse boş string eklenir (bash davranışı)
+    ///
+    /// Output: "Hello root, home is /root/docs"
+    /// ```
     pub fn expand(&self, input: &str) -> String {
         let mut result = String::new();
         let mut chars = input.chars().peekable();
-        
+
         while let Some(c) = chars.next() {
             if c == '$' {
                 // $VAR veya ${VAR} formatını parse et
@@ -79,7 +144,7 @@ impl Environment {
                     }
                     name
                 };
-                
+
                 if !var_name.is_empty() {
                     if let Some(value) = self.get(&var_name) {
                         result.push_str(&value);
@@ -89,11 +154,16 @@ impl Environment {
                 result.push(c);
             }
         }
-        
+
         result
     }
-    
-    /// Default environment'ı başlatır
+
+    /// Varsayılan ortam değişkenlerini başlatır.
+    ///
+    /// Shell ilk başladığında bu fonksiyon çağrılarak standart Unix
+    /// değişkenleri ayarlanır. Gerçek bir sistemde `/etc/environment`
+    /// veya `~/.profile` dosyalarından okunur; echOS'ta sabit değerler
+    /// kullanılmaktadır.
     pub fn init_defaults(&self) {
         self.set("PATH", "/bin:/usr/bin:/sbin");
         self.set("HOME", "/root");
@@ -109,15 +179,45 @@ impl Environment {
 }
 
 lazy_static::lazy_static! {
-    /// Global environment
+    /// Global ortam değişkeni mağazası.
+    ///
+    /// `lazy_static!` ile uygulama ömrü boyunca tek bir instance tutulur.
+    /// Kernel herhangi bir yerden `advanced::ENV.get("HOME")` şeklinde erişebilir.
     pub static ref ENV: Environment = Environment::new();
 }
 
 // ============================================================================
-// HISTORY MANAGEMENT
+// HISTORY MANAGEMENT (KOMUT GEÇMİŞİ)
 // ============================================================================
 
-/// Command history manager
+/// Komut geçmişi yöneticisi.
+///
+/// ## Veri Yapısı
+///
+/// ```
+/// entries: Vec<String>   (max 1000 komut, FIFO — en eski baştan silinir)
+/// current_index: usize   (yukarı/aşağı ok navigasyonu için konum)
+///
+///   entries[0]  = en eski komut
+///   entries[N-1]= en yeni komut
+///   current_index = N (başlangıç: listenin sonundan bir ötesi, "boş satır")
+/// ```
+///
+/// ## Navigasyon Mantığı
+///
+/// ```
+/// ArrowUp   → index-- → önceki komutu göster
+/// ArrowDown → index++ → sonraki; index == len ise boş string dön
+/// ```
+///
+/// ## Ctrl+R Ters Arama
+///
+/// ```
+/// start_search()        → sorguyu temizle, results listesini sıfırla
+/// search_add_char(c)    → sorguya karakter ekle, sonuçları güncelle
+/// search_backspace()    → son karakteri sil, sonuçları güncelle
+/// search_current()      → en yakın eşleşmeyi döndür
+/// ```
 pub struct History {
     entries: Mutex<Vec<String>>,
     max_size: usize,
@@ -136,45 +236,52 @@ impl History {
             search_results: Mutex::new(Vec::new()),
         }
     }
-    
-    /// Komut ekler
+
+    /// Yeni komutu geçmişe ekler.
+    ///
+    /// ## Ekleme Kuralları
+    ///
+    /// - Boş / yalnızca boşluk içeren komutlar eklenmez
+    /// - Ardışık aynı komut tekrar eklenilmez (bash `HISTCONTROL=ignoredups`)
+    /// - `max_size` dolunca en eski komut (`entries[0]`) silinir
+    /// - Ekleme sonrası `current_index` en sona (len) taşınır
     pub fn push(&self, cmd: &str) {
         if cmd.trim().is_empty() {
             return;
         }
-        
+
         let mut entries = self.entries.lock();
-        
+
         // Aynı komut tekrar eklenmesin
         if entries.last().map(|s| s.as_str()) == Some(cmd) {
             return;
         }
-        
+
         if entries.len() >= self.max_size {
             entries.remove(0);
         }
-        
+
         entries.push(cmd.to_string());
         *self.current_index.lock() = entries.len();
     }
-    
+
     /// Önceki komutu döndürür (yukarı ok)
     pub fn previous(&self) -> Option<String> {
         let entries = self.entries.lock();
         let mut index = self.current_index.lock();
-        
+
         if *index > 0 {
             *index -= 1;
             return entries.get(*index).cloned();
         }
         None
     }
-    
+
     /// Sonraki komutu döndürür (aşağı ok)
     pub fn next(&self) -> Option<String> {
         let entries = self.entries.lock();
         let mut index = self.current_index.lock();
-        
+
         if *index < entries.len() - 1 {
             *index += 1;
             return entries.get(*index).cloned();
@@ -184,8 +291,11 @@ impl History {
         }
         None
     }
-    
-    /// History'i listeler
+
+    /// Numaralı geçmiş listesi döndürür.
+    ///
+    /// `history` komutu tarafından kullanılır.
+    /// Dönen tuple: `(sıra_no, komut)` — sıra no 1'den başlar.
     pub fn list(&self) -> Vec<(usize, String)> {
         self.entries.lock()
             .iter()
@@ -193,48 +303,51 @@ impl History {
             .map(|(i, cmd)| (i + 1, cmd.clone()))
             .collect()
     }
-    
+
     /// Reverse search başlatır (Ctrl+R)
     pub fn start_search(&self) {
         *self.search_query.lock() = String::new();
         self.search_results.lock().clear();
     }
-    
+
     /// Search query'e karakter ekler
     pub fn search_add_char(&self, c: char) -> Option<String> {
         self.search_query.lock().push(c);
         self.search_update()
     }
-    
+
     /// Search query'den karakter siler
     pub fn search_backspace(&self) -> Option<String> {
         self.search_query.lock().pop();
         self.search_update()
     }
-    
-    /// Search'i günceller
+
+    /// Arama sorgusunu çalıştırır ve en iyi eşleşmeyi döndürür.
+    ///
+    /// Geçmiş listesi **ters sırada** (en yeniden eskiye) aranır.
+    /// `contains()` ile substring eşleşmesi kullanılır (regex değil).
     fn search_update(&self) -> Option<String> {
         let query = self.search_query.lock().clone();
         let entries = self.entries.lock();
         let mut results = self.search_results.lock();
-        
+
         results.clear();
         for (i, cmd) in entries.iter().enumerate().rev() {
             if cmd.contains(&query) {
                 results.push(i);
             }
         }
-        
+
         results.first().and_then(|&i| entries.get(i).cloned())
     }
-    
+
     /// Current search result'ı döndürür
     pub fn search_current(&self) -> Option<String> {
         let results = self.search_results.lock();
         let entries = self.entries.lock();
         results.first().and_then(|&i| entries.get(i).cloned())
     }
-    
+
     /// Search query'sini döndürür
     pub fn search_query(&self) -> String {
         self.search_query.lock().clone()
@@ -242,15 +355,41 @@ impl History {
 }
 
 lazy_static::lazy_static! {
-    /// Global command history
+    /// Global komut geçmişi (en fazla 1000 komut tutar).
+    ///
+    /// Shell her komut çalıştırıldığında `HISTORY.push()` çağrılır.
+    /// OK tuşları `HISTORY.previous()` / `HISTORY.next()` ile çalışır.
     pub static ref HISTORY: History = History::new(1000);
 }
 
 // ============================================================================
-// GLOBBING (Wildcard Expansion)
+// GLOBBING (Joker Karakter Genişletme)
 // ============================================================================
 
-/// Glob pattern matcher
+/// Glob (joker karakter) eşleştirme motoru.
+///
+/// ## Desteklenen Desenler
+///
+/// | Desen    | Açıklama                              | Örnek             |
+/// |----------|---------------------------------------|-------------------|
+/// | `*`      | Sıfır veya daha fazla herhangi karakter | `*.txt`         |
+/// | `?`      | Tam olarak bir herhangi karakter      | `test?.sh`        |
+/// | `[abc]`  | Karakter sınıfı (a, b veya c)        | `[abc].txt`       |
+/// | `[a-z]`  | Karakter aralığı (a'dan z'ye)        | `[a-z]*.rs`       |
+/// | `[!abc]` | Olumsuzlanmış karakter sınıfı        | `[!.]*`           |
+/// | `[^abc]` | `[!abc]` ile eşdeğer (^=! olumsuz)   | `[^0-9]*`         |
+///
+/// ## Algoritma (Özyinelemeli Eşleştirme)
+///
+/// ```
+/// matches_inner("*.txt", "file.txt"):
+///
+///   pattern[0] = '*'  →  articulating kısmı tüket, kalan desen = ".txt"
+///   kalan metin  = ""  → ".txt" vs ""  → yanlış
+///   kalan metin  = "f" → ".txt" vs "ile.txt" → yanlış
+///   ...
+///   kalan metin  = "file" → ".txt" vs ".txt" → DOĞRU ✓
+/// ```
 pub struct Glob;
 
 impl Glob {
@@ -258,35 +397,35 @@ impl Glob {
     pub fn matches(pattern: &str, text: &str) -> bool {
         Self::matches_inner(pattern, text)
     }
-    
+
     fn matches_inner(pattern: &str, text: &str) -> bool {
         let mut p_chars = pattern.chars().peekable();
         let mut t_chars = text.chars().peekable();
-        
+
         loop {
             match (p_chars.next(), t_chars.peek()) {
                 // Both exhausted
                 (None, None) => return true,
-                
+
                 // Pattern exhausted but text remains
                 (None, Some(_)) => return false,
-                
+
                 // * matches any sequence
                 (Some('*'), _) => {
                     // Consume consecutive *
                     while p_chars.peek() == Some(&'*') {
                         p_chars.next();
                     }
-                    
+
                     // * at end matches everything
                     if p_chars.peek().is_none() {
                         return true;
                     }
-                    
+
                     // Try matching * with 0, 1, 2, ... characters
                     let remaining_pattern: String = p_chars.collect();
                     let remaining_text: String = t_chars.collect();
-                    
+
                     for i in 0..=remaining_text.len() {
                         if Self::matches_inner(&remaining_pattern, &remaining_text[i..]) {
                             return true;
@@ -294,25 +433,25 @@ impl Glob {
                     }
                     return false;
                 }
-                
+
                 // ? matches any single char
                 (Some('?'), Some(_)) => {
                     t_chars.next();
                 }
-                
+
                 // [] character class
                 (Some('['), Some(&t)) => {
                     t_chars.next();
-                    
+
                     let mut negated = false;
                     if p_chars.peek() == Some(&'!') || p_chars.peek() == Some(&'^') {
                         negated = true;
                         p_chars.next();
                     }
-                    
+
                     let mut matched = false;
                     let mut prev_char: Option<char> = None;
-                    
+
                     loop {
                         match p_chars.next() {
                             Some(']') => break,
@@ -332,20 +471,20 @@ impl Glob {
                             None => return false, // Unclosed [
                         }
                     }
-                    
+
                     if negated == matched {
                         return false;
                     }
                 }
-                
+
                 // Exact match
                 (Some(p), Some(&t)) if p == t => {
                     t_chars.next();
                 }
-                
+
                 // No match
                 (Some(_), Some(_)) => return false,
-                
+
                 // Text exhausted but pattern remains
                 (Some(_), None) => {
                     // Check if remaining pattern is all *
@@ -357,8 +496,11 @@ impl Glob {
             }
         }
     }
-    
-    /// Pattern'e uyan dosyaları bulur
+
+    /// Verilen dosya listesi üzerinde glob deseniyle eşleşen dosyaları döndürür.
+    ///
+    /// Sonuç alfabetik olarak sıralanır (bash davranışı).
+    /// `shell/mod.rs`'teki `expand_glob_pattern()` tarafından çağrılır.
     pub fn expand(pattern: &str, files: &[&str]) -> Vec<String> {
         let mut matches = Vec::new();
         for file in files {
@@ -372,12 +514,29 @@ impl Glob {
 }
 
 // ============================================================================
-// TAB COMPLETION
+// TAB COMPLETION (SEKMELİ TAMAMLAMA)
 // ============================================================================
 
-/// Tab completion provider
+/// Sekme (Tab) tuşu tamamlama motoru.
+///
+/// ## Tamamlama Stratejisi
+///
+/// ```
+/// Kullanıcı "hel<TAB>" yazarsa:
+///   words = ["hel"]
+///   Yerleşik komutlar arasında "hel" ile başlayanlar: ["help"]
+///   → Tek eşleşme: "help " yazar
+///
+/// Kullanıcı "cat /et<TAB>" yazarsa:
+///   words = ["cat", "/et"]
+///   Son kelime "/et" → dizin="/", prefix="et"
+///   → list_dir("/") → isimleri "et" ile başlayanlar: ["etc"]
+///
+/// Birden fazla eşleşme varsa:
+///   İlk 10 seçenek listelenir, ortak prefix tamamlanır
+/// ```
 pub struct Completer {
-    /// Built-in komutlar
+    /// Built-in komutlar listesi — tab tamamlama için kullanılır
     pub builtins: Vec<&'static str>,
 }
 
@@ -395,27 +554,34 @@ impl Completer {
             ],
         }
     }
-    
-    /// Tamamlama önerileri döndürür
+
+    /// Tamamlama önerileri döndürür.
+    ///
+    /// `input`: Mevcut komut satırı metni
+    /// `cursor_pos`: İmlecin byte cinsinden konumu
+    ///
+    /// Döndürülen `Vec<String>` boşsa tamamlama yok;
+    /// tek eleman varsa otomatik tamamla;
+    /// birden fazla ise listele + ortak prefix tamamla.
     pub fn complete(&self, input: &str, cursor_pos: usize) -> Vec<String> {
         let mut completions = Vec::new();
-        
+
         // Cursor position'a göre current word'ü bul
         let before_cursor = &input[..cursor_pos];
         let words: Vec<&str> = before_cursor.split_whitespace().collect();
-        
+
         if words.is_empty() || !before_cursor.ends_with(' ') {
             // İlk kelime tamamlama (komut)
             if words.is_empty() || words.len() == 1 {
                 let prefix = words.first().copied().unwrap_or("");
-                
+
                 // Built-in komutları kontrol et
                 for &cmd in &self.builtins {
                     if cmd.starts_with(prefix) {
                         completions.push(cmd.to_string());
                     }
                 }
-                
+
                 // TODO: PATH'teki executable'ları da ekle
             } else {
                 // Sonraki kelimeler (dosya/dizin tamamlama)
@@ -423,14 +589,19 @@ impl Completer {
                 completions = self.complete_path(prefix);
             }
         }
-        
+
         completions
     }
-    
-    /// Path tamamlama
+
+    /// Dosya/dizin yolu tamamlama.
+    ///
+    /// `prefix` içinde `/` varsa → dizin kısmını ayır, dosya önekini çıkar
+    /// `/etc/pas` → dir="/etc/", file_prefix="pas" → list_dir ile eşleşenleri bul
+    ///
+    /// Gerçek dosya sistemi erişimi başarısız olursa sabit mock liste kullanılır.
     fn complete_path(&self, prefix: &str) -> Vec<String> {
         let mut completions = Vec::new();
-        
+
         // Gerçek dosya sistemi entegrasyonu
         let (dir, file_prefix) = if prefix.contains('/') {
             let last_slash = prefix.rfind('/').unwrap();
@@ -438,7 +609,7 @@ impl Completer {
         } else {
             ("/".to_string(), prefix.to_string())
         };
-        
+
         // Dizini oku
         if let Ok(entries) = crate::fs::f2fs::list_dir(&dir) {
             for entry in entries {
@@ -452,7 +623,7 @@ impl Completer {
                 }
             }
         }
-        
+
         // Fallback: mock data
         if completions.is_empty() {
             let mock_files = [
@@ -460,27 +631,39 @@ impl Completer {
                 "proc", "root", "sbin", "sys", "tmp", "usr", "var",
                 "config.txt", "readme.md", "test.sh",
             ];
-            
+
             for file in &mock_files {
                 if file.starts_with(prefix) {
                     completions.push(file.to_string());
                 }
             }
         }
-        
+
         completions.sort();
         completions
     }
-    
-    /// En uzun ortak prefix'i bulur
+
+    /// Birden fazla tamamlama adayının en uzun ortak önekini bulur.
+    ///
+    /// ## Algoritma
+    ///
+    /// ```
+    /// completions = ["config.txt", "config.sh", "config_old.txt"]
+    /// first       = "config.txt",  prefix_len = 10
+    ///
+    /// "config.sh"     → first[..6] = "config" ile eşleşme yeri 6
+    /// "config_old.txt"→ first[..6] = "config" ile eşleşme yeri 6
+    ///
+    /// Sonuç: "config"
+    /// ```
     pub fn common_prefix(completions: &[String]) -> String {
         if completions.is_empty() {
             return String::new();
         }
-        
+
         let first = &completions[0];
         let mut prefix_len = first.len();
-        
+
         for completion in &completions[1..] {
             let mut i = 0;
             while i < prefix_len && i < completion.len() {
@@ -491,7 +674,7 @@ impl Completer {
             }
             prefix_len = i;
         }
-        
+
         first[..prefix_len].to_string()
     }
 }
@@ -503,10 +686,13 @@ impl Default for Completer {
 }
 
 // ============================================================================
-// PIPE AND REDIRECT
+// PIPE AND REDIRECT (BORU HATTI VE YÖNLENDİRME)
 // ============================================================================
 
-/// Token types for command parsing
+/// Komut satırı lexer'ının ürettiği token türleri.
+///
+/// Tek geçişli (`single-pass`) lexer, kaynak metni bu enum varyantlarına
+/// dönüştürür. Parser bu token listesini alarak `Pipeline` AST'i oluşturur.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
     Word(String),
@@ -523,7 +709,20 @@ pub enum Token {
     Newline,        // \n
 }
 
-/// Tokenizer
+/// Komut satırı lexer'ı (tokenizer).
+///
+/// ## Lexer Kuralları
+///
+/// - Boşluk/tab: kelime sınırı (kelime başlarsa token oluştur)
+/// - `|`:  tek `|` → Pipe, çift `||` → Or
+/// - `>`:  tek `>` → RedirectOut, `>>` → RedirectAppend
+/// - `<`:  RedirectIn
+/// - `&`:  `&>` → RedirectAll, `&&` → And, tek `&` → Background
+/// - `;`:  Semicolon
+/// - `\n`: Newline
+/// - `\\c`: escape — sonraki karakteri literal olarak ekle
+/// - `'...'`: tek tırnak — içeride hiçbir yorumlama yapılmaz
+/// - `"..."`: çift tırnak — `\\c` escape desteklenir, `$VAR` henüz değil
 pub struct Tokenizer;
 
 impl Tokenizer {
@@ -532,7 +731,7 @@ impl Tokenizer {
         let mut tokens = Vec::new();
         let mut chars = input.chars().peekable();
         let mut current_word = String::new();
-        
+
         while let Some(c) = chars.next() {
             match c {
                 ' ' | '\t' => {
@@ -639,30 +838,46 @@ impl Tokenizer {
                 }
             }
         }
-        
+
         if !current_word.is_empty() {
             tokens.push(Token::Word(current_word));
         }
-        
+
         tokens
     }
 }
 
-/// Simple command
+/// Tek bir basit komut (args + yönlendirmeler + arka plan bayrağı).
+///
+/// `Pipeline.commands[i]` olarak konumlanır.
 #[derive(Clone, Debug, Default)]
 pub struct SimpleCommand {
+    /// Komut argümanları (parts[0] = komut adı)
     pub args: Vec<String>,
+    /// Yönlendirme listesi (sırasıyla uygulanır)
     pub redirects: Vec<Redirect>,
+    /// Arka planda çalıştır (`&`)
     pub background: bool,
 }
 
-/// Redirect specification
+/// Tek bir yönlendirme spesifikasyonu.
 #[derive(Clone, Debug)]
 pub struct Redirect {
+    /// Yönlendirme türü
     pub kind: RedirectKind,
+    /// Hedef dosya adı
     pub target: String,
 }
 
+/// Yönlendirme türleri.
+///
+/// | Variant       | Sembol | Açıklama                              |
+/// |---------------|--------|---------------------------------------|
+/// | Stdout        | `>`    | Standart çıktıyı dosyaya yaz          |
+/// | StdoutAppend  | `>>`   | Standart çıktıyı dosyaya ekle         |
+/// | Stdin         | `<`    | Standart girdiyi dosyadan oku         |
+/// | Stderr        | `2>`   | Hata çıktısını dosyaya yaz            |
+/// | All           | `&>`   | Stdout+Stderr'i dosyaya yaz           |
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RedirectKind {
     Stdout,      // >
@@ -672,18 +887,44 @@ pub enum RedirectKind {
     All,         // &>
 }
 
-/// Pipeline (sequence of commands connected by pipes)
+/// Boru hattı: `|` ile bağlanmış komutlar dizisi.
+///
+/// ```
+/// "cmd1 | cmd2 | cmd3"
+///
+/// Pipeline {
+///   commands: [cmd1, cmd2, cmd3],
+///   background: false,
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct Pipeline {
+    /// Boru hattındaki komutlar (soldan sağa)
     pub commands: Vec<SimpleCommand>,
+    /// Tüm pipeline arka planda mı çalışacak?
     pub background: bool,
 }
 
-/// Command parser
+/// Komut satırı parser'ı.
+///
+/// ## Gramer (BNF benzeri gösterim)
+///
+/// ```
+/// pipeline_list ::= pipeline (; pipeline)*
+/// pipeline      ::= command (| command)*
+/// command       ::= WORD+ redirect*
+/// redirect      ::= (> | >> | < | 2> | &>) WORD
+/// ```
+///
+/// `&&` ve `||` operatörleri `parse()` içinde ayrı `Pipeline` nesneleri
+/// oluşturarak `shell/mod.rs`'teki `execute_chained()` tarafından işlenir.
 pub struct Parser;
 
 impl Parser {
-    /// Token listesinden pipeline oluşturur
+    /// Token listesinden pipeline listesi oluşturur.
+    ///
+    /// Başarı durumunda `Vec<Pipeline>` döndürür.
+    /// Sözdizimi hatası varsa `ParseError` ile `Err` döndürür.
     pub fn parse(tokens: Vec<Token>) -> Result<Vec<Pipeline>, ParseError> {
         let mut pipelines = Vec::new();
         let mut current_pipeline = Pipeline {
@@ -692,7 +933,7 @@ impl Parser {
         };
         let mut current_command = SimpleCommand::default();
         let mut i = 0;
-        
+
         while i < tokens.len() {
             match &tokens[i] {
                 Token::Word(word) => {
@@ -792,7 +1033,7 @@ impl Parser {
             }
             i += 1;
         }
-        
+
         // Son komutu ekle
         if !current_command.args.is_empty() {
             current_pipeline.commands.push(current_command);
@@ -800,24 +1041,45 @@ impl Parser {
         if !current_pipeline.commands.is_empty() {
             pipelines.push(current_pipeline);
         }
-        
+
         Ok(pipelines)
     }
 }
 
+/// Parser hata türleri.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
+    /// `|` beklenmediği bir yerde bulundu
     UnexpectedPipe,
+    /// `>` / `<` beklenmediği bir yerde bulundu
     UnexpectedRedirect,
+    /// Yönlendirme hedef dosya adı eksik
     MissingTarget,
+    /// Tırnak işareti kapatılmadı
     UnterminatedQuote,
 }
 
 // ============================================================================
-// ALIAS SUPPORT
+// ALIAS SUPPORT (ALIAS DESTEĞİ)
 // ============================================================================
 
-/// Alias manager
+/// Alias (kısaltma) yöneticisi.
+///
+/// ## Alias Mantığı
+///
+/// `expand_line()` **yalnızca ilk kelimeyi** genişletir — bash davranışı.
+/// `echo` gibi yerleşik komutlar alias ile maskelenebilir.
+///
+/// ## Varsayılan Alias'lar
+///
+/// | Alias | Genişleme  | Açıklama                  |
+/// |-------|------------|---------------------------|
+/// | ll    | ls -la     | Ayrıntılı liste           |
+/// | la    | ls -a      | Gizli dosyalar dahil      |
+/// | l     | ls         | Kısa liste                |
+/// | ..    | cd ..      | Bir üst dizine çık        |
+/// | ...   | cd ../..   | İki üst dizine çık        |
+/// | cls   | clear      | Ekranı temizle            |
 pub struct AliasManager {
     aliases: Mutex<BTreeMap<String, String>>,
 }
@@ -828,30 +1090,34 @@ impl AliasManager {
             aliases: Mutex::new(BTreeMap::new()),
         }
     }
-    
+
     /// Alias tanımlar
     pub fn set(&self, name: &str, expansion: &str) {
         self.aliases.lock().insert(name.to_string(), expansion.to_string());
     }
-    
+
     /// Alias'ı siler
     pub fn unset(&self, name: &str) {
         self.aliases.lock().remove(name);
     }
-    
+
     /// Alias'ı expand eder
     pub fn expand(&self, name: &str) -> Option<String> {
         self.aliases.lock().get(name).cloned()
     }
-    
+
     /// Tüm alias'ları listeler
     pub fn list(&self) -> Vec<(String, String)> {
         self.aliases.lock().iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
-    
-    /// Komut satırındaki alias'ları expand eder
+
+    /// Komut satırının ilk kelimesini alias ile değiştirir.
+    ///
+    /// `input` = "ll /tmp"
+    /// `ll` → `ls -la` olarak tanımlıysa
+    /// Döndürür: "ls -la /tmp"
     pub fn expand_line(&self, input: &str) -> String {
         let first_word = input.split_whitespace().next();
         if let Some(word) = first_word {
@@ -864,18 +1130,27 @@ impl AliasManager {
 }
 
 lazy_static::lazy_static! {
-    /// Global alias manager
+    /// Global alias mağazası.
+    ///
+    /// `init()` tarafından varsayılan alias'larla doldurulur.
+    /// Kullanıcı `alias ll='ls -la'` komutunu çalıştırdığında buraya eklenir.
     pub static ref ALIASES: AliasManager = AliasManager::new();
 }
 
 // ============================================================================
-// INITIALIZATION
+// INITIALIZATION (BAŞLATMA)
 // ============================================================================
 
-/// Advanced shell features'ı başlatır
+/// Gelişmiş shell özelliklerini başlatır.
+///
+/// Kernel init akışında en erken çağrılması gereken fonksiyon.
+/// Sırasıyla:
+/// 1. Ortam değişkenlerini varsayılan değerlere ayarlar (`ENV`)
+/// 2. Yaygın kullanılan alias'ları tanımlar (`ALIASES`)
+/// 3. Serial porta başlangıç mesajı yazar
 pub fn init() {
     ENV.init_defaults();
-    
+
     // Default alias'lar
     ALIASES.set("ll", "ls -la");
     ALIASES.set("la", "ls -a");
@@ -883,24 +1158,24 @@ pub fn init() {
     ALIASES.set("..", "cd ..");
     ALIASES.set("...", "cd ../..");
     ALIASES.set("cls", "clear");
-    
+
     crate::serial_println!("[SHELL] Advanced features initialized");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_env_expand() {
         ENV.set("HOME", "/root");
         ENV.set("USER", "test");
-        
+
         assert_eq!(ENV.expand("$HOME"), "/root");
         assert_eq!(ENV.expand("Hello $USER"), "Hello test");
         assert_eq!(ENV.expand("${HOME}/file"), "/root/file");
     }
-    
+
     #[test]
     fn test_glob() {
         assert!(Glob::matches("*.txt", "file.txt"));
@@ -909,7 +1184,7 @@ mod tests {
         assert!(Glob::matches("[abc]", "a"));
         assert!(!Glob::matches("[abc]", "d"));
     }
-    
+
     #[test]
     fn test_tokenizer() {
         let tokens = Tokenizer:: tokenize("ls -la | grep test > out.txt");
@@ -917,7 +1192,7 @@ mod tests {
         assert_eq!(tokens[2], Token::Pipe);
         assert_eq!(tokens[5], Token::RedirectOut);
     }
-    
+
     #[test]
     fn test_parser() {
         let tokens = Tokenizer:: tokenize("ls | grep test");

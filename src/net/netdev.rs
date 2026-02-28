@@ -1,6 +1,33 @@
-//! # Network Device Drivers
+//! # Ağ Aygıt Sürücüleri (Network Device Drivers)
 //!
-//! VirtIO-Net and loopback interface
+//! VirtIO-Net ve Loopback arabirim sürücüleri.
+//!
+//! ## Bu Modüldeki Arabirimler
+//!
+//! ```text
+//! +--------------------------+     +--------------------------+
+//! |   LoopbackInterface      |     |   VirtioNetInterface     |
+//! |   (lo: 127.0.0.1/8)     |     |   (eth0: DHCP)           |
+//! |                          |     |                          |
+//! |  send() → rx_queue       |     |  send() → VirtIO TX ring |
+//! |  recv() ← rx_queue.pop  |     |  recv() ← VirtIO RX ring |
+//! +--------------------------+     +--------------------------+
+//!          |                                  |
+//!          +------ NetInterface (trait) -------+
+//!                         |
+//!                  Protocol Stack
+//! ```
+//!
+//! ## VirtIO-Net Nedir?
+//!
+//! VirtIO-Net, QEMU/KVM sanallaştırma ortamında sanal ağ kartı sürücüsüdür.
+//! Gerçek donanım yerine ortak bir "sanal kuyruk" (virtqueue) mekanizması
+//! kullanarak ana makine ile ağ paketlerini paylaşır.
+//!
+//! ## Loopback Arabirim Nedir?
+//!
+//! Geri döngü arabirimi (loopback), gönderilen paketleri doğrudan alma
+//! kuyruğuna yazar. Ağ kartı gerektirmez. Genellikle 127.0.0.1 ile bilinir.
 
 use super::{MacAddr, Ipv4Addr, NetInterface, NetError, NetStats, register_interface};
 use alloc::string::String;
@@ -9,10 +36,21 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 // ============================================================================
-// LOOPBACK INTERFACE
+// GERİ DÖNGÜ ARABİRİMİ (LOOPBACK INTERFACE)
 // ============================================================================
+//
+// Loopback arabirimi Linux'taki `lo` arayüzüne karşılık gelir.
+// Gönderilen her paket anında alma kuyruğuna düşer — ağ donanımı gerekmez.
+//
+//   Uygulama
+//      │  send("127.0.0.1")
+//      ▼
+//   rx_queue.push(data)    ← gönderilen veri kuyruğa eklenir
+//      │
+//      ▼
+//   recv() → rx_queue.pop  ← aynı uygulama veya başka bir süreç alır
 
-/// Loopback interface (127.0.0.1)
+/// Geri döngü arabirimi (127.0.0.1, 8-bit ağ maskesi 255.0.0.0)
 pub struct LoopbackInterface {
     name: String,
     mac: MacAddr,
@@ -67,7 +105,7 @@ impl NetInterface for LoopbackInterface {
     }
     
     fn set_gateway(&mut self, _gw: Ipv4Addr) {
-        // Loopback has no gateway
+        // Loopback arabiriminin ağ geçidi olmaz
     }
     
     fn is_up(&self) -> bool {
@@ -83,7 +121,7 @@ impl NetInterface for LoopbackInterface {
             return Err(NetError::NotUp);
         }
         
-        // Loopback: put in receive queue
+        // Loopback: gönderilen veriyi alma kuyruğuna ekle (geri döngü mantığı)
         self.rx_queue.push(data.to_vec());
         self.stats.tx_packets += 1;
         self.stats.tx_bytes += data.len() as u64;
@@ -110,10 +148,32 @@ impl NetInterface for LoopbackInterface {
 }
 
 // ============================================================================
-// VIRTIO-NET INTERFACE
+// VİRTIO-NET ARABİRİMİ (VIRTIO-NET INTERFACE)
 // ============================================================================
+//
+// VirtIO (Virtual I/O), QEMU ve KVM gibi sanallaştırma katmanlarında
+// aygıt iletişimini standartlaştıran bir OASIS spesifikasyonudur.
+//
+// VirtIO-Net'in çalışma mantığı:
+//   1. Misafir çekirdek (echOS), TX-virtqueue'ya Ethernet çerçevesi yazar.
+//   2. Hipervisora "kick" (zil sinyali) gönderilir.
+//   3. Hipervisor paketi gerçek/sanal ağa iletir.
+//   4. Gelen paketler RX-virtqueue'ya kopyalanır; misafir çekirdek keser
+//      alır ve `recv()` ile okur.
+//
+// Bu implementasyon şu an bir "stub" (iskelet) durumundadır.
+// Gerçek gönderme/alma için `src/drivers/virtio_ffi` entegrasyonu gerekir.
 
-/// VirtIO-Net interface (stub - requires virtio driver integration)
+/// VirtIO-Net arabirimi (iskelet - virtio sürücü entegrasyonu gerektirir)
+///
+/// Alanlar:
+/// - `name`    : Arabirim adı; "eth0" Linux/POSIX standardıyla uyumludur
+/// - `mac`     : 6 baytlık donanım adresi; QEMU'da 52:54:00:xx:xx:xx formatı
+/// - `ip`      : DHCP ile atanır; başlangıçta 0.0.0.0 (UNSPECIFIED)
+/// - `netmask` : Varsayılan /24 maskesi (255.255.255.0)
+/// - `gateway` : Dış ağa çıkış noktası; DHCP ile öğrenilir
+/// - `up`      : false başlar; DHCP veya statik yapılandırmadan sonra true olur
+/// - `stats`   : TX/RX istatistik sayaçları (hata ayıklama ve izleme için)
 pub struct VirtioNetInterface {
     name: String,
     mac: MacAddr,
@@ -126,6 +186,11 @@ pub struct VirtioNetInterface {
 }
 
 impl VirtioNetInterface {
+    /// Yeni bir VirtIO-Net arabirimi oluşturur.
+    ///
+    /// `mac` parametresi hipervisor tarafından belirlenen donanım adresidir.
+    /// Arabirim başlangıçta `up = false` ve `ip = 0.0.0.0` durumundadır;
+    /// `configure_dhcp()` veya `configure_static()` çağrıldıktan sonra aktif olur.
     pub fn new(mac: MacAddr) -> Self {
         VirtioNetInterface {
             name: String::from("eth0"),
@@ -217,26 +282,45 @@ impl NetInterface for VirtioNetInterface {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA (INITIALIZATION)
 // ============================================================================
+//
+// Çekirdek önyükleme sürecinde ağ alt sistemi bu bölümle hazırlanır.
+// Her arabirim `Arc<Mutex<T>>` ile sarılarak global listeye eklenir:
+//   - `Arc`   : Atomik referans sayacı — Rust'da çoklu sahiplik sağlar.
+//   - `Mutex` : Karşılıklı dışlama kilidi — aynı anda yalnızca bir görevin
+//               arabirime erişmesini garantiler; çok çekirdekli güvenlik.
 
-/// Initialize network devices
+/// Ağ aygıtlarını başlatır ve global arabirim listesine kaydeder.
+///
+/// loopback önce eklenir; daha sonra VirtIO-Net iskelet arabirimi eklenir.
+/// MAC adresi şimdilik sabit kodlanmıştır; gerçek implementasyonda
+/// hipervisordan PCI yapılandırma alanı okunarak öğrenilmelidir.
 pub fn init() {
     crate::serial_println!("[NETDEV] Initializing network devices...");
-    
+
     // Create loopback interface
     let lo = Arc::new(Mutex::new(LoopbackInterface::new()));
     register_interface(lo);
-    
+
     // Try to create VirtIO-Net interface
     // TODO: Detect virtio-net device and get MAC
     let eth0 = Arc::new(Mutex::new(VirtioNetInterface::new(MacAddr::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]))));
     register_interface(eth0);
-    
+
     crate::serial_println!("[NETDEV] Network devices initialized");
 }
 
-/// Configure interface with DHCP
+/// DHCP ile otomatik ağ yapılandırması yapar.
+///
+/// DHCP (Dynamic Host Configuration Protocol) 4 adımlı el sıkışması:
+///   1. DISCOVER : Broadcast — "Ağda DHCP sunucusu var mı?"
+///   2. OFFER    : Sunucu → istemci IP teklifi sunar.
+///   3. REQUEST  : İstemci teklifi onaylar.
+///   4. ACK      : Sunucu IP, maske ve gateway'i kesinleştirir.
+///
+/// Bu implementasyon basitleştirilmiş döngüyle yanıt bekler (~100 deneme).
+/// Gerçek bir çekirdekte bu işlem async/await veya IRQ tabanlı olmalıdır.
 pub fn configure_dhcp(iface_name: &str) -> Result<super::NetworkConfig, NetError> {
     let iface = super::get_interface(iface_name).ok_or(NetError::NoInterface)?;
     
@@ -273,7 +357,14 @@ pub fn configure_dhcp(iface_name: &str) -> Result<super::NetworkConfig, NetError
     Err(NetError::Timeout)
 }
 
-/// Configure interface statically
+/// Arabirimi statik IP ile yapılandırır.
+///
+/// DHCP kullanılamadığında (sunucu yok, ağ bağlantısı yok) IP adresi,
+/// ağ maskesi ve ağ geçidi elle belirtilir. Tüm değerler hem arabirim
+/// nesnesine hem de global `NetworkConfig` yapısına yazılır.
+///
+/// Örnek CIDR gösterimi:
+///   ip = 192.168.1.5, netmask = 255.255.255.0  →  192.168.1.5/24
 pub fn configure_static(
     iface_name: &str,
     ip: Ipv4Addr,

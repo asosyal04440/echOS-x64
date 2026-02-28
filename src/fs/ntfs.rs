@@ -1,6 +1,34 @@
-//! # NTFS File System (Read Support)
+//! # NTFS Dosya Sistemi (Salt Okunur Destek)
 //!
-//! New Technology File System - Read-only implementation
+//! New Technology File System - Yalnızca okuma modunda uygulama.
+//! Windows'un yerel dosya sistemi olan NTFS'in temel yapılarını çözümler.
+//!
+//! ## NTFS Disk Yapısı (ASCII Diyagram)
+//! ```text
+//! NTFS Bölüm Düzeni:
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │  Sektör 0       │  Önyükleme Sektörü - BPB + NTFS sihiri   │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │  MFT (Ana Dosya Tablosu) - her dosya için 1024 baytlık giriş│
+//! │   MFT #0  = $MFT (MFT'nin kendisi)                         │
+//! │   MFT #1  = $MFTMirr (MFT aynası - yedek)                  │
+//! │   MFT #2  = $LogFile (işlem günlüğü)                       │
+//! │   MFT #3  = $Volume (birim bilgisi)                         │
+//! │   MFT #4  = $AttrDef (öznitelik tanımları)                  │
+//! │   MFT #5  = . (kök dizin)                                   │
+//! │   MFT #6  = $Bitmap (disk bitmap'i)                         │
+//! │   MFT #7  = $Boot (önyükleme dosyası)                       │
+//! │   MFT #8+ = Kullanıcı dosyaları                             │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │  Veri Bölgesi - kümeler, öznitelik tipleri ile erişilir     │
+//! └─────────────────────────────────────────────────────────────┘
+//!
+//! MFT Girişi Öznitelik Tipleri:
+//!   0x10 = $STANDARD_INFORMATION (zaman, bayraklar)
+//!   0x30 = $FILE_NAME (UTF-16LE dosya adı, üst dizin)
+//!   0x80 = $DATA (dosya içeriği - yerleşik veya data run'larla)
+//!   0x90 = $INDEX_ROOT (dizin b-ağacı kökü)
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -8,19 +36,19 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 // ============================================================================
-// NTFS CONSTANTS
+// NTFS SABİTLERİ
 // ============================================================================
 
-/// NTFS magic: "NTFS    "
+/// NTFS sihiri: "NTFS    " - önyükleme sektörünü doğrular
 const NTFS_MAGIC: [u8; 8] = [0x4E, 0x54, 0x46, 0x53, 0x20, 0x20, 0x20, 0x20];
 
-/// Sector size (usually 512 bytes)
+/// Sektör boyutu (genellikle 512 bayt)
 const SECTOR_SIZE: u64 = 512;
 
-/// MFT entry size (usually 1024 bytes)
+/// MFT girişi boyutu (genellikle 1024 bayt)
 const MFT_ENTRY_SIZE: u64 = 1024;
 
-/// Attribute types
+/// Öznitelik türleri - MFT girdisindeki öznitelikleri tanımlar
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
 const ATTR_FILE_NAME: u32 = 0x30;
@@ -37,7 +65,7 @@ const ATTR_EA_INFORMATION: u32 = 0xD0;
 const ATTR_EA: u32 = 0xE0;
 const ATTR_LOGGED_UTILITY_STREAM: u32 = 0x100;
 
-/// MFT entry numbers
+/// Sistem MFT giriş numaraları - rezerve edilmiş sistem dosyaları
 const MFT_MFT: u64 = 0;
 const MFT_MFTMIRR: u64 = 1;
 const MFT_LOGFILE: u64 = 2;
@@ -47,16 +75,17 @@ const MFT_ROOTDIR: u64 = 5;
 const MFT_BITMAP: u64 = 6;
 const MFT_BOOT: u64 = 7;
 
-/// File name namespaces
+/// Dosya adı ad alanları - aynı dosyanın farklı ad biçimleri
 const FILE_NAME_POSIX: u8 = 0;
 const FILE_NAME_WIN32: u8 = 1;
 const FILE_NAME_DOS: u8 = 2;
 const FILE_NAME_WIN32_DOS: u8 = 3;
 
 // ============================================================================
-// NTFS ERROR
+// NTFS HATASI
 // ============================================================================
 
+/// NTFS işlemlerinde oluşabilecek hata türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NtfsError {
     InvalidFormat,
@@ -68,9 +97,10 @@ pub enum NtfsError {
 }
 
 // ============================================================================
-// FILE TYPES
+// DOSYA TÜRLERİ
 // ============================================================================
 
+/// NTFS dosya türü numaralandırması
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NtfsFileType {
     File,
@@ -84,6 +114,7 @@ pub enum NtfsFileType {
     Unknown,
 }
 
+/// NTFS dizin girdisi - dosya adı, inode numarası, tür ve boyut bilgisi
 #[derive(Clone, Debug)]
 pub struct NtfsDirEntry {
     pub name: String,
@@ -92,6 +123,7 @@ pub struct NtfsDirEntry {
     pub size: u64,
 }
 
+/// NTFS dosya meta verisi - boyut, zaman damgaları ve bayraklar
 #[derive(Clone, Debug)]
 pub struct NtfsMetadata {
     pub size: u64,
@@ -104,9 +136,10 @@ pub struct NtfsMetadata {
 }
 
 // ============================================================================
-// BOOT SECTOR
+// ÖNYÜKLEME SEKTÖRÜ
 // ============================================================================
 
+/// NTFS Önyükleme Sektörü - BPB parametreleri ve MFT konumu
 #[derive(Clone, Debug)]
 pub struct NtfsBootSector {
     pub oem_id: [u8; 8],
@@ -121,13 +154,13 @@ pub struct NtfsBootSector {
 }
 
 impl NtfsBootSector {
-    /// Parse boot sector from bytes
+    /// Önyükleme sektörünü ham baytlardan çözümler ve NTFS sihirini doğrular
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 512 {
             return None;
         }
 
-        // Check magic
+        // Sihiri kontrol et
         let oem_id: [u8; 8] = [data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10]];
         if oem_id != NTFS_MAGIC {
             return None;
@@ -136,19 +169,19 @@ impl NtfsBootSector {
         let bytes_per_sector = u16::from_le_bytes([data[11], data[12]]);
         let sectors_per_cluster = data[13];
 
-        // Total sectors (64-bit at offset 40)
+        // Toplam sektör sayısı (64 bit, ofset 40)
         let total_sectors = u64::from_le_bytes([
             data[40], data[41], data[42], data[43],
             data[44], data[45], data[46], data[47],
         ]);
 
-        // MFT cluster (64-bit at offset 48)
+        // MFT kümesi (64 bit, ofset 48)
         let mft_cluster = u64::from_le_bytes([
             data[48], data[49], data[50], data[51],
             data[52], data[53], data[54], data[55],
         ]);
 
-        // MFT mirror cluster (64-bit at offset 56)
+        // MFT aynası kümesi (64 bit, ofset 56)
         let mftmirr_cluster = u64::from_le_bytes([
             data[56], data[57], data[58], data[59],
             data[60], data[61], data[62], data[63],
@@ -157,7 +190,7 @@ impl NtfsBootSector {
         let clusters_per_mft_record = data[64] as i8;
         let clusters_per_index_buffer = data[68] as i8;
 
-        // Serial number (64-bit at offset 72)
+        // Seri numarası (64 bit, ofset 72)
         let serial_number = u64::from_le_bytes([
             data[72], data[73], data[74], data[75],
             data[76], data[77], data[78], data[79],
@@ -176,31 +209,32 @@ impl NtfsBootSector {
         })
     }
 
-    /// Get cluster size
+    /// Küme boyutunu bayt olarak hesaplar
     pub fn cluster_size(&self) -> u64 {
         self.bytes_per_sector as u64 * self.sectors_per_cluster as u64
     }
 
-    /// Get MFT entry size
+    /// MFT giriş boyutunu hesaplar (negatif değer 2^|değer| anlamına gelir)
     pub fn mft_entry_size(&self) -> u64 {
         if self.clusters_per_mft_record > 0 {
             self.cluster_size() * self.clusters_per_mft_record as u64
         } else {
-            // Negative value means 2^|value|
+            // Negatif değer: 2^|değer| bayt
             1u64 << (-self.clusters_per_mft_record as u64)
         }
     }
 
-    /// Get MFT offset
+    /// MFT'nin disk üzerindeki bayt ofsetini döndürür
     pub fn mft_offset(&self) -> u64 {
         self.mft_cluster * self.cluster_size()
     }
 }
 
 // ============================================================================
-// MFT ENTRY
+// MFT GİRİŞİ
 // ============================================================================
 
+/// MFT Girişi - bir dosya veya dizin için tüm meta veriyi öznitelik listesi olarak tutar
 #[derive(Clone, Debug)]
 pub struct MftEntry {
     pub signature: [u8; 4],
@@ -216,7 +250,7 @@ impl MftEntry {
     const SIGNATURE_HOLE: [u8; 4] = [b'H', b'O', b'L', b'E'];
     const SIGNATURE_CHKD: [u8; 4] = [b'C', b'H', b'K', b'D'];
 
-    /// Parse MFT entry from bytes
+    /// MFT girişini ham baytlardan çözümler; imzayı ve öznitelikleri ayrıştırır
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 48 {
             return None;
@@ -224,9 +258,9 @@ impl MftEntry {
 
         let signature: [u8; 4] = [data[0], data[1], data[2], data[3]];
 
-        // Check if valid entry
-        if signature != Self::SIGNATURE_FILE && 
-           signature != Self::SIGNATURE_BAAD && 
+        // Geçerli giriş kontrolü
+        if signature != Self::SIGNATURE_FILE &&
+           signature != Self::SIGNATURE_BAAD &&
            signature != Self::SIGNATURE_HOLE {
             return None;
         }
@@ -234,13 +268,13 @@ impl MftEntry {
         let sequence = u16::from_le_bytes([data[16], data[17]]);
         let link_count = u16::from_le_bytes([data[18], data[19]]);
 
-        // Parse attributes
+        // Öznitelikleri çözümle
         let mut attributes = Vec::new();
         let mut offset = u16::from_le_bytes([data[20], data[21]]) as usize;
 
         while offset + 16 <= data.len() {
             let attr = NtfsAttribute::parse(&data[offset..])?;
-            
+
             if attr.attr_type == 0xFFFFFFFF {
                 break;
             }
@@ -249,7 +283,7 @@ impl MftEntry {
             if attr_len == 0 {
                 break;
             }
-            
+
             attributes.push(attr);
             offset += attr_len;
         }
@@ -263,31 +297,32 @@ impl MftEntry {
         })
     }
 
-    /// Check if valid FILE entry
+    /// Girişin geçerli bir FILE girişi olup olmadığını kontrol eder
     pub fn is_valid(&self) -> bool {
         self.signature == Self::SIGNATURE_FILE
     }
 
-    /// Get attribute by type
+    /// Belirtilen türdeki özniteliği döndürür
     pub fn get_attribute(&self, attr_type: u32) -> Option<&NtfsAttribute> {
         self.attributes.iter().find(|a| a.attr_type == attr_type)
     }
 
-    /// Get data attribute
+    /// $DATA özniteliğini döndürür (dosya içeriği)
     pub fn get_data_attribute(&self) -> Option<&NtfsAttribute> {
         self.get_attribute(ATTR_DATA)
     }
 
-    /// Get filename attribute
+    /// $FILE_NAME özniteliğini döndürür (dosya adı ve üst dizin)
     pub fn get_filename_attribute(&self) -> Option<&NtfsAttribute> {
         self.get_attribute(ATTR_FILE_NAME)
     }
 }
 
 // ============================================================================
-// NTFS ATTRIBUTE
+// NTFS ÖZNİTELİĞİ
 // ============================================================================
 
+/// NTFS Özniteliği - yerleşik (resident) veya dışsal (non-resident) veri içerir
 #[derive(Clone, Debug)]
 pub struct NtfsAttribute {
     pub attr_type: u32,
@@ -300,6 +335,7 @@ pub struct NtfsAttribute {
     pub content: AttributeContent,
 }
 
+/// Öznitelik içeriği - yerleşik veri veya dışsal data run'ları
 #[derive(Clone, Debug)]
 pub enum AttributeContent {
     Resident { data_offset: u16, data_length: u32 },
@@ -307,15 +343,15 @@ pub enum AttributeContent {
 }
 
 impl NtfsAttribute {
-    /// Parse attribute from bytes
+    /// Özniteliği ham baytlardan çözümler; yerleşik veya dışsal içeriği ayrıştırır
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 16 {
             return None;
         }
 
         let attr_type = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        
-        // End marker
+
+        // Son işaretçi
         if attr_type == 0xFFFFFFFF {
             return Some(NtfsAttribute {
                 attr_type,
@@ -337,7 +373,7 @@ impl NtfsAttribute {
         let instance = u16::from_le_bytes([data[14], data[15]]);
 
         let content = if non_resident {
-            // Non-resident attribute
+            // Dışsal öznitelik - data run'larla blok eşlemesi
             let start_vcn = u64::from_le_bytes([
                 data[16], data[17], data[18], data[19],
                 data[20], data[21], data[22], data[23],
@@ -348,7 +384,7 @@ impl NtfsAttribute {
             ]);
             let data_runs_offset = u16::from_le_bytes([data[32], data[33]]);
 
-            // Parse data runs
+            // Data run'larını çözümle
             let data_runs = Self::parse_data_runs(&data[data_runs_offset as usize..])?;
 
             AttributeContent::NonResident {
@@ -358,10 +394,10 @@ impl NtfsAttribute {
                 data_runs,
             }
         } else {
-            // Resident attribute
+            // Yerleşik öznitelik - doğrudan MFT girişi içinde
             let data_length = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
             let data_offset = u16::from_le_bytes([data[20], data[21]]);
-            
+
             AttributeContent::Resident { data_offset, data_length }
         };
 
@@ -377,7 +413,7 @@ impl NtfsAttribute {
         })
     }
 
-    /// Parse data runs (LCN mappings)
+    /// Data run'larını çözümler (LCN eşlemeleri, sıkıştırılmış format)
     fn parse_data_runs(data: &[u8]) -> Option<Vec<DataRun>> {
         let mut runs = Vec::new();
         let mut offset = 0;
@@ -401,19 +437,19 @@ impl NtfsAttribute {
                 break;
             }
 
-            // Parse length
+            // Uzunluğu çözümle
             let mut length = 0u64;
             for i in 0..len_bytes {
                 length |= (data[offset + i] as u64) << (i * 8);
             }
             offset += len_bytes;
 
-            // Parse LCN (signed)
+            // LCN'yi çözümle (işaretli - önceki değere göreli)
             let mut lcn = 0i64;
             for i in 0..lcn_bytes {
                 lcn |= (data[offset + i] as i64) << (i * 8);
             }
-            // Sign extend
+            // İşaret uzatma
             if lcn_bytes > 0 && (data[offset + lcn_bytes - 1] & 0x80) != 0 {
                 lcn |= !0 << (lcn_bytes * 8);
             }
@@ -425,7 +461,7 @@ impl NtfsAttribute {
         Some(runs)
     }
 
-    /// Get resident data
+    /// Yerleşik özniteliğin ham verisini döndürür
     pub fn get_resident_data<'a>(&self, entry_data: &'a [u8]) -> Option<&'a [u8]> {
         if let AttributeContent::Resident { data_offset, data_length } = self.content {
             let offset = data_offset as usize;
@@ -441,17 +477,18 @@ impl NtfsAttribute {
     }
 }
 
-/// Data run (LCN mapping)
+/// Data run - LCN eşlemesi; dışsal özniteliklerin disk konumunu belirtir
 #[derive(Clone, Copy, Debug)]
 pub struct DataRun {
     pub length: u64,
-    pub lcn: i64,  // Signed, relative to previous
+    pub lcn: i64,  // İşaretli, önceki değere göreli
 }
 
 // ============================================================================
-// FILE NAME ATTRIBUTE
+// DOSYA ADI ÖZNİTELİĞİ
 // ============================================================================
 
+/// $FILE_NAME öznitelik içeriği - dosya adı, üst dizin ve zaman damgaları
 #[derive(Clone, Debug)]
 pub struct FileNameAttr {
     pub parent_directory: u64,
@@ -464,7 +501,7 @@ pub struct FileNameAttr {
 }
 
 impl FileNameAttr {
-    /// Parse FILE_NAME attribute from data
+    /// $FILE_NAME özniteliğini ham baytlardan çözümler (UTF-16LE adı dönüştürür)
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 66 {
             return None;
@@ -499,7 +536,7 @@ impl FileNameAttr {
         let name_length = data[64] as usize;
         let namespace = data[65];
 
-        // Name is UTF-16LE
+        // Ad UTF-16LE kodlamalıdır
         let name_offset = 66;
         if name_offset + name_length * 2 > data.len() {
             return None;
@@ -528,16 +565,17 @@ impl FileNameAttr {
         })
     }
 
-    /// Check if directory
+    /// Dosyanın dizin olup olmadığını kontrol eder
     pub fn is_directory(&self) -> bool {
         (self.flags & 0x10000000) != 0
     }
 }
 
 // ============================================================================
-// NTFS FILE SYSTEM
+// NTFS DOSYA SİSTEMİ
 // ============================================================================
 
+/// NTFS Dosya Sistemi örneği - bölüm parametrelerini ve MFT konumunu yönetir
 #[derive(Clone, Debug)]
 pub struct NtfsFileSystem {
     pub boot_sector: NtfsBootSector,
@@ -547,7 +585,7 @@ pub struct NtfsFileSystem {
 }
 
 impl NtfsFileSystem {
-    /// Create new NTFS filesystem instance
+    /// Varsayılan değerlerle yeni bir NTFS dosya sistemi örneği oluşturur
     pub fn new() -> Self {
         NtfsFileSystem {
             boot_sector: unsafe { core::mem::zeroed() },
@@ -557,7 +595,7 @@ impl NtfsFileSystem {
         }
     }
 
-    /// Initialize from device data
+    /// Aygıt verisinden NTFS'yi başlatır: önyükleme sektörünü okur ve MFT konumunu hesaplar
     pub fn init(&mut self, device_data: &[u8]) -> Result<(), NtfsError> {
         if device_data.len() < 512 {
             return Err(NtfsError::ReadError);
@@ -575,13 +613,13 @@ impl NtfsFileSystem {
         self.mft_offset = mft_offset;
         self.mft_entry_size = mft_entry_size;
 
-        crate::serial_println!("[NTFS] Initialized: {} sectors, {} bytes/cluster, MFT at {}",
+        crate::serial_println!("[NTFS] Başlatıldı: {} sektör, {} bayt/küme, MFT'nin konumu {}",
             total_sectors, cluster_size, mft_offset);
 
         Ok(())
     }
 
-    /// Read MFT entry
+    /// Belirtilen numaralı MFT girişini aygıt verisinden okur
     pub fn read_mft_entry(&self, entry_num: u64, device_data: &[u8]) -> Result<MftEntry, NtfsError> {
         let offset = self.mft_offset + entry_num * self.mft_entry_size;
         let offset = offset as usize;
@@ -597,7 +635,7 @@ impl NtfsFileSystem {
         Ok(entry)
     }
 
-    /// Read file data
+    /// MFT girişindeki $DATA özniteliğinden dosya içeriğini okur
     pub fn read_file(&self, entry: &MftEntry, device_data: &[u8]) -> Result<Vec<u8>, NtfsError> {
         let data_attr = entry.get_data_attribute().ok_or(NtfsError::NotFound)?;
 
@@ -606,7 +644,7 @@ impl NtfsFileSystem {
                 let offset = *data_offset as usize;
                 let length = *data_length as usize;
                 let entry_offset = self.mft_offset as usize + entry.entry_number as usize * self.mft_entry_size as usize;
-                
+
                 if entry_offset + offset + length <= device_data.len() {
                     Ok(device_data[entry_offset + offset..entry_offset + offset + length].to_vec())
                 } else {
@@ -619,9 +657,9 @@ impl NtfsFileSystem {
 
                 for run in data_runs {
                     current_lcn += run.lcn;
-                    
+
                     if current_lcn < 0 {
-                        // Sparse run
+                        // Seyrek çalıştır (sparse run) - sıfırlarla doldur
                         data.extend(core::iter::repeat(0u8).take((run.length * self.cluster_size) as usize));
                         continue;
                     }
@@ -639,29 +677,29 @@ impl NtfsFileSystem {
         }
     }
 
-    /// Get file name from entry
+    /// MFT girişinden dosya adını alır
     pub fn get_file_name(&self, entry: &MftEntry) -> Option<String> {
         let attr = entry.get_filename_attribute()?;
         let data = attr.get_resident_data(&[0u8; 0])?;
-        
-        // Need to get from actual entry data
-        None // Simplified for now
+
+        // Asıl giriş verisinden alınması gerekir
+        None // Şimdilik basitleştirildi
     }
 
-    /// Read root directory
+    /// Kök dizin MFT girişini okur ve dizin içeriğini döndürür
     pub fn read_root_dir(&self, device_data: &[u8]) -> Result<Vec<NtfsDirEntry>, NtfsError> {
         let root_entry = self.read_mft_entry(MFT_ROOTDIR, device_data)?;
-        
-        // Root directory uses INDEX_ROOT and INDEX_ALLOCATION
-        // Simplified: just return empty for now
+
+        // Kök dizin INDEX_ROOT ve INDEX_ALLOCATION kullanır
+        // Basitleştirildi: şimdilik boş döndür
         Ok(Vec::new())
     }
 
-    /// Get metadata for entry
+    /// Verilen MFT girişinin meta verisini döndürür
     pub fn get_metadata(&self, entry: &MftEntry) -> Option<NtfsMetadata> {
         let filename_attr = entry.get_filename_attribute()?;
-        // Parse filename attribute for metadata
-        None // Simplified
+        // Dosya adı özniteliğinden meta veri oluştur
+        None // Basitleştirildi
     }
 }
 
@@ -672,14 +710,14 @@ impl Default for NtfsFileSystem {
 }
 
 // ============================================================================
-// GLOBAL INSTANCE
+// GLOBAL ÖRNEK
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref NTFS_INSTANCES: Mutex<BTreeMap<String, NtfsFileSystem>> = Mutex::new(BTreeMap::new());
 }
 
-/// Mount NTFS filesystem
+/// NTFS dosya sistemini bağlar (mount)
 pub fn mount_ntfs(name: &str, device_data: &[u8]) -> Result<(), NtfsError> {
     let mut fs = NtfsFileSystem::new();
     fs.init(device_data)?;
@@ -688,17 +726,17 @@ pub fn mount_ntfs(name: &str, device_data: &[u8]) -> Result<(), NtfsError> {
     Ok(())
 }
 
-/// Get NTFS filesystem
+/// İsme göre NTFS dosya sistemi örneğini döndürür
 pub fn get_ntfs(name: &str) -> Option<NtfsFileSystem> {
     NTFS_INSTANCES.lock().get(name).cloned()
 }
 
-/// Unmount NTFS filesystem
+/// NTFS dosya sistemini ayırır (unmount)
 pub fn unmount_ntfs(name: &str) -> bool {
     NTFS_INSTANCES.lock().remove(name).is_some()
 }
 
-/// Initialize NTFS module
+/// NTFS modülünü başlatır
 pub fn init() {
-    crate::serial_println!("[NTFS] Module initialized");
+    crate::serial_println!("[NTFS] Modül başlatıldı");
 }

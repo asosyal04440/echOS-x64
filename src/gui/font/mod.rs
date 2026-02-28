@@ -1,6 +1,30 @@
-//! # echOS Font Rendering
+//! # echOS Font Rendering (Font Görüntüleme)
 //!
-//! TrueType/OpenType font parsing, rasterization, and text layout.
+//! TrueType/OpenType font ayrıştırma, rasterleştirme ve metin düzeni.
+//!
+//! ## Font Pipeline (Akışı):
+//!
+//! ```
+//!  Ham Bayt Verisi (.ttf dosyası)
+//!          │
+//!          ▼
+//!  [TrueTypeFont::parse]   <── truetype.rs: Tablo okuma, glyph çıkarma
+//!          │
+//!          ▼
+//!    Glyph Outline         <── Bezier eğri noktaları (vektör form)
+//!          │
+//!          ▼
+//!  [Rasterizer::rasterize] <── rasterizer.rs: Scanline doldurma
+//!          │
+//!          ▼
+//!    RasterGlyph Bitmap    <── Piksel alfa değerleri (0-255)
+//!          │
+//!          ▼
+//!  [TextLayout::layout]    <── text_layout.rs: Satırları ve konumları hesapla
+//!          │
+//!          ▼
+//!    Framebuffer'a çizim
+//! ```
 
 mod truetype;
 mod rasterizer;
@@ -13,7 +37,8 @@ pub use text_layout::{TextLayout, LayoutLine, LayoutRun, LayoutGlyph};
 use alloc::vec::Vec;
 use alloc::string::String;
 
-/// Font handle for rendering
+/// Fontu render etmek için üst düzey tutamaç (handle).
+/// TrueTypeFont + Rasterizer birleşimini sarar.
 pub struct Font {
     inner: TrueTypeFont,
     rasterizer: Rasterizer,
@@ -21,7 +46,7 @@ pub struct Font {
 }
 
 impl Font {
-    /// Load font from bytes
+    /// Bayt diliminden font yükler (örn: include_bytes! ile gömülü font)
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         let inner = TrueTypeFont::parse(data)?;
         let rasterizer = Rasterizer::new();
@@ -32,38 +57,39 @@ impl Font {
         })
     }
 
-    /// Set font size in pixels
+    /// Font boyutunu piksel cinsinden ayarlar (örn: 12.0, 16.0, 24.0)
     pub fn set_size(&mut self, size: f32) {
         self.size = size;
     }
 
-    /// Get current font size
+    /// Mevcut font boyutunu döndürür
     pub fn size(&self) -> f32 {
         self.size
     }
 
-    /// Get glyph for character
+    /// Belirtilen karakter için ham Glyph verisini döndürür
     pub fn glyph(&self, c: char) -> Option<&Glyph> {
         self.inner.glyph(c)
     }
 
-    /// Rasterize glyph at current size
+    /// Mevcut boyutta bir glyphi rasterleştirir (piksel bitmap üretir)
     pub fn rasterize_glyph(&mut self, c: char) -> Option<RasterGlyph> {
         let glyph = self.inner.glyph(c)?;
         self.rasterizer.rasterize(&self.inner, glyph, self.size)
     }
 
-    /// Get advance width for character
+    /// Bir karakter için ilerleme genişliğini (advance width) döndürür.
+    /// İki karakter arasındaki yatay mesafeyi belirler.
     pub fn advance(&self, c: char) -> f32 {
         self.inner.advance(c, self.size)
     }
 
-    /// Get line height
+    /// Satır yüksekliğini döndürür (font boyutunun 1.2 katı, standart tipografi değeri)
     pub fn line_height(&self) -> f32 {
         self.size * 1.2
     }
 
-    /// Measure text width
+    /// Metnin piksel genişliğini ölçer (her karakterin advance genişliklerini toplar)
     pub fn measure_text(&self, text: &str) -> f32 {
         let mut width = 0.0;
         for c in text.chars() {
@@ -72,23 +98,33 @@ impl Font {
         width
     }
 
-    /// Layout text for rendering
+    /// Metni render için düzenler (layout hesaplar).
+    /// max_width verilirse kelime kaydırma (word wrap) uygulanır.
     pub fn layout_text(&self, text: &str, max_width: Option<f32>) -> TextLayout {
         TextLayout::layout(text, &self.inner, self.size, max_width)
     }
 
-    /// Get font family name
+    /// Font ailesi adını döndürür (örn: "Arial", "DejaVu Sans")
     pub fn family_name(&self) -> &str {
         &self.inner.family_name
     }
 
-    /// Check if font is monospace
+    /// Fontun sabit genişlikli (monospace) olup olmadığını kontrol eder.
+    /// Kod editörleri için önemli: her karakter aynı genişlikte olmalı.
     pub fn is_monospace(&self) -> bool {
         self.inner.is_monospace
     }
 }
 
-/// Font manager for handling multiple fonts
+/// Birden fazla fontu yöneten yönetici yapı.
+///
+/// ## Kullanım Örneği:
+/// ```
+/// let mut fm = FontManager::new();
+/// fm.register("sans", sans_font);
+/// fm.register("mono", mono_font);
+/// fm.set_default("sans");
+/// ```
 pub struct FontManager {
     fonts: Vec<(String, Font)>,
     default_idx: Option<usize>,

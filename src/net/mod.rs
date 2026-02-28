@@ -1,7 +1,55 @@
-//! # echOS Networking Stack
+//! # echOS Ağ Yığını
 //!
-//! Tier 1 OS seviyesinde TCP/IP implementasyonu
-//! POSIX socket API uyumlu
+//! Katman-1 (OS seviyesi) TCP/IP implementasyonu — POSIX soket API uyumlu.
+//!
+//! ## Ağ Yığını Katman Mimarisi
+//!
+//! ```text
+//! +----------------------------------------------+
+//! |           Uygulama Katmanı                   |
+//! |   (HTTP, DNS, TLS, WebSocket, QUIC...)       |
+//! +----------------------------------------------+
+//! |         Taşıma Katmanı (Transport)           |
+//! |        TCP (bağlantılı) | UDP (bağlantısız) |
+//! +----------------------------------------------+
+//! |           Ağ Katmanı (Network)               |
+//! |     IPv4 / IPv6 | ICMP | ARP | DHCP         |
+//! +----------------------------------------------+
+//! |         Veri Bağlantı Katmanı (Data Link)    |
+//! |          Ethernet | MAC Adresleme            |
+//! +----------------------------------------------+
+//! |          Fiziksel Katman / Sürücü            |
+//! |    VirtIO-Net | Loopback (lo) | smoltcp      |
+//! +----------------------------------------------+
+//! ```
+//!
+//! ## Alt Modüller
+//!
+//! | Modül           | Açıklama                                      |
+//! |-----------------|-----------------------------------------------|
+//! | `socket`        | POSIX soket API (socket/bind/connect/send...) |
+//! | `tcp`           | TCP bağlantı yönetimi, durum makinesi         |
+//! | `udp`           | UDP datagram gönderme/alma                    |
+//! | `ip`            | IPv4 paket işleme                             |
+//! | `ipv6`          | IPv6, ICMPv6, NDP, SLAAC, DHCPv6             |
+//! | `ethernet`      | Ethernet çerçeve işleme, EtherType            |
+//! | `arp`           | ARP protokolü (IP→MAC çözümleme)              |
+//! | `dhcp`          | DHCPv4 istemci                                |
+//! | `dns`           | DNS çözümleme                                 |
+//! | `dnssec`        | DNSSEC doğrulama                              |
+//! | `doh`           | DNS over HTTPS                                |
+//! | `dot`           | DNS over TLS                                  |
+//! | `netdev`        | Ağ aygıt sürücüleri (VirtIO-Net, loopback)   |
+//! | `http`          | HTTP/1.1 istemci/sunucu                       |
+//! | `http2`         | HTTP/2 multiplexing                           |
+//! | `websocket`     | WebSocket protokolü                           |
+//! | `smoltcp_driver`| smoltcp TCP/IP kütüphanesi entegrasyonu       |
+//! | `tls`           | TLS 1.2/1.3 şifreleme katmanı                |
+//! | `io_uring`      | Linux io_uring uyumlu async I/O API           |
+//! | `x509`          | X.509 sertifika işleme                        |
+//! | `quic`          | QUIC protokolü (UDP üzeri TLS)                |
+//! | `zero_copy`     | Sıfır kopya tampon yönetimi                   |
+//! | `netfilter`     | iptables/netfilter paket filtreleme           |
 
 pub mod socket;
 pub mod tcp;
@@ -36,16 +84,19 @@ use core::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// NETWORK CONFIGURATION
+// AĞ YAPILANDIRMASI (NETWORK CONFIGURATION)
 // ============================================================================
+//
+// Sistem genelinde tek bir ağ yapılandırması tutulur.
+// DHCP veya statik yapılandırma ile doldurulur.
 
-/// Maximum socket count
+/// Maksimum soket sayısı
 const MAX_SOCKETS: usize = 4096;
 
-/// Network buffer size
+/// Ağ tamponu boyutu (MTU + Ethernet başlığı)
 const NET_BUF_SIZE: usize = 1514; // MTU + Ethernet header
 
-/// Global network configuration
+/// Küresel ağ yapılandırması (Mutex ile korumalı)
 static NET_CONFIG: Mutex<NetworkConfig> = Mutex::new(NetworkConfig {
     ip_addr: [0, 0, 0, 0],
     netmask: [255, 255, 255, 0],
@@ -54,7 +105,7 @@ static NET_CONFIG: Mutex<NetworkConfig> = Mutex::new(NetworkConfig {
     hostname: String::new(),
 });
 
-/// Network configuration
+/// Ağ yapılandırması — IP, ağ maskesi, ağ geçidi ve DNS
 #[derive(Clone, Debug)]
 pub struct NetworkConfig {
     pub ip_addr: [u8; 4],
@@ -81,10 +132,14 @@ impl NetworkConfig {
 }
 
 // ============================================================================
-// MAC ADDRESS
+// MAC ADRESİ (Media Access Control Address)
 // ============================================================================
+//
+// MAC adresi, ağ arayüz kartına üretici tarafından atanan 48-bitlik
+// donanım adresidir. Ethernet çerçevelerinde kaynak ve hedef tanımlamasında
+// kullanılır. Format: AA:BB:CC:DD:EE:FF (6 oktet, hex)
 
-/// MAC Address
+/// MAC Adresi (6 bayt = 48 bit)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MacAddr(pub [u8; 6]);
 
@@ -120,17 +175,26 @@ impl Default for MacAddr {
 }
 
 // ============================================================================
-// IP ADDRESS
+// IP ADRESİ (IPv4)
 // ============================================================================
+//
+// IPv4 adresi 32 bittir ve genellikle dört oktet noktalı gösterim ile yazılır.
+// Örnek: 192.168.1.1 (0xC0.0xA8.0x01.0x01)
+//
+// Sınıflar (CIDR öncesi, tarihsel):
+//   A: 0.0.0.0/8     (büyük ağlar, 10.x.x.x özel)
+//   B: 128.0.0.0/16  (orta ağlar, 172.16-31.x.x özel)
+//   C: 192.0.0.0/24  (küçük ağlar, 192.168.x.x özel)
+//   D: 224.0.0.0/4   (multicast)
 
-/// IPv4 Address
+/// IPv4 Adresi (4 bayt = 32 bit)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ipv4Addr(pub [u8; 4]);
 
 impl Ipv4Addr {
-    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr([0, 0, 0, 0]);
-    pub const BROADCAST: Ipv4Addr = Ipv4Addr([255, 255, 255, 255]);
-    pub const LOCALHOST: Ipv4Addr = Ipv4Addr([127, 0, 0, 1]);
+    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr([0, 0, 0, 0]);           // 0.0.0.0 belirsiz
+    pub const BROADCAST: Ipv4Addr = Ipv4Addr([255, 255, 255, 255]);     // 255.255.255.255 yayın
+    pub const LOCALHOST: Ipv4Addr = Ipv4Addr([127, 0, 0, 1]);           // 127.0.0.1 geri döngü
     
     pub fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
         Ipv4Addr([a, b, c, d])
@@ -149,8 +213,8 @@ impl Ipv4Addr {
     }
     
     pub fn is_private(&self) -> bool {
-        // 10.0.0.0/8
-        self.0[0] == 10 ||
+        // RFC 1918 özel adres aralıkları:
+        self.0[0] == 10 ||                                               // 10.0.0.0/8
         // 172.16.0.0/12
         (self.0[0] == 172 && self.0[1] >= 16 && self.0[1] <= 31) ||
         // 192.168.0.0/16
@@ -191,20 +255,28 @@ impl core::fmt::Display for Ipv4Addr {
 }
 
 // ============================================================================
-// PORT
+// PORT NUMARASI
 // ============================================================================
+//
+// Port, aynı IP adresi üzerindeki farklı servisleri ayırt etmek için kullanılan
+// 16-bit (0-65535) tanımlayıcıdır.
+//
+// Port Aralıkları:
+//   0 - 1023  : Sistem portları (iyi bilinen servisler, root yetkisi gerektirir)
+//   1024-49151 : Kayıtlı portlar (IANA tarafından atanmış)
+//   49152-65535 : Dinamik/kısa ömürlü portlar (istemci tarafı geçici bağlantılar)
 
-/// Network port
+/// Ağ portu (16 bit)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Port(pub u16);
 
 impl Port {
-    pub const HTTP: Port = Port(80);
-    pub const HTTPS: Port = Port(443);
-    pub const SSH: Port = Port(22);
-    pub const DNS: Port = Port(53);
-    pub const DHCP_CLIENT: Port = Port(68);
-    pub const DHCP_SERVER: Port = Port(67);
+    pub const HTTP: Port = Port(80);           // Hiper Metin Transfer Protokolü
+    pub const HTTPS: Port = Port(443);         // HTTP Güvenli (TLS üzeri HTTP)
+    pub const SSH: Port = Port(22);            // Güvenli Kabuk (Secure Shell)
+    pub const DNS: Port = Port(53);            // Alan Adı Sistemi
+    pub const DHCP_CLIENT: Port = Port(68);    // DHCP İstemci portu
+    pub const DHCP_SERVER: Port = Port(67);    // DHCP Sunucu portu
     
     pub fn new(port: u16) -> Self {
         Port(port)
@@ -224,10 +296,14 @@ impl Port {
 }
 
 // ============================================================================
-// SOCKET ADDRESS
+// SOKET ADRESİ (SOCKET ADDRESS)
 // ============================================================================
+//
+// Bir soket addresi = IP adresi + Port numarası birleşimidir.
+// TCP/UDP bağlantılarında kaynak ve hedef uç noktaları tanımlar.
+// Örnek: 192.168.1.1:8080
 
-/// Socket address (IP + Port)
+/// Soket adresi (IP + Port)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SocketAddr {
     pub ip: Ipv4Addr,
@@ -254,10 +330,19 @@ impl Default for SocketAddr {
 }
 
 // ============================================================================
-// NETWORK INTERFACE
+// AĞ ARABIRIM KATMANI (NETWORK INTERFACE)
 // ============================================================================
+//
+// Her ağ arabirimi (eth0, lo, wlan0 vb.) bu trait'i implemente eder.
+// Sürücüler, bu soyutlama katmanı sayesinde protokol yığınından bağımsız hale gelir.
+//
+//   Protokol Yığını
+//       │
+//       ▼
+//   NetInterface (trait) ← VirtioNetInterface
+//                        ← LoopbackInterface
 
-/// Network interface statistics
+/// Ağ arabirimi istatistikleri (gelen/giden paket, bayt, hata sayaçları)
 #[derive(Clone, Debug, Default)]
 pub struct NetStats {
     pub rx_packets: u64,
@@ -270,88 +355,96 @@ pub struct NetStats {
     pub tx_dropped: u64,
 }
 
-/// Network interface
+/// Ağ arabirimi trait'i — tüm sürücüler bu arayüzü uygulamalıdır
 pub trait NetInterface: Send + Sync {
-    /// Get interface name
+    /// Arabirim adını döndürür (örn. "eth0", "lo")
     fn name(&self) -> &str;
-    
-    /// Get MAC address
+
+    /// MAC adresini döndürür
     fn mac(&self) -> MacAddr;
-    
-    /// Get IP address
+
+    /// Atanmış IPv4 adresini döndürür
     fn ip(&self) -> Ipv4Addr;
-    
-    /// Set IP address
+
+    /// IPv4 adresini ayarlar
     fn set_ip(&mut self, ip: Ipv4Addr);
-    
-    /// Get netmask
+
+    /// Ağ maskesini döndürür (örn. 255.255.255.0)
     fn netmask(&self) -> Ipv4Addr;
-    
-    /// Set netmask
+
+    /// Ağ maskesini ayarlar
     fn set_netmask(&mut self, mask: Ipv4Addr);
-    
-    /// Get gateway
+
+    /// Varsayılan ağ geçidini döndürür
     fn gateway(&self) -> Option<Ipv4Addr>;
-    
-    /// Set gateway
+
+    /// Varsayılan ağ geçidini ayarlar
     fn set_gateway(&mut self, gw: Ipv4Addr);
     
-    /// Check if interface is up
+    /// Arabirimin aktif (up) olup olmadığını döndürür
     fn is_up(&self) -> bool;
-    
-    /// Bring interface up/down
+
+    /// Arabirimi aktif (up=true) veya pasif (up=false) yapar
     fn set_up(&mut self, up: bool);
-    
-    /// Send raw packet
+
+    /// Ham Ethernet çerçevesi gönderir
     fn send(&mut self, data: &[u8]) -> Result<(), NetError>;
-    
-    /// Receive raw packet (non-blocking)
+
+    /// Ham Ethernet çerçevesi alır (engellemesiz/non-blocking)
     fn recv(&mut self) -> Option<Vec<u8>>;
-    
-    /// Get statistics
+
+    /// Arabirim istatistiklerini döndürür
     fn stats(&self) -> NetStats;
-    
-    /// Get MTU
+
+    /// Maksimum İletim Birimi (MTU) — varsayılan 1500 bayt
     fn mtu(&self) -> u16 {
         1500
     }
 }
 
-/// Network error
+/// Ağ işlemi hata türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetError {
-    NoInterface,
-    NotUp,
-    BufferFull,
-    BufferEmpty,
-    InvalidPacket,
-    InvalidFd,
-    InvalidParam,
-    ChecksumError,
-    Timeout,
-    ConnectionRefused,
-    ConnectionReset,
-    ConnectionClosed,
-    WouldBlock,
-    AddrInUse,
-    AddrNotAvailable,
-    NetworkUnreachable,
-    HostUnreachable,
-    ProtocolError,
-    NotSupported,
-    Unknown,
+    NoInterface,          // Ağ arabirimi bulunamadı
+    NotUp,                // Arabirim aktif değil
+    BufferFull,           // Gönderme tamponu dolu
+    BufferEmpty,          // Alma tamponu boş
+    InvalidPacket,        // Geçersiz paket formatı
+    InvalidFd,            // Geçersiz soket tanımlayıcısı
+    InvalidParam,         // Geçersiz parametre
+    ChecksumError,        // Sağlama toplamı hatası
+    Timeout,              // Zaman aşımı
+    ConnectionRefused,    // Bağlantı reddedildi
+    ConnectionReset,      // Bağlantı sıfırlandı
+    ConnectionClosed,     // Bağlantı kapatıldı
+    WouldBlock,           // Engellemesiz modda işlem tamamlanamadı
+    AddrInUse,            // Adres/port zaten kullanımda
+    AddrNotAvailable,     // Adres mevcut değil
+    NetworkUnreachable,   // Ağa erişilemiyor
+    HostUnreachable,      // Uzak makineye erişilemiyor
+    ProtocolError,        // Protokol hatası
+    NotSupported,         // Desteklenmeyen işlem
+    Unknown,              // Bilinmeyen hata
 }
 
 // ============================================================================
-// NETWORK MANAGER
+// AĞ YÖNETİCİSİ (NETWORK MANAGER)
 // ============================================================================
+//
+// Tüm ağ arabirimlerini merkezi olarak yönetir.
+// Arabirim kayıt, çözümleme ve varsayılan arabirim seçimi buradan yapılır.
+//
+//   NET_INTERFACES : Kayıtlı arabirimler listesi (Mutex<Vec<Arc<Mutex<dyn NetInterface>>>>)
+//   NET_INITIALIZED: Ağ yığınının başlatılıp başlatılmadığını belirtir (AtomicBool)
+//   NEXT_SOCKET_ID : Bir sonraki benzersiz soket kimliği (AtomicU32)
 
-/// Global network manager
+/// Kayıtlı ağ arabirimlerinin küresel listesi
 static NET_INTERFACES: Mutex<Vec<Arc<Mutex<dyn NetInterface>>>> = Mutex::new(Vec::new());
+/// Ağ yığınının başlatılma durumu (çift başlatmayı önler)
 static NET_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static NEXT_SOCKET_ID: AtomicU32 = AtomicU32::new(1);
 
-/// Initialize networking subsystem
+/// Ağ yığınını başlatır (çift çağrı güvenlidir)
 pub fn init() {
     if NET_INITIALIZED.swap(true, Ordering::SeqCst) {
         return;
@@ -370,14 +463,14 @@ pub fn init() {
     crate::serial_println!("[NET] Networking stack initialized");
 }
 
-/// Register network interface
+/// Yeni bir ağ arabirimini sisteme kaydeder
 pub fn register_interface(iface: Arc<Mutex<dyn NetInterface>>) {
     let mut interfaces = NET_INTERFACES.lock();
     interfaces.push(iface);
     crate::serial_println!("[NET] Interface registered: {}", interfaces.last().unwrap().lock().name());
 }
 
-/// Get interface by name
+/// Ada göre ağ arabirimini bulur ve döndürür
 pub fn get_interface(name: &str) -> Option<Arc<Mutex<dyn NetInterface>>> {
     let interfaces = NET_INTERFACES.lock();
     for iface in interfaces.iter() {
@@ -388,7 +481,7 @@ pub fn get_interface(name: &str) -> Option<Arc<Mutex<dyn NetInterface>>> {
     None
 }
 
-/// Get default interface
+/// Varsayılan ağ arabirimini döndürür (listede ilk kayıtlı arabirim)
 pub fn default_interface() -> Option<Arc<Mutex<dyn NetInterface>>> {
     let interfaces = NET_INTERFACES.lock();
     if !interfaces.is_empty() {
@@ -398,38 +491,38 @@ pub fn default_interface() -> Option<Arc<Mutex<dyn NetInterface>>> {
     }
 }
 
-/// Allocate socket ID
+/// Yeni benzersiz soket kimliği ayırır ve döndürür
 pub fn allocate_socket_id() -> u32 {
     NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Check if network is configured
+/// Ağın yapılandırılıp yapılandırılmadığını kontrol eder (IP atanmış mı?)
 pub fn is_configured() -> bool {
     NET_CONFIG.lock().is_configured()
 }
 
-/// Get network configuration
+/// Mevcut ağ yapılandırmasının bir kopyasını döndürür
 pub fn get_config() -> NetworkConfig {
     NET_CONFIG.lock().clone()
 }
 
-/// Set network configuration
+/// Ağ yapılandırmasını günceller (DHCP yanıtı veya statik ayar sonrası)
 pub fn set_config(config: NetworkConfig) {
     let mut cfg = NET_CONFIG.lock();
     *cfg = config;
 }
 
-/// Get local IP address
+/// Sistemin yerel IPv4 adresini döndürür
 pub fn local_ip() -> Ipv4Addr {
     Ipv4Addr::from_bytes(NET_CONFIG.lock().ip_addr)
 }
 
-/// Process incoming packet
+/// Gelen Ethernet çerçevesini işler ve uygun protokole yönlendirir
 pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
-    // Parse Ethernet frame
+    // Ethernet çerçevesini ayrıştır
     let frame = ethernet::EthernetFrame::parse(data)?;
-    
-    // Dispatch by EtherType
+
+    // EtherType'a göre yönlendir
     match frame.ether_type() {
         ethernet::EtherType::ARP => {
             arp::process_packet(&frame.payload)?;
@@ -438,14 +531,14 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
             ip::process_packet(&frame.payload)?;
         }
         _ => {
-            // Unknown protocol, drop
+            // Bilinmeyen protokol, paketi düşür
         }
     }
     
     Ok(())
 }
 
-/// Send packet through default interface
+/// Paketi varsayılan ağ arabirimi üzerinden gönderir
 pub fn send_packet(data: &[u8]) -> Result<(), NetError> {
     let iface = default_interface().ok_or(NetError::NoInterface)?;
     iface.lock().send(data)?;
@@ -453,10 +546,22 @@ pub fn send_packet(data: &[u8]) -> Result<(), NetError> {
 }
 
 // ============================================================================
-// NETWORK UTILITIES (ss, nc, traceroute)
+// AĞ ARAÇLARI (ss, nc, traceroute, ping, ifconfig)
 // ============================================================================
+//
+// Bu bölüm, kullanıcı kabuk komutlarını desteklemek için üst düzey ağ araçları
+// sunar. Her araç ilgili protokol modülleri üzerine inşa edilmiştir.
+//
+//  Araç         Komut     Açıklama
+//  --------     ------    ----------------------------------------
+//  ss           ss -t     Aktif soketleri listeler (netstat yerine)
+//  nc           nc        Netcat: TCP bağlantısı kur veya dinle
+//  traceroute   tracert   Hedefe giden yol üzerindeki atlama noktaları
+//  ping         ping      ICMP Echo Request/Reply ile gecikme ölçümü
+//  arp          arp -n    ARP tablosunu görüntüler
+//  ifconfig     ifconfig  Ağ arabirimi bilgilerini görüntüler
 
-/// Socket statistics entry
+/// Soket istatistikleri girdisi (`ss` komutu için)
 #[derive(Clone, Debug)]
 pub struct SocketStats {
     pub id: u32,
@@ -468,11 +573,11 @@ pub struct SocketStats {
     pub tx_bytes: usize,
 }
 
-/// Get socket statistics (ss command)
+/// Tüm aktif soketlerin istatistiklerini döndürür (`ss` komutu)
 pub fn get_socket_stats() -> Vec<SocketStats> {
     let mut stats = Vec::new();
-    
-    // TCP connections
+
+    // TCP bağlantılarını listele
     let tcp_conns = tcp::get_all_connections();
     for conn in tcp_conns {
         let state_str = match conn.state {
@@ -504,7 +609,7 @@ pub fn get_socket_stats() -> Vec<SocketStats> {
         });
     }
     
-    // UDP sockets
+    // UDP soketlerini listele
     let udp_socks = udp::get_all_sockets();
     for sock in udp_socks {
         stats.push(SocketStats {
@@ -523,7 +628,7 @@ pub fn get_socket_stats() -> Vec<SocketStats> {
     stats
 }
 
-/// Netcat - connect to host
+/// Netcat — uzak sunucuya TCP bağlantısı kurar (`nc host port`)
 pub fn nc_connect(host: &str, port: u16) -> Result<u32, NetError> {
     let dns_server = get_config().dns_servers.first()
         .map(|ip| Ipv4Addr::from_bytes(*ip))
@@ -542,17 +647,17 @@ pub fn nc_connect(host: &str, port: u16) -> Result<u32, NetError> {
     Ok(sock)
 }
 
-/// Netcat - send data
+/// Netcat — bağlı sokete veri gönderir
 pub fn nc_send(sock: u32, data: &[u8]) -> Result<usize, NetError> {
     socket::send(sock, data, 0)
 }
 
-/// Netcat - receive data
+/// Netcat — soketten veri alır
 pub fn nc_recv(sock: u32, buf: &mut [u8]) -> Result<usize, NetError> {
     socket::recv(sock, buf, 0)
 }
 
-/// Netcat - listen mode
+/// Netcat — dinleme modu (`nc -l port`) — belirtilen portta bağlantı bekler
 pub fn nc_listen(port: u16) -> Result<u32, NetError> {
     let sock = socket::socket(
         socket::AddressFamily::IPV4,
@@ -565,12 +670,12 @@ pub fn nc_listen(port: u16) -> Result<u32, NetError> {
     Ok(sock)
 }
 
-/// Netcat - accept connection
+/// Netcat — gelen bağlantıyı kabul eder
 pub fn nc_accept(sock: u32) -> Result<(u32, SocketAddr), NetError> {
     socket::accept(sock)
 }
 
-/// Traceroute hop info
+/// Traceroute atlama noktası bilgisi
 #[derive(Clone, Debug)]
 pub struct TracerouteHop {
     pub hop: u8,
@@ -579,20 +684,20 @@ pub struct TracerouteHop {
     pub reached: bool,
 }
 
-/// Traceroute to destination
+/// Hedefe giden yolu TTL artırarak keşfeder (Traceroute)
 pub fn traceroute(dest: Ipv4Addr, max_hops: u8) -> Result<Vec<TracerouteHop>, NetError> {
     let mut hops = Vec::new();
-    
-    // Get gateway for routing
+
+    // Yönlendirme için ağ geçidini al
     let config = get_config();
     let gateway = Ipv4Addr::from_bytes(config.gateway);
-    
-    // Simple traceroute simulation
-    // In real implementation, would send ICMP/UDP with increasing TTL
+
+    // Basit traceroute simülasyonu
+    // Gerçek implementasyonunda artan TTL ile ICMP/UDP paketleri gönderilir
     for ttl in 1..=max_hops {
-        // Check if we've reached destination
+        // Hedefe ulaşıp ulaşmadığımızı kontrol et
         if ttl == 1 {
-            // First hop is usually gateway
+            // İlk atlama genellikle ağ geçididir (yerel router)
             if !gateway.is_unspecified() {
                 hops.push(TracerouteHop {
                     hop: ttl,
@@ -602,7 +707,7 @@ pub fn traceroute(dest: Ipv4Addr, max_hops: u8) -> Result<Vec<TracerouteHop>, Ne
                 });
             }
         } else if ttl == max_hops || ttl >= 16 {
-            // Assume we reached destination
+            // Hedefe ulaşıldığı varsayılır (gerçek impl: ICMP Echo Reply bekle)
             hops.push(TracerouteHop {
                 hop: ttl,
                 ip: dest,
@@ -611,8 +716,8 @@ pub fn traceroute(dest: Ipv4Addr, max_hops: u8) -> Result<Vec<TracerouteHop>, Ne
             });
             break;
         } else {
-            // Intermediate hop (placeholder)
-            // Real implementation would parse ICMP Time Exceeded responses
+            // Ara atlama noktası (simüle edilmiş, gerçek değil)
+            // Gerçek implementasyonda ICMP Time Exceeded yanıtları ayrıştırılır
             let hop_ip = Ipv4Addr::from_bytes([
                 gateway.0[0],
                 gateway.0[1],
@@ -631,16 +736,15 @@ pub fn traceroute(dest: Ipv4Addr, max_hops: u8) -> Result<Vec<TracerouteHop>, Ne
     Ok(hops)
 }
 
-/// Ping destination
+/// Ping — ICMP Echo Request/Reply ile gecikme ölçer (`ping ip count`)
 pub fn ping(dest: Ipv4Addr, count: u8) -> Result<Vec<(u32, bool)>, NetError> {
     let mut results = Vec::new();
-    
-    // Simple ping simulation
-    // Real implementation would use ICMP Echo Request/Reply
+
+    // Ping simülasyonu — gerçek implementasyonda ICMP Echo Request/Reply kullanılır
     for i in 0..count {
-        // Simulate RTT (would be measured from actual ICMP)
+        // RTT simüle et (gerçekte: ICMP yanıt zamanı ölçülür)
         let rtt = 5 + (i as u32 * 2);
-        let success = i < count - 1; // Simulate some packet loss
+        let success = i < count - 1; // Paket kaybı simülasyonu
         
         results.push((rtt, success));
     }
@@ -648,12 +752,12 @@ pub fn ping(dest: Ipv4Addr, count: u8) -> Result<Vec<(u32, bool)>, NetError> {
     Ok(results)
 }
 
-/// Get ARP table
+/// ARP tablosunu döndürür (`arp -n`)
 pub fn get_arp_table() -> Vec<(Ipv4Addr, MacAddr)> {
     arp::get_table()
 }
 
-/// Get network interfaces
+/// Sistemdeki tüm ağ arabirimlerini döndürür (`ifconfig`)
 pub fn get_interfaces() -> Vec<InterfaceInfo> {
     let mut interfaces = Vec::new();
     
@@ -673,7 +777,7 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
     interfaces
 }
 
-/// Interface information
+/// Ağ arabirimi bilgisi (`ifconfig` çıktısı için)
 #[derive(Clone, Debug)]
 pub struct InterfaceInfo {
     pub name: String,

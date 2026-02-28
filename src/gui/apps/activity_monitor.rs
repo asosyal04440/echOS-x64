@@ -2,6 +2,17 @@
 //!
 //! System monitoring app showing CPU, memory, disk, and network usage
 //! Process list with resource consumption details
+//!
+//! Bu modül, macOS Activity Monitor'e benzer bir sistem izleme uygulamasını
+//! gerçekleştirir. İşletim sistemlerinde her çalışan program bir "process"
+//! (süreç) olarak yönetilir; bu uygulama mevcut süreçleri ve sistem
+//! kaynak tüketimini görselleştirir.
+//!
+//! Temel kavramlar:
+//! - **PID**: Process ID — her sürecin işletim sistemi tarafından atanan benzersiz kimliği.
+//! - **CPU kullanımı**: İşlemcinin o süreç için ne kadar zaman harcadığının yüzdesi.
+//! - **Bellek kullanımı**: Sürecin RAM'de kapladığı alan (bayt cinsinden).
+//! - **Uptime**: Sistemin kesintisiz çalışma süresi (saniye cinsinden).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -19,70 +30,81 @@ use crate::gui::Rect;
 // ============================================================================
 // ACTIVITY MONITOR CONSTANTS
 // ============================================================================
+// Sabit değerler: UI bileşenlerinin piksel cinsinden boyutları.
+// `const` anahtar kelimesi ile derleme zamanında sabit değerler tanımlanır.
+// `usize` türü, platform genişliğine (32 veya 64 bit) bağlı işaretsiz tam sayıdır.
 
-/// Tab bar height
+/// Sekme çubuğunun piksel cinsinden yüksekliği
 pub const TAB_BAR_HEIGHT: usize = 32;
 
-/// Toolbar height
+/// Araç çubuğunun piksel cinsinden yüksekliği
 pub const TOOLBAR_HEIGHT: usize = 36;
 
-/// Process row height
+/// Süreç listesinde her satırın yüksekliği
 pub const ROW_HEIGHT: usize = 24;
 
-/// Graph height
+/// Kaynak kullanım grafiğinin yüksekliği
 pub const GRAPH_HEIGHT: usize = 100;
 
-/// Update interval (ms)
+/// İstatistik güncelleme aralığı (milisaniye)
 pub const UPDATE_INTERVAL: u64 = 1000;
 
 // ============================================================================
 // PROCESS INFO
 // ============================================================================
+// Süreç (process) bilgisini temsil eden veri yapısı.
+// Rust'ta `struct` ile ilişkili verileri bir arada gruplayabiliriz.
+// `#[derive(Clone, Debug)]` özniteliği, derleyiciye bu struct için
+// otomatik olarak Clone (kopyalama) ve Debug (hata ayıklama çıktısı)
+// trait'lerini üretmesini söyler.
 
-/// Process information
+/// İşletim sistemi tarafından çalıştırılan bir sürece ait bilgiler
 #[derive(Clone, Debug)]
 pub struct ProcessInfo {
-    /// Process ID
+    /// Sürecin benzersiz kimliği (Process ID)
     pub pid: u32,
-    /// Process name
+    /// Sürecin adı (örn. "kernel_task", "Browser")
     pub name: String,
-    /// User
+    /// Süreci başlatan kullanıcı
     pub user: String,
-    /// CPU usage (percentage)
+    /// CPU kullanım yüzdesi (0.0 - 100.0)
     pub cpu_percent: f32,
-    /// Memory usage (bytes)
+    /// Kullanılan bellek miktarı (bayt cinsinden)
     pub memory_bytes: u64,
-    /// Memory percentage
+    /// Toplam belleğe oranla kullanım yüzdesi
     pub memory_percent: f32,
-    /// Disk read (bytes)
+    /// Diskten okunan veri miktarı (bayt)
     pub disk_read: u64,
-    /// Disk written (bytes)
+    /// Diske yazılan veri miktarı (bayt)
     pub disk_write: u64,
-    /// Network received (bytes)
+    /// Ağdan alınan veri miktarı (bayt)
     pub net_recv: u64,
-    /// Network sent (bytes)
+    /// Ağa gönderilen veri miktarı (bayt)
     pub net_sent: u64,
-    /// Thread count
+    /// Süreç içindeki iş parçacığı (thread) sayısı
     pub threads: u32,
-    /// Open ports
+    /// Açık ağ portu sayısı
     pub ports: u32,
-    /// State
+    /// Sürecin mevcut durumu
     pub state: ProcessState,
-    /// Parent PID
+    /// Üst sürecin PID'i (parent process)
     pub ppid: u32,
-    /// Priority
+    /// Zamanlayıcı önceliği (düşük = yüksek öncelik Unix'te)
     pub priority: i32,
-    /// Start time
+    /// Sürecin başlama zamanı (UNIX timestamp)
     pub start_time: u64,
 }
 
+// Süreç durumlarını temsil eden enum.
+// `Copy` trait'i, değerin yığına (stack) kopyalanabildiğini belirtir.
+// `PartialEq + Eq` trait'leri == operatörü ile karşılaştırmaya olanak tanır.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessState {
-    Running,
-    Sleeping,
-    Idle,
-    Stopped,
-    Zombie,
+    Running,  // Süreç aktif olarak çalışıyor
+    Sleeping, // Eventbeliyor (engellenmiş, ama sonlandırılmamış)
+    Idle,     // Boşta bekliyor
+    Stopped,  // Dış sinyal ile durdurulmuş (SIGSTOP gibi)
+    Zombie,   // Tamamlandı ama üst süreç henüz temizlemedi
 }
 
 impl ProcessInfo {
@@ -106,7 +128,10 @@ impl ProcessInfo {
             start_time: 0,
         }
     }
-    
+
+    // Bayt birimindeki bellek miktarını okunabilir bir stringe dönüştürür.
+    // 1 KB = 1024 B, 1 MB = 1024 KB, 1 GB = 1024 MB şeklinde hesaplanır.
+    // `as f64` ile tam sayıyı kayan noktalı sayıya dönüştürüp bölme yapılır.
     pub fn format_memory(&self) -> String {
         if self.memory_bytes < 1024 {
             format!("{} B", self.memory_bytes)
@@ -149,59 +174,64 @@ impl ProcessInfo {
 // ============================================================================
 // SYSTEM STATS
 // ============================================================================
+// Sistemin anlık kaynak kullanım istatistikleri.
+// `Vec<f32>` kullanımı, geçmiş değerleri dinamik dizide saklamamızı sağlar.
+// Grafik çizmek için son 60 örnek (yaklaşık 1 dakika) burada tutulur.
 
-/// System statistics
+/// Sistem genelindeki anlık ve geçmişe ait kaynak kullanım istatistikleri
 #[derive(Clone, Debug)]
 pub struct SystemStats {
-    /// CPU usage per core
+    /// Her çekirdek için ayrı CPU kullanım yüzdesi
     pub cpu_cores: Vec<f32>,
-    /// Total CPU usage
+    /// Tüm çekirdeklerin ortalaması olan toplam CPU kullanımı
     pub cpu_total: f32,
-    /// CPU history
+    /// Son 60 saniyeye ait CPU kullanım geçmişi (grafik için)
     pub cpu_history: Vec<f32>,
-    /// Total memory
+    /// Toplam fiziksel RAM miktarı (bayt)
     pub memory_total: u64,
-    /// Used memory
+    /// Şu an kullanımda olan RAM miktarı (bayt)
     pub memory_used: u64,
-    /// Memory pressure
+    /// Bellek baskısı: Normal / Uyarı / Kritik
     pub memory_pressure: MemoryPressure,
-    /// Memory history
+    /// Son 60 saniyeye ait bellek kullanım geçmişi
     pub memory_history: Vec<f32>,
-    /// Disk total
+    /// Toplam disk alanı (bayt)
     pub disk_total: u64,
-    /// Disk used
+    /// Kullanılan disk alanı (bayt)
     pub disk_used: u64,
-    /// Disk read speed
+    /// Anlık disk okuma hızı (bayt/saniye)
     pub disk_read_speed: u64,
-    /// Disk write speed
+    /// Anlık disk yazma hızı (bayt/saniye)
     pub disk_write_speed: u64,
-    /// Disk history
+    /// Son 60 saniyeye ait disk kullanım geçmişi
     pub disk_history: Vec<f32>,
-    /// Network received
+    /// Toplam ağdan alınan veri miktarı (bayt)
     pub net_recv: u64,
-    /// Network sent
+    /// Toplam ağa gönderilen veri miktarı (bayt)
     pub net_sent: u64,
-    /// Network recv speed
+    /// Anlık indirme hızı (bayt/saniye)
     pub net_recv_speed: u64,
-    /// Network send speed
+    /// Anlık yükleme hızı (bayt/saniye)
     pub net_send_speed: u64,
-    /// Network history
+    /// Son 60 saniyeye ait ağ trafiği geçmişi (indirme, yükleme) çifti
     pub net_history: Vec<(f32, f32)>,
-    /// Uptime (seconds)
+    /// Sistemin açık kalma süresi (saniye cinsinden)
     pub uptime: u64,
-    /// Load average
+    /// 1, 5 ve 15 dakikalık yük ortalaması (Unix load average)
     pub load_avg: (f32, f32, f32),
-    /// Process count
+    /// Toplam çalışan süreç sayısı
     pub process_count: usize,
-    /// Thread count
+    /// Toplam iş parçacığı sayısı
     pub thread_count: u32,
 }
 
+// Bellek baskı seviyesi: macOS'un "Memory Pressure" kavramından esinlenilmiştir.
+// Sistem daha fazla uygulama için bellek bulamazsa önce uyarı, sonra kritik duruma geçer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryPressure {
-    Normal,
-    Warning,
-    Critical,
+    Normal,   // Bellek yeterli
+    Warning,  // Bellek azalıyor, bazı önbellek alanları serbest bırakılıyor
+    Critical, // Bellek kritik seviyede; sistem yavaşlayabilir
 }
 
 impl SystemStats {
@@ -289,15 +319,17 @@ impl SystemStats {
 // ============================================================================
 // MONITOR TAB
 // ============================================================================
+// Kullanıcının hangi kaynak türünü izleyeceğini seçmesini sağlayan sekme tipi.
+// Enum varyantları, farklı izleme kategorilerini temsil eder.
 
-/// Monitor tab type
+/// Etkinlik izleyicisinin ana sekme türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MonitorTab {
-    Cpu,
-    Memory,
-    Energy,
-    Disk,
-    Network,
+    Cpu,     // İşlemci kullanımı
+    Memory,  // Bellek kullanımı
+    Energy,  // Enerji tüketimi
+    Disk,    // Disk okuma/yazma
+    Network, // Ağ trafiği
 }
 
 impl MonitorTab {
@@ -325,36 +357,39 @@ impl MonitorTab {
 // ============================================================================
 // ACTIVITY MONITOR WINDOW
 // ============================================================================
+// Ana pencere yapısı. Rust'ta ownership (sahiplik) modeli gereği,
+// bu struct tüm alt verilerin sahibidir. Pencere kapatıldığında
+// `Drop` trait'i aracılığıyla tüm alanlar otomatik olarak serbest bırakılır.
 
-/// Activity Monitor window
+/// Etkinlik İzleyici uygulama penceresi
 pub struct ActivityMonitor {
-    /// Window rect
+    /// Pencerenin ekrandaki konumu ve boyutu
     pub rect: Rect,
-    /// Current tab
+    /// Aktif sekme (CPU, Bellek, Enerji vb.)
     pub current_tab: MonitorTab,
-    /// System stats
+    /// Sistem istatistikleri
     pub stats: SystemStats,
-    /// Process list
+    /// Tüm süreçlerin listesi
     pub processes: Vec<ProcessInfo>,
-    /// Filtered processes
+    /// Filtrelenmiş süreçlerin orijinal listedeki indeksleri
     pub filtered_processes: Vec<usize>,
-    /// Search query
+    /// Arama kutusu metni
     pub search_query: String,
-    /// Sort column
+    /// Hangi sütuna göre sıralandığı
     pub sort_column: SortColumn,
-    /// Sort ascending
+    /// Artan sıralama mı? (false = azalan)
     pub sort_ascending: bool,
-    /// Selected process
+    /// Seçili sürecin PID'i
     pub selected_process: Option<u32>,
-    /// Hovered process
+    /// Fare imlecinin üzerinde olduğu satır indeksi
     pub hovered_process: Option<usize>,
-    /// Scroll offset
+    /// Kaydırma pozisyonu (kaç satır aşağı kaydırıldı)
     pub scroll_offset: usize,
-    /// Update timer
+    /// Sonraki güncellemeye kalan süre (saniye)
     pub update_timer: f32,
-    /// View mode
+    /// Hangi süreçlerin gösterileceği (Tümü, Aktif vb.)
     pub view_mode: ViewMode,
-    /// Show graph
+    /// Grafik alanı gösterilsin mi?
     pub show_graph: bool,
 }
 
@@ -549,7 +584,9 @@ impl ActivityMonitor {
         self.filter_and_sort();
     }
     
-    /// Update stats
+    /// İstatistikleri güncelle - her saniyede bir çağrılır.
+    /// `dt` (delta time): Son güncellemeden bu yana geçen süre (saniye).
+    /// `sinf` fonksiyonu, simüle edilmiş dalgalı CPU kullanımı üretmek için kullanılır.
     pub fn update(&mut self, dt: f32) {
         self.update_timer += dt;
         
@@ -1043,6 +1080,11 @@ pub enum MonitorAction {
 // ============================================================================
 // GLOBAL ACTIVITY MONITOR
 // ============================================================================
+// `lazy_static!` makrosu, global statik değişkenleri "ilk kullanımda"
+// başlatmak için kullanılır. `Mutex<T>` ise çok iş parçacıklı erişimi
+// güvenli hale getirir; kilidi almadan iç veriye ulaşılamaz.
+// `spin::Mutex`, standart kütüphane olmadan (no_std) kullanılabilen
+// bir döngüsel kilit (spinlock) implementasyonudur.
 
 lazy_static::lazy_static! {
     static ref MONITOR: Mutex<ActivityMonitor> = Mutex::new(ActivityMonitor::new(Rect {

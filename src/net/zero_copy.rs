@@ -1,7 +1,53 @@
-//! # Zero-Copy Networking
+//! # Sıfır Kopya Ağ İletişimi (Zero-Copy Networking)
 //!
-//! High-performance zero-copy network I/O with io_uring-style interface
-//! Supports scatter-gather I/O, memory-mapped buffers, and async operations
+//! io_uring tarzı arayüz ile yüksek performanslı sıfır-kopya ağ I/O.
+//! Scatter-gather I/O, bellek eşlemeli tamponlar ve asenkron işlemler desteklenir.
+//!
+//! ## Sıfır Kopya Nedir?
+//!
+//! Geleneksel ağ I/O'da veri birçok kez kopyalanır:
+//! ```
+//!  Geleneksel:
+//!  NIC -> Çekirdek tamponu -> Kullanıcı tamponu -> Uygulama  (3 kopya)
+//!
+//!  Sıfır Kopya:
+//!  NIC -> Paylaşımlı tampon <-> Uygulama  (0 kopya, DMA ile)
+//!  Tampon bellek hem çekirdek hem kullanıcı tarafından doğrudan erişilir.
+//! ```
+//!
+//! ## io_uring Mimarisi
+//!
+//! ```
+//!  Uygulama           Çekirdek
+//!  +----------+       +----------+
+//!  | SQ (Gönd)|  ->   | İşleme   |  Submission Queue: Yapılacak işler
+//!  +----------+       +----------+
+//!  | CQ (Tam) |  <-   | Sonuç    |  Completion Queue: Tamamlanan işler
+//!  +----------+       +----------+
+//!
+//!  Ring tampon: Kilit gerektirmeden çoklu üretici/tüketici desteği
+//!  Atomic head/tail: Sadece sayaç güncellenir, kilit gerekmez
+//! ```
+//!
+//! ## Scatter-Gather I/O
+//!
+//! ```
+//!  Tek send() çağrısıyla birden fazla tamponu gönder:
+//!  [IoVec {buf=1, off=0, len=14}]  <- Ethernet başlığı
+//!  [IoVec {buf=2, off=0, len=20}]  <- IP başlığı
+//!  [IoVec {buf=3, off=0, len=100}] <- Veri
+//!
+//!  DMA kontrolcüsü bu parçaları tek transfer olarak birleştirir.
+//! ```
+//!
+//! ## DMA Tampon Havuzu
+//!
+//! ```
+//!  Toplam: 16 MB fiziksel ardışık bellek
+//!  4096 adet 4KB tampon (sayfa hizalı)
+//!  Her tampon: fiziksel adres (DMA için) + sanal adres (CPU için)
+//!  Serbest liste: VecDeque ile O(1) tahsis/serbest bırakma
+//! ```
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -15,29 +61,35 @@ use super::{NetError, MacAddr, Ipv4Addr, SocketAddr};
 use super::ethernet::{EthernetFrame, EthernetHeader, EtherType};
 
 // ============================================================================
-// ZERO-COPY CONSTANTS
+// SIFIR KOPYA SABİTLERİ
 // ============================================================================
 
-/// Maximum buffer pool size (16MB)
+/// Tampon havuzu toplam boyutu: 16 MB (DMA için ardışık fiziksel bellek)
 const BUFFER_POOL_SIZE: usize = 16 * 1024 * 1024;
 
-/// Buffer chunk size (page-aligned, 4KB)
+/// Tampon parça boyutu: 4 KB (sayfa hizalı, DMA için ideal)
 const BUFFER_CHUNK_SIZE: usize = 4096;
 
-/// Maximum number of buffer chunks
+/// Maksimum tampon parça sayısı: 16MB / 4KB = 4096 parça
 const MAX_CHUNKS: usize = BUFFER_POOL_SIZE / BUFFER_CHUNK_SIZE;
 
-/// Maximum ring entries
+/// Ring tampon boyutu: 4096 giriş (kuyruğun maksimum kapasitesi)
 const RING_SIZE: usize = 4096;
 
-/// Maximum scatter-gather segments
+/// Maksimum scatter-gather vektör sayısı (tek işlemde)
 const MAX_IOV: usize = 8;
 
 // ============================================================================
-// BUFFER DESCRIPTOR
+// TAMPON TANIMLAYICISI (BUFFER DESCRIPTOR)
 // ============================================================================
+//
+// Her DMA tamponu için fiziksel ve sanal adres çifti tutulur.
+// NIC doğrudan fiziksel adrese yazar (DMA), CPU sanal adresten okur.
 
-/// Buffer descriptor for zero-copy I/O
+/// Sıfır-kopya I/O için tampon tanımlayıcısı
+///
+/// phys_addr: NIC'in DMA transferi için kullandığı adres
+/// virt_addr: CPU'nun veriyi okumak için kullandığı adres
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct BufferDescriptor {
@@ -74,10 +126,17 @@ impl BufferDescriptor {
 }
 
 // ============================================================================
-// SCATTER-GATHER VECTOR
+// SCATTER-GATHER VEKTÖRÜ (IoVec)
 // ============================================================================
+//
+// Scatter-Gather I/O: Birden fazla bellek bölgesini tek I/O işlemine bağlar.
+// "Scatter": Okuma - gelen veriyi farklı tamponlara dağıt
+// "Gather":  Yazma - farklı tamponlardan veriyi tek pakette topla
 
-/// I/O vector for scatter-gather operations
+/// Scatter-gather işlemleri için I/O vektörü
+///
+/// Bir IoVec, belirli bir tampondaki belirli bir bölgeyi temsil eder:
+/// buf_id + offset + len ile 4KB tampon içindeki bir dilimi belirtir.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct IoVec {
@@ -96,10 +155,13 @@ impl IoVec {
 }
 
 // ============================================================================
-// SUBMISSION QUEUE ENTRY
+// GÖNDERİM KUYRUĞU GİRİŞİ (Submission Queue Entry - SQE)
 // ============================================================================
+//
+// Kullanıcı/çekirdek, SQ'ya SQE ekleyerek asenkron işlem başlatır.
+// Çekirdek SQE'leri işleyip CQ'ya CQE ekler.
 
-/// Operation type
+/// İşlem kodu (Submission Queue Entry türü)
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpCode {
@@ -182,10 +244,15 @@ pub const SQE_FLAG_FIXED_BUF: u8 = 1 << 1;
 pub const SQE_FLAG_NONBLOCK: u8 = 1 << 2;
 
 // ============================================================================
-// COMPLETION QUEUE ENTRY
+// TAMAMLAMA KUYRUĞU GİRİŞİ (Completion Queue Entry - CQE)
 // ============================================================================
+//
+// Her SQE işlemi tamamlandığında bir CQE üretilir.
+// result > 0: Transfer edilen byte sayısı
+// result < 0: Hata kodu (NetError)
+// user_data: SQE'den taşınan kullanıcı verisi (bağlantı kimliği gibi)
 
-/// Completion queue entry (CQE)
+/// Tamamlama kuyruğu girişi (CQE)
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct Cqe {
@@ -222,10 +289,28 @@ impl Cqe {
 }
 
 // ============================================================================
-// RING BUFFER
+// HALKA TAMPON (Ring Buffer)
 // ============================================================================
+//
+// Kilit olmadan atomik head/tail sayaçlarıyla çalışan dairesel tampon.
+//
+// Okuma (Pop):
+//   1. head yükle (Acquire)
+//   2. head konumundaki girişi oku
+//   3. Bellek bariyeri (Release fence)
+//   4. head'i artır ve sakla
+//
+// Yazma (Push):
+//   1. tail yükle (Acquire)
+//   2. tail konumuna yaz
+//   3. Bellek bariyeri (Release fence)
+//   4. tail'i artır ve sakla
+//
+// Boyut: 2'nin kuvveti (mask = size-1, fast modulo)
+// Doluluk: tail - head >= size -> Dolu
+// Boşluk: tail - head == 0 -> Boş
 
-/// Ring buffer for submission/completion queues
+/// Gönderim/tamamlama kuyrukları için halka tampon
 pub struct RingBuffer<T: Copy + Clone> {
     /// Ring entries
     entries: Vec<T>,
@@ -317,10 +402,20 @@ impl<T: Copy + Clone> RingBuffer<T> {
 }
 
 // ============================================================================
-// BUFFER POOL
+// TAMPON HAVUZU (Buffer Pool)
 // ============================================================================
+//
+// DMA için ardışık fiziksel bellek tahsis eden ve yöneten yapı.
+//
+// Tahsis:  free_list.pop_front() -> O(1)
+// Serbest: free_list.push_back() -> O(1), ref_count == 0 olduğunda
+//
+// Referans sayımı:
+//   Aynı tampon birden fazla SQE tarafından kullanılabilir.
+//   ref_count > 0 iken serbest bırakılamaz.
+//   ref_count == 0 olunca free_list'e döner.
 
-/// Buffer pool for zero-copy operations
+/// Sıfır-kopya işlemler için DMA tampon havuzu
 pub struct BufferPool {
     /// Buffer descriptors
     descriptors: Vec<BufferDescriptor>,
@@ -514,10 +609,24 @@ impl BufferPool {
 }
 
 // ============================================================================
-// IO_URING INTERFACE
+// IO_URING ARAYÜZÜ
 // ============================================================================
+//
+// Linux io_uring'den ilham alan sıfır-kopya I/O arayüzü.
+//
+// İş Akışı:
+//   1. IoUring oluştur (ring_id ile)
+//   2. Tampon tahsis et (AllocBuf SQE)
+//   3. Veriyi tampona yaz
+//   4. Send/Recv SQE'sini gönderim kuyruğuna ekle
+//   5. process() çağır - SQE'leri işle, CQE üret
+//   6. complete() ile sonuçları al
 
-/// Zero-copy I/O ring interface
+/// Sıfır-kopya I/O halka arayüzü
+///
+/// sq: Gönderim kuyruğu (uygulama -> çekirdek)
+/// cq: Tamamlama kuyruğu (çekirdek -> uygulama)
+/// buffers: DMA tampon havuzu
 pub struct IoUring {
     /// Submission queue
     sq: RingBuffer<Sqe>,
@@ -695,8 +804,12 @@ impl IoUring {
 }
 
 // ============================================================================
-// GLOBAL IO_URING INSTANCE
+// GLOBAL IO_URING ÖRNEKLERİ
 // ============================================================================
+//
+// Birden fazla ring desteklenir (çoklu işlem veya CPU çekirdeği başına bir ring).
+// Her ring ayrı tampon havuzuna sahiptir.
+// NEXT_RING_ID: Her yeni ring için artan ID (atomik)
 
 lazy_static::lazy_static! {
     static ref IO_RINGS: Mutex<Vec<Arc<Mutex<IoUring>>>> = Mutex::new(Vec::new());
@@ -734,10 +847,14 @@ pub fn process_all_rings() {
 }
 
 // ============================================================================
-// USERSPACE INTERFACE
+// KULLANICI ALANI ARAYÜZÜ (USERSPACE INTERFACE)
 // ============================================================================
+//
+// Kullanıcı alanı uygulamaları bu yapı üzerinden I/O ringine erişir.
+// sq_entries/cq_entries: Ring tampon bellek adresleri (paylaşımlı bellek)
+// buffer_base: DMA tampon havuzunun başlangıç adresi
 
-/// I/O ring setup structure (for userspace)
+/// Kullanıcı alanı için I/O ring kurulum yapısı
 #[repr(C)]
 pub struct IoUringSetup {
     /// Ring ID
@@ -771,10 +888,10 @@ pub fn setup_userspace_ring() -> Option<IoUringSetup> {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA (INITIALIZATION)
 // ============================================================================
 
-/// Initialize zero-copy networking
+/// Sıfır-kopya ağ alt sistemini başlat (varsayılan I/O ring oluştur)
 pub fn init() {
     crate::serial_println!("[ZC-NET] Initializing zero-copy networking...");
     

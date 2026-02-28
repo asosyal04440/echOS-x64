@@ -201,6 +201,8 @@ pub enum TransitionType {
 }
 
 impl WallpaperManager {
+    /// Ekran boyutlarını alarak duvar kağıdı yöneticisini başlatır.
+    /// Varsayılan duvar kağıtlarını (düz renk, degrade, animasyonlu) otomatik olarak yükler.
     pub fn new(screen_width: usize, screen_height: usize) -> Self {
         let mut manager = WallpaperManager {
             wallpapers: Vec::new(),
@@ -220,6 +222,9 @@ impl WallpaperManager {
         manager
     }
 
+    /// Varsayılan duvar kağıtlarını kütüphaneye ekler.
+    /// Düz renkler (0-2), degradeler (3-8), radyal degrade (9) ve animasyonlular (10-12)
+    /// olmak üzere toplam 13 türde duvar kağıdı tanımlanmaktadır.
     fn add_default_wallpapers(&mut self) {
         // Düz renkler
         self.wallpapers.push(Wallpaper::solid(0, "Solid Black", 0x000000));
@@ -369,6 +374,8 @@ impl WallpaperManager {
         }
     }
 
+    /// Geçiş türüne göre eski ve yeni duvar kağıdı arasındaki geçişi framebuffer'a uygular.
+    /// Fade/CrossFade için alfa karıştırma; SlideLeft/SlideRight için yatay öteleme kullanılır.
     fn draw_transition(&self, fb: &mut Framebuffer, wallpaper: &Wallpaper) {
         let progress = wallpaper.transition_progress;
 
@@ -413,6 +420,9 @@ impl WallpaperManager {
         }
     }
 
+    /// Belirtilen duvar kağıdı türünü verilen alfa değeriyle framebuffer'a çizer.
+    /// `alpha` değeri 0.0-1.0 arasındadır; geçiş sırasında katman saydamlığını belirler.
+    /// Görüntü (Image) türü henüz implemente edilmediğinden düz renge düşer.
     fn draw_wallpaper_type(&self, fb: &mut Framebuffer, wallpaper_type: &WallpaperType, alpha: f32) {
         match wallpaper_type {
             WallpaperType::Solid(color) => {
@@ -502,6 +512,8 @@ impl WallpaperManager {
         }
     }
 
+    /// Animasyonlu arka planı çizer: önce geceye özgü koyu degrade, ardından animasyon katmanı.
+    /// Animasyon türüne göre `draw_stars`, `draw_aurora`, `draw_waves` veya `draw_particles` çağrılır.
     fn draw_animated(&self, fb: &mut Framebuffer, anim_type: AnimatedType, alpha: f32) {
         // Temel degrade arka plan
         let base_top = 0x0F0F23;
@@ -558,6 +570,9 @@ impl WallpaperManager {
         }
     }
 
+    /// Kuzey ışıkları (aurora) efektini çizer.
+    /// İki sinüs dalgasının toplamıyla kıvrılan bir bant, yeşil→mor→yeşil renk döngüsüyle renklendirilir.
+    /// Pikseller mevcut arka plan üzerine toplayıcı (additive) renk karıştırmayla uygulanır.
     fn draw_aurora(&self, fb: &mut Framebuffer, alpha: f32) {
         let time = self.anim_time;
 
@@ -590,6 +605,9 @@ impl WallpaperManager {
         }
     }
 
+    /// Okyanus dalgaları efektini çizer.
+    /// Üç sinüs dalgasının toplamıyla belirlenen su yüzeyi çizgisinin altı
+    /// derinliğe göre koyulaşan okyanus mavisi degradeyle doldurulur.
     fn draw_waves(&self, fb: &mut Framebuffer, alpha: f32) {
         let time = self.anim_time;
 
@@ -616,6 +634,9 @@ impl WallpaperManager {
         }
     }
 
+    /// Yüzen parçacıklar efektini çizer.
+    /// Her parçacık `sinf + cosf` kombinasyonuyla eliptik yörüngede hareket eder.
+    /// Gerçek rastgelelik yerine deterministik tohum (seed) tabanlı sahte-rastgelelik kullanılır.
     fn draw_particles(&self, fb: &mut Framebuffer, alpha: f32) {
         let time = self.anim_time;
 
@@ -646,6 +667,8 @@ impl WallpaperManager {
         }
     }
 
+    /// `c1` ve `c2` renkleri arasında `t` (0.0-1.0) parametresiyle lineer interpolasyon yapar;
+    /// sonucu `alpha` ile ölçekler. Formül: `kanal = (c1 + (c2 - c1) * t) * alpha`
     fn lerp_color(c1: u32, c2: u32, t: f32, alpha: f32) -> u32 {
         let r1 = ((c1 >> 16) & 0xFF) as f32;
         let g1 = ((c1 >> 8) & 0xFF) as f32;
@@ -662,6 +685,8 @@ impl WallpaperManager {
         (r as u32) << 16 | (g as u32) << 8 | (b as u32)
     }
 
+    /// Bir rengi alfa değeriyle karıştırarak siyaha yaklaştırır.
+    /// Her kanal `kanal * alpha` formülüyle ölçeklenir; alfa=1.0 orijinal rengi korur.
     fn alpha_color(color: u32, alpha: f32) -> u32 {
         let r = (((color >> 16) & 0xFF) as f32 * alpha) as u32;
         let g = (((color >> 8) & 0xFF) as f32 * alpha) as u32;
@@ -669,6 +694,8 @@ impl WallpaperManager {
         (r << 16) | (g << 8) | b
     }
 
+    /// İki rengi toplayıcı (additive) karıştırmayla birleştirir.
+    /// Her kanalın toplamı 255 ile sınırlandırılır; aurora efektinin parlak görünmesini sağlar.
     fn blend_color(bg: u32, fg: u32) -> u32 {
         let br = ((bg >> 16) & 0xFF) as f32;
         let bg_ = ((bg >> 8) & 0xFF) as f32;

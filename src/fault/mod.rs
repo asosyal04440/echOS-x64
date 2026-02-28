@@ -3,6 +3,59 @@
 //! Kapsamlı hata tespiti, izolasyonu ve kurtarma sistemi.
 //! Sağlık izleme ve zarif bozunma (graceful degradation) aracılığıyla
 //! çökme korumalı (anti-crash) bir yapı sağlar.
+//!
+//! ## Genel Mimari
+//!
+//! ```text
+//!  ┌─────────────────────────────────────────────────────────────┐
+//!  │               HATA YÖNETİMİ ALT SİSTEMİ                    │
+//!  │                                                             │
+//!  │  Modüller (Memory, CPU, Sched, ...)                         │
+//!  │       │  hata bildir                                        │
+//!  │       ▼                                                     │
+//!  │  ┌──────────┐    ┌──────────────┐    ┌────────────────┐    │
+//!  │  │ FaultHub │───▶│  RecoveryEng │───▶│  Degradation   │    │
+//!  │  │ (merkez) │    │  (kurtarma)  │    │  (bozunma yönt)│    │
+//!  │  └──────────┘    └──────────────┘    └────────────────┘    │
+//!  │       │                                       │            │
+//!  │       ▼                                       ▼            │
+//!  │  ┌──────────┐    ┌──────────────┐    ┌────────────────┐    │
+//!  │  │ Watchdog │    │  Checkpoint  │    │   Emergency    │    │
+//!  │  │(zamanlcı)│    │ (kontol nkt) │    │  (acil durum)  │    │
+//!  │  └──────────┘    └──────────────┘    └────────────────┘    │
+//!  └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Hata Akış Şeması
+//!
+//! ```text
+//!  Hata Oluştu
+//!       │
+//!       ▼
+//!  report_fault() ──▶ FaultState'e kaydet ──▶ Şiddet belirle
+//!       │
+//!       ▼
+//!  auto_recovery etkin mi?
+//!       │ evet
+//!       ▼
+//!  RecoveryEngine::recover()
+//!       │
+//!       ├──▶ Birincil eylem dene ──▶ Başarılı? ──▶ Bitti
+//!       │                              hayır
+//!       ├──▶ Yedek eylem dene   ──▶ Başarılı? ──▶ Bitti
+//!       │                              hayır
+//!       └──▶ Son çare: EmergencyHalt / Reboot
+//! ```
+//!
+//! ## Kurtarma Seviyeleri
+//!
+//! | Seviye | Ad        | Açıklama                                  |
+//! |--------|-----------|-------------------------------------------|
+//! | 0      | Normal    | Her şey yolunda                           |
+//! | 1      | Warning   | Küçük sorunlar var, izleniyor             |
+//! | 2      | Degraded  | Audio/BT/GUI devre dışı                   |
+//! | 3      | Critical  | + Ağ ve USB de devre dışı                 |
+//! | 4      | Emergency | + Dosya yazma devre dışı, halt yakın      |
 
 pub mod hub;
 pub mod severity;
@@ -22,6 +75,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, AtomicBool, Ordering
 use spin::Mutex;
 
 // Re-export main types
+// Dışarıdan `crate::fault::FaultHub` şeklinde erişim sağlamak için kısayollar.
+// Bu sayede kullanıcı modülün iç yapısını bilmeden doğrudan ana tipleri kullanabilir.
 pub use hub::FaultHub;
 pub use severity::{Severity, RecoveryResult};
 pub use recovery::{RecoveryAction, RecoveryEngine};
@@ -31,10 +86,13 @@ pub use recovery::{RecoveryAction, RecoveryEngine};
 // ============================================================================
 
 /// Benzersiz hata tanımlayıcısı
+/// Atomik sayaç ile üretilir — aynı anda birden fazla hata oluşsa bile ID'ler çakışmaz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FaultId(pub u64);
 
 /// Hatayı üreten kaynak modül
+/// Her hata hangi alt sistemden geldiğini bildirir; bu sayede
+/// kurtarma motoru kaynağa özel strateji seçebilir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FaultSource {
     Memory,
@@ -118,6 +176,12 @@ pub enum FaultType {
 }
 
 /// Tespit edilmiş bir hata olayini temsil eder
+///
+/// Her `Fault`, sistemde tespit edilen tek bir hatanın tam kaydıdır.
+/// Kaynaktan (hangi modül), türden (ne tür hata), şiddetten (ne kadar ciddi)
+/// ve kurtarma durumundan (denendi mi, başarılı mı) oluşur.
+///
+/// `with_context()` ile ek sayısal bağlam verileri (adresler, sayaçlar vb.) eklenebilir.
 #[derive(Clone, Debug)]
 pub struct Fault {
     /// Benzersiz hata kimliği
@@ -250,6 +314,12 @@ impl ModuleHealth {
 // ============================================================================
 
 /// Global hata yönetim durumu
+///
+/// Tüm çekirdek kodu tarafından paylaşılan tekil (singleton) hata durumu.
+/// `lazy_static!` ile başlatılır, `Mutex` ve `Atomic` tiplerle iç senkronizasyon sağlanır.
+///
+/// Not: `fault_history` son 100 hatayı tutar — en eski girdi yeni hata gelince silinir.
+/// Bu kayan pencere (sliding window) yapısı hata hızını (fault rate) hesaplamakta kullanılır.
 pub struct FaultState {
     /// Toplam tespit edilen hata sayısı
     pub total_faults: AtomicU64,
@@ -354,6 +424,16 @@ pub fn periodic_check() {
     update_recovery_level();
 }
 
+/// Hata geçmişine bakarak sistem kurtarma seviyesini otomatik günceller.
+///
+/// Karar mantığı şu şekilde çalışır:
+///  - Son 10 saniyede kritik/acil hata varsa → Seviye 4 (Emergency)
+///  - Son 10 saniyede 10'dan fazla hata varsa → Seviye 3 (Critical)
+///  - Son 10 saniyede 5'ten fazla hata varsa  → Seviye 2 (Degraded)
+///  - Herhangi bir son hata varsa             → Seviye 1 (Warning)
+///  - Hata yoksa                              → Seviye 0 (Normal)
+///
+/// Seviye 4'e ulaşıldığında `emergency::enter()` çağrılır.
 fn update_recovery_level() {
     let history = FAULT_STATE.fault_history.lock();
     let current = crate::task::scheduler::get_ticks();

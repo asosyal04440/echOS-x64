@@ -2,6 +2,17 @@
 //!
 //! View images with zoom, pan, and slideshow support
 //! Supports PNG and JPEG formats
+//!
+//! Bu modül, piksel tabanlı bir görüntü görüntüleyici uygular.
+//! Görüntüler belleğe `DecodedImage` yapısı olarak yüklenir ve
+//! çerçeve tamponu (framebuffer) üzerine piksel piksel çizilir.
+//!
+//! Temel görüntü kavramları:
+//! - **Piksel (Pixel)**: Ekranda konumlandırılmış tek bir renk noktası.
+//! - **RGBA**: Kırmızı, Yeşil, Mavi ve Alfa (şeffaflık) kanalları; her biri 0-255.
+//! - **Zoom**: Görüntüyü yeniden ölçeklendirme (büyütme/küçültme).
+//! - **Pan**: Görüntüyü kaydırarak farklı bölgelerini gösterme.
+//! - **Bilineer interpolasyon**: Ölçeklendirmede piksel renkleri daha yumuşak hesaplanır.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -17,16 +28,23 @@ use crate::gui::widgets::{Widget, Rect};
 // ============================================================================
 // IMAGE FORMAT
 // ============================================================================
+// Desteklenen görüntü dosyası formatları.
+// Her format farklı sıkıştırma ve renk uzayı özelliklerine sahiptir:
+// - PNG: Kayıpsız sıkıştırma, şeffaflık (alfa kanalı) desteği.
+// - JPEG: Kayıplı sıkıştırma, fotoğraflar için ideal.
+// - BMP: Sıkıştırmasız ham piksel verisi (büyük dosya boyutu).
+// - GIF: Animasyon desteği, 256 renkle sınırlı.
+// - WebP: Google'ın modern formatı; hem kayıplı hem kayıpsız.
 
-/// Supported image formats
+/// Desteklenen görüntü dosyası formatları
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFormat {
-    Unknown,
-    Png,
-    Jpeg,
-    Bmp,
-    Gif,
-    WebP,
+    Unknown, // Tanımlanamayan format
+    Png,     // Portable Network Graphics (şeffaflık destekli)
+    Jpeg,    // Joint Photographic Experts Group (fotoğraf)
+    Bmp,     // Bitmap (sıkıştırmasız)
+    Gif,     // Graphics Interchange Format (animasyonlu)
+    WebP,    // Google WebP (modern, verimli)
 }
 
 impl ImageFormat {
@@ -56,19 +74,24 @@ impl ImageFormat {
 // ============================================================================
 // DECODED IMAGE
 // ============================================================================
+// Bellekte tutulan görüntü verisi. Tüm pikseller ARGB u32 değeri olarak
+// düz bir `Vec<u32>` içinde saklanır:
+//   Piksel [y * genişlik + x] = 0xAARRGGBB
+// `AA`: Alfa (şeffaflık) - 0x00 tam şeffaf, 0xFF tam opak.
+// `RR`,`GG`,`BB`: Kırmızı, Yeşil, Mavi renk kanalları (0-255).
 
-/// Decoded image data
+/// Bellekte çözümlenmiş (decoded) görüntü verisi
 #[derive(Clone)]
 pub struct DecodedImage {
-    /// Width in pixels
+    /// Görüntünün piksel cinsinden genişliği
     pub width: usize,
-    /// Height in pixels
+    /// Görüntünün piksel cinsinden yüksekliği
     pub height: usize,
-    /// Pixel data (RGBA)
+    /// Piksel verisi: ARGB formatında `width * height` elemanlı dizi
     pub data: Vec<u32>,
-    /// Original format
+    /// Dosyanın orijinal formatı
     pub format: ImageFormat,
-    /// Has alpha channel
+    /// Alfa kanalı var mı? (şeffaflık desteği)
     pub has_alpha: bool,
 }
 
@@ -110,7 +133,10 @@ impl DecodedImage {
         }
     }
     
-    /// Scale image to new size (nearest neighbor)
+    /// Görüntüyü yeni boyuta ölçeklendir (en yakın komşu - hızlı ama pürüzlü).
+    /// Her çıktı pikselinde kaynak pikseli oranla hesaplanır:
+    ///   src_x = out_x * (orijinal_genişlik / yeni_genişlik)
+    /// Bu yöntem hızlıdır ancak büyütmede piksel bloklarına yol açar.
     pub fn scale(&self, new_width: usize, new_height: usize) -> Self {
         if new_width == 0 || new_height == 0 {
             return DecodedImage::new(1, 1);
@@ -135,7 +161,10 @@ impl DecodedImage {
         scaled
     }
     
-    /// Scale image with bilinear interpolation
+    /// Bilineer interpolasyon ile ölçeklendir (daha kaliteli ama daha yavaş).
+    /// Dört komşu piksel ağırlıklı ortalama ile karıştırılır:
+    ///   p = (1-fx)*(1-fy)*p00 + fx*(1-fy)*p01 + (1-fx)*fy*p10 + fx*fy*p11
+    /// `fx`, `fy`: Kaynak koordinatların kesirli (fractional) kısımları.
     pub fn scale_bilinear(&self, new_width: usize, new_height: usize) -> Self {
         if new_width == 0 || new_height == 0 {
             return DecodedImage::new(1, 1);
@@ -267,14 +296,28 @@ impl DecodedImage {
 // ============================================================================
 // IMAGE DECODER
 // ============================================================================
+// Görüntü çözücü trait'i ve gerçekleştirimleri.
+// Rust'ta `trait`, nesne yönelimli dillerdeki "interface" kavramına benzer:
+// Farklı format çözücüleri aynı arayüzü uygulyarak polimorfik kullanım sağlar.
+//
+// PNG yapısı:
+//   - Bayt 0-7: Sabit imza (0x89 PNG \r\n 0x1A \n)
+//   - IHDR chunk: Genişlik, yükseklik, bit derinliği ve renk tipi
+//   - IDAT chunk(lar): zlib ile sıkıştırılmış tarama satırları
+//   - IEND chunk: Dosya sonu işareti
+//
+// JPEG yapısı:
+//   - SOI (0xFF 0xD8): Başlangıç işareti
+//   - APP, SOF, DHT, SOS segmentleri içerir
+//   - Huffman kodlaması + IDCT gerektiren karmaşık bir format
 
-/// Image decoder trait
+/// Görüntü çözücü için ortak davranış tanımı (trait)
 pub trait ImageDecoder {
     fn decode(&self, data: &[u8]) -> Option<DecodedImage>;
     fn can_decode(&self, format: ImageFormat) -> bool;
 }
 
-/// PNG decoder (simplified)
+/// PNG çözücüsü (basitleştirilmiş - IHDR'dan boyut okur, içerik yer tutucudur)
 pub struct PngDecoder;
 
 impl PngDecoder {
@@ -332,7 +375,8 @@ impl ImageDecoder for PngDecoder {
     }
 }
 
-/// JPEG decoder (simplified)
+/// JPEG çözücüsü (basitleştirilmiş - imzayı doğrular, gerçek ayrıştırmayı atlıyor)
+/// NOT: Gerçek JPEG çözümü Huffman kodu çözme ve IDCT işlemi gerektirir.
 pub struct JpegDecoder;
 
 impl JpegDecoder {
@@ -370,50 +414,59 @@ impl ImageDecoder for JpegDecoder {
 // ============================================================================
 // IMAGE VIEWER
 // ============================================================================
+// Görüntü görüntüleyici uygulamasının ana yapısı.
+// `display_image`: orijinal görüntünün mevcut zoom ve fit moduna göre
+// yeniden ölçeklendirilmiş kopyasıdır. Orijinal kaynak `image` alanında korunur.
+// Bu ayırım, zoom değiştiğinde sadece `display_image`'ın yeniden hesaplanmasını sağlar.
 
-/// Image Viewer Application
+/// Görüntü görüntüleyici uygulama penceresi
 pub struct ImageViewer {
-    /// Window position and size
+    /// Pencerenin ekrandaki konumu ve boyutu
     rect: Rect,
-    /// Current image
+    /// Orijinal çözümlenmiş görüntü verisi
     image: Option<DecodedImage>,
-    /// Displayed image (scaled for view)
+    /// Görüntülenecek ölçeklendirilmiş görüntü (cache)
     display_image: Option<DecodedImage>,
-    /// Current file path
+    /// Yüklü dosyanın yolu
     file_path: String,
-    /// Zoom level (1.0 = 100%)
+    /// Yakınlaştırma seviyesi (1.0 = %100, 2.0 = %200)
     zoom: f32,
-    /// Pan offset
+    /// Yatay kaydırma ofseti (piksel)
     pan_x: i32,
+    /// Dikey kaydırma ofseti (piksel)
     pan_y: i32,
-    /// Is panning
+    /// Sürükleme hareketi ile kaydırma aktif mi?
     is_panning: bool,
-    /// Last pan position
+    /// Son sürükleme koordinatı (delta hesabı için)
     last_pan: (i32, i32),
-    /// Fit mode
+    /// Pencereye uydurma modu
     fit_mode: FitMode,
-    /// Image list for slideshow
+    /// Slayt gösterisi için görüntü dosyası yolları listesi
     image_list: Vec<String>,
-    /// Current image index
+    /// Listede şu an gösterilen görüntünün indeksi
     current_index: usize,
-    /// Slideshow active
+    /// Slayt gösterisi aktif mi?
     slideshow_active: bool,
-    /// Slideshow interval (ms)
+    /// Slayt göstericisi geçiş aralığı (milisaniye)
     slideshow_interval: u64,
-    /// Background color
+    /// Görüntü alanının arka plan rengi (ARGB formatında u32)
     bg_color: u32,
-    /// Show toolbar
+    /// Araç çubuğu gösterilsin mi?
     show_toolbar: bool,
-    /// Toolbar height
+    /// Araç çubuğunun piksel yüksekliği
     toolbar_height: usize,
 }
 
+// Görüntüyü pencereye uydurma modu.
+// `FitWindow`: En-boy oranını koruyarak hem genişlik hem yüksekliğe sığdır.
+// `FitWidth/FitHeight`: Yalnızca bir eksende sığdır; diğer eksende kırpılabilir.
+// `None`: Zoom seviyesi manuel olarak belirlenir, otomatik uydurma yapılmaz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FitMode {
-    None,
-    FitWindow,
-    FitWidth,
-    FitHeight,
+    None,      // Zoom elle ayarlanır
+    FitWindow, // En-boy oranı korunarak pencereye sığdır
+    FitWidth,  // Genişliğe sığdır
+    FitHeight, // Yüksekliğe sığdır
 }
 
 impl ImageViewer {
@@ -909,6 +962,9 @@ impl Default for ImageViewer {
 // ============================================================================
 // GLOBAL IMAGE VIEWER
 // ============================================================================
+// Görüntü görüntüleyicinin global tek örneği.
+// `get_viewer()` fonksiyonu, güvenli erişim için Mutex korumalı referans döndürür.
+// `init()` başlatma fonksiyonu serial port üzerinden debug mesajı basar.
 
 lazy_static::lazy_static! {
     static ref IMAGE_VIEWER: Mutex<ImageViewer> = Mutex::new(ImageViewer::new());

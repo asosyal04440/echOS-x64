@@ -1,35 +1,100 @@
-//! # IPv6 Protocol
+//! # IPv6 Protokolü (Internet Protocol version 6)
 //!
-//! IPv6 header and address handling
+//! IPv6 başlık yapısı ve adres işleme.
+//!
+//! ## IPv6 Nedir?
+//!
+//! IPv4'ün 32-bit adres alanı tükenmesiyle geliştirilmiş, 128-bit adres
+//! uzayına sahip yeni nesil internet protokolüdür. RFC 2460 ile tanımlanmıştır.
+//!
+//! ## IPv6 Başlık Yapısı (40 bayt sabit boyut)
+//!
+//! ```text
+//! 0                   1                   2                   3
+//! 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |Version| Traf. Cls |           Flow Label                      |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |         Payload Length        |  Next Header  |   Hop Limit   |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |                                                               |
+//! +                     Kaynak IPv6 Adresi                        +
+//! |                       (128 bit)                               |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |                                                               |
+//! +                    Hedef IPv6 Adresi                          +
+//! |                       (128 bit)                               |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! ```
+//!
+//! ## IPv6 Adres Türleri
+//!
+//! ```text
+//! Unicast   : Tek bir arabirime ait adres
+//! Multicast : Bir grup arabirime ait adres (ff00::/8)
+//! Anycast   : En yakın arabirime yönlendirilen adres
+//!
+//! Özel Adresler:
+//!   ::           = 0.0.0.0 (belirsiz / unspecified)
+//!   ::1          = 127.0.0.1 (geri döngü / loopback)
+//!   fe80::/10    = Bağlantı-yerel (link-local)
+//!   fc00::/7     = Benzersiz-yerel (unique-local, RFC 4193)
+//!   2000::/3     = Global unicast
+//!   ::ffff:0:0/96 = IPv4 eşlemeli (IPv4-mapped)
+//! ```
+//!
+//! ## Bu Modüldeki İçerikler
+//!
+//! - `Ipv6Addr`           : 128-bit IPv6 adres yapısı
+//! - `Ipv6Header`         : 40 baytlık sabit başlık
+//! - `Ipv6NextHeader`     : Sonraki başlık türleri (TCP=6, UDP=17, ICMPv6=58)
+//! - `Icmpv6Type`         : ICMPv6 mesaj tipleri (NDP, ping...)
+//! - `RouterSolicitation` : Yönlendirici Talep (RS) mesajı
+//! - `RouterAdvertisement`: Yönlendirici Duyuru (RA) mesajı
+//! - `SlaacState`         : Durumsuz Adres Otokonfigürasyonu
+//! - `Dhcpv6Client`       : DHCPv6 istemci durumu
+//! - `NeighborSolicitation`: Komşu Bulma (NDP) protokolü
 
 use alloc::string::String;
 use alloc::format;
 use core::str::FromStr;
 
 // ============================================================================
-// IPv6 ADDRESS
+// IPv6 ADRESİ
 // ============================================================================
+//
+// IPv6 adresi 128 bit uzunluğundadır ve genellikle 8 adet 16-bit blok
+// olarak gösterilir. Bloklar birbirinden ':' ile ayrılır.
+//
+// Örnek:  2001:0db8:85a3:0000:0000:8a2e:0370:7334
+//
+// Kısaltma kuralları:
+//   1) Baştaki sıfırlar atılabilir: 0db8 → db8
+//   2) Ardışık sıfır blokları '::' ile gösterilir (yalnızca bir kez):
+//      2001:db8::1  (2001:0db8:0000:0000:0000:0000:0000:0001)
 
-/// IPv6 address (128-bit)
+/// IPv6 adresi (128 bit = 16 bayt)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ipv6Addr(pub [u8; 16]);
 
 impl Ipv6Addr {
-    /// Unspecified address (::)
+    /// Belirsiz (unspecified) adres `::` — IPv4'teki 0.0.0.0 karşılığı
     pub const UNSPECIFIED: Self = Ipv6Addr([0; 16]);
-    
-    /// Loopback address (::1)
+
+    /// Geri döngü (loopback) adresi `::1` — IPv4'teki 127.0.0.1 karşılığı
     pub const LOOPBACK: Self = Ipv6Addr([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-    
-    /// Link-local prefix (fe80::)
+
+    /// Bağlantı-yerel (link-local) ön eki `fe80::/64`
+    /// Bu adresler yalnızca aynı fiziksel bağlantı (link) üzerinde geçerlidir.
     pub const LINK_LOCAL_PREFIX: [u8; 8] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0];
-    
-    /// Create new IPv6 address from bytes
+
+    /// Bayt dizisinden yeni bir IPv6 adresi oluşturur
     pub const fn new(bytes: [u8; 16]) -> Self {
         Ipv6Addr(bytes)
     }
     
-    /// Create from 8 16-bit segments
+    /// 8 adet 16-bit segment (grup) dizisinden IPv6 adresi oluşturur.
+    /// Her segment big-endian (büyük-önce) byte sırasıyla 2 bayta dönüştürülür.
     pub const fn from_segments(segments: [u16; 8]) -> Self {
         Ipv6Addr([
             (segments[0] >> 8) as u8, (segments[0] & 0xFF) as u8,
@@ -43,12 +108,13 @@ impl Ipv6Addr {
         ])
     }
     
-    /// Get as bytes
+    /// Adresin ham bayt dizisini döndürür (16 bayt)
     pub const fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
     
-    /// Get as 16-bit segments
+    /// Adresi 8 adet 16-bit segmente (gruba) dönüştürür.
+    /// Örnek: 2001:db8::1 → [0x2001, 0x0db8, 0, 0, 0, 0, 0, 1]
     pub fn segments(&self) -> [u16; 8] {
         [
             u16::from_be_bytes([self.0[0], self.0[1]]),
@@ -62,43 +128,49 @@ impl Ipv6Addr {
         ]
     }
     
-    /// Check if unspecified (::)
+    /// Adresin belirsiz `::` olup olmadığını kontrol eder
     pub fn is_unspecified(&self) -> bool {
         self.0 == [0; 16]
     }
     
-    /// Check if loopback (::1)
+    /// Adresin geri döngü `::1` olup olmadığını kontrol eder
     pub fn is_loopback(&self) -> bool {
         *self == Self::LOOPBACK
     }
     
-    /// Check if link-local (fe80::/10)
+    /// Bağlantı-yerel adres `fe80::/10` olup olmadığını kontrol eder.
+    /// fe80:: - febf:: aralığındaki adresler bağlantı-yereldir.
     pub fn is_link_local(&self) -> bool {
         (self.0[0] & 0xFF) == 0xFE && (self.0[1] & 0xC0) == 0x80
     }
     
-    /// Check if unique local (fc00::/7)
+    /// Benzersiz-yerel adres `fc00::/7` olup olmadığını kontrol eder.
+    /// RFC 4193 ile tanımlanmış, özel ağlar için kullanılır (IPv4'teki RFC 1918 gibi).
     pub fn is_unique_local(&self) -> bool {
         (self.0[0] & 0xFE) == 0xFC
     }
     
-    /// Check if global unicast
+    /// Global unicast adres `2000::/3` olup olmadığını kontrol eder.
+    /// İnternette yönlendirilebilen genel adreslerdir.
     pub fn is_global(&self) -> bool {
-        // Global unicast: 2000::/3
+        // Global unicast: 2000::/3 (en yüksek 3 bit = 001)
         (self.0[0] & 0xE0) == 0x20
     }
     
-    /// Check if multicast (ff00::/8)
+    /// Çok noktaya yayın (multicast) adresi `ff00::/8` olup olmadığını kontrol eder.
+    /// İlk bayt 0xFF ise multicast'tir.
     pub fn is_multicast(&self) -> bool {
         self.0[0] == 0xFF
     }
     
-    /// Check if IPv4-mapped (::ffff:0:0/96)
+    /// IPv4-eşlemeli adres `::ffff:0:0/96` olup olmadığını kontrol eder.
+    /// IPv4 ve IPv6 geçiş mekanizmasında kullanılır.
+    /// Örnek: ::ffff:192.168.1.1
     pub fn is_ipv4_mapped(&self) -> bool {
         self.0[0..10] == [0; 10] && self.0[10..12] == [0xFF, 0xFF]
     }
     
-    /// Convert to IPv4 if mapped
+    /// IPv4-eşlemeli ise karşılık gelen IPv4 adresini döndürür, değilse `None`
     pub fn to_ipv4_mapped(&self) -> Option<super::Ipv4Addr> {
         if self.is_ipv4_mapped() {
             Some(super::Ipv4Addr::from_bytes([self.0[12], self.0[13], self.0[14], self.0[15]]))
@@ -107,7 +179,8 @@ impl Ipv6Addr {
         }
     }
     
-    /// Create IPv4-mapped IPv6 address
+    /// Bir IPv4 adresinden IPv4-eşlemeli IPv6 adresi oluşturur.
+    /// Sonuç: `::ffff:a.b.c.d` formatında bir adres
     pub fn from_ipv4_mapped(ipv4: super::Ipv4Addr) -> Self {
         let bytes = ipv4.as_bytes();
         Ipv6Addr([
@@ -116,7 +189,8 @@ impl Ipv6Addr {
         ])
     }
     
-    /// Get scope ID for link-local addresses
+    /// Bağlantı-yerel adresler için kapsam kimliği (scope ID) döndürür.
+    /// Scope ID, hangi ağ arayüzü üzerinden erişileceğini belirtir.
     pub fn scope_id(&self) -> Option<u32> {
         if self.is_link_local() {
             Some(u32::from_be_bytes([self.0[12], self.0[13], self.0[14], self.0[15]]))
@@ -125,7 +199,8 @@ impl Ipv6Addr {
         }
     }
     
-    /// Format as string
+    /// Adresi insan okunabilir IPv6 metin formatına çevirir.
+    /// RFC 5952'ye göre çift kolon `::` sıkıştırması uygulanır.
     pub fn to_string(&self) -> String {
         if self.is_ipv4_mapped() {
             if let Some(ipv4) = self.to_ipv4_mapped() {
@@ -143,7 +218,7 @@ impl Ipv6Addr {
         
         let segments = self.segments();
         
-        // Find longest run of zeros for ::
+        // RFC 5952 §4.2: `::` için ardışık sıfır bloklarından en uzununun başlangıcını bul.
         let mut longest_start = 0;
         let mut longest_len = 0;
         let mut current_start = 0;
@@ -279,18 +354,29 @@ impl Default for Ipv6Addr {
 }
 
 // ============================================================================
-// IPv6 HEADER
+// IPv6 BAŞLIĞI (HEADER)
 // ============================================================================
+//
+// IPv6 başlığı daima 40 bayttır (IPv4'ün değişken uzunluklu başlığının aksine).
+// Uzantı başlıkları (extension headers) ayrı paketler olarak eklenir.
+//
+// Başlık alanları:
+//   version        : Daima 6
+//   traffic_class  : Hizmet kalitesi (QoS) için 8 bit
+//   flow_label     : Akış tanımlaması için 20 bit (QoS, multipath)
+//   payload_len    : Başlık sonrasındaki veri boyutu (bayt)
+//   next_header    : Sonraki başlık türü (IPv4'teki protocol alanı gibi)
+//   hop_limit      : İzin verilen maksimum yönlendirici sayısı (IPv4 TTL gibi)
 
-/// IPv6 header (40 bytes fixed)
+/// IPv6 başlığı (40 bayt sabit boyut)
 #[derive(Clone, Copy, Debug)]
 pub struct Ipv6Header {
-    pub version: u8,           // 4 bits, always 6
-    pub traffic_class: u8,     // 8 bits
-    pub flow_label: u32,       // 20 bits
-    pub payload_len: u16,      // Payload length (excluding header)
-    pub next_header: u8,       // Next header type (like IPv4 protocol)
-    pub hop_limit: u8,         // Like TTL
+    pub version: u8,           // 4 bit, daima 6
+    pub traffic_class: u8,     // 8 bit, trafik sınıfı (QoS)
+    pub flow_label: u32,       // 20 bit, akış etiketi
+    pub payload_len: u16,      // Yük uzunluğu (başlık hariç, bayt cinsinden)
+    pub next_header: u8,       // Sonraki başlık türü (IPv4 protocol alanı gibi)
+    pub hop_limit: u8,         // Maksimum atlama sayısı (IPv4 TTL gibi)
     pub src: Ipv6Addr,
     pub dst: Ipv6Addr,
 }
@@ -355,7 +441,9 @@ impl Ipv6Header {
             return Err(super::NetError::BufferFull);
         }
         
-        // Version (4 bits) + Traffic class (8 bits) + Flow label (20 bits)
+        // Version (4 bit) + Traffic class (8 bit) + Flow label (20 bit)
+        // İlk 32-bit sözcük bit düzeyinde paketleme:
+        //   [7:4] = version, [3:0][15:12] = traffic_class, [11:0] = flow_label
         buf[0] = (self.version << 4) | ((self.traffic_class >> 4) & 0x0F);
         buf[1] = ((self.traffic_class & 0x0F) << 4) | ((self.flow_label >> 16) as u8 & 0x0F);
         buf[2] = (self.flow_label >> 8) as u8;
@@ -372,7 +460,8 @@ impl Ipv6Header {
     }
 }
 
-/// IPv6 next header types
+/// IPv6 sonraki başlık (next header) türleri.
+/// Bu alan IPv4'teki "protocol" alanının karşılığıdır.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ipv6NextHeader {
     HopByHop = 0,
@@ -404,10 +493,13 @@ impl Ipv6NextHeader {
 }
 
 // ============================================================================
-// IPv6 PACKET
+// IPv6 PAKETİ
 // ============================================================================
+//
+// Bir IPv6 paketi = 40 bayt sabit başlık + değişken uzunluklu yük (payload)
+// IPv4'teki parçalama (fragmentation) başlığa gömülü değil, uzantı başlığı olarak ayrıdır.
 
-/// IPv6 packet
+/// IPv6 paketi (başlık + yük)
 #[derive(Clone, Debug)]
 pub struct Ipv6Packet {
     pub header: Ipv6Header,
@@ -450,10 +542,19 @@ impl Ipv6Packet {
 }
 
 // ============================================================================
-// IPv6 EXTENSION HEADERS (placeholder)
+// IPv6 UZANTI BAŞLIKLARI (EXTENSION HEADERS)
 // ============================================================================
+//
+// IPv6, seçenekler için sabit başlık içine alan koymak yerine uzantı başlıkları
+// kullanır. Her uzantı başlığı kendi "next_header" alanıyla bir sonrakine işaret eder.
+//
+// Uzantı Başlığı Zinciri:
+//   IPv6 Header → HopByHop Opt. → Routing → Fragment → Dest. Opt. → TCP/UDP
+//
+// Bu implementasyon şimdilik taslak (placeholder) düzeyindedir.
 
-/// Hop-by-Hop Options header
+/// Atlama-Atlama (Hop-by-Hop) Seçenekleri başlığı.
+/// Rota üzerindeki her yönlendirici bu başlığı işlemek zorundadır.
 #[derive(Clone, Debug)]
 pub struct HopByHopHeader {
     pub next_header: u8,
@@ -461,29 +562,40 @@ pub struct HopByHopHeader {
     pub options: alloc::vec::Vec<u8>,
 }
 
-/// Fragment header
+/// Parçalama (Fragment) başlığı.
+/// IPv6'da parçalama yalnızca kaynak tarafından yapılır; yönlendiriciler parçalamaz.
 #[derive(Clone, Debug)]
 pub struct FragmentHeader {
     pub next_header: u8,
-    pub fragment_offset: u16,  // 13 bits
+    pub fragment_offset: u16,  // 13 bit, parça ofseti (8 baytlık birimler halinde)
     pub more_fragments: bool,
     pub identification: u32,
 }
 
 // ============================================================================
-// HELPER FUNCTIONS
+// YARDIMCI FONKSİYONLAR
 // ============================================================================
+//
+// EUI-64: MAC adresinden 64-bit arabirim tanımlayıcısı oluşturma yöntemi.
+//
+// MAC adresi (48 bit):   XX:XX:XX:YY:YY:YY
+//                                 ↓
+// EUI-64 (64 bit):       XX:XX:XX:FF:FE:YY:YY:YY
+//   + 7. bitin tersine çevrilmesi (universal/local bit)
+//
+// Bu tanımlayıcı, link-local ve SLAAC global adreslerinin ikinci yarısını oluşturur.
 
-/// Generate IPv6 link-local address from MAC (EUI-64)
+/// MAC adresinden EUI-64 yöntemiyle bağlantı-yerel (link-local) IPv6 adresi üretir.
+/// Sonuç: `fe80::` ön eki + EUI-64 arabirim tanımlayıcısı
 pub fn link_local_from_mac(mac: super::MacAddr) -> Ipv6Addr {
     let bytes = mac.as_bytes();
     
-    // EUI-64: Insert FF:FE in middle
+    // EUI-64: Ortaya FF:FE ekle (48-bit → 64-bit genişletme)
     let mut addr = [0u8; 16];
     addr[0] = 0xFE;
     addr[1] = 0x80;
-    // Bytes 2-7 are zero
-    addr[8] = bytes[0] ^ 0x02;  // Flip universal/local bit
+    // Bytes 2-7 sıfır (link-local prefix zaten fe80:: olduğu için)
+    addr[8] = bytes[0] ^ 0x02;  // Universal/local bitini tersine çevir (EUI-64 standardı)
     addr[9] = bytes[1];
     addr[10] = bytes[2];
     addr[11] = 0xFF;
@@ -495,7 +607,9 @@ pub fn link_local_from_mac(mac: super::MacAddr) -> Ipv6Addr {
     Ipv6Addr(addr)
 }
 
-/// Generate solicited-node multicast address
+/// Bir IPv6 adresi için talep-düğüm (solicited-node) çok noktaya yayın adresi üretir.
+/// Komşu Bulma Protokolü'nde (NDP) ARP'nin IPv6 karşılığı olarak kullanılır.
+/// Format: `ff02::1:ff00:0/104` ön eki + adresin son 24 biti
 pub fn solicited_node_multicast(addr: &Ipv6Addr) -> Ipv6Addr {
     Ipv6Addr([
         0xFF, 0x02, 0, 0,
@@ -509,10 +623,27 @@ pub fn solicited_node_multicast(addr: &Ipv6Addr) -> Ipv6Addr {
 }
 
 // ============================================================================
-// ICMPv6 (Internet Control Message Protocol for IPv6)
+// ICMPv6 (IPv6 İçin İnternet Kontrol Mesaj Protokolü)
 // ============================================================================
+//
+// ICMPv6, IPv6'nın ayrılmaz bir parçasıdır (RFC 4443). IPv4'teki ICMP, ARP ve
+// IGMP protokollerinin birleşimi gibi düşünülebilir.
+//
+// Kullanım alanları:
+//   - Hata bildirimi (Destination Unreachable, Time Exceeded...)
+//   - Echo (ping) istekleri
+//   - Komşu Bulma Protokolü / NDP (ARP'nin IPv6 karşılığı)
+//   - Yönlendirici Bulma (Router Discovery)
+//   - Çok noktaya yayın dinleyici keşfi (MLD)
+//
+// ICMPv6 mesaj yapısı:
+//   Tür (1B) | Kod (1B) | Sağlama Toplamı (2B) | Tipe özgü veri
+//
+// Türler:
+//   1-127  : Hata mesajları
+//   128-255: Bilgi mesajları (Echo, NDP, MLD...)
 
-/// ICMPv6 message types
+/// ICMPv6 mesaj türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icmpv6Type {
     DestinationUnreachable = 1,
@@ -547,7 +678,7 @@ impl Icmpv6Type {
     }
 }
 
-/// ICMPv6 header
+/// ICMPv6 genel başlık alanları (tüm ICMPv6 mesajlarında ortak)
 #[derive(Clone, Debug)]
 pub struct Icmpv6Header {
     pub msg_type: Icmpv6Type,
@@ -555,11 +686,13 @@ pub struct Icmpv6Header {
     pub checksum: u16,
 }
 
-/// ICMPv6 Router Solicitation
+/// ICMPv6 Yönlendirici Talep (Router Solicitation - RS) mesajı.
+/// Bir istemci ağa bağlandığında yönlendiricileri keşfetmek için gönderilir.
+/// Hedef: `ff02::2` (tüm yönlendiriciler multicast adresi)
 #[derive(Clone, Debug)]
 pub struct RouterSolicitation {
     pub header: Icmpv6Header,
-    /// Source link-layer address option (optional)
+    /// Kaynak bağlantı katmanı adresi seçeneği (isteğe bağlı, genellikle MAC adresi)
     pub source_link_addr: Option<[u8; 6]>,
 }
 
@@ -578,49 +711,52 @@ impl RouterSolicitation {
     pub fn serialize(&self) -> alloc::vec::Vec<u8> {
         let mut buf = alloc::vec::Vec::new();
         
-        // ICMPv6 header
+        // ICMPv6 başlığı serileştir
         buf.push(self.header.msg_type as u8);
         buf.push(self.header.code);
         buf.extend_from_slice(&self.header.checksum.to_be_bytes());
-        
-        // Reserved (4 bytes)
+
+        // Ayrılmış (Reserved) 4 bayt
         buf.extend_from_slice(&[0u8; 4]);
-        
-        // Source link-layer address option (type 1)
+
+        // Kaynak bağlantı katmanı adresi seçeneği (tip 1)
         if let Some(mac) = &self.source_link_addr {
-            buf.push(1); // Option type
-            buf.push(1); // Option length (in 8-byte units)
+            buf.push(1); // Seçenek tipi: Source Link-Layer Address
+            buf.push(1); // Seçenek uzunluğu (8 baytlık birimler halinde: 1 = 8 bayt)
             buf.extend_from_slice(mac);
-            buf.extend_from_slice(&[0u8; 2]); // Padding
+            buf.extend_from_slice(&[0u8; 2]); // Hizalama için dolgu (padding)
         }
         
         buf
     }
 }
 
-/// ICMPv6 Router Advertisement
+/// ICMPv6 Yönlendirici Duyurusu (Router Advertisement - RA) mesajı.
+/// Yönlendiriciler periyodik ya da RS'e yanıt olarak bu mesajı gönderir.
+/// İçeriği: ön ek bilgisi, MTU, atlama sınırı, DNS sunucuları, DHCPv6 işaretleri
 #[derive(Clone, Debug)]
 pub struct RouterAdvertisement {
     pub header: Icmpv6Header,
-    /// Current hop limit
+    /// Yeni oluşturulan paketler için varsayılan atlama sınırı (hop limit)
     pub hop_limit: u8,
-    /// Flags (M=Managed, O=Other, H=HomeAgent, P=Proxy, A=Autonomous)
+    /// Bayraklar: M=Yönetimli (Managed/DHCPv6), O=Diğer yapılandırma (Other)
     pub flags: u8,
-    /// Router lifetime (seconds)
+    /// Yönlendirici ömrü (saniye cinsinden, 0 ise artık varsayılan yönlendirici değildir)
     pub router_lifetime: u16,
-    /// Reachable time (milliseconds)
+    /// Komşunun erişilebilir kalma süresi (milisaniye)
     pub reachable_time: u32,
-    /// Retransmit timer (milliseconds)
+    /// Komşu talep yeniden gönderme aralığı (milisaniye)
     pub retransmit_timer: u32,
-    /// Prefix options
+    /// Ön ek bilgisi seçenekleri (SLAAC için)
     pub prefixes: alloc::vec::Vec<PrefixInfo>,
-    /// DNS servers (RDNSS)
+    /// RDNSS seçeneğindeki DNS sunucuları
     pub dns_servers: alloc::vec::Vec<Ipv6Addr>,
-    /// MTU
+    /// Bağlantı MTU değeri (varsa)
     pub mtu: Option<u32>,
 }
 
-/// Prefix Information option
+/// RA içindeki Ön Ek Bilgisi (Prefix Information) seçeneği.
+/// SLAAC adresi üretme ve yönlendirme kararları için kullanılır.
 #[derive(Clone, Debug)]
 pub struct PrefixInfo {
     pub prefix: Ipv6Addr,
@@ -658,7 +794,7 @@ impl RouterAdvertisement {
             mtu: None,
         };
         
-        // Parse options
+        // RA seçeneklerini ayrıştır
         let mut offset = 16;
         while offset + 2 <= data.len() {
             let opt_type = data[offset];
@@ -670,10 +806,10 @@ impl RouterAdvertisement {
             
             match opt_type {
                 1 => {
-                    // Source link-layer address
+                    // Kaynak bağlantı katmanı adresi seçeneği (Source Link-Layer Address)
                 }
                 3 => {
-                    // Prefix Information
+                    // Ön Ek Bilgisi seçeneği (Prefix Information)
                     if opt_len >= 32 {
                         let prefix_len = data[offset + 2];
                         let flags = data[offset + 3];
@@ -698,7 +834,7 @@ impl RouterAdvertisement {
                     }
                 }
                 5 => {
-                    // MTU option
+                    // MTU seçeneği (RFC 4861 §4.6.4)
                     if opt_len >= 8 {
                         ra.mtu = Some(u32::from_be_bytes([
                             data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]
@@ -706,7 +842,8 @@ impl RouterAdvertisement {
                     }
                 }
                 25 => {
-                    // Recursive DNS Server (RDNSS)
+                    // RDNSS: Özyinelemeli DNS Sunucusu seçeneği (RFC 8106)
+                    // Her DNS sunucusu 16 bayt (1 IPv6 adresi)
                     if opt_len >= 24 {
                         let num_servers = (opt_len - 8) / 16;
                         for i in 0..num_servers {
@@ -728,39 +865,59 @@ impl RouterAdvertisement {
         Some(ra)
     }
     
-    /// Check if Managed flag is set (use DHCPv6 for addresses)
+    /// M (Managed) bayrağı: Ayarlanmışsa adresler DHCPv6 ile alınır (SLAAC yerine)
     pub fn use_dhcpv6(&self) -> bool {
         (self.flags & 0x80) != 0
     }
     
-    /// Check if Other flag is set (use DHCPv6 for other config)
+    /// O (Other) bayrağı: Ayarlanmışsa DNS/NTP gibi diğer yapılandırma için DHCPv6 kullanılır
     pub fn use_dhcpv6_other(&self) -> bool {
         (self.flags & 0x40) != 0
     }
 }
 
 // ============================================================================
-// SLAAC (Stateless Address Autoconfiguration)
+// SLAAC (Durumsuz Adres Otokonfigürasyonu - Stateless Address Autoconfiguration)
 // ============================================================================
+//
+// SLAAC, RFC 4862'de tanımlanmıştır. Cihazların DHCPv6 sunucusu olmadan
+// otomatik olarak IPv6 adresi edinmesini sağlar.
+//
+// SLAAC Akışı:
+//
+//   1. Cihaz açılır → Link-Local adres üretilir (fe80::/64 + EUI-64)
+//   2. DAD (Duplicate Address Detection) yapılır → adres çakışıyor mu?
+//   3. Yönlendirici Talebi (RS) gönderilir → ff02::2 hedefli
+//   4. Yönlendirici Duyurusu (RA) alınır ← yönlendiriciden
+//   5. RA'daki AutoConf ön eki + EUI-64 → Global adres oluşturulur
+//   6. Adres DAD ile doğrulanır
+//
+//   Cihaz        Bağlantı        Yönlendirici
+//    |               |                 |
+//    |-- RS -------->|---------------->|
+//    |               |          RA <---|
+//    |<-- RA --------|-----------------|
+//    | (Global adres üret)             |
+//    |                                 |
 
-/// SLAAC state
+/// SLAAC durum nesnesi — bir ağ arayüzünün IPv6 adres durumunu tutar
 #[derive(Clone, Debug)]
 pub struct SlaacState {
-    /// Link-local address
+    /// Bağlantı-yerel adres (fe80::/64)
     pub link_local: Ipv6Addr,
-    /// Global addresses (prefix + EUI-64)
+    /// Global adresler (RA ön eki + EUI-64 ile oluşturulur)
     pub global_addresses: alloc::vec::Vec<SlaacAddress>,
-    /// Default gateway
+    /// Varsayılan ağ geçidi (RA'nın kaynak adresi)
     pub default_gateway: Option<Ipv6Addr>,
-    /// DNS servers
+    /// RA'dan öğrenilen DNS sunucuları
     pub dns_servers: alloc::vec::Vec<Ipv6Addr>,
-    /// MTU
+    /// Bağlantı MTU değeri (varsayılan 1500)
     pub mtu: u32,
-    /// Router lifetime
+    /// Yönlendirici ömrü (saniye)
     pub router_lifetime: u32,
 }
 
-/// SLAAC address
+/// SLAAC ile oluşturulmuş tek bir IPv6 adresi ve yaşam süresi bilgisi
 #[derive(Clone, Debug)]
 pub struct SlaacAddress {
     pub address: Ipv6Addr,
@@ -782,13 +939,14 @@ impl SlaacState {
         }
     }
     
-    /// Generate SLAAC address from prefix and MAC
+    /// RA'dan gelen ön ek ve MAC adresinden SLAAC global adresi üretir.
+    /// Algoritma: ön ek (64 bit) + EUI-64 arabirim tanımlayıcısı (64 bit)
     pub fn generate_address(prefix: &Ipv6Addr, prefix_len: u8, mac: super::MacAddr) -> Ipv6Addr {
         let mac_bytes = mac.as_bytes();
         
-        // EUI-64 interface identifier
+        // EUI-64 arabirim tanımlayıcısı oluştur
         let mut interface_id = [0u8; 8];
-        interface_id[0] = mac_bytes[0] ^ 0x02; // Flip universal/local bit
+        interface_id[0] = mac_bytes[0] ^ 0x02; // Universal/local bitini tersine çevir
         interface_id[1] = mac_bytes[1];
         interface_id[2] = mac_bytes[2];
         interface_id[3] = 0xFF;
@@ -797,16 +955,16 @@ impl SlaacState {
         interface_id[6] = mac_bytes[4];
         interface_id[7] = mac_bytes[5];
         
-        // Combine prefix and interface ID
+        // Ön ek ve arabirim tanımlayıcısını birleştir
         let mut addr = [0u8; 16];
-        
-        // Copy prefix (up to prefix_len bits)
+
+        // Ön eki kopyala (prefix_len bit kadar)
         let prefix_bytes = (prefix_len as usize + 7) / 8;
         for i in 0..prefix_bytes.min(8) {
             addr[i] = prefix.0[i];
         }
         
-        // Append interface ID
+        // Arabirim tanımlayıcısını (EUI-64) sonuna ekle (bayt 8-15)
         for i in 0..8 {
             addr[8 + i] = interface_id[i];
         }
@@ -814,38 +972,38 @@ impl SlaacState {
         Ipv6Addr(addr)
     }
     
-    /// Process Router Advertisement
+    /// Yönlendirici Duyurusu'nu (RA) işler; adres ve yapılandırmayı günceller
     pub fn process_ra(&mut self, ra: &RouterAdvertisement, mac: super::MacAddr, current_time: u64) {
-        // Update default gateway (source of RA)
+        // Varsayılan ağ geçidini güncelle (RA kaynağı, IPv6 başlığından alınır)
         if ra.router_lifetime > 0 {
-            // Gateway is the source of the RA (we'd need the source IP from IPv6 header)
+            // Ağ geçidi adresi RA'nın kaynak IPv6 adresinden alınır (burada üst katmandan geçmeli)
             self.router_lifetime = ra.router_lifetime as u32;
         }
         
-        // Update MTU
+        // MTU'yu güncelle
         if let Some(mtu) = ra.mtu {
             self.mtu = mtu;
         }
-        
-        // Update DNS servers
+
+        // DNS sunucularını güncelle
         self.dns_servers = ra.dns_servers.clone();
-        
-        // Process prefixes for SLAAC
+
+        // Otomatik yapılandırma (A bayrağı) ön ekleri için SLAAC adresi üret
         for prefix in &ra.prefixes {
             if prefix.autonomous {
-                // Generate SLAAC address
+                // EUI-64 + ön ek ile global adres oluştur
                 let addr = Self::generate_address(&prefix.prefix, prefix.prefix_len, mac);
-                
-                // Check if we already have this address
+
+                // Bu adres zaten kayıtlıysa yaşam sürelerini güncelle
                 let existing = self.global_addresses.iter_mut()
                     .find(|a| a.address == addr);
-                
+
                 if let Some(existing) = existing {
-                    // Update lifetimes
+                    // Mevcut adresin yaşam sürelerini yenile
                     existing.valid_lifetime = prefix.valid_lifetime;
                     existing.preferred_lifetime = prefix.preferred_lifetime;
                 } else {
-                    // Add new address
+                    // Yeni adresi listeye ekle
                     self.global_addresses.push(SlaacAddress {
                         address: addr,
                         prefix_len: prefix.prefix_len,
@@ -858,7 +1016,8 @@ impl SlaacState {
         }
     }
     
-    /// Check if address is preferred
+    /// Adresin tercih edilen (preferred) durumda olup olmadığını kontrol eder.
+    /// Tercih süresi (preferred_lifetime) dolmamışsa adres tercih edilir.
     pub fn is_preferred(&self, addr: &Ipv6Addr, current_time: u64) -> bool {
         for slaac_addr in &self.global_addresses {
             if &slaac_addr.address == addr {
@@ -869,7 +1028,8 @@ impl SlaacState {
         false
     }
     
-    /// Check if address is valid
+    /// Adresin geçerli (valid) olup olmadığını kontrol eder.
+    /// Geçerli süre (valid_lifetime) dolmamışsa adres hâlâ kullanılabilir.
     pub fn is_valid(&self, addr: &Ipv6Addr, current_time: u64) -> bool {
         for slaac_addr in &self.global_addresses {
             if &slaac_addr.address == addr {
@@ -880,7 +1040,7 @@ impl SlaacState {
         false
     }
     
-    /// Expire old addresses
+    /// Geçerli süresi (valid_lifetime) dolmuş adresleri listeden temizler
     pub fn expire_addresses(&mut self, current_time: u64) {
         self.global_addresses.retain(|addr| {
             let elapsed = current_time - addr.created_at;
@@ -890,10 +1050,42 @@ impl SlaacState {
 }
 
 // ============================================================================
-// DHCPv6 (Dynamic Host Configuration Protocol for IPv6)
+// DHCPv6 (IPv6 için Dinamik Ana Makine Yapılandırma Protokolü)
 // ============================================================================
+//
+// DHCPv6 (RFC 3315), IPv6 ağlarında cihazlara otomatik IP adresi, DNS sunucusu
+// ve diğer yapılandırma bilgilerini atayan protokoldür.
+//
+// SLAAC'tan farkı: Merkezi sunucudan yönetilen adres ataması yapar.
+//
+// DHCPv6 Mesaj Akışı (4 adımlı):
+//
+//   İstemci                            Sunucu
+//     |                                   |
+//     |------- Solicit (Talep) ---------->|
+//     |<------ Advertise (Duyuru) --------|
+//     |------- Request (İstek) ---------->|
+//     |<------ Reply (Yanıt) -------------|
+//     |       (IP atanmış!)               |
+//
+// Hızlı mod (Rapid Commit seçeneğiyle 2 adım):
+//
+//   İstemci                            Sunucu
+//     |                                   |
+//     |------- Solicit + RapidCommit --->|
+//     |<------ Reply (/w address) --------|
+//
+// DUID (DHCP Unique Identifier): Her DHCPv6 istemcisinin kalıcı kimliği.
+//   Tür 1: DUID-LLT (Link-Layer + Zaman)
+//   Tür 2: DUID-EN  (Kurumsal Numara)
+//   Tür 3: DUID-LL  (Yalnızca MAC — bu implementasyonda kullanılan)
+//
+// IA_NA (Identity Association for Non-temporary Addresses):
+//   Sunucunun istemciye atadığı geçici olmayan adres grubu
+//   T1 (Yenileme Zamanı) dolunca istemci sunucuya Renew gönderir
+//   T2 (Yeniden Bağlama Zamanı) dolunca Rebind gönderir
 
-/// DHCPv6 message types
+/// DHCPv6 mesaj türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dhcpv6MessageType {
     Solicit = 1,
@@ -911,53 +1103,53 @@ pub enum Dhcpv6MessageType {
     RelayRepl = 13,
 }
 
-/// DHCPv6 option codes
-pub const DHCPV6_OPT_CLIENTID: u16 = 1;
-pub const DHCPV6_OPT_SERVERID: u16 = 2;
-pub const DHCPV6_OPT_IA_NA: u16 = 3;
-pub const DHCPV6_OPT_IA_TA: u16 = 4;
-pub const DHCPV6_OPT_IAADDR: u16 = 5;
-pub const DHCPV6_OPT_ORO: u16 = 6;
-pub const DHCPV6_OPT_PREFERENCE: u16 = 7;
-pub const DHCPV6_OPT_ELAPSED_TIME: u16 = 8;
-pub const DHCPV6_OPT_RELAY_MSG: u16 = 9;
-pub const DHCPV6_OPT_STATUS_CODE: u16 = 13;
-pub const DHCPV6_OPT_RAPID_COMMIT: u16 = 14;
-pub const DHCPV6_OPT_USER_CLASS: u16 = 15;
-pub const DHCPV6_OPT_VENDOR_CLASS: u16 = 16;
-pub const DHCPV6_OPT_DNS_SERVERS: u16 = 23;
-pub const DHCPV6_OPT_DOMAIN_LIST: u16 = 24;
-pub const DHCPV6_OPT_IA_PD: u16 = 25;
-pub const DHCPV6_OPT_IA_PREFIX: u16 = 26;
+/// DHCPv6 seçenek kodları (RFC 3315 §22)
+pub const DHCPV6_OPT_CLIENTID: u16 = 1;   // İstemci DUID
+pub const DHCPV6_OPT_SERVERID: u16 = 2;   // Sunucu DUID
+pub const DHCPV6_OPT_IA_NA: u16 = 3;      // Kalıcı Olmayan Adres Grubu
+pub const DHCPV6_OPT_IA_TA: u16 = 4;      // Geçici Adres Grubu
+pub const DHCPV6_OPT_IAADDR: u16 = 5;     // IA içindeki adres
+pub const DHCPV6_OPT_ORO: u16 = 6;        // Seçenek İstek Listesi
+pub const DHCPV6_OPT_PREFERENCE: u16 = 7; // Sunucu tercihi (0-255)
+pub const DHCPV6_OPT_ELAPSED_TIME: u16 = 8; // Geçen süre (1/100 saniye)
+pub const DHCPV6_OPT_RELAY_MSG: u16 = 9;  // Röle mesajı
+pub const DHCPV6_OPT_STATUS_CODE: u16 = 13; // Durum kodu
+pub const DHCPV6_OPT_RAPID_COMMIT: u16 = 14; // Hızlı onay (2 adımlı el sıkışma)
+pub const DHCPV6_OPT_USER_CLASS: u16 = 15;  // Kullanıcı sınıfı
+pub const DHCPV6_OPT_VENDOR_CLASS: u16 = 16; // Satıcı sınıfı
+pub const DHCPV6_OPT_DNS_SERVERS: u16 = 23; // DNS sunucuları (RFC 3646)
+pub const DHCPV6_OPT_DOMAIN_LIST: u16 = 24; // Alan adı arama listesi
+pub const DHCPV6_OPT_IA_PD: u16 = 25;    // Ön ek Delegasyonu
+pub const DHCPV6_OPT_IA_PREFIX: u16 = 26; // IA_PD içindeki ön ek
 
-/// DHCPv6 client state
+/// DHCPv6 istemci durum makinesi ve yapılandırma verisi
 #[derive(Clone, Debug)]
 pub struct Dhcpv6Client {
-    /// Client DUID (DHCP Unique Identifier)
+    /// İstemci DUID (DHCP Benzersiz Tanımlayıcısı) — her cihazın kalıcı kimliği
     pub duid: [u8; 14],
-    /// Transaction ID
+    /// İşlem Kimliği (24 bit): istek/yanıt eşleştirme için kullanılır
     pub transaction_id: u32,
-    /// Server DUID
+    /// Sunucu DUID (Solicit/Reply akışından öğrenilir)
     pub server_duid: Option<alloc::vec::Vec<u8>>,
-    /// Assigned addresses
+    /// Atanan IPv6 adresleri listesi
     pub addresses: alloc::vec::Vec<Dhcpv6Address>,
-    /// DNS servers
+    /// Sunucudan alınan DNS sunucuları
     pub dns_servers: alloc::vec::Vec<Ipv6Addr>,
-    /// Domain search list
+    /// Alan adı arama listesi
     pub domains: alloc::vec::Vec<String>,
-    /// State
+    /// İstemci durum makinesi
     pub state: Dhcpv6State,
-    /// Renew timer (T1)
+    /// T1 yenileme zamanlayıcısı (saniye): dolunca Renew gönderilir
     pub t1: u32,
-    /// Rebind timer (T2)
+    /// T2 yeniden bağlama zamanlayıcısı (saniye): dolunca Rebind gönderilir
     pub t2: u32,
-    /// Preferred lifetime
+    /// Tercih edilen yaşam süresi (saniye)
     pub preferred_lifetime: u32,
-    /// Valid lifetime
+    /// Geçerli yaşam süresi (saniye)
     pub valid_lifetime: u32,
 }
 
-/// DHCPv6 address
+/// DHCPv6 sunucusundan atanmış tek bir IPv6 adresi ve yaşam süresi bilgisi
 #[derive(Clone, Debug)]
 pub struct Dhcpv6Address {
     pub address: Ipv6Addr,
@@ -966,7 +1158,7 @@ pub struct Dhcpv6Address {
     pub valid_lifetime: u32,
 }
 
-/// DHCPv6 state
+/// DHCPv6 istemci durum makinesi durumları (RFC 3315 §5.1)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dhcpv6State {
     Init,
@@ -980,14 +1172,15 @@ pub enum Dhcpv6State {
 
 impl Dhcpv6Client {
     pub fn new(mac: super::MacAddr) -> Self {
-        // Generate DUID-LL (Link-Layer) based on MAC
+        // MAC adresinden DUID-LL (Link-Layer DUID) üret
+        // Format: [tip(2B)][donanım tipi(2B)][MAC(6B)][zaman(4B)]
         let mut duid = [0u8; 14];
-        duid[0] = 0; // DUID type: Link-Layer
+        duid[0] = 0; // DUID tipi: Link-Layer (LL)
         duid[1] = 1;
-        duid[2] = 0; // Hardware type: Ethernet
+        duid[2] = 0; // Donanım tipi: Ethernet
         duid[3] = 1;
         duid[4..10].copy_from_slice(mac.as_bytes());
-        duid[10..14].copy_from_slice(&[0, 0, 0, 1]); // Time
+        duid[10..14].copy_from_slice(&[0, 0, 0, 1]); // Zaman bilgisi (sabit 1)
         
         Dhcpv6Client {
             duid,
@@ -1004,81 +1197,81 @@ impl Dhcpv6Client {
         }
     }
     
-    /// Generate new transaction ID
+    /// Yeni bir işlem kimliği (transaction ID) üretir. Her mesaj akışı için taze bir ID gerekir.
     pub fn new_transaction_id(&mut self) -> u32 {
-        // Use random or timestamp
+        // Zamanlayıcı sayacından 24-bit rasgele değer üret
         self.transaction_id = crate::interrupts::get_ticks() as u32 & 0xFFFFFF;
         self.transaction_id
     }
     
-    /// Build Solicit message
+    /// DHCPv6 Solicit (Talep) mesajı oluşturur — sunucu keşfi için gönderilir
     pub fn build_solicit(&mut self) -> alloc::vec::Vec<u8> {
         let mut buf = alloc::vec::Vec::new();
-        
-        // Message type
+
+        // Mesaj tipi: Solicit
         buf.push(Dhcpv6MessageType::Solicit as u8);
-        
-        // Transaction ID (24 bits)
+
+        // İşlem Kimliği (24 bit, büyük bajt önce)
         let tid = self.new_transaction_id();
         buf.push(((tid >> 16) & 0xFF) as u8);
         buf.push(((tid >> 8) & 0xFF) as u8);
         buf.push((tid & 0xFF) as u8);
         
-        // Client ID option
+        // İstemci DUID seçeneği
         buf.extend_from_slice(&DHCPV6_OPT_CLIENTID.to_be_bytes());
         buf.extend_from_slice(&(self.duid.len() as u16).to_be_bytes());
         buf.extend_from_slice(&self.duid);
-        
-        // Rapid Commit option (empty)
+
+        // Hızlı onay seçeneği (Rapid Commit — 2 adımlı el sıkışma için)
         buf.extend_from_slice(&DHCPV6_OPT_RAPID_COMMIT.to_be_bytes());
         buf.extend_from_slice(&0u16.to_be_bytes());
-        
-        // Option Request Option (ORO) - request DNS servers
+
+        // Seçenek İstek Listesi (ORO — DNS sunucuları iste)
         buf.extend_from_slice(&DHCPV6_OPT_ORO.to_be_bytes());
         buf.extend_from_slice(&4u16.to_be_bytes());
         buf.extend_from_slice(&DHCPV6_OPT_DNS_SERVERS.to_be_bytes());
         buf.extend_from_slice(&DHCPV6_OPT_DOMAIN_LIST.to_be_bytes());
-        
-        // Elapsed time option
+
+        // Geçen süre seçeneği (0 = ilk deneme)
         buf.extend_from_slice(&DHCPV6_OPT_ELAPSED_TIME.to_be_bytes());
         buf.extend_from_slice(&2u16.to_be_bytes());
-        buf.extend_from_slice(&0u16.to_be_bytes()); // 0 ms elapsed
+        buf.extend_from_slice(&0u16.to_be_bytes()); // 0 ms geçti
         
         buf
     }
     
-    /// Build Request message
+    /// DHCPv6 Request (İstek) mesajı oluşturur — Advertise'a yanıt olarak belirli sunucudan IP ister
     pub fn build_request(&mut self) -> alloc::vec::Vec<u8> {
         let mut buf = alloc::vec::Vec::new();
-        
-        // Message type
+
+        // Mesaj tipi: Request
         buf.push(Dhcpv6MessageType::Request as u8);
-        
-        // Transaction ID
+
+        // İşlem Kimliği
         let tid = self.new_transaction_id();
         buf.push(((tid >> 16) & 0xFF) as u8);
         buf.push(((tid >> 8) & 0xFF) as u8);
         buf.push((tid & 0xFF) as u8);
         
-        // Client ID option
+        // İstemci DUID seçeneği
         buf.extend_from_slice(&DHCPV6_OPT_CLIENTID.to_be_bytes());
         buf.extend_from_slice(&(self.duid.len() as u16).to_be_bytes());
         buf.extend_from_slice(&self.duid);
-        
-        // Server ID option
+
+        // Sunucu DUID seçeneği (Advertise'dan öğrenildi)
         if let Some(server_duid) = &self.server_duid {
             buf.extend_from_slice(&DHCPV6_OPT_SERVERID.to_be_bytes());
             buf.extend_from_slice(&(server_duid.len() as u16).to_be_bytes());
             buf.extend_from_slice(server_duid);
         }
-        
-        // ORO
+
+        // ORO (Seçenek İstek Listesi)
         buf.extend_from_slice(&DHCPV6_OPT_ORO.to_be_bytes());
         buf.extend_from_slice(&4u16.to_be_bytes());
         buf.extend_from_slice(&DHCPV6_OPT_DNS_SERVERS.to_be_bytes());
         buf.extend_from_slice(&DHCPV6_OPT_DOMAIN_LIST.to_be_bytes());
-        
-        // Elapsed time
+
+        // Geçen süre
         buf.extend_from_slice(&DHCPV6_OPT_ELAPSED_TIME.to_be_bytes());
         buf.extend_from_slice(&2u16.to_be_bytes());
         buf.extend_from_slice(&0u16.to_be_bytes());
@@ -1086,23 +1279,23 @@ impl Dhcpv6Client {
         buf
     }
     
-    /// Build Renew message
+    /// DHCPv6 Renew (Yenileme) mesajı oluşturur — T1 süresi dolunca gönderilir
     pub fn build_renew(&mut self) -> alloc::vec::Vec<u8> {
         let mut buf = alloc::vec::Vec::new();
-        
+
         buf.push(Dhcpv6MessageType::Renew as u8);
-        
+
         let tid = self.new_transaction_id();
         buf.push(((tid >> 16) & 0xFF) as u8);
         buf.push(((tid >> 8) & 0xFF) as u8);
         buf.push((tid & 0xFF) as u8);
         
-        // Client ID
+        // İstemci DUID
         buf.extend_from_slice(&DHCPV6_OPT_CLIENTID.to_be_bytes());
         buf.extend_from_slice(&(self.duid.len() as u16).to_be_bytes());
         buf.extend_from_slice(&self.duid);
-        
-        // Server ID
+
+        // Sunucu DUID
         if let Some(server_duid) = &self.server_duid {
             buf.extend_from_slice(&DHCPV6_OPT_SERVERID.to_be_bytes());
             buf.extend_from_slice(&(server_duid.len() as u16).to_be_bytes());
@@ -1112,18 +1305,18 @@ impl Dhcpv6Client {
         buf
     }
     
-    /// Parse Reply message
+    /// DHCPv6 Reply (Yanıt) mesajını ayrıştırır; başarıyla işlenirse `true` döndürür
     pub fn parse_reply(&mut self, data: &[u8]) -> bool {
         if data.is_empty() {
             return false;
         }
-        
-        // Check message type
+
+        // Mesaj tipini kontrol et
         if data[0] != Dhcpv6MessageType::Reply as u8 {
             return false;
         }
-        
-        // Transaction ID
+
+        // İşlem kimliğini doğrula
         if data.len() < 4 {
             return false;
         }
@@ -1133,7 +1326,7 @@ impl Dhcpv6Client {
             return false;
         }
         
-        // Parse options
+        // Seçenekleri ayrıştır
         let mut offset = 4;
         while offset + 4 <= data.len() {
             let opt_code = u16::from_be_bytes([data[offset], data[offset + 1]]);
@@ -1150,14 +1343,14 @@ impl Dhcpv6Client {
                     self.server_duid = Some(opt_data.to_vec());
                 }
                 DHCPV6_OPT_IA_NA => {
-                    // IA_NA (Identity Association for Non-temporary Addresses)
+                    // IA_NA (Geçici Olmayan Adres Grubu) — T1/T2 ve adres bilgisi içerir
                     if opt_len >= 12 {
                         let t1 = u32::from_be_bytes([opt_data[4], opt_data[5], opt_data[6], opt_data[7]]);
                         let t2 = u32::from_be_bytes([opt_data[8], opt_data[9], opt_data[10], opt_data[11]]);
                         self.t1 = t1;
                         self.t2 = t2;
-                        
-                        // Parse IAADDR options inside
+
+                        // IA_NA içindeki IAADDR seçeneklerini ayrıştır
                         let mut ia_offset = 12;
                         while ia_offset + 4 <= opt_data.len() {
                             let ia_opt_code = u16::from_be_bytes([opt_data[ia_offset], opt_data[ia_offset + 1]]);
@@ -1188,7 +1381,7 @@ impl Dhcpv6Client {
                     }
                 }
                 DHCPV6_OPT_DNS_SERVERS => {
-                    // DNS servers (16 bytes each)
+                    // DNS sunucuları: her biri 16 bayt IPv6 adresi
                     for i in (0..opt_len).step_by(16) {
                         if i + 16 <= opt_len {
                             let mut addr = [0u8; 16];
@@ -1198,7 +1391,7 @@ impl Dhcpv6Client {
                     }
                 }
                 DHCPV6_OPT_DOMAIN_LIST => {
-                    // Domain search list
+                    // Alan adı arama listesi — şimdilik ham baytlar olarak saklanıyor
                     // Simplified: just store as bytes
                 }
                 _ => {}
@@ -1213,10 +1406,32 @@ impl Dhcpv6Client {
 }
 
 // ============================================================================
-// IPv6 NEIGHBOR DISCOVERY
+// IPv6 KOMŞU BULMA PROTOKOLÜ (NDP - Neighbor Discovery Protocol)
 // ============================================================================
+//
+// NDP, RFC 4861'de tanımlanmıştır. IPv4'teki ARP protokolünün yerini alır.
+// ICMPv6 mesajları üzerine inşa edilmiştir.
+//
+// NDP'nin Görevleri:
+//   1) Adres Çözümleme  : IPv6 → MAC (ARP yerine NS/NA kullanılır)
+//   2) Yönlendirici Keşfi: RS/RA mesajları ile varsayılan ağ geçidi bulunur
+//   3) Ön Ek Keşfi     : RA'dan ağ ön ekleri öğrenilir (SLAAC için)
+//   4) DAD             : Yinelenen Adres Algılama (adres çakışması tespiti)
+//   5) NUD             : Komşu Erişilebilirlik Tespiti
+//
+// Komşu Çözümleme Akışı (ARP'ye benzer):
+//
+//   A (fe80::1)          Ağ          B (fe80::2)
+//       |                 |               |
+//       |=== NS =========>|==============>|  "fe80::2 kimdir?"
+//       |                 |   NA <========|  "Ben! MAC: 52:54:00:xx:xx:xx"
+//       |<================|               |
+//       | (B'nin MAC'i öğrenildi)         |
+//
+// Komşu Önbellek Durumları:
+//   INCOMPLETE → REACHABLE → STALE → DELAY → PROBE → (temizle)
 
-/// Neighbor cache entry
+/// Komşu önbellek girdisi — IPv6 adres ↔ MAC adres eşleşmesini tutar
 #[derive(Clone, Debug)]
 pub struct NeighborEntry {
     pub ip: Ipv6Addr,
@@ -1227,7 +1442,7 @@ pub struct NeighborEntry {
     pub last_used: u64,
 }
 
-/// Neighbor state
+/// Komşu önbellek girdisinin durumu (RFC 4861 §7.3.2)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NeighborState {
     Incomplete,
@@ -1237,7 +1452,9 @@ pub enum NeighborState {
     Probe,
 }
 
-/// Neighbor Solicitation
+/// Komşu Talep (Neighbor Solicitation - NS) mesajı.
+/// "Bu IPv6 adresinin MAC'i nedir?" sorusunu ağa yayar.
+/// Hedef: talep-düğüm multicast adresi (`ff02::1:ffXX:XXXX`)
 #[derive(Clone, Debug)]
 pub struct NeighborSolicitation {
     pub header: Icmpv6Header,
@@ -1265,16 +1482,16 @@ impl NeighborSolicitation {
         buf.push(self.header.code);
         buf.extend_from_slice(&self.header.checksum.to_be_bytes());
         
-        // Reserved
+        // Ayrılmış (Reserved)
         buf.extend_from_slice(&[0u8; 4]);
-        
-        // Target address
+
+        // Hedef adres (sorgulanmak istenen IPv6 adresi)
         buf.extend_from_slice(&self.target_addr.0);
-        
-        // Source link-layer address option
+
+        // Kaynak bağlantı katmanı adresi seçeneği
         if let Some(mac) = &self.source_link_addr {
-            buf.push(1); // Option type
-            buf.push(1); // Option length
+            buf.push(1); // Seçenek tipi
+            buf.push(1); // Seçenek uzunluğu
             buf.extend_from_slice(mac);
             buf.extend_from_slice(&[0u8; 2]);
         }
@@ -1283,7 +1500,8 @@ impl NeighborSolicitation {
     }
 }
 
-/// Neighbor Advertisement
+/// Komşu Duyurusu (Neighbor Advertisement - NA) mesajı.
+/// NS'e yanıt olarak "Bu adres bende, MAC'im şu" bilgisini içerir.
 #[derive(Clone, Debug)]
 pub struct NeighborAdvertisement {
     pub header: Icmpv6Header,
@@ -1312,7 +1530,7 @@ impl NeighborAdvertisement {
         
         let mut target_link_addr = None;
         
-        // Parse options
+        // NA seçeneklerini ayrıştır (hedef bağlantı katmanı adresi ararız)
         let mut offset = 24;
         while offset + 2 <= data.len() {
             let opt_type = data[offset];
@@ -1344,7 +1562,7 @@ impl NeighborAdvertisement {
     }
 }
 
-/// Initialize IPv6
+/// IPv6 modülünü başlatır
 pub fn init() {
     crate::serial_println!("[IPv6] Module initialized");
 }

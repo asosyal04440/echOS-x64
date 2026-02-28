@@ -1,6 +1,38 @@
-//! # Cgroups v2
+//! # Cgroups v2 (Kontrol Grupları Sürüm 2)
 //!
-//! Control groups version 2 for resource control.
+//! Konteyner ve süreç yalıtımı için kaynak kontrol alt sistemi.
+//! Docker, Kubernetes gibi araçların altında yatan çekirdek mekanizması.
+//!
+//! ## Cgroup Hiyerarşisi
+//!
+//! ```text
+//!  / (kök cgroup)
+//!  ├── cpu controller: tüm CPU'ya erişim
+//!  ├── pids controller: sınırsız süreç
+//!  │
+//!  ├── /system.slice
+//!  │   ├── cpu.weight = 100  (varsayılan ağırlık)
+//!  │   ├── pids.max = 500
+//!  │   └── /nginx.service
+//!  │       ├── cpu.max = "200000 1000000"  (%20 CPU sınırı)
+//!  │       └── [PID 1234, PID 1235]
+//!  │
+//!  └── /user.slice
+//!      ├── cpu.weight = 200  (daha yüksek öncelik)
+//!      └── /user-1000.slice
+//!          ├── pids.max = 100
+//!          └── [PID 5678, PID 5679]
+//! ```
+//!
+//! ## Temel Özellikler
+//! - **cpu controller**: CPU bant genişliği ve ağırlık kontrolü
+//! - **cpuset controller**: İşlemleri belirli CPU çekirdeklerine sabitler
+//! - **pids controller**: Süreç sayısını sınırlar (fork bomb koruması)
+//! - **memory controller**: Bellek kullanımını sınırlar
+//!
+//! ## Dosya Sistemi Arayüzü
+//! Her cgroup `/sys/fs/cgroup/` altında bir dizin olarak görünür.
+//! Kaynak limitleri bu dizindeki sanal dosyalara yazılarak ayarlanır.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,10 +42,10 @@ use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU32, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// CGROUP V2 CONSTANTS
+// CGROUP V2 SABİTLERİ
 // ============================================================================
 
-/// Cgroup controllers
+/// Desteklenen denetleyiciler (controller'lar)
 pub const CGROUP_CONTROLLER_CPU: &str = "cpu";
 pub const CGROUP_CONTROLLER_CPUSET: &str = "cpuset";
 pub const CGROUP_CONTROLLER_MEMORY: &str = "memory";
@@ -23,7 +55,7 @@ pub const CGROUP_CONTROLLER_RDMA: &str = "rdma";
 pub const CGROUP_CONTROLLER_HUGETLB: &str = "hugetlb";
 pub const CGROUP_CONTROLLER_MISC: &str = "misc";
 
-/// Cgroup files
+/// Her cgroup dizininde standart olarak bulunan sözde dosyalar
 pub const CGROUP_FILE_CGROUP_TYPE: &str = "cgroup.type";
 pub const CGROUP_FILE_CGROUP_PROCS: &str = "cgroup.procs";
 pub const CGROUP_FILE_CGROUP_CONTROLLERS: &str = "cgroup.controllers";
@@ -34,35 +66,35 @@ pub const CGROUP_FILE_CGROUP_MAX_DEPTH: &str = "cgroup.max.depth";
 pub const CGROUP_FILE_CGROUP_STAT: &str = "cgroup.stat";
 
 // ============================================================================
-// CGROUP V2
+// CGROUP V2 YAPISI
 // ============================================================================
 
 pub struct CgroupV2 {
-    /// Cgroup ID
+    /// Cgroup'un benzersiz kimlik numarası
     pub id: u64,
-    /// Path
+    /// Sanal dosya sistemi yolu (örn. /system.slice/nginx.service)
     pub path: String,
-    /// Name
+    /// Cgroup'un görünen adı
     pub name: String,
-    /// Parent
+    /// Ebeveyn cgroup'un ID'si (kök için None)
     pub parent: Option<u64>,
-    /// Children
+    /// Alt cgroup'ların ID listesi
     pub children: Mutex<Vec<u64>>,
-    /// Enabled controllers
+    /// Aktif denetleyiciler (cpu, pids, memory vb.)
     pub controllers: Mutex<BTreeMap<String, Box<dyn CgroupController>>>,
-    /// Subtree control
+    /// Alt ağaçta etkinleştirilecek denetleyiciler (subtree_control)
     pub subtree_control: Mutex<Vec<String>>,
-    /// Processes
+    /// Bu cgroup'a atanan süreç PID'leri
     pub processes: Mutex<Vec<u64>>,
-    /// Threads
+    /// Bu cgroup'a atanan iş parçacığı TID'leri
     pub threads: Mutex<Vec<u64>>,
-    /// Is populated
+    /// Cgroup'da en az bir süreç var mı?
     pub populated: AtomicBool,
-    /// Is frozen
+    /// Cgroup dondurulmuş mu? (tüm süreçler duraklatılır)
     pub frozen: AtomicBool,
-    /// Events
+    /// Olay bildirimleri (populate/freeze durumu)
     pub events: Mutex<CgroupEvents>,
-    /// Statistics
+    /// İstatistikler (torun sayısı vb.)
     pub stats: Mutex<CgroupStats>,
 }
 
@@ -102,34 +134,35 @@ impl CgroupV2 {
         }
     }
 
-    /// Add process
+    /// Cgroup'a süreç ekler. populated bayrağını günceller.
     pub fn add_process(&self, pid: u64) {
         self.processes.lock().push(pid);
         self.populated.store(true, Ordering::SeqCst);
         self.events.lock().populated = true;
     }
 
-    /// Remove process
+    /// Cgroup'dan süreç çıkarır. Boş kalırsa populated bayrağını temizler.
     pub fn remove_process(&self, pid: u64) {
         self.processes.lock().retain(|&p| p != pid);
-        
+
         if self.processes.lock().is_empty() {
             self.populated.store(false, Ordering::SeqCst);
             self.events.lock().populated = false;
         }
     }
 
-    /// Enable controller
+    /// Alt ağaç için denetleyici etkinleştirir (örn. "+cpu" komutu).
     pub fn enable_controller(&self, name: &str) {
         self.subtree_control.lock().push(String::from(name));
     }
 
-    /// Disable controller
+    /// Alt ağaç için denetleyiciyi devre dışı bırakır (örn. "-cpu" komutu).
     pub fn disable_controller(&self, name: &str) {
         self.subtree_control.lock().retain(|c| c != name);
     }
 
-    /// Write to cgroup file
+    /// Cgroup sanal dosyasına değer yazar.
+    /// Örnek: write("cpu.max", "500000 1000000") -> CPU'nun %50'sini sınırla
     pub fn write(&self, file: &str, value: &str) -> Result<(), CgroupError> {
         match file {
             "cgroup.procs" => {
@@ -138,7 +171,7 @@ impl CgroupV2 {
                 }
             }
             "cgroup.subtree_control" => {
-                // Parse controller list
+                // Denetleyici listesini ayrıştır ("+cpu -memory" gibi)
                 for ctrl in value.split_whitespace() {
                     if ctrl.starts_with('+') {
                         self.enable_controller(&ctrl[1..]);
@@ -152,7 +185,7 @@ impl CgroupV2 {
                 self.events.lock().frozen = value == "1";
             }
             _ => {
-                // Delegate to controllers
+                // İlgili denetleyiciye yönlendir
                 for controller in self.controllers.lock().values_mut() {
                     if controller.handles_file(file) {
                         return controller.write(file, value);
@@ -163,7 +196,7 @@ impl CgroupV2 {
         Ok(())
     }
 
-    /// Read from cgroup file
+    /// Cgroup sanal dosyasından değer okur.
     pub fn read(&self, file: &str) -> Result<String, CgroupError> {
         match file {
             "cgroup.procs" => {
@@ -208,8 +241,11 @@ impl CgroupV2 {
 }
 
 // ============================================================================
-// CGROUP CONTROLLER TRAIT
+// CGROUP DENETLEYİCİ TRAIT'İ
 // ============================================================================
+//
+// Her kaynak türü (cpu, memory, pids...) bu trait'i uygular.
+// Controller'lar cgroup ağacının düğümlerine dinamik olarak bağlanır.
 
 pub trait CgroupController: Send + Sync {
     fn name(&self) -> &str;
@@ -221,8 +257,12 @@ pub trait CgroupController: Send + Sync {
 }
 
 // ============================================================================
-// CPU CONTROLLER
+// CPU DENETLEYİCİSİ
 // ============================================================================
+//
+// cpu.weight  : CFS ağırlığı (1-10000, varsayılan 100)
+// cpu.max     : Bant genişliği kısıtlaması "quota period" (örn. "500000 1000000" = %50)
+// cpu.max.burst: Kısa süreli limit aşımı izni
 
 pub struct CpuController {
     pub weight: AtomicU64,
@@ -267,7 +307,7 @@ impl CgroupController for CpuController {
                 }
             }
             "cpu.max" => {
-                // Format: "quota period" or "max"
+                // Biçim: "kota period" veya "max" (sınırsız)
                 if value == "max" {
                     self.max.store(u64::MAX, Ordering::SeqCst);
                 } else {
@@ -317,8 +357,12 @@ impl CgroupController for CpuController {
 }
 
 // ============================================================================
-// CPUSET CONTROLLER
+// CPUSET DENETLEYİCİSİ
 // ============================================================================
+//
+// cpuset.cpus : İzin verilen CPU çekirdekleri (örn. "0-3,5,7")
+// cpuset.mems : İzin verilen NUMA bellek düğümleri (örn. "0,1")
+// cpuset.cpus.effective: Gerçekte kullanılan CPU'lar (NUMA toplolojisinden miras alınır)
 
 pub struct CpusetController {
     pub cpus: Mutex<Vec<u32>>,
@@ -350,7 +394,7 @@ impl CgroupController for CpusetController {
     fn write(&mut self, file: &str, value: &str) -> Result<(), CgroupError> {
         match file {
             "cpuset.cpus" => {
-                // Parse CPU list (e.g., "0-3,5,7")
+                // CPU listesini ayrıştır (örn. "0-3,5,7")
                 let mut cpus = Vec::new();
                 for part in value.split(',') {
                     if part.contains('-') {
@@ -367,7 +411,7 @@ impl CgroupController for CpusetController {
                 *self.cpus.lock() = cpus;
             }
             "cpuset.mems" => {
-                // Parse memory node list
+                // NUMA bellek düğümü listesini ayrıştır
                 let mut mems = Vec::new();
                 for part in value.split(',') {
                     if let Ok(mem) = part.trim().parse::<u32>() {
@@ -400,8 +444,13 @@ impl CgroupController for CpusetController {
 }
 
 // ============================================================================
-// PIDS CONTROLLER
+// PIDs DENETLEYİCİSİ
 // ============================================================================
+//
+// Fork bomb saldırılarına karşı koruma sağlar.
+// pids.max    : Cgroup içindeki maksimum süreç+iş parçacığı sayısı
+// pids.current: Şu anki süreç+iş parçacığı sayısı
+// pids.events : Sınır aşım olayları sayacı
 
 pub struct PidsController {
     pub max: AtomicI64,
@@ -417,7 +466,7 @@ pub struct PidsEvents {
 impl PidsController {
     pub fn new() -> Self {
         Self {
-            max: AtomicI64::new(-1), // -1 = no limit
+            max: AtomicI64::new(-1), // -1 = sınırsız
             current: AtomicU64::new(0),
             events: Mutex::new(PidsEvents::default()),
         }
@@ -464,7 +513,7 @@ impl CgroupController for PidsController {
     fn charge(&self, _amount: u64) -> Result<(), CgroupError> {
         let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
         let max = self.max.load(Ordering::Relaxed);
-        
+
         if max >= 0 && current > max as u64 {
             self.current.fetch_sub(1, Ordering::SeqCst);
             self.events.lock().max += 1;
@@ -479,8 +528,11 @@ impl CgroupController for PidsController {
 }
 
 // ============================================================================
-// CGROUP V2 MANAGER
+// CGROUP V2 YÖNETİCİSİ
 // ============================================================================
+//
+// Tüm cgroup hiyerarşisini yönetir: oluşturma, silme, yol eşleme.
+// `path_map` ile O(1) yol araması sağlanır.
 
 pub struct CgroupV2Manager {
     cgroups: Mutex<BTreeMap<u64, Arc<CgroupV2>>>,
@@ -501,35 +553,35 @@ impl CgroupV2Manager {
 
     pub fn init(&self) {
         let root = Arc::new(CgroupV2::new(0, "/", "root", None));
-        
-        // Add controllers
+
+        // Kök cgroup'a temel denetleyicileri ekle
         root.controllers.lock().insert(String::from("cpu"), Box::new(CpuController::new()));
         root.controllers.lock().insert(String::from("cpuset"), Box::new(CpusetController::new()));
         root.controllers.lock().insert(String::from("pids"), Box::new(PidsController::new()));
-        
+
         self.cgroups.lock().insert(0, root);
         self.path_map.lock().insert(String::from("/"), 0);
-        
-        crate::serial_println!("[CGROUPV2] Initialized cgroup v2");
+
+        crate::serial_println!("[CGROUPV2] cgroup v2 başlatıldı");
     }
 
     pub fn create(&self, parent_path: &str, name: &str) -> Result<Arc<CgroupV2>, CgroupError> {
         let parent_id = self.path_map.lock().get(parent_path).copied()
             .ok_or(CgroupError::NotFound)?;
-        
+
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let path = alloc::format!("{}/{}", parent_path.trim_end_matches('/'), name);
-        
+
         let cgroup = Arc::new(CgroupV2::new(id, &path, name, Some(parent_id)));
-        
-        // Add to parent's children
+
+        // Ebeveyn cgroup'a alt olarak ekle
         if let Some(parent) = self.cgroups.lock().get(&parent_id) {
             parent.children.lock().push(id);
         }
-        
+
         self.cgroups.lock().insert(id, cgroup.clone());
         self.path_map.lock().insert(path, id);
-        
+
         Ok(cgroup)
     }
 
@@ -544,7 +596,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TÜRÜ
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,7 +609,7 @@ pub enum CgroupError {
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init() {

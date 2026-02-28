@@ -1,7 +1,12 @@
-//! # echOS Doom Port
+//! # echOS Doom Portu
 //!
-//! DoomGeneric implementation for echOS
-//! Based on DoomGeneric by https://github.com/ozkl/doomgeneric
+//! DoomGeneric implementasyonu — echOS üzerinde çalışan Doom oyun motoru.
+//! Orijinal kaynak: https://github.com/ozkl/doomgeneric
+//!
+//! ## Doom Hakkında
+//! Doom, 1993 yılında id Software tarafından geliştirilen efsanevi FPS oyunudur.
+//! "DoomGeneric" projesi, Doom'u minimum platform bağımlılığıyla taşımanın
+//! yolunu sunar. Bu modül, echOS'a özgü grafik ve ses arka uçlarını implemente eder.
 
 use alloc::vec::Vec;
 use alloc::vec;
@@ -10,21 +15,23 @@ use alloc::boxed::Box;
 use spin::Mutex;
 
 // ============================================================================
-// DOOM CONSTANTS
+// DOOM SABİTLERİ
 // ============================================================================
 
-/// Screen width
+/// Ekran genişliği — piksel cinsinden (Doom orijinal 320x200 çözünürlük kullanır)
 pub const SCREEN_WIDTH: usize = 320;
-/// Screen height
+/// Ekran yüksekliği — piksel cinsinden
 pub const SCREEN_HEIGHT: usize = 200;
-/// Screen pitch (bytes per row)
+/// Ekran satır genişliği (pitch) — her satır için bayt sayısı (4 bayt = ARGB)
 pub const SCREEN_PITCH: usize = 320 * 4;
 
 // ============================================================================
-// DOOM TYPES
+// DOOM TÜRLERİ
 // ============================================================================
 
-/// Pixel format (ARGB)
+/// Piksel renk formatı (ARGB).
+/// A=Alpha (şeffaflık), R=Kırmızı, G=Yeşil, B=Mavi.
+/// Her kanal 8 bit (0-255).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pixel {
     pub a: u8,
@@ -37,7 +44,9 @@ impl Pixel {
     pub fn new(r: u8, g: u8, b: u8) -> Self {
         Pixel { a: 255, r, g, b }
     }
-    
+
+    /// 32-bit u32 renk değerinden Pixel oluşturur.
+    /// Bit kaydırma ile her kanalı ayıklar: AARRGGBB formatı.
     pub fn from_u32(color: u32) -> Self {
         Pixel {
             a: ((color >> 24) & 0xFF) as u8,
@@ -46,13 +55,15 @@ impl Pixel {
             b: (color & 0xFF) as u8,
         }
     }
-    
+
+    /// Pixel'i 32-bit u32 renk değerine dönüştürür.
     pub fn to_u32(&self) -> u32 {
         ((self.a as u32) << 24) | ((self.r as u32) << 16) | ((self.g as u32) << 8) | (self.b as u32)
     }
 }
 
-/// Key codes
+/// Doom tuş kodları.
+/// PS/2 klavye tarama kodlarını Doom'un anlayacağı tuş değerlerine eşler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DoomKey {
     Left,
@@ -105,7 +116,7 @@ pub enum DoomKey {
     Unknown,
 }
 
-/// Mouse buttons
+/// Fare düğmeleri.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DoomMouseButton {
     Left,
@@ -113,7 +124,8 @@ pub enum DoomMouseButton {
     Middle,
 }
 
-/// Input event
+/// Doom giriş olayı (event).
+/// Oyun motoru bu olayları işleyerek oyun durumunu günceller.
 #[derive(Clone, Debug)]
 pub enum DoomEvent {
     KeyDown(DoomKey),
@@ -125,10 +137,11 @@ pub enum DoomEvent {
 }
 
 // ============================================================================
-// DOOM FRAMEBUFFER
+// DOOM KARE TAMPONU (FRAMEBUFFER)
 // ============================================================================
 
-/// Framebuffer for Doom rendering
+/// Doom render çıktısı için kare tamponu (framebuffer).
+/// Oyun motoru, her kareyi bu tampona çizer; ardından gerçek ekrana kopyalanır.
 #[derive(Clone)]
 pub struct DoomFramebuffer {
     pub width: usize,
@@ -146,15 +159,16 @@ impl DoomFramebuffer {
             pixels: vec![0u32; SCREEN_WIDTH * SCREEN_HEIGHT],
         }
     }
-    
-    /// Set pixel at position
+
+    /// Belirtilen (x, y) konumuna renk yazar.
+    /// Sınır dışı erişim sessizce görmezden gelinir.
     pub fn set_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x < self.width && y < self.height {
             self.pixels[y * self.width + x] = color;
         }
     }
-    
-    /// Get pixel at position
+
+    /// Belirtilen (x, y) konumundaki piksel rengini döndürür.
     pub fn get_pixel(&self, x: usize, y: usize) -> u32 {
         if x < self.width && y < self.height {
             self.pixels[y * self.width + x]
@@ -162,8 +176,8 @@ impl DoomFramebuffer {
             0
         }
     }
-    
-    /// Fill rectangle
+
+    /// Belirtilen dikdörtgen bölgeyi tek bir renkle doldurur.
     pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
         for py in y..(y + h).min(self.height) {
             for px in x..(x + w).min(self.width) {
@@ -171,18 +185,19 @@ impl DoomFramebuffer {
             }
         }
     }
-    
-    /// Clear framebuffer
+
+    /// Tüm kareyi belirtilen renkle temizler.
     pub fn clear(&mut self, color: u32) {
         for pixel in &mut self.pixels {
             *pixel = color;
         }
     }
-    
-    /// Blit to screen
+
+    /// Kare tamponunu gerçek ekrana kopyalar (blit işlemi).
+    /// Gerçek uygulamada grafik alt sistemini kullanır.
     pub fn blit_to_screen(&self) {
-        // Copy framebuffer to actual screen
-        // In real implementation, this would use the graphics subsystem
+        // Kare tamponunu gerçek ekrana kopyalar.
+        // Gerçek uygulamada grafik alt sistemi kullanılır.
         for y in 0..self.height {
             for x in 0..self.width {
                 let color = self.pixels[y * self.width + x];
@@ -199,10 +214,11 @@ impl Default for DoomFramebuffer {
 }
 
 // ============================================================================
-// DOOM AUDIO
+// DOOM SESİ
 // ============================================================================
 
-/// Audio sample
+/// Doom ses tamponu.
+/// Ses örneklerini (PCM) tutar ve ses sürücüsüne iletir.
 #[derive(Clone)]
 pub struct DoomAudio {
     pub sample_rate: u32,
@@ -218,14 +234,15 @@ impl DoomAudio {
             buffer: Vec::new(),
         }
     }
-    
-    /// Play audio buffer
+
+    /// Ses tamponunu çalar.
+    /// Gerçek uygulamada ses sürücüsüne iletilir.
     pub fn play(&mut self, data: &[u8]) {
-        // In real implementation, would send to audio driver
+        // Gerçek uygulamada ses sürücüsüne gönderilir
         self.buffer = data.to_vec();
     }
-    
-    /// Stop playback
+
+    /// Sesi durdurur ve tamponu temizler.
     pub fn stop(&mut self) {
         self.buffer.clear();
     }
@@ -238,39 +255,41 @@ impl Default for DoomAudio {
 }
 
 // ============================================================================
-// DOOM ENGINE INTERFACE
+// DOOM MOTOR ARAYÜZÜ
 // ============================================================================
 
-/// Doom engine interface
-/// These functions are called by the Doom engine
+/// Doom motor arayüzü (trait).
+/// Platform arka ucu bu trait'i uygular; Doom motoru bu fonksiyonları çağırır.
+/// Bu tasarım, Doom'u herhangi bir platforma taşımayı kolaylaştırır.
 pub trait DoomEngine {
-    /// Initialize graphics
+    /// Grafik alt sistemini başlatır
     fn init_graphics(&mut self) -> bool;
-    
-    /// Draw frame
+
+    /// Bir kareyi çizer — pixels dizisi ARGB formatında piksel verileri içerir
     fn draw_frame(&mut self, pixels: &[u32]);
-    
-    /// Process events
+
+    /// Giriş olaylarını işler ve birikmiş olaylar kuyruğunu döndürür
     fn process_events(&mut self) -> Vec<DoomEvent>;
-    
-    /// Get ticks (milliseconds since start)
+
+    /// Başlangıçtan bu yana geçen süreyi milisaniye cinsinden döndürür
     fn get_ticks(&self) -> u32;
-    
-    /// Sleep for milliseconds
+
+    /// Belirtilen milisaniye kadar bekler (gecikme döngüsü)
     fn sleep(&mut self, ms: u32);
-    
-    /// Play sound
+
+    /// Belirtilen ses efektini çalar
     fn play_sound(&mut self, sound_id: u32, volume: u8);
-    
-    /// Stop sound
+
+    /// Belirtilen ses efektini durdurur
     fn stop_sound(&mut self, sound_id: u32);
 }
 
 // ============================================================================
-// ECHOS DOOM IMPLEMENTATION
+// ECHOS DOOM UYGULAMASI
 // ============================================================================
 
-/// echOS Doom implementation
+/// echOS'a özgü Doom uygulaması.
+/// DoomEngine trait'ini uygular ve echOS grafik/ses altyapısını kullanır.
 #[derive(Clone)]
 pub struct EchosDoom {
     framebuffer: DoomFramebuffer,
@@ -290,28 +309,29 @@ impl EchosDoom {
             event_queue: Vec::new(),
         }
     }
-    
-    /// Initialize Doom
+
+    /// Doom motorunu başlatır.
     pub fn init(&mut self) -> bool {
         self.start_tick = Self::get_tick_count();
         self.running = true;
-        crate::serial_println!("[DOOM] Initialized");
+        crate::serial_println!("[DOOM] Başlatıldı");
         true
     }
-    
-    /// Shutdown Doom
+
+    /// Doom motorunu kapatır.
     pub fn shutdown(&mut self) {
         self.running = false;
-        crate::serial_println!("[DOOM] Shutdown");
+        crate::serial_println!("[DOOM] Kapatıldı");
     }
-    
-    /// Run one frame
+
+    /// Bir oyun karesi işler.
+    /// Olayları kontrol eder; Quit olayı gelirse false döner.
     pub fn tick(&mut self) -> bool {
         if !self.running {
             return false;
         }
-        
-        // Process events
+
+        // Olayları işle
         let events = self.process_events();
         for event in &events {
             if matches!(event, DoomEvent::Quit) {
@@ -319,17 +339,17 @@ impl EchosDoom {
                 return false;
             }
         }
-        
+
         true
     }
-    
-    /// Get tick count (milliseconds)
+
+    /// Sistem zamanlayıcısından milisaniye cinsinden tik sayısını döndürür.
     fn get_tick_count() -> u64 {
-        // In real implementation, would use system timer
+        // Gerçek uygulamada sistem zamanlayıcısı kullanılır
         0
     }
-    
-    /// Add key event
+
+    /// Tuş olayını olay kuyruğuna ekler.
     pub fn add_key_event(&mut self, key: DoomKey, pressed: bool) {
         if pressed {
             self.event_queue.push(DoomEvent::KeyDown(key));
@@ -337,8 +357,8 @@ impl EchosDoom {
             self.event_queue.push(DoomEvent::KeyUp(key));
         }
     }
-    
-    /// Add mouse event
+
+    /// Fare olayını olay kuyruğuna ekler.
     pub fn add_mouse_event(&mut self, button: Option<DoomMouseButton>, x: i32, y: i32, pressed: bool) {
         if let Some(btn) = button {
             if pressed {
@@ -350,8 +370,8 @@ impl EchosDoom {
             self.event_queue.push(DoomEvent::MouseMove(x, y));
         }
     }
-    
-    /// Request quit
+
+    /// Oyundan çıkış isteği gönderir.
     pub fn quit(&mut self) {
         self.event_queue.push(DoomEvent::Quit);
     }
@@ -361,42 +381,42 @@ impl DoomEngine for EchosDoom {
     fn init_graphics(&mut self) -> bool {
         self.init()
     }
-    
+
     fn draw_frame(&mut self, pixels: &[u32]) {
-        // Copy pixels to framebuffer
+        // Piksel verilerini kare tamponuna kopyala
         for (i, &pixel) in pixels.iter().enumerate() {
             if i < self.framebuffer.pixels.len() {
                 self.framebuffer.pixels[i] = pixel;
             }
         }
-        
-        // Blit to screen
+
+        // Ekrana aktar
         self.framebuffer.blit_to_screen();
     }
-    
+
     fn process_events(&mut self) -> Vec<DoomEvent> {
         let events = self.event_queue.clone();
         self.event_queue.clear();
         events
     }
-    
+
     fn get_ticks(&self) -> u32 {
         (Self::get_tick_count() - self.start_tick) as u32
     }
-    
+
     fn sleep(&mut self, ms: u32) {
-        // Simple delay loop
+        // Basit spin-loop gecikme — gerçek uygulamada preemptible bekleme kullanılır
         for _ in 0..ms * 10000 {
             core::hint::spin_loop();
         }
     }
-    
+
     fn play_sound(&mut self, sound_id: u32, volume: u8) {
-        crate::serial_println!("[DOOM] Play sound {} (vol {})", sound_id, volume);
+        crate::serial_println!("[DOOM] Ses çal {} (ses seviyesi {})", sound_id, volume);
     }
-    
+
     fn stop_sound(&mut self, sound_id: u32) {
-        crate::serial_println!("[DOOM] Stop sound {}", sound_id);
+        crate::serial_println!("[DOOM] Ses durdur {}", sound_id);
     }
 }
 
@@ -407,15 +427,17 @@ impl Default for EchosDoom {
 }
 
 // ============================================================================
-// DOOMGENERIC C INTERFACE
+// DOOMGENERIC C ARAYÜZÜ
 // ============================================================================
 
-/// C-compatible callback types
+/// C uyumlu geri çağrı türleri.
+/// extern "C" garantisi ile C ABI kullanılır (calling convention uyumu için).
 pub type DrawFrameCallback = extern "C" fn(*const u32);
 pub type GetTicksCallback = extern "C" fn() -> u32;
 pub type SleepCallback = extern "C" fn(u32);
 
-/// DoomGeneric C interface
+/// DoomGeneric C arayüzü yapısı.
+/// Orijinal Doom C kodu ile köprü kurmak için kullanılır.
 #[repr(C)]
 pub struct DoomGenericCallbacks {
     pub draw_frame: DrawFrameCallback,
@@ -424,12 +446,13 @@ pub struct DoomGenericCallbacks {
 }
 
 // ============================================================================
-// GLOBAL DOOM INSTANCE
+// GLOBAL DOOM ÖRNEĞI
 // ============================================================================
 
+/// Global Doom örneği — Mutex ile çoklu iş parçacığı (multi-thread) güvencesi sağlar.
 static DOOM_INSTANCE: Mutex<Option<EchosDoom>> = Mutex::new(None);
 
-/// Initialize Doom
+/// Doom motorunu başlatır ve global örneği oluşturur.
 pub fn init_doom() -> bool {
     let mut instance = DOOM_INSTANCE.lock();
     let mut doom = EchosDoom::new();
@@ -438,19 +461,19 @@ pub fn init_doom() -> bool {
     result
 }
 
-/// Get Doom instance
+/// Global Doom örneğinin klonunu döndürür.
 pub fn get_doom() -> Option<EchosDoom> {
     DOOM_INSTANCE.lock().clone()
 }
 
-/// Draw Doom frame
+/// Global örnek üzerinden kare çizer.
 pub fn draw_doom_frame(pixels: &[u32]) {
     if let Some(ref mut doom) = *DOOM_INSTANCE.lock() {
         doom.draw_frame(pixels);
     }
 }
 
-/// Process Doom events
+/// Global örnek üzerinden olayları işler.
 pub fn process_doom_events() -> Vec<DoomEvent> {
     if let Some(ref mut doom) = *DOOM_INSTANCE.lock() {
         doom.process_events()
@@ -459,7 +482,7 @@ pub fn process_doom_events() -> Vec<DoomEvent> {
     }
 }
 
-/// Run Doom tick
+/// Global örnek üzerinden bir oyun tikini işler.
 pub fn doom_tick() -> bool {
     if let Some(ref mut doom) = *DOOM_INSTANCE.lock() {
         doom.tick()
@@ -468,7 +491,7 @@ pub fn doom_tick() -> bool {
     }
 }
 
-/// Shutdown Doom
+/// Doom motorunu kapatır ve global örneği temizler.
 pub fn shutdown_doom() {
     if let Some(ref mut doom) = *DOOM_INSTANCE.lock() {
         doom.shutdown();
@@ -476,21 +499,21 @@ pub fn shutdown_doom() {
     *DOOM_INSTANCE.lock() = None;
 }
 
-/// Add key event to Doom
+/// Global örneğe tuş olayı iletir.
 pub fn doom_key_event(key: DoomKey, pressed: bool) {
     if let Some(ref mut doom) = *DOOM_INSTANCE.lock() {
         doom.add_key_event(key, pressed);
     }
 }
 
-/// Add mouse event to Doom
+/// Global örneğe fare olayı iletir.
 pub fn doom_mouse_event(button: Option<DoomMouseButton>, x: i32, y: i32, pressed: bool) {
     if let Some(ref mut doom) = *DOOM_INSTANCE.lock() {
         doom.add_mouse_event(button, x, y, pressed);
     }
 }
 
-/// Request Doom quit
+/// Oyundan çıkış isteği gönderir.
 pub fn doom_quit() {
     if let Some(ref mut doom) = *DOOM_INSTANCE.lock() {
         doom.quit();
@@ -498,10 +521,14 @@ pub fn doom_quit() {
 }
 
 // ============================================================================
-// KEYBOARD MAPPING
+// KLAVYE EŞLEMESİ
 // ============================================================================
 
-/// Map scancode to Doom key
+/// PS/2 klavye tarama kodunu Doom tuş koduna dönüştürür.
+///
+/// Tarama kodu (scancode): PS/2 klavye kontrolcüsünden gelen ham donanım kodu.
+/// Her tuşa benzersiz bir sayı atanmıştır (IBM AT/XT standardı).
+/// Örnek: 0x01 = Escape, 0x48 = Yukarı ok.
 pub fn scancode_to_doom_key(scancode: u8) -> DoomKey {
     match scancode {
         0x01 => DoomKey::Escape,

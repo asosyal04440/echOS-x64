@@ -1,8 +1,65 @@
-//! # echOS Shell (Komut Satırı)
+//! # echOS Shell (Komut Satırı Yorumlayıcısı)
 //!
-//! Linux-level shell implementation.
-//! Pipe, redirect, job control, tab completion, globbing, history search.
-//! Scripting: variables, if/else, loops, functions, arithmetic.
+//! Linux seviyesinde shell implementasyonu.
+//! Pipe, yönlendirme (redirect), iş kontrolü (job control),
+//! tab tamamlama, glob genişletme, geçmiş arama (history search).
+//! Scripting: değişkenler, if/else, döngüler, fonksiyonlar, aritmetik.
+//!
+//! ## Shell Komut İşleme Akışı (ASCII Diyagramı)
+//!
+//! ```
+//!  Kullanıcı Tuş Girişi (klavye polling)
+//!         │
+//!         v
+//!  ┌──────────────────────────────────────────────────────────┐
+//!  │                    GapBuffer editor                      │
+//!  │  insert(c) / delete() / move_left() / move_right()      │
+//!  │  Backspace / Delete / Home / End / Arrow tuşları         │
+//!  └──────────────────────┬───────────────────────────────────┘
+//!                         │ '\n' (Enter)
+//!                         v
+//!  ┌──────────────────────────────────────────────────────────┐
+//!  │                   Shell::execute()                       │
+//!  │                                                          │
+//!  │  1. Alias expansion    (ll -> ls -la)                    │
+//!  │  2. ENV expansion      ($HOME -> /root)                  │
+//!  │  3. Glob expansion     (*.txt -> dosya1.txt dosya2.txt)  │
+//!  │  4. Tokenize           (Tokenizer::tokenize)             │
+//!  │                                                          │
+//!  │       ┌──────────────────────────────────┐              │
+//!  │       │ && veya ||  --> execute_chained() │              │
+//!  │       │ | veya >    --> execute_pipeline()│              │
+//!  │       │ Diğer       --> match parts[0]    │              │
+//!  │       └──────────────────────────────────┘              │
+//!  └──────────────────────────────────────────────────────────┘
+//!
+//!  Desteklenen Operatörler:
+//!  - |   : Pipe (cmd1 | cmd2)
+//!  - >   : Stdout yönlendirme (cmd > dosya)
+//!  - >>  : Append yönlendirme (cmd >> dosya)
+//!  - <   : Stdin yönlendirme (cmd < dosya)
+//!  - &&  : Kısa devre AND (ilk başarılıysa ikinci çalışır)
+//!  - ||  : Kısa devre OR (ilk başarısızsa ikinci çalışır)
+//!  - ;   : Sıralı çalıştırma
+//! ```
+//!
+//! ## Desteklenen Komutlar
+//!
+//! | Komut    | Açıklama                            |
+//! |----------|-------------------------------------|
+//! | help     | Komut listesi                       |
+//! | ls       | Dizin listele                       |
+//! | cat      | Dosya içeriği göster                |
+//! | ps       | Çalışan task'ları göster             |
+//! | kill     | Task sonlandır                      |
+//! | net      | Ağ bilgisi/yönetimi                 |
+//! | http     | HTTP GET/POST/download              |
+//! | wget     | URL'den dosya indir                 |
+//! | curl     | URL içeriği göster                  |
+//! | wine     | Windows PE çalıştırma               |
+//! | launch   | ELF userspace uygulaması çalıştır   |
+//! | run      | Shell script çalıştır               |
+//! | eval     | Aritmetik ifade değerlendir          |
 
 pub mod editor;
 pub mod advanced;
@@ -14,17 +71,27 @@ use alloc::vec;
 use alloc::vec::Vec;
 use editor::GapBuffer;
 
-/// Shell'i bir task olarak başlat
+/// Shell'i bir task olarak başlat.
+///
+/// echOS görev zamanlayıcısına (scheduler) Normal öncelikli yeni bir task
+/// olarak ekler. Shell, scheduler döngüsünde kendi CPU zamanını alır.
 pub fn spawn_shell_task() {
     crate::task::scheduler::spawn_with_priority(shell_entry, crate::task::task::Priority::Normal, "shell");
 }
 
-/// Shell'i doğrudan çalıştır (blocking - scheduler olmadan)
+/// Shell'i doğrudan çalıştırır (blocking - scheduler olmadan).
+///
+/// Bu fonksiyon dönmez (`-> !`). Kernel init akışında hem GUI desktop
+/// hem de TTY shell dönemine göre bu fonksiyon çağrılabilir.
 pub fn run_shell() -> ! {
     shell_entry()
 }
 
-/// Hem serial hem de framebuffer'a yaz
+/// Hem serial porta hem de framebuffer terminaline metin yazar.
+///
+/// Shell çıktısı iki yere gider:
+/// 1. Framebuffer: UEFI GOP aracılığıyla ekrandaki metin terminali
+/// 2. Serial (COM1): QEMU -serial stdio ile host terminali
 fn print(s: &str) {
     // Framebuffer'a yaz
     crate::boot::term_print(s);
@@ -32,13 +99,19 @@ fn print(s: &str) {
     crate::serial_print!("{}", s);
 }
 
-/// Hem serial hem de framebuffer'a satır yaz
+/// Hem serial porta hem de framebuffer terminaline satır sonu ile yazar.
+///
+/// `print(s)` ardından `print("\n")` çağırır.
 fn println(s: &str) {
     print(s);
     print("\n");
 }
 
-/// Ekranı temizle
+/// Ekranı temizler.
+///
+/// - Framebuffer: `term_clear()` ile tüm pikseller silinir
+/// - Serial terminal: `\x1b[2J\x1b[H` ANSI kaçış dizisi ile
+///   ekran temizlenir ve cursor üst sola taşınır
 fn clear_screen() {
     // Framebuffer'ı temizle
     crate::boot::term_clear();
@@ -46,13 +119,21 @@ fn clear_screen() {
     crate::serial_print!("\x1b[2J\x1b[H");
 }
 
-/// Shell task entry point
+/// Shell task giriş noktası (entry point).
+///
+/// Bu fonksiyon `-> !` tipindedir, yani asla dönmez.
+/// Sonsuz döngüde:
+/// 1. Prompt yazdır ("echOS$ ")
+/// 2. Klavyeden karakter oku (polling)
+/// 3. Enter'a basılınca komutu çalıştır
+/// 4. Sonucu ekrana yazdır
+/// 5. Tekrar prompt'a dön
 fn shell_entry() -> ! {
     crate::serial_println!("[SHELL] Starting interactive shell...");
-    
+
     // Ekranı temizle
     clear_screen();
-    
+
     // Banner
     println("╔════════════════════════════════════════════════════════════╗");
     println("║                    echOS v0.3.0                            ║");
@@ -61,13 +142,13 @@ fn shell_entry() -> ! {
     println("");
     println("Type 'help' for available commands.");
     println("");
-    
+
     let mut shell = Shell::new();
     let prompt = "echOS$ ";
-    
+
     loop {
         print(prompt);
-        
+
         // Basit input loop - klavye polling
         loop {
             // Klavyeden karakter oku
@@ -123,7 +204,7 @@ fn shell_entry() -> ! {
                             let cursor_pos = shell.editor.cursor_pos();
                             let completer = advanced::Completer::new();
                             let completions = completer.complete(&input, cursor_pos);
-                            
+
                             if completions.len() == 1 {
                                 // Tek eşleşme - tamamla
                                 let completion = &completions[0];
@@ -192,7 +273,7 @@ fn shell_entry() -> ! {
                                         print("\x1b[D");
                                     }
                                     print("\x1b[K");
-                                    
+
                                     // History'den gelen komutu yaz
                                     shell.editor = GapBuffer::new(64);
                                     for c in hist_cmd.chars() {
@@ -210,7 +291,7 @@ fn shell_entry() -> ! {
                                         print("\x1b[D");
                                     }
                                     print("\x1b[K");
-                                    
+
                                     // History'den gelen komutu yaz
                                     shell.editor = GapBuffer::new(64);
                                     for c in hist_cmd.chars() {
@@ -255,7 +336,7 @@ fn shell_entry() -> ! {
                     }
                 }
             }
-            
+
             // Kısa bekleme - CPU'yu yormamak için
             // NOT: schedule() çağrısı PAGE FAULT'a neden olabiliyor
             for _ in 0..1000 {
@@ -265,16 +346,21 @@ fn shell_entry() -> ! {
     }
 }
 
-/// Komut satırı shell yapısı
+/// Komut satırı shell yapısı.
+///
+/// Shell'in durumunu tutar: `GapBuffer` satır editörü ve komut geçmişi.
 pub struct Shell {
-    /// Metin düzenleme için gap buffer
+    /// Metin düzenleme için gap buffer (O(1) cursor pozisyonunda ekleme/silme)
     editor: GapBuffer,
-    /// Komut geçmişi
+    /// Komut geçmişi (her session için tutulur)
     history: Vec<String>,
 }
 
 impl Shell {
     /// Yeni bir shell instance oluşturur.
+    ///
+    /// 64 karakter kapasiteli gap buffer ile başlar.
+    /// Buffer dolunca `grow()` ile otomatik genişler.
     pub fn new() -> Self {
         Self {
             editor: GapBuffer::new(64),
@@ -283,6 +369,9 @@ impl Shell {
     }
 
     /// Klavye tuşunu işler.
+    ///
+    /// Unicode karakterler editöre eklenir; RawKey'ler
+    /// (ArrowLeft/Right/Up/Down) cursor hareketi için kullanılır.
     pub fn handle_key(&mut self, key: pc_keyboard::DecodedKey) {
         use pc_keyboard::DecodedKey;
         match key {
@@ -306,7 +395,22 @@ impl Shell {
         }
     }
 
-    /// Mevcut komutu çalıştırır ve sonucu döndürür.
+    /// Mevcut komutu çalıştırır ve çıktıyı `Option<String>` olarak döndürür.
+    ///
+    /// ## İşleme Sırası
+    ///
+    /// 1. Editor'dan komut satırını al (`to_string()`)
+    /// 2. Editor'ı sıfırla (yeni prompt için hazırla)
+    /// 3. Boş satır kontrolü — boşsa `None` döndür
+    /// 4. **Alias expansion**: `ll` → `ls -la` gibi kısaltmaları genişlet
+    /// 5. **ENV expansion**: `$HOME` → `/root` gibi değişkenleri yerleştir
+    /// 6. **Glob expansion**: `*.txt` → eşleşen dosya adlarını yerleştir
+    /// 7. **Tokenize**: Tokenizer ile kelimelere/operatörlere böl
+    /// 8. **Chained execution**: `&&`, `||` varsa `execute_chained()`
+    /// 9. **Pipeline**: `|` veya `>` varsa `execute_pipeline()`
+    /// 10. **Built-in**: `match parts[0]` ile doğrudan çalıştır
+    ///
+    /// Özel dönüş değeri: `Some("__CLEAR__")` ekranın temizlenmesi gerektiğini bildirir.
     pub fn execute(&mut self) -> Option<String> {
         let cmd_line = self.editor.to_string();
 
@@ -325,31 +429,31 @@ impl Shell {
 
         // Alias expansion
         let expanded_cmd = advanced::ALIASES.expand_line(trimmed);
-        
+
         // Environment variable expansion ($VAR)
         let expanded_cmd = advanced::ENV.expand(&expanded_cmd);
-        
+
         // Glob expansion (*.txt, etc.)
         let expanded_cmd = expand_globs(&expanded_cmd);
-        
+
         // Parse for pipes and redirects
         let tokens = advanced::Tokenizer::tokenize(&expanded_cmd);
-        
+
         // Check for && || chaining
         let has_and = tokens.iter().any(|t| *t == advanced::Token::And);
         let has_or = tokens.iter().any(|t| *t == advanced::Token::Or);
-        
+
         if has_and || has_or {
             return execute_chained(&tokens);
         }
-        
+
         // Check for pipe/redirect operators
         let has_pipe = tokens.iter().any(|t| *t == advanced::Token::Pipe);
-        let has_redirect = tokens.iter().any(|t| matches!(t, 
-            advanced::Token::RedirectOut | 
-            advanced::Token::RedirectAppend | 
+        let has_redirect = tokens.iter().any(|t| matches!(t,
+            advanced::Token::RedirectOut |
+            advanced::Token::RedirectAppend |
             advanced::Token::RedirectIn));
-        
+
         if has_pipe || has_redirect {
             // Parse as pipeline
             if let Ok(pipelines) = advanced::Parser::parse(tokens) {
@@ -724,14 +828,14 @@ impl Shell {
                 } else {
                     (parts[1], parts[2])
                 };
-                
+
                 let link_path = link.trim_start_matches('/');
                 let (parent, name) = if let Some(pos) = link_path.rfind('/') {
                     (&link_path[..pos], &link_path[pos + 1..])
                 } else {
                     ("", link_path)
                 };
-                
+
                 if is_symlink {
                     match crate::fs::f2fs::create_symlink(&format!("/{}", parent), name, target) {
                         Ok(()) => Some(format!("ln -s: {} -> {}", link, target)),
@@ -1025,12 +1129,17 @@ impl Shell {
     }
 
     /// Mevcut input satırını döndürür.
+    ///
+    /// GUI terminal köprüsü veya test kodu için kullanılabilir.
     pub fn get_input_line(&self) -> String {
         self.editor.to_string()
     }
 }
 
-/// FAT32 üzerinden ELF dosyasını yükler ve Ring 3'e geçirir.
+/// FAT32 üzerinden ELF dosyasını yükler ve Ring 3'e (kullanıcı alanına) geçirir.
+///
+/// ELF ikili dosyası VFS üzerinden okunur, ardından `enter_user_elf_from_image()`
+/// ile kernel'den kullanıcı alanına geçiş yapılır.
 fn load_and_run_elf(path: &str) -> Result<(), String> {
     let data = load_file(path)?;
     if data.is_empty() {
@@ -1041,6 +1150,14 @@ fn load_and_run_elf(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// VFS üzerinden dosya okur ve içeriği `Vec<u8>` olarak döndürür.
+///
+/// ## Okuma Algoritması
+///
+/// 1. `vfs_open_inode(path)` — inode handle'ı al
+/// 2. `vfs_inode_metadata()` — dosya boyutunu öğren
+/// 3. `vfs_read_at()` — loop ile tüm dosyayı oku (partial read desteği)
+/// 4. Okunan byte sayısına `truncate()` uygula
 fn load_file(path: &str) -> Result<Vec<u8>, String> {
     let inode = crate::fs::vfs_open_inode(path).map_err(|_| String::from("Dosya bulunamadi"))?;
     let size = crate::fs::vfs_inode_metadata(&inode)
@@ -1060,6 +1177,11 @@ fn load_file(path: &str) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
+/// Dizin içeriğini listeler ve formatlanmış metin döndürür.
+///
+/// Dizin girişleri:
+/// - Dizinler: `isim/` formatında
+/// - Dosyalar: `isim (boyut)` formatında
 fn list_directory(path: Option<&str>) -> Result<String, String> {
     let path_value = match path {
         None => "/",
@@ -1082,6 +1204,10 @@ fn list_directory(path: Option<&str>) -> Result<String, String> {
     Ok(out.trim_end_matches('\n').to_string())
 }
 
+/// Wine/Proton Windows runtime komutlarını işler.
+///
+/// Alt komutlar: `set`, `list`, `use`, `status`, `run`, `info`, `sections`, `plan`
+/// Her alt komut, echOS POSIX/Wine katmanı ile iletişim kurar.
 fn handle_wine_command(kind: crate::posix::WineRuntimeKind, parts: &[&str]) -> Option<String> {
     let label = match kind {
         crate::posix::WineRuntimeKind::Wine => "wine",
@@ -1293,6 +1419,9 @@ fn handle_wine_command(kind: crate::posix::WineRuntimeKind, parts: &[&str]) -> O
     }
 }
 
+/// Linux cihaz ve sürücü yönetim komutlarını işler.
+///
+/// Alt komutlar: `status`, `devices`, `drivers`
 fn handle_linux_command(parts: &[&str]) -> Option<String> {
     if parts.len() < 2 {
         return Some(String::from(
@@ -1357,12 +1486,16 @@ fn handle_linux_command(parts: &[&str]) -> Option<String> {
 // GLOB EXPANSION
 // ============================================================================
 
-/// Glob pattern'larını expand eder (*.txt -> file1.txt file2.txt)
+/// Glob pattern'larını expand eder (*.txt -> file1.txt file2.txt).
+///
+/// Her kelimeyi tarara: `*`, `?`, `[` karakteri içeriyorsa
+/// `expand_glob_pattern()` ile dosya sistemi üzerinde eşleşme arar.
+/// Boşluk ve tab karakterleri kelime sınırı olarak kullanılır.
 fn expand_globs(input: &str) -> String {
     let mut result = String::new();
     let mut in_word = false;
     let mut current_word = String::new();
-    
+
     for c in input.chars() {
         if c == ' ' || c == '\t' {
             if in_word {
@@ -1383,7 +1516,7 @@ fn expand_globs(input: &str) -> String {
             current_word.push(c);
         }
     }
-    
+
     // Son kelime
     if !current_word.is_empty() {
         if current_word.contains('*') || current_word.contains('?') || current_word.contains('[') {
@@ -1393,25 +1526,28 @@ fn expand_globs(input: &str) -> String {
             result.push_str(&current_word);
         }
     }
-    
+
     result
 }
 
-/// Tek glob pattern'ini expand eder
+/// Tek bir glob pattern'ini dosya sistemi üzerinde expand eder.
+///
+/// `/` kök dizinindeki dosya listesine karşı `advanced::Glob::expand()` çağrılır.
+/// Eşleşme yoksa orijinal pattern döndürülür (bash davranışı).
 fn expand_glob_pattern(pattern: &str) -> String {
     // Dosya listesini al
     let files: Vec<String> = if let Ok(entries) = crate::fs::f2fs::list_dir("/") {
         entries.iter().map(|e| e.name.clone()).collect()
     } else {
         // Fallback mock data
-        vec!["bin".to_string(), "boot".to_string(), "dev".to_string(), 
+        vec!["bin".to_string(), "boot".to_string(), "dev".to_string(),
              "etc".to_string(), "home".to_string(), "lib".to_string()]
     };
-    
+
     // Glob ile match et
     let file_refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
     let matches = advanced::Glob::expand(pattern, &file_refs);
-    
+
     if matches.is_empty() {
         pattern.to_string()
     } else {
@@ -1423,13 +1559,23 @@ fn expand_glob_pattern(pattern: &str) -> String {
 // CHAINED COMMAND EXECUTION (&& ||)
 // ============================================================================
 
-/// && ve || ile zincirlenmiş komutları çalıştırır
+/// `&&` ve `||` ile zincirlenmiş komutları çalıştırır.
+///
+/// ## Zincir Mantığı
+///
+/// ```
+///  cmd1 && cmd2    cmd1 başarılıysa cmd2 çalışır
+///  cmd1 || cmd2    cmd1 başarısızsa cmd2 çalışır
+///  cmd1 ; cmd2     cmd1'in sonucuna bakmaksızın cmd2 çalışır
+/// ```
+///
+/// Başarı/Başarısızlık belirleme: Çıktı "hata" veya "Hata" içeriyorsa başarısız sayılır.
 fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
     let mut current_cmd: Vec<String> = Vec::new();
     let mut last_success = true;  // İlk komut her zaman çalışır
     let mut last_output: Option<String> = None;
     let mut i = 0;
-    
+
     while i < tokens.len() {
         match &tokens[i] {
             advanced::Token::Word(word) => {
@@ -1443,7 +1589,7 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
                     last_success = last_output.is_none() || !last_output.as_ref().map(|o| o.contains("hata") || o.contains("Hata")).unwrap_or(false);
                 }
                 current_cmd.clear();
-                
+
                 if !last_success {
                     // Başarısız - geri kalanı atla (sonraki ||'ya kadar)
                     while i + 1 < tokens.len() {
@@ -1468,7 +1614,7 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
                     last_success = last_output.is_none() || !last_output.as_ref().map(|o| o.contains("hata") || o.contains("Hata")).unwrap_or(false);
                 }
                 current_cmd.clear();
-                
+
                 if last_success {
                     // Başarılı - geri kalanı atla (sonraki &&'e kadar)
                     while i + 1 < tokens.len() {
@@ -1492,13 +1638,13 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
         }
         i += 1;
     }
-    
+
     // Son komutu çalıştır
     if !current_cmd.is_empty() {
         let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
         last_output = execute_builtin(&args, None);
     }
-    
+
     last_output
 }
 
@@ -1506,29 +1652,44 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
 // PIPELINE EXECUTION
 // ============================================================================
 
-/// Pipeline'ı çalıştırır (cmd1 | cmd2 | cmd3)
+/// Pipeline'ı çalıştırır (`cmd1 | cmd2 | cmd3`).
+///
+/// ## Mevcut Implementasyon
+///
+/// Komutlar sıralı olarak çalıştırılır; her komutun çıktısı
+/// sonraki komutun `stdin`'i olarak geçirilir.
+///
+/// Gerçek Unix pipe'ında her süreç paralel çalışır ve kernel
+/// `pipe()` syscall'ı ile aralarında tampon sağlar. Bu implementasyon
+/// daha basit ama fonksiyonel bir yaklaşım kullanır.
+///
+/// ## Yönlendirme (Redirect)
+///
+/// `cmd.redirects` içindeki her `Redirect` işlenir:
+/// - `Stdout` / `StdoutAppend`: Çıktı dosyaya yazılır (TODO)
+/// - `Stdin`: Girdi dosyadan okunur (TODO)
 fn execute_pipeline(pipeline: &advanced::Pipeline) -> Option<String> {
     if pipeline.commands.is_empty() {
         return None;
     }
-    
+
     // Basit implementation: her komutu sırayla çalıştır
     // Gerçek pipe için process'ler arası IPC gerekli
     let mut last_output: Option<String> = None;
-    
+
     for (i, cmd) in pipeline.commands.iter().enumerate() {
         let args: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
-        
+
         // Redirect'leri işle
         let _redirects = &cmd.redirects;
-        
+
         if args.is_empty() {
             continue;
         }
-        
+
         // Komutu çalıştır
         let output = execute_builtin(&args, last_output.as_deref());
-        
+
         // Redirect varsa dosyaya yaz
         for redirect in &cmd.redirects {
             match redirect.kind {
@@ -1544,22 +1705,26 @@ fn execute_pipeline(pipeline: &advanced::Pipeline) -> Option<String> {
                 }
             }
         }
-        
+
         last_output = output;
     }
-    
+
     last_output
 }
 
-/// Built-in komut çalıştırır
+/// Pipe pipeline'ında kullanılabilen built-in komutları çalıştırır.
+///
+/// `stdin` parametresi önceki komutun çıktısıdır (pipe için).
+/// `echo`, `cat`, `ls`, `wc`, `grep`, `sort`, `uniq`, `head`, `tail`
+/// komutları `stdin` girişini destekler.
 fn execute_builtin(args: &[&str], stdin: Option<&str>) -> Option<String> {
     if args.is_empty() {
         return None;
     }
-    
+
     // stdin varsa echo'ya geçir
     let input = stdin.unwrap_or("");
-    
+
     match args[0] {
         "echo" => {
             let mut out = args[1..].join(" ");
@@ -1653,15 +1818,25 @@ fn execute_builtin(args: &[&str], stdin: Option<&str>) -> Option<String> {
 // ANSI COLOR SUPPORT
 // ============================================================================
 
-/// ANSI renk kodları
+/// ANSI renk ve biçimlendirme kaçış kodları.
+///
+/// Bu kodlar VT100/ANSI terminal standardına uygundur.
+/// `\x1b[` ile başlar, rakam kodu ile biter (örn. `\x1b[31m` = kırmızı).
+///
+/// Örnek kullanım: `format!("{}Hata: {}{}", colors::RED, msg, colors::RESET)`
 pub mod colors {
+    /// Tüm biçimlendirmeyi sıfırla
     pub const RESET: &str = "\x1b[0m";
+    /// Kalın (bold) metin
     pub const BOLD: &str = "\x1b[1m";
+    /// Soluk (dim) metin
     pub const DIM: &str = "\x1b[2m";
+    /// İtalik metin
     pub const ITALIC: &str = "\x1b[3m";
+    /// Altı çizili metin
     pub const UNDERLINE: &str = "\x1b[4m";
-    
-    // Foreground colors
+
+    // Foreground colors (ön plan renkleri)
     pub const BLACK: &str = "\x1b[30m";
     pub const RED: &str = "\x1b[31m";
     pub const GREEN: &str = "\x1b[32m";
@@ -1670,8 +1845,8 @@ pub mod colors {
     pub const MAGENTA: &str = "\x1b[35m";
     pub const CYAN: &str = "\x1b[36m";
     pub const WHITE: &str = "\x1b[37m";
-    
-    // Bright foreground colors
+
+    // Bright foreground colors (parlak ön plan renkleri)
     pub const BRIGHT_BLACK: &str = "\x1b[90m";
     pub const BRIGHT_RED: &str = "\x1b[91m";
     pub const BRIGHT_GREEN: &str = "\x1b[92m";
@@ -1680,8 +1855,8 @@ pub mod colors {
     pub const BRIGHT_MAGENTA: &str = "\x1b[95m";
     pub const BRIGHT_CYAN: &str = "\x1b[96m";
     pub const BRIGHT_WHITE: &str = "\x1b[97m";
-    
-    // Background colors
+
+    // Background colors (arka plan renkleri)
     pub const BG_BLACK: &str = "\x1b[40m";
     pub const BG_RED: &str = "\x1b[41m";
     pub const BG_GREEN: &str = "\x1b[42m";
@@ -1692,27 +1867,29 @@ pub mod colors {
     pub const BG_WHITE: &str = "\x1b[47m";
 }
 
-/// Renkli prompt
+/// Renkli prompt oluşturur: `echOS$ ` (yeşil renkte).
+///
+/// `BRIGHT_GREEN` + "echOS" + `RESET` + "$ " formatında çıktı üretir.
 fn colored_prompt() -> String {
     format!("{}echOS{}$ ", colors::BRIGHT_GREEN, colors::RESET)
 }
 
-/// Hata mesajı (kırmızı)
+/// Kırmızı renkte hata mesajı formatlar.
 pub fn error_msg(msg: &str) -> String {
     format!("{}{}{}", colors::RED, msg, colors::RESET)
 }
 
-/// Başarı mesajı (yeşil)
+/// Yeşil renkte başarı mesajı formatlar.
 pub fn success_msg(msg: &str) -> String {
     format!("{}{}{}", colors::GREEN, msg, colors::RESET)
 }
 
-/// Uyarı mesajı (sarı)
+/// Sarı renkte uyarı mesajı formatlar.
 pub fn warning_msg(msg: &str) -> String {
     format!("{}{}{}", colors::YELLOW, msg, colors::RESET)
 }
 
-/// Bilgi mesajı (mavi)
+/// Cyan renkte bilgi mesajı formatlar.
 pub fn info_msg(msg: &str) -> String {
     format!("{}{}{}", colors::CYAN, msg, colors::RESET)
 }
@@ -1727,6 +1904,12 @@ pub fn info_msg(msg: &str) -> String {
 /// geçirir ve çıktıyı `Option<String>` olarak döndürür.
 /// `"__CLEAR__"` özel çıktısı terminali temizle anlamına gelir.
 ///
+/// ## Kullanım
+///
+/// GUI terminal widget'ı Enter'a basıldığında bu fonksiyonu çağırır.
+/// Shell'in iç durumunu (history, variables, aliases) paylaşmaz —
+/// her çağrıda yeni bir `Shell` instance'ı oluşturulur.
+///
 /// # Örnek
 /// ```rust
 /// let out = crate::shell::run_command("ls /");
@@ -1738,3 +1921,4 @@ pub fn run_command(cmd_line: &str) -> Option<String> {
     }
     s.execute()
 }
+

@@ -1,7 +1,7 @@
-//! # echOS Win32 API Emulation
+//! # Win32 API Öykünme Katmanı
 //!
-//! Windows API emulation layer for running Windows binaries
-//! Implements common Win32 APIs: kernel32, user32, gdi32
+//! Windows uygulamalarını echOS üzerinde çalıştırmak için Win32 API öykünmesi.
+//! `kernel32`, `user32` ve `gdi32` gibi yaygın Win32 API'lerini uygular.
 
 use alloc::vec::Vec;
 use alloc::vec;

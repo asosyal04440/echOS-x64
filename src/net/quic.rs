@@ -1,10 +1,90 @@
-//! # QUIC Protocol Implementation
+//! # QUIC Protokolü (RFC 9000)
 //!
-//! HTTP/3 foundation with:
-//! - UDP-based transport
-//! - Encrypted packets (TLS 1.3)
-//! - Stream multiplexing
-//! - Loss recovery and congestion control
+//! HTTP/3'ün taşıma katmanı: UDP tabanlı, TLS 1.3 ile şifreli, çok akışlı (multiplexed)
+//! ve bağlantı geçişi destekleyen modern aktarım protokolü.
+//!
+//! ## QUIC Nedir?
+//!
+//! QUIC, TCP'nin sınırlılıklarını aşmak için Google tarafından geliştirilen ve
+//! IETF tarafından RFC 9000 ile standartlaştırılan aktarım protokolüdür.
+//!
+//! ## TCP vs QUIC Karşılaştırması
+//!
+//! ```
+//!  TCP + TLS 1.3:                QUIC (v1):
+//!  ─────────────────────────     ────────────────────────
+//!  TCP SYN                  →    Initial (ClientHello)
+//!  TCP SYN-ACK              ←    Initial + Handshake
+//!  TCP ACK                  →
+//!  TLS ClientHello          →    (tek RTT el sıkışma) ←────────────┐
+//!  TLS ServerHello          ←                                       │
+//!  TLS Finished(C+S)        →←   1-RTT ile bağlantı kurulur        │
+//!                                0-RTT ile HEMEN veri gönderilebilir │
+//!  Toplam: 2 RTT             Toplam: 1 RTT (0-RTT: 0)──────────────┘
+//! ```
+//!
+//! ## QUIC Paket Yapısı
+//!
+//! ```
+//!  Uzun Başlık (Long Header) - el sıkışma paketleri için:
+//!  ┌───────────────────────────────────────────────────────────┐
+//!  │ Bit7=1  │ PacketType(2b) │ Reserved(2b) │ PacketNumLen(2b)│
+//!  │         (1 byte ilk byte)                                  │
+//!  ├───────────────────────────────────────────────────────────┤
+//!  │ Version (4 byte, big-endian)                              │
+//!  ├───────────────────────────────────────────────────────────┤
+//!  │ DCID Length (1 byte) │ DCID (0-20 byte)                  │
+//!  ├───────────────────────────────────────────────────────────┤
+//!  │ SCID Length (1 byte) │ SCID (0-20 byte)                  │
+//!  ├───────────────────────────────────────────────────────────┤
+//!  │ Token Length (varint) │ Token (değişken)  [Initial only] │
+//!  ├───────────────────────────────────────────────────────────┤
+//!  │ Length (varint) │ Packet Number (1-4 byte, korumalı)     │
+//!  ├───────────────────────────────────────────────────────────┤
+//!  │ AEAD-şifreli payload (QUIC Frame'ler) + 16-byte AEAD tag │
+//!  └───────────────────────────────────────────────────────────┘
+//!
+//!  Kısa Başlık (Short Header) - veri paketleri için (1-RTT):
+//!  ┌───────────────────────────────────────────┐
+//!  │ Bit7=0 │ SpinBit │ R │ KeyPhase │ PNLen  │
+//!  ├───────────────────────────────────────────┤
+//!  │ DCID (sabit uzunluk, bağlantıya göre)    │
+//!  ├───────────────────────────────────────────┤
+//!  │ Packet Number (1-4 byte, korumalı)        │
+//!  ├───────────────────────────────────────────┤
+//!  │ AEAD-şifreli payload + 16-byte AEAD tag   │
+//!  └───────────────────────────────────────────┘
+//! ```
+//!
+//! ## Stream Çoklama (Multiplexing)
+//!
+//! ```
+//!  Tek QUIC bağlantısı    ->  Birden fazla bağımsız akış (stream)
+//!
+//!  Stream 0 (biDi, client): HTTP/3 isteği 1
+//!  Stream 4 (biDi, client): HTTP/3 isteği 2
+//!  Stream 8 (biDi, client): HTTP/3 isteği 3
+//!
+//!  TCP'de bir paketin kaybolması TÜM akışları durdurur (HOL blocking).
+//!  QUIC'te kayıp sadece ilgili akışı etkiler, diğerleri devam eder.
+//! ```
+//!
+//! ## Bağlantı Geçişi (Connection Migration)
+//!
+//! ```
+//!  Mobil cihaz WiFi -> 4G geçişi:
+//!  TCP: bağlantı kesilir, yeniden kurulur (2 RTT)
+//!  QUIC: Connection ID değişmez, bağlantı sürer (0 RTT)
+//! ```
+//!
+//! ## QUIC Şifreleme Seviyeleri
+//!
+//! ```
+//!  Initial    │ HKDF'den türetilen sabit tuz ile şifrelenir
+//!  Handshake  │ TLS 1.3 Handshake Secret ile şifrelenir
+//!  1-RTT      │ TLS 1.3 Application Traffic Secret ile şifrelenir
+//!  0-RTT      │ Önceki bağlantıdan PSK ile şifrelenir
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -15,86 +95,145 @@ use spin::Mutex;
 use super::tls::{X25519, AesGcm, ChaCha20Poly1305, CipherSuite};
 
 // ============================================================================
-// QUIC CONSTANTS
+// QUIC SABİTLERİ
 // ============================================================================
 
-/// QUIC version 1
+/// QUIC sürüm 1 (RFC 9000). Paket başlığında version alanına yazılır.
+/// Sürüm müzakeresi (Version Negotiation) için 0x00000000 kullanılır.
 pub const QUIC_VERSION_1: u32 = 0x00000001;
 
-/// QUIC packet types
+/// QUIC paket tipleri (uzun başlık için).
+/// Her tip farklı bağlantı kurulumu aşamasına karşılık gelir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuicPacketType {
+    /// El sıkışmanın ilk paketi. TLS ClientHello burada taşınır.
     Initial = 0x00,
+    /// 0-RTT verisi: önceki oturumun TLS bilgileriyle şifreli veri.
     ZeroRTT = 0x01,
+    /// TLS el sıkışmasının devam paketi (Handshake aşaması).
     Handshake = 0x02,
+    /// Sunucu yeniden deneme paketi: token gönderir (DDoS koruması).
     Retry = 0x03,
-    OneRTT = 0x40,  // Short header
+    /// 1-RTT veri paketi: kısa başlık, tam uygulama verisi.
+    OneRTT = 0x40,
 }
 
-/// QUIC frame types
+/// QUIC frame (çerçeve) tipleri.
+/// Her frame tipi farklı bir kontrol veya veri işlemi gerçekleştirir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuicFrameType {
+    /// Boş dolgu: paket boyutunu arttırmak veya PMTU keşfi için.
     Padding = 0x00,
+    /// Canlılık denetimi: ACK-eliciting (karşı taraftan ACK bekler).
     Ping = 0x01,
+    /// Alındı onayı (ACK): hangi paketlerin alındığını bildirir.
     Ack = 0x02,
+    /// Explicit Congestion Notification (ECN) ile ACK.
     AckEcn = 0x03,
+    /// Akışı sıfırla: gönderme tarafı akıştan vazgeçiyor.
     ResetStream = 0x04,
+    /// Akış verisini durdur: alma tarafı veri istemiyor.
     StopSending = 0x05,
+    /// TLS kriptografik handshake verisi taşır.
     Crypto = 0x06,
+    /// Sunucu yeni bir token sağlar (gelecekteki 0-RTT için).
     NewToken = 0x07,
+    /// Uygulama verisi: akış ID + offset + FIN bayrağı + veri.
     Stream = 0x08,
+    /// Bağlantı düzeyinde akış kontrolü: toplam veri sınırı.
     MaxData = 0x10,
+    /// Akış düzeyinde akış kontrolü: tek akış veri sınırı.
     MaxStreamData = 0x11,
+    /// Maksimum eş zamanlı akış sayısını arttır.
     MaxStreams = 0x12,
+    /// Gönderici veri göndermek istiyor ama sınıra takıldı.
     DataBlocked = 0x14,
+    /// Akış bazında veri engeli bildirimi.
     StreamDataBlocked = 0x15,
+    /// Yeni akış açılamıyor, limit doldu.
     StreamsBlocked = 0x16,
+    /// Yeni bir Connection ID tanıt (geçiş için).
     NewConnectionId = 0x18,
+    /// Eski bir Connection ID'yi kullanımdan kaldır.
     RetireConnectionId = 0x19,
+    /// Yol doğrulama meydan okuması (8-byte rastgele veri).
     PathChallenge = 0x1A,
+    /// Yol doğrulama yanıtı.
     PathResponse = 0x1B,
+    /// Bağlantıyı kapat (protokol hatası).
     ConnectionClose = 0x1C,
+    /// Bağlantıyı kapat (uygulama hatası).
     ConnectionCloseApp = 0x1D,
+    /// El sıkışmanın tamamlandığını bildir (sunucudan istemciye).
     HandshakeDone = 0x1E,
 }
 
-/// QUIC transport error codes
+/// QUIC taşıma katmanı hata kodları (RFC 9000, Bölüm 20.1).
+/// ConnectionClose frame'inde error_code alanına yazılır.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuicError {
+    /// Hata yok; bağlantı temiz kapatıldı.
     NoError = 0x00,
+    /// Uygulama içi beklenmedik bir hata.
     InternalError = 0x01,
+    /// Sunucu bağlantıyı reddetti.
     ConnectionRefused = 0x02,
+    /// Akış kontrolü sınırı aşıldı.
     FlowControlError = 0x03,
+    /// Maksimum akış sayısı aşıldı.
     StreamLimitError = 0x04,
+    /// Akış yanlış durumda veri aldı/gönderdi.
     StreamStateError = 0x05,
+    /// RESET_STREAM sonrası gelen veri boyutu uyuşmuyor.
     FinalSizeError = 0x06,
+    /// Frame kodlaması hatalı veya bilinmiyor.
     FrameEncodingError = 0x07,
+    /// Taşıma parametresi geçersiz.
     TransportParameterError = 0x08,
+    /// Connection ID limiti aşıldı.
     ConnectionIdLimitError = 0x09,
+    /// Protokol ihlali.
     ProtocolViolation = 0x0A,
+    /// Retry token geçersiz.
     InvalidToken = 0x0B,
+    /// Uygulama tanımlı hata.
     ApplicationError = 0x0C,
+    /// Şifreleme tamponu sınırı aşıldı.
     CryptoBufferExceeded = 0x0D,
+    /// Anahtar güncelleme hatası.
     KeyUpdateError = 0x0E,
+    /// AEAD kullanım limiti doldu (anahtar yenileme gerekli).
     AeadLimitReached = 0x0F,
+    /// Kullanılabilir ağ yolu yok.
     NoViablePath = 0x10,
 }
 
 // ============================================================================
-// QUIC CONNECTION ID
+// QUIC BAĞLANTI KİMLİĞİ (Connection ID)
 // ============================================================================
+//
+// Connection ID, bir QUIC bağlantısını tanımlayan değişken uzunluklu (0-20 byte)
+// alandır. TCP'nin (kaynak IP, kaynak port, hedef IP, hedef port) dörtlüsünün
+// aksine, QUIC bağlantısı IP adresi değişse bile aynı Connection ID üzerinden
+// devam edebilir (bağlantı geçişi / connection migration).
 
-/// QUIC Connection ID (variable length, max 20 bytes)
+/// QUIC bağlantı kimliği (değişken uzunluk, maksimum 20 byte).
+/// Paket başlığındaki DCID (Destination CID) ve SCID (Source CID) alanları
+/// bu yapı ile temsil edilir.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectionId {
+    /// Bağlantı kimliği verisi (ham byte dizisi).
     pub data: Vec<u8>,
 }
 
 impl ConnectionId {
+    /// Varolan veriden bir Connection ID oluşturur.
     pub fn new(data: Vec<u8>) -> Self {
         ConnectionId { data }
     }
-    
+
+    /// Kriptografik olarak güçlü rastgele byte'lardan Connection ID üretir.
+    /// `len` byte, güvenli rastgele sayı üretecinden alınır.
     pub fn random(len: usize) -> Self {
         let mut data = Vec::with_capacity(len);
         for _ in 0..len {
@@ -102,62 +241,106 @@ impl ConnectionId {
         }
         ConnectionId { data }
     }
-    
+
+    /// Connection ID'nin byte uzunluğu.
     pub fn len(&self) -> usize {
         self.data.len()
     }
-    
+
+    /// Connection ID boş mu? (0-uzunluklu CID bazı durumlarda geçerlidir)
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
-    
+
+    /// Ham byte dilimini döndürür (paket serileştirme için).
     pub fn as_slice(&self) -> &[u8] {
         &self.data
     }
 }
 
 // ============================================================================
-// QUIC STREAM
+// QUIC AKIŞI (QUIC Stream)
 // ============================================================================
+//
+// QUIC akışları, tek bağlantı üzerinde birden fazla bağımsız veri kanalı sağlar.
+// TCP'den farklı olarak akışlar birbirini engellemez (HOL-blocking yok).
+//
+// Akış ID Kuralları (RFC 9000, Bölüm 2.1):
+//   Bit 0: İstemci (0) / Sunucu (1)
+//   Bit 1: Çift yönlü-biDi (0) / Tek yönlü-uniDi (1)
+//
+//   0 -> İstemci açtı, çift yönlü (0, 4, 8, ...)
+//   1 -> Sunucu açtı, çift yönlü (1, 5, 9, ...)
+//   2 -> İstemci açtı, tek yönlü (2, 6, 10, ...)
+//   3 -> Sunucu açtı, tek yönlü (3, 7, 11, ...)
+//
+// Akış Durum Makinesi:
+//   Idle -> Open -> HalfClosedLocal -> Closed
+//                -> HalfClosedRemote -> Closed
+//         -> ResetSent / ResetReceived
 
-/// Stream types
+/// QUIC akış tipi.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamType {
+    /// İstemci açtı, çift yönlü (HTTP/3 istekleri için).
     ClientBiDi = 0,
+    /// Sunucu açtı, çift yönlü.
     ServerBiDi = 1,
+    /// İstemci açtı, tek yönlü (QPACK encoder stream gibi).
     ClientUniDi = 2,
+    /// Sunucu açtı, tek yönlü (QPACK decoder stream gibi).
     ServerUniDi = 3,
 }
 
-/// Stream state
+/// QUIC akış durumu (durum makinesi).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamState {
+    /// Akış henüz açılmadı.
     Idle,
+    /// Akış açık: her iki yönde veri akışı mümkün.
     Open,
+    /// Yerel FIN gönderildi; yerel gönderme kapatıldı, alma devam ediyor.
     HalfClosedLocal,
+    /// Karşı taraf FIN gönderdi; uzak gönderme kapatıldı, yerel gönderme devam ediyor.
     HalfClosedRemote,
+    /// Her iki yön de kapatıldı.
     Closed,
+    /// RESET_STREAM gönderildi: yerel taraf akışı iptal etti.
     ResetSent,
+    /// RESET_STREAM alındı: uzak taraf akışı iptal etti.
     ResetReceived,
 }
 
-/// QUIC Stream
+/// Tek bir QUIC akışı: gönderme ve alma tamponlarını yönetir.
 #[derive(Clone, Debug)]
 pub struct QuicStream {
+    /// Akış tanımlayıcısı (4 ile artan, tip bitlerini içerir).
     pub id: u64,
+    /// Akışın tipi (istemci/sunucu, çift/tek yönlü).
     pub stream_type: StreamType,
+    /// Akışın mevcut durumu.
     pub state: StreamState,
+    /// Gönderme tamponu için mevcut bayt ofseti (toplam gönderilen byte).
     pub send_offset: u64,
+    /// Alma tamponu için mevcut bayt ofseti (toplam alınan byte).
     pub recv_offset: u64,
+    /// Uzak tarafın belirlediği max gönderme sınırı (akış kontrolü).
     pub send_max_offset: u64,
+    /// Yerel tarafın belirlediği max alma sınırı (akış kontrolü).
     pub recv_max_offset: u64,
+    /// Gönderilmeyi bekleyen veriler (henüz paketlenmemiş).
     pub send_buffer: Vec<u8>,
+    /// Alınmış ve uygulama katmanını bekleyen veriler.
     pub recv_buffer: Vec<u8>,
+    /// FIN (son byte) gönderildi mi?
     pub fin_sent: bool,
+    /// Karşı taraftan FIN alındı mı?
     pub fin_received: bool,
 }
 
 impl QuicStream {
+    /// Yeni bir QUIC akışı oluşturur.
+    /// Başlangıç alma penceresi 16 MB olarak ayarlanır.
     pub fn new(id: u64, stream_type: StreamType) -> Self {
         QuicStream {
             id,
@@ -166,62 +349,79 @@ impl QuicStream {
             send_offset: 0,
             recv_offset: 0,
             send_max_offset: 0,
-            recv_max_offset: 16 * 1024 * 1024, // 16MB initial
+            recv_max_offset: 16 * 1024 * 1024, // 16 MB başlangıç alma penceresi
             send_buffer: Vec::new(),
             recv_buffer: Vec::new(),
             fin_sent: false,
             fin_received: false,
         }
     }
-    
-    /// Check if stream is readable
+
+    /// Akış okunabilir mi? Açık/yarı-kapalı durumda ve tampon dolu ise evet.
     pub fn can_read(&self) -> bool {
         matches!(self.state, StreamState::Open | StreamState::HalfClosedLocal) && !self.recv_buffer.is_empty()
     }
-    
-    /// Check if stream is writable
+
+    /// Akışa yazılabilir mi? Açık/yarı-kapalı durumda ve gönderme penceresi dolmamışsa evet.
     pub fn can_write(&self) -> bool {
         matches!(self.state, StreamState::Open | StreamState::HalfClosedRemote) && self.send_offset < self.send_max_offset
     }
-    
-    /// Write data to stream
+
+    /// Akışa veri yazar. Akış kontrolü sınırına kadar yazar, fazlası kesilir.
+    /// Gerçekte yazılan byte sayısını döner.
     pub fn write(&mut self, data: &[u8]) -> usize {
         if !self.can_write() {
             return 0;
         }
-        
+
+        // Kullanılabilir gönderme penceresi kadar yaz
         let available = (self.send_max_offset - self.send_offset) as usize;
         let to_write = data.len().min(available);
-        
+
         self.send_buffer.extend_from_slice(&data[..to_write]);
         self.send_offset += to_write as u64;
-        
+
         to_write
     }
-    
-    /// Read data from stream
+
+    /// Akıştan veri okur. Tamponda ne kadar varsa o kadar veya buf.len() kadar okur.
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         if !self.can_read() {
             return 0;
         }
-        
+
         let to_read = buf.len().min(self.recv_buffer.len());
         buf[..to_read].copy_from_slice(&self.recv_buffer[..to_read]);
+        // Baştan okunmuş kısmı temizle (drain: O(n) ama yeterli)
         self.recv_buffer.drain(..to_read);
-        
+
         to_read
     }
 }
 
 // ============================================================================
-// QUIC FRAMES
+// QUIC FRAME'LERİ (QUIC Frames)
 // ============================================================================
+//
+// QUIC paketleri bir veya daha fazla frame içerir. Her frame TLV benzeri
+// bir yapıdadır: ilk byte frame tipi, ardından tipe özgü alanlar gelir.
+//
+// QUIC Değişken Uzunluklu Tam Sayı (Variable-Length Integer):
+//   Bit 7-6'ya göre boyut belirlenir:
+//   00xxxxxx            -> 1 byte  (0 - 63)
+//   01xxxxxx xxxxxxxx   -> 2 byte  (0 - 16383)
+//   10xxxxxx (3 byte)   -> 4 byte  (0 - 1073741823)
+//   11xxxxxx (7 byte)   -> 8 byte  (0 - 4611686018427387903)
 
-/// QUIC Frame
+/// Tek bir QUIC frame (çerçeve). Her varyant farklı bir frame tipini temsil eder.
+/// Frame'ler `encode()` ile byte dizisine, `decode()` ile geri yapıya dönüştürülür.
 #[derive(Clone, Debug)]
 pub enum QuicFrame {
+    /// Dolgu: paket boyutunu artırmak için kullanılır.
     Padding,
+    /// Canlılık denetimi: karşı taraftan ACK bekler.
     Ping,
+    /// Alım onayı: hangi paket numaralarının alındığını bildirir.
     Ack {
         largest_ack: u64,
         ack_delay: u64,
@@ -229,82 +429,101 @@ pub enum QuicFrame {
         first_ack_range: u64,
         ack_ranges: Vec<u64>,
     },
+    /// Akışı sıfırla: gönderici akışı iptal etti ve final boyutunu bildiriyor.
     ResetStream {
         stream_id: u64,
         error_code: u64,
         final_size: u64,
     },
+    /// Veri gönderimini durdur: alıcı bu akıştan veri istemiyor.
     StopSending {
         stream_id: u64,
         error_code: u64,
     },
+    /// TLS el sıkışma verisi (ClientHello, ServerHello, Finished vb.).
     Crypto {
         offset: u64,
         data: Vec<u8>,
     },
+    /// Sunucunun gelecekteki 0-RTT için istemciye token vermesi.
     NewToken {
         token: Vec<u8>,
     },
+    /// Uygulama verisi: stream_id + offset + FIN bayrağı + byte verisi.
     Stream {
         stream_id: u64,
         offset: u64,
         fin: bool,
         data: Vec<u8>,
     },
+    /// Bağlantı genelinde maksimum veri sınırını arttır (akış kontrol penceresi).
     MaxData {
         max_data: u64,
     },
+    /// Belirli bir akış için maksimum veri sınırını arttır.
     MaxStreamData {
         stream_id: u64,
         max_stream_data: u64,
     },
+    /// Açılabilecek maksimum eş zamanlı akış sayısını arttır.
     MaxStreams {
         stream_type: StreamType,
         max_streams: u64,
     },
+    /// Gönderici, bağlantı genelindeki veri sınırına takıldı.
     DataBlocked {
         max_data: u64,
     },
+    /// Gönderici, belirli akışın sınırına takıldı.
     StreamDataBlocked {
         stream_id: u64,
         max_stream_data: u64,
     },
+    /// Yeni akış açılamıyor, akış sayısı sınırına ulaşıldı.
     StreamsBlocked {
         stream_type: StreamType,
         max_streams: u64,
     },
+    /// Bağlantı geçişi için yeni Connection ID tanıt.
     NewConnectionId {
         sequence: u64,
         retire_prior: u64,
         conn_id: ConnectionId,
         reset_token: [u8; 16],
     },
+    /// Eski Connection ID'yi kullanımdan kaldır.
     RetireConnectionId {
         sequence: u64,
     },
+    /// Yol doğrulama: 8-byte meydan okuma verisi gönder.
     PathChallenge {
         data: [u8; 8],
     },
+    /// Yol doğrulama yanıtı: aynı 8-byte ile karşılık ver.
     PathResponse {
         data: [u8; 8],
     },
+    /// Bağlantıyı kapat (QUIC katmanı hatası).
     ConnectionClose {
         error_code: u64,
         frame_type: u64,
         reason: Vec<u8>,
     },
+    /// Bağlantıyı kapat (uygulama katmanı hatası).
     ConnectionCloseApp {
         error_code: u64,
         reason: Vec<u8>,
     },
+    /// El sıkışma tamamlandı sinyali (sunucudan istemciye).
     HandshakeDone,
 }
 
 impl QuicFrame {
-    /// Encode frame to bytes
+    /// Frame'i wire formatına (byte dizisi) dönüştürür.
+    /// QUIC değişken uzunluklu tamsayı (varint) kodlaması kullanılır.
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        
+
         match self {
             QuicFrame::Padding => {
                 buf.push(QuicFrameType::Padding as u8);
@@ -341,13 +560,13 @@ impl QuicFrame {
             }
             QuicFrame::Stream { stream_id, offset, fin, data } => {
                 let mut frame_type = QuicFrameType::Stream as u8;
-                // Set OFF bit (offset present)
+                // OFF bit: offset alanının varlığını belirtir (offset > 0 ise)
                 if *offset > 0 {
                     frame_type |= 0x04;
                 }
-                // Set LEN bit (length present)
+                // LEN bit: uzunluk alanının varlığını belirtir
                 frame_type |= 0x02;
-                // Set FIN bit
+                // FIN bit: bu frame akıştaki son veridir
                 if *fin {
                     frame_type |= 0x01;
                 }
@@ -372,15 +591,21 @@ impl QuicFrame {
                 buf.push(QuicFrameType::HandshakeDone as u8);
             }
             _ => {
-                // Other frames - simplified encoding
+                // Diğer frame tipleri: basitleştirilmiş kodlama (stub)
                 buf.push(0xFF);
             }
         }
-        
+
         buf
     }
-    
-    /// Encode QUIC variable-length integer
+
+    /// QUIC değişken uzunluklu tamsayı (varint) kodlaması.
+    ///
+    /// Değer aralığına göre 1, 2, 4 veya 8 byte kullanır:
+    ///   0..63        -> 1 byte (00xxxxxx)
+    ///   64..16383    -> 2 byte (01xxxxxx xxxxxxxx)
+    ///   16384..1G-1  -> 4 byte (10xxxxxx ...)
+    ///   1G..4.6E-1   -> 8 byte (11xxxxxx ...)
     fn encode_varint(buf: &mut Vec<u8>, val: u64) {
         if val < 64 {
             buf.push(val as u8);
@@ -403,50 +628,53 @@ impl QuicFrame {
             buf.push(val as u8);
         }
     }
-    
-    /// Decode QUIC variable-length integer
+
+    /// QUIC değişken uzunluklu tamsayı (varint) kod çözümü.
+    /// `pos` pozisyonu tüketilen byte sayısı kadar ilerletilir.
     fn decode_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
         if *pos >= data.len() {
             return None;
         }
-        
+
         let first = data[*pos];
         *pos += 1;
-        
+
+        // İlk byte'ın yüksek 2 biti varint uzunluğunu belirtir
         let (len, mask) = match first >> 6 {
-            0 => (0, 0x3F),
-            1 => (1, 0x3F),
-            2 => (3, 0x3F),
-            3 => (7, 0x3F),
+            0 => (0, 0x3F), // 1 byte toplam
+            1 => (1, 0x3F), // 2 byte toplam
+            2 => (3, 0x3F), // 4 byte toplam
+            3 => (7, 0x3F), // 8 byte toplam
             _ => unreachable!(),
         };
-        
+
         if *pos + len > data.len() {
             return None;
         }
-        
+
         let mut val = (first & mask) as u64;
         for i in 0..len {
             val = (val << 8) | (data[*pos] as u64);
             *pos += 1;
         }
-        
+
         Some(val)
     }
-    
-    /// Decode frame from bytes
+
+    /// Byte dizisinden frame çözümler. `pos` ilerletilir.
     pub fn decode(data: &[u8], pos: &mut usize) -> Option<Self> {
         if *pos >= data.len() {
             return None;
         }
-        
+
         let frame_type = data[*pos];
         *pos += 1;
-        
+
         match frame_type {
             0x00 => Some(QuicFrame::Padding),
             0x01 => Some(QuicFrame::Ping),
             0x02 | 0x03 => {
+                // ACK veya ACK+ECN frame'i
                 let largest_ack = Self::decode_varint(data, pos)?;
                 let ack_delay = Self::decode_varint(data, pos)?;
                 let ack_range_count = Self::decode_varint(data, pos)?;
@@ -464,17 +692,20 @@ impl QuicFrame {
                 })
             }
             0x04 => {
+                // RESET_STREAM: stream_id + error_code + final_size
                 let stream_id = Self::decode_varint(data, pos)?;
                 let error_code = Self::decode_varint(data, pos)?;
                 let final_size = Self::decode_varint(data, pos)?;
                 Some(QuicFrame::ResetStream { stream_id, error_code, final_size })
             }
             0x05 => {
+                // STOP_SENDING: stream_id + error_code
                 let stream_id = Self::decode_varint(data, pos)?;
                 let error_code = Self::decode_varint(data, pos)?;
                 Some(QuicFrame::StopSending { stream_id, error_code })
             }
             0x06 => {
+                // CRYPTO: TLS handshake verisi
                 let offset = Self::decode_varint(data, pos)?;
                 let len = Self::decode_varint(data, pos)? as usize;
                 if *pos + len > data.len() {
@@ -485,16 +716,19 @@ impl QuicFrame {
                 Some(QuicFrame::Crypto { offset, data: frame_data })
             }
             0x08..=0x0F => {
-                // Stream frame with various flags
+                // STREAM frame: bayrak biti kombinasyonları
                 let stream_id = Self::decode_varint(data, pos)?;
                 let offset = if frame_type & 0x04 != 0 {
+                    // OFF bit: offset alanı mevcut
                     Self::decode_varint(data, pos)?
                 } else {
-                    0
+                    0 // Offset yoksa 0'dan başla
                 };
                 let len = if frame_type & 0x02 != 0 {
+                    // LEN bit: uzunluk alanı mevcut
                     Self::decode_varint(data, pos)? as usize
                 } else {
+                    // LEN yok: paketin kalanı bu akışın verisidir
                     data.len() - *pos
                 };
                 if *pos + len > data.len() {
@@ -505,7 +739,7 @@ impl QuicFrame {
                 Some(QuicFrame::Stream {
                     stream_id,
                     offset,
-                    fin: frame_type & 0x01 != 0,
+                    fin: frame_type & 0x01 != 0, // FIN bit
                     data: frame_data,
                 })
             }
@@ -519,74 +753,121 @@ impl QuicFrame {
                 Some(QuicFrame::MaxStreamData { stream_id, max_stream_data })
             }
             0x1E => Some(QuicFrame::HandshakeDone),
-            _ => None, // Unknown frame type
+            _ => None, // Bilinmeyen frame tipi -> bağlantı hatası
         }
     }
 }
 
 // ============================================================================
-// QUIC CONNECTION STATE
+// QUIC BAĞLANTI DURUMU VE BAĞLANTI YAPILANMASI
 // ============================================================================
+//
+// QUIC bağlantısı durum makinesi:
+//
+//   Initial ──> HandshakeStarted ──> HandshakeInProgress
+//                                         │
+//                                    HandshakeComplete
+//                                         │
+//                                    Established ──> Closing ──> Draining ──> Closed
 
-/// QUIC connection state
+/// QUIC bağlantısının durum makinesi.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuicState {
+    /// İlk Initial paket henüz gönderilmedi.
     Initial,
+    /// Initial paket gönderildi, ServerHello bekleniyor.
     HandshakeStarted,
+    /// TLS el sıkışması devam ediyor (Handshake mesajları alınıyor/gönderiliyor).
     HandshakeInProgress,
+    /// El sıkışma tamamlandı, Finished mesajları işlendi.
     HandshakeComplete,
+    /// Bağlantı tamamen kuruldu, uygulama verisi akışı başlayabilir.
     Established,
+    /// Bağlantı kapatılıyor: ConnectionClose gönderildi.
     Closing,
+    /// Diğer tarafın ConnectionClose'u onaylaması bekleniyor.
     Draining,
+    /// Bağlantı tamamen kapatıldı.
     Closed,
 }
 
-/// QUIC crypto level
+/// QUIC kriptografik seviyeler: her seviye farklı anahtarlar kullanır.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum QuicCryptoLevel {
+    /// Başlangıç anahtarları (HKDF + sabit Initial tuz, RFC 9001).
     Initial,
+    /// El sıkışma anahtarları (TLS 1.3 Handshake Secret).
     Handshake,
+    /// Uygulama anahtarları (TLS 1.3 Application Traffic Secret).
     OneRTT,
 }
 
-/// QUIC key material
+/// Bir kriptografik seviye için anahtar materyali.
 #[derive(Clone, Debug)]
 pub struct QuicKeys {
+    /// Ana gizli anahtar (HKDF ile türetilmiş).
     pub secret: Vec<u8>,
+    /// AEAD şifreleme anahtarı (AES-128-GCM veya ChaCha20-Poly1305 için).
     pub key: Vec<u8>,
+    /// AEAd nonce tabanı (IV) - paket numarasıyla XOR'lanır.
     pub iv: Vec<u8>,
-    pub hp: Vec<u8>,  // Header protection key
+    /// Başlık koruma (Header Protection) anahtarı.
+    pub hp: Vec<u8>,
 }
 
-/// QUIC Connection
+/// Tam bir QUIC bağlantısı: akışlar, durum, istatistikler ve kriptografik bilgiler.
 #[derive(Clone, Debug)]
 pub struct QuicConnection {
+    /// Bu uç için Connection ID'si (yerel).
     pub conn_id: ConnectionId,
+    /// Karşı tarafın Connection ID'si (uzak).
     pub peer_conn_id: ConnectionId,
+    /// Bağlantının mevcut durumu.
     pub state: QuicState,
+    /// QUIC protokol sürümü (QUIC_VERSION_1 = 0x00000001).
     pub version: u32,
+    /// Açık akışlar: stream_id -> QuicStream.
     pub streams: BTreeMap<u64, QuicStream>,
+    /// Sonraki akış için atanacak ID (her açılışta 4 artar).
     pub next_stream_id: u64,
+    /// Toplam gönderilen paket sayısı.
     pub packets_sent: u64,
+    /// Toplam alınan paket sayısı.
     pub packets_received: u64,
+    /// Toplam gönderilen bayt.
     pub bytes_sent: u64,
+    /// Toplam alınan bayt.
     pub bytes_received: u64,
+    /// Bağlantı genelinde toplam veri penceresi (akış kontrolü).
     pub max_data: u64,
+    /// Her akış için varsayılan veri penceresi.
     pub max_stream_data: u64,
+    /// Yerel tarafın açabileceği maksimum çift yönlü akış sayısı.
     pub local_max_streams_bidi: u64,
+    /// Yerel tarafın açabileceği maksimum tek yönlü akış sayısı.
     pub local_max_streams_unidi: u64,
+    /// Uzak tarafın açabileceği maksimum çift yönlü akış sayısı.
     pub remote_max_streams_bidi: u64,
+    /// Uzak tarafın açabileceği maksimum tek yönlü akış sayısı.
     pub remote_max_streams_unidi: u64,
+    /// Geçerli kriptografik seviye.
     pub crypto_level: QuicCryptoLevel,
+    /// TLS el sıkışma verisi tamponu.
     pub crypto_data: Vec<u8>,
+    /// Kriptografik seviyeye göre anahtar materyali.
     pub keys: BTreeMap<QuicCryptoLevel, QuicKeys>,
+    /// Kayıp tespiti için zamanlayıcı (ns cinsinden).
     pub loss_detection_time: u64,
+    /// PTO (Probe Timeout) sayacı: ardışık zaman aşımı sayısı.
     pub pto_count: u32,
+    /// Boşta kalma zaman aşımı (ms cinsinden).
     pub idle_timeout: u64,
+    /// Son aktivite zamanı (idle timeout hesabı için).
     pub last_activity: u64,
 }
 
 impl QuicConnection {
+    /// Belirtilen uzunlukta rastgele Connection ID ile yeni bağlantı oluşturur.
     pub fn new(conn_id_len: usize) -> Self {
         QuicConnection {
             conn_id: ConnectionId::random(conn_id_len),

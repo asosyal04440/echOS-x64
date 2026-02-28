@@ -1,16 +1,61 @@
-//! # echOS ACPI Power Manager (OSPM)
+//! # echOS ACPI Güç Yöneticisi (OSPM — OS-directed Power Management)
+//!
+//! ## OSPM Nedir?
+//! OSPM (Operating System-directed Power Management), ACPI modelinde işletim sisteminin
+//! güç yönetimini doğrudan kontrol ettiği mimaridir. BIOS/firmware pasif bir rol üstlenerek
+//! yalnızca AML metodlarla politika sunar; gerçek kararları işletim sistemi verir.
+//!
+//! ## Güç Durumu Hiyerarşisi
+//! ```text
+//!  ┌──────────────────────────────────────────────────────────────────────┐
+//!  │                     ACPI Güç Durumları                              │
+//!  ├─────────────┬────────────────────────────────────────────────────────┤
+//!  │  S-States   │  Sistem geneli uyku durumları                          │
+//!  │  (Global)   │  S0:Çalışıyor │ S3:Askı │ S4:Hazırda Bek │ S5:Kapalı  │
+//!  ├─────────────┼────────────────────────────────────────────────────────┤
+//!  │  C-States   │  CPU boşta durum yönetimi                              │
+//!  │  (CPU-lokal)│  C0:Çalışıyor │ C1:HLT │ C2:Stop-Grant │ C3:Sleep     │
+//!  ├─────────────┼────────────────────────────────────────────────────────┤
+//!  │  P-States   │  CPU performans/frekans ölçeklendirmesi (DVFS)         │
+//!  │  (CPU-lokal)│  P0:Maks Frekans → Pn:Min Frekans (güç tasarrufu)     │
+//!  ├─────────────┼────────────────────────────────────────────────────────┤
+//!  │  D-States   │  Bireysel ACPI cihazlarının güç durumları              │
+//!  │  (Cihaz)    │  D0:Tam Güç │ D1/D2:Uyku │ D3Hot/D3Cold:Kapalı        │
+//!  └─────────────┴────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## P-State (Performance State) — DVFS
+//! DVFS (Dynamic Voltage and Frequency Scaling) ile CPU frekansı ve gerilimi
+//! çalışma yüküne göre dinamik olarak ayarlanır.
+//! ```text
+//!  P0 →  3.5 GHz, 1.2V  (maksimum performans)
+//!  P1 →  2.8 GHz, 1.1V
+//!  P2 →  2.1 GHz, 1.0V
+//!  P3 →  1.4 GHz, 0.9V  (minimum güç tüketimi)
+//! ```
+//!
+//! ## C-State (CPU Idle State) — Boşta Güç Yönetimi
+//! ```text
+//!  C0 → CPU çalışıyor (normal işlem)
+//!  C1 → HLT komutu ile durduruldu; ilk kesmede anında uyandırma
+//!  C2 → PLT (Stop-Grant) durumu; C1'den daha derin, daha fazla güç tasarrufu
+//!  C3 → Sleep durumu; L2 önbellek flush edilebilir; daha yüksek gecikme
+//! ```
 //!
 //! Faz 5: Tam güç yönetimi — S-states, C-states, P-states.
-//! _PTS/_WAK, _PSS/_PCT, _CST AML method evaluation.
+//! _PTS/_WAK, _PSS/_PCT, _CST AML metot değerlendirmesi.
 
 use alloc::vec::Vec;
 use aml::AmlValue;
 
 // ============================================================================
-// Uyku Durumu Yönetimi
+// Uyku Durumu Yönetimi (S-States)
 // ============================================================================
 
-/// Desteklenen uyku durumlarını tespit et (_S0.._S5)
+/// Firmware tarafından desteklenen ACPI uyku durumlarını tespit eder (`\_S0` — `\_S5`).
+///
+/// Firmware'in her uyku durumu için AML namespace'te `\_Sn` nesnesi olması gerekir.
+/// Bu nesneyi evaluate etmek mümkünse durum destekleniyor demektir.
 pub fn get_supported_sleep_states() -> Vec<u8> {
     let mut supported = Vec::new();
 
@@ -18,6 +63,7 @@ pub fn get_supported_sleep_states() -> Vec<u8> {
         return supported;
     }
 
+    // _S0.._S5 arasında her uyku durumunu dene
     for state in 0..=5 {
         let path = alloc::format!("\\_S{}", state);
         if crate::cpu::acpi_aml::invoke_method(&path, &[]).is_ok() {
@@ -29,8 +75,13 @@ pub fn get_supported_sleep_states() -> Vec<u8> {
     supported
 }
 
-/// Uyku durumuna hazırlan — _PTS(sleep_state) çalıştır
-/// ACPI Spec §7.4.1: Prepare To Sleep
+/// Uyku durumuna hazırlan — `\_PTS(sleep_state)` AML metodunu çalıştırır.
+///
+/// ACPI Spec §7.4.1: `_PTS` (Prepare To Sleep), uyku girişinden önce firmware'in
+/// donanımı uyku moduna hazırlaması için çağrılır. Aygıt sürücüleri bu sırada
+/// bağlamlarını kaydeder, G/Ç işlemlerini durdurur.
+///
+/// `sleep_state`: 1=S1, 3=S3, 4=S4, 5=S5
 pub fn prepare_to_sleep(sleep_state: u8) -> bool {
     let arg = AmlValue::Integer(sleep_state as u64);
     match crate::cpu::acpi_aml::invoke_method("\\_PTS", &[arg]) {
@@ -45,8 +96,11 @@ pub fn prepare_to_sleep(sleep_state: u8) -> bool {
     }
 }
 
-/// Uyku durumundan uyanma — _WAK(sleep_state) çalıştır
-/// ACPI Spec §7.4.2: System Wake
+/// Uyku durumundan uyandıktan sonra — `\_WAK(sleep_state)` AML metodunu çalıştırır.
+///
+/// ACPI Spec §7.4.2: `_WAK` (System Wake), uyku modundan çıkıldıktan sonra
+/// firmware'in donanımı yeniden aktif duruma geçirmesi için çağrılır.
+/// Aygıt sürücüleri bu sırada bağlamlarını geri yükler.
 pub fn wake_from_sleep(sleep_state: u8) -> bool {
     let arg = AmlValue::Integer(sleep_state as u64);
     match crate::cpu::acpi_aml::invoke_method("\\_WAK", &[arg]) {
@@ -62,31 +116,38 @@ pub fn wake_from_sleep(sleep_state: u8) -> bool {
 }
 
 // ============================================================================
-// CPU Performance States (P-states) — DVFS
+// CPU Performans Durumları (P-States) — DVFS
 // ============================================================================
 
-/// P-state bilgisi (_PSS dönüş elemanı)
+/// Tek bir CPU P-state'inin tüm özelliklerini içeren yapı.
+///
+/// `_PSS` (Performance Supported States) metodu bu yapı listesini döndürür.
+/// P0 = en yüksek frekans (en fazla güç), Pn = en düşük frekans (en az güç).
 #[derive(Debug, Clone)]
 pub struct PStateInfo {
-    /// Frekans (MHz)
+    /// CPU çalışma frekansı (MHz cinsinden)
     pub frequency: u32,
-    /// Güç tüketimi (mW)
+    /// Tahmini güç tüketimi (miliwatt cinsinden)
     pub power: u32,
-    /// Geçiş gecikmesi (µs)
+    /// Bu P-state'e geçiş gecikmesi (mikrosaniye)
     pub transition_latency: u32,
-    /// Bus master gecikmesi (µs)
+    /// Bus master gecikmesi (mikrosaniye) — C3 ve benzeri durumlarla etkileşim
     pub bus_master_latency: u32,
-    /// Control register değeri
+    /// Performans kontrol register değeri — IA32_PERF_CTL MSR'a yazılır
     pub control: u32,
-    /// Status register değeri
+    /// Beklenen durum değeri — IA32_PERF_STATUS MSR'dan doğrulama için okunur
     pub status: u32,
 }
 
-/// CPU0'ın desteklediği P-state'leri oku (_PSS)
+/// CPU'nun desteklediği P-state listesini `_PSS` AML metodundan okur.
+///
+/// `_PSS` (Performance Supported States) paketi, her P-state için 6 elemanlı
+/// bir alt paket içerir. Birden fazla CPU namespace yolu denenir
+/// (farklı firmware'ler farklı yollar kullanır).
 pub fn get_pstate_list() -> Vec<PStateInfo> {
     let mut pstates = Vec::new();
 
-    // \_PR.CPU0._PSS veya \_SB.CPU0._PSS denemesi
+    // Farklı firmware'lerin kullandığı CPU namespace yolları
     let paths = ["\\_PR.CPU0._PSS", "\\_SB.CPU0._PSS", "\\_PR.C000._PSS"];
 
     for path in &paths {
@@ -95,12 +156,12 @@ pub fn get_pstate_list() -> Vec<PStateInfo> {
                 if let AmlValue::Package(fields) = elem {
                     if fields.len() >= 6 {
                         let pstate = PStateInfo {
-                            frequency: aml_to_u32(&fields[0]),
-                            power: aml_to_u32(&fields[1]),
+                            frequency:          aml_to_u32(&fields[0]),
+                            power:              aml_to_u32(&fields[1]),
                             transition_latency: aml_to_u32(&fields[2]),
                             bus_master_latency: aml_to_u32(&fields[3]),
-                            control: aml_to_u32(&fields[4]),
-                            status: aml_to_u32(&fields[5]),
+                            control:            aml_to_u32(&fields[4]),
+                            status:             aml_to_u32(&fields[5]),
                         };
                         pstates.push(pstate);
                     }
@@ -122,7 +183,11 @@ pub fn get_pstate_list() -> Vec<PStateInfo> {
     pstates
 }
 
-/// P-state'i AML üzerinden değiştir (_PCT Performance Control)
+/// AML `_PCT` (Performance Control) yolu üzerinden P-state değiştirir.
+///
+/// `_PCT` metodu performans kontrol register'ının adresini ve tipini döndürür.
+/// Bu implementasyon MSR yolunu kullanır: IA32_PERF_CTL (0x199) Intel CPU'larda
+/// frekans/gerilim geçişlerini yazılımdan kontrol etmeye olanak tanır.
 pub fn set_pstate_via_aml(pstate_index: usize) -> bool {
     let pstates = get_pstate_list();
     if pstate_index >= pstates.len() {
@@ -131,11 +196,11 @@ pub fn set_pstate_via_aml(pstate_index: usize) -> bool {
 
     let control_value = pstates[pstate_index].control;
 
-    // _PCT ile kontrol register'ını al
+    // _PCT (Performance Control) kaydını al — MSR tabanlı kontrol yaygın
     let paths = ["\\_PR.CPU0._PCT", "\\_SB.CPU0._PCT", "\\_PR.C000._PCT"];
     for path in &paths {
         if let Ok(_) = crate::cpu::acpi_aml::invoke_method(path, &[]) {
-            // MSR yoluyla P-state değiştir (IA32_PERF_CTL = 0x199)
+            // MSR 0x199 = IA32_PERF_CTL — Intel SpeedStep/Enhanced SpeedStep P-state kontrolü
             unsafe {
                 let mut msr = x86_64::registers::model_specific::Msr::new(0x199);
                 msr.write(control_value as u64);
@@ -154,21 +219,27 @@ pub fn set_pstate_via_aml(pstate_index: usize) -> bool {
 }
 
 // ============================================================================
-// CPU C-states (Idle States)
+// CPU Boşta Durumları (C-States)
 // ============================================================================
 
-/// C-state bilgisi
+/// Tek bir C-state'in özelliklerini tutan yapı.
+///
+/// C-state'ler CPU boşta durum yönetimi için kullanılır;
+/// daha derin C-state daha düşük güç ama daha yüksek uyandırma gecikmesi demektir.
 #[derive(Debug, Clone)]
 pub struct CStateInfo {
-    /// C-state tipi (1=C1, 2=C2, 3=C3)
+    /// C-state türü: 1=C1 (HLT), 2=C2 (Stop-Grant), 3=C3 (Sleep)
     pub ctype: u8,
-    /// Gecikme (µs)
+    /// Bu C-state'ten çıkış gecikmesi (mikrosaniye)
     pub latency: u32,
-    /// Güç tüketimi (mW)
+    /// Bu C-state'de tahmini güç tüketimi (miliwatt)
     pub power: u32,
 }
 
-/// CPU0'ın desteklediği C-state'leri oku (_CST)
+/// CPU'nun desteklediği C-state listesini `_CST` AML metodundan okur.
+///
+/// `_CST` ilk elemanı C-state sayısı olan bir paket döndürür;
+/// devamındakiler her C-state için tanımlayıcı alt paketlerdir.
 pub fn get_cstates() -> Vec<CStateInfo> {
     let mut cstates = Vec::new();
 
@@ -176,15 +247,15 @@ pub fn get_cstates() -> Vec<CStateInfo> {
 
     for path in &paths {
         if let Ok(AmlValue::Package(elements)) = crate::cpu::acpi_aml::invoke_method(path, &[]) {
-            // İlk eleman C-state sayısı
+            // İlk eleman toplam C-state sayısını belirtir; gerçek veriler 1. indeksten başlar
             if elements.len() > 1 {
                 for elem in &elements[1..] {
                     if let AmlValue::Package(fields) = elem {
                         if fields.len() >= 3 {
                             let cstate = CStateInfo {
-                                ctype: aml_to_u32(&fields[0]) as u8,
+                                ctype:   aml_to_u32(&fields[0]) as u8,
                                 latency: aml_to_u32(&fields[1]),
-                                power: aml_to_u32(&fields[2]),
+                                power:   aml_to_u32(&fields[2]),
                             };
                             cstates.push(cstate);
                         }
@@ -202,10 +273,13 @@ pub fn get_cstates() -> Vec<CStateInfo> {
 }
 
 // ============================================================================
-// Thermal Management (AML-based)
+// Termal Yönetim (AML tabanlı)
 // ============================================================================
 
-/// Termal bölge sıcaklığını oku (_TMP) — Kelvin * 10 döner
+/// Termal bölgenin mevcut sıcaklığını `_TMP` AML metoduyla okur.
+///
+/// Dönüş değeri Kelvin × 10 cinsindendir.
+/// Örn: 3232 → 323.2 K → 50.2°C (Kelvin'den Celsius: K - 273.15)
 pub fn get_temperature(tz_path: &str) -> Option<u32> {
     let path = alloc::format!("{}._TMP", tz_path);
     match crate::cpu::acpi_aml::invoke_method(&path, &[]) {
@@ -214,7 +288,10 @@ pub fn get_temperature(tz_path: &str) -> Option<u32> {
     }
 }
 
-/// Kritik sıcaklık eşiği (_CRT) — bu sıcaklıkta sistem kapanır
+/// Kritik sıcaklık eşiğini `_CRT` AML metoduyla okur.
+///
+/// Bu sıcaklık aşıldığında işletim sistemi sistemi acil kapatmalıdır.
+/// Kelvin × 10 cinsinden döner.
 pub fn get_critical_temp(tz_path: &str) -> Option<u32> {
     let path = alloc::format!("{}._CRT", tz_path);
     match crate::cpu::acpi_aml::invoke_method(&path, &[]) {
@@ -223,7 +300,10 @@ pub fn get_critical_temp(tz_path: &str) -> Option<u32> {
     }
 }
 
-/// Pasif soğutma eşiği (_PSV) — CPU throttle başlatılır
+/// Pasif soğutma eşiğini `_PSV` AML metoduyla okur.
+///
+/// Bu sıcaklık aşıldığında işletim sistemi CPU'yu kısıtlamalıdır (throttle).
+/// Pasif soğutma, fan kullanmadan yalnızca CPU frekansını düşürerek çalışır.
 pub fn get_passive_temp(tz_path: &str) -> Option<u32> {
     let path = alloc::format!("{}._PSV", tz_path);
     match crate::cpu::acpi_aml::invoke_method(&path, &[]) {
@@ -232,7 +312,11 @@ pub fn get_passive_temp(tz_path: &str) -> Option<u32> {
     }
 }
 
-/// Aktif soğutma noktaları (_AC0.._AC9) — fan seviyeleri
+/// Aktif soğutma (fan) eşik noktalarını `_AC0`.`_AC9` AML metodlarıyla okur.
+///
+/// Daha düşük indeksli `_ACx`, daha yüksek fan hızını tetikler.
+/// `_AC0` en agresif soğutma, `_AC9` en sessiz soğutma eşiğidir.
+/// Kelvin × 10 cinsinden döner; ilk bulunan metot yoksa döngü kesilir.
 pub fn get_active_cooling_points(tz_path: &str) -> Vec<u32> {
     let mut points = Vec::new();
     for i in 0..=9 {
@@ -246,33 +330,44 @@ pub fn get_active_cooling_points(tz_path: &str) -> Vec<u32> {
 }
 
 // ============================================================================
-// Battery (AML-based) — Faz 6
+// Batarya Yönetimi (AML tabanlı) — Faz 6
 // ============================================================================
 
-/// Batarya bilgisi (_BIF/_BIX)
+/// AML üzerinden okunan batarya sabit bilgileri yapısı.
+///
+/// `_BIX` (ACPI 4.0+ genişletilmiş) veya `_BIF` (ACPI 1.0 uyumlu) metodundan okunur.
+/// Bu bilgiler fabrika verilerini içerir; sürekli değişmez.
 #[derive(Debug, Clone)]
 pub struct BatteryInfoAml {
+    /// Tasarım kapasitesi (mAh veya mWh — `_BIF[1]`)
     pub design_capacity: u32,
+    /// Son tam şarj kapasitesi (mAh veya mWh — `_BIF[2]`)
     pub last_full_capacity: u32,
+    /// Tasarım gerilimi (mV — `_BIF[4]`)
     pub design_voltage: u32,
+    /// Batarya seri numarası (varsa)
     pub serial_number: Option<alloc::string::String>,
+    /// Batarya model adı (varsa)
     pub model_number: Option<alloc::string::String>,
 }
 
-/// Batarya bilgisini AML ile oku
+/// Batarya sabit bilgilerini AML üzerinden okur.
+///
+/// Önce ACPI 4.0+ `_BIX` denenir; bulunamazsa geriye uyumlu `_BIF` kullanılır.
+/// Farklı platformlardaki EC yolları için birden fazla namespace yolu denenir.
 pub fn get_battery_info_aml() -> Option<BatteryInfoAml> {
-    // Önce _BIX (ACPI 4.0+), sonra _BIF (ACPI 1.0)
+    // Önce _BIX (ACPI 4.0+), sonra _BIF (ACPI 1.0) denenir
     let paths = ["\\_SB.BAT0._BIX", "\\_SB.BAT0._BIF", "\\_SB.PCI0.LPC.EC.BAT0._BIF"];
 
     for path in &paths {
         if let Ok(AmlValue::Package(fields)) = crate::cpu::acpi_aml::invoke_method(path, &[]) {
             if fields.len() >= 4 {
                 return Some(BatteryInfoAml {
-                    design_capacity: aml_to_u32(&fields[1]),
+                    design_capacity:    aml_to_u32(&fields[1]),
                     last_full_capacity: aml_to_u32(&fields[2]),
-                    design_voltage: aml_to_u32(&fields[4]),
+                    design_voltage:     aml_to_u32(&fields[4]),
                     serial_number: aml_to_string(&fields.get(10)),
-                    model_number: aml_to_string(&fields.get(9)),
+                    model_number:  aml_to_string(&fields.get(9)),
                 });
             }
         }
@@ -280,19 +375,23 @@ pub fn get_battery_info_aml() -> Option<BatteryInfoAml> {
     None
 }
 
-/// Batarya durumu (_BST) — şarj durumu, akım, voltaj
+/// AML üzerinden okunan anlık batarya durumu yapısı.
+///
+/// `_BST` (Battery Status) metodu tarafından döndürülür; sık sık sorgulanabilir.
 #[derive(Debug, Clone)]
 pub struct BatteryStatusAml {
-    /// Durum (0=full, 1=discharging, 2=charging, 4=critical)
+    /// Batarya durumu bayrakları:
+    /// 0=tam dolu, 1=boşalıyor (discharging), 2=şarj oluyor (charging), 4=kritik seviye
     pub state: u32,
-    /// Mevcut akım (mA)
+    /// Anlık şarj/deşarj akımı (mA veya mW)
     pub rate: u32,
-    /// Kalan kapasite (mAh)
+    /// Kalan kapasite (mAh veya mWh)
     pub remaining_capacity: u32,
-    /// Mevcut voltaj (mV)
+    /// Anlık uçbirim gerilimi (mV)
     pub voltage: u32,
 }
 
+/// Batarya anlık durumunu `_BST` AML metoduyla okur.
 pub fn get_battery_status_aml() -> Option<BatteryStatusAml> {
     let paths = ["\\_SB.BAT0._BST", "\\_SB.PCI0.LPC.EC.BAT0._BST"];
 
@@ -300,10 +399,10 @@ pub fn get_battery_status_aml() -> Option<BatteryStatusAml> {
         if let Ok(AmlValue::Package(fields)) = crate::cpu::acpi_aml::invoke_method(path, &[]) {
             if fields.len() >= 4 {
                 return Some(BatteryStatusAml {
-                    state: aml_to_u32(&fields[0]),
-                    rate: aml_to_u32(&fields[1]),
+                    state:              aml_to_u32(&fields[0]),
+                    rate:               aml_to_u32(&fields[1]),
                     remaining_capacity: aml_to_u32(&fields[2]),
-                    voltage: aml_to_u32(&fields[3]),
+                    voltage:            aml_to_u32(&fields[3]),
                 });
             }
         }
@@ -312,23 +411,29 @@ pub fn get_battery_status_aml() -> Option<BatteryStatusAml> {
 }
 
 // ============================================================================
-// PCI IRQ Routing — Faz 3
+// PCI IRQ Yönlendirme — Faz 3
 // ============================================================================
 
-/// PCI IRQ routing entry
+/// PCI IRQ yönlendirme tablosu girişi.
+///
+/// `_PRT` (PCI Routing Table) metodu bu girişlerin listesini döndürür.
+/// Her PCI cihazının interrupt pinlerinin hangi GSI'ye (Global System Interrupt) bağlandığını tanımlar.
 #[derive(Debug, Clone)]
 pub struct PciIrqEntry {
-    /// PCI device address (upper word = device, lower = function)
+    /// PCI cihaz adresi: üst sözcük = cihaz numarası, alt sözcük = fonksiyon numarası
     pub address: u64,
-    /// PCI interrupt pin (0=INTA, 1=INTB, 2=INTC, 3=INTD)
+    /// PCI interrupt pin: 0=INTA#, 1=INTB#, 2=INTC#, 3=INTD#
     pub pin: u8,
-    /// GSI (Global System Interrupt) number
+    /// Hedef GSI (Global System Interrupt) numarası
     pub gsi: u32,
-    /// Source device path (eğer link device üzerinden routing varsa)
+    /// Interrupt link cihaz yolu — yönlendirme link cihazı üzerinden yapılıyorsa dolu
     pub source: Option<alloc::string::String>,
 }
 
-/// PCI IRQ routing tablosunu AML'den oku (_PRT)
+/// PCI IRQ yönlendirme tablosunu `_PRT` AML metodundan okur.
+///
+/// Bu tablo, PCI cihazlarının kesme bağlantılarını yapılandırmak için kullanılır.
+/// PCI kök köprüsü (`\_SB.PCI0`) altında bulunur.
 pub fn get_pci_routing_table() -> Vec<PciIrqEntry> {
     let mut entries = Vec::new();
 
@@ -344,8 +449,8 @@ pub fn get_pci_routing_table() -> Vec<PciIrqEntry> {
                 if let AmlValue::Package(fields) = elem {
                     if fields.len() >= 4 {
                         let address = aml_to_u64(&fields[0]);
-                        let pin = aml_to_u32(&fields[1]) as u8;
-                        let gsi = aml_to_u32(&fields[3]);
+                        let pin  = aml_to_u32(&fields[1]) as u8;
+                        let gsi  = aml_to_u32(&fields[3]);
 
                         entries.push(PciIrqEntry {
                             address,
@@ -367,9 +472,10 @@ pub fn get_pci_routing_table() -> Vec<PciIrqEntry> {
 }
 
 // ============================================================================
-// Yardımcı Fonksiyonlar
+// Yardımcı Dönüşüm Fonksiyonları
 // ============================================================================
 
+/// `AmlValue::Integer` varyantını `u32`'ye dönüştürür; diğer türler için 0 döner.
 fn aml_to_u32(val: &AmlValue) -> u32 {
     match val {
         AmlValue::Integer(n) => *n as u32,
@@ -377,6 +483,7 @@ fn aml_to_u32(val: &AmlValue) -> u32 {
     }
 }
 
+/// `AmlValue::Integer` varyantını `u64`'e dönüştürür; diğer türler için 0 döner.
 fn aml_to_u64(val: &AmlValue) -> u64 {
     match val {
         AmlValue::Integer(n) => *n,
@@ -384,6 +491,7 @@ fn aml_to_u64(val: &AmlValue) -> u64 {
     }
 }
 
+/// `AmlValue::String` varyantını `Option<String>`'e dönüştürür.
 fn aml_to_string(val: &Option<&AmlValue>) -> Option<alloc::string::String> {
     match val {
         Some(AmlValue::String(s)) => Some(s.clone()),

@@ -1,7 +1,69 @@
-//! # OOM (Out-Of-Memory) Killer
+//! # OOM Killer — Bellek Tükenmesi Süreç Öldürücüsü
 //!
-//! Linux-benzeri OOM killer implementasyonu.
-//! Bellek bittiğinde process'leri score bazlı seçip öldürür.
+//! Linux benzeri OOM (Out-Of-Memory) Killer implementasyonu.
+//! Serbest bellek kritik düzeyin altına düşünce en uygun süreci sonlandırır.
+//!
+//! ## OOM Tetiklenme Koşulları
+//!
+//! ```
+//! allocate_frame() çağrıldı
+//!        │
+//!        ▼
+//!   Serbest frame < OOM_MIN_FREE_PAGES (64)?
+//!   VEYA
+//!   Serbest frame < toplam / 20 (%5)?
+//!        │
+//!        ▼ EVET
+//!   OOM Killer tetiklenir
+//! ```
+//!
+//! ## OOM Score Hesaplaması
+//!
+//! Her süreç için bir puan hesaplanır; en yüksek puanlı süreç öldürülür:
+//!
+//! ```
+//! ham_puan = (RSS + swap_kullanımı) × (1000 + oom_score_adj) / 1000
+//!
+//! Düzeltme faktörleri:
+//!   root süreçler:        × 0.8   (biraz daha korunur)
+//!   çalışma süresi uzun:  × 0.9   (>10000 ticks ise yavaşça korunur)
+//!   çok çocuk süreci var: × 0.85  (>10 çocuk ise daha az tercih edilir)
+//!   çekirdek görevi:      → puan = 0 (asla öldürülmez)
+//!
+//! oom_score_adj aralığı: -1000 (asla öldürülme) → +1000 (hep öldürülme)
+//! ```
+//!
+//! ## OOM Karar Akışı
+//!
+//! ```
+//! oom_kill() çağrıldı
+//!      │
+//!      ▼
+//!  Soğuma süresi geçti mi? (OOM_RECOVERY_WAIT_TICKS = 100)
+//!      │
+//!      ▼ EVET
+//!  Tüm süreçleri al → oom_score() hesapla → sırala
+//!      │
+//!      ▼
+//!  En yüksek puanlı süreci seç
+//!  (çekirdek görevleri ve oom_score_adj=-1000 süreçler hariç)
+//!      │
+//!      ▼
+//!  Süreci öldür → OOM geçmişine kaydet → soğuma başlat
+//! ```
+//!
+//! ## Güvenlik ve Sınırlamalar
+//!
+//! - Çekirdek görevleri (`is_kernel_task = true`) asla öldürülmez
+//! - `oom_score_adj = -1000` olan süreçler korunur (sistemd, init vb.)
+//! - Ard arda en fazla `OOM_MAX_KILLS = 3` öldürme yapılır
+//! - Her öldürme arasında `OOM_RECOVERY_WAIT_TICKS = 100` tick beklenir
+//!   (kernel thread'lerin belleği geri vermesi için süre tanınır)
+//!
+//! ## İlgili Modüller:
+//! - `mod.rs`: `MemoryManager::allocate_frame()` — OOM'u çağıran yer
+//! - `fibonacci_pmm.rs`: `free_frames()` — boş frame sayısını raporlar
+//! - `zswap.rs`: ZSwap — OOM öncesi son kurtarma katmanı
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

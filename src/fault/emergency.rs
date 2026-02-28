@@ -3,6 +3,46 @@
 //! Acil durum kapatma ve minimal işlem modu.
 //! Sistem kritik bir hatayla karşılaştığında veri kaybını önlemek
 //! için güvenli kapatma (safe halt) mekanizması sağlar.
+//!
+//! ## Acil Durum Akışı
+//!
+//! ```text
+//!  Kritik Hata Tespit Edildi
+//!           │
+//!           ▼
+//!   emergency::enter_with_reason("sebep")
+//!           │
+//!           ├─▶ Zaten acil modda mı? ──evet──▶ dön (tekrar girilmez)
+//!           │
+//!           ▼
+//!   Bozunma Level4'e yükselt ──▶ audio/bt/gui/net/usb/fs_write kapat
+//!           │
+//!           ▼
+//!   Dosya sistemlerini senkronize et (emergency_sync)
+//!           │
+//!           ▼
+//!   Sistem durumunu seri porta yaz (log_state)
+//!           │
+//!    ┌──────┴──────┐
+//!    ▼             ▼
+//! safe_halt()   reboot()
+//!  (kes+hlt)  (triple fault)
+//! ```
+//!
+//! ## Neden safe_halt() Triple Fault Kullanmaz?
+//!
+//! `safe_halt()` önce dosya sistemini flushlayıp sonra kesmeleri
+//! devre dışı bırakarak `hlt` döngüsüne girer — veri kaybı yoktur.
+//!
+//! `reboot()` ise önce ACPI reset dener; bu başarısız olursa kasıtlı
+//! olarak geçersiz bir IDT yükleyip `int 3` ile triple fault tetikler.
+//! Bu, donanımın CPU'yu sıfırlamasına yol açar — acil ve ham bir yeniden başlatmadır.
+//!
+//! ## AtomicBool ile Yeniden Giriş Koruması
+//!
+//! `enter()` başında `active.swap(true)` ile tek seferlik giriş garantilenir.
+//! İkinci bir çağrı hemen döner — bu sayede döngüsel hata fırtınaları (panic loops)
+//! sistemi kilitlemez.
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
 
@@ -11,6 +51,11 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
 // ============================================================================
 
 /// Acil durum modu durum bilgisi
+///
+/// Bu struct tüm acil durum bilgisini tek bir yerde toplar.
+/// `reason` alanı `spin::Mutex<Option<String>>` ile korunur çünkü
+/// `String` tipi atomic olmayan bir heap nesnesidir.
+/// Diğer sayısal alanlar `Atomic` tiplerle kilitsiz (lock-free) erişilir.
 pub struct EmergencyState {
     /// Acil durum modu aktif mi?
     active: AtomicBool,
@@ -154,6 +199,13 @@ impl EmergencyState {
     }
     
     /// Acil durum yeniden başlatması (reboot)
+    ///
+    /// Önce dosya sistemlerini senkronize eder, sonra şu sırayla yeniden başlatmayı dener:
+    ///  1. ACPI sıfırlama (henüz uygulanmadı)
+    ///  2. PS/2 klavye denetleyicisi üzerinden reset (henüz uygulanmadı)
+    ///  3. Triple fault zorlaması: Geçersiz bir IDT yükleyip `int 3` tetikler.
+    ///     CPU geçersiz IDT ile kesmeyi işleyemez → çift hata (double fault),
+    ///     o da işlenemez → triple fault → CPU sıfırlanır.
     pub fn reboot(&self) -> ! {
         crate::serial_println!("[EMERGENCY] === EMERGENCY REBOOT ===");
         

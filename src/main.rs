@@ -1,3 +1,16 @@
+//! # EchOS Çekirdek Giriş Noktası
+//!
+//! Bu dosya çekirdeğin ana giriş noktasını içerir. UEFI ve Limine (bare-metal)
+//! olmak üzere iki önyükleme ortamını destekler:
+//!
+//! - **UEFI modu** (`target_os = "uefi"`): UEFI firmware tarafından çağrılır,
+//!   framebuffer başlatılır, splash ekranı gösterilir ve GUI sistemi devreye alınır.
+//! - **Limine modu** (varsayılan): Limine önyükleyici protokolü üzerinden bellek
+//!   haritası alınır, sayfa tabloları kurulur ve çekirdek tam olarak başlatılır.
+//!
+//! `#![no_std]` ve `#![no_main]` nitelikleri, standart kütüphane ve C çalışma
+//! zamanı bağımlılığı olmaksızın doğrudan donanım üzerinde çalışmayı sağlar.
+
 #![no_std]
 #![no_main]
 #![allow(clippy::all)]

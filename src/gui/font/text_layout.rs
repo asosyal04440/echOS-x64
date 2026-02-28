@@ -1,6 +1,22 @@
-//! # Text Layout
+//! # Metin Düzeni (Text Layout)
 //!
-//! Text shaping and layout for rendering.
+//! Metin biçimlendirme ve düzen hesaplaması; karakterleri ekran koordinatlarına yerleştirir.
+//!
+//! ## Metin Düzeni Nedir?
+//! Ham bir karakter dizisini ekranda doğru konuma yerleştirmek için gereken
+//! tüm geometrik hesaplama sürecine "text layout" denir. Bu süreç şunları içerir:
+//!
+//! - **Shaping**: Unicode karakterleri glyph dizilerine dönüştürme
+//! - **Metrics**: Her glyphin genişlik (advance) ve yükseklik bilgisi
+//! - **Line breaking**: Maksimum genişliğe göre satır kırma
+//! - **Alignment**: Sola/sağa/ortaya/iki yana hizalama
+//! - **Hit testing**: Fare tıklamasından karakter konumu bulma
+//!
+//! ## Veri Yapıları
+//! - `LayoutGlyph`: Tek bir glyphin x/y konumu ve advance genişliği
+//! - `LayoutRun`: Aynı biçimlendirmeye sahip ardışık karakter dizisi
+//! - `LayoutLine`: Bir metin satırı; birden fazla run içerebilir
+//! - `TextLayout`: Tüm satırları kapsayan düzen sonucu
 
 use super::truetype::{TrueTypeFont, Glyph};
 use super::rasterizer::RasterGlyph;
@@ -8,7 +24,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
 
-/// Layout glyph position
+/// Düzenlenmiş tek bir glyph'in ekran üzerindeki konumu.
+///
+/// `glyph_index`: Font içindeki glyph tablosu indeksi (cmap ile Unicode'dan türetilir).
+/// `x` / `y`: Satır başına göre göreli piksel koordinatı.
+/// `advance`: Sonraki glyphın başlayacağı x kaydırma miktarı (piksel).
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutGlyph {
     pub glyph_index: u16,
@@ -17,7 +37,10 @@ pub struct LayoutGlyph {
     pub advance: f32,
 }
 
-/// Layout run (contiguous text with same formatting)
+/// Aynı biçimlendirme özelliklerine (renk, stil vb.) sahip ardışık glyph dizisi.
+///
+/// Zengin metin sistemlerinde farklı renkler veya kalınlık gibi özellikler değiştikçe
+/// yeni bir run başlar. Sade metinde tek satır genellikle tek run'dan oluşur.
 #[derive(Clone, Debug)]
 pub struct LayoutRun {
     pub start: usize,
@@ -26,7 +49,10 @@ pub struct LayoutRun {
     pub width: f32,
 }
 
-/// Layout line
+/// Tek bir metin satırının tüm geometrik verisi.
+///
+/// `baseline`: Metnin ana çizgisinin y koordinatı; harflerin diplerinin oturduğu çizgi.
+/// Genellikle satır yüksekliğinin %80'i olarak hesaplanır.
 #[derive(Clone, Debug)]
 pub struct LayoutLine {
     pub start: usize,
@@ -37,7 +63,7 @@ pub struct LayoutLine {
     pub baseline: f32,
 }
 
-/// Text layout result
+/// Tüm metnin düzen sonucu: satırlar, toplam boyut ve sarmalama genişliği.
 #[derive(Clone, Debug)]
 pub struct TextLayout {
     pub text: String,
@@ -48,7 +74,13 @@ pub struct TextLayout {
 }
 
 impl TextLayout {
-    /// Layout text with optional max width
+    /// Metni düzenler; isteğe bağlı maksimum genişliğe göre satıra sarar.
+    ///
+    /// `scale = size / units_per_em` ile font birimi → piksel dönüşümü yapılır.
+    /// `line_height = size * 1.2` tipik bir satır aralığı katsayısıdır (%120).
+    /// Algoritma karakterleri tek tek dolaşır:
+    /// - `\n` → satır sonu zorlaması
+    /// - Boşluk/tire ve max_width aşımı → kelime sarmalama
     pub fn layout(text: &str, font: &TrueTypeFont, size: f32, max_width: Option<f32>) -> Self {
         let scale = size / font.units_per_em as f32;
         let line_height = size * 1.2;

@@ -1,6 +1,39 @@
-//! # CFS (Completely Fair Scheduler)
+//! # CFS (Completely Fair Scheduler - Tamamen Adil Zamanlayıcı)
 //!
-//! Linux-style fair scheduling with virtual runtime.
+//! Linux çekirdeğinden ilham alınan, sanal çalışma zamanı (vruntime) tabanlı
+//! adil zamanlama algoritması.
+//!
+//! ## Temel Fikir
+//! Her task bir "sanal saat"e (vruntime) sahiptir. Zamanlayıcı her zaman
+//! en düşük vruntime değerine sahip task'ı çalıştırır. Bu sayede tüm
+//! task'lar CPU zamanından "eşit" pay alır.
+//!
+//! ## CFS Red-Black Tree (Kırmızı-Siyah Ağaç) Yapısı
+//!
+//! ```text
+//!                    [vruntime=50]  <-- En yüksek öncelik (kök)
+//!                   /              \
+//!          [vruntime=30]        [vruntime=80]
+//!          /          \
+//!  [vruntime=10]  [vruntime=40]
+//!       ^
+//!  pick_next() bu task'ı seçer (en sol yaprak = en küçük vruntime)
+//! ```
+//!
+//! ## vruntime Hesaplama
+//! ```
+//! vruntime_delta = (gercek_sure * NICE_0_WEIGHT) / task_weight
+//! ```
+//! Ağır (yüksek öncelikli) task'lar daha az vruntime biriktirerek
+//! daha sık seçilir.
+//!
+//! ## nice Değeri ve Ağırlık İlişkisi
+//! ```text
+//! nice -20  ->  weight ~3121  (en yüksek öncelik)
+//! nice   0  ->  weight  1024  (varsayılan)
+//! nice +19  ->  weight   15   (en düşük öncelik)
+//! ```
+//! Her nice seviyesi ağırlığı yaklaşık %25 değiştirir.
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -9,30 +42,32 @@ use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// CFS CONSTANTS
+// CFS SABİTLERİ
 // ============================================================================
 
-/// Default time slice (microseconds)
+/// Varsayılan zaman dilimi (mikrosaniye cinsinden)
 pub const CFS_DEFAULT_SLICE: u64 = 1_000_000; // 1ms
-/// Minimum granularity
+/// Minimum granülarite — bir task bu süreden az çalışmaz
 pub const CFS_MIN_GRANULARITY: u64 = 1_000_000; // 1ms
-/// Wakeup granularity
+/// Uyandırma granülaritesi — yeni uyanan task'ın preempt edebilmesi için minimum vruntime farkı
 pub const CFS_WAKEUP_GRANULARITY: u64 = 1_000_000;
-/// Default nice weight
+/// nice=0 için referans ağırlık (Linux'ta aynı değer kullanılır)
 pub const CFS_NICE_0_WEIGHT: u64 = 1024;
-/// Load average period
+/// Yük ortalaması periyodu (PELT algoritması için)
 pub const CFS_LOAD_AVG_PERIOD: u64 = 32;
-/// Time constants for load tracking
+/// PELT yarı ömrü — yük ortalamasının %50'ye düşmesi için gereken ms
 pub const CFS_PELT_HALF_LIFE: u64 = 32; // 32ms
 
-/// Nice to weight conversion
+/// nice değerinden ağırlık hesaplar.
+///
+/// Her nice seviyesi ağırlığı yaklaşık %25 artırır veya azaltır.
 pub fn nice_to_weight(nice: i32) -> u64 {
     let weight = CFS_NICE_0_WEIGHT as i64;
     let delta = nice as i64;
-    
-    // Each nice level changes weight by ~25%
+
+    // Her nice seviyesi ağırlığı ~%25 oranında değiştirir
     let factor = 1.25_f64.powi(delta.abs() as i32);
-    
+
     if delta > 0 {
         (weight as f64 / factor) as u64
     } else {
@@ -40,7 +75,10 @@ pub fn nice_to_weight(nice: i32) -> u64 {
     }
 }
 
-/// Weight to vruntime delta
+/// Gerçek süreyi sanal çalışma zamanına (vruntime) dönüştürür.
+///
+/// Formül: vruntime_delta = (delta * NICE_0_WEIGHT) / task_weight
+/// Ağır task'lar daha az vruntime biriktirerek daha sık seçilir.
 pub fn weight_to_vruntime(delta: u64, weight: u64) -> u64 {
     if weight == 0 {
         return delta;
@@ -49,34 +87,34 @@ pub fn weight_to_vruntime(delta: u64, weight: u64) -> u64 {
 }
 
 // ============================================================================
-// CFS TASK
+// CFS TASK (GÖREVİ)
 // ============================================================================
 
 #[derive(Clone, Debug)]
 pub struct CfsTask {
-    /// Task ID
+    /// Görevin benzersiz kimlik numarası
     pub task_id: u64,
-    /// Nice value (-20 to 19)
+    /// nice değeri (-20 ile +19 arası; negatif = yüksek öncelik)
     pub nice: AtomicI64,
-    /// Weight
+    /// Zamanlayıcı ağırlığı (nice değerinden türetilir)
     pub weight: AtomicU64,
-    /// Virtual runtime
+    /// Sanal çalışma zamanı — CFS'in çekirdek değeri, ağaçta sıralama kriteri
     pub vruntime: AtomicU64,
-    /// Actual runtime accumulated
+    /// Toplam gerçek çalışma süresi (istatistik)
     pub runtime: AtomicU64,
-    /// Time slice
+    /// Bu task'a atanan zaman dilimi (time slice)
     pub slice: AtomicU64,
-    /// Is running
+    /// Şu anda CPU'da çalışıyor mu?
     pub running: AtomicBool,
-    /// Is on runqueue
+    /// Çalışma kuyruğunda (run queue) mevcut mu?
     pub on_rq: AtomicBool,
-    /// Last enqueue time
+    /// Kuyruğa eklendiği zamanın tick değeri
     pub enqueue_time: AtomicU64,
-    /// Load average
+    /// PELT yük ortalaması (Per-Entity Load Tracking)
     pub load_avg: AtomicU64,
-    /// Utilization average
+    /// PELT kullanım ortalaması
     pub util_avg: AtomicU64,
-    /// Statistics
+    /// Ayrıntılı istatistikler (bekleme süresi, migrasyon sayısı vb.)
     pub stats: Mutex<CfsStats>,
 }
 
@@ -110,13 +148,14 @@ impl CfsTask {
         }
     }
 
-    /// Set nice value
+    /// nice değerini günceller ve ağırlığı yeniden hesaplar.
     pub fn set_nice(&self, nice: i32) {
         self.nice.store(nice as i64, Ordering::SeqCst);
         self.weight.store(nice_to_weight(nice), Ordering::SeqCst);
     }
 
-    /// Update vruntime after running
+    /// Çalışma sonrası vruntime'ı günceller.
+    /// delta: gerçek çalışma süresi (nanosaniye)
     pub fn update_vruntime(&self, delta: u64) {
         let weight = self.weight.load(Ordering::Relaxed);
         let vruntime_delta = weight_to_vruntime(delta, weight);
@@ -124,44 +163,61 @@ impl CfsTask {
         self.runtime.fetch_add(delta, Ordering::Relaxed);
     }
 
-    /// Get time slice based on weight
+    /// Ağırlığa göre zaman dilimini hesaplar.
+    /// Yüksek ağırlıklı task'lar daha uzun dilim alır.
     pub fn calc_slice(&self, total_weight: u64, nr_running: u64) -> u64 {
         if nr_running == 0 {
             return CFS_DEFAULT_SLICE;
         }
-        
+
         let weight = self.weight.load(Ordering::Relaxed);
         let slice = (weight * CFS_DEFAULT_SLICE * nr_running) / total_weight;
-        
+
         slice.max(CFS_MIN_GRANULARITY)
     }
 
-    /// Check if task is eligible to run (for buddy selection)
+    /// Task'ın çalışmaya uygun olup olmadığını kontrol eder.
+    /// min_vruntime'dan büyük vruntime'a sahip task'lar bekletilir.
     pub fn is_eligible(&self, min_vruntime: u64) -> bool {
         self.vruntime.load(Ordering::Relaxed) <= min_vruntime
     }
 }
 
 // ============================================================================
-// CFS RUN QUEUE
+// CFS ÇALIŞMA KUYRUĞU (RUN QUEUE)
 // ============================================================================
+//
+// CFS run queue'su kavramsal olarak bir Red-Black Tree'dir.
+// Burada BTreeMap ile simüle edilmiştir (key = vruntime).
+//
+// Görsel:
+//   ┌──────────────────────────────────────────┐
+//   │  CfsRq (Çalışma Kuyruğu)                │
+//   │                                          │
+//   │  BTreeMap<vruntime, CfsTask>             │
+//   │  ┌────┬────┬────┬────┬────┐             │
+//   │  │ 10 │ 30 │ 50 │ 80 │100 │  <-- sol   │
+//   │  └────┴────┴────┴────┴────┘  en düşük  │
+//   │    ▲                                     │
+//   │  pick_next() burayı seçer                │
+//   └──────────────────────────────────────────┘
 
 pub struct CfsRq {
-    /// Tasks sorted by vruntime (rbtree simulation)
+    /// vruntime'a göre sıralanmış task listesi (Red-Black Tree simülasyonu)
     pub tasks: Mutex<BTreeMap<u64, Arc<CfsTask>>>, // vruntime -> task
-    /// Minimum vruntime
+    /// Kuyrukta en küçük vruntime değeri — yeni task'lar buna göre ayarlanır
     pub min_vruntime: AtomicU64,
-    /// Total weight
+    /// Kuyruktaki tüm task'ların toplam ağırlığı (zaman dilimi hesabı için)
     pub total_weight: AtomicU64,
-    /// Number of running tasks
+    /// Kuyruktaki çalışabilir task sayısı
     pub nr_running: AtomicU32,
-    /// Currently running task
+    /// Şu an CPU'da çalışan task
     pub curr: Mutex<Option<Arc<CfsTask>>>,
-    /// Load average
+    /// PELT yük ortalaması (tüm kuyruk)
     pub load_avg: AtomicU64,
-    /// Utilization average
+    /// PELT kullanım ortalaması (tüm kuyruk)
     pub util_avg: AtomicU64,
-    /// Clock
+    /// Monoton artan mantıksal saat
     pub clock: AtomicU64,
 }
 
@@ -179,85 +235,90 @@ impl CfsRq {
         }
     }
 
-    /// Enqueue task
+    /// Task'ı çalışma kuyruğuna ekler.
+    /// Yeni veya uyuyan task'lar min_vruntime'a sıfırlanır; böylece
+    /// çok uzun süre uyuyan task'lar aniden geçmişe dönmez.
     pub fn enqueue(&self, task: Arc<CfsTask>) {
         let vruntime = task.vruntime.load(Ordering::Relaxed);
-        
-        // Ensure vruntime is at least min_vruntime
+
+        // vruntime en az min_vruntime kadar olmalıdır (fairness koruması)
         let min_vr = self.min_vruntime.load(Ordering::Relaxed);
         let adjusted_vr = vruntime.max(min_vr);
-        
+
         task.vruntime.store(adjusted_vr, Ordering::SeqCst);
         task.on_rq.store(true, Ordering::SeqCst);
         task.enqueue_time.store(self.clock.load(Ordering::Relaxed), Ordering::SeqCst);
-        
+
         self.tasks.lock().insert(adjusted_vr, task.clone());
         self.total_weight.fetch_add(task.weight.load(Ordering::Relaxed), Ordering::SeqCst);
         self.nr_running.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Dequeue task
+    /// Task'ı kuyruktan çıkarır (bloklanma veya sonlanma durumunda).
     pub fn dequeue(&self, task: &CfsTask) {
         let vruntime = task.vruntime.load(Ordering::Relaxed);
-        
+
         self.tasks.lock().remove(&vruntime);
         self.total_weight.fetch_sub(task.weight.load(Ordering::Relaxed), Ordering::SeqCst);
         self.nr_running.fetch_sub(1, Ordering::SeqCst);
         task.on_rq.store(false, Ordering::SeqCst);
     }
 
-    /// Pick next task (leftmost in rbtree)
+    /// Bir sonraki çalıştırılacak task'ı seçer.
+    /// Red-Black Tree'nin en sol yaprağı = en küçük vruntime = en çok hak kazanan task.
     pub fn pick_next(&self) -> Option<Arc<CfsTask>> {
         let tasks = self.tasks.lock();
-        
-        // Get leftmost (lowest vruntime)
+
+        // En sol düğüm (en düşük vruntime) — O(log n) but effectively O(1) cached
         if let Some((&vruntime, task)) = tasks.iter().next() {
-            // Update min_vruntime
+            // min_vruntime'ı güncelle — kuyruk saatini ileri taşır
             self.min_vruntime.store(vruntime, Ordering::SeqCst);
-            
+
             task.running.store(true, Ordering::SeqCst);
             *self.curr.lock() = Some(task.clone());
-            
+
             return Some(task.clone());
         }
-        
+
         None
     }
 
-    /// Put prev task back
+    /// Önceki task'ı geri kuyruğa alır (preemption veya yield sonrası).
     pub fn put_prev(&self, task: &CfsTask) {
         task.running.store(false, Ordering::SeqCst);
-        
+
         if task.on_rq.load(Ordering::Relaxed) {
-            // Re-enqueue with updated vruntime
+            // Güncellenmiş vruntime ile yeniden ekle
             let vruntime = task.vruntime.load(Ordering::Relaxed);
             self.tasks.lock().insert(vruntime, Arc::new(task.clone()));
         }
     }
 
-    /// Update clock
+    /// Mantıksal saati günceller.
     pub fn update_clock(&self, now: u64) {
         self.clock.store(now, Ordering::SeqCst);
     }
 
-    /// Update load average (PELT - Per-Entity Load Tracking)
+    /// PELT (Per-Entity Load Tracking) yük ortalamasını günceller.
+    /// Yük = ağırlık × delta_süre (exponential moving average ile düzeltilir).
     pub fn update_load_avg(&self, task: &CfsTask, delta: u64) {
-        // Simplified PELT calculation
+        // Basitleştirilmiş PELT hesabı
         let weight = task.weight.load(Ordering::Relaxed);
         let contribution = weight * delta;
-        
+
         task.load_avg.fetch_add(contribution, Ordering::Relaxed);
         self.load_avg.fetch_add(contribution, Ordering::Relaxed);
     }
 
-    /// Check for buddy (preemption candidate)
+    /// Uyanan bir task'ın mevcut task'ı preempt edip edemeyeceğini kontrol eder.
+    /// CFS_WAKEUP_GRANULARITY'den fazla vruntime avantajı varsa preempt edilir.
     pub fn check_preempt_wakeup(&self, task: &CfsTask) -> bool {
         let curr = self.curr.lock();
         if let Some(curr_task) = curr.as_ref() {
             let curr_vr = curr_task.vruntime.load(Ordering::Relaxed);
             let task_vr = task.vruntime.load(Ordering::Relaxed);
-            
-            // Preempt if new task has significantly lower vruntime
+
+            // Yeni task çok daha düşük vruntime'a sahipse preempt et
             if task_vr + CFS_WAKEUP_GRANULARITY < curr_vr {
                 return true;
             }
@@ -267,19 +328,19 @@ impl CfsRq {
 }
 
 // ============================================================================
-// CFS SCHEDULER
+// CFS ZAMANLAYICISI
 // ============================================================================
 
 pub struct CfsScheduler {
-    /// Per-CPU run queues
+    /// CPU başına çalışma kuyruğu (SMP desteği)
     pub run_queues: Mutex<Vec<CfsRq>>,
-    /// Number of CPUs
+    /// Sistem CPU sayısı
     pub nr_cpus: usize,
-    /// Is enabled
+    /// Zamanlayıcı aktif mi?
     pub enabled: AtomicBool,
-    /// Tick interval (nanoseconds)
+    /// Tick aralığı (nanosaniye cinsinden)
     pub tick_interval: u64,
-    /// Load balancer interval
+    /// Yük dengeleme aralığı (load balancer ne sıklıkla çalışır)
     pub lb_interval: u64,
 }
 
@@ -289,7 +350,7 @@ impl CfsScheduler {
         for _ in 0..nr_cpus {
             rqs.push(CfsRq::new());
         }
-        
+
         Self {
             run_queues: Mutex::new(rqs),
             nr_cpus,
@@ -299,7 +360,7 @@ impl CfsScheduler {
         }
     }
 
-    /// Schedule - pick next task
+    /// Belirtilen CPU için bir sonraki task'ı seçer.
     pub fn schedule(&self, cpu: usize) -> Option<Arc<CfsTask>> {
         let rqs = self.run_queues.lock();
         if let Some(rq) = rqs.get(cpu) {
@@ -309,25 +370,26 @@ impl CfsScheduler {
         }
     }
 
-    /// Timer tick
+    /// Zamanlayıcı tick'i işler.
+    /// Her tick'te: saati güncelle, vruntime artır, zaman dilimi dolmuşsa yeniden zamanla.
     pub fn tick(&self, cpu: usize) {
         let rqs = self.run_queues.lock();
         if let Some(rq) = rqs.get(cpu) {
             let now = crate::task::scheduler::get_ticks();
             rq.update_clock(now);
-            
-            // Update current task
+
+            // Çalışan task'ı güncelle
             let curr = rq.curr.lock();
             if let Some(task) = curr.as_ref() {
                 task.update_vruntime(self.tick_interval);
                 rq.update_load_avg(task, self.tick_interval);
-                
-                // Check if time slice expired
+
+                // Zaman dilimi doldu mu kontrol et
                 let runtime = task.runtime.load(Ordering::Relaxed);
                 let slice = task.slice.load(Ordering::Relaxed);
-                
+
                 if runtime >= slice {
-                    // Reschedule needed
+                    // Yeniden zamanlama gerekli
                     drop(curr);
                     rq.put_prev(task);
                 }
@@ -335,7 +397,7 @@ impl CfsScheduler {
         }
     }
 
-    /// Enqueue task
+    /// Task'ı kuyruğa ekler.
     pub fn enqueue(&self, task: Arc<CfsTask>, cpu: usize) {
         let rqs = self.run_queues.lock();
         if let Some(rq) = rqs.get(cpu) {
@@ -343,7 +405,7 @@ impl CfsScheduler {
         }
     }
 
-    /// Dequeue task
+    /// Task'ı kuyruktan çıkarır.
     pub fn dequeue(&self, task: &CfsTask, cpu: usize) {
         let rqs = self.run_queues.lock();
         if let Some(rq) = rqs.get(cpu) {
@@ -351,36 +413,37 @@ impl CfsScheduler {
         }
     }
 
-    /// Load balance between CPUs
+    /// CPU'lar arası yük dengelemesi yapar.
+    /// En meşgul ve en boş CPU'yu bularak görev migrasyonuna karar verir.
     pub fn load_balance(&self) {
-        // Find busiest and idlest CPUs
+        // En meşgul ve en boş CPU'yu bul
         let rqs = self.run_queues.lock();
         let mut busiest_load = 0u64;
         let mut busiest_cpu = 0;
         let mut idlest_load = u64::MAX;
         let mut idlest_cpu = 0;
-        
+
         for (i, rq) in rqs.iter().enumerate() {
             let load = rq.load_avg.load(Ordering::Relaxed);
-            
+
             if load > busiest_load {
                 busiest_load = load;
                 busiest_cpu = i;
             }
-            
+
             if load < idlest_load {
                 idlest_load = load;
                 idlest_cpu = i;
             }
         }
-        
-        // Migrate tasks if imbalance
+
+        // Yük dengesizliği 2 kattan fazlaysa migrasyon yap
         if busiest_load > idlest_load * 2 {
-            // Would migrate tasks here
+            // Görev migrasyonu burada gerçekleştirilecek
         }
     }
 
-    /// Set nice for task
+    /// Task'ın nice değerini günceller, ağırlığı yeniden hesaplar.
     pub fn set_nice(&self, task: &CfsTask, nice: i32) {
         task.set_nice(nice);
     }
@@ -391,28 +454,28 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARAYÜZÜ
 // ============================================================================
 
 pub fn sys_sched_setparam(pid: u64, nice: i32) -> i32 {
-    // Find task and set nice
+    // Task'ı bul ve nice değerini ayarla
     nice.clamp(-20, 19);
     0
 }
 
 pub fn sys_sched_getparam(pid: u64) -> i32 {
-    0 // Return nice value
+    0 // nice değerini döndür
 }
 
 pub fn sys_sched_yield() -> i32 {
-    // Yield current task
+    // Mevcut task'ı gönüllü olarak CPU'yu bırakmaya zorla
     0
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
 pub fn init() {
-    crate::serial_println!("[CFS] Completely Fair Scheduler initialized");
+    crate::serial_println!("[CFS] Tamamen Adil Zamanlayıcı (CFS) başlatıldı");
 }

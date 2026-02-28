@@ -45,6 +45,8 @@ pub struct VirtualDesktop {
 }
 
 impl VirtualDesktop {
+    /// Belirtilen kimlik, ad ve sıra indeksiyle yeni bir sanal masaüstü oluşturur.
+    /// Varsayılan arka plan rengi `0x1E1E1E` (koyu antrasit); pencere listesi boş başlar.
     pub fn new(id: usize, name: &str, index: usize) -> Self {
         VirtualDesktop {
             id,
@@ -117,6 +119,9 @@ pub struct DesktopManager {
 }
 
 impl DesktopManager {
+    /// Ekran boyutlarını alarak masaüstü yöneticisini başlatır.
+    /// Varsayılan olarak 3 masaüstü oluşturulur ve ilki aktif yapılır.
+    /// `max_desktops` = 16; bu sayıyı aşan ekleme talepleri reddedilir.
     pub fn new(screen_width: usize, screen_height: usize) -> Self {
         let mut manager = DesktopManager {
             desktops: Vec::new(),

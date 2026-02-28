@@ -1,7 +1,28 @@
-//! # Extended Attributes (xattr)
+//! # Genişletilmiş Öznitelikler (xattr)
 //!
-//! POSIX extended attributes support for files.
-//! Allows storing additional metadata as key-value pairs.
+//! Dosyalar için POSIX genişletilmiş öznitelikler desteği.
+//! Dosyalara anahtar-değer çiftleri olarak ek meta veri saklamayı sağlar.
+//!
+//! ## xattr Ad Alanı Ve Yapısı (ASCII Diyagram)
+//! ```text
+//! xattr Ad Alanları:
+//!   user.*         - Kullanıcı alanı (herkes okuyabilir, dosya sahibi yazabilir)
+//!   trusted.*      - Güvenilir alan (yalnızca CAP_SYS_ADMIN ile erişilebilir)
+//!   security.*     - Güvenlik alanı (SELinux, capability gibi)
+//!   system.*       - Sistem alanı (POSIX ACL'ler: posix_acl_access, posix_acl_default)
+//!
+//! Depolama Yapısı:
+//!   XATTR_MANAGER
+//!     └── storage: BTreeMap<inode, XattrStorage>
+//!           └── XattrStorage
+//!                 └── attrs: BTreeMap<String(isim), Vec<u8>(değer)>
+//!
+//! Sistem Çağrıları:
+//!   setxattr / lsetxattr / fsetxattr  → öznitelik yaz
+//!   getxattr / lgetxattr / fgetxattr  → öznitelik oku
+//!   listxattr / llistxattr / flistxattr → öznitelik listele
+//!   removexattr / lremovexattr / fremovexattr → öznitelik sil
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -11,42 +32,43 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// XATTR CONSTANTS
+// XATTR SABİTLERİ
 // ============================================================================
 
-/// Maximum xattr name length
+/// Maksimum xattr adı uzunluğu (bayt)
 pub const XATTR_NAME_MAX: usize = 255;
-/// Maximum xattr value length
+/// Maksimum xattr değer uzunluğu (bayt)
 pub const XATTR_VALUE_MAX: usize = 65536;
-/// Maximum xattr list size
+/// Maksimum xattr liste boyutu (bayt)
 pub const XATTR_LIST_MAX: usize = 65536;
 
-/// xattr namespace prefixes
+/// xattr ad alanı önekleri
 pub const XATTR_USER_PREFIX: &str = "user.";
 pub const XATTR_TRUSTED_PREFIX: &str = "trusted.";
 pub const XATTR_SECURITY_PREFIX: &str = "security.";
 pub const XATTR_SYSTEM_PREFIX: &str = "system.";
 
-/// xattr flags for setxattr
-pub const XATTR_CREATE: i32 = 1;  // Create only (fail if exists)
-pub const XATTR_REPLACE: i32 = 2; // Replace only (fail if not exists)
+/// setxattr bayrakları
+pub const XATTR_CREATE: i32 = 1;  // Yalnızca oluştur (zaten varsa hata)
+pub const XATTR_REPLACE: i32 = 2; // Yalnızca değiştir (yoksa hata)
 
 // ============================================================================
-// XATTR STRUCTURE
+// XATTR YAPISI
 // ============================================================================
 
-/// An extended attribute
+/// Tek bir genişletilmiş öznitelik kaydı
 #[derive(Clone, Debug)]
 pub struct Xattr {
-    /// Attribute name (including namespace prefix)
+    /// Öznitelik adı (ad alanı öneki dahil)
     pub name: String,
-    /// Attribute value
+    /// Öznitelik değeri
     pub value: Vec<u8>,
-    /// Flags
+    /// Bayraklar
     pub flags: u32,
 }
 
 impl Xattr {
+    /// Yeni bir xattr kaydı oluşturur
     pub fn new(name: &str, value: &[u8]) -> Self {
         Self {
             name: String::from(name),
@@ -55,7 +77,7 @@ impl Xattr {
         }
     }
 
-    /// Get namespace from name
+    /// Addan ad alanını belirler ve döndürür
     pub fn namespace(&self) -> &str {
         if self.name.starts_with(XATTR_USER_PREFIX) {
             "user"
@@ -70,31 +92,32 @@ impl Xattr {
         }
     }
 
-    /// Check if attribute name is valid
+    /// Öznitelik adının geçerli olup olmadığını kontrol eder
     pub fn is_valid_name(name: &str) -> bool {
         if name.is_empty() || name.len() > XATTR_NAME_MAX {
             return false;
         }
-        
-        // Must have a namespace prefix
+
+        // Ad alanı öneki olmalı (nokta içermeli)
         name.contains('.')
     }
 }
 
 // ============================================================================
-// XATTR MANAGER
+// XATTR YÖNETİCİSİ
 // ============================================================================
 
-/// Extended attribute storage (per-inode)
+/// İnode başına genişletilmiş öznitelik deposu
 #[derive(Clone, Debug)]
 pub struct XattrStorage {
-    /// Inode number
+    /// Inode numarası
     pub inode: u64,
-    /// Attributes (name -> value)
+    /// Öznitelikler (isim -> değer)
     attrs: BTreeMap<String, Vec<u8>>,
 }
 
 impl XattrStorage {
+    /// Verilen inode için yeni bir öznitelik deposu oluşturur
     pub fn new(inode: u64) -> Self {
         Self {
             inode,
@@ -102,36 +125,36 @@ impl XattrStorage {
         }
     }
 
-    /// Get attribute value
+    /// Öznitelik değerini döndürür
     pub fn get(&self, name: &str) -> Option<&[u8]> {
         self.attrs.get(name).map(|v| v.as_slice())
     }
 
-    /// Set attribute value
+    /// Özniteliği ayarlar; XATTR_CREATE ve XATTR_REPLACE bayraklarını destekler
     pub fn set(&mut self, name: &str, value: &[u8], flags: i32) -> Result<(), XattrError> {
         if !Xattr::is_valid_name(name) {
             return Err(XattrError::InvalidName);
         }
-        
+
         if value.len() > XATTR_VALUE_MAX {
             return Err(XattrError::ValueTooLarge);
         }
-        
+
         let exists = self.attrs.contains_key(name);
-        
-        // Check flags
+
+        // Bayrakları kontrol et
         if flags & XATTR_CREATE != 0 && exists {
             return Err(XattrError::AlreadyExists);
         }
         if flags & XATTR_REPLACE != 0 && !exists {
             return Err(XattrError::NotFound);
         }
-        
+
         self.attrs.insert(String::from(name), Vec::from(value));
         Ok(())
     }
 
-    /// Remove attribute
+    /// Özniteliği kaldırır
     pub fn remove(&mut self, name: &str) -> Result<(), XattrError> {
         if self.attrs.remove(name).is_some() {
             Ok(())
@@ -140,22 +163,22 @@ impl XattrStorage {
         }
     }
 
-    /// List all attribute names
+    /// Tüm öznitelik adlarını null ile ayrılmış bayt listesi olarak döndürür
     pub fn list(&self) -> Vec<u8> {
         let mut result = Vec::new();
         for name in self.attrs.keys() {
             result.extend_from_slice(name.as_bytes());
-            result.push(0); // null terminator
+            result.push(0); // null sonlandırıcı
         }
         result
     }
 
-    /// Get attribute count
+    /// Öznitelik sayısını döndürür
     pub fn count(&self) -> usize {
         self.attrs.len()
     }
 
-    /// Get total size of all attributes
+    /// Tüm özniteliklerin toplam boyutunu döndürür (isim + değer)
     pub fn total_size(&self) -> usize {
         self.attrs.iter()
             .map(|(k, v)| k.len() + 1 + v.len())
@@ -163,17 +186,18 @@ impl XattrStorage {
     }
 }
 
-/// Global xattr manager
+/// Global xattr yöneticisi - tüm inode'ların özniteliklerini merkezi olarak yönetir
 pub struct XattrManager {
-    /// Storage per inode
+    /// Inode başına depolama
     storage: Mutex<BTreeMap<u64, XattrStorage>>,
-    /// Total xattr count
+    /// Toplam xattr sayısı
     total_xattrs: AtomicU64,
-    /// Total size
+    /// Toplam boyut
     total_size: AtomicU64,
 }
 
 impl XattrManager {
+    /// Sabit zamanda yeni bir xattr yöneticisi oluşturur
     pub const fn new() -> Self {
         Self {
             storage: Mutex::new(BTreeMap::new()),
@@ -182,63 +206,63 @@ impl XattrManager {
         }
     }
 
-    /// Get storage for inode (create if not exists)
+    /// Inode için depolama alanını döndürür; yoksa yeni oluşturur
     fn get_or_create_storage(&self, inode: u64) -> XattrStorage {
         let mut storage = self.storage.lock();
         storage.entry(inode).or_insert_with(|| XattrStorage::new(inode)).clone()
     }
 
-    /// Get attribute
+    /// Belirtilen inode'un özniteliğini döndürür
     pub fn get(&self, inode: u64, name: &str) -> Option<Vec<u8>> {
         let storage = self.storage.lock();
         storage.get(&inode).and_then(|s| s.get(name).map(|v| v.to_vec()))
     }
 
-    /// Set attribute
+    /// Belirtilen inode'a öznitelik atar ve istatistikleri günceller
     pub fn set(&self, inode: u64, name: &str, value: &[u8], flags: i32) -> Result<(), XattrError> {
         let mut storage = self.storage.lock();
         let entry = storage.entry(inode).or_insert_with(|| XattrStorage::new(inode));
-        
+
         let old_size = entry.get(name).map(|v| v.len()).unwrap_or(0);
         entry.set(name, value, flags)?;
-        
-        // Update stats
+
+        // İstatistikleri güncelle
         self.total_xattrs.fetch_add(1, Ordering::Relaxed);
         self.total_size.fetch_add((value.len() - old_size) as u64, Ordering::Relaxed);
-        
+
         crate::serial_println!(
-            "[XATTR] Set '{}' on inode {:#x} ({} bytes)",
+            "[XATTR] '{}' inode {:#x} üzerine ayarlandı ({} bayt)",
             name, inode, value.len()
         );
-        
+
         Ok(())
     }
 
-    /// Remove attribute
+    /// Belirtilen inode'dan özniteliği kaldırır
     pub fn remove(&self, inode: u64, name: &str) -> Result<(), XattrError> {
         let mut storage = self.storage.lock();
-        
+
         if let Some(entry) = storage.get_mut(&inode) {
             let size = entry.get(name).map(|v| v.len()).unwrap_or(0);
             entry.remove(name)?;
-            
+
             self.total_xattrs.fetch_sub(1, Ordering::Relaxed);
             self.total_size.fetch_sub(size as u64, Ordering::Relaxed);
-            
-            crate::serial_println!("[XATTR] Removed '{}' from inode {:#x}", name, inode);
+
+            crate::serial_println!("[XATTR] '{}' inode {:#x}'den kaldırıldı", name, inode);
             Ok(())
         } else {
             Err(XattrError::NotFound)
         }
     }
 
-    /// List attributes
+    /// Belirtilen inode'un tüm öznitelik adlarını listeler
     pub fn list(&self, inode: u64) -> Vec<u8> {
         let storage = self.storage.lock();
         storage.get(&inode).map(|s| s.list()).unwrap_or_default()
     }
 
-    /// Remove all attributes for inode
+    /// Bir inode'un tüm özniteliklerini kaldırır (dosya silindiğinde çağrılır)
     pub fn remove_all(&self, inode: u64) {
         let mut storage = self.storage.lock();
         if let Some(entry) = storage.remove(&inode) {
@@ -251,14 +275,15 @@ impl XattrManager {
 }
 
 lazy_static::lazy_static! {
-    /// Global xattr manager
+    /// Global xattr yöneticisi
     static ref XATTR_MANAGER: XattrManager = XattrManager::new();
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TÜRLERİ
 // ============================================================================
 
+/// xattr işlemlerinde oluşabilecek hata türleri
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XattrError {
     InvalidName,
@@ -270,28 +295,28 @@ pub enum XattrError {
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARABIRIMI
 // ============================================================================
 
-/// setxattr syscall implementation
+/// setxattr sistem çağrısı uygulaması - yola göre öznitelik ayarlar
 pub fn sys_setxattr(path: &str, name: &str, value: &[u8], flags: i32) -> i32 {
     if !Xattr::is_valid_name(name) {
         return -22; // EINVAL
     }
-    
+
     if value.len() > XATTR_VALUE_MAX {
         return -7; // E2BIG
     }
-    
-    // Get inode from path (placeholder)
+
+    // Yoldan inode al (yer tutucu)
     let inode = hash_path(path);
-    
-    // Check namespace permissions
+
+    // Ad alanı izin kontrolü
     if name.starts_with(XATTR_TRUSTED_PREFIX) || name.starts_with(XATTR_SECURITY_PREFIX) {
-        // These require CAP_SYS_ADMIN
-        // For now, allow all
+        // Bunlar için CAP_SYS_ADMIN gerekir
+        // Şimdilik herkese izin verilmektedir
     }
-    
+
     match XATTR_MANAGER.set(inode, name, value, flags) {
         Ok(()) => 0,
         Err(XattrError::AlreadyExists) => -17, // EEXIST
@@ -302,45 +327,45 @@ pub fn sys_setxattr(path: &str, name: &str, value: &[u8], flags: i32) -> i32 {
     }
 }
 
-/// lsetxattr syscall (same as setxattr but doesn't follow symlinks)
+/// lsetxattr sistem çağrısı (setxattr ile aynı, sembolik bağları takip etmez)
 pub fn sys_lsetxattr(path: &str, name: &str, value: &[u8], flags: i32) -> i32 {
-    // For now, same as setxattr
+    // Şimdilik setxattr ile aynı
     sys_setxattr(path, name, value, flags)
 }
 
-/// fsetxattr syscall (by file descriptor)
+/// fsetxattr sistem çağrısı (dosya tanımlayıcısına göre)
 pub fn sys_fsetxattr(fd: i32, name: &str, value: &[u8], flags: i32) -> i32 {
     if fd < 0 {
         return -9; // EBADF
     }
-    
-    // Get inode from fd (placeholder)
+
+    // Dosya tanımlayıcısından inode al (yer tutucu)
     let inode = fd as u64;
-    
+
     match XATTR_MANAGER.set(inode, name, value, flags) {
         Ok(()) => 0,
         Err(_) => -5, // EIO
     }
 }
 
-/// getxattr syscall implementation
+/// getxattr sistem çağrısı uygulaması - yola göre öznitelik okur
 pub fn sys_getxattr(path: &str, name: &str, buf: &mut [u8]) -> i64 {
     if !Xattr::is_valid_name(name) {
         return -22; // EINVAL
     }
-    
+
     let inode = hash_path(path);
-    
+
     match XATTR_MANAGER.get(inode, name) {
         Some(value) => {
             if buf.is_empty() {
                 return value.len() as i64;
             }
-            
+
             if value.len() > buf.len() {
                 return -34; // ERANGE
             }
-            
+
             buf[..value.len()].copy_from_slice(&value);
             value.len() as i64
         }
@@ -348,29 +373,29 @@ pub fn sys_getxattr(path: &str, name: &str, buf: &mut [u8]) -> i64 {
     }
 }
 
-/// lgetxattr syscall
+/// lgetxattr sistem çağrısı (sembolik bağları takip etmez)
 pub fn sys_lgetxattr(path: &str, name: &str, buf: &mut [u8]) -> i64 {
     sys_getxattr(path, name, buf)
 }
 
-/// fgetxattr syscall
+/// fgetxattr sistem çağrısı (dosya tanımlayıcısına göre)
 pub fn sys_fgetxattr(fd: i32, name: &str, buf: &mut [u8]) -> i64 {
     if fd < 0 {
         return -9; // EBADF
     }
-    
+
     let inode = fd as u64;
-    
+
     match XATTR_MANAGER.get(inode, name) {
         Some(value) => {
             if buf.is_empty() {
                 return value.len() as i64;
             }
-            
+
             if value.len() > buf.len() {
                 return -34; // ERANGE
             }
-            
+
             buf[..value.len()].copy_from_slice(&value);
             value.len() as i64
         }
@@ -378,58 +403,58 @@ pub fn sys_fgetxattr(fd: i32, name: &str, buf: &mut [u8]) -> i64 {
     }
 }
 
-/// listxattr syscall implementation
+/// listxattr sistem çağrısı uygulaması - tüm öznitelik adlarını listeler
 pub fn sys_listxattr(path: &str, buf: &mut [u8]) -> i64 {
     let inode = hash_path(path);
-    
+
     let list = XATTR_MANAGER.list(inode);
-    
+
     if buf.is_empty() {
         return list.len() as i64;
     }
-    
+
     if list.len() > buf.len() {
         return -34; // ERANGE
     }
-    
+
     buf[..list.len()].copy_from_slice(&list);
     list.len() as i64
 }
 
-/// llistxattr syscall
+/// llistxattr sistem çağrısı (sembolik bağları takip etmez)
 pub fn sys_llistxattr(path: &str, buf: &mut [u8]) -> i64 {
     sys_listxattr(path, buf)
 }
 
-/// flistxattr syscall
+/// flistxattr sistem çağrısı (dosya tanımlayıcısına göre)
 pub fn sys_flistxattr(fd: i32, buf: &mut [u8]) -> i64 {
     if fd < 0 {
         return -9; // EBADF
     }
-    
+
     let inode = fd as u64;
     let list = XATTR_MANAGER.list(inode);
-    
+
     if buf.is_empty() {
         return list.len() as i64;
     }
-    
+
     if list.len() > buf.len() {
         return -34; // ERANGE
     }
-    
+
     buf[..list.len()].copy_from_slice(&list);
     list.len() as i64
 }
 
-/// removexattr syscall implementation
+/// removexattr sistem çağrısı uygulaması - özniteliği kaldırır
 pub fn sys_removexattr(path: &str, name: &str) -> i32 {
     if !Xattr::is_valid_name(name) {
         return -22; // EINVAL
     }
-    
+
     let inode = hash_path(path);
-    
+
     match XATTR_MANAGER.remove(inode, name) {
         Ok(()) => 0,
         Err(XattrError::NotFound) => -61, // ENODATA
@@ -437,19 +462,19 @@ pub fn sys_removexattr(path: &str, name: &str) -> i32 {
     }
 }
 
-/// lremovexattr syscall
+/// lremovexattr sistem çağrısı (sembolik bağları takip etmez)
 pub fn sys_lremovexattr(path: &str, name: &str) -> i32 {
     sys_removexattr(path, name)
 }
 
-/// fremovexattr syscall
+/// fremovexattr sistem çağrısı (dosya tanımlayıcısına göre)
 pub fn sys_fremovexattr(fd: i32, name: &str) -> i32 {
     if fd < 0 {
         return -9; // EBADF
     }
-    
+
     let inode = fd as u64;
-    
+
     match XATTR_MANAGER.remove(inode, name) {
         Ok(()) => 0,
         Err(XattrError::NotFound) => -61, // ENODATA
@@ -458,10 +483,10 @@ pub fn sys_fremovexattr(fd: i32, name: &str) -> i32 {
 }
 
 // ============================================================================
-// HELPER FUNCTIONS
+// YARDIMCI FONKSİYONLAR
 // ============================================================================
 
-/// Simple path hash for inode placeholder
+/// Yol için basit hash fonksiyonu - inode yer tutucusu olarak kullanılır
 fn hash_path(path: &str) -> u64 {
     let mut hash: u64 = 5381;
     for byte in path.bytes() {
@@ -471,48 +496,48 @@ fn hash_path(path: &str) -> u64 {
 }
 
 // ============================================================================
-// SPECIAL XATTR HANDLING
+// ÖZEL XATTR İŞLEME
 // ============================================================================
 
-/// ACL related xattrs
+/// POSIX ACL ile ilgili xattr'lar
 pub const XATTR_NAME_POSIX_ACL_ACCESS: &str = "system.posix_acl_access";
 pub const XATTR_NAME_POSIX_ACL_DEFAULT: &str = "system.posix_acl_default";
 
-/// SELinux xattr
+/// SELinux güvenlik bağlamı xattr'ı
 pub const XATTR_NAME_SELINUX: &str = "security.selinux";
 
-/// Capability xattrs
+/// Yetenek (capability) xattr'ları
 pub const XATTR_NAME_CAPS: &str = "security.capability";
 
-/// Check if xattr is a special system xattr
+/// Verilen adın özel bir sistem xattr'ı olup olmadığını kontrol eder
 pub fn is_system_xattr(name: &str) -> bool {
     name == XATTR_NAME_POSIX_ACL_ACCESS ||
     name == XATTR_NAME_POSIX_ACL_DEFAULT ||
     name == XATTR_NAME_CAPS
 }
 
-/// Check if xattr is security-related
+/// Verilen adın güvenlik xattr'ı olup olmadığını kontrol eder
 pub fn is_security_xattr(name: &str) -> bool {
     name.starts_with(XATTR_SECURITY_PREFIX)
 }
 
 // ============================================================================
-// PUBLIC API
+// GENEL API
 // ============================================================================
 
-/// Initialize xattr subsystem
+/// xattr alt sistemini başlatır
 pub fn init() {
-    crate::serial_println!("[XATTR] Subsystem initialized");
+    crate::serial_println!("[XATTR] Alt sistem başlatıldı");
 }
 
-/// Get xattr statistics
+/// xattr istatistik yapısı
 pub struct XattrStats {
     pub inode_count: usize,
     pub total_xattrs: u64,
     pub total_size: u64,
 }
 
-/// Get statistics
+/// xattr istatistiklerini döndürür (inode sayısı, toplam öznitelik ve boyut)
 pub fn get_stats() -> XattrStats {
     XattrStats {
         inode_count: XATTR_MANAGER.storage.lock().len(),
@@ -521,7 +546,7 @@ pub fn get_stats() -> XattrStats {
     }
 }
 
-/// Remove all xattrs for an inode (called when file is deleted)
+/// Bir inode'un tüm xattr'larını kaldırır (dosya silindiğinde çağrılır)
 pub fn remove_inode_xattrs(inode: u64) {
     XATTR_MANAGER.remove_all(inode);
 }

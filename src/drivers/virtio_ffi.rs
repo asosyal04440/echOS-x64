@@ -1,6 +1,63 @@
+//! # VirtIO FFI (Foreign Function Interface) Katmanı
+//!
+//! Bu modül, VirtIO blok cihazı ile Rust kodunu C tabanlı sürücü stublara
+//! bağlayan köprü katmanıdır. Gerçek bir C arka ucu olmadığından stub
+//! (iskelet) implementasyonlar kullanılmaktadır.
+//!
+//! ## VirtIO Nedir?
+//!
+//! VirtIO, sanallaştırma ortamlarında (QEMU, KVM, Simics) kullanılan
+//! standart bir aygıt arabirimi protokolüdür. Misafir işletim sistemi ile
+//! ana bilgisayar arasında verimli I/O sağlar.
+//!
+//! ## Mimari Diyagramı
+//!
+//! ```
+//!  ┌───────────────────────────────────────────────┐
+//!  │              Rust Çekirdek (echOS)             │
+//!  │                                               │
+//!  │   VirtioBlock::read_sector()                  │
+//!  │   VirtioBlock::write_sector()                 │
+//!  │           │                                   │
+//!  │           ▼                                   │
+//!  │   virtio_ffi::init()  ──────► BASE_PORT       │
+//!  │   virtio_ffi::device() ◄──── VirtioBlock      │
+//!  │           │                                   │
+//!  │           ▼   (FFI çağrısı)                   │
+//!  │   virtio_disk_rw(sector, buf, write)          │
+//!  │           │                                   │
+//!  └───────────│───────────────────────────────────┘
+//!              ▼  (stub: gerçek C yok)
+//!         serial_println! (stub mesajı)
+//! ```
+//!
+//! ## virt_to_phys_c Fonksiyonu
+//!
+//! C kodu fiziksel adreslere ihtiyaç duyar. Bu fonksiyon, sanal adresi
+//! bellek çeviri tablosundan (page table) fiziksel adrese çevirir.
+//!
+//! ## Sektör Tabanlı Okuma/Yazma
+//!
+//! Disk, 512 byte'lık sektörler halinde organize edilir.
+//! read_at/write_at, byte offset üzerinden sektör hesabı yaparak
+//! çoklu sektör transferi gerçekleştirir.
+//!
+//! ```
+//! offset=768  → sektör=1 (768/512), within=256 (768%512)
+//!    sektör 0  sektör 1
+//!   [       ] [  ▲    ]  ← within=256 pozisyonundan başla
+//!               └─ veri buradan kopyalanır
+//! ```
+
 use core::sync::atomic::{AtomicU16, Ordering};
 use rcore_fs::dev::{Device, Result as DevResult};
 use spin::Mutex;
+
+// ---------------------------------------------------------------------------
+// C arka ucu stub implementasyonları
+// Gerçek donanım sürücüsü bağlandığında bu fonksiyonlar gerçek
+// C kütüphanesi tarafından sağlanır.
+// ---------------------------------------------------------------------------
 
 fn virtio_disk_init(_base_port: u16) {
     crate::serial_println!("VIRTIO FFI: virtio_disk_init stub (no C backend)");
@@ -10,9 +67,23 @@ fn virtio_disk_rw(_sector: u64, _buf: *mut u8, _write: i32) {
     crate::serial_println!("VIRTIO FFI: virtio_disk_rw stub (no C backend)");
 }
 
+// ---------------------------------------------------------------------------
+// Global durum değişkenleri
+// LOCK: aynı anda yalnızca bir okuma/yazma operasyonuna izin verir (mutual exclusion)
+// BASE_PORT: VirtIO cihazının I/O port adresi (atomic = iş parçacığı güvenli)
+// ---------------------------------------------------------------------------
+
 static LOCK: Mutex<()> = Mutex::new(());
 static BASE_PORT: AtomicU16 = AtomicU16::new(0);
 
+/// Sanal adresi fiziksel adrese çeviren C-ABI fonksiyon.
+///
+/// `#[no_mangle]` ile Rust isim dönüşümü (name mangling) devre dışı bırakılır;
+/// böylece C kodu bu fonksiyonu `virt_to_phys_c` ismiyle doğrudan çağırabilir.
+///
+/// `extern "C"` ile C çağrı kuralı (calling convention) kullanılır:
+/// - Argümanlar: rdi, rsi, ... (x86-64 System V ABI)
+/// - Dönüş değeri: rax
 #[no_mangle]
 pub extern "C" fn virt_to_phys_c(ptr: *const u8) -> u64 {
     let vaddr = ptr as u64;
@@ -25,6 +96,14 @@ pub extern "C" fn virt_to_phys_c(ptr: *const u8) -> u64 {
     }
 }
 
+/// VirtIO FFI katmanını başlatır.
+///
+/// # Adımlar
+/// 1. C stub başlatma fonksiyonunu çağır
+/// 2. BASE_PORT atomik değişkenine portu kaydet
+///
+/// Atomik `SeqCst` (Sequentially Consistent) sıralama kullanılır:
+/// Bu en güçlü sıralamadır; tüm CPU çekirdekleri aynı sırayı görür.
 pub fn init(base_port: u16) {
     crate::serial_println!("VIRTIO FFI: init base_port=0x{:x}", base_port);
     unsafe {
@@ -34,6 +113,11 @@ pub fn init(base_port: u16) {
     crate::serial_println!("VIRTIO FFI: init done");
 }
 
+/// Başlatılmış VirtIO blok cihazını döndürür.
+///
+/// BASE_PORT sıfırsa cihaz henüz başlatılmamıştır → None döner.
+/// Bu `Option<T>` kalıbı, Rust'ta null pointer kullanımından kaçınmanın
+/// idiomatik (deyimsel) yoludur.
 pub fn device() -> Option<VirtioBlock> {
     let base_port = BASE_PORT.load(Ordering::SeqCst);
     if base_port == 0 {
@@ -44,11 +128,19 @@ pub fn device() -> Option<VirtioBlock> {
     }
 }
 
+/// VirtIO blok cihazını temsil eden yapı.
+///
+/// Tek alan olan `base_port`, donanım registerlarına erişmek için
+/// kullanılan I/O port tabanıdır.
 pub struct VirtioBlock {
     base_port: u16,
 }
 
 impl VirtioBlock {
+    /// Belirtilen sektörü okur.
+    ///
+    /// `buf`: 512 byte'lık sabit boyutlu dizi referansı ([u8; 512])
+    /// Mutex kilidi alınarak eşzamanlı erişim engellenir.
     pub fn read_sector(&self, sector: u64, buf: &mut [u8; 512]) {
         let _guard = LOCK.lock();
         crate::serial_println!("VIRTIO FFI: read sector={}", sector);
@@ -57,6 +149,10 @@ impl VirtioBlock {
         }
     }
 
+    /// Belirtilen sektöre yazar.
+    ///
+    /// `buf`: değişmez (immutable) referans → `as *mut u8` cast'i gerekir
+    /// write=1 parametresi C fonksiyonuna yazma işlemi olduğunu bildirir.
     pub fn write_sector(&self, sector: u64, buf: &[u8; 512]) {
         let _guard = LOCK.lock();
         crate::serial_println!("VIRTIO FFI: write sector={}", sector);
@@ -66,6 +162,20 @@ impl VirtioBlock {
     }
 }
 
+/// rcore_fs `Device` trait implementasyonu.
+///
+/// Bu trait, dosya sistemi katmanının doğrudan ham sektörlere değil
+/// byte offset üzerinden veri okumasını/yazmasını sağlar.
+///
+/// ## Sektör Hizalama Algoritması
+///
+/// ```
+/// offset → sektör numarası: offset / 512
+/// sektör içi offset: offset % 512
+/// kopyalanacak byte: min(512 - within, kalan_buf)
+/// ```
+///
+/// Döngü her iterasyonda en az 1 sektör işler ve `done` sayacını artırır.
 impl Device for VirtioBlock {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> DevResult<usize> {
         let _guard = LOCK.lock();
@@ -96,11 +206,14 @@ impl Device for VirtioBlock {
         while done < buf.len() {
             let sector = (cur_offset / 512) as u64;
             let within = cur_offset % 512;
+            // Önce mevcut sektörü oku (read-modify-write: kısmi yazma için gerekli)
             unsafe {
                 virtio_disk_rw(sector, sector_buf.as_mut_ptr(), 0);
             }
             let to_copy = core::cmp::min(512 - within, buf.len() - done);
+            // Değiştirilecek kısmı güncelle
             sector_buf[within..within + to_copy].copy_from_slice(&buf[done..done + to_copy]);
+            // Güncellenmiş sektörü geri yaz
             unsafe {
                 virtio_disk_rw(sector, sector_buf.as_mut_ptr(), 1);
             }
@@ -110,6 +223,7 @@ impl Device for VirtioBlock {
         Ok(done)
     }
 
+    /// Önbellek senkronizasyonu (bu implementasyonda gereksiz, her yazma anında senkron).
     fn sync(&self) -> DevResult<()> {
         Ok(())
     }

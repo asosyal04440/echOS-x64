@@ -1,6 +1,62 @@
-//! # memfd_create ve userfaultfd
+//! # memfd_create ve userfaultfd — Anonim Dosya ve Kullanıcı Alanı Sayfa Hataları
 //!
-//! Anonim dosya oluşturma ve kullanıcı alanı sayfa hatası işleme.
+//! ## memfd_create Nedir?
+//!
+//! `memfd_create()`, dosya sistemi kullanmadan bellek destekli anonim bir dosya tanımlayıcısı
+//! oluşturur. Linux 3.17'de eklendi (memfd_create(2) man sayfası):
+//!
+//! ```
+//! Kullanıcı alanı:
+//!   fd = memfd_create("paylaşılan_tampon", MFD_ALLOW_SEALING)
+//!   ftruncate(fd, 4096)
+//!   ptr = mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)
+//!
+//! Çekirdek tarafı (bu modül):
+//!   Memfd { pages: Vec<Vec<u8>>, seals: AtomicU32, ... }
+//! ```
+//!
+//! ## Mühür (Seal) Mekanizması
+//!
+//! Mühürler, dosyanın sonraki değişikliklerini kilitler. Bir kez eklenen mühür kaldırılamaz:
+//!
+//! ```
+//! F_SEAL_SEAL        → Artık yeni mühür eklenemez
+//! F_SEAL_SHRINK      → Dosya küçültülemez (ftruncate azaltma yasak)
+//! F_SEAL_GROW        → Dosya büyütülemez (ftruncate artırma yasak)
+//! F_SEAL_WRITE       → Yazma yasak (mmap PROT_WRITE de dahil)
+//! F_SEAL_FUTURE_WRITE→ Gelecekteki PROT_WRITE mmap'ler yasak
+//! F_SEAL_EXEC        → Çalıştırma yasak (PROT_EXEC mmap'ler yasak)
+//! ```
+//!
+//! ## userfaultfd Nedir?
+//!
+//! `userfaultfd` sayfa hatasını kullanıcı alanına devreder.
+//! Kernel normalde sayfa hatalarını kendi halleder; userfaultfd ile
+//! uygulama kendi başına sayfaları doldurabilir/kopyalayabilir:
+//!
+//! ```
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                    Sayfa Hatası Akışı                       │
+//! │                                                             │
+//! │  Uygulama belleğe erişir → Sayfa yok → Çekirdek hatayı     │
+//! │  userfaultfd kuyruğuna koyar                                │
+//! │       ↓                                                     │
+//! │  Kullanıcı alanı handler okuyor → UFFDIO_COPY ya da        │
+//! │  UFFDIO_ZEROPAGE ile sayfayı dolduruyor                     │
+//! │       ↓                                                     │
+//! │  Çekirdek erişimi yeniden deniyor → Başarılı               │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Kullanım Alanları
+//!
+//! - **Checkpoint/restore (CRIU)**: Süreç belleklerini kaydedip geri yükleme
+//! - **Tembel yükleme (lazy populate)**: Talep olmadan bellekten kaçınma
+//! - **Hata enjeksiyonu**: Test amacıyla belirli sayfalarda hata üretme
+//!
+//! ## İlgili Modüller:
+//! - `mod.rs`: `handle_user_page_fault()` — normal sayfa hata yöneticisi
+//! - `paging.rs`: Sayfa tablosu manipülasyonu
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

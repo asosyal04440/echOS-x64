@@ -1,25 +1,53 @@
-//! # echOS Grafik Engine
+//! # echOS Grafik Motoru
 //!
-//! Linear framebuffer rendering engine.
+//! Doğrusal çerçeve tampon (linear framebuffer) render motoru.
 //! SIMD optimizasyonları, tile-based rendering ve compositor içerir.
+//!
+//! ## Grafik Altyapısı Genel Görünümü
+//!
+//! ```text
+//!  Uygulama Katmanı
+//!       │
+//!       ▼
+//!  ┌────────────────┐    ┌──────────────────┐
+//!  │  compositor    │    │  gal (GAL trait) │  ← GPU Soyutlama Katmanı
+//!  │  (pencere WM)  │    │  SoftwareGal     │  ← CPU geri dönüş
+//!  └───────┬────────┘    └────────┬─────────┘
+//!          │                      │
+//!          ▼                      ▼
+//!  ┌────────────────────────────────────────┐
+//!  │           Surface / SwapChain          │  ← Piksel tamponu
+//!  │  tile_renderer  (kirli döşeme takibi)  │  ← tile-based render
+//!  └─────────────────┬──────────────────────┘
+//!                    │
+//!                    ▼
+//!  ┌────────────────────────────────────────┐
+//!  │  simd (AVX2/SSE bellek kopyalama)      │  ← Donanım hızlandırma
+//!  └─────────────────┬──────────────────────┘
+//!                    │
+//!                    ▼
+//!  ┌────────────────────────────────────────┐
+//!  │  GOP Framebuffer (fiziksel bellek)     │  ← Ekrana doğrudan yazma
+//!  └────────────────────────────────────────┘
+//! ```
 
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-/// SIMD (AVX/SSE) grafik operasyonları
+/// SIMD (AVX2/SSE) grafik operasyonları — donanım hızlandırmalı bellek kopyalama
 pub mod simd;
 
-/// Tile rendering altyapısı
+/// Tile (döşeme) render altyapısı — temel Tile ve TileIterator yapıları
 pub mod tile;
 
-/// Tile-based renderer
+/// Tile tabanlı render sistemi — TileRenderer, TileCache, HierarchicalTileCache
 pub mod tile_renderer;
 
-/// GPU Abstraction Layer
+/// GPU Soyutlama Katmanı (GAL) — SoftwareGal ve Gal trait'i
 pub mod gal;
 
-/// Desktop compositor (linear framebuffer)
+/// Masaüstü compositor (doğrusal çerçeve tampon) — pencere birleştirme döngüsü
 pub mod compositor;
 
 pub struct Surface {
@@ -65,7 +93,8 @@ impl Surface {
                 let sx = dx - dst_x;
                 let src_px = src.buffer[src_row + sx as usize];
                 let dst_px = self.buffer[dst_row + dx as usize];
-                // Kaynak piksel kendi alpha değeri varsa (AARRGGBBi bit 31..24)
+                // Kaynak pikselin kendi alpha değeri varsa (ARGB formatı bit 31..24)
+                // etkin alpha = kaynak_alpha × opacity / 255 şeklinde hesaplanır
                 let src_a = ((src_px >> 24) & 0xFF) as u32;
                 let eff_a = (src_a * a) / 255;
                 let eff_inv = 255 - eff_a;

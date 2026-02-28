@@ -3,6 +3,51 @@
 //! Sistem bozunma seviyelerini ve modül devre dışı bırakma işlemlerini yönetir.
 //! Sistem kırılırken kritik olmayan modülleri devre dışı bırakar,
 //! çekirdek işlevselliğini korur.
+//!
+//! ## Zarif Bozunma Nedir?
+//!
+//! Bir sistem parçası bozulduğunda tüm sistemi çöktürmek yerine,
+//! yalnızca o parçayı devre dışı bırakıp geri kalanın çalışmaya devam etmesine
+//! "zarif bozunma" denir. Uçak bileşenlerindeki "fail-safe" konseptine benzer.
+//!
+//! ## Modül Öncelik Sırası (Hangisi Önce Devre Dışı Kalır?)
+//!
+//! ```text
+//!  Bozunma Yok (Level 0)
+//!  ┌────────────────────────────────────────────────────┐
+//!  │  memory  cpu  scheduler  interrupts                │
+//!  │  audio  bluetooth  gui  network  usb  fs_write     │
+//!  └────────────────────────────────────────────────────┘
+//!                    Level 1 (Warning)
+//!  ┌────────────────────────────────────────────────────┐
+//!  │  [Hiçbir modül devre dışı bırakılmaz, yalnızca    │
+//!  │   izleme artar]                                    │
+//!  └────────────────────────────────────────────────────┘
+//!                    Level 2 (Degraded)
+//!  ┌────────────────────────────────────────────────────┐
+//!  │  memory  cpu  scheduler  interrupts                │
+//!  │  network  usb  fs_write                            │
+//!  │  ✗ audio  ✗ bluetooth  ✗ gui  (devre dışı)        │
+//!  └────────────────────────────────────────────────────┘
+//!                    Level 3 (Critical)
+//!  ┌────────────────────────────────────────────────────┐
+//!  │  memory  cpu  scheduler  interrupts   fs_write     │
+//!  │  ✗ audio  ✗ bluetooth  ✗ gui          (devre dışı)│
+//!  │  ✗ network  ✗ usb                     (devre dışı)│
+//!  └────────────────────────────────────────────────────┘
+//!                    Level 4 (Emergency)
+//!  ┌────────────────────────────────────────────────────┐
+//!  │  memory  cpu  scheduler  interrupts                │
+//!  │  ✗ audio  ✗ bluetooth  ✗ gui          (devre dışı)│
+//!  │  ✗ network  ✗ usb  ✗ fs_write         (devre dışı)│
+//!  └────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Devre Dışı Bırakma Türleri
+//!
+//! - **Seviye kaynaklı**: `set_level()` — bozunma seviyesi arttığında otomatik
+//! - **Manuel**: `disable_module()` — belirli bir modül için açık sebep kaydedilir
+//! - **Geri alma**: `enable_module()` — yalnızca seviye kaynaklı devre dışı bırakmalar geri alınır
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -28,6 +73,10 @@ pub struct ModuleState {
 }
 
 /// Bozunma yöneticisi — tüm modül durumlarını ve bozunma seviyesini yönetir
+///
+/// Singleton örüntüsüyle `DEGRADATION_MANAGER` static örneği üzerinden kullanılır.
+/// `init()` çağrıldığında hem çekirdek modüller (kaldırılamaz) hem de
+/// kritik olmayan modüller (devre dışı bırakılabilir) sisteme kayıt edilir.
 pub struct DegradationManager {
     /// Mevcut bozunma seviyesi (0-4)
     level: AtomicU32,
@@ -132,6 +181,12 @@ impl DegradationManager {
     }
     
     /// Bozunma seviyesini modüllere uygular — etkilenen modülleri devre dışı bırakır/etkinleştirir
+    ///
+    /// Mantık:
+    ///  1. Verilen seviyenin `disabled_modules()` listesine bak.
+    ///  2. O listede olan modüller etkinse → devre dışı bırak, sebebi "Degradation level X" kaydet.
+    ///  3. Listede olmayan ama "Degradation level" sebebiyle kapalı olan modüller → yeniden etkinleştir.
+    ///     (Manuel kapatmalar bu şekilde yanlışlıkla açılmaz.)
     fn apply_level(&self, level: RecoveryLevel) {
         let disabled = level.disabled_modules();
         

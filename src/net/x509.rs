@@ -1,6 +1,77 @@
-//! # X.509 Certificate Chain Verification
+//! # X.509 Sertifika Zinciri Doğrulama
 //!
-//! ASN.1 DER parsing and X.509 certificate verification for TLS 1.3
+//! TLS 1.3 için ASN.1 DER ayrıştırma ve X.509 sertifika doğrulama.
+//!
+//! ## X.509 Sertifika Nedir?
+//!
+//! X.509, kimlik kanıtlamak için kullanılan dijital sertifika standardıdır.
+//! HTTPS'de sunucuların kimliğini doğrulamak için kullanılır.
+//!
+//! ## Sertifika Zinciri (Certificate Chain)
+//!
+//! ```
+//!  Tarayıcı / İşletim Sistemi
+//!  +--------------------------+
+//!  | Root CA (Güvenilen KÖK)  |  <- Önceden yüklenmiş, kendinden imzalı
+//!  +--------------------------+
+//!           |  imzalar
+//!  +--------------------------+
+//!  | Intermediate CA          |  <- Ara sertifika yetkilisi
+//!  +--------------------------+
+//!           |  imzalar
+//!  +--------------------------+
+//!  | Leaf Certificate         |  <- example.com'un sertifikası
+//!  +--------------------------+
+//!
+//!  Doğrulama: Leaf -> Intermediate -> Root (Root güvenilirse ZİNCİR GEÇERLİ)
+//! ```
+//!
+//! ## ASN.1 DER Formatı
+//!
+//! ```
+//!  ASN.1 (Abstract Syntax Notation One): Veri yapısı tanım dili
+//!  DER (Distinguished Encoding Rules): ASN.1'in canonical binary kodlaması
+//!
+//!  Her ASN.1 elemanı TLV (Tag-Length-Value) formatındadır:
+//!  +----------+-----------+------------------+
+//!  | Tag (1+) | Uzunluk   | Değer (Value)    |
+//!  +----------+-----------+------------------+
+//!
+//!  Tag byte: [Sınıf(2bit)][Yapısal(1bit)][Tag_no(5bit)]
+//!  Sınıflar: Universal(0) Application(1) ContextSpecific(2) Private(3)
+//! ```
+//!
+//! ## X.509 Sertifika Yapısı (RFC 5280)
+//!
+//! ```
+//!  Certificate ::= SEQUENCE {
+//!    tbsCertificate     TBSCertificate,   <- İmzalanacak veri
+//!    signatureAlgorithm AlgorithmIdentifier,
+//!    signatureValue     BIT STRING        <- CA'nın imzası
+//!  }
+//!
+//!  TBSCertificate ::= SEQUENCE {
+//!    version         [0] INTEGER (v1|v2|v3),
+//!    serialNumber        INTEGER,
+//!    signature           AlgorithmIdentifier,
+//!    issuer              Name,            <- Kim imzaladı?
+//!    validity            Validity,        <- Geçerlilik süresi
+//!    subject             Name,            <- Kimin sertifikası?
+//!    subjectPublicKeyInfo SubjectPublicKeyInfo,
+//!    extensions      [3] Extensions OPTIONAL
+//!  }
+//! ```
+//!
+//! ## OID (Object Identifier) Örnekleri
+//!
+//! ```
+//!  2.5.4.3   = commonName (CN)
+//!  2.5.4.10  = organizationName (O)
+//!  2.5.29.19 = basicConstraints (CA mı?)
+//!  2.5.29.15 = keyUsage
+//!  1.2.840.113549.1.1.11 = sha256WithRSAEncryption
+//!  1.2.840.10045.4.3.2   = ecdsa-with-SHA256
+//! ```
 
 use alloc::vec::Vec;
 use alloc::vec;
@@ -10,10 +81,25 @@ use alloc::format;
 use spin::Mutex;
 
 // ============================================================================
-// ASN.1 DER PARSER
+// ASN.1 DER AYRIŞTIRICISI (PARSER)
 // ============================================================================
+//
+// DER (Distinguished Encoding Rules), ASN.1 veri yapılarını ikili formata
+// dönüştüren kanonik bir kodlama kurallar setidir. X.509 sertifikalar
+// DER formatında kodlanır.
+//
+// TLV Yapısı:
+//   Tag    : Veri tipini belirtir (1 veya daha fazla byte)
+//   Length : Değerin byte uzunluğu
+//   Value  : Gerçek veri
+//
+// Uzunluk Kodlaması:
+//   0x00-0x7F: Kısa form - doğrudan uzunluk
+//   0x81     : Sonraki 1 byte = uzunluk
+//   0x82     : Sonraki 2 byte = uzunluk
+//   0x80     : Belirsiz uzunluk (DER'de yasak!)
 
-/// ASN.1 Tag classes
+/// ASN.1 Tag sınıfları
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asn1Class {
     Universal,
@@ -22,7 +108,10 @@ pub enum Asn1Class {
     Private,
 }
 
-/// ASN.1 Universal tags
+/// ASN.1 Evrensel tag türleri
+///
+/// X.690 standardında tanımlı temel veri tipleri.
+/// Her tag sayısal bir değere karşılık gelir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asn1Tag {
     Boolean = 0x01,
@@ -66,7 +155,10 @@ impl Asn1Tag {
     }
 }
 
-/// ASN.1 DER element
+/// ASN.1 DER elemanı
+///
+/// Her eleman: sınıf, yapısal bayrağı, tag numarası, ham veri ve alt elemanlar içerir.
+/// Yapısal elemanlar (SEQUENCE, SET) alt elemanlarını `children` içinde taşır.
 #[derive(Clone, Debug)]
 pub struct Asn1Element {
     pub class: Asn1Class,
@@ -101,7 +193,10 @@ impl Asn1Element {
     }
 }
 
-/// ASN.1 DER Parser
+/// ASN.1 DER Ayrıştırıcısı
+///
+/// Akış tabanlı TLV ayrıştıcı. Her çağrıda bir DER elemanı okur.
+/// Yapısal elemanlar (`constructed=true`) alt elemanlarıyla birlikte döner.
 pub struct Asn1Parser<'a> {
     data: &'a [u8],
     pos: usize,
@@ -112,7 +207,9 @@ impl<'a> Asn1Parser<'a> {
         Asn1Parser { data, pos: 0 }
     }
     
-    /// Parse a single element
+    /// Tek bir DER elemanı ayrıştır (TLV: Tag-Length-Value)
+    ///
+    /// Tag okuma -> Uzunluk okuma -> Değer okuma -> (yapısal ise) Alt eleman ayrıştırma
     pub fn parse_element(&mut self) -> Option<Asn1Element> {
         if self.pos >= self.data.len() {
             return None;
@@ -216,7 +313,7 @@ impl<'a> Asn1Parser<'a> {
         })
     }
     
-    /// Parse all elements
+    /// Tüm elemanları sona kadar ayrıştır
     pub fn parse_all(&mut self) -> Vec<Asn1Element> {
         let mut elements = Vec::new();
         while let Some(elem) = self.parse_element() {
@@ -226,7 +323,12 @@ impl<'a> Asn1Parser<'a> {
     }
 }
 
-/// Parse OID from ASN.1 element
+/// OID değerini ASN.1 verisinden nokta-notasyonlu string'e dönüştür
+///
+/// OID kodlaması:
+/// - İlk byte: ilk iki bileşeni kodlar (first/40, first%40)
+/// - Geri kalan: 7-bit grup kodlaması (yüksek bit = devam ediyor)
+/// Örnek: {2, 5, 4, 3} -> "2.5.4.3" (commonName)
 pub fn parse_oid(data: &[u8]) -> String {
     if data.is_empty() {
         return String::new();
@@ -252,10 +354,20 @@ pub fn parse_oid(data: &[u8]) -> String {
 }
 
 // ============================================================================
-// X.509 CERTIFICATE
+// X.509 SERTİFİKASI
 // ============================================================================
+//
+// X.509, ITU-T tarafından tanımlanan en yaygın kullanılan dijital sertifika
+// standardıdır. SSL/TLS, kod imzalama ve e-posta güvenliğinde kullanılır.
+//
+// Bir X.509 sertifikası şunları içerir:
+// - Sertifika sahibinin public key'i
+// - Sertifika sahibinin kimliği (subject)
+// - Sertifikayı imzalayan CA'nın kimliği (issuer)
+// - Geçerlilik süresi (notBefore, notAfter)
+// - CA'nın dijital imzası (tbsCertificate üzerinde)
 
-/// X.509 Distinguished Name
+/// X.509 Ayırt Edici Ad (Distinguished Name)
 #[derive(Clone, Debug, Default)]
 pub struct X509Name {
     pub common_name: String,
@@ -271,7 +383,10 @@ impl X509Name {
         X509Name::default()
     }
     
-    /// Parse from ASN.1 sequence
+    /// ASN.1 dizisinden isim alanlarını ayrıştır
+    ///
+    /// X.509 Name yapısı: SET{SEQUENCE{OID, Value}} şeklinde iç içe yapıdır.
+    /// OID değerine göre CN, O, OU, C, L, ST alanları doldurulur.
     pub fn parse(elements: &[Asn1Element]) -> Self {
         let mut name = X509Name::new();
         
@@ -318,7 +433,11 @@ impl X509Name {
     }
 }
 
-/// X.509 Public Key
+/// X.509 Açık Anahtar Bilgisi (SubjectPublicKeyInfo)
+///
+/// Sertifika sahibinin açık anahtarını ve algoritmasını içerir.
+/// RSA için: algorithm = "1.2.840.113549.1.1.1"
+/// EC için:  algorithm = "1.2.840.10045.2.1", curve = P-256 OID
 #[derive(Clone, Debug)]
 pub struct X509PublicKey {
     pub algorithm: String,
@@ -326,7 +445,10 @@ pub struct X509PublicKey {
     pub curve: Option<String>,
 }
 
-/// X.509 Signature Algorithm
+/// X.509 İmza Algoritması
+///
+/// Sertifikayı imzalamak için kullanılan algoritmanın OID'i ve parametreleri.
+/// Örnek: "1.2.840.113549.1.1.11" = sha256WithRSAEncryption
 #[derive(Clone, Debug)]
 pub struct SignatureAlgorithm {
     pub algorithm: String,
@@ -353,7 +475,10 @@ impl SignatureAlgorithm {
     }
 }
 
-/// X.509 Certificate
+/// X.509 Sertifikası
+///
+/// RFC 5280'de tanımlanan tam X.509 v3 sertifika yapısı.
+/// TLS el sıkışmasında sunucu bu sertifikayı istemciye gönderir.
 #[derive(Clone, Debug)]
 pub struct X509Certificate {
     pub version: u8,
@@ -370,7 +495,14 @@ pub struct X509Certificate {
     pub raw: Vec<u8>,
 }
 
-/// X.509 Extension
+    /// X.509 uzantısı
+    ///
+    /// Her uzantı bir OID, kritiklik bayrağı ve değer içerir.
+    /// Kritik uzantılar bilinmiyorsa sertifika REDDEDİLMELİ.
+    /// Örnek uzantılar:
+    /// - 2.5.29.19 = basicConstraints (CA mi?)
+    /// - 2.5.29.15 = keyUsage (hangi işlemler için?)
+    /// - 2.5.29.17 = subjectAltName (DNS isimleri)
 #[derive(Clone, Debug)]
 pub struct X509Extension {
     pub oid: String,
@@ -639,10 +771,19 @@ impl X509Certificate {
 }
 
 // ============================================================================
-// CERTIFICATE STORE
+// SERTİFİKA DEPOSU (CERTIFICATE STORE)
 // ============================================================================
+//
+// Güvenilen köklerin (Root CA) saklandığı global depo.
+// Tarayıcılar ve işletim sistemleri bu depoları önceden doldurur.
+// Örnek: DigiCert, Let's Encrypt, Comodo, GlobalSign kök CA'ları
+//
+// Güven Politikası:
+//   - Kök CA'lar işletim sistemi/tarayıcı tarafından seçilir
+//   - Tüm sertifika zincirleri bir köke dayanmalı
+//   - Kompromize edilmiş kökler listeden kaldırılır (Trust Store güncelleme)
 
-/// Root CA certificate store
+/// Güvenilen kök CA sertifika deposu (global, mutex korumalı)
 static ROOT_CA_STORE: Mutex<Vec<X509Certificate>> = Mutex::new(Vec::new());
 
 /// Add root CA to store
@@ -662,10 +803,20 @@ pub fn clear_root_cas() {
 }
 
 // ============================================================================
-// CERTIFICATE CHAIN VERIFICATION
+// SERTİFİKA ZİNCİRİ DOĞRULAMA
 // ============================================================================
+//
+// Doğrulama Adımları:
+// 1. Geçerlilik süresini kontrol et (notBefore <= now <= notAfter)
+// 2. Zincirdeki ara CA'ların CA olduğunu doğrula (basicConstraints)
+// 3. Son sertifikanın güvenilen bir köke bağlı olduğunu kontrol et
+// 4. Her sertifikanın bir önceki tarafından imzalandığını doğrula
+//
+// Güven Çıpası (Trust Anchor):
+//   Zincirin sonundaki sertifika güvenilen kök deposunda bulunmalıdır.
+//   Bulunamazsa -> UnknownIssuer hatası
 
-/// Certificate verification error
+/// Sertifika doğrulama hata türleri
 #[derive(Clone, Debug)]
 pub enum CertError {
     InvalidFormat,
@@ -832,10 +983,25 @@ pub fn parse_certificate_chain(cert_data: &[u8]) -> Vec<X509Certificate> {
 }
 
 // ============================================================================
-// X.509 CRL (CERTIFICATE REVOCATION LIST)
+// X.509 CRL (SERTİFİKA İPTAL LİSTESİ)
 // ============================================================================
+//
+// CRL (Certificate Revocation List): CA'nın iptal ettiği sertifikaların listesi.
+//
+// CRL Yaşam Döngüsü:
+//   CA, düzenli aralıklarla (saatlik/günlük) imzalı CRL yayınlar.
+//   İstemciler bu listeyi indirir ve sertifikayla karşılaştırır.
+//
+// CRL vs OCSP:
+//   CRL  : Büyük dosya, periyodik güncelleme, çevrimdışı kullanılabilir
+//   OCSP : Küçük yanıt, gerçek zamanlı, ağ gerektirir
+//
+// CRL Yapısı:
+//   thisUpdate: Bu CRL'in yayınlanma zamanı
+//   nextUpdate: Bir sonraki CRL ne zaman yayınlanacak
+//   revokedCertificates: İptal edilen sertifika listesi (serial + tarih + neden)
 
-/// CRL Reason codes
+/// CRL iptal nedeni kodları (RFC 5280 Bölüm 5.3.1)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrlReason {
     Unspecified = 0,
@@ -1091,10 +1257,25 @@ impl X509Crl {
 }
 
 // ============================================================================
-// OCSP (ONLINE CERTIFICATE STATUS PROTOCOL)
+// OCSP (ÇEVRİMİÇİ SERTİFİKA DURUM PROTOKOLÜ)
 // ============================================================================
+//
+// OCSP (Online Certificate Status Protocol, RFC 6960):
+// CRL'e alternatif olarak sertifika iptal durumunu gerçek zamanlı sorgular.
+//
+// OCSP El Sıkışması:
+//
+//   İstemci                     OCSP Yanıtlayıcısı
+//      |--- OCSPRequest ---------->|   Sertifika durumunu sor
+//      |<-- OCSPResponse ----------|   good/revoked/unknown
+//
+// CertID: Issuer name hash + issuer key hash + serial number (SHA-1 ile)
+//
+// OCSP Stapling:
+//   Sunucu, OCSP yanıtını önceden alır ve TLS el sıkışmasında istemciye ekler.
+//   İstemcinin OCSP sunucusuna ayrıca sorgu yapmasına gerek kalmaz.
 
-/// OCSP Request
+/// OCSP isteği
 #[derive(Clone, Debug)]
 pub struct OcspRequest {
     pub requestor_name: Option<X509Name>,
@@ -1510,10 +1691,21 @@ impl OcspResponse {
 }
 
 // ============================================================================
-// REVOCATION CHECKER
+// İPTAL KONTROL EDİCİSİ (REVOCATION CHECKER)
 // ============================================================================
+//
+// CRL ve OCSP'yi birleştiren sertifika iptal kontrolü.
+//
+// Tercih Sırası (prefer_ocsp = true):
+//   1. OCSP önbelleğinde ara
+//   2. CRL listesinde ara
+//   3. Hiçbirinde bulunamazsa kabul et (soft-fail)
+//
+// Üretim ortamında:
+//   - Bulunamazsa OCSP sunucusuna ağ isteği yapılmalı
+//   - Hard-fail modunda bulunamazsa bağlantı reddedilmeli
 
-/// Revocation checker combining CRL and OCSP
+/// CRL ve OCSP kullanarak sertifika iptali kontrol eden yapı
 pub struct RevocationChecker {
     pub crls: Vec<X509Crl>,
     pub ocsp_cache: Vec<(Vec<u8>, OcspResponse)>,

@@ -285,7 +285,7 @@ impl MicrocodeManager {
             crate::cpu::msr::write(MSR_IA32_UCODE_WRITE, data_ptr);
         }
         
-        // Read new revision
+        // Güncelleme sonrası yeni revizyonu MSR'dan tekrar oku ve doğrula
         self.read_current_revision();
         let new_rev = self.current_revision.load(Ordering::SeqCst);
         
@@ -379,6 +379,8 @@ lazy_static::lazy_static! {
 // HATA TİPİ
 // ============================================================================
 
+/// Microcode yükleme işlemi sırasında oluşabilecek hata türleri.
+/// Her variant, başarısız olduğu aşamayı açıklar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicrocodeError {
     InvalidFormat,

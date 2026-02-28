@@ -176,10 +176,14 @@ pub struct WinServer {
 }
 
 impl WinServer {
+    /// `const fn` ile derleme zamanında başlatılır; `static` değişkenle kullanıma uygundur.
+    /// `handles` vektörü boş, `next_id` = 1, `focused` = 0 (odak yok) ile gelir.
     const fn new() -> Self {
         WinServer { handles: Vec::new(), next_id: 1, focused: 0 }
     }
 
+    /// Monoton artan pencere kimliği tahsis eder.
+    /// Taşma (overflow) durumunda 0 atlanarak 1'e sarar; 0 "geçersiz id" anlamına gelir.
     fn alloc_id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);

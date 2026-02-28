@@ -7,6 +7,23 @@
 //! hangi bellek alanına yakın olduğunu; SLIT (System Locality Information Table)
 //! düğümler arası mesafe matrisini tanımlar. Bu bilgi, bellek tahsislerini
 //! CPU'ya yakın düğümlere yönlendirerek performansı artırır.
+//!
+//! ## NUMA Topolojisi — Örnek 2 Düğümlü Sistem
+//!
+//! ```text
+//!  ┌─────────────────────────┐       ┌─────────────────────────┐
+//!  │      NUMA Düğüm 0       │       │      NUMA Düğüm 1       │
+//!  │  CPU0  CPU1  CPU2  CPU3 │       │  CPU4  CPU5  CPU6  CPU7 │
+//!  │  └──────────────────┐  │       │  └──────────────────┐  │
+//!  │       Bellek 0      │  │  QPI  │       Bellek 1      │  │
+//!  │   (yerel, hızlı)    │◄─┼───────┼►  (yerel, hızlı)   │  │
+//!  └─────────────────────────┘       └─────────────────────────┘
+//!        mesafe=10 (local)                mesafe=10 (local)
+//!        mesafe=21 (remote) ──────────── mesafe=21 (remote)
+//!
+//!  SRAT: CPU→Düğüm ve Bellek→Düğüm ilişkisini tanımlar
+//!  SLIT: Düğümler arası mesafe matrisini tanımlar (N×N bayt dizisi)
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -484,7 +501,7 @@ pub fn init_from_acpi(srat_addr: Option<u64>, slit_addr: Option<u64>) {
     }
 }
 
-/// Get statistics
+/// NUMA alt sistemi için özet istatistik verilerini topla ve döndür
 pub struct NumaStats {
     pub node_count: u32,
     pub total_memory: u64,

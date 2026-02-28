@@ -2,6 +2,7 @@
 //!
 //! Bare-metal grafiksel kullanıcı arayüzü.
 //! Window yönetimi, tema sistemi ve widget desteği.
+//! Tüm GUI bileşenleri bu modül altında alt modüller biçiminde toplanmıştır.
 
 /// Cyber-Industrial WM temel veri yapıları (WindowId, WindowFrame, SnapTarget, ShortcutId vs.)
 pub mod echos_wm;
@@ -15,100 +16,132 @@ pub mod cyber_panel;
 /// Kullanıcı-alanı ELF süreçleri için çekirdek pencere sunucusu (Faz 5)
 pub mod win_server;
 
-/// Mouse cursor rendering
+/// Fare imleci çizimi.
+/// Donanım imleci yerine yazılımsal sprite olarak framebuffer üzerine çizilir.
 pub mod cursor;
 
-/// Desktop environment (background, taskbar)
+/// Masaüstü ortamı (arka plan ve görev çubuğu).
+/// Sistemin görsel temelini oluşturur; tüm pencereler bu katmanın üzerinde görünür.
 pub mod desktop;
 
-/// Window component (title bar, content area)
+/// Pencere bileşeni (başlık çubuğu ve içerik alanı).
+/// Pencerelerin çerçevesini, yeniden boyutlandırma tutamaçlarını ve içerik alanını tanımlar.
 pub mod window;
 
-/// Renk teması (VS Code inspired dark theme)
+/// Renk teması (VS Code ilhamlı koyu tema).
+/// `Color` yapısı ile `Theme` sabitleri tüm GUI bileşenleri tarafından paylaşılır.
 pub mod theme;
 
-/// Widget sistemi (button, label, matrix)
+/// Widget sistemi (button, label, matrix).
+/// Tekrar kullanılabilir UI bileşenlerinin temel katmanı; `Widget` trait'i ile genişletilebilir.
 pub mod widgets;
 
-/// File manager widget
+/// Dosya yöneticisi widget'ı.
+/// Dizin gezginini ve dosya listeleme bileşenlerini içerir.
 pub mod file_manager;
 
-/// Start menu widget
+/// Başlat menüsü widget'ı.
+/// Uygulama başlatma arayüzünü sağlar.
 pub mod start_menu;
 
-/// System tray icons
+/// Sistem tepsisi simgeleri.
+/// Ağ, ses, pil gibi durum simgelerini görev çubuğunda gösterir.
 pub mod system_tray;
 
-/// Notification system
+/// Bildirim sistemi.
+/// Toast bildirimleri ve uyarı popup'larını yönetir.
 pub mod notification;
 
-/// Window manager (minimize, maximize, resize)
+/// Pencere yöneticisi (küçültme, büyütme, yeniden boyutlandırma).
+/// Pencerelerin yaşam döngüsünü ve konumunu yönetir.
 pub mod window_manager;
 
-/// Font rendering (TrueType, rasterizer, layout)
+/// Font çizimi (TrueType, rasterizer, layout).
+/// Glyph tabanlı metin çizimi ve satır düzeni hesaplamalarını içerir.
 pub mod font;
 
-/// Animation system (easing, timeline, frame pacing)
+/// Animasyon sistemi (easing, timeline, kare hızı yönetimi).
+/// Pürüzsüz geçişler ve zamanlı animasyonlar için altyapı sağlar.
 pub mod animation;
 
-/// Retained mode widget tree with dirty tracking
+/// Kirlilik takipli (dirty tracking) widget ağacı.
+/// Yalnızca değişen widget'ların yeniden çizilmesini sağlayarak performansı artırır.
 pub mod widget_tree;
 
-/// Glyph atlas with subpixel antialiasing
+/// Alt piksel kenar yumuşatmalı glyph atlası.
+/// Glyph'leri bir doku atlasında önbelleğe alarak metin çizimini hızlandırır.
 pub mod glyph_atlas;
 
-/// Desktop icons system
+/// Masaüstü simgeleri sistemi.
+/// Masaüstünde dosya ve uygulama simgelerini yerleştirir ve tıklama olaylarını işler.
 pub mod desktop_icons;
 
-/// Enhanced taskbar with start menu and system tray
+/// Başlat menüsü ve sistem tepsisiyle geliştirilmiş görev çubuğu.
+/// Açık uygulamaları, sistem bilgilerini ve hızlı erişim öğelerini barındırır.
 pub mod taskbar;
 
-/// Built-in applications
+/// Yerleşik uygulamalar.
+/// echOS ile birlikte gelen temel uygulamaları (metin editörü, terminaL vb.) içerir.
 pub mod apps;
 
-/// macOS-style Dock with magnification
+/// Büyütme efektli macOS tarzı dock.
+/// Uygulama başlatıcı çubuğu; fare üzerine gelince simgeler büyür.
 pub mod dock;
 
-/// Global menu bar with app menus
+/// Uygulama menüleriyle global menü çubuğu.
+/// Ekranın üstünde sabit konumda, etkin uygulamanın menülerini gösterir.
 pub mod menu_bar;
 
-/// Spotlight-style global search overlay
+/// Spotlight tarzı global arama katmanı.
+/// Klavye kısayoluyla tetiklenen, uygulama/dosya/ayar arama paneli.
 pub mod spotlight;
 
-/// Notification Center with widgets
+/// Widget'lı bildirim merkezi.
+/// macOS tarzı sağ panel; bildirimler, takvim ve hava durumu widget'larını barındırır.
 pub mod notification_center;
 
-/// Control Center panel (quick settings)
+/// Kontrol merkezi paneli (hızlı ayarlar).
+/// WiFi, Bluetooth, parlaklık gibi sistem ayarlarına tek tıkla erişim sağlar.
 pub mod control_center;
 
-/// Launchpad app grid launcher
+/// Uygulama ızgara başlatıcı (Launchpad).
+/// Tüm kurulu uygulamaları sayfalı ızgara düzeninde listeler.
 pub mod launchpad;
 
-/// Window shadows and blur effects
+/// Pencere gölgeleri ve bulanıklık efektleri.
+/// Pencerelere derinlik hissi katan görsel katman efektleri.
 pub mod effects;
 
-/// Mission Control (window overview)
+/// Mission Control (pencere genel görünümü).
+/// Tüm açık pencereleri ve masaüstü alanlarını kuşbakışı gösterir.
 pub mod mission_control;
 
-/// Virtual Desktops/Spaces support
+/// Sanal masaüstü desteği (Spaces).
+/// Birden fazla masaüstü alanı oluşturmayı ve aralarında geçiş yapmayı sağlar.
 pub mod spaces;
 
-/// Screenshot tool with selection
+/// Seçim bölgesiyle ekran görüntüsü alma aracı.
+/// Kullanıcının istediği alanı seçip ekran görüntüsü almasını sağlar.
 pub mod screenshot;
 
-/// File dialogs (Open/Save)
+/// Dosya iletişim kutuları (Aç / Kaydet).
+/// Standart dosya seçici ve kaydet diyalog bileşenlerini içerir.
 pub mod dialogs;
 
-/// Desktop wallpapers with transitions
+/// Geçiş efektleriyle masaüstü duvar kağıtları.
+/// Animasyonlu, dinamik ve slayt gösterisi duvar kağıtlarını yönetir.
 pub mod wallpaper;
 
-/// Login screen with user selection
+/// Kullanıcı seçimli oturum açma ekranı.
+/// Sistem başlangıcında kullanıcı kimlik doğrulamasını sunar.
 pub mod login;
 
-/// Drag and drop support
+/// Sürükle ve bırak desteği.
+/// GUI bileşenleri arasında veri transferini mümkün kılan etkileşim katmanı.
 pub mod drag_drop;
 
-/// Clipboard manager
+/// Pano yöneticisi.
+/// Kesme, kopyalama ve yapıştırma işlemleri için geçici veri deposu.
 pub mod clipboard;
 
 pub use desktop::Desktop;

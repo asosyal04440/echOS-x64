@@ -2,6 +2,36 @@
 //!
 //! POSIX dosya kilitleme desteği (flock, fcntl kilitleri).
 //! Danışma ve zorunlu dosya kilitlemeyi destekler.
+//!
+//! ## Kilit Çakışma Matrisi
+//!
+//! ```text
+//!  flock kilit uyumluluğu:
+//!  ┌──────────────┬──────────┬──────────┐
+//!  │  İstek ▼     │  LOCK_SH │  LOCK_EX │
+//!  ├──────────────┼──────────┼──────────┤
+//!  │  LOCK_SH var │    ✓     │    ✗     │
+//!  │  LOCK_EX var │    ✗     │    ✗     │
+//!  └──────────────┴──────────┴──────────┘
+//!
+//!  fcntl / POSIX kilit uyumluluğu:
+//!  ┌──────────────┬──────────┬──────────┐
+//!  │  İstek ▼     │  F_RDLCK │  F_WRLCK │
+//!  ├──────────────┼──────────┼──────────┤
+//!  │  F_RDLCK var │    ✓     │    ✗     │
+//!  │  F_WRLCK var │    ✗     │    ✗     │
+//!  └──────────────┴──────────┴──────────┘
+//!  (Aynı PID'in kilitleri birbirleriyle çakışmaz.)
+//!
+//!  Zorunlu kilitleme (mandatory locking):
+//!  mode & 0o2000 (setgid) != 0  VE  mode & 0o040 (group exec) == 0
+//!
+//!  fcntl kilit byte aralığı çakışması:
+//!  kilit_A: [start_A ... start_A + len_A)
+//!  kilit_B: [start_B ... start_B + len_B)
+//!  Çakışma: start_A < end_B  &&  start_B < end_A
+//!           (len == 0 ise dosya sonuna kadar = u64::MAX)
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;

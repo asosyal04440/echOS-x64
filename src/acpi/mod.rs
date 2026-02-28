@@ -2,6 +2,26 @@
 //!
 //! ACPI (Advanced Configuration and Power Interface) tablolarını bulma ve okuma.
 //! UEFI config tablosundan RSDP adresini alır.
+//!
+//! ## ACPI Başlatma Akışı
+//! ```ascii
+//! UEFI Önyükleyici
+//!      |
+//!      v
+//! find_acpi_table() → RSDP fiziksel adresi
+//!      |
+//!      v
+//! set_rsdp_address() → RSDP_PHYS atomik değişkeni
+//!      |
+//!      v
+//! init() → AcpiTables::from_rsdp()
+//!      |
+//!      v
+//! platform_info() → InterruptModel::Apic
+//!      |
+//!      v
+//! APIC_INFO → madt::from_apic()
+//! ```
 
 use acpi::platform::interrupt::InterruptModel;
 use acpi::{AcpiHandler, AcpiTables, PhysicalMapping};
@@ -16,15 +36,29 @@ use uefi::table::cfg::{ConfigTableEntry, ACPI2_GUID, ACPI_GUID};
 
 pub mod madt;
 
+/// RSDP (Root System Description Pointer) fiziksel bellek adresi.
+///
+/// UEFI önyükleyiciden alınan adres burada saklanır; `init()` tarafından okunur.
 static RSDP_PHYS: AtomicU64 = AtomicU64::new(0);
+
+/// Küresel APIC yapılandırma bilgisi.
+///
+/// `init()` başarılı olduğunda MADT'tan çıkarılan APIC bilgisi burada saklanır.
 pub static APIC_INFO: Mutex<madt::ApicInfo> = Mutex::new(madt::ApicInfo::empty());
 
+/// RSDP fiziksel adresini kaydeder.
+///
+/// Sıfır olmayan adresler kabul edilir; sıfır geçilirse işlem yapılmaz.
 pub fn set_rsdp_address(rsdp_phys: u64) {
     if rsdp_phys != 0 {
         RSDP_PHYS.store(rsdp_phys, Ordering::SeqCst);
     }
 }
 
+/// ACPI alt sistemini başlatır.
+///
+/// `RSDP_PHYS` adresinden ACPI tablolarını ayrıştırır ve APIC bilgisini çıkarır.
+/// Başarılıysa `true`, başarısızsa `false` döner.
 pub fn init() -> bool {
     let rsdp = RSDP_PHYS.load(Ordering::SeqCst);
     if rsdp == 0 {
@@ -52,14 +86,22 @@ pub fn init() -> bool {
     }
 }
 
+/// Küresel APIC yapılandırma bilgisinin klonunu döner.
 pub fn get_apic_info() -> madt::ApicInfo {
     APIC_INFO.lock().clone()
 }
 
+/// HHDM (Higher Half Direct Map) tabanlı ACPI bellek eşleyici.
+///
+/// Fiziksel adresleri HHDM ofsetiyle sanal adrese çevirerek ACPI tablolarına
+/// erişim sağlar. `AcpiHandler` trait'ini uygular.
 #[derive(Clone, Copy)]
 struct HhdmAcpiHandler;
 
 impl AcpiHandler for HhdmAcpiHandler {
+    /// Fiziksel bellek bölgesini sanal adres alanına eşler.
+    ///
+    /// HHDM ofseti eklenerek fiziksel adres sanal adrese dönüştürülür.
     unsafe fn map_physical_region<T>(
         &self,
         physical_address: usize,
@@ -71,6 +113,9 @@ impl AcpiHandler for HhdmAcpiHandler {
         PhysicalMapping::new(physical_address, virtual_address, size, size, *self)
     }
 
+    /// Fiziksel bellek bölgesinin eşlemesini kaldırır.
+    ///
+    /// HHDM tabanlı eşleme için temizleme gerekmez; boş bırakılır.
     fn unmap_physical_region<T>(_region: &PhysicalMapping<Self, T>) {}
 }
 

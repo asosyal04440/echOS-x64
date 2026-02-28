@@ -1,6 +1,21 @@
-//! # echOS File Manager
+//! # echOS Dosya Yöneticisi
 //!
-//! Graphical file browser for the desktop environment.
+//! Masaüstü ortamı için grafik tabanlı dosya tarayıcısı.
+//!
+//! ## Bileşenler
+//! - `FileEntryType`: Dosya sistemindeki giriş türleri (Dosya, Dizin, Sembolik Bağ vb.)
+//! - `FileEntry`: Tek bir dosya/dizin için metadata (ad, yol, boyut, izinler)
+//! - `FileManager`: Ana widget; yol çubuğu, dosya listesi ve kaydırma çubuğu içerir
+//! - `ViewMode`: Liste, simge veya detay görünümü modları
+//!
+//! ## Görünüm Modları
+//! - `List`: Her satırda simge + ad; en hızlı render
+//! - `Icons`: Büyük simge + alt yazı; görsel tarama için
+//! - `Details`: Ad + boyut sütunları ile tam veri
+//!
+//! ## Kaydırma Mantığı
+//! `scroll_offset` ile görünür pencere kayar; `visible_items()` ekranda
+//! kaç öğenin sığacağını hesaplayarak gereksiz çizimi önler.
 
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::Theme;
@@ -11,7 +26,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
 
-/// File entry type
+/// Dosya sistemi giriş türleri.
+/// İşletim sistemi inode türlerini temsil eder: dosya, dizin,
+/// sembolik bağ ve aygıt dosyaları (karakter/blok).
 #[derive(Clone, Debug)]
 pub enum FileEntryType {
     File,
@@ -21,7 +38,9 @@ pub enum FileEntryType {
     CharDevice,
 }
 
-/// File entry information
+/// Tek bir dosya/dizin kaydının metadata bilgisi.
+/// `size` bayt cinsindendir; `modified` Unix zaman damgasıdır (epoch saniyesi).
+/// `hidden` bayrağı nokta (.) ile başlayan dosyaları işaretler.
 #[derive(Clone, Debug)]
 pub struct FileEntry {
     pub name: String,
@@ -34,6 +53,8 @@ pub struct FileEntry {
 }
 
 impl FileEntry {
+    /// Yeni bir dosya kaydı oluşturur. Dizin değil, salt okunur değil ve
+    /// gizli değil varsayılan değerleriyle başlar.
     pub fn file(name: &str, path: &str, size: u64) -> Self {
         Self {
             name: String::from(name),

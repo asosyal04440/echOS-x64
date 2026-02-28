@@ -1,9 +1,24 @@
-//! # echOS Cyber-Industrial Window Manager
+//! # echOS Cyber-Industrial Window Manager (Temel Veri Yapıları)
 //!
-//! Tüm window manager bileşenlerinin temel veri yapıları.
-//! Hem fare hem klavye olaylarını aynı anda işleyen hibrit input
-//! mimarisi, alpha compositing için katmanlı pencere modeli ve
-//! Cyber-Industrial görsel sistemi burada tanımlanır.
+//! Tüm window manager bileşenlerinin temel veri yapıları bu modülde tanımlanır.
+//!
+//! ## Katmanlı Pencere Modeli
+//! Her pencere `Window` yapısında bir `layer` (katman) değeri taşır. Renderer,
+//! katmanları en küçükten büyüğe sıralayarak çizer; böylece yüksek katmanlı
+//! pencereler (örn. açılır menüler, bildirimler) her zaman önde görünür.
+//!
+//! ## Alpha Compositing
+//! `BG_TITLEBAR` ve `BG_PANEL` sabitleri 8-bit alpha kanalı içerir (üst bayt).
+//! Renderer `blend_colors` ile arka plan pikseli üzerine pencere pikselini alfa
+//! oranında karıştırır: `çıktı = arka_plan × (1-α) + ön_plan × α`.
+//!
+//! ## Hibrit Input Mimarisi
+//! Fare ve klavye olayları `InputEvent` enum'u içinde birleştirilir. WM,
+//! her kare başında olay kuyruğunu boşaltır ve aktif pencereye iletir.
+//!
+//! ## Cyber-Industrial Tema Sistemi
+//! `CyberTheme` yapısı tüm renk sabitlerini merkezi olarak sağlar. Renk
+//! değerleri `0xAARRGGBB` formatındadır; AA=alpha, RR/GG/BB=renk bileşenleri.
 
 use crate::gui::widgets::Rect;
 use alloc::string::String;

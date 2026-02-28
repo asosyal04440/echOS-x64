@@ -1,6 +1,37 @@
-//! # inotify - File Change Notification
+//! # inotify - Dosya Değişikliği Bildirimi
 //!
-//! Linux-compatible inotify subsystem for monitoring file system events.
+//! Dosya sistemi olaylarını izlemek için Linux uyumlu inotify alt sistemi.
+//!
+//! ## inotify Olay Akışı
+//!
+//! ```text
+//!  Dosya sistemi işlemi
+//!  (örn. write(), rename(), unlink())
+//!          │
+//!          ▼
+//!  generate_event(inode, mask, cookie, name)
+//!          │
+//!          ▼
+//!  watch_index'te inode için izleyicileri bul
+//!          │
+//!          ├── InotifyInstance[0].push_event(...)
+//!          ├── InotifyInstance[1].push_event(...)
+//!          └── InotifyInstance[n].push_event(...)
+//!                       │
+//!                       ▼
+//!  Kullanıcı prosesi: read(inotify_fd, buf, size)
+//!                       │
+//!                       ▼
+//!  ┌──────────────────────────────────────────┐
+//!  │  InotifyEventRaw (16 bayt sabit kısım)   │
+//!  │  [ wd | mask | cookie | name_len ]       │
+//!  │  + name (name_len bayt, 8'e hizalanmış)  │
+//!  └──────────────────────────────────────────┘
+//!
+//!  Yeniden adlandırma olayları eşleşmesi (cookie):
+//!  old_parent: IN_MOVED_FROM (cookie=X)
+//!  new_parent: IN_MOVED_TO   (cookie=X) ← aynı cookie
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -10,41 +41,41 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// INOTIFY CONSTANTS
+// INOTIFY SABİTLERİ
 // ============================================================================
 
-/// inotify events
-pub const IN_ACCESS: u32        = 0x00000001;  // File was accessed
-pub const IN_MODIFY: u32        = 0x00000002;  // File was modified
-pub const IN_ATTRIB: u32        = 0x00000004;  // Metadata changed
-pub const IN_CLOSE_WRITE: u32   = 0x00000008;  // Writable file closed
-pub const IN_CLOSE_NOWRITE: u32 = 0x00000010;  // Unwritable file closed
+/// inotify olay maskeleri
+pub const IN_ACCESS: u32        = 0x00000001;  // Dosyaya erişildi
+pub const IN_MODIFY: u32        = 0x00000002;  // Dosya değiştirildi
+pub const IN_ATTRIB: u32        = 0x00000004;  // Meta veri değişti
+pub const IN_CLOSE_WRITE: u32   = 0x00000008;  // Yazılabilir dosya kapatıldı
+pub const IN_CLOSE_NOWRITE: u32 = 0x00000010;  // Salt okunur dosya kapatıldı
 pub const IN_CLOSE: u32         = IN_CLOSE_WRITE | IN_CLOSE_NOWRITE;
-pub const IN_OPEN: u32          = 0x00000020;  // File was opened
-pub const IN_MOVED_FROM: u32    = 0x00000040;  // File moved from X
-pub const IN_MOVED_TO: u32      = 0x00000080;  // File moved to Y
+pub const IN_OPEN: u32          = 0x00000020;  // Dosya açıldı
+pub const IN_MOVED_FROM: u32    = 0x00000040;  // Dosya X'ten taşındı
+pub const IN_MOVED_TO: u32      = 0x00000080;  // Dosya Y'ye taşındı
 pub const IN_MOVE: u32          = IN_MOVED_FROM | IN_MOVED_TO;
-pub const IN_CREATE: u32        = 0x00000100;  // Subfile created
-pub const IN_DELETE: u32        = 0x00000200;  // Subfile deleted
-pub const IN_DELETE_SELF: u32   = 0x00000400;  // Self was deleted
-pub const IN_MOVE_SELF: u32     = 0x00000800;  // Self was moved
+pub const IN_CREATE: u32        = 0x00000100;  // Alt dosya/dizin oluşturuldu
+pub const IN_DELETE: u32        = 0x00000200;  // Alt dosya/dizin silindi
+pub const IN_DELETE_SELF: u32   = 0x00000400;  // İzlenen nesne silindi
+pub const IN_MOVE_SELF: u32     = 0x00000800;  // İzlenen nesne taşındı
 
-/// Special events
-pub const IN_UNMOUNT: u32       = 0x00002000;  // Backing fs unmounted
-pub const IN_Q_OVERFLOW: u32    = 0x00004000;  // Event queue overflowed
-pub const IN_IGNORED: u32       = 0x00008000;  // Watch was removed
-pub const IN_ISDIR: u32         = 0x40000000;  // Event occurred on dir
-pub const IN_ONESHOT: u32       = 0x80000000;  // Only send one event
+/// Özel sistem olayları
+pub const IN_UNMOUNT: u32       = 0x00002000;  // Bağlı dosya sistemi çıkarıldı
+pub const IN_Q_OVERFLOW: u32    = 0x00004000;  // Olay kuyruğu taştı
+pub const IN_IGNORED: u32       = 0x00008000;  // İzleyici kaldırıldı
+pub const IN_ISDIR: u32         = 0x40000000;  // Olay bir dizinde oluştu
+pub const IN_ONESHOT: u32       = 0x80000000;  // Tek sefer olay gönder
 
-/// inotify init flags
-pub const IN_CLOEXEC: i32       = 0x02000000;  // Close on exec
-pub const IN_NONBLOCK: i32      = 0x00004000;  // Non-blocking
+/// inotify başlatma bayrakları
+pub const IN_CLOEXEC: i32       = 0x02000000;  // exec sonrası kapat
+pub const IN_NONBLOCK: i32      = 0x00004000;  // Engellemesiz mod
 
-/// Maximum watches per instance
+/// Instance başına maksimum izleyici sayısı
 pub const INOTIFY_MAX_WATCHES: usize = 8192;
-/// Maximum events per queue
+/// Kuyruk başına maksimum olay sayısı
 pub const INOTIFY_MAX_EVENTS: usize = 16384;
-/// Maximum instances per user
+/// Kullanıcı başına maksimum instance sayısı
 pub const INOTIFY_MAX_INSTANCES: usize = 128;
 
 // ============================================================================

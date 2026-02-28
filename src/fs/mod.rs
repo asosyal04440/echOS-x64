@@ -1,6 +1,58 @@
 //! # echOS Dosya Sistemi
 //!
 //! Dosya sistemi desteği. Şu anda F2FS, FAT32/exFAT, ext4 ve NTFS implementasyonu mevcut.
+//!
+//! ## Sanal Dosya Sistemi (VFS) Katman Mimarisi
+//!
+//! ```
+//!  Kullanıcı Alanı Sistem Çağrıları
+//!  open() / read() / write() / close()
+//!          │
+//!          ▼
+//!  ┌────────────────────────────────────────────────┐
+//!  │          VFS Katmanı (mod.rs)                  │
+//!  │  sys_open / sys_read / sys_write / sys_close   │
+//!  │  FileDescriptorTable  (fd → OpenFile)          │
+//!  └───────────────┬────────────────────────────────┘
+//!                  │
+//!       ┌──────────┴──────────┐
+//!       ▼                     ▼
+//!  ┌─────────┐          ┌──────────┐
+//!  │  F2FS   │          │  diğer   │
+//!  │ (yerli) │          │ (ext4,   │
+//!  │  mod    │          │  NTFS,   │
+//!  └────┬────┘          │  FAT32)  │
+//!       │               └──────────┘
+//!       ▼
+//!  ┌────────────────┐
+//!  │  INode Arayüzü │  ← rcore-fs::vfs::INode
+//!  │  read_at()     │
+//!  │  write_at()    │
+//!  │  metadata()    │
+//!  │  find()        │
+//!  └────────────────┘
+//!          │
+//!          ▼
+//!  ┌───────────────────┐
+//!  │  ATA/Blok Sürücüsü│
+//!  │  (disk I/O)       │
+//!  └───────────────────┘
+//!
+//! ## Dosya Tanımlayıcısı Yaşam Döngüsü
+//!
+//!  sys_open("dosya", O_RDWR) → fd = 3
+//!      │
+//!      ├─ FileDescriptorTable'a OpenFile eklenir
+//!      │  { path, offset: 0, flags }
+//!      │
+//!  sys_read(fd=3, buf, 512)
+//!      │
+//!      ├─ fd → OpenFile.path → F2FS okuma
+//!      └─ offset += okundu
+//!
+//!  sys_close(fd=3)
+//!      └─ OpenFile = None (tablo girişi boşaltıldı)
+//! ```
 
 pub mod f2fs;
 pub mod fat;
@@ -22,47 +74,61 @@ use rcore_fs::vfs::{FileSystem, FileType, FsError, FsInfo, INode, Metadata, Poll
 use crate::drivers::ata::BLOCK_SIZE;
 use crate::fs::f2fs::{read_f2fs_file_at, write_f2fs_file_at};
 
+/// F2FS için dahili sanal dosya sistemi uygulayıcısı
 struct F2fsVfs;
 
+/// F2FS kök dizin inode'u — dosya ağacının kökünü temsil eder
 struct F2fsRootInode;
 
 lazy_static! {
+    /// Kök inode singleton — tüm path çözümlemeleri buradan başlar
     static ref F2FS_ROOT_INODE: Arc<dyn INode> = Arc::new(F2fsRootInode);
+    /// VFS singleton — FileSystem trait nesnesi
     static ref F2FS_VFS_INSTANCE: Arc<dyn FileSystem> = Arc::new(F2fsVfs);
-    /// Global timestamp counter (boot time'dan beri saniye)
+    /// Global zaman sayacı (önyüklemeden beri saniye)
     static ref GLOBAL_TIME: Mutex<u64> = Mutex::new(0);
 }
 
-/// Global zamanı günceller (her saniye çağrılmalı)
+/// Global sistem saatini bir saniye ilerletir.
+/// Periyodik zamanlayıcı kesmesinden çağrılmalıdır.
 pub fn update_global_time() {
     let mut time = GLOBAL_TIME.lock();
     *time += 1;
 }
 
-/// Global zamanı alır
+/// Mevcut sistem zamanını POSIX Timespec biçiminde döndürür
 pub fn get_global_time() -> Timespec {
     let time = GLOBAL_TIME.lock();
     Timespec { sec: *time as i64, nsec: 0 }
 }
 
-/// Mount point resolution - path'i mount table'a göre çözer
+/// Bağlama noktası çözümlemesi — path'i bağlama tablosuna göre çözer.
+///
+/// Örnek:
+/// ```
+/// /mnt/usb/dosya.txt  →  bağlama tablosu: /mnt/usb → /dev/sdb
+///                     →  çözümlendi: /dev/sdb/dosya.txt
+/// ```
+///
+/// En uzun önek eşleşmesi (longest prefix match) algoritması kullanılır.
 pub fn resolve_mount_path(path: &str) -> String {
     let mounts = crate::fs::f2fs::list_mounts();
     let mut resolved = path.to_string();
-    
-    // En uzun match'i bul
+
+    // En uzun önek eşleşmesini bul
     for m in mounts {
         if path.starts_with(&m.mountpoint) && m.mountpoint.len() > 1 {
-            // Mount point altındaki path'i device path'ine çevir
+            // Bağlama noktası altındaki yolu cihaz yoluna dönüştür
             let sub_path = &path[m.mountpoint.len()..];
             resolved = format!("{}{}", m.device, sub_path);
             break;
         }
     }
-    
+
     resolved
 }
 
+/// Dosya sistemi bilgisi döndürür — statfs() çağrısının temeli
 fn fs_info() -> FsInfo {
     FsInfo {
         bsize: BLOCK_SIZE,
@@ -76,10 +142,13 @@ fn fs_info() -> FsInfo {
     }
 }
 
+/// Mevcut zamanı Timespec olarak döndürür (atime/mtime/ctime için)
 fn current_timespec() -> Timespec {
     get_global_time()
 }
 
+/// Normal dosya meta verisi oluşturur.
+/// mode 0o100644 = düzenli dosya, sahibi okuma/yazma, diğerleri okuma izni
 fn file_metadata(size: usize) -> Metadata {
     let time = current_timespec();
     Metadata {
@@ -100,6 +169,8 @@ fn file_metadata(size: usize) -> Metadata {
     }
 }
 
+/// Dizin meta verisi oluşturur.
+/// mode 0o040755 = dizin, sahibi tam izin, diğerleri okuma+çalıştırma
 fn dir_metadata() -> Metadata {
     let time = current_timespec();
     Metadata {
@@ -121,17 +192,34 @@ fn dir_metadata() -> Metadata {
 }
 
 // ============================================================================
-// FILE DESCRIPTOR TABLE (Per-Process)
+// DOSYA TANIM LAYICISI TABLOSU (Her İşlem İçin Ayrı)
 // ============================================================================
 
-/// Açık dosya bilgisi
+/// Açık bir dosyayı temsil eden kayıt.
+/// Unix'te her açık dosya bu kayıtla izlenir.
 pub struct OpenFile {
     pub path: String,
+    /// Mevcut okuma/yazma konumu (her read/write sonrası güncellenir)
     pub offset: usize,
-    pub flags: u32,  // O_RDONLY, O_WRONLY, O_RDWR
+    pub flags: u32,  // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
 }
 
-/// Process başına dosya descriptor table
+/// İşlem başına dosya tanımlayıcı tablosu.
+///
+/// ```
+/// Tablo Yapısı:
+/// ┌────┬────────────────────────────────────────────┐
+/// │ fd │ OpenFile                                   │
+/// ├────┼────────────────────────────────────────────┤
+/// │  0 │ /dev/stdin   (flags=O_RDONLY, offset=0)    │
+/// │  1 │ /dev/stdout  (flags=O_WRONLY, offset=0)    │
+/// │  2 │ /dev/stderr  (flags=O_WRONLY, offset=0)    │
+/// │  3 │ /home/user/dosya.txt (uygulama açtı)       │
+/// │  4 │ None  (kapatıldı)                          │
+/// │  5 │ /var/log/app.log                           │
+/// └────┴────────────────────────────────────────────┘
+/// next_fd = 6 (bir sonraki open() bu fd'yi tahsis eder)
+/// ```
 pub struct FileDescriptorTable {
     pub files: Vec<Option<OpenFile>>,
     pub next_fd: usize,
@@ -140,14 +228,15 @@ pub struct FileDescriptorTable {
 impl FileDescriptorTable {
     pub fn new() -> Self {
         let mut files = Vec::new();
-        // stdin, stdout, stderr
+        // stdin, stdout, stderr — standart akışlar daima 0, 1, 2 fd değerlerini alır
         files.push(Some(OpenFile { path: "/dev/stdin".to_string(), offset: 0, flags: 0 }));
         files.push(Some(OpenFile { path: "/dev/stdout".to_string(), offset: 0, flags: 1 }));
         files.push(Some(OpenFile { path: "/dev/stderr".to_string(), offset: 0, flags: 1 }));
         Self { files, next_fd: 3 }
     }
-    
-    /// Dosya aç, fd döndür
+
+    /// Dosyayı açar ve yeni fd döndürür.
+    /// Tablo büyür; kapatılan fd numaraları yeniden kullanılmaz (basit uygulama).
     pub fn open(&mut self, path: &str, flags: u32) -> usize {
         let fd = self.next_fd;
         self.files.push(Some(OpenFile {
@@ -158,8 +247,8 @@ impl FileDescriptorTable {
         self.next_fd += 1;
         fd
     }
-    
-    /// Dosya kapat
+
+    /// Dosyayı kapatır — tablo girişini None yapar, fd numarası serbest kalır
     pub fn close(&mut self, fd: usize) -> bool {
         if fd < self.files.len() {
             self.files[fd] = None;
@@ -168,8 +257,8 @@ impl FileDescriptorTable {
             false
         }
     }
-    
-    /// Offset ayarla (seek)
+
+    /// Dosya konumunu ayarlar (lseek benzeri)
     pub fn seek(&mut self, fd: usize, offset: usize) -> bool {
         if let Some(Some(file)) = self.files.get_mut(fd) {
             file.offset = offset;
@@ -178,53 +267,57 @@ impl FileDescriptorTable {
             false
         }
     }
-    
-    /// Offset oku (tell)
+
+    /// Mevcut dosya konumunu döndürür (tell)
     pub fn tell(&self, fd: usize) -> Option<usize> {
         self.files.get(fd).and_then(|f| f.as_ref().map(|f| f.offset))
     }
-    
-    /// Dosya bilgisini al
+
+    /// fd'ye ait OpenFile kaydını okuma amaçlı getirir
     pub fn get(&self, fd: usize) -> Option<&OpenFile> {
         self.files.get(fd).and_then(|f| f.as_ref())
     }
 }
 
 lazy_static! {
-    /// Global FD table (şimdilik tek process)
+    /// Global FD tablosu — şu anlık tek işlem varsayımıyla global tutulur.
+    /// Çok işlemli bir sistemde bu tablo her process'e özel olmalıdır.
     static ref GLOBAL_FD_TABLE: Mutex<FileDescriptorTable> = Mutex::new(FileDescriptorTable::new());
 }
 
-/// Global FD table'den dosya aç
+/// Dosya açar, tahsis edilen fd numarasını döndürür (open syscall)
 pub fn sys_open(path: &str, flags: u32) -> usize {
     GLOBAL_FD_TABLE.lock().open(path, flags)
 }
 
-/// Global FD table'den dosya kapat
+/// Dosyayı kapatır (close syscall)
 pub fn sys_close(fd: usize) -> bool {
     GLOBAL_FD_TABLE.lock().close(fd)
 }
 
-/// Seek
+/// Dosya konumunu değiştirir (lseek syscall)
 pub fn sys_seek(fd: usize, offset: usize) -> bool {
     GLOBAL_FD_TABLE.lock().seek(fd, offset)
 }
 
-/// Tell
+/// Mevcut dosya konumunu döndürür (tell / lseek SEEK_CUR benzeri)
 pub fn sys_tell(fd: usize) -> Option<usize> {
     GLOBAL_FD_TABLE.lock().tell(fd)
 }
 
-/// FD'den oku
+/// fd'den okur ve offset'i günceller (read syscall).
+///
+/// Okuma akışı:
+/// fd → OpenFile.path → F2FS okuma → offset += okunan
 pub fn sys_read(fd: usize, buf: &mut [u8]) -> Result<usize, FsError> {
     let table = GLOBAL_FD_TABLE.lock();
     if let Some(file) = table.get(fd) {
         let path = file.path.clone();
         let offset = file.offset;
         drop(table);
-        
+
         let read = read_f2fs_file_at(&path, offset, buf)?;
-        
+
         // Offset güncelle
         GLOBAL_FD_TABLE.lock().seek(fd, offset + read);
         Ok(read)
@@ -233,16 +326,19 @@ pub fn sys_read(fd: usize, buf: &mut [u8]) -> Result<usize, FsError> {
     }
 }
 
-/// FD'ye yaz
+/// fd'ye yazar ve offset'i günceller (write syscall).
+///
+/// Yazma akışı:
+/// buf → F2FS yazma → offset += yazılan
 pub fn sys_write(fd: usize, buf: &[u8]) -> Result<usize, FsError> {
     let table = GLOBAL_FD_TABLE.lock();
     if let Some(file) = table.get(fd) {
         let path = file.path.clone();
         let offset = file.offset;
         drop(table);
-        
+
         let written = write_f2fs_file_at(&path, offset, buf)?;
-        
+
         // Offset güncelle
         GLOBAL_FD_TABLE.lock().seek(fd, offset + written);
         Ok(written)
@@ -251,6 +347,7 @@ pub fn sys_write(fd: usize, buf: &[u8]) -> Result<usize, FsError> {
     }
 }
 
+/// Path'e göre inode açar — kök dizin özel durumu vardır
 fn open_inode_by_path(path: &str) -> Result<Arc<dyn INode>, FsError> {
     if path.trim_start_matches('/').is_empty() {
         return Ok(F2FS_ROOT_INODE.clone());
@@ -258,6 +355,8 @@ fn open_inode_by_path(path: &str) -> Result<Arc<dyn INode>, FsError> {
     open_f2fs_inode_by_path(path)
 }
 
+/// F2FS dosya sistemi üzerinde path'e karşılık gelen inode'u döndürür.
+/// Dizin ise F2fsDirInode, dosyaysa F2fsFileInode döndürülür.
 fn open_f2fs_inode_by_path(path: &str) -> Result<Arc<dyn INode>, FsError> {
     let entry = crate::fs::f2fs::open_entry(path)?;
     if entry.is_dir {
@@ -322,10 +421,12 @@ impl INode for F2fsRootInode {
     }
 }
 
+/// F2FS dizin inode'u — bir dizini temsil eder
 struct F2fsDirInode {
     path: String,
 }
 
+/// F2FS dosya inode'u — belirli boyuttaki bir dosyayı temsil eder
 struct F2fsFileInode {
     path: String,
     size: usize,
@@ -397,14 +498,17 @@ impl INode for F2fsFileInode {
     }
 }
 
+/// VFS arayüzü — path üzerinden inode açar
 pub fn vfs_open_inode(path: &str) -> Result<Arc<dyn INode>, FsError> {
     open_inode_by_path(path)
 }
 
+/// Bir inode'un meta verisini döndürür (stat benzeri)
 pub fn vfs_inode_metadata(inode: &Arc<dyn INode>) -> Result<Metadata, FsError> {
     inode.metadata()
 }
 
+/// Inode üzerinden belirli bir ofsetten okur
 pub fn vfs_read_at(
     inode: &Arc<dyn INode>,
     offset: usize,
@@ -413,10 +517,12 @@ pub fn vfs_read_at(
     inode.read_at(offset, buf)
 }
 
+/// Inode üzerinden belirli bir ofsete yazar
 pub fn vfs_write_at(inode: &Arc<dyn INode>, offset: usize, buf: &[u8]) -> Result<usize, FsError> {
     inode.write_at(offset, buf)
 }
 
+/// Küresel VFS dosya sistemi örneğini döndürür
 pub fn vfs_file_system() -> Arc<dyn FileSystem> {
     F2FS_VFS_INSTANCE.clone()
 }

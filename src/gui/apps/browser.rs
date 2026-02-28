@@ -2,6 +2,17 @@
 //!
 //! Tabbed web browser with address bar, bookmarks, and history
 //! Note: Actual web rendering would require a rendering engine
+//!
+//! Bu modül, sekmeli bir web tarayıcısının temel yapısını uygular.
+//! Gerçek bir web tarayıcısı için HTML ayrıştırıcısı (parser),
+//! CSS motoru ve JavaScript yorumlayıcısı gerekir. Bu uygulama,
+//! kullanıcı arayüzü katmanını ve veri modellerini göstermek amacıyla
+//! içerik üretimi için yer tutucu (placeholder) yaklaşımını kullanır.
+//!
+//! Temel kavramlar:
+//! - **Sekme (Tab)**: Her sekme bağımsız bir URL geçmişi ve içeriğe sahiptir.
+//! - **Yer İmi (Bookmark)**: Sık ziyaret edilen sayfalara hızlı erişim.
+//! - **İndirme (Download)**: Arkaplan dosya indirme yönetimi.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -19,58 +30,66 @@ use crate::gui::Rect;
 // ============================================================================
 // BROWSER CONSTANTS
 // ============================================================================
+// Tarayıcı arayüzünün piksel boyutları.
+// Bu değerler, Chrome'un "browser chrome" (tarayıcı krom) katmanını —
+// sekme çubuğu, araç çubuğu ve durum çubuğu — oluşturur.
 
-/// Tab bar height
+/// Sekme çubuğunun piksel cinsinden yüksekliği
 pub const TAB_BAR_HEIGHT: usize = 32;
 
-/// Toolbar height
+/// Araç çubuğunun (adres çubuğu ve gezinme butonları) yüksekliği
 pub const TOOLBAR_HEIGHT: usize = 40;
 
-/// Bookmark bar height
+/// Yer imleri çubuğunun yüksekliği
 pub const BOOKMARK_BAR_HEIGHT: usize = 28;
 
-/// Status bar height
+/// Durum çubuğunun yüksekliği (bağlantı URL'i ve yükleme durumunu gösterir)
 pub const STATUS_BAR_HEIGHT: usize = 24;
 
 // ============================================================================
 // BROWSER TAB
 // ============================================================================
+// Her browser sekmesi (tab), bağımsız bir URL, yükleme durumu ve geçmiş tutar.
+// `Option<T>` türü, bir değerin var olup olmadığını Rust'ta güvenle ifade eder:
+//   - `Some(değer)`: Değer mevcut
+//   - `None`: Değer yok (null referans güvensizliği olmadan)
 
-/// A browser tab
+/// Tek bir tarayıcı sekmesinin durumunu ve içeriğini temsil eder
 #[derive(Clone, Debug)]
 pub struct BrowserTab {
-    /// Tab ID
+    /// Sekmenin benzersiz kimliği
     pub id: u32,
-    /// Current URL
+    /// Sekmede yüklü olan sayfanın URL'i
     pub url: String,
-    /// Page title
+    /// Sayfanın başlığı (HTML `<title>` etiketinden gelir)
     pub title: String,
-    /// Loading progress (0.0 - 1.0)
+    /// Yükleme ilerleme oranı (0.0 = başlangıç, 1.0 = tamamlandı)
     pub loading_progress: f32,
-    /// Is loading
+    /// Sayfa şu an yükleniyor mu?
     pub loading: bool,
-    /// Is secure (HTTPS)
+    /// Bağlantı HTTPS (güvenli) mi?
     pub secure: bool,
-    /// Favicon
+    /// Sayfanın favicon (küçük simge) URL'i
     pub favicon: String,
-    /// Scroll position
+    /// Yatay kaydırma pozisyonu (piksel)
     pub scroll_x: usize,
+    /// Dikey kaydırma pozisyonu (piksel)
     pub scroll_y: usize,
-    /// Zoom level
+    /// Sayfa yakınlaştırma seviyesi (1.0 = %100)
     pub zoom: f32,
-    /// Can go back
+    /// Geri gidilebilir durum var mı?
     pub can_back: bool,
-    /// Can go forward
+    /// İleri gidilebilir durum var mı?
     pub can_forward: bool,
-    /// History
+    /// URL gezinme geçmişi listesi
     pub history: Vec<String>,
-    /// History position
+    /// Geçmiş listesinde şu anki konum
     pub history_pos: usize,
-    /// Page content (simplified)
+    /// Sayfa içeriği (basitleştirilmiş model)
     pub content: PageContent,
-    /// Reader mode available
+    /// Okuma modu mevcut mu? (reklamları gizler)
     pub reader_mode: bool,
-    /// Reader mode active
+    /// Okuma modu aktif mi?
     pub reader_active: bool,
 }
 
@@ -268,21 +287,23 @@ impl PageContent {
 // ============================================================================
 // BOOKMARK
 // ============================================================================
+// Yer imi (bookmark), kullanıcının sık ziyaret ettiği URL'leri kaydetmesini sağlar.
+// Yer imleri klasörler halinde gruplanabilir (folder alanı ile).
 
-/// A bookmark
+/// Kaydedilmiş bir web adresi (yer imi)
 #[derive(Clone, Debug)]
 pub struct Bookmark {
-    /// Bookmark ID
+    /// Yer iminin benzersiz kimliği
     pub id: u32,
-    /// URL
+    /// Kaydedilen web adresi
     pub url: String,
-    /// Title
+    /// Kullanıcıya gösterilen başlık
     pub title: String,
-    /// Favicon
+    /// Sitenin favicon URL'i
     pub favicon: String,
-    /// Folder
+    /// Yer iminin ait olduğu klasör adı
     pub folder: String,
-    /// Added timestamp
+    /// Yer iminin eklenme zamanı (UNIX timestamp)
     pub added: u64,
 }
 
@@ -302,31 +323,34 @@ impl Bookmark {
 // ============================================================================
 // DOWNLOAD
 // ============================================================================
+// İndirme yöneticisi: Dosya indirme işlemlerini temsil eden veri yapısı.
+// Gerçek bir indirme işlemi için asenkron I/O ve ilerleme takibi gerekir.
+// Bu yapı, UI katmanında indirme durumunu göstermek için tasarlanmıştır.
 
-/// A download item
+/// Devam eden veya tamamlanmış bir dosya indirme işlemi
 #[derive(Clone, Debug)]
 pub struct DownloadItem {
-    /// Download ID
+    /// İndirmenin benzersiz kimliği
     pub id: u32,
-    /// URL
+    /// İndirilen dosyanın kaynak URL'i
     pub url: String,
-    /// Filename
+    /// Dosya adı
     pub filename: String,
-    /// Total size
+    /// Toplam dosya boyutu (bayt); bilinmiyorsa 0
     pub total_size: u64,
-    /// Downloaded size
+    /// Şu ana kadar indirilen bayt miktarı
     pub downloaded: u64,
-    /// Progress (0.0 - 1.0)
+    /// İlerleme oranı (0.0 - 1.0)
     pub progress: f32,
-    /// Is complete
+    /// İndirme tamamlandı mı?
     pub complete: bool,
-    /// Is paused
+    /// Kullanıcı tarafından duraklatıldı mı?
     pub paused: bool,
-    /// Is cancelled
+    /// İptal edildi mi?
     pub cancelled: bool,
-    /// Download speed
+    /// Anlık indirme hızı (bayt/saniye)
     pub speed: u64,
-    /// Destination path
+    /// Dosyanın kaydedileceği hedef dizin yolu
     pub destination: String,
 }
 
@@ -373,42 +397,45 @@ impl DownloadItem {
 // ============================================================================
 // BROWSER WINDOW
 // ============================================================================
+// Ana tarayıcı penceresi: tüm sekmeleri, yer imlerini ve indirmeleri yönetir.
+// Rust'ta birden fazla yer'den erişilen veriler için `Arc<Mutex<T>>` veya
+// global statik `Mutex<T>` kalıpları yaygın olarak kullanılır.
 
-/// Safari-like browser window
+/// Tüm sekmeleri ve tarayıcı durumunu yöneten ana pencere yapısı
 pub struct BrowserWindow {
-    /// Window rect
+    /// Pencerenin ekrandaki konumu ve boyutu
     pub rect: Rect,
-    /// Tabs
+    /// Açık sekmelerin listesi
     pub tabs: Vec<BrowserTab>,
-    /// Active tab index
+    /// Aktif (görünen) sekmenin indeksi
     pub active_tab: usize,
-    /// Bookmarks
+    /// Kaydedilmiş yer imleri
     pub bookmarks: Vec<Bookmark>,
-    /// Downloads
+    /// Devam eden ve tamamlanan indirmeler
     pub downloads: Vec<DownloadItem>,
-    /// Show bookmark bar
+    /// Yer imleri çubuğu görünür mü?
     pub show_bookmark_bar: bool,
-    /// Show downloads panel
+    /// İndirmeler paneli açık mı?
     pub show_downloads: bool,
-    /// Show history panel
+    /// Geçmiş paneli açık mı?
     pub show_history: bool,
-    /// Address bar text
+    /// Adres çubuğunun mevcut metin içeriği
     pub address_bar: String,
-    /// Is address bar focused
+    /// Adres çubuğu odak aldı mı? (klavye girişi buraya gider)
     pub address_focused: bool,
-    /// Search engine
+    /// Kullanılan varsayılan arama motoru URL'i (sorgu parametresiyle)
     pub search_engine: String,
-    /// Hovered tab
+    /// Fare imlecinin üzerinde olduğu sekme indeksi
     pub hovered_tab: Option<usize>,
-    /// Hovered bookmark
+    /// Fare imlecinin üzerinde olduğu yer imi indeksi
     pub hovered_bookmark: Option<usize>,
-    /// Hovered link
+    /// Fare imlecinin üzerinde olduğu link indeksi
     pub hovered_link: Option<usize>,
-    /// Next tab ID
+    /// Yeni sekme oluşturulurken kullanılacak sonraki ID
     pub next_tab_id: u32,
-    /// Next bookmark ID
+    /// Yeni yer imi oluşturulurken kullanılacak sonraki ID
     pub next_bookmark_id: u32,
-    /// Next download ID
+    /// Yeni indirme başlatılırken kullanılacak sonraki ID
     pub next_download_id: u32,
 }
 
@@ -480,6 +507,10 @@ impl BrowserWindow {
         self.address_bar = self.tabs[self.active_tab].url.clone();
     }
     
+    /// Verilen URL'e git. URL'nin formatına göre uygun işlem yapılır:
+    /// - http:// veya https:// ile başlıyorsa doğrudan yükle
+    /// - Nokta içeriyor ve boşluk yoksa başına "https://" ekle
+    /// - Aksi halde arama motoruna yönlendir
     pub fn navigate(&mut self, url: &str) {
         let url = if url.starts_with("http://") || url.starts_with("https://") {
             String::from(url)
@@ -1094,6 +1125,9 @@ pub enum BrowserAction {
 // ============================================================================
 // GLOBAL BROWSER
 // ============================================================================
+// Tek bir global tarayıcı örneği. `lazy_static!` ile ilk erişimde oluşturulur.
+// `Mutex` sayesinde çoklu çekirdek erişimi güvenli hale gelir.
+// `get_browser()` fonksiyonu ile bu örneğe her yerden ulaşılabilir.
 
 lazy_static::lazy_static! {
     static ref BROWSER: Mutex<BrowserWindow> = Mutex::new(BrowserWindow::new(Rect {

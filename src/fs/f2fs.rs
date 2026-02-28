@@ -1,3 +1,15 @@
+//! # F2FS (Flash-Friendly File System) Sürücüsü
+//!
+//! F2FS, NAND flash depolama aygıtları için optimize edilmiş bir log-yapılı
+//! dosya sistemidir. Samsung tarafından geliştirilmiş olup SSD ve eMMC gibi
+//! flash tabanlı depolarda yüksek performans sunar.
+//!
+//! Bu modül F2FS biçimindeki bölümleri okuma/yazma işlemlerini sağlar:
+//! - Dizin girişleri (F2fsEntry) üzerinden dosya meta verisi erişimi
+//! - Vnode tabanlı inode yönetimi
+//! - ATA blok aygıtı üzerinden sektör okuma/yazma
+//! - Hashbrown tabanlı dizin önbelleği
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;

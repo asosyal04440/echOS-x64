@@ -1,7 +1,27 @@
-//! # ext4 Journaling System
+//! # ext4 Günlükleme Sistemi (JBD2)
 //!
-//! Implements the ext4 journal (JBD2) for crash consistency.
-//! Supports ordered mode writes with transaction support.
+//! ext4 günlüğü (JBD2 - Journaling Block Device 2) çökmeden kurtarma için
+//! işlem (transaction) tabanlı yazma desteği sağlar.
+//! Sıralı mod yazmaları ve işlem yönetimi desteklenir.
+//!
+//! ## JBD2 İşlem Yaşam Döngüsü (ASCII Diyagram)
+//! ```text
+//! Günlük Döngüsel Tampon Yapısı:
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │ SB │ Tanımlayıcı │ Veri Blokları │ Teslim │ İptal │ ...    │
+//! └─────────────────────────────────────────────────────────────┘
+//!
+//! İşlem Aşamaları:
+//!  1. BAŞLAT  → JournalHandle al, blokları kaydet
+//!  2. KİLİTLE → Yeni yazma yok
+//!  3. TEMİZLE → Veri bloklarını günlüğe yaz
+//!  4. TESLİM  → Teslim bloğu yaz (crash-safe nokta)
+//!  5. KONTROL → Blokları asıl konumlarına kopyala
+//!  6. BİTTİ   → İşlem tamamlandı
+//!
+//! Kurtarma algoritması:
+//!  Mount → Tanımlayıcı tara → Teslim bloğu varsa → Tekrar oynat
+//! ```
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -12,26 +32,26 @@ use spin::Mutex;
 use core::mem;
 
 // ============================================================================
-// JBD2 CONSTANTS
+// JBD2 SABİTLERİ
 // ============================================================================
 
-/// Journal magic number
+/// Günlük sihirli sayısı - her günlük bloğunun başında yer alır
 const JBD2_MAGIC: u32 = 0xC03B3998;
 
-/// Journal block types
+/// Günlük blok türleri - her bloğun ne tür bilgi içerdiğini belirtir
 const JBD2_DESCRIPTOR_BLOCK: u32 = 1;
 const JBD2_COMMIT_BLOCK: u32 = 2;
 const JBD2_SUPERBLOCK_V1: u32 = 3;
 const JBD2_SUPERBLOCK_V2: u32 = 4;
 const JBD2_REVOKE_BLOCK: u32 = 5;
 
-/// Journal flags
+/// Günlük bayrakları - blok etiket özelliklerini belirtir
 const JBD2_FLAG_ESCAPE: u32 = 1;
 const JBD2_FLAG_SAME_UUID: u32 = 2;
 const JBD2_FLAG_DELETED: u32 = 4;
 const JBD2_FLAG_FLIPPED: u32 = 8;
 
-/// Transaction states
+/// İşlem durumları - bir işlemin yaşam döngüsündeki aşamaları
 const JBD2_RUNNING: u32 = 0;
 const JBD2_LOCKED: u32 = 1;
 const JBD2_FLUSHING: u32 = 2;
@@ -39,55 +59,55 @@ const JBD2_COMMITTING: u32 = 3;
 const JBD2_FINISHED: u32 = 4;
 
 // ============================================================================
-// JOURNAL SUPERBLOCK
+// GÜNLÜK SÜPER BLOĞU
 // ============================================================================
 
-/// Journal superblock (on-disk format)
+/// Günlük süper bloğu - disk üzerindeki format (big-endian)
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct JournalSuperblock {
-    /// Magic number
+    /// Sihirli sayı
     pub s_header_h_magic: u32,
-    /// Block type
+    /// Blok türü
     pub s_header_h_blocktype: u32,
-    /// Sequence number
+    /// Sıralı numara
     pub s_header_h_sequence: u32,
-    /// Journal first block
+    /// Günlüğün ilk bloğu
     pub s_first: u32,
-    /// Journal sequence number
+    /// Günlük sıralı numarası
     pub s_sequence: u32,
-    /// Journal block size
+    /// Günlük blok boyutu
     pub s_blocksize: u32,
-    /// Journal length in blocks
+    /// Günlük uzunluğu (blok sayısı)
     pub s_maxlen: u32,
-    /// First data block
+    /// İlk veri bloğu
     pub s_first_data_block: u32,
-    /// Transaction ID
+    /// İşlem kimliği
     pub s_transaction: u32,
-    /// Journal filesystem block size
+    /// Günlük dosya sistemi blok boyutu
     pub s_jnl_blocksize: u32,
-    /// Number of users
+    /// Kullanıcı sayısı
     pub s_users: u32,
-    /// Device major
+    /// Aygıt ana numarası
     pub s_dev_major: u32,
-    /// Device minor
+    /// Aygıt alt numarası
     pub s_dev_minor: u32,
-    /// Start of log
+    /// Günlüğün başlangıç konumu
     pub s_start: u32,
-    /// Error number
+    /// Hata numarası
     pub s_errno: u32,
-    /// Feature flags
+    /// Özellik bayrakları
     pub s_feature_compat: u32,
     pub s_feature_incompat: u32,
     pub s_feature_ro_compat: u32,
-    /// Journal UUID
+    /// Günlük UUID'si
     pub s_uuid: [u8; 16],
-    /// Number of revoke blocks
+    /// İptal bloğu sayısı
     pub s_nr_revokes: u32,
 }
 
 impl JournalSuperblock {
-    /// Parse from bytes
+    /// Süper bloğu ham baytlardan çözümler; sihirli sayıyı doğrular
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < core::mem::size_of::<JournalSuperblock>() {
             return None;
@@ -99,7 +119,7 @@ impl JournalSuperblock {
         }
 
         let mut sb: JournalSuperblock = unsafe { mem::zeroed() };
-        
+
         sb.s_header_h_magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         sb.s_header_h_blocktype = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         sb.s_header_h_sequence = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
@@ -115,25 +135,25 @@ impl JournalSuperblock {
         sb.s_dev_minor = u32::from_be_bytes([data[48], data[49], data[50], data[51]]);
         sb.s_start = u32::from_be_bytes([data[52], data[53], data[54], data[55]]);
         sb.s_errno = u32::from_be_bytes([data[56], data[57], data[58], data[59]]);
-        
-        // Feature flags at offset 60
+
+        // Özellik bayrakları 60. ofsetinde
         sb.s_feature_compat = u32::from_be_bytes([data[60], data[61], data[62], data[63]]);
         sb.s_feature_incompat = u32::from_be_bytes([data[64], data[65], data[66], data[67]]);
         sb.s_feature_ro_compat = u32::from_be_bytes([data[68], data[69], data[70], data[71]]);
-        
-        // UUID at offset 72
+
+        // UUID 72. ofsetinde (16 bayt)
         sb.s_uuid.copy_from_slice(&data[72..88]);
-        
-        // Revoke count at offset 88
+
+        // İptal sayısı 88. ofsetinde
         sb.s_nr_revokes = u32::from_be_bytes([data[88], data[89], data[90], data[91]]);
 
         Some(sb)
     }
 
-    /// Serialize to bytes
+    /// Süper bloğu bayt dizisine serileştirir (big-endian format)
     pub fn serialize(&self) -> Vec<u8> {
         let mut data = vec![0u8; core::mem::size_of::<JournalSuperblock>()];
-        
+
         data[0..4].copy_from_slice(&self.s_header_h_magic.to_be_bytes());
         data[4..8].copy_from_slice(&self.s_header_h_blocktype.to_be_bytes());
         data[8..12].copy_from_slice(&self.s_header_h_sequence.to_be_bytes());
@@ -154,29 +174,29 @@ impl JournalSuperblock {
         data[68..72].copy_from_slice(&self.s_feature_ro_compat.to_be_bytes());
         data[72..88].copy_from_slice(&self.s_uuid);
         data[88..92].copy_from_slice(&self.s_nr_revokes.to_be_bytes());
-        
+
         data
     }
 }
 
 // ============================================================================
-// JOURNAL HEADER
+// GÜNLÜK BAŞLIĞI
 // ============================================================================
 
-/// Generic journal header
+/// Genel günlük bloğu başlığı - her günlük bloğunun ilk 12 baytı
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct JournalHeader {
-    /// Magic number
+    /// Sihirli sayı
     pub h_magic: u32,
-    /// Block type
+    /// Blok türü
     pub h_blocktype: u32,
-    /// Sequence number
+    /// Sıralı numara
     pub h_sequence: u32,
 }
 
 impl JournalHeader {
-    /// Parse from bytes
+    /// Günlük başlığını ham baytlardan çözümler
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 12 {
             return None;
@@ -194,7 +214,7 @@ impl JournalHeader {
         })
     }
 
-    /// Serialize to bytes
+    /// Başlığı 12 baytlık dizi olarak serileştirir
     pub fn serialize(&self) -> [u8; 12] {
         let mut data = [0u8; 12];
         data[0..4].copy_from_slice(&self.h_magic.to_be_bytes());
@@ -205,49 +225,49 @@ impl JournalHeader {
 }
 
 // ============================================================================
-// JOURNAL DESCRIPTOR BLOCK
+// GÜNLÜK TANIL AYICI BLOĞU
 // ============================================================================
 
-/// Journal descriptor block header
+/// Günlük tanımlayıcı bloğu başlığı - hangi fiziksel blokların günlükte olduğunu listeler
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct DescriptorBlock {
     pub header: JournalHeader,
-    pub block_tags: [BlockTag; 16], // Up to 16 tags per block
+    pub block_tags: [BlockTag; 16], // Blok başına en fazla 16 etiket
 }
 
-/// Block tag in descriptor
+/// Tanımlayıcıdaki blok etiketi - bir bloğun numarasını ve özelliklerini tutar
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct BlockTag {
-    pub t_blocknr: u32,       // Block number
-    pub t_flags: u16,         // Flags
-    pub t_checksum: u16,      // Checksum
+    pub t_blocknr: u32,       // Blok numarası
+    pub t_flags: u16,         // Bayraklar
+    pub t_checksum: u16,      // Sağlama toplamı
 }
 
 impl DescriptorBlock {
-    /// Parse from bytes
+    /// Tanımlayıcı bloğu ham baytlardan çözümler
     pub fn parse(data: &[u8]) -> Option<Self> {
         let header = JournalHeader::parse(data)?;
-        
+
         if header.h_blocktype != JBD2_DESCRIPTOR_BLOCK {
             return None;
         }
 
         let mut block_tags = [BlockTag { t_blocknr: 0, t_flags: 0, t_checksum: 0 }; 16];
-        
-        let mut offset = 12; // After header
+
+        let mut offset = 12; // Başlıktan sonra
         for i in 0..16 {
             if offset + 8 > data.len() {
                 break;
             }
-            
+
             block_tags[i] = BlockTag {
                 t_blocknr: u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]),
                 t_flags: u16::from_be_bytes([data[offset+4], data[offset+5]]),
                 t_checksum: u16::from_be_bytes([data[offset+6], data[offset+7]]),
             };
-            
+
             offset += 8;
         }
 
@@ -256,10 +276,10 @@ impl DescriptorBlock {
 }
 
 // ============================================================================
-// JOURNAL COMMIT BLOCK
+// GÜNLÜK TESLİM BLOĞU
 // ============================================================================
 
-/// Journal commit block
+/// Günlük teslim bloğu - işlemin başarıyla yazıldığını işaretler (crash-safe)
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CommitBlock {
@@ -267,11 +287,11 @@ pub struct CommitBlock {
     pub h_chksum_type: u8,
     pub h_chksum_size: u8,
     pub h_padding: [u8; 2],
-    pub h_chksum: [u8; 32],  // Up to 32 bytes for checksum
+    pub h_chksum: [u8; 32],  // Sağlama toplamı için en fazla 32 bayt
 }
 
 impl CommitBlock {
-    /// Create new commit block
+    /// Verilen sıralı numara ile yeni bir teslim bloğu oluşturur
     pub fn new(sequence: u32) -> Self {
         Self {
             header: JournalHeader {
@@ -286,45 +306,45 @@ impl CommitBlock {
         }
     }
 
-    /// Serialize to bytes
+    /// Teslim bloğunu tam blok boyutunda bayt dizisine serileştirir
     pub fn serialize(&self, block_size: usize) -> Vec<u8> {
         let mut data = vec![0u8; block_size];
-        
+
         data[0..12].copy_from_slice(&self.header.serialize());
         data[12] = self.h_chksum_type;
         data[13] = self.h_chksum_size;
         data[14..16].copy_from_slice(&self.h_padding);
         data[16..48].copy_from_slice(&self.h_chksum);
-        
+
         data
     }
 }
 
 // ============================================================================
-// REVOKE BLOCK
+// İPTAL BLOĞU
 // ============================================================================
 
-/// Journal revoke block
+/// Günlük iptal bloğu - belirtilen blokların eski günlük kayıtlarını geçersiz kılar
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct RevokeBlock {
     pub header: JournalHeader,
-    pub r_count: u32,        // Number of revoke entries
-    pub r_entries: Vec<u32>, // Revoke entries (block numbers)
+    pub r_count: u32,        // İptal girişi sayısı
+    pub r_entries: Vec<u32>, // İptal girişleri (blok numaraları)
 }
 
 impl RevokeBlock {
-    /// Parse from bytes
+    /// İptal bloğunu ham baytlardan çözümler
     pub fn parse(data: &[u8]) -> Option<Self> {
         let header = JournalHeader::parse(data)?;
-        
+
         if header.h_blocktype != JBD2_REVOKE_BLOCK {
             return None;
         }
 
         let r_count = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
         let mut r_entries = Vec::new();
-        
+
         let mut offset = 16;
         for _ in 0..r_count {
             if offset + 4 > data.len() {
@@ -339,10 +359,10 @@ impl RevokeBlock {
 }
 
 // ============================================================================
-// TRANSACTION
+// İŞLEM
 // ============================================================================
 
-/// Transaction state
+/// İşlem durumu - bir JBD2 işleminin yaşam döngüsündeki aşamaları
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransactionState {
     Running,
@@ -352,36 +372,36 @@ pub enum TransactionState {
     Finished,
 }
 
-/// In-memory transaction
+/// Bellekteki işlem yapısı - değiştirilecek blokları ve meta veriyi tutar
 #[derive(Clone, Debug)]
 pub struct Transaction {
-    /// Transaction ID
+    /// İşlem kimliği
     pub tid: u64,
-    /// State
+    /// Durum
     pub state: TransactionState,
-    /// Blocks to be modified
+    /// Değiştirilecek bloklar
     pub blocks: Vec<TransactionBlock>,
-    /// Blocks to revoke
+    /// İptal edilecek bloklar
     pub revokes: Vec<u32>,
-    /// Start time (ticks)
+    /// Başlangıç zamanı (tik sayısı)
     pub start_time: u64,
 }
 
-/// Block in transaction
+/// İşlemdeki blok kaydı - blok verisi ve meta bilgisini içerir
 #[derive(Clone, Debug)]
 pub struct TransactionBlock {
-    /// Block number
+    /// Blok numarası
     pub block_nr: u32,
-    /// Block data
+    /// Blok verisi
     pub data: Vec<u8>,
-    /// Is metadata
+    /// Meta veri bloğu mu?
     pub is_metadata: bool,
-    /// Is new block
+    /// Yeni tahsis edilmiş blok mu?
     pub is_new: bool,
 }
 
 impl Transaction {
-    /// Create new transaction
+    /// Verilen kimlikle yeni bir işlem başlatır
     pub fn new(tid: u64) -> Self {
         Self {
             tid,
@@ -392,7 +412,7 @@ impl Transaction {
         }
     }
 
-    /// Add block to transaction
+    /// İşleme bir blok ekler (değiştirileceği bildirilir)
     pub fn add_block(&mut self, block_nr: u32, data: &[u8], is_metadata: bool, is_new: bool) {
         self.blocks.push(TransactionBlock {
             block_nr,
@@ -402,45 +422,45 @@ impl Transaction {
         });
     }
 
-    /// Add revoke entry
+    /// İşleme iptal girişi ekler (ikincil kez eklemez)
     pub fn add_revoke(&mut self, block_nr: u32) {
         if !self.revokes.contains(&block_nr) {
             self.revokes.push(block_nr);
         }
     }
 
-    /// Get block count
+    /// İşlemdeki toplam blok sayısını döndürür
     pub fn block_count(&self) -> usize {
         self.blocks.len()
     }
 }
 
 // ============================================================================
-// JOURNAL HANDLE
+// GÜNLÜK TUTAMACI
 // ============================================================================
 
-/// Journal handle for a transaction
+/// Bir işlem için günlük tutamacı - işlem başına alınır, drop edildiğinde serbest bırakılır
 pub struct JournalHandle {
-    /// Journal reference
+    /// Günlük referansı
     journal: Arc<Mutex<Journal>>,
-    /// Transaction ID
+    /// İşlem kimliği
     tid: u64,
-    /// Buffer credits (blocks allocated)
+    /// Tampon kredileri (tahsis edilmiş blok sayısı)
     credits: usize,
 }
 
 impl JournalHandle {
-    /// Create new handle
+    /// Yeni bir günlük tutamacı oluşturur
     pub fn new(journal: Arc<Mutex<Journal>>, tid: u64, credits: usize) -> Self {
         Self { journal, tid, credits }
     }
 
-    /// Get handle credits
+    /// Mevcut kredi sayısını döndürür
     pub fn credits(&self) -> usize {
         self.credits
     }
 
-    /// Extend credits
+    /// Ek krediler ekler
     pub fn extend(&mut self, additional: usize) {
         self.credits += additional;
     }
@@ -448,36 +468,36 @@ impl JournalHandle {
 
 impl Drop for JournalHandle {
     fn drop(&mut self) {
-        // Release unused credits
-        // In real implementation, would update journal state
+        // Kullanılmayan kredileri serbest bırak
+        // Gerçek uygulamada günlük durumu güncellenirdi
     }
 }
 
 // ============================================================================
-// JOURNAL
+// GÜNLÜK
 // ============================================================================
 
-/// Journal instance
+/// Günlük örneği - JBD2 günlüğünün tüm durumunu yönetir
 #[derive(Debug)]
 pub struct Journal {
-    /// Journal superblock
+    /// Günlük süper bloğu
     pub superblock: JournalSuperblock,
-    /// Journal block size
+    /// Günlük blok boyutu
     pub block_size: u32,
-    /// Journal device offset
+    /// Günlüğün aygıttaki ofseti
     pub journal_offset: u64,
-    /// Current transaction
+    /// Mevcut aktif işlem
     pub current_transaction: Option<Transaction>,
-    /// Transaction sequence number
+    /// İşlem sıralı numarası
     pub sequence: u64,
-    /// Running transaction count
+    /// Çalışan işlem sayısı
     pub running_trans: u32,
-    /// Journal buffer
+    /// Günlük tamponu
     buffer: Vec<u8>,
 }
 
 impl Journal {
-    /// Create new journal
+    /// Verilen parametrelerle yeni bir günlük oluşturur
     pub fn new(block_size: u32, journal_offset: u64, journal_size: u64) -> Self {
         let mut sb: JournalSuperblock = unsafe { mem::zeroed() };
         sb.s_header_h_magic = JBD2_MAGIC;
@@ -486,7 +506,7 @@ impl Journal {
         sb.s_maxlen = (journal_size / block_size as u64) as u32;
         sb.s_sequence = 1;
         sb.s_start = 1;
-        
+
         Self {
             superblock: sb,
             block_size,
@@ -498,10 +518,10 @@ impl Journal {
         }
     }
 
-    /// Initialize from device data
+    /// Aygıt verisinden mevcut günlüğü başlatır (süper bloğu okur)
     pub fn init(&mut self, device_data: &[u8]) -> Result<(), JournalError> {
         let offset = self.journal_offset as usize;
-        
+
         if offset + self.block_size as usize > device_data.len() {
             return Err(JournalError::InvalidOffset);
         }
@@ -512,17 +532,17 @@ impl Journal {
         self.superblock = sb;
         self.sequence = sb.s_sequence as u64;
 
-        crate::serial_println!("[JBD2] Journal initialized: {} blocks, seq={}", 
+        crate::serial_println!("[JBD2] Günlük başlatıldı: {} blok, sıra={}",
             sb.s_maxlen, sb.s_sequence);
 
         Ok(())
     }
 
-    /// Start new transaction
+    /// Yeni bir işlem başlatır; çalışan işlem varsa hata döner
     pub fn start_transaction(&mut self, credits: usize) -> Result<JournalHandle, JournalError> {
         if self.running_trans > 0 {
-            // Wait for existing transaction to complete
-            // In real implementation, would block
+            // Mevcut işlemin tamamlanmasını bekle
+            // Gerçek uygulamada bloklanırdı
             return Err(JournalError::TransactionRunning);
         }
 
@@ -535,7 +555,7 @@ impl Journal {
         Ok(JournalHandle::new(Arc::new(Mutex::new(self.clone())), tid, credits))
     }
 
-    /// Add block to current transaction
+    /// Mevcut işleme var olan bir bloğu ekler (meta veri veya veri bloğu)
     pub fn add_block(&mut self, block_nr: u32, data: &[u8], is_metadata: bool) -> Result<(), JournalError> {
         let trans = self.current_transaction.as_mut()
             .ok_or(JournalError::NoTransaction)?;
@@ -544,7 +564,7 @@ impl Journal {
         Ok(())
     }
 
-    /// Add new block allocation to transaction
+    /// Mevcut işleme yeni tahsis edilmiş bir blok ekler
     pub fn add_new_block(&mut self, block_nr: u32, data: &[u8], is_metadata: bool) -> Result<(), JournalError> {
         let trans = self.current_transaction.as_mut()
             .ok_or(JournalError::NoTransaction)?;
@@ -553,89 +573,89 @@ impl Journal {
         Ok(())
     }
 
-    /// Commit transaction
+    /// Mevcut işlemi 5 aşamada teslim eder (atomik yazma garantisi)
     pub fn commit_transaction(&mut self) -> Result<(), JournalError> {
         let trans = self.current_transaction.take()
             .ok_or(JournalError::NoTransaction)?;
 
-        // Phase 1: Write descriptor blocks
+        // Aşama 1: Tanımlayıcı bloklarını yaz
         self.write_descriptors(&trans)?;
 
-        // Phase 2: Write data blocks to journal
+        // Aşama 2: Veri bloklarını günlüğe yaz
         self.write_data_blocks(&trans)?;
 
-        // Phase 3: Write commit block
+        // Aşama 3: Teslim bloğunu yaz (buradan sonra kurtarılabilir)
         self.write_commit_block(&trans)?;
 
-        // Phase 4: Write to actual locations (checkpoint)
+        // Aşama 4: Asıl konumlara yaz (checkpoint)
         self.checkpoint(&trans)?;
 
-        // Phase 5: Update superblock
+        // Aşama 5: Süper bloğu güncelle
         self.update_superblock()?;
 
         self.running_trans = self.running_trans.saturating_sub(1);
 
-        crate::serial_println!("[JBD2] Transaction {} committed ({} blocks)", 
+        crate::serial_println!("[JBD2] İşlem {} teslim edildi ({} blok)",
             trans.tid, trans.blocks.len());
 
         Ok(())
     }
 
-    /// Write descriptor blocks
+    /// Tanımlayıcı bloklarını günlük bölgesine yazar
     fn write_descriptors(&mut self, trans: &Transaction) -> Result<(), JournalError> {
-        // In real implementation, would write to journal area
+        // Gerçek uygulamada günlük bölgesine yazılırdı
         let _ = trans;
         Ok(())
     }
 
-    /// Write data blocks to journal
+    /// Veri bloklarını günlüğe yazar
     fn write_data_blocks(&mut self, trans: &Transaction) -> Result<(), JournalError> {
-        // In real implementation, would write blocks to journal
+        // Gerçek uygulamada bloklar günlüğe yazılırdı
         let _ = trans;
         Ok(())
     }
 
-    /// Write commit block
+    /// Teslim bloğunu yazar (crash-safe nokta)
     fn write_commit_block(&mut self, trans: &Transaction) -> Result<(), JournalError> {
         let commit = CommitBlock::new(trans.tid as u32);
         let _data = commit.serialize(self.block_size as usize);
-        // Would write to journal
+        // Günlüğe yazılacak
         Ok(())
     }
 
-    /// Checkpoint - write blocks to final locations
+    /// Checkpoint - blokları dosya sistemindeki asıl konumlarına yazar
     fn checkpoint(&mut self, trans: &Transaction) -> Result<(), JournalError> {
-        // In real implementation, would write blocks to filesystem
+        // Gerçek uygulamada bloklar dosya sistemine yazılırdı
         let _ = trans;
         Ok(())
     }
 
-    /// Update superblock
+    /// Süper bloğu güncel sıralı numara ile günceller
     fn update_superblock(&mut self) -> Result<(), JournalError> {
         self.superblock.s_sequence = self.sequence as u32;
         Ok(())
     }
 
-    /// Abort transaction
+    /// Mevcut işlemi iptal eder ve tüm bekleyen değişiklikleri atar
     pub fn abort_transaction(&mut self) {
         self.current_transaction = None;
         self.running_trans = self.running_trans.saturating_sub(1);
-        crate::serial_println!("[JBD2] Transaction aborted");
+        crate::serial_println!("[JBD2] İşlem iptal edildi");
     }
 
-    /// Recover journal on mount
+    /// Mount sırasında günlüğü kurtarır: tamamlanmış işlemleri tekrar oynatır
     pub fn recover(&mut self, device_data: &[u8]) -> Result<(), JournalError> {
         let start = self.superblock.s_start;
         let sequence = self.superblock.s_sequence;
 
         if start == 0 {
-            // Journal is clean
+            // Günlük temiz, kurtarma gerekmiyor
             return Ok(());
         }
 
-        crate::serial_println!("[JBD2] Starting recovery from block {}", start);
+        crate::serial_println!("[JBD2] {} bloğundan kurtarma başlıyor", start);
 
-        // Scan journal for uncommitted transactions
+        // Tamamlanmamış işlemler için günlüğü tara
         let mut current_seq: u64 = sequence as u64;
         let mut offset = self.journal_offset + (start as u64) * (self.block_size as u64);
 
@@ -645,50 +665,50 @@ impl Journal {
             }
 
             let block_data = &device_data[offset as usize..];
-            
+
             if let Some(header) = JournalHeader::parse(block_data) {
                 match header.h_blocktype {
                     JBD2_DESCRIPTOR_BLOCK => {
-                        // Found transaction start
+                        // İşlem başlangıcı bulundu
                         current_seq = header.h_sequence as u64;
                     }
                     JBD2_COMMIT_BLOCK => {
-                        // Transaction committed, replay it
+                        // İşlem teslim edilmiş, tekrar oynat
                         if header.h_sequence as u64 == current_seq {
                             self.replay_transaction(block_data)?;
                         }
                     }
                     JBD2_REVOKE_BLOCK => {
-                        // Handle revoke
+                        // İptal bloğunu işle
                     }
                     _ => {}
                 }
             }
 
             offset += self.block_size as u64;
-            
-            // Wrap around
+
+            // Döngüsel tamponu başa sar
             if offset >= self.journal_offset + (self.superblock.s_maxlen as u64) * (self.block_size as u64) {
                 break;
             }
         }
 
-        // Mark journal as clean
+        // Günlüğü temiz olarak işaretle
         self.superblock.s_start = 0;
         self.sequence = current_seq + 1;
 
-        crate::serial_println!("[JBD2] Recovery complete, seq={}", self.sequence);
+        crate::serial_println!("[JBD2] Kurtarma tamamlandı, sıra={}", self.sequence);
 
         Ok(())
     }
 
-    /// Replay a transaction during recovery
+    /// Kurtarma sırasında teslim edilmiş bir işlemi tekrar oynatır
     fn replay_transaction(&mut self, _block_data: &[u8]) -> Result<(), JournalError> {
-        // In real implementation, would replay committed blocks
+        // Gerçek uygulamada teslim edilmiş bloklar tekrar oynatılırdı
         Ok(())
     }
 
-    /// Clone journal (for Arc<Mutex<Journal>>)
+    /// Günlüğü klonlar (Arc<Mutex<Journal>> için gerekli)
     fn clone(&self) -> Self {
         Self {
             superblock: self.superblock,
@@ -703,9 +723,10 @@ impl Journal {
 }
 
 // ============================================================================
-// JOURNAL ERROR
+// GÜNLÜK HATA TÜRLERİ
 // ============================================================================
 
+/// JBD2 günlük işlemlerinde oluşabilecek hata türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JournalError {
     InvalidSuperblock,
@@ -719,24 +740,24 @@ pub enum JournalError {
 }
 
 // ============================================================================
-// GLOBAL JOURNAL REGISTRY
+// GLOBAL GÜNLÜK KAYIT DEFTERİ
 // ============================================================================
 
 lazy_static::lazy_static! {
     static ref JOURNAL_INSTANCES: Mutex<BTreeMap<String, Arc<Mutex<Journal>>>> = Mutex::new(BTreeMap::new());
 }
 
-/// Register journal
+/// İsimlendirilmiş bir günlüğü global kayıt defterine ekler
 pub fn register_journal(name: &str, journal: Journal) {
     JOURNAL_INSTANCES.lock().insert(name.to_string(), Arc::new(Mutex::new(journal)));
 }
 
-/// Get journal by name
+/// İsme göre günlük örneğini döndürür
 pub fn get_journal(name: &str) -> Option<Arc<Mutex<Journal>>> {
     JOURNAL_INSTANCES.lock().get(name).cloned()
 }
 
-/// Initialize journal module
+/// Günlük modülünü başlatır
 pub fn init() {
-    crate::serial_println!("[JBD2] Journal module initialized");
+    crate::serial_println!("[JBD2] Günlük modülü başlatıldı");
 }

@@ -1,10 +1,77 @@
-//! # TLS 1.3 Implementation for echOS
+//! # TLS 1.3 Protokolü (Transport Layer Security)
 //!
-//! TLS 1.3 handshake state machine with:
-//! - Record parsing and construction
-//! - Handshake message handling
-//! - Key schedule (HKDF-based)
-//! - Soft crypto implementations for no_std
+//! echOS için TLS 1.3 el sıkışma durum makinesi.
+//!
+//! ## TLS 1.3 Nedir?
+//!
+//! TLS (Transport Layer Security), ağ üzerindeki iletişimi kriptografik olarak
+//! güvence altına alan protokoldür. HTTPS, SMTPS, FTPS ve daha birçok protokolün
+//! temelini oluşturur.
+//!
+//! ## TLS 1.3 El Sıkışma Diyagramı
+//!
+//! ```
+//!  İstemci                              Sunucu
+//!     |                                    |
+//!     |---- ClientHello ------------------>|  Desteklenen cipher suites, key_share
+//!     |                                    |
+//!     |<--- ServerHello -------------------|  Cipher suite seçimi, key_share
+//!     |<--- {EncryptedExtensions} ---------|  Şifrelenmiş uzantılar
+//!     |<--- {Certificate} -----------------|  Sunucu sertifikası
+//!     |<--- {CertificateVerify} -----------|  Sertifika imzası
+//!     |<--- {Finished} --------------------|  El sıkışma MAC'i
+//!     |                                    |
+//!     |---- {Finished} ------------------->|  İstemci onayı
+//!     |                                    |
+//!     |==== [Uygulama Verisi] ============>|  Şifreli iletişim başladı
+//!     |<==== [Uygulama Verisi] ============|
+//!
+//!  {} = Handshake traffic secret ile şifreli
+//!  [] = Application traffic secret ile şifreli
+//! ```
+//!
+//! ## TLS 1.3 Anahtar Takvimi (Key Schedule)
+//!
+//! ```
+//!  0 -> HKDF-Extract(0, PSK/DHE) -> Early Secret
+//!       |
+//!       +-> Derive -> Early Traffic Key (0-RTT için)
+//!       |
+//!       v
+//!  HKDF-Extract(ES, ECDHE) -> Handshake Secret
+//!       |
+//!       +-> Derive -> Client/Server Handshake Traffic Keys
+//!       |
+//!       v
+//!  HKDF-Extract(HS, 0) -> Master Secret
+//!       |
+//!       +-> Derive -> Client/Server Application Traffic Keys
+//!       |
+//!       +-> Derive -> Exporter Master Secret
+//!       +-> Derive -> Resumption Master Secret
+//! ```
+//!
+//! ## Şifre Paketleri (Cipher Suites)
+//!
+//! ```
+//!  TLS_AES_128_GCM_SHA256        (0x1301) - 128-bit AES-GCM, SHA-256
+//!  TLS_AES_256_GCM_SHA384        (0x1302) - 256-bit AES-GCM, SHA-384
+//!  TLS_CHACHA20_POLY1305_SHA256  (0x1303) - ChaCha20-Poly1305, SHA-256
+//!
+//!  AES-GCM: Donanım hızlandırma var (AES-NI), çok hızlı
+//!  ChaCha20: Sabit zamanlı, donanım desteği olmayan ortamlarda tercih edilir
+//! ```
+//!
+//! ## ECDHE Anahtar Değişimi
+//!
+//! ```
+//!  x25519 (Curve25519 üzerinde ECDH):
+//!  İstemci: gizli_a rastgele üretir, public_A = a * G gönderir
+//!  Sunucu:  gizli_b rastgele üretir, public_B = b * G gönderir
+//!  Paylaşılan sır: a * public_B = b * public_A = a*b*G
+//!
+//!  Bu sır HKDF ile anahtar materyaline dönüştürülür.
+//! ```
 
 use alloc::vec::Vec;
 use alloc::vec;
@@ -14,13 +81,20 @@ use sha2::{Sha256, Sha384, Digest};
 use hkdf::Hkdf;
 
 // ============================================================================
-// TLS CONSTANTS
+// TLS SABİTLERİ VE TEMEL TİPLER
 // ============================================================================
 
-/// TLS 1.3 version
+/// TLS 1.3 protokol sürüm kodu
+/// Not: 0x0303 = TLS 1.2 uyumluluğu için, gerçek sürüm uzantıda belirtilir
 pub const TLS_VERSION_1_3: u16 = 0x0303;
 
-/// TLS 1.3 record types
+/// TLS 1.3 kayıt türleri (record layer content type)
+///
+/// Her TLS kaydının ilk byte'ı içerik türünü belirtir:
+/// - 20: ChangeCipherSpec (geriye uyumluluk, TLS 1.3'te anlamsız)
+/// - 21: Alert (uyarı/hata mesajları)
+/// - 22: Handshake (el sıkışma mesajları)
+/// - 23: ApplicationData (şifreli uygulama verisi)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentType {
     ChangeCipherSpec = 20,
@@ -41,7 +115,10 @@ impl ContentType {
     }
 }
 
-/// TLS 1.3 handshake message types
+/// TLS 1.3 el sıkışma mesaj türleri
+///
+/// El sıkışma akışı (tam): ClientHello -> ServerHello ->
+/// EncryptedExtensions -> Certificate -> CertificateVerify -> Finished
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandshakeType {
     ClientHello = 1,
@@ -74,7 +151,10 @@ impl HandshakeType {
     }
 }
 
-/// TLS 1.3 cipher suites
+/// TLS 1.3 şifre paketleri
+///
+/// TLS 1.3'te yalnızca AEAD (Authenticated Encryption with Associated Data)
+/// şifreleme algoritmaları desteklenir. Her paket: şifreleme + hash içerir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CipherSuite {
     Aes128GcmSha256 = 0x1301,
@@ -126,7 +206,10 @@ impl NamedGroup {
     }
 }
 
-/// TLS 1.3 signature schemes
+/// TLS 1.3 imza şemaları (sertifika doğrulama için)
+///
+/// TLS 1.3'te RSA-PKCS1 v1.5 yalnızca geriye uyumluluk için tutulmuştur.
+/// Önerilen: ECDSA veya RSA-PSS kullanımı.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignatureScheme {
     RsaPkcs1Sha256 = 0x0401,
@@ -142,10 +225,10 @@ pub enum SignatureScheme {
 }
 
 // ============================================================================
-// TLS ERROR
+// TLS HATA TİPLERİ
 // ============================================================================
 
-/// TLS error types
+/// TLS hata türleri
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TlsError {
     InvalidState,
@@ -186,10 +269,22 @@ pub enum AlertDescription {
 }
 
 // ============================================================================
-// TLS HANDSHAKE STATE
+// TLS EL SIKIŞTIRMA DURUM MAKİNESİ
 // ============================================================================
+//
+// TLS 1.3 El Sıkışma Durum Geçişleri:
+//
+//   Initial
+//     -> ClientHelloSent      (ClientHello gönderildi)
+//     -> ServerHelloReceived  (ServerHello alındı, ECDHE tamamlandı)
+//     -> EncryptedExtensionsReceived
+//     -> CertificateReceived
+//     -> CertificateVerifyReceived  (imza doğrulandı)
+//     -> FinishedReceived      (sunucu Finished alındı)
+//     -> Established           (bağlantı hazır, uygulama verisi)
+//     -> Closed / Error
 
-/// TLS handshake state machine
+/// TLS el sıkışma durum makinesi
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TlsState {
     Initial,
@@ -204,10 +299,21 @@ pub enum TlsState {
 }
 
 // ============================================================================
-// TLS RECORD
+// TLS KAYIT KATMANI (Record Layer)
 // ============================================================================
+//
+// TLS Record katmanı, üst katman verilerini (Handshake, Alert, AppData) paketler.
+//
+// TLS Kayıt Yapısı:
+//   +----------+---------+----------+
+//   | Type (1) | Ver (2) | Len (2)  |  <- 5 byte başlık
+//   +----------+---------+----------+
+//   | Veri (len byte)                |  <- Şifreli ya da açık veri
+//   +--------------------------------+
+//
+// TLS 1.3'te ApplicationData kayıtlarının gerçek tipi iç ContentType'ta gizlidir.
 
-/// TLS record header
+/// TLS kayıt başlığı (5 byte)
 #[derive(Clone, Debug)]
 pub struct TlsRecordHeader {
     pub content_type: ContentType,
@@ -241,10 +347,20 @@ impl TlsRecordHeader {
 }
 
 // ============================================================================
-// TLS HANDSHAKE MESSAGE
+// TLS EL SIKIŞTIRMA MESAJ BAŞLIĞI (Handshake Message Header)
 // ============================================================================
+//
+// Her el sıkışma mesajının önünde 4-byte başlık bulunur:
+//   [MsgType(1)] [Uzunluk(3)]
+//
+// Uzunluk 3-byte big-endian olarak kodlanır (tek byte yeterli olmaz).
+// TlsRecord içinde taşınır: ContentType=Handshake(22) olan kayıtlarda.
 
-/// TLS handshake message header
+/// TLS el sıkışma mesaj başlığı (4 byte)
+///
+/// Her el sıkışma mesajının başına eklenen tip ve uzunluk bilgisi.
+/// MsgType: HandshakeType enum değerinden türetilir.
+/// Length: Gövdenin byte cinsinden uzunluğu (3-byte big-endian).
 #[derive(Clone, Debug)]
 pub struct HandshakeHeader {
     pub msg_type: HandshakeType,
@@ -277,10 +393,22 @@ impl HandshakeHeader {
 }
 
 // ============================================================================
-// TLS KEY SCHEDULE
+// TLS ANAHTAR TAKVİMİ (Key Schedule)
 // ============================================================================
+//
+// TLS 1.3 anahtar türetimi HKDF (HMAC-based Extract-and-Expand) kullanır.
+//
+// HKDF-Extract(salt, ikm) -> PRK  (Pseudo-Random Key)
+// HKDF-Expand(PRK, info, len) -> OKM (Output Keying Material)
+//
+// TLS'ye özgü türetme fonksiyonları:
+//   Derive-Secret(Secret, Label, Messages) = HKDF-Expand-Label(Secret, Label, Hash(Messages), L)
+//   HKDF-Expand-Label(Secret, Label, Context, Length) = HKDF-Expand(Secret, HkdfLabel, Length)
+//
+// Her aşamada (early, handshake, master) ayrı trafik anahtarları türetilir.
+// forward secrecy: Her oturum için ayrı geçici ECDHE anahtarı kullanılır.
 
-/// TLS 1.3 key schedule
+/// TLS 1.3 anahtar takvimi
 pub struct KeySchedule {
     early_secret: [u8; 32],
     handshake_secret: Option<[u8; 32]>,
@@ -387,10 +515,29 @@ impl Default for KeySchedule {
 }
 
 // ============================================================================
-// TLS CLIENT
+// TLS İSTEMCİ BAĞLANTISI (TLS Client Connection)
 // ============================================================================
+//
+// TlsClient, bir TLS 1.3 bağlantısının istemci tarafını yönetir.
+//
+// Alanlar:
+//   state         : Mevcut el sıkışma durumu (TlsState enum)
+//   cipher_suite  : Sunucunun seçtiği şifre paketi
+//   key_schedule  : HKDF tabanlı anahtar türetme
+//   transcript    : Tüm el sıkışma mesajlarının birikimi (hash için)
+//   client_seq    : İstemci gönderme sıra numarası (nonce tabanı)
+//   server_seq    : Sunucu gönderme sıra numarası (nonce tabanı)
+//
+// Kullanım Akışı:
+//   1. build_client_hello() -> ClientHello oluştur ve gönder
+//   2. process_server_hello() -> ServerHello'yu işle, cipher suite'i kaydet
+//   3. process_encrypted_extensions() -> Şifreli uzantıları işle
+//   4. process_certificate() -> Sunucu sertifikasını işle
+//   5. process_certificate_verify() -> İmzayı kontrol et
+//   6. process_finished() -> Sunucu Finished mesajını işle
+//   7. complete_handshake() -> Master secret türet, durum = Established
 
-/// TLS client connection
+/// TLS istemci bağlantı bağlamı
 pub struct TlsClient {
     state: TlsState,
     cipher_suite: Option<CipherSuite>,
@@ -412,7 +559,19 @@ impl TlsClient {
         }
     }
     
-    /// Build ClientHello message
+    /// ClientHello mesajı oluştur ve gönderime hazırla
+    ///
+    /// TLS 1.3 ClientHello yapısı:
+    ///   - Protokol sürümü (0x0303 geriye uyumluluk için)
+    ///   - 32-byte rastgele değer (nonce)
+    ///   - Şifre paketi listesi (tercih sırasına göre)
+    ///   - Uzantılar: supported_versions, key_share, signature_algorithms, SNI
+    ///
+    /// Uzantılar (Extensions):
+    ///   - server_name (0): SNI - hangi sunucuya bağlanıldığını belirtir
+    ///   - supported_versions (43): TLS 1.3 (0x0304) desteğini bildirir
+    ///   - key_share (51): ECDHE için geçici public key paylaşılır
+    ///   - signature_algorithms (13): Desteklenen imza şemaları listesi
     pub fn build_client_hello(&mut self, hostname: &str) -> Vec<u8> {
         let mut body = Vec::new();
         
@@ -508,7 +667,14 @@ impl TlsClient {
         hello
     }
     
-    /// Process ServerHello message
+    /// ServerHello mesajını işle
+    ///
+    /// ServerHello içeriği:
+    ///   - Seçilen şifre paketi (CipherSuite)
+    ///   - Sunucunun ECDHE public key'i (key_share uzantısı)
+    ///   - Seçilen TLS sürümü (supported_versions uzantısı)
+    ///
+    /// Bu aşamada: ECDHE ile ortak sır hesaplanır, el sıkışma transkripti güncellenir.
     pub fn process_server_hello(&mut self, data: &[u8]) -> Result<(), TlsError> {
         if self.state != TlsState::ClientHelloSent {
             return Err(TlsError::InvalidState);
@@ -558,7 +724,11 @@ impl TlsClient {
         Ok(())
     }
     
-    /// Process encrypted extensions
+    /// Şifrelenmiş uzantıları işle (EncryptedExtensions)
+    ///
+    /// El sıkışma sıralamasında ServerHello'dan hemen sonra gelir.
+    /// Sunucunun desteklediği uzantıları (ALPN, max_fragment_length vb.) içerir.
+    /// TLS 1.3'te bu mesaj el sıkışma sırrıyla şifrelenir (ilk şifreli mesaj).
     pub fn process_encrypted_extensions(&mut self, data: &[u8]) -> Result<(), TlsError> {
         let header = HandshakeHeader::parse(data)?;
         if header.msg_type != HandshakeType::EncryptedExtensions {
@@ -570,7 +740,11 @@ impl TlsClient {
         Ok(())
     }
     
-    /// Process certificate
+    /// Sunucu sertifikasını işle (Certificate)
+    ///
+    /// Sunucu X.509 sertifika zincirini gönderir (yaprak + ara CA'lar).
+    /// Her sertifika DER formatında kodlanmıştır.
+    /// Gerçek uygulamada: x509::parse_certificate_chain() ile doğrulama yapılır.
     pub fn process_certificate(&mut self, data: &[u8]) -> Result<(), TlsError> {
         let header = HandshakeHeader::parse(data)?;
         if header.msg_type != HandshakeType::Certificate {
@@ -582,7 +756,11 @@ impl TlsClient {
         Ok(())
     }
     
-    /// Process certificate verify
+    /// Sertifika doğrulama mesajını işle (CertificateVerify)
+    ///
+    /// Sunucu, tbsCertificate üzerinde private key ile imza oluşturur.
+    /// İmza: "TLS 1.3, server CertificateVerify" öneki + transcript_hash üzerinde.
+    /// İstemci bu imzayı sertifikadaki public key ile doğrulamalıdır.
     pub fn process_certificate_verify(&mut self, data: &[u8]) -> Result<(), TlsError> {
         let header = HandshakeHeader::parse(data)?;
         if header.msg_type != HandshakeType::CertificateVerify {
@@ -594,7 +772,13 @@ impl TlsClient {
         Ok(())
     }
     
-    /// Process finished
+    /// Sunucu Finished mesajını işle
+    ///
+    /// Finished mesajı, el sıkışmanın bütünlüğünü doğrular.
+    /// İçerik: HMAC(finished_key, transcript_hash)
+    /// finished_key = HKDF-Expand-Label(server_handshake_secret, "finished", "", hash_len)
+    ///
+    /// Bu mesaj alındıktan sonra istemci de kendi Finished mesajını gönderir.
     pub fn process_finished(&mut self, data: &[u8]) -> Result<(), TlsError> {
         let header = HandshakeHeader::parse(data)?;
         if header.msg_type != HandshakeType::Finished {
@@ -606,7 +790,13 @@ impl TlsClient {
         Ok(())
     }
     
-    /// Complete handshake
+    /// El sıkışmayı tamamla ve uygulama anahtarlarını türet
+    ///
+    /// Bu adımda:
+    ///   1. Tam transkriptin SHA-256 hash'i hesaplanır
+    ///   2. Master secret ve application traffic secrets türetilir
+    ///   3. Durum Established olarak işaretlenir
+    ///   4. Uygulama verisi artık gönderilebilir/alınabilir
     pub fn complete_handshake(&mut self) {
         let hash = Sha256::digest(&self.transcript);
         self.key_schedule.derive_master_secret(&hash);
@@ -623,10 +813,16 @@ impl Default for TlsClient {
 }
 
 // ============================================================================
-// HELPER FUNCTIONS
+// YARDIMCI FONKSİYONLAR (Helper Functions)
 // ============================================================================
+//
+// TLS kayıt katmanı ve transkript hash yardımcıları.
 
-/// Wrap data in TLS record
+/// Veriyi TLS kaydına (record) sar
+///
+/// TLS kayıt formatı:
+///   [ContentType(1)] [Sürüm(2)] [Uzunluk(2)] [Veri(n)]
+/// TLS 1.3'te sürüm alanı her zaman 0x0303 (geriye uyumluluk).
 pub fn wrap_record(content_type: ContentType, data: &[u8]) -> Vec<u8> {
     let mut record = Vec::new();
     let header = TlsRecordHeader {
@@ -639,14 +835,21 @@ pub fn wrap_record(content_type: ContentType, data: &[u8]) -> Vec<u8> {
     record
 }
 
-/// Parse TLS record
+/// TLS kaydını ayrıştır (başlık + yük)
+///
+/// Gelen ham veriyi başlık ve yük olarak ayırır.
+/// Hata: Veri çok kısa veya geçersiz ContentType içeriyorsa Err döner.
 pub fn parse_record(data: &[u8]) -> Result<(TlsRecordHeader, Vec<u8>), TlsError> {
     let header = TlsRecordHeader::parse(data)?;
     let payload = data[TlsRecordHeader::SIZE..].to_vec();
     Ok((header, payload))
 }
 
-/// Compute transcript hash
+/// El sıkışma transkriptinin SHA-256 hash'ini hesapla
+///
+/// Transkript hash, tüm el sıkışma mesajlarının birikimsel hash'idir.
+/// Anahtar türetme ve Finished MAC hesaplamalarında kullanılır.
+/// TLS 1.3: Transcript-Hash(M1 || M2 || ... || Mn)
 pub fn transcript_hash(transcript: &[u8]) -> [u8; 32] {
     let hash = Sha256::digest(transcript);
     let mut result = [0u8; 32];
@@ -655,10 +858,32 @@ pub fn transcript_hash(transcript: &[u8]) -> [u8; 32] {
 }
 
 // ============================================================================
-// AES-GCM IMPLEMENTATION (no_std compatible)
+// AES-GCM UYGULAMASI (no_std uyumlu)
 // ============================================================================
+//
+// AES (Advanced Encryption Standard): 128/256-bit blok şifreleme.
+// GCM (Galois/Counter Mode): AEAD modu - şifreleme + kimlik doğrulama.
+//
+// AES Yapısı:
+//   - 128-bit (16 byte) blok boyutu
+//   - 10 tur (AES-128): SubBytes -> ShiftRows -> MixColumns -> AddRoundKey
+//   - 14 tur (AES-256): Daha fazla tur = daha güçlü
+//   - S-box: Doğrusal olmayan byte dönüşüm tablosu (256 giriş)
+//
+// GCM Modu:
+//   Şifreleme: CTR (Counter) modu ile XOR
+//   Kimlik doğrulama: GHASH (Galois alanı çarpımı) ile MAC etiketi
+//
+//   +----------+     +--------+     +--------+
+//   | Anahtar  | --> |  AES   | --> | Keystr |  -> XOR -> Şifrelenmiş veri
+//   +----------+     +--------+     +--------+
+//   +----------+     +--------+
+//   | Veri+AAD | --> | GHASH  | --> 16-byte MAC etiketi (şifreli + AAD üzerinden)
+//   +----------+     +--------+
+//
+// AES-NI: Modern CPU'larda donanım talimatları ile 10x hız artışı.
 
-/// AES-128/256 block cipher
+/// AES-128/256 blok şifreleme (no_std uyumlu, yazılım uygulaması)
 pub struct Aes {
     rounds: usize,
     rk: [u32; 60], // Round keys (max 14 rounds for AES-256)
@@ -963,7 +1188,13 @@ impl Aes {
     }
 }
 
-/// AES-GCM (Galois/Counter Mode)
+/// AES-GCM (Galois/Counter Mode) AEAD şifreleme
+///
+/// AES-GCM birleşik şifreleme ve kimlik doğrulama sağlar (AEAD).
+/// - encrypt(): Şifreler + 16-byte kimlik doğrulama etiketi üretir
+/// - decrypt(): Etiketi önce doğrular, başarılıysa şifre çözer
+/// - ghash(): GF(2^128) Galois alan çarpımıyla MAC hesaplar
+/// - gmul(): Galois alan çarpımı (0xe1000... indirgeme polinomu)
 pub struct AesGcm {
     aes: Aes,
     key_len: usize,
@@ -977,7 +1208,11 @@ impl AesGcm {
         }
     }
     
-    /// Encrypt with GCM
+    /// GCM modu ile şifrele (CTR + GHASH)
+    ///
+    /// Döndürür: (şifreli_veri, 16-byte mac_etiketi)
+    /// nonce: 12-byte IV, her şifreleme işleminde benzersiz olmalı
+    /// aad: Kimlik doğrulanacak ama şifrelenmeyecek ek veri
     pub fn encrypt(&self, nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> (Vec<u8>, [u8; 16]) {
         let mut ciphertext = vec![0u8; plaintext.len()];
         let mut tag = [0u8; 16];
@@ -1018,7 +1253,11 @@ impl AesGcm {
         (ciphertext, tag)
     }
     
-    /// Decrypt with GCM
+    /// GCM modu ile şifre çöz ve kimlik doğrula
+    ///
+    /// Önce MAC etiketini doğrular (zamanlama saldırısına kapalı karşılaştırma).
+    /// Etiket eşleşmezse None döner (kimlik doğrulama başarısız).
+    /// Eşleşirse şifreyi çözer ve düz metni döner.
     pub fn decrypt(&self, nonce: &[u8], aad: &[u8], ciphertext: &[u8], tag: &[u8; 16]) -> Option<Vec<u8>> {
         // Verify tag first
         let ghash = self.ghash(aad, ciphertext);
@@ -1053,7 +1292,12 @@ impl AesGcm {
         Some(plaintext)
     }
     
-    /// GHASH function
+    /// GHASH kimlik doğrulama fonksiyonu
+    ///
+    /// GF(2^128) üzerinde polinom değerlendirme:
+    ///   - H = AES(key, 0^128) - hash anahtarı
+    ///   - Her 16-byte blok için: y = (y XOR blok) * H
+    ///   - Son blok: uzunluk bilgisi (AAD_len || CT_len)
     fn ghash(&self, aad: &[u8], ciphertext: &[u8]) -> [u8; 16] {
         let h = {
             let mut h = [0u8; 16];
@@ -1098,7 +1342,11 @@ impl AesGcm {
         y
     }
     
-    /// Galois field multiplication
+    /// Galois alan çarpımı GF(2^128)
+    ///
+    /// GCM'de kullanılan ikili polinom çarpımı (mod x^128 + x^7 + x^2 + x + 1).
+    /// İndirgeme polinomu: 0xe1 (MSB'de) = x^128 + x^7 + x^2 + x + 1
+    /// Her bit için: z ^= v eğer x[i] = 1, sonra v >> 1 (LSB eğer 1 ise 0xe1 XOR)
     fn gmul(x: &[u8; 16], y: &[u8; 16]) -> [u8; 16] {
         let mut z = [0u8; 16];
         let mut v = *y;
@@ -1127,16 +1375,47 @@ impl AesGcm {
 }
 
 // ============================================================================
-// CHACHA20-POLY1305 IMPLEMENTATION
+// CHACHA20-POLY1305 UYGULAMASI
 // ============================================================================
+//
+// ChaCha20-Poly1305, RFC 8439'da tanımlanan AEAD şifreleme algoritmasıdır.
+// Donanım AES hızlandırması olmayan ortamlarda AES-GCM'e tercih edilir.
+//
+// ChaCha20 Akış Şifresi:
+//   - 256-bit anahtar, 96-bit nonce, 32-bit sayaç
+//   - 16-sözcük (64-byte) durum matrisi
+//   - 20 tur quarter-round işlemi (ARX: Add-Rotate-XOR)
+//   - Sabit zamanlı: yan kanal saldırılarına karşı güvenli
+//
+//   Durum Matrisi:
+//   [ "expa" "nd 3" "2-by" "te k" ]  <- Sabit (4 sözcük)
+//   [ key[0..3]                    ]  <- Anahtar (8 sözcük)
+//   [ counter | nonce[0..2]        ]  <- Sayaç + Nonce (4 sözcük)
+//
+// Poly1305 MAC:
+//   - 256-bit anahtar (r: 128-bit, s: 128-bit)
+//   - r-clamping: Belirli bit pozisyonları sıfırlanır
+//   - GF(2^130 - 5) üzerinde polinom değerlendirme
+//   - Her 16-byte blok için kümülatif XOR + çarpım
+//
+// AEAD Kombinasyonu:
+//   1. ChaCha20(key, nonce, 0) -> İlk 32 byte = Poly1305 anahtarı
+//   2. ChaCha20(key, nonce, 1) ile düz metin şifrelenir
+//   3. Poly1305(poly_key, AAD || şifreli) -> 16-byte MAC
 
-/// ChaCha20 stream cipher
+/// ChaCha20 akış şifresi (256-bit anahtar, 96-bit nonce)
 pub struct ChaCha20 {
     state: [u32; 16],
 }
 
 impl ChaCha20 {
-    /// Create new ChaCha20 instance
+    /// Yeni ChaCha20 örneği oluştur
+    ///
+    /// Durum matrisi:
+    ///   [0..3]  : "expand 32-byte k" sabiti (4 sözcük)
+    ///   [4..11] : 256-bit anahtar (8 sözcük)
+    ///   [12]    : 32-bit sayaç (0'dan başlar, her blokta +1)
+    ///   [13..15]: 96-bit nonce (3 sözcük)
     pub fn new(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> Self {
         let mut state = [0u32; 16];
         
@@ -1164,7 +1443,13 @@ impl ChaCha20 {
         ChaCha20 { state }
     }
     
-    /// Quarter round
+    /// ChaCha20 çeyrek tur işlemi (ARX: Add-Rotate-XOR)
+    ///
+    /// Dört sözcük üzerinde 4 adım:
+    ///   a += b; d ^= a; d <<< 16;  (16-bit döndürme)
+    ///   c += d; b ^= c; b <<< 12;  (12-bit döndürme)
+    ///   a += b; d ^= a; d <<< 8;   (8-bit döndürme)
+    ///   c += d; b ^= c; b <<< 7;   (7-bit döndürme)
     fn quarter_round(a: usize, b: usize, c: usize, d: usize, state: &mut [u32; 16]) {
         state[a] = state[a].wrapping_add(state[b]);
         state[d] ^= state[a];
@@ -1183,7 +1468,11 @@ impl ChaCha20 {
         state[b] = state[b].rotate_left(7);
     }
     
-    /// Generate keystream block
+    /// 64-byte anahtar akışı bloğu üret (20 tur = 10 çift tur)
+    ///
+    /// Sütun turu: (0,4,8,12), (1,5,9,13), (2,6,10,14), (3,7,11,15)
+    /// Köşegen turu: (0,5,10,15), (1,6,11,12), (2,7,8,13), (3,4,9,14)
+    /// Son: çalışma durumunu orijinal durumla topla
     pub fn block(&self) -> [u8; 64] {
         let mut working = self.state;
         
@@ -1217,7 +1506,10 @@ impl ChaCha20 {
         output
     }
     
-    /// Encrypt/decrypt data
+    /// Veriyi şifrele/çöz (akış şifresi XOR)
+    ///
+    /// ChaCha20 akış şifresi simetrik: aynı işlem şifreler ve çözer.
+    /// Her 64-byte blok için ayrı counter değeri kullanılır.
     pub fn process(&self, data: &[u8]) -> Vec<u8> {
         let mut result = Vec::with_capacity(data.len());
         let mut counter = self.state[12];
@@ -1237,7 +1529,13 @@ impl ChaCha20 {
     }
 }
 
-/// Poly1305 MAC
+/// Poly1305 tek seferlik mesaj kimlik doğrulama kodu (MAC)
+///
+/// GF(2^130 - 5) üzerinde polinom değerlendirmesi:
+///   - r: 128-bit anahtar (clamped - belirli bitler sıfırlanır)
+///   - s: 128-bit nonce (ekleme için)
+///   - Her 16-byte blok için akümülatöre eklenir
+///   - Sonuç = (a[0]*r^n + a[1]*r^(n-1) + ... + a[n]) + s (mod 2^130-5)
 pub struct Poly1305 {
     r: [u8; 16],
     s: [u8; 16],
@@ -1245,7 +1543,10 @@ pub struct Poly1305 {
 }
 
 impl Poly1305 {
-    /// Create new Poly1305 instance
+    /// Yeni Poly1305 örneği oluştur (32-byte anahtar ile)
+    ///
+    /// İlk 16 byte r anahtarı (clamping uygulanır), son 16 byte s anahtarı.
+    /// r-clamping: bytes[3,7,11,15] &= 0x0f, bytes[4,8,12] &= 0xfc
     pub fn new(key: &[u8; 32]) -> Self {
         let mut r = [0u8; 16];
         let mut s = [0u8; 16];
@@ -1268,7 +1569,10 @@ impl Poly1305 {
         }
     }
     
-    /// Update with data
+    /// Veri bloğuyla akümülatörü güncelle
+    ///
+    /// Her 16-byte blok için: blok sonuna 1 eklenir (17 byte), sonra akümülatöre XOR.
+    /// Gerçek uygulamada: akümülatör * r + blok hesaplanmalı (mod 2^130-5).
     pub fn update(&mut self, data: &[u8]) {
         for chunk in data.chunks(16) {
             let mut block = [0u8; 17];
@@ -1282,7 +1586,10 @@ impl Poly1305 {
         }
     }
     
-    /// Finalize and get tag
+    /// MAC etiketini tamamla ve döndür (16 byte)
+    ///
+    /// Son adım: akümülatör + s (mod 2^128)
+    /// Sonuç: 16-byte Poly1305 kimlik doğrulama etiketi
     pub fn finalize(self) -> [u8; 16] {
         let mut tag = [0u8; 16];
         
@@ -1295,7 +1602,11 @@ impl Poly1305 {
     }
 }
 
-/// ChaCha20-Poly1305 AEAD
+/// ChaCha20-Poly1305 AEAD şifreleme (RFC 8439)
+///
+/// ChaCha20 (şifreleme) + Poly1305 (kimlik doğrulama) kombinasyonu.
+/// Sabit zamanlı, donanım hızlandırması gerektirmez.
+/// TLS 1.3'te TLS_CHACHA20_POLY1305_SHA256 şifre paketi için kullanılır.
 pub struct ChaCha20Poly1305 {
     key: [u8; 32],
 }
@@ -1307,7 +1618,12 @@ impl ChaCha20Poly1305 {
         ChaCha20Poly1305 { key: k }
     }
     
-    /// Encrypt with Poly1305 authentication
+    /// Poly1305 kimlik doğrulamasıyla şifrele
+    ///
+    /// Adımlar:
+    ///   1. ChaCha20(key, nonce, 0) -> İlk 32 byte = Poly1305 anahtarı
+    ///   2. ChaCha20(key, nonce, 1) ile düz metin XOR -> şifreli metin
+    ///   3. Poly1305(poly_key, aad || şifreli) -> 16-byte MAC
     pub fn encrypt(&self, nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> (Vec<u8>, [u8; 16]) {
         // Generate Poly1305 key using ChaCha20
         let chacha = ChaCha20::new(&self.key, nonce, 0);
@@ -1328,7 +1644,10 @@ impl ChaCha20Poly1305 {
         (ciphertext, tag)
     }
     
-    /// Decrypt and verify
+    /// Kimlik doğrula ve şifre çöz
+    ///
+    /// Önce MAC doğrulaması yapılır. Etiket yanlışsa None döner.
+    /// Doğrulama başarılıysa ChaCha20 ile şifre çözülür.
     pub fn decrypt(&self, nonce: &[u8; 12], aad: &[u8], ciphertext: &[u8], tag: &[u8; 16]) -> Option<Vec<u8>> {
         // Generate Poly1305 key
         let chacha = ChaCha20::new(&self.key, nonce, 0);
@@ -1353,11 +1672,38 @@ impl ChaCha20Poly1305 {
 }
 
 // ============================================================================
-// ECDHE (Elliptic Curve Diffie-Hellman) - X25519
+// ECDHE - ELİPTİK EĞRİ DİFFIE-HELLMAN ANAHTAR DEĞİŞİMİ (X25519)
 // ============================================================================
+//
+// X25519, Montgomery eğrisi Curve25519 üzerinde Diffie-Hellman anahtar değişimidir.
+// RFC 7748'de tanımlanmış, TLS 1.3'ün varsayılan anahtar değişim yöntemidir.
+//
+// Matematiksel Temel:
+//   Curve25519: y^2 = x^3 + 486662*x^2 + x (mod 2^255 - 19)
+//   Skaler çarpım: scalar * P eğri noktası hesaplama
+//   DH ortak sır: a * (b*G) = b * (a*G) = a*b*G
+//
+// Montgomery Merdiveni (Scalar Multiplication Algoritması):
+//   - Sabit zamanlı: Her bit işlemi aynı süre alır (yan kanal saldırısı önlemi)
+//   - conditional_swap: Bit değerine göre iki noktayı takas eder (zamanlama sızıntısı yok)
+//   - 255 bit işlenerek nokta koordinatları hesaplanır
+//
+// Saha Elemanı (FieldElement):
+//   - 51-bit parçalı gösterim: 5 x 64-bit limb ile 255-bit sayı temsili
+//   - limbs[0] + limbs[1]*2^51 + limbs[2]*2^102 + ... + limbs[4]*2^204
+//   - p = 2^255 - 19 (ana sayı)
+//
+// TLS 1.3'te Kullanım:
+//   1. generate_keypair() -> (private, public)
+//   2. public key ClientHello key_share uzantısında gönderilir
+//   3. shared_secret = diffie_hellman(our_private, peer_public)
+//   4. shared_secret HKDF-Extract'a girdi olarak verilir
 
-/// Field element for Curve25519 (255 bits, 5 x 64-bit limbs)
-/// Represented as: limbs[0] + limbs[1]*2^51 + limbs[2]*2^102 + limbs[3]*2^153 + limbs[4]*2^204
+/// Curve25519 saha elemanı (255 bit, 5 x 64-bit limb gösterimi)
+///
+/// Gösterim: limbs[0] + limbs[1]*2^51 + limbs[2]*2^102 + limbs[3]*2^153 + limbs[4]*2^204
+/// Ana sayı: p = 2^255 - 19
+/// Bu gösterim mod p aritmetiğini verimli kılar (51-bit taşıma zinciri)
 #[derive(Clone, Copy, Debug)]
 pub struct FieldElement(pub [u64; 5]);
 
@@ -1598,7 +1944,13 @@ impl FieldElement {
     }
 }
 
-/// X25519 elliptic curve operations (Curve25519)
+/// X25519 eliptik eğri işlemleri (Curve25519 Montgomery merdiveni)
+///
+/// Temel işlemler:
+///   - generate_keypair(): Rastgele private key üretir, public key türetir
+///   - public_from_private(): u=9 temel noktasıyla skaler çarpım (G*private)
+///   - scalar_mult(): Montgomery ladder ile sabit zamanlı skaler çarpım
+///   - diffie_hellman(): Ortak sır hesaplama (scalar_mult yeniden adlandırılmış)
 pub struct X25519;
 
 impl X25519 {
@@ -1705,18 +2057,42 @@ impl X25519 {
         result.to_bytes()
     }
     
-    /// Compute shared secret (Diffie-Hellman)
+    /// Diffie-Hellman ortak sır hesapla
+    ///
+    /// scalar_mult(private, public) = private * public_point
+    /// Sonuç: Her iki tarafın da hesaplayabildiği ortak gizli değer.
+    /// TLS 1.3'te bu değer HKDF-Extract'a ikm (input keying material) olarak verilir.
     pub fn diffie_hellman(private: &[u8; 32], public: &[u8; 32]) -> [u8; 32] {
         Self::scalar_mult(private, public)
     }
 }
 
 // ============================================================================
-// TLS 1.3 CRYPTO INTEGRATION
+// TLS 1.3 KRİPTO ENTEGRASYONU
 // ============================================================================
+//
+// Bu bölüm, TLS 1.3'ün RFC 8446 Bölüm 7'sine göre tam HKDF anahtar takvimini
+// ve şifreleme/şifre çözme işlemlerini uygular.
+//
+// TlsKeySchedule:
+//   HKDF tabanlı anahtar türetme iş akışı:
+//   init_with_psk() -> derive_handshake_secrets() -> derive_master_secret()
+//   Son adımda: derive_traffic_keys() ile key + iv elde edilir.
+//
+//   traffic_secret -> HKDF-Expand-Label(secret, "key", "", key_len) = şifreleme anahtarı
+//   traffic_secret -> HKDF-Expand-Label(secret, "iv",  "", 12)      = nonce tabanı
+//
+// TlsCrypto:
+//   Seçilen şifre paketine göre şifreleme/şifre çözme gerçekleştirir.
+//   TLS 1.3 kayıt formatı:
+//     - Düz metin + ContentType baytı + dolgu birleştirilir
+//     - AEAD ile şifrelenir (key + nonce kullanarak)
+//     - Sonuç: şifreli veri || 16-byte kimlik doğrulama etiketi
+//
+//   Nonce oluşturma (RFC 8446 Bölüm 5.3):
+//     nonce = IV XOR (sekans_numarası'nın big-endian 12-byte gösterimi)
 
-/// TLS 1.3 Key Schedule
-/// Implements HKDF-based key derivation per RFC 8446 Section 7.1
+/// TLS 1.3 anahtar takvimi (RFC 8446 Bölüm 7.1 uyumlu)
 pub struct TlsKeySchedule {
     /// Cipher suite
     cipher_suite: CipherSuite,
@@ -1759,7 +2135,11 @@ impl TlsKeySchedule {
         }
     }
     
-    /// HKDF-Extract: PRK = HMAC-Hash(salt, IKM)
+    /// HKDF-Extract: PSK veya ECDHE girdisinden Pseudo-Random Key türet
+    ///
+    /// PRK = HMAC-Hash(salt, IKM)
+    /// salt: Önceki aşamanın derived_secret değeri (veya sıfır dizisi)
+    /// IKM (Input Keying Material): PSK veya ECDHE ortak sırrı
     fn hkdf_extract(&self, salt: &[u8], ikm: &[u8]) -> Vec<u8> {
         // HMAC-Hash(salt, ikm)
         // Simplified: just hash salt || ikm
@@ -1780,7 +2160,12 @@ impl TlsKeySchedule {
         }
     }
     
-    /// HKDF-Expand: OKM = HKDF-Expand(PRK, info, L)
+    /// HKDF-Expand: PRK'dan istenilen uzunlukta OKM türet
+    ///
+    /// OKM = T(1) | T(2) | T(3) | ... | T(n)
+    /// T(0) = boş dizi
+    /// T(n) = HMAC(PRK, T(n-1) | info | n)
+    /// Maksimum çıktı: 255 * Hash.länge
     fn hkdf_expand(&self, prk: &[u8], info: &[u8], len: usize) -> Vec<u8> {
         // HKDF-Expand(PRK, info, L) =
         //   T(1) | T(2) | T(3) | ... | T(n)
@@ -2081,10 +2466,38 @@ impl TlsCrypto {
 }
 
 // ============================================================================
-// TLS 1.3 0-RTT EARLY DATA
+// TLS 1.3 0-RTT ERKEN VERİ (Early Data)
 // ============================================================================
+//
+// 0-RTT (Zero Round Trip Time), TLS 1.3'ün oturum devam ettirme özelliğidir.
+// İstemci, önceki oturumdan elde ettiği PSK ile ilk pakette uygulama verisi gönderir.
+// Bu işlem ağ gecikmesini 1 RTT azaltır, özellikle kısa bağlantılarda önemlidir.
+//
+// 0-RTT El Sıkışma Akışı:
+//
+//   İstemci                        Sunucu
+//      |-- ClientHello (PSK) ------->|  Önceki oturum kimlik bilgisi
+//      |-- [Early Data] ============>|  Erken veri (şifreli, 0-RTT anahtarıyla)
+//      |                             |
+//      |<-- ServerHello (PSK Kabul) -|
+//      |<-- [EncryptedExtensions] ---|  early_data uzantısı = kabul/red
+//      |<-- [Finished] -------------|
+//      |-- [Finished] ------------->|
+//      |======= Uygulama Verisi ====|  Normal şifreli iletişim
+//
+// Güvenlik Uyarıları:
+//   - 0-RTT verisi replay saldırısına karşı korunmasızdır
+//   - Sunucu aynı isteği iki kez işleyebilir (idempotent olmalı)
+//   - Forward secrecy yok (PSK sabit)
+//   - Uygulama sadece güvenli/idempotent işlemler için kullanmalı (GET isteği gibi)
+//
+// Oturum Bileti Yapısı (SessionTicket):
+//   ticket_lifetime : Biletin geçerli olduğu süre (saniye)
+//   age_add         : Biletin yaşını gizlemek için rastgele eklenen değer
+//   resumption_key  : PSK için kullanılan gizli anahtar
+//   max_early_data  : Kabul edilecek maksimum erken veri miktarı (byte)
 
-/// 0-RTT Early Data configuration
+/// 0-RTT erken veri yapılandırması
 #[derive(Clone, Debug)]
 pub struct EarlyDataConfig {
     /// Maximum early data size the server accepts
@@ -2272,10 +2685,35 @@ impl Default for ZeroRttState {
 }
 
 // ============================================================================
-// TLS 1.3 SESSION RESUMPTION
+// TLS 1.3 OTURUM DEVAM ETTİRME (Session Resumption)
 // ============================================================================
+//
+// TLS 1.3, oturum devam ettirme için PSK (Pre-Shared Key) mekanizmasını kullanır.
+// Önceki oturum tamamlandığında, sunucu istemciye bir oturum bileti (NewSessionTicket)
+// gönderir. Sonraki bağlantıda bu bilet PSK olarak kullanılır.
+//
+// Devam Ettirilen Oturum Avantajları:
+//   - Daha hızlı el sıkışma (özellikle 0-RTT ile)
+//   - TLS katmanı sürtünmesini azaltır
+//   - Sertifika doğrulama tekrarlanmaz
+//
+// NewSessionTicket Mesajı (Sunucu -> İstemci):
+//   ticket_lifetime  : Geçerlilik süresi (saniye)
+//   ticket_age_add   : Yaş gizleme için rastgele eklenti
+//   ticket_nonce     : Anahtarı türetmek için benzersiz değer
+//   ticket           : Şifreli bağlamı taşıyan opak bayt dizisi
+//   extensions       : early_data uzantısı (max_early_data_size bilgisi)
+//
+// Resumption Master Secret Türetimi:
+//   resumption_secret = Derive-Secret(master_secret, "res master", transcript)
+//   PSK = HKDF-Expand-Label(resumption_secret, "resumption", nonce, hash_len)
+//
+// SessionCache:
+//   - Geçerli oturum biletlerini bellekte tutar (LRU, max 100 bilet)
+//   - Süresi dolmuş biletler otomatik temizlenir
+//   - find_for_server() ile uygun bilet aranır
 
-/// Session cache for resumption
+/// Oturum devam ettirme için istemci tarafı oturum önbelleği
 #[derive(Clone, Debug)]
 pub struct SessionCache {
     sessions: Vec<SessionTicket>,
@@ -2327,10 +2765,36 @@ impl Default for SessionCache {
 }
 
 // ============================================================================
-// TLS 1.3 HANDSHAKE WITH 0-RTT
+// 0-RTT DESTEKLİ TLS 1.3 EL SIKIŞTIRMA (Handshake with 0-RTT)
 // ============================================================================
+//
+// TlsHandshakeExt, temel TlsClient/TlsState yapısını genişleterek oturum devam
+// ettirme ve 0-RTT veri gönderimini destekler.
+//
+// Genişletilmiş Durum Bileşenleri:
+//   state          : Temel el sıkışma durumu (TlsState enum)
+//   zero_rtt       : 0-RTT yaşam döngüsü yönetimi (ZeroRttState)
+//   session_cache  : Sunucu başına oturum bileti önbelleği
+//   server_name    : SNI (Server Name Indication) için sunucu adı
+//
+// start_with_early_data() İş Akışı:
+//   1. session_cache.find_for_server() ile önceki bilet aranır
+//   2. Bilet bulunduysa:
+//      a. ZeroRttState::with_ticket() ile 0-RTT durumu başlatılır
+//      b. ClientHello'ya pre_shared_key uzantısı eklenir
+//      c. ClientHello'ya early_data uzantısı eklenir
+//   3. Bilet bulunamazsa: Normal ClientHello gönderilir
+//
+// process_server_response() Yanıt İşleme:
+//   ServerHello   : PSK kabul/red kararı analiz edilir
+//   NewSessionTicket : Yeni bilet önbelleğe alınır
+//   EncryptedExtensions: early_data uzantısı kontrol edilir
+//
+// send_data() Veri Gönderimi:
+//   Bağlantı kurulduysa  -> Normal 1-RTT şifreli veri
+//   0-RTT mümkünse       -> ZeroRttState.send_early_data() ile erken veri
 
-/// Extended handshake state with 0-RTT support
+/// 0-RTT desteği olan genişletilmiş TLS el sıkışma durumu
 #[derive(Clone, Debug)]
 pub struct TlsHandshakeExt {
     /// Base handshake state

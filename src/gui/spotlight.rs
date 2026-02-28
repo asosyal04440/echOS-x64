@@ -3,19 +3,80 @@
 //! Uygulamalar, dosyalar ve sistem komutları için tam ekran arama katmanı.
 //! Kategoriler ve önizlemelerle gerçek zamanlı arama.
 //!
+//! ## Spotlight Arama Mekanizması
+//!
+//! ```text
+//!  Kullanıcı bir karakter yazar
+//!         │
+//!         ▼
+//!   on_key_press(c) → query güncellenir
+//!         │
+//!         ▼
+//!   index.search(query) çağrılır
+//!         │
+//!    ┌────┼────────────┬────────────┬──────────────┐
+//!    ▼    ▼            ▼            ▼              ▼
+//!  Apps  Files      Settings    Commands     Hesap mı?
+//!  (tam  (yol ile   (kategori   (komut adı   (is_math?
+//!   ad)   eşleşme)   eşleşme)    eşleşme)     → eval)
+//!    │    │            │            │              │
+//!    └────┴────────────┴────────────┴──────────────┘
+//!                          │
+//!                          ▼
+//!              match_score() ile puan hesapla
+//!                          │
+//!              ┌───────────┼──────────────────┐
+//!              ▼           ▼                  ▼
+//!          Tam eşleşme  İçinde geçiyor   Bulanık eşleşme
+//!          (skor=1.0)   (skor=0.7)       (skor=0.5)
+//!                          │
+//!                          ▼
+//!              Puana göre sırala (sort_by score)
+//!                          │
+//!                          ▼
+//!             En fazla 20 sonuç → self.results
+//!                          │
+//!                          ▼
+//!                  draw() ile ekranda göster
+//! ```
+//!
 //! ## Mimari
 //! - `SearchResult`: Başlık, alt başlık, tür, puan, eylem ve simge içeren arama sonucu
 //! - `SearchIndex`: Uygulamalar, dosyalar, ayarlar ve komutlar için hızlı arama dizini
 //! - `Spotlight`: Animasyonlu arama katmanı; sorgu düzenleme, klavye navigasyonu
 //!
 //! ## Matematik İfadesi Ayrıştırıcısı
+//!
 //! Özyinelemeli iniş (recursive descent) yöntemi:
-//! `parse_expr` → toplama/çıkarma
-//! `parse_term` → çarpma/bölme
-//! `parse_factor` → sayı veya parantezli ifade
+//!
+//! ```text
+//!  Kaynak: "3 + 4 * 2"
+//!
+//!  parse_expr()          ← toplama/çıkarma (en düşük öncelik)
+//!    ├── parse_term()    ← çarpma/bölme
+//!    │     └── parse_factor() → 3
+//!    ├── op: '+'
+//!    └── parse_term()
+//!          ├── parse_factor() → 4
+//!          ├── op: '*'
+//!          └── parse_factor() → 2
+//!                → 4 * 2 = 8
+//!    → 3 + 8 = 11
+//! ```
 //!
 //! ## Bulanık Eşleşme (Fuzzy Match)
+//!
 //! Sorgu karakterlerini metinde sırayla arar; karakterler bitişik olmak zorunda değil.
+//!
+//! ```text
+//!  Sorgu: "trm"
+//!  Metin: "Terminal"
+//!
+//!  T → 't' bulundu (konum 0)
+//!  r → 'r' bulundu (konum 2)
+//!  m → 'm' bulundu (konum 5)
+//!  Tüm karakterler bulundu → eşleşme VAR (skor 0.5)
+//! ```
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -32,25 +93,30 @@ use crate::gui::theme::{Theme, Color};
 // ARAMA SONUCU
 // ============================================================================
 
-/// Arama sonucu öğesi
+/// Tek bir arama sonucu öğesini temsil eder.
+///
+/// Her sonuç bir başlık, açıklama, tür puanı ve çalıştırılacak eylem içerir.
+/// Sonuçlar `score` alanına göre büyükten küçüğe sıralanır.
 #[derive(Clone, Debug)]
 pub struct SearchResult {
-    /// Görüntü adı
+    /// Görüntü adı (örn. "Terminal", "Settings > Display")
     pub title: String,
-    /// Alt başlık/açıklama
+    /// Alt başlık/açıklama (örn. dosya yolu, kategori)
     pub subtitle: String,
-    /// Sonuç türü
+    /// Sonuç türü (uygulama, dosya, ayar, komut...)
     pub result_type: ResultType,
-    /// Eşleşme puanı (0.0 - 1.0)
+    /// Eşleşme puanı (0.0 = zayıf, 1.0 = mükemmel)
     pub score: f32,
-    /// Gerçekleştirilecek eylem
+    /// Sonuç seçildiğinde gerçekleştirilecek eylem
     pub action: SearchAction,
-    /// Simge tanımlayıcısı
+    /// Listede gösterilecek simge türü
     pub icon: SearchIcon,
-    /// Yol (dosyalar için)
+    /// Dosya/klasör yolu (uygulama sonuçları için boş)
     pub path: String,
 }
 
+/// Arama sonucunun hangi kategoriye ait olduğunu belirtir.
+/// Bu bilgi hem simge rengi hem de rozet metni için kullanılır.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ResultType {
     Application,   // Uygulama
@@ -65,6 +131,8 @@ pub enum ResultType {
     Dictionary,    // Sözlük
 }
 
+/// Sonuç seçildiğinde gerçekleştirilecek eylem.
+/// Her varyant parametresini de taşır (uygulama id, dosya yolu, vb.)
 #[derive(Clone, Debug)]
 pub enum SearchAction {
     LaunchApp(String),      // Uygulama başlat
@@ -77,6 +145,8 @@ pub enum SearchAction {
     None,                   // Eylem yok
 }
 
+/// Sonuç satırında gösterilecek simge türü.
+/// `Custom(u16)` ile özel simge ID'si de kullanılabilir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchIcon {
     App,
@@ -93,6 +163,8 @@ pub enum SearchIcon {
 }
 
 impl SearchResult {
+    /// Uygulama türünde arama sonucu oluştur.
+    /// Puan varsayılan olarak 1.0 (en yüksek öncelik).
     pub fn app(name: &str, app_id: &str) -> Self {
         SearchResult {
             title: String::from(name),
@@ -105,6 +177,7 @@ impl SearchResult {
         }
     }
 
+    /// Dosya türünde arama sonucu oluştur. Puan 0.8.
     pub fn file(name: &str, path: &str) -> Self {
         SearchResult {
             title: String::from(name),
@@ -117,6 +190,7 @@ impl SearchResult {
         }
     }
 
+    /// Klasör türünde arama sonucu oluştur. Puan 0.9.
     pub fn folder(name: &str, path: &str) -> Self {
         SearchResult {
             title: String::from(name),
@@ -129,6 +203,7 @@ impl SearchResult {
         }
     }
 
+    /// Ayar türünde arama sonucu oluştur. Puan 0.7.
     pub fn setting(name: &str, category: &str) -> Self {
         SearchResult {
             title: String::from(name),
@@ -141,6 +216,7 @@ impl SearchResult {
         }
     }
 
+    /// Sistem komutu türünde arama sonucu oluştur. Puan 0.6.
     pub fn command(name: &str, description: &str, cmd: &str) -> Self {
         SearchResult {
             title: String::from(name),
@@ -158,17 +234,20 @@ impl SearchResult {
 // ARAMA DİZİNİ
 // ============================================================================
 
-/// Hızlı arama için dizin
+/// Hızlı arama için tüm sistem içeriğini bellekte tutan dizin yapısı.
+///
+/// Uygulama başlangıcında `build_default_index()` ile varsayılan girişler yüklenir,
+/// `index_files()` ile dosya sistemi taranarak dosya/klasör girişleri eklenir.
 pub struct SearchIndex {
-    /// Uygulamalar
+    /// Yüklü uygulama listesi
     apps: Vec<SearchResult>,
-    /// Dosyalar (önbelleğe alınmış)
+    /// Dosya sistemi tarama sonuçları (önbelleğe alınmış)
     files: Vec<SearchResult>,
-    /// Ayarlar
+    /// Sistem ayarları
     settings: Vec<SearchResult>,
-    /// Komutlar
+    /// Sistem komutları (shutdown, lock, screenshot...)
     commands: Vec<SearchResult>,
-    /// Dizinlendi mi
+    /// Dizinleme tamamlandı mı
     indexed: bool,
 }
 
@@ -231,7 +310,16 @@ impl SearchIndex {
         self.indexed = true;
     }
 
-    /// Tüm kategorilerde ara
+    /// Tüm kategorilerde (uygulama, dosya, ayar, komut) arama yapar.
+    ///
+    /// ## Arama Sırası
+    /// 1. Uygulamalar taranır
+    /// 2. Dosyalar taranır
+    /// 3. Ayarlar taranır
+    /// 4. Komutlar taranır
+    /// 5. Matematiksel ifade mi? → hesap makinesi sonucu eklenir
+    /// 6. Sorgu uzunsa → "Web'de ara" seçeneği eklenir
+    /// 7. Puana göre büyükten küçüğe sıralanır, en fazla 20 sonuç döner
     pub fn search(&self, query: &str) -> Vec<SearchResult> {
         if query.is_empty() {
             return Vec::new();
@@ -305,6 +393,16 @@ impl SearchIndex {
         results
     }
 
+    /// Bir metin ile sorgu arasındaki eşleşme puanını hesaplar.
+    ///
+    /// ## Puan Tablosu
+    /// ```text
+    ///  Tam eşleşme         → 1.0  (en yüksek)
+    ///  Başında başlıyor    → 0.9
+    ///  İçinde geçiyor      → 0.7
+    ///  Bulanık eşleşme     → 0.5
+    ///  Hiç eşleşme yok     → None
+    /// ```
     fn match_score(&self, text: &str, query: &str) -> Option<f32> {
         let text_lower = text.to_lowercase();
 
@@ -331,6 +429,22 @@ impl SearchIndex {
         None
     }
 
+    /// Bulanık eşleşme algoritması.
+    ///
+    /// Sorgunun her karakterinin metinde (sırayla, ama bitişik olmadan) bulunup
+    /// bulunmadığını kontrol eder. Karakterler arasında boşluk olabilir.
+    ///
+    /// ## Örnek
+    /// ```text
+    ///  Sorgu="trm", Metin="terminal"
+    ///  't' → bulundu (konum 0)
+    ///  'r' → bulundu (konum 2)
+    ///  'm' → bulundu (konum 5)
+    ///  → true (eşleşme var)
+    ///
+    ///  Sorgu="xyz", Metin="terminal"
+    ///  'x' → bulunamadı → false
+    /// ```
     fn fuzzy_match(&self, text: &str, query: &str) -> bool {
         let mut text_chars = text.chars();
         for q in query.chars() {
@@ -345,6 +459,8 @@ impl SearchIndex {
         true
     }
 
+    /// Sorgunun matematiksel ifade olup olmadığını kontrol eder.
+    /// En az bir rakam VE bir operatör (+, -, *, /, ^, %) içermelidir.
     fn is_math_expression(&self, query: &str) -> bool {
         let chars: Vec<char> = query.chars().collect();
         let has_digit = chars.iter().any(|c| c.is_ascii_digit());
@@ -378,6 +494,14 @@ impl SearchIndex {
         self.parse_expr(expr, &mut pos)
     }
 
+    /// İfade ayrıştırıcısının en üst seviyesi: toplama ve çıkarma işler.
+    ///
+    /// ## Hiyerarşi (öncelik düşükten yükseğe)
+    /// ```text
+    ///  parse_expr   → + ve - (en düşük öncelik)
+    ///    parse_term → * ve /
+    ///      parse_factor → sayı veya (ifade)
+    /// ```
     fn parse_expr(&self, expr: &str, pos: &mut usize) -> Option<f64> {
         let mut left = self.parse_term(expr, pos)?;
 
@@ -395,6 +519,7 @@ impl SearchIndex {
         Some(left)
     }
 
+    /// Çarpma ve bölme işlemlerini ayrıştırır (orta öncelik).
     fn parse_term(&self, expr: &str, pos: &mut usize) -> Option<f64> {
         let mut left = self.parse_factor(expr, pos)?;
 
@@ -412,6 +537,9 @@ impl SearchIndex {
         Some(left)
     }
 
+    /// Sayı veya parantezli alt ifadeyi ayrıştırır (en yüksek öncelik).
+    ///
+    /// `(` görürse özyinelemeli olarak `parse_expr` çağırır.
     fn parse_factor(&self, expr: &str, pos: &mut usize) -> Option<f64> {
         if *pos >= expr.len() {
             return None;
@@ -445,7 +573,9 @@ impl SearchIndex {
         None
     }
 
-    /// Dosya sisteminden dosyaları dizinle
+    /// Dosya sisteminden dosyaları dizinle.
+    /// Gerçek bir OS'ta bu fonksiyon dosya sistemi sürücüsünü tarar;
+    /// şimdilik yaygın ev dizin klasörleri sabit olarak ekleniyor.
     pub fn index_files(&mut self) {
         self.files.clear();
 
@@ -465,7 +595,29 @@ impl SearchIndex {
 // SPOTLIGHT KATMANI
 // ============================================================================
 
-/// Spotlight tarzı arama katmanı
+/// macOS Spotlight benzeri tam ekran arama katmanı.
+///
+/// ## Ekran Düzeni
+///
+/// ```text
+///  ┌──────────────────────────────────────┐
+///  │          (karartılmış arkaplan)       │
+///  │                                       │
+///  │    ┌──────────────────────────────┐   │
+///  │    │ 🔍  Uygulama, dosya ara...   │   │  ← arama kutusu (600×44 px)
+///  │    └──────────────────────────────┘   │    y = ekran_yüksekliği/3
+///  │    ┌──────────────────────────────┐   │
+///  │    │ 📱  Terminal         App     │   │  ← sonuç listesi
+///  │    │ 📁  Home             Folder  │   │    her öğe 48px yüksek
+///  │    │ ⚙   Display          Setting │   │    max 8 öğe görünür
+///  │    └──────────────────────────────┘   │
+///  │    ↵ Seç  ↑↓ Gezin  Tab Tamamla      │  ← kısayol ipucu
+///  └──────────────────────────────────────┘
+/// ```
+///
+/// ## Animasyon
+/// `animation_progress` 0.0→1.0 arasında kayar.
+/// Kutu yukarıdan 50px aşağı düşerek görünür hale gelir.
 pub struct Spotlight {
     /// Görünür mü
     pub visible: bool,
@@ -477,13 +629,13 @@ pub struct Spotlight {
     pub selected_index: usize,
     /// Arama dizini
     pub index: SearchIndex,
-    /// Animasyon ilerlemesi (0.0 - 1.0)
+    /// Animasyon ilerlemesi (0.0 = gizli, 1.0 = tam görünür)
     pub animation_progress: f32,
     /// Ekran genişliği
     pub screen_width: usize,
     /// Ekran yüksekliği
     pub screen_height: usize,
-    /// Sorgudaki imleç konumu
+    /// Sorgudaki imleç konumu (karakter indeksi)
     pub cursor_pos: usize,
     /// Kategorileri göster
     pub show_categories: bool,
@@ -505,7 +657,7 @@ impl Spotlight {
         }
     }
 
-    /// Spotlight'ı göster
+    /// Spotlight'ı göster. Animasyonu sıfırdan başlatır, sorguyu temizler.
     pub fn show(&mut self) {
         self.visible = true;
         self.animation_progress = 0.0;
@@ -515,13 +667,13 @@ impl Spotlight {
         self.cursor_pos = 0;
     }
 
-    /// Spotlight'ı gizle
+    /// Spotlight'ı gizle. Animasyon sıfırlanır.
     pub fn hide(&mut self) {
         self.visible = false;
         self.animation_progress = 0.0;
     }
 
-    /// Görünürlüğü değiştir
+    /// Görünürlüğü değiştir (açıksa kapat, kapalıysa aç).
     pub fn toggle(&mut self) {
         if self.visible {
             self.hide();
@@ -530,7 +682,10 @@ impl Spotlight {
         }
     }
 
-    /// Animasyonu güncelle
+    /// Her kare çağrılır. `dt` = delta time (saniye cinsinden kare süresi).
+    ///
+    /// `animation_progress` değeri her karede `dt * 8.0` artırılır/azaltılır.
+    /// Bu sayede animasyon kare hızından bağımsız (dt-tabanlı) çalışır.
     pub fn update(&mut self, dt: f32) {
         if self.visible && self.animation_progress < 1.0 {
             self.animation_progress = (self.animation_progress + dt * 8.0).min(1.0);
@@ -547,8 +702,8 @@ impl Spotlight {
     pub fn needs_redraw(&self) -> bool {
         self.visible || self.is_animating()
     }
-    
-    /// Update search query
+
+    /// Arama sorgusunu günceller ve hemen arama sonuçlarını hesaplar.
     pub fn set_query(&mut self, query: &str) {
         self.query = String::from(query);
         self.cursor_pos = query.len();
@@ -556,7 +711,13 @@ impl Spotlight {
         self.selected_index = 0;
     }
 
-    /// Tuş basımını işle
+    /// Klavye tuş basımını işler.
+    ///
+    /// ## Özel Karakterler
+    /// - `\x1b` (Escape) → kapat, `Cancelled` döner
+    /// - `\n` / `\r` (Enter) → seçili sonucu çalıştır
+    /// - `\x08` (Backspace) → imleç solundaki karakteri sil
+    /// - Diğer yazdırılabilir karakterler → sorguya ekle, anında arama başlat
     pub fn on_key_press(&mut self, c: char) -> SpotlightEvent {
         if c == '\x1b' { // Escape
             self.hide();
@@ -587,7 +748,7 @@ impl Spotlight {
         SpotlightEvent::None
     }
 
-    /// Özel tuşu işle
+    /// Ok tuşları, Tab ve Escape gibi özel tuşları işler.
     pub fn on_special_key(&mut self, key: SpotlightKey) -> SpotlightEvent {
         match key {
             SpotlightKey::Up => {
@@ -610,7 +771,7 @@ impl Spotlight {
                 self.activate_selected()
             }
             SpotlightKey::Tab => {
-                // Otomatik tamamlama - ilk sonucu kullan
+                // Otomatik tamamlama: ilk sonucun başlığını sorguya kopyala
                 if !self.results.is_empty() {
                     self.query = self.results[0].title.clone();
                     self.cursor_pos = self.query.len();
@@ -629,7 +790,14 @@ impl Spotlight {
         SpotlightEvent::None
     }
 
-    /// Spotlight katmanını çiz
+    /// Spotlight katmanını framebuffer'a çizer.
+    ///
+    /// ## Çizim Katmanları (altan üste)
+    /// 1. Arkaplan karartması (mevcut ekran pikseli × 0.4 alfa)
+    /// 2. Arama kutusu (beyaz panel, yuvarlak)
+    /// 3. Arama simgesi + sorgu metni + imleç
+    /// 4. Sonuç listesi (seçili öğe accent renginde vurgulanır)
+    /// 5. Klavye kısayolu ipuçları
     pub fn draw(&self, fb: &mut Framebuffer) {
         if self.animation_progress <= 0.0 {
             return;
@@ -654,7 +822,7 @@ impl Spotlight {
         let box_x = (self.screen_width - box_width) / 2;
         let box_y = (self.screen_height / 3) as f32;
 
-        // Kutuyu kaydırarak göster
+        // Kutuyu yukarıdan aşağı kaydırarak göster (giriş animasyonu)
         let animated_y = (box_y + (1.0 - progress) * -50.0) as usize;
 
         // Arama kutusu arkaplanını çiz
@@ -671,7 +839,7 @@ impl Spotlight {
         } else {
             fb.draw_string(text_x, animated_y + 12, &self.query, 0xFF333333);
 
-            // İmleci çiz
+            // İmleci çiz (2 piksel genişliğinde dikey çizgi)
             let cursor_x = text_x + self.cursor_pos * 8;
             fb.draw_rect(cursor_x, animated_y + 10, 2, 24, 0xFF333333);
         }
@@ -729,6 +897,12 @@ impl Spotlight {
         fb.draw_string(box_x, hint_y, "↵ Select  ↑↓ Navigate  Tab Autocomplete  Esc Close", 0xFF888888);
     }
 
+    /// İki rengi alfa kanalıyla karıştırır (doğrusal interpolasyon).
+    ///
+    /// ## Formül
+    /// ```text
+    ///  sonuç_kanal = arka_plan_kanal * (1 - alfa) + ön_plan_kanal * alfa
+    /// ```
     fn blend_color(bg: u32, fg: u32, alpha: f32) -> u32 {
         let br = ((bg >> 16) & 0xFF) as f32;
         let bg_ = ((bg >> 8) & 0xFF) as f32;
@@ -791,7 +965,8 @@ impl Spotlight {
         }
     }
 
-    /// Mouse tıklamasını işle
+    /// Fare tıklamasını işler. Sonuç listesine tıklanırsa seçer ve çalıştırır.
+    /// Kutu dışına tıklanırsa Spotlight kapanır.
     pub fn on_click(&mut self, mx: i32, my: i32) -> SpotlightEvent {
         let box_width = 600;
         let box_x = (self.screen_width - box_width) / 2;
@@ -820,40 +995,41 @@ impl Spotlight {
         SpotlightEvent::None
     }
 
-    /// Yeniden boyutlandır
+    /// Ekran boyutu değiştiğinde güncellenir (pencere yeniden boyutlandırma).
     pub fn resize(&mut self, width: usize, height: usize) {
         self.screen_width = width;
         self.screen_height = height;
     }
 }
 
-/// Spotlight tuş kodları
+/// Spotlight bileşenine gönderilen özel tuş kodları.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpotlightKey {
-    Up,     // Yukarı ok
-    Down,   // Aşağı ok
-    Escape, // Escape tuşu
-    Enter,  // Enter tuşu
-    Tab,    // Tab tuşu
+    Up,     // Yukarı ok: bir önceki sonuca git
+    Down,   // Aşağı ok: bir sonraki sonuca git
+    Escape, // Escape tuşu: Spotlight'ı kapat
+    Enter,  // Enter tuşu: seçili sonucu çalıştır
+    Tab,    // Tab tuşu: ilk sonucun adıyla otomatik tamamla
 }
 
-/// Spotlight olayları
+/// Spotlight'tan dışarıya yayımlanan olaylar.
 #[derive(Clone, Debug)]
 pub enum SpotlightEvent {
-    None,                        // Olay yok
-    ResultSelected(SearchResult), // Sonuç seçildi
-    Cancelled,                   // İptal edildi
+    None,                         // Herhangi bir olay yok
+    ResultSelected(SearchResult), // Kullanıcı bir sonucu seçti/tıkladı
+    Cancelled,                    // Kullanıcı Escape veya dışarı tıklayarak iptal etti
 }
 
 // ============================================================================
 // GLOBAL SPOTLIGHT
 // ============================================================================
 
+/// Global Spotlight singleton. `spin::Mutex` ile `no_std` ortamında güvenli erişim.
 lazy_static::lazy_static! {
     static ref SPOTLIGHT: Mutex<Spotlight> = Mutex::new(Spotlight::new(1920, 1080));
 }
 
-/// Spotlight'ı başlat
+/// Spotlight'ı başlat. Ekran boyutunu ayarla ve dosya dizinini oluştur.
 pub fn init(width: usize, height: usize) {
     let mut spotlight = SPOTLIGHT.lock();
     spotlight.resize(width, height);
@@ -861,7 +1037,7 @@ pub fn init(width: usize, height: usize) {
     crate::serial_println!("[GUI] Spotlight initialized");
 }
 
-/// Spotlight'ı al
+/// Global Spotlight mutex referansını döndür.
 pub fn get_spotlight() -> &'static Mutex<Spotlight> {
     &SPOTLIGHT
 }

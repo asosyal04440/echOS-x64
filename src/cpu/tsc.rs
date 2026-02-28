@@ -4,6 +4,28 @@
 //! TSC, her clock cycle'da bir artan 64-bit bir sayaçtır; çok hassas
 //! ölçümler için işletim sistemleri tarafından yaygın biçimde kullanılır.
 //! Doğru nanosaniye dönüşümü için CPU frekansının kalibrasyonu zorunludur.
+//!
+//! ## TSC Kalibrasyon Akışı
+//!
+//! ```text
+//!   Sistem Açılışı
+//!        │
+//!        ▼
+//!   TSC tsc_start = RDTSC ──► PIT/HPET zamanlayıcı başlat
+//!        │                          │
+//!        │      (sabitle ~10 ms)    │
+//!        ▼                          ▼
+//!   TSC tsc_end = RDTSC ◄── PIT/HPET kesme (bilinen gecikme)
+//!        │
+//!        ▼
+//!   freq_hz = (tsc_end - tsc_start) / gecikme_sn
+//!        │
+//!        ▼
+//!   read_ns() = RDTSC / (freq_hz / 1_000_000_000)
+//!
+//!  Not: Şu an sabit 3 GHz varsayılmakta; gerçek donanımda
+//!       PIT (0x40 portu) veya HPET ile ölçülmeli.
+//! ```
 
 use core::arch::asm;
 

@@ -1,8 +1,50 @@
+//! # Local APIC (LAPIC) Sürücüsü
+//!
 //! BSP üzerinde Local APIC başlatma ve kayıt erişimi.
 //!
 //! x2APIC önceliklidir; desteklenmezse xAPIC MMIO yoluna düşer.
 //! TSC-deadline mode destekleniyorsa periodic yerine one-shot deadline kullanır.
 //! CPUID leaf 0x01 sonuçları CPU_INFO içinde tutulur.
+//!
+//! ## LAPIC Nedir?
+//!
+//! Her CPU çekirdeğine gömülü bir kesme denetleyicisidir.
+//! Yerel timer, IPI (CPU'lar arası kesme) ve donanım kesmelerinin teslimini yönetir.
+//!
+//! ```text
+//!  ┌─────────────────────────────────────────────┐
+//!  │                CPU Çekirdeği                 │
+//!  │                                              │
+//!  │  ┌──────────────────────────────────────┐   │
+//!  │  │             L A P I C                │   │
+//!  │  │                                      │   │
+//!  │  │  ┌──────────┐  ┌─────────────────┐  │   │
+//!  │  │  │  Timer   │  │  LVT Register   │  │   │
+//!  │  │  │ (TSC/PIT)│  │  (6 giriş)     │  │   │
+//!  │  │  └──────────┘  └─────────────────┘  │   │
+//!  │  │  ┌──────────┐  ┌─────────────────┐  │   │
+//!  │  │  │   EOI    │  │ Spurious Vector │  │   │
+//!  │  │  │ Register │  │   (0xFF)        │  │   │
+//!  │  │  └──────────┘  └─────────────────┘  │   │
+//!  │  └──────────────────────────────────────┘   │
+//!  └─────────────────────────────────────────────┘
+//! ```
+//!
+//! ## xAPIC vs x2APIC
+//!
+//! ```text
+//!  xAPIC  : MMIO tabanlı (bellek üzerinden register erişimi, 0xFEE00000 fiziksel)
+//!  x2APIC : MSR tabanlı  (daha hızlı, 64-bit APIC ID, MSR 0x800 + offset/16)
+//! ```
+//!
+//! ## TSC-Deadline Timer
+//!
+//! ```text
+//!  TSC (Time Stamp Counter) sürekli artar.
+//!  IA32_TSC_DEADLINE MSR'a bir değer yazılır.
+//!  TSC o değere ulaştığında LAPIC timer kesmesi tetiklenir.
+//!  Bu yöntem periyodik timer'dan daha hassas one-shot zamanlama sağlar.
+//! ```
 
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -10,21 +52,35 @@ use x86_64::registers::model_specific::Msr;
 
 use crate::memory::active_physical_offset;
 
+/// IA32_APIC_BASE MSR adresi — APIC taban adresini ve etkinleştirme bitlerini içerir
 const IA32_APIC_BASE_MSR: u32 = 0x1B;
+/// x2APIC MSR taban adresi — APIC register'ları bu MSR bloğuna eşlenir
 const IA32_X2APIC_MSR_BASE: u32 = 0x800;
 
+/// Görev Öncelik Kaydı — TPR=0 → tüm kesmeler kabul edilir
 const APIC_REG_TPR: u32 = 0x080;
+/// End-of-Interrupt kaydı — işleyici sonunda 0 yazarak APIC'e bildirim gönderilir
 const APIC_REG_EOI: u32 = 0x0B0;
+/// Spurious Interrupt Vector kaydı — bit 8: APIC etkinleştirme; bit 7..0: yalın-kesme vektörü
 const APIC_REG_SPURIOUS: u32 = 0x0F0;
 
+/// LVT Timer kaydı — hangi vektörün tetikleneceği ve mod belirlenir
 const APIC_LVT_TIMER: u32 = 0x320;
+/// LVT Termal Sensör kaydı
 const APIC_LVT_THERMAL: u32 = 0x330;
+/// LVT Performans İzleyici kaydı
 const APIC_LVT_PERF: u32 = 0x340;
+/// LVT LINT0 kaydı — yerel kesme 0 (genellikle 8259 PIC bağlantısı)
 const APIC_LVT_LINT0: u32 = 0x350;
+/// LVT LINT1 kaydı — yerel kesme 1 (genellikle NMI)
 const APIC_LVT_LINT1: u32 = 0x360;
+/// LVT Hata kaydı — APIC dahili hata kesmesi
 const APIC_LVT_ERROR: u32 = 0x370;
+/// Timer başlangıç sayacı — periyodik modda bu değerden geri sayar
 const APIC_TIMER_INIT: u32 = 0x380;
+/// Timer mevcut sayacı — anlık sayaç değerini okur
 const APIC_TIMER_CURRENT: u32 = 0x390;
+/// Timer bölen kaydı — sayacın hızını belirler (1/2/4/.../128)
 const APIC_TIMER_DIV: u32 = 0x3E0;
 
 /// IA32_TSC_DEADLINE MSR adresi — TSC-Deadline modunda son teslim tarihini bu MSR'a yazar
@@ -40,6 +96,12 @@ static TSC_DEADLINE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static TSC_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
 
 /// LAPIC çalışma modu.
+///
+/// ```text
+///  Disabled : APIC devre dışı (eski sistemler veya başlatılmamış durum)
+///  XApic    : MMIO tabanlı erişim (xAPIC modu, Intel P4+)
+///  X2Apic   : MSR tabanlı erişim (x2APIC modu, Intel Nehalem+, daha hızlı)
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ApicMode {
@@ -51,7 +113,9 @@ pub enum ApicMode {
 /// LAPIC başlatma hataları.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApicInitError {
+    /// CPU'da APIC donanımı bulunmuyor
     NoApic,
+    /// IA32_APIC_BASE MSR'daki fiziksel adres geçersiz (0)
     InvalidBase,
 }
 
@@ -62,6 +126,7 @@ fn set_mode(mode: ApicMode) {
     APIC_MODE.store(mode as u8, Ordering::SeqCst);
 }
 
+/// Mevcut LAPIC çalışma modunu döner.
 pub fn mode() -> ApicMode {
     match APIC_MODE.load(Ordering::SeqCst) {
         2 => ApicMode::X2Apic,
@@ -70,12 +135,16 @@ pub fn mode() -> ApicMode {
     }
 }
 
+/// xAPIC MMIO register ofsetini x2APIC MSR adresine çevirir.
+/// x2APIC MSR indeksleri: 0x800 + (MMIO offset / 16)
 fn x2apic_msr(reg_offset: u32) -> u32 {
-    // x2APIC MSR indeksleri: 0x800 + (MMIO offset / 16)
     IA32_X2APIC_MSR_BASE + (reg_offset >> 4)
 }
 
-/// LAPIC başlatma ve çalışma modu seçimi.
+/// LAPIC'i başlatır ve uygun çalışma modunu seçer.
+///
+/// Mod seçim önceliği: x2APIC > xAPIC > Hata
+/// x2APIC için IA32_APIC_BASE MSR'da bit 10 (x2APIC enable) ve bit 11 (global enable) set edilir.
 pub fn init() -> Result<ApicMode, ApicInitError> {
     // CPUID leaf 0x01 sonucu CPU_INFO içinde saklanır.
     let (has_x2apic, has_xapic) = {
@@ -129,8 +198,16 @@ pub fn init() -> Result<ApicMode, ApicInitError> {
 }
 
 /// Mod bağımsız ortak LAPIC ayarları.
+///
+/// Yapılan işlemler:
+/// 1. Spurious Interrupt Vector ayarlanır (APIC etkinleştirilir)
+/// 2. TPR sıfırlanır (tüm önceliklerdeki kesmeler kabul edilir)
+/// 3. LVT kayıtlarındaki bekleyen durumlar okunarak temizlenir
+/// 4. Timer başlatılır
 fn common_init() {
     // Spurious Interrupt (yalın kesme) vektörü: 0xFF + etkinleştirme biti (bit 8)
+    // Yalın kesme: donanım bir kesme gönderir ama CPU almadan önce geri çekilir;
+    // bu durumda CPU 0xFF vektörüne dal ve sadece EOI gönder.
     write_reg(APIC_REG_SPURIOUS, 0xFF | (1 << 8));
     // TPR: 0 (tüm interrupt'ları kabul et)
     write_reg(APIC_REG_TPR, 0);
@@ -144,6 +221,19 @@ fn common_init() {
     init_timer();
 }
 
+/// LAPIC timer'ını başlatır.
+/// TSC-Deadline destekliyorsa onu tercih eder; yoksa periyodik moda geçer.
+///
+/// ```text
+///  TSC-Deadline Modu:
+///    TSC ─────────────────────────────────────────► zaman
+///               ▲                 ▲
+///               │                 │
+///     arm (MSR'a deadline yaz)  TSC == deadline → kesme!
+///
+///  Periyodik Mod:
+///    APIC_TIMER_INIT → geri say → 0 → kesme → tekrar INIT'ten başla
+/// ```
 fn init_timer() {
     // TSC-deadline desteğini kontrol et
     if has_tsc_deadline() {
@@ -170,13 +260,22 @@ fn init_timer() {
     }
 }
 
-/// CPUID ile TSC-deadline desteğini kontrol et
+/// CPUID ile TSC-deadline desteğini kontrol et.
+/// Bu bilgi başlatma sırasında CPU_INFO'ya kaydedilir.
 fn has_tsc_deadline() -> bool {
     let info = crate::cpu::CPU_INFO.lock();
     info.has_tsc_deadline
 }
 
-/// TSC frekansını kalibre et (CPUID leaf 0x15 veya PIT ile)
+/// TSC (Time Stamp Counter) frekansını kalibre eder.
+///
+/// Yöntem 1 (tercihli): CPUID leaf 0x15 — Intel Skylake ve sonrası işlemcilerde
+///   doğrudan TSC/referans frekansı oranı bildirilen bir CPUID yaprağı.
+///   Formül: freq = ECX * EBX / EAX
+///
+/// Yöntem 2 (geri düş): PIT (Programmable Interval Timer) ile ~10ms ölçüm.
+///   PIT 1.193182 MHz'de çalışır, 11932 tick ≈ 10ms.
+///   Bu sürede okunan TSC delta'sı × 100 = yaklaşık TSC Hz.
 fn calibrate_tsc() {
     // Yöntem 1: CPUID leaf 0x15 (Intel Skylake+)
     let cpuid_result = unsafe { core::arch::x86_64::__cpuid(0x15) };
@@ -205,8 +304,8 @@ fn calibrate_tsc() {
         // PIT tamamlanmasını bekle (port 0x61 bit 5)
         let mut gate = x86_64::instructions::port::Port::<u8>::new(0x61);
         let val = gate.read();
-        gate.write((val & 0xFC) | 0x01); // Höparlor kapısını etkinleştir (speaker gate)
-        // Basit spin-wait
+        gate.write((val & 0xFC) | 0x01); // Höparlör kapısını etkinleştir (speaker gate)
+        // Basit spin-wait döngüsü
         for _ in 0..10_000_000 {
             core::hint::spin_loop();
         }
@@ -217,10 +316,10 @@ fn calibrate_tsc() {
     let elapsed_ticks = 0xFFFF_FFFFu32.wrapping_sub(current);
     let tsc_delta = tsc_end.wrapping_sub(tsc_start);
 
-    // TSC frekansı hesapla
+    // TSC frekansını hesapla
     if elapsed_ticks > 0 {
-        // elapsed_ticks = LAPIC tick sayısı (bölen 16) yaklasik 10ms'de
-        // TSC frekansı ≈ tsc_delta * 100 (10ms → 1s)
+        // elapsed_ticks = LAPIC tick sayısı (bölen 16) yaklaşık 10ms'de
+        // TSC frekansı ≈ tsc_delta * 100 (10ms → 1s ölçeği)
         let freq = tsc_delta * 100;
         TSC_FREQ_HZ.store(freq, Ordering::SeqCst);
     } else {
@@ -232,7 +331,9 @@ fn calibrate_tsc() {
     write_reg(APIC_TIMER_INIT, 0);
 }
 
-/// TSC-deadline zamanlayıcısını arm et — `ticks_from_now` TSC tick sonra tetiklenir
+/// TSC-deadline zamanlayıcısını arm eder.
+/// `ticks_from_now` TSC tick sonra LAPIC timer kesmesi tetiklenir.
+/// IA32_TSC_DEADLINE MSR'a (mevcut_TSC + ticks_from_now) yazılır.
 pub fn deadline_arm(ticks_from_now: u64) {
     if !TSC_DEADLINE_ACTIVE.load(Ordering::SeqCst) {
         return;
@@ -244,17 +345,20 @@ pub fn deadline_arm(ticks_from_now: u64) {
     }
 }
 
-/// TSC-deadline mode aktif mi?
+/// TSC-deadline modunun aktif olup olmadığını döner.
 pub fn is_tsc_deadline() -> bool {
     TSC_DEADLINE_ACTIVE.load(Ordering::SeqCst)
 }
 
-/// Kalibre edilmiş TSC frekansı (Hz)
+/// Kalibre edilmiş TSC frekansını Hz cinsinden döner.
 pub fn tsc_frequency() -> u64 {
     TSC_FREQ_HZ.load(Ordering::SeqCst)
 }
 
 /// LAPIC kaydını okur.
+///
+/// x2APIC modunda MSR okuma kullanılır (daha hızlı, `rdmsr` talimatı).
+/// xAPIC modunda MMIO okuma kullanılır (bellek eşlemeli register).
 pub fn read_reg(reg_offset: u32) -> u32 {
     match mode() {
         ApicMode::X2Apic => {
@@ -274,6 +378,9 @@ pub fn read_reg(reg_offset: u32) -> u32 {
 }
 
 /// LAPIC kaydına yazar.
+///
+/// x2APIC modunda MSR yazma kullanılır (`wrmsr` talimatı).
+/// xAPIC modunda MMIO yazma kullanılır (bellek eşlemeli register).
 pub fn write_reg(reg_offset: u32, value: u32) {
     match mode() {
         ApicMode::X2Apic => {
@@ -292,7 +399,11 @@ pub fn write_reg(reg_offset: u32, value: u32) {
     }
 }
 
-/// End-of-interrupt bildirimi gönderir.
+/// End-of-Interrupt (EOI) bildirimi gönderir.
+///
+/// Her kesme işleyicisinin sonunda çağrılmalıdır.
+/// EOI yazılmazsa LAPIC aynı öncelikteki bir sonraki kesmeyi teslim etmez.
+/// APIC_REG_EOI kaydına sıfır yazmak yeterlidir.
 pub fn eoi() {
     write_reg(APIC_REG_EOI, 0);
 }

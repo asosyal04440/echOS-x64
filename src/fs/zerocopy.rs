@@ -1,6 +1,41 @@
 //! # sendfile ve splice
 //!
 //! Dosya tanımlayıcıları arasında sıfır kopya (zero-copy) veri transferi.
+//!
+//! ## Sıfır Kopya Veri Akışı
+//!
+//! ```text
+//!  Geleneksel kopya (4 kez çekirdek↔kullanıcı geçişi):
+//!  ──────────────────────────────────────────────────
+//!  Disk ──► Çekirdek tamponu ──► Kullanıcı tamponu
+//!        ──► Çekirdek tamponu ──► Soket/Boru
+//!
+//!  sendfile ile sıfır kopya (2 kez, kullanıcı alanı yok):
+//!  ──────────────────────────────────────────────────────
+//!  Disk ──► Sayfa önbelleği ──► DMA ──► Soket tamponu
+//!                   (kullanıcı alanına kopyalama yok)
+//!
+//!  sys_sendfile(out_fd, in_fd, offset, count):
+//!  ┌─────────┐   64KB parça   ┌──────────┐
+//!  │  in_fd  │ ─────────────► │  out_fd  │
+//!  │ (dosya) │                │ (soket)  │
+//!  └─────────┘                └──────────┘
+//!
+//!  sys_splice(fd_in, off_in, fd_out, off_out, len, flags):
+//!  ┌─────────┐   boru tamponu  ┌──────────┐
+//!  │  fd_in  │ ──────────────► │  fd_out  │
+//!  │(dosya/  │   (sayfa ref.)  │ (dosya/  │
+//!  │  boru)  │                 │   boru)  │
+//!  └─────────┘                 └──────────┘
+//!
+//!  sys_tee  : boru ──► boru (veriyi tüketmeden çoğaltır)
+//!  sys_vmsplice : kullanıcı belleği ──► boru
+//!  copy_file_range : dosya ──► dosya (reflink desteği)
+//!
+//!  İstatistik sayaçları:
+//!  SENDFILE_STATS: toplam sendfile ile aktarılan bayt
+//!  SPLICE_STATS  : toplam splice ile aktarılan bayt
+//! ```
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

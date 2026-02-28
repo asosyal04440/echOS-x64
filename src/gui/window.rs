@@ -15,12 +15,14 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Animation state for window
+/// Pencere animasyon durumu.
+/// Pencereler açılırken ve kapanırken bu enum ile hangi animasyonun
+/// çalıştığı takip edilir. `None` durumu animasyon olmadığını gösterir.
 #[derive(Clone, Copy, PartialEq)]
 pub enum AnimationState {
     None,
-    Opening,    // Fade-in + scale up
-    Closing,    // Fade-out + scale down
+    Opening,    // Açılıyor: küçük-merkezden hedef boyuta doğru büyüme
+    Closing,    // Kapanıyor: hedef boyuttan küçülerek soluklaşma
 }
 
 /// GUI Penceresi
@@ -34,13 +36,14 @@ pub struct Window<'a> {
     pub content_lines: Vec<String>,
     pub titlebar_height: usize,
     pub widgets: Vec<Box<dyn Widget + 'a>>,
-    /// Animation state
+    /// Pencere animasyon durumu (None / Opening / Closing)
     pub animation: AnimationState,
-    /// Animation progress (0.0 to 1.0)
+    /// Animasyon ilerlemesi: 0.0 = başlangıç, 1.0 = tamamlandı
     pub anim_progress: f32,
-    /// Target dimensions for animation
+    /// Animasyon bitince pencerenin ulaşacağı hedef X/Y konumu
     pub target_x: usize,
     pub target_y: usize,
+    /// Animasyon bitince pencerenin ulaşacağı hedef genişlik/yükseklik
     pub target_width: usize,
     pub target_height: usize,
 }
@@ -66,25 +69,26 @@ impl<'a> Window<'a> {
         }
     }
     
-    /// Start opening animation
+    /// Açılma animasyonunu başlatır.
+    /// Pencere önce ortadan küçük boyutla başlar, ardından hedef konuma/boyuta doğru büyür.
     pub fn start_open_animation(&mut self) {
         self.animation = AnimationState::Opening;
         self.anim_progress = 0.0;
-        // Start from center, small
+        // Merkezden küçük başla: hedef boyutun 1/4'ü kadar içeriden konumlan
         self.x = self.target_x + self.target_width / 4;
         self.y = self.target_y + self.target_height / 4;
         self.width = self.target_width / 2;
         self.height = self.target_height / 2;
     }
     
-    /// Update animation (call each frame)
-    /// Returns true if animation is still running
+    /// Animasyonu bir kare ilerletir; her çerçevede çağrılmalıdır.
+    /// Animasyon devam ediyorsa `true`, tamamlandıysa `false` döner.
     pub fn update_animation(&mut self) -> bool {
         if self.animation == AnimationState::None {
             return false;
         }
-        
-        // Ease-out animation
+
+        // Her karede ilerleme artırılır; 1.0'e ulaşınca animasyon biter
         self.anim_progress += 0.08;
         if self.anim_progress >= 1.0 {
             self.anim_progress = 1.0;
@@ -95,10 +99,10 @@ impl<'a> Window<'a> {
             self.height = self.target_height;
             return false;
         }
-        
-        // Interpolate size and position
+
+        // Konum ve boyutu ease-out ile interpolasyon yaparak güncelle
         let t = self.anim_progress;
-        let ease = 1.0 - (1.0 - t) * (1.0 - t); // Ease-out quad
+        let ease = 1.0 - (1.0 - t) * (1.0 - t); // Ease-out ikinci dereceden: sonuna yakın yavaşlar
         
         self.x = self.target_x + (self.target_width as f32 * (1.0 - ease) * 0.25) as usize;
         self.y = self.target_y + (self.target_height as f32 * (1.0 - ease) * 0.25) as usize;
@@ -272,7 +276,7 @@ impl<'a> Window<'a> {
             widget.update();
         }
 
-        // Widget varsa animasyon olabilir, redraw iste.
+        // Widget varsa animasyon olabilir; her karede yeniden çizim (redraw) talep et
         !self.widgets.is_empty()
     }
 }

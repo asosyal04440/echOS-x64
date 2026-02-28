@@ -3,6 +3,65 @@
 //! Linux `kernel/softirq.c` karşılığı.
 //! Interrupt handler'ın hızlı kısmı (top-half) bittikten sonra
 //! ertelenmiş ağır işler burada çalıştırılır.
+//!
+//! ## Top-Half / Bottom-Half Ayrımı
+//!
+//! ```text
+//!  Donanım IRQ gelir
+//!        │
+//!        ▼
+//!  ┌─────────────────────────────┐
+//!  │   TOP-HALF (IRQ Handler)    │  ← Çok kısa! Interrupt kapalıyken çalışır
+//!  │   • Donanımı onayla (ACK)   │
+//!  │   • Kritik veriyi kaydet    │
+//!  │   • raise_softirq() çağır   │
+//!  │   • EOI gönder              │
+//!  └────────────┬────────────────┘
+//!               │  interrupt'lar yeniden açılır
+//!               ▼
+//!  ┌─────────────────────────────┐
+//!  │  BOTTOM-HALF (Softirq)      │  ← Daha uzun, interrupt açıkken çalışır
+//!  │   • do_softirq() → handler  │
+//!  │   • Ağ paketi işle (NetRx)  │
+//!  │   • Timer callback'leri     │
+//!  │   • Tasklet'leri çalıştır   │
+//!  └─────────────────────────────┘
+//! ```
+//!
+//! ## Softirq Vektör Öncelik Sırası
+//!
+//! ```text
+//!  0: HI       — Yüksek öncelikli tasklet (en önce işlenir)
+//!  1: TIMER    — Hrtimer ve timer wheel callback'leri
+//!  2: NET_TX   — Ağ gönderim kuyruğu boşaltma
+//!  3: NET_RX   — Ağ alım paketi işleme
+//!  4: BLOCK    — Blok I/O tamamlanma bildirimleri
+//!  5: IRQ_POLL — NAPI/polling tabanlı IRQ işleme
+//!  6: TASKLET  — Normal öncelikli tasklet kuyruğu
+//!  7: SCHED    — Scheduler load balancing
+//!  8: HRTIMER  — High-resolution timer son işlemler
+//!  9: RCU      — Read-Copy-Update synchronization callbacks
+//! ```
+//!
+//! ## Tasklet Yaşam Döngüsü
+//!
+//! ```text
+//!  Tasklet::new(func, data)      — Tanımla (Idle durumunda)
+//!       │
+//!       ▼
+//!  tasklet_schedule()            — TASKLET_VEC kuyruğuna ekle
+//!  raise_softirq(Tasklet)        — SOFTIRQ_PENDING bit'i set et
+//!       │
+//!       ▼  (timer_interrupt veya ksoftirqd)
+//!  do_softirq()                  — Bekleyen softirq'ları çalıştır
+//!  tasklet_action()              — TASKLET_VEC kuyruğunu boşalt
+//!       │
+//!       ▼
+//!  func(data) çalıştır           — Tasklet işlevi yürütülür
+//!       │
+//!       ▼
+//!  state = Idle                  — Tekrar planlanmaya hazır
+//! ```
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -11,6 +70,16 @@ use spin::Mutex;
 
 // ============================================================================
 // Softirq Vektörleri (Linux: include/linux/interrupt.h)
+//
+// SOFTIRQ_PENDING atomic u32 değişkeni bir bitmask'tir.
+// Her bit, ilgili vektörün bekleyip beklemediğini gösterir.
+//   Bit 0 = Hi, Bit 1 = Timer, ..., Bit 9 = Rcu
+//
+// raise_softirq(vec): İlgili biti atomik olarak set eder (fetch_or).
+// do_softirq():       Tüm set bitleri tek tek handler'larla çalıştırır.
+//
+// Bu tasarım, interrupt handler içindeki atomik bit-set işleminin
+// yeterince hızlı (birkaç ns) olmasını sağlar — ağır iş ertelenir.
 // ============================================================================
 
 /// Softirq türleri — Linux ile birebir aynı sıralama
@@ -128,6 +197,21 @@ pub fn print_softirq_stats() {
 
 // ============================================================================
 // Tasklet (Linux: include/linux/interrupt.h)
+//
+// Tasklet, tek seferlik çalıştırılmak üzere planlanabilen minimal
+// bir bottom-half iş birimidir. Softirq'dan farkı:
+//   • Aynı anda yalnızca bir CPU'da çalışır (mutual exclusion var)
+//   • Dinamik olarak oluşturulabilir (softirq derleme zamanında sabit)
+//   • İki öncelik: normal (TASKLET) ve yüksek (HI)
+//
+// Durum makinesi (state machine):
+//   Idle ──► Scheduled ──► Running ──► Idle
+//                 │            │
+//                 │  (disable)  │  (enable)
+//                 └────►──────►┘
+//
+// `count > 0` ise tasklet devre dışıdır: schedule edilse bile
+// çalıştırılmaz, retry kuyruğuna geri konur.
 // ============================================================================
 
 /// Tasklet durumu
@@ -277,6 +361,18 @@ pub fn tasklet_hi_action() {
 
 // ============================================================================
 // ksoftirqd (Kernel Softirq Daemon)
+//
+// Linux'ta her CPU için bir `ksoftirqd/N` kernel thread'i bulunur.
+// Çok fazla softirq birikirsek (MAX_RESTART aşılırsa) veya
+// interrupt handler dışından softirq işlenmesi gerektiğinde
+// bu daemon devreye girer.
+//
+// echOS'ta tek bir global ksoftirqd thread'i vardır.
+// Thread, softirq_pending() kontrol ederek bekler.
+// Softirq varsa do_softirq() çağırır, yoksa sleep(1) ile bekler.
+//
+// Avantajı: Uzun süren softirq işleri sistem responsiveness'ını
+// bozmaz çünkü thread preemptible'dır (scheduler tarafından kesilebilir).
 // ============================================================================
 
 static KSOFTIRQD_STARTED: core::sync::atomic::AtomicBool =
@@ -314,6 +410,11 @@ fn wake_ksoftirqd() {
 
 // ============================================================================
 // Softirq Subsystem Init
+//
+// init() fonksiyonu, interrupts::init() tarafından çağrılır.
+// Tasklet ve Hi-tasklet softirq vektörlerine handler'ları kaydeder.
+// Diğer vektörler (TIMER, NET_TX, NET_RX, vb.) ilgili alt sistemler
+// başlatıldığında open_softirq() ile kaydedilmelidir.
 // ============================================================================
 
 /// Softirq subsystemini başlat — tasklet handler'ları kaydet

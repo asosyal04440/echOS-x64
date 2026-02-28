@@ -1,6 +1,7 @@
-//! # Pipe and FIFO
+//! # Boru ve FIFO (Pipe and FIFO)
 //!
-//! Anonymous pipes and named pipes (FIFOs).
+//! İsimsiz (anonymous) pipe ve isimli pipe (FIFO/named pipe) implementasyonları.
+//! Tek yönlü IPC kanalı: bir taraf yazar (write end), diğer taraf okur (read end).
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -10,44 +11,52 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
-// PIPE CONSTANTS
+// PIPE SABİTLERİ
 // ============================================================================
 
-/// Default pipe buffer size
+/// Varsayılan pipe tampon boyutu (64 KB)
+/// Linux'ta /proc/sys/fs/pipe-max-size ile değiştirilebilir
 pub const PIPE_BUF_SIZE: usize = 65536; // 64KB
 
-/// Pipe flags
+/// Dosya erişim bayrakları
+/// O_RDONLY: Sadece okuma, O_WRONLY: Sadece yazma, O_RDWR: Okuma/Yazma
 pub const O_RDONLY: u32 = 0;
 pub const O_WRONLY: u32 = 1;
 pub const O_RDWR: u32 = 2;
+/// O_NONBLOCK: Engellenmeden hata döndür
 pub const O_NONBLOCK: u32 = 0x800;
 
-/// Pipe buffer limits
+/// Pipe tampon boyutu sınırları
+/// PIPE_MIN_BUF_SIZE: Minimum tampon (1 sayfa = 4 KB)
+/// PIPE_MAX_BUF_SIZE: Maximum tampon (1 MB)
 pub const PIPE_MIN_BUF_SIZE: usize = 4096;
 pub const PIPE_MAX_BUF_SIZE: usize = 1048576; // 1MB
 
 // ============================================================================
-// PIPE BUFFER
+// PIPE TAMPONU
 // ============================================================================
 
+/// Pipe'ın veri tamponu
+/// VecDeque kullanılır çünkü hem baştan okuma hem sondan yazma O(1) verir
+/// Okuyucu ve yazıcı sayısı atomik olarak takip edilir
 pub struct PipeBuffer {
-    /// Data buffer
+    /// Dairesel tampon (ring buffer) olarak VecDeque
     buffer: Mutex<VecDeque<u8>>,
-    /// Maximum size
+    /// Maximum tampon boyutu
     max_size: usize,
-    /// Readers count
+    /// Aktif okuyucu sayısı (0 olursa yazıcı SIGPIPE alır)
     readers: AtomicU32,
-    /// Writers count
+    /// Aktif yazıcı sayısı (0 olursa okuyucu EOF alır)
     writers: AtomicU32,
-    /// Is non-blocking
+    /// Bloke olmayan mod aktif mi
     nonblocking: AtomicBool,
-    /// Total bytes written
+    /// Toplam yazılan bayt sayısı (istatistik)
     bytes_written: AtomicU64,
-    /// Total bytes read
+    /// Toplam okunan bayt sayısı (istatistik)
     bytes_read: AtomicU64,
-    /// Waiting readers
+    /// Veri bekleyen okuyucu sayısı
     waiting_readers: AtomicU32,
-    /// Waiting writers
+    /// Yer bekleyen yazıcı sayısı
     waiting_writers: AtomicU32,
 }
 
@@ -66,37 +75,40 @@ impl PipeBuffer {
         }
     }
 
-    /// Add reader
+    /// Okuyucu sayısını artır (dup/fork sonrası çağrılır)
     pub fn add_reader(&self) {
         self.readers.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Remove reader
+    /// Okuyucu sayısını azalt (close() çağrısında)
     pub fn remove_reader(&self) {
         self.readers.fetch_sub(1, Ordering::SeqCst);
     }
 
-    /// Add writer
+    /// Yazıcı sayısını artır
     pub fn add_writer(&self) {
         self.writers.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Remove writer
+    /// Yazıcı sayısını azalt (close() çağrısında)
     pub fn remove_writer(&self) {
         self.writers.fetch_sub(1, Ordering::SeqCst);
     }
 
-    /// Get readers count
+    /// Aktif okuyucu sayısını döndür
     pub fn get_readers(&self) -> u32 {
         self.readers.load(Ordering::SeqCst)
     }
 
-    /// Get writers count
+    /// Aktif yazıcı sayısını döndür
     pub fn get_writers(&self) -> u32 {
         self.writers.load(Ordering::SeqCst)
     }
 
-    /// Read from pipe
+    /// Pipe'tan veri oku (read() sistem çağrısına karşılık gelir)
+    /// - Tampon boş && yazıcı yok => EOF döndür (0 bayt)
+    /// - Tampon boş && yazıcı var && nonblocking => EAGAIN döndür
+    /// - Tampon boş && yazıcı var && blocking => bloke ol (şimdilik EAGAIN)
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, PipeError> {
         if self.readers.load(Ordering::SeqCst) == 0 {
             return Err(PipeError::NoReader);
@@ -106,14 +118,14 @@ impl PipeBuffer {
 
         if buffer.is_empty() {
             if self.writers.load(Ordering::SeqCst) == 0 {
-                return Ok(0); // EOF
+                return Ok(0); // EOF: tüm yazıcılar kapandı
             }
 
             if self.nonblocking.load(Ordering::SeqCst) {
                 return Err(PipeError::WouldBlock);
             }
 
-            // Would block - wait for data
+            // Blocking mod: veri gelene kadar bekle (şimdilik hata)
             return Err(PipeError::WouldBlock);
         }
 
@@ -127,25 +139,28 @@ impl PipeBuffer {
         Ok(to_read)
     }
 
-    /// Write to pipe
+    /// Pipe'a veri yaz (write() sistem çağrısına karşılık gelir)
+    /// - Okuyucu yoksa => BrokenPipe (SIGPIPE gönderilmeli)
+    /// - Tampon doluysa && nonblocking => EAGAIN
+    /// - Tampon doluysa && blocking => bloke ol (şimdilik EAGAIN)
     pub fn write(&self, buf: &[u8]) -> Result<usize, PipeError> {
         if self.writers.load(Ordering::SeqCst) == 0 {
             return Err(PipeError::NoWriter);
         }
 
         if self.readers.load(Ordering::SeqCst) == 0 {
-            return Err(PipeError::BrokenPipe);
+            return Err(PipeError::BrokenPipe); // EPIPE - okuyucu kalmadı
         }
 
         let mut buffer = self.buffer.lock();
 
         let available = self.max_size.saturating_sub(buffer.len());
-        
+
         if available == 0 {
             if self.nonblocking.load(Ordering::SeqCst) {
                 return Err(PipeError::WouldBlock);
             }
-            // Would block - wait for space
+            // Yer açılana kadar bekle (şimdilik hata)
             return Err(PipeError::WouldBlock);
         }
 
@@ -159,47 +174,51 @@ impl PipeBuffer {
         Ok(to_write)
     }
 
-    /// Get available space
+    /// Kalan boş alan miktarını döndür
     pub fn space(&self) -> usize {
         let buffer = self.buffer.lock();
         self.max_size.saturating_sub(buffer.len())
     }
 
-    /// Get buffered data size
+    /// Tamponda bekleyen veri boyutunu döndür
     pub fn len(&self) -> usize {
         self.buffer.lock().len()
     }
 
-    /// Check if empty
+    /// Tampon boş mu kontrolü
     pub fn is_empty(&self) -> bool {
         self.buffer.lock().is_empty()
     }
 
-    /// Set non-blocking mode
+    /// Bloke olmayan modu aç/kapat
     pub fn set_nonblocking(&self, nonblock: bool) {
         self.nonblocking.store(nonblock, Ordering::SeqCst);
     }
 
-    /// Poll for events
+    /// Poll olaylarını kontrol et (select/poll/epoll için)
+    /// POLLIN=0x001: Okunacak veri var
+    /// POLLOUT=0x004: Yazılabilir alan var
+    /// POLLHUP=0x010: Yazıcı kapatıldı
+    /// POLLERR=0x008: Okuyucu kapatıldı
     pub fn poll(&self, events: u32) -> u32 {
         let mut revents = 0u32;
 
-        // POLLIN
+        // POLLIN: Okunabilir veri var mı?
         if events & 0x001 != 0 && !self.is_empty() {
             revents |= 0x001;
         }
 
-        // POLLOUT
+        // POLLOUT: Yazılabilir alan var mı?
         if events & 0x004 != 0 && self.space() > 0 {
             revents |= 0x004;
         }
 
-        // POLLHUP
+        // POLLHUP: Tüm yazıcılar kapandı mı?
         if self.writers.load(Ordering::SeqCst) == 0 {
             revents |= 0x010;
         }
 
-        // POLLERR
+        // POLLERR: Tüm okuyucular kapandı mı?
         if self.readers.load(Ordering::SeqCst) == 0 {
             revents |= 0x008;
         }
@@ -209,15 +228,18 @@ impl PipeBuffer {
 }
 
 // ============================================================================
-// PIPE
+// PIPE (İSİMSİZ BORU)
 // ============================================================================
 
+/// İsimsiz pipe: pipe() sistem çağrısıyla oluşturulan tek yönlü iletişim kanalı
+/// read_fd: okuma ucu (parent'ın child'dan veri aldığı taraf)
+/// write_fd: yazma ucu (child'ın parent'a veri gönderdiği taraf)
 pub struct Pipe {
-    /// Pipe buffer
+    /// Paylaşılan tampon
     buffer: Arc<PipeBuffer>,
-    /// Read fd
+    /// Okuma ucu dosya tanımlayıcısı
     pub read_fd: i32,
-    /// Write fd
+    /// Yazma ucu dosya tanımlayıcısı
     pub write_fd: i32,
 }
 
@@ -234,46 +256,49 @@ impl Pipe {
         }
     }
 
-    /// Get buffer
+    /// Paylaşılan tampona referans döndür (dup/fork için)
     pub fn get_buffer(&self) -> Arc<PipeBuffer> {
         self.buffer.clone()
     }
 
-    /// Read
+    /// Okuma ucundan veri al
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, PipeError> {
         self.buffer.read(buf)
     }
 
-    /// Write
+    /// Yazma ucuna veri gönder
     pub fn write(&self, buf: &[u8]) -> Result<usize, PipeError> {
         self.buffer.write(buf)
     }
 
-    /// Close read end
+    /// Okuma ucunu kapat (EOF koşulu yaratır)
     pub fn close_read(&self) {
         self.buffer.remove_reader();
     }
 
-    /// Close write end
+    /// Yazma ucunu kapat (yazıcı kapandı bildirimi)
     pub fn close_write(&self) {
         self.buffer.remove_writer();
     }
 }
 
 // ============================================================================
-// FIFO (NAMED PIPE)
+// FIFO (İSİMLİ BORU)
 // ============================================================================
 
+/// İsimli pipe (FIFO): dosya sisteminde bir ada sahip olan pipe
+/// mkfifo() veya mknod() S_IFIFO ile oluşturulur
+/// Birden fazla süreç aynı FIFO'yu açabilir
 pub struct Fifo {
-    /// Path
+    /// FIFO'nun dosya sistemi yolu (örn: "/tmp/myfifo")
     pub path: String,
-    /// Mode
+    /// Erişim izinleri (örn: 0o644)
     pub mode: u32,
-    /// Pipe buffer
+    /// Paylaşılan veri tamponu
     buffer: Arc<PipeBuffer>,
-    /// Is open for reading
+    /// Okuma için açık mı
     open_read: AtomicBool,
-    /// Is open for writing
+    /// Yazma için açık mı
     open_write: AtomicBool,
 }
 
@@ -290,67 +315,69 @@ impl Fifo {
         }
     }
 
-    /// Open for reading
+    /// FIFO'yu okuma modunda aç
     pub fn open_read(&self) -> Result<(), PipeError> {
         self.buffer.add_reader();
         self.open_read.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Open for writing
+    /// FIFO'yu yazma modunda aç
     pub fn open_write(&self) -> Result<(), PipeError> {
         self.buffer.add_writer();
         self.open_write.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Close read end
+    /// Okuma ucunu kapat
     pub fn close_read(&self) {
         if self.open_read.swap(false, Ordering::SeqCst) {
             self.buffer.remove_reader();
         }
     }
 
-    /// Close write end
+    /// Yazma ucunu kapat
     pub fn close_write(&self) {
         if self.open_write.swap(false, Ordering::SeqCst) {
             self.buffer.remove_writer();
         }
     }
 
-    /// Read
+    /// FIFO'dan oku
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, PipeError> {
         self.buffer.read(buf)
     }
 
-    /// Write
+    /// FIFO'ya yaz
     pub fn write(&self, buf: &[u8]) -> Result<usize, PipeError> {
         self.buffer.write(buf)
     }
 
-    /// Get buffer
+    /// Tampona referans döndür
     pub fn get_buffer(&self) -> Arc<PipeBuffer> {
         self.buffer.clone()
     }
 }
 
 // ============================================================================
-// PIPE MANAGER
+// PIPE YÖNETİCİSİ
 // ============================================================================
 
+/// Hem isimsiz pipe'ları hem FIFO'ları yöneten merkezi yapı
 pub struct PipeManager {
-    /// Named pipes (FIFOs)
+    /// İsimli pipe'lar (yol -> FIFO)
     fifos: Mutex<BTreeMap<String, Arc<Fifo>>>,
-    /// Anonymous pipes
+    /// İsimsiz pipe'lar (ID -> Pipe)
     pipes: Mutex<BTreeMap<u64, Arc<Pipe>>>,
-    /// Next pipe ID
+    /// Sonraki pipe ID sayacı
     next_pipe_id: AtomicU64,
-    /// Statistics
+    /// İstatistikler
     stats: Mutex<PipeStats>,
 }
 
 use alloc::collections::BTreeMap;
 
+/// Pipe istatistikleri
 #[derive(Clone, Debug, Default)]
 pub struct PipeStats {
     pub pipes_created: u64,
@@ -369,7 +396,7 @@ impl PipeManager {
         }
     }
 
-    /// Create anonymous pipe
+    /// İsimsiz pipe oluştur ve yöneticide kaydet
     pub fn create_pipe(&self, size: usize) -> Arc<Pipe> {
         let id = self.next_pipe_id.fetch_add(1, Ordering::SeqCst);
         let pipe = Arc::new(Pipe::new(size));
@@ -382,7 +409,7 @@ impl PipeManager {
         pipe
     }
 
-    /// Create FIFO
+    /// İsimli FIFO oluştur
     pub fn create_fifo(&self, path: &str, mode: u32) -> Result<Arc<Fifo>, PipeError> {
         let mut fifos = self.fifos.lock();
 
@@ -399,17 +426,17 @@ impl PipeManager {
         Ok(fifo)
     }
 
-    /// Get FIFO by path
+    /// Yola göre FIFO bul
     pub fn get_fifo(&self, path: &str) -> Option<Arc<Fifo>> {
         self.fifos.lock().get(path).cloned()
     }
 
-    /// Remove FIFO
+    /// FIFO'yu kaldır (unlink)
     pub fn remove_fifo(&self, path: &str) {
         self.fifos.lock().remove(path);
     }
 
-    /// Get statistics
+    /// İstatistikleri döndür
     pub fn get_stats(&self) -> PipeStats {
         self.stats.lock().clone()
     }
@@ -420,47 +447,51 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// ERROR TYPE
+// HATA TİPİ
 // ============================================================================
 
+/// Pipe hata kodları
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeError {
-    WouldBlock,
-    BrokenPipe,
-    NoReader,
-    NoWriter,
-    AlreadyExists,
-    NotFound,
+    WouldBlock,    // EAGAIN: Bloke olunması gerekiyor, nonblocking modda hata
+    BrokenPipe,    // EPIPE: Okuyucu kalmadı, yazma başarısız
+    NoReader,      // Okuyucu ucu kapalı
+    NoWriter,      // Yazıcı ucu kapalı
+    AlreadyExists, // EEXIST: FIFO zaten mevcut
+    NotFound,      // ENOENT: FIFO bulunamadı
 }
 
 // ============================================================================
-// SYSCALL INTERFACE
+// SİSTEM ÇAĞRISI ARAYÜZÜ
 // ============================================================================
 
-/// pipe(int pipefd[2])
+/// pipe(int pipefd[2]) sistem çağrısı
+/// pipefd[0]: okuma ucu, pipefd[1]: yazma ucu
 pub fn sys_pipe(fds: &mut [i32; 2]) -> i32 {
     let pipe = PIPE_MANAGER.create_pipe(PIPE_BUF_SIZE);
 
-    // Allocate file descriptors
+    // Dosya tanımlayıcıları atanır (gerçek uygulamada fd tablosuna eklenir)
     fds[0] = pipe.read_fd;
     fds[1] = pipe.write_fd;
 
     0
 }
 
-/// mkfifo(const char *pathname, mode_t mode)
+/// mkfifo(const char *pathname, mode_t mode) sistem çağrısı
+/// İsimli pipe oluşturur, dosya sisteminde görünür
 pub fn sys_mkfifo(path: &str, mode: u32) -> i32 {
     match PIPE_MANAGER.create_fifo(path, mode) {
         Ok(_) => 0,
-        Err(PipeError::AlreadyExists) => -17, // EEXIST
-        Err(_) => -5,
+        Err(PipeError::AlreadyExists) => -17, // -EEXIST
+        Err(_) => -5,                          // -EIO
     }
 }
 
 // ============================================================================
-// INITIALIZATION
+// BAŞLATMA
 // ============================================================================
 
+/// Pipe/FIFO alt sistemini başlat
 pub fn init() {
     crate::serial_println!("[PIPE] Pipe/FIFO initialized");
 }

@@ -1,3 +1,27 @@
+# echOS - Rust Araç Zinciri Yapılandırması
+#
+# Bu dosya, projenin hangi Rust derleyici kanalını ve hedef mimarilerini
+# kullandığını tanımlar. `rust-toolchain.toml` dosyası, `rustup` tarafından
+# otomatik olarak okunur; bu sayede tüm geliştiriciler aynı derleyici sürümünü kullanır.
+
 [toolchain]
+# `nightly`: Kararlı (stable) kanala henüz girmemiş deneysel özellikleri etkinleştirir.
+# Çekirdek geliştirme için nightly zorunludur çünkü:
+#   - `#![no_std]` ve `#![no_main]` gibi özellikler için bazı nightly API'lar gereklidir
+#   - `#![feature(test)]` ile benchmark desteği nightly gerektirir
+#   - Inline assembly (`asm!`) ve diğer düşük seviye makrolar nightly'e dayanır
 channel = "nightly"
+
+# Derleme hedefleri (cross-compilation targets):
+#
+#   x86_64-unknown-none  → Bare-metal çekirdek hedefi
+#                          İşletim sistemi yok, standart kütüphane yok.
+#                          Doğrudan donanım üzerinde çalışır.
+#
+#   x86_64-unknown-uefi  → UEFI uygulaması hedefi
+#                          UEFI firmware üzerinde çalışan .efi ikili dosyası üretir.
+#                          Modern bilgisayarlarda boot sürecinde kullanılır.
+#
+# Not: Bu hedeflerin indirilebilmesi için `rustup target add <hedef>` komutu gereklidir.
+# rust-toolchain.toml burada bunu otomatik olarak yönetir.
 targets = ["x86_64-unknown-none", "x86_64-unknown-uefi"]

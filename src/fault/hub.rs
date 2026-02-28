@@ -2,6 +2,48 @@
 //!
 //! Merkezi hata toplama, yönlendirme ve yönetim modulu.
 //! Tüm modüllerden gelen hataları tek noktada toplar ve kurtarma motorunu tetikler.
+//!
+//! ## FaultHub'un Rolü
+//!
+//! FaultHub, hata yönetim sisteminin "trafik yöneticisidir".
+//! Bir modülden hata geldiğinde hub:
+//!  1. Modülün sağlık kaydını günceller (fault_count artar, status değişir)
+//!  2. Global şiddet seviyesini yükseltir (gerekirse)
+//!  3. Kurtarma motorunu çalıştırır (RecoveryEngine::recover)
+//!
+//! ## Mimari Diyagramı
+//!
+//! ```text
+//!  ┌─────────────┐    report_fault()    ┌──────────────┐
+//!  │  Her modül  │ ───────────────────▶ │   FaultHub   │
+//!  │  (memory,   │                      │              │
+//!  │   cpu, ...)  │                      │  modules:    │
+//!  └─────────────┘                      │  BTreeMap<   │
+//!                                       │   &str,      │
+//!  ┌─────────────┐    register_handler  │  ModuleHealth│
+//!  │ FaultHandler│ ◀─────────────────── │  >           │
+//!  │  (trait)    │                      │              │
+//!  │  .check()   │ ──▶ Option<Fault>    │  recovery_   │
+//!  │  .recover() │                      │  engine      │
+//!  └─────────────┘                      └──────────────┘
+//! ```
+//!
+//! ## Modül Sağlık Otomasyonu
+//!
+//! `report_fault` çağrıldığında modülün `fault_count`'u artırılır ve
+//! şu eşiklere göre durumu otomatik güncellenir:
+//!
+//! ```text
+//!  fault_count = 0   → Healthy
+//!  fault_count > 0   → Warning
+//!  fault_count > 2   → Degraded
+//!  fault_count > 5   → Failed
+//! ```
+//!
+//! ## FaultHandler Trait'i
+//!
+//! Bir modül kendi hata mantığını `FaultHandler` impl ederek hub'a kaydedebilir.
+//! Hub periyodik olarak `check_all()` çağırığında kayıtlı her işleyiciyi sorgular.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -110,7 +152,7 @@ impl FaultHub {
         
         self.fault_count.fetch_add(1, Ordering::SeqCst);
         
-        // Update module health
+        // Modül sağlık kaydını güncelle
         if let Some(module) = self.modules.lock().get_mut(&match source {
             FaultSource::Memory => "memory",
             FaultSource::Cpu => "cpu",
@@ -224,6 +266,10 @@ impl FaultHub {
     }
     
     /// Mevcut şiddet seviyesini günceller (yalnızca artış yönünde)
+    ///
+    /// Şiddet seviyesi hiçbir zaman düşürülmez — bu kasıtlı bir tasarım kararıdır.
+    /// Sistem sıfırlanana veya açık bir `reset_module()` çağrısı yapılana kadar
+    /// en yüksek gözlemlenen şiddet seviyesi korunur.
     fn update_severity(&self, severity: Severity) {
         let current = Severity::from(self.current_severity.load(Ordering::SeqCst) as u8);
         if severity > current {

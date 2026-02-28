@@ -1,116 +1,141 @@
-//! # echOS Memory Barriers Module
+//! # echOS Bellek Bariyerleri Modülü
 //!
-//! Tier 1 OS seviyesinde memory barriers implementasyonu
-//! Linux 6.x ile aynı seviyede memory ordering garantileri
+//! Tier 1 OS seviyesinde bellek bariyerleri (memory barriers) implementasyonu.
+//! Linux 6.x ile aynı seviyede bellek sıralama (memory ordering) garantileri sağlar.
+//!
+//! ## Neden Bellek Bariyeri?
+//! Modern CPU'lar ve derleyiciler performans için talimatları yeniden sıralar.
+//! Bu yeniden sıralama çok çekirdekli sistemlerde veri tutarsızlığına yol açabilir.
+//! Bellek bariyerleri bu yeniden sıralamayı engeller ve veri görünürlüğünü garanti eder.
 
 use core::sync::atomic::Ordering;
 
-/// Full memory barrier - Linux'ın smp_mb() karşılığı
-/// 
-/// Tüm memory operations'ları sıralar:
-/// - Önceki tüm read/write'ları barrier'dan sonraki read/write'lardan ayırır
-/// - Hem compiler hem de CPU seviyesinde garanti sağlar
+/// Tam bellek bariyeri - Linux'ın `smp_mb()` karşılığı.
+///
+/// Tüm bellek işlemlerini sıralar:
+/// - Önceki tüm okuma/yazma işlemlerini, barrier'dan sonraki
+///   okuma/yazma işlemlerinden kesinlikle ayırır.
+/// - Hem derleyici (compiler) hem de CPU seviyesinde garanti sağlar.
+///
+/// x86_64'de `mfence` komutu kullanılır: en güçlü bariyer türüdür.
+///
+/// ```ascii
+/// [Önceki Okuma/Yazma İşlemleri]
+///          |
+///    [MFENCE Bariyeri]  <-- smp_mb() burası
+///          |
+/// [Sonraki Okuma/Yazma İşlemleri]
+/// ```
 #[inline(always)]
 pub fn smp_mb() {
-    // x86_64'de mfence en güçlü barrier
+    // x86_64'de mfence en güçlü bariyer: hem okuma hem yazma sıralar
     unsafe {
         core::arch::asm!("mfence", options(nomem, nostack, preserves_flags));
     }
 }
 
-/// Read memory barrier - Linux'ın smp_rmb() karşılığı
-/// 
-/// Önceki read'ları sonraki read'lardan ayırır:
-/// - Read operations'ları sıralar
-/// - Write operations'ları etkilemez
+/// Okuma bellek bariyeri - Linux'ın `smp_rmb()` karşılığı.
+///
+/// Önceki okuma işlemlerini sonraki okuma işlemlerinden ayırır:
+/// - Sadece okuma (read) işlemlerini sıralar.
+/// - Yazma (write) işlemlerini etkilemez.
+///
+/// x86_64'de `lfence` (Load Fence) komutu kullanılır.
 #[inline(always)]
 pub fn smp_rmb() {
-    // x86_64'de lfence read barrier için yeterli
+    // x86_64'de lfence, yük (load) işlemleri için yeterli okuma bariyeridir
     unsafe {
         core::arch::asm!("lfence", options(nomem, nostack, preserves_flags));
     }
 }
 
-/// Write memory barrier - Linux'ın smp_wmb() karşılığı
-/// 
-/// Önceki write'ları sonraki write'lardan ayırır:
-/// - Write operations'ları sıralar
-/// - Read operations'larını etkilemez
+/// Yazma bellek bariyeri - Linux'ın `smp_wmb()` karşılığı.
+///
+/// Önceki yazma işlemlerini sonraki yazma işlemlerinden ayırır:
+/// - Sadece yazma (write) işlemlerini sıralar.
+/// - Okuma (read) işlemlerini etkilemez.
+///
+/// x86_64'de `sfence` (Store Fence) komutu kullanılır.
 #[inline(always)]
 pub fn smp_wmb() {
-    // x86_64'de sfence write barrier için yeterli
+    // x86_64'de sfence, depo (store) işlemleri için yeterli yazma bariyeridir
     unsafe {
         core::arch::asm!("sfence", options(nomem, nostack, preserves_flags));
     }
 }
 
-/// Acquire barrier - Linux'ın smp_acquire() karşılığı
-/// 
-/// Sonraki tüm memory operations'larını barrier'dan sonraya taşır:
-/// - Lock-free veri yapılarında kritik
-/// - RCU implementasyonlarında gerekli
+/// Edinme (acquire) bariyeri - Linux'ın `smp_acquire()` karşılığı.
+///
+/// Sonraki tüm bellek işlemlerini bu barrier'dan sonraya taşır:
+/// - Kilit-serbest (lock-free) veri yapılarında kritik öneme sahiptir.
+/// - RCU implementasyonlarında gereklidir.
+/// - "Kilidi aldıktan sonra oku" semantiğini garanti eder.
 #[inline(always)]
 pub fn smp_acquire() {
-    // x86_64'de normal read zaten acquire semantics'e sahip
-    // Ama garanti için lfence ekliyoruz
+    // x86_64'de normal okuma zaten acquire semantiğine sahip,
+    // ancak ekstra güvence için lfence kullanıyoruz
     unsafe {
         core::arch::asm!("lfence", options(nomem, nostack, preserves_flags));
     }
 }
 
-/// Release barrier - Linux'ın smp_release() karşılığı
-/// 
-/// Önceki tüm memory operations'larını barrier'dan önceye taşır:
-/// - Lock-free veri yapılarında kritik
-/// - RCU implementasyonlarında gerekli
+/// Serbest bırakma (release) bariyeri - Linux'ın `smp_release()` karşılığı.
+///
+/// Önceki tüm bellek işlemlerini barrier'dan önceye taşır:
+/// - Kilit-serbest (lock-free) veri yapılarında kritik öneme sahiptir.
+/// - RCU implementasyonlarında gereklidir.
+/// - "Yaz, sonra kilidi bırak" semantiğini garanti eder.
 #[inline(always)]
 pub fn smp_release() {
-    // x86_64'de normal write zaten release semantics'e sahip
-    // Ama garanti için sfence ekliyoruz
+    // x86_64'de normal yazma zaten release semantiğine sahip,
+    // ancak ekstra güvence için sfence kullanıyoruz
     unsafe {
         core::arch::asm!("sfence", options(nomem, nostack, preserves_flags));
     }
 }
 
-/// Read-Acquire barrier kombinasyonu
-/// 
-/// Lock-free okuma işlemleri için optimize edilmiş:
-/// - Önceki read'ları sıralar
-/// - Sonraki operations'ları acquire eder
+/// Okuma-Edinme (read-acquire) bariyer kombinasyonu.
+///
+/// Kilit-serbest okuma işlemleri için optimize edilmiş bileşik bariyer:
+/// - Önceki okuma işlemlerini sıralar (rmb).
+/// - Sonraki tüm işlemleri acquire eder (acquire).
+/// - Genellikle kilitsiz pointer okumalarında kullanılır.
 #[inline(always)]
 pub fn smp_read_acquire() {
     smp_rmb();
     smp_acquire();
 }
 
-/// Write-Release barrier kombinasyonu
-/// 
-/// Lock-free yazma işlemleri için optimize edilmiş:
-/// - Önceki write'ları sıralar
-/// - Önceki operations'ı release eder
+/// Yazma-Serbest (write-release) bariyer kombinasyonu.
+///
+/// Kilit-serbest yazma işlemleri için optimize edilmiş bileşik bariyer:
+/// - Önceki yazma işlemlerini sıralar (wmb).
+/// - Önceki tüm işlemleri release eder (release).
+/// - Genellikle kilitsiz pointer güncellemelerinde kullanılır.
 #[inline(always)]
 pub fn smp_write_release() {
     smp_wmb();
     smp_release();
 }
 
-/// Full barrier with atomic ordering
-/// 
-/// Atomic operations ile birlikte kullanım için:
-/// - SeqCst ordering garantisi
-/// - Hem atomic hem de normal memory için
+/// Atomik sıralamaya sahip tam bariyer.
+///
+/// Atomik (atomic) işlemlerle birlikte kullanım için tasarlanmıştır:
+/// - SeqCst (Sıralı Tutarlılık) sıralama garantisi sağlar.
+/// - Hem atomik hem de normal bellek erişimleri için geçerlidir.
+/// - En güçlü, en pahalı bariyer türüdür; yalnızca gerektiğinde kullanın.
 #[inline(always)]
 pub fn smp_full_barrier() {
-    // SeqCst ordering ile full barrier
+    // SeqCst sıralama ile tam atomik bariyer
     core::sync::atomic::fence(Ordering::SeqCst);
     smp_mb();
 }
 
-/// Conditional memory barrier
-/// 
-/// Sadece belirli koşullarda barrier uygulama:
-/// - Performans optimizasyonu için
-/// - Debug modunda ek kontrol
+/// Koşullu bellek bariyeri.
+///
+/// Yalnızca belirli koşullar gerçekleştiğinde bariyer uygular:
+/// - Performans optimizasyonu gerektiren durumlarda kullanılır.
+/// - Debug modunda ek kontrol sağlamak için idealdir.
 #[inline(always)]
 pub fn smp_conditional_mb(condition: bool) {
     if condition {
@@ -118,41 +143,49 @@ pub fn smp_conditional_mb(condition: bool) {
     }
 }
 
-/// Memory barrier for lock-free data structures
-/// 
-/// RCU benzeri yapılar için özel barrier:
-/// - Grace period garantisi
-/// - Lock-free read/write işlemleri
+/// Kilit-serbest veri yapıları için bellek bariyeri yapısı.
+///
+/// RCU benzeri yapılar için özel bariyer yönetimi sağlar:
+/// - Zariflik dönemi (grace period) garantisi verir.
+/// - Kilit-serbest okuma/yazma işlemlerini güvenli hale getirir.
 pub struct MemoryBarrier;
 
 impl MemoryBarrier {
-    /// Initialize memory barrier subsystem
+    /// Bellek bariyeri alt sistemini başlatır.
+    ///
+    /// Sistem açılışında çağrılmalıdır. Tüm bariyer türlerinin
+    /// doğru çalıştığını test eder ve seri porta bilgi mesajı yazar.
     pub fn init() {
         crate::serial_println!("Memory barriers initialized (x86_64)");
-        
-        // Test barriers
+
+        // Tüm bariyer türlerini test et
         Self::test_barriers();
     }
-    
-    /// Test all barrier types
+
+    /// Tüm bariyer türlerini test eder.
+    ///
+    /// Bu fonksiyon sistemin başlatılması sırasında çalışır ve
+    /// hiçbir panic olmaksızın tamamlanması beklenir.
     fn test_barriers() {
-        // Full barrier test
+        // Tam bariyer testi: hem okuma hem yazma sıralanır
         smp_mb();
-        
-        // Read barrier test
+
+        // Okuma bariyeri testi: yalnızca okuma sıralanır
         smp_rmb();
-        
-        // Write barrier test
+
+        // Yazma bariyeri testi: yalnızca yazma sıralanır
         smp_wmb();
-        
-        // Acquire/Release test
+
+        // Edinme/Serbest bırakma testi
         smp_acquire();
         smp_release();
-        
+
         crate::serial_println!("Memory barriers test completed");
     }
-    
-    /// Barrier statistics (debug için)
+
+    /// Bariyer istatistiklerini döner (hata ayıklama için).
+    ///
+    /// Şu an sıfır değerleri döner; gelecekte gerçek sayımlar eklenebilir.
     pub fn stats() -> BarrierStats {
         BarrierStats {
             full_barriers: 0,
@@ -164,7 +197,10 @@ impl MemoryBarrier {
     }
 }
 
-/// Barrier statistics for debugging
+/// Hata ayıklama için bariyer istatistikleri.
+///
+/// Kaç kez hangi bariyer türünün kullanıldığını takip eder.
+/// Performans analizi ve hata ayıklama amacıyla kullanılır.
 #[derive(Debug, Clone, Copy)]
 pub struct BarrierStats {
     pub full_barriers: u64,
@@ -174,82 +210,107 @@ pub struct BarrierStats {
     pub release_barriers: u64,
 }
 
-/// CPU-specific memory barriers
-/// 
-/// Farklı CPU mimarileri için optimize edilmiş:
-/// - x86_64: mfence/lfence/sfence
-/// - ARM: dmb ish/dmb ishst/dsb ish
+/// CPU mimarisine özgü bellek bariyerleri modülü.
+///
+/// Farklı CPU mimarileri için optimize edilmiş bariyer implementasyonları:
+/// - x86_64: `mfence` / `lfence` / `sfence` komutları
+/// - ARM (gelecekte): `dmb ish` / `dmb ishst` / `dsb ish` komutları
 pub mod cpu_specific {
+    /// x86_64 mimarisi için tam bellek bariyeri.
     #[cfg(target_arch = "x86_64")]
     pub fn cpu_full_barrier() {
         super::smp_mb();
     }
-    
+
+    /// x86_64 mimarisi için okuma bellek bariyeri.
     #[cfg(target_arch = "x86_64")]
     pub fn cpu_read_barrier() {
         super::smp_rmb();
     }
-    
+
+    /// x86_64 mimarisi için yazma bellek bariyeri.
     #[cfg(target_arch = "x86_64")]
     pub fn cpu_write_barrier() {
         super::smp_wmb();
     }
 }
 
-/// Lock-free memory operations
-/// 
-/// Tier 1 OS seviyesinde lock-free veri yapıları:
-/// - RCU benzeri read-copy-update
-/// - Lock-free queue/stack
-/// - Hazard pointers
+/// Kilit-serbest (lock-free) bellek işlemleri modülü.
+///
+/// Tier 1 OS seviyesinde kilit-serbest veri yapıları için altyapı:
+/// - RCU (Read-Copy-Update) benzeri okuma-kopyalama-güncelleme
+/// - Kilit-serbest kuyruk/yığın (lock-free queue/stack)
+/// - Tehlike işaretçileri (hazard pointers)
 pub mod lockfree {
     use super::*;
-    
-    /// RCU grace period marker
+
+    /// RCU zariflik dönemi (grace period) işaretleyicisi.
+    ///
+    /// Bir zariflik dönemi, tüm okuyucuların eski veriyi bırakmasını
+    /// beklemek için kullanılır. Eski verinin güvenle serbest bırakılmasını sağlar.
     #[derive(Debug, Clone, Copy)]
     pub struct RcuGracePeriod {
         epoch: u64,
     }
-    
+
     impl RcuGracePeriod {
-        /// Start new grace period
+        /// Yeni bir zariflik dönemi başlatır.
+        ///
+        /// Tam bariyer uygulayarak önceki tüm işlemlerin görünür
+        /// olmasını garanti eder.
         pub fn new() -> Self {
             smp_mb();
             Self { epoch: 0 }
         }
-        
-        /// End grace period
+
+        /// Zariflik dönemini sonlandırır.
+        ///
+        /// Tam bariyer uygulayarak dönem sonundaki tüm işlemlerin
+        /// tamamlanmasını garanti eder.
         pub fn end(self) {
             smp_mb();
         }
-        
-        /// Check if grace period is safe
+
+        /// Zariflik döneminin güvenli olup olmadığını kontrol eder.
+        ///
+        /// Tüm okuyucuların bu dönemden çıkıp çıkmadığını doğrular.
         pub fn is_safe(&self) -> bool {
-            // RCU implementasyonu buraya gelecek
+            // Gerçek RCU implementasyonu ilerleyen sürümlerde eklenecek
             smp_rmb();
             true
         }
     }
-    
-    /// Lock-free pointer for RCU
+
+    /// RCU için kilit-serbest işaretçi (pointer) sarmalayıcısı.
+    ///
+    /// Aynı anda birden fazla okuyucu ve tek bir yazıcının güvenle
+    /// çalışmasını sağlar. Okuma tarafı hiç kilit kullanmaz.
     pub struct RcuPtr<T> {
         ptr: *const T,
     }
-    
+
     impl<T> RcuPtr<T> {
-        /// Create new RCU pointer
+        /// Yeni bir RCU korumalı işaretçi oluşturur.
+        ///
+        /// Yazma bariyeri uygulayarak işaretçinin diğer CPU'lara
+        /// görünür hale gelmesini garanti eder.
         pub fn new(ptr: *const T) -> Self {
             smp_wmb();
             Self { ptr }
         }
-        
-        /// Read with acquire semantics
+
+        /// Edinme (acquire) semantiği ile işaretçiyi okur.
+        ///
+        /// Okuma bariyeri uygulayarak okunan verinin tüm CPU'lara
+        /// görünür ve tutarlı olmasını garanti eder.
         pub fn read(&self) -> *const T {
             smp_rmb();
             self.ptr
         }
-        
-        /// Update with release semantics
+
+        /// Serbest bırakma (release) semantiği ile işaretçiyi günceller.
+        ///
+        /// Yazma bariyeri uygulayarak güncellemenin atomik görünmesini sağlar.
         pub fn update(&mut self, new_ptr: *const T) {
             smp_wmb();
             self.ptr = new_ptr;
@@ -257,16 +318,19 @@ pub mod lockfree {
     }
 }
 
-/// Memory ordering utilities
-/// 
-/// Atomic operations için yardımcı fonksiyonlar:
-/// - Acquire/Release wrapper'ları
-/// - SeqCst garantileri
+/// Atomik sıralama yardımcı fonksiyonları modülü.
+///
+/// Atomik işlemler için `Ordering` dönüştürme ve kontrol yardımcıları:
+/// - Acquire/Release sarmalayıcıları
+/// - SeqCst (Sıralı Tutarlılık) garantileri
 pub mod ordering {
     use super::*;
     use core::sync::atomic::Ordering;
-    
-    /// Convert to acquire ordering
+
+    /// Verilen sıralamayı edinme (acquire) sıralamasına yükseltir.
+    ///
+    /// Daha zayıf bir sıralama verilmişse, en az acquire garantisi
+    /// sağlayacak şekilde dönüştürür.
     pub fn to_acquire(ordering: Ordering) -> Ordering {
         match ordering {
             Ordering::Relaxed => Ordering::Acquire,
@@ -277,8 +341,11 @@ pub mod ordering {
             _ => Ordering::SeqCst,
         }
     }
-    
-    /// Convert to release ordering
+
+    /// Verilen sıralamayı serbest bırakma (release) sıralamasına yükseltir.
+    ///
+    /// Daha zayıf bir sıralama verilmişse, en az release garantisi
+    /// sağlayacak şekilde dönüştürür.
     pub fn to_release(ordering: Ordering) -> Ordering {
         match ordering {
             Ordering::Relaxed => Ordering::Release,
@@ -289,8 +356,11 @@ pub mod ordering {
             _ => Ordering::SeqCst,
         }
     }
-    
-    /// Check if ordering needs barriers
+
+    /// Verilen sıralamanın bariyer gerektirip gerektirmediğini kontrol eder.
+    ///
+    /// Yalnızca `Relaxed` sıralama bariyer gerektirmez; diğer tüm
+    /// sıralama türleri en az bir tür bariyer gerektirir.
     pub fn needs_barriers(ordering: Ordering) -> bool {
         !matches!(ordering, Ordering::Relaxed)
     }

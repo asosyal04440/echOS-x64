@@ -7,6 +7,30 @@
 //! - AMD için: VMRUN/VMSAVE/VMLOAD, VMCB yapılandırması
 //! Her iki platform da CPUID ile algılanarak ilgili MSR'lar aracılığıyla
 //! etkinleştirilir.
+//!
+//! ## Intel VT-x VM Yaşam Döngüsü
+//!
+//! ```text
+//!   CR4.VMXE = 1          VMXON(region_phys)
+//!        │                       │
+//!        ▼                       ▼
+//!   [VMX Devre Dışı] ──► [VMX Root Operasyon]
+//!                                │
+//!                    VMCLEAR → VMPTRLD → VMWRITE
+//!                                │
+//!                                ▼
+//!                          VMLAUNCH ──► [Konuk (Guest) Çalışıyor]
+//!                                │              │
+//!                                │   VM-EXIT ◄──┘ (kesme/istisna)
+//!                                ▼
+//!                     [VMX Root — exit handler]
+//!                                │
+//!                          VMRESUME ──► [Konuk devam]
+//!                                │
+//!                           VMXOFF ──► [VMX Devre Dışı]
+//!
+//!  Not: AMD SVM'de VMLAUNCH=VMRUN, VMCS=VMCB, VMXON=VMRUN ile eşdeğerdir.
+//! ```
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -114,7 +138,8 @@ impl Vmcs {
     }
 }
 
-/// VMX operation region
+/// VMX operasyon bölgesi — VMXON komutuna verilmesi gereken 4 KB hizalı sayfa.
+/// revision_id alanı MSR_IA32_VMX_BASIC'ten okunarak doldurulmalıdır.
 #[repr(C, align(4096))]
 pub struct VmxonRegion {
     pub revision_id: u32,
@@ -125,7 +150,8 @@ pub struct VmxonRegion {
 // SVM YAPILARI
 // ============================================================================
 
-/// VMCB Control Area
+/// VMCB Kontrol Alanı — konuk VM için kesme yakalama (intercept), I/O ve MSR
+/// izinlerini, TLB kontrolünü ve VM-EXIT bilgilerini barındırır. (VMCB ofseti 0x000)
 #[repr(C)]
 pub struct VmcbControl {
     pub intercept_cr: [u16; 4],
@@ -171,7 +197,8 @@ pub struct VmcbControl {
     pub reserved5: [u64; 10],
 }
 
-/// VMCB State Save Area
+/// VMCB Durum Kayıt Alanı — konuk CPU'nun tüm register durumunu (segment, kontrol
+/// ve genel amaçlı yazmaçlar dahil) tutar. (VMCB ofseti 0x400)
 #[repr(C)]
 pub struct VmcbState {
     pub es: Segment,
@@ -209,7 +236,8 @@ pub struct VmcbState {
     pub reserved8: [u64; 24],
 }
 
-/// Segment descriptor
+/// Segment tanımlayıcısı — x86 segment kaydını (seçici, öznitelik, limit, taban) tutar.
+/// AMD VMCB ve Intel VMCS'teki segment alanlarıyla birebir eşleşir.
 #[repr(C)]
 pub struct Segment {
     pub selector: u16,
@@ -218,7 +246,8 @@ pub struct Segment {
     pub base: u64,
 }
 
-/// Full VMCB
+/// Tam VMCB (Virtual Machine Control Block) — Kontrol Alanı (0x000) ve
+/// Durum Kayıt Alanı (0x400) bölümlerini tek bir 4 KB hizalı yapıda birleştirir.
 #[repr(C, align(4096))]
 pub struct Vmcb {
     pub control: VmcbControl,

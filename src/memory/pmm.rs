@@ -1,7 +1,64 @@
-//! # echOS Fiziksel Bellek Yöneticisi (PMM)
+//! # echOS Fiziksel Bellek Yöneticisi (PMM) — Bitmap Tabanlı
 //!
-//! Bitmap tabanlı fiziksel frame allocator.
-//! UEFI Memory Map'i kullanarak boş ve dolu bellek bölgelerini takip eder.
+//! UEFI Memory Map üzerinde çalışan bit haritası tabanlı fiziksel frame ayırıcı.
+//!
+//! ## Bitmap PMM Veri Yapısı
+//!
+//! Her fiziksel 4 KB çerçeve için 1 bit kullanılır (0 = boş, 1 = dolu):
+//!
+//! ```
+//! Fiziksel Bellek:
+//!  [frame0][frame1][frame2][frame3] ... [frameN]
+//!
+//! Bitmap (bellekte tutulur):
+//!  [1111 0001] [1011 1111] [0000 0000] ...
+//!   │││└─────── frame[4] = boş
+//!   ││└──────── frame[5] = dolu
+//!   │└───────── frame[6] = dolu
+//!   └────────── frame[7] = dolu
+//!
+//! 1 u64 = 64 frame = 64 × 4 KB = 256 KB
+//! 1 GB RAM için bitmap boyutu = (1 GB / 4 KB) / 8 = 32 KB
+//! ```
+//!
+//! ## Tahsis Algoritması (O(1) Amorti)
+//!
+//! `last_idx` değişkeni son başarılı tahsisin indeksini takip eder.
+//! Bir sonraki tahsis oradan başlayarak ilerler (döngüsel arama):
+//!
+//! ```
+//! last_idx = 42 (son tahsisin frame indeksi)
+//!      ↓
+//! frame[43], frame[44], ... → boş mu bakılır
+//!      ↓
+//! boş frame bulunduğunda: bit = 1 yap, last_idx = frame_index, döndür
+//!      ↓
+//! RAM sonuna ulaşıldığında başa sar (wrap-around)
+//! ```
+//!
+//! ## Ardışık Tahsis (Contiguous Allocation)
+//!
+//! `allocate_contiguous(N)` N tane arka arkaya boş frame arar.
+//! THP (Transparent Huge Pages) ve DMA tamponları için gereklidir:
+//!
+//! ```
+//! N = 512 (2 MB büyük sayfa için)
+//!
+//! bitmap'te 512 ardışık 0 bit ara:
+//!   [... 0000 0000 0000 ...] → bulundu, hepsini 1 yap ve ilk frame'i döndür
+//! ```
+//!
+//! ## Frame 0 Koruması
+//!
+//! Frame 0 (fiziksel adres 0x0) her zaman "dolu" olarak işaretlenir.
+//! Bu, null pointer hata ayıklamasını kolaylaştırır:
+//! - Sıfır fiziksel adres hiçbir zaman geçerli bir frame olmaz
+//! - NULL dereference hataları erken yakalanır
+//!
+//! ## İlgili Modüller:
+//! - `fibonacci_pmm.rs`: Zone tabanlı PMM (UEFI için tercih edilen)
+//! - `mod.rs`: `MemoryManager` — `FibonacciPmm`'i sarar; bu modül alternatif implementasyon
+//! - `thp.rs`: `allocate_contiguous_huge_frame()` — 512 ardışık frame tahsis eder
 
 use uefi::table::boot::{MemoryDescriptor, MemoryType};
 use x86_64::structures::paging::{FrameAllocator, PhysFrame, Size4KiB};

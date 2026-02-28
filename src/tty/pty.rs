@@ -1,7 +1,55 @@
-//! PTY (Pseudo Terminal) Driver
+//! Sözde Terminal (PTY - Pseudo Terminal) Sürücüsü
 //!
 //! Linux uyumlu PTY implementasyonu.
-//! SSH, screen, tmux gibi uygulamalar için altyapı.
+//! SSH, screen, tmux gibi uygulamalar için altyapı sağlar.
+//!
+//! ## PTY Nedir?
+//!
+//! Pseudo Terminal (sözde terminal), gerçek bir donanıma bağlı olmayan,
+//! yazılım tarafından simüle edilen bir TTY çiftidir.
+//! Çift yönlü bir boru (pipe) gibi çalışır: bir uca yazılan,
+//! diğer uçtan okunabilir.
+//!
+//! ## Master/Slave Mimarisi
+//!
+//! ```
+//!  ┌────────────────────────────────────────────────────────────┐
+//!  │                    PTY ÇİFTİ                               │
+//!  │                                                            │
+//!  │  Terminal Emülatörü           Shell / Uygulama             │
+//!  │  (SSH client, xterm, tmux)   (bash, zsh, python)          │
+//!  │                                                            │
+//!  │  ┌─────────────┐   yazma    ┌─────────────┐               │
+//!  │  │             │ ─────────> │             │               │
+//!  │  │  PTY MASTER │           │  PTY SLAVE  │               │
+//!  │  │ /dev/ptmx   │ <───────── │ /dev/pts/N  │               │
+//!  │  │             │   okuma   │             │               │
+//!  │  └─────────────┘           └─────────────┘               │
+//!  │                                                            │
+//!  │  Master: terminal verisini sağlar (kullanıcı girdisi)     │
+//!  │  Slave:  kabuk/uygulama tarafından kullanılır             │
+//!  └────────────────────────────────────────────────────────────┘
+//!
+//!  Örnek akış (SSH bağlantısı):
+//!  Kullanıcı tuş basar --> SSH client --> PTY Master --> PTY Slave --> shell
+//!  Shell çıktı üretir  --> PTY Slave  --> PTY Master --> SSH client --> ekran
+//! ```
+//!
+//! ## Termios Nedir?
+//!
+//! "Terminal I/O Settings" - terminal davranışını kontrol eden flag'ler kümesidir.
+//! Unix/POSIX standardında `struct termios` olarak tanımlıdır.
+//! `ioctl(TCGETS/TCSETS)` sistem çağrılarıyla okunup yazılır.
+//!
+//! ```
+//! struct termios {
+//!     c_iflag: input flags  (ICRNL, IXON ...)
+//!     c_oflag: output flags (OPOST, ONLCR ...)
+//!     c_cflag: control flags (baud rate, parity ...)
+//!     c_lflag: local flags  (ECHO, ICANON, ISIG ...)
+//!     c_cc:    control chars (Ctrl+C=VINTR, Ctrl+D=VEOF ...)
+//! }
+//! ```
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -9,146 +57,247 @@ use spin::Mutex;
 use super::buffer::TtyBuffer;
 
 /// PTY çifti: Master ve Slave
+///
+/// Bir PTY oturumundaki iki tarafı bir arada tutar.
+/// Arc (Atomically Reference Counted) ile hem master hem slave
+/// birbirinin yaşam süresinden bağımsız olarak kullanılabilir.
 pub struct PtyPair {
     /// Master taraf - terminal emülatörü okur/yazar
     pub master: Arc<PtyMaster>,
     /// Slave taraf - shell/uygulama okur/yazar
     pub slave: Arc<PtySlave>,
-    /// PTY numarası (örn: /dev/pts/0)
+    /// PTY numarası (örn: /dev/pts/0, /dev/pts/1 ...)
     pub pty_num: usize,
 }
 
-/// Master taraf (terminal emülatörü)
+/// Master taraf (terminal emülatörü tarafı)
+///
+/// Terminal emülatörü (xterm, SSH, screen vb.) bu tarafı kullanır.
+/// Kullanıcı girdisini slave'e yazar, slave'in çıktısını okur.
 pub struct PtyMaster {
-    /// Master'dan Slave'e veri
+    /// Master'dan Slave'e veri tamponu (kullanıcı girdisi)
     to_slave: Arc<Mutex<TtyBuffer>>,
-    /// Slave'den Master'a veri
+    /// Slave'den Master'a veri tamponu (uygulama çıktısı)
     from_slave: Arc<Mutex<TtyBuffer>>,
-    /// PTY numarası
+    /// PTY numarası (/dev/pts/N için N)
     pty_num: usize,
-    /// Canonical mode flag
+    /// Kanonik mod: satır tamponlama aktif mi?
+    /// true = canonical (cooked), false = raw mode
     canonical: bool,
-    /// Echo flag
+    /// Echo modu: yazdığını ekranda gör
     echo: bool,
 }
 
-/// Slave taraf (shell/uygulama)
+/// Slave taraf (shell/uygulama tarafı)
+///
+/// Kabuk (bash, sh) ya da terminal uygulamaları bu tarafı kullanır.
+/// Standart I/O (stdin/stdout/stderr) bu taraftan yönlendirilir.
 pub struct PtySlave {
-    /// Slave'den Master'a veri
+    /// Slave'den Master'a veri tamponu (uygulama çıktısı)
     to_master: Arc<Mutex<TtyBuffer>>,
-    /// Master'dan Slave'e veri
+    /// Master'dan Slave'e veri tamponu (kullanıcı girdisi)
     from_master: Arc<Mutex<TtyBuffer>>,
     /// PTY numarası
     pty_num: usize,
-    /// Foreground process group ID
+    /// Ön plan process group ID (job control için)
+    /// Hangi process grubunun terminale sahip olduğunu belirler
     foreground_pgid: Mutex<usize>,
-    /// Window size
+    /// Terminal pencere boyutu (SIGWINCH sinyali için)
     winsize: Mutex<Winsize>,
 }
 
-/// Window size yapısı (ioctl TIOCGWINSZ için)
+/// Terminal pencere boyutu yapısı (ioctl TIOCGWINSZ için)
+///
+/// Terminal uygulamaları, ekranın boyutunu öğrenmek için bu yapıyı kullanır.
+/// Boyut değiştiğinde SIGWINCH sinyali gönderilir.
+///
+/// `#[repr(C)]`: C dili ile uyumlu bellek düzeni (ioctl için gerekli)
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Winsize {
+    /// Satır sayısı (karakter cinsinden)
     pub ws_row: u16,
+    /// Sütun sayısı (karakter cinsinden)
     pub ws_col: u16,
+    /// Piksel genişliği (0 = bilinmiyor)
     pub ws_xpixel: u16,
+    /// Piksel yüksekliği (0 = bilinmiyor)
     pub ws_ypixel: u16,
 }
 
-/// Termios yapısı (terminal ayarları)
+/// Termios yapısı (terminal I/O ayarları)
+///
+/// POSIX `struct termios` ile birebir uyumlu.
+/// `ioctl(TCGETS)` ve `ioctl(TCSETS)` sistem çağrıları bu yapıyı kullanır.
+///
+/// `#[repr(C)]`: C ABI uyumluluğu için zorunlu
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Termios {
-    pub c_iflag: u32,  // Input modes
-    pub c_oflag: u32,  // Output modes
-    pub c_cflag: u32,  // Control modes
-    pub c_lflag: u32,  // Local modes
-    pub c_line: u8,    // Line discipline
-    pub c_cc: [u8; 19], // Control characters
+    /// Girdi bayrakları (input flags): satır sonu dönüşümü, parity kontrolü vb.
+    pub c_iflag: u32,
+    /// Çıktı bayrakları (output flags): satır sonu dönüşümü, sonrası işleme vb.
+    pub c_oflag: u32,
+    /// Kontrol bayrakları (control flags): baud hızı, veri bitleri, parity vb.
+    pub c_cflag: u32,
+    /// Yerel bayraklar (local flags): echo, kanonik mod, sinyaller vb.
+    pub c_lflag: u32,
+    /// Satır disiplini tipi (genellikle 0 = N_TTY)
+    pub c_line: u8,
+    /// Kontrol karakterleri dizisi (VINTR=Ctrl+C, VEOF=Ctrl+D vb.)
+    pub c_cc: [u8; 19],
 }
 
-// Termios flag'leri
-pub const IGNBRK: u32 = 0o000001;  // Ignore break condition
-pub const BRKINT: u32 = 0o000002;  // Signal interrupt on break
-pub const IGNPAR: u32 = 0o000004;  // Ignore characters with parity errors
-pub const PARMRK: u32 = 0o000010;  // Mark parity and framing errors
-pub const INPCK: u32 = 0o000020;   // Enable input parity check
-pub const ISTRIP: u32 = 0o000040;  // Strip 8th bit off characters
-pub const INLCR: u32 = 0o000100;   // Map NL to CR on input
-pub const IGNCR: u32 = 0o000200;   // Ignore CR
-pub const ICRNL: u32 = 0o000400;   // Map CR to NL on input
-pub const IUCLC: u32 = 0o001000;   // Map uppercase to lowercase
-pub const IXON: u32 = 0o002000;    // Enable start/stop output control
-pub const IXANY: u32 = 0o004000;   // Enable any character to restart output
-pub const IXOFF: u32 = 0o010000;   // Enable start/stop input control
+// ============================================================================
+// Termios girdi bayrakları (c_iflag)
+// ============================================================================
+/// Break sinyalini yoksay
+pub const IGNBRK: u32 = 0o000001;
+/// Break'te interrupt sinyali gönder (SIGINT)
+pub const BRKINT: u32 = 0o000002;
+/// Parity hatası olan karakterleri yoksay
+pub const IGNPAR: u32 = 0o000004;
+/// Parity ve framing hatalarını işaretle
+pub const PARMRK: u32 = 0o000010;
+/// Girdi parity kontrolünü etkinleştir
+pub const INPCK: u32 = 0o000020;
+/// Karakterlerin 8. bitini sil (7-bit ASCII modu)
+pub const ISTRIP: u32 = 0o000040;
+/// Girdide NL'yi CR'ye dönüştür
+pub const INLCR: u32 = 0o000100;
+/// CR karakterini yoksay
+pub const IGNCR: u32 = 0o000200;
+/// Girdide CR'yi NL'ye dönüştür (en yaygın kullanılan: terminal '\r' -> '\n')
+pub const ICRNL: u32 = 0o000400;
+/// Büyük harfleri küçüğe dönüştür (artık kullanılmıyor)
+pub const IUCLC: u32 = 0o001000;
+/// XON/XOFF akış kontrolünü etkinleştir (Ctrl+S durdurur, Ctrl+Q devam ettirir)
+pub const IXON: u32 = 0o002000;
+/// Herhangi bir karakterin XON'u yeniden başlatabileceğine izin ver
+pub const IXANY: u32 = 0o004000;
+/// Girdi XON/XOFF akış kontrolünü etkinleştir
+pub const IXOFF: u32 = 0o010000;
 
-pub const OPOST: u32 = 0o000001;   // Post-process output
-pub const OLCUC: u32 = 0o000002;   // Map lowercase to uppercase
-pub const ONLCR: u32 = 0o000004;   // Map NL to CR-NL
-pub const OCRNL: u32 = 0o000010;   // Map CR to NL
-pub const ONOCR: u32 = 0o000020;   // No CR output at column 0
-pub const ONLRET: u32 = 0o000040;  // NL performs CR function
+// ============================================================================
+// Termios çıktı bayrakları (c_oflag)
+// ============================================================================
+/// Çıktıyı işle (newline dönüşümleri vb.) - kapalıysa ham çıktı
+pub const OPOST: u32 = 0o000001;
+/// Küçük harfleri büyüğe dönüştür (artık kullanılmıyor)
+pub const OLCUC: u32 = 0o000002;
+/// Çıktıda NL'yi CR+NL'ye dönüştür (Unix->Windows satır sonu)
+pub const ONLCR: u32 = 0o000004;
+/// CR'yi NL'ye dönüştür
+pub const OCRNL: u32 = 0o000010;
+/// Sütun 0'da CR çıktılamayı engelle
+pub const ONOCR: u32 = 0o000020;
+/// NL, CR işlevi görsün
+pub const ONLRET: u32 = 0o000040;
 
-pub const ISIG: u32 = 0o000001;    // Enable signals
-pub const ICANON: u32 = 0o000002;  // Canonical mode
-pub const XCASE: u32 = 0o000004;   // Enable ERASE and KILL processing
-pub const ECHO: u32 = 0o000010;    // Enable echo
-pub const ECHOE: u32 = 0o000020;   // Echo ERASE as BS-SPACE-BS
-pub const ECHOK: u32 = 0o000040;   // Echo KILL by erasing line
-pub const ECHONL: u32 = 0o000100;  // Echo NL
-pub const NOFLSH: u32 = 0o000200;  // Disable flush after interrupt
-pub const TOSTOP: u32 = 0o000400;  // Send SIGTTOU for background output
-pub const ECHOCTL: u32 = 0o001000; // Echo control characters as ^X
-pub const ECHOPRT: u32 = 0o002000; // Echo ERASE as character erased
-pub const ECHOKE: u32 = 0o004000;  // Echo KILL by erasing line
-pub const FLUSHO: u32 = 0o010000;  // Output being flushed
-pub const PENDIN: u32 = 0o040000;  // Retype pending input
-pub const IEXTEN: u32 = 0o100000;  // Enable extended functions
+// ============================================================================
+// Termios yerel bayraklar (c_lflag)
+// ============================================================================
+/// Sinyal üretmeyi etkinleştir (Ctrl+C -> SIGINT, Ctrl+Z -> SIGTSTP)
+pub const ISIG: u32 = 0o000001;
+/// Kanonik mod (satır tamponlama + özel tuş işleme)
+pub const ICANON: u32 = 0o000002;
+/// ERASE ve KILL işlemeyi etkinleştir (artık kullanılmıyor)
+pub const XCASE: u32 = 0o000004;
+/// Echo modunu etkinleştir (yazdığın görünür)
+pub const ECHO: u32 = 0o000010;
+/// ERASE karakterini BS-SPACE-BS olarak yankıla (görsel silme efekti)
+pub const ECHOE: u32 = 0o000020;
+/// KILL karakterini satırı silerek yankıla
+pub const ECHOK: u32 = 0o000040;
+/// NL karakterini yankıla (ICANON kapalıyken bile)
+pub const ECHONL: u32 = 0o000100;
+/// Interrupt/quit sonrası flush'u devre dışı bırak
+pub const NOFLSH: u32 = 0o000200;
+/// Arka plan çıktısı için SIGTTOU gönder (job control)
+pub const TOSTOP: u32 = 0o000400;
+/// Kontrol karakterlerini ^X formatında yankıla (Ctrl+C -> ^C)
+pub const ECHOCTL: u32 = 0o001000;
+/// ERASE karakterini silinen karakter olarak yankıla
+pub const ECHOPRT: u32 = 0o002000;
+/// KILL ile satırı silme (BS-SPACE-BS tarzı görsel silme)
+pub const ECHOKE: u32 = 0o004000;
+/// Çıktı boşaltılıyor (flush devam ediyor)
+pub const FLUSHO: u32 = 0o010000;
+/// Bekleyen girdinin yeniden yazılmasını sağla
+pub const PENDIN: u32 = 0o040000;
+/// Genişletilmiş fonksiyonları etkinleştir (IEXTEN + ECHOKE vb.)
+pub const IEXTEN: u32 = 0o100000;
 
-// Control character indices
-pub const VINTR: usize = 0;    // Interrupt character (Ctrl+C)
-pub const VQUIT: usize = 1;    // Quit character (Ctrl+\)
-pub const VERASE: usize = 2;   // Erase character (Backspace)
-pub const VKILL: usize = 3;    // Kill line character (Ctrl+U)
-pub const VEOF: usize = 4;     // End-of-file character (Ctrl+D)
-pub const VTIME: usize = 5;    // Timeouts
-pub const VMIN: usize = 6;     // Minimum read count
-pub const VSWTC: usize = 7;    // Switch character
-pub const VSTART: usize = 8;   // Start character (Ctrl+Q)
-pub const VSTOP: usize = 9;    // Stop character (Ctrl+S)
-pub const VSUSP: usize = 10;   // Suspend character (Ctrl+Z)
-pub const VEOL: usize = 11;    // End-of-line character
-pub const VREPRINT: usize = 12; // Reprint line (Ctrl+R)
-pub const VDISCARD: usize = 13; // Discard (Ctrl+O)
-pub const VWERASE: usize = 14; // Word erase (Ctrl+W)
-pub const VLNEXT: usize = 15;  // Literal next (Ctrl+V)
-pub const VEOL2: usize = 16;   // Alternative EOL
+// ============================================================================
+// Kontrol karakter dizini sabitleri (c_cc[])
+// ============================================================================
+/// c_cc[VINTR]: Interrupt karakteri - varsayılan: Ctrl+C (0x03) -> SIGINT
+pub const VINTR: usize = 0;
+/// c_cc[VQUIT]: Quit karakteri - varsayılan: Ctrl+\ (0x1C) -> SIGQUIT
+pub const VQUIT: usize = 1;
+/// c_cc[VERASE]: Silme karakteri - varsayılan: DEL/Backspace (0x7F)
+pub const VERASE: usize = 2;
+/// c_cc[VKILL]: Satır silme karakteri - varsayılan: Ctrl+U (0x15)
+pub const VKILL: usize = 3;
+/// c_cc[VEOF]: Dosya sonu karakteri - varsayılan: Ctrl+D (0x04)
+pub const VEOF: usize = 4;
+/// c_cc[VTIME]: Raw mod zaman aşımı (1/10 saniye cinsinden)
+pub const VTIME: usize = 5;
+/// c_cc[VMIN]: Raw modda minimum okunacak karakter sayısı
+pub const VMIN: usize = 6;
+/// c_cc[VSWTC]: Switch karakteri (artık kullanılmıyor)
+pub const VSWTC: usize = 7;
+/// c_cc[VSTART]: Çıktıyı başlat - varsayılan: Ctrl+Q (0x11)
+pub const VSTART: usize = 8;
+/// c_cc[VSTOP]: Çıktıyı durdur - varsayılan: Ctrl+S (0x13)
+pub const VSTOP: usize = 9;
+/// c_cc[VSUSP]: Suspend karakteri - varsayılan: Ctrl+Z (0x1A) -> SIGTSTP
+pub const VSUSP: usize = 10;
+/// c_cc[VEOL]: Satır sonu karakteri (NL ek olarak)
+pub const VEOL: usize = 11;
+/// c_cc[VREPRINT]: Satırı yeniden yazdır - varsayılan: Ctrl+R (0x12)
+pub const VREPRINT: usize = 12;
+/// c_cc[VDISCARD]: Çıktıyı at - varsayılan: Ctrl+O (0x0F)
+pub const VDISCARD: usize = 13;
+/// c_cc[VWERASE]: Kelime silme - varsayılan: Ctrl+W (0x17)
+pub const VWERASE: usize = 14;
+/// c_cc[VLNEXT]: Sonraki karakteri literal al - varsayılan: Ctrl+V (0x16)
+pub const VLNEXT: usize = 15;
+/// c_cc[VEOL2]: Alternatif satır sonu karakteri
+pub const VEOL2: usize = 16;
 
 impl Default for Termios {
+    /// POSIX uyumlu varsayılan terminal ayarları.
+    ///
+    /// Bu ayarlar, tipik bir Unix terminal oturumunun başlangıç durumunu temsil eder:
+    /// - Kanonik mod aktif (satır tamponlama)
+    /// - Echo aktif (yazdığın görünür)
+    /// - Sinyal üretimi aktif (Ctrl+C çalışır)
+    /// - Girdi: CR -> NL dönüşümü aktif
+    /// - Çıktı: NL -> CR+NL dönüşümü aktif
     fn default() -> Self {
         let mut c_cc = [0u8; 19];
-        c_cc[VINTR] = 0x03;     // Ctrl+C
-        c_cc[VQUIT] = 0x1C;     // Ctrl+\
+        c_cc[VINTR] = 0x03;     // Ctrl+C -> SIGINT
+        c_cc[VQUIT] = 0x1C;     // Ctrl+\ -> SIGQUIT
         c_cc[VERASE] = 0x7F;    // DEL/Backspace
-        c_cc[VKILL] = 0x15;     // Ctrl+U
-        c_cc[VEOF] = 0x04;      // Ctrl+D
-        c_cc[VTIME] = 0;
-        c_cc[VMIN] = 1;
+        c_cc[VKILL] = 0x15;     // Ctrl+U (satırı sil)
+        c_cc[VEOF] = 0x04;      // Ctrl+D (EOF)
+        c_cc[VTIME] = 0;        // Zaman aşımı yok
+        c_cc[VMIN] = 1;         // En az 1 karakter oku
         c_cc[VSWTC] = 0;
-        c_cc[VSTART] = 0x11;    // Ctrl+Q
-        c_cc[VSTOP] = 0x13;     // Ctrl+S
-        c_cc[VSUSP] = 0x1A;     // Ctrl+Z
+        c_cc[VSTART] = 0x11;    // Ctrl+Q (XON)
+        c_cc[VSTOP] = 0x13;     // Ctrl+S (XOFF)
+        c_cc[VSUSP] = 0x1A;     // Ctrl+Z -> SIGTSTP
         c_cc[VEOL] = 0;
         c_cc[VREPRINT] = 0x12;  // Ctrl+R
         c_cc[VDISCARD] = 0x0F;  // Ctrl+O
         c_cc[VWERASE] = 0x17;   // Ctrl+W
         c_cc[VLNEXT] = 0x16;    // Ctrl+V
         c_cc[VEOL2] = 0;
-        
+
         Self {
-            c_iflag: ICRNL,
-            c_oflag: OPOST | ONLCR,
+            c_iflag: ICRNL,                          // CR -> NL dönüşümü
+            c_oflag: OPOST | ONLCR,                  // Çıktı işleme + NL -> CR+NL
             c_cflag: 0,
             c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | IEXTEN,
             c_line: 0,
@@ -158,10 +307,13 @@ impl Default for Termios {
 }
 
 /// PTY Yöneticisi
+///
+/// Sistemdeki tüm PTY çiftlerini takip eder ve yeni çiftler oluşturur.
+/// Linux'ta `/dev/ptmx` açıldığında bu yönetici (/dev/pts/N) numarasını atar.
 pub struct PtyManager {
-    /// Aktif PTY çiftleri
+    /// Aktif PTY çiftleri listesi (indeks = PTY numarası)
     pairs: Mutex<Vec<Option<Arc<PtyPair>>>>,
-    /// Sıradaki PTY numarası
+    /// Sıradaki tahsis edilecek PTY numarası
     next_pty_num: Mutex<usize>,
 }
 
@@ -172,17 +324,31 @@ impl PtyManager {
             next_pty_num: Mutex::new(0),
         }
     }
-    
-    /// Yeni PTY çifti oluşturur
+
+    /// Yeni bir PTY çifti oluşturur ve döndürür.
+    ///
+    /// Başarılı olursa `/dev/pts/N` yolunu loglar.
+    /// Paylaşılan tampon bellek alanı Arc ile hem master hem slave'e bağlanır.
+    ///
+    /// ```
+    /// PTY tampon bağlantısı:
+    ///   master_to_slave Arc<Mutex<TtyBuffer>>
+    ///      ├── PtyMaster.to_slave (yazma)
+    ///      └── PtySlave.from_master (okuma)
+    ///
+    ///   slave_to_master Arc<Mutex<TtyBuffer>>
+    ///      ├── PtySlave.to_master (yazma)
+    ///      └── PtyMaster.from_slave (okuma)
+    /// ```
     pub fn create_pair(&self) -> Result<Arc<PtyPair>, PtyError> {
         let mut next_num = self.next_pty_num.lock();
         let pty_num = *next_num;
         *next_num += 1;
-        
+
         // Lock-free buffer'ları oluştur
         let master_to_slave = Arc::new(Mutex::new(TtyBuffer::new()));
         let slave_to_master = Arc::new(Mutex::new(TtyBuffer::new()));
-        
+
         let master = Arc::new(PtyMaster {
             to_slave: master_to_slave.clone(),
             from_slave: slave_to_master.clone(),
@@ -190,7 +356,7 @@ impl PtyManager {
             canonical: true,
             echo: true,
         });
-        
+
         let slave = Arc::new(PtySlave {
             to_master: slave_to_master,
             from_master: master_to_slave,
@@ -203,22 +369,23 @@ impl PtyManager {
                 ws_ypixel: 0,
             }),
         });
-        
+
         let pair = Arc::new(PtyPair {
             master,
             slave,
             pty_num,
         });
-        
+
         // PTY listesine ekle
         let mut pairs = self.pairs.lock();
         pairs.push(Some(pair.clone()));
-        
+
         crate::serial_println!("[PTY] Created /dev/pts/{}", pty_num);
         Ok(pair)
     }
-    
-    /// PTY numarasına göre slave döndürür
+
+    /// PTY numarasına göre slave tarafı döndürür.
+    /// Shell/uygulamanın /dev/pts/N'i açması bu yolla gerçekleşir.
     pub fn get_slave(&self, pty_num: usize) -> Option<Arc<PtySlave>> {
         let pairs = self.pairs.lock();
         pairs.iter()
@@ -226,8 +393,9 @@ impl PtyManager {
             .find(|p| p.pty_num == pty_num)
             .map(|p| p.slave.clone())
     }
-    
-    /// PTY numarasına göre master döndürür
+
+    /// PTY numarasına göre master tarafı döndürür.
+    /// Terminal emülatörünün /dev/ptmx'ten master'a erişimi bu yolla gerçekleşir.
     pub fn get_master(&self, pty_num: usize) -> Option<Arc<PtyMaster>> {
         let pairs = self.pairs.lock();
         pairs.iter()
@@ -237,29 +405,40 @@ impl PtyManager {
     }
 }
 
+/// PTY hatası türleri
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PtyError {
+    /// Boş PTY slotu yok (sistem limiti aşıldı)
     NoFreePty,
+    /// Geçersiz PTY numarası
     InvalidPty,
+    /// Yazma tamponu dolu
     BufferFull,
+    /// Okuma tamponu boş
     BufferEmpty,
 }
 
 impl PtyMaster {
-    /// Master'dan slave'e veri yazar (kullanıcı girdisi)
+    /// Master'dan slave'e veri yazar (kullanıcı girdisi - terminal'den shell'e).
+    ///
+    /// Terminal emülatörü, kullanıcının tuş basmalarını bu metod ile slave'e iletir.
+    /// Döndürülen değer: başarıyla yazılan byte sayısı.
     pub fn write(&self, data: &[u8]) -> Result<usize, PtyError> {
         let mut buf = self.to_slave.lock();
         let mut written = 0;
         for &b in data {
             match buf.push(b) {
                 Ok(()) => written += 1,
-                Err(()) => break,
+                Err(()) => break, // Tampon doldu, daha fazla yazılamaz
             }
         }
         Ok(written)
     }
-    
-    /// Slave'den master'a veri okur (çıktı)
+
+    /// Slave'den master'a veri okur (uygulama çıktısı - shell'den terminal'e).
+    ///
+    /// Terminal emülatörü, shell'in ürettiği çıktıyı bu metod ile okur
+    /// ve kullanıcının ekranına yazdırır.
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, PtyError> {
         let mut slave_buf = self.from_slave.lock();
         let mut read = 0;
@@ -269,20 +448,22 @@ impl PtyMaster {
                     *b = byte;
                     read += 1;
                 }
-                None => break,
+                None => break, // Tampon boş
             }
         }
         Ok(read)
     }
-    
-    /// PTY numarasını döndürür
+
+    /// Bu PTY'nin numarasını döndürür (/dev/pts/N için N değeri).
     pub fn pty_num(&self) -> usize {
         self.pty_num
     }
 }
 
 impl PtySlave {
-    /// Slave'den master'a veri yazar (çıktı)
+    /// Slave'den master'a veri yazar (uygulama çıktısı - shell'den terminal'e).
+    ///
+    /// Shell'in stdout/stderr'e yazdığı veri bu metod ile master'a iletilir.
     pub fn write(&self, data: &[u8]) -> Result<usize, PtyError> {
         let mut buf = self.to_master.lock();
         let mut written = 0;
@@ -294,8 +475,10 @@ impl PtySlave {
         }
         Ok(written)
     }
-    
-    /// Master'dan slave'e veri okur (girdi)
+
+    /// Master'dan slave'e veri okur (kullanıcı girdisi - terminal'den shell'e).
+    ///
+    /// Shell'in stdin'den okuduğu veri bu metod ile master'dan alınır.
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, PtyError> {
         let mut master_buf = self.from_master.lock();
         let mut read = 0;
@@ -310,39 +493,51 @@ impl PtySlave {
         }
         Ok(read)
     }
-    
-    /// PTY numarasını döndürür
+
+    /// Bu PTY slave'inin numarasını döndürür.
     pub fn pty_num(&self) -> usize {
         self.pty_num
     }
-    
-    /// Window size ayarlar
+
+    /// Terminal pencere boyutunu ayarlar.
+    ///
+    /// Kullanıcı terminal penceresini yeniden boyutlandırdığında çağrılır.
+    /// Ardından foreground process grubuna SIGWINCH sinyali gönderilmelidir.
     pub fn set_winsize(&self, ws: Winsize) {
         *self.winsize.lock() = ws;
     }
-    
-    /// Window size döndürür
+
+    /// Mevcut terminal pencere boyutunu döndürür.
+    /// `ioctl(TIOCGWINSZ)` sistem çağrısı bu metoda yönlendirilir.
     pub fn get_winsize(&self) -> Winsize {
         *self.winsize.lock()
     }
-    
-    /// Foreground process group ayarlar
+
+    /// Ön plan process group ID'sini ayarlar.
+    ///
+    /// Hangi process grubunun terminale sahip olduğunu belirler.
+    /// Job control (fg/bg komutları) için kullanılır.
     pub fn set_foreground_pgid(&self, pgid: usize) {
         *self.foreground_pgid.lock() = pgid;
     }
-    
-    /// Foreground process group döndürür
+
+    /// Ön plan process group ID'sini döndürür.
+    /// `ioctl(TIOCGPGRP)` sistem çağrısı bu metoda yönlendirilir.
     pub fn get_foreground_pgid(&self) -> usize {
         *self.foreground_pgid.lock()
     }
 }
 
 lazy_static::lazy_static! {
-    /// Global PTY yöneticisi
+    /// Global PTY yöneticisi - sistemdeki tüm PTY çiftlerini yönetir.
+    /// Linux'taki /dev/ptmx'e karşılık gelir.
     pub static ref PTY_MANAGER: PtyManager = PtyManager::new();
 }
 
-/// PTY alt sistemini başlatır
+/// PTY alt sistemini başlatır.
+///
+/// Şu an yalnızca log mesajı basar; gelecekte /dev/pts sanal dosya sistemi
+/// bağlanacak ve device node'ları oluşturulacak.
 pub fn init() {
     crate::serial_println!("[PTY] Subsystem initialized");
 }
@@ -350,17 +545,17 @@ pub fn init() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_pty_create() {
         let pair = PTY_MANAGER.create_pair().unwrap();
         assert_eq!(pair.pty_num, 0);
     }
-    
+
     #[test]
     fn test_pty_io() {
         let pair = PTY_MANAGER.create_pair().unwrap();
-        
+
         // Master yazar, slave okur
         pair.master.write(b"hello").unwrap();
         let mut buf = [0u8; 10];

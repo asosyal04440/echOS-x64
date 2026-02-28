@@ -2,6 +2,17 @@
 //!
 //! Font management application for viewing, installing, and organizing fonts
 //! Supports preview, categorization, and font metadata
+//!
+//! Bu modül, macOS Font Book'a benzer bir yazı tipi yönetim uygulamasını uygular.
+//! İşletim sistemleri, metin oluşturmak için harfleri, rakamları ve simgeleri
+//! içeren "font" (yazı tipi) dosyalarını kullanır.
+//!
+//! Temel font kavramları:
+//! - **Aile (Family)**: "Helvetica" gibi tüm stilleri kapsayan üst kategori.
+//! - **Stil (Style)**: Regular, Bold, Italic gibi bir ailenin varyantları.
+//! - **Ağırlık (Weight)**: 100 (İnce) ile 900 (Siyah) arasında kalınlık.
+//! - **EM birimi**: Font metriklerinin ölçüldüğü temel birim (genellikle 1000).
+//! - **Glif (Glyph)**: Bir karakterin grafik temsili.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -18,78 +29,89 @@ use crate::gui::Rect;
 // ============================================================================
 // FONT BOOK CONSTANTS
 // ============================================================================
+// Font Book arayüzünün piksel ölçüleri.
+// MacOS Font Book'a yakın bir düzen oluşturmak için kullanılır.
 
-/// Toolbar height
+/// Araç çubuğunun yüksekliği (görünüm değiştirme ve arama butonları)
 pub const TOOLBAR_HEIGHT: usize = 44;
 
-/// Sidebar width
+/// Kategori ve koleksiyon listesini gösteren sol kenar çubuğunun genişliği
 pub const SIDEBAR_WIDTH: usize = 200;
 
-/// Preview area height
+/// Seçili fontu büyük puntoda önizleyen alanın yüksekliği
 pub const PREVIEW_HEIGHT: usize = 200;
 
-/// Font list row height
+/// Font listesinde her satırın yüksekliği
 pub const ROW_HEIGHT: usize = 32;
 
 // ============================================================================
 // FONT INFO
 // ============================================================================
+// Bir font dosyasının tüm üst veri (metadata) ve tanımlayıcı bilgilerini
+// tutan yapı. `FontFormat` ve `FontType` enum'ları font kategorisini belirler.
+// `Vec<FontCategory>` alanı ile bir font birden fazla kategoriye ait olabilir.
 
-/// Font information
+/// Bir yazı tipi dosyasına ait tüm bilgiler
 #[derive(Clone, Debug)]
 pub struct FontInfo {
-    /// Font ID
+    /// Sistemde fontu tanımlayan benzersiz sayısal kimlik
     pub id: u32,
-    /// Font family name
+    /// Font ailesi adı (örn. "Helvetica", "Times New Roman")
     pub family: String,
-    /// Font style (Regular, Bold, Italic, etc.)
+    /// Stil adı (örn. "Regular", "Bold Italic")
     pub style: String,
-    /// Full font name
+    /// Tam ad: aile + stil birleşimi (örn. "Helvetica Bold")
     pub full_name: String,
-    /// PostScript name
+    /// PostScript adı (eğik çizgi olmadan, örn. "Helvetica-Bold")
     pub postscript_name: String,
-    /// Font format
+    /// Dosya formatı (TrueType, OpenType vb.)
     pub format: FontFormat,
-    /// Font type
+    /// Görsel sınıflandırma (Serif, Sans-Serif, Monospace vb.)
     pub font_type: FontType,
-    /// File path
+    /// Font dosyasının disk üzerindeki yolu
     pub path: String,
-    /// File size
+    /// Font dosyasının boyutu (bayt cinsinden)
     pub file_size: u64,
-    /// Is installed
+    /// Sistem fontlarına yüklenmiş mi?
     pub installed: bool,
-    /// Is enabled
+    /// Uygulama tarafından etkin mi? (devre dışı bırakılmış fontlar kullanılamaz)
     pub enabled: bool,
-    /// Is favorite
+    /// Kullanıcı tarafından favorilere eklenmiş mi?
     pub favorite: bool,
-    /// Categories
+    /// Fontu listeleyen kategoriler
     pub categories: Vec<FontCategory>,
-    /// Metadata
+    /// Ek teknik üst veriler
     pub metadata: FontMetadata,
-    /// Sample glyphs
+    /// Önizlemede gösterilecek örnek metin
     pub sample: String,
 }
 
+// Desteklenen yazı tipi formatları.
+// TrueType (.ttf) ve OpenType (.otf) en yaygın modern formatlardır.
+// WOFF/WOFF2 web için sıkıştırılmış versiyonlardır.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FontFormat {
-    TrueType,
-    OpenType,
-    Type1,
-    WOFF,
-    WOFF2,
-    Bitmap,
-    Unknown,
+    TrueType, // Apple/Microsoft geliştirdi; .ttf uzantılı
+    OpenType, // TrueType üzerine inşa edilmiş gelişmiş format; .otf
+    Type1,    // Adobe'nin eski PostScript font formatı
+    WOFF,     // Web Open Font Format (sıkıştırılmış)
+    WOFF2,    // Daha iyi sıkıştırma ile güncellenmiş WOFF
+    Bitmap,   // Sabit boyutlu piksel tabanlı font
+    Unknown,  // Tanımlanamayan format
 }
 
+// Yazı tipi görsel sınıflandırması.
+// Tipografide fontlar karakterlerinin şekline göre kategorilere ayrılır.
+// Serif vs. Sans-Serif: tırnak/süsleme olan vs. olmayan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FontType {
-    Serif,
-    SansSerif,
-    Display,
-    Handwriting,
-    Monospace,
-    Symbol,
-    Unknown,
+    Serif,       // Harf uçlarında ince çizgiler (tırnaklar) olan fontlar (örn. Times)
+    SansSerif,   // Tırnaksız, temiz çizgili fontlar (örn. Helvetica)
+    Display,     // Büyük başlıklar için tasarlanmış dekoratif fontlar
+    Handwriting, // El yazısı stilinde olanlar
+    Monospace,   // Her karakterin aynı genişlikte olduğu fontlar (kod için ideal)
+    Symbol,      // Harf yerine özel simge ve şekilleri içeren fontlar
+    Unknown,     // Sınıflandırılamayan
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,51 +184,55 @@ impl FontInfo {
 // ============================================================================
 // FONT METADATA
 // ============================================================================
+// Font dosyasının içinde gömülü teknik ve telif hakkı bilgilerini tutan yapı.
+// `ascender` ve `descender`: Temel hattın (baseline) üstünde ve altında kalan
+// maksimum glif yüksekliği (EM birimi cinsinden).
+// `units_per_em`: Koordinat sisteminin temel ölçeği; genellikle 1000 veya 2048.
 
-/// Font metadata
+/// Bir fonttaki teknik metrikler ve telif hakkı bilgileri
 #[derive(Clone, Debug)]
 pub struct FontMetadata {
-    /// Designer
+    /// Fontu tasarlayan kişi veya kuruluş
     pub designer: String,
-    /// Foundry
+    /// Fontu yayımlayan kuruluş (döküm evi)
     pub foundry: String,
-    /// Version
+    /// Font sürümü (örn. "2.001")
     pub version: String,
-    /// Copyright
+    /// Telif hakkı metni
     pub copyright: String,
-    /// License
+    /// Lisans türü (örn. "OFL 1.1")
     pub license: String,
-    /// License URL
+    /// Lisans URL'i
     pub license_url: String,
-    /// Description
+    /// Fonun kısa açıklaması
     pub description: String,
-    /// Sample text
+    /// Önizleme için örnek metin
     pub sample_text: String,
-    /// Weight (100-900)
+    /// Kalınlık değeri: 100 (Thin) — 900 (Black)
     pub weight: u16,
-    /// Width (1-9)
+    /// Genişlik değeri: 1 (Ultra Condensed) — 9 (Ultra Expanded)
     pub width: u8,
-    /// Is italic
+    /// İtalik mi?
     pub italic: bool,
-    /// Is fixed pitch
+    /// Sabit genişlikli (monospace) mi?
     pub fixed_pitch: bool,
-    /// Units per EM
+    /// EM koordinat birimi başına birim sayısı
     pub units_per_em: u16,
-    /// Ascender
+    /// Temel hattın üstündeki maksimum yükseklik (EM birimiyle)
     pub ascender: i16,
-    /// Descender
+    /// Temel hattın altındaki maksimum derinlik (negatif EM birimiyle)
     pub descender: i16,
-    /// Line gap
+    /// Satır boşluğu (line gap) değeri
     pub line_gap: i16,
-    /// Cap height
+    /// Büyük harf yüksekliği (cap height)
     pub cap_height: i16,
-    /// X height
+    /// Küçük "x" harfinin yüksekliği
     pub x_height: i16,
-    /// Supported scripts
+    /// Desteklenen yazı sistemleri (örn. "Latin", "Cyrillic")
     pub scripts: Vec<String>,
-    /// Supported languages
+    /// Desteklenen diller
     pub languages: Vec<String>,
-    /// Glyph count
+    /// Fontun içerdiği toplam glif sayısı
     pub glyph_count: u32,
 }
 
@@ -271,19 +297,23 @@ impl FontMetadata {
 // ============================================================================
 // FONT COLLECTION
 // ============================================================================
+// Kullanıcının özel olarak oluşturduğu, el ile veya akıllı kurallarla
+// doldurulabilen font gruplamalarıdır.
+// `smart: true` olan koleksiyonlar, belirlenen kurallara uyan tüm fontları
+// otomatik olarak içerir (iTunes'daki Akıllı Listeler gibi).
 
-/// A collection of fonts
+/// Bir font koleksiyonu (manuel veya akıllı kural tabanlı)
 #[derive(Clone, Debug)]
 pub struct FontCollection {
-    /// Collection ID
+    /// Koleksiyonun benzersiz kimliği
     pub id: u32,
-    /// Collection name
+    /// Koleksiyon adı (örn. "Sık Kullanılanlar", "Sunum Fontları")
     pub name: String,
-    /// Font IDs in collection
+    /// Bu koleksiyona dahil font ID'leri
     pub fonts: Vec<u32>,
-    /// Is smart collection
+    /// Akıllı koleksiyon mu? (kural tabanlı otomatik filtreleme)
     pub smart: bool,
-    /// Smart collection rules
+    /// Akıllı koleksiyonun filtreleme kuralları
     pub rules: Vec<CollectionRule>,
 }
 
@@ -346,40 +376,43 @@ impl FontCollection {
 // ============================================================================
 // FONT BOOK WINDOW
 // ============================================================================
+// Font Book ana penceresi: fontları listeler, önizler ve yönetir.
+// `get_filtered_fonts()` metodu, kategori filtresi ve arama metnini
+// birleştirerek hangi fontların gösterileceğini hesaplar (indeks listesi döner).
 
-/// Font Book window
+/// Font Book uygulama penceresi
 pub struct FontBookWindow {
-    /// Window rect
+    /// Pencerenin ekrandaki konumu ve boyutu
     pub rect: Rect,
-    /// All fonts
+    /// Tüm kayıtlı fontlar
     pub fonts: Vec<FontInfo>,
-    /// Collections
+    /// Kullanıcı tanımlı koleksiyonlar
     pub collections: Vec<FontCollection>,
-    /// Current category
+    /// Şu an aktif olan kategori filtresi
     pub current_category: FontCategory,
-    /// Selected font index
+    /// Seçili fontu temsil eden indeks (listedeki sırası)
     pub selected_font: Option<usize>,
-    /// Selected collection
+    /// Seçili koleksiyonun indeksi
     pub selected_collection: Option<usize>,
-    /// Search query
+    /// Arama kutusu içeriği
     pub search_query: String,
-    /// Preview text
+    /// Kullanıcı tarafından girilmiş önizleme metni
     pub preview_text: String,
-    /// Preview size
+    /// Önizleme punto boyutu
     pub preview_size: usize,
-    /// Show metadata panel
+    /// Sağ panelde meta veri detayları gösterilsin mi?
     pub show_metadata: bool,
-    /// Scroll offset
+    /// Font listesinde kaydırma konumu
     pub scroll_offset: usize,
-    /// Hovered font
+    /// Fare imlecinin üzerinde olduğu font satırının indeksi
     pub hovered_font: Option<usize>,
-    /// Hovered collection
+    /// Fare imlecinin üzerinde olduğu koleksiyon satırının indeksi
     pub hovered_collection: Option<usize>,
-    /// View mode
+    /// Aktif görünüm modu (Liste, Izgara, Önizleme)
     pub view_mode: FontViewMode,
-    /// Next font ID
+    /// Bir sonraki font ID'si (artımlı)
     pub next_font_id: u32,
-    /// Next collection ID
+    /// Bir sonraki koleksiyon ID'si
     pub next_collection_id: u32,
 }
 
@@ -993,6 +1026,9 @@ pub enum FontBookAction {
 // ============================================================================
 // GLOBAL FONT BOOK
 // ============================================================================
+// Font Book'un global örneği. `lazy_static!` ile ilk erişimde başlatılır.
+// `init()` fonksiyonu çağrıldığında serial porta başlatma mesajı yazılır;
+// bu, kernel'ın hangi bileşenleri başlattığını takip etmenizi sağlar.
 
 lazy_static::lazy_static! {
     static ref FONTBOOK: Mutex<FontBookWindow> = Mutex::new(FontBookWindow::new(Rect {
