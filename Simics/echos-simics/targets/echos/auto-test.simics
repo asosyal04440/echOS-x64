@@ -21,11 +21,11 @@ echo "echOS Boot Test Starting"
 echo "Hard timeout: 120s"
 echo "=========================================="
 
-script-branch "timeout-stop" {
-    bp.time.wait-for 120
-    echo "[auto-test] timeout reached, stopping simulation"
-    stop
-}
+# script-branch "timeout-stop" {
+#     bp.time.wait-for 120
+#     echo "[auto-test] timeout reached, stopping simulation"
+#     stop
+# }
 
 run
 

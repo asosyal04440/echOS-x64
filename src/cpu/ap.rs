@@ -8,7 +8,35 @@
 //! Başlatma sırası GDT, IDT, LAPIC, GS_BASE ve sonunda `idle_loop`'tur.
 
 use crate::syscall::{init_cpu_data, CpuData};
+use core::arch::{asm, naked_asm};
 use x86_64::VirtAddr;
+
+#[inline(always)]
+fn ap_marker(byte: u8) {
+    unsafe {
+        x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(byte);
+    }
+}
+
+/// AP Park Modu — sonsuz döngüde bekle (interrupt kapalı)
+/// Bu fonksiyon ASLA dönmemeli.
+#[cfg(not(target_os = "windows"))]
+#[unsafe(naked)]
+unsafe extern "C" fn park_secondary_cpu() -> ! {
+    naked_asm!(
+        "cli",
+        "1:",
+        "hlt",
+        "jmp 1b"
+    );
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "C" fn park_secondary_cpu() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 /// AP (Application Processor — Uygulama İşlemcisi) giriş noktası.
 ///
@@ -53,64 +81,21 @@ pub extern "sysv64" fn ap_entry(cpu_data: &'static mut CpuData) -> ! {
         idt.load();
     }
 
-    // Bu noktadan itibaren istisna (exception) oluşturabilecek işlemler güvenli
-    // HAM UART HATA AYIKLAMA: COM1 (0x3F8) portuna 'A' karakteri yaz — AP'nin bu noktaya ulaştığını doğrular
-    unsafe {
-        x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'A');
+    if crate::apic::lapic::init().is_err() {
+        // Hata durumunda bile devam etmeye çalış, log bas
+        ap_marker(b'E');
     }
-    // HAM UART HATA AYIKLAMA: COM1'e 'B' yaz — GDT/IDT kurulumunun tamamlandığını gösterir
-    unsafe {
-        x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'B');
-    }
-
-    // CPU kimliği zaten cpu_data içinde mevcut.
-    // APIC ID'yi erken başlangıçta MMIO/MSR okuyarak değil, global SMP durumundan al —
-    // bu daha güvenli ve SMP durum yapısıyla tutarlıdır.
-    let apic_id = {
-        let mut id = cpu_id;
-        if let Some(state) = crate::cpu::smp::SMP_STATE.try_lock() {
-            id = state.cpu_apic_ids.get(cpu_id as usize).copied().unwrap_or(cpu_id);
-        }
-        id
-    };
-
-    // HAM UART HATA AYIKLAMA: COM1'e 'C' yaz — APIC ID alındı
-    unsafe {
-        x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'C');
-    }
-    unsafe {
-        crate::debug::serial::EMERGENCY_SERIAL.write_byte(b'D');
-    }
-    // Local APIC'i başlat — bu CPU'nun kesme alabilmesi ve IPI gönderebilmesi için gerekli
-    let _ = crate::apic::lapic::init();
-    unsafe {
-        crate::debug::serial::EMERGENCY_SERIAL.write_byte(b'E');
-    }
-    // GS_BASE MSR'a cpu_data işaretçisini yaz — çekirdek CPU-yerel veriye bu yolla erişir.
-    // GS taban adresi, "fs:0" veya "gs:0" gibi segment-göreli erişimler için kullanılır.
-    unsafe {
-        use x86_64::registers::model_specific::Msr;
-        // MSR 0xC0000101 = IA32_GS_BASE — GS segmentinin kernel mod taban adresi
-        Msr::new(0xC0000101).write(cpu_data as *mut CpuData as u64);
-    }
-    // Not: GDT ve IDT başta yüklendi — init_per_cpu() yeniden çağrılmamalı
-    // Not: IDT başta yüklendi — tekrar yüklemeye gerek yok
-    unsafe {
-        crate::debug::serial::EMERGENCY_SERIAL.write_byte(b'G');
-        x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'W');
-    }
-    // Bu CPU'yu çevrimiçi (online) olarak işaretle — BSP tarafından beklenen onay sinyali
-    crate::cpu::smp::mark_cpu_online(cpu_id, apic_id);
-    unsafe {
-        crate::debug::serial::EMERGENCY_SERIAL.write_byte(b'H');
-    }
-    // Kesmeleri etkinleştir — bu noktadan itibaren zamanlayıcı ve donanım kesmeleri işlenir
-    unsafe {
-        x86_64::instructions::interrupts::enable();
-    }
-    unsafe {
-        crate::debug::serial::EMERGENCY_SERIAL.write_byte(b'I');
-    }
-    // Boşta döngüsüne gir — görev sırası boşken CPU burada HLT ile düşük güç modunda bekler
-    crate::task::scheduler::idle_loop();
+    
+    crate::apic::lapic::mask_timer();
+    crate::cpu::init_secondary_cpu();
+    crate::syscall::init();
+    
+    // Online işaretini vermeden önce stack/instruction stream'in temiz olduğundan emin ol
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    
+    // AP'yi online işaretle
+    crate::cpu::smp::mark_cpu_online(cpu_id, cpu_id);
+    
+    // Doğrudan park moduna geç - return yok, stack kullanımı yok
+    unsafe { park_secondary_cpu() }
 }

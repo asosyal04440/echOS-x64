@@ -40,26 +40,33 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use ironshim_rs::{
-    // Kaynak izolasyonu — MMIO aralıkları ve port erişim denetimi
-    ResourceManifest, MmioDesc, IoPortDesc,
-    // PCI adres ve fonksiyon tanımlayıcıları
-    PciAddress, PciFunctionDesc, PciBar,
-    // IRQ budget koruması
-    InterruptBudget, InterruptRegistry,
-    // DMA tahsis yöneticisi
-    DmaAllocator, DmaHandle,
-    // Denetim (audit) ve sistem çağrısı politikası
-    AuditSink, AuditEvent,
-    SyscallPolicy, SyscallRequest,
     enforce_syscall,
+    AuditEvent,
+    // Denetim (audit) ve sistem çağrısı politikası
+    AuditSink,
+    // DMA tahsis yöneticisi
+    DmaAllocator,
+    DmaHandle,
     // Hata türü
     Error as ShimError,
+    // IRQ budget koruması
+    InterruptBudget,
+    InterruptRegistry,
+    IoPortDesc,
+    MmioDesc,
+    // PCI adres ve fonksiyon tanımlayıcıları
+    PciAddress,
+    PciBar,
+    PciFunctionDesc,
+    // Kaynak izolasyonu — MMIO aralıkları ve port erişim denetimi
+    ResourceManifest,
+    SyscallPolicy,
+    SyscallRequest,
 };
 
 use crate::shim_layer::{
-    IRONSHIM_DMA, IRONSHIM_IRQ, IRONSHIM_PCI,
-    IRONSHIM_AUDIT, IRONSHIM_POLICY,
-    EchOsDmaAllocator, EchOsPciConfig,
+    EchOsDmaAllocator, EchOsPciConfig, IRONSHIM_AUDIT, IRONSHIM_DMA, IRONSHIM_IRQ, IRONSHIM_PCI,
+    IRONSHIM_POLICY,
 };
 
 // ============================================================================
@@ -144,7 +151,10 @@ pub fn register_isolated_driver(driver: IsolatedDriver) -> Result<usize, ShimErr
             return Ok(i);
         }
     }
-    crate::serial_println!("[IronShim/Bridge] ERROR: All {} driver slots full", MAX_ISOLATED_DRIVERS);
+    crate::serial_println!(
+        "[IronShim/Bridge] ERROR: All {} driver slots full",
+        MAX_ISOLATED_DRIVERS
+    );
     Err(ShimError::OutOfMemory)
 }
 
@@ -160,7 +170,8 @@ pub fn unregister_isolated_driver(slot: usize) -> Result<(), ShimError> {
     if let Some(ref driver) = slots[slot] {
         crate::serial_println!(
             "[IronShim/Bridge] Driver '{}' unregistered from slot {}",
-            driver.name, slot
+            driver.name,
+            slot
         );
     }
     slots[slot] = None;
@@ -170,7 +181,11 @@ pub fn unregister_isolated_driver(slot: usize) -> Result<(), ShimError> {
 /// Şu anda kayıtlı (aktif) sürücü sayısını döner.
 /// `None` olmayan slot sayısını sayar.
 pub fn active_driver_count() -> usize {
-    ISOLATED_DRIVERS.lock().iter().filter(|s| s.is_some()).count()
+    ISOLATED_DRIVERS
+        .lock()
+        .iter()
+        .filter(|s| s.is_some())
+        .count()
 }
 
 // ============================================================================
@@ -302,19 +317,26 @@ pub fn safe_pci_register_driver(driver: *mut crate::linux_glue::PciDriver) -> i3
             if crate::linux_glue::id_match(dev, id_ref) {
                 crate::serial_println!(
                     "[IronShim/Bridge] Match: {:04x}:{:04x} @ {:02x}:{:02x}.{}",
-                    dev.vendor_id, dev.device_id,
-                    dev.bus, dev.device, dev.function
+                    dev.vendor_id,
+                    dev.device_id,
+                    dev.bus,
+                    dev.device,
+                    dev.function
                 );
 
                 // IronShim PCI parse — BAR bilgilerini oku
                 let desc = match ironshim_rs::parse_pci_function(
                     &EchOsPciConfig,
-                    dev.bus, dev.device, dev.function,
+                    dev.bus,
+                    dev.device,
+                    dev.function,
                 ) {
                     Ok(d) => d,
                     Err(_) => {
                         crate::serial_println!("[IronShim/Bridge] PCI parse failed, skipping");
-                        unsafe { id_ptr = id_ptr.add(1); }
+                        unsafe {
+                            id_ptr = id_ptr.add(1);
+                        }
                         continue;
                     }
                 };
@@ -325,11 +347,11 @@ pub fn safe_pci_register_driver(driver: *mut crate::linux_glue::PciDriver) -> i3
 
                 // Manifest doğrulama — sürücünün talep ettiği kaynaklar geçerli mi?
                 if let Err(e) = build_manifest(mmio, mmio_count, ports, port_count) {
-                    crate::serial_println!(
-                        "[IronShim/Bridge] Manifest validation failed: {:?}", e
-                    );
+                    crate::serial_println!("[IronShim/Bridge] Manifest validation failed: {:?}", e);
                     IRONSHIM_AUDIT.record(AuditEvent::ManifestRejected);
-                    unsafe { id_ptr = id_ptr.add(1); }
+                    unsafe {
+                        id_ptr = id_ptr.add(1);
+                    }
                     continue;
                 }
 
@@ -357,15 +379,18 @@ pub fn safe_pci_register_driver(driver: *mut crate::linux_glue::PciDriver) -> i3
                 if let Err(e) = register_isolated_driver(isolated) {
                     crate::serial_println!("[IronShim/Bridge] Registration failed: {:?}", e);
                     IRONSHIM_AUDIT.record(AuditEvent::ManifestRejected);
-                    unsafe { id_ptr = id_ptr.add(1); }
+                    unsafe {
+                        id_ptr = id_ptr.add(1);
+                    }
                     continue;
                 }
 
                 // Gerçek Linux C FFI probe() fonksiyonunu çağır
-                let linux_dev = unsafe {
-                    crate::linux_glue::create_pci_dev(dev.bus, dev.device, dev.function)
-                };
-                if linux_dev.is_null() { break; }
+                let linux_dev =
+                    unsafe { crate::linux_glue::create_pci_dev(dev.bus, dev.device, dev.function) };
+                if linux_dev.is_null() {
+                    break;
+                }
 
                 unsafe {
                     (*linux_dev).dev.driver = driver as *mut core::ffi::c_void;
@@ -378,13 +403,19 @@ pub fn safe_pci_register_driver(driver: *mut crate::linux_glue::PciDriver) -> i3
                     if rc == 0 {
                         unsafe {
                             crate::linux_glue::claim_device(
-                                driver, linux_dev,
-                                dev.bus, dev.device, dev.function,
+                                driver,
+                                linux_dev,
+                                dev.bus,
+                                dev.device,
+                                dev.function,
                             );
                         }
                         crate::serial_println!(
                             "[IronShim/Bridge] ✅ '{}' bound to {:02x}:{:02x}.{} (ISOLATED)",
-                            driver_name, dev.bus, dev.device, dev.function
+                            driver_name,
+                            dev.bus,
+                            dev.device,
+                            dev.function
                         );
                         IRONSHIM_AUDIT.record(AuditEvent::ManifestValidated);
                         claimed += 1;
@@ -392,13 +423,21 @@ pub fn safe_pci_register_driver(driver: *mut crate::linux_glue::PciDriver) -> i3
                     }
                 }
 
-                unsafe { crate::linux_glue::destroy_pci_dev(linux_dev); }
+                unsafe {
+                    crate::linux_glue::destroy_pci_dev(linux_dev);
+                }
             }
-            unsafe { id_ptr = id_ptr.add(1); }
+            unsafe {
+                id_ptr = id_ptr.add(1);
+            }
         }
     }
 
-    if claimed > 0 { 0 } else { -1 }
+    if claimed > 0 {
+        0
+    } else {
+        -1
+    }
 }
 
 // ============================================================================
@@ -423,12 +462,16 @@ pub fn safe_pci_register_driver(driver: *mut crate::linux_glue::PciDriver) -> i3
 /// ## Dönüş Değeri
 /// Başarılı olursa `DmaHandle` döner; bu handle üzerinden sanal ve fiziksel
 /// adrese erişilebilir.
-pub fn safe_dma_alloc<T>(count: usize) -> Result<DmaHandle<'static, T, EchOsDmaAllocator>, ShimError> {
+pub fn safe_dma_alloc<T>(
+    count: usize,
+) -> Result<DmaHandle<'static, T, EchOsDmaAllocator>, ShimError> {
     let handle = IRONSHIM_DMA.alloc::<T>(count)?;
     crate::serial_println!(
         "[IronShim/Bridge] DMA alloc: {} x {} = {} bytes (phys={:#x})",
-        count, core::mem::size_of::<T>(),
-        count * core::mem::size_of::<T>(), handle.phys()
+        count,
+        core::mem::size_of::<T>(),
+        count * core::mem::size_of::<T>(),
+        handle.phys()
     );
     Ok(handle)
 }
@@ -458,7 +501,9 @@ pub fn safe_request_irq(
     IRONSHIM_IRQ.register_with_budget(irq, handler, budget)?;
     crate::serial_println!(
         "[IronShim/Bridge] IRQ {} registered (budget: max_calls={}, max_ticks={})",
-        irq, budget.max_calls, budget.max_ticks,
+        irq,
+        budget.max_calls,
+        budget.max_ticks,
     );
     Ok(())
 }

@@ -105,9 +105,7 @@ pub fn handle_sci() {
     }
 
     // PM1a_EVT_BLK Status kaydını oku — hangi ACPI olaylarının tetiklendiğini gösterir
-    let pm1_sts = unsafe {
-        x86_64::instructions::port::Port::<u16>::new(pm1a_evt).read()
-    };
+    let pm1_sts = unsafe { x86_64::instructions::port::Port::<u16>::new(pm1a_evt).read() };
 
     // PM1_STS bit haritası kontrolü — ACPI Spec §4.8.3:
     if pm1_sts & (1 << 8) != 0 {

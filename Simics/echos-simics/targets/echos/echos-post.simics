@@ -10,12 +10,12 @@ log-type -disable spec-viol
 echo "[echOS] Booting from HDD0..."
 echo "[echOS] System: echos"
 
-# Run simulation for 60 seconds
-script-branch "timeout" {
-    bp.time.wait-for 60
-    echo "[echOS] Timeout - stopping"
-    stop
-}
+# # Run simulation for 60 seconds
+# script-branch "timeout" {
+#     bp.time.wait-for 60
+#     echo "[echOS] Timeout - stopping"
+#     stop
+# }
 
 run
 

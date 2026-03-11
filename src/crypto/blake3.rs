@@ -63,8 +63,7 @@ const BLAKE3_OUT_LEN: usize = 32;
 /// BLAKE3 başlangıç vektörü (IV) — SHA-256 sabitlerinden türetilmiştir.
 /// Bu sabitler 2'nin kareköklerinden alınan kesirli kısımlardan oluşur.
 const IV: [u32; 8] = [
-    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
-    0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
+    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
 ];
 
 /// BLAKE3 mesaj permütasyonu — her turda blok kelimelerinin sırasını değiştirir.
@@ -78,12 +77,12 @@ const ROUNDS: usize = 7;
 /// Bir chunk birden fazla 64-baytlık blok içerebilir; cv zincirleme değerini tutar.
 #[derive(Clone, Copy)]
 struct ChunkState {
-    cv: [u32; 8],            // Zincirleme değeri (chaining value)
-    counter: u64,            // Bu chunk'ın çıktı bloğu sayacı
-    block: [u32; 16],        // Mevcut 64-baytlık blok
-    block_len: usize,        // Blok içindeki geçerli bayt sayısı
-    blocks_compressed: usize,// Bu chunk'ta işlenen blok sayısı
-    flags: u32,              // Mod bayrakları (CHUNK_START, CHUNK_END vb.)
+    cv: [u32; 8],             // Zincirleme değeri (chaining value)
+    counter: u64,             // Bu chunk'ın çıktı bloğu sayacı
+    block: [u32; 16],         // Mevcut 64-baytlık blok
+    block_len: usize,         // Blok içindeki geçerli bayt sayısı
+    blocks_compressed: usize, // Bu chunk'ta işlenen blok sayısı
+    flags: u32,               // Mod bayrakları (CHUNK_START, CHUNK_END vb.)
 }
 
 /// BLAKE3 özetleyici ana yapısı.
@@ -91,7 +90,7 @@ struct ChunkState {
 pub struct Blake3 {
     key: [u8; 32],
     chunk_state: ChunkState,
-    cv_stack: [[u32; 8]; 54],  // log2(2^54) = 54 bit → max 2^54 chunk desteklenir
+    cv_stack: [[u32; 8]; 54], // log2(2^54) = 54 bit → max 2^54 chunk desteklenir
     cv_stack_len: usize,
     flags: u32,
 }
@@ -260,9 +259,22 @@ impl Blake3 {
     /// Sonuç: state[0..8] XOR state[8..16] → yeni CV
     fn compress(cv: &[u32; 8], block: &[u32; 16], counter: u64, flags: u32) -> [u32; 8] {
         let mut state = [
-            cv[0], cv[1], cv[2], cv[3], cv[4], cv[5], cv[6], cv[7],
-            IV[0], IV[1], IV[2], IV[3],
-            (counter as u32), ((counter >> 32) as u32), 0, flags,
+            cv[0],
+            cv[1],
+            cv[2],
+            cv[3],
+            cv[4],
+            cv[5],
+            cv[6],
+            cv[7],
+            IV[0],
+            IV[1],
+            IV[2],
+            IV[3],
+            (counter as u32),
+            ((counter >> 32) as u32),
+            0,
+            flags,
         ];
 
         // 7 tam tur — her tur sütun + köşegen karışımından oluşur
@@ -296,9 +308,22 @@ impl Blake3 {
     /// XOF (genişletilebilir çıktı) için tam 16 kelimelik blok üretir.
     fn compress_block(cv: &[u32; 8], counter: u64, flags: u32) -> [u32; 16] {
         let mut state = [
-            cv[0], cv[1], cv[2], cv[3], cv[4], cv[5], cv[6], cv[7],
-            IV[0], IV[1], IV[2], IV[3],
-            (counter as u32), ((counter >> 32) as u32), 0, flags,
+            cv[0],
+            cv[1],
+            cv[2],
+            cv[3],
+            cv[4],
+            cv[5],
+            cv[6],
+            cv[7],
+            IV[0],
+            IV[1],
+            IV[2],
+            IV[3],
+            (counter as u32),
+            ((counter >> 32) as u32),
+            0,
+            flags,
         ];
 
         for _ in 0..ROUNDS {
@@ -340,7 +365,12 @@ impl Blake3 {
     fn words_from_bytes(bytes: &[u8; 32]) -> [u32; 8] {
         let mut words = [0u32; 8];
         for i in 0..8 {
-            words[i] = u32::from_le_bytes([bytes[i * 4], bytes[i * 4 + 1], bytes[i * 4 + 2], bytes[i * 4 + 3]]);
+            words[i] = u32::from_le_bytes([
+                bytes[i * 4],
+                bytes[i * 4 + 1],
+                bytes[i * 4 + 2],
+                bytes[i * 4 + 3],
+            ]);
         }
         words
     }

@@ -46,9 +46,10 @@
 //! - Allocation bütünlük takibi
 //! - Bozulma tespiti ve raporlama
 
+use super::PageOwner;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use rlsf::Tlsf;
 use spin::Mutex;
 
@@ -131,15 +132,8 @@ impl AllocationEntry {
 ///
 /// Mutex ile korunur. 4096 slot döngüsel olarak kullanılır.
 /// Aynı anda 4096'dan fazla allocation takip edilemez.
-static ALLOCATION_TRACKER: Mutex<[AllocationEntry; MAX_TRACKED_ALLOCATIONS]> = Mutex::new(
-    const { [const { AllocationEntry::new() }; MAX_TRACKED_ALLOCATIONS] }
-);
-
-/// Takip dizisinde bir sonraki yazma konumunu gösteren atomik indeks.
-///
-/// `fetch_add` ile artırılır ve `% MAX_TRACKED_ALLOCATIONS` ile sarılır
-/// (ring buffer davranışı).
-static TRACKER_INDEX: AtomicUsize = AtomicUsize::new(0);
+static ALLOCATION_TRACKER: Mutex<[AllocationEntry; MAX_TRACKED_ALLOCATIONS]> =
+    Mutex::new(const { [const { AllocationEntry::new() }; MAX_TRACKED_ALLOCATIONS] });
 
 /// İş parçacığı güvenli (thread-safe) TLSF allocator sarmalayıcısı.
 ///
@@ -216,54 +210,6 @@ impl LockedTlsf {
         Self::is_early_heap(ptr) || Self::is_main_heap(ptr)
     }
 
-    /// Allocation'ı bütünlük takip tablosuna kaydeder.
-    ///
-    /// Döngüsel indeks (ring buffer) kullanılır. Aynı zamanda toplam ayrılan
-    /// baytı ve tepe kullanımını günceller.
-    ///
-    /// ## Tepe Kullanımı Güncelleme:
-    /// CAS (Compare-And-Swap) döngüsü kullanılır; eşzamanlı güncellemelerde
-    /// en yüksek değer kaybolmaz.
-    fn track_allocation(ptr: usize, size: usize) {
-        let idx = TRACKER_INDEX.fetch_add(1, Ordering::SeqCst) % MAX_TRACKED_ALLOCATIONS;
-        let tracker = &mut ALLOCATION_TRACKER.lock();
-        tracker[idx].ptr.store(ptr, Ordering::SeqCst);
-        tracker[idx].size.store(size, Ordering::SeqCst);
-        // Canary değerini yaz: ileride bozulma tespiti için referans noktası
-        tracker[idx].canary.store(HEAP_CANARY_MAGIC, Ordering::SeqCst);
-
-        TOTAL_ALLOCATED.fetch_add(size, Ordering::SeqCst);
-
-        // Tepe kullanımını güncelle (CAS döngüsü ile eşzamanlılık güvenli)
-        let current = TOTAL_ALLOCATED.load(Ordering::SeqCst);
-        let mut peak = PEAK_USAGE.load(Ordering::SeqCst);
-        while current > peak {
-            match PEAK_USAGE.compare_exchange(peak, current, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => break,
-                Err(p) => peak = p,
-            }
-        }
-    }
-
-    /// Allocation kaydını takip tablosundan kaldırır.
-    ///
-    /// Pointer ile eşleşen girdiyi sıfırlar ve boyutu `TOTAL_ALLOCATED`'dan çıkarır.
-    /// Bulunamazsa `None` döner (erken heap alloc veya zaten serbest bırakılmış olabilir).
-    fn untrack_allocation(ptr: usize) -> Option<usize> {
-        let tracker = ALLOCATION_TRACKER.lock();
-        for entry in tracker.iter() {
-            if entry.ptr.load(Ordering::SeqCst) == ptr {
-                let size = entry.size.load(Ordering::SeqCst);
-                entry.ptr.store(0, Ordering::SeqCst);
-                entry.size.store(0, Ordering::SeqCst);
-                entry.canary.store(0, Ordering::SeqCst);
-                TOTAL_ALLOCATED.fetch_sub(size, Ordering::SeqCst);
-                return Some(size);
-            }
-        }
-        None
-    }
-
     /// Tüm takip edilen allocation'ların canary değerlerini kontrol eder.
     ///
     /// Her aktif alloc için canary `HEAP_CANARY_MAGIC` ile karşılaştırılır.
@@ -281,17 +227,19 @@ impl LockedTlsf {
 
         let tracker = ALLOCATION_TRACKER.lock();
         for (i, entry) in tracker.iter().enumerate() {
-            let ptr = entry.ptr.load(Ordering::SeqCst);
+            let ptr = entry.ptr.load(Ordering::Relaxed);
             if ptr != 0 {
                 report.total_tracked += 1;
-                report.total_bytes += entry.size.load(Ordering::SeqCst);
+                report.total_bytes += entry.size.load(Ordering::Relaxed);
 
                 // Canary kontrolü: beklenen değerden farklıysa bozulma var
-                let canary = entry.canary.load(Ordering::SeqCst);
+                let canary = entry.canary.load(Ordering::Relaxed);
                 if canary != HEAP_CANARY_MAGIC {
                     report.corrupted += 1;
-                    report.corruptions.push((ptr, entry.size.load(Ordering::SeqCst)));
-                    CORRUPTION_COUNT.fetch_add(1, Ordering::SeqCst);
+                    report
+                        .corruptions
+                        .push((ptr, entry.size.load(Ordering::Relaxed)));
+                    CORRUPTION_COUNT.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -301,7 +249,7 @@ impl LockedTlsf {
 
     /// Tespit edilen toplam bozulma sayısını döndürür.
     pub fn corruption_count() -> usize {
-        CORRUPTION_COUNT.load(Ordering::SeqCst)
+        CORRUPTION_COUNT.load(Ordering::Relaxed)
     }
 
     /// Heap bütünlük kontrolünü çalıştırır ve bozulma sayısını döndürür.
@@ -316,12 +264,14 @@ impl LockedTlsf {
     /// toplam bozulma sayısını içeren `AllocStats` yapısını döndürür.
     pub fn get_stats() -> AllocStats {
         AllocStats {
-            active_allocations: ALLOCATION_TRACKER.lock().iter()
-                .filter(|e| e.ptr.load(Ordering::SeqCst) != 0)
+            active_allocations: ALLOCATION_TRACKER
+                .lock()
+                .iter()
+                .filter(|e| e.ptr.load(Ordering::Relaxed) != 0)
                 .count(),
-            total_allocated: TOTAL_ALLOCATED.load(Ordering::SeqCst),
-            peak_usage: PEAK_USAGE.load(Ordering::SeqCst),
-            corruption_count: CORRUPTION_COUNT.load(Ordering::SeqCst),
+            total_allocated: TOTAL_ALLOCATED.load(Ordering::Relaxed),
+            peak_usage: PEAK_USAGE.load(Ordering::Relaxed),
+            corruption_count: CORRUPTION_COUNT.load(Ordering::Relaxed),
         }
     }
 
@@ -330,10 +280,38 @@ impl LockedTlsf {
     /// `AllocStats`'a ek olarak erken heap kullanımını da içerir.
     pub fn memory_stats() -> MemoryStats {
         MemoryStats {
-            total_allocated: TOTAL_ALLOCATED.load(Ordering::SeqCst),
-            peak_usage: PEAK_USAGE.load(Ordering::SeqCst),
-            early_heap_used: EARLY_OFFSET.load(Ordering::SeqCst),
-            corruption_count: CORRUPTION_COUNT.load(Ordering::SeqCst),
+            total_allocated: TOTAL_ALLOCATED.load(Ordering::Relaxed),
+            peak_usage: PEAK_USAGE.load(Ordering::Relaxed),
+            early_heap_used: EARLY_OFFSET.load(Ordering::Relaxed),
+            corruption_count: CORRUPTION_COUNT.load(Ordering::Relaxed),
+        }
+    }
+
+    pub unsafe fn alloc_from_main_heap(&self, layout: Layout) -> *mut u8 {
+        if !HEAP_READY.load(Ordering::Acquire) {
+            return core::ptr::null_mut();
+        }
+
+        let mut lock = self.0.lock();
+        if lock.is_none() {
+            *lock = Some(Tlsf::new());
+        }
+        let tlsf = lock.as_mut().unwrap();
+        match tlsf.allocate(layout) {
+            Some(ptr) => ptr.as_ptr(),
+            None => core::ptr::null_mut(),
+        }
+    }
+
+    pub unsafe fn dealloc_to_main_heap(&self, ptr: *mut u8, align: usize) {
+        if ptr.is_null() || !HEAP_READY.load(Ordering::Acquire) {
+            return;
+        }
+        let mut lock = self.0.lock();
+        if let Some(tlsf) = lock.as_mut() {
+            if let Some(ptr) = NonNull::new(ptr) {
+                tlsf.deallocate(ptr, align.max(8));
+            }
         }
     }
 }
@@ -414,11 +392,13 @@ fn early_alloc(layout: Layout) -> *mut u8 {
 
         // CAS: atomic karşılaştır-ve-değiştir; başarısız olursa döngü yeniden dener
         if EARLY_OFFSET
-            .compare_exchange(current, next_offset, Ordering::SeqCst, Ordering::Relaxed)
+            .compare_exchange(current, next_offset, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
             // Güvenlik için sıfırla: önceden orada ne olduğu bilinmiyor
-            unsafe { core::ptr::write_bytes(aligned as *mut u8, 0, size); }
+            unsafe {
+                core::ptr::write_bytes(aligned as *mut u8, 0, size);
+            }
             return aligned as *mut u8;
         }
     }
@@ -465,24 +445,22 @@ unsafe impl GlobalAlloc for LockedTlsf {
             return early_alloc(layout);
         }
 
-        // Ana heap modu: TLSF'den bellek iste
-        let mut lock = self.0.lock();
-        if lock.is_none() {
-            *lock = Some(Tlsf::new());
+        if let Some(ptr) = crate::allocator::slab::slab_alloc(layout.size(), layout.align()) {
+            #[cfg(feature = "heap_stats")]
+            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            return ptr;
         }
-        let tlsf = lock.as_mut().unwrap();
 
-        match tlsf.allocate(layout) {
-            Some(ptr) => {
-                #[cfg(feature = "heap_stats")]
-                ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-                ptr.as_ptr()
-            }
-            None => {
-                // TLSF allocation başarısız; son çare olarak erken heap'e döngüsel geri dön
-                early_alloc(layout)
-            }
+        // Ana heap modu: TLSF'den bellek iste
+        let ptr = self.alloc_from_main_heap(layout);
+        if !ptr.is_null() {
+            #[cfg(feature = "heap_stats")]
+            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            return ptr;
         }
+
+        // TLSF allocation başarısız; son çare olarak erken heap'e döngüsel geri dön
+        early_alloc(layout)
     }
 
     /// Bellek serbest bırakır.
@@ -518,15 +496,11 @@ unsafe impl GlobalAlloc for LockedTlsf {
         }
 
         // Erken heap kontrolü — erken heap allocation'ları asla serbest bırakılmaz.
-        // Bu bir hata değil, tasarım gereği normal davranıştır;
-        // erken heap bir bump allocator gibi çalışır ve bireysel free desteklemez.
         if Self::is_early_heap(ptr_addr) {
             return;
         }
 
         // Ana heap kontrolü — yalnızca ana heap'ten ayrılanlar serbest bırakılır.
-        // Kapsam dışı pointer: muhtemelen bellek bozulması veya çift serbest bırakma.
-        // Panic yerine sessizce dön; panic sırasında heap daha da bozulabilir.
         if !Self::is_main_heap(ptr_addr) {
             return;
         }
@@ -535,17 +509,19 @@ unsafe impl GlobalAlloc for LockedTlsf {
             return;
         }
 
-        // Hizalamayı alloc ile tutarlı tut (her ikisinde de max(align, 8))
-        let align = layout.align().max(8);
-
-        let mut lock = self.0.lock();
-        if let Some(tlsf) = lock.as_mut() {
-            if let Some(ptr) = NonNull::new(ptr) {
-                tlsf.deallocate(ptr, align);
-                #[cfg(feature = "heap_stats")]
-                FREE_COUNT.fetch_add(1, Ordering::Relaxed);
+        match crate::allocator::page_owner_for_ptr(ptr_addr) {
+            PageOwner::Slab => {
+                let _ = crate::allocator::slab::slab_dealloc(ptr);
+            }
+            PageOwner::Tlsf | PageOwner::Large | PageOwner::Unassigned => {
+                // Hizalamayı alloc ile tutarlı tut (her ikisinde de max(align, 8))
+                let align = layout.align().max(8);
+                self.dealloc_to_main_heap(ptr, align);
             }
         }
+
+        #[cfg(feature = "heap_stats")]
+        FREE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
 

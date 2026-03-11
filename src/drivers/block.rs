@@ -20,8 +20,8 @@
 //! - `lba`: Mantıksal Blok Adresi — her blok genellikle 512 bayttır.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 
 /// Blok aygıtı hata türleri.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

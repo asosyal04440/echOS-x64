@@ -78,15 +78,18 @@
 //! ```
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::format;
 use alloc::vec;
-use spin::Mutex;
+use alloc::vec::Vec;
 use core::mem;
+use spin::Mutex;
 
-use super::{UsbDevice, UsbError, UsbSpeed, UsbDeviceAddress, UsbEndpoint, XhciController, UsbSetupPacket, UsbClass};
+use super::{
+    UsbClass, UsbDevice, UsbDeviceAddress, UsbEndpoint, UsbError, UsbSetupPacket, UsbSpeed,
+    XhciController,
+};
 
 // ============================================================================
 // HUB SABİTLERİ
@@ -469,8 +472,12 @@ impl PortState {
         }
 
         Some(PortState {
-            status: PortStatus { raw: u16::from_le_bytes([data[0], data[1]]) },
-            change: PortChange { raw: u16::from_le_bytes([data[2], data[3]]) },
+            status: PortStatus {
+                raw: u16::from_le_bytes([data[0], data[1]]),
+            },
+            change: PortChange {
+                raw: u16::from_le_bytes([data[2], data[3]]),
+            },
         })
     }
 }
@@ -523,8 +530,7 @@ impl UsbHub {
 
         // Hub tanımlayıcısını al
         let desc_data = Self::get_hub_descriptor(&device)?;
-        let descriptor = HubDescriptor::parse(&desc_data)
-            .ok_or(UsbError::DescriptorError)?;
+        let descriptor = HubDescriptor::parse(&desc_data).ok_or(UsbError::DescriptorError)?;
 
         let port_count = descriptor.port_count();
         let mut ports = Vec::with_capacity(port_count as usize);
@@ -534,8 +540,11 @@ impl UsbHub {
 
         let name = format!("hub-{}", address);
 
-        crate::serial_println!("[USB-HUB] Found hub at address {}: {} ports",
-            address, port_count);
+        crate::serial_println!(
+            "[USB-HUB] Found hub at address {}: {} ports",
+            address,
+            port_count
+        );
 
         Ok(UsbHub {
             device,
@@ -597,9 +606,9 @@ impl UsbHub {
 
         // GET_DESCRIPTOR setup paketi (Hub sınıfına özgü)
         let setup = UsbSetupPacket {
-            request_type: 0xA0,  // Sınıf, Arabirim → Host
+            request_type: 0xA0, // Sınıf, Arabirim → Host
             request: HUB_GET_DESCRIPTOR,
-            value: 0x2900,  // Tanımlayıcı tipi (Hub) << 8 | index
+            value: 0x2900, // Tanımlayıcı tipi (Hub) << 8 | index
             index: 0,
             length: 64,
         };
@@ -670,11 +679,11 @@ impl UsbHub {
 
         // GET_STATUS setup paketi (Other yönü, büyük harfle)
         let setup = UsbSetupPacket {
-            request_type: 0xA3,  // Sınıf, Other → Host
+            request_type: 0xA3, // Sınıf, Other → Host
             request: HUB_GET_STATUS,
             value: 0,
-            index: port as u16,  // Port numarası
-            length: 4,           // 4 byte: wPortStatus + wPortChange
+            index: port as u16, // Port numarası
+            length: 4,          // 4 byte: wPortStatus + wPortChange
         };
 
         let mut buffer = [0u8; 4];
@@ -705,10 +714,10 @@ impl UsbHub {
 
         // SET_FEATURE setup paketi
         let setup = UsbSetupPacket {
-            request_type: 0x23,  // Sınıf, Other → Device
+            request_type: 0x23, // Sınıf, Other → Device
             request: HUB_SET_FEATURE,
-            value: feature as u16,  // Özellik seçici
-            index: port as u16,     // Port numarası
+            value: feature as u16, // Özellik seçici
+            index: port as u16,    // Port numarası
             length: 0,
         };
 
@@ -734,9 +743,9 @@ impl UsbHub {
 
         // CLEAR_FEATURE setup paketi
         let setup = UsbSetupPacket {
-            request_type: 0x23,  // Sınıf, Other → Device
+            request_type: 0x23, // Sınıf, Other → Device
             request: HUB_CLEAR_FEATURE,
-            value: feature as u16,  // Özellik seçici
+            value: feature as u16, // Özellik seçici
             index: port as u16,
             length: 0,
         };
@@ -779,8 +788,11 @@ impl UsbHub {
 
                 if state.status.is_enabled() {
                     let speed = state.status.speed();
-                    crate::serial_println!("[USB-HUB] Port {} reset complete, speed={:?}",
-                        port, speed);
+                    crate::serial_println!(
+                        "[USB-HUB] Port {} reset complete, speed={:?}",
+                        port,
+                        speed
+                    );
                     return Ok(speed);
                 }
             }
@@ -939,7 +951,10 @@ pub fn is_hub_device(device: &UsbDevice) -> bool {
 ///
 /// `enumerate_device`: Çağıran tarafından sağlanan fonksiyon pointer'ı.
 /// Her cihaz default state'te (adres 0) iken bu fonksiyon çağrılır.
-pub fn enumerate_hub_ports(hub: &mut UsbHub, enumerate_device: fn(&mut UsbDevice, u8) -> Result<(), UsbError>) -> Result<(), UsbError> {
+pub fn enumerate_hub_ports(
+    hub: &mut UsbHub,
+    enumerate_device: fn(&mut UsbDevice, u8) -> Result<(), UsbError>,
+) -> Result<(), UsbError> {
     // Portlara güç ver (bekleme dahil)
     hub.power_on_ports()?;
 

@@ -584,20 +584,65 @@ pub fn sys_keyctl(cmd: i32, arg2: u64, arg3: u64, arg4: u64) -> i64 {
             0
         }
         4 => { // KEYCTL_CHOWN - Anahtar sahipliğini değiştir
-            // TODO: uid/gid güncelleme implementasyonu
-            0
+            if let Some(key) = KEY_MANAGER.get_key(arg2) {
+                let new_uid = arg3 as u32;
+                let new_gid = arg4 as u32;
+                if new_uid != u32::MAX {
+                    key.uid.store(new_uid, Ordering::Relaxed);
+                }
+                if new_gid != u32::MAX {
+                    key.gid.store(new_gid, Ordering::Relaxed);
+                }
+                crate::serial_println!("[KEYCTL] CHOWN: key={} uid={} gid={}", arg2, new_uid, new_gid);
+                0
+            } else {
+                -2 // ENOENT
+            }
         }
         5 => { // KEYCTL_SETPERM - İzin maskesini güncelle
-            // TODO: izin maskesi güncelleme implementasyonu
-            0
+            if let Some(key) = KEY_MANAGER.get_key(arg2) {
+                key.permissions.store(arg3 as u32, Ordering::Relaxed);
+                crate::serial_println!("[KEYCTL] SETPERM: key={} perm={:#x}", arg2, arg3);
+                0
+            } else {
+                -2 // ENOENT
+            }
         }
         6 => { // KEYCTL_DESCRIBE - Anahtar bilgisini kullanıcı alanına aktar
-            // TODO: tanımlama string'i implementasyonu
-            0
+            if let Some(key) = KEY_MANAGER.get_key(arg2) {
+                // Format: "type;uid;gid;perm;description"
+                let desc = alloc::format!(
+                    "{};{};{};{:08x};{}",
+                    key.key_type,
+                    key.uid.load(Ordering::Relaxed),
+                    key.gid.load(Ordering::Relaxed),
+                    key.permissions.load(Ordering::Relaxed),
+                    key.description
+                );
+                // Kullanıcı alanına kopyala (arg3 = buffer ptr, arg4 = buflen)
+                if arg3 != 0 && arg4 > 0 {
+                    let copy_len = desc.len().min(arg4 as usize);
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            desc.as_ptr(),
+                            arg3 as *mut u8,
+                            copy_len,
+                        );
+                    }
+                }
+                desc.len() as i64
+            } else {
+                -2 // ENOENT
+            }
         }
         7 => { // KEYCTL_CLEAR - Keyring'deki tüm bağlantıları temizle
-            // TODO: keyring temizleme implementasyonu
-            0
+            if let Some(keyring) = KEY_MANAGER.get_keyring(arg2) {
+                keyring.links.lock().clear();
+                crate::serial_println!("[KEYCTL] CLEAR: keyring={}", arg2);
+                0
+            } else {
+                -2 // ENOENT
+            }
         }
         8 => { // KEYCTL_LINK - Keyring'e anahtar bağla
             let _ = KEY_MANAGER.link_key(arg2, arg3);

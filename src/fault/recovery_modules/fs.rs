@@ -45,14 +45,16 @@
 //! - Mevcut veriler okunmaya devam edebilir
 //! - fsck (dosya sistemi denetimi) için güvenli durum oluşur
 
-use crate::fault::{Fault, FaultType};
 use crate::fault::severity::RecoveryResult;
+use crate::fault::{Fault, FaultType};
 
 /// Dosya sistemi kurtarmasını dener
 pub fn recover(fault: &Fault) -> RecoveryResult {
     match fault.fault_type {
         FaultType::MetadataCorruption => {
-            crate::serial_println!("[FS_RECOVERY] Meta veri bozulması - günlük (journal) yeniden oynatılıyor");
+            crate::serial_println!(
+                "[FS_RECOVERY] Meta veri bozulması - günlük (journal) yeniden oynatılıyor"
+            );
             // Günlük yeniden oynatma çağrılacak
             // Journal replay: Tamamlanmamış işlemleri yeniden uygular veya geri alır
             RecoveryResult::Degraded
@@ -94,7 +96,10 @@ pub fn emergency_sync() {
 
 /// Dosya sistemini salt okunur olarak yeniden bağlar
 pub fn remount_readonly(mount_point: &str) -> bool {
-    crate::serial_println!("[FS_RECOVERY] {} salt okunur olarak yeniden bağlanıyor", mount_point);
+    crate::serial_println!(
+        "[FS_RECOVERY] {} salt okunur olarak yeniden bağlanıyor",
+        mount_point
+    );
     // remount(MS_RDONLY): Dosya sistemini demount etmeden salt okunur geri bağlar.
     // Linux/POSIX'te mount(2) sistem çağrısının kernel tarafı burada uygulanacak.
     true

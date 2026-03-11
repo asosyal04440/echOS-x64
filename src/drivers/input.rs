@@ -22,8 +22,10 @@
 
 use alloc::collections::VecDeque;
 use lazy_static::lazy_static;
-use pc_keyboard::DecodedKey;
+use pc_keyboard::{DecodedKey, KeyState};
 use spin::Mutex;
+use crate::drivers::gesture::Gesture;
+use crate::drivers::spsc::SpscQueue;
 
 // ============================================================================
 // EVENT TÜRLERİ (EVENT TYPES)
@@ -46,47 +48,39 @@ pub enum MousePacket {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputEvent {
     /// Keyboard tuş basma veya bırakma olayı (pc_keyboard crate'i ile decode edilmiş)
-    Keyboard(DecodedKey),
+    Keyboard {
+        decoded: Option<DecodedKey>,
+        scan_code: u16,
+        modifiers: u8,
+        state: KeyState,
+    },
     /// PS/2 protokolüyle tam olarak ayrıştırılmış mouse paketi
     Mouse(MousePacket),
     /// Ham PS/2 mouse byte'ı (Hızlı geçiş / Fast-Path ISR'dan gelir)
     MouseByte(u8),
+    /// Gesture (el hareketi) olayı
+    Gesture(Gesture),
 }
 
 // ============================================================================
-// EVENT KUYRUĞU (EVENT QUEUE)
+// ABSOLUTE ZERO INPUT PIPELINE (SPSC)
 // ============================================================================
 
 lazy_static! {
-    /// Sistem geneli tek global input event kuyruğu.
-    /// spin::Mutex ile korunur: interrupt handler'dan güvenle erişilebilir.
-    static ref INPUT_QUEUE: Mutex<VecDeque<InputEvent>> = Mutex::new(VecDeque::new());
+    /// SPSC Lock-Free Input Queue. Capacity 4096 (Power of Two).
+    /// Zero Mutex. Zero Contention.
+    static ref INPUT_SPSC: SpscQueue<InputEvent, 4096> = SpscQueue::new();
 }
 
-/// Kuyruk maksimum boyutu. Aşılırsa en eski event silinir.
-/// 2048 event: 60 Hz compositor ile ~34 saniyelik tampon.
-const MAX_INPUT_EVENTS: usize = 2048;
+/// Kuyruk maksimum boyutu. 
+const MAX_INPUT_EVENTS: usize = 4096;
 
-/// Event'i kuyruğa ekler.
-///
-/// Interrupt handler'lardan (IRQ1 klavye, IRQ12 mouse) çağrılır.
-/// `without_interrupts` bloğu deadlock'u önler: lock tutulurken
-/// yeni interrupt gelip aynı lock'u almaya çalışmasının önüne geçer.
+/// Event'i SPSC kuyruğuna ekler (Lock-Free).
 pub fn push_event(event: InputEvent) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut q = INPUT_QUEUE.lock();
-        if q.len() >= MAX_INPUT_EVENTS {
-            // Kuyruk doldu: en eski event'i çıkar (ring-buffer davranışı)
-            let _ = q.pop_front();
-        }
-        q.push_back(event);
-    });
+    let _ = INPUT_SPSC.push(event);
 }
 
-/// Kuyruktan bir event çeker; kuyruk boşsa None döner.
-///
-/// Compositor/görev zamanlayıcı main loop'undan çağrılır.
-/// `without_interrupts` bloğu: okuma sırasında yeni event gelmesini engeller.
+/// SPSC kuyruğundan bir event çeker (Lock-Free).
 pub fn pop_event() -> Option<InputEvent> {
-    x86_64::instructions::interrupts::without_interrupts(|| INPUT_QUEUE.lock().pop_front())
+    INPUT_SPSC.pop()
 }

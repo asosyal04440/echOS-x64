@@ -1,69 +1,29 @@
-//! # Giriş Ekranı
-//!
-//! macOS tarzı kullanıcı seçimi özellikli giriş ekranı.
-//! Kullanıcı avatarları, şifre alanı ve kilit ekranı içerir.
-//!
-//! ## Mimari
-//! - `UserAccount`: Kullanıcı verisi; isim, avatar türü, yönetici bayrağı
-//! - `LoginScreen`: Durum makinesi; Boot → UserSelection → PasswordEntry → LoggedIn
-//! - `LoginState`: Boot, UserSelection, PasswordEntry, Authenticating, AuthFailed, LoggedIn, Locked
-//!
-//! ## Animasyon Algoritmaları
-//! - **Boot ekranı**: Matrix dijital yağmur efekti; progress * 100 damla, sahte-rastgele konumlar
-//! - **Glitch logosu**: boot_progress * 50/70 değerlerine göre x/y ofseti kayması
-//! - **Arka plan**: 50 parçacık; `sinf/cosf` ile dairesel hareket + alpha karıştırma
-//! - **Dairesel avatar**: Merkez orijinli yarıçap testi; hover halinde `sqrtf` ile halka çizimi
-//! - **Yükleyici (spinner)**: 8 nokta + `cosf/sinf`; her nokta için `alpha = 1 - i/8` kararması
+//! Hybrid Titan login and lock screen.
 
-use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::format;
 use alloc::vec::Vec;
-use alloc::vec;
+use libm::sinf;
 use spin::Mutex;
-use libm::{sinf, cosf, sqrtf};
 
 use crate::gop::framebuffer::Framebuffer;
-use crate::gui::theme::{Theme, Color};
+use crate::gui::protocol::Rect;
+use crate::gui::shell;
+use crate::gui::theme::{Theme, ThemeMode};
 
-// ============================================================================
-// GİRİŞ SABİTLERİ
-// ============================================================================
-
-/// Kullanıcı avatar boyutu (piksel)
 pub const AVATAR_SIZE: usize = 96;
-
-/// Avatar arası boşluk (piksel)
 pub const AVATAR_SPACING: usize = 120;
-
-/// Şifre alanı genişliği (piksel)
 pub const PASSWORD_WIDTH: usize = 280;
-
-/// Şifre alanı yüksekliği (piksel)
 pub const PASSWORD_HEIGHT: usize = 36;
 
-// ============================================================================
-// KULLANICI HESABI
-// ============================================================================
-
-/// Kullanıcı hesap bilgisi
 #[derive(Clone, Debug)]
 pub struct UserAccount {
-    /// Kullanıcı kimliği
     pub id: u32,
-    /// Kullanıcı adı
     pub username: String,
-    /// Görüntü adı
     pub display_name: String,
-    /// Avatar türü
     pub avatar: AvatarType,
-    /// Yönetici mi
     pub is_admin: bool,
-    /// Giriş yapılmış mı
     pub logged_in: bool,
-    /// Son giriş zamanı
     pub last_login: u64,
-    /// Şifre ipucu
     pub password_hint: String,
 }
 
@@ -85,12 +45,12 @@ pub enum AvatarIcon {
 
 impl UserAccount {
     pub fn new(id: u32, username: &str, display_name: &str) -> Self {
-        let initials = display_name.split_whitespace()
+        let initials = display_name
+            .split_whitespace()
             .take(2)
-            .filter_map(|w| w.chars().next())
+            .filter_map(|word| word.chars().next())
             .collect::<String>();
-
-        UserAccount {
+        Self {
             id,
             username: String::from(username),
             display_name: String::from(display_name),
@@ -110,7 +70,7 @@ impl UserAccount {
     }
 
     pub fn guest() -> Self {
-        UserAccount {
+        Self {
             id: 0,
             username: String::from("guest"),
             display_name: String::from("Guest"),
@@ -123,74 +83,40 @@ impl UserAccount {
     }
 }
 
-// ============================================================================
-// GİRİŞ EKRANI DURUMU
-// ============================================================================
-
-/// Giriş ekranı durumu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginState {
-    /// Kullanıcı seçimi gösteriliyor
     UserSelection,
-    /// Seçili kullanıcı için şifre girişi
     PasswordEntry,
-    /// Kimlik doğrulanıyor
     Authenticating,
-    /// Kimlik doğrulama başarısız
     AuthFailed,
-    /// Başarıyla giriş yapıldı
     LoggedIn,
-    /// Kilit ekranı
     Locked,
-    /// Açılış animasyonu
     Boot,
 }
 
-// ============================================================================
-// GİRİŞ EKRANI
-// ============================================================================
-
-/// Giriş ekranı
 pub struct LoginScreen {
-    /// Geçerli durum
     pub state: LoginState,
-    /// Kullanılabilir kullanıcılar
     pub users: Vec<UserAccount>,
-    /// Seçili kullanıcı indeksi
     pub selected_user: Option<usize>,
-    /// Şifre girişi
     pub password: String,
-    /// İmleç görünür mü
     pub cursor_visible: bool,
-    /// İmleç yanıp sönme zamanlayıcısı
     pub cursor_timer: f32,
-    /// Animasyon ilerlemesi
     pub animation_progress: f32,
-    /// Ekran genişliği
     pub screen_width: usize,
-    /// Ekran yüksekliği
     pub screen_height: usize,
-    /// Üzerine gelinen kullanıcı indeksi
     pub hovered_user: Option<usize>,
-    /// Hata mesajı
     pub error_message: String,
-    /// Hata zamanlayıcısı
     pub error_timer: f32,
-    /// Açılış ilerlemesi (0.0 - 1.0)
     pub boot_progress: f32,
-    /// Kapatma seçenekleri göster
     pub show_shutdown_menu: bool,
-    /// Saat dizisi
     pub time_string: String,
-    /// Tarih dizisi
     pub date_string: String,
-    /// Arka plan bulanıklığı
     pub blur_amount: f32,
 }
 
 impl LoginScreen {
     pub fn new(screen_width: usize, screen_height: usize) -> Self {
-        let mut login = LoginScreen {
+        let mut login = Self {
             state: LoginState::Boot,
             users: Vec::new(),
             selected_user: None,
@@ -209,18 +135,12 @@ impl LoginScreen {
             date_string: String::from("Monday, January 1"),
             blur_amount: 0.0,
         };
-
-        login.add_default_users();
+        login.users.push(UserAccount::admin(1, "admin", "Administrator"));
+        login.users.push(UserAccount::new(2, "user", "User"));
+        login.users.push(UserAccount::guest());
         login
     }
 
-    fn add_default_users(&mut self) {
-        self.users.push(UserAccount::admin(1, "admin", "Administrator"));
-        self.users.push(UserAccount::new(2, "user", "User"));
-        self.users.push(UserAccount::guest());
-    }
-
-    /// Giriş ekranını göster
     pub fn show(&mut self) {
         self.state = LoginState::Boot;
         self.boot_progress = 0.0;
@@ -231,7 +151,6 @@ impl LoginScreen {
         self.show_shutdown_menu = false;
     }
 
-    /// Ekranı kilitle
     pub fn lock(&mut self) {
         self.state = LoginState::Locked;
         self.selected_user = None;
@@ -239,490 +158,455 @@ impl LoginScreen {
         self.animation_progress = 0.0;
     }
 
-    /// Kullanıcı seç
     pub fn select_user(&mut self, index: usize) {
-        if index >= self.users.len() {
-            return;
+        if index < self.users.len() {
+            self.selected_user = Some(index);
+            self.state = LoginState::PasswordEntry;
+            self.password.clear();
+            self.error_message.clear();
+            self.error_timer = 0.0;
         }
-
-        self.selected_user = Some(index);
-        self.state = LoginState::PasswordEntry;
-        self.password.clear();
-        self.animation_progress = 0.0;
-        self.error_message.clear();
     }
 
-    /// Kullanıcı seçimine geri dön
     pub fn go_back(&mut self) {
         self.selected_user = None;
         self.password.clear();
         self.state = LoginState::UserSelection;
-        self.animation_progress = 0.0;
         self.error_message.clear();
     }
 
-    /// Şifreyi gönder
     pub fn submit_password(&mut self) -> LoginEvent {
         if self.password.is_empty() {
             return LoginEvent::None;
         }
 
         self.state = LoginState::Authenticating;
-
-        // Kimlik doğrulamayı simüle et (depolanmış hash ile doğrulanacak)
-        // Demo için: misafir her şifreyi kabul eder, diğerleri "password" veya "echos" kabul eder
-        if let Some(idx) = self.selected_user {
-            let (user_id, username) = {
-                let user = &self.users[idx];
-                (user.id, user.username.clone())
-            };
-
+        if let Some(index) = self.selected_user {
+            let username = self.users[index].username.clone();
+            let user_id = self.users[index].id;
             if username == "guest" || self.password == "password" || self.password == "echos" {
-                // Başarılı
+                self.users[index].logged_in = true;
                 self.state = LoginState::LoggedIn;
-                self.users[idx].logged_in = true;
                 return LoginEvent::LoginSuccess(user_id, username);
             }
         }
 
-        // Başarısız
         self.state = LoginState::AuthFailed;
-        self.error_message = String::from("Incorrect password. Try again.");
-        self.error_timer = 3.0;
+        self.error_message = String::from("Incorrect password");
+        self.error_timer = 2.0;
         self.password.clear();
-
         LoginEvent::LoginFailed
     }
 
-    /// Animasyonu güncelle
     pub fn update(&mut self, dt: f32) -> LoginEvent {
-        // İmleç yanıp sönmesini güncelle
         self.cursor_timer += dt;
         if self.cursor_timer >= 0.5 {
             self.cursor_timer = 0.0;
             self.cursor_visible = !self.cursor_visible;
         }
 
-        // Animasyonu güncelle
-        if self.animation_progress < 1.0 {
-            self.animation_progress = (self.animation_progress + dt * 3.0).min(1.0);
-        }
+        self.animation_progress = (self.animation_progress + dt * 1.6).min(1.0);
+        self.blur_amount = (self.blur_amount + dt * 0.7).min(1.0);
 
-        // Açılış ilerlemesini güncelle
         if self.state == LoginState::Boot {
-            self.boot_progress += dt * 0.5;
+            self.boot_progress = (self.boot_progress + dt * 0.5).min(1.0);
             if self.boot_progress >= 1.0 {
                 self.state = LoginState::UserSelection;
                 return LoginEvent::BootComplete;
             }
         }
 
-        // Hata zamanlayıcısını güncelle
         if self.error_timer > 0.0 {
             self.error_timer -= dt;
-            if self.error_timer <= 0.0 {
+            if self.error_timer <= 0.0 && self.state == LoginState::AuthFailed {
                 self.error_message.clear();
-                if self.state == LoginState::AuthFailed {
-                    self.state = LoginState::PasswordEntry;
-                }
+                self.state = LoginState::PasswordEntry;
             }
         }
 
         LoginEvent::None
     }
 
-    /// Giriş ekranını çiz
     pub fn draw(&self, fb: &mut Framebuffer) {
-        // Arka planı çiz
-        self.draw_background(fb);
+        let screen = Rect::new(0, 0, self.screen_width as u32, self.screen_height as u32);
+        shell::draw_wallpaper_backdrop(fb, screen, screen, ThemeMode::Dark);
+        shell::fill_blended_rect(
+            fb,
+            screen,
+            screen,
+            Theme::tokens(ThemeMode::Dark).surfaces.overlay,
+            if self.state == LoginState::Locked { 0x88 } else { 0x70 },
+        );
 
         match self.state {
-            LoginState::Boot => {
-                self.draw_boot_screen(fb);
-            }
-            LoginState::UserSelection | LoginState::Locked => {
-                self.draw_user_selection(fb);
-            }
+            LoginState::Boot => self.draw_boot_screen(fb),
+            LoginState::UserSelection | LoginState::Locked => self.draw_user_selection(fb),
             LoginState::PasswordEntry | LoginState::Authenticating | LoginState::AuthFailed => {
-                self.draw_password_screen(fb);
+                self.draw_password_screen(fb)
             }
-            LoginState::LoggedIn => {
-                // Soluklaşarak kapat
-            }
+            LoginState::LoggedIn => {}
         }
 
-        // Kapatma menüsünü çiz
         if self.show_shutdown_menu {
             self.draw_shutdown_menu(fb);
         }
     }
 
-    fn draw_background(&self, fb: &mut Framebuffer) {
-        // Degrade arka plan
-        let top_color = 0x1E1E2E;
-        let bottom_color = 0x0F0F1F;
-
-        for y in 0..self.screen_height {
-            let t = y as f32 / self.screen_height as f32;
-            let color = Self::lerp_color(top_color, bottom_color, t);
-
-            for x in 0..self.screen_width {
-                fb.plot_pixel(x, y, color);
-            }
-        }
-
-        // Hafif animasyonlu efekt ekle
-        let time = self.animation_progress;
-        for i in 0..50 {
-            let x = (self.screen_width as f32 * 0.3 + sinf(i as f32 * 37.0 + time * 20.0) * 100.0) as usize;
-            let y = (self.screen_height as f32 * 0.3 + cosf(i as f32 * 23.0 + time * 15.0) * 100.0) as usize;
-
-            if x < self.screen_width && y < self.screen_height {
-                let alpha = 0.05 + 0.03 * sinf(i as f32 * 0.1 + time);
-                let ptr = unsafe { (fb.base_addr as *mut u32).add(y * fb.pixels_per_scan_line + x) };
-                let bg = unsafe { *ptr };
-                unsafe { *ptr = Self::blend_color(bg, 0x4080FF, alpha); }
-            }
-        }
-    }
-
     fn draw_boot_screen(&self, fb: &mut Framebuffer) {
-        let center_x = self.screen_width / 2;
-        let center_y = self.screen_height / 2 - 50;
-
-        // Açılış ilerlemesine göre matrix dijital yağmur arka planı efekti
-        let max_drops = (self.boot_progress * 100.0) as usize;
-        for i in 0..max_drops {
-            let drop_x = (i * 73) % self.screen_width;
-            let drop_y = ((self.boot_progress * 1000.0) as usize + i * 41) % self.screen_height;
-            if drop_y > 20 {
-                fb.draw_string(drop_x, drop_y, &format!("{}", (i % 10)), 0x00FF00); // Hacker yeşili
-            }
-        }
-
-        // Logo üzerinde zamana/ilerlemeye göre glitch efekti
-        let glitch_offset_x = if (self.boot_progress * 50.0) as u32 % 5 == 0 { 2 } else { 0 };
-        let glitch_offset_y = if (self.boot_progress * 70.0) as u32 % 7 == 0 { -1 } else { 0 };
-
-        // echOS logosunu glitch ile çiz
-        if glitch_offset_x > 0 {
-            fb.draw_string(center_x - 40 + glitch_offset_x as usize, center_y - 20, "echOS", 0xFF0000); // Kırmızı glitch
-            fb.draw_string(center_x - 40 - glitch_offset_x as usize, center_y - 20, "echOS", 0x0000FF); // Mavi glitch
-        }
-        fb.draw_string(center_x - 40, (center_y as i32 - 20 + glitch_offset_y) as usize, "echOS", 0xFFFFFFFF);
-
-        // İlerleme çubuğu
-        let bar_width = 200;
-        let bar_height = 4;
-        let bar_x = center_x - bar_width / 2;
-        let bar_y = center_y + 40;
-
-        fb.draw_rect(bar_x, bar_y, bar_width, bar_height, 0x404040);
-        fb.draw_rect(bar_x, bar_y, (bar_width as f32 * self.boot_progress) as usize, bar_height, Theme::ACCENT_PRIMARY.to_u32());
-
-        // İlerleme metni
-        let progress_text = format!("Loading... {}%", (self.boot_progress * 100.0) as u32);
-        fb.draw_string(center_x - 50, bar_y + 16, &progress_text, 0x808080);
+        let screen = Rect::new(0, 0, self.screen_width as u32, self.screen_height as u32);
+        let center_x = self.screen_width as i32 / 2;
+        let panel = Rect::new(center_x - 180, self.screen_height as i32 / 2 - 110, 360, 180);
+        let beam = Rect::new(panel.x + 40, panel.y + 92, 280, 6);
+        shell::fill_blended_rect(
+            fb,
+            panel,
+            screen,
+            Theme::tokens(ThemeMode::Dark).surfaces.overlay,
+            0xB0,
+        );
+        shell::draw_rect_outline_clipped(fb, panel, screen, Theme::BORDER.to_u32());
+        shell::draw_emblem_wordmark(fb, center_x, panel.y + 24, ThemeMode::Dark, true);
+        shell::fill_blended_rect(
+            fb,
+            beam,
+            screen,
+            Theme::tokens(ThemeMode::Dark).surfaces.field,
+            0xFF,
+        );
+        let fill = Rect::new(
+            beam.x,
+            beam.y,
+            ((beam.width as f32) * self.boot_progress) as u32,
+            beam.height,
+        );
+        shell::fill_rect_clipped(fb, fill, screen, Theme::ACCENT_PRIMARY.to_u32());
+        let status = alloc::format!("Starting shell runtime   {:>3}%", (self.boot_progress * 100.0) as u32);
+        fb.draw_string(
+            (center_x - 104).max(0) as usize,
+            (beam.y + 18).max(0) as usize,
+            &status,
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
     }
 
     fn draw_user_selection(&self, fb: &mut Framebuffer) {
-        // Saat görüntüsü
-        let time_y = self.screen_height / 4;
-        fb.draw_string(self.screen_width / 2 - 40, time_y, &self.time_string, 0xFFFFFFFF);
-        fb.draw_string(self.screen_width / 2 - 80, time_y + 28, &self.date_string, 0x808080);
+        fb.draw_string(
+            self.screen_width / 2 - 48,
+            self.screen_height / 5,
+            &self.time_string,
+            Theme::TEXT_PRIMARY.to_u32(),
+        );
+        fb.draw_string(
+            self.screen_width / 2 - 92,
+            self.screen_height / 5 + 26,
+            &self.date_string,
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
 
-        // Kullanıcı avatarları
-        let users_y = self.screen_height / 2 + 20;
+        let users_y = self.screen_height / 2 + 10;
         let total_width = self.users.len() * AVATAR_SPACING;
         let start_x = (self.screen_width - total_width) / 2 + AVATAR_SPACING / 2;
 
-        for (i, user) in self.users.iter().enumerate() {
-            let x = start_x + i * AVATAR_SPACING;
-            let is_hovered = self.hovered_user == Some(i);
-            let scale = if is_hovered { 1.1 } else { 1.0 };
-
-            self.draw_user_avatar(fb, x, users_y, user, scale, is_hovered);
+        for (index, user) in self.users.iter().enumerate() {
+            let x = start_x + index * AVATAR_SPACING;
+            self.draw_user_avatar(
+                fb,
+                x,
+                users_y,
+                user,
+                if self.hovered_user == Some(index) { 1.08 } else { 1.0 },
+                self.hovered_user == Some(index),
+            );
         }
 
-        // Kapatma düğmesi
-        fb.draw_string(self.screen_width / 2 - 60, self.screen_height - 60, "⏻ Shut Down", 0x808080);
-    }
-
-    fn draw_user_avatar(&self, fb: &mut Framebuffer, x: usize, y: usize, user: &UserAccount, scale: f32, hovered: bool) {
-        let size = (AVATAR_SIZE as f32 * scale) as usize;
-        let offset = (size - AVATAR_SIZE) / 2;
-        let draw_x = x - offset;
-        let draw_y = y - offset;
-
-        // Gölge
-        for sy in 0..8 {
-            let shadow_y = draw_y + size + sy;
-            let shadow_alpha = 0.2 - sy as f32 * 0.025;
-
-            for sx in 0..size {
-                let screen_x = draw_x + sx;
-                if screen_x < self.screen_width && shadow_y < self.screen_height {
-                    let ptr = unsafe {
-                        (fb.base_addr as *mut u32).add(shadow_y * fb.pixels_per_scan_line + screen_x)
-                    };
-                    let bg = unsafe { *ptr };
-                    unsafe { *ptr = Self::blend_color(bg, 0x000000, shadow_alpha); }
-                }
-            }
-        }
-
-        // Avatar arka planı
-        let bg_color = match &user.avatar {
-            AvatarType::Color(color) => *color,
-            AvatarType::Icon(AvatarIcon::Admin) => 0xFF6B35,
-            AvatarType::Icon(AvatarIcon::Guest) => 0x808080,
-            _ => Theme::ACCENT_PRIMARY.to_u32(),
-        };
-
-        // Dairesel avatar çiz
-        let radius = size / 2;
-        for py in 0..size {
-            for px in 0..size {
-                let dx = px as i32 - radius as i32;
-                let dy = py as i32 - radius as i32;
-                if dx * dx + dy * dy <= (radius * radius) as i32 {
-                    let screen_x = draw_x + px;
-                    let screen_y = draw_y + py;
-                    if screen_x < self.screen_width && screen_y < self.screen_height {
-                        fb.plot_pixel(screen_x, screen_y, bg_color);
-                    }
-                }
-            }
-        }
-
-        // Avatar içeriğini çiz
-        match &user.avatar {
-            AvatarType::Initials(initials) => {
-                let text_x = draw_x + radius - initials.len() * 4;
-                let text_y = draw_y + radius - 8;
-                fb.draw_string(text_x, text_y, initials, 0xFFFFFFFF);
-            }
-            AvatarType::Icon(icon) => {
-                let icon_str = match icon {
-                    AvatarIcon::User => "👤",
-                    AvatarIcon::Admin => "👑",
-                    AvatarIcon::Guest => "👤",
-                    AvatarIcon::Custom(_) => "👤",
-                };
-                fb.draw_string(draw_x + radius - 8, draw_y + radius - 8, icon_str, 0xFFFFFFFF);
-            }
-            AvatarType::Image(_) => {
-                // Görüntü çizilecek
-                fb.draw_string(draw_x + radius - 8, draw_y + radius - 8, "👤", 0xFFFFFFFF);
-            }
-            AvatarType::Color(_) => {
-                fb.draw_string(draw_x + radius - 8, draw_y + radius - 8, "👤", 0xFFFFFFFF);
-            }
-        }
-
-        // Kullanıcı adı
-        let name_y = draw_y + size + 12;
-        let text_color = if hovered { 0xFFFFFFFF } else { 0xC0C0C0 };
-        fb.draw_string(x - user.display_name.len() * 4, name_y, &user.display_name, text_color);
-
-        // Hover vurgusu
-        if hovered {
-            // Avatarın etrafına halka çiz
-            for py in 0..size + 4 {
-                for px in 0..size + 4 {
-                    let dx = px as i32 - (radius + 2) as i32;
-                    let dy = py as i32 - (radius + 2) as i32;
-                    let dist = sqrtf((dx * dx + dy * dy) as f32);
-                    if dist >= radius as f32 && dist <= (radius + 2) as f32 {
-                        let screen_x = draw_x - 2 + px;
-                        let screen_y = draw_y - 2 + py;
-                        if screen_x < self.screen_width && screen_y < self.screen_height {
-                            fb.plot_pixel(screen_x, screen_y, Theme::ACCENT_PRIMARY.to_u32());
-                        }
-                    }
-                }
-            }
-        }
+        fb.draw_string(
+            self.screen_width / 2 - 58,
+            self.screen_height - 52,
+            "Power / Lock",
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
     }
 
     fn draw_password_screen(&self, fb: &mut Framebuffer) {
-        if let Some(idx) = self.selected_user {
-            let user = &self.users[idx];
+        let Some(index) = self.selected_user else {
+            return;
+        };
+        let screen = Rect::new(0, 0, self.screen_width as u32, self.screen_height as u32);
+        let user = &self.users[index];
+        let avatar_x = self.screen_width / 2;
+        let avatar_y = self.screen_height / 2 - 108;
+        let panel = Rect::new(avatar_x as i32 - 200, avatar_y as i32 - 44, 400, 244);
+        shell::fill_blended_rect(
+            fb,
+            panel,
+            screen,
+            Theme::tokens(ThemeMode::Dark).surfaces.overlay,
+            0xB6,
+        );
+        shell::draw_rect_outline_clipped(fb, panel, screen, Theme::BORDER.to_u32());
 
-            // Kullanıcı avatarı (daha küçük)
-            let avatar_x = self.screen_width / 2;
-            let avatar_y = self.screen_height / 2 - 80;
+        self.draw_user_avatar(fb, avatar_x, avatar_y, user, 0.74, false);
+        fb.draw_string(
+            avatar_x - user.display_name.len() * 4,
+            avatar_y + 84,
+            &user.display_name,
+            Theme::TEXT_PRIMARY.to_u32(),
+        );
 
-            self.draw_user_avatar(fb, avatar_x, avatar_y, user, 0.8, false);
+        let shake = if self.error_timer > 0.0 {
+            (sinf(self.error_timer * 24.0) * 6.0) as i32
+        } else {
+            0
+        };
+        let field_x = self.screen_width as i32 / 2 - PASSWORD_WIDTH as i32 / 2 + shake;
+        let field_y = avatar_y as i32 + 116;
 
-            // Kullanıcı adı
-            fb.draw_string(avatar_x - user.display_name.len() * 4, avatar_y + AVATAR_SIZE as f32 as usize * 8 / 10 + 16,
-                          &user.display_name, 0xFFFFFFFF);
+        fb.draw_rect(
+            field_x.max(0) as usize,
+            field_y.max(0) as usize,
+            PASSWORD_WIDTH,
+            PASSWORD_HEIGHT,
+            Theme::SIDEBAR_BG.to_u32(),
+        );
+        fb.draw_rect_outline(
+            field_x.max(0) as usize,
+            field_y.max(0) as usize,
+            PASSWORD_WIDTH,
+            PASSWORD_HEIGHT,
+            if self.error_timer > 0.0 {
+                Theme::ERROR.to_u32()
+            } else {
+                Theme::BORDER.to_u32()
+            },
+        );
 
-            // Şifre alanı
-            let field_x = self.screen_width / 2 - PASSWORD_WIDTH / 2;
-            let field_y = avatar_y + AVATAR_SIZE + 60;
-
-            // Arka plan
-            fb.draw_rect(field_x, field_y, PASSWORD_WIDTH, PASSWORD_HEIGHT, 0x202020);
-            fb.draw_rect_outline(field_x, field_y, PASSWORD_WIDTH, PASSWORD_HEIGHT, 0x404040);
-
-            // Şifre noktaları
-            let dot_count = self.password.len().min(20);
-            let dot_spacing = 12;
-            let dots_width = dot_count * dot_spacing;
-            let dots_start = field_x + PASSWORD_WIDTH / 2 - dots_width / 2;
-
-            for i in 0..dot_count {
-                let dot_x = dots_start + i * dot_spacing;
-                let dot_y = field_y + PASSWORD_HEIGHT / 2 - 3;
-                fb.draw_rect(dot_x, dot_y, 6, 6, 0xC0C0C0);
-            }
-
-            // İmleç
-            if self.cursor_visible && self.state != LoginState::Authenticating {
-                let cursor_x = dots_start + dot_count * dot_spacing + 4;
-                fb.draw_rect(cursor_x, field_y + 8, 2, PASSWORD_HEIGHT - 16, 0xFFFFFFFF);
-            }
-
-            // İpucu
-            if !user.password_hint.is_empty() && self.state != LoginState::Authenticating {
-                fb.draw_string(field_x, field_y + PASSWORD_HEIGHT + 8,
-                              &format!("Hint: {}", user.password_hint), 0x808080);
-            }
-
-            // Hata mesajı
-            if !self.error_message.is_empty() {
-                fb.draw_string(self.screen_width / 2 - self.error_message.len() * 4,
-                              field_y + PASSWORD_HEIGHT + 32, &self.error_message, Theme::ERROR.to_u32());
-            }
-
-            // Kimlik doğrulama yükleyicisi
-            if self.state == LoginState::Authenticating {
-                let spinner_x = self.screen_width / 2;
-                let spinner_y = field_y + PASSWORD_HEIGHT + 40;
-                self.draw_spinner(fb, spinner_x, spinner_y);
-            }
-
-            // Geri düğmesi
-            fb.draw_string(field_x - 60, field_y + 8, "← Back", 0x808080);
-
-            // Gönderme ipucu
-            fb.draw_string(field_x + PASSWORD_WIDTH + 16, field_y + 8, "↵ Enter", 0x808080);
+        let dot_count = self.password.len().min(20) as i32;
+        let dot_spacing = 12;
+        let dots_width = dot_count * dot_spacing;
+        let dots_start = field_x + (PASSWORD_WIDTH as i32 / 2) - dots_width / 2;
+        for dot in 0..dot_count {
+            let dot_x = dots_start + dot * dot_spacing;
+            let dot_y = field_y + PASSWORD_HEIGHT as i32 / 2 - 3;
+            fb.draw_rect(dot_x.max(0) as usize, dot_y.max(0) as usize, 6, 6, Theme::TEXT_PRIMARY.to_u32());
         }
+
+        if self.cursor_visible && self.state != LoginState::Authenticating {
+            let cursor_x = dots_start + dot_count * dot_spacing + 4;
+            fb.draw_rect(
+                cursor_x.max(0) as usize,
+                (field_y + 8).max(0) as usize,
+                2,
+                PASSWORD_HEIGHT - 16,
+                Theme::TEXT_PRIMARY.to_u32(),
+            );
+        }
+
+        if !self.error_message.is_empty() {
+            fb.draw_string(
+                self.screen_width / 2 - self.error_message.len() * 4,
+                (field_y + PASSWORD_HEIGHT as i32 + 16).max(0) as usize,
+                &self.error_message,
+                Theme::ERROR.to_u32(),
+            );
+        } else if !user.password_hint.is_empty() {
+            let hint = alloc::format!("Hint: {}", user.password_hint);
+            fb.draw_string(
+                self.screen_width / 2 - hint.len() * 4,
+                (field_y + PASSWORD_HEIGHT as i32 + 16).max(0) as usize,
+                &hint,
+                Theme::TEXT_SECONDARY.to_u32(),
+            );
+        }
+
+        if self.state == LoginState::Authenticating {
+            self.draw_spinner(fb, self.screen_width / 2, (field_y + PASSWORD_HEIGHT as i32 + 48).max(0) as usize);
+        }
+
+        fb.draw_string(
+            (field_x - 54).max(0) as usize,
+            (field_y + 10).max(0) as usize,
+            "Back",
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
+        fb.draw_string(
+            (field_x + PASSWORD_WIDTH as i32 + 16).max(0) as usize,
+            (field_y + 10).max(0) as usize,
+            "Enter",
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
+    }
+
+    fn draw_user_avatar(
+        &self,
+        fb: &mut Framebuffer,
+        x: usize,
+        y: usize,
+        user: &UserAccount,
+        scale: f32,
+        hovered: bool,
+    ) {
+        let size = (AVATAR_SIZE as f32 * scale) as usize;
+        let draw_x = x.saturating_sub(size / 2);
+        let draw_y = y.saturating_sub(size / 2);
+        let screen = Rect::new(0, 0, self.screen_width as u32, self.screen_height as u32);
+        let card = Rect::new(
+            draw_x as i32 - 18,
+            draw_y as i32 - 18,
+            (size + 36) as u32,
+            (size + 74) as u32,
+        );
+        shell::fill_blended_rect(
+            fb,
+            card,
+            screen,
+            Theme::tokens(ThemeMode::Dark).surfaces.overlay,
+            if hovered { 0xD0 } else { 0xA0 },
+        );
+        shell::draw_rect_outline_clipped(
+            fb,
+            card,
+            screen,
+            if hovered {
+                Theme::BORDER_FOCUS.to_u32()
+            } else {
+                Theme::BORDER.to_u32()
+            },
+        );
+
+        let bg = match &user.avatar {
+            AvatarType::Color(color) => *color,
+            AvatarType::Icon(AvatarIcon::Admin) => Theme::ACCENT_WARNING.to_u32(),
+            AvatarType::Icon(AvatarIcon::Guest) => Theme::TEXT_SECONDARY.to_u32(),
+            _ => Theme::ACCENT_PRIMARY.to_u32(),
+        };
+        fb.draw_rect(draw_x, draw_y, size, size, bg);
+        fb.draw_rect_outline(draw_x, draw_y, size, size, Theme::BORDER.to_u32());
+
+        match &user.avatar {
+            AvatarType::Initials(initials) => fb.draw_string(
+                draw_x + size / 2 - initials.len() * 4,
+                draw_y + size / 2 - 8,
+                initials,
+                Theme::TEXT_ON_ACCENT.to_u32(),
+            ),
+            AvatarType::Icon(icon) => {
+                let glyph = match icon {
+                    AvatarIcon::User => "U",
+                    AvatarIcon::Admin => "A",
+                    AvatarIcon::Guest => "G",
+                    AvatarIcon::Custom(_) => "*",
+                };
+                fb.draw_string(
+                    draw_x + size / 2 - 4,
+                    draw_y + size / 2 - 8,
+                    glyph,
+                    Theme::TEXT_ON_ACCENT.to_u32(),
+                )
+            }
+            AvatarType::Image(_) => fb.draw_string(
+                draw_x + size / 2 - 4,
+                draw_y + size / 2 - 8,
+                "I",
+                Theme::TEXT_ON_ACCENT.to_u32(),
+            ),
+            AvatarType::Color(_) => fb.draw_string(
+                draw_x + size / 2 - 4,
+                draw_y + size / 2 - 8,
+                "C",
+                Theme::TEXT_ON_ACCENT.to_u32(),
+            ),
+        }
+
+        fb.draw_string(
+            x.saturating_sub(user.display_name.len() * 4),
+            draw_y + size + 12,
+            &user.display_name,
+            if hovered {
+                Theme::TEXT_PRIMARY.to_u32()
+            } else {
+                Theme::TEXT_SECONDARY.to_u32()
+            },
+        );
     }
 
     fn draw_spinner(&self, fb: &mut Framebuffer, x: usize, y: usize) {
-        let radius = 12;
-        let angle = self.animation_progress * core::f32::consts::PI * 2.0;
-
-        for i in 0..8 {
-            let a = angle + i as f32 * core::f32::consts::PI / 4.0;
-            let px = x as i32 + (cosf(a) * radius as f32) as i32;
-            let py = y as i32 + (sinf(a) * radius as f32) as i32;
-
-            let alpha = 1.0 - i as f32 / 8.0;
-            let color = Self::alpha_color(0xFFFFFFFF, alpha);
-
-            if px >= 0 && py >= 0 && (px as usize) < self.screen_width && (py as usize) < self.screen_height {
-                fb.plot_pixel(px as usize, py as usize, color);
+        for index in 0..8 {
+            let angle = self.animation_progress * core::f32::consts::TAU
+                + index as f32 * (core::f32::consts::PI / 4.0);
+            let px = x as i32 + (libm::cosf(angle) * 12.0) as i32;
+            let py = y as i32 + (sinf(angle) * 12.0) as i32;
+            if px >= 0 && py >= 0 {
+                fb.plot_pixel(
+                    px as usize,
+                    py as usize,
+                    shell::blend_color(
+                        Theme::SIDEBAR_BG.to_u32(),
+                        Theme::ACCENT_PRIMARY.to_u32(),
+                        (255 - index as u8 * 24).max(48),
+                    ),
+                );
             }
         }
     }
 
     fn draw_shutdown_menu(&self, fb: &mut Framebuffer) {
-        let menu_x = self.screen_width / 2 - 100;
-        let menu_y = self.screen_height - 140;
-        let menu_width = 200;
-        let menu_height = 100;
-
-        // Arka plan
-        fb.draw_rect(menu_x, menu_y, menu_width, menu_height, 0xE0202020);
-
-        // Seçenekler
-        let options = [("⏻ Shut Down", "shutdown"), ("🔄 Restart", "restart"), ("🔒 Lock", "lock")];
-
-        for (i, (label, _)) in options.iter().enumerate() {
-            let item_y = menu_y + 8 + i * 28;
-            fb.draw_rect(menu_x + 4, item_y, menu_width - 8, 24, Theme::SIDEBAR_BG.to_u32());
-            fb.draw_string(menu_x + 16, item_y + 4, label, Theme::TEXT_PRIMARY.to_u32());
+        let rect = Rect::new(self.screen_width as i32 / 2 - 100, self.screen_height as i32 - 140, 200, 100);
+        let screen = Rect::new(0, 0, self.screen_width as u32, self.screen_height as u32);
+        shell::fill_blended_rect(
+            fb,
+            rect,
+            screen,
+            Theme::tokens(ThemeMode::Dark).surfaces.sidebar,
+            0xF0,
+        );
+        shell::draw_rect_outline_clipped(fb, rect, screen, Theme::BORDER.to_u32());
+        for (index, label) in ["Shutdown", "Restart", "Lock"].iter().enumerate() {
+            let row = Rect::new(rect.x + 8, rect.y + 8 + index as i32 * 28, rect.width - 16, 22);
+            shell::fill_rect_clipped(
+                fb,
+                row,
+                screen,
+                if index == 2 {
+                    Theme::button_fill(crate::gui::theme::ButtonRole::Secondary, ThemeMode::Dark, false, true)
+                } else {
+                    Theme::SIDEBAR_BG.to_u32()
+                },
+            );
+            fb.draw_string((row.x + 10).max(0) as usize, (row.y + 5).max(0) as usize, label, Theme::TEXT_PRIMARY.to_u32());
         }
     }
 
-    fn lerp_color(c1: u32, c2: u32, t: f32) -> u32 {
-        let r1 = ((c1 >> 16) & 0xFF) as f32;
-        let g1 = ((c1 >> 8) & 0xFF) as f32;
-        let b1 = (c1 & 0xFF) as f32;
-
-        let r2 = ((c2 >> 16) & 0xFF) as f32;
-        let g2 = ((c2 >> 8) & 0xFF) as f32;
-        let b2 = (c2 & 0xFF) as f32;
-
-        let r = (r1 + (r2 - r1) * t) as u32;
-        let g = (g1 + (g2 - g1) * t) as u32;
-        let b = (b1 + (b2 - b1) * t) as u32;
-
-        (r << 16) | (g << 8) | b
-    }
-
-    fn blend_color(bg: u32, fg: u32, alpha: f32) -> u32 {
-        let br = ((bg >> 16) & 0xFF) as f32;
-        let bg_ = ((bg >> 8) & 0xFF) as f32;
-        let bb = (bg & 0xFF) as f32;
-
-        let fr = ((fg >> 16) & 0xFF) as f32;
-        let fg_ = ((fg >> 8) & 0xFF) as f32;
-        let fb = (fg & 0xFF) as f32;
-
-        let r = (br * (1.0 - alpha) + fr * alpha) as u32;
-        let g = (bg_ * (1.0 - alpha) + fg_ * alpha) as u32;
-        let b = (bb * (1.0 - alpha) + fb * alpha) as u32;
-
-        (r << 16) | (g << 8) | b
-    }
-
-    fn alpha_color(color: u32, alpha: f32) -> u32 {
-        let r = (((color >> 16) & 0xFF) as f32 * alpha) as u32;
-        let g = (((color >> 8) & 0xFF) as f32 * alpha) as u32;
-        let b = ((color & 0xFF) as f32 * alpha) as u32;
-        (r << 16) | (g << 8) | b
-    }
-
-    /// Tıklama olayını işle
     pub fn on_click(&mut self, mx: i32, my: i32) -> LoginEvent {
         match self.state {
             LoginState::UserSelection | LoginState::Locked => {
-                // Kullanıcı avatarlarını kontrol et
-                let users_y = self.screen_height / 2 + 20;
+                let users_y = self.screen_height / 2 + 10;
                 let total_width = self.users.len() * AVATAR_SPACING;
                 let start_x = (self.screen_width - total_width) / 2 + AVATAR_SPACING / 2;
-
-                for (i, _) in self.users.iter().enumerate() {
-                    let x = start_x + i * AVATAR_SPACING;
-
-                    if mx >= (x - AVATAR_SIZE / 2) as i32 && mx < (x + AVATAR_SIZE / 2) as i32
-                        && my >= (users_y - AVATAR_SIZE / 2) as i32 && my < (users_y + AVATAR_SIZE / 2) as i32 {
-                        self.select_user(i);
+                for (index, _) in self.users.iter().enumerate() {
+                    let x = start_x + index * AVATAR_SPACING;
+                    if mx >= (x - AVATAR_SIZE / 2) as i32
+                        && mx < (x + AVATAR_SIZE / 2) as i32
+                        && my >= (users_y - AVATAR_SIZE / 2) as i32
+                        && my < (users_y + AVATAR_SIZE / 2) as i32
+                    {
+                        self.select_user(index);
                         return LoginEvent::None;
                     }
                 }
 
-                // Kapatma düğmesini kontrol et
-                if mx >= (self.screen_width / 2 - 60) as i32 && mx < (self.screen_width / 2 + 60) as i32
-                    && my >= (self.screen_height - 60) as i32 && my < (self.screen_height - 40) as i32 {
+                if mx >= (self.screen_width / 2 - 60) as i32
+                    && mx < (self.screen_width / 2 + 60) as i32
+                    && my >= (self.screen_height - 60) as i32
+                    && my < (self.screen_height - 36) as i32
+                {
                     self.show_shutdown_menu = !self.show_shutdown_menu;
+                    return LoginEvent::None;
                 }
 
-                // Kapatma menüsü öğelerini kontrol et
                 if self.show_shutdown_menu {
-                    let menu_x = self.screen_width / 2 - 100;
-                    let menu_y = self.screen_height - 140;
-
-                    if mx >= menu_x as i32 && mx < (menu_x + 200) as i32
-                        && my >= (menu_y + 8) as i32 && my < (menu_y + 92) as i32 {
-                        let idx = ((my - menu_y as i32 - 8) / 28) as usize;
-
-                        match idx {
+                    let rect = Rect::new(self.screen_width as i32 / 2 - 100, self.screen_height as i32 - 140, 200, 100);
+                    if mx >= rect.x && mx < rect.right() && my >= rect.y && my < rect.bottom() {
+                        match ((my - rect.y - 8) / 28) as usize {
                             0 => return LoginEvent::Shutdown,
                             1 => return LoginEvent::Restart,
                             2 => {
@@ -732,87 +616,75 @@ impl LoginScreen {
                             _ => {}
                         }
                     }
-
-                    self.show_shutdown_menu = false;
                 }
             }
-            LoginState::PasswordEntry => {
-                // Geri düğmesini kontrol et
-                let field_x = self.screen_width / 2 - PASSWORD_WIDTH / 2;
-                let field_y = self.screen_height / 2 + AVATAR_SIZE + 60 - 80 + AVATAR_SIZE + 60;
-
-                if mx >= (field_x - 60) as i32 && mx < field_x as i32
-                    && my >= field_y as i32 && my < (field_y + PASSWORD_HEIGHT) as i32 {
+            LoginState::PasswordEntry | LoginState::AuthFailed => {
+                let field_x = self.screen_width as i32 / 2 - PASSWORD_WIDTH as i32 / 2;
+                let field_y = self.screen_height as i32 / 2 + 8;
+                if mx >= field_x - 60 && mx < field_x && my >= field_y && my < field_y + PASSWORD_HEIGHT as i32 {
                     self.go_back();
                 }
             }
             _ => {}
         }
-
         LoginEvent::None
     }
 
-    /// Tuş basışını işle
     pub fn on_key_press(&mut self, c: char) -> LoginEvent {
         match self.state {
-            LoginState::PasswordEntry => {
-                if c == '\x1b' { // Escape
+            LoginState::PasswordEntry | LoginState::AuthFailed => {
+                if c == '\x1b' {
                     self.go_back();
-                } else if c == '\n' || c == '\r' { // Enter
+                } else if c == '\n' || c == '\r' {
                     return self.submit_password();
-                } else if c == '\x08' { // Geri silme
+                } else if c == '\x08' {
                     self.password.pop();
                 } else if !c.is_control() && self.password.len() < 32 {
                     self.password.push(c);
                 }
             }
             LoginState::UserSelection | LoginState::Locked => {
-                // Herhangi bir tuş ilk kullanıcı için şifre girişini başlatır
                 if !c.is_control() && !self.users.is_empty() {
                     self.select_user(0);
                 }
             }
             _ => {}
         }
-
         LoginEvent::None
     }
 
-    /// Mouse hareketini işle
     pub fn on_mouse_move(&mut self, mx: i32, my: i32) {
-        if self.state == LoginState::UserSelection || self.state == LoginState::Locked {
-            let users_y = self.screen_height / 2 + 20;
-            let total_width = self.users.len() * AVATAR_SPACING;
-            let start_x = (self.screen_width - total_width) / 2 + AVATAR_SPACING / 2;
-
-            self.hovered_user = None;
-
-            for (i, _) in self.users.iter().enumerate() {
-                let x = start_x + i * AVATAR_SPACING;
-
-                if mx >= (x - AVATAR_SIZE / 2) as i32 && mx < (x + AVATAR_SIZE / 2) as i32
-                    && my >= (users_y - AVATAR_SIZE / 2) as i32 && my < (users_y + AVATAR_SIZE / 2) as i32 {
-                    self.hovered_user = Some(i);
-                    break;
-                }
+        if self.state != LoginState::UserSelection && self.state != LoginState::Locked {
+            return;
+        }
+        let users_y = self.screen_height / 2 + 10;
+        let total_width = self.users.len() * AVATAR_SPACING;
+        let start_x = (self.screen_width - total_width) / 2 + AVATAR_SPACING / 2;
+        self.hovered_user = None;
+        for (index, _) in self.users.iter().enumerate() {
+            let x = start_x + index * AVATAR_SPACING;
+            if mx >= (x - AVATAR_SIZE / 2) as i32
+                && mx < (x + AVATAR_SIZE / 2) as i32
+                && my >= (users_y - AVATAR_SIZE / 2) as i32
+                && my < (users_y + AVATAR_SIZE / 2) as i32
+            {
+                self.hovered_user = Some(index);
+                break;
             }
         }
     }
 
-    /// Yeniden boyutlandır
     pub fn resize(&mut self, width: usize, height: usize) {
         self.screen_width = width;
         self.screen_height = height;
     }
 
-    /// Saati ayarla
     pub fn set_time(&mut self, time: &str, date: &str) {
         self.time_string = String::from(time);
         self.date_string = String::from(date);
     }
 }
 
-/// Giriş olayları
 #[derive(Clone, Debug)]
 pub enum LoginEvent {
     None,
@@ -824,22 +696,16 @@ pub enum LoginEvent {
     Lock,
 }
 
-// ============================================================================
-// GLOBAL GİRİŞ EKRANI
-// ============================================================================
-
 lazy_static::lazy_static! {
     static ref LOGIN: Mutex<LoginScreen> = Mutex::new(LoginScreen::new(1920, 1080));
 }
 
-/// Giriş ekranını başlat
 pub fn init(width: usize, height: usize) {
     let mut login = LOGIN.lock();
     login.resize(width, height);
     crate::serial_println!("[GUI] Login screen initialized");
 }
 
-/// Giriş ekranına eriş
 pub fn get_login() -> &'static Mutex<LoginScreen> {
     &LOGIN
 }

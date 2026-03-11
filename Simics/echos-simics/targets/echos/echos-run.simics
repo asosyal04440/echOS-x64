@@ -10,12 +10,12 @@ log-type -disable spec-viol
 echo "[echOS] Starting simulation..."
 echo "[echOS] Boot medium: USB"
 
-# Timeout
-script-branch "timeout" {
-    bp.time.wait-for 120
-    echo "[echOS] Timeout reached"
-    stop
-}
+# # Timeout
+# script-branch "timeout" {
+#     bp.time.wait-for 120
+#     echo "[echOS] Timeout reached"
+#     stop
+# }
 
 # Run simulation
 run

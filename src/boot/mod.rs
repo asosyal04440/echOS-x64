@@ -32,6 +32,7 @@
 //! `version` alanı, geriye dönük uyumluluk için kullanılır.
 
 pub mod safety;
+pub mod appliance;
 
 use crate::gop::framebuffer::Framebuffer;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

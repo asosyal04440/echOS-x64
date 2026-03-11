@@ -18,8 +18,8 @@
 //! Bit 5+: COUNT_OFFSET    - Sayaç ofseti
 //! ```
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Her CPU için ayrı ön işleme sayacı dizisi.
 ///
@@ -27,18 +27,28 @@ use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
 /// bu sayede kilit gerektirmez (lock-free).
 static mut PREEMPT_COUNT: [AtomicU32; 8192] = [const { AtomicU32::new(0) }; 8192];
 
-/// Ön işleme devre dışı bırakma biti (Linux ile uyumlu).
-pub const PREEMPT_DISABLE_BITS: u32 = 1 << 0;      // PREEMPT_DISABLE
-/// Yeniden zamanlama gerektiğini belirten bit.
-pub const PREEMPT_NEED_RESCHED: u32 = 1 << 1;     // NEED_RESCHED
-/// Donanım kesmesi (Hard IRQ) içinde olunduğunu belirten bit.
-pub const PREEMPT_HARDIRQ: u32 = 1 << 2;          // HARDIRQ
-/// Yazılım kesmesi (Soft IRQ) içinde olunduğunu belirten bit.
-pub const PREEMPT_SOFTIRQ: u32 = 1 << 3;          // SOFTIRQ
-/// Maskelenemeyen kesme (NMI) içinde olunduğunu belirten bit.
-pub const PREEMPT_NMI: u32 = 1 << 4;              // NMI
-/// Sayaç ofset biti.
-pub const PREEMPT_COUNT_OFFSET: u32 = 1 << 5;    // COUNT_OFFSET
+/// Ön işleme devre dışı bırakma birimi — fetch_add(1) ile sayaç olarak kullanılır.
+/// Bit 0-7: preempt disable iç içe sayacı (256 seviye).
+pub const PREEMPT_DISABLE_BITS: u32 = 1; // bits 0-7
+/// Preempt disable maskesi — iç içe sayacın 8 bit genişliği.
+pub const PREEMPT_DISABLE_MASK: u32 = 0xFF;
+/// Yeniden zamanlama gerektiğini belirten bit (fetch_or/fetch_and ile).
+pub const PREEMPT_NEED_RESCHED: u32 = 1 << 8; // bit 8
+/// Yazılım kesmesi (Soft IRQ) sayaç birimi — fetch_add(1 << 9) ile.
+/// Bit 9-15: softirq iç içe sayacı (128 seviye).
+pub const PREEMPT_SOFTIRQ: u32 = 1 << 9; // bits 9-15
+/// Softirq maskesi.
+pub const PREEMPT_SOFTIRQ_MASK: u32 = 0x7F << 9;
+/// Donanım kesmesi (Hard IRQ) sayaç birimi — fetch_add(1 << 16) ile.
+/// Bit 16-23: hardirq iç içe sayacı (256 seviye).
+pub const PREEMPT_HARDIRQ: u32 = 1 << 16; // bits 16-23
+/// Hardirq maskesi.
+pub const PREEMPT_HARDIRQ_MASK: u32 = 0xFF << 16;
+/// Maskelenemeyen kesme (NMI) bayrağı (fetch_or/fetch_and ile).
+/// Bit 24: NMI aktif bayrağı.
+pub const PREEMPT_NMI: u32 = 1 << 24; // bit 24
+/// Sayaç ofset biti (eski uyumluluk — kullanılmaz).
+pub const PREEMPT_COUNT_OFFSET: u32 = 1 << 25; // COUNT_OFFSET
 
 /// Kesme bağlamı (interrupt context) seviyesi.
 ///
@@ -78,7 +88,7 @@ impl PreemptDisableGuard {
     /// Ön işlemenin şu an devre dışı olup olmadığını kontrol eder.
     pub fn is_disabled(&self) -> bool {
         let current_count = get_preempt_count(self.cpu_id);
-        (current_count & PREEMPT_DISABLE_BITS) != 0
+        (current_count & PREEMPT_DISABLE_MASK) != 0
     }
 }
 
@@ -197,9 +207,7 @@ impl Drop for NMIGuard {
 /// Bu fonksiyon Relaxed sıralama kullanır; çağıran taraf
 /// gerektiğinde bariyer uygulamalıdır.
 pub fn get_preempt_count(cpu_id: u32) -> u32 {
-    unsafe {
-        PREEMPT_COUNT[cpu_id as usize].load(Ordering::Relaxed)
-    }
+    unsafe { PREEMPT_COUNT[cpu_id as usize].load(Ordering::Relaxed) }
 }
 
 /// Ön işleme sayacını belirtilen bitler kadar artırır.
@@ -232,14 +240,14 @@ pub fn preempt_count_dec(cpu_id: u32, bits: u32) -> u32 {
 pub fn preempt_enabled() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
-    (count & PREEMPT_DISABLE_BITS) == 0
+    (count & PREEMPT_DISABLE_MASK) == 0
 }
 
 /// Geçerli CPU'nun kesme bağlamında (IRQ, SoftIRQ veya NMI) olup olmadığını kontrol eder.
 pub fn in_interrupt() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
-    (count & (PREEMPT_HARDIRQ | PREEMPT_SOFTIRQ | PREEMPT_NMI)) != 0
+    (count & (PREEMPT_HARDIRQ_MASK | PREEMPT_SOFTIRQ_MASK | PREEMPT_NMI)) != 0
 }
 
 /// Geçerli CPU'nun kesme bağlamı seviyesini döner.
@@ -251,9 +259,9 @@ pub fn get_interrupt_context() -> InterruptContext {
 
     if (count & PREEMPT_NMI) != 0 {
         InterruptContext::NMI
-    } else if (count & PREEMPT_HARDIRQ) != 0 {
+    } else if (count & PREEMPT_HARDIRQ_MASK) != 0 {
         InterruptContext::HardIRQ
-    } else if (count & PREEMPT_SOFTIRQ) != 0 {
+    } else if (count & PREEMPT_SOFTIRQ_MASK) != 0 {
         InterruptContext::SoftIRQ
     } else {
         InterruptContext::None
@@ -271,14 +279,14 @@ pub fn in_nmi() -> bool {
 pub fn in_hardirq() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
-    (count & PREEMPT_HARDIRQ) != 0
+    (count & PREEMPT_HARDIRQ_MASK) != 0
 }
 
 /// Geçerli CPU'nun yazılım kesmesi (SoftIRQ) bağlamında olup olmadığını kontrol eder.
 pub fn in_softirq() -> bool {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let count = get_preempt_count(cpu_id);
-    (count & PREEMPT_SOFTIRQ) != 0
+    (count & PREEMPT_SOFTIRQ_MASK) != 0
 }
 
 /// Geçerli CPU için yeniden zamanlama (reschedule) bayrağını ayarlar.
@@ -344,8 +352,9 @@ impl PreemptStats {
         Self {
             cpu_id,
             preempt_count: count,
-            preempt_disabled: (count & PREEMPT_DISABLE_BITS) != 0,
-            in_interrupt: (count & (PREEMPT_HARDIRQ | PREEMPT_SOFTIRQ | PREEMPT_NMI)) != 0,
+            preempt_disabled: (count & PREEMPT_DISABLE_MASK) != 0,
+            in_interrupt: (count & (PREEMPT_HARDIRQ_MASK | PREEMPT_SOFTIRQ_MASK | PREEMPT_NMI))
+                != 0,
             interrupt_context: get_interrupt_context(),
             need_resched: (count & PREEMPT_NEED_RESCHED) != 0,
         }
@@ -358,13 +367,14 @@ impl PreemptStats {
         Self {
             cpu_id,
             preempt_count: count,
-            preempt_disabled: (count & PREEMPT_DISABLE_BITS) != 0,
-            in_interrupt: (count & (PREEMPT_HARDIRQ | PREEMPT_SOFTIRQ | PREEMPT_NMI)) != 0,
+            preempt_disabled: (count & PREEMPT_DISABLE_MASK) != 0,
+            in_interrupt: (count & (PREEMPT_HARDIRQ_MASK | PREEMPT_SOFTIRQ_MASK | PREEMPT_NMI))
+                != 0,
             interrupt_context: if (count & PREEMPT_NMI) != 0 {
                 InterruptContext::NMI
-            } else if (count & PREEMPT_HARDIRQ) != 0 {
+            } else if (count & PREEMPT_HARDIRQ_MASK) != 0 {
                 InterruptContext::HardIRQ
-            } else if (count & PREEMPT_SOFTIRQ) != 0 {
+            } else if (count & PREEMPT_SOFTIRQ_MASK) != 0 {
                 InterruptContext::SoftIRQ
             } else {
                 InterruptContext::None
@@ -413,9 +423,14 @@ pub mod debug {
         crate::serial_println!("=== All CPU Preempt States ===");
         for cpu_id in 0..cpu_count {
             let stats = PreemptStats::for_cpu(cpu_id);
-            crate::serial_println!("CPU {}: count=0x{:x}, disabled={}, interrupt={:?}, need_resched={}",
-                cpu_id, stats.preempt_count, stats.preempt_disabled,
-                stats.interrupt_context, stats.need_resched);
+            crate::serial_println!(
+                "CPU {}: count=0x{:x}, disabled={}, interrupt={:?}, need_resched={}",
+                cpu_id,
+                stats.preempt_count,
+                stats.preempt_disabled,
+                stats.interrupt_context,
+                stats.need_resched
+            );
         }
         crate::serial_println!("=== End CPU States ===");
     }
@@ -433,12 +448,18 @@ pub mod debug {
 
             // Geçersiz durum kombinasyonlarını kontrol et
             if stats.in_interrupt && stats.preempt_disabled {
-                crate::serial_println!("Preempt Warning: CPU {} has both interrupt and disabled", cpu_id);
+                crate::serial_println!(
+                    "Preempt Warning: CPU {} has both interrupt and disabled",
+                    cpu_id
+                );
                 valid = false;
             }
 
             if stats.interrupt_context == InterruptContext::None && stats.in_interrupt {
-                crate::serial_println!("Preempt Error: CPU {} inconsistent interrupt state", cpu_id);
+                crate::serial_println!(
+                    "Preempt Error: CPU {} inconsistent interrupt state",
+                    cpu_id
+                );
                 valid = false;
             }
         }

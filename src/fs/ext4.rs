@@ -28,11 +28,11 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use alloc::vec;
 use alloc::sync::Arc;
-use spin::Mutex;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::mem;
+use spin::Mutex;
 
 use super::ext4_journal::{Journal, JournalError, Transaction, TransactionState};
 
@@ -174,7 +174,9 @@ impl Ext4Superblock {
             s_first_ino: u32::from_le_bytes([data[84], data[85], data[86], data[87]]),
             s_inode_size: u16::from_le_bytes([data[88], data[89]]),
             s_blocks_count_hi: u32::from_le_bytes([data[336], data[337], data[338], data[339]]),
-            s_free_blocks_count_hi: u32::from_le_bytes([data[340], data[341], data[342], data[343]]),
+            s_free_blocks_count_hi: u32::from_le_bytes([
+                data[340], data[341], data[342], data[343],
+            ]),
         })
     }
 
@@ -489,8 +491,12 @@ impl Ext4FileSystem {
         // Blok grubu tanımlayıcılarını diskten yükle
         self.load_group_descriptors(device_data)?;
 
-        crate::serial_println!("[ext4] Başlatıldı: {} blok, {} inode, {} bayt/blok",
-            sb.total_blocks(), sb.s_inodes_count, self.block_size);
+        crate::serial_println!(
+            "[ext4] Başlatıldı: {} blok, {} inode, {} bayt/blok",
+            sb.total_blocks(),
+            sb.s_inodes_count,
+            self.block_size
+        );
 
         Ok(())
     }
@@ -607,7 +613,11 @@ impl Ext4FileSystem {
     }
 
     /// Dizin inode'undan tüm girişleri okuyup döndürür
-    pub fn read_dir(&self, inode: &Ext4Inode, device_data: &[u8]) -> Result<Vec<Ext4DirEntry>, Ext4Error> {
+    pub fn read_dir(
+        &self,
+        inode: &Ext4Inode,
+        device_data: &[u8],
+    ) -> Result<Vec<Ext4DirEntry>, Ext4Error> {
         if !inode.is_directory() {
             return Err(Ext4Error::NotSupported);
         }
@@ -617,7 +627,12 @@ impl Ext4FileSystem {
         let mut offset = 0;
 
         while offset + 8 <= data.len() {
-            let inode_num = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+            let inode_num = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
             let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]) as usize;
             let name_len = data[offset + 6] as usize;
             let file_type = data[offset + 7];
@@ -660,12 +675,21 @@ impl Ext4FileSystem {
     // ========================================================================
 
     /// Yazma desteği için JBD2 günlüğünü başlatır ve kurtarma yapar
-    pub fn init_journal(&mut self, device_data: &[u8], journal_offset: u64, journal_size: u64) -> Result<(), Ext4Error> {
+    pub fn init_journal(
+        &mut self,
+        device_data: &[u8],
+        journal_offset: u64,
+        journal_size: u64,
+    ) -> Result<(), Ext4Error> {
         let mut journal = Journal::new(self.block_size, journal_offset, journal_size);
-        journal.init(device_data).map_err(|_| Ext4Error::NotSupported)?;
+        journal
+            .init(device_data)
+            .map_err(|_| Ext4Error::NotSupported)?;
 
         // Tamamlanmamış işlemleri kurtar (crash recovery)
-        journal.recover(device_data).map_err(|_| Ext4Error::Corrupted)?;
+        journal
+            .recover(device_data)
+            .map_err(|_| Ext4Error::Corrupted)?;
 
         self.journal = Some(Arc::new(Mutex::new(journal)));
         self.journal_offset = journal_offset;
@@ -678,7 +702,8 @@ impl Ext4FileSystem {
     pub fn begin_transaction(&self, credits: usize) -> Result<(), Ext4Error> {
         if let Some(ref journal) = self.journal {
             let mut j = journal.lock();
-            j.start_transaction(credits).map_err(|_| Ext4Error::NotSupported)?;
+            j.start_transaction(credits)
+                .map_err(|_| Ext4Error::NotSupported)?;
         }
         Ok(())
     }
@@ -693,7 +718,13 @@ impl Ext4FileSystem {
     }
 
     /// Dosyaya veri yazar (günlükleme etkinse işleme ekler)
-    pub fn write_file(&self, inode: &mut Ext4Inode, offset: u64, data: &[u8], device_data: &mut [u8]) -> Result<usize, Ext4Error> {
+    pub fn write_file(
+        &self,
+        inode: &mut Ext4Inode,
+        offset: u64,
+        data: &[u8],
+        device_data: &mut [u8],
+    ) -> Result<usize, Ext4Error> {
         let block_size = self.block_size as u64;
         let start_block = offset / block_size;
         let end_block = (offset + data.len() as u64 + block_size - 1) / block_size;
@@ -705,7 +736,11 @@ impl Ext4FileSystem {
                 if let Some(phys_block) = self.map_block(inode, block_num as u32) {
                     let block_offset = phys_block as usize * block_size as usize;
                     if block_offset + block_size as usize <= device_data.len() {
-                        j.add_block(phys_block as u32, &device_data[block_offset..block_offset + block_size as usize], true)?;
+                        j.add_block(
+                            phys_block as u32,
+                            &device_data[block_offset..block_offset + block_size as usize],
+                            true,
+                        )?;
                     }
                 }
             }
@@ -734,7 +769,8 @@ impl Ext4FileSystem {
                     let write_count = write_len.min(data.len() - data_offset);
 
                     if block_offset + write_start + write_count <= device_data.len() {
-                        device_data[block_offset + write_start..block_offset + write_start + write_count]
+                        device_data
+                            [block_offset + write_start..block_offset + write_start + write_count]
                             .copy_from_slice(&data[data_offset..data_offset + write_count]);
                         bytes_written += write_count;
                         data_offset += write_count;
@@ -754,13 +790,22 @@ impl Ext4FileSystem {
     }
 
     /// Dosya için yeni bir blok tahsis eder
-    pub fn allocate_block(&self, inode: &mut Ext4Inode, logical_block: u32, device_data: &mut [u8]) -> Result<u64, Ext4Error> {
+    pub fn allocate_block(
+        &self,
+        inode: &mut Ext4Inode,
+        logical_block: u32,
+        device_data: &mut [u8],
+    ) -> Result<u64, Ext4Error> {
         // Blok bitmap'inden serbest blok bul
         let group = logical_block / self.superblock.s_blocks_per_group;
-        let gd = self.group_descriptors.get(group as usize).ok_or(Ext4Error::OutOfMemory)?;
+        let gd = self
+            .group_descriptors
+            .get(group as usize)
+            .ok_or(Ext4Error::OutOfMemory)?;
 
         // Basit tahsis stratejisi (gerçek uygulamada blok bitmap taranır)
-        let new_block = self.superblock.total_blocks() - self.superblock.free_blocks() + logical_block as u64;
+        let new_block =
+            self.superblock.total_blocks() - self.superblock.free_blocks() + logical_block as u64;
 
         // Günlükleme etkinse yeni bloğu işleme ekle
         if let Some(ref journal) = self.journal {
@@ -795,7 +840,11 @@ impl Ext4FileSystem {
         } | mode;
 
         inode.i_links_count = 1;
-        inode.i_flags = if self.superblock.has_extents() { 0x00080000 } else { 0 };
+        inode.i_flags = if self.superblock.has_extents() {
+            0x00080000
+        } else {
+            0
+        };
 
         // Mevcut zamanı al (sistem saatinden alınır)
         let time = crate::task::scheduler::get_ticks() as u32;
@@ -807,7 +856,14 @@ impl Ext4FileSystem {
     }
 
     /// Üst dizine yeni bir dizin girdisi ekler
-    pub fn create_dir_entry(&self, parent_inode: &mut Ext4Inode, name: &str, child_inode: u32, file_type: Ext4FileType, device_data: &mut [u8]) -> Result<(), Ext4Error> {
+    pub fn create_dir_entry(
+        &self,
+        parent_inode: &mut Ext4Inode,
+        name: &str,
+        child_inode: u32,
+        file_type: Ext4FileType,
+        device_data: &mut [u8],
+    ) -> Result<(), Ext4Error> {
         // Mevcut dizin verisini oku
         let mut dir_data = self.read_file(parent_inode, device_data)?;
 
@@ -897,4 +953,191 @@ pub fn unmount_ext4(name: &str) -> bool {
 /// ext4 modülünü başlatır
 pub fn init() {
     crate::serial_println!("[ext4] Modül başlatıldı");
+}
+
+// ============================================================================
+// HTree Dizin İndeksleme (Hash Tree / dx_root)
+// ============================================================================
+//
+// ext4 büyük dizinlerin O(n) yerine O(log n) aranmasını sağlamak için
+// B-tree benzeri karma ağaç (htree) yapısı kullanır.
+// Bu yapı, dizin bloğunun 0. girişinde dx_root olarak saklanır.
+
+/// dx_root — HTree kök bloğu yapısı.
+///
+/// Dizin bloğunun başında yer alır ve ağacın meta verisini tutar.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct DxRoot {
+    /// Sahte dot girişi (inode, rec_len, name_len, file_type)
+    pub dot_inode: u32,
+    pub dot_rec_len: u16,
+    pub dot_name_len: u8,
+    pub dot_file_type: u8,
+    /// Sahte dotdot girişi
+    pub dotdot_inode: u32,
+    pub dotdot_rec_len: u16,
+    pub dotdot_name_len: u8,
+    pub dotdot_file_type: u8,
+    // dx_root_info yapısı başlangıcı
+    /// Ayrılmış (0)
+    pub reserved_zero: u32,
+    /// Hash versiyonu (0=legacy, 1=half_md4, 2=tea, 3=unsigned legacy, 4=unsigned half_md4, 5=unsigned tea, 6=siphash)
+    pub hash_version: u8,
+    /// Ağaç derinliği (info_length)
+    pub info_length: u8,
+    /// Dolaylılık seviyesi (indirect levels) — genellikle 0 veya 1
+    pub indirect_levels: u8,
+    /// Kullanılmayan bayraklar
+    pub unused_flags: u8,
+    /// Limit — bu blokta saklanabilecek maximum giriş sayısı
+    pub limit: u16,
+    /// Count — mevcut giriş sayısı
+    pub count: u16,
+    /// İlk hash aralığının bloğu
+    pub block: u32,
+}
+
+/// dx_entry — HTree arama tablosu girişi.
+///
+/// Hash değerine göre sıralanmış blok referanslarıdır.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct DxEntry {
+    /// Hash değeri alt sınırı
+    pub hash: u32,
+    /// Bu hash aralığını içeren blok numarası
+    pub block: u32,
+}
+
+/// Desteklenen hash algoritmaları
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DxHashVersion {
+    Legacy = 0,
+    HalfMd4 = 1,
+    Tea = 2,
+    UnsignedLegacy = 3,
+    UnsignedHalfMd4 = 4,
+    UnsignedTea = 5,
+    SipHash = 6,
+}
+
+impl DxHashVersion {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Legacy),
+            1 => Some(Self::HalfMd4),
+            2 => Some(Self::Tea),
+            3 => Some(Self::UnsignedLegacy),
+            4 => Some(Self::UnsignedHalfMd4),
+            5 => Some(Self::UnsignedTea),
+            6 => Some(Self::SipHash),
+            _ => None,
+        }
+    }
+}
+
+/// Half-MD4 karma fonksiyonu (ext4 varsayılanı).
+///
+/// Dosya adını 32-bit hash değerine dönüştürür.
+/// Gerçek half_md4, TEA tabanlı hash'e yakın basitleştirilmiş versiyondur.
+pub fn dx_hash_half_md4(name: &[u8], seed: u32) -> u32 {
+    let mut hash = seed;
+    for &b in name {
+        hash = hash.wrapping_mul(0x01000193) ^ (b as u32); // FNV-benzeri
+    }
+    // Sıfır hash geçersiz — 1'e yuvarlat
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
+/// HTree dizin araması.
+///
+/// `root_block` verilen dx_root bloğu ve `entries` listesi ile
+/// belirtilen dosya adının bulunduğu dizin bloğu döner.
+pub fn htree_lookup(entries: &[DxEntry], name_hash: u32) -> Option<u32> {
+    if entries.is_empty() {
+        return None;
+    }
+    // İkili arama: hash değerine göre doğru bloğu bul
+    let mut lo = 0usize;
+    let mut hi = entries.len();
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if entries[mid].hash <= name_hash {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(entries[lo].block)
+}
+
+/// dx_root bloğundan giriş tablosunu ayrıştırır.
+pub fn parse_dx_root(block_data: &[u8]) -> Option<(DxRoot, Vec<DxEntry>)> {
+    if block_data.len() < 40 {
+        return None;
+    }
+    let root = DxRoot {
+        dot_inode: u32::from_le_bytes([block_data[0], block_data[1], block_data[2], block_data[3]]),
+        dot_rec_len: u16::from_le_bytes([block_data[4], block_data[5]]),
+        dot_name_len: block_data[6],
+        dot_file_type: block_data[7],
+        dotdot_inode: u32::from_le_bytes([
+            block_data[8],
+            block_data[9],
+            block_data[10],
+            block_data[11],
+        ]),
+        dotdot_rec_len: u16::from_le_bytes([block_data[12], block_data[13]]),
+        dotdot_name_len: block_data[14],
+        dotdot_file_type: block_data[15],
+        reserved_zero: u32::from_le_bytes([
+            block_data[16],
+            block_data[17],
+            block_data[18],
+            block_data[19],
+        ]),
+        hash_version: block_data[20],
+        info_length: block_data[21],
+        indirect_levels: block_data[22],
+        unused_flags: block_data[23],
+        limit: u16::from_le_bytes([block_data[24], block_data[25]]),
+        count: u16::from_le_bytes([block_data[26], block_data[27]]),
+        block: u32::from_le_bytes([
+            block_data[28],
+            block_data[29],
+            block_data[30],
+            block_data[31],
+        ]),
+    };
+
+    let count = root.count as usize;
+    let mut entries = Vec::with_capacity(count);
+    let mut offset = 32usize;
+    for _ in 0..count {
+        if offset + 8 > block_data.len() {
+            break;
+        }
+        entries.push(DxEntry {
+            hash: u32::from_le_bytes([
+                block_data[offset],
+                block_data[offset + 1],
+                block_data[offset + 2],
+                block_data[offset + 3],
+            ]),
+            block: u32::from_le_bytes([
+                block_data[offset + 4],
+                block_data[offset + 5],
+                block_data[offset + 6],
+                block_data[offset + 7],
+            ]),
+        });
+        offset += 8;
+    }
+
+    Some((root, entries))
 }

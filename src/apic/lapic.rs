@@ -236,7 +236,13 @@ fn common_init() {
 /// ```
 fn init_timer() {
     // TSC-deadline desteğini kontrol et
-    if has_tsc_deadline() {
+    // Simics'te TSC-Deadline MSR yazımları AP'de #GP oluşturabilir — periyodik moda düş
+    #[cfg(feature = "simics")]
+    let use_tsc_deadline = false;
+    #[cfg(not(feature = "simics"))]
+    let use_tsc_deadline = has_tsc_deadline();
+
+    if use_tsc_deadline {
         // TSC-Deadline modu: LVT Timer = vektör 32 + TSC-Deadline mod biti
         write_reg(APIC_LVT_TIMER, 32 | LVT_TIMER_TSC_DEADLINE);
         TSC_DEADLINE_ACTIVE.store(true, Ordering::SeqCst);
@@ -253,10 +259,38 @@ fn init_timer() {
         );
     } else {
         // Geri düş: Periyodik mod (TSC-Deadline yoksa)
-        write_reg(APIC_TIMER_DIV, 0xB);
-        write_reg(APIC_TIMER_INIT, 10_000_000);
-        write_reg(APIC_LVT_TIMER, 32 | 0x20000);
-        crate::serial_println!("[LAPIC] Periodic timer active (fallback)");
+        // Önce TSC ile LAPIC timer frekansını kalibre et
+        calibrate_tsc();
+        write_reg(APIC_TIMER_DIV, 0xB); // Bölen = 1
+
+        // LAPIC frekansını ölç: 10ms boyunca LAPIC timer'ın kaç tick yediğine bak
+        // Kısa ölçüm: max değerle başlat, TSC ile 10ms bekle
+        write_reg(APIC_LVT_TIMER, 32 | (1 << 16)); // Masked
+        write_reg(APIC_TIMER_INIT, 0xFFFF_FFFF);
+        let tsc_start = unsafe { core::arch::x86_64::_rdtsc() };
+        let tsc_freq = tsc_frequency();
+        let tsc_10ms = tsc_freq / 100; // 10ms in TSC ticks
+        while (unsafe { core::arch::x86_64::_rdtsc() } - tsc_start) < tsc_10ms {
+            core::hint::spin_loop();
+        }
+        let current = read_reg(APIC_TIMER_CURRENT);
+        let lapic_ticks_10ms = 0xFFFF_FFFFu32.wrapping_sub(current);
+
+        // Timer'ı durdur, sonra kalibre edilmiş değerle kur
+        write_reg(APIC_TIMER_INIT, 0);
+
+        let init_count = if lapic_ticks_10ms > 100 {
+            lapic_ticks_10ms
+        } else {
+            10_000_000u32 // Kalibrasyon başarısız, varsayılan
+        };
+
+        write_reg(APIC_TIMER_INIT, init_count);
+        write_reg(APIC_LVT_TIMER, 32 | 0x20000); // Periodic, vector 32
+        crate::serial_println!(
+            "[LAPIC] Periodic timer active (calibrated: {} ticks/10ms)",
+            init_count
+        );
     }
 }
 
@@ -305,7 +339,7 @@ fn calibrate_tsc() {
         let mut gate = x86_64::instructions::port::Port::<u8>::new(0x61);
         let val = gate.read();
         gate.write((val & 0xFC) | 0x01); // Höparlör kapısını etkinleştir (speaker gate)
-        // Basit spin-wait döngüsü
+                                         // Basit spin-wait döngüsü
         for _ in 0..10_000_000 {
             core::hint::spin_loop();
         }
@@ -323,8 +357,24 @@ fn calibrate_tsc() {
         let freq = tsc_delta * 100;
         TSC_FREQ_HZ.store(freq, Ordering::SeqCst);
     } else {
-        // Geri düş: 3 GHz varsayımı (kalibrasyon başarısız olduğunda)
-        TSC_FREQ_HZ.store(3_000_000_000, Ordering::SeqCst);
+        // CPUID leaf 0x16 ile işlemci frekansını almayı dene
+        let max_leaf = unsafe { core::arch::x86_64::__cpuid(0) }.eax;
+        let freq = if max_leaf >= 0x16 {
+            let cpuid16 = unsafe { core::arch::x86_64::__cpuid_count(0x16, 0) };
+            if cpuid16.eax > 0 {
+                // EAX = base frequency in MHz
+                (cpuid16.eax as u64) * 1_000_000
+            } else {
+                3_000_000_000u64 // CPUID boş dönerse 3 GHz
+            }
+        } else {
+            3_000_000_000u64 // Leaf 0x16 desteklenmiyorsa 3 GHz
+        };
+        crate::serial_println!(
+            "[TSC] PIT calibration failed, using CPUID/fallback: {} Hz",
+            freq
+        );
+        TSC_FREQ_HZ.store(freq, Ordering::SeqCst);
     }
 
     // LAPIC timer'ı durdur
@@ -342,6 +392,16 @@ pub fn deadline_arm(ticks_from_now: u64) {
     let deadline = current_tsc + ticks_from_now;
     unsafe {
         Msr::new(IA32_TSC_DEADLINE_MSR).write(deadline);
+    }
+}
+
+pub fn mask_timer() {
+    write_reg(APIC_LVT_TIMER, read_reg(APIC_LVT_TIMER) | (1 << 16));
+    write_reg(APIC_TIMER_INIT, 0);
+    if TSC_DEADLINE_ACTIVE.swap(false, Ordering::SeqCst) {
+        unsafe {
+            Msr::new(IA32_TSC_DEADLINE_MSR).write(0);
+        }
     }
 }
 

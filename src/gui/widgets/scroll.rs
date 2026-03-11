@@ -210,7 +210,12 @@ impl Widget for ScrollBar {
                 fb.draw_string(x + 4, y + (h - 16) / 2, "<", Theme::TEXT_PRIMARY.to_u32());
                 // Sağ ok düğmesi
                 fb.draw_rect(x + w - 16, y, 16, h, Theme::TITLEBAR_BG.to_u32());
-                fb.draw_string(x + w - 12, y + (h - 16) / 2, ">", Theme::TEXT_PRIMARY.to_u32());
+                fb.draw_string(
+                    x + w - 12,
+                    y + (h - 16) / 2,
+                    ">",
+                    Theme::TEXT_PRIMARY.to_u32(),
+                );
             }
             Orientation::Vertical => {
                 // Yukarı ok düğmesi
@@ -218,7 +223,12 @@ impl Widget for ScrollBar {
                 fb.draw_string(x + (w - 8) / 2, y + 2, "^", Theme::TEXT_PRIMARY.to_u32());
                 // Aşağı ok düğmesi
                 fb.draw_rect(x, y + h - 16, w, 16, Theme::TITLEBAR_BG.to_u32());
-                fb.draw_string(x + (w - 8) / 2, y + h - 14, "v", Theme::TEXT_PRIMARY.to_u32());
+                fb.draw_string(
+                    x + (w - 8) / 2,
+                    y + h - 14,
+                    "v",
+                    Theme::TEXT_PRIMARY.to_u32(),
+                );
             }
         }
     }
@@ -269,9 +279,8 @@ impl Widget for ScrollBar {
                     if click_pos < thumb_center {
                         self.value = self.value.saturating_sub(self.page_size);
                     } else {
-                        self.value = (self.value + self.page_size).min(
-                            self.max_value.saturating_sub(self.page_size)
-                        );
+                        self.value = (self.value + self.page_size)
+                            .min(self.max_value.saturating_sub(self.page_size));
                     }
                     if let Some(handler) = self.on_change {
                         handler(self.value);
@@ -302,9 +311,8 @@ impl Widget for ScrollBar {
                     if click_pos < thumb_center {
                         self.value = self.value.saturating_sub(self.page_size);
                     } else {
-                        self.value = (self.value + self.page_size).min(
-                            self.max_value.saturating_sub(self.page_size)
-                        );
+                        self.value = (self.value + self.page_size)
+                            .min(self.max_value.saturating_sub(self.page_size));
                     }
                     if let Some(handler) = self.on_change {
                         handler(self.value);
@@ -450,7 +458,9 @@ impl Slider {
             ((value - self.min_value + self.step / 2) / self.step) * self.step + self.min_value
         } else {
             value
-        }.max(self.min_value).min(self.max_value)
+        }
+        .max(self.min_value)
+        .min(self.max_value)
     }
 }
 
@@ -470,7 +480,13 @@ impl Widget for Slider {
 
         // Soldan thumb'a kadar dolumu aksent rengiyle göster
         let thumb_x = x + 10 + self.thumb_position() as usize;
-        fb.draw_rect(x + 10, track_y, thumb_x - x - 10, 8, Theme::ACCENT_PRIMARY.to_u32());
+        fb.draw_rect(
+            x + 10,
+            track_y,
+            thumb_x - x - 10,
+            8,
+            Theme::ACCENT_PRIMARY.to_u32(),
+        );
 
         // Thumb dikdörtgeni — sürükleniyorsa aksent, üstündeyse hover rengi
         let thumb_color = if self.dragging {
@@ -486,7 +502,12 @@ impl Widget for Slider {
         // Sağ kenarında mevcut değerin metin etiketi
         let value_str = alloc::format!("{}", self.value);
         let label_x = x + w - value_str.len() * 8 - 5;
-        fb.draw_string(label_x, y + (h - 16) / 2, &value_str, Theme::TEXT_SECONDARY.to_u32());
+        fb.draw_string(
+            label_x,
+            y + (h - 16) / 2,
+            &value_str,
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
     }
 
     /// Tıklama olayını işler.

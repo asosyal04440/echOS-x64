@@ -71,14 +71,14 @@
 //!                                 IP'yi döndür
 //! ```
 
-use super::{Ipv4Addr, Port, SocketAddr, NetError};
+use super::socket::{bind, close, recvfrom, sendto, socket};
 use super::udp;
-use super::socket::{socket, bind, sendto, recvfrom, close};
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
-use alloc::format;
+use super::{Ipv4Addr, NetError, Port, SocketAddr};
 use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 /// DNS sunucu portu: hem UDP hem TCP'de kullanılır
@@ -90,15 +90,15 @@ const DNS_PORT: u16 = 53;
 /// İstemciler sorgu yaparken hangi türde kayıt istediklerini belirtir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DnsRecordType {
-    A = 1,      // IPv4 adresi (32 bit)
-    NS = 2,     // İsim sunucusu (Name Server): Bu domain için yetkili sunucu
-    CNAME = 5,  // Kanonik isim (Alias): Bir domain adı başka bir domain'e işaret eder
-    SOA = 6,    // Yetki başlangıcı (Start of Authority): Zone hakkında bilgi
-    PTR = 12,   // Ters sorgu (Pointer): IP'den domain adına (reverse DNS)
-    MX = 15,    // Posta sunucusu (Mail Exchange)
-    TXT = 16,   // Metin kaydı (Text): SPF, DKIM vb. için kullanılır
-    AAAA = 28,  // IPv6 adresi (128 bit)
-    SRV = 33,   // Servis kaydı: Belirli servisler için port/öncelik bilgisi
+    A = 1,     // IPv4 adresi (32 bit)
+    NS = 2,    // İsim sunucusu (Name Server): Bu domain için yetkili sunucu
+    CNAME = 5, // Kanonik isim (Alias): Bir domain adı başka bir domain'e işaret eder
+    SOA = 6,   // Yetki başlangıcı (Start of Authority): Zone hakkında bilgi
+    PTR = 12,  // Ters sorgu (Pointer): IP'den domain adına (reverse DNS)
+    MX = 15,   // Posta sunucusu (Mail Exchange)
+    TXT = 16,  // Metin kaydı (Text): SPF, DKIM vb. için kullanılır
+    AAAA = 28, // IPv6 adresi (128 bit)
+    SRV = 33,  // Servis kaydı: Belirli servisler için port/öncelik bilgisi
 }
 
 impl DnsRecordType {
@@ -133,12 +133,12 @@ impl DnsRecordType {
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct DnsHeader {
-    pub id: u16,       // Sorgu/yanıt eşleştirmek için benzersiz kimlik
-    pub flags: u16,    // Bayraklar: QR, Opcode, AA, TC, RD, RA, Z, RCODE
-    pub qdcount: u16,  // Soru bölümü kayıt sayısı
-    pub ancount: u16,  // Yanıt bölümü kayıt sayısı
-    pub nscount: u16,  // Yetki bölümü kayıt sayısı (name server)
-    pub arcount: u16,  // Ek bölümü kayıt sayısı (additional)
+    pub id: u16,      // Sorgu/yanıt eşleştirmek için benzersiz kimlik
+    pub flags: u16,   // Bayraklar: QR, Opcode, AA, TC, RD, RA, Z, RCODE
+    pub qdcount: u16, // Soru bölümü kayıt sayısı
+    pub ancount: u16, // Yanıt bölümü kayıt sayısı
+    pub nscount: u16, // Yetki bölümü kayıt sayısı (name server)
+    pub arcount: u16, // Ek bölümü kayıt sayısı (additional)
 }
 
 impl DnsHeader {
@@ -288,11 +288,11 @@ impl DnsQuestion {
 /// ```
 #[derive(Clone, Debug)]
 pub struct DnsAnswer {
-    pub name: String,   // Yanıtın ait olduğu alan adı
-    pub atype: u16,     // Kayıt türü (A=1, AAAA=28 vb.)
-    pub aclass: u16,    // Sınıf (IN=1)
-    pub ttl: u32,       // Time-To-Live: önbellekte kaç saniye tutulacağı
-    pub data: Vec<u8>,  // Ham kayıt verisi (RDATA)
+    pub name: String,  // Yanıtın ait olduğu alan adı
+    pub atype: u16,    // Kayıt türü (A=1, AAAA=28 vb.)
+    pub aclass: u16,   // Sınıf (IN=1)
+    pub ttl: u32,      // Time-To-Live: önbellekte kaç saniye tutulacağı
+    pub data: Vec<u8>, // Ham kayıt verisi (RDATA)
 }
 
 impl DnsAnswer {
@@ -324,13 +324,16 @@ impl DnsAnswer {
         let answer_data = data[pos..pos + rdlength].to_vec();
         pos += rdlength;
 
-        Ok((DnsAnswer {
-            name,
-            atype,
-            aclass,
-            ttl,
-            data: answer_data,
-        }, pos))
+        Ok((
+            DnsAnswer {
+                name,
+                atype,
+                aclass,
+                ttl,
+                data: answer_data,
+            },
+            pos,
+        ))
     }
 
     /// DNS wire formatındaki alan adını metne çevirir.
@@ -340,8 +343,8 @@ impl DnsAnswer {
     /// bu sayede tekrarlayan alan adları için bant genişliği tasarrufu sağlanır.
     fn parse_name(data: &[u8], pos: &mut usize) -> Result<String, NetError> {
         let mut name = String::new();
-        let mut jumped = false;   // İşaretçi atlaması yapıldı mı?
-        let mut jumped_pos = 0;   // Atlama sonrası geri dönülecek konum
+        let mut jumped = false; // İşaretçi atlaması yapıldı mı?
+        let mut jumped_pos = 0; // Atlama sonrası geri dönülecek konum
 
         loop {
             let len = data[*pos] as usize;
@@ -388,7 +391,12 @@ impl DnsAnswer {
     /// A kaydının RDATA alanı tam olarak 4 byte olmalıdır.
     pub fn as_ipv4(&self) -> Option<Ipv4Addr> {
         if self.atype == 1 && self.data.len() == 4 {
-            Some(Ipv4Addr::from_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]))
+            Some(Ipv4Addr::from_bytes([
+                self.data[0],
+                self.data[1],
+                self.data[2],
+                self.data[3],
+            ]))
         } else {
             None
         }
@@ -414,11 +422,11 @@ static DNS_SOCKET: Mutex<Option<u32>> = Mutex::new(None);
 /// TTL (Time-To-Live) süresi dolmadan girdi geçerli kabul edilir.
 #[derive(Clone, Debug)]
 pub struct DnsCacheEntry {
-    pub name: String,             // Alan adı
+    pub name: String,               // Alan adı
     pub record_type: DnsRecordType, // Kayıt türü (A, AAAA, CNAME vb.)
-    pub data: Vec<u8>,            // Ham kayıt verisi
-    pub ttl: u32,                 // Saniye cinsinden geçerlilik süresi
-    pub obtained_at: u64,         // Alındığı zaman damgası
+    pub data: Vec<u8>,              // Ham kayıt verisi
+    pub ttl: u32,                   // Saniye cinsinden geçerlilik süresi
+    pub obtained_at: u64,           // Alındığı zaman damgası
 }
 
 impl DnsCacheEntry {
@@ -433,7 +441,12 @@ impl DnsCacheEntry {
     /// A kaydı ise IPv4 adresini döner.
     pub fn as_ipv4(&self) -> Option<Ipv4Addr> {
         if self.record_type == DnsRecordType::A && self.data.len() == 4 {
-            Some(Ipv4Addr::from_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]))
+            Some(Ipv4Addr::from_bytes([
+                self.data[0],
+                self.data[1],
+                self.data[2],
+                self.data[3],
+            ]))
         } else {
             None
         }
@@ -474,7 +487,11 @@ pub fn init() {
 /// DNS önbelleğinden belirtilen kayıt türü için girdi arar.
 ///
 /// Girdi varsa ve TTL dolmamışsa döner, yoksa veya süresi geçmişse `None` döner.
-pub fn get_cached(name: &str, record_type: DnsRecordType, current_time: u64) -> Option<DnsCacheEntry> {
+pub fn get_cached(
+    name: &str,
+    record_type: DnsRecordType,
+    current_time: u64,
+) -> Option<DnsCacheEntry> {
     let key = format!("{}:{}", name, record_type as u16);
     let cache = DNS_CACHE.lock();
     if let Some(entry) = cache.get(&key) {
@@ -492,10 +509,13 @@ pub fn get_cached(name: &str, record_type: DnsRecordType, current_time: u64) -> 
 pub fn cache_entry(entry: DnsCacheEntry, current_time: u64) {
     let key = format!("{}:{}", entry.name, entry.record_type as u16);
     let mut cache = DNS_CACHE.lock();
-    cache.insert(key, DnsCacheEntry {
-        obtained_at: current_time,
-        ..entry
-    });
+    cache.insert(
+        key,
+        DnsCacheEntry {
+            obtained_at: current_time,
+            ..entry
+        },
+    );
 }
 
 /// Tüm DNS önbelleğini temizler.
@@ -511,13 +531,49 @@ pub fn cache_size() -> usize {
 /// Bir alan adını DNS sunucusuna sorarak IPv4 adresine çözümler.
 ///
 /// Çalışma mantığı:
-/// 1. UDP soketi oluştur ve geçici porta bağlan
-/// 2. DNS sorgusu oluştur (Header + Question)
-/// 3. DNS sunucusuna gönder (UDP port 53)
-/// 4. Yanıtı al ve ayrıştır
-/// 5. İlk A kaydını döndür
+/// 1. Önce DNS önbelleğini kontrol et — geçerli girdi varsa hemen döndür
+/// 2. Önbellekte yoksa UDP soketi oluştur ve geçici porta bağlan
+/// 3. DNS sorgusu oluştur (Header + Question)
+/// 4. DNS sunucusuna gönder (UDP port 53)
+/// 5. Yanıtı al ve ayrıştır
+/// 6. CNAME zinciri varsa takip et (maks. 8 atlama)
+/// 7. Sonucu önbelleğe kaydet ve ilk A kaydını döndür
 pub fn resolve(hostname: &str, dns_server: Ipv4Addr) -> Result<Ipv4Addr, NetError> {
-    // UDP soketi oluştur
+    resolve_with_depth(hostname, dns_server, 0)
+}
+
+/// CNAME zinciri takibinde sonsuz döngüyü önlemek için maksimum derinlik.
+const MAX_CNAME_DEPTH: u8 = 8;
+
+/// İç çözümleme fonksiyonu — CNAME takibi için derinlik sayacı içerir.
+fn resolve_with_depth(
+    hostname: &str,
+    dns_server: Ipv4Addr,
+    depth: u8,
+) -> Result<Ipv4Addr, NetError> {
+    if depth >= MAX_CNAME_DEPTH {
+        crate::serial_println!(
+            "[DNS] CNAME chain depth limit ({}) exceeded for {}",
+            MAX_CNAME_DEPTH,
+            hostname
+        );
+        return Err(NetError::ProtocolError);
+    }
+
+    // ── 1. Önbellek kontrolü ──────────────────────────────────────────
+    let current_time = crate::interrupts::get_ticks();
+    if let Some(cached) = get_cached(hostname, DnsRecordType::A, current_time) {
+        if let Some(ip) = cached.as_ipv4() {
+            crate::serial_println!(
+                "[DNS] Cache hit for {} -> {}",
+                hostname,
+                super::socket::format_ipv4(ip)
+            );
+            return Ok(ip);
+        }
+    }
+
+    // ── 2. UDP soketi oluştur ─────────────────────────────────────────
     let sock_id = socket(
         super::socket::AddressFamily::IPV4,
         super::socket::SocketType::DGRAM,
@@ -542,7 +598,7 @@ pub fn resolve(hostname: &str, dns_server: Ipv4Addr) -> Result<Ipv4Addr, NetErro
     let dst = SocketAddr::new(dns_server, Port(DNS_PORT));
     sendto(sock_id, &buf[..total_len], dst, 0)?;
 
-    crate::serial_println!("[DNS] Query sent for {}", hostname);
+    crate::serial_println!("[DNS] Query sent for {} (depth={})", hostname, depth);
 
     // Yanıtı al
     let mut resp_buf = vec![0u8; 512];
@@ -575,18 +631,131 @@ pub fn resolve(hostname: &str, dns_server: Ipv4Addr) -> Result<Ipv4Addr, NetErro
         offset += 4; // QTYPE + QCLASS
     }
 
-    // Yanıt kayıtlarını ayrıştır; ilk A kaydını döndür
+    // ── 3. Yanıt kayıtlarını ayrıştır ─────────────────────────────────
+    // İlk geçişte A kaydı arıyoruz; bulamazsak CNAME takip ediyoruz.
+    let mut cname_target: Option<String> = None;
+
     for _ in 0..resp_header.ancount {
         let (answer, new_offset) = DnsAnswer::parse(&resp_buf, offset)?;
         offset = new_offset;
 
+        // A kaydı bulundu — önbelleğe kaydet ve döndür
         if let Some(ip) = answer.as_ipv4() {
-            crate::serial_println!("[DNS] {} -> {}", hostname, super::socket::format_ipv4(ip));
+            let ts = crate::interrupts::get_ticks();
+            cache_entry(
+                DnsCacheEntry {
+                    name: String::from(hostname),
+                    record_type: DnsRecordType::A,
+                    data: answer.data.clone(),
+                    ttl: answer.ttl,
+                    obtained_at: ts,
+                },
+                ts,
+            );
+            crate::serial_println!(
+                "[DNS] {} -> {} (TTL={}s)",
+                hostname,
+                super::socket::format_ipv4(ip),
+                answer.ttl
+            );
             return Ok(ip);
+        }
+
+        // CNAME kaydı — hedef alan adını çıkar
+        if answer.atype == DnsRecordType::CNAME as u16 && cname_target.is_none() {
+            // CNAME RDATA'sı wire-format alan adıdır; ayrıştır
+            if let Ok(target) = parse_name_from_rdata(
+                &resp_buf,
+                answer.data.as_slice(),
+                offset.saturating_sub(answer.data.len()),
+            ) {
+                crate::serial_println!("[DNS] CNAME {} -> {}", hostname, target);
+                // CNAME'i de önbelleğe al
+                let ts = crate::interrupts::get_ticks();
+                cache_entry(
+                    DnsCacheEntry {
+                        name: String::from(hostname),
+                        record_type: DnsRecordType::CNAME,
+                        data: target.as_bytes().to_vec(),
+                        ttl: answer.ttl,
+                        obtained_at: ts,
+                    },
+                    ts,
+                );
+                cname_target = Some(target);
+            }
         }
     }
 
+    // ── 4. CNAME takibi ───────────────────────────────────────────────
+    if let Some(target) = cname_target {
+        return resolve_with_depth(&target, dns_server, depth + 1);
+    }
+
     Err(NetError::HostUnreachable) // A kaydı bulunamadı
+}
+
+/// DNS wire-format RDATA içindeki alan adını metne çevirir.
+///
+/// CNAME RDATA'sı, tam paketin sıkıştırma işaretçileri ile birlikte
+/// kodlanmış bir alan adı içerir. Bu yardımcı fonksiyon bunu çözer.
+fn parse_name_from_rdata(
+    full_packet: &[u8],
+    _rdata: &[u8],
+    rdata_offset: usize,
+) -> Result<String, NetError> {
+    let mut pos = rdata_offset;
+    let mut name = String::new();
+    let mut jumped = false;
+    let mut jumped_pos = 0usize;
+
+    loop {
+        if pos >= full_packet.len() {
+            break;
+        }
+        let len = full_packet[pos] as usize;
+        pos += 1;
+
+        if len == 0 {
+            break;
+        }
+
+        // Sıkıştırma işaretçisi
+        if (len & 0xC0) == 0xC0 {
+            if pos >= full_packet.len() {
+                return Err(NetError::InvalidPacket);
+            }
+            if !jumped {
+                jumped_pos = pos + 1;
+                jumped = true;
+            }
+            let ptr = ((len & 0x3F) << 8) | (full_packet[pos] as usize);
+            pos = ptr;
+            continue;
+        }
+
+        if pos + len > full_packet.len() {
+            return Err(NetError::InvalidPacket);
+        }
+
+        if !name.is_empty() {
+            name.push('.');
+        }
+        for i in 0..len {
+            name.push(full_packet[pos + i] as char);
+        }
+        pos += len;
+    }
+
+    if jumped {
+        // Restore position after pointer jump (not needed for return value)
+        let _ = jumped_pos;
+    }
+
+    if name.is_empty() {
+        return Err(NetError::InvalidPacket);
+    }
+    Ok(name)
 }
 
 /// Varsayılan DNS sunucusunu kullanarak alan adını çözümler.

@@ -10,14 +10,16 @@
 //! - NUMA düğümleri arası bellek erişimini azaltır
 //! - Gerçek zamanlı görevlerde gecikmeyi (latency) düşürür
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use alloc::vec::Vec;
+use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
+use crate::preempt::{preempt_enabled, PreemptDisableGuard};
+use crate::rcu::{synchronize_rcu, RcuPtr};
+use crate::topology::{
+    get_cache_sharing_cpus, get_core_cpus, get_package_cpus, get_system_topology,
+};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
-use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
-use crate::preempt::{PreemptDisableGuard, preempt_enabled};
-use crate::rcu::{RcuPtr, synchronize_rcu};
-use crate::topology::{get_system_topology, get_cache_sharing_cpus, get_package_cpus, get_core_cpus};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// CPU affinity maskesi türü.
 /// Her bit, bir CPU çekirdeğini temsil eder.
@@ -415,7 +417,8 @@ impl TaskAffinity {
         let numa_node = self.get_numa_node();
 
         // Tercih edilen NUMA düğümündeki CPU'ları bul
-        let numa_cpus: Vec<u32> = available_cpus.iter()
+        let numa_cpus: Vec<u32> = available_cpus
+            .iter()
             .filter(|&&cpu| self.is_numa_cpu(cpu))
             .copied()
             .collect();
@@ -440,7 +443,8 @@ impl TaskAffinity {
         let cache_cpus = get_cache_sharing_cpus(last_cpu, cache_level_u8);
 
         // Önbellek paylaşan CPU'ları bul
-        let shared_cpus: Vec<u32> = available_cpus.iter()
+        let shared_cpus: Vec<u32> = available_cpus
+            .iter()
             .filter(|&&cpu| cache_cpus.contains(&cpu))
             .copied()
             .collect();
@@ -463,7 +467,8 @@ impl TaskAffinity {
         let package_cpus = get_package_cpus(self.get_last_cpu());
 
         // Aynı paketteki CPU'ları bul
-        let same_package_cpus: Vec<u32> = available_cpus.iter()
+        let same_package_cpus: Vec<u32> = available_cpus
+            .iter()
             .filter(|&&cpu| package_cpus.contains(&cpu))
             .copied()
             .collect();
@@ -599,7 +604,6 @@ impl AffinityManager {
         for _ in 0..max_cpus {
             cpu_loads.push(AtomicU32::new(0));
         }
-
         Self {
             max_cpus,
             task_affinities,
@@ -618,7 +622,8 @@ impl AffinityManager {
 
         // Vektörün yeterince büyük olduğundan emin ol
         while self.task_affinities.len() <= task_id as usize {
-            self.task_affinities.push(RcuPtr::new(core::ptr::null_mut()));
+            self.task_affinities
+                .push(RcuPtr::new(core::ptr::null_mut()));
         }
 
         self.task_affinities[task_id as usize] = affinity_ptr.clone();
@@ -813,8 +818,12 @@ impl AffinityManager {
         affinity.read().migrations.fetch_add(1, Ordering::Relaxed);
         self.stats.record_migration();
 
-        crate::serial_println!("Affinity: Görev {} CPU {}'den CPU {}'e taşındı",
-            task_id, current_cpu, target_cpu);
+        crate::serial_println!(
+            "Affinity: Görev {} CPU {}'den CPU {}'e taşındı",
+            task_id,
+            current_cpu,
+            target_cpu
+        );
 
         true
     }

@@ -34,12 +34,12 @@
 //!     |  (2*MSL bekleme: TIME_WAIT)   |
 //! ```
 
-use super::{Ipv4Addr, Port, SocketAddr, NetError, allocate_socket_id};
 use super::ip::{IpProtocol, Ipv4Packet};
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-use alloc::vec;
+use super::{allocate_socket_id, Ipv4Addr, NetError, Port, SocketAddr};
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
@@ -51,13 +51,13 @@ use spin::Mutex;
 // Toplam seçenek alanı 40 baytı geçemez (min başlık 20B, max 60B).
 
 /// TCP seçenek türleri - RFC 793 ve uzantıları
-pub const TCPOPT_EOL: u8 = 0;           // End of Option List - seçenekler bitti
-pub const TCPOPT_NOP: u8 = 1;           // No Operation - hizalama dolgusu
-pub const TCPOPT_MSS: u8 = 2;           // Maximum Segment Size - maks. segment boyutu
-pub const TCPOPT_WINDOW_SCALE: u8 = 3;  // Window Scale - pencere ölçekleme (RFC 7323)
+pub const TCPOPT_EOL: u8 = 0; // End of Option List - seçenekler bitti
+pub const TCPOPT_NOP: u8 = 1; // No Operation - hizalama dolgusu
+pub const TCPOPT_MSS: u8 = 2; // Maximum Segment Size - maks. segment boyutu
+pub const TCPOPT_WINDOW_SCALE: u8 = 3; // Window Scale - pencere ölçekleme (RFC 7323)
 pub const TCPOPT_SACK_PERMITTED: u8 = 4; // SACK izni (RFC 2018)
-pub const TCPOPT_SACK: u8 = 5;          // Selective ACK verisi
-pub const TCPOPT_TIMESTAMP: u8 = 8;     // Zaman damgası (RTT ölçümü için)
+pub const TCPOPT_SACK: u8 = 5; // Selective ACK verisi
+pub const TCPOPT_TIMESTAMP: u8 = 8; // Zaman damgası (RTT ölçümü için)
 
 // ============================================================================
 // TCP SACK (Seçici Onaylama - Selective Acknowledgment)
@@ -200,8 +200,8 @@ impl SackScoreboard {
         let adjacent = a.end.wrapping_sub(b.start) == 0 || b.end.wrapping_sub(a.start) == 0;
 
         // Örtüşme: aralıklar kesişiyor
-        let overlap = (a.start <= b.start && a.end > b.start) ||
-                      (b.start <= a.start && b.end > a.start);
+        let overlap =
+            (a.start <= b.start && a.end > b.start) || (b.start <= a.start && b.end > a.start);
 
         overlap || adjacent
     }
@@ -305,8 +305,18 @@ impl SackScoreboard {
                 break;
             }
 
-            let start = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-            let end = u32::from_be_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
+            let start = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+            let end = u32::from_be_bytes([
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
+            ]);
 
             scoreboard.add_block(SackBlock::new(start, end));
         }
@@ -555,7 +565,9 @@ pub struct WindowScaleOption {
 
 impl WindowScaleOption {
     pub fn new(scale: u8) -> Self {
-        WindowScaleOption { scale: scale.min(14) } // RFC 7323: maks. 14
+        WindowScaleOption {
+            scale: scale.min(14),
+        } // RFC 7323: maks. 14
     }
 
     /// Pencere ölçekleme seçeneğini serileştir: [tür][uzunluk=3][ölçek]
@@ -591,8 +603,8 @@ impl WindowScaleOption {
 /// TCP Zaman Damgası seçeneği - RTT ölçümü ve PAWS koruması
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TimestampOption {
-    pub ts_val: u32,  // Gönderenin zaman damgası değeri
-    pub ts_ecr: u32,  // Geri yankılanan zaman damgası (echo reply)
+    pub ts_val: u32, // Gönderenin zaman damgası değeri
+    pub ts_ecr: u32, // Geri yankılanan zaman damgası (echo reply)
 }
 
 impl TimestampOption {
@@ -602,9 +614,13 @@ impl TimestampOption {
 
     /// Şimdiki zamanla oluştur (ts_ecr karşı taraftan gelen değer)
     pub fn now(ts_ecr: u32) -> Self {
-        // Şimdilik rastgele değer kullanılıyor (gerçekte monoton saat kullanılır)
-        let ts_val = crate::random::next_u32();
-        TimestampOption { ts_val, ts_ecr }
+        // Basit monoton sayaç kullanarak zaman damgası oluştur
+        static mut TIMESTAMP_COUNTER: u32 = 0;
+        unsafe {
+            TIMESTAMP_COUNTER = TIMESTAMP_COUNTER.wrapping_add(1000);
+            let ts_val = TIMESTAMP_COUNTER;
+            TimestampOption { ts_val, ts_ecr }
+        }
     }
 
     /// Zaman damgası seçeneğini serileştir: [8][10][ts_val][ts_ecr]
@@ -645,12 +661,12 @@ impl TimestampOption {
 /// Ayrıştırılmış TCP seçenekleri - tüm seçenekler burada toplanır
 #[derive(Clone, Debug, Default)]
 pub struct TcpOptions {
-    pub mss: Option<u16>,                     // Maksimum Segment Boyutu
+    pub mss: Option<u16>,                        // Maksimum Segment Boyutu
     pub window_scale: Option<WindowScaleOption>, // Pencere ölçekleme faktörü
-    pub sack_permitted: bool,                  // SACK kullanımına izin var mı
-    pub sack_blocks: Vec<SackBlock>,           // Alınan SACK blokları
-    pub timestamps: Option<TimestampOption>,   // Zaman damgaları
-    pub tfo_cookie: Option<TfoCookie>,         // TFO çerezi
+    pub sack_permitted: bool,                    // SACK kullanımına izin var mı
+    pub sack_blocks: Vec<SackBlock>,             // Alınan SACK blokları
+    pub timestamps: Option<TimestampOption>,     // Zaman damgaları
+    pub tfo_cookie: Option<TfoCookie>,           // TFO çerezi
 }
 
 impl TcpOptions {
@@ -728,7 +744,12 @@ impl TcpOptions {
 
     /// SYN paketi için seçenekler oluştur.
     /// SYN'de MSS, pencere ölçekleme, SACK izni ve zaman damgaları müzakere edilir.
-    pub fn build_syn_options(mss: u16, ws_scale: u8, enable_sack: bool, enable_tfo: bool) -> Vec<u8> {
+    pub fn build_syn_options(
+        mss: u16,
+        ws_scale: u8,
+        enable_sack: bool,
+        enable_tfo: bool,
+    ) -> Vec<u8> {
         let mut opts = Vec::new();
 
         // MSS seçeneği (Maksimum Segment Boyutu bildirimi)
@@ -813,7 +834,7 @@ pub struct TcpHeader {
     pub dst_port: Port,
     pub seq_num: u32,
     pub ack_num: u32,
-    pub data_offset: u8,        // 4 bit, başlık uzunluğu 32-bit kelimeler cinsinden
+    pub data_offset: u8, // 4 bit, başlık uzunluğu 32-bit kelimeler cinsinden
     pub flags: TcpFlags,
     pub window_size: u16,
     pub checksum: u16,
@@ -837,37 +858,69 @@ impl TcpFlags {
     }
 
     pub fn syn() -> Self {
-        TcpFlags { syn: true, ..Default::default() }
+        TcpFlags {
+            syn: true,
+            ..Default::default()
+        }
     }
 
     pub fn syn_ack() -> Self {
-        TcpFlags { syn: true, ack: true, ..Default::default() }
+        TcpFlags {
+            syn: true,
+            ack: true,
+            ..Default::default()
+        }
     }
 
     pub fn ack() -> Self {
-        TcpFlags { ack: true, ..Default::default() }
+        TcpFlags {
+            ack: true,
+            ..Default::default()
+        }
     }
 
     pub fn fin() -> Self {
-        TcpFlags { fin: true, ..Default::default() }
+        TcpFlags {
+            fin: true,
+            ..Default::default()
+        }
     }
 
     pub fn fin_ack() -> Self {
-        TcpFlags { fin: true, ack: true, ..Default::default() }
+        TcpFlags {
+            fin: true,
+            ack: true,
+            ..Default::default()
+        }
     }
 
     pub fn rst() -> Self {
-        TcpFlags { rst: true, ..Default::default() }
+        TcpFlags {
+            rst: true,
+            ..Default::default()
+        }
     }
 
     pub fn to_u8(self) -> u8 {
         let mut val = 0u8;
-        if self.fin { val |= 0x01; }
-        if self.syn { val |= 0x02; }
-        if self.rst { val |= 0x04; }
-        if self.psh { val |= 0x08; }
-        if self.ack { val |= 0x10; }
-        if self.urg { val |= 0x20; }
+        if self.fin {
+            val |= 0x01;
+        }
+        if self.syn {
+            val |= 0x02;
+        }
+        if self.rst {
+            val |= 0x04;
+        }
+        if self.psh {
+            val |= 0x08;
+        }
+        if self.ack {
+            val |= 0x10;
+        }
+        if self.urg {
+            val |= 0x20;
+        }
         val
     }
 
@@ -1008,19 +1061,23 @@ pub fn verify_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, segment: &[u8]) -> bo
 /// LAST_ACK -> CLOSED (ACK alındı)
 /// TIME_WAIT -> CLOSED (2*MSL süre geçti)
 /// ```
+
+/// TIME_WAIT süresi: 2×MSL = 2×60 saniye (tick cinsinden)
+const TIME_WAIT_DURATION: u64 = 120;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TcpState {
-    Closed,       // Bağlantı yok
-    Listen,       // Bağlantı bekliyor
-    SynSent,      // SYN gönderildi, SYN-ACK bekleniyor
-    SynReceived,  // SYN alındı, SYN-ACK gönderildi
-    Established,  // Bağlantı kuruldu, veri transferi
-    FinWait1,     // FIN gönderildi, onay bekleniyor
-    FinWait2,     // FIN onaylandı, karşı tarafın FIN'i bekleniyor
-    CloseWait,    // Karşı taraf kapattı, uygulama kapanmayı bekliyor
-    Closing,      // Her iki taraf eş zamanlı kapanıyor
-    LastAck,      // Son ACK bekleniyor
-    TimeWait,     // 2*MSL süre bekleniyor (gecikmiş segmentlere karşı)
+    Closed,      // Bağlantı yok
+    Listen,      // Bağlantı bekliyor
+    SynSent,     // SYN gönderildi, SYN-ACK bekleniyor
+    SynReceived, // SYN alındı, SYN-ACK gönderildi
+    Established, // Bağlantı kuruldu, veri transferi
+    FinWait1,    // FIN gönderildi, onay bekleniyor
+    FinWait2,    // FIN onaylandı, karşı tarafın FIN'i bekleniyor
+    CloseWait,   // Karşı taraf kapattı, uygulama kapanmayı bekliyor
+    Closing,     // Her iki taraf eş zamanlı kapanıyor
+    LastAck,     // Son ACK bekleniyor
+    TimeWait,    // 2*MSL süre bekleniyor (gecikmiş segmentlere karşı)
 }
 
 /// TCP bağlantısı - tüm durum bilgilerini tutar.
@@ -1038,29 +1095,35 @@ pub struct TcpConnection {
     pub tx_buffer: Vec<u8>,
     pub listen_backlog: usize,
     // Tıkanıklık kontrolü değişkenleri
-    pub cwnd: u32,           // Tıkanıklık penceresi (Congestion Window)
-    pub ssthresh: u32,       // Yavaş başlangıç eşiği (Slow Start Threshold)
-    pub rtt: u32,            // Tahmin edilen gidiş-dönüş süresi (ms)
-    pub rtt_var: u32,        // RTT varyansı (Jacobson algoritması)
-    pub rto: u32,            // Yeniden iletim zaman aşımı = RTT + 4*RTTVAR (ms)
+    pub cwnd: u32,            // Tıkanıklık penceresi (Congestion Window)
+    pub ssthresh: u32,        // Yavaş başlangıç eşiği (Slow Start Threshold)
+    pub rtt: u32,             // Tahmin edilen gidiş-dönüş süresi (ms)
+    pub rtt_var: u32,         // RTT varyansı (Jacobson algoritması)
+    pub rto: u32,             // Yeniden iletim zaman aşımı = RTT + 4*RTTVAR (ms)
     pub retransmit_count: u8, // Yeniden iletim sayacı
     // Pencere ölçekleme
-    pub ws_scale: u8,        // Bizim pencere ölçekleme faktörümüz
-    pub peer_ws_scale: u8,   // Karşı tarafın pencere ölçekleme faktörü
+    pub ws_scale: u8,      // Bizim pencere ölçekleme faktörümüz
+    pub peer_ws_scale: u8, // Karşı tarafın pencere ölçekleme faktörü
     // SACK desteği
-    pub sack_permitted: bool,     // SACK müzakere edildi mi?
-    pub sack_scoreboard: SackScoreboard,  // Alınan SACK blokları panosu
-    pub rx_sack_blocks: Vec<SackBlock>,   // Göndereceğimiz SACK blokları
+    pub sack_permitted: bool,            // SACK müzakere edildi mi?
+    pub sack_scoreboard: SackScoreboard, // Alınan SACK blokları panosu
+    pub rx_sack_blocks: Vec<SackBlock>,  // Göndereceğimiz SACK blokları
     // Hızlı yeniden iletim
     pub fast_retx: FastRetransmitState,
     // Gönderme durumu (RFC 793 değişkenleri)
-    pub snd_una: u32,        // En eski onaylanmamış sıra numarası
-    pub snd_nxt: u32,        // Gönderilecek bir sonraki sıra numarası
-    pub snd_wnd: u32,        // Gönderme penceresi (karşı tarafın alım kapasitesi)
+    pub snd_una: u32, // En eski onaylanmamış sıra numarası
+    pub snd_nxt: u32, // Gönderilecek bir sonraki sıra numarası
+    pub snd_wnd: u32, // Gönderme penceresi (karşı tarafın alım kapasitesi)
     // Zaman damgaları
-    pub ts_recent: u32,      // Karşı tarafın son zaman damgası
-    pub ts_echo: u32,        // Geri yankılayacağımız zaman damgası
-    pub ts_val: u32,         // Bizim zaman damgası değerimiz
+    pub ts_recent: u32, // Karşı tarafın son zaman damgası
+    pub ts_echo: u32,   // Geri yankılayacağımız zaman damgası
+    pub ts_val: u32,    // Bizim zaman damgası değerimiz
+    // Tıkanıklık kontrol durumu (CcState dispatch)
+    pub cc: CcState,
+    // TIME_WAIT zamanlayıcısı (tick cinsinden)
+    pub time_wait_start: u64,
+    // Yeniden iletim zamanlayıcısı (tick cinsinden)
+    pub last_send_time: u64,
 }
 
 impl TcpConnection {
@@ -1077,11 +1140,11 @@ impl TcpConnection {
             tx_buffer: Vec::new(),
             listen_backlog: 0,
             // Tıkanıklık kontrolü başlangıç değerleri
-            cwnd: 10 * 1460,        // Başlangıç penceresi (10 MSS - RFC 6928)
-            ssthresh: 65535,        // Yüksek başlangıç eşiği
-            rtt: 100,               // Başlangıç RTT tahmini (100ms)
-            rtt_var: 50,            // Başlangıç RTT varyansı
-            rto: 200,               // Başlangıç RTO (200ms)
+            cwnd: 10 * 1460, // Başlangıç penceresi (10 MSS - RFC 6928)
+            ssthresh: 65535, // Yüksek başlangıç eşiği
+            rtt: 100,        // Başlangıç RTT tahmini (100ms)
+            rtt_var: 50,     // Başlangıç RTT varyansı
+            rto: 200,        // Başlangıç RTO (200ms)
             retransmit_count: 0,
             ws_scale: 0,
             peer_ws_scale: 0,
@@ -1099,6 +1162,12 @@ impl TcpConnection {
             ts_recent: 0,
             ts_echo: 0,
             ts_val: 0,
+            // Tıkanıklık kontrol durumu
+            cc: CcState::new(CcAlgorithm::Cubic),
+            // TIME_WAIT zamanlayıcısı
+            time_wait_start: 0,
+            // Yeniden iletim zamanlayıcısı
+            last_send_time: 0,
         }
     }
 
@@ -1133,8 +1202,14 @@ impl TcpConnection {
             return Err(NetError::ProtocolError);
         }
 
-        // Bekleyen bağlantılar için kabul kuyruğu kontrolü
-        // TODO: Kabul kuyruğu implementasyonu
+        // Kabul kuyruğundan bağlantı al
+        let mut queue = ACCEPT_QUEUE.lock();
+        if let Some(child_ids) = queue.get_mut(&self.id) {
+            if !child_ids.is_empty() {
+                let _child_id = child_ids.remove(0);
+                return Ok(self.remote);
+            }
+        }
 
         Err(NetError::WouldBlock)
     }
@@ -1146,6 +1221,8 @@ impl TcpConnection {
 
         self.send_packet(TcpFlags::ack(), data)?;
         self.seq_num = self.seq_num.wrapping_add(data.len() as u32);
+        self.snd_nxt = self.seq_num;
+        self.last_send_time = crate::task::scheduler::get_ticks() as u64;
 
         Ok(data.len())
     }
@@ -1208,12 +1285,7 @@ impl TcpConnection {
 
         // IP katmanından gönder
         let mut ip_buf = vec![0u8; 1500];
-        let len = super::ip::build_packet(
-            self.remote.ip,
-            IpProtocol::TCP,
-            &segment,
-            &mut ip_buf,
-        )?;
+        let len = super::ip::build_packet(self.remote.ip, IpProtocol::TCP, &segment, &mut ip_buf)?;
 
         // Ethernet çerçevesi oluştur ve gönder
         super::send_packet(&ip_buf[..len])?;
@@ -1262,6 +1334,22 @@ impl TcpConnection {
                 }
             }
             TcpState::Established => {
+                // ACK işleme - tıkanıklık kontrolü güncelle
+                if header.flags.ack {
+                    let acked = header.ack_num.wrapping_sub(self.snd_una);
+                    if acked > 0 && acked < 0x8000_0000 {
+                        let now = crate::task::scheduler::get_ticks() as u64;
+                        self.cc.on_ack(acked, now, self.rtt);
+                        self.cwnd = self.cc.cwnd();
+                        self.ssthresh = match self.cc.algorithm {
+                            CcAlgorithm::Reno => self.cc.reno.ssthresh,
+                            CcAlgorithm::Cubic => self.cc.cubic.ssthresh,
+                            CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.cc.bbr.target_cwnd(),
+                        };
+                        self.snd_una = header.ack_num;
+                    }
+                }
+
                 // Veri paketi al
                 if !data.is_empty() {
                     self.rx_buffer.extend_from_slice(data);
@@ -1288,6 +1376,7 @@ impl TcpConnection {
                     self.ack_num = self.ack_num.wrapping_add(1);
                     self.send_packet(TcpFlags::ack(), &[])?;
                     self.state = TcpState::TimeWait;
+                    self.time_wait_start = crate::task::scheduler::get_ticks() as u64;
                 }
             }
             TcpState::LastAck => {
@@ -1317,8 +1406,54 @@ impl TcpConnection {
         self.rto = self.rtt + 4 * self.rtt_var;
 
         // RTO sınırla (min 200ms, max 60s - RFC 6298)
-        if self.rto < 200 { self.rto = 200; }
-        if self.rto > 60000 { self.rto = 60000; }
+        if self.rto < 200 {
+            self.rto = 200;
+        }
+        if self.rto > 60000 {
+            self.rto = 60000;
+        }
+    }
+
+    /// Yeniden iletim zamanlayıcısını kontrol et.
+    /// Onaylanmamış veri varsa ve RTO süresi geçmişse yeniden iletim yap.
+    pub fn check_retransmit(&mut self) -> Result<(), NetError> {
+        if self.state != TcpState::Established {
+            return Ok(());
+        }
+
+        let now = crate::task::scheduler::get_ticks() as u64;
+        let elapsed = now.wrapping_sub(self.last_send_time);
+
+        // Onaylanmamış veri var mı ve RTO süresi geçti mi?
+        let has_unacked = self.snd_nxt != self.snd_una;
+        if has_unacked && elapsed > self.rto as u64 && self.last_send_time > 0 {
+            crate::serial_println!("[TCP] RTO expired, retransmitting (rto={}ms)", self.rto);
+
+            // Tıkanıklık kontrolüne zaman aşımı bildir
+            let now_ms = crate::task::scheduler::get_ticks() as u64;
+            self.cc.on_timeout(now_ms);
+            self.cwnd = self.cc.cwnd();
+            self.ssthresh = match self.cc.algorithm {
+                CcAlgorithm::Reno => self.cc.reno.ssthresh,
+                CcAlgorithm::Cubic => self.cc.cubic.ssthresh,
+                CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.cc.bbr.target_cwnd(),
+            };
+
+            // Yeniden iletim sayacını artır
+            self.retransmit_count = self.retransmit_count.saturating_add(1);
+
+            // Üstel geri çekilme (exponential backoff)
+            self.rto = (self.rto * 2).min(60000);
+
+            // tx_buffer'daki veriyi yeniden gönder
+            if !self.tx_buffer.is_empty() {
+                let data = self.tx_buffer.clone();
+                self.send_packet(TcpFlags::ack(), &data)?;
+                self.last_send_time = crate::task::scheduler::get_ticks() as u64;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1584,13 +1719,16 @@ pub struct BbrState {
     pub probe_rtt_done: bool,
     /// ProbeRTT başlangıç turu
     pub probe_rtt_round_stamp: u64,
+    pub bbrv3_enabled: bool,
+    pub inflight_hi: u32,
+    pub ecn_alpha: f64,
 }
 
 /// BBR modları
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BbrMode {
     #[default]
-    Startup,  // Başlangıç: bant genişliğini hızla bul
+    Startup, // Başlangıç: bant genişliğini hızla bul
     Drain,    // Boşalt: kuyruğu azalt
     ProbeBW,  // Bant genişliğini araştır
     ProbeRTT, // RTT'yi ölç
@@ -1651,14 +1789,18 @@ impl BbrRttFilter {
     }
 }
 
+const BBRV3_STARTUP_PACING_GAIN: f64 = 2.77;
+const BBRV3_DRAIN_PACING_GAIN: f64 = 0.70;
+const BBRV3_HEADROOM: f64 = 0.85;
+
 impl BbrState {
     /// BBR sabitleri (RFC 9102)
-    const BBR_HIGH_GAIN: f64 = 2.89;      // 2/ln(2) - Startup için yüksek kazanç
-    const BBR_DRAIN_GAIN: f64 = 0.35;     // 1/2.89 - Drain için düşük kazanç
+    const BBR_HIGH_GAIN: f64 = 2.89; // 2/ln(2) - Startup için yüksek kazanç
+    const BBR_DRAIN_GAIN: f64 = 0.35; // 1/2.89 - Drain için düşük kazanç
     const BBR_CWND_GAIN_TARGET: f64 = 2.0; // Hedef cwnd kazancı
     const BBR_PROBE_RTT_CWND_GAIN: f64 = 0.5; // ProbeRTT sırasında cwnd yarıya iner
     const BBR_PROBE_RTT_MODE_DURATION_MS: u64 = 200; // ProbeRTT süresi (ms)
-    const BBR_MIN_RTT_WIN_SEC: u64 = 10;  // RTprop güncelleme penceresi (saniye)
+    const BBR_MIN_RTT_WIN_SEC: u64 = 10; // RTprop güncelleme penceresi (saniye)
 
     pub fn new() -> Self {
         BbrState {
@@ -1677,7 +1819,16 @@ impl BbrState {
             rtt_filter: BbrRttFilter::default(),
             probe_rtt_done: false,
             probe_rtt_round_stamp: 0,
+            bbrv3_enabled: false,
+            inflight_hi: 1460 * 100,
+            ecn_alpha: 0.0,
         }
+    }
+
+    pub fn enable_v3(&mut self) {
+        self.bbrv3_enabled = true;
+        self.cwnd_gain = Self::BBR_CWND_GAIN_TARGET;
+        self.pacing_gain = BBRV3_STARTUP_PACING_GAIN;
     }
 
     /// Gönderim hızını hesapla: pacing_rate = BtlBw * pacing_gain
@@ -1706,7 +1857,11 @@ impl BbrState {
 
         // target_cwnd = cwnd_gain * BDP
         let target = (self.cwnd_gain * bdp as f64) as u32;
-        target.max(1460)
+        if self.bbrv3_enabled {
+            target.min(self.inflight_hi.max(1460))
+        } else {
+            target.max(1460)
+        }
     }
 
     /// ACK alındığında BBR durumunu güncelle.
@@ -1732,7 +1887,11 @@ impl BbrState {
                 // Bottleneck bant genişliğine ulaşıldı mı kontrol et
                 if self.is_full_bw_reached() {
                     self.mode = BbrMode::Drain;
-                    self.pacing_gain = Self::BBR_DRAIN_GAIN;
+                    self.pacing_gain = if self.bbrv3_enabled {
+                        BBRV3_DRAIN_PACING_GAIN
+                    } else {
+                        Self::BBR_DRAIN_GAIN
+                    };
                     self.cwnd_gain = Self::BBR_CWND_GAIN_TARGET;
                 }
             }
@@ -1769,6 +1928,15 @@ impl BbrState {
         }
 
         // Gönderim hızını ve birimini güncelle
+        if self.bbrv3_enabled {
+            let bdp = if self.min_rtt > 0 {
+                (self.bw * self.min_rtt / 1_000_000) as u32
+            } else {
+                1460
+            };
+            let ecn_penalty = (1.0 - (self.ecn_alpha * 0.5)).clamp(0.5, 1.0);
+            self.inflight_hi = ((bdp as f64 * BBRV3_HEADROOM * ecn_penalty) as u32).max(1460);
+        }
         self.set_pacing_rate();
         self.set_send_quantum();
     }
@@ -1785,6 +1953,10 @@ impl BbrState {
     /// BBR kaybı doğrudan tıkanıklık işareti olarak görmez,
     /// bant genişliği tahminine dayalı çalışır.
     pub fn on_loss(&mut self) {
+        if self.bbrv3_enabled {
+            self.inflight_hi = (self.inflight_hi.saturating_mul(9) / 10).max(1460);
+            self.ecn_alpha = (self.ecn_alpha + 0.05).min(1.0);
+        }
         // BBR kaybı doğrudan işlemez
         // Bant genişliği tahminini kullanır
     }
@@ -1794,7 +1966,11 @@ impl BbrState {
         // Startup moduna sıfırla
         self.mode = BbrMode::Startup;
         self.cwnd_gain = Self::BBR_HIGH_GAIN;
-        self.pacing_gain = Self::BBR_HIGH_GAIN;
+        self.pacing_gain = if self.bbrv3_enabled {
+            BBRV3_STARTUP_PACING_GAIN
+        } else {
+            Self::BBR_HIGH_GAIN
+        };
         self.rtprop_stamp = now_us;
     }
 
@@ -1819,9 +1995,10 @@ impl BbrState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CcAlgorithm {
     #[default]
-    Reno,  // Klasik TCP Reno
+    Reno, // Klasik TCP Reno
     Cubic, // CUBIC (modern standart)
     Bbr,   // BBR (Google)
+    Bbrv3, // BBRv3
 }
 
 /// Tıkanıklık kontrol durumu - seçilen algoritmayı yönetir
@@ -1858,11 +2035,15 @@ impl Default for RenoState {
 
 impl CcState {
     pub fn new(algorithm: CcAlgorithm) -> Self {
+        let mut bbr = BbrState::new();
+        if algorithm == CcAlgorithm::Bbrv3 {
+            bbr.enable_v3();
+        }
         CcState {
             algorithm,
             reno: RenoState::default(),
             cubic: CubicState::new(),
-            bbr: BbrState::new(),
+            bbr,
         }
     }
 
@@ -1870,7 +2051,7 @@ impl CcState {
         match self.algorithm {
             CcAlgorithm::Reno => self.reno.cwnd,
             CcAlgorithm::Cubic => self.cubic.cwnd,
-            CcAlgorithm::Bbr => self.bbr.cwnd(),
+            CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.bbr.cwnd(),
         }
     }
 
@@ -1886,8 +2067,9 @@ impl CcState {
             CcAlgorithm::Cubic => {
                 self.cubic.on_ack(acked_bytes, current_time_ms, rtt_ms);
             }
-            CcAlgorithm::Bbr => {
-                self.bbr.on_ack(acked_bytes, rtt_ms as u64 * 1000, current_time_ms * 1000);
+            CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => {
+                self.bbr
+                    .on_ack(acked_bytes, rtt_ms as u64 * 1000, current_time_ms * 1000);
             }
         }
     }
@@ -1901,7 +2083,7 @@ impl CcState {
             CcAlgorithm::Cubic => {
                 self.cubic.on_loss(current_time_ms);
             }
-            CcAlgorithm::Bbr => {
+            CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => {
                 self.bbr.on_loss();
             }
         }
@@ -1916,7 +2098,7 @@ impl CcState {
             CcAlgorithm::Cubic => {
                 self.cubic.on_timeout(current_time_ms);
             }
-            CcAlgorithm::Bbr => {
+            CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => {
                 self.bbr.on_timeout(current_time_ms * 1000);
             }
         }
@@ -1931,6 +2113,8 @@ impl CcState {
 
 static TCP_CONNECTIONS: Mutex<BTreeMap<u32, Box<TcpConnection>>> = Mutex::new(BTreeMap::new());
 static TCP_LISTENERS: Mutex<BTreeMap<Port, u32>> = Mutex::new(BTreeMap::new());
+/// Kabul kuyruğu: dinleyici soket ID'si -> bekleyen çocuk bağlantı ID'leri
+static ACCEPT_QUEUE: Mutex<BTreeMap<u32, Vec<u32>>> = Mutex::new(BTreeMap::new());
 
 /// TCP alt sistemini başlat
 pub fn init() {
@@ -1975,14 +2159,42 @@ pub fn listen(socket_id: u32, backlog: usize) -> Result<(), NetError> {
 
 /// Gelen bağlantıyı kabul et
 pub fn accept(socket_id: u32) -> Result<(u32, SocketAddr), NetError> {
-    let conns = TCP_CONNECTIONS.lock();
-    let conn = conns.get(&socket_id).ok_or(NetError::ProtocolError)?;
-
-    if conn.state != TcpState::Listen {
-        return Err(NetError::ProtocolError);
+    // Dinleyici durumunu doğrula
+    {
+        let conns = TCP_CONNECTIONS.lock();
+        let conn = conns.get(&socket_id).ok_or(NetError::ProtocolError)?;
+        if conn.state != TcpState::Listen {
+            return Err(NetError::ProtocolError);
+        }
     }
 
-    // TODO: Kabul kuyruğunu kontrol et
+    // Kabul kuyruğundan Established durumundaki bağlantıyı al
+    let child_ids: Vec<u32> = {
+        let queue = ACCEPT_QUEUE.lock();
+        queue.get(&socket_id).cloned().unwrap_or_default()
+    };
+
+    for &child_id in &child_ids {
+        let established = {
+            let conns = TCP_CONNECTIONS.lock();
+            conns
+                .get(&child_id)
+                .map_or(false, |c| c.state == TcpState::Established)
+        };
+        if established {
+            let remote = {
+                let conns = TCP_CONNECTIONS.lock();
+                conns.get(&child_id).map(|c| c.remote).unwrap_or_default()
+            };
+            // Kabul kuyruğundan çıkar
+            let mut queue = ACCEPT_QUEUE.lock();
+            if let Some(ids) = queue.get_mut(&socket_id) {
+                ids.retain(|&id| id != child_id);
+            }
+            return Ok((child_id, remote));
+        }
+    }
+
     Err(NetError::WouldBlock)
 }
 
@@ -1998,6 +2210,112 @@ pub fn recv(socket_id: u32, buf: &mut [u8]) -> Result<usize, NetError> {
     let mut conns = TCP_CONNECTIONS.lock();
     let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
     conn.recv(buf)
+}
+
+/// Non-blocking send - tries to send without waiting
+/// Returns WouldBlock if the connection is not ready for sending
+pub fn try_send(socket_id: u32, data: &[u8]) -> Result<usize, NetError> {
+    let mut conns = TCP_CONNECTIONS.lock();
+    let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
+
+    // Check connection state
+    if conn.state != TcpState::Established {
+        return Err(NetError::ConnectionClosed);
+    }
+
+    // Try to send - this is already non-blocking in our implementation
+    conn.send(data)
+}
+
+/// Non-blocking receive - returns immediately if no data available
+/// Returns WouldBlock if no data is available
+pub fn try_recv(socket_id: u32, buf: &mut [u8]) -> Result<usize, NetError> {
+    let mut conns = TCP_CONNECTIONS.lock();
+    let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
+
+    // Check if data is available
+    if conn.rx_buffer.is_empty() {
+        if conn.state == TcpState::CloseWait || conn.state == TcpState::Closed {
+            return Err(NetError::ConnectionClosed);
+        }
+        return Err(NetError::WouldBlock);
+    }
+
+    conn.recv(buf)
+}
+
+/// Peek at data without consuming it from the buffer
+/// Returns the data but leaves it in the receive buffer
+pub fn peek(socket_id: u32, buf: &mut [u8]) -> Result<usize, NetError> {
+    let conns = TCP_CONNECTIONS.lock();
+    let conn = conns.get(&socket_id).ok_or(NetError::ProtocolError)?;
+
+    // Check if data is available
+    if conn.rx_buffer.is_empty() {
+        if conn.state == TcpState::CloseWait || conn.state == TcpState::Closed {
+            return Err(NetError::ConnectionClosed);
+        }
+        return Err(NetError::WouldBlock);
+    }
+
+    // Copy data without removing from buffer
+    let len = buf.len().min(conn.rx_buffer.len());
+    buf[..len].copy_from_slice(&conn.rx_buffer[..len]);
+
+    Ok(len)
+}
+
+/// Receive exactly the requested amount of data (blocking)
+/// Waits until buffer is full or connection is closed
+pub fn recv_all(socket_id: u32, buf: &mut [u8]) -> Result<usize, NetError> {
+    let mut total_read = 0;
+
+    while total_read < buf.len() {
+        let read = {
+            let mut conns = TCP_CONNECTIONS.lock();
+            let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
+
+            // Check if connection is closed
+            if conn.state == TcpState::CloseWait || conn.state == TcpState::Closed {
+                if conn.rx_buffer.is_empty() {
+                    break; // EOF - return what we have
+                }
+            }
+
+            // Try to read what's available
+            if !conn.rx_buffer.is_empty() {
+                let remaining = &mut buf[total_read..];
+                let len = remaining.len().min(conn.rx_buffer.len());
+                remaining[..len].copy_from_slice(&conn.rx_buffer[..len]);
+                conn.rx_buffer.drain(..len);
+                len
+            } else {
+                0
+            }
+        };
+
+        if read == 0 {
+            // No data available - check if connection is still active
+            let conns = TCP_CONNECTIONS.lock();
+            let conn = conns.get(&socket_id).ok_or(NetError::ProtocolError)?;
+
+            if conn.state == TcpState::CloseWait || conn.state == TcpState::Closed {
+                break; // Connection closed, return what we have
+            }
+
+            // Yield CPU and wait for data
+            drop(conns);
+            crate::task::scheduler::schedule();
+        } else {
+            total_read += read;
+        }
+    }
+
+    if total_read == 0 {
+        Err(NetError::ConnectionClosed)
+    } else {
+        Ok(total_read)
+    }
 }
 
 /// TCP soketini kapat (FIN gönderir)
@@ -2021,6 +2339,24 @@ pub fn get_all_connections() -> Vec<TcpConnection> {
     conns.values().map(|c| (**c).clone()).collect()
 }
 
+/// Bağlantının yerel adresini al (getsockname için)
+pub fn get_connection_local_addr(socket_id: u32) -> Result<SocketAddr, NetError> {
+    let conns = TCP_CONNECTIONS.lock();
+    conns
+        .get(&socket_id)
+        .map(|c| c.local.clone())
+        .ok_or(NetError::InvalidFd)
+}
+
+/// Bağlantının uzak adresini al (getpeername için)
+pub fn get_connection_remote_addr(socket_id: u32) -> Result<SocketAddr, NetError> {
+    let conns = TCP_CONNECTIONS.lock();
+    conns
+        .get(&socket_id)
+        .map(|c| c.remote.clone())
+        .ok_or(NetError::InvalidFd)
+}
+
 /// Gelen TCP paketini işle.
 /// Hedef porta göre mevcut bağlantı veya dinleyici aranır.
 pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
@@ -2033,8 +2369,7 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
     // Kurulu bağlantı ara (hem yerel hem uzak port eşleşmeli)
     let mut found_id = None;
     for (_, conn) in conns.iter() {
-        if conn.local.port == tcp_header.dst_port &&
-           conn.remote.port == tcp_header.src_port {
+        if conn.local.port == tcp_header.dst_port && conn.remote.port == tcp_header.src_port {
             found_id = Some(conn.id);
             break;
         }
@@ -2051,12 +2386,44 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
 
     // Dinleyici ara (sadece hedef port kontrol edilir)
     let listeners = TCP_LISTENERS.lock();
-    if let Some(&_socket_id) = listeners.get(&tcp_header.dst_port) {
+    if let Some(&listener_id) = listeners.get(&tcp_header.dst_port) {
         drop(listeners);
 
+        if tcp_header.flags.syn {
+            // SYN alındı: yeni çocuk bağlantı oluştur ve kabul kuyruğuna ekle
+            let local_addr = {
+                let conns = TCP_CONNECTIONS.lock();
+                conns.get(&listener_id).map(|c| c.local)
+            };
+
+            if let Some(local_addr) = local_addr {
+                let mut child = TcpConnection::new(local_addr);
+                child.remote = SocketAddr::new(ip_packet.header.src, tcp_header.src_port);
+                child.seq_num = crate::random::rand_u64() as u32;
+                child.ack_num = tcp_header.seq_num.wrapping_add(1);
+                child.state = TcpState::SynReceived;
+                let _ = child.send_packet(TcpFlags::syn_ack(), &[]);
+                let child_id = child.id;
+
+                TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                ACCEPT_QUEUE
+                    .lock()
+                    .entry(listener_id)
+                    .or_insert_with(Vec::new)
+                    .push(child_id);
+                crate::serial_println!(
+                    "[TCP] SYN received, child connection {} created for listener {}",
+                    child_id,
+                    listener_id
+                );
+            }
+
+            return Ok(());
+        }
+
+        // SYN olmayan paketler için dinleyiciyi kontrol et
         let mut conns = TCP_CONNECTIONS.lock();
-        let port_as_key = tcp_header.dst_port.0 as u32;
-        if let Some(conn) = conns.get_mut(&port_as_key) {
+        if let Some(conn) = conns.get_mut(&listener_id) {
             conn.remote.ip = ip_packet.header.src;
             return conn.on_packet(&tcp_header, data);
         }
@@ -2064,4 +2431,102 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
 
     // Eşleşen bağlantı yok - RST gönderilebilir
     Ok(())
+}
+
+// ============================================================================
+// netstat desteği
+// ============================================================================
+
+/// netstat komutu için bağlantı özeti
+#[derive(Clone, Debug)]
+pub struct TcpConnInfo {
+    pub local_ip: Ipv4Addr,
+    pub local_port: u16,
+    pub remote_ip: Ipv4Addr,
+    pub remote_port: u16,
+    pub state: TcpState,
+}
+
+/// Tüm TCP bağlantılarını listele (netstat için)
+pub fn list_connections() -> Vec<TcpConnInfo> {
+    let conns = TCP_CONNECTIONS.lock();
+    conns
+        .values()
+        .map(|c| TcpConnInfo {
+            local_ip: c.local.ip,
+            local_port: c.local.port.0,
+            remote_ip: c.remote.ip,
+            remote_port: c.remote.port.0,
+            state: c.state,
+        })
+        .collect()
+}
+
+/// TIME_WAIT durumundaki bağlantıları temizle (2×MSL zamanlayıcısı).
+/// Periyodik olarak çağrılmalıdır (örn. zamanlayıcı kesmeleri içinden).
+pub fn time_wait_gc() {
+    let now = crate::task::scheduler::get_ticks() as u64;
+    let mut conns = TCP_CONNECTIONS.lock();
+    let expired_ids: Vec<u32> = conns
+        .iter()
+        .filter(|(_, c)| {
+            c.state == TcpState::TimeWait
+                && c.time_wait_start > 0
+                && now.wrapping_sub(c.time_wait_start) >= TIME_WAIT_DURATION
+        })
+        .map(|(&id, _)| id)
+        .collect();
+
+    for id in &expired_ids {
+        crate::serial_println!("[TCP] TIME_WAIT expired, removing connection {}", id);
+        conns.remove(id);
+    }
+}
+
+/// SACK retransmission entry — tek bir segment'in yeniden gönderim kaydı.
+#[derive(Debug, Clone)]
+pub struct RetransmitEntry {
+    /// Segment başlangıç sequence numarası
+    pub seq_start: u32,
+    /// Segment bitiş sequence numarası
+    pub seq_end: u32,
+    /// Gönderim sayısı
+    pub tx_count: u32,
+    /// Son gönderim zamanı (TSC)
+    pub last_sent_tsc: u64,
+    /// Kayıp olarak işaretlendi mi
+    pub marked_lost: bool,
+    /// SACK edildi mi
+    pub sacked: bool,
+}
+
+/// SACK congestion state — kayıp tabanlı tıkanıklık kontrolü.
+#[derive(Debug, Clone)]
+pub struct SackCongestionState {
+    pub cwnd: u32,
+    pub ssthresh: u32,
+    pub pipe: u32,
+    pub limited_transmit: u32,
+}
+
+impl SackCongestionState {
+    pub fn new(initial_cwnd: u32) -> Self {
+        Self {
+            cwnd: initial_cwnd,
+            ssthresh: u32::MAX,
+            pipe: 0,
+            limited_transmit: 0,
+        }
+    }
+
+    /// RFC 6675 Pipe hesaplaması.
+    pub fn update_pipe(&mut self, lost: usize, sacked: usize) {
+        self.pipe = (lost + sacked) as u32;
+    }
+
+    /// Kayıp tespiti sonrası multiplicative decrease.
+    pub fn on_loss(&mut self) {
+        self.ssthresh = (self.cwnd / 2).max(2);
+        self.cwnd = self.ssthresh;
+    }
 }

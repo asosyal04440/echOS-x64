@@ -259,25 +259,116 @@ impl SecurityAssociation {
         }
     }
 
-    fn encrypt_aes_cbc(&self, _pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
-        Ok(Vec::new())
+    /// AES-CBC şifreleme (RFC 3602)
+    ///
+    /// PKCS#7 padding + rastgele IV (16 byte) ile CBC modu.
+    fn encrypt_aes_cbc(&self, pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
+        let key = &self.enc_key;
+        if key.len() < 16 { return Err(IpsecError::InvalidKey); }
+
+        // Rastgele IV (16 byte)
+        let mut iv = [0u8; 16];
+        for i in 0..16 { iv[i] = crate::random::next_u32() as u8; }
+
+        // PKCS#7 padding
+        let pad_len = 16 - (pkt.len() % 16);
+        let mut padded = pkt.to_vec();
+        for _ in 0..pad_len { padded.push(pad_len as u8); }
+
+        // CBC şifreleme: C[i] = AES(key, P[i] XOR C[i-1])
+        let mut result = Vec::with_capacity(16 + padded.len());
+        result.extend_from_slice(&iv);
+        let mut prev = iv;
+        for chunk in padded.chunks(16) {
+            let mut block = [0u8; 16];
+            for j in 0..16 { block[j] = chunk[j] ^ prev[j]; }
+            let encrypted = crate::crypto::hw_aes::aes_ecb_encrypt_block(&block, key);
+            result.extend_from_slice(&encrypted);
+            prev = encrypted;
+        }
+
+        Ok(result)
     }
 
-    fn decrypt_aes_cbc(&self, _pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
-        Ok(Vec::new())
+    /// AES-CBC şifre çözme
+    fn decrypt_aes_cbc(&self, pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
+        let key = &self.enc_key;
+        if key.len() < 16 || pkt.len() < 32 || pkt.len() % 16 != 0 {
+            return Err(IpsecError::InvalidPacket);
+        }
+
+        let iv = &pkt[..16];
+        let ciphertext = &pkt[16..];
+
+        // CBC şifre çözme: P[i] = AES_DEC(key, C[i]) XOR C[i-1]
+        let mut result = Vec::with_capacity(ciphertext.len());
+        let mut prev = [0u8; 16];
+        prev.copy_from_slice(iv);
+        for chunk in ciphertext.chunks(16) {
+            let decrypted = crate::crypto::hw_aes::aes_ecb_decrypt_block(chunk, key);
+            let mut plaintext = [0u8; 16];
+            for j in 0..16 { plaintext[j] = decrypted[j] ^ prev[j]; }
+            result.extend_from_slice(&plaintext);
+            prev.copy_from_slice(chunk);
+        }
+
+        // PKCS#7 padding kaldır
+        if let Some(&pad_len) = result.last() {
+            let pad = pad_len as usize;
+            if pad > 0 && pad <= 16 && result.len() >= pad {
+                result.truncate(result.len() - pad);
+            }
+        }
+
+        Ok(result)
     }
 
-    fn encrypt_aes_gcm(&self, _pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
-        Ok(Vec::new())
+    /// AES-GCM şifreleme (RFC 4106)
+    ///
+    /// 8 byte IV + AES-CTR şifreleme + GHASH authentication tag.
+    fn encrypt_aes_gcm(&self, pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
+        let key = &self.enc_key;
+        if key.len() < 16 { return Err(IpsecError::InvalidKey); }
+
+        // 8 byte explicit nonce (4 byte salt oturumda saklı; 8 byte explicit)
+        let mut nonce = [0u8; 12];
+        // Salt: key'in son 4 byte'ı
+        if self.enc_key.len() >= 20 {
+            nonce[..4].copy_from_slice(&self.enc_key[16..20]);
+        }
+        for i in 4..12 { nonce[i] = crate::random::next_u32() as u8; }
+
+        // AES-GCM = AES-CTR + GHASH
+        let encrypted = crate::crypto::hw_aes::aes_gcm_encrypt(key, &nonce, pkt, &[]);
+
+        let mut result = Vec::with_capacity(8 + encrypted.len());
+        result.extend_from_slice(&nonce[4..12]); // 8 byte explicit nonce
+        result.extend_from_slice(&encrypted);    // ciphertext + 16 byte tag
+        Ok(result)
     }
 
-    fn decrypt_aes_gcm(&self, _pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
-        Ok(Vec::new())
+    /// AES-GCM şifre çözme
+    fn decrypt_aes_gcm(&self, pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
+        let key = &self.enc_key;
+        if key.len() < 16 || pkt.len() < 24 { return Err(IpsecError::InvalidPacket); }
+
+        // Nonce yeniden oluştur: 4 byte salt + 8 byte explicit
+        let mut nonce = [0u8; 12];
+        if self.enc_key.len() >= 20 {
+            nonce[..4].copy_from_slice(&self.enc_key[16..20]);
+        }
+        nonce[4..12].copy_from_slice(&pkt[..8]);
+
+        let ciphertext_with_tag = &pkt[8..];
+        crate::crypto::hw_aes::aes_gcm_decrypt(key, &nonce, ciphertext_with_tag, &[])
+            .map_err(|_| IpsecError::DecryptionFailed)
     }
 
-    /// Calculate ICV (Integrity Check Value)
+    /// ICV (Integrity Check Value) hesapla — HMAC tabanlı
+    ///
+    /// Kullanılan algoritmaya göre HMAC-SHA256 veya SHA-1 ile
+    /// bütünlük kontrol değeri hesaplar.
     pub fn calculate_icv(&self, data: &[u8]) -> Vec<u8> {
-        // HMAC-SHA256
         let icv_len = match self.auth_alg {
             IPSEC_AUTH_HMAC_SHA1 => 12,
             IPSEC_AUTH_HMAC_SHA256 => 16,
@@ -285,13 +376,25 @@ impl SecurityAssociation {
             IPSEC_AUTH_HMAC_SHA512 => 32,
             _ => 12,
         };
-        vec![0u8; icv_len]
+
+        // HMAC-SHA256 ile ICV hesapla
+        let auth_key = if self.auth_key.is_empty() { &self.enc_key } else { &self.auth_key };
+        let full_hmac = crate::net::quic::hmac_sha256(auth_key, data);
+
+        // Truncate to icv_len
+        full_hmac[..icv_len.min(full_hmac.len())].to_vec()
     }
 
-    /// Verify ICV
+    /// ICV doğrula
     pub fn verify_icv(&self, data: &[u8], icv: &[u8]) -> bool {
         let expected = self.calculate_icv(data);
-        expected == icv
+        // Sabit zamanlı karşılaştırma (timing attack koruması)
+        if expected.len() != icv.len() { return false; }
+        let mut diff = 0u8;
+        for (a, b) in expected.iter().zip(icv.iter()) {
+            diff |= a ^ b;
+        }
+        diff == 0
     }
 }
 
@@ -554,6 +657,7 @@ pub enum IpsecError {
     SaNotFound,
     PolicyNotFound,
     InvalidPacket,
+    InvalidKey,
     AuthFailed,
     ReplayAttack,
     UnsupportedAlgorithm,

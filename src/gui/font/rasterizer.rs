@@ -19,9 +19,10 @@
 //! - **Advance width**: Bir karakterden sonra bir sonrakini yerleştirmek için
 //!   ilerlenecek yatay piksel mesafesi
 
-use super::truetype::{TrueTypeFont, Glyph, GlyphPoint, GlyphContour};
-use alloc::vec::Vec;
+use super::truetype::{Glyph, GlyphContour, GlyphPoint, TrueTypeFont};
 use alloc::vec;
+use alloc::vec::Vec;
+use libm::powf;
 
 /// no_std ortamı için özel tavan (ceiling) fonksiyonu.
 /// Standart kütüphanede `f32::ceil()` bulunur; ancak çekirdek modunda
@@ -31,7 +32,11 @@ use alloc::vec;
 /// ile tavan elde edilir.
 fn ceil_f32(x: f32) -> f32 {
     let i = x as i32 as f32;
-    if x > i { i + 1.0 } else { i }
+    if x > i {
+        i + 1.0
+    } else {
+        i
+    }
 }
 
 /// no_std ortamı için özel taban (floor) fonksiyonu.
@@ -40,7 +45,11 @@ fn ceil_f32(x: f32) -> f32 {
 /// bir çıkarma yapılır.
 fn floor_f32(x: f32) -> f32 {
     let i = x as i32 as f32;
-    if x < i { i - 1.0 } else { i }
+    if x < i {
+        i - 1.0
+    } else {
+        i
+    }
 }
 
 /// Rasterize edilmiş (pikselleştirilmiş) glyph bitmap'i.
@@ -82,6 +91,8 @@ pub struct Rasterizer {
     scanline: Vec<f32>,
     // Winding sayı tamponu; pozitif = sola döndürme, negatif = sağa döndürme
     winding: Vec<i32>,
+    subpixel_aa: bool,
+    gamma: f32,
 }
 
 impl Rasterizer {
@@ -89,6 +100,8 @@ impl Rasterizer {
         Self {
             scanline: Vec::new(),
             winding: Vec::new(),
+            subpixel_aa: true,
+            gamma: 2.2,
         }
     }
 
@@ -98,7 +111,12 @@ impl Rasterizer {
     /// `scale = size / units_per_em` formülüyle font koordinat birimlerinden
     /// piksel koordinatlarına dönüşüm katsayısı hesaplanır.
     /// Sıfır boyutlu glyphler (boşluk karakteri gibi) için boş bitmap döndürülür.
-    pub fn rasterize(&mut self, font: &TrueTypeFont, glyph: &Glyph, size: f32) -> Option<RasterGlyph> {
+    pub fn rasterize(
+        &mut self,
+        font: &TrueTypeFont,
+        glyph: &Glyph,
+        size: f32,
+    ) -> Option<RasterGlyph> {
         let scale = size / font.units_per_em as f32;
 
         // Bitmap boyutunu hesapla: glyphin sınırlayıcı kutusunu ölçeklendirip
@@ -127,6 +145,10 @@ impl Rasterizer {
         // ileride bezier eğrileriyle tam vektör rasterizasyonu yapılacak
         self.render_simple(&mut bitmap, width, height, glyph, scale);
 
+        if self.subpixel_aa {
+            self.apply_subpixel_gamma(&mut bitmap, width, height);
+        }
+
         Some(RasterGlyph {
             width,
             height,
@@ -143,7 +165,14 @@ impl Rasterizer {
     /// kaplama değeri hesaplar. Bu basit sürüm tüm glyphi dolu bir kutu olarak
     /// çizer; kenar piksellerine 128 (yarı saydam) değeri atanarak ham bir
     /// anti-aliasing taklidi yapılır.
-    fn render_simple(&mut self, bitmap: &mut [u8], width: usize, height: usize, glyph: &Glyph, scale: f32) {
+    fn render_simple(
+        &mut self,
+        bitmap: &mut [u8],
+        width: usize,
+        height: usize,
+        glyph: &Glyph,
+        scale: f32,
+    ) {
         let bounds = &glyph.bounds;
 
         // Sınırlayıcı kutu değişkenleri; ileride bezier örnekleme için kullanılacak
@@ -189,8 +218,36 @@ impl Rasterizer {
     /// 3. Kesişim noktasındaki winding sayısını güncelle.
     /// 4. Winding ≠ 0 olan sütunlar çizgi içindedir → pikseli doldur.
     /// Bu yöntem TrueType'ın "non-zero winding" doldurma kuralına uygundur.
+    fn apply_subpixel_gamma(&self, bitmap: &mut [u8], width: usize, height: usize) {
+        if width < 3 || height == 0 {
+            return;
+        }
+
+        let mut filtered = vec![0u8; bitmap.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let idx = y * width + x;
+                let l = bitmap[y * width + x.saturating_sub(1)] as u32;
+                let c = bitmap[idx] as u32;
+                let r = bitmap[y * width + (x + 1).min(width - 1)] as u32;
+                let linear = (l + (2 * c) + r) / 4;
+                let norm = (linear as f32 / 255.0).clamp(0.0, 1.0);
+                let gamma_corrected = powf(norm, 1.0 / self.gamma.max(1.0));
+                filtered[idx] = (gamma_corrected * 255.0) as u8;
+            }
+        }
+        bitmap.copy_from_slice(&filtered);
+    }
+
     #[allow(dead_code)]
-    fn render_outline(&mut self, bitmap: &mut [u8], width: usize, height: usize, contours: &[GlyphContour], scale: f32) {
+    fn render_outline(
+        &mut self,
+        bitmap: &mut [u8],
+        width: usize,
+        height: usize,
+        contours: &[GlyphContour],
+        scale: f32,
+    ) {
         // Tarama satırı tamponu büyüklüğünü güvence altına al
         if self.scanline.len() < width {
             self.scanline.resize(width, 0.0);
@@ -269,7 +326,7 @@ impl Rasterizer {
         let scale = (size / 8.0).max(1.0) as usize;
         let width = 8 * scale;
         let height = 8 * scale;
-        
+
         let mut bitmap = vec![0u8; width * height];
 
         for (row, &bits) in char_bits.iter().enumerate() {
@@ -290,7 +347,7 @@ impl Rasterizer {
                 }
             }
         }
-        
+
         RasterGlyph {
             width,
             height,

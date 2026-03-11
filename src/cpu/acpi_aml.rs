@@ -299,7 +299,11 @@ pub fn init_aml() {
         let fadt_len = core::ptr::read_unaligned((fadt_virt + 4) as *const u32);
         if fadt_len >= 148 {
             let dsdt64 = core::ptr::read_unaligned((fadt_virt + 0x8C) as *const u64);
-            if dsdt64 != 0 { dsdt64 } else { dsdt32 }
+            if dsdt64 != 0 {
+                dsdt64
+            } else {
+                dsdt32
+            }
         } else {
             dsdt32
         }
@@ -389,28 +393,16 @@ pub fn init_aml() {
 
     // Namespace istatistiklerini kaydı için referans al (henüz kullanılmıyor)
     let ns = &context.namespace;
-    crate::serial_println!(
-        "[AML] Namespace ready — DSDT + {} SSDTs loaded",
-        ssdt_count
-    );
+    crate::serial_println!("[AML] Namespace ready — DSDT + {} SSDTs loaded", ssdt_count);
 
     // Global bağlama kaydet ve başlatıldı bayrağını set et
     *AML_CONTEXT.lock() = Some(context);
     AML_INITIALIZED.store(true, Ordering::SeqCst);
 
-    crate::serial_println!(
-        "╔══════════════════════════════════════╗"
-    );
-    crate::serial_println!(
-        "║  AML Interpreter: ACTIVE             ║"
-    );
-    crate::serial_println!(
-        "║  Tables: 1 DSDT + {} SSDTs            ║",
-        ssdt_count
-    );
-    crate::serial_println!(
-        "╚══════════════════════════════════════╝"
-    );
+    crate::serial_println!("╔══════════════════════════════════════╗");
+    crate::serial_println!("║  AML Interpreter: ACTIVE             ║");
+    crate::serial_println!("║  Tables: 1 DSDT + {} SSDTs            ║", ssdt_count);
+    crate::serial_println!("╚══════════════════════════════════════╝");
 }
 
 // ============================================================================
@@ -435,8 +427,7 @@ pub fn invoke_method(path: &str, args: &[AmlValue]) -> Result<AmlValue, AmlError
 
     let name = AmlName::from_str(path).map_err(|_| AmlError::InvalidPath)?;
 
-    let aml_args = aml::value::Args::from_list(args.to_vec())
-        .map_err(|_| AmlError::InvalidArgs)?;
+    let aml_args = aml::value::Args::from_list(args.to_vec()).map_err(|_| AmlError::InvalidArgs)?;
 
     context
         .invoke_method(&name, aml_args)

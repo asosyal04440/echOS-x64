@@ -6,6 +6,7 @@ $disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
 $machine_name = "board"
 $show_con0 = TRUE
 $create_network = FALSE
+$num_cores = 2
 run-script "%simics%/targets/qsp-x86/qsp-hdd-boot.simics"
 
 # Serial ciktiyi terminale yaz
@@ -21,10 +22,10 @@ echo "  VGA penceresi echOS ekranini gosterecek."
 echo "================================================"
 
 # 120 saniye simulasyon calistir, sonra dur (GUI acik kalir)
-script-branch "auto-stop" {
-    bp.time.wait-for 120
-    echo "[GUI-BOOT] 120s simulation complete - stopping (GUI stays open)"
-    stop
-}
+# script-branch "auto-stop" {
+#     bp.time.wait-for 120
+#     echo "[GUI-BOOT] 120s simulation complete - stopping (GUI stays open)"
+#     stop
+# }
 
 run

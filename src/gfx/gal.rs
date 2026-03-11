@@ -15,13 +15,13 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
-use core::sync::atomic::{AtomicU32, AtomicBool, AtomicU64, Ordering};
-use spin::Mutex;
+use alloc::vec::Vec;
 use core::mem;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use spin::Mutex;
 
-use super::{Surface, SwapChain, GraphicsBackend};
+use super::{GraphicsBackend, Surface, SwapChain};
 
 // ============================================================================
 // GAL SABİTLERİ
@@ -156,19 +156,20 @@ impl TextureFormat {
 
     /// Derinlik formatı mı
     pub fn is_depth(&self) -> bool {
-        matches!(self,
-            TextureFormat::Depth16 |
-            TextureFormat::Depth24 |
-            TextureFormat::Depth32F |
-            TextureFormat::Depth24Stencil8
+        matches!(
+            self,
+            TextureFormat::Depth16
+                | TextureFormat::Depth24
+                | TextureFormat::Depth32F
+                | TextureFormat::Depth24Stencil8
         )
     }
 
     /// Stencil formatı mı
     pub fn is_stencil(&self) -> bool {
-        matches!(self,
-            TextureFormat::Stencil8 |
-            TextureFormat::Depth24Stencil8
+        matches!(
+            self,
+            TextureFormat::Stencil8 | TextureFormat::Depth24Stencil8
         )
     }
 }
@@ -638,7 +639,12 @@ pub enum ClearValue {
 
 impl Default for ClearValue {
     fn default() -> Self {
-        ClearValue::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+        ClearValue::Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }
     }
 }
 
@@ -753,7 +759,15 @@ pub trait Gal: Send + Sync {
     fn set_rasterizer_state(&mut self, state: RasterizerState);
 
     /// Görüntü alanı ayarla
-    fn set_viewport(&mut self, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32);
+    fn set_viewport(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        min_depth: f32,
+        max_depth: f32,
+    );
 
     /// Makas dikdörtgeni ayarla
     fn set_scissor(&mut self, x: i32, y: i32, width: u32, height: u32);
@@ -905,12 +919,15 @@ impl Gal for SoftwareGal {
         let handle = self.next_texture_handle();
         let size = (desc.width * desc.height) as usize * desc.format.bytes_per_pixel();
 
-        self.textures.insert(handle.0, SoftwareTexture {
-            width: desc.width,
-            height: desc.height,
-            format: desc.format,
-            data: vec![0; size],
-        });
+        self.textures.insert(
+            handle.0,
+            SoftwareTexture {
+                width: desc.width,
+                height: desc.height,
+                format: desc.format,
+                data: vec![0; size],
+            },
+        );
 
         Some(handle)
     }
@@ -928,10 +945,13 @@ impl Gal for SoftwareGal {
             buffer[..copy_len].copy_from_slice(&d[..copy_len]);
         }
 
-        self.buffers.insert(handle.0, SoftwareBuffer {
-            data: buffer,
-            is_index: false,
-        });
+        self.buffers.insert(
+            handle.0,
+            SoftwareBuffer {
+                data: buffer,
+                is_index: false,
+            },
+        );
 
         Some(handle)
     }
@@ -945,10 +965,13 @@ impl Gal for SoftwareGal {
             buffer[..copy_len].copy_from_slice(&d[..copy_len]);
         }
 
-        self.buffers.insert(handle.0, SoftwareBuffer {
-            data: buffer,
-            is_index: true,
-        });
+        self.buffers.insert(
+            handle.0,
+            SoftwareBuffer {
+                data: buffer,
+                is_index: true,
+            },
+        );
 
         Some(handle)
     }
@@ -964,10 +987,13 @@ impl Gal for SoftwareGal {
     fn create_shader(&mut self, vertex_src: &str, fragment_src: &str) -> Option<ShaderHandle> {
         let handle = self.next_shader_handle();
 
-        self.shaders.insert(handle.0, SoftwareShader {
-            vertex_src: String::from(vertex_src),
-            fragment_src: String::from(fragment_src),
-        });
+        self.shaders.insert(
+            handle.0,
+            SoftwareShader {
+                vertex_src: String::from(vertex_src),
+                fragment_src: String::from(fragment_src),
+            },
+        );
 
         Some(handle)
     }
@@ -1033,8 +1059,8 @@ impl Gal for SoftwareGal {
             if attachment.load_op == LoadOp::Clear {
                 if let ClearValue::Color { r, g, b, a } = attachment.clear_value {
                     let color = ((r * 255.0) as u32) << 16
-                              | ((g * 255.0) as u32) << 8
-                              | ((b * 255.0) as u32);
+                        | ((g * 255.0) as u32) << 8
+                        | ((b * 255.0) as u32);
 
                     // Çerçeve tamponunu temizle
                     for pixel in &mut self.framebuffer {
@@ -1089,7 +1115,15 @@ impl Gal for SoftwareGal {
         let _ = state;
     }
 
-    fn set_viewport(&mut self, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32) {
+    fn set_viewport(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        min_depth: f32,
+        max_depth: f32,
+    ) {
         self.viewport = (x, y, width, height, min_depth, max_depth);
     }
 

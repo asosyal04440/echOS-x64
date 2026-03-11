@@ -9,7 +9,7 @@ param(
     [switch]$NoBuild,
     [switch]$Release,
     [switch]$BatchMode,
-    [int]$TimeoutSec = 120
+    [int]$TimeoutSec = 3600 # 1 hour default (removed hard timeout from scripts)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +22,7 @@ $GuiScript     = "targets/echos/gui-boot.simics"
 $BatchScript   = "targets/echos/zero-tolerance-gate.simics"
 $Log           = Join-Path $ProjectRoot "vhdx_update.log"
 $DiskHelper    = Join-Path $ProjectRoot "run_simics_disk_helper.ps1"
+$SerialCapture = Join-Path $SimicsProject "targets\echos\logs\serial_capture.txt"
 
 $Profile = if ($Release) { "release" } else { "debug" }
 $EfiPath = Join-Path $ProjectRoot "target\x86_64-unknown-uefi\$Profile\ech_os.efi"
@@ -38,7 +39,7 @@ Write-Host ""
 # --- 1. Build ---
 if (-not $NoBuild) {
     Write-Host "[1/3] Derleniyor ($Profile)..." -ForegroundColor Yellow
-    $buildArgs = @("build", "--target", "x86_64-unknown-uefi")
+    $buildArgs = @("build", "--target", "x86_64-unknown-uefi", "--features", "simics")
     if ($Release) { $buildArgs += "--release" }
 
     $prevPref = $ErrorActionPreference
@@ -103,10 +104,13 @@ Write-Host "[3/3] Simics baslatiliyor..." -ForegroundColor Yellow
 Push-Location $SimicsProject
 try {
     if ($BatchMode) {
+        if (Test-Path $SerialCapture) {
+            Remove-Item $SerialCapture -Force
+        }
         Write-Host "  Batch mod: $TimeoutSec sn simulasyon" -ForegroundColor DarkCyan
         & $SimicsBat --batch-mode $BatchScript
         Write-Host ""
-        $serial = Join-Path $SimicsProject "targets\echos\logs\serial_capture.txt"
+        $serial = $SerialCapture
         if (Test-Path $serial) {
             $bytes = (Get-Item $serial).Length
             $panicCount = (Select-String -Path $serial -Pattern '\[PANIC\]' -SimpleMatch | Measure-Object).Count

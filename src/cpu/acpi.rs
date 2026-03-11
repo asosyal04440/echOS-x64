@@ -299,23 +299,23 @@ struct Madt {
 }
 
 /// MADT giriş tipi sabitleri — her giriş farklı bir donanım bileşenini tanımlar.
-const MADT_ENTRY_LOCAL_APIC: u8 = 0;             // 32-bit APIC ID'li CPU
-const MADT_ENTRY_IO_APIC: u8 = 1;               // IO-APIC birimi
-const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;    // IRQ → GSI yönlendirme
+const MADT_ENTRY_LOCAL_APIC: u8 = 0; // 32-bit APIC ID'li CPU
+const MADT_ENTRY_IO_APIC: u8 = 1; // IO-APIC birimi
+const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2; // IRQ → GSI yönlendirme
 #[allow(dead_code)]
-const MADT_ENTRY_NMI: u8 = 4;                   // Non-Maskable Interrupt kaynağı
+const MADT_ENTRY_NMI: u8 = 4; // Non-Maskable Interrupt kaynağı
 #[allow(dead_code)]
-const MADT_ENTRY_LOCAL_APIC_NMI: u8 = 5;        // CPU'ya bağlı NMI
+const MADT_ENTRY_LOCAL_APIC_NMI: u8 = 5; // CPU'ya bağlı NMI
 const MADT_ENTRY_LOCAL_APIC_ADDRESS_OVERRIDE: u8 = 6; // APIC taban adresi geçersizleme
 #[allow(dead_code)]
-const MADT_ENTRY_IO_SAPIC: u8 = 7;              // IA-64 IO-SAPIC
+const MADT_ENTRY_IO_SAPIC: u8 = 7; // IA-64 IO-SAPIC
 #[allow(dead_code)]
-const MADT_ENTRY_LOCAL_SAPIC: u8 = 8;           // IA-64 Local SAPIC
+const MADT_ENTRY_LOCAL_SAPIC: u8 = 8; // IA-64 Local SAPIC
 #[allow(dead_code)]
-const MADT_ENTRY_PLATFORM_INTERRUPT: u8 = 9;    // Platform interrupt kaynakları
-const MADT_ENTRY_LOCAL_X2APIC: u8 = 10;         // x2APIC (>255 CPU desteği için)
+const MADT_ENTRY_PLATFORM_INTERRUPT: u8 = 9; // Platform interrupt kaynakları
+const MADT_ENTRY_LOCAL_X2APIC: u8 = 10; // x2APIC (>255 CPU desteği için)
 #[allow(dead_code)]
-const MADT_ENTRY_LOCAL_X2APIC_NMI: u8 = 11;     // x2APIC NMI kaynağı
+const MADT_ENTRY_LOCAL_X2APIC_NMI: u8 = 11; // x2APIC NMI kaynağı
 
 /// Klasik Local APIC giriş yapısı — 32-bit APIC ID (maksimum 255 CPU)
 #[repr(C, packed)]
@@ -855,12 +855,12 @@ struct Fadt {
     reserved2: u8,            // 0x6F
     flags: u32,               // 0x70  ← FADT bayrakları (bit 10 = RESET_REG_SUP)
     // Offset 0x74: RESET_REG (Generic Address Structure — 12 bayt)
-    reset_reg_space: u8,      // 0x74  ← Adres uzayı (0=bellek, 1=I/O, 2=PCI)
-    reset_reg_bit_width: u8,  // 0x75
-    reset_reg_bit_offset: u8, // 0x76
-    reset_reg_access_size: u8,// 0x77
-    reset_reg_addr: u64,      // 0x78  ← Sıfırlama kaydının fiziksel adresi
-    reset_value: u8,          // 0x80  ← Sıfırlama için kayda yazılacak değer
+    reset_reg_space: u8,       // 0x74  ← Adres uzayı (0=bellek, 1=I/O, 2=PCI)
+    reset_reg_bit_width: u8,   // 0x75
+    reset_reg_bit_offset: u8,  // 0x76
+    reset_reg_access_size: u8, // 0x77
+    reset_reg_addr: u64,       // 0x78  ← Sıfırlama kaydının fiziksel adresi
+    reset_value: u8,           // 0x80  ← Sıfırlama için kayda yazılacak değer
 }
 
 /// FADT'yi parse eder ve güç yönetimi parametrelerini `AcpiState`'e aktarır.
@@ -899,18 +899,24 @@ fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
 
     crate::serial_println!(
         "ACPI: FADT PM1a_CNT=0x{:X} PM1b_CNT=0x{:X} PM1a_EVT=0x{:X} SCI={}",
-        pm1a, pm1b, pm1a_evt, sci_int
+        pm1a,
+        pm1b,
+        pm1a_evt,
+        sci_int
     );
     crate::serial_println!(
         "ACPI: FADT SMI_CMD=0x{:X} ACPI_ENABLE=0x{:X} flags=0x{:X}",
-        smi_cmd, acpi_enable, flags
+        smi_cmd,
+        acpi_enable,
+        flags
     );
 
     // RESET_REG alanını oku — bu kayda reset_value yazmak sistemi yeniden başlatır.
     // FADT uzunluğu >= 129 bayt ise RESET_REG alanı mevcuttur (ACPI 2.0+).
     if fadt_len >= 129 {
         let reset_space = fadt.reset_reg_space;
-        let reset_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.reset_reg_addr)) };
+        let reset_addr =
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.reset_reg_addr)) };
         let reset_val = fadt.reset_value;
         state.reset_reg_space = reset_space;
         state.reset_reg_addr = reset_addr;
@@ -919,7 +925,10 @@ fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
         let reset_supported = (flags >> 10) & 1 == 1;
         crate::serial_println!(
             "ACPI: RESET_REG space={} addr=0x{:X} val=0x{:X} supported={}",
-            reset_space, reset_addr, reset_val, reset_supported
+            reset_space,
+            reset_addr,
+            reset_val,
+            reset_supported
         );
     }
 
@@ -959,12 +968,11 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
     let s5_sig: [u8; 4] = [b'_', b'S', b'5', b'_'];
     let mut found = false;
 
-    let data_slice = unsafe {
-        core::slice::from_raw_parts(data_start as *const u8, data_end - data_start)
-    };
+    let data_slice =
+        unsafe { core::slice::from_raw_parts(data_start as *const u8, data_end - data_start) };
 
     for i in 0..data_slice.len().saturating_sub(20) {
-        if data_slice[i..i+4] == s5_sig {
+        if data_slice[i..i + 4] == s5_sig {
             // `_S5_` bulundu — paket içeriğini parse et
             // Format: _S5_ 0x12 PkgLen ElemSayısı 0x0A SLP_TYP_A [0x0A SLP_TYP_B] ...
             let mut offset = i + 4;
@@ -1000,7 +1008,7 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
                     } else if data_slice[offset] == 0x0B {
                         // WordPrefix: iki bayt, little-endian
                         offset += 1;
-                        let v = u16::from_le_bytes([data_slice[offset], data_slice[offset+1]]);
+                        let v = u16::from_le_bytes([data_slice[offset], data_slice[offset + 1]]);
                         offset += 2;
                         v
                     } else {
@@ -1016,7 +1024,7 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
                             data_slice[offset] as u16
                         } else if data_slice[offset] == 0x0B {
                             offset += 1;
-                            u16::from_le_bytes([data_slice[offset], data_slice[offset+1]])
+                            u16::from_le_bytes([data_slice[offset], data_slice[offset + 1]])
                         } else {
                             data_slice[offset] as u16
                         }
@@ -1030,7 +1038,8 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
 
                     crate::serial_println!(
                         "ACPI: DSDT \\_S5 found — SLP_TYP_A={} SLP_TYP_B={}",
-                        slp_a, slp_b
+                        slp_a,
+                        slp_b
                     );
                     break;
                 }
@@ -1088,14 +1097,24 @@ fn parse_madt(madt_addr: u64, state: &mut AcpiState) {
 
             MADT_ENTRY_LOCAL_X2APIC => {
                 let entry = unsafe { &*(offset as *const MadtLocalX2Apic) };
+                // Packed struct'tan güvenli kopyalama (hizasız erişim önleme)
+                let x2id = entry.x2apic_id;
+                let flags = entry.flags;
 
-                if (entry.flags & 1) != 0 {
-                    // Etkin x2APIC birimi
-                    state.cpu_info.cpu_list.push(entry.x2apic_id);
+                if x2id == 0xFFFFFFFF {
+                    // Geçersiz APIC ID — firmware bazen boş/devre dışı girişleri
+                    // 0xFFFFFFFF ile işaretler. ACPI spec'e göre bu geçersizdir.
+                    crate::serial_println!(
+                        "ACPI: Skipping x2APIC entry with invalid ID 0xFFFFFFFF"
+                    );
+                } else if (flags & 1) != 0 || (flags & 2) != 0 {
+                    // bit 0 = Etkin, bit 1 = Online Capable
+                    crate::serial_println!("ACPI: Found x2APIC ID {} (flags={})", x2id, flags);
+                    state.cpu_info.cpu_list.push(x2id);
 
-                    if (entry.flags & 2) != 0 {
+                    if (flags & 2) != 0 {
                         // Bu BSP (önyükleme işlemcisi)
-                        state.cpu_info.bsp_apic_id = entry.x2apic_id;
+                        state.cpu_info.bsp_apic_id = x2id;
                     }
                 }
             }
@@ -1267,13 +1286,20 @@ pub fn acpi_shutdown() -> ! {
     if let Some((aml_a, aml_b)) = crate::cpu::acpi_aml::get_s5_sleep_type() {
         slp_typ_a = aml_a;
         slp_typ_b = aml_b;
-        crate::serial_println!("[ACPI] S5 from AML: SLP_TYP_A={} SLP_TYP_B={}", aml_a, aml_b);
+        crate::serial_println!(
+            "[ACPI] S5 from AML: SLP_TYP_A={} SLP_TYP_B={}",
+            aml_a,
+            aml_b
+        );
     }
 
     crate::serial_println!("[ACPI] Shutting down (S5)...");
     crate::serial_println!(
         "[ACPI] PM1a=0x{:X} SLP_TYP_A={} PM1b=0x{:X} SLP_TYP_B={}",
-        pm1a, slp_typ_a, pm1b, slp_typ_b
+        pm1a,
+        slp_typ_a,
+        pm1b,
+        slp_typ_b
     );
 
     // Kesmeleri devre dışı bırak — kapatma sırasında kesme kabul edilmemeli
@@ -1329,7 +1355,12 @@ pub fn acpi_reboot() -> ! {
         let value = state.reset_value;
         drop(state);
 
-        crate::serial_println!("[ACPI] Rebooting via RESET_REG (space={} addr=0x{:X} val=0x{:X})", space, addr, value);
+        crate::serial_println!(
+            "[ACPI] Rebooting via RESET_REG (space={} addr=0x{:X} val=0x{:X})",
+            space,
+            addr,
+            value
+        );
 
         x86_64::instructions::interrupts::disable();
 

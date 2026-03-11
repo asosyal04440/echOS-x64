@@ -3,6 +3,7 @@
 //! İsimsiz (anonymous) pipe ve isimli pipe (FIFO/named pipe) implementasyonları.
 //! Tek yönlü IPC kanalı: bir taraf yazar (write end), diğer taraf okur (read end).
 
+use crate::task::scheduler::WaitQueue;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -58,6 +59,10 @@ pub struct PipeBuffer {
     waiting_readers: AtomicU32,
     /// Yer bekleyen yazıcı sayısı
     waiting_writers: AtomicU32,
+    /// Veri bekleyen okuyucular için WaitQueue
+    read_wq: WaitQueue,
+    /// Yer bekleyen yazıcılar için WaitQueue
+    write_wq: WaitQueue,
 }
 
 impl PipeBuffer {
@@ -72,6 +77,8 @@ impl PipeBuffer {
             bytes_read: AtomicU64::new(0),
             waiting_readers: AtomicU32::new(0),
             waiting_writers: AtomicU32::new(0),
+            read_wq: WaitQueue::new(),
+            write_wq: WaitQueue::new(),
         }
     }
 
@@ -108,70 +115,91 @@ impl PipeBuffer {
     /// Pipe'tan veri oku (read() sistem çağrısına karşılık gelir)
     /// - Tampon boş && yazıcı yok => EOF döndür (0 bayt)
     /// - Tampon boş && yazıcı var && nonblocking => EAGAIN döndür
-    /// - Tampon boş && yazıcı var && blocking => bloke ol (şimdilik EAGAIN)
+    /// - Tampon boş && yazıcı var && blocking => WaitQueue'da uyut
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, PipeError> {
         if self.readers.load(Ordering::SeqCst) == 0 {
             return Err(PipeError::NoReader);
         }
 
-        let mut buffer = self.buffer.lock();
+        loop {
+            {
+                let mut buffer = self.buffer.lock();
 
-        if buffer.is_empty() {
-            if self.writers.load(Ordering::SeqCst) == 0 {
-                return Ok(0); // EOF: tüm yazıcılar kapandı
+                if !buffer.is_empty() {
+                    let to_read = buf.len().min(buffer.len());
+                    for i in 0..to_read {
+                        buf[i] = buffer.pop_front().unwrap();
+                    }
+                    self.bytes_read.fetch_add(to_read as u64, Ordering::SeqCst);
+                    drop(buffer);
+                    // Yer açıldı — bekleyen yazıcıları uyandır
+                    self.write_wq.wake_one();
+                    return Ok(to_read);
+                }
+
+                if self.writers.load(Ordering::SeqCst) == 0 {
+                    return Ok(0); // EOF: tüm yazıcılar kapandı
+                }
+
+                if self.nonblocking.load(Ordering::SeqCst) {
+                    return Err(PipeError::WouldBlock);
+                }
             }
-
-            if self.nonblocking.load(Ordering::SeqCst) {
-                return Err(PipeError::WouldBlock);
-            }
-
-            // Blocking mod: veri gelene kadar bekle (şimdilik hata)
-            return Err(PipeError::WouldBlock);
+            // Blocking mod: veri gelene kadar WaitQueue'da uyut
+            self.waiting_readers.fetch_add(1, Ordering::SeqCst);
+            self.read_wq.sleep();
+            self.waiting_readers.fetch_sub(1, Ordering::SeqCst);
         }
-
-        let to_read = buf.len().min(buffer.len());
-        for i in 0..to_read {
-            buf[i] = buffer.pop_front().unwrap();
-        }
-
-        self.bytes_read.fetch_add(to_read as u64, Ordering::SeqCst);
-
-        Ok(to_read)
     }
 
     /// Pipe'a veri yaz (write() sistem çağrısına karşılık gelir)
-    /// - Okuyucu yoksa => BrokenPipe (SIGPIPE gönderilmeli)
+    /// - Okuyucu yoksa => BrokenPipe + SIGPIPE
     /// - Tampon doluysa && nonblocking => EAGAIN
-    /// - Tampon doluysa && blocking => bloke ol (şimdilik EAGAIN)
+    /// - Tampon doluysa && blocking => WaitQueue'da uyut
     pub fn write(&self, buf: &[u8]) -> Result<usize, PipeError> {
         if self.writers.load(Ordering::SeqCst) == 0 {
             return Err(PipeError::NoWriter);
         }
 
         if self.readers.load(Ordering::SeqCst) == 0 {
-            return Err(PipeError::BrokenPipe); // EPIPE - okuyucu kalmadı
+            // SIGPIPE gönder — yazıcı process'e bildir
+            crate::task::signal::send_signal_to_current(crate::task::signal::Signal::SIGPIPE);
+            return Err(PipeError::BrokenPipe);
         }
 
-        let mut buffer = self.buffer.lock();
+        loop {
+            {
+                let mut buffer = self.buffer.lock();
+                let available = self.max_size.saturating_sub(buffer.len());
 
-        let available = self.max_size.saturating_sub(buffer.len());
+                if available > 0 {
+                    let to_write = buf.len().min(available);
+                    for i in 0..to_write {
+                        buffer.push_back(buf[i]);
+                    }
+                    self.bytes_written
+                        .fetch_add(to_write as u64, Ordering::SeqCst);
+                    drop(buffer);
+                    // Veri geldi — bekleyen okuyucuları uyandır
+                    self.read_wq.wake_one();
+                    return Ok(to_write);
+                }
 
-        if available == 0 {
-            if self.nonblocking.load(Ordering::SeqCst) {
-                return Err(PipeError::WouldBlock);
+                if self.nonblocking.load(Ordering::SeqCst) {
+                    return Err(PipeError::WouldBlock);
+                }
             }
-            // Yer açılana kadar bekle (şimdilik hata)
-            return Err(PipeError::WouldBlock);
+            // Blocking mod: yer açılana kadar WaitQueue'da uyut
+            self.waiting_writers.fetch_add(1, Ordering::SeqCst);
+            self.write_wq.sleep();
+            self.waiting_writers.fetch_sub(1, Ordering::SeqCst);
+
+            // Uyandıktan sonra reader kapanmış olabilir — tekrar kontrol et
+            if self.readers.load(Ordering::SeqCst) == 0 {
+                crate::task::signal::send_signal_to_current(crate::task::signal::Signal::SIGPIPE);
+                return Err(PipeError::BrokenPipe);
+            }
         }
-
-        let to_write = buf.len().min(available);
-        for i in 0..to_write {
-            buffer.push_back(buf[i]);
-        }
-
-        self.bytes_written.fetch_add(to_write as u64, Ordering::SeqCst);
-
-        Ok(to_write)
     }
 
     /// Kalan boş alan miktarını döndür
@@ -387,7 +415,7 @@ pub struct PipeStats {
 }
 
 impl PipeManager {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             fifos: Mutex::new(BTreeMap::new()),
             pipes: Mutex::new(BTreeMap::new()),
@@ -483,7 +511,7 @@ pub fn sys_mkfifo(path: &str, mode: u32) -> i32 {
     match PIPE_MANAGER.create_fifo(path, mode) {
         Ok(_) => 0,
         Err(PipeError::AlreadyExists) => -17, // -EEXIST
-        Err(_) => -5,                          // -EIO
+        Err(_) => -5,                         // -EIO
     }
 }
 

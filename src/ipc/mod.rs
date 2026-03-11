@@ -50,7 +50,16 @@
 /// Mesaj yapısı ve gönderme/alma fonksiyonları
 pub mod message;
 
-/// İletişim kanalları
+/// MPMC kanalları (Multi-Producer Multi-Consumer)
 pub mod channel;
+
+/// Servis IPC arayüzü (Faz 3)
+pub mod service_ipc;
+
+/// Service IPC türleri (Faz 3)
+pub use service_ipc::*;
+
+/// Eventfd / Signalfd / Timerfd — Linux IPC dosya tanımlayıcıları
+pub mod event_fd;
 
 pub use message::{has_message, receive_message, send_message, Message};

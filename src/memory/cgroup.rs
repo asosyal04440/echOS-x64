@@ -191,11 +191,11 @@ impl MemoryCgroup {
         }
 
         // Üst cgroup'a yay
-        // if let Some(parent_id) = self.parent {
-        //     if let Some(parent) = CGROUP_MANAGER.get_cgroup(parent_id) {
-        //         parent.charge(bytes);
-        //     }
-        // }
+        if let Some(parent_id) = self.parent {
+            if let Some(parent) = CGROUP_MANAGER.get_cgroup(parent_id) {
+                let _ = parent.charge(bytes);
+            }
+        }
 
         Ok(())
     }
@@ -210,8 +210,15 @@ impl MemoryCgroup {
     /// Belleği geri kazanmaya çalış
     fn try_reclaim(&self, needed: u64) -> bool {
         // Bu cgroup için bellek geri kazanımı tetikle
-        // Bellek yönetimini çağırır
-        false
+        let pages_needed = (needed as usize) / 4096;
+        let reclaimed = crate::memory::reclaim_pages(pages_needed.max(16));
+        crate::serial_println!(
+            "[CGROUP] Reclaimed {} pages for cgroup '{}' (needed {} bytes)",
+            reclaimed,
+            self.name,
+            needed
+        );
+        reclaimed > 0
     }
 
     /// OOM kill'i tetikle
@@ -228,7 +235,8 @@ impl MemoryCgroup {
         );
 
         // Bu cgroup'un süreçleri için OOM killer'ı çağır
-        // crate::memory::oom::oom_kill_cgroup(self);
+        let pids: alloc::vec::Vec<u64> = self.processes.lock().iter().copied().collect();
+        crate::memory::oom::oom_kill_cgroup(&self.name, &pids);
     }
 
     /// Bellek limitini ayarla
@@ -395,7 +403,8 @@ impl CgroupManager {
 
     /// Tüm cgroup'ları listele
     pub fn list_cgroups(&self) -> Vec<(u64, String)> {
-        self.cgroups.read()
+        self.cgroups
+            .read()
             .iter()
             .map(|(id, cg)| (*id, cg.name.clone()))
             .collect()
@@ -462,5 +471,7 @@ pub fn create(name: &str, parent: u64) -> Result<u64, CgroupError> {
 
 /// Cgroup istatistiklerini al
 pub fn get_stats(cgroup_id: u64) -> Option<MemoryStats> {
-    CGROUP_MANAGER.get_cgroup(cgroup_id).map(|cg| cg.stats.lock().clone())
+    CGROUP_MANAGER
+        .get_cgroup(cgroup_id)
+        .map(|cg| cg.stats.lock().clone())
 }

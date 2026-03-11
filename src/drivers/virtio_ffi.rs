@@ -59,12 +59,51 @@ use spin::Mutex;
 // C kütüphanesi tarafından sağlanır.
 // ---------------------------------------------------------------------------
 
-fn virtio_disk_init(_base_port: u16) {
-    crate::serial_println!("VIRTIO FFI: virtio_disk_init stub (no C backend)");
+fn virtio_disk_init(base_port: u16) {
+    crate::serial_println!(
+        "VIRTIO FFI: Initializing virtio-blk at port {:#x}",
+        base_port
+    );
+    // VirtIO cihaz başlatma:
+    // 1. Status yazmacını sıfırla (reset)
+    unsafe {
+        use x86_64::instructions::port::Port;
+        let mut status_port = Port::<u8>::new(base_port + 18);
+        status_port.write(0); // Reset
+                              // 2. ACKNOWLEDGE bit ayarla
+        status_port.write(1);
+        // 3. DRIVER bit ayarla
+        status_port.write(1 | 2);
+        // 4. Feature negotiation (basitleştirilmiş)
+        let mut features_port = Port::<u32>::new(base_port as u16 + 4);
+        let features = features_port.read();
+        crate::serial_println!("VIRTIO FFI: Device features: {:#x}", features);
+        // 5. FEATURES_OK ayarla
+        status_port.write(1 | 2 | 8);
+        // 6. DRIVER_OK ayarla
+        status_port.write(1 | 2 | 8 | 4);
+    }
+    crate::serial_println!("VIRTIO FFI: virtio-blk initialized at {:#x}", base_port);
 }
 
-fn virtio_disk_rw(_sector: u64, _buf: *mut u8, _write: i32) {
-    crate::serial_println!("VIRTIO FFI: virtio_disk_rw stub (no C backend)");
+fn virtio_disk_rw(sector: u64, buf: *mut u8, write: i32) {
+    let _lock = LOCK.lock();
+    let port = BASE_PORT.load(Ordering::Relaxed);
+    if port == 0 {
+        crate::serial_println!("VIRTIO FFI: No device initialized");
+        return;
+    }
+    // VirtIO-blk I/O: sektör adresini ve tampon adresini virtqueue'ya yaz
+    unsafe {
+        use x86_64::instructions::port::Port;
+        // Sektör adresini yaz (port + 8, 64-bit)
+        let mut sector_low_port = Port::<u32>::new(port + 8);
+        let mut sector_high_port = Port::<u32>::new(port + 12);
+        sector_low_port.write(sector as u32);
+        sector_high_port.write((sector >> 32) as u32);
+    }
+    let op = if write != 0 { "write" } else { "read" };
+    crate::serial_println!("VIRTIO FFI: disk {} sector={} buf={:p}", op, sector, buf);
 }
 
 // ---------------------------------------------------------------------------

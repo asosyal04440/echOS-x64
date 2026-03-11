@@ -82,12 +82,30 @@ const KECCAK_STATE_SIZE: usize = 25;
 /// ι adımında bu sabit A[0,0] şeridine XOR'lanarak her turun farklı işlenmesi sağlanır
 /// (aksi hâlde tüm turlar özdeş olur ve güvenlik ortadan kalkar).
 const RC: [u64; 24] = [
-    0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
-    0x000000000000808b, 0x0000000000800081, 0x8000000000008081, 0x8000000000808000,
-    0x0000000000008009, 0x000000000020002a, 0x8000000000200080, 0x800000000080800a,
-    0x0000000000800081, 0x8000000000808081, 0x8000000000808082, 0x0000000000800080,
-    0x8000000000008009, 0x8000000000008081, 0x8000000000008082, 0x800000000000808a,
-    0x8000000000808000, 0x0000000000800080, 0x8000000000808000, 0x0000000000808000,
+    0x0000000000000001,
+    0x0000000000008082,
+    0x800000000000808a,
+    0x8000000080008000,
+    0x000000000000808b,
+    0x0000000000800081,
+    0x8000000000008081,
+    0x8000000000808000,
+    0x0000000000008009,
+    0x000000000020002a,
+    0x8000000000200080,
+    0x800000000080800a,
+    0x0000000000800081,
+    0x8000000000808081,
+    0x8000000000808082,
+    0x0000000000800080,
+    0x8000000000008009,
+    0x8000000000008081,
+    0x8000000000008082,
+    0x800000000000808a,
+    0x8000000000808000,
+    0x0000000000800080,
+    0x8000000000808000,
+    0x0000000000808000,
 ];
 
 /// Keccak ρ adımı için döndürme ofseti tablosu (ROTOFF[y][x]).
@@ -190,7 +208,8 @@ impl Sha3 {
             let space = self.rate - self.buffer_len;
             let take = remaining.len().min(space);
 
-            self.buffer[self.buffer_len..self.buffer_len + take].copy_from_slice(&remaining[..take]);
+            self.buffer[self.buffer_len..self.buffer_len + take]
+                .copy_from_slice(&remaining[..take]);
             self.buffer_len += take;
             remaining = &remaining[take..];
 
@@ -322,8 +341,8 @@ impl Sha3 {
             // A[x,y] = B[x,y] XOR (NOT B[x+1,y] AND B[x+2,y])
             for x in 0..5 {
                 for y in 0..5 {
-                    self.state[y * 5 + x] = b[y * 5 + x] ^
-                        (!b[y * 5 + ((x + 1) % 5)] & b[y * 5 + ((x + 2) % 5)]);
+                    self.state[y * 5 + x] =
+                        b[y * 5 + x] ^ (!b[y * 5 + ((x + 1) % 5)] & b[y * 5 + ((x + 2) % 5)]);
                 }
             }
 

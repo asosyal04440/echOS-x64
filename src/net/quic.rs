@@ -87,12 +87,12 @@
 //! ```
 
 use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-use super::tls::{X25519, AesGcm, ChaCha20Poly1305, CipherSuite};
+use super::tls::{AesGcm, ChaCha20Poly1305, CipherSuite, X25519};
 
 // ============================================================================
 // QUIC SABİTLERİ
@@ -359,12 +359,16 @@ impl QuicStream {
 
     /// Akış okunabilir mi? Açık/yarı-kapalı durumda ve tampon dolu ise evet.
     pub fn can_read(&self) -> bool {
-        matches!(self.state, StreamState::Open | StreamState::HalfClosedLocal) && !self.recv_buffer.is_empty()
+        matches!(self.state, StreamState::Open | StreamState::HalfClosedLocal)
+            && !self.recv_buffer.is_empty()
     }
 
     /// Akışa yazılabilir mi? Açık/yarı-kapalı durumda ve gönderme penceresi dolmamışsa evet.
     pub fn can_write(&self) -> bool {
-        matches!(self.state, StreamState::Open | StreamState::HalfClosedRemote) && self.send_offset < self.send_max_offset
+        matches!(
+            self.state,
+            StreamState::Open | StreamState::HalfClosedRemote
+        ) && self.send_offset < self.send_max_offset
     }
 
     /// Akışa veri yazar. Akış kontrolü sınırına kadar yazar, fazlası kesilir.
@@ -436,19 +440,11 @@ pub enum QuicFrame {
         final_size: u64,
     },
     /// Veri gönderimini durdur: alıcı bu akıştan veri istemiyor.
-    StopSending {
-        stream_id: u64,
-        error_code: u64,
-    },
+    StopSending { stream_id: u64, error_code: u64 },
     /// TLS el sıkışma verisi (ClientHello, ServerHello, Finished vb.).
-    Crypto {
-        offset: u64,
-        data: Vec<u8>,
-    },
+    Crypto { offset: u64, data: Vec<u8> },
     /// Sunucunun gelecekteki 0-RTT için istemciye token vermesi.
-    NewToken {
-        token: Vec<u8>,
-    },
+    NewToken { token: Vec<u8> },
     /// Uygulama verisi: stream_id + offset + FIN bayrağı + byte verisi.
     Stream {
         stream_id: u64,
@@ -457,9 +453,7 @@ pub enum QuicFrame {
         data: Vec<u8>,
     },
     /// Bağlantı genelinde maksimum veri sınırını arttır (akış kontrol penceresi).
-    MaxData {
-        max_data: u64,
-    },
+    MaxData { max_data: u64 },
     /// Belirli bir akış için maksimum veri sınırını arttır.
     MaxStreamData {
         stream_id: u64,
@@ -471,9 +465,7 @@ pub enum QuicFrame {
         max_streams: u64,
     },
     /// Gönderici, bağlantı genelindeki veri sınırına takıldı.
-    DataBlocked {
-        max_data: u64,
-    },
+    DataBlocked { max_data: u64 },
     /// Gönderici, belirli akışın sınırına takıldı.
     StreamDataBlocked {
         stream_id: u64,
@@ -492,17 +484,11 @@ pub enum QuicFrame {
         reset_token: [u8; 16],
     },
     /// Eski Connection ID'yi kullanımdan kaldır.
-    RetireConnectionId {
-        sequence: u64,
-    },
+    RetireConnectionId { sequence: u64 },
     /// Yol doğrulama: 8-byte meydan okuma verisi gönder.
-    PathChallenge {
-        data: [u8; 8],
-    },
+    PathChallenge { data: [u8; 8] },
     /// Yol doğrulama yanıtı: aynı 8-byte ile karşılık ver.
-    PathResponse {
-        data: [u8; 8],
-    },
+    PathResponse { data: [u8; 8] },
     /// Bağlantıyı kapat (QUIC katmanı hatası).
     ConnectionClose {
         error_code: u64,
@@ -510,10 +496,7 @@ pub enum QuicFrame {
         reason: Vec<u8>,
     },
     /// Bağlantıyı kapat (uygulama katmanı hatası).
-    ConnectionCloseApp {
-        error_code: u64,
-        reason: Vec<u8>,
-    },
+    ConnectionCloseApp { error_code: u64, reason: Vec<u8> },
     /// El sıkışma tamamlandı sinyali (sunucudan istemciye).
     HandshakeDone,
 }
@@ -531,7 +514,13 @@ impl QuicFrame {
             QuicFrame::Ping => {
                 buf.push(QuicFrameType::Ping as u8);
             }
-            QuicFrame::Ack { largest_ack, ack_delay, ack_range_count, first_ack_range, ack_ranges } => {
+            QuicFrame::Ack {
+                largest_ack,
+                ack_delay,
+                ack_range_count,
+                first_ack_range,
+                ack_ranges,
+            } => {
                 buf.push(QuicFrameType::Ack as u8);
                 Self::encode_varint(&mut buf, *largest_ack);
                 Self::encode_varint(&mut buf, *ack_delay);
@@ -541,13 +530,20 @@ impl QuicFrame {
                     Self::encode_varint(&mut buf, *range);
                 }
             }
-            QuicFrame::ResetStream { stream_id, error_code, final_size } => {
+            QuicFrame::ResetStream {
+                stream_id,
+                error_code,
+                final_size,
+            } => {
                 buf.push(QuicFrameType::ResetStream as u8);
                 Self::encode_varint(&mut buf, *stream_id);
                 Self::encode_varint(&mut buf, *error_code);
                 Self::encode_varint(&mut buf, *final_size);
             }
-            QuicFrame::StopSending { stream_id, error_code } => {
+            QuicFrame::StopSending {
+                stream_id,
+                error_code,
+            } => {
                 buf.push(QuicFrameType::StopSending as u8);
                 Self::encode_varint(&mut buf, *stream_id);
                 Self::encode_varint(&mut buf, *error_code);
@@ -558,7 +554,12 @@ impl QuicFrame {
                 Self::encode_varint(&mut buf, data.len() as u64);
                 buf.extend_from_slice(data);
             }
-            QuicFrame::Stream { stream_id, offset, fin, data } => {
+            QuicFrame::Stream {
+                stream_id,
+                offset,
+                fin,
+                data,
+            } => {
                 let mut frame_type = QuicFrameType::Stream as u8;
                 // OFF bit: offset alanının varlığını belirtir (offset > 0 ise)
                 if *offset > 0 {
@@ -582,7 +583,10 @@ impl QuicFrame {
                 buf.push(QuicFrameType::MaxData as u8);
                 Self::encode_varint(&mut buf, *max_data);
             }
-            QuicFrame::MaxStreamData { stream_id, max_stream_data } => {
+            QuicFrame::MaxStreamData {
+                stream_id,
+                max_stream_data,
+            } => {
                 buf.push(QuicFrameType::MaxStreamData as u8);
                 Self::encode_varint(&mut buf, *stream_id);
                 Self::encode_varint(&mut buf, *max_stream_data);
@@ -590,9 +594,51 @@ impl QuicFrame {
             QuicFrame::HandshakeDone => {
                 buf.push(QuicFrameType::HandshakeDone as u8);
             }
+            QuicFrame::NewConnectionId {
+                sequence,
+                retire_prior,
+                conn_id,
+                reset_token,
+            } => {
+                buf.push(QuicFrameType::NewConnectionId as u8);
+                Self::encode_varint(&mut buf, *sequence);
+                Self::encode_varint(&mut buf, *retire_prior);
+                buf.push(conn_id.len() as u8);
+                buf.extend_from_slice(&conn_id.data);
+                buf.extend_from_slice(reset_token);
+            }
+            QuicFrame::RetireConnectionId { sequence } => {
+                buf.push(QuicFrameType::RetireConnectionId as u8);
+                Self::encode_varint(&mut buf, *sequence);
+            }
+            QuicFrame::PathChallenge { data } => {
+                buf.push(QuicFrameType::PathChallenge as u8);
+                buf.extend_from_slice(data);
+            }
+            QuicFrame::PathResponse { data } => {
+                buf.push(QuicFrameType::PathResponse as u8);
+                buf.extend_from_slice(data);
+            }
+            QuicFrame::ConnectionClose {
+                error_code,
+                frame_type,
+                reason,
+            } => {
+                buf.push(QuicFrameType::ConnectionClose as u8);
+                Self::encode_varint(&mut buf, *error_code);
+                Self::encode_varint(&mut buf, *frame_type);
+                Self::encode_varint(&mut buf, reason.len() as u64);
+                buf.extend_from_slice(reason);
+            }
+            QuicFrame::ConnectionCloseApp { error_code, reason } => {
+                buf.push(0x1d); // CONNECTION_CLOSE (app)
+                Self::encode_varint(&mut buf, *error_code);
+                Self::encode_varint(&mut buf, reason.len() as u64);
+                buf.extend_from_slice(reason);
+            }
             _ => {
-                // Diğer frame tipleri: basitleştirilmiş kodlama (stub)
-                buf.push(0xFF);
+                // Bilinmeyen frame tipi — sessizce atla (RFC 9000 Section 19)
+                crate::serial_println!("[QUIC] Unknown frame type, skipping");
             }
         }
 
@@ -696,13 +742,20 @@ impl QuicFrame {
                 let stream_id = Self::decode_varint(data, pos)?;
                 let error_code = Self::decode_varint(data, pos)?;
                 let final_size = Self::decode_varint(data, pos)?;
-                Some(QuicFrame::ResetStream { stream_id, error_code, final_size })
+                Some(QuicFrame::ResetStream {
+                    stream_id,
+                    error_code,
+                    final_size,
+                })
             }
             0x05 => {
                 // STOP_SENDING: stream_id + error_code
                 let stream_id = Self::decode_varint(data, pos)?;
                 let error_code = Self::decode_varint(data, pos)?;
-                Some(QuicFrame::StopSending { stream_id, error_code })
+                Some(QuicFrame::StopSending {
+                    stream_id,
+                    error_code,
+                })
             }
             0x06 => {
                 // CRYPTO: TLS handshake verisi
@@ -713,7 +766,10 @@ impl QuicFrame {
                 }
                 let frame_data = data[*pos..*pos + len].to_vec();
                 *pos += len;
-                Some(QuicFrame::Crypto { offset, data: frame_data })
+                Some(QuicFrame::Crypto {
+                    offset,
+                    data: frame_data,
+                })
             }
             0x08..=0x0F => {
                 // STREAM frame: bayrak biti kombinasyonları
@@ -750,7 +806,10 @@ impl QuicFrame {
             0x11 => {
                 let stream_id = Self::decode_varint(data, pos)?;
                 let max_stream_data = Self::decode_varint(data, pos)?;
-                Some(QuicFrame::MaxStreamData { stream_id, max_stream_data })
+                Some(QuicFrame::MaxStreamData {
+                    stream_id,
+                    max_stream_data,
+                })
             }
             0x1E => Some(QuicFrame::HandshakeDone),
             _ => None, // Bilinmeyen frame tipi -> bağlantı hatası
@@ -880,7 +939,7 @@ impl QuicConnection {
             packets_received: 0,
             bytes_sent: 0,
             bytes_received: 0,
-            max_data: 16 * 1024 * 1024,  // 16MB
+            max_data: 16 * 1024 * 1024,   // 16MB
             max_stream_data: 1024 * 1024, // 1MB per stream
             local_max_streams_bidi: 100,
             local_max_streams_unidi: 100,
@@ -895,81 +954,81 @@ impl QuicConnection {
             last_activity: 0,
         }
     }
-    
+
     /// Create a new stream
     pub fn create_stream(&mut self, stream_type: StreamType) -> u64 {
         let stream_id = self.next_stream_id;
-        self.next_stream_id += 4;  // Stream IDs are spaced by 4
-        
+        self.next_stream_id += 4; // Stream IDs are spaced by 4
+
         let stream = QuicStream::new(stream_id, stream_type);
         self.streams.insert(stream_id, stream);
-        
+
         stream_id
     }
-    
+
     /// Get stream by ID
     pub fn get_stream(&self, stream_id: u64) -> Option<&QuicStream> {
         self.streams.get(&stream_id)
     }
-    
+
     /// Get mutable stream by ID
     pub fn get_stream_mut(&mut self, stream_id: u64) -> Option<&mut QuicStream> {
         self.streams.get_mut(&stream_id)
     }
-    
+
     /// Process incoming packet
     pub fn on_packet(&mut self, data: &[u8]) -> Result<Vec<QuicFrame>, QuicError> {
         self.packets_received += 1;
         self.bytes_received += data.len() as u64;
         self.last_activity = 0;
-        
+
         // Parse packet header
         if data.is_empty() {
             return Err(QuicError::ProtocolViolation);
         }
-        
+
         let first_byte = data[0];
-        
+
         // Check if long header (version negotiation, initial, 0-RTT, handshake, retry)
         if first_byte & 0x80 != 0 {
             // Long header
             if data.len() < 5 {
                 return Err(QuicError::ProtocolViolation);
             }
-            
+
             let version = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
-            
+
             if version != self.version && self.state != QuicState::Initial {
                 return Err(QuicError::ProtocolViolation);
             }
-            
+
             // Parse connection IDs
             let pos = 5;
             let dcid_len = data[pos] as usize;
             if pos + 1 + dcid_len >= data.len() {
                 return Err(QuicError::ProtocolViolation);
             }
-            
+
             let scid_len = data[pos + 1 + dcid_len] as usize;
-            
+
             // Skip to packet number and frames
             // For now, just parse frames from payload
             let frames = self.parse_frames(data)?;
-            
+
             return Ok(frames);
         }
-        
+
         // Short header (1-RTT)
         let frames = self.parse_frames(data)?;
-        
+
         Ok(frames)
     }
-    
+
     /// Parse frames from packet payload
     fn parse_frames(&mut self, data: &[u8]) -> Result<Vec<QuicFrame>, QuicError> {
         let mut frames = Vec::new();
         let mut pos = 0;
-        
+
         while pos < data.len() {
             if let Some(frame) = QuicFrame::decode(data, &mut pos) {
                 // Process frame
@@ -982,7 +1041,12 @@ impl QuicConnection {
                             self.state = QuicState::HandshakeComplete;
                         }
                     }
-                    QuicFrame::Stream { stream_id, data, fin, .. } => {
+                    QuicFrame::Stream {
+                        stream_id,
+                        data,
+                        fin,
+                        ..
+                    } => {
                         if let Some(stream) = self.streams.get_mut(stream_id) {
                             stream.recv_buffer.extend_from_slice(data);
                             stream.recv_offset += data.len() as u64;
@@ -994,7 +1058,10 @@ impl QuicConnection {
                     QuicFrame::MaxData { max_data } => {
                         self.max_data = *max_data;
                     }
-                    QuicFrame::MaxStreamData { stream_id, max_stream_data } => {
+                    QuicFrame::MaxStreamData {
+                        stream_id,
+                        max_stream_data,
+                    } => {
                         if let Some(stream) = self.streams.get_mut(stream_id) {
                             stream.send_max_offset = *max_stream_data;
                         }
@@ -1005,20 +1072,20 @@ impl QuicConnection {
                     }
                     _ => {}
                 }
-                
+
                 frames.push(frame);
             } else {
                 break;
             }
         }
-        
+
         Ok(frames)
     }
-    
+
     /// Build packet to send
     pub fn build_packet(&mut self, frames: &[QuicFrame]) -> Vec<u8> {
         let mut packet = Vec::new();
-        
+
         // Long header for Initial/Handshake
         if self.state == QuicState::Initial || self.state == QuicState::HandshakeInProgress {
             packet.push(0xC0 | (QuicPacketType::Initial as u8));
@@ -1027,44 +1094,44 @@ impl QuicConnection {
             packet.extend_from_slice(self.conn_id.as_slice());
             packet.push(self.peer_conn_id.len() as u8);
             packet.extend_from_slice(self.peer_conn_id.as_slice());
-            
+
             // Token (empty for client Initial)
             packet.push(0);
-            
+
             // Length and packet number (simplified)
             let mut payload = Vec::new();
             for frame in frames {
                 payload.extend_from_slice(&frame.encode());
             }
-            
+
             // Encode length
-            let len = payload.len() + 2;  // +2 for packet number
+            let len = payload.len() + 2; // +2 for packet number
             Self::encode_varint(&mut packet, len as u64);
-            
+
             // Packet number (2 bytes)
             packet.push(0);
             packet.push((self.packets_sent & 0xFF) as u8);
-            
+
             packet.extend_from_slice(&payload);
         } else {
             // Short header (1-RTT)
-            packet.push(0x40);  // Short header, no spin bit
+            packet.push(0x40); // Short header, no spin bit
             packet.extend_from_slice(self.peer_conn_id.as_slice());
-            
+
             // Packet number
             packet.push((self.packets_sent & 0xFF) as u8);
-            
+
             for frame in frames {
                 packet.extend_from_slice(&frame.encode());
             }
         }
-        
+
         self.packets_sent += 1;
         self.bytes_sent += packet.len() as u64;
-        
+
         packet
     }
-    
+
     /// Encode variable-length integer
     fn encode_varint(buf: &mut Vec<u8>, val: u64) {
         if val < 64 {
@@ -1101,43 +1168,94 @@ impl QuicClient {
             server_addr,
         }
     }
-    
+
     /// Connect to server
     pub fn connect(&mut self) -> Result<Vec<u8>, QuicError> {
         // Generate Initial keys
         let (private, public) = X25519::generate_keypair();
-        
+
         // Create Initial packet with Crypto frame containing TLS ClientHello
+        // TLS 1.3 ClientHello (RFC 8446 Section 4.1.2)
+        let mut client_hello = Vec::with_capacity(128);
+        client_hello.push(0x01); // HandshakeType = ClientHello
+                                 // Length placeholder (3 bytes) — sonra doldurulacak
+        let len_pos = client_hello.len();
+        client_hello.extend_from_slice(&[0x00, 0x00, 0x00]);
+        // ProtocolVersion = TLS 1.2 (uyumluluk için; gerçek sürüm extension'da)
+        client_hello.extend_from_slice(&[0x03, 0x03]);
+        // Random (32 bytes)
+        for i in 0..32u8 {
+            client_hello.push(private[i as usize % 32] ^ (i.wrapping_mul(0x5A)));
+        }
+        // Session ID length = 32 (TLS 1.3 uyumluluk modu)
+        client_hello.push(32);
+        for i in 0..32u8 {
+            client_hello.push(i ^ 0xAA);
+        }
+        // Cipher Suites: TLS_AES_128_GCM_SHA256 (0x1301), TLS_CHACHA20_POLY1305_SHA256 (0x1303)
+        client_hello.extend_from_slice(&[0x00, 0x04, 0x13, 0x01, 0x13, 0x03]);
+        // Compression methods: null
+        client_hello.extend_from_slice(&[0x01, 0x00]);
+        // Extensions
+        let mut exts = Vec::new();
+        // SNI extension (type=0x0000)
+        exts.extend_from_slice(&[0x00, 0x00, 0x00, 0x0e]);
+        exts.extend_from_slice(&[0x00, 0x0c, 0x00, 0x00, 0x09]);
+        exts.extend_from_slice(b"localhost");
+        // Supported Versions extension (type=0x002b) → TLS 1.3 (0x0304)
+        exts.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
+        // Key Share extension (type=0x0033) → X25519 public key
+        exts.extend_from_slice(&[0x00, 0x33, 0x00, 0x26, 0x00, 0x24]);
+        exts.extend_from_slice(&[0x00, 0x1d, 0x00, 0x20]); // X25519 group
+        exts.extend_from_slice(&public);
+        // QUIC Transport Parameters extension (type=0x0039)
+        exts.extend_from_slice(&[0x00, 0x39, 0x00, 0x10]);
+        // max_idle_timeout=30s, initial_max_data=1MB, initial_max_streams=8
+        exts.extend_from_slice(&[0x01, 0x04, 0x00, 0x00, 0x75, 0x30]); // max_idle_timeout
+        exts.extend_from_slice(&[0x04, 0x04, 0x00, 0x10, 0x00, 0x00]); // initial_max_data=1MB
+        exts.extend_from_slice(&[0x08, 0x02, 0x00, 0x08]); // initial_max_streams_bidi=8
+                                                           // Extensions length
+        let ext_len = exts.len() as u16;
+        client_hello.extend_from_slice(&ext_len.to_be_bytes());
+        client_hello.extend_from_slice(&exts);
+        // Length field'ını doldur
+        let body_len = (client_hello.len() - len_pos - 3) as u32;
+        client_hello[len_pos] = ((body_len >> 16) & 0xFF) as u8;
+        client_hello[len_pos + 1] = ((body_len >> 8) & 0xFF) as u8;
+        client_hello[len_pos + 2] = (body_len & 0xFF) as u8;
+
         let crypto_frame = QuicFrame::Crypto {
             offset: 0,
-            data: vec![0x01, 0x00, 0x00, 0x00],  // Simplified ClientHello
+            data: client_hello,
         };
-        
+
         let packet = self.connection.build_packet(&[crypto_frame]);
-        
+
         Ok(packet)
     }
-    
+
     /// Send data on stream
     pub fn send(&mut self, stream_id: u64, data: &[u8]) -> Result<Vec<u8>, QuicError> {
-        let stream = self.connection.get_stream_mut(stream_id)
+        let stream = self
+            .connection
+            .get_stream_mut(stream_id)
             .ok_or(QuicError::StreamStateError)?;
-        
+
         let offset = stream.send_offset;
         stream.write(data);
-        
+
         let frame = QuicFrame::Stream {
             stream_id,
             offset,
             fin: false,
             data: data.to_vec(),
         };
-        
+
         let packet = self.connection.build_packet(&[frame]);
-        
+
         Ok(packet)
     }
-    
+
     /// Create new bidirectional stream
     pub fn create_stream(&mut self) -> u64 {
         self.connection.create_stream(StreamType::ClientBiDi)
@@ -1159,48 +1277,94 @@ impl QuicServer {
             connections: BTreeMap::new(),
         }
     }
-    
+
     /// Handle incoming packet
-    pub fn on_packet(&mut self, data: &[u8], client_addr: super::SocketAddr) -> Option<(Vec<u8>, super::SocketAddr)> {
+    pub fn on_packet(
+        &mut self,
+        data: &[u8],
+        client_addr: super::SocketAddr,
+    ) -> Option<(Vec<u8>, super::SocketAddr)> {
         // Parse connection ID from packet
         if data.is_empty() {
             return None;
         }
-        
+
         let first_byte = data[0];
-        
+
         // Long header
         if first_byte & 0x80 != 0 {
             if data.len() < 6 {
                 return None;
             }
-            
+
             let dcid_len = data[5] as usize;
             if 6 + dcid_len > data.len() {
                 return None;
             }
-            
+
             let dcid = data[6..6 + dcid_len].to_vec();
-            
+
             // Get or create connection
-            let conn = self.connections.entry(dcid.clone()).or_insert_with(|| {
-                QuicConnection::new(8)
-            });
-            
+            let conn = self
+                .connections
+                .entry(dcid.clone())
+                .or_insert_with(|| QuicConnection::new(8));
+
             // Process packet
             match conn.on_packet(data) {
                 Ok(frames) => {
                     // Build response
-                    let response_frames: Vec<QuicFrame> = frames.iter()
+                    let response_frames: Vec<QuicFrame> = frames
+                        .iter()
                         .filter_map(|f| match f {
-                            QuicFrame::Crypto { .. } => Some(QuicFrame::Crypto {
-                                offset: 0,
-                                data: vec![0x02, 0x00, 0x00, 0x00],  // Simplified ServerHello
-                            }),
+                            QuicFrame::Crypto { data, .. } => {
+                                // TLS 1.3 ServerHello (RFC 8446 Section 4.1.3)
+                                let mut server_hello = Vec::with_capacity(128);
+                                server_hello.push(0x02); // HandshakeType = ServerHello
+                                let slen_pos = server_hello.len();
+                                server_hello.extend_from_slice(&[0x00, 0x00, 0x00]);
+                                // ProtocolVersion = TLS 1.2 (uyumluluk)
+                                server_hello.extend_from_slice(&[0x03, 0x03]);
+                                // Server Random (32 bytes)
+                                let sr_seed = if data.len() > 6 { data[6] } else { 0x42 };
+                                for i in 0..32u8 {
+                                    server_hello.push(sr_seed.wrapping_add(i).wrapping_mul(0x7F));
+                                }
+                                // Session ID echo (32 bytes)
+                                server_hello.push(32);
+                                for i in 0..32u8 {
+                                    server_hello.push(i ^ 0xAA);
+                                }
+                                // Cipher suite: TLS_AES_128_GCM_SHA256
+                                server_hello.extend_from_slice(&[0x13, 0x01]);
+                                // Compression: null
+                                server_hello.push(0x00);
+                                // Extensions
+                                let mut s_exts = Vec::new();
+                                // Supported Version: TLS 1.3
+                                s_exts.extend_from_slice(&[0x00, 0x2b, 0x00, 0x02, 0x03, 0x04]);
+                                // Key Share: X25519 server public key
+                                s_exts.extend_from_slice(&[0x00, 0x33, 0x00, 0x24]);
+                                s_exts.extend_from_slice(&[0x00, 0x1d, 0x00, 0x20]);
+                                let server_key = crate::net::tls::X25519::generate_keypair();
+                                s_exts.extend_from_slice(&server_key.1);
+                                let se_len = s_exts.len() as u16;
+                                server_hello.extend_from_slice(&se_len.to_be_bytes());
+                                server_hello.extend_from_slice(&s_exts);
+                                // Length field
+                                let sb_len = (server_hello.len() - slen_pos - 3) as u32;
+                                server_hello[slen_pos] = ((sb_len >> 16) & 0xFF) as u8;
+                                server_hello[slen_pos + 1] = ((sb_len >> 8) & 0xFF) as u8;
+                                server_hello[slen_pos + 2] = (sb_len & 0xFF) as u8;
+                                Some(QuicFrame::Crypto {
+                                    offset: 0,
+                                    data: server_hello,
+                                })
+                            }
                             _ => None,
                         })
                         .collect();
-                    
+
                     if !response_frames.is_empty() {
                         let response = conn.build_packet(&response_frames);
                         return Some((response, client_addr));
@@ -1209,7 +1373,7 @@ impl QuicServer {
                 Err(_) => {}
             }
         }
-        
+
         None
     }
 }
@@ -1228,31 +1392,171 @@ impl Default for QuicServer {
 pub fn compute_nonce(iv: &[u8], packet_number: u64) -> [u8; 12] {
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(iv);
-    
+
     // XOR with packet number (big-endian, 12 bytes)
     let pn_bytes = packet_number.to_be_bytes();
     for i in 0..8 {
         nonce[4 + i] ^= pn_bytes[i];
     }
-    
+
     nonce
 }
 
-/// QUIC header protection mask using AES-ECB or ChaCha20
+/// QUIC header protection mask using AES-ECB (RFC 9001 Section 5.4.3)
+///
+/// AES-ECB(hp_key, sample) sonucunun ilk 5 byte'ı mask olarak kullanılır.
+/// Bu mask, paket numarası ve ilk byte'ın bazı bitlerini gizler.
 pub fn compute_header_protection_mask(hp_key: &[u8], sample: &[u8]) -> [u8; 5] {
-    // Simplified: use AES-ECB to generate mask
-    // In real implementation, this would use the actual cipher
+    // AES-ECB ile 16 byte'lık sample'ı şifrele
+    let encrypted = if hp_key.len() >= 16 && sample.len() >= 16 {
+        // hw_aes modülü varsa AES-ECB kullan
+        let mut block = [0u8; 16];
+        block.copy_from_slice(&sample[..16]);
+        // AES-ECB: her blok bağımsız şifrelenir
+        let mut key_sched = [0u32; 60];
+        aes_key_expansion(hp_key, &mut key_sched);
+        aes_encrypt_block(&block, &key_sched)
+    } else {
+        // Fallback: HMAC-SHA256 tabanlı mask
+        let h = hmac_sha256(hp_key, sample);
+        let mut b = [0u8; 16];
+        b.copy_from_slice(&h[..16]);
+        b
+    };
+
     let mut mask = [0u8; 5];
-    
-    // XOR key with sample for mask
-    for (i, m) in mask.iter_mut().enumerate() {
-        *m = if i < hp_key.len() { hp_key[i] } else { 0 };
-        if i < sample.len() {
-            *m ^= sample[i];
+    mask.copy_from_slice(&encrypted[..5]);
+    mask
+}
+
+/// AES key expansion (128-bit key → round key schedule)
+fn aes_key_expansion(key: &[u8], schedule: &mut [u32; 60]) {
+    let nk = key.len() / 4;
+    let nr = nk + 6; // 10 rounds for AES-128
+                     // İlk Nk kelimeyi doğrudan kopyala
+    for i in 0..nk {
+        schedule[i] =
+            u32::from_be_bytes([key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]]);
+    }
+    // RCON sabitleri
+    let rcon: [u32; 10] = [
+        0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000,
+        0x80000000, 0x1b000000, 0x36000000,
+    ];
+    let sbox = crate::crypto::hw_aes::SBOX;
+    for i in nk..((nr + 1) * 4) {
+        let mut temp = schedule[i - 1];
+        if i % nk == 0 {
+            // RotWord + SubWord + Rcon
+            temp = temp.rotate_left(8);
+            let b = temp.to_be_bytes();
+            temp = u32::from_be_bytes([
+                sbox[b[0] as usize],
+                sbox[b[1] as usize],
+                sbox[b[2] as usize],
+                sbox[b[3] as usize],
+            ]);
+            temp ^= rcon[i / nk - 1];
+        }
+        schedule[i] = schedule[i - nk] ^ temp;
+    }
+}
+
+/// AES-ECB tek blok şifreleme (128-bit)
+fn aes_encrypt_block(block: &[u8; 16], schedule: &[u32; 60]) -> [u8; 16] {
+    let sbox = crate::crypto::hw_aes::SBOX;
+    let mut state = [0u8; 16];
+    state.copy_from_slice(block);
+
+    // AddRoundKey (round 0)
+    for i in 0..4 {
+        let rk = schedule[i].to_be_bytes();
+        for j in 0..4 {
+            state[i * 4 + j] ^= rk[j];
         }
     }
-    
-    mask
+
+    let nr = 10; // AES-128
+    for round in 1..nr {
+        // SubBytes
+        for b in state.iter_mut() {
+            *b = sbox[*b as usize];
+        }
+        // ShiftRows
+        let tmp = state[1];
+        state[1] = state[5];
+        state[5] = state[9];
+        state[9] = state[13];
+        state[13] = tmp;
+        let tmp = state[2];
+        state[2] = state[10];
+        state[10] = tmp;
+        let tmp = state[6];
+        state[6] = state[14];
+        state[14] = tmp;
+        let tmp = state[15];
+        state[15] = state[11];
+        state[11] = state[7];
+        state[7] = state[3];
+        state[3] = tmp;
+        // MixColumns
+        for i in 0..4 {
+            let c = i * 4;
+            let (a0, a1, a2, a3) = (state[c], state[c + 1], state[c + 2], state[c + 3]);
+            state[c] = gf_mul2(a0) ^ gf_mul3(a1) ^ a2 ^ a3;
+            state[c + 1] = a0 ^ gf_mul2(a1) ^ gf_mul3(a2) ^ a3;
+            state[c + 2] = a0 ^ a1 ^ gf_mul2(a2) ^ gf_mul3(a3);
+            state[c + 3] = gf_mul3(a0) ^ a1 ^ a2 ^ gf_mul2(a3);
+        }
+        // AddRoundKey
+        for i in 0..4 {
+            let rk = schedule[round * 4 + i].to_be_bytes();
+            for j in 0..4 {
+                state[i * 4 + j] ^= rk[j];
+            }
+        }
+    }
+    // Son round (MixColumns yok)
+    for b in state.iter_mut() {
+        *b = sbox[*b as usize];
+    }
+    let tmp = state[1];
+    state[1] = state[5];
+    state[5] = state[9];
+    state[9] = state[13];
+    state[13] = tmp;
+    let tmp = state[2];
+    state[2] = state[10];
+    state[10] = tmp;
+    let tmp = state[6];
+    state[6] = state[14];
+    state[14] = tmp;
+    let tmp = state[15];
+    state[15] = state[11];
+    state[11] = state[7];
+    state[7] = state[3];
+    state[3] = tmp;
+    for i in 0..4 {
+        let rk = schedule[nr * 4 + i].to_be_bytes();
+        for j in 0..4 {
+            state[i * 4 + j] ^= rk[j];
+        }
+    }
+    state
+}
+
+/// GF(2^8) multiply by 2
+fn gf_mul2(a: u8) -> u8 {
+    if a & 0x80 != 0 {
+        (a << 1) ^ 0x1b
+    } else {
+        a << 1
+    }
+}
+
+/// GF(2^8) multiply by 3  (= mul2(a) XOR a)
+fn gf_mul3(a: u8) -> u8 {
+    gf_mul2(a) ^ a
 }
 
 /// Apply header protection to long header packet
@@ -1260,17 +1564,17 @@ pub fn protect_long_header(packet: &mut [u8], hp_key: &[u8]) {
     if packet.len() < 20 {
         return;
     }
-    
+
     // Sample starts at first protected byte + 4
     // For long header: sample at byte 17 (after DCID, SCID, token, length)
     let sample_start = 17.min(packet.len() - 8);
     let sample = &packet[sample_start..sample_start + 8.min(packet.len() - sample_start)];
-    
+
     let mask = compute_header_protection_mask(hp_key, sample);
-    
+
     // Protect first byte (lower 4 bits for long header)
     packet[0] ^= mask[0] & 0x0F;
-    
+
     // Protect packet number (bytes 1-4 after sample position)
     let pn_start = sample_start - 4;
     if pn_start + 4 <= packet.len() {
@@ -1285,15 +1589,15 @@ pub fn unprotect_long_header(packet: &mut [u8], hp_key: &[u8]) {
     if packet.len() < 20 {
         return;
     }
-    
+
     let sample_start = 17.min(packet.len() - 8);
     let sample = &packet[sample_start..sample_start + 8.min(packet.len() - sample_start)];
-    
+
     let mask = compute_header_protection_mask(hp_key, sample);
-    
+
     // Unprotect first byte
     packet[0] ^= mask[0] & 0x0F;
-    
+
     // Unprotect packet number
     let pn_start = sample_start - 4;
     if pn_start + 4 <= packet.len() {
@@ -1312,7 +1616,7 @@ pub fn encrypt_packet_payload(
     aad: &[u8],
 ) -> Vec<u8> {
     let nonce = compute_nonce(iv, packet_number);
-    
+
     // Use AES-GCM or ChaCha20-Poly1305
     if key.len() == 16 {
         // AES-128-GCM
@@ -1348,11 +1652,11 @@ pub fn decrypt_packet_payload(
     if ciphertext.len() < 16 {
         return None;
     }
-    
+
     let nonce = compute_nonce(iv, packet_number);
     let (enc_data, tag) = ciphertext.split_at(ciphertext.len() - 16);
     let tag_arr: [u8; 16] = tag.try_into().ok()?;
-    
+
     if key.len() == 16 {
         let cipher = AesGcm::new(key);
         cipher.decrypt(&nonce, aad, enc_data, &tag_arr)
@@ -1409,7 +1713,7 @@ pub struct LossRecovery {
     pub lost_packets: Vec<u64>,
     /// PTO packets (probe timeout)
     pub pto_packets: Vec<u64>,
-    
+
     // RACK (Recent ACKnowledgment) state
     /// Time of most recent ACK
     pub rack_rtt: u64,
@@ -1419,7 +1723,7 @@ pub struct LossRecovery {
     pub rack_end_time: u64,
     /// RACK reordering window
     pub rack_reo_wnd: u64,
-    
+
     // Congestion control
     /// Congestion window (bytes)
     pub congestion_window: u64,
@@ -1465,15 +1769,21 @@ impl LossRecovery {
             congestion_state: CongestionState::SlowStart,
         }
     }
-    
+
     /// Record packet sent
-    pub fn on_packet_sent(&mut self, packet_number: u64, ack_eliciting: bool, sent_bytes: usize, now: u64) {
+    pub fn on_packet_sent(
+        &mut self,
+        packet_number: u64,
+        ack_eliciting: bool,
+        sent_bytes: usize,
+        now: u64,
+    ) {
         self.largest_sent = self.largest_sent.max(packet_number);
-        
+
         if ack_eliciting {
             self.time_of_last_ack_eliciting_packet = now;
         }
-        
+
         self.sent_packets.push(SentPacket {
             packet_number,
             ack_eliciting,
@@ -1482,56 +1792,65 @@ impl LossRecovery {
             time_sent: now,
             largest_acked: self.largest_acked,
         });
-        
+
         self.bytes_in_flight += sent_bytes as u64;
     }
-    
+
     /// Process ACK frame
     pub fn on_ack_received(&mut self, largest_acked: u64, ack_delay: u64, now: u64) {
         // Update RACK
         if largest_acked > self.rack_end_seq {
             self.rack_end_seq = largest_acked;
-            if let Some(pkt) = self.sent_packets.iter().find(|p| p.packet_number == largest_acked) {
+            if let Some(pkt) = self
+                .sent_packets
+                .iter()
+                .find(|p| p.packet_number == largest_acked)
+            {
                 self.rack_end_time = pkt.time_sent;
                 self.rack_rtt = now.saturating_sub(pkt.time_sent);
             }
         }
-        
+
         // Update RTT
-        if let Some(pkt) = self.sent_packets.iter().find(|p| p.packet_number == largest_acked) {
+        if let Some(pkt) = self
+            .sent_packets
+            .iter()
+            .find(|p| p.packet_number == largest_acked)
+        {
             let rtt = now.saturating_sub(pkt.time_sent);
             self.update_rtt(rtt, ack_delay);
         }
-        
+
         // Remove acknowledged packets
-        self.sent_packets.retain(|p| p.packet_number > largest_acked);
-        
+        self.sent_packets
+            .retain(|p| p.packet_number > largest_acked);
+
         // Reset PTO count
         self.pto_count = 0;
-        
+
         // Detect losses
         self.detect_lost_packets(now);
-        
+
         // Update congestion control
         self.on_packets_acked(largest_acked);
     }
-    
+
     /// Update RTT estimates
     pub fn update_rtt(&mut self, rtt: u64, ack_delay: u64) {
         self.latest_rtt = rtt;
-        
+
         // Update min RTT
         if rtt < self.min_rtt {
             self.min_rtt = rtt;
         }
-        
+
         // Adjusted RTT for ack delay
         let adjusted_rtt = if ack_delay < self.min_rtt {
             rtt.saturating_sub(ack_delay)
         } else {
             rtt
         };
-        
+
         if !self.first_rtt_sample {
             self.smoothed_rtt = adjusted_rtt;
             self.rttvar = adjusted_rtt / 2;
@@ -1547,70 +1866,74 @@ impl LossRecovery {
             self.smoothed_rtt = (7 * self.smoothed_rtt + adjusted_rtt) / 8;
         }
     }
-    
+
     /// Detect lost packets using RACK and time-based detection
     pub fn detect_lost_packets(&mut self, now: u64) {
         // RACK reordering window: max(min_rtt/4, 1ms)
         self.rack_reo_wnd = (self.min_rtt / 4).max(1_000_000); // 1ms in ns
-        
+
         // Time threshold: 9/8 * smoothed_rtt
         let loss_time_threshold = (9 * self.smoothed_rtt) / 8;
-        
+
         // Packet threshold: 3 packets
         let packet_threshold = 3u64;
-        
+
         self.lost_packets.clear();
-        
+
         for pkt in &self.sent_packets {
             if pkt.packet_number >= self.rack_end_seq {
                 continue;
             }
-            
+
             // RACK-based loss detection
             let time_elapsed = now.saturating_sub(self.rack_end_time);
             let seq_delta = self.rack_end_seq - pkt.packet_number;
-            
+
             if time_elapsed > self.rack_reo_wnd && seq_delta > 0 {
                 self.lost_packets.push(pkt.packet_number);
                 continue;
             }
-            
+
             // Time-based loss detection
             let time_sent_elapsed = now.saturating_sub(pkt.time_sent);
             if time_sent_elapsed > loss_time_threshold {
                 self.lost_packets.push(pkt.packet_number);
                 continue;
             }
-            
+
             // Packet-based loss detection (FACK-like)
             if self.largest_acked > pkt.packet_number + packet_threshold {
                 self.lost_packets.push(pkt.packet_number);
             }
         }
-        
+
         // Remove lost packets from sent_packets
         for lost in &self.lost_packets {
-            if let Some(pos) = self.sent_packets.iter().position(|p| &p.packet_number == lost) {
+            if let Some(pos) = self
+                .sent_packets
+                .iter()
+                .position(|p| &p.packet_number == lost)
+            {
                 let pkt = self.sent_packets.remove(pos);
                 self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.sent_bytes as u64);
             }
         }
-        
+
         // On loss, enter recovery
         if !self.lost_packets.is_empty() {
             self.on_congestion_event();
         }
     }
-    
+
     /// Calculate PTO (Probe Timeout)
     pub fn pto(&self) -> u64 {
         // PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
         let max_rttvar = (4 * self.rttvar).max(1_000_000); // 1ms granularity
         let max_ack_delay = 25_000_000; // 25ms default
-        
+
         self.smoothed_rtt + max_rttvar + max_ack_delay
     }
-    
+
     /// Get loss detection timeout
     pub fn loss_detection_timeout(&self, now: u64) -> Option<u64> {
         // Check for early loss detection
@@ -1618,20 +1941,20 @@ impl LossRecovery {
         if loss_time < now + self.pto() {
             return Some(loss_time);
         }
-        
+
         // PTO timeout
         if !self.sent_packets.is_empty() {
             let pto = self.pto() << self.pto_count.min(3); // Exponential backoff
             return Some(self.time_of_last_ack_eliciting_packet + pto);
         }
-        
+
         None
     }
-    
+
     /// Get earliest loss time
     fn earliest_loss_time(&self, now: u64) -> u64 {
         let loss_time_threshold = (9 * self.smoothed_rtt) / 8;
-        
+
         self.sent_packets
             .iter()
             .filter(|p| p.ack_eliciting)
@@ -1640,18 +1963,18 @@ impl LossRecovery {
             .min()
             .unwrap_or(u64::MAX)
     }
-    
+
     /// Handle PTO expiration
     pub fn on_pto_expired(&mut self) {
         self.pto_count = self.pto_count.saturating_add(1);
-        
+
         // Send probe packets
         self.pto_packets.clear();
         for i in 0..2 {
             self.pto_packets.push(self.largest_sent + 1 + i as u64);
         }
     }
-    
+
     /// Congestion control: on packets acked
     fn on_packets_acked(&mut self, _acked: u64) {
         match self.congestion_state {
@@ -1667,14 +1990,38 @@ impl LossRecovery {
                 self.congestion_window += (14720 * 14720) / self.congestion_window;
             }
             CongestionState::Recovery => {
-                // Stay in recovery until all packets sent before recovery are acked
+                // Recovery aşamasında cwnd artırma: PRR (Proportional Rate Reduction)
+                // Recovery öncesi gönderilmiş tüm paketler ack'lenince recovery'den çık
+                self.congestion_window += 14720; // Her ACK'de MSS kadar artır
+                if self.congestion_window >= self.ssthresh {
+                    self.congestion_state = CongestionState::CongestionAvoidance;
+                    crate::serial_println!(
+                        "[QUIC] Congestion: Recovery → CongestionAvoidance, cwnd={}",
+                        self.congestion_window
+                    );
+                }
             }
             CongestionState::ProbeRtt => {
-                // Probe RTT: minimal window
+                // Probe RTT: Minimum pencere ile RTT ölçümü yap
+                // 200ms boyunca minimum pencere tut, sonra önceki duruma dön
+                let min_cwnd = 14720 * 4; // 4 MSS minimum
+                if self.congestion_window > min_cwnd {
+                    self.congestion_window = min_cwnd;
+                }
+                // ProbeRtt süresi dolduğunda (basit yaklaşım: hemen çık)
+                self.congestion_state = if self.congestion_window < self.ssthresh {
+                    CongestionState::SlowStart
+                } else {
+                    CongestionState::CongestionAvoidance
+                };
+                crate::serial_println!(
+                    "[QUIC] Congestion: ProbeRtt tamamlandı, cwnd={}",
+                    self.congestion_window
+                );
             }
         }
     }
-    
+
     /// Congestion control: on congestion event
     fn on_congestion_event(&mut self) {
         // Reduce congestion window
@@ -1682,12 +2029,12 @@ impl LossRecovery {
         self.congestion_window = self.ssthresh;
         self.congestion_state = CongestionState::Recovery;
     }
-    
+
     /// Check if we can send more data
     pub fn can_send(&self) -> bool {
         self.bytes_in_flight < self.congestion_window
     }
-    
+
     /// Get available send window
     pub fn send_window(&self) -> u64 {
         self.congestion_window.saturating_sub(self.bytes_in_flight)
@@ -1708,28 +2055,27 @@ impl Default for LossRecovery {
 pub fn derive_initial_secret(conn_id: &[u8], is_client: bool) -> QuicKeys {
     // Initial salt for QUIC v1
     let initial_salt = [
-        0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3,
-        0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
-        0xcc, 0xbb, 0x7f, 0x0a,
+        0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c,
+        0xad, 0xcc, 0xbb, 0x7f, 0x0a,
     ];
-    
+
     // Derive initial secret using HKDF
     let initial_secret = hkdf_extract(&initial_salt, conn_id);
-    
+
     // Derive client/server secret
     let label = if is_client {
         b"client in"
     } else {
         b"server in"
     };
-    
+
     let secret = hkdf_expand(&initial_secret, label, 32);
-    
+
     // Derive key, IV, and HP
     let key = hkdf_expand(&secret, b"quic key", 16);
     let iv = hkdf_expand(&secret, b"quic iv", 12);
     let hp = hkdf_expand(&secret, b"quic hp", 16);
-    
+
     QuicKeys {
         secret,
         key,
@@ -1738,33 +2084,176 @@ pub fn derive_initial_secret(conn_id: &[u8], is_client: bool) -> QuicKeys {
     }
 }
 
-/// Simple HKDF-Extract (HMAC-SHA256)
+/// HKDF-Extract (RFC 5869) — HMAC-SHA256(salt, ikm)
+///
+/// salt: isteğe bağlı tuz değeri (yoksa 32 byte sıfır)
+/// ikm: input keying material
+/// Çıktı: 32 byte PRK (Pseudorandom Key)
 fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Vec<u8> {
-    // Simplified: just XOR and hash
-    let mut out = vec![0u8; 32];
-    for (i, b) in salt.iter().chain(ikm.iter()).enumerate() {
-        out[i % 32] ^= b;
+    hmac_sha256(salt, ikm)
+}
+
+/// HKDF-Expand (RFC 5869) — T(N) = HMAC-SHA256(PRK, T(N-1) || info || N)
+///
+/// prk: pseudorandom key (HKDF-Extract çıktısı)
+/// label: bağlam etiketi
+/// len: istenen çıktı uzunluğu
+fn hkdf_expand(prk: &[u8], label: &[u8], len: usize) -> Vec<u8> {
+    let hash_len = 32; // SHA-256 çıktı uzunluğu
+    let n = (len + hash_len - 1) / hash_len; // ceil(len / hash_len)
+    let mut out = Vec::with_capacity(n * hash_len);
+    let mut t_prev: Vec<u8> = Vec::new(); // T(0) = boş string
+
+    for i in 1..=(n as u8) {
+        // T(i) = HMAC-SHA256(PRK, T(i-1) || label || i)
+        let mut msg = Vec::with_capacity(t_prev.len() + label.len() + 1);
+        msg.extend_from_slice(&t_prev);
+        msg.extend_from_slice(label);
+        msg.push(i);
+        t_prev = hmac_sha256(prk, &msg);
+        out.extend_from_slice(&t_prev);
     }
+
+    out.truncate(len);
     out
 }
 
-/// Simple HKDF-Expand
-fn hkdf_expand(prk: &[u8], label: &[u8], len: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(len);
-    
-    // Simplified: hash PRK with label
-    let mut counter = 1u8;
-    while out.len() < len {
-        for (i, b) in prk.iter().chain(label.iter()).chain(Some(&counter)).enumerate() {
-            if out.len() < len {
-                out.push(*b);
-            }
-        }
-        counter = counter.wrapping_add(1);
+/// HMAC-SHA256 implementasyonu (RFC 2104)
+///
+/// key: HMAC anahtarı
+/// msg: mesaj verisi
+/// Çıktı: 32 byte MAC
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
+    let block_size = 64; // SHA-256 blok boyutu
+
+    // Anahtar > blok boyutu ise hash'le
+    let key_block = if key.len() > block_size {
+        sha256_hash(key)
+    } else {
+        let mut k = key.to_vec();
+        k.resize(block_size, 0); // sıfırla doldur
+        k
+    };
+
+    // Anahtarı blok boyutuna getir
+    let mut key_padded = key_block.clone();
+    key_padded.resize(block_size, 0);
+
+    // ipad = key XOR 0x36, opad = key XOR 0x5c
+    let mut ipad = vec![0x36u8; block_size];
+    let mut opad = vec![0x5cu8; block_size];
+    for i in 0..block_size {
+        ipad[i] ^= key_padded[i];
+        opad[i] ^= key_padded[i];
     }
-    
-    out.truncate(len);
-    out
+
+    // inner = SHA256(ipad || msg)
+    let mut inner_data = Vec::with_capacity(block_size + msg.len());
+    inner_data.extend_from_slice(&ipad);
+    inner_data.extend_from_slice(msg);
+    let inner_hash = sha256_hash(&inner_data);
+
+    // outer = SHA256(opad || inner)
+    let mut outer_data = Vec::with_capacity(block_size + 32);
+    outer_data.extend_from_slice(&opad);
+    outer_data.extend_from_slice(&inner_hash);
+    sha256_hash(&outer_data)
+}
+
+/// SHA-256 hash hesaplama (FIPS 180-4)
+///
+/// Tam SHA-256 implementasyonu: 64 round, 8 çalışma değişkeni,
+/// mesaj padding, Merkle-Damgård yapısı.
+pub fn sha256_hash(data: &[u8]) -> Vec<u8> {
+    // SHA-256 sabitleri: ilk 64 asal sayının küp köklerinin kesirli kısımları
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    // Başlangıç hash değerleri: ilk 8 asal sayının kareköklerinin kesirli kısımları
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    // Mesaj padding: mesaj || 0x80 || sıfırlar || uzunluk(64-bit BE)
+    let bit_len = (data.len() as u64) * 8;
+    let mut padded = data.to_vec();
+    padded.push(0x80);
+    while (padded.len() % 64) != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    // 512-bit (64 byte) bloklar halinde işle
+    for chunk in padded.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut result = Vec::with_capacity(32);
+    for &val in &h {
+        result.extend_from_slice(&val.to_be_bytes());
+    }
+    result
 }
 
 /// QUIC key update
@@ -1773,7 +2262,7 @@ pub fn update_key(current_secret: &[u8]) -> QuicKeys {
     let key = hkdf_expand(&new_secret, b"quic key", 16);
     let iv = hkdf_expand(&new_secret, b"quic iv", 12);
     let hp = hkdf_expand(&new_secret, b"quic hp", 16);
-    
+
     QuicKeys {
         secret: new_secret,
         key,

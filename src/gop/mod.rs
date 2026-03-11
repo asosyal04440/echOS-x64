@@ -51,3 +51,21 @@
 
 /// Framebuffer yönetimi ve çizim fonksiyonları
 pub mod framebuffer;
+
+use alloc::string::String;
+use uefi::proto::console::gop::GraphicsOutput;
+
+/// Global framebuffer örneği
+static mut FRAMEBUFFER: Option<framebuffer::Framebuffer> = None;
+
+/// Framebuffer'ı başlatır
+pub fn init_framebuffer(gop: &mut GraphicsOutput) {
+    unsafe {
+        FRAMEBUFFER = Some(framebuffer::Framebuffer::new(gop));
+    }
+}
+
+/// Framebuffer'a erişim sağlar
+pub fn get_framebuffer() -> Option<framebuffer::Framebuffer> {
+    unsafe { FRAMEBUFFER }
+}

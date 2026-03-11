@@ -55,12 +55,300 @@
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use spin::Mutex;
+use alloc::vec::Vec;
 use core::f32::consts::PI;
-use libm::{sinf, cosf, powf, sqrtf};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use libm::{cosf, powf, sinf, sqrtf};
+use spin::Mutex;
+
+// ============================================================================
+// SPRING PHYSICS ENGINE (Damped Harmonic Oscillator)
+// ============================================================================
+
+/// macOS-style spring physics based on damped harmonic oscillator.
+///
+/// This provides natural, physically-based animations that feel smooth and responsive.
+/// The spring system simulates mass-spring-damper dynamics:
+///
+/// ```text
+///   F = -k * x - c * v
+///
+///   where:
+///     k = stiffness (spring constant)
+///     c = damping coefficient
+///     x = displacement from target
+///     v = velocity
+/// ```
+///
+/// ## Presets
+///
+/// | Use Case         | Stiffness | Damping | Feel |
+/// |------------------|-----------|---------|------|
+/// | Window animations| 200       | 20      | Snappy, macOS-like |
+/// | Dock magnification| 300      | 25      | Quick response |
+/// | Soft transitions | 120       | 15      | Gentle, smooth |
+/// | Bouncy effects   | 400       | 12      | Overshoot, playful |
+///
+/// ## Usage
+///
+/// ```rust
+/// let mut spring = Spring::new(0.0, 1.0); // Animate from 0 to 1
+/// while !spring.is_settled() {
+///     let value = spring.tick(1.0 / 60.0); // 60 FPS
+///     // Use `value` for animation
+/// }
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Spring {
+    /// Current position in the spring system
+    pub position: f32,
+    /// Current velocity
+    pub velocity: f32,
+    /// Target position to animate towards
+    pub target: f32,
+    /// Spring stiffness (higher = faster, more responsive)
+    pub stiffness: f32,
+    /// Damping coefficient (higher = less oscillation)
+    pub damping: f32,
+    /// Mass of the simulated object
+    pub mass: f32,
+}
+
+impl Spring {
+    /// Create a new spring with default macOS-like parameters.
+    ///
+    /// # Arguments
+    /// * `initial` - Starting position
+    /// * `target` - Target position to animate towards
+    pub fn new(initial: f32, target: f32) -> Self {
+        Self {
+            position: initial,
+            velocity: 0.0,
+            target,
+            stiffness: 200.0, // macOS default feel
+            damping: 20.0,    // Critical damping for smooth stop
+            mass: 1.0,
+        }
+    }
+
+    /// Create a spring with custom physics parameters.
+    pub fn with_params(initial: f32, target: f32, stiffness: f32, damping: f32) -> Self {
+        Self {
+            position: initial,
+            velocity: 0.0,
+            target,
+            stiffness,
+            damping,
+            mass: 1.0,
+        }
+    }
+
+    /// Create a snappy spring (quick, responsive).
+    pub fn snappy(initial: f32, target: f32) -> Self {
+        Self::with_params(initial, target, 300.0, 25.0)
+    }
+
+    /// Create a soft spring (gentle, smooth).
+    pub fn soft(initial: f32, target: f32) -> Self {
+        Self::with_params(initial, target, 120.0, 15.0)
+    }
+
+    /// Create a bouncy spring (overshoots target, playful).
+    pub fn bouncy(initial: f32, target: f32) -> Self {
+        Self::with_params(initial, target, 400.0, 12.0)
+    }
+
+    /// Advance the spring simulation by `dt` seconds.
+    ///
+    /// Uses semi-implicit Euler integration for stability.
+    ///
+    /// # Arguments
+    /// * `dt` - Time step in seconds (typically 1/60 for 60 FPS)
+    ///
+    /// # Returns
+    /// Current position after the time step
+    pub fn tick(&mut self, dt: f32) -> f32 {
+        // Calculate spring force: F = -k * displacement
+        let displacement = self.position - self.target;
+        let spring_force = -self.stiffness * displacement;
+
+        // Calculate damping force: F = -c * velocity
+        let damping_force = -self.damping * self.velocity;
+
+        // Total force and acceleration: F = ma -> a = F/m
+        let force = spring_force + damping_force;
+        let acceleration = force / self.mass;
+
+        // Semi-implicit Euler integration (more stable than explicit)
+        self.velocity += acceleration * dt;
+        self.position += self.velocity * dt;
+
+        self.position
+    }
+
+    /// Check if the spring has effectively reached its target.
+    ///
+    /// Returns true when both position and velocity are within threshold.
+    pub fn is_settled(&self) -> bool {
+        let pos_threshold = 0.5;
+        let vel_threshold = 0.5;
+
+        (self.position - self.target).abs() < pos_threshold && self.velocity.abs() < vel_threshold
+    }
+
+    /// Check if settled with custom thresholds.
+    pub fn is_settled_precise(&self, pos_threshold: f32, vel_threshold: f32) -> bool {
+        (self.position - self.target).abs() < pos_threshold && self.velocity.abs() < vel_threshold
+    }
+
+    /// Set a new target position (for interactive animations).
+    pub fn set_target(&mut self, target: f32) {
+        self.target = target;
+    }
+
+    /// Reset the spring to a new initial state.
+    pub fn reset(&mut self, initial: f32, target: f32) {
+        self.position = initial;
+        self.velocity = 0.0;
+        self.target = target;
+    }
+
+    /// Get the current progress as 0.0 to 1.0 (approximate).
+    pub fn progress(&self) -> f32 {
+        let total = (self.target - self.position).abs();
+        if total < 0.001 {
+            1.0
+        } else {
+            // Rough estimate based on distance remaining
+            1.0 - (total / (self.stiffness / 10.0).max(1.0)).min(1.0)
+        }
+    }
+}
+
+impl Default for Spring {
+    fn default() -> Self {
+        Self::new(0.0, 1.0)
+    }
+}
+
+// ============================================================================
+// SPRING 2D (For position animations)
+// ============================================================================
+
+/// 2D spring for animating positions (x, y).
+#[derive(Clone, Copy, Debug)]
+pub struct Spring2D {
+    pub x: Spring,
+    pub y: Spring,
+}
+
+impl Spring2D {
+    /// Create a new 2D spring.
+    pub fn new(from: (f32, f32), to: (f32, f32)) -> Self {
+        Self {
+            x: Spring::new(from.0, to.0),
+            y: Spring::new(from.1, to.1),
+        }
+    }
+
+    /// Create with custom parameters.
+    pub fn with_params(from: (f32, f32), to: (f32, f32), stiffness: f32, damping: f32) -> Self {
+        Self {
+            x: Spring::with_params(from.0, to.0, stiffness, damping),
+            y: Spring::with_params(from.1, to.1, stiffness, damping),
+        }
+    }
+
+    /// Advance simulation.
+    pub fn tick(&mut self, dt: f32) -> (f32, f32) {
+        (self.x.tick(dt), self.y.tick(dt))
+    }
+
+    /// Check if settled.
+    pub fn is_settled(&self) -> bool {
+        self.x.is_settled() && self.y.is_settled()
+    }
+
+    /// Set new target.
+    pub fn set_target(&mut self, target: (f32, f32)) {
+        self.x.set_target(target.0);
+        self.y.set_target(target.1);
+    }
+
+    /// Get current position.
+    pub fn position(&self) -> (f32, f32) {
+        (self.x.position, self.y.position)
+    }
+}
+
+// ============================================================================
+// SPRING RECT (For window geometry animations)
+// ============================================================================
+
+/// Spring animation for rectangles (window geometry).
+#[derive(Clone, Copy, Debug)]
+pub struct SpringRect {
+    pub x: Spring,
+    pub y: Spring,
+    pub w: Spring,
+    pub h: Spring,
+}
+
+impl SpringRect {
+    /// Create a new rect spring.
+    pub fn new(from: (f32, f32, f32, f32), to: (f32, f32, f32, f32)) -> Self {
+        Self {
+            x: Spring::new(from.0, to.0),
+            y: Spring::new(from.1, to.1),
+            w: Spring::new(from.2, to.2),
+            h: Spring::new(from.3, to.3),
+        }
+    }
+
+    /// Create with custom parameters (snappy for window animations).
+    pub fn snappy(from: (f32, f32, f32, f32), to: (f32, f32, f32, f32)) -> Self {
+        Self {
+            x: Spring::snappy(from.0, to.0),
+            y: Spring::snappy(from.1, to.1),
+            w: Spring::snappy(from.2, to.2),
+            h: Spring::snappy(from.3, to.3),
+        }
+    }
+
+    /// Advance simulation, returns (x, y, w, h).
+    pub fn tick(&mut self, dt: f32) -> (f32, f32, f32, f32) {
+        (
+            self.x.tick(dt),
+            self.y.tick(dt),
+            self.w.tick(dt),
+            self.h.tick(dt),
+        )
+    }
+
+    /// Check if all components are settled.
+    pub fn is_settled(&self) -> bool {
+        self.x.is_settled() && self.y.is_settled() && self.w.is_settled() && self.h.is_settled()
+    }
+
+    /// Set new target rect.
+    pub fn set_target(&mut self, target: (f32, f32, f32, f32)) {
+        self.x.set_target(target.0);
+        self.y.set_target(target.1);
+        self.w.set_target(target.2);
+        self.h.set_target(target.3);
+    }
+
+    /// Get current rect as integers.
+    pub fn rect_i32(&self) -> (i32, i32, i32, i32) {
+        (
+            self.x.position as i32,
+            self.y.position as i32,
+            self.w.position as i32,
+            self.h.position as i32,
+        )
+    }
+}
 
 // ============================================================================
 // EASING TÜRLERİ
@@ -182,28 +470,44 @@ impl EasingCache {
             self.samples[EasingType::EaseInQuad as usize][i] = t * t;
             self.samples[EasingType::EaseOutQuad as usize][i] = 1.0 - (1.0 - t) * (1.0 - t);
             self.samples[EasingType::EaseInOutQuad as usize][i] = {
-                if t < 0.5 { 2.0 * t * t } else { 1.0 - powf(-2.0 * t + 2.0, 2.0) / 2.0 }
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    1.0 - powf(-2.0 * t + 2.0, 2.0) / 2.0
+                }
             };
 
             // --- Üçüncü Dereceden (Cubic) ---
             self.samples[EasingType::EaseInCubic as usize][i] = t * t * t;
             self.samples[EasingType::EaseOutCubic as usize][i] = 1.0 - powf(1.0 - t, 3.0);
             self.samples[EasingType::EaseInOutCubic as usize][i] = {
-                if t < 0.5 { 4.0 * t * t * t } else { 1.0 - powf(-2.0 * t + 2.0, 3.0) / 2.0 }
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - powf(-2.0 * t + 2.0, 3.0) / 2.0
+                }
             };
 
             // --- Dördüncü Derece (Quartic) ---
             self.samples[EasingType::EaseInQuart as usize][i] = t * t * t * t;
             self.samples[EasingType::EaseOutQuart as usize][i] = 1.0 - powf(1.0 - t, 4.0);
             self.samples[EasingType::EaseInOutQuart as usize][i] = {
-                if t < 0.5 { 8.0 * powf(t, 4.0) } else { 1.0 - powf(-2.0 * t + 2.0, 4.0) / 2.0 }
+                if t < 0.5 {
+                    8.0 * powf(t, 4.0)
+                } else {
+                    1.0 - powf(-2.0 * t + 2.0, 4.0) / 2.0
+                }
             };
 
             // --- Beşinci Derece (Quintic) ---
             self.samples[EasingType::EaseInQuint as usize][i] = powf(t, 5.0);
             self.samples[EasingType::EaseOutQuint as usize][i] = 1.0 - powf(1.0 - t, 5.0);
             self.samples[EasingType::EaseInOutQuint as usize][i] = {
-                if t < 0.5 { 16.0 * powf(t, 5.0) } else { 1.0 - powf(-2.0 * t + 2.0, 5.0) / 2.0 }
+                if t < 0.5 {
+                    16.0 * powf(t, 5.0)
+                } else {
+                    1.0 - powf(-2.0 * t + 2.0, 5.0) / 2.0
+                }
             };
 
             // --- Sinüzoidal ---
@@ -211,24 +515,35 @@ impl EasingCache {
             // Doğal, insan algısına uygun yumuşak hareket
             self.samples[EasingType::EaseInSine as usize][i] = 1.0 - cosf(t * PI / 2.0);
             self.samples[EasingType::EaseOutSine as usize][i] = sinf(t * PI / 2.0);
-            self.samples[EasingType::EaseInOutSine as usize][i] = {
-                -(cosf(PI * t) - 1.0) / 2.0
-            };
+            self.samples[EasingType::EaseInOutSine as usize][i] = { -(cosf(PI * t) - 1.0) / 2.0 };
 
             // --- Üstel (Exponential) ---
             // Formül: 2^(10t - 10)
             // t=0 için özel durum: tam sıfır döndür (süreksizliği önler)
             self.samples[EasingType::EaseInExpo as usize][i] = {
-                if t == 0.0 { 0.0 } else { powf(2.0_f32, 10.0 * t - 10.0) }
+                if t == 0.0 {
+                    0.0
+                } else {
+                    powf(2.0_f32, 10.0 * t - 10.0)
+                }
             };
             self.samples[EasingType::EaseOutExpo as usize][i] = {
-                if t == 1.0 { 1.0 } else { 1.0 - powf(2.0_f32, -10.0 * t) }
+                if t == 1.0 {
+                    1.0
+                } else {
+                    1.0 - powf(2.0_f32, -10.0 * t)
+                }
             };
             self.samples[EasingType::EaseInOutExpo as usize][i] = {
-                if t == 0.0 { 0.0 }
-                else if t == 1.0 { 1.0 }
-                else if t < 0.5 { powf(2.0_f32, 20.0 * t - 10.0) / 2.0 }
-                else { (2.0 - powf(2.0_f32, -20.0 * t + 10.0)) / 2.0 }
+                if t == 0.0 {
+                    0.0
+                } else if t == 1.0 {
+                    1.0
+                } else if t < 0.5 {
+                    powf(2.0_f32, 20.0 * t - 10.0) / 2.0
+                } else {
+                    (2.0 - powf(2.0_f32, -20.0 * t + 10.0)) / 2.0
+                }
             };
 
             // --- Dairesel (Circular) ---
@@ -250,12 +565,9 @@ impl EasingCache {
             const C2: f32 = C1 * 1.525;
             const C3: f32 = C1 + 1.0;
 
-            self.samples[EasingType::EaseInBack as usize][i] = {
-                C3 * t * t * t - C1 * t * t
-            };
-            self.samples[EasingType::EaseOutBack as usize][i] = {
-                1.0 + C3 * powf(t - 1.0, 3.0) + C1 * powf(t - 1.0, 2.0)
-            };
+            self.samples[EasingType::EaseInBack as usize][i] = { C3 * t * t * t - C1 * t * t };
+            self.samples[EasingType::EaseOutBack as usize][i] =
+                { 1.0 + C3 * powf(t - 1.0, 3.0) + C1 * powf(t - 1.0, 2.0) };
             self.samples[EasingType::EaseInOutBack as usize][i] = {
                 if t < 0.5 {
                     (powf(2.0 * t, 2.0) * ((C2 + 1.0) * 2.0 * t - C2)) / 2.0
@@ -271,23 +583,29 @@ impl EasingCache {
             const C5: f32 = (2.0 * PI) / 4.5;
 
             self.samples[EasingType::EaseInElastic as usize][i] = {
-                if t == 0.0 { 0.0 }
-                else if t == 1.0 { 1.0 }
-                else {
+                if t == 0.0 {
+                    0.0
+                } else if t == 1.0 {
+                    1.0
+                } else {
                     -powf(2.0_f32, 10.0 * t - 10.0) * sinf((t * 10.0 - 10.75) * C4)
                 }
             };
             self.samples[EasingType::EaseOutElastic as usize][i] = {
-                if t == 0.0 { 0.0 }
-                else if t == 1.0 { 1.0 }
-                else {
+                if t == 0.0 {
+                    0.0
+                } else if t == 1.0 {
+                    1.0
+                } else {
                     powf(2.0_f32, -10.0 * t) * sinf((t * 10.0 - 0.75) * C4) + 1.0
                 }
             };
             self.samples[EasingType::EaseInOutElastic as usize][i] = {
-                if t == 0.0 { 0.0 }
-                else if t == 1.0 { 1.0 }
-                else if t < 0.5 {
+                if t == 0.0 {
+                    0.0
+                } else if t == 1.0 {
+                    1.0
+                } else if t < 0.5 {
                     -(powf(2.0_f32, 20.0 * t - 10.0) * sinf((20.0 * t - 11.125) * C5)) / 2.0
                 } else {
                     (powf(2.0_f32, -20.0 * t + 10.0) * sinf((20.0 * t - 11.125) * C5)) / 2.0 + 1.0
@@ -312,13 +630,18 @@ impl EasingCache {
                 }
             };
             self.samples[EasingType::EaseInBounce as usize][i] = {
-                1.0 - self.samples[EasingType::EaseOutBounce as usize][(EASING_SAMPLES - 1 - i) as usize]
+                1.0 - self.samples[EasingType::EaseOutBounce as usize]
+                    [(EASING_SAMPLES - 1 - i) as usize]
             };
             self.samples[EasingType::EaseInOutBounce as usize][i] = {
                 if t < 0.5 {
-                    (1.0 - self.samples[EasingType::EaseOutBounce as usize][(EASING_SAMPLES - 1 - 2 * i as usize).min(EASING_SAMPLES - 1)]) / 2.0
+                    (1.0 - self.samples[EasingType::EaseOutBounce as usize]
+                        [(EASING_SAMPLES - 1 - 2 * i as usize).min(EASING_SAMPLES - 1)])
+                        / 2.0
                 } else {
-                    (1.0 + self.samples[EasingType::EaseOutBounce as usize][(2 * i as usize - EASING_SAMPLES).max(0)]) / 2.0
+                    (1.0 + self.samples[EasingType::EaseOutBounce as usize]
+                        [(2 * i as usize - EASING_SAMPLES).max(0)])
+                        / 2.0
                 }
             };
         }
@@ -384,14 +707,14 @@ pub struct AnimationTarget {
 /// Animasyon hedefi türleri — hangi özelliğin animate edileceğini gösterir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AnimationTargetType {
-    WindowPosition,  // Pencere X/Y konumu
-    WindowSize,      // Pencere genişlik/yüksekliği
-    WindowOpacity,   // Pencere saydamlığı (0.0=görünmez, 1.0=opak)
-    WidgetPosition,  // Widget X/Y konumu
-    WidgetSize,      // Widget boyutu
-    WidgetOpacity,   // Widget saydamlığı
-    WidgetProperty,  // Widget'a özel sayısal özellik
-    Custom,          // Kullanıcı tanımlı özel hedef
+    WindowPosition, // Pencere X/Y konumu
+    WindowSize,     // Pencere genişlik/yüksekliği
+    WindowOpacity,  // Pencere saydamlığı (0.0=görünmez, 1.0=opak)
+    WidgetPosition, // Widget X/Y konumu
+    WidgetSize,     // Widget boyutu
+    WidgetOpacity,  // Widget saydamlığı
+    WidgetProperty, // Widget'a özel sayısal özellik
+    Custom,         // Kullanıcı tanımlı özel hedef
 }
 
 // ============================================================================
@@ -449,9 +772,9 @@ pub struct Animation {
 /// Animasyon döngü modları.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoopMode {
-    None,      // Döngüsüz — bir kez oynatılır
-    Loop,      // Sonsuz tekrar — her bitişte başa döner
-    PingPong,  // İleri-geri — baştan sona, sondan başa
+    None,     // Döngüsüz — bir kez oynatılır
+    Loop,     // Sonsuz tekrar — her bitişte başa döner
+    PingPong, // İleri-geri — baştan sona, sondan başa
 }
 
 impl Animation {
@@ -484,24 +807,42 @@ impl Animation {
     /// Pencere konum animasyonu oluşturur (EaseOutCubic easing).
     pub fn position(window_id: u32, start: f32, end: f32, duration: f64) -> Self {
         Animation::new(
-            AnimationTarget { target_type: AnimationTargetType::WindowPosition, id: window_id },
-            start, end, duration, EasingType::EaseOutCubic,
+            AnimationTarget {
+                target_type: AnimationTargetType::WindowPosition,
+                id: window_id,
+            },
+            start,
+            end,
+            duration,
+            EasingType::EaseOutCubic,
         )
     }
 
     /// Pencere boyut animasyonu oluşturur (EaseOutCubic easing).
     pub fn size(window_id: u32, start: f32, end: f32, duration: f64) -> Self {
         Animation::new(
-            AnimationTarget { target_type: AnimationTargetType::WindowSize, id: window_id },
-            start, end, duration, EasingType::EaseOutCubic,
+            AnimationTarget {
+                target_type: AnimationTargetType::WindowSize,
+                id: window_id,
+            },
+            start,
+            end,
+            duration,
+            EasingType::EaseOutCubic,
         )
     }
 
     /// Pencere opaklık (solma/belirme) animasyonu oluşturur (EaseOutSine easing).
     pub fn opacity(window_id: u32, start: f32, end: f32, duration: f64) -> Self {
         Animation::new(
-            AnimationTarget { target_type: AnimationTargetType::WindowOpacity, id: window_id },
-            start, end, duration, EasingType::EaseOutSine,
+            AnimationTarget {
+                target_type: AnimationTargetType::WindowOpacity,
+                id: window_id,
+            },
+            start,
+            end,
+            duration,
+            EasingType::EaseOutSine,
         )
     }
 
@@ -789,7 +1130,8 @@ impl FramePacer {
 
         if remaining > 0 {
             // Büyük beklemeler → işletim sistemi uykusu (CPU boşa harcama)
-            if remaining > 2_000_000 { // > 2ms
+            if remaining > 2_000_000 {
+                // > 2ms
                 sleep_ns((remaining - 1_000_000) as u64);
             }
 
@@ -804,7 +1146,8 @@ impl FramePacer {
         self.accumulated_error_ns = actual_elapsed as i64 - target;
 
         // Hatanın yarım kare sınırını aşmasını önle (frenaway koruması)
-        self.accumulated_error_ns = self.accumulated_error_ns
+        self.accumulated_error_ns = self
+            .accumulated_error_ns
             .max(-(self.target_frame_ns as i64) / 2)
             .min(self.target_frame_ns as i64 / 2);
 

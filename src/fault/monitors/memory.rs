@@ -53,7 +53,7 @@
 //! diğer                                  --> Healthy
 //! ```
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
@@ -127,7 +127,7 @@ impl MemoryMonitor {
             return Some(Fault::new(
                 FaultSource::Memory,
                 FaultType::HeapCorruption,
-                "Heap integrity check failed"
+                "Heap integrity check failed",
             ));
         }
 
@@ -152,14 +152,14 @@ impl MemoryMonitor {
             return Some(Fault::new(
                 FaultSource::Memory,
                 FaultType::OutOfMemory,
-                &alloc::format!("Critical memory pressure: {}% free", free_percent)
+                &alloc::format!("Critical memory pressure: {}% free", free_percent),
             ));
         } else if free_percent < 15 {
             // %15'in altı: Uyarı — geri kazanım başlatılmalı
             return Some(Fault::new(
                 FaultSource::Memory,
                 FaultType::OutOfMemory,
-                &alloc::format!("Low memory: {}% free", free_percent)
+                &alloc::format!("Low memory: {}% free", free_percent),
             ));
         }
 
@@ -177,7 +177,7 @@ impl MemoryMonitor {
             return Some(Fault::new(
                 FaultSource::Memory,
                 FaultType::TaskLeak, // Reusing for allocation leak
-                &alloc::format!("High allocation count: {}", stats.active_allocations)
+                &alloc::format!("High allocation count: {}", stats.active_allocations),
             ));
         }
 
@@ -196,10 +196,8 @@ impl super::HealthMonitor for MemoryMonitor {
         }
 
         // Son kontrol zamanını güncelle
-        self.last_check_tick.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_check_tick
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
         // Heap bütünlüğünü kontrol et
         if let Some(fault) = self.check_heap() {
@@ -242,7 +240,8 @@ impl super::HealthMonitor for MemoryMonitor {
         ModuleHealth {
             name: self.name(),
             status: self.health(),
-            fault_count: self.corruption_count.load(Ordering::SeqCst) + self.oom_events.load(Ordering::SeqCst) as u32,
+            fault_count: self.corruption_count.load(Ordering::SeqCst)
+                + self.oom_events.load(Ordering::SeqCst) as u32,
             recovery_count: 0,
             last_fault_tick: self.last_check_tick.load(Ordering::SeqCst),
             uptime_ticks: crate::task::scheduler::get_ticks(),

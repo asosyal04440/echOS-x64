@@ -33,16 +33,84 @@ pub mod acpi_ec;
 
 /// SCI + GPE event handler — runtime donanım olayları
 pub mod acpi_event;
+pub mod cpu_slots;
+pub mod epoch;
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
+
+// ============================================================================
+// XSAVE ALTYAPISI — Silicon-Assisted Eager FPU
+// ============================================================================
+
+/// XSAVE yeteneklerini tutan yapı — boot sırasında bir kez doldurulur, sonra read-only.
+#[derive(Debug, Clone, Copy)]
+pub struct XSaveCapabilities {
+    /// XSAVE instruction desteği var mı (CPUID.01H:ECX bit 26)
+    pub has_xsave: bool,
+    /// XSAVEOPT desteği var mı (CPUID.0DH.01H:EAX bit 0) — hardware lazy save
+    pub has_xsaveopt: bool,
+    /// XSAVEC (compacted) desteği var mı (CPUID.0DH.01H:EAX bit 1)
+    pub has_xsavec: bool,
+    /// XSAVES (supervisor) desteği var mı (CPUID.0DH.01H:EAX bit 3)
+    pub has_xsaves: bool,
+    /// XCR0 tarafından desteklenen bileşen bitmask'i
+    pub xcr0_supported: u64,
+    /// Aktif XCR0 değeri (OS tarafından enable edilen bileşenler)
+    pub xcr0_active: u64,
+    /// XSAVE alanının toplam boyutu (byte) — CPUID.0DH.00H:ECX
+    pub area_size: usize,
+}
+
+impl XSaveCapabilities {
+    pub const fn empty() -> Self {
+        Self {
+            has_xsave: false,
+            has_xsaveopt: false,
+            has_xsavec: false,
+            has_xsaves: false,
+            xcr0_supported: 0,
+            xcr0_active: 0,
+            area_size: 512, // fallback: FXSAVE size
+        }
+    }
+}
+
+/// Global XSAVE yetenekleri — boot sırasında `enable_xsave()` tarafından doldurulur.
+static XSAVE_CAPS: Mutex<XSaveCapabilities> = Mutex::new(XSaveCapabilities::empty());
+
+/// XSAVE aktif mi? (fast path — Mutex almadan kontrol)
+static XSAVE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// XSAVE yeteneklerinin kopyasını döndürür.
+pub fn xsave_capabilities() -> XSaveCapabilities {
+    *XSAVE_CAPS.lock()
+}
+
+/// XSAVE aktif mi? (lock-free fast path)
+#[inline(always)]
+pub fn xsave_active() -> bool {
+    XSAVE_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// XSAVE alanının boyutunu döndürür (context switch için).
+/// XSAVE yoksa FXSAVE boyutu (512) döner.
+#[inline]
+pub fn xsave_area_size() -> usize {
+    if xsave_active() {
+        XSAVE_CAPS.lock().area_size
+    } else {
+        512
+    }
+}
 
 /// Global CPU bilgisi
 pub static CPU_INFO: Mutex<CpuInfo> = Mutex::new(CpuInfo::new());
 
 /// CPU bilgi yapısı
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CpuInfo {
     /// Toplam CPU sayısı
     pub total_cpus: u32,
@@ -108,14 +176,69 @@ impl CpuInfo {
             },
         }
     }
+
+    /// Vendor string (procfs/sysfs için)
+    pub fn vendor_str(&self) -> &'static str {
+        match self.vendor {
+            CpuVendor::Intel => "GenuineIntel",
+            CpuVendor::AMD => "AuthenticAMD",
+            CpuVendor::Unknown => "Unknown",
+        }
+    }
+
+    /// Marka dizesi (model name) — CPUID leaf 0x80000002-4'ten alınamazsa sabit döndürür
+    pub fn brand_string(&self) -> &'static str {
+        match self.vendor {
+            CpuVendor::Intel => "Intel(R) Core(TM) Processor (echOS detected)",
+            CpuVendor::AMD => "AMD Processor (echOS detected)",
+            _ => "Unknown Processor",
+        }
+    }
+
+    /// Tahmini frekans (MHz) — gerçek TSC ölçümü mevcut olmadığında sabit döner
+    pub fn freq_mhz(&self) -> u32 {
+        3000
+    }
+
+    /// L2 cache boyutu (KB) — CPUID leaf 4 ile tam okuma yapılmıyorsa sabit döner
+    pub fn l2_cache_kb(&self) -> u32 {
+        256
+    }
+
+    /// SSE2 desteği var mı (CPUID.01H:EDX bit 26)
+    pub fn has_sse2(&self) -> bool {
+        self.features & (1 << 26) != 0
+    }
+
+    /// AVX desteği var mı (CPUID.01H:ECX bit 28)
+    pub fn has_avx_feat(&self) -> bool {
+        self.features & (1 << 28) != 0
+    }
+
+    /// AES-NI desteği var mı (CPUID.01H:ECX bit 25)
+    pub fn has_aes(&self) -> bool {
+        self.features & (1 << 25) != 0
+    }
+
+    /// RDRAND desteği var mı (CPUID.01H:ECX bit 30)
+    pub fn has_rdrand(&self) -> bool {
+        self.features & (1 << 30) != 0
+    }
 }
 
-/// CPU özelliklerini etkinleştirir (SSE, AVX, APIC).
+/// Global CPU bilgisine erişim kısayolu — Mutex lock alarak kopyasını döndürür
+pub fn get_cpu_info() -> CpuInfo {
+    CPU_INFO.lock().clone()
+}
+
+/// CPU özelliklerini etkinleştirir (SSE, AVX, XSAVE, APIC).
 pub fn init() {
     detect_cpu();
     crate::serial_println!("CPU: detect_cpu tamam");
     enable_sse();
     crate::serial_println!("CPU: enable_sse tamam");
+    enable_xsave();
+    crate::serial_println!("CPU: enable_xsave tamam");
     enable_page_protections();
     crate::serial_println!("CPU: enable_page_protections tamam");
     crate::memory::paging::init_pcid();
@@ -137,6 +260,18 @@ pub fn init() {
 
     // AML interpreter — DSDT/SSDT parse et, ACPI namespace oluştur
     acpi_aml::init_aml();
+}
+
+/// Secondary CPU feature bringup.
+///
+/// AP'ler BSP'nin CR4/XCR0 durumunu güvenilir şekilde miras almaz. Scheduler'ın ilk
+/// XSAVE/XRSTOR veya PCID yolunda #UD/#GP yememesi için her AP kendi SIMD ve paging
+/// yardımcı durumunu yeniden etkinleştirir.
+pub fn init_secondary_cpu() {
+    enable_sse();
+    enable_xsave();
+    enable_page_protections();
+    crate::memory::paging::init_pcid();
 }
 
 /// AVX (Advanced Vector Extensions) komutlarının hem CPU hem OS tarafından desteklenip desteklenmediğini sorgular.
@@ -231,6 +366,16 @@ fn detect_cpu() {
 
     // x2APIC kontrolü (leaf 1, ecx bit 21)
     info.has_x2apic = (features.ecx & (1 << 21)) != 0;
+
+    // Simics QSP modeli x2APIC MSR'larını desteklemez (MSR 0x800+ "unknown").
+    // CPUID x2APIC destekliyor dese bile MMIO (legacy xAPIC) moduna zorla.
+    #[cfg(feature = "simics")]
+    {
+        if info.has_x2apic {
+            crate::serial_println!("[CPU] Simics detected: forcing x2APIC OFF (using MMIO xAPIC)");
+            info.has_x2apic = false;
+        }
+    }
 
     // TSC-Deadline kontrolü (leaf 1, ecx bit 24)
     info.has_tsc_deadline = (features.ecx & (1 << 24)) != 0;
@@ -327,6 +472,120 @@ fn enable_sse() {
     crate::serial_println!("SSE Enabled");
 }
 
+/// XSAVE altyapısını etkinleştirir — Silicon-Assisted Eager FPU.
+///
+/// 1. CPUID ile XSAVE desteği kontrol edilir
+/// 2. CR4.OSXSAVE ayarlanır — OS'un XSAVE kullanacağını CPU'ya bildirir
+/// 3. XCR0'a x87 + SSE + AVX bileşenleri yazılır
+/// 4. XSAVEOPT/XSAVEC/XSAVES yetenekleri tespit edilir
+/// 5. XSAVE alan boyutu hesaplanır
+///
+/// Bu fonksiyon `enable_sse()`'den SONRA çağrılmalıdır.
+fn enable_xsave() {
+    // CPUID leaf 1: XSAVE desteği (ECX bit 26)
+    let features = cpuid(1, 0);
+    let has_xsave = (features.ecx & (1 << 26)) != 0;
+
+    if !has_xsave {
+        crate::serial_println!("XSAVE not supported — falling back to FXSAVE");
+        return;
+    }
+
+    unsafe {
+        // CR4.OSXSAVE (bit 18) — OS'un XSAVE/XRSTOR kullanacağını CPU'ya bildir
+        let mut cr4 = Cr4::read();
+        cr4.insert(Cr4Flags::OSXSAVE);
+        Cr4::write(cr4);
+    }
+
+    // XCR0'a yazılabilecek bileşenleri tespit et (CPUID leaf 0xD, subleaf 0)
+    let xsave_main = cpuid(0xD, 0);
+    let xcr0_supported = ((xsave_main.edx as u64) << 32) | (xsave_main.eax as u64);
+
+    // XCR0 bileşen bitleri:
+    //   bit 0 = x87 FPU (zorunlu)
+    //   bit 1 = SSE (XMM0-15)
+    //   bit 2 = AVX (YMM0-15 üst yarı)
+    //   bit 5 = AVX-512 opmask (k0-k7)
+    //   bit 6 = AVX-512 ZMM_Hi256 (ZMM0-15 üst 256-bit)
+    //   bit 7 = AVX-512 Hi16_ZMM (ZMM16-31 tamamı)
+    let mut xcr0_val: u64 = 0x3; // x87 + SSE (zorunlu minimum)
+
+    if xcr0_supported & (1 << 2) != 0 {
+        xcr0_val |= 1 << 2; // AVX enable
+    }
+
+    // AVX-512: Simics/QEMU desteklerse etkinleştir (üç bit birlikte)
+    if xcr0_supported & 0xE0 == 0xE0 {
+        xcr0_val |= 0xE0; // AVX-512 opmask + ZMM_Hi256 + Hi16_ZMM
+    }
+
+    // XCR0'a yaz
+    unsafe {
+        xsetbv(0, xcr0_val);
+    }
+
+    // XSAVE alanının toplam boyutunu sor (CPUID leaf 0xD, subleaf 0, ECX)
+    // ECX = tüm aktif bileşenler için gereken toplam byte
+    let xsave_size_info = cpuid(0xD, 0);
+    let area_size = xsave_size_info.ecx as usize;
+
+    // XSAVEOPT / XSAVEC / XSAVES desteği (CPUID leaf 0xD, subleaf 1)
+    let xsave_ext = cpuid(0xD, 1);
+    let has_xsaveopt = (xsave_ext.eax & (1 << 0)) != 0;
+    let has_xsavec = (xsave_ext.eax & (1 << 1)) != 0;
+    let has_xsaves = (xsave_ext.eax & (1 << 3)) != 0;
+
+    // Global yetenekleri kaydet
+    {
+        let mut caps = XSAVE_CAPS.lock();
+        *caps = XSaveCapabilities {
+            has_xsave: true,
+            has_xsaveopt,
+            has_xsavec,
+            has_xsaves,
+            xcr0_supported,
+            xcr0_active: xcr0_val,
+            area_size,
+        };
+    }
+    XSAVE_ACTIVE.store(true, Ordering::Release);
+
+    crate::serial_println!(
+        "XSAVE Enabled: area={}B, XCR0=0x{:X}, XSAVEOPT={}, XSAVEC={}, XSAVES={}",
+        area_size,
+        xcr0_val,
+        has_xsaveopt,
+        has_xsavec,
+        has_xsaves
+    );
+
+    // AVX durumunu logla
+    if xcr0_val & (1 << 2) != 0 {
+        crate::serial_println!("  AVX enabled — simd::stream_copy() will use AVX2 path");
+    }
+    if xcr0_val & 0xE0 == 0xE0 {
+        crate::serial_println!("  AVX-512 enabled — future-proof ZMM state save active");
+    }
+}
+
+/// XCR (Extended Control Register) yazma — XSETBV instruction wrapper.
+///
+/// # Safety
+/// XCR index ve değer geçerli olmalıdır. Geçersiz bileşen bitleri #GP üretir.
+#[inline]
+unsafe fn xsetbv(xcr_index: u32, value: u64) {
+    let eax = value as u32;
+    let edx = (value >> 32) as u32;
+    core::arch::asm!(
+        "xsetbv",
+        in("ecx") xcr_index,
+        in("eax") eax,
+        in("edx") edx,
+        options(nostack, preserves_flags)
+    );
+}
+
 fn enable_page_protections() {
     unsafe {
         let mut cr0 = Cr0::read();
@@ -368,15 +627,35 @@ pub fn security_status() {
     };
 
     let pcid = crate::memory::paging::pcid_active();
+    let xsave = xsave_active();
 
     crate::serial_println!("╔══════════════════════════════════════╗");
     crate::serial_println!("║     echOS Security Status            ║");
     crate::serial_println!("╠══════════════════════════════════════╣");
-    crate::serial_println!("║  CR0.WP (Write Protect): {}        ║", if wp { "  ON" } else { " OFF" });
-    crate::serial_println!("║  SMEP (Kernel exec):     {}        ║", if smep { "  ON" } else { " OFF" });
-    crate::serial_println!("║  SMAP (Kernel access):   {}        ║", if smap { "  ON" } else { " OFF" });
-    crate::serial_println!("║  NX (No-Execute):        {}        ║", if nx { "  ON" } else { " OFF" });
-    crate::serial_println!("║  PCID (TLB per-process): {}        ║", if pcid { "  ON" } else { " OFF" });
+    crate::serial_println!(
+        "║  CR0.WP (Write Protect): {}        ║",
+        if wp { "  ON" } else { " OFF" }
+    );
+    crate::serial_println!(
+        "║  SMEP (Kernel exec):     {}        ║",
+        if smep { "  ON" } else { " OFF" }
+    );
+    crate::serial_println!(
+        "║  SMAP (Kernel access):   {}        ║",
+        if smap { "  ON" } else { " OFF" }
+    );
+    crate::serial_println!(
+        "║  NX (No-Execute):        {}        ║",
+        if nx { "  ON" } else { " OFF" }
+    );
+    crate::serial_println!(
+        "║  PCID (TLB per-process): {}        ║",
+        if pcid { "  ON" } else { " OFF" }
+    );
+    crate::serial_println!(
+        "║  XSAVE (Silicon FPU):    {}        ║",
+        if xsave { "  ON" } else { " OFF" }
+    );
     crate::serial_println!("║  STAC/CLAC:              available ║");
     crate::serial_println!("║  DMA panic-on-fail:      enforced  ║");
     crate::serial_println!("║  Guard pages:            enforced  ║");

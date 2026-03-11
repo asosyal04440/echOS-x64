@@ -26,16 +26,16 @@
 //!    Framebuffer'a çizim
 //! ```
 
-mod truetype;
 mod rasterizer;
 mod text_layout;
+mod truetype;
 
-pub use truetype::{TrueTypeFont, FontHeader, Glyph};
-pub use rasterizer::{Rasterizer, RasterGlyph, RasterMetrics};
-pub use text_layout::{TextLayout, LayoutLine, LayoutRun, LayoutGlyph};
+pub use rasterizer::{RasterGlyph, RasterMetrics, Rasterizer};
+pub use text_layout::{LayoutGlyph, LayoutLine, LayoutRun, TextLayout};
+pub use truetype::{FontHeader, Glyph, TrueTypeFont};
 
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Fontu render etmek için üst düzey tutamaç (handle).
 /// TrueTypeFont + Rasterizer birleşimini sarar.
@@ -151,15 +151,22 @@ impl FontManager {
     }
 
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Font> {
-        self.fonts.iter_mut().find(|(n, _)| n == name).map(|(_, f)| f)
+        self.fonts
+            .iter_mut()
+            .find(|(n, _)| n == name)
+            .map(|(_, f)| f)
     }
 
     pub fn default_font(&self) -> Option<&Font> {
-        self.default_idx.and_then(|i| self.fonts.get(i)).map(|(_, f)| f)
+        self.default_idx
+            .and_then(|i| self.fonts.get(i))
+            .map(|(_, f)| f)
     }
 
     pub fn default_font_mut(&mut self) -> Option<&mut Font> {
-        self.default_idx.and_then(|i| self.fonts.get_mut(i)).map(|(_, f)| f)
+        self.default_idx
+            .and_then(|i| self.fonts.get_mut(i))
+            .map(|(_, f)| f)
     }
 
     pub fn set_default(&mut self, name: &str) -> bool {

@@ -48,7 +48,7 @@
 //!        (CPU devrede değil)
 //! ```
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
@@ -105,7 +105,7 @@ impl DriverMonitor {
             return Some(Fault::new(
                 FaultSource::Driver,
                 FaultType::DeviceTimeout,
-                &alloc::format!("Multiple device timeouts: {}", timeouts)
+                &alloc::format!("Multiple device timeouts: {}", timeouts),
             ));
         }
 
@@ -114,7 +114,7 @@ impl DriverMonitor {
             return Some(Fault::new(
                 FaultSource::Driver,
                 FaultType::DeviceError,
-                &alloc::format!("Multiple device errors: {}", errors)
+                &alloc::format!("Multiple device errors: {}", errors),
             ));
         }
 
@@ -135,10 +135,8 @@ impl super::HealthMonitor for DriverMonitor {
         }
 
         // Son kontrol zamanını güncelle
-        self.last_check.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_check
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
         self.check_drivers()
     }
@@ -168,7 +166,8 @@ impl super::HealthMonitor for DriverMonitor {
         ModuleHealth {
             name: self.name(),
             status: self.health(),
-            fault_count: self.device_timeouts.load(Ordering::SeqCst) + self.device_errors.load(Ordering::SeqCst),
+            fault_count: self.device_timeouts.load(Ordering::SeqCst)
+                + self.device_errors.load(Ordering::SeqCst),
             recovery_count: 0,
             last_fault_tick: self.last_check.load(Ordering::SeqCst),
             uptime_ticks: crate::task::scheduler::get_ticks(),

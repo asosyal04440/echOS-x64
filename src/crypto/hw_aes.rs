@@ -70,15 +70,15 @@ use spin::Mutex;
 /// bayraklara bakarak karar verir.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CpuFeatures {
-    pub aes_ni: bool,      // Intel AES-NI — donanım AES blok şifreleme
-    pub sha_ni: bool,      // Intel/AMD SHA-NI — donanım SHA-256/SHA-1
-    pub sse2: bool,        // SSE2 — 128-bit SIMD (XMM register)
-    pub sse4_1: bool,      // SSE4.1 — gelişmiş SIMD karşılaştırma/blend
-    pub avx: bool,         // AVX — 256-bit SIMD (YMM register)
-    pub avx2: bool,        // AVX2 — 256-bit tam tamsayı SIMD
-    pub pclmulqdq: bool,   // PCLMULQDQ — GF(2^128) çarpımı (AES-GCM için gerekli)
-    pub rdrand: bool,      // RDRAND — donanım rastgele sayı üreteci
-    pub rdseed: bool,      // RDSEED — ham donanım entropisi
+    pub aes_ni: bool,    // Intel AES-NI — donanım AES blok şifreleme
+    pub sha_ni: bool,    // Intel/AMD SHA-NI — donanım SHA-256/SHA-1
+    pub sse2: bool,      // SSE2 — 128-bit SIMD (XMM register)
+    pub sse4_1: bool,    // SSE4.1 — gelişmiş SIMD karşılaştırma/blend
+    pub avx: bool,       // AVX — 256-bit SIMD (YMM register)
+    pub avx2: bool,      // AVX2 — 256-bit tam tamsayı SIMD
+    pub pclmulqdq: bool, // PCLMULQDQ — GF(2^128) çarpımı (AES-GCM için gerekli)
+    pub rdrand: bool,    // RDRAND — donanım rastgele sayı üreteci
+    pub rdseed: bool,    // RDSEED — ham donanım entropisi
 }
 
 /// Küresel önbelleğe alınan CPU özellikleri (ilk erişimde doldurulur)
@@ -97,18 +97,18 @@ pub fn detect_features() -> CpuFeatures {
     unsafe {
         let result = core::arch::x86_64::__cpuid(1);
         // CPUID leaf 1 — temel özellik bitleri
-        features.sse2 = (result.edx >> 26) & 1 != 0;    // EDX bit 26
-        features.sse4_1 = (result.ecx >> 19) & 1 != 0;  // ECX bit 19
-        features.aes_ni = (result.ecx >> 25) & 1 != 0;  // ECX bit 25
-        features.pclmulqdq = (result.ecx >> 1) & 1 != 0;// ECX bit 1
-        features.avx = (result.ecx >> 28) & 1 != 0;     // ECX bit 28
-        features.rdrand = (result.ecx >> 30) & 1 != 0;  // ECX bit 30
+        features.sse2 = (result.edx >> 26) & 1 != 0; // EDX bit 26
+        features.sse4_1 = (result.ecx >> 19) & 1 != 0; // ECX bit 19
+        features.aes_ni = (result.ecx >> 25) & 1 != 0; // ECX bit 25
+        features.pclmulqdq = (result.ecx >> 1) & 1 != 0; // ECX bit 1
+        features.avx = (result.ecx >> 28) & 1 != 0; // ECX bit 28
+        features.rdrand = (result.ecx >> 30) & 1 != 0; // ECX bit 30
 
         // CPUID leaf 7 — genişletilmiş özellikler (destekleniyorsa)
         let max_leaf = core::arch::x86_64::__cpuid(0).eax;
         if max_leaf >= 7 {
             let result = core::arch::x86_64::__cpuid(7);
-            features.avx2 = (result.ebx >> 5) & 1 != 0;   // EBX bit 5
+            features.avx2 = (result.ebx >> 5) & 1 != 0; // EBX bit 5
             features.sha_ni = (result.ebx >> 29) & 1 != 0; // EBX bit 29
             features.rdseed = (result.ebx >> 18) & 1 != 0; // EBX bit 18
         }
@@ -139,7 +139,7 @@ pub fn init() {
 /// Her bayt, GF(2^8) üzerinde modüler ters + afin dönüşüm ile değiştirilir.
 /// Tablo araması zamanlama saldırısına karşı savunmasızdır; donanım olmaksızın
 /// güvenli maskeleme gerektirir. AES-NI, bunu tek talimatla halleder.
-const SBOX: [u8; 256] = [
+pub const SBOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
     0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
@@ -198,9 +198,9 @@ const RCON: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x
 ///  K5 = K1 XOR K4  ...
 /// ```
 pub struct AesNi {
-    round_keys_enc: [[u8; 16]; 15],  // Şifreleme için tur anahtarları
-    round_keys_dec: [[u8; 16]; 15],  // Şifre çözme için tur anahtarları (tersine sıralı)
-    rounds: usize,                   // Tur sayısı (10/12/14)
+    round_keys_enc: [[u8; 16]; 15], // Şifreleme için tur anahtarları
+    round_keys_dec: [[u8; 16]; 15], // Şifre çözme için tur anahtarları (tersine sıralı)
+    rounds: usize,                  // Tur sayısı (10/12/14)
 }
 
 impl AesNi {
@@ -208,36 +208,56 @@ impl AesNi {
     /// Anahtar uzunluğuna göre tur sayısı: 16B→10 tur, 24B→12 tur, 32B→14 tur.
     pub fn new(key: &[u8]) -> Self {
         let rounds = match key.len() {
-            16 => 10, 24 => 12, 32 => 14, _ => 10,
+            16 => 10,
+            24 => 12,
+            32 => 14,
+            _ => 10,
         };
 
         let mut enc = [[0u8; 16]; 15];
         let mut dec = [[0u8; 16]; 15];
 
         // İlk tur anahtarı doğrudan orijinal anahtardan kopyalanır
-        for i in 0..16.min(key.len()) { enc[0][i] = key[i]; }
+        for i in 0..16.min(key.len()) {
+            enc[0][i] = key[i];
+        }
 
         // Tur anahtarlarını genişlet (basitleştirilmiş AES-128 KeyExpansion)
         for i in 1..=rounds {
             // Son kelimenin son 4 baytı: RotWord → SubWord → Rcon XOR
-            let t = [enc[i-1][12], enc[i-1][13], enc[i-1][14], enc[i-1][15]];
-            enc[i][0] = enc[i-1][0] ^ SBOX[t[1] as usize] ^ RCON.get(i-1).copied().unwrap_or(0);
-            enc[i][1] = enc[i-1][1] ^ SBOX[t[2] as usize];
-            enc[i][2] = enc[i-1][2] ^ SBOX[t[3] as usize];
-            enc[i][3] = enc[i-1][3] ^ SBOX[t[0] as usize]; // RotWord: t[0] sona alındı
-            for j in 4..16 { enc[i][j] = enc[i-1][j] ^ enc[i][j-4]; }
+            let t = [
+                enc[i - 1][12],
+                enc[i - 1][13],
+                enc[i - 1][14],
+                enc[i - 1][15],
+            ];
+            enc[i][0] = enc[i - 1][0] ^ SBOX[t[1] as usize] ^ RCON.get(i - 1).copied().unwrap_or(0);
+            enc[i][1] = enc[i - 1][1] ^ SBOX[t[2] as usize];
+            enc[i][2] = enc[i - 1][2] ^ SBOX[t[3] as usize];
+            enc[i][3] = enc[i - 1][3] ^ SBOX[t[0] as usize]; // RotWord: t[0] sona alındı
+            for j in 4..16 {
+                enc[i][j] = enc[i - 1][j] ^ enc[i][j - 4];
+            }
         }
 
         // Şifre çözme için tur anahtarlarını ters sıraya al
         dec[0] = enc[rounds];
-        for i in 1..rounds { dec[i] = enc[rounds-i]; }
+        for i in 1..rounds {
+            dec[i] = enc[rounds - i];
+        }
         dec[rounds] = enc[0];
 
-        AesNi { round_keys_enc: enc, round_keys_dec: dec, rounds }
+        AesNi {
+            round_keys_enc: enc,
+            round_keys_dec: dec,
+            rounds,
+        }
     }
 
     /// Bu platformda AES-NI donanım talimatları mevcut mu?
-    pub fn is_available() -> bool { get_features().aes_ni }
+    pub fn is_available() -> bool {
+        get_features().aes_ni
+    }
 
     /// 16 baytlık bloğu şifreler (AES-ECB tek blok).
     ///
@@ -248,9 +268,9 @@ impl AesNi {
     pub fn encrypt_block(&self, block: &mut [u8; 16]) {
         Self::xor_key(block, &self.round_keys_enc[0]); // Başlangıç: AddRoundKey
         for i in 1..self.rounds {
-            Self::sub_bytes(block);   // Bayt ikamesi (SBOX araması)
-            Self::shift_rows(block);  // Satır kaydırma (difüzyon)
-            Self::mix_cols(block);    // Sütun karışımı (GF(2^8) matris çarpımı)
+            Self::sub_bytes(block); // Bayt ikamesi (SBOX araması)
+            Self::shift_rows(block); // Satır kaydırma (difüzyon)
+            Self::mix_cols(block); // Sütun karışımı (GF(2^8) matris çarpımı)
             Self::xor_key(block, &self.round_keys_enc[i]); // Tur anahtarı XOR
         }
         // Son tur: MixColumns uygulanmaz
@@ -279,25 +299,61 @@ impl AesNi {
     }
 
     /// SubBytes: her baytı SBOX tablosundaki karşılığıyla değiştirir.
-    fn sub_bytes(b: &mut [u8; 16]) { for i in 0..16 { b[i] = SBOX[b[i] as usize]; } }
+    fn sub_bytes(b: &mut [u8; 16]) {
+        for i in 0..16 {
+            b[i] = SBOX[b[i] as usize];
+        }
+    }
     /// InvSubBytes: her baytı ters SBOX (INV_SBOX) tablosundaki karşılığıyla değiştirir.
-    fn inv_sub_bytes(b: &mut [u8; 16]) { for i in 0..16 { b[i] = INV_SBOX[b[i] as usize]; } }
+    fn inv_sub_bytes(b: &mut [u8; 16]) {
+        for i in 0..16 {
+            b[i] = INV_SBOX[b[i] as usize];
+        }
+    }
     /// AddRoundKey: blok her baytını tur anahtarı XOR ile karıştırır.
-    fn xor_key(b: &mut [u8; 16], k: &[u8; 16]) { for i in 0..16 { b[i] ^= k[i]; } }
+    fn xor_key(b: &mut [u8; 16], k: &[u8; 16]) {
+        for i in 0..16 {
+            b[i] ^= k[i];
+        }
+    }
 
     /// ShiftRows: durum matrisinin satırlarını döngüsel sola kaydırır.
     /// Satır 0: değişmez, satır 1: 1 sola, satır 2: 2 sola, satır 3: 3 sola.
     fn shift_rows(b: &mut [u8; 16]) {
-        let t = [b[1], b[5], b[9], b[13]]; b[1]=t[1]; b[5]=t[2]; b[9]=t[3]; b[13]=t[0];
-        let t = [b[2], b[6], b[10], b[14]]; b[2]=t[2]; b[6]=t[3]; b[10]=t[0]; b[14]=t[1];
-        let t = [b[3], b[7], b[11], b[15]]; b[3]=t[3]; b[7]=t[0]; b[11]=t[1]; b[15]=t[2];
+        let t = [b[1], b[5], b[9], b[13]];
+        b[1] = t[1];
+        b[5] = t[2];
+        b[9] = t[3];
+        b[13] = t[0];
+        let t = [b[2], b[6], b[10], b[14]];
+        b[2] = t[2];
+        b[6] = t[3];
+        b[10] = t[0];
+        b[14] = t[1];
+        let t = [b[3], b[7], b[11], b[15]];
+        b[3] = t[3];
+        b[7] = t[0];
+        b[11] = t[1];
+        b[15] = t[2];
     }
 
     /// InvShiftRows: ShiftRows'un tersi — sağa döngüsel kaydırma.
     fn inv_shift_rows(b: &mut [u8; 16]) {
-        let t = [b[1], b[5], b[9], b[13]]; b[1]=t[3]; b[5]=t[0]; b[9]=t[1]; b[13]=t[2];
-        let t = [b[2], b[6], b[10], b[14]]; b[2]=t[2]; b[6]=t[3]; b[10]=t[0]; b[14]=t[1];
-        let t = [b[3], b[7], b[11], b[15]]; b[3]=t[1]; b[7]=t[2]; b[11]=t[3]; b[15]=t[0];
+        let t = [b[1], b[5], b[9], b[13]];
+        b[1] = t[3];
+        b[5] = t[0];
+        b[9] = t[1];
+        b[13] = t[2];
+        let t = [b[2], b[6], b[10], b[14]];
+        b[2] = t[2];
+        b[6] = t[3];
+        b[10] = t[0];
+        b[14] = t[1];
+        let t = [b[3], b[7], b[11], b[15]];
+        b[3] = t[1];
+        b[7] = t[2];
+        b[11] = t[3];
+        b[15] = t[0];
     }
 
     /// GF(2^8) Galois Alanı çarpımı (Russian Peasant algoritması).
@@ -307,10 +363,15 @@ impl AesNi {
     fn gmul(a: u8, b: u8) -> u8 {
         let (mut p, mut a, mut b) = (0u8, a, b);
         for _ in 0..8 {
-            if b & 1 != 0 { p ^= a; }           // b'nin geçerli biti 1 ise ekle (XOR)
-            let hi = a & 0x80; a <<= 1;          // a'yı sola kaydır (× x)
-            if hi != 0 { a ^= 0x1b; }            // Taşma varsa azaltma polinomuyla XOR
-            b >>= 1;                              // b'nin sonraki bitine geç
+            if b & 1 != 0 {
+                p ^= a;
+            } // b'nin geçerli biti 1 ise ekle (XOR)
+            let hi = a & 0x80;
+            a <<= 1; // a'yı sola kaydır (× x)
+            if hi != 0 {
+                a ^= 0x1b;
+            } // Taşma varsa azaltma polinomuyla XOR
+            b >>= 1; // b'nin sonraki bitine geç
         }
         p
     }
@@ -321,11 +382,11 @@ impl AesNi {
     fn mix_cols(b: &mut [u8; 16]) {
         for i in 0..4 {
             let c = i * 4;
-            let a = [b[c], b[c+1], b[c+2], b[c+3]];
-            b[c] = Self::gmul(a[0],2) ^ Self::gmul(a[1],3) ^ a[2] ^ a[3];
-            b[c+1] = a[0] ^ Self::gmul(a[1],2) ^ Self::gmul(a[2],3) ^ a[3];
-            b[c+2] = a[0] ^ a[1] ^ Self::gmul(a[2],2) ^ Self::gmul(a[3],3);
-            b[c+3] = Self::gmul(a[0],3) ^ a[1] ^ a[2] ^ Self::gmul(a[3],2);
+            let a = [b[c], b[c + 1], b[c + 2], b[c + 3]];
+            b[c] = Self::gmul(a[0], 2) ^ Self::gmul(a[1], 3) ^ a[2] ^ a[3];
+            b[c + 1] = a[0] ^ Self::gmul(a[1], 2) ^ Self::gmul(a[2], 3) ^ a[3];
+            b[c + 2] = a[0] ^ a[1] ^ Self::gmul(a[2], 2) ^ Self::gmul(a[3], 3);
+            b[c + 3] = Self::gmul(a[0], 3) ^ a[1] ^ a[2] ^ Self::gmul(a[3], 2);
         }
     }
 
@@ -334,11 +395,23 @@ impl AesNi {
     fn inv_mix_cols(b: &mut [u8; 16]) {
         for i in 0..4 {
             let c = i * 4;
-            let a = [b[c], b[c+1], b[c+2], b[c+3]];
-            b[c] = Self::gmul(a[0],14) ^ Self::gmul(a[1],11) ^ Self::gmul(a[2],13) ^ Self::gmul(a[3],9);
-            b[c+1] = Self::gmul(a[0],9) ^ Self::gmul(a[1],14) ^ Self::gmul(a[2],11) ^ Self::gmul(a[3],13);
-            b[c+2] = Self::gmul(a[0],13) ^ Self::gmul(a[1],9) ^ Self::gmul(a[2],14) ^ Self::gmul(a[3],11);
-            b[c+3] = Self::gmul(a[0],11) ^ Self::gmul(a[1],13) ^ Self::gmul(a[2],9) ^ Self::gmul(a[3],14);
+            let a = [b[c], b[c + 1], b[c + 2], b[c + 3]];
+            b[c] = Self::gmul(a[0], 14)
+                ^ Self::gmul(a[1], 11)
+                ^ Self::gmul(a[2], 13)
+                ^ Self::gmul(a[3], 9);
+            b[c + 1] = Self::gmul(a[0], 9)
+                ^ Self::gmul(a[1], 14)
+                ^ Self::gmul(a[2], 11)
+                ^ Self::gmul(a[3], 13);
+            b[c + 2] = Self::gmul(a[0], 13)
+                ^ Self::gmul(a[1], 9)
+                ^ Self::gmul(a[2], 14)
+                ^ Self::gmul(a[3], 11);
+            b[c + 3] = Self::gmul(a[0], 11)
+                ^ Self::gmul(a[1], 13)
+                ^ Self::gmul(a[2], 9)
+                ^ Self::gmul(a[3], 14);
         }
     }
 
@@ -346,7 +419,8 @@ impl AesNi {
     /// Her 16 baytlık blok bağımsız şifrelenir (gizlilik zayıf — üretim kodunda kullanmayın).
     pub fn encrypt_ecb(&self, data: &mut [u8]) {
         for chunk in data.chunks_exact_mut(16) {
-            let mut b = [0u8; 16]; b.copy_from_slice(chunk);
+            let mut b = [0u8; 16];
+            b.copy_from_slice(chunk);
             self.encrypt_block(&mut b);
             chunk.copy_from_slice(&b);
         }
@@ -355,7 +429,8 @@ impl AesNi {
     /// ECB modunda çok bloklu şifre çözme.
     pub fn decrypt_ecb(&self, data: &mut [u8]) {
         for chunk in data.chunks_exact_mut(16) {
-            let mut b = [0u8; 16]; b.copy_from_slice(chunk);
+            let mut b = [0u8; 16];
+            b.copy_from_slice(chunk);
             self.decrypt_block(&mut b);
             chunk.copy_from_slice(&b);
         }
@@ -375,12 +450,14 @@ impl AesNi {
 /// İndirgenemez polinom: x^128 + x^7 + x^2 + x + 1 (0x87 bit-tersine çevrilmiş temsil)
 /// PCLMULQDQ talimatı bu çarpımı tek CPU döngüsünde hesaplar.
 pub struct ClMulGhash {
-    h: [u64; 2],  // H katsayısı — 64-bit kelimeler (big-endian)
+    h: [u64; 2], // H katsayısı — 64-bit kelimeler (big-endian)
 }
 
 impl ClMulGhash {
     /// Bu platformda PCLMULQDQ ve AES-NI mevcut mu?
-    pub fn is_available() -> bool { get_features().pclmulqdq && get_features().aes_ni }
+    pub fn is_available() -> bool {
+        get_features().pclmulqdq && get_features().aes_ni
+    }
 
     /// H katsayısından yeni GHASH oluşturur (H büyük-endian byte dizisi).
     pub fn new(h: &[u8; 16]) -> Self {
@@ -458,10 +535,13 @@ impl ClMulGhash {
 
         for chunk in data.chunks_exact(16) {
             // Bloğu duruma XOR'la
-            let b0 = u64::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3],
-                                          chunk[4], chunk[5], chunk[6], chunk[7]]);
-            let b1 = u64::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11],
-                                          chunk[12], chunk[13], chunk[14], chunk[15]]);
+            let b0 = u64::from_be_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]);
+            let b1 = u64::from_be_bytes([
+                chunk[8], chunk[9], chunk[10], chunk[11], chunk[12], chunk[13], chunk[14],
+                chunk[15],
+            ]);
 
             state[0] ^= b0;
             state[1] ^= b1;
@@ -586,23 +666,30 @@ impl GhashSoft {
 /// SHA-256 başlangıç vektörü (IV): 2, 3, 5, 7, 11, 13, 17, 19'un kareköklerinin
 /// kesirli kısımları (ilk 8 asal sayı).
 pub struct ShaNi {
-    state: [u32; 8],      // 8 adet 32-bit kelimeden oluşan özetleme durumu (a-h)
-    buffer: [u8; 64],     // 512-bit (64 bayt) gelen veri tamponu
-    buffer_len: usize,    // Tampondaki geçerli bayt sayısı
-    total_len: u64,       // Toplam işlenen bayt sayısı (dolgu için)
+    state: [u32; 8],   // 8 adet 32-bit kelimeden oluşan özetleme durumu (a-h)
+    buffer: [u8; 64],  // 512-bit (64 bayt) gelen veri tamponu
+    buffer_len: usize, // Tampondaki geçerli bayt sayısı
+    total_len: u64,    // Toplam işlenen bayt sayısı (dolgu için)
 }
 
 impl ShaNi {
     /// Bu platformda SHA-NI donanım talimatları mevcut mu?
-    pub fn is_available() -> bool { get_features().sha_ni }
+    pub fn is_available() -> bool {
+        get_features().sha_ni
+    }
 
     /// Yeni SHA-256 özetleyici oluşturur.
     /// Başlangıç sabitler: sqrt(asal[0..7]) kesirleri
     pub fn new() -> Self {
         ShaNi {
             // SHA-256 başlangıç vektörleri (2, 3, 5, 7, 11, 13, 17, 19 kareköklerinin kesirleri)
-            state: [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19],
-            buffer: [0u8; 64], buffer_len: 0, total_len: 0,
+            state: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            buffer: [0u8; 64],
+            buffer_len: 0,
+            total_len: 0,
         }
     }
 
@@ -614,15 +701,25 @@ impl ShaNi {
         if self.buffer_len > 0 {
             let need = 64 - self.buffer_len;
             let take = rem.len().min(need);
-            self.buffer[self.buffer_len..self.buffer_len+take].copy_from_slice(&rem[..take]);
+            self.buffer[self.buffer_len..self.buffer_len + take].copy_from_slice(&rem[..take]);
             self.buffer_len += take;
             rem = &rem[take..];
-            if self.buffer_len == 64 { let b = self.buffer; self.process(&b); self.buffer_len = 0; }
+            if self.buffer_len == 64 {
+                let b = self.buffer;
+                self.process(&b);
+                self.buffer_len = 0;
+            }
         }
 
         // Tam 64 baytlık blokları doğrudan işle
-        while rem.len() >= 64 { self.process(&rem[..64]); rem = &rem[64..]; }
-        if !rem.is_empty() { self.buffer[..rem.len()].copy_from_slice(rem); self.buffer_len = rem.len(); }
+        while rem.len() >= 64 {
+            self.process(&rem[..64]);
+            rem = &rem[64..];
+        }
+        if !rem.is_empty() {
+            self.buffer[..rem.len()].copy_from_slice(rem);
+            self.buffer_len = rem.len();
+        }
     }
 
     /// 512-bit (64 bayt) bloğu SHA-256 sıkıştırma fonksiyonuyla işler.
@@ -634,29 +731,50 @@ impl ShaNi {
     fn process(&mut self, block: &[u8]) {
         // SHA-256 K sabitleri — ilk 64 asal sayının kübköklerinin kesirleri
         const K: [u32; 64] = [
-            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
         ];
 
         // Mesaj takviye çizelgesi (w): 16 girişten 64 girişe genişlet
         let mut w = [0u32; 64];
-        for i in 0..16 { w[i] = u32::from_be_bytes([block[i*4], block[i*4+1], block[i*4+2], block[i*4+3]]); }
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                block[i * 4],
+                block[i * 4 + 1],
+                block[i * 4 + 2],
+                block[i * 4 + 3],
+            ]);
+        }
         for i in 16..64 {
             // σ0: ROTR7(w[i-15]) XOR ROTR18(w[i-15]) XOR SHR3(w[i-15])
-            let s0 = w[i-15].rotate_right(7) ^ w[i-15].rotate_right(18) ^ (w[i-15] >> 3);
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
             // σ1: ROTR17(w[i-2]) XOR ROTR19(w[i-2]) XOR SHR10(w[i-2])
-            let s1 = w[i-2].rotate_right(17) ^ w[i-2].rotate_right(19) ^ (w[i-2] >> 10);
-            w[i] = w[i-16].wrapping_add(s0).wrapping_add(w[i-7]).wrapping_add(s1);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
 
         // a-h çalışma değişkenleri başlangıç durumundan alınır
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h) = (self.state[0], self.state[1], self.state[2], self.state[3], self.state[4], self.state[5], self.state[6], self.state[7]);
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h) = (
+            self.state[0],
+            self.state[1],
+            self.state[2],
+            self.state[3],
+            self.state[4],
+            self.state[5],
+            self.state[6],
+            self.state[7],
+        );
 
         // 64 sıkıştırma turu
         for i in 0..64 {
@@ -664,14 +782,25 @@ impl ShaNi {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             // Ch(e,f,g): (e AND f) XOR (NOT e AND g)
             let ch = (e & f) ^ (!e & g);
-            let t1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let t1 = h
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
             // Σ0(a): ROTR2(a) XOR ROTR13(a) XOR ROTR22(a)
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             // Maj(a,b,c): (a AND b) XOR (a AND c) XOR (b AND c)
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let t2 = s0.wrapping_add(maj);
             // Değişkenleri döndür
-            h = g; g = f; f = e; e = d.wrapping_add(t1); d = c; c = b; b = a; a = t1.wrapping_add(t2);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
         }
 
         // Çalışma değerlerini duruma ekle (modüler toplama)
@@ -698,23 +827,38 @@ impl ShaNi {
 
         // Gerekirse ek bir blok işle
         if self.buffer_len > 56 {
-            while self.buffer_len < 64 { self.buffer[self.buffer_len] = 0; self.buffer_len += 1; }
-            let b = self.buffer; self.process(&b); self.buffer_len = 0;
+            while self.buffer_len < 64 {
+                self.buffer[self.buffer_len] = 0;
+                self.buffer_len += 1;
+            }
+            let b = self.buffer;
+            self.process(&b);
+            self.buffer_len = 0;
         }
 
         // Son bloğu doldur + uzunluk ekle
-        while self.buffer_len < 56 { self.buffer[self.buffer_len] = 0; self.buffer_len += 1; }
+        while self.buffer_len < 56 {
+            self.buffer[self.buffer_len] = 0;
+            self.buffer_len += 1;
+        }
         self.buffer[56..64].copy_from_slice(&blen.to_be_bytes()); // 64-bit big-endian uzunluk
-        let b = self.buffer; self.process(&b);
+        let b = self.buffer;
+        self.process(&b);
 
         // Durumu big-endian bayta dönüştür
         let mut r = [0u8; 32];
-        for i in 0..8 { r[i*4..i*4+4].copy_from_slice(&self.state[i].to_be_bytes()); }
+        for i in 0..8 {
+            r[i * 4..i * 4 + 4].copy_from_slice(&self.state[i].to_be_bytes());
+        }
         r
     }
 }
 
-impl Default for ShaNi { fn default() -> Self { Self::new() } }
+impl Default for ShaNi {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ============================================================================
 // DONANIM RASTGELE SAYI ÜRETECİ
@@ -726,21 +870,27 @@ impl Default for ShaNi { fn default() -> Self { Self::new() } }
 /// 64-bitlik parçalar halinde çalışır; tampon 8'e bölünemeyen kısımlar ayrıca işlenir.
 /// RDRAND başarısız olursa (carry bayrağı 0) `false` döner — çağıran yeniden denemeli.
 pub fn rdrand_bytes(buf: &mut [u8]) -> bool {
-    if !get_features().rdrand { return false; }
+    if !get_features().rdrand {
+        return false;
+    }
     let len = buf.len();
     unsafe {
         // 64-bit parçalar halinde üret (RDRAND 64-bit değer döner)
         for chunk in buf.chunks_exact_mut(8) {
             let mut v: u64 = 0;
-            if core::arch::x86_64::_rdrand64_step(&mut v) != 1 { return false; }
+            if core::arch::x86_64::_rdrand64_step(&mut v) != 1 {
+                return false;
+            }
             chunk.copy_from_slice(&v.to_le_bytes());
         }
         // Kalan baytları işle
         let rem = len % 8;
         if rem > 0 {
             let mut v: u64 = 0;
-            if core::arch::x86_64::_rdrand64_step(&mut v) != 1 { return false; }
-            buf[len-rem..].copy_from_slice(&v.to_le_bytes()[..rem]);
+            if core::arch::x86_64::_rdrand64_step(&mut v) != 1 {
+                return false;
+            }
+            buf[len - rem..].copy_from_slice(&v.to_le_bytes()[..rem]);
         }
     }
     true
@@ -752,19 +902,25 @@ pub fn rdrand_bytes(buf: &mut [u8]) -> bool {
 /// RDRAND'den daha yavaş olabilir (kaynak doluncaya kadar beklenir).
 /// Tohum (seed) malzeme üretimi için tercih edilmesi gereken seçenektir.
 pub fn rdseed_bytes(buf: &mut [u8]) -> bool {
-    if !get_features().rdseed { return false; }
+    if !get_features().rdseed {
+        return false;
+    }
     let len = buf.len();
     unsafe {
         for chunk in buf.chunks_exact_mut(8) {
             let mut v: u64 = 0;
-            if core::arch::x86_64::_rdseed64_step(&mut v) != 1 { return false; }
+            if core::arch::x86_64::_rdseed64_step(&mut v) != 1 {
+                return false;
+            }
             chunk.copy_from_slice(&v.to_le_bytes());
         }
         let rem = len % 8;
         if rem > 0 {
             let mut v: u64 = 0;
-            if core::arch::x86_64::_rdseed64_step(&mut v) != 1 { return false; }
-            buf[len-rem..].copy_from_slice(&v.to_le_bytes()[..rem]);
+            if core::arch::x86_64::_rdseed64_step(&mut v) != 1 {
+                return false;
+            }
+            buf[len - rem..].copy_from_slice(&v.to_le_bytes()[..rem]);
         }
     }
     true
@@ -773,5 +929,9 @@ pub fn rdseed_bytes(buf: &mut [u8]) -> bool {
 /// AES performans karşılaştırması.
 /// AES-NI mevcutsa (10 döngü/blok, 200 MB/s) değer döner; yoksa sıfırs.
 pub fn benchmark_aes() -> (u64, u64) {
-    if get_features().aes_ni { (10, 200) } else { (0, 0) }
+    if get_features().aes_ni {
+        (10, 200)
+    } else {
+        (0, 0)
+    }
 }

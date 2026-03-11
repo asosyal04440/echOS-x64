@@ -70,10 +70,10 @@ use crate::linux_glue::PciDev;
 // ---------------------------------------------------------------------------
 
 const VIRTIO_PCI_CAP_ID: u8 = 0x09;
-const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;  // Ortak yapılandırma
-const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;  // Bildirim (doorbell)
-const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;     // Interrupt durum
-const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;  // Aygıta özgü yapılandırma
+const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1; // Ortak yapılandırma
+const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2; // Bildirim (doorbell)
+const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3; // Interrupt durum
+const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4; // Aygıta özgü yapılandırma
 
 // ---------------------------------------------------------------------------
 // VirtIO Durum Biti Sabitleri
@@ -81,10 +81,10 @@ const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;  // Aygıta özgü yapılandırma
 // Bu sıra VirtIO spesifikasyonunda zorunludur.
 // ---------------------------------------------------------------------------
 
-const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;   // Sürücü cihazı tanıdı
-const VIRTIO_STATUS_DRIVER: u8 = 2;        // Sürücü cihazla konuşabilir
-const VIRTIO_STATUS_DRIVER_OK: u8 = 4;     // Sürücü hazır
-const VIRTIO_STATUS_FEATURES_OK: u8 = 8;   // Özellik müzakeresi tamamlandı
+const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1; // Sürücü cihazı tanıdı
+const VIRTIO_STATUS_DRIVER: u8 = 2; // Sürücü cihazla konuşabilir
+const VIRTIO_STATUS_DRIVER_OK: u8 = 4; // Sürücü hazır
+const VIRTIO_STATUS_FEATURES_OK: u8 = 8; // Özellik müzakeresi tamamlandı
 
 // ---------------------------------------------------------------------------
 // VirtIO GPU Özellik Bitleri
@@ -99,23 +99,23 @@ const VIRTIO_GPU_F_VIRGL: u64 = 1 << 0;
 // 0x11xx: Başarı yanıtları
 // ---------------------------------------------------------------------------
 
-const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;   // Ekran bilgisi al
-const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0108;         // VirGL yetenek seti al
-const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;        // Tarama kaynağını ayarla
-const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;     // Kaynağı ekrana yansıt
-const VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200;         // VirGL bağlamı oluştur
+const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100; // Ekran bilgisi al
+const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0108; // VirGL yetenek seti al
+const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103; // Tarama kaynağını ayarla
+const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104; // Kaynağı ekrana yansıt
+const VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200; // VirGL bağlamı oluştur
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D: u32 = 0x0202; // 3D kaynak oluştur
-const VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0205;          // VirGL komut paketi gönder
-const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;         // Başarı, veri yok
-const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1107;         // Yetenek seti yanıtı
-const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;   // Ekran bilgisi yanıtı
-const VIRTIO_GPU_FLAG_FENCE: u32 = 1;                  // Çit (senkronizasyon işareti)
+const VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0205; // VirGL komut paketi gönder
+const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100; // Başarı, veri yok
+const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1107; // Yetenek seti yanıtı
+const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101; // Ekran bilgisi yanıtı
+const VIRTIO_GPU_FLAG_FENCE: u32 = 1; // Çit (senkronizasyon işareti)
 
-const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;  // Maksimum ekran çıkışı sayısı
+const VIRTIO_GPU_MAX_SCANOUTS: usize = 16; // Maksimum ekran çıkışı sayısı
 
 // VirGL Yetenek Seti kimlikleri
-const VIRTIO_GPU_CAPSET_VIRGL: u32 = 1;   // VirGL v1
-const VIRTIO_GPU_CAPSET_VIRGL2: u32 = 2;  // VirGL v2 (tercih edilir)
+const VIRTIO_GPU_CAPSET_VIRGL: u32 = 1; // VirGL v1
+const VIRTIO_GPU_CAPSET_VIRGL2: u32 = 2; // VirGL v2 (tercih edilir)
 
 // B8G8R8A8_UNORM: Mavi-Yeşil-Kırmızı-Alfa, normalize edilmemiş
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 67;
@@ -126,11 +126,11 @@ const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 67;
 // Her komut başlığı: opcode | (payload_len << 16)
 // ---------------------------------------------------------------------------
 
-const VIRGL_CCMD_CREATE_OBJECT: u32 = 1;         // GPU nesnesi oluştur
+const VIRGL_CCMD_CREATE_OBJECT: u32 = 1; // GPU nesnesi oluştur
 const VIRGL_CCMD_SET_FRAMEBUFFER_STATE: u32 = 2; // Framebuffer'ı ayarla
-const VIRGL_CCMD_CLEAR: u32 = 3;                 // Renk tamponu temizle
-const VIRGL_OBJECT_SURFACE: u32 = 1;             // Nesne türü: yüzey
-const VIRGL_CLEAR_COLOR: u32 = 1;                // Renk tamponu temizleme maskesi
+const VIRGL_CCMD_CLEAR: u32 = 3; // Renk tamponu temizle
+const VIRGL_OBJECT_SURFACE: u32 = 1; // Nesne türü: yüzey
+const VIRGL_CLEAR_COLOR: u32 = 1; // Renk tamponu temizleme maskesi
 
 /// VirtIO PCI Ortak Yapılandırma Register'ları
 ///
@@ -145,22 +145,22 @@ const VIRGL_CLEAR_COLOR: u32 = 1;                // Renk tamponu temizleme maske
 /// ```
 #[repr(C)]
 struct VirtioPciCommonCfg {
-    device_feature_select: u32,  // Hangi 32-bitlik özellik grubunu seçer (0 veya 1)
-    device_feature: u32,         // Seçilen gruptaki cihaz özellikleri
-    driver_feature_select: u32,  // Sürücü özellik grubu seçimi
-    driver_feature: u32,         // Sürücünün istediği özellikler
-    msix_config: u16,            // MSI-X yapılandırması
-    num_queues: u16,             // Bu cihazın kuyruk sayısı
-    device_status: u8,           // Cihaz durum byte'ı (yukarıdaki sabitler)
-    config_generation: u8,       // Yapılandırma değişim sayacı
-    queue_select: u16,           // Hangi kuyruğu yapılandıracağımızı seçer
-    queue_size: u16,             // Seçili kuyruğun maksimum boyutu
-    queue_msix_vector: u16,      // Kuyruk MSI-X vektörü
-    queue_enable: u16,           // 1 = kuyruk aktif
-    queue_notify_off: u16,       // Bildirim register ofseti
-    queue_desc: u64,             // Tanımlayıcı tablosu fiziksel adresi
-    queue_avail: u64,            // Kullanılabilir halka fiziksel adresi
-    queue_used: u64,             // Kullanılmış halka fiziksel adresi
+    device_feature_select: u32, // Hangi 32-bitlik özellik grubunu seçer (0 veya 1)
+    device_feature: u32,        // Seçilen gruptaki cihaz özellikleri
+    driver_feature_select: u32, // Sürücü özellik grubu seçimi
+    driver_feature: u32,        // Sürücünün istediği özellikler
+    msix_config: u16,           // MSI-X yapılandırması
+    num_queues: u16,            // Bu cihazın kuyruk sayısı
+    device_status: u8,          // Cihaz durum byte'ı (yukarıdaki sabitler)
+    config_generation: u8,      // Yapılandırma değişim sayacı
+    queue_select: u16,          // Hangi kuyruğu yapılandıracağımızı seçer
+    queue_size: u16,            // Seçili kuyruğun maksimum boyutu
+    queue_msix_vector: u16,     // Kuyruk MSI-X vektörü
+    queue_enable: u16,          // 1 = kuyruk aktif
+    queue_notify_off: u16,      // Bildirim register ofseti
+    queue_desc: u64,            // Tanımlayıcı tablosu fiziksel adresi
+    queue_avail: u64,           // Kullanılabilir halka fiziksel adresi
+    queue_used: u64,            // Kullanılmış halka fiziksel adresi
 }
 
 /// VirtIO GPU Kontrol Başlığı
@@ -169,11 +169,11 @@ struct VirtioPciCommonCfg {
 /// `fence_id` senkronizasyon çit numarasını belirtir.
 #[repr(C)]
 struct VirtioGpuCtrlHdr {
-    type_: u32,     // Komut/yanıt kodu (yukarıdaki sabitler)
-    flags: u32,     // Çit bayrağı ve diğerleri
-    fence_id: u64,  // Senkronizasyon için benzersiz ID
-    ctx_id: u32,    // VirGL bağlam kimliği
-    padding: u32,   // 8-byte hizalama için dolgu
+    type_: u32,    // Komut/yanıt kodu (yukarıdaki sabitler)
+    flags: u32,    // Çit bayrağı ve diğerleri
+    fence_id: u64, // Senkronizasyon için benzersiz ID
+    ctx_id: u32,   // VirGL bağlam kimliği
+    padding: u32,  // 8-byte hizalama için dolgu
 }
 
 /// GPU Dikdörtgen Alanı (koordinat + boyut)
@@ -190,8 +190,8 @@ struct VirtioGpuRect {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtioGpuDisplayOne {
-    r: VirtioGpuRect,  // Ekranın dikdörtgen alanı
-    enabled: u32,       // 0 = devre dışı, 1 = aktif
+    r: VirtioGpuRect, // Ekranın dikdörtgen alanı
+    enabled: u32,     // 0 = devre dışı, 1 = aktif
     flags: u32,
 }
 
@@ -216,7 +216,7 @@ struct VirtioGpuRespCapset {
     hdr: VirtioGpuCtrlHdr,
     capset_id: u32,
     capset_version: u32,
-    size: u32,    // Yetenek verisinin byte boyutu
+    size: u32, // Yetenek verisinin byte boyutu
     padding: u32,
 }
 
@@ -236,10 +236,10 @@ struct VirtioGpuResourceCreate3d {
     format: u32,      // Piksel formatı (B8G8R8A8 vb.)
     width: u32,
     height: u32,
-    depth: u32,       // 2D için 1
-    array_size: u32,  // Dizi dokusu için, normal için 1
-    last_level: u32,  // Mipmap seviyesi (0 = mip yok)
-    nr_samples: u32,  // Çoklu örnekleme sayısı
+    depth: u32,      // 2D için 1
+    array_size: u32, // Dizi dokusu için, normal için 1
+    last_level: u32, // Mipmap seviyesi (0 = mip yok)
+    nr_samples: u32, // Çoklu örnekleme sayısı
     flags: u32,
 }
 
@@ -247,9 +247,9 @@ struct VirtioGpuResourceCreate3d {
 #[repr(C)]
 struct VirtioGpuSetScanout {
     hdr: VirtioGpuCtrlHdr,
-    r: VirtioGpuRect,    // Görüntülenecek kaynak bölgesi
-    scanout_id: u32,     // Hedef ekran çıkışı (0 = birincil)
-    resource_id: u32,    // Bağlanacak kaynak
+    r: VirtioGpuRect, // Görüntülenecek kaynak bölgesi
+    scanout_id: u32,  // Hedef ekran çıkışı (0 = birincil)
+    resource_id: u32, // Bağlanacak kaynak
 }
 
 /// RESOURCE_FLUSH komutu: GPU belleğini ekrana yansıtır
@@ -268,7 +268,7 @@ struct VirtioGpuResourceFlush {
 #[repr(C)]
 struct VirtioGpuCmdSubmit3d {
     hdr: VirtioGpuCtrlHdr,
-    size: u32,    // VirGL komutlarının toplam byte boyutu
+    size: u32, // VirGL komutlarının toplam byte boyutu
     padding: u32,
 }
 
@@ -319,10 +319,10 @@ impl VirglEncoder {
 /// - bit 1 (WRITE): tampon cihaz tarafından yazılacak (IN tamponu)
 #[repr(C)]
 struct VirtqDesc {
-    addr: u64,   // Tampon fiziksel adresi
-    len: u32,    // Tampon boyutu (byte)
-    flags: u16,  // NEXT, WRITE bayrakları
-    next: u16,   // Zincirdeki sonraki tanımlayıcı indeksi
+    addr: u64,  // Tampon fiziksel adresi
+    len: u32,   // Tampon boyutu (byte)
+    flags: u16, // NEXT, WRITE bayrakları
+    next: u16,  // Zincirdeki sonraki tanımlayıcı indeksi
 }
 
 /// Virtqueue Kullanılabilir Halkası
@@ -331,10 +331,10 @@ struct VirtqDesc {
 /// `idx` monoton artan sayaçtır; cihaz son gördüğü idx'e kadar işler.
 #[repr(C)]
 struct VirtqAvail {
-    flags: u16,        // Bildirim bastırma bayrağı
-    idx: u16,          // Sürücünün eklediği sonraki giriş indeksi
-    ring: [u16; 8],    // Tanımlayıcı zinciri başlangıç indeksleri
-    used_event: u16,   // Kesme optimizasyonu için kullanılan indeks
+    flags: u16,      // Bildirim bastırma bayrağı
+    idx: u16,        // Sürücünün eklediği sonraki giriş indeksi
+    ring: [u16; 8],  // Tanımlayıcı zinciri başlangıç indeksleri
+    used_event: u16, // Kesme optimizasyonu için kullanılan indeks
 }
 
 /// Kullanılmış Halka Girdisi
@@ -350,10 +350,10 @@ struct VirtqUsedElem {
 /// `idx` monoton artar; sürücü yeni girdileri burada bulur.
 #[repr(C)]
 struct VirtqUsed {
-    flags: u16,              // Bildirim bastırma bayrağı
-    idx: u16,                // Cihazın eklediği sonraki giriş indeksi
+    flags: u16, // Bildirim bastırma bayrağı
+    idx: u16,   // Cihazın eklediği sonraki giriş indeksi
     ring: [VirtqUsedElem; 8],
-    avail_event: u16,        // Kesme optimizasyonu
+    avail_event: u16, // Kesme optimizasyonu
 }
 
 /// Tam Virtqueue: desc + avail + used halkaları + meta veriler
@@ -366,28 +366,38 @@ struct VirtQueue {
     notify_off: u16,        // Bildirim register ofseti (çarpan uygulanmadan önce)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VirtioGpuDoorbellSnapshot {
+    pub queue_index: u16,
+    pub queue_notify_off: u16,
+    pub notify_off_multiplier: u32,
+    pub notify_mmio_offset: u32,
+    pub avail_idx: u16,
+    pub used_idx: u16,
+}
+
 /// VirtIO GPU Cihaz Durumu
 ///
 /// Tüm GPU durumu tek global yapıda tutulur.
 /// `unsafe impl Send`: raw pointer içerdiği için Rust bunu otomatik yapmaz,
 /// ancak yalnızca kilitleme altında erişileceği garanti edilir.
 struct VirtioGpuDevice {
-    common: *mut VirtioPciCommonCfg,   // Ortak VirtIO register'ları
-    notify: *mut u8,                    // Bildirim (doorbell) tabanı
-    notify_off_multiplier: u32,         // Bildirim ofseti çarpanı
-    isr: *mut u8,                       // Interrupt durumu
-    device_cfg: *mut u8,                // GPU'ya özgü yapılandırma
-    features: u64,                      // Müzakere edilen özellikler
-    virgl: bool,                        // VirGL destekleniyor mu
-    capset_id: u32,                     // Aktif VirGL yetenek seti ID'si
-    capset_version: u32,                // Yetenek seti sürümü
-    capset_size: u32,                   // Yetenek verisi boyutu
-    capset_data: *mut u8,               // Yetenek verisi tamponu
-    ctx_id: u32,                        // VirGL bağlam kimliği
-    resource_id: u32,                   // Sonraki kaynak kimliği
-    surface_handle: u32,                // VirGL yüzey tanıtıcısı
-    fence_counter: u64,                 // Senkronizasyon çit sayacı
-    ctrl_queue: VirtQueue,              // Kontrol kuyruğu
+    common: *mut VirtioPciCommonCfg, // Ortak VirtIO register'ları
+    notify: *mut u8,                 // Bildirim (doorbell) tabanı
+    notify_off_multiplier: u32,      // Bildirim ofseti çarpanı
+    isr: *mut u8,                    // Interrupt durumu
+    device_cfg: *mut u8,             // GPU'ya özgü yapılandırma
+    features: u64,                   // Müzakere edilen özellikler
+    virgl: bool,                     // VirGL destekleniyor mu
+    capset_id: u32,                  // Aktif VirGL yetenek seti ID'si
+    capset_version: u32,             // Yetenek seti sürümü
+    capset_size: u32,                // Yetenek verisi boyutu
+    capset_data: *mut u8,            // Yetenek verisi tamponu
+    ctx_id: u32,                     // VirGL bağlam kimliği
+    resource_id: u32,                // Sonraki kaynak kimliği
+    surface_handle: u32,             // VirGL yüzey tanıtıcısı
+    fence_counter: u64,              // Senkronizasyon çit sayacı
+    ctrl_queue: VirtQueue,           // Kontrol kuyruğu
 }
 
 unsafe impl Send for VirtioGpuDevice {}
@@ -455,6 +465,31 @@ pub unsafe fn init_from_pci(dev: *mut PciDev) -> bool {
     );
     *GPU_DEVICE.lock() = Some(gpu);
     true
+}
+
+fn queue_doorbell_snapshot(gpu: &VirtioGpuDevice, queue_index: u16) -> VirtioGpuDoorbellSnapshot {
+    let q = &gpu.ctrl_queue;
+    let avail_idx = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*q.avail).idx)) };
+    let used_idx = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*q.used).idx)) };
+    VirtioGpuDoorbellSnapshot {
+        queue_index,
+        queue_notify_off: q.notify_off,
+        notify_off_multiplier: gpu.notify_off_multiplier,
+        notify_mmio_offset: q.notify_off as u32 * gpu.notify_off_multiplier,
+        avail_idx,
+        used_idx,
+    }
+}
+
+fn ring_queue_notify(gpu: &VirtioGpuDevice, snapshot: VirtioGpuDoorbellSnapshot) {
+    let notify_ptr = unsafe { gpu.notify.add(snapshot.notify_mmio_offset as usize) as *mut u16 };
+    unsafe { write_volatile(notify_ptr, snapshot.queue_index) };
+}
+
+pub fn gpu_doorbell_snapshot() -> Option<VirtioGpuDoorbellSnapshot> {
+    let guard = GPU_DEVICE.lock();
+    let gpu = guard.as_ref()?;
+    Some(queue_doorbell_snapshot(gpu, 0))
 }
 
 /// PCI capability listesini okur, VirtIO MMIO adreslerini çıkarır.
@@ -912,7 +947,7 @@ unsafe fn submit_3d_command(gpu: &mut VirtioGpuDevice, data: *const u8, len: usi
         &mut resp as *mut _ as *mut u8,
         core::mem::size_of::<VirtioGpuCtrlHdr>(),
     ) && resp.type_ == VIRTIO_GPU_RESP_OK_NODATA
-        && resp.fence_id == fence_id  // Çit eşleşmesi: GPU'nun komutu işlediğini doğrular
+        && resp.fence_id == fence_id // Çit eşleşmesi: GPU'nun komutu işlediğini doğrular
 }
 
 /// Bir kaynağı belirtilen ekrana bağlar.
@@ -1192,7 +1227,7 @@ unsafe fn submit_ctrl(
     // Kapı zili: cihaza yeni iş var diye bildir
     let notify_offset = q.notify_off as u32 * gpu.notify_off_multiplier;
     let notify_ptr = gpu.notify.add(notify_offset as usize) as *mut u16;
-    write_volatile(notify_ptr, 0); // Kuyruk numarası (0 = ctrl)
+    write_volatile(notify_ptr, 0);
 
     // Busy-wait: cihaz used.idx'i güncelleyene kadar döngüde bekle
     let target = avail.idx;

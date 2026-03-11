@@ -22,11 +22,27 @@
 //! Tüm bu özellikler boot sırasında `security::init()` ile etkinleştirilir.
 
 pub mod capability;
+pub mod cfi;
+pub mod landlock;
+pub mod kpti;
 pub mod mac;
+pub mod mpk;
+pub mod anti_cheat;
+pub mod seccomp;
 pub mod simics_gate;
 pub mod tpm;
+pub mod users;
 
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+/// KASLR — Kernel Address Space Layout Randomization + Manifest İmzalama
+pub mod kaslr;
+
+/// Paket yönetim sistemi - .bhd formatında uygulama paketleri
+pub mod package;
+
+/// Paket izin dialog sistemi - kullanıcı onay mekanizması
+pub mod permission_dialog;
+
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
@@ -173,15 +189,17 @@ pub fn init_stack_canary() {
 /// CPU başına farklı canary değeri türetir.
 /// Her CPU, global canary + sabit çarpan * cpu_id formülüyle hesaplanır.
 pub fn init_per_cpu_canary(cpu_id: u32) {
-    let canary = STACK_CANARY.load(Ordering::SeqCst).wrapping_add(cpu_id as u64 * 0x12345678);
-    
+    let canary = STACK_CANARY
+        .load(Ordering::SeqCst)
+        .wrapping_add(cpu_id as u64 * 0x12345678);
+
     let mut canaries = PER_CPU_CANARIES.lock();
     let idx = cpu_id as usize;
     if canaries.len() <= idx {
         canaries.resize(idx + 1, 0);
     }
     canaries[idx] = canary;
-    
+
     crate::serial_println!("[SEC] CPU {} stack canary: {:#x}", cpu_id, canary);
 }
 
@@ -190,7 +208,10 @@ pub fn init_per_cpu_canary(cpu_id: u32) {
 pub fn get_current_canary() -> u64 {
     let cpu_id = crate::cpu::smp::current_cpu_id();
     let canaries = PER_CPU_CANARIES.lock();
-    canaries.get(cpu_id as usize).copied().unwrap_or_else(|| STACK_CANARY.load(Ordering::SeqCst))
+    canaries
+        .get(cpu_id as usize)
+        .copied()
+        .unwrap_or_else(|| STACK_CANARY.load(Ordering::SeqCst))
 }
 
 /// GCC/Clang'ın ürettiği stack-protector epilogu bu sembolü çağırır.
@@ -203,7 +224,7 @@ pub fn get_current_canary() -> u64 {
 pub extern "C" fn __stack_chk_fail() -> ! {
     crate::serial_println!("[SEC] *** STACK CANARY VIOLATION ***");
     crate::serial_println!("[SEC] Buffer overflow detected! Halting...");
-    
+
     // Kernel panic - saldırı tespit edildi, sistem güvenli biçimde durduruldu
     panic!("Stack buffer overflow detected - possible exploit attempt!");
 }
@@ -249,14 +270,15 @@ static ASLR_ENABLED: AtomicBool = AtomicBool::new(false);
 pub fn init_aslr() {
     // Her alan için bağımsız rastgele ofset üret, sayfa sınırına hizala
     let mmap_offset = (crate::random::rand_u64() % crate::memory::USER_MMAP_RANDOM_RANGE) & !0xFFF;
-    let stack_offset = (crate::random::rand_u64() % crate::memory::USER_STACK_RANDOM_RANGE) & !0xFFF;
+    let stack_offset =
+        (crate::random::rand_u64() % crate::memory::USER_STACK_RANDOM_RANGE) & !0xFFF;
     let heap_offset = (crate::random::rand_u64() % (64 * 1024 * 1024)) & !0xFFF;
-    
+
     MMAP_ASLR_OFFSET.store(mmap_offset, Ordering::SeqCst);
     STACK_ASLR_OFFSET.store(stack_offset, Ordering::SeqCst);
     HEAP_ASLR_OFFSET.store(heap_offset, Ordering::SeqCst);
     ASLR_ENABLED.store(true, Ordering::SeqCst);
-    
+
     crate::serial_println!("[SEC] ASLR enabled:");
     crate::serial_println!("  MMAP offset: {:#x}", mmap_offset);
     crate::serial_println!("  Stack offset: {:#x}", stack_offset);
@@ -365,7 +387,9 @@ static WXORX_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Etkinleştirildikten sonra `check_wxorx()` ile her sayfa eşlemesi denetlenir.
 pub fn enable_wxorx() {
     WXORX_ENABLED.store(true, Ordering::SeqCst);
-    crate::serial_println!("[SEC] W^X policy enabled - Pages cannot be both writable and executable");
+    crate::serial_println!(
+        "[SEC] W^X policy enabled - Pages cannot be both writable and executable"
+    );
 }
 
 /// W^X kuralını kontrol eder: hem yazılabilir hem çalıştırılabilir ise `false` döner.
@@ -411,35 +435,68 @@ pub fn init() {
     // Debugcon 'S' baytı: security::init() girildi (seri port hazır olmadan önce izleme)
     unsafe {
         use x86_64::instructions::port::PortWriteOnly;
-        PortWriteOnly::<u8>::new(0xE9).write(b'S');  // Entered security::init
+        PortWriteOnly::<u8>::new(0xE9).write(b'S'); // Entered security::init
     }
     crate::serial_println!("[SEC] Initializing security subsystem...");
 
-    unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'1'); }
+    unsafe {
+        x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'1');
+    }
     // Adım 1: NX/DEP - EFER MSR'ın NXE bitini set eder
     enable_nx();
 
-    unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'2'); }
+    unsafe {
+        x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'2');
+    }
     // Adım 2: SMEP - CR4 bit 20'yi set eder (kullanıcı kodu çalıştırma yasağı)
     enable_smep();
 
-    unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'3'); }
+    unsafe {
+        x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'3');
+    }
     // Adım 3: SMAP - CR4 bit 21'i set eder + CLAC ile varsayılan koruma aktif
     enable_smap();
 
-    unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'4'); }
+    unsafe {
+        x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'4');
+    }
     // Adım 4: Stack Canary - CSPRNG ile rastgele değer üretilir
     init_stack_canary();
 
-    unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'5'); }
+    unsafe {
+        x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'5');
+    }
     // Adım 5: ASLR - mmap/stack/heap için rastgele page-aligned ofsetler
     init_aslr();
 
-    unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'6'); }
+    unsafe {
+        x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'6');
+    }
     // Adım 6: W^X - hem yazılabilir hem çalıştırılabilir sayfa politikası engeli
     enable_wxorx();
 
-    unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'7'); }
+    // Adım 7: CFI ve KPTI koruma katmanları
+    cfi::init();
+    kpti::init();
+    kpti::register_sensitive_range(0xFFFF_8000_0000_0000, 0x0000_8000_0000_0000);
+
+    // Adım 8: Seccomp ve path-based sandbox policy motoru
+    seccomp::init();
+    landlock::init();
+    if let Err(err) = crate::valkyrie_virt::init_valkyrie() {
+        crate::serial_println!(
+            "[SEC] Valkyrie-V init skipped: {:?} (fallback to non-hypervisor sandbox)",
+            err
+        );
+    }
+
+    // Adım 9: MPK/PKEYS (donanım destekliyse aktif edilir)
+    mpk::init();
+    anti_cheat::init();
+
+    unsafe {
+        x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'9');
+    }
     crate::serial_println!("[SEC] Security subsystem initialized ✓");
 }
 
@@ -487,19 +544,30 @@ pub fn log_security_event(event: SecurityEvent) {
             crate::serial_println!("[SEC/AUDIT] *** STACK CANARY VIOLATION ***");
         }
         SecurityEvent::NxViolation => {
-            crate::serial_println!("[SEC/AUDIT] NX violation - attempt to execute non-executable memory");
+            crate::serial_println!(
+                "[SEC/AUDIT] NX violation - attempt to execute non-executable memory"
+            );
         }
         SecurityEvent::SmepViolation => {
-            crate::serial_println!("[SEC/AUDIT] SMEP violation - kernel tried to execute user code");
+            crate::serial_println!(
+                "[SEC/AUDIT] SMEP violation - kernel tried to execute user code"
+            );
         }
         SecurityEvent::SmapViolation => {
-            crate::serial_println!("[SEC/AUDIT] SMAP violation - kernel tried to access user memory");
+            crate::serial_println!(
+                "[SEC/AUDIT] SMAP violation - kernel tried to access user memory"
+            );
         }
         SecurityEvent::WxorxViolation => {
-            crate::serial_println!("[SEC/AUDIT] W^X violation - page is both writable and executable");
+            crate::serial_println!(
+                "[SEC/AUDIT] W^X violation - page is both writable and executable"
+            );
         }
         SecurityEvent::SeccompViolation(syscall) => {
-            crate::serial_println!("[SEC/AUDIT] Seccomp violation - syscall {} blocked", syscall);
+            crate::serial_println!(
+                "[SEC/AUDIT] Seccomp violation - syscall {} blocked",
+                syscall
+            );
         }
         SecurityEvent::SuspiciousSyscall(syscall) => {
             crate::serial_println!("[SEC/AUDIT] Suspicious syscall {} detected", syscall);
@@ -547,12 +615,24 @@ pub struct SecurityStatus {
 impl SecurityStatus {
     pub fn score(&self) -> u8 {
         let mut score = 0u8;
-        if self.nx { score += 2; }
-        if self.smep { score += 2; }
-        if self.smap { score += 2; }
-        if self.aslr { score += 1; }
-        if self.wxorx { score += 1; }
-        if self.canary { score += 2; }
+        if self.nx {
+            score += 2;
+        }
+        if self.smep {
+            score += 2;
+        }
+        if self.smap {
+            score += 2;
+        }
+        if self.aslr {
+            score += 1;
+        }
+        if self.wxorx {
+            score += 1;
+        }
+        if self.canary {
+            score += 2;
+        }
         score
     }
 }
@@ -605,10 +685,10 @@ pub enum ChecksumLevel {
 /// Bir sayfanın bütünlük bilgisi (checksum + ihlal sayacı).
 #[derive(Clone, Debug)]
 pub struct PageIntegrity {
-    pub parity: u64,      // 4KB sayfa için 64-bit XOR parity (8 bayt)
-    pub crc32: u32,       // CRC32 sağlama toplamı (donanım hızlandırmalı)
-    pub last_check: u64,  // Son kontrol edildiği syscall tick sayısı
-    pub violations: u32,  // Bu sayfada toplam ihlal sayısı
+    pub parity: u64,     // 4KB sayfa için 64-bit XOR parity (8 bayt)
+    pub crc32: u32,      // CRC32 sağlama toplamı (donanım hızlandırmalı)
+    pub last_check: u64, // Son kontrol edildiği syscall tick sayısı
+    pub violations: u32, // Bu sayfada toplam ihlal sayısı
 }
 
 /// Eternal Seal global durumu (kilitli koleksiyon değişkenleri)
@@ -623,9 +703,19 @@ static SEAL_SAMPLING_RATE: AtomicU64 = AtomicU64::new(5); // %5 per tick
 /// Yeni bir kernel bölgesini Eternal Seal'a kaydeder.
 /// Boot sonrası kod bölgeleri, syscall tablosu vb. için çağrılır.
 pub fn seal_register_region(start: u64, size: u64, name: &'static str, priority: u8) {
-    let region = KernelRegion { start, size, name, priority };
+    let region = KernelRegion {
+        start,
+        size,
+        name,
+        priority,
+    };
     SEAL_REGIONS.lock().push(region);
-    crate::serial_println!("[SEAL] Region registered: {} @ {:#x} (priority {})", name, start, priority);
+    crate::serial_println!(
+        "[SEAL] Region registered: {} @ {:#x} (priority {})",
+        name,
+        start,
+        priority
+    );
 }
 
 /// XOR Parity hesaplar - O(n/8) karmaşıklık, en hızlı yöntem.
@@ -637,18 +727,18 @@ fn compute_parity(data: &[u8]) -> u64 {
     // 64-bit bloklar halinde XOR - en hızlı yol
     let chunks = data.chunks_exact(8);
     let remainder = chunks.remainder();
-    
+
     let mut parity = chunks.fold(0u64, |acc, chunk| {
         acc ^ u64::from_le_bytes(chunk.try_into().unwrap())
     });
-    
+
     // Kalan baytlar (8'in katı olmayan son parça) sıfırla doldurulup XOR'lanır
     if !remainder.is_empty() {
         let mut last = [0u8; 8];
         last[..remainder.len()].copy_from_slice(remainder);
         parity ^= u64::from_le_bytes(last);
     }
-    
+
     parity
 }
 
@@ -669,12 +759,12 @@ fn compute_crc32(data: &[u8]) -> u32 {
     // 8 baytlık bloklar: _mm_crc32_u64 ile tek talimat işlemi
     while i + 8 <= len {
         unsafe {
-            let val = u64::from_le_bytes(data[i..i+8].try_into().unwrap());
+            let val = u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
             crc = _mm_crc32_u64(crc as u64, val) as u32;
         }
         i += 8;
     }
-    
+
     // Kalan baytlar (8'in katı olmayan son parça) tek tek işlenir
     while i < len {
         unsafe {
@@ -682,7 +772,7 @@ fn compute_crc32(data: &[u8]) -> u32 {
         }
         i += 1;
     }
-    
+
     !crc
 }
 
@@ -707,7 +797,11 @@ const CRC_TABLE: [u32; 256] = {
         let mut crc = i as u32;
         let mut j = 0;
         while j < 8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82F63B78 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0x82F63B78
+            } else {
+                crc >> 1
+            };
             j += 1;
         }
         table[i] = crc;
@@ -738,7 +832,7 @@ fn compute_sha256_simple(data: &[u8]) -> [u8; 32] {
     for i in 16..32 {
         hash[i] = hash[i - 8] ^ hash[i - 4] ^ (i as u8);
     }
-    
+
     hash
 }
 
@@ -760,7 +854,7 @@ pub fn seal_init() {
 
     seal_register_region(
         0xFFFF_FFFF_8010_0000,
-        0x0008_0000,           // 512KB syscall işleyici bölgesi
+        0x0008_0000, // 512KB syscall işleyici bölgesi
         "syscall_table",
         0, // Kritik öncelik
     );
@@ -777,16 +871,19 @@ pub fn seal_init() {
             // Kernel alanı güvenli okuma (fiziksel adresten doğrudan erişim)
             let ptr = addr as *const u8;
             let data = unsafe { core::slice::from_raw_parts(ptr, 4096) };
-            
-            integrity.insert(addr, PageIntegrity {
-                parity: compute_parity(data),
-                crc32: compute_crc32(data),
-                last_check: 0,
-                violations: 0,
-            });
+
+            integrity.insert(
+                addr,
+                PageIntegrity {
+                    parity: compute_parity(data),
+                    crc32: compute_crc32(data),
+                    last_check: 0,
+                    violations: 0,
+                },
+            );
         }
     }
-    
+
     SEAL_ENABLED.store(true, Ordering::SeqCst);
     crate::serial_println!("[SEAL] {} pages sealed", integrity.len());
 }
@@ -802,11 +899,11 @@ pub fn seal_guardian_tick(current_tick: u64) {
     if !SEAL_ENABLED.load(Ordering::SeqCst) {
         return;
     }
-    
+
     let regions = SEAL_REGIONS.lock();
     let mut integrity = SEAL_INTEGRITY.lock();
     let sampling_rate = SEAL_SAMPLING_RATE.load(Ordering::SeqCst);
-    
+
     // Olasılıksal örnekleme için rastgele sayı üret
     let rand_val = crate::random::next_u32();
 
@@ -816,8 +913,8 @@ pub fn seal_guardian_tick(current_tick: u64) {
         // Öncelik bazlı örnekleme olasılığı:
         // Kritik (0): her tick kontrol edilir, Yüksek (1): %50, Normal (2): yapılandırılabilir
         let check_prob = match region.priority {
-            0 => 100,  // Her zaman kontrol et
-            1 => 50,   // %50 olasılıkla kontrol et
+            0 => 100,                  // Her zaman kontrol et
+            1 => 50,                   // %50 olasılıkla kontrol et
             _ => sampling_rate as u32, // Yapılandırılabilir örnekleme
         };
 
@@ -845,7 +942,8 @@ pub fn seal_guardian_tick(current_tick: u64) {
 
                         crate::serial_println!(
                             "[SEAL] *** INTEGRITY VIOLATION *** {} @ {:#x}",
-                            region.name, addr
+                            region.name,
+                            addr
                         );
 
                         log_security_event(SecurityEvent::NxViolation);
@@ -894,8 +992,11 @@ pub fn seal_stats() -> SealStats {
     let integrity = SEAL_INTEGRITY.lock();
     let total = integrity.len();
     let violations = integrity.values().map(|p| p.violations).sum();
-    
-    SealStats { total_pages: total, total_violations: violations }
+
+    SealStats {
+        total_pages: total,
+        total_violations: violations,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

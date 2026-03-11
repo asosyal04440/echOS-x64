@@ -161,9 +161,11 @@ impl IrqData {
     /// Set disabled
     pub fn set_disabled(&self, disabled: bool) {
         if disabled {
-            self.state_flags.fetch_or(IRQD_IRQ_DISABLED, Ordering::SeqCst);
+            self.state_flags
+                .fetch_or(IRQD_IRQ_DISABLED, Ordering::SeqCst);
         } else {
-            self.state_flags.fetch_and(!IRQD_IRQ_DISABLED, Ordering::SeqCst);
+            self.state_flags
+                .fetch_and(!IRQD_IRQ_DISABLED, Ordering::SeqCst);
         }
     }
 
@@ -172,16 +174,19 @@ impl IrqData {
         if masked {
             self.state_flags.fetch_or(IRQD_IRQ_MASKED, Ordering::SeqCst);
         } else {
-            self.state_flags.fetch_and(!IRQD_IRQ_MASKED, Ordering::SeqCst);
+            self.state_flags
+                .fetch_and(!IRQD_IRQ_MASKED, Ordering::SeqCst);
         }
     }
 
     /// Set in progress
     pub fn set_in_progress(&self, in_progress: bool) {
         if in_progress {
-            self.state_flags.fetch_or(IRQD_IRQ_INPROGRESS, Ordering::SeqCst);
+            self.state_flags
+                .fetch_or(IRQD_IRQ_INPROGRESS, Ordering::SeqCst);
         } else {
-            self.state_flags.fetch_and(!IRQD_IRQ_INPROGRESS, Ordering::SeqCst);
+            self.state_flags
+                .fetch_and(!IRQD_IRQ_INPROGRESS, Ordering::SeqCst);
         }
     }
 
@@ -193,7 +198,8 @@ impl IrqData {
     /// Set affinity
     pub fn set_affinity(&self, mask: u32) {
         self.affinity.store(mask, Ordering::SeqCst);
-        self.state_flags.fetch_or(IRQD_AFFINITY_SET, Ordering::SeqCst);
+        self.state_flags
+            .fetch_or(IRQD_AFFINITY_SET, Ordering::SeqCst);
     }
 }
 
@@ -494,7 +500,7 @@ pub struct IrqDomainStats {
 }
 
 impl IrqDomainManager {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             domains: Mutex::new(BTreeMap::new()),
             next_domain_id: AtomicU32::new(1),

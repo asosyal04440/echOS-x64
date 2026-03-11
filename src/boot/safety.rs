@@ -20,9 +20,9 @@
 //! kritik hatalar acil durdurma (emergency halt) ile sonuçlanır.
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -178,10 +178,8 @@ impl BootSafetyState {
     /// aşamayı aynı anda görmeli ve sıra bozulmamalıdır.
     pub fn enter_phase(&self, phase: BootPhase) {
         self.current_phase.store(phase as u32, Ordering::SeqCst);
-        self.last_checkpoint.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_checkpoint
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
         crate::serial_println!("[BOOT_SAFETY] Aşamaya girildi: {:?}", phase);
     }
@@ -226,7 +224,9 @@ impl BootSafetyState {
 
         crate::serial_println!(
             "[BOOT_SAFETY] İhlal: {:?} - {} (kurtarıldı: {})",
-            violation_type, message, recovered
+            violation_type,
+            message,
+            recovered
         );
     }
 
@@ -284,7 +284,7 @@ impl HeapSafety {
             BOOT_SAFETY.record_violation(
                 ViolationType::HeapCorruption,
                 "Heap sınırları tersine dönmüş",
-                false
+                false,
             );
         }
 
@@ -293,7 +293,7 @@ impl HeapSafety {
             BOOT_SAFETY.record_violation(
                 ViolationType::HeapCorruption,
                 "Erken heap kapasiteye yakın",
-                true
+                true,
             );
         }
 
@@ -315,7 +315,7 @@ impl HeapSafety {
                     BOOT_SAFETY.record_violation(
                         ViolationType::HeapCorruption,
                         "Geçersiz allocation layout'u",
-                        false
+                        false,
                     );
                     return None;
                 }
@@ -333,7 +333,7 @@ impl HeapSafety {
                     BOOT_SAFETY.record_violation(
                         ViolationType::InvalidPointer,
                         "Allocator geçersiz pointer döndürdü",
-                        false
+                        false,
                     );
 
                     // Bozulma eşiği aşıldı mı?
@@ -377,8 +377,10 @@ impl HeapSafety {
     /// tutarlı hata durumunda kalmasını sağlar.
     fn emergency_halt(reason: &str) {
         crate::serial_println!("[HEAP_SAFETY] ACİL DURDURMA: {}", reason);
-        crate::serial_println!("[HEAP_SAFETY] Bozulma sayısı: {}",
-            BOOT_SAFETY.heap_corruptions.load(Ordering::SeqCst));
+        crate::serial_println!(
+            "[HEAP_SAFETY] Bozulma sayısı: {}",
+            BOOT_SAFETY.heap_corruptions.load(Ordering::SeqCst)
+        );
 
         loop {
             unsafe {
@@ -427,7 +429,7 @@ impl SmpSafety {
             BOOT_SAFETY.record_violation(
                 ViolationType::ApStartupFailed,
                 &format!("CPU {} için ön kontroller başarısız", cpu_id),
-                false
+                false,
             );
             return false;
         }
@@ -436,7 +438,9 @@ impl SmpSafety {
         for attempt in 0..MAX_RETRY_ATTEMPTS {
             crate::serial_println!(
                 "[SMP_SAFETY] AP {} başlatılıyor (deneme {}/{})",
-                cpu_id, attempt + 1, MAX_RETRY_ATTEMPTS
+                cpu_id,
+                attempt + 1,
+                MAX_RETRY_ATTEMPTS
             );
 
             // Gerçek AP başlatma çağrısı
@@ -445,10 +449,7 @@ impl SmpSafety {
             if result {
                 // AP gerçekten çevrimiçi mi? (semaphore/flag tespiti)
                 if Self::verify_ap_online(cpu_id) {
-                    crate::serial_println!(
-                        "[SMP_SAFETY] AP {} başarıyla çevrimiçi",
-                        cpu_id
-                    );
+                    crate::serial_println!("[SMP_SAFETY] AP {} başarıyla çevrimiçi", cpu_id);
                     return true;
                 }
             }
@@ -461,20 +462,19 @@ impl SmpSafety {
         BOOT_SAFETY.smp_failures.fetch_add(1, Ordering::SeqCst);
         BOOT_SAFETY.record_violation(
             ViolationType::ApStartupFailed,
-            &format!("AP {} {} denemeden sonra başlatılamadı", cpu_id, MAX_RETRY_ATTEMPTS),
-            false
+            &format!(
+                "AP {} {} denemeden sonra başlatılamadı",
+                cpu_id, MAX_RETRY_ATTEMPTS
+            ),
+            false,
         );
 
         // CPU'yu bozuk olarak işaretle
-        crate::cpu::smp_state::CPU_STATES.set_state(
-            cpu_id,
-            crate::cpu::smp_state::CpuHotplugState::Broken
-        );
+        crate::cpu::smp_state::CPU_STATES
+            .set_state(cpu_id, crate::cpu::smp_state::CpuHotplugState::Broken);
 
         // Sistem azaltılmış CPU sayısıyla çalışmayı sürdür
-        crate::serial_println!(
-            "[SMP_SAFETY] Azaltılmış CPU sayısıyla devam ediliyor"
-        );
+        crate::serial_println!("[SMP_SAFETY] Azaltılmış CPU sayısıyla devam ediliyor");
         true // Sistemi durdurmadan devam et
     }
 
@@ -488,30 +488,21 @@ impl SmpSafety {
         // CPU durum makinesini kontrol et
         let state = crate::cpu::smp_state::CPU_STATES.get_state(cpu_id);
         if !state.can_start() {
-            crate::serial_println!(
-                "[SMP_SAFETY] CPU {} geçersiz durumda: {:?}",
-                cpu_id, state
-            );
+            crate::serial_println!("[SMP_SAFETY] CPU {} geçersiz durumda: {:?}", cpu_id, state);
             return false;
         }
 
         // Per-CPU verisinin hazır olduğunu kontrol et
         let smp_state = crate::cpu::smp::SMP_STATE.lock();
         if cpu_id as usize >= smp_state.per_cpu_data.len() {
-            crate::serial_println!(
-                "[SMP_SAFETY] CPU {} için per-CPU verisi yok",
-                cpu_id
-            );
+            crate::serial_println!("[SMP_SAFETY] CPU {} için per-CPU verisi yok", cpu_id);
             return false;
         }
 
         // Stack'in tahsis edildiğini kontrol et
         let stack_top = smp_state.per_cpu_data[cpu_id as usize].stack_top;
         if stack_top == 0 {
-            crate::serial_println!(
-                "[SMP_SAFETY] CPU {} için stack tahsis edilmemiş",
-                cpu_id
-            );
+            crate::serial_println!("[SMP_SAFETY] CPU {} için stack tahsis edilmemiş", cpu_id);
             return false;
         }
 
@@ -545,25 +536,23 @@ impl SmpSafety {
     /// CPU'yu "Broken" durumuna alır, beklenen çevrimiçi CPU sayısını günceller
     /// ve ihlali merkezi kayda yazar. Sistem çalışmaya devam eder.
     pub fn handle_bringup_failure(cpu_id: u32, reason: &str) {
-        crate::serial_println!(
-            "[SMP_SAFETY] AP {} başlatma başarısız: {}",
-            cpu_id, reason
-        );
+        crate::serial_println!("[SMP_SAFETY] AP {} başlatma başarısız: {}", cpu_id, reason);
 
         // Durum makinesini güncelle
-        crate::cpu::smp_state::CPU_STATES.set_state(
-            cpu_id,
-            crate::cpu::smp_state::CpuHotplugState::Broken
-        );
+        crate::cpu::smp_state::CPU_STATES
+            .set_state(cpu_id, crate::cpu::smp_state::CpuHotplugState::Broken);
 
         // Beklenen çevrimiçi CPU sayısını azalt
-        crate::cpu::smp::SMP_STATE.lock().online_cpus.fetch_sub(1, Ordering::SeqCst);
+        crate::cpu::smp::SMP_STATE
+            .lock()
+            .online_cpus
+            .fetch_sub(1, Ordering::SeqCst);
 
         // İhlali kaydet (sistem devam eder)
         BOOT_SAFETY.record_violation(
             ViolationType::ApStartupFailed,
             reason,
-            true // Sistem devam etmektedir
+            true, // Sistem devam etmektedir
         );
     }
 }
@@ -595,7 +584,9 @@ impl IdtSafety {
         for attempt in 0..MAX_RETRY_ATTEMPTS {
             crate::serial_println!(
                 "[IDT_SAFETY] CPU {} için IDT başlatılıyor (deneme {}/{})",
-                cpu_id, attempt + 1, MAX_RETRY_ATTEMPTS
+                cpu_id,
+                attempt + 1,
+                MAX_RETRY_ATTEMPTS
             );
 
             // IDT'yi oluştur ve yükle
@@ -623,7 +614,7 @@ impl IdtSafety {
         BOOT_SAFETY.record_violation(
             ViolationType::IdtLoadFailed,
             &format!("CPU {} için IDT başlatma başarısız", cpu_id),
-            false
+            false,
         );
 
         false
@@ -670,8 +661,7 @@ impl IdtSafety {
         // IDTR formatı: [limit: 2 bayt little-endian][taban: 8 bayt little-endian]
         let limit = u16::from_le_bytes([idtr[0], idtr[1]]);
         let base = u64::from_le_bytes([
-            idtr[2], idtr[3], idtr[4], idtr[5],
-            idtr[6], idtr[7], idtr[8], idtr[9]
+            idtr[2], idtr[3], idtr[4], idtr[5], idtr[6], idtr[7], idtr[8], idtr[9],
         ]);
 
         // IDT en az 32 girdi içermelidir (her girdi 16 bayt)
@@ -720,7 +710,7 @@ impl GopSafety {
             BOOT_SAFETY.record_violation(
                 ViolationType::GopInitFailed,
                 "Geçersiz framebuffer",
-                true
+                true,
             );
             return Self::try_text_mode();
         }
@@ -795,10 +785,9 @@ impl BootWatchdog {
     ///
     /// `boot_start_time` mevcut tik sayısıyla ayarlanır.
     pub fn start() {
-        BOOT_SAFETY.boot_start_time.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        BOOT_SAFETY
+            .boot_start_time
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
         crate::serial_println!("[BOOT_WATCHDOG] Başlatıldı");
     }
@@ -824,8 +813,11 @@ impl BootWatchdog {
         if current_time.saturating_sub(last_checkpoint as usize) > phase_timeout {
             BOOT_SAFETY.record_violation(
                 ViolationType::Timeout,
-                &format!("Aşama {:?} zaman aşımı", BootPhase::try_from(current_phase as u8)),
-                false
+                &format!(
+                    "Aşama {:?} zaman aşımı",
+                    BootPhase::try_from(current_phase as u8)
+                ),
+                false,
             );
 
             // Aşamaya göre kurtarma girişimi
@@ -851,8 +843,10 @@ impl BootWatchdog {
                 crate::serial_println!("[BOOT_WATCHDOG] Başarısız sürücü atlanıyor");
             }
             _ => {
-                crate::serial_println!("[BOOT_WATCHDOG] {:?} aşamasından kurtarılamıyor",
-                    BootPhase::try_from(phase as u8));
+                crate::serial_println!(
+                    "[BOOT_WATCHDOG] {:?} aşamasından kurtarılamıyor",
+                    BootPhase::try_from(phase as u8)
+                );
             }
         }
 
@@ -870,7 +864,12 @@ impl BootWatchdog {
         crate::serial_println!(
             "[BOOT_WATCHDOG] Boot tamamlandı - {} ihlal, {} kurtarıldı",
             BOOT_SAFETY.violation_count(),
-            BOOT_SAFETY.violations.lock().iter().filter(|v| v.recovered).count()
+            BOOT_SAFETY
+                .violations
+                .lock()
+                .iter()
+                .filter(|v| v.recovered)
+                .count()
         );
     }
 }

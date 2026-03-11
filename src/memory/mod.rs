@@ -149,12 +149,100 @@ use x86_64::structures::paging::{
 };
 use x86_64::{PhysAddr, VirtAddr};
 
+/// cgroups v2 bellek denetleyicisi — limit, soft limit, swap limit
+pub mod cgroup;
+/// Erken önyükleme için doğrudan 2MB huge-page kurulumu (kaynak: pagging.rs)
+#[path = "pagging.rs"]
+pub mod early_paging;
 pub mod fibonacci_buddy;
 pub mod fibonacci_pmm;
 pub mod frame_allocator;
+/// Opsiyonel KASAN benzeri gölge bellek doğrulaması (debug)
+pub mod kasan;
+/// memfd_create — güvenli anonim bellek dosyaları
+pub mod memfd;
+pub mod damon;
+/// Multi-Gen LRU (MGLRU) — sıcak/soğuk nesil tabanlı reclaim sinyali
+pub mod mglru;
 pub mod oom;
 pub mod paging;
 pub mod pmm;
+/// Pressure Stall Information (PSI) — bellek baskısı telemetrisi
+pub mod psi;
+/// Şeffaf büyük sayfa (Transparent Huge Pages) — 4K→2M collapse/split
+pub mod thp;
+/// Bellek sıkıştırma ve swap: ZSwap/ZRam, LZ4/ZSTD
+pub mod zswap;
+
+// ============================================================================
+// BELLEK İSTATİSTİKLERİ — procfs ve shell için
+// ============================================================================
+
+/// Bellek istatistik bilgisi yapısı — /proc/meminfo ve shell `info mem` komutu tarafından kullanılır
+pub struct MemoryStats {
+    pub total_kb: usize,
+    pub free_kb: usize,
+    pub available_kb: usize,
+    pub buffers_kb: usize,
+    pub cached_kb: usize,
+    pub swap_cached_kb: usize,
+    pub active_kb: usize,
+    pub inactive_kb: usize,
+    pub swap_total_kb: usize,
+    pub swap_free_kb: usize,
+    pub slab_kb: usize,
+    pub page_tables_kb: usize,
+}
+
+/// Çekirdek heap boyutu (başlangıç adresi allocator'dan alınır)
+pub const KERNEL_HEAP_BASE: u64 = crate::allocator::HEAP_START as u64;
+/// Çekirdek heap boyutu (byte)
+pub const KERNEL_HEAP_SIZE: usize = crate::allocator::HEAP_SIZE;
+
+/// Bellek istatistikleri döndürür.
+/// PMM'den gerçek fiziksel bellek istatistiklerini alır.
+/// LRU, ZSwap ve heap verilerini birleştirir.
+pub fn get_memory_stats() -> MemoryStats {
+    let heap_kb = KERNEL_HEAP_SIZE / 1024;
+    let page_size_kb = PAGE_SIZE / 1024;
+
+    // PMM'den gerçek frame sayılarını al
+    let total_frames = memory_total_frames();
+    let free_frames = memory_free_frames();
+
+    let total_kb = if total_frames > 0 {
+        total_frames * page_size_kb
+    } else {
+        512 * 1024 // PMM henüz init olmadıysa fallback
+    };
+    let free_kb = free_frames * page_size_kb;
+
+    // LRU istatistikleri
+    let (active_pages, inactive_pages) = {
+        let lru = LRU.lock();
+        (lru.active_by_seq.len(), lru.inactive_by_seq.len())
+    };
+
+    // ZSwap istatistikleri
+    let zswap_stats = zswap::ZSWAP_MANAGER.get_stats();
+    let swap_cached_kb = zswap_stats.stored_pages as usize * page_size_kb;
+    let zswap_pool_kb = (zswap_stats.pool_total_size as usize) / 1024;
+
+    MemoryStats {
+        total_kb,
+        free_kb,
+        available_kb: free_kb.saturating_add(inactive_pages * page_size_kb),
+        buffers_kb: 0,
+        cached_kb: (active_pages + inactive_pages) * page_size_kb,
+        swap_cached_kb,
+        active_kb: active_pages * page_size_kb,
+        inactive_kb: inactive_pages * page_size_kb,
+        swap_total_kb: zswap_pool_kb,
+        swap_free_kb: zswap_pool_kb.saturating_sub(swap_cached_kb),
+        slab_kb: heap_kb / 8,
+        page_tables_kb: 1024,
+    }
+}
 
 // ============================================================================
 // MEMORY MANAGER
@@ -198,7 +286,14 @@ impl MemoryManager {
     }
 
     pub fn deallocate_contiguous_frames(&mut self, start: PhysFrame, pages: usize) {
-        self.pmm.deallocate_contiguous(start, pages)
+        self.pmm.deallocate_contiguous(start, pages);
+        // Cgroup bellek muhasebesi: serbest bırakılan frame'leri uncharge et
+        let pid = crate::task::scheduler::current_task_id() as u64;
+        if let Some(cg_id) = cgroup::CGROUP_MANAGER.get_cgroup_for_process(pid) {
+            if let Some(cg) = cgroup::CGROUP_MANAGER.get_cgroup(cg_id) {
+                cg.uncharge((pages * PAGE_SIZE) as u64);
+            }
+        }
     }
 
     pub fn total_frames(&self) -> usize {
@@ -214,29 +309,94 @@ impl MemoryManager {
 /// Scheduler ve paging sistemi için gerekli.
 unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        if should_reclaim_now() {
+        // İleri düzey hook'lar (reclaim, cgroup, OOM) yalnızca alt sistemler hazır olduğunda çalışır.
+        // Boot sırasında bu yollar UB (aliased &mut) ve hazır olmayan alt sistemlere erişim yapar.
+        let hooks_ready = ALLOC_HOOKS_READY.load(Ordering::Relaxed);
+        let stall_start = if hooks_ready {
+            crate::task::scheduler::get_ticks() as u64
+        } else {
+            0
+        };
+
+        if hooks_ready && should_reclaim_now() {
             reclaim_pages_global(64);
             process_writeback_budget(8);
         }
         if let Some(frame) = self.pmm.allocate_frame() {
+            // Cgroup bellek muhasebesi: alloc edilen frame'i mevcut task'ın cgroup'una yükle
+            if hooks_ready {
+                let pid = crate::task::scheduler::current_task_id() as u64;
+                if let Some(cg_id) = cgroup::CGROUP_MANAGER.get_cgroup_for_process(pid) {
+                    if let Some(cg) = cgroup::CGROUP_MANAGER.get_cgroup(cg_id) {
+                        let _ = cg.charge(PAGE_SIZE as u64);
+                    }
+                }
+            }
+            if hooks_ready {
+                let now = crate::task::scheduler::get_ticks() as u64;
+                let elapsed = now.saturating_sub(stall_start);
+                if elapsed > 0 {
+                    psi::record_memory_stall(0, elapsed, false);
+                }
+            }
             return Some(frame);
         }
         // Geri kazanım denemesi
-        if reclaim_pages(16) > 0 {
+        if hooks_ready {
+            psi::record_memory_stall(1, 1, false);
+        }
+        if hooks_ready && reclaim_pages(16) > 0 {
             if let Some(frame) = self.pmm.allocate_frame() {
+                let now = crate::task::scheduler::get_ticks() as u64;
+                let elapsed = now.saturating_sub(stall_start).max(1);
+                psi::record_memory_stall(elapsed.min(4), elapsed, false);
                 return Some(frame);
             }
         }
-        
+
         // OOM Killer: Bellek hala yoksa process öldür
-        if oom::should_trigger_oom(self.free_frames(), self.total_frames()) {
-            crate::serial_println!("[MEM] OOM triggered - free: {} / total: {}", 
-                self.free_frames(), self.total_frames());
-            // OOM killer'ı tetikle (gerçek implementation task listesi ile)
-            // Şimdilik loglama yap, gerçek kill task manager entegrasyonu gerektirir
-            oom::oom_kill(&[]);
+        if hooks_ready && oom::should_trigger_oom(self.free_frames(), self.total_frames()) {
+            crate::serial_println!(
+                "[MEM] OOM triggered - free: {} / total: {}",
+                self.free_frames(),
+                self.total_frames()
+            );
+
+            // ZSwap writeback dene — OOM öncesi son kurtarma
+            let _ = zswap::ZSWAP_MANAGER.writeback_lru();
+            if let Some(frame) = self.pmm.allocate_frame() {
+                let now = crate::task::scheduler::get_ticks() as u64;
+                let elapsed = now.saturating_sub(stall_start).max(1);
+                psi::record_memory_stall(elapsed.min(8), elapsed, false);
+                return Some(frame);
+            }
+            let now = crate::task::scheduler::get_ticks() as u64;
+            let elapsed = now.saturating_sub(stall_start).max(1);
+            psi::record_memory_stall(elapsed, elapsed, true);
+
+            // Scheduler'dan gerçek task listesi al
+            let tasks = crate::task::scheduler::list_tasks();
+            let oom_infos: alloc::vec::Vec<oom::OomProcessInfo> = tasks
+                .iter()
+                .map(|t| {
+                    oom::OomProcessInfo {
+                        pid: t.pid,
+                        name: alloc::string::String::from(t.name),
+                        rss_pages: 256, // Tahmini — gerçek RSS için VMA tracking gerekir
+                        swap_pages: 0,
+                        oom_score_adj: 0,
+                        nice: 0,
+                        runtime_ticks: 0,
+                        is_kernel: t.pid < 2,
+                        is_root: false,
+                        children: 0,
+                        cpu_percent: 0,
+                    }
+                })
+                .collect();
+            oom::oom_kill(&oom_infos);
         }
-        
+
         None
     }
 }
@@ -248,6 +408,35 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
 /// Bellek yöneticisini başlatır.
 pub fn init_uefi(memory_map: MemoryMap<'static>) -> MemoryManager {
     MemoryManager::new(memory_map)
+}
+
+/// Tüm bellek alt sistemlerini başlatır.
+/// PMM init'ten sonra çağrılmalıdır.
+/// OOM, THP, Cgroup, Memfd, ZSwap alt modüllerini devreye sokar.
+pub fn init_memory_subsystems() {
+    oom::init();
+    psi::init(true);
+    damon::init(true);
+    mglru::init(true);
+    #[cfg(debug_assertions)]
+    kasan::init(true);
+    #[cfg(not(debug_assertions))]
+    kasan::init(false);
+    thp::THP_MANAGER.compact_for_thp(); // THP yapısını zorla lazy_static init et
+    cgroup::init();
+    memfd::init();
+
+    // ZSwap'ı toplam bellek bilgisi ile başlat
+    let total_mem = memory_total_frames() as u64 * PAGE_SIZE as u64;
+    zswap::ZSWAP_MANAGER.set_enabled(true);
+
+    // Artık allocate_frame hook'ları güvenle çalışabilir
+    ALLOC_HOOKS_READY.store(true, Ordering::Release);
+
+    crate::serial_println!(
+        "[MEM] Memory subsystems initialized (total: {} MB)",
+        total_mem / (1024 * 1024)
+    );
 }
 
 /// Global bellek yöneticisi için ham pointer.
@@ -318,6 +507,11 @@ pub const USER_MMAP_RANDOM_RANGE: u64 = 256 * 1024 * 1024;
 pub const USER_STACK_RANDOM_RANGE: u64 = 128 * 1024 * 1024;
 static mut ACTIVE_PHYSICAL_MEMORY_OFFSET: u64 = PHYSICAL_MEMORY_OFFSET;
 static KASLR_OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+/// Bellek alt sistemleri (reclaim, cgroup, OOM) hazır olduğunda true.
+/// allocate_frame içindeki ileri düzey hook'lar bu bayrak true olmadan çalışmaz.
+static ALLOC_HOOKS_READY: AtomicBool = AtomicBool::new(false);
+
 const RECLAIM_HIGH_DIV: usize = 5;
 const RECLAIM_LOW_DIV: usize = 10;
 const RECLAIM_MIN_HIGH: usize = 128;
@@ -532,6 +726,9 @@ impl LruState {
     fn record_refault(&mut self, space_id: u64, page_index: u64) {
         let seq = self.next_seq;
         self.refaults.insert((space_id, page_index), seq);
+        let now_tick = crate::task::scheduler::get_ticks() as u64;
+        mglru::record_refault(space_id, page_index, now_tick);
+        damon::record_refault(space_id, page_index, now_tick);
     }
 
     fn pop_matching(
@@ -1018,10 +1215,29 @@ fn register_lru_mapping(addr: u64, phys: u64, region: &Vma) {
         node_id: node_id_for_phys(phys),
         backing,
     };
+    let accessed = page_table_flags(page_start)
+        .map(|flags| flags.contains(PageTableFlags::ACCESSED))
+        .unwrap_or(false);
+    mglru::record_page_access(
+        entry.space_id,
+        entry.page_index,
+        entry.node_id,
+        accessed,
+        crate::task::scheduler::get_ticks() as u64,
+    );
+    damon::record_page_access(
+        entry.space_id,
+        entry.page_index,
+        entry.node_id,
+        accessed,
+        crate::task::scheduler::get_ticks() as u64,
+    );
     LRU.lock().touch(entry);
 }
 
 fn remove_lru_mapping(space_id: u64, page_index: u64) {
+    mglru::remove_page(space_id, page_index);
+    damon::remove_page(space_id, page_index);
     LRU.lock().remove_page(space_id, page_index);
 }
 
@@ -1042,29 +1258,32 @@ fn swap_remove_page(space_id: u64, page_index: u64) {
 }
 
 fn swap_store_page(space_id: u64, page_index: u64, data: Vec<u8>) -> bool {
+    // Önce ZSwap'a yaz (sıkıştırılmış RAM önbelleği)
+    let offset = (space_id << 32) | page_index;
+    if zswap::ZSWAP_MANAGER.store(offset, &data).is_ok() {
+        return true;
+    }
+    // ZSwap başarısız → disk swap dene
     if let Some(device) = SWAP_DEVICE.lock().as_mut() {
         if device.store(space_id, page_index, &data) {
             return true;
         }
     }
+    // Son çare: bellek içi swap hashmap
     SWAP.lock().insert(space_id, page_index, data);
     true
 }
 
 fn memory_total_frames() -> usize {
-    unsafe {
-        global_memory_manager_mut()
-            .map(|manager| manager.total_frames())
-            .unwrap_or(0)
-    }
+    global_memory_manager()
+        .map(|manager| manager.total_frames())
+        .unwrap_or(0)
 }
 
 fn memory_free_frames() -> usize {
-    unsafe {
-        global_memory_manager_mut()
-            .map(|manager| manager.free_frames())
-            .unwrap_or(0)
-    }
+    global_memory_manager()
+        .map(|manager| manager.free_frames())
+        .unwrap_or(0)
 }
 
 fn memory_watermarks() -> (usize, usize) {
@@ -2117,6 +2336,10 @@ pub fn start_reclaim_daemon() {
 
 fn memory_reclaim_daemon() -> ! {
     loop {
+        let now = crate::task::scheduler::get_ticks() as u64;
+        damon::age(now);
+        mglru::age_generations(now);
+        let _ = thp::khugepaged_scan_once(8);
         if should_reclaim_background() {
             reclaim_pages_global(KSWAPD_RECLAIM_BATCH);
             process_writeback_budget(WRITEBACK_BUDGET_FAST);
@@ -2130,18 +2353,43 @@ fn memory_reclaim_daemon() -> ! {
 
 fn reclaim_pages_scoped(target: usize, global: bool) -> usize {
     let mut freed = 0;
+    let mut scan_budget = target.saturating_mul(6).max(8);
     let space_id = current_space_id();
     let node_hint = Some(current_numa_node());
-    while freed < target {
+    while freed < target && scan_budget > 0 {
+        scan_budget = scan_budget.saturating_sub(1);
+        let now_tick = crate::task::scheduler::get_ticks() as u64;
+        let pressure = psi::snapshot();
+        let pressure_critical = pressure.some_avg10 >= 700 || pressure.full_avg10 >= 350;
         let class_hint = if global {
             reclaim_class_global()
         } else {
             reclaim_class_for_space(space_id)
         };
-        let entry = LRU.lock().pop_oldest_balanced(
-            class_hint,
+        let damon_victim = damon::pick_victim(
             if global { None } else { Some(space_id) },
             node_hint,
+            now_tick,
+        );
+        let mg_victim = mglru::pick_victim(
+            if global { None } else { Some(space_id) },
+            node_hint,
+        );
+        let space_hint = if global {
+            damon_victim
+                .map(|v| v.key.space_id)
+                .or_else(|| mg_victim.map(|v| v.key.space_id))
+        } else {
+            Some(space_id)
+        };
+        let node_select = damon_victim
+            .map(|v| v.node_id)
+            .or_else(|| mg_victim.map(|v| v.node_id))
+            .or(node_hint);
+        let entry = LRU.lock().pop_oldest_balanced(
+            class_hint,
+            space_hint,
+            node_select,
         );
         let Some(entry) = entry else {
             break;
@@ -2149,6 +2397,17 @@ fn reclaim_pages_scoped(target: usize, global: bool) -> usize {
         if !global && entry.space_id != space_id {
             LRU.lock().touch(entry);
             break;
+        }
+        if let Some(hint) = damon::hint_for_page(entry.space_id, entry.page_index, now_tick) {
+            let preserve_hot = matches!(hint.temperature, damon::DamonTemperature::Hot)
+                && !pressure_critical;
+            let preserve_warm = matches!(hint.temperature, damon::DamonTemperature::Warm)
+                && pressure.full_avg10 < 200
+                && scan_budget > 0;
+            if preserve_hot || preserve_warm {
+                LRU.lock().touch(entry);
+                continue;
+            }
         }
         let page_mask = !(PAGE_SIZE as u64 - 1);
         let virt = entry.virt & page_mask;
@@ -2272,12 +2531,14 @@ fn reclaim_pages_scoped(target: usize, global: bool) -> usize {
             }
             deallocate_contiguous_frames(frame, 1);
         }
+        damon::record_eviction(entry.space_id, entry.page_index);
+        mglru::record_eviction(entry.space_id, entry.page_index);
         freed = freed.saturating_add(1);
     }
     freed
 }
 
-fn reclaim_pages(target: usize) -> usize {
+pub fn reclaim_pages(target: usize) -> usize {
     reclaim_pages_scoped(target, false)
 }
 
@@ -3186,17 +3447,15 @@ pub fn allocate_contiguous_frames(pages: usize) -> Option<PhysFrame> {
 pub fn alloc_phys(size: usize) -> Option<u64> {
     let page_size = 4096;
     let pages = (size + page_size - 1) / page_size;
-    
-    allocate_contiguous_frames(pages).map(|frame| {
-        frame.start_address().as_u64()
-    })
+
+    allocate_contiguous_frames(pages).map(|frame| frame.start_address().as_u64())
 }
 
 /// alloc_phys tarafından tahsis edilen ardışık fiziksel belleği serbest bırakır
 pub fn free_phys(phys_addr: u64, size: usize) {
     let page_size = 4096;
     let pages = (size + page_size - 1) / page_size;
-    
+
     // Adresten PhysFrame oluştur
     let frame = PhysFrame::containing_address(x86_64::addr::PhysAddr::new(phys_addr));
     deallocate_contiguous_frames(frame, pages);
@@ -3303,6 +3562,7 @@ fn is_kernel_range(start: u64, len: u64) -> bool {
     start >= KERNEL_SPACE_START && end >= KERNEL_SPACE_START && !is_user_range(start, len)
 }
 
+#[cfg(any(target_os = "none", target_os = "uefi"))]
 pub fn dma_alloc(pages: usize) -> Option<(usize, NonNull<u8>)> {
     if pages == 0 {
         return None;
@@ -3330,6 +3590,7 @@ pub fn dma_alloc(pages: usize) -> Option<(usize, NonNull<u8>)> {
     Some((paddr, vaddr))
 }
 
+#[cfg(any(target_os = "none", target_os = "uefi"))]
 pub fn dma_dealloc(paddr: usize, pages: usize) {
     if paddr == 0 || pages == 0 {
         return;
@@ -3343,6 +3604,46 @@ pub fn dma_dealloc(paddr: usize, pages: usize) {
     }
     let frame = PhysFrame::containing_address(PhysAddr::new(paddr as u64));
     deallocate_contiguous_frames(frame, pages);
+}
+
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+pub fn dma_alloc(pages: usize) -> Option<(usize, NonNull<u8>)> {
+    if pages == 0 {
+        return None;
+    }
+    let len = pages.saturating_mul(PAGE_SIZE);
+    let layout = core::alloc::Layout::from_size_align(len, PAGE_SIZE).ok()?;
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    let vaddr = NonNull::new(ptr)?;
+    let mapping = DmaMapping {
+        vaddr: vaddr.as_ptr() as usize,
+        paddr: vaddr.as_ptr() as usize,
+        len,
+        owned: true,
+    };
+    if !insert_dma_mapping(mapping) {
+        unsafe { std::alloc::dealloc(vaddr.as_ptr(), layout) };
+        return None;
+    }
+    Some((vaddr.as_ptr() as usize, vaddr))
+}
+
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+pub fn dma_dealloc(paddr: usize, pages: usize) {
+    if paddr == 0 || pages == 0 {
+        return;
+    }
+    let len = pages.saturating_mul(PAGE_SIZE);
+    let Some(entry) = remove_dma_mapping(paddr) else {
+        return;
+    };
+    if !entry.owned {
+        let _ = insert_dma_mapping(entry);
+        return;
+    }
+    if let Ok(layout) = core::alloc::Layout::from_size_align(len, PAGE_SIZE) {
+        unsafe { std::alloc::dealloc(entry.vaddr as *mut u8, layout) };
+    }
 }
 
 pub fn dma_share(buffer: NonNull<[u8]>) -> Option<usize> {
@@ -3679,7 +3980,8 @@ pub fn map_physical_to_user_va(va: u64, phys: u64, flags: PageTableFlags) -> boo
     let phys_base = level_4_frame.start_address();
     let virt_base = VirtAddr::new(active_physical_offset() + phys_base.as_u64());
     let table = unsafe { &mut *(virt_base.as_mut_ptr()) };
-    let mut mapper = unsafe { OffsetPageTable::new(table, VirtAddr::new(active_physical_offset())) };
+    let mut mapper =
+        unsafe { OffsetPageTable::new(table, VirtAddr::new(active_physical_offset())) };
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
     let frame = PhysFrame::containing_address(x86_64::addr::PhysAddr::new(phys));
     let map_flags = (flags | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
@@ -3690,7 +3992,10 @@ pub fn map_physical_to_user_va(va: u64, phys: u64, flags: PageTableFlags) -> boo
         mapper.map_to_with_table_flags(page, frame, map_flags, table_flags, frame_allocator)
     });
     match result {
-        Ok(flush) => { flush.flush(); true }
+        Ok(flush) => {
+            flush.flush();
+            true
+        }
         Err(MapToError::PageAlreadyMapped(_)) => false,
         Err(_) => false,
     }
@@ -4324,6 +4629,23 @@ pub enum UefiHhdmError {
     Map2M(MapToError<Size2MiB>),
 }
 
+/// HHDM init sırasında identity-mapped bölgeden (< 4GB) frame tahsis eden wrapper.
+/// OffsetPageTable offset=0 ile çalışırken, UEFI firmware yalnızca < 4GB'ı identity-map eder.
+/// Page table frame'leri bu bölgeden alınmalıdır, aksi takdirde page fault oluşur.
+#[cfg(target_os = "uefi")]
+struct Dma32FrameAllocator<'a> {
+    inner: &'a mut MemoryManager,
+}
+
+#[cfg(target_os = "uefi")]
+unsafe impl FrameAllocator<Size4KiB> for Dma32FrameAllocator<'_> {
+    fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        self.inner
+            .pmm
+            .allocate_from_zone(fibonacci_pmm::MemoryZone::Dma32)
+    }
+}
+
 #[cfg(target_os = "uefi")]
 pub fn init_uefi_hhdm(
     mapper: &mut (impl MapperAllSizes + Translate),
@@ -4340,6 +4662,7 @@ pub fn init_uefi_hhdm(
         }
     }
     let descriptors: Vec<MemoryDescriptor> = frame_allocator.get_memory_map().map(|d| *d).collect();
+    let mut map_count: usize = 0;
     for desc in descriptors.iter() {
         let ty = desc.ty;
         let is_runtime = desc.att.contains(MemoryAttribute::RUNTIME);
@@ -4374,8 +4697,65 @@ pub fn init_uefi_hhdm(
             continue;
         }
         let end = start.saturating_add(size);
-        map_hhdm_range_uefi(mapper, frame_allocator, start, end, hhdm_offset, flags)?;
+        {
+            let mut dma32_alloc = Dma32FrameAllocator {
+                inner: frame_allocator,
+            };
+            map_hhdm_range_uefi(mapper, &mut dma32_alloc, start, end, hhdm_offset, flags)?;
+        }
+        map_count += 1;
     }
+    crate::serial_println!("[HHDM] {} regions + device MMIO mapped", map_count);
+
+    // PCI MMIO hole (DF800000-100000000) bölgesindeki cihaz MMIO alanlarını HHDM'e ekle.
+    // UEFI memory map bu bölgeyi içermez ama Local APIC, IOAPIC, HPET gibi cihazlar
+    // bu aralıkta MMIO register'lara sahiptir. HHDM offset aktif olduktan sonra
+    // tüm fiziksel erişimler hhdm_offset + phys üzerinden yapılacağından
+    // bu bölgelerin de haritalanması zorunludur.
+    let device_mmio_regions: [(u64, u64, &str); 3] = [
+        (0xFEC0_0000, 0x1000, "IOAPIC"), // I/O APIC
+        (0xFED0_0000, 0x1000, "HPET"),   // HPET Timer
+        (0xFEE0_0000, 0x1000, "LAPIC"),  // Local APIC MMIO
+    ];
+    let mmio_flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE
+        | PageTableFlags::NO_CACHE
+        | PageTableFlags::WRITE_THROUGH;
+    for (phys_base, size, name) in &device_mmio_regions {
+        let mut dma32_alloc = Dma32FrameAllocator {
+            inner: frame_allocator,
+        };
+        let mut cur = *phys_base;
+        let region_end = phys_base + size;
+        while cur < region_end {
+            let virt = VirtAddr::new(hhdm_offset + cur);
+            let phys = PhysAddr::new(cur);
+            let page = Page::<Size4KiB>::containing_address(virt);
+            let frame = PhysFrame::<Size4KiB>::containing_address(phys);
+            match unsafe { mapper.map_to(page, frame, mmio_flags, &mut dma32_alloc) } {
+                Ok(flush) => flush.flush(),
+                Err(MapToError::PageAlreadyMapped(_)) => {}
+                Err(MapToError::ParentEntryHugePage) => {
+                    // Huge page varsa split et
+                    let p = Page::<Size4KiB>::containing_address(virt);
+                    if !split_huge_page(mapper, &mut dma32_alloc, p, mmio_flags) {
+                        crate::serial_println!("[HHDM] WARN: {} split failed at {:#x}", name, cur);
+                    }
+                }
+                Err(e) => {
+                    crate::serial_println!(
+                        "[HHDM] WARN: {} map failed at {:#x}: {:?}",
+                        name,
+                        cur,
+                        e
+                    );
+                }
+            }
+            cur += Size4KiB::SIZE;
+        }
+    }
+
     if old_cr0.contains(Cr0Flags::WRITE_PROTECT) {
         unsafe {
             Cr0::write(old_cr0);
@@ -4385,14 +4765,17 @@ pub fn init_uefi_hhdm(
 }
 
 #[cfg(target_os = "uefi")]
-fn map_hhdm_range_uefi(
+fn map_hhdm_range_uefi<A>(
     mapper: &mut (impl MapperAllSizes + Translate),
-    frame_allocator: &mut MemoryManager,
+    frame_allocator: &mut A,
     start: u64,
     end: u64,
     hhdm_offset: u64,
     flags: PageTableFlags,
-) -> Result<(), UefiHhdmError> {
+) -> Result<(), UefiHhdmError>
+where
+    A: FrameAllocator<Size4KiB>,
+{
     let mut current = start;
     let huge_size = Size2MiB::SIZE;
     let page_size = Size4KiB::SIZE;

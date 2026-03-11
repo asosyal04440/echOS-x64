@@ -50,10 +50,10 @@
 //! - **Geri alma**: `enable_module()` — yalnızca seviye kaynaklı devre dışı bırakmalar geri alınır
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 use super::severity::RecoveryLevel;
@@ -94,92 +94,122 @@ impl DegradationManager {
             enabled: AtomicBool::new(true),
         }
     }
-    
+
     /// Bilinen modülleri kayıt ederek başlatır
     pub fn init(&self) {
         let mut modules = self.modules.lock();
-        
+
         // Çekirdek modüller (devre dışı bırakılamaz)
-        modules.insert(String::from("memory"), ModuleState {
-            name: String::from("memory"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
-        modules.insert(String::from("cpu"), ModuleState {
-            name: String::from("cpu"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
-        modules.insert(String::from("scheduler"), ModuleState {
-            name: String::from("scheduler"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
-        modules.insert(String::from("interrupts"), ModuleState {
-            name: String::from("interrupts"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
-        
+        modules.insert(
+            String::from("memory"),
+            ModuleState {
+                name: String::from("memory"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
+        modules.insert(
+            String::from("cpu"),
+            ModuleState {
+                name: String::from("cpu"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
+        modules.insert(
+            String::from("scheduler"),
+            ModuleState {
+                name: String::from("scheduler"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
+        modules.insert(
+            String::from("interrupts"),
+            ModuleState {
+                name: String::from("interrupts"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
+
         // Kritik olmayan modüller (devre dışı bırakılabilir)
-        modules.insert(String::from("audio"), ModuleState {
-            name: String::from("audio"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
-        modules.insert(String::from("bluetooth"), ModuleState {
-            name: String::from("bluetooth"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
-        modules.insert(String::from("gui"), ModuleState {
-            name: String::from("gui"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
-        modules.insert(String::from("network"), ModuleState {
-            name: String::from("network"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
-        modules.insert(String::from("usb"), ModuleState {
-            name: String::from("usb"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
-        modules.insert(String::from("fs_write"), ModuleState {
-            name: String::from("fs_write"),
-            enabled: true,
-            degraded: false,
-            fallback_active: false,
-            disable_reason: None,
-        });
+        modules.insert(
+            String::from("audio"),
+            ModuleState {
+                name: String::from("audio"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
+        modules.insert(
+            String::from("bluetooth"),
+            ModuleState {
+                name: String::from("bluetooth"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
+        modules.insert(
+            String::from("gui"),
+            ModuleState {
+                name: String::from("gui"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
+        modules.insert(
+            String::from("network"),
+            ModuleState {
+                name: String::from("network"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
+        modules.insert(
+            String::from("usb"),
+            ModuleState {
+                name: String::from("usb"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
+        modules.insert(
+            String::from("fs_write"),
+            ModuleState {
+                name: String::from("fs_write"),
+                enabled: true,
+                degraded: false,
+                fallback_active: false,
+                disable_reason: None,
+            },
+        );
     }
-    
+
     /// Bozunma seviyesini ayarlar ve ilgili modüllere uygular
     pub fn set_level(&self, level: RecoveryLevel) {
         self.level.store(level as u32, Ordering::SeqCst);
         self.apply_level(level);
     }
-    
+
     /// Bozunma seviyesini modüllere uygular — etkilenen modülleri devre dışı bırakır/etkinleştirir
     ///
     /// Mantık:
@@ -189,7 +219,7 @@ impl DegradationManager {
     ///     (Manuel kapatmalar bu şekilde yanlışlıkla açılmaz.)
     fn apply_level(&self, level: RecoveryLevel) {
         let disabled = level.disabled_modules();
-        
+
         let mut modules = self.modules.lock();
         for (name, state) in modules.iter_mut() {
             if disabled.contains(&name.as_str()) {
@@ -199,7 +229,12 @@ impl DegradationManager {
                     crate::serial_println!("[DEGRADATION] Disabled module: {}", name);
                 }
             } else {
-                if !state.enabled && state.disable_reason.as_ref().map_or(false, |r| r.starts_with("Degradation level")) {
+                if !state.enabled
+                    && state
+                        .disable_reason
+                        .as_ref()
+                        .map_or(false, |r| r.starts_with("Degradation level"))
+                {
                     state.enabled = true;
                     state.disable_reason = None;
                     crate::serial_println!("[DEGRADATION] Re-enabled module: {}", name);
@@ -207,7 +242,7 @@ impl DegradationManager {
             }
         }
     }
-    
+
     /// Belirli bir modülü devre dışı bırakır
     pub fn disable_module(&self, name: &str, reason: &str) -> bool {
         let mut modules = self.modules.lock();
@@ -221,7 +256,7 @@ impl DegradationManager {
         }
         false
     }
-    
+
     /// Belirli bir modülü etkinleştirir
     pub fn enable_module(&self, name: &str) -> bool {
         let mut modules = self.modules.lock();
@@ -235,25 +270,26 @@ impl DegradationManager {
         }
         false
     }
-    
+
     /// Belirtilen modülün etkin olup olmadığını kontrol eder
     pub fn is_enabled(&self, name: &str) -> bool {
-        self.modules.lock()
+        self.modules
+            .lock()
             .get(name)
             .map(|s| s.enabled)
             .unwrap_or(true)
     }
-    
+
     /// Mevcut bozunma seviyesini döndürür
     pub fn current_level(&self) -> RecoveryLevel {
         RecoveryLevel::from(self.level.load(Ordering::SeqCst))
     }
-    
+
     /// Tüm modül durumlarını döndürür
     pub fn module_states(&self) -> Vec<ModuleState> {
         self.modules.lock().values().cloned().collect()
     }
-    
+
     /// Bozunma seviyesini bir kademe artırır
     pub fn increase_level(&self) {
         let current = self.current_level();
@@ -265,7 +301,7 @@ impl DegradationManager {
         };
         self.set_level(new_level);
     }
-    
+
     /// Bozunma seviyesini bir kademe azaltır
     pub fn decrease_level(&self) {
         let current = self.current_level();

@@ -41,9 +41,9 @@
 //! Her kurtarma modülü bağımsızdır; birbirini çağırmaz.
 //! Bu tasarım, kurtarma sırasında zincirleme hataları önler.
 
-pub mod memory;
 pub mod driver;
 pub mod fs;
+pub mod memory;
 pub mod network;
 
 use core::sync::atomic::{AtomicBool, Ordering};

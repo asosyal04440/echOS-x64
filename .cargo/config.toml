@@ -9,14 +9,36 @@
 # VARSAYILAN DERLEME HEDEFİ
 # ============================================================
 # `target`: Belirtilmezse tüm `cargo build` komutları bu hedef için derleme yapar.
-# `x86_64-unknown-none`: x86_64 mimarisi, işletim sistemi yok (bare-metal).
+# `x86_64-unknown-uefi`: x86_64 mimarisi, UEFI firmware hedefi.
 #   - "unknown" → Üretici bilinmiyor (generic)
-#   - "none"    → İşletim sistemi yok; std kütüphane kullanılamaz
+#   - "uefi"    → UEFI firmware ABI ve EFI yüklenebilir çıktı hedefi
 #
-# Bu sayede `cargo build` çalıştırmak otomatik olarak çekirdek ikili dosyası üretir,
-# host sisteminiz için değil.
+# Bu sayede `cargo build` çalıştırmak otomatik olarak EFI yüklenebilir dosyası üretir.
+# ============================================================
+# CARGO ALIAS'LARI
+# ============================================================
+# `test-host`: Host ortamında (Windows MSVC) integration testlerini koşturur.
+# Kullanım: cargo test-host [-- <test-filter>]
+# Örnek:    cargo test-host --test integration_suite
+#           cargo test-host --test regression_suite
+#           cargo test-host --test heap_stack_phys_addr_bug_test
+#
+# NOT: `cargo test` (alias'sız) varsayılan UEFI hedefi için
+# derleme yapmaya çalışır; bu yol host test koşucusu yerine EFI hedefini derlediği için
+# repo testleri için uygun değildir.
+# Host-side testler için her zaman `cargo test-host` ya da
+# `cargo test --target x86_64-pc-windows-msvc` kullanın.
+[alias]
+test-host = "test --target x86_64-pc-windows-msvc"
+build-kernel = "build --target x86_64-unknown-none"
+check-kernel = "check --target x86_64-unknown-none"
+
 [build]
-target = "x86_64-unknown-none"
+target = "x86_64-unknown-uefi"
+jobs = 4
+
+[profile.dev]
+debug = 1
 
 # ============================================================
 # BARE-METAL HEDEFI İÇİN BAĞLAYICI AYARLARI

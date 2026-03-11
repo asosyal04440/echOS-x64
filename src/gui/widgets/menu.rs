@@ -205,7 +205,13 @@ impl Widget for MenuBar {
             let dropdown_h = items.len() * item_height;
 
             // Açılır listenin arka planı
-            fb.draw_rect(dropdown_x, dropdown_y, dropdown_w, dropdown_h, Theme::WINDOW_BG.to_u32());
+            fb.draw_rect(
+                dropdown_x,
+                dropdown_y,
+                dropdown_w,
+                dropdown_h,
+                Theme::WINDOW_BG.to_u32(),
+            );
 
             // Dört kenar kenarlık çizgisi — piksel piksel üst/alt ve sol/sağ kenarlar
             for col in dropdown_x..(dropdown_x + dropdown_w) {
@@ -238,12 +244,22 @@ impl Widget for MenuBar {
                     // Klavye kısayolu — sağa hizalı olarak listenin sonuna yazılır
                     if !item.shortcut.is_empty() {
                         let shortcut_x = dropdown_x + dropdown_w - item.shortcut.len() * 8 - 8;
-                        fb.draw_string(shortcut_x, item_y + 4, &item.shortcut, Theme::TEXT_SECONDARY.to_u32());
+                        fb.draw_string(
+                            shortcut_x,
+                            item_y + 4,
+                            &item.shortcut,
+                            Theme::TEXT_SECONDARY.to_u32(),
+                        );
                     }
 
                     // Alt menü oku — sağ tarafta ">" karakteriyle gösterilir
                     if item.submenu.is_some() {
-                        fb.draw_string(dropdown_x + dropdown_w - 16, item_y + 4, ">", Theme::TEXT_SECONDARY.to_u32());
+                        fb.draw_string(
+                            dropdown_x + dropdown_w - 16,
+                            item_y + 4,
+                            ">",
+                            Theme::TEXT_SECONDARY.to_u32(),
+                        );
                     }
                 }
             }
@@ -447,7 +463,13 @@ impl Widget for ContextMenu {
             } else {
                 // Fare üzerindeyse ve kalem etkinse hover vurgusu uygula
                 if self.hovered_index == Some(i) && item.enabled {
-                    fb.draw_rect(x + 1, item_y, w - 2, item_height, Theme::BUTTON_HOVER.to_u32());
+                    fb.draw_rect(
+                        x + 1,
+                        item_y,
+                        w - 2,
+                        item_height,
+                        Theme::BUTTON_HOVER.to_u32(),
+                    );
                 }
 
                 // Kalem metni — devre dışı olanlar soluk renkte
@@ -461,7 +483,12 @@ impl Widget for ContextMenu {
                 // Klavye kısayolu — sağa hizalı
                 if !item.shortcut.is_empty() {
                     let shortcut_x = x + w - item.shortcut.len() * 8 - 8;
-                    fb.draw_string(shortcut_x, item_y + 4, &item.shortcut, Theme::TEXT_SECONDARY.to_u32());
+                    fb.draw_string(
+                        shortcut_x,
+                        item_y + 4,
+                        &item.shortcut,
+                        Theme::TEXT_SECONDARY.to_u32(),
+                    );
                 }
             }
         }

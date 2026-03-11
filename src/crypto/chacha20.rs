@@ -94,12 +94,8 @@ impl ChaCha20 {
 
         // Anahtar kelimeleri (state[4..11], little-endian)
         for i in 0..8 {
-            state[4 + i] = u32::from_le_bytes([
-                key[i * 4],
-                key[i * 4 + 1],
-                key[i * 4 + 2],
-                key[i * 4 + 3],
-            ]);
+            state[4 + i] =
+                u32::from_le_bytes([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
         }
 
         // Sayaç (state[12]) — sıfırdan başlar; her blokta 1 artar
@@ -129,12 +125,8 @@ impl ChaCha20 {
         state[3] = CONSTANTS[3];
 
         for i in 0..8 {
-            state[4 + i] = u32::from_le_bytes([
-                key[i * 4],
-                key[i * 4 + 1],
-                key[i * 4 + 2],
-                key[i * 4 + 3],
-            ]);
+            state[4 + i] =
+                u32::from_le_bytes([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
         }
 
         state[12] = counter;
@@ -256,9 +248,9 @@ pub struct ChaCha20Poly1305 {
 
 #[derive(Clone)]
 struct Poly1305State {
-    r: [u32; 5],        // Sıkıştırılmış (clamped) r değeri — çarpım için
-    s: [u32; 4],        // s değeri — son toplama sabiti
-    h: [u32; 5],        // Birikimli toplam (accumulator)
+    r: [u32; 5], // Sıkıştırılmış (clamped) r değeri — çarpım için
+    s: [u32; 4], // s değeri — son toplama sabiti
+    h: [u32; 5], // Birikimli toplam (accumulator)
     buffer: [u8; 16],
     buffer_len: usize,
 }
@@ -396,7 +388,12 @@ impl Poly1305State {
         r[4] = (u32::from_le_bytes([key[12], key[13], key[14], key[15]]) & 0x0FFFFFFC) >> 2;
 
         for i in 0..4 {
-            s[i] = u32::from_le_bytes([key[16 + i * 4], key[17 + i * 4], key[18 + i * 4], key[19 + i * 4]]);
+            s[i] = u32::from_le_bytes([
+                key[16 + i * 4],
+                key[17 + i * 4],
+                key[18 + i * 4],
+                key[19 + i * 4],
+            ]);
         }
 
         Poly1305State {
@@ -435,10 +432,30 @@ impl Poly1305State {
         let mut acc = [0u64; 5];
 
         // Tamponu h birikimine ekle (modüler aritmetik GF(2^130 - 5) üzerinde)
-        let n0 = u32::from_le_bytes([self.buffer[0], self.buffer[1], self.buffer[2], self.buffer[3]]);
-        let n1 = u32::from_le_bytes([self.buffer[4], self.buffer[5], self.buffer[6], self.buffer[7]]);
-        let n2 = u32::from_le_bytes([self.buffer[8], self.buffer[9], self.buffer[10], self.buffer[11]]);
-        let n3 = u32::from_le_bytes([self.buffer[12], self.buffer[13], self.buffer[14], self.buffer[15]]);
+        let n0 = u32::from_le_bytes([
+            self.buffer[0],
+            self.buffer[1],
+            self.buffer[2],
+            self.buffer[3],
+        ]);
+        let n1 = u32::from_le_bytes([
+            self.buffer[4],
+            self.buffer[5],
+            self.buffer[6],
+            self.buffer[7],
+        ]);
+        let n2 = u32::from_le_bytes([
+            self.buffer[8],
+            self.buffer[9],
+            self.buffer[10],
+            self.buffer[11],
+        ]);
+        let n3 = u32::from_le_bytes([
+            self.buffer[12],
+            self.buffer[13],
+            self.buffer[14],
+            self.buffer[15],
+        ]);
 
         acc[0] = self.h[0] as u64 + n0 as u64;
         acc[1] = self.h[1] as u64 + n1 as u64;
@@ -505,14 +522,25 @@ impl XChaCha20Poly1305 {
     }
 
     /// 24 baytlık nonce ile şifreler.
-    pub fn encrypt(key: &[u8; 32], nonce: &[u8; 24], plaintext: &[u8], aad: &[u8]) -> (Vec<u8>, [u8; 16]) {
+    pub fn encrypt(
+        key: &[u8; 32],
+        nonce: &[u8; 24],
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> (Vec<u8>, [u8; 16]) {
         let (subkey, subnonce) = Self::derive_subkey(key, nonce);
         let mut cipher = ChaCha20Poly1305::new(&subkey, &subnonce);
         cipher.encrypt(plaintext, aad)
     }
 
     /// 24 baytlık nonce ile şifre çözer.
-    pub fn decrypt(key: &[u8; 32], nonce: &[u8; 24], ciphertext: &[u8], aad: &[u8], tag: &[u8; 16]) -> Option<Vec<u8>> {
+    pub fn decrypt(
+        key: &[u8; 32],
+        nonce: &[u8; 24],
+        ciphertext: &[u8],
+        aad: &[u8],
+        tag: &[u8; 16],
+    ) -> Option<Vec<u8>> {
         let (subkey, subnonce) = Self::derive_subkey(key, nonce);
         let mut cipher = ChaCha20Poly1305::new(&subkey, &subnonce);
         cipher.decrypt(ciphertext, aad, tag)

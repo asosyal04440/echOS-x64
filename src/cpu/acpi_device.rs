@@ -77,11 +77,11 @@ pub enum DevicePowerState {
 ///   Bit 3: Tamamen işlevsel mi?
 ///   Bit 4: Pil durumu göstergesi mi? (yalnızca pil aygıtları)
 /// ```
-pub const STA_PRESENT: u32 = 1 << 0;     // Cihaz fiziksel olarak var
-pub const STA_ENABLED: u32 = 1 << 1;     // Cihaz etkin ve adres çözme aktif
-pub const STA_VISIBLE: u32 = 1 << 2;     // Kullanıcı arayüzünde görünür
+pub const STA_PRESENT: u32 = 1 << 0; // Cihaz fiziksel olarak var
+pub const STA_ENABLED: u32 = 1 << 1; // Cihaz etkin ve adres çözme aktif
+pub const STA_VISIBLE: u32 = 1 << 2; // Kullanıcı arayüzünde görünür
 pub const STA_FUNCTIONING: u32 = 1 << 3; // Cihaz tamamen işlevsel
-pub const STA_BATTERY: u32 = 1 << 4;     // Batarya durumunu göster
+pub const STA_BATTERY: u32 = 1 << 4; // Batarya durumunu göster
 
 // ============================================================================
 // Cihaz Keşfi
@@ -101,22 +101,22 @@ pub fn enumerate_devices() -> Vec<AcpiDevice> {
 
     // Yaygın ACPI cihaz yolları — QEMU i440fx/q35 ve gerçek dizüstü/masaüstü donanım
     let known_paths = [
-        "\\_SB",              // System Bus kök nesnesi
-        "\\_SB.PCI0",         // PCI kök köprüsü (Host Bridge)
-        "\\_SB.PCI0.ISA",     // ISA köprüsü
-        "\\_SB.PCI0.SATA",    // SATA denetleyicisi
-        "\\_SB.PCI0.USB0",    // USB denetleyicisi 0
-        "\\_SB.PCI0.USB1",    // USB denetleyicisi 1
-        "\\_SB.PCI0.VGA",     // Ekran kartı
-        "\\_SB.PCI0.LPC",     // LPC (Low Pin Count) köprüsü
-        "\\_SB.PCI0.LPC.EC",  // Embedded Controller (EC) — dizüstülerde fan/batarya
-        "\\_SB.PCI0.HPET",    // High Precision Event Timer
-        "\\_SB.LID0",         // Kapak anahtarı (dizüstü)
-        "\\_SB.SLPB",         // Uyku düğmesi
-        "\\_SB.PWRB",         // Güç düğmesi
-        "\\_SB.BAT0",         // Birincil batarya
-        "\\_SB.AC",           // AC güç adaptörü
-        "\\_SB.FAN0",         // Fan denetleyicisi
+        "\\_SB",             // System Bus kök nesnesi
+        "\\_SB.PCI0",        // PCI kök köprüsü (Host Bridge)
+        "\\_SB.PCI0.ISA",    // ISA köprüsü
+        "\\_SB.PCI0.SATA",   // SATA denetleyicisi
+        "\\_SB.PCI0.USB0",   // USB denetleyicisi 0
+        "\\_SB.PCI0.USB1",   // USB denetleyicisi 1
+        "\\_SB.PCI0.VGA",    // Ekran kartı
+        "\\_SB.PCI0.LPC",    // LPC (Low Pin Count) köprüsü
+        "\\_SB.PCI0.LPC.EC", // Embedded Controller (EC) — dizüstülerde fan/batarya
+        "\\_SB.PCI0.HPET",   // High Precision Event Timer
+        "\\_SB.LID0",        // Kapak anahtarı (dizüstü)
+        "\\_SB.SLPB",        // Uyku düğmesi
+        "\\_SB.PWRB",        // Güç düğmesi
+        "\\_SB.BAT0",        // Birincil batarya
+        "\\_SB.AC",          // AC güç adaptörü
+        "\\_SB.FAN0",        // Fan denetleyicisi
     ];
 
     for path in &known_paths {
@@ -238,6 +238,6 @@ fn eisaid_to_string(id: u64) -> String {
     let c1 = ((id >> 26) & 0x1F) as u8 + b'@'; // Üretici kodu, 1. harf
     let c2 = ((id >> 21) & 0x1F) as u8 + b'@'; // Üretici kodu, 2. harf
     let c3 = ((id >> 16) & 0x1F) as u8 + b'@'; // Üretici kodu, 3. harf
-    let n = id & 0xFFFF;                         // Ürün numarası (4 hex rakam)
+    let n = id & 0xFFFF; // Ürün numarası (4 hex rakam)
     alloc::format!("{}{}{}{:04X}", c1 as char, c2 as char, c3 as char, n)
 }

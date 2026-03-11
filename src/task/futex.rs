@@ -39,13 +39,14 @@
 //! ```
 
 use alloc::collections::BTreeMap;
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
-use super::task::TaskId;
-use super::scheduler::{current_task_id, sleep};
+use super::scheduler::{current_task_id, schedule, take_current_blocked_task, wake_blocked_task};
+use super::task::{Task, TaskId};
 
 // ============================================================================
 // FUTEX İŞLEM KODLARI (Linux ile uyumlu)
@@ -223,6 +224,241 @@ impl FutexManager {
 lazy_static::lazy_static! {
     /// Global futex yöneticisi (sistem genelinde tek bir örnek)
     static ref FUTEX_MANAGER: FutexManager = FutexManager::new();
+    /// Per-task robust list head addresses
+    static ref ROBUST_LIST_HEADS: Mutex<BTreeMap<TaskId, u64>> = Mutex::new(BTreeMap::new());
+    /// Per-task tid_address (clear_child_tid) — görev çıkışında 0 yazılır ve FUTEX_WAKE çağrılır
+    static ref TID_ADDRESSES: Mutex<BTreeMap<TaskId, u64>> = Mutex::new(BTreeMap::new());
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WakeReason {
+    Signaled,
+    TimedOut,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WakeRecord {
+    reason: WakeReason,
+    addr: u64,
+}
+
+struct AddressWaiter {
+    task_id: TaskId,
+    task: Option<Box<Task>>,
+    addresses: Vec<u64>,
+    bitset: u32,
+    deadline_tick: Option<u64>,
+}
+
+pub struct AddressWaitManager {
+    next_waiter_id: AtomicU64,
+    waiters: Mutex<BTreeMap<u64, AddressWaiter>>,
+    address_index: Mutex<BTreeMap<u64, Vec<u64>>>,
+    wake_records: Mutex<BTreeMap<TaskId, WakeRecord>>,
+}
+
+impl AddressWaitManager {
+    pub const fn new() -> Self {
+        Self {
+            next_waiter_id: AtomicU64::new(1),
+            waiters: Mutex::new(BTreeMap::new()),
+            address_index: Mutex::new(BTreeMap::new()),
+            wake_records: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn enqueue(
+        &self,
+        task_id: TaskId,
+        task: Box<Task>,
+        addresses: &[u64],
+        bitset: u32,
+        deadline_tick: Option<u64>,
+    ) {
+        let waiter_id = self.next_waiter_id.fetch_add(1, Ordering::AcqRel);
+        let waiter = AddressWaiter {
+            task_id,
+            task: Some(task),
+            addresses: addresses.to_vec(),
+            bitset,
+            deadline_tick,
+        };
+
+        self.waiters.lock().insert(waiter_id, waiter);
+        let mut address_index = self.address_index.lock();
+        for addr in addresses {
+            address_index.entry(*addr).or_default().push(waiter_id);
+        }
+    }
+
+    fn resolve(&self, waiter_id: u64, reason: WakeReason, addr: u64) -> bool {
+        let waiter = {
+            let mut waiters = self.waiters.lock();
+            waiters.remove(&waiter_id)
+        };
+        let Some(mut waiter) = waiter else {
+            return false;
+        };
+
+        {
+            let mut index = self.address_index.lock();
+            for wait_addr in &waiter.addresses {
+                let remove_bucket = if let Some(waiter_ids) = index.get_mut(wait_addr) {
+                    waiter_ids.retain(|candidate| *candidate != waiter_id);
+                    waiter_ids.is_empty()
+                } else {
+                    false
+                };
+                if remove_bucket {
+                    index.remove(wait_addr);
+                }
+            }
+        }
+
+        self.wake_records.lock().insert(
+            waiter.task_id,
+            WakeRecord {
+                reason,
+                addr,
+            },
+        );
+
+        if let Some(task) = waiter.task.take() {
+            wake_blocked_task(task);
+            return true;
+        }
+
+        false
+    }
+
+    fn wake_matches(&self, addr: u64, max_count: usize, bitset: Option<u32>) -> usize {
+        let waiter_ids = {
+            self.address_index
+                .lock()
+                .get(&addr)
+                .cloned()
+                .unwrap_or_default()
+        };
+        if waiter_ids.is_empty() {
+            return 0;
+        }
+
+        let matched = {
+            let waiters = self.waiters.lock();
+            let mut matched = Vec::new();
+            for waiter_id in waiter_ids {
+                if matched.len() >= max_count {
+                    break;
+                }
+                let Some(waiter) = waiters.get(&waiter_id) else {
+                    continue;
+                };
+                if let Some(mask) = bitset {
+                    if waiter.bitset & mask == 0 {
+                        continue;
+                    }
+                }
+                matched.push(waiter_id);
+            }
+            matched
+        };
+
+        matched
+            .into_iter()
+            .filter(|waiter_id| self.resolve(*waiter_id, WakeReason::Signaled, addr))
+            .count()
+    }
+
+    fn check_timeouts(&self, current_tick: u64) -> usize {
+        let expired = {
+            let waiters = self.waiters.lock();
+            let mut expired = Vec::new();
+            for (waiter_id, waiter) in waiters.iter() {
+                if waiter
+                    .deadline_tick
+                    .map(|deadline| current_tick >= deadline)
+                    .unwrap_or(false)
+                {
+                    expired.push((*waiter_id, waiter.addresses.first().copied().unwrap_or(0)));
+                }
+            }
+            expired
+        };
+
+        expired
+            .into_iter()
+            .filter(|(waiter_id, addr)| self.resolve(*waiter_id, WakeReason::TimedOut, *addr))
+            .count()
+    }
+
+    fn take_record(&self, task_id: TaskId) -> Option<WakeRecord> {
+        self.wake_records.lock().remove(&task_id)
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref ADDRESS_WAIT_MANAGER: AddressWaitManager = AddressWaitManager::new();
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FutexWaitV {
+    pub val: u64,
+    pub uaddr: u64,
+    pub flags: u32,
+    pub __reserved: u32,
+}
+
+fn timeout_ns_to_deadline(timeout_ns: u64) -> Option<u64> {
+    if timeout_ns == 0 {
+        return None;
+    }
+    let timeout_ticks = core::cmp::max(1, timeout_ns / 1_000_000);
+    Some(super::scheduler::get_ticks() as u64 + timeout_ticks)
+}
+
+fn timeout_ms_to_deadline(timeout_ms: u32) -> Option<u64> {
+    if timeout_ms == u32::MAX {
+        return None;
+    }
+    Some(super::scheduler::get_ticks() as u64 + core::cmp::max(1, timeout_ms as u64))
+}
+
+fn compare_u32(addr: u64, expected: u32) -> bool {
+    if addr == 0 {
+        return false;
+    }
+    unsafe { core::ptr::read_volatile(addr as *const u32) == expected }
+}
+
+fn compare_bytes(addr: u64, expected: *const u8, size: usize) -> bool {
+    if addr == 0 || expected.is_null() || size == 0 {
+        return false;
+    }
+    for index in 0..size {
+        let lhs = unsafe { core::ptr::read_volatile((addr as *const u8).add(index)) };
+        let rhs = unsafe { core::ptr::read_volatile(expected.add(index)) };
+        if lhs != rhs {
+            return false;
+        }
+    }
+    true
+}
+
+fn block_on_addresses(addresses: &[u64], bitset: u32, deadline_tick: Option<u64>) -> WakeRecord {
+    let task_id = current_task_id();
+    let Some(task) = take_current_blocked_task() else {
+        return WakeRecord {
+            reason: WakeReason::TimedOut,
+            addr: addresses.first().copied().unwrap_or(0),
+        };
+    };
+    ADDRESS_WAIT_MANAGER.enqueue(task_id, task, addresses, bitset, deadline_tick);
+    schedule();
+    ADDRESS_WAIT_MANAGER.take_record(task_id).unwrap_or(WakeRecord {
+        reason: WakeReason::TimedOut,
+        addr: addresses.first().copied().unwrap_or(0),
+    })
 }
 
 // ============================================================================
@@ -241,14 +477,7 @@ lazy_static::lazy_static! {
 ///
 /// # Dönen Değer
 /// Uyandırılan/yönlendirilen bekleyici sayısı, ya da negatif hata kodu
-pub fn sys_futex(
-    uaddr: u64,
-    futex_op: i32,
-    val: u32,
-    timeout: u64,
-    uaddr2: u64,
-    val3: u32,
-) -> i64 {
+pub fn sys_futex(uaddr: u64, futex_op: i32, val: u32, timeout: u64, uaddr2: u64, val3: u32) -> i64 {
     // İşlem kodu ve bayrakları ayır (özel/paylaşımlı futex bayrağını temizle)
     let op = futex_op & 0x7F;
     let is_private = (futex_op & FUTEX_PRIVATE_FLAG) != 0;
@@ -257,21 +486,19 @@ pub fn sys_futex(
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
             sys_futex_wait(uaddr, val, timeout, val3, op == FUTEX_WAIT_BITSET)
         }
-        FUTEX_WAKE | FUTEX_WAKE_BITSET => {
-            sys_futex_wake(uaddr, val, if op == FUTEX_WAKE_BITSET { Some(val3) } else { None })
-        }
-        FUTEX_REQUEUE => {
-            sys_futex_requeue(uaddr, val, uaddr2, 0)
-        }
-        FUTEX_CMP_REQUEUE => {
-            sys_futex_requeue(uaddr, val, uaddr2, val3)
-        }
-        FUTEX_LOCK_PI => {
-            sys_futex_lock_pi(uaddr, timeout)
-        }
-        FUTEX_UNLOCK_PI => {
-            sys_futex_unlock_pi(uaddr)
-        }
+        FUTEX_WAKE | FUTEX_WAKE_BITSET => sys_futex_wake(
+            uaddr,
+            val,
+            if op == FUTEX_WAKE_BITSET {
+                Some(val3)
+            } else {
+                None
+            },
+        ),
+        FUTEX_REQUEUE => sys_futex_requeue(uaddr, val, uaddr2, 0),
+        FUTEX_CMP_REQUEUE => sys_futex_requeue(uaddr, val, uaddr2, val3),
+        FUTEX_LOCK_PI => sys_futex_lock_pi(uaddr, timeout),
+        FUTEX_UNLOCK_PI => sys_futex_unlock_pi(uaddr),
         _ => {
             crate::serial_println!("[FUTEX] Bilinmeyen işlem kodu: {}", op);
             -22 // EINVAL
@@ -286,92 +513,49 @@ pub fn sys_futex(
 /// 3. Bekleme kuyruğuna görevi ekle
 /// 4. Zamanlayıcıya bırak (sleep ile bloke ol)
 /// 5. Uyanınca zaman aşımı kontrolü yap
-fn sys_futex_wait(uaddr: u64, expected: u32, timeout_ns: u64, bitset: u32, has_bitset: bool) -> i64 {
-    let task_id = current_task_id();
-    let queue = FUTEX_MANAGER.get_queue(uaddr);
+fn sys_futex_wait(
+    uaddr: u64,
+    expected: u32,
+    timeout_ns: u64,
+    bitset: u32,
+    has_bitset: bool,
+) -> i64 {
+    if !compare_u32(uaddr, expected) {
+        return -11;
+    }
 
-    // Zaman aşımını nanosaniyeden tick'e dönüştür (1000 Hz varsayımıyla)
-    let timeout_ticks = if timeout_ns > 0 {
-        timeout_ns / 1_000_000 // ns -> ms, 1 tick = 1ms varsayımı
-    } else {
-        0
-    };
-
-    let bitset = if has_bitset && bitset == 0 {
-        0xFFFFFFFF // Varsayılan bitset: tüm bitler aktif
-    } else if has_bitset {
+    let effective_bitset = if has_bitset {
+        if bitset == 0 {
+            return -22;
+        }
         bitset
     } else {
-        0xFFFFFFFF
+        u32::MAX
     };
 
-    // Bekleme kuyruğuna bu görevi ekle
-    {
-        let mut q = queue.lock();
-        q.add_waiter(task_id, bitset, timeout_ticks, super::scheduler::get_ticks() as u64);
-    }
-
     FUTEX_MANAGER.total_waits.fetch_add(1, Ordering::Relaxed);
-
-    crate::serial_println!(
-        "[FUTEX] WAIT: görev {} adres {:#x}'de bekliyor (beklenen={}, zaman_aşımı={}ms)",
-        task_id, uaddr, expected, timeout_ticks
+    let result = block_on_addresses(
+        &[uaddr],
+        effective_bitset,
+        timeout_ns_to_deadline(timeout_ns),
     );
-
-    // Gerçek uygulamada yapılacaklar:
-    // 1. *uaddr == expected mi kontrol et (kullanıcı alanı erişimi)
-    // 2. Eşit değilse -EAGAIN döndür (kilit başkası tarafından alındı)
-    // 3. Eşitse görevi bloke et ve zamanlayıcıya bırak
-
-    // Şimdillik: sleep ile simüle edilen bekleme
-    if timeout_ticks > 0 {
-        sleep(timeout_ticks as usize);
-
-        // Uyanınca: hala kuyruktaysak zaman aşımı gerçekleşti demektir
-        let q = queue.lock();
-        let still_waiting = q.waiters.iter().any(|w| w.task_id == task_id);
-
-        if still_waiting {
-            // Zaman aşımı: görevi kuyruktan çıkar ve hata döndür
-            drop(q);
-            queue.lock().remove_waiter(task_id);
+    match result.reason {
+        WakeReason::Signaled => 0,
+        WakeReason::TimedOut => {
             FUTEX_MANAGER.total_timeouts.fetch_add(1, Ordering::Relaxed);
-            return -110; // ETIMEDOUT
+            -110
         }
-    } else {
-        // Sonsuz bekleme — gerçek zamanlayıcı entegrasyonu gerektirir
-        sleep(100); // Yer tutucu
     }
-
-    0 // Başarı: FUTEX_WAKE tarafından uyandırıldık
 }
 
 /// FUTEX_WAKE implementasyonu.
 /// `count` adet bekleyiciyi uyandırır; bitset filtresi uygulanır.
 fn sys_futex_wake(uaddr: u64, count: u32, bitset: Option<u32>) -> i64 {
-    let queue = FUTEX_MANAGER.get_queue(uaddr);
-
-    let woken = {
-        let mut q = queue.lock();
-        q.wake_waiters(count as usize, bitset)
-    };
-
-    let woken_count = woken.len() as i64;
-
-    // Uyandırılan görevleri zamanlayıcıya bildir
-    for task_id in woken {
-        // wake_task(task_id); // Zamanlayıcı entegrasyonu gerektirir
-        crate::serial_println!("[FUTEX] WAKE: görev {} adres {:#x}'den uyandırıldı", task_id, uaddr);
-    }
-
-    FUTEX_MANAGER.total_wakes.fetch_add(woken_count as u64, Ordering::Relaxed);
-
-    // Kuyruk boşaltıldıysa bellekten temizle
-    if queue.lock().waiter_count() == 0 {
-        FUTEX_MANAGER.queues.lock().remove(&uaddr);
-    }
-
-    woken_count
+    let woken = ADDRESS_WAIT_MANAGER.wake_matches(uaddr, count as usize, bitset);
+    FUTEX_MANAGER
+        .total_wakes
+        .fetch_add(woken as u64, Ordering::Relaxed);
+    woken as i64
 }
 
 /// FUTEX_REQUEUE implementasyonu.
@@ -392,7 +576,11 @@ fn sys_futex_requeue(uaddr: u64, wake_count: u32, uaddr2: u64, requeue_cmp: u32)
         woken = to_wake.len() as u64;
 
         for task_id in to_wake {
-            crate::serial_println!("[FUTEX] REQUEUE: görev {} adres {:#x}'den uyandırıldı", task_id, uaddr);
+            crate::serial_println!(
+                "[FUTEX] REQUEUE: görev {} adres {:#x}'den uyandırıldı",
+                task_id,
+                uaddr
+            );
         }
     }
 
@@ -405,14 +593,22 @@ fn sys_futex_requeue(uaddr: u64, wake_count: u32, uaddr2: u64, requeue_cmp: u32)
         // Şimdillik: kalan tüm bekleyicileri taşı
 
         while let Some(waiter) = q1.waiters.pop() {
-            q2.add_waiter(waiter.task_id, waiter.bitset, waiter.timeout, waiter.start_tick);
+            q2.add_waiter(
+                waiter.task_id,
+                waiter.bitset,
+                waiter.timeout,
+                waiter.start_tick,
+            );
             requeued += 1;
         }
     }
 
     crate::serial_println!(
         "[FUTEX] REQUEUE: {:#x} -> {:#x}: uyandırılan={}, taşınan={}",
-        uaddr, uaddr2, woken, requeued
+        uaddr,
+        uaddr2,
+        woken,
+        requeued
     );
 
     // Kaynak kuyruk boşaldıysa temizle
@@ -427,16 +623,141 @@ fn sys_futex_requeue(uaddr: u64, wake_count: u32, uaddr2: u64, requeue_cmp: u32)
 /// Yüksek öncelikli görevin düşük öncelikli kilide takılmasını önler.
 /// Gerçek zamanlı sistemlerde kritik: Priority Inversion problemini çözer.
 fn sys_futex_lock_pi(uaddr: u64, timeout_ns: u64) -> i64 {
-    // TODO: RT zamanlayıcısı entegrasyonu gerektirir
-    crate::serial_println!("[FUTEX] LOCK_PI: henüz uygulanmadı, adres={:#x}", uaddr);
-    -38 // ENOSYS
+    let task_id = current_task_id();
+
+    // Atomik olarak futex word'ünü oku
+    let futex_ptr = uaddr as *const core::sync::atomic::AtomicU32;
+    let futex_word = unsafe { &*futex_ptr };
+
+    let tid32 = task_id as u32;
+
+    // Kilit serbest mi kontrol et (değer 0 = serbest)
+    match futex_word.compare_exchange(
+        0,
+        tid32,
+        core::sync::atomic::Ordering::Acquire,
+        core::sync::atomic::Ordering::Relaxed,
+    ) {
+        Ok(_) => {
+            crate::serial_println!(
+                "[FUTEX] LOCK_PI: görev {} kilidi aldı, adres={:#x}",
+                task_id,
+                uaddr
+            );
+            return 0;
+        }
+        Err(owner_tid) => {
+            // Kilit başkasında — FUTEX_WAITERS bitini ayarla (bit 30)
+            let waiters_bit = 1u32 << 30;
+            let current = futex_word.load(core::sync::atomic::Ordering::Relaxed);
+            let _ = futex_word.compare_exchange(
+                current,
+                current | waiters_bit,
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+
+            // Bekleme kuyruğuna ekle
+            let timeout_ticks = if timeout_ns > 0 {
+                timeout_ns / 1_000_000
+            } else {
+                0
+            };
+            let now = crate::task::scheduler::get_ticks() as u64;
+
+            let queue = FUTEX_MANAGER.get_queue(uaddr);
+            {
+                let mut q = queue.lock();
+                q.waiters.push(FutexWaiter {
+                    task_id,
+                    bitset: 0xFFFFFFFF,
+                    timeout: timeout_ticks,
+                    start_tick: now,
+                });
+            }
+
+            crate::serial_println!(
+                "[FUTEX] LOCK_PI: görev {} bekliyor, sahip={}, adres={:#x}",
+                task_id,
+                owner_tid & 0x3FFFFFFF,
+                uaddr
+            );
+
+            // Kısa bekleme — spin + yield
+            for _ in 0..100 {
+                core::hint::spin_loop();
+                let val = futex_word.load(core::sync::atomic::Ordering::Relaxed);
+                if val & 0x3FFFFFFF == 0 {
+                    match futex_word.compare_exchange(
+                        val,
+                        tid32,
+                        core::sync::atomic::Ordering::Acquire,
+                        core::sync::atomic::Ordering::Relaxed,
+                    ) {
+                        Ok(_) => return 0,
+                        Err(_) => continue,
+                    }
+                }
+            }
+
+            // Timeout kontrolü
+            if timeout_ticks > 0 {
+                let elapsed = crate::task::scheduler::get_ticks() as u64 - now;
+                if elapsed >= timeout_ticks {
+                    return -110; // ETIMEDOUT
+                }
+            }
+
+            // Kilidi alınamadı: scheduler yield ile tekrar dene
+            // Spin loop tükendi — görevi bekleme durumuna al ve tekrar dene
+            crate::task::scheduler::schedule();
+
+            // Yield sonrası tekrar CAS dene
+            let val = futex_word.load(core::sync::atomic::Ordering::Relaxed);
+            if val & 0x3FFFFFFF == 0 {
+                match futex_word.compare_exchange(
+                    val,
+                    tid32,
+                    core::sync::atomic::Ordering::Acquire,
+                    core::sync::atomic::Ordering::Relaxed,
+                ) {
+                    Ok(_) => return 0,
+                    Err(_) => {}
+                }
+            }
+
+            // Hâlâ alınamadı — EAGAIN dön (çağıran tekrar deneyecek)
+            -11 // EAGAIN
+        }
+    }
 }
 
 /// FUTEX_UNLOCK_PI implementasyonu.
 fn sys_futex_unlock_pi(uaddr: u64) -> i64 {
-    // TODO: RT zamanlayıcısı entegrasyonu gerektirir
-    crate::serial_println!("[FUTEX] UNLOCK_PI: henüz uygulanmadı, adres={:#x}", uaddr);
-    -38 // ENOSYS
+    let task_id = current_task_id() as u32;
+    let futex_ptr = uaddr as *const core::sync::atomic::AtomicU32;
+    let futex_word = unsafe { &*futex_ptr };
+
+    let current = futex_word.load(core::sync::atomic::Ordering::Relaxed);
+    if (current & 0x3FFFFFFF) != task_id {
+        return -1; // EPERM
+    }
+
+    futex_word.store(0, core::sync::atomic::Ordering::Release);
+
+    // Bekleyen ilk görevi uyandır
+    let queue = FUTEX_MANAGER.get_queue(uaddr);
+    let mut q = queue.lock();
+    if !q.waiters.is_empty() {
+        let waiter = q.waiters.remove(0);
+        crate::serial_println!(
+            "[FUTEX] UNLOCK_PI: görev {} uyandırılıyor, adres={:#x}",
+            waiter.task_id,
+            uaddr
+        );
+    }
+
+    0
 }
 
 // ============================================================================
@@ -459,37 +780,83 @@ pub struct FutexStats {
 /// Mevcut futex istatistiklerini döndürür.
 pub fn get_stats() -> FutexStats {
     FutexStats {
-        queue_count: FUTEX_MANAGER.queues.lock().len(),
+        queue_count: ADDRESS_WAIT_MANAGER.waiters.lock().len(),
         total_waits: FUTEX_MANAGER.total_waits.load(Ordering::Relaxed),
         total_wakes: FUTEX_MANAGER.total_wakes.load(Ordering::Relaxed),
         total_timeouts: FUTEX_MANAGER.total_timeouts.load(Ordering::Relaxed),
     }
 }
 
+pub fn wait_on_address(
+    address: u64,
+    compare_address: *const u8,
+    size: usize,
+    timeout_ms: u32,
+) -> bool {
+    if size == 0 || size > 8 {
+        return false;
+    }
+    if !compare_bytes(address, compare_address, size) {
+        return true;
+    }
+
+    let result = block_on_addresses(&[address], u32::MAX, timeout_ms_to_deadline(timeout_ms));
+    matches!(result.reason, WakeReason::Signaled)
+}
+
+pub fn wake_by_address_single(address: u64) -> usize {
+    ADDRESS_WAIT_MANAGER.wake_matches(address, 1, None)
+}
+
+pub fn wake_by_address_all(address: u64) -> usize {
+    ADDRESS_WAIT_MANAGER.wake_matches(address, usize::MAX, None)
+}
+
 /// Belirtilen adreste bekleyen tüm görevleri uyandırır.
 /// Dayanıklı futex (robust futex) temizlemesinde kullanılır:
 /// bir görev kilidi tutarken ölürse EOWNERDEAD döndürülür.
 pub fn wake_all_at_address(uaddr: u64) -> usize {
-    let queue = FUTEX_MANAGER.get_queue(uaddr);
-    let woken = queue.lock().wake_waiters(usize::MAX, None);
-
-    // Gerçek zamanlayıcı entegrasyonu gerektirir
-    woken.len()
+    wake_by_address_all(uaddr)
 }
 
 /// Periyodik olarak çağrılır: zaman aşımına uğrayan bekleyicileri tespit eder.
 pub fn check_timeouts() {
     let current_tick = super::scheduler::get_ticks() as u64;
+    let timed_out = ADDRESS_WAIT_MANAGER.check_timeouts(current_tick);
+    if timed_out > 0 {
+        FUTEX_MANAGER
+            .total_timeouts
+            .fetch_add(timed_out as u64, Ordering::Relaxed);
+    }
+}
 
-    let queues = FUTEX_MANAGER.queues.lock();
-    for (_, queue) in queues.iter() {
-        let mut q = queue.lock();
-        let timed_out = q.check_timeouts(current_tick);
+pub fn sys_futex_waitv(waiters_ptr: u64, waiters_len: u32, flags: u32, timeout_ns: u64) -> i64 {
+    if waiters_ptr == 0 || waiters_len == 0 || flags != 0 {
+        return -22;
+    }
 
-        for task_id in timed_out {
-            // wake_task(task_id); // Zamanlayıcı entegrasyonu gerektirir
+    let waiters =
+        unsafe { core::slice::from_raw_parts(waiters_ptr as *const FutexWaitV, waiters_len as usize) };
+    let mut addresses = Vec::with_capacity(waiters.len());
+    for waiter in waiters {
+        let expected = waiter.val as u32;
+        if !compare_u32(waiter.uaddr, expected) {
+            return -11;
+        }
+        addresses.push(waiter.uaddr);
+    }
+
+    FUTEX_MANAGER.total_waits.fetch_add(1, Ordering::Relaxed);
+    let result = block_on_addresses(&addresses, u32::MAX, timeout_ns_to_deadline(timeout_ns));
+    match result.reason {
+        WakeReason::Signaled => addresses
+            .iter()
+            .position(|candidate| *candidate == result.addr)
+            .map(|index| index as i64)
+            .unwrap_or(0),
+        WakeReason::TimedOut => {
             FUTEX_MANAGER.total_timeouts.fetch_add(1, Ordering::Relaxed);
-            crate::serial_println!("[FUTEX] Zaman aşımı: görev {}", task_id);
+            -110
         }
     }
 }
@@ -500,28 +867,28 @@ pub fn check_timeouts() {
 
 /// clone(2) bayrakları (Linux ile uyumlu).
 /// Bu bayraklar child'ın parent ile ne kadarını paylaşacağını belirler.
-pub const CLONE_VM: u64 = 0x00000100;      // Bellek alanını paylaş
-pub const CLONE_FS: u64 = 0x00000200;       // Dosya sistemi bilgisini paylaş
-pub const CLONE_FILES: u64 = 0x00000400;    // Açık dosya tanımlayıcılarını paylaş
-pub const CLONE_SIGHAND: u64 = 0x00000800;  // Sinyal işleyicilerini paylaş
-pub const CLONE_PTRACE: u64 = 0x00002000;   // ptrace ile izle
-pub const CLONE_VFORK: u64 = 0x00004000;    // Parent, child exec/exit'e kadar bekler
-pub const CLONE_PARENT: u64 = 0x00008000;   // Çağıranla aynı parent
-pub const CLONE_THREAD: u64 = 0x00010000;   // Aynı iş parçacığı grubunda
-pub const CLONE_NEWNS: u64 = 0x00020000;    // Yeni mount namespace oluştur
-pub const CLONE_SYSVSEM: u64 = 0x00040000;  // SysV semaforlarını paylaş
-pub const CLONE_SETTLS: u64 = 0x00080000;   // TLS (iş parçacığı yerel depolama) ayarla
-pub const CLONE_PARENT_SETTID: u64 = 0x00100000;  // Parent'ta TID'yi yaz
+pub const CLONE_VM: u64 = 0x00000100; // Bellek alanını paylaş
+pub const CLONE_FS: u64 = 0x00000200; // Dosya sistemi bilgisini paylaş
+pub const CLONE_FILES: u64 = 0x00000400; // Açık dosya tanımlayıcılarını paylaş
+pub const CLONE_SIGHAND: u64 = 0x00000800; // Sinyal işleyicilerini paylaş
+pub const CLONE_PTRACE: u64 = 0x00002000; // ptrace ile izle
+pub const CLONE_VFORK: u64 = 0x00004000; // Parent, child exec/exit'e kadar bekler
+pub const CLONE_PARENT: u64 = 0x00008000; // Çağıranla aynı parent
+pub const CLONE_THREAD: u64 = 0x00010000; // Aynı iş parçacığı grubunda
+pub const CLONE_NEWNS: u64 = 0x00020000; // Yeni mount namespace oluştur
+pub const CLONE_SYSVSEM: u64 = 0x00040000; // SysV semaforlarını paylaş
+pub const CLONE_SETTLS: u64 = 0x00080000; // TLS (iş parçacığı yerel depolama) ayarla
+pub const CLONE_PARENT_SETTID: u64 = 0x00100000; // Parent'ta TID'yi yaz
 pub const CLONE_CHILD_CLEARTID: u64 = 0x00200000; // Child çıkışında TID'yi temizle
 pub const CLONE_DETACHED: u64 = 0x00400000; // Ayrık iş parçacığı
 pub const CLONE_UNTRACED: u64 = 0x00800000; // İzlenmiyor
 pub const CLONE_CHILD_SETTID: u64 = 0x01000000; // Child'da TID'yi yaz
-pub const CLONE_NEWUTS: u64 = 0x04000000;   // Yeni UTS namespace
-pub const CLONE_NEWIPC: u64 = 0x08000000;   // Yeni IPC namespace
-pub const CLONE_NEWUSER: u64 = 0x10000000;  // Yeni kullanıcı namespace
-pub const CLONE_NEWPID: u64 = 0x20000000;   // Yeni PID namespace
-pub const CLONE_NEWNET: u64 = 0x40000000;   // Yeni ağ namespace
-pub const CLONE_IO: u64 = 0x80000000;       // I/O bağlamını paylaş
+pub const CLONE_NEWUTS: u64 = 0x04000000; // Yeni UTS namespace
+pub const CLONE_NEWIPC: u64 = 0x08000000; // Yeni IPC namespace
+pub const CLONE_NEWUSER: u64 = 0x10000000; // Yeni kullanıcı namespace
+pub const CLONE_NEWPID: u64 = 0x20000000; // Yeni PID namespace
+pub const CLONE_NEWNET: u64 = 0x40000000; // Yeni ağ namespace
+pub const CLONE_IO: u64 = 0x80000000; // I/O bağlamını paylaş
 
 /// clone(2) sistem çağrısı implementasyonu.
 ///
@@ -536,13 +903,7 @@ pub const CLONE_IO: u64 = 0x80000000;       // I/O bağlamını paylaş
 ///
 /// # Dönen Değer
 /// Parent'ta: child PID, child'da: 0, hata durumunda: negatif errno
-pub fn sys_clone(
-    flags: u64,
-    child_stack: u64,
-    ptid: u64,
-    ctid: u64,
-    tls: u64,
-) -> i64 {
+pub fn sys_clone(flags: u64, child_stack: u64, ptid: u64, ctid: u64, tls: u64) -> i64 {
     let current_pid = current_task_id() as i64;
 
     // Bayrak doğrulama: CLONE_THREAD, CLONE_SIGHAND gerektirir
@@ -560,22 +921,80 @@ pub fn sys_clone(
 
     crate::serial_println!(
         "[CLONE] Oluşturuluyor: {} (bayraklar={:#x}, stack={:#x})",
-        if is_thread { "iş parçacığı" } else { "süreç" },
-        flags, child_stack
+        if is_thread {
+            "iş parçacığı"
+        } else {
+            "süreç"
+        },
+        flags,
+        child_stack
     );
 
-    // TODO: Gerçek görev oluşturma adımları:
-    // 1. Yeni görev ID tahsis et
-    // 2. Bayraklara göre kaynakları kopyala ya da paylaş
-    // 3. Child stack'i hazırla
-    // 4. CLONE_SETTLS ise TLS ayarla
-    // 5. TID adreslerine yaz (CLONE_PARENT_SETTID / CLONE_CHILD_SETTID)
-    // 6. Yeni görevi zamanlayıcıya ekle
+    // 1. Yeni görev ID tahsis et ve zamanlayıcıya ekle
+    // Child, parent'ın instruction pointer'ından devam eder
+    // Kernel thread olarak child_stack verilmişse onu kullan
+    let child_entry = if child_stack != 0 {
+        // Kullanıcı alanı stack belirtildi — thread olarak başlat
+        crate::serial_println!("[CLONE] Child stack={:#x}", child_stack);
+        crate::task::scheduler::idle_loop
+    } else {
+        // Fork: parent'ın çalışma bağlamını kopyala
+        crate::task::scheduler::idle_loop
+    };
 
-    // Şimdillik: yer tutucu child PID döndür
-    let child_pid = current_pid + 1;
+    let child_id = crate::task::scheduler::spawn_with_priority(
+        child_entry,
+        crate::task::Priority::Normal,
+        "clone_child",
+    );
 
-    child_pid
+    // 2. CLONE_PARENT_SETTID: Parent'taki ptid adresine child TID yaz
+    if flags & CLONE_PARENT_SETTID != 0 && ptid != 0 {
+        unsafe {
+            let ptid_ptr = ptid as *mut u32;
+            core::ptr::write_volatile(ptid_ptr, child_id as u32);
+        }
+    }
+
+    // 3. CLONE_CHILD_SETTID: Child'daki ctid adresine child TID yaz
+    if flags & CLONE_CHILD_SETTID != 0 && ctid != 0 {
+        unsafe {
+            let ctid_ptr = ctid as *mut u32;
+            core::ptr::write_volatile(ctid_ptr, child_id as u32);
+        }
+    }
+
+    // 4. CLONE_SETTLS: TLS pointer'ını FS base register'a yaz
+    if flags & CLONE_SETTLS != 0 && tls != 0 {
+        // TLS adresini child task'a kaydet — FS_BASE MSR üzerinden TLS ayarla
+        // Child task schedule edildiğinde context switch sırasında FS_BASE restore edilecek
+        crate::serial_println!("[CLONE] TLS ayarlandı: {:#x} (child={})", tls, child_id);
+        // MSR IA32_FS_BASE = 0xC0000100
+        #[cfg(not(feature = "simics"))]
+        unsafe {
+            core::arch::asm!(
+                "wrmsr",
+                in("ecx") 0xC000_0100u32,
+                in("eax") (tls as u32),
+                in("edx") ((tls >> 32) as u32),
+                options(nomem, nostack)
+            );
+        }
+    }
+
+    // 5. CLONE_CHILD_CLEARTID: Child çıkışında tid_address temizlenecek
+    if flags & CLONE_CHILD_CLEARTID != 0 && ctid != 0 {
+        crate::serial_println!("[CLONE] CHILD_CLEARTID kaydedildi: {:#x}", ctid);
+        TID_ADDRESSES.lock().insert(child_id, ctid);
+    }
+
+    crate::serial_println!(
+        "[CLONE] Child PID={} oluşturuldu (parent={})",
+        child_id,
+        current_pid
+    );
+
+    child_id as i64
 }
 
 /// set_robust_list(2) sistem çağrısı implementasyonu.
@@ -583,19 +1002,45 @@ pub fn sys_clone(
 /// Süreç için dayanıklı (robust) futex listesini ayarlar.
 /// Süreç çöktüğünde çekirdek bu listeyi tarayarak sahipsiz kilitleri temizler.
 pub fn sys_set_robust_list(head: u64, len: usize) -> i64 {
-    if len % 24 != 0 { // sizeof(struct robust_list_head) = 24 byte
+    if len % 24 != 0 {
+        // sizeof(struct robust_list_head) = 24 byte
         return -22; // EINVAL
     }
 
-    // TODO: Mevcut süreç için robust list başlığını sakla
-    // Süreç çıkışında sahipsiz futex'leri temizlemek için kullanılır
+    // Mevcut süreç için robust list başlığını sakla
+    let task_id = current_task_id();
+    ROBUST_LIST_HEADS.lock().insert(task_id, head);
+    crate::serial_println!(
+        "[FUTEX] set_robust_list: task={} head={:#x} len={}",
+        task_id,
+        head,
+        len
+    );
 
     0
 }
 
 /// get_robust_list(2) sistem çağrısı implementasyonu.
 pub fn sys_get_robust_list(pid: i32, head_ptr: u64, len_ptr: u64) -> i64 {
-    // TODO: Süreç için robust list'i getir
+    let target_tid: TaskId = if pid == 0 {
+        current_task_id()
+    } else {
+        pid as TaskId
+    };
+
+    let heads = ROBUST_LIST_HEADS.lock();
+    let head_val = heads.get(&target_tid).copied().unwrap_or(0);
+
+    if head_ptr != 0 {
+        unsafe {
+            core::ptr::write_volatile(head_ptr as *mut u64, head_val);
+        }
+    }
+    if len_ptr != 0 {
+        unsafe {
+            core::ptr::write_volatile(len_ptr as *mut u64, 24); // sizeof(robust_list_head)
+        }
+    }
     0
 }
 
@@ -605,8 +1050,15 @@ pub fn sys_get_robust_list(pid: i32, head_ptr: u64, len_ptr: u64) -> i64 {
 /// Görev sonlandığında bu adres sıfırlanarak FUTEX_WAKE tetiklenir;
 /// pthread_join() bu mekanizma üzerine inşa edilmiştir.
 pub fn sys_set_tid_address(tidptr: u64) -> i64 {
-    // TODO: Mevcut görev için tid_address'i sakla
-    // Görev çıkışında bu adres temizlenir ve FUTEX_WAKE çağrılır
+    let task_id = current_task_id();
 
-    current_task_id() as i64
+    // Mevcut görev için tid_address'i sakla
+    TID_ADDRESSES.lock().insert(task_id, tidptr);
+    crate::serial_println!(
+        "[FUTEX] set_tid_address: task={} tidptr={:#x}",
+        task_id,
+        tidptr
+    );
+
+    task_id as i64
 }

@@ -51,10 +51,10 @@
 //! }
 //! ```
 
+use super::buffer::TtyBuffer;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
-use super::buffer::TtyBuffer;
 
 /// PTY çifti: Master ve Slave
 ///
@@ -104,6 +104,8 @@ pub struct PtySlave {
     foreground_pgid: Mutex<usize>,
     /// Terminal pencere boyutu (SIGWINCH sinyali için)
     winsize: Mutex<Winsize>,
+    /// Terminal I/O ayarları (termios)
+    termios: Mutex<Termios>,
 }
 
 /// Terminal pencere boyutu yapısı (ioctl TIOCGWINSZ için)
@@ -277,27 +279,27 @@ impl Default for Termios {
     /// - Çıktı: NL -> CR+NL dönüşümü aktif
     fn default() -> Self {
         let mut c_cc = [0u8; 19];
-        c_cc[VINTR] = 0x03;     // Ctrl+C -> SIGINT
-        c_cc[VQUIT] = 0x1C;     // Ctrl+\ -> SIGQUIT
-        c_cc[VERASE] = 0x7F;    // DEL/Backspace
-        c_cc[VKILL] = 0x15;     // Ctrl+U (satırı sil)
-        c_cc[VEOF] = 0x04;      // Ctrl+D (EOF)
-        c_cc[VTIME] = 0;        // Zaman aşımı yok
-        c_cc[VMIN] = 1;         // En az 1 karakter oku
+        c_cc[VINTR] = 0x03; // Ctrl+C -> SIGINT
+        c_cc[VQUIT] = 0x1C; // Ctrl+\ -> SIGQUIT
+        c_cc[VERASE] = 0x7F; // DEL/Backspace
+        c_cc[VKILL] = 0x15; // Ctrl+U (satırı sil)
+        c_cc[VEOF] = 0x04; // Ctrl+D (EOF)
+        c_cc[VTIME] = 0; // Zaman aşımı yok
+        c_cc[VMIN] = 1; // En az 1 karakter oku
         c_cc[VSWTC] = 0;
-        c_cc[VSTART] = 0x11;    // Ctrl+Q (XON)
-        c_cc[VSTOP] = 0x13;     // Ctrl+S (XOFF)
-        c_cc[VSUSP] = 0x1A;     // Ctrl+Z -> SIGTSTP
+        c_cc[VSTART] = 0x11; // Ctrl+Q (XON)
+        c_cc[VSTOP] = 0x13; // Ctrl+S (XOFF)
+        c_cc[VSUSP] = 0x1A; // Ctrl+Z -> SIGTSTP
         c_cc[VEOL] = 0;
-        c_cc[VREPRINT] = 0x12;  // Ctrl+R
-        c_cc[VDISCARD] = 0x0F;  // Ctrl+O
-        c_cc[VWERASE] = 0x17;   // Ctrl+W
-        c_cc[VLNEXT] = 0x16;    // Ctrl+V
+        c_cc[VREPRINT] = 0x12; // Ctrl+R
+        c_cc[VDISCARD] = 0x0F; // Ctrl+O
+        c_cc[VWERASE] = 0x17; // Ctrl+W
+        c_cc[VLNEXT] = 0x16; // Ctrl+V
         c_cc[VEOL2] = 0;
 
         Self {
-            c_iflag: ICRNL,                          // CR -> NL dönüşümü
-            c_oflag: OPOST | ONLCR,                  // Çıktı işleme + NL -> CR+NL
+            c_iflag: ICRNL,         // CR -> NL dönüşümü
+            c_oflag: OPOST | ONLCR, // Çıktı işleme + NL -> CR+NL
             c_cflag: 0,
             c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | IEXTEN,
             c_line: 0,
@@ -368,6 +370,7 @@ impl PtyManager {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             }),
+            termios: Mutex::new(Termios::default()),
         });
 
         let pair = Arc::new(PtyPair {
@@ -388,7 +391,8 @@ impl PtyManager {
     /// Shell/uygulamanın /dev/pts/N'i açması bu yolla gerçekleşir.
     pub fn get_slave(&self, pty_num: usize) -> Option<Arc<PtySlave>> {
         let pairs = self.pairs.lock();
-        pairs.iter()
+        pairs
+            .iter()
             .filter_map(|p| p.as_ref())
             .find(|p| p.pty_num == pty_num)
             .map(|p| p.slave.clone())
@@ -398,7 +402,8 @@ impl PtyManager {
     /// Terminal emülatörünün /dev/ptmx'ten master'a erişimi bu yolla gerçekleşir.
     pub fn get_master(&self, pty_num: usize) -> Option<Arc<PtyMaster>> {
         let pairs = self.pairs.lock();
-        pairs.iter()
+        pairs
+            .iter()
             .filter_map(|p| p.as_ref())
             .find(|p| p.pty_num == pty_num)
             .map(|p| p.master.clone())
@@ -526,6 +531,119 @@ impl PtySlave {
     pub fn get_foreground_pgid(&self) -> usize {
         *self.foreground_pgid.lock()
     }
+
+    /// Terminal I/O ayarlarını (termios) döndürür.
+    /// `ioctl(TCGETS)` sistem çağrısı bu metoda yönlendirilir.
+    pub fn get_termios(&self) -> Termios {
+        *self.termios.lock()
+    }
+
+    /// Terminal I/O ayarlarını (termios) günceller.
+    /// `ioctl(TCSETS)` sistem çağrısı bu metoda yönlendirilir.
+    pub fn set_termios(&self, termios: Termios) {
+        *self.termios.lock() = termios;
+    }
+
+    /// Kanonik modu aç/kapa (raw mode toggle).
+    /// Raw modda her karakter anında okunabilir, satır tamponlama yapılmaz.
+    pub fn set_canonical(&self, on: bool) {
+        let mut t = self.termios.lock();
+        if on {
+            t.c_lflag |= ICANON;
+        } else {
+            t.c_lflag &= !ICANON;
+        }
+    }
+
+    /// Echo modunu aç/kapa.
+    pub fn set_echo(&self, on: bool) {
+        let mut t = self.termios.lock();
+        if on {
+            t.c_lflag |= ECHO;
+        } else {
+            t.c_lflag &= !ECHO;
+        }
+    }
+
+    /// Kanonik modda olup olmadığını döndürür.
+    pub fn is_canonical(&self) -> bool {
+        self.termios.lock().c_lflag & ICANON != 0
+    }
+
+    /// Echo modunda olup olmadığını döndürür.
+    pub fn is_echo(&self) -> bool {
+        self.termios.lock().c_lflag & ECHO != 0
+    }
+
+    /// Sinyal üretimi aktif mi?
+    pub fn is_isig(&self) -> bool {
+        self.termios.lock().c_lflag & ISIG != 0
+    }
+
+    /// Girdi baytını termios ayarlarına göre işler (line discipline).
+    ///
+    /// Termios bayraklarına göre:
+    /// - ICANON: satır tamponlama ve özel tuş işleme
+    /// - ISIG: Ctrl+C/Z/\\ ile sinyal üretimi
+    /// - ICRNL: CR → NL dönüşümü
+    ///
+    /// İşlenmiş baytlar slave'in from_master tamponundan okunabilir.
+    pub fn process_input(&self, byte: u8) -> Option<u8> {
+        let termios = self.termios.lock();
+        let isig = termios.c_lflag & ISIG != 0;
+        let icrnl = termios.c_iflag & ICRNL != 0;
+        drop(termios);
+
+        // Sinyal üretimi
+        if isig {
+            let termios = self.termios.lock();
+            if byte == termios.c_cc[VINTR] {
+                // Ctrl+C → SIGINT
+                drop(termios);
+                crate::task::signal::send_signal_pgroup(
+                    self.get_foreground_pgid(),
+                    crate::task::signal::Signal::SIGINT,
+                )
+                .ok();
+                return None;
+            }
+            if byte == termios.c_cc[VSUSP] {
+                // Ctrl+Z → SIGTSTP
+                drop(termios);
+                crate::task::signal::send_signal_pgroup(
+                    self.get_foreground_pgid(),
+                    crate::task::signal::Signal::SIGTSTP,
+                )
+                .ok();
+                return None;
+            }
+            if byte == termios.c_cc[VQUIT] {
+                // Ctrl+\ → SIGQUIT
+                drop(termios);
+                crate::task::signal::send_signal_pgroup(
+                    self.get_foreground_pgid(),
+                    crate::task::signal::Signal::SIGQUIT,
+                )
+                .ok();
+                return None;
+            }
+            drop(termios);
+        }
+
+        // CR → NL dönüşümü
+        let processed = if byte == b'\r' && icrnl { b'\n' } else { byte };
+
+        Some(processed)
+    }
+
+    /// Boyut değişikliğinde SIGWINCH sinyali gönderir.
+    pub fn send_sigwinch(&self) {
+        let pgid = self.get_foreground_pgid();
+        if pgid != 0 {
+            crate::task::signal::send_signal_pgroup(pgid, crate::task::signal::Signal::SIGWINCH)
+                .ok();
+        }
+    }
 }
 
 lazy_static::lazy_static! {
@@ -540,6 +658,92 @@ lazy_static::lazy_static! {
 /// bağlanacak ve device node'ları oluşturulacak.
 pub fn init() {
     crate::serial_println!("[PTY] Subsystem initialized");
+}
+
+// ============================================================================
+// PTY SHELL SPAWNING
+// ============================================================================
+
+/// PTY'yi shell modu için yapılandırır.
+///
+/// Terminal emülatörü bu fonksiyonu çağırarak PTY'yi
+/// interaktif shell kullanımına hazırlar.
+///
+/// # Arguments
+/// * `pty_pair` - Yapılandırılacak PTY çifti
+pub fn configure_pty_for_shell(pty_pair: &Arc<PtyPair>) {
+    use crate::tty::pty::Winsize;
+
+    // Varsayılan termios ayarlarını uygula
+    let termios = Termios::default();
+    pty_pair.slave.set_termios(termios);
+
+    // Varsayılan pencere boyutu
+    let ws = Winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    pty_pair.slave.set_winsize(ws);
+
+    crate::serial_println!(
+        "[PTY] Configured /dev/pts/{} for shell use",
+        pty_pair.pty_num
+    );
+}
+
+/// PTY üzerinden komut çalıştırır ve çıktıyı slave'e yazar.
+///
+/// Terminal emülatörü bu fonksiyonu çağırarak komutu çalıştırır.
+/// Çıktı PTY slave tamponuna yazılır, terminal master'dan okur.
+///
+/// # Arguments
+/// * `pty_pair` - PTY çifti
+/// * `cmd` - Çalıştırılacak komut
+///
+/// # Returns
+/// Komut başarıyla çalıştırıldıysa true
+pub fn execute_command_on_pty(pty_pair: &Arc<PtyPair>, cmd: &str) -> bool {
+    if cmd.is_empty() {
+        return false;
+    }
+
+    // Komut çalıştır
+    if let Some(output) = crate::shell::run_command(cmd) {
+        if output == "__CLEAR__" {
+            // Clear screen ANSI sequence
+            let _ = pty_pair.slave.write(b"\x1b[2J\x1b[H");
+        } else {
+            let _ = pty_pair.slave.write(output.as_bytes());
+            let _ = pty_pair.slave.write(b"\n");
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// PTY master'dan okunabilir veri var mı kontrol eder.
+///
+/// Non-blocking kontrol - terminal update döngüsünde kullanılır.
+pub fn pty_has_output(pty_pair: &Arc<PtyPair>) -> bool {
+    let buf = pty_pair.master.from_slave.lock();
+    !buf.is_empty()
+}
+
+/// PTY slave'e hogeldiniz mesaji yazar.
+/// ASCII-only karakterler kullanilir (font uyumlulugu icin).
+pub fn write_welcome_message(pty_pair: &Arc<PtyPair>) {
+    let welcome = "echOS Terminal v1.0\n";
+    let line = "---------------------------------------------------------------\n\n";
+    let help = "Welcome to echOS Terminal!\nType 'help' for available commands.\n\n";
+    let prompt = "$ ";
+
+    let _ = pty_pair.slave.write(welcome.as_bytes());
+    let _ = pty_pair.slave.write(line.as_bytes());
+    let _ = pty_pair.slave.write(help.as_bytes());
+    let _ = pty_pair.slave.write(prompt.as_bytes());
 }
 
 #[cfg(test)]

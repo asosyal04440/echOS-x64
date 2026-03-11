@@ -38,7 +38,7 @@ impl Severity {
             | FaultType::PmmCorruption
             | FaultType::IdtCorruption
             | FaultType::RunQueueCorruption => Severity::Emergency,
-            
+
             // Kritik - sistem neredeyse işlevsiz
             FaultType::OutOfMemory
             | FaultType::ApStartupFailed
@@ -46,7 +46,7 @@ impl Severity {
             | FaultType::MetadataCorruption
             | FaultType::CanaryMismatch
             | FaultType::ThermalEvent => Severity::Critical,
-            
+
             // Bozunmuş - azaltılmış işlevsellik
             FaultType::DoubleFree
             | FaultType::UseAfterFree
@@ -56,7 +56,7 @@ impl Severity {
             | FaultType::DeviceError
             | FaultType::JournalError
             | FaultType::AmlError => Severity::Degraded,
-            
+
             // Uyarı - günlüğe yazılır, sistem devam eder
             FaultType::NullPointer
             | FaultType::InvalidPointer
@@ -67,27 +67,30 @@ impl Severity {
             | FaultType::SocketLeak
             | FaultType::GpeStorm
             | FaultType::BootTimeout => Severity::Warning,
-            
+
             // Bilinmeyen için varsayılan: uyarı
             _ => Severity::Warning,
         }
     }
-    
+
     /// Hatanın anında müdahale gerektirip gerektirmediğini kontrol eder
     pub fn requires_immediate_action(&self) -> bool {
         matches!(self, Severity::Critical | Severity::Emergency)
     }
-    
+
     /// Sistemin devam edip edemeyeceğini kontrol eder
     pub fn can_continue(&self) -> bool {
         !matches!(self, Severity::Emergency)
     }
-    
+
     /// Kurtarmanın denenmesi gerekip gerekmediğini kontrol eder
     pub fn should_recover(&self) -> bool {
-        matches!(self, Severity::Warning | Severity::Degraded | Severity::Critical)
+        matches!(
+            self,
+            Severity::Warning | Severity::Degraded | Severity::Critical
+        )
     }
-    
+
     /// İnsan tarafından okunabilir açıklama döndürür
     pub fn description(&self) -> &'static str {
         match self {
@@ -98,7 +101,7 @@ impl Severity {
             Severity::Emergency => "Kurtarılamaz hata, acil kapatma",
         }
     }
-    
+
     /// Önerilen eylemi döndürür
     pub fn recommended_action(&self) -> RecommendedAction {
         match self {
@@ -154,15 +157,21 @@ impl RecoveryResult {
     pub fn is_success(&self) -> bool {
         matches!(self, RecoveryResult::Recovered | RecoveryResult::Degraded)
     }
-    
+
     /// Sistemin devam edip edemeyeceğini kontrol eder
     pub fn can_continue(&self) -> bool {
-        matches!(self, RecoveryResult::Recovered | RecoveryResult::Degraded | RecoveryResult::Failed)
+        matches!(
+            self,
+            RecoveryResult::Recovered | RecoveryResult::Degraded | RecoveryResult::Failed
+        )
     }
-    
+
     /// Yeniden başlatma gerekip gerekmediğini kontrol eder
     pub fn needs_reboot(&self) -> bool {
-        matches!(self, RecoveryResult::RequiresReboot | RecoveryResult::Unrecoverable)
+        matches!(
+            self,
+            RecoveryResult::RequiresReboot | RecoveryResult::Unrecoverable
+        )
     }
 }
 
@@ -209,7 +218,7 @@ impl RecoveryLevel {
             RecoveryLevel::Level4 => "Acil: Sistem durdurma yakın",
         }
     }
-    
+
     /// Bu seviyede devre dışı bırakılması gereken modülleri döndürür
     pub fn disabled_modules(&self) -> &'static [&'static str] {
         match self {
@@ -220,7 +229,7 @@ impl RecoveryLevel {
             RecoveryLevel::Level4 => &["audio", "bluetooth", "gui", "network", "usb", "fs_write"],
         }
     }
-    
+
     /// Modülün bu seviyede aktif olup olmayacağını kontrol eder
     pub fn is_module_active(&self, module: &str) -> bool {
         !self.disabled_modules().contains(&module)

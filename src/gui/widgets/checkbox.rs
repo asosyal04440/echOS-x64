@@ -64,13 +64,16 @@ pub struct CheckBox {
     checked: bool,
     hovered: bool,
     on_toggle: Option<fn(bool)>,
+    /// Devre dışı — tıklama yok sayılır, soluk renkte çizilir.
+    enabled: bool,
+    /// Belirsiz (indeterminate) — kısmen seçili, tire (dash) gösterir.
+    indeterminate: bool,
+    /// Odak durumu — klavye ile Space ile toggle.
+    focused: bool,
 }
 
 impl CheckBox {
     /// Yeni checkbox oluşturur; başlangıçta işaretsiz durumdadır.
-    ///
-    /// Sabit boyut (200x24 piksel) kullanılır. Gerçek uygulamalarda
-    /// metin uzunluğuna göre dinamik genişlik hesaplanabilir.
     pub fn new(x: i32, y: i32, label: &str) -> Self {
         Self {
             rect: Rect::new(x, y, 200, 24),
@@ -78,7 +81,20 @@ impl CheckBox {
             checked: false,
             hovered: false,
             on_toggle: None,
+            enabled: true,
+            indeterminate: false,
+            focused: false,
         }
+    }
+
+    /// Etkinlik durumunu ayarlar.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Belirsiz (indeterminate) durumunu ayarlar.
+    pub fn set_indeterminate(&mut self, v: bool) {
+        self.indeterminate = v;
     }
 
     /// Toggle handler'ı zincir yöntemiyle (builder pattern) ekler.
@@ -105,10 +121,11 @@ impl CheckBox {
     }
 
     /// Durumu tersine çevirir ve varsa callback'i tetikler.
-    ///
-    /// `if let Some(handler) = self.on_toggle` deseni: Option içindeki değeri
-    /// güvenle açar. `on_toggle` `None` ise if let bloğu çalışmaz, panic olmaz.
     pub fn toggle(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.indeterminate = false; // Toggle, belirsiz durumu temizler
         self.checked = !self.checked;
         if let Some(handler) = self.on_toggle {
             handler(self.checked);
@@ -162,7 +179,12 @@ impl Widget for CheckBox {
         // Etiket metni: kutunun sağına 8 piksel boşlukla yerleştirilir.
         // Dikey ortalama: box_size=18, metin yüksekliği~16; (18-16)/2 = 1 olduğundan
         // +3 piksel offset yeterli görsel hizalamayı sağlar.
-        fb.draw_string(x + box_size + 8, y + 3, &self.label, Theme::TEXT_PRIMARY.to_u32());
+        fb.draw_string(
+            x + box_size + 8,
+            y + 3,
+            &self.label,
+            Theme::TEXT_PRIMARY.to_u32(),
+        );
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {
@@ -299,7 +321,12 @@ impl Widget for RadioButton {
         }
 
         // Etiket metni: çemberin sağına yerleştirilir
-        fb.draw_string(x + circle_size + 8, y + 3, &self.label, Theme::TEXT_PRIMARY.to_u32());
+        fb.draw_string(
+            x + circle_size + 8,
+            y + 3,
+            &self.label,
+            Theme::TEXT_PRIMARY.to_u32(),
+        );
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {

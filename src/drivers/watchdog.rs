@@ -158,10 +158,8 @@ impl WatchdogDevice {
         if let Some(ops) = self.ops {
             ops.start()?;
             self.running.store(true, Ordering::SeqCst);
-            self.last_ping.store(
-                crate::task::scheduler::get_ticks(),
-                Ordering::SeqCst
-            );
+            self.last_ping
+                .store(crate::task::scheduler::get_ticks() as u64, Ordering::SeqCst);
             crate::serial_println!("[WATCHDOG] {} started", self.name);
         }
         Ok(())
@@ -196,10 +194,8 @@ impl WatchdogDevice {
 
         if let Some(ops) = self.ops {
             ops.ping()?;
-            self.last_ping.store(
-                crate::task::scheduler::get_ticks(),
-                Ordering::SeqCst
-            );
+            self.last_ping
+                .store(crate::task::scheduler::get_ticks() as u64, Ordering::SeqCst);
         }
         Ok(())
     }

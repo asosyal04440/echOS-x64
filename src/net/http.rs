@@ -76,17 +76,17 @@
 //! \r\n
 //! ```
 
-use alloc::vec::Vec;
-use alloc::vec;
+use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::string::ToString;
-use alloc::collections::BTreeMap;
-use alloc::borrow::ToOwned;
+use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
-use super::{NetError, Ipv4Addr, Port};
-use super::socket::{SocketAddr, SocketType, AddressFamily, Protocol};
-use super::socket::{socket as socket_create, connect, send, recv, close};
+use super::socket::{close, connect, recv, send, socket as socket_create};
+use super::socket::{AddressFamily, Protocol, SocketAddr, SocketType};
+use super::{Ipv4Addr, NetError, Port};
 
 // ============================================================================
 // HTTP SABİTLERİ
@@ -114,18 +114,18 @@ const DEFAULT_TIMEOUT_MS: u64 = 30000;
 /// Ağ hatalarından uygulama düzeyindeki hatalara kadar tüm hata durumlarını kapsar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpError {
-    Network(NetError),  // Ağ katmanı hatası (TCP bağlantı kesilmesi vb.)
-    InvalidUrl,         // URL ayrıştırılamadı (şema veya host eksik)
-    InvalidResponse,    // Yanıt geçerli HTTP formatında değil
-    ConnectionFailed,   // DNS çözümleme veya TCP bağlantısı başarısız
-    Timeout,            // Bağlantı veya veri alım zaman aşımı
-    TooManyRedirects,   // MAX_REDIRECTS sınırı aşıldı
-    NotFound,           // HTTP 404 Not Found
-    ServerError,        // HTTP 5xx Sunucu Hatası
-    InvalidHeader,      // Başlık UTF-8 geçersiz veya format hatası
-    ChunkedEncoding,    // Chunked transfer encoding ayrıştırma hatası
-    ContentLength,      // Content-Length başlığı geçersiz veya eksik
-    TlsNotSupported,    // HTTPS/TLS henüz desteklenmiyor (TODO)
+    Network(NetError), // Ağ katmanı hatası (TCP bağlantı kesilmesi vb.)
+    InvalidUrl,        // URL ayrıştırılamadı (şema veya host eksik)
+    InvalidResponse,   // Yanıt geçerli HTTP formatında değil
+    ConnectionFailed,  // DNS çözümleme veya TCP bağlantısı başarısız
+    Timeout,           // Bağlantı veya veri alım zaman aşımı
+    TooManyRedirects,  // MAX_REDIRECTS sınırı aşıldı
+    NotFound,          // HTTP 404 Not Found
+    ServerError,       // HTTP 5xx Sunucu Hatası
+    InvalidHeader,     // Başlık UTF-8 geçersiz veya format hatası
+    ChunkedEncoding,   // Chunked transfer encoding ayrıştırma hatası
+    ContentLength,     // Content-Length başlığı geçersiz veya eksik
+    TlsNotSupported,   // HTTPS/TLS henüz desteklenmiyor (TODO)
 }
 
 impl From<NetError> for HttpError {
@@ -208,7 +208,8 @@ impl HttpHeaders {
     ///
     /// Anahtar küçük harfe dönüştürülür (HTTP başlıkları büyük-küçük harf duyarsız).
     pub fn insert(&mut self, key: &str, value: &str) {
-        self.headers.insert(key.to_string().to_lowercase(), value.to_string());
+        self.headers
+            .insert(key.to_string().to_lowercase(), value.to_string());
     }
 
     /// Belirtilen başlığın değerini döner.
@@ -299,7 +300,11 @@ impl HttpUrl {
         };
 
         // Şemaya göre varsayılan port belirle
-        port = if scheme == "https" { HTTPS_PORT } else { HTTP_PORT };
+        port = if scheme == "https" {
+            HTTPS_PORT
+        } else {
+            HTTP_PORT
+        };
 
         // Host ve port ayrıştır (ilk / karakterine kadar)
         let path_start = rest.find('/').unwrap_or(rest.len());
@@ -361,8 +366,9 @@ impl HttpUrl {
         result.push_str(&self.host);
 
         // Standart olmayan portlar URL'de gösterilir
-        if (self.scheme == "http" && self.port != HTTP_PORT) ||
-           (self.scheme == "https" && self.port != HTTPS_PORT) {
+        if (self.scheme == "http" && self.port != HTTP_PORT)
+            || (self.scheme == "https" && self.port != HTTPS_PORT)
+        {
             result.push(':');
             result.push_str(&self.port.to_string());
         }
@@ -399,10 +405,10 @@ impl HttpUrl {
 /// Sunucudan alınan durum kodu, başlıklar ve gövde verisini içerir.
 #[derive(Clone, Debug)]
 pub struct HttpResponse {
-    pub status_code: u16,    // HTTP durum kodu (200=OK, 404=Not Found, 500=Server Error)
+    pub status_code: u16, // HTTP durum kodu (200=OK, 404=Not Found, 500=Server Error)
     pub status_text: String, // Durum metni ("OK", "Not Found" vb.)
-    pub headers: HttpHeaders,// Yanıt başlıkları (Content-Type, Content-Length vb.)
-    pub body: Vec<u8>,       // Yanıt gövdesi (HTML, JSON, binary vb.)
+    pub headers: HttpHeaders, // Yanıt başlıkları (Content-Type, Content-Length vb.)
+    pub body: Vec<u8>,    // Yanıt gövdesi (HTML, JSON, binary vb.)
 }
 
 impl HttpResponse {
@@ -454,7 +460,8 @@ impl HttpResponse {
     ///
     /// Başlık eksikse veya ayrıştırılamazsa `None` döner.
     pub fn content_length(&self) -> Option<usize> {
-        self.headers.get("content-length")
+        self.headers
+            .get("content-length")
             .and_then(|s| s.parse::<usize>().ok())
     }
 
@@ -463,7 +470,8 @@ impl HttpResponse {
     /// Chunked encoding: Yanıt gövdesi parçalar halinde gelir.
     /// Her parça önce hex boyutunu, ardından veriyi içerir.
     pub fn is_chunked(&self) -> bool {
-        self.headers.get("transfer-encoding")
+        self.headers
+            .get("transfer-encoding")
             .map(|s| s.to_lowercase() == "chunked")
             .unwrap_or(false)
     }
@@ -491,9 +499,9 @@ impl Default for HttpResponse {
 /// DNS çözümleme, TCP bağlantısı, istek gönderme ve yanıt ayrıştırmayı
 /// birleştirir. Otomatik yönlendirme takibi desteklenir.
 pub struct HttpClient {
-    timeout_ms: u64,       // Bağlantı ve alım zaman aşımı (ms)
-    max_redirects: u8,     // Maksimum otomatik yönlendirme sayısı
-    follow_redirects: bool,// Otomatik yönlendirme takip edilsin mi?
+    timeout_ms: u64,        // Bağlantı ve alım zaman aşımı (ms)
+    max_redirects: u8,      // Maksimum otomatik yönlendirme sayısı
+    follow_redirects: bool, // Otomatik yönlendirme takip edilsin mi?
 }
 
 impl HttpClient {
@@ -528,7 +536,12 @@ impl HttpClient {
     /// Sunucuda yeni kaynak oluştur veya işlem başlat.
     /// `body`: İstek gövdesi (form verisi, JSON vb.)
     /// `content_type`: İçerik türü ("application/json", "application/x-www-form-urlencoded" vb.)
-    pub fn post(&self, url: &str, body: &[u8], content_type: Option<&str>) -> Result<HttpResponse, HttpError> {
+    pub fn post(
+        &self,
+        url: &str,
+        body: &[u8],
+        content_type: Option<&str>,
+    ) -> Result<HttpResponse, HttpError> {
         self.request(HttpMethod::POST, url, Some(body), content_type)
     }
 
@@ -559,7 +572,9 @@ impl HttpClient {
             }
 
             // DNS ile hostname'i IP adresine çevir
-            let dns_server = super::get_config().dns_servers.first()
+            let dns_server = super::get_config()
+                .dns_servers
+                .first()
                 .copied()
                 .unwrap_or([8, 8, 8, 8]);
             let dns_ip = Ipv4Addr::from_bytes(dns_server);
@@ -567,11 +582,7 @@ impl HttpClient {
                 .map_err(|_| HttpError::ConnectionFailed)?;
 
             // TCP soketi oluştur (STREAM = bağlantı yönelimli)
-            let sock_id = socket_create(
-                AddressFamily::IPV4,
-                SocketType::STREAM,
-                Protocol::TCP,
-            )?;
+            let sock_id = socket_create(AddressFamily::IPV4, SocketType::STREAM, Protocol::TCP)?;
 
             // Web sunucusuna bağlan (genellikle port 80)
             let addr = SocketAddr::new(ip, Port(current_url.port));
@@ -743,8 +754,8 @@ impl HttpClient {
         }
 
         // Başlık sonu konumunu bul (zorunlu)
-        let header_end = find_header_end(&header_buf[..header_len])
-            .ok_or(HttpError::InvalidResponse)?;
+        let header_end =
+            find_header_end(&header_buf[..header_len]).ok_or(HttpError::InvalidResponse)?;
 
         let header_str = core::str::from_utf8(&header_buf[..header_end])
             .map_err(|_| HttpError::InvalidHeader)?;
@@ -764,7 +775,9 @@ impl HttpClient {
             // Başlık tamponunda zaten gelen gövde verisi varsa kopyala
             let initial_body_len = header_len - body_start;
             if initial_body_len > 0 {
-                response.body.extend_from_slice(&header_buf[body_start..header_len]);
+                response
+                    .body
+                    .extend_from_slice(&header_buf[body_start..header_len]);
             }
 
             // Kalan gövdeyi oku
@@ -778,7 +791,9 @@ impl HttpClient {
             }
         } else {
             // Content-Length yok: bağlantı kapanana dek oku
-            response.body.extend_from_slice(&header_buf[body_start..header_len]);
+            response
+                .body
+                .extend_from_slice(&header_buf[body_start..header_len]);
 
             loop {
                 let mut chunk = vec![0u8; RECV_BUF_SIZE];
@@ -797,7 +812,11 @@ impl HttpClient {
     ///
     /// İlk satır: "HTTP/1.1 200 OK" (durum satırı)
     /// Sonraki satırlar: "Anahtar: Değer" formatında başlık alanları
-    fn parse_response_headers(&self, header_str: &str, response: &mut HttpResponse) -> Result<(), HttpError> {
+    fn parse_response_headers(
+        &self,
+        header_str: &str,
+        response: &mut HttpResponse,
+    ) -> Result<(), HttpError> {
         let mut lines = header_str.lines();
 
         // Durum satırı: "HTTP/1.1 200 OK"
@@ -809,8 +828,7 @@ impl HttpClient {
             return Err(HttpError::InvalidResponse);
         }
 
-        response.status_code = parts[1].parse()
-            .map_err(|_| HttpError::InvalidResponse)?;
+        response.status_code = parts[1].parse().map_err(|_| HttpError::InvalidResponse)?;
         response.status_text = parts.get(2).unwrap_or(&"").to_string();
 
         // Başlık alanlarını ayrıştır: "Content-Type: text/html"
@@ -839,7 +857,11 @@ impl HttpClient {
     /// 0\r\n          <- Son chunk (boyut = 0 demek bitiş)
     /// \r\n
     /// ```
-    fn receive_chunked_body(&self, sock_id: u32, response: &mut HttpResponse) -> Result<(), HttpError> {
+    fn receive_chunked_body(
+        &self,
+        sock_id: u32,
+        response: &mut HttpResponse,
+    ) -> Result<(), HttpError> {
         loop {
             // Chunk boyutunu oku (hex, \r\n ile biter)
             let mut size_buf = String::new();
@@ -905,7 +927,8 @@ impl Default for HttpClient {
 /// Dönen değer: başlıkların bittiği konum (CRLFCRLF'den önceki byte'ın indisi).
 fn find_header_end(data: &[u8]) -> Option<usize> {
     for i in 0..data.len().saturating_sub(3) {
-        if data[i] == b'\r' && data[i + 1] == b'\n' && data[i + 2] == b'\r' && data[i + 3] == b'\n' {
+        if data[i] == b'\r' && data[i + 1] == b'\n' && data[i + 2] == b'\r' && data[i + 3] == b'\n'
+        {
             return Some(i);
         }
     }

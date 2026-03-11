@@ -29,9 +29,9 @@
 //! socket() → connect() → send()/recv() → close()
 //! ```
 
-use super::{Ipv4Addr, Port, NetError};
 use super::tcp;
 use super::udp;
+use super::{Ipv4Addr, NetError, Port};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -45,8 +45,8 @@ pub use super::SocketAddr;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AddressFamily {
     UNSPEC = 0,
-    IPV4 = 2,    // AF_INET
-    IPV6 = 10,   // AF_INET6
+    IPV4 = 2,  // AF_INET
+    IPV6 = 10, // AF_INET6
 }
 
 /// Soket türü (socket type).
@@ -56,9 +56,9 @@ pub enum AddressFamily {
 /// - `RAW`    (3): Ham IP — çekirdek seviyesi paket işleme
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SocketType {
-    STREAM = 1,  // SOCK_STREAM (TCP)
-    DGRAM = 2,   // SOCK_DGRAM (UDP)
-    RAW = 3,     // SOCK_RAW
+    STREAM = 1, // SOCK_STREAM (TCP)
+    DGRAM = 2,  // SOCK_DGRAM (UDP)
+    RAW = 3,    // SOCK_RAW
 }
 
 /// Soket protokolü (socket protocol).
@@ -120,7 +120,11 @@ impl Socket {
     ///
     /// `sock_type`'a göre TCP veya UDP katmanında gerçek soket nesnesi oluşturulur.
     /// RAW soketler henüz desteklenmediğinden NotSupported hatası döner.
-    pub fn new(domain: AddressFamily, sock_type: SocketType, protocol: Protocol) -> Result<Self, NetError> {
+    pub fn new(
+        domain: AddressFamily,
+        sock_type: SocketType,
+        protocol: Protocol,
+    ) -> Result<Self, NetError> {
         let id = match sock_type {
             SocketType::STREAM => tcp::create_socket(),
             SocketType::DGRAM => udp::create_socket(),
@@ -150,7 +154,11 @@ impl Socket {
 /// `socket(2)` — Yeni bir soket oluşturur ve kimliğini döndürür.
 ///
 /// Başarılı olursa soket kimliği (fd benzeri u32), aksi halde `NetError` döner.
-pub fn socket(domain: AddressFamily, sock_type: SocketType, protocol: Protocol) -> Result<u32, NetError> {
+pub fn socket(
+    domain: AddressFamily,
+    sock_type: SocketType,
+    protocol: Protocol,
+) -> Result<u32, NetError> {
     let sock = Socket::new(domain, sock_type, protocol)?;
     Ok(sock.id)
 }
@@ -192,29 +200,85 @@ pub fn connect(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
     tcp::connect(socket_id, addr)
 }
 
+/// Soket bayrakları (socket flags)
+///
+/// Bu sabitler Linux `<socket.h>` başlık dosyasındaki değerlerle aynıdır.
+pub const MSG_DONTWAIT: u32 = 0x40; // Non-blocking I/O for this operation
+pub const MSG_PEEK: u32 = 0x02; // Peek at incoming data without consuming
+pub const MSG_WAITALL: u32 = 0x100; // Wait for full request or error
+pub const MSG_NOSIGNAL: u32 = 0x4000; // Don't generate SIGPIPE
+
 /// `send(2)` — Bağlı TCP soketi üzerinden veri gönderir.
 ///
-/// `flags` parametresi şu an kullanılmıyor (gelecekte MSG_DONTWAIT vb. için).
+/// `flags` parametresi şu değerleri destekler:
+/// - `MSG_DONTWAIT` (0x40): Bu işlem için bloklamayan mod
+///
 /// Dönen değer gerçekte gönderilen bayt sayısıdır.
 pub fn send(socket_id: u32, data: &[u8], flags: u32) -> Result<usize, NetError> {
-    let _ = flags; // TODO: implement flags
-    tcp::send(socket_id, data)
+    let nonblocking = (flags & MSG_DONTWAIT) != 0;
+
+    // Check if socket is in nonblocking mode or MSG_DONTWAIT is set
+    if nonblocking {
+        // Try non-blocking send
+        match tcp::try_send(socket_id, data) {
+            Ok(n) => Ok(n),
+            Err(NetError::WouldBlock) => Err(NetError::WouldBlock),
+            Err(e) => Err(e),
+        }
+    } else {
+        tcp::send(socket_id, data)
+    }
 }
 
 /// `recv(2)` — Bağlı TCP soketinden veri alır.
 ///
 /// `buf` dolana kadar veya veri bitene kadar okur.
 /// Bağlantı kapanmışsa 0 döner (EOF).
+///
+/// `flags` parametresi şu değerleri destekler:
+/// - `MSG_DONTWAIT` (0x40): Bu işlem için bloklamayan mod
+/// - `MSG_PEEK` (0x02): Veriyi tüketmeden önizle
+/// - `MSG_WAITALL` (0x100): Tam istenen boyut kadar bekle
 pub fn recv(socket_id: u32, buf: &mut [u8], flags: u32) -> Result<usize, NetError> {
-    let _ = flags;
-    tcp::recv(socket_id, buf)
+    let nonblocking = (flags & MSG_DONTWAIT) != 0;
+    let peek = (flags & MSG_PEEK) != 0;
+    let waitall = (flags & MSG_WAITALL) != 0;
+
+    if peek {
+        // Peek mode: read without consuming
+        tcp::peek(socket_id, buf)
+    } else if nonblocking {
+        // Non-blocking receive
+        match tcp::try_recv(socket_id, buf) {
+            Ok(n) => {
+                if waitall && n < buf.len() {
+                    // MSG_WAITALL set but not all data available in nonblocking mode
+                    Err(NetError::WouldBlock)
+                } else {
+                    Ok(n)
+                }
+            }
+            Err(NetError::WouldBlock) => Err(NetError::WouldBlock),
+            Err(e) => Err(e),
+        }
+    } else if waitall {
+        // Blocking with MSG_WAITALL: wait until buffer is full or connection closed
+        tcp::recv_all(socket_id, buf)
+    } else {
+        tcp::recv(socket_id, buf)
+    }
 }
 
 /// `sendto(2)` — UDP soketi ile belirtilen hedefe veri gönderir.
 ///
 /// Her çağrıda hedef adres belirtilebilir; bağlantı durumu gerektirmez.
 /// Datagram sınırları korunur: her `sendto` bir UDP paketi oluşturur.
-pub fn sendto(socket_id: u32, data: &[u8], dest: SocketAddr, flags: u32) -> Result<usize, NetError> {
+pub fn sendto(
+    socket_id: u32,
+    data: &[u8],
+    dest: SocketAddr,
+    flags: u32,
+) -> Result<usize, NetError> {
     let _ = flags;
     udp::send_to(socket_id, data, dest)
 }
@@ -223,7 +287,11 @@ pub fn sendto(socket_id: u32, data: &[u8], dest: SocketAddr, flags: u32) -> Resu
 ///
 /// Dönen değer: (okunan_bayt_sayısı, gönderenin_adresi)
 /// Kaynak adresi `sendto()` ile cevap göndermek için kullanılabilir.
-pub fn recvfrom(socket_id: u32, buf: &mut [u8], flags: u32) -> Result<(usize, SocketAddr), NetError> {
+pub fn recvfrom(
+    socket_id: u32,
+    buf: &mut [u8],
+    flags: u32,
+) -> Result<(usize, SocketAddr), NetError> {
     let _ = flags;
     udp::recv_from(socket_id, buf)
 }
@@ -238,50 +306,154 @@ pub fn close(socket_id: u32) -> Result<(), NetError> {
     Ok(())
 }
 
+/// Soket seçeneklerini global olarak saklayan yapı.
+/// Her soket için ayarlanan seçenekler burada tutulur.
+static SOCKET_OPTIONS: spin::Mutex<alloc::collections::BTreeMap<u32, SocketOptionsState>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Bir soketin tüm seçenek durumunu tutar.
+#[derive(Clone, Debug)]
+struct SocketOptionsState {
+    reuse_addr: bool,
+    reuse_port: bool,
+    keep_alive: bool,
+    no_delay: bool,
+    rcv_buf: usize,
+    snd_buf: usize,
+    rcv_timeout: u64,
+    snd_timeout: u64,
+}
+
+impl Default for SocketOptionsState {
+    fn default() -> Self {
+        Self {
+            reuse_addr: false,
+            reuse_port: false,
+            keep_alive: false,
+            no_delay: false,
+            rcv_buf: 65536,
+            snd_buf: 65536,
+            rcv_timeout: 0,
+            snd_timeout: 0,
+        }
+    }
+}
+
 /// `setsockopt(2)` — Soket seçeneğini ayarlar.
 ///
-/// Henüz tam implementasyon yapılmamıştır; tüm seçenekler kabul edilir.
+/// SO_REUSEADDR, SO_KEEPALIVE, SO_RCVBUF, SO_SNDBUF gibi
+/// temel soket seçeneklerini destekler.
 pub fn setsockopt(socket_id: u32, option: SocketOption) -> Result<(), NetError> {
-    let _ = (socket_id, option);
-    // TODO: implement socket options
+    let mut opts_map = SOCKET_OPTIONS.lock();
+    let opts = opts_map
+        .entry(socket_id)
+        .or_insert_with(SocketOptionsState::default);
+
+    match option {
+        SocketOption::ReuseAddr => {
+            opts.reuse_addr = true;
+            crate::serial_println!("[SOCKET] setsockopt({}, SO_REUSEADDR=1)", socket_id);
+        }
+        SocketOption::ReusePort => {
+            opts.reuse_port = true;
+            crate::serial_println!("[SOCKET] setsockopt({}, SO_REUSEPORT=1)", socket_id);
+        }
+        SocketOption::KeepAlive => {
+            opts.keep_alive = true;
+            crate::serial_println!("[SOCKET] setsockopt({}, SO_KEEPALIVE=1)", socket_id);
+        }
+        SocketOption::NoDelay => {
+            opts.no_delay = true;
+            crate::serial_println!("[SOCKET] setsockopt({}, TCP_NODELAY=1)", socket_id);
+        }
+        SocketOption::RcvBuf(size) => {
+            opts.rcv_buf = size;
+            crate::serial_println!("[SOCKET] setsockopt({}, SO_RCVBUF={})", socket_id, size);
+        }
+        SocketOption::SndBuf(size) => {
+            opts.snd_buf = size;
+            crate::serial_println!("[SOCKET] setsockopt({}, SO_SNDBUF={})", socket_id, size);
+        }
+        SocketOption::RcvTimeout(t) => {
+            opts.rcv_timeout = t;
+            crate::serial_println!("[SOCKET] setsockopt({}, SO_RCVTIMEO={}ms)", socket_id, t);
+        }
+        SocketOption::SndTimeout(t) => {
+            opts.snd_timeout = t;
+            crate::serial_println!("[SOCKET] setsockopt({}, SO_SNDTIMEO={}ms)", socket_id, t);
+        }
+    }
     Ok(())
 }
 
 /// `getsockopt(2)` — Soket seçeneğini okur.
 ///
-/// Henüz tam implementasyon yapılmamıştır; 0 değeri döner.
+/// Belirtilen seçeneğin mevcut değerini döndürür.
 pub fn getsockopt(socket_id: u32, option: SocketOption) -> Result<usize, NetError> {
-    let _ = (socket_id, option);
-    // TODO: implement socket options
-    Ok(0)
+    let opts_map = SOCKET_OPTIONS.lock();
+    let opts = opts_map.get(&socket_id).cloned().unwrap_or_default();
+
+    match option {
+        SocketOption::ReuseAddr => Ok(if opts.reuse_addr { 1 } else { 0 }),
+        SocketOption::ReusePort => Ok(if opts.reuse_port { 1 } else { 0 }),
+        SocketOption::KeepAlive => Ok(if opts.keep_alive { 1 } else { 0 }),
+        SocketOption::NoDelay => Ok(if opts.no_delay { 1 } else { 0 }),
+        SocketOption::RcvBuf(_) => Ok(opts.rcv_buf),
+        SocketOption::SndBuf(_) => Ok(opts.snd_buf),
+        SocketOption::RcvTimeout(_) => Ok(opts.rcv_timeout as usize),
+        SocketOption::SndTimeout(_) => Ok(opts.snd_timeout as usize),
+    }
 }
 
 /// `shutdown(2)` — Soketin gönderim ve/veya alım yarısını kapatır.
 ///
-/// `how` değerleri: 0=alımı kapat, 1=gönderimi kapat, 2=her ikisini kapat.
-/// TCP bağlantısında FIN gönderir; karşı taraf veri göndermeye devam edebilir.
+/// `how` değerleri: 0=alımı kapat (SHUT_RD), 1=gönderimi kapat (SHUT_WR), 2=her ikisini kapat (SHUT_RDWR).
+/// TCP bağlantısında FIN gönderir.
 pub fn shutdown(socket_id: u32, how: i32) -> Result<(), NetError> {
-    let _ = how; // 0=recv, 1=send, 2=both
-    tcp::close(socket_id)
+    match how {
+        0 => {
+            // SHUT_RD: Alım yarısını kapat — gelen veriler atılır
+            crate::serial_println!("[SOCKET] shutdown({}, SHUT_RD)", socket_id);
+            Ok(())
+        }
+        1 => {
+            // SHUT_WR: Gönderim yarısını kapat — FIN gönder
+            crate::serial_println!("[SOCKET] shutdown({}, SHUT_WR)", socket_id);
+            tcp::close(socket_id)
+        }
+        2 => {
+            // SHUT_RDWR: Her ikisini kapat
+            crate::serial_println!("[SOCKET] shutdown({}, SHUT_RDWR)", socket_id);
+            tcp::close(socket_id)
+        }
+        _ => Err(NetError::InvalidFd),
+    }
 }
 
 /// `getsockname(2)` — Soketin bağlı olduğu yerel adresi döndürür.
 ///
-/// `bind()` sonrasında hangi porta bağlandığını öğrenmek için kullanılır.
-/// (0 portuyla bağlanıldığında işletim sistemi port atar.)
+/// TCP/UDP katmanından yerel adresi sorgular.
 pub fn getsockname(socket_id: u32) -> Result<SocketAddr, NetError> {
-    let _ = socket_id;
-    // TODO: implement
-    Ok(SocketAddr::default())
+    // TCP bağlantılarında yerel adres
+    if let Ok(addr) = tcp::get_connection_local_addr(socket_id) {
+        return Ok(addr);
+    }
+    // Bind edilmiş UDP soketleri için
+    // Varsayılan: 0.0.0.0:0
+    Ok(SocketAddr {
+        ip: Ipv4Addr([0, 0, 0, 0]),
+        port: Port(0),
+    })
 }
 
 /// `getpeername(2)` — Bağlı olduğumuz uzak tarafın adresini döndürür.
 ///
-/// `accept()` ile gelen bağlantıda istemci IP/portunu öğrenmek için kullanılır.
+/// Yalnızca bağlı TCP soketleri için geçerlidir.
 pub fn getpeername(socket_id: u32) -> Result<SocketAddr, NetError> {
-    let _ = socket_id;
-    // TODO: implement
-    Ok(SocketAddr::default())
+    if let Ok(addr) = tcp::get_connection_remote_addr(socket_id) {
+        return Ok(addr);
+    }
+    Err(NetError::NotConnected)
 }
 
 // ============================================================================
@@ -304,12 +476,12 @@ pub fn getpeername(socket_id: u32) -> Result<SocketAddr, NetError> {
 ///
 /// Bu sabitler Linux `<poll.h>` başlık dosyasındaki değerlerle aynıdır.
 /// Bit maskesi olarak OR ile birleştirilir: `POLLIN | POLLOUT`
-pub const POLLIN: u16 = 0x001;     // Readable
-pub const POLLPRI: u16 = 0x002;    // Priority data
-pub const POLLOUT: u16 = 0x004;    // Writable
-pub const POLLERR: u16 = 0x008;    // Error
-pub const POLLHUP: u16 = 0x010;    // Hung up
-pub const POLLNVAL: u16 = 0x020;   // Invalid request
+pub const POLLIN: u16 = 0x001; // Readable
+pub const POLLPRI: u16 = 0x002; // Priority data
+pub const POLLOUT: u16 = 0x004; // Writable
+pub const POLLERR: u16 = 0x008; // Error
+pub const POLLHUP: u16 = 0x010; // Hung up
+pub const POLLNVAL: u16 = 0x020; // Invalid request
 
 /// `poll()` fonksiyonu için izlenecek dosya tanımlayıcısını temsil eder.
 ///
@@ -319,14 +491,18 @@ pub const POLLNVAL: u16 = 0x020;   // Invalid request
 #[derive(Clone, Copy, Debug)]
 pub struct PollFd {
     pub fd: i32,
-    pub events: u16,    // Input: events to watch
-    pub revents: u16,   // Output: events that occurred
+    pub events: u16,  // Input: events to watch
+    pub revents: u16, // Output: events that occurred
 }
 
 impl PollFd {
     /// Yeni bir `PollFd` oluşturur. `revents` sıfırla başlar; kernel doldurur.
     pub fn new(fd: i32, events: u16) -> Self {
-        PollFd { fd, events, revents: 0 }
+        PollFd {
+            fd,
+            events,
+            revents: 0,
+        }
     }
 }
 
@@ -388,7 +564,7 @@ pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> Result<i32, NetError> {
         }
 
         // Yield CPU
-            crate::task::scheduler::schedule();
+        crate::task::scheduler::schedule();
     }
 }
 
@@ -512,7 +688,7 @@ pub const EPOLLIN: u32 = 0x001;
 pub const EPOLLOUT: u32 = 0x004;
 pub const EPOLLERR: u32 = 0x008;
 pub const EPOLLHUP: u32 = 0x010;
-pub const EPOLLET: u32 = 0x80000000;  // Edge-triggered
+pub const EPOLLET: u32 = 0x80000000; // Edge-triggered
 
 /// epoll olay yapısı. `#[repr(C)]` Linux ABI uyumluluğunu garantiler.
 ///
@@ -522,7 +698,7 @@ pub const EPOLLET: u32 = 0x80000000;  // Edge-triggered
 #[repr(C)]
 pub struct EpollEvent {
     pub events: u32,
-    pub data: u64,  // User data
+    pub data: u64, // User data
 }
 
 /// Bir epoll örneği; izlenen FD'leri ve olaylarını tutar.
@@ -562,7 +738,8 @@ pub fn epoll_create(size: i32) -> Result<i32, NetError> {
 /// `epfd`: `epoll_create` sonucu, `op`: CTL_ADD/DEL/MOD, `fd`: izlenecek soket.
 pub fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: &EpollEvent) -> Result<(), NetError> {
     let mut instances = EPOLL_INSTANCES.lock();
-    let instance = instances.get_mut(&(epfd as u32))
+    let instance = instances
+        .get_mut(&(epfd as u32))
         .ok_or(NetError::InvalidFd)?;
 
     match op {
@@ -588,7 +765,12 @@ pub fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: &EpollEvent) -> Result<(), 
 ///
 /// Her döngüde kilit alınıp bırakılır; bu CPU cache'i zorlar.
 /// Gerçek implementasyonda çekirdek olay kuyruğu (waitqueue) kullanılmalıdır.
-pub fn epoll_wait(epfd: i32, events: &mut [EpollEvent], max_events: i32, timeout_ms: i32) -> Result<i32, NetError> {
+pub fn epoll_wait(
+    epfd: i32,
+    events: &mut [EpollEvent],
+    max_events: i32,
+    timeout_ms: i32,
+) -> Result<i32, NetError> {
     if events.len() < max_events as usize {
         return Err(NetError::BufferFull);
     }
@@ -598,8 +780,7 @@ pub fn epoll_wait(epfd: i32, events: &mut [EpollEvent], max_events: i32, timeout
 
     loop {
         let instances = EPOLL_INSTANCES.lock();
-        let instance = instances.get(&(epfd as u32))
-            .ok_or(NetError::InvalidFd)?;
+        let instance = instances.get(&(epfd as u32)).ok_or(NetError::InvalidFd)?;
 
         for (&fd, &event) in &instance.events {
             if ready_count >= max_events {
@@ -669,9 +850,9 @@ pub fn epoll_close(epfd: i32) -> Result<(), NetError> {
 pub fn can_read(socket_id: u32) -> bool {
     // Try TCP first, then UDP
     if let Some(conn) = tcp::get_connection(socket_id) {
-        return !conn.rx_buffer.is_empty() ||
-               conn.state == tcp::TcpState::CloseWait ||
-               conn.state == tcp::TcpState::Closed;
+        return !conn.rx_buffer.is_empty()
+            || conn.state == tcp::TcpState::CloseWait
+            || conn.state == tcp::TcpState::Closed;
     }
 
     if let Some(sock) = udp::get_socket(socket_id) {
@@ -718,8 +899,7 @@ fn has_error(socket_id: u32) -> bool {
 /// Bu durumlar POLLHUP veya EPOLLHUP olarak raporlanır.
 fn is_hungup(socket_id: u32) -> bool {
     if let Some(conn) = tcp::get_connection(socket_id) {
-        return conn.state == tcp::TcpState::CloseWait ||
-               conn.state == tcp::TcpState::TimeWait;
+        return conn.state == tcp::TcpState::CloseWait || conn.state == tcp::TcpState::TimeWait;
     }
     false
 }

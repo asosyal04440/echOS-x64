@@ -44,18 +44,18 @@
 //! ```
 
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::fmt::Write;
 
-/// ANSI Renk kodları (3/4-bit)
+/// ANSI Renk sistemi — 3/4-bit, 8-bit (256), ve 24-bit (True Color) destekli.
 ///
-/// ANSI renk sistemi: 8 standart renk + 8 parlak (bright) renk.
-/// Renk kodları SGR (Select Graphic Rendition) komutu ile kullanılır.
-///
-/// Standart renk numaraları (ön plan için 30-37, arka plan için 40-47 eklenir):
-/// - 0: Siyah, 1: Kırmızı, 2: Yeşil, 3: Sarı
-/// - 4: Mavi, 5: Mor, 6: Camgöbeği, 7: Beyaz
+/// Standart 16 renk + 256-renk paleti + RGB kullanılabilir.
+/// SGR (Select Graphic Rendition) komutu ile ayarlanır:
+/// - `ESC[38;5;Nm`  → 256-renk ön plan
+/// - `ESC[48;5;Nm`  → 256-renk arka plan
+/// - `ESC[38;2;R;G;Bm` → RGB ön plan (True Color)
+/// - `ESC[48;2;R;G;Bm` → RGB arka plan (True Color)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Color {
     Black = 0,
@@ -74,7 +74,138 @@ pub enum Color {
     BrightMagenta = 13,
     BrightCyan = 14,
     BrightWhite = 15,
-    Default = 255, // Changed from 9 to avoid conflict
+    /// 256-renk paleti (0-255 indeks)
+    Palette256 = 16,
+    /// 24-bit RGB (True Color)
+    Rgb = 17,
+    Default = 255,
+}
+
+/// Genişletilmiş renk bilgisi — 256-renk ve RGB değerlerini taşır
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtendedColor {
+    /// Temel renk türü
+    pub color: Color,
+    /// 256-renk indeksi (0-255) — Color::Palette256 için
+    pub index: u8,
+    /// RGB bileşenleri — Color::Rgb için
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl ExtendedColor {
+    pub const fn default_fg() -> Self {
+        Self {
+            color: Color::Default,
+            index: 0,
+            r: 255,
+            g: 255,
+            b: 255,
+        }
+    }
+    pub const fn default_bg() -> Self {
+        Self {
+            color: Color::Default,
+            index: 0,
+            r: 0,
+            g: 0,
+            b: 0,
+        }
+    }
+    pub const fn from_standard(c: Color) -> Self {
+        Self {
+            color: c,
+            index: c as u8,
+            r: 0,
+            g: 0,
+            b: 0,
+        }
+    }
+    pub const fn from_256(index: u8) -> Self {
+        Self {
+            color: Color::Palette256,
+            index,
+            r: 0,
+            g: 0,
+            b: 0,
+        }
+    }
+    pub const fn from_rgb(r: u8, g: u8, b: u8) -> Self {
+        Self {
+            color: Color::Rgb,
+            index: 0,
+            r,
+            g,
+            b,
+        }
+    }
+    /// 256 paletten veya RGB'den 32-bit ARGB değerine dönüştür
+    pub fn to_argb(&self) -> u32 {
+        match self.color {
+            Color::Rgb => 0xFF000000 | (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32,
+            Color::Palette256 => palette_256_to_argb(self.index),
+            _ => standard_color_to_argb(self.color),
+        }
+    }
+}
+
+/// 256-renk paletinden ARGB'ye çevir
+fn palette_256_to_argb(idx: u8) -> u32 {
+    match idx {
+        0 => 0xFF000000,
+        1 => 0xFFAA0000,
+        2 => 0xFF00AA00,
+        3 => 0xFFAA5500,
+        4 => 0xFF0000AA,
+        5 => 0xFFAA00AA,
+        6 => 0xFF00AAAA,
+        7 => 0xFFAAAAAA,
+        8 => 0xFF555555,
+        9 => 0xFFFF5555,
+        10 => 0xFF55FF55,
+        11 => 0xFFFFFF55,
+        12 => 0xFF5555FF,
+        13 => 0xFFFF55FF,
+        14 => 0xFF55FFFF,
+        15 => 0xFFFFFFFF,
+        // 16-231: 6×6×6 renk küpü
+        16..=231 => {
+            let n = (idx - 16) as u32;
+            let b = (n % 6) * 51;
+            let g = ((n / 6) % 6) * 51;
+            let r = (n / 36) * 51;
+            0xFF000000 | (r << 16) | (g << 8) | b
+        }
+        // 232-255: Gri tonları
+        _ => {
+            let v = ((idx as u32 - 232) * 10 + 8).min(255);
+            0xFF000000 | (v << 16) | (v << 8) | v
+        }
+    }
+}
+
+/// Standart 16 renk → ARGB
+fn standard_color_to_argb(c: Color) -> u32 {
+    match c {
+        Color::Black => 0xFF000000,
+        Color::Red => 0xFFAA0000,
+        Color::Green => 0xFF00AA00,
+        Color::Yellow => 0xFFAA5500,
+        Color::Blue => 0xFF0000AA,
+        Color::Magenta => 0xFFAA00AA,
+        Color::Cyan => 0xFF00AAAA,
+        Color::White => 0xFFAAAAAA,
+        Color::BrightBlack => 0xFF555555,
+        Color::BrightRed => 0xFFFF5555,
+        Color::BrightGreen => 0xFF55FF55,
+        Color::BrightYellow => 0xFFFFFF55,
+        Color::BrightBlue => 0xFF5555FF,
+        Color::BrightMagenta => 0xFFFF55FF,
+        Color::BrightCyan => 0xFF55FFFF,
+        Color::BrightWhite => 0xFFFFFFFF,
+        _ => 0xFFAAAAAA,
+    }
 }
 
 /// ANSI Escape Sequence tipleri
@@ -229,7 +360,8 @@ impl AnsiParser {
         match self.state {
             ParserState::Normal => {
                 match byte {
-                    0x1B => { // ESC - escape sequence başlıyor
+                    0x1B => {
+                        // ESC - escape sequence başlıyor
                         self.state = ParserState::Escape;
                         self.buffer.clear();
                         self.params.clear();
@@ -300,11 +432,15 @@ impl AnsiParser {
                     }
                     b'F' => {
                         self.state = ParserState::Normal;
-                        Some(EscapeSequence::CursorPreviousLine(self.parse_single_param(1)))
+                        Some(EscapeSequence::CursorPreviousLine(
+                            self.parse_single_param(1),
+                        ))
                     }
                     b'G' => {
                         self.state = ParserState::Normal;
-                        Some(EscapeSequence::CursorHorizontalAbsolute(self.parse_single_param(1)))
+                        Some(EscapeSequence::CursorHorizontalAbsolute(
+                            self.parse_single_param(1),
+                        ))
                     }
                     b'H' | b'f' => {
                         // H ve f aynı anlama gelir: imleç konumlandırma
@@ -314,7 +450,9 @@ impl AnsiParser {
                     }
                     b'J' => {
                         self.state = ParserState::Normal;
-                        Some(EscapeSequence::EraseInDisplay(self.parse_single_param(0) as u8))
+                        Some(EscapeSequence::EraseInDisplay(
+                            self.parse_single_param(0) as u8
+                        ))
                     }
                     b'K' => {
                         self.state = ParserState::Normal;
@@ -332,7 +470,9 @@ impl AnsiParser {
                         // SGR - Select Graphic Rendition: renk ve stil kodları
                         // Örnek: ESC[1;31m = kalın + kırmızı
                         self.state = ParserState::Normal;
-                        Some(EscapeSequence::SelectGraphicRendition(self.parse_sgr_params()))
+                        Some(EscapeSequence::SelectGraphicRendition(
+                            self.parse_sgr_params(),
+                        ))
                     }
                     b's' => {
                         self.state = ParserState::Normal;
@@ -408,7 +548,11 @@ impl AnsiParser {
                 break;
             }
         }
-        if found { num } else { default }
+        if found {
+            num
+        } else {
+            default
+        }
     }
 
     /// Cursor position parse eder.
@@ -526,9 +670,13 @@ impl AnsiParser {
                 let (row, col) = self.parse_cursor_position();
                 Some(EscapeSequence::CursorPosition { row, col })
             }
-            b'J' => Some(EscapeSequence::EraseInDisplay(self.parse_single_param(0) as u8)),
+            b'J' => Some(EscapeSequence::EraseInDisplay(
+                self.parse_single_param(0) as u8
+            )),
             b'K' => Some(EscapeSequence::EraseInLine(self.parse_single_param(0) as u8)),
-            b'm' => Some(EscapeSequence::SelectGraphicRendition(self.parse_sgr_params())),
+            b'm' => Some(EscapeSequence::SelectGraphicRendition(
+                self.parse_sgr_params(),
+            )),
             _ => Some(EscapeSequence::Unknown(params)),
         }
     }
@@ -751,7 +899,8 @@ impl AnsiBuilder {
     /// Colored text (helper)
     /// Metni belirlenen ön plan ve arka plan renkleriyle sarar, sonunda sıfırlar.
     pub fn colored(text: &str, fg: Color, bg: Color) -> String {
-        alloc::format!("{}{}{}{}",
+        alloc::format!(
+            "{}{}{}{}",
             Self::fg_color(fg),
             Self::bg_color(bg),
             text,
@@ -793,10 +942,10 @@ pub struct TerminalState {
     pub saved_cursor_row: u16,
     /// ESC[s ile kaydedilen imleç sütunu
     pub saved_cursor_col: u16,
-    /// Ön plan rengi (metni bu renkte göster)
-    pub fg_color: Color,
-    /// Arka plan rengi (metin arkasını bu renkle doldur)
-    pub bg_color: Color,
+    /// Ön plan rengi (metni bu renkte göster) — 256-renk ve RGB destekli
+    pub fg_color: ExtendedColor,
+    /// Arka plan rengi (metin arkasını bu renkle doldur) — 256-renk ve RGB destekli
+    pub bg_color: ExtendedColor,
     /// Kalın metin aktif mi?
     pub bold: bool,
     /// Soluk metin aktif mi?
@@ -832,8 +981,8 @@ impl Default for TerminalState {
             cursor_col: 1,
             saved_cursor_row: 1,
             saved_cursor_col: 1,
-            fg_color: Color::Default,
-            bg_color: Color::Default,
+            fg_color: ExtendedColor::default_fg(),
+            bg_color: ExtendedColor::default_bg(),
             bold: false,
             dim: false,
             italic: false,
@@ -925,8 +1074,8 @@ impl TerminalState {
             match params[i] {
                 0 => {
                     // Reset all - tüm özellikler varsayılana dönüyor
-                    self.fg_color = Color::Default;
-                    self.bg_color = Color::Default;
+                    self.fg_color = ExtendedColor::default_fg();
+                    self.bg_color = ExtendedColor::default_bg();
                     self.bold = false;
                     self.dim = false;
                     self.italic = false;
@@ -944,47 +1093,58 @@ impl TerminalState {
                 7 => self.reverse = true,
                 8 => self.hidden = true,
                 9 => self.strikethrough = true,
-                22 => { self.bold = false; self.dim = false; }
+                22 => {
+                    self.bold = false;
+                    self.dim = false;
+                }
                 23 => self.italic = false,
                 24 => self.underline = false,
                 25 => self.blink = false,
                 27 => self.reverse = false,
                 28 => self.hidden = false,
                 29 => self.strikethrough = false,
-                30..=37 => self.fg_color = Color::from_sgr(params[i] - 30),
+                30..=37 => {
+                    self.fg_color = ExtendedColor::from_standard(Color::from_sgr(params[i] - 30))
+                }
                 38 => {
                     // Extended foreground color - genişletilmiş ön plan rengi
                     if i + 2 < params.len() && params[i + 1] == 5 {
                         // 256-color modu: 38;5;<n>
-                        let _color_256 = params[i + 2];
+                        self.fg_color = ExtendedColor::from_256(params[i + 2]);
                         i += 2;
                     } else if i + 4 < params.len() && params[i + 1] == 2 {
                         // RGB modu: 38;2;<r>;<g>;<b>
-                        let _r = params[i + 2];
-                        let _g = params[i + 3];
-                        let _b = params[i + 4];
+                        self.fg_color =
+                            ExtendedColor::from_rgb(params[i + 2], params[i + 3], params[i + 4]);
                         i += 4;
                     }
                 }
-                39 => self.fg_color = Color::Default,
-                40..=47 => self.bg_color = Color::from_sgr(params[i] - 40),
+                39 => self.fg_color = ExtendedColor::default_fg(),
+                40..=47 => {
+                    self.bg_color = ExtendedColor::from_standard(Color::from_sgr(params[i] - 40))
+                }
                 48 => {
                     // Extended background color - genişletilmiş arka plan rengi
                     if i + 2 < params.len() && params[i + 1] == 5 {
                         // 256-color modu: 48;5;<n>
-                        let _color_256 = params[i + 2];
+                        self.bg_color = ExtendedColor::from_256(params[i + 2]);
                         i += 2;
                     } else if i + 4 < params.len() && params[i + 1] == 2 {
                         // RGB modu: 48;2;<r>;<g>;<b>
-                        let _r = params[i + 2];
-                        let _g = params[i + 3];
-                        let _b = params[i + 4];
+                        self.bg_color =
+                            ExtendedColor::from_rgb(params[i + 2], params[i + 3], params[i + 4]);
                         i += 4;
                     }
                 }
-                49 => self.bg_color = Color::Default,
-                90..=97 => self.fg_color = Color::from_sgr_bright(params[i] - 90),
-                100..=107 => self.bg_color = Color::from_sgr_bright(params[i] - 100),
+                49 => self.bg_color = ExtendedColor::default_bg(),
+                90..=97 => {
+                    self.fg_color =
+                        ExtendedColor::from_standard(Color::from_sgr_bright(params[i] - 90))
+                }
+                100..=107 => {
+                    self.bg_color =
+                        ExtendedColor::from_standard(Color::from_sgr_bright(params[i] - 100))
+                }
                 _ => {}
             }
             i += 1;

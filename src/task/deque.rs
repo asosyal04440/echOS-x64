@@ -30,10 +30,10 @@
 //! ## Kaynak
 //! "Dynamic Circular Work-Stealing Deque", Chase & Lev (2005)
 
-use alloc::sync::Arc;
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
+use alloc::sync::Arc;
 use core::ptr;
+use core::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 
 // Sabit boyutlu Chase-Lev Deque uygulaması.
 // Gerçek üretim sistemlerinde buffer yeniden boyutlandırma gerekir,
@@ -71,7 +71,8 @@ impl<T> Worker<T> {
         // Tamponu sıfır-başlatılmış null pointer'larla hazırla.
         // AtomicPtr null pointer (0) ile başlatılabilir.
         // x86_64 mimarisinde null pointer her zaman 0'dır, bu yüzden zeroed güvenlidir.
-        let mut buffer: [AtomicPtr<T>; DEQUE_SIZE] = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+        let mut buffer: [AtomicPtr<T>; DEQUE_SIZE] =
+            unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
 
         let inner = Arc::new(Inner {
             buffer,
@@ -80,7 +81,9 @@ impl<T> Worker<T> {
         });
 
         (
-            Worker { inner: inner.clone() },
+            Worker {
+                inner: inner.clone(),
+            },
             Stealer { inner },
         )
     }
@@ -102,7 +105,9 @@ impl<T> Worker<T> {
 
         // Release fence: önceki bellek yazmaları yayınlanır
         core::sync::atomic::fence(Ordering::Release);
-        self.inner.bottom.store(b.wrapping_add(1), Ordering::Relaxed);
+        self.inner
+            .bottom
+            .store(b.wrapping_add(1), Ordering::Relaxed);
     }
 
     /// Kuyruğun sonundan (bottom) bir görev alır — LIFO davranışı.
@@ -125,12 +130,21 @@ impl<T> Worker<T> {
             if t == b {
                 // Son eleman: Stealer ile yarış olabilir!
                 // CAS ile sahipliği atomik olarak talep et
-                if self.inner.top.compare_exchange(t, t.wrapping_add(1), Ordering::SeqCst, Ordering::Relaxed).is_ok() {
-                    self.inner.bottom.store(b.wrapping_add(1), Ordering::Relaxed);
+                if self
+                    .inner
+                    .top
+                    .compare_exchange(t, t.wrapping_add(1), Ordering::SeqCst, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    self.inner
+                        .bottom
+                        .store(b.wrapping_add(1), Ordering::Relaxed);
                     return Some(unsafe { Box::from_raw(task_ptr) });
                 } else {
                     // Yarışı kaybettik, bir Stealer bu görevi aldı
-                    self.inner.bottom.store(b.wrapping_add(1), Ordering::Relaxed);
+                    self.inner
+                        .bottom
+                        .store(b.wrapping_add(1), Ordering::Relaxed);
                     return None;
                 }
             }
@@ -138,7 +152,9 @@ impl<T> Worker<T> {
             return Some(unsafe { Box::from_raw(task_ptr) });
         } else {
             // Kuyruk boştu — bottom'u geri al
-            self.inner.bottom.store(b.wrapping_add(1), Ordering::Relaxed);
+            self.inner
+                .bottom
+                .store(b.wrapping_add(1), Ordering::Relaxed);
             return None;
         }
     }
@@ -170,7 +186,12 @@ impl<T> Stealer<T> {
             let task_ptr = self.inner.buffer[idx].load(Ordering::Relaxed);
 
             // Atomik karşılaştırma-değiştirme: top'u t'den t+1'e güncelle
-            if self.inner.top.compare_exchange(t, t.wrapping_add(1), Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+            if self
+                .inner
+                .top
+                .compare_exchange(t, t.wrapping_add(1), Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
+            {
                 return Some(unsafe { Box::from_raw(task_ptr) });
             }
         }

@@ -57,29 +57,29 @@
 //! | 3      | Critical  | + Ağ ve USB de devre dışı                 |
 //! | 4      | Emergency | + Dosya yazma devre dışı, halt yakın      |
 
-pub mod hub;
-pub mod severity;
-pub mod recovery;
-pub mod watchdog;
 pub mod checkpoint;
 pub mod degradation;
 pub mod emergency;
+pub mod hub;
 pub mod injection;
+pub mod recovery;
+pub mod severity;
+pub mod watchdog;
 
 pub mod monitors;
 pub mod recovery_modules;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 // Re-export main types
 // Dışarıdan `crate::fault::FaultHub` şeklinde erişim sağlamak için kısayollar.
 // Bu sayede kullanıcı modülün iç yapısını bilmeden doğrudan ana tipleri kullanabilir.
 pub use hub::FaultHub;
-pub use severity::{Severity, RecoveryResult};
 pub use recovery::{RecoveryAction, RecoveryEngine};
+pub use severity::{RecoveryResult, Severity};
 
 // ============================================================================
 // HATA TÜRLERİ
@@ -121,56 +121,56 @@ pub enum FaultType {
     OutOfMemory,
     PageFault,
     PmmCorruption,
-    
+
     // CPU/SMP hataları
     ApStartupFailed,
     TlbShootdownTimeout,
     CpuHung,
     MicrocodeError,
-    
+
     // Kesme (interrupt) hataları
     IdtCorruption,
     IrqStorm,
     HandlerTimeout,
     SpuriousInterrupt,
-    
+
     // Zamanlayıcı (scheduler) hataları
     RunQueueCorruption,
     TaskLeak,
     PriorityInversion,
     Starvation,
-    
+
     // Sürücsü (driver) hataları
     DmaCorruption,
     DeviceTimeout,
     DeviceError,
     DriverCrash,
-    
+
     // Dosya sistemi (filesystem) hataları
     MetadataCorruption,
     JournalError,
     IoError,
     DiskFull,
-    
+
     // Ağ (network) hataları
     ConnectionReset,
     StackCorruption,
     SocketLeak,
-    
+
     // Güvenlik (security) hataları
     CanaryMismatch,
     SmepViolation,
     SmapViolation,
-    
+
     // ACPI hataları
     AmlError,
     GpeStorm,
     ThermalEvent,
-    
+
     // Açılış (boot) hataları
     BootTimeout,
     InitFailed,
-    
+
     // Genel
     Unknown,
 }
@@ -209,7 +209,7 @@ pub struct Fault {
 impl Fault {
     pub fn new(source: FaultSource, fault_type: FaultType, message: &str) -> Self {
         static FAULT_COUNTER: AtomicU64 = AtomicU64::new(0);
-        
+
         Self {
             id: FaultId(FAULT_COUNTER.fetch_add(1, Ordering::SeqCst)),
             source,
@@ -223,7 +223,7 @@ impl Fault {
             recovery_success: false,
         }
     }
-    
+
     pub fn with_context(mut self, context: Vec<u64>) -> Self {
         self.context = context;
         self
@@ -279,7 +279,12 @@ pub struct ModuleHealth {
 }
 
 impl ModuleHealth {
-    pub const fn new(name: &'static str, is_critical: bool, can_restart: bool, has_fallback: bool) -> Self {
+    pub const fn new(
+        name: &'static str,
+        is_critical: bool,
+        can_restart: bool,
+        has_fallback: bool,
+    ) -> Self {
         Self {
             name,
             status: HealthStatus::Healthy,
@@ -292,18 +297,18 @@ impl ModuleHealth {
             has_fallback,
         }
     }
-    
+
     pub fn record_fault(&mut self) {
         self.fault_count += 1;
         self.last_fault_tick = crate::task::scheduler::get_ticks();
     }
-    
+
     pub fn record_recovery(&mut self, success: bool) {
         if success {
             self.recovery_count += 1;
         }
     }
-    
+
     pub fn update_status(&mut self, status: HealthStatus) {
         self.status = status;
     }
@@ -352,11 +357,12 @@ impl FaultState {
             fault_history: Mutex::new(Vec::new()),
         }
     }
-    
+
     pub fn record_fault(&self, fault: &Fault) {
         self.total_faults.fetch_add(1, Ordering::SeqCst);
-        self.last_fault_tick.store(fault.timestamp, Ordering::SeqCst);
-        
+        self.last_fault_tick
+            .store(fault.timestamp, Ordering::SeqCst);
+
         // Geçmişe ekle (maksimum 100 giriş)
         let mut history = self.fault_history.lock();
         if history.len() >= 100 {
@@ -364,19 +370,20 @@ impl FaultState {
         }
         history.push(fault.clone());
     }
-    
+
     pub fn record_recovery(&self) {
         self.total_recoveries.fetch_add(1, Ordering::SeqCst);
     }
-    
+
     pub fn get_fault_rate(&self, window_ticks: u64) -> f64 {
         let current = crate::task::scheduler::get_ticks();
         let history = self.fault_history.lock();
-        
-        let count = history.iter()
+
+        let count = history
+            .iter()
             .filter(|f| current.saturating_sub(f.timestamp as usize) <= window_ticks as usize)
             .count();
-        
+
         count as f64 / (window_ticks as f64 / 1000.0)
     }
 }
@@ -392,19 +399,19 @@ lazy_static::lazy_static! {
 /// Hata yönetimi alt sistemini başlatır
 pub fn init() {
     crate::serial_println!("[FAULT] Initializing fault management subsystem");
-    
+
     // Hata merkezini başlat
     hub::init();
-    
+
     // Watchdog sistemini başlat
     watchdog::init();
-    
+
     // Kurtarma motorunu başlat
     recovery::init();
-    
+
     // Monitor/izleme modüllerini başlat
     monitors::init();
-    
+
     crate::serial_println!("[FAULT] Fault management subsystem initialized");
 }
 
@@ -413,13 +420,13 @@ pub fn periodic_check() {
     if !FAULT_STATE.detection_enabled.load(Ordering::SeqCst) {
         return;
     }
-    
+
     // Tüm monitorrlerı kontrol et
     monitors::check_all();
-    
+
     // Watchdog'ları kontrol et
     watchdog::check_all();
-    
+
     // Kurtarma seviyesini güncelle
     update_recovery_level();
 }
@@ -437,17 +444,19 @@ pub fn periodic_check() {
 fn update_recovery_level() {
     let history = FAULT_STATE.fault_history.lock();
     let current = crate::task::scheduler::get_ticks();
-    
+
     // Son 10 saniyedeki hataları say
-    let recent_faults = history.iter()
+    let recent_faults = history
+        .iter()
         .filter(|f| current.saturating_sub(f.timestamp) <= 10000)
         .count();
-    
+
     // Kritik hataları say
-    let critical_faults = history.iter()
+    let critical_faults = history
+        .iter()
         .filter(|f| f.severity == Severity::Critical || f.severity == Severity::Emergency)
         .count();
-    
+
     // Kurtarma seviyesini belirle
     let level = if critical_faults > 0 {
         4 // Acil durum (Emergency)
@@ -460,9 +469,9 @@ fn update_recovery_level() {
     } else {
         0 // Normal
     };
-    
+
     FAULT_STATE.recovery_level.store(level, Ordering::SeqCst);
-    
+
     if level >= 4 {
         FAULT_STATE.emergency_mode.store(true, Ordering::SeqCst);
         emergency::enter();
@@ -473,17 +482,19 @@ fn update_recovery_level() {
 pub fn report_fault(source: FaultSource, fault_type: FaultType, message: &str) -> FaultId {
     let fault = Fault::new(source, fault_type, message);
     FAULT_STATE.record_fault(&fault);
-    
+
     crate::serial_println!(
         "[FAULT] {:?} fault from {:?}: {}",
-        fault.severity, fault.source, fault.message
+        fault.severity,
+        fault.source,
+        fault.message
     );
-    
+
     // Etkinse otomatik kurtarma dene
     if FAULT_STATE.auto_recovery.load(Ordering::SeqCst) {
         recovery::attempt_recovery(&fault);
     }
-    
+
     fault.id
 }
 

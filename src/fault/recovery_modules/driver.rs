@@ -40,8 +40,8 @@
 //! Tüm enum kolları kapsanmalıdır (exhaustive matching).
 //! `_` joker ifadesi, ele alınmayan tüm durumları yakalar.
 
-use crate::fault::{Fault, FaultType};
 use crate::fault::severity::RecoveryResult;
+use crate::fault::{Fault, FaultType};
 
 /// Sürücü kurtarmasını dener
 pub fn recover(fault: &Fault) -> RecoveryResult {

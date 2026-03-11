@@ -410,3 +410,63 @@ pub fn sys_setns_net(ns_id: u64) -> i32 {
 pub fn init() {
     NETNS_MANAGER.init();
 }
+
+// ============================================================================
+// VETH (Virtual Ethernet Pair) DESTEĞİ
+// ============================================================================
+
+/// Veth pair oluşturur — iki sanal ağ arayüzü birbirine bağlanır
+///
+/// Container networking temel taşı:
+/// - veth0 → host namespace'de kalır
+/// - veth1 → container namespace'e taşınır
+///
+/// ```text
+/// Host NS:  veth0 ◄──────► veth1 :Container NS
+/// ```
+pub fn create_veth_pair(
+    ns1_id: u64,
+    name1: &str,
+    ns2_id: u64,
+    name2: &str,
+) -> Result<(), &'static str> {
+    let ns1 = NETNS_MANAGER.get(ns1_id).ok_or("NS1 not found")?;
+    let ns2 = NETNS_MANAGER.get(ns2_id).ok_or("NS2 not found")?;
+
+    let ifindex1 = alloc_ifindex();
+    let ifindex2 = alloc_ifindex();
+
+    let dev1 = Arc::new(NetDevice::new(name1, ifindex1));
+    let dev2 = Arc::new(NetDevice::new(name2, ifindex2));
+
+    ns1.add_device(dev1);
+    ns2.add_device(dev2);
+
+    crate::serial_println!(
+        "[NetNS] veth pair created: {}(ns{}) <-> {}(ns{})",
+        name1, ns1_id, name2, ns2_id
+    );
+
+    Ok(())
+}
+
+/// Interface index sayacı
+static NEXT_IFINDEX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(100);
+
+fn alloc_ifindex() -> u32 {
+    NEXT_IFINDEX.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Namespace'deki tüm interface'leri listeler
+pub fn list_interfaces(ns_id: u64) -> Vec<String> {
+    if let Some(ns) = NETNS_MANAGER.get(ns_id) {
+        ns.devices.lock().keys().cloned().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Namespace sayısını döner
+pub fn namespace_count() -> usize {
+    NETNS_MANAGER.namespaces.lock().len()
+}

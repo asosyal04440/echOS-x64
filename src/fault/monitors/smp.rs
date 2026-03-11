@@ -71,7 +71,7 @@
 //! diğer                      --> Healthy
 //! ```
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
@@ -123,7 +123,7 @@ impl SmpMonitor {
             return Some(Fault::new(
                 FaultSource::Smp,
                 FaultType::ApStartupFailed,
-                &alloc::format!("{} of {} CPUs online", online, expected)
+                &alloc::format!("{} of {} CPUs online", online, expected),
             ));
         }
 
@@ -143,10 +143,8 @@ impl super::HealthMonitor for SmpMonitor {
         }
 
         // Son kontrol zamanını güncelle
-        self.last_check.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_check
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
         self.check_smp()
     }
@@ -172,7 +170,8 @@ impl super::HealthMonitor for SmpMonitor {
         ModuleHealth {
             name: self.name(),
             status: self.health(),
-            fault_count: self.ap_failures.load(Ordering::SeqCst) + self.tlb_timeouts.load(Ordering::SeqCst),
+            fault_count: self.ap_failures.load(Ordering::SeqCst)
+                + self.tlb_timeouts.load(Ordering::SeqCst),
             recovery_count: 0,
             last_fault_tick: self.last_check.load(Ordering::SeqCst),
             uptime_ticks: crate::task::scheduler::get_ticks(),

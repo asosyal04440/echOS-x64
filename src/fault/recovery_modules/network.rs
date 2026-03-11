@@ -55,14 +55,16 @@
 //! 1000 açık soket = ~500MB + bellek basıncı!
 //! ```
 
-use crate::fault::{Fault, FaultType};
 use crate::fault::severity::RecoveryResult;
+use crate::fault::{Fault, FaultType};
 
 /// Ağ kurtarmasını dener
 pub fn recover(fault: &Fault) -> RecoveryResult {
     match fault.fault_type {
         FaultType::ConnectionReset => {
-            crate::serial_println!("[NET_RECOVERY] Bağlantı sıfırlandı - soketler bilgilendiriliyor");
+            crate::serial_println!(
+                "[NET_RECOVERY] Bağlantı sıfırlandı - soketler bilgilendiriliyor"
+            );
             // Bağlantı sıfırlanması: Açık soketlere hata bildir, kaynakları temizle.
             // Uygulama katmanı yeniden bağlanmayı kendisi yönetebilir.
             RecoveryResult::Recovered

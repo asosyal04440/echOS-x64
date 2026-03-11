@@ -25,15 +25,15 @@
 //! çiziminde sınır dışı erişimi tetikleyebileceğinden boyut doğrulanır.
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
-use alloc::format;
-use alloc::vec::Vec;
-use alloc::vec;
 use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::gop::framebuffer::Framebuffer;
-use crate::gui::theme::{Theme, Color};
+use crate::gui::theme::{Color, Theme};
 
 // ============================================================================
 // PANO SABİTLERİ
@@ -59,7 +59,11 @@ pub enum ClipboardData {
     /// Zengin metin (HTML/RTF)
     RichText { html: String, plain: String },
     /// Resim verisi
-    Image { width: usize, height: usize, data: Vec<u32> },
+    Image {
+        width: usize,
+        height: usize,
+        data: Vec<u32>,
+    },
     /// Dosya yolları
     Files(Vec<String>),
     /// URL
@@ -404,7 +408,9 @@ impl ClipboardManager {
                 ClipboardData::Text(t) => t.to_lowercase().contains(&query),
                 ClipboardData::RichText { plain, .. } => plain.to_lowercase().contains(&query),
                 ClipboardData::Url(u) => u.to_lowercase().contains(&query),
-                ClipboardData::Files(files) => files.iter().any(|f| f.to_lowercase().contains(&query)),
+                ClipboardData::Files(files) => {
+                    files.iter().any(|f| f.to_lowercase().contains(&query))
+                }
                 _ => false,
             };
 
@@ -416,13 +422,19 @@ impl ClipboardManager {
     pub fn get_filtered_history(&self) -> Vec<&ClipboardItem> {
         let query = self.search_query.to_lowercase();
 
-        self.history.iter()
+        self.history
+            .iter()
             .filter(|item| {
                 // Türe göre filtrele
                 let type_match = match self.filter_type {
                     None | Some(ClipboardFilter::All) => true,
-                    Some(ClipboardFilter::Text) => matches!(item.data, ClipboardData::Text(_) | ClipboardData::RichText { .. }),
-                    Some(ClipboardFilter::Images) => matches!(item.data, ClipboardData::Image { .. }),
+                    Some(ClipboardFilter::Text) => matches!(
+                        item.data,
+                        ClipboardData::Text(_) | ClipboardData::RichText { .. }
+                    ),
+                    Some(ClipboardFilter::Images) => {
+                        matches!(item.data, ClipboardData::Image { .. })
+                    }
                     Some(ClipboardFilter::Files) => matches!(item.data, ClipboardData::Files(_)),
                     Some(ClipboardFilter::URLs) => matches!(item.data, ClipboardData::Url(_)),
                     Some(ClipboardFilter::Pinned) => item.pinned,
@@ -441,7 +453,9 @@ impl ClipboardManager {
                     ClipboardData::Text(t) => t.to_lowercase().contains(&query),
                     ClipboardData::RichText { plain, .. } => plain.to_lowercase().contains(&query),
                     ClipboardData::Url(u) => u.to_lowercase().contains(&query),
-                    ClipboardData::Files(files) => files.iter().any(|f| f.to_lowercase().contains(&query)),
+                    ClipboardData::Files(files) => {
+                        files.iter().any(|f| f.to_lowercase().contains(&query))
+                    }
                     _ => false,
                 }
             })
@@ -464,9 +478,19 @@ impl ClipboardManager {
         fb.draw_string(x + 16, search_y + 6, "🔍", Theme::TEXT_SECONDARY.to_u32());
 
         if self.search_query.is_empty() {
-            fb.draw_string(x + 36, search_y + 6, "Panoda ara...", Theme::TEXT_SECONDARY.to_u32());
+            fb.draw_string(
+                x + 36,
+                search_y + 6,
+                "Panoda ara...",
+                Theme::TEXT_SECONDARY.to_u32(),
+            );
         } else {
-            fb.draw_string(x + 36, search_y + 6, &self.search_query, Theme::TEXT_PRIMARY.to_u32());
+            fb.draw_string(
+                x + 36,
+                search_y + 6,
+                &self.search_query,
+                Theme::TEXT_PRIMARY.to_u32(),
+            );
         }
 
         // Filtre sekmeleri
@@ -485,8 +509,16 @@ impl ClipboardManager {
                 _ => false,
             };
 
-            let bg = if is_active { Theme::ACCENT_PRIMARY.to_u32() } else { Theme::SIDEBAR_BG.to_u32() };
-            let text_color = if is_active { Theme::TEXT_ON_ACCENT.to_u32() } else { Theme::TEXT_PRIMARY.to_u32() };
+            let bg = if is_active {
+                Theme::ACCENT_PRIMARY.to_u32()
+            } else {
+                Theme::SIDEBAR_BG.to_u32()
+            };
+            let text_color = if is_active {
+                Theme::TEXT_ON_ACCENT.to_u32()
+            } else {
+                Theme::TEXT_PRIMARY.to_u32()
+            };
 
             fb.draw_rect(tab_x, tabs_y, tab.len() * 8 + 16, 24, bg);
             fb.draw_string(tab_x + 8, tabs_y + 4, tab, text_color);
@@ -511,14 +543,26 @@ impl ClipboardManager {
             let is_selected = self.selected_item == Some(item.id);
             let is_hovered = self.hovered_item == Some(item.id);
 
-            let bg = if is_selected { Theme::ACCENT_PRIMARY.to_u32() }
-                     else if is_hovered { Theme::LIST_ITEM_HOVER.to_u32() }
-                     else { Theme::WINDOW_BG.to_u32() };
+            let bg = if is_selected {
+                Theme::ACCENT_PRIMARY.to_u32()
+            } else if is_hovered {
+                Theme::LIST_ITEM_HOVER.to_u32()
+            } else {
+                Theme::WINDOW_BG.to_u32()
+            };
 
             fb.draw_rect(x, item_y, width, item_height, bg);
 
-            let text_color = if is_selected { Theme::TEXT_ON_ACCENT.to_u32() } else { Theme::TEXT_PRIMARY.to_u32() };
-            let secondary_color = if is_selected { Theme::TEXT_ON_ACCENT.to_u32() } else { Theme::TEXT_SECONDARY.to_u32() };
+            let text_color = if is_selected {
+                Theme::TEXT_ON_ACCENT.to_u32()
+            } else {
+                Theme::TEXT_PRIMARY.to_u32()
+            };
+            let secondary_color = if is_selected {
+                Theme::TEXT_ON_ACCENT.to_u32()
+            } else {
+                Theme::TEXT_SECONDARY.to_u32()
+            };
 
             // Simge
             fb.draw_string(x + 8, item_y + 8, item.data.icon(), text_color);
@@ -553,7 +597,12 @@ impl ClipboardManager {
             } else {
                 "Eşleşen öğe yok"
             };
-            fb.draw_string(x + width / 2 - empty_text.len() * 4, y + height / 2, empty_text, Theme::TEXT_SECONDARY.to_u32());
+            fb.draw_string(
+                x + width / 2 - empty_text.len() * 4,
+                y + height / 2,
+                empty_text,
+                Theme::TEXT_SECONDARY.to_u32(),
+            );
         }
 
         // Alt çubuk
@@ -561,18 +610,39 @@ impl ClipboardManager {
         fb.draw_rect(x, footer_y, width, 32, Theme::TOOLBAR_BG.to_u32());
 
         let count_text = format!("{} öğe", self.history.len());
-        fb.draw_string(x + 8, footer_y + 8, &count_text, Theme::TEXT_SECONDARY.to_u32());
+        fb.draw_string(
+            x + 8,
+            footer_y + 8,
+            &count_text,
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
 
         // Klavye kısayolu ipucu
-        fb.draw_string(x + width - 80, footer_y + 8, &self.shortcut, Theme::TEXT_SECONDARY.to_u32());
+        fb.draw_string(
+            x + width - 80,
+            footer_y + 8,
+            &self.shortcut,
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
     }
 
     /// Tıklama olayını işle
-    pub fn on_click(&mut self, mx: i32, my: i32, x: usize, y: usize, width: usize, height: usize) -> ClipboardAction {
+    pub fn on_click(
+        &mut self,
+        mx: i32,
+        my: i32,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    ) -> ClipboardAction {
         // Arama alanı
         let search_y = y + 48;
-        if mx >= (x + 8) as i32 && mx < (x + width - 8) as i32
-            && my >= search_y as i32 && my < (search_y + 28) as i32 {
+        if mx >= (x + 8) as i32
+            && mx < (x + width - 8) as i32
+            && my >= search_y as i32
+            && my < (search_y + 28) as i32
+        {
             return ClipboardAction::FocusSearch;
         }
 
@@ -600,8 +670,11 @@ impl ClipboardManager {
 
             let tab_width = tab_name.len() * 8 + 16;
 
-            if mx >= tab_x as i32 && mx < (tab_x + tab_width) as i32
-                && my >= tabs_y as i32 && my < (tabs_y + 24) as i32 {
+            if mx >= tab_x as i32
+                && mx < (tab_x + tab_width) as i32
+                && my >= tabs_y as i32
+                && my < (tabs_y + 24) as i32
+            {
                 self.filter_type = Some(filter);
                 return ClipboardAction::None;
             }
@@ -640,12 +713,15 @@ impl ClipboardManager {
 
     /// Tuş basımını işle
     pub fn on_key_press(&mut self, c: char) -> ClipboardAction {
-        if c == '\x08' { // Geri al
+        if c == '\x08' {
+            // Geri al
             self.search_query.pop();
-        } else if c == '\x1b' { // Escape
+        } else if c == '\x1b' {
+            // Escape
             self.search_query.clear();
             self.filter_type = None;
-        } else if c == '\n' { // Enter
+        } else if c == '\n' {
+            // Enter
             if let Some(&id) = self.selected_item.as_ref() {
                 return ClipboardAction::PasteItem(id);
             }
@@ -688,4 +764,64 @@ pub fn init() {
 /// Pano yöneticisini al
 pub fn get_clipboard() -> &'static Mutex<ClipboardManager> {
     &CLIPBOARD
+}
+
+// ============================================================================
+// CONVENIENCE FUNCTIONS
+// ============================================================================
+
+/// Copy text to clipboard (shortcut for Ctrl+C)
+pub fn copy_text(text: &str) {
+    CLIPBOARD
+        .lock()
+        .copy(ClipboardData::Text(text.into()), "System");
+}
+
+/// Paste text from clipboard (shortcut for Ctrl+V)
+pub fn paste_text() -> Option<alloc::string::String> {
+    let clipboard = CLIPBOARD.lock();
+    match clipboard.paste() {
+        Some(ClipboardData::Text(t)) => Some(t.clone()),
+        Some(ClipboardData::RichText { plain, .. }) => Some(plain.clone()),
+        Some(ClipboardData::Url(u)) => Some(u.clone()),
+        _ => None,
+    }
+}
+
+/// Copy files to clipboard
+pub fn copy_files(paths: alloc::vec::Vec<alloc::string::String>) {
+    CLIPBOARD
+        .lock()
+        .copy(ClipboardData::Files(paths), "FileManager");
+}
+
+/// Paste files from clipboard
+pub fn paste_files() -> Option<alloc::vec::Vec<alloc::string::String>> {
+    let clipboard = CLIPBOARD.lock();
+    match clipboard.paste() {
+        Some(ClipboardData::Files(f)) => Some(f.clone()),
+        _ => None,
+    }
+}
+
+/// Check if clipboard has text
+pub fn has_text() -> bool {
+    let clipboard = CLIPBOARD.lock();
+    matches!(
+        clipboard.paste(),
+        Some(ClipboardData::Text(_))
+            | Some(ClipboardData::RichText { .. })
+            | Some(ClipboardData::Url(_))
+    )
+}
+
+/// Check if clipboard has files
+pub fn has_files() -> bool {
+    let clipboard = CLIPBOARD.lock();
+    matches!(clipboard.paste(), Some(ClipboardData::Files(_)))
+}
+
+/// Clear the clipboard
+pub fn clear() {
+    CLIPBOARD.lock().clear();
 }

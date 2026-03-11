@@ -20,10 +20,10 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::vec;
-use spin::Mutex;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
+use spin::Mutex;
 
 // ============================================================================
 // BLUETOOTH SABİTLERİ
@@ -118,9 +118,15 @@ impl BdAddr {
     }
 
     pub fn to_string(&self) -> String {
-        alloc::format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            self.bytes[5], self.bytes[4], self.bytes[3],
-            self.bytes[2], self.bytes[1], self.bytes[0])
+        alloc::format!(
+            "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            self.bytes[5],
+            self.bytes[4],
+            self.bytes[3],
+            self.bytes[2],
+            self.bytes[1],
+            self.bytes[0]
+        )
     }
 }
 
@@ -305,9 +311,9 @@ impl HciController {
         params.push(0);
 
         // Bağlantı aralığı min, max, gecikme, zaman aşımı
-        params.extend_from_slice(&24u16.to_le_bytes());  // 30ms minimum
-        params.extend_from_slice(&40u16.to_le_bytes());  // 50ms maksimum
-        params.extend_from_slice(&0u16.to_le_bytes());   // Gecikme yok
+        params.extend_from_slice(&24u16.to_le_bytes()); // 30ms minimum
+        params.extend_from_slice(&40u16.to_le_bytes()); // 50ms maksimum
+        params.extend_from_slice(&0u16.to_le_bytes()); // Gecikme yok
         params.extend_from_slice(&500u16.to_le_bytes()); // 5 sn zaman aşımı
 
         // Min/max CE uzunluğu
@@ -505,10 +511,7 @@ impl L2capManager {
         let channel = L2capChannel::new(cid, psm);
         self.channels.insert(cid, channel);
 
-        let req = L2capConnReq {
-            psm,
-            src_cid: cid,
-        };
+        let req = L2capConnReq { psm, src_cid: cid };
 
         (cid, req.to_bytes())
     }
@@ -583,7 +586,7 @@ impl RfcommHeader {
         if data.len() < 3 {
             return None;
         }
-        
+
         let length = if (data[2] & 0x01) != 0 {
             data[2] >> 1
         } else if data.len() >= 4 {
@@ -591,7 +594,7 @@ impl RfcommHeader {
         } else {
             return None;
         };
-        
+
         Some(RfcommHeader {
             addr: data[0],
             control: data[1],
@@ -602,13 +605,25 @@ impl RfcommHeader {
     /// Create SABM frame (Set Asynchronous Balanced Mode)
     pub fn sabm(dlci: u8) -> Vec<u8> {
         let addr = 0x03 | (dlci << 2);
-        vec![addr, RFCOMM_SABM, 0x01, 0x00, 0x70 | Self::fcs(&[addr, RFCOMM_SABM, 0x01])]
+        vec![
+            addr,
+            RFCOMM_SABM,
+            0x01,
+            0x00,
+            0x70 | Self::fcs(&[addr, RFCOMM_SABM, 0x01]),
+        ]
     }
 
     /// Create UA frame (Unnumbered Acknowledgment)
     pub fn ua(dlci: u8) -> Vec<u8> {
         let addr = 0x01 | (dlci << 2);
-        vec![addr, RFCOMM_UA, 0x01, 0x00, 0x70 | Self::fcs(&[addr, RFCOMM_UA, 0x01])]
+        vec![
+            addr,
+            RFCOMM_UA,
+            0x01,
+            0x00,
+            0x70 | Self::fcs(&[addr, RFCOMM_UA, 0x01]),
+        ]
     }
 
     /// Create UIH frame (Unnumbered Information with Header check)
@@ -617,7 +632,7 @@ impl RfcommHeader {
         let mut frame = Vec::with_capacity(5 + data.len());
         frame.push(addr);
         frame.push(RFCOMM_UIH);
-        
+
         // Length field (7-bit or 15-bit)
         if data.len() < 128 {
             frame.push(((data.len() as u8) << 1) | 1);
@@ -625,12 +640,12 @@ impl RfcommHeader {
             frame.push((data.len() as u8) << 1);
             frame.push((data.len() >> 7) as u8);
         }
-        
+
         frame.extend_from_slice(data);
-        
+
         // FCS (only header for UIH)
         frame.push(0x00); // Simplified FCS
-        
+
         frame
     }
 
@@ -845,7 +860,7 @@ impl BleManager {
                 break;
             }
             let ad_type = data[offset + 1];
-            
+
             // Local Name (0x08 or 0x09)
             if ad_type == 0x08 || ad_type == 0x09 {
                 if offset + 2 + len - 1 <= data.len() {
@@ -853,7 +868,7 @@ impl BleManager {
                     name = String::from_utf8_lossy(name_bytes).to_string();
                 }
             }
-            
+
             offset += len + 1;
         }
 
@@ -986,4 +1001,139 @@ pub fn stop_ble_scanning() {
 /// Get BLE devices
 pub fn get_ble_devices() -> Vec<BleDevice> {
     BT_MANAGER.lock().ble.devices.clone()
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GattPermissions {
+    pub read: bool,
+    pub write: bool,
+    pub notify: bool,
+    pub indicate: bool,
+    pub write_without_response: bool,
+}
+
+impl GattPermissions {
+    pub fn read_only() -> Self {
+        Self {
+            read: true,
+            write: false,
+            notify: false,
+            indicate: false,
+            write_without_response: false,
+        }
+    }
+    pub fn read_write() -> Self {
+        Self {
+            read: true,
+            write: true,
+            notify: false,
+            indicate: false,
+            write_without_response: false,
+        }
+    }
+}
+
+/// GATT Hizmet tanımı
+#[derive(Debug, Clone)]
+pub struct GattService {
+    pub uuid: u16,
+    pub start_handle: u16,
+    pub end_handle: u16,
+    pub characteristics: Vec<GattCharacteristic>,
+}
+
+/// GATT Characteristic tanımı
+#[derive(Debug, Clone)]
+pub struct GattCharacteristic {
+    pub uuid: u16,
+    pub handle: u16,
+    pub value_handle: u16,
+    pub properties: GattPermissions,
+    pub value: Vec<u8>,
+}
+
+/// GATT Sunucusu — hizmet ve characteristic yönetimi
+pub struct GattServer {
+    pub services: Vec<GattService>,
+    pub next_handle: u16,
+}
+
+impl GattServer {
+    pub fn new() -> Self {
+        Self {
+            services: Vec::new(),
+            next_handle: 1,
+        }
+    }
+
+    /// Yeni hizmet kaydeder.
+    pub fn add_service(&mut self, uuid: u16) -> usize {
+        let start_handle = self.next_handle;
+        self.next_handle += 1;
+        let service = GattService {
+            uuid,
+            start_handle,
+            end_handle: start_handle,
+            characteristics: Vec::new(),
+        };
+        self.services.push(service);
+        self.services.len() - 1
+    }
+
+    /// Hizmete characteristic ekler.
+    pub fn add_characteristic(
+        &mut self,
+        service_idx: usize,
+        uuid: u16,
+        properties: GattPermissions,
+        initial_value: Vec<u8>,
+    ) {
+        let handle = self.next_handle;
+        self.next_handle += 1;
+        let value_handle = self.next_handle;
+        self.next_handle += 1;
+
+        let charact = GattCharacteristic {
+            uuid,
+            handle,
+            value_handle,
+            properties,
+            value: initial_value,
+        };
+
+        if let Some(service) = self.services.get_mut(service_idx) {
+            service.characteristics.push(charact);
+            service.end_handle = self.next_handle - 1;
+        }
+    }
+
+    /// Characteristic değerini okur.
+    pub fn read_characteristic(&self, handle: u16) -> Option<&[u8]> {
+        for service in &self.services {
+            for chr in &service.characteristics {
+                if chr.value_handle == handle {
+                    return Some(&chr.value);
+                }
+            }
+        }
+        None
+    }
+
+    /// Characteristic değerini yazar.
+    pub fn write_characteristic(&mut self, handle: u16, value: &[u8]) -> bool {
+        for service in &mut self.services {
+            for chr in &mut service.characteristics {
+                if chr.value_handle == handle && chr.properties.write {
+                    chr.value = value.to_vec();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Toplam hizmet sayısı.
+    pub fn service_count(&self) -> usize {
+        self.services.len()
+    }
 }

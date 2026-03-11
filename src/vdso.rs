@@ -24,7 +24,9 @@
 
 use crate::memory::PAGE_SIZE;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB};
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
+};
 use x86_64::{PhysAddr, VirtAddr};
 
 /// Kullanıcı alanında vDSO'nun eşleneceği sabit sanal adres.
@@ -77,7 +79,9 @@ static mut VDSO_KERNEL_VIRT: Option<VirtAddr> = None;
 pub fn init() {
     // 1 sayfalık physical frame allocate et
     let mut allocator = unsafe { crate::memory::global_memory_manager_mut().unwrap() };
-    let frame = allocator.allocate_frame().expect("vDSO frame allocate edilemedi!");
+    let frame = allocator
+        .allocate_frame()
+        .expect("vDSO frame allocate edilemedi!");
     unsafe {
         VDSO_PHYS_FRAME = Some(frame);
     }
@@ -95,7 +99,10 @@ pub fn init() {
     // İlk değerleri gir
     update_time(0, 0);
 
-    crate::serial_println!("[vDSO] Initialized at mapped phys: {:#x}", frame.start_address().as_u64());
+    crate::serial_println!(
+        "[vDSO] Initialized at mapped phys: {:#x}",
+        frame.start_address().as_u64()
+    );
 }
 
 /// Zamanlayıcı tick'i geldiğinde çekirdek tarafından çağrılır; zaman verilerini günceller.
@@ -136,7 +143,8 @@ pub fn map_to_user(mapper: &mut impl Mapper<Size4KiB>) -> Result<(), ()> {
     let mut allocator = unsafe { crate::memory::global_memory_manager_mut().ok_or(())? };
 
     unsafe {
-        mapper.map_to(page, frame, flags, allocator)
+        mapper
+            .map_to(page, frame, flags, allocator)
             .map_err(|_| ())?
             .flush();
     }

@@ -1133,3 +1133,331 @@ fn read_ecam_dword(base: u64, bus: u8, device: u8, function: u8, offset: u16) ->
         + ((offset as u64) & 0xFFC);
     unsafe { read_volatile(address as *const u32) }
 }
+
+// ============================================================================
+// PCIe AER (Advanced Error Reporting)
+// ============================================================================
+
+/// PCIe AER Extended Capability ID
+const PCI_EXT_CAP_ID_AER: u16 = 0x0001;
+
+/// AER Uncorrectable Error Status Register offset (relative to AER capability)
+const AER_UNCORR_STATUS: u16 = 0x04;
+/// AER Uncorrectable Error Mask Register offset
+const AER_UNCORR_MASK: u16 = 0x08;
+/// AER Uncorrectable Error Severity Register offset
+const AER_UNCORR_SEVERITY: u16 = 0x0C;
+/// AER Correctable Error Status Register offset
+const AER_CORR_STATUS: u16 = 0x10;
+/// AER Correctable Error Mask Register offset
+const AER_CORR_MASK: u16 = 0x14;
+/// AER Advanced Error Capabilities and Control Register offset
+const AER_CAP_CONTROL: u16 = 0x18;
+/// AER Header Log [0-3] offsets
+const AER_HEADER_LOG: u16 = 0x1C;
+/// AER TLP Prefix Log offsets
+const AER_TLP_PREFIX_LOG: u16 = 0x38;
+
+/// AER Uncorrectable Error bits
+pub const AER_UNCORR_TRAINING_ERROR: u32 = 1 << 0;
+pub const AER_UNCORR_DLLP_ERROR: u32 = 1 << 4;
+pub const AER_UNCORR_SURPRISE_DOWN: u32 = 1 << 5;
+pub const AER_UNCORR_POISONED_TLP: u32 = 1 << 12;
+pub const AER_UNCORR_FC_PROTOCOL: u32 = 1 << 13;
+pub const AER_UNCORR_COMPLETION_TIMEOUT: u32 = 1 << 14;
+pub const AER_UNCORR_COMPLETER_ABORT: u32 = 1 << 15;
+pub const AER_UNCORR_UNEXPECTED_COMPLETION: u32 = 1 << 16;
+pub const AER_UNCORR_RECEIVER_OVERFLOW: u32 = 1 << 17;
+pub const AER_UNCORR_MALFORMED_TLP: u32 = 1 << 18;
+pub const AER_UNCORR_ECRC_ERROR: u32 = 1 << 19;
+pub const AER_UNCORR_UNSUPPORTED_REQUEST: u32 = 1 << 20;
+pub const AER_UNCORR_ACS_VIOLATION: u32 = 1 << 21;
+pub const AER_UNCORR_INTERNAL_ERROR: u32 = 1 << 22;
+pub const AER_UNCORR_MC_BLOCKED_TLP: u32 = 1 << 23;
+pub const AER_UNCORR_ATOMIC_EGRESS_BLOCKED: u32 = 1 << 24;
+pub const AER_UNCORR_TLP_PREFIX_BLOCKED: u32 = 1 << 25;
+
+/// AER Correctable Error bits
+pub const AER_CORR_RECEIVER_ERROR: u32 = 1 << 0;
+pub const AER_CORR_REPLAY_ROLLOVER: u32 = 1 << 8;
+pub const AER_CORR_REPLAY_TIMER_TIMEOUT: u32 = 1 << 12;
+pub const AER_CORR_ADVISORY_NONFATAL: u32 = 1 << 13;
+pub const AER_CORR_INTERNAL_ERROR: u32 = 1 << 14;
+pub const AER_CORR_HEADER_LOG_OVFLOW: u32 = 1 << 15;
+
+/// AER error information structure
+#[derive(Debug, Clone)]
+pub struct AerErrorInfo {
+    /// Device identification
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    /// Uncorrectable error status
+    pub uncorr_status: u32,
+    /// Correctable error status
+    pub corr_status: u32,
+    /// Error severity (from uncorr_severity register interpretation)
+    pub is_fatal: bool,
+    /// Header log (first TLP header that caused error)
+    pub header_log: [u32; 4],
+}
+
+impl AerErrorInfo {
+    /// Check if there are any uncorrectable errors
+    pub fn has_uncorrectable(&self) -> bool {
+        self.uncorr_status != 0
+    }
+
+    /// Check if there are any correctable errors
+    pub fn has_correctable(&self) -> bool {
+        self.corr_status != 0
+    }
+
+    /// Get human-readable error description
+    pub fn describe_uncorr_error(&self) -> alloc::string::String {
+        let mut desc = alloc::string::String::new();
+        if self.uncorr_status & AER_UNCORR_TRAINING_ERROR != 0 {
+            desc.push_str("Training Error, ");
+        }
+        if self.uncorr_status & AER_UNCORR_DLLP_ERROR != 0 {
+            desc.push_str("DLLP Error, ");
+        }
+        if self.uncorr_status & AER_UNCORR_SURPRISE_DOWN != 0 {
+            desc.push_str("Surprise Down, ");
+        }
+        if self.uncorr_status & AER_UNCORR_POISONED_TLP != 0 {
+            desc.push_str("Poisoned TLP, ");
+        }
+        if self.uncorr_status & AER_UNCORR_FC_PROTOCOL != 0 {
+            desc.push_str("FC Protocol Error, ");
+        }
+        if self.uncorr_status & AER_UNCORR_COMPLETION_TIMEOUT != 0 {
+            desc.push_str("Completion Timeout, ");
+        }
+        if self.uncorr_status & AER_UNCORR_COMPLETER_ABORT != 0 {
+            desc.push_str("Completer Abort, ");
+        }
+        if self.uncorr_status & AER_UNCORR_UNEXPECTED_COMPLETION != 0 {
+            desc.push_str("Unexpected Completion, ");
+        }
+        if self.uncorr_status & AER_UNCORR_MALFORMED_TLP != 0 {
+            desc.push_str("Malformed TLP, ");
+        }
+        if self.uncorr_status & AER_UNCORR_ECRC_ERROR != 0 {
+            desc.push_str("ECRC Error, ");
+        }
+        if self.uncorr_status & AER_UNCORR_UNSUPPORTED_REQUEST != 0 {
+            desc.push_str("Unsupported Request, ");
+        }
+        if self.uncorr_status & AER_UNCORR_INTERNAL_ERROR != 0 {
+            desc.push_str("Internal Error, ");
+        }
+        desc
+    }
+
+    /// Get human-readable correctable error description
+    pub fn describe_corr_error(&self) -> alloc::string::String {
+        let mut desc = alloc::string::String::new();
+        if self.corr_status & AER_CORR_RECEIVER_ERROR != 0 {
+            desc.push_str("Receiver Error, ");
+        }
+        if self.corr_status & AER_CORR_REPLAY_ROLLOVER != 0 {
+            desc.push_str("Replay Rollover, ");
+        }
+        if self.corr_status & AER_CORR_REPLAY_TIMER_TIMEOUT != 0 {
+            desc.push_str("Replay Timer Timeout, ");
+        }
+        if self.corr_status & AER_CORR_ADVISORY_NONFATAL != 0 {
+            desc.push_str("Advisory Non-Fatal, ");
+        }
+        if self.corr_status & AER_CORR_INTERNAL_ERROR != 0 {
+            desc.push_str("Internal Error, ");
+        }
+        desc
+    }
+}
+
+/// Find PCIe Extended Capability offset
+/// PCIe extended capabilities start at offset 0x100 and use a linked list
+pub fn find_ext_capability(bus: u8, device: u8, function: u8, cap_id: u16) -> Option<u16> {
+    let mut offset = 0x100u16;
+
+    while offset >= 0x100 {
+        let header = read_config_dword(bus, device, function, offset);
+        if header == 0xFFFFFFFF {
+            return None;
+        }
+
+        let curr_cap_id = (header & 0xFFFF) as u16;
+        if curr_cap_id == cap_id {
+            return Some(offset);
+        }
+
+        // Next capability offset is in bits 20-28
+        offset = ((header >> 20) & 0xFFC) as u16;
+
+        // Check version (bits 16-19), must be valid
+        if offset == 0 {
+            break;
+        }
+    }
+    None
+}
+
+/// Check if device supports AER (Advanced Error Reporting)
+pub fn has_aer(bus: u8, device: u8, function: u8) -> bool {
+    find_ext_capability(bus, device, function, PCI_EXT_CAP_ID_AER).is_some()
+}
+
+/// Read AER capability registers
+pub fn read_aer_info(bus: u8, device: u8, function: u8) -> Option<AerErrorInfo> {
+    let aer_offset = find_ext_capability(bus, device, function, PCI_EXT_CAP_ID_AER)?;
+
+    let uncorr_status = read_config_dword(bus, device, function, aer_offset + AER_UNCORR_STATUS);
+    let corr_status = read_config_dword(bus, device, function, aer_offset + AER_CORR_STATUS);
+    let uncorr_severity =
+        read_config_dword(bus, device, function, aer_offset + AER_UNCORR_SEVERITY);
+
+    // Determine if error is fatal based on severity register
+    let is_fatal = (uncorr_status & uncorr_severity) != 0;
+
+    // Read header log for the first TLP that caused the error
+    let header_log = [
+        read_config_dword(bus, device, function, aer_offset + AER_HEADER_LOG),
+        read_config_dword(bus, device, function, aer_offset + AER_HEADER_LOG + 4),
+        read_config_dword(bus, device, function, aer_offset + AER_HEADER_LOG + 8),
+        read_config_dword(bus, device, function, aer_offset + AER_HEADER_LOG + 12),
+    ];
+
+    Some(AerErrorInfo {
+        bus,
+        device,
+        function,
+        uncorr_status,
+        corr_status,
+        is_fatal,
+        header_log,
+    })
+}
+
+/// Clear AER error status registers
+pub fn clear_aer_status(bus: u8, device: u8, function: u8) -> bool {
+    let aer_offset = match find_ext_capability(bus, device, function, PCI_EXT_CAP_ID_AER) {
+        Some(off) => off,
+        None => return false,
+    };
+
+    // Clear uncorrectable errors by writing 1s to status bits
+    let uncorr_status = read_config_dword(bus, device, function, aer_offset + AER_UNCORR_STATUS);
+    write_config_dword(
+        bus,
+        device,
+        function,
+        aer_offset + AER_UNCORR_STATUS,
+        uncorr_status,
+    );
+
+    // Clear correctable errors by writing 1s to status bits
+    let corr_status = read_config_dword(bus, device, function, aer_offset + AER_CORR_STATUS);
+    write_config_dword(
+        bus,
+        device,
+        function,
+        aer_offset + AER_CORR_STATUS,
+        corr_status,
+    );
+
+    crate::serial_println!(
+        "[AER] Cleared errors for {:02x}:{:02x}.{} (UC={:#x}, C={:#x})",
+        bus,
+        device,
+        function,
+        uncorr_status,
+        corr_status
+    );
+
+    true
+}
+
+/// Enable AER for a device
+pub fn enable_aer(bus: u8, device: u8, function: u8) -> bool {
+    let aer_offset = match find_ext_capability(bus, device, function, PCI_EXT_CAP_ID_AER) {
+        Some(off) => off,
+        None => return false,
+    };
+
+    // Clear any existing errors first
+    clear_aer_status(bus, device, function);
+
+    // Enable ECRC checking and generation (optional but recommended)
+    let cap_control = read_config_dword(bus, device, function, aer_offset + AER_CAP_CONTROL);
+    let new_control = cap_control | (1 << 6) | (1 << 7); // Enable ECRC check and generation
+    write_config_dword(
+        bus,
+        device,
+        function,
+        aer_offset + AER_CAP_CONTROL,
+        new_control,
+    );
+
+    // Unmask correctable errors (enable reporting)
+    let corr_mask = read_config_dword(bus, device, function, aer_offset + AER_CORR_MASK);
+    // Only unmask common non-critical errors
+    let new_corr_mask = corr_mask & !(AER_CORR_RECEIVER_ERROR | AER_CORR_REPLAY_ROLLOVER);
+    write_config_dword(
+        bus,
+        device,
+        function,
+        aer_offset + AER_CORR_MASK,
+        new_corr_mask,
+    );
+
+    crate::serial_println!("[AER] Enabled for {:02x}:{:02x}.{}", bus, device, function);
+
+    true
+}
+
+/// Scan all devices for AER errors and report them
+pub fn scan_aer_errors() -> Vec<AerErrorInfo> {
+    let devices = scan();
+    let mut errors = Vec::new();
+
+    for dev in devices {
+        if let Some(mut info) = read_aer_info(dev.bus, dev.device, dev.function) {
+            if info.has_uncorrectable() || info.has_correctable() {
+                crate::serial_println!(
+                    "[AER] Error detected at {:02x}:{:02x}.{}: UC={:#x} C={:#x}",
+                    dev.bus,
+                    dev.device,
+                    dev.function,
+                    info.uncorr_status,
+                    info.corr_status
+                );
+                if info.has_uncorrectable() {
+                    crate::serial_println!("  Uncorrectable: {}", info.describe_uncorr_error());
+                }
+                if info.has_correctable() {
+                    crate::serial_println!("  Correctable: {}", info.describe_corr_error());
+                }
+                errors.push(info);
+            }
+        }
+    }
+
+    errors
+}
+
+/// Initialize AER for all PCIe devices
+pub fn init_aer() {
+    let devices = scan();
+    let mut aer_count = 0;
+
+    for dev in devices {
+        if has_aer(dev.bus, dev.device, dev.function) {
+            enable_aer(dev.bus, dev.device, dev.function);
+            aer_count += 1;
+        }
+    }
+
+    crate::serial_println!("[PCI] AER initialized for {} devices", aer_count);
+}

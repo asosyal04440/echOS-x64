@@ -17,7 +17,7 @@
 
 use super::{Rect, Widget};
 use crate::gop::framebuffer::Framebuffer;
-use crate::gui::theme::Theme;
+use crate::gui::theme::{ButtonRole, Theme, ThemeMode};
 
 /// Tıklanabilir buton widget'ı.
 ///
@@ -28,27 +28,64 @@ use crate::gui::theme::Theme;
 pub struct Button<'a> {
     rect: Rect,
     text: &'a str,
-    bg_color: u32,
-    text_color: u32,
+    role: ButtonRole,
     hovered: bool,
     pressed: bool,
+    /// Devre dışı durumu — tıklama yok sayılır, soluk renkte çizilir.
+    enabled: bool,
+    /// Odak durumu — klavye ile Enter/Space ile tetiklenebilir.
+    focused: bool,
+    /// Tıklama geri çağırma (opsiyonel). None ise toggle efekti.
+    on_click_fn: Option<fn()>,
 }
 
 impl<'a> Button<'a> {
     /// Yeni buton oluşturur.
-    ///
-    /// Renk değerleri `Theme` sabitleri üzerinden `to_u32()` conversion yöntemiyle
-    /// 32-bit ARGB/RGBA formatına dönüştürülür. Framebuffer pikseller 32-bit
-    /// tam sayılarla temsil edilir; her byte bir renk kanalına karşılık gelir.
     pub fn new(x: i32, y: i32, width: i32, height: i32, text: &'a str) -> Self {
         Self {
-            rect: Rect::new(x, y, width, height),
+            rect: Rect::new(
+                x,
+                y,
+                width.max(Theme::MIN_HIT_WIDTH),
+                height.max(Theme::MIN_HIT_HEIGHT),
+            ),
             text,
-            bg_color: Theme::BUTTON_BG.to_u32(),
-            text_color: Theme::BUTTON_TEXT.to_u32(),
+            role: ButtonRole::Secondary,
             hovered: false,
             pressed: false,
+            enabled: true,
+            focused: false,
+            on_click_fn: None,
         }
+    }
+
+    pub fn primary(x: i32, y: i32, width: i32, height: i32, text: &'a str) -> Self {
+        Self::new(x, y, width, height, text).with_role(ButtonRole::Primary)
+    }
+
+    pub fn tertiary(x: i32, y: i32, width: i32, height: i32, text: &'a str) -> Self {
+        Self::new(x, y, width, height, text).with_role(ButtonRole::Tertiary)
+    }
+
+    pub fn with_role(mut self, role: ButtonRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// Tıklama geri çağırması ayarlar.
+    pub fn with_on_click(mut self, cb: fn()) -> Self {
+        self.on_click_fn = Some(cb);
+        self
+    }
+
+    /// Butonun etkinlik durumunu ayarlar.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Butonun etkin olup olmadığını döndürür.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 }
 
@@ -58,18 +95,19 @@ impl<'a> Widget for Button<'a> {
         let y = self.rect.y as usize;
         let w = self.rect.width as usize;
         let h = self.rect.height as usize;
+        let mode = ThemeMode::Dark;
 
-        // Duruma göre renk seçimi:
-        // pressed ve hovered aynı rengi kullanır; daha ince bir efekt için
-        // ayrı renkler de tanımlanabilir. if-else zinciri bir öncelik sırası
-        // oluşturur: önce pressed kontrol edilir, sonra hovered, son olarak
-        // normal durum.
-        let color = if self.pressed {
-            Theme::BUTTON_HOVER.to_u32()
-        } else if self.hovered {
-            Theme::BUTTON_HOVER.to_u32()
+        // Disabled → soluk gri; pressed → koyu; hovered → parlak; normal → temel
+        let color = if !self.enabled {
+            Theme::TEXT_DISABLED.to_u32()
         } else {
-            self.bg_color
+            Theme::button_fill(self.role, mode, self.pressed, self.hovered)
+        };
+
+        let text_c = if !self.enabled {
+            Theme::TEXT_DISABLED.to_u32()
+        } else {
+            Theme::button_text(self.role, mode)
         };
 
         // Arkaplan: tüm piksellerle teker teker doldurulur.
@@ -85,7 +123,11 @@ impl<'a> Widget for Button<'a> {
         // Kenarlık: dört kenarı ayrı ayrı tarar.
         // Üst ve alt kenar için yatay döngü, sol ve sağ kenar için dikey
         // döngü kullanılır; köşe pikseller her iki döngüde de çizilir.
-        let border_color = Theme::BORDER.to_u32();
+        let border_color = if self.focused {
+            Theme::BORDER_FOCUS.to_u32()
+        } else {
+            Theme::BORDER.to_u32()
+        };
         for col in x..(x + w) {
             fb.plot_pixel(col, y, border_color); // Üst
             fb.plot_pixel(col, y + h - 1, border_color); // Alt
@@ -108,24 +150,83 @@ impl<'a> Widget for Button<'a> {
         };
         let text_y = y + (h - 16) / 2;
 
-        fb.draw_string(text_x, text_y, self.text, self.text_color);
+        fb.draw_string(text_x, text_y, self.text, text_c);
+
+        // Odak halkası — focused ise kenarlık ACCENT renginde çizilir
+        if self.focused && self.enabled {
+            let focus_color = Theme::INPUT_FOCUS.to_u32();
+            for col in x..(x + w) {
+                fb.plot_pixel(col, y, focus_color);
+                fb.plot_pixel(col, y + h - 1, focus_color);
+            }
+            for row in y..(y + h) {
+                fb.plot_pixel(x, row, focus_color);
+                fb.plot_pixel(x + w - 1, row, focus_color);
+            }
+        }
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {
+        if !self.enabled {
+            return false;
+        }
         if self.rect.contains(x, y) {
-            self.pressed = !self.pressed; // Toggle efekti: her tıklamada durum değişir
+            if let Some(cb) = self.on_click_fn {
+                cb();
+            }
+            self.pressed = !self.pressed;
             true
         } else {
             false
         }
     }
 
-    /// Butonun sınır dikdörtgenini döndürür.
-    ///
-    /// `Rect` türü `Copy` trait'ini implement ettiği için bu döndürme bir
-    /// kopyalama işlemidir; referans döndürmeye gerek yoktur. `Copy` türleri
-    /// bellek adresi yerine değer üzerinden kopyalanır.
+    fn on_hover(&mut self, x: i32, y: i32) -> bool {
+        let was = self.hovered;
+        self.hovered = self.rect.contains(x, y);
+        self.hovered != was
+    }
+
+    fn on_key(&mut self, key: char, _modifiers: u8, _scancode: u8) -> bool {
+        if !self.enabled || !self.focused {
+            return false;
+        }
+        // Enter veya Space ile buton tetikleme
+        if key == '\n' || key == ' ' {
+            if let Some(cb) = self.on_click_fn {
+                cb();
+            }
+            self.pressed = !self.pressed;
+            return true;
+        }
+        false
+    }
+
     fn bounds(&self) -> Rect {
         self.rect
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focused
+    }
+    fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    fn accessibility_info(&self) -> super::AccessibilityInfo {
+        use super::{AccessRole, AccessState, AccessibilityInfo};
+        let mut state = AccessState::empty();
+        if self.focused {
+            state = state.with(AccessState::FOCUSED);
+        }
+        if !self.enabled {
+            state = state.with(AccessState::DISABLED);
+        }
+        AccessibilityInfo {
+            role: AccessRole::Button,
+            label: self.text,
+            value: if self.pressed { "pressed" } else { "" },
+            state,
+        }
     }
 }

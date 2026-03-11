@@ -79,6 +79,13 @@ pub struct Dialog<'a> {
     result: DialogResult,
     content_widgets: Vec<Box<dyn Widget + 'a>>,
     on_close: Option<fn(DialogResult)>,
+    /// Modal arka plan karartması etkin mi
+    modal_overlay: bool,
+    /// Ekran boyutları (modal overlay için)
+    screen_width: usize,
+    screen_height: usize,
+    /// Odaklı buton indeksi (Tab ile geçiş)
+    focused_button: usize,
 }
 
 impl<'a> Dialog<'a> {
@@ -98,6 +105,10 @@ impl<'a> Dialog<'a> {
             result: DialogResult::None,
             content_widgets: Vec::new(),
             on_close: None,
+            modal_overlay: true,
+            screen_width: 0,
+            screen_height: 0,
+            focused_button: 0,
         }
     }
 
@@ -130,6 +141,9 @@ impl<'a> Dialog<'a> {
         self.rect.y = ((screen_height as i32 - self.rect.height) / 2).max(0);
         self.visible = true;
         self.result = DialogResult::None;
+        self.screen_width = screen_width;
+        self.screen_height = screen_height;
+        self.focused_button = 0;
     }
 
     /// Diyaloğu gizler.
@@ -157,20 +171,17 @@ impl<'a> Dialog<'a> {
     /// Pencerenin sürüklenip sürüklenmeyeceğini belirler; yalnızca başlık
     /// çubuğuna tıklanırsa sürükleme başlar.
     fn is_titlebar_hit(&self, x: i32, y: i32) -> bool {
-        y >= self.rect.y && y < self.rect.y + self.titlebar_height()
-            && x >= self.rect.x && x < self.rect.x + self.rect.width
+        y >= self.rect.y
+            && y < self.rect.y + self.titlebar_height()
+            && x >= self.rect.x
+            && x < self.rect.x + self.rect.width
     }
 
     /// Kapatma düğmesinin dikdörtgenini hesaplar.
     ///
     /// Sağ üst köşeye 24 piksel soldan yerleştirilir, 4 piksel üstten offset ile.
     fn close_button_rect(&self) -> Rect {
-        Rect::new(
-            self.rect.x + self.rect.width - 24,
-            self.rect.y + 4,
-            20,
-            20,
-        )
+        Rect::new(self.rect.x + self.rect.width - 24, self.rect.y + 4, 20, 20)
     }
 
     /// Belirtilen indeksteki butonun dikdörtgenini hesaplar.
@@ -183,7 +194,8 @@ impl<'a> Dialog<'a> {
         let button_width = 80;
         let button_height = 28;
         let spacing = 10;
-        let total_width = (self.buttons.len() as i32 * button_width) + ((self.buttons.len() - 1) as i32 * spacing);
+        let total_width = (self.buttons.len() as i32 * button_width)
+            + ((self.buttons.len() - 1) as i32 * spacing);
         let start_x = self.rect.x + (self.rect.width - total_width) / 2;
         let button_y = self.rect.y + self.rect.height - button_height - 15;
 
@@ -201,6 +213,13 @@ impl<'a> Widget for Dialog<'a> {
         // Görünmez diyalog hiçbir şey çizmez; erken çıkış optimizasyonu
         if !self.visible {
             return;
+        }
+
+        // Modal overlay: arka planı %40 karartır
+        if self.modal_overlay && self.screen_width > 0 && self.screen_height > 0 {
+            let overlay_color = 0x66000000u32; // %40 opak siyah
+                                               // Performans için basitçe koyu bir dikdörtgen çiz
+            fb.draw_rect(0, 0, self.screen_width, self.screen_height, 0x00181818);
         }
 
         let x = self.rect.x as usize;
@@ -256,22 +275,36 @@ impl<'a> Widget for Dialog<'a> {
         // Alt butonları çiz: her buton için dikdörtgen, kenarlık ve metin
         for (i, (text, _)) in self.buttons.iter().enumerate() {
             let btn_rect = self.button_rect(i);
+            let is_focused_btn = i == self.focused_button;
+            let bg = if is_focused_btn {
+                Theme::ACCENT_PRIMARY.to_u32()
+            } else {
+                Theme::BUTTON_BG.to_u32()
+            };
             fb.draw_rect(
                 btn_rect.x as usize,
                 btn_rect.y as usize,
                 btn_rect.width as usize,
                 btn_rect.height as usize,
-                Theme::BUTTON_BG.to_u32(),
+                bg,
             );
 
             // Buton kenarlığı
             for col in btn_rect.x as usize..(btn_rect.x as usize + btn_rect.width as usize) {
                 fb.plot_pixel(col, btn_rect.y as usize, Theme::BORDER.to_u32());
-                fb.plot_pixel(col, btn_rect.y as usize + btn_rect.height as usize - 1, Theme::BORDER.to_u32());
+                fb.plot_pixel(
+                    col,
+                    btn_rect.y as usize + btn_rect.height as usize - 1,
+                    Theme::BORDER.to_u32(),
+                );
             }
             for row in btn_rect.y as usize..(btn_rect.y as usize + btn_rect.height as usize) {
                 fb.plot_pixel(btn_rect.x as usize, row, Theme::BORDER.to_u32());
-                fb.plot_pixel(btn_rect.x as usize + btn_rect.width as usize - 1, row, Theme::BORDER.to_u32());
+                fb.plot_pixel(
+                    btn_rect.x as usize + btn_rect.width as usize - 1,
+                    row,
+                    Theme::BORDER.to_u32(),
+                );
             }
 
             // Buton metni ortaya hizalı
@@ -337,6 +370,56 @@ impl<'a> Widget for Dialog<'a> {
             true
         } else {
             false
+        }
+    }
+
+    /// Klavye olayını işler.
+    /// ESC: diyaloğu Cancel ile kapatır.
+    /// Tab: butonlar arasında odak döngüsü (focus trap).
+    /// Enter/Space: odaklı butonu tetikler.
+    fn on_key(&mut self, _key: char, _modifiers: u8, scancode: u8) -> bool {
+        if !self.visible {
+            return false;
+        }
+
+        match scancode {
+            0x01 => {
+                // ESC: DialogResult::Cancel ile kapat
+                self.result = DialogResult::Cancel;
+                if let Some(handler) = self.on_close {
+                    handler(self.result);
+                }
+                self.hide();
+                true
+            }
+            0x0F => {
+                // Tab: butonlar arasında döngü (focus trap)
+                if !self.buttons.is_empty() {
+                    self.focused_button = (self.focused_button + 1) % self.buttons.len();
+                }
+                true
+            }
+            0x1C => {
+                // Enter: odaklı butonu tetikle
+                if self.focused_button < self.buttons.len() {
+                    self.result = self.buttons[self.focused_button].1;
+                    if let Some(handler) = self.on_close {
+                        handler(self.result);
+                    }
+                    self.hide();
+                }
+                true
+            }
+            _ => {
+                // İçerik widget'larına ilet
+                for widget in &mut self.content_widgets {
+                    if widget.on_key(_key, _modifiers, scancode) {
+                        return true;
+                    }
+                }
+                // Diyalog görünürken tüm tuşları yutar (focus trap)
+                true
+            }
         }
     }
 
@@ -444,7 +527,12 @@ impl Widget for MessageBox {
         let icon_x = self.dialog.rect.x + 20;
         let icon_y = self.dialog.rect.y + 50;
         fb.draw_rect(icon_x as usize, icon_y as usize, 32, 32, self.icon_color());
-        fb.draw_string(icon_x as usize + 12, icon_y as usize + 8, self.icon_char(), Theme::TEXT_PRIMARY.to_u32());
+        fb.draw_string(
+            icon_x as usize + 12,
+            icon_y as usize + 8,
+            self.icon_char(),
+            Theme::TEXT_PRIMARY.to_u32(),
+        );
 
         // Mesaj metni: ikonun sağında, otomatik satır kırmalı (word wrap)
         let msg_x = self.dialog.rect.x + 65;
@@ -462,12 +550,22 @@ impl Widget for MessageBox {
                 let mut start = 0;
                 while start < line.len() {
                     let end = (start + (max_width as usize / 8)).min(line.len());
-                    fb.draw_string(msg_x as usize, line_y as usize, &line[start..end], Theme::TEXT_PRIMARY.to_u32());
+                    fb.draw_string(
+                        msg_x as usize,
+                        line_y as usize,
+                        &line[start..end],
+                        Theme::TEXT_PRIMARY.to_u32(),
+                    );
                     line_y += 18;
                     start = end;
                 }
             } else {
-                fb.draw_string(msg_x as usize, line_y as usize, line, Theme::TEXT_PRIMARY.to_u32());
+                fb.draw_string(
+                    msg_x as usize,
+                    line_y as usize,
+                    line,
+                    Theme::TEXT_PRIMARY.to_u32(),
+                );
                 line_y += 18;
             }
         }
@@ -549,7 +647,9 @@ impl FileDialog {
     /// `and_then(|i| self.files.get(i))`: Option zinciri; indeks geçerliyse
     /// dosya adına erişir. `map(|s| s.as_str())`: String'i &str'ye dönüştürür.
     pub fn selected_file(&self) -> Option<&str> {
-        self.selected_file.and_then(|i| self.files.get(i)).map(|s| s.as_str())
+        self.selected_file
+            .and_then(|i| self.files.get(i))
+            .map(|s| s.as_str())
     }
 
     /// Dosya adı giriş alanındaki metni döndürür.
@@ -660,7 +760,12 @@ impl Widget for FileDialog {
             } else {
                 Theme::TEXT_PRIMARY.to_u32()
             };
-            fb.draw_string(list_rect.x as usize + 5, file_y as usize + 1, file, text_color);
+            fb.draw_string(
+                list_rect.x as usize + 5,
+                file_y as usize + 1,
+                file,
+                text_color,
+            );
 
             file_y += 20;
         }
@@ -722,7 +827,11 @@ impl Widget for FileDialog {
         }
 
         // Dosya adı giriş alanına klavye girişi işle
-        if self.dialog.rect.contains(self.filename_rect().x, self.filename_rect().y) {
+        if self
+            .dialog
+            .rect
+            .contains(self.filename_rect().x, self.filename_rect().y)
+        {
             if scancode == 0x0E && !self.filename_input.is_empty() {
                 // Backspace
                 self.filename_input.pop();

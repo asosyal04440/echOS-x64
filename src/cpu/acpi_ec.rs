@@ -53,21 +53,20 @@ const EC_DATA_PORT: u16 = 0x62;
 const EC_CMD_PORT: u16 = 0x66;
 
 /// EC komutları — ACPI Spec §12.3 (Embedded Controller Interface)
-const EC_CMD_READ: u8 = 0x80;         // EC bellek alanından bir bayt oku
-const EC_CMD_WRITE: u8 = 0x81;        // EC bellek alanına bir bayt yaz
+const EC_CMD_READ: u8 = 0x80; // EC bellek alanından bir bayt oku
+const EC_CMD_WRITE: u8 = 0x81; // EC bellek alanına bir bayt yaz
 const EC_CMD_BURST_ENABLE: u8 = 0x82; // Burst modunu etkinleştir (toplu erişim için)
-const EC_CMD_BURST_DISABLE: u8 = 0x83;// Burst modunu devre dışı bırak
-const EC_CMD_QUERY: u8 = 0x84;        // GPE sorgula — en son hangi olay tetiklendi?
+const EC_CMD_BURST_DISABLE: u8 = 0x83; // Burst modunu devre dışı bırak
+const EC_CMD_QUERY: u8 = 0x84; // GPE sorgula — en son hangi olay tetiklendi?
 
 /// EC durum kaydı bit maskeleri — EC_CMD_PORT'tan okunur
-const EC_STATUS_OBF: u8 = 0x01;   // Çıkış Tamponu Dolu (Output Buffer Full) — okuma mümkün
-const EC_STATUS_IBF: u8 = 0x02;   // Giriş Tamponu Dolu (Input Buffer Full) — EC meşgul
+const EC_STATUS_OBF: u8 = 0x01; // Çıkış Tamponu Dolu (Output Buffer Full) — okuma mümkün
+const EC_STATUS_IBF: u8 = 0x02; // Giriş Tamponu Dolu (Input Buffer Full) — EC meşgul
 const EC_STATUS_BURST: u8 = 0x10; // Burst modu etkin — birden fazla erişim için optimize
 
 /// EC varlığını yapılandırmada atomik olarak izler.
 /// Masaüstü sistemlerde veya sanal makinelerde EC genellikle bulunmaz.
-static EC_AVAILABLE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static EC_AVAILABLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// EC'yi keşfeder ve başlatır.
 ///
@@ -90,9 +89,7 @@ pub fn init_ec() {
     ];
 
     for path in &ec_paths {
-        if let Ok(_) = crate::cpu::acpi_aml::invoke_method(
-            &alloc::format!("{}._HID", path), &[]
-        ) {
+        if let Ok(_) = crate::cpu::acpi_aml::invoke_method(&alloc::format!("{}._HID", path), &[]) {
             EC_AVAILABLE.store(true, core::sync::atomic::Ordering::SeqCst);
             crate::serial_println!("[EC] Embedded Controller found at {}", path);
             return;
@@ -101,12 +98,13 @@ pub fn init_ec() {
 
     // ACPI namespace'te bulunamazsa doğrudan I/O port probe yöntemi kullan
     // EC_CMD_PORT'tan okunan değer 0xFF ise EC yok; başka bir değer EC varlığını gösterir
-    let status = unsafe {
-        x86_64::instructions::port::Port::<u8>::new(EC_CMD_PORT).read()
-    };
+    let status = unsafe { x86_64::instructions::port::Port::<u8>::new(EC_CMD_PORT).read() };
     if status != 0xFF {
         EC_AVAILABLE.store(true, core::sync::atomic::Ordering::SeqCst);
-        crate::serial_println!("[EC] EC detected via I/O port probe (status=0x{:02X})", status);
+        crate::serial_println!(
+            "[EC] EC detected via I/O port probe (status=0x{:02X})",
+            status
+        );
     } else {
         crate::serial_println!("[EC] No Embedded Controller found (desktop/VM)");
     }
@@ -151,9 +149,7 @@ pub fn ec_read(offset: u8) -> Option<u8> {
     }
 
     // Yanıt verisini oku
-    let data = unsafe {
-        x86_64::instructions::port::Port::<u8>::new(EC_DATA_PORT).read()
-    };
+    let data = unsafe { x86_64::instructions::port::Port::<u8>::new(EC_DATA_PORT).read() };
 
     Some(data)
 }
@@ -219,9 +215,7 @@ pub fn ec_query() -> Option<u8> {
         return None;
     }
 
-    let query_val = unsafe {
-        x86_64::instructions::port::Port::<u8>::new(EC_DATA_PORT).read()
-    };
+    let query_val = unsafe { x86_64::instructions::port::Port::<u8>::new(EC_DATA_PORT).read() };
 
     if query_val == 0 {
         None // 0 değeri bekleyen olay olmadığını gösterir
@@ -236,9 +230,7 @@ pub fn ec_query() -> Option<u8> {
 /// Timeout gerçekleşirse `false` döner ve işlem iptal edilebilir.
 fn wait_ibf_clear() -> bool {
     for _ in 0..1000 {
-        let status = unsafe {
-            x86_64::instructions::port::Port::<u8>::new(EC_CMD_PORT).read()
-        };
+        let status = unsafe { x86_64::instructions::port::Port::<u8>::new(EC_CMD_PORT).read() };
         if status & EC_STATUS_IBF == 0 {
             return true; // Giriş tamponu boş — yazma güvenli
         }
@@ -254,9 +246,7 @@ fn wait_ibf_clear() -> bool {
 /// Timeout gerçekleşirse `false` döner.
 fn wait_obf_set() -> bool {
     for _ in 0..1000 {
-        let status = unsafe {
-            x86_64::instructions::port::Port::<u8>::new(EC_CMD_PORT).read()
-        };
+        let status = unsafe { x86_64::instructions::port::Port::<u8>::new(EC_CMD_PORT).read() };
         if status & EC_STATUS_OBF != 0 {
             return true; // Çıkış tamponu dolu — okuma güvenli
         }

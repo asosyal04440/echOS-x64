@@ -95,7 +95,11 @@ impl Environment {
 
     /// Tüm değişkenleri döndürür
     pub fn list(&self) -> Vec<(String, String)> {
-        self.vars.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        self.vars
+            .lock()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     /// String içindeki `$VAR` ve `${VAR}` referanslarını gerçek değerleriyle değiştirir.
@@ -297,7 +301,8 @@ impl History {
     /// `history` komutu tarafından kullanılır.
     /// Dönen tuple: `(sıra_no, komut)` — sıra no 1'den başlar.
     pub fn list(&self) -> Vec<(usize, String)> {
-        self.entries.lock()
+        self.entries
+            .lock()
             .iter()
             .enumerate()
             .map(|(i, cmd)| (i + 1, cmd.clone()))
@@ -516,6 +521,107 @@ impl Glob {
 // ============================================================================
 // TAB COMPLETION (SEKMELİ TAMAMLAMA)
 // ============================================================================
+// BRACE EXPANSION (Süslü Parantez Genişletme)
+// ============================================================================
+
+/// Süslü parantez genişletme — `{a,b,c}` ve `{1..5}` kalıplarını açar.
+///
+/// ## Örnekler
+/// ```
+/// expand_braces("file{1,2,3}.txt")  → ["file1.txt", "file2.txt", "file3.txt"]
+/// expand_braces("{a,b}{1,2}")       → ["a1", "a2", "b1", "b2"]
+/// expand_braces("test{1..4}")       → ["test1", "test2", "test3", "test4"]
+/// expand_braces("hello")            → ["hello"]  (değişiklik yok)
+/// ```
+pub fn expand_braces(input: &str) -> Vec<String> {
+    // Süslü parantez bul
+    if let Some(open) = input.find('{') {
+        if let Some(close) = find_matching_brace(input, open) {
+            let prefix = &input[..open];
+            let suffix = &input[close + 1..];
+            let inner = &input[open + 1..close];
+
+            // Aralık mı? {start..end}
+            if let Some(dotdot) = inner.find("..") {
+                let start_str = &inner[..dotdot];
+                let end_str = &inner[dotdot + 2..];
+                if let (Ok(start), Ok(end)) = (start_str.parse::<i64>(), end_str.parse::<i64>()) {
+                    let mut results = Vec::new();
+                    let step = if start <= end { 1i64 } else { -1i64 };
+                    let mut i = start;
+                    loop {
+                        let expanded = format!("{}{}{}", prefix, i, suffix);
+                        // Suffix'te başka brace olabilir — recursive expand
+                        results.extend(expand_braces(&expanded));
+                        if i == end {
+                            break;
+                        }
+                        i += step;
+                    }
+                    return results;
+                }
+            }
+
+            // Virgülle ayrılmış liste: {a,b,c}
+            let items = split_brace_items(inner);
+            let mut results = Vec::new();
+            for item in &items {
+                let expanded = format!("{}{}{}", prefix, item, suffix);
+                // Recursive expand — iç içe brace'ler için
+                results.extend(expand_braces(&expanded));
+            }
+            return results;
+        }
+    }
+    vec![input.to_string()]
+}
+
+/// Eşleşen kapanış süslü parantezi bul (iç içe parantez desteği)
+fn find_matching_brace(s: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (i, ch) in s[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Brace içindeki virgülle ayrılmış öğeleri ayır (iç içe brace'leri koru)
+fn split_brace_items(inner: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0;
+    for ch in inner.chars() {
+        match ch {
+            '{' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '}' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                items.push(core::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        items.push(current);
+    }
+    items
+}
+
+// ============================================================================
 
 /// Sekme (Tab) tuşu tamamlama motoru.
 ///
@@ -544,13 +650,11 @@ impl Completer {
     pub fn new() -> Self {
         Self {
             builtins: vec![
-                "help", "ver", "echo", "clear", "ls", "cat", "cd", "pwd",
-                "mkdir", "rm", "cp", "mv", "touch", "chmod", "chown",
-                "ps", "kill", "top", "jobs", "fg", "bg", "export", "unset",
-                "env", "set", "history", "alias", "unalias", "source",
-                "exit", "shutdown", "reboot", "uname", "whoami", "id",
-                "date", "time", "uptime", "free", "df", "du", "mount", "umount",
-                "wine", "proton", "linux", "launch",
+                "help", "ver", "echo", "clear", "ls", "cat", "cd", "pwd", "mkdir", "rm", "cp",
+                "mv", "touch", "chmod", "chown", "ps", "kill", "top", "jobs", "fg", "bg", "export",
+                "unset", "env", "set", "history", "alias", "unalias", "source", "exit", "shutdown",
+                "reboot", "uname", "whoami", "id", "date", "time", "uptime", "free", "df", "du",
+                "mount", "umount", "wine", "proton", "linux", "launch",
             ],
         }
     }
@@ -605,7 +709,10 @@ impl Completer {
         // Gerçek dosya sistemi entegrasyonu
         let (dir, file_prefix) = if prefix.contains('/') {
             let last_slash = prefix.rfind('/').unwrap();
-            (prefix[..last_slash + 1].to_string(), prefix[last_slash + 1..].to_string())
+            (
+                prefix[..last_slash + 1].to_string(),
+                prefix[last_slash + 1..].to_string(),
+            )
         } else {
             ("/".to_string(), prefix.to_string())
         };
@@ -627,9 +734,23 @@ impl Completer {
         // Fallback: mock data
         if completions.is_empty() {
             let mock_files = [
-                "bin", "boot", "dev", "etc", "home", "lib", "mnt",
-                "proc", "root", "sbin", "sys", "tmp", "usr", "var",
-                "config.txt", "readme.md", "test.sh",
+                "bin",
+                "boot",
+                "dev",
+                "etc",
+                "home",
+                "lib",
+                "mnt",
+                "proc",
+                "root",
+                "sbin",
+                "sys",
+                "tmp",
+                "usr",
+                "var",
+                "config.txt",
+                "readme.md",
+                "test.sh",
             ];
 
             for file in &mock_files {
@@ -880,11 +1001,11 @@ pub struct Redirect {
 /// | All           | `&>`   | Stdout+Stderr'i dosyaya yaz           |
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RedirectKind {
-    Stdout,      // >
+    Stdout,       // >
     StdoutAppend, // >>
-    Stdin,       // <
-    Stderr,      // 2>
-    All,         // &>
+    Stdin,        // <
+    Stderr,       // 2>
+    All,          // &>
 }
 
 /// Boru hattı: `|` ile bağlanmış komutlar dizisi.
@@ -1093,7 +1214,9 @@ impl AliasManager {
 
     /// Alias tanımlar
     pub fn set(&self, name: &str, expansion: &str) {
-        self.aliases.lock().insert(name.to_string(), expansion.to_string());
+        self.aliases
+            .lock()
+            .insert(name.to_string(), expansion.to_string());
     }
 
     /// Alias'ı siler
@@ -1108,7 +1231,9 @@ impl AliasManager {
 
     /// Tüm alias'ları listeler
     pub fn list(&self) -> Vec<(String, String)> {
-        self.aliases.lock().iter()
+        self.aliases
+            .lock()
+            .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
@@ -1187,7 +1312,7 @@ mod tests {
 
     #[test]
     fn test_tokenizer() {
-        let tokens = Tokenizer:: tokenize("ls -la | grep test > out.txt");
+        let tokens = Tokenizer::tokenize("ls -la | grep test > out.txt");
         assert_eq!(tokens.len(), 7);
         assert_eq!(tokens[2], Token::Pipe);
         assert_eq!(tokens[5], Token::RedirectOut);
@@ -1195,7 +1320,7 @@ mod tests {
 
     #[test]
     fn test_parser() {
-        let tokens = Tokenizer:: tokenize("ls | grep test");
+        let tokens = Tokenizer::tokenize("ls | grep test");
         let pipelines = Parser::parse(tokens).unwrap();
         assert_eq!(pipelines.len(), 1);
         assert_eq!(pipelines[0].commands.len(), 2);

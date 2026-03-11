@@ -86,25 +86,25 @@ pub struct PciResource {
 #[repr(C)]
 pub struct PciDev {
     /// Temel cihaz nesnesi — ilk alan olmalı (Linux tasarım gereği)
-    pub dev: Device,           // offset = 0x00
+    pub dev: Device, // offset = 0x00
     /// PCI cihazının üretici (vendor) kimliği — örn: 0x8086 = Intel
-    pub vendor: u16,           // offset = 0x18
+    pub vendor: u16, // offset = 0x18
     /// PCI cihazının ürün (device) kimliği
-    pub device: u16,           // offset = 0x1A
+    pub device: u16, // offset = 0x1A
     /// Alt sistem üretici kimliği
     pub subsystem_vendor: u16, // offset = 0x1C
     /// Alt sistem ürün kimliği
     pub subsystem_device: u16, // offset = 0x1E
     /// Sınıf kodu: 3 baytlık hiyerarşik kod (class/subclass/progif)
-    pub class: u32,            // offset = 0x20
+    pub class: u32, // offset = 0x20
     /// Revizyon kodu — donanım versiyonu
-    pub revision: u8,          // offset = 0x24
+    pub revision: u8, // offset = 0x24
     /// Hizalama dolgusu — yapı boyutunu 4'ün katına tamamlar
     pub _pad0: [u8; 3],
     /// 6 adet BAR (Base Address Register) — MMIO ve Port I/O aralıkları
     pub resource: [PciResource; 6], // offset = 0x28
     /// Sürücüye özel veri pointer'ı — `pci_set_drvdata()` / `pci_get_drvdata()` ile yönetilir
-    pub driver_data: *mut c_void,   // offset = 0xB8
+    pub driver_data: *mut c_void, // offset = 0xB8
 }
 
 /// Linux PCI cihaz kimlik tablosu girişi — sürücünün desteklediği cihazlar.
@@ -353,7 +353,13 @@ pub(crate) fn is_claimed(bus: u8, device: u8, function: u8) -> bool {
 ///
 /// `probe()` başarılı olduğunda çağrılır. Cihaz, `CLAIMED_DEVICES` listesine eklenir
 /// ve bir daha `probe` denilmez.
-pub(crate) fn claim_device(driver: *mut PciDriver, dev: *mut PciDev, bus: u8, device: u8, function: u8) {
+pub(crate) fn claim_device(
+    driver: *mut PciDriver,
+    dev: *mut PciDev,
+    bus: u8,
+    device: u8,
+    function: u8,
+) {
     let mut claimed = CLAIMED_DEVICES.lock();
     let name = driver_name(driver);
     claimed.push(ClaimedDevice {
@@ -549,7 +555,7 @@ static VIRTIO_GPU_ID_TABLE: [PciDeviceId; 2] = [
         driver_data: 0,
     },
     PciDeviceId {
-        vendor: 0,  // Tablo sonu işaretçisi — vendor=0, device=0
+        vendor: 0, // Tablo sonu işaretçisi — vendor=0, device=0
         device: 0,
         subvendor: 0,
         subdevice: 0,
@@ -575,6 +581,8 @@ static mut VIRTIO_GPU_DRIVER: PciDriver = PciDriver {
 /// Kernel önyükleme sırasında çağrılır. VirtIO GPU cihazı PCI taramasında
 /// bulunursa `virtio_gpu_probe()` otomatik olarak tetiklenir.
 pub fn init() {
+    // eLS/driver uyumluluk sınırı için IronShim + Valkyrie politika bootstrap.
+    crate::ecosystem::bootstrap();
     unsafe {
         let _ = pci_register_driver(&raw mut VIRTIO_GPU_DRIVER as *mut PciDriver);
     }
@@ -654,11 +662,11 @@ pub struct DrmDriver {
     /// DRM minor versiyon numarası
     pub minor: i32,
     /// GPU başlatma fonksiyonu
-    pub load: DrmLoadFn,     // offset = 0x08
+    pub load: DrmLoadFn, // offset = 0x08
     /// GPU kaldırma fonksiyonu
     pub unload: DrmUnloadFn, // offset = 0x10
     /// IOCTL işleyici
-    pub ioctl: DrmIoctlFn,   // offset = 0x18
+    pub ioctl: DrmIoctlFn, // offset = 0x18
     /// Dosya operasyonları tablosu pointer'ı
     pub fops: *const FileOperations,
     /// Sürücü adı

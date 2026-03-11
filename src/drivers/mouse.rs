@@ -44,8 +44,11 @@
 //! 6. 0xF4 -> mouse  (Paket akışını başlat)
 //! ```
 
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use spin::Mutex;
 use x86_64::instructions::port::Port;
+use crate::drivers::gesture::GestureRecognizer;
+use crate::drivers::input::{push_event, InputEvent, MousePacket};
 
 // ============================================================================
 // PS/2 PORT SABİTLERİ (PS/2 PORT CONSTANTS)
@@ -55,31 +58,30 @@ use x86_64::instructions::port::Port;
 //   0x60: Veri portu (okuma: keyboard/mouse verisi; yazma: komut argümanı)
 //   0x64: Durum/Komut portu (okuma: durum; yazma: komut)
 
-const DATA_PORT: u16 = 0x60;    // PS/2 veri portu (input/output)
-const STATUS_PORT: u16 = 0x64;  // PS/2 durum portu (okuma için)
+const DATA_PORT: u16 = 0x60; // PS/2 veri portu (input/output)
+const STATUS_PORT: u16 = 0x64; // PS/2 durum portu (okuma için)
 const COMMAND_PORT: u16 = 0x64; // PS/2 komut portu (yazma için; status ile aynı adres)
 
 // ============================================================================
 // GLOBAL MOUSE DURUMU (GLOBAL MOUSE STATE)
 // ============================================================================
 
-// unsafe static kullanımı: tek çekirdekli giriş yolunda basitlik sağlar.
-// Çok çekirdekli ortamda Mutex<MouseState> tercih edilir.
+// Atomic state: thread-safe mouse position and button state
+// IRQ handler updates these, compositor reads them without unsafe blocks
 
 /// Mevcut mouse X koordinatı (piksel; 0=sol kenar)
-pub static mut MOUSE_X: i32 = 640;
+pub static MOUSE_X: AtomicI32 = AtomicI32::new(640);
 /// Mevcut mouse Y koordinatı (piksel; 0=üst kenar)
-pub static mut MOUSE_Y: i32 = 400;
-/// Mevcut mouse buton durumları
-pub static mut MOUSE_BUTTONS: MouseButtons = MouseButtons {
-    left: false,
-    right: false,
-    middle: false,
-};
+pub static MOUSE_Y: AtomicI32 = AtomicI32::new(400);
+/// Mevcut mouse buton durumları (atomik bayraklar)
+pub static MOUSE_LEFT: AtomicBool = AtomicBool::new(false);
+pub static MOUSE_RIGHT: AtomicBool = AtomicBool::new(false);
+pub static MOUSE_MIDDLE: AtomicBool = AtomicBool::new(false);
 
 // Paket buffer (3 byte'lık döngü): IRQ başına 1 byte gelir, 3 byte = 1 tam paket
-static MOUSE_CYCLE: Mutex<u8> = Mutex::new(0);     // Hangi byte bekleniyor: 0, 1, 2
+static MOUSE_CYCLE: Mutex<u8> = Mutex::new(0); // Hangi byte bekleniyor: 0, 1, 2
 static MOUSE_PACKET: Mutex<[u8; 3]> = Mutex::new([0; 3]); // Toplanan paket byte'ları
+static GESTURE_RECOGNIZER: Mutex<GestureRecognizer> = Mutex::new(GestureRecognizer::new());
 
 // Ekran sınırları (Mouse clamp için) — runtime'da güncellenir.
 // Ekranın dışına çıkmayı önlemek için mouse koordinatları bu sınırlara kırpılır.
@@ -93,9 +95,9 @@ pub static mut SCREEN_HEIGHT: i32 = 800;
 /// Mouse buton durumları: sol, sağ, orta tuşların basılı olup olmadığı
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MouseButtons {
-    pub left: bool,    // Sol tuş (bit 0 flags byte)
-    pub right: bool,   // Sağ tuş (bit 1 flags byte)
-    pub middle: bool,  // Orta tuş / scroll wheel tıklaması (bit 2 flags byte)
+    pub left: bool,   // Sol tuş (bit 0 flags byte)
+    pub right: bool,  // Sağ tuş (bit 1 flags byte)
+    pub middle: bool, // Orta tuş / scroll wheel tıklaması (bit 2 flags byte)
 }
 
 // =============================================================================
@@ -191,8 +193,8 @@ pub fn init() -> bool {
     // Adım 3: Status Byte Güncelle
     // - Bit 1 AÇ (Enable IRQ12): mouse verisi gelince CPU'ya interrupt gönder
     // - Bit 5 KAPAT (Enable Mouse Clock): mouse'un saat sinyalini etkinleştir
-    status_byte |= 0x02;  // IRQ12 etkinleştir
-    status_byte &= 0xDF;  // Mouse clock etkinleştir (bit 5 = 0)
+    status_byte |= 0x02; // IRQ12 etkinleştir
+    status_byte &= 0xDF; // Mouse clock etkinleştir (bit 5 = 0)
 
     // Adım 4: Yeni Status Byte'ı Yaz
     // 0x60 komutu: Controller Command Byte'ını yaz
@@ -276,17 +278,51 @@ pub fn handle_packet(packet_byte: u8) {
                 dy -= 256; // Y negatif
             }
 
-            // Global pozisyonu güncelle
-            unsafe {
-                MOUSE_X = (MOUSE_X + dx).clamp(0, SCREEN_WIDTH - 1);
-                // Y ekseni: PS/2 protokolünde Y yukari=pozitif, ekranda yukari=negatif
-                MOUSE_Y = (MOUSE_Y - dy).clamp(0, SCREEN_HEIGHT - 1);
+            // Pointer Acceleration Curve (Phase 8.3)
+            // cursor_speed = raw_delta * (1.0 + raw_delta.abs() * ACCEL_FACTOR)
+            let raw_dx = dx as f32;
+            let raw_dy = dy as f32;
+            const ACCEL_FACTOR: f32 = 0.08; // İvme faktörü
+            const BASE_SENSITIVITY: f32 = 1.5; // Temel hassasiyet
 
-                // Buton durumlarını güncelle (flags byte'ının alt 3 biti)
-                MOUSE_BUTTONS.left = (flags & 0x01) != 0;   // Bit 0: sol tuş
-                MOUSE_BUTTONS.right = (flags & 0x02) != 0;  // Bit 1: sağ tuş
-                MOUSE_BUTTONS.middle = (flags & 0x04) != 0; // Bit 2: orta tuş
-            }
+            // İvme uygula
+            let accel_dx = raw_dx * (1.0 + raw_dx.abs() * ACCEL_FACTOR);
+            let accel_dy = raw_dy * (1.0 + raw_dy.abs() * ACCEL_FACTOR);
+
+            // Hassasiyet uygula ve integer'a çevir
+            dx = (accel_dx * BASE_SENSITIVITY) as i32;
+            dy = (accel_dy * BASE_SENSITIVITY) as i32;
+
+            // Gesture Engine Feed (Phase 8.2)
+            x86_64::instructions::interrupts::without_interrupts(|| {
+                if let Some(gesture) = GESTURE_RECOGNIZER.lock().feed(dx, dy) {
+                    push_event(InputEvent::Gesture(gesture));
+                }
+            });
+
+            let buttons = flags & 0x07;
+
+            // Global pozisyonu güncelle (atomik işlemler, thread-safe)
+            let screen_w = unsafe { SCREEN_WIDTH };
+            let screen_h = unsafe { SCREEN_HEIGHT };
+            let new_x = (MOUSE_X.load(Ordering::Relaxed) + dx).clamp(0, screen_w - 1);
+            let new_y = (MOUSE_Y.load(Ordering::Relaxed) - dy).clamp(0, screen_h - 1);
+            MOUSE_X.store(new_x, Ordering::Relaxed);
+            // Y ekseni: PS/2 protokolünde Y yukari=pozitif, ekranda yukari=negatif
+            MOUSE_Y.store(new_y, Ordering::Relaxed);
+
+            // Buton durumlarını güncelle (flags byte'ının alt 3 biti)
+            MOUSE_LEFT.store((flags & 0x01) != 0, Ordering::Relaxed); // Bit 0: sol tuş
+            MOUSE_RIGHT.store((flags & 0x02) != 0, Ordering::Relaxed); // Bit 1: sağ tuş
+            MOUSE_MIDDLE.store((flags & 0x04) != 0, Ordering::Relaxed); // Bit 2: orta tuş
+
+            // EchInput pointer route'u yalnızca Mouse paket event'leri üzerinden çalışır.
+            // Cursor state'i güncelledikten sonra tam paketi kuyruğa bas.
+            push_event(InputEvent::Mouse(MousePacket::Standard {
+                buttons,
+                x: dx,
+                y: dy,
+            }));
         }
         _ => {
             // Geçersiz durum: sıfırla
@@ -301,9 +337,11 @@ pub fn set_bounds(width: i32, height: i32) {
     unsafe {
         SCREEN_WIDTH = width.max(1);
         SCREEN_HEIGHT = height.max(1);
-        // Mevcut koordinatları yeni sınırlara kırp
-        MOUSE_X = MOUSE_X.clamp(0, SCREEN_WIDTH - 1);
-        MOUSE_Y = MOUSE_Y.clamp(0, SCREEN_HEIGHT - 1);
+        // Mevcut koordinatları yeni sınırlara kırp (atomik işlemler)
+        let x = MOUSE_X.load(Ordering::Relaxed).clamp(0, SCREEN_WIDTH - 1);
+        let y = MOUSE_Y.load(Ordering::Relaxed).clamp(0, SCREEN_HEIGHT - 1);
+        MOUSE_X.store(x, Ordering::Relaxed);
+        MOUSE_Y.store(y, Ordering::Relaxed);
     }
 }
 
@@ -314,13 +352,20 @@ pub fn set_bounds(width: i32, height: i32) {
 /// Mouse pozisyonunu döndürür.
 /// Döner: (x, y) piksel koordinatları; (0,0) sol-üst köşe
 pub fn get_position() -> (i32, i32) {
-    unsafe { (MOUSE_X, MOUSE_Y) }
+    (
+        MOUSE_X.load(Ordering::Relaxed),
+        MOUSE_Y.load(Ordering::Relaxed),
+    )
 }
 
 /// Mouse buton durumlarını döndürür.
 /// IRQ12 tabanlı güncellemeden sonra çağrılmalıdır.
 pub fn get_buttons() -> MouseButtons {
-    unsafe { MOUSE_BUTTONS }
+    MouseButtons {
+        left: MOUSE_LEFT.load(Ordering::Relaxed),
+        right: MOUSE_RIGHT.load(Ordering::Relaxed),
+        middle: MOUSE_MIDDLE.load(Ordering::Relaxed),
+    }
 }
 
 /// Polling ile mouse verisi okur (Interrupt'sız mod için).
@@ -340,6 +385,35 @@ pub fn poll() -> bool {
         return true;
     }
     false
+}
+
+/// QEMU/virt ortamlarında AUX (bit5) güvenilir olduğunda yalnız fare verisini tüketir.
+/// Klavye scancode'larını çalmamak için output-buffer dolu olsa bile AUX biti yoksa okumaz.
+pub fn poll_aux_only() -> bool {
+    let mut status_port = Port::<u8>::new(STATUS_PORT);
+    let mut data_port = Port::<u8>::new(DATA_PORT);
+
+    let status = unsafe { status_port.read() };
+    if (status & 0x01) == 0 || (status & 0x20) == 0 {
+        return false;
+    }
+
+    let packet_byte = unsafe { data_port.read() };
+    handle_packet(packet_byte);
+    true
+}
+
+/// AUX-bounded polling burst. QEMU/UEFI GUI path'inde IRQ12 kaçsa bile
+/// fare hareketini toparlamak için kullanılır.
+pub fn poll_aux_burst(max_bytes: usize) -> usize {
+    let mut count = 0usize;
+    while count < max_bytes {
+        if !poll_aux_only() {
+            break;
+        }
+        count += 1;
+    }
+    count
 }
 
 /// Bir kare içinde sınırlı sayıda AUX byte'ı tüketir.

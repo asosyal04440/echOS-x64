@@ -60,8 +60,8 @@
 //! UseAfterFree: Serbest bırakılan bellek okunmaya/yazılmaya devam edilir.
 //! Her ikisi de tanımsız davranış (undefined behavior) — Rust'ta unsafe olmadan oluşamaz.
 
-use crate::fault::{Fault, FaultType};
 use crate::fault::severity::RecoveryResult;
+use crate::fault::{Fault, FaultType};
 
 /// Bellek kurtarmasını dener
 pub fn recover(fault: &Fault) -> RecoveryResult {
@@ -69,7 +69,9 @@ pub fn recover(fault: &Fault) -> RecoveryResult {
         FaultType::HeapCorruption => {
             // Yığın bozulmasından gerçek anlamda kurtarma mümkün değil
             // Bozulan blokları karantinaya al
-            crate::serial_println!("[MEM_RECOVERY] Yığın bozulması tespit edildi - karantinaya alınıyor");
+            crate::serial_println!(
+                "[MEM_RECOVERY] Yığın bozulması tespit edildi - karantinaya alınıyor"
+            );
             // Karantina: Bozulan bellek bloğunu bir daha tahsis edilmeyecek şekilde işaretle.
             // Bu, daha fazla hasarı önler ama sistemi kurtaramaz.
             RecoveryResult::Failed

@@ -39,3 +39,9 @@
 
 /// VGA 8x16 bitmap font verisi (ASCII 0x20–0x7E ve Türkçe Unicode'lar)
 pub mod vga_font;
+
+/// PSF2 font loader (PC Screen Font v2)
+pub mod psf2;
+
+/// FontRenderer API - tüm font tiplerini birleştiren yüksek seviye render API
+pub mod renderer;

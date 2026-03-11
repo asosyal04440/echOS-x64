@@ -51,8 +51,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 // HTTP/2 Çerçeve Türleri
@@ -727,7 +727,8 @@ impl HpackDecoder {
             Some(STATIC_TABLE[index - 1])
         } else {
             let dynamic_index = index - STATIC_TABLE.len() - 1;
-            self.dynamic_table.get(dynamic_index)
+            self.dynamic_table
+                .get(dynamic_index)
                 .map(|(n, v)| (n.as_str(), v.as_str()))
         }
     }
@@ -753,7 +754,12 @@ impl HpackDecoder {
         Ok(s)
     }
 
-    fn decode_integer(&self, data: &[u8], pos: &mut usize, prefix_bits: u8) -> Result<u32, HpackError> {
+    fn decode_integer(
+        &self,
+        data: &[u8],
+        pos: &mut usize,
+        prefix_bits: u8,
+    ) -> Result<u32, HpackError> {
         if *pos >= data.len() {
             return Err(HpackError::UnexpectedEnd);
         }
@@ -864,7 +870,13 @@ impl Http2Connection {
     /// - `:path`   → İstek yolu (/index.html)
     /// - `:scheme` → http veya https
     /// - `:authority` → Host başlığına karşılık gelir
-    pub fn build_request(&mut self, stream_id: u32, method: &str, path: &str, host: &str) -> Vec<u8> {
+    pub fn build_request(
+        &mut self,
+        stream_id: u32,
+        method: &str,
+        path: &str,
+        host: &str,
+    ) -> Vec<u8> {
         let mut headers = BTreeMap::new();
         headers.insert(":method".to_string(), method.to_string());
         headers.insert(":path".to_string(), path.to_string());
@@ -890,7 +902,9 @@ impl Http2Connection {
                 self.process_settings(&frame.payload)?;
             }
             FRAME_HEADERS => {
-                let headers = self.decoder.decode(&frame.payload)
+                let headers = self
+                    .decoder
+                    .decode(&frame.payload)
                     .map_err(|_| Http2Error::CompressionError)?;
                 if let Some(stream) = self.streams.get_mut(&frame.stream_id) {
                     stream.headers = headers;
@@ -909,7 +923,10 @@ impl Http2Connection {
             }
             FRAME_WINDOW_UPDATE => {
                 let increment = u32::from_be_bytes([
-                    frame.payload[0], frame.payload[1], frame.payload[2], frame.payload[3],
+                    frame.payload[0],
+                    frame.payload[1],
+                    frame.payload[2],
+                    frame.payload[3],
                 ]);
                 if frame.stream_id == 0 {
                     self.window_size += increment;
@@ -932,7 +949,12 @@ impl Http2Connection {
         let mut pos = 0;
         while pos + 6 <= payload.len() {
             let id = u16::from_be_bytes([payload[pos], payload[pos + 1]]);
-            let value = u32::from_be_bytes([payload[pos + 2], payload[pos + 3], payload[pos + 4], payload[pos + 5]]);
+            let value = u32::from_be_bytes([
+                payload[pos + 2],
+                payload[pos + 3],
+                payload[pos + 4],
+                payload[pos + 5],
+            ]);
             pos += 6;
 
             match id {
@@ -984,3 +1006,6 @@ pub enum Http2Error {
 pub fn connection_preface() -> &'static [u8] {
     CONNECTION_PREFACE
 }
+
+/// HTTP/2 istemci - Http2Connection'ın istemci tarafı için alias
+pub type Http2Client = Http2Connection;

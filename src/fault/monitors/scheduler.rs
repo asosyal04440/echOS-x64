@@ -48,7 +48,7 @@
 //! diğer                                 --> Healthy
 //! ```
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
@@ -101,7 +101,7 @@ impl SchedulerMonitor {
             return Some(Fault::new(
                 FaultSource::Scheduler,
                 FaultType::TaskLeak,
-                &alloc::format!("High zombie task count: {}", stats.zombie_count)
+                &alloc::format!("High zombie task count: {}", stats.zombie_count),
             ));
         }
 
@@ -111,7 +111,7 @@ impl SchedulerMonitor {
             return Some(Fault::new(
                 FaultSource::Scheduler,
                 FaultType::Starvation,
-                &alloc::format!("High runnable task count: {}", stats.runnable_tasks)
+                &alloc::format!("High runnable task count: {}", stats.runnable_tasks),
             ));
         }
 
@@ -131,10 +131,8 @@ impl super::HealthMonitor for SchedulerMonitor {
         }
 
         // Son kontrol zamanını güncelle
-        self.last_check.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_check
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
         self.check_scheduler()
     }
@@ -160,7 +158,8 @@ impl super::HealthMonitor for SchedulerMonitor {
         ModuleHealth {
             name: self.name(),
             status: self.health(),
-            fault_count: self.task_leaks.load(Ordering::SeqCst) + self.starvation_events.load(Ordering::SeqCst),
+            fault_count: self.task_leaks.load(Ordering::SeqCst)
+                + self.starvation_events.load(Ordering::SeqCst),
             recovery_count: 0,
             last_fault_tick: self.last_check.load(Ordering::SeqCst),
             uptime_ticks: crate::task::scheduler::get_ticks(),

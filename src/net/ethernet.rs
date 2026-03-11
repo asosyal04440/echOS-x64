@@ -71,7 +71,8 @@
 //! 0x8100 = VLAN   -- 802.1Q VLAN etiketleme (4 byte ek başlık)
 //! ```
 
-use super::{MacAddr, NetError};
+pub use super::MacAddr;
+use super::NetError;
 
 /// Ethernet çerçeve başlığı.
 ///
@@ -79,9 +80,9 @@ use super::{MacAddr, NetError};
 /// Bu başlıktan sonra 46-1500 byte arası yük (payload) gelir.
 #[derive(Clone, Copy, Debug)]
 pub struct EthernetHeader {
-    pub dst: MacAddr,            // Hedef MAC adresi (6 byte)
-    pub src: MacAddr,            // Kaynak MAC adresi (6 byte)
-    pub ether_type: EtherType,   // Yük protokolü tanımlayıcısı (2 byte)
+    pub dst: MacAddr,          // Hedef MAC adresi (6 byte)
+    pub src: MacAddr,          // Kaynak MAC adresi (6 byte)
+    pub ether_type: EtherType, // Yük protokolü tanımlayıcısı (2 byte)
 }
 
 /// Ödünç alınmış yük verisi ile birlikte Ethernet çerçevesi.
@@ -112,11 +113,11 @@ impl<'a> EthernetFrame<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum EtherType {
-    IPV4 = 0x0800,    // IPv4 paketi (en yaygın)
-    ARP = 0x0806,     // ARP: IP adresinden MAC adresi çözümleme
-    IPV6 = 0x86DD,    // IPv6 paketi
-    VLAN = 0x8100,    // IEEE 802.1Q VLAN etiketleme (ek 4 byte başlık içerir)
-    UNKNOWN = 0,      // Bilinmeyen veya desteklenmeyen protokol
+    IPV4 = 0x0800, // IPv4 paketi (en yaygın)
+    ARP = 0x0806,  // ARP: IP adresinden MAC adresi çözümleme
+    IPV6 = 0x86DD, // IPv6 paketi
+    VLAN = 0x8100, // IEEE 802.1Q VLAN etiketleme (ek 4 byte başlık içerir)
+    UNKNOWN = 0,   // Bilinmeyen veya desteklenmeyen protokol
 }
 
 impl EtherType {
@@ -163,7 +164,11 @@ impl EthernetHeader {
         // Son 2 byte: EtherType (big-endian)
         let ether_type = EtherType::from_u16(u16::from_be_bytes([data[12], data[13]]));
 
-        Ok(EthernetHeader { dst, src, ether_type })
+        Ok(EthernetHeader {
+            dst,
+            src,
+            ether_type,
+        })
     }
 
     /// Ethernet başlığını byte dizisine seri hale getirir.
@@ -187,7 +192,11 @@ impl EthernetHeader {
 
     /// Yeni bir Ethernet başlığı oluşturur.
     pub fn new(dst: MacAddr, src: MacAddr, ether_type: EtherType) -> Self {
-        EthernetHeader { dst, src, ether_type }
+        EthernetHeader {
+            dst,
+            src,
+            ether_type,
+        }
     }
 }
 

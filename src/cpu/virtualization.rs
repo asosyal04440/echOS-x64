@@ -87,10 +87,10 @@ pub const MSR_VM_CR: u32 = 0xC0010114;
 pub const MSR_VM_HSAVE_PA: u32 = 0xC0010117;
 
 /// AMD SVM özellik bitleri — hangi SVM yeteneklerinin desteklendiğini belirtir
-pub const SVM_NPT: u32 = 1 << 0;      // İç İçe Sayfa Tabloları (Nested Page Tables)
-pub const SVM_LBR: u32 = 1 << 1;       // LBR Sanallaştırma (Last Branch Record)
-pub const SVM_SVM_LOCK: u32 = 1 << 2;  // SVM Kilit (BIOS RM disable geçişini önler)
-pub const SVM_NRIP: u32 = 1 << 3;      // Sonraki RIP Kaydı (vmexit sonrası ilerleme için)
+pub const SVM_NPT: u32 = 1 << 0; // İç İçe Sayfa Tabloları (Nested Page Tables)
+pub const SVM_LBR: u32 = 1 << 1; // LBR Sanallaştırma (Last Branch Record)
+pub const SVM_SVM_LOCK: u32 = 1 << 2; // SVM Kilit (BIOS RM disable geçişini önler)
+pub const SVM_NRIP: u32 = 1 << 3; // Sonraki RIP Kaydı (vmexit sonrası ilerleme için)
 
 /// VMCB (Virtual Machine Control Block) bölüm ofsesleri
 pub const VMCB_CTRL_OFFSET: usize = 0x000;
@@ -232,7 +232,11 @@ pub struct VmcbState {
     pub reserved6: [u64; 3],
     pub gp_regs: [u64; 16],
     pub reserved7: [u64; 16],
-    pub xmms: [u128; 16],
+    /// XMM register durumu — 16 × 128-bit kayıt, her biri iki u64 olarak saklanır.
+    /// u128 yerine [[u64; 2]; 16] kullanılır: MSVC ABI'de u128 sadece 8-byte hizalanır,
+    /// bu durum LLVM'nin beklediği 16-byte hizalamayla çakışır ve codegen hatasına neden olur.
+    /// [[u64; 2]; 16] binary-layout açısından eşdeğerdir (2 × 64-bit = 128-bit).
+    pub xmms: [[u64; 2]; 16],
     pub reserved8: [u64; 24],
 }
 
@@ -300,16 +304,16 @@ impl VtxManager {
         // CPUID leaf 1 ECX bit 5: VMX desteği
         let cpuid = unsafe { core::arch::x86_64::__cpuid(1) };
         let vmx_bit = (cpuid.ecx >> 5) & 1;
-        
+
         if vmx_bit == 1 {
             self.vmx_supported.store(true, Ordering::SeqCst);
             crate::serial_println!("[VTX] Intel VT-x supported");
         }
-        
+
         // CPUID ext leaf 0x80000001 ECX bit 2: SVM desteği (AMD)
         let cpuid_ext = unsafe { core::arch::x86_64::__cpuid(0x80000001) };
         let svm_bit = (cpuid_ext.ecx >> 2) & 1;
-        
+
         if svm_bit == 1 {
             self.svm_supported.store(true, Ordering::SeqCst);
             crate::serial_println!("[VTX] AMD SVM supported");
@@ -321,12 +325,10 @@ impl VtxManager {
         if !self.vmx_supported.load(Ordering::SeqCst) {
             return Err(VtxError::NotSupported);
         }
-        
+
         // IA32_FEATURE_CONTROL MSR'ını oku (kilitleme ve etkinleştirme durumu)
-        let feature_control = unsafe { 
-            crate::cpu::msr::read(MSR_IA32_FEATURE_CONTROL)
-        };
-        
+        let feature_control = unsafe { crate::cpu::msr::read(MSR_IA32_FEATURE_CONTROL) };
+
         // VMX kilitli ve etkin mi?
         if (feature_control & 1) == 0 {
             // Kilitli değil — VMX'i etkinleştir (bit 0: lock, bit 2: VMX outside SMX)
@@ -337,13 +339,13 @@ impl VtxManager {
             // Kilitli ama VMX (SMX dışı) devre dışı — BIOS tarafından engelleniyor
             return Err(VtxError::DisabledByBios);
         }
-        
+
         // CR4.VMXE (bit 13) bitini ayarla — VMX komutlarına izin verir
         unsafe {
             let cr4 = crate::cpu::read_cr4();
             crate::cpu::write_cr4(cr4 | (1 << 13));
         }
-        
+
         crate::serial_println!("[VTX] VMX enabled");
         Ok(())
     }
@@ -351,10 +353,10 @@ impl VtxManager {
     /// VMXON komutunu çalıştır — VMX root operasyona gir
     pub fn vmxon(&self, region_phys: u64) -> Result<(), VtxError> {
         self.vmxon_region.store(region_phys, Ordering::SeqCst);
-        
+
         // VMXON komutu inline assembly ile çalıştırılmalı
         crate::serial_println!("[VTX] VMXON at {:#x}", region_phys);
-        
+
         self.vmx_active.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -410,34 +412,116 @@ pub enum VtxError {
 // ============================================================================
 
 /// VMCLEAR komutu — VMCS'i temizle ve "temiz" duruma getir (VMLAUNCH öncesi gerekli)
+///
+/// VMCLEAR talimatı VMCS'i deaktif eder ve lansman durumunu sıfırlar.
+/// Bu işlem VMLAUNCH öncesinde yapılmalıdır.
 pub unsafe fn vmclear(vmcs_phys: u64) -> Result<(), VtxError> {
-    // VMCLEAR komutu burada çalıştırılmalı
-    Ok(())
+    let success: u8;
+    core::arch::asm!(
+        "vmclear [{0}]",
+        "setna {1}",
+        in(reg) &vmcs_phys,
+        out(reg_byte) success,
+        options(nostack, preserves_flags)
+    );
+    if success != 0 {
+        Err(VtxError::VmclearFailed)
+    } else {
+        Ok(())
+    }
 }
 
 /// VMPTRLD komutu — VMCS'i mevcut CPU'ya yükle (aktif hale getir)
+///
+/// VMPTRLD talimatı belirtilen fiziksel adresteki VMCS'i
+/// mevcut mantıksal işlemci için aktif yapar.
 pub unsafe fn vmptrld(vmcs_phys: u64) -> Result<(), VtxError> {
-    // VMPTRLD komutu burada çalıştırılmalı
-    Ok(())
+    let success: u8;
+    core::arch::asm!(
+        "vmptrld [{0}]",
+        "setna {1}",
+        in(reg) &vmcs_phys,
+        out(reg_byte) success,
+        options(nostack, preserves_flags)
+    );
+    if success != 0 {
+        Err(VtxError::InvalidVmcs)
+    } else {
+        Ok(())
+    }
 }
 
 /// VMREAD komutu — aktif VMCS'ten alan değeri oku
+///
+/// field: VMCS alan kodlaması (Intel SDM Vol.3 Appendix B)
+/// Dönen değer: 64-bit alan değeri (0 eğer hata oluşursa)
 pub unsafe fn vmread(field: u32) -> u64 {
-    0
+    let value: u64;
+    let success: u8;
+    core::arch::asm!(
+        "vmread {0}, {1}",
+        "setna {2}",
+        out(reg) value,
+        in(reg) field as u64,
+        out(reg_byte) success,
+        options(nostack, preserves_flags)
+    );
+    if success != 0 {
+        0
+    } else {
+        value
+    }
 }
 
 /// VMWRITE komutu — aktif VMCS'e alan değeri yaz
+///
+/// field: VMCS alan kodlaması (Intel SDM Vol.3 Appendix B)
+/// value: Yazılacak 64-bit değer
 pub unsafe fn vmwrite(field: u32, value: u64) {
+    core::arch::asm!(
+        "vmwrite {0}, {1}",
+        in(reg) field as u64,
+        in(reg) value,
+        options(nostack, preserves_flags)
+    );
 }
 
 /// VMLAUNCH komutu — VMX olmayan konuğu ilk kez başlat
+///
+/// VMLAUNCH, "temiz" durumdaki VMCS için kullanılır.
+/// Konuk durumuna geçer ve VM-exit oluşana kadar çalışır.
 pub unsafe fn vmlaunch() -> Result<(), VtxError> {
-    Ok(())
+    let success: u8;
+    core::arch::asm!(
+        "vmlaunch",
+        "setna {0}",
+        out(reg_byte) success,
+        options(nostack, preserves_flags)
+    );
+    if success != 0 {
+        Err(VtxError::VmlaunchFailed)
+    } else {
+        Ok(())
+    }
 }
 
 /// VMRESUME komutu — daha önce başlatılmış konuğu devam ettir
+///
+/// VMRESUME, daha önce VMLAUNCH ile başlatılmış ve
+/// VM-exit yaşamış VMCS için kullanılır.
 pub unsafe fn vmresume() -> Result<(), VtxError> {
-    Ok(())
+    let success: u8;
+    core::arch::asm!(
+        "vmresume",
+        "setna {0}",
+        out(reg_byte) success,
+        options(nostack, preserves_flags)
+    );
+    if success != 0 {
+        Err(VtxError::VmlaunchFailed)
+    } else {
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -445,16 +529,41 @@ pub unsafe fn vmresume() -> Result<(), VtxError> {
 // ============================================================================
 
 /// VMRUN komutu (AMD) — VMCB fiziksel adresiyle konuğu başlat
+///
+/// AMD-V (SVM) sanallarştırma teknolojisinde ana giriş noktası.
+/// VMCB (Virtual Machine Control Block) konuk durumunu ve kontrol
+/// alanlarını içerir.
 pub unsafe fn vmrun(vmcb_phys: u64) -> Result<(), VtxError> {
+    core::arch::asm!(
+        "vmrun {0}",
+        in("rax") vmcb_phys,
+        options(nostack, preserves_flags)
+    );
     Ok(())
 }
 
 /// VMSAVE komutu (AMD) — konuk CPU durumunu VMCB'ye kaydet
+///
+/// Konuk segmentler, LDTR, TR, SYSENTER MSR'ları gibi
+/// CPU durumunu VMCB'nin belirli alanlarına kaydeder.
 pub unsafe fn vmsave(vmcb_phys: u64) {
+    core::arch::asm!(
+        "vmsave {0}",
+        in("rax") vmcb_phys,
+        options(nostack, preserves_flags)
+    );
 }
 
 /// VMLOAD komutu (AMD) — VMCB'den konuk CPU durumunu yükle
+///
+/// VMCB'de kaydedilmiş konuk CPU durumunu donanım
+/// registerlarına yükler.
 pub unsafe fn vmload(vmcb_phys: u64) {
+    core::arch::asm!(
+        "vmload {0}",
+        in("rax") vmcb_phys,
+        options(nostack, preserves_flags)
+    );
 }
 
 // ============================================================================
@@ -469,8 +578,8 @@ pub fn init() {
 
 /// Sanallaştırma desteği mevcut mu? (VMX veya SVM)
 pub fn is_available() -> bool {
-    VTX_MANAGER.vmx_supported.load(Ordering::SeqCst) || 
-    VTX_MANAGER.svm_supported.load(Ordering::SeqCst)
+    VTX_MANAGER.vmx_supported.load(Ordering::SeqCst)
+        || VTX_MANAGER.svm_supported.load(Ordering::SeqCst)
 }
 
 /// Sanallaştırma durumunu döndür

@@ -28,13 +28,14 @@
 //!   [AP kurulumu tamamlandı]
 //! ```
 
+use crate::cpu::smp_state::{CpuAffinity, CpuHotplugState, CPU_STATES};
+use crate::cpu::{cpu_slots, epoch::SMP_EPOCH_DOMAIN};
 use crate::memory::active_physical_offset;
-use crate::cpu::smp_state::{CpuHotplugState, CPU_STATES, CpuAffinity};
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::instructions::interrupts;
 use x86_64::registers::control::Cr3;
@@ -57,7 +58,8 @@ const APIC_TRIGGER_LEVEL: u32 = 1 << 15;
 /// Global SMP durumu
 pub static SMP_STATE: Mutex<SmpState> = Mutex::new(SmpState::new());
 static TLB_SHOOTDOWN_ACKS: AtomicUsize = AtomicUsize::new(0);
-static TLB_SHOOTDOWN_LOCK: Mutex<()> = Mutex::new(());
+static TLB_SHOOTDOWN_SEQ: AtomicU64 = AtomicU64::new(0);
+static AP_ONLINE_HANDSHAKES: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 const TLB_SHOOTDOWN_TIMEOUT_TICKS: usize = 10;
 static TLB_SHOOTDOWN_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 static TLB_SHOOTDOWN_TIMEOUTS: AtomicUsize = AtomicUsize::new(0);
@@ -106,24 +108,31 @@ pub struct SmpState {
 
 /// Mevcut CPU'nun kimlik numarasını döndür (GS segment tabanından okunur)
 pub fn get_current_cpu_id() -> u32 {
-    // GS tabanından oku (per-CPU verisi tarafından ayarlanır)
-    // BSP için 0 döndürür
-    // AP'ler için kendi CPU kimliğini döndürür
+    // GS tabanı syscall::CpuData yapısını gösterir.
+    // CpuData yerleşimi:
+    //   0  -> user_rsp_scratch (u64)
+    //   8  -> kernel_stack_top (u64)
+    //   16 -> cpu_id (u32)
+    // Dolayısıyla CPU kimliği GS:16'dadır; GS:0 user_rsp_scratch alanıdır.
     unsafe {
         let cpu_id: u32;
-        core::arch::asm!("mov {0}, gs:0", out(reg) cpu_id, options(nostack, pure, readonly));
+        core::arch::asm!(
+            "mov {0:e}, dword ptr gs:[16]",
+            out(reg) cpu_id,
+            options(nostack, pure, readonly)
+        );
         cpu_id
     }
 }
 
 /// Çevrimiçi (online) CPU sayısını döndür
 pub fn online_cpu_count() -> u32 {
-    SMP_STATE.lock().online_cpus.load(Ordering::SeqCst)
+    cpu_slots::online_cpu_count()
 }
 
 /// Toplam CPU sayısını döndür (çevrimdışı olanlar dahil)
 pub fn total_cpu_count() -> u32 {
-    SMP_STATE.lock().cpu_count
+    cpu_slots::cpu_count()
 }
 
 impl SmpState {
@@ -138,10 +147,9 @@ impl SmpState {
             syscall_stacks: Vec::new(),
             cpu_apic_ids: Vec::new(),
             ap_started: Vec::new(),
+        }
     }
 }
-}
-
 
 #[repr(C, packed)]
 struct ApStartupData {
@@ -151,20 +159,33 @@ struct ApStartupData {
     cpu_data: u64,
 }
 
+#[cfg(not(target_os = "windows"))]
 global_asm!(include_str!("ap_startup.asm"));
 
+#[cfg(not(target_os = "windows"))]
 extern "C" {
     static ap_startup_begin: u8;
     static ap_startup_end: u8;
     static ap_startup_data: u8;
 }
 
+#[cfg(target_os = "windows")]
+#[no_mangle]
+static ap_startup_begin: u8 = 0;
+#[cfg(target_os = "windows")]
+#[no_mangle]
+static ap_startup_end: u8 = 0;
+#[cfg(target_os = "windows")]
+#[no_mangle]
+static ap_startup_data: u8 = 0;
+
 unsafe fn ap_startup_data_ptr() -> *mut ApStartupData {
     let start = &ap_startup_begin as *const u8 as usize;
     let data = &ap_startup_data as *const u8 as usize;
     let offset = data - start;
     // AP_STARTUP_ADDR fiziksel adresini HHDM üzerinden referans et:
-    (crate::memory::active_physical_offset() + AP_STARTUP_ADDR as u64 + offset as u64) as *mut ApStartupData
+    (crate::memory::active_physical_offset() + AP_STARTUP_ADDR as u64 + offset as u64)
+        as *mut ApStartupData
 }
 
 /// AP startup kodunu belleğe yükler
@@ -188,14 +209,14 @@ unsafe fn load_ap_startup_code() {
     );
 
     // Hata ayıklama: Kaynak kodunu dök
-            let src_slice = core::slice::from_raw_parts(src_ptr, 128);
-            crate::serial_println!("SMP: Source code (128 bytes): {:02x?}", src_slice);
+    let src_slice = core::slice::from_raw_parts(src_ptr, 128);
+    crate::serial_println!("SMP: Source code (128 bytes): {:02x?}", src_slice);
 
-            core::ptr::copy_nonoverlapping(src_ptr, dest_ptr, size);
+    core::ptr::copy_nonoverlapping(src_ptr, dest_ptr, size);
 
-            // Hata ayıklama: Hedef kodunu dök
-            let dest_slice = core::slice::from_raw_parts(dest_ptr, 128);
-            crate::serial_println!("SMP: Dest code (128 bytes): {:02x?}", dest_slice);
+    // Hata ayıklama: Hedef kodunu dök
+    let dest_slice = core::slice::from_raw_parts(dest_ptr, 128);
+    crate::serial_println!("SMP: Dest code (128 bytes): {:02x?}", dest_slice);
 
     // Bellek görünürlüğünü garantile (tüm CPU'larda okuma sıralaması)
     core::sync::atomic::fence(Ordering::SeqCst);
@@ -247,7 +268,7 @@ unsafe fn prepare_ap_startup_data(stack_top: u64, cpu_data: u64) {
     let entry_virtual = crate::cpu::ap::ap_entry as *const () as u64;
 
     data.pml4_phys = pml4_phys;
-    data.entry = entry_virtual;  // Gerçek çalıştırılabilir sanal adresi sakla
+    data.entry = entry_virtual; // Gerçek çalıştırılabilir sanal adresi sakla
     data.stack_top = stack_top;
     data.cpu_data = cpu_data;
 
@@ -291,9 +312,40 @@ unsafe fn write_apic_reg(reg: u32, value: u32) {
     core::ptr::write_volatile(apic_ptr.add((reg >> 2) as usize), value);
 }
 
+/// APIC MMIO taban adresi — cache'lenmiş, lock-free
+static APIC_MMIO_CACHE: AtomicU64 = AtomicU64::new(0);
+
 unsafe fn apic_mmio_base() -> *mut u32 {
-    let mut state = SMP_STATE.lock();
+    // Önce cache'e bak (lock almadan)
+    let cached = APIC_MMIO_CACHE.load(Ordering::Acquire);
+    if cached != 0 {
+        return cached as *mut u32;
+    }
+
+    // Cache'de yoksa, SMP_STATE'ten al (try_lock ile deadlock'u önle)
+    let state = match SMP_STATE.try_lock() {
+        Some(s) => s,
+        None => {
+            // SMP_STATE zaten kilitli (init() içinden çağrılıyor olabilir).
+            // Doğrudan MSR'dan oku ve HHDM offset ile eriş.
+            let msr_base = Msr::new(0x1B).read() & 0xFFFFF000;
+            let virt = active_physical_offset() + msr_base;
+            APIC_MMIO_CACHE.store(virt, Ordering::Release);
+            return virt as *mut u32;
+        }
+    };
+
     if state.apic_virt != 0 {
+        APIC_MMIO_CACHE.store(state.apic_virt, Ordering::Release);
+        return state.apic_virt as *mut u32;
+    }
+    drop(state);
+
+    // İlk kez: MMIO haritalama yap
+    let mut state = SMP_STATE.lock();
+    // Tekrar kontrol (başka çekirdek haritayı oluşturmuş olabilir)
+    if state.apic_virt != 0 {
+        APIC_MMIO_CACHE.store(state.apic_virt, Ordering::Release);
         return state.apic_virt as *mut u32;
     }
     let msr_base = Msr::new(0x1B).read() & 0xFFFFF000;
@@ -309,6 +361,7 @@ unsafe fn apic_mmio_base() -> *mut u32 {
         active_physical_offset() + apic_base
     };
     state.apic_virt = virt;
+    APIC_MMIO_CACHE.store(virt, Ordering::Release);
     virt as *mut u32
 }
 
@@ -348,28 +401,27 @@ unsafe fn send_ipi(dest_apic_id: u32, delivery_mode: u32, vector: u32) {
 }
 
 pub fn send_tlb_shootdown_ipi() {
-    let _guard = TLB_SHOOTDOWN_LOCK.lock();
     let current_apic = read_local_apic_id();
-    let state = SMP_STATE.lock();
-    let mut targets = Vec::new();
-    for cpu in state.per_cpu_data.iter() {
-        if !cpu.online {
-            continue;
-        }
-        if cpu.apic_id == current_apic {
-            continue;
-        }
-        targets.push(cpu.apic_id);
-    }
-    drop(state);
+    let targets = cpu_slots::online_apic_targets(current_apic);
     if targets.is_empty() {
         return;
     }
+    let current_cpu = get_current_cpu_id();
+    let guard_epoch = SMP_EPOCH_DOMAIN.enter(current_cpu);
+    let sequence = TLB_SHOOTDOWN_SEQ
+        .fetch_add(1, Ordering::AcqRel)
+        .saturating_add(1);
     TLB_SHOOTDOWN_REQUESTS.fetch_add(1, Ordering::SeqCst);
     TLB_SHOOTDOWN_LAST_TARGETS.store(targets.len(), Ordering::SeqCst);
     TLB_SHOOTDOWN_ACKS.store(0, Ordering::SeqCst);
     compiler_fence(Ordering::SeqCst);
     for apic_id in targets.iter().copied() {
+        for cpu_id in 0..cpu_slots::cpu_count() {
+            if cpu_slots::apic_id(cpu_id) == apic_id {
+                cpu_slots::publish_tlb_request(cpu_id, sequence);
+                break;
+            }
+        }
         unsafe {
             send_ipi(apic_id, 0, crate::interrupts::IPI_TLB_VECTOR as u32);
         }
@@ -408,9 +460,13 @@ pub fn send_tlb_shootdown_ipi() {
     }
     TLB_SHOOTDOWN_LAST_ACKS.store(acks, Ordering::SeqCst);
     TLB_SHOOTDOWN_LAST_DURATION.store(elapsed, Ordering::SeqCst);
+    let _ = guard_epoch;
+    SMP_EPOCH_DOMAIN.leave(current_cpu);
 }
 
 pub fn notify_tlb_shootdown_ack() {
+    let cpu_id = get_current_cpu_id();
+    cpu_slots::publish_tlb_ack(cpu_id, TLB_SHOOTDOWN_SEQ.load(Ordering::Acquire));
     TLB_SHOOTDOWN_ACKS.fetch_add(1, Ordering::SeqCst);
 }
 
@@ -440,15 +496,21 @@ pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
     crate::serial_println!("Starting AP {} with APIC ID {}", cpu_id, apic_id);
     let (stack_top, cpu_data) = {
         let state = SMP_STATE.lock();
-        
+
         crate::serial_println!("SMP: per_cpu_data.len() = {}", state.per_cpu_data.len());
         crate::serial_println!("SMP: Looking for cpu_id = {}", cpu_id);
-        
+
         let s = state
             .per_cpu_data
             .get(cpu_id as usize)
             .map(|data| {
-                crate::serial_println!("SMP: Found per_cpu_data for cpu_id {}: stack_top = {:#x}", cpu_id, data.stack_top);
+                /*
+                crate::serial_println!(
+                    "SMP: Found per_cpu_data for cpu_id {}: stack_top = {:#x}",
+                    cpu_id,
+                    data.stack_top
+                );
+                */
                 data.stack_top
             })
             .unwrap_or(0);
@@ -457,30 +519,33 @@ pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
             .get(cpu_id as usize)
             .map(|data| *data as *const _ as u64)
             .unwrap_or(0);
-            
+
+        /*
         crate::serial_println!("SMP DEBUG: Entire syscall_cpu_data vector content:");
-        crate::serial_println!("SMP DEBUG: Vector buffer address: {:#x}", state.syscall_cpu_data.as_ptr() as u64);
+        crate::serial_println!(
+            "SMP DEBUG: Vector buffer address: {:#x}",
+            state.syscall_cpu_data.as_ptr() as u64
+        );
         for (i, d) in state.syscall_cpu_data.iter().enumerate() {
             crate::serial_println!("  [{}] = {:#x}", i, *d as *const _ as u64);
         }
-        
+        */
+
         (s, c)
     };
-    
+
     if stack_top == 0 || cpu_data == 0 {
         crate::serial_println!("SMP: ERROR: Invalid AP startup data for cpu_id {}", cpu_id);
         CPU_STATES.set_state(cpu_id, CpuHotplugState::Broken);
         return false;
     }
-    
+
     // CPU başlatılıyor olarak işaretle
     CPU_STATES.set_state(cpu_id, CpuHotplugState::Bringup);
-    
-    let target_online = SMP_STATE
-        .lock()
-        .online_cpus
-        .load(Ordering::Acquire)
-        .saturating_add(1);
+
+    if cpu_id < AP_ONLINE_HANDSHAKES.len() as u32 {
+        AP_ONLINE_HANDSHAKES[cpu_id as usize].store(false, Ordering::Release);
+    }
     prepare_ap_startup_data(stack_top, cpu_data);
 
     // Yeniden deneme seçeneğiyle INIT-SIPI-SIPI dizisi gönder
@@ -516,65 +581,88 @@ pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
         delay_us(200);
 
         // AP'nin online olmasını bekle
-        if wait_for_online(target_online) {
-            crate::serial_println!("SMP: AP {} successfully started on attempt {}", cpu_id, attempt + 1);
-            // State zaten mark_cpu_online'da ONLINE olarak ayarlanacak
+        if wait_for_online(cpu_id) {
+            {
+                let mut state = SMP_STATE.lock();
+                if let Some(per_cpu) = state.per_cpu_data.get_mut(cpu_id as usize) {
+                    per_cpu.cpu_id = cpu_id;
+                    per_cpu.apic_id = apic_id;
+                    per_cpu.online = true;
+                }
+                if let Some(started) = state.ap_started.get(cpu_id as usize) {
+                    started.store(true, Ordering::Release);
+                }
+                state.online_cpus.fetch_add(1, Ordering::AcqRel);
+            }
+            CPU_STATES.set_state(cpu_id, CpuHotplugState::Online);
+            crate::serial_println!(
+                "SMP: AP {} successfully started on attempt {}",
+                cpu_id,
+                attempt + 1
+            );
             return true;
         }
-        
-        crate::serial_println!("SMP: AP {} did not respond on attempt {}", cpu_id, attempt + 1);
+
+        crate::serial_println!(
+            "SMP: AP {} did not respond on attempt {}",
+            cpu_id,
+            attempt + 1
+        );
     }
-    
-    crate::serial_println!("SMP: WARNING: Failed to start AP {} after {} attempts", cpu_id, MAX_RETRIES);
+
+    crate::serial_println!(
+        "SMP: WARNING: Failed to start AP {} after {} attempts",
+        cpu_id,
+        MAX_RETRIES
+    );
     CPU_STATES.set_state(cpu_id, CpuHotplugState::Broken);
     false
 }
 
 /// AP başladı mı kontrol et (timeout ile)
-fn wait_for_online(target_online: u32) -> bool {
+fn wait_for_online(cpu_id: u32) -> bool {
     // Zaman aşımı önemli ölçüde artırıldı. AP önyüklemesi: bellek tahsisi,
     // konsol çıktısı ve GDT/IDT kurulumu gibi işlemler yapar.
     const MAX_SPIN_ITERATIONS: u32 = 500;
-    
+
     x86_64::instructions::interrupts::without_interrupts(|| {
-        let online_ptr = {
-            let state = SMP_STATE.lock();
-            &state.online_cpus as *const AtomicU32
-        };
-        
         for i in 0..MAX_SPIN_ITERATIONS {
-            let current = unsafe { (*online_ptr).load(Ordering::Acquire) };
-            if current >= target_online {
+            if cpu_id < AP_ONLINE_HANDSHAKES.len() as u32
+                && AP_ONLINE_HANDSHAKES[cpu_id as usize].load(Ordering::Acquire)
+            {
                 crate::serial_println!("SMP: AP came online after {} iterations", i);
                 return true;
             }
-            
-            unsafe { delay_us(100); }
+
+            unsafe {
+                delay_us(100);
+            }
         }
-        
-        crate::serial_println!("SMP: Timeout waiting for AP after {} iterations", MAX_SPIN_ITERATIONS);
+
+        crate::serial_println!(
+            "SMP: Timeout waiting for AP after {} iterations",
+            MAX_SPIN_ITERATIONS
+        );
         false
     })
 }
 
 pub fn mark_cpu_online(cpu_id: u32, apic_id: u32) {
-    unsafe { x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'X'); }
-    if cpu_id < SMP_STATE.lock().ap_started.len() as u32 {
-        unsafe { x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'Y'); }
-        {
-            let mut state = SMP_STATE.lock();
-            unsafe { x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'Z'); }
-            if let Some(per_cpu) = state.per_cpu_data.get_mut(cpu_id as usize) {
-                per_cpu.cpu_id = cpu_id;
-                per_cpu.apic_id = apic_id;
-                per_cpu.online = true;
-            }
-            state.ap_started[cpu_id as usize].store(true, Ordering::Release);
-            state.online_cpus.fetch_add(1, Ordering::AcqRel);
+    unsafe {
+        x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'X');
+        x86_64::instructions::port::Port::<u8>::new(0xe9).write(b'X');
+    }
+    cpu_slots::publish_presence(cpu_id, apic_id, true);
+    cpu_slots::publish_state(cpu_id, CpuHotplugState::Online);
+    if cpu_id < AP_ONLINE_HANDSHAKES.len() as u32 {
+        unsafe {
+            x86_64::instructions::port::Port::<u8>::new(0x3f8).write(b'Y');
+            x86_64::instructions::port::Port::<u8>::new(0xe9).write(b'Y');
         }
-        // CPU state machine'i ONLINE olarak güncelle
-        CPU_STATES.set_state(cpu_id, CpuHotplugState::Online);
-        crate::serial_println!("AP {} started successfully (state: ONLINE)", cpu_id);
+        AP_ONLINE_HANDSHAKES[cpu_id as usize].store(true, Ordering::Release);
+        unsafe {
+            x86_64::instructions::port::Port::<u8>::new(0xe9).write(b'Z');
+        }
     }
 }
 
@@ -588,16 +676,29 @@ pub fn startup_all_aps() {
     // çünkü yığın geçişi önceki tüm yerel değişkenleri geçersiz kılar
     prepare_ap_per_cpu_data();
 
-    // Zamanlayıcıyı başlat
+    {
+        let state = SMP_STATE.lock();
+        for cpu_id in 1..state.cpu_count {
+            if let Some(per_cpu) = state.per_cpu_data.get(cpu_id as usize) {
+                crate::gdt::prepare_for_cpu(cpu_id, x86_64::VirtAddr::new(per_cpu.stack_top));
+                crate::interrupts::prepare_idt_for_cpu(cpu_id);
+            }
+        }
+    }
+
     let cpu_count_for_scheduler = SMP_STATE.lock().cpu_count;
+
+    // Zamanlayıcıyı başlat
     crate::task::scheduler::update_cpu_count(cpu_count_for_scheduler);
 
     // Tek CPU için erken dönüş
     if cpu_count_for_scheduler <= 1 {
         crate::serial_println!("SMP: startup_all_aps cpu_count={}", cpu_count_for_scheduler);
-        crate::serial_println!("SMP: {}/{} CPUs online", 
+        crate::serial_println!(
+            "SMP: {}/{} CPUs online",
             SMP_STATE.lock().online_cpus.load(Ordering::Acquire),
-            cpu_count_for_scheduler);
+            cpu_count_for_scheduler
+        );
         return;
     }
 
@@ -613,7 +714,12 @@ pub fn startup_all_aps() {
     let mut successful_aps = 0;
     let mut failed_aps = 0;
 
-    if CPU_STATES.is_parallel_bringup() && cpu_count_for_scheduler > 2 {
+    // QEMU/TCG ve bazı sanallaştırma katmanlarında paralel SIPI yayınları
+    // AP'lerin ilk batch'te sessizce takılmasına neden oluyor. Boot doğruluğu
+    // throughput'tan daha kritik olduğu için getirimi kanıtlanana kadar sıralı
+    // bringup kullanıyoruz.
+    let use_parallel_bringup = false;
+    if use_parallel_bringup && CPU_STATES.is_parallel_bringup() && cpu_count_for_scheduler > 2 {
         // PARALEL BAŞLATMA: Birden fazla AP'yi aynı anda başlat
         crate::serial_println!("SMP: Using PARALLEL bringup mode");
         successful_aps = parallel_startup_aps(cpu_count_for_scheduler);
@@ -633,7 +739,10 @@ pub fn startup_all_aps() {
                     crate::serial_println!("AP {} started successfully", cpu_id);
                     successful_aps += 1;
                 } else {
-                    crate::serial_println!("WARNING: Failed to start AP {} - continuing with remaining CPUs", cpu_id);
+                    crate::serial_println!(
+                        "WARNING: Failed to start AP {} - continuing with remaining CPUs",
+                        cpu_id
+                    );
                     failed_aps += 1;
                 }
             }
@@ -648,11 +757,13 @@ pub fn startup_all_aps() {
         successful_aps,
         failed_aps
     );
-    
+
     if failed_aps > 0 {
         crate::serial_println!("SMP: System will continue with {} CPU(s)", final_online);
     }
-    
+
+    crate::task::scheduler::enable_secondary_scheduling();
+
     // BSP YIĞIN GEÇİŞİ KALDIRILDI: Yığın işaretçisini burada üzerine yazmak
     // kernel_main'e dönüş adresini yok eder! BSP, UEFI tarafından sağlanan
     // yığını kullanmaya devam eder.
@@ -662,22 +773,26 @@ pub fn startup_all_aps() {
 /// Linux kernel parallel bringup benzeri implementasyon
 fn parallel_startup_aps(cpu_count: u32) -> u32 {
     use core::sync::atomic::AtomicU32;
-    
+
     // Batch boyutu: aynı anda kaç AP başlatılacak
     // Intel, en fazla 4 paralel SIPI gönderilmesini önerir
     const BATCH_SIZE: u32 = 4;
-    
+
     let mut successful = 0u32;
     let total_aps = cpu_count - 1; // BSP hariç
-    
+
     // AP'leri batch'ler halinde başlat
     for batch_start in (1..cpu_count).step_by(BATCH_SIZE as usize) {
         let batch_end = (batch_start + BATCH_SIZE).min(cpu_count);
         let batch_size = batch_end - batch_start;
-        
-        crate::serial_println!("SMP: Parallel batch {}-{} ({} APs)", 
-            batch_start, batch_end - 1, batch_size);
-        
+
+        crate::serial_println!(
+            "SMP: Parallel batch {}-{} ({} APs)",
+            batch_start,
+            batch_end - 1,
+            batch_size
+        );
+
         // 1. Tüm AP'lere INIT gönder (broadcast)
         for cpu_id in batch_start..batch_end {
             let apic_id = SMP_STATE
@@ -686,19 +801,25 @@ fn parallel_startup_aps(cpu_count: u32) -> u32 {
                 .get(cpu_id as usize)
                 .copied()
                 .unwrap_or(cpu_id);
-            
+
             // State'i BRINGUP olarak işaretle
             CPU_STATES.set_state(cpu_id, CpuHotplugState::Bringup);
-            
+
             // INIT gönder
             unsafe {
-                send_ipi(apic_id, APIC_DELIVERY_INIT | APIC_LEVEL_ASSERT | APIC_TRIGGER_LEVEL, 0);
+                send_ipi(
+                    apic_id,
+                    APIC_DELIVERY_INIT | APIC_LEVEL_ASSERT | APIC_TRIGGER_LEVEL,
+                    0,
+                );
             }
         }
-        
+
         // INIT deassert bekle
-        unsafe { delay_ms(10); }
-        
+        unsafe {
+            delay_ms(10);
+        }
+
         // 2. Tüm AP'lere INIT deassert
         for cpu_id in batch_start..batch_end {
             let apic_id = SMP_STATE
@@ -711,9 +832,11 @@ fn parallel_startup_aps(cpu_count: u32) -> u32 {
                 send_ipi(apic_id, APIC_DELIVERY_INIT | APIC_TRIGGER_LEVEL, 0);
             }
         }
-        
-        unsafe { delay_ms(1); }
-        
+
+        unsafe {
+            delay_ms(1);
+        }
+
         // 3. Tüm AP'lere SIPI gönder (broadcast)
         for cpu_id in batch_start..batch_end {
             let apic_id = SMP_STATE
@@ -726,10 +849,12 @@ fn parallel_startup_aps(cpu_count: u32) -> u32 {
                 send_ipi(apic_id, APIC_DELIVERY_STARTUP, AP_STARTUP_SEGMENT as u32);
             }
         }
-        
+
         // AP'lerin başlamasını bekle
-        unsafe { delay_us(200); }
-        
+        unsafe {
+            delay_us(200);
+        }
+
         // 4. İkinci SIPI (Intel spec)
         for cpu_id in batch_start..batch_end {
             let apic_id = SMP_STATE
@@ -742,36 +867,42 @@ fn parallel_startup_aps(cpu_count: u32) -> u32 {
                 send_ipi(apic_id, APIC_DELIVERY_STARTUP, AP_STARTUP_SEGMENT as u32);
             }
         }
-        
+
         // 5. Tüm AP'lerin online olmasını bekle
         let target_online = SMP_STATE.lock().online_cpus.load(Ordering::Acquire) + batch_size;
         let batch_success = wait_for_batch_online(target_online, batch_size);
-        
+
         successful += batch_success;
     }
-    
+
     successful
 }
 
 /// Bir batch AP'nin online olmasını bekle
 fn wait_for_batch_online(target_online: u32, batch_size: u32) -> u32 {
-    const MAX_WAIT_MS: u32 = 500;  // 500ms timeout
+    const MAX_WAIT_MS: u32 = 500; // 500ms timeout
     let mut elapsed = 0u32;
-    
+
     loop {
         let current = SMP_STATE.lock().online_cpus.load(Ordering::Acquire);
         if current >= target_online {
             return batch_size;
         }
-        
-        unsafe { delay_ms(1); }
+
+        unsafe {
+            delay_ms(1);
+        }
         elapsed += 1;
-        
+
         if elapsed > MAX_WAIT_MS {
             // Timeout - kaç AP başarılı oldu?
             let current = SMP_STATE.lock().online_cpus.load(Ordering::Acquire);
             let started = current.saturating_sub(target_online - batch_size);
-            crate::serial_println!("SMP: Parallel batch timeout, {}/{} APs online", started, batch_size);
+            crate::serial_println!(
+                "SMP: Parallel batch timeout, {}/{} APs online",
+                started,
+                batch_size
+            );
             return started;
         }
     }
@@ -784,14 +915,21 @@ unsafe fn allocate_stack_phys() -> Option<(&'static mut [u8], u64)> {
     let frame_size = 4096u64;
     let frames_needed = ((stack_size as u64 + frame_size - 1) / frame_size) as usize;
 
-    crate::serial_println!("SMP: Allocating {} bytes ({} frames) from physical memory", stack_size, frames_needed);
+    crate::serial_println!(
+        "SMP: Allocating {} bytes ({} frames) from physical memory",
+        stack_size,
+        frames_needed
+    );
 
     // Global bellek yöneticisi ile ardışık fiziksel çerçeveler tahsis et
     let mm = crate::memory::global_memory_manager_mut()?;
     let start_frame = mm.allocate_contiguous_frames(frames_needed)?;
     let phys_start = start_frame.start_address().as_u64();
 
-    crate::serial_println!("SMP: Allocated contiguous physical memory at {:#x}", phys_start);
+    crate::serial_println!(
+        "SMP: Allocated contiguous physical memory at {:#x}",
+        phys_start
+    );
 
     // HHDM üzerinden sanal adrese eşle
     let hhdm = crate::memory::active_physical_offset();
@@ -807,7 +945,11 @@ unsafe fn allocate_stack_phys() -> Option<(&'static mut [u8], u64)> {
     let mut stack_top = virt_start + stack_size as u64;
     stack_top &= !0xFu64;
 
-    crate::serial_println!("SMP: Stack allocated at virt={:#x}, top={:#x}", virt_start, stack_top);
+    crate::serial_println!(
+        "SMP: Stack allocated at virt={:#x}, top={:#x}",
+        virt_start,
+        stack_top
+    );
 
     Some((stack_slice, stack_top))
 }
@@ -831,7 +973,7 @@ unsafe fn allocate_struct_phys<T>() -> Option<&'static mut T> {
 
     // Hizalamayı garantile (T türünün hizalama gereksinimini karşıla)
     let aligned_virt = (virt + (align - 1)) & !(align - 1);
-    
+
     Some(&mut *(aligned_virt as *mut T))
 }
 
@@ -841,21 +983,25 @@ fn prepare_ap_per_cpu_data() {
     crate::serial_println!("SMP: About to read cpu_count");
     let cpu_count = SMP_STATE.lock().cpu_count;
     crate::serial_println!("SMP: cpu_count = {}, preparing AP per-cpu data", cpu_count);
-    
+
     for cpu_id in 1..cpu_count {
         crate::serial_println!("SMP: Creating per_cpu_data for cpu_id {}", cpu_id);
-        let apic_id = SMP_STATE.lock()
+        let apic_id = SMP_STATE
+            .lock()
             .cpu_apic_ids
             .get(cpu_id as usize)
             .copied()
             .unwrap_or(cpu_id);
-        
+
         // Fiziksel bellekten yığın tahsis et (TLSF'yi atla)
         let (stack, stack_top) = unsafe {
             match allocate_stack_phys() {
                 Some(s) => s,
                 None => {
-                    crate::serial_println!("SMP: ERROR: Failed to allocate stack for cpu_id {}", cpu_id);
+                    crate::serial_println!(
+                        "SMP: ERROR: Failed to allocate stack for cpu_id {}",
+                        cpu_id
+                    );
                     continue;
                 }
             }
@@ -876,14 +1022,21 @@ fn prepare_ap_per_cpu_data() {
                     d
                 }
                 None => {
-                    crate::serial_println!("SMP: ERROR: Failed to allocate CpuData for cpu_id {}", cpu_id);
+                    crate::serial_println!(
+                        "SMP: ERROR: Failed to allocate CpuData for cpu_id {}",
+                        cpu_id
+                    );
                     continue;
                 }
             }
         };
-        
-        crate::serial_println!("SMP: cpu_id {} allocated CpuData at {:#x}", cpu_id, cpu_data as *const _ as u64);
-        
+
+        crate::serial_println!(
+            "SMP: cpu_id {} allocated CpuData at {:#x}",
+            cpu_id,
+            cpu_data as *const _ as u64
+        );
+
         // Fiziksel bellekten PerCpuData tahsis et (TLSF'yi atla)
         let per_cpu = unsafe {
             match allocate_struct_phys::<PerCpuData>() {
@@ -899,18 +1052,36 @@ fn prepare_ap_per_cpu_data() {
                     d
                 }
                 None => {
-                    crate::serial_println!("SMP: ERROR: Failed to allocate PerCpuData for cpu_id {}", cpu_id);
+                    crate::serial_println!(
+                        "SMP: ERROR: Failed to allocate PerCpuData for cpu_id {}",
+                        cpu_id
+                    );
                     continue;
                 }
             }
         };
-        
+
         let mut state = SMP_STATE.lock();
         state.per_cpu_data.push(per_cpu);
         state.ap_started.push(AtomicBool::new(false));
         state.syscall_cpu_data.push(cpu_data);
         state.syscall_stacks.push(stack);
-        crate::serial_println!("SMP: cpu_id {} added to per_cpu_data (len={})", cpu_id, state.per_cpu_data.len());
+        cpu_slots::publish_presence(cpu_id, apic_id, false);
+        cpu_slots::publish_state(cpu_id, CpuHotplugState::PreparePerCpu);
+        if let Some(topology) = crate::topology::get_cpu_topology(cpu_id) {
+            let guard = topology.read();
+            cpu_slots::publish_topology(
+                cpu_id,
+                guard.package_id,
+                guard.core_id,
+                guard.numa_node_id,
+            );
+        }
+        crate::serial_println!(
+            "SMP: cpu_id {} added to per_cpu_data (len={})",
+            cpu_id,
+            state.per_cpu_data.len()
+        );
     }
     crate::serial_println!("SMP: AP per-cpu data preparation complete");
 }
@@ -976,7 +1147,7 @@ fn initialize_bsp_per_cpu() {
 
         // Pointer'ları kaydet
         let cpu_data_ptr = cpu_data as *mut crate::syscall::CpuData;
-        
+
         // SMP state'e ekle
         {
             let mut state = SMP_STATE.lock();
@@ -985,20 +1156,22 @@ fn initialize_bsp_per_cpu() {
             state.syscall_cpu_data.push(cpu_data);
             state.syscall_stacks.push(stack);
         }
+        cpu_slots::publish_presence(0, bsp_apic_id, true);
+        cpu_slots::publish_state(0, CpuHotplugState::Online);
 
         // Sistem çağrısı (syscall) CPU verisini başlat
         unsafe {
             crate::syscall::init_cpu_data(cpu_data_ptr);
         }
-        
+
         // BSP stack_top'u kaydet - stack switch için lazım olacak
         SMP_STATE.lock().per_cpu_data[0].stack_top = stack_top;
     }
     crate::serial_println!("SMP: BSP per-cpu setup done");
 }
 
-
 pub fn update_cpu_load(cpu_id: u32, load: u32) {
+    cpu_slots::set_load(cpu_id, load);
     // Lock'sız erişim için atomic kullanmak daha iyi olurdu ama
     // şimdilik basitçe lock alıp güncelliyoruz.
     // DEADLOCK ÖNLEME: Interrupt handler içinden çağrıldığı için
@@ -1013,7 +1186,7 @@ pub fn update_cpu_load(cpu_id: u32, load: u32) {
 
 /// CFS-style Load Balancer
 /// Linux CFS (Completely Fair Scheduler) load balancing'den esinlenilmiş
-/// 
+///
 /// Özellikler:
 /// - Active balancing (IPI ile task migration)
 /// - Load average tracking
@@ -1037,6 +1210,7 @@ pub fn balance_load() {
     let mut loads: [(u32, u32); 256] = [(0, 0); 256]; // (cpu_id, load)
     let mut load_count = 0;
 
+    #[cfg(not(feature = "simics"))]
     crate::serial_println!("--- SMP CFS Load Balance Report ---");
     for cpu in state.per_cpu_data.iter() {
         if !cpu.online {
@@ -1044,7 +1218,7 @@ pub fn balance_load() {
         }
         let load = cpu.load;
         total_load += load;
-        
+
         if load > max_load {
             max_load = load;
             overloaded_cpu = cpu.cpu_id;
@@ -1053,50 +1227,97 @@ pub fn balance_load() {
             min_load = load;
             underloaded_cpu = cpu.cpu_id;
         }
-        
+
         loads[load_count] = (cpu.cpu_id, load);
         load_count += 1;
 
-        crate::serial_println!("CPU {}: Load {} tasks, Online: {}, Isolated: {}", 
-            cpu.cpu_id, load, cpu.online, CPU_STATES.is_isolated(cpu.cpu_id));
+        #[cfg(not(feature = "simics"))]
+        crate::serial_println!(
+            "CPU {}: Load {} tasks, Online: {}, Isolated: {}",
+            cpu.cpu_id,
+            load,
+            cpu.online,
+            CPU_STATES.is_isolated(cpu.cpu_id)
+        );
     }
 
-    let avg_load = if online_count > 0 { total_load / online_count } else { 0 };
-    crate::serial_println!("Total: {}, Avg: {}, Max: {} (CPU {}), Min: {} (CPU {})", 
-        total_load, avg_load, max_load, overloaded_cpu, min_load, underloaded_cpu);
-    
+    let avg_load = if online_count > 0 {
+        total_load / online_count
+    } else {
+        0
+    };
+    #[cfg(not(feature = "simics"))]
+    crate::serial_println!(
+        "Total: {}, Avg: {}, Max: {} (CPU {}), Min: {} (CPU {})",
+        total_load,
+        avg_load,
+        max_load,
+        overloaded_cpu,
+        min_load,
+        underloaded_cpu
+    );
+
     // ACTIVE BALANCING: Eğer load dengesizliği varsa
     let imbalance_threshold = (avg_load as f32 * 0.25) as u32; // %25 tolerance
     if max_load > avg_load + imbalance_threshold && min_load < avg_load {
+        #[cfg(not(feature = "simics"))]
         crate::serial_println!("CFS: Active balancing triggered - imbalance detected");
-        
+
         // İzole CPU'ları atla
         if !CPU_STATES.is_isolated(overloaded_cpu) && !CPU_STATES.is_isolated(underloaded_cpu) {
             // Task migration önerisi (gerçek migration scheduler'da yapılacak)
             let tasks_to_migrate = (max_load - avg_load) / 2;
-            crate::serial_println!("CFS: Suggesting migration of {} tasks from CPU {} to CPU {}", 
-                tasks_to_migrate, overloaded_cpu, underloaded_cpu);
-            
+            #[cfg(not(feature = "simics"))]
+            crate::serial_println!(
+                "CFS: Suggesting migration of {} tasks from CPU {} to CPU {}",
+                tasks_to_migrate,
+                overloaded_cpu,
+                underloaded_cpu
+            );
+
             // IPI ile active balancing (scheduler'a bildir)
             // Bu gerçek implementation'da scheduler'ın runqueue'larını değiştirecek
             trigger_active_balance(overloaded_cpu, underloaded_cpu, tasks_to_migrate);
         }
     }
-    
+
     // Load average güncelle (exponential moving average)
     update_load_average(loads, load_count);
 }
 
 /// Active balancing tetikle (IPI ile)
 fn trigger_active_balance(from_cpu: u32, to_cpu: u32, tasks: u32) {
-    // Gerçek implementation'da:
-    // 1. from_cpu'ya IPI gönder
-    // 2. from_cpu scheduler'dan task'ları al
-    // 3. to_cpu'ya push et
-    
-    // Şimdilik sadece log
-    crate::serial_println!("CFS: Active balance - would migrate {} tasks from CPU {} to {}", 
-        tasks, from_cpu, to_cpu);
+    let target = tasks.max(1) as usize;
+    let mut migrated = 0usize;
+
+    for _ in 0..target {
+        match crate::task::scheduler::steal_from_cpu(from_cpu) {
+            Some(task) => {
+                crate::task::scheduler::push_to_cpu(to_cpu, task);
+                migrated += 1;
+            }
+            None => break,
+        }
+    }
+
+    if migrated > 0 {
+        cpu_slots::set_load(
+            from_cpu,
+            cpu_slots::load(from_cpu).saturating_sub(migrated as u32),
+        );
+        cpu_slots::set_load(
+            to_cpu,
+            cpu_slots::load(to_cpu).saturating_add(migrated as u32),
+        );
+    }
+
+    #[cfg(not(feature = "simics"))]
+    crate::serial_println!(
+        "CFS: Active balance - migrated {} tasks from CPU {} to {}",
+        migrated,
+        from_cpu,
+        to_cpu
+    );
 }
 
 /// Load average güncelle (exponential moving average)
@@ -1104,7 +1325,7 @@ fn update_load_average(loads: [(u32, u32); 256], count: usize) {
     // Linux tarzı load average (1min, 5min, 15min)
     // Şimdilik basit tracking
     static LOAD_HISTORY: Mutex<[(u64, u32); 256]> = Mutex::new([(0, 0); 256]);
-    
+
     let mut history = LOAD_HISTORY.lock();
     for i in 0..count {
         let (cpu_id, load) = loads[i];
@@ -1124,23 +1345,23 @@ pub fn find_least_loaded_cpu(affinity: &CpuAffinity) -> Option<u32> {
     let state = SMP_STATE.lock();
     let mut min_load = u32::MAX;
     let mut best_cpu = None;
-    
+
     for cpu in state.per_cpu_data.iter() {
         if !cpu.online || CPU_STATES.is_isolated(cpu.cpu_id) {
             continue;
         }
-        
+
         // Affinity kontrolü
         if !affinity.can_run_on(cpu.cpu_id) {
             continue;
         }
-        
+
         if cpu.load < min_load {
             min_load = cpu.load;
             best_cpu = Some(cpu.cpu_id);
         }
     }
-    
+
     best_cpu
 }
 
@@ -1237,41 +1458,111 @@ pub fn delay_us(us: u32) {
     }
 }
 
-/// Belirtilen CPU'yu başlatır
+/// Belirtilen CPU'yu başlatır (hotplug)
 pub fn start_cpu(cpu_id: u32) -> Result<(), &'static str> {
-    // CPU başlatma mantığı
-    // Şimdilik basit bir implementasyon:
     if cpu_id >= get_cpu_count() {
         return Err("Invalid CPU ID");
     }
-    
-    // TODO: Gerçek CPU başlatma kodu buraya eklenecek
-    // Örnek: APIC kullanarak CPU'yu uyandırma
-    
-    Ok(())
+
+    // BSP (CPU 0) zaten çalışıyor
+    if cpu_id == 0 {
+        return Ok(());
+    }
+
+    // CPU state kontrolü
+    let current_state = CPU_STATES.get_state(cpu_id);
+    match current_state {
+        CpuHotplugState::Online => return Ok(()), // Zaten online
+        CpuHotplugState::Offline | CpuHotplugState::Dead | CpuHotplugState::PostDead => {
+            // Offline'dan çıkarılabilir
+        }
+        CpuHotplugState::Bringup
+        | CpuHotplugState::BringupCpu
+        | CpuHotplugState::StartingGdt
+        | CpuHotplugState::StartingIdt
+        | CpuHotplugState::StartingPerCpu
+        | CpuHotplugState::StartingLapic
+        | CpuHotplugState::StartingTimer => {
+            return Err("CPU already starting");
+        }
+        CpuHotplugState::Broken => {
+            return Err("CPU is broken, cannot start");
+        }
+        _ => {}
+    }
+
+    crate::serial_println!("SMP: Hot-plugging CPU {}...", cpu_id);
+
+    // APIC ID'yi al
+    let apic_id = SMP_STATE
+        .lock()
+        .cpu_apic_ids
+        .get(cpu_id as usize)
+        .copied()
+        .unwrap_or(cpu_id);
+
+    // INIT-SIPI-SIPI dizisi gönder
+    unsafe {
+        if startup_ap(apic_id, cpu_id) {
+            crate::serial_println!("SMP: CPU {} hot-plugged successfully", cpu_id);
+            Ok(())
+        } else {
+            Err("Failed to start CPU")
+        }
+    }
 }
 
-/// Belirtilen CPU'yu durdurur
+/// Belirtilen CPU'yu durdurur (hotplug)
 pub fn stop_cpu(cpu_id: u32) -> Result<(), &'static str> {
-    // CPU durdurma mantığı
-    // Şimdilik basit bir implementasyon:
     if cpu_id >= get_cpu_count() {
         return Err("Invalid CPU ID");
     }
-    
+
+    // BSP'yi (CPU 0) durduramayız
     if cpu_id == 0 {
         return Err("Cannot stop boot CPU");
     }
-    
-    // TODO: Gerçek CPU durdurma kodu buraya eklenecek
-    // Örnek: APIC kullanarak CPU'yu uyutma
-    
-    Ok(())
+
+    // CPU state kontrolü
+    let current_state = CPU_STATES.get_state(cpu_id);
+    if current_state != CpuHotplugState::Online {
+        return Err("CPU is not online");
+    }
+
+    crate::serial_println!("SMP: Stopping CPU {}...", cpu_id);
+
+    // CPU'ya IPI gönder ve durmasını iste
+    let apic_id = SMP_STATE
+        .lock()
+        .cpu_apic_ids
+        .get(cpu_id as usize)
+        .copied()
+        .unwrap_or(cpu_id);
+
+    // HLT IPI gönder (veya özel hotplug interrupt)
+    unsafe {
+        send_ipi(apic_id, 0x10, 0); // HALT vector
+    }
+
+    // CPU'nun durmasını bekle
+    let mut timeout = 1000;
+    while timeout > 0 {
+        let state = CPU_STATES.get_state(cpu_id);
+        if state == CpuHotplugState::Offline || state == CpuHotplugState::Dead {
+            crate::serial_println!("SMP: CPU {} stopped successfully", cpu_id);
+            return Ok(());
+        }
+        delay_us(1000);
+        timeout -= 1;
+    }
+
+    crate::serial_println!("SMP: Timeout stopping CPU {}", cpu_id);
+    Err("Timeout waiting for CPU to stop")
 }
 
 /// Sistemdeki toplam CPU sayısını döndürür
 pub fn get_cpu_count() -> u32 {
-    SMP_STATE.lock().cpu_count
+    cpu_slots::cpu_count()
 }
 
 /// SMP başlatma
@@ -1280,23 +1571,25 @@ pub fn init() {
 
     // BSP'yi online olarak işaretle
     CPU_STATES.init_bsp();
-    
+    cpu_slots::publish_presence(0, 0, true);
+    cpu_slots::publish_state(0, CpuHotplugState::Online);
+
     // ACPI'den CPU bilgilerini al
     let cpu_count_from_acpi = if let Some(acpi_info) = crate::cpu::acpi::get_cpu_info() {
         let mut state = SMP_STATE.lock();
         state.apic_base = acpi_info.apic_base;
-        
+
         // DEBUG: ACPI'den gelen bilgileri logla
         crate::serial_println!("SMP DEBUG: bsp_apic_id = {}", acpi_info.bsp_apic_id);
         crate::serial_println!("SMP DEBUG: cpu_list = {:?}", acpi_info.cpu_list);
-        
+
         // APIC ID'leri doğru sırala: BSP ilk, sonra AP'ler
         // ACPI cpu_list zaten tüm CPU'ları içerir, BSP'yi çıkar ve ayrı ekle
         let cpu_count = acpi_info.cpu_list.len();
-        
+
         // CPU state machine'i güncelle
         CPU_STATES.set_cpu_count(cpu_count as u32);
-        
+
         // Yeniden boyutlandırmayı önlemek için vektörleri tam kapasiteyle önceden tahsis et
         state.per_cpu_data = Vec::with_capacity(cpu_count);
         state.syscall_cpu_data = Vec::with_capacity(cpu_count);
@@ -1312,21 +1605,31 @@ pub fn init() {
 
         // Algılanan tüm CPU'ları etkinleştir (Linux 8192 CPU'ya kadar destekler)
         state.cpu_count = cpu_count as u32;
-        
-        crate::serial_println!("SMP: Found {} CPUs via ACPI, activating all", state.cpu_count);
+        cpu_slots::set_cpu_count(cpu_count as u32);
+
+        crate::serial_println!(
+            "SMP: Found {} CPUs via ACPI, activating all",
+            state.cpu_count
+        );
         cpu_count
     } else {
         crate::serial_println!("SMP: Using CPUID detection");
         // CPUID'den CPU sayısını tahmin et
         let mut state = SMP_STATE.lock();
-        state.cpu_count = 1;  // Single CPU
+        state.cpu_count = 1; // Single CPU
+        cpu_slots::set_cpu_count(1);
         state.cpu_apic_ids = vec![0];
         1
     };
 
     let cpu_count = SMP_STATE.lock().cpu_count;
+    cpu_slots::set_cpu_count(cpu_count);
     crate::random::init_per_cpu_entropy(cpu_count);
-    
+    if let Some(topology) = crate::topology::get_cpu_topology(0) {
+        let guard = topology.read();
+        cpu_slots::publish_topology(0, guard.package_id, guard.core_id, guard.numa_node_id);
+    }
+
     if crate::apic::lapic::init().is_err() {
         crate::serial_println!("SMP: LAPIC init failed");
     }
@@ -1336,7 +1639,6 @@ pub fn init() {
         crate::serial_println!("SMP: Single processor system");
     }
 }
-
 
 pub fn read_local_apic_id() -> u32 {
     if has_x2apic() {
@@ -1348,13 +1650,13 @@ pub fn read_local_apic_id() -> u32 {
 pub fn current_cpu_id() -> u32 {
     // SMP init olmadan önce çağrılabilir, bu durumda BSP (CPU 0) döndür
     let apic_id = unsafe { read_apic_reg(0x20) >> 24 };
-    
+
     // SMP_STATE lock almayı dene, başarısız olursa BSP döndür
     let state = match SMP_STATE.try_lock() {
         Some(s) => s,
         None => return 0, // SMP init olmadı, BSP döndür
     };
-    
+
     state
         .cpu_apic_ids
         .iter()

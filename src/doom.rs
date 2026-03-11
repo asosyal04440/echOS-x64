@@ -8,10 +8,10 @@
 //! "DoomGeneric" projesi, Doom'u minimum platform bağımlılığıyla taşımanın
 //! yolunu sunar. Bu modül, echOS'a özgü grafik ve ses arka uçlarını implemente eder.
 
-use alloc::vec::Vec;
-use alloc::vec;
-use alloc::string::String;
 use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 // ============================================================================
@@ -359,7 +359,13 @@ impl EchosDoom {
     }
 
     /// Fare olayını olay kuyruğuna ekler.
-    pub fn add_mouse_event(&mut self, button: Option<DoomMouseButton>, x: i32, y: i32, pressed: bool) {
+    pub fn add_mouse_event(
+        &mut self,
+        button: Option<DoomMouseButton>,
+        x: i32,
+        y: i32,
+        pressed: bool,
+    ) {
         if let Some(btn) = button {
             if pressed {
                 self.event_queue.push(DoomEvent::MouseDown(btn, x, y));

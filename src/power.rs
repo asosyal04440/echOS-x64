@@ -3,12 +3,12 @@
 //! CPU güç durumları (C-state/P-state), frekans ölçeklendirme ve enerji tasarrufu.
 //! Linux cpufreq ile eşdeğer Tier-1 OS düzeyinde yetenekler sunar.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use alloc::vec::Vec;
-use alloc::boxed::Box;
 use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
-use crate::preempt::{PreemptDisableGuard, preempt_enabled};
-use crate::rcu::{RcuPtr, synchronize_rcu};
+use crate::preempt::{preempt_enabled, PreemptDisableGuard};
+use crate::rcu::{synchronize_rcu, RcuPtr};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// CPU power states (Linux C-states ile uyumlu)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,7 @@ impl CpuFrequency {
             is_turbo: false,
         }
     }
-    
+
     pub fn turbo(frequency_mhz: u32, voltage_mv: u32, power_mw: u32) -> Self {
         Self {
             frequency_mhz,
@@ -83,7 +83,12 @@ pub struct CpuIdleState {
 }
 
 impl CpuIdleState {
-    pub fn new(state: CpuState, exit_latency_us: u32, power_mw: u32, target_residency_us: u32) -> Self {
+    pub fn new(
+        state: CpuState,
+        exit_latency_us: u32,
+        power_mw: u32,
+        target_residency_us: u32,
+    ) -> Self {
         Self {
             state,
             exit_latency_us,
@@ -95,7 +100,7 @@ impl CpuIdleState {
             total_time: AtomicU64::new(0),
         }
     }
-    
+
     /// Check if this state is better than another for given idle time
     pub fn is_better_than(&self, other: &CpuIdleState, idle_time_us: u32) -> bool {
         // Prefer deeper states if idle time is sufficient
@@ -108,17 +113,17 @@ impl CpuIdleState {
             false
         }
     }
-    
+
     /// Record entry into this idle state
     pub fn enter(&self) {
         self.usage_count.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Record exit from this idle state
     pub fn exit(&self, duration_ticks: u64) {
         self.total_time.fetch_add(duration_ticks, Ordering::Relaxed);
     }
-    
+
     /// Get usage statistics
     pub fn get_stats(&self) -> (u64, u64) {
         (
@@ -196,16 +201,16 @@ impl CpuPowerDesc {
     pub fn new(cpu_id: u32) -> Self {
         let mut idle_states = Vec::new();
         let mut frequencies = Vec::new();
-        
+
         // Default idle states (typical x86 values)
         idle_states.push(CpuIdleState::new(CpuState::C1, 1, 100, 2));
         idle_states.push(CpuIdleState::new(CpuState::C2, 10, 50, 10));
         idle_states.push(CpuIdleState::new(CpuState::C3, 50, 20, 100));
         idle_states.push(CpuIdleState::new(CpuState::C6, 100, 10, 200));
         idle_states.push(CpuIdleState::new(CpuState::C7, 150, 5, 300));
-        
+
         // Default frequencies (typical desktop CPU)
-        frequencies.push(CpuFrequency::new(800, 800, 5000));   // Min
+        frequencies.push(CpuFrequency::new(800, 800, 5000)); // Min
         frequencies.push(CpuFrequency::new(1200, 900, 8000));
         frequencies.push(CpuFrequency::new(1600, 1000, 12000));
         frequencies.push(CpuFrequency::new(2000, 1100, 17000));
@@ -213,7 +218,7 @@ impl CpuPowerDesc {
         frequencies.push(CpuFrequency::new(2800, 1300, 30000));
         frequencies.push(CpuFrequency::new(3200, 1400, 38000));
         frequencies.push(CpuFrequency::turbo(3600, 1500, 47000)); // Turbo
-        
+
         Self {
             cpu_id,
             current_cstate: AtomicU32::new(CpuState::C0 as u32),
@@ -237,7 +242,7 @@ impl CpuPowerDesc {
             _padding: [0; 0],
         }
     }
-    
+
     /// Get current C-state
     pub fn get_current_cstate(&self) -> CpuState {
         match self.current_cstate.load(Ordering::Acquire) {
@@ -250,46 +255,70 @@ impl CpuPowerDesc {
             _ => CpuState::C0,
         }
     }
-    
+
     /// Set current C-state
     pub fn set_current_cstate(&self, state: CpuState) {
         self.current_cstate.store(state as u32, Ordering::Release);
         smp_wmb();
     }
-    
+
     /// Get current frequency
     pub fn get_current_frequency(&self) -> Option<CpuFrequency> {
         let idx = self.current_pstate.load(Ordering::Acquire) as usize;
         self.frequencies.get(idx).copied()
     }
-    
+
     /// Set frequency
     pub fn set_frequency(&self, freq_idx: u32) -> Result<(), PowerError> {
         if freq_idx > self.max_freq_idx {
             return Err(PowerError::InvalidFrequency);
         }
-        
+
         // Check turbo availability
         if let Some(turbo_idx) = self.turbo_freq_idx {
             if freq_idx == turbo_idx && !self.can_use_turbo() {
                 return Err(PowerError::TurboUnavailable);
             }
         }
-        
+
         let old_idx = self.current_pstate.load(Ordering::Acquire);
         if old_idx != freq_idx {
+            // IA32_PERF_CTL MSR'a (0x199) yeni P-state değeri yaz
+            let freq = &self.frequencies[freq_idx as usize];
+            let perf_ctl_value = (freq_idx as u64) << 8; // P-state indeks (bit 15:8)
+            unsafe {
+                // MSR 0x199 = IA32_PERF_CTL
+                // wrmsr: ECX=MSR index, EAX=low 32, EDX=high 32
+                let low = perf_ctl_value as u32;
+                let high = (perf_ctl_value >> 32) as u32;
+                core::arch::asm!(
+                    "wrmsr",
+                    in("ecx") 0x199u32,
+                    in("eax") low,
+                    in("edx") high,
+                    options(nomem, nostack)
+                );
+            }
+
             self.current_pstate.store(freq_idx, Ordering::Release);
             self.freq_transitions.fetch_add(1, Ordering::Relaxed);
-            self.last_freq_change.store(crate::task::scheduler::get_ticks() as u64, Ordering::Relaxed);
+            self.last_freq_change.store(
+                crate::task::scheduler::get_ticks() as u64,
+                Ordering::Relaxed,
+            );
             smp_mb();
-            
-            crate::serial_println!("Power: CPU {} frequency changed to {} MHz", 
-                self.cpu_id, self.frequencies[freq_idx as usize].frequency_mhz);
+
+            crate::serial_println!(
+                "Power: CPU {} frequency changed to {} MHz (MSR 0x199 = {:#x})",
+                self.cpu_id,
+                freq.frequency_mhz,
+                perf_ctl_value
+            );
         }
-        
+
         Ok(())
     }
-    
+
     /// Check if turbo can be used
     pub fn can_use_turbo(&self) -> bool {
         // Simple turbo availability check
@@ -297,70 +326,70 @@ impl CpuPowerDesc {
         let load = self.current_load.load(Ordering::Acquire);
         load < 80 // Only use turbo if load is not too high
     }
-    
+
     /// Enter idle state
     pub fn enter_idle(&self, idle_time_us: u32) -> CpuState {
         if !self.pm_enabled.load(Ordering::Acquire) {
             return CpuState::C0;
         }
-        
+
         // Find best idle state for given time
         let mut best_state = &self.idle_states[0]; // C1 as default
-        
+
         for state in &self.idle_states {
             if state.is_better_than(best_state, idle_time_us) {
                 best_state = state;
             }
         }
-        
+
         // Enter selected state
         best_state.enter();
         self.set_current_cstate(best_state.state);
         self.in_idle.store(true, Ordering::Release);
-        
+
         best_state.state
     }
-    
+
     /// Exit idle state
     pub fn exit_idle(&self, duration_ticks: u64) {
         let current_state = self.get_current_cstate();
-        
+
         // Update statistics for current state
         if let Some(state) = self.idle_states.iter().find(|s| s.state == current_state) {
             state.exit(duration_ticks);
         }
-        
+
         // Update C-state statistics
         let state_idx = current_state as usize;
         if state_idx < 6 {
             self.cstate_time[state_idx].fetch_add(duration_ticks, Ordering::Relaxed);
             self.cstate_count[state_idx].fetch_add(1, Ordering::Relaxed);
         }
-        
+
         // Return to C0
         self.set_current_cstate(CpuState::C0);
         self.in_idle.store(false, Ordering::Release);
         smp_mb();
     }
-    
+
     /// Update CPU load
     pub fn update_load(&self, load: u32) {
         self.current_load.store(load, Ordering::Release);
-        
+
         // Update average load (exponential moving average)
         let current_avg = self.avg_load.load(Ordering::Acquire);
         let new_avg = (current_avg * 3 + load) / 4; // 0.75 weight to old value
         self.avg_load.store(new_avg, Ordering::Release);
-        
+
         // Apply frequency governor
         self.apply_governor();
     }
-    
+
     /// Apply frequency governor
     fn apply_governor(&self) {
         let governor = self.get_governor();
         let load = self.avg_load.load(Ordering::Acquire);
-        
+
         match governor {
             FreqGovernor::Performance => {
                 self.set_frequency(self.max_freq_idx);
@@ -382,11 +411,11 @@ impl CpuPowerDesc {
             }
         }
     }
-    
+
     /// Apply on-demand governor
     fn apply_ondemand_governor(&self, load: u32) {
         let current_idx = self.current_pstate.load(Ordering::Acquire);
-        
+
         if load > 80 && current_idx < self.max_freq_idx {
             // Increase frequency
             self.set_frequency(current_idx + 1);
@@ -395,11 +424,11 @@ impl CpuPowerDesc {
             self.set_frequency(current_idx - 1);
         }
     }
-    
+
     /// Apply conservative governor
     fn apply_conservative_governor(&self, load: u32) {
         let current_idx = self.current_pstate.load(Ordering::Acquire);
-        
+
         // More gradual changes than on-demand
         if load > 90 && current_idx < self.max_freq_idx {
             self.set_frequency(current_idx + 1);
@@ -407,17 +436,17 @@ impl CpuPowerDesc {
             self.set_frequency(current_idx - 1);
         }
     }
-    
+
     /// Apply schedutil governor
     fn apply_schedutil_governor(&self, load: u32) {
         // Scheduler-driven frequency selection
         // Use load to directly map to frequency
         let freq_range = self.max_freq_idx - self.min_freq_idx;
         let target_idx = self.min_freq_idx + (load * freq_range / 100);
-        
+
         self.set_frequency(target_idx);
     }
-    
+
     /// Get current governor
     pub fn get_governor(&self) -> FreqGovernor {
         match self.governor.load(Ordering::Acquire) {
@@ -430,40 +459,44 @@ impl CpuPowerDesc {
             _ => FreqGovernor::OnDemand,
         }
     }
-    
+
     /// Set frequency governor
     pub fn set_governor(&self, governor: FreqGovernor) {
         self.governor.store(governor as u32, Ordering::Release);
         smp_wmb();
-        
+
         // Apply new governor immediately
         self.apply_governor();
-        
-        crate::serial_println!("Power: CPU {} governor changed to {:?}", self.cpu_id, governor);
+
+        crate::serial_println!(
+            "Power: CPU {} governor changed to {:?}",
+            self.cpu_id,
+            governor
+        );
     }
-    
+
     /// Enable/disable power management
     pub fn set_pm_enabled(&self, enabled: bool) {
         self.pm_enabled.store(enabled, Ordering::Release);
         smp_wmb();
-        
+
         if !enabled {
             // Return to C0 and max frequency when disabled
             self.set_current_cstate(CpuState::C0);
             self.set_frequency(self.max_freq_idx);
         }
     }
-    
+
     /// Get power statistics
     pub fn get_power_stats(&self) -> PowerStats {
         let mut cstate_times = [0u64; 6];
         let mut cstate_counts = [0u64; 6];
-        
+
         for i in 0..6 {
             cstate_times[i] = self.cstate_time[i].load(Ordering::Relaxed);
             cstate_counts[i] = self.cstate_count[i].load(Ordering::Relaxed);
         }
-        
+
         PowerStats {
             current_frequency: self.get_current_frequency(),
             current_load: self.current_load.load(Ordering::Relaxed),
@@ -518,19 +551,20 @@ impl PowerManagerStats {
             total_energy_saved: AtomicU64::new(0),
         }
     }
-    
+
     pub fn record_idle_transition(&self) {
         self.total_idle_transitions.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     pub fn record_freq_change(&self) {
         self.total_freq_changes.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     pub fn record_energy_saved(&self, energy_mwh: u64) {
-        self.total_energy_saved.fetch_add(energy_mwh, Ordering::Relaxed);
+        self.total_energy_saved
+            .fetch_add(energy_mwh, Ordering::Relaxed);
     }
-    
+
     pub fn get_stats(&self) -> (u64, u64, u64) {
         (
             self.total_idle_transitions.load(Ordering::Relaxed),
@@ -544,13 +578,13 @@ impl PowerManager {
     /// Create new power manager
     pub fn new(max_cpus: u32) -> Self {
         let mut cpu_descs = Vec::with_capacity(max_cpus as usize);
-        
+
         // Initialize CPU power descriptors
         for cpu_id in 0..max_cpus {
             let desc = Box::new(CpuPowerDesc::new(cpu_id));
             cpu_descs.push(RcuPtr::new(Box::into_raw(desc)));
         }
-        
+
         Self {
             max_cpus,
             cpu_descs,
@@ -559,138 +593,152 @@ impl PowerManager {
             stats: PowerManagerStats::new(),
         }
     }
-    
+
     /// Get CPU power descriptor
     pub fn get_cpu_desc(&self, cpu_id: u32) -> Option<RcuPtr<CpuPowerDesc>> {
         if cpu_id >= self.max_cpus {
             return None;
         }
-        
+
         Some(self.cpu_descs[cpu_id as usize].clone())
     }
-    
+
     /// Enter idle state for CPU
     pub fn cpu_idle_enter(&self, cpu_id: u32, idle_time_us: u32) -> Result<CpuState, PowerError> {
         if !self.pm_enabled.load(Ordering::Acquire) {
             return Ok(CpuState::C0);
         }
-        
+
         let desc = match self.get_cpu_desc(cpu_id) {
             Some(desc) => desc,
             None => return Err(PowerError::InvalidCpuId),
         };
-        
+
         let state = desc.read().enter_idle(idle_time_us);
         self.stats.record_idle_transition();
-        
+
         Ok(state)
     }
-    
+
     /// Exit idle state for CPU
     pub fn cpu_idle_exit(&self, cpu_id: u32, duration_ticks: u64) -> Result<(), PowerError> {
         let desc = match self.get_cpu_desc(cpu_id) {
             Some(desc) => desc,
             None => return Err(PowerError::InvalidCpuId),
         };
-        
+
         desc.read().exit_idle(duration_ticks);
         Ok(())
     }
-    
+
     /// Update CPU load
     pub fn update_cpu_load(&self, cpu_id: u32, load: u32) -> Result<(), PowerError> {
         let desc = match self.get_cpu_desc(cpu_id) {
             Some(desc) => desc,
             None => return Err(PowerError::InvalidCpuId),
         };
-        
+
         desc.read().update_load(load);
         Ok(())
     }
-    
+
     /// Set CPU frequency governor
     pub fn set_cpu_governor(&self, cpu_id: u32, governor: FreqGovernor) -> Result<(), PowerError> {
         let desc = match self.get_cpu_desc(cpu_id) {
             Some(desc) => desc,
             None => return Err(PowerError::InvalidCpuId),
         };
-        
+
         desc.read().set_governor(governor);
         Ok(())
     }
-    
+
     /// Set global frequency governor
     pub fn set_global_governor(&self, governor: FreqGovernor) {
         self.global_policy.store(governor as u32, Ordering::Release);
         smp_wmb();
-        
+
         // Apply to all CPUs
         for cpu_id in 0..self.max_cpus {
             if let Some(desc) = self.get_cpu_desc(cpu_id) {
                 let _ = self.set_cpu_governor(cpu_id, governor);
             }
         }
-        
+
         crate::serial_println!("Power: Global governor changed to {:?}", governor);
     }
-    
+
     /// Enable/disable power management
     pub fn set_pm_enabled(&self, enabled: bool) {
         self.pm_enabled.store(enabled, Ordering::Release);
         smp_wmb();
-        
+
         // Apply to all CPUs
         for cpu_id in 0..self.max_cpus {
             if let Some(desc) = self.get_cpu_desc(cpu_id) {
                 desc.read().set_pm_enabled(enabled);
             }
         }
-        
-        crate::serial_println!("Power: Power management {}", if enabled { "enabled" } else { "disabled" });
+
+        crate::serial_println!(
+            "Power: Power management {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
-    
+
     /// Get power statistics for CPU
     pub fn get_cpu_stats(&self, cpu_id: u32) -> Result<PowerStats, PowerError> {
         let desc = match self.get_cpu_desc(cpu_id) {
             Some(desc) => desc,
             None => return Err(PowerError::InvalidCpuId),
         };
-        
+
         Ok(desc.read().get_power_stats())
     }
-    
+
     /// Get global power statistics
     pub fn get_global_stats(&self) -> (u64, u64, u64) {
         self.stats.get_stats()
     }
-    
-    /// Suspend system (simplified)
+
+    /// Suspend system — tüm cihazları hazırla, cache flush, ACPI S3'e gir
     pub fn system_suspend(&self) -> Result<(), PowerError> {
         crate::serial_println!("Power: Preparing system suspend...");
-        
-        // Save state of all CPUs
+
+        // 1. Flush CPU caches (WBINVD)
+        #[cfg(not(feature = "simics"))]
+        unsafe {
+            core::arch::asm!("wbinvd", options(nostack, preserves_flags));
+        }
+
+        // 2. Tüm CPU'ları derin uykuya al
         for cpu_id in 0..self.max_cpus {
             if let Some(desc) = self.get_cpu_desc(cpu_id) {
                 let desc_guard = desc.read();
                 desc_guard.set_pm_enabled(false);
-                desc_guard.set_current_cstate(CpuState::C7); // Deepest sleep
+                desc_guard.set_current_cstate(CpuState::C7);
             }
         }
-        
-        // In real implementation, this would:
-        // 1. Save all device states
-        // 2. Flush caches
-        // 3. Enter platform-specific suspend state
-        
+
+        // 3. Gerçek ACPI S3 durumuna gir (drivers::power üzerinden)
+        let _ =
+            crate::drivers::power::PM_MANAGER.enter_sleep(crate::drivers::power::SleepState::S3);
+
         crate::serial_println!("Power: System suspended");
         Ok(())
     }
-    
-    /// Resume system (simplified)
+
+    /// Resume system — cihaz durumlarını geri yükle, CPU'ları aktifleştir
     pub fn system_resume(&self) -> Result<(), PowerError> {
         crate::serial_println!("Power: Resuming system...");
-        
-        // Restore all CPUs
+
+        // 1. BSP cache'lerini invalidate et
+        #[cfg(not(feature = "simics"))]
+        unsafe {
+            core::arch::asm!("wbinvd", options(nostack, preserves_flags));
+        }
+
+        // 2. Tüm CPU'ları aktif duruma getir
         for cpu_id in 0..self.max_cpus {
             if let Some(desc) = self.get_cpu_desc(cpu_id) {
                 let desc_guard = desc.read();
@@ -699,12 +747,21 @@ impl PowerManager {
                 desc_guard.set_frequency(desc_guard.max_freq_idx);
             }
         }
-        
-        // In real implementation, this would:
-        // 1. Restore device states
-        // 2. Reinitialize caches
-        // 3. Wake up other CPUs
-        
+
+        // 3. AP'leri uyandır (INIT-SIPI via LAPIC ICR)
+        #[cfg(not(feature = "simics"))]
+        {
+            // ICR low register (offset 0x300): INIT IPI, all excluding self
+            crate::apic::lapic::write_reg(0x300, 0x000C4500);
+            // Kısa bekleme
+            for _ in 0..10000 {
+                core::hint::spin_loop();
+            }
+            // SIPI — all excluding self, vector 0
+            crate::apic::lapic::write_reg(0x300, 0x000C4600);
+            crate::serial_println!("Power: AP wake-up INIT-SIPI sent");
+        }
+
         crate::serial_println!("Power: System resumed");
         Ok(())
     }
@@ -734,18 +791,18 @@ pub fn init(max_cpus: u32) {
     if POWER_INIT.load(Ordering::Acquire) {
         return;
     }
-    
+
     crate::serial_println!("Power: Initializing power management for {} CPUs", max_cpus);
-    
+
     let manager = PowerManager::new(max_cpus);
-    
+
     unsafe {
         POWER_MANAGER = Some(manager);
     }
-    
+
     POWER_INIT.store(true, Ordering::Release);
     smp_mb();
-    
+
     crate::serial_println!("Power: Power management initialized");
 }
 
@@ -754,7 +811,7 @@ pub fn get_manager() -> Option<&'static PowerManager> {
     if !POWER_INIT.load(Ordering::Acquire) {
         return None;
     }
-    
+
     unsafe { POWER_MANAGER.as_ref() }
 }
 
@@ -798,31 +855,31 @@ pub fn system_resume() -> Result<(), PowerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_cpu_power_desc() {
         let desc = CpuPowerDesc::new(0);
         assert_eq!(desc.get_current_cstate(), CpuState::C0);
         assert!(desc.pm_enabled.load(Ordering::Acquire));
-        
+
         desc.set_governor(FreqGovernor::Performance);
         assert_eq!(desc.get_governor(), FreqGovernor::Performance);
     }
-    
+
     #[test]
     fn test_idle_states() {
         let c1 = CpuIdleState::new(CpuState::C1, 1, 100, 2);
         let c2 = CpuIdleState::new(CpuState::C2, 10, 50, 10);
-        
+
         assert!(c2.is_better_than(&c1, 15)); // 15us > C2 target residency
-        assert!(!c2.is_better_than(&c1, 5));  // 5us < C2 target residency
+        assert!(!c2.is_better_than(&c1, 5)); // 5us < C2 target residency
     }
-    
+
     #[test]
     fn test_power_manager() {
         let manager = PowerManager::new(4);
         assert!(manager.pm_enabled.load(Ordering::Acquire));
-        
+
         assert!(manager.cpu_idle_enter(0, 10).is_ok());
         assert!(manager.cpu_idle_exit(0, 100).is_ok());
     }
@@ -1059,8 +1116,8 @@ impl CoolingDeviceInfo {
 // GLOBAL POWER STATE
 // ============================================================================
 
-use spin::Mutex;
 use alloc::collections::BTreeMap;
+use spin::Mutex;
 
 lazy_static::lazy_static! {
     static ref BATTERIES: Mutex<BTreeMap<u32, BatteryInfo>> = Mutex::new(BTreeMap::new());
@@ -1170,16 +1227,29 @@ pub fn get_all_cooling_devices() -> Vec<CoolingDeviceInfo> {
     COOLING_DEVICES.lock().values().cloned().collect()
 }
 
-/// Enter sleep state
+/// Enter sleep state — ACPI PM1a_CNT üzerinden uyku durumuna geç
 pub fn enter_sleep(state: SleepState) -> Result<(), PowerError> {
     crate::serial_println!("[PWR] Entering sleep state S{}", state.to_acpi());
-    // In real implementation, this would call ACPI methods
-    Ok(())
+
+    // SleepState dönüştürme: src/power.rs -> drivers/power.rs
+    let driver_state = match state {
+        SleepState::S1 => crate::drivers::power::SleepState::S1,
+        SleepState::S2 => crate::drivers::power::SleepState::S1, // S2≈S1
+        SleepState::S3 => crate::drivers::power::SleepState::S3,
+        SleepState::S4 => crate::drivers::power::SleepState::S4,
+    };
+
+    crate::drivers::power::PM_MANAGER
+        .enter_sleep(driver_state)
+        .map_err(|_| PowerError::InvalidStateTransition)
 }
 
-/// Shutdown system
+/// Shutdown system — ACPI S5 + QEMU fallback
 pub fn system_shutdown() -> Result<(), PowerError> {
     crate::serial_println!("[PWR] System shutdown requested");
-    // In real implementation, this would call ACPI methods
-    Ok(())
+
+    // drivers/power PM_MANAGER üzerinden S5 (power off) gerçekleştir
+    crate::drivers::power::PM_MANAGER
+        .power_off()
+        .map_err(|_| PowerError::InvalidStateTransition)
 }

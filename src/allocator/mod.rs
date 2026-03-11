@@ -35,14 +35,15 @@
 //! + 100 MiB         --> Heap sonu (HEAP_START + HEAP_SIZE)
 //! ```
 
-pub mod tlsf;
+pub mod slab;
 pub mod stack;
+pub mod tlsf;
 use tlsf::LockedTlsf;
 
 use crate::memory::paging;
 use core::alloc::Layout;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use x86_64::{
     structures::paging::{
         mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
@@ -62,13 +63,75 @@ pub const HEAP_START: usize = 0x_4444_4444_0000;
 /// 100 MiB çoğu kernel operasyonu için yeterlidir. İleride dinamik
 /// büyüme (heap expansion) mekanizmasıyla genişletilebilir.
 pub const HEAP_SIZE: usize = 100 * 1024 * 1024;
+pub const HEAP_PAGE_SIZE: usize = 4096;
+const HEAP_PAGE_MASK: usize = !(HEAP_PAGE_SIZE - 1);
+const HEAP_PAGE_COUNT: usize = HEAP_SIZE / HEAP_PAGE_SIZE;
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PageOwner {
+    Unassigned = 0x00,
+    Slab = 0x01,
+    Tlsf = 0x02,
+    Large = 0x03,
+}
+
+#[repr(C, align(64))]
+struct HeapPageInfo {
+    owner: AtomicU8,
+    class: AtomicU8,
+}
+
+impl HeapPageInfo {
+    const fn new() -> Self {
+        Self {
+            owner: AtomicU8::new(PageOwner::Unassigned as u8),
+            class: AtomicU8::new(0xFF),
+        }
+    }
+}
+
+static HEAP_PAGE_INFO: [HeapPageInfo; HEAP_PAGE_COUNT] =
+    [const { HeapPageInfo::new() }; HEAP_PAGE_COUNT];
+
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+pub struct HostAllocator;
+
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+impl HostAllocator {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub unsafe fn insert_free_region_ptr(&self, _ptr: *mut u8, _size: usize) {}
+
+    pub unsafe fn alloc_from_main_heap(&self, layout: Layout) -> *mut u8 {
+        std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout)
+    }
+}
 
 /// Global TLSF allocator
 ///
 /// `#[global_allocator]` niteliği sayesinde Rust'ın `alloc` crate'i
 /// (Box, Vec, String vb.) bu allocator'ı otomatik olarak kullanır.
+#[cfg(any(target_os = "none", target_os = "uefi"))]
 #[global_allocator]
 pub static ALLOCATOR: LockedTlsf = LockedTlsf::new();
+
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+#[global_allocator]
+pub static ALLOCATOR: HostAllocator = HostAllocator::new();
+
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+unsafe impl core::alloc::GlobalAlloc for HostAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout)
+    }
+}
 
 /// Heap bütünlüğünü kontrol eder (genel sarmalayıcı).
 ///
@@ -92,6 +155,71 @@ pub fn get_alloc_stats() -> tlsf::AllocStats {
 /// CPU'lar aynı anda init_heap() çağırabilir; bu bayraksız ikinci başlatma
 /// sayfa tablosunu bozabilir.
 static HEAP_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn heap_page_index(ptr: usize) -> Option<usize> {
+    if ptr < HEAP_START || ptr >= HEAP_START.saturating_add(HEAP_SIZE) {
+        return None;
+    }
+    Some((ptr - HEAP_START) / HEAP_PAGE_SIZE)
+}
+
+#[inline]
+pub(crate) fn page_owner_for_ptr(ptr: usize) -> PageOwner {
+    heap_page_index(ptr)
+        .map(
+            |index| match HEAP_PAGE_INFO[index].owner.load(Ordering::Acquire) {
+                x if x == PageOwner::Slab as u8 => PageOwner::Slab,
+                x if x == PageOwner::Large as u8 => PageOwner::Large,
+                x if x == PageOwner::Tlsf as u8 => PageOwner::Tlsf,
+                _ => PageOwner::Unassigned,
+            },
+        )
+        .unwrap_or(PageOwner::Unassigned)
+}
+
+#[inline]
+pub(crate) fn slab_class_for_ptr(ptr: usize) -> Option<usize> {
+    let index = heap_page_index(ptr)?;
+    let class = HEAP_PAGE_INFO[index].class.load(Ordering::Acquire);
+    if class == 0xFF {
+        None
+    } else {
+        Some(class as usize)
+    }
+}
+
+pub(crate) fn tag_heap_range(ptr: *mut u8, size: usize, owner: PageOwner, class: Option<usize>) {
+    if ptr.is_null() || size == 0 {
+        return;
+    }
+    let start = ptr as usize;
+    let end = start.saturating_add(size.saturating_sub(1));
+    let start_index = match heap_page_index(start) {
+        Some(index) => index,
+        None => return,
+    };
+    let end_index = match heap_page_index(end) {
+        Some(index) => index,
+        None => return,
+    };
+    let class_byte = class.map(|value| value as u8).unwrap_or(0xFF);
+    for index in start_index..=end_index {
+        HEAP_PAGE_INFO[index]
+            .owner
+            .store(owner as u8, Ordering::Release);
+        HEAP_PAGE_INFO[index]
+            .class
+            .store(class_byte, Ordering::Release);
+    }
+}
+
+pub(crate) fn init_heap_page_ownership() {
+    for entry in HEAP_PAGE_INFO.iter() {
+        entry.owner.store(PageOwner::Tlsf as u8, Ordering::Release);
+        entry.class.store(0xFF, Ordering::Release);
+    }
+}
 
 /// Heap bellek alanını başlatır.
 ///
@@ -178,6 +306,9 @@ pub fn init_heap(
     unsafe {
         ALLOCATOR.insert_free_region_ptr(HEAP_START as *mut u8, HEAP_SIZE);
     }
+
+    init_heap_page_ownership();
+    slab::activate();
 
     // Başlatıldı olarak işaretle (Release: önceki tüm yazma işlemleri görünür olur)
     HEAP_INITIALIZED.store(true, Ordering::Release);

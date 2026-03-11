@@ -29,8 +29,8 @@
 //! katmanıdır. Gerçek entegrasyon için smoltcp'nin `Device` trait'inin
 //! VirtIO-Net üzerinde implemente edilmesi gerekir.
 
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 /// Ağ arabiriminin çalışma zamanı durumunu tutan yapı.
@@ -110,9 +110,9 @@ pub fn dhcp_configure() -> bool {
     // TODO: smoltcp DHCP client kullan
     // Şimdilik QEMU user-mode network için varsayılan IP
     let mut iface = NET_INTERFACE.lock();
-    iface.ip = Some([10, 0, 2, 15]);      // QEMU default guest IP
-    iface.gateway = Some([10, 0, 2, 2]);  // QEMU default gateway
-    iface.dns = Some([10, 0, 2, 3]);      // QEMU default DNS
+    iface.ip = Some([10, 0, 2, 15]); // QEMU default guest IP
+    iface.gateway = Some([10, 0, 2, 2]); // QEMU default gateway
+    iface.dns = Some([10, 0, 2, 3]); // QEMU default DNS
 
     crate::serial_println!("[smoltcp] DHCP configured: IP={:?}", iface.ip);
     true

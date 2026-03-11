@@ -67,10 +67,10 @@ pub enum Argon2Version {
 pub struct Argon2Config {
     pub variant: Argon2Variant,
     pub version: Argon2Version,
-    pub time_cost: u32,      // İterasyon sayısı — daha yüksek = daha yavaş hesaplama
-    pub memory_cost: u32,    // Bellek kullanımı KiB cinsinden
-    pub parallelism: u32,    // Paralel şerit (lane) sayısı
-    pub hash_len: usize,     // Çıktı hash uzunluğu (bayt)
+    pub time_cost: u32,   // İterasyon sayısı — daha yüksek = daha yavaş hesaplama
+    pub memory_cost: u32, // Bellek kullanımı KiB cinsinden
+    pub parallelism: u32, // Paralel şerit (lane) sayısı
+    pub hash_len: usize,  // Çıktı hash uzunluğu (bayt)
 }
 
 impl Default for Argon2Config {
@@ -79,7 +79,7 @@ impl Default for Argon2Config {
             variant: Argon2Variant::Argon2id,
             version: Argon2Version::V13,
             time_cost: 3,
-            memory_cost: 65536,  // 64 MB bellek kullanımı
+            memory_cost: 65536, // 64 MB bellek kullanımı
             parallelism: 4,
             hash_len: 32,
         }
@@ -89,7 +89,7 @@ impl Default for Argon2Config {
 /// Argon2 bağlamı — bellek ve yapılandırma durumunu tutar
 pub struct Argon2 {
     config: Argon2Config,
-    memory: Vec<[u64; 128]>,  // Blok başına 1024 bayt (128 × 64-bit kelime)
+    memory: Vec<[u64; 128]>, // Blok başına 1024 bayt (128 × 64-bit kelime)
     segment_len: usize,
     lane_len: usize,
 }
@@ -221,7 +221,7 @@ impl Argon2 {
                         let j = lane * self.lane_len + segment_start + offset;
 
                         if j < 2 {
-                            continue;  // İlk iki bloğu atla (zaten oluşturuldu)
+                            continue; // İlk iki bloğu atla (zaten oluşturuldu)
                         }
 
                         // Her bloğu iki referans bloğun G() fonksiyonuyla hesapla
@@ -260,7 +260,14 @@ impl Argon2 {
         }
     }
 
-    fn compute_block(&mut self, block_idx: usize, pass: usize, slice: usize, lane: usize, offset: usize) {
+    fn compute_block(
+        &mut self,
+        block_idx: usize,
+        pass: usize,
+        slice: usize,
+        lane: usize,
+        offset: usize,
+    ) {
         // Basitleştirilmiş blok hesaplama.
         // Gerçek implementasyon doğru adresleme ve G fonksiyonu (Blake2b tabanlı) gerektirir.
 
@@ -276,7 +283,15 @@ impl Argon2 {
         }
     }
 
-    fn get_ref_block(&self, block_idx: usize, pass: usize, slice: usize, lane: usize, offset: usize, _ref_num: usize) -> usize {
+    fn get_ref_block(
+        &self,
+        block_idx: usize,
+        pass: usize,
+        slice: usize,
+        lane: usize,
+        offset: usize,
+        _ref_num: usize,
+    ) -> usize {
         // Basitleştirilmiş adresleme — gerçek implementasyon sözde-rastgele adresleme gerektirir
         let lane_len = self.lane_len;
         let segment_start = slice * self.segment_len;

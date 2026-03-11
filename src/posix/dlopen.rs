@@ -7,9 +7,9 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use alloc::vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicPtr, Ordering};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
@@ -27,77 +27,77 @@ pub const ELFCLASS64: u8 = 2;
 pub const ELFDATA2LSB: u8 = 1;
 
 /// Bölüm türleri (Section Types) - ELF dosyasındaki farklı bölüm tiplerini belirtir
-pub const SHT_NULL: u32 = 0;       // Boş / geçersiz bölüm
-pub const SHT_PROGBITS: u32 = 1;   // Program verisi (.text, .data)
-pub const SHT_SYMTAB: u32 = 2;     // Sembol tablosu
-pub const SHT_STRTAB: u32 = 3;     // String tablosu
-pub const SHT_RELA: u32 = 4;       // Eklemeli yer değiştirme tablosu
-pub const SHT_HASH: u32 = 5;       // Sembol hash tablosu
-pub const SHT_DYNAMIC: u32 = 6;    // Dinamik bağlama bilgisi
-pub const SHT_NOTE: u32 = 7;       // Not bölümü
-pub const SHT_NOBITS: u32 = 8;     // Dosyada yer kaplamayan bölüm (.bss)
-pub const SHT_REL: u32 = 9;        // Eklemesiz yer değiştirme tablosu
-pub const SHT_DYNSYM: u32 = 11;    // Dinamik sembol tablosu
+pub const SHT_NULL: u32 = 0; // Boş / geçersiz bölüm
+pub const SHT_PROGBITS: u32 = 1; // Program verisi (.text, .data)
+pub const SHT_SYMTAB: u32 = 2; // Sembol tablosu
+pub const SHT_STRTAB: u32 = 3; // String tablosu
+pub const SHT_RELA: u32 = 4; // Eklemeli yer değiştirme tablosu
+pub const SHT_HASH: u32 = 5; // Sembol hash tablosu
+pub const SHT_DYNAMIC: u32 = 6; // Dinamik bağlama bilgisi
+pub const SHT_NOTE: u32 = 7; // Not bölümü
+pub const SHT_NOBITS: u32 = 8; // Dosyada yer kaplamayan bölüm (.bss)
+pub const SHT_REL: u32 = 9; // Eklemesiz yer değiştirme tablosu
+pub const SHT_DYNSYM: u32 = 11; // Dinamik sembol tablosu
 
 /// Program başlık türleri (Program Header Types) - segment bilgisi sunar
-pub const PT_NULL: u32 = 0;           // Kullanılmayan girdiler
-pub const PT_LOAD: u32 = 1;           // Belleğe yüklenecek segment
-pub const PT_DYNAMIC: u32 = 2;        // Dinamik bağlama bilgisi segmenti
-pub const PT_INTERP: u32 = 3;         // Program yorumlayıcısı (linker) yolu
-pub const PT_NOTE: u32 = 4;           // Not bilgisi
-pub const PT_PHDR: u32 = 6;           // Program başlık tablosunun kendisi
+pub const PT_NULL: u32 = 0; // Kullanılmayan girdiler
+pub const PT_LOAD: u32 = 1; // Belleğe yüklenecek segment
+pub const PT_DYNAMIC: u32 = 2; // Dinamik bağlama bilgisi segmenti
+pub const PT_INTERP: u32 = 3; // Program yorumlayıcısı (linker) yolu
+pub const PT_NOTE: u32 = 4; // Not bilgisi
+pub const PT_PHDR: u32 = 6; // Program başlık tablosunun kendisi
 pub const PT_GNU_EH_FRAME: u32 = 0x6474e550; // Exception handling çerçeve bilgisi
-pub const PT_GNU_STACK: u32 = 0x6474e551;    // Yığıt yürütme izni
-pub const PT_GNU_RELRO: u32 = 0x6474e552;    // Yeniden konumlandırmadan sonra salt okunur bölgeler
+pub const PT_GNU_STACK: u32 = 0x6474e551; // Yığıt yürütme izni
+pub const PT_GNU_RELRO: u32 = 0x6474e552; // Yeniden konumlandırmadan sonra salt okunur bölgeler
 
 /// Dinamik etiketler (Dynamic Tags) - .dynamic bölümündeki anahtar-değer çiftleri
-pub const DT_NULL: i64 = 0;        // Listenin sonu
-pub const DT_NEEDED: i64 = 1;      // Gereken paylaşımlı kütüphane adı
-pub const DT_PLTRELSZ: i64 = 2;    // PLT yer değiştirme boyutu
-pub const DT_PLTGOT: i64 = 3;      // PLT/GOT adresi
-pub const DT_HASH: i64 = 4;        // Sembol hash tablosu adresi
-pub const DT_STRTAB: i64 = 5;      // String tablosu adresi
-pub const DT_SYMTAB: i64 = 6;      // Sembol tablosu adresi
-pub const DT_RELA: i64 = 7;        // RELA yer değiştirme tablosu
-pub const DT_RELASZ: i64 = 8;      // RELA tablosunun bayt boyutu
-pub const DT_RELAENT: i64 = 9;     // RELA girdisinin bayt boyutu
-pub const DT_STRSZ: i64 = 10;      // String tablosunun boyutu
-pub const DT_SYMENT: i64 = 11;     // Sembol tablo girdisi boyutu
-pub const DT_INIT: i64 = 12;       // Başlatma fonksiyonu adresi
-pub const DT_FINI: i64 = 13;       // Sonlandırma fonksiyonu adresi
-pub const DT_SONAME: i64 = 14;     // Paylaşımlı nesne adı
-pub const DT_RPATH: i64 = 15;      // Kütüphane arama yolu (eski)
-pub const DT_RUNPATH: i64 = 29;    // Kütüphane arama yolu (yeni)
-pub const DT_FLAGS: i64 = 30;      // Bayraklar
-pub const DT_GNU_HASH: i64 = 0x6ffffef5;   // GNU-tarzı hash tablosu
-pub const DT_VERSYM: i64 = 0x6ffffff0;     // Sürüm sembolü bölümü
-pub const DT_RELACOUNT: i64 = 0x6ffffff9;  // RELA sayısı
-pub const DT_FLAGS_1: i64 = 0x6ffffffb;    // Genişletilmiş bayraklar
+pub const DT_NULL: i64 = 0; // Listenin sonu
+pub const DT_NEEDED: i64 = 1; // Gereken paylaşımlı kütüphane adı
+pub const DT_PLTRELSZ: i64 = 2; // PLT yer değiştirme boyutu
+pub const DT_PLTGOT: i64 = 3; // PLT/GOT adresi
+pub const DT_HASH: i64 = 4; // Sembol hash tablosu adresi
+pub const DT_STRTAB: i64 = 5; // String tablosu adresi
+pub const DT_SYMTAB: i64 = 6; // Sembol tablosu adresi
+pub const DT_RELA: i64 = 7; // RELA yer değiştirme tablosu
+pub const DT_RELASZ: i64 = 8; // RELA tablosunun bayt boyutu
+pub const DT_RELAENT: i64 = 9; // RELA girdisinin bayt boyutu
+pub const DT_STRSZ: i64 = 10; // String tablosunun boyutu
+pub const DT_SYMENT: i64 = 11; // Sembol tablo girdisi boyutu
+pub const DT_INIT: i64 = 12; // Başlatma fonksiyonu adresi
+pub const DT_FINI: i64 = 13; // Sonlandırma fonksiyonu adresi
+pub const DT_SONAME: i64 = 14; // Paylaşımlı nesne adı
+pub const DT_RPATH: i64 = 15; // Kütüphane arama yolu (eski)
+pub const DT_RUNPATH: i64 = 29; // Kütüphane arama yolu (yeni)
+pub const DT_FLAGS: i64 = 30; // Bayraklar
+pub const DT_GNU_HASH: i64 = 0x6ffffef5; // GNU-tarzı hash tablosu
+pub const DT_VERSYM: i64 = 0x6ffffff0; // Sürüm sembolü bölümü
+pub const DT_RELACOUNT: i64 = 0x6ffffff9; // RELA sayısı
+pub const DT_FLAGS_1: i64 = 0x6ffffffb; // Genişletilmiş bayraklar
 
 /// Yer değiştirme türleri (x86_64) - dinamik bağlama sırasında uygulanır
-pub const R_X86_64_NONE: u32 = 0;       // İşlem yapma
-pub const R_X86_64_64: u32 = 1;         // 64-bit mutlak adres
-pub const R_X86_64_PC32: u32 = 2;       // 32-bit PC-göreli adres
-pub const R_X86_64_GOT32: u32 = 3;      // GOT girdisine 32-bit uzaklık
-pub const R_X86_64_PLT32: u32 = 4;      // PLT girdisine 32-bit uzaklık
-pub const R_X86_64_COPY: u32 = 5;       // Sembol kopyalama
-pub const R_X86_64_GLOB_DAT: u32 = 6;   // GOT girdi oluşturma
-pub const R_X86_64_JUMP_SLOT: u32 = 7;  // PLT atlama yuvası
-pub const R_X86_64_RELATIVE: u32 = 8;   // Göreceli yük adresi
-pub const R_X86_64_GOTPCREL: u32 = 9;   // GOT'a PC-göreli 32-bit uzaklık
-pub const R_X86_64_32: u32 = 10;        // 32-bit mutlak adres (sıfır genişletme)
+pub const R_X86_64_NONE: u32 = 0; // İşlem yapma
+pub const R_X86_64_64: u32 = 1; // 64-bit mutlak adres
+pub const R_X86_64_PC32: u32 = 2; // 32-bit PC-göreli adres
+pub const R_X86_64_GOT32: u32 = 3; // GOT girdisine 32-bit uzaklık
+pub const R_X86_64_PLT32: u32 = 4; // PLT girdisine 32-bit uzaklık
+pub const R_X86_64_COPY: u32 = 5; // Sembol kopyalama
+pub const R_X86_64_GLOB_DAT: u32 = 6; // GOT girdi oluşturma
+pub const R_X86_64_JUMP_SLOT: u32 = 7; // PLT atlama yuvası
+pub const R_X86_64_RELATIVE: u32 = 8; // Göreceli yük adresi
+pub const R_X86_64_GOTPCREL: u32 = 9; // GOT'a PC-göreli 32-bit uzaklık
+pub const R_X86_64_32: u32 = 10; // 32-bit mutlak adres (sıfır genişletme)
 pub const R_X86_64_IRELATIVE: u32 = 37; // STT_GNU_IFUNC sembolü
 
 /// Sembol bağlama türleri (Symbol Binding)
-pub const STB_LOCAL: u8 = 0;   // Yerel sembol (sadece bu nesne dosyasında görünür)
-pub const STB_GLOBAL: u8 = 1;  // Global sembol (tüm nesne dosyalarında görünür)
-pub const STB_WEAK: u8 = 2;    // Zayıf sembol (override edilebilir)
+pub const STB_LOCAL: u8 = 0; // Yerel sembol (sadece bu nesne dosyasında görünür)
+pub const STB_GLOBAL: u8 = 1; // Global sembol (tüm nesne dosyalarında görünür)
+pub const STB_WEAK: u8 = 2; // Zayıf sembol (override edilebilir)
 
 /// Sembol türleri (Symbol Types)
-pub const STT_NOTYPE: u8 = 0;   // Tür belirtilmemiş
-pub const STT_OBJECT: u8 = 1;   // Veri nesnesi (değişken, dizi)
-pub const STT_FUNC: u8 = 2;     // Fonksiyon veya yürütülebilir kod
-pub const STT_SECTION: u8 = 3;  // Bölüme ilişkin sembol
+pub const STT_NOTYPE: u8 = 0; // Tür belirtilmemiş
+pub const STT_OBJECT: u8 = 1; // Veri nesnesi (değişken, dizi)
+pub const STT_FUNC: u8 = 2; // Fonksiyon veya yürütülebilir kod
+pub const STT_SECTION: u8 = 3; // Bölüme ilişkin sembol
 
 // ============================================================================
 // ELF BAŞLIKLARI (ELF HEADERS)
@@ -108,79 +108,79 @@ pub const STT_SECTION: u8 = 3;  // Bölüme ilişkin sembol
 /// program/bölüm tablolarının konumları hakkında bilgi verir.
 #[repr(C)]
 pub struct Elf64Ehdr {
-    pub e_ident: [u8; 16],    // Kimlik baytları (magic, sınıf, kodlama, vs.)
-    pub e_type: u16,           // Nesne dosya türü (ET_DYN = paylaşımlı kütüphane)
-    pub e_machine: u16,        // Hedef mimari (EM_X86_64 = 0x3E)
-    pub e_version: u32,        // ELF sürümü (her zaman 1)
-    pub e_entry: u64,          // Giriş noktası sanal adresi
-    pub e_phoff: u64,          // Program başlık tablosunun dosya uzaklığı
-    pub e_shoff: u64,          // Bölüm başlık tablosunun dosya uzaklığı
-    pub e_flags: u32,          // Mimariye özgü bayraklar
-    pub e_ehsize: u16,         // Bu başlığın boyutu (64 bayt)
-    pub e_phentsize: u16,      // Program başlık tablosu girdisi boyutu
-    pub e_phnum: u16,          // Program başlığı sayısı
-    pub e_shentsize: u16,      // Bölüm başlık tablosu girdisi boyutu
-    pub e_shnum: u16,          // Bölüm başlığı sayısı
-    pub e_shstrndx: u16,       // Bölüm adı string tablosunun indeksi
+    pub e_ident: [u8; 16], // Kimlik baytları (magic, sınıf, kodlama, vs.)
+    pub e_type: u16,       // Nesne dosya türü (ET_DYN = paylaşımlı kütüphane)
+    pub e_machine: u16,    // Hedef mimari (EM_X86_64 = 0x3E)
+    pub e_version: u32,    // ELF sürümü (her zaman 1)
+    pub e_entry: u64,      // Giriş noktası sanal adresi
+    pub e_phoff: u64,      // Program başlık tablosunun dosya uzaklığı
+    pub e_shoff: u64,      // Bölüm başlık tablosunun dosya uzaklığı
+    pub e_flags: u32,      // Mimariye özgü bayraklar
+    pub e_ehsize: u16,     // Bu başlığın boyutu (64 bayt)
+    pub e_phentsize: u16,  // Program başlık tablosu girdisi boyutu
+    pub e_phnum: u16,      // Program başlığı sayısı
+    pub e_shentsize: u16,  // Bölüm başlık tablosu girdisi boyutu
+    pub e_shnum: u16,      // Bölüm başlığı sayısı
+    pub e_shstrndx: u16,   // Bölüm adı string tablosunun indeksi
 }
 
 /// ELF64 Program Başlığı (Program Header / Segment)
 /// Çalışma zamanı bellek düzenini tanımlar.
 #[repr(C)]
 pub struct Elf64Phdr {
-    pub p_type: u32,    // Segment türü (PT_LOAD, PT_DYNAMIC, vb.)
-    pub p_flags: u32,   // Segment bayrakları (okuma/yazma/yürütme izinleri)
-    pub p_offset: u64,  // Dosyadaki uzaklık
-    pub p_vaddr: u64,   // Sanal bellek adresi
-    pub p_paddr: u64,   // Fiziksel bellek adresi (genellikle kullanılmaz)
-    pub p_filesz: u64,  // Dosyadaki segment boyutu
-    pub p_memsz: u64,   // Bellekteki segment boyutu (> filesz ise kalan sıfırlanır)
-    pub p_align: u64,   // Hizalama gereksinimi
+    pub p_type: u32,   // Segment türü (PT_LOAD, PT_DYNAMIC, vb.)
+    pub p_flags: u32,  // Segment bayrakları (okuma/yazma/yürütme izinleri)
+    pub p_offset: u64, // Dosyadaki uzaklık
+    pub p_vaddr: u64,  // Sanal bellek adresi
+    pub p_paddr: u64,  // Fiziksel bellek adresi (genellikle kullanılmaz)
+    pub p_filesz: u64, // Dosyadaki segment boyutu
+    pub p_memsz: u64,  // Bellekteki segment boyutu (> filesz ise kalan sıfırlanır)
+    pub p_align: u64,  // Hizalama gereksinimi
 }
 
 /// ELF64 Bölüm Başlığı (Section Header)
 /// .text, .data, .bss gibi bölümleri tanımlar.
 #[repr(C)]
 pub struct Elf64Shdr {
-    pub sh_name: u32,       // Bölüm adının string tablosundaki indeksi
-    pub sh_type: u32,       // Bölüm türü (SHT_PROGBITS, SHT_SYMTAB, vb.)
-    pub sh_flags: u64,      // Bölüm özellikleri (SHF_ALLOC, SHF_EXECINSTR, vb.)
-    pub sh_addr: u64,       // Bellekte yükleneceği adres
-    pub sh_offset: u64,     // Dosyadaki uzaklık
-    pub sh_size: u64,       // Bölümün bayt boyutu
-    pub sh_link: u32,       // Bölüme bağlı diğer bölümün indeksi
-    pub sh_info: u32,       // Ek bilgi
-    pub sh_addralign: u64,  // Hizalama kısıtlaması
-    pub sh_entsize: u64,    // Sabit boyutlu girdi içeriyorsa girdi boyutu
+    pub sh_name: u32,      // Bölüm adının string tablosundaki indeksi
+    pub sh_type: u32,      // Bölüm türü (SHT_PROGBITS, SHT_SYMTAB, vb.)
+    pub sh_flags: u64,     // Bölüm özellikleri (SHF_ALLOC, SHF_EXECINSTR, vb.)
+    pub sh_addr: u64,      // Bellekte yükleneceği adres
+    pub sh_offset: u64,    // Dosyadaki uzaklık
+    pub sh_size: u64,      // Bölümün bayt boyutu
+    pub sh_link: u32,      // Bölüme bağlı diğer bölümün indeksi
+    pub sh_info: u32,      // Ek bilgi
+    pub sh_addralign: u64, // Hizalama kısıtlaması
+    pub sh_entsize: u64,   // Sabit boyutlu girdi içeriyorsa girdi boyutu
 }
 
 /// ELF64 Sembol Tablosu Girdisi
 /// Her sembol (fonksiyon, değişken) için bir girdi bulunur.
 #[repr(C)]
 pub struct Elf64Sym {
-    pub st_name: u32,   // Sembol adının string tablosundaki uzaklığı
-    pub st_info: u8,    // Sembol türü ve bağlama bilgisi (STB_* | STT_*)
-    pub st_other: u8,   // Sembol görünürlüğü
-    pub st_shndx: u16,  // İlgili bölümün indeksi
-    pub st_value: u64,  // Sembolün değeri (adres veya uzaklık)
-    pub st_size: u64,   // Sembolün kapladığı alan
+    pub st_name: u32,  // Sembol adının string tablosundaki uzaklığı
+    pub st_info: u8,   // Sembol türü ve bağlama bilgisi (STB_* | STT_*)
+    pub st_other: u8,  // Sembol görünürlüğü
+    pub st_shndx: u16, // İlgili bölümün indeksi
+    pub st_value: u64, // Sembolün değeri (adres veya uzaklık)
+    pub st_size: u64,  // Sembolün kapladığı alan
 }
 
 /// ELF64 Yer Değiştirme Girdisi (Relocation with Addend)
 /// Dinamik bağlama sırasında adres düzeltmeleri için kullanılır.
 #[repr(C)]
 pub struct Elf64Rela {
-    pub r_offset: u64,  // Yer değiştirmenin uygulanacağı adres
-    pub r_info: u64,    // Sembol indeksi ve yer değiştirme türü
-    pub r_addend: i64,  // Sabit eklenti değeri
+    pub r_offset: u64, // Yer değiştirmenin uygulanacağı adres
+    pub r_info: u64,   // Sembol indeksi ve yer değiştirme türü
+    pub r_addend: i64, // Sabit eklenti değeri
 }
 
 /// ELF64 Dinamik Bölüm Girdisi
 /// .dynamic bölümündeki anahtar-değer çiftleri.
 #[repr(C)]
 pub struct Elf64Dyn {
-    pub d_tag: i64,  // Etiket (DT_NEEDED, DT_STRTAB, vb.)
-    pub d_val: u64,  // Değer veya adres
+    pub d_tag: i64, // Etiket (DT_NEEDED, DT_STRTAB, vb.)
+    pub d_val: u64, // Değer veya adres
 }
 
 // ============================================================================
@@ -267,13 +267,13 @@ pub struct DynamicLoader {
 /// Yükleyici istatistikleri - tanı ve hata ayıklama için
 #[derive(Clone, Debug, Default)]
 pub struct DlStats {
-    pub libraries_loaded: u32,     // Toplam yüklenen kütüphane sayısı
-    pub symbols_resolved: u64,     // Çözümlenen sembol sayısı
-    pub relocations_applied: u64,  // Uygulanan yer değiştirme sayısı
+    pub libraries_loaded: u32,    // Toplam yüklenen kütüphane sayısı
+    pub symbols_resolved: u64,    // Çözümlenen sembol sayısı
+    pub relocations_applied: u64, // Uygulanan yer değiştirme sayısı
 }
 
 impl DynamicLoader {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             libraries: Mutex::new(BTreeMap::new()),
             handles: Mutex::new(BTreeMap::new()),
@@ -320,10 +320,13 @@ impl DynamicLoader {
 
         // Global tabloya kaydet ve handle oluştur
         let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
-        self.libraries.lock().insert(String::from(filename), lib.clone());
+        self.libraries
+            .lock()
+            .insert(String::from(filename), lib.clone());
         self.handles.lock().insert(handle, lib.clone());
 
-        if flags & 0x00100 != 0 { // RTLD_GLOBAL
+        if flags & 0x00100 != 0 {
+            // RTLD_GLOBAL
             lib.is_global.store(1, Ordering::SeqCst);
         }
 
@@ -406,7 +409,12 @@ impl DynamicLoader {
         Ok(unsafe { &*(data.as_ptr().add(offset) as *const Elf64Phdr) })
     }
 
-    fn parse_dynamic(&self, lib: &LoadedLibrary, data: &[u8], ehdr: &Elf64Ehdr) -> Result<(), DlError> {
+    fn parse_dynamic(
+        &self,
+        lib: &LoadedLibrary,
+        data: &[u8],
+        ehdr: &Elf64Ehdr,
+    ) -> Result<(), DlError> {
         for i in 0..ehdr.e_phnum as usize {
             let phdr = self.get_phdr(data, i)?;
 
@@ -417,9 +425,7 @@ impl DynamicLoader {
 
                 let mut offset = dyn_offset;
                 while offset + core::mem::size_of::<Elf64Dyn>() <= dyn_offset + dyn_size {
-                    let dyn_entry = unsafe {
-                        &*(data.as_ptr().add(offset) as *const Elf64Dyn)
-                    };
+                    let dyn_entry = unsafe { &*(data.as_ptr().add(offset) as *const Elf64Dyn) };
 
                     match dyn_entry.d_tag {
                         DT_NEEDED => {
@@ -521,12 +527,12 @@ lazy_static::lazy_static! {
 /// Dinamik yükleme hataları
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DlError {
-    InvalidElf,          // Geçersiz ELF formatı
-    InvalidHandle,       // Geçersiz kütüphane handle'ı
-    SymbolNotFound,      // Sembol bulunamadı
-    FileNotFound,        // Dosya bulunamadı
-    RelocationFailed,    // Yer değiştirme başarısız
-    DependencyNotFound,  // Bağımlı kütüphane bulunamadı
+    InvalidElf,         // Geçersiz ELF formatı
+    InvalidHandle,      // Geçersiz kütüphane handle'ı
+    SymbolNotFound,     // Sembol bulunamadı
+    FileNotFound,       // Dosya bulunamadı
+    RelocationFailed,   // Yer değiştirme başarısız
+    DependencyNotFound, // Bağımlı kütüphane bulunamadı
 }
 
 // ============================================================================

@@ -26,8 +26,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -49,7 +49,7 @@ pub const XATTR_SECURITY_PREFIX: &str = "security.";
 pub const XATTR_SYSTEM_PREFIX: &str = "system.";
 
 /// setxattr bayrakları
-pub const XATTR_CREATE: i32 = 1;  // Yalnızca oluştur (zaten varsa hata)
+pub const XATTR_CREATE: i32 = 1; // Yalnızca oluştur (zaten varsa hata)
 pub const XATTR_REPLACE: i32 = 2; // Yalnızca değiştir (yoksa hata)
 
 // ============================================================================
@@ -180,9 +180,7 @@ impl XattrStorage {
 
     /// Tüm özniteliklerin toplam boyutunu döndürür (isim + değer)
     pub fn total_size(&self) -> usize {
-        self.attrs.iter()
-            .map(|(k, v)| k.len() + 1 + v.len())
-            .sum()
+        self.attrs.iter().map(|(k, v)| k.len() + 1 + v.len()).sum()
     }
 }
 
@@ -209,30 +207,40 @@ impl XattrManager {
     /// Inode için depolama alanını döndürür; yoksa yeni oluşturur
     fn get_or_create_storage(&self, inode: u64) -> XattrStorage {
         let mut storage = self.storage.lock();
-        storage.entry(inode).or_insert_with(|| XattrStorage::new(inode)).clone()
+        storage
+            .entry(inode)
+            .or_insert_with(|| XattrStorage::new(inode))
+            .clone()
     }
 
     /// Belirtilen inode'un özniteliğini döndürür
     pub fn get(&self, inode: u64, name: &str) -> Option<Vec<u8>> {
         let storage = self.storage.lock();
-        storage.get(&inode).and_then(|s| s.get(name).map(|v| v.to_vec()))
+        storage
+            .get(&inode)
+            .and_then(|s| s.get(name).map(|v| v.to_vec()))
     }
 
     /// Belirtilen inode'a öznitelik atar ve istatistikleri günceller
     pub fn set(&self, inode: u64, name: &str, value: &[u8], flags: i32) -> Result<(), XattrError> {
         let mut storage = self.storage.lock();
-        let entry = storage.entry(inode).or_insert_with(|| XattrStorage::new(inode));
+        let entry = storage
+            .entry(inode)
+            .or_insert_with(|| XattrStorage::new(inode));
 
         let old_size = entry.get(name).map(|v| v.len()).unwrap_or(0);
         entry.set(name, value, flags)?;
 
         // İstatistikleri güncelle
         self.total_xattrs.fetch_add(1, Ordering::Relaxed);
-        self.total_size.fetch_add((value.len() - old_size) as u64, Ordering::Relaxed);
+        self.total_size
+            .fetch_add((value.len() - old_size) as u64, Ordering::Relaxed);
 
         crate::serial_println!(
             "[XATTR] '{}' inode {:#x} üzerine ayarlandı ({} bayt)",
-            name, inode, value.len()
+            name,
+            inode,
+            value.len()
         );
 
         Ok(())
@@ -320,10 +328,10 @@ pub fn sys_setxattr(path: &str, name: &str, value: &[u8], flags: i32) -> i32 {
     match XATTR_MANAGER.set(inode, name, value, flags) {
         Ok(()) => 0,
         Err(XattrError::AlreadyExists) => -17, // EEXIST
-        Err(XattrError::NotFound) => -2, // ENOENT
-        Err(XattrError::InvalidName) => -22, // EINVAL
-        Err(XattrError::ValueTooLarge) => -7, // E2BIG
-        Err(_) => -5, // EIO
+        Err(XattrError::NotFound) => -2,       // ENOENT
+        Err(XattrError::InvalidName) => -22,   // EINVAL
+        Err(XattrError::ValueTooLarge) => -7,  // E2BIG
+        Err(_) => -5,                          // EIO
     }
 }
 
@@ -458,7 +466,7 @@ pub fn sys_removexattr(path: &str, name: &str) -> i32 {
     match XATTR_MANAGER.remove(inode, name) {
         Ok(()) => 0,
         Err(XattrError::NotFound) => -61, // ENODATA
-        Err(_) => -5, // EIO
+        Err(_) => -5,                     // EIO
     }
 }
 
@@ -478,7 +486,7 @@ pub fn sys_fremovexattr(fd: i32, name: &str) -> i32 {
     match XATTR_MANAGER.remove(inode, name) {
         Ok(()) => 0,
         Err(XattrError::NotFound) => -61, // ENODATA
-        Err(_) => -5, // EIO
+        Err(_) => -5,                     // EIO
     }
 }
 
@@ -511,9 +519,9 @@ pub const XATTR_NAME_CAPS: &str = "security.capability";
 
 /// Verilen adın özel bir sistem xattr'ı olup olmadığını kontrol eder
 pub fn is_system_xattr(name: &str) -> bool {
-    name == XATTR_NAME_POSIX_ACL_ACCESS ||
-    name == XATTR_NAME_POSIX_ACL_DEFAULT ||
-    name == XATTR_NAME_CAPS
+    name == XATTR_NAME_POSIX_ACL_ACCESS
+        || name == XATTR_NAME_POSIX_ACL_DEFAULT
+        || name == XATTR_NAME_CAPS
 }
 
 /// Verilen adın güvenlik xattr'ı olup olmadığını kontrol eder

@@ -16,10 +16,15 @@
 //!                               [tüm okuyucular çıktıktan sonra eski veriyi serbest bırak]
 //! ```
 
-use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use crate::memory_barriers::{smp_acquire, smp_mb, smp_release, smp_rmb, smp_wmb};
 use core::ptr;
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
-use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb, smp_acquire, smp_release};
+
+const MAX_RCU_CPUS: usize = 8192;
+const TREE_RCU_LEAF_SHIFT: usize = 6;
+const TREE_RCU_LEAF_SIZE: usize = 1 << TREE_RCU_LEAF_SHIFT;
+const TREE_RCU_LEAF_COUNT: usize = (MAX_RCU_CPUS + TREE_RCU_LEAF_SIZE - 1) / TREE_RCU_LEAF_SIZE;
 
 /// Global RCU dönem (epoch) sayacı.
 ///
@@ -36,7 +41,10 @@ static RCU_GP_STATE: RcuGracePeriodState = RcuGracePeriodState::new();
 ///
 /// Her CPU'nun kaç aktif RCU okuyucusu olduğunu saklar.
 /// `unsafe` çünkü global değişken; ancak her CPU yalnızca kendi indisine erişir.
-static mut RCU_READER_COUNT: [AtomicUsize; 8192] = [const { AtomicUsize::new(0) }; 8192];
+static mut RCU_READER_COUNT: [AtomicUsize; MAX_RCU_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_RCU_CPUS];
+static TREE_RCU_DOMAIN: TreeRcuDomain = TreeRcuDomain::new();
+static SRCU_DOMAIN: SrcuDomain = SrcuDomain::new();
 
 /// RCU zariflik dönemi durumu.
 ///
@@ -177,12 +185,10 @@ impl<T> RcuPtr<T> {
     /// Başarılı takas durumunda eski işaretçi için zariflik dönemi başlatılır.
     /// Döner değer, takas öncesi işaretçidir.
     pub fn compare_and_swap(&self, current: *mut T, new: *mut T) -> *mut T {
-        let result = self.ptr.compare_exchange(
-            current,
-            new,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ).unwrap_or_else(|x| x);
+        let result = self
+            .ptr
+            .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
+            .unwrap_or_else(|x| x);
 
         if result == current && result != new {
             // Başarılı takas: eski işaretçi için zariflik dönemi başlat
@@ -232,6 +238,21 @@ impl<'a, T> core::ops::Deref for RcuReadGuard<'a, T> {
     }
 }
 
+/// Belirtilen CPU için RCU durağan durum (quiescent state) bildirir.
+///
+/// Her bağlam değişimi (context switch) bir durağan durumdur.
+/// Scheduler bu fonksiyonu çağırarak zariflik dönemlerinin tamamlanmasını hızlandırır.
+/// CPU'nun okuyucu sayacı sıfırlanır: bu CPU tüm RCU okumalarını tamamlamıştır.
+pub fn note_quiescent_state(cpu_id: u32) {
+    unsafe {
+        // Bu CPU'daki aktif okuyucu sayacını sıfırla
+        // Context switch = tüm okumalar tamamlandı
+        RCU_READER_COUNT[cpu_id as usize].store(0, Ordering::Release);
+    }
+    TREE_RCU_DOMAIN.note_quiescent_state(cpu_id);
+    smp_mb();
+}
+
 /// Yeni bir RCU zariflik dönemi başlatır.
 ///
 /// Dönem sayacını artırır ve tam bellek bariyeri uygular.
@@ -239,7 +260,10 @@ impl<'a, T> core::ops::Deref for RcuReadGuard<'a, T> {
 pub fn start_grace_period() {
     let new_gp = RCU_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
     RCU_GP_STATE.current_gp.store(new_gp, Ordering::Release);
-    RCU_GP_STATE.gp_start_tick.store(crate::task::scheduler::get_ticks() as u64, Ordering::Relaxed);
+    RCU_GP_STATE.gp_start_tick.store(
+        crate::task::scheduler::get_ticks() as u64,
+        Ordering::Relaxed,
+    );
 
     // Tüm CPU'ların yeni dönemi görmesi için tam bariyer
     smp_mb();
@@ -281,7 +305,9 @@ pub fn grace_period_completed() -> bool {
     }
 
     // Zariflik dönemi tamamlandı: sonucu kaydet ve bariyer uygula
-    RCU_GP_STATE.completed_gp.store(current_gp, Ordering::Release);
+    RCU_GP_STATE
+        .completed_gp
+        .store(current_gp, Ordering::Release);
     smp_mb();
 
     true
@@ -381,7 +407,9 @@ impl<T> RcuList<T> {
     pub fn insert_head(&self, new_node: *mut RcuListNode<T>) {
         loop {
             let current_head = self.head.load(Ordering::Acquire);
-            unsafe { (*new_node).set_next(current_head); }
+            unsafe {
+                (*new_node).set_next(current_head);
+            }
 
             match self.head.compare_exchange(
                 current_head,
@@ -511,6 +539,429 @@ impl RcuStats {
     }
 }
 
+/// Tree RCU istatistikleri.
+///
+/// Okuyucu taramasını CPU başına değil, 64 CPU'luk yaprak kümeleri
+/// üzerinden yapar. `active_leaves == 0` olduğunda grace period tamamdır.
+#[derive(Debug, Clone, Copy)]
+pub struct TreeRcuStats {
+    pub current_epoch: u64,
+    pub completed_grace_periods: u64,
+    pub active_cpus: usize,
+    pub active_leaves: usize,
+    pub grace_period_start_tick: u64,
+}
+
+/// Sleepable RCU (SRCU) istatistikleri.
+///
+/// Aktif slot yeni okuyucuları, draining slot ise kapanması beklenen
+/// okuyucuları temsil eder. Epoch flip sonrası yalnızca draining slot sıfıra
+/// indiğinde synchronize tamamlanır.
+#[derive(Debug, Clone, Copy)]
+pub struct SrcuStats {
+    pub current_epoch: u64,
+    pub completed_epoch: u64,
+    pub current_slot: usize,
+    pub active_slot_readers: usize,
+    pub draining_slot_readers: usize,
+}
+
+/// Capraz cekirdek atomikleri tek cache line'a izole eder.
+///
+/// 8192 cekirdekte bitisik sayaclar ayni satira duserse her read-side giris/cikisi
+/// gereksiz coherence invalidation uretir. Bu sarmalayici sicak sayaclari 64 byte'a ayirir.
+#[repr(align(64))]
+struct CacheAlignedAtomicUsize {
+    value: AtomicUsize,
+}
+
+impl CacheAlignedAtomicUsize {
+    const fn new(value: usize) -> Self {
+        Self {
+            value: AtomicUsize::new(value),
+        }
+    }
+
+    #[inline(always)]
+    fn load(&self, ordering: Ordering) -> usize {
+        self.value.load(ordering)
+    }
+
+    #[inline(always)]
+    fn store(&self, value: usize, ordering: Ordering) {
+        self.value.store(value, ordering);
+    }
+
+    #[inline(always)]
+    fn fetch_add(&self, value: usize, ordering: Ordering) -> usize {
+        self.value.fetch_add(value, ordering)
+    }
+
+    #[inline(always)]
+    fn fetch_sub(&self, value: usize, ordering: Ordering) -> usize {
+        self.value.fetch_sub(value, ordering)
+    }
+
+    #[inline(always)]
+    fn fetch_xor(&self, value: usize, ordering: Ordering) -> usize {
+        self.value.fetch_xor(value, ordering)
+    }
+
+    #[inline(always)]
+    fn swap(&self, value: usize, ordering: Ordering) -> usize {
+        self.value.swap(value, ordering)
+    }
+}
+
+#[repr(align(64))]
+struct CacheAlignedAtomicU64 {
+    value: AtomicU64,
+}
+
+impl CacheAlignedAtomicU64 {
+    const fn new(value: u64) -> Self {
+        Self {
+            value: AtomicU64::new(value),
+        }
+    }
+
+    #[inline(always)]
+    fn load(&self, ordering: Ordering) -> u64 {
+        self.value.load(ordering)
+    }
+
+    #[inline(always)]
+    fn store(&self, value: u64, ordering: Ordering) {
+        self.value.store(value, ordering);
+    }
+
+    #[inline(always)]
+    fn fetch_add(&self, value: u64, ordering: Ordering) -> u64 {
+        self.value.fetch_add(value, ordering)
+    }
+
+    #[inline(always)]
+    fn fetch_min(&self, value: u64, ordering: Ordering) -> u64 {
+        self.value.fetch_min(value, ordering)
+    }
+}
+/// 64 CPU'luk yaprak kümeleri üzerinden toplama yapan Tree RCU domain'i.
+///
+/// Matematik:
+/// - Her CPU için `cpu_readers[cpu] > 0` ise ilgili yaprak aktiftir.
+/// - `leaf_active[leaf] = |{ cpu in leaf | cpu_readers[cpu] > 0 }|`
+/// - `active_leaves = |{ leaf | leaf_active[leaf] > 0 }|`
+/// - Grace period tamamlanma koşulu: `active_leaves == 0`
+pub struct TreeRcuDomain {
+    epoch: CacheAlignedAtomicU64,
+    completed_gp: CacheAlignedAtomicU64,
+    gp_start_tick: CacheAlignedAtomicU64,
+    active_leaves: CacheAlignedAtomicUsize,
+    cpu_readers: [CacheAlignedAtomicUsize; MAX_RCU_CPUS],
+    leaf_active: [CacheAlignedAtomicUsize; TREE_RCU_LEAF_COUNT],
+}
+
+impl TreeRcuDomain {
+    pub const fn new() -> Self {
+        Self {
+            epoch: CacheAlignedAtomicU64::new(0),
+            completed_gp: CacheAlignedAtomicU64::new(0),
+            gp_start_tick: CacheAlignedAtomicU64::new(0),
+            active_leaves: CacheAlignedAtomicUsize::new(0),
+            cpu_readers: [const { CacheAlignedAtomicUsize::new(0) }; MAX_RCU_CPUS],
+            leaf_active: [const { CacheAlignedAtomicUsize::new(0) }; TREE_RCU_LEAF_COUNT],
+        }
+    }
+    #[inline]
+    const fn leaf_index(cpu_id: usize) -> usize {
+        cpu_id >> TREE_RCU_LEAF_SHIFT
+    }
+
+    fn enter_on_cpu(&self, cpu_id: u32) {
+        let cpu_id = cpu_id as usize;
+        debug_assert!(cpu_id < MAX_RCU_CPUS);
+
+        let prev = self.cpu_readers[cpu_id].fetch_add(1, Ordering::AcqRel);
+        if prev == 0 {
+            let leaf = Self::leaf_index(cpu_id);
+            let leaf_prev = self.leaf_active[leaf].fetch_add(1, Ordering::AcqRel);
+            if leaf_prev == 0 {
+                self.active_leaves.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        smp_rmb();
+    }
+
+    fn exit_on_cpu(&self, cpu_id: u32) {
+        let cpu_id = cpu_id as usize;
+        debug_assert!(cpu_id < MAX_RCU_CPUS);
+
+        let prev = self.cpu_readers[cpu_id].fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            let leaf = Self::leaf_index(cpu_id);
+            let leaf_prev = self.leaf_active[leaf].fetch_sub(1, Ordering::AcqRel);
+            if leaf_prev == 1 {
+                self.active_leaves.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+
+        smp_rmb();
+    }
+
+    pub fn read_lock(&'static self) -> TreeRcuReadGuard<'static> {
+        self.read_lock_on_cpu(crate::cpu::smp::current_cpu_id())
+    }
+
+    pub fn read_lock_on_cpu(&self, cpu_id: u32) -> TreeRcuReadGuard<'_> {
+        self.enter_on_cpu(cpu_id);
+        TreeRcuReadGuard { domain: self, cpu_id }
+    }
+
+    pub fn note_quiescent_state(&self, cpu_id: u32) {
+        let cpu_id = cpu_id as usize;
+        debug_assert!(cpu_id < MAX_RCU_CPUS);
+
+        let prev = self.cpu_readers[cpu_id].swap(0, Ordering::AcqRel);
+        if prev > 0 {
+            let leaf = Self::leaf_index(cpu_id);
+            let leaf_prev = self.leaf_active[leaf].fetch_sub(1, Ordering::AcqRel);
+            if leaf_prev == 1 {
+                self.active_leaves.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+
+        smp_mb();
+    }
+
+    pub fn start_grace_period(&self) {
+        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.gp_start_tick.store(
+            crate::task::scheduler::get_ticks() as u64,
+            Ordering::Relaxed,
+        );
+        self.completed_gp
+            .fetch_min(epoch.saturating_sub(1), Ordering::Relaxed);
+        smp_mb();
+    }
+
+    pub fn grace_period_completed(&self) -> bool {
+        let current = self.epoch.load(Ordering::Acquire);
+        let completed = self.completed_gp.load(Ordering::Acquire);
+
+        if current <= completed {
+            return true;
+        }
+
+        if self.active_leaves.load(Ordering::Acquire) == 0 {
+            self.completed_gp.store(current, Ordering::Release);
+            smp_mb();
+            return true;
+        }
+
+        false
+    }
+
+    pub fn synchronize(&self) {
+        self.start_grace_period();
+
+        let start_tick = crate::task::scheduler::get_ticks();
+        let timeout = 1000;
+
+        while !self.grace_period_completed() {
+            if crate::task::scheduler::get_ticks().saturating_sub(start_tick) > timeout {
+                crate::serial_println!("TreeRCU: Grace period timeout!");
+                break;
+            }
+            crate::task::scheduler::sleep(1);
+        }
+    }
+
+    pub fn stats(&self) -> TreeRcuStats {
+        let mut active_cpus = 0usize;
+        let mut active_leaves = 0usize;
+
+        for cpu_id in 0..MAX_RCU_CPUS {
+            if self.cpu_readers[cpu_id].load(Ordering::Relaxed) > 0 {
+                active_cpus += 1;
+            }
+        }
+        for leaf in 0..TREE_RCU_LEAF_COUNT {
+            if self.leaf_active[leaf].load(Ordering::Relaxed) > 0 {
+                active_leaves += 1;
+            }
+        }
+
+        TreeRcuStats {
+            current_epoch: self.epoch.load(Ordering::Relaxed),
+            completed_grace_periods: self.completed_gp.load(Ordering::Relaxed),
+            active_cpus,
+            active_leaves: active_leaves.min(self.active_leaves.load(Ordering::Relaxed)),
+            grace_period_start_tick: self.gp_start_tick.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn reset(&self, _cpu_count: u32) {
+        for cpu_id in 0..MAX_RCU_CPUS {
+            self.cpu_readers[cpu_id].store(0, Ordering::Relaxed);
+        }
+        for leaf in 0..TREE_RCU_LEAF_COUNT {
+            self.leaf_active[leaf].store(0, Ordering::Relaxed);
+        }
+
+        self.active_leaves.store(0, Ordering::Relaxed);
+        self.epoch.store(0, Ordering::Relaxed);
+        self.completed_gp.store(0, Ordering::Relaxed);
+        self.gp_start_tick.store(0, Ordering::Relaxed);
+    }
+}
+
+pub struct TreeRcuReadGuard<'a> {
+    domain: &'a TreeRcuDomain,
+    cpu_id: u32,
+}
+
+impl Drop for TreeRcuReadGuard<'_> {
+    fn drop(&mut self) {
+        self.domain.exit_on_cpu(self.cpu_id);
+    }
+}
+
+/// Sleepable RCU (SRCU) domain'i.
+///
+/// İki slotlu klasik SRCU dizaynı:
+/// - Okuyucular `current_slot` üzerinde sayılır.
+/// - `synchronize()` çağrısı slot'u çevirir.
+/// - Eski slot (`draining`) sıfıra düşünce grace period tamamlanır.
+pub struct SrcuDomain {
+    epoch: CacheAlignedAtomicU64,
+    completed_epoch: CacheAlignedAtomicU64,
+    current_slot: CacheAlignedAtomicUsize,
+    gp_start_tick: CacheAlignedAtomicU64,
+    slot_active_cpus: [CacheAlignedAtomicUsize; 2],
+    reader_counts: [[CacheAlignedAtomicUsize; MAX_RCU_CPUS]; 2],
+}
+
+impl SrcuDomain {
+    pub const fn new() -> Self {
+        Self {
+            epoch: CacheAlignedAtomicU64::new(0),
+            completed_epoch: CacheAlignedAtomicU64::new(0),
+            current_slot: CacheAlignedAtomicUsize::new(0),
+            gp_start_tick: CacheAlignedAtomicU64::new(0),
+            slot_active_cpus: [const { CacheAlignedAtomicUsize::new(0) }; 2],
+            reader_counts: [
+                [const { CacheAlignedAtomicUsize::new(0) }; MAX_RCU_CPUS],
+                [const { CacheAlignedAtomicUsize::new(0) }; MAX_RCU_CPUS],
+            ],
+        }
+    }
+    fn enter_on_cpu(&self, cpu_id: u32, slot: usize) {
+        let cpu_id = cpu_id as usize;
+        debug_assert!(cpu_id < MAX_RCU_CPUS);
+
+        let prev = self.reader_counts[slot][cpu_id].fetch_add(1, Ordering::AcqRel);
+        if prev == 0 {
+            self.slot_active_cpus[slot].fetch_add(1, Ordering::AcqRel);
+        }
+        smp_acquire();
+    }
+
+    fn exit_on_cpu(&self, cpu_id: u32, slot: usize) {
+        let cpu_id = cpu_id as usize;
+        debug_assert!(cpu_id < MAX_RCU_CPUS);
+
+        let prev = self.reader_counts[slot][cpu_id].fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            self.slot_active_cpus[slot].fetch_sub(1, Ordering::AcqRel);
+        }
+        smp_release();
+    }
+
+    pub fn read_lock(&'static self) -> SrcuReadGuard<'static> {
+        self.read_lock_on_cpu(crate::cpu::smp::current_cpu_id())
+    }
+
+    pub fn read_lock_on_cpu(&self, cpu_id: u32) -> SrcuReadGuard<'_> {
+        let slot = self.current_slot.load(Ordering::Acquire) & 1;
+        self.enter_on_cpu(cpu_id, slot);
+        SrcuReadGuard {
+            domain: self,
+            cpu_id,
+            slot,
+        }
+    }
+
+    pub fn synchronize(&self) {
+        let old_slot = self.current_slot.fetch_xor(1, Ordering::AcqRel) & 1;
+        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.gp_start_tick.store(
+            crate::task::scheduler::get_ticks() as u64,
+            Ordering::Relaxed,
+        );
+        smp_mb();
+
+        let start_tick = crate::task::scheduler::get_ticks();
+        let timeout = 1000;
+
+        while self.slot_active_cpus[old_slot].load(Ordering::Acquire) > 0 {
+            if crate::task::scheduler::get_ticks().saturating_sub(start_tick) > timeout {
+                crate::serial_println!("SRCU: Grace period timeout!");
+                break;
+            }
+            crate::task::scheduler::sleep(1);
+        }
+
+        self.completed_epoch.store(epoch, Ordering::Release);
+        smp_mb();
+    }
+
+    pub fn stats(&self) -> SrcuStats {
+        let current_slot = self.current_slot.load(Ordering::Relaxed) & 1;
+        let draining_slot = current_slot ^ 1;
+        SrcuStats {
+            current_epoch: self.epoch.load(Ordering::Relaxed),
+            completed_epoch: self.completed_epoch.load(Ordering::Relaxed),
+            current_slot,
+            active_slot_readers: self.slot_active_cpus[current_slot].load(Ordering::Relaxed),
+            draining_slot_readers: self.slot_active_cpus[draining_slot].load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn reset(&self, _cpu_count: u32) {
+        for slot in 0..2 {
+            for cpu_id in 0..MAX_RCU_CPUS {
+                self.reader_counts[slot][cpu_id].store(0, Ordering::Relaxed);
+            }
+            self.slot_active_cpus[slot].store(0, Ordering::Relaxed);
+        }
+        self.current_slot.store(0, Ordering::Relaxed);
+        self.epoch.store(0, Ordering::Relaxed);
+        self.completed_epoch.store(0, Ordering::Relaxed);
+        self.gp_start_tick.store(0, Ordering::Relaxed);
+    }
+}
+
+pub struct SrcuReadGuard<'a> {
+    domain: &'a SrcuDomain,
+    cpu_id: u32,
+    slot: usize,
+}
+
+impl Drop for SrcuReadGuard<'_> {
+    fn drop(&mut self) {
+        self.domain.exit_on_cpu(self.cpu_id, self.slot);
+    }
+}
+
+pub fn tree_rcu() -> &'static TreeRcuDomain {
+    &TREE_RCU_DOMAIN
+}
+
+pub fn srcu_default() -> &'static SrcuDomain {
+    &SRCU_DOMAIN
+}
+
 /// RCU alt sistemini başlatır.
 ///
 /// Tüm CPU'ların okuyucu sayaçlarını sıfırlar. Sistem açılışında çağrılmalıdır.
@@ -525,7 +976,25 @@ pub fn init() {
         }
     }
 
+    TREE_RCU_DOMAIN.reset(cpu_count);
+    SRCU_DOMAIN.reset(cpu_count);
+
     crate::serial_println!("RCU: Initialized for {} CPUs", cpu_count);
+}
+
+/// RCU softirq callback'lerini işler.
+///
+/// Tamamlanan zariflik dönemlerinin ertelenmiş serbest bırakma callback'lerini çalıştırır.
+/// Timer softirq'dan periyodik olarak çağrılır.
+pub fn process_callbacks() {
+    // Mevcut zariflik dönemi tamamlandıysa bekleyen callback'leri işle
+    if grace_period_completed() {
+        // İleride callback listesi (call_rcu) eklenecektir
+        // Şu an yalnızca dönem tamamlanma durumunu güncelleriz
+        let current = RCU_GP_STATE.current_gp.load(Ordering::Acquire);
+        RCU_GP_STATE.completed_gp.store(current, Ordering::Release);
+        smp_mb();
+    }
 }
 
 /// RCU alt sistemini temizler.
@@ -534,6 +1003,8 @@ pub fn init() {
 pub fn cleanup() {
     // Tüm açık zariflik dönemlerinin tamamlanmasını bekle
     synchronize_rcu();
+    TREE_RCU_DOMAIN.synchronize();
+    SRCU_DOMAIN.synchronize();
 
     crate::serial_println!("RCU: Cleanup completed");
 }
@@ -559,3 +1030,4 @@ mod tests {
         }
     }
 }
+

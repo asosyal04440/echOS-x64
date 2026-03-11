@@ -42,34 +42,33 @@ impl Watchdog {
             on_expire: None,
         }
     }
-    
+
     /// Watchdog'u tetikler (zamanlayıcıyı sıfırlar)
     pub fn kick(&self) {
-        self.last_kick.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_kick
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
         self.expired.store(false, Ordering::SeqCst);
     }
-    
+
     /// Watchdog süresinin dolup dolmadığını kontrol eder
     pub fn check(&self) -> bool {
         if !self.enabled.load(Ordering::SeqCst) {
             return false;
         }
-        
+
         let current = crate::task::scheduler::get_ticks();
         let last = self.last_kick.load(Ordering::SeqCst);
-        
+
         if current.saturating_sub(last) > self.timeout_ticks as usize {
             if !self.expired.swap(true, Ordering::SeqCst) {
                 self.expiration_count.fetch_add(1, Ordering::SeqCst);
-                
+
                 crate::serial_println!(
                     "[WATCHDOG] '{}' süresi doldu (zaman aşımı: {} tick)",
-                    self.name, self.timeout_ticks
+                    self.name,
+                    self.timeout_ticks
                 );
-                
+
                 // Süre dolumu geri çağırmasını çağır
                 if let Some(callback) = self.on_expire {
                     callback(self.name);
@@ -77,20 +76,20 @@ impl Watchdog {
             }
             return true;
         }
-        
+
         false
     }
-    
+
     /// Watchdog'u etkinleştirir/devre dışı bırakır
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::SeqCst);
     }
-    
+
     /// Süre dolumu sayısını döndürür
     pub fn expiration_count(&self) -> u32 {
         self.expiration_count.load(Ordering::SeqCst)
     }
-    
+
     /// Watchdog'u sıfırlar
     pub fn reset(&self) {
         self.last_kick.store(0, Ordering::SeqCst);
@@ -124,12 +123,14 @@ impl WatchdogRegistry {
             initialized: AtomicBool::new(false),
         }
     }
-    
+
     /// Bir watchdog kaydeder
     pub fn register(&self, watchdog: &'static Watchdog) {
-        self.watchdogs.lock().insert(String::from(watchdog.name), watchdog);
+        self.watchdogs
+            .lock()
+            .insert(String::from(watchdog.name), watchdog);
     }
-    
+
     /// Belirli bir watchdog'u tetikler
     pub fn kick(&self, name: &str) -> bool {
         if let Some(wd) = self.watchdogs.lock().get(name) {
@@ -139,35 +140,36 @@ impl WatchdogRegistry {
             false
         }
     }
-    
+
     /// Tüm watchdog'ları kontrol eder
     pub fn check_all(&self) -> Vec<String> {
         let mut expired = Vec::new();
-        
+
         for (name, wd) in self.watchdogs.lock().iter() {
             if wd.check() {
                 expired.push(name.clone());
             }
         }
-        
+
         expired
     }
-    
+
     /// Periyodik kontrol (zamanlayıcı kesmesinden çağrılır)
     pub fn periodic_check(&self) {
         let current = crate::task::scheduler::get_ticks();
         let last = self.last_check.load(Ordering::SeqCst);
         let interval = self.check_interval.load(Ordering::SeqCst);
-        
+
         if current.saturating_sub(last) >= interval {
             self.last_check.store(current, Ordering::SeqCst);
             self.check_all();
         }
     }
-    
+
     /// Tüm watchdog durumlarını döndürür
     pub fn statuses(&self) -> Vec<WatchdogStatus> {
-        self.watchdogs.lock()
+        self.watchdogs
+            .lock()
             .iter()
             .map(|(name, wd)| WatchdogStatus {
                 name: name.clone(),
@@ -223,21 +225,23 @@ pub fn init() {
     if WATCHDOG_REGISTRY.initialized.swap(true, Ordering::SeqCst) {
         return;
     }
-    
+
     // Temel watchdog'ları kaydet
     WATCHDOG_REGISTRY.register(&MEMORY_WATCHDOG);
     WATCHDOG_REGISTRY.register(&SCHEDULER_WATCHDOG);
     WATCHDOG_REGISTRY.register(&IRQ_WATCHDOG);
     WATCHDOG_REGISTRY.register(&BOOT_WATCHDOG);
-    
+
     // Tüm watchdog'ları tetikle
     MEMORY_WATCHDOG.kick();
     SCHEDULER_WATCHDOG.kick();
     IRQ_WATCHDOG.kick();
     BOOT_WATCHDOG.kick();
-    
-    crate::serial_println!("[WATCHDOG] {} watchdog başlatıldı", 
-        WATCHDOG_REGISTRY.watchdogs.lock().len());
+
+    crate::serial_println!(
+        "[WATCHDOG] {} watchdog başlatıldı",
+        WATCHDOG_REGISTRY.watchdogs.lock().len()
+    );
 }
 
 pub fn check_all() -> Vec<String> {

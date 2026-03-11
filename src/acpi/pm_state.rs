@@ -127,6 +127,7 @@ impl SleepStateInfo {
 /// S3/S4'ten dönüşte `restore()` çağrılarak CPU durumu geri yüklenir.
 /// Kontrol yazmaçları, genel amaçlı yazmaçlar, segment tabloları ve FPU durumu içerir.
 #[derive(Clone, Debug)]
+#[repr(C, align(64))]
 pub struct SuspendContext {
     /// İşlemci kontrol yazmaçları
     pub cr0: u64,
@@ -151,8 +152,9 @@ pub struct SuspendContext {
     /// Yerel APIC kimliği ve zamanlayıcı durumu
     pub lapic_id: u32,
     pub lapic_timer: u64,
-    /// FPU/SSE durum alanı (512 bayt, FXSAVE formatı)
-    pub fpu_state: [u8; 512],
+    /// FPU/SSE/AVX durum alanı — XSAVE formatında (maks 2688 bayt, AVX-512 dahil).
+    /// XSAVE yoksa ilk 512 byte FXSAVE olarak kullanılır.
+    pub fpu_state: [u8; 2688],
 }
 
 impl SuspendContext {
@@ -170,32 +172,97 @@ impl SuspendContext {
             pml4: 0,
             lapic_id: 0,
             lapic_timer: 0,
-            fpu_state: [0u8; 512],
+            fpu_state: [0u8; 2688],
         }
     }
 
     /// Geçerli CPU durumunu kaydeder.
-    ///
-    /// Gerçek uygulamada `mov {}, cr0` vb. assembly talimatları kullanılmalıdır.
     pub fn save(&mut self) {
-        // Gerçek CPU durumu kaydedilecek
-        // unsafe {
-        //     core::arch::asm!(
-        //         "mov {0}, cr0",
-        //         "mov {1}, cr3",
-        //         "mov {2}, cr4",
-        //         out(reg) self.cr0,
-        //         out(reg) self.cr3,
-        //         out(reg) self.cr4,
-        //     );
-        // }
+        unsafe {
+            // Kontrol yazmaçlarını kaydet
+            core::arch::asm!(
+                "mov {0}, cr0",
+                "mov {1}, cr3",
+                "mov {2}, cr4",
+                out(reg) self.cr0,
+                out(reg) self.cr3,
+                out(reg) self.cr4,
+            );
+
+            // Segment yazmaçlarını kaydet
+            core::arch::asm!("mov {0:x}, cs", out(reg) self.cs);
+            core::arch::asm!("mov {0:x}, ds", out(reg) self.ds);
+            core::arch::asm!("mov {0:x}, es", out(reg) self.es);
+            core::arch::asm!("mov {0:x}, ss", out(reg) self.ss);
+
+            // EFLAGS kaydet
+            core::arch::asm!(
+                "pushfq",
+                "pop {0}",
+                out(reg) self.rflags,
+            );
+
+            // Stack pointer kaydet
+            core::arch::asm!("mov {0}, rsp", out(reg) self.rsp);
+
+            // GDT ve IDT kaydet
+            let mut gdtr: [u8; 10] = [0; 10];
+            let mut idtr: [u8; 10] = [0; 10];
+            core::arch::asm!("sgdt [{}]", in(reg) gdtr.as_mut_ptr());
+            core::arch::asm!("sidt [{}]", in(reg) idtr.as_mut_ptr());
+
+            self.gdtr = (
+                u16::from_le_bytes([gdtr[0], gdtr[1]]),
+                u64::from_le_bytes([gdtr[2], gdtr[3], gdtr[4], gdtr[5], gdtr[6], gdtr[7], gdtr[8], gdtr[9]]),
+            );
+            self.idtr = (
+                u16::from_le_bytes([idtr[0], idtr[1]]),
+                u64::from_le_bytes([idtr[2], idtr[3], idtr[4], idtr[5], idtr[6], idtr[7], idtr[8], idtr[9]]),
+            );
+
+            // PML4 (CR3'ten)
+            self.pml4 = self.cr3;
+
+            crate::serial_println!("[PM] CPU state saved: CR0={:#x} CR3={:#x} CR4={:#x} RSP={:#x}",
+                self.cr0, self.cr3, self.cr4, self.rsp);
+        }
     }
 
     /// Kaydedilmiş CPU durumunu geri yükler.
     ///
     /// S3/S4 uyandırma sonrası çağrılır; yazmaçlar kayıtlı değerlere döner.
     pub fn restore(&self) {
-        // Gerçek CPU durumu geri yüklenecek
+        unsafe {
+            // GDT ve IDT yükle
+            let mut gdtr: [u8; 10] = [0; 10];
+            gdtr[0..2].copy_from_slice(&self.gdtr.0.to_le_bytes());
+            gdtr[2..10].copy_from_slice(&self.gdtr.1.to_le_bytes());
+            core::arch::asm!("lgdt [{}]", in(reg) gdtr.as_ptr());
+
+            let mut idtr: [u8; 10] = [0; 10];
+            idtr[0..2].copy_from_slice(&self.idtr.0.to_le_bytes());
+            idtr[2..10].copy_from_slice(&self.idtr.1.to_le_bytes());
+            core::arch::asm!("lidt [{}]", in(reg) idtr.as_ptr());
+
+            // Kontrol yazmaçlarını geri yükle
+            core::arch::asm!("mov cr0, {}", in(reg) self.cr0);
+            // CR3 yüklemesi sayfa tablolarını değiştirir; dikkatli ol
+            core::arch::asm!("mov cr3, {}", in(reg) self.cr3);
+            core::arch::asm!("mov cr4, {}", in(reg) self.cr4);
+
+            // Stack pointer yükle
+            core::arch::asm!("mov rsp, {}", in(reg) self.rsp);
+
+            // EFLAGS yükle
+            core::arch::asm!(
+                "push {0}",
+                "popfq",
+                in(reg) self.rflags,
+            );
+
+            crate::serial_println!("[PM] CPU state restored: CR0={:#x} CR3={:#x} CR4={:#x}",
+                self.cr0, self.cr3, self.cr4);
+        }
     }
 }
 

@@ -47,13 +47,13 @@
 //! Failed    --> Modül çalışamaz durumda
 //! ```
 
-pub mod memory;
 pub mod cpu;
-pub mod smp;
-pub mod irq;
-pub mod scheduler;
 pub mod driver;
 pub mod fs;
+pub mod irq;
+pub mod memory;
+pub mod scheduler;
+pub mod smp;
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -154,7 +154,11 @@ impl MonitorRegistry {
     // Tüm monitörlerin sağlık bilgisini toplar ve döndürür.
     // .map() + .collect(): iterator zinciri ile fonksiyonel dönüşüm.
     pub fn all_health(&self) -> Vec<ModuleHealth> {
-        self.monitors.lock().iter().map(|m| m.module_health()).collect()
+        self.monitors
+            .lock()
+            .iter()
+            .map(|m| m.module_health())
+            .collect()
     }
 }
 
@@ -188,7 +192,10 @@ pub fn init() {
     MONITORS.register(&driver::DRIVER_MONITOR);
     MONITORS.register(&fs::FS_MONITOR);
 
-    crate::serial_println!("[MONITORS] Initialized {} monitors", MONITORS.monitors.lock().len());
+    crate::serial_println!(
+        "[MONITORS] Initialized {} monitors",
+        MONITORS.monitors.lock().len()
+    );
 }
 
 // check_all ve yardımcı fonksiyonlar — dışarıdan MONITORS'a doğrudan erişimi sarmalar.

@@ -37,7 +37,7 @@ pub struct ListItem {
     pub text: String,
     pub id: usize,
     pub selected: bool,
-    pub icon: Option<u8>,  // Icon index (optional)
+    pub icon: Option<u8>, // Icon index (optional)
 }
 
 impl ListItem {
@@ -225,9 +225,21 @@ impl Widget for ListView {
 
             // Seçili öğe vurgu rengiyle; hover öğe daha hafif rengiyle gösterilir
             if item.selected {
-                fb.draw_rect(x + 1, item_y, w - 2, self.item_height, Theme::ACCENT_PRIMARY.to_u32());
+                fb.draw_rect(
+                    x + 1,
+                    item_y,
+                    w - 2,
+                    self.item_height,
+                    Theme::ACCENT_PRIMARY.to_u32(),
+                );
             } else if self.hovered_index == Some(item_index) {
-                fb.draw_rect(x + 1, item_y, w - 2, self.item_height, Theme::BUTTON_HOVER.to_u32());
+                fb.draw_rect(
+                    x + 1,
+                    item_y,
+                    w - 2,
+                    self.item_height,
+                    Theme::BUTTON_HOVER.to_u32(),
+                );
             }
 
             // İkon alanı: varsa 16x16 piksel yer tutucu çizilir, metin ötelenir
@@ -254,7 +266,13 @@ impl Widget for ListView {
         if self.items.len() > visible {
             let scroll_bar_height = (h * visible / self.items.len()).max(20);
             let scroll_bar_y = y + (h * self.scroll_offset / self.items.len());
-            fb.draw_rect(x + w - 8, scroll_bar_y, 6, scroll_bar_height, Theme::BUTTON_BG.to_u32());
+            fb.draw_rect(
+                x + w - 8,
+                scroll_bar_y,
+                6,
+                scroll_bar_height,
+                Theme::BUTTON_BG.to_u32(),
+            );
         }
     }
 
@@ -352,7 +370,13 @@ impl TreeNode {
     /// Bu DFS (Depth-First Search) sıralamasını üretir; ağaç görünümü
     /// için doğal sıralama budur.
     fn flatten(&self, result: &mut Vec<(usize, String, bool, bool, usize)>) {
-        result.push((self.id, self.text.clone(), self.expanded, self.selected, self.level));
+        result.push((
+            self.id,
+            self.text.clone(),
+            self.expanded,
+            self.selected,
+            self.level,
+        ));
         if self.expanded {
             for child in &self.children {
                 child.flatten(result);
@@ -378,6 +402,8 @@ pub struct TreeView {
     scroll_offset: usize,
     item_height: usize,
     hovered_index: Option<usize>,
+    /// Odağlanma durumu; true iken klavye olayları işlenir
+    focused: bool,
 }
 
 impl TreeView {
@@ -391,6 +417,7 @@ impl TreeView {
             scroll_offset: 0,
             item_height: 22,
             hovered_index: None,
+            focused: false,
         }
     }
 
@@ -442,7 +469,11 @@ impl TreeView {
     /// `-> bool` dönüş değeri: düğüm bulunduğunda `true` döner; üst çağrılar
     /// bunu arama erken sonlandırma (short-circuit) işareti olarak kullanır.
     /// Bu "early return recursion" desenidir, gereksiz alt ağaç aramasını engeller.
-    fn toggle_node_recursive_static(nodes: &mut Vec<TreeNode>, id: usize, new_expanded: bool) -> bool {
+    fn toggle_node_recursive_static(
+        nodes: &mut Vec<TreeNode>,
+        id: usize,
+        new_expanded: bool,
+    ) -> bool {
         for node in nodes {
             if node.id == id {
                 node.expanded = new_expanded;
@@ -511,9 +542,21 @@ impl Widget for TreeView {
 
             // Seçili veya hover durumu arka plan rengi
             if *selected {
-                fb.draw_rect(x + 1, item_y, w - 2, self.item_height, Theme::ACCENT_PRIMARY.to_u32());
+                fb.draw_rect(
+                    x + 1,
+                    item_y,
+                    w - 2,
+                    self.item_height,
+                    Theme::ACCENT_PRIMARY.to_u32(),
+                );
             } else if self.hovered_index == Some(item_index) {
-                fb.draw_rect(x + 1, item_y, w - 2, self.item_height, Theme::BUTTON_HOVER.to_u32());
+                fb.draw_rect(
+                    x + 1,
+                    item_y,
+                    w - 2,
+                    self.item_height,
+                    Theme::BUTTON_HOVER.to_u32(),
+                );
             }
 
             // Girintileme: her seviye 16 piksel öteleme yapar.
@@ -522,12 +565,20 @@ impl Widget for TreeView {
             let text_x = x + 4 + indent;
 
             // Genişle/daralt göstergesi: + veya - karakteri.
-            // Not: `has_children` şu an sabit false; gerçek implementasyonda
-            // flattened'dan sonraki öğenin level'ına bakılarak çocuk var mı anlaşılır.
-            let has_children = false; // Would need to check actual children
+            // Sonraki öğenin level'ı bu öğeninkinden büyükse çocuğu var demektir.
+            let has_children = if item_index + 1 < self.flattened.len() {
+                self.flattened[item_index + 1].4 > *level
+            } else {
+                false
+            };
             if has_children {
                 let indicator = if *expanded { "-" } else { "+" };
-                fb.draw_string(text_x, item_y + 3, indicator, Theme::TEXT_SECONDARY.to_u32());
+                fb.draw_string(
+                    text_x,
+                    item_y + 3,
+                    indicator,
+                    Theme::TEXT_SECONDARY.to_u32(),
+                );
             }
 
             // Düğüm metni: girintinin sağına 12 piksel ek boşlukla
@@ -594,6 +645,85 @@ impl Widget for TreeView {
             return true;
         }
         false
+    }
+
+    /// Klavye ile ağaç görünümünde gezinme.
+    /// Yukarı/Aşağı: seçimi taşır. Enter/Space: genişlet/daralt.
+    /// Sağ ok: genişlet. Sol ok: daralt.
+    fn on_key(&mut self, _key: char, _modifiers: u8, scancode: u8) -> bool {
+        if !self.focused || self.flattened.is_empty() {
+            return false;
+        }
+
+        // Mevcut seçili öğenin indeksini bul
+        let current_idx = self
+            .selected_id
+            .and_then(|id| self.flattened.iter().position(|f| f.0 == id))
+            .unwrap_or(0);
+
+        match scancode {
+            0x48 => {
+                // Up arrow
+                if current_idx > 0 {
+                    let new_idx = current_idx - 1;
+                    for item in &mut self.flattened {
+                        item.3 = false;
+                    }
+                    self.flattened[new_idx].3 = true;
+                    self.selected_id = Some(self.flattened[new_idx].0);
+                    // Kaydırmayı ayarla
+                    if new_idx < self.scroll_offset {
+                        self.scroll_offset = new_idx;
+                    }
+                }
+                true
+            }
+            0x50 => {
+                // Down arrow
+                if current_idx + 1 < self.flattened.len() {
+                    let new_idx = current_idx + 1;
+                    for item in &mut self.flattened {
+                        item.3 = false;
+                    }
+                    self.flattened[new_idx].3 = true;
+                    self.selected_id = Some(self.flattened[new_idx].0);
+                    // Kaydırmayı ayarla
+                    let visible = self.visible_items();
+                    if new_idx >= self.scroll_offset + visible {
+                        self.scroll_offset = new_idx - visible + 1;
+                    }
+                }
+                true
+            }
+            0x1C | 0x39 => {
+                // Enter veya Space: genişlet/daralt
+                self.toggle_expand(current_idx);
+                true
+            }
+            0x4D => {
+                // Right arrow: genişlet
+                if !self.flattened[current_idx].2 {
+                    self.toggle_expand(current_idx);
+                }
+                true
+            }
+            0x4B => {
+                // Left arrow: daralt
+                if self.flattened[current_idx].2 {
+                    self.toggle_expand(current_idx);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     fn bounds(&self) -> Rect {

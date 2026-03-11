@@ -71,9 +71,10 @@
 //!        |  kaydeder ve iletişimi başlatır)    |
 //! ```
 
-use super::{MacAddr, Ipv4Addr, NetError, local_ip};
 use super::ethernet::{EtherType, EthernetFrame};
+use super::{local_ip, Ipv4Addr, MacAddr, NetError};
 use alloc::collections::BTreeMap;
+use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -88,16 +89,19 @@ use spin::Mutex;
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct ArpHeader {
-    pub htype: u16,      // Donanım türü: 1 = Ethernet (IEEE 802.3)
-    pub ptype: u16,      // Protokol türü: 0x0800 = IPv4
-    pub hlen: u8,        // Donanım adres uzunluğu: Ethernet için 6 byte (MAC)
-    pub plen: u8,        // Protokol adres uzunluğu: IPv4 için 4 byte
+    pub htype: u16, // Donanım türü: 1 = Ethernet (IEEE 802.3)
+    pub ptype: u16, // Protokol türü: 0x0800 = IPv4
+    pub hlen: u8,   // Donanım adres uzunluğu: Ethernet için 6 byte (MAC)
+    pub plen: u8,   // Protokol adres uzunluğu: IPv4 için 4 byte
     pub oper: ArpOperation,
-    pub sha: MacAddr,    // Sender Hardware Address: Gönderenin MAC adresi
-    pub spa: Ipv4Addr,   // Sender Protocol Address: Gönderenin IP adresi
-    pub tha: MacAddr,    // Target Hardware Address: Hedefin MAC adresi (istek'te sıfır)
-    pub tpa: Ipv4Addr,   // Target Protocol Address: Hedefin IP adresi (çözümlenmek istenen)
+    pub sha: MacAddr,  // Sender Hardware Address: Gönderenin MAC adresi
+    pub spa: Ipv4Addr, // Sender Protocol Address: Gönderenin IP adresi
+    pub tha: MacAddr,  // Target Hardware Address: Hedefin MAC adresi (istek'te sıfır)
+    pub tpa: Ipv4Addr, // Target Protocol Address: Hedefin IP adresi (çözümlenmek istenen)
 }
+
+/// ARP paketi için alias (ArpHeader ile aynı) - test uyumluluğu için
+pub type ArpPacket = ArpHeader;
 
 /// ARP işlem kodu.
 ///
@@ -105,9 +109,9 @@ pub struct ArpHeader {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum ArpOperation {
-    Request = 1,  // ARP isteği: "Bu IP kimin?" sorusu (broadcast ile gönderilir)
-    Reply = 2,    // ARP yanıtı: "Bu IP benim!" cevabı (unicast ile gönderilir)
-    Unknown = 0,  // Bilinmeyen işlem kodu
+    Request = 1, // ARP isteği: "Bu IP kimin?" sorusu (broadcast ile gönderilir)
+    Reply = 2,   // ARP yanıtı: "Bu IP benim!" cevabı (unicast ile gönderilir)
+    Unknown = 0, // Bilinmeyen işlem kodu
 }
 
 impl ArpOperation {
@@ -147,7 +151,15 @@ impl ArpHeader {
         let tpa = Ipv4Addr::from_bytes([data[24], data[25], data[26], data[27]]);
 
         Ok(ArpHeader {
-            htype, ptype, hlen, plen, oper, sha, spa, tha, tpa,
+            htype,
+            ptype,
+            hlen,
+            plen,
+            oper,
+            sha,
+            spa,
+            tha,
+            tpa,
         })
     }
 
@@ -173,6 +185,16 @@ impl ArpHeader {
         Ok(())
     }
 
+    /// Sender IP adresini döner
+    pub fn sender_ip(&self) -> Ipv4Addr {
+        self.spa
+    }
+
+    /// Target IP adresini döner
+    pub fn target_ip(&self) -> Ipv4Addr {
+        self.tpa
+    }
+
     /// Yeni bir ARP isteği (Request) paketi oluşturur.
     ///
     /// Hedef MAC adresi (THA) bilinmediği için sıfır olarak ayarlanır.
@@ -186,7 +208,7 @@ impl ArpHeader {
             oper: ArpOperation::Request,
             sha,
             spa,
-            tha: MacAddr::ZERO,  // Hedef MAC henüz bilinmiyor, sıfır gönderilir
+            tha: MacAddr::ZERO, // Hedef MAC henüz bilinmiyor, sıfır gönderilir
             tpa,
         }
     }
@@ -227,8 +249,22 @@ impl ArpHeader {
 // ARP_PENDING: MAC adresi henüz çözümlenmemiş IP'ler için bekleyen
 // paketleri tutar. MAC adresi öğrenilince bu paketler otomatik gönderilir.
 
-static ARP_CACHE: Mutex<BTreeMap<u32, MacAddr>> = Mutex::new(BTreeMap::new());
+/// ARP önbellek girişi: MAC adresi ve ekleme zamanı (zamanaşımı için)
+#[derive(Clone, Copy, Debug)]
+pub struct ArpCacheEntry {
+    pub mac: MacAddr,
+    /// Girişin eklendiği veya güncellendiği zaman (tick cinsinden)
+    pub timestamp: u64,
+}
+
+/// ARP önbellek zaman aşımı: 1200 tick ≈ 20 dakika (~1 tick/saniye varsayımı)
+const ARP_CACHE_TIMEOUT: u64 = 1200;
+
+static ARP_CACHE: Mutex<BTreeMap<u32, ArpCacheEntry>> = Mutex::new(BTreeMap::new());
 static ARP_PENDING: Mutex<BTreeMap<u32, Vec<Vec<u8>>>> = Mutex::new(BTreeMap::new());
+
+/// ARP istek hız sınırlama tablosu: IP başına son gönderilen istek zamanı
+static ARP_LAST_REQUEST: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
 
 /// ARP alt sistemini başlatır.
 ///
@@ -243,7 +279,8 @@ pub fn init() {
 /// Önbellekte kayıt varsa MAC adresini döner, yoksa `None` döner.
 /// `None` durumunda ARP isteği gönderilmeli ve yanıt beklenmeli.
 pub fn resolve(ip: Ipv4Addr) -> Option<MacAddr> {
-    ARP_CACHE.lock().get(&ip.to_u32()).copied()
+    let cache = ARP_CACHE.lock();
+    cache.get(&ip.to_u32()).map(|entry| entry.mac)
 }
 
 /// ARP tablosundaki tüm kayıtları döner.
@@ -252,8 +289,9 @@ pub fn resolve(ip: Ipv4Addr) -> Option<MacAddr> {
 /// IP->MAC eşleşmelerinin listesini verir.
 pub fn get_table() -> Vec<(Ipv4Addr, MacAddr)> {
     let cache = ARP_CACHE.lock();
-    cache.iter()
-        .map(|(&ip, &mac)| (Ipv4Addr::from_u32(ip), mac))
+    cache
+        .iter()
+        .map(|(&ip, entry)| (Ipv4Addr::from_u32(ip), entry.mac))
         .collect()
 }
 
@@ -265,7 +303,14 @@ pub fn get_table() -> Vec<(Ipv4Addr, MacAddr)> {
 ///
 /// ARP yanıtı alındığında veya başka bir kaynaktan MAC öğrenildiğinde çağrılır.
 pub fn add_entry(ip: Ipv4Addr, mac: MacAddr) {
-    ARP_CACHE.lock().insert(ip.to_u32(), mac);
+    let now = crate::interrupts::get_ticks();
+    ARP_CACHE.lock().insert(
+        ip.to_u32(),
+        ArpCacheEntry {
+            mac,
+            timestamp: now,
+        },
+    );
 
     // MAC adresi öğrenilince bu IP için bekleyen paketleri gönder
     let mut pending = ARP_PENDING.lock();
@@ -285,6 +330,19 @@ pub fn add_entry(ip: Ipv4Addr, mac: MacAddr) {
 /// yerel ağ üzerindeki tüm cihazlara gönderir.
 /// Hedef IP sahibi olan cihaz ARP yanıtı ile MAC adresini bildirir.
 pub fn send_request(tpa: Ipv4Addr) -> Result<(), NetError> {
+    // ── Rate limiting: aynı IP için saniyede en fazla 1 istek ──
+    let now = crate::interrupts::get_ticks();
+    {
+        let mut last_req = ARP_LAST_REQUEST.lock();
+        if let Some(&last_time) = last_req.get(&tpa.to_u32()) {
+            if now.wrapping_sub(last_time) < 1 {
+                // Son istek 1 saniyeden kısa süre önce gönderildi, atla
+                return Ok(());
+            }
+        }
+        last_req.insert(tpa.to_u32(), now);
+    }
+
     let iface = super::default_interface().ok_or(NetError::NoInterface)?;
     let mut iface = iface.lock();
 
@@ -297,18 +355,15 @@ pub fn send_request(tpa: Ipv4Addr) -> Result<(), NetError> {
 
     // Broadcast MAC adresiyle Ethernet çerçevesi oluştur
     let mut frame_buf = alloc::vec![0u8; 1514];
-    let frame = EthernetFrame::new(
-        MacAddr::BROADCAST,
-        sha,
-        EtherType::ARP,
-        &buf,
-    );
+    let frame = EthernetFrame::new(MacAddr::BROADCAST, sha, EtherType::ARP, &buf);
     let len = frame.serialize(&mut frame_buf)?;
 
     iface.send(&frame_buf[..len])?;
 
-    crate::serial_println!("[ARP] Request: Who has {}?",
-        super::socket::format_ipv4(tpa));
+    crate::serial_println!(
+        "[ARP] Request: Who has {}?",
+        super::socket::format_ipv4(tpa)
+    );
 
     Ok(())
 }
@@ -338,19 +393,18 @@ pub fn send_to_ip(ip: Ipv4Addr, data: &[u8]) -> Result<(), NetError> {
         let mut iface = iface.lock();
 
         let mut frame_buf = alloc::vec![0u8; 1514];
-        let frame = EthernetFrame::new(
-            mac,
-            iface.mac(),
-            EtherType::IPV4,
-            data,
-        );
+        let frame = EthernetFrame::new(mac, iface.mac(), EtherType::IPV4, data);
         let len = frame.serialize(&mut frame_buf)?;
 
         iface.send(&frame_buf[..len])?;
         Ok(())
     } else {
         // MAC bilinmiyor: paketi kuyruğa al ve ARP isteği gönder
-        ARP_PENDING.lock().entry(next_hop.to_u32()).or_default().push(data.to_vec());
+        ARP_PENDING
+            .lock()
+            .entry(next_hop.to_u32())
+            .or_default()
+            .push(data.to_vec());
         send_request(next_hop)?;
         Err(NetError::WouldBlock)
     }
@@ -377,34 +431,30 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
                 let iface = super::default_interface().ok_or(NetError::NoInterface)?;
                 let mut iface = iface.lock();
 
-                let reply = ArpHeader::new_reply(
-                    iface.mac(),
-                    local,
-                    arp.sha,
-                    arp.spa,
-                );
+                let reply = ArpHeader::new_reply(iface.mac(), local, arp.sha, arp.spa);
 
                 let mut buf = alloc::vec![0u8; ArpHeader::SIZE];
                 reply.serialize(&mut buf)?;
 
                 let mut frame_buf = alloc::vec![0u8; 1514];
-                let frame = EthernetFrame::new(
-                    arp.sha,
-                    iface.mac(),
-                    EtherType::ARP,
-                    &buf,
-                );
+                let frame = EthernetFrame::new(arp.sha, iface.mac(), EtherType::ARP, &buf);
                 let len = frame.serialize(&mut frame_buf)?;
 
                 iface.send(&frame_buf[..len])?;
 
-                crate::serial_println!("[ARP] Reply: {} is at {:?}",
-                    super::socket::format_ipv4(local), iface.mac());
+                crate::serial_println!(
+                    "[ARP] Reply: {} is at {:?}",
+                    super::socket::format_ipv4(local),
+                    iface.mac()
+                );
             }
             ArpOperation::Reply => {
                 // Bize ARP yanıtı geldi: add_entry ile önbellek güncellendi
-                crate::serial_println!("[ARP] Reply: {} is at {:?}",
-                    super::socket::format_ipv4(arp.spa), arp.sha);
+                crate::serial_println!(
+                    "[ARP] Reply: {} is at {:?}",
+                    super::socket::format_ipv4(arp.spa),
+                    arp.sha
+                );
             }
             _ => {}
         }
@@ -415,8 +465,49 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
 
 /// ARP önbelleğini döner (get_table ile aynı işlev, alternatif isim).
 pub fn get_cache() -> Vec<(Ipv4Addr, MacAddr)> {
-    ARP_CACHE.lock()
+    ARP_CACHE
+        .lock()
         .iter()
-        .map(|(&ip, &mac)| (Ipv4Addr::from_u32(ip), mac))
+        .map(|(&ip, entry)| (Ipv4Addr::from_u32(ip), entry.mac))
         .collect()
+}
+
+/// ARP önbelleğindeki süresi dolmuş girişleri kaldırır.
+///
+/// ARP_CACHE_TIMEOUT (1200 tick ≈ 20 dakika) geçen girişler temizlenir.
+/// Periyodik olarak çağrılmalıdır (timer task veya ağ döngüsünden).
+pub fn arp_cache_gc() {
+    let now = crate::interrupts::get_ticks();
+    let mut cache = ARP_CACHE.lock();
+    cache.retain(|_ip, entry| now.wrapping_sub(entry.timestamp) < ARP_CACHE_TIMEOUT);
+}
+
+/// Gratuitous ARP gönderir.
+///
+/// Gratuitous ARP, ağdaki diğer cihazların ARP tablolarını güncellemek
+/// için gönderilen istenmeyen ARP yanıtıdır. IP çakışma tespiti ve
+/// yük devretme (failover) senaryolarında kullanılır.
+///
+/// sender_ip = target_ip = bizim IP, hedef MAC = broadcast
+pub fn send_gratuitous(ip: Ipv4Addr, mac: MacAddr) -> Result<(), NetError> {
+    let iface = super::default_interface().ok_or(NetError::NoInterface)?;
+    let mut iface = iface.lock();
+
+    // Gratuitous ARP: sender ve target IP aynı, reply olarak broadcast
+    let garp = ArpHeader::new_reply(mac, ip, MacAddr::BROADCAST, ip);
+    let mut buf = vec![0u8; ArpHeader::SIZE];
+    garp.serialize(&mut buf)?;
+
+    let mut frame_buf = vec![0u8; 1514];
+    let frame = EthernetFrame::new(MacAddr::BROADCAST, mac, EtherType::ARP, &buf);
+    let len = frame.serialize(&mut frame_buf)?;
+
+    iface.send(&frame_buf[..len])?;
+
+    crate::serial_println!(
+        "[ARP] Gratuitous ARP sent for {}",
+        super::socket::format_ipv4(ip)
+    );
+
+    Ok(())
 }

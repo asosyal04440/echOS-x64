@@ -19,7 +19,7 @@
 //! - **task**: Preemptive multitasking scheduler
 
 #![no_std]
-#![feature(abi_x86_interrupt)]
+#![cfg_attr(any(target_os = "none", target_os = "uefi"), feature(abi_x86_interrupt))]
 #![feature(c_variadic)]
 #![allow(dead_code)]
 #![allow(clippy::all)]
@@ -35,6 +35,8 @@
 )]
 
 extern crate alloc;
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+extern crate std;
 
 // ============================================================================
 // MODÜLLER
@@ -68,6 +70,8 @@ pub mod boot;
 
 /// CPU yapılandırması (GDT, IDT, SMP, ACPI)
 pub mod cpu;
+
+pub mod platform;
 
 /// VGA bitmap fontları
 pub mod font;
@@ -108,8 +112,15 @@ pub mod interrupts;
 /// Inter-process communication (süreçler arası iletişim)
 pub mod ipc;
 
+/// Sistem servisleri (Faz 3) - EchDisplay, EchInput, EchAudio, EchStore
+pub mod services;
+
 /// Grafiksel kullanıcı arayüzü
 pub mod gui;
+/// Kişiselleştirme ve etkileşim motoru (FAZ VII)
+pub mod personalization;
+/// Uyumluluk/ekosistem koordinatörü (FAZ VIII)
+pub mod ecosystem;
 
 /// Tile-based grafik engine
 pub mod gfx;
@@ -120,18 +131,25 @@ pub mod gdt;
 /// Sistem çağrısı arayüzü — kullanıcı alanından çekirdek servislerine erişim kapısı.
 pub mod syscall;
 
+pub mod affinity;
+pub mod atomic_ops;
+pub mod cgroups;
+pub mod ebpf;
+pub mod ebpf_jit;
+pub mod hotplug;
+pub mod memory_barriers;
+pub mod mount_namespace;
+pub mod numa;
+pub mod pid_namespace;
+pub mod power;
+pub mod preempt;
+pub mod profiler;
 /// Rastgele sayı üretici
 pub mod random;
-pub mod tty;
-pub mod memory_barriers;
 pub mod rcu;
-pub mod preempt;
-pub mod atomic_ops;
-pub mod hotplug;
-pub mod numa;
-pub mod power;
 pub mod topology;
-pub mod affinity;
+pub mod tty;
+pub mod uts_user_ns;
 
 /// Debug araçları
 pub mod debug;
@@ -150,16 +168,38 @@ pub mod net;
 pub mod crypto;
 
 pub mod elf;
+pub mod ironshim_bridge;
 pub mod linux_glue;
+/// POSIX uyumluluk katmanı — syscall dispatcher + pipe/sem/msgq/dlopen alt modülleri
+#[path = "posix.rs"]
 pub mod posix;
 pub mod shim_layer;
-pub mod ironshim_bridge;
 pub mod vdso;
 
 /// Sanallaştırma desteği (VMX/SVM, EPT) — hypervisor yetenekleri sağlar.
 /// Intel VT-x ve AMD-V donanım sanallaştırmasını kullanır.
 pub mod virt;
+pub mod valkyrie_virt;
+
+/// Makine öğrenimi motoru (ONNX Runtime) — AI model çıkartımı
+/// CPU/GPU hızlandırmalı sinir ağı çıkarımı sağlar.
+pub mod ml;
+
+/// Ses işleme sistemi — gerçek zamanlı DSP ve efektler
+/// Profesyonel ses işleme yetenekleri sağlar.
+pub mod audio;
 
 /// GPU 3D API — Vulkan benzeri grafik API'si.
 /// Shader, render pass ve pipeline kavramlarını uygular.
 pub mod gpu3d;
+
+/// Init sistemi — PID 1 yöneticisi, servis denetimi, runlevel yönetimi
+pub mod init;
+
+/// Valkyrie-V hypervisor bridge — pure Rust integration
+#[cfg(feature = "valkyrie")]
+pub mod valkyrie_bridge;
+
+/// Windows NT Native ABI - Lock-Free implementation
+/// Windows syscall'larını doğrudan echOS lock-free yapılarına map eder
+pub mod win32_abi;

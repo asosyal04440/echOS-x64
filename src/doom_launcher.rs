@@ -8,11 +8,11 @@
 //! IWAD (Internal WAD): Resmi id Software dosyası.
 //! PWAD (Patch WAD): Kullanıcı tarafından oluşturulan ek içerik.
 
-use alloc::vec::Vec;
-use alloc::vec;
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
-use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 // ============================================================================
@@ -41,7 +41,7 @@ const DOOM_SHAREWARE_SIZE: usize = 4_196_020;
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct WadHeader {
-    pub identification: [u8; 4],  // "IWAD" veya "PWAD" — dosya türünü belirler
+    pub identification: [u8; 4], // "IWAD" veya "PWAD" — dosya türünü belirler
     pub num_lumps: u32,
     pub info_table_offset: u32,
 }
@@ -121,9 +121,7 @@ impl WadFile {
         }
 
         // Başlığı ayrıştır — unsafe: C-benzeri ham bellek okuma
-        let header = unsafe {
-            core::ptr::read(data.as_ptr() as *const WadHeader)
-        };
+        let header = unsafe { core::ptr::read(data.as_ptr() as *const WadHeader) };
 
         if !header.is_valid() {
             crate::serial_println!("[WAD] Geçersiz WAD başlığı");
@@ -143,9 +141,8 @@ impl WadFile {
                 break;
             }
 
-            let entry = unsafe {
-                core::ptr::read(data.as_ptr().add(offset) as *const WadLumpEntry)
-            };
+            let entry =
+                unsafe { core::ptr::read(data.as_ptr().add(offset) as *const WadLumpEntry) };
 
             lumps.push(entry);
         }
@@ -404,12 +401,10 @@ pub fn cmd_doom(args: &[&str]) -> String {
     }
 
     match args[0] {
-        "download" => {
-            match download_and_launch() {
-                Ok(()) => "Doom indirildi ve başlatıldı!\n".to_string(),
-                Err(e) => alloc::format!("Hata: {}\n", e),
-            }
-        }
+        "download" => match download_and_launch() {
+            Ok(()) => "Doom indirildi ve başlatıldı!\n".to_string(),
+            Err(e) => alloc::format!("Hata: {}\n", e),
+        },
         "launch" => {
             let mut launcher = DOOM_LAUNCHER.lock();
             match launcher.launch() {

@@ -6,8 +6,8 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -33,10 +33,10 @@ pub const IPC_INFO: i32 = 3;
 /// MSGMNB: Kuyrukta aynı anda olabilecek toplam bayt (16 KB)
 /// MSGMNI: Sistemde olabilecek toplam kuyruk ID sayısı
 /// MSGTQL: Sistemde aynı anda olabilecek toplam mesaj sayısı
-pub const MSGMAX: usize = 8192;        // Max message size
-pub const MSGMNB: usize = 16384;       // Default max bytes on queue
-pub const MSGMNI: usize = 128;         // Max message queue IDs
-pub const MSGTQL: usize = 256;         // Max messages system-wide
+pub const MSGMAX: usize = 8192; // Max message size
+pub const MSGMNB: usize = 16384; // Default max bytes on queue
+pub const MSGMNI: usize = 128; // Max message queue IDs
+pub const MSGTQL: usize = 256; // Max messages system-wide
 
 /// POSIX mesaj kuyruğu: mesaj öncelik sayısı
 pub const MQ_PRIO_MAX: u32 = 32;
@@ -120,7 +120,7 @@ impl SysvMsgQueue {
             lrpid: AtomicU32::new(0),
             stime: AtomicU64::new(0),
             rtime: AtomicU64::new(0),
-            ctime: AtomicU64::new(crate::task::scheduler::get_ticks()),
+            ctime: AtomicU64::new(crate::task::scheduler::get_ticks() as u64),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
         }
@@ -146,9 +146,11 @@ impl SysvMsgQueue {
 
         // Mesajı kuyruğa ekle (FIFO sırası)
         self.messages.lock().push(msg.clone());
-        self.current_bytes.fetch_add(msg.data.len() as u64, Ordering::SeqCst);
+        self.current_bytes
+            .fetch_add(msg.data.len() as u64, Ordering::SeqCst);
         self.current_msgs.fetch_add(1, Ordering::SeqCst);
-        self.stime.store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
+        self.stime
+            .store(crate::task::scheduler::get_ticks() as u64, Ordering::SeqCst);
         self.lspid.store(0, Ordering::SeqCst); // Current PID
 
         Ok(())
@@ -180,9 +182,11 @@ impl SysvMsgQueue {
 
         if let Some(idx) = index {
             let msg = messages.remove(idx);
-            self.current_bytes.fetch_sub(msg.data.len() as u64, Ordering::SeqCst);
+            self.current_bytes
+                .fetch_sub(msg.data.len() as u64, Ordering::SeqCst);
             self.current_msgs.fetch_sub(1, Ordering::SeqCst);
-            self.rtime.store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
+            self.rtime
+                .store(crate::task::scheduler::get_ticks() as u64, Ordering::SeqCst);
             self.lrpid.store(0, Ordering::SeqCst); // Current PID
             return Ok(msg);
         }
@@ -311,7 +315,8 @@ impl PosixMsgQueue {
 
         // Önceliğe göre sıralı ekleme - yüksek öncelik öne geçer
         let mut messages = self.messages.lock();
-        let pos = messages.iter()
+        let pos = messages
+            .iter()
             .position(|m| m.priority < msg.priority)
             .unwrap_or(messages.len());
         messages.insert(pos, msg);
@@ -359,7 +364,8 @@ impl PosixMsgQueue {
     /// Kuyruk bayraklarını ayarla (mq_setattr için)
     pub fn set_attr(&self, flags: u32) {
         self.mq_flags.store(flags, Ordering::SeqCst);
-        self.nonblocking.store((flags & O_NONBLOCK) != 0, Ordering::SeqCst);
+        self.nonblocking
+            .store((flags & O_NONBLOCK) != 0, Ordering::SeqCst);
     }
 }
 
@@ -404,7 +410,7 @@ pub struct MsgStats {
 }
 
 impl MsgQueueManager {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             sysv_queues: Mutex::new(BTreeMap::new()),
             posix_queues: Mutex::new(BTreeMap::new()),
@@ -450,8 +456,13 @@ impl MsgQueueManager {
                 drop(queues);
                 self.sysv_queues.lock().remove(&msqid);
                 Ok(MsqQueueStats {
-                    msg_qbytes: 0, msg_qnum: 0, msg_lspid: 0, msg_lrpid: 0,
-                    msg_stime: 0, msg_rtime: 0, msg_ctime: 0,
+                    msg_qbytes: 0,
+                    msg_qnum: 0,
+                    msg_lspid: 0,
+                    msg_lrpid: 0,
+                    msg_stime: 0,
+                    msg_rtime: 0,
+                    msg_ctime: 0,
                 })
             }
             IPC_STAT => {
@@ -489,7 +500,13 @@ impl MsgQueueManager {
     }
 
     /// POSIX mesaj kuyruğu oluştur veya aç (mq_open sistem çağrısı)
-    pub fn mq_open(&self, name: &str, oflag: i32, mode: u32, attr: Option<MqAttr>) -> Result<Arc<PosixMsgQueue>, MsgError> {
+    pub fn mq_open(
+        &self,
+        name: &str,
+        oflag: i32,
+        mode: u32,
+        attr: Option<MqAttr>,
+    ) -> Result<Arc<PosixMsgQueue>, MsgError> {
         let mut queues = self.posix_queues.lock();
 
         if let Some(queue) = queues.get(name) {
@@ -552,12 +569,12 @@ lazy_static::lazy_static! {
 /// Linux hata kodlarından türetilmiştir (ENOENT, EEXIST, EAGAIN vb.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsgError {
-    NotFound,          // ENOENT: Kuyruk bulunamadı
-    AlreadyExists,     // EEXIST: Kuyruk zaten mevcut
-    WouldBlock,        // EAGAIN: Bloke olunması gerekiyor
-    MessageTooLong,    // EMSGSIZE: Mesaj çok büyük
-    InvalidCommand,    // EINVAL: Geçersiz komut
-    PermissionDenied,  // EACCES: Yetki yok
+    NotFound,         // ENOENT: Kuyruk bulunamadı
+    AlreadyExists,    // EEXIST: Kuyruk zaten mevcut
+    WouldBlock,       // EAGAIN: Bloke olunması gerekiyor
+    MessageTooLong,   // EMSGSIZE: Mesaj çok büyük
+    InvalidCommand,   // EINVAL: Geçersiz komut
+    PermissionDenied, // EACCES: Yetki yok
 }
 
 // ============================================================================
@@ -569,9 +586,9 @@ pub enum MsgError {
 pub fn sys_msgget(key: i32, msgflg: i32) -> i32 {
     match MSG_QUEUE_MANAGER.msgget(key, msgflg) {
         Ok(id) => id,
-        Err(MsgError::NotFound) => -2,     // -ENOENT
+        Err(MsgError::NotFound) => -2,       // -ENOENT
         Err(MsgError::AlreadyExists) => -17, // -EEXIST
-        Err(_) => -22,                      // -EINVAL
+        Err(_) => -22,                       // -EINVAL
     }
 }
 

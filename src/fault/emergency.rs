@@ -44,7 +44,7 @@
 //! İkinci bir çağrı hemen döner — bu sayede döngüsel hata fırtınaları (panic loops)
 //! sistemi kilitlemez.
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 // ============================================================================
 // ACİL DURUM DURUMU
@@ -79,48 +79,46 @@ impl EmergencyState {
             attempt_recovery: AtomicBool::new(true),
         }
     }
-    
+
     /// Acil durum moduna girer: dosya sistemlerini senkronize eder ve modülleri devre dışı bırakır
     pub fn enter(&self, reason: &str) {
         if self.active.swap(true, Ordering::SeqCst) {
             return; // Zaten acil durum modunda
         }
-        
+
         self.count.fetch_add(1, Ordering::SeqCst);
-        self.start_time.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.start_time
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
         *self.reason.lock() = Some(alloc::string::String::from(reason));
-        
+
         crate::serial_println!("[EMERGENCY] === ENTERING EMERGENCY MODE ===");
         crate::serial_println!("[EMERGENCY] Reason: {}", reason);
-        
+
         // Kritik olmayan modülleri devre dışı bırak
         crate::fault::degradation::set_level(crate::fault::severity::RecoveryLevel::Level4);
-        
+
         // Dosya sistemlerini senkronize et
         crate::serial_println!("[EMERGENCY] Dosya sistemleri senkronize ediliyor...");
         crate::fault::recovery_modules::fs::emergency_sync();
-        
+
         // Sistem durumunu günlüklere yaz
         self.log_state();
     }
-    
+
     /// Acil durum modundan çıkar ve normal çalışmaya döner
     pub fn exit(&self) {
         if !self.active.swap(false, Ordering::SeqCst) {
             return; // Zaten acil durum modunda değil
         }
-        
+
         crate::serial_println!("[EMERGENCY] === EXITING EMERGENCY MODE ===");
-        
+
         *self.reason.lock() = None;
-        
+
         // Normal çalışmayı geri yükle
         crate::fault::degradation::set_level(crate::fault::severity::RecoveryLevel::Level0);
     }
-    
+
     /// Mevcut sistem durumunu seri porta yazar (teşhis amaçlı)
     fn log_state(&self) {
         // Bellek durumu
@@ -128,19 +126,15 @@ impl EmergencyState {
             let mm: &crate::memory::MemoryManager = mm;
             let free = mm.free_frames();
             let total = mm.total_frames();
-            crate::serial_println!(
-                "[EMERGENCY] Memory: {} / {} frames free",
-                free,
-                total
-            );
+            crate::serial_println!("[EMERGENCY] Memory: {} / {} frames free", free, total);
         }
-        
+
         // CPU durumu
         crate::serial_println!(
             "[EMERGENCY] CPU'lar: {} çevrimici",
             crate::cpu::smp::online_cpu_count()
         );
-        
+
         // Hata istatistikleri
         let stats = crate::fault::get_stats();
         crate::serial_println!(
@@ -149,7 +143,7 @@ impl EmergencyState {
             stats.total_recoveries,
             stats.recovery_level
         );
-        
+
         // Zamanlayıcı durumu
         let sched_stats = crate::task::scheduler::get_stats();
         crate::serial_println!(
@@ -159,36 +153,34 @@ impl EmergencyState {
             sched_stats.zombie_count
         );
     }
-    
+
     /// Acil durum modunun aktif olup olmadığını kontrol eder
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::SeqCst)
     }
-    
+
     /// Acil durum nedenini döndürür
     pub fn reason(&self) -> Option<alloc::string::String> {
         self.reason.lock().clone()
     }
-    
+
     /// Acil durum süresini tick cinsinden döndürür
     pub fn duration(&self) -> usize {
         if !self.active.load(Ordering::SeqCst) {
             return 0;
         }
-        
-        crate::task::scheduler::get_ticks().saturating_sub(
-            self.start_time.load(Ordering::SeqCst)
-        )
+
+        crate::task::scheduler::get_ticks().saturating_sub(self.start_time.load(Ordering::SeqCst))
     }
-    
+
     /// Güvenli durdurma — veriyi koruyarak sistemi durdurur
     pub fn safe_halt(&self) -> ! {
         crate::serial_println!("[EMERGENCY] === SAFE HALT ===");
         crate::serial_println!("[EMERGENCY] System is halting safely");
-        
+
         // Son senkronizasyon
         crate::fault::recovery_modules::fs::emergency_sync();
-        
+
         // Kesmeleri devre dışı bırak ve dur
         unsafe {
             x86_64::instructions::interrupts::disable();
@@ -197,7 +189,7 @@ impl EmergencyState {
             }
         }
     }
-    
+
     /// Acil durum yeniden başlatması (reboot)
     ///
     /// Önce dosya sistemlerini senkronize eder, sonra şu sırayla yeniden başlatmayı dener:
@@ -208,19 +200,19 @@ impl EmergencyState {
     ///     o da işlenemez → triple fault → CPU sıfırlanır.
     pub fn reboot(&self) -> ! {
         crate::serial_println!("[EMERGENCY] === EMERGENCY REBOOT ===");
-        
+
         // Son senkronizasyon
         crate::fault::recovery_modules::fs::emergency_sync();
-        
+
         // ACPI sıfırlamayı dene
         crate::serial_println!("[EMERGENCY] ACPI sıfırlama deneniyor...");
-        
+
         // ACPI başarısız olursa klavye denetleyicisini dene
         // unsafe { ... }
-        
+
         // Hiçbiri işe yaramazsa triple fault ile zorla sıfırla
         crate::serial_println!("[EMERGENCY] Triple fault ile sıfırlama zorlanıyor");
-        
+
         unsafe {
             // Geçersiz IDT yükle ve kesme tetikle
             core::arch::asm!(

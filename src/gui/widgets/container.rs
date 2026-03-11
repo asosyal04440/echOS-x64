@@ -38,6 +38,10 @@ pub struct Panel<'a> {
     background: u32,
     border: bool,
     title: Option<String>,
+    /// İç boşluk (padding) — [top, right, bottom, left] piksel
+    padding: [i32; 4],
+    /// Dış boşluk (margin) — [top, right, bottom, left] piksel
+    margin: [i32; 4],
 }
 
 impl<'a> Panel<'a> {
@@ -49,6 +53,8 @@ impl<'a> Panel<'a> {
             background: Theme::WINDOW_BG.to_u32(),
             border: true,
             title: None,
+            padding: [0; 4],
+            margin: [0; 4],
         }
     }
 
@@ -68,6 +74,47 @@ impl<'a> Panel<'a> {
     pub fn with_border(mut self, border: bool) -> Self {
         self.border = border;
         self
+    }
+
+    /// Builder: dört taraflı iç boşluk (padding) ayarlar.
+    /// Sıralama: [top, right, bottom, left].
+    pub fn with_padding(mut self, top: i32, right: i32, bottom: i32, left: i32) -> Self {
+        self.padding = [top, right, bottom, left];
+        self
+    }
+
+    /// Builder: tek değerli eşit iç boşluk ayarlar.
+    pub fn with_padding_all(mut self, p: i32) -> Self {
+        self.padding = [p, p, p, p];
+        self
+    }
+
+    /// Builder: dört taraflı dış boşluk (margin) ayarlar.
+    pub fn with_margin(mut self, top: i32, right: i32, bottom: i32, left: i32) -> Self {
+        self.margin = [top, right, bottom, left];
+        self
+    }
+
+    /// Builder: tek değerli eşit dış boşluk ayarlar.
+    pub fn with_margin_all(mut self, m: i32) -> Self {
+        self.margin = [m, m, m, m];
+        self
+    }
+
+    /// Padding uygulandıktan sonra kullanılabilir iç Rect'i döndürür.
+    pub fn content_rect(&self) -> Rect {
+        let title_offset = if self.title.is_some() { 24 } else { 0 };
+        Rect::new(
+            self.rect.x + self.margin[3] + self.padding[3],
+            self.rect.y + self.margin[0] + self.padding[0] + title_offset,
+            self.rect.width - self.margin[1] - self.margin[3] - self.padding[1] - self.padding[3],
+            self.rect.height
+                - self.margin[0]
+                - self.margin[2]
+                - self.padding[0]
+                - self.padding[2]
+                - title_offset,
+        )
     }
 
     /// Alt widget ekler. `Box<dyn Widget>` alarak trait object sahipliğini devralır.
@@ -93,10 +140,11 @@ impl<'a> Panel<'a> {
 
 impl<'a> Widget for Panel<'a> {
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
+        // Margin uygulanmış çizim alanı
+        let x = (self.rect.x + self.margin[3]) as usize;
+        let y = (self.rect.y + self.margin[0]) as usize;
+        let w = (self.rect.width - self.margin[1] - self.margin[3]) as usize;
+        let h = (self.rect.height - self.margin[0] - self.margin[2]) as usize;
 
         // Arka plan rengi tüm paneli doldurur
         fb.draw_rect(x, y, w, h, self.background);
@@ -388,7 +436,11 @@ impl<'a> Widget for TabControl<'a> {
         }
         for row in content.y as usize..(content.y as usize + content.height as usize) {
             fb.plot_pixel(content.x as usize, row, Theme::BORDER.to_u32());
-            fb.plot_pixel(content.x as usize + content.width as usize - 1, row, Theme::BORDER.to_u32());
+            fb.plot_pixel(
+                content.x as usize + content.width as usize - 1,
+                row,
+                Theme::BORDER.to_u32(),
+            );
         }
 
         // Aktif sekme içeriğini çiz: yalnızca aktif sekmenin paneli görünür.

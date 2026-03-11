@@ -18,7 +18,7 @@
 //! `scroll_offset`, görünür pencerenin metnin başından ne kadar ofsetlendiğini tutar;
 //! imleç ekran dışına çıktığında `update_scroll` bunu otomatik ayarlar.
 
-use super::{Rect, Widget, MOD_CTRL};
+use super::{Rect, Widget, MOD_CTRL, MOD_SHIFT};
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::Theme;
 use alloc::string::String;
@@ -46,6 +46,10 @@ pub struct TextBox {
     max_length: usize,
     /// Şifre modu; true ise karakterler "*" olarak maskelenir
     password_mode: bool,
+    /// Seçim başlangıç konumu (Some ise seçim aktif)
+    selection_start: Option<usize>,
+    /// Seçim bitiş konumu (imleç konumuna eşittir)
+    selection_end: Option<usize>,
 }
 
 impl TextBox {
@@ -61,6 +65,8 @@ impl TextBox {
             scroll_offset: 0,
             max_length: 256,
             password_mode: false,
+            selection_start: None,
+            selection_end: None,
         }
     }
 
@@ -170,6 +176,63 @@ impl TextBox {
         self.cursor_pos = self.text.len();
         self.update_scroll();
     }
+
+    /// Seçim aktif mi?
+    pub fn has_selection(&self) -> bool {
+        if let (Some(s), Some(e)) = (self.selection_start, self.selection_end) {
+            s != e
+        } else {
+            false
+        }
+    }
+
+    /// Seçili metnin (start, end) aralığını normalleştirilmiş olarak döndürür.
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        if let (Some(s), Some(e)) = (self.selection_start, self.selection_end) {
+            if s != e {
+                Some((s.min(e), s.max(e)))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Seçili metni döndürür.
+    pub fn selected_text(&self) -> &str {
+        if let Some((start, end)) = self.selection_range() {
+            &self.text[start..end]
+        } else {
+            ""
+        }
+    }
+
+    /// Seçili metni siler; imleç seçimin başına taşınır.
+    fn delete_selection(&mut self) {
+        if let Some((start, end)) = self.selection_range() {
+            self.text.drain(start..end);
+            self.cursor_pos = start;
+            self.clear_selection();
+            self.update_scroll();
+        }
+    }
+
+    /// Seçimi temizler.
+    fn clear_selection(&mut self) {
+        self.selection_start = None;
+        self.selection_end = None;
+    }
+
+    /// Shift basılıyken seçim başlatır veya genişletir.
+    fn extend_selection(&mut self) {
+        if self.selection_start.is_none() {
+            // Yeni seçim başlat — anchor noktası mevcut imleç konumu
+            self.selection_start = Some(self.cursor_pos);
+        }
+        // selection_end her zaman cursor_pos'u takip eder
+        self.selection_end = Some(self.cursor_pos);
+    }
 }
 
 impl Widget for TextBox {
@@ -211,7 +274,12 @@ impl Widget for TextBox {
 
         if self.text.is_empty() && !self.focused {
             // Boş ve odak dışındaysa placeholder soluk renkte gösterilir
-            fb.draw_string(text_x, text_y, &self.placeholder, Theme::TEXT_SECONDARY.to_u32());
+            fb.draw_string(
+                text_x,
+                text_y,
+                &self.placeholder,
+                Theme::TEXT_SECONDARY.to_u32(),
+            );
         } else {
             // Şifre modunda gerçek karakterler yerine "*" kullanılır
             let display_text = if self.password_mode {
@@ -222,6 +290,20 @@ impl Widget for TextBox {
                 let end = (start + (w - 10) / 8).min(self.text.len());
                 alloc::string::ToString::to_string(&self.text[start..end])
             };
+
+            // Seçim vurgusu: seçim aralığı görünür pencereyle kesişiyorsa mavi arka plan çiz
+            if let Some((sel_s, sel_e)) = self.selection_range() {
+                let vis_start = self.scroll_offset;
+                let vis_end = vis_start + (w - 10) / 8;
+                let hl_start = sel_s.max(vis_start);
+                let hl_end = sel_e.min(vis_end);
+                if hl_start < hl_end {
+                    let hl_x = text_x + (hl_start - vis_start) * 8;
+                    let hl_w = (hl_end - hl_start) * 8;
+                    fb.draw_rect(hl_x, text_y, hl_w, 16, Theme::ACCENT_PRIMARY.to_u32());
+                }
+            }
+
             fb.draw_string(text_x, text_y, &display_text, Theme::TEXT_PRIMARY.to_u32());
         }
 
@@ -244,6 +326,7 @@ impl Widget for TextBox {
     fn on_click(&mut self, x: i32, y: i32) -> bool {
         if self.rect.contains(x, y) {
             self.focused = true;
+            self.clear_selection();
             // Fare X'ten imleç pozisyonunu hesapla: (x - text_x) / 8 karakter
             let text_x = self.rect.x + 5;
             let click_offset = ((x - text_x) / 8) as usize;
@@ -264,16 +347,84 @@ impl Widget for TextBox {
             return false;
         }
 
+        let shift = (modifiers & MOD_SHIFT) != 0;
+
         match scancode {
-            0x0E => self.backspace(),           // Backspace
-            0x53 => self.delete_char(),          // Delete
-            0x4B => self.move_cursor_left(),     // Left arrow
-            0x4D => self.move_cursor_right(),    // Right arrow
-            0x47 => self.move_cursor_home(),     // Home
-            0x4F => self.move_cursor_end(),      // End
+            0x0E => {
+                // Backspace: seçim varsa seçimi sil, yoksa normal backspace
+                if self.has_selection() {
+                    self.delete_selection();
+                } else {
+                    self.backspace();
+                }
+            }
+            0x53 => {
+                // Delete: seçim varsa seçimi sil, yoksa normal delete
+                if self.has_selection() {
+                    self.delete_selection();
+                } else {
+                    self.delete_char();
+                }
+            }
+            0x4B => {
+                // Left arrow
+                if shift {
+                    if self.selection_start.is_none() {
+                        self.selection_start = Some(self.cursor_pos);
+                    }
+                    self.move_cursor_left();
+                    self.selection_end = Some(self.cursor_pos);
+                } else {
+                    self.clear_selection();
+                    self.move_cursor_left();
+                }
+            }
+            0x4D => {
+                // Right arrow
+                if shift {
+                    if self.selection_start.is_none() {
+                        self.selection_start = Some(self.cursor_pos);
+                    }
+                    self.move_cursor_right();
+                    self.selection_end = Some(self.cursor_pos);
+                } else {
+                    self.clear_selection();
+                    self.move_cursor_right();
+                }
+            }
+            0x47 => {
+                // Home
+                if shift {
+                    if self.selection_start.is_none() {
+                        self.selection_start = Some(self.cursor_pos);
+                    }
+                    self.move_cursor_home();
+                    self.selection_end = Some(self.cursor_pos);
+                } else {
+                    self.clear_selection();
+                    self.move_cursor_home();
+                }
+            }
+            0x4F => {
+                // End
+                if shift {
+                    if self.selection_start.is_none() {
+                        self.selection_start = Some(self.cursor_pos);
+                    }
+                    self.move_cursor_end();
+                    self.selection_end = Some(self.cursor_pos);
+                } else {
+                    self.clear_selection();
+                    self.move_cursor_end();
+                }
+            }
             _ => {
                 // Ctrl basılı değilse ve geçerli bir karakter geldiyse ekle
                 if key != '\0' && (modifiers & MOD_CTRL) == 0 {
+                    // Seçim varsa önce sil, sonra yeni karakteri ekle
+                    if self.has_selection() {
+                        self.delete_selection();
+                    }
                     self.insert_char(key);
                 }
             }
@@ -540,27 +691,31 @@ impl Widget for TextArea {
 
         match scancode {
             0x0E => self.backspace(),
-            0x48 => { // Up arrow — yukarı satıra geç; sütunu mevcut satırın uzunluğuna kırp
+            0x48 => {
+                // Up arrow — yukarı satıra geç; sütunu mevcut satırın uzunluğuna kırp
                 if self.cursor_line > 0 {
                     self.cursor_line -= 1;
                     self.cursor_col = self.cursor_col.min(self.lines[self.cursor_line].len());
                     self.update_scroll();
                 }
             }
-            0x50 => { // Down arrow — aşağı satıra geç; sütunu kırp
+            0x50 => {
+                // Down arrow — aşağı satıra geç; sütunu kırp
                 if self.cursor_line < self.lines.len() - 1 {
                     self.cursor_line += 1;
                     self.cursor_col = self.cursor_col.min(self.lines[self.cursor_line].len());
                     self.update_scroll();
                 }
             }
-            0x4B => { // Left arrow — solu sola bir karakter kaydır
+            0x4B => {
+                // Left arrow — solu sola bir karakter kaydır
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
                     self.update_scroll();
                 }
             }
-            0x4D => { // Right arrow — sağa bir karakter kaydır
+            0x4D => {
+                // Right arrow — sağa bir karakter kaydır
                 if self.cursor_col < self.lines[self.cursor_line].len() {
                     self.cursor_col += 1;
                     self.update_scroll();

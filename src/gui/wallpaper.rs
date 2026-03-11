@@ -19,13 +19,13 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
+use libm::{cosf, sinf, sqrtf};
 use spin::Mutex;
-use libm::{sinf, cosf, sqrtf};
 
 use crate::gop::framebuffer::Framebuffer;
-use crate::gui::theme::{Theme, Color};
+use crate::gui::theme::{Color, Theme};
 
 // ============================================================================
 // DUVAR KAĞIDI SABİTLERİ
@@ -227,17 +227,26 @@ impl WallpaperManager {
     /// olmak üzere toplam 13 türde duvar kağıdı tanımlanmaktadır.
     fn add_default_wallpapers(&mut self) {
         // Düz renkler
-        self.wallpapers.push(Wallpaper::solid(0, "Solid Black", 0x000000));
-        self.wallpapers.push(Wallpaper::solid(1, "Solid Dark", 0x1E1E1E));
-        self.wallpapers.push(Wallpaper::solid(2, "Solid Blue", 0x003366));
+        self.wallpapers
+            .push(Wallpaper::solid(0, "Solid Black", 0x000000));
+        self.wallpapers
+            .push(Wallpaper::solid(1, "Solid Dark", 0x1E1E1E));
+        self.wallpapers
+            .push(Wallpaper::solid(2, "Solid Blue", 0x003366));
 
         // Degradeler
-        self.wallpapers.push(Wallpaper::gradient(3, "Sunset", 0xFF6B35, 0x1E1E2E));
-        self.wallpapers.push(Wallpaper::gradient(4, "Ocean", 0x006994, 0x001F3F));
-        self.wallpapers.push(Wallpaper::gradient(5, "Forest", 0x228B22, 0x0B3D0B));
-        self.wallpapers.push(Wallpaper::gradient(6, "Night Sky", 0x0F0F23, 0x000011));
-        self.wallpapers.push(Wallpaper::gradient(7, "Dawn", 0xFFB347, 0x87CEEB));
-        self.wallpapers.push(Wallpaper::gradient(8, "Dusk", 0x4B0082, 0x191970));
+        self.wallpapers
+            .push(Wallpaper::gradient(3, "Sunset", 0xFF6B35, 0x1E1E2E));
+        self.wallpapers
+            .push(Wallpaper::gradient(4, "Ocean", 0x006994, 0x001F3F));
+        self.wallpapers
+            .push(Wallpaper::gradient(5, "Forest", 0x228B22, 0x0B3D0B));
+        self.wallpapers
+            .push(Wallpaper::gradient(6, "Night Sky", 0x0F0F23, 0x000011));
+        self.wallpapers
+            .push(Wallpaper::gradient(7, "Dawn", 0xFFB347, 0x87CEEB));
+        self.wallpapers
+            .push(Wallpaper::gradient(8, "Dusk", 0x4B0082, 0x191970));
 
         // Radyal degradeler
         self.wallpapers.push(Wallpaper {
@@ -253,9 +262,12 @@ impl WallpaperManager {
         });
 
         // Animasyonlu
-        self.wallpapers.push(Wallpaper::animated(10, "Stars", AnimatedType::Stars));
-        self.wallpapers.push(Wallpaper::animated(11, "Aurora", AnimatedType::Aurora));
-        self.wallpapers.push(Wallpaper::animated(12, "Waves", AnimatedType::Waves));
+        self.wallpapers
+            .push(Wallpaper::animated(10, "Stars", AnimatedType::Stars));
+        self.wallpapers
+            .push(Wallpaper::animated(11, "Aurora", AnimatedType::Aurora));
+        self.wallpapers
+            .push(Wallpaper::animated(12, "Waves", AnimatedType::Waves));
 
         // Varsayılanı ata
         if !self.wallpapers.is_empty() {
@@ -297,7 +309,11 @@ impl WallpaperManager {
 
     /// Önceki duvar kağıdı
     pub fn prev_wallpaper(&mut self) {
-        let prev = if self.current_index == 0 { self.wallpapers.len() - 1 } else { self.current_index - 1 };
+        let prev = if self.current_index == 0 {
+            self.wallpapers.len() - 1
+        } else {
+            self.current_index - 1
+        };
         self.set_wallpaper(prev);
     }
 
@@ -401,7 +417,11 @@ impl WallpaperManager {
                     }
                 }
                 // Geçerlisini sağdan çiz
-                self.draw_wallpaper_offset(fb, &wallpaper.wallpaper_type, self.screen_width as i32 - offset);
+                self.draw_wallpaper_offset(
+                    fb,
+                    &wallpaper.wallpaper_type,
+                    self.screen_width as i32 - offset,
+                );
             }
             TransitionType::SlideRight => {
                 let offset = (self.screen_width as f32 * progress) as i32;
@@ -411,7 +431,11 @@ impl WallpaperManager {
                         self.draw_wallpaper_offset(fb, &prev.wallpaper_type, offset);
                     }
                 }
-                self.draw_wallpaper_offset(fb, &wallpaper.wallpaper_type, -(self.screen_width as i32) + offset);
+                self.draw_wallpaper_offset(
+                    fb,
+                    &wallpaper.wallpaper_type,
+                    -(self.screen_width as i32) + offset,
+                );
             }
             _ => {
                 // Varsayılan: çapraz geçiş
@@ -423,7 +447,12 @@ impl WallpaperManager {
     /// Belirtilen duvar kağıdı türünü verilen alfa değeriyle framebuffer'a çizer.
     /// `alpha` değeri 0.0-1.0 arasındadır; geçiş sırasında katman saydamlığını belirler.
     /// Görüntü (Image) türü henüz implemente edilmediğinden düz renge düşer.
-    fn draw_wallpaper_type(&self, fb: &mut Framebuffer, wallpaper_type: &WallpaperType, alpha: f32) {
+    fn draw_wallpaper_type(
+        &self,
+        fb: &mut Framebuffer,
+        wallpaper_type: &WallpaperType,
+        alpha: f32,
+    ) {
         match wallpaper_type {
             WallpaperType::Solid(color) => {
                 let color = Self::alpha_color(*color, alpha);
@@ -443,7 +472,10 @@ impl WallpaperManager {
                     }
                 }
             }
-            WallpaperType::RadialGradient { center_color, edge_color } => {
+            WallpaperType::RadialGradient {
+                center_color,
+                edge_color,
+            } => {
                 let center_x = fb.width / 2;
                 let center_y = fb.height / 2;
                 let max_dist = sqrtf((center_x * center_x + center_y * center_y) as f32);
@@ -462,9 +494,16 @@ impl WallpaperManager {
             }
             WallpaperType::Image(_path) => {
                 // Görüntü yüklenip çizilecek - düz renge geri dön
-                self.draw_wallpaper_type(fb, &WallpaperType::Solid(Theme::DESKTOP_BG.to_u32()), alpha);
+                self.draw_wallpaper_type(
+                    fb,
+                    &WallpaperType::Solid(Theme::DESKTOP_BG.to_u32()),
+                    alpha,
+                );
             }
-            WallpaperType::Dynamic { day_image, night_image: _ } => {
+            WallpaperType::Dynamic {
+                day_image,
+                night_image: _,
+            } => {
                 // Zamanı kontrol edip uygun görüntüyü çizecek
                 self.draw_wallpaper_type(fb, &WallpaperType::Image(day_image.clone()), alpha);
             }
@@ -480,7 +519,12 @@ impl WallpaperManager {
         }
     }
 
-    fn draw_wallpaper_offset(&self, fb: &mut Framebuffer, wallpaper_type: &WallpaperType, offset: i32) {
+    fn draw_wallpaper_offset(
+        &self,
+        fb: &mut Framebuffer,
+        wallpaper_type: &WallpaperType,
+        offset: i32,
+    ) {
         // Duvar kağıdını yatay ofsete göre çiz
         match wallpaper_type {
             WallpaperType::Solid(color) => {
@@ -597,9 +641,12 @@ impl WallpaperManager {
                         Self::lerp_color(0x8800FF, 0x00FF88, (hue - 0.5) * 2.0, intensity)
                     };
 
-                    let ptr = unsafe { (fb.base_addr as *mut u32).add(y * fb.pixels_per_scan_line + x) };
+                    let ptr =
+                        unsafe { (fb.base_addr as *mut u32).add(y * fb.pixels_per_scan_line + x) };
                     let bg = unsafe { *ptr };
-                    unsafe { *ptr = Self::blend_color(bg, color); }
+                    unsafe {
+                        *ptr = Self::blend_color(bg, color);
+                    }
                 }
             }
         }
@@ -627,8 +674,11 @@ impl WallpaperManager {
                     // Okyanus mavisi degrade
                     let color = Self::lerp_color(0x006994, 0x001F3F, intensity, intensity);
 
-                    let ptr = unsafe { (fb.base_addr as *mut u32).add(y * fb.pixels_per_scan_line + x) };
-                    unsafe { *ptr = color; }
+                    let ptr =
+                        unsafe { (fb.base_addr as *mut u32).add(y * fb.pixels_per_scan_line + x) };
+                    unsafe {
+                        *ptr = color;
+                    }
                 }
             }
         }
@@ -725,7 +775,10 @@ impl WallpaperManager {
 
     /// Ayarlar için duvar kağıdı listesini al
     pub fn get_wallpaper_list(&self) -> Vec<(u32, String)> {
-        self.wallpapers.iter().map(|w| (w.id, w.name.clone())).collect()
+        self.wallpapers
+            .iter()
+            .map(|w| (w.id, w.name.clone()))
+            .collect()
     }
 }
 

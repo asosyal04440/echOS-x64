@@ -78,8 +78,8 @@ pub enum MemoryZone {
 }
 
 /// Zone sınırları (byte cinsinden)
-const ZONE_DMA_LIMIT: u64 = 16 * 1024 * 1024;           // 16 MB
-const ZONE_DMA32_LIMIT: u64 = 4 * 1024 * 1024 * 1024;   // 4 GB
+const ZONE_DMA_LIMIT: u64 = 16 * 1024 * 1024; // 16 MB
+const ZONE_DMA32_LIMIT: u64 = 4 * 1024 * 1024 * 1024; // 4 GB
 
 impl MemoryZone {
     /// Fiziksel adrese göre zone belirler
@@ -396,7 +396,7 @@ mod tests {
         let mut pmm = FibonacciPmm::empty();
 
         let desc = MemoryDescriptor {
-            phys_start: 0x1000000,  // 16MB — DMA32 zone
+            phys_start: 0x1000000, // 16MB — DMA32 zone
             virt_start: 0x1000000,
             page_count: 1024, // 4MB
             ty: MemoryType::CONVENTIONAL,
@@ -419,16 +419,16 @@ mod tests {
 
         // DMA zone (0-16MB)
         let desc_dma = MemoryDescriptor {
-            phys_start: 0x100000,   // 1MB — DMA zone
+            phys_start: 0x100000, // 1MB — DMA zone
             virt_start: 0x100000,
-            page_count: 256,        // 1MB
+            page_count: 256, // 1MB
             ty: MemoryType::CONVENTIONAL,
             att: uefi::table::boot::MemoryAttribute::empty(),
         };
 
         // NORMAL zone (4GB+)
         let desc_normal = MemoryDescriptor {
-            phys_start: 0x1_0000_0000,  // 4GB — NORMAL zone
+            phys_start: 0x1_0000_0000, // 4GB — NORMAL zone
             virt_start: 0x1_0000_0000,
             page_count: 1024,
             ty: MemoryType::CONVENTIONAL,

@@ -53,6 +53,13 @@ pub struct ProgressBar {
     animated: bool,
     /// Gradyan animasyonunun mevcut kaydırma ofseti (0–19 döngülü)
     animation_offset: u32,
+    /// Belirsiz (indeterminate) mod — değer bilinmiyorken kayar çubuk gösterir.
+    /// true iken, sabit genişlikte bir blok sola-sağa kayarak hareket eder.
+    indeterminate: bool,
+    /// Belirsiz mod kayma pozisyonu (0..width döngülü)
+    indeterminate_pos: i32,
+    /// Belirsiz mod hareket yönü (1 = sağa, -1 = sola)
+    indeterminate_dir: i32,
 }
 
 impl ProgressBar {
@@ -66,7 +73,21 @@ impl ProgressBar {
             show_percentage: true,
             animated: false,
             animation_offset: 0,
+            indeterminate: false,
+            indeterminate_pos: 0,
+            indeterminate_dir: 1,
         }
+    }
+
+    /// Belirsiz (indeterminate) modunu ayarlar.
+    /// Bu modda ilerleme değeri görmezden gelinir, kayar blok çalışır.
+    pub fn set_indeterminate(&mut self, v: bool) {
+        self.indeterminate = v;
+    }
+
+    /// Belirsiz modda olup olmadığını döndürür.
+    pub fn is_indeterminate(&self) -> bool {
+        self.indeterminate
     }
 
     /// Builder kalıbıyla başlangıç değeri ve maksimum ayarlar.
@@ -110,7 +131,7 @@ impl ProgressBar {
 
 impl Widget for ProgressBar {
     /// İlerleme çubuğunu çizer.
-    /// Sırasıyla: arka plan → kenarlık → dolum alanı → yüzde metni.
+    /// Belirsiz modda kayar blok; normal modda dolum alanı.
     fn draw(&self, fb: &mut Framebuffer) {
         let x = self.rect.x as usize;
         let y = self.rect.y as usize;
@@ -120,7 +141,7 @@ impl Widget for ProgressBar {
         // Boş arka plan dikdörtgeni
         fb.draw_rect(x, y, w, h, Theme::BUTTON_BG.to_u32());
 
-        // Dört kenarlık çizgisi — üst/alt ve sol/sağ kenarlar
+        // Dört kenarlık çizgisi
         for col in x..(x + w) {
             fb.plot_pixel(col, y, Theme::BORDER.to_u32());
             fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
@@ -130,12 +151,20 @@ impl Widget for ProgressBar {
             fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
         }
 
-        // Dolum alanı — 2 piksel iç boşlukta başlar, değer oranına göre genişler
-        if self.max_value > 0 {
+        if self.indeterminate {
+            // Belirsiz mod: sabit genişlikte kayar blok
+            let block_w = (w / 4).max(20);
+            let pos = self.indeterminate_pos as usize;
+            let draw_x = (x + 2 + pos).min(x + w - 2);
+            let draw_w = block_w.min(w.saturating_sub(4).saturating_sub(pos));
+            if draw_w > 0 {
+                fb.draw_rect(draw_x, y + 2, draw_w, h - 4, Theme::ACCENT_PRIMARY.to_u32());
+            }
+        } else if self.max_value > 0 {
+            // Normal dolum alanı
             let fill_width = ((w - 4) as u32 * self.value / self.max_value) as usize;
 
             if self.animated && fill_width > 0 {
-                // Animasyonlu gradyan: her sütun 0–20 döngüsünde parlaklık değiştirir
                 for i in 0..fill_width {
                     let color_offset = (i as u32 + self.animation_offset) % 20;
                     let intensity = if color_offset < 10 {
@@ -149,19 +178,22 @@ impl Widget for ProgressBar {
                     }
                 }
             } else {
-                // Düz renk dolum — aksent rengiyle dolar
-                fb.draw_rect(x + 2, y + 2, fill_width, h - 4, Theme::ACCENT_PRIMARY.to_u32());
+                fb.draw_rect(
+                    x + 2,
+                    y + 2,
+                    fill_width,
+                    h - 4,
+                    Theme::ACCENT_PRIMARY.to_u32(),
+                );
             }
         }
 
-        // Yüzde metni — yalnızca widget yeterince yüksekse (>=16 piksel) çizilir
-        if self.show_percentage && h >= 16 {
+        // Yüzde metni (belirsiz modda gösterilmez)
+        if !self.indeterminate && self.show_percentage && h >= 16 {
             let pct = self.percentage();
             let pct_str = alloc::format!("{}%", pct);
             let text_x = x + (w - pct_str.len() * 8) / 2;
             let text_y = y + (h - 16) / 2;
-
-            // %50'den fazla dolmuşsa metin rengini tersine çevir (okunabilirlik)
             let text_color = if self.percentage() > 50 {
                 Theme::DESKTOP_BG.to_u32()
             } else {
@@ -172,8 +204,19 @@ impl Widget for ProgressBar {
     }
 
     /// Animasyon ofsetini ilerletir.
-    /// Her `update` çağrısında `animation_offset` 0–19 arasında döner.
     fn update(&mut self) {
+        if self.indeterminate {
+            let avail = (self.rect.width as i32 - 4).max(0);
+            let block_w = (avail / 4).max(20);
+            self.indeterminate_pos += self.indeterminate_dir * 3;
+            if self.indeterminate_pos + block_w >= avail {
+                self.indeterminate_dir = -1;
+            }
+            if self.indeterminate_pos <= 0 {
+                self.indeterminate_pos = 0;
+                self.indeterminate_dir = 1;
+            }
+        }
         if self.animated {
             self.animation_offset = (self.animation_offset + 1) % 20;
         }
@@ -269,9 +312,12 @@ impl Widget for Spinner {
                     let base_color = self.color;
                     let bg_color = Theme::WINDOW_BG.to_u32();
 
-                    let r = ((base_color >> 16) as u32 * opacity / 255) + ((bg_color >> 16) as u32 * (255 - opacity) / 255);
-                    let g = (((base_color >> 8) & 0xFF) as u32 * opacity / 255) + (((bg_color >> 8) & 0xFF) as u32 * (255 - opacity) / 255);
-                    let b = ((base_color & 0xFF) as u32 * opacity / 255) + ((bg_color & 0xFF) as u32 * (255 - opacity) / 255);
+                    let r = ((base_color >> 16) as u32 * opacity / 255)
+                        + ((bg_color >> 16) as u32 * (255 - opacity) / 255);
+                    let g = (((base_color >> 8) & 0xFF) as u32 * opacity / 255)
+                        + (((bg_color >> 8) & 0xFF) as u32 * (255 - opacity) / 255);
+                    let b = ((base_color & 0xFF) as u32 * opacity / 255)
+                        + ((bg_color & 0xFF) as u32 * (255 - opacity) / 255);
 
                     let blended = (r << 16) | (g << 8) | b;
                     fb.plot_pixel(x + px, y + py, blended);

@@ -56,16 +56,16 @@
 //! ```
 
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
 use alloc::format;
-use alloc::vec::Vec;
+use alloc::string::{String, ToString};
 use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 use super::dns::DnsHeader;
 use super::dns::DnsRecordType;
-use super::{Ipv4Addr, NetError};
 use super::ipv6::Ipv6Addr;
+use super::{Ipv4Addr, NetError};
 
 /// DoH içerik türü: DNS mesajlarını ikili (binary) wire formatında taşır
 const DNS_MESSAGE_CONTENT_TYPE: &str = "application/dns-message";
@@ -173,19 +173,30 @@ impl DohClient {
     /// DNS sorgusu Base64URL olarak kodlanır ve URL parametresi olarak eklenir:
     /// `GET /dns-query?dns=<base64url>  HTTP/1.1`
     ///
-    /// NOT: Bu implementasyon TLS henüz desteklemediğinden hata döner.
+    /// HTTP/1.1 isteği TLS üzerinden gönderilir.
     pub fn query_get(&self, domain: &str, qtype: DnsRecordType) -> Result<Vec<u8>, DohError> {
         let dns_query = Self::build_query(domain, qtype);
 
         // DNS binary verisini Base64 URL kodla (dolgu karakteri '=' olmadan)
         let encoded = base64url_encode(&dns_query);
 
-        // ?dns= parametresiyle URL oluştur
-        let url = format!("{}?dns={}", self.server_url, encoded);
+        // URL'den host ve path ayrıştır
+        let (host, path) = parse_doh_url(&self.server_url);
 
-        // TODO: Make HTTPS request
-        // For now, return error
-        Err(DohError::HttpsNotSupported)
+        // HTTP/1.1 GET isteği oluştur
+        let request = format!(
+            "GET {}?dns={} HTTP/1.1\r\nHost: {}\r\nAccept: {}\r\nConnection: close\r\n\r\n",
+            path, encoded, host, DNS_MESSAGE_CONTENT_TYPE
+        );
+
+        // TLS bağlantısı kur ve HTTP isteğini gönder
+        let response_body = self.send_https_request(&host, request.as_bytes())?;
+
+        crate::serial_println!(
+            "[DoH] GET response received ({} bytes)",
+            response_body.len()
+        );
+        Ok(response_body)
     }
 
     /// DNS sorgusunu HTTPS POST yöntemiyle gönderir.
@@ -193,12 +204,114 @@ impl DohClient {
     /// DNS sorgusu ikili formatta HTTP body olarak gönderilir:
     /// Content-Type: application/dns-message
     ///
-    /// NOT: Bu implementasyon TLS henüz desteklemediğinden hata döner.
+    /// HTTP/1.1 isteği TLS üzerinden gönderilir.
     pub fn query_post(&self, domain: &str, qtype: DnsRecordType) -> Result<Vec<u8>, DohError> {
         let dns_query = Self::build_query(domain, qtype);
 
-        // TODO: Make HTTPS POST request
-        Err(DohError::HttpsNotSupported)
+        // URL'den host ve path ayrıştır
+        let (host, path) = parse_doh_url(&self.server_url);
+
+        // HTTP/1.1 POST isteği oluştur
+        let header = format!(
+            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccept: {}\r\nConnection: close\r\n\r\n",
+            path, host, DNS_MESSAGE_CONTENT_TYPE, dns_query.len(), DNS_MESSAGE_CONTENT_TYPE
+        );
+
+        // Header ve body'yi birleştir
+        let mut request = header.into_bytes();
+        request.extend_from_slice(&dns_query);
+
+        // TLS bağlantısı kur ve HTTP isteğini gönder
+        let response_body = self.send_https_request(&host, &request)?;
+
+        crate::serial_println!(
+            "[DoH] POST response received ({} bytes)",
+            response_body.len()
+        );
+        Ok(response_body)
+    }
+
+    /// HTTPS (TLS) üzerinden HTTP isteği gönderir ve yanıt gövdesini döner.
+    ///
+    /// Adımlar:
+    /// 1. Sunucu IP adresini DNS ile çözümle
+    /// 2. TCP bağlantısı kur (port 443)
+    /// 3. TLS handshake gerçekleştir
+    /// 4. HTTP isteğini TLS kaydı olarak gönder
+    /// 5. Yanıtı al ve HTTP body'sini ayrıştır
+    fn send_https_request(&self, host: &str, request: &[u8]) -> Result<Vec<u8>, DohError> {
+        use super::socket::{
+            close, connect, recv, send, socket, AddressFamily, Protocol, SocketType,
+        };
+        use super::{Port, SocketAddr};
+
+        // Sunucu IP adresini çözümle (DoH sunucusu için plain DNS kullanıyoruz)
+        let server_ip =
+            crate::net::dns::resolve_default(host).map_err(|_| DohError::NetworkError)?;
+
+        // TCP soketi oluştur ve bağlan (HTTPS = port 443)
+        let sock_id = socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::TCP)
+            .map_err(|_| DohError::NetworkError)?;
+        let addr = SocketAddr::new(server_ip, Port(443));
+        connect(sock_id, addr).map_err(|_| DohError::NetworkError)?;
+
+        // ── TLS Handshake ─────────────────────────────────────────────
+        let mut tls = crate::net::tls::TlsClient::new();
+
+        // ClientHello gönder
+        let client_hello = tls.build_client_hello(host);
+        let hello_record =
+            crate::net::tls::wrap_record(crate::net::tls::ContentType::Handshake, &client_hello);
+        send(sock_id, &hello_record, 0).map_err(|_| DohError::NetworkError)?;
+
+        // ServerHello al
+        let mut sh_buf = [0u8; 4096];
+        let sh_len = recv(sock_id, &mut sh_buf, 0).map_err(|_| DohError::NetworkError)?;
+        if sh_len > 5 {
+            let _ = tls.process_server_hello(&sh_buf[5..sh_len]);
+        }
+
+        // Kalan handshake mesajlarını al
+        let mut hs_buf = [0u8; 8192];
+        let hs_len = recv(sock_id, &mut hs_buf, 0).map_err(|_| DohError::NetworkError)?;
+        if hs_len > 5 {
+            let _ = tls.process_encrypted_extensions(&hs_buf[5..hs_len]);
+        }
+
+        tls.complete_handshake();
+
+        if !tls.is_established() {
+            let _ = close(sock_id);
+            crate::serial_println!("[DoH] TLS handshake failed for {}", host);
+            return Err(DohError::NetworkError);
+        }
+        crate::serial_println!("[DoH] TLS established with {}", host);
+
+        // ── HTTP isteğini gönder ──────────────────────────────────────
+        let tls_record =
+            crate::net::tls::wrap_record(crate::net::tls::ContentType::ApplicationData, request);
+        send(sock_id, &tls_record, 0).map_err(|_| DohError::NetworkError)?;
+
+        // ── Yanıtı al ──────────────────────────────────────────────
+        let mut resp_buf = [0u8; 16384];
+        let resp_len = recv(sock_id, &mut resp_buf, 0).map_err(|_| DohError::Timeout)?;
+        let _ = close(sock_id);
+
+        if resp_len < 5 {
+            return Err(DohError::InvalidResponse);
+        }
+
+        // TLS kayıt başlığını atla (5 byte)
+        let http_response = &resp_buf[5..resp_len];
+
+        // HTTP yanıtından body'yi çıkar (\r\n\r\n ayırıcısı)
+        let body = extract_http_body(http_response);
+
+        if body.is_empty() {
+            return Err(DohError::InvalidResponse);
+        }
+
+        Ok(body)
     }
 
     /// DoH sunucusundan gelen DNS yanıtını ayrıştırır.
@@ -261,7 +374,12 @@ impl DohClient {
 
         let rtype = u16::from_be_bytes([data[*offset], data[*offset + 1]]);
         let _rclass = u16::from_be_bytes([data[*offset + 2], data[*offset + 3]]);
-        let _ttl = u32::from_be_bytes([data[*offset + 4], data[*offset + 5], data[*offset + 6], data[*offset + 7]]);
+        let _ttl = u32::from_be_bytes([
+            data[*offset + 4],
+            data[*offset + 5],
+            data[*offset + 6],
+            data[*offset + 7],
+        ]);
         let rdlength = u16::from_be_bytes([data[*offset + 8], data[*offset + 9]]) as usize;
         *offset += 10;
 
@@ -276,7 +394,9 @@ impl DohClient {
         let ip = match rtype {
             1 if rdlength == 4 => {
                 // A kaydı: 4 byte IPv4 adresi
-                Some(IpAddr::V4(Ipv4Addr::from_bytes([rdata[0], rdata[1], rdata[2], rdata[3]])))
+                Some(IpAddr::V4(Ipv4Addr::from_bytes([
+                    rdata[0], rdata[1], rdata[2], rdata[3],
+                ])))
             }
             28 if rdlength == 16 => {
                 // AAAA kaydı: 16 byte IPv6 adresi
@@ -301,8 +421,8 @@ impl DohClient {
     /// Sonsuz döngüye karşı maksimum 5 atlama sınırı uygulanır.
     fn parse_name(data: &[u8], offset: &mut usize) -> Result<String, DohError> {
         let mut name = String::new();
-        let mut jumped = false;    // Sıkıştırma atlama yapıldı mı?
-        let mut max_jumps = 5;     // Döngü önleme: en fazla 5 sıkıştırma atlaması
+        let mut jumped = false; // Sıkıştırma atlama yapıldı mı?
+        let mut max_jumps = 5; // Döngü önleme: en fazla 5 sıkıştırma atlaması
         let original_offset = *offset;
 
         loop {
@@ -381,7 +501,7 @@ pub struct DnsAnswer {
 /// DNS başlığı ve yanıt kayıtları listesini içerir.
 #[derive(Clone, Debug)]
 pub struct DnsResponse {
-    pub header: DnsHeader,    // DNS başlığı (ID, flags, sayılar)
+    pub header: DnsHeader,       // DNS başlığı (ID, flags, sayılar)
     pub answers: Vec<DnsAnswer>, // Yanıt kayıtları listesi
 }
 
@@ -419,6 +539,43 @@ pub enum DohError {
     ServerError(u16),  // HTTP hata kodu (4xx, 5xx)
 }
 
+/// DoH URL'sinden host ve path bileşenlerini ayrıştırır.
+///
+/// Örnek: "https://cloudflare-dns.com/dns-query" → ("cloudflare-dns.com", "/dns-query")
+fn parse_doh_url(url: &str) -> (String, String) {
+    // Şema kısmını atla (https://)
+    let without_scheme = if let Some(rest) = url.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        rest
+    } else {
+        url
+    };
+
+    // Host ve path'i ayır
+    if let Some(slash_pos) = without_scheme.find('/') {
+        let host = &without_scheme[..slash_pos];
+        let path = &without_scheme[slash_pos..];
+        (String::from(host), String::from(path))
+    } else {
+        (String::from(without_scheme), String::from("/dns-query"))
+    }
+}
+
+/// HTTP yanıtından body kısmını çıkarır.
+///
+/// Header ve body arasındaki `\r\n\r\n` ayırıcısını bulur.
+fn extract_http_body(data: &[u8]) -> Vec<u8> {
+    // \r\n\r\n = [13, 10, 13, 10] ara
+    for i in 0..data.len().saturating_sub(3) {
+        if data[i] == 13 && data[i + 1] == 10 && data[i + 2] == 13 && data[i + 3] == 10 {
+            return data[i + 4..].to_vec();
+        }
+    }
+    // Ayırıcı bulunamazsa tüm veriyi döndür (best effort)
+    data.to_vec()
+}
+
 /// Base64 URL kodlaması (dolgusu olmayan).
 ///
 /// RFC 4648 Bölüm 5: URL ve dosya adı güvenli Base64 alfabesi.
@@ -442,8 +599,16 @@ fn base64url_encode(data: &[u8]) -> String {
 
     while i < data.len() {
         let b0 = data[i] as usize;
-        let b1 = if i + 1 < data.len() { data[i + 1] as usize } else { 0 };
-        let b2 = if i + 2 < data.len() { data[i + 2] as usize } else { 0 };
+        let b1 = if i + 1 < data.len() {
+            data[i + 1] as usize
+        } else {
+            0
+        };
+        let b2 = if i + 2 < data.len() {
+            data[i + 2] as usize
+        } else {
+            0
+        };
 
         // Her 3 byte -> 4 Base64 karakteri (6 bit grupları)
         result.push(ALPHABET[b0 >> 2] as char);
@@ -479,7 +644,6 @@ pub fn init_doh(server_url: &str) {
 /// Global DoH istemcisi üzerinden alan adını çözümler.
 ///
 /// İstemci başlatılmamışsa hata döner.
-/// TLS desteklenene kadar gerçek sorgu yapılamaz.
 pub fn resolve_doh(domain: &str, qtype: DnsRecordType) -> Result<DnsResponse, DohError> {
     let client = DOH_CLIENT.lock();
     if let Some(client) = client.as_ref() {
@@ -487,5 +651,59 @@ pub fn resolve_doh(domain: &str, qtype: DnsRecordType) -> Result<DnsResponse, Do
         DohClient::parse_response(&response_data)
     } else {
         Err(DohError::HttpsNotSupported)
+    }
+}
+
+/// Alan adını güvenli DNS yöntemleri ile çözümler (fallback zinciri).
+///
+/// Deneme sırası:
+/// 1. DoH (DNS over HTTPS) — en yüksek gizlilik, HTTPS trafiğine karışır
+/// 2. DoT (DNS over TLS) — şifreli ama ayrı port (853)
+/// 3. Plain DNS (UDP port 53) — şifresiz, son çare
+///
+/// İlk başarılı sonuç döner. Tümü başarısız olursa son hatayı döner.
+pub fn resolve_with_fallback(
+    hostname: &str,
+    record_type: super::dns::DnsRecordType,
+) -> Result<super::Ipv4Addr, DohError> {
+    // ── 1. DoH dene ───────────────────────────────────────────────────
+    crate::serial_println!("[DoH-Fallback] Trying DoH for {}", hostname);
+    match resolve_doh(hostname, record_type) {
+        Ok(response) => {
+            if let Some(ip) = response.get_a() {
+                crate::serial_println!("[DoH-Fallback] DoH succeeded for {}", hostname);
+                return Ok(ip);
+            }
+        }
+        Err(e) => {
+            crate::serial_println!("[DoH-Fallback] DoH failed for {}: {:?}", hostname, e);
+        }
+    }
+
+    // ── 2. DoT dene ───────────────────────────────────────────────────
+    crate::serial_println!("[DoH-Fallback] Trying DoT for {}", hostname);
+    match super::dot::resolve_dot(hostname, record_type) {
+        Ok(response) => {
+            if let Some(ip) = response.get_a() {
+                crate::serial_println!("[DoH-Fallback] DoT succeeded for {}", hostname);
+                return Ok(ip);
+            }
+        }
+        Err(e) => {
+            crate::serial_println!("[DoH-Fallback] DoT failed for {}: {:?}", hostname, e);
+        }
+    }
+
+    // ── 3. Plain DNS dene ─────────────────────────────────────────────
+    crate::serial_println!("[DoH-Fallback] Trying plain DNS for {}", hostname);
+    match super::dns::resolve_default(hostname) {
+        Ok(ip) => {
+            crate::serial_println!("[DoH-Fallback] Plain DNS succeeded for {}", hostname);
+            Ok(ip)
+        }
+        Err(_) => {
+            crate::serial_println!("[DoH-Fallback] All methods failed for {}", hostname);
+            Err(DohError::NetworkError)
+        }
     }
 }

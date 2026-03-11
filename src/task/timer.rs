@@ -32,9 +32,9 @@
 //! ```
 
 use super::task::{Task, TaskState};
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
 
 /// Çarkın her bir dilimi (bucket).
 /// Aynı tick'te uyanacak task'ları tutar.
@@ -151,7 +151,7 @@ impl TimingWheel {
     /// Üst seviye çarktan alt seviye çarka task'ları taşır (Cascade).
     fn cascade(&mut self, level: usize, tick: usize) {
         let idx = (tick >> (level * WHEEL_BITS)) & WHEEL_MASK;
-        
+
         // O slot'taki tüm task'ları al
         let mut tasks_to_move = Vec::new();
         while let Some(task) = self.wheels[level][idx].pop_front() {
@@ -164,7 +164,7 @@ impl TimingWheel {
                 self.schedule(task, wake_tick);
             } else {
                 // Hata durumu, ama güvenli olması için tekrar schedule et
-                self.schedule(task, tick); 
+                self.schedule(task, tick);
             }
         }
     }

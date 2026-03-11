@@ -25,8 +25,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 /// Yetki nesnesi tanımlayıcısı (u64 = 64-bit benzersiz kimlik).
@@ -62,15 +62,45 @@ pub struct CapRights {
 
 impl CapRights {
     /// Hiç hak yok
-    pub const NONE: Self = CapRights { read: false, write: false, execute: false, share: false, transfer: false };
+    pub const NONE: Self = CapRights {
+        read: false,
+        write: false,
+        execute: false,
+        share: false,
+        transfer: false,
+    };
     /// Yalnızca okuma
-    pub const READ: Self = CapRights { read: true, write: false, execute: false, share: false, transfer: false };
+    pub const READ: Self = CapRights {
+        read: true,
+        write: false,
+        execute: false,
+        share: false,
+        transfer: false,
+    };
     /// Yalnızca yazma
-    pub const WRITE: Self = CapRights { read: false, write: true, execute: false, share: false, transfer: false };
+    pub const WRITE: Self = CapRights {
+        read: false,
+        write: true,
+        execute: false,
+        share: false,
+        transfer: false,
+    };
     /// Okuma + Yazma
-    pub const READ_WRITE: Self = CapRights { read: true, write: true, execute: false, share: false, transfer: false };
+    pub const READ_WRITE: Self = CapRights {
+        read: true,
+        write: true,
+        execute: false,
+        share: false,
+        transfer: false,
+    };
     /// Tüm haklar
-    pub const ALL: Self = CapRights { read: true, write: true, execute: true, share: true, transfer: true };
+    pub const ALL: Self = CapRights {
+        read: true,
+        write: true,
+        execute: true,
+        share: true,
+        transfer: true,
+    };
 }
 
 // ============================================================================
@@ -132,7 +162,7 @@ pub struct Capability {
     /// Bu yetki ile kullanılabilecek haklar
     pub rights: CapRights,
     /// Sahibi olan sürecin ID'si
-    pub owner: u64,  // Process ID
+    pub owner: u64, // Process ID
     /// Türetme jenerasyonu (0 = kaynak yetki, +1 her türetmede)
     pub generation: u32,
     /// Bu yetkiden türetilen alt yetki ID'leri
@@ -174,7 +204,12 @@ impl CapabilityTable {
     }
 
     /// Yeni bir yetki nesnesi oluşturur ve tabloya ekler; CapId döndürür.
-    pub fn create(&mut self, resource_type: ResourceType, resource_id: u64, rights: CapRights) -> CapId {
+    pub fn create(
+        &mut self,
+        resource_type: ResourceType,
+        resource_id: u64,
+        rights: CapRights,
+    ) -> CapId {
         let id = self.next_cap_id;
         self.next_cap_id += 1;
 
@@ -221,11 +256,21 @@ impl CapabilityTable {
         let parent = self.capabilities.get(&parent_id)?;
 
         // Alt küme hakları üst yetki'den taşmıyor mu kontrol et
-        if subset_rights.read && !parent.rights.read { return None; }
-        if subset_rights.write && !parent.rights.write { return None; }
-        if subset_rights.execute && !parent.rights.execute { return None; }
-        if subset_rights.share && !parent.rights.share { return None; }
-        if subset_rights.transfer && !parent.rights.transfer { return None; }
+        if subset_rights.read && !parent.rights.read {
+            return None;
+        }
+        if subset_rights.write && !parent.rights.write {
+            return None;
+        }
+        if subset_rights.execute && !parent.rights.execute {
+            return None;
+        }
+        if subset_rights.share && !parent.rights.share {
+            return None;
+        }
+        if subset_rights.transfer && !parent.rights.transfer {
+            return None;
+        }
 
         let child_id = self.next_cap_id;
         self.next_cap_id += 1;
@@ -240,7 +285,10 @@ impl CapabilityTable {
             children: Vec::new(),
         };
 
-        self.capabilities.get_mut(&parent_id)?.children.push(child_id);
+        self.capabilities
+            .get_mut(&parent_id)?
+            .children
+            .push(child_id);
         self.capabilities.insert(child_id, child);
         Some(child_id)
     }
@@ -304,7 +352,12 @@ pub fn get_table(pid: u64) -> Option<CapabilityTable> {
 }
 
 /// Belirtilen süreç için yeni yetki nesnesi oluşturur; CapId döndürür.
-pub fn create_capability(pid: u64, resource_type: ResourceType, resource_id: u64, rights: CapRights) -> Option<CapId> {
+pub fn create_capability(
+    pid: u64,
+    resource_type: ResourceType,
+    resource_id: u64,
+    rights: CapRights,
+) -> Option<CapId> {
     let mut tables = CAP_TABLES.lock();
     let table = tables.get_mut(&pid)?;
     Some(table.create(resource_type, resource_id, rights))

@@ -143,6 +143,8 @@ pub struct I2cAdapter {
     pub frequency: AtomicU32,
     /// 10-bit adresleme desteği
     pub ten_bit: AtomicBool,
+    /// MMIO taban adresi (0 = henüz atanmadı)
+    pub base_addr: u64,
     /// Bu bus üzerindeki kayıtlı client'lar
     pub clients: Mutex<Vec<Arc<I2cClient>>>,
     /// Bus seviyesi kilit (eş zamanlı transfer önlenir)
@@ -156,6 +158,7 @@ impl I2cAdapter {
             name: String::from(name),
             frequency: AtomicU32::new(I2C_STANDARD_MODE),
             ten_bit: AtomicBool::new(false),
+            base_addr: 0,
             clients: Mutex::new(Vec::new()),
             lock: Mutex::new(()),
         }
@@ -175,8 +178,46 @@ impl I2cAdapter {
 
     /// Tek bir I2C mesajı donanıma gönderir (donanıma özgü kısım)
     fn do_transfer(&self, msg: &I2cMsg) -> Result<(), I2cError> {
-        // Gerçek uygulamada: MMIO yazmaçlarına erişilir, START/STOP bit gönderilir
-        // Şimdilik yer tutucu (placeholder)
+        // I2C MMIO yazmacı üzerinden transfer gerçekleştir
+        let base = self.base_addr;
+        if base == 0 {
+            return Err(I2cError::BusError);
+        }
+
+        unsafe {
+            // 1. Hedef adres yazmacına slave adresini yaz
+            let tar_reg = base as *mut u32;
+            core::ptr::write_volatile(tar_reg, msg.addr as u32);
+
+            // 2. Kontrol yazmacı: master modu, hız, 7-bit adres
+            let ctrl_reg = (base + 0x04) as *mut u32;
+            let ctrl_val = 0x65; // Master, 7-bit, fast mode
+            core::ptr::write_volatile(ctrl_reg, ctrl_val);
+
+            // 3. Enable yazmacı
+            let enable_reg = (base + 0x6C) as *mut u32;
+            core::ptr::write_volatile(enable_reg, 1);
+
+            // 4. Veri gönder/al
+            let data_cmd_reg = (base + 0x10) as *mut u32;
+            if msg.flags & 1 != 0 {
+                // Okuma: READ komutu gönder
+                for _ in 0..msg.len {
+                    core::ptr::write_volatile(data_cmd_reg, 0x100); // READ cmd
+                }
+            } else {
+                // Yazma
+                for i in 0..msg.len as usize {
+                    if i < msg.buf.len() {
+                        core::ptr::write_volatile(data_cmd_reg, msg.buf[i] as u32);
+                    }
+                }
+            }
+
+            crate::serial_println!("[I2C] Transfer: addr={:#x} len={} {}",
+                msg.addr, msg.len, if msg.flags & 1 != 0 { "READ" } else { "WRITE" });
+        }
+
         Ok(())
     }
 
@@ -360,6 +401,8 @@ pub struct SpiController {
     pub bits_per_word: AtomicU32,
     /// Aktif SPI modu (CPOL/CPHA)
     pub mode: AtomicU32,
+    /// MMIO taban adresi (0 = henüz atanmadı)
+    pub base_addr: u64,
     /// Bu bus üzerindeki kayıtlı SPI cihazları
     pub devices: Mutex<Vec<Arc<SpiDevice>>>,
     /// Bus seviyesi kilit
@@ -375,6 +418,7 @@ impl SpiController {
             max_speed_hz: 50_000_000, // 50 MHz varsayılan
             bits_per_word: AtomicU32::new(8),
             mode: AtomicU32::new(SPI_MODE_0),
+            base_addr: 0,
             devices: Mutex::new(Vec::new()),
             lock: Mutex::new(()),
         }
@@ -393,7 +437,45 @@ impl SpiController {
 
     /// Tek bir SPI segmentini donanıma gönderir (donanıma özgü kısım)
     fn do_transfer(&self, transfer: &SpiTransfer) -> Result<(), SpiError> {
-        // Gerçek uygulamada: FIFO'ya yaz, DMA başlat, kesme bekle
+        let base = self.base_addr;
+        if base == 0 {
+            return Err(SpiError::BusError);
+        }
+
+        unsafe {
+            // 1. CS (Chip Select) aktif et
+            let cs_reg = (base + 0x10) as *mut u32;
+            core::ptr::write_volatile(cs_reg, 1);
+
+            // 2. FIFO'ya TX verisini yaz
+            let tx_fifo = (base + 0x08) as *mut u32;
+            for i in 0..transfer.len as usize {
+                if i < transfer.tx_buf.len() {
+                    core::ptr::write_volatile(tx_fifo, transfer.tx_buf[i] as u32);
+                }
+            }
+
+            // 3. Transfer başlat
+            let ctrl_reg = base as *mut u32;
+            core::ptr::write_volatile(ctrl_reg, 0x01); // Enable + transfer start
+
+            // 4. Transfer tamamlanmasını bekle (status register poll)
+            let status_reg = (base + 0x04) as *const u32;
+            let mut timeout = 10000u32;
+            while core::ptr::read_volatile(status_reg) & 0x01 == 0 {
+                timeout -= 1;
+                if timeout == 0 {
+                    break;
+                }
+            }
+
+            // 5. CS deaktif et
+            core::ptr::write_volatile(cs_reg, 0);
+
+            crate::serial_println!("[SPI] Transfer: len={} speed={}Hz",
+                transfer.len, transfer.speed_hz);
+        }
+
         Ok(())
     }
 

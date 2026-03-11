@@ -19,12 +19,12 @@
 
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::Theme;
-use crate::gui::widgets::{Rect, Widget};
-use crate::gui::widgets::list::{ListView, ListItem};
 use crate::gui::widgets::button::Button;
+use crate::gui::widgets::list::{ListItem, ListView};
+use crate::gui::widgets::{Rect, Widget};
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 
 /// Dosya sistemi giriş türleri.
 /// İşletim sistemi inode türlerini temsil eder: dosya, dizin,
@@ -105,7 +105,7 @@ impl FileEntry {
         if matches!(self.entry_type, FileEntryType::Directory) {
             return String::from("<DIR>");
         }
-        
+
         if self.size < 1024 {
             alloc::format!("{} B", self.size)
         } else if self.size < 1024 * 1024 {
@@ -224,7 +224,7 @@ impl FileManager {
     fn select(&mut self, index: usize) {
         if index < self.entries.len() {
             self.selected_index = Some(index);
-            
+
             // Scroll to visible
             let visible = self.visible_items();
             if index < self.scroll_offset {
@@ -272,25 +272,35 @@ impl Widget for FileManager {
 
         // Toolbar
         fb.draw_rect(x, y, w, 30, Theme::TITLEBAR_BG.to_u32());
-        
+
         // Back button
         fb.draw_rect(x + 5, y + 5, 24, 20, Theme::BUTTON_BG.to_u32());
         fb.draw_string(x + 10, y + 7, "<", Theme::TEXT_PRIMARY.to_u32());
-        
+
         // Up button
         fb.draw_rect(x + 35, y + 5, 24, 20, Theme::BUTTON_BG.to_u32());
         fb.draw_string(x + 42, y + 7, "^", Theme::TEXT_PRIMARY.to_u32());
 
         // Path bar
         fb.draw_rect(x + 70, y + 5, w - 80, 20, Theme::BUTTON_BG.to_u32());
-        fb.draw_string(x + 75, y + 7, &self.current_path, Theme::TEXT_SECONDARY.to_u32());
+        fb.draw_string(
+            x + 75,
+            y + 7,
+            &self.current_path,
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
 
         // Column headers (for details view)
         if self.view_mode == ViewMode::Details {
             let header_y = y + 32;
             fb.draw_rect(x, header_y, w, 20, Theme::TITLEBAR_BG.to_u32());
             fb.draw_string(x + 10, header_y + 2, "Name", Theme::TEXT_SECONDARY.to_u32());
-            fb.draw_string(x + w - 100, header_y + 2, "Size", Theme::TEXT_SECONDARY.to_u32());
+            fb.draw_string(
+                x + w - 100,
+                header_y + 2,
+                "Size",
+                Theme::TEXT_SECONDARY.to_u32(),
+            );
         }
 
         // File list
@@ -314,7 +324,13 @@ impl Widget for FileManager {
 
             // Selection background
             if self.selected_index == Some(item_index) {
-                fb.draw_rect(x + 1, item_y, w - 2, item_height, Theme::ACCENT_PRIMARY.to_u32());
+                fb.draw_rect(
+                    x + 1,
+                    item_y,
+                    w - 2,
+                    item_height,
+                    Theme::ACCENT_PRIMARY.to_u32(),
+                );
             }
 
             // Icon
@@ -332,23 +348,39 @@ impl Widget for FileManager {
             // Size (for details view)
             if self.view_mode == ViewMode::Details {
                 let size_str = entry.format_size();
-                fb.draw_string(x + w - 80, item_y + 3, &size_str, Theme::TEXT_SECONDARY.to_u32());
+                fb.draw_string(
+                    x + w - 80,
+                    item_y + 3,
+                    &size_str,
+                    Theme::TEXT_SECONDARY.to_u32(),
+                );
             }
         }
 
         // Status bar
         let status_y = y + h - 25;
         fb.draw_rect(x, status_y, w, 25, Theme::TITLEBAR_BG.to_u32());
-        
+
         let count = self.entries.len();
         let status = alloc::format!("{} items", count);
-        fb.draw_string(x + 10, status_y + 5, &status, Theme::TEXT_SECONDARY.to_u32());
+        fb.draw_string(
+            x + 10,
+            status_y + 5,
+            &status,
+            Theme::TEXT_SECONDARY.to_u32(),
+        );
 
         // Scroll bar
         if self.entries.len() > visible {
             let scroll_bar_height = ((h - 85) * visible / self.entries.len()).max(20);
             let scroll_bar_y = y + 55 + ((h - 85) * self.scroll_offset / self.entries.len());
-            fb.draw_rect(x + w - 10, scroll_bar_y, 8, scroll_bar_height, Theme::BUTTON_BG.to_u32());
+            fb.draw_rect(
+                x + w - 10,
+                scroll_bar_y,
+                8,
+                scroll_bar_height,
+                Theme::BUTTON_BG.to_u32(),
+            );
         }
     }
 
@@ -384,7 +416,7 @@ impl Widget for FileManager {
     fn on_scroll(&mut self, delta: i32) -> bool {
         let visible = self.visible_items();
         let max_scroll = self.entries.len().saturating_sub(visible);
-        
+
         if delta > 0 && self.scroll_offset > 0 {
             self.scroll_offset -= 1;
             return true;

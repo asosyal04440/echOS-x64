@@ -35,7 +35,7 @@ use core::arch::asm;
 pub fn read() -> u64 {
     let low: u32;
     let high: u32;
-    
+
     unsafe {
         asm!(
             "rdtsc",
@@ -44,7 +44,7 @@ pub fn read() -> u64 {
             options(nomem, nostack)
         );
     }
-    
+
     ((high as u64) << 32) | (low as u64)
 }
 

@@ -33,7 +33,7 @@
 //! aynı anda güvenle okuyup yazmasına olanak tanır — kilit (mutex) gerektirmez.
 //! Bu, kesme işleyicilerinden (interrupt handler) güvenle çağrılabilmeleri için kritiktir.
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
@@ -85,7 +85,7 @@ impl CpuMonitor {
             return Some(Fault::new(
                 FaultSource::Cpu,
                 FaultType::CpuHung,
-                &alloc::format!("{} CPU(s) offline", offline)
+                &alloc::format!("{} CPU(s) offline", offline),
             ));
         }
 
@@ -125,10 +125,8 @@ impl super::HealthMonitor for CpuMonitor {
         }
 
         // Son kontrol zamanını şu anki tick değeriyle güncelle
-        self.last_check.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_check
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
         // CPU sağlığını kontrol et; hata varsa hemen döndür
         if let Some(fault) = self.check_cpu_health() {
@@ -166,7 +164,8 @@ impl super::HealthMonitor for CpuMonitor {
         ModuleHealth {
             name: self.name(),
             status: self.health(),
-            fault_count: self.hung_cpus.load(Ordering::SeqCst) + self.thermal_events.load(Ordering::SeqCst),
+            fault_count: self.hung_cpus.load(Ordering::SeqCst)
+                + self.thermal_events.load(Ordering::SeqCst),
             recovery_count: 0,
             last_fault_tick: self.last_check.load(Ordering::SeqCst),
             uptime_ticks: crate::task::scheduler::get_ticks(),

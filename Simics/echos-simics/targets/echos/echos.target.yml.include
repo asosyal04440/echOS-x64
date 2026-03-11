@@ -27,12 +27,12 @@ log-type -disable spec-viol
 echo "[echOS] Starting boot from HDD0..."
 echo "[echOS] Waiting for boot..."
 
-# Run with longer timeout
-script-branch "boot-timeout" {
-    bp.time.wait-for 300
-    echo "[echOS] 300s timeout reached"
-    stop
-}
+# # Run with longer timeout
+# script-branch "boot-timeout" {
+#     bp.time.wait-for 300
+#     echo "[echOS] 300s timeout reached"
+#     stop
+# }
 
 run
 

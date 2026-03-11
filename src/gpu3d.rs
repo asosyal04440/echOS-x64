@@ -9,13 +9,13 @@
 //! - **Render Pass**: Render hedefleri ve alt geçişler açıkça tanımlanır
 //! - **SPIR-V shader**: Shader kodu doğrudan SPIR-V bayt kodu olarak verilir
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::vec;
-use alloc::boxed::Box;
-use spin::Mutex;
+use alloc::vec::Vec;
 use core::mem;
+use spin::Mutex;
 
 // ============================================================================
 // GPU SABİTLERİ
@@ -88,7 +88,7 @@ pub enum GpuError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Undefined,
-    
+
     // Renk formatları
     R8Unorm,
     R8Snorm,
@@ -105,7 +105,7 @@ pub enum Format {
     B8G8R8A8Unorm,
     B8G8R8A8Srgb,
     R8G8B8A8Srgb,
-    
+
     // Derinlik formatları (Depth) — z-buffer ve stencil için kullanılır
     D16Unorm,
     D24Unorm,
@@ -113,7 +113,7 @@ pub enum Format {
     D16UnormS8Uint,
     D24UnormS8Uint,
     D32SfloatS8Uint,
-    
+
     // Sıkıştırılmış formatlar (BC = Block Compression) — sabit oranlı GPU doku sıkıştırması
     BC1RgbUnorm,
     BC1RgbaUnorm,
@@ -124,7 +124,7 @@ pub enum Format {
     BC6HUfloat,
     BC6HSfloat,
     BC7Unorm,
-    
+
     // Kayan noktalı (floating point) formatlar — HDR render için
     R16Sfloat,
     R16G16Sfloat,
@@ -143,8 +143,11 @@ impl Format {
             Format::R8Unorm | Format::R8Snorm | Format::R8Uint | Format::R8Sint => 1,
             Format::R8G8Unorm | Format::R8G8Snorm | Format::R8G8Uint | Format::R8G8Sint => 2,
             Format::R8G8B8Unorm | Format::R8G8B8Snorm => 3,
-            Format::R8G8B8A8Unorm | Format::R8G8B8A8Snorm | Format::B8G8R8A8Unorm | 
-            Format::B8G8R8A8Srgb | Format::R8G8B8A8Srgb => 4,
+            Format::R8G8B8A8Unorm
+            | Format::R8G8B8A8Snorm
+            | Format::B8G8R8A8Unorm
+            | Format::B8G8R8A8Srgb
+            | Format::R8G8B8A8Srgb => 4,
             Format::D16Unorm => 2,
             Format::D24Unorm => 3,
             Format::D32Sfloat => 4,
@@ -164,14 +167,20 @@ impl Format {
     }
 
     pub fn is_depth(&self) -> bool {
-        matches!(self, 
-            Format::D16Unorm | Format::D24Unorm | Format::D32Sfloat |
-            Format::D16UnormS8Uint | Format::D24UnormS8Uint | Format::D32SfloatS8Uint
+        matches!(
+            self,
+            Format::D16Unorm
+                | Format::D24Unorm
+                | Format::D32Sfloat
+                | Format::D16UnormS8Uint
+                | Format::D24UnormS8Uint
+                | Format::D32SfloatS8Uint
         )
     }
 
     pub fn is_stencil(&self) -> bool {
-        matches!(self,
+        matches!(
+            self,
             Format::D16UnormS8Uint | Format::D24UnormS8Uint | Format::D32SfloatS8Uint
         )
     }
@@ -248,19 +257,33 @@ pub struct BufferUsage {
 
 impl BufferUsage {
     pub fn vertex() -> Self {
-        BufferUsage { vertex: true, transfer_dst: true, ..Self::none() }
+        BufferUsage {
+            vertex: true,
+            transfer_dst: true,
+            ..Self::none()
+        }
     }
 
     pub fn index() -> Self {
-        BufferUsage { index: true, transfer_dst: true, ..Self::none() }
+        BufferUsage {
+            index: true,
+            transfer_dst: true,
+            ..Self::none()
+        }
     }
 
     pub fn uniform() -> Self {
-        BufferUsage { uniform: true, ..Self::none() }
+        BufferUsage {
+            uniform: true,
+            ..Self::none()
+        }
     }
 
     pub fn storage() -> Self {
-        BufferUsage { storage: true, ..Self::none() }
+        BufferUsage {
+            storage: true,
+            ..Self::none()
+        }
     }
 
     pub fn none() -> Self {
@@ -357,19 +380,33 @@ pub struct ImageUsage {
 
 impl ImageUsage {
     pub fn color_attachment() -> Self {
-        ImageUsage { color_attachment: true, transfer_dst: true, ..Self::none() }
+        ImageUsage {
+            color_attachment: true,
+            transfer_dst: true,
+            ..Self::none()
+        }
     }
 
     pub fn depth_stencil() -> Self {
-        ImageUsage { depth_stencil_attachment: true, ..Self::none() }
+        ImageUsage {
+            depth_stencil_attachment: true,
+            ..Self::none()
+        }
     }
 
     pub fn sampled() -> Self {
-        ImageUsage { sampled: true, transfer_dst: true, ..Self::none() }
+        ImageUsage {
+            sampled: true,
+            transfer_dst: true,
+            ..Self::none()
+        }
     }
 
     pub fn storage() -> Self {
-        ImageUsage { storage: true, ..Self::none() }
+        ImageUsage {
+            storage: true,
+            ..Self::none()
+        }
     }
 
     pub fn none() -> Self {
@@ -543,7 +580,7 @@ pub enum ShaderStage {
 #[derive(Clone, Debug)]
 pub struct ShaderDesc {
     pub stage: ShaderStage,
-    pub code: Vec<u32>,  // SPIR-V bayt kodu — assembler benzeri GPU instruction seti
+    pub code: Vec<u32>, // SPIR-V bayt kodu — assembler benzeri GPU instruction seti
     pub entry_point: String,
     pub name: String,
 }
@@ -1261,6 +1298,20 @@ pub enum DescriptorBinding {
 pub struct Fence {
     pub handle: FenceHandle,
     pub signaled: bool,
+    pub current_value: u64,
+    pub monitored_value: u64,
+    pub signal_count: u64,
+    pub last_signal_tick: u64,
+    pub log: Vec<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FenceSnapshot {
+    pub current_value: u64,
+    pub monitored_value: u64,
+    pub signaled: bool,
+    pub signal_count: u64,
+    pub last_signal_tick: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1291,6 +1342,10 @@ pub struct GpuDevice {
     pub descriptor_sets: BTreeMap<DescriptorSetHandle, DescriptorSet>,
     pub fences: BTreeMap<FenceHandle, Fence>,
     pub semaphores: BTreeMap<SemaphoreHandle, Semaphore>,
+    pub shader_cache: BTreeMap<String, ShaderHandle>,
+    pub pipeline_cache: BTreeMap<String, PipelineHandle>,
+    pub render_pass_cache: BTreeMap<String, RenderPassHandle>,
+    pub fence_registry: BTreeMap<String, FenceHandle>,
     pub next_handle: u64,
     pub name: String,
 }
@@ -1310,6 +1365,10 @@ impl GpuDevice {
             descriptor_sets: BTreeMap::new(),
             fences: BTreeMap::new(),
             semaphores: BTreeMap::new(),
+            shader_cache: BTreeMap::new(),
+            pipeline_cache: BTreeMap::new(),
+            render_pass_cache: BTreeMap::new(),
+            fence_registry: BTreeMap::new(),
             next_handle: 1,
             name: name.to_string(),
         }
@@ -1354,6 +1413,130 @@ impl GpuDevice {
         let pipeline = Pipeline { handle, desc };
         self.pipelines.insert(handle, pipeline);
         handle
+    }
+
+    pub fn cache_shader(&mut self, key: &str, desc: ShaderDesc) -> (ShaderHandle, bool) {
+        if let Some(handle) = self.shader_cache.get(key).copied() {
+            return (handle, true);
+        }
+        let handle = self.create_shader(desc);
+        self.shader_cache.insert(key.to_string(), handle);
+        (handle, false)
+    }
+
+    pub fn cache_render_pass(&mut self, key: &str, desc: RenderPassDesc) -> RenderPassHandle {
+        if let Some(handle) = self.render_pass_cache.get(key).copied() {
+            return handle;
+        }
+        let handle = self.create_render_pass(desc);
+        self.render_pass_cache.insert(key.to_string(), handle);
+        handle
+    }
+
+    pub fn cache_pipeline(&mut self, key: &str, desc: PipelineDesc) -> (PipelineHandle, bool) {
+        if let Some(handle) = self.pipeline_cache.get(key).copied() {
+            return (handle, true);
+        }
+        let handle = self.create_pipeline(desc);
+        self.pipeline_cache.insert(key.to_string(), handle);
+        (handle, false)
+    }
+
+    pub fn register_named_fence(&mut self, name: &str, signaled: bool) -> FenceHandle {
+        if let Some(handle) = self.fence_registry.get(name).copied() {
+            if let Some(fence) = self.fences.get_mut(&handle) {
+                if signaled {
+                    let next_value = fence.current_value.saturating_add(1).max(1);
+                    Self::update_fence_value(fence, next_value);
+                } else {
+                    fence.monitored_value = fence.current_value.saturating_add(1);
+                    fence.signaled = false;
+                }
+            }
+            return handle;
+        }
+        let handle = FenceHandle(self.next_handle());
+        let initial_value = if signaled { 1 } else { 0 };
+        self.fences.insert(
+            handle,
+            Fence {
+                handle,
+                signaled,
+                current_value: initial_value,
+                monitored_value: initial_value,
+                signal_count: signaled as u64,
+                last_signal_tick: crate::interrupts::get_ticks(),
+                log: if signaled { vec![initial_value] } else { Vec::new() },
+            },
+        );
+        self.fence_registry.insert(name.to_string(), handle);
+        handle
+    }
+
+    fn update_fence_value(fence: &mut Fence, value: u64) {
+        if value > fence.current_value {
+            fence.current_value = value;
+            fence.signal_count = fence.signal_count.saturating_add(1);
+            fence.last_signal_tick = crate::interrupts::get_ticks();
+            if fence.log.len() >= 64 {
+                let _ = fence.log.remove(0);
+            }
+            fence.log.push(value);
+        }
+        fence.signaled = fence.current_value >= fence.monitored_value;
+    }
+
+    pub fn set_fence_state(&mut self, handle: FenceHandle, signaled: bool) -> Result<(), GpuError> {
+        let Some(fence) = self.fences.get_mut(&handle) else {
+            return Err(GpuError::InvalidHandle);
+        };
+        if signaled {
+            let next_value = fence.current_value.saturating_add(1).max(fence.monitored_value.max(1));
+            Self::update_fence_value(fence, next_value);
+        } else {
+            fence.monitored_value = fence.current_value.saturating_add(1);
+            fence.signaled = false;
+        }
+        Ok(())
+    }
+
+    pub fn fence_state(&self, handle: FenceHandle) -> Option<bool> {
+        self.fences.get(&handle).map(|fence| fence.signaled)
+    }
+
+    pub fn signal_fence_value(&mut self, handle: FenceHandle, value: u64) -> Result<(), GpuError> {
+        let Some(fence) = self.fences.get_mut(&handle) else {
+            return Err(GpuError::InvalidHandle);
+        };
+        Self::update_fence_value(fence, value);
+        Ok(())
+    }
+
+    pub fn set_fence_target(&mut self, handle: FenceHandle, value: u64) -> Result<(), GpuError> {
+        let Some(fence) = self.fences.get_mut(&handle) else {
+            return Err(GpuError::InvalidHandle);
+        };
+        fence.monitored_value = value.max(fence.current_value);
+        fence.signaled = fence.current_value >= fence.monitored_value;
+        Ok(())
+    }
+
+    pub fn fence_value(&self, handle: FenceHandle) -> Option<u64> {
+        self.fences.get(&handle).map(|fence| fence.current_value)
+    }
+
+    pub fn fence_snapshot(&self, handle: FenceHandle) -> Option<FenceSnapshot> {
+        self.fences.get(&handle).map(|fence| FenceSnapshot {
+            current_value: fence.current_value,
+            monitored_value: fence.monitored_value,
+            signaled: fence.signaled,
+            signal_count: fence.signal_count,
+            last_signal_tick: fence.last_signal_tick,
+        })
+    }
+
+    pub fn fence_log(&self, handle: FenceHandle) -> Option<Vec<u64>> {
+        self.fences.get(&handle).map(|fence| fence.log.clone())
     }
 
     pub fn create_framebuffer(&mut self, desc: FramebufferDesc) -> FramebufferHandle {
@@ -1421,6 +1604,50 @@ pub fn init() {
     crate::serial_println!("[GPU3D] 3D grafik API'si başlatıldı");
 }
 
+pub fn cache_shader_program(key: &str, desc: ShaderDesc) -> (ShaderHandle, bool) {
+    GPU_DEVICE.lock().cache_shader(key, desc)
+}
+
+pub fn create_cached_render_pass(key: &str, desc: RenderPassDesc) -> RenderPassHandle {
+    GPU_DEVICE.lock().cache_render_pass(key, desc)
+}
+
+pub fn cache_pipeline_state(key: &str, desc: PipelineDesc) -> (PipelineHandle, bool) {
+    GPU_DEVICE.lock().cache_pipeline(key, desc)
+}
+
+pub fn register_named_fence(name: &str, signaled: bool) -> FenceHandle {
+    GPU_DEVICE.lock().register_named_fence(name, signaled)
+}
+
+pub fn set_fence_state(handle: FenceHandle, signaled: bool) -> Result<(), GpuError> {
+    GPU_DEVICE.lock().set_fence_state(handle, signaled)
+}
+
+pub fn fence_state(handle: FenceHandle) -> Option<bool> {
+    GPU_DEVICE.lock().fence_state(handle)
+}
+
+pub fn signal_fence_value(handle: FenceHandle, value: u64) -> Result<(), GpuError> {
+    GPU_DEVICE.lock().signal_fence_value(handle, value)
+}
+
+pub fn set_fence_target(handle: FenceHandle, value: u64) -> Result<(), GpuError> {
+    GPU_DEVICE.lock().set_fence_target(handle, value)
+}
+
+pub fn fence_value(handle: FenceHandle) -> Option<u64> {
+    GPU_DEVICE.lock().fence_value(handle)
+}
+
+pub fn fence_snapshot(handle: FenceHandle) -> Option<FenceSnapshot> {
+    GPU_DEVICE.lock().fence_snapshot(handle)
+}
+
+pub fn fence_log(handle: FenceHandle) -> Option<Vec<u64>> {
+    GPU_DEVICE.lock().fence_log(handle)
+}
+
 /// Yeni bir GPU tamponu oluşturur ve handle'ını döndürür.
 /// Tampon içeriği başlangıçta sıfırlanmış olarak gelir.
 pub fn create_buffer(desc: BufferDesc) -> BufferHandle {
@@ -1471,7 +1698,9 @@ pub fn get_image(handle: ImageHandle) -> Option<Image> {
 
 /// Belirtilen ofsetten başlayarak tampona veri yazar.
 pub fn write_buffer(handle: BufferHandle, offset: u64, data: &[u8]) -> Result<(), GpuError> {
-    GPU_DEVICE.lock().get_buffer_mut(handle)
+    GPU_DEVICE
+        .lock()
+        .get_buffer_mut(handle)
         .ok_or(GpuError::InvalidHandle)?
         .write(offset, data)
 }

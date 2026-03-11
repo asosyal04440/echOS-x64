@@ -45,6 +45,7 @@
 //! Faz 5: Tam güç yönetimi — S-states, C-states, P-states.
 //! _PTS/_WAK, _PSS/_PCT, _CST AML metot değerlendirmesi.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use aml::AmlValue;
 
@@ -156,12 +157,12 @@ pub fn get_pstate_list() -> Vec<PStateInfo> {
                 if let AmlValue::Package(fields) = elem {
                     if fields.len() >= 6 {
                         let pstate = PStateInfo {
-                            frequency:          aml_to_u32(&fields[0]),
-                            power:              aml_to_u32(&fields[1]),
+                            frequency: aml_to_u32(&fields[0]),
+                            power: aml_to_u32(&fields[1]),
                             transition_latency: aml_to_u32(&fields[2]),
                             bus_master_latency: aml_to_u32(&fields[3]),
-                            control:            aml_to_u32(&fields[4]),
-                            status:             aml_to_u32(&fields[5]),
+                            control: aml_to_u32(&fields[4]),
+                            status: aml_to_u32(&fields[5]),
                         };
                         pstates.push(pstate);
                     }
@@ -253,9 +254,9 @@ pub fn get_cstates() -> Vec<CStateInfo> {
                     if let AmlValue::Package(fields) = elem {
                         if fields.len() >= 3 {
                             let cstate = CStateInfo {
-                                ctype:   aml_to_u32(&fields[0]) as u8,
+                                ctype: aml_to_u32(&fields[0]) as u8,
                                 latency: aml_to_u32(&fields[1]),
-                                power:   aml_to_u32(&fields[2]),
+                                power: aml_to_u32(&fields[2]),
                             };
                             cstates.push(cstate);
                         }
@@ -357,17 +358,21 @@ pub struct BatteryInfoAml {
 /// Farklı platformlardaki EC yolları için birden fazla namespace yolu denenir.
 pub fn get_battery_info_aml() -> Option<BatteryInfoAml> {
     // Önce _BIX (ACPI 4.0+), sonra _BIF (ACPI 1.0) denenir
-    let paths = ["\\_SB.BAT0._BIX", "\\_SB.BAT0._BIF", "\\_SB.PCI0.LPC.EC.BAT0._BIF"];
+    let paths = [
+        "\\_SB.BAT0._BIX",
+        "\\_SB.BAT0._BIF",
+        "\\_SB.PCI0.LPC.EC.BAT0._BIF",
+    ];
 
     for path in &paths {
         if let Ok(AmlValue::Package(fields)) = crate::cpu::acpi_aml::invoke_method(path, &[]) {
             if fields.len() >= 4 {
                 return Some(BatteryInfoAml {
-                    design_capacity:    aml_to_u32(&fields[1]),
+                    design_capacity: aml_to_u32(&fields[1]),
                     last_full_capacity: aml_to_u32(&fields[2]),
-                    design_voltage:     aml_to_u32(&fields[4]),
+                    design_voltage: aml_to_u32(&fields[4]),
                     serial_number: aml_to_string(&fields.get(10)),
-                    model_number:  aml_to_string(&fields.get(9)),
+                    model_number: aml_to_string(&fields.get(9)),
                 });
             }
         }
@@ -399,15 +404,242 @@ pub fn get_battery_status_aml() -> Option<BatteryStatusAml> {
         if let Ok(AmlValue::Package(fields)) = crate::cpu::acpi_aml::invoke_method(path, &[]) {
             if fields.len() >= 4 {
                 return Some(BatteryStatusAml {
-                    state:              aml_to_u32(&fields[0]),
-                    rate:               aml_to_u32(&fields[1]),
+                    state: aml_to_u32(&fields[0]),
+                    rate: aml_to_u32(&fields[1]),
                     remaining_capacity: aml_to_u32(&fields[2]),
-                    voltage:            aml_to_u32(&fields[3]),
+                    voltage: aml_to_u32(&fields[3]),
                 });
             }
         }
     }
     None
+}
+
+// ============================================================================
+// ACPI Device Power Management (_STA, _PS0, _PS3)
+// ============================================================================
+
+/// ACPI cihaz durumu bayrakları (_STA dönüş değeri)
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceStatus {
+    /// Cihaz mevcut ve etkin mi (bit 0)
+    pub present: bool,
+    /// Cihaz etkin mi (bit 1)
+    pub enabled: bool,
+    /// Cihaz UI'da gösterilmeli mi (bit 2)
+    pub show_in_ui: bool,
+    /// Cihaz çalışıyor mu (bit 3)
+    pub functional: bool,
+    /// Pil takılı mı (bit 4) - batarya cihazları için
+    pub battery_present: bool,
+}
+
+impl DeviceStatus {
+    /// _STA dönüş değerinden DeviceStatus oluştur
+    pub fn from_sta(value: u64) -> Self {
+        Self {
+            present: (value & 0x01) != 0,
+            enabled: (value & 0x02) != 0,
+            show_in_ui: (value & 0x04) != 0,
+            functional: (value & 0x08) != 0,
+            battery_present: (value & 0x10) != 0,
+        }
+    }
+
+    /// Cihaz kullanılabilir mi?
+    pub fn is_usable(&self) -> bool {
+        self.present && self.enabled && self.functional
+    }
+
+    /// Tüm durumu u32 değerine dönüştür
+    pub fn to_u32(&self) -> u32 {
+        let mut val = 0u32;
+        if self.present {
+            val |= 0x01;
+        }
+        if self.enabled {
+            val |= 0x02;
+        }
+        if self.show_in_ui {
+            val |= 0x04;
+        }
+        if self.functional {
+            val |= 0x08;
+        }
+        if self.battery_present {
+            val |= 0x10;
+        }
+        val
+    }
+}
+
+/// ACPI cihazının durumunu sorgular (_STA metodu)
+///
+/// _STA (Status) metodu, cihazın mevcut durumunu döndürür:
+/// - Bit 0: Cihaz mevcut
+/// - Bit 1: Cihaz etkin
+/// - Bit 2: UI'da göster
+/// - Bit 3: Fonksiyonel
+/// - Bit 4: Batarya mevcut
+///
+/// Eğer _STA metodu yoksa, cihaz mevcut ve etkin kabul edilir.
+pub fn get_device_status(device_path: &str) -> DeviceStatus {
+    let sta_path = alloc::format!("{}._STA", device_path);
+
+    match crate::cpu::acpi_aml::invoke_method(&sta_path, &[]) {
+        Ok(AmlValue::Integer(value)) => {
+            crate::serial_println!("[OSPM] _STA({}) = {:#x}", device_path, value);
+            DeviceStatus::from_sta(value)
+        }
+        _ => {
+            // _STA yoksa cihaz mevcut ve etkin kabul edilir
+            crate::serial_println!("[OSPM] _STA({}) not found, assuming present", device_path);
+            DeviceStatus {
+                present: true,
+                enabled: true,
+                show_in_ui: true,
+                functional: true,
+                battery_present: false,
+            }
+        }
+    }
+}
+
+/// ACPI cihazını D0 (tam güç) durumuna getirir (_PS0 metodu)
+///
+/// _PS0 (Power State 0), cihazı tam güç durumuna getirir.
+/// Cihaz etkinleştirilmeden önce çağrılmalıdır.
+///
+/// # Dönüş
+/// - `true`: İşlem başarılı veya _PS0 metodu yok (opsiyonel)
+/// - `false`: İşlem başarısız
+pub fn device_power_on(device_path: &str) -> bool {
+    // Önce _STA ile cihazın durumunu kontrol et
+    let status = get_device_status(device_path);
+    if !status.present {
+        crate::serial_println!("[OSPM] Device {} not present, cannot power on", device_path);
+        return false;
+    }
+
+    let ps0_path = alloc::format!("{}._PS0", device_path);
+
+    match crate::cpu::acpi_aml::invoke_method(&ps0_path, &[]) {
+        Ok(_) => {
+            crate::serial_println!("[OSPM] _PS0({}) OK - device powered on", device_path);
+            true
+        }
+        Err(e) => {
+            // _PS0 opsiyonel bir metod - bulunamaması hata değil
+            crate::serial_println!(
+                "[OSPM] _PS0({}) not found or failed: {:?} (optional)",
+                device_path,
+                e
+            );
+            // Cihaz zaten D0'da olabilir
+            true
+        }
+    }
+}
+
+/// ACPI cihazını D3 (düşük güç) durumuna getirir (_PS3 metodu)
+///
+/// _PS3 (Power State 3), cihazı düşük güç durumuna getirir.
+/// Cihaz devre dışı bırakıldığında çağrılmalıdır.
+///
+/// # Dönüş
+/// - `true`: İşlem başarılı veya _PS3 metodu yok (opsiyonel)
+/// - `false`: İşlem başarısız
+pub fn device_power_off(device_path: &str) -> bool {
+    let ps3_path = alloc::format!("{}._PS3", device_path);
+
+    match crate::cpu::acpi_aml::invoke_method(&ps3_path, &[]) {
+        Ok(_) => {
+            crate::serial_println!("[OSPM] _PS3({}) OK - device powered off", device_path);
+            true
+        }
+        Err(e) => {
+            // _PS3 opsiyonel bir metod - bulunamaması hata değil
+            crate::serial_println!(
+                "[OSPM] _PS3({}) not found or failed: {:?} (optional)",
+                device_path,
+                e
+            );
+            true
+        }
+    }
+}
+
+/// ACPI cihazını belirli bir güç durumuna getirir
+///
+/// # Argümanlar
+/// - `device_path`: Cihazın ACPI yolu (örn. "\\_SB.PCI0.USB0")
+/// - `state`: Hedef güç durumu (0=tam güç, 3=düşük güç)
+///
+/// # Dönüş
+/// İşlem başarılıysa `true`
+pub fn set_device_power_state(device_path: &str, state: u8) -> bool {
+    match state {
+        0 => device_power_on(device_path),
+        3 => device_power_off(device_path),
+        _ => {
+            crate::serial_println!(
+                "[OSPM] Unsupported power state D{} for {}",
+                state,
+                device_path
+            );
+            false
+        }
+    }
+}
+
+/// Tüm ACPI cihazlarını tarar ve güç durumlarını raporlar
+pub fn enumerate_device_power_states() -> Vec<(alloc::string::String, DeviceStatus)> {
+    let mut devices = Vec::new();
+
+    if !crate::cpu::acpi_aml::is_initialized() {
+        return devices;
+    }
+
+    // Yaygın cihaz yollarını kontrol et
+    let common_paths = [
+        "\\_SB.PCI0",
+        "\\_SB.PCI0.USB0",
+        "\\_SB.PCI0.USB1",
+        "\\_SB.PCI0.SATA",
+        "\\_SB.PCI0.LPC",
+        "\\_SB.PCI0.LPC.EC",
+        "\\_SB.PWRB",
+        "\\_SB.SLPB",
+    ];
+
+    for path in &common_paths {
+        let status = get_device_status(path);
+        devices.push((alloc::string::String::from(*path), status));
+    }
+
+    devices
+}
+
+/// Güç yönetimi için ACPI cihazlarını başlatır
+pub fn init_device_power_management() {
+    crate::serial_println!("[OSPM] Initializing device power management...");
+
+    let devices = enumerate_device_power_states();
+    let mut active = 0;
+    let mut total = 0;
+
+    for (path, status) in &devices {
+        total += 1;
+        if status.is_usable() {
+            active += 1;
+        }
+    }
+
+    crate::serial_println!(
+        "[OSPM] Device power management initialized: {}/{} devices usable",
+        active,
+        total
+    );
 }
 
 // ============================================================================
@@ -449,8 +681,8 @@ pub fn get_pci_routing_table() -> Vec<PciIrqEntry> {
                 if let AmlValue::Package(fields) = elem {
                     if fields.len() >= 4 {
                         let address = aml_to_u64(&fields[0]);
-                        let pin  = aml_to_u32(&fields[1]) as u8;
-                        let gsi  = aml_to_u32(&fields[3]);
+                        let pin = aml_to_u32(&fields[1]) as u8;
+                        let gsi = aml_to_u32(&fields[3]);
 
                         entries.push(PciIrqEntry {
                             address,
@@ -462,7 +694,11 @@ pub fn get_pci_routing_table() -> Vec<PciIrqEntry> {
                 }
             }
             if !entries.is_empty() {
-                crate::serial_println!("[OSPM] {} PCI IRQ routing entries from {}", entries.len(), path);
+                crate::serial_println!(
+                    "[OSPM] {} PCI IRQ routing entries from {}",
+                    entries.len(),
+                    path
+                );
                 break;
             }
         }

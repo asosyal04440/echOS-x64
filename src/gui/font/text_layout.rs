@@ -18,11 +18,112 @@
 //! - `LayoutLine`: Bir metin satırı; birden fazla run içerebilir
 //! - `TextLayout`: Tüm satırları kapsayan düzen sonucu
 
-use super::truetype::{TrueTypeFont, Glyph};
 use super::rasterizer::RasterGlyph;
+use super::truetype::{Glyph, TrueTypeFont};
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
+
+fn is_rtl_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF
+    )
+}
+
+fn reorder_bidi_runs(text: &str) -> String {
+    let mut out = String::new();
+    let mut run = Vec::new();
+    let mut run_is_rtl = false;
+
+    for c in text.chars() {
+        let rtl = is_rtl_char(c);
+        if run.is_empty() {
+            run_is_rtl = rtl;
+            run.push(c);
+            continue;
+        }
+
+        if rtl == run_is_rtl {
+            run.push(c);
+        } else {
+            if run_is_rtl {
+                for ch in run.iter().rev() {
+                    out.push(*ch);
+                }
+            } else {
+                for ch in run.iter() {
+                    out.push(*ch);
+                }
+            }
+            run.clear();
+            run_is_rtl = rtl;
+            run.push(c);
+        }
+    }
+
+    if run_is_rtl {
+        for ch in run.iter().rev() {
+            out.push(*ch);
+        }
+    } else {
+        for ch in run.iter() {
+            out.push(*ch);
+        }
+    }
+
+    out
+}
+
+fn apply_ligatures(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        if i + 2 < chars.len() && chars[i] == 'f' && chars[i + 1] == 'f' && chars[i + 2] == 'i' {
+            out.push('\u{FB03}'); // ffi
+            i += 3;
+            continue;
+        }
+        if i + 2 < chars.len() && chars[i] == 'f' && chars[i + 1] == 'f' && chars[i + 2] == 'l' {
+            out.push('\u{FB04}'); // ffl
+            i += 3;
+            continue;
+        }
+        if i + 1 < chars.len() && chars[i] == 'f' && chars[i + 1] == 'i' {
+            out.push('\u{FB01}'); // fi
+            i += 2;
+            continue;
+        }
+        if i + 1 < chars.len() && chars[i] == 'f' && chars[i + 1] == 'l' {
+            out.push('\u{FB02}'); // fl
+            i += 2;
+            continue;
+        }
+        if i + 1 < chars.len() && chars[i] == 'f' && chars[i + 1] == 'f' {
+            out.push('\u{FB00}'); // ff
+            i += 2;
+            continue;
+        }
+
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+fn kerning_adjust(prev: Option<char>, current: char, size: f32) -> f32 {
+    let Some(p) = prev else { return 0.0 };
+    let pair = [p, current];
+    let base = size * 0.06;
+    match pair {
+        ['A', 'V'] | ['A', 'W'] | ['A', 'Y'] | ['T', 'o'] | ['T', 'a'] | ['Y', 'o'] => -base,
+        ['L', 'T'] | ['F', 'o'] => -(base * 0.75),
+        _ => 0.0,
+    }
+}
 
 /// Düzenlenmiş tek bir glyph'in ekran üzerindeki konumu.
 ///
@@ -82,9 +183,11 @@ impl TextLayout {
     /// - `\n` → satır sonu zorlaması
     /// - Boşluk/tire ve max_width aşımı → kelime sarmalama
     pub fn layout(text: &str, font: &TrueTypeFont, size: f32, max_width: Option<f32>) -> Self {
+        let bidi_reordered = reorder_bidi_runs(text);
+        let shaped_text = apply_ligatures(&bidi_reordered);
         let scale = size / font.units_per_em as f32;
         let line_height = size * 1.2;
-        
+
         let mut lines = Vec::new();
         let mut current_line_start = 0;
         let mut current_run_glyphs = Vec::new();
@@ -92,16 +195,20 @@ impl TextLayout {
         let mut current_run_width = 0.0;
         let mut current_line_width = 0.0;
         let mut current_x = 0.0;
-        
-        for (i, c) in text.char_indices() {
+        let mut prev_char: Option<char> = None;
+
+        for (i, c) in shaped_text.char_indices() {
             let is_newline = c == '\n';
-            let is_space = c == ' ';
             let is_break_char = c == ' ' || c == '-' || c == '\t';
-            
+
             // Get glyph
             let glyph = font.glyph(c);
-            let advance = glyph.map(|g| g.advance_width as f32 * scale).unwrap_or(size * 0.3);
-            
+            let mut advance = glyph
+                .map(|g| g.advance_width as f32 * scale)
+                .unwrap_or(size * 0.3);
+            let kern = kerning_adjust(prev_char, c, size);
+            advance += kern;
+
             // Check for line break
             if is_newline {
                 // Finish current run and line
@@ -112,7 +219,7 @@ impl TextLayout {
                         y: 0.0,
                         advance: 0.0,
                     });
-                    
+
                     lines.push(LayoutLine {
                         start: current_line_start,
                         end: i,
@@ -136,16 +243,17 @@ impl TextLayout {
                         baseline: line_height * 0.8,
                     });
                 }
-                
+
                 current_line_start = i + c.len_utf8();
                 current_run_start = i + c.len_utf8();
                 current_run_glyphs.clear();
                 current_run_width = 0.0;
                 current_line_width = 0.0;
                 current_x = 0.0;
+                prev_char = None;
                 continue;
             }
-            
+
             // Check for word wrap
             if let Some(max_w) = max_width {
                 if current_line_width + advance > max_w && is_break_char {
@@ -164,7 +272,7 @@ impl TextLayout {
                             height: line_height,
                             baseline: line_height * 0.8,
                         });
-                        
+
                         current_line_start = i;
                         current_run_start = i;
                         current_run_glyphs.clear();
@@ -174,7 +282,7 @@ impl TextLayout {
                     }
                 }
             }
-            
+
             // Add glyph to current run
             let glyph_index = glyph.map(|g| g.index).unwrap_or(0);
             current_run_glyphs.push(LayoutGlyph {
@@ -183,20 +291,21 @@ impl TextLayout {
                 y: 0.0,
                 advance,
             });
-            
+
             current_x += advance;
             current_run_width += advance;
             current_line_width += advance;
+            prev_char = Some(c);
         }
-        
+
         // Finish last line
-        if !current_run_glyphs.is_empty() || current_line_start < text.len() {
+        if !current_run_glyphs.is_empty() || current_line_start < shaped_text.len() {
             lines.push(LayoutLine {
                 start: current_line_start,
-                end: text.len(),
+                end: shaped_text.len(),
                 runs: vec![LayoutRun {
                     start: current_run_start,
-                    end: text.len(),
+                    end: shaped_text.len(),
                     glyphs: current_run_glyphs,
                     width: current_run_width,
                 }],
@@ -205,13 +314,16 @@ impl TextLayout {
                 baseline: line_height * 0.8,
             });
         }
-        
+
         // Calculate total dimensions
-        let total_width = lines.iter().map(|l| l.width).fold(0.0f32, |a: f32, b: f32| if a > b { a } else { b });
+        let total_width = lines
+            .iter()
+            .map(|l| l.width)
+            .fold(0.0f32, |a: f32, b: f32| if a > b { a } else { b });
         let total_height = lines.len() as f32 * line_height;
-        
+
         Self {
-            text: String::from(text),
+            text: shaped_text,
             lines,
             width: total_width,
             height: total_height,
@@ -224,10 +336,10 @@ impl TextLayout {
         if self.lines.is_empty() {
             return None;
         }
-        
+
         let line_height = self.lines[0].height;
         let line_idx = (y / line_height) as usize;
-        
+
         if line_idx < self.lines.len() {
             Some(line_idx)
         } else {
@@ -239,7 +351,7 @@ impl TextLayout {
     pub fn hit_test(&self, x: f32, y: f32) -> Option<usize> {
         let line_idx = self.line_at(y)?;
         let line = self.lines.get(line_idx)?;
-        
+
         // Find run
         for run in &line.runs {
             let mut current_x = 0.0;
@@ -252,7 +364,7 @@ impl TextLayout {
                 current_x += glyph.advance;
             }
         }
-        
+
         // Return end of line
         Some(line.end)
     }
@@ -263,7 +375,7 @@ impl TextLayout {
             if char_index >= line.start && char_index <= line.end {
                 let line_height = line.height;
                 let y = line_idx as f32 * line_height;
-                
+
                 // Find x position
                 for run in &line.runs {
                     if char_index >= run.start && char_index <= run.end {
@@ -277,35 +389,35 @@ impl TextLayout {
                         return (x, y);
                     }
                 }
-                
+
                 return (line.width, y);
             }
         }
-        
+
         (0.0, 0.0)
     }
 
     /// Get selection rectangles for range
     pub fn selection_rects(&self, start: usize, end: usize) -> Vec<(f32, f32, f32, f32)> {
         let mut rects = Vec::new();
-        
+
         for (line_idx, line) in self.lines.iter().enumerate() {
             if end <= line.start || start >= line.end {
                 continue;
             }
-            
+
             let line_start = start.max(line.start);
             let line_end = end.min(line.end);
-            
+
             let (start_x, _) = self.cursor_position(line_start);
             let (end_x, _) = self.cursor_position(line_end);
-            
+
             let y = line_idx as f32 * line.height;
             let height = line.height;
-            
+
             rects.push((start_x, y, end_x - start_x, height));
         }
-        
+
         rects
     }
 
@@ -321,7 +433,7 @@ impl TextLayout {
                     0.0 // TODO: Implement justification
                 }
             };
-            
+
             // Offset all glyphs
             for run in &mut line.runs {
                 for glyph in &mut run.glyphs {
@@ -329,7 +441,7 @@ impl TextLayout {
                 }
             }
         }
-        
+
         self
     }
 }

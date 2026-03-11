@@ -1,7 +1,7 @@
 #![cfg(not(target_os = "uefi"))]
 //! # Multiboot2 / Limine Fiziksel Frame Ayırıcısı
 //!
-//! Kernel önyükleme aşamasına özel, basit bir ileri-doğru büyüyen (bump) ayırıcı.
+//! Kernel önyükleme aşamasına özel, ileri-doğru büyüyen (bump) ayırıcı.
 //!
 //! ## Neden Bump Ayırıcı?
 //!
@@ -354,6 +354,7 @@ fn align_down(addr: u64, align: u64) -> u64 {
     addr & !(align - 1)
 }
 
+#[cfg(target_os = "none")]
 unsafe fn kernel_phys_range(kaslr_offset: u64) -> (u64, u64) {
     extern "C" {
         static kernel_start: u8;
@@ -379,4 +380,17 @@ unsafe fn kernel_phys_range(kaslr_offset: u64) -> (u64, u64) {
         align_down(kernel_start_phys, FRAME_SIZE),
         align_up(kernel_end_phys, FRAME_SIZE),
     )
+}
+
+#[cfg(not(target_os = "none"))]
+unsafe fn kernel_phys_range(_kaslr_offset: u64) -> (u64, u64) {
+    // Host verification builds do not carry the bare-metal linker image symbols.
+    // Derive a stable local image span so allocator code can still link and execute.
+    static HOST_IMAGE_START: u8 = 0;
+    static HOST_IMAGE_END: u8 = 0;
+
+    let start = &HOST_IMAGE_START as *const u8 as u64;
+    let end = (&HOST_IMAGE_END as *const u8 as u64).saturating_add(FRAME_SIZE);
+
+    (align_down(start, FRAME_SIZE), align_up(end, FRAME_SIZE))
 }

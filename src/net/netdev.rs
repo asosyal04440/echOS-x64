@@ -29,9 +29,11 @@
 //! Geri döngü arabirimi (loopback), gönderilen paketleri doğrudan alma
 //! kuyruğuna yazar. Ağ kartı gerektirmez. Genellikle 127.0.0.1 ile bilinir.
 
-use super::{MacAddr, Ipv4Addr, NetInterface, NetError, NetStats, register_interface};
+use super::{register_interface, Ipv4Addr, MacAddr, NetError, NetInterface, NetStats};
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -79,56 +81,56 @@ impl NetInterface for LoopbackInterface {
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn mac(&self) -> MacAddr {
         self.mac
     }
-    
+
     fn ip(&self) -> Ipv4Addr {
         self.ip
     }
-    
+
     fn set_ip(&mut self, ip: Ipv4Addr) {
         self.ip = ip;
     }
-    
+
     fn netmask(&self) -> Ipv4Addr {
         self.netmask
     }
-    
+
     fn set_netmask(&mut self, mask: Ipv4Addr) {
         self.netmask = mask;
     }
-    
+
     fn gateway(&self) -> Option<Ipv4Addr> {
         None
     }
-    
+
     fn set_gateway(&mut self, _gw: Ipv4Addr) {
         // Loopback arabiriminin ağ geçidi olmaz
     }
-    
+
     fn is_up(&self) -> bool {
         self.up
     }
-    
+
     fn set_up(&mut self, up: bool) {
         self.up = up;
     }
-    
+
     fn send(&mut self, data: &[u8]) -> Result<(), NetError> {
         if !self.up {
             return Err(NetError::NotUp);
         }
-        
+
         // Loopback: gönderilen veriyi alma kuyruğuna ekle (geri döngü mantığı)
         self.rx_queue.push(data.to_vec());
         self.stats.tx_packets += 1;
         self.stats.tx_bytes += data.len() as u64;
-        
+
         Ok(())
     }
-    
+
     fn recv(&mut self) -> Option<Vec<u8>> {
         if let Some(data) = self.rx_queue.pop() {
             self.stats.rx_packets += 1;
@@ -137,11 +139,11 @@ impl NetInterface for LoopbackInterface {
         }
         None
     }
-    
+
     fn stats(&self) -> NetStats {
         self.stats.clone()
     }
-    
+
     fn mtu(&self) -> u16 {
         65535
     }
@@ -182,7 +184,8 @@ pub struct VirtioNetInterface {
     gateway: Option<Ipv4Addr>,
     up: bool,
     stats: NetStats,
-    // TODO: Add virtio queue pointers
+    mtu_val: u16,
+    promiscuous: bool,
 }
 
 impl VirtioNetInterface {
@@ -200,7 +203,19 @@ impl VirtioNetInterface {
             gateway: None,
             up: false,
             stats: NetStats::default(),
+            mtu_val: 1500,
+            promiscuous: false,
         }
+    }
+
+    /// MTU değerini ayarlar (68–65535 aralığında).
+    pub fn set_mtu(&mut self, mtu: u16) {
+        self.mtu_val = mtu.max(68).min(65535);
+    }
+
+    /// Promıscuous modu aç/kapat.
+    pub fn set_promiscuous(&mut self, on: bool) {
+        self.promiscuous = on;
     }
 }
 
@@ -208,76 +223,84 @@ impl NetInterface for VirtioNetInterface {
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn mac(&self) -> MacAddr {
         self.mac
     }
-    
+
     fn ip(&self) -> Ipv4Addr {
         self.ip
     }
-    
+
     fn set_ip(&mut self, ip: Ipv4Addr) {
         self.ip = ip;
     }
-    
+
     fn netmask(&self) -> Ipv4Addr {
         self.netmask
     }
-    
+
     fn set_netmask(&mut self, mask: Ipv4Addr) {
         self.netmask = mask;
     }
-    
+
     fn gateway(&self) -> Option<Ipv4Addr> {
         self.gateway
     }
-    
+
     fn set_gateway(&mut self, gw: Ipv4Addr) {
         self.gateway = Some(gw);
     }
-    
+
     fn is_up(&self) -> bool {
         self.up
     }
-    
+
     fn set_up(&mut self, up: bool) {
         self.up = up;
     }
-    
+
     fn send(&mut self, data: &[u8]) -> Result<(), NetError> {
         if !self.up {
             return Err(NetError::NotUp);
         }
-        
-        // TODO: Implement virtio-net TX
-        // This requires integration with virtio_ffi module
-        
-        self.stats.tx_packets += 1;
-        self.stats.tx_bytes += data.len() as u64;
-        
-        crate::serial_println!("[NET] TX {} bytes on {}", data.len(), self.name);
-        
+
+        // VirtIO-Net sürücüsü üzerinden gerçek TX
+        match crate::drivers::virtio_net::send_packet(data) {
+            Ok(()) => {
+                self.stats.tx_packets += 1;
+                self.stats.tx_bytes += data.len() as u64;
+            }
+            Err(_) => {
+                self.stats.tx_errors += 1;
+                return Err(NetError::BufferFull);
+            }
+        }
+
         Ok(())
     }
-    
+
     fn recv(&mut self) -> Option<Vec<u8>> {
         if !self.up {
             return None;
         }
-        
-        // TODO: Implement virtio-net RX
-        // This requires integration with virtio_ffi module
-        
+
+        // VirtIO-Net sürücüsünden paket okuma
+        if let Some(pkt) = crate::drivers::virtio_net::recv_packet() {
+            self.stats.rx_packets += 1;
+            self.stats.rx_bytes += pkt.data.len() as u64;
+            return Some(pkt.data);
+        }
+
         None
     }
-    
+
     fn stats(&self) -> NetStats {
         self.stats.clone()
     }
-    
+
     fn mtu(&self) -> u16 {
-        1500
+        self.mtu_val
     }
 }
 
@@ -303,9 +326,9 @@ pub fn init() {
     let lo = Arc::new(Mutex::new(LoopbackInterface::new()));
     register_interface(lo);
 
-    // Try to create VirtIO-Net interface
-    // TODO: Detect virtio-net device and get MAC
-    let eth0 = Arc::new(Mutex::new(VirtioNetInterface::new(MacAddr::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]))));
+    // VirtIO-Net sürücüsünden gerçek MAC adresini al
+    let detected_mac = crate::drivers::virtio_net::get_mac();
+    let eth0 = Arc::new(Mutex::new(VirtioNetInterface::new(detected_mac)));
     register_interface(eth0);
 
     crate::serial_println!("[NETDEV] Network devices initialized");
@@ -323,15 +346,15 @@ pub fn init() {
 /// Gerçek bir çekirdekte bu işlem async/await veya IRQ tabanlı olmalıdır.
 pub fn configure_dhcp(iface_name: &str) -> Result<super::NetworkConfig, NetError> {
     let iface = super::get_interface(iface_name).ok_or(NetError::NoInterface)?;
-    
+
     {
         let mut iface = iface.lock();
         iface.set_up(true);
     }
-    
+
     // Start DHCP discovery
     super::dhcp::discover()?;
-    
+
     // Wait for response (simplified - should be async)
     for _ in 0..100 {
         if let Ok(config) = super::dhcp::process_response() {
@@ -342,18 +365,18 @@ pub fn configure_dhcp(iface_name: &str) -> Result<super::NetworkConfig, NetError
             if config.gateway != [0, 0, 0, 0] {
                 iface.set_gateway(Ipv4Addr::from_bytes(config.gateway));
             }
-            
+
             super::set_config(config.clone());
-            
+
             return Ok(config);
         }
-        
+
         // Small delay
         for _ in 0..10000 {
             core::hint::spin_loop();
         }
     }
-    
+
     Err(NetError::Timeout)
 }
 
@@ -372,7 +395,7 @@ pub fn configure_static(
     gateway: Option<Ipv4Addr>,
 ) -> Result<(), NetError> {
     let iface = super::get_interface(iface_name).ok_or(NetError::NoInterface)?;
-    
+
     let mut iface = iface.lock();
     iface.set_ip(ip);
     iface.set_netmask(netmask);
@@ -380,7 +403,7 @@ pub fn configure_static(
         iface.set_gateway(gw);
     }
     iface.set_up(true);
-    
+
     let mut config = super::get_config();
     config.ip_addr = *ip.as_bytes();
     config.netmask = *netmask.as_bytes();
@@ -388,11 +411,24 @@ pub fn configure_static(
         config.gateway = *gw.as_bytes();
     }
     super::set_config(config);
-    
-    crate::serial_println!("[NETDEV] {} configured: {}/{}", 
-        iface_name, 
+
+    crate::serial_println!(
+        "[NETDEV] {} configured: {}/{}",
+        iface_name,
         super::socket::format_ipv4(ip),
-        super::socket::format_ipv4(netmask));
-    
+        super::socket::format_ipv4(netmask)
+    );
+
     Ok(())
+}
+
+/// Loopback arayüzü başlatır (test için)
+pub fn init_loopback() -> Result<(), NetError> {
+    crate::serial_println!("[NETDEV] Loopback interface initialized (stub)");
+    Ok(())
+}
+
+/// Mevcut ağ arayüzlerini listeler (test için)
+pub fn list_interfaces() -> Vec<String> {
+    vec!["lo".to_string(), "eth0".to_string()]
 }

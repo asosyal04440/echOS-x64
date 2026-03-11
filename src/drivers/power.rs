@@ -104,6 +104,12 @@ pub enum SleepState {
     S5,
 }
 
+impl Default for SleepState {
+    fn default() -> Self {
+        SleepState::S0
+    }
+}
+
 /// ACPI cihaz güç durumları.
 /// D0 tam çalışmadan D3Cold tam kapanmaya kadar enerji seviyeleri.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,10 +238,8 @@ impl PowerManageable {
     /// Otomatik askıya alma zamanlayıcısını sıfırlar.
     pub fn get(&self) {
         self.usage_count.fetch_add(1, Ordering::SeqCst);
-        self.last_busy.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_busy
+            .store(crate::task::scheduler::get_ticks() as u64, Ordering::SeqCst);
     }
 
     /// Kullanım sayacını azaltır.
@@ -253,7 +257,7 @@ impl PowerManageable {
     /// Son meşguliyet üzerinden autosuspend_delay ms geçmişse true döner.
     pub fn check_autosuspend(&self) -> bool {
         let last = self.last_busy.load(Ordering::SeqCst);
-        let now = crate::task::scheduler::get_ticks();
+        let now = crate::task::scheduler::get_ticks() as u64;
         let delay = self.autosuspend_delay.load(Ordering::SeqCst) as u64;
 
         now - last > delay
@@ -311,7 +315,14 @@ impl PowerManager {
             wakeup_sources: Mutex::new(Vec::new()),
             suspend_blockers: Mutex::new(Vec::new()),
             suspending: AtomicBool::new(false),
-            stats: Mutex::new(PmStats::default()),
+            stats: Mutex::new(PmStats {
+                suspend_count: 0,
+                resume_count: 0,
+                suspend_fail_count: 0,
+                last_suspend_time: 0,
+                total_suspend_time: 0,
+                deepest_state: SleepState::S0,
+            }),
         }
     }
 
@@ -362,7 +373,7 @@ impl PowerManager {
         }
 
         self.suspending.store(true, Ordering::SeqCst);
-        let start_time = crate::task::scheduler::get_ticks();
+        let start_time = crate::task::scheduler::get_ticks() as u64;
 
         crate::serial_println!("[PM] Entering sleep state {:?}", state);
 
@@ -374,8 +385,7 @@ impl PowerManager {
         }
 
         // Cihazları ters sırayla askıya al (bağımlılık sırasına göre)
-        let devices: Vec<Arc<PowerManageable>> =
-            self.devices.lock().values().cloned().collect();
+        let devices: Vec<Arc<PowerManageable>> = self.devices.lock().values().cloned().collect();
 
         for device in devices.iter().rev() {
             let target_state = match state {
@@ -402,7 +412,7 @@ impl PowerManager {
         }
 
         // İstatistikleri güncelle
-        let end_time = crate::task::scheduler::get_ticks();
+        let end_time = crate::task::scheduler::get_ticks() as u64;
         let mut stats = self.stats.lock();
         stats.suspend_count += 1;
         stats.resume_count += 1;
@@ -422,11 +432,52 @@ impl PowerManager {
     fn enter_acpi_state(&self, state: SleepState) -> Result<(), PmError> {
         *self.system_state.lock() = state;
 
-        // ACPI PM1a kontrol yazmacına yazma (şimdilik yer tutucu)
+        // ACPI PM1a kontrol yazmacına yaz
+        // PM1a_CNT tipik adresi: 0x404 (FADT tablosundan okunmalı)
+        let pm1a_cnt_addr = 0x404u16;
+
         match state {
+            SleepState::S1 => {
+                // S1: CPU halt, c haz w/o power loss
+                crate::serial_println!("[PM] Entering S1 (Power On Suspend)");
+                unsafe {
+                    use x86_64::instructions::port::Port;
+                    let mut port = Port::<u16>::new(pm1a_cnt_addr);
+                    // SLP_TYP = S1 (0x00) | SLP_EN = bit 13
+                    port.write((0x00 << 10) | (1 << 13));
+                }
+            }
+            SleepState::S3 => {
+                // S3: RAM'e askıya al
+                crate::serial_println!("[PM] Entering S3 (Suspend to RAM)");
+                unsafe {
+                    use x86_64::instructions::port::Port;
+                    let mut port = Port::<u16>::new(pm1a_cnt_addr);
+                    // SLP_TYP = S3 (0x05) | SLP_EN = bit 13
+                    port.write((0x05 << 10) | (1 << 13));
+                }
+            }
+            SleepState::S4 => {
+                // S4: Diske askıya al
+                crate::serial_println!("[PM] Entering S4 (Hibernate)");
+                unsafe {
+                    use x86_64::instructions::port::Port;
+                    let mut port = Port::<u16>::new(pm1a_cnt_addr);
+                    port.write((0x06 << 10) | (1 << 13));
+                }
+            }
             SleepState::S5 => {
                 // Sistemi kapat
-                crate::serial_println!("[PM] Powering off");
+                crate::serial_println!("[PM] Powering off (S5)");
+                unsafe {
+                    use x86_64::instructions::port::Port;
+                    // QEMU poweroff: port 0x604 değeri 0x2000
+                    let mut qemu_port = Port::<u16>::new(0x604);
+                    qemu_port.write(0x2000);
+                    // Fallback: PM1a_CNT
+                    let mut port = Port::<u16>::new(pm1a_cnt_addr);
+                    port.write((0x07 << 10) | (1 << 13));
+                }
             }
             _ => {}
         }
@@ -507,22 +558,26 @@ pub enum PmError {
 /// veya hibernate durumuna geçişini sağlar.
 pub fn sys_reboot(cmd: u32) -> i32 {
     match cmd {
-        0 => { // LINUX_REBOOT_CMD_RESTART
+        0 => {
+            // LINUX_REBOOT_CMD_RESTART
             let _ = PM_MANAGER.reboot();
             0
         }
-        1 => { // LINUX_REBOOT_CMD_POWER_OFF
+        1 => {
+            // LINUX_REBOOT_CMD_POWER_OFF
             let _ = PM_MANAGER.power_off();
             0
         }
-        2 => { // LINUX_REBOOT_CMD_HALT
+        2 => {
+            // LINUX_REBOOT_CMD_HALT
             0
         }
-        3 => { // LINUX_REBOOT_CMD_SW_SUSPEND (Hibernate)
+        3 => {
+            // LINUX_REBOOT_CMD_SW_SUSPEND (Hibernate)
             let _ = PM_MANAGER.hibernate();
             0
         }
-        _ => -22 // EINVAL: geçersiz komut
+        _ => -22, // EINVAL: geçersiz komut
     }
 }
 

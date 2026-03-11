@@ -17,6 +17,11 @@ serial_mb.log
 dism.log
 build_errors.txt
 build_log_*.txt
+build_log.txt
+build-*.log
+build-*.jsonl
+cargo_errors.txt
+errors.txt
 rustc-ice-*.txt
 *.log
 Simics/echos-simics/targets/echos/logs/
@@ -41,6 +46,7 @@ symbols.txt
 vhdx_update.log
 OVMF_VARS.fd
 echOS_teknik_rapor.pdf
+.codex_*.ps1
 
 # Disk/Firmware Images (too large for GitHub)
 *.vhdx
@@ -68,3 +74,10 @@ UEFI_Spec_*.pdf
 # System Files
 .DS_Store
 Thumbs.db
+.idea
+.vscode
+
+# Private agent / prompt workspace
+.qoder/
+skills/
+AGENTS.md

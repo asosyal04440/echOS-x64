@@ -34,8 +34,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -131,7 +131,7 @@ pub const IPTABLES_SECURITY_TABLE: &str = "security";
 /// - `matches`                : Ek eşleştirici uzantıları (conntrack, limit vb.)
 /// - `target`                 : Eşleşme durumunda uygulanacak eylem
 /// - `packet_count`/`byte_count`: İstatistik sayaçları (atomik güncelleme)
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct IptEntry {
     /// Source IP address
     pub src_ip: u32,
@@ -256,26 +256,42 @@ pub struct IptTarget {
 impl IptTarget {
     /// Paketi kabul eden hedef oluşturur. Linux'ta `-j ACCEPT` ile eşdeğerdir.
     pub fn accept() -> Self {
-        Self { name: String::from("ACCEPT"), verdict: NF_ACCEPT, data: Vec::new() }
+        Self {
+            name: String::from("ACCEPT"),
+            verdict: NF_ACCEPT,
+            data: Vec::new(),
+        }
     }
 
     /// Paketi sessizce düşüren hedef. `-j DROP` ile eşdeğerdir.
     /// Gönderici herhangi bir hata mesajı almaz (güvenlik açısından tercih edilir).
     pub fn drop() -> Self {
-        Self { name: String::from("DROP"), verdict: NF_DROP, data: Vec::new() }
+        Self {
+            name: String::from("DROP"),
+            verdict: NF_DROP,
+            data: Vec::new(),
+        }
     }
 
     /// Zincirlerde kullanılan RETURN hedefi.
     /// Alt zincirden çağıran zincire geri döner.
     /// 0xFFFFFFFF özel RETURN sentinel değeri olarak kullanılır.
     pub fn return_() -> Self {
-        Self { name: String::from("RETURN"), verdict: 0xFFFFFFFF, data: Vec::new() }
+        Self {
+            name: String::from("RETURN"),
+            verdict: 0xFFFFFFFF,
+            data: Vec::new(),
+        }
     }
 
     /// MASQUERADE: Kaynak IP'yi çıkış arabiriminin IP'siyle değiştirir.
     /// Dinamik IP'ye sahip bağlantı paylaşımında kullanılır (ev yönlendiricisi gibi).
     pub fn masquerade() -> Self {
-        Self { name: String::from("MASQUERADE"), verdict: NF_ACCEPT, data: Vec::new() }
+        Self {
+            name: String::from("MASQUERADE"),
+            verdict: NF_ACCEPT,
+            data: Vec::new(),
+        }
     }
 
     /// SNAT (Source NAT): Kaynak IP ve portu sabit bir adresle değiştirir.
@@ -291,7 +307,7 @@ impl IptTarget {
                 ((ip >> 24) & 0xFF) as u8,
                 (port & 0xFF) as u8,
                 ((port >> 8) & 0xFF) as u8,
-            ]
+            ],
         }
     }
 
@@ -308,7 +324,7 @@ impl IptTarget {
                 ((ip >> 24) & 0xFF) as u8,
                 (port & 0xFF) as u8,
                 ((port >> 8) & 0xFF) as u8,
-            ]
+            ],
         }
     }
 }
@@ -335,7 +351,7 @@ impl IptTarget {
 /// - `entries`       : Sıralı kural listesi
 /// - `packet_count`  : Bu zincirden geçen toplam paket sayısı
 /// - `byte_count`    : Bu zincirden geçen toplam bayt sayısı
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct IptChain {
     pub name: String,
     pub hook: u32,
@@ -393,7 +409,9 @@ impl IptChain {
         for entry in &self.entries {
             if entry.matches_packet(pkt) {
                 entry.packet_count.fetch_add(1, Ordering::Relaxed);
-                entry.byte_count.fetch_add(pkt.len as u64, Ordering::Relaxed);
+                entry
+                    .byte_count
+                    .fetch_add(pkt.len as u64, Ordering::Relaxed);
 
                 // Execute target
                 return self.execute_target(&entry.target, pkt);
@@ -422,7 +440,10 @@ impl IptChain {
             "SNAT" => {
                 if target.data.len() >= 6 {
                     let ip = u32::from_le_bytes([
-                        target.data[0], target.data[1], target.data[2], target.data[3]
+                        target.data[0],
+                        target.data[1],
+                        target.data[2],
+                        target.data[3],
                     ]);
                     pkt.new_src_ip = ip;
                 }
@@ -431,7 +452,10 @@ impl IptChain {
             "DNAT" => {
                 if target.data.len() >= 6 {
                     let ip = u32::from_le_bytes([
-                        target.data[0], target.data[1], target.data[2], target.data[3]
+                        target.data[0],
+                        target.data[1],
+                        target.data[2],
+                        target.data[3],
                     ]);
                     pkt.new_dst_ip = ip;
                 }
@@ -444,8 +468,10 @@ impl IptChain {
             "LOG" => {
                 crate::serial_println!(
                     "[IPTABLES] LOG: {}:{} -> {}:{} proto={}",
-                    pkt.src_ip, pkt.src_port,
-                    pkt.dst_ip, pkt.dst_port,
+                    pkt.src_ip,
+                    pkt.src_port,
+                    pkt.dst_ip,
+                    pkt.dst_port,
                     pkt.proto
                 );
                 NF_ACCEPT
@@ -467,7 +493,7 @@ impl IptChain {
 ///
 /// - `name`   : Tablo adı ("filter", "nat", "mangle" vb.)
 /// - `chains` : Tablo içindeki zincirler (zincir adına göre anahtar-değer)
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct IptTable {
     pub name: String,
     pub chains: BTreeMap<String, IptChain>,
@@ -592,7 +618,12 @@ impl NetfilterManager {
         Self {
             tables: Mutex::new(BTreeMap::new()),
             enabled: AtomicBool::new(true),
-            stats: Mutex::new(NetfilterStats::default()),
+            stats: Mutex::new(NetfilterStats {
+                packets_processed: 0,
+                packets_dropped: 0,
+                packets_accepted: 0,
+                nat_count: 0,
+            }),
         }
     }
 
@@ -607,14 +638,22 @@ impl NetfilterManager {
         filter.add_chain(IptChain::new("INPUT", NF_INET_LOCAL_IN, NF_ACCEPT));
         filter.add_chain(IptChain::new("FORWARD", NF_INET_FORWARD, NF_DROP));
         filter.add_chain(IptChain::new("OUTPUT", NF_INET_LOCAL_OUT, NF_ACCEPT));
-        self.tables.lock().insert(String::from(IPTABLES_FILTER_TABLE), filter);
+        self.tables
+            .lock()
+            .insert(String::from(IPTABLES_FILTER_TABLE), filter);
 
         // NAT table
         let mut nat = IptTable::new(IPTABLES_NAT_TABLE);
         nat.add_chain(IptChain::new("PREROUTING", NF_INET_PRE_ROUTING, NF_ACCEPT));
-        nat.add_chain(IptChain::new("POSTROUTING", NF_INET_POST_ROUTING, NF_ACCEPT));
+        nat.add_chain(IptChain::new(
+            "POSTROUTING",
+            NF_INET_POST_ROUTING,
+            NF_ACCEPT,
+        ));
         nat.add_chain(IptChain::new("OUTPUT", NF_INET_LOCAL_OUT, NF_ACCEPT));
-        self.tables.lock().insert(String::from(IPTABLES_NAT_TABLE), nat);
+        self.tables
+            .lock()
+            .insert(String::from(IPTABLES_NAT_TABLE), nat);
 
         crate::serial_println!("[NETFILTER] Initialized iptables");
     }
@@ -651,10 +690,17 @@ impl NetfilterManager {
 
     /// Tablodaki zincire yeni bir kural ekler.
     /// Hata durumunda `NetfilterError` döner (tablo veya zincir bulunamazsa).
-    pub fn add_rule(&self, table: &str, chain: &str, entry: IptEntry) -> Result<(), NetfilterError> {
+    pub fn add_rule(
+        &self,
+        table: &str,
+        chain: &str,
+        entry: IptEntry,
+    ) -> Result<(), NetfilterError> {
         let mut tables = self.tables.lock();
         let tbl = tables.get_mut(table).ok_or(NetfilterError::TableNotFound)?;
-        let chn = tbl.get_chain_mut(chain).ok_or(NetfilterError::ChainNotFound)?;
+        let chn = tbl
+            .get_chain_mut(chain)
+            .ok_or(NetfilterError::ChainNotFound)?;
         chn.add_entry(entry);
         Ok(())
     }
@@ -663,7 +709,9 @@ impl NetfilterManager {
     pub fn delete_rule(&self, table: &str, chain: &str, pos: usize) -> Result<(), NetfilterError> {
         let mut tables = self.tables.lock();
         let tbl = tables.get_mut(table).ok_or(NetfilterError::TableNotFound)?;
-        let chn = tbl.get_chain_mut(chain).ok_or(NetfilterError::ChainNotFound)?;
+        let chn = tbl
+            .get_chain_mut(chain)
+            .ok_or(NetfilterError::ChainNotFound)?;
         chn.delete_entry(pos);
         Ok(())
     }
@@ -716,4 +764,340 @@ pub enum NetfilterError {
 /// Bu fonksiyon `NETFILTER.init()` aracılığıyla varsayılan tabloları kurar.
 pub fn init() {
     NETFILTER.init();
+}
+
+// ============================================================================
+// CONNTRACK — Bağlantı Takibi (Connection Tracking)
+// ============================================================================
+//
+// Conntrack, netfilter'ın datagram-tabanlı IP trafiğini mantıksal bağlantılar
+// olarak modellemesini sağlar. NAT, stateful firewall ve rate limiting için
+// temel altyapıdır.
+
+/// Bağlantı durumu
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnState {
+    /// Yeni bağlantı (ilk paket görüldü)
+    New,
+    /// Bağlantı kuruldu (çift yönlü trafik)
+    Established,
+    /// İlişkili bağlantı (FTP data vs.)
+    Related,
+    /// Geçersiz paket
+    Invalid,
+    /// Bağlantı kapanıyor (FIN/RST görüldü)
+    Closing,
+    /// Zaman aşımı ile silindi
+    TimedOut,
+}
+
+/// Bağlantı yönü
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnDirection {
+    /// Orijinal yön (istemci → sunucu)
+    Original,
+    /// Yanıt yönü (sunucu → istemci)
+    Reply,
+}
+
+/// L4 protokol bilgisi
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnProto {
+    Tcp {
+        src_port: u16,
+        dst_port: u16,
+        /// TCP durum takibi
+        tcp_state: ConnTcpState,
+    },
+    Udp {
+        src_port: u16,
+        dst_port: u16,
+    },
+    Icmp {
+        icmp_type: u8,
+        icmp_code: u8,
+        icmp_id: u16,
+    },
+    Other(u8),
+}
+
+/// Conntrack TCP durum makinesi
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnTcpState {
+    None,
+    SynSent,
+    SynRecv,
+    Established,
+    FinWait,
+    CloseWait,
+    LastAck,
+    TimeWait,
+    Close,
+}
+
+/// Tek bir bağlantı takip kaydı
+#[derive(Debug, Clone)]
+pub struct ConntrackEntry {
+    /// Benzersiz bağlantı ID
+    pub id: u64,
+    /// Kaynak IP (IPv4 olarak u32, big-endian)
+    pub src_ip: u32,
+    /// Hedef IP
+    pub dst_ip: u32,
+    /// Protokol bilgisi
+    pub proto: ConnProto,
+    /// Bağlantı durumu
+    pub state: ConnState,
+    /// Orijinal yöndeki paket sayısı
+    pub packets_orig: u64,
+    /// Yanıt yönündeki paket sayısı
+    pub packets_reply: u64,
+    /// Orijinal yöndeki bayt sayısı
+    pub bytes_orig: u64,
+    /// Yanıt yönündeki bayt sayısı
+    pub bytes_reply: u64,
+    /// Oluşturma zamanı (TSC)
+    pub created_tsc: u64,
+    /// Son paket zamanı (TSC)
+    pub last_seen_tsc: u64,
+    /// Zaman aşımı süresi (TSC tick)
+    pub timeout_ticks: u64,
+    /// NAT bilgisi (varsa)
+    pub nat: Option<ConnNat>,
+    /// Mark (nfmark)
+    pub mark: u32,
+}
+
+/// NAT çeviri bilgisi
+#[derive(Debug, Clone, Copy)]
+pub struct ConnNat {
+    /// Çevrilmiş kaynak IP
+    pub translated_src: u32,
+    /// Çevrilmiş hedef IP
+    pub translated_dst: u32,
+    /// Çevrilmiş kaynak port
+    pub translated_sport: u16,
+    /// Çevrilmiş hedef port
+    pub translated_dport: u16,
+}
+
+/// Conntrack tablosu — tüm aktif bağlantıları tutar
+pub struct ConntrackTable {
+    /// Bağlantılar (ID → Entry)
+    entries: Mutex<BTreeMap<u64, ConntrackEntry>>,
+    /// Sonraki ID
+    next_id: AtomicU64,
+    /// Toplam kayıt limiti
+    max_entries: usize,
+    /// TCP timeout (saniye cinsinden TSC — varsayılan 5 dakika)
+    tcp_timeout: u64,
+    /// UDP timeout
+    udp_timeout: u64,
+    /// ICMP timeout
+    icmp_timeout: u64,
+    /// Aktif mi
+    enabled: AtomicBool,
+}
+
+impl ConntrackTable {
+    pub const fn new() -> Self {
+        Self {
+            entries: Mutex::new(BTreeMap::new()),
+            next_id: AtomicU64::new(1),
+            max_entries: 65536,
+            tcp_timeout: 300_000_000_000, // ~5 dakika @ 1GHz TSC
+            udp_timeout: 30_000_000_000,  // ~30 saniye
+            icmp_timeout: 30_000_000_000, // ~30 saniye
+            enabled: AtomicBool::new(true),
+        }
+    }
+
+    /// Yeni bağlantı kaydeder veya mevcut kaydı günceller.
+    pub fn track_packet(
+        &self,
+        src_ip: u32,
+        dst_ip: u32,
+        proto: ConnProto,
+        current_tsc: u64,
+        pkt_len: u64,
+    ) -> (u64, ConnState) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return (0, ConnState::Invalid);
+        }
+
+        let mut entries = self.entries.lock();
+
+        // Mevcut bağlantı ara (kaynak→hedef yönünde)
+        for entry in entries.values_mut() {
+            if entry.src_ip == src_ip
+                && entry.dst_ip == dst_ip
+                && Self::proto_match(&entry.proto, &proto)
+            {
+                // Orijinal yönde paket
+                entry.packets_orig += 1;
+                entry.bytes_orig += pkt_len;
+                entry.last_seen_tsc = current_tsc;
+                Self::advance_tcp_state(&mut entry.proto, &proto, ConnDirection::Original);
+                if entry.state == ConnState::New && entry.packets_reply > 0 {
+                    entry.state = ConnState::Established;
+                }
+                return (entry.id, entry.state);
+            }
+            if entry.src_ip == dst_ip
+                && entry.dst_ip == src_ip
+                && Self::proto_match_reverse(&entry.proto, &proto)
+            {
+                // Yanıt yönünde paket
+                entry.packets_reply += 1;
+                entry.bytes_reply += pkt_len;
+                entry.last_seen_tsc = current_tsc;
+                Self::advance_tcp_state(&mut entry.proto, &proto, ConnDirection::Reply);
+                if entry.state == ConnState::New {
+                    entry.state = ConnState::Established;
+                }
+                return (entry.id, entry.state);
+            }
+        }
+
+        // Yeni bağlantı
+        if entries.len() >= self.max_entries {
+            return (0, ConnState::Invalid);
+        }
+
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let timeout = match proto {
+            ConnProto::Tcp { .. } => self.tcp_timeout,
+            ConnProto::Udp { .. } => self.udp_timeout,
+            ConnProto::Icmp { .. } => self.icmp_timeout,
+            ConnProto::Other(_) => self.udp_timeout,
+        };
+        let entry = ConntrackEntry {
+            id,
+            src_ip,
+            dst_ip,
+            proto,
+            state: ConnState::New,
+            packets_orig: 1,
+            packets_reply: 0,
+            bytes_orig: pkt_len,
+            bytes_reply: 0,
+            created_tsc: current_tsc,
+            last_seen_tsc: current_tsc,
+            timeout_ticks: timeout,
+            nat: None,
+            mark: 0,
+        };
+        entries.insert(id, entry);
+        (id, ConnState::New)
+    }
+
+    /// Protokol eşleştirme (aynı yön).
+    fn proto_match(existing: &ConnProto, incoming: &ConnProto) -> bool {
+        match (existing, incoming) {
+            (
+                ConnProto::Tcp {
+                    src_port: s1,
+                    dst_port: d1,
+                    ..
+                },
+                ConnProto::Tcp {
+                    src_port: s2,
+                    dst_port: d2,
+                    ..
+                },
+            ) => s1 == s2 && d1 == d2,
+            (
+                ConnProto::Udp {
+                    src_port: s1,
+                    dst_port: d1,
+                },
+                ConnProto::Udp {
+                    src_port: s2,
+                    dst_port: d2,
+                },
+            ) => s1 == s2 && d1 == d2,
+            (ConnProto::Icmp { icmp_id: id1, .. }, ConnProto::Icmp { icmp_id: id2, .. }) => {
+                id1 == id2
+            }
+            _ => false,
+        }
+    }
+
+    /// Ters yön eşleştirme.
+    fn proto_match_reverse(existing: &ConnProto, incoming: &ConnProto) -> bool {
+        match (existing, incoming) {
+            (
+                ConnProto::Tcp {
+                    src_port: s1,
+                    dst_port: d1,
+                    ..
+                },
+                ConnProto::Tcp {
+                    src_port: s2,
+                    dst_port: d2,
+                    ..
+                },
+            ) => s1 == d2 && d1 == s2,
+            (
+                ConnProto::Udp {
+                    src_port: s1,
+                    dst_port: d1,
+                },
+                ConnProto::Udp {
+                    src_port: s2,
+                    dst_port: d2,
+                },
+            ) => s1 == d2 && d1 == s2,
+            (ConnProto::Icmp { icmp_id: id1, .. }, ConnProto::Icmp { icmp_id: id2, .. }) => {
+                id1 == id2
+            }
+            _ => false,
+        }
+    }
+
+    /// TCP durum geçişini ilerletir.
+    fn advance_tcp_state(existing: &mut ConnProto, _incoming: &ConnProto, _dir: ConnDirection) {
+        if let ConnProto::Tcp { tcp_state, .. } = existing {
+            match *tcp_state {
+                ConnTcpState::None => *tcp_state = ConnTcpState::SynSent,
+                ConnTcpState::SynSent => *tcp_state = ConnTcpState::SynRecv,
+                ConnTcpState::SynRecv => *tcp_state = ConnTcpState::Established,
+                ConnTcpState::Established => {}
+                ConnTcpState::FinWait => *tcp_state = ConnTcpState::CloseWait,
+                ConnTcpState::CloseWait => *tcp_state = ConnTcpState::LastAck,
+                ConnTcpState::LastAck => *tcp_state = ConnTcpState::TimeWait,
+                ConnTcpState::TimeWait => *tcp_state = ConnTcpState::Close,
+                ConnTcpState::Close => {}
+            }
+        }
+    }
+
+    /// Zaman aşımına uğramış bağlantıları temizler.
+    pub fn gc(&self, current_tsc: u64) -> usize {
+        let mut entries = self.entries.lock();
+        let before = entries.len();
+        entries.retain(|_, e| current_tsc.saturating_sub(e.last_seen_tsc) < e.timeout_ticks);
+        before - entries.len()
+    }
+
+    /// Toplam bağlantı sayısı.
+    pub fn count(&self) -> usize {
+        self.entries.lock().len()
+    }
+
+    /// Tüm bağlantıları listeler.
+    pub fn list(&self) -> Vec<ConntrackEntry> {
+        self.entries.lock().values().cloned().collect()
+    }
+
+    /// NAT bilgisi atar.
+    pub fn set_nat(&self, conn_id: u64, nat: ConnNat) {
+        if let Some(entry) = self.entries.lock().get_mut(&conn_id) {
+            entry.nat = Some(nat);
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    pub static ref CONNTRACK: ConntrackTable = ConntrackTable::new();
 }

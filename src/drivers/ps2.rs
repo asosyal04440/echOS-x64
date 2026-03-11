@@ -334,9 +334,8 @@ pub fn poll_keyboard() {
 
         // Scan kodu -> KeyEvent -> DecodedKey dönüşümü
         if let Ok(Some(key_event)) = POLL_KEYBOARD.lock().add_byte(scancode) {
-            if let Some(key) = POLL_KEYBOARD.lock().process_keyevent(key_event) {
-                crate::keyboard::push_key(key);
-            }
+            let decoded = POLL_KEYBOARD.lock().process_keyevent(key_event.clone());
+            crate::keyboard::dispatch_key_event(key_event, decoded.clone());
         }
     }
 }

@@ -68,13 +68,13 @@
 //! Örneğin, çoklu kart okuyucu: SD, CF, MS slotları → ayrı LUN'lar.
 //! `GET_MAX_LUN` isteğiyle maksimum LUN sayısı sorgulanır.
 
-use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use spin::Mutex;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use spin::Mutex;
 
-use super::{UsbDevice, UsbError, UsbSetupPacket, UsbEndpoint, UsbDirection, UsbTransferType};
+use super::{UsbDevice, UsbDirection, UsbEndpoint, UsbError, UsbSetupPacket, UsbTransferType};
 
 // ============================================================================
 // YIĞIN DEPOLAMA SINIF İSTEKLERİ
@@ -107,29 +107,29 @@ const CSW_SIGNATURE: u32 = 0x53425355; // "USBS"
 // Komut Blok Alanı'nın (CBWCB) ilk byte: komut tipi
 // ============================================================================
 
-const SCSI_TEST_UNIT_READY: u8 = 0x00;   // Cihaz hazır mı?
-const SCSI_REQUEST_SENSE: u8 = 0x03;     // Hata detay bilgisi
-const SCSI_FORMAT_UNIT: u8 = 0x04;       // Birim biçimlendir
-const SCSI_READ_6: u8 = 0x08;            // Oku (6-byte, eski format)
-const SCSI_WRITE_6: u8 = 0x0A;           // Yaz (6-byte, eski format)
-const SCSI_INQUIRY: u8 = 0x12;           // Cihaz tanımlama
-const SCSI_MODE_SELECT_6: u8 = 0x15;     // Mod seç (6-byte)
-const SCSI_MODE_SENSE_6: u8 = 0x1A;      // Mod anlamlandır (6-byte)
-const SCSI_START_STOP_UNIT: u8 = 0x1B;   // Başlat/durdur (çıkar/yükle)
+const SCSI_TEST_UNIT_READY: u8 = 0x00; // Cihaz hazır mı?
+const SCSI_REQUEST_SENSE: u8 = 0x03; // Hata detay bilgisi
+const SCSI_FORMAT_UNIT: u8 = 0x04; // Birim biçimlendir
+const SCSI_READ_6: u8 = 0x08; // Oku (6-byte, eski format)
+const SCSI_WRITE_6: u8 = 0x0A; // Yaz (6-byte, eski format)
+const SCSI_INQUIRY: u8 = 0x12; // Cihaz tanımlama
+const SCSI_MODE_SELECT_6: u8 = 0x15; // Mod seç (6-byte)
+const SCSI_MODE_SENSE_6: u8 = 0x1A; // Mod anlamlandır (6-byte)
+const SCSI_START_STOP_UNIT: u8 = 0x1B; // Başlat/durdur (çıkar/yükle)
 const SCSI_PREVENT_ALLOW_MEDIUM_REMOVAL: u8 = 0x1E; // Ortam çıkarılmasını engelle
 const SCSI_READ_FORMAT_CAPACITIES: u8 = 0x23; // Biçim kapasitelerini oku
-const SCSI_READ_CAPACITY_10: u8 = 0x25;  // Kapasite oku (10-byte)
-const SCSI_READ_10: u8 = 0x28;           // Oku (10-byte, standart)
-const SCSI_WRITE_10: u8 = 0x2A;          // Yaz (10-byte, standart)
+const SCSI_READ_CAPACITY_10: u8 = 0x25; // Kapasite oku (10-byte)
+const SCSI_READ_10: u8 = 0x28; // Oku (10-byte, standart)
+const SCSI_WRITE_10: u8 = 0x2A; // Yaz (10-byte, standart)
 const SCSI_WRITE_AND_VERIFY_10: u8 = 0x2E; // Yaz ve doğrula
-const SCSI_VERIFY_10: u8 = 0x2F;         // Doğrula
+const SCSI_VERIFY_10: u8 = 0x2F; // Doğrula
 const SCSI_SYNCHRONIZE_CACHE_10: u8 = 0x35; // Önbelleği senkronize et (flush)
-const SCSI_READ_TOC: u8 = 0x43;          // İçindekiler tablosu oku (CD-ROM)
-const SCSI_MODE_SELECT_10: u8 = 0x55;    // Mod seç (10-byte)
-const SCSI_MODE_SENSE_10: u8 = 0x5A;     // Mod anlamlandır (10-byte)
-const SCSI_READ_16: u8 = 0x88;           // Oku (16-byte, büyük LBA)
-const SCSI_WRITE_16: u8 = 0x8A;          // Yaz (16-byte, büyük LBA)
-const SCSI_READ_CAPACITY_16: u8 = 0x9E;  // Kapasite oku (16-byte, 2TB+)
+const SCSI_READ_TOC: u8 = 0x43; // İçindekiler tablosu oku (CD-ROM)
+const SCSI_MODE_SELECT_10: u8 = 0x55; // Mod seç (10-byte)
+const SCSI_MODE_SENSE_10: u8 = 0x5A; // Mod anlamlandır (10-byte)
+const SCSI_READ_16: u8 = 0x88; // Oku (16-byte, büyük LBA)
+const SCSI_WRITE_16: u8 = 0x8A; // Yaz (16-byte, büyük LBA)
+const SCSI_READ_CAPACITY_16: u8 = 0x9E; // Kapasite oku (16-byte, 2TB+)
 
 // ============================================================================
 // KOMUT BLOK SARMAYICI (Command Block Wrapper - CBW)
@@ -177,12 +177,22 @@ impl CommandBlockWrapper {
     /// `direction=In` → flags=0x80 (cihaz → host veri akışı)
     /// `direction=Out` → flags=0x00 (host → cihaz veri akışı)
     /// `lun & 0x0F`: LUN 4 bit, üst 4 bit sıfır olmalı
-    pub fn new(tag: u32, transfer_length: u32, direction: UsbDirection, lun: u8, cb_length: u8) -> Self {
+    pub fn new(
+        tag: u32,
+        transfer_length: u32,
+        direction: UsbDirection,
+        lun: u8,
+        cb_length: u8,
+    ) -> Self {
         Self {
             signature: CBW_SIGNATURE,
             tag,
             transfer_length,
-            flags: if direction == UsbDirection::In { 0x80 } else { 0x00 },
+            flags: if direction == UsbDirection::In {
+                0x80
+            } else {
+                0x00
+            },
             lun: lun & 0x0F,
             cb_length: cb_length.min(16),
             cb: [0u8; 16],
@@ -205,9 +215,9 @@ impl CommandBlockWrapper {
         let mut cbw = Self::new(tag, (block_count as u32) * 512, UsbDirection::In, lun, 10);
         cbw.cb[0] = SCSI_READ_10;
         cbw.cb[1] = 0; // Bayraklar
-        cbw.cb[2..6].copy_from_slice(&lba.to_be_bytes());  // LBA big-endian
+        cbw.cb[2..6].copy_from_slice(&lba.to_be_bytes()); // LBA big-endian
         cbw.cb[6] = 0; // Grup numarası
-        cbw.cb[7..9].copy_from_slice(&block_count.to_be_bytes());  // Blok sayısı big-endian
+        cbw.cb[7..9].copy_from_slice(&block_count.to_be_bytes()); // Blok sayısı big-endian
         cbw.cb[9] = 0; // Kontrol
         cbw
     }
@@ -246,11 +256,11 @@ impl CommandBlockWrapper {
     pub fn inquiry(tag: u32, lun: u8) -> Self {
         let mut cbw = Self::new(tag, 36, UsbDirection::In, lun, 6);
         cbw.cb[0] = SCSI_INQUIRY;
-        cbw.cb[1] = 0;  // EVPD=0 (Vital Product Data yoktur)
-        cbw.cb[2] = 0;  // Sayfa kodu (EVPD=0 ise kullanılmaz)
-        cbw.cb[3] = 0;  // Rezerve
+        cbw.cb[1] = 0; // EVPD=0 (Vital Product Data yoktur)
+        cbw.cb[2] = 0; // Sayfa kodu (EVPD=0 ise kullanılmaz)
+        cbw.cb[3] = 0; // Rezerve
         cbw.cb[4] = 36; // Ayrılan boyut (Allocation Length)
-        cbw.cb[5] = 0;  // Kontrol
+        cbw.cb[5] = 0; // Kontrol
         cbw
     }
 
@@ -307,7 +317,7 @@ impl CommandBlockWrapper {
     pub fn mode_sense6(tag: u32, lun: u8, page_code: u8) -> Self {
         let mut cbw = Self::new(tag, 4, UsbDirection::In, lun, 6);
         cbw.cb[0] = SCSI_MODE_SENSE_6;
-        cbw.cb[2] = page_code & 0x3F;  // Sayfa kodu (bit6=PC, bit5-0=sayfa)
+        cbw.cb[2] = page_code & 0x3F; // Sayfa kodu (bit6=PC, bit5-0=sayfa)
         cbw.cb[4] = 4; // Ayrılan boyut
         cbw
     }
@@ -445,12 +455,16 @@ impl ScsiInquiry {
     ///
     /// `trim_end()`: ASCII alanlarında sağ boşluk dolgusu standart bir uygulamadır.
     pub fn vendor_id_str(&self) -> &str {
-        core::str::from_utf8(&self.vendor_id).unwrap_or("Unknown").trim_end()
+        core::str::from_utf8(&self.vendor_id)
+            .unwrap_or("Unknown")
+            .trim_end()
     }
 
     /// Ürün kimliğini sağ boşlukları kırparak döndürür.
     pub fn product_id_str(&self) -> &str {
-        core::str::from_utf8(&self.product_id).unwrap_or("Unknown").trim_end()
+        core::str::from_utf8(&self.product_id)
+            .unwrap_or("Unknown")
+            .trim_end()
     }
 }
 
@@ -710,9 +724,9 @@ impl MassStorageDriver {
                 for ep in &iface.endpoints {
                     if ep.transfer_type == UsbTransferType::Bulk {
                         if ep.direction == UsbDirection::In {
-                            self.bulk_in = Some(*ep);   // Veri alma
+                            self.bulk_in = Some(*ep); // Veri alma
                         } else {
-                            self.bulk_out = Some(*ep);  // Komut/veri gönderme
+                            self.bulk_out = Some(*ep); // Komut/veri gönderme
                         }
                     }
                 }
@@ -730,7 +744,11 @@ impl MassStorageDriver {
 
         // LUN sayısını sorgula (GET_MAX_LUN + 1)
         self.lun_count = self.get_max_lun()? + 1;
-        crate::serial_println!("[MSC] Max LUN: {} ({} logical unit(s))", self.lun_count - 1, self.lun_count);
+        crate::serial_println!(
+            "[MSC] Max LUN: {} ({} logical unit(s))",
+            self.lun_count - 1,
+            self.lun_count
+        );
 
         // Cihazın hazır hale gelmesini bekle (ilk güç açık sonrası ortam yükleme gecikmesi)
         let mut ready = false;
@@ -838,7 +856,11 @@ impl MassStorageDriver {
     /// 3. CSW ← Bulk IN (13 byte sabit uzunluk)
     ///
     /// Gerçek uygulamada her adım Bulk transfer ile gerçekleştirilir.
-    fn execute_command(&self, cbw: &CommandBlockWrapper, data: Option<&mut [u8]>) -> Result<CommandStatusWrapper, UsbError> {
+    fn execute_command(
+        &self,
+        cbw: &CommandBlockWrapper,
+        data: Option<&mut [u8]>,
+    ) -> Result<CommandStatusWrapper, UsbError> {
         // 1. CBW'yi Bulk OUT endpoint üzerinden gönder (gerçek: 31 byte)
         // self.send_bulk_out(cbw as *const _ as *const u8, 31)?;
 
@@ -894,7 +916,7 @@ impl MassStorageDriver {
     pub fn request_sense(&self, lun: u8) -> Result<ScsiSenseData, UsbError> {
         let cbw = CommandBlockWrapper::request_sense(self.next_tag(), lun);
         let mut sense = ScsiSenseData {
-            response_code: 0x70,  // Sabit format, geçerli veri
+            response_code: 0x70, // Sabit format, geçerli veri
             reserved: 0,
             sense_key: 0,
             information: [0; 4],
@@ -910,7 +932,7 @@ impl MassStorageDriver {
         let sense_buf = unsafe {
             core::slice::from_raw_parts_mut(
                 &mut sense as *mut ScsiSenseData as *mut u8,
-                core::mem::size_of::<ScsiSenseData>()
+                core::mem::size_of::<ScsiSenseData>(),
             )
         };
 
@@ -946,7 +968,7 @@ impl MassStorageDriver {
         let inquiry_buf = unsafe {
             core::slice::from_raw_parts_mut(
                 &mut inquiry as *mut ScsiInquiry as *mut u8,
-                core::mem::size_of::<ScsiInquiry>()
+                core::mem::size_of::<ScsiInquiry>(),
             )
         };
 
@@ -972,7 +994,7 @@ impl MassStorageDriver {
         let cap_buf = unsafe {
             core::slice::from_raw_parts_mut(
                 &mut capacity as *mut ScsiReadCapacity10 as *mut u8,
-                core::mem::size_of::<ScsiReadCapacity10>()
+                core::mem::size_of::<ScsiReadCapacity10>(),
             )
         };
 
@@ -993,7 +1015,13 @@ impl MassStorageDriver {
     /// LBA < 2^32 için READ(10) kullanılır.
     /// Büyük diskler için READ(16) (4TB+) gerekir; şu anda desteklenmiyor.
     /// `expected_len = block_count * block_size`: okuma tamponu yeterli boyutta olmalı.
-    pub fn read_blocks(&self, lun: u8, lba: u64, block_count: u16, buf: &mut [u8]) -> Result<usize, UsbError> {
+    pub fn read_blocks(
+        &self,
+        lun: u8,
+        lba: u64,
+        block_count: u16,
+        buf: &mut [u8],
+    ) -> Result<usize, UsbError> {
         let expected_len = (block_count as usize) * (self.block_size as usize);
         if buf.len() < expected_len {
             return Err(UsbError::DataOverrun);
@@ -1020,7 +1048,13 @@ impl MassStorageDriver {
     ///
     /// LBA < 2^32 için WRITE(10) kullanılır.
     /// Veri tamponu en az `block_count * block_size` byte olmalıdır.
-    pub fn write_blocks(&self, lun: u8, lba: u64, block_count: u16, data: &[u8]) -> Result<usize, UsbError> {
+    pub fn write_blocks(
+        &self,
+        lun: u8,
+        lba: u64,
+        block_count: u16,
+        data: &[u8],
+    ) -> Result<usize, UsbError> {
         let expected_len = (block_count as usize) * (self.block_size as usize);
         if data.len() < expected_len {
             return Err(UsbError::DataUnderrun);

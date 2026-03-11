@@ -10,12 +10,12 @@
 //! - Hata toleransı: arızalı CPU'yu çalışma zamanında çıkar
 //! - Sanallaştırma: sanal makineye dinamik CPU ekleme/çıkarma
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use alloc::vec::Vec;
-use alloc::boxed::Box;
 use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
-use crate::preempt::{PreemptDisableGuard, preempt_enabled};
-use crate::rcu::{RcuPtr, synchronize_rcu};
+use crate::preempt::{preempt_enabled, PreemptDisableGuard};
+use crate::rcu::{synchronize_rcu, RcuPtr};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// CPU hotplug durum makinesi (Linux cpu_states ile uyumlu).
 /// Durum geçişleri: Offline → ComingUp → Online → GoingDown → Offline.
@@ -209,7 +209,7 @@ pub struct CpuHotplugManager {
     /// Hotplug geri çağrı listesi
     callbacks: Vec<HotplugCallback>,
     /// Hotplug kilidi — aynı anda tek işlem çalışmasını garantiler
-    hotplug_lock: spin::Mutex<()>,
+    hotplug_gate: AtomicBool,
     /// Şu anda çevrimiçi olan CPU sayısı
     online_cpus: AtomicU32,
     /// Hotplug işlem istatistikleri
@@ -286,7 +286,7 @@ impl CpuHotplugManager {
             max_cpus,
             cpu_descs,
             callbacks: Vec::new(),
-            hotplug_lock: spin::Mutex::new(()),
+            hotplug_gate: AtomicBool::new(false),
             online_cpus: AtomicU32::new(0),
             stats: HotplugStats::new(),
         }
@@ -321,7 +321,7 @@ impl CpuHotplugManager {
     ///         └── Durum: Online, istatistik güncelle, Online geri çağrıları
     /// ```
     pub fn cpu_online(&self, cpu_id: u32) -> Result<(), HotplugError> {
-        let _guard = self.hotplug_lock.lock();
+        let _guard = self.acquire_hotplug_gate()?;
 
         // CPU tanımlayıcısını al
         let desc = match self.get_cpu_desc(cpu_id) {
@@ -367,10 +367,15 @@ impl CpuHotplugManager {
 
         // Durumu güncelle — tam bellek bariyeri ile diğer CPU'ların görmesi sağlanır
         let desc_guard = desc.read();
-        desc_guard.state.store(CpuState::Online as u32, Ordering::Release);
+        desc_guard
+            .state
+            .store(CpuState::Online as u32, Ordering::Release);
         desc_guard.online.store(true, Ordering::Release);
         desc_guard.hotplugging.store(false, Ordering::Release);
-        desc_guard.last_hotplug.store(crate::task::scheduler::get_ticks() as u64, Ordering::Relaxed);
+        desc_guard.last_hotplug.store(
+            crate::task::scheduler::get_ticks() as u64,
+            Ordering::Relaxed,
+        );
         desc_guard.hotplug_attempts.fetch_add(1, Ordering::Relaxed);
         smp_mb(); // Tam bellek bariyeri — tüm yazmaların görünür olması garantisi
 
@@ -390,7 +395,7 @@ impl CpuHotplugManager {
     /// CPU'yu çevrimdışına alır.
     /// BSP (CPU 0) çevrimdışı yapılamaz — sistem bu CPU olmadan çalışamaz.
     pub fn cpu_offline(&self, cpu_id: u32) -> Result<(), HotplugError> {
-        let _guard = self.hotplug_lock.lock();
+        let _guard = self.acquire_hotplug_gate()?;
 
         // BSP'yi çevrimdışı yapma izni yok
         if cpu_id == 0 {
@@ -446,10 +451,15 @@ impl CpuHotplugManager {
 
         // Durumu güncelle
         let desc_guard = desc.read();
-        desc_guard.state.store(CpuState::Offline as u32, Ordering::Release);
+        desc_guard
+            .state
+            .store(CpuState::Offline as u32, Ordering::Release);
         desc_guard.online.store(false, Ordering::Release);
         desc_guard.hotplugging.store(false, Ordering::Release);
-        desc_guard.last_hotplug.store(crate::task::scheduler::get_ticks() as u64, Ordering::Relaxed);
+        desc_guard.last_hotplug.store(
+            crate::task::scheduler::get_ticks() as u64,
+            Ordering::Relaxed,
+        );
         desc_guard.hotplug_attempts.fetch_add(1, Ordering::Relaxed);
         smp_mb();
 
@@ -546,9 +556,42 @@ impl CpuHotplugManager {
     fn migrate_tasks_away(&self, cpu_id: u32) -> Result<(), HotplugError> {
         crate::serial_println!("Hotplug: CPU {}'deki görevler taşınıyor", cpu_id);
 
-        // Şimdilik yalnızca log yazdırılıyor.
-        // Gerçek uygulamada yukarıdaki adımlar izlenir.
+        // Çevrimdışı olan CPU'nun stealer'ından görevleri çal ve
+        // diğer çevrimiçi CPU'lara dağıt
+        let cpu_count = crate::task::scheduler::get_cpu_count();
+        let mut migrated = 0u32;
 
+        // Stealer üzerinden görevleri çek
+        loop {
+            let task = crate::task::scheduler::steal_from_cpu(cpu_id);
+            if task.is_none() {
+                break;
+            }
+            let task = task.unwrap();
+
+            // En az yüklü çevrimiçi CPU'yu bul (çevrimdışı olan hariç)
+            let mut best_cpu = None;
+            let mut min_load = u32::MAX;
+
+            if let Some(state) = crate::cpu::smp::SMP_STATE.try_lock() {
+                for cpu in state.per_cpu_data.iter() {
+                    if cpu.online && cpu.cpu_id != cpu_id && cpu.load < min_load {
+                        min_load = cpu.load;
+                        best_cpu = Some(cpu.cpu_id);
+                    }
+                }
+            }
+
+            let target = best_cpu.unwrap_or(0);
+            crate::task::scheduler::push_to_cpu(target, task);
+            migrated += 1;
+        }
+
+        // Scheduler CPU sayısını güncelle
+        let online = self.online_cpus.load(Ordering::Acquire);
+        crate::task::scheduler::update_cpu_count(online);
+
+        crate::serial_println!("Hotplug: {} görev CPU {}'den taşındı", migrated, cpu_id);
         Ok(())
     }
 
@@ -665,7 +708,10 @@ pub fn init(max_cpus: u32) {
         return;
     }
 
-    crate::serial_println!("Hotplug: {} CPU için CPU hotplug desteği başlatılıyor", max_cpus);
+    crate::serial_println!(
+        "Hotplug: {} CPU için CPU hotplug desteği başlatılıyor",
+        max_cpus
+    );
 
     let mut manager = CpuHotplugManager::new(max_cpus);
 
@@ -695,13 +741,19 @@ pub fn get_manager() -> Option<&'static CpuHotplugManager> {
 fn default_hotplug_callback(cpu_id: u32, event: CpuHotplugEvent) -> Result<(), HotplugError> {
     match event {
         CpuHotplugEvent::PrepareOnline => {
-            crate::serial_println!("Hotplug: CPU {} çevrimiçe alınmak üzere hazırlanıyor", cpu_id);
+            crate::serial_println!(
+                "Hotplug: CPU {} çevrimiçe alınmak üzere hazırlanıyor",
+                cpu_id
+            );
         }
         CpuHotplugEvent::Online => {
             crate::serial_println!("Hotplug: CPU {} çevrimiçi", cpu_id);
         }
         CpuHotplugEvent::PrepareOffline => {
-            crate::serial_println!("Hotplug: CPU {} çevrimdışına alınmak üzere hazırlanıyor", cpu_id);
+            crate::serial_println!(
+                "Hotplug: CPU {} çevrimdışına alınmak üzere hazırlanıyor",
+                cpu_id
+            );
         }
         CpuHotplugEvent::Offline => {
             crate::serial_println!("Hotplug: CPU {} çevrimdışı", cpu_id);
@@ -730,11 +782,31 @@ pub fn get_online_cpus() -> u32 {
 }
 
 pub fn can_cpu_offline(cpu_id: u32) -> bool {
-    get_manager().map(|m| m.can_cpu_offline(cpu_id)).unwrap_or(false)
+    get_manager()
+        .map(|m| m.can_cpu_offline(cpu_id))
+        .unwrap_or(false)
 }
 
 pub fn can_cpu_online(cpu_id: u32) -> bool {
-    get_manager().map(|m| m.can_cpu_online(cpu_id)).unwrap_or(false)
+    get_manager()
+        .map(|m| m.can_cpu_online(cpu_id))
+        .unwrap_or(false)
+}
+
+impl CpuHotplugManager {
+    fn acquire_hotplug_gate(&self) -> Result<HotplugGateGuard<'_>, HotplugError> {
+        match self.hotplug_gate.compare_exchange(
+            false,
+            true,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(HotplugGateGuard {
+                gate: &self.hotplug_gate,
+            }),
+            Err(_) => Err(HotplugError::OperationFailed),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -758,5 +830,15 @@ mod tests {
 
         assert!(manager.can_cpu_online(0));
         assert!(!manager.can_cpu_offline(0)); // BSP çevrimdışı yapılamaz
+    }
+}
+
+struct HotplugGateGuard<'a> {
+    gate: &'a AtomicBool,
+}
+
+impl Drop for HotplugGateGuard<'_> {
+    fn drop(&mut self) {
+        self.gate.store(false, Ordering::Release);
     }
 }

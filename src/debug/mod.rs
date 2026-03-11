@@ -42,6 +42,25 @@ pub mod analyzer;
 /// Interrupt gerektirmeyen, doğrudan I/O portuna erişen basit sürücü.
 pub mod serial;
 
+/// KGDB — Kernel GDB Remote Serial Protocol stub.
+/// Seri port üzerinden GDB RSP ile çekirdek seviyesi hata ayıklama.
+pub mod kgdb;
+
+/// Ftrace — fonksiyon izleme altyapısı (function tracer, function_graph, irqsoff).
+pub mod ftrace;
+
+/// Kdump — çekirdek çöküş dökümü (register capture, stack trace, ELF64 vmcore).
+pub mod kdump;
+
+/// Strace — per-process sistem çağrısı izleme.
+pub mod strace;
+
+/// Perf — donanım performans sayaçları (PMU profiling).
+pub mod perf;
+
+/// Performance Audit — NVMe IOPS, NIC throughput, jail latency benchmark.
+pub mod perf_audit;
+
 /// Önyükleme öz-denetimi — temel sistem bütünlüğünü doğrular.
 ///
 /// Çekirdek tamamen başlamadan önce çağrılır. Başarılı olursa `true` döner.

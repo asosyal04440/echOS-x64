@@ -16,12 +16,12 @@
 //! CPU1 <--[hızlı]--> Bellek1 (NUMA Düğüm 1)
 //! ```
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use alloc::vec::Vec;
-use alloc::boxed::Box;
 use crate::memory_barriers::{smp_mb, smp_rmb, smp_wmb};
-use crate::rcu::{RcuPtr, synchronize_rcu};
 use crate::preempt::PreemptDisableGuard;
+use crate::rcu::{synchronize_rcu, RcuPtr};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Desteklenen maksimum NUMA düğüm sayısı.
 ///
@@ -87,7 +87,7 @@ impl NumaDistance {
     pub fn new(distance: u8) -> Self {
         Self {
             distance,
-            is_local: distance == 10,  // Linux yerel mesafe için 10 kullanır
+            is_local: distance == 10, // Linux yerel mesafe için 10 kullanır
             is_remote: distance > 10,
         }
     }
@@ -237,19 +237,32 @@ impl NumaNode {
 
         // İstatistikleri güncelle: tahsis sayacını artır, kullanılabilir belleği azalt
         self.allocations.fetch_add(1, Ordering::AcqRel);
-        self.available_memory.fetch_sub(size as u64, Ordering::AcqRel);
+        self.available_memory
+            .fetch_sub(size as u64, Ordering::AcqRel);
         smp_mb();
 
-        // Şimdilik sahte adres dönüyoruz
-        // Gerçek implementasyonda düğümün bellek havuzundan tahsis yapılacak
-        Some(0x4000_0000 as *mut u8) // Geçici implementasyon
+        // Gerçek PMM'den fiziksel çerçeve tahsis et
+        let page_size = 4096usize;
+        let pages = (size + page_size - 1) / page_size;
+        if let Some(frame) = crate::memory::allocate_contiguous_frames(pages) {
+            let phys_addr = frame.start_address().as_u64();
+            let hhdm = crate::memory::hhdm_offset();
+            Some((phys_addr + hhdm) as *mut u8)
+        } else {
+            // Tahsis başarısız — istatistikleri geri al
+            self.available_memory
+                .fetch_add(size as u64, Ordering::AcqRel);
+            self.allocations.fetch_sub(1, Ordering::AcqRel);
+            None
+        }
     }
 
     /// Bu düğüme bellek geri bırakır.
     ///
     /// Kullanılabilir bellek miktarını artırır ve yazma bariyeri uygular.
     pub fn free(&self, size: usize) {
-        self.available_memory.fetch_add(size as u64, Ordering::AcqRel);
+        self.available_memory
+            .fetch_add(size as u64, Ordering::AcqRel);
         smp_wmb();
     }
 
@@ -332,7 +345,7 @@ pub struct NumaManager {
     /// NUMA istatistikleri
     stats: NumaStats,
     /// Sayfa göçü işlemleri için kilit
-    migration_lock: spin::Mutex<()>,
+    migration_gate: AtomicBool,
 }
 
 /// NUMA alt sistemi için istatistikler.
@@ -413,7 +426,7 @@ impl NumaManager {
             online_nodes: AtomicU32::new(0),
             default_policy: AtomicU32::new(NumaPolicy::Default as u32),
             stats: NumaStats::new(),
-            migration_lock: spin::Mutex::new(()),
+            migration_gate: AtomicBool::new(false),
         }
     }
 
@@ -513,13 +526,20 @@ impl NumaManager {
     ///              Evet -> ptr döndür
     ///              Hayır -> hata döndür
     /// ```
-    pub fn allocate(&self, size: usize, preferred_node: Option<u32>, policy: Option<NumaPolicy>) -> Result<*mut u8, NumaError> {
+    pub fn allocate(
+        &self,
+        size: usize,
+        preferred_node: Option<u32>,
+        policy: Option<NumaPolicy>,
+    ) -> Result<*mut u8, NumaError> {
         let policy = policy.unwrap_or_else(|| self.get_default_policy());
 
         match policy {
             NumaPolicy::Local => self.allocate_local(size),
             NumaPolicy::Prefer => self.allocate_preferred(size, preferred_node),
-            NumaPolicy::Bind => self.allocate_bind(size, preferred_node.ok_or(NumaError::NoPreferredNode)?),
+            NumaPolicy::Bind => {
+                self.allocate_bind(size, preferred_node.ok_or(NumaError::NoPreferredNode)?)
+            }
             NumaPolicy::Interleave => self.allocate_interleave(size),
             NumaPolicy::Preferred => self.allocate_preferred(size, preferred_node),
             NumaPolicy::Default => self.allocate_default(size, preferred_node),
@@ -549,7 +569,11 @@ impl NumaManager {
     /// Tercih edilen NUMA düğümünden bellek tahsis eder.
     ///
     /// Tercih edilen düğüm yetersizse ya da çevrimdışıysa `allocate_fallback`'e geçer.
-    fn allocate_preferred(&self, size: usize, preferred_node: Option<u32>) -> Result<*mut u8, NumaError> {
+    fn allocate_preferred(
+        &self,
+        size: usize,
+        preferred_node: Option<u32>,
+    ) -> Result<*mut u8, NumaError> {
         if let Some(node_id) = preferred_node {
             let node = self.get_node(node_id).ok_or(NumaError::InvalidNodeId)?;
             let node_guard = node.read();
@@ -604,7 +628,8 @@ impl NumaManager {
         }
 
         // Basit round-robin sıralaması ile dönüşümlü tahsis
-        let node_id = online_nodes[(self.stats.total_allocations.load(Ordering::Relaxed) as usize) % online_nodes.len()];
+        let node_id = online_nodes
+            [(self.stats.total_allocations.load(Ordering::Relaxed) as usize) % online_nodes.len()];
         let node = self.get_node(node_id).ok_or(NumaError::InvalidNodeId)?;
         let node_guard = node.read();
 
@@ -621,7 +646,11 @@ impl NumaManager {
     ///
     /// Önce yerel düğümü, sonra tercih edilen düğümü, son olarak
     /// herhangi çevrimiçi düğümü dener.
-    fn allocate_default(&self, size: usize, preferred_node: Option<u32>) -> Result<*mut u8, NumaError> {
+    fn allocate_default(
+        &self,
+        size: usize,
+        preferred_node: Option<u32>,
+    ) -> Result<*mut u8, NumaError> {
         // Önce yereli dene, sonra tercihliye, en son yedek düğüme geç
         if let Ok(ptr) = self.allocate_local(size) {
             return Ok(ptr);
@@ -712,7 +741,12 @@ impl NumaManager {
     }
 
     /// Belirtilen düğümün bellek boyutunu ayarlar.
-    pub fn set_node_memory(&self, node_id: u32, total: u64, available: u64) -> Result<(), NumaError> {
+    pub fn set_node_memory(
+        &self,
+        node_id: u32,
+        total: u64,
+        available: u64,
+    ) -> Result<(), NumaError> {
         let node = self.get_node(node_id).ok_or(NumaError::InvalidNodeId)?;
         let node_guard = node.read();
         node_guard.set_memory_size(total, available);
@@ -723,7 +757,12 @@ impl NumaManager {
     ///
     /// Mesafe matrisi simetrik olmak zorunda değildir;
     /// her yön ayrı ayrı ayarlanmalıdır.
-    pub fn set_node_distance(&mut self, src_node: u32, dst_node: u32, distance: u8) -> Result<(), NumaError> {
+    pub fn set_node_distance(
+        &mut self,
+        src_node: u32,
+        dst_node: u32,
+        distance: u8,
+    ) -> Result<(), NumaError> {
         let node = self.get_node(src_node).ok_or(NumaError::InvalidNodeId)?;
         let node_guard = node.read();
         let mutable_node = node_guard.as_mut();
@@ -779,8 +818,13 @@ impl NumaManager {
     ///
     /// Göç işlemi sırasında `migration_lock` kilidiyle korunur.
     /// Her iki düğüm de Online olmalıdır; hedef düğümde yeterli bellek bulunmalıdır.
-    pub fn migrate_pages(&self, src_node: u32, dst_node: u32, pages: usize) -> Result<(), NumaError> {
-        let _guard = self.migration_lock.lock();
+    pub fn migrate_pages(
+        &self,
+        src_node: u32,
+        dst_node: u32,
+        pages: usize,
+    ) -> Result<(), NumaError> {
+        let _guard = self.acquire_migration_gate()?;
 
         let src_node_ptr = self.get_node(src_node).ok_or(NumaError::InvalidNodeId)?;
         let dst_node_ptr = self.get_node(dst_node).ok_or(NumaError::InvalidNodeId)?;
@@ -789,7 +833,9 @@ impl NumaManager {
         let dst_guard = dst_node_ptr.read();
 
         // Her iki düğümün de çevrimiçi olup olmadığını kontrol et
-        if src_guard.get_state() != NumaNodeState::Online || dst_guard.get_state() != NumaNodeState::Online {
+        if src_guard.get_state() != NumaNodeState::Online
+            || dst_guard.get_state() != NumaNodeState::Online
+        {
             return Err(NumaError::NodeOffline);
         }
 
@@ -802,18 +848,45 @@ impl NumaManager {
         }
 
         // Basitleştirilmiş göç: bellek sayaçlarını güncelle
-        src_guard.available_memory.fetch_sub(required_memory, Ordering::AcqRel);
-        dst_guard.available_memory.fetch_add(required_memory, Ordering::AcqRel);
+        src_guard
+            .available_memory
+            .fetch_sub(required_memory, Ordering::AcqRel);
+        dst_guard
+            .available_memory
+            .fetch_add(required_memory, Ordering::AcqRel);
 
         // İstatistikleri güncelle
-        src_guard.migrations.fetch_add(pages as u64, Ordering::AcqRel);
-        dst_guard.migrations.fetch_add(pages as u64, Ordering::AcqRel);
+        src_guard
+            .migrations
+            .fetch_add(pages as u64, Ordering::AcqRel);
+        dst_guard
+            .migrations
+            .fetch_add(pages as u64, Ordering::AcqRel);
         self.stats.record_migration();
 
         smp_mb();
 
-        crate::serial_println!("NUMA: Migrated {} pages from node {} to node {}", pages, src_node, dst_node);
+        crate::serial_println!(
+            "NUMA: Migrated {} pages from node {} to node {}",
+            pages,
+            src_node,
+            dst_node
+        );
         Ok(())
+    }
+
+    fn acquire_migration_gate(&self) -> Result<MigrationGateGuard<'_>, NumaError> {
+        match self.migration_gate.compare_exchange(
+            false,
+            true,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(MigrationGateGuard {
+                gate: &self.migration_gate,
+            }),
+            Err(_) => Err(NumaError::InvalidStateTransition),
+        }
     }
 }
 
@@ -888,7 +961,11 @@ pub fn get_manager() -> Option<&'static NumaManager> {
 /// NUMA-aware bellek tahsisi için kolaylık fonksiyonu.
 ///
 /// Global yönetici üzerinden `allocate` çağrısı yapar.
-pub fn allocate(size: usize, preferred_node: Option<u32>, policy: Option<NumaPolicy>) -> Result<*mut u8, NumaError> {
+pub fn allocate(
+    size: usize,
+    preferred_node: Option<u32>,
+    policy: Option<NumaPolicy>,
+) -> Result<*mut u8, NumaError> {
     let manager = get_manager().ok_or(NumaError::NoOnlineNodes)?;
     manager.allocate(size, preferred_node, policy)
 }
@@ -908,12 +985,16 @@ pub fn get_cpu_node(cpu_id: u32) -> Result<u32, NumaError> {
 
 /// Tüm çevrimiçi NUMA düğümlerinin listesini dönen kolaylık fonksiyonu.
 pub fn get_online_nodes() -> Vec<u32> {
-    get_manager().map(|m| m.get_online_nodes()).unwrap_or_default()
+    get_manager()
+        .map(|m| m.get_online_nodes())
+        .unwrap_or_default()
 }
 
 /// Çevrimiçi NUMA düğüm sayısını dönen kolaylık fonksiyonu.
 pub fn get_online_node_count() -> u32 {
-    get_manager().map(|m| m.get_online_node_count()).unwrap_or(0)
+    get_manager()
+        .map(|m| m.get_online_node_count())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -944,5 +1025,15 @@ mod tests {
 
         assert!(manager.node_offline(0).is_ok());
         assert_eq!(manager.get_online_node_count(), 0);
+    }
+}
+
+struct MigrationGateGuard<'a> {
+    gate: &'a AtomicBool,
+}
+
+impl Drop for MigrationGateGuard<'_> {
+    fn drop(&mut self) {
+        self.gate.store(false, Ordering::Release);
     }
 }

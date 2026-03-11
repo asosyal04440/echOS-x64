@@ -77,7 +77,8 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use x86_64::structures::paging::PageTableFlags;
 use spin::Mutex;
 
 // ============================================================================
@@ -148,7 +149,7 @@ impl Default for ThpConfig {
 // ============================================================================
 
 /// Büyük sayfa tahsisi
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HugePage {
     /// Fiziksel adres
     pub phys_addr: u64,
@@ -177,6 +178,19 @@ impl HugePage {
     }
 }
 
+impl Clone for HugePage {
+    fn clone(&self) -> Self {
+        Self {
+            phys_addr: self.phys_addr,
+            virt_addr: self.virt_addr,
+            size: self.size,
+            is_thp: self.is_thp,
+            ref_count: AtomicU32::new(self.ref_count.load(Ordering::Relaxed)),
+            node: self.node,
+        }
+    }
+}
+
 // ============================================================================
 // THP YÖNETİCİSİ
 // ============================================================================
@@ -193,6 +207,12 @@ pub struct ThpStats {
     pub bytes_in_huge_pages: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ThpCandidate {
+    hotness: u16,
+    last_touch_tick: u64,
+}
+
 /// THP Yöneticisi
 pub struct ThpManager {
     /// Yapılandırma
@@ -205,16 +225,25 @@ pub struct ThpManager {
     enabled: AtomicBool,
     /// Toplam büyük sayfa belleği
     total_huge_memory: AtomicU64,
+    /// 2MB-aligned bölge adayları (khugepaged tarama kaydı)
+    candidates: Mutex<BTreeMap<u64, ThpCandidate>>,
+    /// khugepaged turu için son tarama zamanı (tick)
+    last_scan_tick: AtomicU64,
+    /// khugepaged tarama aralığı
+    scan_interval_ticks: AtomicU64,
 }
 
 impl ThpManager {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             config: Mutex::new(ThpConfig::default()),
             huge_pages: Mutex::new(BTreeMap::new()),
             stats: Mutex::new(ThpStats::default()),
             enabled: AtomicBool::new(true),
             total_huge_memory: AtomicU64::new(0),
+            candidates: Mutex::new(BTreeMap::new()),
+            last_scan_tick: AtomicU64::new(0),
+            scan_interval_ticks: AtomicU64::new(64),
         }
     }
 
@@ -247,33 +276,43 @@ impl ThpManager {
         let hp = HugePage::new(phys, virt, size, false, node);
 
         self.huge_pages.lock().insert(virt, hp.clone());
-        self.total_huge_memory.fetch_add(size as u64, Ordering::Relaxed);
+        self.total_huge_memory
+            .fetch_add(size as u64, Ordering::Relaxed);
 
         let mut stats = self.stats.lock();
         stats.total_huge_pages += 1;
         stats.bytes_in_huge_pages += size as u64;
 
-        crate::serial_println!("[THP] Allocated {} huge page at {:#x}",
-            if size == HPAGE_1GB { "1GB" } else { "2MB" }, virt);
+        crate::serial_println!(
+            "[THP] Allocated {} huge page at {:#x}",
+            if size == HPAGE_1GB { "1GB" } else { "2MB" },
+            virt
+        );
 
         Some(hp)
     }
 
-    /// Ardışık fiziksel bellek tahsis et (yer tutucu)
+    /// Ardışık fiziksel bellek tahsis et (PMM üzerinden)
     fn alloc_contiguous(&self, size: usize) -> Option<u64> {
-        // Ardışık tahsis için PMM çağrılır
-        // Şimdilik yer tutucu döndür
-        Some(0x10000000)
+        let pages = size / 4096;
+        unsafe {
+            crate::memory::global_memory_manager_mut()
+                .and_then(|mgr| mgr.allocate_contiguous_frames(pages))
+                .map(|frame| frame.start_address().as_u64())
+        }
     }
 
-    /// Büyük sayfayı eşle (yer tutucu)
-    fn map_huge_page(&self, phys: u64, size: usize) -> Option<u64> {
-        // Büyük sayfa bayrağı ile sayfa tabloları kurulur
-        Some(0xFFFF800000000000 + phys)
+    /// Büyük sayfayı eşle (HHDM offset ile gerçek sanal adres döndür)
+    fn map_huge_page(&self, phys: u64, _size: usize) -> Option<u64> {
+        // HHDM (Higher Half Direct Map) üzerinden sanal adres hesapla
+        // Gerçek 2MB/1GB sayfa tablosu kaydı paging.rs tarafından yapılır
+        let hhdm = crate::memory::hhdm_offset();
+        Some(hhdm + phys)
     }
 
     /// Küçük sayfaları büyük sayfaya daraltmayı dene
     pub fn try_collapse(&self, vaddr: u64) -> bool {
+        self.mark_candidate(vaddr);
         // Bölgenin daraltma için uygun olup olmadığını kontrol et
         if !Self::is_aligned(vaddr, HPAGE_2MB) {
             return false;
@@ -296,25 +335,150 @@ impl ThpManager {
         false
     }
 
+    fn align_to_hpage_2mb(vaddr: u64) -> u64 {
+        vaddr & !(HPAGE_2MB as u64 - 1)
+    }
+
+    fn mark_candidate(&self, vaddr: u64) {
+        let base = Self::align_to_hpage_2mb(vaddr);
+        let now = crate::task::scheduler::get_ticks() as u64;
+        let mut guard = self.candidates.lock();
+        let entry = guard.entry(base).or_default();
+        entry.hotness = entry.hotness.saturating_add(1).min(4096);
+        entry.last_touch_tick = now;
+    }
+
+    fn reclaim_candidate(&self, base: u64) {
+        self.candidates.lock().remove(&base);
+    }
+
+    /// Khugepaged benzeri tarayıcı: en sıcak adaylardan başlayıp collapse dener.
+    pub fn khugepaged_scan_once(&self, max_regions: usize) -> usize {
+        if max_regions == 0 {
+            return 0;
+        }
+        let now = crate::task::scheduler::get_ticks() as u64;
+        let last = self.last_scan_tick.load(Ordering::Relaxed);
+        let interval = self.scan_interval_ticks.load(Ordering::Relaxed).max(1);
+        if now > last && now.saturating_sub(last) < interval {
+            return 0;
+        }
+        self.last_scan_tick.store(now, Ordering::Relaxed);
+
+        let mut hot: Vec<(u64, ThpCandidate)> = self
+            .candidates
+            .lock()
+            .iter()
+            .map(|(base, cand)| (*base, *cand))
+            .collect();
+
+        hot.sort_by(|a, b| b.1.hotness.cmp(&a.1.hotness));
+        let mut collapsed = 0usize;
+        for (base, cand) in hot.into_iter().take(max_regions) {
+            if cand.hotness < 2 {
+                continue;
+            }
+            if self.try_collapse(base) {
+                collapsed = collapsed.saturating_add(1);
+                self.reclaim_candidate(base);
+            }
+        }
+        collapsed
+    }
+
     /// Bölgenin daraltılabilir olup olmadığını kontrol et
     fn can_collapse(&self, vaddr: u64) -> bool {
-        // 2MB aralığındaki 512 adet 4KB sayfanın tamamını kontrol et
-        // Hepsi mevcut, kilitli değil ve aynı izinlere sahip olmalı
-        // Şimdilik true döndür
-        true
+        let base = Self::align_to_hpage_2mb(vaddr);
+        if self.huge_pages.lock().contains_key(&base) {
+            return false;
+        }
+
+        let config = self.config.lock().clone();
+        if !config.enabled || config.mode == ThpMode::Never {
+            return false;
+        }
+
+        if let Some(manager) = crate::memory::global_memory_manager() {
+            let total_frames = manager.total_frames().max(1) as u64;
+            let max_huge_bytes = total_frames
+                .saturating_mul(4096)
+                .saturating_mul(config.max_percent as u64)
+                / 100;
+            if self.total_huge_memory.load(Ordering::Relaxed) >= max_huge_bytes {
+                return false;
+            }
+        }
+
+        let mut hot_pages = 0usize;
+        for i in 0..(HPAGE_2MB / 4096) {
+            let va = base + (i as u64 * 4096);
+            if crate::memory::translate_addr(va).is_none() {
+                return false;
+            }
+            if let Some(flags) =
+                crate::memory::paging::translate_effective_flags(x86_64::VirtAddr::new(va))
+            {
+                if flags.contains(PageTableFlags::ACCESSED) {
+                    hot_pages = hot_pages.saturating_add(1);
+                }
+            }
+        }
+        // Bölgenin çoğunluğu aktif değilse collapse deneme maliyetini ötele.
+        hot_pages >= 384
     }
 
     /// Gerçek daraltmayı gerçekleştir
     fn do_collapse(&self, vaddr: u64) -> bool {
-        // 1. 2MB ardışık fiziksel bellek tahsis et
-        // 2. 512 küçük sayfadan veriyi kopyala
-        // 3. Büyük sayfa kullanmak için sayfa tablolarını güncelle
-        // 4. Eski küçük sayfaları serbest bırak
+        let base = Self::align_to_hpage_2mb(vaddr);
+        let pages = HPAGE_2MB / 4096;
+
+        let mut src_phys = Vec::with_capacity(pages);
+        for i in 0..pages {
+            let va = base + (i as u64 * 4096);
+            let Some(phys) = crate::memory::translate_addr(va) else {
+                return false;
+            };
+            src_phys.push(phys & !0xFFF);
+        }
+
+        let Some(new_phys_base) = self.alloc_contiguous(HPAGE_2MB) else {
+            return false;
+        };
+
+        let hhdm = crate::memory::active_physical_offset();
+        for (i, old_phys) in src_phys.iter().enumerate() {
+            let src = hhdm.saturating_add(*old_phys) as *const u8;
+            let dst = hhdm.saturating_add(new_phys_base + (i as u64 * 4096)) as *mut u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, dst, 4096);
+            }
+        }
+
+        for i in 0..pages {
+            let va = base + (i as u64 * 4096);
+            crate::memory::unmap_user_va(va);
+            let flags = PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::USER_ACCESSIBLE;
+            if !crate::memory::map_physical_to_user_va(va, new_phys_base + (i as u64 * 4096), flags)
+            {
+                return false;
+            }
+        }
+
+        let hp = HugePage::new(new_phys_base, base, HPAGE_2MB, true, 0);
+        self.huge_pages.lock().insert(base, hp);
+        self.total_huge_memory
+            .fetch_add(HPAGE_2MB as u64, Ordering::Relaxed);
+        let mut stats = self.stats.lock();
+        stats.total_huge_pages = stats.total_huge_pages.saturating_add(1);
+        stats.bytes_in_huge_pages = stats.bytes_in_huge_pages.saturating_add(HPAGE_2MB as u64);
         true
     }
 
     /// Büyük sayfayı küçük sayfalara böl
     pub fn split_huge_page(&self, vaddr: u64) -> bool {
+        self.reclaim_candidate(Self::align_to_hpage_2mb(vaddr));
         let mut huge_pages = self.huge_pages.lock();
 
         if let Some(hp) = huge_pages.remove(&vaddr) {
@@ -329,7 +493,8 @@ impl ThpManager {
             stats.total_huge_pages -= 1;
             stats.bytes_in_huge_pages -= hp.size as u64;
 
-            self.total_huge_memory.fetch_sub(hp.size as u64, Ordering::Relaxed);
+            self.total_huge_memory
+                .fetch_sub(hp.size as u64, Ordering::Relaxed);
 
             crate::serial_println!("[THP] Split huge page at {:#x}", vaddr);
             return true;
@@ -340,6 +505,7 @@ impl ThpManager {
 
     /// THP hatasını işle
     pub fn handle_thp_fault(&self, vaddr: u64) -> bool {
+        self.mark_candidate(vaddr);
         let mut stats = self.stats.lock();
         stats.thp_faults += 1;
 
@@ -374,10 +540,20 @@ impl ThpManager {
         // Ardışık aralıklar oluşturmak için bellek sıkıştırması tetikle
         let mut compacted = 0;
 
-        // Bellek sıkıştırma rutinini çağırır
+        // Bellek geri kazanımı yaparak ardışık alan oluştur
+        // Inactive sayfaları geri kazanarak 512 ardışık frame (~2MB) oluşturmayı dene
+        let reclaimed = crate::memory::reclaim_pages(64);
+        compacted += reclaimed;
 
-        crate::serial_println!("[THP] Compacted {} pages", compacted);
+        crate::serial_println!(
+            "[THP] Compacted {} pages for huge page allocation",
+            compacted
+        );
         compacted
+    }
+
+    pub fn set_scan_interval_ticks(&self, ticks: u64) {
+        self.scan_interval_ticks.store(ticks.max(1), Ordering::Relaxed);
     }
 }
 
@@ -415,7 +591,11 @@ pub const PR_SET_THP_DISABLE: i32 = 43;
 pub fn sys_prctl_thp(option: i32, arg: u64) -> i64 {
     match option {
         PR_GET_THP_DISABLE => {
-            if THP_MANAGER.enabled.load(Ordering::SeqCst) { 0 } else { 1 }
+            if THP_MANAGER.enabled.load(Ordering::SeqCst) {
+                0
+            } else {
+                1
+            }
         }
         PR_SET_THP_DISABLE => {
             THP_MANAGER.enabled.store(arg == 0, Ordering::SeqCst);
@@ -442,4 +622,9 @@ pub fn is_huge_page(vaddr: u64) -> bool {
 /// Büyük sayfa bilgisini al
 pub fn get_huge_page_info(vaddr: u64) -> Option<HugePage> {
     THP_MANAGER.huge_pages.lock().get(&vaddr).cloned()
+}
+
+/// Khugepaged tarayıcı döngüsünün tek turunu çalıştırır.
+pub fn khugepaged_scan_once(max_regions: usize) -> usize {
+    THP_MANAGER.khugepaged_scan_once(max_regions)
 }

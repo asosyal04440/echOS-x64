@@ -88,24 +88,24 @@ pub const VTD_IVA_REG: u32 = 0x60;
 pub const VTD_IRTA_REG: u32 = 0xB8;
 
 /// VT-d capability flags
-pub const VTD_CAP_RWBF: u64 = 1 << 4;      // Required Write-Buffer Flushing
-pub const VTD_CAP_AFL: u64 = 1 << 3;        // Advanced Fault Logging
+pub const VTD_CAP_RWBF: u64 = 1 << 4; // Required Write-Buffer Flushing
+pub const VTD_CAP_AFL: u64 = 1 << 3; // Advanced Fault Logging
 pub const VTD_CAP_MGAW_MASK: u64 = 0x3F << 16; // Maximum Guest Address Width
-pub const VTD_CAP_SAGAW_MASK: u64 = 0x1F << 8;  // Supported Adjusted Guest Address Width
+pub const VTD_CAP_SAGAW_MASK: u64 = 0x1F << 8; // Supported Adjusted Guest Address Width
 
 /// VT-d extended capability flags
-pub const VTD_ECAP_IR: u64 = 1 << 3;        // Interrupt Remapping
-pub const VTD_ECAP_EIM: u64 = 1 << 4;       // Extended Interrupt Mode
-pub const VTD_ECAP_DT: u64 = 1 << 2;        // Device-TLBs
+pub const VTD_ECAP_IR: u64 = 1 << 3; // Interrupt Remapping
+pub const VTD_ECAP_EIM: u64 = 1 << 4; // Extended Interrupt Mode
+pub const VTD_ECAP_DT: u64 = 1 << 2; // Device-TLBs
 
 /// Global command register bits
-pub const VTD_GCMD_TE: u32 = 1 << 31;       // Translation Enable
-pub const VTD_GCMD_SRTP: u32 = 1 << 30;     // Set Root Table Pointer
-pub const VTD_GCMD_SFL: u32 = 1 << 29;     // Set Fault Log
-pub const VTD_GCMD_EAFL: u32 = 1 << 28;    // Enable Advanced Fault Log
-pub const VTD_GCMD_WBF: u32 = 1 << 27;     // Write Buffer Flush
-pub const VTD_GCMD_IRE: u32 = 1 << 25;     // Interrupt Remapping Enable
-pub const VTD_GCMD_SIRTP: u32 = 1 << 24;  // Set Interrupt Remap Table Pointer
+pub const VTD_GCMD_TE: u32 = 1 << 31; // Translation Enable
+pub const VTD_GCMD_SRTP: u32 = 1 << 30; // Set Root Table Pointer
+pub const VTD_GCMD_SFL: u32 = 1 << 29; // Set Fault Log
+pub const VTD_GCMD_EAFL: u32 = 1 << 28; // Enable Advanced Fault Log
+pub const VTD_GCMD_WBF: u32 = 1 << 27; // Write Buffer Flush
+pub const VTD_GCMD_IRE: u32 = 1 << 25; // Interrupt Remapping Enable
+pub const VTD_GCMD_SIRTP: u32 = 1 << 24; // Set Interrupt Remap Table Pointer
 
 /// Global status register bits
 pub const VTD_GSTS_TES: u32 = 1 << 31;
@@ -120,11 +120,11 @@ pub const VTD_GSTS_IRTPS: u32 = 1 << 24;
 pub const IRTE_SIZE: usize = 16;
 
 /// IRTE flags
-pub const IRTE_P: u64 = 1 << 0;             // Present
-pub const IRTE_FPD: u64 = 1 << 1;           // Fault Processing Disable
-pub const IRTE_DM: u64 = 1 << 2;            // Delivery Mode
-pub const IRTE_TM: u64 = 1 << 4;            // Trigger Mode
-pub const IRTE_RH: u64 = 1 << 6;            // Redirection Hint
+pub const IRTE_P: u64 = 1 << 0; // Present
+pub const IRTE_FPD: u64 = 1 << 1; // Fault Processing Disable
+pub const IRTE_DM: u64 = 1 << 2; // Delivery Mode
+pub const IRTE_TM: u64 = 1 << 4; // Trigger Mode
+pub const IRTE_RH: u64 = 1 << 6; // Redirection Hint
 
 /// Source validation types
 pub const SVT_NONE: u8 = 0;
@@ -351,13 +351,13 @@ impl IntrRemapUnit {
     /// Enable interrupt remapping
     pub fn enable(&self) -> Result<(), IrError> {
         // Set interrupt remap table pointer first
-        self.write_reg(VTD_GCMD_REG, VTD_GCMD_SIRTP);
+        self.write_reg(VTD_GCMD_REG, VTD_GCMD_SIRTP as u64);
 
         // Wait for completion
         self.wait_status(VTD_GSTS_IRTPS);
 
         // Enable interrupt remapping
-        self.write_reg(VTD_GCMD_REG, VTD_GCMD_IRE);
+        self.write_reg(VTD_GCMD_REG, VTD_GCMD_IRE as u64);
 
         // Wait for enable
         self.wait_status(VTD_GSTS_IRES);
@@ -376,7 +376,13 @@ impl IntrRemapUnit {
     }
 
     /// Program interrupt
-    pub fn program_interrupt(&self, index: usize, vector: u8, dest: u32, trigger: bool) -> Result<(), IrError> {
+    pub fn program_interrupt(
+        &self,
+        index: usize,
+        vector: u8,
+        dest: u32,
+        trigger: bool,
+    ) -> Result<(), IrError> {
         let irt = self.irt.lock();
         let table = irt.as_ref().ok_or(IrError::TableNotSet)?;
 
@@ -406,7 +412,7 @@ impl IntrRemapUnit {
                 source_id: source,
                 domain_id: 0,
                 address: 0,
-                timestamp: crate::task::scheduler::get_ticks(),
+                timestamp: crate::task::scheduler::get_ticks() as u64,
             };
 
             // Clear fault
@@ -474,7 +480,7 @@ pub struct IrStats {
 }
 
 impl IntrRemapManager {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             units: Mutex::new(BTreeMap::new()),
             next_index: AtomicU32::new(0),
@@ -503,7 +509,13 @@ impl IntrRemapManager {
     }
 
     /// Map interrupt
-    pub fn map_interrupt(&self, unit_id: u32, vector: u8, dest: u32, trigger: bool) -> Result<u32, IrError> {
+    pub fn map_interrupt(
+        &self,
+        unit_id: u32,
+        vector: u8,
+        dest: u32,
+        trigger: bool,
+    ) -> Result<u32, IrError> {
         let unit = self.get_unit(unit_id).ok_or(IrError::UnitNotFound)?;
 
         let index = self.allocate_index();

@@ -34,11 +34,12 @@
 //! Her cgroup `/sys/fs/cgroup/` altında bir dizin olarak görünür.
 //! Kaynak limitleri bu dizindeki sanal dosyalara yazılarak ayarlanır.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
@@ -200,18 +201,22 @@ impl CgroupV2 {
     pub fn read(&self, file: &str) -> Result<String, CgroupError> {
         match file {
             "cgroup.procs" => {
-                let procs: Vec<String> = self.processes.lock()
+                let procs: Vec<String> = self
+                    .processes
+                    .lock()
                     .iter()
                     .map(|p| p.to_string())
                     .collect();
                 Ok(procs.join("\n"))
             }
-            "cgroup.controllers" => {
-                Ok(self.controllers.lock().keys().cloned().collect::<Vec<_>>().join(" "))
-            }
-            "cgroup.subtree_control" => {
-                Ok(self.subtree_control.lock().join(" "))
-            }
+            "cgroup.controllers" => Ok(self
+                .controllers
+                .lock()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")),
+            "cgroup.subtree_control" => Ok(self.subtree_control.lock().join(" ")),
             "cgroup.events" => {
                 let events = self.events.lock();
                 Ok(alloc::format!(
@@ -293,10 +298,15 @@ impl CpuController {
 }
 
 impl CgroupController for CpuController {
-    fn name(&self) -> &str { "cpu" }
+    fn name(&self) -> &str {
+        "cpu"
+    }
 
     fn handles_file(&self, file: &str) -> bool {
-        matches!(file, "cpu.weight" | "cpu.max" | "cpu.max.burst" | "cpu.stat")
+        matches!(
+            file,
+            "cpu.weight" | "cpu.max" | "cpu.max.burst" | "cpu.stat"
+        )
     }
 
     fn write(&mut self, file: &str, value: &str) -> Result<(), CgroupError> {
@@ -385,10 +395,15 @@ impl CpusetController {
 }
 
 impl CgroupController for CpusetController {
-    fn name(&self) -> &str { "cpuset" }
+    fn name(&self) -> &str {
+        "cpuset"
+    }
 
     fn handles_file(&self, file: &str) -> bool {
-        matches!(file, "cpuset.cpus" | "cpuset.mems" | "cpuset.cpus.effective" | "cpuset.mems.effective")
+        matches!(
+            file,
+            "cpuset.cpus" | "cpuset.mems" | "cpuset.cpus.effective" | "cpuset.mems.effective"
+        )
     }
 
     fn write(&mut self, file: &str, value: &str) -> Result<(), CgroupError> {
@@ -399,7 +414,9 @@ impl CgroupController for CpusetController {
                 for part in value.split(',') {
                     if part.contains('-') {
                         let range: Vec<&str> = part.split('-').collect();
-                        if let (Ok(start), Ok(end)) = (range[0].parse::<u32>(), range[1].parse::<u32>()) {
+                        if let (Ok(start), Ok(end)) =
+                            (range[0].parse::<u32>(), range[1].parse::<u32>())
+                        {
                             for cpu in start..=end {
                                 cpus.push(cpu);
                             }
@@ -429,17 +446,27 @@ impl CgroupController for CpusetController {
         match file {
             "cpuset.cpus" => {
                 let cpus = self.cpus.lock();
-                Ok(cpus.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(","))
+                Ok(cpus
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","))
             }
             "cpuset.mems" => {
                 let mems = self.mems.lock();
-                Ok(mems.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(","))
+                Ok(mems
+                    .iter()
+                    .map(|m| m.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","))
             }
             _ => Err(CgroupError::FileNotFound),
         }
     }
 
-    fn charge(&self, _amount: u64) -> Result<(), CgroupError> { Ok(()) }
+    fn charge(&self, _amount: u64) -> Result<(), CgroupError> {
+        Ok(())
+    }
     fn uncharge(&self, _amount: u64) {}
 }
 
@@ -474,7 +501,9 @@ impl PidsController {
 }
 
 impl CgroupController for PidsController {
-    fn name(&self) -> &str { "pids" }
+    fn name(&self) -> &str {
+        "pids"
+    }
 
     fn handles_file(&self, file: &str) -> bool {
         matches!(file, "pids.max" | "pids.current" | "pids.events")
@@ -555,9 +584,15 @@ impl CgroupV2Manager {
         let root = Arc::new(CgroupV2::new(0, "/", "root", None));
 
         // Kök cgroup'a temel denetleyicileri ekle
-        root.controllers.lock().insert(String::from("cpu"), Box::new(CpuController::new()));
-        root.controllers.lock().insert(String::from("cpuset"), Box::new(CpusetController::new()));
-        root.controllers.lock().insert(String::from("pids"), Box::new(PidsController::new()));
+        root.controllers
+            .lock()
+            .insert(String::from("cpu"), Box::new(CpuController::new()));
+        root.controllers
+            .lock()
+            .insert(String::from("cpuset"), Box::new(CpusetController::new()));
+        root.controllers
+            .lock()
+            .insert(String::from("pids"), Box::new(PidsController::new()));
 
         self.cgroups.lock().insert(0, root);
         self.path_map.lock().insert(String::from("/"), 0);
@@ -566,7 +601,11 @@ impl CgroupV2Manager {
     }
 
     pub fn create(&self, parent_path: &str, name: &str) -> Result<Arc<CgroupV2>, CgroupError> {
-        let parent_id = self.path_map.lock().get(parent_path).copied()
+        let parent_id = self
+            .path_map
+            .lock()
+            .get(parent_path)
+            .copied()
             .ok_or(CgroupError::NotFound)?;
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -614,4 +653,62 @@ pub enum CgroupError {
 
 pub fn init() {
     CGROUP_V2.init();
+}
+
+// ============================================================================
+// FREEZER CONTROLLER — İşlem Dondurma
+// ============================================================================
+
+/// Cgroup freezer controller — işlem grubunu dondur/çöz.
+///
+/// Container duraklatma ve SIGSTOP benzeri davranış için kullanılır.
+#[derive(Debug, Clone)]
+pub struct FreezerController {
+    /// Dondurulmuş mu
+    pub frozen: bool,
+    /// Kendi kendine dondurulmuş (kullanıcı isteğiyle)
+    pub self_freezing: bool,
+    /// Ebeveyn dondurduğu için donmuş
+    pub parent_freezing: bool,
+}
+
+impl FreezerController {
+    pub fn new() -> Self {
+        Self {
+            frozen: false,
+            self_freezing: false,
+            parent_freezing: false,
+        }
+    }
+
+    /// İşlem grubunu dondurur.
+    pub fn freeze(&mut self) {
+        self.self_freezing = true;
+        self.frozen = true;
+        crate::serial_println!("[cgroup-freezer] Grup donduruldu");
+    }
+
+    /// İşlem grubunun dondurmasını çözer.
+    pub fn thaw(&mut self) {
+        self.self_freezing = false;
+        if !self.parent_freezing {
+            self.frozen = false;
+        }
+        crate::serial_println!("[cgroup-freezer] Grup çözüldü");
+    }
+
+    /// Ebeveyn freeze propagasyonu.
+    pub fn parent_freeze(&mut self, freeze: bool) {
+        self.parent_freezing = freeze;
+        self.frozen = freeze || self.self_freezing;
+    }
+
+    /// Durum string'i.
+    pub fn state_str(&self) -> &str {
+        if self.frozen {
+            "FROZEN"
+        } else {
+            "THAWED"
+        }
+    }
 }

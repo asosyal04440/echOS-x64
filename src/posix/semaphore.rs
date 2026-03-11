@@ -3,11 +3,12 @@
 //! İsimli (named) ve isimsiz (unnamed) POSIX semafor uygulaması.
 //! Süreçler arası ve iş parçacıkları arası senkronizasyon için kullanılır.
 
+use crate::task::scheduler::WaitQueue;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
@@ -70,20 +71,24 @@ impl SemUnnamed {
         }
     }
 
-    /// Wait (decrement)
+    /// Wait (decrement) — scheduler ile blocking
     pub fn wait(&self) -> Result<(), SemError> {
         self.waiters.fetch_add(1, Ordering::SeqCst);
-        
+
         loop {
             let current = self.value.load(Ordering::SeqCst);
-            
+
             if current <= 0 {
-                // Block until value > 0
-                // For now, spin
+                // Scheduler üzerinden uyut — CPU yakmadan bekle
+                crate::task::scheduler::sleep(1);
                 continue;
             }
-            
-            if self.value.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+
+            if self
+                .value
+                .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 self.waiters.fetch_sub(1, Ordering::SeqCst);
                 return Ok(());
             }
@@ -94,12 +99,16 @@ impl SemUnnamed {
     pub fn trywait(&self) -> Result<(), SemError> {
         loop {
             let current = self.value.load(Ordering::SeqCst);
-            
+
             if current <= 0 {
                 return Err(SemError::WouldBlock);
             }
-            
-            if self.value.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+
+            if self
+                .value
+                .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 return Ok(());
             }
         }
@@ -109,13 +118,18 @@ impl SemUnnamed {
     pub fn post(&self) -> Result<(), SemError> {
         loop {
             let current = self.value.load(Ordering::SeqCst);
-            
+
             if current >= self.max {
                 return Err(SemError::Overflow);
             }
-            
-            if self.value.compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                // Wake waiters
+
+            if self
+                .value
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                // Bekleyen waiter'ları scheduler tick'inde uyandır
+                // (waiters sleep(1) ile uyuyor, bir sonraki tick'te kontrol edecekler)
                 return Ok(());
             }
         }
@@ -158,16 +172,21 @@ impl SemNamed {
         }
     }
 
-    /// Wait
+    /// Wait — scheduler ile blocking
     pub fn wait(&self) -> Result<(), SemError> {
         loop {
             let current = self.value.load(Ordering::SeqCst);
-            
+
             if current <= 0 {
+                crate::task::scheduler::sleep(1);
                 continue;
             }
-            
-            if self.value.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+
+            if self
+                .value
+                .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 return Ok(());
             }
         }
@@ -177,12 +196,16 @@ impl SemNamed {
     pub fn trywait(&self) -> Result<(), SemError> {
         loop {
             let current = self.value.load(Ordering::SeqCst);
-            
+
             if current <= 0 {
                 return Err(SemError::WouldBlock);
             }
-            
-            if self.value.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+
+            if self
+                .value
+                .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 return Ok(());
             }
         }
@@ -192,12 +215,16 @@ impl SemNamed {
     pub fn post(&self) -> Result<(), SemError> {
         loop {
             let current = self.value.load(Ordering::SeqCst);
-            
+
             if current >= self.max {
                 return Err(SemError::Overflow);
             }
-            
-            if self.value.compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+
+            if self
+                .value
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 return Ok(());
             }
         }
@@ -224,7 +251,7 @@ impl SemNamed {
 // SYSTEM V SEMAPHORE
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SemArray {
     /// Semaphore set ID
     pub id: i32,
@@ -268,7 +295,7 @@ impl SemArray {
         for _ in 0..nsems {
             values.push(AtomicI32::new(0));
         }
-        
+
         Self {
             id,
             key,
@@ -281,7 +308,7 @@ impl SemArray {
             values,
             last_pid: AtomicU32::new(0),
             otime: AtomicU64::new(0),
-            ctime: AtomicU64::new(crate::task::scheduler::get_ticks()),
+            ctime: AtomicU64::new(crate::task::scheduler::get_ticks() as u64),
             undo: Mutex::new(Vec::new()),
         }
     }
@@ -293,19 +320,24 @@ impl SemArray {
                 self.values[i].store(*val as i32, Ordering::SeqCst);
             }
         }
-        self.otime.store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
+        self.otime
+            .store(crate::task::scheduler::get_ticks() as u64, Ordering::SeqCst);
     }
 
     /// Get all values
     pub fn get_all(&self) -> Vec<u16> {
-        self.values.iter().map(|v| v.load(Ordering::SeqCst) as u16).collect()
+        self.values
+            .iter()
+            .map(|v| v.load(Ordering::SeqCst) as u16)
+            .collect()
     }
 
     /// Set single value
     pub fn set_val(&self, semnum: u16, val: i32) {
         if (semnum as usize) < self.values.len() {
             self.values[semnum as usize].store(val, Ordering::SeqCst);
-            self.otime.store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
+            self.otime
+                .store(crate::task::scheduler::get_ticks() as u64, Ordering::SeqCst);
         }
     }
 
@@ -325,28 +357,28 @@ impl SemArray {
             if op.sem_num as usize >= self.values.len() {
                 return Err(SemError::InvalidSemNum);
             }
-            
+
             let val = self.values[op.sem_num as usize].load(Ordering::SeqCst);
             let new_val = val + op.sem_op as i32;
-            
+
             if new_val < 0 {
-                if op.sem_flg & IPC_NOWAIT != 0 {
+                if op.sem_flg & (IPC_NOWAIT as i16) != 0 {
                     return Err(SemError::WouldBlock);
                 }
                 // Would need to block
             }
-            
+
             if new_val > SEMVMX {
                 return Err(SemError::Overflow);
             }
         }
-        
+
         // Second pass: apply operations
         for op in ops {
             let val = self.values[op.sem_num as usize].load(Ordering::SeqCst);
             let new_val = val + op.sem_op as i32;
             self.values[op.sem_num as usize].store(new_val, Ordering::SeqCst);
-            
+
             // Add undo entry if SEM_UNDO flag
             if op.sem_flg & SEM_UNDO != 0 {
                 self.undo.lock().push(SemUndo {
@@ -357,10 +389,11 @@ impl SemArray {
                 });
             }
         }
-        
+
         self.last_pid.store(0, Ordering::SeqCst); // Current PID
-        self.otime.store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
-        
+        self.otime
+            .store(crate::task::scheduler::get_ticks() as u64, Ordering::SeqCst);
+
         Ok(())
     }
 }
@@ -396,7 +429,7 @@ pub struct SemStats {
 }
 
 impl SemManager {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             named: Mutex::new(BTreeMap::new()),
             sysv: Mutex::new(BTreeMap::new()),
@@ -406,9 +439,15 @@ impl SemManager {
     }
 
     /// Open named semaphore
-    pub fn sem_open(&self, name: &str, oflag: i32, mode: u32, value: i32) -> Result<Arc<SemNamed>, SemError> {
+    pub fn sem_open(
+        &self,
+        name: &str,
+        oflag: i32,
+        mode: u32,
+        value: i32,
+    ) -> Result<Arc<SemNamed>, SemError> {
         let mut named = self.named.lock();
-        
+
         if let Some(sem) = named.get(name) {
             if oflag & IPC_EXCL != 0 {
                 return Err(SemError::AlreadyExists);
@@ -416,17 +455,17 @@ impl SemManager {
             sem.open_count.fetch_add(1, Ordering::SeqCst);
             return Ok(sem.clone());
         }
-        
+
         if oflag & IPC_CREAT == 0 {
             return Err(SemError::NotFound);
         }
-        
+
         let sem = Arc::new(SemNamed::new(name, value));
         named.insert(String::from(name), sem.clone());
-        
+
         let mut stats = self.stats.lock();
         stats.named_count += 1;
-        
+
         Ok(sem)
     }
 
@@ -434,11 +473,11 @@ impl SemManager {
     pub fn sem_close(&self, name: &str) -> Result<(), SemError> {
         if let Some(sem) = self.named.lock().get(name) {
             sem.close();
-            
+
             if sem.open_count.load(Ordering::SeqCst) == 0 && sem.unlinked.load(Ordering::SeqCst) {
                 self.named.lock().remove(name);
             }
-            
+
             return Ok(());
         }
         Err(SemError::NotFound)
@@ -448,11 +487,11 @@ impl SemManager {
     pub fn sem_unlink(&self, name: &str) -> Result<(), SemError> {
         if let Some(sem) = self.named.lock().get(name) {
             sem.unlink();
-            
+
             if sem.open_count.load(Ordering::SeqCst) == 0 {
                 self.named.lock().remove(name);
             }
-            
+
             return Ok(());
         }
         Err(SemError::NotFound)
@@ -461,7 +500,7 @@ impl SemManager {
     /// Create System V semaphore set
     pub fn semget(&self, key: i32, nsems: u16, semflg: i32) -> Result<i32, SemError> {
         let mut sysv = self.sysv.lock();
-        
+
         // Check if exists
         for sem in sysv.values() {
             if sem.key == key && key != 0 {
@@ -471,27 +510,27 @@ impl SemManager {
                 return Ok(sem.id);
             }
         }
-        
+
         if semflg & IPC_CREAT == 0 {
             return Err(SemError::NotFound);
         }
-        
+
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let sem = Arc::new(SemArray::new(id, key, nsems, (semflg & 0x1FF) as u16));
         sysv.insert(id, sem);
-        
+
         let mut stats = self.stats.lock();
         stats.sysv_count += 1;
-        
+
         Ok(id)
     }
 
     /// System V semaphore control
     pub fn semctl(&self, semid: i32, semnum: u16, cmd: i32, arg: u64) -> Result<i32, SemError> {
         let sysv = self.sysv.lock();
-        
+
         let sem = sysv.get(&semid).ok_or(SemError::NotFound)?;
-        
+
         match cmd {
             IPC_RMID => {
                 drop(sysv);
@@ -512,22 +551,17 @@ impl SemManager {
                 Ok(vals.len() as i32)
             }
             SETALL => {
-                let vals = unsafe {
-                    core::slice::from_raw_parts(arg as *const u16, sem.nsems as usize)
-                };
+                let vals =
+                    unsafe { core::slice::from_raw_parts(arg as *const u16, sem.nsems as usize) };
                 sem.set_all(vals);
                 Ok(0)
             }
-            GETVAL => {
-                Ok(sem.get_val(semnum))
-            }
+            GETVAL => Ok(sem.get_val(semnum)),
             SETVAL => {
                 sem.set_val(semnum, arg as i32);
                 Ok(0)
             }
-            GETPID => {
-                Ok(sem.last_pid.load(Ordering::SeqCst) as i32)
-            }
+            GETPID => Ok(sem.last_pid.load(Ordering::SeqCst) as i32),
             GETNCNT => {
                 // Number waiting for semval > current
                 Ok(0)
@@ -544,12 +578,12 @@ impl SemManager {
     pub fn semop(&self, semid: i32, ops: &[Sembuf]) -> Result<(), SemError> {
         let sysv = self.sysv.lock();
         let sem = sysv.get(&semid).ok_or(SemError::NotFound)?;
-        
+
         let result = sem.op(ops);
-        
+
         let mut stats = self.stats.lock();
         stats.total_ops += 1;
-        
+
         result
     }
 

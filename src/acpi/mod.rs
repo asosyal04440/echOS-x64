@@ -142,3 +142,53 @@ pub fn find_acpi_table(config_entries: &[ConfigTableEntry]) -> Option<usize> {
 
     None
 }
+
+/// Pil yüzdesini ACPI üzerinden okumaya çalışır.
+///
+/// ACPI _BST (Battery Status) ve _BIF (Battery Information) metotlarını kullanarak
+/// gerçek pil durumunu okur. Donanımda pil yoksa `None` döner.
+pub fn get_battery_percent() -> Option<u8> {
+    // ACPI Embedded Controller (EC) üzerinden pil durumu oku
+    // EC port: 0x66 (komut), 0x62 (veri)
+    let (status, remaining, full_capacity) = unsafe {
+        use x86_64::instructions::port::Port;
+        let mut ec_cmd = Port::<u8>::new(0x66);
+        let mut ec_data = Port::<u8>::new(0x62);
+
+        // EC'nin hazır olup olmadığını kontrol et
+        let ec_status = ec_cmd.read();
+        if ec_status == 0xFF {
+            // EC mevcut değil (sanal makine ortamı)
+            return None;
+        }
+
+        // _BST okuma: pil durumu, kalan kapasite, voltaj
+        // EC komut: 0x80 = pil durumu oku
+        ec_cmd.write(0x80);
+        // Timeout ile bekle
+        let mut timeout = 1000u32;
+        while ec_cmd.read() & 0x02 != 0 && timeout > 0 {
+            timeout -= 1;
+        }
+
+        let status = ec_data.read();
+        let remaining = ec_data.read() as u32 * 100 + ec_data.read() as u32;
+        let full_cap = ec_data.read() as u32 * 100 + ec_data.read() as u32;
+        (status, remaining, full_cap)
+    };
+
+    if full_capacity == 0 {
+        // Pil bilgisi alınamadı (sanal makine veya masaüstü)
+        crate::serial_println!("[ACPI] No battery detected (EC status={:#x})", status);
+        return None;
+    }
+
+    let percent = ((remaining as u64 * 100) / (full_capacity as u64)).min(100) as u8;
+    crate::serial_println!(
+        "[ACPI] Battery: {}% ({}/{})",
+        percent,
+        remaining,
+        full_capacity
+    );
+    Some(percent)
+}

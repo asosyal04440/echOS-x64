@@ -154,32 +154,35 @@ pub enum ScriptToken {
     Export,
     Readonly,
     Declare,
+    Case,
+    Esac,
+    DoubleSemicolon, // ;;
 
     // Operatörler
-    Assign,         // =
-    Plus,           // +
-    Minus,          // -
-    Star,           // *
-    Slash,          // /
-    Percent,        // %
-    Equal,          // ==
-    NotEqual,       // !=
-    Less,           // <
-    Greater,        // >
-    LessEqual,      // <=
-    GreaterEqual,   // >=
-    And,            // &&
-    Or,             // ||
-    Not,            // !
+    Assign,       // =
+    Plus,         // +
+    Minus,        // -
+    Star,         // *
+    Slash,        // /
+    Percent,      // %
+    Equal,        // ==
+    NotEqual,     // !=
+    Less,         // <
+    Greater,      // >
+    LessEqual,    // <=
+    GreaterEqual, // >=
+    And,          // &&
+    Or,           // ||
+    Not,          // !
 
     // Sınırlayıcılar (delimiters)
-    LeftParen,      // (
-    RightParen,     // )
-    LeftBracket,    // [
-    RightBracket,   // ]
-    LeftBrace,      // {
-    RightBrace,     // }
-    Semicolon,      // ;
+    LeftParen,    // (
+    RightParen,   // )
+    LeftBracket,  // [
+    RightBracket, // ]
+    LeftBrace,    // {
+    RightBrace,   // }
+    Semicolon,    // ;
     Newline,
 
     // Literaller
@@ -188,10 +191,10 @@ pub enum ScriptToken {
     String(String),
 
     // Özel token'lar
-    ArithStart,     // $((
-    ArithEnd,       // ))
-    CommandSubStart, // $(
-    CommandSubEnd,   // )
+    ArithStart,       // $((
+    ArithEnd,         // ))
+    CommandSubStart,  // $(
+    CommandSubEnd,    // )
     Variable(String), // $VAR veya ${VAR}
     Eof,
 }
@@ -251,9 +254,14 @@ impl ScriptLexer {
                     tokens.push(ScriptToken::Newline);
                 }
 
-                // Noktalı virgül — sıralı komut ayırıcı
+                // Noktalı virgül — sıralı komut ayırıcı veya case-arm sonlandırıcı
                 ';' => {
-                    tokens.push(ScriptToken::Semicolon);
+                    if chars.peek() == Some(&';') {
+                        chars.next();
+                        tokens.push(ScriptToken::DoubleSemicolon);
+                    } else {
+                        tokens.push(ScriptToken::Semicolon);
+                    }
                 }
 
                 // '(' veya '((' — LeftParen vs ArithStart
@@ -504,6 +512,8 @@ impl ScriptLexer {
                         "export" => ScriptToken::Export,
                         "readonly" => ScriptToken::Readonly,
                         "declare" => ScriptToken::Declare,
+                        "case" => ScriptToken::Case,
+                        "esac" => ScriptToken::Esac,
                         _ => ScriptToken::Word(word),
                     };
                     tokens.push(token);
@@ -560,9 +570,7 @@ pub enum Stmt {
     /// Basit komut çalıştırma
     ///
     /// `args[0]` komut adı, `args[1..]` argümanlardır.
-    Command {
-        args: Vec<Expr>,
-    },
+    Command { args: Vec<Expr> },
     /// Koşullu dal yapısı
     ///
     /// `elif_clauses`: `(koşul, gövde)` çiftlerinin listesi
@@ -574,10 +582,7 @@ pub enum Stmt {
         else_body: Option<Vec<Stmt>>,
     },
     /// While döngüsü — koşul doğru olduğu sürece gövdeyi tekrar eder
-    While {
-        condition: Expr,
-        body: Vec<Stmt>,
-    },
+    While { condition: Expr, body: Vec<Stmt> },
     /// For döngüsü — her öğe için `var` değişkenini günceller ve gövdeyi çalıştırır
     For {
         var: String,
@@ -585,10 +590,7 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     /// Until döngüsü — koşul yanlış olduğu sürece gövdeyi tekrar eder
-    Until {
-        condition: Expr,
-        body: Vec<Stmt>,
-    },
+    Until { condition: Expr, body: Vec<Stmt> },
     /// Fonksiyon tanımı — `SCRIPT_STATE.functions` map'ine kaydedilir
     Function {
         name: String,
@@ -601,6 +603,11 @@ pub enum Stmt {
     Break,
     /// Continue deyimi — `SCRIPT_STATE.continue_flag`'i true yapar
     Continue,
+    /// Case deyimi — `case $VAR in pattern) body;; esac`
+    Case {
+        expr: Expr,
+        arms: Vec<(Vec<String>, Vec<Stmt>)>, // (patterns, body)
+    },
     /// No-op (boş deyim)
     Nop,
 }
@@ -642,10 +649,7 @@ pub enum Expr {
         right: Box<Expr>,
     },
     /// Tekil operatör ifadesi — `!` (mantıksal değil) veya `-` (negatif)
-    Unary {
-        op: UnaryOp,
-        operand: Box<Expr>,
-    },
+    Unary { op: UnaryOp, operand: Box<Expr> },
     /// Test ifadesi — `[ ifade ]`; bash benzeri koşul testi
     Test(Box<Expr>),
     /// String karşılaştırma ifadesi — `left op right`
@@ -663,19 +667,19 @@ pub enum Expr {
 /// Tüm operatörler `eval_arithmetic()` ile `i64` üzerinde değerlendirilir.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BinOp {
-    Add,  // +
-    Sub,  // -
-    Mul,  // *
-    Div,  // /
-    Mod,  // %
-    Eq,   // ==
-    Ne,   // !=
-    Lt,   // <
-    Gt,   // >
-    Le,   // <=
-    Ge,   // >=
-    And,  // &&
-    Or,   // ||
+    Add, // +
+    Sub, // -
+    Mul, // *
+    Div, // /
+    Mod, // %
+    Eq,  // ==
+    Ne,  // !=
+    Lt,  // <
+    Gt,  // >
+    Le,  // <=
+    Ge,  // >=
+    And, // &&
+    Or,  // ||
 }
 
 /// Tekil operatör türleri.
@@ -685,8 +689,8 @@ pub enum BinOp {
 /// `Neg`: işareti çevirir (sayısal negatif)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UnaryOp {
-    Not,  // !
-    Neg,  // - (negatif)
+    Not, // !
+    Neg, // - (negatif)
 }
 
 /// String karşılaştırma operatörü türleri.
@@ -695,14 +699,14 @@ pub enum UnaryOp {
 /// `Match` / `Nmatch`: `contains()` ile alt string eşleştirmesi yapar (regex değil).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StrCompareOp {
-    Eq,      // =
-    Ne,      // !=
-    Lt,      // <
-    Gt,      // >
-    Le,      // <=
-    Ge,      // >=
-    Match,   // =~    (alt string eşleşmesi)
-    Nmatch,  // !~    (alt string eşleşmesi yok)
+    Eq,     // =
+    Ne,     // !=
+    Lt,     // <
+    Gt,     // >
+    Le,     // <=
+    Ge,     // >=
+    Match,  // =~    (alt string eşleşmesi)
+    Nmatch, // !~    (alt string eşleşmesi yok)
 }
 
 // ============================================================================
@@ -791,14 +795,16 @@ impl ScriptParser {
             ScriptToken::While => self.parse_while(),
             ScriptToken::For => self.parse_for(),
             ScriptToken::Until => self.parse_until(),
+            ScriptToken::Case => self.parse_case(),
             ScriptToken::Function => self.parse_function(),
             ScriptToken::Return => {
                 self.advance();
-                let expr = if !self.check(&ScriptToken::Newline) && !self.check(&ScriptToken::Semicolon) {
-                    Some(self.parse_expr()?)
-                } else {
-                    None
-                };
+                let expr =
+                    if !self.check(&ScriptToken::Newline) && !self.check(&ScriptToken::Semicolon) {
+                        Some(self.parse_expr()?)
+                    } else {
+                        None
+                    };
                 Ok(Stmt::Return(expr))
             }
             ScriptToken::Break => {
@@ -841,8 +847,9 @@ impl ScriptParser {
 
         let mut then_body = Vec::new();
         while !self.check(&ScriptToken::Elif)
-           && !self.check(&ScriptToken::Else)
-           && !self.check(&ScriptToken::Fi) {
+            && !self.check(&ScriptToken::Else)
+            && !self.check(&ScriptToken::Fi)
+        {
             then_body.push(self.parse_stmt()?);
         }
 
@@ -854,8 +861,9 @@ impl ScriptParser {
 
             let mut elif_body = Vec::new();
             while !self.check(&ScriptToken::Elif)
-               && !self.check(&ScriptToken::Else)
-               && !self.check(&ScriptToken::Fi) {
+                && !self.check(&ScriptToken::Else)
+                && !self.check(&ScriptToken::Fi)
+            {
                 elif_body.push(self.parse_stmt()?);
             }
             elif_clauses.push((elif_cond, elif_body));
@@ -963,6 +971,76 @@ impl ScriptParser {
         Ok(Stmt::Until { condition, body })
     }
 
+    /// `case` deyimini parse eder.
+    ///
+    /// ## Gramer
+    /// ```
+    /// case_stmt ::= 'case' expr 'in'
+    ///               (pattern ('|' pattern)* ')' deyim* ';;')*
+    ///               'esac'
+    /// ```
+    fn parse_case(&mut self) -> Result<Stmt, ScriptError> {
+        self.expect(ScriptToken::Case)?;
+        let expr = self.parse_expr()?;
+        self.expect(ScriptToken::In)?;
+        while self.check(&ScriptToken::Newline) || self.check(&ScriptToken::Semicolon) {
+            self.advance();
+        }
+
+        let mut arms: Vec<(Vec<String>, Vec<Stmt>)> = Vec::new();
+
+        while !self.check(&ScriptToken::Esac) && !self.check(&ScriptToken::Eof) {
+            // Pattern'ları oku: pat1 | pat2 | pat3 )
+            let mut patterns = Vec::new();
+            loop {
+                match self.advance().clone() {
+                    ScriptToken::Word(s) | ScriptToken::String(s) => patterns.push(s),
+                    ScriptToken::Star => patterns.push("*".into()),
+                    _ => break,
+                }
+                // '|' ile ayrılmış pattern'lar
+                if let ScriptToken::Word(ref w) = self.peek() {
+                    if w == "|" {
+                        self.advance();
+                        continue;
+                    }
+                }
+                break;
+            }
+            // ')' bekle — pattern sonu
+            if self.check(&ScriptToken::RightParen) {
+                self.advance();
+            }
+            while self.check(&ScriptToken::Newline) || self.check(&ScriptToken::Semicolon) {
+                self.advance();
+            }
+
+            // Body — ;; veya esac'a kadar oku
+            let mut body = Vec::new();
+            while !self.check(&ScriptToken::DoubleSemicolon)
+                && !self.check(&ScriptToken::Esac)
+                && !self.check(&ScriptToken::Eof)
+            {
+                body.push(self.parse_stmt()?);
+                while self.check(&ScriptToken::Newline) || self.check(&ScriptToken::Semicolon) {
+                    self.advance();
+                }
+            }
+            if self.check(&ScriptToken::DoubleSemicolon) {
+                self.advance();
+            }
+            while self.check(&ScriptToken::Newline) || self.check(&ScriptToken::Semicolon) {
+                self.advance();
+            }
+
+            if !patterns.is_empty() {
+                arms.push((patterns, body));
+            }
+        }
+        self.expect(ScriptToken::Esac)?;
+        Ok(Stmt::Case { expr, arms })
+    }
+
     /// Fonksiyon tanımını parse eder.
     ///
     /// ## Gramer
@@ -1028,7 +1106,12 @@ impl ScriptParser {
 
         let value = self.parse_expr()?;
 
-        Ok(Stmt::Assign { name, value, local, export })
+        Ok(Stmt::Assign {
+            name,
+            value,
+            local,
+            export,
+        })
     }
 
     /// Basit komut deyimini parse eder.
@@ -1039,9 +1122,10 @@ impl ScriptParser {
         let mut args = Vec::new();
 
         while !self.check(&ScriptToken::Newline)
-           && !self.check(&ScriptToken::Semicolon)
-           && !self.check(&ScriptToken::Eof)
-           && !self.is_keyword() {
+            && !self.check(&ScriptToken::Semicolon)
+            && !self.check(&ScriptToken::Eof)
+            && !self.is_keyword()
+        {
             args.push(self.parse_expr()?);
         }
 
@@ -1294,12 +1378,22 @@ impl ScriptParser {
     ///
     /// Komut parse ederken argüman toplama döngüsünü anahtar kelimelerde durdurur.
     fn is_keyword(&self) -> bool {
-        matches!(self.peek(),
-            ScriptToken::If | ScriptToken::Then | ScriptToken::Elif |
-            ScriptToken::Else | ScriptToken::Fi | ScriptToken::While |
-            ScriptToken::For | ScriptToken::Do | ScriptToken::Done |
-            ScriptToken::Until | ScriptToken::Function | ScriptToken::Return |
-            ScriptToken::Break | ScriptToken::Continue
+        matches!(
+            self.peek(),
+            ScriptToken::If
+                | ScriptToken::Then
+                | ScriptToken::Elif
+                | ScriptToken::Else
+                | ScriptToken::Fi
+                | ScriptToken::While
+                | ScriptToken::For
+                | ScriptToken::Do
+                | ScriptToken::Done
+                | ScriptToken::Until
+                | ScriptToken::Function
+                | ScriptToken::Return
+                | ScriptToken::Break
+                | ScriptToken::Continue
         )
     }
 
@@ -1377,6 +1471,13 @@ pub struct ScriptState {
     pub break_flag: Mutex<bool>,
     /// Continue bayrağı — döngünün geri kalanını atlatır
     pub continue_flag: Mutex<bool>,
+    /// Shell seçenekleri — `set -e/-x/-u` ile kontrol edilir
+    /// errexit: hata durumunda betiği sonlandır (set -e)
+    pub errexit: Mutex<bool>,
+    /// xtrace: her komutu çalıştırmadan önce stderr'e yaz (set -x)
+    pub xtrace: Mutex<bool>,
+    /// nounset: tanımsız değişken kullanımında hata ver (set -u)
+    pub nounset: Mutex<bool>,
 }
 
 impl ScriptState {
@@ -1391,6 +1492,9 @@ impl ScriptState {
             return_value: Mutex::new(None),
             break_flag: Mutex::new(false),
             continue_flag: Mutex::new(false),
+            errexit: Mutex::new(false),
+            xtrace: Mutex::new(false),
+            nounset: Mutex::new(false),
         }
     }
 
@@ -1398,7 +1502,9 @@ impl ScriptState {
     ///
     /// `local_vars` map'ine `(isim, değer)` çiftini ekler/günceller.
     pub fn set_local(&self, name: &str, value: &str) {
-        self.local_vars.lock().insert(name.to_string(), value.to_string());
+        self.local_vars
+            .lock()
+            .insert(name.to_string(), value.to_string());
     }
 
     /// Değişkeni okur; önce yerel, sonra ortam değişkenlerine bakar.
@@ -1501,7 +1607,12 @@ impl Interpreter {
     /// - `Continue`: `continue_flag`'i true yap
     fn exec_stmt(stmt: &Stmt) -> Result<i64, ScriptError> {
         match stmt {
-            Stmt::Assign { name, value, local, export } => {
+            Stmt::Assign {
+                name,
+                value,
+                local,
+                export,
+            } => {
                 let val = Self::eval_expr(value)?;
 
                 if *local {
@@ -1521,7 +1632,8 @@ impl Interpreter {
 
             Stmt::Command { args } => {
                 // Argümanları değerlendir
-                let evaluated: Vec<String> = args.iter()
+                let evaluated: Vec<String> = args
+                    .iter()
                     .map(|a| Self::eval_expr(a))
                     .collect::<Result<Vec<_>, _>>()?;
 
@@ -1531,7 +1643,12 @@ impl Interpreter {
                 Ok(0)
             }
 
-            Stmt::If { condition, then_body, elif_clauses, else_body } => {
+            Stmt::If {
+                condition,
+                then_body,
+                elif_clauses,
+                else_body,
+            } => {
                 if Self::is_truthy(condition)? {
                     // Ana koşul doğru — then gövdesini çalıştır
                     Self::execute(then_body)?;
@@ -1649,6 +1766,31 @@ impl Interpreter {
                 Ok(0)
             }
 
+            Stmt::Case { expr, arms } => {
+                // case $expr in pattern) body;; esac
+                let value = Self::eval_expr(expr)?;
+                let mut result = 0i64;
+                for (patterns, body) in arms {
+                    let matched = patterns.iter().any(|p| {
+                        if p == "*" {
+                            true
+                        } else if p.contains('*') || p.contains('?') {
+                            // Basit glob matching
+                            crate::shell::advanced::Glob::matches(p, &value)
+                        } else {
+                            p == &value
+                        }
+                    });
+                    if matched {
+                        for stmt in body {
+                            result = Self::exec_stmt(stmt)?;
+                        }
+                        break; // İlk eşleşen arm'da dur
+                    }
+                }
+                Ok(result)
+            }
+
             Stmt::Nop => Ok(0),
         }
     }
@@ -1674,21 +1816,26 @@ impl Interpreter {
         match expr {
             Expr::String(s) => Ok(s.clone()),
             Expr::Number(n) => Ok(n.to_string()),
-            Expr::Variable(name) => {
-                SCRIPT_STATE.get_var(name).ok_or_else(|| ScriptError::UndefinedVariable(name.clone()))
-            }
+            Expr::Variable(name) => SCRIPT_STATE
+                .get_var(name)
+                .ok_or_else(|| ScriptError::UndefinedVariable(name.clone())),
             Expr::Arithmetic(inner) => {
                 // $((ifade)) — iç ifadeyi i64'e çevir, string olarak döndür
                 let n = Self::eval_arithmetic(inner)?;
                 Ok(n.to_string())
             }
             Expr::CommandSub(args) => {
-                // TODO: Komutu çalıştır ve çıktısını yakala
-                let cmd: Vec<String> = args.iter()
+                // $(komut) — komutu çalıştır ve çıktısını yakala
+                let cmd: Vec<String> = args
+                    .iter()
                     .map(|a| Self::eval_expr(a))
                     .collect::<Result<Vec<_>, _>>()?;
-                crate::serial_println!("[SCRIPT] Command substitution: {}", cmd.join(" "));
-                Ok(String::new())
+                let cmd_line = cmd.join(" ");
+                crate::serial_println!("[SCRIPT] Command substitution: {}", cmd_line);
+                // Shell'in run_command fonksiyonunu kullanarak çalıştır
+                let output = crate::shell::run_command(&cmd_line).unwrap_or_default();
+                // Sondaki newline'ları kaldır (bash davranışı)
+                Ok(output.trim_end_matches('\n').to_string())
             }
             Expr::Binary { op, left, right } => {
                 // Her iki tarafı i64'e çevir, operatörü uygula
@@ -1711,7 +1858,7 @@ impl Interpreter {
                         }
                         l % r
                     }
-                    BinOp::Eq => (l == r) as i64,   // 1 veya 0
+                    BinOp::Eq => (l == r) as i64, // 1 veya 0
                     BinOp::Ne => (l != r) as i64,
                     BinOp::Lt => (l < r) as i64,
                     BinOp::Gt => (l > r) as i64,
@@ -1727,8 +1874,8 @@ impl Interpreter {
                 let n = Self::eval_arithmetic(operand)?;
 
                 let result = match op {
-                    UnaryOp::Not => (n == 0) as i64,  // !0 = 1, !n = 0
-                    UnaryOp::Neg => -n,               // -(n)
+                    UnaryOp::Not => (n == 0) as i64, // !0 = 1, !n = 0
+                    UnaryOp::Neg => -n,              // -(n)
                 };
 
                 Ok(result.to_string())
@@ -1750,7 +1897,7 @@ impl Interpreter {
                     StrCompareOp::Gt => l > r,
                     StrCompareOp::Le => l <= r,
                     StrCompareOp::Ge => l >= r,
-                    StrCompareOp::Match => l.contains(&r),   // Alt string var mı?
+                    StrCompareOp::Match => l.contains(&r), // Alt string var mı?
                     StrCompareOp::Nmatch => !l.contains(&r), // Alt string yok mu?
                 };
 
@@ -1767,7 +1914,8 @@ impl Interpreter {
     /// Dönüşüm başarısız olursa `ScriptError::RuntimeError` döndürülür.
     fn eval_arithmetic(expr: &Expr) -> Result<i64, ScriptError> {
         let s = Self::eval_expr(expr)?;
-        s.parse().map_err(|_| ScriptError::RuntimeError(format!("Not a number: {}", s)))
+        s.parse()
+            .map_err(|_| ScriptError::RuntimeError(format!("Not a number: {}", s)))
     }
 
     /// Bir ifadenin "doğruluk değerini" hesaplar.

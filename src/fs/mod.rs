@@ -54,22 +54,31 @@
 //!      └─ OpenFile = None (tablo girişi boşaltıldı)
 //! ```
 
-pub mod f2fs;
-pub mod fat;
+pub mod btrfs;
+pub mod devfs;
 pub mod ext4;
 pub mod ext4_journal;
-pub mod ntfs;
+pub mod f2fs;
+pub mod fat;
 pub mod file_lock;
 pub mod inotify;
+pub mod mount;
+pub mod ntfs;
+pub mod overlayfs;
+pub mod procfs;
+pub mod sysfs;
+pub mod tmpfs;
+pub mod vfs_unified;
 pub mod xattr;
+pub mod xfs;
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use spin::Mutex;
 use rcore_fs::vfs::{FileSystem, FileType, FsError, FsInfo, INode, Metadata, PollStatus, Timespec};
+use spin::Mutex;
 
 use crate::drivers::ata::BLOCK_SIZE;
 use crate::fs::f2fs::{read_f2fs_file_at, write_f2fs_file_at};
@@ -99,7 +108,10 @@ pub fn update_global_time() {
 /// Mevcut sistem zamanını POSIX Timespec biçiminde döndürür
 pub fn get_global_time() -> Timespec {
     let time = GLOBAL_TIME.lock();
-    Timespec { sec: *time as i64, nsec: 0 }
+    Timespec {
+        sec: *time as i64,
+        nsec: 0,
+    }
 }
 
 /// Bağlama noktası çözümlemesi — path'i bağlama tablosuna göre çözer.
@@ -201,7 +213,7 @@ pub struct OpenFile {
     pub path: String,
     /// Mevcut okuma/yazma konumu (her read/write sonrası güncellenir)
     pub offset: usize,
-    pub flags: u32,  // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+    pub flags: u32, // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
 }
 
 /// İşlem başına dosya tanımlayıcı tablosu.
@@ -229,22 +241,46 @@ impl FileDescriptorTable {
     pub fn new() -> Self {
         let mut files = Vec::new();
         // stdin, stdout, stderr — standart akışlar daima 0, 1, 2 fd değerlerini alır
-        files.push(Some(OpenFile { path: "/dev/stdin".to_string(), offset: 0, flags: 0 }));
-        files.push(Some(OpenFile { path: "/dev/stdout".to_string(), offset: 0, flags: 1 }));
-        files.push(Some(OpenFile { path: "/dev/stderr".to_string(), offset: 0, flags: 1 }));
+        files.push(Some(OpenFile {
+            path: "/dev/stdin".to_string(),
+            offset: 0,
+            flags: 0,
+        }));
+        files.push(Some(OpenFile {
+            path: "/dev/stdout".to_string(),
+            offset: 0,
+            flags: 1,
+        }));
+        files.push(Some(OpenFile {
+            path: "/dev/stderr".to_string(),
+            offset: 0,
+            flags: 1,
+        }));
         Self { files, next_fd: 3 }
     }
 
     /// Dosyayı açar ve yeni fd döndürür.
     /// Tablo büyür; kapatılan fd numaraları yeniden kullanılmaz (basit uygulama).
     pub fn open(&mut self, path: &str, flags: u32) -> usize {
-        let fd = self.next_fd;
+        // FD slot recycling: önce None olan slotları tara (0-2 stdin/stdout/stderr atla)
+        for i in 3..self.files.len() {
+            if self.files[i].is_none() {
+                self.files[i] = Some(OpenFile {
+                    path: path.to_string(),
+                    offset: 0,
+                    flags,
+                });
+                return i;
+            }
+        }
+        // Boş slot yoksa tabloyu genişlet
+        let fd = self.files.len();
         self.files.push(Some(OpenFile {
             path: path.to_string(),
             offset: 0,
             flags,
         }));
-        self.next_fd += 1;
+        self.next_fd = fd + 1;
         fd
     }
 
@@ -270,7 +306,9 @@ impl FileDescriptorTable {
 
     /// Mevcut dosya konumunu döndürür (tell)
     pub fn tell(&self, fd: usize) -> Option<usize> {
-        self.files.get(fd).and_then(|f| f.as_ref().map(|f| f.offset))
+        self.files
+            .get(fd)
+            .and_then(|f| f.as_ref().map(|f| f.offset))
     }
 
     /// fd'ye ait OpenFile kaydını okuma amaçlı getirir
@@ -307,44 +345,48 @@ pub fn sys_tell(fd: usize) -> Option<usize> {
 
 /// fd'den okur ve offset'i günceller (read syscall).
 ///
-/// Okuma akışı:
-/// fd → OpenFile.path → F2FS okuma → offset += okunan
+/// Path/offset'i lock altında alır, I/O'yu lock dışı yapar, sonra offset'i günceller.
 pub fn sys_read(fd: usize, buf: &mut [u8]) -> Result<usize, FsError> {
-    let table = GLOBAL_FD_TABLE.lock();
-    if let Some(file) = table.get(fd) {
-        let path = file.path.clone();
-        let offset = file.offset;
-        drop(table);
+    let (path, offset) = {
+        let table = GLOBAL_FD_TABLE.lock();
+        let file = table
+            .files
+            .get(fd)
+            .and_then(|f| f.as_ref())
+            .ok_or(FsError::NotFile)?;
+        (file.path.clone(), file.offset)
+    };
 
-        let read = read_f2fs_file_at(&path, offset, buf)?;
+    let read = read_f2fs_file_at(&path, offset, buf)?;
 
-        // Offset güncelle
-        GLOBAL_FD_TABLE.lock().seek(fd, offset + read);
-        Ok(read)
-    } else {
-        Err(FsError::NotFile)
+    let mut table = GLOBAL_FD_TABLE.lock();
+    if let Some(Some(file)) = table.files.get_mut(fd) {
+        file.offset = offset + read;
     }
+    Ok(read)
 }
 
 /// fd'ye yazar ve offset'i günceller (write syscall).
 ///
-/// Yazma akışı:
-/// buf → F2FS yazma → offset += yazılan
+/// Path/offset'i lock altında alır, I/O'yu lock dışı yapar, sonra offset'i günceller.
 pub fn sys_write(fd: usize, buf: &[u8]) -> Result<usize, FsError> {
-    let table = GLOBAL_FD_TABLE.lock();
-    if let Some(file) = table.get(fd) {
-        let path = file.path.clone();
-        let offset = file.offset;
-        drop(table);
+    let (path, offset) = {
+        let table = GLOBAL_FD_TABLE.lock();
+        let file = table
+            .files
+            .get(fd)
+            .and_then(|f| f.as_ref())
+            .ok_or(FsError::NotFile)?;
+        (file.path.clone(), file.offset)
+    };
 
-        let written = write_f2fs_file_at(&path, offset, buf)?;
+    let written = write_f2fs_file_at(&path, offset, buf)?;
 
-        // Offset güncelle
-        GLOBAL_FD_TABLE.lock().seek(fd, offset + written);
-        Ok(written)
-    } else {
-        Err(FsError::NotFile)
+    let mut table = GLOBAL_FD_TABLE.lock();
+    if let Some(Some(file)) = table.files.get_mut(fd) {
+        file.offset = offset + written;
     }
+    Ok(written)
 }
 
 /// Path'e göre inode açar — kök dizin özel durumu vardır
@@ -499,7 +541,20 @@ impl INode for F2fsFileInode {
 }
 
 /// VFS arayüzü — path üzerinden inode açar
+/// /proc, /dev ve /sys sanal dosya sistemlerini kontrol eder;
+/// bulunamazsa gerçek disk dosya sistemine (F2FS) yönlendirir
 pub fn vfs_open_inode(path: &str) -> Result<Arc<dyn INode>, FsError> {
+    // Sanal dosya sistemlerini önce kontrol et
+    if procfs::is_proc_path(path) {
+        return procfs::open_proc_inode(path);
+    }
+    if devfs::is_dev_path(path) {
+        return devfs::open_dev_inode(path);
+    }
+    if sysfs::is_sys_path(path) {
+        return sysfs::open_sys_inode(path);
+    }
+    // Gerçek dosya sistemi (F2FS, ext4, FAT32, NTFS)
     open_inode_by_path(path)
 }
 
@@ -525,4 +580,51 @@ pub fn vfs_write_at(inode: &Arc<dyn INode>, offset: usize, buf: &[u8]) -> Result
 /// Küresel VFS dosya sistemi örneğini döndürür
 pub fn vfs_file_system() -> Arc<dyn FileSystem> {
     F2FS_VFS_INSTANCE.clone()
+}
+
+// ---------- Convenience VFS helpers for GUI apps ----------
+
+/// Verilen yoldaki dosyayı okuyup String olarak döndürür.
+/// Dosya bulunamazsa veya okunamazsa `None` döner.
+pub fn read_to_string(path: &str) -> Option<String> {
+    let root = F2FS_ROOT_INODE.clone();
+    let inode = root.lookup(path).ok()?;
+    let meta = inode.metadata().ok()?;
+    let size = meta.size;
+    let mut buf = alloc::vec![0u8; size];
+    let n = inode.read_at(0, &mut buf).ok()?;
+    buf.truncate(n);
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Verilen yoldaki dosyaya metin yazar. Başarılıysa `true` döner.
+pub fn write_string(path: &str, content: &str) -> bool {
+    let root = F2FS_ROOT_INODE.clone();
+    // Dosya yoksa oluştur
+    let inode = match root.lookup(path) {
+        Ok(i) => i,
+        Err(_) => match root.create(path, FileType::File, 0o644) {
+            Ok(i) => i,
+            Err(_) => return false,
+        },
+    };
+    inode.write_at(0, content.as_bytes()).is_ok()
+}
+
+/// Bir dizinin içeriğini `(isim, is_dir)` çiftleri olarak döndürür.
+/// F2FS VFS read_dir_entries fonksiyonunu kullanarak gerçek dizin içeriğini okur.
+pub fn read_dir(path: &str) -> Option<Vec<(String, bool)>> {
+    let mut drive = crate::drivers::linux::select_block_device().ok()?;
+    let ctx = f2fs::load_context(&mut *drive).ok()?;
+    let inode = f2fs::open_inode_by_path(&mut *drive, &ctx, path).ok()?;
+    if !inode.is_dir {
+        return None;
+    }
+    let entries = f2fs::read_dir_entries(&mut *drive, &ctx, &inode).ok()?;
+    let result: Vec<(String, bool)> = entries
+        .into_iter()
+        .filter(|e| e.name != "." && e.name != "..")
+        .map(|e| (e.name, e.is_dir))
+        .collect();
+    Some(result)
 }

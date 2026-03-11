@@ -44,8 +44,8 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -155,12 +155,12 @@ impl Signal {
             _ => None,
         }
     }
-    
+
     /// Signal numarasını döndürür
     pub fn number(&self) -> u8 {
         *self as u8
     }
-    
+
     /// Signal adını döndürür
     pub fn name(&self) -> &'static str {
         match self {
@@ -197,17 +197,20 @@ impl Signal {
             Signal::SIGSYS => "SIGSYS",
         }
     }
-    
+
     /// Signal yakalanabilir mi?
     pub fn is_catchable(&self) -> bool {
         !matches!(self, Signal::SIGKILL | Signal::SIGSTOP)
     }
-    
+
     /// Signal durdurma signalı mi?
     pub fn is_stop_signal(&self) -> bool {
-        matches!(self, Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU)
+        matches!(
+            self,
+            Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU
+        )
     }
-    
+
     /// Signal devam signalı mi?
     pub fn is_continue_signal(&self) -> bool {
         matches!(self, Signal::SIGCONT)
@@ -221,8 +224,17 @@ pub enum SignalAction {
     Default,
     /// Sinyali yoksay (SIG_IGN)
     Ignore,
-    /// Kullanıcı alanı işleyicisi (handler) ile yakala — adres belirtilir
-    Catch(usize),
+    /// Kullanıcı alanı işleyicisi (handler) ile yakala
+    Catch {
+        /// Handler fonksiyon adresi
+        handler: usize,
+        /// Sinyal maskesi — handler çalışırken bloklanacak sinyaller
+        mask: u64,
+        /// SA bayrakları (SA_SIGINFO, SA_RESTART, SA_NODEFER, SA_RESETHAND)
+        flags: u32,
+        /// Sinyal geri dönüş fonksiyonu (sigreturn stub adresi)
+        restorer: usize,
+    },
 }
 
 impl Default for SignalAction {
@@ -240,9 +252,7 @@ pub fn default_action(sig: Signal) -> SignalDisposition {
         Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU => {
             SignalDisposition::Stop
         }
-        Signal::SIGCONT => {
-            SignalDisposition::Continue
-        }
+        Signal::SIGCONT => SignalDisposition::Continue,
         _ => SignalDisposition::Terminate,
     }
 }
@@ -274,27 +284,27 @@ pub struct SigInfo {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct SigAction {
-    pub sa_handler: usize,  // Fonksiyon işaretçisi veya SIG_IGN/SIG_DFL
+    pub sa_handler: usize, // Fonksiyon işaretçisi veya SIG_IGN/SIG_DFL
     pub sa_mask: u64,
     pub sa_flags: u32,
     pub sa_restorer: usize,
 }
 
 // Özel işleyici değerleri
-pub const SIG_DFL: usize = 0;  // Varsayılan eylem
-pub const SIG_IGN: usize = 1;  // Sinyali yoksay
+pub const SIG_DFL: usize = 0; // Varsayılan eylem
+pub const SIG_IGN: usize = 1; // Sinyali yoksay
 
 // sigaction bayrakları (sa_flags)
-pub const SA_NOCLDSTOP: u32 = 0x00000001;  // Alt süreç durunca SIGCHLD gönderme
-pub const SA_NOCLDWAIT: u32 = 0x00000002;  // Alt süreç ölünce zombi oluşturma
-pub const SA_SIGINFO: u32   = 0x00000004;  // sa_sigaction işleyicisini kullan
-pub const SA_RESTART: u32   = 0x10000000;  // Sinyal sonrası sistem çağrısını yeniden başlat
-pub const SA_NODEFER: u32   = 0x40000000;  // İşleyici çalışırken sinyali bloklamaz
-pub const SA_RESETHAND: u32 = 0x80000000;  // İşleyici sonrası SIG_DFL'ye döner
-pub const SA_ONSTACK: u32   = 0x08000000;  // Değişken sinyal yığınını kullan
+pub const SA_NOCLDSTOP: u32 = 0x00000001; // Alt süreç durunca SIGCHLD gönderme
+pub const SA_NOCLDWAIT: u32 = 0x00000002; // Alt süreç ölünce zombi oluşturma
+pub const SA_SIGINFO: u32 = 0x00000004; // sa_sigaction işleyicisini kullan
+pub const SA_RESTART: u32 = 0x10000000; // Sinyal sonrası sistem çağrısını yeniden başlat
+pub const SA_NODEFER: u32 = 0x40000000; // İşleyici çalışırken sinyali bloklamaz
+pub const SA_RESETHAND: u32 = 0x80000000; // İşleyici sonrası SIG_DFL'ye döner
+pub const SA_ONSTACK: u32 = 0x08000000; // Değişken sinyal yığınını kullan
 
 // sigprocmask yöntemi değerleri
-pub const SIG_BLOCK: i32   = 0;
+pub const SIG_BLOCK: i32 = 0;
 pub const SIG_UNBLOCK: i32 = 1;
 pub const SIG_SETMASK: i32 = 2;
 
@@ -310,14 +320,14 @@ impl SignalHandlers {
         let mut handlers = [SignalAction::Default; 32];
         // SIGCHLD default olarak ignore
         handlers[17] = SignalAction::Ignore;
-        
+
         Self {
             handlers,
             mask: AtomicU64::new(0),
             pending: AtomicU64::new(0),
         }
     }
-    
+
     /// Signal action ayarlar
     pub fn set_action(&mut self, sig: Signal, action: SignalAction) -> SignalAction {
         if !sig.is_catchable() {
@@ -329,7 +339,7 @@ impl SignalHandlers {
         }
         core::mem::replace(&mut self.handlers[idx], action)
     }
-    
+
     /// Signal action döndürür
     pub fn get_action(&self, sig: Signal) -> &SignalAction {
         let idx = sig.number() as usize;
@@ -338,56 +348,56 @@ impl SignalHandlers {
         }
         &self.handlers[idx]
     }
-    
+
     /// Signal mask ayarlar
     pub fn set_mask(&self, mask: u64) {
         self.mask.store(mask, Ordering::SeqCst);
     }
-    
+
     /// Signal mask döndürür
     pub fn get_mask(&self) -> u64 {
         self.mask.load(Ordering::SeqCst)
     }
-    
+
     /// Signal block'lar
     pub fn block(&self, sig: Signal) {
         let mask = 1u64 << (sig.number() - 1);
         self.mask.fetch_or(mask, Ordering::SeqCst);
     }
-    
+
     /// Signal unblock'lar
     pub fn unblock(&self, sig: Signal) {
         let mask = 1u64 << (sig.number() - 1);
         self.mask.fetch_and(!mask, Ordering::SeqCst);
     }
-    
+
     /// Pending signal ekler
     pub fn add_pending(&self, sig: Signal) {
         let mask = 1u64 << (sig.number() - 1);
         self.pending.fetch_or(mask, Ordering::SeqCst);
     }
-    
+
     /// Pending signal'ı temizler
     pub fn clear_pending(&self, sig: Signal) {
         let mask = 1u64 << (sig.number() - 1);
         self.pending.fetch_and(!mask, Ordering::SeqCst);
     }
-    
+
     /// Pending signal'ları döndürür
     pub fn get_pending(&self) -> u64 {
         self.pending.load(Ordering::SeqCst)
     }
-    
+
     /// Bir sonraki pending signal'ı döndürür
     pub fn next_pending(&self) -> Option<Signal> {
         let pending = self.pending.load(Ordering::SeqCst);
         let mask = self.mask.load(Ordering::SeqCst);
         let deliverable = pending & !mask;
-        
+
         if deliverable == 0 {
             return None;
         }
-        
+
         // En düşük numaralı signal'i bul
         for i in 0..32 {
             if deliverable & (1u64 << i) != 0 {
@@ -455,13 +465,13 @@ impl JobManager {
             foreground_pgid: Mutex::new(0),
         }
     }
-    
+
     /// Yeni job oluşturur
     pub fn create_job(&self, pgid: usize, command: &str) -> usize {
         let mut next_id = self.next_job_id.lock();
         let job_id = *next_id;
         *next_id += 1;
-        
+
         let job = Job {
             job_id,
             pgid,
@@ -469,12 +479,12 @@ impl JobManager {
             state: JobState::Running,
             processes: vec![pgid],
         };
-        
+
         self.jobs.lock().insert(job_id, job);
         crate::serial_println!("[JOB] Created job [{}] {}", job_id, command);
         job_id
     }
-    
+
     /// Job'ı durdurur (SIGTSTP)
     pub fn stop_job(&self, job_id: usize) -> bool {
         let mut jobs = self.jobs.lock();
@@ -485,7 +495,7 @@ impl JobManager {
         }
         false
     }
-    
+
     /// Job'ı devam ettirir (SIGCONT)
     pub fn continue_job(&self, job_id: usize, foreground: bool) -> bool {
         let mut jobs = self.jobs.lock();
@@ -494,13 +504,17 @@ impl JobManager {
             if foreground {
                 *self.foreground_pgid.lock() = job.pgid;
             }
-            crate::serial_println!("[JOB] Continued job [{}] {} ({})", 
-                job_id, job.command, if foreground { "fg" } else { "bg" });
+            crate::serial_println!(
+                "[JOB] Continued job [{}] {} ({})",
+                job_id,
+                job.command,
+                if foreground { "fg" } else { "bg" }
+            );
             return true;
         }
         false
     }
-    
+
     /// Job'ı tamamlanmış olarak işaretler
     pub fn finish_job(&self, job_id: usize) -> bool {
         let mut jobs = self.jobs.lock();
@@ -511,71 +525,141 @@ impl JobManager {
         }
         false
     }
-    
+
     /// Job'ı siler
     pub fn remove_job(&self, job_id: usize) -> Option<Job> {
         self.jobs.lock().remove(&job_id)
     }
-    
+
     /// Job'ı ID ile bulur
     pub fn get_job(&self, job_id: usize) -> Option<Job> {
         self.jobs.lock().get(&job_id).cloned()
     }
-    
+
     /// Tüm job'ları listeler
     pub fn list_jobs(&self) -> Vec<Job> {
         self.jobs.lock().values().cloned().collect()
     }
-    
+
     /// Foreground process group ayarlar
     pub fn set_foreground(&self, pgid: usize) {
         *self.foreground_pgid.lock() = pgid;
     }
-    
+
     /// Foreground process group döndürür
     pub fn get_foreground(&self) -> usize {
         *self.foreground_pgid.lock()
     }
-    
+
     /// Process group'a job bulur
     pub fn find_by_pgid(&self, pgid: usize) -> Option<Job> {
-        self.jobs.lock().values()
-            .find(|j| j.pgid == pgid)
-            .cloned()
+        self.jobs.lock().values().find(|j| j.pgid == pgid).cloned()
     }
 }
 
 lazy_static::lazy_static! {
     /// Global job manager
     pub static ref JOB_MANAGER: JobManager = JobManager::new();
+    static ref ALARM_DEADLINES: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
+    static ref ALT_SIGNAL_STACK: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
+}
+
+fn current_task_has_deliverable_signal() -> bool {
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let pid = crate::task::scheduler::current_task_id();
+        for slot in crate::task::scheduler::PER_CPU_CURRENT_TASK.iter() {
+            if let Some(task) = slot {
+                if task.id == pid {
+                    let pending = task.cold.signals.get_pending();
+                    let mask = task.cold.signals.get_mask();
+                    return (pending & !mask) != 0;
+                }
+            }
+        }
+        false
+    })
 }
 
 /// Signal gönderir (kill syscall benzeri)
 pub fn send_signal(pid: usize, sig: Signal) -> Result<(), SignalError> {
-    // TODO: Gerçek process'e signal gönder
     crate::serial_println!("[SIGNAL] Sending {} to PID {}", sig.name(), pid);
-    
-    // Signal'i process'in pending listesine ekle
-    // Bu kısım scheduler entegrasyonu ile yapılacak
-    
-    Ok(())
+
+    // Per-CPU current task'larda ara
+    let found = x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        for slot in crate::task::scheduler::PER_CPU_CURRENT_TASK.iter() {
+            if let Some(task) = slot {
+                if task.hot.id == pid {
+                    task.cold.signals.add_pending(sig);
+                    return true;
+                }
+            }
+        }
+        false
+    });
+
+    if found {
+        Ok(())
+    } else {
+        // Task çalışma kuyruğunda olabilir — scheduler sonraki döngüde teslim eder
+        // Şimdilik ProcessNotFound döndür
+        Err(SignalError::ProcessNotFound)
+    }
+}
+
+/// Mevcut task'a signal gönderir (pipe SIGPIPE gibi kernel-internal kullanımlar için)
+pub fn send_signal_to_current(sig: Signal) {
+    let cpu_id = crate::cpu::smp::current_cpu_id();
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        if let Some(task) = crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)
+            .and_then(|t| t.as_ref())
+        {
+            task.cold.signals.add_pending(sig);
+        }
+    });
 }
 
 /// Signal gönderir (process group'a)
 pub fn send_signal_pgroup(pgid: usize, sig: Signal) -> Result<(), SignalError> {
     crate::serial_println!("[SIGNAL] Sending {} to PGID {}", sig.name(), pgid);
-    
-    // TODO: Process group'taki tüm process'lere signal gönder
-    
-    Ok(())
+
+    // Per-CPU current task'larda pgid eşleşen task'ları bul
+    let found = x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let mut any_found = false;
+        for slot in crate::task::scheduler::PER_CPU_CURRENT_TASK.iter() {
+            if let Some(task) = slot {
+                // pgid kontrolü — şimdilik pid == pgid varsayıyoruz
+                if task.hot.id == pgid {
+                    task.cold.signals.add_pending(sig);
+                    any_found = true;
+                }
+            }
+        }
+        any_found
+    });
+
+    if found {
+        Ok(())
+    } else {
+        Err(SignalError::ProcessNotFound)
+    }
 }
 
 /// Signal gönderir (tüm process'lere)
 pub fn send_signal_all(sig: Signal) -> Result<(), SignalError> {
     crate::serial_println!("[SIGNAL] Broadcasting {}", sig.name());
-    
-    // TODO: Tüm process'lere signal gönder
-    
+
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        for slot in crate::task::scheduler::PER_CPU_CURRENT_TASK.iter() {
+            if let Some(task) = slot {
+                // idle (PID 0) ve init (PID 1) hariç
+                if task.hot.id > 1 {
+                    task.cold.signals.add_pending(sig);
+                }
+            }
+        }
+    });
+
     Ok(())
 }
 
@@ -593,7 +677,7 @@ pub fn generate_terminal_signal(sig: Signal) {
     if fg_pgid != 0 {
         let _ = send_signal_pgroup(fg_pgid, sig);
     }
-    
+
     // Job'ı güncelle
     if sig == Signal::SIGTSTP {
         if let Some(job) = JOB_MANAGER.find_by_pgid(fg_pgid) {
@@ -644,7 +728,7 @@ pub fn sys_sigaction(
     // İsteniyorsa eski eylemi sakla
     if let Some(old) = oldact {
         let current = handlers.get_action(sig);
-        *old = match current {
+        *old = match *current {
             SignalAction::Default => SigAction {
                 sa_handler: SIG_DFL,
                 sa_mask: 0,
@@ -657,15 +741,20 @@ pub fn sys_sigaction(
                 sa_flags: 0,
                 sa_restorer: 0,
             },
-            SignalAction::Catch(addr) => SigAction {
-                sa_handler: *addr,
-                sa_mask: handlers.get_mask(),
-                sa_flags: 0,
-                sa_restorer: 0,
+            SignalAction::Catch {
+                handler,
+                mask,
+                flags,
+                restorer,
+            } => SigAction {
+                sa_handler: handler,
+                sa_mask: mask,
+                sa_flags: flags,
+                sa_restorer: restorer,
             },
         };
     }
-    
+
     // Yeni eylem varsa uygula
     if let Some(new_act) = act {
         let action = if new_act.sa_handler == SIG_DFL {
@@ -673,24 +762,19 @@ pub fn sys_sigaction(
         } else if new_act.sa_handler == SIG_IGN {
             SignalAction::Ignore
         } else {
-            SignalAction::Catch(new_act.sa_handler)
+            SignalAction::Catch {
+                handler: new_act.sa_handler,
+                mask: new_act.sa_mask,
+                flags: new_act.sa_flags,
+                restorer: new_act.sa_restorer,
+            }
         };
 
         handlers.set_action(sig, action);
 
-        // sa_mask'tan sinyal maskesini uygula
-        if new_act.sa_flags & SA_NODEFER == 0 {
-            // İşleyici çalışırken sinyali maske içine ekle
-            let mut mask = new_act.sa_mask;
-            if new_act.sa_flags & SA_RESETHAND != 0 {
-                // İşleyici sonrası varsayılana döner
-            }
-            handlers.set_mask(mask);
-        }
-        
         crate::serial_println!("[SIGNAL] sigaction({}) -> {:?}", sig.name(), action);
     }
-    
+
     0 // Success
 }
 
@@ -733,10 +817,10 @@ pub fn sys_sigprocmask(
             }
             _ => return -22, // EINVAL
         }
-        
+
         crate::serial_println!("[SIGNAL] sigprocmask(how={}, mask={:#x})", how, new_mask);
     }
-    
+
     0 // Success
 }
 
@@ -755,8 +839,9 @@ pub fn sys_sigsuspend(handlers: &SignalHandlers, mask: u64) -> i32 {
     let old_mask = handlers.get_mask();
     handlers.set_mask(mask);
 
-    // TODO: Process'i gerçekten askıya al
-    // Zamanlayıcı entegrasyonu gerektirir
+    while handlers.next_pending().is_none() {
+        crate::task::scheduler::sleep(1);
+    }
 
     // Geri dönerken eski maskeyi geri yükle
     handlers.set_mask(old_mask);
@@ -771,7 +856,7 @@ pub fn sys_kill(pid: i32, signum: i32) -> i32 {
     if signum < 0 || signum > 31 {
         return -22; // EINVAL
     }
-    
+
     let sig = if signum > 0 {
         match Signal::from_number(signum as u8) {
             Some(s) => Some(s),
@@ -780,7 +865,7 @@ pub fn sys_kill(pid: i32, signum: i32) -> i32 {
     } else {
         None // Sinyal 0 = process varlık kontrolü
     };
-    
+
     if pid > 0 {
         // Belirli bir process'e gönder
         if let Some(signal) = sig {
@@ -788,20 +873,49 @@ pub fn sys_kill(pid: i32, signum: i32) -> i32 {
                 Ok(()) => 0,
                 Err(SignalError::ProcessNotFound) => -3, // ESRCH
                 Err(SignalError::PermissionDenied) => -1, // EPERM
-                Err(SignalError::InvalidSignal) => -22, // EINVAL
+                Err(SignalError::InvalidSignal) => -22,  // EINVAL
             }
         } else {
             // Sinyal 0: sadece process'in var olup olmadığını kontrol et
-            // TODO: Process varlığını kontrol et
-            0
+            if crate::task::scheduler::task_exists(pid as usize) {
+                0
+            } else {
+                -3
+            }
         }
     } else if pid == 0 {
         // Mevcut process grubuna gönder
         if let Some(signal) = sig {
-            // TODO: Mevcut process grubunu al
-            0
+            let pgid = JOB_MANAGER.get_foreground();
+            if pgid == 0 {
+                let current_pid = crate::task::scheduler::current_task_id();
+                match send_signal(current_pid, signal) {
+                    Ok(()) => 0,
+                    Err(SignalError::ProcessNotFound) => -3,
+                    Err(_) => -1,
+                }
+            } else {
+                match send_signal_pgroup(pgid, signal) {
+                    Ok(()) => 0,
+                    Err(SignalError::ProcessNotFound) => -3,
+                    Err(_) => -1,
+                }
+            }
         } else {
-            0
+            let pgid = JOB_MANAGER.get_foreground();
+            if pgid == 0 {
+                if crate::task::scheduler::task_exists(crate::task::scheduler::current_task_id()) {
+                    0
+                } else {
+                    -3
+                }
+            } else {
+                if JOB_MANAGER.find_by_pgid(pgid).is_some() {
+                    0
+                } else {
+                    -3
+                }
+            }
         }
     } else if pid == -1 {
         // Tüm process'lere gönder (init hariç)
@@ -839,7 +953,9 @@ pub fn sys_raise(signum: i32) -> i32 {
 ///
 /// Bir sinyal yakalanana kadar process'i askıya alır.
 pub fn sys_pause() -> i32 {
-    // TODO: Gerçekten askıya almak için zamanlayıcı entegrasyonu gerektirir
+    while !current_task_has_deliverable_signal() {
+        crate::task::scheduler::sleep(1);
+    }
     -4 // EINTR
 }
 
@@ -847,17 +963,71 @@ pub fn sys_pause() -> i32 {
 ///
 /// Belirtilen saniye sonra SIGALRM gönderilmesini zamanlar.
 pub fn sys_alarm(seconds: u32) -> u32 {
-    // TODO: Zamanlayıcı tabanlı alarm uygulaması
-    // Şimdilik 0 döndür (önceki alarm yok)
-    0
+    let pid = crate::task::scheduler::current_task_id();
+    let now = crate::task::scheduler::get_ticks();
+    let mut alarms = ALARM_DEADLINES.lock();
+
+    let previous_remaining = alarms
+        .get(&pid)
+        .map(|deadline| deadline.saturating_sub(now))
+        .unwrap_or(0);
+
+    if seconds == 0 {
+        alarms.remove(&pid);
+    } else {
+        let ticks = (seconds as usize).saturating_mul(100);
+        alarms.insert(pid, now.saturating_add(ticks));
+    }
+
+    (previous_remaining / 100) as u32
 }
 
 /// sigaltstack(2) sistem çağrısı uygulaması.
 ///
 /// Değişken sinyal yığınını ayarlar/alır.
 pub fn sys_sigaltstack(ss: Option<usize>, old_ss: Option<&mut usize>) -> i32 {
-    // TODO: Değişken sinyal yığınını uygula
+    let pid = crate::task::scheduler::current_task_id();
+
+    if let Some(out) = old_ss {
+        *out = ALT_SIGNAL_STACK.lock().get(&pid).copied().unwrap_or(0);
+    }
+
+    if let Some(new_ss) = ss {
+        ALT_SIGNAL_STACK.lock().insert(pid, new_ss);
+    }
+
     0
+}
+
+pub fn process_alarms(current_tick: usize) {
+    let due: Vec<usize> = {
+        let alarms = ALARM_DEADLINES.lock();
+        alarms
+            .iter()
+            .filter_map(|(pid, deadline)| {
+                if *deadline <= current_tick {
+                    Some(*pid)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    if due.is_empty() {
+        return;
+    }
+
+    {
+        let mut alarms = ALARM_DEADLINES.lock();
+        for pid in &due {
+            alarms.remove(pid);
+        }
+    }
+
+    for pid in due {
+        let _ = send_signal(pid, Signal::SIGALRM);
+    }
 }
 
 // ============================================================================
@@ -867,11 +1037,12 @@ pub fn sys_sigaltstack(ss: Option<usize>, old_ss: Option<&mut usize>) -> i32 {
 /// Bekleyen sinyalleri process'e teslim eder.
 ///
 /// Kullanıcı alanına dönmeden önce çağrılmalıdır.
+/// `task_id` parametresi, sinyali alan task'ın kimliğidir (varsayılan eylemlerde kullanılır).
 ///
 /// # Dönen Değer
 /// - `Some((handler_addr, siginfo))`: Çağrılacak sinyal işleyicisi
 /// - `None`: Teslim edilecek sinyal yok
-pub fn deliver_signals(handlers: &mut SignalHandlers) -> Option<(usize, SigInfo)> {
+pub fn deliver_signals(handlers: &SignalHandlers, task_id: usize) -> Option<(usize, SigInfo)> {
     // Maskelenmemiş bir sonraki bekleyen sinyali al
     let sig = handlers.next_pending()?;
 
@@ -888,36 +1059,39 @@ pub fn deliver_signals(handlers: &mut SignalHandlers) -> Option<(usize, SigInfo)
             match disposition {
                 SignalDisposition::Ignore => {
                     // Hiçbir şey yapma
-                    return None;
                 }
-                SignalDisposition::Terminate => {
+                SignalDisposition::Terminate | SignalDisposition::CoreDump => {
                     // Process'i sonlandır
-                    crate::serial_println!("[SIGNAL] Varsayılan eylem: {} sebebiyle sonlandırıldı", sig.name());
-                    // TODO: Process'i gerçekten sonlandır
-                    return None;
+                    crate::serial_println!(
+                        "[SIGNAL] PID {} {} sebebiyle sonlandırıldı",
+                        task_id,
+                        sig.name()
+                    );
+                    let _ = crate::task::scheduler::kill_task(task_id, sig.number() as i32);
                 }
                 SignalDisposition::Stop => {
-                    // Process'i durdur
-                    crate::serial_println!("[SIGNAL] Varsayılan eylem: {} sebebiyle durduruldu", sig.name());
-                    // TODO: Process'i durdur
-                    return None;
+                    // Process'i durdur (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU)
+                    crate::serial_println!(
+                        "[SIGNAL] PID {} {} sebebiyle durduruldu",
+                        task_id,
+                        sig.name()
+                    );
+                    crate::task::scheduler::stop_task(task_id);
                 }
                 SignalDisposition::Continue => {
-                    // Durmuşsa devam et
-                    return None;
-                }
-                SignalDisposition::CoreDump => {
-                    // Bellek dökümü alarak sonlandır
-                    crate::serial_println!("[SIGNAL] Varsayılan eylem: {} sebebiyle bellek dökümü", sig.name());
-                    // TODO: Core dump
-                    return None;
+                    // Durmuşsa devam et (SIGCONT)
+                    crate::task::scheduler::continue_task(task_id);
                 }
             }
+            None
         }
-        SignalAction::Ignore => {
-            return None;
-        }
-        SignalAction::Catch(handler_addr) => {
+        SignalAction::Ignore => None,
+        SignalAction::Catch {
+            handler: handler_addr,
+            mask: _,
+            flags: _,
+            restorer: _,
+        } => {
             // siginfo yapısını oluştur
             let siginfo = SigInfo {
                 si_signo: sig.number() as i32,
@@ -929,16 +1103,15 @@ pub fn deliver_signals(handlers: &mut SignalHandlers) -> Option<(usize, SigInfo)
                 si_value: 0,
             };
 
-            // İşleyici çalışırken sinyali maskele (SA_NODEFER yoksa)
-            handlers.block(sig);
+            crate::serial_println!(
+                "[SIGNAL] {} sinyali {:#x} işleyicisine teslim ediliyor",
+                sig.name(),
+                handler_addr
+            );
 
-            crate::serial_println!("[SIGNAL] {} sinyali {:#x} işleyicisine teslim ediliyor", sig.name(), handler_addr);
-
-            return Some((handler_addr, siginfo));
+            Some((handler_addr, siginfo))
         }
     }
-
-    None
 }
 
 /// Process'in bekleyen sinyali olup olmadığını kontrol eder.
@@ -958,20 +1131,20 @@ mod tests {
         assert_eq!(Signal::SIGKILL.number(), 9);
         assert_eq!(Signal::SIGTERM.number(), 15);
     }
-    
+
     #[test]
     fn test_signal_handlers() {
         let mut handlers = SignalHandlers::new();
         handlers.set_action(Signal::SIGINT, SignalAction::Ignore);
-        
+
         assert_eq!(handlers.get_action(Signal::SIGINT), &SignalAction::Ignore);
     }
-    
+
     #[test]
     fn test_job_manager() {
         let job_id = JOB_MANAGER.create_job(100, "test command");
         assert!(job_id > 0);
-        
+
         let job = JOB_MANAGER.get_job(job_id);
         assert!(job.is_some());
     }

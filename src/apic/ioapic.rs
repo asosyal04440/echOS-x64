@@ -157,6 +157,9 @@ impl IoApic {
         level_trigger: bool,
         masked: bool,
     ) {
+        if vector == 44 {
+             crate::serial_println!("[IOAPIC] Configuring IRQ12 (Vector 44): Index={} Dest={} Masked={}", index, dest_apic_id, masked);
+        }
         let mut low = vector as u32;
         if polarity_low {
             low |= 1 << 13;

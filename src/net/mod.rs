@@ -48,39 +48,50 @@
 //! | `io_uring`      | Linux io_uring uyumlu async I/O API           |
 //! | `x509`          | X.509 sertifika işleme                        |
 //! | `quic`          | QUIC protokolü (UDP üzeri TLS)                |
+//! | `bluetooth_le_audio` | Bluetooth 5.2 LE Audio (LC3, ISO channels) |
 //! | `zero_copy`     | Sıfır kopya tampon yönetimi                   |
 //! | `netfilter`     | iptables/netfilter paket filtreleme           |
 
-pub mod socket;
-pub mod tcp;
-pub mod udp;
-pub mod ip;
-pub mod ipv6;
-pub mod ethernet;
 pub mod arp;
+pub mod bluetooth_le_audio;
 pub mod dhcp;
+pub mod cni;
 pub mod dns;
 pub mod dnssec;
 pub mod doh;
 pub mod dot;
-pub mod netdev;
+pub mod ebpf;
+pub mod ethernet;
+pub mod grpc;
 pub mod http;
 pub mod http2;
-pub mod websocket;
-pub mod smoltcp_driver;
-pub mod tls;
+pub mod http3;
 pub mod io_uring;
-pub mod x509;
+pub mod io_uring_nvme;
+pub mod ip;
+pub mod ipv6;
+pub mod netdev;
+pub mod netfilter;
 pub mod quic;
+pub mod smoltcp_driver;
+pub mod socket;
+pub mod tcp;
+pub mod test_stack;
+pub mod tls;
+pub mod udp;
+pub mod unix_socket;
+pub mod websocket;
+pub mod wireguard;
+pub mod x509;
 pub mod zero_copy;
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::format;
+use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use alloc::vec;
-use core::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 // ============================================================================
@@ -125,7 +136,7 @@ impl NetworkConfig {
             hostname: String::from("echos"),
         }
     }
-    
+
     pub fn is_configured(&self) -> bool {
         self.ip_addr != [0, 0, 0, 0]
     }
@@ -146,23 +157,23 @@ pub struct MacAddr(pub [u8; 6]);
 impl MacAddr {
     pub const BROADCAST: MacAddr = MacAddr([0xFF; 6]);
     pub const ZERO: MacAddr = MacAddr([0x00; 6]);
-    
+
     pub fn new(bytes: [u8; 6]) -> Self {
         MacAddr(bytes)
     }
-    
+
     pub fn from_bytes(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Self {
         MacAddr([a, b, c, d, e, f])
     }
-    
+
     pub fn is_broadcast(&self) -> bool {
         self.0 == [0xFF; 6]
     }
-    
+
     pub fn is_multicast(&self) -> bool {
         self.0[0] & 0x01 != 0
     }
-    
+
     pub fn as_bytes(&self) -> &[u8; 6] {
         &self.0
     }
@@ -192,26 +203,26 @@ impl Default for MacAddr {
 pub struct Ipv4Addr(pub [u8; 4]);
 
 impl Ipv4Addr {
-    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr([0, 0, 0, 0]);           // 0.0.0.0 belirsiz
-    pub const BROADCAST: Ipv4Addr = Ipv4Addr([255, 255, 255, 255]);     // 255.255.255.255 yayın
-    pub const LOCALHOST: Ipv4Addr = Ipv4Addr([127, 0, 0, 1]);           // 127.0.0.1 geri döngü
-    
+    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr([0, 0, 0, 0]); // 0.0.0.0 belirsiz
+    pub const BROADCAST: Ipv4Addr = Ipv4Addr([255, 255, 255, 255]); // 255.255.255.255 yayın
+    pub const LOCALHOST: Ipv4Addr = Ipv4Addr([127, 0, 0, 1]); // 127.0.0.1 geri döngü
+
     pub fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
         Ipv4Addr([a, b, c, d])
     }
-    
+
     pub fn from_bytes(bytes: [u8; 4]) -> Self {
         Ipv4Addr(bytes)
     }
-    
+
     pub fn is_unspecified(&self) -> bool {
         self.0 == [0, 0, 0, 0]
     }
-    
+
     pub fn is_loopback(&self) -> bool {
         self.0[0] == 127
     }
-    
+
     pub fn is_private(&self) -> bool {
         // RFC 1918 özel adres aralıkları:
         self.0[0] == 10 ||                                               // 10.0.0.0/8
@@ -220,23 +231,23 @@ impl Ipv4Addr {
         // 192.168.0.0/16
         (self.0[0] == 192 && self.0[1] == 168)
     }
-    
+
     pub fn is_multicast(&self) -> bool {
         self.0[0] >= 224 && self.0[0] <= 239
     }
-    
+
     pub fn is_broadcast(&self) -> bool {
         self.0 == [255, 255, 255, 255]
     }
-    
+
     pub fn as_bytes(&self) -> &[u8; 4] {
         &self.0
     }
-    
+
     pub fn to_u32(&self) -> u32 {
         u32::from_be_bytes(self.0)
     }
-    
+
     pub fn from_u32(val: u32) -> Self {
         Ipv4Addr(val.to_be_bytes())
     }
@@ -271,25 +282,25 @@ impl core::fmt::Display for Ipv4Addr {
 pub struct Port(pub u16);
 
 impl Port {
-    pub const HTTP: Port = Port(80);           // Hiper Metin Transfer Protokolü
-    pub const HTTPS: Port = Port(443);         // HTTP Güvenli (TLS üzeri HTTP)
-    pub const SSH: Port = Port(22);            // Güvenli Kabuk (Secure Shell)
-    pub const DNS: Port = Port(53);            // Alan Adı Sistemi
-    pub const DHCP_CLIENT: Port = Port(68);    // DHCP İstemci portu
-    pub const DHCP_SERVER: Port = Port(67);    // DHCP Sunucu portu
-    
+    pub const HTTP: Port = Port(80); // Hiper Metin Transfer Protokolü
+    pub const HTTPS: Port = Port(443); // HTTP Güvenli (TLS üzeri HTTP)
+    pub const SSH: Port = Port(22); // Güvenli Kabuk (Secure Shell)
+    pub const DNS: Port = Port(53); // Alan Adı Sistemi
+    pub const DHCP_CLIENT: Port = Port(68); // DHCP İstemci portu
+    pub const DHCP_SERVER: Port = Port(67); // DHCP Sunucu portu
+
     pub fn new(port: u16) -> Self {
         Port(port)
     }
-    
+
     pub fn is_system(&self) -> bool {
         self.0 < 1024
     }
-    
+
     pub fn is_dynamic(&self) -> bool {
         self.0 >= 49152
     }
-    
+
     pub fn as_u16(&self) -> u16 {
         self.0
     }
@@ -314,7 +325,7 @@ impl SocketAddr {
     pub fn new(ip: Ipv4Addr, port: Port) -> Self {
         SocketAddr { ip, port }
     }
-    
+
     pub fn unspecified(port: Port) -> Self {
         SocketAddr {
             ip: Ipv4Addr::UNSPECIFIED,
@@ -380,7 +391,7 @@ pub trait NetInterface: Send + Sync {
 
     /// Varsayılan ağ geçidini ayarlar
     fn set_gateway(&mut self, gw: Ipv4Addr);
-    
+
     /// Arabirimin aktif (up) olup olmadığını döndürür
     fn is_up(&self) -> bool;
 
@@ -405,26 +416,27 @@ pub trait NetInterface: Send + Sync {
 /// Ağ işlemi hata türleri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetError {
-    NoInterface,          // Ağ arabirimi bulunamadı
-    NotUp,                // Arabirim aktif değil
-    BufferFull,           // Gönderme tamponu dolu
-    BufferEmpty,          // Alma tamponu boş
-    InvalidPacket,        // Geçersiz paket formatı
-    InvalidFd,            // Geçersiz soket tanımlayıcısı
-    InvalidParam,         // Geçersiz parametre
-    ChecksumError,        // Sağlama toplamı hatası
-    Timeout,              // Zaman aşımı
-    ConnectionRefused,    // Bağlantı reddedildi
-    ConnectionReset,      // Bağlantı sıfırlandı
-    ConnectionClosed,     // Bağlantı kapatıldı
-    WouldBlock,           // Engellemesiz modda işlem tamamlanamadı
-    AddrInUse,            // Adres/port zaten kullanımda
-    AddrNotAvailable,     // Adres mevcut değil
-    NetworkUnreachable,   // Ağa erişilemiyor
-    HostUnreachable,      // Uzak makineye erişilemiyor
-    ProtocolError,        // Protokol hatası
-    NotSupported,         // Desteklenmeyen işlem
-    Unknown,              // Bilinmeyen hata
+    NoInterface,        // Ağ arabirimi bulunamadı
+    NotUp,              // Arabirim aktif değil
+    BufferFull,         // Gönderme tamponu dolu
+    BufferEmpty,        // Alma tamponu boş
+    InvalidPacket,      // Geçersiz paket formatı
+    InvalidFd,          // Geçersiz soket tanımlayıcısı
+    InvalidParam,       // Geçersiz parametre
+    ChecksumError,      // Sağlama toplamı hatası
+    Timeout,            // Zaman aşımı
+    ConnectionRefused,  // Bağlantı reddedildi
+    ConnectionReset,    // Bağlantı sıfırlandı
+    ConnectionClosed,   // Bağlantı kapatıldı
+    WouldBlock,         // Engellemesiz modda işlem tamamlanamadı
+    AddrInUse,          // Adres/port zaten kullanımda
+    AddrNotAvailable,   // Adres mevcut değil
+    NetworkUnreachable, // Ağa erişilemiyor
+    HostUnreachable,    // Uzak makineye erişilemiyor
+    ProtocolError,      // Protokol hatası
+    NotSupported,       // Desteklenmeyen işlem
+    NotConnected,       // Soket bağlı değil
+    Unknown,            // Bilinmeyen hata
 }
 
 // ============================================================================
@@ -449,17 +461,32 @@ pub fn init() {
     if NET_INITIALIZED.swap(true, Ordering::SeqCst) {
         return;
     }
-    
+
     crate::serial_println!("[NET] Initializing networking stack...");
-    
+
     // Initialize network device drivers
     netdev::init();
-    
+
     // Initialize protocols
     arp::init();
     tcp::init();
     udp::init();
-    
+    dhcp::init();
+    dns::init();
+    ipv6::init();
+    netfilter::init();
+
+    // High-performance datapaths
+    ebpf::init();
+    zero_copy::init();
+    io_uring::init();
+    io_uring_nvme::init();
+
+    // Modern transport/security protocols
+    http3::init();
+    wireguard::init();
+    grpc::init();
+
     crate::serial_println!("[NET] Networking stack initialized");
 }
 
@@ -467,7 +494,10 @@ pub fn init() {
 pub fn register_interface(iface: Arc<Mutex<dyn NetInterface>>) {
     let mut interfaces = NET_INTERFACES.lock();
     interfaces.push(iface);
-    crate::serial_println!("[NET] Interface registered: {}", interfaces.last().unwrap().lock().name());
+    crate::serial_println!(
+        "[NET] Interface registered: {}",
+        interfaces.last().unwrap().lock().name()
+    );
 }
 
 /// Ada göre ağ arabirimini bulur ve döndürür
@@ -534,7 +564,7 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
             // Bilinmeyen protokol, paketi düşür
         }
     }
-    
+
     Ok(())
 }
 
@@ -593,56 +623,64 @@ pub fn get_socket_stats() -> Vec<SocketStats> {
             tcp::TcpState::LastAck => "LAST-ACK",
             tcp::TcpState::TimeWait => "TIME-WAIT",
         };
-        
+
         stats.push(SocketStats {
             id: conn.id,
             proto: String::from("tcp"),
-            local: format!("{}:{}", 
+            local: format!(
+                "{}:{}",
                 socket::format_ipv4(conn.local.ip),
-                conn.local.port.0),
-            remote: format!("{}:{}", 
+                conn.local.port.0
+            ),
+            remote: format!(
+                "{}:{}",
                 socket::format_ipv4(conn.remote.ip),
-                conn.remote.port.0),
+                conn.remote.port.0
+            ),
             state: String::from(state_str),
             rx_bytes: conn.rx_buffer.len(),
             tx_bytes: conn.tx_buffer.len(),
         });
     }
-    
+
     // UDP soketlerini listele
     let udp_socks = udp::get_all_sockets();
     for sock in udp_socks {
         stats.push(SocketStats {
             id: sock.id,
             proto: String::from("udp"),
-            local: format!("{}:{}", 
+            local: format!(
+                "{}:{}",
                 socket::format_ipv4(sock.local.ip),
-                sock.local.port.0),
+                sock.local.port.0
+            ),
             remote: String::from("*:*"),
             state: String::from(" "),
             rx_bytes: sock.rx_buffer.iter().map(|(_, v)| v.len()).sum(),
             tx_bytes: 0,
         });
     }
-    
+
     stats
 }
 
 /// Netcat — uzak sunucuya TCP bağlantısı kurar (`nc host port`)
 pub fn nc_connect(host: &str, port: u16) -> Result<u32, NetError> {
-    let dns_server = get_config().dns_servers.first()
+    let dns_server = get_config()
+        .dns_servers
+        .first()
         .map(|ip| Ipv4Addr::from_bytes(*ip))
         .ok_or(NetError::NetworkUnreachable)?;
-    
+
     let ip = dns::resolve(host, dns_server)?;
     let addr = SocketAddr::new(ip, Port(port));
-    
+
     let sock = socket::socket(
         socket::AddressFamily::IPV4,
         socket::SocketType::STREAM,
         socket::Protocol::TCP,
     )?;
-    
+
     socket::connect(sock, addr)?;
     Ok(sock)
 }
@@ -664,7 +702,7 @@ pub fn nc_listen(port: u16) -> Result<u32, NetError> {
         socket::SocketType::STREAM,
         socket::Protocol::TCP,
     )?;
-    
+
     socket::bind(sock, SocketAddr::new(Ipv4Addr::UNSPECIFIED, Port(port)))?;
     socket::listen(sock, 1)?;
     Ok(sock)
@@ -718,12 +756,7 @@ pub fn traceroute(dest: Ipv4Addr, max_hops: u8) -> Result<Vec<TracerouteHop>, Ne
         } else {
             // Ara atlama noktası (simüle edilmiş, gerçek değil)
             // Gerçek implementasyonda ICMP Time Exceeded yanıtları ayrıştırılır
-            let hop_ip = Ipv4Addr::from_bytes([
-                gateway.0[0],
-                gateway.0[1],
-                gateway.0[2],
-                ttl,
-            ]);
+            let hop_ip = Ipv4Addr::from_bytes([gateway.0[0], gateway.0[1], gateway.0[2], ttl]);
             hops.push(TracerouteHop {
                 hop: ttl,
                 ip: hop_ip,
@@ -732,7 +765,7 @@ pub fn traceroute(dest: Ipv4Addr, max_hops: u8) -> Result<Vec<TracerouteHop>, Ne
             });
         }
     }
-    
+
     Ok(hops)
 }
 
@@ -745,10 +778,10 @@ pub fn ping(dest: Ipv4Addr, count: u8) -> Result<Vec<(u32, bool)>, NetError> {
         // RTT simüle et (gerçekte: ICMP yanıt zamanı ölçülür)
         let rtt = 5 + (i as u32 * 2);
         let success = i < count - 1; // Paket kaybı simülasyonu
-        
+
         results.push((rtt, success));
     }
-    
+
     Ok(results)
 }
 
@@ -760,7 +793,7 @@ pub fn get_arp_table() -> Vec<(Ipv4Addr, MacAddr)> {
 /// Sistemdeki tüm ağ arabirimlerini döndürür (`ifconfig`)
 pub fn get_interfaces() -> Vec<InterfaceInfo> {
     let mut interfaces = Vec::new();
-    
+
     if let Some(iface) = default_interface() {
         let netdev = iface.lock();
         interfaces.push(InterfaceInfo {
@@ -773,7 +806,7 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
             up: true,
         });
     }
-    
+
     interfaces
 }
 
@@ -788,3 +821,17 @@ pub struct InterfaceInfo {
     pub mtu: usize,
     pub up: bool,
 }
+
+// Public exports
+pub use arp::*;
+pub use bluetooth_le_audio::*;
+pub use dhcp::*;
+pub use dns::*;
+pub use ethernet::*;
+pub use ip::*;
+pub use ipv6::*;
+pub use quic::*;
+pub use socket::*;
+pub use tcp::*;
+pub use tls::*;
+pub use udp::*;

@@ -45,16 +45,16 @@
 //! Bir modül kendi hata mantığını `FaultHandler` impl ederek hub'a kaydedebilir.
 //! Hub periyodik olarak `check_all()` çağırığında kayıtlı her işleyiciyi sorgular.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
-use super::{Fault, FaultId, FaultSource, FaultType, ModuleHealth, HealthStatus, FAULT_STATE};
-use super::severity::{Severity, RecoveryResult, RecommendedAction};
 use super::recovery::RecoveryEngine;
+use super::severity::{RecommendedAction, RecoveryResult, Severity};
+use super::{Fault, FaultId, FaultSource, FaultType, HealthStatus, ModuleHealth, FAULT_STATE};
 
 // ============================================================================
 // HATA MERKEİ YAPISI
@@ -108,13 +108,13 @@ impl FaultHub {
             last_check: AtomicUsize::new(0),
         }
     }
-    
+
     /// Hata merkezini başlatır ve çekirdek modülleri kayıt eder
     pub fn init(&self) {
         if self.initialized.swap(true, Ordering::SeqCst) {
             return;
         }
-        
+
         // Çekirdek modülleri kayıt et
         self.register_module(ModuleHealth::new("memory", true, false, false));
         self.register_module(ModuleHealth::new("cpu", true, false, false));
@@ -126,32 +126,34 @@ impl FaultHub {
         self.register_module(ModuleHealth::new("network", false, true, true));
         self.register_module(ModuleHealth::new("security", true, false, false));
         self.register_module(ModuleHealth::new("acpi", false, true, false));
-        
+
         // Kurtarma motorunu başlat
         *self.recovery_engine.lock() = Some(RecoveryEngine::new());
-        
-        crate::serial_println!("[FAULT_HUB] Initialized with {} modules", 
-            self.modules.lock().len());
+
+        crate::serial_println!(
+            "[FAULT_HUB] Initialized with {} modules",
+            self.modules.lock().len()
+        );
     }
-    
+
     /// Sağlık takibi için modül kaydeder
     pub fn register_module(&self, health: ModuleHealth) {
         self.modules.lock().insert(health.name, health);
     }
-    
+
     /// Özel bir hata işleyici kaydeder
     pub fn register_handler(&self, source: FaultSource, handler: Box<dyn FaultHandler>) {
         self.handlers.lock().insert(source, handler);
     }
-    
+
     /// Hata bildirir, modül sağlığını günceller ve kurtarmayı başlatır
     pub fn report_fault(&self, fault: Fault) -> FaultId {
         let id = fault.id;
         let severity = fault.severity;
         let source = fault.source;
-        
+
         self.fault_count.fetch_add(1, Ordering::SeqCst);
-        
+
         // Modül sağlık kaydını güncelle
         if let Some(module) = self.modules.lock().get_mut(&match source {
             FaultSource::Memory => "memory",
@@ -167,7 +169,7 @@ impl FaultHub {
             _ => "unknown",
         }) {
             module.record_fault();
-            
+
             // Hata sayısına göre durumu güncelle
             if module.fault_count > 5 {
                 module.update_status(HealthStatus::Failed);
@@ -177,27 +179,31 @@ impl FaultHub {
                 module.update_status(HealthStatus::Warning);
             }
         }
-        
+
         // Global şiddet seviyesini güncelle
         self.update_severity(severity);
-        
+
         // Hatayı günlülere yaz
         crate::serial_println!(
             "[FAULT_HUB] Fault #{:?}: {:?}/{:?} - {} (severity: {:?})",
-            id, source, fault.fault_type, fault.message, severity
+            id,
+            source,
+            fault.fault_type,
+            fault.message,
+            severity
         );
-        
+
         // Global duruma kayıt et
         FAULT_STATE.record_fault(&fault);
-        
+
         // Kurtarmayı dene
         if FAULT_STATE.auto_recovery.load(Ordering::SeqCst) {
             self.attempt_recovery(&fault);
         }
-        
+
         id
     }
-    
+
     /// Bir hata için kurtarma denemesi yapar
     pub fn attempt_recovery(&self, fault: &Fault) -> RecoveryResult {
         let result = if let Some(engine) = self.recovery_engine.lock().as_ref() {
@@ -205,14 +211,14 @@ impl FaultHub {
         } else {
             RecoveryResult::Failed
         };
-        
+
         // İstatistikleri güncelle
         if result.is_success() {
             self.recovery_success.fetch_add(1, Ordering::SeqCst);
         } else {
             self.recovery_failure.fetch_add(1, Ordering::SeqCst);
         }
-        
+
         // Modül sağlığını güncelle
         if let Some(module) = self.modules.lock().get_mut(&match fault.source {
             FaultSource::Memory => "memory",
@@ -229,24 +235,25 @@ impl FaultHub {
         }) {
             module.record_recovery(result.is_success());
         }
-        
+
         crate::serial_println!(
             "[FAULT_HUB] Recovery result for fault #{:?}: {:?}",
-            fault.id, result
+            fault.id,
+            result
         );
-        
+
         result
     }
-    
+
     /// Tüm modülleri hata açısından kontrol eder
     pub fn check_all(&self) {
         if !self.initialized.load(Ordering::SeqCst) {
             return;
         }
-        
+
         let current_tick = crate::task::scheduler::get_ticks();
         self.last_check.store(current_tick, Ordering::SeqCst);
-        
+
         // Kayıtlı her işleyiciyi kontrol et
         for (source, handler) in self.handlers.lock().iter() {
             if let Some(fault) = handler.check() {
@@ -254,17 +261,17 @@ impl FaultHub {
             }
         }
     }
-    
+
     /// Belirtilen modülün sağlık durumunu döndürür
     pub fn get_health(&self, module: &str) -> Option<ModuleHealth> {
         self.modules.lock().get(module).cloned()
     }
-    
+
     /// Tüm modül sağlık durumlarını döndürür
     pub fn get_all_health(&self) -> Vec<ModuleHealth> {
         self.modules.lock().values().cloned().collect()
     }
-    
+
     /// Mevcut şiddet seviyesini günceller (yalnızca artış yönünde)
     ///
     /// Şiddet seviyesi hiçbir zaman düşürülmez — bu kasıtlı bir tasarım kararıdır.
@@ -273,15 +280,16 @@ impl FaultHub {
     fn update_severity(&self, severity: Severity) {
         let current = Severity::from(self.current_severity.load(Ordering::SeqCst) as u8);
         if severity > current {
-            self.current_severity.store(severity as u32, Ordering::SeqCst);
+            self.current_severity
+                .store(severity as u32, Ordering::SeqCst);
         }
     }
-    
+
     /// Mevcut sistem şiddet seviyesini döndürür
     pub fn current_severity(&self) -> Severity {
         Severity::from(self.current_severity.load(Ordering::SeqCst) as u8)
     }
-    
+
     /// Hata istatistiklerini döndürür
     pub fn stats(&self) -> HubStats {
         HubStats {
@@ -292,7 +300,7 @@ impl FaultHub {
             module_count: self.modules.lock().len(),
         }
     }
-    
+
     /// Modül sağlık durumunu sıfırlar
     pub fn reset_module(&self, module: &str) -> bool {
         if let Some(health) = self.modules.lock().get_mut(module) {
@@ -305,12 +313,12 @@ impl FaultHub {
             false
         }
     }
-    
+
     /// Sistemin acil durum modunda olup olmadığını kontrol eder
     pub fn is_emergency(&self) -> bool {
         self.current_severity() == Severity::Emergency
     }
-    
+
     /// Mevcut sistem durumu için önerilen eylemi döndürür
     pub fn recommended_action(&self) -> RecommendedAction {
         self.current_severity().recommended_action()

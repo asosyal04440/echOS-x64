@@ -26,10 +26,10 @@
 //!   0x0FFFFFF7  = Bozuk küme
 //! ```
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
 use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
 // ============================================================================
 // FAT32 SABİTLERİ
@@ -216,7 +216,8 @@ impl Fat32Fs {
             return None;
         }
 
-        let boot: Fat32BootSector = unsafe { core::ptr::read(data.as_ptr() as *const Fat32BootSector) };
+        let boot: Fat32BootSector =
+            unsafe { core::ptr::read(data.as_ptr() as *const Fat32BootSector) };
 
         // İmzayı doğrula
         if boot.signature != 0xAA55 {
@@ -260,7 +261,12 @@ impl Fat32Fs {
         if offset + 4 > fat_data.len() {
             return FAT32_EOF;
         }
-        u32::from_le_bytes([fat_data[offset], fat_data[offset + 1], fat_data[offset + 2], fat_data[offset + 3]]) & 0x0FFFFFFF
+        u32::from_le_bytes([
+            fat_data[offset],
+            fat_data[offset + 1],
+            fat_data[offset + 2],
+            fat_data[offset + 3],
+        ]) & 0x0FFFFFFF
     }
 
     /// FAT tablosundaki belirtilen kümenin değerini yazar
@@ -488,7 +494,8 @@ impl ExFatFs {
             return None;
         }
 
-        let boot: ExFatBootSector = unsafe { core::ptr::read(data.as_ptr() as *const ExFatBootSector) };
+        let boot: ExFatBootSector =
+            unsafe { core::ptr::read(data.as_ptr() as *const ExFatBootSector) };
 
         // İmzayı doğrula
         if boot.signature != 0xAA55 {
@@ -516,7 +523,12 @@ impl ExFatFs {
         if offset + 4 > fat_data.len() {
             return 0xFFFFFFFF;
         }
-        u32::from_le_bytes([fat_data[offset], fat_data[offset + 1], fat_data[offset + 2], fat_data[offset + 3]])
+        u32::from_le_bytes([
+            fat_data[offset],
+            fat_data[offset + 1],
+            fat_data[offset + 2],
+            fat_data[offset + 3],
+        ])
     }
 
     /// FAT tablosundaki belirtilen kümenin değerini yazar

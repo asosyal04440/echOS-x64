@@ -46,7 +46,7 @@
 //! diğer               --> Healthy
 //! ```
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
@@ -105,7 +105,7 @@ impl FsMonitor {
             return Some(Fault::new(
                 FaultSource::Filesystem,
                 FaultType::MetadataCorruption,
-                &alloc::format!("Metadata errors detected: {}", meta)
+                &alloc::format!("Metadata errors detected: {}", meta),
             ));
         }
 
@@ -115,7 +115,7 @@ impl FsMonitor {
             return Some(Fault::new(
                 FaultSource::Filesystem,
                 FaultType::IoError,
-                &alloc::format!("High I/O error count: {}", io)
+                &alloc::format!("High I/O error count: {}", io),
             ));
         }
 
@@ -135,10 +135,8 @@ impl super::HealthMonitor for FsMonitor {
         }
 
         // Son kontrol tick'ini kaydet
-        self.last_check.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_check
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
         self.check_fs()
     }
@@ -166,7 +164,8 @@ impl super::HealthMonitor for FsMonitor {
         ModuleHealth {
             name: self.name(),
             status: self.health(),
-            fault_count: self.io_errors.load(Ordering::SeqCst) + self.metadata_errors.load(Ordering::SeqCst),
+            fault_count: self.io_errors.load(Ordering::SeqCst)
+                + self.metadata_errors.load(Ordering::SeqCst),
             recovery_count: 0,
             last_fault_tick: self.last_check.load(Ordering::SeqCst),
             uptime_ticks: crate::task::scheduler::get_ticks(),

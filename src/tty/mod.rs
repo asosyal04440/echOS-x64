@@ -27,10 +27,10 @@
 //! - `pty`     : Pseudo Terminal - SSH/tmux için sanallaştırılmış TTY çifti
 //! - `ansi`    : ANSI/VT100 escape sequence ayrıştırıcı ve oluşturucu
 
+pub mod ansi;
 pub mod buffer;
 pub mod ldisc;
 pub mod pty;
-pub mod ansi;
 
 use lazy_static::lazy_static;
 
@@ -61,4 +61,7 @@ pub fn init() {
 /// Re-export convenience items
 /// Dışarıdan kullanım kolaylığı için sık kullanılan tipleri yeniden dışa aktarır.
 pub use ansi::{AnsiBuilder, AnsiParser, Color, EscapeSequence, TerminalState};
-pub use pty::{PtyManager, PtyMaster, PtyPair, PtySlave, Termios, Winsize, PTY_MANAGER};
+pub use pty::{
+    configure_pty_for_shell, execute_command_on_pty, pty_has_output, write_welcome_message,
+    PtyManager, PtyMaster, PtyPair, PtySlave, Termios, Winsize, PTY_MANAGER,
+};

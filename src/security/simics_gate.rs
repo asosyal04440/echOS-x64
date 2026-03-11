@@ -232,7 +232,10 @@ impl GateReport {
     /// CI/CD boru hattı bu değeri kullanarak PR'ı onaylar veya reddeder.
     pub fn should_block_merge(&self) -> bool {
         match self.mode {
-            GateMode::Day1HardBlock => self.records.iter().any(|record| record.verdict == AxisVerdict::Fail),
+            GateMode::Day1HardBlock => self
+                .records
+                .iter()
+                .any(|record| record.verdict == AxisVerdict::Fail),
         }
     }
 }
@@ -275,15 +278,8 @@ const RULE_BOOT_IRQ_INPUT: GateRule = GateRule {
 /// Syscall güvenlik ve Windows Server API doğrulama kuralı
 const RULE_SYSCALL_SECURITY: GateRule = GateRule {
     axis: TestAxis::SyscallWinServerSecurity,
-    required_markers: &[
-        "[WINSRV]",
-        "ownership check",
-        "user-range",
-    ],
-    forbidden_markers: &[
-        "kernel pointer leak",
-        "invalid user pointer accepted",
-    ],
+    required_markers: &["[WINSRV]", "ownership check", "user-range"],
+    forbidden_markers: &["kernel pointer leak", "invalid user pointer accepted"],
     thresholds: ThresholdSet {
         timeout_ms: 120_000,
         max_waker_latency_us: 2_000,
@@ -303,11 +299,7 @@ const RULE_SYSCALL_SECURITY: GateRule = GateRule {
 /// Dosya sistemi ve ağ sağlık testi kuralı
 const RULE_FS_NETWORK: GateRule = GateRule {
     axis: TestAxis::FsNetworkHealth,
-    required_markers: &[
-        "[NET]",
-        "FAT",
-        "filesystem",
-    ],
+    required_markers: &["[NET]", "FAT", "filesystem"],
     forbidden_markers: &["fs corruption", "network deadlock"],
     thresholds: ThresholdSet {
         timeout_ms: 120_000,
@@ -328,11 +320,7 @@ const RULE_FS_NETWORK: GateRule = GateRule {
 /// Performans temel hat ölçüm kuralı (daha sıkı eşikler)
 const RULE_PERFORMANCE: GateRule = GateRule {
     axis: TestAxis::PerformanceBaseline,
-    required_markers: &[
-        "[PERF]",
-        "frame",
-        "latency",
-    ],
+    required_markers: &["[PERF]", "frame", "latency"],
     forbidden_markers: &["latency regression", "frame pacing violation"],
     thresholds: ThresholdSet {
         timeout_ms: 120_000,
@@ -355,16 +343,8 @@ const RULE_PERFORMANCE: GateRule = GateRule {
 /// VM kaçışı + IronShim + bellek fuzzing aşırı güvenlik testi kuralı
 const RULE_EXTREME: GateRule = GateRule {
     axis: TestAxis::ExtremeIronShimVmEscapeMemoryFuzz,
-    required_markers: &[
-        "[IRONSHIM]",
-        "fuzz",
-        "ring3->ring0 blocked",
-    ],
-    forbidden_markers: &[
-        "vm escape success",
-        "ring0 overwrite",
-        "oom queue collapse",
-    ],
+    required_markers: &["[IRONSHIM]", "fuzz", "ring3->ring0 blocked"],
+    forbidden_markers: &["vm escape success", "ring0 overwrite", "oom queue collapse"],
     thresholds: ThresholdSet {
         timeout_ms: 180_000,
         max_waker_latency_us: 1_000,

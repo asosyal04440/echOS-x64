@@ -46,8 +46,115 @@
 //!  (ARP ile MAC)    (gateway IP → ARP → MAC)
 //! ```
 
-use super::{Ipv4Addr, NetError, local_ip};
+use super::{local_ip, Ipv4Addr, NetError};
+use alloc::collections::BTreeMap;
+use alloc::vec;
 use alloc::vec::Vec;
+use spin::Mutex;
+
+// ============================================================================
+// IP FRAGMENT REASSEMBLY (IP PARÇA BİRLEŞTİRME)
+// ============================================================================
+//
+// IP paketleri MTU'dan büyükse parçalanır. Alıcı taraf parçaları birleştirmelidir.
+// RFC 791: Parça birleştirme zaman aşımı 15-60 saniye arası olmalıdır.
+//
+// FragmentKey: (src_ip, dst_ip, identification, protocol) 4'lüsü ile
+// aynı orijinal pakete ait parçalar eşleştirilir.
+
+/// Parça birleştirme tablosu anahtarı
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FragmentKey {
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub identification: u16,
+    pub protocol: u8,
+}
+
+/// Parça birleştirme tablosu girişi
+pub struct FragmentEntry {
+    /// Birleştirme tamponu — parçalar burada toplanır
+    pub buffer: Vec<u8>,
+    /// Hangi bayt ofsetlerinin alındığını izleyen bitmask (offset/8 bazında)
+    pub received_mask: Vec<bool>,
+    /// Toplam yük uzunluğu (son parça alındığında belirlenir)
+    pub total_len: Option<u16>,
+    /// Girişin oluşturulma zamanı (tick cinsinden)
+    pub timestamp: u64,
+}
+
+/// Küresel parça birleştirme tablosu
+static FRAGMENT_TABLE: Mutex<BTreeMap<FragmentKey, FragmentEntry>> = Mutex::new(BTreeMap::new());
+
+/// Parça birleştirme zaman aşımı (15 saniye — tick cinsinden, ~1 tick/saniye varsayımı)
+const FRAGMENT_TIMEOUT_TICKS: u64 = 15;
+
+/// Gelen IP parçasını birleştirme tablosuna ekler.
+///
+/// Tüm parçalar tamamlandığında birleştirilmiş yükü `Some(Vec<u8>)` olarak döner.
+/// Henüz eksik parça varsa `None` döner.
+pub fn reassemble_fragment(header: &Ipv4Header, payload: &[u8]) -> Option<Vec<u8>> {
+    let now = crate::interrupts::get_ticks();
+    let key = FragmentKey {
+        src_ip: header.src.to_u32(),
+        dst_ip: header.dst.to_u32(),
+        identification: header.identification,
+        protocol: header.protocol as u8,
+    };
+
+    let offset_bytes = (header.fragment_offset as usize) * 8;
+    let mf = (header.flags & 0x01) != 0; // More Fragments bayrağı
+
+    let mut table = FRAGMENT_TABLE.lock();
+    let entry = table.entry(key).or_insert_with(|| FragmentEntry {
+        buffer: vec![0u8; 65535],
+        received_mask: vec![false; 8192], // 65535/8 + 1
+        total_len: None,
+        timestamp: now,
+    });
+
+    // Parça verisini tampona kopyala
+    let end = offset_bytes + payload.len();
+    if end > entry.buffer.len() {
+        return None; // Tampon sınırı aşıldı
+    }
+    entry.buffer[offset_bytes..end].copy_from_slice(payload);
+
+    // Alınan ofsetleri işaretle (8 byte bloklar halinde)
+    let block_start = offset_bytes / 8;
+    let block_end = (end + 7) / 8;
+    for i in block_start..block_end.min(entry.received_mask.len()) {
+        entry.received_mask[i] = true;
+    }
+
+    // Son parçaysa toplam uzunluğu belirle
+    if !mf {
+        entry.total_len = Some(end as u16);
+    }
+
+    // Tüm parçalar tamam mı kontrol et
+    if let Some(total) = entry.total_len {
+        let total_blocks = (total as usize + 7) / 8;
+        let complete = entry.received_mask[..total_blocks].iter().all(|&b| b);
+        if complete {
+            let result = entry.buffer[..total as usize].to_vec();
+            table.remove(&key);
+            return Some(result);
+        }
+    }
+
+    None
+}
+
+/// Parça birleştirme tablosundaki süresi dolmuş girişleri temizler.
+///
+/// RFC 791 uyarınca 15 saniyeden eski parçalar kaldırılır.
+/// Periyodik olarak (timer tick'ten veya ağ işleme döngüsünden) çağrılmalıdır.
+pub fn fragment_gc() {
+    let now = crate::interrupts::get_ticks();
+    let mut table = FRAGMENT_TABLE.lock();
+    table.retain(|_key, entry| now.wrapping_sub(entry.timestamp) < FRAGMENT_TIMEOUT_TICKS);
+}
 
 /// IP protokol numaraları
 ///
@@ -83,14 +190,14 @@ impl IpProtocol {
 /// tümleyen toplamı alınır, sonuç 0xFFFF olmalıdır (doğrulama).
 #[derive(Clone, Copy, Debug)]
 pub struct Ipv4Header {
-    pub version: u8,           // 4 bits, should be 4
-    pub ihl: u8,               // 4 bits, header length in 32-bit words
-    pub dscp: u8,              // 6 bits
-    pub ecn: u8,               // 2 bits
+    pub version: u8, // 4 bits, should be 4
+    pub ihl: u8,     // 4 bits, header length in 32-bit words
+    pub dscp: u8,    // 6 bits
+    pub ecn: u8,     // 2 bits
     pub total_length: u16,
     pub identification: u16,
-    pub flags: u8,             // 3 bits
-    pub fragment_offset: u16,  // 13 bits
+    pub flags: u8,            // 3 bits
+    pub fragment_offset: u16, // 13 bits
     pub ttl: u8,
     pub protocol: IpProtocol,
     pub checksum: u16,
@@ -202,14 +309,14 @@ impl Ipv4Header {
     pub fn new(src: Ipv4Addr, dst: Ipv4Addr, protocol: IpProtocol, total_length: u16) -> Self {
         Ipv4Header {
             version: 4,
-            ihl: 5,     // Seçeneksiz: 5 × 4 = 20 bayt
+            ihl: 5, // Seçeneksiz: 5 × 4 = 20 bayt
             dscp: 0,
             ecn: 0,
             total_length,
             identification: 0,
-            flags: 2,   // DF bayrağı: parçalama yapma
+            flags: 2, // DF bayrağı: parçalama yapma
             fragment_offset: 0,
-            ttl: 64,    // Linux/BSD varsayılan TTL
+            ttl: 64, // Linux/BSD varsayılan TTL
             protocol,
             checksum: 0,
             src,
@@ -343,31 +450,112 @@ pub fn compute_checksum(data: &[u8]) -> u16 {
 pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
     let packet = Ipv4Packet::parse(data)?;
 
+    // ── Source Route Rejection (RFC 7126) ──
+    // IHL > 5 demek IP seçenekleri mevcut; LSRR (0x83) ve SSRR (0x89) güvenlik riski.
+    if packet.header.ihl > 5 {
+        let header_len = packet.header.header_len();
+        let options = &data[Ipv4Header::MIN_SIZE..header_len];
+        let mut idx = 0;
+        while idx < options.len() {
+            let opt_type = options[idx];
+            // End of Options List
+            if opt_type == 0 {
+                break;
+            }
+            // No-Operation
+            if opt_type == 1 {
+                idx += 1;
+                continue;
+            }
+            // LSRR (0x83) veya SSRR (0x89) → paketi düşür
+            if opt_type == 0x83 || opt_type == 0x89 {
+                crate::serial_println!(
+                    "[IP] Source route option 0x{:02X} rejected (RFC 7126)",
+                    opt_type
+                );
+                return Ok(());
+            }
+            // Diğer seçenekler: uzunluk alanını oku ve atla
+            if idx + 1 >= options.len() {
+                break;
+            }
+            let opt_len = options[idx + 1] as usize;
+            if opt_len < 2 {
+                break;
+            }
+            idx += opt_len;
+        }
+    }
+
     // Check if destination is us
     let local = local_ip();
-    if packet.header.dst != local &&
-       !packet.header.dst.is_broadcast() &&
-       !packet.header.dst.is_multicast() {
-        // Not for us, drop
+    if packet.header.dst != local
+        && !packet.header.dst.is_broadcast()
+        && !packet.header.dst.is_multicast()
+    {
+        // ── TTL Decrement on Forward ──
+        // Yönlendirme durumunda TTL'i azalt; 0'a düşerse paketi sil.
+        let mut fwd_data = data.to_vec();
+        let ttl = fwd_data[8];
+        if ttl <= 1 {
+            crate::serial_println!(
+                "[IP] TTL expired for packet from {} -> {}",
+                packet.header.src,
+                packet.header.dst
+            );
+            // ICMP Time Exceeded (type 11) gönder — traceroute için gerekli
+            send_icmp_time_exceeded(&packet.header, &fwd_data[..20]);
+            return Ok(());
+        }
+        fwd_data[8] = ttl - 1;
+        // Başlık sağlama toplamını yeniden hesapla
+        let hdr_len = packet.header.header_len();
+        fwd_data[10] = 0;
+        fwd_data[11] = 0;
+        let new_cksum = compute_checksum(&fwd_data[..hdr_len]);
+        fwd_data[10..12].copy_from_slice(&new_cksum.to_be_bytes());
+        // Not for us — forward would happen here; for now just drop.
         return Ok(());
     }
 
-    // Dispatch by protocol
-    match packet.header.protocol {
+    // ── Fragment Reassembly ──
+    // Parçalanmış paketleri birleştir: MF bayrağı set veya fragment_offset > 0
+    let mf = (packet.header.flags & 0x01) != 0;
+    if mf || packet.header.fragment_offset > 0 {
+        if let Some(reassembled) = reassemble_fragment(&packet.header, packet.payload) {
+            // Birleştirilmiş yükle protokol dağıtımı yap
+            dispatch_protocol(&packet.header, &reassembled)?;
+        }
+        // Henüz tamamlanmamış — sessizce bekle
+        return Ok(());
+    }
+
+    // Parçalanmamış paket — doğrudan protokol dağıtımı
+    dispatch_protocol(&packet.header, packet.payload)?;
+    Ok(())
+}
+
+/// Protokol alanına göre paketi ilgili üst katmana yönlendirir.
+fn dispatch_protocol(header: &Ipv4Header, payload: &[u8]) -> Result<(), NetError> {
+    // Geçici Ipv4Packet oluştur (dispatch için)
+    let pkt = Ipv4Packet {
+        header: *header,
+        payload,
+    };
+    match header.protocol {
         IpProtocol::ICMP => {
-            icmp_process(&packet)?;
+            icmp_process(&pkt)?;
         }
         IpProtocol::TCP => {
-            super::tcp::process_packet(&packet)?;
+            super::tcp::process_packet(&pkt)?;
         }
         IpProtocol::UDP => {
-            super::udp::process_packet(&packet)?;
+            super::udp::process_packet(&pkt)?;
         }
         _ => {
             // Unknown protocol
         }
     }
-
     Ok(())
 }
 
@@ -433,12 +621,125 @@ pub fn is_same_subnet(a: Ipv4Addr, b: Ipv4Addr) -> bool {
 /// - Time Exceeded mesajı üretmek (traceroute için)
 ///
 /// Şu anlık sadece seri porta kayıt yazar.
+/// ICMP paket tipleri
+const ICMP_TYPE_ECHO_REPLY: u8 = 0;
+const ICMP_TYPE_ECHO_REQUEST: u8 = 8;
+const ICMP_TYPE_TIME_EXCEEDED: u8 = 11; // TTL=0 veya fragment reassembly timeout
+
+/// ICMP Time Exceeded mesajı gönderir (RFC 792).
+///
+/// Kullanım:
+///   - traceroute aracı için gerekli
+///   - TTL=0 olduğunda kaynak IP'ye "paketiniz yolda öldü" bildirimi
+///
+/// Format:
+///   Type (1) = 11
+///   Code (1) = 0 (TTL exceeded in transit) or 1 (fragment reassembly time exceeded)
+///   Checksum (2)
+///   Unused (4) = 0
+///   Original IP header + first 8 bytes of original payload
+pub fn send_icmp_time_exceeded(orig_ip_hdr: &Ipv4Header, orig_payload: &[u8]) {
+    // ICMP Time Exceeded mesajı oluştur
+    let mut icmp_buf = [0u8; 28]; // 8 byte ICMP header + 20 byte IP header
+
+    // ICMP header
+    icmp_buf[0] = ICMP_TYPE_TIME_EXCEEDED;
+    icmp_buf[1] = 0; // Code 0: TTL exceeded in transit
+    icmp_buf[2..4].copy_from_slice(&[0u8; 2]); // Checksum will be calculated
+    icmp_buf[4..8].copy_from_slice(&[0u8; 4]); // Unused
+
+    // Orijinal IP header'ın ilk 20 byte'ını ekle (RFC 792)
+    let ip_header_bytes = [
+        ((orig_ip_hdr.version << 4) | orig_ip_hdr.ihl),
+        ((orig_ip_hdr.dscp << 2) | orig_ip_hdr.ecn),
+        orig_ip_hdr.total_length.to_be_bytes()[0],
+        orig_ip_hdr.total_length.to_be_bytes()[1],
+        orig_ip_hdr.identification.to_be_bytes()[0],
+        orig_ip_hdr.identification.to_be_bytes()[1],
+        (((orig_ip_hdr.flags as u16) << 5) | ((orig_ip_hdr.fragment_offset >> 8) & 0x1F)) as u8,
+        orig_ip_hdr.fragment_offset.to_be_bytes()[1],
+        orig_ip_hdr.ttl,
+        orig_ip_hdr.protocol as u8,
+        orig_ip_hdr.checksum.to_be_bytes()[0],
+        orig_ip_hdr.checksum.to_be_bytes()[1],
+        orig_ip_hdr.src.0[0],
+        orig_ip_hdr.src.0[1],
+        orig_ip_hdr.src.0[2],
+        orig_ip_hdr.src.0[3],
+        orig_ip_hdr.dst.0[0],
+        orig_ip_hdr.dst.0[1],
+        orig_ip_hdr.dst.0[2],
+        orig_ip_hdr.dst.0[3],
+    ];
+    icmp_buf[8..28].copy_from_slice(&ip_header_bytes);
+
+    // ICMP checksum hesapla
+    let cksum = compute_checksum(&icmp_buf);
+    icmp_buf[2..4].copy_from_slice(&cksum.to_be_bytes());
+
+    // IP paketi oluştur: hedef = orijinal kaynak, kaynak = biz
+    let mut ip_buf = vec![0u8; 64];
+    match build_packet(orig_ip_hdr.src, IpProtocol::ICMP, &icmp_buf, &mut ip_buf) {
+        Ok(len) => {
+            if let Err(e) = super::send_packet(&ip_buf[..len]) {
+                crate::serial_println!("[ICMP] Failed to send Time Exceeded: {:?}", e);
+            } else {
+                crate::serial_println!(
+                    "[ICMP] Time Exceeded sent to {} (orig src: {})",
+                    orig_ip_hdr.src,
+                    orig_ip_hdr.dst
+                );
+            }
+        }
+        Err(e) => {
+            crate::serial_println!("[ICMP] Failed to build Time Exceeded packet: {:?}", e);
+        }
+    }
+}
+
 pub fn icmp_process(packet: &Ipv4Packet) -> Result<(), NetError> {
-    // TODO: Implement ICMP echo reply
+    if packet.payload.len() < 8 {
+        crate::serial_println!("[ICMP] Paket çok kısa: {} bayt", packet.payload.len());
+        return Err(NetError::InvalidPacket);
+    }
+
+    let icmp_type = packet.payload[0];
+    let icmp_code = packet.payload[1];
+    // payload[2..4] = checksum, payload[4..6] = identifier, payload[6..8] = sequence
+
     crate::serial_println!(
-        "[NET] ICMP packet from {}: {} bytes",
+        "[ICMP] packet from {}: type={} code={} len={}",
         packet.header.src,
+        icmp_type,
+        icmp_code,
         packet.payload.len()
     );
+
+    if icmp_type == ICMP_TYPE_ECHO_REQUEST && icmp_code == 0 {
+        // ── ICMP Echo Reply oluştur ──
+        // Tip=0, Kod=0, aynı tanımlayıcı/sıra/veri korunur
+        let mut reply_payload = packet.payload.to_vec();
+        reply_payload[0] = ICMP_TYPE_ECHO_REPLY; // type = 0 (echo reply)
+        reply_payload[1] = 0; // code = 0
+                              // Checksum alanını sıfırla ve yeniden hesapla
+        reply_payload[2] = 0;
+        reply_payload[3] = 0;
+        let cksum = compute_checksum(&reply_payload);
+        reply_payload[2..4].copy_from_slice(&cksum.to_be_bytes());
+
+        // IP paketi oluştur ve gönder: hedef = orijinal kaynak, kaynak = biz
+        let mut ip_buf = vec![0u8; 1500];
+        let len = build_packet(
+            packet.header.src,
+            IpProtocol::ICMP,
+            &reply_payload,
+            &mut ip_buf,
+        )?;
+
+        super::send_packet(&ip_buf[..len])?;
+
+        crate::serial_println!("[ICMP] Echo Reply sent to {}", packet.header.src);
+    }
+
     Ok(())
 }

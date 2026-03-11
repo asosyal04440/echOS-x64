@@ -27,6 +27,11 @@
 //!                    │
 //!                    ▼
 //!  ┌────────────────────────────────────────┐
+//!  │  GPU Compute (OpenCL/DirectCompute)    │  ← Paralel hesaplama
+//!  └─────────────────┬──────────────────────┘
+//!                    │
+//!                    ▼
+//!  ┌────────────────────────────────────────┐
 //!  │  GOP Framebuffer (fiziksel bellek)     │  ← Ekrana doğrudan yazma
 //!  └────────────────────────────────────────┘
 //! ```
@@ -47,8 +52,20 @@ pub mod tile_renderer;
 /// GPU Soyutlama Katmanı (GAL) — SoftwareGal ve Gal trait'i
 pub mod gal;
 
-/// Masaüstü compositor (doğrusal çerçeve tampon) — pencere birleştirme döngüsü
-pub mod compositor;
+/// GPU Compute Shaders (OpenCL/DirectCompute)
+pub mod gpu_compute;
+
+/// DPI Scaling System — resolution-aware scaling for high-DPI displays
+pub mod scaling;
+
+/// Animasyonlu duvar kağıdı motoru
+pub mod wallpaper;
+
+/// Blur ve gölge efektleri
+pub mod blur;
+
+/// Velvet Glove Compositor - echOS native desktop runtime
+pub mod velvet_glove;
 
 pub struct Surface {
     pub width: usize,
@@ -99,8 +116,8 @@ impl Surface {
                 let eff_a = (src_a * a) / 255;
                 let eff_inv = 255 - eff_a;
                 let r = (((src_px >> 16) & 0xFF) * eff_a + ((dst_px >> 16) & 0xFF) * eff_inv) / 255;
-                let g = (((src_px >>  8) & 0xFF) * eff_a + ((dst_px >>  8) & 0xFF) * eff_inv) / 255;
-                let b = (( src_px        & 0xFF) * eff_a + ( dst_px        & 0xFF) * eff_inv) / 255;
+                let g = (((src_px >> 8) & 0xFF) * eff_a + ((dst_px >> 8) & 0xFF) * eff_inv) / 255;
+                let b = ((src_px & 0xFF) * eff_a + (dst_px & 0xFF) * eff_inv) / 255;
                 self.buffer[dst_row + dx as usize] = 0xFF000000 | (r << 16) | (g << 8) | b;
             }
         }
@@ -123,10 +140,10 @@ impl Surface {
 
     /// Dikdörtgen kenarlık çizer.
     pub fn draw_rect_outline(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        self.fill_rect(x,         y,         w, 1, color);
-        self.fill_rect(x,         y + h - 1, w, 1, color);
-        self.fill_rect(x,         y,         1, h, color);
-        self.fill_rect(x + w - 1, y,         1, h, color);
+        self.fill_rect(x, y, w, 1, color);
+        self.fill_rect(x, y + h - 1, w, 1, color);
+        self.fill_rect(x, y, 1, h, color);
+        self.fill_rect(x + w - 1, y, 1, h, color);
     }
 
     pub fn new(width: usize, height: usize, stride: usize) -> Self {

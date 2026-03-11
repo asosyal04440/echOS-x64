@@ -63,11 +63,31 @@ fn test_hhdm_direct_translation() -> bool {
     println!("HHDM adreslerinin doğrudan hesaplama kullandığı test ediliyor\n");
 
     let test_cases = vec![
-        ("Tam PHYSICAL_MEMORY_OFFSET'te", 0xFFFF_8000_0000_0000u64, 0x0000_0000_0000_0000u64),
-        ("Tipik HHDM adresi", 0xFFFF_8000_0010_0000u64, 0x0000_0000_0010_0000u64),
-        ("Başka bir HHDM adresi", 0xFFFF_8000_0100_0000u64, 0x0000_0000_0100_0000u64),
-        ("Daha yüksek HHDM adresi", 0xFFFF_8000_1000_0000u64, 0x0000_0000_1000_0000u64),
-        ("Adres uzayının üst kısmına yakın", 0xFFFF_FFFF_FFFF_F000u64, 0x0000_7FFF_FFFF_F000u64),
+        (
+            "Tam PHYSICAL_MEMORY_OFFSET'te",
+            0xFFFF_8000_0000_0000u64,
+            0x0000_0000_0000_0000u64,
+        ),
+        (
+            "Tipik HHDM adresi",
+            0xFFFF_8000_0010_0000u64,
+            0x0000_0000_0010_0000u64,
+        ),
+        (
+            "Başka bir HHDM adresi",
+            0xFFFF_8000_0100_0000u64,
+            0x0000_0000_0100_0000u64,
+        ),
+        (
+            "Daha yüksek HHDM adresi",
+            0xFFFF_8000_1000_0000u64,
+            0x0000_0000_1000_0000u64,
+        ),
+        (
+            "Adres uzayının üst kısmına yakın",
+            0xFFFF_FFFF_FFFF_F000u64,
+            0x0000_7FFF_FFFF_F000u64,
+        ),
     ];
 
     let mut all_passed = true;
@@ -75,8 +95,10 @@ fn test_hhdm_direct_translation() -> bool {
     for (name, virt_addr, expected_phys) in test_cases {
         println!("  Test: {}", name);
         println!("    Sanal adres: {:#018x}", virt_addr);
-        println!("    HHDM mi? (>= PHYSICAL_MEMORY_OFFSET): {}",
-                 virt_addr >= PHYSICAL_MEMORY_OFFSET);
+        println!(
+            "    HHDM mi? (>= PHYSICAL_MEMORY_OFFSET): {}",
+            virt_addr >= PHYSICAL_MEMORY_OFFSET
+        );
 
         // Doğrudan dönüşüm formülünü doğrula
         let calculated_phys = virt_addr - PHYSICAL_MEMORY_OFFSET;
@@ -143,7 +165,10 @@ fn test_boundary_behavior() -> bool {
     println!("  HHDM eşiğinin hemen üstündeki adres:");
     println!("    Sanal adres: {:#018x}", hhdm_above);
     let is_hhdm_above = hhdm_above >= PHYSICAL_MEMORY_OFFSET;
-    println!("    HHDM mi? (>= PHYSICAL_MEMORY_OFFSET): {}", is_hhdm_above);
+    println!(
+        "    HHDM mi? (>= PHYSICAL_MEMORY_OFFSET): {}",
+        is_hhdm_above
+    );
 
     if is_hhdm_above {
         println!("    ✓ GEÇTI: HHDM adresi olarak doğru tanımlandı\n");
@@ -154,8 +179,14 @@ fn test_boundary_behavior() -> bool {
 
     // Sınır kontrolü mantığının doğrulanması
     println!("  Sınır kontrolü doğrulaması:");
-    println!("    {:#018x} altındaki adresler sayfa tablosu dönüşümü kullanmalı", PHYSICAL_MEMORY_OFFSET);
-    println!("    {:#018x} ve üstündeki adresler doğrudan dönüşüm kullanmalı", PHYSICAL_MEMORY_OFFSET);
+    println!(
+        "    {:#018x} altındaki adresler sayfa tablosu dönüşümü kullanmalı",
+        PHYSICAL_MEMORY_OFFSET
+    );
+    println!(
+        "    {:#018x} ve üstündeki adresler doğrudan dönüşüm kullanmalı",
+        PHYSICAL_MEMORY_OFFSET
+    );
     println!("    ✓ GEÇTI: Sınır davranışı doğru\n");
 
     all_passed

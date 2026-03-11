@@ -58,6 +58,10 @@ core_io = "0.1.20210325"
 rcore-fs = { git = "https://github.com/rcore-os/rcore-fs", default-features = false }
 # SHA-2 hash algoritması - dijital imza doğrulaması için kullanılır, yazılım implementasyonu (no_std uyumlu)
 sha2 = { version = "0.10", default-features = false, features = ["force-soft", "oid"] }
+# SHA-1: OCSP/X.509 eski alan karma (no_std uyumlu)
+sha1 = { version = "0.10", default-features = false }
+# HMAC: TLS 1.3 HKDF-Extract için mesaj doğrulama kodu (no_std uyumlu)
+hmac = { version = "0.12", default-features = false }
 # RSA açık anahtarlı şifreleme - önyükleyici imzası doğrulaması için
 rsa = { version = "0.9", default-features = false }
 # Dijital imza trait'leri - RSA ve diğer imza algoritmalarını standart arayüzle kullanır
@@ -78,6 +82,9 @@ smoltcp = { version = "0.11", default-features = false, features = ["alloc", "pr
 libm = "0.2"
 # Önyükleyici kütüphanesi - çekirdeği yüklemek için temel altyapı sunar
 bootloader = "0.9"
+[patch.crates-io]
+core_io = { path = "third_party/core_io" }
+virtio-drivers = { path = "third_party/virtio-drivers" }
 
 # ============================================================
 # KÜTÜPHANELERİ VE İKİLİLERİ YAPILANDIRMA
@@ -92,6 +99,13 @@ bench = false
 name = "ech_os"
 test = false
 bench = false
+
+[[bin]]
+name = "tier1_runtime_smoke"
+path = "tests/tier1_runtime_smoke.rs"
+test = false
+bench = false
+required-features = ["host_smoke"]
 
 # ============================================================
 # GELİŞTİRME BAĞIMLILIKLARI (Sadece test/bench için)
@@ -111,6 +125,19 @@ rand = "0.8"
 # Benchmark'lar için gerekli çünkü `#![feature(test)]` nightly gerektirir
 [features]
 nightly = []
+## Simics simulator modu — derleme zamaninda aktif edilir:
+##   cargo build --features simics
+## Compositor FPS dusurur, serial spam keser, shell'de hlt kullanir.
+## Produksiyon (bare-metal) binary'sinde sifir maliyet: tek byte overhead yok.
+simics = []
+## Valkyrie-V hypervisor integration — pure Rust bridge:
+##   cargo build --features valkyrie
+## Enables direct integration with Valkyrie-V Type-1 hypervisor.
+valkyrie = []
+heap_stats = []
+serial_debug = []
+stress_test = []
+host_smoke = []
 
 # ============================================================
 # BENCHMARK TANIMLARI
@@ -138,6 +165,41 @@ harness = false
 required-features = ["nightly"]
 
 # ============================================================
+# TEST TANIMLARI
+# ============================================================
+# Host ortamında (x86_64-pc-windows-msvc veya linux-gnu) çalıştırılır.
+# Bare-metal hedefi (x86_64-unknown-none) std sağlamadığından testler
+# `cargo test --target x86_64-pc-windows-msvc` komutuyla çalıştırılmalıdır.
+# Kısa yol: `cargo test-host` (.cargo/config.toml alias'ı kullanılır).
+#
+# harness = false: fn main() barındıran standalone test binary'leri için.
+#   Binary çıkış kodu 0 → başarı, sıfır dışı → başarısız.
+# harness = true (varsayılan): #[test] fonksiyonlarını koşturan testler için.
+
+# Heap/stack fiziksel adres dönüşümü hata keşif testi.
+# fn main() içerir; Cargo test harness'ı devre dışı bırakılmalı.
+[[test]]
+name = "heap_stack_phys_addr_bug_test"
+harness = false
+
+# HHDM yığıt doğrudan dönüşüm koruma testi.
+# fn main() içerir; Cargo test harness'ı devre dışı bırakılmalı.
+[[test]]
+name = "heap_stack_preservation_test"
+harness = false
+
+# Çapraz-alt-sistem entegrasyon senaryoları (ext4/NVMe, TCP/NIC, USB/FAT32,
+# eBPF tracing, container stack). Tamamen bağımsız simülasyon; ech_os import'u yok.
+[[test]]
+name = "integration_suite"
+
+# Regresyon + stress suite: SPSC ring, RCU, EEVDF, EAS, PSI, MGLRU, WiFi MLO,
+# Btrfs scrub, io_uring, NVMe SQ/CQ, jail izolasyon, syscall conformance, FS
+# tutarlılığı. ech_os kütüphanesi üzerinden kernel modüllerini kullanır.
+[[test]]
+name = "regression_suite"
+
+# ============================================================
 # DERLEME PROFİLLERİ
 # ============================================================
 # `panic = "abort"`: Panik durumunda yığın açımı (stack unwinding) yapılmaz.
@@ -146,13 +208,19 @@ required-features = ["nightly"]
 panic = "abort"
 # Hata ayıklama sembolleri dahil edilir - GDB/LLDB ile çekirdek hata ayıklaması için
 debug = true
+# Temel optimizasyonlar dev build'de de aktif — Simics testleri hızlanır
+opt-level = 1
 
 [profile.release]
 panic = "abort"
 # Hata ayıklama sembolleri çıkarılır - üretim derlemesi için
 debug = false
-# `opt-level = "s"`: Boyut için optimize et - çekirdek görüntüsü küçük tutulur
-opt-level = "s"
+# `opt-level = 2`: Hız için optimize et — agresiz unrolling yok, icache-friendly
+opt-level = 2
+# Thin LTO: cross-crate inlining (allocator, trait dispatch) — %5-20 kazanç
+lto = "thin"
+# Tek codegen unit: intra-crate optimizasyon maksimize
+codegen-units = 1
 
 # ============================================================
 # DERLEME BAĞIMLILIKLARI
@@ -166,6 +234,4 @@ cc = "1.2.30"
 # ============================================================
 # `patch.crates-io`: crates.io üzerindeki paketleri yerel kopyalarla geçersiz kılar.
 # Bu sayede third_party klasöründeki özelleştirilmiş/düzeltilmiş sürümler kullanılır.
-[patch.crates-io]
-core_io = { path = "third_party/core_io" }
-virtio-drivers = { path = "third_party/virtio-drivers" }
+# [patch.crates-io] (Artık yukarıda tanımlandı)

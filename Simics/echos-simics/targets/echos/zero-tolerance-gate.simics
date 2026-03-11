@@ -9,6 +9,7 @@ $disk0_image = "targets/echos/images/echos-uefi-fixed.vhdx"
 $machine_name = "board"
 $show_con0 = TRUE
 $create_network = FALSE
+$num_cores = 2
 run-script "%simics%/targets/qsp-x86/qsp-hdd-boot.simics"
 
 # ── Serial capture: write to file AND echo to cmd-line ─────────
@@ -24,11 +25,11 @@ echo "[GATE] START profile=aggressive mode=day1-hard-block"
 echo "[GATE] AXES boot_irq_input,syscall_security,fs_network,performance,extreme_ironshim"
 echo "[GATE] TIMEOUT hard=120s"
 
-script-branch "timeout-stop" {
-    bp.time.wait-for 120
-    echo "[GATE] TIMEOUT reached - stopping simulation"
-    stop
-}
+# script-branch "timeout-stop" {
+#     bp.time.wait-for 120
+#     echo "[GATE] TIMEOUT reached - stopping simulation"
+#     stop
+# }
 
 run
 

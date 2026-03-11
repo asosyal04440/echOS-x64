@@ -44,7 +44,7 @@
 //! spurious_count   --> Sahte kesme sayısı (AtomicU64: çok yüksek olabilir)
 //! ```
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::fault::{Fault, FaultSource, FaultType, HealthStatus, ModuleHealth};
 
@@ -106,7 +106,7 @@ impl IrqMonitor {
             return Some(Fault::new(
                 FaultSource::Interrupt,
                 FaultType::IrqStorm,
-                &alloc::format!("IRQ storm detected: {} storms", stats.storm_count)
+                &alloc::format!("IRQ storm detected: {} storms", stats.storm_count),
             ));
         }
 
@@ -122,7 +122,7 @@ impl IrqMonitor {
             return Some(Fault::new(
                 FaultSource::Interrupt,
                 FaultType::SpuriousInterrupt,
-                &alloc::format!("High spurious interrupt count: {}", spurious)
+                &alloc::format!("High spurious interrupt count: {}", spurious),
             ));
         }
 
@@ -142,10 +142,8 @@ impl super::HealthMonitor for IrqMonitor {
         }
 
         // Son kontrol zamanını güncelle
-        self.last_check.store(
-            crate::task::scheduler::get_ticks(),
-            Ordering::SeqCst
-        );
+        self.last_check
+            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
         // Önce fırtınaları kontrol et (daha kritik)
         if let Some(fault) = self.check_storms() {
@@ -182,7 +180,8 @@ impl super::HealthMonitor for IrqMonitor {
         ModuleHealth {
             name: self.name(),
             status: self.health(),
-            fault_count: self.storm_count.load(Ordering::SeqCst) + self.handler_timeouts.load(Ordering::SeqCst),
+            fault_count: self.storm_count.load(Ordering::SeqCst)
+                + self.handler_timeouts.load(Ordering::SeqCst),
             recovery_count: 0,
             last_fault_tick: self.last_check.load(Ordering::SeqCst),
             uptime_ticks: crate::task::scheduler::get_ticks(),

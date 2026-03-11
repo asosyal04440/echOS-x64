@@ -206,12 +206,14 @@ pub fn read_sector(lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
         let mut offset = 0usize;
 
         // BlkReq hizalaması
-        offset = (offset + core::mem::align_of::<BlkReq>() - 1) & !(core::mem::align_of::<BlkReq>() - 1);
+        offset =
+            (offset + core::mem::align_of::<BlkReq>() - 1) & !(core::mem::align_of::<BlkReq>() - 1);
         let req_ptr = (base + offset) as *mut BlkReq;
         offset += core::mem::size_of::<BlkReq>();
 
         // BlkResp hizalaması
-        offset = (offset + core::mem::align_of::<BlkResp>() - 1) & !(core::mem::align_of::<BlkResp>() - 1);
+        offset = (offset + core::mem::align_of::<BlkResp>() - 1)
+            & !(core::mem::align_of::<BlkResp>() - 1);
         let resp_ptr = (base + offset) as *mut BlkResp;
         offset += core::mem::size_of::<BlkResp>();
 
@@ -223,9 +225,8 @@ pub fn read_sector(lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
         }
 
         // Veri tamponu slice'ı oluştur (DMA tamponundaki ham bellek alanı)
-        let dma_buf = unsafe {
-            core::slice::from_raw_parts_mut((base + offset) as *mut u8, SECTOR_SIZE)
-        };
+        let dma_buf =
+            unsafe { core::slice::from_raw_parts_mut((base + offset) as *mut u8, SECTOR_SIZE) };
 
         // Her sektör için ayrı non-blocking VirtIO isteği gönder
         for i in 0..sectors {
@@ -286,7 +287,11 @@ pub fn read_sector(lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
         // DMA tamponunu serbest bırak
         unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
 
-        crate::serial_println!("VIRTIO BLK: okuma tamamlandi lba={} sektor={}", lba, sectors);
+        crate::serial_println!(
+            "VIRTIO BLK: okuma tamamlandi lba={} sektor={}",
+            lba,
+            sectors
+        );
         Ok(())
     })
 }
@@ -334,7 +339,11 @@ pub fn write_sector(lba: u64, buffer: &[u8]) -> Result<(), &'static str> {
                 })?;
         }
 
-        crate::serial_println!("VIRTIO BLK: yazma tamamlandi lba={} sektor={}", lba, sectors);
+        crate::serial_println!(
+            "VIRTIO BLK: yazma tamamlandi lba={} sektor={}",
+            lba,
+            sectors
+        );
         Ok(())
     })
 }

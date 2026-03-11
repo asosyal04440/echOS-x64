@@ -72,9 +72,11 @@
 //! ```
 
 pub mod idt;
+pub mod intr_remap;
+pub mod irq_chip;
+pub mod irq_domain;
 pub mod pic;
 pub mod softirq;
-pub mod irq_chip;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -122,6 +124,63 @@ static IRQ_SHARED_CHAINS: Mutex<[Option<Vec<IrqHandler>>; 256]> = Mutex::new({
 });
 static IRQ_THREAD_HANDLERS: Mutex<[Option<IrqHandler>; 256]> = Mutex::new([None; 256]);
 static IRQ_FLOWS: Mutex<[IrqFlow; 256]> = Mutex::new([IrqFlow::Level; 256]);
+
+// ============================================================================
+// LOCK-FREE SHADOW ARRAYS  (hot-path reads — zero contention)
+//
+// Write tarafı: Mutex koruması altında güncellendikten sonra buraya da yazılır.
+// Read tarafı (dispatch_irq, watchdog_poll): Sadece atomic load — hiç lock yok.
+// ============================================================================
+/// Lock-free handler pointer cache (fn(u8) as usize)
+static IRQ_HANDLERS_FAST: [AtomicUsize; 256] = {
+    const ZERO: AtomicUsize = AtomicUsize::new(0);
+    [ZERO; 256]
+};
+/// Lock-free flow type cache (IrqFlow as u8)
+static IRQ_FLOWS_FAST: [AtomicU8; 256] = {
+    const LEVEL: AtomicU8 = AtomicU8::new(0); // IrqFlow::Level = 0
+    [LEVEL; 256]
+};
+/// Lock-free threaded handler pointer cache
+static IRQ_THREADED_FAST: [AtomicUsize; 256] = {
+    const ZERO: AtomicUsize = AtomicUsize::new(0);
+    [ZERO; 256]
+};
+/// Lock-free IRQ event ring buffer wrapper (interrupt context = tek writer, güvenli)
+struct IrqLogRing([core::cell::UnsafeCell<IrqEvent>; 4096]);
+// SAFETY: IRQ_LOG_RING yalnızca interrupt context'ten yazılır (tek writer).
+// Okuyucular (print_irq_report) yalnızca bilgilendirme amaçlı okur; torn read
+// olursa sadece istatistik hatası olur, güvenlik riski yoktur.
+unsafe impl Sync for IrqLogRing {}
+static IRQ_LOG_RING: IrqLogRing = {
+    const EMPTY: core::cell::UnsafeCell<IrqEvent> = core::cell::UnsafeCell::new(IrqEvent {
+        vector: 0,
+        cpu: 0,
+        tsc: 0,
+        latency: 0,
+    });
+    IrqLogRing([EMPTY; 4096])
+};
+const IRQ_LOG_RING_SIZE: usize = 4096;
+const IRQ_LOG_RING_MASK: usize = IRQ_LOG_RING_SIZE - 1;
+
+/// Shadow array'e handler pointer yaz (Release ordering ile)
+#[inline(always)]
+fn sync_handler_shadow(vector: u8, handler: Option<IrqHandler>) {
+    let ptr = handler.map(|f| f as usize).unwrap_or(0);
+    IRQ_HANDLERS_FAST[vector as usize].store(ptr, Ordering::Release);
+}
+/// Shadow array'e flow yaz
+#[inline(always)]
+fn sync_flow_shadow(vector: u8, flow: IrqFlow) {
+    IRQ_FLOWS_FAST[vector as usize].store(flow as u8, Ordering::Release);
+}
+/// Shadow array'e threaded handler yaz
+#[inline(always)]
+fn sync_threaded_shadow(vector: u8, handler: Option<IrqHandler>) {
+    let ptr = handler.map(|f| f as usize).unwrap_or(0);
+    IRQ_THREADED_FAST[vector as usize].store(ptr, Ordering::Release);
+}
 static PCI_IRQ_POLICY: AtomicU8 = AtomicU8::new(PciInterruptPolicy::MsiPreferred as u8);
 static IRQ_STORM_LIMIT: AtomicU64 = AtomicU64::new(DEFAULT_STORM_LIMIT);
 static IRQ_WATCHDOG_INTERVAL: AtomicU64 = AtomicU64::new(DEFAULT_IRQ_WATCHDOG_INTERVAL);
@@ -147,7 +206,8 @@ static IRQ_DYNAMIC_FLOW_ENABLED: AtomicBool = AtomicBool::new(true);
 // ============================================================================
 
 /// Per-CPU IRQ disable depth (nested disable tracking)
-static IRQ_DISABLE_DEPTH: AtomicU64 = AtomicU64::new(0);
+/// Her CPU kendi derinlik sayacına erişir — SMP güvenli.
+static mut IRQ_DISABLE_DEPTH: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
 /// Interrupt'ları devre dışı bırak ve önceki durumu kaydet (nested).
 /// Linux `local_irq_save()` karşılığı.
@@ -158,7 +218,10 @@ static IRQ_DISABLE_DEPTH: AtomicU64 = AtomicU64::new(0);
 pub fn local_irq_save() -> u64 {
     let flags = x86_64::registers::rflags::read().bits();
     x86_64::instructions::interrupts::disable();
-    IRQ_DISABLE_DEPTH.fetch_add(1, Ordering::SeqCst);
+    let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+    unsafe {
+        IRQ_DISABLE_DEPTH[cpu_id].fetch_add(1, Ordering::Relaxed);
+    }
     flags
 }
 
@@ -169,7 +232,8 @@ pub fn local_irq_save() -> u64 {
 /// interrupt'lar yeniden etkinleştirilir. Böylece iç içe kritik
 /// bölümler birbirinin interrupt durumunu bozmaz.
 pub fn local_irq_restore(flags: u64) {
-    let depth = IRQ_DISABLE_DEPTH.fetch_sub(1, Ordering::SeqCst);
+    let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+    let depth = unsafe { IRQ_DISABLE_DEPTH[cpu_id].fetch_sub(1, Ordering::Relaxed) };
     if depth <= 1 {
         // Depth 0'a düştü — interrupt'ları aç (eğer önceki durumda açıksa)
         if (flags & (1 << 9)) != 0 {
@@ -183,9 +247,10 @@ pub fn kick_irq_worker() {
     start_irq_worker();
 }
 
-/// Mevcut IRQ disable derinliği
+/// Mevcut IRQ disable derinliği (per-CPU)
 pub fn irq_disable_depth() -> u64 {
-    IRQ_DISABLE_DEPTH.load(Ordering::SeqCst)
+    let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+    unsafe { IRQ_DISABLE_DEPTH[cpu_id].load(Ordering::Relaxed) }
 }
 
 /// Interrupt'lar aktif mi?
@@ -223,7 +288,6 @@ lazy_static::lazy_static! {
     static ref IRQ_LATENCY_SAMPLES: Vec<AtomicU64> = (0..256).map(|_| AtomicU64::new(0)).collect();
     static ref IRQ_STORMS_REPORTED: Vec<AtomicU64> = (0..256).map(|_| AtomicU64::new(0)).collect();
     static ref IRQ_LATENCY_REPORTED: Vec<AtomicU64> = (0..256).map(|_| AtomicU64::new(0)).collect();
-    static ref IRQ_LOG: Mutex<Vec<IrqEvent>> = Mutex::new(Vec::new());
     static ref IRQ_AFFINITY_MASKS: Vec<AtomicU64> = (0..256).map(|_| AtomicU64::new(0)).collect();
     static ref IRQ_AFFINITY_CURSOR: Vec<AtomicU64> = (0..256).map(|_| AtomicU64::new(0)).collect();
     static ref IRQ_REBALANCE_LAST: Vec<AtomicU64> = (0..256).map(|_| AtomicU64::new(0)).collect();
@@ -244,24 +308,35 @@ struct IrqEvent {
 }
 
 pub fn init_idt_for_cpu(cpu_id: u32) -> &'static InterruptDescriptorTable {
+    #[cfg(not(feature = "simics"))]
     crate::serial_println!("init_idt_for_cpu: cpu_id={}", cpu_id);
     let idx = cpu_id as usize;
+    #[cfg(not(feature = "simics"))]
     crate::serial_println!("init_idt_for_cpu: acquiring lock...");
     let mut list = IDT_TABLES.lock();
+    #[cfg(not(feature = "simics"))]
     crate::serial_println!("init_idt_for_cpu: lock acquired. list.len()={}", list.len());
     if list.len() <= idx {
+        #[cfg(not(feature = "simics"))]
         crate::serial_println!("init_idt_for_cpu: resizing list to {}", idx + 1);
         list.resize(idx + 1, 0);
     }
     if list[idx] == 0 {
+        #[cfg(not(feature = "simics"))]
         crate::serial_println!("init_idt_for_cpu: building new IDT (Box::new)");
         let idt = Box::new(build_idt());
         let ptr = Box::into_raw(idt) as usize;
+        #[cfg(not(feature = "simics"))]
         crate::serial_println!("init_idt_for_cpu: IDT allocated at {:#x}", ptr);
         list[idx] = ptr;
     }
+    #[cfg(not(feature = "simics"))]
     crate::serial_println!("init_idt_for_cpu: returning IDT");
     unsafe { &*(list[idx] as *const InterruptDescriptorTable) }
+}
+
+pub fn prepare_idt_for_cpu(cpu_id: u32) {
+    let _ = init_idt_for_cpu(cpu_id);
 }
 
 /// Interrupt sistemini başlatır.
@@ -300,7 +375,7 @@ pub fn enable_ioapic() -> bool {
         crate::serial_println!("IOAPIC init failed");
         return false;
     }
-    USE_IOAPIC.store(true, Ordering::SeqCst);
+    USE_IOAPIC.store(true, Ordering::Release);
     unsafe {
         crate::drivers::apic::disable_pic();
     }
@@ -309,12 +384,13 @@ pub fn enable_ioapic() -> bool {
 }
 
 pub fn ioapic_enabled() -> bool {
-    USE_IOAPIC.load(Ordering::SeqCst)
+    USE_IOAPIC.load(Ordering::Acquire)
 }
 
 pub fn register_irq_handler(vector: u8, handler: IrqHandler) {
     let mut handlers = IRQ_HANDLERS.lock();
     handlers[vector as usize] = Some(handler);
+    sync_handler_shadow(vector, Some(handler));
 }
 
 pub fn request_irq(vector: u8, handler: IrqHandler, flags: u64) -> bool {
@@ -332,17 +408,21 @@ pub fn request_irq(vector: u8, handler: IrqHandler, flags: u64) -> bool {
         let mut primary = IRQ_HANDLERS.lock();
         if primary[vector as usize].is_none() {
             primary[vector as usize] = Some(handler);
+            sync_handler_shadow(vector, Some(handler));
         }
     } else if (flags & IRQF_THREADED) != 0 {
         let mut handlers = IRQ_HANDLERS.lock();
         handlers[vector as usize] = None;
+        sync_handler_shadow(vector, None);
         let mut thread_handlers = IRQ_THREAD_HANDLERS.lock();
         thread_handlers[vector as usize] = Some(handler);
+        sync_threaded_shadow(vector, Some(handler));
         start_irq_worker();
     } else {
         register_irq_handler(vector, handler);
         let mut thread_handlers = IRQ_THREAD_HANDLERS.lock();
         thread_handlers[vector as usize] = None;
+        sync_threaded_shadow(vector, None);
     }
     true
 }
@@ -357,8 +437,10 @@ pub fn request_threaded_irq(
     set_irq_type(vector, flow);
     let mut handlers = IRQ_HANDLERS.lock();
     handlers[vector as usize] = top;
+    sync_handler_shadow(vector, top);
     let mut thread_handlers = IRQ_THREAD_HANDLERS.lock();
     thread_handlers[vector as usize] = Some(thread);
+    sync_threaded_shadow(vector, Some(thread));
     start_irq_worker();
     true
 }
@@ -366,10 +448,13 @@ pub fn request_threaded_irq(
 pub fn free_irq(vector: u8) {
     let mut handlers = IRQ_HANDLERS.lock();
     handlers[vector as usize] = None;
+    sync_handler_shadow(vector, None);
     let mut thread_handlers = IRQ_THREAD_HANDLERS.lock();
     thread_handlers[vector as usize] = None;
+    sync_threaded_shadow(vector, None);
     let mut flows = IRQ_FLOWS.lock();
     flows[vector as usize] = IrqFlow::Level;
+    sync_flow_shadow(vector, IrqFlow::Level);
     IRQ_AFFINITY_MASKS[vector as usize].store(0, Ordering::Relaxed);
 }
 
@@ -390,15 +475,15 @@ pub fn set_irq_affinity_mask(vector: u8, mask: u64) {
 }
 
 pub fn set_irq_dynamic_flow(enabled: bool) {
-    IRQ_DYNAMIC_FLOW_ENABLED.store(enabled, Ordering::SeqCst);
+    IRQ_DYNAMIC_FLOW_ENABLED.store(enabled, Ordering::Release);
 }
 
 pub fn irq_dynamic_flow_enabled() -> bool {
-    IRQ_DYNAMIC_FLOW_ENABLED.load(Ordering::SeqCst)
+    IRQ_DYNAMIC_FLOW_ENABLED.load(Ordering::Acquire)
 }
 
 pub fn set_irq_flow_cooldown(ticks: u64) {
-    IRQ_FLOW_CHANGE_COOLDOWN.store(ticks, Ordering::SeqCst);
+    IRQ_FLOW_CHANGE_COOLDOWN.store(ticks, Ordering::Release);
 }
 
 pub fn irq_affinity_mask(vector: u8) -> u64 {
@@ -426,6 +511,8 @@ pub fn release_msi_vector(vector: u8) {
     VECTOR_ALLOCATOR.lock().free_vector(vector);
     let mut handlers = IRQ_HANDLERS.lock();
     handlers[vector as usize] = None;
+    sync_handler_shadow(vector, None);
+    sync_threaded_shadow(vector, None);
 }
 
 pub fn release_msi_vectors(vectors: &[u8]) {
@@ -434,6 +521,8 @@ pub fn release_msi_vectors(vectors: &[u8]) {
     for &vector in vectors {
         allocator.free_vector(vector);
         handlers[vector as usize] = None;
+        sync_handler_shadow(vector, None);
+        sync_threaded_shadow(vector, None);
     }
 }
 
@@ -447,11 +536,11 @@ pub fn set_irq_affinity(irq: u8, apic_id: u8) {
 }
 
 pub fn set_pci_interrupt_policy(policy: PciInterruptPolicy) {
-    PCI_IRQ_POLICY.store(policy as u8, Ordering::SeqCst);
+    PCI_IRQ_POLICY.store(policy as u8, Ordering::Release);
 }
 
 pub fn pci_interrupt_policy() -> PciInterruptPolicy {
-    match PCI_IRQ_POLICY.load(Ordering::SeqCst) {
+    match PCI_IRQ_POLICY.load(Ordering::Acquire) {
         0 => PciInterruptPolicy::LegacyOnly,
         2 => PciInterruptPolicy::MsiXPreferred,
         _ => PciInterruptPolicy::MsiPreferred,
@@ -508,7 +597,6 @@ pub fn clear_irq_metrics() {
     }
     WATCHDOG_LAST_TICK.store(0, Ordering::Relaxed);
     IRQ_LOG_INDEX.store(0, Ordering::Relaxed);
-    IRQ_LOG.lock().clear();
 }
 
 pub fn simulate_irq(vector: u8, iterations: u64) {
@@ -693,11 +781,13 @@ fn dump_registers(stack_frame: &InterruptStackFrame) {
 }
 
 /// Sıfıra bölme hatası (Divide by Zero)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
     panic!("EXCEPTION: DIVIDE ERROR\n{:#?}", stack_frame);
 }
 
 /// Debug breakpoint (INT 3)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     crate::serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
@@ -740,6 +830,7 @@ fn user_fault_exit(kind: &str, rip: u64, addr: Option<u64>, code: Option<u64>) {
 
 /// Sayfa hatası (Page Fault)
 /// User mode'da oluşursa task sonlandırılır, kernel mode'da panic.
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
@@ -766,6 +857,7 @@ extern "x86-interrupt" fn page_fault_handler(
 }
 
 /// Çift hata (Double Fault) - kurtarılamaz
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
@@ -775,6 +867,7 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 /// Genel koruma hatası (General Protection Fault)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -793,6 +886,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 /// Geçersiz opcode hatası (#UD)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     let rip = stack_frame.instruction_pointer.as_u64();
     let cs = stack_frame.code_segment;
@@ -804,11 +898,13 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     panic!("Invalid Opcode");
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
     record_irq(2);
     dispatch_irq(2);
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(SPURIOUS_VECTOR);
 }
@@ -842,6 +938,15 @@ extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStac
 /// Sistem tick sayacı
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// BSP init tamamlandığında true yapılır.
+/// AP'lerin timer handler'ı bu bayrak set olmadan ileri düzey işlem yapmaz.
+static BSP_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
+
+/// BSP init tamamlandığında çağrılır — AP timer'lar tam modda çalışmaya başlar.
+pub fn mark_bsp_init_complete() {
+    BSP_INIT_COMPLETE.store(true, Ordering::Release);
+}
+
 /// Timer interrupt handler (IRQ0)
 /// Her tick'te scheduler'ı çağırır.
 ///
@@ -857,32 +962,59 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 ///   8. EOI gönder (PIC veya LAPIC)
 ///   9. Bekleyen softirq'ları çalıştır (bottom-half işleme)
 ///  10. TSC-deadline modunda sonraki timer deadline'ını arm et
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    record_irq(32);
-    let needs_eoi = dispatch_irq(32);
-    let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-    let tsc = unsafe { _rdtsc() };
-    crate::random::add_entropy(tsc ^ ticks);
+    unsafe {
+        x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b't');
+    }
+    // BSP init tamamlanana kadar minimal timer işleme yap.
+    // Boot sırasında AP'nin tam timer yolu (tick → current_cpu_id → CPU_INFO.lock,
+    // SMP_STATE.try_lock, HardIRQGuard, softirq dispatch, dispatch_irq →
+    // IRQ_SHARED_CHAINS.lock) BSP'nin heap allocator'ıyla çakışma yaratır.
+    // Minimal yol: sadece tick sayacı artır, EOI gönder, TSC-deadline yeniden arm et.
+    let bsp_ready = BSP_INIT_COMPLETE.load(Ordering::Relaxed);
 
-    // Scheduler'a tick bildir
-    crate::task::scheduler::tick();
-    watchdog_poll(ticks);
+    if bsp_ready {
+        // === TAM TIMER YOLU (BSP init sonrası) ===
+        let _irq_guard = crate::preempt::HardIRQGuard::new();
 
-    // vDSO'ya yeni zamanı yaz (1 tick = 10ms sayarak)
-    let seconds_since_boot = ticks / 100;
-    let nsec_since_boot = (ticks % 100) * 10_000_000;
-    crate::vdso::update_time(seconds_since_boot, nsec_since_boot);
+        record_irq(32);
+        let needs_eoi = dispatch_irq(32);
+        let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        let tsc = unsafe { _rdtsc() };
+        crate::random::add_entropy(tsc ^ ticks);
 
-    if needs_eoi {
-        irq_eoi(32);
+        crate::task::scheduler::tick();
+        watchdog_poll(ticks);
+
+        // Timer ve RCU softirq'larını tetikle
+        crate::interrupts::softirq::raise_softirq(crate::interrupts::softirq::SoftirqVec::Timer);
+        crate::interrupts::softirq::raise_softirq(crate::interrupts::softirq::SoftirqVec::Rcu);
+
+        // vDSO'ya yeni zamanı yaz (1 tick = 10ms sayarak)
+        let seconds_since_boot = ticks / 100;
+        let nsec_since_boot = (ticks % 100) * 10_000_000;
+        crate::vdso::update_time(seconds_since_boot, nsec_since_boot);
+
+        if needs_eoi {
+            irq_eoi(32);
+        }
+
+        // Linux irq_exit(): HardIRQ bağlamından çık, SONRA softirq işle
+        drop(_irq_guard);
+
+        if crate::interrupts::softirq::softirq_pending() {
+            crate::interrupts::softirq::do_softirq();
+        }
+    } else {
+        // === MİNİMAL TIMER YOLU (boot sırasında) ===
+        // Kilit almaz, current_cpu_id() çağırmaz, heap ile etkileşmez.
+        TICKS.fetch_add(1, Ordering::Relaxed);
+        // LAPIC EOI — her zaman gerekli, yoksa sonraki timer teslim edilmez
+        crate::apic::lapic::eoi();
     }
 
-    // Softirq dispatch — Linux: irq_exit() → invoke_softirq()
-    if crate::interrupts::softirq::softirq_pending() {
-        crate::interrupts::softirq::do_softirq();
-    }
-
-    // TSC-deadline mode: sonraki deadline'ı yeniden arm et
+    // TSC-deadline mode: sonraki deadline'ı yeniden arm et (lock-free atomics)
     if crate::apic::lapic::is_tsc_deadline() {
         let freq = crate::apic::lapic::tsc_frequency();
         if freq > 0 {
@@ -891,6 +1023,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn tlb_shootdown_handler(_stack_frame: InterruptStackFrame) {
     tlb::flush_all();
     crate::cpu::smp::notify_tlb_shootdown_ack();
@@ -912,6 +1045,7 @@ lazy_static::lazy_static! {
 
 /// Keyboard interrupt handler (IRQ1)
 /// Scancode'u decode eder ve input queue'ya ekler.
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
@@ -923,11 +1057,8 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     let result = KEYBOARD.lock().add_byte(scancode);
     match result {
         Ok(Some(key_event)) => {
-            if let Some(key) = KEYBOARD.lock().process_keyevent(key_event) {
-                crate::keyboard::push_key(key);
-                use crate::drivers::input::InputEvent;
-                crate::drivers::input::push_event(InputEvent::Keyboard(key));
-            }
+            let decoded = KEYBOARD.lock().process_keyevent(key_event.clone());
+            crate::keyboard::dispatch_key_event(key_event, decoded.clone());
         }
         Ok(None) => {}
         Err(_) => {}
@@ -942,6 +1073,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
 /// Mouse interrupt handler (IRQ12)
 /// Raw byte'ı input queue'ya ekler (Fast-Path).
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use crate::drivers::input::InputEvent;
     use x86_64::instructions::port::Port;
@@ -965,6 +1097,7 @@ pub fn get_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn build_idt() -> InterruptDescriptorTable {
     let mut idt = InterruptDescriptorTable::new();
     idt.divide_error.set_handler_fn(divide_error_handler);
@@ -1019,25 +1152,33 @@ fn build_idt() -> InterruptDescriptorTable {
     // ================================================================
     // EXCEPTION HARDENING — eksik 10 CPU exception vektörü
     // ================================================================
-    idt.overflow.set_handler_fn(overflow_handler);                      // #OF (4)
-    idt.bound_range_exceeded.set_handler_fn(bound_range_handler);       // #BR (5)
-    idt.device_not_available.set_handler_fn(device_not_available_handler); // #NM (7)
-    idt.segment_not_present.set_handler_fn(segment_not_present_handler); // #NP (11)
-    idt.stack_segment_fault.set_handler_fn(stack_segment_handler);      // #SS (12)
-    idt.x87_floating_point.set_handler_fn(x87_fp_handler);              // #MF (16)
-    idt.alignment_check.set_handler_fn(alignment_check_handler);        // #AC (17)
-    idt.machine_check.set_handler_fn(machine_check_handler);            // #MC (18)
-    idt.simd_floating_point.set_handler_fn(simd_fp_handler);            // #XM (19)
-    idt.virtualization.set_handler_fn(virtualization_handler);           // #VE (20)
+    idt.overflow.set_handler_fn(overflow_handler); // #OF (4)
+    idt.bound_range_exceeded.set_handler_fn(bound_range_handler); // #BR (5)
+    idt.device_not_available
+        .set_handler_fn(device_not_available_handler); // #NM (7)
+    idt.segment_not_present
+        .set_handler_fn(segment_not_present_handler); // #NP (11)
+    idt.stack_segment_fault
+        .set_handler_fn(stack_segment_handler); // #SS (12)
+    idt.x87_floating_point.set_handler_fn(x87_fp_handler); // #MF (16)
+    idt.alignment_check.set_handler_fn(alignment_check_handler); // #AC (17)
+    idt.machine_check.set_handler_fn(machine_check_handler); // #MC (18)
+    idt.simd_floating_point.set_handler_fn(simd_fp_handler); // #XM (19)
+    idt.virtualization.set_handler_fn(virtualization_handler); // #VE (20)
 
     idt
 }
 
 fn init_global_once() {
     if INIT_STATE
-        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        INIT_STATE.store(2, Ordering::Release);
         return;
     }
     VECTOR_ALLOCATOR.lock().init();
@@ -1061,7 +1202,7 @@ fn init_global_once() {
             pic::init();
         }
     }
-    INIT_STATE.store(2, Ordering::SeqCst);
+    INIT_STATE.store(2, Ordering::Release);
 }
 
 fn record_irq(vector: u8) {
@@ -1082,48 +1223,111 @@ fn record_irq(vector: u8) {
 }
 
 fn dispatch_irq(vector: u8) -> bool {
-    let flow = { IRQ_FLOWS.lock()[vector as usize] };
-    let handler = { IRQ_HANDLERS.lock()[vector as usize] };
-    let threaded = { IRQ_THREAD_HANDLERS.lock()[vector as usize] };
+    // Lock-free shadow array'lerden oku — sıfır contention
+    let flow_u8 = IRQ_FLOWS_FAST[vector as usize].load(Ordering::Acquire);
+    let flow = match flow_u8 {
+        1 => IrqFlow::Edge,
+        2 => IrqFlow::FastEoi,
+        3 => IrqFlow::PerCpu,
+        _ => IrqFlow::Level,
+    };
+    let handler_ptr = IRQ_HANDLERS_FAST[vector as usize].load(Ordering::Acquire);
+    let handler: Option<IrqHandler> = if handler_ptr != 0 {
+        Some(unsafe { core::mem::transmute(handler_ptr) })
+    } else {
+        None
+    };
+    let threaded_ptr = IRQ_THREADED_FAST[vector as usize].load(Ordering::Acquire);
+    let shared_chain: Option<Vec<IrqHandler>> = {
+        let chains = IRQ_SHARED_CHAINS.lock();
+        chains[vector as usize].as_ref().cloned()
+    };
+
     if flow == IrqFlow::FastEoi {
         irq_eoi(vector);
     }
-    if let Some(func) = handler {
-        let start = unsafe { _rdtsc() };
-        func(vector);
-        let end = unsafe { _rdtsc() };
-        let delta = end.wrapping_sub(start);
-        IRQ_TOTAL_LATENCY[vector as usize].fetch_add(delta, Ordering::Relaxed);
-        IRQ_LATENCY_SAMPLES[vector as usize].fetch_add(1, Ordering::Relaxed);
-        let mut current = IRQ_MAX_LATENCY[vector as usize].load(Ordering::Relaxed);
-        while delta > current {
-            match IRQ_MAX_LATENCY[vector as usize].compare_exchange(
-                current,
-                delta,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(next) => current = next,
+    if let Some(chain) = shared_chain {
+        if !chain.is_empty() {
+            let irq_count = IRQ_COUNTS[vector as usize].load(Ordering::Relaxed);
+            if (irq_count & 63) == 0 {
+                let start = unsafe { _rdtsc() };
+                for func in chain {
+                    func(vector);
+                }
+                let end = unsafe { _rdtsc() };
+                let delta = end.wrapping_sub(start);
+                IRQ_TOTAL_LATENCY[vector as usize].fetch_add(delta, Ordering::Relaxed);
+                IRQ_LATENCY_SAMPLES[vector as usize].fetch_add(1, Ordering::Relaxed);
+                let mut current = IRQ_MAX_LATENCY[vector as usize].load(Ordering::Relaxed);
+                while delta > current {
+                    match IRQ_MAX_LATENCY[vector as usize].compare_exchange(
+                        current,
+                        delta,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(next) => current = next,
+                    }
+                }
+                let cpu = crate::cpu::smp::current_cpu_id();
+                let idx = IRQ_LOG_INDEX.fetch_add(1, Ordering::Relaxed);
+                let slot = idx & IRQ_LOG_RING_MASK;
+                unsafe {
+                    let ptr = IRQ_LOG_RING.0[slot].get();
+                    (*ptr) = IrqEvent {
+                        vector,
+                        cpu,
+                        tsc: end,
+                        latency: delta,
+                    };
+                }
+            } else {
+                for func in chain {
+                    func(vector);
+                }
             }
         }
-        let cpu = crate::cpu::smp::current_cpu_id();
-        let idx = IRQ_LOG_INDEX.fetch_add(1, Ordering::Relaxed);
-        let mut log = IRQ_LOG.lock();
-        let event = IrqEvent {
-            vector,
-            cpu,
-            tsc: end,
-            latency: delta,
-        };
-        if log.len() < IRQ_LOG_CAP {
-            log.push(event);
+    } else if let Some(func) = handler {
+        // Latency sampling: her 64. IRQ'da rdtsc \u00f6l\u00e7 \u2014 rdtsc ~20 cycle, hot vector'lerde toplan\u0131r
+        let irq_count = IRQ_COUNTS[vector as usize].load(Ordering::Relaxed);
+        if (irq_count & 63) == 0 {
+            let start = unsafe { _rdtsc() };
+            func(vector);
+            let end = unsafe { _rdtsc() };
+            let delta = end.wrapping_sub(start);
+            IRQ_TOTAL_LATENCY[vector as usize].fetch_add(delta, Ordering::Relaxed);
+            IRQ_LATENCY_SAMPLES[vector as usize].fetch_add(1, Ordering::Relaxed);
+            let mut current = IRQ_MAX_LATENCY[vector as usize].load(Ordering::Relaxed);
+            while delta > current {
+                match IRQ_MAX_LATENCY[vector as usize].compare_exchange(
+                    current,
+                    delta,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(next) => current = next,
+                }
+            }
+            // Lock-free ring buffer \u2014 sampled
+            let cpu = crate::cpu::smp::current_cpu_id();
+            let idx = IRQ_LOG_INDEX.fetch_add(1, Ordering::Relaxed);
+            let slot = idx & IRQ_LOG_RING_MASK;
+            unsafe {
+                let ptr = IRQ_LOG_RING.0[slot].get();
+                (*ptr) = IrqEvent {
+                    vector,
+                    cpu,
+                    tsc: end,
+                    latency: delta,
+                };
+            }
         } else {
-            let slot = idx % IRQ_LOG_CAP;
-            log[slot] = event;
+            func(vector);
         }
     }
-    if threaded.is_some() {
+    if threaded_ptr != 0 {
         enqueue_threaded_irq(vector);
     }
     flow != IrqFlow::FastEoi
@@ -1182,22 +1386,29 @@ pub fn print_irq_report() {
 }
 
 pub fn print_irq_log_recent(max: usize) {
-    let log = IRQ_LOG.lock();
-    let len = log.len();
-    if len == 0 {
+    let head = IRQ_LOG_INDEX.load(Ordering::Relaxed);
+    if head == 0 {
         crate::serial_println!("[IRQ] log empty");
         return;
     }
-    let count = max.min(len);
-    let base = IRQ_LOG_INDEX.load(Ordering::Relaxed);
+    // Ring buffer'daki toplam girdi sayısı
+    let total = head.min(IRQ_LOG_RING_SIZE);
+    let count = max.min(total);
     crate::serial_println!("[IRQ] log begin count={}", count);
     for i in 0..count {
-        let idx = if len < IRQ_LOG_CAP {
-            len - count + i
+        // En eski istenen girdiden başlayarak oku
+        let idx = if head <= IRQ_LOG_RING_SIZE {
+            // Henüz wrap olmadı
+            head - count + i
         } else {
-            (base + IRQ_LOG_CAP - count + i) % IRQ_LOG_CAP
+            // Wrap oldu — ring buffer
+            (head - count + i) & IRQ_LOG_RING_MASK
         };
-        let event = log[idx];
+        let slot = idx & IRQ_LOG_RING_MASK;
+        // SAFETY: torn read olabilir ama sadece bilgilendirme amaçlı (SAFETY yorumu ring
+        // buffer tanımında mevcut). Okuma sırasında yeni yazım olursa en fazla
+        // yanlış istatistik görünür, güvenlik riski yok.
+        let event = unsafe { *IRQ_LOG_RING.0[slot].get() };
         crate::serial_println!(
             "[IRQ] log vector={} cpu={} tsc={} latency={}",
             event.vector,
@@ -1218,7 +1429,18 @@ fn watchdog_poll(ticks: u64) {
         return;
     }
     for v in 0u8..=255 {
-        let flow = { IRQ_FLOWS.lock()[v as usize] };
+        // Skip vectors with zero activity (lock-free early-out)
+        if IRQ_COUNTS[v as usize].load(Ordering::Relaxed) == 0 {
+            continue;
+        }
+        // Lock-free flow read — no Mutex
+        let flow_u8 = IRQ_FLOWS_FAST[v as usize].load(Ordering::Relaxed);
+        let flow = match flow_u8 {
+            1 => IrqFlow::Edge,
+            2 => IrqFlow::FastEoi,
+            3 => IrqFlow::PerCpu,
+            _ => IrqFlow::Level,
+        };
         if flow == IrqFlow::PerCpu {
             continue;
         }
@@ -1266,7 +1488,13 @@ fn try_adjust_flow(vector: u8, ticks: u64, stormed: bool, latency_warned: bool) 
     if !stormed && !latency_warned {
         return;
     }
-    let flow = { IRQ_FLOWS.lock()[vector as usize] };
+    let flow_u8 = IRQ_FLOWS_FAST[vector as usize].load(Ordering::Relaxed);
+    let flow = match flow_u8 {
+        1 => IrqFlow::Edge,
+        2 => IrqFlow::FastEoi,
+        3 => IrqFlow::PerCpu,
+        _ => IrqFlow::Level,
+    };
     if flow == IrqFlow::PerCpu || flow == IrqFlow::FastEoi {
         return;
     }
@@ -1326,7 +1554,7 @@ fn start_irq_worker() {
     }
 
     if IRQ_WORKER_STARTED
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
         crate::task::scheduler::spawn_with_priority(
@@ -1382,6 +1610,7 @@ fn apply_irq_flow(vector: u8, flow: IrqFlow, ticks: u64, dynamic: bool) {
     }
     IRQ_FLOW_LAST_CHANGE[vector as usize].store(ticks, Ordering::Relaxed);
     flows[vector as usize] = flow;
+    sync_flow_shadow(vector, flow);
     if vector >= 32 && vector <= 47 && ioapic_enabled() {
         match flow {
             IrqFlow::Edge => crate::apic::ioapic::set_irq_trigger_mode(vector - 32, Some(false)),
@@ -1437,7 +1666,7 @@ fn select_cpu_index(mask: u64, cursor: usize, cpu_count: usize) -> Option<usize>
 }
 
 fn irq_eoi(vector: u8) {
-    if USE_IOAPIC.load(Ordering::SeqCst) {
+    if USE_IOAPIC.load(Ordering::Acquire) {
         crate::apic::lapic::eoi();
     } else {
         unsafe {
@@ -1511,6 +1740,7 @@ impl VectorAllocator {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq2_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(34);
     let needs_eoi = dispatch_irq(34);
@@ -1519,6 +1749,7 @@ extern "x86-interrupt" fn irq2_interrupt_handler(_stack_frame: InterruptStackFra
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq3_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(35);
     let needs_eoi = dispatch_irq(35);
@@ -1527,6 +1758,7 @@ extern "x86-interrupt" fn irq3_interrupt_handler(_stack_frame: InterruptStackFra
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq4_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(36);
     let needs_eoi = dispatch_irq(36);
@@ -1535,6 +1767,7 @@ extern "x86-interrupt" fn irq4_interrupt_handler(_stack_frame: InterruptStackFra
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq5_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(37);
     let needs_eoi = dispatch_irq(37);
@@ -1543,6 +1776,7 @@ extern "x86-interrupt" fn irq5_interrupt_handler(_stack_frame: InterruptStackFra
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq6_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(38);
     let needs_eoi = dispatch_irq(38);
@@ -1551,6 +1785,7 @@ extern "x86-interrupt" fn irq6_interrupt_handler(_stack_frame: InterruptStackFra
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq7_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(39);
     let needs_eoi = dispatch_irq(39);
@@ -1559,6 +1794,7 @@ extern "x86-interrupt" fn irq7_interrupt_handler(_stack_frame: InterruptStackFra
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq8_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(40);
     let needs_eoi = dispatch_irq(40);
@@ -1567,6 +1803,7 @@ extern "x86-interrupt" fn irq8_interrupt_handler(_stack_frame: InterruptStackFra
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq9_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(41);
     let needs_eoi = dispatch_irq(41);
@@ -1575,6 +1812,7 @@ extern "x86-interrupt" fn irq9_interrupt_handler(_stack_frame: InterruptStackFra
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq10_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(42);
     let needs_eoi = dispatch_irq(42);
@@ -1583,6 +1821,7 @@ extern "x86-interrupt" fn irq10_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq11_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(43);
     let needs_eoi = dispatch_irq(43);
@@ -1591,6 +1830,7 @@ extern "x86-interrupt" fn irq11_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq13_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(45);
     let needs_eoi = dispatch_irq(45);
@@ -1599,6 +1839,7 @@ extern "x86-interrupt" fn irq13_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq14_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(46);
     let needs_eoi = dispatch_irq(46);
@@ -1607,6 +1848,7 @@ extern "x86-interrupt" fn irq14_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq15_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(47);
     let needs_eoi = dispatch_irq(47);
@@ -1615,6 +1857,7 @@ extern "x86-interrupt" fn irq15_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq16_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(48);
     let needs_eoi = dispatch_irq(48);
@@ -1623,6 +1866,7 @@ extern "x86-interrupt" fn irq16_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq17_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(49);
     let needs_eoi = dispatch_irq(49);
@@ -1631,6 +1875,7 @@ extern "x86-interrupt" fn irq17_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq18_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(50);
     let needs_eoi = dispatch_irq(50);
@@ -1639,6 +1884,7 @@ extern "x86-interrupt" fn irq18_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq19_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(51);
     let needs_eoi = dispatch_irq(51);
@@ -1647,6 +1893,7 @@ extern "x86-interrupt" fn irq19_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq20_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(52);
     let needs_eoi = dispatch_irq(52);
@@ -1655,6 +1902,7 @@ extern "x86-interrupt" fn irq20_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq21_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(53);
     let needs_eoi = dispatch_irq(53);
@@ -1663,6 +1911,7 @@ extern "x86-interrupt" fn irq21_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq22_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(54);
     let needs_eoi = dispatch_irq(54);
@@ -1671,6 +1920,7 @@ extern "x86-interrupt" fn irq22_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq23_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(55);
     let needs_eoi = dispatch_irq(55);
@@ -1679,6 +1929,7 @@ extern "x86-interrupt" fn irq23_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq24_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(56);
     let needs_eoi = dispatch_irq(56);
@@ -1687,6 +1938,7 @@ extern "x86-interrupt" fn irq24_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq25_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(57);
     let needs_eoi = dispatch_irq(57);
@@ -1695,6 +1947,7 @@ extern "x86-interrupt" fn irq25_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq26_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(58);
     let needs_eoi = dispatch_irq(58);
@@ -1703,6 +1956,7 @@ extern "x86-interrupt" fn irq26_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq27_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(59);
     let needs_eoi = dispatch_irq(59);
@@ -1711,6 +1965,7 @@ extern "x86-interrupt" fn irq27_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq28_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(60);
     let needs_eoi = dispatch_irq(60);
@@ -1719,6 +1974,7 @@ extern "x86-interrupt" fn irq28_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq29_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(61);
     let needs_eoi = dispatch_irq(61);
@@ -1727,6 +1983,7 @@ extern "x86-interrupt" fn irq29_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq30_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(62);
     let needs_eoi = dispatch_irq(62);
@@ -1735,6 +1992,7 @@ extern "x86-interrupt" fn irq30_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq31_interrupt_handler(_stack_frame: InterruptStackFrame) {
     record_irq(63);
     let needs_eoi = dispatch_irq(63);
@@ -1765,26 +2023,39 @@ extern "x86-interrupt" fn irq31_interrupt_handler(_stack_frame: InterruptStackFr
 // ============================================================================
 
 /// #OF — Overflow (INT 4)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
-        user_fault_exit("OVERFLOW", stack_frame.instruction_pointer.as_u64(), None, None);
+        user_fault_exit(
+            "OVERFLOW",
+            stack_frame.instruction_pointer.as_u64(),
+            None,
+            None,
+        );
     }
     crate::serial_println!("EXCEPTION: OVERFLOW (#OF)\n{:#?}", stack_frame);
     panic!("Overflow");
 }
 
 /// #BR — Bound Range Exceeded (INT 5)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn bound_range_handler(stack_frame: InterruptStackFrame) {
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
-        user_fault_exit("BOUND_RANGE", stack_frame.instruction_pointer.as_u64(), None, None);
+        user_fault_exit(
+            "BOUND_RANGE",
+            stack_frame.instruction_pointer.as_u64(),
+            None,
+            None,
+        );
     }
     crate::serial_println!("EXCEPTION: BOUND RANGE EXCEEDED (#BR)\n{:#?}", stack_frame);
     panic!("Bound Range Exceeded");
 }
 
 /// #NM — Device Not Available (INT 7) — FPU/SSE lazy save
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
     // FPU/SSE kullanılmadığında tetiklenir — CR0.TS flag
     // Kernel: TS flag'i temizle ve FPU state'i yükle
@@ -1802,6 +2073,7 @@ extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptSta
 }
 
 /// #NP — Segment Not Present (INT 11)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn segment_not_present_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -1825,10 +2097,8 @@ extern "x86-interrupt" fn segment_not_present_handler(
 }
 
 /// #SS — Stack Segment Fault (INT 12)
-extern "x86-interrupt" fn stack_segment_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: u64,
-) {
+#[cfg(not(target_os = "windows"))]
+extern "x86-interrupt" fn stack_segment_handler(stack_frame: InterruptStackFrame, error_code: u64) {
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         user_fault_exit(
@@ -1848,16 +2118,23 @@ extern "x86-interrupt" fn stack_segment_handler(
 }
 
 /// #MF — x87 Floating-Point Error (INT 16)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn x87_fp_handler(stack_frame: InterruptStackFrame) {
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
-        user_fault_exit("X87_FP_ERROR", stack_frame.instruction_pointer.as_u64(), None, None);
+        user_fault_exit(
+            "X87_FP_ERROR",
+            stack_frame.instruction_pointer.as_u64(),
+            None,
+            None,
+        );
     }
     crate::serial_println!("EXCEPTION: x87 FLOATING POINT (#MF)\n{:#?}", stack_frame);
     panic!("x87 Floating-Point Exception");
 }
 
 /// #AC — Alignment Check (INT 17)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn alignment_check_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -1880,6 +2157,7 @@ extern "x86-interrupt" fn alignment_check_handler(
 }
 
 /// #MC — Machine Check (INT 18) — kurtarılamaz donanım hatası
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
     crate::serial_println!("EXCEPTION: MACHINE CHECK (#MC) — FATAL HARDWARE ERROR");
     crate::serial_println!("{:#?}", stack_frame);
@@ -1899,10 +2177,16 @@ extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame
 }
 
 /// #XM — SIMD Floating-Point (INT 19)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn simd_fp_handler(stack_frame: InterruptStackFrame) {
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
-        user_fault_exit("SIMD_FP_ERROR", stack_frame.instruction_pointer.as_u64(), None, None);
+        user_fault_exit(
+            "SIMD_FP_ERROR",
+            stack_frame.instruction_pointer.as_u64(),
+            None,
+            None,
+        );
     }
     // MXCSR register'ından hata detayını oku
     let mut mxcsr: u32 = 0;
@@ -1918,9 +2202,15 @@ extern "x86-interrupt" fn simd_fp_handler(stack_frame: InterruptStackFrame) {
 }
 
 /// #VE — Virtualization Exception (INT 20)
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFrame) {
     crate::serial_println!("EXCEPTION: VIRTUALIZATION (#VE)\n{:#?}", stack_frame);
     panic!("Virtualization Exception");
+}
+
+#[cfg(target_os = "windows")]
+fn build_idt() -> InterruptDescriptorTable {
+    InterruptDescriptorTable::new()
 }
 
 // ============================================================================
@@ -1952,16 +2242,15 @@ pub struct IrqStats {
 pub fn get_stats() -> IrqStats {
     let mut total = 0u64;
     let mut storms = 0u64;
-    
+
     for i in 0..256 {
-        total += IRQ_COUNTS[i].load(Ordering::SeqCst);
-        storms += IRQ_STORMS_REPORTED[i].load(Ordering::SeqCst);
+        total += IRQ_COUNTS[i].load(Ordering::Relaxed);
+        storms += IRQ_STORMS_REPORTED[i].load(Ordering::Relaxed);
     }
-    
+
     IrqStats {
         storm_count: storms,
         total_irqs: total,
         spurious_count: 0, // Would need tracking
     }
 }
-

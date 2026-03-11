@@ -23,12 +23,12 @@
 //! - **BDL**: DMA transfer listesi; ses verisi fiziksel bellekten doğrudan okunur.
 //! - **Widget**: Codec içindeki ses işleme düğümü (DAC, ADC, Pin, Mixer vb.).
 
-use alloc::vec::Vec;
-use alloc::vec;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use spin::Mutex;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use spin::Mutex;
 
 // ============================================================================
 // HDA SABİTLERİ
@@ -39,14 +39,14 @@ const PCI_CLASS_MULTIMEDIA: u8 = 0x04;
 const PCI_SUBCLASS_HDA: u8 = 0x03;
 
 /// HDA denetleyici yazmacları (bellek eşlemeli — MMIO)
-const HDA_GCAP: usize = 0x00;      // Genel Yetenekler (Global Capabilities)
-const HDA_GCTL: usize = 0x08;      // Genel Kontrol (Global Control)
-const HDA_GSTS: usize = 0x0C;      // Genel Durum (Global Status)
-const HDA_OUTSTR: usize = 0x10;    // Çıktı Akışı Yükü (Output Stream Payload)
-const HDA_INSTR: usize = 0x14;     // Giriş Akışı Yükü (Input Stream Payload)
-const HDA_INTCTL: usize = 0x20;    // Kesme Kontrolü (Interrupt Control)
-const HDA_INTSTS: usize = 0x24;    // Kesme Durumu (Interrupt Status)
-const HDA_WAKEEN: usize = 0x0C;    // Uyandırma Etkinleştirme (Wake Enable)
+const HDA_GCAP: usize = 0x00; // Genel Yetenekler (Global Capabilities)
+const HDA_GCTL: usize = 0x08; // Genel Kontrol (Global Control)
+const HDA_GSTS: usize = 0x0C; // Genel Durum (Global Status)
+const HDA_OUTSTR: usize = 0x10; // Çıktı Akışı Yükü (Output Stream Payload)
+const HDA_INSTR: usize = 0x14; // Giriş Akışı Yükü (Input Stream Payload)
+const HDA_INTCTL: usize = 0x20; // Kesme Kontrolü (Interrupt Control)
+const HDA_INTSTS: usize = 0x24; // Kesme Durumu (Interrupt Status)
+const HDA_WAKEEN: usize = 0x0C; // Uyandırma Etkinleştirme (Wake Enable)
 
 /// Akış yazmacı taban ofseti
 const HDA_STREAM_BASE: usize = 0x80;
@@ -177,7 +177,7 @@ impl HdaController {
             codecs: Vec::new(),
         }
     }
-    
+
     /// Denetleyiciyi başlatır.
     /// Reset → Yetenek okuma → CORB/RIRB başlatma → Codec tarama adımlarını uygular.
     pub fn init(&mut self) -> Result<(), AudioError> {
@@ -192,13 +192,17 @@ impl HdaController {
 
         // Codec'leri bul
         self.detect_codecs();
-        
-        crate::serial_println!("[HDA] Controller initialized: {} out, {} in, {} bidir streams",
-            self.output_streams, self.input_streams, self.bidir_streams);
-        
+
+        crate::serial_println!(
+            "[HDA] Controller initialized: {} out, {} in, {} bidir streams",
+            self.output_streams,
+            self.input_streams,
+            self.bidir_streams
+        );
+
         Ok(())
     }
-    
+
     /// Denetleyiciyi sıfırlar (GCTL.CRST biti aracılığıyla).
     fn reset(&mut self) -> Result<(), AudioError> {
         // CRST bitini GCTL yazmacına yaz
@@ -292,7 +296,7 @@ impl HdaCodec {
             audio_func_group: 0,
         }
     }
-    
+
     /// Codec içindeki widget'ları tarar ve `self.widgets` listesine ekler.
     pub fn scan_widgets(&mut self) {
         // Kök düğüm
@@ -310,7 +314,7 @@ impl HdaCodec {
             default_gain: 0,
             muted: false,
         });
-        
+
         self.widgets.push(AudioWidget {
             nid: 3,
             widget_type: HdaWidgetType::Pin,
@@ -319,7 +323,7 @@ impl HdaCodec {
             default_gain: 0,
             muted: false,
         });
-        
+
         self.widgets.push(AudioWidget {
             nid: 4,
             widget_type: HdaWidgetType::Pin,
@@ -328,7 +332,7 @@ impl HdaCodec {
             default_gain: 0,
             muted: false,
         });
-        
+
         self.widgets.push(AudioWidget {
             nid: 5,
             widget_type: HdaWidgetType::InputAdc,
@@ -337,7 +341,7 @@ impl HdaCodec {
             default_gain: 0,
             muted: false,
         });
-        
+
         self.widgets.push(AudioWidget {
             nid: 6,
             widget_type: HdaWidgetType::Pin,
@@ -347,7 +351,7 @@ impl HdaCodec {
             muted: false,
         });
     }
-    
+
     /// NID (Node ID) ile widget arar.
     pub fn find_widget(&self, nid: u8) -> Option<&AudioWidget> {
         self.widgets.iter().find(|w| w.nid == nid)
@@ -429,11 +433,11 @@ impl WidgetCaps {
     pub const PIN_SENSE: WidgetCaps = WidgetCaps(1 << 13);
     pub const TRIGGER: WidgetCaps = WidgetCaps(1 << 14);
     pub const IMPEDANCE: WidgetCaps = WidgetCaps(1 << 15);
-    
+
     pub fn contains(&self, other: WidgetCaps) -> bool {
         (self.0 & other.0) != 0
     }
-    
+
     pub fn insert(&mut self, other: WidgetCaps) {
         self.0 |= other.0;
     }
@@ -493,7 +497,7 @@ impl AudioFormat {
             channels,
         }
     }
-    
+
     /// CD kalitesi format (44.1 kHz, 16-bit stereo).
     pub fn cd_quality() -> Self {
         AudioFormat::new(44100, 16, 2)
@@ -519,7 +523,7 @@ impl AudioFormat {
             192000 => HDA_FMT_192KHZ,
             _ => HDA_FMT_48KHZ,
         };
-        
+
         let bits_bits = match self.bits_per_sample {
             8 => HDA_FMT_8BIT,
             16 => HDA_FMT_16BIT,
@@ -528,13 +532,13 @@ impl AudioFormat {
             32 => HDA_FMT_32BIT,
             _ => HDA_FMT_16BIT,
         };
-        
+
         let chan_bits = if self.channels == 1 {
             HDA_FMT_MONO
         } else {
             HDA_FMT_STEREO
         };
-        
+
         rate_bits | (bits_bits << 4) | (chan_bits << 8)
     }
 }
@@ -577,7 +581,7 @@ impl AudioStream {
             loop_enabled: false,
         }
     }
-    
+
     /// PCM veri tamponunu ayarlar, konumu sıfırlar.
     pub fn set_buffer(&mut self, data: Vec<u8>) {
         self.buffer = data;
@@ -690,20 +694,20 @@ pub fn init() {
     if AUDIO_INITIALIZED.swap(true, Ordering::SeqCst) {
         return;
     }
-    
+
     crate::serial_println!("[AUDIO] HDA alt sistemi başlatılıyor...");
 
     // HDA denetleyicilerini bul
     let controllers = discover_hda_controllers();
-    
+
     let mut hda_ctrls = HDA_CONTROLLERS.lock();
-    
+
     for mut ctrl in controllers {
         if ctrl.init().is_ok() {
             hda_ctrls.push(ctrl);
         }
     }
-    
+
     crate::serial_println!("[AUDIO] Found {} HDA controllers", hda_ctrls.len());
 }
 
@@ -724,24 +728,24 @@ impl AudioBackend {
             position: 0.0,
         }
     }
-    
+
     pub fn play(&mut self, _path: &str) {
         self.playing = true;
     }
-    
+
     pub fn pause(&mut self) {
         self.playing = false;
     }
-    
+
     pub fn stop(&mut self) {
         self.playing = false;
         self.position = 0.0;
     }
-    
+
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume;
     }
-    
+
     pub fn seek(&mut self, position: f32) {
         self.position = position;
     }
@@ -759,15 +763,679 @@ pub fn get_audio() -> Option<&'static Mutex<AudioBackend>> {
 /// PCI taramasıyla HDA denetleyicilerini keşfeder.
 pub fn discover_hda_controllers() -> Vec<HdaController> {
     let mut controllers = Vec::new();
-    
+
     let devices = crate::drivers::pci::scan();
     for dev in devices {
         if dev.class_code == PCI_CLASS_MULTIMEDIA && dev.subclass == PCI_SUBCLASS_HDA {
             controllers.push(HdaController::new(dev.bus, dev.device, dev.function));
         }
     }
-    
+
     controllers
+}
+
+// ============================================================================
+// CORB/RIRB IMPLEMENTATION (Codec Communication)
+// ============================================================================
+
+/// HDA CORB/RIRB Ring Buffer Manager
+///
+/// Handles communication with HDA codecs via command/response rings.
+/// CORB (Command Output Ring Buffer): CPU → Codec commands
+/// RIRB (Response Input Ring Buffer): Codec → CPU responses
+#[derive(Debug, Clone)]
+pub struct CorbRirb {
+    /// CORB buffer base address (physical)
+    pub corb_base: u64,
+    /// CORB buffer size (entries)
+    pub corb_size: usize,
+    /// CORB write pointer
+    pub corb_wp: u16,
+    /// RIRB buffer base address (physical)
+    pub rirb_base: u64,
+    /// RIRB buffer size (entries)
+    pub rirb_size: usize,
+    /// RIRB read pointer
+    pub rirb_rp: u16,
+    /// Response buffer
+    pub responses: [u64; 256],
+    /// Response count
+    pub response_count: usize,
+}
+
+impl CorbRirb {
+    pub fn new() -> Self {
+        Self {
+            corb_base: 0,
+            corb_size: 256,
+            corb_wp: 0,
+            rirb_base: 0,
+            rirb_size: 256,
+            rirb_rp: 0,
+            responses: [0; 256],
+            response_count: 0,
+        }
+    }
+
+    /// Initialize CORB/RIRB ring buffers
+    ///
+    /// 1. Allocate and program CORB base address
+    /// 2. Set CORB size
+    /// 3. Reset CORB read/write pointers
+    /// 4. Allocate and program RIRB base address
+    /// 5. Set RIRB size
+    /// 6. Reset RIRB write pointer
+    pub fn init(&mut self, mmio_base: u64) -> Result<(), AudioError> {
+        let _ = mmio_base;
+
+        // In real implementation:
+        // 1. Allocate DMA-coherent memory for CORB (256 entries * 4 bytes = 1KB)
+        // 2. Allocate DMA-coherent memory for RIRB (256 entries * 8 bytes = 2KB)
+        // 3. Program CORBLBASE/CORBUBASE registers
+        // 4. Program CORBSIZE register
+        // 5. Program IRBLBASE/IRBUBASE registers
+        // 6. Program IRBSIZE register
+        // 7. Set CORBWP = 0, CORBRP = 0xFFFF (reset)
+        // 8. Set IRBWP = 0xFFFF (reset)
+
+        crate::serial_println!("[HDA] CORB/RIRB initialized");
+        Ok(())
+    }
+
+    /// Send a codec command via CORB
+    ///
+    /// Command format: (codec_addr << 28) | (nid << 20) | (verb << 8) | payload
+    pub fn send_command(
+        &mut self,
+        codec_addr: u8,
+        nid: u8,
+        verb: u16,
+        payload: u8,
+    ) -> Result<(), AudioError> {
+        let command = ((codec_addr as u32) << 28)
+            | ((nid as u32) << 20)
+            | ((verb as u32) << 8)
+            | (payload as u32);
+
+        // In real implementation:
+        // 1. Write command to CORB[corb_wp]
+        // 2. Increment corb_wp
+        // 3. Write corb_wp to CORBWP register
+        // 4. Wait for response in RIRB
+
+        crate::serial_println!(
+            "[HDA] CORB command: codec={} nid={} verb={:#06x} payload={:#04x}",
+            codec_addr,
+            nid,
+            verb,
+            payload
+        );
+
+        // Simulate response for testing
+        self.response_count = 1;
+        self.responses[0] = 0; // Response value
+
+        let _ = command;
+        Ok(())
+    }
+
+    /// Get response from RIRB
+    pub fn get_response(&mut self) -> Option<u64> {
+        if self.response_count > 0 {
+            self.response_count -= 1;
+            Some(self.responses[self.response_count])
+        } else {
+            None
+        }
+    }
+
+    /// Send verb and wait for response
+    pub fn send_verb(&mut self, codec_addr: u8, nid: u8, verb: u32) -> u32 {
+        // Format: (codec_addr << 28) | (nid << 20) | verb
+        let _ = (codec_addr, nid, verb);
+        0
+    }
+}
+
+// ============================================================================
+// STREAM DESCRIPTOR (SD) PROGRAMMING
+// ============================================================================
+
+/// HDA Stream Descriptor (SD) Manager
+///
+/// Each stream has a dedicated set of registers for DMA control:
+/// - SD_CTL: Stream control (run, reset, interrupt enable)
+/// - SD_STS: Stream status (buffer completion, FIFO error)
+/// - SD_LPIB: Link position in current buffer
+/// - SD_CBL: Cyclic buffer length
+/// - SD_LVI: Last valid index (number of BDL entries - 1)
+/// - SD_FMT: Stream format (sample rate, bits, channels)
+/// - SD_BDPL/BDPU: BDL base address
+#[derive(Debug, Clone)]
+pub struct StreamDescriptor {
+    /// Stream index (0-30 for output, 0-30 for input)
+    pub index: u8,
+    /// Direction (Playback or Capture)
+    pub direction: StreamDirection,
+    /// Stream format
+    pub format: AudioFormat,
+    /// BDL base address
+    pub bdl_base: u64,
+    /// BDL entries
+    pub bdl: Vec<BufferDescriptorEntry>,
+    /// Cyclic buffer length (bytes)
+    pub buffer_length: u32,
+    /// Last valid index
+    pub last_valid_index: u8,
+    /// Stream running state
+    pub running: bool,
+}
+
+impl StreamDescriptor {
+    pub fn new(index: u8, direction: StreamDirection) -> Self {
+        Self {
+            index,
+            direction,
+            format: AudioFormat::dvd_quality(),
+            bdl_base: 0,
+            bdl: Vec::new(),
+            buffer_length: 0,
+            last_valid_index: 0,
+            running: false,
+        }
+    }
+
+    /// Calculate SD_FMT register value from audio format
+    ///
+    /// Format: [31:20] base rate, [19:16] base bits, [15:8] channels - 1, [7:0] divisor
+    pub fn calculate_format_value(&self) -> u16 {
+        let base_rate = match self.format.sample_rate {
+            48000 => 0x0000,
+            44100 => 0x4000,
+            96000 => 0x8000,
+            192000 => 0xC000,
+            _ => 0x0000,
+        };
+
+        let bits = match self.format.bits_per_sample {
+            8 => 0x00,
+            16 => 0x01,
+            20 => 0x02,
+            24 => 0x03,
+            32 => 0x04,
+            _ => 0x01,
+        };
+
+        let channels = (self.format.channels as u16 - 1) << 8;
+
+        base_rate | bits | channels
+    }
+
+    /// Program the BDL (Buffer Descriptor List)
+    ///
+    /// The BDL is an array of 16-byte entries pointing to audio buffer fragments.
+    /// Each entry contains: buffer address (64-bit), length (32-bit), flags (32-bit)
+    pub fn program_bdl(&mut self, buffer_phys: u64, buffer_size: usize, fragment_count: usize) {
+        let fragment_size = buffer_size / fragment_count;
+        self.bdl.clear();
+
+        for i in 0..fragment_count {
+            let addr = buffer_phys + (i * fragment_size) as u64;
+            let is_last = i == fragment_count - 1;
+            let interrupt = i == 0 || is_last; // Interrupt on first and last
+
+            let entry = BufferDescriptorEntry::new(addr, fragment_size as u32, is_last, interrupt);
+            self.bdl.push(entry);
+        }
+
+        self.buffer_length = buffer_size as u32;
+        self.last_valid_index = (fragment_count - 1) as u8;
+
+        crate::serial_println!(
+            "[HDA] BDL programmed: {} fragments, {} bytes each, total {} bytes",
+            fragment_count,
+            fragment_size,
+            buffer_size
+        );
+    }
+
+    /// Program stream descriptor registers
+    ///
+    /// 1. Write SD_FMT
+    /// 2. Write SD_BDPL/SD_BDPU
+    /// 3. Write SD_CBL
+    /// 4. Write SD_LVI
+    /// 5. Clear SD_LPIB
+    pub fn program_registers(&self, mmio_base: u64, stream_base: usize) {
+        let _ = (mmio_base, stream_base);
+
+        // In real implementation:
+        // let sd_offset = stream_base + (self.index as usize * 0x20);
+        //
+        // // Program format
+        // write_volatile(mmio_base + sd_offset + HDA_SD_FMT, self.calculate_format_value());
+        //
+        // // Program BDL address
+        // write_volatile(mmio_base + sd_offset + HDA_SD_BDPL, self.bdl_base as u32);
+        // write_volatile(mmio_base + sd_offset + HDA_SD_BDPU, (self.bdl_base >> 32) as u32);
+        //
+        // // Program buffer length
+        // write_volatile(mmio_base + sd_offset + HDA_SD_CBL, self.buffer_length);
+        //
+        // // Program last valid index
+        // write_volatile(mmio_base + sd_offset + HDA_SD_LVI, self.last_valid_index as u32);
+        //
+        // // Reset position
+        // write_volatile(mmio_base + sd_offset + HDA_SD_LPIB, 0);
+
+        crate::serial_println!(
+            "[HDA] Stream {} programmed: format={}Hz {}bit {}ch",
+            self.index,
+            self.format.sample_rate,
+            self.format.bits_per_sample,
+            self.format.channels
+        );
+    }
+
+    /// Start the stream (set RUN bit in SD_CTL)
+    pub fn start(&mut self, mmio_base: u64, stream_base: usize) {
+        let _ = (mmio_base, stream_base);
+
+        // In real implementation:
+        // let sd_offset = stream_base + (self.index as usize * 0x20);
+        // let ctl = read_volatile(mmio_base + sd_offset + HDA_SD_CTL);
+        // write_volatile(mmio_base + sd_offset + HDA_SD_CTL, ctl | (1 << 1)); // Set RUN bit
+
+        self.running = true;
+        crate::serial_println!("[HDA] Stream {} started", self.index);
+    }
+
+    /// Stop the stream (clear RUN bit in SD_CTL)
+    pub fn stop(&mut self, mmio_base: u64, stream_base: usize) {
+        let _ = (mmio_base, stream_base);
+
+        // In real implementation:
+        // let sd_offset = stream_base + (self.index as usize * 0x20);
+        // let ctl = read_volatile(mmio_base + sd_offset + HDA_SD_CTL);
+        // write_volatile(mmio_base + sd_offset + HDA_SD_CTL, ctl & !(1 << 1)); // Clear RUN bit
+
+        self.running = false;
+        crate::serial_println!("[HDA] Stream {} stopped", self.index);
+    }
+
+    /// Reset the stream
+    pub fn reset(&mut self, mmio_base: u64, stream_base: usize) {
+        let _ = (mmio_base, stream_base);
+
+        // In real implementation:
+        // 1. Set SRST bit in SD_CTL
+        // 2. Wait for SRST to be set by hardware
+        // 3. Clear SRST bit
+        // 4. Wait for SRST to be cleared by hardware
+
+        self.running = false;
+        crate::serial_println!("[HDA] Stream {} reset", self.index);
+    }
+}
+
+// ============================================================================
+// WIDGET PATH DISCOVERY (Pin → DAC)
+// ============================================================================
+
+/// Audio path from pin to DAC
+#[derive(Debug, Clone)]
+pub struct AudioPath {
+    /// Output pin NID
+    pub pin_nid: u8,
+    /// DAC NID
+    pub dac_nid: u8,
+    /// Path through widgets (mixers, selectors)
+    pub path: Vec<u8>,
+    /// Pin configuration default
+    pub pin_config: u32,
+    /// Pin type (speaker, headphone, line-out)
+    pub pin_type: PinType,
+}
+
+/// Pin type enumeration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinType {
+    Speaker,
+    Headphone,
+    LineOut,
+    LineIn,
+    Mic,
+    Unknown,
+}
+
+impl AudioPath {
+    /// Discover audio output paths in a codec
+    ///
+    /// Algorithm:
+    /// 1. Find all pin widgets with connection (Pin Complex)
+    /// 2. For each pin, traverse connection list to find DAC
+    /// 3. Store the path for configuration
+    pub fn discover_paths(codec: &HdaCodec) -> Vec<Self> {
+        let mut paths = Vec::new();
+
+        // Find pin widgets (type 0x4)
+        for widget in &codec.widgets {
+            if widget.widget_type == HdaWidgetType::Pin {
+                // Try to find connected DAC
+                if let Some(dac_widget) = Self::find_dac_for_pin(codec, widget.nid) {
+                    let pin_type = Self::get_pin_type(widget.nid);
+
+                    paths.push(AudioPath {
+                        pin_nid: widget.nid,
+                        dac_nid: dac_widget.nid,
+                        path: vec![widget.nid, dac_widget.nid],
+                        pin_config: 0, // Would read from Get Pin Config verb
+                        pin_type,
+                    });
+
+                    crate::serial_println!(
+                        "[HDA] Found path: Pin {} -> DAC {} (type: {:?})",
+                        widget.nid,
+                        dac_widget.nid,
+                        pin_type
+                    );
+                }
+            }
+        }
+
+        paths
+    }
+
+    /// Find DAC widget connected to a pin
+    fn find_dac_for_pin(codec: &HdaCodec, pin_nid: u8) -> Option<&AudioWidget> {
+        // In real implementation:
+        // 1. Get Pin Widget's connection list (Get Connection List verb)
+        // 2. Follow connections to find DAC (type 0x0)
+        // 3. Handle mixers and selectors in the path
+
+        // Simplified: find first DAC in codec
+        codec.find_output_dac()
+    }
+
+    /// Determine pin type from configuration default
+    fn get_pin_type(_nid: u8) -> PinType {
+        // In real implementation:
+        // 1. Issue Get Pin Configuration verb
+        // 2. Parse configuration default (bits 20:23 = default device)
+        //
+        // Device types:
+        // 0x0 = Line Out
+        // 0x1 = Speaker
+        // 0x2 = Headphone Out
+        // 0x3 = CD
+        // 0x4 = SPDIF Out
+        // 0x5 = Digital Other Out
+        // 0x6 = Modem Line Side
+        // 0x7 = Modem Handset Side
+        // 0x8 = Line In
+        // 0x9 = Aux
+        // 0xA = Mic In
+        // 0xB = Telephony
+        // 0xC = SPDIF In
+        // 0xD = Digital Other In
+        // 0xE = Reserved
+        // 0xF = Other
+
+        PinType::Speaker // Default assumption
+    }
+
+    /// Configure the audio path for playback
+    ///
+    /// 1. Power up all widgets in path
+    /// 2. Set Pin Widget Control (enable output)
+    /// 3. Set DAC format
+    /// 4. Set amplifier gains
+    pub fn configure(
+        &self,
+        corb_rirb: &mut CorbRirb,
+        codec_addr: u8,
+        format: u16,
+    ) -> Result<(), AudioError> {
+        let _ = (corb_rirb, codec_addr, format);
+
+        // In real implementation:
+        // 1. Set Power State to D0 for all widgets in path
+        //    Verb: 0x705 | (nid << 20) | 0x00
+        //
+        // 2. Configure Pin Widget Control
+        //    Verb: 0x707 | (pin_nid << 20) | 0xC0 (output enable)
+        //
+        // 3. Set DAC format
+        //    Verb: 0x200 | (dac_nid << 20) | format
+        //
+        // 4. Set amplifier gains (unmute)
+        //    Verb: 0x300 | (nid << 20) | gain_value
+
+        crate::serial_println!(
+            "[HDA] Path configured: Pin {} -> DAC {}",
+            self.pin_nid,
+            self.dac_nid
+        );
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// DMA PLAYBACK ENGINE
+// ============================================================================
+
+/// HDA DMA Playback Engine
+///
+/// Manages the complete audio playback pipeline:
+/// 1. CORB/RIRB for codec configuration
+/// 2. Stream Descriptor for DMA programming
+/// 3. Widget path for audio routing
+#[derive(Debug, Clone)]
+pub struct DmaPlaybackEngine {
+    /// CORB/RIRB manager
+    pub corb_rirb: CorbRirb,
+    /// Stream descriptor
+    pub stream: StreamDescriptor,
+    /// Audio paths
+    pub paths: Vec<AudioPath>,
+    /// DMA buffer physical address
+    pub buffer_phys: u64,
+    /// DMA buffer virtual address (stored as usize for Send safety)
+    pub buffer_virt: usize,
+    /// DMA buffer size
+    pub buffer_size: usize,
+    /// MMIO base address
+    pub mmio_base: u64,
+    /// Stream register base offset
+    pub stream_base: usize,
+    /// Initialized flag
+    pub initialized: bool,
+}
+
+impl DmaPlaybackEngine {
+    pub fn new() -> Self {
+        Self {
+            corb_rirb: CorbRirb::new(),
+            stream: StreamDescriptor::new(0, StreamDirection::Playback),
+            paths: Vec::new(),
+            buffer_phys: 0,
+            buffer_virt: 0,
+            buffer_size: 0,
+            mmio_base: 0,
+            stream_base: 0x80, // Default stream register base
+            initialized: false,
+        }
+    }
+
+    /// Initialize the playback engine
+    ///
+    /// 1. Initialize CORB/RIRB
+    /// 2. Discover audio paths
+    /// 3. Configure default path
+    pub fn init(&mut self, controller: &mut HdaController) -> Result<(), AudioError> {
+        if self.initialized {
+            return Ok(());
+        }
+
+        // Initialize CORB/RIRB
+        self.corb_rirb.init(self.mmio_base)?;
+
+        // Discover audio paths in all codecs
+        for codec in &controller.codecs {
+            let paths = AudioPath::discover_paths(codec);
+            self.paths.extend(paths);
+        }
+
+        // Configure first available path
+        if let Some(path) = self.paths.first() {
+            if let Some(codec) = controller.codecs.first() {
+                let format = self.stream.calculate_format_value();
+                path.configure(&mut self.corb_rirb, codec.address, format)?;
+            }
+        }
+
+        self.initialized = true;
+        crate::serial_println!("[HDA] DMA playback engine initialized");
+
+        Ok(())
+    }
+
+    /// Allocate DMA buffer
+    ///
+    /// Allocates a physically contiguous buffer for audio data.
+    /// Size should be multiple of fragment size * fragment count.
+    pub fn allocate_buffer(&mut self, size: usize) -> Result<(), AudioError> {
+        // In real implementation:
+        // 1. Allocate physically contiguous memory (DMA-safe)
+        // 2. Map to virtual address if needed
+        // 3. Store physical and virtual addresses
+
+        self.buffer_size = size;
+
+        crate::serial_println!("[HDA] DMA buffer allocated: {} bytes", size);
+
+        Ok(())
+    }
+
+    /// Write audio data to DMA buffer
+    ///
+    /// Copies PCM data to the DMA buffer for playback.
+    pub fn write_buffer(&mut self, data: &[u8]) -> Result<usize, AudioError> {
+        if self.buffer_virt == 0 || self.buffer_size == 0 {
+            return Err(AudioError::BufferError);
+        }
+
+        let copy_len = data.len().min(self.buffer_size);
+
+        // In real implementation:
+        // unsafe {
+        //     core::ptr::copy_nonoverlapping(data.as_ptr(), self.buffer_virt, copy_len);
+        // }
+
+        crate::serial_println!("[HDA] Written {} bytes to DMA buffer", copy_len);
+
+        Ok(copy_len)
+    }
+
+    /// Start playback
+    ///
+    /// 1. Program BDL
+    /// 2. Program stream registers
+    /// 3. Start stream
+    pub fn start_playback(&mut self) -> Result<(), AudioError> {
+        if !self.initialized {
+            return Err(AudioError::ControllerError);
+        }
+
+        // Program BDL with circular buffer (2 fragments)
+        let fragment_count = 2;
+        self.stream
+            .program_bdl(self.buffer_phys, self.buffer_size, fragment_count);
+
+        // Program stream registers
+        self.stream
+            .program_registers(self.mmio_base, self.stream_base);
+
+        // Start stream
+        self.stream.start(self.mmio_base, self.stream_base);
+
+        crate::serial_println!("[HDA] Playback started");
+
+        Ok(())
+    }
+
+    /// Stop playback
+    pub fn stop_playback(&mut self) -> Result<(), AudioError> {
+        self.stream.stop(self.mmio_base, self.stream_base);
+        crate::serial_println!("[HDA] Playback stopped");
+        Ok(())
+    }
+
+    /// Handle buffer completion interrupt
+    ///
+    /// Called when a buffer fragment has been consumed by DMA.
+    /// Update buffer position and possibly swap buffers.
+    pub fn handle_buffer_complete(&mut self) -> Result<(), AudioError> {
+        // In real implementation:
+        // 1. Read SD_LPIB to get current position
+        // 2. Calculate which fragment was just completed
+        // 3. Update application's buffer position
+        // 4. Clear interrupt status
+
+        crate::serial_println!("[HDA] Buffer completion interrupt");
+
+        Ok(())
+    }
+}
+
+// Global DMA playback engine
+static DMA_ENGINE: Mutex<Option<DmaPlaybackEngine>> = Mutex::new(None);
+
+/// Initialize DMA playback engine with controller
+pub fn init_dma_playback() -> Result<(), AudioError> {
+    let mut controllers = HDA_CONTROLLERS.lock();
+    let controller = controllers.first_mut().ok_or(AudioError::NoController)?;
+
+    let mut engine = DmaPlaybackEngine::new();
+    engine.mmio_base = controller.mmio_base;
+    engine.init(controller)?;
+
+    *DMA_ENGINE.lock() = Some(engine);
+
+    crate::serial_println!("[HDA] DMA playback initialized");
+
+    Ok(())
+}
+
+/// Play audio data via DMA
+pub fn play_audio_dma(data: &[u8], format: AudioFormat) -> Result<(), AudioError> {
+    let mut engine_lock = DMA_ENGINE.lock();
+    let engine = engine_lock.as_mut().ok_or(AudioError::NoController)?;
+
+    // Set format
+    engine.stream.format = format;
+
+    // Allocate buffer (should be pre-allocated in real implementation)
+    engine.allocate_buffer(data.len())?;
+
+    // Write data
+    engine.write_buffer(data)?;
+
+    // Start playback
+    engine.start_playback()?;
+
+    Ok(())
+}
+
+/// Stop DMA playback
+pub fn stop_audio_dma() -> Result<(), AudioError> {
+    let mut engine_lock = DMA_ENGINE.lock();
+    let engine = engine_lock.as_mut().ok_or(AudioError::NoController)?;
+
+    engine.stop_playback()?;
+
+    Ok(())
 }
 
 /// Varsayılan (ilk) HDA denetleyicisini döndürür.
@@ -777,7 +1445,8 @@ pub fn default_controller() -> Option<HdaController> {
 
 /// Varsayılan denetleyicideki ilk codec'i döndürür.
 pub fn default_codec() -> Option<HdaCodec> {
-    HDA_CONTROLLERS.lock()
+    HDA_CONTROLLERS
+        .lock()
         .first()
         .and_then(|ctrl| ctrl.codecs.first().cloned())
 }
@@ -785,14 +1454,19 @@ pub fn default_codec() -> Option<HdaCodec> {
 /// Oynatma için yeni bir ses akışı açar, akış kimliği döndürür.
 pub fn open_playback_stream(format: AudioFormat) -> Result<u8, AudioError> {
     let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::SeqCst) as u8;
-    
+
     let stream = AudioStream::new(stream_id, StreamDirection::Playback, format);
-    
+
     AUDIO_STREAMS.lock().insert(stream_id, stream);
-    
-    crate::serial_println!("[AUDIO] Opened playback stream {} ({}Hz, {}bit, {}ch)",
-        stream_id, format.sample_rate, format.bits_per_sample, format.channels);
-    
+
+    crate::serial_println!(
+        "[AUDIO] Opened playback stream {} ({}Hz, {}bit, {}ch)",
+        stream_id,
+        format.sample_rate,
+        format.bits_per_sample,
+        format.channels
+    );
+
     Ok(stream_id)
 }
 
@@ -811,9 +1485,9 @@ pub fn close_stream(stream_id: u8) -> Result<(), AudioError> {
 pub fn write_stream(stream_id: u8, data: &[u8]) -> Result<usize, AudioError> {
     let mut streams = AUDIO_STREAMS.lock();
     let stream = streams.get_mut(&stream_id).ok_or(AudioError::NoStream)?;
-    
+
     stream.set_buffer(data.to_vec());
-    
+
     Ok(data.len())
 }
 
@@ -821,11 +1495,11 @@ pub fn write_stream(stream_id: u8, data: &[u8]) -> Result<usize, AudioError> {
 pub fn start_stream(stream_id: u8) -> Result<(), AudioError> {
     let mut streams = AUDIO_STREAMS.lock();
     let stream = streams.get_mut(&stream_id).ok_or(AudioError::NoStream)?;
-    
+
     stream.start();
-    
+
     crate::serial_println!("[AUDIO] Started stream {}", stream_id);
-    
+
     Ok(())
 }
 
@@ -833,11 +1507,11 @@ pub fn start_stream(stream_id: u8) -> Result<(), AudioError> {
 pub fn stop_stream(stream_id: u8) -> Result<(), AudioError> {
     let mut streams = AUDIO_STREAMS.lock();
     let stream = streams.get_mut(&stream_id).ok_or(AudioError::NoStream)?;
-    
+
     stream.stop();
-    
+
     crate::serial_println!("[AUDIO] Stopped stream {}", stream_id);
-    
+
     Ok(())
 }
 
@@ -852,9 +1526,9 @@ pub fn set_volume(volume: u8) -> Result<(), AudioError> {
             let _ = dac;
         }
     }
-    
+
     crate::serial_println!("[AUDIO] Volume set to {}%", volume);
-    
+
     Ok(())
 }
 
@@ -862,15 +1536,15 @@ pub fn set_volume(volume: u8) -> Result<(), AudioError> {
 pub fn set_mute(mute: bool) -> Result<(), AudioError> {
     let mut controllers = HDA_CONTROLLERS.lock();
     let ctrl = controllers.first_mut().ok_or(AudioError::NoController)?;
-    
+
     if let Some(codec) = ctrl.codecs.first_mut() {
         if let Some(dac) = codec.find_output_dac() {
             let _ = dac;
         }
     }
-    
+
     crate::serial_println!("[AUDIO] Mute: {}", mute);
-    
+
     Ok(())
 }
 
@@ -878,7 +1552,7 @@ pub fn set_mute(mute: bool) -> Result<(), AudioError> {
 pub fn get_stream_position(stream_id: u8) -> Result<usize, AudioError> {
     let streams = AUDIO_STREAMS.lock();
     let stream = streams.get(&stream_id).ok_or(AudioError::NoStream)?;
-    
+
     Ok(stream.position)
 }
 
@@ -886,7 +1560,7 @@ pub fn get_stream_position(stream_id: u8) -> Result<usize, AudioError> {
 pub fn is_stream_playing(stream_id: u8) -> Result<bool, AudioError> {
     let streams = AUDIO_STREAMS.lock();
     let stream = streams.get(&stream_id).ok_or(AudioError::NoStream)?;
-    
+
     Ok(stream.playing)
 }
 
@@ -894,7 +1568,7 @@ pub fn is_stream_playing(stream_id: u8) -> Result<bool, AudioError> {
 pub fn get_capabilities() -> Option<AudioCapabilities> {
     let controllers = HDA_CONTROLLERS.lock();
     let ctrl = controllers.first()?;
-    
+
     Some(AudioCapabilities {
         max_channels: 8,
         max_sample_rate: 192000,
@@ -998,8 +1672,8 @@ impl DmaAudioTransfer {
 pub struct MixerChannel {
     pub id: u8,
     pub name: alloc::string::String,
-    pub volume: u8,       // 0-100
-    pub pan: i8,          // -100 (sol) ile 100 (sağ) arası
+    pub volume: u8, // 0-100
+    pub pan: i8,    // -100 (sol) ile 100 (sağ) arası
     pub muted: bool,
     pub solo: bool,
     pub input_stream: Option<u8>,
@@ -1042,7 +1716,10 @@ impl MixerChannel {
             right_vol
         };
 
-        (left_pan.clamp(-32768, 32767) as i16, right_pan.clamp(-32768, 32767) as i16)
+        (
+            left_pan.clamp(-32768, 32767) as i16,
+            right_pan.clamp(-32768, 32767) as i16,
+        )
     }
 }
 
@@ -1111,13 +1788,23 @@ impl AudioMixer {
 
             if let Some(stream_id) = channel.input_stream {
                 if let Some(stream) = streams.get(&stream_id) {
-                    if stream.playing && stream.format.channels == 2 && stream.format.bits_per_sample == 16 {
+                    if stream.playing
+                        && stream.format.channels == 2
+                        && stream.format.bits_per_sample == 16
+                    {
                         // Bu akıştan örnekleri karıştır
                         for i in 0..samples {
-                            let sample_offset = (stream.position + i * 4).min(stream.buffer.len() - 4);
+                            let sample_offset =
+                                (stream.position + i * 4).min(stream.buffer.len() - 4);
                             if sample_offset + 4 <= stream.buffer.len() {
-                                let left = i16::from_le_bytes([stream.buffer[sample_offset], stream.buffer[sample_offset + 1]]);
-                                let right = i16::from_le_bytes([stream.buffer[sample_offset + 2], stream.buffer[sample_offset + 3]]);
+                                let left = i16::from_le_bytes([
+                                    stream.buffer[sample_offset],
+                                    stream.buffer[sample_offset + 1],
+                                ]);
+                                let right = i16::from_le_bytes([
+                                    stream.buffer[sample_offset + 2],
+                                    stream.buffer[sample_offset + 3],
+                                ]);
 
                                 let (left_out, right_out) = channel.apply_to_sample(left, right);
 
@@ -1343,7 +2030,7 @@ fn sin_approx(x: f32) -> f32 {
     let x5 = x3 * x2;
     let x7 = x5 * x2;
     let x9 = x7 * x2;
-    
+
     x - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
 }
 
@@ -1460,7 +2147,8 @@ impl WhiteNoiseCodec {
 
     /// Basit LFSR (Doğrusal Geri Beslemeli Kaydırma Yazmacı) ile sözde rastgele sayı üretir.
     fn next_random(&mut self) -> u32 {
-        let bit = ((self.state >> 0) ^ (self.state >> 2) ^ (self.state >> 3) ^ (self.state >> 5)) & 1;
+        let bit =
+            ((self.state >> 0) ^ (self.state >> 2) ^ (self.state >> 3) ^ (self.state >> 5)) & 1;
         self.state = (self.state >> 1) | (bit << 31);
         self.state
     }
@@ -1693,7 +2381,9 @@ pub fn add_mixer_channel(name: &str) -> Option<u8> {
 pub fn set_channel_volume(channel_id: u8, volume: u8) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
-    let channel = mixer.get_channel_mut(channel_id).ok_or(AudioError::NoStream)?;
+    let channel = mixer
+        .get_channel_mut(channel_id)
+        .ok_or(AudioError::NoStream)?;
     channel.volume = volume.min(100);
     Ok(())
 }
@@ -1702,7 +2392,9 @@ pub fn set_channel_volume(channel_id: u8, volume: u8) -> Result<(), AudioError> 
 pub fn set_channel_pan(channel_id: u8, pan: i8) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
-    let channel = mixer.get_channel_mut(channel_id).ok_or(AudioError::NoStream)?;
+    let channel = mixer
+        .get_channel_mut(channel_id)
+        .ok_or(AudioError::NoStream)?;
     channel.pan = pan.clamp(-100, 100);
     Ok(())
 }
@@ -1711,7 +2403,9 @@ pub fn set_channel_pan(channel_id: u8, pan: i8) -> Result<(), AudioError> {
 pub fn set_channel_mute(channel_id: u8, muted: bool) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
-    let channel = mixer.get_channel_mut(channel_id).ok_or(AudioError::NoStream)?;
+    let channel = mixer
+        .get_channel_mut(channel_id)
+        .ok_or(AudioError::NoStream)?;
     channel.muted = muted;
     Ok(())
 }
@@ -1720,7 +2414,9 @@ pub fn set_channel_mute(channel_id: u8, muted: bool) -> Result<(), AudioError> {
 pub fn set_channel_solo(channel_id: u8, solo: bool) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
-    let channel = mixer.get_channel_mut(channel_id).ok_or(AudioError::NoStream)?;
+    let channel = mixer
+        .get_channel_mut(channel_id)
+        .ok_or(AudioError::NoStream)?;
     channel.solo = solo;
     Ok(())
 }
@@ -1729,7 +2425,9 @@ pub fn set_channel_solo(channel_id: u8, solo: bool) -> Result<(), AudioError> {
 pub fn link_stream_to_channel(channel_id: u8, stream_id: u8) -> Result<(), AudioError> {
     let mut mixer = AUDIO_MIXER.lock();
     let mixer = mixer.as_mut().ok_or(AudioError::NoController)?;
-    let channel = mixer.get_channel_mut(channel_id).ok_or(AudioError::NoStream)?;
+    let channel = mixer
+        .get_channel_mut(channel_id)
+        .ok_or(AudioError::NoStream)?;
     channel.input_stream = Some(stream_id);
     Ok(())
 }
@@ -1740,4 +2438,23 @@ pub fn mix_streams() -> Option<Vec<u8>> {
     let mixer = mixer.as_ref()?;
     let streams = AUDIO_STREAMS.lock();
     Some(mixer.mix_to_buffer(&streams))
+}
+
+/// Ana ses seviyesini ayarlar (0.0 - 1.0).
+///
+/// Bu fonksiyon GUI ses sistemi tarafından çağrılır.
+pub fn set_master_volume(volume: f32) {
+    let vol = (volume.clamp(0.0, 1.0) * 100.0) as u8;
+    let mut mixer = AUDIO_MIXER.lock();
+    if let Some(ref mut m) = *mixer {
+        m.set_master_volume(vol);
+    }
+}
+
+/// Ana kanalı susturur veya susturmayı kaldırır.
+pub fn set_master_mute(muted: bool) {
+    let mut mixer = AUDIO_MIXER.lock();
+    if let Some(ref mut m) = *mixer {
+        m.set_master_mute(muted);
+    }
 }

@@ -43,14 +43,19 @@
 //!  +---------------------------+
 //! ```
 
-use super::{Ipv4Addr, Port, NetError, allocate_socket_id};
 use super::ip::{IpProtocol, Ipv4Packet};
 use super::socket::SocketAddr;
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-use alloc::vec;
+use super::{allocate_socket_id, Ipv4Addr, NetError, Port};
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Mutex;
+
+/// Sonraki kısa ömürlü (ephemeral) port numarası.
+/// IANA tanımlı dinamik port aralığı: 49152–65535
+static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
 
 /// UDP başlık yapısı (8 byte sabit)
 ///
@@ -162,7 +167,11 @@ pub fn compute_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, segment: &[u8]) -> u
     // Ones-complement (bitwise NOT)
     // UDP'de 0 = "checksum yok" - checksum 0 olursa 0xFFFF döndür
     let result = !(sum as u16);
-    if result == 0 { 0xFFFF } else { result }
+    if result == 0 {
+        0xFFFF
+    } else {
+        result
+    }
 }
 
 /// UDP checksum doğrula
@@ -289,13 +298,41 @@ pub fn create_socket() -> u32 {
 }
 
 /// Soketi belirtilen adrese bağla ve port tablosunu güncelle
+/// Kısa ömürlü port tahsis et (49152–65535 aralığından döngüsel)
+fn allocate_ephemeral_port() -> Port {
+    loop {
+        let port = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed);
+        // 65535'i aştıysa başa sar
+        if port < 49152 {
+            NEXT_EPHEMERAL_PORT.store(49152, Ordering::Relaxed);
+            continue;
+        }
+        // Port zaten kullanılıyor mu kontrol et
+        let bindings = UDP_BINDINGS.lock();
+        let candidate = Port(port);
+        if !bindings.contains_key(&candidate) {
+            return candidate;
+        }
+        // Kullanımdaysa bir sonrakini dene (wrap-around)
+    }
+}
+
 pub fn bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
     let mut socks = UDP_SOCKETS.lock();
     let sock = socks.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
-    sock.bind(addr)?;
+
+    // Port 0 ise otomatik olarak kısa ömürlü port tahsis et
+    let bind_addr = if addr.port.0 == 0 {
+        let eport = allocate_ephemeral_port();
+        SocketAddr::new(addr.ip, eport)
+    } else {
+        addr
+    };
+
+    sock.bind(bind_addr)?;
 
     // Port -> socket_id eşleşmesini kaydet
-    UDP_BINDINGS.lock().insert(addr.port, socket_id);
+    UDP_BINDINGS.lock().insert(bind_addr.port, socket_id);
 
     Ok(())
 }
@@ -345,6 +382,17 @@ pub fn get_all_sockets() -> Vec<UdpSocket> {
 ///     -> Soketi bul ve rx_buffer'a ekle
 /// ```
 pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
+    // ── Checksum doğrulaması ──
+    // Checksum 0 değilse (yani hesaplanmışsa) doğrula; geçersizse paketi düşür.
+    if !verify_checksum(
+        ip_packet.header.src,
+        ip_packet.header.dst,
+        ip_packet.payload,
+    ) {
+        crate::serial_println!("[UDP] Checksum verification failed, dropping packet");
+        return Err(NetError::ChecksumError);
+    }
+
     let udp_header = UdpHeader::parse(ip_packet.payload)?;
     // Veri: UDP başlığından sonra, UDP uzunluk alanı kadar
     let data = &ip_packet.payload[UdpHeader::SIZE..udp_header.length as usize];
@@ -365,4 +413,23 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
     }
 
     Ok(())
+}
+
+// ============================================================================
+// netstat desteği
+// ============================================================================
+
+/// netstat komutu için UDP soket özeti
+#[derive(Clone, Debug)]
+pub struct UdpSocketInfo {
+    pub port: u16,
+}
+
+/// Tüm UDP soketlerini listele (netstat için)
+pub fn list_sockets() -> Vec<UdpSocketInfo> {
+    let bindings = UDP_BINDINGS.lock();
+    bindings
+        .keys()
+        .map(|p| UdpSocketInfo { port: p.0 })
+        .collect()
 }

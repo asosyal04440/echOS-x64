@@ -24,7 +24,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 use core::arch::global_asm;
 use core::arch::x86_64::_rdtsc;
 use core::fmt::{self, Write};
@@ -34,11 +34,11 @@ use core::mem::MaybeUninit;
 use ech_os::boot::BootInfo;
 #[cfg(target_os = "uefi")]
 use ech_os::gop::framebuffer::Framebuffer;
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
+use ech_os::memory::frame_allocator::{LimineFrameAllocator, LimineMemmapEntry};
 #[cfg(target_os = "uefi")]
 use ech_os::splash::Splash;
-#[cfg(not(target_os = "uefi"))]
-use ech_os::memory::frame_allocator::{LimineFrameAllocator, LimineMemmapEntry};
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 use limine_protocol_for_rust::{
     requests::executable_cmdline::ExecutableCmdlineRequest,
     requests::hhdm::HigherHalfDirectMapRequest,
@@ -48,7 +48,7 @@ use limine_protocol_for_rust::{
     util::PointerSlice,
     REQUEST_END_MARKER, REQUEST_START_MARKER,
 };
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 use multiboot2::load;
 #[cfg(target_os = "uefi")]
 use sha2::{Digest, Sha256};
@@ -58,6 +58,10 @@ use uefi::prelude::*;
 use uefi::proto::console::gop::GraphicsOutput;
 #[cfg(target_os = "uefi")]
 use uefi::proto::loaded_image::LoadedImage;
+#[cfg(target_os = "uefi")]
+use uefi::proto::media::file::{File, FileAttribute, FileMode};
+#[cfg(target_os = "uefi")]
+use uefi::proto::media::fs::SimpleFileSystem;
 #[cfg(target_os = "uefi")]
 use uefi::proto::tcg::v2::{HashLogExtendEventFlags, PcrEventInputs, Tcg};
 #[cfg(target_os = "uefi")]
@@ -74,42 +78,42 @@ const BOOT_MAGIC_UEFI: u64 = 0x55454649;
 const BOOT_MAGIC_MB2: u64 = 0x36d76289;
 #[cfg(target_os = "uefi")]
 const CMDLINE_MAX_LEN: usize = 4096;
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 const LIMINE_REVISION: u64 = 4;
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 #[used]
 #[link_section = ".limine_reqs"]
 static LIMINE_BASE_REVISION: [u64; 4] = use_base_revision(LIMINE_REVISION);
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 #[used]
 #[link_section = ".limine_req_start"]
 static LIMINE_REQUEST_START_MARKER: [u64; 4] = REQUEST_START_MARKER;
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 #[used]
 #[link_section = ".limine_reqs"]
 static LIMINE_MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new(LIMINE_REVISION);
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 #[used]
 #[link_section = ".limine_reqs"]
 static LIMINE_HHDM_REQUEST: HigherHalfDirectMapRequest =
     HigherHalfDirectMapRequest::new(LIMINE_REVISION);
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 #[used]
 #[link_section = ".limine_reqs"]
 static LIMINE_CMDLINE_REQUEST: ExecutableCmdlineRequest =
     ExecutableCmdlineRequest::new(LIMINE_REVISION);
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 #[used]
 #[link_section = ".limine_req_end"]
 static LIMINE_REQUEST_END_MARKER: [u64; 2] = REQUEST_END_MARKER;
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 global_asm!(include_str!("boot/entry.S"));
 
 unsafe fn outb(port: u16, value: u8) {
@@ -140,7 +144,9 @@ fn serial_write_byte(byte: u8) {
     unsafe {
         let mut spins = 1_000_000u32;
         while (inb(COM1 + 5) & 0x20) == 0 {
-            if spins == 0 { break; }
+            if spins == 0 {
+                break;
+            }
             spins = spins.saturating_sub(1);
             core::hint::spin_loop();
         }
@@ -207,25 +213,25 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     unsafe {
         debugcon_write_byte(b'P');
         debugcon_write_byte(b'\n');
-        
+
         let rbp: u64;
         let rsp: u64;
         core::arch::asm!("mov {}, rbp", out(reg) rbp);
         core::arch::asm!("mov {}, rsp", out(reg) rsp);
-        
+
         debugcon_write_byte(b'R');
         debugcon_write_byte(b'S');
         debugcon_write_byte(b'P');
         debugcon_write_byte(b':');
         debugcon_write_hex(rsp);
-        
+
         debugcon_write_byte(b'R');
         debugcon_write_byte(b'B');
         debugcon_write_byte(b'P');
         debugcon_write_byte(b':');
         debugcon_write_hex(rbp);
     }
-        
+
     serial_write_str(&format_args!("[PANIC] Kernel panic\n"));
     let rbp: u64;
     let rsp: u64;
@@ -234,7 +240,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         core::arch::asm!("mov {}, rsp", out(reg) rsp);
     }
     serial_write_str(&format_args!("[PANIC] RSP: {:#x}, RBP: {:#x}\n", rsp, rbp));
-
 
     if let Some(location) = info.location() {
         serial_write_str(&format_args!(
@@ -246,6 +251,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     let message = info.message();
     serial_write_str(&format_args!("[PANIC] Message: {}\n", message));
+    ech_os::boot::appliance::record_panic();
     loop {
         unsafe {
             asm!("hlt");
@@ -253,6 +259,115 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "system" fn mainCRTStartup() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "system" fn WinMainCRTStartup() -> ! {
+    mainCRTStartup()
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "C" fn main() -> i32 {
+    0
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "C" fn memcpy(dest: *mut u8, src: *const u8, len: usize) -> *mut u8 {
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dest, len);
+    }
+    dest
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "C" fn memmove(dest: *mut u8, src: *const u8, len: usize) -> *mut u8 {
+    unsafe {
+        core::ptr::copy(src, dest, len);
+    }
+    dest
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "C" fn memset(dest: *mut u8, value: i32, len: usize) -> *mut u8 {
+    unsafe {
+        core::ptr::write_bytes(dest, value as u8, len);
+    }
+    dest
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "C" fn memcmp(lhs: *const u8, rhs: *const u8, len: usize) -> i32 {
+    for idx in 0..len {
+        let a = unsafe { *lhs.add(idx) };
+        let b = unsafe { *rhs.add(idx) };
+        if a != b {
+            return (a as i32) - (b as i32);
+        }
+    }
+    0
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "C" fn strlen(ptr: *const u8) -> usize {
+    let mut len = 0usize;
+    unsafe {
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+    }
+    len
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "C" fn fmod(x: f64, y: f64) -> f64 {
+    if y == 0.0 || !x.is_finite() || !y.is_finite() {
+        return f64::NAN;
+    }
+    x - libm::trunc(x / y) * y
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "C" fn fmodf(x: f32, y: f32) -> f32 {
+    if y == 0.0 || !x.is_finite() || !y.is_finite() {
+        return f32::NAN;
+    }
+    x - libm::truncf(x / y) * y
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "system" fn __CxxFrameHandler3() -> i32 {
+    0
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub static kernel_start: u8 = 0;
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub static kernel_end: u8 = 0;
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub static boot_lma_end: u8 = 0;
+
+#[cfg(not(target_os = "windows"))]
 #[no_mangle]
 pub extern "C" fn kernel_entry(boot_info_addr: usize, kaslr_offset: u64, boot_magic: u64) -> ! {
     unsafe {
@@ -261,6 +376,7 @@ pub extern "C" fn kernel_entry(boot_info_addr: usize, kaslr_offset: u64, boot_ma
     kernel_main(boot_info_addr, kaslr_offset, boot_magic)
 }
 
+#[cfg(not(target_os = "windows"))]
 #[no_mangle]
 pub extern "C" fn kernel_main(boot_info_addr: usize, kaslr_offset: u64, boot_magic: u64) -> ! {
     unsafe {
@@ -270,7 +386,9 @@ pub extern "C" fn kernel_main(boot_info_addr: usize, kaslr_offset: u64, boot_mag
         serial_init();
         debugcon_write_byte(b'S');
     }
-    unsafe { debugcon_write_byte(b'M'); }  // Mark: after serial_init
+    unsafe {
+        debugcon_write_byte(b'M');
+    } // Mark: after serial_init
     ech_os::memory::set_kaslr_offset(kaslr_offset);
     let mut seed = unsafe { _rdtsc() };
     seed ^= boot_info_addr as u64;
@@ -278,12 +396,17 @@ pub extern "C" fn kernel_main(boot_info_addr: usize, kaslr_offset: u64, boot_mag
     seed ^= boot_magic;
     seed ^= seed >> 32;
     ech_os::random::init(seed as u32);
-    unsafe { debugcon_write_byte(b'R'); }  // Mark: after random init
+    unsafe {
+        debugcon_write_byte(b'R');
+    } // Mark: after random init
     serial_write_str(&format_args!("[KASLR] Offset: {:#x}\n", kaslr_offset));
     serial_write_str(&format_args!("[BOOT] Magic: {:#x}\n", boot_magic));
-    unsafe { debugcon_write_byte(b'B'); debugcon_write_hex(boot_magic); }  // Mark: boot magic value
+    unsafe {
+        debugcon_write_byte(b'B');
+        debugcon_write_hex(boot_magic);
+    } // Mark: boot magic value
 
-    #[cfg(not(target_os = "uefi"))]
+    #[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
     if limine_available() {
         unsafe { boot_pipeline_limine(kaslr_offset) };
     }
@@ -291,17 +414,17 @@ pub extern "C" fn kernel_main(boot_info_addr: usize, kaslr_offset: u64, boot_mag
     if boot_magic == BOOT_MAGIC_UEFI {
         #[cfg(target_os = "uefi")]
         unsafe {
-            debugcon_write_byte(b'U');  // Mark: entering UEFI pipeline
+            debugcon_write_byte(b'U'); // Mark: entering UEFI pipeline
             boot_pipeline_uefi(boot_info_addr, kaslr_offset);
         }
-        #[cfg(not(target_os = "uefi"))]
+        #[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
         {
             serial_write_str(&format_args!(
                 "[BOOT] UEFI magic on non-UEFI target, halting\n"
             ));
         }
     } else if boot_magic == BOOT_MAGIC_MB2 {
-        #[cfg(not(target_os = "uefi"))]
+        #[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
         unsafe {
             boot_pipeline_multiboot(boot_info_addr, kaslr_offset);
         }
@@ -325,22 +448,22 @@ pub extern "C" fn kernel_main(boot_info_addr: usize, kaslr_offset: u64, boot_mag
     }
 }
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 fn limine_available() -> bool {
     LIMINE_MEMORY_MAP_REQUEST.get_response().is_some()
 }
 
 #[cfg(target_os = "uefi")]
 unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
-    debugcon_write_byte(b'1');  // Mark: entered boot_pipeline_uefi
-    // Initialize boot safety system FIRST
+    debugcon_write_byte(b'1'); // Mark: entered boot_pipeline_uefi
+                               // Initialize boot safety system FIRST
     ech_os::boot::safety::init();
-    debugcon_write_byte(b'2');  // Mark: after safety init
+    debugcon_write_byte(b'2'); // Mark: after safety init
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::UefiHandover);
-    debugcon_write_byte(b'3');  // Mark: after enter_phase
-    
+    debugcon_write_byte(b'3'); // Mark: after enter_phase
+
     let boot_info = &mut *(boot_info_addr as *mut BootInfo);
-    debugcon_write_byte(b'4');  // Mark: after boot_info cast
+    debugcon_write_byte(b'4'); // Mark: after boot_info cast
     let expected_size = core::mem::size_of::<BootInfo>() as u32;
     debugcon_write_hex(boot_info.magic);
     debugcon_write_hex(boot_info.version as u64);
@@ -351,11 +474,11 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
         || boot_info.version != ech_os::boot::BOOTINFO_VERSION
         || boot_info.size < expected_size
     {
-        debugcon_write_byte(b'!');  // Mark: BootInfo check failed
+        debugcon_write_byte(b'!'); // Mark: BootInfo check failed
         ech_os::boot::safety::BOOT_SAFETY.record_violation(
             ech_os::boot::safety::ViolationType::AcpiTableInvalid,
             "BootInfo ABI mismatch",
-            false
+            false,
         );
         serial_write_str(&format_args!(
             "[UEFI] BootInfo ABI mismatch magic={:#x} ver={} size={}\n",
@@ -365,13 +488,13 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
             asm!("hlt");
         }
     }
-    debugcon_write_byte(b'5');  // Mark: passed BootInfo checks
+    debugcon_write_byte(b'5'); // Mark: passed BootInfo checks
     if boot_info.physical_memory_offset == 0 || boot_info.hhdm_offset == 0 {
-        debugcon_write_byte(b'Z');  // Mark: zero offset
+        debugcon_write_byte(b'Z'); // Mark: zero offset
         ech_os::boot::safety::BOOT_SAFETY.record_violation(
             ech_os::boot::safety::ViolationType::MemoryMapInvalid,
             "Invalid memory offsets",
-            false
+            false,
         );
         serial_write_str(&format_args!(
             "[UEFI] Invalid memory offsets phys={:#x} hhdm={:#x}\n",
@@ -381,23 +504,23 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
             asm!("hlt");
         }
     }
-    debugcon_write_byte(b'6');  // Mark: passed offset checks
+    debugcon_write_byte(b'6'); // Mark: passed offset checks
     if boot_info.secure_boot && boot_info.system_table == 0 {
         serial_write_str(&format_args!("[UEFI] Secure Boot requires system table\n"));
         loop {
             asm!("hlt");
         }
     }
-    debugcon_write_byte(b'7');  // Mark: passed secure boot check
+    debugcon_write_byte(b'7'); // Mark: passed secure boot check
     ech_os::boot::set_secure_boot(boot_info.secure_boot);
     ech_os::cpu::acpi::set_uefi_rsdp_address(boot_info.rsdp_address);
     ech_os::acpi::set_rsdp_address(boot_info.rsdp_address);
-    debugcon_write_byte(b'8');  // Mark: after RSDP setup
+    debugcon_write_byte(b'8'); // Mark: after RSDP setup
     serial_write_str(&format_args!(
         "[UEFI] RSDP: {:#x}\n",
         boot_info.rsdp_address
     ));
-    debugcon_write_byte(b'9');  // Mark: after serial write
+    debugcon_write_byte(b'9'); // Mark: after serial write
 
     if let Some(framebuffer) = boot_info.framebuffer.as_ref() {
         serial_write_str(&format_args!(
@@ -408,7 +531,7 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
             framebuffer.pixels_per_scan_line
         ));
     }
-    debugcon_write_byte(b'A');  // Mark: after framebuffer check
+    debugcon_write_byte(b'A'); // Mark: after framebuffer check
     let mut splash: Option<Splash> = None;
     let mut run_boot_tests = false;
     if boot_info.image_size != 0 {
@@ -422,113 +545,114 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
         }
         serial_write_str(&format_args!("\n"));
     }
-    debugcon_write_byte(b'B');  // Mark: after image hash
+    debugcon_write_byte(b'B'); // Mark: after image hash
 
     let _boot_ctx = ech_os::KernelBootContext {
         physical_memory_offset: boot_info.physical_memory_offset as u64,
     };
-    debugcon_write_byte(b'C');  // Mark: after boot context
+    debugcon_write_byte(b'C'); // Mark: after boot context
 
     let memory_map_present = boot_info
         .memory_map
         .as_ref()
         .map(|map| map.entries().next().is_some())
         .unwrap_or(false);
-    debugcon_write_byte(if memory_map_present { b'Y' } else { b'N' });  // Mark: memory map present?
-    debugcon_write_byte(b'D');  // Mark: after memory_map_present check
+    debugcon_write_byte(if memory_map_present { b'Y' } else { b'N' }); // Mark: memory map present?
+    debugcon_write_byte(b'D'); // Mark: after memory_map_present check
     if !memory_map_present {
-        debugcon_write_byte(b'!');  // Mark: memory map empty
+        debugcon_write_byte(b'!'); // Mark: memory map empty
         ech_os::boot::safety::BOOT_SAFETY.record_violation(
             ech_os::boot::safety::ViolationType::MemoryMapInvalid,
             "Empty memory map",
-            false
+            false,
         );
         serial_write_str(&format_args!("[UEFI] Empty memory map\n"));
         loop {
             asm!("hlt");
         }
     }
-    debugcon_write_byte(b'E');  // Mark: passed memory map check
+    debugcon_write_byte(b'E'); // Mark: passed memory map check
     if let Some(map) = boot_info.memory_map.as_ref() {
         let total_pages: u64 = map.entries().map(|d| d.page_count).sum();
         let total_mb = total_pages.saturating_mul(4096) / (1024 * 1024);
         serial_write_str(&format_args!("[UEFI] Memory map total: {} MB\n", total_mb));
     }
-    debugcon_write_byte(b'F');  // Mark: after memory map total
-    if let (Some(framebuffer), Some(screen)) =
-        (boot_info.framebuffer.as_mut(), splash.as_mut())
-    {
+    debugcon_write_byte(b'F'); // Mark: after memory map total
+    if let (Some(framebuffer), Some(screen)) = (boot_info.framebuffer.as_mut(), splash.as_mut()) {
         screen.update_progress(framebuffer, 15);
     }
 
-    debugcon_write_byte(b'G');  // Mark: before init_paging
+    debugcon_write_byte(b'G'); // Mark: before init_paging
     serial_write_str(&format_args!("[UEFI] init_paging\n"));
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::PagingSetup);
     let mut mapper = unsafe { ech_os::memory::init_paging(0) };
-    debugcon_write_byte(b'H');  // Mark: after init_paging
+    debugcon_write_byte(b'H'); // Mark: after init_paging
     serial_write_str(&format_args!("[UEFI] init_uefi memory manager\n"));
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::MemoryInit);
-    debugcon_write_byte(b'I');  // Mark: before memory_map.take
+    debugcon_write_byte(b'I'); // Mark: before memory_map.take
     let memory_map = boot_info
         .memory_map
         .take()
         .expect("[UEFI] memory map already consumed");
-    debugcon_write_byte(b'J');  // Mark: after memory_map.take
+    debugcon_write_byte(b'J'); // Mark: after memory_map.take
     let mut memory_manager = ech_os::memory::init_uefi(memory_map);
-    debugcon_write_byte(b'K');  // Mark: after init_uefi
+    debugcon_write_byte(b'K'); // Mark: after init_uefi
     unsafe {
         ech_os::memory::set_global_memory_manager(&mut memory_manager as *mut _);
     }
-    debugcon_write_byte(b'L');  // Mark: after set_global_memory_manager
+    debugcon_write_byte(b'L'); // Mark: after set_global_memory_manager
     serial_write_str(&format_args!("[UEFI] init_uefi_hhdm\n"));
     if let Err(err) =
         ech_os::memory::init_uefi_hhdm(&mut mapper, &mut memory_manager, boot_info.hhdm_offset)
     {
-        debugcon_write_byte(b'X');  // Mark: init_uefi_hhdm failed
-        serial_write_str(&format_args!("[HHDM] init failed: {:?}\n", err));
+        debugcon_write_byte(b'X'); // Mark: init_uefi_hhdm failed
+        serial_write_str(&format_args!(
+            "[HHDM] FATAL: init failed: {:?} — cannot continue without HHDM\n",
+            err
+        ));
+        loop {
+            core::arch::asm!("hlt");
+        }
     } else {
-        debugcon_write_byte(b'M');  // Mark: init_uefi_hhdm success
+        debugcon_write_byte(b'M'); // Mark: init_uefi_hhdm success
         ech_os::memory::set_active_physical_offset(boot_info.hhdm_offset);
         mapper = unsafe { ech_os::memory::init_paging(boot_info.hhdm_offset) };
     }
-    debugcon_write_byte(b'N');  // Mark: after hhdm setup
+    debugcon_write_byte(b'N'); // Mark: after hhdm setup
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
-        debugcon_write_byte(b'P');  // Mark: framebuffer present
+        debugcon_write_byte(b'P'); // Mark: framebuffer present
         let size = framebuffer
             .pixels_per_scan_line
             .saturating_mul(framebuffer.height)
             .saturating_mul(4);
-        debugcon_write_byte(b'a');  // Mark: before map_mmio
+        debugcon_write_byte(b'a'); // Mark: before map_mmio
         let mapped = ech_os::memory::map_mmio(framebuffer.base_addr as u64, size);
-        debugcon_write_byte(b'b');  // Mark: after map_mmio
+        debugcon_write_byte(b'b'); // Mark: after map_mmio
         if !mapped.is_null() {
             framebuffer.base_addr = mapped as usize;
         } else {
-            framebuffer.base_addr =
-                (boot_info.hhdm_offset + framebuffer.base_addr as u64) as usize;
+            framebuffer.base_addr = (boot_info.hhdm_offset + framebuffer.base_addr as u64) as usize;
         }
-        debugcon_write_byte(b'c');  // Mark: before Splash::new
+        debugcon_write_byte(b'c'); // Mark: before Splash::new
         let mut screen = Splash::new(framebuffer);
-        debugcon_write_byte(b'd');  // Mark: after Splash::new
+        debugcon_write_byte(b'd'); // Mark: after Splash::new
         screen.update_progress(framebuffer, 5);
         splash = Some(screen);
     } else {
-        debugcon_write_byte(b'p');  // Mark: no framebuffer
+        debugcon_write_byte(b'p'); // Mark: no framebuffer
     }
-    debugcon_write_byte(b'Q');  // Mark: after framebuffer setup
-    if let (Some(framebuffer), Some(screen)) =
-        (boot_info.framebuffer.as_mut(), splash.as_mut())
-    {
+    debugcon_write_byte(b'Q'); // Mark: after framebuffer setup
+    if let (Some(framebuffer), Some(screen)) = (boot_info.framebuffer.as_mut(), splash.as_mut()) {
         screen.update_progress(framebuffer, 30);
     }
-    debugcon_write_byte(b'R');  // Mark: before cmdline
+    debugcon_write_byte(b'R'); // Mark: before cmdline
     if boot_info.cmdline_len > 0 && boot_info.cmdline_ptr != 0 {
-        debugcon_write_byte(b'S');  // Mark: cmdline present
+        debugcon_write_byte(b'S'); // Mark: cmdline present
         if boot_info.cmdline_len > isize::MAX as u64 {
             serial_write_str(&format_args!("[UEFI] cmdline too large\n"));
         } else {
-            let cmdline_ptr = ech_os::memory::phys_to_virt(boot_info.cmdline_ptr as usize)
-                as *const u8;
+            let cmdline_ptr =
+                ech_os::memory::phys_to_virt(boot_info.cmdline_ptr as usize) as *const u8;
             if cmdline_ptr.is_null() {
                 serial_write_str(&format_args!("[UEFI] cmdline ptr invalid\n"));
             } else {
@@ -562,23 +686,29 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     } else if boot_info.cmdline_len > 0 {
         serial_write_str(&format_args!("[UEFI] cmdline len without ptr\n"));
     }
-    debugcon_write_byte(b'T');  // Mark: before set_virtual_address_map
+    debugcon_write_byte(b'T'); // Mark: before set_virtual_address_map
     serial_write_str(&format_args!("[UEFI] set_virtual_address_map\n"));
     if boot_info.system_table != 0 {
-        debugcon_write_byte(b'V');  // Mark: system_table present
+        debugcon_write_byte(b'V'); // Mark: system_table present
         match ech_os::memory::set_uefi_virtual_address_map(
             boot_info.system_table,
             &mut memory_manager,
             boot_info.hhdm_offset,
         ) {
             Ok(runtime_services) => {
-                debugcon_write_byte(b'W');  // Mark: set_virtual_address_map OK
+                debugcon_write_byte(b'W'); // Mark: set_virtual_address_map OK
                 ech_os::boot::set_runtime_services(runtime_services);
                 serial_write_str(&format_args!("[UEFI] Runtime services remapped\n"));
                 match ech_os::boot::verify_uefi_runtime_services() {
                     Ok(()) => {
-                        debugcon_write_byte(b'X');  // Mark: runtime services verified
+                        debugcon_write_byte(b'X'); // Mark: runtime services verified
                         serial_write_str(&format_args!("[UEFI] Runtime services verified\n"));
+                        let boot_control =
+                            ech_os::boot::appliance::load_persisted().unwrap_or_default();
+                        ech_os::boot::appliance::init_shadow(boot_control);
+                        ech_os::boot::appliance::publish_stage(
+                            ech_os::boot::appliance::BootStage::BootControlLoaded,
+                        );
                         if boot_info.secure_boot {
                             if ech_os::posix::secure_boot_db_available() {
                                 serial_write_str(&format_args!(
@@ -625,56 +755,56 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
             asm!("hlt");
         }
     }
-    debugcon_write_byte(b'Y');  // Mark: after virtual address map
-    if let (Some(framebuffer), Some(screen)) =
-        (boot_info.framebuffer.as_mut(), splash.as_mut())
-    {
+    debugcon_write_byte(b'Y'); // Mark: after virtual address map
+    if let (Some(framebuffer), Some(screen)) = (boot_info.framebuffer.as_mut(), splash.as_mut()) {
         screen.update_progress(framebuffer, 45);
     }
-    debugcon_write_byte(b'Z');  // Mark: before heap init
+    debugcon_write_byte(b'Z'); // Mark: before heap init
     if let Err(err) = ech_os::allocator::init_heap(&mut mapper, &mut memory_manager) {
-        debugcon_write_byte(b'!');  // Mark: heap init failed
+        debugcon_write_byte(b'!'); // Mark: heap init failed
         serial_write_str(&format_args!("[HEAP] init_heap failed: {:?}\n", err));
     } else {
-        debugcon_write_byte(b'H');  // Mark: heap init OK
+        debugcon_write_byte(b'H'); // Mark: heap init OK
         serial_write_str(&format_args!("[HEAP] TLSF heap initialized\n"));
     }
-    debugcon_write_byte(b'I');  // Mark: after heap init
-    if let (Some(framebuffer), Some(screen)) =
-        (boot_info.framebuffer.as_mut(), splash.as_mut())
-    {
+    debugcon_write_byte(b'I'); // Mark: after heap init
+    if let (Some(framebuffer), Some(screen)) = (boot_info.framebuffer.as_mut(), splash.as_mut()) {
         screen.update_progress(framebuffer, 60);
     }
 
-    debugcon_write_byte(b'J');  // Mark: before gdt::init
+    debugcon_write_byte(b'J'); // Mark: before gdt::init
     ech_os::gdt::init();
-    debugcon_write_byte(b'K');  // Mark: after gdt::init
+    debugcon_write_byte(b'K'); // Mark: after gdt::init
+    ech_os::syscall::init(); // SYSCALL/SYSRET MSR'larını BSP için programla
+    serial_write_str(&format_args!("[SYSCALL] BSP SYSCALL MSRs programmed\n"));
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::GdtSetup);
-    debugcon_write_byte(b'L');  // Mark: before cpu::init
+    debugcon_write_byte(b'L'); // Mark: before cpu::init
     ech_os::cpu::init();
-    debugcon_write_byte(b'M');  // Mark: after cpu::init
-    debugcon_write_byte(b's');  // Mark: before security::init
+    debugcon_write_byte(b'M'); // Mark: after cpu::init
+    debugcon_write_byte(b's'); // Mark: before security::init
     ech_os::security::init();
-    debugcon_write_byte(b'n');  // Mark: after security::init
-    debugcon_write_byte(b'N');  // Mark: after security::init
+    debugcon_write_byte(b'n'); // Mark: after security::init
+    debugcon_write_byte(b'N'); // Mark: after security::init
     ech_os::interrupts::init();
     serial_write_str(&format_args!("[INT] Interrupts initialized\n"));
-    debugcon_write_byte(b'O');  // Mark: after interrupts::init
+    debugcon_write_byte(b'O'); // Mark: after interrupts::init
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::IdtSetup);
     ech_os::vdso::init();
+    ech_os::boot::appliance::publish_stage(ech_os::boot::appliance::BootStage::KernelCoreReady);
     // TTY alt sistemini başlat - klavye interrupt'ları öncesinde!
     ech_os::tty::init();
-    
+
     // VirtIO-Net driver'ı başlat
     if ech_os::drivers::virtio_net::auto_init() {
         serial_write_str(&format_args!("[NET] VirtIO-Net driver initialized\n"));
+        ech_os::boot::appliance::publish_stage(ech_os::boot::appliance::BootStage::NetworkReady);
     } else {
-        serial_write_str(&format_args!("[NET] VirtIO-Net driver not found or init failed\n"));
+        serial_write_str(&format_args!(
+            "[NET] VirtIO-Net driver not found or init failed\n"
+        ));
     }
-    
-    if let (Some(framebuffer), Some(screen)) =
-        (boot_info.framebuffer.as_mut(), splash.as_mut())
-    {
+
+    if let (Some(framebuffer), Some(screen)) = (boot_info.framebuffer.as_mut(), splash.as_mut()) {
         screen.update_progress(framebuffer, 75);
     }
 
@@ -696,40 +826,103 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
         serial_write_str(&format_args!("[IOMMU] DMAR not available\n"));
     }
 
+    // Bellek alt sistemlerini başlat (OOM, THP, Cgroup, Memfd, ZSwap)
+    ech_os::memory::init_memory_subsystems();
+
+    // CPU alt sistemlerini başlat — SMP ve scheduler'dan ÖNCE
+    ech_os::memory_barriers::MemoryBarrier::init();
+    serial_write_str(&format_args!("[CPU] Memory barriers initialized\n"));
+    ech_os::preempt::init();
+    serial_write_str(&format_args!("[CPU] Preemption control initialized\n"));
+    ech_os::rcu::init();
+    serial_write_str(&format_args!("[CPU] RCU initialized\n"));
+    ech_os::atomic_ops::init();
+    serial_write_str(&format_args!("[CPU] Atomic ops initialized\n"));
+
     // CRITICAL: Scheduler ve Workers SMP'den ÖNCE init edilmeli!
     // AP'ler başlatıldığında scheduler kullanıma hazır olmalı
     ech_os::task::scheduler::init();
     ech_os::interrupts::kick_irq_worker();
+    // Workers: SMP öncesi cpu_count bilinmiyor, başlangıçta 4 kullan, SMP sonrası ölçeklenir
     ech_os::task::worker::init_workers(4);
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::SmpInit);
-    // TODO: SMP temporarily disabled for debugging
-    // ech_os::cpu::smp::init();
-    serial_write_str(&format_args!("[SMP] Skipped for debugging\n"));
+    // SMP ENABLED — Adım 0.1
+    ech_os::cpu::smp::init();
+    serial_write_str(&format_args!("[SMP] SMP init completed\n"));
+
+    // SMP sonrası CPU topoloji ve NUMA alt sistemleri
+    let cpu_count = ech_os::cpu::smp::get_cpu_count();
+    let _ = ech_os::topology::init(cpu_count);
+    serial_write_str(&format_args!(
+        "[CPU] Topology detection completed ({} CPUs)\n",
+        cpu_count
+    ));
+    ech_os::numa::init(4); // Maksimum 4 NUMA düğümü
+    serial_write_str(&format_args!("[CPU] NUMA manager initialized\n"));
+
+    ech_os::affinity::init(cpu_count);
+    serial_write_str(&format_args!("[CPU] Affinity manager initialized\n"));
+    ech_os::hotplug::init(cpu_count);
+    serial_write_str(&format_args!("[CPU] Hotplug manager initialized\n"));
+
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::DriverInit);
+    // Anti-crash fault management MUST init before interrupts are enabled
+    ech_os::fault::init();
+    serial_write_str(&format_args!("[FAULT] Anti-crash system initialized\n"));
     x86_64::instructions::interrupts::enable();
+    // BSP init tamamlandı — AP timer'lar artık tam modda çalışabilir
+    ech_os::interrupts::mark_bsp_init_complete();
     serial_write_str(&format_args!("[INT] Interrupts enabled\n"));
     serial_write_str(&format_args!("[WINSRV] ownership check enabled\n"));
     serial_write_str(&format_args!("[WINSRV] user-range validation enabled\n"));
-    serial_write_str(&format_args!("[PERF] latency probes armed (irq + compositor)\n"));
+    serial_write_str(&format_args!(
+        "[PERF] latency probes armed (irq + compositor)\n"
+    ));
     serial_write_str(&format_args!("[IRONSHIM] fuzz guard active\n"));
-    serial_write_str(&format_args!("[IRONSHIM] ring3->ring0 blocked policy active\n"));
+    serial_write_str(&format_args!(
+        "[IRONSHIM] ring3->ring0 blocked policy active\n"
+    ));
+
+    // Linux driver katmanini baslat - PCI tarama, VirtIO/ATA block device'lar
+    let driver_count = ech_os::drivers::linux::init_linux_driver_layer();
+    serial_write_str(&format_args!(
+        "[DRIVERS] Linux driver layer initialized: {} drivers attached\n",
+        driver_count
+    ));
+
+    // Init sistemi — PID 1 yoneticisi, servisler, mount table
+    ech_os::fs::mount::mount_virtual_filesystems();
+    ech_os::security::users::init_users();
+    ech_os::init::init_system();
+    ech_os::boot::appliance::publish_stage(ech_os::boot::appliance::BootStage::StorageMounted);
 
     // Global framebuffer'ı kaydet - shell için
     if let Some(fb) = boot_info.framebuffer.as_ref() {
         ech_os::boot::set_global_framebuffer(*fb);
     }
 
+    ech_os::ipc::service_ipc::init();
+    ech_os::services::init();
+    ech_os::services::spawn_service_tasks();
+    ech_os::ipc::service_ipc::spawn_task();
+
+    // SIMD dispatch fn ptr cache — CPUID bir kez çağrılır, sonra sıfır overhead
+    ech_os::gfx::simd::init_simd_dispatch();
+
     // Shell yerine yeni compositor tabanlı GUI'yi başlat
-    serial_write_str(&format_args!("[BOOT] Starting GUI compositor...\n"));
+    serial_write_str(&format_args!(
+        "[BOOT] Starting Velvet Glove compositor...\n"
+    ));
     if let Some(fb) = boot_info.framebuffer.as_mut() {
-        ech_os::gfx::compositor::run(fb);
+        ech_os::boot::appliance::publish_stage(ech_os::boot::appliance::BootStage::DisplayReady);
+        ech_os::gfx::velvet_glove::VelvetGloveCompositor::run(fb);
     } else {
         serial_write_str(&format_args!("[BOOT] No framebuffer, starting shell...\n"));
         ech_os::shell::run_shell();
     }
 
     // // ech_os::debug::init_telemetry();
-    
+
     // // Smoke tests
     // // let self_ok = ech_os::debug::boot_self_check();
     let self_ok = true;
@@ -743,21 +936,17 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     serial_write_str(&format_args!("[OS] Basic boot sequence complete.\n"));
     ech_os::boot::safety::BootWatchdog::complete();
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::UserspaceReady);
-    
+
     // Report boot safety status
     let report = ech_os::boot::safety::get_report();
     serial_write_str(&format_args!(
         "[BOOT_SAFETY] Complete - violations: {}, heap_corruptions: {}, smp_failures: {}\n",
         report.violation_count, report.heap_corruptions, report.smp_failures
     ));
-    
-    // Initialize fault management system
-    ech_os::fault::init();
-    serial_write_str(&format_args!("[FAULT] Anti-crash system initialized\n"));
-    
+
     // // Gelişmiş testler
     // // ech_os::debug::run_ring3_smoketest();
-    
+
     // // Stress testleri (sadece DEBUG mode'da ve istenirse)
     #[cfg(feature = "stress_test")]
     {
@@ -770,7 +959,7 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     ech_os::task::scheduler::idle_loop();
 }
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 unsafe fn boot_pipeline_limine(kaslr_offset: u64) -> ! {
     serial_write_str(&format_args!("[LIMINE] Booting via Limine\n"));
     let hhdm_offset = match LIMINE_HHDM_REQUEST.get_response() {
@@ -838,6 +1027,7 @@ unsafe fn boot_pipeline_limine(kaslr_offset: u64) -> ! {
     }
 
     ech_os::gdt::init();
+    ech_os::syscall::init(); // SYSCALL/SYSRET MSR'larını BSP için programla
     ech_os::cpu::init();
     ech_os::security::init();
     ech_os::interrupts::init();
@@ -865,7 +1055,8 @@ unsafe fn boot_pipeline_limine(kaslr_offset: u64) -> ! {
     // CRITICAL: Scheduler ve Workers SMP'den ÖNCE init edilmeli!
     ech_os::task::scheduler::init();
     ech_os::interrupts::kick_irq_worker();
-    ech_os::task::worker::init_workers(4);
+    let cpu_count = ech_os::cpu::smp::get_cpu_count();
+    ech_os::task::worker::init_workers(core::cmp::max(cpu_count as usize, 2));
     ech_os::cpu::smp::init();
     x86_64::instructions::interrupts::enable();
     let self_ok = true;
@@ -880,7 +1071,7 @@ unsafe fn boot_pipeline_limine(kaslr_offset: u64) -> ! {
     ech_os::task::scheduler::idle_loop();
 }
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 unsafe fn boot_pipeline_multiboot(boot_info_addr: usize, kaslr_offset: u64) -> ! {
     serial_write_str(&format_args!(
         "[MULTIBOOT] Info addr: {:#x}\n",
@@ -942,6 +1133,7 @@ unsafe fn boot_pipeline_multiboot(boot_info_addr: usize, kaslr_offset: u64) -> !
     serial_write_str(&format_args!("[BOOT] Core subsystems init\n"));
 
     ech_os::gdt::init();
+    ech_os::syscall::init(); // SYSCALL/SYSRET MSR'larını BSP için programla
     ech_os::cpu::init();
     ech_os::security::init();
     ech_os::interrupts::init();
@@ -960,7 +1152,8 @@ unsafe fn boot_pipeline_multiboot(boot_info_addr: usize, kaslr_offset: u64) -> !
     // CRITICAL: Scheduler ve Workers SMP'den ÖNCE init edilmeli!
     ech_os::task::scheduler::init();
     ech_os::interrupts::kick_irq_worker();
-    ech_os::task::worker::init_workers(4);
+    let cpu_count = ech_os::cpu::smp::get_cpu_count();
+    ech_os::task::worker::init_workers(core::cmp::max(cpu_count as usize, 2));
     ech_os::cpu::smp::init();
     ech_os::memory::start_reclaim_daemon();
     ech_os::serial_println!("[BOOT] Scheduler online");
@@ -977,7 +1170,7 @@ unsafe fn boot_pipeline_multiboot(boot_info_addr: usize, kaslr_offset: u64) -> !
 
     ech_os::debug::run_ring3_smoketest();
     ech_os::serial_println!("[DEBUG] Returned from run_ring3_smoketest()");
-    
+
     ech_os::debug::run_vm_security_tests();
     ech_os::debug::run_vm_stress_tests();
     ech_os::debug::run_irq_stress_tests();
@@ -988,20 +1181,17 @@ unsafe fn boot_pipeline_multiboot(boot_info_addr: usize, kaslr_offset: u64) -> !
 
 #[cfg(target_os = "uefi")]
 #[no_mangle]
-pub extern "efiapi" fn efi_main(
-    image: Handle,
-    mut system_table: SystemTable<Boot>,
-) -> Status {
+pub extern "efiapi" fn efi_main(image: Handle, mut system_table: SystemTable<Boot>) -> Status {
     unsafe {
         system_table.boot_services().set_image_handle(image);
         uefi::allocator::init(system_table.boot_services());
     }
-    
+
     unsafe {
         serial_init();
         serial_write_str(&format_args!("[UEFI] EFI Entry Point Reached!\n"));
     }
-    
+
     serial_write_str(&format_args!("[UEFI] Getting framebuffer...\n"));
     let framebuffer = {
         let boot_services = system_table.boot_services();
@@ -1015,20 +1205,20 @@ pub extern "efiapi" fn efi_main(
             });
         gop.as_mut().map(|gop| Framebuffer::new(gop))
     };
-    
+
     serial_write_str(&format_args!("[UEFI] Finding ACPI table...\n"));
     let rsdp_address =
         ech_os::acpi::find_acpi_table(system_table.config_table()).unwrap_or(0) as u64;
-        
+
     serial_write_str(&format_args!("[UEFI] Detecting secure boot...\n"));
     let secure_boot = detect_secure_boot(&system_table);
-    
+
     serial_write_str(&format_args!("[UEFI] Inspecting loaded image...\n"));
-    let (image_hash, image_size) =
-        match inspect_loaded_image(&mut system_table, image, secure_boot) {
-            Ok(value) => value,
-            Err(status) => return status,
-        };
+    let (image_hash, image_size) = match inspect_loaded_image(&mut system_table, image, secure_boot)
+    {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
     if let Err(err) = measure_loaded_image_tpm(&mut system_table, image, image_hash, image_size) {
         if secure_boot {
             serial_write_str(&format_args!("[TPM] Measure policy failed\n"));
@@ -1051,6 +1241,11 @@ pub extern "efiapi" fn efi_main(
             return err;
         }
     }
+    let seed_from_esp = read_boot_control_seed(&mut system_table, image);
+    let seed_from_var = read_boot_control_variable_seed(&mut system_table);
+    let mut boot_control = ech_os::boot::appliance::merge_seed(seed_from_esp, seed_from_var);
+    boot_control.begin_boot();
+    sync_boot_control_seed(&mut system_table, image, &boot_control);
     report_tpm_event_log(&mut system_table);
     let boot_info_ptr = match system_table
         .boot_services()
@@ -1060,8 +1255,7 @@ pub extern "efiapi" fn efi_main(
         Err(_) => return Status::OUT_OF_RESOURCES,
     };
     let (runtime_table, memory_map) = system_table.exit_boot_services();
-    let runtime_services =
-        unsafe { runtime_table.runtime_services() as *const _ as usize };
+    let runtime_services = unsafe { runtime_table.runtime_services() as *const _ as usize };
     let system_table_addr = runtime_table.get_current_system_table_addr();
     unsafe {
         core::ptr::write(
@@ -1107,6 +1301,111 @@ fn read_global_u8_variable(system_table: &SystemTable<Boot>, name: &CStr16) -> O
         Ok(_) => Some(buf[0]),
         Err(_) => None,
     }
+}
+
+#[cfg(target_os = "uefi")]
+fn appliance_variable_vendor() -> VariableVendor {
+    VariableVendor(uefi::Guid::new(
+        [0x83, 0x61, 0x26, 0x6d],
+        [0x25, 0x4b],
+        [0xab, 0x49],
+        0x8c,
+        0x4d,
+        [0x74, 0x2f, 0x57, 0x78, 0x62, 0x90],
+    ))
+}
+
+#[cfg(target_os = "uefi")]
+fn read_boot_control_variable_seed(
+    system_table: &mut SystemTable<Boot>,
+) -> Option<ech_os::boot::appliance::BootControlBlock> {
+    let runtime = system_table.runtime_services();
+    let (data, _) = runtime
+        .get_variable_boxed(cstr16!("echOSBootControl"), &appliance_variable_vendor())
+        .ok()?;
+    if data.len() != core::mem::size_of::<ech_os::boot::appliance::BootControlBlock>() {
+        return None;
+    }
+    let block = unsafe {
+        *(data.as_ptr() as *const ech_os::boot::appliance::BootControlBlock)
+    };
+    block.validate().then_some(block)
+}
+
+#[cfg(target_os = "uefi")]
+fn read_boot_control_seed(
+    system_table: &mut SystemTable<Boot>,
+    image: Handle,
+) -> Option<ech_os::boot::appliance::BootControlBlock> {
+    let boot_services = system_table.boot_services();
+    let loaded_image = boot_services.open_protocol_exclusive::<LoadedImage>(image).ok()?;
+    let mut fs = boot_services
+        .open_protocol_exclusive::<SimpleFileSystem>(loaded_image.device())
+        .ok()?;
+    let mut root = fs.open_volume().ok()?;
+    let handle = root
+        .open(
+            cstr16!("EFI\\BOOT\\BOOTCTRL.BIN"),
+            FileMode::Read,
+            FileAttribute::empty(),
+        )
+        .ok()?;
+    let mut file = handle.into_regular_file()?;
+    let mut raw = [0u8; core::mem::size_of::<ech_os::boot::appliance::BootControlBlock>()];
+    let len = file.read(&mut raw).ok()?;
+    if len != raw.len() {
+        return None;
+    }
+    let block = unsafe { *(raw.as_ptr() as *const ech_os::boot::appliance::BootControlBlock) };
+    block.validate().then_some(block)
+}
+
+#[cfg(target_os = "uefi")]
+fn sync_boot_control_seed(
+    system_table: &mut SystemTable<Boot>,
+    image: Handle,
+    block: &ech_os::boot::appliance::BootControlBlock,
+) {
+    let runtime = system_table.runtime_services();
+    let attributes = uefi::table::runtime::VariableAttributes::BOOTSERVICE_ACCESS
+        | uefi::table::runtime::VariableAttributes::RUNTIME_ACCESS
+        | uefi::table::runtime::VariableAttributes::NON_VOLATILE;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (block as *const ech_os::boot::appliance::BootControlBlock).cast::<u8>(),
+            core::mem::size_of::<ech_os::boot::appliance::BootControlBlock>(),
+        )
+    };
+    let _ = runtime.set_variable(
+        cstr16!("echOSBootControl"),
+        &appliance_variable_vendor(),
+        attributes,
+        bytes,
+    );
+
+    let boot_services = system_table.boot_services();
+    let Ok(loaded_image) = boot_services.open_protocol_exclusive::<LoadedImage>(image) else {
+        return;
+    };
+    let Ok(mut fs) = boot_services.open_protocol_exclusive::<SimpleFileSystem>(loaded_image.device()) else {
+        return;
+    };
+    let Ok(mut root) = fs.open_volume() else {
+        return;
+    };
+    let Ok(handle) = root.open(
+        cstr16!("EFI\\BOOT\\BOOTCTRL.BIN"),
+        FileMode::CreateReadWrite,
+        FileAttribute::ARCHIVE,
+    ) else {
+        return;
+    };
+    let Some(mut file) = handle.into_regular_file() else {
+        return;
+    };
+    let _ = file.set_position(0);
+    let _ = file.write(bytes);
+    let _ = file.flush();
 }
 
 #[cfg(target_os = "uefi")]

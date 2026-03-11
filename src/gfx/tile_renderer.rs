@@ -14,12 +14,12 @@
 //! - `TileRenderer`: Ana render nesnesi; kare başlatma/bitirme, geçersiz kılma
 
 use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use alloc::vec;
-use core::cmp::{min, max};
+use alloc::vec::Vec;
+use core::cmp::{max, min};
 use core::mem;
 
-use super::gal::{TextureHandle, TextureDesc, TextureFormat, TextureUsage, Gal};
+use super::gal::{Gal, TextureDesc, TextureFormat, TextureHandle, TextureUsage};
 use super::{Surface, SwapChain};
 
 // ============================================================================
@@ -112,7 +112,13 @@ impl Tile {
     }
 
     /// Döşemeyi çerçeve tamponuna kopyala
-    pub fn blit_to_framebuffer(&self, fb: &mut [u32], fb_stride: usize, fb_width: usize, fb_height: usize) {
+    pub fn blit_to_framebuffer(
+        &self,
+        fb: &mut [u32],
+        fb_stride: usize,
+        fb_width: usize,
+        fb_height: usize,
+    ) {
         for row in 0..self.height {
             let fb_y = self.y + row;
             if fb_y >= fb_height {
@@ -159,11 +165,21 @@ pub struct DirtyRect {
 
 impl DirtyRect {
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
-        DirtyRect { x, y, width, height }
+        DirtyRect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn empty() -> Self {
-        DirtyRect { x: 0, y: 0, width: 0, height: 0 }
+        DirtyRect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -383,7 +399,12 @@ impl TileCache {
         }
 
         // Birleştirme için kirli dikdörtgenlere ekle
-        self.push_dirty_rect(DirtyRect::new(x as i32, y as i32, width as i32, height as i32));
+        self.push_dirty_rect(DirtyRect::new(
+            x as i32,
+            y as i32,
+            width as i32,
+            height as i32,
+        ));
     }
 
     /// Birleştirmeli kirli dikdörtgen ekle
@@ -641,7 +662,8 @@ impl TileRenderer {
     pub fn invalidate(&mut self, x: i32, y: i32, width: i32, height: i32) {
         // Kenar yumuşatmayı işlemek için 1 piksel genişlet
         let rect = DirtyRect::new(x, y, width, height).expand(1);
-        self.cache.mark_dirty(rect.x, rect.y, rect.width, rect.height);
+        self.cache
+            .mark_dirty(rect.x, rect.y, rect.width, rect.height);
     }
 
     /// Tüm ekranı geçersiz kıl
@@ -697,7 +719,11 @@ pub fn tile_to_pixel(tile_idx: usize, tile_size: usize, tiles_per_row: usize) ->
 
 /// Gereken döşeme sayısını hesapla
 #[inline]
-pub fn calculate_tile_count(width: usize, height: usize, tile_size: usize) -> (usize, usize, usize) {
+pub fn calculate_tile_count(
+    width: usize,
+    height: usize,
+    tile_size: usize,
+) -> (usize, usize, usize) {
     let tiles_x = (width + tile_size - 1) / tile_size;
     let tiles_y = (height + tile_size - 1) / tile_size;
     (tiles_x, tiles_y, tiles_x * tiles_y)

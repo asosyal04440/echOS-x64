@@ -28,9 +28,9 @@ pub struct F2fsEntry {
     pub name: String,
     pub size: u64,
     pub is_dir: bool,
-    pub mode: u32,  // Dosya izinleri (chmod)
-    pub uid: u32,   // Sahip kullanıcı ID (chown)
-    pub gid: u32,   // Sahip grup ID (chown)
+    pub mode: u32, // Dosya izinleri (chmod)
+    pub uid: u32,  // Sahip kullanıcı ID (chown)
+    pub gid: u32,  // Sahip grup ID (chown)
 }
 
 impl Default for F2fsEntry {
@@ -39,9 +39,9 @@ impl Default for F2fsEntry {
             name: String::new(),
             size: 0,
             is_dir: false,
-            mode: 0o644,  // Varsayılan: -rw-r--r--
-            uid: 0,       // root
-            gid: 0,       // root
+            mode: 0o644, // Varsayılan: -rw-r--r--
+            uid: 0,      // root
+            gid: 0,      // root
         }
     }
 }
@@ -69,12 +69,19 @@ impl Default for FileMetadata {
 }
 
 /// Dosya metadata'sını günceller (chmod/chown) - hem cache hem disk
-pub fn set_file_metadata(path: &str, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>) -> Result<(), FsError> {
+pub fn set_file_metadata(
+    path: &str,
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> Result<(), FsError> {
     // Önce cache'e yaz
     {
         let mut cache = METADATA_CACHE.lock();
-        let meta = cache.entry(path.to_string()).or_insert_with(FileMetadata::default);
-        
+        let meta = cache
+            .entry(path.to_string())
+            .or_insert_with(FileMetadata::default);
+
         if let Some(m) = mode {
             meta.mode = m;
         }
@@ -85,31 +92,33 @@ pub fn set_file_metadata(path: &str, mode: Option<u32>, uid: Option<u32>, gid: O
             meta.gid = g;
         }
     }
-    
+
     // Diske de yaz (inode mode güncelle)
     if mode.is_some() {
         let mut drive = match crate::drivers::linux::select_block_device() {
             Ok(value) => value,
-            Err(crate::drivers::linux::LinuxDriverError::NotFound) => return Err(FsError::NoDevice),
+            Err(crate::drivers::linux::LinuxDriverError::NotFound) => {
+                return Err(FsError::NoDevice)
+            }
             Err(_) => return Err(FsError::DeviceError),
         };
         let ctx = load_context(&mut *drive)?;
         let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
         let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
-        
+
         if nat_entry.block_addr == 0 {
             return Err(FsError::DeviceError);
         }
-        
+
         let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-        
+
         // Mevcut mode'u oku ve permission bits'i güncelle
         let current_mode = read_u16(&block, INODE_I_MODE_OFFSET)?;
         let file_type = current_mode & 0o170000; // File type bits
         let new_mode = file_type | (mode.unwrap() as u16 & 0o7777);
-        
+
         write_u16(&mut block, INODE_I_MODE_OFFSET, new_mode)?;
-        
+
         // UID/GID yaz (offset 4 ve 8)
         if let Some(u) = uid {
             write_u32(&mut block, 4, u)?;
@@ -117,13 +126,18 @@ pub fn set_file_metadata(path: &str, mode: Option<u32>, uid: Option<u32>, gid: O
         if let Some(g) = gid {
             write_u32(&mut block, 8, g)?;
         }
-        
+
         write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
-        
-        crate::serial_println!("[FS] Metadata written to disk: {} -> mode={:o}, uid={:?}, gid={:?}", 
-            path, new_mode, uid, gid);
+
+        crate::serial_println!(
+            "[FS] Metadata written to disk: {} -> mode={:o}, uid={:?}, gid={:?}",
+            path,
+            new_mode,
+            uid,
+            gid
+        );
     }
-    
+
     Ok(())
 }
 
@@ -150,29 +164,32 @@ type F2fsHashBuilder = BuildHasherDefault<F2fsHasher>;
 
 lazy_static! {
     /// Metadata cache - path -> metadata mapping
-    static ref METADATA_CACHE: Mutex<HashMap<String, FileMetadata, F2fsHashBuilder>> = 
+    static ref METADATA_CACHE: Mutex<HashMap<String, FileMetadata, F2fsHashBuilder>> =
         Mutex::new(HashMap::with_hasher(F2fsHashBuilder::default()));
     /// Mount table - mountpoint -> MountPoint mapping
-    static ref MOUNT_TABLE: Mutex<HashMap<String, MountPoint, F2fsHashBuilder>> = 
+    static ref MOUNT_TABLE: Mutex<HashMap<String, MountPoint, F2fsHashBuilder>> =
         Mutex::new(HashMap::with_hasher(F2fsHashBuilder::default()));
 }
 
 /// Dosya sistemi bağlar (mount)
 pub fn mount_fs(device: &str, mountpoint: &str, fs_type: &str) -> Result<(), FsError> {
     let mut table = MOUNT_TABLE.lock();
-    
+
     // Zaten mount edilmiş mi kontrol et
     if table.contains_key(mountpoint) {
         return Err(FsError::Busy);
     }
-    
-    table.insert(mountpoint.to_string(), MountPoint {
-        device: device.to_string(),
-        mountpoint: mountpoint.to_string(),
-        fs_type: fs_type.to_string(),
-        flags: 0,
-    });
-    
+
+    table.insert(
+        mountpoint.to_string(),
+        MountPoint {
+            device: device.to_string(),
+            mountpoint: mountpoint.to_string(),
+            fs_type: fs_type.to_string(),
+            flags: 0,
+        },
+    );
+
     crate::serial_println!("[FS] Mounted: {} -> {} ({})", device, mountpoint, fs_type);
     Ok(())
 }
@@ -180,7 +197,7 @@ pub fn mount_fs(device: &str, mountpoint: &str, fs_type: &str) -> Result<(), FsE
 /// Dosya sistemi ayırır (umount)
 pub fn umount_fs(mountpoint: &str) -> Result<(), FsError> {
     let mut table = MOUNT_TABLE.lock();
-    
+
     if table.remove(mountpoint).is_some() {
         crate::serial_println!("[FS] Unmounted: {}", mountpoint);
         Ok(())
@@ -220,7 +237,7 @@ struct F2fsSuperblock {
     cp_payload: u32,
 }
 
-struct F2fsContext {
+pub(crate) struct F2fsContext {
     partition_lba: u32,
     block_size: u32,
     sectors_per_block: u32,
@@ -335,19 +352,19 @@ struct CheckpointPack {
     layout_ok: bool,
 }
 
-struct F2fsInodeInfo {
+pub(crate) struct F2fsInodeInfo {
     ino: u32,
-    is_dir: bool,
+    pub(crate) is_dir: bool,
     size: u64,
     inline: bool,
     inline_data: Option<Vec<u8>>,
     addrs: Vec<u32>,
 }
 
-struct DirEntryInfo {
-    name: String,
-    ino: u32,
-    is_dir: bool,
+pub(crate) struct DirEntryInfo {
+    pub(crate) name: String,
+    pub(crate) ino: u32,
+    pub(crate) is_dir: bool,
 }
 
 struct NatEntry {
@@ -399,13 +416,13 @@ const CP_CHECKSUM_OFFSET_OFFSET: usize = 164;
 const CP_BITMAP_OFFSET: usize = 0xC0;
 
 const INODE_I_MODE_OFFSET: usize = 0;
-const INODE_I_UID_OFFSET: usize = 4;   // UID
-const INODE_I_GID_OFFSET: usize = 8;   // GID
+const INODE_I_UID_OFFSET: usize = 4; // UID
+const INODE_I_GID_OFFSET: usize = 8; // GID
 const INODE_I_ATIME_OFFSET: usize = 12; // Access time
 const INODE_I_CTIME_OFFSET: usize = 16; // Create time (SIZE ile çakışıyor, dikkat)
 const INODE_I_MTIME_OFFSET: usize = 20; // Modify time
 const INODE_I_NLINK_OFFSET: usize = 24; // Hard link count
-const INODE_I_SIZE_OFFSET: usize = 16;  // Size (ctime ile aynı offset - F2FS spec)
+const INODE_I_SIZE_OFFSET: usize = 16; // Size (ctime ile aynı offset - F2FS spec)
 const INODE_I_INLINE_OFFSET: usize = 3;
 const INODE_I_ADDR_OFFSET: usize = 360;
 const INODE_SIZE_OF_I_NID: usize = 20;
@@ -559,10 +576,10 @@ pub fn open_entry(path: &str) -> Result<F2fsEntry, FsError> {
     };
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
-    
+
     // Metadata cache'den bilgileri al
     let meta = get_file_metadata(path);
-    
+
     Ok(F2fsEntry {
         name: path.to_string(),
         size: inode.size,
@@ -782,17 +799,21 @@ pub fn create_f2fs_file(parent_path: &str, name: &str) -> Result<(), FsError> {
 }
 
 /// Create file with initial data
-pub fn create_f2fs_file_with_data(parent_path: &str, name: &str, data: &[u8]) -> Result<(), FsError> {
+pub fn create_f2fs_file_with_data(
+    parent_path: &str,
+    name: &str,
+    data: &[u8],
+) -> Result<(), FsError> {
     // First create the file
     create_f2fs_file(parent_path, name)?;
-    
+
     // Then write data to it
     let file_path = if parent_path == "/" || parent_path.is_empty() {
         alloc::format!("/{}", name)
     } else {
         alloc::format!("{}/{}", parent_path, name)
     };
-    
+
     write_f2fs_file_at(&file_path, 0, data)?;
     Ok(())
 }
@@ -888,17 +909,17 @@ pub fn move_f2fs(src_path: &str, dst_path: &str) -> Result<(), FsError> {
     if src_path == dst_path {
         return Ok(());
     }
-    
+
     let mut drive = match crate::drivers::linux::select_block_device() {
         Ok(value) => value,
         Err(crate::drivers::linux::LinuxDriverError::NotFound) => return Err(FsError::NoDevice),
         Err(_) => return Err(FsError::DeviceError),
     };
     let ctx = load_context(&mut *drive)?;
-    
+
     // Kaynak dosyayı aç
     let src_inode = open_inode_by_path(&mut *drive, &ctx, src_path)?;
-    
+
     // Kaynak yolundan parent ve name çıkar
     let src_path_trimmed = src_path.trim_start_matches('/');
     let (src_parent_path, src_name) = if let Some(pos) = src_path_trimmed.rfind('/') {
@@ -906,7 +927,7 @@ pub fn move_f2fs(src_path: &str, dst_path: &str) -> Result<(), FsError> {
     } else {
         ("", src_path_trimmed)
     };
-    
+
     // Hedef yolundan parent ve name çıkar
     let dst_path_trimmed = dst_path.trim_start_matches('/');
     let (dst_parent_path, dst_name) = if let Some(pos) = dst_path_trimmed.rfind('/') {
@@ -914,27 +935,27 @@ pub fn move_f2fs(src_path: &str, dst_path: &str) -> Result<(), FsError> {
     } else {
         ("", dst_path_trimmed)
     };
-    
+
     // Kaynak parent dizini aç
     let src_parent = open_inode_by_path(&mut *drive, &ctx, &format!("/{}", src_parent_path))?;
     if !src_parent.is_dir {
         return Err(FsError::NotDir);
     }
-    
+
     // Hedef parent dizini aç
     let dst_parent = open_inode_by_path(&mut *drive, &ctx, &format!("/{}", dst_parent_path))?;
     if !dst_parent.is_dir {
         return Err(FsError::NotDir);
     }
-    
+
     // Hedefte aynı isimde dosya var mı kontrol et
     if find_entry_in_dir(&mut *drive, &ctx, &dst_parent, dst_name).is_ok() {
         return Err(FsError::EntryExist);
     }
-    
+
     // Kaynak dizinden entry'yi sil
     remove_entry_from_dir(&mut *drive, &ctx, src_parent.ino, src_name)?;
-    
+
     // Hedef dizine entry ekle (aynı inode ile)
     add_entry_to_dir(
         &mut *drive,
@@ -944,7 +965,7 @@ pub fn move_f2fs(src_path: &str, dst_path: &str) -> Result<(), FsError> {
         src_inode.ino,
         src_inode.is_dir,
     )?;
-    
+
     Ok(())
 }
 
@@ -967,7 +988,7 @@ pub fn create_symlink(parent_path: &str, name: &str, target: &str) -> Result<(),
     if find_entry_in_dir(&mut *drive, &ctx, &parent, name).is_ok() {
         return Err(FsError::EntryExist);
     }
-    
+
     // Yeni inode oluştur
     let nid = allocate_free_nid(&mut *drive, &ctx)?;
     allocate_node_block_for_nid(&mut *drive, &ctx, nid)?;
@@ -975,36 +996,38 @@ pub fn create_symlink(parent_path: &str, name: &str, target: &str) -> Result<(),
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
     }
-    
+
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-    
+
     // Symlink mode: S_IFLNK | 0o777
     let mode: u16 = 0o120000 | 0o777;
     write_u16(&mut block, INODE_I_MODE_OFFSET, mode)?;
-    
+
     // Target'ı inline data'ya yaz
     let target_bytes = target.as_bytes();
     let inline_capacity = inline_data_capacity(ctx.block_size)?;
     if target_bytes.len() > inline_capacity {
         return Err(FsError::InvalidParam); // Target çok uzun
     }
-    
+
     // Inline flag set et
-    let flags = block.get_mut(INODE_I_INLINE_OFFSET).ok_or(FsError::DeviceError)?;
+    let flags = block
+        .get_mut(INODE_I_INLINE_OFFSET)
+        .ok_or(FsError::DeviceError)?;
     *flags |= 0x02; // INLINE_DATA flag
-    
+
     // Target'ı yaz
     let data_start = INODE_I_ADDR_OFFSET;
     block[data_start..data_start + target_bytes.len()].copy_from_slice(target_bytes);
-    
+
     // Size = target length
     write_u64(&mut block, INODE_I_SIZE_OFFSET, target_bytes.len() as u64)?;
-    
+
     write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
-    
+
     // Directory entry ekle
     add_entry_to_dir(&mut *drive, &ctx, parent.ino, name, nid, false)?;
-    
+
     crate::serial_println!("[FS] Symlink created: {} -> {}", name, target);
     Ok(())
 }
@@ -1017,26 +1040,26 @@ pub fn create_hardlink(parent_path: &str, name: &str, target_path: &str) -> Resu
         Err(_) => return Err(FsError::DeviceError),
     };
     let ctx = load_context(&mut *drive)?;
-    
+
     // Target inode'u bul
     let target_inode = open_inode_by_path(&mut *drive, &ctx, target_path)?;
     if target_inode.is_dir {
         return Err(FsError::IsDir); // Dizinlere hardlink yapılamaz
     }
-    
+
     // Parent dizini bul
     let parent = open_inode_by_path(&mut *drive, &ctx, parent_path)?;
     if !parent.is_dir {
         return Err(FsError::NotDir);
     }
-    
+
     if find_entry_in_dir(&mut *drive, &ctx, &parent, name).is_ok() {
         return Err(FsError::EntryExist);
     }
-    
+
     // Aynı inode'a yeni directory entry ekle
     add_entry_to_dir(&mut *drive, &ctx, parent.ino, name, target_inode.ino, false)?;
-    
+
     // nlink count artır
     let nat_entry = read_nat_entry(&mut *drive, &ctx, target_inode.ino)?;
     if nat_entry.block_addr != 0 {
@@ -1045,8 +1068,13 @@ pub fn create_hardlink(parent_path: &str, name: &str, target_path: &str) -> Resu
         write_u32(&mut block, INODE_I_NLINK_OFFSET, nlink + 1)?;
         write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
     }
-    
-    crate::serial_println!("[FS] Hardlink created: {} -> {} (inode {})", name, target_path, target_inode.ino);
+
+    crate::serial_println!(
+        "[FS] Hardlink created: {} -> {} (inode {})",
+        name,
+        target_path,
+        target_inode.ino
+    );
     Ok(())
 }
 
@@ -1059,23 +1087,45 @@ pub fn truncate_f2fs(path: &str, new_size: u64) -> Result<(), FsError> {
     };
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
-    
+
     if inode.is_dir {
         return Err(FsError::IsDir);
     }
-    
-    // Sadece küçültme destekleniyor şimdilik
+
+    // Büyütme: yeni bloklar allocate et ve sıfırla
     if new_size > inode.size {
-        // TODO: Büyütme için yeni bloklar allocate et
-        return Err(FsError::NotSupported);
+        let block_size = ctx.block_size as u64;
+        if block_size == 0 {
+            return Err(FsError::DeviceError);
+        }
+        let old_blocks = (inode.size + block_size - 1) / block_size;
+        let new_blocks = (new_size + block_size - 1) / block_size;
+        // Yeni blok adresleri için sıfırlanmış blok yaz
+        let zero_block = alloc::vec![0u8; block_size as usize];
+        for blk_idx in old_blocks..new_blocks {
+            // allocate_data_block ile yeni blok tahsis et
+            if let Ok(new_addr) = allocate_data_block(&mut *drive, &ctx, inode.ino, blk_idx as u16)
+            {
+                // Inode block addr’ı güncelle
+                let _ = update_inode_block_addr(
+                    &mut *drive,
+                    &ctx,
+                    inode.ino,
+                    blk_idx as usize,
+                    new_addr,
+                );
+                // Yeni bloğu sıfırla
+                let _ = write_block(&mut *drive, &ctx, new_addr, &zero_block);
+            }
+        }
     }
-    
+
     // Inode size güncelle
     update_inode_size(&mut *drive, &ctx, inode.ino, new_size)?;
-    
+
     // mtime güncelle
     update_inode_mtime(&mut *drive, &ctx, inode.ino)?;
-    
+
     crate::serial_println!("[FS] Truncated: {} -> {} bytes", path, new_size);
     Ok(())
 }
@@ -1089,32 +1139,32 @@ pub fn read_link(path: &str) -> Result<String, FsError> {
     };
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
-    
+
     // Symlink mi kontrol et
     if !inode.inline {
         return Err(FsError::NotFile);
     }
-    
+
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
     }
-    
+
     let block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
     let data_start = INODE_I_ADDR_OFFSET;
     let target_len = inode.size as usize;
-    
+
     if target_len == 0 || target_len > block.len() - data_start {
         return Err(FsError::DeviceError);
     }
-    
+
     let target = core::str::from_utf8(&block[data_start..data_start + target_len])
         .map_err(|_| FsError::InvalidParam)?;
-    
+
     Ok(target.to_string())
 }
 
-fn load_context(drive: &mut dyn BlockDevice) -> Result<F2fsContext, FsError> {
+pub(crate) fn load_context(drive: &mut dyn BlockDevice) -> Result<F2fsContext, FsError> {
     let partition_lba = read_partition_lba(drive).unwrap_or(0);
     let superblock = read_superblock(drive, partition_lba)?;
     if superblock.magic != F2FS_MAGIC {
@@ -1172,7 +1222,7 @@ fn load_context(drive: &mut dyn BlockDevice) -> Result<F2fsContext, FsError> {
     Ok(ctx)
 }
 
-fn open_inode_by_path(
+pub(crate) fn open_inode_by_path(
     drive: &mut dyn BlockDevice,
     ctx: &F2fsContext,
     path: &str,
@@ -1205,7 +1255,7 @@ fn find_entry_in_dir(
     Err(FsError::EntryNotFound)
 }
 
-fn read_dir_entries(
+pub(crate) fn read_dir_entries(
     drive: &mut dyn BlockDevice,
     ctx: &F2fsContext,
     inode: &F2fsInodeInfo,
@@ -1668,6 +1718,11 @@ fn read_partition_lba(drive: &mut dyn BlockDevice) -> Option<u32> {
     if mbr_data[MBR_SIGNATURE_OFFSET] != 0x55 || mbr_data[MBR_SIGNATURE_OFFSET + 1] != 0xAA {
         return None;
     }
+    let part_type = mbr_data[PARTITION_ENTRY_OFFSET + 4];
+    if part_type == 0xEE {
+        return read_gpt_partition_lba(drive);
+    }
+
     let lba_start = PARTITION_ENTRY_OFFSET + PARTITION_LBA_OFFSET;
     if mbr_data.len() < lba_start + 4 {
         return None;
@@ -1675,6 +1730,74 @@ fn read_partition_lba(drive: &mut dyn BlockDevice) -> Option<u32> {
     Some(u32::from_le_bytes(
         mbr_data[lba_start..lba_start + 4].try_into().ok()?,
     ))
+}
+
+fn read_gpt_partition_lba(drive: &mut dyn BlockDevice) -> Option<u32> {
+    const GPT_HEADER_LBA: u32 = 1;
+    const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
+    const GPT_ENTRY_TYPE_GUID_OFFSET: usize = 0;
+    const GPT_ENTRY_FIRST_LBA_OFFSET: usize = 32;
+    const GPT_ENTRY_NAME_OFFSET: usize = 56;
+
+    let header = drive.read_sectors(GPT_HEADER_LBA, 1);
+    if header.len() < 92 || &header[0..8] != GPT_SIGNATURE {
+        return None;
+    }
+
+    let entry_lba = u64::from_le_bytes(header[72..80].try_into().ok()?);
+    let entry_count = u32::from_le_bytes(header[80..84].try_into().ok()?);
+    let entry_size = u32::from_le_bytes(header[84..88].try_into().ok()?);
+    if entry_count == 0 || entry_size < 128 {
+        return None;
+    }
+
+    let preferred = crate::boot::appliance::current_system_partition_label();
+    let sectors = ((entry_count as usize * entry_size as usize) + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let mut entries = alloc::vec::Vec::with_capacity(sectors * BLOCK_SIZE);
+    let mut next_lba = entry_lba;
+    let mut remaining = sectors;
+    while remaining > 0 {
+        let batch = remaining.min(u8::MAX as usize) as u8;
+        entries.extend_from_slice(&drive.read_sectors(
+            next_lba.min(u32::MAX as u64) as u32,
+            batch,
+        ));
+        next_lba = next_lba.saturating_add(batch as u64);
+        remaining -= batch as usize;
+    }
+    for index in 0..entry_count as usize {
+        let offset = index * entry_size as usize;
+        if offset + entry_size as usize > entries.len() {
+            break;
+        }
+        let entry = &entries[offset..offset + entry_size as usize];
+        if entry[GPT_ENTRY_TYPE_GUID_OFFSET..GPT_ENTRY_TYPE_GUID_OFFSET + 16]
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            continue;
+        }
+        let first_lba =
+            u64::from_le_bytes(entry[GPT_ENTRY_FIRST_LBA_OFFSET..GPT_ENTRY_FIRST_LBA_OFFSET + 8].try_into().ok()?);
+        let name = parse_gpt_name(&entry[GPT_ENTRY_NAME_OFFSET..GPT_ENTRY_NAME_OFFSET + 72]);
+        if name == preferred {
+            return Some(first_lba.min(u32::MAX as u64) as u32);
+        }
+    }
+
+    None
+}
+
+fn parse_gpt_name(raw: &[u8]) -> alloc::string::String {
+    let mut utf16 = alloc::vec::Vec::new();
+    for chunk in raw.chunks_exact(2) {
+        let code = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if code == 0 {
+            break;
+        }
+        utf16.push(code);
+    }
+    alloc::string::String::from_utf16_lossy(&utf16)
 }
 
 fn read_superblock(
@@ -3284,20 +3407,20 @@ fn get_segment_validity(
     // Read SIT entry for segment
     let sit_block = segno / SIT_ENTRY_PER_BLOCK;
     let sit_offset = segno % SIT_ENTRY_PER_BLOCK;
-    
+
     let sit_addr = ctx.sit_blkaddr + sit_block;
     let block = read_block(drive, ctx, sit_addr)?;
-    
+
     // SIT entry format: valid_map (64 bytes) + mtime (8 bytes)
     let entry_offset = sit_offset as usize * 72;
-    
+
     // Count valid blocks from bitmap
     let valid_map = &block[entry_offset..entry_offset + 64];
     let mut valid_blocks = 0u32;
     for &byte in valid_map {
         valid_blocks += byte.count_ones();
     }
-    
+
     let mtime = u64::from_le_bytes([
         block[entry_offset + 64],
         block[entry_offset + 65],
@@ -3308,7 +3431,7 @@ fn get_segment_validity(
         block[entry_offset + 70],
         block[entry_offset + 71],
     ]);
-    
+
     Ok(SegmentInfo {
         segno,
         valid_blocks,
@@ -3327,7 +3450,7 @@ fn select_gc_victim(
     // Get all segment info
     let total_segments = ctx.segment_count_main;
     let mut candidates: Vec<SegmentInfo> = Vec::new();
-    
+
     for segno in 0..total_segments {
         if let Ok(info) = get_segment_validity(drive, ctx, segno) {
             // Skip completely empty or completely full segments
@@ -3336,11 +3459,11 @@ fn select_gc_victim(
             }
         }
     }
-    
+
     if candidates.is_empty() {
         return Ok(None);
     }
-    
+
     // Sort by selection policy
     match mode {
         GcMode::Background => {
@@ -3352,11 +3475,13 @@ fn select_gc_victim(
             candidates.sort_by(|a, b| {
                 let cost_a = a.valid_blocks as f64 / (a.mtime as f64 + 1.0);
                 let cost_b = b.valid_blocks as f64 / (b.mtime as f64 + 1.0);
-                cost_a.partial_cmp(&cost_b).unwrap_or(core::cmp::Ordering::Equal)
+                cost_a
+                    .partial_cmp(&cost_b)
+                    .unwrap_or(core::cmp::Ordering::Equal)
             });
         }
     }
-    
+
     Ok(candidates.first().map(|s| s.segno))
 }
 
@@ -3369,10 +3494,10 @@ fn migrate_segment_blocks(
     let mut migrated = 0u64;
     let blocks_per_seg = ctx.blocks_per_seg;
     let main_blkaddr = ctx.main_blkaddr;
-    
+
     // Get segment validity
     let info = get_segment_validity(drive, ctx, victim_seg)?;
-    
+
     // Read SIT valid bitmap
     let sit_block = victim_seg / SIT_ENTRY_PER_BLOCK;
     let sit_offset = victim_seg % SIT_ENTRY_PER_BLOCK;
@@ -3380,41 +3505,38 @@ fn migrate_segment_blocks(
     let block = read_block(drive, ctx, sit_addr)?;
     let entry_offset = sit_offset as usize * 72;
     let valid_map = &block[entry_offset..entry_offset + 64];
-    
+
     // For each block in segment
     for blk_off in 0..blocks_per_seg {
         // Check if block is valid
         let byte_idx = (blk_off / 8) as usize;
         let bit_idx = blk_off % 8;
-        
+
         if (valid_map[byte_idx] >> bit_idx) & 1 == 0 {
             continue; // Invalid block, skip
         }
-        
+
         // Calculate physical block address
         let old_addr = main_blkaddr + victim_seg * blocks_per_seg + blk_off;
-        
+
         // Read block data
         let data = read_block(drive, ctx, old_addr)?;
-        
+
         // Find new location (simplified - just allocate new block)
         // In real implementation, would update NAT and inode
         let new_addr = allocate_new_block(drive, ctx)?;
-        
+
         // Write to new location
         write_block(drive, ctx, new_addr, &data)?;
-        
+
         migrated += 1;
     }
-    
+
     Ok(migrated)
 }
 
 /// Allocate new block (simplified)
-fn allocate_new_block(
-    _drive: &mut dyn BlockDevice,
-    ctx: &F2fsContext,
-) -> Result<u32, FsError> {
+fn allocate_new_block(_drive: &mut dyn BlockDevice, ctx: &F2fsContext) -> Result<u32, FsError> {
     // Simplified - just return next block
     // Real implementation would use proper allocator
     static NEXT_BLOCK: spin::Mutex<u32> = spin::Mutex::new(0);
@@ -3431,12 +3553,12 @@ pub fn run_gc(mode: GcMode) -> Result<GcState, FsError> {
         Err(crate::drivers::linux::LinuxDriverError::NotFound) => return Err(FsError::NoDevice),
         Err(_) => return Err(FsError::DeviceError),
     };
-    
+
     let ctx = load_context(&mut *drive)?;
     let mut state = GcState::default();
     state.mode = mode;
     state.running = true;
-    
+
     // Select victim segment
     let victim = match select_gc_victim(&mut *drive, &ctx, mode)? {
         Some(v) => v,
@@ -3445,17 +3567,17 @@ pub fn run_gc(mode: GcMode) -> Result<GcState, FsError> {
             return Ok(state);
         }
     };
-    
+
     state.cur_segment = victim;
-    
+
     // Migrate blocks
     let migrated = migrate_segment_blocks(&mut *drive, &ctx, victim)?;
     state.blocks_migrated = migrated;
     state.segments_collected = 1;
-    
+
     // Mark segment as free (update SIT)
     // In real implementation, would update SIT bitmap
-    
+
     state.running = false;
     Ok(state)
 }
@@ -3467,11 +3589,11 @@ pub fn get_free_segments() -> Result<u32, FsError> {
         Err(crate::drivers::linux::LinuxDriverError::NotFound) => return Err(FsError::NoDevice),
         Err(_) => return Err(FsError::DeviceError),
     };
-    
+
     let ctx = load_context(&mut *drive)?;
     let total_segments = ctx.segment_count_main;
     let mut free_count = 0u32;
-    
+
     for segno in 0..total_segments {
         if let Ok(info) = get_segment_validity(&mut *drive, &ctx, segno) {
             if info.valid_blocks == 0 {
@@ -3479,7 +3601,7 @@ pub fn get_free_segments() -> Result<u32, FsError> {
             }
         }
     }
-    
+
     Ok(free_count)
 }
 
@@ -3535,23 +3657,23 @@ pub fn write_checkpoint(flags: u32) -> Result<(), FsError> {
         Err(crate::drivers::linux::LinuxDriverError::NotFound) => return Err(FsError::NoDevice),
         Err(_) => return Err(FsError::DeviceError),
     };
-    
+
     let ctx = load_context(&mut *drive)?;
-    
+
     // Read current checkpoint to get version
     let cp_addr = ctx.cp_blkaddr;
     let cp_block = read_block(&mut *drive, &ctx, cp_addr)?;
-    
+
     // Parse checkpoint header
     let version = read_u64(&cp_block, 0)?;
     let user_block_count = read_u64(&cp_block, 8)?;
     let valid_block_count = read_u64(&cp_block, 16)?;
     let valid_node_count = read_u64(&cp_block, 24)?;
     let valid_inode_count = read_u64(&cp_block, 32)?;
-    
+
     // Create new checkpoint
     let mut new_cp = vec![0u8; ctx.block_size as usize];
-    
+
     // Write checkpoint header
     write_u64(&mut new_cp, 0, version + 1)?;
     write_u64(&mut new_cp, 8, user_block_count)?;
@@ -3559,10 +3681,10 @@ pub fn write_checkpoint(flags: u32) -> Result<(), FsError> {
     write_u64(&mut new_cp, 24, valid_node_count)?;
     write_u64(&mut new_cp, 32, valid_inode_count)?;
     write_u64(&mut new_cp, 40, crate::random::next_u32() as u64)?; // timestamp
-    
+
     // Write flags
     write_u32(&mut new_cp, 48, flags)?;
-    
+
     // Write SIT bitmap (simplified - just copy current)
     let sit_addr = ctx.sit_blkaddr;
     let sit_block = read_block(&mut *drive, &ctx, sit_addr)?;
@@ -3570,7 +3692,7 @@ pub fn write_checkpoint(flags: u32) -> Result<(), FsError> {
     for i in 0..(ctx.block_size as usize / 2).min(sit_block.len()) {
         new_cp[sit_offset + i] = sit_block[i];
     }
-    
+
     // Write NAT bitmap
     let nat_addr = ctx.nat_blkaddr;
     let nat_block = read_block(&mut *drive, &ctx, nat_addr)?;
@@ -3578,22 +3700,26 @@ pub fn write_checkpoint(flags: u32) -> Result<(), FsError> {
     for i in 0..(ctx.block_size as usize / 2).min(nat_block.len()) {
         new_cp[nat_offset + i] = nat_block[i];
     }
-    
+
     // Calculate checksum
     let checksum = calculate_checksum(&new_cp);
     write_u32(&mut new_cp, ctx.block_size as usize - 4, checksum)?;
-    
+
     // Write to alternate checkpoint location (ping-pong)
     let alt_cp_addr = if cp_addr == ctx.cp_blkaddr {
         ctx.cp_blkaddr + 1
     } else {
         ctx.cp_blkaddr
     };
-    
+
     write_block(&mut *drive, &ctx, alt_cp_addr, &new_cp)?;
-    
-    crate::serial_println!("[F2FS] Checkpoint written: version={}, flags={:x}", version + 1, flags);
-    
+
+    crate::serial_println!(
+        "[F2FS] Checkpoint written: version={}, flags={:x}",
+        version + 1,
+        flags
+    );
+
     Ok(())
 }
 
@@ -3642,21 +3768,21 @@ pub fn needs_recovery() -> Result<bool, FsError> {
         Err(crate::drivers::linux::LinuxDriverError::NotFound) => return Err(FsError::NoDevice),
         Err(_) => return Err(FsError::DeviceError),
     };
-    
+
     let ctx = load_context(&mut *drive)?;
-    
+
     // Read both checkpoints
     let cp1 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr)?;
     let cp2 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr + 1)?;
-    
+
     // Check flags
     let flags1 = read_u32(&cp1, 48)?;
     let flags2 = read_u32(&cp2, 48)?;
-    
+
     // If neither has UMOUNT flag, recovery needed
     let clean1 = (flags1 & CP_UMOUNT_FLAG) != 0;
     let clean2 = (flags2 & CP_UMOUNT_FLAG) != 0;
-    
+
     Ok(!clean1 && !clean2)
 }
 
@@ -3667,7 +3793,7 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
         Err(crate::drivers::linux::LinuxDriverError::NotFound) => return Err(FsError::NoDevice),
         Err(_) => return Err(FsError::DeviceError),
     };
-    
+
     let ctx = load_context(&mut *drive)?;
     let mut state = RecoveryState {
         success: false,
@@ -3675,37 +3801,39 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
         blocks_recovered: 0,
         errors: Vec::new(),
     };
-    
+
     // Find latest valid checkpoint
     let cp1 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr)?;
     let cp2 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr + 1)?;
-    
+
     let ver1 = read_u64(&cp1, 0)?;
     let ver2 = read_u64(&cp2, 0)?;
-    
+
     let (latest_cp, _latest_ver) = if ver1 >= ver2 {
         (cp1, ver1)
     } else {
         (cp2, ver2)
     };
-    
+
     // Verify checkpoint checksum
     let stored_checksum = read_u32(&latest_cp, ctx.block_size as usize - 4)?;
     let calc_checksum = calculate_checksum(&latest_cp[..ctx.block_size as usize - 4]);
-    
+
     if stored_checksum != calc_checksum {
-        state.errors.push("Checkpoint checksum mismatch".to_string());
+        state
+            .errors
+            .push("Checkpoint checksum mismatch".to_string());
         return Ok(state);
     }
-    
+
     // Read SIT bitmap from checkpoint
     let sit_offset = 100;
     let sit_bitmap = &latest_cp[sit_offset..sit_offset + (ctx.block_size as usize / 2)];
-    
+
     // Read NAT bitmap from checkpoint
     let nat_offset = sit_offset + (ctx.block_size as usize / 2);
     let nat_bitmap = &latest_cp[nat_offset..nat_offset + (ctx.block_size as usize / 2)];
-    
+
     // Restore SIT
     let sit_addr = ctx.sit_blkaddr;
     let mut sit_block = read_block(&mut *drive, &ctx, sit_addr)?;
@@ -3713,7 +3841,7 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
         sit_block[i] = sit_bitmap[i];
     }
     write_block(&mut *drive, &ctx, sit_addr, &sit_block)?;
-    
+
     // Restore NAT
     let nat_addr = ctx.nat_blkaddr;
     let mut nat_block = read_block(&mut *drive, &ctx, nat_addr)?;
@@ -3721,34 +3849,34 @@ pub fn recover_from_checkpoint() -> Result<RecoveryState, FsError> {
         nat_block[i] = nat_bitmap[i];
     }
     write_block(&mut *drive, &ctx, nat_addr, &nat_block)?;
-    
+
     // Recover orphan inodes
     let flags = read_u32(&latest_cp, 48)?;
     if (flags & CP_ORPHAN_INODE_FLAG) != 0 {
         // Read orphan inode list and recover
         state.inodes_recovered = recover_orphan_inodes(&mut *drive, &ctx)?;
     }
-    
+
     state.success = true;
-    
+
     // Write clean checkpoint
     write_checkpoint(CP_RECOVERY_FLAG | CP_UMOUNT_FLAG)?;
-    
-    crate::serial_println!("[F2FS] Recovery complete: inodes={}, blocks={}", 
-        state.inodes_recovered, state.blocks_recovered);
-    
+
+    crate::serial_println!(
+        "[F2FS] Recovery complete: inodes={}, blocks={}",
+        state.inodes_recovered,
+        state.blocks_recovered
+    );
+
     Ok(state)
 }
 
 /// Recover orphan inodes
-fn recover_orphan_inodes(
-    drive: &mut dyn BlockDevice,
-    ctx: &F2fsContext,
-) -> Result<u32, FsError> {
+fn recover_orphan_inodes(drive: &mut dyn BlockDevice, ctx: &F2fsContext) -> Result<u32, FsError> {
     // Read orphan inode area (after checkpoint)
     let orphan_addr = ctx.cp_blkaddr + ctx.cp_payload;
     let orphan_block = read_block(drive, ctx, orphan_addr)?;
-    
+
     // Count orphan inodes (each is 4 bytes)
     let mut count = 0u32;
     for i in (0..ctx.block_size as usize).step_by(4) {
@@ -3762,7 +3890,7 @@ fn recover_orphan_inodes(
             // 4. Mark inode as deleted
         }
     }
-    
+
     Ok(count)
 }
 
@@ -3773,29 +3901,29 @@ pub fn rollback_checkpoint() -> Result<(), FsError> {
         Err(crate::drivers::linux::LinuxDriverError::NotFound) => return Err(FsError::NoDevice),
         Err(_) => return Err(FsError::DeviceError),
     };
-    
+
     let ctx = load_context(&mut *drive)?;
-    
+
     // Read both checkpoints
     let cp1 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr)?;
     let cp2 = read_block(&mut *drive, &ctx, ctx.cp_blkaddr + 1)?;
-    
+
     let ver1 = read_u64(&cp1, 0)?;
     let ver2 = read_u64(&cp2, 0)?;
-    
+
     // Use older checkpoint
     let (old_cp, _old_ver) = if ver1 < ver2 {
         (cp1, ver1)
     } else {
         (cp2, ver2)
     };
-    
+
     // Write old checkpoint to current position
     let current_addr = ctx.cp_blkaddr;
     write_block(&mut *drive, &ctx, current_addr, &old_cp)?;
-    
+
     crate::serial_println!("[F2FS] Rolled back to previous checkpoint");
-    
+
     Ok(())
 }
 
@@ -3819,7 +3947,7 @@ pub enum CompressAlgorithm {
 #[derive(Clone, Debug)]
 pub struct CompressConfig {
     pub algorithm: CompressAlgorithm,
-    pub log_cluster_size: u8,  // Log2 of cluster size (typically 4 = 16KB)
+    pub log_cluster_size: u8,   // Log2 of cluster size (typically 4 = 16KB)
     pub min_compress_ratio: u8, // Minimum ratio to compress (e.g., 80 = 80%)
     pub compress_mode: CompressMode,
 }
@@ -3827,8 +3955,8 @@ pub struct CompressConfig {
 /// Compression mode
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompressMode {
-    Fs = 0,    // File-system controlled
-    User = 1,  // User-controlled via flags
+    Fs = 0,   // File-system controlled
+    User = 1, // User-controlled via flags
 }
 
 impl Default for CompressConfig {
@@ -3846,7 +3974,7 @@ impl Default for CompressConfig {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CompressHeader {
-    pub magic: u32,      // F2FS_COMPRESSED_DATA
+    pub magic: u32, // F2FS_COMPRESSED_DATA
     pub cluster_size: u16,
     pub algorithm: u8,
     pub compressed_size: u16, // Size of compressed data (excluding header)
@@ -3861,22 +3989,20 @@ pub fn lz4_compress(src: &[u8], dst: &mut [u8]) -> usize {
     if src.is_empty() || dst.len() < src.len() + 4 {
         return 0;
     }
-    
+
     let mut dst_pos = 0;
     let mut src_pos = 0;
-    
+
     while src_pos < src.len() {
         // Find run-length match
         let run_start = src_pos;
         let run_byte = src[src_pos];
         let mut run_len = 1;
-        
-        while src_pos + run_len < src.len() && 
-              src[src_pos + run_len] == run_byte && 
-              run_len < 255 {
+
+        while src_pos + run_len < src.len() && src[src_pos + run_len] == run_byte && run_len < 255 {
             run_len += 1;
         }
-        
+
         if run_len >= 4 {
             // Encode as run: token + literal byte
             dst[dst_pos] = (run_len - 4) as u8;
@@ -3894,7 +4020,7 @@ pub fn lz4_compress(src: &[u8], dst: &mut [u8]) -> usize {
             src_pos += 1;
         }
     }
-    
+
     dst_pos
 }
 
@@ -3902,10 +4028,10 @@ pub fn lz4_compress(src: &[u8], dst: &mut [u8]) -> usize {
 pub fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> usize {
     let mut src_pos = 0;
     let mut dst_pos = 0;
-    
+
     while src_pos + 1 < src.len() && dst_pos < dst.len() {
         let token = src[src_pos];
-        
+
         if token == 0xF0 {
             // Literal
             dst[dst_pos] = src[src_pos + 1];
@@ -3915,7 +4041,7 @@ pub fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> usize {
             // Run-length
             let run_len = (token as usize) + 4;
             let run_byte = src[src_pos + 1];
-            
+
             for i in 0..run_len {
                 if dst_pos + i < dst.len() {
                     dst[dst_pos + i] = run_byte;
@@ -3925,7 +4051,7 @@ pub fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> usize {
             src_pos += 2;
         }
     }
-    
+
     dst_pos
 }
 
@@ -3934,12 +4060,12 @@ pub fn zstd_compress(src: &[u8], dst: &mut [u8]) -> usize {
     if src.is_empty() || dst.len() < src.len() / 2 {
         return 0;
     }
-    
+
     // Simple RLE + dictionary compression
     let mut dict: [u8; 256] = [0; 256];
     let mut dict_pos = 0;
     let mut dst_pos = 0;
-    
+
     // Build dictionary
     for &b in src.iter().take(256) {
         if !dict.contains(&b) {
@@ -3947,18 +4073,18 @@ pub fn zstd_compress(src: &[u8], dst: &mut [u8]) -> usize {
             dict_pos += 1;
         }
     }
-    
+
     // Write dictionary header
     dst[dst_pos] = dict_pos as u8;
     dst_pos += 1;
     dst[dst_pos..dst_pos + dict_pos].copy_from_slice(&dict[..dict_pos]);
     dst_pos += dict_pos;
-    
+
     // Compress using dictionary indices
     let mut src_pos = 0;
     while src_pos < src.len() && dst_pos + 2 < dst.len() {
         let b = src[src_pos];
-        
+
         // Find in dictionary
         if let Some(idx) = dict[..dict_pos].iter().position(|&x| x == b) {
             dst[dst_pos] = idx as u8;
@@ -3971,7 +4097,7 @@ pub fn zstd_compress(src: &[u8], dst: &mut [u8]) -> usize {
         }
         src_pos += 1;
     }
-    
+
     dst_pos
 }
 
@@ -3980,22 +4106,22 @@ pub fn zstd_decompress(src: &[u8], dst: &mut [u8]) -> usize {
     if src.is_empty() {
         return 0;
     }
-    
+
     let mut dict: [u8; 256] = [0; 256];
     let dict_size = src[0] as usize;
-    
+
     if src.len() < 1 + dict_size {
         return 0;
     }
-    
+
     dict[..dict_size].copy_from_slice(&src[1..1 + dict_size]);
-    
+
     let mut src_pos = 1 + dict_size;
     let mut dst_pos = 0;
-    
+
     while src_pos < src.len() && dst_pos < dst.len() {
         let idx = src[src_pos];
-        
+
         if idx == 0xFF {
             // Escaped literal
             if src_pos + 1 >= src.len() {
@@ -4013,7 +4139,7 @@ pub fn zstd_decompress(src: &[u8], dst: &mut [u8]) -> usize {
             src_pos += 1;
         }
     }
-    
+
     dst_pos
 }
 
@@ -4026,7 +4152,7 @@ pub fn compress_block(config: &CompressConfig, src: &[u8], dst: &mut [u8]) -> Op
         }
         return None;
     }
-    
+
     let compressed_size = match config.algorithm {
         CompressAlgorithm::Lz4 => lz4_compress(src, dst),
         CompressAlgorithm::Zstd => zstd_compress(src, dst),
@@ -4036,7 +4162,7 @@ pub fn compress_block(config: &CompressConfig, src: &[u8], dst: &mut [u8]) -> Op
         }
         CompressAlgorithm::None => src.len(),
     };
-    
+
     // Check compression ratio
     let ratio = (compressed_size * 100) / src.len();
     if ratio >= config.min_compress_ratio as usize {
@@ -4047,7 +4173,7 @@ pub fn compress_block(config: &CompressConfig, src: &[u8], dst: &mut [u8]) -> Op
         }
         return None;
     }
-    
+
     Some(compressed_size)
 }
 
@@ -4066,26 +4192,22 @@ pub fn decompress_block(config: &CompressConfig, src: &[u8], dst: &mut [u8]) -> 
 }
 
 /// Write compressed file
-pub fn write_compressed(
-    path: &str,
-    data: &[u8],
-    config: &CompressConfig,
-) -> Result<(), FsError> {
+pub fn write_compressed(path: &str, data: &[u8], config: &CompressConfig) -> Result<(), FsError> {
     let cluster_size = 1u32 << config.log_cluster_size;
-    
+
     // Compress in clusters
     let mut compressed_data = Vec::new();
     let mut offset = 0;
-    
+
     while offset < data.len() {
         let chunk_end = (offset + cluster_size as usize).min(data.len());
         let chunk = &data[offset..chunk_end];
-        
+
         let mut compressed_chunk = vec![0u8; cluster_size as usize * 2];
-        
-        let compressed_size = compress_block(config, chunk, &mut compressed_chunk)
-            .ok_or(FsError::DeviceError)?;
-        
+
+        let compressed_size =
+            compress_block(config, chunk, &mut compressed_chunk).ok_or(FsError::DeviceError)?;
+
         // Add header
         let header = CompressHeader {
             magic: F2FS_COMPRESSED_DATA,
@@ -4095,7 +4217,7 @@ pub fn write_compressed(
             original_size: chunk.len() as u16,
             checksum: calculate_checksum(&compressed_chunk[..compressed_size]),
         };
-        
+
         // Write header + compressed data
         compressed_data.extend_from_slice(&header.magic.to_le_bytes());
         compressed_data.extend_from_slice(&header.cluster_size.to_le_bytes());
@@ -4104,34 +4226,33 @@ pub fn write_compressed(
         compressed_data.extend_from_slice(&header.original_size.to_le_bytes());
         compressed_data.extend_from_slice(&header.checksum.to_le_bytes());
         compressed_data.extend_from_slice(&compressed_chunk[..compressed_size]);
-        
+
         offset = chunk_end;
     }
-    
+
     // Write compressed data to file
     write_f2fs_file_at(path, 0, &compressed_data)?;
-    
+
     // Set compression flag in inode
     set_compress_flag(path, true, config)?;
-    
+
     Ok(())
 }
 
 /// Read compressed file
 pub fn read_compressed(path: &str, config: &CompressConfig) -> Result<Vec<u8>, FsError> {
     // Read raw file data
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     let mut compressed_data = vec![0u8; inode.size as usize];
     drop(drive);
     read_f2fs_file_at(path, 0, &mut compressed_data)?;
     let cluster_size = 1u32 << config.log_cluster_size;
-    
+
     let mut decompressed = Vec::new();
     let mut offset = 0;
-    
+
     while offset + 13 < compressed_data.len() {
         // Read header
         let magic = u32::from_le_bytes([
@@ -4140,44 +4261,39 @@ pub fn read_compressed(path: &str, config: &CompressConfig) -> Result<Vec<u8>, F
             compressed_data[offset + 2],
             compressed_data[offset + 3],
         ]);
-        
+
         if magic != F2FS_COMPRESSED_DATA {
             // Not compressed, return as-is
             return Ok(compressed_data);
         }
-        
-        let _cluster_size = u16::from_le_bytes([
-            compressed_data[offset + 4],
-            compressed_data[offset + 5],
-        ]);
+
+        let _cluster_size =
+            u16::from_le_bytes([compressed_data[offset + 4], compressed_data[offset + 5]]);
         let algorithm = compressed_data[offset + 6];
-        let compressed_size = u16::from_le_bytes([
-            compressed_data[offset + 7],
-            compressed_data[offset + 8],
-        ]) as usize;
-        let original_size = u16::from_le_bytes([
-            compressed_data[offset + 9],
-            compressed_data[offset + 10],
-        ]) as usize;
+        let compressed_size =
+            u16::from_le_bytes([compressed_data[offset + 7], compressed_data[offset + 8]]) as usize;
+        let original_size =
+            u16::from_le_bytes([compressed_data[offset + 9], compressed_data[offset + 10]])
+                as usize;
         let checksum = u32::from_le_bytes([
             compressed_data[offset + 11],
             compressed_data[offset + 12],
             compressed_data[offset + 13],
             compressed_data[offset + 14],
         ]);
-        
+
         offset += 15;
-        
+
         // Verify checksum
         if offset + compressed_size > compressed_data.len() {
             return Err(FsError::DeviceError);
         }
-        
+
         let calc_checksum = calculate_checksum(&compressed_data[offset..offset + compressed_size]);
         if checksum != calc_checksum {
             return Err(FsError::DeviceError);
         }
-        
+
         // Decompress
         let chunk_config = CompressConfig {
             algorithm: match algorithm {
@@ -4188,37 +4304,40 @@ pub fn read_compressed(path: &str, config: &CompressConfig) -> Result<Vec<u8>, F
             },
             ..config.clone()
         };
-        
+
         let mut decompressed_chunk = vec![0u8; original_size];
-        decompress_block(&chunk_config, &compressed_data[offset..offset + compressed_size], &mut decompressed_chunk)
-            .ok_or(FsError::DeviceError)?;
-        
+        decompress_block(
+            &chunk_config,
+            &compressed_data[offset..offset + compressed_size],
+            &mut decompressed_chunk,
+        )
+        .ok_or(FsError::DeviceError)?;
+
         decompressed.extend_from_slice(&decompressed_chunk);
         offset += compressed_size;
     }
-    
+
     Ok(decompressed)
 }
 
 /// Set compression flag on inode
 fn set_compress_flag(path: &str, enable: bool, config: &CompressConfig) -> Result<(), FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
-    
+
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
     }
-    
+
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-    
+
     // Set compression flags in inode i_flags
     let i_flags_offset = INODE_I_MODE_OFFSET + 20; // Approximate offset
     let mut flags = read_u32(&block, i_flags_offset)?;
-    
+
     if enable {
         flags |= 0x0001; // FS_COMPR_FL
         flags |= (config.algorithm as u32) << 4; // Algorithm in bits 4-7
@@ -4226,10 +4345,10 @@ fn set_compress_flag(path: &str, enable: bool, config: &CompressConfig) -> Resul
     } else {
         flags &= !0x0001;
     }
-    
+
     write_u32(&mut block, i_flags_offset, flags)?;
     write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
-    
+
     Ok(())
 }
 
@@ -4283,14 +4402,14 @@ pub struct EncryptKey {
 pub fn derive_key(master_key: &[u8], descriptor: &[u8; 8], key_size: usize) -> Vec<u8> {
     // HKDF-like derivation
     let mut derived = vec![0u8; key_size];
-    
+
     // Simple KDF: HMAC-SHA256 based
     for (i, b) in master_key.iter().chain(descriptor.iter()).enumerate() {
         derived[i % key_size] ^= b;
         // Mix with counter
         derived[i % key_size] ^= (i as u8).wrapping_add(0x5A);
     }
-    
+
     derived
 }
 
@@ -4298,35 +4417,35 @@ pub fn derive_key(master_key: &[u8], descriptor: &[u8; 8], key_size: usize) -> V
 pub fn aes256_xts_encrypt(key: &[u8], tweak: &[u8], plaintext: &[u8]) -> Vec<u8> {
     // Simplified XTS: AES-ECB with tweak
     let mut ciphertext = vec![0u8; plaintext.len()];
-    
+
     // Split key into two halves
     let key1 = &key[..32];
     let _key2 = &key[32..];
-    
+
     // Generate tweak using AES
     let mut tweak_block = [0u8; 16];
     tweak_block.copy_from_slice(&tweak[..16]);
-    
+
     // XOR plaintext with tweak and "encrypt"
     for (i, chunk) in plaintext.chunks(16).enumerate() {
         let mut block = [0u8; 16];
         block[..chunk.len()].copy_from_slice(chunk);
-        
+
         // XOR with tweak
         for j in 0..16 {
             block[j] ^= tweak_block[j];
         }
-        
+
         // Simple "encryption" (would use AES in production)
         for j in 0..16 {
             block[j] ^= key1[j % key1.len()];
         }
-        
+
         // XOR with tweak again
         for j in 0..16 {
             block[j] ^= tweak_block[j];
         }
-        
+
         // Multiply tweak by alpha (GF(2^128))
         let mut carry = false;
         for j in (0..16).rev() {
@@ -4337,11 +4456,11 @@ pub fn aes256_xts_encrypt(key: &[u8], tweak: &[u8], plaintext: &[u8]) -> Vec<u8>
         if carry {
             tweak_block[15] ^= 0x87;
         }
-        
+
         let offset = i * 16;
         ciphertext[offset..offset + chunk.len()].copy_from_slice(&block[..chunk.len()]);
     }
-    
+
     ciphertext
 }
 
@@ -4355,16 +4474,16 @@ pub fn aes256_xts_decrypt(key: &[u8], tweak: &[u8], ciphertext: &[u8]) -> Vec<u8
 pub fn aes256_gcm_encrypt_filename(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Vec<u8> {
     // Simplified GCM for filenames
     let mut ciphertext = vec![0u8; plaintext.len() + 16]; // +16 for tag
-    
+
     // XOR with keystream (simplified)
     for (i, b) in plaintext.iter().enumerate() {
         ciphertext[i] = b ^ key[i % key.len()] ^ nonce[i % nonce.len()];
     }
-    
+
     // Generate tag
     let tag = calculate_checksum(plaintext);
     ciphertext[plaintext.len()..plaintext.len() + 4].copy_from_slice(&tag.to_le_bytes());
-    
+
     ciphertext
 }
 
@@ -4373,15 +4492,15 @@ pub fn aes256_gcm_decrypt_filename(key: &[u8], nonce: &[u8], ciphertext: &[u8]) 
     if ciphertext.len() < 16 {
         return None;
     }
-    
+
     let plaintext_len = ciphertext.len() - 16;
     let mut plaintext = vec![0u8; plaintext_len];
-    
+
     // XOR with keystream
     for (i, b) in ciphertext[..plaintext_len].iter().enumerate() {
         plaintext[i] = b ^ key[i % key.len()] ^ nonce[i % nonce.len()];
     }
-    
+
     // Verify tag
     let stored_tag = u32::from_le_bytes([
         ciphertext[plaintext_len],
@@ -4390,18 +4509,18 @@ pub fn aes256_gcm_decrypt_filename(key: &[u8], nonce: &[u8], ciphertext: &[u8]) 
         ciphertext[plaintext_len + 3],
     ]);
     let calc_tag = calculate_checksum(&plaintext);
-    
+
     if stored_tag != calc_tag {
         return None;
     }
-    
+
     Some(plaintext)
 }
 
 /// Encrypt filename
 pub fn encrypt_filename(policy: &EncryptPolicy, key: &[u8], filename: &str) -> Vec<u8> {
     let plaintext = filename.as_bytes();
-    
+
     match policy.filenames_encryption_mode {
         EncryptAlgorithm::Aes256Gcm => {
             aes256_gcm_encrypt_filename(key, &policy.nonce[..12], plaintext)
@@ -4431,7 +4550,7 @@ pub fn decrypt_filename(policy: &EncryptPolicy, key: &[u8], ciphertext: &[u8]) -
             decrypted
         }
     };
-    
+
     String::from_utf8(plaintext).ok()
 }
 
@@ -4446,11 +4565,9 @@ pub fn encrypt_contents(
     let mut tweak = [0u8; 16];
     tweak[..8].copy_from_slice(&block_number.to_le_bytes());
     tweak[8..].copy_from_slice(&policy.nonce[..8]);
-    
+
     match policy.contents_encryption_mode {
-        EncryptAlgorithm::Aes256Xts => {
-            aes256_xts_encrypt(key, &tweak, plaintext)
-        }
+        EncryptAlgorithm::Aes256Xts => aes256_xts_encrypt(key, &tweak, plaintext),
         _ => {
             // Fallback
             let mut encrypted = plaintext.to_vec();
@@ -4472,11 +4589,9 @@ pub fn decrypt_contents(
     let mut tweak = [0u8; 16];
     tweak[..8].copy_from_slice(&block_number.to_le_bytes());
     tweak[8..].copy_from_slice(&policy.nonce[..8]);
-    
+
     match policy.contents_encryption_mode {
-        EncryptAlgorithm::Aes256Xts => {
-            aes256_xts_decrypt(key, &tweak, ciphertext)
-        }
+        EncryptAlgorithm::Aes256Xts => aes256_xts_decrypt(key, &tweak, ciphertext),
         _ => {
             let mut decrypted = ciphertext.to_vec();
             for (i, b) in decrypted.iter_mut().enumerate() {
@@ -4489,26 +4604,25 @@ pub fn decrypt_contents(
 
 /// Set encryption policy on directory/file
 pub fn set_encryption_policy(path: &str, policy: &EncryptPolicy) -> Result<(), FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
-    
+
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
     }
-    
+
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-    
+
     // Set encryption flag in inode i_flags
     let i_flags_offset = INODE_I_MODE_OFFSET + 20;
     let mut flags = read_u32(&block, i_flags_offset)?;
     flags |= 0x0008; // FS_ENCRYPT_FL
-    
+
     write_u32(&mut block, i_flags_offset, flags)?;
-    
+
     // Write encryption policy to xattr area
     let xattr_offset = ctx.block_size as usize - 200;
     block[xattr_offset] = policy.version;
@@ -4517,35 +4631,34 @@ pub fn set_encryption_policy(path: &str, policy: &EncryptPolicy) -> Result<(), F
     block[xattr_offset + 3] = policy.flags;
     block[xattr_offset + 4..xattr_offset + 12].copy_from_slice(&policy.master_key_descriptor);
     block[xattr_offset + 12..xattr_offset + 28].copy_from_slice(&policy.nonce);
-    
+
     write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
-    
+
     Ok(())
 }
 
 /// Get encryption policy
 pub fn get_encryption_policy(path: &str) -> Result<EncryptPolicy, FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
-    
+
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
     }
-    
+
     let block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-    
+
     // Check encryption flag
     let i_flags_offset = INODE_I_MODE_OFFSET + 20;
     let flags = read_u32(&block, i_flags_offset)?;
-    
+
     if (flags & 0x0008) == 0 {
         return Err(FsError::NotSupported);
     }
-    
+
     // Read encryption policy from xattr area
     let xattr_offset = ctx.block_size as usize - 200;
     let version = block[xattr_offset];
@@ -4561,13 +4674,13 @@ pub fn get_encryption_policy(path: &str) -> Result<EncryptPolicy, FsError> {
         3 => EncryptAlgorithm::Adiantum,
         _ => EncryptAlgorithm::None,
     };
-    
+
     let mut master_key_descriptor = [0u8; 8];
     master_key_descriptor.copy_from_slice(&block[xattr_offset + 4..xattr_offset + 12]);
-    
+
     let mut nonce = [0u8; 16];
     nonce.copy_from_slice(&block[xattr_offset + 12..xattr_offset + 28]);
-    
+
     Ok(EncryptPolicy {
         version,
         contents_encryption_mode: contents_mode,
@@ -4595,9 +4708,7 @@ pub fn add_master_key(descriptor: [u8; 8], key: [u8; 64], key_size: usize) {
 /// Get master key
 pub fn get_master_key(descriptor: &[u8; 8]) -> Option<EncryptKey> {
     let store = MASTER_KEY_STORE.lock();
-    store.iter()
-        .find(|k| &k.descriptor == descriptor)
-        .cloned()
+    store.iter().find(|k| &k.descriptor == descriptor).cloned()
 }
 
 /// Remove master key
@@ -4617,7 +4728,7 @@ pub fn remove_master_key(descriptor: &[u8; 8]) -> bool {
 pub struct ExtentCacheEntry {
     pub logical_block: u64,
     pub physical_block: u64,
-    pub length: u32,      // Number of contiguous blocks
+    pub length: u32, // Number of contiguous blocks
     pub flags: u16,
 }
 
@@ -4631,7 +4742,7 @@ pub struct ExtentCache {
 
 lazy_static! {
     /// Global extent cache
-    static ref EXTENT_CACHE: Mutex<HashMap<u64, ExtentCache, F2fsHashBuilder>> = 
+    static ref EXTENT_CACHE: Mutex<HashMap<u64, ExtentCache, F2fsHashBuilder>> =
         Mutex::new(HashMap::with_hasher(F2fsHashBuilder::default()));
 }
 
@@ -4639,29 +4750,30 @@ lazy_static! {
 pub fn add_extent(ino: u64, logical_block: u64, physical_block: u64, length: u32) {
     let mut cache = EXTENT_CACHE.lock();
     let file_cache = cache.entry(ino).or_insert_with(ExtentCache::default);
-    
+
     // Check if extent already exists or overlaps
     file_cache.entries.retain(|e| {
-        e.logical_block + e.length as u64 <= logical_block ||
-        logical_block + length as u64 <= e.logical_block
+        e.logical_block + e.length as u64 <= logical_block
+            || logical_block + length as u64 <= e.logical_block
     });
-    
+
     file_cache.entries.push(ExtentCacheEntry {
         logical_block,
         physical_block,
         length,
         flags: 0,
     });
-    
+
     // Sort by logical block
     file_cache.entries.sort_by_key(|e| e.logical_block);
-    
+
     // Merge adjacent extents
     let mut merged: Vec<ExtentCacheEntry> = Vec::new();
     for entry in file_cache.entries.drain(..) {
         if let Some(last) = merged.last_mut() {
-            if last.physical_block + last.length as u64 == entry.physical_block &&
-               last.logical_block + last.length as u64 == entry.logical_block {
+            if last.physical_block + last.length as u64 == entry.physical_block
+                && last.logical_block + last.length as u64 == entry.logical_block
+            {
                 last.length += entry.length;
                 continue;
             }
@@ -4677,8 +4789,9 @@ pub fn lookup_extent(ino: u64, logical_block: u64) -> Option<ExtentCacheEntry> {
     if let Some(file_cache) = cache.get_mut(&ino) {
         // Binary search for extent
         for entry in &file_cache.entries {
-            if logical_block >= entry.logical_block &&
-               logical_block < entry.logical_block + entry.length as u64 {
+            if logical_block >= entry.logical_block
+                && logical_block < entry.logical_block + entry.length as u64
+            {
                 file_cache.hit_count += 1;
                 return Some(entry.clone());
             }
@@ -4713,13 +4826,13 @@ pub fn read_block_cached(
         let physical_block = extent.physical_block + offset_in_extent;
         return read_block(drive, ctx, physical_block as u32);
     }
-    
+
     // Cache miss - read normally and update cache
     let physical_block = get_data_block_addr(drive, ctx, ino as u32, logical_block as usize)?;
     if physical_block != 0 {
         add_extent(ino, logical_block, physical_block as u64, 1);
     }
-    
+
     read_block(drive, ctx, physical_block)
 }
 
@@ -4731,13 +4844,13 @@ pub fn read_block_cached(
 #[derive(Clone, Debug)]
 pub struct InlineConfig {
     pub max_inline_size: usize,
-    pub inline_threshold: usize,  // Files below this size are inlined
+    pub inline_threshold: usize, // Files below this size are inlined
 }
 
 impl Default for InlineConfig {
     fn default() -> Self {
         InlineConfig {
-            max_inline_size: 3680,  // ~3.6KB (4KB block - inode overhead)
+            max_inline_size: 3680, // ~3.6KB (4KB block - inode overhead)
             inline_threshold: 3680,
         }
     }
@@ -4745,12 +4858,11 @@ impl Default for InlineConfig {
 
 /// Check if file has inline data
 pub fn is_inline(path: &str) -> Result<bool, FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
-    
+
     Ok(inode.inline)
 }
 
@@ -4761,125 +4873,121 @@ pub fn _inline_data_capacity_alias(block_size: u32) -> Result<usize, FsError> {
 
 /// Read inline data from inode
 pub fn read_inline_data(path: &str) -> Result<Vec<u8>, FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
-    
+
     if !inode.inline {
         return Err(FsError::NotSupported);
     }
-    
+
     Ok(inode.inline_data.unwrap_or_default())
 }
 
 /// Write inline data to inode
 pub fn write_inline_data(path: &str, data: &[u8]) -> Result<(), FsError> {
     let config = InlineConfig::default();
-    
+
     if data.len() > config.max_inline_size {
         return Err(FsError::NotSupported);
     }
-    
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
-    
+
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
     }
-    
+
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-    
+
     // Set inline flag
     let inline_offset = INODE_I_INLINE_OFFSET;
     if block[inline_offset] & F2FS_INLINE_DATA_FLAG == 0 {
         block[inline_offset] |= F2FS_INLINE_DATA_FLAG;
     }
-    
+
     // Write data to inline area
     let data_offset = INODE_I_ADDR_OFFSET;
     block[data_offset..data_offset + data.len()].copy_from_slice(data);
-    
+
     // Zero remaining inline area
     for b in &mut block[data_offset + data.len()..data_offset + config.max_inline_size] {
         *b = 0;
     }
-    
+
     // Update file size
     write_u32(&mut block, INODE_I_SIZE_OFFSET, data.len() as u32)?;
-    
+
     write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
-    
+
     Ok(())
 }
 
 /// Convert inline data to regular blocks
 pub fn convert_inline_to_blocks(path: &str) -> Result<(), FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
-    
+
     if !inode.inline {
-        return Ok(());  // Already not inline
+        return Ok(()); // Already not inline
     }
-    
+
     let inline_data = inode.inline_data.clone().unwrap_or_default();
-    
+
     if inline_data.is_empty() {
         return Ok(());
     }
-    
+
     // Clear inline flag
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
     }
-    
+
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
     block[INODE_I_INLINE_OFFSET] &= !F2FS_INLINE_DATA_FLAG;
     write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
-    
+
     // Write data as regular blocks
     drop(drive);
     write_f2fs_file_at(path, 0, &inline_data)?;
-    
+
     Ok(())
 }
 
 /// Convert regular blocks to inline data
 pub fn convert_blocks_to_inline(path: &str) -> Result<(), FsError> {
     let config = InlineConfig::default();
-    
+
     // Read file data
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
-    
+
     if inode.inline {
-        return Ok(());  // Already inline
+        return Ok(()); // Already inline
     }
-    
+
     if inode.size > config.inline_threshold as u64 {
-        return Err(FsError::NotSupported);  // Too large
+        return Err(FsError::NotSupported); // Too large
     }
-    
+
     // Read data
     let mut data = vec![0u8; inode.size as usize];
     drop(drive);
     read_f2fs_file_at(path, 0, &mut data)?;
-    
+
     // Write as inline
     write_inline_data(path, &data)?;
-    
+
     Ok(())
 }
 
@@ -4900,9 +5008,9 @@ pub enum XattrNamespace {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct XattrHeader {
-    pub magic: u32,        // XATTR_MAGIC
+    pub magic: u32, // XATTR_MAGIC
     pub ref_count: u16,
-    pub name_index: u8,    // XattrNamespace
+    pub name_index: u8, // XattrNamespace
     pub name_len: u8,
     pub value_size: u16,
     pub reserved: u16,
@@ -4920,37 +5028,35 @@ pub struct XattrEntry {
 
 /// Read xattr from file
 pub fn get_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result<Vec<u8>, FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
-    
+
     if nat_entry.block_addr == 0 {
         return Err(FsError::EntryNotFound);
     }
-    
+
     let block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-    
+
     // Find xattr area (at end of inode block)
     let xattr_start = ctx.block_size as usize - 200;
-    
+
     // Parse xattr entries
     let mut pos = xattr_start;
     while pos + 12 < block.len() {
-        let magic = u32::from_le_bytes([
-            block[pos], block[pos + 1], block[pos + 2], block[pos + 3],
-        ]);
-        
+        let magic =
+            u32::from_le_bytes([block[pos], block[pos + 1], block[pos + 2], block[pos + 3]]);
+
         if magic != XATTR_MAGIC {
             break;
         }
-        
+
         let name_index = block[pos + 6];
         let name_len = block[pos + 7] as usize;
         let value_size = u16::from_le_bytes([block[pos + 8], block[pos + 9]]) as usize;
-        
+
         let entry_namespace = match name_index {
             1 => XattrNamespace::User,
             2 => XattrNamespace::System,
@@ -4961,58 +5067,61 @@ pub fn get_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result<Ve
                 continue;
             }
         };
-        
+
         let entry_name = String::from_utf8_lossy(&block[pos + 12..pos + 12 + name_len]).to_string();
-        
+
         if entry_namespace == namespace && entry_name == name {
             let value_start = pos + 12 + name_len;
             return Ok(block[value_start..value_start + value_size].to_vec());
         }
-        
+
         pos += 12 + name_len + value_size;
     }
-    
+
     Err(FsError::EntryNotFound)
 }
 
 /// Set xattr on file
-pub fn set_xattr(path: &str, namespace: XattrNamespace, name: &str, value: &[u8]) -> Result<(), FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+pub fn set_xattr(
+    path: &str,
+    namespace: XattrNamespace,
+    name: &str,
+    value: &[u8],
+) -> Result<(), FsError> {
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
-    
+
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
     }
-    
+
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-    
+
     // Find xattr area
     let xattr_start = ctx.block_size as usize - 200;
     let xattr_end = ctx.block_size as usize;
-    
+
     // Find existing entry or space for new entry
     let mut pos = xattr_start;
     let mut found_pos = None;
     let mut end_pos = xattr_start;
-    
+
     while pos + 12 < xattr_end {
-        let magic = u32::from_le_bytes([
-            block[pos], block[pos + 1], block[pos + 2], block[pos + 3],
-        ]);
-        
+        let magic =
+            u32::from_le_bytes([block[pos], block[pos + 1], block[pos + 2], block[pos + 3]]);
+
         if magic != XATTR_MAGIC {
             end_pos = pos;
             break;
         }
-        
+
         let name_index = block[pos + 6];
         let name_len = block[pos + 7] as usize;
         let value_size = u16::from_le_bytes([block[pos + 8], block[pos + 9]]) as usize;
-        
+
         let entry_namespace = match name_index {
             1 => XattrNamespace::User,
             2 => XattrNamespace::System,
@@ -5020,37 +5129,37 @@ pub fn set_xattr(path: &str, namespace: XattrNamespace, name: &str, value: &[u8]
             6 => XattrNamespace::Security,
             _ => XattrNamespace::User,
         };
-        
+
         let entry_name = String::from_utf8_lossy(&block[pos + 12..pos + 12 + name_len]).to_string();
-        
+
         if entry_namespace == namespace && entry_name == name {
             found_pos = Some(pos);
             break;
         }
-        
+
         pos += 12 + name_len + value_size;
         end_pos = pos;
     }
-    
+
     // Calculate entry size
     let entry_size = 12 + name.len() + value.len();
-    
+
     if let Some(pos) = found_pos {
         // Replace existing entry
         let old_name_len = block[pos + 7] as usize;
         let old_value_size = u16::from_le_bytes([block[pos + 8], block[pos + 9]]) as usize;
         let old_entry_size = 12 + old_name_len + old_value_size;
-        
+
         if entry_size > old_entry_size && end_pos + entry_size - old_entry_size > xattr_end {
             return Err(FsError::DeviceError);
         }
-        
+
         // Shift remaining entries if size changed
         if entry_size != old_entry_size {
             let shift_start = pos + old_entry_size;
             let shift_end = end_pos;
             let delta = entry_size as i32 - old_entry_size as i32;
-            
+
             if delta > 0 {
                 // Expand - shift right
                 for i in (shift_start..shift_end).rev() {
@@ -5063,7 +5172,7 @@ pub fn set_xattr(path: &str, namespace: XattrNamespace, name: &str, value: &[u8]
                 }
             }
         }
-        
+
         // Write new entry
         write_xattr_entry(&mut block, pos, namespace, name, value)?;
     } else {
@@ -5071,19 +5180,25 @@ pub fn set_xattr(path: &str, namespace: XattrNamespace, name: &str, value: &[u8]
         if end_pos + entry_size > xattr_end {
             return Err(FsError::DeviceError);
         }
-        
+
         write_xattr_entry(&mut block, end_pos, namespace, name, value)?;
     }
-    
+
     write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
-    
+
     Ok(())
 }
 
 /// Write xattr entry at position
-fn write_xattr_entry(block: &mut [u8], pos: usize, namespace: XattrNamespace, name: &str, value: &[u8]) -> Result<(), FsError> {
+fn write_xattr_entry(
+    block: &mut [u8],
+    pos: usize,
+    namespace: XattrNamespace,
+    name: &str,
+    value: &[u8],
+) -> Result<(), FsError> {
     let name_bytes = name.as_bytes();
-    
+
     // Write header
     block[pos..pos + 4].copy_from_slice(&XATTR_MAGIC.to_le_bytes());
     block[pos + 4..pos + 6].copy_from_slice(&1u16.to_le_bytes()); // ref_count
@@ -5091,50 +5206,49 @@ fn write_xattr_entry(block: &mut [u8], pos: usize, namespace: XattrNamespace, na
     block[pos + 7] = name_bytes.len() as u8;
     block[pos + 8..pos + 10].copy_from_slice(&(value.len() as u16).to_le_bytes());
     block[pos + 10..pos + 12].copy_from_slice(&0u16.to_le_bytes()); // reserved
-    
+
     // Write name
     block[pos + 12..pos + 12 + name_bytes.len()].copy_from_slice(name_bytes);
-    
+
     // Write value
-    block[pos + 12 + name_bytes.len()..pos + 12 + name_bytes.len() + value.len()].copy_from_slice(value);
-    
+    block[pos + 12 + name_bytes.len()..pos + 12 + name_bytes.len() + value.len()]
+        .copy_from_slice(value);
+
     Ok(())
 }
 
 /// Remove xattr from file
 pub fn remove_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result<(), FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
-    
+
     if nat_entry.block_addr == 0 {
         return Err(FsError::DeviceError);
     }
-    
+
     let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-    
+
     let xattr_start = ctx.block_size as usize - 200;
     let xattr_end = ctx.block_size as usize;
-    
+
     let mut pos = xattr_start;
     let mut found = false;
-    
+
     while pos + 12 < xattr_end {
-        let magic = u32::from_le_bytes([
-            block[pos], block[pos + 1], block[pos + 2], block[pos + 3],
-        ]);
-        
+        let magic =
+            u32::from_le_bytes([block[pos], block[pos + 1], block[pos + 2], block[pos + 3]]);
+
         if magic != XATTR_MAGIC {
             break;
         }
-        
+
         let name_index = block[pos + 6];
         let name_len = block[pos + 7] as usize;
         let value_size = u16::from_le_bytes([block[pos + 8], block[pos + 9]]) as usize;
-        
+
         let entry_namespace = match name_index {
             1 => XattrNamespace::User,
             2 => XattrNamespace::System,
@@ -5142,19 +5256,22 @@ pub fn remove_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result
             6 => XattrNamespace::Security,
             _ => XattrNamespace::User,
         };
-        
+
         let entry_name = String::from_utf8_lossy(&block[pos + 12..pos + 12 + name_len]).to_string();
-        
+
         if entry_namespace == namespace && entry_name == name {
             // Remove entry by shifting remaining entries left
             let entry_size = 12 + name_len + value_size;
             let shift_start = pos + entry_size;
-            
+
             // Find end of xattr area
             let mut end = shift_start;
             while end + 12 < xattr_end {
                 let m = u32::from_le_bytes([
-                    block[end], block[end + 1], block[end + 2], block[end + 3],
+                    block[end],
+                    block[end + 1],
+                    block[end + 2],
+                    block[end + 3],
                 ]);
                 if m != XATTR_MAGIC {
                     break;
@@ -5163,67 +5280,65 @@ pub fn remove_xattr(path: &str, namespace: XattrNamespace, name: &str) -> Result
                 let vs = u16::from_le_bytes([block[end + 8], block[end + 9]]) as usize;
                 end += 12 + nl + vs;
             }
-            
+
             // Shift
             for i in shift_start..end {
                 block[i - entry_size] = block[i];
             }
-            
+
             // Zero remaining
             for b in &mut block[end - entry_size..end] {
                 *b = 0;
             }
-            
+
             found = true;
             break;
         }
-        
+
         pos += 12 + name_len + value_size;
     }
-    
+
     if !found {
         return Err(FsError::EntryNotFound);
     }
-    
+
     write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
-    
+
     Ok(())
 }
 
 /// List xattrs on file
 pub fn list_xattrs(path: &str) -> Result<Vec<XattrEntry>, FsError> {
-    let mut drive = crate::drivers::linux::select_block_device()
-        .map_err(|_| FsError::NoDevice)?;
-    
+    let mut drive = crate::drivers::linux::select_block_device().map_err(|_| FsError::NoDevice)?;
+
     let ctx = load_context(&mut *drive)?;
     let inode = open_inode_by_path(&mut *drive, &ctx, path)?;
     let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
-    
+
     if nat_entry.block_addr == 0 {
         return Ok(Vec::new());
     }
-    
+
     let block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
-    
+
     let xattr_start = ctx.block_size as usize - 200;
     let xattr_end = ctx.block_size as usize;
-    
+
     let mut xattrs = Vec::new();
     let mut pos = xattr_start;
-    
+
     while pos + 12 < xattr_end {
-        let magic = u32::from_le_bytes([
-            block[pos], block[pos + 1], block[pos + 2], block[pos + 3],
-        ]);
-        
+        let magic =
+            u32::from_le_bytes([block[pos], block[pos + 1], block[pos + 2], block[pos + 3]]);
+
         if magic != XATTR_MAGIC {
             break;
         }
-        
+
         let name_index = block[pos + 6];
         let name_len = block[pos + 7] as usize;
         let value_size = u16::from_le_bytes([block[pos + 8], block[pos + 9]]) as usize;
-        
+
         let namespace = match name_index {
             1 => XattrNamespace::User,
             2 => XattrNamespace::System,
@@ -5231,19 +5346,19 @@ pub fn list_xattrs(path: &str) -> Result<Vec<XattrEntry>, FsError> {
             6 => XattrNamespace::Security,
             _ => XattrNamespace::User,
         };
-        
+
         let name = String::from_utf8_lossy(&block[pos + 12..pos + 12 + name_len]).to_string();
         let value = block[pos + 12 + name_len..pos + 12 + name_len + value_size].to_vec();
-        
+
         xattrs.push(XattrEntry {
             namespace,
             name,
             value,
         });
-        
+
         pos += 12 + name_len + value_size;
     }
-    
+
     Ok(xattrs)
 }
 

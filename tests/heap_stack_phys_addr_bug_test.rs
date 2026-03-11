@@ -38,13 +38,18 @@ fn main() {
     println!("Test Durumu 1: Tipik heap adresi");
     let typical_heap_addr: u64 = 0x0000_4444_4447_8A90;
     println!("  Sanal adres: {:#018x}", typical_heap_addr);
-    println!("  Heap adresi mi? (< PHYSICAL_MEMORY_OFFSET): {}",
-             typical_heap_addr < PHYSICAL_MEMORY_OFFSET);
+    println!(
+        "  Heap adresi mi? (< PHYSICAL_MEMORY_OFFSET): {}",
+        typical_heap_addr < PHYSICAL_MEMORY_OFFSET
+    );
 
     // Düzeltilmemiş phys_addr() fonksiyonunun yaptığı işlemi simüle eder
     match typical_heap_addr.checked_sub(PHYSICAL_MEMORY_OFFSET) {
         Some(phys) => {
-            println!("  HATA: Çıkarma işlemi beklenmedik şekilde başarılı oldu: {:#018x}", phys);
+            println!(
+                "  HATA: Çıkarma işlemi beklenmedik şekilde başarılı oldu: {:#018x}",
+                phys
+            );
             println!("  Bu, hatanın mevcut olmadığını veya testin yanlış olduğunu gösterir\n");
         }
         None => {
@@ -58,12 +63,17 @@ fn main() {
     println!("Test Durumu 2: Düşük yığıt adresi");
     let low_addr: u64 = 0x0000_0000_1000_0000;
     println!("  Sanal adres: {:#018x}", low_addr);
-    println!("  Heap adresi mi? (< PHYSICAL_MEMORY_OFFSET): {}",
-             low_addr < PHYSICAL_MEMORY_OFFSET);
+    println!(
+        "  Heap adresi mi? (< PHYSICAL_MEMORY_OFFSET): {}",
+        low_addr < PHYSICAL_MEMORY_OFFSET
+    );
 
     match low_addr.checked_sub(PHYSICAL_MEMORY_OFFSET) {
         Some(phys) => {
-            println!("  HATA: Çıkarma işlemi beklenmedik şekilde başarılı oldu: {:#018x}", phys);
+            println!(
+                "  HATA: Çıkarma işlemi beklenmedik şekilde başarılı oldu: {:#018x}",
+                phys
+            );
         }
         None => {
             println!("  HATA DOĞRULANDI: Tamsayı taşması (underflow) tespit edildi!\n");
@@ -74,12 +84,17 @@ fn main() {
     println!("Test Durumu 3: Sınır adresi (HHDM eşiğinin hemen altında)");
     let boundary_addr: u64 = 0xFFFF_7FFF_FFFF_FFFF;
     println!("  Sanal adres: {:#018x}", boundary_addr);
-    println!("  Heap adresi mi? (< PHYSICAL_MEMORY_OFFSET): {}",
-             boundary_addr < PHYSICAL_MEMORY_OFFSET);
+    println!(
+        "  Heap adresi mi? (< PHYSICAL_MEMORY_OFFSET): {}",
+        boundary_addr < PHYSICAL_MEMORY_OFFSET
+    );
 
     match boundary_addr.checked_sub(PHYSICAL_MEMORY_OFFSET) {
         Some(phys) => {
-            println!("  HATA: Çıkarma işlemi beklenmedik şekilde başarılı oldu: {:#018x}", phys);
+            println!(
+                "  HATA: Çıkarma işlemi beklenmedik şekilde başarılı oldu: {:#018x}",
+                phys
+            );
         }
         None => {
             println!("  HATA DOĞRULANDI: Tamsayı taşması (underflow) tespit edildi!\n");
@@ -90,8 +105,10 @@ fn main() {
     println!("Test Durumu 4: HHDM adresi (kontrol - doğru çalışmalı)");
     let hhdm_addr: u64 = 0xFFFF_8000_0010_0000;
     println!("  Sanal adres: {:#018x}", hhdm_addr);
-    println!("  HHDM adresi mi? (>= PHYSICAL_MEMORY_OFFSET): {}",
-             hhdm_addr >= PHYSICAL_MEMORY_OFFSET);
+    println!(
+        "  HHDM adresi mi? (>= PHYSICAL_MEMORY_OFFSET): {}",
+        hhdm_addr >= PHYSICAL_MEMORY_OFFSET
+    );
 
     match hhdm_addr.checked_sub(PHYSICAL_MEMORY_OFFSET) {
         Some(phys) => {
@@ -110,8 +127,14 @@ fn main() {
     println!("  Bu, heap adreslerinde tamsayı taşmasına neden olur çünkü");
     println!("  virt_addr < PHYSICAL_MEMORY_OFFSET koşulu gerçekleşir");
     println!("\nKarşı örnekler:");
-    println!("  - Heap adresleri (< {:#018x}) taşmaya neden olur", PHYSICAL_MEMORY_OFFSET);
+    println!(
+        "  - Heap adresleri (< {:#018x}) taşmaya neden olur",
+        PHYSICAL_MEMORY_OFFSET
+    );
     println!("  - Düşük adresler başarısız olur");
     println!("  - HHDM eşiğinin hemen altındaki sınır adresleri başarısız olur");
-    println!("  - Yalnızca HHDM adresleri (>= {:#018x}) doğru çalışır", PHYSICAL_MEMORY_OFFSET);
+    println!(
+        "  - Yalnızca HHDM adresleri (>= {:#018x}) doğru çalışır",
+        PHYSICAL_MEMORY_OFFSET
+    );
 }

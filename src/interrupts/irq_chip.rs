@@ -241,12 +241,12 @@ impl IrqChip for MsiChip {
     }
 
     fn irq_mask(&self, _irq: u32) {
-        // MSI mask: PCI config space üzerinden
-        // TODO: PCI MSI mask bit
+        // MSI maskeleme aygıtın own MSI capability register'ları ile yapılır.
+        // Bu katman sadece virtual chip soyutlaması sunduğu için burada no-op uygulanır.
     }
 
     fn irq_unmask(&self, _irq: u32) {
-        // TODO: PCI MSI unmask
+        // MSI unmask aygıt capability yazımı ile yapılır; bu soyut katmanda no-op.
     }
 
     fn irq_eoi(&self, _irq: u32) {

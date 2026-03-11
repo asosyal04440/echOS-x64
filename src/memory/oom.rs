@@ -67,8 +67,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -145,6 +145,8 @@ pub struct OomState {
     oom_exempt: Mutex<Vec<TaskId>>,
     /// OOM score adj değerleri
     oom_scores: Mutex<BTreeMap<TaskId, i16>>,
+    /// Kullanıcı tanımlı kritik seviye (0-100, 100 = en kritik/korunacak)
+    criticality: Mutex<BTreeMap<TaskId, u8>>,
     /// Kill geçmişi
     kill_history: Mutex<Vec<OomKillRecord>>,
 }
@@ -167,6 +169,7 @@ static OOM_STATE: OomState = OomState {
     last_killed_pid: AtomicUsize::new(0),
     oom_exempt: Mutex::new(Vec::new()),
     oom_scores: Mutex::new(BTreeMap::new()),
+    criticality: Mutex::new(BTreeMap::new()),
     kill_history: Mutex::new(Vec::new()),
 };
 
@@ -216,6 +219,18 @@ impl OomState {
         self.oom_scores.lock().get(&pid).copied().unwrap_or(0)
     }
 
+    /// Süreç kritikliği (0-100) ayarla.
+    pub fn set_criticality(&self, pid: TaskId, criticality: u8) {
+        self.criticality
+            .lock()
+            .insert(pid, criticality.min(100));
+    }
+
+    /// Süreç kritikliği al.
+    pub fn get_criticality(&self, pid: TaskId) -> u8 {
+        self.criticality.lock().get(&pid).copied().unwrap_or(0)
+    }
+
     /// OOM kill kaydı ekle
     pub fn record_kill(&self, record: OomKillRecord) {
         let mut history = self.kill_history.lock();
@@ -245,11 +260,11 @@ impl OomState {
 }
 
 /// OOM score hesapla (Linux benzeri)
-/// 
+///
 /// Skor formülü:
 /// base_score = rss + swap + page_table_pages
 /// adjusted_score = base_score * (1000 + oom_score_adj) / 1000
-/// 
+///
 /// Düşük skor = daha az olası öldürülme
 /// Yüksek skor = daha olası öldürülme
 pub fn calculate_oom_score(info: &OomProcessInfo) -> u64 {
@@ -265,7 +280,7 @@ pub fn calculate_oom_score(info: &OomProcessInfo) -> u64 {
 
     // Temel skor: RSS + swap
     let base_score = (info.rss_pages + info.swap_pages) as u64;
-    
+
     if base_score == 0 {
         return 0;
     }
@@ -273,7 +288,7 @@ pub fn calculate_oom_score(info: &OomProcessInfo) -> u64 {
     // OOM score adjustment uygula
     let adj = OOM_STATE.get_oom_score_adj(info.pid);
     let multiplier = 1000i64 + adj as i64;
-    
+
     // Negatif adj düşük skor, pozitif adj yüksek skor
     let adjusted_score = if multiplier <= 0 {
         1 // Minimum skor
@@ -304,8 +319,10 @@ pub fn calculate_oom_score(info: &OomProcessInfo) -> u64 {
     };
 
     let final_score = (score as f64 * runtime_factor * children_factor) as u64;
-    
-    final_score.max(1)
+    let criticality = OOM_STATE.get_criticality(info.pid) as u64;
+    let protection = 100u64.saturating_sub(criticality).max(1);
+    let protected = final_score.saturating_mul(protection) / 100;
+    protected.max(1)
 }
 
 /// OOM adaylarını topla ve sırala
@@ -335,17 +352,22 @@ pub fn select_oom_victim(processes: &[OomProcessInfo]) -> Option<OomCandidate> {
     }
 
     // Skora göre azalan sırada sırala (yüksek skor = öldürülecek)
-    candidates.sort_by(|a, b| b.score.cmp(&a.score));
+    candidates.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| b.rss_pages.cmp(&a.rss_pages))
+            .then_with(|| b.pid.cmp(&a.pid))
+    });
 
     // En yüksek skorlu adayı döndür
     candidates.into_iter().next()
 }
 
 /// OOM killer'ı tetikle
-/// 
+///
 /// Bellek kritik seviyede olduğunda çağrılır.
 /// En yüksek skorlu process'i öldürür.
-/// 
+///
 /// # Returns
 /// - `Some(freed_pages)`: Öldürülen process ve serbest kalan sayfa sayısı
 /// - `None`: Öldürülecek process bulunamadı
@@ -356,7 +378,7 @@ pub fn oom_kill(processes: &[OomProcessInfo]) -> Option<usize> {
     }
 
     let victim = select_oom_victim(processes)?;
-    
+
     crate::serial_println!(
         "[OOM] Killing process '{}' (PID: {}) with score {} (RSS: {} pages)",
         victim.name,
@@ -368,7 +390,7 @@ pub fn oom_kill(processes: &[OomProcessInfo]) -> Option<usize> {
     // Process'i öldür
     // Not: Gerçek implementation task manager ile entegre olmalı
     let freed_pages = victim.rss_pages;
-    
+
     // Kill kaydı tut
     OOM_STATE.record_kill(OomKillRecord {
         pid: victim.pid,
@@ -379,9 +401,9 @@ pub fn oom_kill(processes: &[OomProcessInfo]) -> Option<usize> {
         freed_pages,
     });
 
-    // Process'i terminate et
-    // crate::task::scheduler::kill_task(victim.pid);
-    
+    // Process'i terminate et (SIGKILL)
+    let _ = crate::task::scheduler::kill_task(victim.pid, 9);
+
     Some(freed_pages)
 }
 
@@ -389,6 +411,11 @@ pub fn oom_kill(processes: &[OomProcessInfo]) -> Option<usize> {
 pub fn should_trigger_oom(free_pages: usize, total_pages: usize) -> bool {
     if !OOM_STATE.is_enabled() {
         return false;
+    }
+
+    // PSI erken uyarı — serbest bellek eşikleri düşmeden OOM yolunu hazırla.
+    if crate::memory::psi::severe_memory_pressure() {
+        return true;
     }
 
     // Minimum eşik
@@ -413,6 +440,42 @@ pub fn should_trigger_oom(free_pages: usize, total_pages: usize) -> bool {
 pub fn init() {
     OOM_STATE.set_enabled(true);
     crate::serial_println!("[OOM] OOM Killer initialized");
+}
+
+/// Cgroup-scoped OOM kill: belirli cgroup'üan süreçlerini hedef al
+/// Cgroup bellek limiti aşıldığında çağrılır.
+pub fn oom_kill_cgroup(cgroup_name: &str, process_pids: &[u64]) -> Option<usize> {
+    if process_pids.is_empty() {
+        return None;
+    }
+
+    // Cgroup'üan süreçlerinden OomProcessInfo oluştur
+    let tasks = crate::task::scheduler::list_tasks();
+    let oom_infos: alloc::vec::Vec<OomProcessInfo> = tasks
+        .iter()
+        .filter(|t| process_pids.contains(&(t.pid as u64)))
+        .map(|t| OomProcessInfo {
+            pid: t.pid,
+            name: alloc::string::String::from(t.name),
+            rss_pages: 256,
+            swap_pages: 0,
+            oom_score_adj: 0,
+            nice: 0,
+            runtime_ticks: 0,
+            is_kernel: t.pid < 2,
+            is_root: false,
+            children: 0,
+            cpu_percent: 0,
+        })
+        .collect();
+
+    crate::serial_println!(
+        "[OOM] Cgroup '{}' OOM kill with {} candidate processes",
+        cgroup_name,
+        oom_infos.len()
+    );
+
+    oom_kill(&oom_infos)
 }
 
 /// OOM killer aktif mi?
@@ -445,6 +508,16 @@ pub fn set_oom_score_adj(pid: TaskId, adj: i16) {
     OOM_STATE.set_oom_score_adj(pid, adj);
 }
 
+/// Process kritikliğini ayarla (0-100).
+/// 100: mümkün olduğunca korunur, 0: nötr.
+pub fn set_oom_criticality(pid: TaskId, criticality: u8) {
+    OOM_STATE.set_criticality(pid, criticality);
+}
+
+pub fn get_oom_criticality(pid: TaskId) -> u8 {
+    OOM_STATE.get_criticality(pid)
+}
+
 /// Process OOM score adjustment al
 pub fn get_oom_score_adj(pid: TaskId) -> i16 {
     OOM_STATE.get_oom_score_adj(pid)
@@ -472,15 +545,20 @@ pub struct OomStats {
     pub last_killed_pid: TaskId,
     pub ticks_since_last_kill: u64,
     pub exempt_count: usize,
+    pub psi_some_avg10: u64,
+    pub psi_full_avg10: u64,
 }
 
 /// OOM istatistiklerini al
 pub fn get_oom_stats() -> OomStats {
+    let psi = crate::memory::psi::snapshot();
     OomStats {
         enabled: OOM_STATE.is_enabled(),
         total_kills: OOM_STATE.total_kills.load(Ordering::SeqCst),
         last_killed_pid: OOM_STATE.last_killed_pid.load(Ordering::SeqCst) as TaskId,
         ticks_since_last_kill: OOM_STATE.ticks_since_last_kill(),
         exempt_count: OOM_STATE.oom_exempt.lock().len(),
+        psi_some_avg10: psi.some_avg10,
+        psi_full_avg10: psi.full_avg10,
     }
 }

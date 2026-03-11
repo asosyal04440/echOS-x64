@@ -132,7 +132,8 @@ impl TtyBuffer {
 
         let val = unsafe { (*self.data.get())[tail] };
         // Release: veri okuduktan SONRA tail güncellenmeli
-        self.tail.store((tail + 1) % TTY_BUF_SIZE, Ordering::Release);
+        self.tail
+            .store((tail + 1) % TTY_BUF_SIZE, Ordering::Release);
         Some(val)
     }
 
@@ -154,11 +155,19 @@ impl TtyBuffer {
             }
 
             // Modüler geri alma: 0 ise TTY_BUF_SIZE-1'e sar
-            let prev_head = if head == 0 { TTY_BUF_SIZE - 1 } else { head - 1 };
+            let prev_head = if head == 0 {
+                TTY_BUF_SIZE - 1
+            } else {
+                head - 1
+            };
 
             // Atomik olarak head'i bir geri alıyoruz (CAS işlemi önerilir ama
             // tekil üretici varsa directly store yeterli olabilir, yine de CAS daha güvenli)
-            if self.head.compare_exchange_weak(head, prev_head, Ordering::Release, Ordering::Relaxed).is_ok() {
+            if self
+                .head
+                .compare_exchange_weak(head, prev_head, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
                 return true;
             }
             // CAS başarısız olursa döngü tekrar dener (spin)

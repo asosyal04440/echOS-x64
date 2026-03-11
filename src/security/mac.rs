@@ -36,8 +36,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 /// Güvenlik bağlamı (SELinux context'e karşılık gelir)
@@ -69,7 +69,12 @@ impl SecurityContext {
 
     /// Çekirdek bağlamı oluşturur: sistem_u:system_r:kernel_t:SystemHigh
     pub fn system_u() -> Self {
-        SecurityContext::new("system_u", "system_r", "kernel_t", SecurityLevel::SystemHigh)
+        SecurityContext::new(
+            "system_u",
+            "system_r",
+            "kernel_t",
+            SecurityLevel::SystemHigh,
+        )
     }
 
     /// Kullanıcı bağlamı oluşturur: user_u:user_r:user_t:Low
@@ -79,7 +84,12 @@ impl SecurityContext {
 
     /// Kısıtlanmamış bağlam: tüm kaynaklara erişebilen özel tip
     pub fn unconfined_u() -> Self {
-        SecurityContext::new("unconfined_u", "unconfined_r", "unconfined_t", SecurityLevel::Low)
+        SecurityContext::new(
+            "unconfined_u",
+            "unconfined_r",
+            "unconfined_t",
+            SecurityLevel::Low,
+        )
     }
 }
 
@@ -96,22 +106,44 @@ impl SecurityContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SecurityLevel {
     pub sensitivity: u8,
-    pub categories: u32,  // Bitmask for categories
+    pub categories: u32, // Bitmask for categories
 }
 
 impl SecurityLevel {
-    pub const SystemHigh: Self = SecurityLevel { sensitivity: 255, categories: 0xFFFFFFFF };
-    pub const SystemLow: Self = SecurityLevel { sensitivity: 0, categories: 0 };
-    pub const Low: Self = SecurityLevel { sensitivity: 1, categories: 0 };
-    pub const Medium: Self = SecurityLevel { sensitivity: 2, categories: 0 };
-    pub const High: Self = SecurityLevel { sensitivity: 3, categories: 0 };
-    pub const Secret: Self = SecurityLevel { sensitivity: 4, categories: 0 };
-    pub const TopSecret: Self = SecurityLevel { sensitivity: 5, categories: 0 };
+    pub const SystemHigh: Self = SecurityLevel {
+        sensitivity: 255,
+        categories: 0xFFFFFFFF,
+    };
+    pub const SystemLow: Self = SecurityLevel {
+        sensitivity: 0,
+        categories: 0,
+    };
+    pub const Low: Self = SecurityLevel {
+        sensitivity: 1,
+        categories: 0,
+    };
+    pub const Medium: Self = SecurityLevel {
+        sensitivity: 2,
+        categories: 0,
+    };
+    pub const High: Self = SecurityLevel {
+        sensitivity: 3,
+        categories: 0,
+    };
+    pub const Secret: Self = SecurityLevel {
+        sensitivity: 4,
+        categories: 0,
+    };
+    pub const TopSecret: Self = SecurityLevel {
+        sensitivity: 5,
+        categories: 0,
+    };
 
     /// Bell-LaPadula "dominates" ilişkisi:
     /// self >= other ise true döner (hem duyarlılık hem kategori kapsama)
     pub fn dominates(&self, other: &SecurityLevel) -> bool {
-        self.sensitivity >= other.sensitivity && (self.categories & other.categories) == other.categories
+        self.sensitivity >= other.sensitivity
+            && (self.categories & other.categories) == other.categories
     }
 }
 
@@ -158,7 +190,7 @@ impl AccessVector {
     pub const PROCESS_SIGKILL: u32 = 1 << 3;
     pub const PROCESS_SIGSTOP: u32 = 1 << 4;
     pub const PROCESS_SIGINJECT: u32 = 1 << 5;
-    pub const PROCESS_PTRACE: u32 = 1 << 6;  // Hata ayıklama ekleme yetkisi
+    pub const PROCESS_PTRACE: u32 = 1 << 6; // Hata ayıklama ekleme yetkisi
     pub const PROCESS_EXECMEM: u32 = 1 << 7;
     pub const PROCESS_EXECSTACK: u32 = 1 << 8;
     pub const PROCESS_NOATSECURE: u32 = 1 << 9;
@@ -172,7 +204,9 @@ impl AccessVector {
     pub const SOCKET_ACCEPT: u32 = 1 << 5;
 
     pub const NONE: Self = AccessVector { permissions: 0 };
-    pub const ALL: Self = AccessVector { permissions: 0xFFFFFFFF };
+    pub const ALL: Self = AccessVector {
+        permissions: 0xFFFFFFFF,
+    };
 
     pub fn new(permissions: u32) -> Self {
         AccessVector { permissions }
@@ -362,7 +396,14 @@ impl MacPolicy {
     }
 
     /// TE kuralı ekler (allow/deny <kaynak> <hedef>:<sınıf> { <izinler> })
-    pub fn add_rule(&mut self, source: &str, target: &str, class: ObjectClass, perms: AccessVector, decision: AccessDecision) {
+    pub fn add_rule(
+        &mut self,
+        source: &str,
+        target: &str,
+        class: ObjectClass,
+        perms: AccessVector,
+        decision: AccessDecision,
+    ) {
         self.te_rules.push(TeRule {
             source_type: String::from(source),
             target_type: String::from(target),
@@ -373,7 +414,13 @@ impl MacPolicy {
     }
 
     /// Tip geçiş kuralı ekler (execve() sırasında uygulanır)
-    pub fn add_transition(&mut self, source: &str, target: &str, class: ObjectClass, new_type: &str) {
+    pub fn add_transition(
+        &mut self,
+        source: &str,
+        target: &str,
+        class: ObjectClass,
+        new_type: &str,
+    ) {
         self.transitions.push(TransitionRule {
             source_type: String::from(source),
             target_type: String::from(target),
@@ -388,9 +435,16 @@ impl MacPolicy {
     ///   1. MLS "no read up" kontrolü (Bell-LaPadula okuma kuralı)
     ///   2. TE kuralları taranır; eşleşen ilk kural uygulanır
     ///   3. Eşleşme yoksa enforce moduna göre Deny veya Allow döner
-    pub fn check_access(&self, source_ctx: &SecurityContext, target_ctx: &SecurityContext, class: ObjectClass, requested: AccessVector) -> AccessDecision {
+    pub fn check_access(
+        &self,
+        source_ctx: &SecurityContext,
+        target_ctx: &SecurityContext,
+        class: ObjectClass,
+        requested: AccessVector,
+    ) -> AccessDecision {
         // MLS check first
-        if !source_ctx.level.dominates(&target_ctx.level) && requested.has(AccessVector::FILE_READ) {
+        if !source_ctx.level.dominates(&target_ctx.level) && requested.has(AccessVector::FILE_READ)
+        {
             return AccessDecision::Deny;
         }
 
@@ -416,9 +470,17 @@ impl MacPolicy {
 
     /// Geçiş tipi arar: execve() sonrası sürecin hangi tipi alacağını döndürür.
     /// Eşleşme yoksa None döner (kaynak tip değişmez).
-    pub fn get_transition(&self, source_type: &str, target_type: &str, class: ObjectClass) -> Option<&str> {
+    pub fn get_transition(
+        &self,
+        source_type: &str,
+        target_type: &str,
+        class: ObjectClass,
+    ) -> Option<&str> {
         for trans in &self.transitions {
-            if trans.source_type == source_type && trans.target_type == target_type && trans.object_class == class {
+            if trans.source_type == source_type
+                && trans.target_type == target_type
+                && trans.object_class == class
+            {
                 return Some(&trans.new_type);
             }
         }
@@ -437,17 +499,71 @@ pub fn create_default_policy() -> MacPolicy {
     let mut policy = MacPolicy::new("default");
 
     // Kernel can do everything
-    policy.add_rule("kernel_t", "kernel_t", ObjectClass::Process, AccessVector::ALL, AccessDecision::Allow);
-    policy.add_rule("kernel_t", "file_t", ObjectClass::File, AccessVector::ALL, AccessDecision::Allow);
-    policy.add_rule("kernel_t", "dir_t", ObjectClass::Directory, AccessVector::ALL, AccessDecision::Allow);
-    policy.add_rule("kernel_t", "device_t", ObjectClass::Device, AccessVector::ALL, AccessDecision::Allow);
+    policy.add_rule(
+        "kernel_t",
+        "kernel_t",
+        ObjectClass::Process,
+        AccessVector::ALL,
+        AccessDecision::Allow,
+    );
+    policy.add_rule(
+        "kernel_t",
+        "file_t",
+        ObjectClass::File,
+        AccessVector::ALL,
+        AccessDecision::Allow,
+    );
+    policy.add_rule(
+        "kernel_t",
+        "dir_t",
+        ObjectClass::Directory,
+        AccessVector::ALL,
+        AccessDecision::Allow,
+    );
+    policy.add_rule(
+        "kernel_t",
+        "device_t",
+        ObjectClass::Device,
+        AccessVector::ALL,
+        AccessDecision::Allow,
+    );
 
     // User domain
-    policy.add_rule("user_t", "user_home_t", ObjectClass::File, AccessVector::ALL, AccessDecision::Allow);
-    policy.add_rule("user_t", "user_home_t", ObjectClass::Directory, AccessVector::ALL, AccessDecision::Allow);
-    policy.add_rule("user_t", "user_tmp_t", ObjectClass::File, AccessVector::ALL, AccessDecision::Allow);
-    policy.add_rule("user_t", "bin_t", ObjectClass::File, AccessVector::new(AccessVector::FILE_READ | AccessVector::FILE_EXECUTE), AccessDecision::Allow);
-    policy.add_rule("user_t", "lib_t", ObjectClass::File, AccessVector::new(AccessVector::FILE_READ | AccessVector::FILE_EXECUTE), AccessDecision::Allow);
+    policy.add_rule(
+        "user_t",
+        "user_home_t",
+        ObjectClass::File,
+        AccessVector::ALL,
+        AccessDecision::Allow,
+    );
+    policy.add_rule(
+        "user_t",
+        "user_home_t",
+        ObjectClass::Directory,
+        AccessVector::ALL,
+        AccessDecision::Allow,
+    );
+    policy.add_rule(
+        "user_t",
+        "user_tmp_t",
+        ObjectClass::File,
+        AccessVector::ALL,
+        AccessDecision::Allow,
+    );
+    policy.add_rule(
+        "user_t",
+        "bin_t",
+        ObjectClass::File,
+        AccessVector::new(AccessVector::FILE_READ | AccessVector::FILE_EXECUTE),
+        AccessDecision::Allow,
+    );
+    policy.add_rule(
+        "user_t",
+        "lib_t",
+        ObjectClass::File,
+        AccessVector::new(AccessVector::FILE_READ | AccessVector::FILE_EXECUTE),
+        AccessDecision::Allow,
+    );
 
     // Process transitions
     policy.add_transition("user_t", "bin_t", ObjectClass::Process, "user_t");
@@ -534,7 +650,11 @@ pub fn check_file_access(pid: u64, path: &str, requested: AccessVector) -> Acces
 
 /// Bir sürecin başka bir sürece erişip erişemeyeceğine karar verir.
 /// Her iki sürecin bağlamı bilinmiyorsa Deny döner.
-pub fn check_process_access(source_pid: u64, target_pid: u64, requested: AccessVector) -> AccessDecision {
+pub fn check_process_access(
+    source_pid: u64,
+    target_pid: u64,
+    requested: AccessVector,
+) -> AccessDecision {
     let source_ctx = match get_process_context(source_pid) {
         Some(ctx) => ctx,
         None => return AccessDecision::Deny,
@@ -559,7 +679,12 @@ pub fn compute_transition(source_pid: u64, target_type: &str) -> Option<Security
 
     let new_type = policy.get_transition(&source_ctx.type_, target_type, ObjectClass::Process)?;
 
-    Some(SecurityContext::new(&source_ctx.user, &source_ctx.role, new_type, source_ctx.level))
+    Some(SecurityContext::new(
+        &source_ctx.user,
+        &source_ctx.role,
+        new_type,
+        source_ctx.level,
+    ))
 }
 
 /// Çalışma zamanında özel politika yükler (varsayılan politikanın üzerine yazar).
@@ -586,12 +711,22 @@ pub fn is_enforcing() -> bool {
 ///
 /// Sessiz kararlar (Allow/Deny/DontAudit) loglanmaz; yalnızca denetim istenen
 /// kararlar seri porta yazılır.
-pub fn audit_decision(decision: AccessDecision, source_pid: u64, target: &str, class: ObjectClass, perms: AccessVector) {
+pub fn audit_decision(
+    decision: AccessDecision,
+    source_pid: u64,
+    target: &str,
+    class: ObjectClass,
+    perms: AccessVector,
+) {
     match decision {
         AccessDecision::AuditAllow | AccessDecision::AuditDeny => {
             crate::serial_println!(
                 "[MAC/AUDIT] {:?}: pid={} target={} class={:?} perms={:#x}",
-                decision, source_pid, target, class, perms.permissions
+                decision,
+                source_pid,
+                target,
+                class,
+                perms.permissions
             );
         }
         _ => {}

@@ -124,10 +124,10 @@ impl SerialPort {
     /// 6. Modem kontrol: DTR+RTS=1, OUT2=1 (IRQ enable)
     pub fn init(&mut self) {
         unsafe {
-            self.int_en.write(0x00);   // Tüm interrupt'ları kapat
+            self.int_en.write(0x00); // Tüm interrupt'ları kapat
             self.line_ctrl.write(0x80); // DLAB aktif (baud rate ayarı)
-            self.data.write(0x03);      // Divisor low byte (38400 baud)
-            self.int_en.write(0x00);    // Divisor high byte
+            self.data.write(0x03); // Divisor low byte (38400 baud)
+            self.int_en.write(0x00); // Divisor high byte
             self.line_ctrl.write(0x03); // 8 bit, parity yok, 1 stop bit
             self.fifo_ctrl.write(0xC7); // FIFO aktif, 14 byte threshold
             self.modem_ctrl.write(0x0B); // IRQ aktif, RTS/DSR set

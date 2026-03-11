@@ -101,7 +101,7 @@ pub fn init() {
         lstar.write(syscall_addr.as_u64());
 
         let mut sfmask = Msr::new(MSR_SFMASK);
-        sfmask.write(0x200); // Bit 9: IF (kesme bayrağı maskesi); SYSCALL sırasında kesme kapalı kalır
+        sfmask.write(0x700); // Bit 8: TF (tek adım), Bit 9: IF (kesme), Bit 10: DF (yön bayrağı) — hepsi maskelenir
     }
 
     crate::serial_println!("Syscall Mechanism Initialized.");
@@ -151,6 +151,7 @@ pub fn current_user_context() -> (u64, u64, u64) {
 ///
 /// SYSCALL talimatı tarafından doğrudan çağrılan düşük seviye giriş noktası.
 /// Kullanıcı bağlamını kaydeder, argümanları yeniden düzenler, Rust dağıtıcısını çağırır.
+#[cfg(not(target_os = "windows"))]
 global_asm!(
     r#"
 .global syscall_handler
@@ -208,9 +209,14 @@ syscall_handler:
 );
 
 /// Sistem çağrısı assembly giriş noktasının dış bildirimi.
+#[cfg(not(target_os = "windows"))]
 extern "C" {
     fn syscall_handler();
 }
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "C" fn syscall_handler() {}
 
 /// Rust tarafındaki sistem çağrısı dağıtıcısı.
 ///

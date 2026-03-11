@@ -1,3 +1,6 @@
 [submodule "third_party/ironshim-rs"]
 	path = third_party/ironshim-rs
 	url = https://github.com/asosyal04440/IronShim-rs.git
+[submodule "third_party/valkyrie-v"]
+	path = third_party/valkyrie-v
+	url = https://github.com/asosyal04440/Valkyrie-V

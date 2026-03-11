@@ -375,14 +375,17 @@ pub unsafe fn load_cr3_with_pcid(pml4_phys: PhysAddr, pcid: u16, noflush: bool) 
     if !pcid_active() {
         // PCID yoksa düz CR3 yükle
         let frame = PhysFrame::containing_address(pml4_phys);
-        x86_64::registers::control::Cr3::write(frame, x86_64::registers::control::Cr3Flags::empty());
+        x86_64::registers::control::Cr3::write(
+            frame,
+            x86_64::registers::control::Cr3Flags::empty(),
+        );
         return;
     }
 
     let mut cr3_val = pml4_phys.as_u64() & !0xFFF; // PML4 adresi (sayfa hizalı)
-    cr3_val |= (pcid & 0xFFF) as u64;               // PCID (12-bit)
+    cr3_val |= (pcid & 0xFFF) as u64; // PCID (12-bit)
     if noflush {
-        cr3_val |= 1u64 << 63;                       // NOFLUSH bit
+        cr3_val |= 1u64 << 63; // NOFLUSH bit
     }
 
     core::arch::asm!("mov cr3, {}", in(reg) cr3_val, options(nostack, preserves_flags));

@@ -161,7 +161,9 @@ impl NtfsBootSector {
         }
 
         // Sihiri kontrol et
-        let oem_id: [u8; 8] = [data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10]];
+        let oem_id: [u8; 8] = [
+            data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10],
+        ];
         if oem_id != NTFS_MAGIC {
             return None;
         }
@@ -171,20 +173,17 @@ impl NtfsBootSector {
 
         // Toplam sektör sayısı (64 bit, ofset 40)
         let total_sectors = u64::from_le_bytes([
-            data[40], data[41], data[42], data[43],
-            data[44], data[45], data[46], data[47],
+            data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47],
         ]);
 
         // MFT kümesi (64 bit, ofset 48)
         let mft_cluster = u64::from_le_bytes([
-            data[48], data[49], data[50], data[51],
-            data[52], data[53], data[54], data[55],
+            data[48], data[49], data[50], data[51], data[52], data[53], data[54], data[55],
         ]);
 
         // MFT aynası kümesi (64 bit, ofset 56)
         let mftmirr_cluster = u64::from_le_bytes([
-            data[56], data[57], data[58], data[59],
-            data[60], data[61], data[62], data[63],
+            data[56], data[57], data[58], data[59], data[60], data[61], data[62], data[63],
         ]);
 
         let clusters_per_mft_record = data[64] as i8;
@@ -192,8 +191,7 @@ impl NtfsBootSector {
 
         // Seri numarası (64 bit, ofset 72)
         let serial_number = u64::from_le_bytes([
-            data[72], data[73], data[74], data[75],
-            data[76], data[77], data[78], data[79],
+            data[72], data[73], data[74], data[75], data[76], data[77], data[78], data[79],
         ]);
 
         Some(NtfsBootSector {
@@ -259,9 +257,10 @@ impl MftEntry {
         let signature: [u8; 4] = [data[0], data[1], data[2], data[3]];
 
         // Geçerli giriş kontrolü
-        if signature != Self::SIGNATURE_FILE &&
-           signature != Self::SIGNATURE_BAAD &&
-           signature != Self::SIGNATURE_HOLE {
+        if signature != Self::SIGNATURE_FILE
+            && signature != Self::SIGNATURE_BAAD
+            && signature != Self::SIGNATURE_HOLE
+        {
             return None;
         }
 
@@ -338,8 +337,16 @@ pub struct NtfsAttribute {
 /// Öznitelik içeriği - yerleşik veri veya dışsal data run'ları
 #[derive(Clone, Debug)]
 pub enum AttributeContent {
-    Resident { data_offset: u16, data_length: u32 },
-    NonResident { start_vcn: u64, last_vcn: u64, data_runs_offset: u16, data_runs: Vec<DataRun> },
+    Resident {
+        data_offset: u16,
+        data_length: u32,
+    },
+    NonResident {
+        start_vcn: u64,
+        last_vcn: u64,
+        data_runs_offset: u16,
+        data_runs: Vec<DataRun>,
+    },
 }
 
 impl NtfsAttribute {
@@ -361,7 +368,10 @@ impl NtfsAttribute {
                 name_offset: 0,
                 flags: 0,
                 instance: 0,
-                content: AttributeContent::Resident { data_offset: 0, data_length: 0 },
+                content: AttributeContent::Resident {
+                    data_offset: 0,
+                    data_length: 0,
+                },
             });
         }
 
@@ -375,12 +385,10 @@ impl NtfsAttribute {
         let content = if non_resident {
             // Dışsal öznitelik - data run'larla blok eşlemesi
             let start_vcn = u64::from_le_bytes([
-                data[16], data[17], data[18], data[19],
-                data[20], data[21], data[22], data[23],
+                data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
             ]);
             let last_vcn = u64::from_le_bytes([
-                data[24], data[25], data[26], data[27],
-                data[28], data[29], data[30], data[31],
+                data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
             ]);
             let data_runs_offset = u16::from_le_bytes([data[32], data[33]]);
 
@@ -398,7 +406,10 @@ impl NtfsAttribute {
             let data_length = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
             let data_offset = u16::from_le_bytes([data[20], data[21]]);
 
-            AttributeContent::Resident { data_offset, data_length }
+            AttributeContent::Resident {
+                data_offset,
+                data_length,
+            }
         };
 
         Some(NtfsAttribute {
@@ -463,7 +474,11 @@ impl NtfsAttribute {
 
     /// Yerleşik özniteliğin ham verisini döndürür
     pub fn get_resident_data<'a>(&self, entry_data: &'a [u8]) -> Option<&'a [u8]> {
-        if let AttributeContent::Resident { data_offset, data_length } = self.content {
+        if let AttributeContent::Resident {
+            data_offset,
+            data_length,
+        } = self.content
+        {
             let offset = data_offset as usize;
             let length = data_length as usize;
             if offset + length <= entry_data.len() {
@@ -481,7 +496,7 @@ impl NtfsAttribute {
 #[derive(Clone, Copy, Debug)]
 pub struct DataRun {
     pub length: u64,
-    pub lcn: i64,  // İşaretli, önceki değere göreli
+    pub lcn: i64, // İşaretli, önceki değere göreli
 }
 
 // ============================================================================
@@ -508,28 +523,23 @@ impl FileNameAttr {
         }
 
         let parent_directory = u64::from_le_bytes([
-            data[0], data[1], data[2], data[3],
-            data[4], data[5], data[6], data[7],
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
 
         let created = u64::from_le_bytes([
-            data[8], data[9], data[10], data[11],
-            data[12], data[13], data[14], data[15],
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);
 
         let modified = u64::from_le_bytes([
-            data[16], data[17], data[18], data[19],
-            data[20], data[21], data[22], data[23],
+            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
         ]);
 
         let accessed = u64::from_le_bytes([
-            data[24], data[25], data[26], data[27],
-            data[28], data[29], data[30], data[31],
+            data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
         ]);
 
         let file_size = u64::from_le_bytes([
-            data[56], data[57], data[58], data[59],
-            data[60], data[61], data[62], data[63],
+            data[56], data[57], data[58], data[59], data[60], data[61], data[62], data[63],
         ]);
 
         let flags = u32::from_le_bytes([data[52], data[53], data[54], data[55]]);
@@ -613,14 +623,22 @@ impl NtfsFileSystem {
         self.mft_offset = mft_offset;
         self.mft_entry_size = mft_entry_size;
 
-        crate::serial_println!("[NTFS] Başlatıldı: {} sektör, {} bayt/küme, MFT'nin konumu {}",
-            total_sectors, cluster_size, mft_offset);
+        crate::serial_println!(
+            "[NTFS] Başlatıldı: {} sektör, {} bayt/küme, MFT'nin konumu {}",
+            total_sectors,
+            cluster_size,
+            mft_offset
+        );
 
         Ok(())
     }
 
     /// Belirtilen numaralı MFT girişini aygıt verisinden okur
-    pub fn read_mft_entry(&self, entry_num: u64, device_data: &[u8]) -> Result<MftEntry, NtfsError> {
+    pub fn read_mft_entry(
+        &self,
+        entry_num: u64,
+        device_data: &[u8],
+    ) -> Result<MftEntry, NtfsError> {
         let offset = self.mft_offset + entry_num * self.mft_entry_size;
         let offset = offset as usize;
 
@@ -640,10 +658,14 @@ impl NtfsFileSystem {
         let data_attr = entry.get_data_attribute().ok_or(NtfsError::NotFound)?;
 
         match &data_attr.content {
-            AttributeContent::Resident { data_offset, data_length } => {
+            AttributeContent::Resident {
+                data_offset,
+                data_length,
+            } => {
                 let offset = *data_offset as usize;
                 let length = *data_length as usize;
-                let entry_offset = self.mft_offset as usize + entry.entry_number as usize * self.mft_entry_size as usize;
+                let entry_offset = self.mft_offset as usize
+                    + entry.entry_number as usize * self.mft_entry_size as usize;
 
                 if entry_offset + offset + length <= device_data.len() {
                     Ok(device_data[entry_offset + offset..entry_offset + offset + length].to_vec())
@@ -660,7 +682,9 @@ impl NtfsFileSystem {
 
                     if current_lcn < 0 {
                         // Seyrek çalıştır (sparse run) - sıfırlarla doldur
-                        data.extend(core::iter::repeat(0u8).take((run.length * self.cluster_size) as usize));
+                        data.extend(
+                            core::iter::repeat(0u8).take((run.length * self.cluster_size) as usize),
+                        );
                         continue;
                     }
 
@@ -668,7 +692,9 @@ impl NtfsFileSystem {
                     let length = (run.length * self.cluster_size) as usize;
 
                     if offset as usize + length <= device_data.len() {
-                        data.extend_from_slice(&device_data[offset as usize..offset as usize + length]);
+                        data.extend_from_slice(
+                            &device_data[offset as usize..offset as usize + length],
+                        );
                     }
                 }
 

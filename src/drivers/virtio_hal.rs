@@ -82,7 +82,11 @@ unsafe impl Hal for VirtioHal {
                 (paddr, vaddr)
             }
             None => {
-                crate::serial_println!("[VirtioHal] dma_alloc FAILED: {} pages for domain {}", pages, domain);
+                crate::serial_println!(
+                    "[VirtioHal] dma_alloc FAILED: {} pages for domain {}",
+                    pages,
+                    domain
+                );
                 // Bellek tükenirse panik: daha güvenli bir geri dönüş yolu yok
                 panic!("[VirtioHal] DMA allocation failed")
             }

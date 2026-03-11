@@ -69,7 +69,14 @@ impl Framebuffer {
     }
 
     /// Dikdörtgen çerçevesi çizer (outline).
-    pub fn draw_rect_outline(&mut self, x: usize, y: usize, width: usize, height: usize, color: u32) {
+    pub fn draw_rect_outline(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: u32,
+    ) {
         // Üst kenar
         for i in 0..width {
             self.plot_pixel(x + i, y, color);
@@ -169,3 +176,4 @@ impl Framebuffer {
         // gerçek bir double-buffer için burada blit yapılacak.
     }
 }
+

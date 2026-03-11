@@ -61,8 +61,9 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
@@ -134,19 +135,15 @@ impl Memfd {
             let page_offset = (pos % page_size as u64) as usize;
 
             if let Some(page) = pages.get(&page_idx) {
-                let to_read = core::cmp::min(
-                    page.len().saturating_sub(page_offset),
-                    buf.len() - read
-                );
-                buf[read..read + to_read].copy_from_slice(&page[page_offset..page_offset + to_read]);
+                let to_read =
+                    core::cmp::min(page.len().saturating_sub(page_offset), buf.len() - read);
+                buf[read..read + to_read]
+                    .copy_from_slice(&page[page_offset..page_offset + to_read]);
                 read += to_read;
                 pos += to_read as u64;
             } else {
                 // Tahsis edilmemiş sayfa sıfır döndürür
-                let to_read = core::cmp::min(
-                    page_size - page_offset,
-                    buf.len() - read
-                );
+                let to_read = core::cmp::min(page_size - page_offset, buf.len() - read);
                 for i in 0..to_read {
                     buf[read + i] = 0;
                 }
@@ -176,14 +173,12 @@ impl Memfd {
             let page_idx = pos / page_size as u64;
             let page_offset = (pos % page_size as u64) as usize;
 
-            let page = pages.entry(page_idx).or_insert_with(|| {
-                vec![0u8; page_size]
-            });
+            let page = pages
+                .entry(page_idx)
+                .or_insert_with(|| vec![0u8; page_size]);
 
-            let to_write = core::cmp::min(
-                page.len().saturating_sub(page_offset),
-                buf.len() - written
-            );
+            let to_write =
+                core::cmp::min(page.len().saturating_sub(page_offset), buf.len() - written);
             page[page_offset..page_offset + to_write]
                 .copy_from_slice(&buf[written..written + to_write]);
 
@@ -343,9 +338,9 @@ impl UserfaultFd {
 
     /// Adres aralığının kaydını sil
     pub fn unregister(&self, start: u64, len: u64) -> Result<(), UserfaultError> {
-        self.registered_ranges.lock().retain(|(s, e)| {
-            !(*s >= start && *e <= start + len)
-        });
+        self.registered_ranges
+            .lock()
+            .retain(|(s, e)| !(*s >= start && *e <= start + len));
         Ok(())
     }
 

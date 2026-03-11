@@ -61,18 +61,18 @@
 //! Bu yüzden `send()`/`recv()` öncesi `set_current_dma_domain()` çağrılır
 //! ve işlem sonrası önceki domain geri yüklenir (RAII benzeri pattern).
 
-use alloc::vec::Vec;
-use alloc::vec;
 use alloc::collections::VecDeque;
-use spin::Mutex;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use spin::Mutex;
 
-use virtio_drivers::device::net::{VirtIONet, TxBuffer};
+use virtio_drivers::device::net::{TxBuffer, VirtIONet};
 use virtio_drivers::transport::pci::PciTransport;
 
 use super::virtio_hal::VirtioHal;
-use crate::net::{NetError, MacAddr};
+use crate::net::{MacAddr, NetError};
 
 // ============================================================================
 // VIRTIO-NET SABİTLERİ
@@ -88,16 +88,16 @@ const MAX_PACKET_SIZE: usize = 1514;
 const MIN_PACKET_SIZE: usize = 64;
 
 // VirtIO-Net özellik bitleri (VirtIO spesifikasyonu Bölüm 5.1.3)
-const VIRTIO_NET_F_CSUM: u64 = 1 << 0;         // Donanım checksum hesaplama
-const VIRTIO_NET_F_GUEST_CSUM: u64 = 1 << 1;   // Misafir checksum kısmi
-const VIRTIO_NET_F_MAC: u64 = 1 << 5;           // Cihazın MAC adresi var
-const VIRTIO_NET_F_GSO: u64 = 1 << 6;           // Generic Segmentation Offload
-const VIRTIO_NET_F_GUEST_TSO4: u64 = 1 << 7;   // Misafir IPv4 TCP Segmentation Offload
-const VIRTIO_NET_F_GUEST_TSO6: u64 = 1 << 8;   // Misafir IPv6 TCP Segmentation Offload
-const VIRTIO_NET_F_CTRL_VQ: u64 = 1 << 17;     // Kontrol kuyruğu mevcut
-const VIRTIO_NET_F_CTRL_RX: u64 = 1 << 18;     // Kontrol kuyruğu RX modu değiştirme
-const VIRTIO_NET_F_CTRL_VLAN: u64 = 1 << 19;   // VLAN filtreleme
-const VIRTIO_NET_F_MQ: u64 = 1 << 22;           // Çok kuyruklu (multiqueue)
+const VIRTIO_NET_F_CSUM: u64 = 1 << 0; // Donanım checksum hesaplama
+const VIRTIO_NET_F_GUEST_CSUM: u64 = 1 << 1; // Misafir checksum kısmi
+const VIRTIO_NET_F_MAC: u64 = 1 << 5; // Cihazın MAC adresi var
+const VIRTIO_NET_F_GSO: u64 = 1 << 6; // Generic Segmentation Offload
+const VIRTIO_NET_F_GUEST_TSO4: u64 = 1 << 7; // Misafir IPv4 TCP Segmentation Offload
+const VIRTIO_NET_F_GUEST_TSO6: u64 = 1 << 8; // Misafir IPv6 TCP Segmentation Offload
+const VIRTIO_NET_F_CTRL_VQ: u64 = 1 << 17; // Kontrol kuyruğu mevcut
+const VIRTIO_NET_F_CTRL_RX: u64 = 1 << 18; // Kontrol kuyruğu RX modu değiştirme
+const VIRTIO_NET_F_CTRL_VLAN: u64 = 1 << 19; // VLAN filtreleme
+const VIRTIO_NET_F_MQ: u64 = 1 << 22; // Çok kuyruklu (multiqueue)
 
 // ============================================================================
 // DMA-SAFE HALKA TAMPONU
@@ -361,15 +361,21 @@ impl VirtioNetDevice {
 
         crate::serial_println!("[VIRTIO-NET] Using DMA domain 0");
 
-        let driver = VirtIONet::<VirtioHal, PciTransport, 16>::new(transport, 16)
-            .map_err(|e| {
-                crate::serial_println!("[VIRTIO-NET] Init failed: {:?}", e);
-                NetError::NoInterface
-            })?;
+        let driver = VirtIONet::<VirtioHal, PciTransport, 16>::new(transport, 16).map_err(|e| {
+            crate::serial_println!("[VIRTIO-NET] Init failed: {:?}", e);
+            NetError::NoInterface
+        })?;
 
         // MAC adresini cihazdan oku (VIRTIO_NET_F_MAC özelliği ile)
         let mac_bytes = driver.mac_address();
-        self.mac = MacAddr::from_bytes(mac_bytes[0], mac_bytes[1], mac_bytes[2], mac_bytes[3], mac_bytes[4], mac_bytes[5]);
+        self.mac = MacAddr::from_bytes(
+            mac_bytes[0],
+            mac_bytes[1],
+            mac_bytes[2],
+            mac_bytes[3],
+            mac_bytes[4],
+            mac_bytes[5],
+        );
 
         self.driver = Some(driver);
         self.active = true;
@@ -569,11 +575,14 @@ pub fn auto_init() -> bool {
     // VirtIO-Net device'ı ara
     // VirtIO Net: Vendor 0x1AF4, Device 0x1000 (legacy) or 0x1041 (modern)
     for dev in devices {
-        if dev.vendor_id == 0x1AF4 &&
-           (dev.device_id == 0x1000 || dev.device_id == 0x1041) {
+        if dev.vendor_id == 0x1AF4 && (dev.device_id == 0x1000 || dev.device_id == 0x1041) {
             crate::serial_println!(
                 "[VIRTIO-NET] Found VirtIO device at {:02x}:{:02x}.{} (vid={:04x}, did={:04x})",
-                dev.bus, dev.device, dev.function, dev.vendor_id, dev.device_id
+                dev.bus,
+                dev.device,
+                dev.function,
+                dev.vendor_id,
+                dev.device_id
             );
 
             // Enable device (Bus Master, Memory, I/O)

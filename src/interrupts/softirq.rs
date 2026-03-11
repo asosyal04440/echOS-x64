@@ -86,16 +86,16 @@ use spin::Mutex;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SoftirqVec {
-    Hi = 0,           // Yüksek öncelikli tasklet'ler
-    Timer = 1,        // Timer callback'leri
-    NetTx = 2,        // Ağ gönderimi
-    NetRx = 3,        // Ağ alımı
-    Block = 4,        // Blok I/O tamamlanma
-    IrqPoll = 5,      // IRQ polling mode
-    Tasklet = 6,      // Normal tasklet'ler
-    Sched = 7,        // Scheduler
-    Hrtimer = 8,      // High-resolution timer
-    Rcu = 9,          // RCU callback'leri
+    Hi = 0,      // Yüksek öncelikli tasklet'ler
+    Timer = 1,   // Timer callback'leri
+    NetTx = 2,   // Ağ gönderimi
+    NetRx = 3,   // Ağ alımı
+    Block = 4,   // Blok I/O tamamlanma
+    IrqPoll = 5, // IRQ polling mode
+    Tasklet = 6, // Normal tasklet'ler
+    Sched = 7,   // Scheduler
+    Hrtimer = 8, // High-resolution timer
+    Rcu = 9,     // RCU callback'leri
 }
 
 const NR_SOFTIRQS: usize = 10;
@@ -103,8 +103,8 @@ const NR_SOFTIRQS: usize = 10;
 /// Softirq handler fonksiyonu
 type SoftirqAction = fn();
 
-/// Bekleyen softirq'lar (per-CPU — şimdilik global)
-static SOFTIRQ_PENDING: AtomicU32 = AtomicU32::new(0);
+/// Bekleyen softirq'lar — per-CPU dizisi (her CPU kendi softirq'larını işler)
+static mut SOFTIRQ_PENDING: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
 
 /// Softirq handler tablosu
 static SOFTIRQ_ACTIONS: Mutex<[Option<SoftirqAction>; NR_SOFTIRQS]> =
@@ -124,13 +124,17 @@ pub fn open_softirq(vec: SoftirqVec, action: SoftirqAction) {
 /// Softirq tetikle — interrupt context'ten çağrılır
 #[inline]
 pub fn raise_softirq(vec: SoftirqVec) {
-    SOFTIRQ_PENDING.fetch_or(1 << (vec as u32), Ordering::Release);
+    let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+    unsafe {
+        SOFTIRQ_PENDING[cpu_id].fetch_or(1 << (vec as u32), Ordering::Release);
+    }
 }
 
 /// Bekleyen softirq var mı?
 #[inline]
 pub fn softirq_pending() -> bool {
-    SOFTIRQ_PENDING.load(Ordering::Acquire) != 0
+    let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+    unsafe { SOFTIRQ_PENDING[cpu_id].load(Ordering::Acquire) != 0 }
 }
 
 /// Tüm bekleyen softirq'ları çalıştır.
@@ -142,10 +146,16 @@ pub fn do_softirq() {
     // Max tekrar sayısı — sonsuz döngüyü engeller (Linux: MAX_SOFTIRQ_RESTART = 10)
     const MAX_RESTART: u32 = 10;
 
+    // SoftIRQ bağlamını işaretle — preemptible() ve in_interrupt()
+    // kontrolleri bu bit'e bakar. Softirq handler'ları içinden
+    // yanlışlıkla schedule() çağrılmasını engeller.
+    let _softirq_guard = crate::preempt::SoftIRQGuard::new();
+
     let mut restart_count = 0;
 
     loop {
-        let pending = SOFTIRQ_PENDING.swap(0, Ordering::AcqRel);
+        let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+        let pending = unsafe { SOFTIRQ_PENDING[cpu_id].swap(0, Ordering::AcqRel) };
         if pending == 0 {
             break;
         }
@@ -167,14 +177,14 @@ pub fn do_softirq() {
         restart_count += 1;
         if restart_count >= MAX_RESTART {
             // Çok fazla softirq — ksoftirqd'ye bırak
-            if SOFTIRQ_PENDING.load(Ordering::Relaxed) != 0 {
+            if unsafe { SOFTIRQ_PENDING[cpu_id].load(Ordering::Relaxed) } != 0 {
                 wake_ksoftirqd();
             }
             break;
         }
 
         // Yeni pending var mı kontrol et
-        if SOFTIRQ_PENDING.load(Ordering::Relaxed) == 0 {
+        if unsafe { SOFTIRQ_PENDING[cpu_id].load(Ordering::Relaxed) } == 0 {
             break;
         }
     }
@@ -184,8 +194,8 @@ pub fn do_softirq() {
 pub fn print_softirq_stats() {
     crate::serial_println!("[SOFTIRQ] Statistics:");
     let names = [
-        "HI", "TIMER", "NET_TX", "NET_RX", "BLOCK",
-        "IRQ_POLL", "TASKLET", "SCHED", "HRTIMER", "RCU",
+        "HI", "TIMER", "NET_TX", "NET_RX", "BLOCK", "IRQ_POLL", "TASKLET", "SCHED", "HRTIMER",
+        "RCU",
     ];
     for i in 0..NR_SOFTIRQS {
         let count = SOFTIRQ_COUNTS[i].load(Ordering::Relaxed);
@@ -417,9 +427,34 @@ fn wake_ksoftirqd() {
 // başlatıldığında open_softirq() ile kaydedilmelidir.
 // ============================================================================
 
-/// Softirq subsystemini başlat — tasklet handler'ları kaydet
+/// Softirq subsystemini başlat — tüm handler'ları kaydet
 pub fn init() {
     open_softirq(SoftirqVec::Tasklet, tasklet_action);
     open_softirq(SoftirqVec::Hi, tasklet_hi_action);
-    crate::serial_println!("[SOFTIRQ] Subsystem initialized (10 vectors, tasklet support)");
+    open_softirq(SoftirqVec::Timer, timer_softirq_action);
+    open_softirq(SoftirqVec::Sched, sched_softirq_action);
+    open_softirq(SoftirqVec::Rcu, rcu_softirq_action);
+    crate::serial_println!(
+        "[SOFTIRQ] Subsystem initialized (10 vectors, tasklet + timer + sched + rcu)"
+    );
+}
+
+/// Timer softirq handler — ertelenmiş zamanlayıcı callback'leri işler
+fn timer_softirq_action() {
+    // Zamanlayıcı tekerleği (timer wheel) callback'lerini işle
+    // Şu an scheduler::tick() doğrudan hard IRQ'dan çağrıldığı için
+    // burada ek timer callback'leri (hrtimer, wheel) işlenebilir
+    crate::task::scheduler::process_deferred_timers();
+}
+
+/// Scheduler softirq handler — ertelenmiş zamanlayıcı yeniden dengeleme
+fn sched_softirq_action() {
+    // CPU arası yük dengeleme — bottom-half'ta güvenli
+    crate::cpu::smp::balance_load();
+}
+
+/// RCU softirq handler — ertelenmiş RCU callback'leri
+fn rcu_softirq_action() {
+    // Tamamlanan zariflik periyotlarının callback'lerini işle
+    crate::rcu::process_callbacks();
 }

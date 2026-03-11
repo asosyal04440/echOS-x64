@@ -3,13 +3,14 @@
 //! Bu modül, işletim sistemindeki task (görev) yapısını tanımlar.
 //! Her task kendi stack'ine, context'ine ve önceliğine sahiptir.
 
-use crate::memory::AddressSpace;
 use crate::allocator::stack::KernelStack;
+use crate::memory::AddressSpace;
+use crate::task::signal::SignalHandlers;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::structures::paging::PhysFrame;
 
@@ -76,15 +77,73 @@ pub enum TaskState {
 }
 
 // ============================================================================
-// FPU/SSE DURUMU
+// FPU/SSE/AVX DURUMU — Silicon-Assisted Eager FPU
 // ============================================================================
 
-/// x86_64 FXSAVE/FXRSTOR için 512 byte'lık alan.
-/// SSE, AVX ve FPU register'larını saklar.
-#[repr(C, align(16))]
-#[derive(Debug, Clone)]
-pub struct FxSaveArea {
-    pub data: [u8; 512],
+/// XSAVE alan boyutu üst sınırı (AVX-512 dahil).
+/// Boot sırasında gerçek boyut `crate::cpu::xsave_area_size()` ile sorgulanır.
+pub const XSAVE_MAX_SIZE: usize = 2688;
+
+/// x86_64 XSAVE/XSAVEOPT/XSAVEC ve fallback FXSAVE için durum alanı.
+/// Align 64: XSAVE 64-byte alignment gerektirir (FXSAVE için 16 yeterli ama ileriye dönük).
+#[repr(C, align(64))]
+#[derive(Clone)]
+pub struct XSaveArea {
+    pub data: [u8; XSAVE_MAX_SIZE],
+}
+
+impl core::fmt::Debug for XSaveArea {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("XSaveArea")
+            .field("size", &XSAVE_MAX_SIZE)
+            .finish()
+    }
+}
+
+/// Geriye dönük uyumluluk alias — eski kodda FxSaveArea kullanan yerleri kırmamak için
+pub type FxSaveArea = XSaveArea;
+
+// ============================================================================
+// TASK FLAGS — AOT (Ahead-Of-Time) FPU Hinting
+// ============================================================================
+
+/// Task davranış bayrakları — context switch optimizasyonları için.
+/// Bitwise flags olarak tasarlanmıştır.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskFlags(u32);
+
+impl TaskFlags {
+    /// Boş bayrak kümesi
+    pub const NONE: Self = Self(0);
+    /// FPU/SSE/AVX kullanmayan kernel task — xsaveopt/xrstor atlanır
+    pub const NO_FPU: Self = Self(1 << 0);
+    /// FPU durumu henüz başlatılmadı (ilk xrstor'u atla)
+    pub const FPU_PRISTINE: Self = Self(1 << 1);
+    /// Real-time task — preemption kısıtlı
+    pub const REALTIME: Self = Self(1 << 2);
+    /// Kernel thread (user-space yok)
+    pub const KERNEL_THREAD: Self = Self(1 << 3);
+
+    #[inline(always)]
+    pub const fn contains(self, flag: Self) -> bool {
+        (self.0 & flag.0) == flag.0
+    }
+
+    #[inline(always)]
+    pub const fn insert(self, flag: Self) -> Self {
+        Self(self.0 | flag.0)
+    }
+
+    #[inline(always)]
+    pub const fn remove(self, flag: Self) -> Self {
+        Self(self.0 & !flag.0)
+    }
+
+    /// Raw u32 değerini döndürür (asm'e geçirmek için)
+    #[inline(always)]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
 }
 
 // ============================================================================
@@ -93,6 +152,13 @@ pub struct FxSaveArea {
 
 /// Task'ın CPU durumu (register'lar).
 /// Context switch sırasında kaydedilir ve geri yüklenir.
+///
+/// Bellek düzeni (offset):
+///   0x00: r15, 0x08: r14, 0x10: r13, 0x18: r12
+///   0x20: rbx, 0x28: rbp, 0x30: rsp, 0x38: rflags
+///   0x40: rip
+///   0x48..0x80: _pad (7×u64 = 56 byte, 64-byte alignment sağlar)
+///   0x80 (128): fx_state — XSaveArea (64-byte aligned, XSAVE/FXSAVE için)
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct TaskContext {
@@ -102,12 +168,12 @@ pub struct TaskContext {
     pub r13: u64,
     pub r12: u64,
     pub rbx: u64,
-    pub rbp: u64,             // Taban işaretçisi (base pointer)
-    pub rsp: u64,             // Yığın işaretçisi (stack pointer)
-    pub rflags: u64,          // İşlemci bayrakları (CPU flags)
-    pub rip: u64,             // Komut işaretçisi (instruction pointer / dönüş adresi)
-    pub padding: u64,         // 16-byte alignment için
-    pub fx_state: FxSaveArea, // SSE/FPU durumu
+    pub rbp: u64,            // Taban işaretçisi (base pointer)
+    pub rsp: u64,            // Yığın işaretçisi (stack pointer)
+    pub rflags: u64,         // İşlemci bayrakları (CPU flags)
+    pub rip: u64,            // Komut işaretçisi (instruction pointer / dönüş adresi)
+    pub _pad: [u64; 7],      // 56 byte pad → fx_state offset = 128 (0x80), 64-byte aligned
+    pub fx_state: XSaveArea, // SSE/AVX/FPU durumu (XSAVE formatı)
 }
 
 impl TaskContext {
@@ -127,11 +193,16 @@ impl TaskContext {
             rsp: stack_top,
             rflags: 0x202, // Interrupt'lar aktif
             rip: entry_point,
-            padding: 0,
-            fx_state: FxSaveArea { data: [0; 512] },
+            _pad: [0u64; 7],
+            fx_state: XSaveArea {
+                data: [0; XSAVE_MAX_SIZE],
+            },
         }
     }
 }
+
+// Derleme zamanı kontrol: fx_state offseti 128 (0x80) olmalı — XSAVE 64-byte alignment gerektirir
+const _: () = assert!(core::mem::offset_of!(TaskContext, fx_state) == 128);
 
 // ============================================================================
 // EXECUTION MODE
@@ -144,6 +215,20 @@ pub enum ExecutionMode {
     NativeRust,
     /// Ring 3 (user mode) - İzole bellek alanında çalışan legacy task'lar
     LegacyRing3,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RseqState {
+    pub registered: bool,
+    pub area_ptr: u64,
+    pub area_len: u32,
+    pub signature: u32,
+    pub flags: u32,
+    pub cpu_id_start: u32,
+    pub cpu_id: u32,
+    pub numa_node: u32,
+    pub abort_count: u64,
+    pub event_counter: u64,
 }
 
 // ============================================================================
@@ -162,6 +247,8 @@ pub struct TaskHotData {
     pub affinity: u32,
     pub last_cpu: u32,
     pub kernel_stack_top: u64,
+    /// AOT davranış bayrakları — context switch optimizasyonları
+    pub flags: TaskFlags,
 }
 
 /// Task'ın "Soğuk" verileri - Nadiren erişilen veya sadece context switch'te gerekenler
@@ -182,6 +269,16 @@ pub struct TaskColdData {
     pub stack: KernelStack,
     /// Background task mı (job control için)
     pub is_background: bool,
+    /// POSIX sinyal yöneticisi (Arc ile paylaşılır — Clone uyumluluğu için)
+    pub signals: Arc<SignalHandlers>,
+    /// PCID (Process Context Identifier) — TLB flush optimization.
+    /// 0 = kernel PCID, 1..4095 = user task PCID'leri.
+    pub pcid: u16,
+    /// Üst süreç PID'si — fork()/clone() ile oluşturulmuş ise set edilir
+    pub parent_pid: Option<TaskId>,
+    /// Alt süreç PID listesi — fork ile oluşturulan çocuklar
+    pub children: Vec<TaskId>,
+    pub rseq: RseqState,
 }
 
 /// Bir işletim sistemi task'ı (thread/process).
@@ -217,8 +314,12 @@ impl Task {
     // Geriye dönük uyumluluk için yardımcı erişici metodlar.
     // Mevcut kodu refactor etmeden uyumluluğu koruyan doğrudan erişici metodlar.
 
-    pub fn id(&self) -> TaskId { self.hot.id }
-    pub fn state(&self) -> TaskState { self.hot.state }
+    pub fn id(&self) -> TaskId {
+        self.hot.id
+    }
+    pub fn state(&self) -> TaskState {
+        self.hot.state
+    }
     // ... diğerleri için refactor gerekecek.
 }
 
@@ -251,7 +352,8 @@ impl Task {
         // 16KB stack + 4KB guard page = 20KB toplam ayır (Daha fazla task için küçültüldü)
         const GUARD_PAGE_SIZE: usize = 4096;
         const STACK_SIZE: usize = 16384; // 64KB -> 16KB
-        let mut stack = KernelStack::new(GUARD_PAGE_SIZE + STACK_SIZE).expect("Failed to allocate kernel stack");
+        let mut stack = KernelStack::new(GUARD_PAGE_SIZE + STACK_SIZE)
+            .expect("Failed to allocate kernel stack");
 
         // Guard page: stack'in en altındaki 4KB
         // Bu alanı "zehirle" — debug pattern ile doldur (0xCC = INT3 opcode)
@@ -276,6 +378,7 @@ impl Task {
                 affinity: 0xFFFFFFFF, // Tüm CPU'larda çalışabilir
                 last_cpu: 0,
                 kernel_stack_top: stack_top as u64,
+                flags: TaskFlags::FPU_PRISTINE, // İlk xrstor atlanır
             },
             context: TaskContext::new(entry_point as u64, stack_top),
             cold: TaskColdData {
@@ -293,6 +396,11 @@ impl Task {
                 seccomp_mode: 0, // 0 = Devre dışı
                 stack,
                 is_background: false,
+                signals: Arc::new(SignalHandlers::new()),
+                pcid: 0, // 0 = kernel PCID (NativeRust tasks)
+                parent_pid: None,
+                children: Vec::new(),
+                rseq: RseqState::default(),
             },
         }
     }
@@ -313,6 +421,8 @@ impl Task {
         let mut task = Self::with_priority(idle_task, Priority::Idle, "idle");
         task.hot.affinity = 1 << cpu_id; // Sadece belirli CPU'da
         task.hot.last_cpu = cpu_id;
+        // Idle task FPU kullanmaz — context switch'te xsaveopt/xrstor atlanır
+        task.hot.flags = TaskFlags::NO_FPU.insert(TaskFlags::KERNEL_THREAD);
         task
     }
 }
@@ -320,8 +430,12 @@ impl Task {
 // Cold data için de yardımcı metodlar
 impl Task {
     // Cold data erişici/değiştirici metodlar
-    pub fn name(&self) -> &'static str { self.cold.name }
-    pub fn mode(&self) -> ExecutionMode { self.cold.mode }
+    pub fn name(&self) -> &'static str {
+        self.cold.name
+    }
+    pub fn mode(&self) -> ExecutionMode {
+        self.cold.mode
+    }
 
     // Diğer cold field'lara doğrudan `task.cold.xxx` ile erişilir.
 }

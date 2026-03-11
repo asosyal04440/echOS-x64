@@ -43,9 +43,9 @@
 //!  └──────────────┴──────────────────┴────────────────────────┘
 //! ```
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -179,8 +179,8 @@ impl RtTaskInfo {
     /// Yüksek öncelik = daha uzun zaman dilimi
     fn calculate_timeslice(priority: i32) -> u64 {
         let normalized = (priority as f64 / RT_PRIO_MAX as f64).clamp(0.0, 1.0);
-        let slice = RR_MIN_TIMESLICE as f64 +
-            normalized * (RR_MAX_TIMESLICE - RR_MIN_TIMESLICE) as f64;
+        let slice =
+            RR_MIN_TIMESLICE as f64 + normalized * (RR_MAX_TIMESLICE - RR_MIN_TIMESLICE) as f64;
         slice as u64
     }
 
@@ -243,9 +243,10 @@ impl RtRunQueue {
     /// RT çalışma kuyruğuna görev ekler.
     pub fn enqueue(&mut self, task: Box<Task>) {
         let task_id = task.hot.id;
-        let info = self.task_info.entry(task_id).or_insert_with(|| {
-            RtTaskInfo::new(task_id)
-        });
+        let info = self
+            .task_info
+            .entry(task_id)
+            .or_insert_with(|| RtTaskInfo::new(task_id));
 
         let priority = info.priority;
         let is_rt = info.is_rt;
@@ -347,16 +348,17 @@ impl RtRunQueue {
 
     /// Bir görev için zamanlama parametrelerini alır/ayarlar.
     pub fn set_sched_param(&mut self, task_id: TaskId, policy: SchedPolicy, param: &RtSchedParam) {
-        let info = self.task_info.entry(task_id).or_insert_with(|| {
-            RtTaskInfo::new(task_id)
-        });
+        let info = self
+            .task_info
+            .entry(task_id)
+            .or_insert_with(|| RtTaskInfo::new(task_id));
 
         let old_is_rt = info.is_rt;
-        
+
         info.policy = policy;
         info.priority = param.sched_priority.clamp(0, RT_PRIO_MAX);
         info.is_rt = policy == SchedPolicy::Fifo || policy == SchedPolicy::RoundRobin;
-        
+
         if policy == SchedPolicy::RoundRobin {
             info.total_timeslice = RtTaskInfo::calculate_timeslice(info.priority);
             info.time_slice = info.total_timeslice;
@@ -376,12 +378,15 @@ impl RtRunQueue {
     /// Zamanlama parametrelerini alır.
     pub fn get_sched_param(&self, task_id: TaskId) -> Option<(SchedPolicy, RtSchedParam)> {
         self.task_info.get(&task_id).map(|info| {
-            (info.policy, RtSchedParam {
-                sched_priority: info.priority,
-                sched_runtime: 0,
-                sched_deadline: 0,
-                sched_period: 0,
-            })
+            (
+                info.policy,
+                RtSchedParam {
+                    sched_priority: info.priority,
+                    sched_runtime: 0,
+                    sched_deadline: 0,
+                    sched_period: 0,
+                },
+            )
         })
     }
 
@@ -503,7 +508,8 @@ pub fn set_rt_throttling(enabled: bool) {
 
 /// Görevin gerçek zamanlı olup olmadığını kontrol eder.
 pub fn is_rt_task(task_id: TaskId) -> bool {
-    RT_RUNQUEUE.lock()
+    RT_RUNQUEUE
+        .lock()
         .task_info
         .get(&task_id)
         .map(|info| info.is_rt)
@@ -512,7 +518,8 @@ pub fn is_rt_task(task_id: TaskId) -> bool {
 
 /// Görevin önceliğini alır (RT veya normal).
 pub fn get_task_priority(task_id: TaskId) -> i32 {
-    RT_RUNQUEUE.lock()
+    RT_RUNQUEUE
+        .lock()
         .task_info
         .get(&task_id)
         .map(|info| info.priority)
@@ -521,7 +528,8 @@ pub fn get_task_priority(task_id: TaskId) -> i32 {
 
 /// Görevin zamanlama politikasını alır.
 pub fn get_task_policy(task_id: TaskId) -> SchedPolicy {
-    RT_RUNQUEUE.lock()
+    RT_RUNQUEUE
+        .lock()
         .task_info
         .get(&task_id)
         .map(|info| info.policy)
@@ -611,7 +619,8 @@ pub fn sys_sched_get_priority_min(policy: i32) -> i32 {
 /// sched_rr_get_interval(2) sistem çağrısı uygulaması.
 /// RR görevinin zaman dilimini nanosaniye cinsinden döndürür.
 pub fn sys_sched_rr_get_interval(task_id: TaskId) -> u64 {
-    RT_RUNQUEUE.lock()
+    RT_RUNQUEUE
+        .lock()
         .task_info
         .get(&task_id)
         .map(|info| info.total_timeslice)

@@ -20,13 +20,13 @@
 //! - Intel VMX: `VMXON`/`VMXOFF` ile VMX kipi, `VMLAUNCH`/`VMRESUME` ile konuk çalışır.
 //! - AMD SVM: `VMRUN` ile konuk çalışır, `VMEXIT` ile hipervizöre döner.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::vec;
-use alloc::boxed::Box;
-use spin::Mutex;
+use alloc::vec::Vec;
 use core::mem;
+use spin::Mutex;
 
 // ============================================================================
 // SANALLAŞTIRMA SABİTLERİ
@@ -40,28 +40,28 @@ const CPUID_VIRT_LEAF: u32 = 0x40000000;
 /// Intel VMX MSR kayıtları.
 ///
 /// Bu kayıtlar VMX özelliklerini ve yeteneklerini sorgular.
-const IA32_FEATURE_CONTROL: u32 = 0x3A;       // VMX kilit ve etkinleştirme denetimi
-const IA32_VMX_BASIC: u32 = 0x480;             // VMCS boyutu ve VMCS düzeltme kimliği
-const IA32_VMX_PINBASED_CTLS: u32 = 0x481;    // Pin tabanlı VM çalışma denetimleri
-const IA32_VMX_PROCBASED_CTLS: u32 = 0x482;   // İşlemci tabanlı VM çalışma denetimleri
-const IA32_VMX_EXIT_CTLS: u32 = 0x483;         // VM çıkış denetimleri
-const IA32_VMX_ENTRY_CTLS: u32 = 0x484;        // VM giriş denetimleri
-const IA32_VMX_MISC: u32 = 0x485;              // VMX çeşitli özellikleri
-const IA32_VMX_CR0_FIXED0: u32 = 0x486;        // CR0 sabit 0 bitleri
-const IA32_VMX_CR0_FIXED1: u32 = 0x487;        // CR0 sabit 1 bitleri
-const IA32_VMX_CR4_FIXED0: u32 = 0x488;        // CR4 sabit 0 bitleri
-const IA32_VMX_CR4_FIXED1: u32 = 0x489;        // CR4 sabit 1 bitleri
-const IA32_VMX_VMCS_ENUM: u32 = 0x48A;         // VMCS alan numaralandırması
-const IA32_VMX_PROCBASED_CTLS2: u32 = 0x48B;  // İkincil işlemci tabanlı denetimler
-const IA32_VMX_EPT_VPID_CAP: u32 = 0x48C;     // EPT ve VPID yetenekleri
+const IA32_FEATURE_CONTROL: u32 = 0x3A; // VMX kilit ve etkinleştirme denetimi
+const IA32_VMX_BASIC: u32 = 0x480; // VMCS boyutu ve VMCS düzeltme kimliği
+const IA32_VMX_PINBASED_CTLS: u32 = 0x481; // Pin tabanlı VM çalışma denetimleri
+const IA32_VMX_PROCBASED_CTLS: u32 = 0x482; // İşlemci tabanlı VM çalışma denetimleri
+const IA32_VMX_EXIT_CTLS: u32 = 0x483; // VM çıkış denetimleri
+const IA32_VMX_ENTRY_CTLS: u32 = 0x484; // VM giriş denetimleri
+const IA32_VMX_MISC: u32 = 0x485; // VMX çeşitli özellikleri
+const IA32_VMX_CR0_FIXED0: u32 = 0x486; // CR0 sabit 0 bitleri
+const IA32_VMX_CR0_FIXED1: u32 = 0x487; // CR0 sabit 1 bitleri
+const IA32_VMX_CR4_FIXED0: u32 = 0x488; // CR4 sabit 0 bitleri
+const IA32_VMX_CR4_FIXED1: u32 = 0x489; // CR4 sabit 1 bitleri
+const IA32_VMX_VMCS_ENUM: u32 = 0x48A; // VMCS alan numaralandırması
+const IA32_VMX_PROCBASED_CTLS2: u32 = 0x48B; // İkincil işlemci tabanlı denetimler
+const IA32_VMX_EPT_VPID_CAP: u32 = 0x48C; // EPT ve VPID yetenekleri
 
 /// AMD SVM MSR kayıtları.
 ///
 /// AMD sistemlerde Güvenli Sanal Makine (SVM) özelliklerini denetler.
-const MSR_VM_CR: u32 = 0xC0010114;           // VM denetim kaydı (SVM etkinleştirme)
-const MSR_VM_HSAVE_PA: u32 = 0xC0010117;    // Ev sahibi durumu kayıt adresi
-const MSR_VM_LOCK: u32 = 0xC0010115;         // VM kilitleme kaydı
-const MSR_VM_ASID: u32 = 0xC0010116;         // Adres Alanı Tanımlayıcısı
+const MSR_VM_CR: u32 = 0xC0010114; // VM denetim kaydı (SVM etkinleştirme)
+const MSR_VM_HSAVE_PA: u32 = 0xC0010117; // Ev sahibi durumu kayıt adresi
+const MSR_VM_LOCK: u32 = 0xC0010115; // VM kilitleme kaydı
+const MSR_VM_ASID: u32 = 0xC0010116; // Adres Alanı Tanımlayıcısı
 
 /// VMCS alan kodlamaları (Intel belirtimi).
 ///
@@ -69,12 +69,12 @@ const MSR_VM_ASID: u32 = 0xC0010116;         // Adres Alanı Tanımlayıcısı
 /// - 0x0000xxxx: Denetim alanları
 /// - 0x0800xxxx: Konuk alanları
 /// - 0x0C00xxxx: Ana makine alanları
-const VMCS_CTRL_PIN_BASED: u32 = 0x00004000;       // Pin tabanlı denetimler
-const VMCS_CTRL_PROC_BASED: u32 = 0x00004002;      // İşlemci tabanlı birincil denetimler
-const VMCS_CTRL_PROC_BASED_2: u32 = 0x0000401E;   // İşlemci tabanlı ikincil denetimler
-const VMCS_CTRL_EXIT: u32 = 0x0000400C;            // VM çıkış denetimleri
-const VMCS_CTRL_ENTRY: u32 = 0x00004012;           // VM giriş denetimleri
-const VMCS_CTRL_EXEC: u32 = 0x0000401C;            // VM yürütme denetimleri
+const VMCS_CTRL_PIN_BASED: u32 = 0x00004000; // Pin tabanlı denetimler
+const VMCS_CTRL_PROC_BASED: u32 = 0x00004002; // İşlemci tabanlı birincil denetimler
+const VMCS_CTRL_PROC_BASED_2: u32 = 0x0000401E; // İşlemci tabanlı ikincil denetimler
+const VMCS_CTRL_EXIT: u32 = 0x0000400C; // VM çıkış denetimleri
+const VMCS_CTRL_ENTRY: u32 = 0x00004012; // VM giriş denetimleri
+const VMCS_CTRL_EXEC: u32 = 0x0000401C; // VM yürütme denetimleri
 
 /// Konuk segment seçicileri (Guest Segment Selectors).
 const VMCS_GUEST_ES_SEL: u32 = 0x00000800;
@@ -87,9 +87,9 @@ const VMCS_GUEST_LDTR_SEL: u32 = 0x0000080C;
 const VMCS_GUEST_TR_SEL: u32 = 0x0000080E;
 
 /// Konuk kontrol kaydedici kodlamaları (Guest Control Registers).
-const VMCS_GUEST_CR0: u32 = 0x00000820;   // Konuk CR0 (Koruma Modu, Sayfalama)
-const VMCS_GUEST_CR3: u32 = 0x00000822;   // Konuk CR3 (Sayfa Tablosu Tabanı)
-const VMCS_GUEST_CR4: u32 = 0x00000824;   // Konuk CR4 (PAE, VMX vb. ek özellikler)
+const VMCS_GUEST_CR0: u32 = 0x00000820; // Konuk CR0 (Koruma Modu, Sayfalama)
+const VMCS_GUEST_CR3: u32 = 0x00000822; // Konuk CR3 (Sayfa Tablosu Tabanı)
+const VMCS_GUEST_CR4: u32 = 0x00000824; // Konuk CR4 (PAE, VMX vb. ek özellikler)
 const VMCS_GUEST_ES_BASE: u32 = 0x00000806;
 const VMCS_GUEST_CS_BASE: u32 = 0x00000808;
 const VMCS_GUEST_SS_BASE: u32 = 0x0000080A;
@@ -102,8 +102,8 @@ const VMCS_GUEST_GDTR_BASE: u32 = 0x00000816;
 const VMCS_GUEST_IDTR_BASE: u32 = 0x00000818;
 
 /// Konuk yığın işaretçisi, talimat işaretçisi ve bayraklar.
-const VMCS_GUEST_RSP: u32 = 0x0000081C;    // Konuk yığın tepe adresi
-const VMCS_GUEST_RIP: u32 = 0x0000081E;    // Konuk talimat işaretçisi (giriş noktası)
+const VMCS_GUEST_RSP: u32 = 0x0000081C; // Konuk yığın tepe adresi
+const VMCS_GUEST_RIP: u32 = 0x0000081E; // Konuk talimat işaretçisi (giriş noktası)
 const VMCS_GUEST_RFLAGS: u32 = 0x00000820; // Konuk işlemci bayrakları
 
 /// Konuk segment sınırları (Guest Segment Limits).
@@ -129,9 +129,9 @@ const VMCS_GUEST_LDTR_AR: u32 = 0x00000820;
 const VMCS_GUEST_TR_AR: u32 = 0x00000822;
 
 /// Konuk etkinlik durumu ve diğer alanlar.
-const VMCS_GUEST_ACTIVITY: u32 = 0x00000826;   // Konuk etkinlik durumu (aktif, HLT vb.)
-const VMCS_GUEST_INT_STATE: u32 = 0x00000824;  // Konuk kesme durumu
-const VMCS_GUEST_SMBASE: u32 = 0x00000828;     // SM modu taban adresi
+const VMCS_GUEST_ACTIVITY: u32 = 0x00000826; // Konuk etkinlik durumu (aktif, HLT vb.)
+const VMCS_GUEST_INT_STATE: u32 = 0x00000824; // Konuk kesme durumu
+const VMCS_GUEST_SMBASE: u32 = 0x00000828; // SM modu taban adresi
 
 /// Ana makine (Host) segment seçicileri.
 const VMCS_HOST_ES_SEL: u32 = 0x00000C00;
@@ -151,47 +151,47 @@ const VMCS_HOST_GS_BASE: u32 = 0x00000C08;
 const VMCS_HOST_TR_BASE: u32 = 0x00000C0A;
 const VMCS_HOST_GDTR_BASE: u32 = 0x00000C0C;
 const VMCS_HOST_IDTR_BASE: u32 = 0x00000C0E;
-const VMCS_HOST_RSP: u32 = 0x00000C10;   // VM-EXIT sonrası ana makine yığını
-const VMCS_HOST_RIP: u32 = 0x00000C12;   // VM-EXIT sonrası ana makine giriş noktası
+const VMCS_HOST_RSP: u32 = 0x00000C10; // VM-EXIT sonrası ana makine yığını
+const VMCS_HOST_RIP: u32 = 0x00000C12; // VM-EXIT sonrası ana makine giriş noktası
 
 /// EPT işaretçisi ve VPID alanları.
-const VMCS_EPTP: u32 = 0x0000201A;   // Genişletilmiş Sayfa Tablosu İşaretçisi (EPTP)
-const VMCS_VPID: u32 = 0x00002000;   // Sanal İşlemci Kimliği (VPID)
+const VMCS_EPTP: u32 = 0x0000201A; // Genişletilmiş Sayfa Tablosu İşaretçisi (EPTP)
+const VMCS_VPID: u32 = 0x00002000; // Sanal İşlemci Kimliği (VPID)
 
 /// VMX talimat hata kodları.
 ///
 /// VMWRITE, VMREAD, VMLAUNCH, VMRESUME başarısız olduğunda bu kodlar döner.
-const VMXERR_VMCLEAR_INVALID_ADDR: u32 = 2;   // Geçersiz VMCLEAR adresi
-const VMXERR_VMLAUNCH_NON_CLEAR: u32 = 4;     // VMLAUNCH için temizlenmemiş VMCS
-const VMXERR_VMRESUME_NON_LAUNCHED: u32 = 5;  // VMRESUME için başlatılmamış VMCS
-const VMXERR_VMRESUME_VMCLEAR: u32 = 6;       // VMRESUME için temizlenmiş VMCS
-const VMXERR_INVALID_VMCS_FIELD: u32 = 7;     // Geçersiz VMCS alan kimliği
-const VMXERR_INVALID_HOST_STATE: u32 = 8;     // Geçersiz ana makine durumu
-const VMXERR_INVALID_GUEST_STATE: u32 = 11;   // Geçersiz konuk durumu
+const VMXERR_VMCLEAR_INVALID_ADDR: u32 = 2; // Geçersiz VMCLEAR adresi
+const VMXERR_VMLAUNCH_NON_CLEAR: u32 = 4; // VMLAUNCH için temizlenmemiş VMCS
+const VMXERR_VMRESUME_NON_LAUNCHED: u32 = 5; // VMRESUME için başlatılmamış VMCS
+const VMXERR_VMRESUME_VMCLEAR: u32 = 6; // VMRESUME için temizlenmiş VMCS
+const VMXERR_INVALID_VMCS_FIELD: u32 = 7; // Geçersiz VMCS alan kimliği
+const VMXERR_INVALID_HOST_STATE: u32 = 8; // Geçersiz ana makine durumu
+const VMXERR_INVALID_GUEST_STATE: u32 = 11; // Geçersiz konuk durumu
 
 /// EPT bellek türleri (Extended Page Table Memory Types).
 ///
 /// CPU'nun önbellek davranışını belirler.
-const EPT_MEM_TYPE_UC: u64 = 0x00;  // Önbelleksiz (Uncacheable)
-const EPT_MEM_TYPE_WC: u64 = 0x01;  // Birleştirilerek Yazılır (Write Combining)
-const EPT_MEM_TYPE_WT: u64 = 0x04;  // Yazma Geçirgen (Write Through)
-const EPT_MEM_TYPE_WP: u64 = 0x05;  // Yazmaya Korumalı (Write Protected)
-const EPT_MEM_TYPE_WB: u64 = 0x06;  // Geri Yazma (Write Back) - en verimli
+const EPT_MEM_TYPE_UC: u64 = 0x00; // Önbelleksiz (Uncacheable)
+const EPT_MEM_TYPE_WC: u64 = 0x01; // Birleştirilerek Yazılır (Write Combining)
+const EPT_MEM_TYPE_WT: u64 = 0x04; // Yazma Geçirgen (Write Through)
+const EPT_MEM_TYPE_WP: u64 = 0x05; // Yazmaya Korumalı (Write Protected)
+const EPT_MEM_TYPE_WB: u64 = 0x06; // Geri Yazma (Write Back) - en verimli
 
 /// EPT sayfa izinleri (EPT Permissions).
 ///
 /// Her EPT girdisinin erişim izinlerini bit maskeleri ile belirler.
-const EPT_READ: u64 = 0x01;         // Okuma izni
-const EPT_WRITE: u64 = 0x02;        // Yazma izni
-const EPT_EXECUTE: u64 = 0x04;      // Çalıştırma izni (supervisor modu)
+const EPT_READ: u64 = 0x01; // Okuma izni
+const EPT_WRITE: u64 = 0x02; // Yazma izni
+const EPT_EXECUTE: u64 = 0x04; // Çalıştırma izni (supervisor modu)
 const EPT_EXECUTE_USER: u64 = 0x08; // Kullanıcı modu çalıştırma izni
 
 /// Sayfa boyutları.
 ///
 /// EPT 4K, 2M ve 1G sayfa boyutlarını destekler.
-const PAGE_SIZE_4K: u64 = 4096;                    // 4 KiB: standart
-const PAGE_SIZE_2M: u64 = 2 * 1024 * 1024;        // 2 MiB: büyük sayfa
-const PAGE_SIZE_1G: u64 = 1024 * 1024 * 1024;     // 1 GiB: çok büyük sayfa
+const PAGE_SIZE_4K: u64 = 4096; // 4 KiB: standart
+const PAGE_SIZE_2M: u64 = 2 * 1024 * 1024; // 2 MiB: büyük sayfa
+const PAGE_SIZE_1G: u64 = 1024 * 1024 * 1024; // 1 GiB: çok büyük sayfa
 
 // ============================================================================
 // SANALLAŞTIRMA HATASI
@@ -448,11 +448,11 @@ impl EptEntry {
 /// ```
 #[derive(Clone, Debug)]
 pub struct EptPageTable {
-    pub pml4: Vec<EptEntry>,   // 4. seviye: PML4 tablosu
-    pub pdpt: Vec<EptEntry>,   // 3. seviye: PDPT tablosu
-    pub pd: Vec<EptEntry>,     // 2. seviye: PD tablosu
-    pub pt: Vec<EptEntry>,     // 1. seviye: PT tablosu
-    pub pml4_phys: u64,        // PML4 tablosunun fiziksel adresi (EPTP için)
+    pub pml4: Vec<EptEntry>, // 4. seviye: PML4 tablosu
+    pub pdpt: Vec<EptEntry>, // 3. seviye: PDPT tablosu
+    pub pd: Vec<EptEntry>,   // 2. seviye: PD tablosu
+    pub pt: Vec<EptEntry>,   // 1. seviye: PT tablosu
+    pub pml4_phys: u64,      // PML4 tablosunun fiziksel adresi (EPTP için)
 }
 
 impl EptPageTable {
@@ -486,17 +486,29 @@ impl EptPageTable {
 
         // Üst seviyeleri bağla (yoksa oluştur)
         if !self.pml4[pml4_idx].is_present() {
-            self.pml4[pml4_idx] = EptEntry::from_addr(self.pdpt.as_ptr() as u64, EPT_READ | EPT_WRITE | EPT_EXECUTE, EPT_MEM_TYPE_WB);
+            self.pml4[pml4_idx] = EptEntry::from_addr(
+                self.pdpt.as_ptr() as u64,
+                EPT_READ | EPT_WRITE | EPT_EXECUTE,
+                EPT_MEM_TYPE_WB,
+            );
             self.pml4[pml4_idx].set_present(true);
         }
 
         if !self.pdpt[pdpt_idx].is_present() {
-            self.pdpt[pdpt_idx] = EptEntry::from_addr(self.pd.as_ptr() as u64, EPT_READ | EPT_WRITE | EPT_EXECUTE, EPT_MEM_TYPE_WB);
+            self.pdpt[pdpt_idx] = EptEntry::from_addr(
+                self.pd.as_ptr() as u64,
+                EPT_READ | EPT_WRITE | EPT_EXECUTE,
+                EPT_MEM_TYPE_WB,
+            );
             self.pdpt[pdpt_idx].set_present(true);
         }
 
         if !self.pd[pd_idx].is_present() {
-            self.pd[pd_idx] = EptEntry::from_addr(self.pt.as_ptr() as u64, EPT_READ | EPT_WRITE | EPT_EXECUTE, EPT_MEM_TYPE_WB);
+            self.pd[pd_idx] = EptEntry::from_addr(
+                self.pt.as_ptr() as u64,
+                EPT_READ | EPT_WRITE | EPT_EXECUTE,
+                EPT_MEM_TYPE_WB,
+            );
             self.pd[pd_idx].set_present(true);
         }
     }
@@ -517,12 +529,20 @@ impl EptPageTable {
 
         // Üst seviyeleri bağla
         if !self.pml4[pml4_idx].is_present() {
-            self.pml4[pml4_idx] = EptEntry::from_addr(self.pdpt.as_ptr() as u64, EPT_READ | EPT_WRITE | EPT_EXECUTE, EPT_MEM_TYPE_WB);
+            self.pml4[pml4_idx] = EptEntry::from_addr(
+                self.pdpt.as_ptr() as u64,
+                EPT_READ | EPT_WRITE | EPT_EXECUTE,
+                EPT_MEM_TYPE_WB,
+            );
             self.pml4[pml4_idx].set_present(true);
         }
 
         if !self.pdpt[pdpt_idx].is_present() {
-            self.pdpt[pdpt_idx] = EptEntry::from_addr(self.pd.as_ptr() as u64, EPT_READ | EPT_WRITE | EPT_EXECUTE, EPT_MEM_TYPE_WB);
+            self.pdpt[pdpt_idx] = EptEntry::from_addr(
+                self.pd.as_ptr() as u64,
+                EPT_READ | EPT_WRITE | EPT_EXECUTE,
+                EPT_MEM_TYPE_WB,
+            );
             self.pdpt[pdpt_idx].set_present(true);
         }
     }
@@ -562,11 +582,11 @@ impl Default for EptPageTable {
 /// Her mantıksal işlemci için bir VMCS bulunur.
 #[derive(Clone, Debug)]
 pub struct Vmcs {
-    pub revision_id: u32,      // VMCS düzeltme kimliği (IA32_VMX_BASIC'den alınır)
-    pub abort_indicator: u32,  // VMX iptal göstergesi
-    pub data: Vec<u64>,        // VMCS veri alanı (gerçekte 4 KiB boyut)
-    pub initialized: bool,     // Konuk durumu başlatıldı mı?
-    pub launched: bool,        // VMLAUNCH çağrıldı mı?
+    pub revision_id: u32,     // VMCS düzeltme kimliği (IA32_VMX_BASIC'den alınır)
+    pub abort_indicator: u32, // VMX iptal göstergesi
+    pub data: Vec<u64>,       // VMCS veri alanı (gerçekte 4 KiB boyut)
+    pub initialized: bool,    // Konuk durumu başlatıldı mı?
+    pub launched: bool,       // VMLAUNCH çağrıldı mı?
 }
 
 impl Vmcs {
@@ -747,11 +767,11 @@ pub struct VirtualMachine {
 /// Running -> Error
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmState {
-    Created,   // Oluşturuldu, henüz başlatılmadı
-    Running,   // Çalışıyor
-    Halted,    // Durduruldu
-    Paused,    // Duraklatıldı (VM-EXIT nedeniyle)
-    Error,     // Hata durumunda
+    Created, // Oluşturuldu, henüz başlatılmadı
+    Running, // Çalışıyor
+    Halted,  // Durduruldu
+    Paused,  // Duraklatıldı (VM-EXIT nedeniyle)
+    Error,   // Hata durumunda
 }
 
 impl VirtualMachine {
@@ -779,7 +799,12 @@ impl VirtualMachine {
         for i in 0..self.guest_memory_size / 4096 {
             let gpa = (i * 4096) as u64;
             let hpa = self.guest_memory.as_ptr() as u64 + gpa;
-            self.ept.map_4k(gpa, hpa, EPT_READ | EPT_WRITE | EPT_EXECUTE, EPT_MEM_TYPE_WB);
+            self.ept.map_4k(
+                gpa,
+                hpa,
+                EPT_READ | EPT_WRITE | EPT_EXECUTE,
+                EPT_MEM_TYPE_WB,
+            );
         }
 
         // VMCS'yi yapılandır
@@ -887,12 +912,12 @@ impl VirtualMachine {
 /// Tüm sanal makineleri, CPU özelliklerini ve sanallaştırma altyapısını yönetir.
 #[derive(Clone, Debug)]
 pub struct Vmm {
-    pub vendor: CpuVendor,                         // CPU üreticisi (Intel/AMD)
-    pub vmx_caps: Option<VmxCapabilities>,         // Intel VMX yetenekleri
-    pub svm_caps: Option<SvmCapabilities>,         // AMD SVM yetenekleri
-    pub vms: BTreeMap<u32, VirtualMachine>,        // Sanal makine koleksiyonu (kimlik -> VM)
-    pub next_vm_id: u32,                           // Sonraki sanal makine kimliği
-    pub initialized: bool,                         // VMM başlatıldı mı?
+    pub vendor: CpuVendor,                  // CPU üreticisi (Intel/AMD)
+    pub vmx_caps: Option<VmxCapabilities>,  // Intel VMX yetenekleri
+    pub svm_caps: Option<SvmCapabilities>,  // AMD SVM yetenekleri
+    pub vms: BTreeMap<u32, VirtualMachine>, // Sanal makine koleksiyonu (kimlik -> VM)
+    pub next_vm_id: u32,                    // Sonraki sanal makine kimliği
+    pub initialized: bool,                  // VMM başlatıldı mı?
 }
 
 impl Vmm {
@@ -961,8 +986,12 @@ impl Vmm {
 
         self.vms.insert(id, vm);
 
-        crate::serial_println!("[VMM] Created VM {} ({}) with {} MB memory",
-            id, name, memory_size / (1024 * 1024));
+        crate::serial_println!(
+            "[VMM] Created VM {} ({}) with {} MB memory",
+            id,
+            name,
+            memory_size / (1024 * 1024)
+        );
 
         Ok(id)
     }
@@ -984,7 +1013,8 @@ impl Vmm {
 
     /// Tüm sanal makinelerin (kimlik, ad, durum) listesini döner.
     pub fn list_vms(&self) -> Vec<(u32, String, VmState)> {
-        self.vms.iter()
+        self.vms
+            .iter()
             .map(|(id, vm)| (*id, vm.name.clone(), vm.state))
             .collect()
     }
@@ -1040,4 +1070,460 @@ pub fn destroy_vm(id: u32) -> bool {
 /// Tüm sanal makinelerin listesini döner.
 pub fn list_vms() -> Vec<(u32, String, VmState)> {
     VMM_INSTANCE.lock().list_vms()
+}
+
+// ============================================================================
+// KVM Geliştirmeleri — VM Exit Handler, VPID, EPT, vCPU
+// ============================================================================
+
+/// VM-Exit nedenleri (Intel SDM Vol 3C, Appendix C)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmExitReason {
+    /// Harici kesme
+    ExternalInterrupt = 1,
+    /// Triple fault
+    TripleFault = 2,
+    /// INIT sinyali
+    InitSignal = 3,
+    /// CPUID talimatı
+    Cpuid = 10,
+    /// HLT talimatı
+    Hlt = 12,
+    /// INVLPG
+    Invlpg = 14,
+    /// RDTSC
+    Rdtsc = 16,
+    /// VMCALL (hipervizör çağrısı)
+    Vmcall = 18,
+    /// CR erişimi
+    CrAccess = 28,
+    /// I/O portu erişimi
+    IoInstruction = 30,
+    /// MSR okuma
+    RdMsr = 31,
+    /// MSR yazma
+    WrMsr = 32,
+    /// EPT ihlali
+    EptViolation = 48,
+    /// EPT yanlış yapılandırma
+    EptMisconfiguration = 49,
+    /// XSETBV
+    Xsetbv = 55,
+    /// Bilinmeyen
+    Unknown = 0xFFFF,
+}
+
+impl VmExitReason {
+    pub fn from_u32(val: u32) -> Self {
+        match val {
+            1 => Self::ExternalInterrupt,
+            2 => Self::TripleFault,
+            3 => Self::InitSignal,
+            10 => Self::Cpuid,
+            12 => Self::Hlt,
+            14 => Self::Invlpg,
+            16 => Self::Rdtsc,
+            18 => Self::Vmcall,
+            28 => Self::CrAccess,
+            30 => Self::IoInstruction,
+            31 => Self::RdMsr,
+            32 => Self::WrMsr,
+            48 => Self::EptViolation,
+            49 => Self::EptMisconfiguration,
+            55 => Self::Xsetbv,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// VM-Exit bilgisi
+#[derive(Debug, Clone)]
+pub struct VmExitInfo {
+    /// Exit nedeni
+    pub reason: VmExitReason,
+    /// Exit qualification (neden detayı)
+    pub qualification: u64,
+    /// Guest RIP (exit anında)
+    pub guest_rip: u64,
+    /// Talimat uzunluğu
+    pub instruction_length: u32,
+    /// Guest fiziksel adres (EPT violation'da)
+    pub guest_physical_addr: u64,
+}
+
+/// vCPU yapısı — sanal işlemci
+#[derive(Debug, Clone)]
+pub struct VCpu {
+    /// vCPU ID
+    pub id: u32,
+    /// VMCS bölge adresi (4KB-aligned physical)
+    pub vmcs_region: u64,
+    /// VPID (Virtual Processor ID) — TLB tag'i
+    pub vpid: u16,
+    /// vCPU durumu
+    pub state: VCpuState,
+    /// Toplam VM-Exit sayısı
+    pub exit_count: u64,
+    /// Son exit nedeni
+    pub last_exit: Option<VmExitReason>,
+    /// Guest register durumu
+    pub regs: VCpuRegisters,
+}
+
+/// vCPU durumları
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VCpuState {
+    /// Oluşturuldu ama başlatılmadı
+    Created,
+    /// Çalışıyor (VMRESUME/VMLAUNCH sonrası)
+    Running,
+    /// Durduruldu
+    Stopped,
+    /// Init bekleniyor (SIPI bekleniyor)
+    WaitingForSipi,
+}
+
+/// vCPU register dosyası
+#[derive(Debug, Clone, Default)]
+pub struct VCpuRegisters {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rsp: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub rflags: u64,
+    pub cr0: u64,
+    pub cr3: u64,
+    pub cr4: u64,
+}
+
+impl VCpu {
+    /// Yeni vCPU oluşturur.
+    pub fn new(id: u32, vpid: u16) -> Self {
+        Self {
+            id,
+            vmcs_region: 0,
+            vpid,
+            state: VCpuState::Created,
+            exit_count: 0,
+            last_exit: None,
+            regs: VCpuRegisters::default(),
+        }
+    }
+
+    /// VM-Exit işler ve uygun eylemi belirler.
+    pub fn handle_exit(&mut self, info: &VmExitInfo) -> VmExitAction {
+        self.exit_count += 1;
+        self.last_exit = Some(info.reason);
+
+        match info.reason {
+            VmExitReason::Cpuid => {
+                // CPUID emülasyonu: leaf EAX, subleaf ECX'ten
+                let _leaf = self.regs.rax as u32;
+                let _subleaf = self.regs.rcx as u32;
+                // Emülasyon sonrası RIP'i ilerlet
+                VmExitAction::AdvanceRip(info.instruction_length)
+            }
+            VmExitReason::Hlt => {
+                // HLT — vCPU'yu durdur, kesme bekle
+                VmExitAction::Halt
+            }
+            VmExitReason::Vmcall => {
+                // Hipervizör çağrısı (paravirtualization)
+                let _call_nr = self.regs.rax;
+                VmExitAction::AdvanceRip(info.instruction_length)
+            }
+            VmExitReason::IoInstruction => {
+                let port = (info.qualification >> 16) as u16;
+                let _size = (info.qualification & 0x7) as u8 + 1;
+                let is_in = (info.qualification & 0x8) != 0;
+                VmExitAction::EmulateIo { port, is_in }
+            }
+            VmExitReason::RdMsr => {
+                let _msr = self.regs.rcx as u32;
+                VmExitAction::AdvanceRip(info.instruction_length)
+            }
+            VmExitReason::WrMsr => {
+                let _msr = self.regs.rcx as u32;
+                let _value = ((self.regs.rdx as u64) << 32) | (self.regs.rax as u64 & 0xFFFF_FFFF);
+                VmExitAction::AdvanceRip(info.instruction_length)
+            }
+            VmExitReason::EptViolation => {
+                // EPT ihlali — sayfa hatası gibi; bellek eşleme gerekli
+                VmExitAction::HandleEptViolation {
+                    guest_phys: info.guest_physical_addr,
+                }
+            }
+            VmExitReason::TripleFault => {
+                crate::serial_println!("[KVM] vCPU {} triple fault!", self.id);
+                VmExitAction::Shutdown
+            }
+            VmExitReason::ExternalInterrupt => {
+                // Harici kesme — host'a yönlendir
+                VmExitAction::InjectInterrupt
+            }
+            _ => {
+                crate::serial_println!("[KVM] vCPU {} unhandled exit: {:?}", self.id, info.reason);
+                VmExitAction::Shutdown
+            }
+        }
+    }
+}
+
+/// VM-Exit sonrası alınacak eylem
+#[derive(Debug, Clone, Copy)]
+pub enum VmExitAction {
+    /// RIP'i belirtilen uzunluk kadar ilerlet ve VMRESUME
+    AdvanceRip(u32),
+    /// vCPU'yu durdur (HLT)
+    Halt,
+    /// I/O emülasyonu
+    EmulateIo { port: u16, is_in: bool },
+    /// EPT ihlalini çöz
+    HandleEptViolation { guest_phys: u64 },
+    /// Harici kesmeyi host'a yönlendir
+    InjectInterrupt,
+    /// VM'yi kapat
+    Shutdown,
+}
+
+/// VPID yöneticisi — benzersiz VPID atar.
+static NEXT_VPID: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(1);
+
+/// Yeni VPID tahsis eder.
+pub fn allocate_vpid() -> u16 {
+    let vpid = NEXT_VPID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if vpid == 0 {
+        NEXT_VPID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    } else {
+        vpid
+    }
+}
+
+/// INVVPID talimatı — VPID tabanlı TLB temizleme.
+///
+/// Belirli bir VPID'nin TLB girişlerini geçersiz kılar.
+pub fn invvpid_single_context(vpid: u16) {
+    if vpid == 0 {
+        return;
+    }
+    // INVVPID type=1 (single-context invalidation)
+    // Descriptor: [VPID:16][Rsvd:48][LinearAddr:64]
+    let descriptor: [u64; 2] = [vpid as u64, 0];
+    unsafe {
+        core::arch::asm!(
+            "invvpid {0}, [{1}]",
+            in(reg) 1u64, // type = single-context
+            in(reg) &descriptor as *const _ as u64,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+// ============================================================================
+// NESTED PAGING (EPT/NPT) IMPLEMENTATION
+// ============================================================================
+
+use alloc::sync::Arc;
+
+/// VM Exit Reasons
+pub const EXIT_REASON_EPT_VIOLATION: u32 = 48;
+pub const EXIT_REASON_EPT_MISCONFIG: u32 = 49;
+
+/// Nested Paging Hatası
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NestedPagingError {
+    InvalidGuestPhysicalAddress,
+    InvalidHostPhysicalAddress,
+    PageTableFull,
+    InvalidPageSize,
+    AccessViolation,
+    Misconfiguration,
+    UnsupportedFeature,
+    OutOfMemory,
+}
+
+/// EPT/NPT Sanal Makine için Sayfa Tablosu
+#[derive(Debug)]
+pub struct VmNestedPageTable {
+    pub vm_id: u32,
+    pub ept_pointer: u64,
+    pub page_mappings: Mutex<BTreeMap<u64, u64>>,
+    pub large_page_mappings: Mutex<BTreeMap<u64, u64>>,
+}
+
+impl VmNestedPageTable {
+    pub fn new(vm_id: u32) -> Self {
+        Self {
+            vm_id,
+            ept_pointer: 0,
+            page_mappings: Mutex::new(BTreeMap::new()),
+            large_page_mappings: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// 4KB sayfa eşlemesi oluşturur
+    pub fn map_page_4k(
+        &self,
+        guest_phys_addr: u64,
+        host_phys_addr: u64,
+        read: bool,
+        write: bool,
+        execute: bool,
+        mem_type: u64,
+    ) -> Result<(), NestedPagingError> {
+        if guest_phys_addr & 0xFFF != 0 || host_phys_addr & 0xFFF != 0 {
+            return Err(NestedPagingError::InvalidGuestPhysicalAddress);
+        }
+
+        // Gerçek uygulamada: EPT tabloları oluşturulur ve yapılandırılır
+        self.page_mappings
+            .lock()
+            .insert(guest_phys_addr, host_phys_addr);
+
+        crate::serial_println!(
+            "[EPT] VM {} mapped GPA 0x{:x} -> HPA 0x{:x}",
+            self.vm_id,
+            guest_phys_addr,
+            host_phys_addr
+        );
+
+        Ok(())
+    }
+
+    /// 2MB büyük sayfa eşlemesi oluşturur
+    pub fn map_page_2m(
+        &self,
+        guest_phys_addr: u64,
+        host_phys_addr: u64,
+        read: bool,
+        write: bool,
+        execute: bool,
+        mem_type: u64,
+    ) -> Result<(), NestedPagingError> {
+        if guest_phys_addr & 0x1FFFFF != 0 || host_phys_addr & 0x1FFFFF != 0 {
+            return Err(NestedPagingError::InvalidGuestPhysicalAddress);
+        }
+
+        self.large_page_mappings
+            .lock()
+            .insert(guest_phys_addr, host_phys_addr);
+
+        crate::serial_println!(
+            "[EPT] VM {} mapped 2MB GPA 0x{:x} -> HPA 0x{:x}",
+            self.vm_id,
+            guest_phys_addr,
+            host_phys_addr
+        );
+
+        Ok(())
+    }
+
+    /// EPT ihlali işleme
+    pub fn handle_ept_violation(
+        &self,
+        guest_linear_addr: u64,
+        guest_phys_addr: u64,
+        qualification: u64,
+    ) -> Result<(), NestedPagingError> {
+        let read_violation = (qualification & 1) != 0;
+        let write_violation = (qualification & 2) != 0;
+        let exec_violation = (qualification & 4) != 0;
+
+        crate::serial_println!(
+            "[EPT] Violation in VM {}: GPA=0x{:x}, GLA=0x{:x}, R={} W={} X={}",
+            self.vm_id,
+            guest_phys_addr,
+            guest_linear_addr,
+            read_violation,
+            write_violation,
+            exec_violation
+        );
+
+        // İhlali çöz - gerçek uygulamada: doğru eşleme yapılır
+        if read_violation || write_violation || exec_violation {
+            self.map_page_4k(
+                guest_phys_addr & !0xFFF,
+                guest_phys_addr & !0xFFF,
+                true,
+                false,
+                true,
+                EPT_MEM_TYPE_WB,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// EPT pointer'ı döndürür
+    pub fn get_ept_pointer(&self) -> u64 {
+        self.ept_pointer
+    }
+}
+
+static NESTED_PAGING_MANAGER: spin::Once<Mutex<BTreeMap<u32, Arc<VmNestedPageTable>>>> =
+    spin::Once::new();
+
+/// Nested paging sistemini başlatır
+pub fn init_nested_paging() -> Result<(), NestedPagingError> {
+    NESTED_PAGING_MANAGER.call_once(|| Mutex::new(BTreeMap::new()));
+    crate::serial_println!("[EPT/NPT] Nested Paging Manager initialized");
+    Ok(())
+}
+
+/// Sanal makine için nested page table oluşturur
+pub fn create_vm_page_table(vm_id: u32) -> Result<Arc<VmNestedPageTable>, NestedPagingError> {
+    let manager = NESTED_PAGING_MANAGER.get().unwrap();
+    let page_table = Arc::new(VmNestedPageTable::new(vm_id));
+    manager.lock().insert(vm_id, page_table.clone());
+
+    crate::serial_println!("[EPT/NPT] Created page table for VM {}", vm_id);
+    Ok(page_table)
+}
+
+/// Sanal makinenin page table'ını alır
+pub fn get_vm_page_table(vm_id: u32) -> Option<Arc<VmNestedPageTable>> {
+    let manager = NESTED_PAGING_MANAGER.get()?;
+    manager.lock().get(&vm_id).cloned()
+}
+
+/// EPT ihlalini işler
+pub fn handle_vmx_exit(
+    exit_reason: u32,
+    guest_linear_addr: u64,
+    guest_phys_addr: u64,
+    qualification: u64,
+    vm_id: u32,
+) -> Result<bool, NestedPagingError> {
+    match exit_reason {
+        EXIT_REASON_EPT_VIOLATION => {
+            if let Some(page_table) = get_vm_page_table(vm_id) {
+                page_table.handle_ept_violation(
+                    guest_linear_addr,
+                    guest_phys_addr,
+                    qualification,
+                )?;
+                Ok(true)
+            } else {
+                Err(NestedPagingError::InvalidGuestPhysicalAddress)
+            }
+        }
+        EXIT_REASON_EPT_MISCONFIG => {
+            crate::serial_println!("[EPT] Misconfiguration in VM {}", vm_id);
+            Err(NestedPagingError::Misconfiguration)
+        }
+        _ => Ok(false),
+    }
 }

@@ -45,7 +45,7 @@
 //! - **Kontrol Arabirimi** (CDC Control, sınıf 0x02): Komutlar (Interrupt IN ucu noktası)
 //! - **Veri Arabirimi** (CDC Data, sınıf 0x0A): Gerçek veri aktarımı (Bulk IN + Bulk OUT)
 
-use super::{UsbDevice, UsbError, UsbClass};
+use super::{UsbClass, UsbDevice, UsbError};
 use alloc::vec::Vec;
 
 /// CDC cihaz alt tipi.
@@ -112,7 +112,13 @@ impl CdcDevice {
     /// [baud_rate (4B LE)] [stop_bits (1B)] [parity (1B)] [data_bits (1B)]
     /// ```
     /// Örnek: 115200-8N1 → dwDTERate=0x0001C200, bCharFormat=0, bParityType=0, bDataBits=8
-    pub fn set_line_coding(&mut self, baud_rate: u32, stop_bits: u8, parity: u8, data_bits: u8) -> Result<(), UsbError> {
+    pub fn set_line_coding(
+        &mut self,
+        baud_rate: u32,
+        stop_bits: u8,
+        parity: u8,
+        data_bits: u8,
+    ) -> Result<(), UsbError> {
         // Line coding yapısı: 7 byte
         // dwDTERate (4 byte): Baud rate, little-endian formatı
         // bCharFormat (1 byte): Stop bit sayısı
@@ -301,10 +307,10 @@ impl CdcAcmDevice {
 
         CdcAcmDevice {
             cdc,
-            baud_rate: 115200,  // Yaygın hata ayıklama baud hızı
+            baud_rate: 115200, // Yaygın hata ayıklama baud hızı
             data_bits: 8,
             stop_bits: 1,
-            parity: 0,          // Parite yok (en yaygın)
+            parity: 0, // Parite yok (en yaygın)
         }
     }
 
@@ -312,8 +318,15 @@ impl CdcAcmDevice {
     ///
     /// `set_line_coding` USB kontrol aktarımı üzerinden cihaza gönderilir.
     /// Yerel alanlar güncellenir (yazılım durumu self ile senkronize).
-    pub fn configure(&mut self, baud_rate: u32, data_bits: u8, stop_bits: u8, parity: u8) -> Result<(), UsbError> {
-        self.cdc.set_line_coding(baud_rate, stop_bits, parity, data_bits)?;
+    pub fn configure(
+        &mut self,
+        baud_rate: u32,
+        data_bits: u8,
+        stop_bits: u8,
+        parity: u8,
+    ) -> Result<(), UsbError> {
+        self.cdc
+            .set_line_coding(baud_rate, stop_bits, parity, data_bits)?;
         self.baud_rate = baud_rate;
         self.data_bits = data_bits;
         self.stop_bits = stop_bits;

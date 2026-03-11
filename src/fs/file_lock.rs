@@ -44,20 +44,20 @@ use spin::Mutex;
 // ============================================================================
 
 /// flock() için kilit türleri
-pub const LOCK_SH: i32 = 1;      // Paylaşımlı kilit
-pub const LOCK_EX: i32 = 2;      // Özel kilit
-pub const LOCK_UN: i32 = 8;      // Kilidi kaldır
-pub const LOCK_NB: i32 = 4;      // Bloklamayan mod
+pub const LOCK_SH: i32 = 1; // Paylaşımlı kilit
+pub const LOCK_EX: i32 = 2; // Özel kilit
+pub const LOCK_UN: i32 = 8; // Kilidi kaldır
+pub const LOCK_NB: i32 = 4; // Bloklamayan mod
 
 /// fcntl için kilit türleri (F_SETLK, F_SETLKW, F_GETLK)
-pub const F_RDLCK: i32 = 0;      // Okuma kilidi
-pub const F_WRLCK: i32 = 1;      // Yazma kilidi
-pub const F_UNLCK: i32 = 2;      // Kilidi kaldır
+pub const F_RDLCK: i32 = 0; // Okuma kilidi
+pub const F_WRLCK: i32 = 1; // Yazma kilidi
+pub const F_UNLCK: i32 = 2; // Kilidi kaldır
 
 /// fcntl kilit komutları
-pub const F_SETLK: i32 = 6;      // Kilidi ayarla (bloklamayan)
-pub const F_SETLKW: i32 = 7;     // Kilidi ayarla (bloklayan)
-pub const F_GETLK: i32 = 5;      // Kilit bilgisini al
+pub const F_SETLK: i32 = 6; // Kilidi ayarla (bloklamayan)
+pub const F_SETLKW: i32 = 7; // Kilidi ayarla (bloklayan)
+pub const F_GETLK: i32 = 5; // Kilit bilgisini al
 
 // ============================================================================
 // DOSYA KİLİT YAPILARI
@@ -178,7 +178,7 @@ impl FileLockManager {
     /// POSIX kilidin alınıp alınamayacağını kontrol eder
     pub fn can_acquire_posix_lock(&self, inode: u64, lock: &FileLock) -> bool {
         let locks = self.posix_locks.lock();
-        
+
         if let Some(existing_locks) = locks.get(&inode) {
             for existing in existing_locks {
                 if lock.conflicts_with(existing) {
@@ -186,14 +186,14 @@ impl FileLockManager {
                 }
             }
         }
-        
+
         true
     }
 
     /// POSIX kilidi alır
     pub fn acquire_posix_lock(&self, inode: u64, lock: FileLock) -> Result<(), FileLockError> {
         let mut locks = self.posix_locks.lock();
-        
+
         // Çakışmaları kontrol et
         if let Some(existing_locks) = locks.get(&inode) {
             for existing in existing_locks {
@@ -203,14 +203,12 @@ impl FileLockManager {
                 }
             }
         }
-        
+
         // Prosesten kalan örtüşen kilidi kaldır
         if lock.l_type == F_UNLCK {
             // Kilidi kaldır: örtüşen kilitleri temizle
             if let Some(existing_locks) = locks.get_mut(&inode) {
-                existing_locks.retain(|l| {
-                    l.l_pid != lock.l_pid || !l.overlaps(&lock)
-                });
+                existing_locks.retain(|l| l.l_pid != lock.l_pid || !l.overlaps(&lock));
             }
         } else {
             // Yeni kilit ekle
@@ -218,14 +216,14 @@ impl FileLockManager {
             entry.push(lock);
             self.total_locks.fetch_add(1, Ordering::Relaxed);
         }
-        
+
         Ok(())
     }
 
     /// Çakışan kilidi getirir (F_GETLK için)
     pub fn get_conflicting_lock(&self, inode: u64, lock: &FileLock) -> Option<FileLock> {
         let locks = self.posix_locks.lock();
-        
+
         if let Some(existing_locks) = locks.get(&inode) {
             for existing in existing_locks {
                 if lock.conflicts_with(existing) {
@@ -233,7 +231,7 @@ impl FileLockManager {
                 }
             }
         }
-        
+
         None
     }
 
@@ -246,7 +244,7 @@ impl FileLockManager {
                 lock_list.retain(|l| l.l_pid != pid);
             }
         }
-        
+
         // flock kilitlerini serbest bırak
         {
             let mut locks = self.flock_locks.lock();
@@ -254,50 +252,50 @@ impl FileLockManager {
                 lock_list.retain(|l| l.pid != pid);
             }
         }
-        
+
         crate::serial_println!("[FILELOCK] Released all locks for PID {}", pid);
     }
 
     /// flock kilidi alır
     pub fn acquire_flock(&self, fd: u64, lock_type: i32, pid: u64) -> Result<(), FileLockError> {
         let mut locks = self.flock_locks.lock();
-        
+
         // Çakışmaları kontrol et
         if let Some(existing_locks) = locks.get(&fd) {
             for existing in existing_locks {
                 if existing.pid == pid {
                     continue; // Aynı proses yeniden kilitleyebilir
                 }
-                
+
                 // Özel kilit her şeyle çakışır
                 if lock_type == LOCK_EX || existing.lock_type == LOCK_EX {
                     self.total_conflicts.fetch_add(1, Ordering::Relaxed);
                     return Err(FileLockError::Conflict);
                 }
-                
+
                 // İki paylaşımlı kilit çakışmaz
             }
         }
-        
+
         // Bu prosesten mevcut kilidi kaldır
         if let Some(existing_locks) = locks.get_mut(&fd) {
             existing_locks.retain(|l| l.pid != pid);
         }
-        
+
         // Yeni kilit ekle (kilit kaldırma değilse)
         if lock_type != LOCK_UN {
             let entry = locks.entry(fd).or_insert_with(Vec::new);
             entry.push(FlockLock { fd, lock_type, pid });
             self.total_locks.fetch_add(1, Ordering::Relaxed);
         }
-        
+
         Ok(())
     }
 
     /// Dosyanın kilitli olup olmadığını kontrol eder (zorunlu kilitleme için)
     pub fn is_locked(&self, inode: u64, offset: u64, write: bool) -> bool {
         let locks = self.posix_locks.lock();
-        
+
         if let Some(existing_locks) = locks.get(&inode) {
             for lock in existing_locks {
                 if lock.contains_offset(offset) {
@@ -312,7 +310,7 @@ impl FileLockManager {
                 }
             }
         }
-        
+
         false
     }
 }
@@ -339,34 +337,31 @@ pub enum FileLockError {
 // ============================================================================
 
 /// flock sistem çağrısı uygulaması
-/// 
+///
 /// # Argümanlar
 /// - `fd`: Dosya tanımlayıcısı
 /// - `operation`: Kilit işlemi (LOCK_SH | LOCK_EX | LOCK_UN | LOCK_NB)
-/// 
+///
 /// # Döndürür
 /// Başarıda 0, hata durumunda negatif errno
 pub fn sys_flock(fd: i32, operation: i32) -> i32 {
     if fd < 0 {
         return -9; // EBADF
     }
-    
+
     let lock_type = operation & !LOCK_NB;
     let nonblock = (operation & LOCK_NB) != 0;
-    
+
     if lock_type != LOCK_SH && lock_type != LOCK_EX && lock_type != LOCK_UN {
         return -22; // EINVAL
     }
-    
+
     let pid = crate::task::scheduler::current_task_id() as u64;
-    
+
     loop {
         match FILE_LOCK_MANAGER.acquire_flock(fd as u64, lock_type, pid) {
             Ok(()) => {
-                crate::serial_println!(
-                    "[FLOCK] fd={} type={} pid={}",
-                    fd, lock_type, pid
-                );
+                crate::serial_println!("[FLOCK] fd={} type={} pid={}", fd, lock_type, pid);
                 return 0;
             }
             Err(FileLockError::Conflict) => {
@@ -385,29 +380,42 @@ pub fn sys_flock(fd: i32, operation: i32) -> i32 {
 }
 
 /// fcntl kilit uygulaması (F_SETLK/F_SETLKW/F_GETLK)
-/// 
+///
 /// # Argümanlar
 /// - `fd`: Dosya tanımlayıcısı
 /// - `cmd`: Komut (F_SETLK, F_SETLKW, F_GETLK)
 /// - `lock`: Kilit yapısı
-/// 
+///
 /// # Döndürür
 /// Başarıda 0, hata durumunda negatif errno
 pub fn sys_fcntl_lock(fd: i32, cmd: i32, lock: &mut FileLock) -> i32 {
     if fd < 0 {
         return -9; // EBADF
     }
-    
+
     // Validate lock type
     if lock.l_type != F_RDLCK && lock.l_type != F_WRLCK && lock.l_type != F_UNLCK {
         return -22; // EINVAL
     }
-    
-    // Get inode from fd (placeholder)
-    let inode = fd as u64; // Gerçek uygulamada fd'den inode alınacak
-    
+
+    // Try to map fd -> path -> inode (simple path hash). Falls back to fd
+    let inode = {
+        // Attempt to read path from global FD table
+        let table = crate::fs::GLOBAL_FD_TABLE.lock();
+        if let Some(file) = table.get(fd as usize) {
+            // Simple djb2-style hash to produce a stable inode-like value
+            let mut hash: u64 = 5381;
+            for b in file.path.bytes() {
+                hash = hash.wrapping_mul(33).wrapping_add(b as u64);
+            }
+            hash
+        } else {
+            fd as u64
+        }
+    };
+
     lock.l_pid = crate::task::scheduler::current_task_id() as u64;
-    
+
     match cmd {
         F_GETLK => {
             // Çakışan kilidi bul
@@ -424,12 +432,15 @@ pub fn sys_fcntl_lock(fd: i32, cmd: i32, lock: &mut FileLock) -> i32 {
                 Ok(()) => {
                     crate::serial_println!(
                         "[FCNTL] SETLK: fd={} type={} start={} len={}",
-                        fd, lock.l_type, lock.l_start, lock.l_len
+                        fd,
+                        lock.l_type,
+                        lock.l_start,
+                        lock.l_len
                     );
                     0
                 }
                 Err(FileLockError::Conflict) => -11, // EAGAIN
-                Err(_) => -22, // EINVAL
+                Err(_) => -22,                       // EINVAL
             }
         }
         F_SETLKW => {
@@ -439,12 +450,28 @@ pub fn sys_fcntl_lock(fd: i32, cmd: i32, lock: &mut FileLock) -> i32 {
                     Ok(()) => {
                         crate::serial_println!(
                             "[FCNTL] SETLKW: fd={} type={} start={} len={}",
-                            fd, lock.l_type, lock.l_start, lock.l_len
+                            fd,
+                            lock.l_type,
+                            lock.l_start,
+                            lock.l_len
                         );
                         return 0;
                     }
                     Err(FileLockError::Conflict) => {
-                        // TODO: Kilitlenme (deadlock) kontrolü
+                        // Kilitlenme (deadlock) kontrolü: eğer bekleme süresi
+                        // DEADLOCK_TIMEOUT_MS'i aştıysa EDEADLK döndür
+                        const DEADLOCK_TIMEOUT_MS: u64 = 5000;
+                        static WAIT_START: core::sync::atomic::AtomicU64 =
+                            core::sync::atomic::AtomicU64::new(0);
+                        let now = crate::task::scheduler::get_ticks() as u64;
+                        let start = WAIT_START.load(core::sync::atomic::Ordering::Relaxed);
+                        if start == 0 {
+                            WAIT_START.store(now, core::sync::atomic::Ordering::Relaxed);
+                        } else if now.saturating_sub(start) > DEADLOCK_TIMEOUT_MS {
+                            WAIT_START.store(0, core::sync::atomic::Ordering::Relaxed);
+                            crate::serial_println!("[FCNTL] Deadlock detected for fd={}", fd);
+                            return -35; // EDEADLK
+                        }
                         crate::task::sleep(10);
                     }
                     Err(_) => {

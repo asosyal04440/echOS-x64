@@ -41,11 +41,11 @@
 //! ancak gerçek çekirdek durumunu (register'lar, yığın, sayfa tabloları)
 //! geri yükleyemez. Tam geri yükleme çok daha karmaşık donanım desteği gerektirir.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 // ============================================================================
@@ -78,7 +78,7 @@ pub struct Checkpoint {
 impl Checkpoint {
     pub fn new(name: &str) -> Self {
         static CHECKPOINT_ID: AtomicU64 = AtomicU64::new(0);
-        
+
         Self {
             id: CHECKPOINT_ID.fetch_add(1, Ordering::SeqCst),
             name: String::from(name),
@@ -88,26 +88,30 @@ impl Checkpoint {
             checksum: 0,
         }
     }
-    
+
     /// Kontrol noktasına modül durumu ekler ve checksum'ı günceller
     pub fn add_state(&mut self, module: &str, state: Vec<u8>) {
         self.checksum = self.checksum.wrapping_add(
-            state.iter().fold(0u64, |acc, &b| acc.wrapping_add(b as u64))
+            state
+                .iter()
+                .fold(0u64, |acc, &b| acc.wrapping_add(b as u64)),
         );
         self.module_states.insert(String::from(module), state);
     }
-    
+
     /// Kontrol noktasından belirtilen modülün durumunu getirir
     pub fn get_state(&self, module: &str) -> Option<&Vec<u8>> {
         self.module_states.get(module)
     }
-    
+
     /// Checksum kontrolü ile kontrol noktasının bütünlüğünü doğrular
     pub fn verify(&self) -> bool {
-        let calculated = self.module_states.values()
+        let calculated = self
+            .module_states
+            .values()
             .flat_map(|v| v.iter())
             .fold(0u64, |acc, &b| acc.wrapping_add(b as u64));
-        
+
         calculated == self.checksum
     }
 }
@@ -149,14 +153,14 @@ impl CheckpointManager {
             checkpoint_on_fault: AtomicBool::new(true),
         }
     }
-    
+
     /// Yeni bir kontrol noktası oluşturur ve kaydeder
     pub fn create(&self, name: &str) -> Checkpoint {
         let mut checkpoint = Checkpoint::new(name);
-        
+
         // Modül durumlarını yakala
         self.capture_states(&mut checkpoint);
-        
+
         // Kontrol noktasını kaydet
         {
             let mut checkpoints = self.checkpoints.lock();
@@ -165,29 +169,30 @@ impl CheckpointManager {
             }
             checkpoints.push(checkpoint.clone());
         }
-        
-        self.last_checkpoint.store(checkpoint.timestamp, Ordering::SeqCst);
-        
+
+        self.last_checkpoint
+            .store(checkpoint.timestamp, Ordering::SeqCst);
+
         crate::serial_println!("[CHECKPOINT] Created: {} (id: {})", name, checkpoint.id);
-        
+
         checkpoint
     }
-    
+
     /// Mevcut sistem durumlarını yakalar (zamanlayıcı, bellek, hata istatistikleri)
     fn capture_states(&self, checkpoint: &mut Checkpoint) {
         // Zamanlayıcı durumunu yakala
         let scheduler_state = self.capture_scheduler_state();
         checkpoint.add_state("scheduler", scheduler_state);
-        
+
         // Bellek durumunu yakala
         let memory_state = self.capture_memory_state();
         checkpoint.add_state("memory", memory_state);
-        
+
         // Hata yönetim durumunu yakala
         let fault_state = self.capture_fault_state();
         checkpoint.add_state("fault", fault_state);
     }
-    
+
     fn capture_scheduler_state(&self) -> Vec<u8> {
         let stats = crate::task::scheduler::get_stats();
         // İstatistikleri serileştir (basitleştirilmiş)
@@ -197,7 +202,7 @@ impl CheckpointManager {
         state.extend_from_slice(&stats.zombie_count.to_le_bytes());
         state
     }
-    
+
     fn capture_memory_state(&self) -> Vec<u8> {
         let free = crate::memory::global_memory_manager()
             .map(|m: &crate::memory::MemoryManager| m.free_frames())
@@ -205,13 +210,13 @@ impl CheckpointManager {
         let total = crate::memory::global_memory_manager()
             .map(|m: &crate::memory::MemoryManager| m.total_frames())
             .unwrap_or(1);
-        
+
         let mut state = Vec::new();
         state.extend_from_slice(&free.to_le_bytes());
         state.extend_from_slice(&total.to_le_bytes());
         state
     }
-    
+
     fn capture_fault_state(&self) -> Vec<u8> {
         let stats = crate::fault::get_stats();
         let mut state = Vec::new();
@@ -220,17 +225,17 @@ impl CheckpointManager {
         state.extend_from_slice(&stats.recovery_level.to_le_bytes());
         state
     }
-    
+
     /// En son oluşturulan kontrol noktasını getirir
     pub fn latest(&self) -> Option<Checkpoint> {
         self.checkpoints.lock().last().cloned()
     }
-    
+
     /// Belirtilen ID ile kontrol noktasını getirir
     pub fn get(&self, id: u64) -> Option<Checkpoint> {
         self.checkpoints.lock().iter().find(|c| c.id == id).cloned()
     }
-    
+
     /// Kontrol noktasına geri döner (sınırlı — çekirdek durumunu tam olarak geri yükleyemez)
     pub fn restore(&self, id: u64) -> bool {
         if let Some(checkpoint) = self.get(id) {
@@ -238,38 +243,38 @@ impl CheckpointManager {
                 crate::serial_println!("[CHECKPOINT] Checkpoint {} corrupted", id);
                 return false;
             }
-            
+
             crate::serial_println!("[CHECKPOINT] Restoring to checkpoint {}", id);
-            
+
             // Sınırlı geri yükleme — çoğunlukla bilgilendirici amaçlı
             // Tam geri yükleme çok daha karmaşık durum yönetimi gerektirir
-            
+
             true
         } else {
             false
         }
     }
-    
+
     /// Tüm kontrol noktalarını listeler
     pub fn list(&self) -> Vec<Checkpoint> {
         self.checkpoints.lock().clone()
     }
-    
+
     /// Tüm kontrol noktalarını siler
     pub fn clear(&self) {
         self.checkpoints.lock().clear();
     }
-    
+
     /// Periyodik kontrol noktası kontrolü — otomatik zamanlama için çağrılır
     pub fn periodic_check(&self) {
         if !self.auto_checkpoint.load(Ordering::SeqCst) {
             return;
         }
-        
+
         let current = crate::task::scheduler::get_ticks();
         let last = self.last_checkpoint.load(Ordering::SeqCst);
         let interval = self.checkpoint_interval.load(Ordering::SeqCst);
-        
+
         if current.saturating_sub(last) >= interval {
             self.create("auto");
         }
@@ -317,6 +322,10 @@ pub fn periodic_check() {
 }
 
 pub fn set_auto_checkpoint(enabled: bool, interval_ticks: usize) {
-    CHECKPOINT_MANAGER.auto_checkpoint.store(enabled, Ordering::SeqCst);
-    CHECKPOINT_MANAGER.checkpoint_interval.store(interval_ticks, Ordering::SeqCst);
+    CHECKPOINT_MANAGER
+        .auto_checkpoint
+        .store(enabled, Ordering::SeqCst);
+    CHECKPOINT_MANAGER
+        .checkpoint_interval
+        .store(interval_ticks, Ordering::SeqCst);
 }

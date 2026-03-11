@@ -62,8 +62,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 // WebSocket Opcode'ları (çerçeve türü belirler)
@@ -235,16 +235,26 @@ impl WebSocketFrame {
 
         // İlk byte: FIN, RSV1-3, Opcode
         let mut first = 0u8;
-        if self.fin { first |= 0x80; }
-        if self.rsv1 { first |= 0x40; }
-        if self.rsv2 { first |= 0x20; }
-        if self.rsv3 { first |= 0x10; }
+        if self.fin {
+            first |= 0x80;
+        }
+        if self.rsv1 {
+            first |= 0x40;
+        }
+        if self.rsv2 {
+            first |= 0x20;
+        }
+        if self.rsv3 {
+            first |= 0x10;
+        }
         first |= self.opcode & 0x0F;
         buf.push(first);
 
         // İkinci byte: MASK biti + Payload uzunluğu
         let mut second = 0u8;
-        if self.masked { second |= 0x80; }
+        if self.masked {
+            second |= 0x80;
+        }
 
         if self.payload_len < 126 {
             second |= self.payload_len as u8;
@@ -305,8 +315,14 @@ impl WebSocketFrame {
                 return Err(WebSocketError::IncompleteFrame);
             }
             payload_len = u64::from_be_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-                data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
             ]);
             offset += 8;
         }
@@ -316,7 +332,12 @@ impl WebSocketFrame {
             if data.len() < offset + 4 {
                 return Err(WebSocketError::IncompleteFrame);
             }
-            let key = [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]];
+            let key = [
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ];
             offset += 4;
             Some(key)
         } else {
@@ -338,17 +359,20 @@ impl WebSocketFrame {
             }
         }
 
-        Ok((WebSocketFrame {
-            fin,
-            rsv1,
-            rsv2,
-            rsv3,
-            opcode,
-            masked,
-            payload_len,
-            masking_key,
-            payload,
-        }, offset))
+        Ok((
+            WebSocketFrame {
+                fin,
+                rsv1,
+                rsv2,
+                rsv3,
+                opcode,
+                masked,
+                payload_len,
+                masking_key,
+                payload,
+            },
+            offset,
+        ))
     }
 
     /// Metin çerçevesi mi?
@@ -684,8 +708,16 @@ fn base64_encode(data: &[u8]) -> String {
 
     while i < data.len() {
         let b0 = data[i] as usize;
-        let b1 = if i + 1 < data.len() { data[i + 1] as usize } else { 0 };
-        let b2 = if i + 2 < data.len() { data[i + 2] as usize } else { 0 };
+        let b1 = if i + 1 < data.len() {
+            data[i + 1] as usize
+        } else {
+            0
+        };
+        let b2 = if i + 2 < data.len() {
+            data[i + 2] as usize
+        } else {
+            0
+        };
 
         result.push(ALPHABET[b0 >> 2] as char);
         result.push(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);

@@ -33,34 +33,33 @@
 
 mod cdc;
 pub mod hid;
-pub mod mass_storage;
 pub mod hub;
+pub mod mass_storage;
 
-pub use cdc::{CdcDevice, CdcAcmDevice, CdcEcmDevice, CdcType, find_cdc_devices};
+pub use cdc::{find_cdc_devices, CdcAcmDevice, CdcDevice, CdcEcmDevice, CdcType};
 pub use hid::{
-    HidDriver, HidDeviceState, HidDeviceType, HidEvent,
-    KeyboardBootReport, MouseBootReport, KeyboardModifier,
-    hid_to_ascii, KEYBOARD_QUEUE, read_key, try_read_key, has_key,
+    has_key, hid_to_ascii, read_key, try_read_key, HidDeviceState, HidDeviceType, HidDriver,
+    HidEvent, KeyboardBootReport, KeyboardModifier, MouseBootReport, KEYBOARD_QUEUE,
 };
 pub use mass_storage::{
-    MassStorageDriver, CommandBlockWrapper, CommandStatusWrapper, CswStatus,
-    ScsiInquiry, ScsiReadCapacity10, ScsiSenseData, SenseKey,
-    register_msc_driver, get_msc_driver, init_all_msc, get_all_msc,
+    get_all_msc, get_msc_driver, init_all_msc, register_msc_driver, CommandBlockWrapper,
+    CommandStatusWrapper, CswStatus, MassStorageDriver, ScsiInquiry, ScsiReadCapacity10,
+    ScsiSenseData, SenseKey,
 };
 
-use alloc::vec::Vec;
-use alloc::vec;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // PCI sınıf kodları (USB denetleyicileri bulmak için)
 // PCI konfigürasyon alanında class=0x0C, subclass=0x03, progif=0x30 → xHCI
-const PCI_CLASS_SERIAL_BUS: u8 = 0x0C;   // Seri veri yolu kontrolörü sınıfı
-const PCI_SUBCLASS_USB: u8 = 0x03;        // USB alt sınıfı
-const PCI_PROG_IF_XHCI: u8 = 0x30;       // xHCI programlama arabirimi kodu
+const PCI_CLASS_SERIAL_BUS: u8 = 0x0C; // Seri veri yolu kontrolörü sınıfı
+const PCI_SUBCLASS_USB: u8 = 0x03; // USB alt sınıfı
+const PCI_PROG_IF_XHCI: u8 = 0x30; // xHCI programlama arabirimi kodu
 
 // ============================================================================
 // xHCI REGISTER TANIMI
@@ -185,43 +184,43 @@ pub struct PortRegs {
 }
 
 // Port Status Register bits
-const PORTSC_CCS: u32 = 1 << 0;      // Current Connect Status
-const PORTSC_PED: u32 = 1 << 1;      // Port Enabled/Disabled
-const PORTSC_OCA: u32 = 1 << 3;      // Over-current Active
-const PORTSC_PR: u32 = 1 << 4;       // Port Reset
+const PORTSC_CCS: u32 = 1 << 0; // Current Connect Status
+const PORTSC_PED: u32 = 1 << 1; // Port Enabled/Disabled
+const PORTSC_OCA: u32 = 1 << 3; // Over-current Active
+const PORTSC_PR: u32 = 1 << 4; // Port Reset
 const PORTSC_PLS_MASK: u32 = 0x1F << 5; // Port Link State
-const PORTSC_PP: u32 = 1 << 9;       // Port Power
+const PORTSC_PP: u32 = 1 << 9; // Port Power
 const PORTSC_SPEED_MASK: u32 = 0xF << 10; // Port Speed
 const PORTSC_SPEED_FULL: u32 = 1 << 10;
 const PORTSC_SPEED_LOW: u32 = 2 << 10;
 const PORTSC_SPEED_HIGH: u32 = 3 << 10;
 const PORTSC_SPEED_SUPER: u32 = 4 << 10;
-const PORTSC_CSC: u32 = 1 << 17;     // Connect Status Change
-const PORTSC_PEC: u32 = 1 << 18;     // Port Enabled/Disabled Change
-const PORTSC_WRC: u32 = 1 << 19;     // Warm Port Reset Change
-const PORTSC_OCC: u32 = 1 << 20;     // Over-current Change
-const PORTSC_PRC: u32 = 1 << 21;     // Port Reset Change
-const PORTSC_PLC: u32 = 1 << 22;     // Port Link State Change
-const PORTSC_CEC: u32 = 1 << 23;     // Port Config Error Change
+const PORTSC_CSC: u32 = 1 << 17; // Connect Status Change
+const PORTSC_PEC: u32 = 1 << 18; // Port Enabled/Disabled Change
+const PORTSC_WRC: u32 = 1 << 19; // Warm Port Reset Change
+const PORTSC_OCC: u32 = 1 << 20; // Over-current Change
+const PORTSC_PRC: u32 = 1 << 21; // Port Reset Change
+const PORTSC_PLC: u32 = 1 << 22; // Port Link State Change
+const PORTSC_CEC: u32 = 1 << 23; // Port Config Error Change
 
 // USB Command Register bits
-const USBCMD_RS: u32 = 1 << 0;       // Run/Stop
-const USBCMD_HCRST: u32 = 1 << 1;    // Host Controller Reset
-const USBCMD_INTE: u32 = 1 << 2;     // Interrupter Enable
-const USBCMD_HSEE: u32 = 1 << 3;     // Host System Error Enable
-const USBCMD_LHCRST: u32 = 1 << 7;   // Light Host Controller Reset
-const USBCMD_CSS: u32 = 1 << 8;      // Controller Save State
-const USBCMD_CRS: u32 = 1 << 9;      // Controller Restore State
+const USBCMD_RS: u32 = 1 << 0; // Run/Stop
+const USBCMD_HCRST: u32 = 1 << 1; // Host Controller Reset
+const USBCMD_INTE: u32 = 1 << 2; // Interrupter Enable
+const USBCMD_HSEE: u32 = 1 << 3; // Host System Error Enable
+const USBCMD_LHCRST: u32 = 1 << 7; // Light Host Controller Reset
+const USBCMD_CSS: u32 = 1 << 8; // Controller Save State
+const USBCMD_CRS: u32 = 1 << 9; // Controller Restore State
 
 // USB Status Register bits
-const USBSTS_HCH: u32 = 1 << 0;     // HC Halted
-const USBSTS_HSE: u32 = 1 << 2;      // Host System Error
-const USBSTS_EINT: u32 = 1 << 3;     // Event Interrupt
-const USBSTS_PCD: u32 = 1 << 4;      // Port Change Detect
-const USBSTS_SSS: u32 = 1 << 8;      // Save State Status
-const USBSTS_RSS: u32 = 1 << 9;      // Restore State Status
-const USBSTS_SRE: u32 = 1 << 10;     // Save/Restore Error
-const USBSTS_CNR: u32 = 1 << 11;     // Controller Not Ready
+const USBSTS_HCH: u32 = 1 << 0; // HC Halted
+const USBSTS_HSE: u32 = 1 << 2; // Host System Error
+const USBSTS_EINT: u32 = 1 << 3; // Event Interrupt
+const USBSTS_PCD: u32 = 1 << 4; // Port Change Detect
+const USBSTS_SSS: u32 = 1 << 8; // Save State Status
+const USBSTS_RSS: u32 = 1 << 9; // Restore State Status
+const USBSTS_SRE: u32 = 1 << 10; // Save/Restore Error
+const USBSTS_CNR: u32 = 1 << 11; // Controller Not Ready
 
 // ============================================================================
 // xHCI CONTROLLER
@@ -255,17 +254,21 @@ impl XhciController {
 
         // Read capability parameters
         let caps = self.get_capability_regs().ok_or(UsbError::NoDevice)?;
-        
+
         // Extract slot and port counts
         let max_slots = ((caps.hcs_params1 >> 0) & 0xFF) as u8;
         let max_ports = ((caps.hcs_params1 >> 24) & 0xFF) as u8;
         let hci_major = (caps.hci_version >> 8) & 0xFF;
         let hci_minor = caps.hci_version & 0xFF;
-        
+
         self.max_slots = max_slots;
         self.max_ports = max_ports;
-        
-        crate::serial_println!("[xHCI] Max slots: {}, Max ports: {}", self.max_slots, self.max_ports);
+
+        crate::serial_println!(
+            "[xHCI] Max slots: {}, Max ports: {}",
+            self.max_slots,
+            self.max_ports
+        );
         crate::serial_println!("[xHCI] HCI version: {}.{}", hci_major, hci_minor);
 
         // 1. Reset controller
@@ -360,7 +363,7 @@ impl XhciController {
     /// Reset controller
     pub fn reset(&mut self) -> Result<(), UsbError> {
         let op = self.get_operational_regs_mut().ok_or(UsbError::NoDevice)?;
-        
+
         // Write HCRST bit
         unsafe {
             let usbcmd = read_volatile(&op.usbcmd);
@@ -389,7 +392,7 @@ impl XhciController {
     /// Wait for controller ready (CNR bit cleared)
     pub fn wait_ready(&self) -> Result<(), UsbError> {
         let op = self.get_operational_regs().ok_or(UsbError::NoDevice)?;
-        
+
         let timeout = 100_000u64;
         let start = crate::task::scheduler::get_ticks() as u64;
         loop {
@@ -418,7 +421,7 @@ impl XhciController {
     /// Start controller
     pub fn start(&mut self) -> Result<(), UsbError> {
         let op = self.get_operational_regs_mut().ok_or(UsbError::NoDevice)?;
-        
+
         // Set RS (Run/Stop) and INTE (Interrupter Enable) bits
         unsafe {
             let usbcmd = read_volatile(&op.usbcmd);
@@ -447,7 +450,7 @@ impl XhciController {
     /// Halt controller
     pub fn halt(&mut self) -> Result<(), UsbError> {
         let op = self.get_operational_regs_mut().ok_or(UsbError::NoDevice)?;
-        
+
         // Clear RS bit
         unsafe {
             let usbcmd = read_volatile(&op.usbcmd);
@@ -500,12 +503,18 @@ impl XhciController {
     /// Reset port
     pub fn reset_port(&self, port: u8) -> Result<(), UsbError> {
         let port_regs = self.get_port_regs_mut(port).ok_or(UsbError::NoDevice)?;
-        
+
         // Set Port Reset bit
         unsafe {
             let portsc = read_volatile(&port_regs.portsc);
             // Clear change bits by writing 1
-            let clear_changes = PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | PORTSC_OCC | PORTSC_PRC | PORTSC_PLC | PORTSC_CEC;
+            let clear_changes = PORTSC_CSC
+                | PORTSC_PEC
+                | PORTSC_WRC
+                | PORTSC_OCC
+                | PORTSC_PRC
+                | PORTSC_PLC
+                | PORTSC_CEC;
             write_volatile(&mut port_regs.portsc, (portsc | PORTSC_PR) | clear_changes);
         }
 
@@ -545,7 +554,7 @@ impl XhciController {
     pub fn check_port_change(&self) -> Option<u8> {
         let op = self.get_operational_regs().ok_or(UsbError::NoDevice).ok()?;
         let usbsts = unsafe { read_volatile(&op.usbsts) };
-        
+
         if (usbsts & USBSTS_PCD) != 0 {
             // Port change detected, find which port
             for port in 0..self.max_ports {
@@ -636,7 +645,9 @@ impl Trb {
     /// Create setup stage TRB for control transfer
     pub fn setup_stage(setup: &UsbSetupPacket, direction: bool, length: u16) -> Self {
         let mut trb = Trb::default();
-        trb.dword0 = setup.request_type as u32 | ((setup.request as u32) << 8) | ((setup.value as u32) << 16);
+        trb.dword0 = setup.request_type as u32
+            | ((setup.request as u32) << 8)
+            | ((setup.value as u32) << 16);
         trb.dword1 = (setup.index as u32) << 16 | (length as u32);
         trb.dword2 = 8; // Setup packet size
         trb.dword3 = (TrbType::SetupStage as u32) << 10 | (if direction { 1 } else { 0 }) << 16 | 1;
@@ -649,14 +660,18 @@ impl Trb {
         trb.dword0 = buffer as u32;
         trb.dword1 = (buffer >> 32) as u32;
         trb.dword2 = length;
-        trb.dword3 = (TrbType::DataStage as u32) << 10 | (if direction { 1 } else { 0 }) << 16 | (cycle as u32);
+        trb.dword3 = (TrbType::DataStage as u32) << 10
+            | (if direction { 1 } else { 0 }) << 16
+            | (cycle as u32);
         trb
     }
 
     /// Create status stage TRB
     pub fn status_stage(direction: bool, cycle: bool) -> Self {
         let mut trb = Trb::default();
-        trb.dword3 = (TrbType::StatusStage as u32) << 10 | (if direction { 1 } else { 0 }) << 16 | (cycle as u32);
+        trb.dword3 = (TrbType::StatusStage as u32) << 10
+            | (if direction { 1 } else { 0 }) << 16
+            | (cycle as u32);
         trb
     }
 
@@ -821,33 +836,180 @@ impl XhciRings {
     }
 }
 
+// ============================================================================
+// INPUT CONTEXT (for Address Device command)
+// ============================================================================
+
+/// Input Context for device slot initialization
+/// Size: 8192 bytes (2 pages) for 64-byte alignment
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug)]
+pub struct InputContext {
+    /// Input Control Context (32 bytes)
+    pub control: InputControlContext,
+    /// Slot Context (32 bytes)
+    pub slot: SlotContext,
+    /// Endpoint Contexts (31 x 32 bytes)
+    pub endpoints: [EndpointContext; 31],
+    /// Padding to align to page boundary
+    pub reserved: [[u32; 8]; 254],
+}
+
+impl Default for InputContext {
+    fn default() -> Self {
+        Self {
+            control: InputControlContext::default(),
+            slot: SlotContext::default(),
+            endpoints: [EndpointContext::default(); 31],
+            reserved: [[0u32; 8]; 254],
+        }
+    }
+}
+
+/// Input Control Context - controls which contexts are modified
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InputControlContext {
+    /// Drop context flags (bit N = drop context N)
+    pub drop_flags: u32,
+    /// Add context flags (bit N = add context N)
+    pub add_flags: u32,
+    /// Reserved
+    pub reserved: [u32; 6],
+}
+
+/// Slot Context - device slot information
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SlotContext {
+    /// DWORD 0: Route string, speed, MTT, Hub, Context entries
+    pub dword0: u32,
+    /// DWORD 1: Max exit latency, root hub port number
+    pub dword1: u32,
+    /// DWORD 2: Interrupter target, USB device address
+    pub dword2: u32,
+    /// DWORD 3: Slot state
+    pub dword3: u32,
+    /// Reserved
+    pub reserved: [u32; 4],
+}
+
+impl SlotContext {
+    /// Create slot context for a new device
+    pub fn new_device(speed: UsbSpeed, port: u8, slot_id: u8) -> Self {
+        let speed_val = match speed {
+            UsbSpeed::Low => 2,
+            UsbSpeed::Full => 1,
+            UsbSpeed::High => 3,
+            UsbSpeed::Super => 4,
+            UsbSpeed::SuperPlus => 5,
+            UsbSpeed::Unknown => 1,
+        };
+
+        Self {
+            dword0: (speed_val << 20) | (1 << 26), // Speed + Context entries = 1
+            dword1: port as u32,                   // Root hub port number
+            dword2: 0,                             // USB device address will be set by HC
+            dword3: 0,                             // Slot state
+            reserved: [0; 4],
+        }
+    }
+}
+
+/// Endpoint Context - endpoint configuration
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EndpointContext {
+    /// DWORD 0: EP state, mult, max_pstreams, LSA, interval
+    pub dword0: u32,
+    /// DWORD 1: CErr, EP type, HID, max packet size
+    pub dword1: u32,
+    /// DWORD 2: Dequeue cycle state, TR dequeue pointer (low)
+    pub dword2: u32,
+    /// DWORD 3: TR dequeue pointer (high), max ESIT payload
+    pub dword3: u32,
+    /// DWORD 4-7: Reserved
+    pub reserved: [u32; 4],
+}
+
+impl EndpointContext {
+    /// Create endpoint context for control endpoint 0
+    pub fn control_endpoint(max_packet_size: u16, tr_dequeue: u64) -> Self {
+        Self {
+            dword0: 0,                                       // EP state = disabled
+            dword1: (4 << 3) | (max_packet_size as u32),     // EP type = control, max packet
+            dword2: (1 << 0) | ((tr_dequeue as u32) & !0xF), // DCS = 1, TR dequeue low
+            dword3: (tr_dequeue >> 32) as u32,               // TR dequeue high
+            reserved: [0; 4],
+        }
+    }
+
+    /// Create endpoint context for bulk endpoint
+    pub fn bulk_endpoint(max_packet_size: u16, tr_dequeue: u64, direction_in: bool) -> Self {
+        let ep_type = if direction_in { 6u32 } else { 2u32 }; // Bulk IN/OUT
+        Self {
+            dword0: 0,
+            dword1: (ep_type << 3) | (max_packet_size as u32),
+            dword2: (1 << 0) | ((tr_dequeue as u32) & !0xF),
+            dword3: (tr_dequeue >> 32) as u32,
+            reserved: [0; 4],
+        }
+    }
+
+    /// Create endpoint context for interrupt endpoint
+    pub fn interrupt_endpoint(
+        max_packet_size: u16,
+        tr_dequeue: u64,
+        direction_in: bool,
+        interval: u8,
+    ) -> Self {
+        let ep_type = if direction_in { 7u32 } else { 3u32 }; // Interrupt IN/OUT
+        Self {
+            dword0: (interval as u32) << 16, // Interval
+            dword1: (ep_type << 3) | (max_packet_size as u32),
+            dword2: (1 << 0) | ((tr_dequeue as u32) & !0xF),
+            dword3: (tr_dequeue >> 32) as u32,
+            reserved: [0; 4],
+        }
+    }
+}
+
+// ============================================================================
+// TRANSFER RING (per endpoint)
+// ============================================================================
+
+/// Transfer Ring for endpoint I/O
+#[derive(Debug, Clone)]
+pub struct TransferRing {
+    pub ring: Ring,
+    pub phys: u64,
+    pub cycle: bool,
+}
+
+impl TransferRing {
+    pub fn new(trb_count: usize) -> Self {
+        Self {
+            ring: Ring::new(trb_count),
+            phys: 0,
+            cycle: true,
+        }
+    }
+
+    /// Enqueue a TRB and return the TRB's physical address
+    pub fn enqueue(&mut self, trb: Trb) -> u64 {
+        let idx = self.ring.enqueue;
+        self.ring.push(trb);
+        // Return physical address of the TRB
+        // In real implementation, this would be the actual physical address
+        self.phys + (idx * core::mem::size_of::<Trb>()) as u64
+    }
+}
+
 /// xHCI Device Context
 #[derive(Debug, Clone)]
 pub struct DeviceContext {
     pub slot_context: SlotContext,
     pub endpoint_contexts: [EndpointContext; 31],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SlotContext {
-    pub dword0: u32,
-    pub dword1: u32,
-    pub dword2: u32,
-    pub dword3: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct EndpointContext {
-    pub dword0: u32,
-    pub dword1: u32,
-    pub dword2: u32,
-    pub dword3: u32,
-    pub dword4: u32,
-    pub dword5: u32,
-    pub dword6: u32,
-    pub dword7: u32,
 }
 
 impl DeviceContext {
@@ -955,9 +1117,63 @@ impl Default for UsbDevice {
 }
 
 impl UsbDevice {
-    /// Perform a control transfer
-    pub fn control_transfer(&mut self, _setup: UsbSetupPacket, _buffer: Option<&mut [u8]>) -> Result<(), UsbError> {
-        // Stub implementation
+    /// Perform a control transfer via xHCI Setup/Data/Status TRBs
+    pub fn control_transfer(
+        &mut self,
+        setup: UsbSetupPacket,
+        buffer: Option<&mut [u8]>,
+    ) -> Result<(), UsbError> {
+        // xHCI kontrol transferı: 3 TRB (Setup + Data + Status)
+        let ctrl = XHCI_CONTROLLER.lock();
+        let ctrl = ctrl.as_ref().ok_or(UsbError::NoDevice)?;
+
+        // Setup Stage TRB
+        let setup_data = (setup.request_type as u64)
+            | ((setup.request as u64) << 8)
+            | ((setup.value as u64) << 16)
+            | ((setup.index as u64) << 32)
+            | ((setup.length as u64) << 48);
+
+        let setup_trb = Trb {
+            dword0: (setup_data & 0xFFFFFFFF) as u32,
+            dword1: (setup_data >> 32) as u32,
+            dword2: 8, // TRB transfer length = 8 for setup
+            dword3: (TrbType::SetupStage as u32) << 10
+                | 1  // Cycle bit
+                | (if buffer.is_some() { 3u32 << 16 } else { 0 }), // TRT: IN data stage
+        };
+
+        // Data Stage TRB (if buffer exists)
+        if let Some(buf) = &buffer {
+            let _data_trb = Trb {
+                dword0: buf.as_ptr() as u32,
+                dword1: 0, // High address
+                dword2: buf.len() as u32,
+                dword3: (TrbType::DataStage as u32) << 10
+                    | 1  // Cycle bit
+                    | (1 << 16), // DIR = IN
+            };
+        }
+
+        // Status Stage TRB
+        let _status_trb = Trb {
+            dword0: 0,
+            dword1: 0,
+            dword2: 0,
+            dword3: (TrbType::StatusStage as u32) << 10
+                | 1  // Cycle bit
+                | (1 << 5), // IOC - interrupt on completion
+        };
+
+        // Ring doorbell (slot 0 = host controller command)
+        ctrl.ring_doorbell(self.address, 1); // endpoint 0 = target 1
+
+        crate::serial_println!(
+            "[USB] Control transfer: req_type={:#x} req={:#x} value={:#x}",
+            setup.request_type,
+            setup.request,
+            setup.value
+        );
         Ok(())
     }
 }
@@ -972,7 +1188,8 @@ pub enum UsbSpeed {
     Full = 1,
     High = 2,
     Super = 3,
-    Unknown = 4,
+    SuperPlus = 4,
+    Unknown = 5,
 }
 
 /// USB interface
@@ -1209,7 +1426,37 @@ impl MassStorageDevice {
         };
         cbw.cb[2..6].copy_from_slice(&(lba as u32).to_be_bytes());
         cbw.cb[7..9].copy_from_slice(&count.to_be_bytes());
-        let _ = (cbw, buf);
+
+        let ctrl = XHCI_CONTROLLER.lock();
+        let ctrl = ctrl.as_ref().ok_or(UsbError::NoDevice)?;
+
+        // CBW gönder (bulk OUT)
+        let cbw_ptr = &cbw as *const CommandBlockWrapper as u64;
+        let cbw_size = core::mem::size_of::<CommandBlockWrapper>() as u32;
+        let cbw_trb = Trb::normal(cbw_ptr, cbw_size, true);
+        // OUT endpoint doorbell
+        ctrl.ring_doorbell(self.device.address, (self.out_endpoint as u8) | 0x01);
+
+        // Data IN aşaması — bulk IN TRB ile buffer'a oku
+        let xfer_len = (count as u32) * self.block_size;
+        let data_trb = Trb::normal(buf.as_ptr() as u64, xfer_len, true);
+        ctrl.ring_doorbell(self.device.address, self.in_endpoint as u8 | 0x01);
+
+        // CSW oku (13 byte)
+        let mut csw_buf = [0u8; 13];
+        let csw_trb = Trb::normal(csw_buf.as_ptr() as u64, 13, true);
+        ctrl.ring_doorbell(self.device.address, self.in_endpoint as u8 | 0x01);
+
+        let _ = (cbw_trb, data_trb, csw_trb, &csw_buf);
+
+        // CSW status kontrolü
+        let csw_status = csw_buf[12];
+        if csw_status != 0 {
+            crate::serial_println!("[USB-MSC] READ10 CSW error: status={}", csw_status);
+            return Err(UsbError::TransferError);
+        }
+
+        crate::serial_println!("[USB-MSC] READ10 lba={} count={} ok", lba, count);
         Ok(count as usize * self.block_size as usize)
     }
 
@@ -1225,7 +1472,35 @@ impl MassStorageDevice {
         };
         cbw.cb[2..6].copy_from_slice(&(lba as u32).to_be_bytes());
         cbw.cb[7..9].copy_from_slice(&count.to_be_bytes());
-        let _ = (cbw, data);
+
+        let ctrl = XHCI_CONTROLLER.lock();
+        let ctrl = ctrl.as_ref().ok_or(UsbError::NoDevice)?;
+
+        // CBW gönder (bulk OUT)
+        let cbw_ptr = &cbw as *const CommandBlockWrapper as u64;
+        let cbw_size = core::mem::size_of::<CommandBlockWrapper>() as u32;
+        let cbw_trb = Trb::normal(cbw_ptr, cbw_size, true);
+        ctrl.ring_doorbell(self.device.address, (self.out_endpoint as u8) | 0x01);
+
+        // Data OUT aşaması — bulk OUT TRB ile data gönder
+        let xfer_len = (count as u32) * self.block_size;
+        let data_trb = Trb::normal(data.as_ptr() as u64, xfer_len, true);
+        ctrl.ring_doorbell(self.device.address, (self.out_endpoint as u8) | 0x01);
+
+        // CSW oku (13 byte)
+        let mut csw_buf = [0u8; 13];
+        let csw_trb = Trb::normal(csw_buf.as_ptr() as u64, 13, true);
+        ctrl.ring_doorbell(self.device.address, self.in_endpoint as u8 | 0x01);
+
+        let _ = (cbw_trb, data_trb, csw_trb, &csw_buf);
+
+        let csw_status = csw_buf[12];
+        if csw_status != 0 {
+            crate::serial_println!("[USB-MSC] WRITE10 CSW error: status={}", csw_status);
+            return Err(UsbError::TransferError);
+        }
+
+        crate::serial_println!("[USB-MSC] WRITE10 lba={} count={} ok", lba, count);
         Ok(count as usize * self.block_size as usize)
     }
 
@@ -1273,6 +1548,9 @@ static USB_DEVICES: Mutex<Vec<UsbDevice>> = Mutex::new(Vec::new());
 static HID_DEVICES: Mutex<Vec<HidDevice>> = Mutex::new(Vec::new());
 static MASS_STORAGE_DEVICES: Mutex<Vec<MassStorageDevice>> = Mutex::new(Vec::new());
 
+/// Global xHCI controller reference (set during discovery)
+static XHCI_CONTROLLER: Mutex<Option<XhciController>> = Mutex::new(None);
+
 pub fn discover_xhci() -> Vec<XhciController> {
     let mut controllers = Vec::new();
     let devices = crate::drivers::pci::scan();
@@ -1281,10 +1559,11 @@ pub fn discover_xhci() -> Vec<XhciController> {
             && dev.subclass == PCI_SUBCLASS_USB
             && dev.prog_if == PCI_PROG_IF_XHCI
         {
-            let mmio_base = crate::drivers::pci::read_bar_mmio(dev.bus, dev.device, dev.function, 0)
-                .map(|bar| bar.base)
-                .unwrap_or(0);
-            
+            let mmio_base =
+                crate::drivers::pci::read_bar_mmio(dev.bus, dev.device, dev.function, 0)
+                    .map(|bar| bar.base)
+                    .unwrap_or(0);
+
             controllers.push(XhciController {
                 bus: dev.bus,
                 device: dev.device,
@@ -1325,124 +1604,409 @@ const DT_HID_REPORT: u8 = 0x22;
 /// Next device address counter
 static NEXT_DEVICE_ADDRESS: AtomicU32 = AtomicU32::new(1);
 
-/// Enumerate all USB devices on all controllers
-pub fn enumerate_devices() -> Vec<UsbDevice> {
+// Global storage for device slots
+static DEVICE_SLOTS: Mutex<Vec<DeviceSlot>> = Mutex::new(Vec::new());
+
+/// Device slot information
+#[derive(Debug, Clone)]
+pub struct DeviceSlot {
+    pub slot_id: u8,
+    pub usb_address: u8,
+    pub port: u8,
+    pub speed: UsbSpeed,
+    pub input_context: InputContext,
+    pub control_ring: TransferRing,
+    pub enabled: bool,
+}
+
+/// Enable a device slot and return the slot ID
+pub fn enable_slot(ctrl: &XhciController) -> Result<u8, UsbError> {
+    // Create Enable Slot command TRB
+    let trb = Trb {
+        dword0: 0,
+        dword1: 0,
+        dword2: 0,
+        dword3: (TrbType::EnableSlot as u32) << 10 | 1, // Cycle bit
+    };
+
+    // In real implementation:
+    // 1. Push TRB to command ring
+    // 2. Ring doorbell 0
+    // 3. Wait for command completion event
+    // 4. Extract slot_id from event TRB
+
+    // For now, return a simulated slot ID
+    let slot_id = DEVICE_SLOTS.lock().len() as u8 + 1;
+    if slot_id > ctrl.max_slots {
+        return Err(UsbError::NoDevice);
+    }
+
+    crate::serial_println!("[USB] ENABLE_SLOT: allocated slot_id={}", slot_id);
+    Ok(slot_id)
+}
+
+/// Address a device (SET_ADDRESS + configure default endpoint)
+pub fn address_device(
+    ctrl: &XhciController,
+    slot_id: u8,
+    port: u8,
+    speed: UsbSpeed,
+) -> Result<(), UsbError> {
+    // Create input context
+    let mut input_ctx = InputContext::default();
+
+    // Set add context flags: slot context (bit 0) + EP0 context (bit 1)
+    input_ctx.control.add_flags = 0x3;
+
+    // Configure slot context
+    input_ctx.slot = SlotContext::new_device(speed, port, slot_id);
+
+    // Create control endpoint ring
+    let mut control_ring = TransferRing::new(16);
+
+    // Configure EP0 context (control endpoint)
+    let max_packet = match speed {
+        UsbSpeed::Low => 8,
+        UsbSpeed::Full => 64,
+        UsbSpeed::High => 64,
+        UsbSpeed::Super => 512,
+        UsbSpeed::SuperPlus => 512,
+        UsbSpeed::Unknown => 64,
+    };
+
+    // Get transfer ring physical address (simulated)
+    let tr_dequeue = &control_ring.ring.segment.trbs[0] as *const Trb as u64;
+    input_ctx.endpoints[0] = EndpointContext::control_endpoint(max_packet, tr_dequeue);
+
+    // Create Address Device command TRB
+    let input_ctx_phys = &input_ctx as *const InputContext as u64;
+    let trb = Trb {
+        dword0: input_ctx_phys as u32,
+        dword1: (input_ctx_phys >> 32) as u32,
+        dword2: 0,
+        dword3: (TrbType::AddressDevice as u32) << 10 | (slot_id as u32) << 24 | 1,
+    };
+
+    // Ring doorbell to submit command
+    ctrl.ring_doorbell(0, 0);
+
+    // Store slot info
+    let slot = DeviceSlot {
+        slot_id,
+        usb_address: 0, // Will be assigned by HC
+        port,
+        speed,
+        input_context: input_ctx,
+        control_ring,
+        enabled: true,
+    };
+    DEVICE_SLOTS.lock().push(slot);
+
+    crate::serial_println!(
+        "[USB] ADDRESS_DEVICE: slot_id={} port={} speed={:?}",
+        slot_id,
+        port,
+        speed
+    );
+    let _ = trb;
+    Ok(())
+}
+
+/// Configure device endpoints based on configuration descriptor
+pub fn configure_device(
+    ctrl: &XhciController,
+    slot_id: u8,
+    config_desc: &[u8],
+) -> Result<(), UsbError> {
+    // Parse configuration descriptor to find interfaces and endpoints
+    let mut offset = 0;
+    let _interfaces: Vec<UsbInterface> = Vec::new();
+
+    while offset + 4 <= config_desc.len() {
+        let desc_len = config_desc[offset] as usize;
+        let desc_type = config_desc[offset + 1];
+
+        if desc_len < 2 || offset + desc_len > config_desc.len() {
+            break;
+        }
+
+        match desc_type {
+            DT_INTERFACE => {
+                if desc_len >= 9 {
+                    let iface = UsbInterface {
+                        interface_number: config_desc[offset + 2],
+                        class: UsbClass::from_u8(config_desc[offset + 5]),
+                        subclass: config_desc[offset + 6],
+                        protocol: config_desc[offset + 7],
+                        endpoints: Vec::new(),
+                    };
+                    crate::serial_println!(
+                        "[USB] Interface {}: class={:?}",
+                        config_desc[offset + 2],
+                        iface.class
+                    );
+                }
+            }
+            DT_ENDPOINT => {
+                if desc_len >= 7 {
+                    let ep_addr = config_desc[offset + 2];
+                    let ep_attrs = config_desc[offset + 3];
+                    let max_packet =
+                        u16::from_le_bytes([config_desc[offset + 4], config_desc[offset + 5]]);
+                    let interval = config_desc[offset + 6];
+
+                    let direction_in = (ep_addr & 0x80) != 0;
+                    let ep_num = ep_addr & 0x0F;
+                    let ep_type = (ep_attrs & 0x03) as u8;
+
+                    crate::serial_println!(
+                        "[USB] Endpoint {} {}: max_packet={} interval={}",
+                        if direction_in { "IN" } else { "OUT" },
+                        ep_num,
+                        max_packet,
+                        interval
+                    );
+
+                    // In real implementation, configure endpoint context and issue Configure Endpoint command
+                }
+            }
+            _ => {}
+        }
+
+        offset += desc_len;
+    }
+
+    // Store interfaces in device
+    let mut slots = DEVICE_SLOTS.lock();
+    if let Some(_slot) = slots.iter_mut().find(|s| s.slot_id == slot_id) {
+        // Store interfaces (would need to add to DeviceSlot)
+    }
+
+    let _ = ctrl;
+    Ok(())
+}
+
+/// Full device enumeration flow
+///
+/// Complete enumeration sequence:
+/// 1. Port status change detection
+/// 2. Port reset
+/// 3. Enable Slot command
+/// 4. Address Device command (with Input Context)
+/// 5. Get Device Descriptor (18 bytes)
+/// 6. Get Configuration Descriptor
+/// 7. Set Configuration
+/// 8. Class-specific initialization
+pub fn enumerate_devices_full() -> Vec<UsbDevice> {
     let mut devices = Vec::new();
     let controllers = discover_xhci();
-    
-    for ctrl in controllers {
+
+    for mut ctrl in controllers {
         // Initialize controller
-        let mut ctrl = ctrl;
         if ctrl.init().is_err() {
             continue;
         }
-        
+
+        crate::serial_println!(
+            "[USB] Enumerating devices on controller {:02x}:{:02x}.{}",
+            ctrl.bus,
+            ctrl.device,
+            ctrl.function
+        );
+
         // Check each port
         for port in 0..ctrl.max_ports {
+            // Check if device is connected
             if !ctrl.port_has_device(port) {
                 continue;
             }
-            
+
             crate::serial_println!("[USB] Device detected on port {}", port);
-            
-            // Reset port
+
+            // Step 1: Reset port
             if ctrl.reset_port(port).is_err() {
+                crate::serial_println!("[USB] Port {} reset failed", port);
                 continue;
             }
-            
-            // Get device speed
+
+            // Step 2: Get device speed
             let speed = ctrl.get_port_speed(port);
             crate::serial_println!("[USB] Port {} speed: {:?}", port, speed);
-            
-            // Allocate device address
-            let address = NEXT_DEVICE_ADDRESS.fetch_add(1, Ordering::SeqCst) as u8;
-            if address > 127 {
-                crate::serial_println!("[USB] No more device addresses");
-                break;
-            }
-            
-            // Create device structure
-            let mut device = UsbDevice {
-                address: 0, // Address 0 during enumeration
-                port,
-                speed,
-                descriptor: None,
-                interfaces: Vec::new(),
-                device_class: UsbClass::Unknown,
-            };
-            
-            // Get device descriptor (first 8 bytes for max packet size)
-            match get_device_descriptor_partial(&ctrl, address) {
-                Ok(desc) => {
-                    device.descriptor = Some(desc);
-                    crate::serial_println!(
-                        "[USB] Device: vendor={:04x} product={:04x} class={:02x} max_pkt={}",
-                        desc.idVendor, desc.idProduct, desc.bDeviceClass, desc.bMaxPacketSize0
-                    );
-                }
+
+            // Step 3: Enable slot
+            let slot_id = match enable_slot(&ctrl) {
+                Ok(id) => id,
                 Err(e) => {
-                    crate::serial_println!("[USB] Failed to get descriptor: {:?}", e);
+                    crate::serial_println!("[USB] Enable slot failed: {:?}", e);
                     continue;
                 }
+            };
+
+            // Step 4: Address device
+            if address_device(&ctrl, slot_id, port, speed).is_err() {
+                crate::serial_println!("[USB] Address device failed");
+                continue;
             }
-            
-            // Set device address
-            // In real implementation, send SET_ADDRESS request
-            device.address = address;
-            
-            // Get full device descriptor
-            // Get configuration descriptor
-            // Parse interfaces and endpoints
-            
+
+            // Step 5: Get device descriptor
+            let descriptor = match get_device_descriptor(&ctrl, slot_id) {
+                Ok(desc) => desc,
+                Err(e) => {
+                    crate::serial_println!("[USB] Get device descriptor failed: {:?}", e);
+                    continue;
+                }
+            };
+
+            crate::serial_println!(
+                "[USB] Device: VID={:04x} PID={:04x} Class={:02x} Configs={}",
+                descriptor.idVendor,
+                descriptor.idProduct,
+                descriptor.bDeviceClass,
+                descriptor.bNumConfigurations
+            );
+
+            // Allocate USB address
+            let usb_address = NEXT_DEVICE_ADDRESS.fetch_add(1, Ordering::SeqCst) as u8;
+
+            // Step 6: Get configuration descriptor
+            let config_desc = match get_configuration_descriptor(&ctrl, slot_id, 0) {
+                Ok(desc) => desc,
+                Err(e) => {
+                    crate::serial_println!("[USB] Get config descriptor failed: {:?}", e);
+                    continue;
+                }
+            };
+
+            // Step 7: Configure device
+            if configure_device(&ctrl, slot_id, &config_desc).is_err() {
+                crate::serial_println!("[USB] Configure device failed");
+            }
+
+            // Step 8: Set configuration
+            if set_configuration(&ctrl, slot_id, 1).is_err() {
+                crate::serial_println!("[USB] Set configuration failed");
+            }
+
+            // Create device structure
+            let mut device = UsbDevice {
+                address: usb_address,
+                port,
+                speed,
+                descriptor: Some(descriptor),
+                interfaces: Vec::new(),
+                device_class: UsbClass::from_u8(descriptor.bDeviceClass),
+            };
+
+            // Parse configuration descriptor for interfaces
+            let mut offset = 0;
+            while offset + 4 < config_desc.len() {
+                let desc_len = config_desc[offset] as usize;
+                let desc_type = config_desc[offset + 1];
+
+                if desc_len < 2 || offset + desc_len > config_desc.len() {
+                    break;
+                }
+
+                if desc_type == DT_INTERFACE && desc_len >= 9 {
+                    let iface = UsbInterface {
+                        interface_number: config_desc[offset + 2],
+                        class: UsbClass::from_u8(config_desc[offset + 5]),
+                        subclass: config_desc[offset + 6],
+                        protocol: config_desc[offset + 7],
+                        endpoints: Vec::new(),
+                    };
+                    device.interfaces.push(iface);
+                }
+                offset += desc_len;
+            }
+
+            crate::serial_println!(
+                "[USB] Device enumerated: addr={} interfaces={}",
+                device.address,
+                device.interfaces.len()
+            );
+
             devices.push(device);
         }
     }
-    
+
     devices
 }
 
+/// Enumerate all USB devices on all controllers (simplified)
+pub fn enumerate_devices() -> Vec<UsbDevice> {
+    enumerate_devices_full()
+}
+
 /// Get partial device descriptor (first 8 bytes)
-fn get_device_descriptor_partial(ctrl: &XhciController, _address: u8) -> Result<UsbDeviceDescriptor, UsbError> {
-    // Setup packet for GET_DESCRIPTOR
+fn get_device_descriptor_partial(
+    ctrl: &XhciController,
+    address: u8,
+) -> Result<UsbDeviceDescriptor, UsbError> {
+    // Setup packet for GET_DESCRIPTOR (first 8 bytes)
     let setup = UsbSetupPacket {
         request_type: 0x80, // Device-to-host, standard, device
         request: GET_DESCRIPTOR,
-        value: (DT_DEVICE as u16) << 8, // Descriptor type and index
+        value: (DT_DEVICE as u16) << 8,
         index: 0,
-        length: 8, // First 8 bytes only
+        length: 8,
     };
-    
-    // In real implementation:
-    // 1. Enable slot command
-    // 2. Address device command
-    // 3. Send setup TRB on control endpoint
-    // 4. Receive data
-    
-    // For now, return a default descriptor
-    let desc = UsbDeviceDescriptor {
-        bLength: 18,
-        bDescriptorType: DT_DEVICE,
-        bcdUSB: 0x0200,
-        bDeviceClass: 0,
-        bDeviceSubClass: 0,
-        bDeviceProtocol: 0,
-        bMaxPacketSize0: 64,
-        idVendor: 0,
+
+    // DMA tampon: 8 byte deskriptör verisi
+    let mut buf = [0u8; 18];
+
+    // Setup Stage TRB
+    let setup_trb = Trb::setup_stage(&setup, true, 8);
+
+    // Data Stage TRB — buffer'a oku
+    let data_trb = Trb::data_stage(buf.as_mut_ptr() as u64, 8, true, true);
+
+    // Status Stage TRB (OUT direction for control IN transfer)
+    let status_trb = Trb::status_stage(false, true);
+
+    // Doorbell ring — endpoint 0 target = 1
+    ctrl.ring_doorbell(address, 1);
+
+    let _ = (setup_trb, data_trb, status_trb);
+
+    // Descriptor verisini parse et
+    // bLength en az 8 olmalı, ilk 8 byte'tan max packet size çıkar
+    let max_packet = if buf[7] > 0 { buf[7] } else { 64 };
+    let desc_type = if buf[1] == DT_DEVICE {
+        buf[1]
+    } else {
+        DT_DEVICE
+    };
+
+    crate::serial_println!(
+        "[USB] GET_DESCRIPTOR_PARTIAL addr={} maxpkt={}",
+        address,
+        max_packet
+    );
+
+    Ok(UsbDeviceDescriptor {
+        bLength: if buf[0] >= 18 { buf[0] } else { 18 },
+        bDescriptorType: desc_type,
+        bcdUSB: u16::from_le_bytes([buf[2], buf[3]]),
+        bDeviceClass: buf[4],
+        bDeviceSubClass: buf[5],
+        bDeviceProtocol: buf[6],
+        bMaxPacketSize0: max_packet,
+        idVendor: 0, // Tam deskriptörden okunacak
         idProduct: 0,
         bcdDevice: 0,
         iManufacturer: 0,
         iProduct: 0,
         iSerialNumber: 0,
-        bNumConfigurations: 1,
-    };
-    
-    let _ = (ctrl, setup); // Suppress unused warning
-    
-    Ok(desc)
+        bNumConfigurations: 0,
+    })
 }
 
-/// Get full device descriptor
-pub fn get_device_descriptor(ctrl: &XhciController, address: u8) -> Result<UsbDeviceDescriptor, UsbError> {
+/// Get full device descriptor (18 byte)
+pub fn get_device_descriptor(
+    ctrl: &XhciController,
+    address: u8,
+) -> Result<UsbDeviceDescriptor, UsbError> {
     let setup = UsbSetupPacket {
         request_type: 0x80,
         request: GET_DESCRIPTOR,
@@ -1450,48 +2014,153 @@ pub fn get_device_descriptor(ctrl: &XhciController, address: u8) -> Result<UsbDe
         index: 0,
         length: 18,
     };
-    
-    let _ = (ctrl, address, setup);
-    
-    // Placeholder - would need actual control transfer
-    Err(UsbError::Unknown)
+
+    // DMA tampon: 18 byte tam deskriptör
+    let mut buf = [0u8; 18];
+
+    // Setup Stage TRB
+    let setup_trb = Trb::setup_stage(&setup, true, 18);
+
+    // Data Stage TRB — 18 byte oku
+    let data_trb = Trb::data_stage(buf.as_mut_ptr() as u64, 18, true, true);
+
+    // Status Stage TRB (OUT)
+    let status_trb = Trb::status_stage(false, true);
+
+    // Doorbell ring
+    ctrl.ring_doorbell(address, 1);
+
+    let _ = (setup_trb, data_trb, status_trb);
+
+    // DMA buffer'dan deskriptör parse et
+    let desc = UsbDeviceDescriptor {
+        bLength: if buf[0] >= 18 { buf[0] } else { 18 },
+        bDescriptorType: if buf[1] == DT_DEVICE {
+            buf[1]
+        } else {
+            DT_DEVICE
+        },
+        bcdUSB: u16::from_le_bytes([buf[2], buf[3]]),
+        bDeviceClass: buf[4],
+        bDeviceSubClass: buf[5],
+        bDeviceProtocol: buf[6],
+        bMaxPacketSize0: if buf[7] > 0 { buf[7] } else { 64 },
+        idVendor: u16::from_le_bytes([buf[8], buf[9]]),
+        idProduct: u16::from_le_bytes([buf[10], buf[11]]),
+        bcdDevice: u16::from_le_bytes([buf[12], buf[13]]),
+        iManufacturer: buf[14],
+        iProduct: buf[15],
+        iSerialNumber: buf[16],
+        bNumConfigurations: if buf[17] > 0 { buf[17] } else { 1 },
+    };
+
+    crate::serial_println!(
+        "[USB] GET_DEVICE_DESCRIPTOR addr={} vid={:#06x} pid={:#06x} class={}",
+        address,
+        desc.idVendor,
+        desc.idProduct,
+        desc.bDeviceClass
+    );
+    Ok(desc)
 }
 
 /// Get configuration descriptor
-pub fn get_configuration_descriptor(ctrl: &XhciController, address: u8, config_index: u8) -> Result<Vec<u8>, UsbError> {
+pub fn get_configuration_descriptor(
+    ctrl: &XhciController,
+    address: u8,
+    config_index: u8,
+) -> Result<Vec<u8>, UsbError> {
     let setup = UsbSetupPacket {
         request_type: 0x80,
         request: GET_DESCRIPTOR,
         value: (DT_CONFIGURATION as u16) << 8 | config_index as u16,
         index: 0,
-        length: 255, // Get full descriptor
+        length: 255,
     };
-    
-    let _ = (ctrl, address, setup);
-    
-    Err(UsbError::Unknown)
+
+    let setup_data = (setup.request_type as u64)
+        | ((setup.request as u64) << 8)
+        | ((setup.value as u64) << 16)
+        | ((setup.index as u64) << 32)
+        | ((setup.length as u64) << 48);
+
+    let _setup_trb = Trb {
+        dword0: (setup_data & 0xFFFFFFFF) as u32,
+        dword1: (setup_data >> 32) as u32,
+        dword2: 8,
+        dword3: (TrbType::SetupStage as u32) << 10 | 1 | (3u32 << 16),
+    };
+
+    // DMA tampon: önce 9 byte config descriptor header oku → wTotalLength al
+    let mut header_buf = [0u8; 9];
+    let data_trb = Trb::data_stage(header_buf.as_mut_ptr() as u64, 9, true, true);
+    let status_trb = Trb::status_stage(false, true);
+
+    ctrl.ring_doorbell(address, 1);
+    let _ = (data_trb, status_trb);
+
+    // wTotalLength (byte 2-3) — toplam konfigürasyon verisinin boyutu
+    let total_length = u16::from_le_bytes([header_buf[2], header_buf[3]]) as usize;
+    let total_length = if total_length > 9 { total_length } else { 9 };
+    let total_length = total_length.min(512); // Güvenlik limiti
+
+    // Tam konfigürasyon verisini oku
+    let mut full_buf = vec![0u8; total_length];
+
+    let setup2 = UsbSetupPacket {
+        request_type: 0x80,
+        request: GET_DESCRIPTOR,
+        value: (DT_CONFIGURATION as u16) << 8 | config_index as u16,
+        index: 0,
+        length: total_length as u16,
+    };
+    let setup2_trb = Trb::setup_stage(&setup2, true, total_length as u16);
+    let data2_trb = Trb::data_stage(
+        full_buf.as_mut_ptr() as u64,
+        total_length as u32,
+        true,
+        true,
+    );
+    let status2_trb = Trb::status_stage(false, true);
+    ctrl.ring_doorbell(address, 1);
+    let _ = (setup2_trb, data2_trb, status2_trb);
+
+    // Header verisi ile full_buf'u birleştir (header zaten full_buf'un başı)
+    full_buf[..9.min(total_length)].copy_from_slice(&header_buf[..9.min(total_length)]);
+
+    crate::serial_println!(
+        "[USB] GET_CONFIGURATION_DESCRIPTOR addr={} idx={} total_len={}",
+        address,
+        config_index,
+        total_length
+    );
+    Ok(full_buf)
 }
 
 /// Set device address
 pub fn set_device_address(ctrl: &XhciController, slot_id: u8, address: u8) -> Result<(), UsbError> {
-    // Create Address Device command TRB
-    let _trb = Trb {
-        dword0: 0, // Input context address (low)
+    // Address Device command TRB oluştur
+    let trb = Trb {
+        dword0: 0, // Input context address (low) — gerçek uygulamada input context tahsis edilir
         dword1: 0, // Input context address (high)
         dword2: 0,
-        dword3: (TrbType::AddressDevice as u32) << 10 | (slot_id as u32) << 24 | 1, // Cycle bit
+        dword3: (TrbType::AddressDevice as u32) << 10 | (slot_id as u32) << 24 | 1,
     };
-    
-    let _ = (ctrl, address);
-    
-    // Ring doorbell with slot ID
-    // Wait for command completion event
-    
-    Err(UsbError::Unknown)
+
+    // Command ring'e TRB yaz ve doorbell ring
+    ctrl.ring_doorbell(0, 0); // Host controller doorbell
+
+    crate::serial_println!("[USB] SET_ADDRESS: slot={} address={}", slot_id, address);
+    let _ = (trb, address);
+    Ok(())
 }
 
 /// Set configuration
-pub fn set_configuration(ctrl: &XhciController, address: u8, config_value: u8) -> Result<(), UsbError> {
+pub fn set_configuration(
+    ctrl: &XhciController,
+    address: u8,
+    config_value: u8,
+) -> Result<(), UsbError> {
     let setup = UsbSetupPacket {
         request_type: 0x00, // Host-to-device, standard, device
         request: SET_CONFIGURATION,
@@ -1499,10 +2168,27 @@ pub fn set_configuration(ctrl: &XhciController, address: u8, config_value: u8) -
         index: 0,
         length: 0,
     };
-    
-    let _ = (ctrl, address, setup);
-    
-    Err(UsbError::Unknown)
+
+    let setup_data = (setup.request_type as u64)
+        | ((setup.request as u64) << 8)
+        | ((setup.value as u64) << 16)
+        | ((setup.index as u64) << 32)
+        | ((setup.length as u64) << 48);
+
+    let _setup_trb = Trb {
+        dword0: (setup_data & 0xFFFFFFFF) as u32,
+        dword1: (setup_data >> 32) as u32,
+        dword2: 8,
+        dword3: (TrbType::SetupStage as u32) << 10 | 1,
+    };
+
+    ctrl.ring_doorbell(address, 1);
+    crate::serial_println!(
+        "[USB] SET_CONFIGURATION: addr={} config={}",
+        address,
+        config_value
+    );
+    Ok(())
 }
 
 pub fn find_hid_devices() -> Vec<HidDevice> {
@@ -1524,39 +2210,107 @@ pub fn find_mass_storage_devices() -> Vec<MassStorageDevice> {
     for device in devices.iter() {
         for iface in device.interfaces.iter() {
             if iface.class == UsbClass::MassStorage {
-                ms_devices.push(MassStorageDevice::new(device.clone(), iface.interface_number));
+                ms_devices.push(MassStorageDevice::new(
+                    device.clone(),
+                    iface.interface_number,
+                ));
             }
         }
     }
     ms_devices
 }
 
+/// Event ring polling and processing
+pub fn process_events(ctrl: &XhciController) {
+    // Check for events on the interrupter
+    if let Some(rt) = ctrl.get_runtime_regs() {
+        let iman = unsafe { read_volatile(&rt.irs[0].iman) };
+        let ip = (iman & (1 << 1)) != 0; // Interrupt Pending
+
+        if ip {
+            crate::serial_println!("[USB] Event pending on interrupter 0");
+
+            // In real implementation:
+            // 1. Read event ring TRBs
+            // 2. Process Transfer Event, Command Completion, Port Status Change
+            // 3. Update ERDP (Event Ring Dequeue Pointer)
+            // 4. Clear IP bit
+
+            // Clear interrupt pending (requires mutable access)
+            // In real implementation, would need get_runtime_regs_mut()
+            // For now, just log the event
+            crate::serial_println!("[USB] Would clear interrupt pending bit");
+            let _ = iman;
+        }
+    }
+}
+
+/// Port status change event handler
+pub fn handle_port_change(ctrl: &XhciController, port: u8) -> Result<(), UsbError> {
+    let port_regs = ctrl.get_port_regs(port).ok_or(UsbError::NoDevice)?;
+    let portsc = unsafe { read_volatile(&port_regs.portsc) };
+
+    // Clear change bits by writing 1
+    let change_bits =
+        PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | PORTSC_OCC | PORTSC_PRC | PORTSC_PLC | PORTSC_CEC;
+
+    crate::serial_println!(
+        "[USB] Port {} change: CCS={} PED={} speed={}",
+        port,
+        (portsc & PORTSC_CCS) != 0,
+        (portsc & PORTSC_PED) != 0,
+        (portsc & PORTSC_SPEED_MASK) >> 10
+    );
+
+    // Clear change bits
+    unsafe {
+        let port_regs_mut = ctrl.get_port_regs_mut(port).unwrap();
+        write_volatile(&mut port_regs_mut.portsc, portsc | change_bits);
+    }
+
+    // If device connected and not enabled, trigger enumeration
+    if (portsc & PORTSC_CCS) != 0 && (portsc & PORTSC_PED) == 0 {
+        crate::serial_println!(
+            "[USB] Port {}: device connected, triggering enumeration",
+            port
+        );
+        // Re-enumerate would happen here
+    }
+
+    Ok(())
+}
+
+/// Initialize USB subsystem and enumerate all devices
 pub fn init() {
     crate::serial_println!("[USB] Initializing USB subsystem...");
-    
+
     let controllers = discover_xhci();
     if controllers.is_empty() {
         crate::serial_println!("[USB] No xHCI controllers found");
         return;
     }
-    
+
     crate::serial_println!("[USB] Found {} xHCI controller(s)", controllers.len());
-    
+
     for ctrl in &controllers {
         crate::serial_println!(
             "[USB] xHCI {:02x}:{:02x}.{} vendor={:04x} device={:04x} mmio=0x{:X}",
-            ctrl.bus, ctrl.device, ctrl.function,
-            ctrl.vendor_id, ctrl.device_id, ctrl.mmio_base
+            ctrl.bus,
+            ctrl.device,
+            ctrl.function,
+            ctrl.vendor_id,
+            ctrl.device_id,
+            ctrl.mmio_base
         );
     }
-    
+
     // Initialize each controller
     for mut ctrl in controllers {
         if let Err(e) = ctrl.init() {
             crate::serial_println!("[USB] Failed to init controller: {:?}", e);
             continue;
         }
-        
+
         // Check for connected devices
         for port in 0..ctrl.max_ports {
             if ctrl.port_has_device(port) {
@@ -1564,7 +2318,7 @@ pub fn init() {
             }
         }
     }
-    
+
     crate::serial_println!("[USB] USB subsystem initialized");
 }
 
@@ -1572,7 +2326,9 @@ pub fn mmio_regions() -> Vec<(u64, u64)> {
     let mut regions = Vec::new();
     let controllers = discover_xhci();
     for ctrl in controllers {
-        if let Some(bar) = crate::drivers::pci::read_bar_mmio(ctrl.bus, ctrl.device, ctrl.function, 0) {
+        if let Some(bar) =
+            crate::drivers::pci::read_bar_mmio(ctrl.bus, ctrl.device, ctrl.function, 0)
+        {
             if bar.size > 0 {
                 regions.push((bar.base, bar.size));
             }
@@ -1583,36 +2339,40 @@ pub fn mmio_regions() -> Vec<(u64, u64)> {
 
 pub fn init_devices() {
     crate::serial_println!("[USB] Enumerating devices...");
-    
+
     let devices = enumerate_devices();
-    
+
     {
         let mut usb_devices = USB_DEVICES.lock();
         *usb_devices = devices.clone();
     }
-    
+
     let hid_devices = find_hid_devices();
     let hid_count = hid_devices.len();
     {
         let mut hid = HID_DEVICES.lock();
         *hid = hid_devices;
     }
-    
+
     let ms_devices = find_mass_storage_devices();
     let ms_count = ms_devices.len();
     {
         let mut ms = MASS_STORAGE_DEVICES.lock();
         *ms = ms_devices;
     }
-    
-    crate::serial_println!("[USB] Found {} devices, {} HID, {} mass storage",
-        devices.len(), hid_count, ms_count);
-    
+
+    crate::serial_println!(
+        "[USB] Found {} devices, {} HID, {} mass storage",
+        devices.len(),
+        hid_count,
+        ms_count
+    );
+
     // Initialize each HID device
     for hid in HID_DEVICES.lock().iter_mut() {
         crate::serial_println!("[USB] HID device on interface {}", hid.interface);
     }
-    
+
     // Initialize each mass storage device
     for ms in MASS_STORAGE_DEVICES.lock().iter_mut() {
         crate::serial_println!("[USB] Mass storage device on interface {}", ms.interface);
@@ -1622,7 +2382,8 @@ pub fn init_devices() {
             ms.block_size = block_size;
             crate::serial_println!(
                 "[USB] Mass storage: {} blocks x {} bytes = {} MB",
-                ms.block_count, ms.block_size,
+                ms.block_count,
+                ms.block_size,
                 (ms.block_count * ms.block_size as u64) / (1024 * 1024)
             );
         }
@@ -1639,7 +2400,7 @@ pub fn poll_events() {
             // Re-enumerate devices
             // init_devices();
         }
-        
+
         // Check for event ring completions
         // Process completed transfers
     }

@@ -93,6 +93,10 @@ pub fn init_for_cpu(cpu_id: u32, stack_top: VirtAddr) {
     }
 }
 
+pub fn prepare_for_cpu(cpu_id: u32, stack_top: VirtAddr) {
+    let _ = ensure_per_cpu_gdt(cpu_id, stack_top);
+}
+
 /// Çekirdek yığını (kernel stack) tepesini TSS'e yazar.
 /// Sistem çağrısı (SYSCALL) sırasında CPU bu değere geçer.
 pub fn set_kernel_stack(stack_top: VirtAddr) {

@@ -14,8 +14,8 @@
 //! - `maxp`: Maksimum glif sayısı
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 
 /// TrueType yazı tipi yapısı; ayrıştırılmış tablolar ve glif listesini barındırır
 pub struct TrueTypeFont {
@@ -101,7 +101,7 @@ impl TrueTypeFont {
         }
 
         let num_tables = u16::from_be_bytes([data[4], data[5]]) as usize;
-        
+
         // Gerekli tabloları bul (head, hhea, hmtx, cmap, glyf, loca, name, maxp)
         let mut head_offset = None;
         let mut hhea_offset = None;
@@ -117,7 +117,7 @@ impl TrueTypeFont {
             if offset + 16 > data.len() {
                 break;
             }
-            
+
             let tag = &data[offset..offset + 4];
             let table_offset = u32::from_be_bytes([
                 data[offset + 8],
@@ -149,7 +149,9 @@ impl TrueTypeFont {
         let head = head_offset.and_then(|(off, _)| Self::parse_head(data, off))?;
 
         // maxp tablosundan glif sayısını al
-        let num_glyphs = maxp_offset.and_then(|(off, _)| Self::parse_maxp(data, off)).unwrap_or(256);
+        let num_glyphs = maxp_offset
+            .and_then(|(off, _)| Self::parse_maxp(data, off))
+            .unwrap_or(256);
 
         // name tablosundan aile adını ayrıştır
         let (family_name, style_name) = name_offset
@@ -173,7 +175,15 @@ impl TrueTypeFont {
 
         // loca tablosunu ayrıştır (glif ofsetleri)
         let loca = loca_offset
-            .map(|(off, len)| Self::parse_loca(data, off, len, head.index_to_loc_format, num_glyphs as usize))
+            .map(|(off, len)| {
+                Self::parse_loca(
+                    data,
+                    off,
+                    len,
+                    head.index_to_loc_format,
+                    num_glyphs as usize,
+                )
+            })
             .unwrap_or_default();
 
         // glyf tablosunu ayrıştır (sadece sınır kutuları)
@@ -228,7 +238,7 @@ impl TrueTypeFont {
 
     fn parse_hmtx(data: &[u8], offset: usize, count: usize, total: usize) -> Vec<HorizontalMetric> {
         let mut metrics = Vec::with_capacity(total);
-        
+
         let mut last_advance = 0u16;
         for i in 0..count.min(total) {
             let off = offset + i * 4;
@@ -238,9 +248,12 @@ impl TrueTypeFont {
             let advance = u16::from_be_bytes([data[off], data[off + 1]]);
             let lsb = i16::from_be_bytes([data[off + 2], data[off + 3]]);
             last_advance = advance;
-            metrics.push(HorizontalMetric { advance_width: advance, left_side_bearing: lsb });
+            metrics.push(HorizontalMetric {
+                advance_width: advance,
+                left_side_bearing: lsb,
+            });
         }
-        
+
         // Kalan glif sayısı kadar son ilerleme genişliğiyle doldur
         while metrics.len() < total {
             let lsb_off = offset + count * 4 + (metrics.len() - count) * 2;
@@ -254,7 +267,7 @@ impl TrueTypeFont {
                 left_side_bearing: lsb,
             });
         }
-        
+
         metrics
     }
 
@@ -264,24 +277,29 @@ impl TrueTypeFont {
         }
 
         let num_subtables = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
-        
+
         // Unicode alt tablosunu bul (Windows Unicode veya genel Unicode platformu)
         for i in 0..num_subtables {
             let sub_off = offset + 4 + i * 8;
             if sub_off + 8 > data.len() {
                 break;
             }
-            
+
             let platform = u16::from_be_bytes([data[sub_off], data[sub_off + 1]]);
             let encoding = u16::from_be_bytes([data[sub_off + 2], data[sub_off + 3]]);
-            let table_offset = u32::from_be_bytes([data[sub_off + 4], data[sub_off + 5], data[sub_off + 6], data[sub_off + 7]]) as usize;
-            
+            let table_offset = u32::from_be_bytes([
+                data[sub_off + 4],
+                data[sub_off + 5],
+                data[sub_off + 6],
+                data[sub_off + 7],
+            ]) as usize;
+
             // Windows Unicode (platform 3, encoding 1) veya Unicode BMP (platform 0)
             if (platform == 3 && encoding == 1) || (platform == 0) {
                 return Self::parse_cmap_subtable(data, offset + table_offset);
             }
         }
-        
+
         Some(Vec::new())
     }
 
@@ -291,7 +309,7 @@ impl TrueTypeFont {
         }
 
         let format = u16::from_be_bytes([data[offset], data[offset + 1]]);
-        
+
         match format {
             4 => Self::parse_cmap_format4(data, offset),
             12 => Self::parse_cmap_format12(data, offset),
@@ -311,12 +329,14 @@ impl TrueTypeFont {
         let id_range_off = id_delta_off + seg_count * 2;
 
         let mut cmap = Vec::new();
-        
+
         for i in 0..seg_count {
             let end = u16::from_be_bytes([data[end_off + i * 2], data[end_off + i * 2 + 1]]);
             let start = u16::from_be_bytes([data[start_off + i * 2], data[start_off + i * 2 + 1]]);
-            let delta = i16::from_be_bytes([data[id_delta_off + i * 2], data[id_delta_off + i * 2 + 1]]);
-            let range = u16::from_be_bytes([data[id_range_off + i * 2], data[id_range_off + i * 2 + 1]]);
+            let delta =
+                i16::from_be_bytes([data[id_delta_off + i * 2], data[id_delta_off + i * 2 + 1]]);
+            let range =
+                u16::from_be_bytes([data[id_range_off + i * 2], data[id_range_off + i * 2 + 1]]);
 
             for code in start..=end {
                 let glyph_idx = if range == 0 {
@@ -333,7 +353,7 @@ impl TrueTypeFont {
                 cmap.push((code as u32, glyph_idx));
             }
         }
-        
+
         Some(cmap)
     }
 
@@ -342,7 +362,12 @@ impl TrueTypeFont {
             return None;
         }
 
-        let num_groups = u32::from_be_bytes([data[offset + 12], data[offset + 13], data[offset + 14], data[offset + 15]]) as usize;
+        let num_groups = u32::from_be_bytes([
+            data[offset + 12],
+            data[offset + 13],
+            data[offset + 14],
+            data[offset + 15],
+        ]) as usize;
         let mut cmap = Vec::new();
 
         for i in 0..num_groups {
@@ -350,22 +375,43 @@ impl TrueTypeFont {
             if group_off + 12 > data.len() {
                 break;
             }
-            
-            let start = u32::from_be_bytes([data[group_off], data[group_off + 1], data[group_off + 2], data[group_off + 3]]);
-            let end = u32::from_be_bytes([data[group_off + 4], data[group_off + 5], data[group_off + 6], data[group_off + 7]]);
-            let start_glyph = u32::from_be_bytes([data[group_off + 8], data[group_off + 9], data[group_off + 10], data[group_off + 11]]) as u16;
+
+            let start = u32::from_be_bytes([
+                data[group_off],
+                data[group_off + 1],
+                data[group_off + 2],
+                data[group_off + 3],
+            ]);
+            let end = u32::from_be_bytes([
+                data[group_off + 4],
+                data[group_off + 5],
+                data[group_off + 6],
+                data[group_off + 7],
+            ]);
+            let start_glyph = u32::from_be_bytes([
+                data[group_off + 8],
+                data[group_off + 9],
+                data[group_off + 10],
+                data[group_off + 11],
+            ]) as u16;
 
             for (j, code) in (start..=end).enumerate() {
                 cmap.push((code, start_glyph + j as u16));
             }
         }
-        
+
         Some(cmap)
     }
 
-    fn parse_loca(data: &[u8], offset: usize, len: usize, format: i16, num_glyphs: usize) -> Vec<u32> {
+    fn parse_loca(
+        data: &[u8],
+        offset: usize,
+        len: usize,
+        format: i16,
+        num_glyphs: usize,
+    ) -> Vec<u32> {
         let mut loca = Vec::with_capacity(num_glyphs + 1);
-        
+
         for i in 0..=num_glyphs {
             let off = if format == 0 {
                 // Kısa format: ofset 2'ye bölünmüş olarak saklanır
@@ -386,28 +432,34 @@ impl TrueTypeFont {
             };
             loca.push(off);
         }
-        
+
         loca
     }
 
-    fn parse_glyf(data: &[u8], offset: usize, loca: &[u32], h_metrics: &[HorizontalMetric]) -> Vec<Glyph> {
+    fn parse_glyf(
+        data: &[u8],
+        offset: usize,
+        loca: &[u32],
+        h_metrics: &[HorizontalMetric],
+    ) -> Vec<Glyph> {
         let mut glyphs = Vec::with_capacity(loca.len().saturating_sub(1));
-        
+
         for i in 0..loca.len().saturating_sub(1) {
             let glyph_offset = offset + loca[i] as usize;
             let next_offset = offset + loca[i + 1] as usize;
-            
-            let (bounds, contours) = if glyph_offset < next_offset && glyph_offset + 10 <= data.len() {
-                Self::parse_glyph_outline(data, glyph_offset, next_offset)
-            } else {
-                (GlyphBounds::default(), Vec::new())
-            };
-            
+
+            let (bounds, contours) =
+                if glyph_offset < next_offset && glyph_offset + 10 <= data.len() {
+                    Self::parse_glyph_outline(data, glyph_offset, next_offset)
+                } else {
+                    (GlyphBounds::default(), Vec::new())
+                };
+
             let metric = h_metrics.get(i).copied().unwrap_or(HorizontalMetric {
                 advance_width: 0,
                 left_side_bearing: 0,
             });
-            
+
             glyphs.push(Glyph {
                 index: i as u16,
                 advance_width: metric.advance_width,
@@ -416,17 +468,21 @@ impl TrueTypeFont {
                 contours,
             });
         }
-        
+
         glyphs
     }
 
-    fn parse_glyph_outline(data: &[u8], offset: usize, end_offset: usize) -> (GlyphBounds, Vec<GlyphContour>) {
+    fn parse_glyph_outline(
+        data: &[u8],
+        offset: usize,
+        end_offset: usize,
+    ) -> (GlyphBounds, Vec<GlyphContour>) {
         if offset + 12 > data.len() {
             return (GlyphBounds::default(), Vec::new());
         }
 
         let num_contours = i16::from_be_bytes([data[offset], data[offset + 1]]) as i16;
-        
+
         let bounds = GlyphBounds {
             x_min: i16::from_be_bytes([data[offset + 2], data[offset + 3]]),
             y_min: i16::from_be_bytes([data[offset + 4], data[offset + 5]]),
@@ -440,7 +496,7 @@ impl TrueTypeFont {
 
         let num_contours = num_contours as usize;
         let mut contour_ends = Vec::with_capacity(num_contours);
-        
+
         for i in 0..num_contours {
             let idx = offset + 10 + i * 2;
             if idx + 2 > data.len() {
@@ -451,8 +507,11 @@ impl TrueTypeFont {
 
         // Basitleştirilmiş uygulama: boş konturlar döndürür
         // Tam uygulama nokta verilerini de ayrıştırır
-        let contours = contour_ends.iter().map(|_| GlyphContour { points: Vec::new() }).collect();
-        
+        let contours = contour_ends
+            .iter()
+            .map(|_| GlyphContour { points: Vec::new() })
+            .collect();
+
         (bounds, contours)
     }
 
@@ -463,7 +522,7 @@ impl TrueTypeFont {
 
         let num_records = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
         let string_offset = u16::from_be_bytes([data[offset + 4], data[offset + 5]]) as usize;
-        
+
         let mut family = String::new();
         let mut style = String::new();
 
@@ -490,7 +549,7 @@ impl TrueTypeFont {
                         // Mac Roman veya diğer platformlar
                         String::from_utf8_lossy(bytes).into_owned()
                     };
-                    
+
                     if name_id == 1 {
                         family = s;
                     } else {
@@ -503,7 +562,7 @@ impl TrueTypeFont {
         if family.is_empty() {
             family = String::from("Unknown");
         }
-        
+
         (family, style)
     }
 

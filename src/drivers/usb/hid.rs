@@ -56,13 +56,13 @@
 //! - `UsagePage::LED (0x08)`: klavye LED'leri
 //! - `UsagePage::Button (0x09)`: fare/joystick düğmeleri
 
-use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use spin::Mutex;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use spin::Mutex;
 
-use super::{UsbDevice, UsbError, UsbSetupPacket, UsbEndpoint, UsbDirection, UsbTransferType};
+use super::{UsbDevice, UsbDirection, UsbEndpoint, UsbError, UsbSetupPacket, UsbTransferType};
 
 // ============================================================================
 // HID SINIF İSTEKLERİ
@@ -164,14 +164,14 @@ impl KeyboardBootReport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum KeyboardModifier {
-    LeftCtrl   = 0x01,  // bit0: Sol Ctrl
-    LeftShift  = 0x02,  // bit1: Sol Shift
-    LeftAlt    = 0x04,  // bit2: Sol Alt
-    LeftGUI    = 0x08,  // bit3: Sol GUI (Windows/Meta)
-    RightCtrl  = 0x10,  // bit4: Sağ Ctrl
-    RightShift = 0x20,  // bit5: Sağ Shift
-    RightAlt   = 0x40,  // bit6: Sağ Alt (AltGr)
-    RightGUI   = 0x80,  // bit7: Sağ GUI
+    LeftCtrl = 0x01,   // bit0: Sol Ctrl
+    LeftShift = 0x02,  // bit1: Sol Shift
+    LeftAlt = 0x04,    // bit2: Sol Alt
+    LeftGUI = 0x08,    // bit3: Sol GUI (Windows/Meta)
+    RightCtrl = 0x10,  // bit4: Sağ Ctrl
+    RightShift = 0x20, // bit5: Sağ Shift
+    RightAlt = 0x40,   // bit6: Sağ Alt (AltGr)
+    RightGUI = 0x80,   // bit7: Sağ GUI
 }
 
 /// Standart fare boot protokolü raporu (3-4 byte).
@@ -230,26 +230,26 @@ impl MouseBootReport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum UsagePage {
-    Undefined       = 0x00,
-    GenericDesktop  = 0x01,  // Fare, klavye, joystick, gamepad
-    Simulation      = 0x02,  // Uçuş simülasyonu
-    VR              = 0x03,  // Sanal gerçeklik
-    Sport           = 0x04,  // Spor cihazları
-    Game            = 0x05,  // Oyun cihazları
-    Keyboard        = 0x07,  // Klavye/keypad
-    LED             = 0x08,  // LED göstergeleri (NumLock, CapsLock)
-    Button          = 0x09,  // Fiziksel düğmeler
-    Ordinal         = 0x0A,
-    Telephony       = 0x0B,  // Telefon tuşları
-    Consumer        = 0x0C,  // Medya kontrol düğmeleri (ses kısmalt/artır)
-    Digitizer       = 0x0D,  // Dijital kalem/dokunmatik ekran
-    PID             = 0x0F,  // Kuvvet geri bildirimi
-    Unicode         = 0x10,
-    AlphaNumeric    = 0x14,
-    Medical         = 0x40,
-    Monitor         = 0x80,
-    Power           = 0x84,
-    VendorDefined   = 0xFF00,
+    Undefined = 0x00,
+    GenericDesktop = 0x01, // Fare, klavye, joystick, gamepad
+    Simulation = 0x02,     // Uçuş simülasyonu
+    VR = 0x03,             // Sanal gerçeklik
+    Sport = 0x04,          // Spor cihazları
+    Game = 0x05,           // Oyun cihazları
+    Keyboard = 0x07,       // Klavye/keypad
+    LED = 0x08,            // LED göstergeleri (NumLock, CapsLock)
+    Button = 0x09,         // Fiziksel düğmeler
+    Ordinal = 0x0A,
+    Telephony = 0x0B, // Telefon tuşları
+    Consumer = 0x0C,  // Medya kontrol düğmeleri (ses kısmalt/artır)
+    Digitizer = 0x0D, // Dijital kalem/dokunmatik ekran
+    PID = 0x0F,       // Kuvvet geri bildirimi
+    Unicode = 0x10,
+    AlphaNumeric = 0x14,
+    Medical = 0x40,
+    Monitor = 0x80,
+    Power = 0x84,
+    VendorDefined = 0xFF00,
 }
 
 /// HID Genel Masaüstü Kullanımları (Generic Desktop Usages).
@@ -258,26 +258,26 @@ pub enum UsagePage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum GenericDesktopUsage {
-    Undefined    = 0x00,
-    Pointer      = 0x01,  // İşaretçi (fare)
-    Mouse        = 0x02,
-    Joystick     = 0x04,
-    Gamepad      = 0x05,
-    Keyboard     = 0x06,
-    Keypad       = 0x07,
-    X            = 0x30,  // X ekseni (fare, joystick)
-    Y            = 0x31,  // Y ekseni
-    Z            = 0x32,  // Z ekseni (3D)
-    Rx           = 0x33,  // X etrafında dönüş
-    Ry           = 0x34,  // Y etrafında dönüş
-    Rz           = 0x35,  // Z etrafında dönüş
-    Slider       = 0x36,  // Sürgü
-    Dial         = 0x37,  // Döner kontrol
-    Wheel        = 0x38,  // Tekerlek (fare scroll)
-    HatSwitch    = 0x39,  // D-pad yön düğmesi
-    MotionWakeup = 0x46,  // Hareket uyandırma
-    Start        = 0x47,  // Başlat düğmesi
-    Select       = 0x48,  // Seç düğmesi
+    Undefined = 0x00,
+    Pointer = 0x01, // İşaretçi (fare)
+    Mouse = 0x02,
+    Joystick = 0x04,
+    Gamepad = 0x05,
+    Keyboard = 0x06,
+    Keypad = 0x07,
+    X = 0x30,            // X ekseni (fare, joystick)
+    Y = 0x31,            // Y ekseni
+    Z = 0x32,            // Z ekseni (3D)
+    Rx = 0x33,           // X etrafında dönüş
+    Ry = 0x34,           // Y etrafında dönüş
+    Rz = 0x35,           // Z etrafında dönüş
+    Slider = 0x36,       // Sürgü
+    Dial = 0x37,         // Döner kontrol
+    Wheel = 0x38,        // Tekerlek (fare scroll)
+    HatSwitch = 0x39,    // D-pad yön düğmesi
+    MotionWakeup = 0x46, // Hareket uyandırma
+    Start = 0x47,        // Başlat düğmesi
+    Select = 0x48,       // Seç düğmesi
 }
 
 /// HID Klavye Kullanım Kodları (kısmi liste).
@@ -288,57 +288,102 @@ pub enum GenericDesktopUsage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum KeyboardUsage {
-    NoEvent      = 0x00,  // Tuş yok (boş slot)
+    NoEvent = 0x00,       // Tuş yok (boş slot)
     ErrorRollOver = 0x01, // 6'dan fazla tuş aynı anda basıldı
-    A = 0x04, B = 0x05, C = 0x06, D = 0x07, E = 0x08, F = 0x09,
-    G = 0x0A, H = 0x0B, I = 0x0C, J = 0x0D, K = 0x0E, L = 0x0F,
-    M = 0x10, N = 0x11, O = 0x12, P = 0x13, Q = 0x14, R = 0x15,
-    S = 0x16, T = 0x17, U = 0x18, V = 0x19, W = 0x1A, X = 0x1B,
-    Y = 0x1C, Z = 0x1D,
-    Digit1 = 0x1E, Digit2 = 0x1F, Digit3 = 0x20, Digit4 = 0x21,
-    Digit5 = 0x22, Digit6 = 0x23, Digit7 = 0x24, Digit8 = 0x25,
-    Digit9 = 0x26, Digit0 = 0x27,
-    Enter     = 0x28,
-    Escape    = 0x29,
+    A = 0x04,
+    B = 0x05,
+    C = 0x06,
+    D = 0x07,
+    E = 0x08,
+    F = 0x09,
+    G = 0x0A,
+    H = 0x0B,
+    I = 0x0C,
+    J = 0x0D,
+    K = 0x0E,
+    L = 0x0F,
+    M = 0x10,
+    N = 0x11,
+    O = 0x12,
+    P = 0x13,
+    Q = 0x14,
+    R = 0x15,
+    S = 0x16,
+    T = 0x17,
+    U = 0x18,
+    V = 0x19,
+    W = 0x1A,
+    X = 0x1B,
+    Y = 0x1C,
+    Z = 0x1D,
+    Digit1 = 0x1E,
+    Digit2 = 0x1F,
+    Digit3 = 0x20,
+    Digit4 = 0x21,
+    Digit5 = 0x22,
+    Digit6 = 0x23,
+    Digit7 = 0x24,
+    Digit8 = 0x25,
+    Digit9 = 0x26,
+    Digit0 = 0x27,
+    Enter = 0x28,
+    Escape = 0x29,
     Backspace = 0x2A,
-    Tab       = 0x2B,
-    Space     = 0x2C,
-    Minus     = 0x2D,  // '-' veya '_'
-    Equal     = 0x2E,  // '=' veya '+'
-    LeftBrace  = 0x2F, // '[' veya '{'
+    Tab = 0x2B,
+    Space = 0x2C,
+    Minus = 0x2D,      // '-' veya '_'
+    Equal = 0x2E,      // '=' veya '+'
+    LeftBrace = 0x2F,  // '[' veya '{'
     RightBrace = 0x30, // ']' veya '}'
-    Backslash  = 0x31, // '\' veya '|'
-    Semicolon  = 0x33, // ';' veya ':'
-    Quote      = 0x34, // '\'' veya '"'
-    Grave      = 0x35, // '`' veya '~'
-    Comma      = 0x36, // ',' veya '<'
-    Period     = 0x37, // '.' veya '>'
-    Slash      = 0x38, // '/' veya '?'
-    CapsLock   = 0x39,
-    F1 = 0x3A, F2 = 0x3B, F3 = 0x3C, F4 = 0x3D, F5 = 0x3E, F6 = 0x3F,
-    F7 = 0x40, F8 = 0x41, F9 = 0x42, F10 = 0x43, F11 = 0x44, F12 = 0x45,
+    Backslash = 0x31,  // '\' veya '|'
+    Semicolon = 0x33,  // ';' veya ':'
+    Quote = 0x34,      // '\'' veya '"'
+    Grave = 0x35,      // '`' veya '~'
+    Comma = 0x36,      // ',' veya '<'
+    Period = 0x37,     // '.' veya '>'
+    Slash = 0x38,      // '/' veya '?'
+    CapsLock = 0x39,
+    F1 = 0x3A,
+    F2 = 0x3B,
+    F3 = 0x3C,
+    F4 = 0x3D,
+    F5 = 0x3E,
+    F6 = 0x3F,
+    F7 = 0x40,
+    F8 = 0x41,
+    F9 = 0x42,
+    F10 = 0x43,
+    F11 = 0x44,
+    F12 = 0x45,
     PrintScreen = 0x46,
-    ScrollLock  = 0x47,
-    Pause       = 0x48,
-    Insert      = 0x49,
-    Home        = 0x4A,
-    PageUp      = 0x4B,
-    Delete      = 0x4C,
-    End         = 0x4D,
-    PageDown    = 0x4E,
-    RightArrow  = 0x4F,
-    LeftArrow   = 0x50,
-    DownArrow   = 0x51,
-    UpArrow     = 0x52,
-    NumLock     = 0x53,
-    KeypadSlash    = 0x54,
+    ScrollLock = 0x47,
+    Pause = 0x48,
+    Insert = 0x49,
+    Home = 0x4A,
+    PageUp = 0x4B,
+    Delete = 0x4C,
+    End = 0x4D,
+    PageDown = 0x4E,
+    RightArrow = 0x4F,
+    LeftArrow = 0x50,
+    DownArrow = 0x51,
+    UpArrow = 0x52,
+    NumLock = 0x53,
+    KeypadSlash = 0x54,
     KeypadAsterisk = 0x55,
-    KeypadMinus    = 0x56,
-    KeypadPlus     = 0x57,
-    KeypadEnter    = 0x58,
-    Keypad1 = 0x59, Keypad2 = 0x5A, Keypad3 = 0x5B, Keypad4 = 0x5C,
-    Keypad5 = 0x5D, Keypad6 = 0x5E, Keypad7 = 0x5F, Keypad8 = 0x60,
-    Keypad9 = 0x61, Keypad0 = 0x62,
+    KeypadMinus = 0x56,
+    KeypadPlus = 0x57,
+    KeypadEnter = 0x58,
+    Keypad1 = 0x59,
+    Keypad2 = 0x5A,
+    Keypad3 = 0x5B,
+    Keypad4 = 0x5C,
+    Keypad5 = 0x5D,
+    Keypad6 = 0x5E,
+    Keypad7 = 0x5F,
+    Keypad8 = 0x60,
+    Keypad9 = 0x61,
+    Keypad0 = 0x62,
     KeypadPeriod = 0x63,
     // Modifier tuşlar boot protokolünde ayrı olarak rapor edilir
 }
@@ -392,7 +437,7 @@ pub fn hid_to_ascii(usage: u8, shift: bool) -> Option<char> {
         0x25 => Some(if shift { '*' } else { '8' }),
         0x26 => Some(if shift { '(' } else { '9' }),
         0x27 => Some(if shift { ')' } else { '0' }),
-        0x28 => Some('\n'),    // Enter → yeni satır
+        0x28 => Some('\n'),   // Enter → yeni satır
         0x29 => Some('\x1B'), // Escape → ESC karakteri
         0x2A => Some('\x08'), // Backspace → geri al
         0x2B => Some('\t'),   // Tab → sekme
@@ -408,7 +453,7 @@ pub fn hid_to_ascii(usage: u8, shift: bool) -> Option<char> {
         0x36 => Some(if shift { '<' } else { ',' }),
         0x37 => Some(if shift { '>' } else { '.' }),
         0x38 => Some(if shift { '?' } else { '/' }),
-        _ => None,  // Fonksiyon tuşları, navigation, vb. → ASCII yok
+        _ => None, // Fonksiyon tuşları, navigation, vb. → ASCII yok
     }
 }
 
@@ -420,11 +465,11 @@ pub fn hid_to_ascii(usage: u8, shift: bool) -> Option<char> {
 /// HID cihaz tipi.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HidDeviceType {
-    Keyboard,  // Klavye (boot raporu: 8 byte)
-    Mouse,     // Fare (boot raporu: 3+ byte)
-    Gamepad,   // Oyun kolu (rapor protokolü)
-    Generic,   // Diğer HID cihazlar
-    Unknown,   // Henüz belirlenmemiş
+    Keyboard, // Klavye (boot raporu: 8 byte)
+    Mouse,    // Fare (boot raporu: 3+ byte)
+    Gamepad,  // Oyun kolu (rapor protokolü)
+    Generic,  // Diğer HID cihazlar
+    Unknown,  // Henüz belirlenmemiş
 }
 
 /// HID cihaz durum kaydı.
@@ -471,7 +516,7 @@ impl HidDeviceState {
             mouse_x: 0,
             mouse_y: 0,
             leds: 0,
-            poll_interval_ms: 10,  // 10ms = 100 rapor/saniye
+            poll_interval_ms: 10, // 10ms = 100 rapor/saniye
             boot_protocol: false,
         }
     }
@@ -482,7 +527,7 @@ impl HidDeviceState {
     /// Format: [modifiers][reserved][key0][key1][key2][key3][key4][key5]
     pub fn update_keyboard(&mut self, report: &[u8]) {
         if report.len() >= 8 {
-            self.prev_keyboard = self.keyboard;  // Öncekini sakla
+            self.prev_keyboard = self.keyboard; // Öncekini sakla
             self.keyboard.modifiers = report[0];
             // report[1] rezerve → atlanır
             self.keyboard.keys.copy_from_slice(&report[2..8]);
@@ -496,9 +541,9 @@ impl HidDeviceState {
     pub fn update_mouse(&mut self, report: &[u8]) {
         if report.len() >= 3 {
             self.mouse.buttons = report[0];
-            self.mouse.x = report[1] as i8;  // i8: işaretli göreli hareket
+            self.mouse.x = report[1] as i8; // i8: işaretli göreli hareket
             self.mouse.y = report[2] as i8;
-            self.mouse_x += self.mouse.x as i32;  // Mutlak konuma ekle
+            self.mouse_x += self.mouse.x as i32; // Mutlak konuma ekle
             self.mouse_y += self.mouse.y as i32;
         }
     }
@@ -584,9 +629,9 @@ impl HidDriver {
                 for ep in &iface.endpoints {
                     if ep.transfer_type == UsbTransferType::Interrupt {
                         if ep.direction == UsbDirection::In {
-                            self.interrupt_in = Some(*ep);   // Rapor alma
+                            self.interrupt_in = Some(*ep); // Rapor alma
                         } else {
-                            self.interrupt_out = Some(*ep);  // LED gönderme
+                            self.interrupt_out = Some(*ep); // LED gönderme
                         }
                     }
                 }
@@ -617,10 +662,14 @@ impl HidDriver {
     ///
     /// `request_type=0x21`: Host→Device, Class, Interface
     pub fn set_boot_protocol(&self, boot: bool) -> Result<(), UsbError> {
-        let protocol = if boot { HID_PROTOCOL_BOOT } else { HID_PROTOCOL_REPORT };
+        let protocol = if boot {
+            HID_PROTOCOL_BOOT
+        } else {
+            HID_PROTOCOL_REPORT
+        };
 
         let setup = UsbSetupPacket {
-            request_type: 0x21,  // Host→Device | Sınıf | Arabirim
+            request_type: 0x21, // Host→Device | Sınıf | Arabirim
             request: HID_SET_PROTOCOL,
             value: protocol as u16,
             index: self.interface as u16,
@@ -667,7 +716,7 @@ impl HidDriver {
         let setup = UsbSetupPacket {
             request_type: 0x21,
             request: HID_SET_REPORT,
-            value: ((HID_REPORT_OUTPUT as u16) << 8) | 0,  // Rapor ID 0
+            value: ((HID_REPORT_OUTPUT as u16) << 8) | 0, // Rapor ID 0
             index: self.interface as u16,
             length: 1,
         };
@@ -684,7 +733,7 @@ impl HidDriver {
     /// NumLock LED durumunu değiştirir (toggle).
     pub fn toggle_num_lock(&self) -> Result<(), UsbError> {
         let mut state = self.state.lock();
-        state.leds ^= 0x01;  // bit0 tersine çevir
+        state.leds ^= 0x01; // bit0 tersine çevir
         let leds = state.leds;
         drop(state);
         self.set_leds(leds)
@@ -693,7 +742,7 @@ impl HidDriver {
     /// CapsLock LED durumunu değiştirir (toggle).
     pub fn toggle_caps_lock(&self) -> Result<(), UsbError> {
         let mut state = self.state.lock();
-        state.leds ^= 0x02;  // bit1 tersine çevir
+        state.leds ^= 0x02; // bit1 tersine çevir
         let leds = state.leds;
         drop(state);
         self.set_leds(leds)
@@ -702,7 +751,7 @@ impl HidDriver {
     /// ScrollLock LED durumunu değiştirir (toggle).
     pub fn toggle_scroll_lock(&self) -> Result<(), UsbError> {
         let mut state = self.state.lock();
-        state.leds ^= 0x04;  // bit2 tersine çevir
+        state.leds ^= 0x04; // bit2 tersine çevir
         let leds = state.leds;
         drop(state);
         self.set_leds(leds)
@@ -772,14 +821,14 @@ pub enum HidEvent {
     KeyRelease(Vec<u8>),
     /// Fare hareketi olayı
     MouseMove {
-        dx: i32,      // X göreli hareket
-        dy: i32,      // Y göreli hareket
-        buttons: u8,  // Düğme durumları (bit maskeleri)
+        dx: i32,     // X göreli hareket
+        dy: i32,     // Y göreli hareket
+        buttons: u8, // Düğme durumları (bit maskeleri)
     },
     /// Oyun kolu olayı
     Gamepad {
-        buttons: u16,    // 16 adet dijital düğme (bit maskeleri)
-        axes: [i16; 6],  // 6 adet analog eksen değerleri
+        buttons: u16,   // 16 adet dijital düğme (bit maskeleri)
+        axes: [i16; 6], // 6 adet analog eksen değerleri
     },
 }
 
@@ -805,7 +854,7 @@ lazy_static::lazy_static! {
 /// Arabirim numarası, sürücü için benzersiz kimlik olarak kullanılır.
 pub fn register_hid_driver(device: UsbDevice, interface: u8) -> Result<u8, UsbError> {
     let driver = HidDriver::new(device, interface);
-    let id = interface;  // Arabirim numarasını kimlik olarak kullan
+    let id = interface; // Arabirim numarasını kimlik olarak kullan
 
     HID_DRIVERS.lock().insert(id, Arc::new(Mutex::new(driver)));
     Ok(id)

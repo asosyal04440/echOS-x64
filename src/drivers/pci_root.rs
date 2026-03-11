@@ -125,8 +125,13 @@ pub fn get_bar(bus: u8, device: u8, function: u8, bar_index: u8) -> (u64, u64) {
             let next_offset = bar_offset + 4;
             super::pci::write_config_dword(bus, device, function, next_offset, 0xFFFFFFFF);
             let upper_resp = super::pci::read_config_dword(bus, device, function, next_offset);
-            super::pci::write_config_dword(bus, device, function, next_offset,
-                super::pci::read_config_dword(bus, device, function, bar_offset + 4));
+            super::pci::write_config_dword(
+                bus,
+                device,
+                function,
+                next_offset,
+                super::pci::read_config_dword(bus, device, function, bar_offset + 4),
+            );
             upper_resp
         } else {
             0

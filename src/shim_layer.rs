@@ -360,16 +360,28 @@ pub fn resolve_symbol(name: &str) -> Option<usize> {
 // erişebilir. Aksi halde kernel anında reddeder.
 
 use ironshim_rs::{
+    AuditEvent,
+    AuditSink,
     // DMA
-    DmaAllocator, DmaHandle, PhysAddr as ShimPhysAddr,
-    // Interrupt
-    InterruptHandler, InterruptRegistry, InterruptBudget, InterruptMetrics,
-    // Resource / PCI
-    KernelPciBridge, PciConfigAccess, PciTopology, PciAddress, PortIo,
-    // Policy & Audit
-    SyscallPolicy, SyscallRequest, AuditSink, AuditEvent,
+    DmaAllocator,
+    DmaHandle,
     // Errors
     Error as ShimError,
+    InterruptBudget,
+    // Interrupt
+    InterruptHandler,
+    InterruptMetrics,
+    InterruptRegistry,
+    // Resource / PCI
+    KernelPciBridge,
+    PciAddress,
+    PciConfigAccess,
+    PciTopology,
+    PhysAddr as ShimPhysAddr,
+    PortIo,
+    // Policy & Audit
+    SyscallPolicy,
+    SyscallRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -384,7 +396,9 @@ impl DmaAllocator for EchOsDmaAllocator {
     where
         Self: Sized,
     {
-        let size = core::mem::size_of::<T>().checked_mul(count).ok_or(ShimError::OutOfMemory)?;
+        let size = core::mem::size_of::<T>()
+            .checked_mul(count)
+            .ok_or(ShimError::OutOfMemory)?;
         let pages = (size + 4095) / 4096;
         let domain = crate::cpu::smp::current_dma_domain();
         match crate::memory::dma_alloc_for_domain(domain, pages) {
@@ -432,7 +446,11 @@ impl EchOsInterruptRegistry {
 }
 
 impl InterruptRegistry for EchOsInterruptRegistry {
-    fn register(&self, irq: u32, handler: &'static mut dyn InterruptHandler) -> Result<(), ShimError> {
+    fn register(
+        &self,
+        irq: u32,
+        handler: &'static mut dyn InterruptHandler,
+    ) -> Result<(), ShimError> {
         self.register_with_budget(irq, handler, InterruptBudget::unlimited())
     }
 
@@ -546,7 +564,11 @@ impl PciTopology for EchOsPciTopology {
         for bus in 0u8..=255 {
             for device in 0u8..32 {
                 for function in 0u8..8 {
-                    f(PciAddress { bus, device, function });
+                    f(PciAddress {
+                        bus,
+                        device,
+                        function,
+                    });
                 }
             }
         }
