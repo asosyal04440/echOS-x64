@@ -20,12 +20,12 @@
 //! - Kuyruk dolunca en eski event çıkarılır (ring-buffer benzeri davranış).
 //! - MAX_INPUT_EVENTS = 2048: 60 Hz'de ~34 saniyelik tampon.
 
+use crate::drivers::gesture::Gesture;
+use crate::drivers::spsc::SpscQueue;
 use alloc::collections::VecDeque;
 use lazy_static::lazy_static;
 use pc_keyboard::{DecodedKey, KeyState};
 use spin::Mutex;
-use crate::drivers::gesture::Gesture;
-use crate::drivers::spsc::SpscQueue;
 
 // ============================================================================
 // EVENT TÜRLERİ (EVENT TYPES)
@@ -72,7 +72,7 @@ lazy_static! {
     static ref INPUT_SPSC: SpscQueue<InputEvent, 4096> = SpscQueue::new();
 }
 
-/// Kuyruk maksimum boyutu. 
+/// Kuyruk maksimum boyutu.
 const MAX_INPUT_EVENTS: usize = 4096;
 
 /// Event'i SPSC kuyruğuna ekler (Lock-Free).

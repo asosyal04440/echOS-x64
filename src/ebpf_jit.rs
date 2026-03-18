@@ -29,7 +29,40 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+use core::ffi::c_void;
+#[cfg(all(
+    feature = "host_smoke",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+use std::eprintln;
+
 use crate::ebpf::{BpfError, BpfInsn, BpfVerifier};
+
+#[cfg(all(
+    feature = "host_smoke",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+fn host_smoke_probe(stage: &str) {
+    if std::env::var_os("PHASE1_DEBUG_EBPF").is_some()
+        || std::env::var_os("PHASE1_SKIP_EBPF_RUN").is_some()
+    {
+        eprintln!("jit:{stage}");
+    }
+}
+
+#[cfg(not(all(
+    feature = "host_smoke",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+)))]
+fn host_smoke_probe(_stage: &str) {}
 
 // ============================================================================
 // Sabitler
@@ -40,6 +73,21 @@ const MAX_JIT_SIZE: usize = 65536;
 
 /// BPF stack boyutu (doğrudan rbp'den erişilir)
 const BPF_STACK_SIZE: usize = 512;
+
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+const HOST_CALL_SHADOW_SPACE: usize = 32;
+#[cfg(not(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+)))]
+const HOST_CALL_SHADOW_SPACE: usize = 0;
+
+const JIT_STACK_FRAME_SIZE: usize = BPF_STACK_SIZE + HOST_CALL_SHADOW_SPACE;
 
 // ============================================================================
 // x86_64 Register Tanımları
@@ -149,6 +197,12 @@ pub struct JitProgram {
     code: Vec<u8>,
     /// Kod boyutu
     code_len: usize,
+    #[cfg(all(
+        target_os = "windows",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    ))]
+    exec_ptr: *mut u8,
     /// Program ID (eBPF attach sistemi ile ilişki)
     pub prog_id: u32,
     /// Çalışma sayacı
@@ -166,12 +220,59 @@ impl JitProgram {
             return 0;
         }
 
-        // Kod buffer'ının başını fonksiyon olarak çağır
-        // x86_64 System V ABI: rdi = ilk argüman (ctx)
-        let func: unsafe extern "C" fn(u64) -> u64 = core::mem::transmute(self.code.as_ptr());
+        // Kod buffer'ının başını fonksiyon olarak çağır.
+        // Windows hostunda ilk argüman RCX ile gelir; JIT prologue bunu iç eşlemeye taşır.
+        #[cfg(all(
+            target_os = "windows",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        ))]
+        let entry = if self.exec_ptr.is_null() {
+            self.code.as_ptr()
+        } else {
+            self.exec_ptr.cast_const()
+        };
+        #[cfg(not(all(
+            target_os = "windows",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )))]
+        let entry = self.code.as_ptr();
+
+        #[cfg(all(
+            target_os = "windows",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        ))]
+        let func: unsafe extern "system" fn(u64) -> u64 = core::mem::transmute(entry);
+        #[cfg(not(all(
+            target_os = "windows",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )))]
+        let func: unsafe extern "C" fn(u64) -> u64 = core::mem::transmute(entry);
 
         self.run_count.fetch_add(1, Ordering::Relaxed);
         func(ctx)
+    }
+
+    pub fn code_bytes(&self) -> &[u8] {
+        &self.code
+    }
+}
+
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+impl Drop for JitProgram {
+    fn drop(&mut self) {
+        if !self.exec_ptr.is_null() {
+            unsafe {
+                let _ = VirtualFree(self.exec_ptr.cast::<c_void>(), 0, MEM_RELEASE);
+            }
+        }
     }
 }
 
@@ -217,12 +318,27 @@ impl JitCompiler {
             return Err(BpfError::ProgramTooLarge(program.len()));
         }
 
-        Ok(JitProgram {
+        let mut program = JitProgram {
             code_len: jit.code.len(),
             code: jit.code,
+            #[cfg(all(
+                target_os = "windows",
+                not(target_os = "none"),
+                not(target_os = "uefi")
+            ))]
+            exec_ptr: core::ptr::null_mut(),
             prog_id: 0,
             run_count: AtomicU64::new(0),
-        })
+        };
+        #[cfg(all(
+            target_os = "windows",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        ))]
+        {
+            program.exec_ptr = allocate_executable_copy(&program.code)?;
+        }
+        Ok(program)
     }
 
     /// x86_64 fonksiyon prologu: callee-saved register'ları kaydet, stack ayır
@@ -239,26 +355,55 @@ impl JitCompiler {
         self.emit_push_r64(X86Reg::R13);
         self.emit_push_r64(X86Reg::R14);
         self.emit_push_r64(X86Reg::R15);
+        #[cfg(all(
+            target_os = "windows",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        ))]
+        {
+            // Windows x64 ABI: RDI/RSI nonvolatile, but echOS maps BPF R1/R2 onto them.
+            self.emit_push_r64(X86Reg::Rdi);
+            self.emit_push_r64(X86Reg::Rsi);
+        }
 
-        // sub rsp, BPF_STACK_SIZE (BPF stack alanı)
+        // sub rsp, JIT_STACK_FRAME_SIZE (BPF stack + host call shadow space)
         self.emit_rex_w();
         self.emit1(0x81);
         self.emit_modrm(0b11, 5, X86Reg::Rsp as u8 & 7); // sub
-        self.emit4(BPF_STACK_SIZE as u32);
+        self.emit4(JIT_STACK_FRAME_SIZE as u32);
 
-        // BPF R1 (rdi) zaten ctx parametresi — System V ABI uyumlu
+        #[cfg(all(
+            target_os = "windows",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        ))]
+        {
+            // Windows x64 ABI: ilk argüman RCX; iç eşleme rdi kullanıyor.
+            self.emit_mov_rr(X86Reg::Rdi, X86Reg::Rcx, true);
+        }
+
+        // BPF R1 (rdi) ctx parametresidir.
         // BPF R10 (rbp) zaten frame pointer
     }
 
     /// x86_64 fonksiyon epilogu: stack geri al, callee-saved restore, ret
     fn emit_epilogue(&mut self) {
-        // add rsp, BPF_STACK_SIZE
+        // add rsp, JIT_STACK_FRAME_SIZE
         self.emit_rex_w();
         self.emit1(0x81);
         self.emit_modrm(0b11, 0, X86Reg::Rsp as u8 & 7);
-        self.emit4(BPF_STACK_SIZE as u32);
+        self.emit4(JIT_STACK_FRAME_SIZE as u32);
 
         // pop r15, r14, r13, rbx
+        #[cfg(all(
+            target_os = "windows",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        ))]
+        {
+            self.emit_pop_r64(X86Reg::Rsi);
+            self.emit_pop_r64(X86Reg::Rdi);
+        }
         self.emit_pop_r64(X86Reg::R15);
         self.emit_pop_r64(X86Reg::R14);
         self.emit_pop_r64(X86Reg::R13);
@@ -872,6 +1017,137 @@ pub fn jit_compile_and_run(program: &[BpfInsn], ctx: u64) -> Result<u64, BpfErro
 /// JIT istatistikleri
 static JIT_COMPILE_COUNT: AtomicU64 = AtomicU64::new(0);
 static JIT_TOTAL_CODE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+const MEM_COMMIT: u32 = 0x1000;
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+const MEM_RESERVE: u32 = 0x2000;
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+const MEM_RELEASE: u32 = 0x8000;
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+const PAGE_READWRITE: u32 = 0x04;
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+const PAGE_EXECUTE_READ: u32 = 0x20;
+
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+unsafe extern "system" {
+    fn GetCurrentProcess() -> *mut c_void;
+    fn VirtualAlloc(
+        lp_address: *mut c_void,
+        dw_size: usize,
+        fl_allocation_type: u32,
+        fl_protect: u32,
+    ) -> *mut c_void;
+    fn VirtualProtect(
+        lp_address: *mut c_void,
+        dw_size: usize,
+        fl_new_protect: u32,
+        lpfl_old_protect: *mut u32,
+    ) -> i32;
+    fn VirtualFree(lp_address: *mut c_void, dw_size: usize, dw_free_type: u32) -> i32;
+    fn FlushInstructionCache(
+        h_process: *mut c_void,
+        lp_base_address: *const c_void,
+        dw_size: usize,
+    ) -> i32;
+}
+
+#[cfg(all(
+    target_os = "windows",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
+fn allocate_executable_copy(code: &[u8]) -> Result<*mut u8, BpfError> {
+    if code.is_empty() {
+        return Ok(core::ptr::null_mut());
+    }
+
+    let ptr = unsafe {
+        VirtualAlloc(
+            core::ptr::null_mut(),
+            code.len(),
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        )
+    };
+    if ptr.is_null() {
+        return Err(BpfError::VerificationFailed(alloc::format!(
+            "VirtualAlloc failed for {} JIT bytes",
+            code.len()
+        )));
+    }
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(code.as_ptr(), ptr.cast::<u8>(), code.len());
+        let mut old_protect = 0u32;
+        if VirtualProtect(ptr, code.len(), PAGE_EXECUTE_READ, &mut old_protect) == 0 {
+            let _ = VirtualFree(ptr, 0, MEM_RELEASE);
+            return Err(BpfError::VerificationFailed(alloc::format!(
+                "VirtualProtect failed for {} JIT bytes",
+                code.len()
+            )));
+        }
+        let _ = FlushInstructionCache(GetCurrentProcess(), ptr.cast_const(), code.len());
+    }
+    Ok(ptr.cast::<u8>())
+}
+
+pub fn compile_bytes(program: &[BpfInsn]) -> Result<Vec<u8>, BpfError> {
+    host_smoke_probe("compile_bytes:verify:begin");
+    BpfVerifier::verify(program)?;
+    host_smoke_probe("compile_bytes:verify:end");
+
+    host_smoke_probe("compile_bytes:new:begin");
+    let mut jit = JitCompiler::new();
+    host_smoke_probe("compile_bytes:new:end");
+    host_smoke_probe("compile_bytes:prologue:begin");
+    jit.emit_prologue();
+    host_smoke_probe("compile_bytes:prologue:end");
+
+    for (i, insn) in program.iter().enumerate() {
+        host_smoke_probe("compile_bytes:emit_insn:begin");
+        jit.insn_offsets.push(jit.code.len());
+        jit.emit_insn(i, insn, program.len())?;
+        host_smoke_probe("compile_bytes:emit_insn:end");
+    }
+
+    host_smoke_probe("compile_bytes:fixups:prep");
+    jit.insn_offsets.push(jit.code.len());
+    host_smoke_probe("compile_bytes:fixups:begin");
+    jit.apply_fixups()?;
+    host_smoke_probe("compile_bytes:fixups:end");
+
+    if jit.code.len() > MAX_JIT_SIZE {
+        return Err(BpfError::ProgramTooLarge(program.len()));
+    }
+
+    host_smoke_probe("compile_bytes:return");
+    Ok(jit.code)
+}
 
 /// eBPF JIT alt sistemini başlatır.
 pub fn init() {

@@ -12,9 +12,9 @@ use ech_os::fs::btrfs::{
     BTRFS_CSUM_TYPE_CRC32, BTRFS_CSUM_TYPE_XXHASH, BTRFS_MAGIC, BTRFS_SUPERBLOCK_SIZE,
 };
 use ech_os::net::io_uring::{
-    get_cqe as io_uring_get_cqe, get_io_uring, io_uring_close, io_uring_register,
-    io_uring_setup, submit_sqe as io_uring_submit_sqe, IoUringParams, IoUringRegisteredBuffer,
-    IoUringSqe, IORING_OP_NOP, IORING_OP_READ_FIXED, IORING_SETUP_SQPOLL, IOSQE_FIXED_FILE,
+    get_cqe as io_uring_get_cqe, get_io_uring, io_uring_close, io_uring_register, io_uring_setup,
+    submit_sqe as io_uring_submit_sqe, IoUringParams, IoUringRegisteredBuffer, IoUringSqe,
+    IORING_OP_NOP, IORING_OP_READ_FIXED, IORING_SETUP_SQPOLL, IOSQE_FIXED_FILE,
 };
 use ech_os::net::socket::{self, AddressFamily, Protocol, SocketType};
 use ech_os::rcu::{SrcuDomain, TreeRcuDomain};
@@ -113,7 +113,10 @@ fn verify_wifi_mlo() {
         .expect("MLO session");
 
     assert_eq!(session.primary.band, WifiBand::Band6G);
-    assert!(session.secondary.iter().any(|link| link.band == WifiBand::Band5G));
+    assert!(session
+        .secondary
+        .iter()
+        .any(|link| link.band == WifiBand::Band5G));
     assert!(session.link_count() >= 2);
     assert!(session.aggregate_mbps > session.primary.estimated_mbps);
 }
@@ -196,8 +199,8 @@ fn verify_io_uring() {
     assert_eq!(ring.registered_file_count(), files.len());
     assert_eq!(ring.registered_buffer_count(), buffers.len());
 
-    let socket_fd = socket::socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::DEFAULT)
-        .expect("socket");
+    let socket_fd =
+        socket::socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::DEFAULT).expect("socket");
     let fixed_files = [socket_fd as i32];
     let mut fast_path_buf = [0u8; 64];
     let fixed_buffers = [IoUringRegisteredBuffer {

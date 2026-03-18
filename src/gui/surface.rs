@@ -1,7 +1,8 @@
 //! Surface registry for desktop composition.
 
 use crate::gui::protocol::{
-    AppId, DamageEpoch, FenceId, GpuBufferHandle, Rect, SharedSurfaceDescriptor, SurfaceId,
+    AppId, DamageEpoch, FenceId, GpuBufferHandle, Rect, SceneUpdate, SharedSurfaceDescriptor,
+    SurfaceId, WindowBufferMode,
 };
 use crate::gui::surface_memory::SharedSurfaceMemory;
 use alloc::collections::BTreeMap;
@@ -24,6 +25,7 @@ pub struct SurfaceRecord {
     pub gpu_buffer_handle: GpuBufferHandle,
     pub damage_epoch: DamageEpoch,
     pub fence_id: FenceId,
+    pub scene_update: Option<SceneUpdate>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +40,8 @@ pub struct SurfaceInfo {
     pub gpu_buffer_handle: GpuBufferHandle,
     pub damage_epoch: DamageEpoch,
     pub fence_id: FenceId,
+    pub scene_root: Option<u64>,
+    pub buffer_mode: WindowBufferMode,
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +59,70 @@ pub struct SurfaceManager {
 }
 
 impl SurfaceManager {
+    fn effective_object_bounds(object: &crate::gui::protocol::RenderObject) -> Rect {
+        match object.clip {
+            Some(clip) => object.bounds.intersection(&clip).unwrap_or_default(),
+            None => object.bounds,
+        }
+    }
+
+    fn scene_damage(
+        previous: Option<&SceneUpdate>,
+        next: &SceneUpdate,
+        fallback: Rect,
+    ) -> Vec<Rect> {
+        let mut damage = Vec::new();
+        if let Some(previous) = previous {
+            let previous_map = previous
+                .render_objects
+                .iter()
+                .map(|object| (object.object_id, object))
+                .collect::<BTreeMap<_, _>>();
+            let next_map = next
+                .render_objects
+                .iter()
+                .map(|object| (object.object_id, object))
+                .collect::<BTreeMap<_, _>>();
+
+            for object_id in previous_map
+                .keys()
+                .chain(next_map.keys())
+                .copied()
+                .collect::<alloc::collections::BTreeSet<_>>()
+            {
+                let previous_object = previous_map.get(&object_id).copied();
+                let next_object = next_map.get(&object_id).copied();
+                let rect = match (previous_object, next_object) {
+                    (Some(old), Some(new)) if old == new => None,
+                    (Some(old), Some(new)) => {
+                        let old_bounds = Self::effective_object_bounds(old);
+                        let new_bounds = Self::effective_object_bounds(new);
+                        Some(old_bounds.union(&new_bounds))
+                    }
+                    (Some(old), None) => Some(Self::effective_object_bounds(old)),
+                    (None, Some(new)) => Some(Self::effective_object_bounds(new)),
+                    (None, None) => None,
+                };
+                if let Some(rect) = rect {
+                    if rect.is_empty() || damage.iter().any(|existing| *existing == rect) {
+                        continue;
+                    }
+                    damage.push(rect);
+                }
+            }
+        }
+        for rect in next.damage_hint.iter().copied() {
+            if rect.is_empty() || damage.iter().any(|existing| *existing == rect) {
+                continue;
+            }
+            damage.push(rect);
+        }
+        if damage.is_empty() {
+            damage.push(fallback);
+        }
+        damage
+    }
+
     pub fn new() -> Self {
         Self {
             next_id: 1,
@@ -85,6 +153,7 @@ impl SurfaceManager {
             gpu_buffer_handle: id,
             damage_epoch: 1,
             fence_id: 0,
+            scene_update: None,
         };
         self.surfaces.insert(id, record);
         Ok(id)
@@ -168,9 +237,32 @@ impl SurfaceManager {
         if let Some(shared) = surface.shared.as_ref() {
             let _ = shared.write_full(pixels);
         }
+        surface.scene_update = None;
         surface.dirty = true;
         surface.damage_epoch = surface.damage_epoch.saturating_add(1);
         Ok(())
+    }
+
+    pub fn commit_scene(
+        &mut self,
+        surface_id: SurfaceId,
+        mut scene: SceneUpdate,
+    ) -> Result<Vec<Rect>, SurfaceError> {
+        let surface = self
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or(SurfaceError::SurfaceNotFound)?;
+        scene.canonicalize();
+        scene.damage_hint = Self::scene_damage(
+            surface.scene_update.as_ref(),
+            &scene,
+            Rect::new(0, 0, surface.rect.width, surface.rect.height),
+        );
+        let damage_hint = scene.damage_hint.clone();
+        surface.scene_update = Some(scene);
+        surface.dirty = true;
+        surface.damage_epoch = surface.damage_epoch.saturating_add(1);
+        Ok(damage_hint)
     }
 
     pub fn map_shared_surface(
@@ -183,7 +275,9 @@ impl SurfaceManager {
             .ok_or(SurfaceError::SurfaceNotFound)?;
         let shared = surface
             .shared
-            .get_or_insert_with(|| SharedSurfaceMemory::new(surface.rect.width, surface.rect.height))
+            .get_or_insert_with(|| {
+                SharedSurfaceMemory::new(surface.rect.width, surface.rect.height)
+            })
             .clone();
         Ok(SharedSurfaceDescriptor {
             client_id: surface.app_id,
@@ -260,6 +354,12 @@ impl SurfaceManager {
                 gpu_buffer_handle: s.gpu_buffer_handle,
                 damage_epoch: s.damage_epoch,
                 fence_id: s.fence_id,
+                scene_root: s.scene_update.as_ref().map(|scene| scene.root_id),
+                buffer_mode: if s.scene_update.is_some() {
+                    WindowBufferMode::Scene
+                } else {
+                    WindowBufferMode::Pixels
+                },
             })
             .collect()
     }
@@ -290,5 +390,73 @@ impl SurfaceManager {
             return Err(SurfaceError::OutOfMemory);
         }
         Ok(len_u64 as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::protocol::{DamageLane, RenderObject, RenderObjectKind, SceneUpdate};
+
+    fn solid(id: u64, rect: Rect) -> RenderObject {
+        RenderObject {
+            object_id: id,
+            bounds: rect,
+            clip: None,
+            z_index: id as u32,
+            opacity: u8::MAX,
+            lane: DamageLane::Shell,
+            kind: RenderObjectKind::SolidRect {
+                color: 0xFF00FF00,
+                corner_radius: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn scene_damage_only_marks_changed_objects() {
+        let previous = SceneUpdate {
+            root_id: 1,
+            revision: 1,
+            render_objects: vec![solid(1, Rect::new(0, 0, 40, 20)), solid(2, Rect::new(50, 0, 30, 20))],
+            damage_hint: Vec::new(),
+            semantic_root: None,
+        };
+        let next = SceneUpdate {
+            root_id: 1,
+            revision: 2,
+            render_objects: vec![solid(1, Rect::new(0, 0, 40, 20)), solid(2, Rect::new(56, 0, 30, 20))],
+            damage_hint: Vec::new(),
+            semantic_root: None,
+        };
+
+        let damage = SurfaceManager::scene_damage(Some(&previous), &next, Rect::new(0, 0, 96, 48));
+        assert_eq!(damage, vec![Rect::new(50, 0, 36, 20)]);
+    }
+
+    #[test]
+    fn commit_scene_returns_precise_damage_hint() {
+        let mut surfaces = SurfaceManager::new();
+        let surface_id = surfaces.create_surface(7, 96, 48).unwrap();
+        let first = SceneUpdate {
+            root_id: 3,
+            revision: 1,
+            render_objects: vec![solid(1, Rect::new(0, 0, 20, 20)), solid(2, Rect::new(24, 0, 20, 20))],
+            damage_hint: Vec::new(),
+            semantic_root: None,
+        };
+        let second = SceneUpdate {
+            root_id: 3,
+            revision: 2,
+            render_objects: vec![solid(1, Rect::new(0, 0, 20, 20)), solid(2, Rect::new(30, 0, 20, 20))],
+            damage_hint: Vec::new(),
+            semantic_root: None,
+        };
+
+        let first_damage = surfaces.commit_scene(surface_id, first).unwrap();
+        assert_eq!(first_damage, vec![Rect::new(0, 0, 96, 48)]);
+
+        let second_damage = surfaces.commit_scene(surface_id, second).unwrap();
+        assert_eq!(second_damage, vec![Rect::new(24, 0, 26, 20)]);
     }
 }

@@ -86,6 +86,16 @@ pub struct FragmentEntry {
 /// Küresel parça birleştirme tablosu
 static FRAGMENT_TABLE: Mutex<BTreeMap<FragmentKey, FragmentEntry>> = Mutex::new(BTreeMap::new());
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct IcmpEchoKey {
+    peer: Ipv4Addr,
+    identifier: u16,
+    sequence: u16,
+}
+
+static ICMP_ECHO_OUTSTANDING: Mutex<BTreeMap<IcmpEchoKey, u64>> = Mutex::new(BTreeMap::new());
+static ICMP_ECHO_REPLIES: Mutex<BTreeMap<IcmpEchoKey, u32>> = Mutex::new(BTreeMap::new());
+
 /// Parça birleştirme zaman aşımı (15 saniye — tick cinsinden, ~1 tick/saniye varsayımı)
 const FRAGMENT_TIMEOUT_TICKS: u64 = 15;
 
@@ -626,6 +636,58 @@ const ICMP_TYPE_ECHO_REPLY: u8 = 0;
 const ICMP_TYPE_ECHO_REQUEST: u8 = 8;
 const ICMP_TYPE_TIME_EXCEEDED: u8 = 11; // TTL=0 veya fragment reassembly timeout
 
+pub fn send_icmp_echo_request(
+    dest: Ipv4Addr,
+    identifier: u16,
+    sequence: u16,
+    payload: &[u8],
+) -> Result<(), NetError> {
+    let mut icmp_buf = Vec::with_capacity(8 + payload.len());
+    icmp_buf.push(ICMP_TYPE_ECHO_REQUEST);
+    icmp_buf.push(0);
+    icmp_buf.extend_from_slice(&[0u8; 2]);
+    icmp_buf.extend_from_slice(&identifier.to_be_bytes());
+    icmp_buf.extend_from_slice(&sequence.to_be_bytes());
+    icmp_buf.extend_from_slice(payload);
+
+    let checksum = compute_checksum(&icmp_buf);
+    icmp_buf[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+    let mut ip_buf = vec![0u8; 1500];
+    let len = build_packet(dest, IpProtocol::ICMP, &icmp_buf, &mut ip_buf)?;
+    match super::arp::send_to_ip(dest, &ip_buf[..len]) {
+        Ok(()) | Err(NetError::WouldBlock) => {}
+        Err(err) => return Err(err),
+    }
+
+    ICMP_ECHO_OUTSTANDING.lock().insert(
+        IcmpEchoKey {
+            peer: dest,
+            identifier,
+            sequence,
+        },
+        crate::interrupts::get_ticks(),
+    );
+
+    Ok(())
+}
+
+pub fn take_icmp_echo_reply(dest: Ipv4Addr, identifier: u16, sequence: u16) -> Option<u32> {
+    ICMP_ECHO_REPLIES.lock().remove(&IcmpEchoKey {
+        peer: dest,
+        identifier,
+        sequence,
+    })
+}
+
+pub fn cancel_icmp_echo_request(dest: Ipv4Addr, identifier: u16, sequence: u16) {
+    ICMP_ECHO_OUTSTANDING.lock().remove(&IcmpEchoKey {
+        peer: dest,
+        identifier,
+        sequence,
+    });
+}
+
 /// ICMP Time Exceeded mesajı gönderir (RFC 792).
 ///
 /// Kullanım:
@@ -680,17 +742,18 @@ pub fn send_icmp_time_exceeded(orig_ip_hdr: &Ipv4Header, orig_payload: &[u8]) {
     // IP paketi oluştur: hedef = orijinal kaynak, kaynak = biz
     let mut ip_buf = vec![0u8; 64];
     match build_packet(orig_ip_hdr.src, IpProtocol::ICMP, &icmp_buf, &mut ip_buf) {
-        Ok(len) => {
-            if let Err(e) = super::send_packet(&ip_buf[..len]) {
-                crate::serial_println!("[ICMP] Failed to send Time Exceeded: {:?}", e);
-            } else {
+        Ok(len) => match super::arp::send_to_ip(orig_ip_hdr.src, &ip_buf[..len]) {
+            Ok(()) | Err(NetError::WouldBlock) => {
                 crate::serial_println!(
                     "[ICMP] Time Exceeded sent to {} (orig src: {})",
                     orig_ip_hdr.src,
                     orig_ip_hdr.dst
                 );
             }
-        }
+            Err(e) => {
+                crate::serial_println!("[ICMP] Failed to send Time Exceeded: {:?}", e);
+            }
+        },
         Err(e) => {
             crate::serial_println!("[ICMP] Failed to build Time Exceeded packet: {:?}", e);
         }
@@ -736,9 +799,34 @@ pub fn icmp_process(packet: &Ipv4Packet) -> Result<(), NetError> {
             &mut ip_buf,
         )?;
 
-        super::send_packet(&ip_buf[..len])?;
+        match super::arp::send_to_ip(packet.header.src, &ip_buf[..len]) {
+            Ok(()) | Err(NetError::WouldBlock) => {}
+            Err(err) => return Err(err),
+        }
 
         crate::serial_println!("[ICMP] Echo Reply sent to {}", packet.header.src);
+    } else if icmp_type == ICMP_TYPE_ECHO_REPLY && icmp_code == 0 && packet.payload.len() >= 8 {
+        let identifier = u16::from_be_bytes([packet.payload[4], packet.payload[5]]);
+        let sequence = u16::from_be_bytes([packet.payload[6], packet.payload[7]]);
+        let key = IcmpEchoKey {
+            peer: packet.header.src,
+            identifier,
+            sequence,
+        };
+        let now = crate::interrupts::get_ticks();
+        let rtt = if let Some(sent_tick) = ICMP_ECHO_OUTSTANDING.lock().remove(&key) {
+            now.saturating_sub(sent_tick) as u32
+        } else {
+            0
+        };
+        ICMP_ECHO_REPLIES.lock().insert(key, rtt);
+        crate::serial_println!(
+            "[ICMP] Echo Reply received from {} id={} seq={} rtt={}",
+            packet.header.src,
+            identifier,
+            sequence,
+            rtt
+        );
     }
 
     Ok(())

@@ -1,23 +1,35 @@
 //! Active desktop session runtime for the native echOS shell.
 
 use crate::font::vga_font;
+use crate::gfx::shell_invalidation::{ShellFramePlan, ShellInvalidationState};
+use crate::gfx::shell_scene::raster_surface_scene;
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::animation::{
+    add_animation, get_animation_value, get_time_ns, remove_animation, update_animations,
+    Animation, AnimationTarget, AnimationTargetType,
+};
 use crate::gui::client::{ClientWindow, DesktopClient};
+use crate::gui::layout::{layout_flex, EdgeInsets, FlexDirection, FlexItem};
 use crate::gui::protocol::{
     AccessibilityNode, AccessibilityRole, AppHealth, ClipboardPayload, CommandPaletteAction,
-    DesktopPermission, DialogKind, DialogSelection, InputEvent, KeyState, NotificationEntry,
-    NotificationLevel, PermissionState, Point, Rect, SessionPowerState, SessionSnapshot,
-    ShellAppEntry, ShellShortcut, StageSet, WindowId, WindowInputEvent, MOD_CTRL,
+    DamageLane, DesktopPermission, DialogKind, DialogSelection, InputEvent, InvalidationReason,
+    InvalidationTarget, KeyState, LayerRole, NotificationEntry, NotificationLevel,
+    PermissionState, Point, Rect, RenderObjectKind, SceneNodeId, SessionPowerState,
+    SessionSnapshot, ShellAppEntry, ShellShortcut, ShellState, StageSet, WindowFlags, WindowId,
+    WindowInputEvent, WorkspaceLayout, WorkspaceRule, MOD_CTRL,
 };
+use crate::gui::scene::SceneGraph;
+use crate::gui::text::{TextStyle, TextSystem};
 use crate::gui::theme::{ShellLayoutProfile, Theme, ThemeMode};
 use crate::gui::window_manager::{
     BORDER_THICKNESS, MIN_CONTENT_HEIGHT, MIN_CONTENT_WIDTH, TITLEBAR_HEIGHT,
 };
+use crate::personalization::{hybrid_windowing, virtual_desktops};
 use crate::security::users::USER_DB;
 use crate::services::FileEntry;
 use crate::tty::pty::{
-    configure_pty_for_shell, execute_command_on_pty, pty_has_output, write_welcome_message,
-    PtyPair, Winsize, PTY_MANAGER,
+    configure_pty_for_shell, execute_command_on_pty_with_shell, pty_has_output,
+    write_welcome_message, PtyPair, Winsize, PTY_MANAGER,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -32,6 +44,8 @@ const TERMINAL_APP_ID: u32 = 10;
 const FILES_APP_ID: u32 = 11;
 const SETTINGS_APP_ID: u32 = 12;
 const EDITOR_APP_ID: u32 = 13;
+const WORKSPACE_COUNT: u8 = 8;
+const SCRATCHPAD_WORKSPACE: u8 = WORKSPACE_COUNT;
 
 const FONT_WIDTH: i32 = 8;
 const FONT_HEIGHT: i32 = 16;
@@ -47,6 +61,36 @@ const ACCENT_BLUE: u32 = 0xFF5AB3FF;
 const ACCENT_GOLD: u32 = 0xFFFFB84D;
 const ACCENT_CORAL: u32 = 0xFFFF7866;
 const ACCENT_SOFT: u32 = 0xFF7FE6A6;
+
+fn shell_layer_flags() -> WindowFlags {
+    WindowFlags::layer_shell()
+}
+
+fn scratchpad_flags() -> WindowFlags {
+    WindowFlags {
+        scratchpad: true,
+        ..WindowFlags::layer_shell()
+    }
+}
+
+fn default_workspace_rule(workspace_id: u8) -> WorkspaceRule {
+    let mut name = [0u8; 16];
+    let label = match workspace_id {
+        0 => "Prime",
+        1 => "Build",
+        2 => "Observe",
+        3 => "Docs",
+        4 => "Net",
+        5 => "Media",
+        6 => "Lab",
+        7 => "Ops",
+        _ => "Scratchpad",
+    };
+    let bytes = label.as_bytes();
+    let len = bytes.len().min(name.len());
+    name[..len].copy_from_slice(&bytes[..len]);
+    WorkspaceRule::new(name, WorkspaceLayout::Dwindle)
+}
 
 #[derive(Clone, Copy)]
 struct UiPalette {
@@ -65,28 +109,20 @@ struct UiPalette {
 }
 
 fn hybrid_titan_palette(theme_mode: ThemeMode) -> UiPalette {
-    let dark_preferred = false;
-    let resolved_mode = Theme::resolve_mode(theme_mode, dark_preferred);
-    let tokens = Theme::resolved_tokens(theme_mode, dark_preferred);
-    let panel_bg = tokens.surfaces.sidebar;
-    let panel_alt = tokens.surfaces.field;
-    let text_primary = Theme::text_with_contrast(resolved_mode, panel_bg, tokens.text.primary, 96);
-    let text_secondary =
-        Theme::text_with_contrast(resolved_mode, panel_bg, tokens.text.secondary, 72);
-    let text_muted = Theme::text_with_contrast(resolved_mode, panel_alt, tokens.text.tertiary, 56);
+    let _ = theme_mode;
     UiPalette {
-        window_bg: tokens.surfaces.window,
-        panel_bg,
-        panel_alt,
-        border: tokens.borders.subtle,
-        text_primary,
-        text_secondary,
-        text_muted,
-        accent_mint: tokens.accent.primary,
-        accent_blue: tokens.accent.secondary,
-        accent_gold: tokens.accent.warning,
-        accent_coral: tokens.accent.error,
-        accent_soft: tokens.accent.success,
+        window_bg: 0xFF0C1722,
+        panel_bg: 0xFF0A131E,
+        panel_alt: 0xFF111C29,
+        border: 0xFF2B4156,
+        text_primary: 0xFFEDF4FB,
+        text_secondary: 0xFFA6B7CA,
+        text_muted: 0xFF6D8196,
+        accent_mint: 0xFF29E4C6,
+        accent_blue: 0xFF60B8FF,
+        accent_gold: 0xFFFFBB57,
+        accent_coral: 0xFFFF7474,
+        accent_soft: 0xFF5DE1A4,
     }
 }
 
@@ -136,6 +172,15 @@ impl AppKind {
             Self::Editor => '4',
         }
     }
+
+    fn dock_label(self) -> &'static str {
+        match self {
+            Self::Terminal => "T",
+            Self::Files => "F",
+            Self::Settings => "S",
+            Self::Editor => "W",
+        }
+    }
 }
 
 fn app_kind_from_id(app_id: u32) -> Option<AppKind> {
@@ -171,6 +216,9 @@ struct SessionWindow {
     content_rect: Rect,
     visible: bool,
     focused: bool,
+    opacity: f32,
+    desired_visible: bool,
+    fading_out: bool,
 }
 
 impl SessionWindow {
@@ -180,6 +228,9 @@ impl SessionWindow {
             content_rect: window.content_rect,
             visible: true,
             focused: false,
+            opacity: 1.0,
+            desired_visible: true,
+            fading_out: false,
         }
     }
 
@@ -192,6 +243,117 @@ impl SessionWindow {
         self.focused = info.focused;
         changed
     }
+}
+
+fn animation_window_id(window_id: WindowId) -> u32 {
+    window_id as u32
+}
+
+fn window_opacity_target(window_id: WindowId) -> AnimationTarget {
+    AnimationTarget {
+        target_type: AnimationTargetType::WindowOpacity,
+        id: animation_window_id(window_id),
+    }
+}
+
+fn animate_shell_surface(
+    client: &DesktopClient,
+    window: &mut SessionWindow,
+    visible: bool,
+    animated: bool,
+    duration: f64,
+) {
+    let target = window_opacity_target(window.window_id);
+    remove_animation(&target);
+
+    if visible {
+        let _ = client.set_visibility(window.window_id, true);
+        window.visible = true;
+        window.desired_visible = true;
+        window.fading_out = false;
+        if animated {
+            window.opacity = 0.0;
+            let _ = add_animation(Animation::opacity(
+                animation_window_id(window.window_id),
+                0.0,
+                1.0,
+                duration,
+            ));
+        } else {
+            window.opacity = 1.0;
+        }
+    } else if animated && window.visible {
+        window.desired_visible = false;
+        window.fading_out = true;
+        let start = window.opacity.clamp(0.0, 1.0);
+        let _ = add_animation(Animation::opacity(
+            animation_window_id(window.window_id),
+            start,
+            0.0,
+            duration,
+        ));
+    } else {
+        let _ = client.set_visibility(window.window_id, false);
+        window.visible = false;
+        window.desired_visible = false;
+        window.fading_out = false;
+        window.opacity = 0.0;
+    }
+}
+
+fn refresh_shell_surface_animation(client: &DesktopClient, window: &mut SessionWindow) -> bool {
+    let target = window_opacity_target(window.window_id);
+    let mut changed = false;
+
+    if let Some(value) = get_animation_value(&target) {
+        let next = value.clamp(0.0, 1.0);
+        if (window.opacity - next).abs() > 0.01 {
+            window.opacity = next;
+            changed = true;
+        }
+    } else if window.desired_visible && window.opacity < 1.0 {
+        window.opacity = 1.0;
+        changed = true;
+    }
+
+    if window.fading_out && window.opacity <= 0.01 {
+        let _ = client.set_visibility(window.window_id, false);
+        window.visible = false;
+        window.fading_out = false;
+        window.opacity = 0.0;
+        changed = true;
+    }
+
+    changed
+}
+
+fn set_shell_surface_visibility(
+    client: &DesktopClient,
+    window: &mut SessionWindow,
+    visible: bool,
+) {
+    let _ = client.set_visibility(window.window_id, visible);
+    window.visible = visible;
+    window.desired_visible = visible;
+    window.opacity = if visible { 1.0 } else { 0.0 };
+    window.fading_out = false;
+}
+
+fn task_strip_window_rect(screen: Rect) -> Rect {
+    let available = screen.width.saturating_sub(48);
+    let width = if available >= 354 {
+        354
+    } else if available >= 260 {
+        available
+    } else {
+        available.max(200)
+    };
+    Rect::new(
+        screen.x + ((screen.width.saturating_sub(width)) / 2) as i32,
+        screen.bottom() - (Theme::PULSE_DOCK_HEIGHT as i32 + 56),
+        width,
+        Theme::PULSE_DOCK_HEIGHT as u32,
+    )
 }
 
 #[derive(Clone)]
@@ -236,17 +398,7 @@ struct ShellRuntime {
     notification_index: usize,
     auth_input: String,
     logged_in: bool,
-    dirty_launcher: bool,
-    dirty_notifications: bool,
-    dirty_quick_settings: bool,
-    dirty_command_palette: bool,
-    dirty_stage_rail: bool,
-    dirty_top_bar: bool,
-    dirty_task_strip: bool,
-    dirty_dialog: bool,
-    dirty_context_menu: bool,
-    dirty_switcher: bool,
-    dirty_lock: bool,
+    invalidation: ShellInvalidationState,
 }
 
 struct TerminalApp {
@@ -255,6 +407,7 @@ struct TerminalApp {
     workspace_id: u8,
     lines: Vec<String>,
     input: String,
+    shell: crate::shell::Shell,
     pty: Option<Arc<PtyPair>>,
     pending_dialogs: Vec<u64>,
     dirty: bool,
@@ -308,6 +461,7 @@ struct EditorDialog {
 struct DesktopSession {
     screen: Rect,
     shell: ShellRuntime,
+    text_system: TextSystem,
     terminal: TerminalApp,
     files: FilesApp,
     settings: SettingsApp,
@@ -315,6 +469,7 @@ struct DesktopSession {
     appliance_auto_login_pending: bool,
     desktop_ready_published: bool,
     app_basket_committed: bool,
+    last_tick_ns: u64,
 }
 
 pub struct VelvetGloveCompositor;
@@ -346,6 +501,47 @@ impl VelvetGloveCompositor {
 }
 
 impl DesktopSession {
+    fn invalidate_shell(&mut self, target: InvalidationTarget, reason: InvalidationReason) {
+        self.shell.invalidation.mark(target, reason);
+    }
+
+    fn invalidate_shell_many(
+        &mut self,
+        targets: &[InvalidationTarget],
+        reason: InvalidationReason,
+    ) {
+        self.shell.invalidation.mark_many(targets, reason);
+    }
+
+    fn shell_state(&self) -> ShellState {
+        if self.is_locked() {
+            ShellState::Locked
+        } else if self.shell.quick_settings.visible
+            || self.shell.command_palette.visible
+            || self.shell.stage_rail.visible
+            || self.shell.dialog.visible
+            || self.shell.context_menu.visible
+            || self.shell.switcher.visible
+        {
+            ShellState::OverlayInteractive
+        } else {
+            ShellState::DesktopReady
+        }
+    }
+
+    fn commit_shell_surface(
+        &self,
+        window: &SessionWindow,
+        width: usize,
+        height: usize,
+        pixels: Vec<u32>,
+    ) -> Result<(), String> {
+        self.shell.client.commit_scene(
+            window.window_id,
+            raster_surface_scene(window.window_id, width, height, pixels, DamageLane::Shell),
+        )
+    }
+
     fn new(screen: Rect) -> Result<Self, String> {
         debug_marker(b"N00\n");
         crate::serial_println!("[DESKTOP] session bootstrap step=connect");
@@ -358,81 +554,121 @@ impl DesktopSession {
 
         debug_marker(b"N10\n");
         crate::serial_println!("[DESKTOP] session bootstrap step=shell-windows");
-        let top_bar_window = shell_client.create_window(
+        let top_bar_window = shell_client.create_layer_window(
             "Top Bar",
             screen.x + 18,
             screen.y + 18,
             screen.width.saturating_sub(36),
             Theme::HALO_BAR_HEIGHT as u32,
+            0,
+            LayerRole::TopBar,
+            shell_layer_flags(),
         )?;
-        let task_strip_window = shell_client.create_window(
+        let task_strip_rect = task_strip_window_rect(screen);
+        let task_strip_window = shell_client.create_layer_window(
             "Task Strip",
-            screen.x + 18,
-            screen.bottom() - (Theme::PULSE_DOCK_HEIGHT as i32 + 56),
-            screen.width.saturating_sub(36),
-            Theme::PULSE_DOCK_HEIGHT as u32,
+            task_strip_rect.x,
+            task_strip_rect.y,
+            task_strip_rect.width,
+            task_strip_rect.height,
+            0,
+            LayerRole::Dock,
+            shell_layer_flags(),
         )?;
-        let launcher_window = shell_client.create_window(
+        let launcher_window = shell_client.create_layer_window(
             "Session Shell",
             screen.x + 32,
             screen.y + 108,
             min(392, screen.width.saturating_sub(96)),
             min(332, screen.height.saturating_sub(172)),
+            0,
+            LayerRole::Overlay,
+            shell_layer_flags(),
         )?;
-        let notifications_window = shell_client.create_window(
+        let notifications_window = shell_client.create_layer_window(
             "Notifications",
             screen.right() - 364,
             screen.y + 108,
             320,
             220,
+            0,
+            LayerRole::Overlay,
+            shell_layer_flags(),
         )?;
-        let quick_settings_window = shell_client.create_window(
+        let quick_settings_window = shell_client.create_layer_window(
             "Quick Settings",
             screen.right() - 364,
             screen.y + 348,
             320,
             232,
+            0,
+            LayerRole::Overlay,
+            shell_layer_flags(),
         )?;
-        let command_palette_window = shell_client.create_window(
+        let command_palette_window = shell_client.create_layer_window(
             "Command Palette",
             screen.x + (screen.width as i32 / 2) - 310,
             screen.y + 136,
             620,
             312,
+            0,
+            LayerRole::Overlay,
+            shell_layer_flags(),
         )?;
-        let stage_rail_window =
-            shell_client.create_window("Stage Rail", screen.x + 18, screen.y + 108, 236, 264)?;
-        let dialog_window = shell_client.create_window(
+        let stage_rail_window = shell_client.create_layer_window(
+            "Workspace Overview",
+            screen.x + 18,
+            screen.y + 108,
+            236,
+            264,
+            0,
+            LayerRole::Overlay,
+            shell_layer_flags(),
+        )?;
+        let dialog_window = shell_client.create_layer_window(
             "Dialog Broker",
             screen.x + (screen.width as i32 / 2) - 180,
             screen.y + (screen.height as i32 / 2) - 120,
             360,
             190,
+            0,
+            LayerRole::Modal,
+            shell_layer_flags(),
         )?;
-        let context_menu_window = shell_client.create_window(
+        let context_menu_window = shell_client.create_layer_window(
             "Context Menu",
             screen.right() - 310,
             screen.bottom() - 290,
             240,
             224,
+            0,
+            LayerRole::Overlay,
+            shell_layer_flags(),
         )?;
-        let switcher_window = shell_client.create_window(
+        let switcher_window = shell_client.create_layer_window(
             "App Switcher",
             screen.x + (screen.width as i32 / 2) - 220,
             screen.y + (screen.height as i32 / 2) - 120,
             440,
             240,
+            0,
+            LayerRole::Overlay,
+            shell_layer_flags(),
         )?;
-        let lock_window = shell_client.create_window(
+        let lock_window = shell_client.create_layer_window(
             "Login",
             screen.x + (screen.width as i32 / 2) - 240,
             screen.y + (screen.height as i32 / 2) - 160,
             480,
             320,
+            0,
+            LayerRole::Modal,
+            shell_layer_flags(),
         )?;
         let _ = shell_client.set_visibility(dialog_window.window_id, false);
         let _ = shell_client.set_visibility(context_menu_window.window_id, false);
         let _ = shell_client.set_visibility(switcher_window.window_id, false);
+        let _ = shell_client.set_visibility(notifications_window.window_id, false);
         let _ = shell_client.set_visibility(quick_settings_window.window_id, false);
         let _ = shell_client.set_visibility(command_palette_window.window_id, false);
         debug_marker(b"N20\n");
@@ -454,6 +690,22 @@ impl DesktopSession {
         grant_default_file_access(&shell_client, &["/", "/workspace", "/system"]);
         let _ = shell_client.set_power_state(SessionPowerState::Active);
         let _ = shell_client.set_theme_mode(Theme::default_mode());
+        for workspace_id in 0..WORKSPACE_COUNT {
+            let rule = default_workspace_rule(workspace_id);
+            let _ = shell_client.set_workspace_rule(workspace_id, rule);
+            let _ = shell_client.set_workspace_layout(workspace_id, rule.layout);
+            let _ = virtual_desktops().lock().set_profile(
+                workspace_id,
+                crate::personalization::DesktopProfile {
+                    wallpaper_id: workspace_id as u32,
+                    icon_pack: rule.default_name_str(),
+                },
+            );
+        }
+        let _ = shell_client.set_workspace_rule(
+            SCRATCHPAD_WORKSPACE,
+            default_workspace_rule(SCRATCHPAD_WORKSPACE),
+        );
         debug_marker(b"N30\n");
         crate::serial_println!("[DESKTOP] session bootstrap step=session-struct");
         let mut session = Self {
@@ -489,27 +741,19 @@ impl DesktopSession {
                 notification_index: 0,
                 auth_input: String::new(),
                 logged_in: false,
-                dirty_launcher: true,
-                dirty_notifications: true,
-                dirty_quick_settings: true,
-                dirty_command_palette: true,
-                dirty_stage_rail: true,
-                dirty_top_bar: true,
-                dirty_task_strip: true,
-                dirty_dialog: true,
-                dirty_context_menu: true,
-                dirty_switcher: true,
-                dirty_lock: true,
+                invalidation: ShellInvalidationState::bootstrap_shell(),
             },
+            text_system: TextSystem::new(),
             terminal: TerminalApp {
                 client: terminal_client,
                 window: None,
                 workspace_id: 0,
                 lines: vec![
                     String::from("echOS native terminal"),
-                    String::from("Type help, clear, or open <app>"),
+                    String::from("Type pwd, cd, ls, cp, or open <app>"),
                 ],
                 input: String::new(),
+                shell: crate::shell::Shell::new(),
                 pty: None,
                 pending_dialogs: Vec::new(),
                 dirty: true,
@@ -547,14 +791,29 @@ impl DesktopSession {
             appliance_auto_login_pending: crate::boot::appliance::auto_login_requested(),
             desktop_ready_published: false,
             app_basket_committed: false,
+            last_tick_ns: get_time_ns(),
         };
         session.shell.dialog.visible = false;
         session.shell.context_menu.visible = false;
         session.shell.switcher.visible = false;
+        session.shell.notifications.visible = false;
         session.shell.quick_settings.visible = false;
         session.shell.command_palette.visible = false;
-        session.shell.stage_rail.visible = true;
+        session.shell.stage_rail.visible = false;
         session.shell.lock_screen.visible = true;
+        for window in [
+            &mut session.shell.notifications,
+            &mut session.shell.dialog,
+            &mut session.shell.context_menu,
+            &mut session.shell.switcher,
+            &mut session.shell.quick_settings,
+            &mut session.shell.command_palette,
+            &mut session.shell.stage_rail,
+        ] {
+            window.opacity = 0.0;
+            window.desired_visible = false;
+            window.fading_out = false;
+        }
         debug_marker(b"N40\n");
         crate::serial_println!("[DESKTOP] session bootstrap step=login-visible");
         session.set_login_visibility(true);
@@ -578,6 +837,15 @@ impl DesktopSession {
     }
 
     fn tick(&mut self) {
+        let now = get_time_ns();
+        let dt =
+            ((now.saturating_sub(self.last_tick_ns)).min(100_000_000) as f64) / 1_000_000_000.0;
+        self.last_tick_ns = now;
+        if self.settings.animations && update_animations(dt.max(1.0 / 240.0)) {
+            self.refresh_shell_surface_animations();
+        } else {
+            self.refresh_shell_surface_animations();
+        }
         self.sync_window_states();
         self.rebuild_stage_sets();
         self.service_dialog_queue();
@@ -629,6 +897,45 @@ impl DesktopSession {
         let _ = self.shell.client.present_frame();
     }
 
+    fn refresh_shell_surface_animations(&mut self) {
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.quick_settings) {
+            self.invalidate_shell(
+                InvalidationTarget::QuickSettings,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.command_palette) {
+            self.invalidate_shell(
+                InvalidationTarget::CommandPalette,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.stage_rail) {
+            self.invalidate_shell(
+                InvalidationTarget::Overview,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.dialog) {
+            self.invalidate_shell(
+                InvalidationTarget::Dialog,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.context_menu) {
+            self.invalidate_shell(
+                InvalidationTarget::ContextMenu,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.switcher) {
+            self.invalidate_shell(
+                InvalidationTarget::Switcher,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+    }
+
     fn run_appliance_auto_login(&mut self) {
         if !self.appliance_auto_login_pending
             || self.shell.logged_in
@@ -640,7 +947,7 @@ impl DesktopSession {
         self.appliance_auto_login_pending = false;
         self.shell.auth_input.clear();
         self.shell.auth_input.push_str("echos");
-        self.shell.dirty_lock = true;
+        self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
         crate::serial_println!("[DESKTOP] appliance auto-login attempt");
         self.attempt_login();
     }
@@ -658,10 +965,10 @@ impl DesktopSession {
                     self.attempt_login();
                 } else if is_backspace_key(input) {
                     self.shell.auth_input.pop();
-                    self.shell.dirty_lock = true;
+                    self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
                 } else if let Some(ch) = printable_key(input) {
                     self.shell.auth_input.push(ch);
-                    self.shell.dirty_lock = true;
+                    self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
                 }
                 continue;
             }
@@ -750,19 +1057,19 @@ impl DesktopSession {
                 } else if is_backspace_key(input) {
                     self.shell.command_query.pop();
                     self.shell.command_selection = 0;
-                    self.shell.dirty_command_palette = true;
+                    self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
                 } else if key_scan_pressed(input, 0x24) {
                     self.shell.command_selection = self.shell.command_selection.saturating_add(1);
-                    self.shell.dirty_command_palette = true;
+                    self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
                 } else if key_scan_pressed(input, 0x25) {
                     self.shell.command_selection = self.shell.command_selection.saturating_sub(1);
-                    self.shell.dirty_command_palette = true;
+                    self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
                 } else if let Some(ch) = printable_key(input) {
                     if self.shell.command_query.len() < 48 {
                         self.shell.command_query.push(ch);
                     }
                     self.shell.command_selection = 0;
-                    self.shell.dirty_command_palette = true;
+                    self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
                 }
             }
 
@@ -886,9 +1193,15 @@ impl DesktopSession {
                         ..
                     } => {
                         if let Some(local) = event.local_position {
-                            if let Some(workspace_id) = task_strip_workspace_hit(local) {
+                            if let Some(workspace_id) = task_strip_workspace_hit(
+                                local,
+                                self.shell.task_strip.content_rect.width as usize,
+                            ) {
                                 commands.push(SessionCommand::SwitchWorkspace(workspace_id));
-                            } else if let Some(kind) = task_strip_app_hit(local) {
+                            } else if let Some(kind) = task_strip_app_hit(
+                                local,
+                                self.shell.task_strip.content_rect.width as usize,
+                            ) {
                                 match button {
                                     crate::gui::protocol::PointerButton::Right => {
                                         self.open_context_menu(kind)
@@ -905,9 +1218,6 @@ impl DesktopSession {
                     commands.push(SessionCommand::Activate(kind));
                 } else {
                     match digit_key_pressed(input) {
-                        Some(5) => commands.push(SessionCommand::SwitchWorkspace(0)),
-                        Some(6) => commands.push(SessionCommand::SwitchWorkspace(1)),
-                        Some(7) => commands.push(SessionCommand::SwitchWorkspace(2)),
                         _ if key_scan_pressed(input, 0x0F) => self.cycle_switcher(),
                         _ => {}
                     }
@@ -964,10 +1274,10 @@ impl DesktopSession {
                                             "Notification {} acknowledged",
                                             entry.id
                                         ));
-                                        self.shell.dirty_notifications = true;
-                                        self.shell.dirty_top_bar = true;
-                                        self.shell.dirty_task_strip = true;
-                                        self.shell.dirty_launcher = true;
+                                        self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
+                                        self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
+                                        self.invalidate_shell(InvalidationTarget::Dock, InvalidationReason::StateChanged);
+                                        self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
                                     }
                                 }
                             }
@@ -978,10 +1288,10 @@ impl DesktopSession {
 
                 if key_scan_pressed(input, 0x24) {
                     self.shell.notification_index = self.shell.notification_index.saturating_add(1);
-                    self.shell.dirty_notifications = true;
+                    self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
                 } else if key_scan_pressed(input, 0x25) {
                     self.shell.notification_index = self.shell.notification_index.saturating_sub(1);
-                    self.shell.dirty_notifications = true;
+                    self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
                 } else if key_scan_pressed(input, 0x18) {
                     if let Ok(entries) = self.shell.client.list_notifications(6) {
                         let display_entries: Vec<_> = entries.into_iter().rev().collect();
@@ -996,7 +1306,7 @@ impl DesktopSession {
                                     commands.push(SessionCommand::Activate(kind));
                                 }
                             }
-                            self.shell.dirty_notifications = true;
+                            self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
                         }
                     }
                 } else if key_scan_pressed(input, 0x2E) {
@@ -1027,12 +1337,12 @@ impl DesktopSession {
                     self.resolve_pending_dialog(true);
                 } else if is_backspace_key(input) {
                     self.shell.dialog_input.pop();
-                    self.shell.dirty_dialog = true;
+                    self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
                 } else if is_escape_key(input) {
                     self.resolve_pending_dialog(false);
                 } else if let Some(ch) = printable_key(input) {
                     self.shell.dialog_input.push(ch);
-                    self.shell.dirty_dialog = true;
+                    self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
                 }
             }
         }
@@ -1080,7 +1390,11 @@ impl DesktopSession {
                 }
                 ShellShortcut::ToggleCommandPalette => self.toggle_command_palette(),
                 ShellShortcut::ToggleQuickSettings => self.toggle_quick_settings(),
-                ShellShortcut::CycleStageSet => self.cycle_stage_set(),
+                ShellShortcut::ToggleOverview => self.toggle_overview(),
+                ShellShortcut::ToggleScratchpad => self.toggle_terminal_scratchpad(),
+                ShellShortcut::LaunchTerminal => {
+                    let _ = self.activate_app(AppKind::Terminal);
+                }
             }
         }
     }
@@ -1093,40 +1407,32 @@ impl DesktopSession {
     }
 
     fn set_login_visibility(&mut self, visible: bool) {
-        let _ = self
-            .shell
-            .client
-            .set_visibility(self.shell.lock_screen.window_id, visible);
-        self.shell.lock_screen.visible = visible;
-        self.shell.dirty_lock = true;
+        let stage_rail_visible = false;
+        set_shell_surface_visibility(
+            &self.shell.client,
+            &mut self.shell.lock_screen,
+            visible,
+        );
+        self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
 
-        for window_id in [
-            self.shell.top_bar.window_id,
-            self.shell.task_strip.window_id,
-            self.shell.launcher.window_id,
-            self.shell.notifications.window_id,
-            self.shell.quick_settings.window_id,
-            self.shell.command_palette.window_id,
-            self.shell.stage_rail.window_id,
-            self.shell.dialog.window_id,
-            self.shell.context_menu.window_id,
-            self.shell.switcher.window_id,
-        ] {
-            let _ = self.shell.client.set_visibility(window_id, !visible);
-        }
-        self.shell.top_bar.visible = !visible;
-        self.shell.task_strip.visible = !visible;
-        self.shell.launcher.visible = !visible;
-        self.shell.notifications.visible = !visible;
-        self.shell.quick_settings.visible = false;
-        self.shell.command_palette.visible = false;
-        self.shell.stage_rail.visible = !visible;
-        self.shell.dialog.visible &= !visible;
-        self.shell.context_menu.visible &= !visible;
-        self.shell.switcher.visible &= !visible;
-        self.shell.dirty_quick_settings = true;
-        self.shell.dirty_command_palette = true;
-        self.shell.dirty_stage_rail = true;
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.top_bar, !visible);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.task_strip, !visible);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.launcher, false);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.notifications, false);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.quick_settings, false);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.command_palette, false);
+        set_shell_surface_visibility(
+            &self.shell.client,
+            &mut self.shell.stage_rail,
+            stage_rail_visible,
+        );
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.dialog, false);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.context_menu, false);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.switcher, false);
+
+        self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
 
         for window in [
             self.terminal.window.as_ref(),
@@ -1168,10 +1474,7 @@ impl DesktopSession {
             self.editor.workspace_id,
             self.shell.active_workspace,
         );
-        let _ = self
-            .shell
-            .client
-            .focus_window(self.shell.launcher.window_id);
+        let _ = self.shell.client.focus_window(self.shell.top_bar.window_id);
         self.push_notice(String::from("Session unlocked"));
         self.mark_shell_dirty();
     }
@@ -1183,9 +1486,9 @@ impl DesktopSession {
         }
 
         let app_basket_ready = self.shell.logged_in
-            && self.terminal.window.is_some_and(|window| window.visible)
-            && self.files.window.is_some_and(|window| window.visible)
-            && self.editor.window.is_some_and(|window| window.visible);
+            && self.shell.top_bar.visible
+            && self.shell.task_strip.visible
+            && !self.shell.lock_screen.visible;
 
         if app_basket_ready && !self.app_basket_committed {
             crate::boot::appliance::publish_stage(
@@ -1206,7 +1509,7 @@ impl DesktopSession {
         } else {
             self.shell.auth_input.clear();
             self.push_notice(String::from("Authentication failed"));
-            self.shell.dirty_lock = true;
+            self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
         }
     }
 
@@ -1264,8 +1567,8 @@ impl DesktopSession {
             id: 4,
             app_id: SHELL_APP_ID,
             role: AccessibilityRole::List,
-            label: String::from("Stage Rail"),
-            description: String::from("stage manager window sets"),
+            label: String::from("Workspace Overview"),
+            description: String::from("workspace switcher and overview"),
             focused: self.shell.stage_rail.focused,
             bounds: self.shell.stage_rail.content_rect,
         });
@@ -1353,6 +1656,8 @@ impl DesktopSession {
             LaunchResult::Restored => "restored",
             LaunchResult::Focused => "focused",
         };
+        let _ = self.relayout_workspace(self.shell.active_workspace);
+        self.rebuild_stage_sets();
         self.push_notice(format!("{} {}", kind.title(), verb));
         self.mark_shell_dirty();
         Ok(())
@@ -1369,30 +1674,30 @@ impl DesktopSession {
         while self.shell.notices.len() > 8 {
             self.shell.notices.remove(0);
         }
-        self.shell.dirty_notifications = true;
-        self.shell.dirty_launcher = true;
-        self.shell.dirty_top_bar = true;
-        self.shell.dirty_task_strip = true;
+        self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::Dock, InvalidationReason::StateChanged);
     }
 
     fn mark_shell_dirty(&mut self) {
-        self.shell.dirty_top_bar = true;
-        self.shell.dirty_task_strip = true;
-        self.shell.dirty_launcher = true;
-        self.shell.dirty_notifications = true;
-        self.shell.dirty_quick_settings = true;
-        self.shell.dirty_command_palette = true;
-        self.shell.dirty_stage_rail = true;
-        self.shell.dirty_dialog = true;
-        self.shell.dirty_context_menu = true;
-        self.shell.dirty_switcher = true;
+        self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::Dock, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::ContextMenu, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::Switcher, InvalidationReason::StateChanged);
     }
 
     fn switch_workspace(&mut self, workspace_id: u8) -> Result<(), String> {
         self.close_context_menu();
         self.close_switcher();
         self.close_command_palette();
-        self.shell.active_workspace = workspace_id.min(2);
+        self.shell.active_workspace = workspace_id.min(WORKSPACE_COUNT.saturating_sub(1));
         self.shell
             .client
             .set_workspace(self.shell.active_workspace)?;
@@ -1429,6 +1734,8 @@ impl DesktopSession {
             self.editor.workspace_id,
             self.shell.active_workspace,
         )?;
+        let _ = self.relayout_active_workspace();
+        self.rebuild_stage_sets();
 
         let _ = self
             .shell
@@ -1459,13 +1766,15 @@ impl DesktopSession {
             return;
         }
 
-        if !self.shell.switcher.visible {
+        if !self.shell.switcher.desired_visible {
             self.shell.switcher_index = 0;
-            let _ = self
-                .shell
-                .client
-                .set_visibility(self.shell.switcher.window_id, true);
-            self.shell.switcher.visible = true;
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.switcher,
+                true,
+                self.settings.animations,
+                0.14,
+            );
         } else {
             self.shell.switcher_index = (self.shell.switcher_index + 1) % candidates.len();
         }
@@ -1474,17 +1783,19 @@ impl DesktopSession {
             .shell
             .client
             .focus_window(self.shell.switcher.window_id);
-        self.shell.dirty_switcher = true;
+        self.invalidate_shell(InvalidationTarget::Switcher, InvalidationReason::StateChanged);
     }
 
     fn close_switcher(&mut self) {
-        if self.shell.switcher.visible {
-            let _ = self
-                .shell
-                .client
-                .set_visibility(self.shell.switcher.window_id, false);
-            self.shell.switcher.visible = false;
-            self.shell.dirty_switcher = true;
+        if self.shell.switcher.visible || self.shell.switcher.desired_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.switcher,
+                false,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(InvalidationTarget::Switcher, InvalidationReason::StateChanged);
         }
     }
 
@@ -1505,33 +1816,37 @@ impl DesktopSession {
         }
         self.close_switcher();
         self.close_context_menu();
-        if self.shell.command_palette.visible {
+        if self.shell.command_palette.desired_visible {
             self.close_command_palette();
             return;
         }
-        let _ = self
-            .shell
-            .client
-            .set_visibility(self.shell.command_palette.window_id, true);
+        animate_shell_surface(
+            &self.shell.client,
+            &mut self.shell.command_palette,
+            true,
+            self.settings.animations,
+            0.16,
+        );
         let _ = self
             .shell
             .client
             .focus_window(self.shell.command_palette.window_id);
-        self.shell.command_palette.visible = true;
         self.shell.command_selection = 0;
-        self.shell.dirty_command_palette = true;
+        self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
     }
 
     fn close_command_palette(&mut self) {
-        if self.shell.command_palette.visible {
-            let _ = self
-                .shell
-                .client
-                .set_visibility(self.shell.command_palette.window_id, false);
-            self.shell.command_palette.visible = false;
+        if self.shell.command_palette.visible || self.shell.command_palette.desired_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.command_palette,
+                false,
+                self.settings.animations,
+                0.12,
+            );
             self.shell.command_query.clear();
             self.shell.command_selection = 0;
-            self.shell.dirty_command_palette = true;
+            self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
         }
     }
 
@@ -1540,19 +1855,21 @@ impl DesktopSession {
             return;
         }
         self.close_command_palette();
-        let next_visible = !self.shell.quick_settings.visible;
-        let _ = self
-            .shell
-            .client
-            .set_visibility(self.shell.quick_settings.window_id, next_visible);
+        let next_visible = !self.shell.quick_settings.desired_visible;
+        animate_shell_surface(
+            &self.shell.client,
+            &mut self.shell.quick_settings,
+            next_visible,
+            self.settings.animations,
+            0.14,
+        );
         if next_visible {
             let _ = self
                 .shell
                 .client
                 .focus_window(self.shell.quick_settings.window_id);
         }
-        self.shell.quick_settings.visible = next_visible;
-        self.shell.dirty_quick_settings = true;
+        self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
     }
 
     fn apply_quick_settings_toggle(&mut self, index: usize, commands: &mut Vec<SessionCommand>) {
@@ -1583,7 +1900,7 @@ impl DesktopSession {
                     }
                 ));
                 self.settings.dirty = true;
-                self.shell.dirty_quick_settings = true;
+                self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
             }
             2 => {
                 self.settings.animations = !self.settings.animations;
@@ -1596,14 +1913,14 @@ impl DesktopSession {
                     }
                 ));
                 self.settings.dirty = true;
-                self.shell.dirty_quick_settings = true;
+                self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
             }
             3 => self.toggle_power_state(),
             4 => {
                 let _ = self.shell.client.clear_notifications();
                 self.push_notice(String::from("Notifications cleared"));
-                self.shell.dirty_notifications = true;
-                self.shell.dirty_quick_settings = true;
+                self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
+                self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
             }
             5 => {
                 commands.push(SessionCommand::SwitchWorkspace(0));
@@ -1642,27 +1959,15 @@ impl DesktopSession {
             shortcut: String::from("4"),
             enabled: true,
         });
-        actions.push(CommandPaletteAction {
-            id: 10,
-            title: String::from("Switch Workspace 1"),
-            category: String::from("Workspace"),
-            shortcut: String::from("Alt+1"),
-            enabled: true,
-        });
-        actions.push(CommandPaletteAction {
-            id: 11,
-            title: String::from("Switch Workspace 2"),
-            category: String::from("Workspace"),
-            shortcut: String::from("Alt+2"),
-            enabled: true,
-        });
-        actions.push(CommandPaletteAction {
-            id: 12,
-            title: String::from("Switch Workspace 3"),
-            category: String::from("Workspace"),
-            shortcut: String::from("Alt+3"),
-            enabled: true,
-        });
+        for workspace_id in 0..WORKSPACE_COUNT {
+            actions.push(CommandPaletteAction {
+                id: 10 + workspace_id as u64,
+                title: format!("Switch Workspace {}", workspace_id.saturating_add(1)),
+                category: String::from("Workspace"),
+                shortcut: format!("Super+{}", workspace_id.saturating_add(1)),
+                enabled: true,
+            });
+        }
         actions.push(CommandPaletteAction {
             id: 20,
             title: String::from("Toggle Theme"),
@@ -1696,6 +2001,20 @@ impl DesktopSession {
             title: String::from("Capture Screen"),
             category: String::from("Tools"),
             shortcut: String::from("P"),
+            enabled: true,
+        });
+        actions.push(CommandPaletteAction {
+            id: 25,
+            title: String::from("Toggle Workspace Overview"),
+            category: String::from("Workspace"),
+            shortcut: String::from("Super+`"),
+            enabled: true,
+        });
+        actions.push(CommandPaletteAction {
+            id: 26,
+            title: String::from("Toggle Terminal Scratchpad"),
+            category: String::from("Workspace"),
+            shortcut: String::from("Super+S"),
             enabled: true,
         });
         actions
@@ -1732,13 +2051,13 @@ impl DesktopSession {
             2 => commands.push(SessionCommand::Activate(AppKind::Files)),
             3 => commands.push(SessionCommand::Activate(AppKind::Settings)),
             4 => commands.push(SessionCommand::Activate(AppKind::Editor)),
-            10 => commands.push(SessionCommand::SwitchWorkspace(0)),
-            11 => commands.push(SessionCommand::SwitchWorkspace(1)),
-            12 => commands.push(SessionCommand::SwitchWorkspace(2)),
+            10..=17 => commands.push(SessionCommand::SwitchWorkspace((selected.id - 10) as u8)),
             20 => self.apply_quick_settings_toggle(0, commands),
             21 => self.toggle_quick_settings(),
             22 => self.toggle_power_state(),
             23 => self.apply_quick_settings_toggle(4, commands),
+            25 => self.toggle_overview(),
+            26 => self.toggle_terminal_scratchpad(),
             24 => {
                 if let Ok(entry) = self.shell.client.capture_screen("palette") {
                     self.push_notice(format!("Captured screen {}", entry.id));
@@ -1752,7 +2071,7 @@ impl DesktopSession {
     fn rebuild_stage_sets(&mut self) {
         let snapshots = self.app_snapshots();
         let mut sets = Vec::new();
-        for workspace_id in 0..3u8 {
+        for workspace_id in 0..WORKSPACE_COUNT {
             let mut window_ids = Vec::new();
             for snapshot in snapshots.iter().filter(|s| s.workspace_id == workspace_id) {
                 if let Some(window_id) = snapshot.window_id {
@@ -1761,7 +2080,12 @@ impl DesktopSession {
             }
             sets.push(StageSet {
                 id: workspace_id as u64,
-                name: format!("Stage {}", workspace_id.saturating_add(1)),
+                name: self
+                    .shell
+                    .client
+                    .workspace_rule(workspace_id)
+                    .map(|rule| rule.default_name_str())
+                    .unwrap_or_else(|_| format!("Workspace {}", workspace_id.saturating_add(1))),
                 window_ids,
                 pinned: workspace_id == self.shell.active_workspace,
             });
@@ -1775,12 +2099,16 @@ impl DesktopSession {
                 .iter()
                 .position(|set| set.id as u8 == self.shell.active_workspace)
                 .unwrap_or(0);
-            self.shell.dirty_stage_rail = true;
+            self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
         }
     }
 
     fn cycle_stage_set(&mut self) {
         if self.is_locked() {
+            return;
+        }
+        if !self.shell.stage_rail.visible {
+            self.toggle_overview();
             return;
         }
         if self.shell.stage_sets.is_empty() {
@@ -1810,7 +2138,94 @@ impl DesktopSession {
             let _ = self.shell.client.focus_window(window_id);
         }
         self.shell.active_stage_set = index.min(self.shell.stage_sets.len().saturating_sub(1));
-        self.shell.dirty_stage_rail = true;
+        self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+    }
+
+    fn toggle_overview(&mut self) {
+        if self.is_locked() {
+            return;
+        }
+        let visible = self.shell.client.toggle_overview().unwrap_or(false);
+        animate_shell_surface(
+            &self.shell.client,
+            &mut self.shell.stage_rail,
+            visible,
+            self.settings.animations,
+            0.18,
+        );
+        if visible {
+            self.rebuild_stage_sets();
+            let _ = self
+                .shell
+                .client
+                .focus_window(self.shell.stage_rail.window_id);
+        }
+        self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+        self.push_notice(if visible {
+            String::from("Workspace overview open")
+        } else {
+            String::from("Workspace overview closed")
+        });
+    }
+
+    fn toggle_terminal_scratchpad(&mut self) {
+        if self.is_locked() {
+            return;
+        }
+        if self.terminal.window.is_none() {
+            self.terminal.workspace_id = self.shell.active_workspace;
+            let _ = self.activate_app(AppKind::Terminal);
+        }
+        let Some(window) = self.terminal.window.as_mut() else {
+            return;
+        };
+
+        let visible = self.shell.client.toggle_scratchpad().unwrap_or(false);
+        let target_workspace = SCRATCHPAD_WORKSPACE;
+        let _ = hybrid_windowing()
+            .lock()
+            .toggle_scratchpad(target_workspace, window.window_id);
+        let _ = self
+            .terminal
+            .client
+            .move_window_to_workspace(window.window_id, target_workspace);
+        let _ = self.terminal.client.set_window_meta(
+            window.window_id,
+            target_workspace,
+            LayerRole::WorkspaceScratchpad,
+            scratchpad_flags(),
+        );
+        self.terminal.workspace_id = target_workspace;
+
+        if visible {
+            let rect = Rect::new(
+                self.screen.x + (self.screen.width as i32 / 2) - 380,
+                self.screen.y + 110,
+                760,
+                420,
+            );
+            let _ = self
+                .terminal
+                .client
+                .move_window(window.window_id, rect.x, rect.y);
+            let _ = self
+                .terminal
+                .client
+                .resize_window(window.window_id, rect.width, rect.height);
+            let _ = self.terminal.client.set_visibility(window.window_id, true);
+            let _ = self.terminal.client.focus_window(window.window_id);
+        } else {
+            let _ = self.terminal.client.set_visibility(window.window_id, false);
+        }
+
+        let _ = sync_shell_window(&self.terminal.client, window);
+        self.rebuild_stage_sets();
+        self.mark_shell_dirty();
+        self.push_notice(if visible {
+            String::from("Terminal scratchpad shown")
+        } else {
+            String::from("Terminal scratchpad hidden")
+        });
     }
 
     fn toggle_power_state(&mut self) {
@@ -1831,37 +2246,41 @@ impl DesktopSession {
             self.unlock_session();
         }
         self.push_notice(format!("Session {}", power_state_label(next)));
-        self.shell.dirty_top_bar = true;
-        self.shell.dirty_launcher = true;
+        self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
+        self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
     }
 
     fn open_context_menu(&mut self, kind: AppKind) {
         self.close_switcher();
         self.close_command_palette();
         self.shell.context_target = Some(kind);
-        if !self.shell.context_menu.visible {
-            let _ = self
-                .shell
-                .client
-                .set_visibility(self.shell.context_menu.window_id, true);
-            self.shell.context_menu.visible = true;
+        if !self.shell.context_menu.desired_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.context_menu,
+                true,
+                self.settings.animations,
+                0.14,
+            );
         }
         let _ = self
             .shell
             .client
             .focus_window(self.shell.context_menu.window_id);
-        self.shell.dirty_context_menu = true;
+        self.invalidate_shell(InvalidationTarget::ContextMenu, InvalidationReason::StateChanged);
     }
 
     fn close_context_menu(&mut self) {
         self.shell.context_target = None;
-        if self.shell.context_menu.visible {
-            let _ = self
-                .shell
-                .client
-                .set_visibility(self.shell.context_menu.window_id, false);
-            self.shell.context_menu.visible = false;
-            self.shell.dirty_context_menu = true;
+        if self.shell.context_menu.visible || self.shell.context_menu.desired_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.context_menu,
+                false,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(InvalidationTarget::ContextMenu, InvalidationReason::StateChanged);
         }
     }
 
@@ -1915,6 +2334,7 @@ impl DesktopSession {
     }
 
     fn close_app(&mut self, kind: AppKind) -> Result<(), String> {
+        let workspace_id = self.app_workspace(kind);
         match kind {
             AppKind::Terminal => close_app_window(
                 &self.terminal.client,
@@ -1941,11 +2361,14 @@ impl DesktopSession {
                 self.editor.workspace_id,
             )?,
         }
+        let _ = self.relayout_workspace(workspace_id);
+        self.rebuild_stage_sets();
         self.push_notice(format!("{} closed", kind.title()));
         Ok(())
     }
 
     fn move_app_to_next_workspace(&mut self, kind: AppKind) -> Result<(), String> {
+        let previous_workspace = self.app_workspace(kind);
         match kind {
             AppKind::Terminal => move_app_workspace(
                 &self.terminal.client,
@@ -1972,6 +2395,9 @@ impl DesktopSession {
                 self.shell.active_workspace,
             )?,
         }
+        let _ = self.relayout_workspace(previous_workspace);
+        let _ = self.relayout_active_workspace();
+        self.rebuild_stage_sets();
         self.push_notice(format!("{} moved to next space", kind.title()));
         Ok(())
     }
@@ -2010,7 +2436,7 @@ impl DesktopSession {
 
     fn work_area_rect(&self) -> Rect {
         let top = self.screen.y + 18 + Theme::HALO_BAR_HEIGHT as i32 + 32;
-        let dock_top = self.screen.bottom() - (Theme::PULSE_DOCK_HEIGHT as i32 + 56);
+        let dock_top = task_strip_window_rect(self.screen).y;
         let bottom = dock_top - 22;
         Rect::new(
             self.screen.x + 18,
@@ -2018,6 +2444,64 @@ impl DesktopSession {
             self.screen.width.saturating_sub(36),
             bottom.saturating_sub(top).max(120) as u32,
         )
+    }
+
+    fn relayout_active_workspace(&mut self) -> Result<(), String> {
+        self.relayout_workspace(self.shell.active_workspace)
+    }
+
+    fn relayout_workspace(&mut self, workspace_id: u8) -> Result<(), String> {
+        let layout = self
+            .shell
+            .client
+            .workspace_layout(workspace_id)
+            .unwrap_or(WorkspaceLayout::Dwindle);
+        let rule = self
+            .shell
+            .client
+            .workspace_rule(workspace_id)
+            .unwrap_or_else(|_| default_workspace_rule(workspace_id));
+        let windows = self.shell.client.list_windows()?;
+        let plans = {
+            let mut orchestrator = hybrid_windowing().lock();
+            orchestrator.set_workspace_rule(workspace_id, rule);
+            orchestrator.set_workspace_layout(workspace_id, layout);
+            orchestrator.plan_workspace(&windows, workspace_id, self.work_area_rect())
+        };
+
+        for plan in plans {
+            let Some(window) = windows.iter().find(|window| window.id == plan.window_id) else {
+                continue;
+            };
+            self.apply_window_plan(window.app_id, plan.window_id, plan.workspace_id, plan.rect)?;
+        }
+        Ok(())
+    }
+
+    fn apply_window_plan(
+        &self,
+        app_id: u32,
+        window_id: WindowId,
+        workspace_id: u8,
+        rect: Rect,
+    ) -> Result<(), String> {
+        let client = match app_kind_from_id(app_id) {
+            Some(AppKind::Terminal) => &self.terminal.client,
+            Some(AppKind::Files) => &self.files.client,
+            Some(AppKind::Settings) => &self.settings.client,
+            Some(AppKind::Editor) => &self.editor.client,
+            None => return Ok(()),
+        };
+        client.move_window_to_workspace(window_id, workspace_id)?;
+        client.set_window_meta(
+            window_id,
+            workspace_id,
+            LayerRole::Window,
+            WindowFlags::default(),
+        )?;
+        client.move_window(window_id, rect.x, rect.y)?;
+        client.resize_window(window_id, rect.width, rect.height)?;
+        Ok(())
     }
 
     fn switcher_candidates(&self) -> Vec<AppKind> {
@@ -2038,200 +2522,227 @@ impl DesktopSession {
 
     fn sync_window_states(&mut self) {
         if sync_shell_window(&self.shell.client, &mut self.shell.top_bar).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.top_bar,
                 "Top Bar",
-                self.screen.x + 18,
-                self.screen.y + 18,
-                self.screen.width.saturating_sub(36),
-                Theme::HALO_BAR_HEIGHT as u32,
-            ) {
-                self.shell.top_bar = SessionWindow::from_client_window(window);
-                self.shell.dirty_top_bar = true;
+                Rect::new(
+                    self.screen.x + 18,
+                    self.screen.y + 18,
+                    self.screen.width.saturating_sub(36),
+                    Theme::HALO_BAR_HEIGHT as u32,
+                ),
+                0,
+                LayerRole::TopBar,
+                true,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Top Bar restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.task_strip).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
+            let rect = task_strip_window_rect(self.screen);
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.task_strip,
                 "Task Strip",
-                self.screen.x + 18,
-                self.screen.bottom() - (Theme::PULSE_DOCK_HEIGHT as i32 + 56),
-                self.screen.width.saturating_sub(36),
-                Theme::PULSE_DOCK_HEIGHT as u32,
-            ) {
-                self.shell.task_strip = SessionWindow::from_client_window(window);
-                self.shell.dirty_task_strip = true;
+                rect,
+                0,
+                LayerRole::Dock,
+                true,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::Dock, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Task Strip restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.launcher).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.launcher,
                 "Session Shell",
-                self.screen.x + 42,
-                self.screen.y + 74,
-                min(392, self.screen.width.saturating_sub(96)),
-                min(332, self.screen.height.saturating_sub(172)),
-            ) {
-                self.shell.launcher = SessionWindow::from_client_window(window);
-                self.shell.dirty_launcher = true;
+                Rect::new(
+                    self.screen.x + 42,
+                    self.screen.y + 74,
+                    min(392, self.screen.width.saturating_sub(96)),
+                    min(332, self.screen.height.saturating_sub(172)),
+                ),
+                0,
+                LayerRole::Overlay,
+                true,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Session Shell restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.notifications).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.notifications,
                 "Notifications",
-                self.screen.right() - 364,
-                self.screen.y + 74,
-                320,
-                220,
-            ) {
-                self.shell.notifications = SessionWindow::from_client_window(window);
-                self.shell.dirty_notifications = true;
+                Rect::new(self.screen.right() - 364, self.screen.y + 74, 320, 220),
+                0,
+                LayerRole::Overlay,
+                true,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Notifications restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.quick_settings).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.quick_settings,
                 "Quick Settings",
-                self.screen.right() - 364,
-                self.screen.y + 348,
-                320,
-                232,
-            ) {
-                self.shell.quick_settings = SessionWindow::from_client_window(window);
-                let _ = self
-                    .shell
-                    .client
-                    .set_visibility(self.shell.quick_settings.window_id, false);
-                self.shell.quick_settings.visible = false;
-                self.shell.dirty_quick_settings = true;
+                Rect::new(self.screen.right() - 364, self.screen.y + 348, 320, 232),
+                0,
+                LayerRole::Overlay,
+                false,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Quick Settings restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.command_palette).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.command_palette,
                 "Command Palette",
-                self.screen.x + (self.screen.width as i32 / 2) - 310,
-                self.screen.y + 136,
-                620,
-                312,
-            ) {
-                self.shell.command_palette = SessionWindow::from_client_window(window);
-                let _ = self
-                    .shell
-                    .client
-                    .set_visibility(self.shell.command_palette.window_id, false);
-                self.shell.command_palette.visible = false;
-                self.shell.dirty_command_palette = true;
+                Rect::new(
+                    self.screen.x + (self.screen.width as i32 / 2) - 310,
+                    self.screen.y + 136,
+                    620,
+                    312,
+                ),
+                0,
+                LayerRole::Overlay,
+                false,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Command Palette restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.stage_rail).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
-                "Stage Rail",
-                self.screen.x + 18,
-                self.screen.y + 108,
-                236,
-                264,
-            ) {
-                self.shell.stage_rail = SessionWindow::from_client_window(window);
-                let visible = !self.is_locked();
-                let _ = self
-                    .shell
-                    .client
-                    .set_visibility(self.shell.stage_rail.window_id, visible);
-                self.shell.stage_rail.visible = visible;
-                self.shell.dirty_stage_rail = true;
-                self.push_notice(String::from("Stage Rail restored"));
+            let stage_rail_visible = self.shell.stage_rail.visible && !self.is_locked();
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.stage_rail,
+                "Workspace Overview",
+                Rect::new(self.screen.x + 18, self.screen.y + 108, 236, 264),
+                0,
+                LayerRole::Overlay,
+                stage_rail_visible,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+                self.push_notice(String::from("Workspace Overview restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.dialog).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.dialog,
                 "Dialog Broker",
-                self.screen.x + (self.screen.width as i32 / 2) - 180,
-                self.screen.y + (self.screen.height as i32 / 2) - 120,
-                360,
-                190,
-            ) {
-                self.shell.dialog = SessionWindow::from_client_window(window);
-                if self.shell.pending_dialog.is_none() {
-                    let _ = self
-                        .shell
-                        .client
-                        .set_visibility(self.shell.dialog.window_id, false);
-                    self.shell.dialog.visible = false;
-                }
-                self.shell.dirty_dialog = true;
+                Rect::new(
+                    self.screen.x + (self.screen.width as i32 / 2) - 180,
+                    self.screen.y + (self.screen.height as i32 / 2) - 120,
+                    360,
+                    190,
+                ),
+                0,
+                LayerRole::Modal,
+                self.shell.pending_dialog.is_some(),
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Dialog Broker restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.context_menu).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.context_menu,
                 "Context Menu",
-                self.screen.right() - 310,
-                self.screen.bottom() - 290,
-                240,
-                224,
-            ) {
-                self.shell.context_menu = SessionWindow::from_client_window(window);
-                if self.shell.context_target.is_none() {
-                    let _ = self
-                        .shell
-                        .client
-                        .set_visibility(self.shell.context_menu.window_id, false);
-                    self.shell.context_menu.visible = false;
-                }
-                self.shell.dirty_context_menu = true;
+                Rect::new(
+                    self.screen.right() - 310,
+                    self.screen.bottom() - 290,
+                    240,
+                    224,
+                ),
+                0,
+                LayerRole::Overlay,
+                self.shell.context_target.is_some(),
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::ContextMenu, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Context Menu restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.switcher).is_none() {
             let should_show = self.shell.switcher.visible;
-            if let Ok(window) = self.shell.client.create_window(
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.switcher,
                 "App Switcher",
-                self.screen.x + (self.screen.width as i32 / 2) - 220,
-                self.screen.y + (self.screen.height as i32 / 2) - 120,
-                440,
-                240,
-            ) {
-                self.shell.switcher = SessionWindow::from_client_window(window);
-                if !should_show {
-                    let _ = self
-                        .shell
-                        .client
-                        .set_visibility(self.shell.switcher.window_id, false);
-                    self.shell.switcher.visible = false;
-                }
-                self.shell.dirty_switcher = true;
+                Rect::new(
+                    self.screen.x + (self.screen.width as i32 / 2) - 220,
+                    self.screen.y + (self.screen.height as i32 / 2) - 120,
+                    440,
+                    240,
+                ),
+                0,
+                LayerRole::Overlay,
+                should_show,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::Switcher, InvalidationReason::StateChanged);
                 self.push_notice(String::from("App Switcher restored"));
             }
         }
 
         if sync_shell_window(&self.shell.client, &mut self.shell.lock_screen).is_none() {
-            if let Ok(window) = self.shell.client.create_window(
+            let lock_visible = self.is_locked();
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.lock_screen,
                 "Login",
-                self.screen.x + (self.screen.width as i32 / 2) - 240,
-                self.screen.y + (self.screen.height as i32 / 2) - 160,
-                480,
-                320,
-            ) {
-                self.shell.lock_screen = SessionWindow::from_client_window(window);
-                if !self.is_locked() {
-                    let _ = self
-                        .shell
-                        .client
-                        .set_visibility(self.shell.lock_screen.window_id, false);
-                    self.shell.lock_screen.visible = false;
-                }
-                self.shell.dirty_lock = true;
+                Rect::new(
+                    self.screen.x + (self.screen.width as i32 / 2) - 240,
+                    self.screen.y + (self.screen.height as i32 / 2) - 160,
+                    480,
+                    320,
+                ),
+                0,
+                LayerRole::Modal,
+                lock_visible,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Login restored"));
             }
         }
@@ -2261,24 +2772,30 @@ impl DesktopSession {
                 self.close_switcher();
                 self.shell.dialog_input = dialog_default_path(&request);
                 self.shell.pending_dialog = Some(request);
-                let _ = self
-                    .shell
-                    .client
-                    .set_visibility(self.shell.dialog.window_id, true);
+                animate_shell_surface(
+                    &self.shell.client,
+                    &mut self.shell.dialog,
+                    true,
+                    self.settings.animations,
+                    0.16,
+                );
                 let _ = self.shell.client.focus_window(self.shell.dialog.window_id);
-                self.shell.dialog.visible = true;
-                self.shell.dirty_dialog = true;
+                self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
                 self.push_notice(String::from("Dialog awaiting shell decision"));
             }
         }
 
-        if self.shell.pending_dialog.is_none() && self.shell.dialog.visible {
-            let _ = self
-                .shell
-                .client
-                .set_visibility(self.shell.dialog.window_id, false);
-            self.shell.dialog.visible = false;
-            self.shell.dirty_dialog = true;
+        if self.shell.pending_dialog.is_none()
+            && (self.shell.dialog.visible || self.shell.dialog.desired_visible)
+        {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.dialog,
+                false,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
         }
     }
 
@@ -2308,16 +2825,22 @@ impl DesktopSession {
         };
         let _ = self.shell.client.resolve_dialog(request.id, selection);
         self.shell.dialog_input.clear();
-        let _ = self
-            .shell
-            .client
-            .set_visibility(self.shell.dialog.window_id, false);
-        self.shell.dialog.visible = false;
-        self.shell.dirty_dialog = true;
+        animate_shell_surface(
+            &self.shell.client,
+            &mut self.shell.dialog,
+            false,
+            self.settings.animations,
+            0.12,
+        );
+        self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
         self.push_notice(format!("Dialog resolved for app {}", request.app_id));
     }
 
     fn render_shell(&mut self) -> Result<(), String> {
+        let Some(frame_plan) = self.shell.invalidation.take_frame_plan() else {
+            return Ok(());
+        };
+
         self.shell.layout_profile = Theme::layout_profile(self.screen.width);
         let session_snapshot = self
             .shell
@@ -2325,190 +2848,273 @@ impl DesktopSession {
             .session_snapshot()
             .unwrap_or(SessionSnapshot {
                 workspace_id: self.shell.active_workspace,
+                workspace_layout: WorkspaceLayout::Dwindle,
                 power_state: SessionPowerState::Active,
                 unread_notifications: 0,
                 apps_running: 0,
                 apps_crashed: 0,
+                overview_active: false,
+                scratchpad_visible: false,
+                shell_ready: true,
+                boot_clean_desktop: true,
+                output_scale: 1,
+                text_scale: 1,
+                locale: String::from("en-US"),
+                theme_variant: String::from("hybrid-titan"),
+                shell_state: self.shell_state(),
             });
         let snapshots = self.app_snapshots();
         let theme_mode = self.shell.theme_mode;
+        let _pending_reasons = frame_plan.pending.as_slice();
 
-        if self.shell.dirty_top_bar {
-            let top_bar_pixels = paint_top_bar_surface(
-                self.shell.top_bar.content_rect.width as usize,
-                self.shell.top_bar.content_rect.height as usize,
-                self.shell.active_workspace,
-                &session_snapshot,
-                theme_mode,
-            );
-            self.shell
-                .client
-                .present(self.shell.top_bar.window_id, &top_bar_pixels)?;
-            self.shell.dirty_top_bar = false;
-        }
-
-        if self.shell.dirty_task_strip {
-            let task_strip_pixels = paint_task_strip_surface(
-                self.shell.task_strip.content_rect.width as usize,
-                self.shell.task_strip.content_rect.height as usize,
-                &snapshots,
-                self.shell.active_workspace,
-                theme_mode,
-            );
-            self.shell
-                .client
-                .present(self.shell.task_strip.window_id, &task_strip_pixels)?;
-            self.shell.dirty_task_strip = false;
-        }
-
-        if self.shell.dirty_launcher {
-            let launcher_pixels = paint_launcher_surface(
-                self.shell.launcher.content_rect.width as usize,
-                self.shell.launcher.content_rect.height as usize,
-                &snapshots,
-                &self.shell.notices,
-                theme_mode,
-                self.shell.layout_profile,
-            );
-            self.shell
-                .client
-                .present(self.shell.launcher.window_id, &launcher_pixels)?;
-            self.shell.dirty_launcher = false;
-        }
-
-        if self.shell.dirty_notifications {
-            let entries = self
-                .shell
-                .client
-                .list_notifications(6)
-                .unwrap_or_else(|_| Vec::new());
-            let notifications_pixels = paint_notifications_surface(
-                self.shell.notifications.content_rect.width as usize,
-                self.shell.notifications.content_rect.height as usize,
-                &entries,
-                self.shell.notification_index,
-                theme_mode,
-            );
-            self.shell
-                .client
-                .present(self.shell.notifications.window_id, &notifications_pixels)?;
-            self.shell.dirty_notifications = false;
-        }
-
-        if self.shell.dirty_quick_settings {
-            if self.shell.quick_settings.visible {
-                let quick_settings_pixels = paint_quick_settings_surface(
-                    self.shell.quick_settings.content_rect.width as usize,
-                    self.shell.quick_settings.content_rect.height as usize,
+        if frame_plan.touches(InvalidationTarget::TopBar) {
+            let width = self.shell.top_bar.content_rect.width as usize;
+            let height = self.shell.top_bar.content_rect.height as usize;
+            self.shell.client.commit_scene(
+                self.shell.top_bar.window_id,
+                build_top_bar_scene(
+                    self.shell.top_bar.window_id,
+                    &mut self.text_system,
+                    width,
+                    height,
+                    self.shell.active_workspace,
+                    &session_snapshot,
                     theme_mode,
-                    self.settings.notifications,
-                    self.settings.animations,
-                );
-                self.shell
-                    .client
-                    .present(self.shell.quick_settings.window_id, &quick_settings_pixels)?;
-            }
-            self.shell.dirty_quick_settings = false;
+                ),
+            )?;
         }
 
-        if self.shell.dirty_command_palette {
-            if self.shell.command_palette.visible {
-                let actions = self.filtered_palette_actions();
-                let command_palette_pixels = paint_command_palette_surface(
-                    self.shell.command_palette.content_rect.width as usize,
-                    self.shell.command_palette.content_rect.height as usize,
-                    &actions,
-                    &self.shell.command_query,
-                    self.shell.command_selection,
-                    theme_mode,
-                );
-                self.shell.client.present(
-                    self.shell.command_palette.window_id,
-                    &command_palette_pixels,
-                )?;
-            }
-            self.shell.dirty_command_palette = false;
-        }
-
-        if self.shell.dirty_stage_rail {
-            if self.shell.stage_rail.visible {
-                let stage_pixels = paint_stage_rail_surface(
-                    self.shell.stage_rail.content_rect.width as usize,
-                    self.shell.stage_rail.content_rect.height as usize,
-                    &self.shell.stage_sets,
-                    self.shell.active_stage_set,
-                    theme_mode,
-                );
-                self.shell
-                    .client
-                    .present(self.shell.stage_rail.window_id, &stage_pixels)?;
-            }
-            self.shell.dirty_stage_rail = false;
-        }
-
-        if self.shell.dirty_dialog {
-            if self.shell.dialog.visible {
-                let dialog_pixels = paint_dialog_surface(
-                    self.shell.dialog.content_rect.width as usize,
-                    self.shell.dialog.content_rect.height as usize,
-                    self.shell.pending_dialog.as_ref(),
-                    &self.shell.dialog_input,
-                    theme_mode,
-                );
-                self.shell
-                    .client
-                    .present(self.shell.dialog.window_id, &dialog_pixels)?;
-            }
-            self.shell.dirty_dialog = false;
-        }
-
-        if self.shell.dirty_context_menu {
-            if self.shell.context_menu.visible {
-                let context_pixels = paint_context_menu_surface(
-                    self.shell.context_menu.content_rect.width as usize,
-                    self.shell.context_menu.content_rect.height as usize,
-                    self.shell.context_target,
-                    theme_mode,
-                );
-                self.shell
-                    .client
-                    .present(self.shell.context_menu.window_id, &context_pixels)?;
-            }
-            self.shell.dirty_context_menu = false;
-        }
-
-        if self.shell.dirty_switcher {
-            if self.shell.switcher.visible {
-                let candidates = self.switcher_candidates();
-                let switcher_pixels = paint_switcher_surface(
-                    self.shell.switcher.content_rect.width as usize,
-                    self.shell.switcher.content_rect.height as usize,
-                    &candidates,
-                    self.shell.switcher_index,
+        if frame_plan.touches(InvalidationTarget::Dock) {
+            let width = self.shell.task_strip.content_rect.width as usize;
+            let height = self.shell.task_strip.content_rect.height as usize;
+            self.shell.client.commit_scene(
+                self.shell.task_strip.window_id,
+                build_task_strip_scene(
+                    self.shell.task_strip.window_id,
+                    &mut self.text_system,
+                    width,
+                    height,
+                    &snapshots,
                     self.shell.active_workspace,
                     theme_mode,
-                );
-                self.shell
-                    .client
-                    .present(self.shell.switcher.window_id, &switcher_pixels)?;
-            }
-            self.shell.dirty_switcher = false;
+                ),
+            )?;
         }
 
-        if self.shell.dirty_lock {
-            if self.shell.lock_screen.visible {
-                let pixels = paint_lock_surface(
-                    self.shell.lock_screen.content_rect.width as usize,
-                    self.shell.lock_screen.content_rect.height as usize,
+        if frame_plan.touches(InvalidationTarget::Launcher)
+            && (self.shell.launcher.visible
+                || self.shell.launcher.desired_visible
+                || self.shell.launcher.fading_out)
+        {
+            let width = self.shell.launcher.content_rect.width as usize;
+            let height = self.shell.launcher.content_rect.height as usize;
+            let slide_px =
+                (((1.0 - self.shell.launcher.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
+            self.shell.client.commit_scene(
+                self.shell.launcher.window_id,
+                apply_scene_overlay_transform(
+                    build_launcher_scene(
+                        self.shell.launcher.window_id,
+                        &mut self.text_system,
+                        width,
+                        height,
+                        &snapshots,
+                        &session_snapshot,
+                        &self.shell.notices,
+                        theme_mode,
+                        self.shell.layout_profile,
+                    ),
+                    self.shell.launcher.opacity,
+                    slide_px,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::NotificationCenter) && self.shell.notifications.visible
+        {
+            let entries = self.shell.client.list_notifications(6).unwrap_or_else(|_| Vec::new());
+            let width = self.shell.notifications.content_rect.width as usize;
+            let height = self.shell.notifications.content_rect.height as usize;
+            let slide_px =
+                (((1.0 - self.shell.notifications.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
+            self.shell.client.commit_scene(
+                self.shell.notifications.window_id,
+                apply_scene_overlay_transform(
+                    build_notifications_scene(
+                        self.shell.notifications.window_id,
+                        &mut self.text_system,
+                        width,
+                        height,
+                        &entries,
+                        self.shell.notification_index,
+                        theme_mode,
+                    ),
+                    self.shell.notifications.opacity,
+                    slide_px,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::QuickSettings) && self.shell.quick_settings.visible
+        {
+            let width = self.shell.quick_settings.content_rect.width as usize;
+            let height = self.shell.quick_settings.content_rect.height as usize;
+            let slide_px =
+                (((1.0 - self.shell.quick_settings.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
+            self.shell.client.commit_scene(
+                self.shell.quick_settings.window_id,
+                apply_scene_overlay_transform(
+                    build_quick_settings_scene(
+                        self.shell.quick_settings.window_id,
+                        &mut self.text_system,
+                        width,
+                        height,
+                        theme_mode,
+                        self.settings.notifications,
+                        self.settings.animations,
+                    ),
+                    self.shell.quick_settings.opacity,
+                    slide_px,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::CommandPalette)
+            && self.shell.command_palette.visible
+        {
+            let actions = self.filtered_palette_actions();
+            let width = self.shell.command_palette.content_rect.width as usize;
+            let height = self.shell.command_palette.content_rect.height as usize;
+            let slide_px =
+                (((1.0 - self.shell.command_palette.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5)
+                    as i32;
+            self.shell.client.commit_scene(
+                self.shell.command_palette.window_id,
+                apply_scene_overlay_transform(
+                    build_command_palette_scene(
+                        self.shell.command_palette.window_id,
+                        &mut self.text_system,
+                        width,
+                        height,
+                        &actions,
+                        &self.shell.command_query,
+                        self.shell.command_selection,
+                        theme_mode,
+                    ),
+                    self.shell.command_palette.opacity,
+                    slide_px,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::Overview) && self.shell.stage_rail.visible {
+            let width = self.shell.stage_rail.content_rect.width as usize;
+            let height = self.shell.stage_rail.content_rect.height as usize;
+            let slide_px =
+                (((1.0 - self.shell.stage_rail.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
+            self.shell.client.commit_scene(
+                self.shell.stage_rail.window_id,
+                apply_scene_overlay_transform(
+                    build_stage_rail_scene(
+                        self.shell.stage_rail.window_id,
+                        &mut self.text_system,
+                        width,
+                        height,
+                        &self.shell.stage_sets,
+                        self.shell.active_stage_set,
+                        theme_mode,
+                    ),
+                    self.shell.stage_rail.opacity,
+                    slide_px,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::Dialog) && self.shell.dialog.visible {
+            let width = self.shell.dialog.content_rect.width as usize;
+            let height = self.shell.dialog.content_rect.height as usize;
+            let slide_px =
+                (((1.0 - self.shell.dialog.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
+            self.shell.client.commit_scene(
+                self.shell.dialog.window_id,
+                apply_scene_overlay_transform(
+                    build_dialog_scene(
+                        self.shell.dialog.window_id,
+                        &mut self.text_system,
+                        width,
+                        height,
+                        self.shell.pending_dialog.as_ref(),
+                        &self.shell.dialog_input,
+                        theme_mode,
+                    ),
+                    self.shell.dialog.opacity,
+                    slide_px,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::ContextMenu) && self.shell.context_menu.visible {
+            let width = self.shell.context_menu.content_rect.width as usize;
+            let height = self.shell.context_menu.content_rect.height as usize;
+            let slide_px =
+                (((1.0 - self.shell.context_menu.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
+            self.shell.client.commit_scene(
+                self.shell.context_menu.window_id,
+                apply_scene_overlay_transform(
+                    build_context_menu_scene(
+                        self.shell.context_menu.window_id,
+                        &mut self.text_system,
+                        width,
+                        height,
+                        self.shell.context_target,
+                        theme_mode,
+                    ),
+                    self.shell.context_menu.opacity,
+                    slide_px,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::Switcher) && self.shell.switcher.visible {
+            let candidates = self.switcher_candidates();
+            let width = self.shell.switcher.content_rect.width as usize;
+            let height = self.shell.switcher.content_rect.height as usize;
+            let slide_px =
+                (((1.0 - self.shell.switcher.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
+            self.shell.client.commit_scene(
+                self.shell.switcher.window_id,
+                apply_scene_overlay_transform(
+                    build_switcher_scene(
+                        self.shell.switcher.window_id,
+                        &mut self.text_system,
+                        width,
+                        height,
+                        &candidates,
+                        self.shell.switcher_index,
+                        self.shell.active_workspace,
+                        theme_mode,
+                    ),
+                    self.shell.switcher.opacity,
+                    slide_px,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::LockScreen) && self.shell.lock_screen.visible {
+            let width = self.shell.lock_screen.content_rect.width as usize;
+            let height = self.shell.lock_screen.content_rect.height as usize;
+            self.shell.client.commit_scene(
+                self.shell.lock_screen.window_id,
+                build_lock_scene(
+                    self.shell.lock_screen.window_id,
+                    &mut self.text_system,
+                    width,
+                    height,
                     &self.shell.auth_input,
                     self.shell.logged_in,
                     theme_mode,
-                );
-                self.shell
-                    .client
-                    .present(self.shell.lock_screen.window_id, &pixels)?;
-            }
-            self.shell.dirty_lock = false;
+                ),
+            )?;
         }
 
         Ok(())
@@ -2784,7 +3390,10 @@ impl TerminalApp {
         match command.as_str() {
             "help" => {
                 self.lines.push(String::from(
-                    "help | clear | open terminal|files|settings|editor | copy <text> | paste | open-file | screenshot | screenshot-save | grants | accessibility",
+                    "local: clear | open terminal|files|settings|editor | copy <text> | paste | open-file | save-file | pick-folder | screenshot | grants | accessibility",
+                ));
+                self.lines.push(String::from(
+                    "shell: pwd | cd <dir> | ls [path] | tree [path] | find [path] -name <glob> | stat <path> | cp <src> <dst> | mv | rm | mkdir | touch | head | tail | wc | grep | sort | uniq | env | history | alias | which | command",
                 ));
             }
             "clear" => {
@@ -2888,9 +3497,7 @@ impl TerminalApp {
 
         let _ = pair.master.write(command.as_bytes());
         let _ = pair.master.write(b"\n");
-        if !execute_command_on_pty(pair, command) {
-            let _ = pair.slave.write(b"unknown command\n");
-        }
+        let _ = execute_command_on_pty_with_shell(pair, &mut self.shell, command);
         let _ = pair.slave.write(b"$ ");
         self.pull_pty_output();
         Ok(())
@@ -3459,10 +4066,20 @@ impl SettingsApp {
         canvas.draw_text(18, 18, "Settings", TEXT_PRIMARY);
         let session = self.client.session_snapshot().unwrap_or(SessionSnapshot {
             workspace_id: self.workspace_id,
+            workspace_layout: WorkspaceLayout::Dwindle,
             power_state: SessionPowerState::Active,
             unread_notifications: 0,
             apps_running: 0,
             apps_crashed: 0,
+            overview_active: false,
+            scratchpad_visible: false,
+            shell_ready: true,
+            boot_clean_desktop: true,
+            output_scale: 1,
+            text_scale: 1,
+            locale: String::from("en-US"),
+            theme_variant: String::from("hybrid-titan"),
+            shell_state: ShellState::DesktopReady,
         });
         let clipboard_permission = self
             .client
@@ -3824,6 +4441,13 @@ fn ensure_window_visible(
         if let Ok(info) = client.window_info(current.window_id) {
             let was_visible = info.visible;
             current.update_from_info(&info);
+            let _ = client.move_window_to_workspace(current.window_id, workspace_id);
+            let _ = client.set_window_meta(
+                current.window_id,
+                workspace_id,
+                LayerRole::Window,
+                WindowFlags::default(),
+            );
             if !was_visible {
                 client.set_visibility(current.window_id, true)?;
             }
@@ -3847,7 +4471,16 @@ fn ensure_window_visible(
         *window = None;
     }
 
-    let created = client.create_window(title, rect.x, rect.y, rect.width, rect.height)?;
+    let created = client.create_layer_window(
+        title,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        workspace_id,
+        LayerRole::Window,
+        WindowFlags::default(),
+    )?;
     client.focus_window(created.window_id)?;
     *window = Some(SessionWindow::from_client_window(created));
     let _ = client.mark_app_launched(title);
@@ -3901,6 +4534,36 @@ fn sync_shell_window(client: &DesktopClient, window: &mut SessionWindow) -> Opti
     Some(())
 }
 
+fn restore_shell_window(
+    client: &DesktopClient,
+    window: &mut SessionWindow,
+    title: &str,
+    rect: Rect,
+    workspace_id: u8,
+    layer_role: LayerRole,
+    visible: bool,
+) -> Result<(), String> {
+    let created = client.create_layer_window(
+        title,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        workspace_id,
+        layer_role,
+        shell_layer_flags(),
+    )?;
+    if !visible {
+        client.set_visibility(created.window_id, false)?;
+    }
+    *window = SessionWindow::from_client_window(created);
+    window.visible = visible;
+    window.desired_visible = visible;
+    window.opacity = if visible { 1.0 } else { 0.0 };
+    window.fading_out = false;
+    Ok(())
+}
+
 fn apply_workspace_visibility(
     client: &DesktopClient,
     window: &mut Option<SessionWindow>,
@@ -3919,6 +4582,9 @@ fn apply_workspace_visibility(
         } else {
             current.visible = should_be_visible;
         }
+        current.desired_visible = should_be_visible;
+        current.opacity = if should_be_visible { 1.0 } else { 0.0 };
+        current.fading_out = false;
     }
 
     let _ = client.update_shell_window(
@@ -3944,6 +4610,9 @@ fn minimize_app_window(
     } else {
         current.visible = false;
     }
+    current.desired_visible = false;
+    current.opacity = 0.0;
+    current.fading_out = false;
     let _ = client.update_shell_window(Some(current.window_id), false, false, workspace_id);
     Ok(())
 }
@@ -3970,7 +4639,16 @@ fn move_app_workspace(
     workspace_id: &mut u8,
     active_workspace: u8,
 ) -> Result<(), String> {
-    *workspace_id = (*workspace_id + 1) % 3;
+    *workspace_id = (*workspace_id + 1) % WORKSPACE_COUNT;
+    if let Some(current) = window.as_ref() {
+        client.move_window_to_workspace(current.window_id, *workspace_id)?;
+        client.set_window_meta(
+            current.window_id,
+            *workspace_id,
+            LayerRole::Window,
+            WindowFlags::default(),
+        )?;
+    }
     apply_workspace_visibility(client, window, *workspace_id, active_workspace)
 }
 
@@ -4106,6 +4784,58 @@ const FILES_ENTRIES: [FilesEntry; 4] = [
     },
 ];
 
+fn blend_pixel(background: u32, foreground: u32, opacity: f32) -> u32 {
+    let opacity = opacity.clamp(0.0, 1.0);
+    let br = ((background >> 16) & 0xFF) as f32;
+    let bg = ((background >> 8) & 0xFF) as f32;
+    let bb = (background & 0xFF) as f32;
+
+    let fr = ((foreground >> 16) & 0xFF) as f32;
+    let fg = ((foreground >> 8) & 0xFF) as f32;
+    let fb = (foreground & 0xFF) as f32;
+
+    let r = (br * (1.0 - opacity) + fr * opacity) as u32;
+    let g = (bg * (1.0 - opacity) + fg * opacity) as u32;
+    let b = (bb * (1.0 - opacity) + fb * opacity) as u32;
+    0xFF00_0000 | (r << 16) | (g << 8) | b
+}
+
+fn transform_overlay_surface(
+    pixels: Vec<u32>,
+    width: usize,
+    height: usize,
+    background: u32,
+    opacity: f32,
+    slide_px: i32,
+) -> Vec<u32> {
+    let opacity = opacity.clamp(0.0, 1.0);
+    if width == 0 || height == 0 {
+        return pixels;
+    }
+
+    let shift = slide_px.max(0) as usize;
+    let mut transformed = vec![background; width.saturating_mul(height)];
+
+    if shift >= height {
+        return transformed;
+    }
+
+    for row in 0..height.saturating_sub(shift) {
+        let src = row * width;
+        let dst = (row + shift) * width;
+        transformed[dst..dst + width].copy_from_slice(&pixels[src..src + width]);
+    }
+
+    if opacity >= 0.995 {
+        return transformed;
+    }
+
+    for pixel in &mut transformed {
+        *pixel = blend_pixel(background, *pixel, opacity);
+    }
+    transformed
+}
+
 fn launcher_hit(local: Point) -> Option<AppKind> {
     let row_top = 92;
     let row_height = 54;
@@ -4123,27 +4853,16 @@ fn launcher_hit(local: Point) -> Option<AppKind> {
     None
 }
 
-fn task_strip_workspace_hit(local: Point) -> Option<u8> {
-    if local.y < 16 || local.y > 56 {
-        return None;
-    }
-    for index in 0..3u8 {
-        let left = 18 + index as i32 * 72;
-        let rect = Rect::new(left, 16, 58, 36);
-        if rect.contains(local) {
-            return Some(index);
-        }
-    }
+fn task_strip_workspace_hit(_local: Point, _width: usize) -> Option<u8> {
     None
 }
 
-fn task_strip_app_hit(local: Point) -> Option<AppKind> {
-    if local.y < 12 || local.y > 60 {
+fn task_strip_app_hit(local: Point, width: usize) -> Option<AppKind> {
+    if local.y < 10 || local.y > 70 {
         return None;
     }
     for (index, kind) in AppKind::ALL.iter().enumerate() {
-        let left = 246 + index as i32 * 118;
-        let rect = Rect::new(left, 12, 106, 48);
+        let rect = task_strip_icon_rect(index, width);
         if rect.contains(local) {
             return Some(*kind);
         }
@@ -4364,6 +5083,24 @@ fn app_health_color(health: AppHealth, needs_attention: bool, accent: u32) -> u3
     }
 }
 
+fn workspace_layout_label(layout: WorkspaceLayout) -> &'static str {
+    match layout {
+        WorkspaceLayout::Dwindle => "dwindle",
+        WorkspaceLayout::Master => "master",
+        WorkspaceLayout::Floating => "floating",
+        WorkspaceLayout::Overview => "overview",
+    }
+}
+
+fn notification_level_label(level: NotificationLevel) -> &'static str {
+    match level {
+        NotificationLevel::Info => "info",
+        NotificationLevel::Success => "ok",
+        NotificationLevel::Warning => "warn",
+        NotificationLevel::Error => "error",
+    }
+}
+
 fn power_state_label(state: SessionPowerState) -> &'static str {
     match state {
         SessionPowerState::Active => "active",
@@ -4393,81 +5130,102 @@ struct TopBarLayout {
     command_rect: Rect,
     quick_rect: Rect,
     power_rect: Rect,
+    status_start: i32,
 }
 
 fn top_bar_layout(width: i32) -> TopBarLayout {
     let width = width.max(320);
-    let profile = Theme::layout_profile(width as u32);
-    let control_top = 2;
-    let control_height = 30;
-    let control_width = 84;
-    let edge_inset = 20;
-    let gap = 12;
-
-    let power_rect = Rect::new(
-        width.saturating_sub(edge_inset + control_width),
-        control_top,
-        control_width as u32,
-        control_height as u32,
-    );
-    let quick_rect = Rect::new(
-        power_rect.x.saturating_sub(gap + control_width),
-        control_top,
-        control_width as u32,
-        control_height as u32,
-    );
-    let command_width = match profile {
-        ShellLayoutProfile::Desktop => 286,
-        ShellLayoutProfile::Compact => 228,
-    };
-    let min_command_x = match profile {
-        ShellLayoutProfile::Desktop => 336,
-        ShellLayoutProfile::Compact => 288,
-    };
-    let command_rect = Rect::new(
-        quick_rect
-            .x
-            .saturating_sub(14 + command_width)
-            .max(min_command_x),
-        control_top,
-        command_width as u32,
-        control_height as u32,
-    );
-    let workspace_start = command_rect.x.saturating_sub(214).max(212);
+    let power_rect = Rect::new(width.saturating_sub(74), 10, 58, 38);
+    let quick_rect = Rect::new(power_rect.x.saturating_sub(116), 10, 104, 38);
+    let command_rect = Rect::new(width.saturating_div(2).saturating_sub(103), 10, 206, 38);
+    let workspace_start = command_rect.x.saturating_sub(292).max(210);
+    let status_start = quick_rect.x.saturating_sub(118);
 
     TopBarLayout {
         workspace_start,
         command_rect,
         quick_rect,
         power_rect,
+        status_start,
     }
+}
+
+fn top_bar_workspace_rect(index: u8, width: i32) -> Rect {
+    let layout = top_bar_layout(width);
+    if index >= 4 {
+        return Rect::new(-10_000, -10_000, 1, 1);
+    }
+    let gap = 10;
+    let button_width = 56;
+    Rect::new(
+        layout.workspace_start + index as i32 * (button_width + gap),
+        10,
+        button_width as u32,
+        38,
+    )
+}
+
+fn task_strip_workspace_rect(index: u8) -> Rect {
+    let gap = 4;
+    let button_width = 25;
+    Rect::new(
+        18 + index as i32 * (button_width + gap),
+        24,
+        button_width as u32,
+        36,
+    )
+}
+
+fn task_strip_icon_rect(index: usize, width: usize) -> Rect {
+    let dock_width = 354u32.min(width as u32);
+    let dock_rect = Rect::new(
+        ((width as i32 - dock_width as i32) / 2).max(0),
+        0,
+        dock_width,
+        Theme::PULSE_DOCK_HEIGHT as u32,
+    );
+    let icons = layout_flex(
+        Rect::new(dock_rect.x + 19, dock_rect.y + 14, dock_rect.width.saturating_sub(38), 52),
+        FlexDirection::Row,
+        EdgeInsets::default(),
+        14,
+        &[
+            FlexItem::fixed(52),
+            FlexItem::fixed(52),
+            FlexItem::fixed(52),
+            FlexItem::fixed(52),
+            FlexItem::fixed(52),
+        ],
+    );
+    icons
+        .get(index)
+        .copied()
+        .unwrap_or(Rect::new(-10_000, -10_000, 1, 1))
 }
 
 fn quick_settings_row_rect(index: usize, width: usize) -> Rect {
     Rect::new(
         18,
-        64 + index as i32 * 30,
+        86 + index as i32 * 58,
         width.saturating_sub(36) as u32,
-        Theme::MIN_HIT_HEIGHT as u32,
+        46,
     )
 }
 
 fn command_palette_row_rect(index: usize, width: usize) -> Rect {
     Rect::new(
-        22,
-        86 + index as i32 * 30,
-        width.saturating_sub(44) as u32,
-        Theme::MIN_HIT_HEIGHT as u32,
+        18,
+        138 + index as i32 * 54,
+        width.saturating_sub(36) as u32,
+        44,
     )
 }
 
 fn stage_rail_row_rect(index: usize, width: usize) -> Rect {
-    Rect::new(
-        14,
-        58 + index as i32 * 58,
-        width.saturating_sub(28) as u32,
-        48,
-    )
+    let card_width = width.saturating_sub(54).saturating_div(2);
+    let x = 18 + (index % 2) as i32 * (card_width as i32 + 18);
+    let y = 82 + (index / 2) as i32 * 214;
+    Rect::new(x, y, card_width as u32, 196)
 }
 
 fn top_bar_power_hit(local: Point, width: i32) -> bool {
@@ -4524,10 +5282,1484 @@ fn theme_mode_label(mode: ThemeMode) -> &'static str {
     }
 }
 
+fn push_scene_rect(scene: &mut SceneGraph, parent: SceneNodeId, bounds: Rect, color: u32) {
+    push_scene_round_rect(scene, parent, bounds, color, 0);
+}
+
+fn push_scene_round_rect(
+    scene: &mut SceneGraph,
+    parent: SceneNodeId,
+    bounds: Rect,
+    color: u32,
+    corner_radius: u16,
+) {
+    let _ = scene.push_render_object(
+        parent,
+        bounds,
+        DamageLane::Shell,
+        RenderObjectKind::SolidRect {
+            color,
+            corner_radius,
+        },
+    );
+}
+
+fn push_scene_panel(
+    scene: &mut SceneGraph,
+    parent: SceneNodeId,
+    bounds: Rect,
+    fill: u32,
+    border: u32,
+    corner_radius: u16,
+    top_accent: Option<u32>,
+) {
+    push_scene_round_rect(scene, parent, bounds, fill, corner_radius);
+    push_scene_outline(scene, parent, bounds, border);
+    if let Some(accent) = top_accent {
+        let inset = (corner_radius as i32 / 2).max(0);
+        let width = bounds
+            .width
+            .saturating_sub((inset as u32).saturating_mul(2))
+            .max(1);
+        push_scene_round_rect(
+            scene,
+            parent,
+            Rect::new(bounds.x + inset, bounds.y, width, 1),
+            accent,
+            1,
+        );
+    }
+}
+
+fn push_scene_icon(
+    scene: &mut SceneGraph,
+    parent: SceneNodeId,
+    kind: AppKind,
+    rect: Rect,
+    accent: u32,
+) {
+    let inset = 10;
+    let inner = Rect::new(
+        rect.x + inset,
+        rect.y + inset,
+        rect.width.saturating_sub((inset as u32) * 2),
+        rect.height.saturating_sub((inset as u32) * 2),
+    );
+    match kind {
+        AppKind::Terminal => {
+            push_scene_round_rect(scene, parent, inner, accent, 8);
+            push_scene_rect(
+                scene,
+                parent,
+                Rect::new(inner.x + 4, inner.y + 5, inner.width.saturating_sub(8), 3),
+                0xFF0A131E,
+            );
+            push_scene_rect(scene, parent, Rect::new(inner.x + 6, inner.y + 13, 10, 3), 0xFF0A131E);
+            push_scene_rect(
+                scene,
+                parent,
+                Rect::new(inner.x + 18, inner.y + 19, inner.width.saturating_sub(24), 3),
+                0xFF0A131E,
+            );
+        }
+        AppKind::Files => {
+            let tab = Rect::new(inner.x + 4, inner.y + 5, inner.width / 3, 6);
+            let body = Rect::new(
+                inner.x + 3,
+                inner.y + 10,
+                inner.width.saturating_sub(6),
+                inner.height.saturating_sub(13),
+            );
+            push_scene_round_rect(scene, parent, body, accent, 7);
+            push_scene_round_rect(scene, parent, tab, accent, 4);
+        }
+        AppKind::Settings => {
+            push_scene_round_rect(
+                scene,
+                parent,
+                Rect::new(inner.x + 4, inner.y + 6, inner.width.saturating_sub(8), 5),
+                accent,
+                3,
+            );
+            push_scene_round_rect(
+                scene,
+                parent,
+                Rect::new(inner.x + 4, inner.y + 14, inner.width.saturating_sub(8), 5),
+                accent,
+                3,
+            );
+            push_scene_round_rect(
+                scene,
+                parent,
+                Rect::new(inner.x + 4, inner.y + 22, inner.width.saturating_sub(8), 5),
+                accent,
+                3,
+            );
+            push_scene_round_rect(scene, parent, Rect::new(inner.x + 9, inner.y + 4, 7, 9), 0xFF0A131E, 3);
+            push_scene_round_rect(scene, parent, Rect::new(inner.x + 17, inner.y + 12, 7, 9), 0xFF0A131E, 3);
+            push_scene_round_rect(scene, parent, Rect::new(inner.x + 13, inner.y + 20, 7, 9), 0xFF0A131E, 3);
+        }
+        AppKind::Editor => {
+            push_scene_round_rect(scene, parent, inner, accent, 8);
+            push_scene_rect(
+                scene,
+                parent,
+                Rect::new(inner.x + 6, inner.y + 6, 3, inner.height.saturating_sub(12)),
+                0xFF0A131E,
+            );
+            push_scene_rect(
+                scene,
+                parent,
+                Rect::new(inner.x + 14, inner.y + 8, inner.width.saturating_sub(20), 3),
+                0xFF0A131E,
+            );
+            push_scene_rect(
+                scene,
+                parent,
+                Rect::new(inner.x + 14, inner.y + 15, inner.width.saturating_sub(24), 3),
+                0xFF0A131E,
+            );
+            push_scene_rect(
+                scene,
+                parent,
+                Rect::new(inner.x + 14, inner.y + 22, inner.width.saturating_sub(16), 3),
+                0xFF0A131E,
+            );
+        }
+    }
+}
+
+fn push_scene_outline(scene: &mut SceneGraph, parent: SceneNodeId, bounds: Rect, color: u32) {
+    if bounds.width == 0 || bounds.height == 0 {
+        return;
+    }
+    push_scene_rect(scene, parent, Rect::new(bounds.x, bounds.y, bounds.width, 1), color);
+    push_scene_rect(
+        scene,
+        parent,
+        Rect::new(bounds.x, bounds.bottom().saturating_sub(1), bounds.width, 1),
+        color,
+    );
+    push_scene_rect(scene, parent, Rect::new(bounds.x, bounds.y, 1, bounds.height), color);
+    push_scene_rect(
+        scene,
+        parent,
+        Rect::new(bounds.right().saturating_sub(1), bounds.y, 1, bounds.height),
+        color,
+    );
+}
+
+fn push_scene_text(
+    scene: &mut SceneGraph,
+    text_system: &mut TextSystem,
+    parent: SceneNodeId,
+    x: i32,
+    y: i32,
+    max_width: u32,
+    text: &str,
+    color: u32,
+) {
+    let blob = text_system.layout_text_with_style(text, max_width.max(1), TextStyle::ui(), color);
+    let _ = scene.push_render_object(
+        parent,
+        Rect::new(x, y, blob.width_px.max(1), blob.height_px.max(1)),
+        DamageLane::Text,
+        RenderObjectKind::Raster {
+            width: blob.width_px.max(1),
+            height: blob.height_px.max(1),
+            pixels: blob.pixels,
+        },
+    );
+}
+
+fn apply_scene_overlay_transform(
+    mut scene: crate::gui::protocol::SceneUpdate,
+    opacity: f32,
+    slide_y: i32,
+) -> crate::gui::protocol::SceneUpdate {
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    for object in scene.render_objects.iter_mut() {
+        object.opacity = ((object.opacity as u16 * alpha as u16) / 255) as u8;
+        object.bounds.y = object.bounds.y.saturating_add(slide_y);
+        if let Some(clip) = object.clip.as_mut() {
+            clip.y = clip.y.saturating_add(slide_y);
+        }
+    }
+    for rect in scene.damage_hint.iter_mut() {
+        rect.y = rect.y.saturating_add(slide_y);
+    }
+    scene
+}
+
+fn build_top_bar_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    active_workspace: u8,
+    snapshot: &SessionSnapshot,
+    theme_mode: ThemeMode,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    let layout = top_bar_layout(width as i32);
+
+    push_scene_panel(
+        &mut scene,
+        root,
+        Rect::new(0, 0, width as u32, height as u32),
+        0xD60A131E,
+        palette.border,
+        20,
+        Some(0x2E60B8FF),
+    );
+
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        17,
+        180,
+        "echOS",
+        palette.text_primary,
+    );
+
+    let workspace_start = ((active_workspace as usize) / 4) * 4;
+    let workspace_rects = layout_flex(
+        Rect::new(layout.workspace_start, 10, 266, 38),
+        FlexDirection::Row,
+        EdgeInsets {
+            left: 0,
+            top: 1,
+            right: 0,
+            bottom: 1,
+        },
+        10,
+        &[FlexItem::fixed(56), FlexItem::fixed(56), FlexItem::fixed(56), FlexItem::fixed(56)],
+    );
+    for (index, rect) in workspace_rects.iter().enumerate() {
+        let workspace_id = (workspace_start + index).min(WORKSPACE_COUNT as usize - 1) as u8;
+        let active = workspace_id == active_workspace;
+        push_scene_panel(
+            &mut scene,
+            root,
+            *rect,
+            if active { 0xF2142433 } else { 0xDB0D1724 },
+            palette.border,
+            14,
+            if active { Some(palette.accent_mint) } else { None },
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + ((rect.width as i32 - 10) / 2),
+            rect.y + 11,
+            16,
+            &(workspace_id + 1).to_string(),
+            if active {
+                palette.text_primary
+            } else {
+                palette.text_muted
+            },
+        );
+    }
+
+    push_scene_panel(
+        &mut scene,
+        root,
+        layout.command_rect,
+        0xC7091018,
+        palette.border,
+        14,
+        None,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        layout.command_rect.x + 15,
+        layout.command_rect.y + 10,
+        layout.command_rect.width.saturating_sub(30),
+        "Search / Command",
+        palette.text_muted,
+    );
+
+    let right_labels = ["NET", "AUD", "PWR"];
+    let mut status_x = layout.status_start;
+    for label in right_labels {
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            status_x,
+            17,
+            30,
+            label,
+            palette.text_secondary,
+        );
+        status_x += 34;
+    }
+    push_scene_panel(
+        &mut scene,
+        root,
+        layout.quick_rect,
+        0xD00E1723,
+        palette.border,
+        14,
+        Some(palette.accent_blue),
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        layout.quick_rect.x + 16,
+        layout.quick_rect.y + 10,
+        layout.quick_rect.width.saturating_sub(32),
+        "Panel",
+        palette.text_primary,
+    );
+    push_scene_panel(
+        &mut scene,
+        root,
+        layout.power_rect,
+        0xD00E1723,
+        palette.border,
+        14,
+        Some(palette.accent_gold),
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        layout.power_rect.x + 14,
+        layout.power_rect.y + 10,
+        layout.power_rect.width.saturating_sub(28),
+        "Lock",
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        width as i32 - 120,
+        17,
+        44,
+        "12:00",
+        palette.text_secondary,
+    );
+
+    let mut update = scene.snapshot(window_id);
+    update.damage_hint = vec![bounds];
+    update
+}
+
+fn build_task_strip_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    snapshots: &[AppSnapshot],
+    active_workspace: u8,
+    theme_mode: ThemeMode,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+
+    let dock_width = 354u32.min(width as u32);
+    let dock_rect = Rect::new(
+        ((width as i32 - dock_width as i32) / 2).max(0),
+        0,
+        dock_width,
+        height as u32,
+    );
+    push_scene_panel(
+        &mut scene,
+        root,
+        dock_rect,
+        0xD1091018,
+        palette.border,
+        22,
+        None,
+    );
+
+    let icons_rect = layout_flex(
+        Rect::new(dock_rect.x + 19, dock_rect.y + 14, dock_rect.width.saturating_sub(38), 52),
+        FlexDirection::Row,
+        EdgeInsets::default(),
+        14,
+        &[
+            FlexItem::fixed(52),
+            FlexItem::fixed(52),
+            FlexItem::fixed(52),
+            FlexItem::fixed(52),
+            FlexItem::fixed(52),
+        ],
+    );
+    let mut focused_kind = None;
+    for snapshot in snapshots.iter() {
+        if snapshot.focused || (snapshot.workspace_id == active_workspace && snapshot.visible) {
+            focused_kind = Some(snapshot.kind);
+            if snapshot.focused {
+                break;
+            }
+        }
+    }
+    let dock_items = [
+        (Some(AppKind::Terminal), palette.accent_mint),
+        (Some(AppKind::Files), palette.accent_blue),
+        (Some(AppKind::Settings), palette.accent_gold),
+        (Some(AppKind::Editor), palette.accent_coral),
+        (None, if snapshots.iter().any(|s| s.needs_attention) { palette.accent_gold } else { palette.text_secondary }),
+    ];
+    for (index, rect) in icons_rect.iter().enumerate() {
+        let (kind, accent) = dock_items[index];
+        let active = kind.is_some() && kind == focused_kind;
+        push_scene_panel(
+            &mut scene,
+            root,
+            *rect,
+            0xF1111C29,
+            palette.border,
+            16,
+            if active { Some(accent) } else { None },
+        );
+        if let Some(kind) = kind {
+            push_scene_icon(&mut scene, root, kind, *rect, if active { palette.text_primary } else { accent });
+        } else {
+            let badge = Rect::new(rect.x + 14, rect.y + 12, rect.width.saturating_sub(28), rect.height.saturating_sub(24));
+            push_scene_round_rect(&mut scene, root, badge, accent, 12);
+            push_scene_round_rect(&mut scene, root, Rect::new(rect.x + rect.width as i32 / 2 - 3, rect.y + 14, 6, 6), 0xFF0A131E, 3);
+            push_scene_round_rect(&mut scene, root, Rect::new(rect.x + rect.width as i32 / 2 - 3, rect.bottom() - 20, 6, 6), 0xFF0A131E, 3);
+        }
+    }
+
+    let mut update = scene.snapshot(window_id);
+    update.damage_hint = vec![bounds];
+    update
+}
+
+fn build_launcher_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    snapshots: &[AppSnapshot],
+    session: &SessionSnapshot,
+    notices: &[String],
+    theme_mode: ThemeMode,
+    layout_profile: ShellLayoutProfile,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    let _ = layout_profile;
+    push_scene_panel(
+        &mut scene,
+        root,
+        bounds,
+        0xE80B121C,
+        palette.border,
+        24,
+        Some(palette.accent_blue),
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        18,
+        width.saturating_sub(36) as u32,
+        "Launcher",
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        40,
+        width.saturating_sub(36) as u32,
+        "Dock-first launch, recent actions, and app restore.",
+        palette.text_muted,
+    );
+
+    let search_rect = Rect::new(18, 74, width.saturating_sub(36) as u32, 42);
+    push_scene_panel(
+        &mut scene,
+        root,
+        search_rect,
+        0xC7091018,
+        palette.border,
+        14,
+        None,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        search_rect.x + 14,
+        search_rect.y + 12,
+        search_rect.width.saturating_sub(28),
+        "Search apps, files, commands, sessions",
+        palette.text_muted,
+    );
+
+    let app_rects = crate::gui::layout::layout_grid(
+        Rect::new(18, 134, width.saturating_sub(36) as u32, 104),
+        EdgeInsets::default(),
+        1,
+        0,
+        12,
+        4,
+        92,
+    );
+    for (rect, kind) in app_rects.iter().zip(AppKind::ALL.iter()) {
+        let snapshot = snapshots.iter().find(|snapshot| snapshot.kind == *kind);
+        let active = snapshot
+            .map(|s| s.focused || (s.visible && s.workspace_id == session.workspace_id))
+            .unwrap_or(false);
+        push_scene_panel(
+            &mut scene,
+            root,
+            *rect,
+            0xE0111C29,
+            palette.border,
+            18,
+            if active { Some(kind.accent()) } else { None },
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 18,
+            rect.y + 18,
+            rect.width.saturating_sub(36),
+            kind.title(),
+            palette.text_primary,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 18,
+            rect.y + 42,
+            rect.width.saturating_sub(36),
+            snapshot
+                .map(|s| app_health_label(s.health, s.visible, s.focused))
+                .unwrap_or("ready"),
+            if active { palette.text_secondary } else { palette.text_muted },
+        );
+    }
+
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        262,
+        width.saturating_sub(36) as u32,
+        "Recent actions",
+        palette.text_primary,
+    );
+    let recents = [
+        "Launch Terminal",
+        "Open Quick Settings",
+        "Switch to Workspace 2",
+        "Find build logs",
+        "Toggle scratchpad",
+    ];
+    for (index, label) in recents.iter().enumerate() {
+        let rect = Rect::new(18, 292 + index as i32 * 54, width.saturating_sub(36) as u32, 44);
+        push_scene_panel(
+            &mut scene,
+            root,
+            rect,
+            0xE00E1723,
+            palette.border,
+            14,
+            if index == 0 { Some(palette.accent_blue) } else { None },
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 14,
+            rect.y + 13,
+            rect.width.saturating_sub(110),
+            label,
+            palette.text_secondary,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.right() - 64,
+            rect.y + 13,
+            50,
+            if index == 0 { "Enter" } else { "Open" },
+            palette.text_muted,
+        );
+    }
+
+    if let Some(last) = notices.last() {
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            18,
+            max(height as i32 - 34, 0),
+            width.saturating_sub(36) as u32,
+            last,
+            palette.text_muted,
+        );
+    }
+    scene.snapshot(window_id)
+}
+
+fn build_quick_settings_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    theme_mode: ThemeMode,
+    notifications: bool,
+    animations: bool,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    push_scene_panel(
+        &mut scene,
+        root,
+        bounds,
+        0xE80B121C,
+        palette.border,
+        24,
+        Some(palette.accent_blue),
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        18,
+        width.saturating_sub(36) as u32,
+        "Quick Settings",
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        42,
+        width.saturating_sub(36) as u32,
+        "Utility overlays stay compact and quiet.",
+        palette.text_muted,
+    );
+    let rows = [
+        (
+            "Wi-Fi",
+            if notifications { "On" } else { "Idle" },
+            palette.accent_blue,
+        ),
+        (
+            "Audio",
+            if animations { "36%" } else { "Muted" },
+            palette.accent_mint,
+        ),
+        ("Theme", theme_mode_label(theme_mode), palette.accent_gold),
+        ("Desktop", "Hybrid", palette.accent_soft),
+        ("Notifications", if notifications { "Open" } else { "Muted" }, palette.text_secondary),
+    ];
+    for (index, (label, value, accent)) in rows.iter().enumerate() {
+        let rect = Rect::new(18, 86 + index as i32 * 58, width.saturating_sub(36) as u32, 46);
+        push_scene_panel(
+            &mut scene,
+            root,
+            rect,
+            0xE00E1723,
+            palette.border,
+            14,
+            Some(*accent),
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 14,
+            rect.y + 13,
+            rect.width.saturating_sub(110),
+            label,
+            palette.text_primary,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.right() - 96,
+            rect.y + 13,
+            84,
+            value,
+            palette.text_secondary,
+        );
+    }
+    scene.snapshot(window_id)
+}
+
+fn build_stage_rail_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    stage_sets: &[StageSet],
+    active_stage_set: usize,
+    theme_mode: ThemeMode,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    push_scene_panel(
+        &mut scene,
+        root,
+        bounds,
+        0xE80B121C,
+        palette.border,
+        24,
+        Some(palette.accent_blue),
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        14,
+        18,
+        width.saturating_sub(28) as u32,
+        "Workspaces",
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        14,
+        40,
+        width.saturating_sub(28) as u32,
+        "Overview as a true workspace control surface",
+        palette.text_muted,
+    );
+    let cards = crate::gui::layout::layout_grid(
+        Rect::new(18, 82, width.saturating_sub(36) as u32, height.saturating_sub(100) as u32),
+        EdgeInsets::default(),
+        2,
+        0,
+        18,
+        stage_sets.len().max(1).min(4),
+        196,
+    );
+    for (index, stage) in stage_sets.iter().take(cards.len()).enumerate() {
+        let rect = cards[index];
+        let selected = index == active_stage_set;
+        push_scene_panel(
+            &mut scene,
+            root,
+            rect,
+            if selected { 0xF2142433 } else { 0xE0111C29 },
+            palette.border,
+            20,
+            if selected { Some(palette.accent_mint) } else { None },
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 16,
+            rect.y + 18,
+            rect.width.saturating_sub(32),
+            &format!("Workspace {}", index + 1),
+            palette.text_primary,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 16,
+            rect.y + 42,
+            rect.width.saturating_sub(32),
+            &format!(
+                "{} · layout: {}{}",
+                stage.name,
+                workspace_layout_label(if selected {
+                    WorkspaceLayout::Overview
+                } else {
+                    WorkspaceLayout::Dwindle
+                }),
+                if stage.pinned { " · pinned" } else { "" }
+            ),
+            palette.text_secondary,
+        );
+        let thumb = Rect::new(rect.x + 16, rect.y + 78, rect.width.saturating_sub(32), rect.height.saturating_sub(94));
+        push_scene_panel(
+            &mut scene,
+            root,
+            thumb,
+            0xD00C1722,
+            palette.border,
+            16,
+            None,
+        );
+        let left = Rect::new(thumb.x + 14, thumb.y + 16, thumb.width / 2, thumb.height.saturating_sub(32));
+        push_scene_round_rect(&mut scene, root, left, 0xF018293B, 14);
+        if stage.window_ids.len() > 1 {
+            let right_top = Rect::new(
+                thumb
+                    .right()
+                    .saturating_sub((thumb.width / 4) as i32)
+                    .saturating_sub(14),
+                thumb.y + 16,
+                thumb.width / 4,
+                thumb.height / 2 - 10,
+            );
+            let right_bottom = Rect::new(right_top.x, right_top.bottom() + 10, right_top.width, right_top.height);
+            push_scene_round_rect(&mut scene, root, right_top, 0xEE142233, 12);
+            push_scene_round_rect(&mut scene, root, right_bottom, 0xEE142233, 12);
+        }
+    }
+    scene.snapshot(window_id)
+}
+
+fn build_context_menu_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    target: Option<AppKind>,
+    theme_mode: ThemeMode,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    push_scene_rect(&mut scene, root, bounds, palette.window_bg);
+    push_scene_rect(&mut scene, root, Rect::new(0, 0, width as u32, 36), palette.panel_bg);
+    push_scene_rect(&mut scene, root, Rect::new(0, 36, width as u32, 1), palette.border);
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        16,
+        12,
+        width.saturating_sub(128) as u32,
+        "Window Actions",
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        width as i32 - 96,
+        12,
+        92,
+        target.map(|kind| kind.title()).unwrap_or("No Target"),
+        palette.text_muted,
+    );
+    let rows = [
+        ("1 Focus / Restore", ContextAction::Focus),
+        ("2 Minimize", ContextAction::Minimize),
+        ("3 Snap Left", ContextAction::SnapLeft),
+        ("4 Snap Right", ContextAction::SnapRight),
+        ("5 Maximize", ContextAction::Maximize),
+        ("6 Move Next Space", ContextAction::MoveNextWorkspace),
+        ("7 Close Window", ContextAction::Close),
+    ];
+    for (index, (label, action)) in rows.iter().enumerate() {
+        let rect = Rect::new(16, 52 + index as i32 * 24, 208, 22);
+        push_scene_rect(&mut scene, root, rect, palette.panel_bg);
+        push_scene_outline(
+            &mut scene,
+            root,
+            rect,
+            if matches!(action, ContextAction::Close) {
+                palette.accent_coral
+            } else {
+                palette.border
+            },
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 10,
+            rect.y + 6,
+            rect.width.saturating_sub(20),
+            label,
+            palette.text_secondary,
+        );
+    }
+    scene.snapshot(window_id)
+}
+
+fn build_switcher_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    candidates: &[AppKind],
+    selected_index: usize,
+    active_workspace: u8,
+    theme_mode: ThemeMode,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    push_scene_rect(&mut scene, root, bounds, palette.window_bg);
+    push_scene_rect(&mut scene, root, Rect::new(0, 0, width as u32, 44), palette.panel_bg);
+    push_scene_rect(&mut scene, root, Rect::new(0, 44, width as u32, 1), palette.border);
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        14,
+        width.saturating_sub(36) as u32,
+        "App Switcher",
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        28,
+        width.saturating_sub(36) as u32,
+        "Alt+Tab cycles, Alt release confirms",
+        palette.text_muted,
+    );
+    for (index, kind) in candidates.iter().enumerate() {
+        let rect = Rect::new(24, 72 + index as i32 * 36, 392, 30);
+        let selected = index == selected_index.min(candidates.len().saturating_sub(1));
+        push_scene_rect(
+            &mut scene,
+            root,
+            rect,
+            if selected { palette.panel_alt } else { palette.panel_bg },
+        );
+        push_scene_outline(
+            &mut scene,
+            root,
+            rect,
+            if selected { kind.accent() } else { palette.border },
+        );
+        push_scene_rect(
+            &mut scene,
+            root,
+            Rect::new(rect.x + 10, rect.y + 10, 8, 8),
+            kind.accent(),
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 28,
+            rect.y + 7,
+            rect.width.saturating_sub(148),
+            kind.title(),
+            palette.text_primary,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.right() - 110,
+            rect.y + 7,
+            100,
+            if index == 0 { "current ring" } else { "queued" },
+            palette.text_muted,
+        );
+    }
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        height as i32 - 24,
+        width.saturating_sub(36) as u32,
+        &format!("workspace {}", active_workspace.saturating_add(1)),
+        palette.text_secondary,
+    );
+    scene.snapshot(window_id)
+}
+
+fn build_dialog_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    pending_dialog: Option<&crate::gui::protocol::DialogRequest>,
+    dialog_input: &str,
+    theme_mode: ThemeMode,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    push_scene_rect(&mut scene, root, bounds, palette.window_bg);
+    push_scene_rect(&mut scene, root, Rect::new(0, 0, width as u32, 58), palette.panel_bg);
+    push_scene_rect(&mut scene, root, Rect::new(0, 58, width as u32, 1), palette.border);
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        18,
+        width.saturating_sub(36) as u32,
+        "Dialog Broker",
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        36,
+        width.saturating_sub(36) as u32,
+        "Shell mediates file and message dialogs",
+        palette.text_muted,
+    );
+    if let Some(request) = pending_dialog {
+        let kind = match request.kind {
+            DialogKind::OpenFile => "Open file",
+            DialogKind::SaveFile => "Save file",
+            DialogKind::PickFolder => "Pick folder",
+            DialogKind::Message => "Message",
+        };
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            18,
+            78,
+            width.saturating_sub(36) as u32,
+            &request.title,
+            palette.text_primary,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            18,
+            98,
+            width.saturating_sub(36) as u32,
+            kind,
+            palette.accent_blue,
+        );
+        if !request.message.is_empty() {
+            for (index, line) in request.message.lines().take(4).enumerate() {
+                push_scene_text(
+                    &mut scene,
+                    text_system,
+                    root,
+                    18,
+                    118 + index as i32 * 18,
+                    width.saturating_sub(36) as u32,
+                    line,
+                    palette.text_secondary,
+                );
+            }
+        } else {
+            push_scene_text(
+                &mut scene,
+                text_system,
+                root,
+                18,
+                118,
+                width.saturating_sub(36) as u32,
+                "Path",
+                palette.text_muted,
+            );
+            let input_rect = Rect::new(18, 136, width as u32 - 36, 26);
+            push_scene_rect(&mut scene, root, input_rect, palette.panel_bg);
+            push_scene_outline(&mut scene, root, input_rect, palette.accent_mint);
+            push_scene_text(
+                &mut scene,
+                text_system,
+                root,
+                26,
+                144,
+                input_rect.width.saturating_sub(16),
+                dialog_input,
+                palette.text_secondary,
+            );
+        }
+    } else {
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            18,
+            92,
+            width.saturating_sub(36) as u32,
+            "No pending dialogs",
+            palette.text_secondary,
+        );
+    }
+    let cancel = Rect::new(36, 126, 134, 40);
+    let accept = Rect::new(190, 126, 134, 40);
+    push_scene_rect(&mut scene, root, cancel, palette.panel_bg);
+    push_scene_outline(&mut scene, root, cancel, palette.border);
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        cancel.x + 40,
+        cancel.y + 12,
+        64,
+        "Cancel",
+        palette.text_secondary,
+    );
+    push_scene_rect(&mut scene, root, accept, palette.panel_alt);
+    push_scene_outline(&mut scene, root, accept, palette.accent_mint);
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        accept.x + 40,
+        accept.y + 12,
+        64,
+        "Accept",
+        palette.text_primary,
+    );
+    scene.snapshot(window_id)
+}
+
+fn build_notifications_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    notices: &[NotificationEntry],
+    selected_index: usize,
+    theme_mode: ThemeMode,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    push_scene_panel(
+        &mut scene,
+        root,
+        bounds,
+        0xE80B121C,
+        palette.border,
+        24,
+        Some(palette.accent_blue),
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        18,
+        width.saturating_sub(36) as u32,
+        "Notifications",
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        42,
+        width.saturating_sub(36) as u32,
+        "Recent shell activity",
+        palette.text_muted,
+    );
+    let mut y = 86;
+    for (index, notice) in notices.iter().rev().take(6).rev().enumerate() {
+        let rect = Rect::new(18, y, width.saturating_sub(36) as u32, 46);
+        let accent = match notice.level {
+            NotificationLevel::Info => palette.border,
+            NotificationLevel::Success => palette.accent_soft,
+            NotificationLevel::Warning => palette.accent_gold,
+            NotificationLevel::Error => palette.accent_coral,
+        };
+        push_scene_panel(
+            &mut scene,
+            root,
+            rect,
+            if index == selected_index { 0xF2142433 } else { 0xE00E1723 },
+            palette.border,
+            14,
+            Some(accent),
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 14,
+            rect.y + 13,
+            rect.width.saturating_sub(126),
+            &notice.title,
+            palette.text_primary,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.right() - 48,
+            rect.y + 13,
+            40,
+            notification_level_label(notice.level),
+            if notice.read { palette.text_muted } else { accent },
+        );
+        y += 58;
+    }
+    scene.snapshot(window_id)
+}
+
+fn build_lock_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    auth_input: &str,
+    logged_in: bool,
+    theme_mode: ThemeMode,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    push_scene_rect(&mut scene, root, bounds, palette.window_bg);
+    push_scene_rect(&mut scene, root, Rect::new(0, 0, width as u32, 64), palette.panel_bg);
+    push_scene_rect(&mut scene, root, Rect::new(0, 64, width as u32, 1), palette.border);
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        24,
+        20,
+        width.saturating_sub(48) as u32,
+        if logged_in { "Unlock" } else { "Login" },
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        24,
+        40,
+        width.saturating_sub(48) as u32,
+        "Native session authentication gate",
+        palette.text_muted,
+    );
+    let panel = Rect::new(40, 100, (width as u32).saturating_sub(80), 136);
+    push_scene_rect(&mut scene, root, panel, palette.panel_bg);
+    push_scene_outline(&mut scene, root, panel, palette.accent_blue);
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        60,
+        126,
+        panel.width.saturating_sub(120),
+        "User: operator",
+        palette.text_secondary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        60,
+        152,
+        panel.width.saturating_sub(120),
+        "Password",
+        palette.text_primary,
+    );
+    let input_rect = Rect::new(60, 176, panel.width.saturating_sub(120), 34);
+    push_scene_rect(&mut scene, root, input_rect, palette.window_bg);
+    push_scene_outline(&mut scene, root, input_rect, palette.accent_mint);
+    let masked = "*".repeat(auth_input.len().max(1));
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        74,
+        186,
+        input_rect.width.saturating_sub(20),
+        &masked,
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        60,
+        224,
+        panel.width.saturating_sub(120),
+        "Enter = unlock, Backspace = delete",
+        palette.text_muted,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        60,
+        246,
+        panel.width.saturating_sub(120),
+        "Default password: echos",
+        palette.accent_gold,
+    );
+    scene.snapshot(window_id)
+}
+
+fn build_command_palette_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    actions: &[CommandPaletteAction],
+    query: &str,
+    selected_index: usize,
+    theme_mode: ThemeMode,
+) -> crate::gui::protocol::SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+    push_scene_panel(
+        &mut scene,
+        root,
+        bounds,
+        0xE80B121C,
+        palette.border,
+        24,
+        Some(palette.accent_blue),
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        18,
+        width.saturating_sub(36) as u32,
+        "Command Palette",
+        palette.text_primary,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        18,
+        42,
+        width.saturating_sub(36) as u32,
+        "One entry point for apps, commands, recent actions, and workspace moves.",
+        palette.text_muted,
+    );
+    let query_rect = Rect::new(18, 82, width.saturating_sub(36) as u32, 42);
+    push_scene_panel(
+        &mut scene,
+        root,
+        query_rect,
+        0xC7091018,
+        palette.border,
+        14,
+        None,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        query_rect.x + 14,
+        query_rect.y + 12,
+        query_rect.width.saturating_sub(20),
+        if query.is_empty() { "Type to filter actions" } else { query },
+        if query.is_empty() { palette.text_muted } else { palette.text_primary },
+    );
+    for (index, action) in actions.iter().take(6).enumerate() {
+        let selected = index == selected_index.min(actions.len().saturating_sub(1));
+        let rect = Rect::new(18, 138 + index as i32 * 54, width.saturating_sub(36) as u32, 44);
+        push_scene_panel(
+            &mut scene,
+            root,
+            rect,
+            if selected { 0xF2142433 } else { 0xE00E1723 },
+            palette.border,
+            14,
+            if selected { Some(palette.accent_blue) } else { None },
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 14,
+            rect.y + 13,
+            108,
+            &action.category,
+            palette.text_muted,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.x + 126,
+            rect.y + 13,
+            rect.width.saturating_sub(252),
+            &action.title,
+            palette.text_primary,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            rect.right() - 120,
+            rect.y + 13,
+            112,
+            &action.shortcut,
+            palette.text_secondary,
+        );
+    }
+    if actions.is_empty() {
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            24,
+            92,
+            width.saturating_sub(48) as u32,
+            "No matching actions",
+            palette.text_secondary,
+        );
+    }
+    scene.snapshot(window_id)
+}
+
 fn paint_launcher_surface(
     width: usize,
     height: usize,
     snapshots: &[AppSnapshot],
+    session: &SessionSnapshot,
     notices: &[String],
     theme_mode: ThemeMode,
     layout_profile: ShellLayoutProfile,
@@ -4536,11 +6768,15 @@ fn paint_launcher_surface(
     let mut canvas = Canvas::new(width, height, palette.window_bg);
     canvas.fill_rect(Rect::new(0, 0, width as u32, 64), palette.panel_bg);
     canvas.fill_rect(Rect::new(0, 64, width as u32, 1), palette.border);
-    canvas.draw_text(18, 18, "Session Shell", palette.text_primary);
+    canvas.draw_text(18, 18, "Desktop Launcher", palette.text_primary);
     canvas.draw_text(
         18,
         38,
-        "Launch, focus, or restore native apps",
+        if session.boot_clean_desktop {
+            "Clean desktop ready. Launch only what you need."
+        } else {
+            "Launch, focus, or restore native apps"
+        },
         palette.text_muted,
     );
     canvas.draw_text(
@@ -4553,7 +6789,31 @@ fn paint_launcher_surface(
         palette.text_muted,
     );
 
-    let mut y = 92;
+    if session.boot_clean_desktop {
+        let hero = Rect::new(18, 92, width.saturating_sub(36) as u32, 74);
+        canvas.fill_rect(hero, palette.panel_bg);
+        canvas.stroke_rect(hero, palette.accent_mint);
+        canvas.draw_text(
+            hero.x + 14,
+            hero.y + 14,
+            "Zero-app startup",
+            palette.text_primary,
+        );
+        canvas.draw_text(
+            hero.x + 14,
+            hero.y + 34,
+            "Workspace 1 is active, overlays are quiet, shell is accepting input.",
+            palette.text_secondary,
+        );
+        canvas.draw_text(
+            hero.x + 14,
+            hero.y + 52,
+            "Super+Enter terminal  Super+Space palette  Super+, settings  Super+` overview",
+            palette.text_muted,
+        );
+    }
+
+    let mut y = if session.boot_clean_desktop { 184 } else { 92 };
     for snapshot in snapshots.iter() {
         let rect = Rect::new(18, y, width.saturating_sub(36) as u32, 54);
         canvas.fill_rect(rect, palette.panel_bg);
@@ -4581,7 +6841,11 @@ fn paint_launcher_surface(
             &snapshot.detail,
             palette.text_secondary,
         );
-        let state = app_health_label(snapshot.health, snapshot.visible, snapshot.focused);
+        let state = if snapshot.launch_count == 0 && !snapshot.visible {
+            "ready"
+        } else {
+            app_health_label(snapshot.health, snapshot.visible, snapshot.focused)
+        };
         canvas.draw_text(rect.right() - 96, rect.y + 10, state, palette.text_muted);
         canvas.draw_text(
             rect.right() - 112,
@@ -4611,7 +6875,11 @@ fn paint_launcher_surface(
     canvas.draw_text(
         18,
         footer_y + 28,
-        "Shell is the single desktop control path",
+        if session.shell_ready {
+            "Shell ready, clean desktop preserved until explicit launch"
+        } else {
+            "Shell runtime not ready"
+        },
         palette.text_muted,
     );
     canvas.into_pixels()
@@ -4636,10 +6904,10 @@ fn paint_top_bar_surface(
         Rect::new(0, height as i32 - 1, width as u32, 1),
         palette.border,
     );
-    canvas.draw_text(18, 10, "echOS Session", palette.text_primary);
+    canvas.draw_text(18, 10, "echOS Desktop", palette.text_primary);
 
-    for index in 0..3u8 {
-        let rect = Rect::new(layout.workspace_start + index as i32 * 72, 2, 58, 30);
+    for index in 0..WORKSPACE_COUNT {
+        let rect = top_bar_workspace_rect(index, width as i32);
         let active = index == active_workspace;
         canvas.fill_rect(
             rect,
@@ -4658,7 +6926,7 @@ fn paint_top_bar_surface(
             },
         );
         canvas.draw_text(
-            rect.x + 18,
+            rect.x + 8,
             rect.y + 7,
             &(index.saturating_add(1)).to_string(),
             if active {
@@ -4670,8 +6938,15 @@ fn paint_top_bar_surface(
     }
 
     let status = format!(
-        "{} unread  {} live  {} fault",
-        snapshot.unread_notifications, snapshot.apps_running, snapshot.apps_crashed
+        "{} unread  {} live  {} fault  {}",
+        snapshot.unread_notifications,
+        snapshot.apps_running,
+        snapshot.apps_crashed,
+        if snapshot.boot_clean_desktop {
+            "clean"
+        } else {
+            "active"
+        }
     );
     let status_x = match profile {
         ShellLayoutProfile::Desktop => width as i32 - 278,
@@ -4683,8 +6958,13 @@ fn paint_top_bar_surface(
             width as i32 - 278,
             34,
             &format!(
-                "{}  Super+Space palette  Super+, settings  Super+` stages",
-                power_state_label(snapshot.power_state)
+                "{}  {}  Super+Space palette  Super+, settings  Super+` overview",
+                power_state_label(snapshot.power_state),
+                if snapshot.shell_ready {
+                    "shell-ready"
+                } else {
+                    "shell-syncing"
+                }
             ),
             palette.text_muted,
         );
@@ -4735,8 +7015,8 @@ fn paint_task_strip_surface(
     canvas.fill_rect(Rect::new(0, 0, width as u32, 1), palette.border);
     canvas.draw_text(18, 10, "Spaces", palette.text_muted);
 
-    for index in 0..3u8 {
-        let rect = Rect::new(18 + index as i32 * 72, 24, 58, 36);
+    for index in 0..WORKSPACE_COUNT {
+        let rect = task_strip_workspace_rect(index);
         let active = index == active_workspace;
         canvas.fill_rect(
             rect,
@@ -4755,7 +7035,7 @@ fn paint_task_strip_surface(
             },
         );
         canvas.draw_text(
-            rect.x + 18,
+            rect.x + 8,
             rect.y + 10,
             &(index.saturating_add(1)).to_string(),
             if active {
@@ -4812,7 +7092,12 @@ fn paint_task_strip_surface(
         );
     }
 
-    canvas.draw_text(width as i32 - 154, 28, "5 6 7 = spaces", palette.text_muted);
+    canvas.draw_text(
+        width as i32 - 208,
+        28,
+        "Super+1..8 spaces  Super+S scratch",
+        palette.text_muted,
+    );
     canvas.into_pixels()
 }
 
@@ -5258,8 +7543,8 @@ fn paint_stage_rail_surface(
     let mut canvas = Canvas::new(width, height, palette.window_bg);
     canvas.fill_rect(Rect::new(0, 0, width as u32, 44), palette.panel_bg);
     canvas.fill_rect(Rect::new(0, 44, width as u32, 1), palette.border);
-    canvas.draw_text(14, 14, "Stage Sets", palette.text_primary);
-    canvas.draw_text(14, 30, "Super+` cycle", palette.text_muted);
+    canvas.draw_text(14, 14, "Workspace Overview", palette.text_primary);
+    canvas.draw_text(14, 30, "Super+` toggle", palette.text_muted);
 
     for (index, set) in stage_sets.iter().enumerate() {
         let selected = index == active_index.min(stage_sets.len().saturating_sub(1));
@@ -5284,7 +7569,14 @@ fn paint_stage_rail_surface(
         canvas.draw_text(
             rect.x + 10,
             rect.y + 24,
-            &format!("{} windows", set.window_ids.len()),
+            &format!(
+                "{}",
+                if set.window_ids.is_empty() {
+                    String::from("empty workspace")
+                } else {
+                    format!("{} windows", set.window_ids.len())
+                }
+            ),
             palette.text_secondary,
         );
         if set.pinned {
@@ -5295,7 +7587,7 @@ fn paint_stage_rail_surface(
     canvas.draw_text(
         14,
         max(height as i32 - 20, 0),
-        "Click or 1-3 to activate",
+        "Click or 1-8 to activate",
         palette.text_muted,
     );
     canvas.into_pixels()
@@ -5409,3 +7701,4 @@ impl Canvas {
         self.pixels
     }
 }
+

@@ -9,7 +9,7 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
+use spin::{Mutex, Once};
 
 // ============================================================================
 // WIN32 TYPES
@@ -30,6 +30,9 @@ pub type HGDIOBJ = u64;
 pub type HPEN = u64;
 pub type HPALETTE = u64;
 pub type HRGN = u64;
+pub type HACCEL = u64;
+pub type HMETAFILE = u64;
+pub type HENHMETAFILE = u64;
 pub type HKEY = u64;
 pub type SC_HANDLE = u64;
 pub type HCRYPTPROV = u64;
@@ -38,6 +41,7 @@ pub type HCRYPTHASH = u64;
 pub type HDROP = u64;
 pub type HRESULT = i32;
 pub type DWORD_PTR = u64;
+pub type BSTR = *mut u16;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -73,9 +77,14 @@ pub type LONG = i32;
 pub type ULONG = u32;
 pub type SIZE_T = u64;
 pub type SHORT = i16;
+pub type ULONG_PTR = u64;
+pub type LCID = DWORD;
+pub type DISPID = LONG;
 
 pub type FARPROC = Option<unsafe extern "system" fn() -> isize>;
 pub type PROC = Option<unsafe extern "system" fn() -> isize>;
+pub type LPTOP_LEVEL_EXCEPTION_FILTER =
+    Option<unsafe extern "system" fn(*mut EXCEPTION_POINTERS) -> LONG>;
 
 // ============================================================================
 // WIN32 CONSTANTS
@@ -85,6 +94,76 @@ pub const INVALID_HANDLE_VALUE: HANDLE = !0;
 pub const NULL: HANDLE = 0;
 pub const TRUE: BOOL = 1;
 pub const FALSE: BOOL = 0;
+pub const S_OK: HRESULT = 0;
+pub const S_FALSE: HRESULT = 1;
+pub const E_NOINTERFACE: HRESULT = 0x8000_4002u32 as i32;
+pub const E_POINTER: HRESULT = 0x8000_4003u32 as i32;
+pub const E_NOTIMPL: HRESULT = 0x8000_4001u32 as i32;
+pub const E_INVALIDARG: HRESULT = 0x8007_0057u32 as i32;
+pub const E_OUTOFMEMORY: HRESULT = 0x8007_000Eu32 as i32;
+pub const CO_E_NOTINITIALIZED: HRESULT = 0x8004_01F0u32 as i32;
+pub const REGDB_E_CLASSNOTREG: HRESULT = 0x8004_0154u32 as i32;
+pub const CLASS_E_NOAGGREGATION: HRESULT = 0x8004_0110u32 as i32;
+pub const DISP_E_MEMBERNOTFOUND: HRESULT = 0x8002_0003u32 as i32;
+pub const DISP_E_UNKNOWNNAME: HRESULT = 0x8002_0006u32 as i32;
+pub const STG_E_INVALIDPOINTER: HRESULT = 0x8003_0009u32 as i32;
+pub const STG_E_REVERTED: HRESULT = 0x8003_0102u32 as i32;
+pub const TYPE_E_ELEMENTNOTFOUND: HRESULT = 0x8002_802Bu32 as i32;
+pub const TYPE_E_CANTLOADLIBRARY: HRESULT = 0x8002_9C4Au32 as i32;
+pub const CLSCTX_INPROC_SERVER: DWORD = 0x1;
+pub const CLSCTX_LOCAL_SERVER: DWORD = 0x4;
+pub const COINIT_MULTITHREADED: DWORD = 0x0;
+pub const COINIT_APARTMENTTHREADED: DWORD = 0x2;
+pub const APTTYPE_STA: DWORD = 0;
+pub const APTTYPE_MTA: DWORD = 1;
+pub const APTTYPEQUALIFIER_NONE: DWORD = 0;
+pub const STREAM_SEEK_SET: DWORD = 0;
+pub const STREAM_SEEK_CUR: DWORD = 1;
+pub const STREAM_SEEK_END: DWORD = 2;
+pub const STGTY_STREAM: DWORD = 2;
+pub const STATFLAG_NONAME: DWORD = 1;
+pub const SYS_WIN32: DWORD = 1;
+pub const TKIND_ENUM: DWORD = 0;
+pub const TKIND_RECORD: DWORD = 1;
+pub const TKIND_MODULE: DWORD = 2;
+pub const TKIND_INTERFACE: DWORD = 3;
+pub const TKIND_DISPATCH: DWORD = 4;
+pub const TKIND_COCLASS: DWORD = 5;
+pub const TKIND_ALIAS: DWORD = 6;
+pub const TKIND_UNION: DWORD = 7;
+pub const MEMBERID_NIL: DISPID = -1;
+pub const TYPEFLAG_FDISPATCHABLE: WORD = 0x1000;
+pub const IMPLTYPEFLAG_FDEFAULT: INT = 0x1;
+pub const IMPLTYPEFLAG_FSOURCE: INT = 0x2;
+pub const IMPLTYPEFLAG_FRESTRICTED: INT = 0x4;
+pub const IMPLTYPEFLAG_FDEFAULTVTABLE: INT = 0x8;
+pub const INVOKE_FUNC: WORD = 0x1;
+pub const INVOKE_PROPERTYGET: WORD = 0x2;
+pub const INVOKE_PROPERTYPUT: WORD = 0x4;
+pub const FUNC_PUREVIRTUAL: DWORD = 1;
+pub const VAR_PERINSTANCE: DWORD = 0;
+pub const DESCKIND_NONE: DWORD = 0;
+pub const DESCKIND_FUNCDESC: DWORD = 1;
+pub const DESCKIND_VARDESC: DWORD = 2;
+pub const DESCKIND_TYPECOMP: DWORD = 3;
+pub const DESCKIND_IMPLICITAPPOBJ: DWORD = 4;
+pub const DESCKIND_MAX: DWORD = 5;
+pub const STILL_ACTIVE: DWORD = 259;
+pub const INTERNET_OPEN_TYPE_DIRECT: DWORD = 1;
+pub const INTERNET_OPEN_TYPE_PROXY: DWORD = 3;
+pub const INTERNET_SERVICE_HTTP: DWORD = 3;
+pub const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: DWORD = 0;
+pub const WINHTTP_ACCESS_TYPE_NO_PROXY: DWORD = 1;
+pub const WINHTTP_FLAG_SECURE: DWORD = 0x0080_0000;
+pub const HTTP_QUERY_CONTENT_LENGTH: DWORD = 5;
+pub const HTTP_QUERY_STATUS_CODE: DWORD = 19;
+pub const HTTP_QUERY_STATUS_TEXT: DWORD = 20;
+pub const HTTP_QUERY_RAW_HEADERS_CRLF: DWORD = 22;
+pub const HTTP_QUERY_SET_COOKIE: DWORD = 43;
+pub const HTTP_QUERY_FLAG_NUMBER: DWORD = 0x2000_0000;
+pub const EXCEPTION_CONTINUE_EXECUTION: LONG = -1;
+pub const EXCEPTION_CONTINUE_SEARCH: LONG = 0;
+pub const EXCEPTION_EXECUTE_HANDLER: LONG = 1;
 
 // Memory constants
 pub const PAGE_NOACCESS: DWORD = 0x01;
@@ -137,9 +216,23 @@ pub const WM_CLOSE: UINT = 0x0010;
 pub const WM_QUIT: UINT = 0x0012;
 pub const WM_ERASEBKGND: UINT = 0x0014;
 pub const WM_SHOWWINDOW: UINT = 0x0018;
+pub const WM_NCCALCSIZE: UINT = 0x0083;
+pub const WM_NCPAINT: UINT = 0x0085;
+pub const WM_NCACTIVATE: UINT = 0x0086;
+pub const WM_GETDLGCODE: UINT = 0x0087;
+pub const WM_NEXTDLGCTL: UINT = 0x0028;
+pub const DM_GETDEFID: UINT = 0x0400;
+pub const DM_SETDEFID: UINT = 0x0401;
+pub const WM_INITDIALOG: UINT = 0x0110;
+pub const WM_COMMAND: UINT = 0x0111;
+pub const WM_INITMENUPOPUP: UINT = 0x0117;
+pub const WM_MENUSELECT: UINT = 0x011F;
+pub const WM_ENTERMENULOOP: UINT = 0x0211;
+pub const WM_EXITMENULOOP: UINT = 0x0212;
 pub const WM_KEYDOWN: UINT = 0x0100;
 pub const WM_KEYUP: UINT = 0x0101;
 pub const WM_CHAR: UINT = 0x0102;
+pub const WM_SYSKEYDOWN: UINT = 0x0104;
 pub const WM_TIMER: UINT = 0x0113;
 pub const WM_MOUSEMOVE: UINT = 0x0200;
 pub const WM_LBUTTONDOWN: UINT = 0x0201;
@@ -151,10 +244,98 @@ pub const WM_RBUTTONUP: UINT = 0x0205;
 pub const VK_ESCAPE: INT = 0x1B;
 pub const VK_RETURN: INT = 0x0D;
 pub const VK_SPACE: INT = 0x20;
+pub const VK_TAB: INT = 0x09;
+pub const VK_SHIFT: INT = 0x10;
+pub const VK_CONTROL: INT = 0x11;
+pub const VK_MENU: INT = 0x12;
+pub const VK_CAPITAL: INT = 0x14;
+pub const VK_NUMLOCK: INT = 0x90;
+pub const VK_SCROLL: INT = 0x91;
 pub const VK_LEFT: INT = 0x25;
 pub const VK_UP: INT = 0x26;
 pub const VK_RIGHT: INT = 0x27;
 pub const VK_DOWN: INT = 0x28;
+pub const KEYEVENTF_KEYUP: DWORD = 0x0002;
+
+pub const MF_INSERT: UINT = 0x0000;
+pub const MF_CHANGE: UINT = 0x0080;
+pub const MF_APPEND: UINT = 0x0100;
+pub const MF_DELETE: UINT = 0x0200;
+pub const MF_REMOVE: UINT = 0x1000;
+pub const MF_BYCOMMAND: UINT = 0x0000;
+pub const MF_BYPOSITION: UINT = 0x0400;
+pub const MF_SEPARATOR: UINT = 0x0800;
+pub const MF_ENABLED: UINT = 0x0000;
+pub const MF_GRAYED: UINT = 0x0001;
+pub const MF_DISABLED: UINT = 0x0002;
+pub const MF_CHECKED: UINT = 0x0008;
+pub const MF_UNCHECKED: UINT = 0x0000;
+pub const MF_POPUP: UINT = 0x0010;
+pub const TPM_RETURNCMD: UINT = 0x0100;
+pub const WA_INACTIVE: WORD = 0;
+pub const WA_ACTIVE: WORD = 1;
+
+pub const OBJ_PEN: UINT = 1;
+pub const OBJ_BRUSH: UINT = 2;
+pub const OBJ_DC: UINT = 3;
+pub const OBJ_PAL: UINT = 5;
+pub const OBJ_FONT: UINT = 6;
+pub const OBJ_REGION: UINT = 8;
+
+pub const WHITE_BRUSH: INT = 0;
+pub const LTGRAY_BRUSH: INT = 1;
+pub const GRAY_BRUSH: INT = 2;
+pub const DKGRAY_BRUSH: INT = 3;
+pub const BLACK_BRUSH: INT = 4;
+pub const NULL_BRUSH: INT = 5;
+pub const WHITE_PEN: INT = 6;
+pub const BLACK_PEN: INT = 7;
+pub const NULL_PEN: INT = 8;
+pub const SYSTEM_FONT: INT = 13;
+pub const DEFAULT_GUI_FONT: INT = 17;
+pub const COLOR_MENU: DWORD = 4;
+pub const COLOR_MENUTEXT: DWORD = 7;
+pub const COLOR_CAPTIONTEXT: DWORD = 9;
+pub const COLOR_ACTIVECAPTION: DWORD = 2;
+pub const COLOR_BTNFACE: DWORD = 15;
+pub const DC_ACTIVE: UINT = 0x0001;
+pub const DFC_CAPTION: UINT = 1;
+pub const DFCS_CAPTIONCLOSE: UINT = 0x0000;
+pub const DFCS_CAPTIONMIN: UINT = 0x0001;
+pub const DFCS_CAPTIONMAX: UINT = 0x0002;
+
+pub const GWL_STYLE: INT = -16;
+pub const GWL_EXSTYLE: INT = -20;
+pub const GWL_ID: INT = -12;
+pub const GWLP_WNDPROC: INT = -4;
+pub const GWLP_USERDATA: INT = -21;
+
+pub const DLGC_WANTARROWS: UINT = 0x0001;
+pub const DLGC_WANTTAB: UINT = 0x0002;
+pub const DLGC_WANTALLKEYS: UINT = 0x0004;
+pub const DLGC_HASSETSEL: UINT = 0x0008;
+pub const DLGC_DEFPUSHBUTTON: UINT = 0x0010;
+pub const DLGC_UNDEFPUSHBUTTON: UINT = 0x0020;
+pub const DLGC_RADIOBUTTON: UINT = 0x0040;
+pub const DLGC_WANTCHARS: UINT = 0x0080;
+pub const DLGC_STATIC: UINT = 0x0100;
+pub const DLGC_BUTTON: UINT = 0x2000;
+pub const BS_PUSHBUTTON: DWORD = 0x00000000;
+pub const BS_DEFPUSHBUTTON: DWORD = 0x00000001;
+pub const DS_SETFONT: DWORD = 0x00000040;
+pub const DS_MODALFRAME: DWORD = 0x00000080;
+pub const DS_CONTROL: DWORD = 0x00000400;
+pub const DS_CENTER: DWORD = 0x00000800;
+pub const DS_SHELLFONT: DWORD = DS_SETFONT | 0x00000048;
+pub const IDOK: INT = 1;
+pub const IDCANCEL: INT = 2;
+const DIALOGEX_SIGNATURE: WORD = 0xFFFF;
+
+pub const FVIRTKEY: BYTE = 0x01;
+pub const FNOINVERT: BYTE = 0x02;
+pub const FSHIFT: BYTE = 0x04;
+pub const FCONTROL: BYTE = 0x08;
+pub const FALT: BYTE = 0x10;
 
 // ============================================================================
 // WIN32 STRUCTURES
@@ -175,12 +356,372 @@ pub struct SIZE {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RECT {
     pub left: LONG,
     pub top: LONG,
     pub right: LONG,
     pub bottom: LONG,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NCCALCSIZE_PARAMS {
+    pub rgrc: [RECT; 3],
+    pub lppos: *mut u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DOCINFOA {
+    pub cbSize: INT,
+    pub lpszDocName: LPCSTR,
+    pub lpszOutput: LPCSTR,
+    pub lpszDatatype: LPCSTR,
+    pub fwType: DWORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VARIANT {
+    pub vt: u16,
+    pub w_reserved1: u16,
+    pub w_reserved2: u16,
+    pub w_reserved3: u16,
+    pub data_lo: u64,
+    pub data_hi: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DISPPARAMS {
+    pub rgvarg: *mut VARIANT,
+    pub rgdispid_named_args: *mut DISPID,
+    pub c_args: UINT,
+    pub c_named_args: UINT,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EXCEPINFO {
+    pub w_code: WORD,
+    pub w_reserved: WORD,
+    pub bstr_source: BSTR,
+    pub bstr_description: BSTR,
+    pub bstr_help_file: BSTR,
+    pub dw_help_context: DWORD,
+    pub pv_reserved: LPVOID,
+    pub pfn_deferred_fill_in: LPVOID,
+    pub scode: HRESULT,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EXCEPTION_RECORD {
+    pub ExceptionCode: DWORD,
+    pub ExceptionFlags: DWORD,
+    pub ExceptionRecord: *mut EXCEPTION_RECORD,
+    pub ExceptionAddress: LPVOID,
+    pub NumberParameters: DWORD,
+    pub ExceptionInformation: [ULONG_PTR; 15],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EXCEPTION_POINTERS {
+    pub ExceptionRecord: *mut EXCEPTION_RECORD,
+    pub ContextRecord: LPVOID,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GUID {
+    pub data1: u32,
+    pub data2: u16,
+    pub data3: u16,
+    pub data4: [u8; 8],
+}
+
+pub const IID_IUNKNOWN: GUID = GUID {
+    data1: 0x00000000,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+pub const IID_ISEQUENTIAL_STREAM: GUID = GUID {
+    data1: 0x0c733a30,
+    data2: 0x2a1c,
+    data3: 0x11ce,
+    data4: [0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d],
+};
+
+pub const IID_ISTREAM: GUID = GUID {
+    data1: 0x0000000c,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+pub const IID_ITYPEINFO: GUID = GUID {
+    data1: 0x00020401,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+pub const IID_ITYPELIB: GUID = GUID {
+    data1: 0x00020402,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+pub const IID_ITYPECOMP: GUID = GUID {
+    data1: 0x00020403,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct STATSTG {
+    pub pwcs_name: LPWSTR,
+    pub type_: DWORD,
+    pub cb_size: u64,
+    pub mtime: u64,
+    pub ctime: u64,
+    pub atime: u64,
+    pub grf_mode: DWORD,
+    pub grf_locks_supported: DWORD,
+    pub clsid: GUID,
+    pub grf_state_bits: DWORD,
+    pub reserved: DWORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IDLDESC {
+    pub dw_reserved: ULONG_PTR,
+    pub w_idl_flags: WORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union TypeDescUnion {
+    pub lptdesc: *mut TYPEDESC,
+    pub lpadesc: *mut u8,
+    pub hreftype: DWORD,
+}
+
+impl Default for TypeDescUnion {
+    fn default() -> Self {
+        Self { hreftype: 0 }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TYPEDESC {
+    pub union_data: TypeDescUnion,
+    pub vt: WORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TYPEATTR {
+    pub guid: GUID,
+    pub lcid: LCID,
+    pub dw_reserved: DWORD,
+    pub memid_constructor: DISPID,
+    pub memid_destructor: DISPID,
+    pub lpstr_schema: LPWSTR,
+    pub cb_size_instance: ULONG,
+    pub typekind: DWORD,
+    pub c_funcs: WORD,
+    pub c_vars: WORD,
+    pub c_impl_types: WORD,
+    pub cb_size_vft: WORD,
+    pub cb_alignment: WORD,
+    pub w_type_flags: WORD,
+    pub w_major_ver_num: WORD,
+    pub w_minor_ver_num: WORD,
+    pub tdesc_alias: TYPEDESC,
+    pub idldesc_type: IDLDESC,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TLIBATTR {
+    pub guid: GUID,
+    pub lcid: LCID,
+    pub syskind: DWORD,
+    pub w_major_ver_num: WORD,
+    pub w_minor_ver_num: WORD,
+    pub w_lib_flags: WORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct ELEMDESC {
+    pub tdesc: TYPEDESC,
+    pub idldesc: IDLDESC,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FUNCDESC {
+    pub memid: DISPID,
+    pub lprgscode: *mut i32,
+    pub lprgelemdesc_param: *mut ELEMDESC,
+    pub funckind: DWORD,
+    pub invkind: WORD,
+    pub callconv: WORD,
+    pub c_params: SHORT,
+    pub c_params_opt: SHORT,
+    pub o_vft: SHORT,
+    pub c_scodes: SHORT,
+    pub elemdesc_func: ELEMDESC,
+    pub w_func_flags: WORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VARDESC {
+    pub memid: DISPID,
+    pub lpstr_schema: LPWSTR,
+    pub o_inst: ULONG,
+    pub elemdesc_var: ELEMDESC,
+    pub w_var_flags: WORD,
+    pub varkind: DWORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct BINDPTR {
+    pub lpfuncdesc: *mut FUNCDESC,
+    pub lpvardesc: *mut VARDESC,
+    pub lptcomp: *mut u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PAINTSTRUCT {
+    pub hdc: HDC,
+    pub f_erase: BOOL,
+    pub rc_paint: RECT,
+    pub f_restore: BOOL,
+    pub f_inc_update: BOOL,
+    pub rgb_reserved: [u8; 32],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct STARTUPINFOA {
+    pub cb: DWORD,
+    pub lpReserved: LPSTR,
+    pub lpDesktop: LPSTR,
+    pub lpTitle: LPSTR,
+    pub dwX: DWORD,
+    pub dwY: DWORD,
+    pub dwXSize: DWORD,
+    pub dwYSize: DWORD,
+    pub dwXCountChars: DWORD,
+    pub dwYCountChars: DWORD,
+    pub dwFillAttribute: DWORD,
+    pub dwFlags: DWORD,
+    pub wShowWindow: WORD,
+    pub cbReserved2: WORD,
+    pub lpReserved2: *mut BYTE,
+    pub hStdInput: HANDLE,
+    pub hStdOutput: HANDLE,
+    pub hStdError: HANDLE,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PROCESS_INFORMATION {
+    pub hProcess: HANDLE,
+    pub hThread: HANDLE,
+    pub dwProcessId: DWORD,
+    pub dwThreadId: DWORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ACCEL {
+    pub fVirt: BYTE,
+    pub key: WORD,
+    pub cmd: WORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LOGPALETTE {
+    pub palVersion: WORD,
+    pub palNumEntries: WORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PALETTEENTRY {
+    pub peRed: BYTE,
+    pub peGreen: BYTE,
+    pub peBlue: BYTE,
+    pub peFlags: BYTE,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DLGTEMPLATE {
+    pub style: DWORD,
+    pub dwExtendedStyle: DWORD,
+    pub cdit: WORD,
+    pub x: i16,
+    pub y: i16,
+    pub cx: i16,
+    pub cy: i16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DLGITEMTEMPLATE {
+    pub style: DWORD,
+    pub dwExtendedStyle: DWORD,
+    pub x: i16,
+    pub y: i16,
+    pub cx: i16,
+    pub cy: i16,
+    pub id: WORD,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DLGTEMPLATEEX {
+    pub dlgVer: WORD,
+    pub signature: WORD,
+    pub helpID: DWORD,
+    pub exStyle: DWORD,
+    pub style: DWORD,
+    pub cDlgItems: WORD,
+    pub x: i16,
+    pub y: i16,
+    pub cx: i16,
+    pub cy: i16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DLGITEMTEMPLATEEX {
+    pub helpID: DWORD,
+    pub exStyle: DWORD,
+    pub style: DWORD,
+    pub x: i16,
+    pub y: i16,
+    pub cx: i16,
+    pub cy: i16,
+    pub id: DWORD,
 }
 
 #[repr(C)]
@@ -355,6 +896,7 @@ pub struct FILE {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct tm {
     pub tm_sec: INT,
     pub tm_min: INT,
@@ -373,6 +915,12 @@ pub struct tm {
 
 /// Win32 API function signature
 type Win32ApiFn = fn(*const u8) -> isize;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Win32ApiStatus {
+    Implemented,
+    Stubbed,
+}
 
 /// Win32 API entry
 struct Win32ApiEntry {
@@ -393,8 +941,17 @@ pub static ALLOC_MAP: Mutex<BTreeMap<u64, (usize, usize)>> = Mutex::new(BTreeMap
 static FILE_HANDLES: Mutex<BTreeMap<u64, Win32FileState>> = Mutex::new(BTreeMap::new());
 static NEXT_FILE_HANDLE: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0x1000_0000);
+static WIN32_CURRENT_DIRECTORY: Once<Mutex<String>> = Once::new();
+static WIN32_ENVIRONMENT: Once<Mutex<BTreeMap<String, String>>> = Once::new();
+static WIN32_CRT_STREAMS: Once<Mutex<BTreeMap<u64, Win32CrtStream>>> = Once::new();
+static WIN32_GMT_TM: Once<Mutex<tm>> = Once::new();
+static WIN32_LOCAL_TM: Once<Mutex<tm>> = Once::new();
+static WIN32_TIME_ASCII: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_GETENV_BUFFER: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_COMMAND_LINE: Once<Box<[i8]>> = Once::new();
 
 /// Win32 file state tracking
+#[derive(Clone)]
 struct Win32FileState {
     fd: usize,        // VFS file descriptor
     path: String,     // Original path for debugging
@@ -402,10 +959,247 @@ struct Win32FileState {
     is_console: bool, // true for stdin/stdout/stderr
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Win32CrtStream {
+    handle: HANDLE,
+    eof: bool,
+    error: bool,
+    owns_handle: bool,
+    append: bool,
+}
+
 /// Standard handles
 const STD_INPUT_HANDLE: u64 = 0xFFFF_FFF6;
 const STD_OUTPUT_HANDLE: u64 = 0xFFFF_FFF5;
 const STD_ERROR_HANDLE: u64 = 0xFFFF_FFF4;
+const ERROR_INVALID_HANDLE: DWORD = 6;
+const ERROR_INVALID_PARAMETER: DWORD = 87;
+const ERROR_INSUFFICIENT_BUFFER: DWORD = 122;
+const ERROR_INTERNET_TIMEOUT: DWORD = 12002;
+const ERROR_INTERNET_LOGIN_FAILURE: DWORD = 12015;
+const ERROR_INTERNET_INCORRECT_HANDLE_STATE: DWORD = 12019;
+const ERROR_INTERNET_CANNOT_CONNECT: DWORD = 12029;
+const ERROR_INTERNET_SEC_CERT_DATE_INVALID: DWORD = 12037;
+const ERROR_INTERNET_SEC_CERT_CN_INVALID: DWORD = 12038;
+const ERROR_INTERNET_INVALID_CA: DWORD = 12045;
+const ERROR_INTERNET_SEC_CERT_ERRORS: DWORD = 12055;
+const ERROR_INTERNET_SEC_INVALID_CERT: DWORD = 12169;
+const ERROR_INTERNET_SEC_CERT_REVOKED: DWORD = 12170;
+const ERROR_INTERNET_DECODING_FAILED: DWORD = 12175;
+
+static THREAD_LAST_ERROR: Mutex<BTreeMap<u64, DWORD>> = Mutex::new(BTreeMap::new());
+static TLS_SLOTS: Mutex<[bool; 64]> = Mutex::new([false; 64]);
+static TLS_THREAD_VALUES: Mutex<BTreeMap<u64, BTreeMap<DWORD, u64>>> = Mutex::new(BTreeMap::new());
+static COM_APARTMENTS: Mutex<BTreeMap<u64, ComApartmentState>> = Mutex::new(BTreeMap::new());
+static INTERNET_HANDLES: Mutex<BTreeMap<u64, InternetHandleState>> = Mutex::new(BTreeMap::new());
+static INTERNET_COOKIE_JAR: Mutex<BTreeMap<String, BTreeMap<String, String>>> =
+    Mutex::new(BTreeMap::new());
+static INTERNET_RESPONSE_CACHE: Mutex<BTreeMap<String, crate::net::http::HttpResponse>> =
+    Mutex::new(BTreeMap::new());
+static UNHANDLED_EXCEPTION_FILTERS: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
+static NEXT_INTERNET_HANDLE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0x3000_0000);
+static CAPTURED_HWND: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static FOCUSED_HWND: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static INVALIDATED_WINDOWS: Mutex<BTreeMap<u64, RECT>> = Mutex::new(BTreeMap::new());
+static NEXT_COM_COOKIE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+static COM_CLASS_OBJECTS: Mutex<BTreeMap<String, ComClassObject>> = Mutex::new(BTreeMap::new());
+static NEXT_COM_STREAM_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+static COM_MARSHAL_STREAMS: Mutex<BTreeMap<u64, ComMarshalStreamState>> =
+    Mutex::new(BTreeMap::new());
+static WIN32_THREAD_LAUNCHES: Mutex<BTreeMap<u64, Win32ThreadLaunch>> = Mutex::new(BTreeMap::new());
+static WIN32_PROCESS_LAUNCHES: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
+
+#[derive(Clone, Debug)]
+struct InternetSessionState {
+    user_agent: String,
+    access_type: DWORD,
+    proxy_name: String,
+    proxy_bypass: String,
+    resolve_timeout_ms: i32,
+    connect_timeout_ms: i32,
+    send_timeout_ms: i32,
+    receive_timeout_ms: i32,
+}
+
+#[derive(Clone, Debug)]
+struct InternetConnectionState {
+    session: HANDLE,
+    host: String,
+    port: u16,
+    secure: bool,
+}
+
+#[derive(Clone, Debug)]
+struct InternetRequestState {
+    connection: HANDLE,
+    method: String,
+    object_name: String,
+    headers: BTreeMap<String, String>,
+    response: Option<crate::net::http::HttpResponse>,
+    read_cursor: usize,
+}
+
+#[derive(Clone, Debug)]
+enum InternetHandleState {
+    Session(InternetSessionState),
+    Connection(InternetConnectionState),
+    Request(InternetRequestState),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InternetProxyRoute {
+    host: String,
+    port: u16,
+    authorization: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ComClassObject {
+    factory: usize,
+    clsctx: DWORD,
+    flags: DWORD,
+    cookie: DWORD,
+}
+
+#[derive(Clone, Debug)]
+struct ComMarshalStreamState {
+    object: usize,
+    iid_key: String,
+    payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct ComTypeInfoState {
+    guid: GUID,
+    name: String,
+    documentation: String,
+    help_context: DWORD,
+    help_file: String,
+    typekind: DWORD,
+    type_flags: WORD,
+    major_version: WORD,
+    minor_version: WORD,
+    member_names: Vec<String>,
+    impl_types: Vec<ComImplTypeState>,
+    funcs: Vec<ComTypeFuncState>,
+    vars: Vec<ComTypeVarState>,
+}
+
+#[derive(Clone, Debug)]
+struct ComTypeLibState {
+    guid: GUID,
+    name: String,
+    documentation: String,
+    path: String,
+    help_context: DWORD,
+    help_file: String,
+    major_version: WORD,
+    minor_version: WORD,
+    lcid: LCID,
+    syskind: DWORD,
+    type_infos: Vec<ComTypeInfoState>,
+}
+
+#[derive(Clone, Debug)]
+struct ComTypeFuncState {
+    memid: DISPID,
+    name: String,
+    documentation: String,
+    help_context: DWORD,
+    dll_name: String,
+    entry_name: String,
+    ordinal: WORD,
+    invkind: WORD,
+    callconv: WORD,
+    param_count: SHORT,
+    optional_param_count: SHORT,
+    func_flags: WORD,
+    vtable_offset: SHORT,
+}
+
+#[derive(Clone, Debug)]
+struct ComTypeVarState {
+    memid: DISPID,
+    name: String,
+    documentation: String,
+    help_context: DWORD,
+    var_flags: WORD,
+    varkind: DWORD,
+    offset: ULONG,
+}
+
+#[derive(Clone, Debug)]
+struct ComImplTypeState {
+    name: String,
+    href_type: DWORD,
+    flags: INT,
+}
+
+#[derive(Clone, Debug)]
+enum Win32RegionShape {
+    Rect,
+    Polygon {
+        points: Vec<POINT>,
+        alternate_fill: bool,
+    },
+}
+
+#[repr(C)]
+struct ComMarshalStream {
+    vtable: *const usize,
+    stream_id: u64,
+    ref_count: u32,
+    position: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ComApartmentState {
+    model: DWORD,
+    ref_count: u32,
+}
+
+#[repr(C)]
+struct ComTypeLibObject {
+    vtable: *const usize,
+    ref_count: u32,
+    state: ComTypeLibState,
+}
+
+#[repr(C)]
+struct ComTypeInfoObject {
+    vtable: *const usize,
+    ref_count: u32,
+    library: ComTypeLibState,
+    index: u32,
+}
+
+#[derive(Clone, Debug)]
+struct ComTypeCompObject {
+    vtable: *const usize,
+    ref_count: u32,
+    library: ComTypeLibState,
+    index: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+struct RegisteredWndClass {
+    class_name: String,
+    wndproc: u64,
+    style: DWORD,
+    background: HBRUSH,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Win32ThreadLaunch {
+    handle: HANDLE,
+    owner_pid: u64,
+    start_routine: usize,
+    parameter: usize,
+}
+
+static REGISTERED_WND_CLASSES: Mutex<BTreeMap<String, RegisteredWndClass>> =
+    Mutex::new(BTreeMap::new());
 
 // ============================================================================
 // WIN32 GUI BRIDGE — HWND → echOS Window, DC → Surface, Message Queue
@@ -425,6 +1219,7 @@ pub struct Win32Window {
     pub parent: u64,
     pub visible: bool,
     pub focused: bool,
+    pub menu: HMENU,
     /// echOS pencere kimliği (compositor entegrasyonu)
     pub echos_window_id: u32,
     /// Pencere içeriği için piksel tamponu (BGRA format)
@@ -457,9 +1252,233 @@ pub struct Win32DC {
     pub bk_mode: i32, // TRANSPARENT=1, OPAQUE=2
     pub pen_x: i32,
     pub pen_y: i32,
+    pub selected_pen: HPEN,
+    pub selected_brush: HBRUSH,
+    pub selected_font: HFONT,
+    pub selected_palette: HPALETTE,
+    pub clip_region: HRGN,
+    pub recording_metafile: HMETAFILE,
+    pub rop2: INT,
+    pub graphics_mode: INT,
+    pub arc_direction: INT,
+    pub poly_fill_mode: INT,
+    pub stretch_blt_mode: INT,
+    pub path_active: bool,
+    pub path_closed: bool,
+    pub path_points: Vec<POINT>,
+    pub map_mode: INT,
+    pub viewport_org: POINT,
+    pub window_org: POINT,
+    pub world_transform: [f32; 6],
+    pub device_kind: Win32DcKind,
+    pub device_name: String,
+    pub current_print_job: u64,
+    pub page_active: bool,
+    pub save_stack: Vec<Win32DCSnapshot>,
     /// Font bilgileri
     pub font_height: i32,
     pub font_weight: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Win32DcKind {
+    Window,
+    Memory,
+    Printer,
+    Information,
+    MetaFile,
+}
+
+#[derive(Clone, Debug)]
+pub struct Win32DCSnapshot {
+    pen_color: u32,
+    brush_color: u32,
+    text_color: u32,
+    bk_color: u32,
+    bk_mode: i32,
+    pen_x: i32,
+    pen_y: i32,
+    selected_pen: HPEN,
+    selected_brush: HBRUSH,
+    selected_font: HFONT,
+    selected_palette: HPALETTE,
+    clip_region: HRGN,
+    rop2: INT,
+    graphics_mode: INT,
+    arc_direction: INT,
+    poly_fill_mode: INT,
+    stretch_blt_mode: INT,
+    path_active: bool,
+    path_closed: bool,
+    path_points: Vec<POINT>,
+    map_mode: INT,
+    viewport_org: POINT,
+    window_org: POINT,
+    world_transform: [f32; 6],
+    font_height: i32,
+    font_weight: i32,
+}
+
+#[derive(Clone, Debug)]
+struct Win32MenuItem {
+    id: usize,
+    submenu: HMENU,
+    flags: UINT,
+    text: String,
+    checked: bool,
+    enabled: bool,
+}
+
+#[derive(Clone, Debug)]
+struct Win32Menu {
+    handle: HMENU,
+    popup: bool,
+    items: Vec<Win32MenuItem>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Win32Brush {
+    handle: HBRUSH,
+    color: DWORD,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Win32Pen {
+    handle: HPEN,
+    style: INT,
+    width: INT,
+    color: DWORD,
+}
+
+#[derive(Clone, Debug)]
+struct Win32Font {
+    handle: HFONT,
+    height: INT,
+    weight: INT,
+    face_name: String,
+}
+
+#[derive(Clone, Debug)]
+struct Win32Region {
+    handle: HRGN,
+    rect: RECT,
+    shape: Win32RegionShape,
+    excluded_rects: Vec<RECT>,
+}
+
+#[derive(Clone, Debug)]
+struct Win32Palette {
+    handle: HPALETTE,
+    entries: Vec<PALETTEENTRY>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Win32GdiHandleMeta {
+    object_type: DWORD,
+    stock: bool,
+    selected_count: u32,
+}
+
+#[derive(Clone, Debug)]
+struct Win32DialogState {
+    hwnd: HWND,
+    owner: HWND,
+    modal: bool,
+    ended: bool,
+    result: isize,
+    default_id: INT,
+    focused_id: INT,
+    is_extended: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Win32AccelEntry {
+    f_virt: BYTE,
+    key: WORD,
+    cmd: WORD,
+}
+
+#[derive(Clone, Debug)]
+struct Win32AccelTable {
+    handle: HACCEL,
+    entries: Vec<Win32AccelEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct Win32MetaFile {
+    handle: HMETAFILE,
+    source_hwnd: HWND,
+    width: INT,
+    height: INT,
+    pixels: Vec<u8>,
+    enhanced: bool,
+    commands: Vec<Win32MetaCommand>,
+    printer_name: String,
+}
+
+#[derive(Clone, Debug)]
+struct Win32PrintJob {
+    id: u64,
+    printer_name: String,
+    document_name: String,
+    pages: Vec<HMETAFILE>,
+    committed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Win32DialogNav {
+    Next,
+    Previous,
+}
+
+#[derive(Clone, Debug)]
+enum Win32MetaCommand {
+    Line {
+        x0: INT,
+        y0: INT,
+        x1: INT,
+        y1: INT,
+        color: DWORD,
+    },
+    Rect {
+        rect: RECT,
+        fill: Option<DWORD>,
+        stroke: Option<DWORD>,
+    },
+    Ellipse {
+        rect: RECT,
+        fill: Option<DWORD>,
+        stroke: Option<DWORD>,
+    },
+    RoundRect {
+        rect: RECT,
+        ellipse: SIZE,
+        fill: Option<DWORD>,
+        stroke: Option<DWORD>,
+    },
+    Polygon {
+        points: Vec<POINT>,
+        fill: Option<DWORD>,
+        stroke: Option<DWORD>,
+    },
+    Text {
+        x: INT,
+        y: INT,
+        text: String,
+        color: DWORD,
+    },
+    PatBlt {
+        rect: RECT,
+        color: DWORD,
+        rop: DWORD,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Win32MenuLoopState {
+    hwnd: HWND,
+    menu: HMENU,
+    highlighted_id: UINT,
 }
 
 /// HWND → Win32Window mapping
@@ -469,6 +1488,36 @@ static NEXT_HWND: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64:
 /// HDC → Win32DC mapping
 static WIN32_DCS: Mutex<BTreeMap<u64, Win32DC>> = Mutex::new(BTreeMap::new());
 static NEXT_HDC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0002_0000);
+static WIN32_MENUS: Mutex<BTreeMap<u64, Win32Menu>> = Mutex::new(BTreeMap::new());
+static NEXT_HMENU: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0003_0000);
+static WIN32_BRUSHES: Mutex<BTreeMap<u64, Win32Brush>> = Mutex::new(BTreeMap::new());
+static NEXT_HBRUSH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0004_0000);
+static WIN32_PENS: Mutex<BTreeMap<u64, Win32Pen>> = Mutex::new(BTreeMap::new());
+static NEXT_HPEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0005_0000);
+static WIN32_FONTS: Mutex<BTreeMap<u64, Win32Font>> = Mutex::new(BTreeMap::new());
+static NEXT_HFONT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0006_0000);
+static WIN32_REGIONS: Mutex<BTreeMap<u64, Win32Region>> = Mutex::new(BTreeMap::new());
+static NEXT_HRGN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0007_0000);
+static WIN32_PALETTES: Mutex<BTreeMap<u64, Win32Palette>> = Mutex::new(BTreeMap::new());
+static WIN32_GDI_HANDLES: Mutex<BTreeMap<u64, Win32GdiHandleMeta>> = Mutex::new(BTreeMap::new());
+static NEXT_HPALETTE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0x0008_0000);
+static WIN32_DIALOGS: Mutex<BTreeMap<u64, Win32DialogState>> = Mutex::new(BTreeMap::new());
+static WIN32_ACCEL_TABLES: Mutex<BTreeMap<u64, Win32AccelTable>> = Mutex::new(BTreeMap::new());
+static NEXT_HACCEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0009_0000);
+static WIN32_METAFILES: Mutex<BTreeMap<u64, Win32MetaFile>> = Mutex::new(BTreeMap::new());
+static NEXT_HMETAFILE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0x000A_0000);
+static WIN32_PRINT_JOBS: Mutex<BTreeMap<u64, Win32PrintJob>> = Mutex::new(BTreeMap::new());
+static WIN32_PRINTER_QUEUES: Mutex<BTreeMap<String, Vec<u64>>> = Mutex::new(BTreeMap::new());
+static NEXT_PRINT_JOB: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0x000B_0000);
+static KEYBOARD_STATE: Mutex<[BYTE; 256]> = Mutex::new([0; 256]);
+static WIN32_MENU_LOOP_STATE: Mutex<Win32MenuLoopState> = Mutex::new(Win32MenuLoopState {
+    hwnd: 0,
+    menu: 0,
+    highlighted_id: 0,
+});
 
 /// Global mesaj kuyruğu (tüm pencereler için)
 static MSG_QUEUE: Mutex<Vec<Win32Msg>> = Mutex::new(Vec::new());
@@ -539,15 +1588,16 @@ pub fn blit_window_to_framebuffer(hwnd: u64) {
         if let Some(mut fb) = crate::boot::get_global_framebuffer() {
             let fb_width = fb.width as i32;
             let fb_height = fb.height as i32;
+            let (client_x, client_y) = window_client_origin(win);
 
             for y in 0..win.height {
-                let dst_y = win.y + y;
+                let dst_y = client_y + y;
                 if dst_y < 0 || dst_y >= fb_height {
                     continue;
                 }
 
                 for x in 0..win.width {
-                    let dst_x = win.x + x;
+                    let dst_x = client_x + x;
                     if dst_x < 0 || dst_x >= fb_width {
                         continue;
                     }
@@ -589,6 +1639,7 @@ pub fn blit_window_to_framebuffer(hwnd: u64) {
                     }
                 }
             }
+            draw_window_non_client_to_fb(&mut fb, win);
         }
     }
 }
@@ -608,6 +1659,10 @@ const HMOD_MSVCRT: u64 = 0x0010_4000;
 const HMOD_SHELL32: u64 = 0x0010_5000;
 const HMOD_NTDLL: u64 = 0x0010_6000;
 const HMOD_WS2_32: u64 = 0x0010_7000;
+const HMOD_WINHTTP: u64 = 0x0010_8000;
+const HMOD_WININET: u64 = 0x0010_9000;
+const HMOD_OLE32: u64 = 0x0010_A000;
+const HMOD_OLEAUT32: u64 = 0x0010_B000;
 
 /// Initialise the well-known DLL handles (called once at Win32 init).
 pub fn init_dll_handles() {
@@ -620,6 +1675,10 @@ pub fn init_dll_handles() {
     map.insert(HMOD_SHELL32, "shell32".into());
     map.insert(HMOD_NTDLL, "ntdll".into());
     map.insert(HMOD_WS2_32, "ws2_32".into());
+    map.insert(HMOD_WINHTTP, "winhttp".into());
+    map.insert(HMOD_WININET, "wininet".into());
+    map.insert(HMOD_OLE32, "ole32".into());
+    map.insert(HMOD_OLEAUT32, "oleaut32".into());
 }
 
 /// Resolve a module name to a canonical handle and register it if not present.
@@ -637,7 +1696,7 @@ pub fn handle_for_module(name: &str) -> u64 {
     }
     // Assign a new handle: use a simple counter above our static range
     static NEXT_HANDLE: core::sync::atomic::AtomicU64 =
-        core::sync::atomic::AtomicU64::new(0x0010_7000);
+        core::sync::atomic::AtomicU64::new(0x0010_C000);
     let h = NEXT_HANDLE.fetch_add(0x1000, core::sync::atomic::Ordering::Relaxed);
     DLL_HANDLES.lock().insert(h, key.to_string());
     h
@@ -646,6 +1705,2560 @@ pub fn handle_for_module(name: &str) -> u64 {
 /// Reverse lookup: handle → module name string.
 pub fn module_for_handle(hmod: u64) -> Option<String> {
     DLL_HANDLES.lock().get(&hmod).cloned()
+}
+
+fn current_win32_thread_key() -> u64 {
+    crate::task::scheduler::current_task_id() as u64
+}
+
+fn current_win32_process_key() -> u64 {
+    crate::pe_loader::current_process_pid().unwrap_or_else(current_win32_thread_key)
+}
+
+fn win32_last_error() -> DWORD {
+    THREAD_LAST_ERROR
+        .lock()
+        .get(&current_win32_thread_key())
+        .copied()
+        .unwrap_or(0)
+}
+
+fn set_win32_last_error(code: DWORD) {
+    THREAD_LAST_ERROR
+        .lock()
+        .insert(current_win32_thread_key(), code);
+}
+
+fn map_http_error_to_internet_error(err: crate::net::http::HttpError) -> DWORD {
+    use crate::net::http::HttpError;
+
+    match err {
+        HttpError::Timeout => ERROR_INTERNET_TIMEOUT,
+        HttpError::ProxyAuthenticationRequired => ERROR_INTERNET_LOGIN_FAILURE,
+        HttpError::ConnectionFailed => ERROR_INTERNET_CANNOT_CONNECT,
+        HttpError::TlsCertDateInvalid => ERROR_INTERNET_SEC_CERT_DATE_INVALID,
+        HttpError::TlsCertCnInvalid => ERROR_INTERNET_SEC_CERT_CN_INVALID,
+        HttpError::TlsInvalidCa => ERROR_INTERNET_INVALID_CA,
+        HttpError::TlsCertRevoked => ERROR_INTERNET_SEC_CERT_REVOKED,
+        HttpError::TlsDecodeFailed => ERROR_INTERNET_DECODING_FAILED,
+        HttpError::TlsInvalidCertificate => ERROR_INTERNET_SEC_INVALID_CERT,
+        HttpError::TlsHandshakeFailed | HttpError::TlsNotSupported => {
+            ERROR_INTERNET_SEC_CERT_ERRORS
+        }
+        _ => ERROR_INTERNET_CANNOT_CONNECT,
+    }
+}
+
+unsafe fn read_ansi_string(ptr: LPCSTR) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut cursor = ptr;
+    while *cursor != 0 {
+        out.push(*cursor as u8 as char);
+        cursor = cursor.add(1);
+    }
+    out
+}
+
+fn current_directory_state() -> &'static Mutex<String> {
+    WIN32_CURRENT_DIRECTORY.call_once(|| Mutex::new(String::from("/")))
+}
+
+fn environment_state() -> &'static Mutex<BTreeMap<String, String>> {
+    WIN32_ENVIRONMENT.call_once(|| {
+        let mut vars = BTreeMap::new();
+        vars.insert(String::from("OS"), String::from("echOS"));
+        vars.insert(String::from("PATH"), String::from("/"));
+        vars.insert(String::from("SYSTEMROOT"), String::from("/"));
+        Mutex::new(vars)
+    })
+}
+
+fn crt_stream_state() -> &'static Mutex<BTreeMap<u64, Win32CrtStream>> {
+    WIN32_CRT_STREAMS.call_once(|| Mutex::new(BTreeMap::new()))
+}
+
+fn gmt_tm_state() -> &'static Mutex<tm> {
+    WIN32_GMT_TM.call_once(|| Mutex::new(tm::default()))
+}
+
+fn local_tm_state() -> &'static Mutex<tm> {
+    WIN32_LOCAL_TM.call_once(|| Mutex::new(tm::default()))
+}
+
+fn time_ascii_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_TIME_ASCII.call_once(|| Mutex::new(vec![0]))
+}
+
+fn getenv_buffer_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_GETENV_BUFFER.call_once(|| Mutex::new(vec![0]))
+}
+
+fn command_line_state() -> &'static [i8] {
+    WIN32_COMMAND_LINE.call_once(|| {
+        let mut raw = b"echos.exe".iter().map(|&b| b as i8).collect::<Vec<_>>();
+        raw.push(0);
+        raw.into_boxed_slice()
+    })
+}
+
+unsafe fn write_ansi_string(dst: LPSTR, max_count: INT, text: &str) -> INT {
+    if dst.is_null() || max_count <= 0 {
+        return 0;
+    }
+    let bytes = text.as_bytes();
+    let copy_len = bytes.len().min((max_count - 1).max(0) as usize);
+    core::ptr::copy_nonoverlapping(bytes.as_ptr() as *const i8, dst, copy_len);
+    *dst.add(copy_len) = 0;
+    copy_len as INT
+}
+
+fn collapse_win32_path(path: &str) -> String {
+    let mut stack = Vec::<&str>::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                stack.pop();
+            }
+            segment => stack.push(segment),
+        }
+    }
+    let mut normalized = String::from("/");
+    normalized.push_str(&stack.join("/"));
+    if normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn normalize_win32_path(path: &str) -> String {
+    let trimmed = path.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut normalized = trimmed.replace('\\', "/");
+    let absolute_drive = normalized.len() >= 3
+        && normalized.as_bytes()[1] == b':'
+        && normalized.as_bytes()[2] == b'/';
+    if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
+        normalized = normalized.split_off(2);
+    }
+    if !normalized.starts_with('/') {
+        let current = current_directory_state().lock().clone();
+        if current.ends_with('/') {
+            normalized = alloc::format!("{current}{normalized}");
+        } else {
+            normalized = alloc::format!("{current}/{normalized}");
+        }
+    } else if absolute_drive {
+        normalized.insert(0, '/');
+    }
+    while normalized.contains("//") {
+        normalized = normalized.replace("//", "/");
+    }
+    crate::fs::resolve_mount_path(&collapse_win32_path(&normalized))
+}
+
+fn environment_key(name: &str) -> String {
+    name.trim().to_ascii_uppercase()
+}
+
+fn file_size_for_path(path: &str) -> Option<u64> {
+    crate::fs::f2fs::open_entry(path)
+        .ok()
+        .map(|entry| entry.size)
+}
+
+unsafe fn write_shared_ansi_buffer(store: &'static Mutex<Vec<i8>>, text: &str) -> LPSTR {
+    let mut buffer = store.lock();
+    buffer.clear();
+    buffer.extend(text.as_bytes().iter().map(|&b| b as i8));
+    buffer.push(0);
+    buffer.as_mut_ptr()
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let doy = (153 * (month as i32 + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146097 + doe - 719468) as i64
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe as i32 + era as i32 * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    (year, month as u32, day as u32)
+}
+
+fn unix_seconds_to_tm(timestamp: i64) -> tm {
+    let seconds = timestamp.max(0);
+    let days = seconds / 86_400;
+    let rem = seconds % 86_400;
+    let hour = (rem / 3_600) as i32;
+    let minute = ((rem % 3_600) / 60) as i32;
+    let second = (rem % 60) as i32;
+    let (year, month, day) = civil_from_days(days);
+    let yday = (days - days_from_civil(year, 1, 1)) as i32;
+    let wday = ((days + 4).rem_euclid(7)) as i32;
+    tm {
+        tm_sec: second,
+        tm_min: minute,
+        tm_hour: hour,
+        tm_mday: day as i32,
+        tm_mon: month as i32 - 1,
+        tm_year: year - 1900,
+        tm_wday: wday,
+        tm_yday: yday,
+        tm_isdst: 0,
+    }
+}
+
+fn weekday_name(idx: i32, short: bool) -> &'static str {
+    match idx.rem_euclid(7) {
+        0 => {
+            if short {
+                "Sun"
+            } else {
+                "Sunday"
+            }
+        }
+        1 => {
+            if short {
+                "Mon"
+            } else {
+                "Monday"
+            }
+        }
+        2 => {
+            if short {
+                "Tue"
+            } else {
+                "Tuesday"
+            }
+        }
+        3 => {
+            if short {
+                "Wed"
+            } else {
+                "Wednesday"
+            }
+        }
+        4 => {
+            if short {
+                "Thu"
+            } else {
+                "Thursday"
+            }
+        }
+        5 => {
+            if short {
+                "Fri"
+            } else {
+                "Friday"
+            }
+        }
+        _ => {
+            if short {
+                "Sat"
+            } else {
+                "Saturday"
+            }
+        }
+    }
+}
+
+fn month_name(idx: i32, short: bool) -> &'static str {
+    match idx {
+        0 => {
+            if short {
+                "Jan"
+            } else {
+                "January"
+            }
+        }
+        1 => {
+            if short {
+                "Feb"
+            } else {
+                "February"
+            }
+        }
+        2 => {
+            if short {
+                "Mar"
+            } else {
+                "March"
+            }
+        }
+        3 => {
+            if short {
+                "Apr"
+            } else {
+                "April"
+            }
+        }
+        4 => {
+            if short {
+                "May"
+            } else {
+                "May"
+            }
+        }
+        5 => {
+            if short {
+                "Jun"
+            } else {
+                "June"
+            }
+        }
+        6 => {
+            if short {
+                "Jul"
+            } else {
+                "July"
+            }
+        }
+        7 => {
+            if short {
+                "Aug"
+            } else {
+                "August"
+            }
+        }
+        8 => {
+            if short {
+                "Sep"
+            } else {
+                "September"
+            }
+        }
+        9 => {
+            if short {
+                "Oct"
+            } else {
+                "October"
+            }
+        }
+        10 => {
+            if short {
+                "Nov"
+            } else {
+                "November"
+            }
+        }
+        _ => {
+            if short {
+                "Dec"
+            } else {
+                "December"
+            }
+        }
+    }
+}
+
+fn format_tm(tm_value: &tm, format: &str) -> String {
+    let mut out = String::new();
+    let mut chars = format.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next().unwrap_or('%') {
+            '%' => out.push('%'),
+            'Y' => out.push_str(&alloc::format!("{:04}", tm_value.tm_year + 1900)),
+            'y' => out.push_str(&alloc::format!("{:02}", (tm_value.tm_year + 1900) % 100)),
+            'm' => out.push_str(&alloc::format!("{:02}", tm_value.tm_mon + 1)),
+            'd' => out.push_str(&alloc::format!("{:02}", tm_value.tm_mday)),
+            'H' => out.push_str(&alloc::format!("{:02}", tm_value.tm_hour)),
+            'M' => out.push_str(&alloc::format!("{:02}", tm_value.tm_min)),
+            'S' => out.push_str(&alloc::format!("{:02}", tm_value.tm_sec)),
+            'a' => out.push_str(weekday_name(tm_value.tm_wday, true)),
+            'A' => out.push_str(weekday_name(tm_value.tm_wday, false)),
+            'b' => out.push_str(month_name(tm_value.tm_mon, true)),
+            'B' => out.push_str(month_name(tm_value.tm_mon, false)),
+            'j' => out.push_str(&alloc::format!("{:03}", tm_value.tm_yday + 1)),
+            'c' => out.push_str(&alloc::format!(
+                "{} {} {:02} {:02}:{:02}:{:02} {}",
+                weekday_name(tm_value.tm_wday, true),
+                month_name(tm_value.tm_mon, true),
+                tm_value.tm_mday,
+                tm_value.tm_hour,
+                tm_value.tm_min,
+                tm_value.tm_sec,
+                tm_value.tm_year + 1900
+            )),
+            spec => {
+                out.push('%');
+                out.push(spec);
+            }
+        }
+    }
+    out
+}
+
+fn extract_command_image_name(command_line: &str) -> String {
+    let trimmed = command_line.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        return rest.split('"').next().unwrap_or_default().to_string();
+    }
+    trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+unsafe fn populate_process_information(
+    lp_process_information: LPVOID,
+    process_handle: HANDLE,
+    thread_handle: HANDLE,
+) {
+    if lp_process_information.is_null() {
+        return;
+    }
+    let Some(process_id) = crate::win32_abi::process_handle_pid(process_handle as u64) else {
+        return;
+    };
+    let thread_id = crate::win32_abi::thread_handle_tid(thread_handle as u64).unwrap_or(0);
+    let info = &mut *(lp_process_information as *mut PROCESS_INFORMATION);
+    info.hProcess = process_handle;
+    info.hThread = thread_handle;
+    info.dwProcessId = process_id as DWORD;
+    info.dwThreadId = thread_id as DWORD;
+}
+
+fn win32_process_start_trampoline() -> ! {
+    let task_id = crate::task::scheduler::current_task_id() as u64;
+    let Some(process_handle) = WIN32_PROCESS_LAUNCHES.lock().remove(&task_id) else {
+        crate::task::scheduler::exit(87);
+    };
+    let Some(pid) = crate::win32_abi::process_handle_pid(process_handle) else {
+        let _ = crate::win32_abi::mark_process_terminated_with_exit(process_handle, 87);
+        crate::task::scheduler::exit(87);
+    };
+    let result = crate::pe_loader::transfer_entry(crate::pe_loader::PeProcessHandle { pid });
+    let exit_code = if result.is_ok() { 0 } else { 193 };
+    let _ = crate::win32_abi::mark_process_terminated_with_exit(process_handle, exit_code);
+    crate::task::scheduler::exit(exit_code as i32)
+}
+
+fn normalize_rect(rect: RECT) -> RECT {
+    RECT {
+        left: rect.left.min(rect.right),
+        top: rect.top.min(rect.bottom),
+        right: rect.left.max(rect.right),
+        bottom: rect.top.max(rect.bottom),
+    }
+}
+
+fn window_nc_metrics(style: DWORD, has_menu: bool) -> (INT, INT, INT) {
+    let border = if (style & WS_CAPTION) != 0 { 1 } else { 0 };
+    let caption = if (style & WS_CAPTION) != 0 { 24 } else { 0 };
+    let menu = if has_menu { 18 } else { 0 };
+    (border, caption, menu)
+}
+
+fn window_total_bounds(window: &Win32Window) -> RECT {
+    let (border, caption, menu) = window_nc_metrics(window.style, window.menu != 0);
+    RECT {
+        left: window.x,
+        top: window.y,
+        right: window.x + window.width + border * 2,
+        bottom: window.y + window.height + border * 2 + caption + menu,
+    }
+}
+
+fn window_client_origin(window: &Win32Window) -> (INT, INT) {
+    let (border, caption, menu) = window_nc_metrics(window.style, window.menu != 0);
+    (window.x + border, window.y + border + caption + menu)
+}
+
+fn logical_to_device(dc: &Win32DC, x: INT, y: INT) -> (INT, INT) {
+    let logical_x = (x - dc.window_org.x) as f32;
+    let logical_y = (y - dc.window_org.y) as f32;
+    let m = dc.world_transform;
+    let transformed_x = logical_x * m[0] + logical_y * m[2] + m[4];
+    let transformed_y = logical_x * m[1] + logical_y * m[3] + m[5];
+    (
+        round_f32_to_int(transformed_x) + dc.viewport_org.x,
+        round_f32_to_int(transformed_y) + dc.viewport_org.y,
+    )
+}
+
+fn round_f32_to_int(value: f32) -> INT {
+    if value >= 0.0 {
+        (value + 0.5) as INT
+    } else {
+        (value - 0.5) as INT
+    }
+}
+
+fn logical_rect_to_device(dc: &Win32DC, rect: RECT) -> RECT {
+    let rect = normalize_rect(rect);
+    let corners = [
+        logical_to_device(dc, rect.left, rect.top),
+        logical_to_device(dc, rect.right, rect.top),
+        logical_to_device(dc, rect.left, rect.bottom),
+        logical_to_device(dc, rect.right, rect.bottom),
+    ];
+    let mut out = RECT {
+        left: corners[0].0,
+        top: corners[0].1,
+        right: corners[0].0,
+        bottom: corners[0].1,
+    };
+    for &(x, y) in &corners[1..] {
+        out.left = out.left.min(x);
+        out.top = out.top.min(y);
+        out.right = out.right.max(x);
+        out.bottom = out.bottom.max(y);
+    }
+    normalize_rect(out)
+}
+
+fn polygon_bounds_root(points: &[POINT]) -> RECT {
+    let mut left = points[0].x;
+    let mut top = points[0].y;
+    let mut right = points[0].x;
+    let mut bottom = points[0].y;
+    for point in &points[1..] {
+        left = left.min(point.x);
+        top = top.min(point.y);
+        right = right.max(point.x);
+        bottom = bottom.max(point.y);
+    }
+    RECT {
+        left,
+        top,
+        right: right + 1,
+        bottom: bottom + 1,
+    }
+}
+
+fn is_left_root(p0: POINT, p1: POINT, x: INT, y: INT) -> i64 {
+    (p1.x - p0.x) as i64 * (y - p0.y) as i64 - (x - p0.x) as i64 * (p1.y - p0.y) as i64
+}
+
+fn polygon_contains_root(points: &[POINT], x: INT, y: INT, alternate_fill: bool) -> bool {
+    if points.len() < 3 {
+        return false;
+    }
+    if alternate_fill {
+        let mut inside = false;
+        let mut j = points.len() - 1;
+        for i in 0..points.len() {
+            let pi = points[i];
+            let pj = points[j];
+            let intersects = ((pi.y > y) != (pj.y > y))
+                && ((x as f32)
+                    < ((pj.x - pi.x) as f32 * (y - pi.y) as f32) / ((pj.y - pi.y) as f32 + 0.0001)
+                        + pi.x as f32);
+            if intersects {
+                inside = !inside;
+            }
+            j = i;
+        }
+        return inside;
+    }
+
+    let mut winding = 0i32;
+    let mut j = points.len() - 1;
+    for i in 0..points.len() {
+        let pi = points[i];
+        let pj = points[j];
+        if pi.y <= y {
+            if pj.y > y && is_left_root(pi, pj, x, y) > 0 {
+                winding += 1;
+            }
+        } else if pj.y <= y && is_left_root(pi, pj, x, y) < 0 {
+            winding -= 1;
+        }
+        j = i;
+    }
+    winding != 0
+}
+
+fn register_gdi_handle(handle: u64, object_type: DWORD, stock: bool) {
+    WIN32_GDI_HANDLES.lock().insert(
+        handle,
+        Win32GdiHandleMeta {
+            object_type,
+            stock,
+            selected_count: 0,
+        },
+    );
+}
+
+fn mark_gdi_handle_selected(handle: u64, object_type: DWORD) {
+    if handle == 0 {
+        return;
+    }
+    let mut table = WIN32_GDI_HANDLES.lock();
+    let entry = table.entry(handle).or_insert(Win32GdiHandleMeta {
+        object_type,
+        stock: false,
+        selected_count: 0,
+    });
+    entry.selected_count = entry.selected_count.saturating_add(1);
+}
+
+fn mark_gdi_handle_released(handle: u64) {
+    if handle == 0 {
+        return;
+    }
+    if let Some(entry) = WIN32_GDI_HANDLES.lock().get_mut(&handle) {
+        entry.selected_count = entry.selected_count.saturating_sub(1);
+    }
+}
+
+fn remove_gdi_payload(handle: u64) -> bool {
+    if WIN32_PENS.lock().remove(&handle).is_some() {
+        return true;
+    }
+    if WIN32_BRUSHES.lock().remove(&handle).is_some() {
+        return true;
+    }
+    if WIN32_FONTS.lock().remove(&handle).is_some() {
+        return true;
+    }
+    if WIN32_REGIONS.lock().remove(&handle).is_some() {
+        return true;
+    }
+    if WIN32_PALETTES.lock().remove(&handle).is_some() {
+        return true;
+    }
+    false
+}
+
+unsafe fn dialog_nav_target(hdlg: HWND, nav: Win32DialogNav) -> HWND {
+    let current = if crate::win32::user32::get_focus() == 0 {
+        hdlg
+    } else {
+        crate::win32::user32::get_focus()
+    };
+    match nav {
+        Win32DialogNav::Next => crate::win32::user32::get_next_dlg_tab_item(hdlg, current, FALSE),
+        Win32DialogNav::Previous => {
+            crate::win32::user32::get_next_dlg_tab_item(hdlg, current, TRUE)
+        }
+    }
+}
+
+fn restore_dc_state(dc: &mut Win32DC, snapshot: Win32DCSnapshot) {
+    dc.pen_color = snapshot.pen_color;
+    dc.brush_color = snapshot.brush_color;
+    dc.text_color = snapshot.text_color;
+    dc.bk_color = snapshot.bk_color;
+    dc.bk_mode = snapshot.bk_mode;
+    dc.pen_x = snapshot.pen_x;
+    dc.pen_y = snapshot.pen_y;
+    dc.selected_pen = snapshot.selected_pen;
+    dc.selected_brush = snapshot.selected_brush;
+    dc.selected_font = snapshot.selected_font;
+    dc.selected_palette = snapshot.selected_palette;
+    dc.clip_region = snapshot.clip_region;
+    dc.rop2 = snapshot.rop2;
+    dc.graphics_mode = snapshot.graphics_mode;
+    dc.arc_direction = snapshot.arc_direction;
+    dc.poly_fill_mode = snapshot.poly_fill_mode;
+    dc.stretch_blt_mode = snapshot.stretch_blt_mode;
+    dc.path_active = snapshot.path_active;
+    dc.path_closed = snapshot.path_closed;
+    dc.path_points = snapshot.path_points;
+    dc.map_mode = snapshot.map_mode;
+    dc.viewport_org = snapshot.viewport_org;
+    dc.window_org = snapshot.window_org;
+    dc.world_transform = snapshot.world_transform;
+    dc.font_height = snapshot.font_height;
+    dc.font_weight = snapshot.font_weight;
+}
+
+fn record_metafile_command(dc: &Win32DC, command: Win32MetaCommand) {
+    if dc.recording_metafile == 0 {
+        return;
+    }
+    if let Some(meta) = WIN32_METAFILES
+        .lock()
+        .get_mut(&(dc.recording_metafile as u64))
+    {
+        meta.commands.push(command);
+    }
+}
+
+unsafe fn replay_metafile_commands(
+    dst_hdc: HDC,
+    commands: &[Win32MetaCommand],
+    target: Option<RECT>,
+) {
+    for command in commands {
+        match command {
+            Win32MetaCommand::Line {
+                x0,
+                y0,
+                x1,
+                y1,
+                color,
+            } => {
+                if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
+                    dc.pen_color = *color;
+                }
+                let _ = gdi32::move_to_ex(dst_hdc, *x0, *y0, core::ptr::null_mut());
+                let _ = gdi32::line_to(dst_hdc, *x1, *y1);
+            }
+            Win32MetaCommand::Rect { rect, fill, stroke } => {
+                if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
+                    if let Some(fill) = fill {
+                        dc.brush_color = *fill;
+                    }
+                    if let Some(stroke) = stroke {
+                        dc.pen_color = *stroke;
+                    }
+                }
+                let _ = gdi32::rectangle(dst_hdc, rect.left, rect.top, rect.right, rect.bottom);
+            }
+            Win32MetaCommand::Ellipse { rect, fill, stroke } => {
+                if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
+                    if let Some(fill) = fill {
+                        dc.brush_color = *fill;
+                    }
+                    if let Some(stroke) = stroke {
+                        dc.pen_color = *stroke;
+                    }
+                }
+                let _ = gdi32::ellipse(dst_hdc, rect.left, rect.top, rect.right, rect.bottom);
+            }
+            Win32MetaCommand::RoundRect {
+                rect,
+                ellipse,
+                fill,
+                stroke,
+            } => {
+                if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
+                    if let Some(fill) = fill {
+                        dc.brush_color = *fill;
+                    }
+                    if let Some(stroke) = stroke {
+                        dc.pen_color = *stroke;
+                    }
+                }
+                let _ = gdi32::round_rect(
+                    dst_hdc,
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    ellipse.cx,
+                    ellipse.cy,
+                );
+            }
+            Win32MetaCommand::Polygon {
+                points,
+                fill,
+                stroke,
+            } => {
+                if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
+                    if let Some(fill) = fill {
+                        dc.brush_color = *fill;
+                    }
+                    if let Some(stroke) = stroke {
+                        dc.pen_color = *stroke;
+                    }
+                }
+                let _ = gdi32::polygon(dst_hdc, points.as_ptr(), points.len() as INT);
+            }
+            Win32MetaCommand::Text { x, y, text, color } => {
+                if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
+                    dc.text_color = *color;
+                }
+                let mut bytes = text.clone().into_bytes();
+                bytes.push(0);
+                let _ =
+                    gdi32::text_out_a(dst_hdc, *x, *y, bytes.as_ptr() as LPCSTR, text.len() as INT);
+            }
+            Win32MetaCommand::PatBlt { rect, color, rop } => {
+                if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
+                    dc.brush_color = *color;
+                }
+                let bounds = target.unwrap_or(*rect);
+                let _ = gdi32::pat_blt(
+                    dst_hdc,
+                    bounds.left,
+                    bounds.top,
+                    bounds.right - bounds.left,
+                    bounds.bottom - bounds.top,
+                    *rop,
+                );
+            }
+        }
+    }
+}
+
+fn fill_fb_rect(fb: &mut crate::gop::framebuffer::Framebuffer, rect: RECT, color: u32, alpha: u8) {
+    let fb_width = fb.width as INT;
+    let fb_height = fb.height as INT;
+    let rect = normalize_rect(rect);
+    for y in rect.top.max(0)..rect.bottom.min(fb_height) {
+        for x in rect.left.max(0)..rect.right.min(fb_width) {
+            if alpha == 0xFF {
+                fb.plot_pixel(x as usize, y as usize, color);
+            } else {
+                let existing = fb.get_pixel(x as usize, y as usize);
+                let dst_r = ((existing >> 16) & 0xFF) as u32;
+                let dst_g = ((existing >> 8) & 0xFF) as u32;
+                let dst_b = (existing & 0xFF) as u32;
+                let src_r = ((color >> 16) & 0xFF) as u32;
+                let src_g = ((color >> 8) & 0xFF) as u32;
+                let src_b = (color & 0xFF) as u32;
+                let a = alpha as u32;
+                let inv = 255 - a;
+                let out = 0xFF00_0000
+                    | (((src_r * a + dst_r * inv) / 255) << 16)
+                    | (((src_g * a + dst_g * inv) / 255) << 8)
+                    | ((src_b * a + dst_b * inv) / 255);
+                fb.plot_pixel(x as usize, y as usize, out);
+            }
+        }
+    }
+}
+
+fn draw_window_non_client_to_fb(
+    fb: &mut crate::gop::framebuffer::Framebuffer,
+    window: &Win32Window,
+) {
+    let (border, caption, menu_height) = window_nc_metrics(window.style, window.menu != 0);
+    if border == 0 && caption == 0 && menu_height == 0 {
+        return;
+    }
+    let outer = window_total_bounds(window);
+    let active = ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed) == window.hwnd;
+    let caption_color: u32 = if active { 0xFF1D3552 } else { 0xFF122030 };
+    let menu_color: u32 = 0xFF101B2B;
+    let border_color: u32 = 0xFF2B4362;
+    let text_color: u32 = if active { 0xFFF4F7FF } else { 0xFFCAD3E2 };
+    let inactive_text: u32 = 0xFF7D889A;
+    let button_bg: u32 = if active { 0xFF23364E } else { 0xFF172434 };
+    let menu_hot: u32 = 0xFF1B3046;
+
+    if border > 0 {
+        fill_fb_rect(
+            fb,
+            RECT {
+                left: outer.left,
+                top: outer.top,
+                right: outer.right,
+                bottom: outer.top + border,
+            },
+            border_color,
+            0xFF,
+        );
+        fill_fb_rect(
+            fb,
+            RECT {
+                left: outer.left,
+                top: outer.bottom - border,
+                right: outer.right,
+                bottom: outer.bottom,
+            },
+            border_color,
+            0xFF,
+        );
+        fill_fb_rect(
+            fb,
+            RECT {
+                left: outer.left,
+                top: outer.top,
+                right: outer.left + border,
+                bottom: outer.bottom,
+            },
+            border_color,
+            0xFF,
+        );
+        fill_fb_rect(
+            fb,
+            RECT {
+                left: outer.right - border,
+                top: outer.top,
+                right: outer.right,
+                bottom: outer.bottom,
+            },
+            border_color,
+            0xFF,
+        );
+    }
+
+    let mut y = outer.top + border;
+    if caption > 0 {
+        fill_fb_rect(
+            fb,
+            RECT {
+                left: outer.left + border,
+                top: y,
+                right: outer.right - border,
+                bottom: y + caption,
+            },
+            caption_color,
+            0xFF,
+        );
+        fb.draw_string(
+            (outer.left + border + 8).max(0) as usize,
+            (y + 6).max(0) as usize,
+            &window.title,
+            text_color,
+        );
+        let button_size = (caption - 6).max(12);
+        let button_top = y + 3;
+        let mut button_right = outer.right - border - 4;
+        let buttons = [
+            ((window.style & WS_SYSMENU) != 0, 'x', 0xFFEF737A),
+            ((window.style & WS_MAXIMIZEBOX) != 0, 'o', 0xFFC9D3E6),
+            ((window.style & WS_MINIMIZEBOX) != 0, '_', 0xFFC9D3E6),
+        ];
+        for (visible, glyph, glyph_color) in buttons {
+            if !visible {
+                continue;
+            }
+            let rect = RECT {
+                left: button_right - button_size,
+                top: button_top,
+                right: button_right,
+                bottom: button_top + button_size,
+            };
+            fill_fb_rect(fb, rect, button_bg, 0xFF);
+            let mut label = String::new();
+            label.push(glyph);
+            fb.draw_string(
+                (rect.left + 4).max(0) as usize,
+                (rect.top + 3).max(0) as usize,
+                &label,
+                if active { glyph_color } else { inactive_text },
+            );
+            button_right = rect.left - 4;
+        }
+        y += caption;
+    }
+    if menu_height > 0 {
+        fill_fb_rect(
+            fb,
+            RECT {
+                left: outer.left + border,
+                top: y,
+                right: outer.right - border,
+                bottom: y + menu_height,
+            },
+            menu_color,
+            0xFF,
+        );
+        if let Some(menu) = WIN32_MENUS.lock().get(&(window.menu as u64)).cloned() {
+            let menu_loop = *WIN32_MENU_LOOP_STATE.lock();
+            let mut x = outer.left + border + 8;
+            for item in menu.items.iter().take(8) {
+                let item_width = 12 + (item.text.len() as i32 * 8);
+                let item_rect = RECT {
+                    left: x - 4,
+                    top: y + 2,
+                    right: x + item_width,
+                    bottom: y + menu_height - 2,
+                };
+                if menu_loop.hwnd == window.hwnd as HWND
+                    && menu_loop.highlighted_id == item.id as UINT
+                {
+                    fill_fb_rect(fb, item_rect, menu_hot, 0xFF);
+                }
+                let item_color = if item.enabled { text_color } else { 0xFF6E7A8F };
+                fb.draw_string(
+                    x.max(0) as usize,
+                    (y + 4).max(0) as usize,
+                    &item.text,
+                    item_color,
+                );
+                x += item_width + 4;
+            }
+        }
+    }
+}
+
+fn stock_brush_color(handle: HBRUSH) -> Option<DWORD> {
+    match handle as INT {
+        WHITE_BRUSH => Some(0xFFFFFF),
+        LTGRAY_BRUSH => Some(0xC0C0C0),
+        GRAY_BRUSH => Some(0x808080),
+        DKGRAY_BRUSH => Some(0x404040),
+        BLACK_BRUSH => Some(0x000000),
+        NULL_BRUSH => None,
+        _ => None,
+    }
+}
+
+fn stock_pen_color(handle: HPEN) -> Option<DWORD> {
+    match handle as INT {
+        WHITE_PEN => Some(0xFFFFFF),
+        BLACK_PEN => Some(0x000000),
+        NULL_PEN => None,
+        _ => None,
+    }
+}
+
+fn brush_color(handle: HBRUSH) -> Option<DWORD> {
+    WIN32_BRUSHES
+        .lock()
+        .get(&(handle as u64))
+        .map(|brush| brush.color)
+        .or_else(|| stock_brush_color(handle))
+}
+
+fn pen_color(handle: HPEN) -> Option<DWORD> {
+    WIN32_PENS
+        .lock()
+        .get(&(handle as u64))
+        .map(|pen| pen.color)
+        .or_else(|| stock_pen_color(handle))
+}
+
+fn region_rect(handle: HRGN) -> Option<RECT> {
+    WIN32_REGIONS
+        .lock()
+        .get(&(handle as u64))
+        .map(|region| normalize_rect(region.rect))
+}
+
+fn region_contains_point(handle: HRGN, x: INT, y: INT) -> bool {
+    let regions = WIN32_REGIONS.lock();
+    let Some(region) = regions.get(&(handle as u64)) else {
+        return false;
+    };
+    let rect = normalize_rect(region.rect);
+    if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
+        return false;
+    }
+    if region.excluded_rects.iter().any(|excluded| {
+        let excluded = normalize_rect(*excluded);
+        x >= excluded.left && x < excluded.right && y >= excluded.top && y < excluded.bottom
+    }) {
+        return false;
+    }
+    match &region.shape {
+        Win32RegionShape::Rect => true,
+        Win32RegionShape::Polygon {
+            points,
+            alternate_fill,
+        } => polygon_contains_root(points, x, y, *alternate_fill),
+    }
+}
+
+fn region_intersects_rect(handle: HRGN, rect: RECT) -> bool {
+    let rect = normalize_rect(rect);
+    if rect.left >= rect.right || rect.top >= rect.bottom {
+        return false;
+    }
+    for y in rect.top..rect.bottom {
+        for x in rect.left..rect.right {
+            if region_contains_point(handle, x, y) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+unsafe fn read_utf16_string(ptr: LPCWSTR) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut units = Vec::new();
+    let mut cursor = ptr;
+    while *cursor != 0 {
+        units.push(*cursor);
+        cursor = cursor.add(1);
+    }
+    String::from_utf16_lossy(&units)
+}
+
+fn allocate_internet_handle(state: InternetHandleState) -> HANDLE {
+    let handle = NEXT_INTERNET_HANDLE.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    INTERNET_HANDLES.lock().insert(handle, state);
+    handle
+}
+
+fn compose_http_url(host: &str, port: u16, secure: bool, object_name: &str) -> String {
+    let scheme = if secure { "https" } else { "http" };
+    let mut path = if object_name.is_empty() {
+        "/".to_string()
+    } else {
+        object_name.to_string()
+    };
+    if !path.starts_with('/') {
+        path.insert(0, '/');
+    }
+    alloc::format!("{scheme}://{host}:{port}{path}")
+}
+
+fn alloc_bstr_from_units(units: &[u16]) -> BSTR {
+    let byte_len = units.len() * 2;
+    let total = 4 + byte_len + 2;
+    let raw = win32_alloc(total, 2);
+    if raw.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        *(raw as *mut u32) = byte_len as u32;
+        let dst = raw.add(4) as *mut u16;
+        if !units.is_empty() {
+            core::ptr::copy_nonoverlapping(units.as_ptr(), dst, units.len());
+        }
+        *dst.add(units.len()) = 0;
+        dst
+    }
+}
+
+fn guid_to_key(guid: *const GUID) -> Option<String> {
+    if guid.is_null() {
+        return None;
+    }
+    let guid = unsafe { &*guid };
+    Some(alloc::format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        guid.data4[0],
+        guid.data4[1],
+        guid.data4[2],
+        guid.data4[3],
+        guid.data4[4],
+        guid.data4[5],
+        guid.data4[6],
+        guid.data4[7]
+    ))
+}
+
+fn guid_matches(guid: *const GUID, expected: &GUID) -> bool {
+    if guid.is_null() {
+        return false;
+    }
+    unsafe { *guid == *expected }
+}
+
+unsafe fn com_add_ref(object: *mut u8) {
+    if object.is_null() {
+        return;
+    }
+    let vtable = *(object as *mut *const usize);
+    let add_ref: extern "system" fn(*mut u8) -> u32 = core::mem::transmute(*vtable.add(1));
+    let _ = add_ref(object);
+}
+
+unsafe fn com_release(object: *mut u8) {
+    if object.is_null() {
+        return;
+    }
+    let vtable = *(object as *mut *const usize);
+    let release: extern "system" fn(*mut u8) -> u32 = core::mem::transmute(*vtable.add(2));
+    let _ = release(object);
+}
+
+unsafe fn com_query_interface(object: *mut u8, iid: *const GUID, out: *mut *mut u8) -> HRESULT {
+    if object.is_null() || out.is_null() {
+        return E_POINTER;
+    }
+    let vtable = *(object as *mut *const usize);
+    let query: extern "system" fn(*mut u8, *const GUID, *mut *mut u8) -> HRESULT =
+        core::mem::transmute(*vtable.add(0));
+    query(object, iid, out)
+}
+
+fn invalidate_window_rect(hwnd: u64, rect: RECT) {
+    let rect = normalize_rect(rect);
+    let mut invalidated = INVALIDATED_WINDOWS.lock();
+    invalidated
+        .entry(hwnd)
+        .and_modify(|existing| {
+            *existing = normalize_rect(RECT {
+                left: existing.left.min(rect.left),
+                top: existing.top.min(rect.top),
+                right: existing.right.max(rect.right),
+                bottom: existing.bottom.max(rect.bottom),
+            });
+        })
+        .or_insert(rect);
+}
+
+fn consume_invalidated_rect(hwnd: u64) -> Option<RECT> {
+    INVALIDATED_WINDOWS.lock().remove(&hwnd)
+}
+
+fn dialog_children(hwnd: HWND) -> Vec<HWND> {
+    let mut children: Vec<(u64, u64)> = WIN32_WINDOWS
+        .lock()
+        .values()
+        .filter(|window| window.parent == hwnd as u64)
+        .map(|window| (window.menu as u64, window.hwnd))
+        .collect();
+    children.sort_by_key(|(id, child)| (*id, *child));
+    children
+        .into_iter()
+        .map(|(_, child)| child as HWND)
+        .collect()
+}
+
+fn dialog_child_by_id(hwnd: HWND, control_id: INT) -> HWND {
+    WIN32_WINDOWS
+        .lock()
+        .values()
+        .find(|window| window.parent == hwnd as u64 && window.menu as INT == control_id)
+        .map(|window| window.hwnd as HWND)
+        .unwrap_or(0)
+}
+
+fn internet_host_from_url(url: &str) -> String {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    without_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next_back()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
+}
+
+fn parse_cookie_assignment(value: &str) -> Option<(String, String)> {
+    let pair = value.split(';').next()?.trim();
+    let (name, cookie) = pair.split_once('=')?;
+    let name = name.trim();
+    let cookie = cookie.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), cookie.to_string()))
+}
+
+fn internet_store_cookie(host: &str, name: &str, value: &str) {
+    if host.is_empty() || name.is_empty() {
+        return;
+    }
+    INTERNET_COOKIE_JAR
+        .lock()
+        .entry(host.to_lowercase())
+        .or_insert_with(BTreeMap::new)
+        .insert(name.to_string(), value.to_string());
+}
+
+fn internet_cookie_header(host: &str) -> Option<String> {
+    let jar = INTERNET_COOKIE_JAR.lock();
+    let cookies = jar.get(&host.to_lowercase())?;
+    if cookies.is_empty() {
+        return None;
+    }
+    Some(
+        cookies
+            .iter()
+            .map(|(name, value)| alloc::format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+fn parse_ansi_header_block(headers: &str) -> BTreeMap<String, String> {
+    let mut parsed = BTreeMap::new();
+    for line in headers.split("\r\n") {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((name, value)) = trimmed.split_once(':') {
+            parsed.insert(name.trim().to_lowercase(), value.trim().to_string());
+        }
+    }
+    parsed
+}
+
+fn internet_response_header_string(
+    response: &crate::net::http::HttpResponse,
+    info_level: DWORD,
+) -> Option<String> {
+    match info_level & 0xFFFF {
+        HTTP_QUERY_STATUS_CODE => Some(response.status_code.to_string()),
+        HTTP_QUERY_STATUS_TEXT => Some(response.status_text.clone()),
+        HTTP_QUERY_CONTENT_LENGTH => Some(response.body.len().to_string()),
+        HTTP_QUERY_SET_COOKIE => response.headers.get("set-cookie").map(|s| s.to_string()),
+        HTTP_QUERY_RAW_HEADERS_CRLF => {
+            let mut raw = alloc::format!(
+                "HTTP/1.1 {} {}\r\n",
+                response.status_code,
+                response.status_text
+            );
+            if let Some(content_length) = response.headers.get("content-length") {
+                raw.push_str("content-length: ");
+                raw.push_str(content_length);
+                raw.push_str("\r\n");
+            }
+            if let Some(content_type) = response.headers.get("content-type") {
+                raw.push_str("content-type: ");
+                raw.push_str(content_type);
+                raw.push_str("\r\n");
+            }
+            if let Some(location) = response.headers.get("location") {
+                raw.push_str("location: ");
+                raw.push_str(location);
+                raw.push_str("\r\n");
+            }
+            if let Some(cookie) = response.headers.get("set-cookie") {
+                raw.push_str("set-cookie: ");
+                raw.push_str(cookie);
+                raw.push_str("\r\n");
+            }
+            raw.push_str("\r\n");
+            Some(raw)
+        }
+        _ => None,
+    }
+}
+
+fn internet_query_header_number(
+    response: &crate::net::http::HttpResponse,
+    info_level: DWORD,
+) -> Option<DWORD> {
+    match info_level & 0xFFFF {
+        HTTP_QUERY_STATUS_CODE => Some(response.status_code as DWORD),
+        HTTP_QUERY_CONTENT_LENGTH => Some(response.body.len() as DWORD),
+        _ => None,
+    }
+}
+
+unsafe fn write_wide_output(buffer: LPVOID, buffer_len: *mut DWORD, text: &str) -> BOOL {
+    if buffer_len.is_null() {
+        set_win32_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    let required = ((units.len() + 1) * 2) as DWORD;
+    if buffer.is_null() || *buffer_len < required {
+        *buffer_len = required;
+        set_win32_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    let dst = buffer as *mut u16;
+    if !units.is_empty() {
+        core::ptr::copy_nonoverlapping(units.as_ptr(), dst, units.len());
+    }
+    *dst.add(units.len()) = 0;
+    *buffer_len = required;
+    set_win32_last_error(0);
+    TRUE
+}
+
+unsafe fn write_ansi_output(buffer: LPVOID, buffer_len: *mut DWORD, text: &str) -> BOOL {
+    if buffer_len.is_null() {
+        set_win32_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    let required = (text.len() + 1) as DWORD;
+    if buffer.is_null() || *buffer_len < required {
+        *buffer_len = required;
+        set_win32_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    core::ptr::copy_nonoverlapping(text.as_ptr(), buffer as *mut u8, text.len());
+    *((buffer as *mut u8).add(text.len())) = 0;
+    *buffer_len = required;
+    set_win32_last_error(0);
+    TRUE
+}
+
+fn win32_thread_start_trampoline() -> ! {
+    let task_id = crate::task::scheduler::current_task_id() as u64;
+    let Some(launch) = WIN32_THREAD_LAUNCHES.lock().get(&task_id).copied() else {
+        crate::task::scheduler::exit(87);
+    };
+    let _ = crate::pe_loader::invoke_tls_thread_attach(launch.owner_pid);
+    let start: unsafe extern "system" fn(LPVOID) -> DWORD =
+        unsafe { core::mem::transmute(launch.start_routine) };
+    let exit_code = unsafe { start(launch.parameter as LPVOID) };
+    WIN32_THREAD_LAUNCHES.lock().remove(&task_id);
+    let _ = crate::win32_abi::mark_thread_handle_terminated_with_exit(launch.handle, exit_code);
+    let _ = crate::pe_loader::invoke_tls_thread_detach(launch.owner_pid);
+    crate::task::scheduler::exit(exit_code as i32)
+}
+
+fn internet_host_is_local(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    !host.contains('.') && !host.contains(':')
+        || lower == "localhost"
+        || lower == "127.0.0.1"
+        || lower == "::1"
+        || lower.starts_with("10.")
+        || lower.starts_with("192.168.")
+        || lower.starts_with("172.16.")
+        || lower.starts_with("172.17.")
+        || lower.starts_with("172.18.")
+        || lower.starts_with("172.19.")
+        || lower.starts_with("172.2")
+        || lower.starts_with("172.30.")
+        || lower.starts_with("172.31.")
+        || lower.ends_with(".local")
+}
+
+fn internet_proxy_bypasses_host(proxy_bypass: &str, host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    proxy_bypass
+        .split(|ch| ch == ';' || ch == ',')
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            let token = token.to_ascii_lowercase();
+            (token == "<local>" && internet_host_is_local(&host))
+                || token == "<-loopback>"
+                    && (host == "localhost" || host == "127.0.0.1" || host == "::1")
+                || token == "direct"
+                || token == "local"
+                || token == host
+                || token
+                    .strip_prefix("*.")
+                    .map(|suffix| host.ends_with(suffix))
+                    .unwrap_or(false)
+                || token
+                    .strip_suffix(".*")
+                    .map(|prefix| host.starts_with(prefix))
+                    .unwrap_or(false)
+        })
+}
+
+fn proxy_policy_requires_autoconfig(proxy_name: &str) -> bool {
+    proxy_name
+        .split(';')
+        .map(|token| token.trim().to_ascii_lowercase())
+        .any(|token| {
+            token == "wpad"
+                || token.starts_with("auto=")
+                || token.starts_with("config=")
+                || token.starts_with("wpad=")
+                || token.ends_with(".pac")
+                || token.contains("/proxy.pac")
+                || token.contains("/wpad.dat")
+        })
+}
+
+fn proxy_autoconfig_source(proxy_name: &str) -> Option<String> {
+    for token in proxy_name.split(';').map(|part| part.trim()) {
+        if token.is_empty() {
+            continue;
+        }
+        let lower = token.to_ascii_lowercase();
+        if lower == "wpad" {
+            return Some("http://wpad/wpad.dat".to_string());
+        }
+        if let Some((key, value)) = token.split_once('=') {
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            if matches!(key.as_str(), "auto" | "config" | "wpad") {
+                return Some(value.to_string());
+            }
+        }
+        if lower.ends_with(".pac")
+            || lower.contains("/proxy.pac")
+            || lower.contains("/wpad.dat")
+            || lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("file://")
+            || token.starts_with('/')
+        {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+fn wpad_candidate_sources(source: &str, host: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if !source.eq_ignore_ascii_case("http://wpad/wpad.dat")
+        && !source.eq_ignore_ascii_case("wpad")
+        && !source.eq_ignore_ascii_case("wpad.dat")
+    {
+        candidates.push(source.to_string());
+        return candidates;
+    }
+
+    let host = host.trim().trim_matches('.').to_ascii_lowercase();
+    if host.is_empty() || parse_ipv4_literal(&host).is_some() || host == "localhost" {
+        candidates.push("http://wpad/wpad.dat".to_string());
+        return candidates;
+    }
+
+    let labels = host.split('.').collect::<Vec<_>>();
+    if labels.len() < 2 {
+        candidates.push("http://wpad/wpad.dat".to_string());
+        return candidates;
+    }
+
+    for start in 1..labels.len().saturating_sub(1) {
+        let suffix = labels[start..].join(".");
+        candidates.push(alloc::format!("http://wpad.{suffix}/wpad.dat"));
+    }
+    candidates.push("http://wpad/wpad.dat".to_string());
+    candidates
+}
+
+fn wildcard_ascii_match(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut pi, mut vi) = (0usize, 0usize);
+    let mut star = None;
+    let mut rewind = 0usize;
+    while vi < value.len() {
+        if pi < pattern.len()
+            && (pattern[pi] == b'?' || pattern[pi].eq_ignore_ascii_case(&value[vi]))
+        {
+            pi += 1;
+            vi += 1;
+            continue;
+        }
+        if pi < pattern.len() && pattern[pi] == b'*' {
+            star = Some(pi);
+            pi += 1;
+            rewind = vi;
+            continue;
+        }
+        if let Some(star_idx) = star {
+            pi = star_idx + 1;
+            rewind += 1;
+            vi = rewind;
+            continue;
+        }
+        return false;
+    }
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
+fn parse_ipv4_literal(host: &str) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut parts = host.split('.');
+    for slot in octets.iter_mut() {
+        *slot = parts.next()?.parse::<u8>().ok()?;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(octets)
+}
+
+fn ipv4_to_string(octets: [u8; 4]) -> String {
+    alloc::format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3])
+}
+
+fn pac_current_tm() -> tm {
+    let unix = crate::drivers::rtc::get_unix_time();
+    unix_seconds_to_tm(unix as i64)
+}
+
+fn pac_weekday_index(name: &str) -> Option<i32> {
+    match name.trim().to_ascii_uppercase().as_str() {
+        "SUN" => Some(0),
+        "MON" => Some(1),
+        "TUE" | "TUES" => Some(2),
+        "WED" => Some(3),
+        "THU" | "THUR" | "THURS" => Some(4),
+        "FRI" => Some(5),
+        "SAT" => Some(6),
+        _ => None,
+    }
+}
+
+fn pac_month_index(name: &str) -> Option<u32> {
+    match name.trim().to_ascii_uppercase().as_str() {
+        "JAN" => Some(1),
+        "FEB" => Some(2),
+        "MAR" => Some(3),
+        "APR" => Some(4),
+        "MAY" => Some(5),
+        "JUN" => Some(6),
+        "JUL" => Some(7),
+        "AUG" => Some(8),
+        "SEP" | "SEPT" => Some(9),
+        "OCT" => Some(10),
+        "NOV" => Some(11),
+        "DEC" => Some(12),
+        _ => None,
+    }
+}
+
+fn pac_split_args(args: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let bytes = args.as_bytes();
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(args[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(args[start..].trim());
+    out
+}
+
+fn pac_parse_time_value(value: &str) -> Option<i32> {
+    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
+    if trimmed.contains(':') {
+        let mut parts = trimmed.split(':');
+        let hour = parts.next()?.parse::<i32>().ok()?;
+        let minute = parts.next().unwrap_or("0").parse::<i32>().ok()?;
+        let second = parts.next().unwrap_or("0").parse::<i32>().ok()?;
+        return Some(hour * 3600 + minute * 60 + second);
+    }
+    let digits = trimmed.parse::<i32>().ok()?;
+    if trimmed.len() <= 2 {
+        Some(digits * 3600)
+    } else if trimmed.len() <= 4 {
+        Some((digits / 100) * 3600 + (digits % 100) * 60)
+    } else {
+        Some((digits / 10000) * 3600 + ((digits / 100) % 100) * 60 + (digits % 100))
+    }
+}
+
+fn pac_parse_day_value(value: &str) -> Option<u32> {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .parse::<u32>()
+        .ok()
+}
+
+fn pac_weekday_in_range(current: i32, start: i32, end: i32) -> bool {
+    if start <= end {
+        current >= start && current <= end
+    } else {
+        current >= start || current <= end
+    }
+}
+
+fn pac_time_in_range(current: i32, start: i32, end: i32) -> bool {
+    if start <= end {
+        current >= start && current <= end
+    } else {
+        current >= start || current <= end
+    }
+}
+
+fn pac_date_in_range(current: (u32, u32), start: (u32, u32), end: (u32, u32)) -> bool {
+    let current_key = current.0 * 100 + current.1;
+    let start_key = start.0 * 100 + start.1;
+    let end_key = end.0 * 100 + end.1;
+    if start_key <= end_key {
+        current_key >= start_key && current_key <= end_key
+    } else {
+        current_key >= start_key || current_key <= end_key
+    }
+}
+
+fn strip_wrapping_parens(condition: &str) -> &str {
+    let mut value = condition.trim();
+    loop {
+        if !(value.starts_with('(') && value.ends_with(')')) {
+            return value;
+        }
+        let mut depth = 0i32;
+        let mut wraps_entire = true;
+        for (idx, ch) in value.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && idx != value.len() - 1 {
+                        wraps_entire = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !wraps_entire {
+            return value;
+        }
+        value = value[1..value.len() - 1].trim();
+    }
+}
+
+fn split_pac_boolean<'a>(condition: &'a str, op: &str) -> Option<Vec<&'a str>> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let bytes = condition.as_bytes();
+    let op_bytes = op.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0
+            && index + op_bytes.len() <= bytes.len()
+            && &bytes[index..index + op_bytes.len()] == op_bytes
+        {
+            parts.push(condition[start..index].trim());
+            index += op_bytes.len();
+            start = index;
+            continue;
+        }
+        index += 1;
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.push(condition[start..].trim());
+    Some(parts)
+}
+
+fn pac_value_expr(expr: &str, url: &str, host: &str) -> Option<String> {
+    let expr = strip_wrapping_parens(expr);
+    if expr.eq_ignore_ascii_case("host") {
+        return Some(host.to_string());
+    }
+    if expr.eq_ignore_ascii_case("url") {
+        return Some(url.to_string());
+    }
+    if expr.eq_ignore_ascii_case("myIpAddress()") {
+        return Some("127.0.0.1".to_string());
+    }
+    if expr.eq_ignore_ascii_case("myIpAddressEx()") {
+        return Some("127.0.0.1;::1".to_string());
+    }
+    if let Some(argument) = expr
+        .strip_prefix("dnsResolve(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let value = pac_value_expr(argument, url, host)?;
+        if let Some(ip) = parse_ipv4_literal(&value) {
+            return Some(ipv4_to_string(ip));
+        }
+        if value.eq_ignore_ascii_case("localhost") {
+            return Some("127.0.0.1".to_string());
+        }
+        let dns_server = crate::net::get_config()
+            .dns_servers
+            .first()
+            .copied()
+            .unwrap_or([8, 8, 8, 8]);
+        let dns_ip = crate::net::Ipv4Addr::from_bytes(dns_server);
+        return crate::net::dns::resolve(&value, dns_ip)
+            .ok()
+            .map(|ip| ipv4_to_string(*ip.as_bytes()));
+    }
+    if (expr.starts_with('"') && expr.ends_with('"'))
+        || (expr.starts_with('\'') && expr.ends_with('\''))
+    {
+        return Some(expr[1..expr.len() - 1].to_string());
+    }
+    Some(expr.to_string())
+}
+
+fn pac_condition_matches(condition: &str, url: &str, host: &str) -> bool {
+    let condition = strip_wrapping_parens(condition);
+    if let Some(parts) = split_pac_boolean(condition, "||") {
+        return parts
+            .into_iter()
+            .any(|part| pac_condition_matches(part, url, host));
+    }
+    if let Some(parts) = split_pac_boolean(condition, "&&") {
+        return parts
+            .into_iter()
+            .all(|part| pac_condition_matches(part, url, host));
+    }
+    if let Some(inner) = condition.strip_prefix('!') {
+        return !pac_condition_matches(inner, url, host);
+    }
+    if condition.eq_ignore_ascii_case("true") {
+        return true;
+    }
+    if condition.eq_ignore_ascii_case("false") {
+        return false;
+    }
+    if let Some(argument) = condition
+        .strip_prefix("isPlainHostName(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        return argument.trim().eq_ignore_ascii_case("host") && !host.contains('.');
+    }
+    if let Some(args) = condition
+        .strip_prefix("isResolvable(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let Some(value) = pac_value_expr(args, url, host) else {
+            return false;
+        };
+        return parse_ipv4_literal(&value).is_some()
+            || value.eq_ignore_ascii_case("localhost")
+            || crate::net::get_config()
+                .dns_servers
+                .first()
+                .copied()
+                .and_then(|server| {
+                    crate::net::dns::resolve(&value, crate::net::Ipv4Addr::from_bytes(server)).ok()
+                })
+                .is_some();
+    }
+    if let Some(args) = condition
+        .strip_prefix("dnsDomainLevels(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let Some(value) = pac_value_expr(args, url, host) else {
+            return false;
+        };
+        return value.matches('.').count() > 0;
+    }
+    if let Some(args) = condition
+        .strip_prefix("dnsDomainIs(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let mut parts = args.split(',').map(str::trim);
+        let lhs = parts.next().unwrap_or_default();
+        let rhs = parts
+            .next()
+            .unwrap_or_default()
+            .trim_matches('"')
+            .trim_matches('\'');
+        let Some(value) = pac_value_expr(lhs, url, host) else {
+            return false;
+        };
+        return value
+            .to_ascii_lowercase()
+            .ends_with(&rhs.to_ascii_lowercase());
+    }
+    if let Some(args) = condition
+        .strip_prefix("localHostOrDomainIs(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let mut parts = args.split(',').map(str::trim);
+        let lhs = parts.next().unwrap_or_default();
+        let rhs = parts
+            .next()
+            .unwrap_or_default()
+            .trim_matches('"')
+            .trim_matches('\'');
+        let Some(value) = pac_value_expr(lhs, url, host) else {
+            return false;
+        };
+        let host_lower = value.to_ascii_lowercase();
+        let rhs_lower = rhs.to_ascii_lowercase();
+        return host_lower == rhs_lower
+            || (!host.contains('.') && rhs_lower.starts_with(&host_lower));
+    }
+    if let Some(args) = condition
+        .strip_prefix("shExpMatch(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let mut parts = args.split(',').map(str::trim);
+        let lhs = parts.next().unwrap_or_default();
+        let rhs = parts
+            .next()
+            .unwrap_or_default()
+            .trim_matches('"')
+            .trim_matches('\'');
+        let Some(value) = pac_value_expr(lhs, url, host) else {
+            return false;
+        };
+        return wildcard_ascii_match(rhs, &value);
+    }
+    if let Some(args) = condition
+        .strip_prefix("isInNet(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let mut parts = args.split(',').map(str::trim);
+        let lhs = parts.next().unwrap_or_default();
+        let network = parts
+            .next()
+            .unwrap_or_default()
+            .trim_matches('"')
+            .trim_matches('\'');
+        let mask = parts
+            .next()
+            .unwrap_or_default()
+            .trim_matches('"')
+            .trim_matches('\'');
+        let Some(value) = pac_value_expr(lhs, url, host) else {
+            return false;
+        };
+        let Some(host_octets) = parse_ipv4_literal(&value) else {
+            return false;
+        };
+        let Some(net_octets) = parse_ipv4_literal(network) else {
+            return false;
+        };
+        let Some(mask_octets) = parse_ipv4_literal(mask) else {
+            return false;
+        };
+        return host_octets
+            .iter()
+            .zip(net_octets.iter().zip(mask_octets.iter()))
+            .all(|(host_byte, (net_byte, mask_byte))| {
+                (*host_byte & *mask_byte) == (*net_byte & *mask_byte)
+            });
+    }
+    if let Some(args) = condition
+        .strip_prefix("weekdayRange(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let args = pac_split_args(args);
+        let tm_value = pac_current_tm();
+        let current = tm_value.tm_wday;
+        if args.is_empty() {
+            return false;
+        }
+        if args.len() == 1 {
+            return pac_weekday_index(args[0]) == Some(current);
+        }
+        let start = pac_weekday_index(args[0]);
+        let end = pac_weekday_index(args[1]);
+        return match (start, end) {
+            (Some(start), Some(end)) => pac_weekday_in_range(current, start, end),
+            _ => false,
+        };
+    }
+    if let Some(args) = condition
+        .strip_prefix("timeRange(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let args = pac_split_args(args);
+        let tm_value = pac_current_tm();
+        let current = tm_value.tm_hour * 3600 + tm_value.tm_min * 60 + tm_value.tm_sec;
+        if args.is_empty() {
+            return false;
+        }
+        if args.len() == 1 {
+            return pac_parse_time_value(args[0]) == Some(current);
+        }
+        let start = pac_parse_time_value(args[0]);
+        let end = pac_parse_time_value(args[1]);
+        return match (start, end) {
+            (Some(start), Some(end)) => pac_time_in_range(current, start, end),
+            _ => false,
+        };
+    }
+    if let Some(args) = condition
+        .strip_prefix("dateRange(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let args = pac_split_args(args);
+        let tm_value = pac_current_tm();
+        let current = ((tm_value.tm_mon + 1) as u32, tm_value.tm_mday as u32);
+        if args.is_empty() {
+            return false;
+        }
+        if args.len() == 2 {
+            let month = pac_month_index(args[0]);
+            let day = pac_parse_day_value(args[1]);
+            return month.zip(day) == Some(current);
+        }
+        if args.len() >= 4 {
+            let start = pac_month_index(args[0]).zip(pac_parse_day_value(args[1]));
+            let end = pac_month_index(args[2]).zip(pac_parse_day_value(args[3]));
+            return match (start, end) {
+                (Some(start), Some(end)) => pac_date_in_range(current, start, end),
+                _ => false,
+            };
+        }
+    }
+    false
+}
+
+fn pac_return_literal(line: &str) -> Option<String> {
+    let return_idx = line.find("return")?;
+    let tail = line[return_idx + "return".len()..].trim();
+    let quote = tail.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let end = tail[1..].find(quote)?;
+    Some(tail[1..1 + end].to_string())
+}
+
+fn pac_result_to_route(result: &str, secure: bool) -> Option<InternetProxyRoute> {
+    for token in result.split(';').map(str::trim) {
+        if token.is_empty() {
+            continue;
+        }
+        if token.eq_ignore_ascii_case("DIRECT") {
+            return None;
+        }
+        if let Some(spec) = token
+            .strip_prefix("PROXY ")
+            .or_else(|| token.strip_prefix("HTTP "))
+            .or_else(|| token.strip_prefix("HTTPS "))
+            .or_else(|| token.strip_prefix("SOCKS "))
+        {
+            if let Some(route) = parse_proxy_endpoint_spec(spec.trim()) {
+                return Some(route);
+            }
+        }
+        if let Some(route) = parse_proxy_endpoint_spec(token) {
+            return Some(route);
+        }
+    }
+    if secure {
+        None
+    } else {
+        None
+    }
+}
+
+fn load_proxy_autoconfig_script(source: &str) -> Result<String, DWORD> {
+    if let Some(path) = source.strip_prefix("file://") {
+        let bytes = crate::fs::vfs_unified::read_file(path).map_err(|_| ERROR_INVALID_PARAMETER)?;
+        return String::from_utf8(bytes).map_err(|_| ERROR_INVALID_PARAMETER);
+    }
+    if source.starts_with('/') {
+        let bytes =
+            crate::fs::vfs_unified::read_file(source).map_err(|_| ERROR_INVALID_PARAMETER)?;
+        return String::from_utf8(bytes).map_err(|_| ERROR_INVALID_PARAMETER);
+    }
+    let response = crate::net::http::HttpClient::new()
+        .get(source)
+        .map_err(map_http_error_to_internet_error)?;
+    if !response.is_success() {
+        return Err(ERROR_INTERNET_CANNOT_CONNECT);
+    }
+    String::from_utf8(response.body).map_err(|_| ERROR_INVALID_PARAMETER)
+}
+
+fn resolve_proxy_autoconfig_route(
+    proxy_name: &str,
+    host: &str,
+    secure: bool,
+) -> Result<Option<InternetProxyRoute>, DWORD> {
+    #[derive(Clone, Copy)]
+    struct PacFrame {
+        matched: bool,
+        consumed: bool,
+    }
+
+    let Some(source) = proxy_autoconfig_source(proxy_name) else {
+        return Ok(None);
+    };
+    let mut script = None;
+    let mut last_error = ERROR_INVALID_PARAMETER;
+    for candidate in wpad_candidate_sources(&source, host) {
+        match load_proxy_autoconfig_script(&candidate) {
+            Ok(value) => {
+                script = Some(value);
+                break;
+            }
+            Err(code) => last_error = code,
+        }
+    }
+    let Some(script) = script else {
+        return Err(last_error);
+    };
+    let url = compose_http_url(host, if secure { 443 } else { 80 }, secure, "/");
+    let mut fallback = None;
+    let mut block_stack = Vec::<PacFrame>::new();
+    let mut pending_else = None::<PacFrame>;
+    let mut block_allows_return =
+        |stack: &[PacFrame]| -> bool { stack.iter().all(|frame| frame.matched) };
+    for raw_line in script.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with('}') {
+            if !block_stack.is_empty() {
+                let completed = block_stack.pop().unwrap();
+                pending_else = Some(completed);
+            }
+            if line == "}" {
+                continue;
+            }
+        }
+        if line.starts_with("else if") {
+            let prior = pending_else.take().unwrap_or(PacFrame {
+                matched: false,
+                consumed: false,
+            });
+            let mut matched = false;
+            if !prior.consumed {
+                if let (Some(open), Some(close)) = (line.find('('), line.rfind(')')) {
+                    matched = pac_condition_matches(&line[open + 1..close], &url, host);
+                }
+            }
+            let frame = PacFrame {
+                matched,
+                consumed: prior.consumed || matched,
+            };
+            if line.contains('{') {
+                block_stack.push(frame);
+            } else if matched {
+                if let Some(result) = pac_return_literal(line) {
+                    return Ok(pac_result_to_route(&result, secure));
+                }
+            } else {
+                pending_else = Some(frame);
+            }
+            continue;
+        }
+        if line.starts_with("else") {
+            let prior = pending_else.take().unwrap_or(PacFrame {
+                matched: false,
+                consumed: false,
+            });
+            let frame = PacFrame {
+                matched: !prior.consumed,
+                consumed: true,
+            };
+            if line.contains('{') {
+                block_stack.push(frame);
+            } else if frame.matched {
+                if let Some(result) = pac_return_literal(line) {
+                    return Ok(pac_result_to_route(&result, secure));
+                }
+            }
+            continue;
+        }
+        if line == "}" {
+            continue;
+        }
+        if line.starts_with("if") {
+            if let (Some(open), Some(close)) = (line.find('('), line.rfind(')')) {
+                let condition = &line[open + 1..close];
+                let matched = pac_condition_matches(condition, &url, host);
+                if line.contains('{') {
+                    block_stack.push(PacFrame {
+                        matched,
+                        consumed: matched,
+                    });
+                } else if matched {
+                    if let Some(result) = pac_return_literal(line) {
+                        return Ok(pac_result_to_route(&result, secure));
+                    }
+                }
+            }
+            pending_else = None;
+            continue;
+        }
+        if block_allows_return(&block_stack) {
+            if let Some(result) = pac_return_literal(line) {
+                return Ok(pac_result_to_route(&result, secure));
+            }
+            continue;
+        }
+        if !block_stack.is_empty() {
+            continue;
+        }
+        if fallback.is_none() {
+            fallback = pac_return_literal(line);
+        }
+    }
+    Ok(fallback.and_then(|result| pac_result_to_route(&result, secure)))
+}
+
+fn encode_basic_base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < data.len() {
+        let b0 = data[index];
+        let b1 = if index + 1 < data.len() {
+            data[index + 1]
+        } else {
+            0
+        };
+        let b2 = if index + 2 < data.len() {
+            data[index + 2]
+        } else {
+            0
+        };
+        let triple = ((b0 as u32) << 16) | ((b1 as u32) << 8) | b2 as u32;
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if index + 1 < data.len() {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if index + 2 < data.len() {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        index += 3;
+    }
+    out
+}
+
+fn parse_proxy_endpoint_spec(spec: &str) -> Option<InternetProxyRoute> {
+    let trimmed = spec
+        .trim()
+        .trim_start_matches("PROXY ")
+        .trim_start_matches("HTTP ")
+        .trim_start_matches("HTTPS ")
+        .trim_start_matches("SOCKS ")
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    if trimmed.eq_ignore_ascii_case("direct") || trimmed.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (authority, authorization) = if let Some((creds, authority)) = trimmed.rsplit_once('@') {
+        let encoded = encode_basic_base64(creds.as_bytes());
+        (authority, Some(alloc::format!("Basic {}", encoded)))
+    } else {
+        (trimmed, None)
+    };
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        let port = port.parse::<u16>().ok()?;
+        return Some(InternetProxyRoute {
+            host: host.to_string(),
+            port,
+            authorization,
+        });
+    }
+    Some(InternetProxyRoute {
+        host: authority.to_string(),
+        port: 8080,
+        authorization,
+    })
+}
+
+fn internet_proxy_endpoint(proxy_name: &str, secure: bool) -> Option<InternetProxyRoute> {
+    for token in proxy_name.split(';').map(|part| part.trim()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token.eq_ignore_ascii_case("direct") || token.eq_ignore_ascii_case("none") {
+            return None;
+        }
+        if let Some((scheme, value)) = token.split_once('=') {
+            if (secure && scheme.eq_ignore_ascii_case("https"))
+                || (!secure && scheme.eq_ignore_ascii_case("http"))
+                || scheme.eq_ignore_ascii_case("all")
+            {
+                return parse_proxy_endpoint_spec(value);
+            }
+            continue;
+        }
+        return parse_proxy_endpoint_spec(token);
+    }
+    None
+}
+
+fn read_window_pixel(surface: &[u8], width: usize, x: usize, y: usize) -> Option<u32> {
+    let index = (y.checked_mul(width)?.checked_add(x)?).checked_mul(4)?;
+    if index + 3 >= surface.len() {
+        return None;
+    }
+    let b = surface[index] as u32;
+    let g = surface[index + 1] as u32;
+    let r = surface[index + 2] as u32;
+    Some((r << 16) | (g << 8) | b)
+}
+
+fn write_window_pixel(surface: &mut [u8], width: usize, x: usize, y: usize, pixel: u32) -> bool {
+    let Some(index) = (y.checked_mul(width))
+        .and_then(|base| base.checked_add(x))
+        .and_then(|offset| offset.checked_mul(4))
+    else {
+        return false;
+    };
+    if index + 3 >= surface.len() {
+        return false;
+    }
+    surface[index] = (pixel & 0xFF) as u8;
+    surface[index + 1] = ((pixel >> 8) & 0xFF) as u8;
+    surface[index + 2] = ((pixel >> 16) & 0xFF) as u8;
+    surface[index + 3] = 0xFF;
+    true
+}
+
+fn internet_session_proxy_route(
+    session: &InternetSessionState,
+    host: &str,
+    secure: bool,
+) -> Option<InternetProxyRoute> {
+    internet_session_proxy_route_checked(session, host, secure)
+        .ok()
+        .flatten()
+}
+
+fn internet_session_proxy_route_checked(
+    session: &InternetSessionState,
+    host: &str,
+    secure: bool,
+) -> Result<Option<InternetProxyRoute>, DWORD> {
+    match session.access_type {
+        INTERNET_OPEN_TYPE_DIRECT | WINHTTP_ACCESS_TYPE_NO_PROXY => Ok(None),
+        INTERNET_OPEN_TYPE_PROXY | WINHTTP_ACCESS_TYPE_DEFAULT_PROXY => {
+            if session.proxy_name.is_empty()
+                || internet_proxy_bypasses_host(&session.proxy_bypass, host)
+            {
+                Ok(None)
+            } else if proxy_policy_requires_autoconfig(&session.proxy_name) {
+                resolve_proxy_autoconfig_route(&session.proxy_name, host, secure)
+            } else {
+                Ok(internet_proxy_endpoint(&session.proxy_name, secure))
+            }
+        }
+        _ => {
+            if session.proxy_name.is_empty()
+                || internet_proxy_bypasses_host(&session.proxy_bypass, host)
+            {
+                Ok(None)
+            } else if proxy_policy_requires_autoconfig(&session.proxy_name) {
+                resolve_proxy_autoconfig_route(&session.proxy_name, host, secure)
+            } else {
+                Ok(internet_proxy_endpoint(&session.proxy_name, secure))
+            }
+        }
+    }
+}
+
+fn execute_internet_request(request_handle: HANDLE, body: Option<&[u8]>) -> BOOL {
+    let (connection_handle, method, object_name, request_headers) = {
+        let handles = INTERNET_HANDLES.lock();
+        let Some(InternetHandleState::Request(request)) = handles.get(&request_handle) else {
+            set_win32_last_error(ERROR_INVALID_HANDLE);
+            return FALSE;
+        };
+        (
+            request.connection,
+            request.method.clone(),
+            request.object_name.clone(),
+            request.headers.clone(),
+        )
+    };
+
+    let (host, port, secure, session_handle) = {
+        let handles = INTERNET_HANDLES.lock();
+        let Some(InternetHandleState::Connection(connection)) = handles.get(&connection_handle)
+        else {
+            set_win32_last_error(ERROR_INVALID_HANDLE);
+            return FALSE;
+        };
+        (
+            connection.host.clone(),
+            connection.port,
+            connection.secure,
+            connection.session,
+        )
+    };
+
+    let session = {
+        let handles = INTERNET_HANDLES.lock();
+        let Some(InternetHandleState::Session(session)) = handles.get(&session_handle) else {
+            set_win32_last_error(ERROR_INVALID_HANDLE);
+            return FALSE;
+        };
+        session.clone()
+    };
+
+    let url = compose_http_url(&host, port, secure, &object_name);
+    let proxy_route = match internet_session_proxy_route_checked(&session, &host, secure) {
+        Ok(route) => route,
+        Err(code) => {
+            set_win32_last_error(code);
+            return FALSE;
+        }
+    };
+    if method.eq_ignore_ascii_case("GET")
+        && !request_headers.contains_key("cache-control")
+        && !request_headers.contains_key("pragma")
+    {
+        if let Some(cached) = INTERNET_RESPONSE_CACHE.lock().get(&url).cloned() {
+            if let Some(InternetHandleState::Request(request)) =
+                INTERNET_HANDLES.lock().get_mut(&request_handle)
+            {
+                request.response = Some(cached);
+                request.read_cursor = 0;
+            }
+            set_win32_last_error(0);
+            return TRUE;
+        }
+    }
+
+    let client = crate::net::http::HttpClient::new();
+    let mut client = client;
+    let timeout_ms = [
+        session.resolve_timeout_ms,
+        session.connect_timeout_ms,
+        session.send_timeout_ms,
+        session.receive_timeout_ms,
+    ]
+    .into_iter()
+    .filter(|value| *value > 0)
+    .max()
+    .unwrap_or(30_000) as u64;
+    client.set_timeout(timeout_ms);
+
+    let mut extra_headers = Vec::<(String, String)>::new();
+    if !session.user_agent.is_empty() {
+        extra_headers.push(("User-Agent".to_string(), session.user_agent.clone()));
+    }
+    for (name, value) in request_headers.iter() {
+        extra_headers.push((name.clone(), value.clone()));
+    }
+    if !request_headers.contains_key("cookie") {
+        if let Some(cookie_header) = internet_cookie_header(&host) {
+            extra_headers.push(("Cookie".to_string(), cookie_header));
+        }
+    }
+    if let Some(proxy) = proxy_route.as_ref() {
+        if let Some(auth) = proxy.authorization.as_ref() {
+            extra_headers.push(("Proxy-Authorization".to_string(), auth.clone()));
+        }
+    }
+
+    let result = if method.eq_ignore_ascii_case("POST") {
+        if let Some(proxy) = proxy_route.as_ref() {
+            client.request_via_proxy_with_headers(
+                crate::net::http::HttpMethod::POST,
+                &url,
+                Some(body.unwrap_or(&[])),
+                Some("application/octet-stream"),
+                Some("*/*"),
+                &extra_headers,
+                &proxy.host,
+                proxy.port,
+            )
+        } else {
+            client.request_with_headers(
+                crate::net::http::HttpMethod::POST,
+                &url,
+                Some(body.unwrap_or(&[])),
+                Some("application/octet-stream"),
+                Some("*/*"),
+                &extra_headers,
+            )
+        }
+    } else {
+        if let Some(proxy) = proxy_route.as_ref() {
+            client.request_via_proxy_with_headers(
+                crate::net::http::HttpMethod::GET,
+                &url,
+                None,
+                None,
+                Some("*/*"),
+                &extra_headers,
+                &proxy.host,
+                proxy.port,
+            )
+        } else {
+            client.request_with_headers(
+                crate::net::http::HttpMethod::GET,
+                &url,
+                None,
+                None,
+                Some("*/*"),
+                &extra_headers,
+            )
+        }
+    };
+
+    match result {
+        Ok(response) => {
+            if let Some(cookie) = response.headers.get("set-cookie") {
+                if let Some((name, value)) = parse_cookie_assignment(cookie) {
+                    internet_store_cookie(&host, &name, &value);
+                }
+            }
+            if method.eq_ignore_ascii_case("GET") && response.is_success() {
+                INTERNET_RESPONSE_CACHE
+                    .lock()
+                    .insert(url.clone(), response.clone());
+            } else if !method.eq_ignore_ascii_case("GET") {
+                INTERNET_RESPONSE_CACHE.lock().remove(&url);
+            }
+            if let Some(InternetHandleState::Request(request)) =
+                INTERNET_HANDLES.lock().get_mut(&request_handle)
+            {
+                request.response = Some(response);
+                request.read_cursor = 0;
+            }
+            set_win32_last_error(0);
+            TRUE
+        }
+        Err(err) => {
+            set_win32_last_error(map_http_error_to_internet_error(err));
+            FALSE
+        }
+    }
+}
+
+fn read_internet_response(
+    request_handle: HANDLE,
+    buffer: *mut u8,
+    bytes_to_read: DWORD,
+    bytes_read: *mut DWORD,
+) -> BOOL {
+    if !bytes_read.is_null() {
+        unsafe {
+            *bytes_read = 0;
+        }
+    }
+    if buffer.is_null() {
+        set_win32_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    let mut handles = INTERNET_HANDLES.lock();
+    let Some(InternetHandleState::Request(request)) = handles.get_mut(&request_handle) else {
+        set_win32_last_error(ERROR_INVALID_HANDLE);
+        return FALSE;
+    };
+    let Some(response) = request.response.as_ref() else {
+        set_win32_last_error(ERROR_INTERNET_INCORRECT_HANDLE_STATE);
+        return FALSE;
+    };
+
+    let remaining = response.body.len().saturating_sub(request.read_cursor);
+    let amount = remaining.min(bytes_to_read as usize);
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            response.body.as_ptr().add(request.read_cursor),
+            buffer,
+            amount,
+        );
+        if !bytes_read.is_null() {
+            *bytes_read = amount as DWORD;
+        }
+    }
+    request.read_cursor = request.read_cursor.saturating_add(amount);
+    set_win32_last_error(0);
+    TRUE
 }
 
 /// Allocate `size` bytes aligned to `align` (min 1), zero-initialised.
@@ -765,6 +4378,7 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("kernel32", "GetFileSize") => kernel32::get_file_size as usize as u64,
         ("kernel32", "GetFileSizeEx") => kernel32::get_file_size_ex as usize as u64,
         ("kernel32", "GetFileAttributesA") => kernel32::get_file_attributes_a as usize as u64,
+        ("kernel32", "SetFileAttributesA") => kernel32::set_file_attributes_a as usize as u64,
         ("kernel32", "DeleteFileA") => kernel32::delete_file_a as usize as u64,
         ("kernel32", "MoveFileA") => kernel32::move_file_a as usize as u64,
         ("kernel32", "CopyFileA") => kernel32::copy_file_a as usize as u64,
@@ -772,10 +4386,14 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("kernel32", "FindNextFileA") => kernel32::find_next_file_a as usize as u64,
         ("kernel32", "FindClose") => kernel32::find_close as usize as u64,
         ("kernel32", "CreateDirectoryA") => kernel32::create_directory_a as usize as u64,
+        ("kernel32", "RemoveDirectoryA") => kernel32::remove_directory_a as usize as u64,
         ("kernel32", "GetCurrentDirectoryA") => kernel32::get_current_directory_a as usize as u64,
+        ("kernel32", "SetCurrentDirectoryA") => kernel32::set_current_directory_a as usize as u64,
         ("kernel32", "ExitProcess") => kernel32::exit_process as usize as u64,
         ("kernel32", "CreateProcessA") => kernel32::create_process_a as usize as u64,
         ("kernel32", "OpenProcess") => kernel32::open_process as usize as u64,
+        ("kernel32", "GetExitCodeProcess") => kernel32::get_exit_code_process as usize as u64,
+        ("kernel32", "GetExitCodeThread") => kernel32::get_exit_code_thread as usize as u64,
         ("kernel32", "GetCurrentProcess") => kernel32::get_current_process as usize as u64,
         ("kernel32", "GetCurrentProcessId") => kernel32::get_current_process_id as usize as u64,
         ("kernel32", "CreateThread") => kernel32::create_thread as usize as u64,
@@ -784,6 +4402,17 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("kernel32", "GetCurrentThreadId") => kernel32::get_current_thread_id as usize as u64,
         ("kernel32", "ResumeThread") => kernel32::resume_thread as usize as u64,
         ("kernel32", "SuspendThread") => kernel32::suspend_thread as usize as u64,
+        ("kernel32", "TlsAlloc") => kernel32::tls_alloc as usize as u64,
+        ("kernel32", "TlsFree") => kernel32::tls_free as usize as u64,
+        ("kernel32", "TlsSetValue") => kernel32::tls_set_value as usize as u64,
+        ("kernel32", "TlsGetValue") => kernel32::tls_get_value as usize as u64,
+        ("kernel32", "RaiseException") => kernel32::raise_exception as usize as u64,
+        ("kernel32", "SetUnhandledExceptionFilter") => {
+            kernel32::set_unhandled_exception_filter as usize as u64
+        }
+        ("kernel32", "UnhandledExceptionFilter") => {
+            kernel32::unhandled_exception_filter as usize as u64
+        }
         ("kernel32", "WaitForSingleObject") => kernel32::wait_for_single_object as usize as u64,
         ("kernel32", "WaitForMultipleObjects") => {
             kernel32::wait_for_multiple_objects as usize as u64
@@ -808,10 +4437,20 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("kernel32", "lstrcmpA") => kernel32::lstrcmp_a as usize as u64,
         ("kernel32", "lstrcmpiA") => kernel32::lstrcmpi_a as usize as u64,
         ("kernel32", "GetStdHandle") => kernel32::get_std_handle as usize as u64,
+        ("kernel32", "SetStdHandle") => kernel32::set_std_handle as usize as u64,
         ("kernel32", "WriteConsoleA") => kernel32::write_console_a as usize as u64,
         ("kernel32", "ReadConsoleA") => kernel32::read_console_a as usize as u64,
         ("kernel32", "SetConsoleMode") => kernel32::set_console_mode as usize as u64,
         ("kernel32", "GetConsoleMode") => kernel32::get_console_mode as usize as u64,
+        ("kernel32", "SetConsoleTextAttribute") => {
+            kernel32::set_console_text_attribute as usize as u64
+        }
+        ("kernel32", "GetConsoleScreenBufferInfo") => {
+            kernel32::get_console_screen_buffer_info as usize as u64
+        }
+        ("kernel32", "FillConsoleOutputCharacterA") => {
+            kernel32::fill_console_output_character_a as usize as u64
+        }
         ("kernel32", "GetEnvironmentVariableA") => {
             kernel32::get_environment_variable_a as usize as u64
         }
@@ -819,7 +4458,9 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
             kernel32::set_environment_variable_a as usize as u64
         }
         ("kernel32", "GetCommandLineA") => kernel32::get_command_line_a as usize as u64,
+        ("kernel32", "GlobalMemoryStatus") => kernel32::global_memory_status as usize as u64,
         ("kernel32", "GlobalMemoryStatusEx") => kernel32::global_memory_status_ex as usize as u64,
+        ("kernel32", "GetUserNameA") => kernel32::get_user_name_a as usize as u64,
         ("kernel32", "TerminateProcess") => kernel32::terminate_process as usize as u64,
         // ---- sync primitives ---------------------------------------------------
         ("kernel32", "CreateMutexA") => kernel32::create_mutex_a as usize as u64,
@@ -834,9 +4475,7 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
             kernel32::build_io_ring_register_buffers as usize as u64
         }
         ("kernel32", "BuildIoRingReadFile") => kernel32::build_io_ring_read_file as usize as u64,
-        ("kernel32", "BuildIoRingWriteFile") => {
-            kernel32::build_io_ring_write_file as usize as u64
-        }
+        ("kernel32", "BuildIoRingWriteFile") => kernel32::build_io_ring_write_file as usize as u64,
         ("kernel32", "SubmitIoRing") => kernel32::submit_io_ring as usize as u64,
         ("kernel32", "PopIoRingCompletion") => kernel32::pop_io_ring_completion as usize as u64,
         ("kernel32", "CloseIoRing") => kernel32::close_io_ring as usize as u64,
@@ -863,9 +4502,16 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("user32", "DestroyWindow") => user32::destroy_window as usize as u64,
         ("user32", "ShowWindow") => user32::show_window as usize as u64,
         ("user32", "UpdateWindow") => user32::update_window as usize as u64,
+        ("user32", "BeginPaint") => user32::begin_paint as usize as u64,
+        ("user32", "EndPaint") => user32::end_paint as usize as u64,
+        ("user32", "InvalidateRect") => user32::invalidate_rect as usize as u64,
+        ("user32", "ValidateRect") => user32::validate_rect as usize as u64,
         ("user32", "GetMessageA") => user32::get_message_a as usize as u64,
         ("user32", "PeekMessageA") => user32::peek_message_a as usize as u64,
         ("user32", "TranslateMessage") => user32::translate_message as usize as u64,
+        ("user32", "TranslateAcceleratorA") => user32::translate_accelerator_a as usize as u64,
+        ("user32", "CreateAcceleratorTableA") => user32::create_accelerator_table_a as usize as u64,
+        ("user32", "DestroyAcceleratorTable") => user32::destroy_accelerator_table as usize as u64,
         ("user32", "DispatchMessageA") => user32::dispatch_message_a as usize as u64,
         ("user32", "PostQuitMessage") => user32::post_quit_message as usize as u64,
         ("user32", "PostMessageA") => user32::post_message_a as usize as u64,
@@ -902,6 +4548,7 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("user32", "SetWindowLongPtrA") => user32::set_window_long_ptr_a as usize as u64,
         ("user32", "GetWindowLongPtrA") => user32::get_window_long_ptr_a as usize as u64,
         ("user32", "FindWindowA") => user32::find_window_a as usize as u64,
+        ("user32", "GetMenu") => user32::get_menu as usize as u64,
         ("user32", "OpenClipboard") => user32::open_clipboard as usize as u64,
         ("user32", "CloseClipboard") => user32::close_clipboard as usize as u64,
         ("user32", "SetClipboardData") => user32::set_clipboard_data as usize as u64,
@@ -919,6 +4566,13 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("user32", "SetMenu") => user32::set_menu as usize as u64,
         ("user32", "DrawMenuBar") => user32::draw_menu_bar as usize as u64,
         ("user32", "EndDialog") => user32::end_dialog as usize as u64,
+        ("user32", "IsDialogMessageA") => user32::is_dialog_message_a as usize as u64,
+        ("user32", "DialogBoxIndirectParamA") => {
+            user32::dialog_box_indirect_param_a as usize as u64
+        }
+        ("user32", "CreateDialogIndirectParamA") => {
+            user32::create_dialog_indirect_param_a as usize as u64
+        }
         ("user32", "GetDlgItem") => user32::get_dlg_item as usize as u64,
         ("user32", "SetWindowsHookExA") => user32::set_windows_hook_ex_a as usize as u64,
         ("user32", "UnhookWindowsHookEx") => user32::unhook_windows_hook_ex as usize as u64,
@@ -935,11 +4589,26 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("gdi32", "CreateFontIndirectA") => gdi32::create_font_indirect_a as usize as u64,
         ("gdi32", "CreateSolidBrush") => gdi32::create_solid_brush as usize as u64,
         ("gdi32", "CreatePen") => gdi32::create_pen as usize as u64,
+        ("gdi32", "SelectObject") => gdi32::select_object as usize as u64,
+        ("gdi32", "DeleteObject") => gdi32::delete_object as usize as u64,
+        ("gdi32", "GetStockObject") => gdi32::get_stock_object as usize as u64,
+        ("gdi32", "GetObjectType") => gdi32::get_object_type as usize as u64,
         ("gdi32", "CreateCompatibleBitmap") => gdi32::create_compatible_bitmap as usize as u64,
         ("gdi32", "CreateBitmap") => gdi32::create_bitmap as usize as u64,
+        ("gdi32", "CreateCompatibleDC") => gdi32::create_compatible_dc as usize as u64,
+        ("gdi32", "CreateDCA") => gdi32::create_dc_a as usize as u64,
+        ("gdi32", "CreateICA") => gdi32::create_ic_a as usize as u64,
+        ("gdi32", "StartDocA") => gdi32::start_doc_a as usize as u64,
+        ("gdi32", "StartPage") => gdi32::start_page as usize as u64,
+        ("gdi32", "EndPage") => gdi32::end_page as usize as u64,
+        ("gdi32", "EndDoc") => gdi32::end_doc as usize as u64,
+        ("gdi32", "AbortDoc") => gdi32::abort_doc as usize as u64,
+        ("gdi32", "DeleteDC") => gdi32::delete_dc as usize as u64,
         ("gdi32", "MoveToEx") => gdi32::move_to_ex as usize as u64,
         ("gdi32", "LineTo") => gdi32::line_to as usize as u64,
         ("gdi32", "Ellipse") => gdi32::ellipse as usize as u64,
+        ("gdi32", "Rectangle") => gdi32::rectangle as usize as u64,
+        ("gdi32", "RoundRect") => gdi32::round_rect as usize as u64,
         ("gdi32", "SetPixel") => gdi32::set_pixel as usize as u64,
         ("gdi32", "SetPixelV") => gdi32::set_pixel_v as usize as u64,
         ("gdi32", "GetPixel") => gdi32::get_pixel as usize as u64,
@@ -953,8 +4622,19 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("gdi32", "RestoreDC") => gdi32::restore_dc as usize as u64,
         ("gdi32", "BeginPath") => gdi32::begin_path as usize as u64,
         ("gdi32", "EndPath") => gdi32::end_path as usize as u64,
+        ("gdi32", "CloseFigure") => gdi32::close_figure as usize as u64,
         ("gdi32", "StrokePath") => gdi32::stroke_path as usize as u64,
         ("gdi32", "FillPath") => gdi32::fill_path as usize as u64,
+        ("gdi32", "StrokeAndFillPath") => gdi32::stroke_and_fill_path as usize as u64,
+        ("gdi32", "GetPath") => gdi32::get_path as usize as u64,
+        ("gdi32", "CreateMetaFileA") => gdi32::create_meta_file_a as usize as u64,
+        ("gdi32", "CloseMetaFile") => gdi32::close_meta_file as usize as u64,
+        ("gdi32", "DeleteMetaFile") => gdi32::delete_meta_file as usize as u64,
+        ("gdi32", "PlayMetaFile") => gdi32::play_meta_file as usize as u64,
+        ("gdi32", "CreateEnhMetaFileA") => gdi32::create_enh_meta_file_a as usize as u64,
+        ("gdi32", "CloseEnhMetaFile") => gdi32::close_enh_meta_file as usize as u64,
+        ("gdi32", "DeleteEnhMetaFile") => gdi32::delete_enh_meta_file as usize as u64,
+        ("gdi32", "PlayEnhMetaFile") => gdi32::play_enh_meta_file as usize as u64,
         ("gdi32", "CreateRectRgn") => gdi32::create_rect_rgn as usize as u64,
         ("gdi32", "CombineRgn") => gdi32::combine_rgn as usize as u64,
         ("gdi32", "SetWorldTransform") => gdi32::set_world_transform as usize as u64,
@@ -972,6 +4652,16 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("advapi32", "CryptGetHashParam") => advapi32::crypt_get_hash_param as usize as u64,
         ("advapi32", "CryptDestroyHash") => advapi32::crypt_destroy_hash as usize as u64,
         ("advapi32", "CryptReleaseContext") => advapi32::crypt_release_context as usize as u64,
+        ("advapi32", "GetUserNameA") => advapi32::get_user_name_a as usize as u64,
+        ("advapi32", "RegisterEventSourceA") => advapi32::register_event_source_a as usize as u64,
+        ("advapi32", "DeregisterEventSource") => advapi32::deregister_event_source as usize as u64,
+        ("advapi32", "ReportEventA") => advapi32::report_event_a as usize as u64,
+        ("advapi32", "OpenEventLogA") => advapi32::open_event_log_a as usize as u64,
+        ("advapi32", "ReadEventLogA") => advapi32::read_event_log_a as usize as u64,
+        ("advapi32", "GetNumberOfEventLogRecords") => {
+            advapi32::get_number_of_event_log_records as usize as u64
+        }
+        ("advapi32", "CreateProcessAsUserA") => advapi32::create_process_as_user_a as usize as u64,
         ("advapi32", "OpenProcessToken") => advapi32::open_process_token as usize as u64,
         ("advapi32", "GetTokenInformation") => advapi32::get_token_information as usize as u64,
         ("advapi32", "LookupPrivilegeValueA") => advapi32::lookup_privilege_value_a as usize as u64,
@@ -1019,8 +4709,402 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("shell32", "SHGetSpecialFolderPathA") => {
             shell32::sh_get_special_folder_path_a as usize as u64
         }
-        _ => stub_api as usize as u64,
+        _ => extended_fn_address(mod_key, name).unwrap_or_else(|| stub_api as usize as u64),
     }
+}
+
+fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
+    match module {
+        "user32" => match name {
+            "SetParent" => Some(user32::set_parent as usize as u64),
+            "GetActiveWindow" => Some(user32::get_active_window as usize as u64),
+            "SetActiveWindow" => Some(user32::set_active_window as usize as u64),
+            "GetCapture" => Some(user32::get_capture as usize as u64),
+            "SetCapture" => Some(user32::set_capture as usize as u64),
+            "ReleaseCapture" => Some(user32::release_capture as usize as u64),
+            "FindWindowExA" => Some(user32::find_window_ex_a as usize as u64),
+            "EnumWindows" => Some(user32::enum_windows as usize as u64),
+            "GetClassNameA" => Some(user32::get_class_name_a as usize as u64),
+            "SendMessageTimeoutA" => Some(user32::send_message_timeout_a as usize as u64),
+            "SendNotifyMessageA" => Some(user32::send_notify_message_a as usize as u64),
+            "PostThreadMessageA" => Some(user32::post_thread_message_a as usize as u64),
+            "ReplyMessage" => Some(user32::reply_message as usize as u64),
+            "GetMessageTime" => Some(user32::get_message_time as usize as u64),
+            "GetMessagePos" => Some(user32::get_message_pos as usize as u64),
+            "WaitMessage" => Some(user32::wait_message as usize as u64),
+            "MsgWaitForMultipleObjects" => {
+                Some(user32::msg_wait_for_multiple_objects as usize as u64)
+            }
+            "RegisterWindowMessageA" => Some(user32::register_window_message_a as usize as u64),
+            "GetKeyboardState" => Some(user32::get_keyboard_state as usize as u64),
+            "SetKeyboardState" => Some(user32::set_keyboard_state as usize as u64),
+            "keybd_event" => Some(user32::keybd_event as usize as u64),
+            "MapVirtualKeyExA" => Some(user32::map_virtual_key_ex_a as usize as u64),
+            "ToUnicode" => Some(user32::to_unicode as usize as u64),
+            "VkKeyScanExA" => Some(user32::vk_key_scan_ex_a as usize as u64),
+            "GetKeyNameTextA" => Some(user32::get_key_name_text_a as usize as u64),
+            "OemKeyScan" => Some(user32::oem_key_scan as usize as u64),
+            "SetDoubleClickTime" => Some(user32::set_double_click_time as usize as u64),
+            "BeginPaint" => Some(user32::begin_paint as usize as u64),
+            "EndPaint" => Some(user32::end_paint as usize as u64),
+            "InvalidateRect" => Some(user32::invalidate_rect as usize as u64),
+            "ValidateRect" => Some(user32::validate_rect as usize as u64),
+            "TranslateAcceleratorA" => Some(user32::translate_accelerator_a as usize as u64),
+            "CreateAcceleratorTableA" => Some(user32::create_accelerator_table_a as usize as u64),
+            "DestroyAcceleratorTable" => Some(user32::destroy_accelerator_table as usize as u64),
+            "CreatePopupMenu" => Some(user32::create_popup_menu as usize as u64),
+            "DestroyMenu" => Some(user32::destroy_menu as usize as u64),
+            "InsertMenuA" => Some(user32::insert_menu_a as usize as u64),
+            "ModifyMenuA" => Some(user32::modify_menu_a as usize as u64),
+            "RemoveMenu" => Some(user32::remove_menu as usize as u64),
+            "DeleteMenu" => Some(user32::delete_menu as usize as u64),
+            "GetMenu" => Some(user32::get_menu as usize as u64),
+            "TrackPopupMenu" => Some(user32::track_popup_menu as usize as u64),
+            "GetMenuItemCount" => Some(user32::get_menu_item_count as usize as u64),
+            "GetMenuItemId" => Some(user32::get_menu_item_id as usize as u64),
+            "GetMenuItemID" => Some(user32::get_menu_item_id as usize as u64),
+            "GetMenuStringA" => Some(user32::get_menu_string_a as usize as u64),
+            "CheckMenuItem" => Some(user32::check_menu_item as usize as u64),
+            "EnableMenuItem" => Some(user32::enable_menu_item as usize as u64),
+            "MessageBoxExA" => Some(user32::message_box_ex_a as usize as u64),
+            "MessageBoxIndirectA" => Some(user32::message_box_indirect_a as usize as u64),
+            "DialogBoxParamA" => Some(user32::dialog_box_param_a as usize as u64),
+            "DialogBoxIndirectParamA" => Some(user32::dialog_box_indirect_param_a as usize as u64),
+            "CreateDialogParamA" => Some(user32::create_dialog_param_a as usize as u64),
+            "CreateDialogIndirectParamA" => {
+                Some(user32::create_dialog_indirect_param_a as usize as u64)
+            }
+            "SetDlgItemTextA" => Some(user32::set_dlg_item_text_a as usize as u64),
+            "GetDlgItemTextA" => Some(user32::get_dlg_item_text_a as usize as u64),
+            "SetDlgItemInt" => Some(user32::set_dlg_item_int as usize as u64),
+            "GetDlgItemInt" => Some(user32::get_dlg_item_int as usize as u64),
+            "CheckDlgButton" => Some(user32::check_dlg_button as usize as u64),
+            "CheckRadioButton" => Some(user32::check_radio_button as usize as u64),
+            "IsDlgButtonChecked" => Some(user32::is_dlg_button_checked as usize as u64),
+            "SendDlgItemMessageA" => Some(user32::send_dlg_item_message_a as usize as u64),
+            "GetNextDlgTabItem" => Some(user32::get_next_dlg_tab_item as usize as u64),
+            "GetNextDlgGroupItem" => Some(user32::get_next_dlg_group_item as usize as u64),
+            "IsDialogMessageA" => Some(user32::is_dialog_message_a as usize as u64),
+            "CountClipboardFormats" => Some(user32::count_clipboard_formats as usize as u64),
+            "EnumClipboardFormats" => Some(user32::enum_clipboard_formats as usize as u64),
+            "GetClipboardOwner" => Some(user32::get_clipboard_owner as usize as u64),
+            "SetClipboardViewer" => Some(user32::set_clipboard_viewer as usize as u64),
+            "GetClipboardViewer" => Some(user32::get_clipboard_viewer as usize as u64),
+            "ChangeClipboardChain" => Some(user32::change_clipboard_chain as usize as u64),
+            "LoadBitmapA" => Some(user32::load_bitmap_a as usize as u64),
+            "LoadStringA" => Some(user32::load_string_a as usize as u64),
+            "LoadImageA" => Some(user32::load_image_a as usize as u64),
+            "CopyImage" => Some(user32::copy_image as usize as u64),
+            "DestroyIcon" => Some(user32::destroy_icon as usize as u64),
+            "DestroyCursor" => Some(user32::destroy_cursor as usize as u64),
+            "SetCursor" => Some(user32::set_cursor as usize as u64),
+            "GetCursor" => Some(user32::get_cursor as usize as u64),
+            "GetClassLongA" => Some(user32::get_class_long_a as usize as u64),
+            "SetClassLongA" => Some(user32::set_class_long_a as usize as u64),
+            "GetPropA" => Some(user32::get_prop_a as usize as u64),
+            "SetPropA" => Some(user32::set_prop_a as usize as u64),
+            "RemovePropA" => Some(user32::remove_prop_a as usize as u64),
+            "EnumPropsA" => Some(user32::enum_props_a as usize as u64),
+            "GetQueueStatus" => Some(user32::get_queue_status as usize as u64),
+            "GetInputState" => Some(user32::get_input_state as usize as u64),
+            _ => None,
+        },
+        "gdi32" => match name {
+            "Polyline" => Some(gdi32::polyline as usize as u64),
+            "Arc" => Some(gdi32::arc as usize as u64),
+            "RoundRect" => Some(gdi32::round_rect as usize as u64),
+            "Polygon" => Some(gdi32::polygon as usize as u64),
+            "PolyBezier" => Some(gdi32::poly_bezier as usize as u64),
+            "FrameRect" => Some(gdi32::frame_rect as usize as u64),
+            "InvertRect" => Some(gdi32::invert_rect as usize as u64),
+            "FloodFill" => Some(gdi32::flood_fill as usize as u64),
+            "GradientFill" => Some(gdi32::gradient_fill as usize as u64),
+            "CreateCompatibleBitmap" => Some(gdi32::create_compatible_bitmap as usize as u64),
+            "GetBitmapBits" => Some(gdi32::get_bitmap_bits as usize as u64),
+            "SetBitmapBits" => Some(gdi32::set_bitmap_bits as usize as u64),
+            "GetDIBits" => Some(gdi32::get_dibits as usize as u64),
+            "SetDIBits" => Some(gdi32::set_dibits as usize as u64),
+            "StretchDIBits" => Some(gdi32::stretch_dibits as usize as u64),
+            "CreateDIBSection" => Some(gdi32::create_dib_section as usize as u64),
+            "CreateHatchBrush" => Some(gdi32::create_hatch_brush as usize as u64),
+            "CreatePatternBrush" => Some(gdi32::create_pattern_brush as usize as u64),
+            "CreateBrushIndirect" => Some(gdi32::create_brush_indirect as usize as u64),
+            "GetSysColorBrush" => Some(gdi32::get_sys_color_brush as usize as u64),
+            "CreatePenIndirect" => Some(gdi32::create_pen_indirect as usize as u64),
+            "ExtCreatePen" => Some(gdi32::ext_create_pen as usize as u64),
+            "SelectObject" => Some(gdi32::select_object as usize as u64),
+            "DeleteObject" => Some(gdi32::delete_object as usize as u64),
+            "GetStockObject" => Some(gdi32::get_stock_object as usize as u64),
+            "GetObjectType" => Some(gdi32::get_object_type as usize as u64),
+            "GetCurrentObject" => Some(gdi32::get_current_object as usize as u64),
+            "GetTextFaceA" => Some(gdi32::get_text_face_a as usize as u64),
+            "GetTextExtentPointA" => Some(gdi32::get_text_extent_point_a as usize as u64),
+            "GetCharWidthA" => Some(gdi32::get_char_width_a as usize as u64),
+            "SetTextAlign" => Some(gdi32::set_text_align as usize as u64),
+            "GetTextColor" => Some(gdi32::get_text_color as usize as u64),
+            "GetNearestColor" => Some(gdi32::get_nearest_color as usize as u64),
+            "CreatePalette" => Some(gdi32::create_palette as usize as u64),
+            "SelectPalette" => Some(gdi32::select_palette as usize as u64),
+            "RealizePalette" => Some(gdi32::realize_palette as usize as u64),
+            "UpdateColors" => Some(gdi32::update_colors as usize as u64),
+            "GetPaletteEntries" => Some(gdi32::get_palette_entries as usize as u64),
+            "AbortPath" => Some(gdi32::abort_path as usize as u64),
+            "CloseFigure" => Some(gdi32::close_figure as usize as u64),
+            "FlattenPath" => Some(gdi32::flatten_path as usize as u64),
+            "StrokeAndFillPath" => Some(gdi32::stroke_and_fill_path as usize as u64),
+            "PathToRegion" => Some(gdi32::path_to_region as usize as u64),
+            "GetPath" => Some(gdi32::get_path as usize as u64),
+            "CreateCompatibleDC" => Some(gdi32::create_compatible_dc as usize as u64),
+            "CreateDCA" => Some(gdi32::create_dc_a as usize as u64),
+            "CreateICA" => Some(gdi32::create_ic_a as usize as u64),
+            "StartDocA" => Some(gdi32::start_doc_a as usize as u64),
+            "StartPage" => Some(gdi32::start_page as usize as u64),
+            "EndPage" => Some(gdi32::end_page as usize as u64),
+            "EndDoc" => Some(gdi32::end_doc as usize as u64),
+            "AbortDoc" => Some(gdi32::abort_doc as usize as u64),
+            "CreateMetaFileA" => Some(gdi32::create_meta_file_a as usize as u64),
+            "CloseMetaFile" => Some(gdi32::close_meta_file as usize as u64),
+            "DeleteMetaFile" => Some(gdi32::delete_meta_file as usize as u64),
+            "PlayMetaFile" => Some(gdi32::play_meta_file as usize as u64),
+            "CreateEnhMetaFileA" => Some(gdi32::create_enh_meta_file_a as usize as u64),
+            "CloseEnhMetaFile" => Some(gdi32::close_enh_meta_file as usize as u64),
+            "DeleteEnhMetaFile" => Some(gdi32::delete_enh_meta_file as usize as u64),
+            "PlayEnhMetaFile" => Some(gdi32::play_enh_meta_file as usize as u64),
+            "DeleteDC" => Some(gdi32::delete_dc as usize as u64),
+            "Rectangle" => Some(gdi32::rectangle as usize as u64),
+            "FrameRect" => Some(gdi32::frame_rect as usize as u64),
+            "DrawFocusRect" => Some(gdi32::draw_focus_rect as usize as u64),
+            "CreateRectRgnIndirect" => Some(gdi32::create_rect_rgn_indirect as usize as u64),
+            "CreateEllipticRgn" => Some(gdi32::create_elliptic_rgn as usize as u64),
+            "CreateEllipticRgnIndirect" => {
+                Some(gdi32::create_elliptic_rgn_indirect as usize as u64)
+            }
+            "CreateRoundRectRgn" => Some(gdi32::create_round_rect_rgn as usize as u64),
+            "RectInRegion" => Some(gdi32::rect_in_region as usize as u64),
+            "SelectClipRgn" => Some(gdi32::select_clip_rgn as usize as u64),
+            "ExcludeClipRect" => Some(gdi32::exclude_clip_rect as usize as u64),
+            "IntersectClipRect" => Some(gdi32::intersect_clip_rect as usize as u64),
+            "GetClipBox" => Some(gdi32::get_clip_box as usize as u64),
+            "PtVisible" => Some(gdi32::pt_visible as usize as u64),
+            "RectVisible" => Some(gdi32::rect_visible as usize as u64),
+            "GetCurrentPositionEx" => Some(gdi32::get_current_position_ex as usize as u64),
+            "GetGraphicsMode" => Some(gdi32::get_graphics_mode as usize as u64),
+            "GetPolyFillMode" => Some(gdi32::get_poly_fill_mode as usize as u64),
+            "SetPolyFillMode" => Some(gdi32::set_poly_fill_mode as usize as u64),
+            "GetStretchBltMode" => Some(gdi32::get_stretch_blt_mode as usize as u64),
+            "SetStretchBltMode" => Some(gdi32::set_stretch_blt_mode as usize as u64),
+            "GetROP2" => Some(gdi32::get_rop2 as usize as u64),
+            "SetROP2" => Some(gdi32::set_rop2 as usize as u64),
+            _ => None,
+        },
+        "advapi32" => match name {
+            "RegDeleteKeyA" => Some(advapi32::reg_delete_key_a as usize as u64),
+            "RegDeleteValueA" => Some(advapi32::reg_delete_value_a as usize as u64),
+            "RegEnumKeyExA" => Some(advapi32::reg_enum_key_ex_a as usize as u64),
+            "RegEnumValueA" => Some(advapi32::reg_enum_value_a as usize as u64),
+            "RegConnectRegistryA" => Some(advapi32::reg_connect_registry_a as usize as u64),
+            "RegNotifyChangeKeyValue" => {
+                Some(advapi32::reg_notify_change_key_value as usize as u64)
+            }
+            "LookupAccountNameA" => Some(advapi32::lookup_account_name_a as usize as u64),
+            "LookupAccountSidA" => Some(advapi32::lookup_account_sid_a as usize as u64),
+            "InitializeSecurityDescriptor" => {
+                Some(advapi32::initialize_security_descriptor as usize as u64)
+            }
+            "InitializeAcl" => Some(advapi32::initialize_acl as usize as u64),
+            "AddAccessAllowedAce" => Some(advapi32::add_access_allowed_ace as usize as u64),
+            "SetSecurityDescriptorDacl" => {
+                Some(advapi32::set_security_descriptor_dacl as usize as u64)
+            }
+            "GetSecurityDescriptorDacl" => {
+                Some(advapi32::get_security_descriptor_dacl as usize as u64)
+            }
+            "IsValidSecurityDescriptor" => {
+                Some(advapi32::is_valid_security_descriptor as usize as u64)
+            }
+            "GetLengthSid" => Some(advapi32::get_length_sid as usize as u64),
+            "CopySid" => Some(advapi32::copy_sid as usize as u64),
+            "EqualSid" => Some(advapi32::equal_sid as usize as u64),
+            "OpenSCManagerA" => Some(advapi32::open_sc_manager_a as usize as u64),
+            "CloseServiceHandle" => Some(advapi32::close_service_handle as usize as u64),
+            "OpenServiceA" => Some(advapi32::open_service_a as usize as u64),
+            "CreateServiceA" => Some(advapi32::create_service_a as usize as u64),
+            "DeleteService" => Some(advapi32::delete_service as usize as u64),
+            "StartServiceA" => Some(advapi32::start_service_a as usize as u64),
+            "ControlService" => Some(advapi32::control_service as usize as u64),
+            "QueryServiceStatus" => Some(advapi32::query_service_status as usize as u64),
+            "EnumServicesStatusA" => Some(advapi32::enum_services_status_a as usize as u64),
+            "GetServiceKeyNameA" => Some(advapi32::get_service_key_name_a as usize as u64),
+            "GetServiceDisplayNameA" => Some(advapi32::get_service_display_name_a as usize as u64),
+            "CloseEventLog" => Some(advapi32::close_event_log as usize as u64),
+            "ClearEventLogA" => Some(advapi32::clear_event_log_a as usize as u64),
+            "CryptDeriveKey" => Some(advapi32::crypt_derive_key as usize as u64),
+            "CryptDestroyKey" => Some(advapi32::crypt_destroy_key as usize as u64),
+            "CryptEncrypt" => Some(advapi32::crypt_encrypt as usize as u64),
+            "CryptDecrypt" => Some(advapi32::crypt_decrypt as usize as u64),
+            "CryptImportKey" => Some(advapi32::crypt_import_key as usize as u64),
+            "CryptExportKey" => Some(advapi32::crypt_export_key as usize as u64),
+            "CryptSignHashA" => Some(advapi32::crypt_sign_hash_a as usize as u64),
+            "CryptVerifySignatureA" => Some(advapi32::crypt_verify_signature_a as usize as u64),
+            "OpenThreadToken" => Some(advapi32::open_thread_token as usize as u64),
+            "DuplicateTokenEx" => Some(advapi32::duplicate_token_ex as usize as u64),
+            "ImpersonateLoggedOnUser" => Some(advapi32::impersonate_logged_on_user as usize as u64),
+            "RevertToSelf" => Some(advapi32::revert_to_self as usize as u64),
+            "SetTokenInformation" => Some(advapi32::set_token_information as usize as u64),
+            "LookupPrivilegeDisplayNameA" => {
+                Some(advapi32::lookup_privilege_display_name_a as usize as u64)
+            }
+            _ => None,
+        },
+        "shell32" => match name {
+            "ShellExecuteExA" => Some(shell32::shell_execute_ex_a as usize as u64),
+            "ShellAboutA" => Some(shell32::shell_about_a as usize as u64),
+            "ExtractIconA" => Some(shell32::extract_icon_a as usize as u64),
+            "ExtractIconExA" => Some(shell32::extract_icon_ex_a as usize as u64),
+            "DragAcceptFiles" => Some(shell32::drag_accept_files as usize as u64),
+            "DragQueryFileA" => Some(shell32::drag_query_file_a as usize as u64),
+            "DragQueryPoint" => Some(shell32::drag_query_point as usize as u64),
+            "DragFinish" => Some(shell32::drag_finish as usize as u64),
+            "Shell_NotifyIconA" => Some(shell32::shell_notify_icon_a as usize as u64),
+            "SHGetPathFromIDListA" => Some(shell32::sh_get_path_from_id_list_a as usize as u64),
+            "SHBrowseForFolderA" => Some(shell32::sh_browse_for_folder_a as usize as u64),
+            "SHGetDesktopFolder" => Some(shell32::sh_get_desktop_folder as usize as u64),
+            "SHGetFileInfoA" => Some(shell32::sh_get_file_info_a as usize as u64),
+            "SHFileOperationA" => Some(shell32::sh_file_operation_a as usize as u64),
+            "SHEmptyRecycleBinA" => Some(shell32::sh_empty_recycle_bin_a as usize as u64),
+            "SHQueryRecycleBinA" => Some(shell32::sh_query_recycle_bin_a as usize as u64),
+            _ => None,
+        },
+        "msvcrt" => match name {
+            "_msize" => Some(msvcrt::_msize as usize as u64),
+            "_expand" => Some(msvcrt::_expand as usize as u64),
+            "_heapmin" => Some(msvcrt::_heapmin as usize as u64),
+            "strncat" => Some(msvcrt::strncat as usize as u64),
+            "strrchr" => Some(msvcrt::strrchr as usize as u64),
+            "feof" => Some(msvcrt::feof as usize as u64),
+            "fgetc" => Some(msvcrt::fgetc as usize as u64),
+            "fputc" => Some(msvcrt::fputc as usize as u64),
+            "fgets" => Some(msvcrt::fgets as usize as u64),
+            "fputs" => Some(msvcrt::fputs as usize as u64),
+            "scanf" => Some(msvcrt::scanf as usize as u64),
+            "labs" => Some(msvcrt::labs as usize as u64),
+            "time" => Some(msvcrt::time as usize as u64),
+            "clock" => Some(msvcrt::clock as usize as u64),
+            "localtime" => Some(msvcrt::localtime as usize as u64),
+            "gmtime" => Some(msvcrt::gmtime as usize as u64),
+            "asctime" => Some(msvcrt::asctime as usize as u64),
+            "ctime" => Some(msvcrt::ctime as usize as u64),
+            "strftime" => Some(msvcrt::strftime as usize as u64),
+            "system" => Some(msvcrt::system as usize as u64),
+            "atof" => Some(msvcrt::atof as usize as u64),
+            "strtol" => Some(msvcrt::strtol as usize as u64),
+            "strtoul" => Some(msvcrt::strtoul as usize as u64),
+            "strtod" => Some(msvcrt::strtod as usize as u64),
+            _ => None,
+        },
+        "winhttp" => match name {
+            "WinHttpOpen" => Some(winhttp::win_http_open as usize as u64),
+            "WinHttpConnect" => Some(winhttp::win_http_connect as usize as u64),
+            "WinHttpOpenRequest" => Some(winhttp::win_http_open_request as usize as u64),
+            "WinHttpSendRequest" => Some(winhttp::win_http_send_request as usize as u64),
+            "WinHttpReceiveResponse" => Some(winhttp::win_http_receive_response as usize as u64),
+            "WinHttpReadData" => Some(winhttp::win_http_read_data as usize as u64),
+            "WinHttpQueryHeaders" => Some(winhttp::win_http_query_headers as usize as u64),
+            "WinHttpQueryDataAvailable" => {
+                Some(winhttp::win_http_query_data_available as usize as u64)
+            }
+            "WinHttpSetTimeouts" => Some(winhttp::win_http_set_timeouts as usize as u64),
+            "WinHttpCloseHandle" => Some(winhttp::win_http_close_handle as usize as u64),
+            _ => None,
+        },
+        "wininet" => match name {
+            "InternetOpenA" => Some(wininet::internet_open_a as usize as u64),
+            "InternetOpenW" => Some(wininet::internet_open_w as usize as u64),
+            "InternetConnectA" => Some(wininet::internet_connect_a as usize as u64),
+            "InternetConnectW" => Some(wininet::internet_connect_w as usize as u64),
+            "HttpOpenRequestA" => Some(wininet::http_open_request_a as usize as u64),
+            "HttpOpenRequestW" => Some(wininet::http_open_request_w as usize as u64),
+            "HttpSendRequestA" => Some(wininet::http_send_request_a as usize as u64),
+            "HttpSendRequestW" => Some(wininet::http_send_request_w as usize as u64),
+            "HttpQueryInfoA" => Some(wininet::http_query_info_a as usize as u64),
+            "InternetSetCookieA" => Some(wininet::internet_set_cookie_a as usize as u64),
+            "InternetGetCookieA" => Some(wininet::internet_get_cookie_a as usize as u64),
+            "InternetReadFile" => Some(wininet::internet_read_file as usize as u64),
+            "InternetCloseHandle" => Some(wininet::internet_close_handle as usize as u64),
+            _ => None,
+        },
+        "ole32" => match name {
+            "CoInitialize" => Some(ole32::co_initialize as usize as u64),
+            "CoInitializeEx" => Some(ole32::co_initialize_ex as usize as u64),
+            "CoUninitialize" => Some(ole32::co_uninitialize as usize as u64),
+            "CoGetApartmentType" => Some(ole32::co_get_apartment_type as usize as u64),
+            "CoRegisterClassObject" => Some(ole32::co_register_class_object as usize as u64),
+            "CoRevokeClassObject" => Some(ole32::co_revoke_class_object as usize as u64),
+            "CoGetClassObject" => Some(ole32::co_get_class_object as usize as u64),
+            "CoCreateInstance" => Some(ole32::co_create_instance as usize as u64),
+            "CoMarshalInterThreadInterfaceInStream" => {
+                Some(ole32::co_marshal_inter_thread_interface_in_stream as usize as u64)
+            }
+            "CoGetInterfaceAndReleaseStream" => {
+                Some(ole32::co_get_interface_and_release_stream as usize as u64)
+            }
+            "CoTaskMemAlloc" => Some(ole32::co_task_mem_alloc as usize as u64),
+            "CoTaskMemFree" => Some(ole32::co_task_mem_free as usize as u64),
+            _ => None,
+        },
+        "oleaut32" => match name {
+            "SysAllocString" => Some(oleaut32::sys_alloc_string as usize as u64),
+            "SysAllocStringLen" => Some(oleaut32::sys_alloc_string_len as usize as u64),
+            "SysFreeString" => Some(oleaut32::sys_free_string as usize as u64),
+            "SysStringLen" => Some(oleaut32::sys_string_len as usize as u64),
+            "VariantInit" => Some(oleaut32::variant_init as usize as u64),
+            "VariantClear" => Some(oleaut32::variant_clear as usize as u64),
+            "DispGetIDsOfNames" => Some(oleaut32::disp_get_ids_of_names as usize as u64),
+            "DispInvoke" => Some(oleaut32::disp_invoke as usize as u64),
+            "LoadTypeLib" => Some(oleaut32::load_type_lib as usize as u64),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn canonical_module_key(module: &str) -> String {
+    let module = module.to_lowercase();
+    let module = module.trim_end_matches(".dll");
+    match module {
+        "kernelbase" => "kernel32".to_string(),
+        "api-ms-win-core-libraryloader-l1-2-0" => "kernel32".to_string(),
+        "api-ms-win-core-heap-l1-1-0" => "kernel32".to_string(),
+        "api-ms-win-core-synch-l1-2-0" => "kernel32".to_string(),
+        other => other.to_string(),
+    }
+}
+
+pub fn get_api_status(module: &str, func: &str) -> Option<Win32ApiStatus> {
+    let module_key = canonical_module_key(module);
+    let table = WIN32_API_TABLE.lock();
+    let table = table.as_ref()?;
+    let module_funcs = table.get(module_key.as_str())?;
+    if !module_funcs.contains_key(func) {
+        return None;
+    }
+    let addr = get_fn_address(module_key.as_str(), func);
+    if addr != stub_api as usize as u64 {
+        Some(Win32ApiStatus::Implemented)
+    } else {
+        Some(Win32ApiStatus::Stubbed)
+    }
+}
+
+pub fn is_declared_api(module: &str, func: &str) -> bool {
+    get_api_status(module, func).is_some()
+}
+
+pub fn is_implemented_api(module: &str, func: &str) -> bool {
+    matches!(
+        get_api_status(module, func),
+        Some(Win32ApiStatus::Implemented)
+    )
 }
 
 /// Win32 API module
@@ -1090,6 +5174,10 @@ mod kernel32 {
         let module =
             crate::win32::module_for_handle(hModule as u64).unwrap_or_else(|| "kernel32".into());
         let addr = crate::win32::get_fn_address(&module, &name);
+        if addr == crate::win32::stub_api as usize as u64 {
+            crate::serial_println!("[WIN32] GetProcAddress: {}!{} unresolved", module, name);
+            return None;
+        }
         crate::serial_println!("[WIN32] GetProcAddress: {}!{} = {:#x}", module, name, addr);
         // Transmute the raw address to FARPROC (Option<unsafe extern fn()>)
         let fn_ptr: unsafe extern "system" fn() -> isize = core::mem::transmute(addr);
@@ -1158,24 +5246,11 @@ mod kernel32 {
             return INVALID_HANDLE_VALUE;
         }
 
-        // Parse filename
-        let mut name = String::new();
-        let mut ptr = lpFileName;
-        while !ptr.is_null() && *ptr != 0 {
-            name.push(*ptr as u8 as char);
-            ptr = ptr.add(1);
+        let name = crate::win32::read_ansi_string(lpFileName);
+        let unix_path = crate::win32::normalize_win32_path(&name);
+        if unix_path.is_empty() {
+            return INVALID_HANDLE_VALUE;
         }
-
-        // Convert Windows path to Unix path
-        let unix_path = name.replace("\\\\", "/").replace("\\", "/");
-        let unix_path: String = if unix_path.len() > 2 && unix_path.chars().nth(1) == Some(':') {
-            // Strip drive letter (C:\foo -> /mnt/c/foo)
-            let mut path = String::from("/mnt");
-            path.push_str(&unix_path[2..]);
-            path
-        } else {
-            unix_path
-        };
 
         // Map Win32 flags to POSIX flags
         let flags = match dwCreationDisposition {
@@ -1392,8 +5467,12 @@ mod kernel32 {
     /// ExitProcess
     pub unsafe fn exit_process(uExitCode: UINT) {
         crate::serial_println!("[WIN32] ExitProcess({})", uExitCode);
-        // TODO: Terminate process
-        loop {}
+        let current_pid = crate::pe_loader::current_process_pid()
+            .unwrap_or(crate::task::scheduler::current_task_id() as u64);
+        if let Some(process_handle) = crate::win32_abi::process_handle_for_pid(current_pid) {
+            let _ = crate::win32_abi::mark_process_terminated_with_exit(process_handle, uExitCode);
+        }
+        crate::task::scheduler::exit(uExitCode as i32)
     }
 
     // ========================================================================
@@ -1413,13 +5492,75 @@ mod kernel32 {
         lpStartupInfo: LPVOID,
         lpProcessInformation: LPVOID,
     ) -> BOOL {
-        let mut name = String::new();
-        let mut ptr = lpApplicationName;
-        while !ptr.is_null() && *ptr != 0 {
-            name.push(*ptr as u8 as char);
-            ptr = ptr.add(1);
+        let _ = (
+            lpProcessAttributes,
+            lpThreadAttributes,
+            bInheritHandles,
+            dwCreationFlags,
+            lpEnvironment,
+            lpStartupInfo,
+        );
+        let app_name = read_ansi_string(lpApplicationName);
+        let command_line = read_ansi_string(lpCommandLine as LPCSTR);
+        let requested = if app_name.is_empty() {
+            extract_command_image_name(&command_line)
+        } else {
+            app_name
+        };
+        let image_path = normalize_win32_path(&requested);
+        if image_path.is_empty() {
+            crate::win32::set_win32_last_error(2);
+            return FALSE;
         }
-        crate::serial_println!("[WIN32] CreateProcessA: {}", name);
+        let _current_directory = normalize_win32_path(&read_ansi_string(lpCurrentDirectory));
+        let mut utf16_path: Vec<u16> = image_path.encode_utf16().collect();
+        let unicode = crate::win32_abi::UnicodeString {
+            length: (utf16_path.len() * 2) as u16,
+            maximum_length: (utf16_path.len() * 2) as u16,
+            buffer: utf16_path.as_mut_ptr(),
+        };
+        let object_attributes = crate::win32_abi::ObjectAttributes {
+            length: core::mem::size_of::<crate::win32_abi::ObjectAttributes>() as u32,
+            root_directory: 0,
+            object_name: &unicode,
+            attributes: 0,
+            security_descriptor: core::ptr::null_mut(),
+            security_quality_of_service: core::ptr::null_mut(),
+        };
+        let mut process_handle = 0u64;
+        let status = crate::win32_abi::nt_create_process(
+            &mut process_handle,
+            0,
+            &object_attributes as *const _ as *const u8,
+            0,
+            false,
+            0,
+            0,
+            0,
+            0,
+        );
+        if status != crate::win32_abi::NtStatus::Success {
+            crate::win32::set_win32_last_error(2);
+            return FALSE;
+        }
+        let Some(thread_handle) = crate::win32_abi::process_initial_thread_handle(process_handle)
+        else {
+            crate::win32::set_win32_last_error(6);
+            return FALSE;
+        };
+        let mut task = crate::task::task::Task::with_priority(
+            crate::win32::win32_process_start_trampoline,
+            crate::task::task::Priority::Normal,
+            "win32-process",
+        );
+        let task_id = task.id as u64;
+        crate::win32::WIN32_PROCESS_LAUNCHES
+            .lock()
+            .insert(task_id, process_handle);
+        let _ = crate::win32_abi::bind_thread_handle_task(thread_handle, task_id);
+        let _ = crate::task::scheduler::spawn_task(task);
+        populate_process_information(lpProcessInformation, process_handle, thread_handle);
+        crate::win32::set_win32_last_error(0);
         TRUE
     }
 
@@ -1429,21 +5570,63 @@ mod kernel32 {
         bInheritHandle: BOOL,
         dwProcessId: DWORD,
     ) -> HANDLE {
-        crate::serial_println!("[WIN32] OpenProcess: pid={}", dwProcessId);
-        dwProcessId as HANDLE
+        let _ = (dwDesiredAccess, bInheritHandle);
+        let Some(handle) = crate::win32_abi::process_handle_for_pid(dwProcessId as u64) else {
+            crate::win32::set_win32_last_error(87);
+            return 0;
+        };
+        crate::win32::set_win32_last_error(0);
+        handle as HANDLE
     }
 
     /// TerminateProcess
     pub unsafe fn terminate_process(hProcess: HANDLE, uExitCode: UINT) -> BOOL {
-        crate::serial_println!("[WIN32] TerminateProcess: handle={}", hProcess);
+        if hProcess == 0 {
+            crate::win32::set_win32_last_error(6);
+            return FALSE;
+        }
+        if let Some(thread_handle) =
+            crate::win32_abi::process_initial_thread_handle(hProcess as u64)
+        {
+            if let Some(task_id) = crate::win32_abi::thread_handle_task_id(thread_handle) {
+                let _ = crate::task::scheduler::kill_task(task_id as usize, 15);
+            }
+        }
+        if !crate::win32_abi::mark_process_terminated_with_exit(hProcess as u64, uExitCode) {
+            crate::win32::set_win32_last_error(6);
+            return FALSE;
+        }
+        crate::win32::set_win32_last_error(0);
         TRUE
     }
 
     /// GetExitCodeProcess
     pub unsafe fn get_exit_code_process(hProcess: HANDLE, lpExitCode: *mut DWORD) -> BOOL {
-        if !lpExitCode.is_null() {
-            *lpExitCode = 0;
+        if lpExitCode.is_null() {
+            crate::win32::set_win32_last_error(87);
+            return FALSE;
         }
+        let Some(exit_code) = crate::win32_abi::process_exit_code(hProcess as u64) else {
+            crate::win32::set_win32_last_error(6);
+            return FALSE;
+        };
+        *lpExitCode = exit_code;
+        crate::win32::set_win32_last_error(0);
+        TRUE
+    }
+
+    /// GetExitCodeThread
+    pub unsafe fn get_exit_code_thread(hThread: HANDLE, lpExitCode: *mut DWORD) -> BOOL {
+        if lpExitCode.is_null() {
+            crate::win32::set_win32_last_error(87);
+            return FALSE;
+        }
+        let Some(exit_code) = crate::win32_abi::thread_exit_code(hThread as u64) else {
+            crate::win32::set_win32_last_error(6);
+            return FALSE;
+        };
+        *lpExitCode = exit_code;
+        crate::win32::set_win32_last_error(0);
         TRUE
     }
 
@@ -1454,7 +5637,8 @@ mod kernel32 {
 
     /// GetCurrentProcessId
     pub unsafe fn get_current_process_id() -> DWORD {
-        crate::task::scheduler::current_task_id() as DWORD
+        crate::pe_loader::current_process_pid()
+            .unwrap_or(crate::task::scheduler::current_task_id() as u64) as DWORD
     }
 
     // ========================================================================
@@ -1470,16 +5654,135 @@ mod kernel32 {
         dwCreationFlags: DWORD,
         lpThreadId: *mut DWORD,
     ) -> HANDLE {
-        crate::serial_println!("[WIN32] CreateThread");
-        if !lpThreadId.is_null() {
-            *lpThreadId = 1;
+        let _ = (lpThreadAttributes, dwStackSize, dwCreationFlags);
+        if lpStartAddress.is_null() {
+            crate::win32::set_win32_last_error(87);
+            return 0;
         }
-        1 as HANDLE
+        let owner_pid = crate::pe_loader::current_process_pid()
+            .unwrap_or(crate::task::scheduler::current_task_id() as u64);
+        let (handle, tid) = crate::win32_abi::register_thread_handle(
+            owner_pid,
+            lpStartAddress as u64,
+            lpParameter as u64,
+        );
+        let mut task = crate::task::task::Task::with_priority(
+            crate::win32::win32_thread_start_trampoline,
+            crate::task::task::Priority::Normal,
+            "win32-thread",
+        );
+        let task_id = task.id as u64;
+        crate::win32::WIN32_THREAD_LAUNCHES.lock().insert(
+            task_id,
+            crate::win32::Win32ThreadLaunch {
+                handle,
+                owner_pid,
+                start_routine: lpStartAddress as usize,
+                parameter: lpParameter as usize,
+            },
+        );
+        let _ = crate::win32_abi::bind_thread_handle_task(handle, task_id);
+        let _ = crate::task::scheduler::spawn_task(task);
+        if !lpThreadId.is_null() {
+            *lpThreadId = tid as DWORD;
+        }
+        crate::win32::set_win32_last_error(0);
+        handle as HANDLE
     }
 
     /// ExitThread
     pub unsafe fn exit_thread(dwExitCode: DWORD) {
         crate::serial_println!("[WIN32] ExitThread({})", dwExitCode);
+        let current_task = crate::task::scheduler::current_task_id() as u64;
+        let launch = crate::win32::WIN32_THREAD_LAUNCHES
+            .lock()
+            .remove(&current_task);
+        if let Some(launch) = launch {
+            let owner_pid = launch.owner_pid;
+            let _ = crate::win32_abi::mark_thread_handle_terminated_with_exit(
+                launch.handle,
+                dwExitCode,
+            );
+            if owner_pid != 0 {
+                let _ = crate::pe_loader::invoke_tls_thread_detach(owner_pid);
+            }
+        }
+        crate::task::scheduler::exit(dwExitCode as i32);
+    }
+
+    /// TlsAlloc
+    pub unsafe fn tls_alloc() -> DWORD {
+        let mut slots = crate::win32::TLS_SLOTS.lock();
+        for (index, used) in slots.iter_mut().enumerate() {
+            if !*used {
+                *used = true;
+                crate::win32::set_win32_last_error(0);
+                return index as DWORD;
+            }
+        }
+        crate::win32::set_win32_last_error(1450);
+        0xFFFF_FFFF
+    }
+
+    /// TlsFree
+    pub unsafe fn tls_free(dwTlsIndex: DWORD) -> BOOL {
+        let mut slots = crate::win32::TLS_SLOTS.lock();
+        let Some(slot) = slots.get_mut(dwTlsIndex as usize) else {
+            crate::win32::set_win32_last_error(87);
+            return FALSE;
+        };
+        if !*slot {
+            crate::win32::set_win32_last_error(87);
+            return FALSE;
+        }
+        *slot = false;
+        for values in crate::win32::TLS_THREAD_VALUES.lock().values_mut() {
+            values.remove(&dwTlsIndex);
+        }
+        crate::win32::set_win32_last_error(0);
+        TRUE
+    }
+
+    /// TlsSetValue
+    pub unsafe fn tls_set_value(dwTlsIndex: DWORD, lpTlsValue: LPVOID) -> BOOL {
+        let slots = crate::win32::TLS_SLOTS.lock();
+        let Some(in_use) = slots.get(dwTlsIndex as usize) else {
+            crate::win32::set_win32_last_error(87);
+            return FALSE;
+        };
+        if !*in_use {
+            crate::win32::set_win32_last_error(87);
+            return FALSE;
+        }
+        drop(slots);
+        crate::win32::TLS_THREAD_VALUES
+            .lock()
+            .entry(crate::win32::current_win32_thread_key())
+            .or_default()
+            .insert(dwTlsIndex, lpTlsValue as u64);
+        crate::win32::set_win32_last_error(0);
+        TRUE
+    }
+
+    /// TlsGetValue
+    pub unsafe fn tls_get_value(dwTlsIndex: DWORD) -> LPVOID {
+        let slots = crate::win32::TLS_SLOTS.lock();
+        let Some(in_use) = slots.get(dwTlsIndex as usize) else {
+            crate::win32::set_win32_last_error(87);
+            return core::ptr::null_mut();
+        };
+        if !*in_use {
+            crate::win32::set_win32_last_error(87);
+            return core::ptr::null_mut();
+        }
+        drop(slots);
+        let value = crate::win32::TLS_THREAD_VALUES
+            .lock()
+            .get(&crate::win32::current_win32_thread_key())
+            .and_then(|values| values.get(&dwTlsIndex).copied())
+            .unwrap_or(0);
+        crate::win32::set_win32_last_error(0);
+        value as LPVOID
     }
 
     /// GetCurrentThread
@@ -1750,8 +6053,7 @@ mod kernel32 {
         lpName: LPCSTR,
     ) -> HANDLE {
         let _ = (lpEventAttributes, lpName);
-        crate::win32_abi::create_waitable_event(bManualReset != 0, bInitialState != 0)
-            .unwrap_or(0)
+        crate::win32_abi::create_waitable_event(bManualReset != 0, bInitialState != 0).unwrap_or(0)
     }
 
     /// CreateSemaphoreA - Creates a semaphore object
@@ -1778,7 +6080,8 @@ mod kernel32 {
 
     /// SetEvent - Sets an event to signaled state
     pub unsafe fn set_event(hEvent: HANDLE) -> BOOL {
-        if crate::win32_abi::set_waitable_event(hEvent as u64) == crate::win32_abi::NtStatus::Success
+        if crate::win32_abi::set_waitable_event(hEvent as u64)
+            == crate::win32_abi::NtStatus::Success
         {
             TRUE
         } else {
@@ -1975,7 +6278,36 @@ mod kernel32 {
         lpDistanceToMoveHigh: *mut LONG,
         dwMoveMethod: DWORD,
     ) -> DWORD {
-        0
+        let state = match crate::win32::FILE_HANDLES
+            .lock()
+            .get(&(hFile as u64))
+            .cloned()
+        {
+            Some(state) => state,
+            None => return u32::MAX,
+        };
+        let current = crate::fs::sys_tell(state.fd).unwrap_or(0) as i64;
+        let end = crate::win32::file_size_for_path(&state.path).unwrap_or(current as u64) as i64;
+        let high = if lpDistanceToMoveHigh.is_null() {
+            0i64
+        } else {
+            (*lpDistanceToMoveHigh as i64) << 32
+        };
+        let delta = high | (lDistanceToMove as u32 as u64 as i64);
+        let base = match dwMoveMethod {
+            0 => 0,
+            1 => current,
+            2 => end,
+            _ => return u32::MAX,
+        };
+        let new_pos = base.saturating_add(delta).max(0);
+        if !crate::fs::sys_seek(state.fd, new_pos as usize) {
+            return u32::MAX;
+        }
+        if !lpDistanceToMoveHigh.is_null() {
+            *lpDistanceToMoveHigh = (new_pos >> 32) as LONG;
+        }
+        new_pos as DWORD
     }
 
     /// SetFilePointerEx
@@ -1985,21 +6317,74 @@ mod kernel32 {
         lpNewFilePointer: *mut i64,
         dwMoveMethod: DWORD,
     ) -> BOOL {
+        let state = match crate::win32::FILE_HANDLES
+            .lock()
+            .get(&(hFile as u64))
+            .cloned()
+        {
+            Some(state) => state,
+            None => {
+                if !lpNewFilePointer.is_null() {
+                    *lpNewFilePointer = 0;
+                }
+                return FALSE;
+            }
+        };
+        let current = crate::fs::sys_tell(state.fd).unwrap_or(0) as i64;
+        let end = crate::win32::file_size_for_path(&state.path).unwrap_or(current as u64) as i64;
+        let base = match dwMoveMethod {
+            0 => 0,
+            1 => current,
+            2 => end,
+            _ => return FALSE,
+        };
+        let new_pos = base.saturating_add(liDistanceToMove).max(0);
+        if !crate::fs::sys_seek(state.fd, new_pos as usize) {
+            if !lpNewFilePointer.is_null() {
+                *lpNewFilePointer = 0;
+            }
+            return FALSE;
+        }
         if !lpNewFilePointer.is_null() {
-            *lpNewFilePointer = 0;
+            *lpNewFilePointer = new_pos;
         }
         TRUE
     }
 
     /// GetFileSize
     pub unsafe fn get_file_size(hFile: HANDLE, lpFileSizeHigh: *mut DWORD) -> DWORD {
-        0
+        let state = match crate::win32::FILE_HANDLES
+            .lock()
+            .get(&(hFile as u64))
+            .cloned()
+        {
+            Some(state) => state,
+            None => return u32::MAX,
+        };
+        let size = crate::win32::file_size_for_path(&state.path).unwrap_or(0);
+        if !lpFileSizeHigh.is_null() {
+            *lpFileSizeHigh = (size >> 32) as DWORD;
+        }
+        size as DWORD
     }
 
     /// GetFileSizeEx
     pub unsafe fn get_file_size_ex(hFile: HANDLE, lpFileSize: *mut i64) -> BOOL {
+        let state = match crate::win32::FILE_HANDLES
+            .lock()
+            .get(&(hFile as u64))
+            .cloned()
+        {
+            Some(state) => state,
+            None => {
+                if !lpFileSize.is_null() {
+                    *lpFileSize = 0;
+                }
+                return FALSE;
+            }
+        };
         if !lpFileSize.is_null() {
-            *lpFileSize = 0;
+            *lpFileSize = crate::win32::file_size_for_path(&state.path).unwrap_or(0) as i64;
         }
         TRUE
     }
@@ -2081,16 +6466,34 @@ mod kernel32 {
 
     /// GetCurrentDirectoryA
     pub unsafe fn get_current_directory_a(nBufferLength: DWORD, lpBuffer: LPSTR) -> DWORD {
-        if !lpBuffer.is_null() && nBufferLength >= 2 {
-            *lpBuffer = '\\' as i8;
-            *((lpBuffer as *mut u8).add(1)) = 0;
+        let current = crate::win32::current_directory_state().lock().clone();
+        let required = current.len() as DWORD;
+        if lpBuffer.is_null() || nBufferLength == 0 {
+            return required + 1;
         }
-        2
+        if nBufferLength <= required {
+            return required + 1;
+        }
+        crate::win32::write_ansi_string(lpBuffer, nBufferLength as INT, &current);
+        required
     }
 
     /// SetCurrentDirectoryA
     pub unsafe fn set_current_directory_a(lpPathName: LPCSTR) -> BOOL {
-        TRUE
+        if lpPathName.is_null() {
+            return FALSE;
+        }
+        let path = crate::win32::normalize_win32_path(&crate::win32::read_ansi_string(lpPathName));
+        if path.is_empty() {
+            return FALSE;
+        }
+        match crate::fs::f2fs::open_entry(&path) {
+            Ok(entry) if entry.is_dir => {
+                *crate::win32::current_directory_state().lock() = path;
+                TRUE
+            }
+            _ => FALSE,
+        }
     }
 
     // ========================================================================
@@ -2103,17 +6506,43 @@ mod kernel32 {
         lpBuffer: LPSTR,
         nSize: DWORD,
     ) -> DWORD {
-        0
+        if lpName.is_null() {
+            return 0;
+        }
+        let key = crate::win32::environment_key(&crate::win32::read_ansi_string(lpName));
+        let value = match crate::win32::environment_state().lock().get(&key).cloned() {
+            Some(value) => value,
+            None => return 0,
+        };
+        let required = value.len() as DWORD;
+        if lpBuffer.is_null() || nSize == 0 {
+            return required + 1;
+        }
+        if nSize <= required {
+            return required + 1;
+        }
+        crate::win32::write_ansi_string(lpBuffer, nSize as INT, &value);
+        required
     }
 
     /// SetEnvironmentVariableA
     pub unsafe fn set_environment_variable_a(lpName: LPCSTR, lpValue: LPCSTR) -> BOOL {
+        if lpName.is_null() {
+            return FALSE;
+        }
+        let key = crate::win32::environment_key(&crate::win32::read_ansi_string(lpName));
+        let mut env = crate::win32::environment_state().lock();
+        if lpValue.is_null() {
+            env.remove(&key);
+        } else {
+            env.insert(key, crate::win32::read_ansi_string(lpValue));
+        }
         TRUE
     }
 
     /// GetCommandLineA
     pub unsafe fn get_command_line_a() -> LPSTR {
-        core::ptr::null_mut()
+        crate::win32::command_line_state().as_ptr() as LPSTR
     }
 
     // ========================================================================
@@ -2256,12 +6685,80 @@ mod kernel32 {
 
     /// GetLastError
     pub unsafe fn get_last_error() -> DWORD {
-        0
+        crate::win32::win32_last_error()
     }
 
     /// SetLastError
     pub unsafe fn set_last_error(dwErrCode: DWORD) {
-        let _ = dwErrCode;
+        crate::win32::set_win32_last_error(dwErrCode);
+    }
+
+    /// SetUnhandledExceptionFilter
+    pub unsafe fn set_unhandled_exception_filter(
+        lp_top_level_exception_filter: LPTOP_LEVEL_EXCEPTION_FILTER,
+    ) -> LPTOP_LEVEL_EXCEPTION_FILTER {
+        let key = crate::win32::current_win32_process_key();
+        let previous = crate::win32::UNHANDLED_EXCEPTION_FILTERS
+            .lock()
+            .insert(
+                key,
+                lp_top_level_exception_filter
+                    .map(|filter| filter as usize)
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0);
+        if previous == 0 {
+            None
+        } else {
+            Some(core::mem::transmute(previous))
+        }
+    }
+
+    /// UnhandledExceptionFilter
+    pub unsafe fn unhandled_exception_filter(exception_info: *mut EXCEPTION_POINTERS) -> LONG {
+        let key = crate::win32::current_win32_process_key();
+        let filter = crate::win32::UNHANDLED_EXCEPTION_FILTERS
+            .lock()
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        if filter != 0 {
+            let handler: unsafe extern "system" fn(*mut EXCEPTION_POINTERS) -> LONG =
+                core::mem::transmute(filter);
+            return handler(exception_info);
+        }
+        let _ = crate::pe_loader::current_process_exception_directory();
+        EXCEPTION_CONTINUE_SEARCH
+    }
+
+    /// RaiseException
+    pub unsafe fn raise_exception(
+        dw_exception_code: DWORD,
+        dw_exception_flags: DWORD,
+        n_number_of_arguments: DWORD,
+        lp_arguments: *const ULONG_PTR,
+    ) {
+        let mut record = EXCEPTION_RECORD {
+            ExceptionCode: dw_exception_code,
+            ExceptionFlags: dw_exception_flags,
+            ExceptionRecord: core::ptr::null_mut(),
+            ExceptionAddress: core::ptr::null_mut(),
+            NumberParameters: core::cmp::min(n_number_of_arguments, 15),
+            ExceptionInformation: [0; 15],
+        };
+        if !lp_arguments.is_null() {
+            let count = record.NumberParameters as usize;
+            let params = core::slice::from_raw_parts(lp_arguments, count);
+            record.ExceptionInformation[..count].copy_from_slice(params);
+        }
+        let mut pointers = EXCEPTION_POINTERS {
+            ExceptionRecord: &mut record,
+            ContextRecord: core::ptr::null_mut(),
+        };
+        let disposition = unhandled_exception_filter(&mut pointers);
+        if disposition != EXCEPTION_CONTINUE_EXECUTION {
+            crate::task::scheduler::exit(dw_exception_code as i32);
+        }
     }
 
     /// MultiByteToWideChar
@@ -2354,7 +6851,25 @@ mod user32 {
 
     /// RegisterClassA
     pub unsafe fn register_class_a(lpWndClass: *const WNDCLASSA) -> WORD {
-        // Return fake atom
+        if lpWndClass.is_null() || (*lpWndClass).lpszClassName.is_null() {
+            return 0;
+        }
+        let class_name = read_ansi_string((*lpWndClass).lpszClassName);
+        if class_name.is_empty() {
+            return 0;
+        }
+        let entry = crate::win32::RegisteredWndClass {
+            class_name: class_name.clone(),
+            wndproc: (*lpWndClass)
+                .lpfnWndProc
+                .map(|f| f as usize as u64)
+                .unwrap_or(0),
+            style: (*lpWndClass).style,
+            background: (*lpWndClass).hbrBackground,
+        };
+        crate::win32::REGISTERED_WND_CLASSES
+            .lock()
+            .insert(class_name, entry);
         0x0001
     }
 
@@ -2429,6 +6944,10 @@ mod user32 {
         }
 
         // Win32Window oluştur
+        let registered_class = crate::win32::REGISTERED_WND_CLASSES
+            .lock()
+            .get(&class_name)
+            .cloned();
         let win = crate::win32::Win32Window {
             hwnd,
             class_name: class_name.clone(),
@@ -2442,9 +6961,10 @@ mod user32 {
             parent: hWndParent as u64,
             visible: false,
             focused: false,
+            menu: hMenu,
             echos_window_id: hwnd as u32,
             surface,
-            wndproc: 0,
+            wndproc: registered_class.as_ref().map(|c| c.wndproc).unwrap_or(0),
         };
 
         crate::win32::WIN32_WINDOWS.lock().insert(hwnd, win);
@@ -2491,6 +7011,7 @@ mod user32 {
                 // WM_SHOWWINDOW + WM_PAINT mesajları
                 drop(windows); // Kilidi serbest bırak
                 crate::win32::post_message(hwnd, crate::win32::WM_SHOWWINDOW, 1, 0);
+                crate::win32::post_message(hwnd, crate::win32::WM_NCPAINT, 0, 0);
                 crate::win32::post_message(hwnd, crate::win32::WM_PAINT, 0, 0);
 
                 // Pencereyi framebuffer'a çiz
@@ -2510,8 +7031,64 @@ mod user32 {
     /// UpdateWindow — WM_PAINT tetikler ve pencereyi çizer
     pub unsafe fn update_window(hWnd: HWND) -> BOOL {
         let hwnd = hWnd as u64;
+        crate::win32::post_message(hwnd, crate::win32::WM_NCPAINT, 0, 0);
         crate::win32::post_message(hwnd, crate::win32::WM_PAINT, 0, 0);
         crate::win32::blit_window_to_framebuffer(hwnd);
+        TRUE
+    }
+
+    /// BeginPaint
+    pub unsafe fn begin_paint(hWnd: HWND, lpPaint: *mut PAINTSTRUCT) -> HDC {
+        if lpPaint.is_null() {
+            return 0;
+        }
+        let hwnd = hWnd as u64;
+        let mut rect = crate::win32::consume_invalidated_rect(hwnd).unwrap_or_else(|| {
+            let windows = crate::win32::WIN32_WINDOWS.lock();
+            windows
+                .get(&hwnd)
+                .map(crate::win32::window_total_bounds)
+                .unwrap_or_default()
+        });
+        rect = crate::win32::normalize_rect(rect);
+        let hdc = get_dc(hWnd);
+        (*lpPaint).hdc = hdc;
+        (*lpPaint).f_erase = FALSE;
+        (*lpPaint).rc_paint = rect;
+        (*lpPaint).f_restore = FALSE;
+        (*lpPaint).f_inc_update = FALSE;
+        hdc
+    }
+
+    /// EndPaint
+    pub unsafe fn end_paint(hWnd: HWND, lpPaint: *const PAINTSTRUCT) -> BOOL {
+        let _ = lpPaint;
+        crate::win32::blit_window_to_framebuffer(hWnd as u64);
+        TRUE
+    }
+
+    /// InvalidateRect
+    pub unsafe fn invalidate_rect(hWnd: HWND, lpRect: *const RECT, bErase: BOOL) -> BOOL {
+        let _ = bErase;
+        let hwnd = hWnd as u64;
+        let rect = if lpRect.is_null() {
+            let windows = crate::win32::WIN32_WINDOWS.lock();
+            windows
+                .get(&hwnd)
+                .map(crate::win32::window_total_bounds)
+                .unwrap_or_default()
+        } else {
+            *lpRect
+        };
+        crate::win32::invalidate_window_rect(hwnd, rect);
+        crate::win32::post_message(hwnd, crate::win32::WM_PAINT, 0, 0);
+        TRUE
+    }
+
+    /// ValidateRect
+    pub unsafe fn validate_rect(hWnd: HWND, lpRect: *const RECT) -> BOOL {
+        let _ = lpRect;
+        let _ = crate::win32::consume_invalidated_rect(hWnd as u64);
         TRUE
     }
 
@@ -2639,7 +7216,7 @@ mod user32 {
         // WM_KEYDOWN -> WM_CHAR çevirisi
         if msg.message == crate::win32::WM_KEYDOWN {
             let vk = msg.wParam as u8;
-        // Dar ASCII dönüşümü; yalnız temel tek bayt karakter kümesini kapsar
+            // Dar ASCII dönüşümü; yalnız temel tek bayt karakter kümesini kapsar
             let ch = match vk {
                 0x30..=0x39 => vk,        // 0-9
                 0x41..=0x5A => vk + 0x20, // A-Z -> a-z
@@ -2698,6 +7275,120 @@ mod user32 {
         let hwnd = hWnd as u64;
 
         match Msg {
+            crate::win32::WM_NCCALCSIZE => {
+                if lParam != 0 {
+                    let windows = crate::win32::WIN32_WINDOWS.lock();
+                    if let Some(window) = windows.get(&hwnd) {
+                        let (border, caption, menu) =
+                            crate::win32::window_nc_metrics(window.style, window.menu != 0);
+                        if wParam != 0 {
+                            let params = lParam as *mut NCCALCSIZE_PARAMS;
+                            if !params.is_null() {
+                                (*params).rgrc[0].left += border;
+                                (*params).rgrc[0].top += border + caption + menu;
+                                (*params).rgrc[0].right -= border;
+                                (*params).rgrc[0].bottom -= border;
+                            }
+                        } else {
+                            let rect = lParam as *mut RECT;
+                            if !rect.is_null() {
+                                (*rect).left += border;
+                                (*rect).top += border + caption + menu;
+                                (*rect).right -= border;
+                                (*rect).bottom -= border;
+                            }
+                        }
+                    }
+                }
+                0
+            }
+            crate::win32::WM_NCPAINT => {
+                let windows = crate::win32::WIN32_WINDOWS.lock();
+                if let Some(window) = windows.get(&hwnd) {
+                    let outer = crate::win32::window_total_bounds(window);
+                    let (client_left, client_top) = crate::win32::window_client_origin(window);
+                    let client = RECT {
+                        left: client_left,
+                        top: client_top,
+                        right: client_left + window.width,
+                        bottom: client_top + window.height,
+                    };
+                    let bands = [
+                        RECT {
+                            left: outer.left,
+                            top: outer.top,
+                            right: outer.right,
+                            bottom: client.top,
+                        },
+                        RECT {
+                            left: outer.left,
+                            top: client.top,
+                            right: client.left,
+                            bottom: outer.bottom,
+                        },
+                        RECT {
+                            left: client.right,
+                            top: client.top,
+                            right: outer.right,
+                            bottom: outer.bottom,
+                        },
+                        RECT {
+                            left: outer.left,
+                            top: client.bottom,
+                            right: outer.right,
+                            bottom: outer.bottom,
+                        },
+                    ];
+                    drop(windows);
+                    for band in bands {
+                        if band.left < band.right && band.top < band.bottom {
+                            crate::win32::invalidate_window_rect(hwnd, band);
+                        }
+                    }
+                } else {
+                    crate::win32::invalidate_window_rect(
+                        hwnd,
+                        RECT {
+                            left: 0,
+                            top: 0,
+                            right: 4096,
+                            bottom: 72,
+                        },
+                    );
+                }
+                crate::win32::blit_window_to_framebuffer(hwnd);
+                0
+            }
+            crate::win32::WM_GETDLGCODE => {
+                let windows = crate::win32::WIN32_WINDOWS.lock();
+                if let Some(window) = windows.get(&hwnd) {
+                    let class = window.class_name.as_str();
+                    if class.eq_ignore_ascii_case("Button") {
+                        if (window.style & crate::win32::BS_DEFPUSHBUTTON) != 0 {
+                            return (crate::win32::DLGC_BUTTON | crate::win32::DLGC_DEFPUSHBUTTON)
+                                as isize;
+                        }
+                        return (crate::win32::DLGC_BUTTON | crate::win32::DLGC_UNDEFPUSHBUTTON)
+                            as isize;
+                    }
+                    if class.eq_ignore_ascii_case("Static") {
+                        return crate::win32::DLGC_STATIC as isize;
+                    }
+                }
+                0
+            }
+            crate::win32::DM_GETDEFID => crate::win32::WIN32_DIALOGS
+                .lock()
+                .get(&hwnd)
+                .map(|state| ((state.default_id.max(0) as isize) << 16) | 1)
+                .unwrap_or(0),
+            crate::win32::DM_SETDEFID => {
+                if let Some(state) = crate::win32::WIN32_DIALOGS.lock().get_mut(&hwnd) {
+                    state.default_id = wParam as INT;
+                    return 1;
+                }
+                0
+            }
             0x0010 => {
                 // WM_CLOSE
                 // Pencereyi kapat
@@ -2736,11 +7427,35 @@ mod user32 {
             bk_mode: 2,            // OPAQUE
             pen_x: 0,
             pen_y: 0,
+            selected_pen: BLACK_PEN as HPEN,
+            selected_brush: WHITE_BRUSH as HBRUSH,
+            selected_font: DEFAULT_GUI_FONT as HFONT,
+            selected_palette: 0,
+            clip_region: 0,
+            recording_metafile: 0,
+            rop2: 13,
+            graphics_mode: 1,
+            arc_direction: 1,
+            poly_fill_mode: 1,
+            stretch_blt_mode: 1,
+            path_active: false,
+            path_closed: false,
+            path_points: Vec::new(),
+            map_mode: 1,
+            viewport_org: POINT::default(),
+            window_org: POINT::default(),
+            world_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            device_kind: crate::win32::Win32DcKind::Window,
+            device_name: String::new(),
+            current_print_job: 0,
+            page_active: false,
+            save_stack: Vec::new(),
             font_height: 16,
             font_weight: 400,
         };
 
         crate::win32::WIN32_DCS.lock().insert(hdc, dc);
+        crate::win32::register_gdi_handle(hdc, crate::win32::OBJ_DC as DWORD, false);
 
         crate::serial_println!("[WIN32] GetDC: hwnd={:#x} -> hdc={:#x}", hwnd, hdc);
         hdc as HDC
@@ -2753,13 +7468,25 @@ mod user32 {
 
     /// SetWindowTextA
     pub unsafe fn set_window_text_a(hWnd: HWND, lpString: LPCSTR) -> BOOL {
-        let mut title = String::new();
-        let mut ptr = lpString;
-        while !ptr.is_null() && *ptr != 0 {
-            title.push(*ptr as u8 as char);
-            ptr = ptr.add(1);
-        }
-        crate::serial_println!("[WIN32] SetWindowTextA: {}", title);
+        let title = read_ansi_string(lpString);
+        let hwnd = hWnd as u64;
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&hwnd) else {
+            return FALSE;
+        };
+        window.title = title;
+        drop(windows);
+        crate::win32::invalidate_window_rect(
+            hwnd,
+            RECT {
+                left: 0,
+                top: 0,
+                right: 4096,
+                bottom: 32,
+            },
+        );
+        crate::win32::post_message(hwnd, crate::win32::WM_NCPAINT, 0, 0);
+        crate::win32::post_message(hwnd, crate::win32::WM_PAINT, 0, 0);
         TRUE
     }
 
@@ -2768,10 +7495,14 @@ mod user32 {
         if lpRect.is_null() {
             return FALSE;
         }
+        let windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(win) = windows.get(&(hWnd as u64)) else {
+            return FALSE;
+        };
         (*lpRect).left = 0;
         (*lpRect).top = 0;
-        (*lpRect).right = 640;
-        (*lpRect).bottom = 480;
+        (*lpRect).right = win.width;
+        (*lpRect).bottom = win.height;
         TRUE
     }
 
@@ -2781,18 +7512,42 @@ mod user32 {
 
     /// DestroyWindow
     pub unsafe fn destroy_window(hWnd: HWND) -> BOOL {
-        crate::serial_println!("[WIN32] DestroyWindow: {}", hWnd);
+        let hwnd = hWnd as u64;
+        let removed = crate::win32::WIN32_WINDOWS.lock().remove(&hwnd);
+        if removed.is_none() {
+            return FALSE;
+        }
+        if crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed) == hwnd {
+            crate::win32::ACTIVE_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        if crate::win32::FOCUSED_HWND.load(core::sync::atomic::Ordering::Relaxed) == hwnd {
+            crate::win32::FOCUSED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        if crate::win32::CAPTURED_HWND.load(core::sync::atomic::Ordering::Relaxed) == hwnd {
+            crate::win32::CAPTURED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        crate::win32::post_message(hwnd, crate::win32::WM_DESTROY, 0, 0);
         TRUE
     }
 
     /// IsWindow
     pub unsafe fn is_window(hWnd: HWND) -> BOOL {
-        TRUE
+        if crate::win32::WIN32_WINDOWS
+            .lock()
+            .contains_key(&(hWnd as u64))
+        {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 
     /// IsWindowVisible
     pub unsafe fn is_window_visible(hWnd: HWND) -> BOOL {
-        TRUE
+        match crate::win32::WIN32_WINDOWS.lock().get(&(hWnd as u64)) {
+            Some(window) if window.visible => TRUE,
+            _ => FALSE,
+        }
     }
 
     /// IsWindowEnabled
@@ -2814,7 +7569,39 @@ mod user32 {
         nHeight: INT,
         bRepaint: BOOL,
     ) -> BOOL {
-        crate::serial_println!("[WIN32] MoveWindow: {},{} {},{}", x, y, nWidth, nHeight);
+        let hwnd = hWnd as u64;
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(win) = windows.get_mut(&hwnd) else {
+            return FALSE;
+        };
+        let old_rect = crate::win32::window_total_bounds(win);
+        win.x = x;
+        win.y = y;
+        if nWidth > 0 && nHeight > 0 && (win.width != nWidth || win.height != nHeight) {
+            win.width = nWidth;
+            win.height = nHeight;
+            win.surface
+                .resize((nWidth * nHeight * 4).max(0) as usize, 0);
+        }
+        let new_rect = crate::win32::window_total_bounds(win);
+        drop(windows);
+        crate::win32::invalidate_window_rect(hwnd, old_rect);
+        crate::win32::invalidate_window_rect(hwnd, new_rect);
+        crate::win32::post_message(
+            hwnd,
+            crate::win32::WM_MOVE,
+            0,
+            (((y as i64) & 0xFFFF) << 16) | ((x as i64) & 0xFFFF),
+        );
+        crate::win32::post_message(
+            hwnd,
+            crate::win32::WM_SIZE,
+            0,
+            (((nHeight as i64) & 0xFFFF) << 16) | ((nWidth as i64) & 0xFFFF),
+        );
+        if bRepaint != FALSE {
+            crate::win32::post_message(hwnd, crate::win32::WM_PAINT, 0, 0);
+        }
         TRUE
     }
 
@@ -2828,6 +7615,28 @@ mod user32 {
         cy: INT,
         uFlags: UINT,
     ) -> BOOL {
+        let _ = hWndInsertAfter;
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(win) = windows.get_mut(&(hWnd as u64)) else {
+            return FALSE;
+        };
+        if (uFlags & 0x0002) == 0 {
+            win.x = x;
+            win.y = y;
+        }
+        if (uFlags & 0x0001) == 0 && cx > 0 && cy > 0 {
+            win.width = cx;
+            win.height = cy;
+            win.surface.resize((cx * cy * 4) as usize, 0);
+        }
+        if (uFlags & 0x0080) != 0 {
+            win.visible = false;
+        }
+        if (uFlags & 0x0040) != 0 {
+            win.visible = true;
+        }
+        drop(windows);
+        crate::win32::post_message(hWnd as u64, crate::win32::WM_PAINT, 0, 0);
         TRUE
     }
 
@@ -2836,31 +7645,58 @@ mod user32 {
         if lpRect.is_null() {
             return FALSE;
         }
-        (*lpRect).left = 0;
-        (*lpRect).top = 0;
-        (*lpRect).right = 640;
-        (*lpRect).bottom = 480;
+        let windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(win) = windows.get(&(hWnd as u64)) else {
+            return FALSE;
+        };
+        *lpRect = crate::win32::window_total_bounds(win);
         TRUE
     }
 
     /// GetWindowTextA
     pub unsafe fn get_window_text_a(hWnd: HWND, lpString: LPSTR, nMaxCount: INT) -> INT {
-        0
+        if lpString.is_null() || nMaxCount <= 0 {
+            return 0;
+        }
+        let windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(win) = windows.get(&(hWnd as u64)) else {
+            *lpString = 0;
+            return 0;
+        };
+        let bytes = win.title.as_bytes();
+        let copy_len = bytes.len().min((nMaxCount - 1).max(0) as usize);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr() as *const i8, lpString, copy_len);
+        *lpString.add(copy_len) = 0;
+        copy_len as INT
     }
 
     /// GetWindowTextLengthA
     pub unsafe fn get_window_text_length_a(hWnd: HWND) -> INT {
-        0
+        crate::win32::WIN32_WINDOWS
+            .lock()
+            .get(&(hWnd as u64))
+            .map(|w| w.title.len() as INT)
+            .unwrap_or(0)
     }
 
     /// GetParent
     pub unsafe fn get_parent(hWnd: HWND) -> HWND {
-        0
+        crate::win32::WIN32_WINDOWS
+            .lock()
+            .get(&(hWnd as u64))
+            .map(|w| w.parent as HWND)
+            .unwrap_or(0)
     }
 
     /// SetParent
     pub unsafe fn set_parent(hWndChild: HWND, hWndNewParent: HWND) -> HWND {
-        0
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&(hWndChild as u64)) else {
+            return 0;
+        };
+        let previous = window.parent as HWND;
+        window.parent = hWndNewParent as u64;
+        previous
     }
 
     /// GetDesktopWindow
@@ -2870,52 +7706,122 @@ mod user32 {
 
     /// GetForegroundWindow
     pub unsafe fn get_foreground_window() -> HWND {
-        1 as HWND
+        crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed) as HWND
     }
 
     /// SetForegroundWindow
     pub unsafe fn set_foreground_window(hWnd: HWND) -> BOOL {
+        if !crate::win32::WIN32_WINDOWS
+            .lock()
+            .contains_key(&(hWnd as u64))
+        {
+            return FALSE;
+        }
+        let previous = get_foreground_window();
+        if previous == hWnd {
+            return TRUE;
+        }
+        if previous != 0 {
+            crate::win32::post_message(
+                previous as u64,
+                crate::win32::WM_NCACTIVATE,
+                FALSE as u64,
+                hWnd as i64,
+            );
+            crate::win32::post_message(
+                previous as u64,
+                crate::win32::WM_ACTIVATE,
+                WA_INACTIVE as u64,
+                hWnd as i64,
+            );
+            crate::win32::post_message(previous as u64, crate::win32::WM_NCPAINT, 0, 0);
+        }
+        crate::win32::ACTIVE_HWND.store(hWnd as u64, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::post_message(
+            hWnd as u64,
+            crate::win32::WM_NCACTIVATE,
+            TRUE as u64,
+            previous as i64,
+        );
+        crate::win32::post_message(
+            hWnd as u64,
+            crate::win32::WM_ACTIVATE,
+            WA_ACTIVE as u64,
+            previous as i64,
+        );
+        crate::win32::post_message(hWnd as u64, crate::win32::WM_NCPAINT, 0, 0);
         TRUE
     }
 
     /// GetActiveWindow
     pub unsafe fn get_active_window() -> HWND {
-        1 as HWND
+        get_foreground_window()
     }
 
     /// SetActiveWindow
     pub unsafe fn set_active_window(hWnd: HWND) -> HWND {
-        hWnd
+        let previous = get_active_window();
+        let _ = set_foreground_window(hWnd);
+        previous
     }
 
     /// GetFocus
     pub unsafe fn get_focus() -> HWND {
-        1 as HWND
+        crate::win32::FOCUSED_HWND.load(core::sync::atomic::Ordering::Relaxed) as HWND
     }
 
     /// SetFocus
     pub unsafe fn set_focus(hWnd: HWND) -> HWND {
-        hWnd
+        let previous = get_focus();
+        let hwnd = hWnd as u64;
+        if !crate::win32::WIN32_WINDOWS.lock().contains_key(&hwnd) {
+            return 0;
+        }
+        if previous != 0 && previous != hWnd {
+            crate::win32::post_message(previous as u64, crate::win32::WM_KILLFOCUS, hWnd as u64, 0);
+            crate::win32::post_message(previous as u64, crate::win32::WM_NCPAINT, 0, 0);
+        }
+        crate::win32::FOCUSED_HWND.store(hwnd, core::sync::atomic::Ordering::Relaxed);
+        if crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed) != hwnd {
+            let _ = set_foreground_window(hWnd);
+        }
+        crate::win32::post_message(hwnd, crate::win32::WM_SETFOCUS, previous as u64, 0);
+        crate::win32::post_message(hwnd, crate::win32::WM_NCPAINT, 0, 0);
+        previous
     }
 
     /// GetCapture
     pub unsafe fn get_capture() -> HWND {
-        0
+        crate::win32::CAPTURED_HWND.load(core::sync::atomic::Ordering::Relaxed) as HWND
     }
 
     /// SetCapture
     pub unsafe fn set_capture(hWnd: HWND) -> HWND {
-        hWnd
+        let previous = get_capture();
+        crate::win32::CAPTURED_HWND.store(hWnd as u64, core::sync::atomic::Ordering::Relaxed);
+        previous
     }
 
     /// ReleaseCapture
     pub unsafe fn release_capture() -> BOOL {
+        crate::win32::CAPTURED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
         TRUE
     }
 
     /// FindWindowA
     pub unsafe fn find_window_a(lpClassName: LPCSTR, lpWindowName: LPCSTR) -> HWND {
-        0
+        let class_name = read_ansi_string(lpClassName);
+        let window_name = read_ansi_string(lpWindowName);
+        let windows = crate::win32::WIN32_WINDOWS.lock();
+        windows
+            .values()
+            .find(|win| {
+                (class_name.is_empty() || win.class_name == class_name)
+                    && (window_name.is_empty() || win.title == window_name)
+                    && win.parent == 0
+            })
+            .map(|win| win.hwnd as HWND)
+            .unwrap_or(0)
     }
 
     /// FindWindowExA
@@ -2925,6 +7831,29 @@ mod user32 {
         lpszClass: LPCSTR,
         lpszWindow: LPCSTR,
     ) -> HWND {
+        let class_name = read_ansi_string(lpszClass);
+        let window_name = read_ansi_string(lpszWindow);
+        let parent = hWndParent as u64;
+        let child_after = hWndChildAfter as u64;
+        let mut started = child_after == 0;
+        let windows = crate::win32::WIN32_WINDOWS.lock();
+        for win in windows.values() {
+            if win.parent != parent {
+                continue;
+            }
+            if !started {
+                if win.hwnd == child_after {
+                    started = true;
+                }
+                continue;
+            }
+            if (!class_name.is_empty() && win.class_name != class_name)
+                || (!window_name.is_empty() && win.title != window_name)
+            {
+                continue;
+            }
+            return win.hwnd as HWND;
+        }
         0
     }
 
@@ -2938,12 +7867,38 @@ mod user32 {
         lpEnumFunc: Option<unsafe extern "system" fn(HWND, usize) -> BOOL>,
         lParam: usize,
     ) -> BOOL {
+        let Some(callback) = lpEnumFunc else {
+            return FALSE;
+        };
+        let hwnds: Vec<u64> = crate::win32::WIN32_WINDOWS
+            .lock()
+            .values()
+            .filter(|w| w.parent == 0)
+            .map(|w| w.hwnd)
+            .collect();
+        for hwnd in hwnds {
+            if callback(hwnd as HWND, lParam) == FALSE {
+                return FALSE;
+            }
+        }
         TRUE
     }
 
     /// GetClassNameA
     pub unsafe fn get_class_name_a(hWnd: HWND, lpClassName: LPSTR, nMaxCount: INT) -> INT {
-        0
+        if lpClassName.is_null() || nMaxCount <= 0 {
+            return 0;
+        }
+        let windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(win) = windows.get(&(hWnd as u64)) else {
+            *lpClassName = 0;
+            return 0;
+        };
+        let bytes = win.class_name.as_bytes();
+        let copy_len = bytes.len().min((nMaxCount - 1).max(0) as usize);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr() as *const i8, lpClassName, copy_len);
+        *lpClassName.add(copy_len) = 0;
+        copy_len as INT
     }
 
     // ========================================================================
@@ -2958,17 +7913,66 @@ mod user32 {
         wMsgFilterMax: UINT,
         wRemoveMsg: UINT,
     ) -> BOOL {
-        FALSE
+        if lpMsg.is_null() {
+            return FALSE;
+        }
+        let hwnd_filter = hWnd as u64;
+        let mut queue = crate::win32::MSG_QUEUE.lock();
+        let predicate = |m: &crate::win32::Win32Msg| {
+            (hwnd_filter == 0 || m.hwnd == hwnd_filter || m.hwnd == 0)
+                && (wMsgFilterMin == 0 || m.message >= wMsgFilterMin)
+                && (wMsgFilterMax == 0 || m.message <= wMsgFilterMax)
+        };
+        let Some(index) = queue.iter().position(predicate) else {
+            return FALSE;
+        };
+        let msg = if (wRemoveMsg & 0x0001) != 0 {
+            queue.remove(index)
+        } else {
+            queue[index]
+        };
+        (*lpMsg).hwnd = msg.hwnd as HWND;
+        (*lpMsg).message = msg.message;
+        (*lpMsg).wParam = msg.wparam as usize;
+        (*lpMsg).lParam = msg.lparam as isize;
+        (*lpMsg).time = msg.time;
+        (*lpMsg).pt.x = msg.pt_x;
+        (*lpMsg).pt.y = msg.pt_y;
+        TRUE
     }
 
     /// PostMessageA
     pub unsafe fn post_message_a(hWnd: HWND, Msg: UINT, wParam: usize, lParam: isize) -> BOOL {
-        TRUE
+        if hWnd != 0
+            && !crate::win32::WIN32_WINDOWS
+                .lock()
+                .contains_key(&(hWnd as u64))
+        {
+            return FALSE;
+        }
+        if crate::win32::post_message(hWnd as u64, Msg, wParam as u64, lParam as i64) {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 
     /// SendMessageA
     pub unsafe fn send_message_a(hWnd: HWND, Msg: UINT, wParam: usize, lParam: isize) -> isize {
-        0
+        if hWnd == 0 {
+            return 0;
+        }
+        let hwnd = hWnd as u64;
+        let wndproc = {
+            let windows = crate::win32::WIN32_WINDOWS.lock();
+            windows.get(&hwnd).map(|w| w.wndproc).unwrap_or(0)
+        };
+        if wndproc != 0 {
+            type WndProcFn = unsafe extern "system" fn(HWND, UINT, usize, isize) -> isize;
+            let func: WndProcFn = core::mem::transmute(wndproc);
+            return func(hWnd, Msg, wParam, lParam);
+        }
+        def_window_proc_a(hWnd, Msg, wParam, lParam)
     }
 
     /// SendMessageTimeoutA
@@ -2991,7 +7995,7 @@ mod user32 {
         wParam: usize,
         lParam: isize,
     ) -> BOOL {
-        TRUE
+        post_message_a(hWnd, Msg, wParam, lParam)
     }
 
     /// PostThreadMessageA
@@ -3040,38 +8044,245 @@ mod user32 {
         0xC000
     }
 
+    /// TranslateAcceleratorA
+    pub unsafe fn translate_accelerator_a(hWnd: HWND, hAccTable: HACCEL, lpMsg: *const MSG) -> INT {
+        if lpMsg.is_null() {
+            return 0;
+        }
+        let msg = &*lpMsg;
+        if msg.message != crate::win32::WM_KEYDOWN && msg.message != crate::win32::WM_SYSKEYDOWN {
+            return 0;
+        }
+        let tables = crate::win32::WIN32_ACCEL_TABLES.lock();
+        let Some(table) = tables.get(&(hAccTable as u64)) else {
+            return 0;
+        };
+        let key = msg.wParam as WORD;
+        let keyboard = crate::win32::KEYBOARD_STATE.lock();
+        let modifier_down = |vk: usize| -> bool { keyboard[vk] & 0x80 != 0 };
+        if let Some(entry) = table.entries.iter().find(|entry| {
+            if entry.key != key {
+                return false;
+            }
+            let virt = entry.f_virt;
+            let expects_shift = virt & crate::win32::FSHIFT as u8 != 0;
+            let expects_ctrl = virt & crate::win32::FCONTROL as u8 != 0;
+            let expects_alt = virt & crate::win32::FALT as u8 != 0;
+            if expects_shift != modifier_down(crate::win32::VK_SHIFT as usize) {
+                return false;
+            }
+            if expects_ctrl != modifier_down(crate::win32::VK_CONTROL as usize) {
+                return false;
+            }
+            if expects_alt != modifier_down(crate::win32::VK_MENU as usize) {
+                return false;
+            }
+            true
+        }) {
+            crate::win32::post_message(hWnd as u64, crate::win32::WM_COMMAND, entry.cmd as u64, 0);
+            return 1;
+        }
+        0
+    }
+
+    /// CreateAcceleratorTableA
+    pub unsafe fn create_accelerator_table_a(lpaccel: *const ACCEL, cEntries: INT) -> HACCEL {
+        if lpaccel.is_null() || cEntries <= 0 {
+            return 0;
+        }
+        let handle = crate::win32::NEXT_HACCEL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let mut entries = Vec::with_capacity(cEntries as usize);
+        for index in 0..cEntries as usize {
+            let accel = *lpaccel.add(index);
+            entries.push(crate::win32::Win32AccelEntry {
+                f_virt: accel.fVirt,
+                key: accel.key,
+                cmd: accel.cmd,
+            });
+        }
+        crate::win32::WIN32_ACCEL_TABLES
+            .lock()
+            .insert(handle, crate::win32::Win32AccelTable { handle, entries });
+        handle as HACCEL
+    }
+
+    /// DestroyAcceleratorTable
+    pub unsafe fn destroy_accelerator_table(hAccel: HACCEL) -> BOOL {
+        if crate::win32::WIN32_ACCEL_TABLES
+            .lock()
+            .remove(&(hAccel as u64))
+            .is_some()
+        {
+            TRUE
+        } else {
+            FALSE
+        }
+    }
+
+    /// IsDialogMessageA
+    pub unsafe fn is_dialog_message_a(hDlg: HWND, lpMsg: *mut MSG) -> BOOL {
+        if lpMsg.is_null() {
+            return FALSE;
+        }
+        let msg = &mut *lpMsg;
+        if msg.hwnd != hDlg && get_parent(msg.hwnd) != hDlg {
+            return FALSE;
+        }
+        match msg.message {
+            crate::win32::WM_KEYDOWN => match msg.wParam as INT {
+                crate::win32::VK_TAB => {
+                    let previous = (get_key_state(crate::win32::VK_SHIFT) as u16 & 0x8000) != 0;
+                    let next = crate::win32::dialog_nav_target(
+                        hDlg,
+                        if previous {
+                            crate::win32::Win32DialogNav::Previous
+                        } else {
+                            crate::win32::Win32DialogNav::Next
+                        },
+                    );
+                    if next != 0 {
+                        let _ = set_focus(next);
+                        if let Some(state) =
+                            crate::win32::WIN32_DIALOGS.lock().get_mut(&(hDlg as u64))
+                        {
+                            state.focused_id = crate::win32::WIN32_WINDOWS
+                                .lock()
+                                .get(&(next as u64))
+                                .map(|w| w.menu as INT)
+                                .unwrap_or(0);
+                        }
+                    }
+                    TRUE
+                }
+                crate::win32::VK_RETURN => {
+                    let command_id = crate::win32::WIN32_DIALOGS
+                        .lock()
+                        .get(&(hDlg as u64))
+                        .map(|state| {
+                            if state.focused_id != 0 {
+                                state.focused_id
+                            } else {
+                                state.default_id
+                            }
+                        })
+                        .unwrap_or(crate::win32::IDOK);
+                    crate::win32::post_message(
+                        hDlg as u64,
+                        crate::win32::WM_COMMAND,
+                        command_id as u64,
+                        0,
+                    );
+                    TRUE
+                }
+                crate::win32::VK_ESCAPE => {
+                    let _ = end_dialog(hDlg, crate::win32::IDCANCEL as isize);
+                    TRUE
+                }
+                crate::win32::VK_LEFT | crate::win32::VK_UP => {
+                    let target = crate::win32::dialog_nav_target(
+                        hDlg,
+                        crate::win32::Win32DialogNav::Previous,
+                    );
+                    if target != 0 {
+                        let _ = set_focus(target);
+                    }
+                    TRUE
+                }
+                crate::win32::VK_RIGHT | crate::win32::VK_DOWN => {
+                    let target =
+                        crate::win32::dialog_nav_target(hDlg, crate::win32::Win32DialogNav::Next);
+                    if target != 0 {
+                        let _ = set_focus(target);
+                    }
+                    TRUE
+                }
+                _ => FALSE,
+            },
+            crate::win32::WM_NEXTDLGCTL => {
+                let target = if msg.wParam != 0 {
+                    msg.wParam as HWND
+                } else {
+                    get_next_dlg_tab_item(hDlg, get_focus(), FALSE)
+                };
+                if target != 0 {
+                    let _ = set_focus(target);
+                }
+                TRUE
+            }
+            _ => FALSE,
+        }
+    }
+
     // ========================================================================
     // INPUT - KEYBOARD
     // ========================================================================
 
     /// GetKeyState
     pub unsafe fn get_key_state(nVirtKey: INT) -> SHORT {
-        0
+        if !(0..=255).contains(&nVirtKey) {
+            return 0;
+        }
+        let state = crate::win32::KEYBOARD_STATE.lock()[nVirtKey as usize];
+        let down = if state & 0x80 != 0 { 0x8000 } else { 0 };
+        let toggle = if state & 0x01 != 0 { 0x0001 } else { 0 };
+        (down | toggle) as SHORT
     }
 
     /// GetAsyncKeyState
     pub unsafe fn get_async_key_state(vKey: INT) -> SHORT {
-        0
+        if !(0..=255).contains(&vKey) {
+            return 0;
+        }
+        if crate::win32::KEYBOARD_STATE.lock()[vKey as usize] & 0x80 != 0 {
+            0x8000u16 as SHORT
+        } else {
+            0
+        }
     }
 
     /// GetKeyboardState
     pub unsafe fn get_keyboard_state(lpKeyState: *mut BYTE) -> BOOL {
-        if !lpKeyState.is_null() {
-            for i in 0..256 {
-                *lpKeyState.add(i) = 0;
-            }
+        if lpKeyState.is_null() {
+            return FALSE;
+        }
+        let keyboard = crate::win32::KEYBOARD_STATE.lock();
+        for i in 0..256 {
+            *lpKeyState.add(i) = keyboard[i];
         }
         TRUE
     }
 
     /// SetKeyboardState
     pub unsafe fn set_keyboard_state(lpKeyState: *const BYTE) -> BOOL {
+        if lpKeyState.is_null() {
+            return FALSE;
+        }
+        let mut keyboard = crate::win32::KEYBOARD_STATE.lock();
+        for i in 0..256 {
+            keyboard[i] = *lpKeyState.add(i);
+        }
         TRUE
     }
 
     /// keybd_event
     pub unsafe fn keybd_event(bVk: BYTE, bScan: BYTE, dwFlags: DWORD, dwExtraInfo: usize) {
-        let _ = (bVk, bScan, dwFlags, dwExtraInfo);
+        let _ = (bScan, dwExtraInfo);
+        let mut keyboard = crate::win32::KEYBOARD_STATE.lock();
+        let index = bVk as usize;
+        if index >= keyboard.len() {
+            return;
+        }
+        if dwFlags & crate::win32::KEYEVENTF_KEYUP != 0 {
+            keyboard[index] &= 0x01;
+            return;
+        }
+        keyboard[index] |= 0x80;
+        if matches!(
+            bVk as INT,
+            crate::win32::VK_CAPITAL | crate::win32::VK_NUMLOCK | crate::win32::VK_SCROLL
+        ) {
+            keyboard[index] ^= 0x01;
+        }
     }
 
     /// MapVirtualKeyA
@@ -3189,19 +8400,269 @@ mod user32 {
     // MENUS
     // ========================================================================
 
+    fn resolve_menu_item_index(menu: &Win32Menu, key: UINT, flags: UINT) -> Option<usize> {
+        if (flags & MF_BYPOSITION) != 0 {
+            let index = key as usize;
+            if index < menu.items.len() {
+                Some(index)
+            } else {
+                None
+            }
+        } else {
+            menu.items.iter().position(|item| item.id as UINT == key)
+        }
+    }
+
+    unsafe fn align_dword_u16(ptr: *const u16) -> *const u16 {
+        let addr = ptr as usize;
+        ((addr + 3) & !3) as *const u16
+    }
+
+    unsafe fn skip_dialog_sz(ptr: *const u16) -> *const u16 {
+        if ptr.is_null() {
+            return ptr;
+        }
+        if *ptr == 0x0000 {
+            return ptr.add(1);
+        }
+        if *ptr == 0xFFFF {
+            return ptr.add(2);
+        }
+        let mut cursor = ptr;
+        while *cursor != 0 {
+            cursor = cursor.add(1);
+        }
+        cursor.add(1)
+    }
+
+    unsafe fn read_utf16_z(ptr: *const u16) -> (String, *const u16) {
+        if ptr.is_null() {
+            return (String::new(), ptr);
+        }
+        let mut units = Vec::new();
+        let mut cursor = ptr;
+        while *cursor != 0 {
+            units.push(*cursor);
+            cursor = cursor.add(1);
+        }
+        (String::from_utf16_lossy(&units), cursor.add(1))
+    }
+
+    unsafe fn dialog_class_name(ptr: *const u16) -> (String, *const u16) {
+        if ptr.is_null() {
+            return (String::new(), ptr);
+        }
+        if *ptr == 0xFFFF {
+            let atom = *ptr.add(1);
+            let class = match atom {
+                0x0080 => "Button",
+                0x0081 => "Edit",
+                0x0082 => "Static",
+                0x0083 => "ListBox",
+                0x0084 => "ScrollBar",
+                0x0085 => "ComboBox",
+                _ => "Static",
+            };
+            return (class.to_string(), ptr.add(2));
+        }
+        read_utf16_z(ptr)
+    }
+
+    unsafe fn create_dialog_from_template(
+        template: *const crate::win32::DLGTEMPLATE,
+        hWndParent: HWND,
+        lpDialogFunc: Option<unsafe extern "system" fn(HWND, UINT, usize, isize) -> isize>,
+        dwInitParam: usize,
+    ) -> HWND {
+        if template.is_null() {
+            return 0;
+        }
+        let raw = template as *const u16;
+        let extended = *raw.add(1) == crate::win32::DIALOGEX_SIGNATURE;
+        let (style, ex_style, cdit, x, y, cx, cy, mut cursor) = if extended {
+            let dlg = &*(template as *const crate::win32::DLGTEMPLATEEX);
+            (
+                dlg.style,
+                dlg.exStyle,
+                dlg.cDlgItems,
+                dlg.x,
+                dlg.y,
+                dlg.cx,
+                dlg.cy,
+                (template as *const u16).add(13),
+            )
+        } else {
+            let dlg = &*template;
+            (
+                dlg.style,
+                dlg.dwExtendedStyle,
+                dlg.cdit,
+                dlg.x,
+                dlg.y,
+                dlg.cx,
+                dlg.cy,
+                (template as *const u16).add(9),
+            )
+        };
+        cursor = skip_dialog_sz(cursor);
+        cursor = skip_dialog_sz(cursor);
+        let (title, next) = read_utf16_z(cursor);
+        cursor = next;
+        if (style & (crate::win32::DS_SETFONT | crate::win32::DS_SHELLFONT)) != 0 {
+            cursor = cursor.add(1);
+            if extended {
+                cursor = cursor.add(2);
+            }
+            cursor = skip_dialog_sz(cursor);
+        }
+        let title_bytes = {
+            let mut bytes = title.into_bytes();
+            bytes.push(0);
+            bytes
+        };
+        let hwnd = create_window_ex_a(
+            ex_style,
+            b"#32770\0".as_ptr() as LPCSTR,
+            title_bytes.as_ptr() as LPCSTR,
+            style,
+            x as INT,
+            y as INT,
+            (cx as INT).max(80),
+            (cy as INT).max(40),
+            hWndParent,
+            0,
+            0,
+            core::ptr::null_mut(),
+        );
+        if hwnd == 0 {
+            return 0;
+        }
+        crate::win32::WIN32_DIALOGS.lock().insert(
+            hwnd as u64,
+            crate::win32::Win32DialogState {
+                hwnd,
+                owner: hWndParent,
+                modal: false,
+                ended: false,
+                result: 0,
+                default_id: crate::win32::IDOK,
+                focused_id: 0,
+                is_extended: extended,
+            },
+        );
+        cursor = align_dword_u16(cursor);
+        let mut default_id = crate::win32::IDOK;
+        for _ in 0..cdit {
+            let (item_style, item_ex_style, item_x, item_y, item_cx, item_cy, item_id, next_cursor) =
+                if extended {
+                    let item = &*(cursor as *const crate::win32::DLGITEMTEMPLATEEX);
+                    (
+                        item.style,
+                        item.exStyle,
+                        item.x,
+                        item.y,
+                        item.cx,
+                        item.cy,
+                        item.id,
+                        (cursor as *const u8)
+                            .add(core::mem::size_of::<crate::win32::DLGITEMTEMPLATEEX>())
+                            as *const u16,
+                    )
+                } else {
+                    let item = &*(cursor as *const crate::win32::DLGITEMTEMPLATE);
+                    (
+                        item.style,
+                        item.dwExtendedStyle,
+                        item.x,
+                        item.y,
+                        item.cx,
+                        item.cy,
+                        item.id as DWORD,
+                        (cursor as *const u8)
+                            .add(core::mem::size_of::<crate::win32::DLGITEMTEMPLATE>())
+                            as *const u16,
+                    )
+                };
+            let (class_name, next_cursor) = dialog_class_name(next_cursor);
+            let (caption, after_caption) = read_utf16_z(next_cursor);
+            cursor = skip_dialog_sz(after_caption);
+            cursor = align_dword_u16(cursor);
+            let mut class_bytes = class_name.into_bytes();
+            class_bytes.push(0);
+            let mut caption_bytes = caption.into_bytes();
+            caption_bytes.push(0);
+            if (item_style & crate::win32::BS_DEFPUSHBUTTON) != 0 {
+                default_id = item_id as INT;
+            }
+            let _child = create_window_ex_a(
+                item_ex_style,
+                class_bytes.as_ptr() as LPCSTR,
+                caption_bytes.as_ptr() as LPCSTR,
+                item_style | WS_CHILD | WS_VISIBLE,
+                item_x as INT,
+                item_y as INT,
+                (item_cx as INT).max(8),
+                (item_cy as INT).max(8),
+                hwnd,
+                item_id as HMENU,
+                0,
+                core::ptr::null_mut(),
+            );
+        }
+        if let Some(state) = crate::win32::WIN32_DIALOGS.lock().get_mut(&(hwnd as u64)) {
+            state.default_id = default_id;
+            state.focused_id = default_id;
+        }
+        if let Some(proc_fn) = lpDialogFunc {
+            let _ = proc_fn(
+                hwnd,
+                crate::win32::WM_INITDIALOG,
+                hWndParent as usize,
+                dwInitParam as isize,
+            );
+        }
+        hwnd
+    }
+
     /// CreateMenu
     pub unsafe fn create_menu() -> HMENU {
-        1 as HMENU
+        let handle = crate::win32::NEXT_HMENU.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_MENUS.lock().insert(
+            handle,
+            crate::win32::Win32Menu {
+                handle,
+                popup: false,
+                items: Vec::new(),
+            },
+        );
+        handle as HMENU
     }
 
     /// CreatePopupMenu
     pub unsafe fn create_popup_menu() -> HMENU {
-        2 as HMENU
+        let handle = crate::win32::NEXT_HMENU.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_MENUS.lock().insert(
+            handle,
+            crate::win32::Win32Menu {
+                handle,
+                popup: true,
+                items: Vec::new(),
+            },
+        );
+        handle as HMENU
     }
 
     /// DestroyMenu
     pub unsafe fn destroy_menu(hMenu: HMENU) -> BOOL {
-        TRUE
+        if crate::win32::WIN32_MENUS
+            .lock()
+            .remove(&(hMenu as u64))
+            .is_some()
+        {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 
     /// AppendMenuA
@@ -3211,6 +8672,22 @@ mod user32 {
         uIDNewItem: usize,
         lpNewItem: LPCSTR,
     ) -> BOOL {
+        let mut menus = crate::win32::WIN32_MENUS.lock();
+        let Some(menu) = menus.get_mut(&(hMenu as u64)) else {
+            return FALSE;
+        };
+        menu.items.push(crate::win32::Win32MenuItem {
+            id: uIDNewItem,
+            submenu: if (uFlags & MF_POPUP) != 0 {
+                uIDNewItem as HMENU
+            } else {
+                0
+            },
+            flags: uFlags,
+            text: read_ansi_string(lpNewItem),
+            checked: (uFlags & MF_CHECKED) != 0,
+            enabled: (uFlags & (MF_GRAYED | MF_DISABLED)) == 0,
+        });
         TRUE
     }
 
@@ -3222,6 +8699,28 @@ mod user32 {
         uIDNewItem: usize,
         lpNewItem: LPCSTR,
     ) -> BOOL {
+        let mut menus = crate::win32::WIN32_MENUS.lock();
+        let Some(menu) = menus.get_mut(&(hMenu as u64)) else {
+            return FALSE;
+        };
+        let item = crate::win32::Win32MenuItem {
+            id: uIDNewItem,
+            submenu: if (uFlags & MF_POPUP) != 0 {
+                uIDNewItem as HMENU
+            } else {
+                0
+            },
+            flags: uFlags,
+            text: read_ansi_string(lpNewItem),
+            checked: (uFlags & MF_CHECKED) != 0,
+            enabled: (uFlags & (MF_GRAYED | MF_DISABLED)) == 0,
+        };
+        let index = if (uFlags & MF_BYPOSITION) != 0 {
+            (uPosition as usize).min(menu.items.len())
+        } else {
+            resolve_menu_item_index(menu, uPosition, uFlags).unwrap_or(menu.items.len())
+        };
+        menu.items.insert(index, item);
         TRUE
     }
 
@@ -3233,31 +8732,103 @@ mod user32 {
         uIDNewItem: usize,
         lpNewItem: LPCSTR,
     ) -> BOOL {
+        let mut menus = crate::win32::WIN32_MENUS.lock();
+        let Some(menu) = menus.get_mut(&(hMnu as u64)) else {
+            return FALSE;
+        };
+        let Some(index) = resolve_menu_item_index(menu, uPosition, uFlags) else {
+            return FALSE;
+        };
+        menu.items[index] = crate::win32::Win32MenuItem {
+            id: uIDNewItem,
+            submenu: if (uFlags & MF_POPUP) != 0 {
+                uIDNewItem as HMENU
+            } else {
+                0
+            },
+            flags: uFlags,
+            text: read_ansi_string(lpNewItem),
+            checked: (uFlags & MF_CHECKED) != 0,
+            enabled: (uFlags & (MF_GRAYED | MF_DISABLED)) == 0,
+        };
         TRUE
     }
 
     /// RemoveMenu
     pub unsafe fn remove_menu(hMenu: HMENU, uPosition: UINT, uFlags: UINT) -> BOOL {
+        let mut menus = crate::win32::WIN32_MENUS.lock();
+        let Some(menu) = menus.get_mut(&(hMenu as u64)) else {
+            return FALSE;
+        };
+        let Some(index) = resolve_menu_item_index(menu, uPosition, uFlags) else {
+            return FALSE;
+        };
+        menu.items.remove(index);
         TRUE
     }
 
     /// DeleteMenu
     pub unsafe fn delete_menu(hMenu: HMENU, uPosition: UINT, uFlags: UINT) -> BOOL {
-        TRUE
+        remove_menu(hMenu, uPosition, uFlags)
     }
 
     /// SetMenu
     pub unsafe fn set_menu(hWnd: HWND, hMenu: HMENU) -> BOOL {
+        let hwnd = hWnd as u64;
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&hwnd) else {
+            return FALSE;
+        };
+        if hMenu != 0
+            && !crate::win32::WIN32_MENUS
+                .lock()
+                .contains_key(&(hMenu as u64))
+        {
+            return FALSE;
+        }
+        window.menu = hMenu;
+        drop(windows);
+        crate::win32::invalidate_window_rect(
+            hwnd,
+            RECT {
+                left: 0,
+                top: 0,
+                right: 4096,
+                bottom: 48,
+            },
+        );
+        crate::win32::post_message(hwnd, crate::win32::WM_INITMENUPOPUP, hMenu as u64, 0);
+        crate::win32::post_message(hwnd, crate::win32::WM_NCPAINT, 0, 0);
+        crate::win32::post_message(hwnd, crate::win32::WM_PAINT, 0, 0);
         TRUE
     }
 
     /// GetMenu
     pub unsafe fn get_menu(hWnd: HWND) -> HMENU {
-        0
+        crate::win32::WIN32_WINDOWS
+            .lock()
+            .get(&(hWnd as u64))
+            .map(|window| window.menu)
+            .unwrap_or(0)
     }
 
     /// DrawMenuBar
     pub unsafe fn draw_menu_bar(hWnd: HWND) -> BOOL {
+        if get_menu(hWnd) == 0 {
+            return FALSE;
+        }
+        let hwnd = hWnd as u64;
+        crate::win32::invalidate_window_rect(
+            hwnd,
+            RECT {
+                left: 0,
+                top: 0,
+                right: 4096,
+                bottom: 48,
+            },
+        );
+        crate::win32::post_message(hwnd, crate::win32::WM_NCPAINT, 0, 0);
+        crate::win32::post_message(hwnd, crate::win32::WM_PAINT, 0, 0);
         TRUE
     }
 
@@ -3271,17 +8842,74 @@ mod user32 {
         hWnd: HWND,
         prcRect: *const RECT,
     ) -> BOOL {
+        let _ = (nReserved, x, y, prcRect);
+        let menus = crate::win32::WIN32_MENUS.lock();
+        let Some(menu) = menus.get(&(hMenu as u64)) else {
+            return FALSE;
+        };
+        let Some(item) = menu.items.iter().find(|item| item.enabled && item.id != 0) else {
+            return FALSE;
+        };
+        if hWnd != 0 {
+            let hwnd = hWnd as u64;
+            *crate::win32::WIN32_MENU_LOOP_STATE.lock() = crate::win32::Win32MenuLoopState {
+                hwnd: hWnd,
+                menu: hMenu,
+                highlighted_id: item.id as UINT,
+            };
+            crate::win32::invalidate_window_rect(
+                hwnd,
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 4096,
+                    bottom: 48,
+                },
+            );
+            crate::win32::post_message(hwnd, crate::win32::WM_ENTERMENULOOP, 0, 0);
+            crate::win32::post_message(hwnd, crate::win32::WM_INITMENUPOPUP, hMenu as u64, 0);
+            crate::win32::post_message(
+                hwnd,
+                crate::win32::WM_MENUSELECT,
+                item.id as u64,
+                hMenu as i64,
+            );
+            if (uFlags & TPM_RETURNCMD) == 0 {
+                crate::win32::post_message(hwnd, crate::win32::WM_COMMAND, item.id as u64, 0);
+            }
+            crate::win32::post_message(hwnd, crate::win32::WM_EXITMENULOOP, 0, 0);
+            *crate::win32::WIN32_MENU_LOOP_STATE.lock() =
+                crate::win32::Win32MenuLoopState::default();
+            crate::win32::invalidate_window_rect(
+                hwnd,
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 4096,
+                    bottom: 48,
+                },
+            );
+        }
         TRUE
     }
 
     /// GetMenuItemCount
     pub unsafe fn get_menu_item_count(hMenu: HMENU) -> INT {
-        0
+        crate::win32::WIN32_MENUS
+            .lock()
+            .get(&(hMenu as u64))
+            .map(|menu| menu.items.len() as INT)
+            .unwrap_or(-1)
     }
 
     /// GetMenuItemID
     pub unsafe fn get_menu_item_id(hMenu: HMENU, nPos: INT) -> UINT {
-        0xFFFFFFFF
+        crate::win32::WIN32_MENUS
+            .lock()
+            .get(&(hMenu as u64))
+            .and_then(|menu| menu.items.get(nPos.max(0) as usize))
+            .map(|item| item.id as UINT)
+            .unwrap_or(0xFFFF_FFFF)
     }
 
     /// GetMenuStringA
@@ -3292,16 +8920,49 @@ mod user32 {
         nMaxCount: INT,
         uFlag: UINT,
     ) -> INT {
-        0
+        let menus = crate::win32::WIN32_MENUS.lock();
+        let Some(menu) = menus.get(&(hMenu as u64)) else {
+            return 0;
+        };
+        let item = if (uFlag & MF_BYPOSITION) != 0 {
+            menu.items.get(uItem as usize)
+        } else {
+            menu.items.iter().find(|item| item.id as UINT == uItem)
+        };
+        match item {
+            Some(item) => write_ansi_string(lpString, nMaxCount, &item.text),
+            None => 0,
+        }
     }
 
     /// CheckMenuItem
     pub unsafe fn check_menu_item(hMenu: HMENU, uIDCheckItem: UINT, uCheck: UINT) -> DWORD {
-        0xFFFFFFFF
+        let mut menus = crate::win32::WIN32_MENUS.lock();
+        let Some(menu) = menus.get_mut(&(hMenu as u64)) else {
+            return 0xFFFF_FFFF;
+        };
+        let Some(index) = resolve_menu_item_index(menu, uIDCheckItem, uCheck) else {
+            return 0xFFFF_FFFF;
+        };
+        let previous = if menu.items[index].checked {
+            MF_CHECKED
+        } else {
+            MF_UNCHECKED
+        };
+        menu.items[index].checked = (uCheck & MF_CHECKED) != 0;
+        previous as DWORD
     }
 
     /// EnableMenuItem
     pub unsafe fn enable_menu_item(hMenu: HMENU, uIDEnableItem: UINT, uEnable: UINT) -> BOOL {
+        let mut menus = crate::win32::WIN32_MENUS.lock();
+        let Some(menu) = menus.get_mut(&(hMenu as u64)) else {
+            return FALSE;
+        };
+        let Some(index) = resolve_menu_item_index(menu, uIDEnableItem, uEnable) else {
+            return FALSE;
+        };
+        menu.items[index].enabled = (uEnable & (MF_GRAYED | MF_DISABLED)) == 0;
         TRUE
     }
 
@@ -3345,11 +9006,117 @@ mod user32 {
         lpDialogFunc: Option<unsafe extern "system" fn(HWND, UINT, usize, isize) -> isize>,
         dwInitParam: usize,
     ) -> isize {
-        0
+        let dialog = create_dialog_param_a(
+            hInstance,
+            lpTemplateName,
+            hWndParent,
+            lpDialogFunc,
+            dwInitParam,
+        );
+        if dialog == 0 {
+            return -1;
+        }
+        if let Some(state) = crate::win32::WIN32_DIALOGS.lock().get_mut(&(dialog as u64)) {
+            state.modal = true;
+        }
+        if show_window(dialog, SW_SHOW) == FALSE {
+            return -1;
+        }
+        let mut msg = MSG {
+            hwnd: 0,
+            message: 0,
+            wParam: 0,
+            lParam: 0,
+            time: 0,
+            pt: POINT::default(),
+        };
+        loop {
+            let ended = crate::win32::WIN32_DIALOGS
+                .lock()
+                .get(&(dialog as u64))
+                .map(|state| state.ended)
+                .unwrap_or(true);
+            if ended {
+                break;
+            }
+            if get_message_a(&mut msg, 0, 0, 0) == FALSE {
+                break;
+            }
+            if is_dialog_message_a(dialog, &mut msg) == FALSE {
+                let _ = translate_message(&msg);
+                let _ = dispatch_message_a(&msg);
+            }
+        }
+        crate::win32::WIN32_DIALOGS
+            .lock()
+            .remove(&(dialog as u64))
+            .map(|state| state.result)
+            .unwrap_or(-1)
+    }
+
+    pub unsafe fn dialog_box_indirect_param_a(
+        hInstance: HINSTANCE,
+        hDialogTemplate: *const crate::win32::DLGTEMPLATE,
+        hWndParent: HWND,
+        lpDialogFunc: Option<unsafe extern "system" fn(HWND, UINT, usize, isize) -> isize>,
+        dwInitParam: isize,
+    ) -> isize {
+        let _ = hInstance;
+        let dialog = create_dialog_from_template(
+            hDialogTemplate,
+            hWndParent,
+            lpDialogFunc,
+            dwInitParam as usize,
+        );
+        if dialog == 0 {
+            return -1;
+        }
+        if let Some(state) = crate::win32::WIN32_DIALOGS.lock().get_mut(&(dialog as u64)) {
+            state.modal = true;
+        }
+        let _ = show_window(dialog, SW_SHOW);
+        let mut msg = MSG {
+            hwnd: 0,
+            message: 0,
+            wParam: 0,
+            lParam: 0,
+            time: 0,
+            pt: POINT::default(),
+        };
+        loop {
+            let ended = crate::win32::WIN32_DIALOGS
+                .lock()
+                .get(&(dialog as u64))
+                .map(|state| state.ended)
+                .unwrap_or(true);
+            if ended {
+                break;
+            }
+            if get_message_a(&mut msg, 0, 0, 0) == FALSE {
+                break;
+            }
+            if is_dialog_message_a(dialog, &mut msg) == FALSE {
+                let _ = translate_message(&msg);
+                let _ = dispatch_message_a(&msg);
+            }
+        }
+        crate::win32::WIN32_DIALOGS
+            .lock()
+            .remove(&(dialog as u64))
+            .map(|state| state.result)
+            .unwrap_or(-1)
     }
 
     /// EndDialog
     pub unsafe fn end_dialog(hDlg: HWND, nResult: isize) -> BOOL {
+        let mut dialogs = crate::win32::WIN32_DIALOGS.lock();
+        let Some(state) = dialogs.get_mut(&(hDlg as u64)) else {
+            return FALSE;
+        };
+        state.ended = true;
+        state.result = nResult;
+        drop(dialogs);
+        let _ = destroy_window(hDlg);
         TRUE
     }
 
@@ -3361,17 +9128,75 @@ mod user32 {
         lpDialogFunc: Option<unsafe extern "system" fn(HWND, UINT, usize, isize) -> isize>,
         dwInitParam: usize,
     ) -> HWND {
-        0
+        let hwnd = create_window_ex_a(
+            0,
+            b"#32770\0".as_ptr() as LPCSTR,
+            lpTemplateName,
+            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            160,
+            120,
+            420,
+            240,
+            hWndParent,
+            0,
+            hInstance,
+            core::ptr::null_mut(),
+        );
+        if hwnd == 0 {
+            return 0;
+        }
+        crate::win32::WIN32_DIALOGS.lock().insert(
+            hwnd as u64,
+            crate::win32::Win32DialogState {
+                hwnd,
+                owner: hWndParent,
+                modal: false,
+                ended: false,
+                result: 0,
+                default_id: crate::win32::IDOK,
+                focused_id: crate::win32::IDOK,
+                is_extended: false,
+            },
+        );
+        if let Some(proc_fn) = lpDialogFunc {
+            let _ = proc_fn(
+                hwnd,
+                crate::win32::WM_INITDIALOG,
+                hWndParent as usize,
+                dwInitParam as isize,
+            );
+        }
+        hwnd
+    }
+
+    pub unsafe fn create_dialog_indirect_param_a(
+        hInstance: HINSTANCE,
+        hDialogTemplate: *const crate::win32::DLGTEMPLATE,
+        hWndParent: HWND,
+        lpDialogFunc: Option<unsafe extern "system" fn(HWND, UINT, usize, isize) -> isize>,
+        dwInitParam: isize,
+    ) -> HWND {
+        let _ = hInstance;
+        create_dialog_from_template(
+            hDialogTemplate,
+            hWndParent,
+            lpDialogFunc,
+            dwInitParam as usize,
+        )
     }
 
     /// GetDlgItem
     pub unsafe fn get_dlg_item(hDlg: HWND, nIDDlgItem: INT) -> HWND {
-        0
+        crate::win32::dialog_child_by_id(hDlg, nIDDlgItem)
     }
 
     /// SetDlgItemTextA
     pub unsafe fn set_dlg_item_text_a(hDlg: HWND, nIDDlgItem: INT, lpString: LPCSTR) -> BOOL {
-        TRUE
+        let item = get_dlg_item(hDlg, nIDDlgItem);
+        if item == 0 {
+            return FALSE;
+        }
+        set_window_text_a(item, lpString)
     }
 
     /// GetDlgItemTextA
@@ -3381,7 +9206,11 @@ mod user32 {
         lpString: LPSTR,
         nMaxCount: INT,
     ) -> UINT {
-        0
+        let item = get_dlg_item(hDlg, nIDDlgItem);
+        if item == 0 {
+            return 0;
+        }
+        get_window_text_a(item, lpString, nMaxCount) as UINT
     }
 
     /// SetDlgItemInt
@@ -3391,7 +9220,14 @@ mod user32 {
         uValue: UINT,
         bSigned: BOOL,
     ) -> BOOL {
-        TRUE
+        let mut value = if bSigned != FALSE {
+            (uValue as i32).to_string()
+        } else {
+            uValue.to_string()
+        }
+        .into_bytes();
+        value.push(0);
+        set_dlg_item_text_a(hDlg, nIDDlgItem, value.as_ptr() as LPCSTR)
     }
 
     /// GetDlgItemInt
@@ -3401,12 +9237,35 @@ mod user32 {
         lpTranslated: *mut BOOL,
         bSigned: BOOL,
     ) -> UINT {
-        0
+        let mut buffer = [0i8; 64];
+        let copied =
+            get_dlg_item_text_a(hDlg, nIDDlgItem, buffer.as_mut_ptr(), buffer.len() as INT);
+        if copied == 0 {
+            if !lpTranslated.is_null() {
+                *lpTranslated = FALSE;
+            }
+            return 0;
+        }
+        let text = read_ansi_string(buffer.as_ptr());
+        let parsed = if bSigned != FALSE {
+            text.parse::<i32>().ok().map(|value| value as u32)
+        } else {
+            text.parse::<u32>().ok()
+        };
+        if !lpTranslated.is_null() {
+            *lpTranslated = if parsed.is_some() { TRUE } else { FALSE };
+        }
+        parsed.unwrap_or(0)
     }
 
     /// CheckDlgButton
     pub unsafe fn check_dlg_button(hDlg: HWND, nIDButton: INT, uCheck: UINT) -> BOOL {
-        TRUE
+        let item = get_dlg_item(hDlg, nIDButton);
+        if item == 0 {
+            return FALSE;
+        }
+        let state = if uCheck != 0 { b"1\0" } else { b"0\0" };
+        set_window_text_a(item, state.as_ptr() as LPCSTR)
     }
 
     /// CheckRadioButton
@@ -3416,12 +9275,25 @@ mod user32 {
         nIDLastButton: INT,
         nIDCheckButton: INT,
     ) -> BOOL {
+        for id in nIDFirstButton..=nIDLastButton {
+            let _ = check_dlg_button(hDlg, id, if id == nIDCheckButton { 1 } else { 0 });
+        }
         TRUE
     }
 
     /// IsDlgButtonChecked
     pub unsafe fn is_dlg_button_checked(hDlg: HWND, nIDButton: INT) -> UINT {
-        0
+        let item = get_dlg_item(hDlg, nIDButton);
+        if item == 0 {
+            return 0;
+        }
+        let mut buffer = [0i8; 8];
+        let _ = get_window_text_a(item, buffer.as_mut_ptr(), buffer.len() as INT);
+        if read_ansi_string(buffer.as_ptr()) == "1" {
+            1
+        } else {
+            0
+        }
     }
 
     // ========================================================================
@@ -3450,17 +9322,33 @@ mod user32 {
         wParam: usize,
         lParam: isize,
     ) -> isize {
-        0
+        let item = get_dlg_item(hDlg, nIDDlgItem);
+        if item == 0 {
+            return 0;
+        }
+        send_message_a(item, Msg, wParam, lParam)
     }
 
     /// GetNextDlgTabItem
     pub unsafe fn get_next_dlg_tab_item(hDlg: HWND, hCtl: HWND, bPrevious: BOOL) -> HWND {
-        0
+        let children = crate::win32::dialog_children(hDlg);
+        if children.is_empty() {
+            return 0;
+        }
+        let index = children
+            .iter()
+            .position(|child| *child == hCtl)
+            .unwrap_or(0);
+        if bPrevious != FALSE {
+            children[(index + children.len() - 1) % children.len()]
+        } else {
+            children[(index + 1) % children.len()]
+        }
     }
 
     /// GetNextDlgGroupItem
     pub unsafe fn get_next_dlg_group_item(hDlg: HWND, hCtl: HWND, bPrevious: BOOL) -> HWND {
-        0
+        get_next_dlg_tab_item(hDlg, hCtl, bPrevious)
     }
 
     // ========================================================================
@@ -3661,22 +9549,58 @@ mod user32 {
 
     /// GetWindowLongA
     pub unsafe fn get_window_long_a(hWnd: HWND, nIndex: INT) -> isize {
-        0
+        let windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get(&(hWnd as u64)) else {
+            return 0;
+        };
+        match nIndex {
+            crate::win32::GWL_STYLE => window.style as isize,
+            crate::win32::GWL_EXSTYLE => window.ex_style as isize,
+            crate::win32::GWL_ID => window.menu as isize,
+            crate::win32::GWLP_WNDPROC => window.wndproc as isize,
+            _ => 0,
+        }
     }
 
     /// SetWindowLongA
     pub unsafe fn set_window_long_a(hWnd: HWND, nIndex: INT, dwNewLong: isize) -> isize {
-        0
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&(hWnd as u64)) else {
+            return 0;
+        };
+        match nIndex {
+            crate::win32::GWL_STYLE => {
+                let previous = window.style as isize;
+                window.style = dwNewLong as DWORD;
+                previous
+            }
+            crate::win32::GWL_EXSTYLE => {
+                let previous = window.ex_style as isize;
+                window.ex_style = dwNewLong as DWORD;
+                previous
+            }
+            crate::win32::GWL_ID => {
+                let previous = window.menu as isize;
+                window.menu = dwNewLong as HMENU;
+                previous
+            }
+            crate::win32::GWLP_WNDPROC => {
+                let previous = window.wndproc as isize;
+                window.wndproc = dwNewLong as u64;
+                previous
+            }
+            _ => 0,
+        }
     }
 
     /// GetWindowLongPtrA
     pub unsafe fn get_window_long_ptr_a(hWnd: HWND, nIndex: INT) -> isize {
-        0
+        get_window_long_a(hWnd, nIndex)
     }
 
     /// SetWindowLongPtrA
     pub unsafe fn set_window_long_ptr_a(hWnd: HWND, nIndex: INT, dwNewLong: isize) -> isize {
-        0
+        set_window_long_a(hWnd, nIndex, dwNewLong)
     }
 
     /// GetClassLongA
@@ -4559,7 +10483,19 @@ mod advapi32 {
         lpStartupInfo: *mut u8,
         lpProcessInformation: *mut u8,
     ) -> BOOL {
-        TRUE
+        let _ = hToken;
+        crate::win32::kernel32::create_process_a(
+            lpApplicationName,
+            lpCommandLine,
+            lpProcessAttributes as LPVOID,
+            lpThreadAttributes as LPVOID,
+            bInheritHandles,
+            dwCreationFlags,
+            lpEnvironment as LPVOID,
+            lpCurrentDirectory,
+            lpStartupInfo as LPVOID,
+            lpProcessInformation as LPVOID,
+        )
     }
 
     /// OpenProcessToken
@@ -4818,6 +10754,3602 @@ mod shell32 {
 }
 
 // ============================================================================
+// WINHTTP IMPLEMENTATION
+// ============================================================================
+
+mod winhttp {
+    use super::*;
+
+    pub unsafe fn win_http_open(
+        pszUserAgent: LPCWSTR,
+        dwAccessType: DWORD,
+        pszProxyName: LPCWSTR,
+        pszProxyBypass: LPCWSTR,
+        dwFlags: DWORD,
+    ) -> HANDLE {
+        let _ = dwFlags;
+        allocate_internet_handle(InternetHandleState::Session(InternetSessionState {
+            user_agent: read_utf16_string(pszUserAgent),
+            access_type: dwAccessType,
+            proxy_name: read_utf16_string(pszProxyName),
+            proxy_bypass: read_utf16_string(pszProxyBypass),
+            resolve_timeout_ms: 30_000,
+            connect_timeout_ms: 30_000,
+            send_timeout_ms: 30_000,
+            receive_timeout_ms: 30_000,
+        }))
+    }
+
+    pub unsafe fn win_http_connect(
+        hSession: HANDLE,
+        pswzServerName: LPCWSTR,
+        nServerPort: u16,
+        dwReserved: DWORD,
+    ) -> HANDLE {
+        let _ = dwReserved;
+        let handles = INTERNET_HANDLES.lock();
+        if !matches!(
+            handles.get(&hSession),
+            Some(InternetHandleState::Session(_))
+        ) {
+            set_win32_last_error(6);
+            return 0;
+        }
+        drop(handles);
+        allocate_internet_handle(InternetHandleState::Connection(InternetConnectionState {
+            session: hSession,
+            host: read_utf16_string(pswzServerName),
+            port: nServerPort,
+            secure: nServerPort == 443,
+        }))
+    }
+
+    pub unsafe fn win_http_open_request(
+        hConnect: HANDLE,
+        pwszVerb: LPCWSTR,
+        pwszObjectName: LPCWSTR,
+        pwszVersion: LPCWSTR,
+        pwszReferrer: LPCWSTR,
+        ppwszAcceptTypes: *const LPCWSTR,
+        dwFlags: DWORD,
+    ) -> HANDLE {
+        let _ = (pwszVersion, pwszReferrer, ppwszAcceptTypes);
+        let handles = INTERNET_HANDLES.lock();
+        if !matches!(
+            handles.get(&hConnect),
+            Some(InternetHandleState::Connection(_))
+        ) {
+            set_win32_last_error(6);
+            return 0;
+        }
+        drop(handles);
+        allocate_internet_handle(InternetHandleState::Request(InternetRequestState {
+            connection: hConnect,
+            method: {
+                let value = read_utf16_string(pwszVerb);
+                if value.is_empty() {
+                    "GET".to_string()
+                } else {
+                    value
+                }
+            },
+            object_name: read_utf16_string(pwszObjectName),
+            headers: BTreeMap::new(),
+            response: None,
+            read_cursor: 0,
+        }))
+    }
+
+    pub unsafe fn win_http_send_request(
+        hRequest: HANDLE,
+        pwszHeaders: LPCWSTR,
+        dwHeadersLength: DWORD,
+        lpOptional: LPVOID,
+        dwOptionalLength: DWORD,
+        dwTotalLength: DWORD,
+        dwContext: DWORD_PTR,
+    ) -> BOOL {
+        let _ = (dwHeadersLength, dwTotalLength, dwContext);
+        let header_block = read_utf16_string(pwszHeaders);
+        if let Some(InternetHandleState::Request(request)) =
+            INTERNET_HANDLES.lock().get_mut(&hRequest)
+        {
+            request.headers = parse_ansi_header_block(&header_block);
+        }
+        let body = if lpOptional.is_null() || dwOptionalLength == 0 {
+            None
+        } else {
+            Some(core::slice::from_raw_parts(
+                lpOptional as *const u8,
+                dwOptionalLength as usize,
+            ))
+        };
+        execute_internet_request(hRequest, body)
+    }
+
+    pub unsafe fn win_http_receive_response(hRequest: HANDLE, lpReserved: LPVOID) -> BOOL {
+        let _ = lpReserved;
+        let handles = INTERNET_HANDLES.lock();
+        match handles.get(&hRequest) {
+            Some(InternetHandleState::Request(request)) if request.response.is_some() => {
+                set_win32_last_error(0);
+                TRUE
+            }
+            Some(InternetHandleState::Request(_)) => {
+                set_win32_last_error(12019);
+                FALSE
+            }
+            _ => {
+                set_win32_last_error(6);
+                FALSE
+            }
+        }
+    }
+
+    pub unsafe fn win_http_read_data(
+        hRequest: HANDLE,
+        lpBuffer: LPVOID,
+        dwNumberOfBytesToRead: DWORD,
+        lpdwNumberOfBytesRead: *mut DWORD,
+    ) -> BOOL {
+        read_internet_response(
+            hRequest,
+            lpBuffer,
+            dwNumberOfBytesToRead,
+            lpdwNumberOfBytesRead,
+        )
+    }
+
+    pub unsafe fn win_http_close_handle(hInternet: HANDLE) -> BOOL {
+        if INTERNET_HANDLES.lock().remove(&hInternet).is_some() {
+            set_win32_last_error(0);
+            TRUE
+        } else {
+            set_win32_last_error(6);
+            FALSE
+        }
+    }
+
+    pub unsafe fn win_http_set_timeouts(
+        hInternet: HANDLE,
+        nResolveTimeout: INT,
+        nConnectTimeout: INT,
+        nSendTimeout: INT,
+        nReceiveTimeout: INT,
+    ) -> BOOL {
+        let mut handles = INTERNET_HANDLES.lock();
+        let Some(InternetHandleState::Session(session)) = handles.get_mut(&hInternet) else {
+            set_win32_last_error(ERROR_INVALID_HANDLE);
+            return FALSE;
+        };
+        session.resolve_timeout_ms = nResolveTimeout;
+        session.connect_timeout_ms = nConnectTimeout;
+        session.send_timeout_ms = nSendTimeout;
+        session.receive_timeout_ms = nReceiveTimeout;
+        set_win32_last_error(0);
+        TRUE
+    }
+
+    pub unsafe fn win_http_query_data_available(
+        hRequest: HANDLE,
+        lpdwNumberOfBytesAvailable: *mut DWORD,
+    ) -> BOOL {
+        if lpdwNumberOfBytesAvailable.is_null() {
+            set_win32_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        let handles = INTERNET_HANDLES.lock();
+        let Some(InternetHandleState::Request(request)) = handles.get(&hRequest) else {
+            set_win32_last_error(ERROR_INVALID_HANDLE);
+            return FALSE;
+        };
+        let Some(response) = request.response.as_ref() else {
+            set_win32_last_error(ERROR_INTERNET_INCORRECT_HANDLE_STATE);
+            return FALSE;
+        };
+        *lpdwNumberOfBytesAvailable =
+            response.body.len().saturating_sub(request.read_cursor) as DWORD;
+        set_win32_last_error(0);
+        TRUE
+    }
+
+    pub unsafe fn win_http_query_headers(
+        hRequest: HANDLE,
+        dwInfoLevel: DWORD,
+        pwszName: LPCWSTR,
+        lpBuffer: LPVOID,
+        lpdwBufferLength: *mut DWORD,
+        lpdwIndex: *mut DWORD,
+    ) -> BOOL {
+        let _ = (pwszName, lpdwIndex);
+        let handles = INTERNET_HANDLES.lock();
+        let Some(InternetHandleState::Request(request)) = handles.get(&hRequest) else {
+            set_win32_last_error(ERROR_INVALID_HANDLE);
+            return FALSE;
+        };
+        let Some(response) = request.response.as_ref() else {
+            set_win32_last_error(ERROR_INTERNET_INCORRECT_HANDLE_STATE);
+            return FALSE;
+        };
+        if (dwInfoLevel & HTTP_QUERY_FLAG_NUMBER) != 0 {
+            let Some(value) = internet_query_header_number(response, dwInfoLevel) else {
+                set_win32_last_error(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            };
+            if lpdwBufferLength.is_null() || lpBuffer.is_null() || *lpdwBufferLength < 4 {
+                if !lpdwBufferLength.is_null() {
+                    *lpdwBufferLength = 4;
+                }
+                set_win32_last_error(ERROR_INSUFFICIENT_BUFFER);
+                return FALSE;
+            }
+            *(lpBuffer as *mut DWORD) = value;
+            *lpdwBufferLength = 4;
+            set_win32_last_error(0);
+            return TRUE;
+        }
+        let Some(value) = internet_response_header_string(response, dwInfoLevel) else {
+            set_win32_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        };
+        write_wide_output(lpBuffer, lpdwBufferLength, &value)
+    }
+}
+
+// ============================================================================
+// WININET IMPLEMENTATION
+// ============================================================================
+
+mod wininet {
+    use super::*;
+
+    pub unsafe fn internet_open_a(
+        lpszAgent: LPCSTR,
+        dwAccessType: DWORD,
+        lpszProxy: LPCSTR,
+        lpszProxyBypass: LPCSTR,
+        dwFlags: DWORD,
+    ) -> HANDLE {
+        let _ = dwFlags;
+        allocate_internet_handle(InternetHandleState::Session(InternetSessionState {
+            user_agent: read_ansi_string(lpszAgent),
+            access_type: dwAccessType,
+            proxy_name: read_ansi_string(lpszProxy),
+            proxy_bypass: read_ansi_string(lpszProxyBypass),
+            resolve_timeout_ms: 30_000,
+            connect_timeout_ms: 30_000,
+            send_timeout_ms: 30_000,
+            receive_timeout_ms: 30_000,
+        }))
+    }
+
+    pub unsafe fn internet_open_w(
+        lpszAgent: LPCWSTR,
+        dwAccessType: DWORD,
+        lpszProxy: LPCWSTR,
+        lpszProxyBypass: LPCWSTR,
+        dwFlags: DWORD,
+    ) -> HANDLE {
+        let _ = dwFlags;
+        allocate_internet_handle(InternetHandleState::Session(InternetSessionState {
+            user_agent: read_utf16_string(lpszAgent),
+            access_type: dwAccessType,
+            proxy_name: read_utf16_string(lpszProxy),
+            proxy_bypass: read_utf16_string(lpszProxyBypass),
+            resolve_timeout_ms: 30_000,
+            connect_timeout_ms: 30_000,
+            send_timeout_ms: 30_000,
+            receive_timeout_ms: 30_000,
+        }))
+    }
+
+    pub unsafe fn internet_connect_a(
+        hInternet: HANDLE,
+        lpszServerName: LPCSTR,
+        nServerPort: u16,
+        lpszUserName: LPCSTR,
+        lpszPassword: LPCSTR,
+        dwService: DWORD,
+        dwFlags: DWORD,
+        dwContext: DWORD_PTR,
+    ) -> HANDLE {
+        let _ = (lpszUserName, lpszPassword, dwService, dwFlags, dwContext);
+        let handles = INTERNET_HANDLES.lock();
+        if !matches!(
+            handles.get(&hInternet),
+            Some(InternetHandleState::Session(_))
+        ) {
+            set_win32_last_error(6);
+            return 0;
+        }
+        drop(handles);
+        allocate_internet_handle(InternetHandleState::Connection(InternetConnectionState {
+            session: hInternet,
+            host: read_ansi_string(lpszServerName),
+            port: nServerPort,
+            secure: nServerPort == 443,
+        }))
+    }
+
+    pub unsafe fn internet_connect_w(
+        hInternet: HANDLE,
+        lpszServerName: LPCWSTR,
+        nServerPort: u16,
+        lpszUserName: LPCWSTR,
+        lpszPassword: LPCWSTR,
+        dwService: DWORD,
+        dwFlags: DWORD,
+        dwContext: DWORD_PTR,
+    ) -> HANDLE {
+        let _ = (lpszUserName, lpszPassword, dwService, dwFlags, dwContext);
+        let handles = INTERNET_HANDLES.lock();
+        if !matches!(
+            handles.get(&hInternet),
+            Some(InternetHandleState::Session(_))
+        ) {
+            set_win32_last_error(6);
+            return 0;
+        }
+        drop(handles);
+        allocate_internet_handle(InternetHandleState::Connection(InternetConnectionState {
+            session: hInternet,
+            host: read_utf16_string(lpszServerName),
+            port: nServerPort,
+            secure: nServerPort == 443,
+        }))
+    }
+
+    pub unsafe fn http_open_request_a(
+        hConnect: HANDLE,
+        lpszVerb: LPCSTR,
+        lpszObjectName: LPCSTR,
+        lpszVersion: LPCSTR,
+        lpszReferrer: LPCSTR,
+        lplpszAcceptTypes: *const LPCSTR,
+        dwFlags: DWORD,
+        dwContext: DWORD_PTR,
+    ) -> HANDLE {
+        let _ = (lpszVersion, lpszReferrer, lplpszAcceptTypes, dwContext);
+        let handles = INTERNET_HANDLES.lock();
+        if !matches!(
+            handles.get(&hConnect),
+            Some(InternetHandleState::Connection(_))
+        ) {
+            set_win32_last_error(6);
+            return 0;
+        }
+        drop(handles);
+        allocate_internet_handle(InternetHandleState::Request(InternetRequestState {
+            connection: hConnect,
+            method: {
+                let value = read_ansi_string(lpszVerb);
+                if value.is_empty() {
+                    "GET".to_string()
+                } else {
+                    value
+                }
+            },
+            object_name: read_ansi_string(lpszObjectName),
+            headers: BTreeMap::new(),
+            response: None,
+            read_cursor: 0,
+        }))
+    }
+
+    pub unsafe fn http_open_request_w(
+        hConnect: HANDLE,
+        lpszVerb: LPCWSTR,
+        lpszObjectName: LPCWSTR,
+        lpszVersion: LPCWSTR,
+        lpszReferrer: LPCWSTR,
+        lplpszAcceptTypes: *const LPCWSTR,
+        dwFlags: DWORD,
+        dwContext: DWORD_PTR,
+    ) -> HANDLE {
+        let _ = (
+            lpszVersion,
+            lpszReferrer,
+            lplpszAcceptTypes,
+            dwContext,
+            dwFlags,
+        );
+        let handles = INTERNET_HANDLES.lock();
+        if !matches!(
+            handles.get(&hConnect),
+            Some(InternetHandleState::Connection(_))
+        ) {
+            set_win32_last_error(6);
+            return 0;
+        }
+        drop(handles);
+        allocate_internet_handle(InternetHandleState::Request(InternetRequestState {
+            connection: hConnect,
+            method: {
+                let value = read_utf16_string(lpszVerb);
+                if value.is_empty() {
+                    "GET".to_string()
+                } else {
+                    value
+                }
+            },
+            object_name: read_utf16_string(lpszObjectName),
+            headers: BTreeMap::new(),
+            response: None,
+            read_cursor: 0,
+        }))
+    }
+
+    pub unsafe fn http_send_request_a(
+        hRequest: HANDLE,
+        lpszHeaders: LPCSTR,
+        dwHeadersLength: DWORD,
+        lpOptional: LPVOID,
+        dwOptionalLength: DWORD,
+    ) -> BOOL {
+        let headers = if dwHeadersLength == 0 {
+            read_ansi_string(lpszHeaders)
+        } else {
+            read_ansi_string(lpszHeaders)
+        };
+        if let Some(InternetHandleState::Request(request)) =
+            INTERNET_HANDLES.lock().get_mut(&hRequest)
+        {
+            request.headers = parse_ansi_header_block(&headers);
+        }
+        let body = if lpOptional.is_null() || dwOptionalLength == 0 {
+            None
+        } else {
+            Some(core::slice::from_raw_parts(
+                lpOptional as *const u8,
+                dwOptionalLength as usize,
+            ))
+        };
+        execute_internet_request(hRequest, body)
+    }
+
+    pub unsafe fn http_send_request_w(
+        hRequest: HANDLE,
+        lpszHeaders: LPCWSTR,
+        dwHeadersLength: DWORD,
+        lpOptional: LPVOID,
+        dwOptionalLength: DWORD,
+    ) -> BOOL {
+        let headers = if dwHeadersLength == 0 {
+            read_utf16_string(lpszHeaders)
+        } else {
+            read_utf16_string(lpszHeaders)
+        };
+        if let Some(InternetHandleState::Request(request)) =
+            INTERNET_HANDLES.lock().get_mut(&hRequest)
+        {
+            request.headers = parse_ansi_header_block(&headers);
+        }
+        let body = if lpOptional.is_null() || dwOptionalLength == 0 {
+            None
+        } else {
+            Some(core::slice::from_raw_parts(
+                lpOptional as *const u8,
+                dwOptionalLength as usize,
+            ))
+        };
+        execute_internet_request(hRequest, body)
+    }
+
+    pub unsafe fn internet_read_file(
+        hFile: HANDLE,
+        lpBuffer: LPVOID,
+        dwNumberOfBytesToRead: DWORD,
+        lpdwNumberOfBytesRead: *mut DWORD,
+    ) -> BOOL {
+        read_internet_response(
+            hFile,
+            lpBuffer,
+            dwNumberOfBytesToRead,
+            lpdwNumberOfBytesRead,
+        )
+    }
+
+    pub unsafe fn internet_close_handle(hInternet: HANDLE) -> BOOL {
+        if INTERNET_HANDLES.lock().remove(&hInternet).is_some() {
+            set_win32_last_error(0);
+            TRUE
+        } else {
+            set_win32_last_error(6);
+            FALSE
+        }
+    }
+
+    pub unsafe fn http_query_info_a(
+        hRequest: HANDLE,
+        dwInfoLevel: DWORD,
+        lpBuffer: LPVOID,
+        lpdwBufferLength: *mut DWORD,
+        lpdwIndex: *mut DWORD,
+    ) -> BOOL {
+        let _ = lpdwIndex;
+        let handles = INTERNET_HANDLES.lock();
+        let Some(InternetHandleState::Request(request)) = handles.get(&hRequest) else {
+            set_win32_last_error(ERROR_INVALID_HANDLE);
+            return FALSE;
+        };
+        let Some(response) = request.response.as_ref() else {
+            set_win32_last_error(ERROR_INTERNET_INCORRECT_HANDLE_STATE);
+            return FALSE;
+        };
+        if (dwInfoLevel & HTTP_QUERY_FLAG_NUMBER) != 0 {
+            let Some(value) = internet_query_header_number(response, dwInfoLevel) else {
+                set_win32_last_error(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            };
+            if lpdwBufferLength.is_null() || lpBuffer.is_null() || *lpdwBufferLength < 4 {
+                if !lpdwBufferLength.is_null() {
+                    *lpdwBufferLength = 4;
+                }
+                set_win32_last_error(ERROR_INSUFFICIENT_BUFFER);
+                return FALSE;
+            }
+            *(lpBuffer as *mut DWORD) = value;
+            *lpdwBufferLength = 4;
+            set_win32_last_error(0);
+            return TRUE;
+        }
+        let Some(value) = internet_response_header_string(response, dwInfoLevel) else {
+            set_win32_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        };
+        write_ansi_output(lpBuffer, lpdwBufferLength, &value)
+    }
+
+    pub unsafe fn internet_set_cookie_a(
+        lpszUrl: LPCSTR,
+        lpszCookieName: LPCSTR,
+        lpszCookieData: LPCSTR,
+    ) -> BOOL {
+        let host = internet_host_from_url(&read_ansi_string(lpszUrl));
+        let name = read_ansi_string(lpszCookieName);
+        let value = read_ansi_string(lpszCookieData);
+        if host.is_empty() || name.is_empty() {
+            set_win32_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        internet_store_cookie(&host, &name, &value);
+        set_win32_last_error(0);
+        TRUE
+    }
+
+    pub unsafe fn internet_get_cookie_a(
+        lpszUrl: LPCSTR,
+        lpszCookieName: LPCSTR,
+        lpszCookieData: LPSTR,
+        lpdwSize: *mut DWORD,
+    ) -> BOOL {
+        let host = internet_host_from_url(&read_ansi_string(lpszUrl));
+        if host.is_empty() || lpdwSize.is_null() {
+            set_win32_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        let requested_name = read_ansi_string(lpszCookieName);
+        let cookie_text = {
+            let jar = INTERNET_COOKIE_JAR.lock();
+            let Some(cookies) = jar.get(&host) else {
+                *lpdwSize = 0;
+                set_win32_last_error(ERROR_INVALID_HANDLE);
+                return FALSE;
+            };
+            if requested_name.is_empty() {
+                cookies
+                    .iter()
+                    .map(|(name, value)| alloc::format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            } else {
+                let Some(value) = cookies.get(&requested_name) else {
+                    *lpdwSize = 0;
+                    set_win32_last_error(ERROR_INVALID_HANDLE);
+                    return FALSE;
+                };
+                alloc::format!("{requested_name}={value}")
+            }
+        };
+        write_ansi_output(lpszCookieData as LPVOID, lpdwSize, &cookie_text)
+    }
+}
+
+// ============================================================================
+// OLE32 IMPLEMENTATION
+// ============================================================================
+
+mod ole32 {
+    use super::*;
+
+    static COM_MARSHAL_STREAM_VTABLE: Once<Box<[usize; 14]>> = Once::new();
+
+    fn current_factory(clsid: *const GUID, clsctx: DWORD) -> Result<ComClassObject, HRESULT> {
+        let Some(key) = guid_to_key(clsid) else {
+            return Err(E_POINTER);
+        };
+        let registry = crate::win32::COM_CLASS_OBJECTS.lock();
+        let Some(class_object) = registry.get(&key).copied() else {
+            return Err(REGDB_E_CLASSNOTREG);
+        };
+        if class_object.clsctx & clsctx == 0 {
+            return Err(REGDB_E_CLASSNOTREG);
+        }
+        Ok(class_object)
+    }
+
+    pub unsafe fn co_initialize(pv_reserved: LPVOID) -> HRESULT {
+        let _ = pv_reserved;
+        co_initialize_ex(core::ptr::null_mut(), COINIT_APARTMENTTHREADED)
+    }
+
+    pub unsafe fn co_initialize_ex(pv_reserved: LPVOID, co_init: DWORD) -> HRESULT {
+        let _ = pv_reserved;
+        let key = crate::win32::current_win32_thread_key();
+        let mut apartments = crate::win32::COM_APARTMENTS.lock();
+        let model = if co_init & COINIT_APARTMENTTHREADED != 0 {
+            COINIT_APARTMENTTHREADED
+        } else {
+            COINIT_MULTITHREADED
+        };
+        match apartments.get_mut(&key) {
+            Some(existing) if existing.model == model => {
+                existing.ref_count = existing.ref_count.saturating_add(1);
+                S_FALSE
+            }
+            Some(_) => 0x8001_0106u32 as i32,
+            None => {
+                apartments.insert(
+                    key,
+                    ComApartmentState {
+                        model,
+                        ref_count: 1,
+                    },
+                );
+                S_OK
+            }
+        }
+    }
+
+    pub unsafe fn co_uninitialize() {
+        let key = crate::win32::current_win32_thread_key();
+        let mut apartments = crate::win32::COM_APARTMENTS.lock();
+        let remove = match apartments.get_mut(&key) {
+            Some(state) if state.ref_count > 1 => {
+                state.ref_count -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if remove {
+            apartments.remove(&key);
+        }
+    }
+
+    pub unsafe fn co_get_apartment_type(
+        p_apt_type: *mut DWORD,
+        p_apt_qualifier: *mut DWORD,
+    ) -> HRESULT {
+        let key = crate::win32::current_win32_thread_key();
+        let apartments = crate::win32::COM_APARTMENTS.lock();
+        let Some(state) = apartments.get(&key).copied() else {
+            return CO_E_NOTINITIALIZED;
+        };
+        if !p_apt_type.is_null() {
+            *p_apt_type = if state.model == COINIT_APARTMENTTHREADED {
+                APTTYPE_STA
+            } else {
+                APTTYPE_MTA
+            };
+        }
+        if !p_apt_qualifier.is_null() {
+            *p_apt_qualifier = APTTYPEQUALIFIER_NONE;
+        }
+        S_OK
+    }
+
+    pub unsafe fn co_create_instance(
+        rclsid: *const GUID,
+        p_unk_outer: *mut u8,
+        dw_cls_context: DWORD,
+        riid: *const GUID,
+        ppv: *mut *mut u8,
+    ) -> HRESULT {
+        if ppv.is_null() {
+            return E_POINTER;
+        }
+        *ppv = core::ptr::null_mut();
+        if !crate::win32::COM_APARTMENTS
+            .lock()
+            .contains_key(&crate::win32::current_win32_thread_key())
+        {
+            return CO_E_NOTINITIALIZED;
+        }
+        if !p_unk_outer.is_null() {
+            return CLASS_E_NOAGGREGATION;
+        }
+        let class_object = match current_factory(rclsid, dw_cls_context) {
+            Ok(object) => object,
+            Err(hr) => return hr,
+        };
+        let vtable = *(class_object.factory as *mut *const usize);
+        let create_instance: extern "system" fn(
+            *mut u8,
+            *mut u8,
+            *const GUID,
+            *mut *mut u8,
+        ) -> HRESULT = core::mem::transmute(*vtable.add(3));
+        create_instance(class_object.factory as *mut u8, p_unk_outer, riid, ppv)
+    }
+
+    pub unsafe fn co_register_class_object(
+        rclsid: *const GUID,
+        p_unk: *mut u8,
+        dw_cls_context: DWORD,
+        flags: DWORD,
+        lpdw_register: *mut DWORD,
+    ) -> HRESULT {
+        if rclsid.is_null() || p_unk.is_null() || lpdw_register.is_null() {
+            return E_POINTER;
+        }
+        let Some(key) = guid_to_key(rclsid) else {
+            return E_POINTER;
+        };
+        let cookie =
+            crate::win32::NEXT_COM_COOKIE.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        crate::win32::com_add_ref(p_unk);
+        crate::win32::COM_CLASS_OBJECTS.lock().insert(
+            key,
+            ComClassObject {
+                factory: p_unk as usize,
+                clsctx: dw_cls_context,
+                flags,
+                cookie,
+            },
+        );
+        *lpdw_register = cookie;
+        S_OK
+    }
+
+    pub unsafe fn co_revoke_class_object(dw_register: DWORD) -> HRESULT {
+        let removed = {
+            let mut registry = crate::win32::COM_CLASS_OBJECTS.lock();
+            let key = registry
+                .iter()
+                .find(|(_, entry)| entry.cookie == dw_register)
+                .map(|(key, _)| key.clone());
+            key.and_then(|key| registry.remove(&key))
+        };
+        if let Some(entry) = removed {
+            crate::win32::com_release(entry.factory as *mut u8);
+        }
+        S_OK
+    }
+
+    pub unsafe fn co_get_class_object(
+        rclsid: *const GUID,
+        dw_cls_context: DWORD,
+        pv_reserved: LPVOID,
+        riid: *const GUID,
+        ppv: *mut *mut u8,
+    ) -> HRESULT {
+        let _ = pv_reserved;
+        if ppv.is_null() {
+            return E_POINTER;
+        }
+        *ppv = core::ptr::null_mut();
+        if !crate::win32::COM_APARTMENTS
+            .lock()
+            .contains_key(&crate::win32::current_win32_thread_key())
+        {
+            return CO_E_NOTINITIALIZED;
+        }
+        let class_object = match current_factory(rclsid, dw_cls_context) {
+            Ok(object) => object,
+            Err(hr) => return hr,
+        };
+        crate::win32::com_query_interface(class_object.factory as *mut u8, riid, ppv)
+    }
+
+    unsafe fn marshal_stream_from_ptr(this: *mut u8) -> Option<&'static mut ComMarshalStream> {
+        if this.is_null() {
+            return None;
+        }
+        Some(&mut *(this as *mut ComMarshalStream))
+    }
+
+    fn allocate_marshal_stream(stream_id: u64) -> *mut u8 {
+        let vtable = COM_MARSHAL_STREAM_VTABLE.call_once(|| {
+            Box::new([
+                marshal_stream_query_interface as usize,
+                marshal_stream_add_ref as usize,
+                marshal_stream_release as usize,
+                marshal_stream_read as usize,
+                marshal_stream_write as usize,
+                marshal_stream_seek as usize,
+                marshal_stream_set_size as usize,
+                marshal_stream_copy_to as usize,
+                marshal_stream_commit as usize,
+                marshal_stream_revert as usize,
+                marshal_stream_lock_region as usize,
+                marshal_stream_unlock_region as usize,
+                marshal_stream_stat as usize,
+                marshal_stream_clone as usize,
+            ])
+        });
+        let stream = Box::new(ComMarshalStream {
+            vtable: vtable.as_ptr(),
+            stream_id,
+            ref_count: 1,
+            position: 0,
+        });
+        Box::into_raw(stream) as *mut u8
+    }
+
+    unsafe fn free_marshal_stream(this: *mut u8) {
+        if !this.is_null() {
+            let _ = Box::from_raw(this as *mut ComMarshalStream);
+        }
+    }
+
+    fn build_marshal_payload(stream_id: u64, iid_key: &str) -> Vec<u8> {
+        alloc::format!("marshal:{stream_id}:{iid_key}").into_bytes()
+    }
+
+    extern "system" fn marshal_stream_query_interface(
+        this: *mut u8,
+        iid: *const GUID,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            if guid_matches(iid, &IID_IUNKNOWN)
+                || guid_matches(iid, &IID_ISEQUENTIAL_STREAM)
+                || guid_matches(iid, &IID_ISTREAM)
+            {
+                *out = this;
+                let _ = marshal_stream_add_ref(this);
+                return S_OK;
+            }
+            E_NOINTERFACE
+        }
+    }
+
+    extern "system" fn marshal_stream_add_ref(this: *mut u8) -> u32 {
+        unsafe {
+            let Some(stream) = marshal_stream_from_ptr(this) else {
+                return 0;
+            };
+            stream.ref_count = stream.ref_count.saturating_add(1);
+            stream.ref_count
+        }
+    }
+
+    extern "system" fn marshal_stream_release(this: *mut u8) -> u32 {
+        unsafe {
+            let Some(stream) = marshal_stream_from_ptr(this) else {
+                return 0;
+            };
+            if stream.ref_count > 1 {
+                stream.ref_count -= 1;
+                return stream.ref_count;
+            }
+            if let Some(state) = COM_MARSHAL_STREAMS.lock().remove(&stream.stream_id) {
+                crate::win32::com_release(state.object as *mut u8);
+            }
+            free_marshal_stream(this);
+            0
+        }
+    }
+
+    extern "system" fn marshal_stream_read(
+        this: *mut u8,
+        pv: *mut u8,
+        cb: ULONG,
+        pcb_read: *mut ULONG,
+    ) -> HRESULT {
+        unsafe {
+            if !pcb_read.is_null() {
+                *pcb_read = 0;
+            }
+            if pv.is_null() {
+                return STG_E_INVALIDPOINTER;
+            }
+            let Some(stream) = marshal_stream_from_ptr(this) else {
+                return STG_E_INVALIDPOINTER;
+            };
+            let states = COM_MARSHAL_STREAMS.lock();
+            let Some(state) = states.get(&stream.stream_id) else {
+                return STG_E_REVERTED;
+            };
+            let start = stream.position.min(state.payload.len());
+            let amount = (cb as usize).min(state.payload.len().saturating_sub(start));
+            if amount != 0 {
+                core::ptr::copy_nonoverlapping(state.payload.as_ptr().add(start), pv, amount);
+            }
+            stream.position = start.saturating_add(amount);
+            if !pcb_read.is_null() {
+                *pcb_read = amount as ULONG;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn marshal_stream_write(
+        this: *mut u8,
+        pv: *const u8,
+        cb: ULONG,
+        pcb_written: *mut ULONG,
+    ) -> HRESULT {
+        unsafe {
+            if !pcb_written.is_null() {
+                *pcb_written = 0;
+            }
+            if pv.is_null() {
+                return STG_E_INVALIDPOINTER;
+            }
+            let Some(stream) = marshal_stream_from_ptr(this) else {
+                return STG_E_INVALIDPOINTER;
+            };
+            let mut states = COM_MARSHAL_STREAMS.lock();
+            let Some(state) = states.get_mut(&stream.stream_id) else {
+                return STG_E_REVERTED;
+            };
+            let start = stream.position;
+            let end = start.saturating_add(cb as usize);
+            if end > state.payload.len() {
+                state.payload.resize(end, 0);
+            }
+            core::ptr::copy_nonoverlapping(pv, state.payload.as_mut_ptr().add(start), cb as usize);
+            stream.position = end;
+            if !pcb_written.is_null() {
+                *pcb_written = cb;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn marshal_stream_seek(
+        this: *mut u8,
+        dlib_move: i64,
+        dw_origin: DWORD,
+        plib_new_position: *mut u64,
+    ) -> HRESULT {
+        unsafe {
+            let Some(stream) = marshal_stream_from_ptr(this) else {
+                return STG_E_INVALIDPOINTER;
+            };
+            let states = COM_MARSHAL_STREAMS.lock();
+            let Some(state) = states.get(&stream.stream_id) else {
+                return STG_E_REVERTED;
+            };
+            let base = match dw_origin {
+                STREAM_SEEK_SET => 0i64,
+                STREAM_SEEK_CUR => stream.position as i64,
+                STREAM_SEEK_END => state.payload.len() as i64,
+                _ => return E_INVALIDARG,
+            };
+            let Some(new_pos) = base.checked_add(dlib_move) else {
+                return E_INVALIDARG;
+            };
+            if new_pos < 0 {
+                return E_INVALIDARG;
+            }
+            stream.position = new_pos as usize;
+            if !plib_new_position.is_null() {
+                *plib_new_position = stream.position as u64;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn marshal_stream_set_size(this: *mut u8, lib_new_size: u64) -> HRESULT {
+        unsafe {
+            let Some(stream) = marshal_stream_from_ptr(this) else {
+                return STG_E_INVALIDPOINTER;
+            };
+            let mut states = COM_MARSHAL_STREAMS.lock();
+            let Some(state) = states.get_mut(&stream.stream_id) else {
+                return STG_E_REVERTED;
+            };
+            state.payload.resize(lib_new_size as usize, 0);
+            if stream.position > state.payload.len() {
+                stream.position = state.payload.len();
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn marshal_stream_copy_to(
+        this: *mut u8,
+        pstm: *mut u8,
+        cb: u64,
+        pcb_read: *mut u64,
+        pcb_written: *mut u64,
+    ) -> HRESULT {
+        unsafe {
+            if !pcb_read.is_null() {
+                *pcb_read = 0;
+            }
+            if !pcb_written.is_null() {
+                *pcb_written = 0;
+            }
+            if pstm.is_null() {
+                return STG_E_INVALIDPOINTER;
+            }
+            let Some(stream) = marshal_stream_from_ptr(this) else {
+                return STG_E_INVALIDPOINTER;
+            };
+            let mut states = COM_MARSHAL_STREAMS.lock();
+            let Some(state) = states.get_mut(&stream.stream_id) else {
+                return STG_E_REVERTED;
+            };
+            let start = stream.position.min(state.payload.len());
+            let amount = (cb as usize).min(state.payload.len().saturating_sub(start));
+            let target_vtable = *(pstm as *mut *const usize);
+            let write: extern "system" fn(*mut u8, *const u8, ULONG, *mut ULONG) -> HRESULT =
+                core::mem::transmute(*target_vtable.add(4));
+            let mut written = 0u32;
+            let hr = write(
+                pstm,
+                state.payload.as_ptr().add(start),
+                amount as ULONG,
+                &mut written,
+            );
+            if hr != S_OK {
+                return hr;
+            }
+            let written = written as usize;
+            stream.position = start.saturating_add(written);
+            if !pcb_read.is_null() {
+                *pcb_read = written as u64;
+            }
+            if !pcb_written.is_null() {
+                *pcb_written = written as u64;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn marshal_stream_commit(_this: *mut u8, _grf_commit_flags: DWORD) -> HRESULT {
+        S_OK
+    }
+
+    extern "system" fn marshal_stream_revert(_this: *mut u8) -> HRESULT {
+        S_OK
+    }
+
+    extern "system" fn marshal_stream_lock_region(
+        _this: *mut u8,
+        _lib_offset: u64,
+        _cb: u64,
+        _dw_lock_type: DWORD,
+    ) -> HRESULT {
+        S_OK
+    }
+
+    extern "system" fn marshal_stream_unlock_region(
+        _this: *mut u8,
+        _lib_offset: u64,
+        _cb: u64,
+        _dw_lock_type: DWORD,
+    ) -> HRESULT {
+        S_OK
+    }
+
+    extern "system" fn marshal_stream_stat(
+        this: *mut u8,
+        pstatstg: *mut STATSTG,
+        grf_stat_flag: DWORD,
+    ) -> HRESULT {
+        unsafe {
+            if pstatstg.is_null() {
+                return STG_E_INVALIDPOINTER;
+            }
+            let Some(stream) = marshal_stream_from_ptr(this) else {
+                return STG_E_INVALIDPOINTER;
+            };
+            let states = COM_MARSHAL_STREAMS.lock();
+            let Some(state) = states.get(&stream.stream_id) else {
+                return STG_E_REVERTED;
+            };
+            *pstatstg = STATSTG {
+                pwcs_name: if grf_stat_flag & STATFLAG_NONAME != 0 {
+                    core::ptr::null_mut()
+                } else {
+                    crate::win32::alloc_bstr_from_units(
+                        &"COMMarshalStream".encode_utf16().collect::<Vec<_>>(),
+                    )
+                },
+                type_: STGTY_STREAM,
+                cb_size: state.payload.len() as u64,
+                mtime: 0,
+                ctime: 0,
+                atime: 0,
+                grf_mode: 0,
+                grf_locks_supported: 0,
+                clsid: GUID::default(),
+                grf_state_bits: 0,
+                reserved: 0,
+            };
+            S_OK
+        }
+    }
+
+    extern "system" fn marshal_stream_clone(this: *mut u8, ppstm: *mut *mut u8) -> HRESULT {
+        unsafe {
+            if ppstm.is_null() {
+                return E_POINTER;
+            }
+            *ppstm = core::ptr::null_mut();
+            let Some(stream) = marshal_stream_from_ptr(this) else {
+                return STG_E_INVALIDPOINTER;
+            };
+            let cloned_state = {
+                let states = COM_MARSHAL_STREAMS.lock();
+                let Some(state) = states.get(&stream.stream_id) else {
+                    return STG_E_REVERTED;
+                };
+                crate::win32::com_add_ref(state.object as *mut u8);
+                state.clone()
+            };
+            let stream_id =
+                crate::win32::NEXT_COM_STREAM_ID.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            COM_MARSHAL_STREAMS.lock().insert(stream_id, cloned_state);
+            let cloned = allocate_marshal_stream(stream_id);
+            if cloned.is_null() {
+                if let Some(state) = COM_MARSHAL_STREAMS.lock().remove(&stream_id) {
+                    crate::win32::com_release(state.object as *mut u8);
+                }
+                return E_OUTOFMEMORY;
+            }
+            let cloned_stream = &mut *(cloned as *mut ComMarshalStream);
+            cloned_stream.position = stream.position;
+            *ppstm = cloned;
+            S_OK
+        }
+    }
+
+    pub unsafe fn co_marshal_inter_thread_interface_in_stream(
+        riid: *const GUID,
+        p_unk: *mut u8,
+        pp_stm: *mut *mut u8,
+    ) -> HRESULT {
+        if pp_stm.is_null() {
+            return E_POINTER;
+        }
+        *pp_stm = core::ptr::null_mut();
+        if riid.is_null() || p_unk.is_null() {
+            return E_POINTER;
+        }
+        if !crate::win32::COM_APARTMENTS
+            .lock()
+            .contains_key(&crate::win32::current_win32_thread_key())
+        {
+            return CO_E_NOTINITIALIZED;
+        }
+        let mut interface = core::ptr::null_mut();
+        let hr = crate::win32::com_query_interface(p_unk, riid, &mut interface);
+        if hr != S_OK || interface.is_null() {
+            return if hr == S_OK { E_NOINTERFACE } else { hr };
+        }
+        let iid_key = guid_to_key(riid).unwrap_or_default();
+        let stream_id =
+            crate::win32::NEXT_COM_STREAM_ID.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        COM_MARSHAL_STREAMS.lock().insert(
+            stream_id,
+            ComMarshalStreamState {
+                object: interface as usize,
+                iid_key: iid_key.clone(),
+                payload: build_marshal_payload(stream_id, &iid_key),
+            },
+        );
+        let stream = allocate_marshal_stream(stream_id);
+        if stream.is_null() {
+            if let Some(state) = COM_MARSHAL_STREAMS.lock().remove(&stream_id) {
+                crate::win32::com_release(state.object as *mut u8);
+            }
+            return E_OUTOFMEMORY;
+        }
+        *pp_stm = stream;
+        S_OK
+    }
+
+    pub unsafe fn co_get_interface_and_release_stream(
+        p_stm: *mut u8,
+        riid: *const GUID,
+        ppv: *mut *mut u8,
+    ) -> HRESULT {
+        if ppv.is_null() {
+            return E_POINTER;
+        }
+        *ppv = core::ptr::null_mut();
+        if p_stm.is_null() || riid.is_null() {
+            return E_POINTER;
+        }
+        if !crate::win32::COM_APARTMENTS
+            .lock()
+            .contains_key(&crate::win32::current_win32_thread_key())
+        {
+            return CO_E_NOTINITIALIZED;
+        }
+        let stream = &mut *(p_stm as *mut ComMarshalStream);
+        let Some(state) = COM_MARSHAL_STREAMS.lock().remove(&stream.stream_id) else {
+            free_marshal_stream(p_stm);
+            return STG_E_REVERTED;
+        };
+        let hr = crate::win32::com_query_interface(state.object as *mut u8, riid, ppv);
+        crate::win32::com_release(state.object as *mut u8);
+        stream.ref_count = 0;
+        free_marshal_stream(p_stm);
+        hr
+    }
+
+    pub unsafe fn co_task_mem_alloc(cb: SIZE_T) -> LPVOID {
+        crate::win32::win32_alloc(cb as usize, 8)
+    }
+
+    pub unsafe fn co_task_mem_free(pv: LPVOID) {
+        crate::win32::win32_dealloc(pv);
+    }
+}
+
+// ============================================================================
+// OLEAUT32 IMPLEMENTATION
+// ============================================================================
+
+mod oleaut32 {
+    use super::*;
+
+    const VT_EMPTY: u16 = 0;
+    const VT_BSTR: u16 = 8;
+    static TYPELIB_VTABLE: Once<Box<[usize; 13]>> = Once::new();
+    static TYPEINFO_VTABLE: Once<Box<[usize; 19]>> = Once::new();
+    static TYPECOMP_VTABLE: Once<Box<[usize; 5]>> = Once::new();
+
+    fn alloc_bstr_text(text: &str) -> BSTR {
+        let utf16 = text.encode_utf16().collect::<Vec<_>>();
+        crate::win32::alloc_bstr_from_units(&utf16)
+    }
+
+    fn stable_hash(bytes: &[u8], seed: u64) -> u64 {
+        let mut hash = seed;
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01B3);
+        }
+        hash
+    }
+
+    fn deterministic_guid(path: &str, payload: &[u8]) -> GUID {
+        let mut reverse = payload.to_vec();
+        reverse.reverse();
+        let h1 = stable_hash(path.as_bytes(), 0xcbf2_9ce4_8422_2325);
+        let h2 = stable_hash(&reverse, h1 ^ (payload.len() as u64));
+        GUID {
+            data1: h1 as u32,
+            data2: (h1 >> 32) as u16,
+            data3: (((h1 >> 48) as u16) & 0x0fff) | 0x4000,
+            data4: [
+                (((h2 >> 56) as u8) & 0x3f) | 0x80,
+                (h2 >> 48) as u8,
+                (h2 >> 40) as u8,
+                (h2 >> 32) as u8,
+                (h2 >> 24) as u8,
+                (h2 >> 16) as u8,
+                (h2 >> 8) as u8,
+                h2 as u8,
+            ],
+        }
+    }
+
+    fn typelib_name_from_path(path: &str) -> String {
+        let trimmed = path.trim_end_matches('/');
+        let leaf = trimmed.rsplit('/').next().unwrap_or(trimmed);
+        leaf.rsplit_once('.')
+            .map(|(stem, _)| stem)
+            .unwrap_or(leaf)
+            .to_string()
+    }
+
+    fn parse_guid_text(text: &str) -> Option<GUID> {
+        let trimmed = text
+            .trim()
+            .trim_matches('{')
+            .trim_matches('}')
+            .trim_matches(|ch: char| ch == '"' || ch == '\'');
+        let mut parts = trimmed.split('-');
+        let data1 = u32::from_str_radix(parts.next()?, 16).ok()?;
+        let data2 = u16::from_str_radix(parts.next()?, 16).ok()?;
+        let data3 = u16::from_str_radix(parts.next()?, 16).ok()?;
+        let part4 = parts.next()?;
+        let part5 = parts.next()?;
+        if parts.next().is_some() || part4.len() != 4 || part5.len() != 12 {
+            return None;
+        }
+        let mut data4 = [0u8; 8];
+        data4[0] = u8::from_str_radix(&part4[0..2], 16).ok()?;
+        data4[1] = u8::from_str_radix(&part4[2..4], 16).ok()?;
+        for index in 0..6 {
+            let start = index * 2;
+            data4[index + 2] = u8::from_str_radix(&part5[start..start + 2], 16).ok()?;
+        }
+        Some(GUID {
+            data1,
+            data2,
+            data3,
+            data4,
+        })
+    }
+
+    fn parse_version_pair(text: &str) -> Option<(u16, u16)> {
+        let (major, minor) = text.trim().split_once('.')?;
+        Some((major.trim().parse().ok()?, minor.trim().parse().ok()?))
+    }
+
+    fn parse_typekind(text: &str) -> DWORD {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "enum" => TKIND_ENUM,
+            "record" => TKIND_RECORD,
+            "module" => TKIND_MODULE,
+            "interface" => TKIND_INTERFACE,
+            "dispatch" | "dispinterface" => TKIND_DISPATCH,
+            "coclass" => TKIND_COCLASS,
+            "alias" => TKIND_ALIAS,
+            "union" => TKIND_UNION,
+            _ => TKIND_DISPATCH,
+        }
+    }
+
+    fn default_member_functions(member_names: &[String]) -> Vec<ComTypeFuncState> {
+        member_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ComTypeFuncState {
+                memid: index as DISPID + 1,
+                name: name.clone(),
+                documentation: name.clone(),
+                help_context: 0,
+                dll_name: String::new(),
+                entry_name: String::new(),
+                ordinal: 0,
+                invkind: INVOKE_FUNC,
+                callconv: 4,
+                param_count: 0,
+                optional_param_count: 0,
+                func_flags: 0,
+                vtable_offset: index as SHORT * 8,
+            })
+            .collect()
+    }
+
+    fn parse_dispatch_invkind(value: Option<&str>) -> WORD {
+        match value
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "get" | "propertyget" => INVOKE_PROPERTYGET,
+            "put" | "propertyput" => INVOKE_PROPERTYPUT,
+            "" | "func" | "method" => INVOKE_FUNC,
+            _ => INVOKE_FUNC,
+        }
+    }
+
+    fn parse_dispatch_short(value: Option<&str>) -> SHORT {
+        value
+            .and_then(|raw| raw.trim().parse::<i16>().ok())
+            .unwrap_or(0)
+    }
+
+    fn parse_dispatch_word(value: Option<&str>) -> WORD {
+        value
+            .and_then(|raw| raw.trim().parse::<u16>().ok())
+            .unwrap_or(0)
+    }
+
+    fn parse_dispatch_dword(value: Option<&str>) -> DWORD {
+        value
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+    }
+
+    fn parse_var_kind(value: Option<&str>) -> DWORD {
+        match value
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "instance" => VAR_PERINSTANCE,
+            "const" => 1,
+            "static" => 2,
+            "dispatch" => 3,
+            other => other.parse::<u32>().unwrap_or(VAR_PERINSTANCE),
+        }
+    }
+
+    fn parse_var_offset(value: Option<&str>) -> ULONG {
+        value
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+    }
+
+    fn parse_impl_type_flags(value: Option<&str>) -> INT {
+        let raw = value.unwrap_or_default().trim();
+        if raw.is_empty() {
+            return 0;
+        }
+        let lowered = raw.to_ascii_lowercase();
+        let mut flags = 0i32;
+        for token in lowered
+            .split(|ch: char| ch == ',' || ch == '|' || ch == '+' || ch.is_ascii_whitespace())
+            .filter(|token| !token.is_empty())
+        {
+            match token {
+                "default" => flags |= IMPLTYPEFLAG_FDEFAULT,
+                "source" => flags |= IMPLTYPEFLAG_FSOURCE,
+                "restricted" => flags |= IMPLTYPEFLAG_FRESTRICTED,
+                "defaultvtable" | "default_vtable" | "defaultvtbl" => {
+                    flags |= IMPLTYPEFLAG_FDEFAULTVTABLE
+                }
+                numeric => {
+                    if let Ok(parsed) = numeric.parse::<i32>() {
+                        flags |= parsed;
+                    }
+                }
+            }
+        }
+        flags
+    }
+
+    fn parse_dispatch_memid(value: Option<&str>) -> Option<DISPID> {
+        value.and_then(|raw| raw.trim().parse::<DISPID>().ok())
+    }
+
+    fn parse_dispatch_dll_entry(value: Option<&str>) -> (String, String, WORD) {
+        let raw = value.unwrap_or_default().trim();
+        if raw.is_empty() {
+            return (String::new(), String::new(), 0);
+        }
+        if let Some((dll_name, entry_name)) = raw.split_once('!') {
+            return (
+                dll_name.trim().to_string(),
+                entry_name.trim().to_string(),
+                0,
+            );
+        }
+        if let Some((dll_name, ordinal)) = raw.split_once('#') {
+            return (
+                dll_name.trim().to_string(),
+                String::new(),
+                ordinal.trim().parse::<u16>().unwrap_or(0),
+            );
+        }
+        (String::new(), raw.to_string(), 0)
+    }
+
+    fn normalize_member_dispatch_shape(info: &mut ComTypeInfoState) {
+        if info.funcs.is_empty() && !info.member_names.is_empty() {
+            info.funcs = default_member_functions(&info.member_names);
+        }
+        if info.member_names.is_empty() {
+            info.member_names = info
+                .funcs
+                .iter()
+                .map(|func| func.name.clone())
+                .chain(info.vars.iter().map(|var| var.name.clone()))
+                .collect();
+        }
+    }
+
+    fn append_type_info_func(
+        type_infos: &mut [ComTypeInfoState],
+        type_name: &str,
+        func_name: &str,
+        memid: Option<DISPID>,
+        documentation: Option<&str>,
+        help_context: Option<DWORD>,
+        dll_entry: Option<(String, String, WORD)>,
+        invkind: Option<WORD>,
+        param_count: Option<SHORT>,
+        optional_param_count: Option<SHORT>,
+        func_flags: Option<WORD>,
+    ) {
+        if let Some(info) = type_infos
+            .iter_mut()
+            .find(|info| info.name.eq_ignore_ascii_case(type_name))
+        {
+            let resolved_memid = memid.unwrap_or_else(|| info.funcs.len() as DISPID + 1);
+            info.funcs.push(ComTypeFuncState {
+                memid: resolved_memid,
+                name: func_name.to_string(),
+                documentation: documentation.unwrap_or(func_name).to_string(),
+                help_context: help_context.unwrap_or(0),
+                dll_name: dll_entry
+                    .as_ref()
+                    .map(|value| value.0.clone())
+                    .unwrap_or_default(),
+                entry_name: dll_entry
+                    .as_ref()
+                    .map(|value| value.1.clone())
+                    .unwrap_or_default(),
+                ordinal: dll_entry.as_ref().map(|value| value.2).unwrap_or(0),
+                invkind: invkind.unwrap_or(INVOKE_FUNC),
+                callconv: 4,
+                param_count: param_count.unwrap_or(0),
+                optional_param_count: optional_param_count.unwrap_or(0),
+                func_flags: func_flags.unwrap_or(0),
+                vtable_offset: info.funcs.len() as SHORT * 8,
+            });
+            normalize_member_dispatch_shape(info);
+        }
+    }
+
+    fn append_type_info_var(
+        type_infos: &mut [ComTypeInfoState],
+        type_name: &str,
+        var_name: &str,
+        memid: Option<DISPID>,
+        documentation: Option<&str>,
+        help_context: Option<DWORD>,
+        varkind: Option<DWORD>,
+        offset: Option<ULONG>,
+        var_flags: Option<WORD>,
+    ) {
+        if let Some(info) = type_infos
+            .iter_mut()
+            .find(|info| info.name.eq_ignore_ascii_case(type_name))
+        {
+            let resolved_memid =
+                memid.unwrap_or_else(|| (info.funcs.len() + info.vars.len()) as DISPID + 1);
+            info.vars.push(ComTypeVarState {
+                memid: resolved_memid,
+                name: var_name.to_string(),
+                documentation: documentation.unwrap_or(var_name).to_string(),
+                help_context: help_context.unwrap_or(0),
+                var_flags: var_flags.unwrap_or(0),
+                varkind: varkind.unwrap_or(VAR_PERINSTANCE),
+                offset: offset.unwrap_or(0),
+            });
+            normalize_member_dispatch_shape(info);
+        }
+    }
+
+    fn append_type_info_impl(
+        type_infos: &mut [ComTypeInfoState],
+        type_name: &str,
+        impl_name: &str,
+        flags: Option<INT>,
+    ) {
+        if impl_name.is_empty() {
+            return;
+        }
+        let Some(info_index) = type_infos
+            .iter()
+            .position(|info| info.name.eq_ignore_ascii_case(type_name))
+        else {
+            return;
+        };
+        let href_type = type_infos
+            .iter()
+            .position(|info| info.name.eq_ignore_ascii_case(impl_name))
+            .map(|index| index as DWORD)
+            .unwrap_or(u32::MAX);
+        if let Some(info) = type_infos.get_mut(info_index) {
+            if info
+                .impl_types
+                .iter()
+                .any(|item| item.name.eq_ignore_ascii_case(impl_name))
+            {
+                return;
+            }
+            info.impl_types.push(ComImplTypeState {
+                name: impl_name.to_string(),
+                href_type,
+                flags: flags.unwrap_or(0),
+            });
+        }
+    }
+
+    fn relink_impl_types(type_infos: &mut [ComTypeInfoState]) {
+        let names = type_infos
+            .iter()
+            .map(|info| info.name.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        for info in type_infos.iter_mut() {
+            for impl_type in info.impl_types.iter_mut() {
+                impl_type.href_type = names
+                    .iter()
+                    .position(|name| name.eq_ignore_ascii_case(&impl_type.name))
+                    .map(|index| index as DWORD)
+                    .unwrap_or(u32::MAX);
+            }
+        }
+    }
+
+    enum TypeMemberRef<'a> {
+        Func(&'a ComTypeFuncState),
+        Var(&'a ComTypeVarState),
+    }
+
+    fn type_info_member_by_memid<'a>(
+        info: &'a ComTypeInfoState,
+        memid: DISPID,
+    ) -> Option<TypeMemberRef<'a>> {
+        info.funcs
+            .iter()
+            .find(|func| func.memid == memid)
+            .map(TypeMemberRef::Func)
+            .or_else(|| {
+                info.vars
+                    .iter()
+                    .find(|var| var.memid == memid)
+                    .map(TypeMemberRef::Var)
+            })
+    }
+
+    fn type_info_member_by_name<'a>(
+        info: &'a ComTypeInfoState,
+        name: &str,
+    ) -> Option<TypeMemberRef<'a>> {
+        info.funcs
+            .iter()
+            .find(|func| func.name.eq_ignore_ascii_case(name))
+            .map(TypeMemberRef::Func)
+            .or_else(|| {
+                info.vars
+                    .iter()
+                    .find(|var| var.name.eq_ignore_ascii_case(name))
+                    .map(TypeMemberRef::Var)
+            })
+    }
+
+    fn type_info_impl_by_href<'a>(
+        library: &'a ComTypeLibState,
+        href_type: DWORD,
+    ) -> Option<(usize, &'a ComTypeInfoState)> {
+        library
+            .type_infos
+            .get(href_type as usize)
+            .map(|info| (href_type as usize, info))
+    }
+
+    fn collect_utf16le_strings(payload: &[u8], out: &mut Vec<String>) {
+        let mut pos = 0usize;
+        while pos + 1 < payload.len() {
+            let mut chars = Vec::new();
+            let start = pos;
+            while pos + 1 < payload.len() {
+                let lo = payload[pos];
+                let hi = payload[pos + 1];
+                if hi != 0 || lo == 0 || !(lo.is_ascii_graphic() || lo == b' ') {
+                    break;
+                }
+                chars.push(lo as char);
+                pos += 2;
+            }
+            if chars.len() >= 4 {
+                let candidate: String = chars.into_iter().collect();
+                if !out.iter().any(|existing| existing == &candidate) {
+                    out.push(candidate);
+                }
+            }
+            if pos == start {
+                pos += 2;
+            }
+        }
+    }
+
+    fn collect_ascii_strings(payload: &[u8], out: &mut Vec<String>) {
+        let mut start = None;
+        for (idx, byte) in payload.iter().copied().enumerate() {
+            if byte.is_ascii_graphic() || byte == b' ' {
+                start.get_or_insert(idx);
+                continue;
+            }
+            if let Some(begin) = start.take() {
+                if idx.saturating_sub(begin) >= 4 {
+                    if let Ok(candidate) = core::str::from_utf8(&payload[begin..idx]) {
+                        let text = candidate.trim().to_string();
+                        if !text.is_empty() && !out.iter().any(|existing| existing == &text) {
+                            out.push(text);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(begin) = start {
+            if payload.len().saturating_sub(begin) >= 4 {
+                if let Ok(candidate) = core::str::from_utf8(&payload[begin..]) {
+                    let text = candidate.trim().to_string();
+                    if !text.is_empty() && !out.iter().any(|existing| existing == &text) {
+                        out.push(text);
+                    }
+                }
+            }
+        }
+    }
+
+    fn parse_binary_typelib_metadata(path: &str, payload: &[u8]) -> Option<ComTypeLibState> {
+        let looks_binary = payload.starts_with(b"MSFT")
+            || payload.starts_with(b"SLTG")
+            || payload.iter().take(128).any(|&byte| byte == 0);
+        if !looks_binary {
+            return None;
+        }
+
+        let mut candidates = Vec::new();
+        collect_utf16le_strings(payload, &mut candidates);
+        collect_ascii_strings(payload, &mut candidates);
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let default_name = typelib_name_from_path(path);
+        let mut name = default_name.clone();
+        let mut documentation = alloc::format!("Binary type library loaded from {path}");
+        let mut library_guid = deterministic_guid(path, payload);
+        let mut major_version = 1u16;
+        let mut minor_version = 0u16;
+        let mut lcid = 0u32;
+        let mut syskind = SYS_WIN32;
+        let mut help_context = 0u32;
+        let mut help_file = path.to_string();
+        let mut type_infos = Vec::new();
+
+        for candidate in candidates {
+            let normalized = candidate.trim();
+            if normalized.is_empty()
+                || normalized.eq_ignore_ascii_case("MSFT")
+                || normalized.eq_ignore_ascii_case("SLTG")
+            {
+                continue;
+            }
+            let lower = normalized.to_ascii_lowercase();
+            if let Some((key, value)) = normalized.split_once('=') {
+                let key = key.trim().to_ascii_lowercase();
+                let value = value.trim();
+                match key.as_str() {
+                    "name" if !value.is_empty() => {
+                        name = value.to_string();
+                        continue;
+                    }
+                    "doc" if !value.is_empty() => {
+                        documentation = value.to_string();
+                        continue;
+                    }
+                    "version" => {
+                        if let Some((major, minor)) = parse_version_pair(value) {
+                            major_version = major;
+                            minor_version = minor;
+                        }
+                        continue;
+                    }
+                    "lcid" => {
+                        if let Ok(parsed) = value.parse::<u32>() {
+                            lcid = parsed;
+                        }
+                        continue;
+                    }
+                    "syskind" => {
+                        if let Ok(parsed) = value.parse::<u32>() {
+                            syskind = parsed;
+                        }
+                        continue;
+                    }
+                    "helpcontext" => {
+                        if let Ok(parsed) = value.parse::<u32>() {
+                            help_context = parsed;
+                        }
+                        continue;
+                    }
+                    "helpfile" if !value.is_empty() => {
+                        help_file = value.to_string();
+                        continue;
+                    }
+                    "guid" => {
+                        if let Some(parsed) = parse_guid_text(value) {
+                            library_guid = parsed;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(parsed) = parse_guid_text(normalized) {
+                library_guid = parsed;
+                continue;
+            }
+            if let Some(value) = normalized.strip_prefix("func:") {
+                let mut parts = value.split('|').map(str::trim);
+                let type_name = parts.next().unwrap_or_default();
+                let func_name = parts.next().unwrap_or_default();
+                if type_name.is_empty() || func_name.is_empty() {
+                    continue;
+                }
+                let memid = parse_dispatch_memid(parts.next());
+                let documentation = parts.next().filter(|value| !value.is_empty());
+                let help_context = Some(parse_dispatch_dword(parts.next()));
+                let dll_entry = Some(parse_dispatch_dll_entry(parts.next()));
+                let invkind = Some(parse_dispatch_invkind(parts.next()));
+                let param_count = Some(parse_dispatch_short(parts.next()));
+                let optional_param_count = Some(parse_dispatch_short(parts.next()));
+                let func_flags = Some(parse_dispatch_word(parts.next()));
+                append_type_info_func(
+                    &mut type_infos,
+                    type_name,
+                    func_name,
+                    memid,
+                    documentation,
+                    help_context,
+                    dll_entry,
+                    invkind,
+                    param_count,
+                    optional_param_count,
+                    func_flags,
+                );
+                continue;
+            }
+            if let Some(value) = normalized.strip_prefix("var:") {
+                let mut parts = value.split('|').map(str::trim);
+                let type_name = parts.next().unwrap_or_default();
+                let var_name = parts.next().unwrap_or_default();
+                if type_name.is_empty() || var_name.is_empty() {
+                    continue;
+                }
+                let memid = parse_dispatch_memid(parts.next());
+                let documentation = parts.next().filter(|value| !value.is_empty());
+                let help_context = Some(parse_dispatch_dword(parts.next()));
+                let varkind = Some(parse_var_kind(parts.next()));
+                let offset = Some(parse_var_offset(parts.next()));
+                let var_flags = Some(parse_dispatch_word(parts.next()));
+                append_type_info_var(
+                    &mut type_infos,
+                    type_name,
+                    var_name,
+                    memid,
+                    documentation,
+                    help_context,
+                    varkind,
+                    offset,
+                    var_flags,
+                );
+                continue;
+            }
+            if let Some(value) = normalized.strip_prefix("impl:") {
+                let mut parts = value.split('|').map(str::trim);
+                let type_name = parts.next().unwrap_or_default();
+                let impl_name = parts.next().unwrap_or_default();
+                if type_name.is_empty() || impl_name.is_empty() {
+                    continue;
+                }
+                append_type_info_impl(
+                    &mut type_infos,
+                    type_name,
+                    impl_name,
+                    Some(parse_impl_type_flags(parts.next())),
+                );
+                continue;
+            }
+            if name == default_name
+                && !lower.contains(".dll")
+                && !lower.contains(".tlb")
+                && !matches!(
+                    lower.as_str(),
+                    "helpstring" | "typelib" | "stdole" | "version" | "lcid" | "syskind"
+                )
+            {
+                name = normalized.to_string();
+                continue;
+            }
+            if documentation.starts_with("Binary type library loaded from")
+                && normalized.contains(' ')
+                && normalized.len() > 8
+            {
+                documentation = normalized.to_string();
+                continue;
+            }
+
+            let (typekind, type_name, members) =
+                if let Some((prefix, rest)) = normalized.split_once(':') {
+                    let rest = rest.trim();
+                    if rest.is_empty() {
+                        continue;
+                    }
+                    let (type_name, members) =
+                        if let Some((name_part, members_part)) = rest.split_once('|') {
+                            (
+                                name_part.trim(),
+                                members_part
+                                    .split(',')
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>(),
+                            )
+                        } else {
+                            (rest, Vec::new())
+                        };
+                    (parse_typekind(prefix), type_name, members)
+                } else if normalized.len() >= 3
+                    && normalized
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ' '))
+                {
+                    let kind = if lower.contains("interface") {
+                        TKIND_INTERFACE
+                    } else if lower.contains("dispatch") || lower.contains("disp") {
+                        TKIND_DISPATCH
+                    } else if lower.contains("class") {
+                        TKIND_COCLASS
+                    } else {
+                        TKIND_DISPATCH
+                    };
+                    (kind, normalized, Vec::new())
+                } else if lower.contains("class") {
+                    (TKIND_COCLASS, normalized, Vec::new())
+                } else {
+                    continue;
+                };
+
+            if type_infos
+                .iter()
+                .any(|state: &ComTypeInfoState| state.name.eq_ignore_ascii_case(type_name))
+            {
+                continue;
+            }
+
+            type_infos.push(ComTypeInfoState {
+                guid: deterministic_guid(
+                    path,
+                    alloc::format!("binary|{}|{}|{}", typekind, type_name, members.join(","))
+                        .as_bytes(),
+                ),
+                name: type_name.to_string(),
+                documentation: alloc::format!(
+                    "Type info extracted from binary typelib: {type_name}"
+                ),
+                help_context,
+                help_file: help_file.clone(),
+                typekind,
+                type_flags: TYPEFLAG_FDISPATCHABLE,
+                major_version,
+                minor_version,
+                member_names: members,
+                impl_types: Vec::new(),
+                funcs: Vec::new(),
+                vars: Vec::new(),
+            });
+            if let Some(last) = type_infos.last_mut() {
+                normalize_member_dispatch_shape(last);
+            }
+        }
+
+        if type_infos.is_empty() {
+            type_infos.push(ComTypeInfoState {
+                guid: library_guid,
+                name: name.clone(),
+                documentation: alloc::format!("Primary automation type for {path}"),
+                help_context,
+                help_file: help_file.clone(),
+                typekind: TKIND_DISPATCH,
+                type_flags: TYPEFLAG_FDISPATCHABLE,
+                major_version,
+                minor_version,
+                member_names: Vec::new(),
+                impl_types: Vec::new(),
+                funcs: Vec::new(),
+                vars: Vec::new(),
+            });
+        }
+        relink_impl_types(&mut type_infos);
+        for info in type_infos.iter_mut() {
+            normalize_member_dispatch_shape(info);
+        }
+
+        Some(ComTypeLibState {
+            guid: library_guid,
+            name,
+            documentation,
+            path: path.to_string(),
+            help_context,
+            help_file,
+            major_version,
+            minor_version,
+            lcid,
+            syskind,
+            type_infos,
+        })
+    }
+
+    fn parse_typelib_metadata(path: &str, payload: &[u8]) -> Option<ComTypeLibState> {
+        let text = core::str::from_utf8(payload).ok()?;
+        let mut lines = text.lines();
+        let magic = lines.next()?.trim();
+        if magic != "ECHOS-TLB1" {
+            return None;
+        }
+
+        let mut name = typelib_name_from_path(path);
+        let mut documentation = alloc::format!("Type library loaded from {path}");
+        let mut major_version = 1u16;
+        let mut minor_version = 0u16;
+        let mut lcid = 0u32;
+        let mut syskind = SYS_WIN32;
+        let mut help_context = 0u32;
+        let mut help_file = path.to_string();
+        let mut type_infos = Vec::new();
+
+        for line in lines {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("name=") {
+                if !value.trim().is_empty() {
+                    name = value.trim().to_string();
+                }
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("doc=") {
+                documentation = value.trim().to_string();
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("version=") {
+                if let Some((major, minor)) = value.trim().split_once('.') {
+                    major_version = major.trim().parse().ok()?;
+                    minor_version = minor.trim().parse().ok()?;
+                }
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("lcid=") {
+                lcid = value.trim().parse().ok()?;
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("syskind=") {
+                syskind = value.trim().parse().ok()?;
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("helpcontext=") {
+                help_context = value.trim().parse().ok()?;
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("helpfile=") {
+                if !value.trim().is_empty() {
+                    help_file = value.trim().to_string();
+                }
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("type=") {
+                let mut parts = value.splitn(7, '|').map(str::trim);
+                let type_name = parts.next().unwrap_or_default();
+                if type_name.is_empty() {
+                    continue;
+                }
+                let kind = parse_typekind(parts.next().unwrap_or("dispatch"));
+                let flags = parts
+                    .next()
+                    .and_then(|raw| {
+                        raw.parse::<u16>().ok().or_else(|| {
+                            let trimmed = raw.trim_start_matches("0x").trim_start_matches("0X");
+                            u16::from_str_radix(trimmed, 16).ok()
+                        })
+                    })
+                    .unwrap_or(TYPEFLAG_FDISPATCHABLE);
+                let type_doc = parts
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(type_name);
+                let type_help_context = parts
+                    .next()
+                    .and_then(|raw| raw.parse::<u32>().ok())
+                    .unwrap_or(help_context);
+                let type_help_file = parts
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(help_file.as_str());
+                let member_names = parts
+                    .next()
+                    .map(|raw| {
+                        raw.split(',')
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                type_infos.push(ComTypeInfoState {
+                    guid: deterministic_guid(
+                        path,
+                        alloc::format!(
+                            "{}|{}|{}|{}|{}",
+                            type_name,
+                            kind,
+                            flags,
+                            type_doc,
+                            member_names.join(",")
+                        )
+                        .as_bytes(),
+                    ),
+                    name: type_name.to_string(),
+                    documentation: type_doc.to_string(),
+                    help_context: type_help_context,
+                    help_file: type_help_file.to_string(),
+                    typekind: kind,
+                    type_flags: flags,
+                    major_version,
+                    minor_version,
+                    member_names,
+                    impl_types: Vec::new(),
+                    funcs: Vec::new(),
+                    vars: Vec::new(),
+                });
+                if let Some(last) = type_infos.last_mut() {
+                    normalize_member_dispatch_shape(last);
+                }
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("func=") {
+                let mut parts = value.splitn(10, '|').map(str::trim);
+                let type_name = parts.next().unwrap_or_default();
+                let func_name = parts.next().unwrap_or_default();
+                if type_name.is_empty() || func_name.is_empty() {
+                    continue;
+                }
+                let memid = parts
+                    .next()
+                    .and_then(|raw| raw.parse::<DISPID>().ok())
+                    .unwrap_or_else(|| {
+                        type_infos
+                            .iter()
+                            .find(|info| info.name.eq_ignore_ascii_case(type_name))
+                            .map(|info| info.funcs.len() as DISPID + 1)
+                            .unwrap_or(1)
+                    });
+                let documentation = parts.next().unwrap_or(func_name).to_string();
+                let help_context = parts.next().and_then(|raw| raw.parse::<u32>().ok());
+                let dll_entry = Some(parse_dispatch_dll_entry(parts.next()));
+                let invkind = Some(parse_dispatch_invkind(parts.next()));
+                let param_count = Some(parse_dispatch_short(parts.next()));
+                let optional_param_count = Some(parse_dispatch_short(parts.next()));
+                let func_flags = Some(parse_dispatch_word(parts.next()));
+                append_type_info_func(
+                    &mut type_infos,
+                    type_name,
+                    func_name,
+                    Some(memid),
+                    Some(&documentation),
+                    help_context,
+                    dll_entry,
+                    invkind,
+                    param_count,
+                    optional_param_count,
+                    func_flags,
+                );
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("var=") {
+                let mut parts = value.splitn(8, '|').map(str::trim);
+                let type_name = parts.next().unwrap_or_default();
+                let var_name = parts.next().unwrap_or_default();
+                if type_name.is_empty() || var_name.is_empty() {
+                    continue;
+                }
+                let memid = parts
+                    .next()
+                    .and_then(|raw| raw.parse::<DISPID>().ok())
+                    .unwrap_or_else(|| {
+                        type_infos
+                            .iter()
+                            .find(|info| info.name.eq_ignore_ascii_case(type_name))
+                            .map(|info| (info.funcs.len() + info.vars.len()) as DISPID + 1)
+                            .unwrap_or(1)
+                    });
+                let documentation = parts.next().unwrap_or(var_name).to_string();
+                let help_context = parts.next().and_then(|raw| raw.parse::<u32>().ok());
+                let varkind = Some(parse_var_kind(parts.next()));
+                let offset = Some(parse_var_offset(parts.next()));
+                let var_flags = Some(parse_dispatch_word(parts.next()));
+                append_type_info_var(
+                    &mut type_infos,
+                    type_name,
+                    var_name,
+                    Some(memid),
+                    Some(&documentation),
+                    help_context,
+                    varkind,
+                    offset,
+                    var_flags,
+                );
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("impl=") {
+                let mut parts = value.splitn(3, '|').map(str::trim);
+                let type_name = parts.next().unwrap_or_default();
+                let impl_name = parts.next().unwrap_or_default();
+                if type_name.is_empty() || impl_name.is_empty() {
+                    continue;
+                }
+                append_type_info_impl(
+                    &mut type_infos,
+                    type_name,
+                    impl_name,
+                    Some(parse_impl_type_flags(parts.next())),
+                );
+            }
+        }
+
+        if type_infos.is_empty() {
+            return None;
+        }
+        relink_impl_types(&mut type_infos);
+        for info in type_infos.iter_mut() {
+            normalize_member_dispatch_shape(info);
+        }
+
+        Some(ComTypeLibState {
+            guid: deterministic_guid(path, payload),
+            name,
+            documentation,
+            path: path.to_string(),
+            help_context,
+            help_file,
+            major_version,
+            minor_version,
+            lcid,
+            syskind,
+            type_infos,
+        })
+    }
+
+    fn load_type_library_state(path: &str) -> Result<ComTypeLibState, HRESULT> {
+        let normalized = crate::win32::normalize_win32_path(path);
+        let disk_path = if normalized.is_empty() {
+            path
+        } else {
+            &normalized
+        };
+        let payload =
+            crate::fs::vfs_unified::read_file(disk_path).map_err(|_| TYPE_E_CANTLOADLIBRARY)?;
+        if let Some(state) = parse_typelib_metadata(disk_path, &payload) {
+            return Ok(state);
+        }
+        if let Some(state) = parse_binary_typelib_metadata(disk_path, &payload) {
+            return Ok(state);
+        }
+        let name = typelib_name_from_path(disk_path);
+        let guid = deterministic_guid(disk_path, &payload);
+        Ok(ComTypeLibState {
+            guid,
+            name: name.clone(),
+            documentation: alloc::format!("Type library loaded from {disk_path}"),
+            path: disk_path.to_string(),
+            help_context: 0,
+            help_file: disk_path.to_string(),
+            major_version: 1,
+            minor_version: 0,
+            lcid: 0,
+            syskind: SYS_WIN32,
+            type_infos: vec![ComTypeInfoState {
+                guid,
+                name,
+                documentation: alloc::format!("Primary automation type for {disk_path}"),
+                help_context: 0,
+                help_file: disk_path.to_string(),
+                typekind: TKIND_DISPATCH,
+                type_flags: TYPEFLAG_FDISPATCHABLE,
+                major_version: 1,
+                minor_version: 0,
+                member_names: Vec::new(),
+                impl_types: Vec::new(),
+                funcs: Vec::new(),
+                vars: Vec::new(),
+            }],
+        })
+    }
+
+    unsafe fn type_lib_from_ptr(this: *mut u8) -> Option<&'static mut ComTypeLibObject> {
+        if this.is_null() {
+            return None;
+        }
+        Some(&mut *(this as *mut ComTypeLibObject))
+    }
+
+    unsafe fn type_info_from_ptr(this: *mut u8) -> Option<&'static mut ComTypeInfoObject> {
+        if this.is_null() {
+            return None;
+        }
+        Some(&mut *(this as *mut ComTypeInfoObject))
+    }
+
+    unsafe fn type_comp_from_ptr(this: *mut u8) -> Option<&'static mut ComTypeCompObject> {
+        if this.is_null() {
+            return None;
+        }
+        Some(&mut *(this as *mut ComTypeCompObject))
+    }
+
+    fn allocate_type_comp(library: ComTypeLibState, index: Option<u32>) -> *mut u8 {
+        let vtable = TYPECOMP_VTABLE.call_once(|| {
+            Box::new([
+                type_comp_query_interface as usize,
+                type_comp_add_ref as usize,
+                type_comp_release as usize,
+                type_comp_bind as usize,
+                type_comp_bind_type as usize,
+            ])
+        });
+        let object = Box::new(ComTypeCompObject {
+            vtable: vtable.as_ptr(),
+            ref_count: 1,
+            library,
+            index,
+        });
+        Box::into_raw(object) as *mut u8
+    }
+
+    fn allocate_func_desc(func: &ComTypeFuncState) -> *mut FUNCDESC {
+        Box::into_raw(Box::new(FUNCDESC {
+            memid: func.memid,
+            lprgscode: core::ptr::null_mut(),
+            lprgelemdesc_param: core::ptr::null_mut(),
+            funckind: FUNC_PUREVIRTUAL,
+            invkind: func.invkind,
+            callconv: func.callconv,
+            c_params: func.param_count,
+            c_params_opt: func.optional_param_count,
+            o_vft: func.vtable_offset,
+            c_scodes: 0,
+            elemdesc_func: ELEMDESC::default(),
+            w_func_flags: func.func_flags,
+        }))
+    }
+
+    fn allocate_var_desc(var: &ComTypeVarState) -> *mut VARDESC {
+        Box::into_raw(Box::new(VARDESC {
+            memid: var.memid,
+            lpstr_schema: core::ptr::null_mut(),
+            o_inst: var.offset,
+            elemdesc_var: ELEMDESC::default(),
+            w_var_flags: var.var_flags,
+            varkind: var.varkind,
+        }))
+    }
+
+    fn allocate_type_lib(state: ComTypeLibState) -> *mut u8 {
+        let vtable = TYPELIB_VTABLE.call_once(|| {
+            Box::new([
+                type_lib_query_interface as usize,
+                type_lib_add_ref as usize,
+                type_lib_release as usize,
+                type_lib_get_type_info_count as usize,
+                type_lib_get_type_info as usize,
+                type_lib_get_type_info_type as usize,
+                type_lib_get_type_info_of_guid as usize,
+                type_lib_get_lib_attr as usize,
+                type_lib_get_type_comp as usize,
+                type_lib_get_documentation as usize,
+                type_lib_is_name as usize,
+                type_lib_find_name as usize,
+                type_lib_release_tlib_attr as usize,
+            ])
+        });
+        let object = Box::new(ComTypeLibObject {
+            vtable: vtable.as_ptr(),
+            ref_count: 1,
+            state,
+        });
+        Box::into_raw(object) as *mut u8
+    }
+
+    fn allocate_type_info(library: ComTypeLibState, index: usize) -> *mut u8 {
+        let vtable = TYPEINFO_VTABLE.call_once(|| {
+            Box::new([
+                type_info_query_interface as usize,
+                type_info_add_ref as usize,
+                type_info_release as usize,
+                type_info_get_type_attr as usize,
+                type_info_get_type_comp as usize,
+                type_info_get_func_desc as usize,
+                type_info_get_var_desc as usize,
+                type_info_get_names as usize,
+                type_info_get_ref_type_of_impl_type as usize,
+                type_info_get_impl_type_flags as usize,
+                type_info_get_ids_of_names as usize,
+                type_info_invoke as usize,
+                type_info_get_documentation as usize,
+                type_info_get_dll_entry as usize,
+                type_info_get_ref_type_info as usize,
+                type_info_address_of_member as usize,
+                type_info_create_instance as usize,
+                type_info_get_containing_type_lib as usize,
+                type_info_release_type_attr as usize,
+            ])
+        });
+        let object = Box::new(ComTypeInfoObject {
+            vtable: vtable.as_ptr(),
+            ref_count: 1,
+            library,
+            index: index as u32,
+        });
+        Box::into_raw(object) as *mut u8
+    }
+
+    unsafe fn free_type_lib(this: *mut u8) {
+        if !this.is_null() {
+            let _ = Box::from_raw(this as *mut ComTypeLibObject);
+        }
+    }
+
+    unsafe fn free_type_info(this: *mut u8) {
+        if !this.is_null() {
+            let _ = Box::from_raw(this as *mut ComTypeInfoObject);
+        }
+    }
+
+    unsafe fn free_type_comp(this: *mut u8) {
+        if !this.is_null() {
+            let _ = Box::from_raw(this as *mut ComTypeCompObject);
+        }
+    }
+
+    fn type_comp_search_indices(object: &ComTypeCompObject) -> impl Iterator<Item = usize> + '_ {
+        object
+            .index
+            .map(|index| alloc::vec![index as usize])
+            .unwrap_or_else(|| (0..object.library.type_infos.len()).collect::<Vec<_>>())
+            .into_iter()
+    }
+
+    extern "system" fn type_comp_query_interface(
+        this: *mut u8,
+        iid: *const GUID,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            if iid.is_null() {
+                return E_POINTER;
+            }
+            if guid_matches(iid, &IID_IUNKNOWN) || guid_matches(iid, &IID_ITYPECOMP) {
+                *out = this;
+                let _ = type_comp_add_ref(this);
+                return S_OK;
+            }
+            E_NOINTERFACE
+        }
+    }
+
+    extern "system" fn type_comp_add_ref(this: *mut u8) -> u32 {
+        unsafe {
+            let Some(object) = type_comp_from_ptr(this) else {
+                return 0;
+            };
+            object.ref_count = object.ref_count.saturating_add(1);
+            object.ref_count
+        }
+    }
+
+    extern "system" fn type_comp_release(this: *mut u8) -> u32 {
+        unsafe {
+            let Some(object) = type_comp_from_ptr(this) else {
+                return 0;
+            };
+            if object.ref_count > 1 {
+                object.ref_count -= 1;
+                return object.ref_count;
+            }
+            free_type_comp(this);
+            0
+        }
+    }
+
+    extern "system" fn type_comp_bind(
+        this: *mut u8,
+        sz_name: LPWSTR,
+        _l_hash_val: ULONG,
+        _w_flags: WORD,
+        pp_tinfo: *mut *mut u8,
+        p_desc_kind: *mut DWORD,
+        p_bind_ptr: *mut BINDPTR,
+    ) -> HRESULT {
+        unsafe {
+            if sz_name.is_null() {
+                return E_POINTER;
+            }
+            if !pp_tinfo.is_null() {
+                *pp_tinfo = core::ptr::null_mut();
+            }
+            if !p_desc_kind.is_null() {
+                *p_desc_kind = DESCKIND_NONE;
+            }
+            if !p_bind_ptr.is_null() {
+                *p_bind_ptr = BINDPTR::default();
+            }
+            let Some(object) = type_comp_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let candidate = read_utf16_string(sz_name);
+            for index in type_comp_search_indices(object) {
+                let Some(info) = object.library.type_infos.get(index) else {
+                    continue;
+                };
+                if info.name.eq_ignore_ascii_case(&candidate) {
+                    if !pp_tinfo.is_null() {
+                        *pp_tinfo = allocate_type_info(object.library.clone(), index);
+                        if (*pp_tinfo).is_null() {
+                            return E_OUTOFMEMORY;
+                        }
+                    }
+                    if !p_desc_kind.is_null() {
+                        *p_desc_kind = DESCKIND_TYPECOMP;
+                    }
+                    if !p_bind_ptr.is_null() {
+                        (*p_bind_ptr).lptcomp =
+                            allocate_type_comp(object.library.clone(), Some(index as u32));
+                        if (*p_bind_ptr).lptcomp.is_null() {
+                            return E_OUTOFMEMORY;
+                        }
+                    }
+                    return S_OK;
+                }
+                if let Some(member) = type_info_member_by_name(info, &candidate) {
+                    if !pp_tinfo.is_null() {
+                        *pp_tinfo = allocate_type_info(object.library.clone(), index);
+                        if (*pp_tinfo).is_null() {
+                            return E_OUTOFMEMORY;
+                        }
+                    }
+                    if !p_bind_ptr.is_null() {
+                        match member {
+                            TypeMemberRef::Func(func) => {
+                                (*p_bind_ptr).lpfuncdesc = allocate_func_desc(func);
+                                if (*p_bind_ptr).lpfuncdesc.is_null() {
+                                    return E_OUTOFMEMORY;
+                                }
+                                if !p_desc_kind.is_null() {
+                                    *p_desc_kind = DESCKIND_FUNCDESC;
+                                }
+                            }
+                            TypeMemberRef::Var(var) => {
+                                (*p_bind_ptr).lpvardesc = allocate_var_desc(var);
+                                if (*p_bind_ptr).lpvardesc.is_null() {
+                                    return E_OUTOFMEMORY;
+                                }
+                                if !p_desc_kind.is_null() {
+                                    *p_desc_kind = DESCKIND_VARDESC;
+                                }
+                            }
+                        }
+                    }
+                    return S_OK;
+                }
+            }
+            TYPE_E_ELEMENTNOTFOUND
+        }
+    }
+
+    extern "system" fn type_comp_bind_type(
+        this: *mut u8,
+        sz_name: LPWSTR,
+        _l_hash_val: ULONG,
+        pp_tinfo: *mut *mut u8,
+        pp_tcomp: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if sz_name.is_null() {
+                return E_POINTER;
+            }
+            if !pp_tinfo.is_null() {
+                *pp_tinfo = core::ptr::null_mut();
+            }
+            if !pp_tcomp.is_null() {
+                *pp_tcomp = core::ptr::null_mut();
+            }
+            let Some(object) = type_comp_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let candidate = read_utf16_string(sz_name);
+            for index in type_comp_search_indices(object) {
+                let Some(info) = object.library.type_infos.get(index) else {
+                    continue;
+                };
+                if !info.name.eq_ignore_ascii_case(&candidate) {
+                    continue;
+                }
+                if !pp_tinfo.is_null() {
+                    *pp_tinfo = allocate_type_info(object.library.clone(), index);
+                    if (*pp_tinfo).is_null() {
+                        return E_OUTOFMEMORY;
+                    }
+                }
+                if !pp_tcomp.is_null() {
+                    *pp_tcomp = allocate_type_comp(object.library.clone(), Some(index as u32));
+                    if (*pp_tcomp).is_null() {
+                        return E_OUTOFMEMORY;
+                    }
+                }
+                return S_OK;
+            }
+            TYPE_E_ELEMENTNOTFOUND
+        }
+    }
+
+    extern "system" fn type_lib_query_interface(
+        this: *mut u8,
+        iid: *const GUID,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            if guid_matches(iid, &IID_IUNKNOWN) || guid_matches(iid, &IID_ITYPELIB) {
+                *out = this;
+                let _ = type_lib_add_ref(this);
+                return S_OK;
+            }
+        }
+        E_NOINTERFACE
+    }
+
+    extern "system" fn type_lib_add_ref(this: *mut u8) -> u32 {
+        unsafe {
+            let Some(object) = type_lib_from_ptr(this) else {
+                return 0;
+            };
+            object.ref_count = object.ref_count.saturating_add(1);
+            object.ref_count
+        }
+    }
+
+    extern "system" fn type_lib_release(this: *mut u8) -> u32 {
+        unsafe {
+            let Some(object) = type_lib_from_ptr(this) else {
+                return 0;
+            };
+            if object.ref_count > 1 {
+                object.ref_count -= 1;
+                return object.ref_count;
+            }
+            free_type_lib(this);
+            0
+        }
+    }
+
+    extern "system" fn type_lib_get_type_info_count(this: *mut u8) -> UINT {
+        unsafe {
+            type_lib_from_ptr(this)
+                .map(|object| object.state.type_infos.len() as UINT)
+                .unwrap_or(0)
+        }
+    }
+
+    extern "system" fn type_lib_get_type_info(
+        this: *mut u8,
+        index: UINT,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_lib_from_ptr(this) else {
+                return E_POINTER;
+            };
+            if index as usize >= object.state.type_infos.len() {
+                return TYPE_E_ELEMENTNOTFOUND;
+            }
+            *out = allocate_type_info(object.state.clone(), index as usize);
+            if (*out).is_null() {
+                return E_OUTOFMEMORY;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_lib_get_type_info_type(
+        this: *mut u8,
+        index: UINT,
+        out: *mut DWORD,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            let Some(object) = type_lib_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.state.type_infos.get(index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            *out = info.typekind;
+            S_OK
+        }
+    }
+
+    extern "system" fn type_lib_get_type_info_of_guid(
+        this: *mut u8,
+        guid: *const GUID,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_lib_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(index) = object
+                .state
+                .type_infos
+                .iter()
+                .position(|info| guid_matches(guid, &info.guid))
+            else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            *out = allocate_type_info(object.state.clone(), index);
+            if (*out).is_null() {
+                return E_OUTOFMEMORY;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_lib_get_lib_attr(this: *mut u8, out: *mut *mut TLIBATTR) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_lib_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let attr = Box::new(TLIBATTR {
+                guid: object.state.guid,
+                lcid: object.state.lcid,
+                syskind: object.state.syskind,
+                w_major_ver_num: object.state.major_version,
+                w_minor_ver_num: object.state.minor_version,
+                w_lib_flags: 0,
+            });
+            *out = Box::into_raw(attr);
+            S_OK
+        }
+    }
+
+    extern "system" fn type_lib_get_type_comp(this: *mut u8, out: *mut *mut u8) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_lib_from_ptr(this) else {
+                return E_POINTER;
+            };
+            *out = allocate_type_comp(object.state.clone(), None);
+            if (*out).is_null() {
+                return E_OUTOFMEMORY;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_lib_get_documentation(
+        this: *mut u8,
+        index: INT,
+        name: *mut BSTR,
+        doc: *mut BSTR,
+        help_context: *mut DWORD,
+        help_file: *mut BSTR,
+    ) -> HRESULT {
+        unsafe {
+            let Some(object) = type_lib_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let (entry_name, entry_doc, entry_help_context, entry_help_file) = if index == -1 {
+                (
+                    &object.state.name,
+                    &object.state.documentation,
+                    object.state.help_context,
+                    object.state.help_file.as_str(),
+                )
+            } else {
+                let Some(info) = object.state.type_infos.get(index as usize) else {
+                    return TYPE_E_ELEMENTNOTFOUND;
+                };
+                (
+                    &info.name,
+                    &info.documentation,
+                    info.help_context,
+                    info.help_file.as_str(),
+                )
+            };
+            if !name.is_null() {
+                *name = alloc_bstr_text(entry_name);
+            }
+            if !doc.is_null() {
+                *doc = alloc_bstr_text(entry_doc);
+            }
+            if !help_context.is_null() {
+                *help_context = entry_help_context;
+            }
+            if !help_file.is_null() {
+                *help_file = alloc_bstr_text(entry_help_file);
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_lib_is_name(
+        this: *mut u8,
+        sz_name_buf: LPWSTR,
+        _l_hash_val: ULONG,
+        pf_name: *mut BOOL,
+    ) -> HRESULT {
+        unsafe {
+            if pf_name.is_null() {
+                return E_POINTER;
+            }
+            *pf_name = FALSE;
+            if sz_name_buf.is_null() {
+                return E_POINTER;
+            }
+            let candidate = read_utf16_string(sz_name_buf).to_ascii_lowercase();
+            let Some(object) = type_lib_from_ptr(this) else {
+                return E_POINTER;
+            };
+            if object.state.name.eq_ignore_ascii_case(&candidate)
+                || object.state.type_infos.iter().any(|info| {
+                    info.name.eq_ignore_ascii_case(&candidate)
+                        || type_info_member_by_name(info, &candidate).is_some()
+                })
+            {
+                *pf_name = TRUE;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_lib_find_name(
+        this: *mut u8,
+        sz_name_buf: LPWSTR,
+        _l_hash_val: ULONG,
+        pp_tinfo: *mut *mut u8,
+        rg_mem_id: *mut DISPID,
+        pc_found: *mut WORD,
+    ) -> HRESULT {
+        unsafe {
+            if sz_name_buf.is_null() || pp_tinfo.is_null() || pc_found.is_null() {
+                return E_POINTER;
+            }
+            *pp_tinfo = core::ptr::null_mut();
+            *pc_found = 0;
+            let candidate = read_utf16_string(sz_name_buf);
+            let Some(object) = type_lib_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some((index, memid)) =
+                object
+                    .state
+                    .type_infos
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, info)| {
+                        if info.name.eq_ignore_ascii_case(&candidate) {
+                            Some((index, MEMBERID_NIL))
+                        } else {
+                            type_info_member_by_name(info, &candidate).map(|member| {
+                                let memid = match member {
+                                    TypeMemberRef::Func(func) => func.memid,
+                                    TypeMemberRef::Var(var) => var.memid,
+                                };
+                                (index, memid)
+                            })
+                        }
+                    })
+            else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            *pp_tinfo = allocate_type_info(object.state.clone(), index);
+            if (*pp_tinfo).is_null() {
+                return E_OUTOFMEMORY;
+            }
+            if !rg_mem_id.is_null() {
+                *rg_mem_id = memid;
+            }
+            *pc_found = 1;
+            S_OK
+        }
+    }
+
+    extern "system" fn type_lib_release_tlib_attr(_this: *mut u8, attr: *mut TLIBATTR) {
+        unsafe {
+            if !attr.is_null() {
+                let _ = Box::from_raw(attr);
+            }
+        }
+    }
+
+    extern "system" fn type_info_query_interface(
+        this: *mut u8,
+        iid: *const GUID,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            if guid_matches(iid, &IID_IUNKNOWN) || guid_matches(iid, &IID_ITYPEINFO) {
+                *out = this;
+                let _ = type_info_add_ref(this);
+                return S_OK;
+            }
+        }
+        E_NOINTERFACE
+    }
+
+    extern "system" fn type_info_add_ref(this: *mut u8) -> u32 {
+        unsafe {
+            let Some(object) = type_info_from_ptr(this) else {
+                return 0;
+            };
+            object.ref_count = object.ref_count.saturating_add(1);
+            object.ref_count
+        }
+    }
+
+    extern "system" fn type_info_release(this: *mut u8) -> u32 {
+        unsafe {
+            let Some(object) = type_info_from_ptr(this) else {
+                return 0;
+            };
+            if object.ref_count > 1 {
+                object.ref_count -= 1;
+                return object.ref_count;
+            }
+            free_type_info(this);
+            0
+        }
+    }
+
+    extern "system" fn type_info_get_type_attr(this: *mut u8, out: *mut *mut TYPEATTR) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            let attr = Box::new(TYPEATTR {
+                guid: info.guid,
+                lcid: object.library.lcid,
+                dw_reserved: 0,
+                memid_constructor: MEMBERID_NIL,
+                memid_destructor: MEMBERID_NIL,
+                lpstr_schema: core::ptr::null_mut(),
+                cb_size_instance: 0,
+                typekind: info.typekind,
+                c_funcs: info.funcs.len().min(u16::MAX as usize) as WORD,
+                c_vars: info.vars.len().min(u16::MAX as usize) as WORD,
+                c_impl_types: info.impl_types.len().min(u16::MAX as usize) as WORD,
+                cb_size_vft: 0,
+                cb_alignment: 8,
+                w_type_flags: info.type_flags,
+                w_major_ver_num: info.major_version,
+                w_minor_ver_num: info.minor_version,
+                tdesc_alias: TYPEDESC::default(),
+                idldesc_type: IDLDESC::default(),
+            });
+            *out = Box::into_raw(attr);
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_get_type_comp(this: *mut u8, out: *mut *mut u8) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            *out = allocate_type_comp(object.library.clone(), Some(object.index));
+            if (*out).is_null() {
+                return E_OUTOFMEMORY;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_get_func_desc(
+        this: *mut u8,
+        index: UINT,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            let Some(func) = info.funcs.get(index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            *out = allocate_func_desc(func) as *mut u8;
+            if (*out).is_null() {
+                return E_OUTOFMEMORY;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_get_var_desc(
+        this: *mut u8,
+        index: UINT,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            let Some(var) = info.vars.get(index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            *out = allocate_var_desc(var) as *mut u8;
+            if (*out).is_null() {
+                return E_OUTOFMEMORY;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_get_names(
+        this: *mut u8,
+        memid: DISPID,
+        names: *mut BSTR,
+        max_names: UINT,
+        count: *mut UINT,
+    ) -> HRESULT {
+        unsafe {
+            if names.is_null() || count.is_null() {
+                return E_POINTER;
+            }
+            *count = 0;
+            if max_names == 0 {
+                return E_INVALIDARG;
+            }
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            if memid == MEMBERID_NIL || memid == 0 {
+                *names = alloc_bstr_text(&info.name);
+                *count = 1;
+                let member_names = info
+                    .funcs
+                    .iter()
+                    .map(|func| func.name.as_str())
+                    .chain(info.vars.iter().map(|var| var.name.as_str()))
+                    .collect::<Vec<_>>();
+                let capacity = core::cmp::min(max_names as usize, member_names.len() + 1);
+                for (index, member_name) in member_names
+                    .iter()
+                    .take(capacity.saturating_sub(1))
+                    .enumerate()
+                {
+                    *names.add(index + 1) = alloc_bstr_text(member_name);
+                    *count += 1;
+                }
+                return S_OK;
+            }
+            let Some(member) = type_info_member_by_memid(info, memid) else {
+                return DISP_E_MEMBERNOTFOUND;
+            };
+            let member_name = match member {
+                TypeMemberRef::Func(func) => &func.name,
+                TypeMemberRef::Var(var) => &var.name,
+            };
+            *names = alloc_bstr_text(member_name);
+            *count = 1;
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_get_ref_type_of_impl_type(
+        this: *mut u8,
+        index: UINT,
+        out: *mut DWORD,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = 0;
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            let Some(impl_type) = info.impl_types.get(index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            *out = impl_type.href_type;
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_get_impl_type_flags(
+        this: *mut u8,
+        index: UINT,
+        out: *mut INT,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = 0;
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            let Some(impl_type) = info.impl_types.get(index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            *out = impl_type.flags;
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_get_ids_of_names(
+        this: *mut u8,
+        names: *mut LPWSTR,
+        count: UINT,
+        memids: *mut DISPID,
+    ) -> HRESULT {
+        unsafe {
+            if names.is_null() || memids.is_null() || count == 0 {
+                return E_POINTER;
+            }
+            let candidate = read_utf16_string(*names);
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            if info.name.eq_ignore_ascii_case(&candidate) {
+                *memids = MEMBERID_NIL;
+                return S_OK;
+            }
+            if let Some(member) = type_info_member_by_name(info, &candidate) {
+                *memids = match member {
+                    TypeMemberRef::Func(func) => func.memid,
+                    TypeMemberRef::Var(var) => var.memid,
+                };
+                return S_OK;
+            }
+            DISP_E_UNKNOWNNAME
+        }
+    }
+
+    extern "system" fn type_info_invoke(
+        _this: *mut u8,
+        _instance: *mut u8,
+        memid: DISPID,
+        _flags: WORD,
+        _params: *mut DISPPARAMS,
+        _result: *mut VARIANT,
+        _excep: *mut EXCEPINFO,
+        _arg_err: *mut UINT,
+    ) -> HRESULT {
+        if memid == MEMBERID_NIL {
+            E_NOTIMPL
+        } else {
+            DISP_E_MEMBERNOTFOUND
+        }
+    }
+
+    extern "system" fn type_info_get_documentation(
+        this: *mut u8,
+        memid: DISPID,
+        name: *mut BSTR,
+        doc: *mut BSTR,
+        help_context: *mut DWORD,
+        help_file: *mut BSTR,
+    ) -> HRESULT {
+        unsafe {
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            if memid != MEMBERID_NIL && memid != 0 {
+                let Some(member) = type_info_member_by_memid(info, memid) else {
+                    return DISP_E_MEMBERNOTFOUND;
+                };
+                let (member_name, member_doc, member_help_context) = match member {
+                    TypeMemberRef::Func(func) => {
+                        (&func.name, &func.documentation, func.help_context)
+                    }
+                    TypeMemberRef::Var(var) => (&var.name, &var.documentation, var.help_context),
+                };
+                if !name.is_null() {
+                    *name = alloc_bstr_text(member_name);
+                }
+                if !doc.is_null() {
+                    *doc = alloc_bstr_text(member_doc);
+                }
+                if !help_context.is_null() {
+                    *help_context = member_help_context;
+                }
+                if !help_file.is_null() {
+                    *help_file = alloc_bstr_text(&info.help_file);
+                }
+                return S_OK;
+            }
+            if !name.is_null() {
+                *name = alloc_bstr_text(&info.name);
+            }
+            if !doc.is_null() {
+                *doc = alloc_bstr_text(&info.documentation);
+            }
+            if !help_context.is_null() {
+                *help_context = info.help_context;
+            }
+            if !help_file.is_null() {
+                *help_file = alloc_bstr_text(&info.help_file);
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_get_dll_entry(
+        this: *mut u8,
+        memid: DISPID,
+        inv_kind: DWORD,
+        dll_name: *mut BSTR,
+        entry_name: *mut BSTR,
+        ordinal: *mut WORD,
+    ) -> HRESULT {
+        unsafe {
+            if !dll_name.is_null() {
+                *dll_name = core::ptr::null_mut();
+            }
+            if !entry_name.is_null() {
+                *entry_name = core::ptr::null_mut();
+            }
+            if !ordinal.is_null() {
+                *ordinal = 0;
+            }
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            let Some(func) = info.funcs.iter().find(|func| {
+                func.memid == memid && (inv_kind == 0 || inv_kind as WORD == func.invkind)
+            }) else {
+                return DISP_E_MEMBERNOTFOUND;
+            };
+            if !dll_name.is_null() && !func.dll_name.is_empty() {
+                *dll_name = alloc_bstr_text(&func.dll_name);
+            }
+            if !entry_name.is_null() && !func.entry_name.is_empty() {
+                *entry_name = alloc_bstr_text(&func.entry_name);
+            }
+            if !ordinal.is_null() {
+                *ordinal = func.ordinal;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_get_ref_type_info(
+        this: *mut u8,
+        href_type: DWORD,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some((index, _)) = type_info_impl_by_href(&object.library, href_type) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            *out = allocate_type_info(object.library.clone(), index);
+            if (*out).is_null() {
+                return E_OUTOFMEMORY;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_address_of_member(
+        this: *mut u8,
+        memid: DISPID,
+        inv_kind: DWORD,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            let Some(func) = info.funcs.iter().find(|func| {
+                func.memid == memid && (inv_kind == 0 || inv_kind as WORD == func.invkind)
+            }) else {
+                return DISP_E_MEMBERNOTFOUND;
+            };
+            if !func.dll_name.is_empty() {
+                let entry = if !func.entry_name.is_empty() {
+                    func.entry_name.as_str()
+                } else {
+                    func.name.as_str()
+                };
+                if let Some(address) = crate::win32::get_proc_address(&func.dll_name, entry) {
+                    *out = address as *mut u8;
+                    return S_OK;
+                }
+            }
+            if func.vtable_offset >= 0 {
+                *out = func.vtable_offset as usize as *mut u8;
+                return S_OK;
+            }
+            TYPE_E_ELEMENTNOTFOUND
+        }
+    }
+
+    extern "system" fn type_info_create_instance(
+        this: *mut u8,
+        outer: *mut u8,
+        iid: *const GUID,
+        out: *mut *mut u8,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            if iid.is_null() {
+                return E_POINTER;
+            }
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            let Some(info) = object.library.type_infos.get(object.index as usize) else {
+                return TYPE_E_ELEMENTNOTFOUND;
+            };
+            if info.typekind != TKIND_COCLASS {
+                return E_NOTIMPL;
+            }
+            super::ole32::co_create_instance(
+                &info.guid,
+                outer,
+                CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER,
+                iid,
+                out,
+            )
+        }
+    }
+
+    extern "system" fn type_info_get_containing_type_lib(
+        this: *mut u8,
+        out: *mut *mut u8,
+        index: *mut UINT,
+    ) -> HRESULT {
+        unsafe {
+            if out.is_null() {
+                return E_POINTER;
+            }
+            *out = core::ptr::null_mut();
+            let Some(object) = type_info_from_ptr(this) else {
+                return E_POINTER;
+            };
+            *out = allocate_type_lib(object.library.clone());
+            if (*out).is_null() {
+                return E_OUTOFMEMORY;
+            }
+            if !index.is_null() {
+                *index = object.index;
+            }
+            S_OK
+        }
+    }
+
+    extern "system" fn type_info_release_type_attr(_this: *mut u8, attr: *mut TYPEATTR) {
+        unsafe {
+            if !attr.is_null() {
+                let _ = Box::from_raw(attr);
+            }
+        }
+    }
+
+    pub unsafe fn sys_alloc_string(psz: LPCWSTR) -> BSTR {
+        let text = read_utf16_string(psz);
+        let utf16 = text.encode_utf16().collect::<Vec<_>>();
+        crate::win32::alloc_bstr_from_units(&utf16)
+    }
+
+    pub unsafe fn sys_alloc_string_len(str_in: LPCWSTR, ui: UINT) -> BSTR {
+        if str_in.is_null() {
+            let zeros = vec![0u16; ui as usize];
+            return crate::win32::alloc_bstr_from_units(&zeros);
+        }
+        let slice = core::slice::from_raw_parts(str_in, ui as usize);
+        crate::win32::alloc_bstr_from_units(slice)
+    }
+
+    pub unsafe fn sys_free_string(bstr: BSTR) {
+        if bstr.is_null() {
+            return;
+        }
+        let raw = (bstr as *mut u8).sub(4);
+        crate::win32::win32_dealloc(raw);
+    }
+
+    pub unsafe fn sys_string_len(bstr: BSTR) -> UINT {
+        if bstr.is_null() {
+            return 0;
+        }
+        let raw = (bstr as *mut u8).sub(4) as *const u32;
+        (*raw / 2) as UINT
+    }
+
+    pub unsafe fn variant_init(pvarg: *mut VARIANT) {
+        if !pvarg.is_null() {
+            *pvarg = VARIANT::default();
+        }
+    }
+
+    pub unsafe fn variant_clear(pvarg: *mut VARIANT) -> HRESULT {
+        if pvarg.is_null() {
+            return E_POINTER;
+        }
+        if (*pvarg).vt == VT_BSTR {
+            sys_free_string((*pvarg).data_lo as BSTR);
+        }
+        (*pvarg).vt = VT_EMPTY;
+        (*pvarg).data_lo = 0;
+        (*pvarg).data_hi = 0;
+        S_OK
+    }
+
+    pub unsafe fn disp_get_ids_of_names(
+        dispatch: *mut u8,
+        riid: *const GUID,
+        names: *mut LPWSTR,
+        name_count: UINT,
+        lcid: LCID,
+        dispids: *mut DISPID,
+    ) -> HRESULT {
+        let _ = lcid;
+        if dispatch.is_null() || names.is_null() || dispids.is_null() {
+            return E_POINTER;
+        }
+        let vtable = *(dispatch as *mut *const usize);
+        let get_ids_of_names: extern "system" fn(
+            *mut u8,
+            *const GUID,
+            *mut LPWSTR,
+            UINT,
+            LCID,
+            *mut DISPID,
+        ) -> HRESULT = core::mem::transmute(*vtable.add(5));
+        get_ids_of_names(dispatch, riid, names, name_count, lcid, dispids)
+    }
+
+    pub unsafe fn disp_invoke(
+        dispatch: *mut u8,
+        dispid_member: DISPID,
+        riid: *const GUID,
+        lcid: LCID,
+        w_flags: WORD,
+        params: *mut DISPPARAMS,
+        result: *mut VARIANT,
+        excep: *mut EXCEPINFO,
+        arg_err: *mut UINT,
+    ) -> HRESULT {
+        if dispatch.is_null() {
+            return E_POINTER;
+        }
+        let vtable = *(dispatch as *mut *const usize);
+        let invoke: extern "system" fn(
+            *mut u8,
+            DISPID,
+            *const GUID,
+            LCID,
+            WORD,
+            *mut DISPPARAMS,
+            *mut VARIANT,
+            *mut EXCEPINFO,
+            *mut UINT,
+        ) -> HRESULT = core::mem::transmute(*vtable.add(6));
+        invoke(
+            dispatch,
+            dispid_member,
+            riid,
+            lcid,
+            w_flags,
+            params,
+            result,
+            excep,
+            arg_err,
+        )
+    }
+
+    pub unsafe fn load_type_lib(sz_file: LPCWSTR, pptlib: *mut *mut u8) -> HRESULT {
+        if pptlib.is_null() {
+            return E_POINTER;
+        }
+        *pptlib = core::ptr::null_mut();
+        if sz_file.is_null() {
+            return E_POINTER;
+        }
+        let path = read_utf16_string(sz_file);
+        if path.is_empty() {
+            return E_INVALIDARG;
+        }
+        let state = match load_type_library_state(&path) {
+            Ok(state) => state,
+            Err(hr) => return hr,
+        };
+        *pptlib = allocate_type_lib(state);
+        if (*pptlib).is_null() {
+            return E_OUTOFMEMORY;
+        }
+        S_OK
+    }
+}
+
+// ============================================================================
 // MSVCRT IMPLEMENTATION
 // ============================================================================
 
@@ -4862,8 +14394,10 @@ mod msvcrt {
 
     /// _expand
     pub unsafe fn _expand(ptr: LPVOID, size: SIZE_T) -> LPVOID {
-        let _ = (ptr, size);
-        0 as LPVOID
+        if ptr.is_null() {
+            return malloc(size);
+        }
+        crate::win32::win32_realloc(ptr as *mut u8, size as usize) as LPVOID
     }
 
     /// _heapmin
@@ -5095,94 +14629,546 @@ mod msvcrt {
     // IO
     // ========================================================================
 
+    fn mode_flags(mode: &str) -> Option<(DWORD, DWORD, bool)> {
+        let bytes = mode.as_bytes();
+        let read_write = bytes.contains(&b'+');
+        let append = bytes.first() == Some(&b'a');
+        let (access, disposition) = match bytes.first().copied()? as char {
+            'r' => (
+                if read_write {
+                    GENERIC_READ | GENERIC_WRITE
+                } else {
+                    GENERIC_READ
+                },
+                OPEN_EXISTING,
+            ),
+            'w' => (
+                if read_write {
+                    GENERIC_READ | GENERIC_WRITE
+                } else {
+                    GENERIC_WRITE
+                },
+                CREATE_ALWAYS,
+            ),
+            'a' => (
+                if read_write {
+                    GENERIC_READ | GENERIC_WRITE
+                } else {
+                    GENERIC_WRITE
+                },
+                4,
+            ),
+            _ => return None,
+        };
+        Some((access, disposition, append))
+    }
+
+    unsafe fn stream_handle(stream: *mut FILE) -> Option<HANDLE> {
+        if stream.is_null() {
+            None
+        } else {
+            Some((*stream)._file as u32 as u64)
+        }
+    }
+
+    unsafe fn new_stream(handle: HANDLE, owns_handle: bool, append: bool) -> *mut FILE {
+        let stream = crate::win32::win32_alloc(size_of::<FILE>(), core::mem::align_of::<FILE>())
+            as *mut FILE;
+        if stream.is_null() {
+            return core::ptr::null_mut();
+        }
+        *stream = FILE {
+            _ptr: core::ptr::null_mut(),
+            _cnt: 0,
+            _base: core::ptr::null_mut(),
+            _flag: 0,
+            _file: handle as INT,
+            _bufsiz: 0,
+        };
+        crate::win32::crt_stream_state().lock().insert(
+            stream as u64,
+            crate::win32::Win32CrtStream {
+                handle,
+                eof: false,
+                error: false,
+                owns_handle,
+                append,
+            },
+        );
+        stream
+    }
+
+    unsafe fn write_to_stream(stream: *mut FILE, bytes: &[u8]) -> INT {
+        let Some(handle) = stream_handle(stream) else {
+            return -1;
+        };
+        let mut written = 0u32;
+        if super::kernel32::write_file(
+            handle,
+            bytes.as_ptr(),
+            bytes.len() as DWORD,
+            &mut written,
+            core::ptr::null_mut(),
+        ) == FALSE
+        {
+            if let Some(state) = crate::win32::crt_stream_state()
+                .lock()
+                .get_mut(&(stream as u64))
+            {
+                state.error = true;
+            }
+            return -1;
+        }
+        written as INT
+    }
+
+    unsafe fn read_from_stream(stream: *mut FILE, bytes: &mut [u8]) -> INT {
+        let Some(handle) = stream_handle(stream) else {
+            return -1;
+        };
+        let mut read = 0u32;
+        if super::kernel32::read_file(
+            handle,
+            bytes.as_mut_ptr(),
+            bytes.len() as DWORD,
+            &mut read,
+            core::ptr::null_mut(),
+        ) == FALSE
+        {
+            if let Some(state) = crate::win32::crt_stream_state()
+                .lock()
+                .get_mut(&(stream as u64))
+            {
+                state.error = true;
+            }
+            return -1;
+        }
+        if let Some(state) = crate::win32::crt_stream_state()
+            .lock()
+            .get_mut(&(stream as u64))
+        {
+            state.eof = read == 0;
+        }
+        read as INT
+    }
+
+    unsafe fn next_printf_arg(args: *const u8, index: &mut usize) -> u64 {
+        if args.is_null() {
+            *index += 1;
+            return 0;
+        }
+        let value = *(args.add(*index * 8) as *const u64);
+        *index += 1;
+        value
+    }
+
+    unsafe fn format_printf_like(format: LPCSTR, args: *const u8) -> String {
+        let fmt = crate::win32::read_ansi_string(format);
+        let mut rendered = String::new();
+        let mut chars = fmt.chars().peekable();
+        let mut arg_index = 0usize;
+        while let Some(ch) = chars.next() {
+            if ch != '%' {
+                rendered.push(ch);
+                continue;
+            }
+            if chars.peek() == Some(&'%') {
+                chars.next();
+                rendered.push('%');
+                continue;
+            }
+            while matches!(chars.peek(), Some('-' | '+' | ' ' | '#' | '0')) {
+                chars.next();
+            }
+            while matches!(chars.peek(), Some('0'..='9')) {
+                chars.next();
+            }
+            if chars.peek() == Some(&'.') {
+                chars.next();
+                while matches!(chars.peek(), Some('0'..='9')) {
+                    chars.next();
+                }
+            }
+            while matches!(chars.peek(), Some('h' | 'l' | 'z' | 'I' | 't')) {
+                chars.next();
+            }
+            match chars.next().unwrap_or('%') {
+                's' => {
+                    let ptr = next_printf_arg(args, &mut arg_index) as LPCSTR;
+                    rendered.push_str(&crate::win32::read_ansi_string(ptr));
+                }
+                'c' => rendered.push((next_printf_arg(args, &mut arg_index) as u8) as char),
+                'd' | 'i' => rendered.push_str(&alloc::format!(
+                    "{}",
+                    next_printf_arg(args, &mut arg_index) as i64
+                )),
+                'u' => rendered.push_str(&alloc::format!(
+                    "{}",
+                    next_printf_arg(args, &mut arg_index) as u64
+                )),
+                'x' => rendered.push_str(&alloc::format!(
+                    "{:x}",
+                    next_printf_arg(args, &mut arg_index) as u64
+                )),
+                'X' => rendered.push_str(&alloc::format!(
+                    "{:X}",
+                    next_printf_arg(args, &mut arg_index) as u64
+                )),
+                'p' => rendered.push_str(&alloc::format!(
+                    "0x{:x}",
+                    next_printf_arg(args, &mut arg_index) as u64
+                )),
+                spec => {
+                    rendered.push('%');
+                    rendered.push(spec);
+                }
+            }
+        }
+        rendered
+    }
+
+    fn parse_float_prefix(text: &str) -> Option<(f64, usize)> {
+        let bytes = text.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let start = index;
+        if index < bytes.len() && matches!(bytes[index], b'+' | b'-') {
+            index += 1;
+        }
+        let mut seen_digit = false;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            seen_digit = true;
+            index += 1;
+        }
+        if index < bytes.len() && bytes[index] == b'.' {
+            index += 1;
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                seen_digit = true;
+                index += 1;
+            }
+        }
+        if !seen_digit {
+            return None;
+        }
+        if index < bytes.len() && matches!(bytes[index], b'e' | b'E') {
+            let exp_start = index;
+            index += 1;
+            if index < bytes.len() && matches!(bytes[index], b'+' | b'-') {
+                index += 1;
+            }
+            let exp_digits = index;
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+            if exp_digits == index {
+                index = exp_start;
+            }
+        }
+        let parsed = core::str::from_utf8(&bytes[start..index])
+            .ok()?
+            .parse::<f64>()
+            .ok()?;
+        Some((parsed, index))
+    }
+
+    fn parse_integer_prefix(text: &str, base_hint: INT, signed: bool) -> Option<(i128, usize)> {
+        let bytes = text.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let start = index;
+        let mut negative = false;
+        if index < bytes.len() && matches!(bytes[index], b'+' | b'-') {
+            negative = bytes[index] == b'-';
+            index += 1;
+        }
+        let mut base = if base_hint == 0 { 10 } else { base_hint as u32 };
+        if base_hint == 0 {
+            if index + 1 < bytes.len()
+                && bytes[index] == b'0'
+                && matches!(bytes[index + 1], b'x' | b'X')
+            {
+                base = 16;
+                index += 2;
+            } else if index < bytes.len() && bytes[index] == b'0' {
+                base = 8;
+                index += 1;
+            }
+        } else if base == 16
+            && index + 1 < bytes.len()
+            && bytes[index] == b'0'
+            && matches!(bytes[index + 1], b'x' | b'X')
+        {
+            index += 2;
+        }
+        let digit_start = index;
+        let mut value = 0u128;
+        while index < bytes.len() {
+            let digit = match bytes[index] {
+                b'0'..=b'9' => (bytes[index] - b'0') as u32,
+                b'a'..=b'z' => (bytes[index] - b'a' + 10) as u32,
+                b'A'..=b'Z' => (bytes[index] - b'A' + 10) as u32,
+                _ => break,
+            };
+            if digit >= base {
+                break;
+            }
+            value = value
+                .saturating_mul(base as u128)
+                .saturating_add(digit as u128);
+            index += 1;
+        }
+        if digit_start == index {
+            return None;
+        }
+        let signed_value = if negative && signed {
+            -(value as i128)
+        } else {
+            value as i128
+        };
+        Some((signed_value, index.max(start)))
+    }
+
     /// fopen
     pub unsafe fn fopen(filename: LPCSTR, mode: LPCSTR) -> *mut FILE {
-        let _ = (filename, mode);
-        0 as *mut FILE
+        if filename.is_null() || mode.is_null() {
+            return core::ptr::null_mut();
+        }
+        let filename = crate::win32::read_ansi_string(filename);
+        let mode = crate::win32::read_ansi_string(mode);
+        let Some((access, disposition, append)) = mode_flags(&mode) else {
+            return core::ptr::null_mut();
+        };
+        if filename.eq_ignore_ascii_case("CONOUT$") {
+            return new_stream(crate::win32::STD_OUTPUT_HANDLE, false, false);
+        }
+        if filename.eq_ignore_ascii_case("CONIN$") {
+            return new_stream(crate::win32::STD_INPUT_HANDLE, false, false);
+        }
+        let normalized = crate::win32::normalize_win32_path(&filename);
+        if normalized.is_empty() {
+            return core::ptr::null_mut();
+        }
+        let exists = crate::fs::f2fs::open_entry(&normalized).ok();
+        match disposition {
+            OPEN_EXISTING if exists.is_none() => return core::ptr::null_mut(),
+            CREATE_NEW if exists.is_some() => return core::ptr::null_mut(),
+            5 if exists.is_none() => return core::ptr::null_mut(),
+            _ => {}
+        }
+        let flags = match disposition {
+            CREATE_NEW => 0o1 | 0o100 | 0o200,
+            CREATE_ALWAYS => 0o1 | 0o100 | 0o1000,
+            OPEN_EXISTING => 0o0,
+            4 => 0o1 | 0o100,
+            5 => 0o1 | 0o1000,
+            _ => 0o0,
+        };
+        let flags = if access & GENERIC_READ != 0 && access & GENERIC_WRITE != 0 {
+            flags | 0o2
+        } else if access & GENERIC_WRITE != 0 {
+            flags | 0o1
+        } else {
+            flags
+        };
+        let fd = crate::fs::sys_open(&normalized, flags);
+        let handle =
+            crate::win32::NEXT_FILE_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::FILE_HANDLES.lock().insert(
+            handle,
+            crate::win32::Win32FileState {
+                fd,
+                path: normalized.clone(),
+                access,
+                is_console: false,
+            },
+        );
+        if append {
+            if let Some(size) = crate::win32::file_size_for_path(&normalized) {
+                let _ = crate::fs::sys_seek(fd, size as usize);
+            }
+        }
+        new_stream(handle as HANDLE, true, append)
     }
 
     /// fclose
     pub unsafe fn fclose(stream: *mut FILE) -> INT {
-        let _ = stream;
+        if stream.is_null() {
+            return -1;
+        }
+        if let Some(state) = crate::win32::crt_stream_state()
+            .lock()
+            .remove(&(stream as u64))
+        {
+            if state.owns_handle {
+                let _ = super::kernel32::close_handle(state.handle);
+            }
+        }
+        crate::win32::win32_dealloc(stream as *mut u8);
         0
     }
 
     /// fread
     pub unsafe fn fread(ptr: LPVOID, size: SIZE_T, count: SIZE_T, stream: *mut FILE) -> SIZE_T {
-        let _ = (ptr, size, count, stream);
-        0
+        if ptr.is_null() || size == 0 || count == 0 {
+            return 0;
+        }
+        let total = (size as usize).saturating_mul(count as usize);
+        let buffer = core::slice::from_raw_parts_mut(ptr, total);
+        let read = read_from_stream(stream, buffer);
+        if read <= 0 {
+            0
+        } else {
+            (read as usize / size as usize) as SIZE_T
+        }
     }
 
     /// fwrite
     pub unsafe fn fwrite(ptr: LPCVOID, size: SIZE_T, count: SIZE_T, stream: *mut FILE) -> SIZE_T {
-        let _ = (ptr, size, count, stream);
-        0
+        if ptr.is_null() || size == 0 || count == 0 {
+            return 0;
+        }
+        let total = (size as usize).saturating_mul(count as usize);
+        let buffer = core::slice::from_raw_parts(ptr, total);
+        let written = write_to_stream(stream, buffer);
+        if written <= 0 {
+            0
+        } else {
+            (written as usize / size as usize) as SIZE_T
+        }
     }
 
     /// fseek
     pub unsafe fn fseek(stream: *mut FILE, offset: LONG, origin: INT) -> INT {
-        let _ = (stream, offset, origin);
+        let Some(handle) = stream_handle(stream) else {
+            return -1;
+        };
+        if super::kernel32::set_file_pointer_ex(
+            handle,
+            offset as i64,
+            core::ptr::null_mut(),
+            origin as DWORD,
+        ) == FALSE
+        {
+            return -1;
+        }
+        if let Some(state) = crate::win32::crt_stream_state()
+            .lock()
+            .get_mut(&(stream as u64))
+        {
+            state.eof = false;
+        }
         0
     }
 
     /// ftell
     pub unsafe fn ftell(stream: *mut FILE) -> LONG {
-        let _ = stream;
-        0
+        let Some(handle) = stream_handle(stream) else {
+            return -1;
+        };
+        let mut position = 0i64;
+        if super::kernel32::set_file_pointer_ex(handle, 0, &mut position, 1) == FALSE {
+            -1
+        } else {
+            position as LONG
+        }
     }
 
     /// feof
     pub unsafe fn feof(stream: *mut FILE) -> INT {
-        let _ = stream;
-        0
+        crate::win32::crt_stream_state()
+            .lock()
+            .get(&(stream as u64))
+            .map(|state| if state.eof { 1 } else { 0 })
+            .unwrap_or(0)
     }
 
     /// fgetc
     pub unsafe fn fgetc(stream: *mut FILE) -> INT {
-        let _ = stream;
-        -1 // EOF
+        let mut byte = [0u8; 1];
+        if read_from_stream(stream, &mut byte) == 1 {
+            byte[0] as INT
+        } else {
+            -1
+        }
     }
 
     /// fputc
     pub unsafe fn fputc(c: INT, stream: *mut FILE) -> INT {
-        let _ = (c, stream);
-        -1
+        let byte = [c as u8];
+        if write_to_stream(stream, &byte) == 1 {
+            c & 0xFF
+        } else {
+            -1
+        }
     }
 
     /// fgets
     pub unsafe fn fgets(s: LPSTR, n: INT, stream: *mut FILE) -> LPSTR {
-        let _ = (s, n, stream);
-        0 as LPSTR
+        if s.is_null() || n <= 1 {
+            return core::ptr::null_mut();
+        }
+        let max_len = (n - 1) as usize;
+        let out = core::slice::from_raw_parts_mut(s as *mut u8, max_len + 1);
+        let mut count = 0usize;
+        while count < max_len {
+            let ch = fgetc(stream);
+            if ch < 0 {
+                break;
+            }
+            out[count] = ch as u8;
+            count += 1;
+            if ch as u8 == b'\n' {
+                break;
+            }
+        }
+        if count == 0 {
+            return core::ptr::null_mut();
+        }
+        out[count] = 0;
+        s
     }
 
     /// fputs
     pub unsafe fn fputs(s: LPCSTR, stream: *mut FILE) -> INT {
-        let _ = (s, stream);
-        -1
+        if s.is_null() {
+            return -1;
+        }
+        let text = crate::win32::read_ansi_string(s);
+        write_to_stream(stream, text.as_bytes())
     }
 
     /// fprintf
     pub unsafe fn fprintf(stream: *mut FILE, format: LPCSTR, args: *const u8) -> INT {
-        let _ = (stream, format, args);
-        0
+        let rendered = format_printf_like(format, args);
+        write_to_stream(stream, rendered.as_bytes())
     }
 
     /// printf
     pub unsafe fn printf(format: LPCSTR, args: *const u8) -> INT {
-        let _ = (format, args);
-        0
+        let rendered = format_printf_like(format, args);
+        let stdout = new_stream(crate::win32::STD_OUTPUT_HANDLE, false, false);
+        if stdout.is_null() {
+            return -1;
+        }
+        let written = write_to_stream(stdout, rendered.as_bytes());
+        let _ = fclose(stdout);
+        written
     }
 
     /// sprintf
     pub unsafe fn sprintf(buffer: LPSTR, format: LPCSTR, args: *const u8) -> INT {
-        let _ = (buffer, format, args);
-        0
+        let rendered = format_printf_like(format, args);
+        crate::win32::write_ansi_string(buffer, (rendered.len() + 1) as INT, &rendered)
     }
 
     /// snprintf
     pub unsafe fn snprintf(buffer: LPSTR, count: SIZE_T, format: LPCSTR, args: *const u8) -> INT {
-        let _ = (buffer, count, format, args);
-        0
+        let rendered = format_printf_like(format, args);
+        crate::win32::write_ansi_string(buffer, count as INT, &rendered)
     }
 
     /// scanf
@@ -5229,7 +15215,7 @@ mod msvcrt {
 
     /// time
     pub unsafe fn time(timer: *mut time_t) -> time_t {
-        let t = crate::random::next_u32() as time_t;
+        let t = crate::drivers::rtc::get_unix_time() as time_t;
         if !timer.is_null() {
             *timer = t;
         }
@@ -5238,37 +15224,71 @@ mod msvcrt {
 
     /// clock
     pub unsafe fn clock() -> clock_t {
-        crate::random::next_u32() as clock_t
+        super::kernel32::get_tick_count() as clock_t
     }
 
     /// localtime
     pub unsafe fn localtime(timer: *const time_t) -> *mut tm {
-        let _ = timer;
-        0 as *mut tm
+        if timer.is_null() {
+            return core::ptr::null_mut();
+        }
+        let value = crate::win32::unix_seconds_to_tm(*timer);
+        let mut slot = crate::win32::local_tm_state().lock();
+        *slot = value;
+        &mut *slot
     }
 
     /// gmtime
     pub unsafe fn gmtime(timer: *const time_t) -> *mut tm {
-        let _ = timer;
-        0 as *mut tm
+        if timer.is_null() {
+            return core::ptr::null_mut();
+        }
+        let value = crate::win32::unix_seconds_to_tm(*timer);
+        let mut slot = crate::win32::gmt_tm_state().lock();
+        *slot = value;
+        &mut *slot
     }
 
     /// asctime
     pub unsafe fn asctime(tm: *const tm) -> LPSTR {
-        let _ = tm;
-        0 as LPSTR
+        if tm.is_null() {
+            return core::ptr::null_mut();
+        }
+        let text = alloc::format!(
+            "{} {} {:02} {:02}:{:02}:{:02} {}\n",
+            crate::win32::weekday_name((*tm).tm_wday, true),
+            crate::win32::month_name((*tm).tm_mon, true),
+            (*tm).tm_mday,
+            (*tm).tm_hour,
+            (*tm).tm_min,
+            (*tm).tm_sec,
+            (*tm).tm_year + 1900
+        );
+        crate::win32::write_shared_ansi_buffer(crate::win32::time_ascii_state(), &text)
     }
 
     /// ctime
     pub unsafe fn ctime(timer: *const time_t) -> LPSTR {
-        let _ = timer;
-        0 as LPSTR
+        let tm_ptr = localtime(timer);
+        if tm_ptr.is_null() {
+            core::ptr::null_mut()
+        } else {
+            asctime(tm_ptr)
+        }
     }
 
     /// strftime
     pub unsafe fn strftime(s: LPSTR, maxsize: SIZE_T, format: LPCSTR, tm: *const tm) -> SIZE_T {
-        let _ = (s, maxsize, format, tm);
-        0
+        if s.is_null() || format.is_null() || tm.is_null() || maxsize == 0 {
+            return 0;
+        }
+        let rendered = crate::win32::format_tm(&*tm, &crate::win32::read_ansi_string(format));
+        let written = crate::win32::write_ansi_string(s, maxsize as INT, &rendered);
+        if written as usize >= maxsize as usize {
+            0
+        } else {
+            written as SIZE_T
+        }
     }
 
     // ========================================================================
@@ -5295,8 +15315,15 @@ mod msvcrt {
 
     /// getenv
     pub unsafe fn getenv(varname: LPCSTR) -> LPSTR {
-        let _ = varname;
-        0 as LPSTR
+        if varname.is_null() {
+            return core::ptr::null_mut();
+        }
+        let key = crate::win32::environment_key(&crate::win32::read_ansi_string(varname));
+        let value = match crate::win32::environment_state().lock().get(&key).cloned() {
+            Some(value) => value,
+            None => return core::ptr::null_mut(),
+        };
+        crate::win32::write_shared_ansi_buffer(crate::win32::getenv_buffer_state(), &value)
     }
 
     /// atoi
@@ -5334,26 +15361,76 @@ mod msvcrt {
 
     /// atof
     pub unsafe fn atof(s: LPCSTR) -> f64 {
-        let _ = s;
-        0.0
+        let text = crate::win32::read_ansi_string(s);
+        parse_float_prefix(&text)
+            .map(|(value, _)| value)
+            .unwrap_or(0.0)
     }
 
     /// strtol
     pub unsafe fn strtol(s: LPCSTR, endptr: *mut LPSTR, base: INT) -> LONG {
-        let _ = (s, endptr, base);
-        0
+        if s.is_null() {
+            if !endptr.is_null() {
+                *endptr = core::ptr::null_mut();
+            }
+            return 0;
+        }
+        let text = crate::win32::read_ansi_string(s);
+        if let Some((value, end)) = parse_integer_prefix(&text, base, true) {
+            if !endptr.is_null() {
+                *endptr = s.add(end) as LPSTR;
+            }
+            value as LONG
+        } else {
+            if !endptr.is_null() {
+                *endptr = s as LPSTR;
+            }
+            0
+        }
     }
 
     /// strtoul
     pub unsafe fn strtoul(s: LPCSTR, endptr: *mut LPSTR, base: INT) -> ULONG {
-        let _ = (s, endptr, base);
-        0
+        if s.is_null() {
+            if !endptr.is_null() {
+                *endptr = core::ptr::null_mut();
+            }
+            return 0;
+        }
+        let text = crate::win32::read_ansi_string(s);
+        if let Some((value, end)) = parse_integer_prefix(&text, base, false) {
+            if !endptr.is_null() {
+                *endptr = s.add(end) as LPSTR;
+            }
+            value as ULONG
+        } else {
+            if !endptr.is_null() {
+                *endptr = s as LPSTR;
+            }
+            0
+        }
     }
 
     /// strtod
     pub unsafe fn strtod(s: LPCSTR, endptr: *mut LPSTR) -> f64 {
-        let _ = (s, endptr);
-        0.0
+        if s.is_null() {
+            if !endptr.is_null() {
+                *endptr = core::ptr::null_mut();
+            }
+            return 0.0;
+        }
+        let text = crate::win32::read_ansi_string(s);
+        if let Some((value, end)) = parse_float_prefix(&text) {
+            if !endptr.is_null() {
+                *endptr = s.add(end) as LPSTR;
+            }
+            value
+        } else {
+            if !endptr.is_null() {
+                *endptr = s as LPSTR;
+            }
+            0.0
+        }
     }
 
     /// qsort - QuickSort implementation for C compatibility
@@ -5472,32 +15549,424 @@ mod msvcrt {
 mod gdi32 {
     use super::*;
 
+    fn dc_clip_rect(dc: &crate::win32::Win32DC, window: &crate::win32::Win32Window) -> RECT {
+        crate::win32::region_rect(dc.clip_region).unwrap_or(RECT {
+            left: 0,
+            top: 0,
+            right: window.width,
+            bottom: window.height,
+        })
+    }
+
+    fn point_visible(
+        dc: &crate::win32::Win32DC,
+        window: &crate::win32::Win32Window,
+        x: INT,
+        y: INT,
+    ) -> bool {
+        if x < 0 || y < 0 || x >= window.width || y >= window.height {
+            return false;
+        }
+        if dc.clip_region == 0 {
+            let clip = dc_clip_rect(dc, window);
+            return x >= clip.left && x < clip.right && y >= clip.top && y < clip.bottom;
+        }
+        crate::win32::region_contains_point(dc.clip_region, x, y)
+    }
+
+    fn put_surface_pixel(
+        dc: &crate::win32::Win32DC,
+        window: &mut crate::win32::Win32Window,
+        x: INT,
+        y: INT,
+        color: DWORD,
+    ) {
+        let (x, y) = crate::win32::logical_to_device(dc, x, y);
+        if !point_visible(dc, window, x, y) {
+            return;
+        }
+        let idx = ((y * window.width + x) * 4) as usize;
+        if idx + 3 >= window.surface.len() {
+            return;
+        }
+        window.surface[idx] = (color & 0xFF) as u8;
+        window.surface[idx + 1] = ((color >> 8) & 0xFF) as u8;
+        window.surface[idx + 2] = ((color >> 16) & 0xFF) as u8;
+        window.surface[idx + 3] = 0xFF;
+        if dc.recording_metafile != 0 {
+            let mut metafiles = crate::win32::WIN32_METAFILES.lock();
+            if let Some(meta) = metafiles.get_mut(&(dc.recording_metafile as u64)) {
+                if x >= 0 && y >= 0 && x < meta.width && y < meta.height {
+                    let meta_idx = ((y * meta.width + x) * 4) as usize;
+                    if meta_idx + 3 < meta.pixels.len() {
+                        meta.pixels[meta_idx] = (color & 0xFF) as u8;
+                        meta.pixels[meta_idx + 1] = ((color >> 8) & 0xFF) as u8;
+                        meta.pixels[meta_idx + 2] = ((color >> 16) & 0xFF) as u8;
+                        meta.pixels[meta_idx + 3] = 0xFF;
+                    }
+                }
+            }
+        }
+    }
+
+    fn paint_region_pixels<F>(hdc: HDC, hrgn: HRGN, mut painter: F) -> Option<RECT>
+    where
+        F: FnMut(&crate::win32::Win32DC, &mut crate::win32::Win32Window, INT, INT),
+    {
+        let region_rect = crate::win32::region_rect(hrgn)?;
+        let (hdc_id, hwnd) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let dc = dcs.get(&(hdc as u64))?;
+            (hdc as u64, dc.hwnd)
+        };
+        if hwnd == 0 {
+            return None;
+        }
+
+        let dc_snapshot = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let dc = dcs.get(&hdc_id)?;
+            crate::win32::Win32DC {
+                hdc: dc.hdc,
+                hwnd: dc.hwnd,
+                pen_color: dc.pen_color,
+                brush_color: dc.brush_color,
+                text_color: dc.text_color,
+                bk_color: dc.bk_color,
+                bk_mode: dc.bk_mode,
+                pen_x: dc.pen_x,
+                pen_y: dc.pen_y,
+                selected_pen: dc.selected_pen,
+                selected_brush: dc.selected_brush,
+                selected_font: dc.selected_font,
+                selected_palette: dc.selected_palette,
+                clip_region: dc.clip_region,
+                recording_metafile: dc.recording_metafile,
+                rop2: dc.rop2,
+                graphics_mode: dc.graphics_mode,
+                arc_direction: dc.arc_direction,
+                poly_fill_mode: dc.poly_fill_mode,
+                stretch_blt_mode: dc.stretch_blt_mode,
+                path_active: dc.path_active,
+                path_closed: dc.path_closed,
+                path_points: dc.path_points.clone(),
+                map_mode: dc.map_mode,
+                viewport_org: dc.viewport_org,
+                window_org: dc.window_org,
+                world_transform: dc.world_transform,
+                device_kind: dc.device_kind,
+                device_name: dc.device_name.clone(),
+                current_print_job: dc.current_print_job,
+                page_active: dc.page_active,
+                save_stack: Vec::new(),
+                font_height: dc.font_height,
+                font_weight: dc.font_weight,
+            }
+        };
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let window = windows.get_mut(&hwnd)?;
+        let device_rect = crate::win32::logical_rect_to_device(&dc_snapshot, region_rect);
+        let normalized = crate::win32::normalize_rect(device_rect);
+        if normalized.left >= normalized.right || normalized.top >= normalized.bottom {
+            return None;
+        }
+        for y in normalized.top..normalized.bottom {
+            for x in normalized.left..normalized.right {
+                if !crate::win32::region_contains_point(hrgn, x, y) {
+                    continue;
+                }
+                painter(&dc_snapshot, window, x, y);
+            }
+        }
+        Some(normalized)
+    }
+
+    fn frame_region_pixels(
+        hdc: HDC,
+        hrgn: HRGN,
+        width: INT,
+        height: INT,
+        color: DWORD,
+    ) -> Option<RECT> {
+        let border_width = width.max(1);
+        let border_height = height.max(1);
+        paint_region_pixels(hdc, hrgn, |dc, window, x, y| {
+            let near_left = (0..border_width)
+                .any(|delta| !crate::win32::region_contains_point(hrgn, x - delta - 1, y));
+            let near_right = (0..border_width)
+                .any(|delta| !crate::win32::region_contains_point(hrgn, x + delta + 1, y));
+            let near_top = (0..border_height)
+                .any(|delta| !crate::win32::region_contains_point(hrgn, x, y - delta - 1));
+            let near_bottom = (0..border_height)
+                .any(|delta| !crate::win32::region_contains_point(hrgn, x, y + delta + 1));
+            if near_left || near_right || near_top || near_bottom {
+                put_surface_pixel(dc, window, x, y, color);
+            }
+        })
+    }
+
+    fn polygon_bounds(points: &[POINT]) -> RECT {
+        let mut left = points[0].x;
+        let mut right = points[0].x + 1;
+        let mut top = points[0].y;
+        let mut bottom = points[0].y + 1;
+        for point in points.iter().skip(1) {
+            left = left.min(point.x);
+            right = right.max(point.x + 1);
+            top = top.min(point.y);
+            bottom = bottom.max(point.y + 1);
+        }
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    fn polygon_contains(points: &[POINT], x: INT, y: INT) -> bool {
+        if points.len() < 3 {
+            return false;
+        }
+        let mut inside = false;
+        let mut j = points.len() - 1;
+        for i in 0..points.len() {
+            let pi = points[i];
+            let pj = points[j];
+            let intersects = ((pi.y > y) != (pj.y > y))
+                && ((x as f32)
+                    < ((pj.x - pi.x) as f32 * (y - pi.y) as f32) / ((pj.y - pi.y) as f32 + 0.0001)
+                        + pi.x as f32);
+            if intersects {
+                inside = !inside;
+            }
+            j = i;
+        }
+        inside
+    }
+
+    fn draw_line_pixels(
+        dc: &crate::win32::Win32DC,
+        window: &mut crate::win32::Win32Window,
+        mut x0: INT,
+        mut y0: INT,
+        x1: INT,
+        y1: INT,
+        color: DWORD,
+    ) {
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            put_surface_pixel(dc, window, x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = err * 2;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    fn fill_rect_pixels(
+        dc: &crate::win32::Win32DC,
+        window: &mut crate::win32::Win32Window,
+        rect: RECT,
+        color: DWORD,
+    ) {
+        let rect = crate::win32::normalize_rect(rect);
+        for y in rect.top..rect.bottom {
+            for x in rect.left..rect.right {
+                put_surface_pixel(dc, window, x, y, color);
+            }
+        }
+    }
+
+    fn ellipse_contains(left: INT, top: INT, right: INT, bottom: INT, x: INT, y: INT) -> bool {
+        let rx = (right - left).max(1) as f32 / 2.0;
+        let ry = (bottom - top).max(1) as f32 / 2.0;
+        let cx = left as f32 + rx;
+        let cy = top as f32 + ry;
+        let dx = (x as f32 + 0.5 - cx) / rx;
+        let dy = (y as f32 + 0.5 - cy) / ry;
+        (dx * dx) + (dy * dy) <= 1.0
+    }
+
+    fn rounded_contains(
+        left: INT,
+        top: INT,
+        right: INT,
+        bottom: INT,
+        radius_x: INT,
+        radius_y: INT,
+        x: INT,
+        y: INT,
+    ) -> bool {
+        let rect = crate::win32::normalize_rect(RECT {
+            left,
+            top,
+            right,
+            bottom,
+        });
+        if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
+            return false;
+        }
+        let rx = radius_x.max(0).min((rect.right - rect.left) / 2).max(1) as f32;
+        let ry = radius_y.max(0).min((rect.bottom - rect.top) / 2).max(1) as f32;
+        if x >= rect.left + rx as i32 && x < rect.right - rx as i32 {
+            return true;
+        }
+        if y >= rect.top + ry as i32 && y < rect.bottom - ry as i32 {
+            return true;
+        }
+        let cx = if x < rect.left + rx as i32 {
+            rect.left as f32 + rx
+        } else {
+            rect.right as f32 - rx
+        };
+        let cy = if y < rect.top + ry as i32 {
+            rect.top as f32 + ry
+        } else {
+            rect.bottom as f32 - ry
+        };
+        let dx = (x as f32 + 0.5 - cx) / rx;
+        let dy = (y as f32 + 0.5 - cy) / ry;
+        (dx * dx) + (dy * dy) <= 1.0
+    }
+
     // ========================================================================
     // DRAWING PRIMITIVES
     // ========================================================================
 
     /// MoveToEx
     pub unsafe fn move_to_ex(hdc: HDC, x: INT, y: INT, lppt: *mut POINT) -> BOOL {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
         if !lppt.is_null() {
-            (*lppt).x = 0;
-            (*lppt).y = 0;
+            (*lppt).x = dc.pen_x;
+            (*lppt).y = dc.pen_y;
+        }
+        dc.pen_x = x;
+        dc.pen_y = y;
+        if dc.path_active {
+            dc.path_points.push(POINT { x, y });
+            dc.path_closed = false;
         }
         TRUE
     }
 
     /// LineTo
     pub unsafe fn line_to(hdc: HDC, nXEnd: INT, nYEnd: INT) -> BOOL {
-        crate::serial_println!("[WIN32] LineTo: {},{}", nXEnd, nYEnd);
+        let (hwnd, start_x, start_y, color, path_active) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            (
+                dc.hwnd,
+                dc.pen_x,
+                dc.pen_y,
+                crate::win32::pen_color(dc.selected_pen).unwrap_or(dc.pen_color),
+                dc.path_active,
+            )
+        };
+        if path_active {
+            let mut dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+                return FALSE;
+            };
+            if dc.path_points.is_empty() {
+                dc.path_points.push(POINT {
+                    x: start_x,
+                    y: start_y,
+                });
+            }
+            dc.path_points.push(POINT { x: nXEnd, y: nYEnd });
+            dc.pen_x = nXEnd;
+            dc.pen_y = nYEnd;
+            return TRUE;
+        }
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let (Some(window), Some(dc)) = (windows.get_mut(&hwnd), dcs.get_mut(&(hdc as u64))) else {
+            return FALSE;
+        };
+        draw_line_pixels(dc, window, start_x, start_y, nXEnd, nYEnd, color);
+        record_metafile_command(
+            dc,
+            crate::win32::Win32MetaCommand::Line {
+                x0: start_x,
+                y0: start_y,
+                x1: nXEnd,
+                y1: nYEnd,
+                color,
+            },
+        );
+        dc.pen_x = nXEnd;
+        dc.pen_y = nYEnd;
+        let (sx, sy) = crate::win32::logical_to_device(dc, start_x, start_y);
+        let (ex, ey) = crate::win32::logical_to_device(dc, nXEnd, nYEnd);
+        crate::win32::invalidate_window_rect(
+            hwnd,
+            RECT {
+                left: sx.min(ex),
+                top: sy.min(ey),
+                right: sx.max(ex) + 1,
+                bottom: sy.max(ey) + 1,
+            },
+        );
         TRUE
     }
 
     /// Polyline
     pub unsafe fn polyline(hdc: HDC, lppt: *const POINT, cPoints: INT) -> BOOL {
+        if lppt.is_null() || cPoints < 2 {
+            return FALSE;
+        }
+        let points = core::slice::from_raw_parts(lppt, cPoints as usize);
+        let path_active = crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.path_active)
+            .unwrap_or(false);
+        if path_active {
+            let mut dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+                return FALSE;
+            };
+            dc.path_points.extend_from_slice(points);
+            if let Some(last) = points.last() {
+                dc.pen_x = last.x;
+                dc.pen_y = last.y;
+            }
+            return TRUE;
+        }
+        let _ = move_to_ex(hdc, points[0].x, points[0].y, core::ptr::null_mut());
+        for point in points.iter().skip(1) {
+            let _ = line_to(hdc, point.x, point.y);
+        }
         TRUE
     }
 
     /// PolylineTo
     pub unsafe fn polyline_to(hdc: HDC, lppt: *const POINT, cCount: DWORD) -> BOOL {
+        if lppt.is_null() || cCount == 0 {
+            return FALSE;
+        }
+        let points = core::slice::from_raw_parts(lppt, cCount as usize);
+        for point in points {
+            let _ = line_to(hdc, point.x, point.y);
+        }
         TRUE
     }
 
@@ -5508,6 +15977,25 @@ mod gdi32 {
         lpbTypes: *const BYTE,
         cCount: INT,
     ) -> BOOL {
+        if lppt.is_null() || lpbTypes.is_null() || cCount <= 0 {
+            return FALSE;
+        }
+        let points = core::slice::from_raw_parts(lppt, cCount as usize);
+        let types = core::slice::from_raw_parts(lpbTypes, cCount as usize);
+        for (point, ty) in points.iter().zip(types.iter()) {
+            match ty & 0x06 {
+                0x06 => {
+                    let _ = move_to_ex(hdc, point.x, point.y, core::ptr::null_mut());
+                }
+                0x02 | 0x04 => {
+                    let _ = line_to(hdc, point.x, point.y);
+                }
+                _ => {}
+            }
+            if (*ty & 0x01) != 0 {
+                let _ = close_figure(hdc);
+            }
+        }
         TRUE
     }
 
@@ -5558,7 +16046,83 @@ mod gdi32 {
 
     /// Ellipse
     pub unsafe fn ellipse(hdc: HDC, left: INT, top: INT, right: INT, bottom: INT) -> BOOL {
-        crate::serial_println!("[WIN32] Ellipse: {},{} {},{}", left, top, right, bottom);
+        let (hwnd, fill_color, stroke_color) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            (
+                dc.hwnd,
+                crate::win32::brush_color(dc.selected_brush),
+                crate::win32::pen_color(dc.selected_pen),
+            )
+        };
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let (Some(window), Some(dc)) = (windows.get_mut(&hwnd), dcs.get(&(hdc as u64))) else {
+            return FALSE;
+        };
+        let bounds = crate::win32::normalize_rect(RECT {
+            left,
+            top,
+            right,
+            bottom,
+        });
+        for y in bounds.top..bounds.bottom {
+            for x in bounds.left..bounds.right {
+                if !ellipse_contains(bounds.left, bounds.top, bounds.right, bounds.bottom, x, y) {
+                    continue;
+                }
+                let neighbor_outside = !ellipse_contains(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    x - 1,
+                    y,
+                ) || !ellipse_contains(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    x + 1,
+                    y,
+                ) || !ellipse_contains(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    x,
+                    y - 1,
+                ) || !ellipse_contains(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    x,
+                    y + 1,
+                );
+                if neighbor_outside {
+                    if let Some(color) = stroke_color {
+                        put_surface_pixel(dc, window, x, y, color);
+                    }
+                } else if let Some(color) = fill_color {
+                    put_surface_pixel(dc, window, x, y, color);
+                }
+            }
+        }
+        record_metafile_command(
+            dc,
+            crate::win32::Win32MetaCommand::Ellipse {
+                rect: bounds,
+                fill: fill_color,
+                stroke: stroke_color,
+            },
+        );
+        crate::win32::invalidate_window_rect(
+            hwnd,
+            crate::win32::logical_rect_to_device(dc, bounds),
+        );
         TRUE
     }
 
@@ -5587,12 +16151,196 @@ mod gdi32 {
         width: INT,
         height: INT,
     ) -> BOOL {
+        let (hwnd, fill_color, stroke_color) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            (
+                dc.hwnd,
+                crate::win32::brush_color(dc.selected_brush),
+                crate::win32::pen_color(dc.selected_pen),
+            )
+        };
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let (Some(window), Some(dc)) = (windows.get_mut(&hwnd), dcs.get(&(hdc as u64))) else {
+            return FALSE;
+        };
+        let bounds = crate::win32::normalize_rect(RECT {
+            left,
+            top,
+            right,
+            bottom,
+        });
+        let radius_x = (width / 2).max(0);
+        let radius_y = (height / 2).max(0);
+        for y in bounds.top..bounds.bottom {
+            for x in bounds.left..bounds.right {
+                if !rounded_contains(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    radius_x,
+                    radius_y,
+                    x,
+                    y,
+                ) {
+                    continue;
+                }
+                let neighbor_outside = !rounded_contains(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    radius_x,
+                    radius_y,
+                    x - 1,
+                    y,
+                ) || !rounded_contains(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    radius_x,
+                    radius_y,
+                    x + 1,
+                    y,
+                ) || !rounded_contains(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    radius_x,
+                    radius_y,
+                    x,
+                    y - 1,
+                ) || !rounded_contains(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    radius_x,
+                    radius_y,
+                    x,
+                    y + 1,
+                );
+                if neighbor_outside {
+                    if let Some(color) = stroke_color {
+                        put_surface_pixel(dc, window, x, y, color);
+                    }
+                } else if let Some(color) = fill_color {
+                    put_surface_pixel(dc, window, x, y, color);
+                }
+            }
+        }
+        record_metafile_command(
+            dc,
+            crate::win32::Win32MetaCommand::RoundRect {
+                rect: bounds,
+                ellipse: SIZE {
+                    cx: width,
+                    cy: height,
+                },
+                fill: fill_color,
+                stroke: stroke_color,
+            },
+        );
+        crate::win32::invalidate_window_rect(
+            hwnd,
+            crate::win32::logical_rect_to_device(dc, bounds),
+        );
+        TRUE
+    }
+
+    /// Rectangle
+    pub unsafe fn rectangle(hdc: HDC, left: INT, top: INT, right: INT, bottom: INT) -> BOOL {
+        let (hwnd, fill_color, stroke_color) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            (
+                dc.hwnd,
+                crate::win32::brush_color(dc.selected_brush),
+                crate::win32::pen_color(dc.selected_pen),
+            )
+        };
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let (Some(window), Some(dc)) = (windows.get_mut(&hwnd), dcs.get(&(hdc as u64))) else {
+            return FALSE;
+        };
+        let rect = crate::win32::normalize_rect(RECT {
+            left,
+            top,
+            right,
+            bottom,
+        });
+        if let Some(color) = fill_color {
+            fill_rect_pixels(dc, window, rect, color);
+        }
+        if let Some(color) = stroke_color {
+            for x in rect.left..rect.right {
+                put_surface_pixel(dc, window, x, rect.top, color);
+                put_surface_pixel(dc, window, x, rect.bottom - 1, color);
+            }
+            for y in rect.top..rect.bottom {
+                put_surface_pixel(dc, window, rect.left, y, color);
+                put_surface_pixel(dc, window, rect.right - 1, y, color);
+            }
+        }
+        record_metafile_command(
+            dc,
+            crate::win32::Win32MetaCommand::Rect {
+                rect,
+                fill: fill_color,
+                stroke: stroke_color,
+            },
+        );
+        crate::win32::invalidate_window_rect(hwnd, crate::win32::logical_rect_to_device(dc, rect));
         TRUE
     }
 
     /// Polygon
     pub unsafe fn polygon(hdc: HDC, lpPoints: *const POINT, nCount: INT) -> BOOL {
-        TRUE
+        if lpPoints.is_null() || nCount < 3 {
+            return FALSE;
+        }
+        let points = core::slice::from_raw_parts(lpPoints, nCount as usize);
+        let _ = begin_path(hdc);
+        let _ = move_to_ex(hdc, points[0].x, points[0].y, core::ptr::null_mut());
+        for point in points.iter().skip(1) {
+            let _ = line_to(hdc, point.x, point.y);
+        }
+        let _ = close_figure(hdc);
+        let _ = end_path(hdc);
+        let result = stroke_and_fill_path(hdc);
+        let (fill_color, stroke_color, recording_metafile) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return result;
+            };
+            (
+                crate::win32::brush_color(dc.selected_brush),
+                crate::win32::pen_color(dc.selected_pen),
+                dc.recording_metafile,
+            )
+        };
+        if recording_metafile != 0 {
+            if let Some(meta) = crate::win32::WIN32_METAFILES
+                .lock()
+                .get_mut(&(recording_metafile as u64))
+            {
+                meta.commands.push(crate::win32::Win32MetaCommand::Polygon {
+                    points: points.to_vec(),
+                    fill: fill_color,
+                    stroke: stroke_color,
+                });
+            }
+        }
+        result
     }
 
     /// PolyPolygon
@@ -5607,12 +16355,59 @@ mod gdi32 {
 
     /// PolyBezier
     pub unsafe fn poly_bezier(hdc: HDC, lppt: *const POINT, cPoints: DWORD) -> BOOL {
+        if lppt.is_null() || cPoints < 4 {
+            return FALSE;
+        }
+        let points = core::slice::from_raw_parts(lppt, cPoints as usize);
+        let mut current = points[0];
+        let _ = move_to_ex(hdc, current.x, current.y, core::ptr::null_mut());
+        for chunk in points[1..].chunks(3) {
+            if chunk.len() < 3 {
+                break;
+            }
+            let p0 = current;
+            let p1 = chunk[0];
+            let p2 = chunk[1];
+            let p3 = chunk[2];
+            for step in 1..=16 {
+                let t = step as f32 / 16.0;
+                let mt = 1.0 - t;
+                let x = mt * mt * mt * p0.x as f32
+                    + 3.0 * mt * mt * t * p1.x as f32
+                    + 3.0 * mt * t * t * p2.x as f32
+                    + t * t * t * p3.x as f32;
+                let y = mt * mt * mt * p0.y as f32
+                    + 3.0 * mt * mt * t * p1.y as f32
+                    + 3.0 * mt * t * t * p2.y as f32
+                    + t * t * t * p3.y as f32;
+                let x = crate::win32::round_f32_to_int(x);
+                let y = crate::win32::round_f32_to_int(y);
+                let _ = line_to(hdc, x, y);
+            }
+            current = p3;
+        }
         TRUE
     }
 
     /// PolyBezierTo
     pub unsafe fn poly_bezier_to(hdc: HDC, lppt: *const POINT, cCount: DWORD) -> BOOL {
-        TRUE
+        if lppt.is_null() || cCount < 3 {
+            return FALSE;
+        }
+        let start = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            POINT {
+                x: dc.pen_x,
+                y: dc.pen_y,
+            }
+        };
+        let mut points = Vec::with_capacity(cCount as usize + 1);
+        points.push(start);
+        points.extend_from_slice(core::slice::from_raw_parts(lppt, cCount as usize));
+        poly_bezier(hdc, points.as_ptr(), points.len() as DWORD)
     }
 
     /// AngleArc
@@ -5649,19 +16444,8 @@ mod gdi32 {
             return 0;
         }
 
-        // Fırça rengini al (varsayılan: beyaz)
-        let color = if hbr as u64 > 0x10 {
-            // Kullanıcı tanımlı fırça - şimdilik varsayılan
-            0xFFFFFFu32
-        } else {
-            // Sistem rengi (COLOR_WINDOW=5, COLOR_BTNFACE=15, vs.)
-            match hbr as u64 {
-                0 => 0x000000,  // COLOR_SCROLLBAR
-                1 => 0xC0C0C0,  // COLOR_BACKGROUND
-                5 => 0xFFFFFF,  // COLOR_WINDOW
-                15 => 0xC0C0C0, // COLOR_BTNFACE
-                _ => 0xFFFFFF,
-            }
+        let Some(color) = crate::win32::brush_color(hbr) else {
+            return 0;
         };
 
         // Pencere surface'ına dikdörtgen çiz
@@ -5702,17 +16486,148 @@ mod gdi32 {
 
     /// FrameRect
     pub unsafe fn frame_rect(hDC: HDC, lprc: *const RECT, hbr: HBRUSH) -> BOOL {
+        if lprc.is_null() {
+            return FALSE;
+        }
+        let rect = crate::win32::normalize_rect(*lprc);
+        let color = crate::win32::brush_color(hbr).unwrap_or(0xFFFFFF);
+        let (hwnd, clip_region) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hDC as u64)) else {
+                return FALSE;
+            };
+            (dc.hwnd, dc.clip_region)
+        };
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&hwnd) else {
+            return FALSE;
+        };
+        let dc_copy = crate::win32::Win32DC {
+            hdc: 0,
+            hwnd,
+            pen_color: 0,
+            brush_color: 0,
+            text_color: 0,
+            bk_color: 0,
+            bk_mode: 2,
+            pen_x: 0,
+            pen_y: 0,
+            selected_pen: 0,
+            selected_brush: 0,
+            selected_font: 0,
+            selected_palette: 0,
+            clip_region,
+            recording_metafile: 0,
+            rop2: 13,
+            graphics_mode: 1,
+            arc_direction: 1,
+            poly_fill_mode: 1,
+            stretch_blt_mode: 1,
+            path_active: false,
+            path_closed: false,
+            path_points: Vec::new(),
+            map_mode: 1,
+            viewport_org: POINT::default(),
+            window_org: POINT::default(),
+            world_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            device_kind: crate::win32::Win32DcKind::Window,
+            device_name: String::new(),
+            current_print_job: 0,
+            page_active: false,
+            save_stack: Vec::new(),
+            font_height: 16,
+            font_weight: 400,
+        };
+        for x in rect.left..rect.right {
+            put_surface_pixel(&dc_copy, window, x, rect.top, color);
+            put_surface_pixel(&dc_copy, window, x, rect.bottom - 1, color);
+        }
+        for y in rect.top..rect.bottom {
+            put_surface_pixel(&dc_copy, window, rect.left, y, color);
+            put_surface_pixel(&dc_copy, window, rect.right - 1, y, color);
+        }
+        crate::win32::invalidate_window_rect(hwnd, rect);
         TRUE
     }
 
     /// InvertRect
     pub unsafe fn invert_rect(hDC: HDC, lprc: *const RECT) -> BOOL {
+        if lprc.is_null() {
+            return FALSE;
+        }
+        let rect = crate::win32::normalize_rect(*lprc);
+        let (hwnd, clip_region) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hDC as u64)) else {
+                return FALSE;
+            };
+            (dc.hwnd, dc.clip_region)
+        };
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&hwnd) else {
+            return FALSE;
+        };
+        let dc_copy = crate::win32::Win32DC {
+            hdc: 0,
+            hwnd,
+            pen_color: 0,
+            brush_color: 0,
+            text_color: 0,
+            bk_color: 0,
+            bk_mode: 2,
+            pen_x: 0,
+            pen_y: 0,
+            selected_pen: 0,
+            selected_brush: 0,
+            selected_font: 0,
+            selected_palette: 0,
+            clip_region,
+            recording_metafile: 0,
+            rop2: 13,
+            graphics_mode: 1,
+            arc_direction: 1,
+            poly_fill_mode: 1,
+            stretch_blt_mode: 1,
+            path_active: false,
+            path_closed: false,
+            path_points: Vec::new(),
+            map_mode: 1,
+            viewport_org: POINT::default(),
+            window_org: POINT::default(),
+            world_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            device_kind: crate::win32::Win32DcKind::Window,
+            device_name: String::new(),
+            current_print_job: 0,
+            page_active: false,
+            save_stack: Vec::new(),
+            font_height: 16,
+            font_weight: 400,
+        };
+        for y in rect.top..rect.bottom {
+            for x in rect.left..rect.right {
+                if !point_visible(&dc_copy, window, x, y) {
+                    continue;
+                }
+                let idx = ((y * window.width + x) * 4) as usize;
+                if idx + 3 >= window.surface.len() {
+                    continue;
+                }
+                window.surface[idx] ^= 0xFF;
+                window.surface[idx + 1] ^= 0xFF;
+                window.surface[idx + 2] ^= 0xFF;
+                window.surface[idx + 3] = 0xFF;
+            }
+        }
+        crate::win32::invalidate_window_rect(hwnd, rect);
         TRUE
     }
 
     /// DrawFocusRect
     pub unsafe fn draw_focus_rect(hDC: HDC, lprc: *const RECT) -> BOOL {
-        TRUE
+        if lprc.is_null() {
+            return FALSE;
+        }
+        frame_rect(hDC, lprc, WHITE_BRUSH as HBRUSH)
     }
 
     /// ExtFloodFill
@@ -5917,8 +16832,16 @@ mod gdi32 {
 
     /// CreateSolidBrush
     pub unsafe fn create_solid_brush(crColor: DWORD) -> HBRUSH {
-        crate::serial_println!("[WIN32] CreateSolidBrush: {:08x}", crColor);
-        crColor as HBRUSH
+        let handle = crate::win32::NEXT_HBRUSH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_BRUSHES.lock().insert(
+            handle,
+            crate::win32::Win32Brush {
+                handle,
+                color: crColor & 0x00FF_FFFF,
+            },
+        );
+        crate::win32::register_gdi_handle(handle, crate::win32::OBJ_BRUSH as DWORD, false);
+        handle as HBRUSH
     }
 
     /// CreateHatchBrush
@@ -5943,7 +16866,11 @@ mod gdi32 {
 
     /// CreateBrushIndirect
     pub unsafe fn create_brush_indirect(lplb: *const u8) -> HBRUSH {
-        1 as HBRUSH
+        if lplb.is_null() {
+            return 0;
+        }
+        let color = *(lplb.add(4) as *const DWORD);
+        create_solid_brush(color)
     }
 
     /// GetBrushOrgEx
@@ -5971,12 +16898,29 @@ mod gdi32 {
 
     /// CreatePen
     pub unsafe fn create_pen(fnPenStyle: INT, nWidth: INT, crColor: DWORD) -> HPEN {
-        crColor as HPEN
+        let handle = crate::win32::NEXT_HPEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_PENS.lock().insert(
+            handle,
+            crate::win32::Win32Pen {
+                handle,
+                style: fnPenStyle,
+                width: nWidth.max(1),
+                color: crColor & 0x00FF_FFFF,
+            },
+        );
+        crate::win32::register_gdi_handle(handle, crate::win32::OBJ_PEN as DWORD, false);
+        handle as HPEN
     }
 
     /// CreatePenIndirect
     pub unsafe fn create_pen_indirect(lplgpn: *const u8) -> HPEN {
-        1 as HPEN
+        if lplgpn.is_null() {
+            return 0;
+        }
+        let style = *(lplgpn as *const INT);
+        let width = *(lplgpn.add(4) as *const INT);
+        let color = *(lplgpn.add(12) as *const DWORD);
+        create_pen(style, width, color)
     }
 
     /// ExtCreatePen
@@ -5987,22 +16931,169 @@ mod gdi32 {
         dwStyleCount: DWORD,
         lpStyle: *const DWORD,
     ) -> HPEN {
-        1 as HPEN
+        let color = if lplb.is_null() {
+            0x000000
+        } else {
+            *(lplb.add(4) as *const DWORD)
+        };
+        create_pen(dwPenStyle as INT, dwWidth as INT, color)
     }
 
     /// GetObjectA
     pub unsafe fn get_object_a(hgdiobj: HGDIOBJ, cbBuffer: INT, lpvObject: LPVOID) -> INT {
+        if lpvObject.is_null() || cbBuffer <= 0 {
+            return 0;
+        }
+        let handle = hgdiobj as u64;
+        if let Some(pen) = crate::win32::WIN32_PENS.lock().get(&handle) {
+            let size = core::mem::size_of::<crate::win32::Win32Pen>().min(cbBuffer as usize);
+            core::ptr::copy_nonoverlapping(pen as *const _ as *const u8, lpvObject, size);
+            return size as INT;
+        }
+        if let Some(brush) = crate::win32::WIN32_BRUSHES.lock().get(&handle) {
+            let size = core::mem::size_of::<crate::win32::Win32Brush>().min(cbBuffer as usize);
+            core::ptr::copy_nonoverlapping(brush as *const _ as *const u8, lpvObject, size);
+            return size as INT;
+        }
+        if let Some(font) = crate::win32::WIN32_FONTS.lock().get(&handle) {
+            let size = core::mem::size_of::<INT>() * 2;
+            if cbBuffer as usize >= size {
+                *(lpvObject as *mut INT) = font.height;
+                *(lpvObject.add(core::mem::size_of::<INT>()) as *mut INT) = font.weight;
+                return size as INT;
+            }
+        }
         0
     }
 
     /// GetObjectW
     pub unsafe fn get_object_w(hgdiobj: HGDIOBJ, cbBuffer: INT, lpvObject: LPVOID) -> INT {
-        0
+        get_object_a(hgdiobj, cbBuffer, lpvObject)
     }
 
     /// GetCurrentObject
     pub unsafe fn get_current_object(hdc: HDC, uObjectType: UINT) -> HGDIOBJ {
-        1 as HGDIOBJ
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return 0;
+        };
+        match uObjectType {
+            crate::win32::OBJ_PEN => dc.selected_pen as HGDIOBJ,
+            crate::win32::OBJ_BRUSH => dc.selected_brush as HGDIOBJ,
+            crate::win32::OBJ_FONT => dc.selected_font as HGDIOBJ,
+            crate::win32::OBJ_REGION => dc.clip_region as HGDIOBJ,
+            _ => 0,
+        }
+    }
+
+    /// SelectObject
+    pub unsafe fn select_object(hdc: HDC, hgdiobj: HGDIOBJ) -> HGDIOBJ {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let handle = hgdiobj as u64;
+        if crate::win32::WIN32_PENS.lock().contains_key(&handle)
+            || crate::win32::stock_pen_color(hgdiobj as HPEN).is_some()
+        {
+            let previous = dc.selected_pen as HGDIOBJ;
+            crate::win32::mark_gdi_handle_released(previous as u64);
+            dc.selected_pen = hgdiobj as HPEN;
+            crate::win32::mark_gdi_handle_selected(handle, crate::win32::OBJ_PEN as DWORD);
+            dc.pen_color = crate::win32::pen_color(dc.selected_pen).unwrap_or(dc.pen_color);
+            return previous;
+        }
+        if crate::win32::WIN32_BRUSHES.lock().contains_key(&handle)
+            || hgdiobj as INT == crate::win32::NULL_BRUSH
+            || crate::win32::stock_brush_color(hgdiobj as HBRUSH).is_some()
+        {
+            let previous = dc.selected_brush as HGDIOBJ;
+            crate::win32::mark_gdi_handle_released(previous as u64);
+            dc.selected_brush = hgdiobj as HBRUSH;
+            crate::win32::mark_gdi_handle_selected(handle, crate::win32::OBJ_BRUSH as DWORD);
+            dc.brush_color = crate::win32::brush_color(dc.selected_brush).unwrap_or(dc.brush_color);
+            return previous;
+        }
+        if crate::win32::WIN32_FONTS.lock().contains_key(&handle)
+            || hgdiobj as INT == crate::win32::SYSTEM_FONT
+            || hgdiobj as INT == crate::win32::DEFAULT_GUI_FONT
+        {
+            let previous = dc.selected_font as HGDIOBJ;
+            crate::win32::mark_gdi_handle_released(previous as u64);
+            dc.selected_font = hgdiobj as HFONT;
+            crate::win32::mark_gdi_handle_selected(handle, crate::win32::OBJ_FONT as DWORD);
+            if let Some(font) = crate::win32::WIN32_FONTS.lock().get(&handle) {
+                dc.font_height = font.height;
+                dc.font_weight = font.weight;
+            }
+            return previous;
+        }
+        if crate::win32::WIN32_REGIONS.lock().contains_key(&handle) {
+            let previous = dc.clip_region as HGDIOBJ;
+            crate::win32::mark_gdi_handle_released(previous as u64);
+            dc.clip_region = hgdiobj as HRGN;
+            crate::win32::mark_gdi_handle_selected(handle, crate::win32::OBJ_REGION as DWORD);
+            return previous;
+        }
+        0
+    }
+
+    /// DeleteObject
+    pub unsafe fn delete_object(hObject: HGDIOBJ) -> BOOL {
+        let handle = hObject as u64;
+        if crate::win32::stock_pen_color(hObject as HPEN).is_some()
+            || crate::win32::stock_brush_color(hObject as HBRUSH).is_some()
+            || hObject as INT == crate::win32::SYSTEM_FONT
+            || hObject as INT == crate::win32::DEFAULT_GUI_FONT
+        {
+            return FALSE;
+        }
+        if let Some(meta) = crate::win32::WIN32_GDI_HANDLES.lock().get(&handle).copied() {
+            if meta.stock || meta.selected_count != 0 {
+                return FALSE;
+            }
+        }
+        if crate::win32::remove_gdi_payload(handle) {
+            crate::win32::WIN32_GDI_HANDLES.lock().remove(&handle);
+            return TRUE;
+        }
+        FALSE
+    }
+
+    /// GetStockObject
+    pub unsafe fn get_stock_object(i: INT) -> HGDIOBJ {
+        i as HGDIOBJ
+    }
+
+    /// GetObjectType
+    pub unsafe fn get_object_type(h: HGDIOBJ) -> DWORD {
+        let handle = h as u64;
+        if crate::win32::WIN32_DCS.lock().contains_key(&handle) {
+            return crate::win32::OBJ_DC as DWORD;
+        }
+        if let Some(meta) = crate::win32::WIN32_GDI_HANDLES.lock().get(&handle) {
+            return meta.object_type;
+        }
+        if crate::win32::WIN32_PENS.lock().contains_key(&handle)
+            || crate::win32::stock_pen_color(h as HPEN).is_some()
+        {
+            return crate::win32::OBJ_PEN as DWORD;
+        }
+        if crate::win32::WIN32_BRUSHES.lock().contains_key(&handle)
+            || crate::win32::stock_brush_color(h as HBRUSH).is_some()
+        {
+            return crate::win32::OBJ_BRUSH as DWORD;
+        }
+        if crate::win32::WIN32_FONTS.lock().contains_key(&handle)
+            || h as INT == crate::win32::SYSTEM_FONT
+            || h as INT == crate::win32::DEFAULT_GUI_FONT
+        {
+            return crate::win32::OBJ_FONT as DWORD;
+        }
+        if crate::win32::WIN32_REGIONS.lock().contains_key(&handle) {
+            return crate::win32::OBJ_REGION as DWORD;
+        }
+        0
     }
 
     // ========================================================================
@@ -6026,19 +17117,30 @@ mod gdi32 {
         iPitchAndFamily: DWORD,
         pszFaceName: LPCSTR,
     ) -> HFONT {
-        let mut name = String::new();
-        let mut ptr = pszFaceName;
-        while !ptr.is_null() && *ptr != 0 {
-            name.push(*ptr as u8 as char);
-            ptr = ptr.add(1);
-        }
-        crate::serial_println!("[WIN32] CreateFontA: {} ({}pt)", name, cHeight);
-        1 as HFONT
+        let name = read_ansi_string(pszFaceName);
+        let handle = crate::win32::NEXT_HFONT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_FONTS.lock().insert(
+            handle,
+            crate::win32::Win32Font {
+                handle,
+                height: cHeight,
+                weight: cWeight,
+                face_name: name,
+            },
+        );
+        crate::win32::register_gdi_handle(handle, crate::win32::OBJ_FONT as DWORD, false);
+        handle as HFONT
     }
 
     /// CreateFontIndirectA
     pub unsafe fn create_font_indirect_a(lplf: *const u8) -> HFONT {
-        1 as HFONT
+        if lplf.is_null() {
+            return 0;
+        }
+        let height = *(lplf as *const INT);
+        let weight = *(lplf.add(16) as *const INT);
+        let face_name = lplf.add(28) as LPCSTR;
+        create_font_a(height, 0, 0, 0, weight, 0, 0, 0, 0, 0, 0, 0, 0, face_name)
     }
 
     /// CreateFontIndirectExA
@@ -6048,7 +17150,16 @@ mod gdi32 {
 
     /// GetTextFaceA
     pub unsafe fn get_text_face_a(hdc: HDC, nCount: INT, lpFaceName: LPSTR) -> INT {
-        0
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return 0;
+        };
+        let text = crate::win32::WIN32_FONTS
+            .lock()
+            .get(&(dc.selected_font as u64))
+            .map(|font| font.face_name.clone())
+            .unwrap_or_else(|| "System".to_string());
+        crate::win32::write_ansi_string(lpFaceName, nCount, &text)
     }
 
     /// GetTextMetricsA
@@ -6135,34 +17246,62 @@ mod gdi32 {
 
     /// SetTextColor
     pub unsafe fn set_text_color(hdc: HDC, crColor: DWORD) -> DWORD {
-        crate::serial_println!("[WIN32] SetTextColor: {:08x}", crColor);
-        0
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0xFFFF_FFFF;
+        };
+        let previous = dc.text_color;
+        dc.text_color = crColor & 0x00FF_FFFF;
+        previous
     }
 
     /// GetTextColor
     pub unsafe fn get_text_color(hdc: HDC) -> DWORD {
-        0
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.text_color)
+            .unwrap_or(0)
     }
 
     /// SetBkColor
     pub unsafe fn set_bk_color(hdc: HDC, crColor: DWORD) -> DWORD {
-        crate::serial_println!("[WIN32] SetBkColor: {:08x}", crColor);
-        0
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0xFFFF_FFFF;
+        };
+        let previous = dc.bk_color;
+        dc.bk_color = crColor & 0x00FF_FFFF;
+        previous
     }
 
     /// GetBkColor
     pub unsafe fn get_bk_color(hdc: HDC) -> DWORD {
-        0
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.bk_color)
+            .unwrap_or(0)
     }
 
     /// SetBkMode
     pub unsafe fn set_bk_mode(hdc: HDC, iBkMode: INT) -> INT {
-        0
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let previous = dc.bk_mode;
+        dc.bk_mode = iBkMode;
+        previous
     }
 
     /// GetBkMode
     pub unsafe fn get_bk_mode(hdc: HDC) -> INT {
-        0
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.bk_mode)
+            .unwrap_or(0)
     }
 
     /// TextOutA — Metni pencereye çizer (8x16 bitmap font)
@@ -6174,11 +17313,11 @@ mod gdi32 {
         let hdc_id = hdc as u64;
 
         // DC'den pencere ve metin rengini al
-        let (hwnd, text_color) = {
+        let (hwnd, text_color, recording_metafile) = {
             let dcs = crate::win32::WIN32_DCS.lock();
             match dcs.get(&hdc_id) {
-                Some(dc) => (dc.hwnd, dc.text_color),
-                None => (0, 0x000000),
+                Some(dc) => (dc.hwnd, dc.text_color, dc.recording_metafile),
+                None => (0, 0x000000, 0),
             }
         };
 
@@ -6209,7 +17348,7 @@ mod gdi32 {
             let mut cx = x as usize;
 
             for ch in text.chars() {
-// 8x16 bitmap font - dar ASCII glif tablosu
+                // 8x16 bitmap font - dar ASCII glif tablosu
                 let glyph = get_ascii_glyph(ch);
 
                 for row in 0..char_h {
@@ -6240,11 +17379,37 @@ mod gdi32 {
             }
 
             crate::serial_println!("[WIN32] TextOutA: {},{} \"{}\"", x, y, text);
+            let text_len = text.len() as INT;
+            if recording_metafile != 0 {
+                if let Some(meta) = crate::win32::WIN32_METAFILES
+                    .lock()
+                    .get_mut(&(recording_metafile as u64))
+                {
+                    meta.commands.push(crate::win32::Win32MetaCommand::Text {
+                        x,
+                        y,
+                        text,
+                        color: text_color,
+                    });
+                }
+            }
+            let rect = RECT {
+                left: x,
+                top: y,
+                right: x + (text_len * char_w as INT),
+                bottom: y + char_h as INT,
+            };
+            if let Some(dc) = crate::win32::WIN32_DCS.lock().get(&hdc_id) {
+                crate::win32::invalidate_window_rect(
+                    hwnd,
+                    crate::win32::logical_rect_to_device(dc, rect),
+                );
+            }
         }
         TRUE
     }
 
-/// Dar 8x16 ASCII bitmap font glyph tablosu
+    /// Dar 8x16 ASCII bitmap font glyph tablosu
     fn get_ascii_glyph(ch: char) -> [u8; 16] {
         // Sadece temel karakterler için basitleştirilmiş glif
         match ch {
@@ -6543,22 +17708,46 @@ mod gdi32 {
 
     /// CreateRectRgn
     pub unsafe fn create_rect_rgn(left: INT, top: INT, right: INT, bottom: INT) -> HRGN {
-        1 as HRGN
+        let handle = crate::win32::NEXT_HRGN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_REGIONS.lock().insert(
+            handle,
+            crate::win32::Win32Region {
+                handle,
+                rect: crate::win32::normalize_rect(RECT {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                }),
+                shape: crate::win32::Win32RegionShape::Rect,
+                excluded_rects: Vec::new(),
+            },
+        );
+        crate::win32::register_gdi_handle(handle, crate::win32::OBJ_REGION as DWORD, false);
+        handle as HRGN
     }
 
     /// CreateRectRgnIndirect
     pub unsafe fn create_rect_rgn_indirect(lprect: *const RECT) -> HRGN {
-        1 as HRGN
+        if lprect.is_null() {
+            return 0;
+        }
+        create_rect_rgn(
+            (*lprect).left,
+            (*lprect).top,
+            (*lprect).right,
+            (*lprect).bottom,
+        )
     }
 
     /// CreateEllipticRgn
     pub unsafe fn create_elliptic_rgn(left: INT, top: INT, right: INT, bottom: INT) -> HRGN {
-        1 as HRGN
+        create_rect_rgn(left, top, right, bottom)
     }
 
     /// CreateEllipticRgnIndirect
     pub unsafe fn create_elliptic_rgn_indirect(lprect: *const RECT) -> HRGN {
-        1 as HRGN
+        create_rect_rgn_indirect(lprect)
     }
 
     /// CreateRoundRectRgn
@@ -6570,12 +17759,31 @@ mod gdi32 {
         nWidthEllipse: INT,
         nHeightEllipse: INT,
     ) -> HRGN {
-        1 as HRGN
+        create_rect_rgn(left, top, right, bottom)
     }
 
     /// CreatePolygonRgn
     pub unsafe fn create_polygon_rgn(lppt: *const POINT, cPoints: INT, fnMode: INT) -> HRGN {
-        1 as HRGN
+        if lppt.is_null() || cPoints < 3 {
+            return 0;
+        }
+        let points = core::slice::from_raw_parts(lppt, cPoints as usize);
+        let handle = crate::win32::NEXT_HRGN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let bounds = crate::win32::polygon_bounds_root(points);
+        crate::win32::WIN32_REGIONS.lock().insert(
+            handle,
+            crate::win32::Win32Region {
+                handle,
+                rect: crate::win32::normalize_rect(bounds),
+                shape: crate::win32::Win32RegionShape::Polygon {
+                    points: points.to_vec(),
+                    alternate_fill: fnMode != 2,
+                },
+                excluded_rects: Vec::new(),
+            },
+        );
+        crate::win32::register_gdi_handle(handle, crate::win32::OBJ_REGION as DWORD, false);
+        handle as HRGN
     }
 
     /// CreatePolyPolygonRgn
@@ -6585,7 +17793,16 @@ mod gdi32 {
         nCount: INT,
         fnPolyFillMode: INT,
     ) -> HRGN {
-        1 as HRGN
+        if lppt.is_null() || lpPolyCounts.is_null() || nCount <= 0 {
+            return 0;
+        }
+        let counts = core::slice::from_raw_parts(lpPolyCounts, nCount as usize);
+        let total: usize = counts.iter().map(|c| (*c).max(0) as usize).sum();
+        if total < 3 {
+            return 0;
+        }
+        let points = core::slice::from_raw_parts(lppt, total);
+        create_polygon_rgn(lppt, total as INT, fnPolyFillMode)
     }
 
     /// CombineRgn
@@ -6595,61 +17812,253 @@ mod gdi32 {
         hrgnSrc2: HRGN,
         fnCombineMode: INT,
     ) -> INT {
-        0 // NULLREGION
+        let Some(src1) = crate::win32::region_rect(hrgnSrc1) else {
+            return 0;
+        };
+        let Some(src2) = crate::win32::region_rect(hrgnSrc2) else {
+            return 0;
+        };
+        let result = match fnCombineMode {
+            1 => RECT {
+                // RGN_AND
+                left: src1.left.max(src2.left),
+                top: src1.top.max(src2.top),
+                right: src1.right.min(src2.right),
+                bottom: src1.bottom.min(src2.bottom),
+            },
+            2 | 4 => RECT {
+                // OR / XOR bounded rect approximation
+                left: src1.left.min(src2.left),
+                top: src1.top.min(src2.top),
+                right: src1.right.max(src2.right),
+                bottom: src1.bottom.max(src2.bottom),
+            },
+            3 => src1, // DIFF keeps src1 rect model
+            5 => src1, // COPY
+            _ => src1,
+        };
+        if let Some(dest) = crate::win32::WIN32_REGIONS
+            .lock()
+            .get_mut(&(hrgnDest as u64))
+        {
+            dest.rect = crate::win32::normalize_rect(result);
+            dest.shape = crate::win32::Win32RegionShape::Rect;
+            dest.excluded_rects.clear();
+        }
+        let result = crate::win32::normalize_rect(result);
+        if result.left >= result.right || result.top >= result.bottom {
+            0
+        } else {
+            1
+        }
     }
 
     /// OffsetRgn
     pub unsafe fn offset_rgn(hrgn: HRGN, nXOffset: INT, nYOffset: INT) -> INT {
-        0
+        let mut regions = crate::win32::WIN32_REGIONS.lock();
+        let Some(region) = regions.get_mut(&(hrgn as u64)) else {
+            return 0;
+        };
+        region.rect.left += nXOffset;
+        region.rect.right += nXOffset;
+        region.rect.top += nYOffset;
+        region.rect.bottom += nYOffset;
+        1
     }
 
     /// InvertRgn
     pub unsafe fn invert_rgn(hdc: HDC, hrgn: HRGN) -> BOOL {
+        let Some(bounds) = paint_region_pixels(hdc, hrgn, |dc, window, x, y| {
+            let (dx, dy) = crate::win32::logical_to_device(dc, x, y);
+            if dx < 0 || dy < 0 {
+                return;
+            }
+            let Some(existing) = crate::win32::read_window_pixel(
+                &window.surface,
+                window.width as usize,
+                dx as usize,
+                dy as usize,
+            ) else {
+                return;
+            };
+            put_surface_pixel(dc, window, x, y, (!existing) & 0x00FF_FFFF);
+        }) else {
+            return FALSE;
+        };
+        crate::win32::invalidate_window_rect(
+            crate::win32::WIN32_DCS
+                .lock()
+                .get(&(hdc as u64))
+                .map(|dc| dc.hwnd)
+                .unwrap_or(0),
+            bounds,
+        );
         TRUE
     }
 
     /// PaintRgn
     pub unsafe fn paint_rgn(hdc: HDC, hrgn: HRGN) -> BOOL {
+        let color = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            crate::win32::brush_color(dc.selected_brush).unwrap_or(dc.brush_color)
+        };
+        let Some(bounds) = paint_region_pixels(hdc, hrgn, |dc, window, x, y| {
+            put_surface_pixel(dc, window, x, y, color);
+        }) else {
+            return FALSE;
+        };
+        if let Some(hwnd) = crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.hwnd)
+        {
+            crate::win32::invalidate_window_rect(hwnd, bounds);
+        }
         TRUE
     }
 
     /// FillRgn
     pub unsafe fn fill_rgn(hdc: HDC, hrgn: HRGN, hbr: HBRUSH) -> BOOL {
+        let Some(color) = crate::win32::brush_color(hbr) else {
+            return FALSE;
+        };
+        let Some(bounds) = paint_region_pixels(hdc, hrgn, |dc, window, x, y| {
+            put_surface_pixel(dc, window, x, y, color);
+        }) else {
+            return FALSE;
+        };
+        if let Some(hwnd) = crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.hwnd)
+        {
+            crate::win32::invalidate_window_rect(hwnd, bounds);
+        }
         TRUE
     }
 
     /// FrameRgn
     pub unsafe fn frame_rgn(hdc: HDC, hrgn: HRGN, hbr: HBRUSH, nWidth: INT, nHeight: INT) -> BOOL {
+        let Some(color) = crate::win32::brush_color(hbr) else {
+            return FALSE;
+        };
+        let Some(bounds) = frame_region_pixels(hdc, hrgn, nWidth, nHeight, color) else {
+            return FALSE;
+        };
+        if let Some(hwnd) = crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.hwnd)
+        {
+            crate::win32::invalidate_window_rect(hwnd, bounds);
+        }
         TRUE
     }
 
     /// GetRgnBox
     pub unsafe fn get_rgn_box(hrgn: HRGN, lprc: *mut RECT) -> INT {
-        0
+        if lprc.is_null() {
+            return 0;
+        }
+        let Some(region) = crate::win32::region_rect(hrgn) else {
+            return 0;
+        };
+        *lprc = region;
+        1
     }
 
     /// PtInRegion
     pub unsafe fn pt_in_region(hrgn: HRGN, x: INT, y: INT) -> BOOL {
-        FALSE
+        match crate::win32::region_rect(hrgn) {
+            Some(_) if crate::win32::region_contains_point(hrgn, x, y) => TRUE,
+            _ => FALSE,
+        }
     }
 
     /// RectInRegion
     pub unsafe fn rect_in_region(hrgn: HRGN, lprect: *const RECT) -> BOOL {
-        FALSE
+        if lprect.is_null() {
+            return FALSE;
+        }
+        let Some(_region) = crate::win32::region_rect(hrgn) else {
+            return FALSE;
+        };
+        if crate::win32::region_intersects_rect(hrgn, *lprect) {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 
     /// EqualRgn
     pub unsafe fn equal_rgn(hrgn1: HRGN, hrgn2: HRGN) -> BOOL {
-        FALSE
+        let regions = crate::win32::WIN32_REGIONS.lock();
+        match (regions.get(&(hrgn1 as u64)), regions.get(&(hrgn2 as u64))) {
+            (Some(left), Some(right))
+                if crate::win32::normalize_rect(left.rect)
+                    == crate::win32::normalize_rect(right.rect)
+                    && left.excluded_rects == right.excluded_rects
+                    && match (&left.shape, &right.shape) {
+                        (
+                            crate::win32::Win32RegionShape::Rect,
+                            crate::win32::Win32RegionShape::Rect,
+                        ) => true,
+                        (
+                            crate::win32::Win32RegionShape::Polygon {
+                                points: left_points,
+                                alternate_fill: left_fill,
+                            },
+                            crate::win32::Win32RegionShape::Polygon {
+                                points: right_points,
+                                alternate_fill: right_fill,
+                            },
+                        ) => {
+                            left_fill == right_fill
+                                && left_points.len() == right_points.len()
+                                && left_points
+                                    .iter()
+                                    .zip(right_points.iter())
+                                    .all(|(left, right)| left.x == right.x && left.y == right.y)
+                        }
+                        _ => false,
+                    } =>
+            {
+                TRUE
+            }
+            _ => FALSE,
+        }
     }
 
     /// GetRegionData
     pub unsafe fn get_region_data(hrgn: HRGN, nCount: DWORD, lpRgnData: *mut u8) -> DWORD {
-        0
+        let Some(region) = crate::win32::region_rect(hrgn) else {
+            return 0;
+        };
+        let required = core::mem::size_of::<RECT>() as DWORD;
+        if lpRgnData.is_null() || nCount < required {
+            return required;
+        }
+        *(lpRgnData as *mut RECT) = region;
+        required
     }
 
     /// SetRectRgn
     pub unsafe fn set_rect_rgn(hrgn: HRGN, left: INT, top: INT, right: INT, bottom: INT) -> BOOL {
+        let mut regions = crate::win32::WIN32_REGIONS.lock();
+        let Some(region) = regions.get_mut(&(hrgn as u64)) else {
+            return FALSE;
+        };
+        region.rect = crate::win32::normalize_rect(RECT {
+            left,
+            top,
+            right,
+            bottom,
+        });
+        region.shape = crate::win32::Win32RegionShape::Rect;
+        region.excluded_rects.clear();
         TRUE
     }
 
@@ -6659,17 +18068,59 @@ mod gdi32 {
 
     /// SelectClipRgn
     pub unsafe fn select_clip_rgn(hdc: HDC, hrgn: HRGN) -> INT {
-        0
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        dc.clip_region = hrgn;
+        if hrgn == 0 {
+            0
+        } else {
+            1
+        }
     }
 
     /// ExtSelectClipRgn
     pub unsafe fn ext_select_clip_rgn(hdc: HDC, hrgn: HRGN, fnMode: INT) -> INT {
-        0
+        let _ = fnMode;
+        select_clip_rgn(hdc, hrgn)
     }
 
     /// ExcludeClipRect
     pub unsafe fn exclude_clip_rect(hdc: HDC, left: INT, top: INT, right: INT, bottom: INT) -> INT {
-        0
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let current = crate::win32::region_rect(dc.clip_region).unwrap_or(RECT {
+            left: 0,
+            top: 0,
+            right: i32::MAX / 2,
+            bottom: i32::MAX / 2,
+        });
+        let rect = crate::win32::normalize_rect(RECT {
+            left,
+            top,
+            right,
+            bottom,
+        });
+        if dc.clip_region == 0 {
+            let next = RECT {
+                left: current.left,
+                top: current.top,
+                right: current.right.min(rect.left.max(current.left)),
+                bottom: current.bottom,
+            };
+            dc.clip_region = create_rect_rgn(next.left, next.top, next.right, next.bottom);
+            return 1;
+        }
+        if let Some(region) = crate::win32::WIN32_REGIONS
+            .lock()
+            .get_mut(&(dc.clip_region as u64))
+        {
+            region.excluded_rects.push(rect);
+        }
+        1
     }
 
     /// ExcludeUpdateRgn
@@ -6685,37 +18136,144 @@ mod gdi32 {
         right: INT,
         bottom: INT,
     ) -> INT {
-        0
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let base = crate::win32::region_rect(dc.clip_region).unwrap_or(RECT {
+            left: 0,
+            top: 0,
+            right: i32::MAX / 2,
+            bottom: i32::MAX / 2,
+        });
+        let rect = crate::win32::normalize_rect(RECT {
+            left,
+            top,
+            right,
+            bottom,
+        });
+        let next = RECT {
+            left: base.left.max(rect.left),
+            top: base.top.max(rect.top),
+            right: base.right.min(rect.right),
+            bottom: base.bottom.min(rect.bottom),
+        };
+        dc.clip_region = create_rect_rgn(next.left, next.top, next.right, next.bottom);
+        if next.left < next.right && next.top < next.bottom {
+            1
+        } else {
+            0
+        }
     }
 
     /// OffsetClipRgn
     pub unsafe fn offset_clip_rgn(hdc: HDC, x: INT, y: INT) -> INT {
-        0
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        if dc.clip_region == 0 {
+            return 0;
+        }
+        offset_rgn(dc.clip_region, x, y)
     }
 
     /// SelectClipPath
     pub unsafe fn select_clip_path(hdc: HDC, iMode: INT) -> BOOL {
+        let hrgn = path_to_region(hdc);
+        if hrgn == 0 {
+            return FALSE;
+        }
+        if iMode == 1 {
+            select_clip_rgn(hdc, hrgn);
+        } else {
+            ext_select_clip_rgn(hdc, hrgn, iMode);
+        }
         TRUE
     }
 
     /// GetClipBox
     pub unsafe fn get_clip_box(hdc: HDC, lprect: *mut RECT) -> INT {
-        0
+        if lprect.is_null() {
+            return 0;
+        }
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return 0;
+        };
+        *lprect = crate::win32::region_rect(dc.clip_region).unwrap_or(RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        });
+        1
     }
 
     /// GetClipRgn
     pub unsafe fn get_clip_rgn(hdc: HDC) -> HRGN {
-        0
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.clip_region)
+            .unwrap_or(0)
     }
 
     /// PtVisible
     pub unsafe fn pt_visible(hdc: HDC, x: INT, y: INT) -> BOOL {
-        TRUE
+        let (hwnd, clip_region) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            (dc.hwnd, dc.clip_region)
+        };
+        let windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get(&hwnd) else {
+            return FALSE;
+        };
+        let visible = x >= 0
+            && y >= 0
+            && x < window.width
+            && y < window.height
+            && (clip_region == 0 || crate::win32::region_contains_point(clip_region, x, y));
+        if visible {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 
     /// RectVisible
     pub unsafe fn rect_visible(hdc: HDC, lprect: *const RECT) -> BOOL {
-        TRUE
+        if lprect.is_null() {
+            return FALSE;
+        }
+        let rect = crate::win32::normalize_rect(*lprect);
+        let (hwnd, clip_region) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            (dc.hwnd, dc.clip_region)
+        };
+        let windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get(&hwnd) else {
+            return FALSE;
+        };
+        let visible = if clip_region == 0 {
+            rect.right > 0
+                && rect.bottom > 0
+                && rect.left < window.width
+                && rect.top < window.height
+        } else {
+            crate::win32::region_intersects_rect(clip_region, rect)
+        };
+        if !visible {
+            FALSE
+        } else {
+            TRUE
+        }
     }
 
     // ========================================================================
@@ -6724,39 +18282,73 @@ mod gdi32 {
 
     /// SetMapMode
     pub unsafe fn set_map_mode(hdc: HDC, iMode: INT) -> INT {
-        0
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let previous = dc.map_mode;
+        dc.map_mode = if iMode == 0 { 1 } else { iMode };
+        previous
     }
 
     /// GetMapMode
     pub unsafe fn get_map_mode(hdc: HDC) -> INT {
-        1 // MM_TEXT
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.map_mode)
+            .unwrap_or(1)
     }
 
     /// SetViewportOrgEx
     pub unsafe fn set_viewport_org_ex(hdc: HDC, x: INT, y: INT, lppt: *mut POINT) -> BOOL {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        if !lppt.is_null() {
+            *lppt = dc.viewport_org;
+        }
+        dc.viewport_org = POINT { x, y };
         TRUE
     }
 
     /// GetViewportOrgEx
     pub unsafe fn get_viewport_org_ex(hdc: HDC, lppt: *mut POINT) -> BOOL {
-        if !lppt.is_null() {
-            (*lppt).x = 0;
-            (*lppt).y = 0;
+        if lppt.is_null() {
+            return FALSE;
         }
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return FALSE;
+        };
+        *lppt = dc.viewport_org;
         TRUE
     }
 
     /// SetWindowOrgEx
     pub unsafe fn set_window_org_ex(hdc: HDC, x: INT, y: INT, lppt: *mut POINT) -> BOOL {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        if !lppt.is_null() {
+            *lppt = dc.window_org;
+        }
+        dc.window_org = POINT { x, y };
         TRUE
     }
 
     /// GetWindowOrgEx
     pub unsafe fn get_window_org_ex(hdc: HDC, lppt: *mut POINT) -> BOOL {
-        if !lppt.is_null() {
-            (*lppt).x = 0;
-            (*lppt).y = 0;
+        if lppt.is_null() {
+            return FALSE;
         }
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return FALSE;
+        };
+        *lppt = dc.window_org;
         TRUE
     }
 
@@ -6790,26 +18382,106 @@ mod gdi32 {
 
     /// DPtoLP
     pub unsafe fn dp_to_lp(hdc: HDC, lppt: *mut POINT, c: INT) -> BOOL {
+        if lppt.is_null() || c < 0 {
+            return FALSE;
+        }
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return FALSE;
+        };
+        for index in 0..c as usize {
+            let point = &mut *lppt.add(index);
+            point.x = point.x - dc.viewport_org.x + dc.window_org.x;
+            point.y = point.y - dc.viewport_org.y + dc.window_org.y;
+        }
         TRUE
     }
 
     /// LPtoDP
     pub unsafe fn lp_to_dp(hdc: HDC, lppt: *mut POINT, c: INT) -> BOOL {
+        if lppt.is_null() || c < 0 {
+            return FALSE;
+        }
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return FALSE;
+        };
+        for index in 0..c as usize {
+            let point = &mut *lppt.add(index);
+            let (x, y) = crate::win32::logical_to_device(dc, point.x, point.y);
+            point.x = x;
+            point.y = y;
+        }
         TRUE
     }
 
     /// SetWorldTransform
     pub unsafe fn set_world_transform(hdc: HDC, lpxf: *const u8) -> BOOL {
+        if lpxf.is_null() {
+            return FALSE;
+        }
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        let src = lpxf as *const f32;
+        dc.world_transform = [
+            *src.add(0),
+            *src.add(1),
+            *src.add(2),
+            *src.add(3),
+            *src.add(4),
+            *src.add(5),
+        ];
         TRUE
     }
 
     /// GetWorldTransform
     pub unsafe fn get_world_transform(hdc: HDC, lpxf: *mut u8) -> BOOL {
+        if lpxf.is_null() {
+            return FALSE;
+        }
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return FALSE;
+        };
+        let dst = lpxf as *mut f32;
+        for (index, value) in dc.world_transform.iter().enumerate() {
+            *dst.add(index) = *value;
+        }
         TRUE
     }
 
     /// ModifyWorldTransform
     pub unsafe fn modify_world_transform(hdc: HDC, lpxf: *const u8, iMode: DWORD) -> BOOL {
+        if iMode == 1 {
+            return set_world_transform(hdc, lpxf);
+        }
+        if lpxf.is_null() {
+            return FALSE;
+        }
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        let src = lpxf as *const f32;
+        let rhs = [
+            *src.add(0),
+            *src.add(1),
+            *src.add(2),
+            *src.add(3),
+            *src.add(4),
+            *src.add(5),
+        ];
+        let lhs = dc.world_transform;
+        dc.world_transform = [
+            lhs[0] * rhs[0] + lhs[2] * rhs[1],
+            lhs[1] * rhs[0] + lhs[3] * rhs[1],
+            lhs[0] * rhs[2] + lhs[2] * rhs[3],
+            lhs[1] * rhs[2] + lhs[3] * rhs[3],
+            lhs[0] * rhs[4] + lhs[2] * rhs[5] + lhs[4],
+            lhs[1] * rhs[4] + lhs[3] * rhs[5] + lhs[5],
+        ];
         TRUE
     }
 
@@ -6819,6 +18491,39 @@ mod gdi32 {
         lpxf1: *const u8,
         lpxf2: *const u8,
     ) -> BOOL {
+        if lpxfResult.is_null() || lpxf1.is_null() || lpxf2.is_null() {
+            return FALSE;
+        }
+        let lhs = lpxf1 as *const f32;
+        let rhs = lpxf2 as *const f32;
+        let out = lpxfResult as *mut f32;
+        let a = [
+            *lhs.add(0),
+            *lhs.add(1),
+            *lhs.add(2),
+            *lhs.add(3),
+            *lhs.add(4),
+            *lhs.add(5),
+        ];
+        let b = [
+            *rhs.add(0),
+            *rhs.add(1),
+            *rhs.add(2),
+            *rhs.add(3),
+            *rhs.add(4),
+            *rhs.add(5),
+        ];
+        let result = [
+            a[0] * b[0] + a[2] * b[1],
+            a[1] * b[0] + a[3] * b[1],
+            a[0] * b[2] + a[2] * b[3],
+            a[1] * b[2] + a[3] * b[3],
+            a[0] * b[4] + a[2] * b[5] + a[4],
+            a[1] * b[4] + a[3] * b[5] + a[5],
+        ];
+        for (index, value) in result.iter().enumerate() {
+            *out.add(index) = *value;
+        }
         TRUE
     }
 
@@ -6912,17 +18617,57 @@ mod gdi32 {
 
     /// CreatePalette
     pub unsafe fn create_palette(lplgpl: *const u8) -> HPALETTE {
-        1 as HPALETTE
+        if lplgpl.is_null() {
+            return 0;
+        }
+        let header = &*(lplgpl as *const crate::win32::LOGPALETTE);
+        let entry_ptr = lplgpl.add(core::mem::size_of::<crate::win32::LOGPALETTE>())
+            as *const crate::win32::PALETTEENTRY;
+        let mut entries = Vec::with_capacity(header.palNumEntries as usize);
+        for index in 0..header.palNumEntries as usize {
+            entries.push(*entry_ptr.add(index));
+        }
+        let handle =
+            crate::win32::NEXT_HPALETTE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_PALETTES
+            .lock()
+            .insert(handle, crate::win32::Win32Palette { handle, entries });
+        crate::win32::register_gdi_handle(handle, crate::win32::OBJ_PAL as DWORD, false);
+        handle as HPALETTE
     }
 
     /// SelectPalette
     pub unsafe fn select_palette(hdc: HDC, hpal: HPALETTE, bForceBackground: BOOL) -> HPALETTE {
-        hpal
+        let _ = bForceBackground;
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let previous = dc.selected_palette;
+        crate::win32::mark_gdi_handle_released(previous as u64);
+        if hpal != 0
+            && !crate::win32::WIN32_PALETTES
+                .lock()
+                .contains_key(&(hpal as u64))
+        {
+            return previous;
+        }
+        dc.selected_palette = hpal;
+        crate::win32::mark_gdi_handle_selected(hpal as u64, crate::win32::OBJ_PAL as DWORD);
+        previous
     }
 
     /// RealizePalette
     pub unsafe fn realize_palette(hdc: HDC) -> UINT {
-        0
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return 0;
+        };
+        crate::win32::WIN32_PALETTES
+            .lock()
+            .get(&(dc.selected_palette as u64))
+            .map(|palette| palette.entries.len() as UINT)
+            .unwrap_or(0)
     }
 
     /// UpdateColors
@@ -6932,6 +18677,13 @@ mod gdi32 {
 
     /// ResizePalette
     pub unsafe fn resize_palette(hpal: HPALETTE, n: UINT) -> BOOL {
+        let mut palettes = crate::win32::WIN32_PALETTES.lock();
+        let Some(palette) = palettes.get_mut(&(hpal as u64)) else {
+            return FALSE;
+        };
+        palette
+            .entries
+            .resize(n as usize, crate::win32::PALETTEENTRY::default());
         TRUE
     }
 
@@ -6942,7 +18694,11 @@ mod gdi32 {
         cEntries: UINT,
         ppe: *const u8,
     ) -> BOOL {
-        TRUE
+        if set_palette_entries(hpal, iStartIndex, cEntries, ppe) == cEntries {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 
     /// SetPaletteEntries
@@ -6952,7 +18708,24 @@ mod gdi32 {
         cEntries: UINT,
         ppe: *const u8,
     ) -> UINT {
-        0
+        if ppe.is_null() {
+            return 0;
+        }
+        let mut palettes = crate::win32::WIN32_PALETTES.lock();
+        let Some(palette) = palettes.get_mut(&(hpal as u64)) else {
+            return 0;
+        };
+        let entries = ppe as *const crate::win32::PALETTEENTRY;
+        let mut written = 0;
+        for index in 0..cEntries as usize {
+            let dst = iStart as usize + index;
+            if dst >= palette.entries.len() {
+                break;
+            }
+            palette.entries[dst] = *entries.add(index);
+            written += 1;
+        }
+        written
     }
 
     /// GetPaletteEntries
@@ -6962,7 +18735,24 @@ mod gdi32 {
         cEntries: UINT,
         ppe: *mut u8,
     ) -> UINT {
-        0
+        if ppe.is_null() {
+            return 0;
+        }
+        let palettes = crate::win32::WIN32_PALETTES.lock();
+        let Some(palette) = palettes.get(&(hpal as u64)) else {
+            return 0;
+        };
+        let entries = ppe as *mut crate::win32::PALETTEENTRY;
+        let mut copied = 0;
+        for index in 0..cEntries as usize {
+            let src = iStart as usize + index;
+            if src >= palette.entries.len() {
+                break;
+            }
+            *entries.add(index) = palette.entries[src];
+            copied += 1;
+        }
+        copied
     }
 
     /// GetSystemPaletteEntries
@@ -6972,7 +18762,47 @@ mod gdi32 {
         cEntries: UINT,
         ppe: *mut u8,
     ) -> UINT {
-        0
+        let _ = hdc;
+        if ppe.is_null() {
+            return 0;
+        }
+        let defaults = [
+            crate::win32::PALETTEENTRY {
+                peRed: 0x00,
+                peGreen: 0x00,
+                peBlue: 0x00,
+                peFlags: 0,
+            },
+            crate::win32::PALETTEENTRY {
+                peRed: 0xFF,
+                peGreen: 0xFF,
+                peBlue: 0xFF,
+                peFlags: 0,
+            },
+            crate::win32::PALETTEENTRY {
+                peRed: 0x1D,
+                peGreen: 0x35,
+                peBlue: 0x52,
+                peFlags: 0,
+            },
+            crate::win32::PALETTEENTRY {
+                peRed: 0x10,
+                peGreen: 0x1B,
+                peBlue: 0x2B,
+                peFlags: 0,
+            },
+        ];
+        let out = ppe as *mut crate::win32::PALETTEENTRY;
+        let mut copied = 0;
+        for index in 0..cEntries as usize {
+            let src = iStart as usize + index;
+            if src >= defaults.len() {
+                break;
+            }
+            *out.add(index) = defaults[src];
+            copied += 1;
+        }
+        copied
     }
 
     /// GetSystemPaletteUse
@@ -6991,21 +18821,60 @@ mod gdi32 {
 
     /// BeginPath
     pub unsafe fn begin_path(hdc: HDC) -> BOOL {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        dc.path_active = true;
+        dc.path_closed = false;
+        dc.path_points.clear();
         TRUE
     }
 
     /// EndPath
     pub unsafe fn end_path(hdc: HDC) -> BOOL {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        if !dc.path_active {
+            return FALSE;
+        }
+        dc.path_active = false;
         TRUE
     }
 
     /// AbortPath
     pub unsafe fn abort_path(hdc: HDC) -> BOOL {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        dc.path_active = false;
+        dc.path_closed = false;
+        dc.path_points.clear();
         TRUE
     }
 
     /// CloseFigure
     pub unsafe fn close_figure(hdc: HDC) -> BOOL {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        if dc.path_points.len() < 2 {
+            return FALSE;
+        }
+        let first = dc.path_points[0];
+        if dc
+            .path_points
+            .last()
+            .map(|p| p.x != first.x || p.y != first.y)
+            .unwrap_or(false)
+        {
+            dc.path_points.push(first);
+        }
+        dc.path_closed = true;
         TRUE
     }
 
@@ -7021,100 +18890,830 @@ mod gdi32 {
 
     /// StrokePath
     pub unsafe fn stroke_path(hdc: HDC) -> BOOL {
+        let (hwnd, points, color) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            (
+                dc.hwnd,
+                dc.path_points.clone(),
+                crate::win32::pen_color(dc.selected_pen).unwrap_or(dc.pen_color),
+            )
+        };
+        if hwnd == 0 || points.len() < 2 {
+            return FALSE;
+        }
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let (Some(window), Some(dc)) = (windows.get_mut(&hwnd), dcs.get(&(hdc as u64))) else {
+            return FALSE;
+        };
+        for segment in points.windows(2) {
+            draw_line_pixels(
+                dc,
+                window,
+                segment[0].x,
+                segment[0].y,
+                segment[1].x,
+                segment[1].y,
+                color,
+            );
+        }
+        crate::win32::invalidate_window_rect(hwnd, polygon_bounds(&points));
         TRUE
     }
 
     /// StrokeAndFillPath
     pub unsafe fn stroke_and_fill_path(hdc: HDC) -> BOOL {
-        TRUE
+        let filled = fill_path(hdc);
+        let stroked = stroke_path(hdc);
+        if filled != FALSE || stroked != FALSE {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 
     /// FillPath
     pub unsafe fn fill_path(hdc: HDC) -> BOOL {
+        let (hwnd, points, fill_color, alternate_fill) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            (
+                dc.hwnd,
+                dc.path_points.clone(),
+                crate::win32::brush_color(dc.selected_brush),
+                dc.poly_fill_mode != 2,
+            )
+        };
+        let Some(fill_color) = fill_color else {
+            return FALSE;
+        };
+        if hwnd == 0 || points.len() < 3 {
+            return FALSE;
+        }
+        let bounds = polygon_bounds(&points);
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let (Some(window), Some(dc)) = (windows.get_mut(&hwnd), dcs.get(&(hdc as u64))) else {
+            return FALSE;
+        };
+        for y in bounds.top..bounds.bottom {
+            for x in bounds.left..bounds.right {
+                if crate::win32::polygon_contains_root(&points, x, y, alternate_fill) {
+                    put_surface_pixel(dc, window, x, y, fill_color);
+                }
+            }
+        }
+        crate::win32::invalidate_window_rect(hwnd, bounds);
         TRUE
     }
 
     /// PathToRegion
     pub unsafe fn path_to_region(hdc: HDC) -> HRGN {
-        1 as HRGN
+        let (points, poly_fill_mode) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return 0 as HRGN;
+            };
+            (dc.path_points.clone(), dc.poly_fill_mode)
+        };
+        if points.len() < 3 {
+            return 0 as HRGN;
+        }
+        create_polygon_rgn(points.as_ptr(), points.len() as INT, poly_fill_mode)
     }
 
     /// GetPath
     pub unsafe fn get_path(hdc: HDC, lppt: *mut POINT, lpbTypes: *mut BYTE, nSize: INT) -> INT {
-        -1
+        let (points, closed) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return -1;
+            };
+            (dc.path_points.clone(), dc.path_closed)
+        };
+        if lppt.is_null() || lpbTypes.is_null() {
+            return points.len() as INT;
+        }
+        let copy = core::cmp::min(points.len(), nSize.max(0) as usize);
+        for (index, point) in points.iter().take(copy).enumerate() {
+            *lppt.add(index) = *point;
+            let mut ty = if index == 0 { 0x06 } else { 0x02 };
+            if closed && index + 1 == copy {
+                ty |= 0x01;
+            }
+            *lpbTypes.add(index) = ty;
+        }
+        copy as INT
+    }
+
+    fn create_meta_dc(enhanced: bool) -> HDC {
+        let source_hwnd = {
+            let active = crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed);
+            if active != 0 {
+                active
+            } else {
+                crate::win32::WIN32_WINDOWS
+                    .lock()
+                    .keys()
+                    .next()
+                    .copied()
+                    .unwrap_or(0)
+            }
+        };
+        let (width, height) = {
+            let windows = crate::win32::WIN32_WINDOWS.lock();
+            windows
+                .get(&source_hwnd)
+                .map(|window| (window.width.max(1), window.height.max(1)))
+                .unwrap_or((1024, 768))
+        };
+        let meta_handle =
+            crate::win32::NEXT_HMETAFILE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_METAFILES.lock().insert(
+            meta_handle,
+            crate::win32::Win32MetaFile {
+                handle: meta_handle as HMETAFILE,
+                source_hwnd: source_hwnd as HWND,
+                width,
+                height,
+                pixels: vec![0; (width * height * 4) as usize],
+                enhanced,
+                commands: Vec::new(),
+                printer_name: String::new(),
+            },
+        );
+        let hdc = crate::win32::NEXT_HDC.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_DCS.lock().insert(
+            hdc,
+            crate::win32::Win32DC {
+                hdc,
+                hwnd: source_hwnd,
+                pen_color: 0x000000,
+                brush_color: 0xFFFFFF,
+                text_color: 0x000000,
+                bk_color: 0xFFFFFF,
+                bk_mode: 2,
+                pen_x: 0,
+                pen_y: 0,
+                selected_pen: BLACK_PEN as HPEN,
+                selected_brush: WHITE_BRUSH as HBRUSH,
+                selected_font: DEFAULT_GUI_FONT as HFONT,
+                selected_palette: 0,
+                clip_region: 0,
+                recording_metafile: meta_handle as HMETAFILE,
+                rop2: 13,
+                graphics_mode: 1,
+                arc_direction: 1,
+                poly_fill_mode: 1,
+                stretch_blt_mode: 1,
+                path_active: false,
+                path_closed: false,
+                path_points: Vec::new(),
+                map_mode: 1,
+                viewport_org: POINT::default(),
+                window_org: POINT::default(),
+                world_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                device_kind: crate::win32::Win32DcKind::MetaFile,
+                device_name: String::new(),
+                current_print_job: 0,
+                page_active: false,
+                save_stack: Vec::new(),
+                font_height: 16,
+                font_weight: 400,
+            },
+        );
+        crate::win32::register_gdi_handle(hdc, crate::win32::OBJ_DC as DWORD, false);
+        hdc as HDC
+    }
+
+    pub unsafe fn create_meta_file_a(lpFilename: LPCSTR) -> HDC {
+        let _ = lpFilename;
+        create_meta_dc(false)
+    }
+
+    pub unsafe fn close_meta_file(hdc: HDC) -> HMETAFILE {
+        crate::win32::WIN32_DCS
+            .lock()
+            .remove(&(hdc as u64))
+            .map(|dc| dc.recording_metafile)
+            .unwrap_or(0 as HMETAFILE)
+    }
+
+    pub unsafe fn delete_meta_file(hmf: HMETAFILE) -> BOOL {
+        if crate::win32::WIN32_METAFILES
+            .lock()
+            .remove(&(hmf as u64))
+            .is_some()
+        {
+            TRUE
+        } else {
+            FALSE
+        }
+    }
+
+    pub unsafe fn play_meta_file(hdc: HDC, hmf: HMETAFILE) -> BOOL {
+        let (dst_hwnd, meta) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            let meta = crate::win32::WIN32_METAFILES
+                .lock()
+                .get(&(hmf as u64))
+                .cloned();
+            (dc.hwnd, meta)
+        };
+        let Some(meta) = meta else {
+            return FALSE;
+        };
+        if !meta.commands.is_empty() {
+            replay_metafile_commands(hdc, &meta.commands, None);
+            return TRUE;
+        }
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&dst_hwnd) else {
+            return FALSE;
+        };
+        let copy_w = meta.width.min(window.width).max(0);
+        let copy_h = meta.height.min(window.height).max(0);
+        for y in 0..copy_h {
+            for x in 0..copy_w {
+                let src_idx = ((y * meta.width + x) * 4) as usize;
+                let dst_idx = ((y * window.width + x) * 4) as usize;
+                if src_idx + 3 < meta.pixels.len() && dst_idx + 3 < window.surface.len() {
+                    window.surface[dst_idx..dst_idx + 4]
+                        .copy_from_slice(&meta.pixels[src_idx..src_idx + 4]);
+                }
+            }
+        }
+        crate::win32::invalidate_window_rect(
+            dst_hwnd,
+            RECT {
+                left: 0,
+                top: 0,
+                right: copy_w,
+                bottom: copy_h,
+            },
+        );
+        TRUE
+    }
+
+    pub unsafe fn create_enh_meta_file_a(
+        hdcRef: HDC,
+        lpFilename: LPCSTR,
+        lpRect: *const RECT,
+        lpDescription: LPCSTR,
+    ) -> HDC {
+        let _ = (hdcRef, lpFilename, lpRect, lpDescription);
+        create_meta_dc(true)
+    }
+
+    pub unsafe fn close_enh_meta_file(hdc: HDC) -> HENHMETAFILE {
+        close_meta_file(hdc) as HENHMETAFILE
+    }
+
+    pub unsafe fn delete_enh_meta_file(hemf: HENHMETAFILE) -> BOOL {
+        delete_meta_file(hemf as HMETAFILE)
+    }
+
+    pub unsafe fn play_enh_meta_file(hdc: HDC, hemf: HENHMETAFILE, lprect: *const RECT) -> BOOL {
+        if lprect.is_null() {
+            return play_meta_file(hdc, hemf as HMETAFILE);
+        }
+        let rect = crate::win32::normalize_rect(*lprect);
+        let (dst_hwnd, meta) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&(hdc as u64)) else {
+                return FALSE;
+            };
+            let meta = crate::win32::WIN32_METAFILES
+                .lock()
+                .get(&(hemf as u64))
+                .cloned();
+            (dc.hwnd, meta)
+        };
+        let Some(meta) = meta else {
+            return FALSE;
+        };
+        if !meta.commands.is_empty() {
+            replay_metafile_commands(hdc, &meta.commands, Some(rect));
+            return TRUE;
+        }
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&dst_hwnd) else {
+            return FALSE;
+        };
+        let out_w = (rect.right - rect.left).max(0);
+        let out_h = (rect.bottom - rect.top).max(0);
+        if out_w == 0 || out_h == 0 {
+            return FALSE;
+        }
+        for y in 0..out_h {
+            let sy = (y * meta.height) / out_h;
+            for x in 0..out_w {
+                let sx = (x * meta.width) / out_w;
+                let src_idx = ((sy * meta.width + sx) * 4) as usize;
+                let dx = rect.left + x;
+                let dy = rect.top + y;
+                if dx < 0 || dy < 0 || dx >= window.width || dy >= window.height {
+                    continue;
+                }
+                let dst_idx = ((dy * window.width + dx) * 4) as usize;
+                if src_idx + 3 < meta.pixels.len() && dst_idx + 3 < window.surface.len() {
+                    window.surface[dst_idx..dst_idx + 4]
+                        .copy_from_slice(&meta.pixels[src_idx..src_idx + 4]);
+                }
+            }
+        }
+        crate::win32::invalidate_window_rect(dst_hwnd, rect);
+        TRUE
+    }
+
+    pub unsafe fn create_dc_a(
+        pwszDriver: LPCSTR,
+        pwszDevice: LPCSTR,
+        pszPort: LPCSTR,
+        pdm: *const u8,
+    ) -> HDC {
+        let _ = (pszPort, pdm);
+        let handle = create_compatible_dc(0 as HDC);
+        let device = read_ansi_string(pwszDevice);
+        if handle != 0 {
+            if let Some(dc) = crate::win32::WIN32_DCS.lock().get_mut(&(handle as u64)) {
+                dc.device_kind = crate::win32::Win32DcKind::Printer;
+                dc.device_name = device.clone();
+            }
+            if !device.is_empty() {
+                let meta_handle = crate::win32::NEXT_HMETAFILE
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                crate::win32::WIN32_METAFILES.lock().insert(
+                    meta_handle,
+                    crate::win32::Win32MetaFile {
+                        handle: meta_handle as HMETAFILE,
+                        source_hwnd: 0,
+                        width: 2550,
+                        height: 3300,
+                        pixels: vec![0; 2550 * 3300 * 4],
+                        enhanced: true,
+                        commands: Vec::new(),
+                        printer_name: device.clone(),
+                    },
+                );
+                if let Some(dc) = crate::win32::WIN32_DCS.lock().get_mut(&(handle as u64)) {
+                    dc.recording_metafile = meta_handle as HMETAFILE;
+                    dc.device_name = device.clone();
+                }
+            }
+        }
+        handle
+    }
+
+    pub unsafe fn create_ic_a(
+        pwszDriver: LPCSTR,
+        pwszDevice: LPCSTR,
+        pszPort: LPCSTR,
+        pdm: *const u8,
+    ) -> HDC {
+        let _ = (pwszDriver, pwszDevice, pszPort, pdm);
+        let handle = create_compatible_dc(0 as HDC);
+        if handle != 0 {
+            if let Some(dc) = crate::win32::WIN32_DCS.lock().get_mut(&(handle as u64)) {
+                dc.device_kind = crate::win32::Win32DcKind::Information;
+                dc.device_name = read_ansi_string(pwszDevice);
+            }
+        }
+        handle
+    }
+
+    fn create_print_page_metafile(printer_name: &str) -> HMETAFILE {
+        let meta_handle =
+            crate::win32::NEXT_HMETAFILE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_METAFILES.lock().insert(
+            meta_handle,
+            crate::win32::Win32MetaFile {
+                handle: meta_handle as HMETAFILE,
+                source_hwnd: 0,
+                width: 2550,
+                height: 3300,
+                pixels: vec![0; 2550 * 3300 * 4],
+                enhanced: true,
+                commands: Vec::new(),
+                printer_name: printer_name.to_string(),
+            },
+        );
+        meta_handle as HMETAFILE
+    }
+
+    pub unsafe fn start_doc_a(hdc: HDC, lpdi: *const crate::win32::DOCINFOA) -> INT {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        if dc.device_kind != crate::win32::Win32DcKind::Printer {
+            return 0;
+        }
+        let doc_name = if lpdi.is_null() {
+            "echOS print job".to_string()
+        } else {
+            let name = crate::win32::read_ansi_string((*lpdi).lpszDocName);
+            if name.is_empty() {
+                "echOS print job".to_string()
+            } else {
+                name
+            }
+        };
+        let printer_name = if dc.device_name.is_empty() {
+            "echOS virtual printer".to_string()
+        } else {
+            dc.device_name.clone()
+        };
+        let job_id =
+            crate::win32::NEXT_PRINT_JOB.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_PRINT_JOBS.lock().insert(
+            job_id,
+            crate::win32::Win32PrintJob {
+                id: job_id,
+                printer_name: printer_name.clone(),
+                document_name: doc_name,
+                pages: Vec::new(),
+                committed: false,
+            },
+        );
+        dc.current_print_job = job_id;
+        dc.page_active = false;
+        job_id as INT
+    }
+
+    pub unsafe fn start_page(hdc: HDC) -> INT {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        if dc.device_kind != crate::win32::Win32DcKind::Printer
+            || dc.current_print_job == 0
+            || dc.page_active
+        {
+            return 0;
+        }
+        dc.recording_metafile = create_print_page_metafile(&dc.device_name);
+        dc.page_active = true;
+        1
+    }
+
+    pub unsafe fn end_page(hdc: HDC) -> INT {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        if dc.current_print_job == 0 || !dc.page_active || dc.recording_metafile == 0 {
+            return 0;
+        }
+        let meta = dc.recording_metafile;
+        dc.recording_metafile = 0;
+        dc.page_active = false;
+        if let Some(job) = crate::win32::WIN32_PRINT_JOBS
+            .lock()
+            .get_mut(&dc.current_print_job)
+        {
+            job.pages.push(meta);
+        }
+        1
+    }
+
+    pub unsafe fn end_doc(hdc: HDC) -> INT {
+        let page_active = crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.page_active)
+            .unwrap_or(false);
+        if page_active {
+            let _ = end_page(hdc);
+        }
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        if dc.current_print_job == 0 {
+            return 0;
+        }
+        let job_id = dc.current_print_job;
+        dc.current_print_job = 0;
+        if let Some(job) = crate::win32::WIN32_PRINT_JOBS.lock().get_mut(&job_id) {
+            job.committed = true;
+            crate::win32::WIN32_PRINTER_QUEUES
+                .lock()
+                .entry(job.printer_name.clone())
+                .or_insert_with(Vec::new)
+                .push(job.id);
+        }
+        1
+    }
+
+    pub unsafe fn abort_doc(hdc: HDC) -> INT {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        if dc.current_print_job == 0 {
+            return 0;
+        }
+        if dc.recording_metafile != 0 {
+            crate::win32::WIN32_METAFILES
+                .lock()
+                .remove(&(dc.recording_metafile as u64));
+        }
+        crate::win32::WIN32_PRINT_JOBS
+            .lock()
+            .remove(&dc.current_print_job);
+        dc.recording_metafile = 0;
+        dc.current_print_job = 0;
+        dc.page_active = false;
+        1
     }
 
     // ========================================================================
     // MISC
     // ========================================================================
 
+    /// CreateCompatibleDC
+    pub unsafe fn create_compatible_dc(hdc: HDC) -> HDC {
+        let source = crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| {
+                (
+                    dc.hwnd,
+                    dc.pen_color,
+                    dc.brush_color,
+                    dc.text_color,
+                    dc.bk_color,
+                    dc.bk_mode,
+                    dc.font_height,
+                    dc.font_weight,
+                    dc.map_mode,
+                    dc.viewport_org,
+                    dc.window_org,
+                    dc.world_transform,
+                    dc.graphics_mode,
+                    dc.arc_direction,
+                    dc.poly_fill_mode,
+                    dc.stretch_blt_mode,
+                )
+            })
+            .unwrap_or((
+                0,
+                0x000000,
+                0xFFFFFF,
+                0x000000,
+                0xFFFFFF,
+                2,
+                16,
+                400,
+                1,
+                POINT::default(),
+                POINT::default(),
+                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                1,
+                1,
+                1,
+                1,
+            ));
+        let handle = crate::win32::NEXT_HDC.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::WIN32_DCS.lock().insert(
+            handle,
+            crate::win32::Win32DC {
+                hdc: handle,
+                hwnd: source.0,
+                pen_color: source.1,
+                brush_color: source.2,
+                text_color: source.3,
+                bk_color: source.4,
+                bk_mode: source.5,
+                pen_x: 0,
+                pen_y: 0,
+                selected_pen: BLACK_PEN as HPEN,
+                selected_brush: WHITE_BRUSH as HBRUSH,
+                selected_font: DEFAULT_GUI_FONT as HFONT,
+                selected_palette: 0,
+                clip_region: 0,
+                recording_metafile: 0,
+                rop2: 13,
+                graphics_mode: source.12,
+                arc_direction: source.13,
+                poly_fill_mode: source.14,
+                stretch_blt_mode: source.15,
+                path_active: false,
+                path_closed: false,
+                path_points: Vec::new(),
+                map_mode: source.8,
+                viewport_org: source.9,
+                window_org: source.10,
+                world_transform: source.11,
+                device_kind: crate::win32::Win32DcKind::Memory,
+                device_name: String::new(),
+                current_print_job: 0,
+                page_active: false,
+                save_stack: Vec::new(),
+                font_height: source.6,
+                font_weight: source.7,
+            },
+        );
+        crate::win32::register_gdi_handle(handle, crate::win32::OBJ_DC as DWORD, false);
+        handle as HDC
+    }
+
+    /// DeleteDC
+    pub unsafe fn delete_dc(hdc: HDC) -> BOOL {
+        let Some(dc) = crate::win32::WIN32_DCS.lock().remove(&(hdc as u64)) else {
+            return FALSE;
+        };
+        crate::win32::mark_gdi_handle_released(dc.selected_pen as u64);
+        crate::win32::mark_gdi_handle_released(dc.selected_brush as u64);
+        crate::win32::mark_gdi_handle_released(dc.selected_font as u64);
+        crate::win32::mark_gdi_handle_released(dc.selected_palette as u64);
+        crate::win32::mark_gdi_handle_released(dc.clip_region as u64);
+        crate::win32::WIN32_GDI_HANDLES.lock().remove(&(hdc as u64));
+        TRUE
+    }
+
     /// SaveDC
     pub unsafe fn save_dc(hdc: HDC) -> INT {
-        1
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        dc.save_stack.push(crate::win32::Win32DCSnapshot {
+            pen_color: dc.pen_color,
+            brush_color: dc.brush_color,
+            text_color: dc.text_color,
+            bk_color: dc.bk_color,
+            bk_mode: dc.bk_mode,
+            pen_x: dc.pen_x,
+            pen_y: dc.pen_y,
+            selected_pen: dc.selected_pen,
+            selected_brush: dc.selected_brush,
+            selected_font: dc.selected_font,
+            selected_palette: dc.selected_palette,
+            clip_region: dc.clip_region,
+            rop2: dc.rop2,
+            graphics_mode: dc.graphics_mode,
+            arc_direction: dc.arc_direction,
+            poly_fill_mode: dc.poly_fill_mode,
+            stretch_blt_mode: dc.stretch_blt_mode,
+            path_active: dc.path_active,
+            path_closed: dc.path_closed,
+            path_points: dc.path_points.clone(),
+            map_mode: dc.map_mode,
+            viewport_org: dc.viewport_org,
+            window_org: dc.window_org,
+            world_transform: dc.world_transform,
+            font_height: dc.font_height,
+            font_weight: dc.font_weight,
+        });
+        dc.save_stack.len() as INT
     }
 
     /// RestoreDC
     pub unsafe fn restore_dc(hdc: HDC, nSavedDC: INT) -> BOOL {
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        if dc.save_stack.is_empty() {
+            return FALSE;
+        }
+        let target_index = if nSavedDC <= 0 {
+            let depth = dc.save_stack.len() as INT;
+            (depth + nSavedDC).max(0) as usize
+        } else {
+            (nSavedDC - 1) as usize
+        };
+        if target_index >= dc.save_stack.len() {
+            return FALSE;
+        }
+        let snapshot = dc.save_stack[target_index].clone();
+        dc.save_stack.truncate(target_index);
+        crate::win32::restore_dc_state(dc, snapshot);
         TRUE
     }
 
     /// GetCurrentPositionEx
     pub unsafe fn get_current_position_ex(hdc: HDC, lppt: *mut POINT) -> BOOL {
-        if !lppt.is_null() {
-            (*lppt).x = 0;
-            (*lppt).y = 0;
+        if lppt.is_null() {
+            return FALSE;
         }
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return FALSE;
+        };
+        (*lppt).x = dc.pen_x;
+        (*lppt).y = dc.pen_y;
         TRUE
     }
 
     /// GetGraphicsMode
     pub unsafe fn get_graphics_mode(hdc: HDC) -> INT {
-        1 // GM_COMPATIBLE
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.graphics_mode)
+            .unwrap_or(1)
     }
 
     /// SetGraphicsMode
     pub unsafe fn set_graphics_mode(hdc: HDC, iMode: INT) -> INT {
-        1
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let previous = dc.graphics_mode;
+        dc.graphics_mode = iMode;
+        previous
     }
 
     /// GetArcDirection
     pub unsafe fn get_arc_direction(hdc: HDC) -> INT {
-        1 // AD_COUNTERCLOCKWISE
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.arc_direction)
+            .unwrap_or(1)
     }
 
     /// SetArcDirection
     pub unsafe fn set_arc_direction(hdc: HDC, dir: INT) -> INT {
-        1
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let previous = dc.arc_direction;
+        dc.arc_direction = dir;
+        previous
     }
 
     /// GetPolyFillMode
     pub unsafe fn get_poly_fill_mode(hdc: HDC) -> INT {
-        1 // ALTERNATE
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.poly_fill_mode)
+            .unwrap_or(1)
     }
 
     /// SetPolyFillMode
     pub unsafe fn set_poly_fill_mode(hdc: HDC, iMode: INT) -> INT {
-        1
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let previous = dc.poly_fill_mode;
+        dc.poly_fill_mode = iMode;
+        previous
     }
 
     /// GetStretchBltMode
     pub unsafe fn get_stretch_blt_mode(hdc: HDC) -> INT {
-        1 // WHITEONBLACK
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.stretch_blt_mode)
+            .unwrap_or(1)
     }
 
     /// SetStretchBltMode
     pub unsafe fn set_stretch_blt_mode(hdc: HDC, iStretchMode: INT) -> INT {
-        1
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let previous = dc.stretch_blt_mode;
+        dc.stretch_blt_mode = iStretchMode;
+        previous
     }
 
     /// GetROP2
     pub unsafe fn get_rop2(hdc: HDC) -> INT {
-        13 // R2_COPYPEN
+        crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(|dc| dc.rop2)
+            .unwrap_or(13)
     }
 
     /// SetROP2
     pub unsafe fn set_rop2(hdc: HDC, fnDrawMode: INT) -> INT {
-        13
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let previous = dc.rop2;
+        dc.rop2 = fnDrawMode;
+        previous
     }
 
     /// GetDCOrgEx
@@ -7144,11 +19743,15 @@ mod gdi32 {
         dwRop: DWORD,
     ) -> BOOL {
         // Kaynak ve hedef pencereleri al
-        let (src_hwnd, dst_hwnd) = {
+        let (src_hwnd, dst_hwnd, dst_clip_region, dst_brush_color, stretch_mode) = {
             let dcs = crate::win32::WIN32_DCS.lock();
             let src = dcs.get(&(hdcSrc as u64)).map(|dc| dc.hwnd).unwrap_or(0);
-            let dst = dcs.get(&(hdcDest as u64)).map(|dc| dc.hwnd).unwrap_or(0);
-            (src, dst)
+            let dst_dc = dcs.get(&(hdcDest as u64));
+            let dst = dst_dc.map(|dc| dc.hwnd).unwrap_or(0);
+            let clip = dst_dc.map(|dc| dc.clip_region).unwrap_or(0);
+            let brush = dst_dc.map(|dc| dc.brush_color).unwrap_or(0);
+            let stretch = dst_dc.map(|dc| dc.stretch_blt_mode).unwrap_or(1);
+            (src, dst, clip, brush, stretch)
         };
 
         if src_hwnd == 0 || dst_hwnd == 0 {
@@ -7157,7 +19760,16 @@ mod gdi32 {
         if src_hwnd == dst_hwnd {
             // Aynı pencere içinde kopyalama
             return self_blit(
-                dst_hwnd, nXDest, nYDest, nWidth, nHeight, nXSrc, nYSrc, dwRop,
+                dst_hwnd,
+                nXDest,
+                nYDest,
+                nWidth,
+                nHeight,
+                nXSrc,
+                nYSrc,
+                dwRop,
+                dst_clip_region,
+                dst_brush_color,
             );
         }
 
@@ -7200,27 +19812,45 @@ mod gdi32 {
                     if dx < dst_win.width as usize && dy < dst_win.height as usize {
                         let src_idx = (y * nWidth + x) as usize;
                         if src_idx < src_pixels.len() {
-                            let pixel = apply_rop(src_pixels[src_idx], 0, dwRop);
-                            let idx = (dy * dst_win.width as usize + dx) * 4;
-                            if idx + 3 < dst_win.surface.len() {
-                                dst_win.surface[idx] = (pixel & 0xFF) as u8;
-                                dst_win.surface[idx + 1] = ((pixel >> 8) & 0xFF) as u8;
-                                dst_win.surface[idx + 2] = ((pixel >> 16) & 0xFF) as u8;
-                                dst_win.surface[idx + 3] = 0xFF;
+                            if dst_clip_region != 0
+                                && !crate::win32::region_contains_point(
+                                    dst_clip_region,
+                                    dx as INT,
+                                    dy as INT,
+                                )
+                            {
+                                continue;
                             }
+                            let dst_pixel = crate::win32::read_window_pixel(
+                                &dst_win.surface,
+                                dst_win.width as usize,
+                                dx,
+                                dy,
+                            )
+                            .unwrap_or(0);
+                            let pixel =
+                                apply_rop(src_pixels[src_idx], dst_pixel, dst_brush_color, dwRop);
+                            let _ = crate::win32::write_window_pixel(
+                                &mut dst_win.surface,
+                                dst_win.width as usize,
+                                dx,
+                                dy,
+                                pixel,
+                            );
                         }
                     }
                 }
             }
         }
 
-        crate::serial_println!(
-            "[WIN32] BitBlt: {},{} {}x{} ROP={:#x}",
-            nXDest,
-            nYDest,
-            nWidth,
-            nHeight,
-            dwRop
+        crate::win32::invalidate_window_rect(
+            dst_hwnd,
+            RECT {
+                left: nXDest,
+                top: nYDest,
+                right: nXDest + nWidth,
+                bottom: nYDest + nHeight,
+            },
         );
         TRUE
     }
@@ -7235,6 +19865,8 @@ mod gdi32 {
         sx: INT,
         sy: INT,
         rop: DWORD,
+        clip_region: HRGN,
+        pattern: u32,
     ) -> BOOL {
         let mut windows = crate::win32::WIN32_WINDOWS.lock();
         if let Some(win) = windows.get_mut(&hwnd) {
@@ -7264,41 +19896,66 @@ mod gdi32 {
                     let wx = (dx + x) as usize;
                     let wy = (dy + y) as usize;
                     if wx < win.width as usize && wy < win.height as usize {
-                        let pixel = apply_rop(temp[(y * w + x) as usize], 0, rop);
-                        let idx = (wy * win.width as usize + wx) * 4;
-                        if idx + 3 < win.surface.len() {
-                            win.surface[idx] = (pixel & 0xFF) as u8;
-                            win.surface[idx + 1] = ((pixel >> 8) & 0xFF) as u8;
-                            win.surface[idx + 2] = ((pixel >> 16) & 0xFF) as u8;
-                            win.surface[idx + 3] = 0xFF;
+                        if clip_region != 0
+                            && !crate::win32::region_contains_point(
+                                clip_region,
+                                wx as INT,
+                                wy as INT,
+                            )
+                        {
+                            continue;
                         }
+                        let dst_pixel = crate::win32::read_window_pixel(
+                            &win.surface,
+                            win.width as usize,
+                            wx,
+                            wy,
+                        )
+                        .unwrap_or(0);
+                        let pixel = apply_rop(temp[(y * w + x) as usize], dst_pixel, pattern, rop);
+                        let _ = crate::win32::write_window_pixel(
+                            &mut win.surface,
+                            win.width as usize,
+                            wx,
+                            wy,
+                            pixel,
+                        );
                     }
                 }
             }
+            crate::win32::invalidate_window_rect(
+                hwnd,
+                RECT {
+                    left: dx,
+                    top: dy,
+                    right: dx + w,
+                    bottom: dy + h,
+                },
+            );
             return TRUE;
         }
         FALSE
     }
 
     /// ROP (Raster Operation) uygula
-    fn apply_rop(src: u32, dst: u32, rop: DWORD) -> u32 {
+    fn apply_rop(src: u32, dst: u32, pat: u32, rop: DWORD) -> u32 {
         match rop {
-            0x00CC0020 => src,          // SRCCOPY
-            0x00EE0086 => src | dst,    // SRCPAINT
-            0x008800C6 => src & dst,    // SRCAND
-            0x00660046 => src ^ dst,    // SRCINVERT
-            0x00440328 => src & !dst,   // SRCERASE
-            0x00330008 => !src,         // NOTSRCCOPY
-            0x001100A6 => !(src | dst), // NOTSRCERASE
-            0x00C000CA => src & dst,    // MERGECOPY
-            0x00BB0226 => !src | dst,   // MERGEPAINT
-            0x00F00021 => dst,          // PATCOPY
-            0x00A00089 => dst,          // PATPAINT
-            0x005A0049 => src ^ dst,    // PATINVERT
-            0x00550009 => !dst,         // DSTINVERT
-            0x00000042 => 0x000000,     // BLACKNESS
-            0x00FF0062 => 0xFFFFFF,     // WHITENESS
-            _ => src,                   // Varsayılan: SRCCOPY
+            0x00CC0020 => src,                // SRCCOPY
+            0x00EE0086 => src | dst,          // SRCPAINT
+            0x008800C6 => src & dst,          // SRCAND
+            0x00660046 => src ^ dst,          // SRCINVERT
+            0x00440328 => src & !dst,         // SRCERASE
+            0x00330008 => !src,               // NOTSRCCOPY
+            0x001100A6 => !(src | dst),       // NOTSRCERASE
+            0x00C000CA => src & pat,          // MERGECOPY
+            0x00BB0226 => !src | dst,         // MERGEPAINT
+            0x00F00021 => pat,                // PATCOPY
+            0x00A00089 => pat | (!src) | dst, // PATPAINT
+            0x005A0049 => pat ^ dst,          // PATINVERT
+            0x00550009 => !dst,               // DSTINVERT
+            0x00000042 => 0x000000,           // BLACKNESS
+            0x00FF0062 => 0xFFFFFF,           // WHITENESS
+            _ => src,                         // Varsayılan: SRCCOPY
         }
     }
 
@@ -7313,11 +19970,16 @@ mod gdi32 {
     ) -> BOOL {
         let hdc_id = hdc as u64;
 
-        let (hwnd, brush_color) = {
+        let (hwnd, brush_color, recording_metafile, clip_region) = {
             let dcs = crate::win32::WIN32_DCS.lock();
             match dcs.get(&hdc_id) {
-                Some(dc) => (dc.hwnd, dc.brush_color),
-                None => (0, 0xFFFFFF),
+                Some(dc) => (
+                    dc.hwnd,
+                    dc.brush_color,
+                    dc.recording_metafile,
+                    dc.clip_region,
+                ),
+                None => (0, 0xFFFFFF, 0, 0),
             }
         };
 
@@ -7327,10 +19989,6 @@ mod gdi32 {
 
         let mut windows = crate::win32::WIN32_WINDOWS.lock();
         if let Some(win) = windows.get_mut(&hwnd) {
-            let r = ((brush_color >> 16) & 0xFF) as u8;
-            let g = ((brush_color >> 8) & 0xFF) as u8;
-            let b = (brush_color & 0xFF) as u8;
-
             for y in 0..nHeight {
                 for x in 0..nWidth {
                     let px = (nXLeft + x) as usize;
@@ -7341,16 +19999,54 @@ mod gdi32 {
                             let existing = (win.surface[idx + 2] as u32) << 16
                                 | (win.surface[idx + 1] as u32) << 8
                                 | (win.surface[idx] as u32);
-                            let pixel = apply_rop(brush_color, existing, dwRop);
-                            win.surface[idx] = (pixel & 0xFF) as u8;
-                            win.surface[idx + 1] = ((pixel >> 8) & 0xFF) as u8;
-                            win.surface[idx + 2] = ((pixel >> 16) & 0xFF) as u8;
-                            win.surface[idx + 3] = 0xFF;
+                            if clip_region != 0
+                                && !crate::win32::region_contains_point(
+                                    clip_region,
+                                    px as INT,
+                                    py as INT,
+                                )
+                            {
+                                continue;
+                            }
+                            let pixel = apply_rop(brush_color, existing, brush_color, dwRop);
+                            let _ = crate::win32::write_window_pixel(
+                                &mut win.surface,
+                                win.width as usize,
+                                px,
+                                py,
+                                pixel,
+                            );
                         }
                     }
                 }
             }
         }
+        if recording_metafile != 0 {
+            if let Some(meta) = crate::win32::WIN32_METAFILES
+                .lock()
+                .get_mut(&(recording_metafile as u64))
+            {
+                meta.commands.push(crate::win32::Win32MetaCommand::PatBlt {
+                    rect: RECT {
+                        left: nXLeft,
+                        top: nYLeft,
+                        right: nXLeft + nWidth,
+                        bottom: nYLeft + nHeight,
+                    },
+                    color: brush_color,
+                    rop: dwRop,
+                });
+            }
+        }
+        crate::win32::invalidate_window_rect(
+            hwnd,
+            RECT {
+                left: nXLeft,
+                top: nYLeft,
+                right: nXLeft + nWidth,
+                bottom: nYLeft + nHeight,
+            },
+        );
         TRUE
     }
 
@@ -7368,19 +20064,102 @@ mod gdi32 {
         nHeightSrc: INT,
         dwRop: DWORD,
     ) -> BOOL {
-        // Basitleştirilmiş implementasyon: BitBlt gibi davran (boyutlandırma yok)
-        // Gerçek boyutlandırma için bilinear/nearest-neighbor interpolasyon gerekir
-        bit_blt(
-            hdcDest,
-            nXOriginDest,
-            nYOriginDest,
-            nWidthDest,
-            nHeightDest,
-            hdcSrc,
-            nXOriginSrc,
-            nYOriginSrc,
-            dwRop,
-        )
+        let (src_hwnd, dst_hwnd, dst_clip_region, dst_brush_color, stretch_mode) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let src = dcs.get(&(hdcSrc as u64)).map(|dc| dc.hwnd).unwrap_or(0);
+            let dst_dc = dcs.get(&(hdcDest as u64));
+            let dst = dst_dc.map(|dc| dc.hwnd).unwrap_or(0);
+            let clip = dst_dc.map(|dc| dc.clip_region).unwrap_or(0);
+            let brush = dst_dc.map(|dc| dc.brush_color).unwrap_or(0);
+            let stretch = dst_dc.map(|dc| dc.stretch_blt_mode).unwrap_or(1);
+            (src, dst, clip, brush, stretch)
+        };
+        if src_hwnd == 0
+            || dst_hwnd == 0
+            || nWidthDest <= 0
+            || nHeightDest <= 0
+            || nWidthSrc <= 0
+            || nHeightSrc <= 0
+        {
+            return FALSE;
+        }
+        let src_pixels: Vec<u32> = {
+            let windows = crate::win32::WIN32_WINDOWS.lock();
+            let Some(src_win) = windows.get(&src_hwnd) else {
+                return FALSE;
+            };
+            let mut pixels = Vec::with_capacity((nWidthDest * nHeightDest) as usize);
+            for y in 0..nHeightDest {
+                let sy = if stretch_mode >= 4 {
+                    nYOriginSrc + ((y * 2 + 1) * nHeightSrc) / (nHeightDest * 2)
+                } else {
+                    nYOriginSrc + (y * nHeightSrc) / nHeightDest
+                };
+                for x in 0..nWidthDest {
+                    let sx = if stretch_mode >= 4 {
+                        nXOriginSrc + ((x * 2 + 1) * nWidthSrc) / (nWidthDest * 2)
+                    } else {
+                        nXOriginSrc + (x * nWidthSrc) / nWidthDest
+                    };
+                    if sx >= 0 && sy >= 0 && sx < src_win.width && sy < src_win.height {
+                        let idx = ((sy * src_win.width + sx) * 4) as usize;
+                        if idx + 3 < src_win.surface.len() {
+                            let b = src_win.surface[idx] as u32;
+                            let g = src_win.surface[idx + 1] as u32;
+                            let r = src_win.surface[idx + 2] as u32;
+                            pixels.push((r << 16) | (g << 8) | b);
+                            continue;
+                        }
+                    }
+                    pixels.push(0);
+                }
+            }
+            pixels
+        };
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(dst_win) = windows.get_mut(&dst_hwnd) else {
+            return FALSE;
+        };
+        for y in 0..nHeightDest {
+            for x in 0..nWidthDest {
+                let dx = nXOriginDest + x;
+                let dy = nYOriginDest + y;
+                if dx < 0 || dy < 0 || dx >= dst_win.width || dy >= dst_win.height {
+                    continue;
+                }
+                let src_idx = (y * nWidthDest + x) as usize;
+                let idx = ((dy * dst_win.width + dx) * 4) as usize;
+                if src_idx >= src_pixels.len() || idx + 3 >= dst_win.surface.len() {
+                    continue;
+                }
+                if dst_clip_region != 0
+                    && !crate::win32::region_contains_point(dst_clip_region, dx, dy)
+                {
+                    continue;
+                }
+                let existing = (dst_win.surface[idx + 2] as u32) << 16
+                    | (dst_win.surface[idx + 1] as u32) << 8
+                    | (dst_win.surface[idx] as u32);
+                let pixel = apply_rop(src_pixels[src_idx], existing, dst_brush_color, dwRop);
+                let _ = crate::win32::write_window_pixel(
+                    &mut dst_win.surface,
+                    dst_win.width as usize,
+                    dx as usize,
+                    dy as usize,
+                    pixel,
+                );
+            }
+        }
+        crate::win32::invalidate_window_rect(
+            dst_hwnd,
+            RECT {
+                left: nXOriginDest,
+                top: nYOriginDest,
+                right: nXOriginDest + nWidthDest,
+                bottom: nYOriginDest + nHeightDest,
+            },
+        );
+        TRUE
     }
 }
 
@@ -7413,6 +20192,7 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     kernel32_funcs.insert("OpenProcess".to_string(), stub_api);
     kernel32_funcs.insert("TerminateProcess".to_string(), stub_api);
     kernel32_funcs.insert("GetExitCodeProcess".to_string(), stub_api);
+    kernel32_funcs.insert("GetExitCodeThread".to_string(), stub_api);
     kernel32_funcs.insert("GetCurrentProcess".to_string(), stub_api);
     kernel32_funcs.insert("GetCurrentProcessId".to_string(), stub_api);
     // Thread
@@ -7422,6 +20202,13 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     kernel32_funcs.insert("GetCurrentThreadId".to_string(), stub_api);
     kernel32_funcs.insert("ResumeThread".to_string(), stub_api);
     kernel32_funcs.insert("SuspendThread".to_string(), stub_api);
+    kernel32_funcs.insert("TlsAlloc".to_string(), stub_api);
+    kernel32_funcs.insert("TlsFree".to_string(), stub_api);
+    kernel32_funcs.insert("TlsSetValue".to_string(), stub_api);
+    kernel32_funcs.insert("TlsGetValue".to_string(), stub_api);
+    kernel32_funcs.insert("RaiseException".to_string(), stub_api);
+    kernel32_funcs.insert("SetUnhandledExceptionFilter".to_string(), stub_api);
+    kernel32_funcs.insert("UnhandledExceptionFilter".to_string(), stub_api);
     kernel32_funcs.insert("WaitForSingleObject".to_string(), stub_api);
     kernel32_funcs.insert("WaitForMultipleObjects".to_string(), stub_api);
     kernel32_funcs.insert("WaitOnAddress".to_string(), stub_api);
@@ -7508,9 +20295,16 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     user32_funcs.insert("DestroyWindow".to_string(), stub_api);
     user32_funcs.insert("ShowWindow".to_string(), stub_api);
     user32_funcs.insert("UpdateWindow".to_string(), stub_api);
+    user32_funcs.insert("BeginPaint".to_string(), stub_api);
+    user32_funcs.insert("EndPaint".to_string(), stub_api);
+    user32_funcs.insert("InvalidateRect".to_string(), stub_api);
+    user32_funcs.insert("ValidateRect".to_string(), stub_api);
     user32_funcs.insert("GetMessageA".to_string(), stub_api);
     user32_funcs.insert("PeekMessageA".to_string(), stub_api);
     user32_funcs.insert("TranslateMessage".to_string(), stub_api);
+    user32_funcs.insert("TranslateAcceleratorA".to_string(), stub_api);
+    user32_funcs.insert("CreateAcceleratorTableA".to_string(), stub_api);
+    user32_funcs.insert("DestroyAcceleratorTable".to_string(), stub_api);
     user32_funcs.insert("DispatchMessageA".to_string(), stub_api);
     user32_funcs.insert("PostQuitMessage".to_string(), stub_api);
     user32_funcs.insert("PostMessageA".to_string(), stub_api);
@@ -7578,8 +20372,11 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     user32_funcs.insert("MessageBoxA".to_string(), stub_api);
     user32_funcs.insert("MessageBoxExA".to_string(), stub_api);
     user32_funcs.insert("DialogBoxParamA".to_string(), stub_api);
+    user32_funcs.insert("DialogBoxIndirectParamA".to_string(), stub_api);
     user32_funcs.insert("EndDialog".to_string(), stub_api);
     user32_funcs.insert("CreateDialogParamA".to_string(), stub_api);
+    user32_funcs.insert("CreateDialogIndirectParamA".to_string(), stub_api);
+    user32_funcs.insert("IsDialogMessageA".to_string(), stub_api);
     user32_funcs.insert("GetDlgItem".to_string(), stub_api);
     user32_funcs.insert("SetDlgItemTextA".to_string(), stub_api);
     user32_funcs.insert("GetDlgItemTextA".to_string(), stub_api);
@@ -7630,6 +20427,13 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     let mut gdi32_funcs: BTreeMap<String, Win32ApiFn> = BTreeMap::new();
     // DC management
     gdi32_funcs.insert("CreateCompatibleDC".to_string(), stub_api);
+    gdi32_funcs.insert("CreateDCA".to_string(), stub_api);
+    gdi32_funcs.insert("CreateICA".to_string(), stub_api);
+    gdi32_funcs.insert("StartDocA".to_string(), stub_api);
+    gdi32_funcs.insert("StartPage".to_string(), stub_api);
+    gdi32_funcs.insert("EndPage".to_string(), stub_api);
+    gdi32_funcs.insert("EndDoc".to_string(), stub_api);
+    gdi32_funcs.insert("AbortDoc".to_string(), stub_api);
     gdi32_funcs.insert("DeleteDC".to_string(), stub_api);
     gdi32_funcs.insert("SaveDC".to_string(), stub_api);
     gdi32_funcs.insert("RestoreDC".to_string(), stub_api);
@@ -7637,6 +20441,7 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     gdi32_funcs.insert("SelectObject".to_string(), stub_api);
     gdi32_funcs.insert("DeleteObject".to_string(), stub_api);
     gdi32_funcs.insert("GetStockObject".to_string(), stub_api);
+    gdi32_funcs.insert("GetObjectType".to_string(), stub_api);
     gdi32_funcs.insert("GetObjectA".to_string(), stub_api);
     gdi32_funcs.insert("GetCurrentObject".to_string(), stub_api);
     // Drawing
@@ -7743,8 +20548,17 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     gdi32_funcs.insert("FlattenPath".to_string(), stub_api);
     gdi32_funcs.insert("StrokePath".to_string(), stub_api);
     gdi32_funcs.insert("FillPath".to_string(), stub_api);
+    gdi32_funcs.insert("StrokeAndFillPath".to_string(), stub_api);
     gdi32_funcs.insert("PathToRegion".to_string(), stub_api);
     gdi32_funcs.insert("GetPath".to_string(), stub_api);
+    gdi32_funcs.insert("CreateMetaFileA".to_string(), stub_api);
+    gdi32_funcs.insert("CloseMetaFile".to_string(), stub_api);
+    gdi32_funcs.insert("DeleteMetaFile".to_string(), stub_api);
+    gdi32_funcs.insert("PlayMetaFile".to_string(), stub_api);
+    gdi32_funcs.insert("CreateEnhMetaFileA".to_string(), stub_api);
+    gdi32_funcs.insert("CloseEnhMetaFile".to_string(), stub_api);
+    gdi32_funcs.insert("DeleteEnhMetaFile".to_string(), stub_api);
+    gdi32_funcs.insert("PlayEnhMetaFile".to_string(), stub_api);
     // Misc
     gdi32_funcs.insert("GetGraphicsMode".to_string(), stub_api);
     gdi32_funcs.insert("SetGraphicsMode".to_string(), stub_api);
@@ -7862,6 +20676,65 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     shell32_funcs.insert("SHQueryRecycleBinA".to_string(), stub_api);
     table.insert("shell32".to_string(), shell32_funcs);
 
+    let mut winhttp_funcs: BTreeMap<String, Win32ApiFn> = BTreeMap::new();
+    winhttp_funcs.insert("WinHttpOpen".to_string(), stub_api);
+    winhttp_funcs.insert("WinHttpConnect".to_string(), stub_api);
+    winhttp_funcs.insert("WinHttpOpenRequest".to_string(), stub_api);
+    winhttp_funcs.insert("WinHttpSendRequest".to_string(), stub_api);
+    winhttp_funcs.insert("WinHttpReceiveResponse".to_string(), stub_api);
+    winhttp_funcs.insert("WinHttpReadData".to_string(), stub_api);
+    winhttp_funcs.insert("WinHttpQueryHeaders".to_string(), stub_api);
+    winhttp_funcs.insert("WinHttpQueryDataAvailable".to_string(), stub_api);
+    winhttp_funcs.insert("WinHttpSetTimeouts".to_string(), stub_api);
+    winhttp_funcs.insert("WinHttpCloseHandle".to_string(), stub_api);
+    table.insert("winhttp".to_string(), winhttp_funcs);
+
+    let mut wininet_funcs: BTreeMap<String, Win32ApiFn> = BTreeMap::new();
+    wininet_funcs.insert("InternetOpenA".to_string(), stub_api);
+    wininet_funcs.insert("InternetOpenW".to_string(), stub_api);
+    wininet_funcs.insert("InternetConnectA".to_string(), stub_api);
+    wininet_funcs.insert("InternetConnectW".to_string(), stub_api);
+    wininet_funcs.insert("HttpOpenRequestA".to_string(), stub_api);
+    wininet_funcs.insert("HttpOpenRequestW".to_string(), stub_api);
+    wininet_funcs.insert("HttpSendRequestA".to_string(), stub_api);
+    wininet_funcs.insert("HttpSendRequestW".to_string(), stub_api);
+    wininet_funcs.insert("HttpQueryInfoA".to_string(), stub_api);
+    wininet_funcs.insert("InternetSetCookieA".to_string(), stub_api);
+    wininet_funcs.insert("InternetGetCookieA".to_string(), stub_api);
+    wininet_funcs.insert("InternetReadFile".to_string(), stub_api);
+    wininet_funcs.insert("InternetCloseHandle".to_string(), stub_api);
+    table.insert("wininet".to_string(), wininet_funcs);
+
+    let mut ole32_funcs: BTreeMap<String, Win32ApiFn> = BTreeMap::new();
+    ole32_funcs.insert("CoInitialize".to_string(), stub_api);
+    ole32_funcs.insert("CoInitializeEx".to_string(), stub_api);
+    ole32_funcs.insert("CoUninitialize".to_string(), stub_api);
+    ole32_funcs.insert("CoGetApartmentType".to_string(), stub_api);
+    ole32_funcs.insert("CoRegisterClassObject".to_string(), stub_api);
+    ole32_funcs.insert("CoRevokeClassObject".to_string(), stub_api);
+    ole32_funcs.insert("CoGetClassObject".to_string(), stub_api);
+    ole32_funcs.insert("CoCreateInstance".to_string(), stub_api);
+    ole32_funcs.insert(
+        "CoMarshalInterThreadInterfaceInStream".to_string(),
+        stub_api,
+    );
+    ole32_funcs.insert("CoGetInterfaceAndReleaseStream".to_string(), stub_api);
+    ole32_funcs.insert("CoTaskMemAlloc".to_string(), stub_api);
+    ole32_funcs.insert("CoTaskMemFree".to_string(), stub_api);
+    table.insert("ole32".to_string(), ole32_funcs);
+
+    let mut oleaut32_funcs: BTreeMap<String, Win32ApiFn> = BTreeMap::new();
+    oleaut32_funcs.insert("SysAllocString".to_string(), stub_api);
+    oleaut32_funcs.insert("SysAllocStringLen".to_string(), stub_api);
+    oleaut32_funcs.insert("SysFreeString".to_string(), stub_api);
+    oleaut32_funcs.insert("SysStringLen".to_string(), stub_api);
+    oleaut32_funcs.insert("VariantInit".to_string(), stub_api);
+    oleaut32_funcs.insert("VariantClear".to_string(), stub_api);
+    oleaut32_funcs.insert("DispGetIDsOfNames".to_string(), stub_api);
+    oleaut32_funcs.insert("DispInvoke".to_string(), stub_api);
+    oleaut32_funcs.insert("LoadTypeLib".to_string(), stub_api);
+    table.insert("oleaut32".to_string(), oleaut32_funcs);
+
     // msvcrt
     let mut msvcrt_funcs: BTreeMap<String, Win32ApiFn> = BTreeMap::new();
     // Memory
@@ -7964,17 +20837,6 @@ pub fn get_proc_address(module: &str, func: &str) -> Option<u64> {
     if addr != stub_api as usize as u64 {
         return Some(addr);
     }
-
-    let module_key = module.to_lowercase();
-    let module_key = module_key.trim_end_matches(".dll");
-    let table = WIN32_API_TABLE.lock();
-    if let Some(ref t) = *table {
-        if let Some(module_funcs) = t.get(module_key) {
-            if module_funcs.contains_key(func) {
-                return Some(stub_api as usize as u64);
-            }
-        }
-    }
     None
 }
 
@@ -7983,4 +20845,2867 @@ pub fn get_proc_address_internal(module: &str, func: &str) -> FARPROC {
     let addr = get_proc_address(module, func)?;
     let fn_ptr: unsafe extern "system" fn() -> isize = unsafe { core::mem::transmute(addr) };
     Some(fn_ptr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declared_kernel32_exports_report_real_status() {
+        init();
+        assert!(is_implemented_api("kernel32", "CreateFileA"));
+        assert!(is_implemented_api("kernel32", "SetCurrentDirectoryA"));
+        assert!(is_implemented_api("kernel32", "SetConsoleTextAttribute"));
+        assert!(is_implemented_api("kernel32", "GetExitCodeProcess"));
+    }
+
+    #[test]
+    fn declared_advapi32_exports_report_real_status() {
+        init();
+        assert!(is_implemented_api("advapi32", "CreateProcessAsUserA"));
+        assert!(is_implemented_api("advapi32", "RegisterEventSourceA"));
+        assert!(is_implemented_api("advapi32", "GetUserNameA"));
+    }
+
+    #[test]
+    fn declared_ws2_32_exports_report_real_status() {
+        init();
+        assert!(is_implemented_api("ws2_32", "WSAStartup"));
+        assert!(is_implemented_api("ws2_32", "WSASocketA"));
+        assert!(is_implemented_api("ws2_32", "sendto"));
+        assert!(is_implemented_api("ws2_32", "getsockopt"));
+        assert!(is_implemented_api("ws2_32", "inet_addr"));
+    }
+
+    #[test]
+    fn declared_kernel32_tls_exports_report_real_status() {
+        init();
+        assert!(is_implemented_api("kernel32", "TlsAlloc"));
+        assert!(is_implemented_api("kernel32", "TlsSetValue"));
+        assert!(is_implemented_api("kernel32", "TlsGetValue"));
+        assert!(is_implemented_api("kernel32", "TlsFree"));
+    }
+
+    #[test]
+    fn declared_http_and_ole_exports_report_real_status() {
+        init();
+        assert!(is_implemented_api("winhttp", "WinHttpOpen"));
+        assert!(is_implemented_api("winhttp", "WinHttpQueryHeaders"));
+        assert!(is_implemented_api("winhttp", "WinHttpReadData"));
+        assert!(is_implemented_api("wininet", "InternetOpenA"));
+        assert!(is_implemented_api("wininet", "HttpQueryInfoA"));
+        assert!(is_implemented_api("wininet", "HttpSendRequestA"));
+        assert!(is_implemented_api("ole32", "CoInitializeEx"));
+        assert!(is_implemented_api("ole32", "CoGetApartmentType"));
+        assert!(is_implemented_api("oleaut32", "SysAllocString"));
+        assert!(is_implemented_api("oleaut32", "VariantClear"));
+        assert!(is_implemented_api("oleaut32", "LoadTypeLib"));
+    }
+
+    #[test]
+    fn stubbed_exports_do_not_resolve_via_get_proc_address() {
+        init();
+        assert!(is_declared_api("user32", "UnregisterClassA"));
+        assert_eq!(
+            get_api_status("user32", "UnregisterClassA"),
+            Some(Win32ApiStatus::Stubbed)
+        );
+        assert_eq!(get_proc_address("user32", "UnregisterClassA"), None);
+    }
+
+    #[test]
+    fn winhttp_and_wininet_preserve_tls_failure_mapping() {
+        assert_eq!(
+            map_http_error_to_internet_error(crate::net::http::HttpError::TlsCertDateInvalid),
+            ERROR_INTERNET_SEC_CERT_DATE_INVALID
+        );
+        assert_eq!(
+            map_http_error_to_internet_error(
+                crate::net::http::HttpError::ProxyAuthenticationRequired
+            ),
+            ERROR_INTERNET_LOGIN_FAILURE
+        );
+        assert_eq!(
+            map_http_error_to_internet_error(crate::net::http::HttpError::TlsCertCnInvalid),
+            ERROR_INTERNET_SEC_CERT_CN_INVALID
+        );
+        assert_eq!(
+            map_http_error_to_internet_error(crate::net::http::HttpError::TlsInvalidCa),
+            ERROR_INTERNET_INVALID_CA
+        );
+        assert_eq!(
+            map_http_error_to_internet_error(crate::net::http::HttpError::TlsCertRevoked),
+            ERROR_INTERNET_SEC_CERT_REVOKED
+        );
+        assert_eq!(
+            map_http_error_to_internet_error(crate::net::http::HttpError::TlsDecodeFailed),
+            ERROR_INTERNET_DECODING_FAILED
+        );
+        assert_eq!(
+            map_http_error_to_internet_error(crate::net::http::HttpError::TlsInvalidCertificate),
+            ERROR_INTERNET_SEC_INVALID_CERT
+        );
+        assert_eq!(
+            map_http_error_to_internet_error(crate::net::http::HttpError::TlsHandshakeFailed),
+            ERROR_INTERNET_SEC_CERT_ERRORS
+        );
+    }
+
+    #[test]
+    fn winhttp_and_wininet_session_cookie_and_cache_are_stateful() {
+        unsafe {
+            init();
+            INTERNET_HANDLES.lock().clear();
+            INTERNET_COOKIE_JAR.lock().clear();
+            INTERNET_RESPONSE_CACHE.lock().clear();
+
+            let user_agent = "Phase2Agent/1.0"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let proxy = "proxy.local:8080"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let bypass = "<local>"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let host = "cache.test"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let verb = "GET"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let object = "/state"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+
+            let session = winhttp::win_http_open(
+                user_agent.as_ptr(),
+                WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                proxy.as_ptr(),
+                bypass.as_ptr(),
+                0,
+            );
+            assert_ne!(session, 0);
+            assert_eq!(
+                winhttp::win_http_set_timeouts(session, 150, 250, 350, 450),
+                TRUE
+            );
+
+            {
+                let handles = INTERNET_HANDLES.lock();
+                assert!(matches!(
+                    handles.get(&session),
+                    Some(InternetHandleState::Session(_))
+                ));
+                let Some(InternetHandleState::Session(state)) = handles.get(&session) else {
+                    return;
+                };
+                assert_eq!(state.user_agent, "Phase2Agent/1.0");
+                assert_eq!(state.proxy_name, "proxy.local:8080");
+                assert_eq!(state.proxy_bypass, "<local>");
+                assert_eq!(state.receive_timeout_ms, 450);
+            }
+
+            let connection = winhttp::win_http_connect(session, host.as_ptr(), 443, 0);
+            assert_ne!(connection, 0);
+            let request = winhttp::win_http_open_request(
+                connection,
+                verb.as_ptr(),
+                object.as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                WINHTTP_FLAG_SECURE,
+            );
+            assert_ne!(request, 0);
+
+            let mut fake_headers = crate::net::http::HttpHeaders::new();
+            fake_headers.insert("Content-Length", "3");
+            fake_headers.insert("Content-Type", "text/plain");
+            fake_headers.insert("Set-Cookie", "sid=server; Path=/");
+            let fake_response = crate::net::http::HttpResponse {
+                status_code: 204,
+                status_text: "No Content".to_string(),
+                headers: fake_headers,
+                body: b"ack".to_vec(),
+            };
+            if let Some(InternetHandleState::Request(state)) =
+                INTERNET_HANDLES.lock().get_mut(&request)
+            {
+                state.response = Some(fake_response);
+            }
+
+            assert_eq!(
+                winhttp::win_http_receive_response(request, core::ptr::null_mut()),
+                TRUE
+            );
+
+            let mut status_code: DWORD = 0;
+            let mut status_len: DWORD = 4;
+            assert_eq!(
+                winhttp::win_http_query_headers(
+                    request,
+                    HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                    core::ptr::null(),
+                    &mut status_code as *mut _ as LPVOID,
+                    &mut status_len,
+                    core::ptr::null_mut(),
+                ),
+                TRUE
+            );
+            assert_eq!(status_code, 204);
+
+            let mut raw_headers = [0u16; 128];
+            let mut raw_len = (raw_headers.len() * 2) as DWORD;
+            assert_eq!(
+                winhttp::win_http_query_headers(
+                    request,
+                    HTTP_QUERY_RAW_HEADERS_CRLF,
+                    core::ptr::null(),
+                    raw_headers.as_mut_ptr() as LPVOID,
+                    &mut raw_len,
+                    core::ptr::null_mut(),
+                ),
+                TRUE
+            );
+            let raw_text =
+                String::from_utf16_lossy(&raw_headers[..(raw_len as usize / 2).saturating_sub(1)]);
+            assert!(raw_text.contains("HTTP/1.1 204 No Content"));
+            assert!(raw_text.contains("set-cookie: sid=server; Path=/"));
+
+            let mut available = 0;
+            assert_eq!(
+                winhttp::win_http_query_data_available(request, &mut available),
+                TRUE
+            );
+            assert_eq!(available, 3);
+
+            let mut read_buf = [0u8; 4];
+            let mut read_len = 0;
+            assert_eq!(
+                winhttp::win_http_read_data(
+                    request,
+                    read_buf.as_mut_ptr() as LPVOID,
+                    3,
+                    &mut read_len,
+                ),
+                TRUE
+            );
+            assert_eq!(read_len, 3);
+            assert_eq!(&read_buf[..3], b"ack");
+
+            assert_eq!(
+                wininet::internet_set_cookie_a(
+                    b"https://cache.test/\0".as_ptr() as LPCSTR,
+                    b"sid\0".as_ptr() as LPCSTR,
+                    b"manual\0".as_ptr() as LPCSTR,
+                ),
+                TRUE
+            );
+            let mut cookie_buf = [0i8; 64];
+            let mut cookie_len = cookie_buf.len() as DWORD;
+            assert_eq!(
+                wininet::internet_get_cookie_a(
+                    b"https://cache.test/\0".as_ptr() as LPCSTR,
+                    core::ptr::null(),
+                    cookie_buf.as_mut_ptr(),
+                    &mut cookie_len,
+                ),
+                TRUE
+            );
+            assert!(read_ansi_string(cookie_buf.as_ptr()).contains("sid=manual"));
+
+            let internet = wininet::internet_open_a(
+                b"Phase2Agent/1.0\0".as_ptr() as LPCSTR,
+                INTERNET_OPEN_TYPE_DIRECT,
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+            );
+            let cached_connection = wininet::internet_connect_a(
+                internet,
+                b"cache.test\0".as_ptr() as LPCSTR,
+                80,
+                core::ptr::null(),
+                core::ptr::null(),
+                INTERNET_SERVICE_HTTP,
+                0,
+                0,
+            );
+            let cached_request = wininet::http_open_request_a(
+                cached_connection,
+                b"GET\0".as_ptr() as LPCSTR,
+                b"/cached\0".as_ptr() as LPCSTR,
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                0,
+            );
+            let mut cache_headers = crate::net::http::HttpHeaders::new();
+            cache_headers.insert("Content-Length", "6");
+            let cached_response = crate::net::http::HttpResponse {
+                status_code: 200,
+                status_text: "OK".to_string(),
+                headers: cache_headers,
+                body: b"cached".to_vec(),
+            };
+            INTERNET_RESPONSE_CACHE
+                .lock()
+                .insert("http://cache.test:80/cached".to_string(), cached_response);
+            assert_eq!(
+                wininet::http_send_request_a(
+                    cached_request,
+                    core::ptr::null(),
+                    0,
+                    core::ptr::null_mut(),
+                    0,
+                ),
+                TRUE
+            );
+
+            let mut http_status: DWORD = 0;
+            let mut http_status_len: DWORD = 4;
+            assert_eq!(
+                wininet::http_query_info_a(
+                    cached_request,
+                    HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                    &mut http_status as *mut _ as LPVOID,
+                    &mut http_status_len,
+                    core::ptr::null_mut(),
+                ),
+                TRUE
+            );
+            assert_eq!(http_status, 200);
+
+            let mut cached_body = [0u8; 8];
+            let mut cached_read = 0;
+            assert_eq!(
+                wininet::internet_read_file(
+                    cached_request,
+                    cached_body.as_mut_ptr() as LPVOID,
+                    6,
+                    &mut cached_read,
+                ),
+                TRUE
+            );
+            assert_eq!(cached_read, 6);
+            assert_eq!(&cached_body[..6], b"cached");
+        }
+    }
+
+    #[test]
+    fn internet_proxy_selection_honors_protocol_and_local_bypass() {
+        assert_eq!(
+            internet_proxy_endpoint("http=proxy.local:8080;https=secure.proxy:8443", false),
+            Some(InternetProxyRoute {
+                host: "proxy.local".to_string(),
+                port: 8080,
+                authorization: None,
+            })
+        );
+        assert_eq!(
+            internet_proxy_endpoint("http=proxy.local:8080;https=secure.proxy:8443", true),
+            Some(InternetProxyRoute {
+                host: "secure.proxy".to_string(),
+                port: 8443,
+                authorization: None,
+            })
+        );
+        assert_eq!(
+            internet_proxy_endpoint("https=user:secret@secure.proxy:8443", true),
+            Some(InternetProxyRoute {
+                host: "secure.proxy".to_string(),
+                port: 8443,
+                authorization: Some("Basic dXNlcjpzZWNyZXQ=".to_string()),
+            })
+        );
+        assert!(internet_proxy_bypasses_host(
+            "<local>;intra.test",
+            "printer"
+        ));
+        assert!(internet_proxy_bypasses_host(
+            "<local>;intra.test",
+            "intra.test"
+        ));
+        assert!(internet_proxy_bypasses_host(
+            "*.corp.test;<-loopback>",
+            "edge.corp.test"
+        ));
+        assert!(internet_proxy_bypasses_host(
+            "*.corp.test;<-loopback>",
+            "localhost"
+        ));
+        assert!(internet_proxy_bypasses_host(
+            "10.*;192.168.*;direct",
+            "10.0.0.8"
+        ));
+        assert!(!internet_proxy_bypasses_host(
+            "<local>;intra.test",
+            "example.com"
+        ));
+        assert_eq!(internet_proxy_endpoint("direct", true), None);
+
+        let session = InternetSessionState {
+            user_agent: String::new(),
+            access_type: INTERNET_OPEN_TYPE_DIRECT,
+            proxy_name: "proxy.local:8080".to_string(),
+            proxy_bypass: String::new(),
+            resolve_timeout_ms: 0,
+            connect_timeout_ms: 0,
+            send_timeout_ms: 0,
+            receive_timeout_ms: 0,
+        };
+        assert_eq!(
+            internet_session_proxy_route(&session, "example.com", false),
+            None
+        );
+    }
+
+    #[test]
+    fn internet_proxy_autoconfig_file_pac_is_stateful() {
+        unsafe {
+            init();
+            let path = b"/phase2_proxy.pac\0";
+            let handle = kernel32::create_file_a(
+                path.as_ptr() as LPCSTR,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                core::ptr::null_mut(),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            let pac = br#"function FindProxyForURL(url, host) {
+if (dnsDomainIs(host, ".corp.test")) return "PROXY secure.proxy.local:8443";
+if (isPlainHostName(host)) return "DIRECT";
+return "PROXY edge.proxy.local:8080; DIRECT";
+}"#;
+            let mut written = 0;
+            assert_eq!(
+                kernel32::write_file(
+                    handle,
+                    pac.as_ptr(),
+                    pac.len() as DWORD,
+                    &mut written,
+                    core::ptr::null_mut(),
+                ),
+                TRUE
+            );
+            assert_eq!(written, pac.len() as DWORD);
+            assert_eq!(kernel32::close_handle(handle), TRUE);
+
+            let session = InternetSessionState {
+                user_agent: String::new(),
+                access_type: WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                proxy_name: "config=file:///phase2_proxy.pac".to_string(),
+                proxy_bypass: String::new(),
+                resolve_timeout_ms: 0,
+                connect_timeout_ms: 0,
+                send_timeout_ms: 0,
+                receive_timeout_ms: 0,
+            };
+            assert_eq!(
+                internet_session_proxy_route_checked(&session, "edge.example.com", true),
+                Ok(Some(InternetProxyRoute {
+                    host: "edge.proxy.local".to_string(),
+                    port: 8080,
+                    authorization: None,
+                }))
+            );
+            assert_eq!(
+                internet_session_proxy_route_checked(&session, "svc.corp.test", true),
+                Ok(Some(InternetProxyRoute {
+                    host: "secure.proxy.local".to_string(),
+                    port: 8443,
+                    authorization: None,
+                }))
+            );
+            assert_eq!(
+                internet_session_proxy_route_checked(&session, "printer", false),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn internet_proxy_wpad_candidates_follow_host_suffixes() {
+        let candidates = wpad_candidate_sources("http://wpad/wpad.dat", "edge.eu.corp.test");
+        assert_eq!(candidates[0], "http://wpad.eu.corp.test/wpad.dat");
+        assert!(candidates
+            .iter()
+            .any(|value| value == "http://wpad.corp.test/wpad.dat"));
+        assert_eq!(
+            candidates.last().map(String::as_str),
+            Some("http://wpad/wpad.dat")
+        );
+    }
+
+    #[test]
+    fn internet_proxy_multiline_pac_blocks_are_stateful() {
+        unsafe {
+            init();
+            let path = b"/phase2_proxy_multiline.pac\0";
+            let handle = kernel32::create_file_a(
+                path.as_ptr() as LPCSTR,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                core::ptr::null_mut(),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            let pac = br#"function FindProxyForURL(url, host) {
+if (shExpMatch(host, "*.corp.test") && !isPlainHostName(host)) {
+    return "PROXY corp.proxy.local:8080";
+}
+if (isInNet(dnsResolve(host), "127.0.0.0", "255.0.0.0")) {
+    return "DIRECT";
+}
+return "PROXY edge.proxy.local:8080";
+}"#;
+            let mut written = 0;
+            assert_eq!(
+                kernel32::write_file(
+                    handle,
+                    pac.as_ptr(),
+                    pac.len() as DWORD,
+                    &mut written,
+                    core::ptr::null_mut(),
+                ),
+                TRUE
+            );
+            assert_eq!(kernel32::close_handle(handle), TRUE);
+
+            let session = InternetSessionState {
+                user_agent: String::new(),
+                access_type: WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                proxy_name: "config=file:///phase2_proxy_multiline.pac".to_string(),
+                proxy_bypass: String::new(),
+                resolve_timeout_ms: 0,
+                connect_timeout_ms: 0,
+                send_timeout_ms: 0,
+                receive_timeout_ms: 0,
+            };
+            assert_eq!(
+                internet_session_proxy_route_checked(&session, "svc.corp.test", true),
+                Ok(Some(InternetProxyRoute {
+                    host: "corp.proxy.local".to_string(),
+                    port: 8080,
+                    authorization: None,
+                }))
+            );
+            assert_eq!(
+                internet_session_proxy_route_checked(&session, "localhost", false),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn gdi_modes_and_path_fill_are_stateful() {
+        unsafe {
+            init();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"gdi\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                80,
+                80,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let hdc = user32::get_dc(hwnd);
+            assert_ne!(hdc, 0);
+            assert_eq!(gdi32::set_graphics_mode(hdc, 2), 1);
+            assert_eq!(gdi32::set_arc_direction(hdc, 2), 1);
+            assert_eq!(gdi32::set_poly_fill_mode(hdc, 2), 1);
+            assert_eq!(gdi32::set_stretch_blt_mode(hdc, 4), 1);
+            assert_eq!(gdi32::get_graphics_mode(hdc), 2);
+            assert_eq!(gdi32::get_arc_direction(hdc), 2);
+            assert_eq!(gdi32::get_poly_fill_mode(hdc), 2);
+            assert_eq!(gdi32::get_stretch_blt_mode(hdc), 4);
+
+            assert_eq!(gdi32::begin_path(hdc), TRUE);
+            assert_eq!(gdi32::move_to_ex(hdc, 10, 10, core::ptr::null_mut()), TRUE);
+            assert_eq!(gdi32::line_to(hdc, 40, 10), TRUE);
+            assert_eq!(gdi32::line_to(hdc, 25, 40), TRUE);
+            assert_eq!(gdi32::close_figure(hdc), TRUE);
+            assert_eq!(gdi32::end_path(hdc), TRUE);
+            let region = gdi32::path_to_region(hdc);
+            assert_ne!(region, 0);
+            let regions = WIN32_REGIONS.lock();
+            let state = regions.get(&(region as u64)).unwrap();
+            match &state.shape {
+                Win32RegionShape::Polygon { alternate_fill, .. } => {
+                    assert_eq!(*alternate_fill, false);
+                }
+                _ => panic!("expected polygon region"),
+            }
+            drop(regions);
+            assert_eq!(gdi32::delete_object(region as HGDIOBJ), TRUE);
+        }
+    }
+
+    #[test]
+    fn gdi_blits_invalidate_destination_rects() {
+        unsafe {
+            init();
+            INVALIDATED_WINDOWS.lock().clear();
+            let src = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"src\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                32,
+                32,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let dst = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"dst\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                32,
+                32,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let src_dc = user32::get_dc(src);
+            let dst_dc = user32::get_dc(dst);
+            assert_eq!(
+                gdi32::bit_blt(dst_dc, 2, 3, 4, 5, src_dc, 0, 0, 0x00CC0020),
+                TRUE
+            );
+            assert_eq!(
+                gdi32::stretch_blt(dst_dc, 6, 7, 8, 9, src_dc, 0, 0, 4, 4, 0x00CC0020),
+                TRUE
+            );
+            let invalid = INVALIDATED_WINDOWS.lock();
+            assert_eq!(
+                invalid.get(&(dst as u64)).copied(),
+                Some(RECT {
+                    left: 2,
+                    top: 3,
+                    right: 14,
+                    bottom: 16,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn internet_proxy_autoconfig_bad_script_fails_truthfully() {
+        let session = InternetSessionState {
+            user_agent: String::new(),
+            access_type: WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            proxy_name: "config=file:///missing_proxy.pac".to_string(),
+            proxy_bypass: String::new(),
+            resolve_timeout_ms: 0,
+            connect_timeout_ms: 0,
+            send_timeout_ms: 0,
+            receive_timeout_ms: 0,
+        };
+        assert_eq!(
+            internet_session_proxy_route_checked(&session, "example.com", true),
+            Err(ERROR_INVALID_PARAMETER)
+        );
+    }
+
+    #[test]
+    fn com_apartment_model_and_refcount_are_stateful() {
+        unsafe {
+            init();
+            COM_APARTMENTS.lock().clear();
+
+            assert_eq!(ole32::co_initialize(core::ptr::null_mut()), S_OK);
+            let mut apt_type = 0u32;
+            let mut qualifier = 0u32;
+            assert_eq!(
+                ole32::co_get_apartment_type(&mut apt_type, &mut qualifier),
+                S_OK
+            );
+            assert_eq!(apt_type, APTTYPE_STA);
+            assert_eq!(qualifier, APTTYPEQUALIFIER_NONE);
+
+            assert_eq!(ole32::co_initialize(core::ptr::null_mut()), S_FALSE);
+            let key = current_win32_thread_key();
+            assert_eq!(
+                COM_APARTMENTS.lock().get(&key).map(|state| state.ref_count),
+                Some(2)
+            );
+
+            ole32::co_uninitialize();
+            assert_eq!(
+                COM_APARTMENTS.lock().get(&key).map(|state| state.ref_count),
+                Some(1)
+            );
+
+            ole32::co_uninitialize();
+            assert!(!COM_APARTMENTS.lock().contains_key(&key));
+
+            assert_eq!(
+                ole32::co_initialize_ex(core::ptr::null_mut(), COINIT_MULTITHREADED),
+                S_OK
+            );
+            assert_eq!(
+                ole32::co_get_apartment_type(&mut apt_type, &mut qualifier),
+                S_OK
+            );
+            assert_eq!(apt_type, APTTYPE_MTA);
+            ole32::co_uninitialize();
+        }
+    }
+
+    #[test]
+    fn com_interthread_marshal_stream_is_stateful_and_callable() {
+        #[repr(C)]
+        struct TestUnknown {
+            vtable: *const usize,
+            refcount: u32,
+        }
+
+        extern "system" fn query_interface(
+            this: *mut u8,
+            iid: *const GUID,
+            out: *mut *mut u8,
+        ) -> HRESULT {
+            unsafe {
+                if out.is_null() {
+                    return E_POINTER;
+                }
+                *out = core::ptr::null_mut();
+                if guid_matches(iid, &IID_IUNKNOWN) {
+                    let _ = add_ref(this);
+                    *out = this;
+                    return S_OK;
+                }
+            }
+            E_NOINTERFACE
+        }
+
+        extern "system" fn add_ref(this: *mut u8) -> u32 {
+            unsafe {
+                let object = &mut *(this as *mut TestUnknown);
+                object.refcount = object.refcount.saturating_add(1);
+                object.refcount
+            }
+        }
+
+        extern "system" fn release(this: *mut u8) -> u32 {
+            unsafe {
+                let object = &mut *(this as *mut TestUnknown);
+                object.refcount = object.refcount.saturating_sub(1);
+                object.refcount
+            }
+        }
+
+        let vtable = [query_interface as usize, add_ref as usize, release as usize];
+        let mut object = TestUnknown {
+            vtable: vtable.as_ptr(),
+            refcount: 1,
+        };
+
+        unsafe {
+            init();
+            COM_APARTMENTS.lock().clear();
+            COM_MARSHAL_STREAMS.lock().clear();
+
+            assert_eq!(ole32::co_initialize(core::ptr::null_mut()), S_OK);
+
+            let mut stream = core::ptr::null_mut();
+            assert_eq!(
+                ole32::co_marshal_inter_thread_interface_in_stream(
+                    &IID_IUNKNOWN,
+                    &mut object as *mut _ as *mut u8,
+                    &mut stream,
+                ),
+                S_OK
+            );
+            assert!(!stream.is_null());
+            assert_eq!(object.refcount, 2);
+
+            let vtable = *(stream as *mut *const usize);
+            let read: extern "system" fn(*mut u8, *mut u8, ULONG, *mut ULONG) -> HRESULT =
+                core::mem::transmute(*vtable.add(3));
+            let seek: extern "system" fn(*mut u8, i64, DWORD, *mut u64) -> HRESULT =
+                core::mem::transmute(*vtable.add(5));
+            let stat: extern "system" fn(*mut u8, *mut STATSTG, DWORD) -> HRESULT =
+                core::mem::transmute(*vtable.add(12));
+
+            let mut stat_out = STATSTG::default();
+            assert_eq!(stat(stream, &mut stat_out, STATFLAG_NONAME), S_OK);
+            assert_eq!(stat_out.type_, STGTY_STREAM);
+            assert!(stat_out.cb_size > 0);
+
+            let mut payload = [0u8; 16];
+            let mut read_count = 0u32;
+            assert_eq!(read(stream, payload.as_mut_ptr(), 7, &mut read_count), S_OK);
+            assert_eq!(read_count, 7);
+            assert_eq!(&payload[..7], b"marshal");
+
+            let mut new_pos = 0u64;
+            assert_eq!(seek(stream, 0, STREAM_SEEK_SET, &mut new_pos), S_OK);
+            assert_eq!(new_pos, 0);
+
+            let mut unmarshaled = core::ptr::null_mut();
+            assert_eq!(
+                ole32::co_get_interface_and_release_stream(stream, &IID_IUNKNOWN, &mut unmarshaled,),
+                S_OK
+            );
+            assert_eq!(unmarshaled, &mut object as *mut _ as *mut u8);
+            assert_eq!(object.refcount, 2);
+            assert!(COM_MARSHAL_STREAMS.lock().is_empty());
+
+            let release_fn: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*(*(unmarshaled as *mut *const usize)).add(2));
+            assert_eq!(release_fn(unmarshaled), 1);
+
+            ole32::co_uninitialize();
+            assert!(is_implemented_api(
+                "ole32",
+                "CoMarshalInterThreadInterfaceInStream"
+            ));
+            assert!(is_implemented_api(
+                "ole32",
+                "CoGetInterfaceAndReleaseStream"
+            ));
+        }
+    }
+
+    #[test]
+    fn kernel32_environment_and_current_directory_are_stateful() {
+        unsafe {
+            let root = b"/\0";
+            assert_eq!(
+                kernel32::set_current_directory_a(root.as_ptr() as LPCSTR),
+                TRUE
+            );
+
+            let mut cwd = [0i8; 32];
+            let len = kernel32::get_current_directory_a(cwd.len() as DWORD, cwd.as_mut_ptr());
+            assert_eq!(len, 1);
+            assert_eq!(read_ansi_string(cwd.as_ptr()), "/");
+
+            let key = b"PHASE2_EXACT\0";
+            let value = b"enabled\0";
+            assert_eq!(
+                kernel32::set_environment_variable_a(
+                    key.as_ptr() as LPCSTR,
+                    value.as_ptr() as LPCSTR
+                ),
+                TRUE
+            );
+
+            let mut env_buf = [0i8; 32];
+            let env_len = kernel32::get_environment_variable_a(
+                key.as_ptr() as LPCSTR,
+                env_buf.as_mut_ptr(),
+                env_buf.len() as DWORD,
+            );
+            assert_eq!(env_len, 7);
+            assert_eq!(read_ansi_string(env_buf.as_ptr()), "enabled");
+            assert!(!kernel32::get_command_line_a().is_null());
+        }
+    }
+
+    #[test]
+    fn msvcrt_streams_and_numeric_helpers_are_stateful() {
+        unsafe {
+            let path = b"/phase2_exact_stdio.txt\0";
+            let mode = b"w+\0";
+            let stream = msvcrt::fopen(path.as_ptr() as LPCSTR, mode.as_ptr() as LPCSTR);
+            assert!(!stream.is_null());
+
+            let payload = b"phase2-data";
+            assert_eq!(
+                msvcrt::fwrite(payload.as_ptr(), 1, payload.len() as SIZE_T, stream),
+                payload.len() as SIZE_T
+            );
+            assert_eq!(msvcrt::fseek(stream, 0, 0), 0);
+
+            let mut read_back = [0u8; 16];
+            assert_eq!(
+                msvcrt::fread(read_back.as_mut_ptr(), 1, payload.len() as SIZE_T, stream),
+                payload.len() as SIZE_T
+            );
+            assert_eq!(&read_back[..payload.len()], payload);
+            assert_eq!(msvcrt::ftell(stream), payload.len() as LONG);
+            assert_eq!(msvcrt::fclose(stream), 0);
+
+            let mut sprintf_buf = [0i8; 64];
+            let args = [0x2Au64, b"ok\0".as_ptr() as u64];
+            assert_eq!(
+                msvcrt::sprintf(
+                    sprintf_buf.as_mut_ptr(),
+                    b"value=%d %s\0".as_ptr() as LPCSTR,
+                    args.as_ptr() as *const u8,
+                ),
+                11
+            );
+            assert_eq!(read_ansi_string(sprintf_buf.as_ptr()), "value=42 ok");
+
+            let mut end = core::ptr::null_mut();
+            assert_eq!(
+                msvcrt::strtol(b"0x2a rest\0".as_ptr() as LPCSTR, &mut end, 0),
+                42
+            );
+            assert_eq!(read_ansi_string(end as LPCSTR), " rest");
+            assert!(
+                (msvcrt::strtod(b"12.5e1x\0".as_ptr() as LPCSTR, &mut end) - 125.0).abs() < 0.01
+            );
+            assert_eq!(read_ansi_string(end as LPCSTR), "x");
+
+            let now = msvcrt::time(core::ptr::null_mut());
+            assert!(now >= 0);
+            let tm_ptr = msvcrt::gmtime(&now);
+            assert!(!tm_ptr.is_null());
+            let mut strftime_buf = [0i8; 64];
+            assert!(
+                msvcrt::strftime(
+                    strftime_buf.as_mut_ptr(),
+                    strftime_buf.len() as SIZE_T,
+                    b"%Y-%m-%d %H:%M:%S\0".as_ptr() as LPCSTR,
+                    tm_ptr,
+                ) > 0
+            );
+        }
+    }
+
+    #[test]
+    fn oleaut32_dispatch_exports_are_real_and_callable() {
+        #[repr(C)]
+        struct TestDispatch {
+            vtable: *const usize,
+            refcount: u32,
+        }
+
+        extern "system" fn query_interface(
+            this: *mut u8,
+            _iid: *const GUID,
+            out: *mut *mut u8,
+        ) -> HRESULT {
+            unsafe {
+                *out = this;
+            }
+            S_OK
+        }
+
+        extern "system" fn add_ref(_this: *mut u8) -> u32 {
+            2
+        }
+
+        extern "system" fn release(_this: *mut u8) -> u32 {
+            1
+        }
+
+        extern "system" fn get_type_info_count(_this: *mut u8, pctinfo: *mut UINT) -> HRESULT {
+            unsafe {
+                if !pctinfo.is_null() {
+                    *pctinfo = 0;
+                }
+            }
+            S_OK
+        }
+
+        extern "system" fn get_type_info(
+            _this: *mut u8,
+            _itinfo: UINT,
+            _lcid: LCID,
+            pptinfo: *mut *mut u8,
+        ) -> HRESULT {
+            unsafe {
+                if !pptinfo.is_null() {
+                    *pptinfo = core::ptr::null_mut();
+                }
+            }
+            S_OK
+        }
+
+        extern "system" fn get_ids_of_names(
+            _this: *mut u8,
+            _riid: *const GUID,
+            _names: *mut LPWSTR,
+            _count: UINT,
+            _lcid: LCID,
+            dispids: *mut DISPID,
+        ) -> HRESULT {
+            unsafe {
+                *dispids = 7;
+            }
+            S_OK
+        }
+
+        extern "system" fn invoke(
+            _this: *mut u8,
+            dispid_member: DISPID,
+            _riid: *const GUID,
+            _lcid: LCID,
+            _w_flags: WORD,
+            _params: *mut DISPPARAMS,
+            result: *mut VARIANT,
+            _excep: *mut EXCEPINFO,
+            _arg_err: *mut UINT,
+        ) -> HRESULT {
+            unsafe {
+                if !result.is_null() {
+                    (*result).data_lo = dispid_member as u64;
+                }
+            }
+            S_OK
+        }
+
+        let test_dispatch_vtable = [
+            query_interface as usize,
+            add_ref as usize,
+            release as usize,
+            get_type_info_count as usize,
+            get_type_info as usize,
+            get_ids_of_names as usize,
+            invoke as usize,
+        ];
+
+        let mut dispatch = TestDispatch {
+            vtable: test_dispatch_vtable.as_ptr(),
+            refcount: 1,
+        };
+        let mut name = "Echo"
+            .encode_utf16()
+            .chain(core::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut name_ptr = name.as_mut_ptr();
+        let mut dispid = 0i32;
+        let hr = unsafe {
+            oleaut32::disp_get_ids_of_names(
+                &mut dispatch as *mut _ as *mut u8,
+                core::ptr::null(),
+                &mut name_ptr,
+                1,
+                0,
+                &mut dispid,
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert_eq!(dispid, 7);
+
+        let mut result = VARIANT::default();
+        let hr = unsafe {
+            oleaut32::disp_invoke(
+                &mut dispatch as *mut _ as *mut u8,
+                dispid,
+                core::ptr::null(),
+                0,
+                1,
+                core::ptr::null_mut(),
+                &mut result,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert_eq!(result.data_lo, 7);
+
+        init();
+        assert!(is_implemented_api("oleaut32", "DispInvoke"));
+        assert!(is_implemented_api("oleaut32", "DispGetIDsOfNames"));
+    }
+
+    #[test]
+    fn oleaut32_type_library_load_and_query_are_stateful() {
+        unsafe {
+            init();
+            let path = b"/phase2_typelib.tlb\0";
+            let handle = kernel32::create_file_a(
+                path.as_ptr() as LPCSTR,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                core::ptr::null_mut(),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            let payload = b"ECHOS-TLB1\nname=Phase2.Library\ndoc=Phase2 automation corpus\nversion=3.7\nlcid=1055\nsyskind=1\ntype=PhaseDispatch|dispatch|0x1000|Dispatch automation surface|Echo,Close\ntype=PhaseInterface|interface|0x0000|Interface metadata|Handshake\n";
+            let mut written = 0;
+            assert_eq!(
+                kernel32::write_file(
+                    handle,
+                    payload.as_ptr(),
+                    payload.len() as DWORD,
+                    &mut written,
+                    core::ptr::null_mut()
+                ),
+                TRUE
+            );
+            assert_eq!(written, payload.len() as DWORD);
+            assert_eq!(kernel32::close_handle(handle), TRUE);
+
+            let wide_path = "/phase2_typelib.tlb"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut typelib = core::ptr::null_mut();
+            assert_eq!(
+                oleaut32::load_type_lib(wide_path.as_ptr(), &mut typelib),
+                S_OK
+            );
+            assert!(!typelib.is_null());
+
+            let vtable = *(typelib as *mut *const usize);
+            let get_type_info_count: extern "system" fn(*mut u8) -> UINT =
+                core::mem::transmute(*vtable.add(3));
+            let get_type_info: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*vtable.add(4));
+            let get_type_info_type: extern "system" fn(*mut u8, UINT, *mut DWORD) -> HRESULT =
+                core::mem::transmute(*vtable.add(5));
+            let get_lib_attr: extern "system" fn(*mut u8, *mut *mut TLIBATTR) -> HRESULT =
+                core::mem::transmute(*vtable.add(7));
+            let get_documentation: extern "system" fn(
+                *mut u8,
+                INT,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*vtable.add(9));
+            let is_name: extern "system" fn(*mut u8, LPWSTR, ULONG, *mut BOOL) -> HRESULT =
+                core::mem::transmute(*vtable.add(10));
+            let find_name: extern "system" fn(
+                *mut u8,
+                LPWSTR,
+                ULONG,
+                *mut *mut u8,
+                *mut DISPID,
+                *mut WORD,
+            ) -> HRESULT = core::mem::transmute(*vtable.add(11));
+            let release_tlib_attr: extern "system" fn(*mut u8, *mut TLIBATTR) =
+                core::mem::transmute(*vtable.add(12));
+
+            assert_eq!(get_type_info_count(typelib), 2);
+            let mut kind = 0;
+            assert_eq!(get_type_info_type(typelib, 0, &mut kind), S_OK);
+            assert_eq!(kind, TKIND_DISPATCH);
+            assert_eq!(get_type_info_type(typelib, 1, &mut kind), S_OK);
+            assert_eq!(kind, TKIND_INTERFACE);
+
+            let mut lib_attr = core::ptr::null_mut();
+            assert_eq!(get_lib_attr(typelib, &mut lib_attr), S_OK);
+            assert!(!lib_attr.is_null());
+            assert_eq!((*lib_attr).syskind, SYS_WIN32);
+            assert_eq!((*lib_attr).lcid, 1055);
+            assert_eq!((*lib_attr).w_major_ver_num, 3);
+            assert_eq!((*lib_attr).w_minor_ver_num, 7);
+            release_tlib_attr(typelib, lib_attr);
+
+            let mut name = core::ptr::null_mut();
+            let mut doc = core::ptr::null_mut();
+            assert_eq!(
+                get_documentation(
+                    typelib,
+                    -1,
+                    &mut name,
+                    &mut doc,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut()
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(name), "Phase2.Library");
+            assert_eq!(read_utf16_string(doc), "Phase2 automation corpus");
+            oleaut32::sys_free_string(name);
+            oleaut32::sys_free_string(doc);
+
+            let mut typeinfo = core::ptr::null_mut();
+            assert_eq!(get_type_info(typelib, 0, &mut typeinfo), S_OK);
+            assert!(!typeinfo.is_null());
+
+            let info_vtable = *(typeinfo as *mut *const usize);
+            let get_type_attr: extern "system" fn(*mut u8, *mut *mut TYPEATTR) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(3));
+            let get_func_desc: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(5));
+            let get_names: extern "system" fn(
+                *mut u8,
+                DISPID,
+                *mut BSTR,
+                UINT,
+                *mut UINT,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(7));
+            let get_ids_of_names: extern "system" fn(
+                *mut u8,
+                *mut LPWSTR,
+                UINT,
+                *mut DISPID,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(10));
+            let get_type_documentation: extern "system" fn(
+                *mut u8,
+                DISPID,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(12));
+            let get_containing_type_lib: extern "system" fn(
+                *mut u8,
+                *mut *mut u8,
+                *mut UINT,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(17));
+            let release_type_attr: extern "system" fn(*mut u8, *mut TYPEATTR) =
+                core::mem::transmute(*info_vtable.add(18));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*info_vtable.add(2));
+            let release_type_lib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*vtable.add(2));
+
+            let mut type_attr = core::ptr::null_mut();
+            assert_eq!(get_type_attr(typeinfo, &mut type_attr), S_OK);
+            assert!(!type_attr.is_null());
+            assert_eq!((*type_attr).typekind, TKIND_DISPATCH);
+            assert_eq!((*type_attr).c_funcs, 2);
+            assert_eq!((*type_attr).c_vars, 0);
+            assert_eq!((*type_attr).w_type_flags, TYPEFLAG_FDISPATCHABLE);
+            assert_eq!((*type_attr).w_major_ver_num, 3);
+            assert_eq!((*type_attr).w_minor_ver_num, 7);
+            release_type_attr(typeinfo, type_attr);
+
+            let mut func_desc = core::ptr::null_mut();
+            assert_eq!(get_func_desc(typeinfo, 1, &mut func_desc), S_OK);
+            let func_desc = func_desc as *mut FUNCDESC;
+            assert!(!func_desc.is_null());
+            assert_eq!((*func_desc).memid, 2);
+            assert_eq!((*func_desc).invkind, INVOKE_FUNC);
+
+            let mut type_names = [core::ptr::null_mut(); 3];
+            let mut count = 0;
+            assert_eq!(
+                get_names(
+                    typeinfo,
+                    MEMBERID_NIL,
+                    type_names.as_mut_ptr(),
+                    3,
+                    &mut count
+                ),
+                S_OK
+            );
+            assert_eq!(count, 3);
+            assert_eq!(read_utf16_string(type_names[0]), "PhaseDispatch");
+            assert_eq!(read_utf16_string(type_names[1]), "Echo");
+            assert_eq!(read_utf16_string(type_names[2]), "Close");
+            for value in type_names {
+                oleaut32::sys_free_string(value);
+            }
+
+            let mut member = "Close"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut member_ptr = member.as_mut_ptr();
+            let mut memid = 0;
+            assert_eq!(
+                get_ids_of_names(typeinfo, &mut member_ptr, 1, &mut memid),
+                S_OK
+            );
+            assert_eq!(memid, 2);
+
+            let mut found_name = "Close"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut found_typeinfo = core::ptr::null_mut();
+            let mut found_memid = 0;
+            let mut found_count = 0;
+            let mut is_name_value = FALSE;
+            assert_eq!(
+                is_name(typelib, found_name.as_mut_ptr(), 0, &mut is_name_value),
+                S_OK
+            );
+            assert_eq!(is_name_value, TRUE);
+            assert_eq!(
+                find_name(
+                    typelib,
+                    found_name.as_mut_ptr(),
+                    0,
+                    &mut found_typeinfo,
+                    &mut found_memid,
+                    &mut found_count,
+                ),
+                S_OK
+            );
+            assert_eq!(found_memid, 2);
+            assert_eq!(found_count, 1);
+            assert!(!found_typeinfo.is_null());
+            assert_eq!(release_type_info(found_typeinfo), 0);
+
+            let mut member_name = core::ptr::null_mut();
+            let mut member_doc = core::ptr::null_mut();
+            assert_eq!(
+                get_type_documentation(
+                    typeinfo,
+                    2,
+                    &mut member_name,
+                    &mut member_doc,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut()
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(member_name), "Close");
+            assert_eq!(read_utf16_string(member_doc), "Close");
+            oleaut32::sys_free_string(member_name);
+            oleaut32::sys_free_string(member_doc);
+
+            let mut containing = core::ptr::null_mut();
+            let mut containing_index = UINT::MAX;
+            assert_eq!(
+                get_containing_type_lib(typeinfo, &mut containing, &mut containing_index),
+                S_OK
+            );
+            assert_eq!(containing_index, 0);
+            assert!(!containing.is_null());
+
+            assert_eq!(release_type_info(typeinfo), 0);
+            assert_eq!(release_type_lib(containing), 0);
+            assert_eq!(release_type_lib(typelib), 0);
+        }
+    }
+
+    #[test]
+    fn oleaut32_binary_typelib_metadata_is_file_driven() {
+        unsafe {
+            init();
+            let mut payload = Vec::new();
+            payload.extend_from_slice(b"MSFT");
+            payload.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
+            for text in [
+                "guid={11223344-5566-7788-99AA-BBCCDDEEFF00}",
+                "version=5.9",
+                "lcid=1033",
+                "helpcontext=42",
+                "helpfile=C:/phase2/help.chm",
+                "func:PhaseDispatch|Close|2|Binary close op|get|3|1|32",
+                "var:PhaseDispatch|State|7|Binary state slot|dispatch|24|12",
+            ] {
+                payload.extend_from_slice(text.as_bytes());
+                payload.push(0);
+            }
+            for text in [
+                "BinaryPhaseLib",
+                "dispatch:PhaseDispatch|Echo,Close",
+                "interface:PhaseContract",
+            ] {
+                for unit in text.encode_utf16() {
+                    payload.extend_from_slice(&unit.to_le_bytes());
+                }
+                payload.extend_from_slice(&0u16.to_le_bytes());
+            }
+            let path = b"/phase2_binary_typelib.tlb\0";
+            let handle = kernel32::create_file_a(
+                path.as_ptr() as LPCSTR,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                core::ptr::null_mut(),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            let mut written = 0;
+            assert_eq!(
+                kernel32::write_file(
+                    handle,
+                    payload.as_ptr(),
+                    payload.len() as DWORD,
+                    &mut written,
+                    core::ptr::null_mut(),
+                ),
+                TRUE
+            );
+            assert_eq!(written, payload.len() as DWORD);
+            assert_eq!(kernel32::close_handle(handle), TRUE);
+
+            let wide_path = "/phase2_binary_typelib.tlb"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut typelib = core::ptr::null_mut();
+            assert_eq!(
+                oleaut32::load_type_lib(wide_path.as_ptr(), &mut typelib),
+                S_OK
+            );
+            assert!(!typelib.is_null());
+
+            let vtable = *(typelib as *mut *const usize);
+            let get_type_info_count: extern "system" fn(*mut u8) -> UINT =
+                core::mem::transmute(*vtable.add(3));
+            let get_lib_attr: extern "system" fn(*mut u8, *mut *mut TLIBATTR) -> HRESULT =
+                core::mem::transmute(*vtable.add(7));
+            let get_documentation: extern "system" fn(
+                *mut u8,
+                INT,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*vtable.add(9));
+            let find_name: extern "system" fn(
+                *mut u8,
+                LPWSTR,
+                ULONG,
+                *mut *mut u8,
+                *mut DISPID,
+                *mut WORD,
+            ) -> HRESULT = core::mem::transmute(*vtable.add(11));
+            let release_tlib_attr: extern "system" fn(*mut u8, *mut TLIBATTR) =
+                core::mem::transmute(*vtable.add(12));
+            let release_type_lib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*vtable.add(2));
+
+            assert_eq!(get_type_info_count(typelib), 2);
+            let mut lib_attr = core::ptr::null_mut();
+            assert_eq!(get_lib_attr(typelib, &mut lib_attr), S_OK);
+            assert!(!lib_attr.is_null());
+            assert_eq!((*lib_attr).guid.data1, 0x11223344);
+            assert_eq!((*lib_attr).guid.data2, 0x5566);
+            assert_eq!((*lib_attr).guid.data3, 0x7788);
+            assert_eq!((*lib_attr).lcid, 1033);
+            assert_eq!((*lib_attr).w_major_ver_num, 5);
+            assert_eq!((*lib_attr).w_minor_ver_num, 9);
+            release_tlib_attr(typelib, lib_attr);
+            let mut name = core::ptr::null_mut();
+            let mut doc = core::ptr::null_mut();
+            let mut help_context = 0u32;
+            let mut help_file = core::ptr::null_mut();
+            assert_eq!(
+                get_documentation(
+                    typelib,
+                    MEMBERID_NIL,
+                    &mut name,
+                    &mut doc,
+                    &mut help_context,
+                    &mut help_file,
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(name), "BinaryPhaseLib");
+            assert!(read_utf16_string(doc).contains("Binary type library"));
+            assert_eq!(help_context, 42);
+            assert_eq!(read_utf16_string(help_file), "C:/phase2/help.chm");
+            oleaut32::sys_free_string(name);
+            oleaut32::sys_free_string(doc);
+            oleaut32::sys_free_string(help_file);
+
+            let get_type_info: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*vtable.add(4));
+            let mut typeinfo = core::ptr::null_mut();
+            assert_eq!(get_type_info(typelib, 0, &mut typeinfo), S_OK);
+            let info_vtable = *(typeinfo as *mut *const usize);
+            let get_names: extern "system" fn(
+                *mut u8,
+                DISPID,
+                *mut BSTR,
+                UINT,
+                *mut UINT,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(7));
+            let get_func_desc: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(5));
+            let get_var_desc: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(6));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*info_vtable.add(2));
+            let mut names = [core::ptr::null_mut(); 3];
+            let mut count = 0;
+            assert_eq!(
+                get_names(typeinfo, MEMBERID_NIL, names.as_mut_ptr(), 3, &mut count),
+                S_OK
+            );
+            assert_eq!(count, 3);
+            assert_eq!(read_utf16_string(names[1]), "Echo");
+            assert_eq!(read_utf16_string(names[2]), "Close");
+            for value in names {
+                oleaut32::sys_free_string(value);
+            }
+            let mut close_name = "Close"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut found_typeinfo = core::ptr::null_mut();
+            let mut found_memid = 0;
+            let mut found_count = 0;
+            assert_eq!(
+                find_name(
+                    typelib,
+                    close_name.as_mut_ptr(),
+                    0,
+                    &mut found_typeinfo,
+                    &mut found_memid,
+                    &mut found_count,
+                ),
+                S_OK
+            );
+            assert_eq!(found_memid, 2);
+            assert_eq!(found_count, 1);
+            assert!(!found_typeinfo.is_null());
+            assert_eq!(release_type_info(found_typeinfo), 0);
+            let mut func_desc_raw = core::ptr::null_mut();
+            assert_eq!(get_func_desc(typeinfo, 0, &mut func_desc_raw), S_OK);
+            let func_desc = func_desc_raw as *mut FUNCDESC;
+            assert!(!func_desc.is_null());
+            assert_eq!((*func_desc).memid, 1);
+            assert_eq!((*func_desc).invkind, INVOKE_FUNC);
+            let mut var_desc = core::ptr::null_mut();
+            func_desc_raw = core::ptr::null_mut();
+            assert_eq!(get_func_desc(typeinfo, 1, &mut func_desc_raw), S_OK);
+            let func_desc = func_desc_raw as *mut FUNCDESC;
+            assert_eq!((*func_desc).memid, 2);
+            assert_eq!((*func_desc).invkind, INVOKE_PROPERTYGET);
+            assert_eq!((*func_desc).c_params, 3);
+            assert_eq!((*func_desc).c_params_opt, 1);
+            assert_eq!((*func_desc).w_func_flags, 32);
+            assert_eq!(get_var_desc(typeinfo, 0, &mut var_desc), S_OK);
+            let var_desc = var_desc as *mut VARDESC;
+            assert!(!var_desc.is_null());
+            assert_eq!((*var_desc).memid, 7);
+            assert_eq!((*var_desc).varkind, 3);
+            assert_eq!((*var_desc).o_inst, 24);
+            assert_eq!((*var_desc).w_var_flags, 12);
+            assert_eq!(release_type_info(typeinfo), 0);
+
+            assert_eq!(release_type_lib(typelib), 0);
+        }
+    }
+
+    #[test]
+    fn oleaut32_typelib_impl_types_and_dll_entries_are_stateful() {
+        unsafe {
+            init();
+            let path = b"/phase2_typelib_impls.tlb\0";
+            let handle = kernel32::create_file_a(
+                path.as_ptr() as LPCSTR,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                core::ptr::null_mut(),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            let payload = b"ECHOS-TLB1\n\
+name=Phase2.ImplLib\n\
+doc=Phase2 impl metadata\n\
+version=2.4\n\
+helpcontext=77\n\
+helpfile=C:/phase2/impl.chm\n\
+type=PhaseBase|interface|0x0000|Base contract|Open\n\
+type=PhaseDispatch|dispatch|0x1000|Dispatch contract|Open,Close,GetCurrentDirectoryA\n\
+type=PhaseSource|dispatch|0x1000|Event contract|Changed\n\
+impl=PhaseDispatch|PhaseBase|default\n\
+impl=PhaseDispatch|PhaseSource|source,defaultvtable\n\
+func=PhaseDispatch|GetCurrentDirectoryA|33|Kernel export|91|kernel32!GetCurrentDirectoryA|func|2|0|64\n\
+func=PhaseDispatch|Close|2|Close op|12||propertyget|1|0|32\n\
+var=PhaseDispatch|State|7|State slot|13|dispatch|48|8\n";
+            let mut written = 0;
+            assert_eq!(
+                kernel32::write_file(
+                    handle,
+                    payload.as_ptr(),
+                    payload.len() as DWORD,
+                    &mut written,
+                    core::ptr::null_mut(),
+                ),
+                TRUE
+            );
+            assert_eq!(kernel32::close_handle(handle), TRUE);
+
+            let wide_path = "/phase2_typelib_impls.tlb"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut typelib = core::ptr::null_mut();
+            assert_eq!(
+                oleaut32::load_type_lib(wide_path.as_ptr(), &mut typelib),
+                S_OK
+            );
+            assert!(!typelib.is_null());
+
+            let type_lib_vtable = *(typelib as *mut *const usize);
+            let get_type_info: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*type_lib_vtable.add(4));
+            let release_type_lib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*type_lib_vtable.add(2));
+
+            let mut dispatch_info = core::ptr::null_mut();
+            assert_eq!(get_type_info(typelib, 1, &mut dispatch_info), S_OK);
+            assert!(!dispatch_info.is_null());
+
+            let info_vtable = *(dispatch_info as *mut *const usize);
+            let get_type_attr: extern "system" fn(*mut u8, *mut *mut TYPEATTR) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(3));
+            let get_ref_type_of_impl_type: extern "system" fn(
+                *mut u8,
+                UINT,
+                *mut DWORD,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(8));
+            let get_impl_type_flags: extern "system" fn(*mut u8, UINT, *mut INT) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(9));
+            let get_documentation: extern "system" fn(
+                *mut u8,
+                DISPID,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(12));
+            let get_dll_entry: extern "system" fn(
+                *mut u8,
+                DISPID,
+                DWORD,
+                *mut BSTR,
+                *mut BSTR,
+                *mut WORD,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(13));
+            let get_ref_type_info: extern "system" fn(*mut u8, DWORD, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(14));
+            let address_of_member: extern "system" fn(
+                *mut u8,
+                DISPID,
+                DWORD,
+                *mut *mut u8,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(15));
+            let release_type_attr: extern "system" fn(*mut u8, *mut TYPEATTR) =
+                core::mem::transmute(*info_vtable.add(18));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*info_vtable.add(2));
+
+            let mut attr = core::ptr::null_mut();
+            assert_eq!(get_type_attr(dispatch_info, &mut attr), S_OK);
+            assert_eq!((*attr).c_impl_types, 2);
+            release_type_attr(dispatch_info, attr);
+
+            let mut href = 0u32;
+            assert_eq!(get_ref_type_of_impl_type(dispatch_info, 0, &mut href), S_OK);
+            assert_eq!(href, 0);
+            let mut impl_flags = 0i32;
+            assert_eq!(get_impl_type_flags(dispatch_info, 0, &mut impl_flags), S_OK);
+            assert_eq!(impl_flags, IMPLTYPEFLAG_FDEFAULT);
+            assert_eq!(get_ref_type_of_impl_type(dispatch_info, 1, &mut href), S_OK);
+            assert_eq!(href, 2);
+            assert_eq!(get_impl_type_flags(dispatch_info, 1, &mut impl_flags), S_OK);
+            assert_eq!(
+                impl_flags,
+                IMPLTYPEFLAG_FSOURCE | IMPLTYPEFLAG_FDEFAULTVTABLE
+            );
+
+            let mut impl_typeinfo = core::ptr::null_mut();
+            assert_eq!(
+                get_ref_type_info(dispatch_info, 2, &mut impl_typeinfo),
+                S_OK
+            );
+            assert!(!impl_typeinfo.is_null());
+            let impl_info_vtable = *(impl_typeinfo as *mut *const usize);
+            let impl_doc: extern "system" fn(
+                *mut u8,
+                DISPID,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*impl_info_vtable.add(12));
+            let mut impl_name = core::ptr::null_mut();
+            let mut impl_help_file = core::ptr::null_mut();
+            let mut impl_help_context = 0u32;
+            assert_eq!(
+                impl_doc(
+                    impl_typeinfo,
+                    MEMBERID_NIL,
+                    &mut impl_name,
+                    core::ptr::null_mut(),
+                    &mut impl_help_context,
+                    &mut impl_help_file,
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(impl_name), "PhaseSource");
+            assert_eq!(impl_help_context, 77);
+            assert_eq!(read_utf16_string(impl_help_file), "C:/phase2/impl.chm");
+            oleaut32::sys_free_string(impl_name);
+            oleaut32::sys_free_string(impl_help_file);
+            assert_eq!(release_type_info(impl_typeinfo), 0);
+
+            let mut dll_name = core::ptr::null_mut();
+            let mut entry_name = core::ptr::null_mut();
+            let mut ordinal = 0u16;
+            assert_eq!(
+                get_dll_entry(
+                    dispatch_info,
+                    33,
+                    INVOKE_FUNC as DWORD,
+                    &mut dll_name,
+                    &mut entry_name,
+                    &mut ordinal,
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(dll_name), "kernel32");
+            assert_eq!(read_utf16_string(entry_name), "GetCurrentDirectoryA");
+            assert_eq!(ordinal, 0);
+            oleaut32::sys_free_string(dll_name);
+            oleaut32::sys_free_string(entry_name);
+
+            let mut member_name = core::ptr::null_mut();
+            let mut member_doc = core::ptr::null_mut();
+            let mut member_help_context = 0u32;
+            let mut member_help_file = core::ptr::null_mut();
+            assert_eq!(
+                get_documentation(
+                    dispatch_info,
+                    33,
+                    &mut member_name,
+                    &mut member_doc,
+                    &mut member_help_context,
+                    &mut member_help_file,
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(member_name), "GetCurrentDirectoryA");
+            assert_eq!(read_utf16_string(member_doc), "Kernel export");
+            assert_eq!(member_help_context, 91);
+            assert_eq!(read_utf16_string(member_help_file), "C:/phase2/impl.chm");
+            oleaut32::sys_free_string(member_name);
+            oleaut32::sys_free_string(member_doc);
+            oleaut32::sys_free_string(member_help_file);
+
+            let mut member_address = core::ptr::null_mut();
+            assert_eq!(
+                address_of_member(dispatch_info, 33, INVOKE_FUNC as DWORD, &mut member_address),
+                S_OK
+            );
+            assert_eq!(
+                member_address as usize as u64,
+                get_proc_address("kernel32", "GetCurrentDirectoryA").unwrap()
+            );
+
+            let mut vtable_address = core::ptr::null_mut();
+            assert_eq!(
+                address_of_member(
+                    dispatch_info,
+                    2,
+                    INVOKE_PROPERTYGET as DWORD,
+                    &mut vtable_address,
+                ),
+                S_OK
+            );
+            assert_eq!(vtable_address as usize, 8);
+
+            assert_eq!(release_type_info(dispatch_info), 0);
+            assert_eq!(release_type_lib(typelib), 0);
+        }
+    }
+
+    #[test]
+    fn oleaut32_type_comp_bind_and_coclass_create_instance_are_stateful() {
+        #[repr(C)]
+        struct TestUnknown {
+            vtable: *const usize,
+            refcount: u32,
+        }
+
+        #[repr(C)]
+        struct TestFactory {
+            vtable: *const usize,
+            refcount: u32,
+            product: *mut u8,
+        }
+
+        extern "system" fn unknown_query_interface(
+            this: *mut u8,
+            iid: *const GUID,
+            out: *mut *mut u8,
+        ) -> HRESULT {
+            unsafe {
+                if out.is_null() {
+                    return E_POINTER;
+                }
+                *out = core::ptr::null_mut();
+                if guid_matches(iid, &IID_IUNKNOWN) {
+                    *out = this;
+                    return S_OK;
+                }
+                E_NOINTERFACE
+            }
+        }
+
+        extern "system" fn unknown_add_ref(this: *mut u8) -> u32 {
+            unsafe {
+                let object = &mut *(this as *mut TestUnknown);
+                object.refcount = object.refcount.saturating_add(1);
+                object.refcount
+            }
+        }
+
+        extern "system" fn unknown_release(this: *mut u8) -> u32 {
+            unsafe {
+                let object = &mut *(this as *mut TestUnknown);
+                if object.refcount > 1 {
+                    object.refcount -= 1;
+                    object.refcount
+                } else {
+                    object.refcount = 0;
+                    0
+                }
+            }
+        }
+
+        extern "system" fn factory_query_interface(
+            this: *mut u8,
+            iid: *const GUID,
+            out: *mut *mut u8,
+        ) -> HRESULT {
+            unsafe {
+                if out.is_null() {
+                    return E_POINTER;
+                }
+                *out = core::ptr::null_mut();
+                if guid_matches(iid, &IID_IUNKNOWN) {
+                    *out = this;
+                    return S_OK;
+                }
+                E_NOINTERFACE
+            }
+        }
+
+        extern "system" fn factory_add_ref(this: *mut u8) -> u32 {
+            unsafe {
+                let factory = &mut *(this as *mut TestFactory);
+                factory.refcount = factory.refcount.saturating_add(1);
+                factory.refcount
+            }
+        }
+
+        extern "system" fn factory_release(this: *mut u8) -> u32 {
+            unsafe {
+                let factory = &mut *(this as *mut TestFactory);
+                if factory.refcount > 1 {
+                    factory.refcount -= 1;
+                    factory.refcount
+                } else {
+                    factory.refcount = 0;
+                    0
+                }
+            }
+        }
+
+        extern "system" fn factory_create_instance(
+            this: *mut u8,
+            outer: *mut u8,
+            iid: *const GUID,
+            out: *mut *mut u8,
+        ) -> HRESULT {
+            unsafe {
+                if out.is_null() {
+                    return E_POINTER;
+                }
+                *out = core::ptr::null_mut();
+                if !outer.is_null() {
+                    return CLASS_E_NOAGGREGATION;
+                }
+                let factory = &mut *(this as *mut TestFactory);
+                unknown_query_interface(factory.product, iid, out)
+            }
+        }
+
+        extern "system" fn factory_lock_server(_this: *mut u8, _lock: BOOL) -> HRESULT {
+            S_OK
+        }
+
+        unsafe {
+            init();
+            COM_APARTMENTS.lock().clear();
+            COM_CLASS_OBJECTS.lock().clear();
+
+            let path = b"/phase2_typecomp_coclass.tlb\0";
+            let handle = kernel32::create_file_a(
+                path.as_ptr() as LPCSTR,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                core::ptr::null_mut(),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            let payload = b"ECHOS-TLB1\n\
+name=Phase2.BindLib\n\
+doc=TypeComp and coclass corpus\n\
+type=PhaseObject|coclass|0x0000|Coclass metadata|Run,State\n\
+func=PhaseObject|Run|101|Run callable|17|phase2!Run|func|2|0|64\n\
+var=PhaseObject|State|102|State slot|18|dispatch|12|3\n";
+            let mut written = 0;
+            assert_eq!(
+                kernel32::write_file(
+                    handle,
+                    payload.as_ptr(),
+                    payload.len() as DWORD,
+                    &mut written,
+                    core::ptr::null_mut(),
+                ),
+                TRUE
+            );
+            assert_eq!(kernel32::close_handle(handle), TRUE);
+
+            let wide_path = "/phase2_typecomp_coclass.tlb"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut typelib = core::ptr::null_mut();
+            assert_eq!(
+                oleaut32::load_type_lib(wide_path.as_ptr(), &mut typelib),
+                S_OK
+            );
+            assert!(!typelib.is_null());
+
+            let typelib_vtable = *(typelib as *mut *const usize);
+            let get_type_info: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*typelib_vtable.add(4));
+            let get_type_comp: extern "system" fn(*mut u8, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*typelib_vtable.add(8));
+            let release_typelib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*typelib_vtable.add(2));
+
+            let mut root_typecomp = core::ptr::null_mut();
+            assert_eq!(get_type_comp(typelib, &mut root_typecomp), S_OK);
+            assert!(!root_typecomp.is_null());
+            let root_typecomp_vtable = *(root_typecomp as *mut *const usize);
+            let bind_type: extern "system" fn(
+                *mut u8,
+                LPWSTR,
+                ULONG,
+                *mut *mut u8,
+                *mut *mut u8,
+            ) -> HRESULT = core::mem::transmute(*root_typecomp_vtable.add(4));
+            let release_typecomp: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*root_typecomp_vtable.add(2));
+
+            let mut phase_object_name = "PhaseObject"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut coclass_info = core::ptr::null_mut();
+            let mut nested_typecomp = core::ptr::null_mut();
+            assert_eq!(
+                bind_type(
+                    root_typecomp,
+                    phase_object_name.as_mut_ptr(),
+                    0,
+                    &mut coclass_info,
+                    &mut nested_typecomp,
+                ),
+                S_OK
+            );
+            assert!(!coclass_info.is_null());
+            assert!(!nested_typecomp.is_null());
+            assert_eq!(release_typecomp(root_typecomp), 0);
+
+            let nested_vtable = *(nested_typecomp as *mut *const usize);
+            let bind: extern "system" fn(
+                *mut u8,
+                LPWSTR,
+                ULONG,
+                WORD,
+                *mut *mut u8,
+                *mut DWORD,
+                *mut BINDPTR,
+            ) -> HRESULT = core::mem::transmute(*nested_vtable.add(3));
+
+            let mut run_name = "Run"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut bound_info = core::ptr::null_mut();
+            let mut desc_kind = DESCKIND_NONE;
+            let mut bind_ptr = BINDPTR::default();
+            assert_eq!(
+                bind(
+                    nested_typecomp,
+                    run_name.as_mut_ptr(),
+                    0,
+                    0,
+                    &mut bound_info,
+                    &mut desc_kind,
+                    &mut bind_ptr,
+                ),
+                S_OK
+            );
+            assert_eq!(desc_kind, DESCKIND_FUNCDESC);
+            assert!(!bound_info.is_null());
+            assert!(!bind_ptr.lpfuncdesc.is_null());
+            assert_eq!((*bind_ptr.lpfuncdesc).memid, 101);
+            assert_eq!((*bind_ptr.lpfuncdesc).c_params, 2);
+
+            let coclass_vtable = *(coclass_info as *mut *const usize);
+            let get_type_attr: extern "system" fn(*mut u8, *mut *mut TYPEATTR) -> HRESULT =
+                core::mem::transmute(*coclass_vtable.add(3));
+            let create_instance: extern "system" fn(
+                *mut u8,
+                *mut u8,
+                *const GUID,
+                *mut *mut u8,
+            ) -> HRESULT = core::mem::transmute(*coclass_vtable.add(16));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*coclass_vtable.add(2));
+            let release_type_attr: extern "system" fn(*mut u8, *mut TYPEATTR) =
+                core::mem::transmute(*coclass_vtable.add(18));
+
+            let mut attr = core::ptr::null_mut();
+            assert_eq!(get_type_attr(coclass_info, &mut attr), S_OK);
+            let coclass_guid = (*attr).guid;
+            release_type_attr(coclass_info, attr);
+
+            let unknown_vtable = [
+                unknown_query_interface as usize,
+                unknown_add_ref as usize,
+                unknown_release as usize,
+            ];
+            let factory_vtable = [
+                factory_query_interface as usize,
+                factory_add_ref as usize,
+                factory_release as usize,
+                factory_create_instance as usize,
+                factory_lock_server as usize,
+            ];
+            let mut product = TestUnknown {
+                vtable: unknown_vtable.as_ptr(),
+                refcount: 1,
+            };
+            let mut factory = TestFactory {
+                vtable: factory_vtable.as_ptr(),
+                refcount: 1,
+                product: &mut product as *mut _ as *mut u8,
+            };
+
+            assert_eq!(ole32::co_initialize(core::ptr::null_mut()), S_OK);
+            let mut cookie = 0u32;
+            assert_eq!(
+                ole32::co_register_class_object(
+                    &coclass_guid,
+                    &mut factory as *mut _ as *mut u8,
+                    CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER,
+                    0,
+                    &mut cookie,
+                ),
+                S_OK
+            );
+            let mut created = core::ptr::null_mut();
+            assert_eq!(
+                create_instance(
+                    coclass_info,
+                    core::ptr::null_mut(),
+                    &IID_IUNKNOWN,
+                    &mut created,
+                ),
+                S_OK
+            );
+            assert_eq!(created, &mut product as *mut _ as *mut u8);
+            assert_eq!(ole32::co_revoke_class_object(cookie), S_OK);
+            ole32::co_uninitialize();
+
+            assert_eq!(release_typecomp(nested_typecomp), 0);
+            assert_eq!(release_type_info(bound_info), 0);
+            assert_eq!(release_type_info(coclass_info), 0);
+            assert_eq!(release_typelib(typelib), 0);
+            assert!(is_implemented_api("oleaut32", "LoadTypeLib"));
+        }
+    }
+
+    #[test]
+    fn internet_proxy_pac_range_and_else_chains_are_stateful() {
+        unsafe {
+            init();
+            let tm_value = pac_current_tm();
+            let weekday = weekday_name(tm_value.tm_wday, true).to_ascii_uppercase();
+            let month = month_name(tm_value.tm_mon, true).to_ascii_uppercase();
+            let path = b"/phase2_proxy_advanced.pac\0";
+            let handle = kernel32::create_file_a(
+                path.as_ptr() as LPCSTR,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                core::ptr::null_mut(),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            let pac = alloc::format!(
+                "function FindProxyForURL(url, host) {{\n\
+if (weekdayRange(\"{weekday}\") && timeRange({hour}) && dateRange(\"{month}\", {day})) {{\n\
+    return \"PROXY calendar.proxy.local:8081\";\n\
+}}\n\
+if (dnsDomainLevels(host) && isResolvable(host)) {{\n\
+    return \"PROXY dns.proxy.local:8082\";\n\
+}}\n\
+if (shExpMatch(host, \"*.corp.test\")) {{\n\
+    return \"PROXY corp.proxy.local:8080\";\n\
+}} else if (isPlainHostName(host)) {{\n\
+    return \"DIRECT\";\n\
+}} else {{\n\
+    return \"PROXY fallback.proxy.local:8083\";\n\
+}}\n\
+}}\n",
+                weekday = weekday,
+                hour = tm_value.tm_hour,
+                month = month,
+                day = tm_value.tm_mday,
+            );
+            let mut written = 0;
+            assert_eq!(
+                kernel32::write_file(
+                    handle,
+                    pac.as_ptr(),
+                    pac.len() as DWORD,
+                    &mut written,
+                    core::ptr::null_mut(),
+                ),
+                TRUE
+            );
+            assert_eq!(kernel32::close_handle(handle), TRUE);
+
+            let session = InternetSessionState {
+                user_agent: String::new(),
+                access_type: WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                proxy_name: "config=file:///phase2_proxy_advanced.pac".to_string(),
+                proxy_bypass: String::new(),
+                resolve_timeout_ms: 0,
+                connect_timeout_ms: 0,
+                send_timeout_ms: 0,
+                receive_timeout_ms: 0,
+            };
+            assert_eq!(
+                internet_session_proxy_route_checked(&session, "calendar.echos.test", true),
+                Ok(Some(InternetProxyRoute {
+                    host: "calendar.proxy.local".to_string(),
+                    port: 8081,
+                    authorization: None,
+                }))
+            );
+            assert_eq!(
+                internet_session_proxy_route_checked(&session, "svc.corp.test", true),
+                Ok(Some(InternetProxyRoute {
+                    host: "dns.proxy.local".to_string(),
+                    port: 8082,
+                    authorization: None,
+                }))
+            );
+            assert_eq!(
+                internet_session_proxy_route_checked(&session, "printer", false),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn gdi_region_paint_frame_fill_and_invert_are_surface_backed() {
+        unsafe {
+            init();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"region\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                64,
+                64,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let hdc = user32::get_dc(hwnd);
+            assert_ne!(hdc, 0);
+            let red = gdi32::create_solid_brush(0x0000FF);
+            let green = gdi32::create_solid_brush(0x00FF00);
+            let blue = gdi32::create_solid_brush(0xFF0000);
+            assert_ne!(red, 0);
+            assert_ne!(green, 0);
+            assert_ne!(blue, 0);
+            assert_ne!(gdi32::select_object(hdc, red as HGDIOBJ), 0);
+
+            let hrgn = gdi32::create_rect_rgn(8, 8, 24, 24);
+            assert_ne!(hrgn, 0);
+            assert_eq!(gdi32::paint_rgn(hdc, hrgn), TRUE);
+            assert_eq!(gdi32::get_pixel(hdc, 10, 10), 0x0000FF);
+
+            assert_eq!(gdi32::fill_rgn(hdc, hrgn, green), TRUE);
+            assert_eq!(gdi32::get_pixel(hdc, 10, 10), 0x00FF00);
+
+            assert_eq!(gdi32::frame_rgn(hdc, hrgn, blue, 2, 2), TRUE);
+            assert_eq!(gdi32::get_pixel(hdc, 8, 8), 0xFF0000);
+            assert_eq!(gdi32::get_pixel(hdc, 9, 9), 0xFF0000);
+            assert_eq!(gdi32::get_pixel(hdc, 12, 12), 0x00FF00);
+
+            assert_eq!(gdi32::invert_rgn(hdc, hrgn), TRUE);
+            assert_eq!(gdi32::get_pixel(hdc, 12, 12), 0xFF00FF);
+            assert_eq!(gdi32::get_pixel(hdc, 8, 8), 0x00FFFF);
+
+            let clip = gdi32::create_rect_rgn(12, 12, 18, 18);
+            assert_ne!(clip, 0);
+            assert_eq!(gdi32::select_clip_rgn(hdc, clip), 1);
+            assert_eq!(gdi32::fill_rgn(hdc, hrgn, red), TRUE);
+            assert_eq!(gdi32::get_pixel(hdc, 9, 9), 0x00FFFF);
+            assert_eq!(gdi32::get_pixel(hdc, 13, 13), 0x0000FF);
+
+            let invalidated = INVALIDATED_WINDOWS.lock();
+            assert!(invalidated.get(&(hwnd as u64)).is_some());
+            drop(invalidated);
+
+            assert_eq!(gdi32::delete_object(clip as HGDIOBJ), TRUE);
+            assert_eq!(gdi32::delete_object(hrgn as HGDIOBJ), TRUE);
+            assert_eq!(gdi32::delete_object(red as HGDIOBJ), TRUE);
+            assert_eq!(gdi32::delete_object(green as HGDIOBJ), TRUE);
+            assert_eq!(gdi32::delete_object(blue as HGDIOBJ), TRUE);
+        }
+    }
+
+    #[test]
+    fn user32_activation_and_focus_order_are_stateful() {
+        unsafe {
+            init();
+            MSG_QUEUE.lock().clear();
+            let hwnd_a = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"a\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                100,
+                100,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let hwnd_b = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"b\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                100,
+                100,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_ne!(hwnd_a, 0);
+            assert_ne!(hwnd_b, 0);
+
+            assert_eq!(user32::set_foreground_window(hwnd_a), TRUE);
+            assert_eq!(user32::set_focus(hwnd_a), 0);
+            assert_eq!(user32::set_foreground_window(hwnd_b), TRUE);
+            assert_eq!(user32::set_focus(hwnd_b), hwnd_a);
+
+            let queue = MSG_QUEUE.lock().clone();
+            assert!(queue.iter().any(|msg| msg.hwnd == hwnd_a
+                && msg.message == WM_NCACTIVATE
+                && msg.wparam == FALSE as u64));
+            assert!(queue.iter().any(|msg| msg.hwnd == hwnd_a
+                && msg.message == WM_ACTIVATE
+                && msg.wparam == WA_INACTIVE as u64));
+            assert!(queue.iter().any(|msg| msg.hwnd == hwnd_b
+                && msg.message == WM_NCACTIVATE
+                && msg.wparam == TRUE as u64));
+            assert!(queue.iter().any(|msg| msg.hwnd == hwnd_b
+                && msg.message == WM_ACTIVATE
+                && msg.wparam == WA_ACTIVE as u64));
+            assert!(queue
+                .iter()
+                .any(|msg| msg.hwnd == hwnd_a && msg.message == WM_NCPAINT));
+            assert!(queue
+                .iter()
+                .any(|msg| msg.hwnd == hwnd_b && msg.message == WM_NCPAINT));
+            assert!(queue
+                .iter()
+                .any(|msg| msg.hwnd == hwnd_a && msg.message == WM_KILLFOCUS));
+            assert!(queue
+                .iter()
+                .any(|msg| msg.hwnd == hwnd_b && msg.message == WM_SETFOCUS));
+        }
+    }
+
+    #[test]
+    fn user32_accelerator_and_menu_loop_are_stateful() {
+        unsafe {
+            init();
+            MSG_QUEUE.lock().clear();
+            let zero_msg = || MSG {
+                hwnd: 0,
+                message: 0,
+                wParam: 0,
+                lParam: 0,
+                time: 0,
+                pt: POINT::default(),
+            };
+
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"phase2-ui\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                32,
+                32,
+                320,
+                200,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_ne!(hwnd, 0);
+            MSG_QUEUE.lock().clear();
+
+            let accel = ACCEL {
+                fVirt: FVIRTKEY | FSHIFT | FCONTROL,
+                key: b'N' as WORD,
+                cmd: 0x4010,
+            };
+            let haccel = user32::create_accelerator_table_a(&accel, 1);
+            assert_ne!(haccel, 0);
+
+            let mut keyboard = [0u8; 256];
+            keyboard[VK_SHIFT as usize] = 0x80;
+            keyboard[VK_CONTROL as usize] = 0x80;
+            assert_eq!(user32::set_keyboard_state(keyboard.as_ptr()), TRUE);
+
+            let msg = MSG {
+                hwnd,
+                message: WM_KEYDOWN,
+                wParam: b'N' as usize,
+                lParam: 0,
+                time: 0,
+                pt: POINT::default(),
+            };
+            assert_eq!(user32::translate_accelerator_a(hwnd, haccel, &msg), 1);
+
+            let mut out = zero_msg();
+            assert_eq!(user32::peek_message_a(&mut out, hwnd, 0, 0, 1), TRUE);
+            assert_eq!(out.message, WM_COMMAND);
+            assert_eq!(out.wParam as WORD, 0x4010);
+
+            let menu = user32::create_popup_menu();
+            assert_ne!(menu, 0);
+            assert_eq!(
+                user32::append_menu_a(menu, MF_ENABLED, 0x5100, b"Run\0".as_ptr() as LPCSTR),
+                TRUE
+            );
+            MSG_QUEUE.lock().clear();
+
+            assert_eq!(
+                user32::track_popup_menu(menu, 0, 8, 8, 0, hwnd, core::ptr::null()),
+                TRUE
+            );
+
+            let mut messages = [0u32; 5];
+            for message in messages.iter_mut() {
+                let mut queued = zero_msg();
+                assert_eq!(user32::peek_message_a(&mut queued, hwnd, 0, 0, 1), TRUE);
+                *message = queued.message;
+            }
+            assert_eq!(
+                messages,
+                [
+                    WM_ENTERMENULOOP,
+                    WM_INITMENUPOPUP,
+                    WM_MENUSELECT,
+                    WM_COMMAND,
+                    WM_EXITMENULOOP
+                ]
+            );
+
+            assert_eq!(user32::destroy_accelerator_table(haccel), TRUE);
+            assert_eq!(user32::destroy_menu(menu), TRUE);
+            assert_eq!(user32::destroy_window(hwnd), TRUE);
+        }
+    }
+
+    #[test]
+    fn user32_dialog_navigation_and_escape_are_stateful() {
+        unsafe {
+            init();
+            MSG_QUEUE.lock().clear();
+            let zero_msg = || MSG {
+                hwnd: 0,
+                message: 0,
+                wParam: 0,
+                lParam: 0,
+                time: 0,
+                pt: POINT::default(),
+            };
+
+            let dialog = user32::create_window_ex_a(
+                0,
+                b"#32770\0".as_ptr() as LPCSTR,
+                b"phase2-dialog\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                48,
+                48,
+                260,
+                160,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let ok = user32::create_window_ex_a(
+                0,
+                b"Button\0".as_ptr() as LPCSTR,
+                b"OK\0".as_ptr() as LPCSTR,
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                16,
+                16,
+                80,
+                24,
+                dialog,
+                IDOK as HMENU,
+                0,
+                core::ptr::null_mut(),
+            );
+            let cancel = user32::create_window_ex_a(
+                0,
+                b"Button\0".as_ptr() as LPCSTR,
+                b"Cancel\0".as_ptr() as LPCSTR,
+                WS_CHILD | WS_VISIBLE,
+                112,
+                16,
+                96,
+                24,
+                dialog,
+                IDCANCEL as HMENU,
+                0,
+                core::ptr::null_mut(),
+            );
+            WIN32_DIALOGS.lock().insert(
+                dialog as u64,
+                Win32DialogState {
+                    hwnd: dialog,
+                    owner: 0,
+                    modal: false,
+                    ended: false,
+                    result: 0,
+                    default_id: IDOK,
+                    focused_id: IDOK,
+                    is_extended: false,
+                },
+            );
+            MSG_QUEUE.lock().clear();
+
+            assert_eq!(user32::set_focus(ok), 0);
+            MSG_QUEUE.lock().clear();
+
+            let mut tab = MSG {
+                hwnd: ok,
+                message: WM_KEYDOWN,
+                wParam: VK_TAB as usize,
+                lParam: 0,
+                time: 0,
+                pt: POINT::default(),
+            };
+            assert_eq!(user32::is_dialog_message_a(dialog, &mut tab), TRUE);
+            assert_eq!(user32::get_focus(), cancel);
+            assert_eq!(
+                WIN32_DIALOGS
+                    .lock()
+                    .get(&(dialog as u64))
+                    .map(|state| state.focused_id),
+                Some(IDCANCEL)
+            );
+
+            MSG_QUEUE.lock().clear();
+            let mut enter = MSG {
+                hwnd: cancel,
+                message: WM_KEYDOWN,
+                wParam: VK_RETURN as usize,
+                lParam: 0,
+                time: 0,
+                pt: POINT::default(),
+            };
+            assert_eq!(user32::is_dialog_message_a(dialog, &mut enter), TRUE);
+            let mut command = zero_msg();
+            assert_eq!(user32::peek_message_a(&mut command, dialog, 0, 0, 1), TRUE);
+            assert_eq!(command.message, WM_COMMAND);
+            assert_eq!(command.wParam as INT, IDCANCEL);
+
+            let mut escape = MSG {
+                hwnd: cancel,
+                message: WM_KEYDOWN,
+                wParam: VK_ESCAPE as usize,
+                lParam: 0,
+                time: 0,
+                pt: POINT::default(),
+            };
+            assert_eq!(user32::is_dialog_message_a(dialog, &mut escape), TRUE);
+            let state = WIN32_DIALOGS.lock().get(&(dialog as u64)).cloned();
+            assert!(state.as_ref().map(|s| s.ended).unwrap_or(false));
+            assert_eq!(state.as_ref().map(|s| s.result), Some(IDCANCEL as isize));
+
+            assert_eq!(user32::destroy_window(cancel), TRUE);
+            assert_eq!(user32::destroy_window(ok), TRUE);
+            assert_eq!(user32::destroy_window(dialog), TRUE);
+        }
+    }
+
+    #[test]
+    fn user32_non_client_calc_and_paint_track_exact_bounds() {
+        unsafe {
+            init();
+            INVALIDATED_WINDOWS.lock().clear();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Nc\0".as_ptr() as LPCSTR,
+                b"phase2-nc\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                24,
+                24,
+                320,
+                200,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_ne!(hwnd, 0);
+
+            let mut params = NCCALCSIZE_PARAMS {
+                rgrc: [
+                    RECT {
+                        left: 24,
+                        top: 24,
+                        right: 24 + 320 + 16,
+                        bottom: 24 + 200 + 39,
+                    },
+                    RECT::default(),
+                    RECT::default(),
+                ],
+                lppos: core::ptr::null_mut(),
+            };
+            assert_eq!(
+                user32::def_window_proc_a(hwnd, WM_NCCALCSIZE, 1, &mut params as *mut _ as isize),
+                0
+            );
+            assert_eq!(
+                params.rgrc[0],
+                RECT {
+                    left: 32,
+                    top: 55,
+                    right: 344,
+                    bottom: 255,
+                }
+            );
+
+            assert_eq!(user32::def_window_proc_a(hwnd, WM_NCPAINT, 0, 0), 0);
+            let invalidated = consume_invalidated_rect(hwnd as u64).expect("invalidated nc");
+            assert_eq!(
+                invalidated,
+                RECT {
+                    left: 24,
+                    top: 24,
+                    right: 360,
+                    bottom: 263,
+                }
+            );
+            assert_eq!(user32::destroy_window(hwnd), TRUE);
+        }
+    }
+
+    #[test]
+    fn gdi_path_region_and_clip_box_are_stateful() {
+        unsafe {
+            init();
+            let dc = gdi32::create_compatible_dc(0);
+            assert_ne!(dc, 0);
+            assert_eq!(gdi32::begin_path(dc), TRUE);
+            assert_eq!(gdi32::move_to_ex(dc, 10, 10, core::ptr::null_mut()), TRUE);
+            assert_eq!(gdi32::line_to(dc, 60, 10), TRUE);
+            assert_eq!(gdi32::line_to(dc, 60, 50), TRUE);
+            assert_eq!(gdi32::close_figure(dc), TRUE);
+            assert_eq!(gdi32::end_path(dc), TRUE);
+
+            let region = gdi32::path_to_region(dc);
+            assert_ne!(region, 0);
+            assert_eq!(gdi32::select_clip_rgn(dc, region), 1);
+            assert_eq!(gdi32::exclude_clip_rect(dc, 20, 20, 40, 40), 1);
+
+            let mut clip = RECT::default();
+            assert_eq!(gdi32::get_clip_box(dc, &mut clip), 1);
+            assert_eq!(
+                clip,
+                RECT {
+                    left: 10,
+                    top: 10,
+                    right: 61,
+                    bottom: 51,
+                }
+            );
+            assert_eq!(gdi32::pt_in_region(region, 55, 30), TRUE);
+            assert_eq!(gdi32::pt_visible(dc, 55, 30), TRUE);
+            assert_eq!(gdi32::pt_visible(dc, 25, 25), FALSE);
+
+            assert_eq!(gdi32::delete_dc(dc), TRUE);
+            assert_eq!(gdi32::delete_object(region as HGDIOBJ), TRUE);
+        }
+    }
+
+    #[test]
+    fn gdi_blt_and_patblt_honor_clip_and_existing_destination() {
+        unsafe {
+            init();
+            let src = user32::create_window_ex_a(
+                0,
+                b"Phase2Src\0".as_ptr() as LPCSTR,
+                b"src\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                0,
+                0,
+                32,
+                32,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let dst = user32::create_window_ex_a(
+                0,
+                b"Phase2Dst\0".as_ptr() as LPCSTR,
+                b"dst\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                48,
+                48,
+                32,
+                32,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let src_dc = user32::get_dc(src);
+            let dst_dc = user32::get_dc(dst);
+            let clip = gdi32::create_rect_rgn(0, 0, 2, 2);
+            assert_ne!(clip, 0);
+            assert_eq!(gdi32::select_clip_rgn(dst_dc, clip), 1);
+            assert_eq!(gdi32::exclude_clip_rect(dst_dc, 1, 1, 2, 2), 1);
+
+            {
+                let mut windows = WIN32_WINDOWS.lock();
+                let src_win = windows.get_mut(&(src as u64)).unwrap();
+                let _ = crate::win32::write_window_pixel(
+                    &mut src_win.surface,
+                    src_win.width as usize,
+                    0,
+                    0,
+                    0x00FF0000,
+                );
+                let dst_win = windows.get_mut(&(dst as u64)).unwrap();
+                let _ = crate::win32::write_window_pixel(
+                    &mut dst_win.surface,
+                    dst_win.width as usize,
+                    0,
+                    0,
+                    0x000000FF,
+                );
+                let _ = crate::win32::write_window_pixel(
+                    &mut dst_win.surface,
+                    dst_win.width as usize,
+                    1,
+                    1,
+                    0x0000FF00,
+                );
+            }
+
+            assert_eq!(
+                gdi32::bit_blt(dst_dc, 0, 0, 2, 2, src_dc, 0, 0, 0x00660046),
+                TRUE
+            );
+
+            {
+                let windows = WIN32_WINDOWS.lock();
+                let dst_win = windows.get(&(dst as u64)).unwrap();
+                assert_eq!(
+                    crate::win32::read_window_pixel(&dst_win.surface, dst_win.width as usize, 0, 0,),
+                    Some(0x00FF00FF)
+                );
+                assert_eq!(
+                    crate::win32::read_window_pixel(&dst_win.surface, dst_win.width as usize, 1, 1,),
+                    Some(0x0000FF00)
+                );
+            }
+
+            let brush = gdi32::create_solid_brush(0x000000AA);
+            assert_ne!(brush, 0);
+            assert_eq!(
+                gdi32::select_object(dst_dc, brush as HGDIOBJ),
+                WHITE_BRUSH as HGDIOBJ
+            );
+            assert_eq!(gdi32::pat_blt(dst_dc, 0, 0, 2, 2, 0x00F00021), TRUE);
+
+            {
+                let windows = WIN32_WINDOWS.lock();
+                let dst_win = windows.get(&(dst as u64)).unwrap();
+                assert_eq!(
+                    crate::win32::read_window_pixel(&dst_win.surface, dst_win.width as usize, 0, 0,),
+                    Some(0x000000AA)
+                );
+                assert_eq!(
+                    crate::win32::read_window_pixel(&dst_win.surface, dst_win.width as usize, 1, 1,),
+                    Some(0x0000FF00)
+                );
+            }
+
+            {
+                let mut windows = WIN32_WINDOWS.lock();
+                let src_win = windows.get_mut(&(src as u64)).unwrap();
+                let _ = crate::win32::write_window_pixel(
+                    &mut src_win.surface,
+                    src_win.width as usize,
+                    0,
+                    0,
+                    0x00FFFF00,
+                );
+                let dst_win = windows.get_mut(&(dst as u64)).unwrap();
+                let _ = crate::win32::write_window_pixel(
+                    &mut dst_win.surface,
+                    dst_win.width as usize,
+                    0,
+                    0,
+                    0x00ABCDEF,
+                );
+            }
+            assert_eq!(
+                gdi32::bit_blt(dst_dc, 0, 0, 1, 1, src_dc, 0, 0, 0x00C000CA),
+                TRUE
+            );
+            {
+                let windows = WIN32_WINDOWS.lock();
+                let dst_win = windows.get(&(dst as u64)).unwrap();
+                assert_eq!(
+                    crate::win32::read_window_pixel(&dst_win.surface, dst_win.width as usize, 0, 0,),
+                    Some(0x00000000)
+                );
+            }
+
+            assert_eq!(gdi32::delete_object(brush as HGDIOBJ), TRUE);
+            assert_eq!(gdi32::delete_object(clip as HGDIOBJ), TRUE);
+            assert_eq!(user32::release_dc(src, src_dc), 1);
+            assert_eq!(user32::release_dc(dst, dst_dc), 1);
+            assert_eq!(user32::destroy_window(src), TRUE);
+            assert_eq!(user32::destroy_window(dst), TRUE);
+        }
+    }
+
+    #[test]
+    fn gdi_selection_restore_and_print_queue_are_stateful() {
+        unsafe {
+            init();
+
+            let dc = gdi32::create_compatible_dc(0);
+            assert_ne!(dc, 0);
+            let pen_primary = gdi32::create_pen(0, 1, 0x00112233);
+            let pen_secondary = gdi32::create_pen(0, 2, 0x00445566);
+            let brush = gdi32::create_solid_brush(0x0000AA55);
+            assert_ne!(pen_primary, 0);
+            assert_ne!(pen_secondary, 0);
+            assert_ne!(brush, 0);
+
+            assert_eq!(
+                gdi32::select_object(dc, pen_primary as HGDIOBJ),
+                BLACK_PEN as HGDIOBJ
+            );
+            assert_eq!(
+                gdi32::select_object(dc, brush as HGDIOBJ),
+                WHITE_BRUSH as HGDIOBJ
+            );
+            assert_eq!(gdi32::delete_object(pen_primary as HGDIOBJ), FALSE);
+            assert_eq!(gdi32::save_dc(dc), 1);
+
+            assert_eq!(
+                gdi32::select_object(dc, pen_secondary as HGDIOBJ),
+                pen_primary as HGDIOBJ
+            );
+            assert_eq!(
+                gdi32::get_current_object(dc, OBJ_PEN),
+                pen_secondary as HGDIOBJ
+            );
+            assert_eq!(gdi32::restore_dc(dc, -1), TRUE);
+            assert_eq!(
+                gdi32::get_current_object(dc, OBJ_PEN),
+                pen_primary as HGDIOBJ
+            );
+            assert_eq!(gdi32::delete_object(pen_secondary as HGDIOBJ), TRUE);
+
+            assert_eq!(gdi32::delete_dc(dc), TRUE);
+            assert_eq!(gdi32::delete_object(pen_primary as HGDIOBJ), TRUE);
+            assert_eq!(gdi32::delete_object(brush as HGDIOBJ), TRUE);
+
+            let printer = gdi32::create_dc_a(
+                b"WINSPOOL\0".as_ptr() as LPCSTR,
+                b"echOS virtual printer\0".as_ptr() as LPCSTR,
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+            assert_ne!(printer, 0);
+            let doc_name = b"phase2-print\0";
+            let doc = DOCINFOA {
+                cbSize: core::mem::size_of::<DOCINFOA>() as INT,
+                lpszDocName: doc_name.as_ptr() as LPCSTR,
+                lpszOutput: core::ptr::null(),
+                lpszDatatype: core::ptr::null(),
+                fwType: 0,
+            };
+            let job_id = gdi32::start_doc_a(printer, &doc);
+            assert!(job_id > 0);
+            assert_eq!(gdi32::start_page(printer), 1);
+            assert_eq!(gdi32::end_page(printer), 1);
+            assert_eq!(gdi32::end_doc(printer), 1);
+
+            let job = WIN32_PRINT_JOBS
+                .lock()
+                .get(&(job_id as u64))
+                .cloned()
+                .expect("print job");
+            assert!(job.committed);
+            assert_eq!(job.document_name, "phase2-print");
+            assert_eq!(job.pages.len(), 1);
+            assert_eq!(
+                WIN32_PRINTER_QUEUES
+                    .lock()
+                    .get("echOS virtual printer")
+                    .map(|queue| queue.contains(&(job_id as u64))),
+                Some(true)
+            );
+            assert_eq!(gdi32::delete_dc(printer), TRUE);
+        }
+    }
 }

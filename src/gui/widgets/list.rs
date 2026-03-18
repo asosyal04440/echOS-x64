@@ -21,10 +21,15 @@
 //! satırın ekranda sığdığını hesaplar. Yalnızca bu aralıktaki öğeler çizilir;
 //! bu yaklaşım binlerce öğeyi verimli göstermeye olanak tanır.
 
-use super::{Rect, Widget};
+use super::{
+    border_rect_objects, draw_render_objects, solid_rect_object, text_render_object_with_width,
+    AccessRole, AccessState, AccessibilityInfo, Rect, Widget,
+};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject};
 use crate::gui::theme::Theme;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// Listede görüntülenen tek bir satır öğesi.
@@ -187,32 +192,27 @@ impl ListView {
             }
         }
     }
-}
 
-impl Widget for ListView {
-    fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-
-        // Arka plan
-        fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
-
-        // Kenarlık: dört kenar
-        for col in x..(x + w) {
-            fb.plot_pixel(col, y, Theme::BORDER.to_u32());
-            fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
-        }
-        for row in y..(y + h) {
-            fb.plot_pixel(x, row, Theme::BORDER.to_u32());
-            fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
-        }
-
-        // Görünür öğeleri çiz: sanal kaydırma ile yalnızca görünür aralık işlenir.
-        // `scroll_offset..scroll_offset+visible` aralığındaki öğeler çizilir.
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64);
         let visible = self.visible_items();
-        let item_y_start = y + 2;
+        let item_y_start = self.rect.y + 2;
+
+        objects.push(solid_rect_object(
+            base_id,
+            self.rect,
+            Theme::WINDOW_BG.to_u32(),
+            DamageLane::Window,
+            0,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 0x10,
+            self.rect,
+            Theme::BORDER.to_u32(),
+            DamageLane::Window,
+            1,
+        ));
 
         for i in 0..visible {
             let item_index = self.scroll_offset + i;
@@ -221,59 +221,80 @@ impl Widget for ListView {
             }
 
             let item = &self.items[item_index];
-            let item_y = item_y_start + i * self.item_height;
-
-            // Seçili öğe vurgu rengiyle; hover öğe daha hafif rengiyle gösterilir
+            let item_y = item_y_start + (i * self.item_height) as i32;
+            let row_rect = Rect::new(self.rect.x + 1, item_y, self.rect.width - 2, self.item_height as i32);
             if item.selected {
-                fb.draw_rect(
-                    x + 1,
-                    item_y,
-                    w - 2,
-                    self.item_height,
+                objects.push(solid_rect_object(
+                    base_id ^ 0x1000 ^ item_index as u64,
+                    row_rect,
                     Theme::ACCENT_PRIMARY.to_u32(),
-                );
+                    DamageLane::Window,
+                    2,
+                ));
             } else if self.hovered_index == Some(item_index) {
-                fb.draw_rect(
-                    x + 1,
-                    item_y,
-                    w - 2,
-                    self.item_height,
+                objects.push(solid_rect_object(
+                    base_id ^ 0x2000 ^ item_index as u64,
+                    row_rect,
                     Theme::BUTTON_HOVER.to_u32(),
-                );
+                    DamageLane::Window,
+                    2,
+                ));
             }
 
-            // İkon alanı: varsa 16x16 piksel yer tutucu çizilir, metin ötelenir
-            let mut text_x = x + 4;
-            if let Some(_icon) = item.icon {
-                // Draw icon placeholder
-                fb.draw_rect(text_x, item_y + 4, 16, 16, Theme::TEXT_SECONDARY.to_u32());
+            let mut text_x = self.rect.x + 4;
+            if item.icon.is_some() {
+                objects.push(solid_rect_object(
+                    base_id ^ 0x3000 ^ item_index as u64,
+                    Rect::new(text_x, item_y + 4, 16, 16),
+                    Theme::TEXT_SECONDARY.to_u32(),
+                    DamageLane::Window,
+                    3,
+                ));
                 text_x += 20;
             }
 
-            // Metin: dikey ortalama, seçiliyse kontrast renk
-            let text_y = item_y + (self.item_height - 16) / 2;
             let text_color = if item.selected {
                 Theme::DESKTOP_BG.to_u32()
             } else {
                 Theme::TEXT_PRIMARY.to_u32()
             };
-            fb.draw_string(text_x, text_y, &item.text, text_color);
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x4000 ^ item_index as u64,
+                Rect::new(
+                    text_x,
+                    item_y + ((self.item_height as i32 - 16) / 2),
+                    (self.rect.width - (text_x - self.rect.x) - 12).max(1),
+                    18,
+                ),
+                &item.text,
+                text_color,
+                false,
+                DamageLane::Text,
+                4,
+            ));
         }
 
-        // Dikey kaydırma çubuğu göstergesi: öğe sayısı görünür alandan fazlaysa.
-        // Kaydırma çubuğu yüksekliği: `h * visible / items.len()` oranıyla.
-        // `max(20)` minimum yüksekliği garanti eder (çok küçük olmasın).
         if self.items.len() > visible {
-            let scroll_bar_height = (h * visible / self.items.len()).max(20);
-            let scroll_bar_y = y + (h * self.scroll_offset / self.items.len());
-            fb.draw_rect(
-                x + w - 8,
-                scroll_bar_y,
-                6,
-                scroll_bar_height,
+            let h = self.rect.height.max(1) as usize;
+            let scroll_bar_height = (h * visible / self.items.len()).max(20) as i32;
+            let scroll_bar_y = self.rect.y + (h * self.scroll_offset / self.items.len()) as i32;
+            objects.push(solid_rect_object(
+                base_id ^ 0x5000,
+                Rect::new(self.rect.x + self.rect.width - 8, scroll_bar_y, 6, scroll_bar_height),
                 Theme::BUTTON_BG.to_u32(),
-            );
+                DamageLane::Window,
+                5,
+            ));
         }
+
+        objects
+    }
+}
+
+impl Widget for ListView {
+    fn draw(&self, fb: &mut Framebuffer) {
+        let objects = self.render_primitives();
+        draw_render_objects(fb, self.rect, &objects);
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {
@@ -318,6 +339,27 @@ impl Widget for ListView {
 
     fn bounds(&self) -> Rect {
         self.rect
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn accessibility_info(&self) -> AccessibilityInfo<'_> {
+        let mut state = AccessState::empty();
+        if self.selected_index.is_some() {
+            state = state.with(AccessState::SELECTED);
+        }
+        AccessibilityInfo {
+            role: AccessRole::List,
+            label: "list",
+            value: "",
+            state,
+        }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }
 
@@ -504,31 +546,27 @@ impl TreeView {
             None
         }
     }
-}
 
-impl Widget for TreeView {
-    fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-
-        // Arka plan
-        fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
-
-        // Kenarlık
-        for col in x..(x + w) {
-            fb.plot_pixel(col, y, Theme::BORDER.to_u32());
-            fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
-        }
-        for row in y..(y + h) {
-            fb.plot_pixel(x, row, Theme::BORDER.to_u32());
-            fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
-        }
-
-        // Görünür düğümleri çiz: `flattened` düz listesi üzerinden iterasyon
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64) ^ 0x7000_0000;
         let visible = self.visible_items();
-        let item_y_start = y + 2;
+        let item_y_start = self.rect.y + 2;
+
+        objects.push(solid_rect_object(
+            base_id,
+            self.rect,
+            Theme::WINDOW_BG.to_u32(),
+            DamageLane::Window,
+            0,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 0x10,
+            self.rect,
+            Theme::BORDER.to_u32(),
+            DamageLane::Window,
+            1,
+        ));
 
         for i in 0..visible {
             let item_index = self.scroll_offset + i;
@@ -536,36 +574,29 @@ impl Widget for TreeView {
                 break;
             }
 
-            // Tuple destructuring: (id, text, expanded, selected, level)
-            let (id, text, expanded, selected, level) = &self.flattened[item_index];
-            let item_y = item_y_start + i * self.item_height;
-
-            // Seçili veya hover durumu arka plan rengi
+            let (_, text, expanded, selected, level) = &self.flattened[item_index];
+            let item_y = item_y_start + (i * self.item_height) as i32;
+            let row_rect = Rect::new(self.rect.x + 1, item_y, self.rect.width - 2, self.item_height as i32);
             if *selected {
-                fb.draw_rect(
-                    x + 1,
-                    item_y,
-                    w - 2,
-                    self.item_height,
+                objects.push(solid_rect_object(
+                    base_id ^ 0x1000 ^ item_index as u64,
+                    row_rect,
                     Theme::ACCENT_PRIMARY.to_u32(),
-                );
+                    DamageLane::Window,
+                    2,
+                ));
             } else if self.hovered_index == Some(item_index) {
-                fb.draw_rect(
-                    x + 1,
-                    item_y,
-                    w - 2,
-                    self.item_height,
+                objects.push(solid_rect_object(
+                    base_id ^ 0x2000 ^ item_index as u64,
+                    row_rect,
                     Theme::BUTTON_HOVER.to_u32(),
-                );
+                    DamageLane::Window,
+                    2,
+                ));
             }
 
-            // Girintileme: her seviye 16 piksel öteleme yapar.
-            // `level * 16`: kök=0px, birinci alt=16px, ikinci alt=32px vb.
-            let indent = level * 16;
-            let text_x = x + 4 + indent;
-
-            // Genişle/daralt göstergesi: + veya - karakteri.
-            // Sonraki öğenin level'ı bu öğeninkinden büyükse çocuğu var demektir.
+            let indent = (*level as i32) * 16;
+            let text_x = self.rect.x + 4 + indent;
             let has_children = if item_index + 1 < self.flattened.len() {
                 self.flattened[item_index + 1].4 > *level
             } else {
@@ -573,23 +604,46 @@ impl Widget for TreeView {
             };
             if has_children {
                 let indicator = if *expanded { "-" } else { "+" };
-                fb.draw_string(
-                    text_x,
-                    item_y + 3,
+                objects.push(text_render_object_with_width(
+                    base_id ^ 0x3000 ^ item_index as u64,
+                    Rect::new(text_x, item_y + 3, 10, 18),
                     indicator,
                     Theme::TEXT_SECONDARY.to_u32(),
-                );
+                    false,
+                    DamageLane::Text,
+                    3,
+                ));
             }
 
-            // Düğüm metni: girintinin sağına 12 piksel ek boşlukla
-            let text_y = item_y + (self.item_height - 16) / 2;
             let text_color = if *selected {
                 Theme::DESKTOP_BG.to_u32()
             } else {
                 Theme::TEXT_PRIMARY.to_u32()
             };
-            fb.draw_string(text_x + 12, text_y, text, text_color);
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x4000 ^ item_index as u64,
+                Rect::new(
+                    text_x + 12,
+                    item_y + ((self.item_height as i32 - 16) / 2),
+                    (self.rect.width - indent - 24).max(1),
+                    18,
+                ),
+                text,
+                text_color,
+                false,
+                DamageLane::Text,
+                4,
+            ));
         }
+
+        objects
+    }
+}
+
+impl Widget for TreeView {
+    fn draw(&self, fb: &mut Framebuffer) {
+        let objects = self.render_primitives();
+        draw_render_objects(fb, self.rect, &objects);
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {
@@ -728,5 +782,26 @@ impl Widget for TreeView {
 
     fn bounds(&self) -> Rect {
         self.rect
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn accessibility_info(&self) -> AccessibilityInfo<'_> {
+        let mut state = AccessState::empty();
+        if self.selected_id.is_some() {
+            state = state.with(AccessState::SELECTED);
+        }
+        AccessibilityInfo {
+            role: AccessRole::List,
+            label: "tree",
+            value: "",
+            state,
+        }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }

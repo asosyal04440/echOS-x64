@@ -18,6 +18,12 @@ pub type ClientId = u32;
 pub type GpuBufferHandle = u64;
 pub type DamageEpoch = u64;
 pub type FenceId = u64;
+pub type SceneNodeId = u64;
+pub type SceneRootId = u64;
+pub type SceneRevision = u64;
+pub type TextBlobId = u64;
+pub type AtlasId = u64;
+pub type FrameTicket = u64;
 
 pub const MOD_SHIFT: u8 = 1 << 0;
 pub const MOD_CTRL: u8 = 1 << 1;
@@ -56,6 +62,105 @@ pub enum DisplayPresentMode {
     Mailbox,
     VblankFifo,
     AdaptiveSync,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WorkspaceLayout {
+    Dwindle,
+    Master,
+    Floating,
+    Overview,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LayerRole {
+    Background,
+    Bottom,
+    Window,
+    TopBar,
+    Dock,
+    Overlay,
+    Modal,
+    WorkspaceScratchpad,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkspaceRule {
+    pub gaps_in: u16,
+    pub gaps_out: u16,
+    pub border_size: u16,
+    pub rounding: u16,
+    pub decorate: bool,
+    pub persistent: bool,
+    pub default_name: [u8; 16],
+    pub layout: WorkspaceLayout,
+}
+
+impl WorkspaceRule {
+    pub const fn new(default_name: [u8; 16], layout: WorkspaceLayout) -> Self {
+        Self {
+            gaps_in: 10,
+            gaps_out: 18,
+            border_size: 1,
+            rounding: 14,
+            decorate: true,
+            persistent: true,
+            default_name,
+            layout,
+        }
+    }
+
+    pub fn default_name_str(&self) -> String {
+        let len = self
+            .default_name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.default_name.len());
+        String::from(core::str::from_utf8(&self.default_name[..len]).unwrap_or("Workspace"))
+    }
+}
+
+impl Default for WorkspaceRule {
+    fn default() -> Self {
+        Self::new(*b"Workspace\0\0\0\0\0\0\0", WorkspaceLayout::Dwindle)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowFlags {
+    pub floating: bool,
+    pub pseudotile: bool,
+    pub pinned: bool,
+    pub scratchpad: bool,
+    pub decorate: bool,
+}
+
+impl WindowFlags {
+    pub const fn decorated() -> Self {
+        Self {
+            floating: false,
+            pseudotile: false,
+            pinned: false,
+            scratchpad: false,
+            decorate: true,
+        }
+    }
+
+    pub const fn layer_shell() -> Self {
+        Self {
+            floating: true,
+            pseudotile: false,
+            pinned: true,
+            scratchpad: false,
+            decorate: false,
+        }
+    }
+}
+
+impl Default for WindowFlags {
+    fn default() -> Self {
+        Self::decorated()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +210,137 @@ pub enum CompositorPass {
     BaseComposite,
     KawaseBlur { radius: u8, passes: u8 },
     SdfShadow { radius: u8, spread: u8 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DamageLane {
+    Shell,
+    Window,
+    Text,
+    Cursor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidationTarget {
+    TopBar,
+    Dock,
+    Launcher,
+    Overview,
+    QuickSettings,
+    CommandPalette,
+    NotificationCenter,
+    Dialog,
+    ContextMenu,
+    Switcher,
+    LockScreen,
+    WorkspaceViewport,
+    Cursor,
+    Wallpaper,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidationReason {
+    StateChanged,
+    LayoutChanged,
+    AnimationAdvanced,
+    InputHoverChanged,
+    FocusChanged,
+    ThemeChanged,
+    TextChanged,
+    AssetChanged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SceneInvalidation {
+    pub target: InvalidationTarget,
+    pub reason: InvalidationReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellState {
+    ColdBoot,
+    DesktopReady,
+    OverlayInteractive,
+    WorkspaceTransition,
+    Locked,
+    Suspended,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TextRunStyle {
+    Ui,
+    Mono,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenderObjectKind {
+    SolidRect {
+        color: u32,
+        corner_radius: u16,
+    },
+    Raster {
+        width: u32,
+        height: u32,
+        pixels: Vec<u32>,
+    },
+    TextRun {
+        blob_id: TextBlobId,
+        text: String,
+        color: u32,
+        style: TextRunStyle,
+        max_width: u32,
+    },
+    GlyphRun {
+        blob_id: TextBlobId,
+        atlas_id: AtlasId,
+        width: u32,
+        height: u32,
+        pixels: Vec<u32>,
+        color: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderObject {
+    pub object_id: u64,
+    pub bounds: Rect,
+    pub clip: Option<Rect>,
+    pub z_index: u32,
+    pub opacity: u8,
+    pub lane: DamageLane,
+    pub kind: RenderObjectKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneUpdate {
+    pub root_id: SceneRootId,
+    pub revision: SceneRevision,
+    pub render_objects: Vec<RenderObject>,
+    pub damage_hint: Vec<Rect>,
+    pub semantic_root: Option<u64>,
+}
+
+impl SceneUpdate {
+    pub fn canonicalize(&mut self) {
+        self.render_objects
+            .sort_by_key(|object| (object.z_index, object.object_id));
+        self.damage_hint.retain(|rect| !rect.is_empty());
+        self.damage_hint.sort_by_key(|rect| {
+            (
+                rect.y,
+                rect.x,
+                rect.height,
+                rect.width,
+            )
+        });
+        self.damage_hint.dedup();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowBufferMode {
+    Pixels,
+    Scene,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,6 +485,13 @@ pub struct WindowInfo {
     pub minimized: bool,
     pub maximized: bool,
     pub z_index: u32,
+    pub workspace_id: WorkspaceId,
+    pub layer_role: LayerRole,
+    pub flags: WindowFlags,
+    pub scene_node_id: SceneNodeId,
+    pub scene_root: Option<SceneRootId>,
+    pub semantic_root: Option<u64>,
+    pub buffer_mode: WindowBufferMode,
 }
 
 /// Generic key/button state.
@@ -310,7 +553,9 @@ pub enum ShellShortcut {
     Workspace(WorkspaceId),
     ToggleCommandPalette,
     ToggleQuickSettings,
-    CycleStageSet,
+    ToggleOverview,
+    ToggleScratchpad,
+    LaunchTerminal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -456,10 +701,20 @@ pub struct PermissionEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub workspace_id: WorkspaceId,
+    pub workspace_layout: WorkspaceLayout,
     pub power_state: SessionPowerState,
     pub unread_notifications: u32,
     pub apps_running: u32,
     pub apps_crashed: u32,
+    pub overview_active: bool,
+    pub scratchpad_visible: bool,
+    pub shell_ready: bool,
+    pub boot_clean_desktop: bool,
+    pub output_scale: u32,
+    pub text_scale: u32,
+    pub locale: String,
+    pub theme_variant: String,
+    pub shell_state: ShellState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

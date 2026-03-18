@@ -11,13 +11,8 @@ const DOCK_ICON_COUNT: usize = 5;
 const DOCK_ICON_SIZE: i32 = 32;
 const DOCK_ICON_GAP: i32 = 14;
 
-const ICON_COLORS: [u32; DOCK_ICON_COUNT] = [
-    0xFF26E6C6,
-    0xFF5AB3FF,
-    0xFFFFB84D,
-    0xFFFF6B6B,
-    0xFF7FE6A6,
-];
+const ICON_COLORS: [u32; DOCK_ICON_COUNT] =
+    [0xFF26E6C6, 0xFF5AB3FF, 0xFFFFB84D, 0xFFFF6B6B, 0xFF7FE6A6];
 
 pub fn desktop_work_area(screen: Rect) -> Rect {
     screen.inset(24, HALO_BAR_HEIGHT + 18, 24, PULSE_DOCK_HEIGHT + 30)
@@ -46,9 +41,14 @@ pub fn draw_wallpaper_backdrop(fb: &mut Framebuffer, screen: Rect, clip: Rect, m
 
     for y in clipped.y.max(0) as usize..clipped.bottom().max(0) as usize {
         let t = (y * 255) / height;
-        let base = lerp_color(tokens.surfaces.desktop_top, tokens.surfaces.desktop_bottom, t as u8);
+        let base = lerp_color(
+            tokens.surfaces.desktop_top,
+            tokens.surfaces.desktop_bottom,
+            t as u8,
+        );
         for x in clipped.x.max(0) as usize..clipped.right().max(0) as usize {
-            let grain = ((((x as u32).wrapping_mul(13)) ^ ((y as u32).wrapping_mul(29))) & 0x07) as i16 - 3;
+            let grain =
+                ((((x as u32).wrapping_mul(13)) ^ ((y as u32).wrapping_mul(29))) & 0x07) as i16 - 3;
             let mut color = Theme::shade(base, grain);
             color = blend_glow(
                 color,
@@ -73,15 +73,14 @@ pub fn draw_wallpaper_backdrop(fb: &mut Framebuffer, screen: Rect, clip: Rect, m
     }
 }
 
-pub fn draw_halo_bar(
-    fb: &mut Framebuffer,
-    screen: Rect,
-    clip: Rect,
-    mode: ThemeMode,
-    title: &str,
-) {
+pub fn draw_halo_bar(fb: &mut Framebuffer, screen: Rect, clip: Rect, mode: ThemeMode, title: &str) {
     let tokens = Theme::tokens(mode);
-    let rect = Rect::new(18, 12, screen.width.saturating_sub(36), Theme::HALO_BAR_HEIGHT as u32);
+    let rect = Rect::new(
+        18,
+        12,
+        screen.width.saturating_sub(36),
+        Theme::HALO_BAR_HEIGHT as u32,
+    );
     fill_blended_rect(fb, rect, clip, tokens.surfaces.halo_bar, 0xD0);
     draw_rect_outline_clipped(fb, rect, clip, tokens.borders.subtle);
 
@@ -277,13 +276,7 @@ pub fn draw_rect_outline_clipped(fb: &mut Framebuffer, rect: Rect, clip: Rect, c
     );
 }
 
-pub fn fill_blended_rect(
-    fb: &mut Framebuffer,
-    rect: Rect,
-    clip: Rect,
-    color: u32,
-    alpha: u8,
-) {
+pub fn fill_blended_rect(fb: &mut Framebuffer, rect: Rect, clip: Rect, color: u32, alpha: u8) {
     let Some(clipped) = rect.intersection(&clip) else {
         return;
     };

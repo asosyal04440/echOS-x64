@@ -55,6 +55,8 @@
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+use std::io::{self, Write as IoWrite};
 use x86_64::instructions::port::Port;
 
 /// Serial port yapısı.
@@ -216,6 +218,12 @@ static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 /// `SERIAL1`'in kilidini alarak `init()` metodunu çağırır.
 /// Baud rate, frame format ve FIFO ayarlarını yapar.
 pub fn init() {
+    #[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+    {
+        return;
+    }
+
+    #[cfg(any(target_os = "none", target_os = "uefi"))]
     SERIAL1.lock().init();
 }
 
@@ -227,12 +235,22 @@ pub fn init() {
 /// Bu, IRQ bağlamında `serial_print!` kullanıldığında deadlock'u önler.
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    use core::fmt::Write;
-    use x86_64::instructions::interrupts;
+    #[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+    {
+        let mut stderr = io::stderr().lock();
+        let _ = stderr.write_fmt(args);
+        return;
+    }
 
-    interrupts::without_interrupts(|| {
-        SERIAL1.lock().write_fmt(args).unwrap();
-    });
+    #[cfg(any(target_os = "none", target_os = "uefi"))]
+    {
+        use core::fmt::Write;
+        use x86_64::instructions::interrupts;
+
+        interrupts::without_interrupts(|| {
+            SERIAL1.lock().write_fmt(args).unwrap();
+        });
+    }
 }
 
 /// İç kullanım için meta bilgili print fonksiyonu.
@@ -281,9 +299,9 @@ macro_rules! serial_print {
 /// - `serial_println!("değer: {}", x)` - format argümanları ile
 #[macro_export]
 macro_rules! serial_println {
-    () => ($crate::serial::uart::_print_with_meta(format_args!(""), file!(), line!(), module_path!()));
-    ($fmt:expr) => ($crate::serial::uart::_print_with_meta(format_args!($fmt), file!(), line!(), module_path!()));
-    ($fmt:expr, $($arg:tt)*) => ($crate::serial::uart::_print_with_meta(format_args!($fmt, $($arg)*), file!(), line!(), module_path!()));
+    () => ($crate::serial::uart::_print_with_meta_hostsafe(format_args!(""), file!(), line!(), module_path!()));
+    ($fmt:expr) => ($crate::serial::uart::_print_with_meta_hostsafe(format_args!($fmt), file!(), line!(), module_path!()));
+    ($fmt:expr, $($arg:tt)*) => ($crate::serial::uart::_print_with_meta_hostsafe(format_args!($fmt, $($arg)*), file!(), line!(), module_path!()));
 }
 
 /// `println!` makrosunu serial porta yönlendirir.
@@ -296,4 +314,25 @@ macro_rules! println {
     () => ($crate::serial_println!());
     ($fmt:expr) => ($crate::serial_println!($fmt));
     ($fmt:expr, $($arg:tt)*) => ($crate::serial_println!($fmt, $($arg)*));
+}
+
+#[doc(hidden)]
+pub fn _print_with_meta_hostsafe(
+    args: fmt::Arguments,
+    file: &'static str,
+    line: u32,
+    module: &'static str,
+) {
+    #[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+    {
+        let seq = LOG_SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut stderr = io::stderr().lock();
+        let _ = stderr.write_fmt(format_args!("[{} {}:{} {}] ", seq, file, line, module));
+        let _ = stderr.write_fmt(args);
+        let _ = stderr.write_all(b"\n");
+        return;
+    }
+
+    #[cfg(any(target_os = "none", target_os = "uefi"))]
+    _print_with_meta(args, file, line, module);
 }

@@ -135,7 +135,9 @@ impl LoginScreen {
             date_string: String::from("Monday, January 1"),
             blur_amount: 0.0,
         };
-        login.users.push(UserAccount::admin(1, "admin", "Administrator"));
+        login
+            .users
+            .push(UserAccount::admin(1, "admin", "Administrator"));
         login.users.push(UserAccount::new(2, "user", "User"));
         login.users.push(UserAccount::guest());
         login
@@ -235,7 +237,11 @@ impl LoginScreen {
             screen,
             screen,
             Theme::tokens(ThemeMode::Dark).surfaces.overlay,
-            if self.state == LoginState::Locked { 0x88 } else { 0x70 },
+            if self.state == LoginState::Locked {
+                0x88
+            } else {
+                0x70
+            },
         );
 
         match self.state {
@@ -255,7 +261,12 @@ impl LoginScreen {
     fn draw_boot_screen(&self, fb: &mut Framebuffer) {
         let screen = Rect::new(0, 0, self.screen_width as u32, self.screen_height as u32);
         let center_x = self.screen_width as i32 / 2;
-        let panel = Rect::new(center_x - 180, self.screen_height as i32 / 2 - 110, 360, 180);
+        let panel = Rect::new(
+            center_x - 180,
+            self.screen_height as i32 / 2 - 110,
+            360,
+            180,
+        );
         let beam = Rect::new(panel.x + 40, panel.y + 92, 280, 6);
         shell::fill_blended_rect(
             fb,
@@ -280,7 +291,10 @@ impl LoginScreen {
             beam.height,
         );
         shell::fill_rect_clipped(fb, fill, screen, Theme::ACCENT_PRIMARY.to_u32());
-        let status = alloc::format!("Starting shell runtime   {:>3}%", (self.boot_progress * 100.0) as u32);
+        let status = alloc::format!(
+            "Starting shell runtime   {:>3}%",
+            (self.boot_progress * 100.0) as u32
+        );
         fb.draw_string(
             (center_x - 104).max(0) as usize,
             (beam.y + 18).max(0) as usize,
@@ -314,7 +328,11 @@ impl LoginScreen {
                 x,
                 users_y,
                 user,
-                if self.hovered_user == Some(index) { 1.08 } else { 1.0 },
+                if self.hovered_user == Some(index) {
+                    1.08
+                } else {
+                    1.0
+                },
                 self.hovered_user == Some(index),
             );
         }
@@ -387,7 +405,13 @@ impl LoginScreen {
         for dot in 0..dot_count {
             let dot_x = dots_start + dot * dot_spacing;
             let dot_y = field_y + PASSWORD_HEIGHT as i32 / 2 - 3;
-            fb.draw_rect(dot_x.max(0) as usize, dot_y.max(0) as usize, 6, 6, Theme::TEXT_PRIMARY.to_u32());
+            fb.draw_rect(
+                dot_x.max(0) as usize,
+                dot_y.max(0) as usize,
+                6,
+                6,
+                Theme::TEXT_PRIMARY.to_u32(),
+            );
         }
 
         if self.cursor_visible && self.state != LoginState::Authenticating {
@@ -419,7 +443,11 @@ impl LoginScreen {
         }
 
         if self.state == LoginState::Authenticating {
-            self.draw_spinner(fb, self.screen_width / 2, (field_y + PASSWORD_HEIGHT as i32 + 48).max(0) as usize);
+            self.draw_spinner(
+                fb,
+                self.screen_width / 2,
+                (field_y + PASSWORD_HEIGHT as i32 + 48).max(0) as usize,
+            );
         }
 
         fb.draw_string(
@@ -550,7 +578,12 @@ impl LoginScreen {
     }
 
     fn draw_shutdown_menu(&self, fb: &mut Framebuffer) {
-        let rect = Rect::new(self.screen_width as i32 / 2 - 100, self.screen_height as i32 - 140, 200, 100);
+        let rect = Rect::new(
+            self.screen_width as i32 / 2 - 100,
+            self.screen_height as i32 - 140,
+            200,
+            100,
+        );
         let screen = Rect::new(0, 0, self.screen_width as u32, self.screen_height as u32);
         shell::fill_blended_rect(
             fb,
@@ -561,18 +594,33 @@ impl LoginScreen {
         );
         shell::draw_rect_outline_clipped(fb, rect, screen, Theme::BORDER.to_u32());
         for (index, label) in ["Shutdown", "Restart", "Lock"].iter().enumerate() {
-            let row = Rect::new(rect.x + 8, rect.y + 8 + index as i32 * 28, rect.width - 16, 22);
+            let row = Rect::new(
+                rect.x + 8,
+                rect.y + 8 + index as i32 * 28,
+                rect.width - 16,
+                22,
+            );
             shell::fill_rect_clipped(
                 fb,
                 row,
                 screen,
                 if index == 2 {
-                    Theme::button_fill(crate::gui::theme::ButtonRole::Secondary, ThemeMode::Dark, false, true)
+                    Theme::button_fill(
+                        crate::gui::theme::ButtonRole::Secondary,
+                        ThemeMode::Dark,
+                        false,
+                        true,
+                    )
                 } else {
                     Theme::SIDEBAR_BG.to_u32()
                 },
             );
-            fb.draw_string((row.x + 10).max(0) as usize, (row.y + 5).max(0) as usize, label, Theme::TEXT_PRIMARY.to_u32());
+            fb.draw_string(
+                (row.x + 10).max(0) as usize,
+                (row.y + 5).max(0) as usize,
+                label,
+                Theme::TEXT_PRIMARY.to_u32(),
+            );
         }
     }
 
@@ -604,7 +652,12 @@ impl LoginScreen {
                 }
 
                 if self.show_shutdown_menu {
-                    let rect = Rect::new(self.screen_width as i32 / 2 - 100, self.screen_height as i32 - 140, 200, 100);
+                    let rect = Rect::new(
+                        self.screen_width as i32 / 2 - 100,
+                        self.screen_height as i32 - 140,
+                        200,
+                        100,
+                    );
                     if mx >= rect.x && mx < rect.right() && my >= rect.y && my < rect.bottom() {
                         match ((my - rect.y - 8) / 28) as usize {
                             0 => return LoginEvent::Shutdown,
@@ -621,7 +674,11 @@ impl LoginScreen {
             LoginState::PasswordEntry | LoginState::AuthFailed => {
                 let field_x = self.screen_width as i32 / 2 - PASSWORD_WIDTH as i32 / 2;
                 let field_y = self.screen_height as i32 / 2 + 8;
-                if mx >= field_x - 60 && mx < field_x && my >= field_y && my < field_y + PASSWORD_HEIGHT as i32 {
+                if mx >= field_x - 60
+                    && mx < field_x
+                    && my >= field_y
+                    && my < field_y + PASSWORD_HEIGHT as i32
+                {
                     self.go_back();
                 }
             }

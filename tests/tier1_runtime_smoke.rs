@@ -1,17 +1,16 @@
 #![cfg(not(target_os = "none"))]
 
+use ech_os::drivers::async_traits::{AsyncBlockDevice, DmaBuffer};
 use ech_os::drivers::drm::{
-    AtomicKmsTransaction, DrmConnector, DrmConnectorStatus, DrmCrtc, DrmDevice, DrmMode, DrmPlane,
-    DrmPlaneType, DmaReservationUsage, GPUBufferHandle, PlaneCandidate,
+    AtomicKmsTransaction, DmaReservationUsage, DrmConnector, DrmConnectorStatus, DrmCrtc,
+    DrmDevice, DrmMode, DrmPlane, DrmPlaneType, GPUBufferHandle, PlaneCandidate,
 };
 use ech_os::drivers::iommu::{IommuUnit, IommuVendor};
 use ech_os::drivers::nic_native::NicNativeDevice;
 use ech_os::drivers::nvme::NvmeAsyncBlockDevice;
-use ech_os::drivers::async_traits::{AsyncBlockDevice, DmaBuffer};
 use ech_os::gui::protocol::{DisplayPresentMode, Rect};
 use ech_os::net::io_uring::{
-    IoUring, IoUringParams, IoUringRegisteredBuffer, IoUringSqe, IORING_OP_NOP,
-    IORING_SETUP_SQPOLL,
+    IoUring, IoUringParams, IoUringRegisteredBuffer, IoUringSqe, IORING_OP_NOP, IORING_SETUP_SQPOLL,
 };
 use ech_os::task::ghost::{
     active_policy, commit_policy, note_policy_dispatch, policy_snapshot, register_agent,
@@ -94,7 +93,10 @@ fn iommu_smoke() {
     assert_eq!(snapshot.completed_page_replays, 1);
     assert_eq!(snapshot.invalidation_records, 1);
     assert_eq!(
-        domain.translate_gpuva(77, 0x4000_0100).expect("gpuva lookup").phys_addr,
+        domain
+            .translate_gpuva(77, 0x4000_0100)
+            .expect("gpuva lookup")
+            .phys_addr,
         0x8000
     );
     println!("smoke:iommu:ok");
@@ -293,7 +295,8 @@ fn nvme_async_smoke() {
     let mmio_ptr = Box::leak(mmio).as_mut_ptr() as u64;
     let sq_ptr = Box::leak(sq).as_mut_ptr() as u64;
     let cq_ptr = Box::leak(cq).as_mut_ptr() as u64;
-    let nvme = NvmeAsyncBlockDevice::from_raw_queue(1, 4096, 1024, mmio_ptr, sq_ptr, cq_ptr, 8, 0, 4);
+    let nvme =
+        NvmeAsyncBlockDevice::from_raw_queue(1, 4096, 1024, mmio_ptr, sq_ptr, cq_ptr, 8, 0, 4);
     let dma = DmaBuffer {
         vaddr: 0x1000,
         paddr: 0x2000,

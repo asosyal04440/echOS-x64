@@ -522,8 +522,9 @@ fn prepare_activation_manifest(
         return Err(DriverActivationError::UnsignedRejected);
     }
 
-    let desc = ironshim_rs::parse_pci_function(&crate::shim_layer::EchOsPciConfig, bus, device, function)
-        .map_err(|_| DriverActivationError::PciParseFailed)?;
+    let desc =
+        ironshim_rs::parse_pci_function(&crate::shim_layer::EchOsPciConfig, bus, device, function)
+            .map_err(|_| DriverActivationError::PciParseFailed)?;
     let (mmio, mmio_count, ports, port_count) =
         crate::ironshim_bridge::extract_manifest_from_bars(&desc.bars, desc.bar_len);
     if mmio_count == 0 && port_count == 0 {
@@ -742,13 +743,15 @@ pub fn compatibility_matrix() -> Vec<DriverCompatibilityRow> {
     let mut rows: BTreeMap<DriverFamily, DriverCompatibilityRow> = BTreeMap::new();
 
     for reg in registry.values() {
-        let row = rows.entry(reg.onboarding.family).or_insert(DriverCompatibilityRow {
-            family: reg.onboarding.family,
-            discovered: 0,
-            active: 0,
-            failed: 0,
-            disabled: 0,
-        });
+        let row = rows
+            .entry(reg.onboarding.family)
+            .or_insert(DriverCompatibilityRow {
+                family: reg.onboarding.family,
+                discovered: 0,
+                active: 0,
+                failed: 0,
+                disabled: 0,
+            });
         row.discovered = row.discovered.saturating_add(1);
         match reg.state {
             DriverState::Active => row.active = row.active.saturating_add(1),
@@ -841,10 +844,7 @@ pub fn driver_detail(driver_id: u32) -> Option<String> {
     ));
     out.push_str(&format!("  Tier:      {}\n", reg.tier));
     out.push_str(&format!("  Family:    {}\n", reg.onboarding.family));
-    out.push_str(&format!(
-        "  Lane:      {}\n",
-        reg.onboarding.parallel_lane
-    ));
+    out.push_str(&format!("  Lane:      {}\n", reg.onboarding.parallel_lane));
     out.push_str(&format!(
         "  eLS src:   {}\n",
         reg.onboarding.requires_els_source_compat

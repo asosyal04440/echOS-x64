@@ -28,6 +28,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -583,7 +584,13 @@ pub enum FatError {
 
 use spin::Mutex;
 
-static FAT32_INSTANCES: Mutex<Vec<Fat32Fs>> = Mutex::new(Vec::new());
+#[derive(Clone, Debug)]
+pub struct MountedFat32 {
+    pub fs: Fat32Fs,
+    pub image: Arc<Vec<u8>>,
+}
+
+static FAT32_INSTANCES: Mutex<Vec<MountedFat32>> = Mutex::new(Vec::new());
 static EXFAT_INSTANCES: Mutex<Vec<ExFatFs>> = Mutex::new(Vec::new());
 
 /// Önyükleme sektöründen dosya sistemi türünü tespit eder
@@ -624,7 +631,10 @@ pub fn init() {
 pub fn mount_fat32(data: &[u8]) -> Option<usize> {
     let fs = Fat32Fs::parse(data)?;
     let mut instances = FAT32_INSTANCES.lock();
-    instances.push(fs);
+    instances.push(MountedFat32 {
+        fs,
+        image: Arc::new(data.to_vec()),
+    });
     Some(instances.len() - 1)
 }
 
@@ -638,6 +648,14 @@ pub fn mount_exfat(data: &[u8]) -> Option<usize> {
 
 /// İndekse göre FAT32 örneğini döndürür
 pub fn get_fat32(index: usize) -> Option<Fat32Fs> {
+    FAT32_INSTANCES
+        .lock()
+        .get(index)
+        .map(|mounted| mounted.fs.clone())
+}
+
+/// Indekse gore imaj destekli FAT32 ornegini dondurur
+pub fn get_mounted_fat32(index: usize) -> Option<MountedFat32> {
     FAT32_INSTANCES.lock().get(index).cloned()
 }
 

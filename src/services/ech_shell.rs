@@ -10,6 +10,7 @@ use spin::Mutex;
 use crate::gui::protocol::{
     AccessibilityNode, AppHealth, AppId, DesktopPermission, FileGrant, PermissionEntry,
     PermissionState, SessionPowerState, SessionSnapshot, ShellAppEntry, WindowId, WorkspaceId,
+    WorkspaceLayout, WorkspaceRule,
 };
 
 #[derive(Clone, Debug)]
@@ -91,6 +92,22 @@ pub enum ShellCommand {
         workspace_id: WorkspaceId,
     },
     GetWorkspace,
+    SetWorkspaceLayout {
+        workspace_id: WorkspaceId,
+        layout: WorkspaceLayout,
+    },
+    GetWorkspaceLayout {
+        workspace_id: WorkspaceId,
+    },
+    SetWorkspaceRule {
+        workspace_id: WorkspaceId,
+        rule: WorkspaceRule,
+    },
+    GetWorkspaceRule {
+        workspace_id: WorkspaceId,
+    },
+    ToggleScratchpad,
+    ToggleOverview,
     SetPowerState {
         power_state: SessionPowerState,
     },
@@ -103,6 +120,9 @@ pub enum ShellResponse {
     Ack,
     Apps(Vec<ShellAppEntry>),
     Workspace(WorkspaceId),
+    WorkspaceLayout(WorkspaceLayout),
+    WorkspaceRule(WorkspaceRule),
+    ToggleState(bool),
     Permission(PermissionState),
     Permissions(Vec<PermissionEntry>),
     FileAccess(bool),
@@ -116,6 +136,10 @@ pub struct EchShell {
     running: AtomicBool,
     workspace_id: Mutex<WorkspaceId>,
     power_state: Mutex<SessionPowerState>,
+    workspace_layouts: Mutex<BTreeMap<WorkspaceId, WorkspaceLayout>>,
+    workspace_rules: Mutex<BTreeMap<WorkspaceId, WorkspaceRule>>,
+    overview_active: AtomicBool,
+    scratchpad_visible: AtomicBool,
     unread_notifications: Mutex<u32>,
     apps: Mutex<BTreeMap<AppId, ShellAppEntry>>,
     permissions: Mutex<BTreeMap<AppId, BTreeMap<DesktopPermission, PermissionState>>>,
@@ -131,6 +155,10 @@ impl EchShell {
             running: AtomicBool::new(false),
             workspace_id: Mutex::new(0),
             power_state: Mutex::new(SessionPowerState::Active),
+            workspace_layouts: Mutex::new(BTreeMap::new()),
+            workspace_rules: Mutex::new(BTreeMap::new()),
+            overview_active: AtomicBool::new(false),
+            scratchpad_visible: AtomicBool::new(false),
             unread_notifications: Mutex::new(0),
             apps: Mutex::new(BTreeMap::new()),
             permissions: Mutex::new(BTreeMap::new()),
@@ -435,6 +463,45 @@ impl EchShell {
                 ShellResponse::Ack
             }
             ShellCommand::GetWorkspace => ShellResponse::Workspace(*self.workspace_id.lock()),
+            ShellCommand::SetWorkspaceLayout {
+                workspace_id,
+                layout,
+            } => {
+                self.workspace_layouts.lock().insert(workspace_id, layout);
+                ShellResponse::Ack
+            }
+            ShellCommand::GetWorkspaceLayout { workspace_id } => {
+                let layout = self
+                    .workspace_layouts
+                    .lock()
+                    .get(&workspace_id)
+                    .copied()
+                    .unwrap_or(WorkspaceLayout::Dwindle);
+                ShellResponse::WorkspaceLayout(layout)
+            }
+            ShellCommand::SetWorkspaceRule { workspace_id, rule } => {
+                self.workspace_rules.lock().insert(workspace_id, rule);
+                ShellResponse::Ack
+            }
+            ShellCommand::GetWorkspaceRule { workspace_id } => {
+                let rule = self
+                    .workspace_rules
+                    .lock()
+                    .get(&workspace_id)
+                    .copied()
+                    .unwrap_or_else(WorkspaceRule::default);
+                ShellResponse::WorkspaceRule(rule)
+            }
+            ShellCommand::ToggleScratchpad => {
+                let next = !self.scratchpad_visible.load(Ordering::Acquire);
+                self.scratchpad_visible.store(next, Ordering::Release);
+                ShellResponse::ToggleState(next)
+            }
+            ShellCommand::ToggleOverview => {
+                let next = !self.overview_active.load(Ordering::Acquire);
+                self.overview_active.store(next, Ordering::Release);
+                ShellResponse::ToggleState(next)
+            }
             ShellCommand::SetPowerState { power_state } => {
                 *self.power_state.lock() = power_state;
                 ShellResponse::Ack
@@ -446,12 +513,37 @@ impl EchShell {
                     .values()
                     .filter(|entry| entry.health == AppHealth::Crashed)
                     .count() as u32;
+                let workspace_id = *self.workspace_id.lock();
+                let workspace_layout = self
+                    .workspace_layouts
+                    .lock()
+                    .get(&workspace_id)
+                    .copied()
+                    .unwrap_or(WorkspaceLayout::Dwindle);
+                let power_state = *self.power_state.lock();
+                let shell_state = if power_state == SessionPowerState::Locked {
+                    crate::gui::protocol::ShellState::Locked
+                } else if self.overview_active.load(Ordering::Acquire) {
+                    crate::gui::protocol::ShellState::OverlayInteractive
+                } else {
+                    crate::gui::protocol::ShellState::DesktopReady
+                };
                 ShellResponse::SessionSnapshot(SessionSnapshot {
-                    workspace_id: *self.workspace_id.lock(),
-                    power_state: *self.power_state.lock(),
+                    workspace_id,
+                    workspace_layout,
+                    power_state,
                     unread_notifications: *self.unread_notifications.lock(),
                     apps_running,
                     apps_crashed,
+                    overview_active: self.overview_active.load(Ordering::Acquire),
+                    scratchpad_visible: self.scratchpad_visible.load(Ordering::Acquire),
+                    shell_ready: self.running.load(Ordering::Acquire),
+                    boot_clean_desktop: apps_running == 0,
+                    output_scale: 1,
+                    text_scale: 1,
+                    locale: String::from("en-US"),
+                    theme_variant: String::from("hybrid-titan"),
+                    shell_state,
                 })
             }
             ShellCommand::ListApps => {

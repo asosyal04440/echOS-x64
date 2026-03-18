@@ -27,12 +27,12 @@ impl ScrollMomentum {
         // Çok hızlı kaydırmada hız artar
         self.velocity_x += dx * 2.0;
         self.velocity_y += dy * 2.0;
-        
+
         // Hız limiti (clamp)
         let max_v = 100.0;
         self.velocity_x = self.velocity_x.clamp(-max_v, max_v);
         self.velocity_y = self.velocity_y.clamp(-max_v, max_v);
-        
+
         self.active = true;
     }
 
@@ -51,7 +51,7 @@ impl ScrollMomentum {
         } else {
             4.0
         };
-        
+
         // Hızı azalt (exponential decay)
         let decay = 1.0 - (friction * dt).min(1.0);
         self.velocity_x *= decay;
@@ -70,15 +70,15 @@ impl ScrollMomentum {
         // 60.0 çarpanı, hızı piksel/frame cinsinden normalize etmek için
         let move_x = (self.velocity_x * dt * 60.0).clamp(-self.max_step_px, self.max_step_px);
         let move_y = (self.velocity_y * dt * 60.0).clamp(-self.max_step_px, self.max_step_px);
-        
+
         (move_x, move_y)
     }
-    
+
     /// Momentum aktif mi?
     pub fn is_active(&self) -> bool {
         self.active
     }
-    
+
     /// Hızı sıfırla (örn. kullanıcı tıkladığında durdurmak için)
     pub fn stop(&mut self) {
         self.velocity_x = 0.0;

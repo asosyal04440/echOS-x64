@@ -96,12 +96,12 @@ pub const VTD_PRS_REG: u32 = 0xD8;
 pub const VTD_PECTL_REG: u32 = 0xE0;
 
 // VT-d Global Komut Bitleri
-pub const VTD_GCMD_TE: u32 = 1 << 31;     // Çeviriyi etkinleştir (Translation Enable)
-pub const VTD_GCMD_SRTP: u32 = 1 << 30;   // Kök tablo pointer'ını ayarla
-pub const VTD_GCMD_WBF: u32 = 1 << 27;    // Yazma tamponu temizleme (Write Buffer Flush)
-pub const VTD_GCMD_QIE: u32 = 1 << 26;    // Geçersiz kılma kuyruğunu etkinleştir
-pub const VTD_GCMD_IRE: u32 = 1 << 25;    // Kesme yeniden yönlendirmeyi etkinleştir
-pub const VTD_GCMD_EAFL: u32 = 1 << 24;   // Gelişmiş hata kaydını etkinleştir
+pub const VTD_GCMD_TE: u32 = 1 << 31; // Çeviriyi etkinleştir (Translation Enable)
+pub const VTD_GCMD_SRTP: u32 = 1 << 30; // Kök tablo pointer'ını ayarla
+pub const VTD_GCMD_WBF: u32 = 1 << 27; // Yazma tamponu temizleme (Write Buffer Flush)
+pub const VTD_GCMD_QIE: u32 = 1 << 26; // Geçersiz kılma kuyruğunu etkinleştir
+pub const VTD_GCMD_IRE: u32 = 1 << 25; // Kesme yeniden yönlendirmeyi etkinleştir
+pub const VTD_GCMD_EAFL: u32 = 1 << 24; // Gelişmiş hata kaydını etkinleştir
 
 // AMD-Vi yazmaç ofseti haritası
 pub const AMDVI_CONTROL_REG: u32 = 0x00;
@@ -127,72 +127,72 @@ pub const AMDVI_PPR_RESPONSE_FAILURE: u32 = 2;
 // ============================================================================
 
 // PCIe Capability IDs
-pub const PCI_CAP_ID_ACS: u8 = 0x0D;        // Access Control Services
-pub const PCI_CAP_ID_ATS: u8 = 0x0F;        // Address Translation Services
-pub const PCI_CAP_ID_PRI: u8 = 0x13;        // Page Request Interface
+pub const PCI_CAP_ID_ACS: u8 = 0x0D; // Access Control Services
+pub const PCI_CAP_ID_ATS: u8 = 0x0F; // Address Translation Services
+pub const PCI_CAP_ID_PRI: u8 = 0x13; // Page Request Interface
 
 // ATS Capability Register Bits
-pub const ATS_CAP_QDEP_SHIFT: u8 = 4;       // Invalidate Queue Depth shift
+pub const ATS_CAP_QDEP_SHIFT: u8 = 4; // Invalidate Queue Depth shift
 pub const ATS_CAP_QDEP_MASK: u32 = 0x1F << ATS_CAP_QDEP_SHIFT;
-pub const ATS_CAP_PAGE_ALIGNED: u32 = 1 << 0;  // Page Aligned Request bit
+pub const ATS_CAP_PAGE_ALIGNED: u32 = 1 << 0; // Page Aligned Request bit
 
 // ATS Control Register Bits
-pub const ATS_CTRL_ENABLE: u32 = 1 << 31;   // ATS Enable bit
-pub const ATS_CTRL_STU_SHIFT: u8 = 16;      // Smallest Translation Unit shift
+pub const ATS_CTRL_ENABLE: u32 = 1 << 31; // ATS Enable bit
+pub const ATS_CTRL_STU_SHIFT: u8 = 16; // Smallest Translation Unit shift
 pub const ATS_CTRL_STU_MASK: u32 = 0x1F << ATS_CTRL_STU_SHIFT;
 
 // PRI (Page Request Interface) Control Register Bits
-pub const PRI_CTRL_ENABLE: u32 = 1 << 31;   // PRI Enable bit
-pub const PRI_CTRL_RESET: u32 = 1 << 30;    // PRI Reset bit
+pub const PRI_CTRL_ENABLE: u32 = 1 << 31; // PRI Enable bit
+pub const PRI_CTRL_RESET: u32 = 1 << 30; // PRI Reset bit
 
 // ============================================================================
 // ARM SMMUv3 SABİTLERİ
 // ============================================================================
 
 // SMMUv3 Register Offsets (relative to SMMU base address)
-pub const SMMU_IDR0: u32 = 0x0000;          // Identification Register 0
-pub const SMMU_IDR1: u32 = 0x0004;          // Identification Register 1
-pub const SMMU_IDR3: u32 = 0x000C;          // Identification Register 3
-pub const SMMU_CR0: u32 = 0x0020;           // Control Register 0
-pub const SMMU_CR0ACK: u32 = 0x0024;        // Control Register 0 Acknowledge
-pub const SMMU_CR2: u32 = 0x0028;           // Control Register 2
-pub const SMMU_GBPA: u32 = 0x0044;          // Global Buffer Performance Abort
-pub const SMMU_IRQ_CTRL: u32 = 0x0050;      // Interrupt Control
-pub const SMMU_IRQ_CTRLACK: u32 = 0x0054;   // Interrupt Control Acknowledge
-pub const SMMU_GERROR: u32 = 0x0060;        // Global Error
-pub const SMMU_GERRORN: u32 = 0x0064;       // Global Error Non-secure
-pub const SMMU_GERROR_IRQ_CFG0: u32 = 0x0070;  // Global Error IRQ Config 0
+pub const SMMU_IDR0: u32 = 0x0000; // Identification Register 0
+pub const SMMU_IDR1: u32 = 0x0004; // Identification Register 1
+pub const SMMU_IDR3: u32 = 0x000C; // Identification Register 3
+pub const SMMU_CR0: u32 = 0x0020; // Control Register 0
+pub const SMMU_CR0ACK: u32 = 0x0024; // Control Register 0 Acknowledge
+pub const SMMU_CR2: u32 = 0x0028; // Control Register 2
+pub const SMMU_GBPA: u32 = 0x0044; // Global Buffer Performance Abort
+pub const SMMU_IRQ_CTRL: u32 = 0x0050; // Interrupt Control
+pub const SMMU_IRQ_CTRLACK: u32 = 0x0054; // Interrupt Control Acknowledge
+pub const SMMU_GERROR: u32 = 0x0060; // Global Error
+pub const SMMU_GERRORN: u32 = 0x0064; // Global Error Non-secure
+pub const SMMU_GERROR_IRQ_CFG0: u32 = 0x0070; // Global Error IRQ Config 0
 
 // SMMU Stream Table and Context Descriptors
-pub const SMMU_STRTAB_BASE: u32 = 0x0080;   // Stream Table Base
+pub const SMMU_STRTAB_BASE: u32 = 0x0080; // Stream Table Base
 pub const SMMU_STRTAB_BASE_CFG: u32 = 0x0088; // Stream Table Base Config
 
 // SMMU Command Queue
-pub const SMMU_CMDQ_BASE: u32 = 0x0090;     // Command Queue Base
-pub const SMMU_CMDQ_PROD: u32 = 0x0098;     // Command Queue Producer
-pub const SMMU_CMDQ_CONS: u32 = 0x009C;     // Command Queue Consumer
+pub const SMMU_CMDQ_BASE: u32 = 0x0090; // Command Queue Base
+pub const SMMU_CMDQ_PROD: u32 = 0x0098; // Command Queue Producer
+pub const SMMU_CMDQ_CONS: u32 = 0x009C; // Command Queue Consumer
 
 // SMMU Event Queue
-pub const SMMU_EVENTQ_BASE: u32 = 0x00A0;   // Event Queue Base
-pub const SMMU_EVENTQ_PROD: u32 = 0x00A8;   // Event Queue Producer
-pub const SMMU_EVENTQ_CONS: u32 = 0x00AC;   // Event Queue Consumer
+pub const SMMU_EVENTQ_BASE: u32 = 0x00A0; // Event Queue Base
+pub const SMMU_EVENTQ_PROD: u32 = 0x00A8; // Event Queue Producer
+pub const SMMU_EVENTQ_CONS: u32 = 0x00AC; // Event Queue Consumer
 
 // SMMU Control Register Bits
-pub const SMMU_CR0_SMMUEN: u32 = 1 << 0;    // SMMU Enable
-pub const SMMU_CR0_EVENTQEN: u32 = 1 << 2;  // Event Queue Enable
-pub const SMMU_CR0_CMDQEN: u32 = 1 << 1;    // Command Queue Enable
+pub const SMMU_CR0_SMMUEN: u32 = 1 << 0; // SMMU Enable
+pub const SMMU_CR0_EVENTQEN: u32 = 1 << 2; // Event Queue Enable
+pub const SMMU_CR0_CMDQEN: u32 = 1 << 1; // Command Queue Enable
 
 // SMMU Identification Register Bits
-pub const SMMU_IDR0_STALL_MODEL: u32 = 1 << 24;  // Stall Model
-pub const SMMU_IDR0_HYP: u32 = 1 << 9;      // Hypervisor Support
-pub const SMMU_IDR0_VMID16: u32 = 1 << 8;   // 16-bit VMID Support
+pub const SMMU_IDR0_STALL_MODEL: u32 = 1 << 24; // Stall Model
+pub const SMMU_IDR0_HYP: u32 = 1 << 9; // Hypervisor Support
+pub const SMMU_IDR0_VMID16: u32 = 1 << 8; // 16-bit VMID Support
 
 // SMMU Stream Table Entry Bits
-pub const STE_CONFIG_ABORT: u64 = 0;        // Abort configuration
-pub const STE_CONFIG_BYPASS: u64 = 1;       // Bypass configuration
-pub const STE_CONFIG_S1_TRANS: u64 = 2;     // Stage 1 Translation
-pub const STE_CONFIG_S2_TRANS: u64 = 3;     // Stage 2 Translation
-pub const STE_CONFIG_NESTED: u64 = 4;       // Nested Stage 1+2 Translation
+pub const STE_CONFIG_ABORT: u64 = 0; // Abort configuration
+pub const STE_CONFIG_BYPASS: u64 = 1; // Bypass configuration
+pub const STE_CONFIG_S1_TRANS: u64 = 2; // Stage 1 Translation
+pub const STE_CONFIG_S2_TRANS: u64 = 3; // Stage 2 Translation
+pub const STE_CONFIG_NESTED: u64 = 4; // Nested Stage 1+2 Translation
 pub const AMDVI_EVT_BASE_REG: u32 = 0x30;
 pub const AMDVI_EVT_HEAD_REG: u32 = 0x38;
 pub const AMDVI_STATUS_REG: u32 = 0x2020;
@@ -215,11 +215,11 @@ pub const AMDVI_STATUS_REG: u32 = 0x2020;
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct DmaTranslation {
-    pub present: bool,      // Bu eşleme geçerli mi?
-    pub read_perm: bool,    // Cihaz bu adresten okuyabilir mi?
-    pub write_perm: bool,   // Cihaz bu adrese yazabilir mi?
-    pub phys_addr: u64,     // Eşlenen fiziksel adres
-    pub size: u64,          // Eşleme boyutu (byte)
+    pub present: bool,    // Bu eşleme geçerli mi?
+    pub read_perm: bool,  // Cihaz bu adresten okuyabilir mi?
+    pub write_perm: bool, // Cihaz bu adrese yazabilir mi?
+    pub phys_addr: u64,   // Eşlenen fiziksel adres
+    pub size: u64,        // Eşleme boyutu (byte)
 }
 
 /// Intel VT-d kök tablosu girişi (16 byte, 16 byte hizalı)
@@ -248,8 +248,12 @@ impl DmaPte {
     pub fn new(phys: u64, read: bool, write: bool) -> Self {
         let mut val = phys & !0xFFF; // Sayfa hizalaması: alt 12 bit sıfırlanır
         val |= 1; // Present biti
-        if read { val |= 1 << 1; }  // Okuma izni
-        if write { val |= 1 << 2; } // Yazma izni
+        if read {
+            val |= 1 << 1;
+        } // Okuma izni
+        if write {
+            val |= 1 << 2;
+        } // Yazma izni
         Self { val }
     }
 }
@@ -261,10 +265,10 @@ impl DmaPte {
 /// PCIe ATS yetenek yapısı
 #[derive(Clone, Copy, Debug)]
 pub struct PciAtsCapability {
-    pub offset: u8,           // PCIe konfigürasyon alanındaki ofset
-    pub qdep: u8,            // Invalidate queue depth
-    pub page_aligned: bool,   // Page aligned request destekli mi?
-    pub enabled: bool,        // ATS şu anda etkin mi?
+    pub offset: u8,         // PCIe konfigürasyon alanındaki ofset
+    pub qdep: u8,           // Invalidate queue depth
+    pub page_aligned: bool, // Page aligned request destekli mi?
+    pub enabled: bool,      // ATS şu anda etkin mi?
 }
 
 impl PciAtsCapability {
@@ -281,9 +285,9 @@ impl PciAtsCapability {
 /// PCIe PRI (Page Request Interface) yetenek yapısı
 #[derive(Clone, Copy, Debug)]
 pub struct PciPriCapability {
-    pub offset: u8,           // PCIe konfigürasyon alanındaki ofset
-    pub enabled: bool,        // PRI şu anda etkin mi?
-    pub reset_pending: bool,   // Reset işlemi beklemede mi?
+    pub offset: u8,          // PCIe konfigürasyon alanındaki ofset
+    pub enabled: bool,       // PRI şu anda etkin mi?
+    pub reset_pending: bool, // Reset işlemi beklemede mi?
 }
 
 impl PciPriCapability {
@@ -299,10 +303,10 @@ impl PciPriCapability {
 /// ATS geçersiz kılma isteği
 #[derive(Clone, Copy, Debug)]
 pub struct AtsInvalidateRequest {
-    pub requester_id: u16,    // PCI requester ID (Bus:Device.Function)
-    pub address: u64,         // Geçersiz kılınacak adres
-    pub length: u32,          // Geçersiz kılma uzunluğu (byte)
-    pub pasid: Option<u32>,   // Process Address Space ID (varsa)
+    pub requester_id: u16,  // PCI requester ID (Bus:Device.Function)
+    pub address: u64,       // Geçersiz kılınacak adres
+    pub length: u32,        // Geçersiz kılma uzunluğu (byte)
+    pub pasid: Option<u32>, // Process Address Space ID (varsa)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -548,11 +552,17 @@ unsafe impl Send for PageRequestQueueState {}
 unsafe impl Sync for PageRequestQueueState {}
 
 impl PageRequestQueueState {
-    fn alloc(vendor: PageRequestQueueVendor, entry_count: u32, entry_size: usize) -> Result<Self, IommuError> {
+    fn alloc(
+        vendor: PageRequestQueueVendor,
+        entry_count: u32,
+        entry_size: usize,
+    ) -> Result<Self, IommuError> {
         let ring_bytes = (entry_count as usize).saturating_mul(entry_size).max(4096);
         let pages = (ring_bytes + 4095) / 4096;
         let (paddr, vaddr) = crate::memory::dma_alloc(pages).ok_or(IommuError::NoMemory)?;
-        unsafe { core::ptr::write_bytes(vaddr.as_ptr(), 0, pages.saturating_mul(4096)); }
+        unsafe {
+            core::ptr::write_bytes(vaddr.as_ptr(), 0, pages.saturating_mul(4096));
+        }
         Ok(Self {
             vendor,
             entry_count,
@@ -611,13 +621,13 @@ impl PageRequestQueueState {
 #[repr(C, align(64))]
 #[derive(Clone, Copy, Debug)]
 pub struct SmmuStreamTableEntry {
-    pub config: u64,          // Yapılandırma (STE_CONFIG_* değerleri)
-    pub s1ctxptr: u64,        // Stage 1 context descriptor pointer
-    pub s2ptr: u64,           // Stage 2 translation table pointer
-    pub msi_addr_lo: u64,     // MSI adresi (alt 64 bit)
-    pub msi_addr_hi: u64,     // MSI adresi (üst 64 bit)
-    pub msi_data: u32,        // MSI veri
-    pub reserved: [u32; 3],   // Rezerve alan
+    pub config: u64,        // Yapılandırma (STE_CONFIG_* değerleri)
+    pub s1ctxptr: u64,      // Stage 1 context descriptor pointer
+    pub s2ptr: u64,         // Stage 2 translation table pointer
+    pub msi_addr_lo: u64,   // MSI adresi (alt 64 bit)
+    pub msi_addr_hi: u64,   // MSI adresi (üst 64 bit)
+    pub msi_data: u32,      // MSI veri
+    pub reserved: [u32; 3], // Rezerve alan
 }
 
 impl SmmuStreamTableEntry {
@@ -632,12 +642,12 @@ impl SmmuStreamTableEntry {
             reserved: [0; 3],
         }
     }
-    
+
     /// Bypass moduna ayarla (çeviri yok)
     pub fn set_bypass(&mut self) {
         self.config = STE_CONFIG_BYPASS;
     }
-    
+
     /// Stage 1 çevirisine ayarla
     pub fn set_stage1_translation(&mut self, ctx_ptr: u64) {
         self.config = STE_CONFIG_S1_TRANS;
@@ -650,9 +660,9 @@ impl SmmuStreamTableEntry {
 #[repr(C, align(64))]
 #[derive(Clone, Copy, Debug)]
 pub struct SmmuContextDescriptor {
-    pub ttbr0: u64,           // Translation Table Base Register 0
-    pub tcr: u64,             // Translation Control Register
-    pub mair: u64,            // Memory Attribute Indirection Register
+    pub ttbr0: u64, // Translation Table Base Register 0
+    pub tcr: u64,   // Translation Control Register
+    pub mair: u64,  // Memory Attribute Indirection Register
     pub reserved: u64,
 }
 
@@ -671,25 +681,25 @@ impl SmmuContextDescriptor {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug)]
 pub struct SmmuCommand {
-    pub opcode: u32,          // Komut türü
-    pub substream_id: u32,    // Alt akış ID
-    pub stream_id: u32,       // Akış ID (PCI requester ID)
-    pub leaf: u32,            // Leaf bit (son seviye)
-    pub addr: u64,            // Adres (çeviri için)
+    pub opcode: u32,       // Komut türü
+    pub substream_id: u32, // Alt akış ID
+    pub stream_id: u32,    // Akış ID (PCI requester ID)
+    pub leaf: u32,         // Leaf bit (son seviye)
+    pub addr: u64,         // Adres (çeviri için)
 }
 
 /// SMMUv3 Olay Kuyruğu Girişi
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug)]
 pub struct SmmuEvent {
-    pub type_: u8,            // Olay türü
-    pub reason: u8,           // Hata nedeni
-    pub level: u8,            // Hata seviyesi
-    pub aborted: u8,          // İptal edildi mi?
-    pub stream_id: u32,       // Akış ID
-    pub substream_id: u32,    // Alt akış ID
-    pub addr: u64,            // Hatalı adres
-    pub timestamp: u64,       // Zaman damgası
+    pub type_: u8,         // Olay türü
+    pub reason: u8,        // Hata nedeni
+    pub level: u8,         // Hata seviyesi
+    pub aborted: u8,       // İptal edildi mi?
+    pub stream_id: u32,    // Akış ID
+    pub substream_id: u32, // Alt akış ID
+    pub addr: u64,         // Hatalı adres
+    pub timestamp: u64,    // Zaman damgası
 }
 
 // ============================================================================
@@ -756,7 +766,14 @@ impl IommuDomain {
     }
 
     /// DMA adresi eşler: cihaz dma_addr'ye erişince phys_addr'ye yönlendirilir
-    pub fn map(&self, dma_addr: u64, phys_addr: u64, size: u64, read: bool, write: bool) -> Result<(), IommuError> {
+    pub fn map(
+        &self,
+        dma_addr: u64,
+        phys_addr: u64,
+        size: u64,
+        read: bool,
+        write: bool,
+    ) -> Result<(), IommuError> {
         let mapping = DmaTranslation {
             present: true,
             read_perm: read,
@@ -785,7 +802,9 @@ impl IommuDomain {
 
     /// PCI cihazını domain'den ayırır
     pub fn detach_device(&self, segment: u16, bdf: u16) {
-        self.devices.lock().retain(|&(s, b)| s != segment || b != bdf);
+        self.devices
+            .lock()
+            .retain(|&(s, b)| s != segment || b != bdf);
         self.device_pasids.lock().remove(&(segment, bdf));
     }
 
@@ -977,13 +996,12 @@ impl IommuDomain {
         sequence
     }
 
-    fn replay_page_request(
-        &self,
-        request: PriPageRequest,
-    ) -> Result<PriReplayResult, IommuError> {
+    fn replay_page_request(&self, request: PriPageRequest) -> Result<PriReplayResult, IommuError> {
         let current_generation = self.sva_generation.load(Ordering::Acquire);
         let replayed = request.generation <= current_generation
-            && self.translate_gpuva(request.pasid, request.address).is_some();
+            && self
+                .translate_gpuva(request.pasid, request.address)
+                .is_some();
         if !replayed {
             return Err(IommuError::InvalidAddress);
         }
@@ -1093,9 +1111,9 @@ unsafe impl Sync for IommuUnit {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IommuVendor {
-    Intel,      // Intel VT-d
-    Amd,        // AMD-Vi
-    Arm,        // ARM SMMUv3
+    Intel, // Intel VT-d
+    Amd,   // AMD-Vi
+    Arm,   // ARM SMMUv3
     Unknown,
 }
 
@@ -1117,10 +1135,10 @@ pub struct IommuFault {
 /// IOMMU ihlal türleri
 #[derive(Clone, Copy, Debug)]
 pub enum IommuFaultType {
-    ReadViolation,         // Okuma izni olmayan adrese erişim
-    WriteViolation,        // Yazma izni olmayan adrese erişim
-    TranslationFailed,     // Eşleme tablosunda adres bulunamadı
-    AccessViolation,       // Genel erişim ihlali
+    ReadViolation,     // Okuma izni olmayan adrese erişim
+    WriteViolation,    // Yazma izni olmayan adrese erişim
+    TranslationFailed, // Eşleme tablosunda adres bulunamadı
+    AccessViolation,   // Genel erişim ihlali
 }
 
 impl IommuUnit {
@@ -1217,7 +1235,7 @@ impl IommuUnit {
         self.write_mmio_reg(AMDVI_CONTROL_EXT_REG, control);
         Ok(())
     }
-    
+
     /// PCIe ATS (Address Translation Services) desteğini başlatır
     /// Bu metod, PCIe cihazlarının donanım destekli çeviri önbelleği
     /// kullanmasına izin verir.
@@ -1228,12 +1246,12 @@ impl IommuUnit {
             IommuVendor::Arm => self.init_arm_smmuv3()?,
             _ => return Err(IommuError::NotSupported),
         }
-        
+
         self.ats_supported = true;
         crate::serial_println!("[IOMMU] Unit {} ATS support initialized", self.id);
         Ok(())
     }
-    
+
     /// Intel VT-d için ATS desteğini başlatır
     fn init_intel_ats(&self) -> Result<(), IommuError> {
         // Intel VT-d'de ATS, genişletilmiş yetenek yazmacında (ECAP)
@@ -1242,7 +1260,7 @@ impl IommuUnit {
         if (ecap & (1 << 15)) == 0 {
             return Err(IommuError::NotSupported);
         }
-        
+
         let mut prq = PageRequestQueueState::alloc(
             PageRequestQueueVendor::Intel,
             256,
@@ -1257,7 +1275,7 @@ impl IommuUnit {
         *self.page_request_queue.lock() = Some(prq);
         Ok(())
     }
-    
+
     /// AMD-Vi için ATS desteğini başlatır
     fn init_amd_ats(&self) -> Result<(), IommuError> {
         let mut prq = PageRequestQueueState::alloc(
@@ -1269,7 +1287,10 @@ impl IommuUnit {
         self.write_mmio_reg(AMDVI_PPR_LOG_A_HEAD_REG, 0);
         self.write_mmio_reg(AMDVI_PPR_LOG_B_BASE_REG, prq.ring_base_phys as u64);
         self.write_mmio_reg(AMDVI_PPR_LOG_B_TAIL_REG, 0);
-        self.write_mmio_reg(AMDVI_PPR_AUTO_RESPONSE_REG, AMDVI_PPR_RESPONSE_SUCCESS as u64);
+        self.write_mmio_reg(
+            AMDVI_PPR_AUTO_RESPONSE_REG,
+            AMDVI_PPR_RESPONSE_SUCCESS as u64,
+        );
         let mut control = self.read_mmio_reg(AMDVI_CONTROL_EXT_REG);
         control |= (AMDVI_CTRL_PPR_ENABLE | AMDVI_CTRL_PPR_LOG_ENABLE) as u64;
         self.write_mmio_reg(AMDVI_CONTROL_EXT_REG, control);
@@ -1330,24 +1351,25 @@ impl IommuUnit {
         let mut results = Vec::with_capacity(count);
 
         for _ in 0..count {
-            let (request_id, generation) = state
-                .pending_request_meta
-                .pop_front()
-                .unwrap_or_else(|| {
+            let (request_id, generation) =
+                state.pending_request_meta.pop_front().unwrap_or_else(|| {
                     (
                         domain.request_counter.fetch_add(1, Ordering::AcqRel),
                         domain.sva_generation.load(Ordering::Acquire),
                     )
                 });
-            let mut request = state.decoded_requests.pop_front().unwrap_or(PriPageRequest {
-                request_id,
-                source_id: 0,
-                pasid: 0,
-                address: 0,
-                length: 4096,
-                write: false,
-                generation,
-            });
+            let mut request = state
+                .decoded_requests
+                .pop_front()
+                .unwrap_or(PriPageRequest {
+                    request_id,
+                    source_id: 0,
+                    pasid: 0,
+                    address: 0,
+                    length: 4096,
+                    write: false,
+                    generation,
+                });
             request.request_id = request_id;
             request.generation = generation;
             state.head = (state.head + 1) % state.entry_count.max(1);
@@ -1355,7 +1377,9 @@ impl IommuUnit {
             domain.completed_page_replays.lock().push(result);
             match state.vendor {
                 PageRequestQueueVendor::Intel => {
-                    state.intel_responses.push(IntelPageResponseRecord::from_result(&result));
+                    state
+                        .intel_responses
+                        .push(IntelPageResponseRecord::from_result(&result));
                     self.write_mmio_reg(VTD_PQH_REG, state.head as u64);
                 }
                 PageRequestQueueVendor::Amd => {
@@ -1377,86 +1401,86 @@ impl IommuUnit {
 
         Ok(results)
     }
-    
+
     /// ARM SMMUv3'ü başlatır
     fn init_arm_smmuv3(&mut self) -> Result<(), IommuError> {
         // SMMUv3 ID register'larını kontrol et
         let idr0 = self.read_smmu_reg(SMMU_IDR0);
-        
+
         // SMMUv3 destekleniyor mu?
         if (idr0 & 0x1) == 0 {
             return Err(IommuError::NotSupported);
         }
-        
+
         // Stream table'ı tahsis et (2^N giriş, her giriş 64 byte)
         let stream_table_entries = 1024; // 10-bit stream ID desteği
         let stream_table_size = stream_table_entries * core::mem::size_of::<SmmuStreamTableEntry>();
-        
+
         // Gerçek uygulamada: sayfa hizalı bellek tahsisi yapılır
         let stream_table_ptr = 0x200000u64; // Örnek adres
         self.smmu_stream_table = Some(stream_table_ptr as *mut SmmuStreamTableEntry);
-        
+
         // Stream table base register'ı ayarla
         self.write_smmu_reg(SMMU_STRTAB_BASE, stream_table_ptr as u32);
-        
+
         // Stream table config register'ı ayarla (log2(entries) - 1)
         let stcfg = (10 - 1) << 0; // 1024 giriş = 2^10
         self.write_smmu_reg(SMMU_STRTAB_BASE_CFG, stcfg);
-        
+
         // Command queue'yu yapılandır
         self.init_smmu_command_queue()?;
-        
+
         // Event queue'yu yapılandır
         self.init_smmu_event_queue()?;
-        
+
         // SMMU'yu etkinleştir
         let cr0 = SMMU_CR0_SMMUEN | SMMU_CR0_CMDQEN | SMMU_CR0_EVENTQEN;
         self.write_smmu_reg(SMMU_CR0, cr0);
-        
+
         // Acknowledge bekle
         while (self.read_smmu_reg(SMMU_CR0ACK) & SMMU_CR0_SMMUEN) == 0 {
             core::hint::spin_loop();
         }
-        
+
         Ok(())
     }
-    
+
     /// SMMUv3 command queue'yu başlatır
     fn init_smmu_command_queue(&mut self) -> Result<(), IommuError> {
         // Command queue için bellek tahsis et
         let cmd_queue_size = 4096; // 4KB, 256 komut (her komut 16 byte)
         let cmd_queue_ptr = 0x300000u64; // Örnek adres
-        
+
         self.smmu_cmd_queue = Some(cmd_queue_ptr as *mut SmmuCommand);
-        
+
         // Command queue base register'ı ayarla
         self.write_smmu_reg(SMMU_CMDQ_BASE, cmd_queue_ptr as u32);
-        
+
         // Producer/consumer pointer'ları sıfırla
         self.write_smmu_reg(SMMU_CMDQ_PROD, 0);
         self.write_smmu_reg(SMMU_CMDQ_CONS, 0);
-        
+
         Ok(())
     }
-    
+
     /// SMMUv3 event queue'yu başlatır
     fn init_smmu_event_queue(&mut self) -> Result<(), IommuError> {
         // Event queue için bellek tahsis et
         let event_queue_size = 4096; // 4KB, 256 olay (her olay 16 byte)
         let event_queue_ptr = 0x400000u64; // Örnek adres
-        
+
         self.smmu_event_queue = Some(event_queue_ptr as *mut SmmuEvent);
-        
+
         // Event queue base register'ı ayarla
         self.write_smmu_reg(SMMU_EVENTQ_BASE, event_queue_ptr as u32);
-        
+
         // Producer/consumer pointer'ları sıfırla
         self.write_smmu_reg(SMMU_EVENTQ_PROD, 0);
         self.write_smmu_reg(SMMU_EVENTQ_CONS, 0);
-        
+
         Ok(())
     }
-    
+
     /// MMIO register'ından okuma yapar
     fn read_mmio_reg(&self, offset: u32) -> u64 {
         if let Some(mmio_base) = *self.mmio.lock() {
@@ -1466,7 +1490,7 @@ impl IommuUnit {
             0
         }
     }
-    
+
     /// MMIO register'ına yazma yapar
     fn write_mmio_reg(&self, offset: u32, value: u64) {
         if let Some(mmio_base) = *self.mmio.lock() {
@@ -1474,7 +1498,7 @@ impl IommuUnit {
             unsafe { (addr as *mut u64).write_volatile(value) };
         }
     }
-    
+
     /// SMMU register'ından okuma yapar
     fn read_smmu_reg(&self, offset: u32) -> u32 {
         if let Some(mmio_base) = *self.mmio.lock() {
@@ -1484,7 +1508,7 @@ impl IommuUnit {
             0
         }
     }
-    
+
     /// SMMU register'ına yazma yapar
     fn write_smmu_reg(&self, offset: u32, value: u32) {
         if let Some(mmio_base) = *self.mmio.lock() {
@@ -1492,16 +1516,16 @@ impl IommuUnit {
             unsafe { (addr as *mut u32).write_volatile(value) };
         }
     }
-    
+
     /// PCIe cihazı için ATS yeteneğini kontrol eder
     pub fn probe_pci_ats(&self, bus: u8, device: u8, function: u8) -> Option<PciAtsCapability> {
         // PCIe konfigürasyon alanını tara ve ATS capability'yi bul
         let mut offset = self.read_pci_config(bus, device, function, 0x34) as u8; // Capabilities pointer
-        
+
         while offset != 0 {
             let cap_id = self.read_pci_config(bus, device, function, offset) as u8;
             let cap_data = self.read_pci_config(bus, device, function, offset + 2);
-            
+
             if cap_id == PCI_CAP_ID_ATS {
                 let mut ats_cap = PciAtsCapability::new();
                 ats_cap.offset = offset;
@@ -1509,65 +1533,80 @@ impl IommuUnit {
                 ats_cap.page_aligned = (cap_data & ATS_CAP_PAGE_ALIGNED) != 0;
                 return Some(ats_cap);
             }
-            
+
             offset = (cap_data >> 8) as u8; // Next capability pointer
         }
-        
+
         None
     }
-    
+
     /// PCIe cihazı için PRI (Page Request Interface) yeteneğini kontrol eder
     pub fn probe_pci_pri(&self, bus: u8, device: u8, function: u8) -> Option<PciPriCapability> {
         let mut offset = self.read_pci_config(bus, device, function, 0x34) as u8;
-        
+
         while offset != 0 {
             let cap_id = self.read_pci_config(bus, device, function, offset) as u8;
-            
+
             if cap_id == PCI_CAP_ID_PRI {
                 let mut pri_cap = PciPriCapability::new();
                 pri_cap.offset = offset;
                 return Some(pri_cap);
             }
-            
+
             let cap_data = self.read_pci_config(bus, device, function, offset + 2);
             offset = (cap_data >> 8) as u8;
         }
-        
+
         None
     }
-    
+
     /// PCIe cihazında ATS'yi etkinleştirir
-    pub fn enable_pci_ats(&self, bus: u8, device: u8, function: u8, ats_cap: &PciAtsCapability) -> Result<(), IommuError> {
+    pub fn enable_pci_ats(
+        &self,
+        bus: u8,
+        device: u8,
+        function: u8,
+        ats_cap: &PciAtsCapability,
+    ) -> Result<(), IommuError> {
         let ctrl_reg = ats_cap.offset + 4; // ATS Control register offset
         let mut ctrl_value = self.read_pci_config(bus, device, function, ctrl_reg);
-        
+
         // ATS'yi etkinleştir ve en küçük çeviri birimini ayarla (4KB)
         ctrl_value |= ATS_CTRL_ENABLE;
         ctrl_value &= !ATS_CTRL_STU_MASK;
         ctrl_value |= (12 << ATS_CTRL_STU_SHIFT); // 4KB = 2^12
-        
+
         self.write_pci_config(bus, device, function, ctrl_reg, ctrl_value);
-        
+
         // Geçersiz kılma kuyruğunu yapılandır (varsa)
         self.configure_ats_invalidation_queue(bus, device, function)?;
-        
+
         Ok(())
     }
-    
+
     /// ATS geçersiz kılma kuyruğunu yapılandırır
-    fn configure_ats_invalidation_queue(&self, bus: u8, device: u8, function: u8) -> Result<(), IommuError> {
+    fn configure_ats_invalidation_queue(
+        &self,
+        bus: u8,
+        device: u8,
+        function: u8,
+    ) -> Result<(), IommuError> {
         // Gerçek uygulamada: IOMMU'nun geçersiz kılma kuyruğunu
         // PCIe cihazının QDEP değeriyle eşleştirmek gerekir
         Ok(())
     }
-    
+
     /// SMMUv3 stream table entry oluşturur
-    pub fn create_smmu_stream_entry(&self, stream_id: u32, stage1_ttbr: u64) -> SmmuStreamTableEntry {
+    pub fn create_smmu_stream_entry(
+        &self,
+        stream_id: u32,
+        stage1_ttbr: u64,
+    ) -> SmmuStreamTableEntry {
         let mut ste = SmmuStreamTableEntry::new();
         ste.set_stage1_translation(stage1_ttbr);
         ste
     }
-    
+
     /// SMMUv3 stream table entry günceller
     pub fn update_smmu_stream_entry(&self, stream_id: u32, entry: SmmuStreamTableEntry) {
         if let Some(stream_table) = self.smmu_stream_table {
@@ -1575,54 +1614,52 @@ impl IommuUnit {
                 let ste_ptr = stream_table.add(stream_id as usize);
                 *ste_ptr = entry;
             }
-            
+
             // Stream table entry geçersiz kıl
             self.invalidate_smmu_stream_entry(stream_id);
         }
     }
-    
+
     /// SMMUv3 stream table entry geçersiz kılar
     fn invalidate_smmu_stream_entry(&self, stream_id: u32) {
         // SMMUv3 komut kuyruğuna geçersiz kılma komutu ekle
         // Gerçek uygulamada: CMD_SYNC komutu gönderilir
     }
-    
+
     /// SMMUv3 komut kuyruğuna komut ekler
     fn enqueue_smmu_command(&self, cmd: SmmuCommand) -> Result<(), IommuError> {
         if let Some(cmd_queue) = self.smmu_cmd_queue {
             let prod = self.read_smmu_reg(SMMU_CMDQ_PROD);
             let cons = self.read_smmu_reg(SMMU_CMDQ_CONS);
-            
+
             // Kuyruk dolu mu?
             let queue_size = 256; // 256 komut kapasite
             if (prod.wrapping_sub(cons)) >= queue_size {
                 return Err(IommuError::NoMemory);
             }
-            
+
             // Komutu kuyruğa ekle
             unsafe {
                 let cmd_ptr = cmd_queue.add((prod % queue_size) as usize);
                 *cmd_ptr = cmd;
             }
-            
+
             // Producer pointer'ı güncelle
             self.write_smmu_reg(SMMU_CMDQ_PROD, prod.wrapping_add(1));
-            
+
             Ok(())
         } else {
             Err(IommuError::InitFailed)
         }
     }
-    
+
     /// PCI konfigürasyon alanından okuma yapar
     fn read_pci_config(&self, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
         let offset = (offset as u64) & !0x3;
         if self.base_addr != 0 {
             // ECAM: base + bus[27:20] + device[19:15] + function[14:12] + register[11:2]
-            let ecam_offset = ((bus as u64) << 20)
-                | ((device as u64) << 15)
-                | ((function as u64) << 12)
-                | offset;
+            let ecam_offset =
+                ((bus as u64) << 20) | ((device as u64) << 15) | ((function as u64) << 12) | offset;
             let addr = self.base_addr.saturating_add(ecam_offset);
             return unsafe { (addr as *const u32).read_volatile() };
         }
@@ -1662,15 +1699,13 @@ impl IommuUnit {
         self.ats_supported = true;
         Ok(())
     }
-    
+
     /// PCI konfigürasyon alanına yazma yapar
     fn write_pci_config(&self, bus: u8, device: u8, function: u8, offset: u8, value: u32) {
         let offset = (offset as u64) & !0x3;
         if self.base_addr != 0 {
-            let ecam_offset = ((bus as u64) << 20)
-                | ((device as u64) << 15)
-                | ((function as u64) << 12)
-                | offset;
+            let ecam_offset =
+                ((bus as u64) << 20) | ((device as u64) << 15) | ((function as u64) << 12) | offset;
             let addr = self.base_addr.saturating_add(ecam_offset);
             unsafe { (addr as *mut u32).write_volatile(value) };
             return;
@@ -1830,12 +1865,26 @@ impl IommuManager {
     }
 
     /// Cihaz için DMA adresi eşler: BDF ile ilgili domain bulunur ve map çağrılır
-    pub fn map_dma(&self, segment: u16, bdf: u16, dma_addr: u64, phys_addr: u64, size: u64, read: bool, write: bool) -> Result<(), IommuError> {
+    pub fn map_dma(
+        &self,
+        segment: u16,
+        bdf: u16,
+        dma_addr: u64,
+        phys_addr: u64,
+        size: u64,
+        read: bool,
+        write: bool,
+    ) -> Result<(), IommuError> {
         let units = self.units.lock();
         for unit in units.iter() {
             let domains = unit.domains.lock();
             for domain in domains.values() {
-                if domain.devices.lock().iter().any(|&(seg, dev)| seg == segment && dev == bdf) {
+                if domain
+                    .devices
+                    .lock()
+                    .iter()
+                    .any(|&(seg, dev)| seg == segment && dev == bdf)
+                {
                     return domain.map(dma_addr, phys_addr, size, read, write);
                 }
             }
@@ -1849,7 +1898,12 @@ impl IommuManager {
         for unit in units.iter() {
             let domains = unit.domains.lock();
             for domain in domains.values() {
-                if domain.devices.lock().iter().any(|&(seg, dev)| seg == segment && dev == bdf) {
+                if domain
+                    .devices
+                    .lock()
+                    .iter()
+                    .any(|&(seg, dev)| seg == segment && dev == bdf)
+                {
                     return domain.unmap(dma_addr);
                 }
             }

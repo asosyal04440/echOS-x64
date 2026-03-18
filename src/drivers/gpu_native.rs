@@ -470,6 +470,19 @@ pub fn device_count() -> usize {
 }
 
 /// PCI/MSI IRQ yolundan Ã§aÄŸrÄ±labilecek minimal VBLANK event yardÄ±mcÄ±sÄ±.
+pub fn blit_primary_region(src_paddr: u64, x: u32, y: u32, width: u32, height: u32) -> bool {
+    if width == 0 || height == 0 {
+        return true;
+    }
+
+    let devices = GPU_DEVICES.lock();
+    let Some(device) = devices.iter().find(|gpu| gpu.ready.load(Ordering::Acquire)) else {
+        return false;
+    };
+
+    device.hw_blit(src_paddr, x, y, width, height).is_ok()
+}
+
 pub fn dispatch_vblank_irq(device_index: usize) -> Option<VBlankEvent> {
     let devices = GPU_DEVICES.lock();
     let device = devices.get(device_index)?;

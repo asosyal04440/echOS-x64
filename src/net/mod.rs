@@ -54,8 +54,8 @@
 
 pub mod arp;
 pub mod bluetooth_le_audio;
-pub mod dhcp;
 pub mod cni;
+pub mod dhcp;
 pub mod dns;
 pub mod dnssec;
 pub mod doh;
@@ -514,11 +514,19 @@ pub fn get_interface(name: &str) -> Option<Arc<Mutex<dyn NetInterface>>> {
 /// Varsayılan ağ arabirimini döndürür (listede ilk kayıtlı arabirim)
 pub fn default_interface() -> Option<Arc<Mutex<dyn NetInterface>>> {
     let interfaces = NET_INTERFACES.lock();
-    if !interfaces.is_empty() {
-        Some(interfaces[0].clone())
-    } else {
-        None
+    for iface in interfaces.iter() {
+        let guard = iface.lock();
+        if guard.name() != "lo" && guard.is_up() {
+            drop(guard);
+            return Some(iface.clone());
+        }
     }
+
+    if let Some(loopback) = interfaces.iter().find(|iface| iface.lock().name() == "lo") {
+        return Some(loopback.clone());
+    }
+
+    interfaces.first().cloned()
 }
 
 /// Yeni benzersiz soket kimliği ayırır ve döndürür
@@ -549,6 +557,18 @@ pub fn local_ip() -> Ipv4Addr {
 
 /// Gelen Ethernet çerçevesini işler ve uygun protokole yönlendirir
 pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
+    match ebpf::filter_ingress_packet(data) {
+        Ok(true) => {}
+        Ok(false) => {
+            crate::serial_println!("[NET] eBPF ingress filter dropped frame ({}B)", data.len());
+            return Ok(());
+        }
+        Err(err) => {
+            crate::serial_println!("[NET] eBPF ingress filter error: {:?}", err);
+            return Err(NetError::ProtocolError);
+        }
+    }
+
     // Ethernet çerçevesini ayrıştır
     let frame = ethernet::EthernetFrame::parse(data)?;
 
@@ -559,6 +579,9 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
         }
         ethernet::EtherType::IPV4 => {
             ip::process_packet(&frame.payload)?;
+        }
+        ethernet::EtherType::IPV6 => {
+            ipv6::process_packet(&frame.payload)?;
         }
         _ => {
             // Bilinmeyen protokol, paketi düşür
@@ -771,15 +794,50 @@ pub fn traceroute(dest: Ipv4Addr, max_hops: u8) -> Result<Vec<TracerouteHop>, Ne
 
 /// Ping — ICMP Echo Request/Reply ile gecikme ölçer (`ping ip count`)
 pub fn ping(dest: Ipv4Addr, count: u8) -> Result<Vec<(u32, bool)>, NetError> {
+    ping_real(dest, count)
+}
+
+/// Gercek ICMP Echo Request/Reply yolu ile ping dener.
+///
+/// Bu yol, varsayilan aktif arabirimden paket alimi yaparak Echo Reply
+/// paketlerini bekler. Timeout durumunda `success=false` ile dÃ¶ner.
+pub fn ping_real(dest: Ipv4Addr, count: u8) -> Result<Vec<(u32, bool)>, NetError> {
     let mut results = Vec::new();
+    let identifier = (crate::interrupts::get_ticks() as u16) ^ 0xEC10;
+    let timeout_ticks = 250u64;
 
-    // Ping simülasyonu — gerçek implementasyonda ICMP Echo Request/Reply kullanılır
     for i in 0..count {
-        // RTT simüle et (gerçekte: ICMP yanıt zamanı ölçülür)
-        let rtt = 5 + (i as u32 * 2);
-        let success = i < count - 1; // Paket kaybı simülasyonu
+        let sequence = i as u16;
+        ip::send_icmp_echo_request(dest, identifier, sequence, b"echOS-ping")?;
 
-        results.push((rtt, success));
+        let deadline = crate::interrupts::get_ticks().saturating_add(timeout_ticks);
+        let mut delivered = false;
+
+        loop {
+            if let Some(rtt) = ip::take_icmp_echo_reply(dest, identifier, sequence) {
+                results.push((rtt, true));
+                delivered = true;
+                break;
+            }
+
+            if let Some(iface) = default_interface() {
+                if let Some(frame) = iface.lock().recv() {
+                    let _ = process_packet(&frame);
+                    continue;
+                }
+            }
+
+            if crate::interrupts::get_ticks() >= deadline {
+                break;
+            }
+
+            core::hint::spin_loop();
+        }
+
+        if !delivered {
+            ip::cancel_icmp_echo_request(dest, identifier, sequence);
+            results.push((timeout_ticks as u32, false));
+        }
     }
 
     Ok(results)

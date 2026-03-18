@@ -528,18 +528,24 @@ impl Theme {
                 resolved,
                 WindowChromeVariant::Inactive,
             ),
-            ShellSurfaceRole::HaloBar => {
-                Self::surface(SurfaceRole::HaloBar, resolved, WindowChromeVariant::Inactive)
-            }
+            ShellSurfaceRole::HaloBar => Self::surface(
+                SurfaceRole::HaloBar,
+                resolved,
+                WindowChromeVariant::Inactive,
+            ),
             ShellSurfaceRole::Dock => {
                 Self::surface(SurfaceRole::Dock, resolved, WindowChromeVariant::Inactive)
             }
-            ShellSurfaceRole::Panel => {
-                Self::surface(SurfaceRole::Sidebar, resolved, WindowChromeVariant::Inactive)
-            }
-            ShellSurfaceRole::Notification => {
-                Self::surface(SurfaceRole::Overlay, resolved, WindowChromeVariant::Inactive)
-            }
+            ShellSurfaceRole::Panel => Self::surface(
+                SurfaceRole::Sidebar,
+                resolved,
+                WindowChromeVariant::Inactive,
+            ),
+            ShellSurfaceRole::Notification => Self::surface(
+                SurfaceRole::Overlay,
+                resolved,
+                WindowChromeVariant::Inactive,
+            ),
             ShellSurfaceRole::WindowActive => {
                 Self::surface(SurfaceRole::Window, resolved, WindowChromeVariant::Active)
             }
@@ -571,7 +577,12 @@ impl Theme {
         }
     }
 
-    pub const fn button_fill(role: ButtonRole, mode: ThemeMode, pressed: bool, hovered: bool) -> u32 {
+    pub const fn button_fill(
+        role: ButtonRole,
+        mode: ThemeMode,
+        pressed: bool,
+        hovered: bool,
+    ) -> u32 {
         let tokens = Self::tokens(mode);
         match role {
             ButtonRole::Primary => {
@@ -688,12 +699,9 @@ impl Theme {
     pub const TEXT_DISABLED: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.text.disabled);
     pub const BORDER: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.borders.subtle);
     pub const BORDER_FOCUS: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.borders.focus);
-    pub const ACCENT_PRIMARY: ColorStruct =
-        ColorStruct::from_u32(DARK_THEME_TOKENS.accent.primary);
-    pub const ACCENT_SUCCESS: ColorStruct =
-        ColorStruct::from_u32(DARK_THEME_TOKENS.accent.success);
-    pub const ACCENT_WARNING: ColorStruct =
-        ColorStruct::from_u32(DARK_THEME_TOKENS.accent.warning);
+    pub const ACCENT_PRIMARY: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.accent.primary);
+    pub const ACCENT_SUCCESS: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.accent.success);
+    pub const ACCENT_WARNING: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.accent.warning);
     pub const ACCENT_ERROR: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.accent.error);
     pub const ERROR: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.accent.error);
     pub const BUTTON_BG: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.surfaces.field);

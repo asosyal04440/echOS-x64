@@ -46,6 +46,8 @@ rand = { version = "0.8", default-features = false, features = ["small_rng"] }
 # Gömülü sistemler için grafik çizim kütüphanesi - pikseller, şekiller, yazı tipi desteği
 embedded-graphics = "0.8"
 embedded-graphics-core = "0.4"
+cosmic-text = { version = "0.18.2", default-features = false, features = ["no_std", "shape-run-cache", "monospace_fallback"] }
+swash = { version = "0.2.6", default-features = false, features = ["render", "libm"] }
 # PS/2 fare protokolü sürücüsü - fare hareketini ve tıklamalarını okur
 ps2-mouse = "0.1"
 # RLSF (Real-time Lock-free memory allocator) - no_std ortamında heap yönetimi
@@ -85,6 +87,7 @@ bootloader = "0.9"
 [patch.crates-io]
 core_io = { path = "third_party/core_io" }
 virtio-drivers = { path = "third_party/virtio-drivers" }
+cosmic-text = { path = "third_party/cosmic-text" }
 
 # ============================================================
 # KÜTÜPHANELERİ VE İKİLİLERİ YAPILANDIRMA
@@ -103,6 +106,13 @@ bench = false
 [[bin]]
 name = "tier1_runtime_smoke"
 path = "tests/tier1_runtime_smoke.rs"
+test = false
+bench = false
+required-features = ["host_smoke"]
+
+[[bin]]
+name = "phase1_live_interop"
+path = "src/bin/phase1_live_interop.rs"
 test = false
 bench = false
 required-features = ["host_smoke"]

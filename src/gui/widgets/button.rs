@@ -1,46 +1,25 @@
-//! # echOS Button Widget
-//!
-//! Tıklanabilir buton bileşeni.
-//!
-//! ## Lifetime Parametresi `'a`
-//!
-//! `Button<'a>` struct'ındaki `'a` lifetime parametresi `text: &'a str` alanından
-//! gelir. Buton, gösterilecek metni kopyalamak yerine bir referans olarak tutar.
-//! Bu sayede heap allocation olmadan (no_std uyumlu) metin gösterimi sağlanır.
-//! Butonun var olduğu süre boyunca metin de geçerli kalmalıdır.
-//!
-//! ## Durum Makinesi
-//!
-//! Butonun görsel durumu `hovered` ve `pressed` boolean'larıyla izlenir.
-//! Bu iki bayrak birlikte küçük bir durum makinesi oluşturur ve Tema sistemi
-//! üzerinden her duruma farklı renk atanır.
-
-use super::{Rect, Widget};
+use super::{
+    draw_render_objects, AccessRole, AccessState, AccessibilityInfo, FocusPolicy, Rect, Widget,
+};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject, RenderObjectKind, TextRunStyle};
 use crate::gui::theme::{ButtonRole, Theme, ThemeMode};
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 
-/// Tıklanabilir buton widget'ı.
-///
-/// Buton, bir metin etiketi, arka plan rengi ve kenarlıktan oluşur.
-/// Hover (üzerine gelme) ve pressed (basılı) için farklı görünümler sunar.
-/// `bg_color` ve `text_color` alanları oluşturma sırasında tema renklerinden
-/// alınır; bu sayede tema değiştiğinde tüm butonların rengi güncellenir.
 pub struct Button<'a> {
     rect: Rect,
     text: &'a str,
     role: ButtonRole,
     hovered: bool,
     pressed: bool,
-    /// Devre dışı durumu — tıklama yok sayılır, soluk renkte çizilir.
     enabled: bool,
-    /// Odak durumu — klavye ile Enter/Space ile tetiklenebilir.
     focused: bool,
-    /// Tıklama geri çağırma (opsiyonel). None ise toggle efekti.
     on_click_fn: Option<fn()>,
 }
 
 impl<'a> Button<'a> {
-    /// Yeni buton oluşturur.
     pub fn new(x: i32, y: i32, width: i32, height: i32, text: &'a str) -> Self {
         Self {
             rect: Rect::new(
@@ -72,18 +51,15 @@ impl<'a> Button<'a> {
         self
     }
 
-    /// Tıklama geri çağırması ayarlar.
     pub fn with_on_click(mut self, cb: fn()) -> Self {
         self.on_click_fn = Some(cb);
         self
     }
 
-    /// Butonun etkinlik durumunu ayarlar.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
-    /// Butonun etkin olup olmadığını döndürür.
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -91,107 +67,30 @@ impl<'a> Button<'a> {
 
 impl<'a> Widget for Button<'a> {
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-        let mode = ThemeMode::Dark;
-
-        // Disabled → soluk gri; pressed → koyu; hovered → parlak; normal → temel
-        let color = if !self.enabled {
-            Theme::TEXT_DISABLED.to_u32()
-        } else {
-            Theme::button_fill(self.role, mode, self.pressed, self.hovered)
-        };
-
-        let text_c = if !self.enabled {
-            Theme::TEXT_DISABLED.to_u32()
-        } else {
-            Theme::button_text(self.role, mode)
-        };
-
-        // Arkaplan: tüm piksellerle teker teker doldurulur.
-        // Bu iç içe döngü O(w*h) karmaşıklığındadır. Çizim her frame'de
-        // yapıldığında performanslı bir draw_rect yardımcı fonksiyonu
-        // kullanmak daha verimlidir; burada doğrudan piksel döngüsü eğiticidir.
-        for row in y..(y + h) {
-            for col in x..(x + w) {
-                fb.plot_pixel(col, row, color);
-            }
-        }
-
-        // Kenarlık: dört kenarı ayrı ayrı tarar.
-        // Üst ve alt kenar için yatay döngü, sol ve sağ kenar için dikey
-        // döngü kullanılır; köşe pikseller her iki döngüde de çizilir.
-        let border_color = if self.focused {
-            Theme::BORDER_FOCUS.to_u32()
-        } else {
-            Theme::BORDER.to_u32()
-        };
-        for col in x..(x + w) {
-            fb.plot_pixel(col, y, border_color); // Üst
-            fb.plot_pixel(col, y + h - 1, border_color); // Alt
-        }
-        for row in y..(y + h) {
-            fb.plot_pixel(x, row, border_color); // Sol
-            fb.plot_pixel(x + w - 1, row, border_color); // Sağ
-        }
-
-        // Metin (Ortalanmış)
-        // Her karakter 8 piksel genişliğinde sabit aralıklı (monospace) yazı
-        // tipinde çizilir. Metnin toplam genişliği `len * 8` olarak hesaplanır.
-        // Yatay ortalama: (alan_genişliği - metin_genişliği) / 2.
-        // Dikey ortalama: 16 piksellik karakter yüksekliği sabit alınır.
-        let text_width = self.text.len() * 8;
-        let text_x = if text_width < w {
-            x + (w - text_width) / 2
-        } else {
-            x + 5
-        };
-        let text_y = y + (h - 16) / 2;
-
-        fb.draw_string(text_x, text_y, self.text, text_c);
-
-        // Odak halkası — focused ise kenarlık ACCENT renginde çizilir
-        if self.focused && self.enabled {
-            let focus_color = Theme::INPUT_FOCUS.to_u32();
-            for col in x..(x + w) {
-                fb.plot_pixel(col, y, focus_color);
-                fb.plot_pixel(col, y + h - 1, focus_color);
-            }
-            for row in y..(y + h) {
-                fb.plot_pixel(x, row, focus_color);
-                fb.plot_pixel(x + w - 1, row, focus_color);
-            }
-        }
+        draw_render_objects(fb, self.bounds(), &self.render_objects());
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {
-        if !self.enabled {
+        if !self.enabled || !self.rect.contains(x, y) {
             return false;
         }
-        if self.rect.contains(x, y) {
-            if let Some(cb) = self.on_click_fn {
-                cb();
-            }
-            self.pressed = !self.pressed;
-            true
-        } else {
-            false
+        if let Some(cb) = self.on_click_fn {
+            cb();
         }
+        self.pressed = !self.pressed;
+        true
     }
 
     fn on_hover(&mut self, x: i32, y: i32) -> bool {
-        let was = self.hovered;
+        let previous = self.hovered;
         self.hovered = self.rect.contains(x, y);
-        self.hovered != was
+        previous != self.hovered
     }
 
     fn on_key(&mut self, key: char, _modifiers: u8, _scancode: u8) -> bool {
         if !self.enabled || !self.focused {
             return false;
         }
-        // Enter veya Space ile buton tetikleme
         if key == '\n' || key == ' ' {
             if let Some(cb) = self.on_click_fn {
                 cb();
@@ -209,12 +108,24 @@ impl<'a> Widget for Button<'a> {
     fn is_focused(&self) -> bool {
         self.focused
     }
+
     fn set_focus(&mut self, focused: bool) {
         self.focused = focused;
     }
 
-    fn accessibility_info(&self) -> super::AccessibilityInfo {
-        use super::{AccessRole, AccessState, AccessibilityInfo};
+    fn can_focus(&self) -> bool {
+        self.enabled
+    }
+
+    fn focus_policy(&self) -> FocusPolicy {
+        if self.enabled {
+            FocusPolicy::Strong
+        } else {
+            FocusPolicy::None
+        }
+    }
+
+    fn accessibility_info(&self) -> AccessibilityInfo<'_> {
         let mut state = AccessState::empty();
         if self.focused {
             state = state.with(AccessState::FOCUSED);
@@ -228,5 +139,78 @@ impl<'a> Widget for Button<'a> {
             value: if self.pressed { "pressed" } else { "" },
             state,
         }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        let mode = ThemeMode::Dark;
+        let fill = if !self.enabled {
+            Theme::TEXT_DISABLED.to_u32()
+        } else {
+            Theme::button_fill(self.role, mode, self.pressed, self.hovered)
+        };
+        let border = if self.focused {
+            Theme::INPUT_FOCUS.to_u32()
+        } else {
+            Theme::BORDER.to_u32()
+        };
+        let text_c = if !self.enabled {
+            Theme::TEXT_DISABLED.to_u32()
+        } else {
+            Theme::button_text(self.role, mode)
+        };
+        let bounds = crate::gui::protocol::Rect::new(
+            self.rect.x,
+            self.rect.y,
+            self.rect.width.max(0) as u32,
+            self.rect.height.max(0) as u32,
+        );
+        let text_bounds = crate::gui::protocol::Rect::new(
+            self.rect.x + 10,
+            self.rect.y + ((self.rect.height - 18).max(0) / 2),
+            (self.rect.width - 20).max(1) as u32,
+            18,
+        );
+
+        vec![
+            RenderObject {
+                object_id: ((self.rect.x as u64) << 32) ^ self.rect.y as u64,
+                bounds,
+                clip: None,
+                z_index: 0,
+                opacity: u8::MAX,
+                lane: DamageLane::Window,
+                kind: RenderObjectKind::SolidRect {
+                    color: fill,
+                    corner_radius: 6,
+                },
+            },
+            RenderObject {
+                object_id: 0x1000_0000_0000_0000u64 ^ (((self.rect.x as u64) << 32) ^ self.rect.y as u64),
+                bounds: crate::gui::protocol::Rect::new(self.rect.x, self.rect.y, bounds.width, 1),
+                clip: None,
+                z_index: 1,
+                opacity: u8::MAX,
+                lane: DamageLane::Window,
+                kind: RenderObjectKind::SolidRect {
+                    color: border,
+                    corner_radius: 0,
+                },
+            },
+            RenderObject {
+                object_id: 0x2000_0000_0000_0000u64 ^ (((self.rect.x as u64) << 32) ^ self.rect.y as u64),
+                bounds: text_bounds,
+                clip: None,
+                z_index: 2,
+                opacity: u8::MAX,
+                lane: DamageLane::Text,
+                kind: RenderObjectKind::TextRun {
+                    blob_id: 0,
+                    text: self.text.to_string(),
+                    color: text_c,
+                    style: TextRunStyle::Ui,
+                    max_width: text_bounds.width.max(1),
+                },
+            },
+        ]
     }
 }

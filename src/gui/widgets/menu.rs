@@ -12,8 +12,12 @@
 //! Menü etkileşimi `Widget` trait'i üzerinden yönetilir:
 //! `on_click` tıklamayı, `on_hover` fare hareketini işler.
 
-use super::{Rect, Widget};
+use super::{
+    border_rect_objects, draw_render_objects, solid_rect_object, text_render_object_with_width,
+    Rect, Widget,
+};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject};
 use crate::gui::theme::Theme;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -150,6 +154,143 @@ impl MenuBar {
         }
         x
     }
+
+    fn render_bounds(&self) -> Rect {
+        if let Some(menu_idx) = self.open_menu {
+            let dropdown_x = self.menu_x(menu_idx);
+            let dropdown_y = self.rect.y + self.rect.height;
+            let dropdown_h = (self.menus[menu_idx].1.len() * 24) as i32;
+            let left = self.rect.x.min(dropdown_x);
+            let right = (self.rect.x + self.rect.width).max(dropdown_x + 200);
+            let bottom = (self.rect.y + self.rect.height).max(dropdown_y + dropdown_h);
+            Rect::new(left, self.rect.y, right - left, bottom - self.rect.y)
+        } else {
+            self.rect
+        }
+    }
+
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64) ^ 0x1000;
+        objects.push(solid_rect_object(
+            base_id,
+            self.rect,
+            Theme::TITLEBAR_BG.to_u32(),
+            DamageLane::Window,
+            0,
+        ));
+        objects.push(solid_rect_object(
+            base_id ^ 1,
+            Rect::new(self.rect.x, self.rect.y + self.rect.height - 1, self.rect.width, 1),
+            Theme::BORDER.to_u32(),
+            DamageLane::Window,
+            1,
+        ));
+
+        let mut menu_x = self.rect.x + 5;
+        for (i, (title, _)) in self.menus.iter().enumerate() {
+            let menu_w = title.len() as i32 * 8 + 16;
+            if self.open_menu == Some(i) || self.hovered_menu == Some(i) {
+                objects.push(solid_rect_object(
+                    base_id ^ 0x10 ^ i as u64,
+                    Rect::new(menu_x, self.rect.y, menu_w, self.rect.height),
+                    if self.open_menu == Some(i) {
+                        Theme::ACCENT_PRIMARY.to_u32()
+                    } else {
+                        Theme::BUTTON_HOVER.to_u32()
+                    },
+                    DamageLane::Window,
+                    1,
+                ));
+            }
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x80 ^ i as u64,
+                Rect::new(menu_x + 8, self.rect.y + ((self.rect.height - 16) / 2), menu_w.max(1), 18),
+                title,
+                if self.open_menu == Some(i) {
+                    Theme::DESKTOP_BG.to_u32()
+                } else {
+                    Theme::TEXT_PRIMARY.to_u32()
+                },
+                false,
+                DamageLane::Text,
+                2,
+            ));
+            menu_x += menu_w;
+        }
+
+        if let Some(menu_idx) = self.open_menu {
+            let (_, items) = &self.menus[menu_idx];
+            let dropdown_x = self.menu_x(menu_idx);
+            let dropdown_y = self.rect.y + self.rect.height;
+            let dropdown_rect = Rect::new(dropdown_x, dropdown_y, 200, (items.len() * 24) as i32);
+            objects.push(solid_rect_object(
+                base_id ^ 0x200,
+                dropdown_rect,
+                Theme::WINDOW_BG.to_u32(),
+                DamageLane::Shell,
+                3,
+            ));
+            objects.extend(border_rect_objects(
+                base_id ^ 0x220,
+                dropdown_rect,
+                Theme::BORDER.to_u32(),
+                DamageLane::Shell,
+                4,
+            ));
+            for (i, item) in items.iter().enumerate() {
+                let item_y = dropdown_y + i as i32 * 24;
+                if item.separator {
+                    objects.push(solid_rect_object(
+                        base_id ^ 0x240 ^ i as u64,
+                        Rect::new(dropdown_x + 5, item_y + 12, 190, 1),
+                        Theme::BORDER.to_u32(),
+                        DamageLane::Shell,
+                        5,
+                    ));
+                } else {
+                    objects.push(text_render_object_with_width(
+                        base_id ^ 0x260 ^ i as u64,
+                        Rect::new(dropdown_x + 8, item_y + 4, 184, 18),
+                        &item.text,
+                        if item.enabled {
+                            Theme::TEXT_PRIMARY.to_u32()
+                        } else {
+                            Theme::TEXT_SECONDARY.to_u32()
+                        },
+                        false,
+                        DamageLane::Text,
+                        5,
+                    ));
+                    if !item.shortcut.is_empty() {
+                        let shortcut_x = dropdown_x + 200 - item.shortcut.len() as i32 * 8 - 8;
+                        objects.push(text_render_object_with_width(
+                            base_id ^ 0x280 ^ i as u64,
+                            Rect::new(shortcut_x, item_y + 4, (200 - (shortcut_x - dropdown_x)).max(1), 18),
+                            &item.shortcut,
+                            Theme::TEXT_SECONDARY.to_u32(),
+                            false,
+                            DamageLane::Text,
+                            5,
+                        ));
+                    }
+                    if item.submenu.is_some() {
+                        objects.push(text_render_object_with_width(
+                            base_id ^ 0x2A0 ^ i as u64,
+                            Rect::new(dropdown_x + 184, item_y + 4, 8, 18),
+                            ">",
+                            Theme::TEXT_SECONDARY.to_u32(),
+                            false,
+                            DamageLane::Text,
+                            5,
+                        ));
+                    }
+                }
+            }
+        }
+
+        objects
+    }
 }
 
 impl Widget for MenuBar {
@@ -157,113 +298,7 @@ impl Widget for MenuBar {
     /// Arka plan ve alt kenarlık çizildikten sonra her menü başlığı
     /// sırayla yerleştirilir; açık ya da üzerine gelinen menü vurgulanır.
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-
-        // Menü çubuğunun arka plan rengi
-        fb.draw_rect(x, y, w, h, Theme::TITLEBAR_BG.to_u32());
-
-        // Alt kenarlık çizgisi — menü çubuğunu içerik alanından ayırır
-        for col in x..(x + w) {
-            fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
-        }
-
-        // Menü başlıklarını sırayla çiz
-        let mut menu_x = x + 5;
-        for (i, (title, _)) in self.menus.iter().enumerate() {
-            let menu_w = title.len() * 8 + 16;
-
-            // Açık menü aksent renginde, sadece üzerine gelinen menü hover renginde gösterilir
-            if self.open_menu == Some(i) {
-                fb.draw_rect(menu_x, y, menu_w, h, Theme::ACCENT_PRIMARY.to_u32());
-            } else if self.hovered_menu == Some(i) {
-                fb.draw_rect(menu_x, y, menu_w, h, Theme::BUTTON_HOVER.to_u32());
-            }
-
-            // Başlık metni — açık menünün metni ters renkte (okunabilirlik için)
-            let text_x = menu_x + 8;
-            let text_y = y + (h - 16) / 2;
-            let text_color = if self.open_menu == Some(i) {
-                Theme::DESKTOP_BG.to_u32()
-            } else {
-                Theme::TEXT_PRIMARY.to_u32()
-            };
-            fb.draw_string(text_x, text_y, title, text_color);
-
-            menu_x += menu_w;
-        }
-
-        // Açık menünün açılır listesini çiz
-        if let Some(menu_idx) = self.open_menu {
-            let (_, items) = &self.menus[menu_idx];
-            let dropdown_x = self.menu_x(menu_idx) as usize;
-            let dropdown_y = y + h;
-            let item_height = 24;
-            let dropdown_w = 200;
-            let dropdown_h = items.len() * item_height;
-
-            // Açılır listenin arka planı
-            fb.draw_rect(
-                dropdown_x,
-                dropdown_y,
-                dropdown_w,
-                dropdown_h,
-                Theme::WINDOW_BG.to_u32(),
-            );
-
-            // Dört kenar kenarlık çizgisi — piksel piksel üst/alt ve sol/sağ kenarlar
-            for col in dropdown_x..(dropdown_x + dropdown_w) {
-                fb.plot_pixel(col, dropdown_y, Theme::BORDER.to_u32());
-                fb.plot_pixel(col, dropdown_y + dropdown_h - 1, Theme::BORDER.to_u32());
-            }
-            for row in dropdown_y..(dropdown_y + dropdown_h) {
-                fb.plot_pixel(dropdown_x, row, Theme::BORDER.to_u32());
-                fb.plot_pixel(dropdown_x + dropdown_w - 1, row, Theme::BORDER.to_u32());
-            }
-
-            // Menü kalemlerini listele
-            for (i, item) in items.iter().enumerate() {
-                let item_y = dropdown_y + i * item_height;
-
-                if item.separator {
-                    // Ayraç çizgisi: soldan ve sağdan 5 piksel içeriden çizilir
-                    for col in (dropdown_x + 5)..(dropdown_x + dropdown_w - 5) {
-                        fb.plot_pixel(col, item_y + item_height / 2, Theme::BORDER.to_u32());
-                    }
-                } else {
-                    // Kalem metni — devre dışı kalemler soluk renkte gösterilir
-                    let text_color = if item.enabled {
-                        Theme::TEXT_PRIMARY.to_u32()
-                    } else {
-                        Theme::TEXT_SECONDARY.to_u32()
-                    };
-                    fb.draw_string(dropdown_x + 8, item_y + 4, &item.text, text_color);
-
-                    // Klavye kısayolu — sağa hizalı olarak listenin sonuna yazılır
-                    if !item.shortcut.is_empty() {
-                        let shortcut_x = dropdown_x + dropdown_w - item.shortcut.len() * 8 - 8;
-                        fb.draw_string(
-                            shortcut_x,
-                            item_y + 4,
-                            &item.shortcut,
-                            Theme::TEXT_SECONDARY.to_u32(),
-                        );
-                    }
-
-                    // Alt menü oku — sağ tarafta ">" karakteriyle gösterilir
-                    if item.submenu.is_some() {
-                        fb.draw_string(
-                            dropdown_x + dropdown_w - 16,
-                            item_y + 4,
-                            ">",
-                            Theme::TEXT_SECONDARY.to_u32(),
-                        );
-                    }
-                }
-            }
-        }
+        draw_render_objects(fb, self.render_bounds(), &self.render_primitives());
     }
 
     /// Tıklama olayını işler.
@@ -337,6 +372,10 @@ impl Widget for MenuBar {
     /// Widget sınırlarını döndürür.
     fn bounds(&self) -> Rect {
         self.rect
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }
 
@@ -412,6 +451,85 @@ impl ContextMenu {
         }
         None
     }
+
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        if !self.visible {
+            return Vec::new();
+        }
+        let mut objects = Vec::new();
+        let bounds = self.bounds();
+        let base_id = ((bounds.x as u64) << 32) ^ (bounds.y as u64) ^ 0x5000;
+        objects.push(solid_rect_object(
+            base_id,
+            Rect::new(bounds.x + 4, bounds.y + 4, bounds.width, bounds.height),
+            Theme::SHADOW.to_u32(),
+            DamageLane::Shell,
+            0,
+        ));
+        objects.push(solid_rect_object(
+            base_id ^ 1,
+            bounds,
+            Theme::WINDOW_BG.to_u32(),
+            DamageLane::Shell,
+            1,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 2,
+            bounds,
+            Theme::BORDER.to_u32(),
+            DamageLane::Shell,
+            2,
+        ));
+
+        for (i, item) in self.items.iter().enumerate() {
+            let item_y = self.y + i as i32 * 24;
+            if item.separator {
+                objects.push(solid_rect_object(
+                    base_id ^ 0x10 ^ i as u64,
+                    Rect::new(self.x + 5, item_y + 12, self.width - 10, 1),
+                    Theme::BORDER.to_u32(),
+                    DamageLane::Shell,
+                    3,
+                ));
+            } else {
+                if self.hovered_index == Some(i) && item.enabled {
+                    objects.push(solid_rect_object(
+                        base_id ^ 0x20 ^ i as u64,
+                        Rect::new(self.x + 1, item_y, self.width - 2, 24),
+                        Theme::BUTTON_HOVER.to_u32(),
+                        DamageLane::Shell,
+                        3,
+                    ));
+                }
+                objects.push(text_render_object_with_width(
+                    base_id ^ 0x40 ^ i as u64,
+                    Rect::new(self.x + 8, item_y + 4, self.width - 16, 18),
+                    &item.text,
+                    if item.enabled {
+                        Theme::TEXT_PRIMARY.to_u32()
+                    } else {
+                        Theme::TEXT_SECONDARY.to_u32()
+                    },
+                    false,
+                    DamageLane::Text,
+                    4,
+                ));
+                if !item.shortcut.is_empty() {
+                    let shortcut_x = self.x + self.width - item.shortcut.len() as i32 * 8 - 8;
+                    objects.push(text_render_object_with_width(
+                        base_id ^ 0x60 ^ i as u64,
+                        Rect::new(shortcut_x, item_y + 4, (self.width - (shortcut_x - self.x)).max(1), 18),
+                        &item.shortcut,
+                        Theme::TEXT_SECONDARY.to_u32(),
+                        false,
+                        DamageLane::Text,
+                        4,
+                    ));
+                }
+            }
+        }
+        objects
+    }
 }
 
 impl Default for ContextMenu {
@@ -428,70 +546,7 @@ impl Widget for ContextMenu {
         if !self.visible {
             return;
         }
-
-        let x = self.x as usize;
-        let y = self.y as usize;
-        let w = self.width as usize;
-        let h = self.items.len() * 24;
-        let item_height = 24usize;
-
-        // Gölge efekti — menüyü 4 piksel sağa/aşağı kaydırılmış koyu dikdörtgen
-        fb.draw_rect(x + 4, y + 4, w, h, Theme::SHADOW.to_u32());
-
-        // Menü arka planı
-        fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
-
-        // Dört kenar kenarlık çizgisi
-        for col in x..(x + w) {
-            fb.plot_pixel(col, y, Theme::BORDER.to_u32());
-            fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
-        }
-        for row in y..(y + h) {
-            fb.plot_pixel(x, row, Theme::BORDER.to_u32());
-            fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
-        }
-
-        // Kalemleri çiz
-        for (i, item) in self.items.iter().enumerate() {
-            let item_y = y + i * item_height;
-
-            if item.separator {
-                // Ayraç çizgisi — kalemin orta yüksekliğinde yatay çizgi
-                for col in (x + 5)..(x + w - 5) {
-                    fb.plot_pixel(col, item_y + item_height / 2, Theme::BORDER.to_u32());
-                }
-            } else {
-                // Fare üzerindeyse ve kalem etkinse hover vurgusu uygula
-                if self.hovered_index == Some(i) && item.enabled {
-                    fb.draw_rect(
-                        x + 1,
-                        item_y,
-                        w - 2,
-                        item_height,
-                        Theme::BUTTON_HOVER.to_u32(),
-                    );
-                }
-
-                // Kalem metni — devre dışı olanlar soluk renkte
-                let text_color = if item.enabled {
-                    Theme::TEXT_PRIMARY.to_u32()
-                } else {
-                    Theme::TEXT_SECONDARY.to_u32()
-                };
-                fb.draw_string(x + 8, item_y + 4, &item.text, text_color);
-
-                // Klavye kısayolu — sağa hizalı
-                if !item.shortcut.is_empty() {
-                    let shortcut_x = x + w - item.shortcut.len() * 8 - 8;
-                    fb.draw_string(
-                        shortcut_x,
-                        item_y + 4,
-                        &item.shortcut,
-                        Theme::TEXT_SECONDARY.to_u32(),
-                    );
-                }
-            }
-        }
+        draw_render_objects(fb, self.bounds(), &self.render_primitives());
     }
 
     /// Tıklama olayını işler.
@@ -541,5 +596,9 @@ impl Widget for ContextMenu {
     /// Yükseklik, kalem sayısı × 24 piksel formülüyle dinamik olarak belirlenir.
     fn bounds(&self) -> Rect {
         Rect::new(self.x, self.y, self.width, (self.items.len() * 24) as i32)
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }

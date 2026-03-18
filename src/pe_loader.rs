@@ -5,7 +5,7 @@
 //!
 //! ## PE Dosya Yapısı
 //! Bir PE dosyası şu bölümlerden oluşur:
-//! - DOS Header (MZ başlığı) — Geriye dönük uyumluluk için 16-bit DOS stub
+//! - DOS Header (MZ başlığı) — Geriye dönük uyumluluk için 16-bit DOS giriş gövdesi
 //! - PE Signature ("PE\0\0") — PE dosya imzası
 //! - File Header (COFF başlığı) — Makine türü, bölüm sayısı, özellikler
 //! - Optional Header — Giriş noktası, image base, bölüm hizalamaları, veri dizinleri
@@ -62,7 +62,9 @@ const IMAGE_DIRECTORY_ENTRY_SECURITY: usize = 4; // Güvenlik sertifikaları
 const IMAGE_DIRECTORY_ENTRY_BASERELOC: usize = 5; // Yer değiştirme tablosu
 const IMAGE_DIRECTORY_ENTRY_DEBUG: usize = 6; // Hata ayıklama bilgisi
 const IMAGE_DIRECTORY_ENTRY_TLS: usize = 9; // Thread yerel depolama
+const IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT: usize = 11; // Bound import tablosu
 const IMAGE_DIRECTORY_ENTRY_IAT: usize = 12; // İçe aktarma adresi tablosu
+const IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT: usize = 13; // Delay-load import tablosu
 
 // ============================================================================
 // PE HATA TİPİ
@@ -256,6 +258,35 @@ pub struct ImageImportDescriptor {
     pub first_thunk: u32,          // 0x10: İlk dönüştürücü (RVA) — IAT girişleri
 }
 
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImageDelayImportDescriptor {
+    pub attributes: u32,
+    pub name: u32,
+    pub module_handle: u32,
+    pub delay_import_address_table: u32,
+    pub delay_import_name_table: u32,
+    pub bound_delay_import_table: u32,
+    pub unload_delay_import_table: u32,
+    pub time_stamp: u32,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImageBoundImportDescriptor {
+    pub time_date_stamp: u32,
+    pub offset_module_name: u16,
+    pub number_of_module_forwarder_refs: u16,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImageBoundForwarderRef {
+    pub time_date_stamp: u32,
+    pub offset_module_name: u16,
+    pub reserved: u16,
+}
+
 /// İçe Aktarma Arama (64-bit) — IAT/INT girişi
 /// En yüksek bit ordinal mı yoksa isimle mi içe aktarıldığını belirtir
 #[repr(C, packed)]
@@ -337,6 +368,8 @@ pub enum RelocationType {
 /// Yüklenmiş PE Görüntüsü — ayrıştırılmış ve belleğe hazırlanmış PE dosyası
 #[derive(Clone, Debug)]
 pub struct PeImage {
+    /// COFF dosya başlığından gelen derleme zaman damgası
+    pub time_date_stamp: u32,
     /// Görüntünün yüklendiği temel adres
     pub image_base: u64,
     /// Giriş noktasının mutlak adresi
@@ -349,10 +382,15 @@ pub struct PeImage {
     pub imports: Vec<ImportEntry>,
     /// Dışa aktarma tablosu (isim → adres eşleşmesi)
     pub exports: BTreeMap<String, u64>,
+    /// Forwarded export tablosu (isim → "dll.symbol")
+    pub export_forwarders: BTreeMap<String, String>,
     /// DLL mi yoksa EXE mi
     pub is_dll: bool,
     /// Hedef makine mimarisi
     pub machine: MachineType,
+    /// Exception directory (.pdata) runtime function tablosu
+    pub exception_directory: Vec<PeRuntimeFunction>,
+    pub bound_imports: Vec<PeBoundImport>,
 }
 
 /// Yüklenmiş bölüm — ham veriyi ve erişim özelliklerini içerir
@@ -386,6 +424,19 @@ pub struct ImportFunction {
     pub resolved_address: Option<u64>, // Çözümlenmiş gerçek adres
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeBoundImport {
+    pub dll_name: String,
+    pub time_date_stamp: u32,
+    pub forwarder_refs: Vec<PeBoundForwarderRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeBoundForwarderRef {
+    pub dll_name: String,
+    pub time_date_stamp: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeImportResolutionReport {
     pub total: usize,
@@ -399,6 +450,9 @@ pub struct PeTlsContext {
     pub tls_size: u32,
     pub template_size: u32,
     pub alignment: u32,
+    pub tls_index_slot: u64,
+    pub callback_count: u8,
+    pub callback_addresses: [u64; 8],
 }
 
 impl PeTlsContext {
@@ -408,11 +462,24 @@ impl PeTlsContext {
             tls_size: 0,
             template_size: 0,
             alignment: 0,
+            tls_index_slot: 0,
+            callback_count: 0,
+            callback_addresses: [0; 8],
         }
     }
 
     pub fn is_enabled(&self) -> bool {
         self.tls_base != 0 && self.tls_size != 0
+    }
+
+    pub fn callback_at(&self, index: usize) -> Option<u64> {
+        if index < self.callback_count as usize {
+            let addr = self.callback_addresses[index];
+            if addr != 0 {
+                return Some(addr);
+            }
+        }
+        None
     }
 }
 
@@ -431,8 +498,18 @@ pub struct PeProcessDescriptor {
     pub stack_top: u64,
     pub tls: PeTlsContext,
     pub imported_modules: Vec<String>,
+    pub bound_imports: Vec<PeBoundImport>,
     pub import_report: PeImportResolutionReport,
     pub initial_thread_handle: u64,
+    pub exception_directory: Vec<PeRuntimeFunction>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeRuntimeFunction {
+    pub begin_address: u32,
+    pub end_address: u32,
+    pub unwind_info_address: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -555,20 +632,29 @@ impl PeLoader {
         }
 
         // İçe aktarma tablosunu ayrıştır (basitleştirilmiş)
-        let imports = self.parse_imports(data, optional_offset, optional_header)?;
+        let mut imports = self.parse_imports(data, optional_offset, optional_header)?;
+        imports.extend(self.parse_delay_imports(data, optional_offset, optional_header)?);
 
         // Dışa aktarma tablosunu ayrıştır (basitleştirilmiş)
-        let exports = self.parse_exports(data, optional_offset, optional_header)?;
+        let (exports, export_forwarders) =
+            self.parse_exports(data, optional_offset, optional_header)?;
+        let exception_directory =
+            self.parse_exception_directory(data, optional_offset, optional_header)?;
+        let bound_imports = self.parse_bound_imports(data, optional_offset, optional_header)?;
 
         let image = PeImage {
+            time_date_stamp: file_header.time_date_stamp,
             image_base: optional_header.image_base,
             entry_point: optional_header.image_base + optional_header.address_of_entry_point as u64,
             image_size: optional_header.size_of_image,
             sections,
             imports,
             exports,
+            export_forwarders,
             is_dll,
             machine,
+            exception_directory,
+            bound_imports,
         };
 
         Ok(image)
@@ -696,6 +782,201 @@ impl PeLoader {
         Ok(imports)
     }
 
+    fn parse_delay_imports(
+        &self,
+        data: &[u8],
+        optional_offset: usize,
+        optional_header: &ImageOptionalHeader64,
+    ) -> Result<Vec<ImportEntry>, PeError> {
+        let mut imports = Vec::new();
+        let directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * 8;
+        if directory_offset + size_of::<ImageDataDirectory>() > data.len() {
+            return Ok(imports);
+        }
+        let delay_dir =
+            unsafe { &*(data.as_ptr().add(directory_offset) as *const ImageDataDirectory) };
+        if delay_dir.virtual_address == 0 || delay_dir.size == 0 {
+            return Ok(imports);
+        }
+
+        let Some(file_off) = self.rva_to_file_offset(
+            data,
+            optional_offset,
+            optional_header,
+            delay_dir.virtual_address,
+        ) else {
+            return Ok(imports);
+        };
+
+        let mut index = 0usize;
+        let desc_size = size_of::<ImageDelayImportDescriptor>();
+        loop {
+            let desc_off = file_off + index * desc_size;
+            if desc_off + desc_size > data.len() {
+                break;
+            }
+            let desc =
+                unsafe { &*(data.as_ptr().add(desc_off) as *const ImageDelayImportDescriptor) };
+            if desc.name == 0
+                && desc.delay_import_name_table == 0
+                && desc.delay_import_address_table == 0
+            {
+                break;
+            }
+
+            let Some(name_off) =
+                self.rva_to_file_offset(data, optional_offset, optional_header, desc.name)
+            else {
+                index += 1;
+                continue;
+            };
+            let dll_name = read_cstring(data, name_off, 128);
+            let thunk_rva = if desc.delay_import_name_table != 0 {
+                desc.delay_import_name_table
+            } else {
+                desc.delay_import_address_table
+            };
+            let Some(thunk_off) =
+                self.rva_to_file_offset(data, optional_offset, optional_header, thunk_rva)
+            else {
+                index += 1;
+                continue;
+            };
+
+            let mut functions = Vec::new();
+            let mut thunk_index = 0usize;
+            loop {
+                let entry_off = thunk_off + thunk_index * 8;
+                if entry_off + 8 > data.len() {
+                    break;
+                }
+                let thunk = unsafe { &*(data.as_ptr().add(entry_off) as *const ImageThunkData64) };
+                if thunk.ordinal_or_address == 0 {
+                    break;
+                }
+                let (name, ordinal) = if thunk.is_ordinal() {
+                    (
+                        alloc::format!("#{}", thunk.ordinal()),
+                        Some(thunk.ordinal()),
+                    )
+                } else {
+                    let Some(hint_off) = self.rva_to_file_offset(
+                        data,
+                        optional_offset,
+                        optional_header,
+                        thunk.hint_name_rva(),
+                    ) else {
+                        thunk_index += 1;
+                        continue;
+                    };
+                    (read_cstring(data, hint_off + 2, 128), None)
+                };
+                functions.push(ImportFunction {
+                    name,
+                    ordinal,
+                    thunk_address: optional_header.image_base
+                        + desc.delay_import_address_table as u64
+                        + (thunk_index as u64 * 8),
+                    resolved_address: None,
+                });
+                thunk_index += 1;
+            }
+            if !functions.is_empty() {
+                imports.push(ImportEntry {
+                    dll_name,
+                    functions,
+                });
+            }
+            index += 1;
+        }
+
+        Ok(imports)
+    }
+
+    fn parse_bound_imports(
+        &self,
+        data: &[u8],
+        optional_offset: usize,
+        optional_header: &ImageOptionalHeader64,
+    ) -> Result<Vec<PeBoundImport>, PeError> {
+        let mut bound_imports = Vec::new();
+        let directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT * 8;
+        if directory_offset + size_of::<ImageDataDirectory>() > data.len() {
+            return Ok(bound_imports);
+        }
+
+        let bound_dir =
+            unsafe { &*(data.as_ptr().add(directory_offset) as *const ImageDataDirectory) };
+        if bound_dir.virtual_address == 0 || bound_dir.size == 0 {
+            return Ok(bound_imports);
+        }
+
+        let Some(directory_file_offset) = self.rva_to_file_offset(
+            data,
+            optional_offset,
+            optional_header,
+            bound_dir.virtual_address,
+        ) else {
+            return Ok(bound_imports);
+        };
+
+        let directory_end = directory_file_offset
+            .saturating_add(bound_dir.size as usize)
+            .min(data.len());
+        let desc_size = size_of::<ImageBoundImportDescriptor>();
+        let ref_size = size_of::<ImageBoundForwarderRef>();
+        let mut cursor = directory_file_offset;
+
+        while cursor + desc_size <= directory_end {
+            let descriptor =
+                unsafe { &*(data.as_ptr().add(cursor) as *const ImageBoundImportDescriptor) };
+            if descriptor.time_date_stamp == 0
+                && descriptor.offset_module_name == 0
+                && descriptor.number_of_module_forwarder_refs == 0
+            {
+                break;
+            }
+
+            let dll_name = self.read_bound_import_name(
+                data,
+                directory_file_offset,
+                descriptor.offset_module_name,
+                directory_end,
+            );
+            let mut forwarder_refs =
+                Vec::with_capacity(descriptor.number_of_module_forwarder_refs as usize);
+            cursor += desc_size;
+
+            for _ in 0..descriptor.number_of_module_forwarder_refs as usize {
+                if cursor + ref_size > directory_end {
+                    break;
+                }
+                let forwarder =
+                    unsafe { &*(data.as_ptr().add(cursor) as *const ImageBoundForwarderRef) };
+                forwarder_refs.push(PeBoundForwarderRef {
+                    dll_name: self.read_bound_import_name(
+                        data,
+                        directory_file_offset,
+                        forwarder.offset_module_name,
+                        directory_end,
+                    ),
+                    time_date_stamp: forwarder.time_date_stamp,
+                });
+                cursor += ref_size;
+            }
+
+            if !dll_name.is_empty() {
+                bound_imports.push(PeBoundImport {
+                    dll_name,
+                    time_date_stamp: descriptor.time_date_stamp,
+                    forwarder_refs,
+                });
+            }
+        }
+
+        Ok(bound_imports)
+    }
+
     /// Dışa aktarma tablosunu ayrıştır
     /// DLL'nin dışarıya sunduğu işlevlerin isim→adres eşleşmesini oluşturur
     fn parse_exports(
@@ -703,20 +984,21 @@ impl PeLoader {
         data: &[u8],
         optional_offset: usize,
         optional_header: &ImageOptionalHeader64,
-    ) -> Result<BTreeMap<String, u64>, PeError> {
+    ) -> Result<(BTreeMap<String, u64>, BTreeMap<String, String>), PeError> {
         let mut exports = BTreeMap::new();
+        let mut forwarders = BTreeMap::new();
 
         // Dışa aktarma dizinini bul — isteğe bağlı başlık sonrası ilk veri dizini (ofset 96)
         let export_dir_offset = optional_offset + 96; // İlk veri dizini (dışa aktarma)
         if export_dir_offset + size_of::<ImageDataDirectory>() > data.len() {
-            return Ok(exports);
+            return Ok((exports, forwarders));
         }
 
         let export_dir =
             unsafe { &*(data.as_ptr().add(export_dir_offset) as *const ImageDataDirectory) };
 
         if export_dir.virtual_address == 0 {
-            return Ok(exports);
+            return Ok((exports, forwarders));
         }
 
         // Dışa aktarma dizini yapısını oku
@@ -724,11 +1006,11 @@ impl PeLoader {
         let export_file_offset =
             match self.rva_to_file_offset(data, optional_offset, optional_header, export_rva) {
                 Some(off) => off,
-                None => return Ok(exports),
+                None => return Ok((exports, forwarders)),
             };
 
         if export_file_offset + size_of::<ImageExportDirectory>() > data.len() {
-            return Ok(exports);
+            return Ok((exports, forwarders));
         }
 
         let exp_dir =
@@ -746,7 +1028,7 @@ impl PeLoader {
             exp_dir.address_of_functions,
         ) {
             Some(off) => off,
-            None => return Ok(exports),
+            None => return Ok((exports, forwarders)),
         };
 
         // AddressOfNames dizisini oku
@@ -757,7 +1039,7 @@ impl PeLoader {
             exp_dir.address_of_names,
         ) {
             Some(off) => off,
-            None => return Ok(exports),
+            None => return Ok((exports, forwarders)),
         };
 
         // AddressOfNameOrdinals dizisini oku
@@ -768,7 +1050,7 @@ impl PeLoader {
             exp_dir.address_of_name_ordinals,
         ) {
             Some(off) => off,
-            None => return Ok(exports),
+            None => return Ok((exports, forwarders)),
         };
 
         // İsimle dışa aktarılan işlevleri ayrıştır
@@ -802,12 +1084,73 @@ impl PeLoader {
                 self.rva_to_file_offset(data, optional_offset, optional_header, name_rva)
             {
                 let func_name = read_cstring(data, name_file_offset, 128);
-                let func_addr = optional_header.image_base + func_rva as u64;
-                exports.insert(func_name, func_addr);
+                let is_forwarder = func_rva >= export_dir.virtual_address
+                    && func_rva < export_dir.virtual_address.saturating_add(export_dir.size);
+                if is_forwarder {
+                    if let Some(target_off) =
+                        self.rva_to_file_offset(data, optional_offset, optional_header, func_rva)
+                    {
+                        let target = read_cstring(data, target_off, 128);
+                        if !target.is_empty() {
+                            forwarders.insert(func_name.clone(), target);
+                            continue;
+                        }
+                    }
+                }
+                exports.insert(func_name, optional_header.image_base + func_rva as u64);
             }
         }
 
-        Ok(exports)
+        Ok((exports, forwarders))
+    }
+
+    fn parse_exception_directory(
+        &self,
+        data: &[u8],
+        optional_offset: usize,
+        optional_header: &ImageOptionalHeader64,
+    ) -> Result<Vec<PeRuntimeFunction>, PeError> {
+        let mut functions = Vec::new();
+        let dir_base = unsafe {
+            (data.as_ptr().add(optional_offset) as *const u8)
+                .add(size_of::<ImageOptionalHeader64>())
+        };
+        let directory = unsafe {
+            &*(dir_base.add(IMAGE_DIRECTORY_ENTRY_EXCEPTION * 8) as *const ImageDataDirectory)
+        };
+        if directory.virtual_address == 0 || directory.size == 0 {
+            return Ok(functions);
+        }
+
+        let Some(file_offset) = self.rva_to_file_offset(
+            data,
+            optional_offset,
+            optional_header,
+            directory.virtual_address,
+        ) else {
+            return Ok(functions);
+        };
+
+        let entry_size = size_of::<ImageRuntimeFunctionEntry>();
+        let count = (directory.size as usize) / entry_size;
+        for index in 0..count {
+            let offset = file_offset + index * entry_size;
+            if offset + entry_size > data.len() {
+                break;
+            }
+            let entry =
+                unsafe { &*(data.as_ptr().add(offset) as *const ImageRuntimeFunctionEntry) };
+            if entry.begin_address == 0 && entry.end_address == 0 {
+                continue;
+            }
+            functions.push(PeRuntimeFunction {
+                begin_address: entry.begin_address,
+                end_address: entry.end_address,
+                unwind_info_address: entry.unwind_info_address,
+            });
+        }
+
+        Ok(functions)
     }
 
     /// RVA'yı dosya ofsetine çevirir — bölüm tablosunu kullanarak
@@ -847,6 +1190,20 @@ impl PeLoader {
         None
     }
 
+    fn read_bound_import_name(
+        &self,
+        data: &[u8],
+        directory_file_offset: usize,
+        name_offset: u16,
+        directory_end: usize,
+    ) -> String {
+        let absolute = directory_file_offset.saturating_add(name_offset as usize);
+        if absolute >= data.len() || absolute >= directory_end {
+            return String::new();
+        }
+        read_cstring(data, absolute, 256)
+    }
+
     // ========================================================================
     // PE BELLEĞE YÜKLEME VE ÇALIŞMA ZAMANI
     // ========================================================================
@@ -854,7 +1211,7 @@ impl PeLoader {
     /// Tam PE yükleme: bellek tahsisi → bölüm kopyası → yer değiştirme → IAT çözümü.
     ///
     /// Döndürür: `(mapped_base, absolute_entry_point)`
-    pub fn load_into_memory(&self, data: &[u8]) -> Result<(u64, u64), PeError> {
+    pub fn load_into_memory(&mut self, data: &[u8]) -> Result<(u64, u64), PeError> {
         // ---- DOS/PE başlıklarını tekrar oku (minimal) -----------------------
         if data.len() < 0x40 {
             return Err(PeError::InvalidDosHeader);
@@ -940,6 +1297,7 @@ impl PeLoader {
 
         // ---- IAT çözümü -----------------------------------------------------
         self.resolve_iat(mem, data, oh)?;
+        self.resolve_delay_iat(mem, data, oh)?;
 
         let entry_point = mapped_base + entry_rva;
         Ok((mapped_base, entry_point))
@@ -1032,7 +1390,7 @@ impl PeLoader {
 
     /// IAT'ı çöz: her içe aktarılan işlev için gerçek kernel fonksiyon adresini yaz.
     fn resolve_iat(
-        &self,
+        &mut self,
         mem: *mut u8,
         data: &[u8],
         oh: &ImageOptionalHeader64,
@@ -1092,6 +1450,8 @@ impl PeLoader {
 
             // IAT başlangıcı bellekte: first_thunk RVA
             let iat_start_rva = desc.first_thunk as usize;
+            let bound_descriptor_match =
+                self.bound_timestamp_matches(&dll_name.to_lowercase(), desc.time_date_stamp);
 
             let mut j = 0usize;
             loop {
@@ -1114,7 +1474,9 @@ impl PeLoader {
                     }
                 };
 
-                let fn_addr = crate::win32::get_fn_address(&dll_name, &func_name);
+                let fn_addr = self
+                    .resolve_import(&dll_name.to_lowercase(), &func_name)
+                    .unwrap_or_else(|| crate::win32::get_fn_address(&dll_name, &func_name));
                 if fn_addr == crate::win32::stub_api as *const () as usize as u64 {
                     crate::serial_println!("[PE] Çözümsüz: {}!{}", dll_name, func_name);
                 } else {
@@ -1126,12 +1488,135 @@ impl PeLoader {
                 if iat_slot_rva + 8 <= oh.size_of_image as usize {
                     unsafe {
                         let slot = mem.add(iat_slot_rva) as *mut u64;
-                        *slot = fn_addr;
+                        let current = *slot;
+                        if bound_descriptor_match && current != 0 {
+                            crate::serial_println!(
+                                "[PE] Bound IAT korundu: {}!{} = {:#x}",
+                                dll_name,
+                                func_name,
+                                current
+                            );
+                        } else {
+                            if desc.time_date_stamp != 0 && current != 0 {
+                                crate::serial_println!(
+                                    "[PE] Bound IAT gecersiz; yeniden cozuluyor: {}!{}",
+                                    dll_name,
+                                    func_name
+                                );
+                            }
+                            *slot = fn_addr;
+                        }
                     }
                 }
                 j += 1;
             }
             i += 1;
+        }
+        Ok(())
+    }
+
+    fn resolve_delay_iat(
+        &mut self,
+        mem: *mut u8,
+        data: &[u8],
+        oh: &ImageOptionalHeader64,
+    ) -> Result<(), PeError> {
+        let oh_ptr = oh as *const ImageOptionalHeader64 as *const u8;
+        let dir_base = unsafe { oh_ptr.add(size_of::<ImageOptionalHeader64>()) };
+        let delay_dir = unsafe {
+            &*(dir_base.add(IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * 8) as *const ImageDataDirectory)
+        };
+        if delay_dir.virtual_address == 0 || delay_dir.size == 0 {
+            return Ok(());
+        }
+
+        let Some(file_off) = self.rva_to_file_offset_2(data, oh, delay_dir.virtual_address) else {
+            return Ok(());
+        };
+        let desc_size = size_of::<ImageDelayImportDescriptor>();
+        let mut index = 0usize;
+        loop {
+            let desc_off = file_off + index * desc_size;
+            if desc_off + desc_size > data.len() {
+                break;
+            }
+            let desc =
+                unsafe { &*(data.as_ptr().add(desc_off) as *const ImageDelayImportDescriptor) };
+            if desc.name == 0
+                && desc.delay_import_name_table == 0
+                && desc.delay_import_address_table == 0
+            {
+                break;
+            }
+            let Some(name_off) = self.rva_to_file_offset_2(data, oh, desc.name) else {
+                index += 1;
+                continue;
+            };
+            let dll_name = read_cstring(data, name_off, 128);
+            let thunk_rva = if desc.delay_import_name_table != 0 {
+                desc.delay_import_name_table
+            } else {
+                desc.delay_import_address_table
+            };
+            let Some(thunk_off) = self.rva_to_file_offset_2(data, oh, thunk_rva) else {
+                index += 1;
+                continue;
+            };
+            let iat_start_rva = desc.delay_import_address_table as usize;
+            let bound_descriptor_match =
+                self.bound_timestamp_matches(&dll_name.to_lowercase(), desc.time_stamp);
+
+            let mut thunk_index = 0usize;
+            loop {
+                let entry_off = thunk_off + thunk_index * 8;
+                if entry_off + 8 > data.len() {
+                    break;
+                }
+                let thunk = unsafe { &*(data.as_ptr().add(entry_off) as *const ImageThunkData64) };
+                if thunk.ordinal_or_address == 0 {
+                    break;
+                }
+                let func_name = if thunk.is_ordinal() {
+                    alloc::format!("#{}", thunk.ordinal())
+                } else {
+                    let Some(hint_off) = self.rva_to_file_offset_2(data, oh, thunk.hint_name_rva())
+                    else {
+                        thunk_index += 1;
+                        continue;
+                    };
+                    read_cstring(data, hint_off + 2, 128)
+                };
+                let fn_addr = self
+                    .resolve_import(&dll_name.to_lowercase(), &func_name)
+                    .unwrap_or_else(|| crate::win32::get_fn_address(&dll_name, &func_name));
+                let iat_slot_rva = iat_start_rva + thunk_index * 8;
+                if iat_slot_rva + 8 <= oh.size_of_image as usize {
+                    unsafe {
+                        let slot = mem.add(iat_slot_rva) as *mut u64;
+                        let current = *slot;
+                        if bound_descriptor_match && current != 0 {
+                            crate::serial_println!(
+                                "[PE] Bound delay-IAT korundu: {}!{} = {:#x}",
+                                dll_name,
+                                func_name,
+                                current
+                            );
+                        } else {
+                            if desc.time_stamp != 0 && current != 0 {
+                                crate::serial_println!(
+                                    "[PE] Bound delay-IAT gecersiz; yeniden cozuluyor: {}!{}",
+                                    dll_name,
+                                    func_name
+                                );
+                            }
+                            *slot = fn_addr;
+                        }
+                    }
+                }
+                thunk_index += 1;
+            }
+
+            index += 1;
         }
         Ok(())
     }
@@ -1177,7 +1662,7 @@ impl PeLoader {
     /// Gerçek Ring 3 izolasyonu için sayfa tablosu ve IRETQ gereklidir;
     /// bu versiyon doğrudan kernel bağlamında çağrı yapar.
     pub fn load_and_run(data: &[u8]) -> Result<(), PeError> {
-        let loader = PE_LOADER.lock();
+        let mut loader = PE_LOADER.lock();
         let (mapped_base, entry_point) = loader.load_into_memory(data)?;
         drop(loader); // Kilidi serbest bırak
 
@@ -1235,11 +1720,30 @@ impl PeLoader {
         // Yüklenmiş DLL'lerde ara
         if let Some(dll) = self.loaded_dlls.get(dll_name) {
             let dll = dll.lock();
-            return dll.exports.get(func_name).copied();
+            let exported = dll.exports.get(func_name).copied();
+            let forwarder = dll.export_forwarders.get(func_name).cloned();
+            drop(dll);
+            if let Some(addr) = exported {
+                return Some(addr);
+            }
+            if let Some(target) = forwarder {
+                let (module, symbol) = split_forwarder_target(&target)?;
+                return self.resolve_import(&module, &symbol);
+            }
         }
 
         // Win32 API emülasyonunda ara (echOS'un kendi Win32 katmanı)
         crate::win32::get_proc_address(dll_name, func_name)
+    }
+
+    fn bound_timestamp_matches(&self, dll_name: &str, expected_timestamp: u32) -> bool {
+        if expected_timestamp == 0 || expected_timestamp == u32::MAX {
+            return false;
+        }
+        self.loaded_dlls
+            .get(&dll_name.to_lowercase())
+            .map(|dll| dll.lock().time_date_stamp == expected_timestamp)
+            .unwrap_or(false)
     }
 }
 
@@ -1286,6 +1790,25 @@ fn read_cstring(data: &[u8], offset: usize, max_len: usize) -> String {
     s
 }
 
+fn split_forwarder_target(target: &str) -> Option<(String, String)> {
+    let mut parts = target.splitn(2, '.');
+    let module = parts.next()?.trim();
+    let symbol = parts.next()?.trim();
+    if module.is_empty() || symbol.is_empty() {
+        return None;
+    }
+    let mut module_name = module.to_lowercase();
+    if !module_name.ends_with(".dll") {
+        module_name.push_str(".dll");
+    }
+    let symbol_name = if let Some(ordinal) = symbol.strip_prefix('#') {
+        alloc::format!("#{}", ordinal)
+    } else {
+        symbol.to_string()
+    };
+    Some((module_name, symbol_name))
+}
+
 // ============================================================================
 // GLOBAL YÜKLEYİCİ
 // ============================================================================
@@ -1293,6 +1816,7 @@ fn read_cstring(data: &[u8], offset: usize, max_len: usize) -> String {
 const PE_USER_STACK_SIZE: usize = 2 * 1024 * 1024;
 static NEXT_PE_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
 static PE_PROCESS_TABLE: Mutex<BTreeMap<u64, PeProcessDescriptor>> = Mutex::new(BTreeMap::new());
+static PE_TASK_BINDINGS: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 
 /// Spin mutex korumalı global PE yükleyici örneği
 static PE_LOADER: Mutex<PeLoader> = Mutex::new(PeLoader {
@@ -1329,6 +1853,7 @@ pub fn resolve_imports(image: &mut PeImage) -> Result<PeImportResolutionReport, 
         for function in import.functions.iter_mut() {
             total += 1;
             let resolved_addr = crate::win32_abi::resolve_module_dispatch(&dll, &function.name)
+                .or_else(|| resolve_import(&dll, &function.name))
                 .unwrap_or_else(|| crate::win32::get_fn_address(&dll, &function.name));
             if resolved_addr == 0 || resolved_addr == stub_addr {
                 function.resolved_address = None;
@@ -1349,6 +1874,442 @@ pub fn resolve_imports(image: &mut PeImage) -> Result<PeImportResolutionReport, 
         return Err(PeError::ImportNotFound);
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_image() -> PeImage {
+        PeImage {
+            time_date_stamp: 0,
+            image_base: 0,
+            entry_point: 0,
+            image_size: 0,
+            sections: Vec::new(),
+            imports: Vec::new(),
+            exports: BTreeMap::new(),
+            export_forwarders: BTreeMap::new(),
+            is_dll: true,
+            machine: MachineType::AMD64,
+            exception_directory: Vec::new(),
+            bound_imports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn split_forwarder_target_normalizes_dll_name() {
+        let (dll, symbol) = split_forwarder_target("KERNEL32.Sleep").expect("forwarder");
+        assert_eq!(dll, "kernel32.dll");
+        assert_eq!(symbol, "Sleep");
+
+        let (dll, symbol) = split_forwarder_target("ntdll.#42").expect("ordinal forwarder");
+        assert_eq!(dll, "ntdll.dll");
+        assert_eq!(symbol, "#42");
+    }
+
+    #[test]
+    fn resolve_import_follows_forwarded_exports() {
+        let mut loader = PeLoader::new();
+
+        let mut target = empty_image();
+        target.exports.insert("Sleep".to_string(), 0x1234_5678);
+        loader.register_dll("kernel32.dll".to_string(), target);
+
+        let mut forwarder = empty_image();
+        forwarder
+            .export_forwarders
+            .insert("ForwardSleep".to_string(), "KERNEL32.Sleep".to_string());
+        loader.register_dll("api-ms-win-core-synch-l1-2-0.dll".to_string(), forwarder);
+
+        assert_eq!(
+            loader.resolve_import("api-ms-win-core-synch-l1-2-0.dll", "ForwardSleep"),
+            Some(0x1234_5678)
+        );
+    }
+
+    fn make_single_import_image(descriptor_timestamp: u32, initial_iat_value: u64) -> Vec<u8> {
+        let mut data = vec![0u8; 0x800];
+
+        let dos = ImageDosHeader {
+            e_magic: DOS_MAGIC,
+            e_cblp: 0,
+            e_cp: 0,
+            e_crlc: 0,
+            e_cparhdr: 0,
+            e_minalloc: 0,
+            e_maxalloc: 0,
+            e_ss: 0,
+            e_sp: 0,
+            e_csum: 0,
+            e_ip: 0,
+            e_cs: 0,
+            e_lfarlc: 0,
+            e_ovno: 0,
+            e_res: [0; 4],
+            e_oemid: 0,
+            e_oeminfo: 0,
+            e_res2: [0; 10],
+            e_lfanew: 0x80,
+        };
+        unsafe {
+            core::ptr::write_unaligned(data.as_mut_ptr() as *mut ImageDosHeader, dos);
+        }
+        data[0x80..0x84].copy_from_slice(&PE_SIGNATURE.to_le_bytes());
+
+        let file_header = ImageFileHeader {
+            machine: MachineType::AMD64 as u16,
+            number_of_sections: 1,
+            time_date_stamp: 0xCAFEBABE,
+            pointer_to_symbol_table: 0,
+            number_of_symbols: 0,
+            size_of_optional_header: (size_of::<ImageOptionalHeader64>() + 16 * 8) as u16,
+            characteristics: IMAGE_FILE_EXECUTABLE_IMAGE,
+        };
+        let file_header_offset = 0x84;
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(file_header_offset) as *mut ImageFileHeader,
+                file_header,
+            );
+        }
+
+        let optional_offset = file_header_offset + size_of::<ImageFileHeader>();
+        let optional_header = ImageOptionalHeader64 {
+            magic: PE32_PLUS_MAGIC,
+            major_linker_version: 0,
+            minor_linker_version: 0,
+            size_of_code: 0,
+            size_of_initialized_data: 0,
+            size_of_uninitialized_data: 0,
+            address_of_entry_point: 0,
+            base_of_code: 0x1000,
+            image_base: 0x1400_0000_0,
+            section_alignment: 0x1000,
+            file_alignment: 0x200,
+            major_operating_system_version: 0,
+            minor_operating_system_version: 0,
+            major_image_version: 0,
+            minor_image_version: 0,
+            major_subsystem_version: 0,
+            minor_subsystem_version: 0,
+            win32_version_value: 0,
+            size_of_image: 0x2000,
+            size_of_headers: 0x200,
+            check_sum: 0,
+            subsystem: 3,
+            dll_characteristics: 0,
+            size_of_stack_reserve: 0,
+            size_of_stack_commit: 0,
+            size_of_heap_reserve: 0,
+            size_of_heap_commit: 0,
+            loader_flags: 0,
+            number_of_rva_and_sizes: 16,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(optional_offset) as *mut ImageOptionalHeader64,
+                optional_header,
+            );
+        }
+
+        let import_directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_IMPORT * 8;
+        let import_directory = ImageDataDirectory {
+            virtual_address: 0x1000,
+            size: (size_of::<ImageImportDescriptor>() * 2) as u32,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(import_directory_offset) as *mut ImageDataDirectory,
+                import_directory,
+            );
+        }
+
+        let section_offset = optional_offset + file_header.size_of_optional_header as usize;
+        let section = ImageSectionHeader {
+            name: [b'.', b'i', b'd', b'a', b't', b'a', 0, 0],
+            virtual_size: 0x300,
+            virtual_address: 0x1000,
+            size_of_raw_data: 0x300,
+            pointer_to_raw_data: 0x200,
+            pointer_to_relocations: 0,
+            pointer_to_linenumbers: 0,
+            number_of_relocations: 0,
+            number_of_linenumbers: 0,
+            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(section_offset) as *mut ImageSectionHeader,
+                section,
+            );
+        }
+
+        let descriptor = ImageImportDescriptor {
+            original_first_thunk: 0x1040,
+            time_date_stamp: descriptor_timestamp,
+            forwarder_chain: 0,
+            name: 0x1080,
+            first_thunk: 0x1060,
+        };
+        let descriptor_offset = 0x200usize;
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(descriptor_offset) as *mut ImageImportDescriptor,
+                descriptor,
+            );
+            core::ptr::write_unaligned(
+                data.as_mut_ptr()
+                    .add(descriptor_offset + size_of::<ImageImportDescriptor>())
+                    as *mut ImageImportDescriptor,
+                ImageImportDescriptor {
+                    original_first_thunk: 0,
+                    time_date_stamp: 0,
+                    forwarder_chain: 0,
+                    name: 0,
+                    first_thunk: 0,
+                },
+            );
+        }
+
+        let ilt_offset = 0x240usize;
+        let iat_offset = 0x260usize;
+        let hint_name_rva = 0x1090u32;
+        let thunk = ImageThunkData64 {
+            ordinal_or_address: hint_name_rva as u64,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(ilt_offset) as *mut ImageThunkData64,
+                thunk,
+            );
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(ilt_offset + 8) as *mut ImageThunkData64,
+                ImageThunkData64 {
+                    ordinal_or_address: 0,
+                },
+            );
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(iat_offset) as *mut u64,
+                initial_iat_value,
+            );
+            core::ptr::write_unaligned(data.as_mut_ptr().add(iat_offset + 8) as *mut u64, 0);
+        }
+
+        data[0x280..0x28D].copy_from_slice(b"kernel32.dll\0");
+        data[0x290..0x292].copy_from_slice(&0u16.to_le_bytes());
+        data[0x292..0x298].copy_from_slice(b"Sleep\0");
+
+        data
+    }
+
+    #[test]
+    fn parse_bound_import_directory_retains_descriptor_and_forwarders() {
+        let mut loader = PeLoader::new();
+        let mut data = vec![0u8; 0x600];
+
+        let dos = ImageDosHeader {
+            e_magic: DOS_MAGIC,
+            e_cblp: 0,
+            e_cp: 0,
+            e_crlc: 0,
+            e_cparhdr: 0,
+            e_minalloc: 0,
+            e_maxalloc: 0,
+            e_ss: 0,
+            e_sp: 0,
+            e_csum: 0,
+            e_ip: 0,
+            e_cs: 0,
+            e_lfarlc: 0,
+            e_ovno: 0,
+            e_res: [0; 4],
+            e_oemid: 0,
+            e_oeminfo: 0,
+            e_res2: [0; 10],
+            e_lfanew: 0x80,
+        };
+        unsafe {
+            core::ptr::write_unaligned(data.as_mut_ptr() as *mut ImageDosHeader, dos);
+        }
+        data[0x80..0x84].copy_from_slice(&PE_SIGNATURE.to_le_bytes());
+
+        let file_header = ImageFileHeader {
+            machine: MachineType::AMD64 as u16,
+            number_of_sections: 1,
+            time_date_stamp: 0,
+            pointer_to_symbol_table: 0,
+            number_of_symbols: 0,
+            size_of_optional_header: (size_of::<ImageOptionalHeader64>() + 16 * 8) as u16,
+            characteristics: IMAGE_FILE_EXECUTABLE_IMAGE,
+        };
+        let file_header_offset = 0x84;
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(file_header_offset) as *mut ImageFileHeader,
+                file_header,
+            );
+        }
+
+        let optional_offset = file_header_offset + size_of::<ImageFileHeader>();
+        let optional_header = ImageOptionalHeader64 {
+            magic: PE32_PLUS_MAGIC,
+            major_linker_version: 0,
+            minor_linker_version: 0,
+            size_of_code: 0,
+            size_of_initialized_data: 0,
+            size_of_uninitialized_data: 0,
+            address_of_entry_point: 0,
+            base_of_code: 0x1000,
+            image_base: 0x1400_0000_0,
+            section_alignment: 0x1000,
+            file_alignment: 0x200,
+            major_operating_system_version: 0,
+            minor_operating_system_version: 0,
+            major_image_version: 0,
+            minor_image_version: 0,
+            major_subsystem_version: 0,
+            minor_subsystem_version: 0,
+            win32_version_value: 0,
+            size_of_image: 0x2000,
+            size_of_headers: 0x200,
+            check_sum: 0,
+            subsystem: 3,
+            dll_characteristics: 0,
+            size_of_stack_reserve: 0,
+            size_of_stack_commit: 0,
+            size_of_heap_reserve: 0,
+            size_of_heap_commit: 0,
+            loader_flags: 0,
+            number_of_rva_and_sizes: 16,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(optional_offset) as *mut ImageOptionalHeader64,
+                optional_header,
+            );
+        }
+
+        let directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT * 8;
+        let directory = ImageDataDirectory {
+            virtual_address: 0x1000,
+            size: 0x80,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(directory_offset) as *mut ImageDataDirectory,
+                directory,
+            );
+        }
+
+        let section_offset = optional_offset + file_header.size_of_optional_header as usize;
+        let section = ImageSectionHeader {
+            name: [b'.', b'r', b'd', b'a', b't', b'a', 0, 0],
+            virtual_size: 0x200,
+            virtual_address: 0x1000,
+            size_of_raw_data: 0x200,
+            pointer_to_raw_data: 0x200,
+            pointer_to_relocations: 0,
+            pointer_to_linenumbers: 0,
+            number_of_relocations: 0,
+            number_of_linenumbers: 0,
+            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(section_offset) as *mut ImageSectionHeader,
+                section,
+            );
+        }
+
+        let bound_offset = 0x200usize;
+        let descriptor = ImageBoundImportDescriptor {
+            time_date_stamp: 0x1234_5678,
+            offset_module_name: 0x20,
+            number_of_module_forwarder_refs: 1,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(bound_offset) as *mut ImageBoundImportDescriptor,
+                descriptor,
+            );
+        }
+        let forwarder = ImageBoundForwarderRef {
+            time_date_stamp: 0x8765_4321,
+            offset_module_name: 0x30,
+            reserved: 0,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr()
+                    .add(bound_offset + size_of::<ImageBoundImportDescriptor>())
+                    as *mut ImageBoundForwarderRef,
+                forwarder,
+            );
+        }
+        data[bound_offset + 0x20..bound_offset + 0x20 + "kernel32.dll".len()]
+            .copy_from_slice(b"kernel32.dll");
+        data[bound_offset + 0x20 + "kernel32.dll".len()] = 0;
+        data[bound_offset + 0x30..bound_offset + 0x30 + "api-ms-win-core-synch-l1-2-0.dll".len()]
+            .copy_from_slice(b"api-ms-win-core-synch-l1-2-0.dll");
+        data[bound_offset + 0x30 + "api-ms-win-core-synch-l1-2-0.dll".len()] = 0;
+
+        let image = loader.load(&data).expect("load with bound imports");
+        assert_eq!(image.bound_imports.len(), 1);
+        assert_eq!(image.bound_imports[0].dll_name, "kernel32.dll");
+        assert_eq!(image.bound_imports[0].time_date_stamp, 0x1234_5678);
+        assert_eq!(image.bound_imports[0].forwarder_refs.len(), 1);
+        assert_eq!(
+            image.bound_imports[0].forwarder_refs[0].dll_name,
+            "api-ms-win-core-synch-l1-2-0.dll"
+        );
+        assert_eq!(
+            image.bound_imports[0].forwarder_refs[0].time_date_stamp,
+            0x8765_4321
+        );
+    }
+
+    #[test]
+    fn load_into_memory_keeps_bound_iat_when_timestamp_matches_registered_dll() {
+        let mut loader = PeLoader::new();
+        let mut target = empty_image();
+        target.time_date_stamp = 0x1234_5678;
+        target
+            .exports
+            .insert("Sleep".to_string(), 0x55AA_55AA_55AA_55AA);
+        loader.register_dll("kernel32.dll".to_string(), target);
+
+        let image_data = make_single_import_image(0x1234_5678, 0x1111_2222_3333_4444);
+        let (mapped_base, _) = loader
+            .load_into_memory(&image_data)
+            .expect("bound import image should load");
+        let slot = unsafe { *((mapped_base as *const u8).add(0x1060) as *const u64) };
+        assert_eq!(slot, 0x1111_2222_3333_4444);
+        unsafe {
+            crate::win32::win32_dealloc(mapped_base as *mut u8);
+        }
+    }
+
+    #[test]
+    fn load_into_memory_rewrites_bound_iat_when_timestamp_mismatches_registered_dll() {
+        let mut loader = PeLoader::new();
+        let mut target = empty_image();
+        target.time_date_stamp = 0xAAAA_BBBB;
+        target
+            .exports
+            .insert("Sleep".to_string(), 0x55AA_55AA_55AA_55AA);
+        loader.register_dll("kernel32.dll".to_string(), target);
+
+        let image_data = make_single_import_image(0x1234_5678, 0x1111_2222_3333_4444);
+        let (mapped_base, _) = loader
+            .load_into_memory(&image_data)
+            .expect("mismatched bound import image should load");
+        let slot = unsafe { *((mapped_base as *const u8).add(0x1060) as *const u64) };
+        assert_eq!(slot, 0x55AA_55AA_55AA_55AA);
+        unsafe {
+            crate::win32::win32_dealloc(mapped_base as *mut u8);
+        }
+    }
 }
 
 /// `.tls` section'ından thread-local template'i başlatır.
@@ -1374,11 +2335,7 @@ pub fn init_tls(image: &PeImage) -> Result<PeTlsContext, PeError> {
     let template_len = core::cmp::min(tls_section.raw_data.len(), tls_size as usize);
     if template_len != 0 {
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                tls_section.raw_data.as_ptr(),
-                tls_ptr,
-                template_len,
-            );
+            core::ptr::copy_nonoverlapping(tls_section.raw_data.as_ptr(), tls_ptr, template_len);
         }
     }
 
@@ -1387,7 +2344,94 @@ pub fn init_tls(image: &PeImage) -> Result<PeTlsContext, PeError> {
         tls_size,
         template_size: template_len as u32,
         alignment: alignment as u32,
+        tls_index_slot: 0,
+        callback_count: 0,
+        callback_addresses: [0; 8],
     })
+}
+
+pub fn init_tls_runtime(
+    image: &PeImage,
+    payload: &[u8],
+    mapped_base: u64,
+) -> Result<PeTlsContext, PeError> {
+    let mut tls = init_tls(image)?;
+    if !tls.is_enabled() {
+        return Ok(tls);
+    }
+
+    let Some(tls_dir_rva) = tls_directory_rva(payload) else {
+        return Ok(tls);
+    };
+    if tls_dir_rva == 0 || mapped_base == 0 {
+        return Ok(tls);
+    }
+
+    let dir_ptr = (mapped_base as usize)
+        .checked_add(tls_dir_rva as usize)
+        .ok_or(PeError::InvalidOptionalHeader)? as *const ImageTlsDirectory64;
+    let directory = unsafe { &*dir_ptr };
+
+    if directory.address_of_index != 0 {
+        tls.tls_index_slot = directory.address_of_index;
+        unsafe {
+            *(directory.address_of_index as *mut u32) = 0;
+        }
+    }
+
+    tls.callback_count = collect_tls_callbacks(
+        directory.address_of_callbacks,
+        mapped_base,
+        image.image_size,
+        &mut tls.callback_addresses,
+    );
+
+    Ok(tls)
+}
+
+fn invoke_tls_callbacks(descriptor: &PeProcessDescriptor, reason: u32) {
+    type TlsCallback = unsafe extern "system" fn(*mut u8, u32, *mut u8);
+    for index in 0..descriptor.tls.callback_count as usize {
+        let Some(callback) = descriptor.tls.callback_at(index) else {
+            continue;
+        };
+        let entry: TlsCallback = unsafe { core::mem::transmute(callback as usize) };
+        unsafe {
+            entry(
+                descriptor.image_base as *mut u8,
+                reason,
+                core::ptr::null_mut(),
+            );
+        }
+    }
+}
+
+fn invoke_tls_process_attach(descriptor: &PeProcessDescriptor) {
+    const DLL_PROCESS_ATTACH: u32 = 1;
+    invoke_tls_callbacks(descriptor, DLL_PROCESS_ATTACH);
+}
+
+pub fn current_process_pid() -> Option<u64> {
+    let task_id = crate::task::scheduler::current_task_id() as u64;
+    PE_TASK_BINDINGS.lock().get(&task_id).copied()
+}
+
+pub fn invoke_tls_thread_attach(pid: u64) -> bool {
+    const DLL_THREAD_ATTACH: u32 = 2;
+    let Some(descriptor) = PE_PROCESS_TABLE.lock().get(&pid).cloned() else {
+        return false;
+    };
+    invoke_tls_callbacks(&descriptor, DLL_THREAD_ATTACH);
+    true
+}
+
+pub fn invoke_tls_thread_detach(pid: u64) -> bool {
+    const DLL_THREAD_DETACH: u32 = 3;
+    let Some(descriptor) = PE_PROCESS_TABLE.lock().get(&pid).cloned() else {
+        return false;
+    };
+    invoke_tls_callbacks(&descriptor, DLL_THREAD_DETACH);
+    true
 }
 
 /// Yüklenmiş görüntü için process kaydı oluşturur, stack bootstrap yapar.
@@ -1401,12 +2445,14 @@ pub fn spawn_process(
         entry_point,
         tls,
         Vec::new(),
+        Vec::new(),
         PeImportResolutionReport {
             total: 0,
             resolved: 0,
             unresolved: 0,
         },
         0,
+        Vec::new(),
     )
 }
 
@@ -1415,8 +2461,10 @@ pub fn spawn_process_with_contract(
     entry_point: u64,
     tls: PeTlsContext,
     imported_modules: Vec<String>,
+    bound_imports: Vec<PeBoundImport>,
     import_report: PeImportResolutionReport,
     initial_thread_handle: u64,
+    exception_directory: Vec<PeRuntimeFunction>,
 ) -> Result<PeProcessHandle, PeError> {
     let stack_ptr = crate::win32::win32_alloc(PE_USER_STACK_SIZE, 16);
     if stack_ptr.is_null() {
@@ -1433,8 +2481,10 @@ pub fn spawn_process_with_contract(
         stack_top: (stack_ptr as u64).saturating_add(PE_USER_STACK_SIZE as u64 - 16),
         tls,
         imported_modules,
+        bound_imports,
         import_report,
         initial_thread_handle,
+        exception_directory,
     };
     PE_PROCESS_TABLE.lock().insert(pid, descriptor);
     Ok(PeProcessHandle { pid })
@@ -1442,6 +2492,17 @@ pub fn spawn_process_with_contract(
 
 pub fn process_descriptor(handle: PeProcessHandle) -> Option<PeProcessDescriptor> {
     PE_PROCESS_TABLE.lock().get(&handle.pid).cloned()
+}
+
+pub fn current_process_exception_directory() -> Option<Vec<PeRuntimeFunction>> {
+    let pid = current_process_pid()?;
+    Some(
+        PE_PROCESS_TABLE
+            .lock()
+            .get(&pid)
+            .map(|descriptor| descriptor.exception_directory.clone())
+            .unwrap_or_default(),
+    )
 }
 
 pub fn set_initial_thread_handle(handle: PeProcessHandle, thread_handle: u64) -> bool {
@@ -1456,6 +2517,9 @@ pub fn set_initial_thread_handle(handle: PeProcessHandle, thread_handle: u64) ->
 /// Kullanıcı process kaydındaki entry point'e transfer yapar.
 pub fn transfer_entry(handle: PeProcessHandle) -> Result<(), PeError> {
     let descriptor = process_descriptor(handle).ok_or(PeError::EntryNotFound)?;
+    let task_id = crate::task::scheduler::current_task_id() as u64;
+    PE_TASK_BINDINGS.lock().insert(task_id, handle.pid);
+    invoke_tls_process_attach(&descriptor);
     let rsp = descriptor.stack_top & !15u64;
     let entry = descriptor.entry_point;
 
@@ -1478,25 +2542,30 @@ pub fn transfer_entry(handle: PeProcessHandle) -> Result<(), PeError> {
 }
 
 /// Native PE contract:
-/// `load_pe -> resolve_imports -> init_tls -> spawn_process`.
+/// `load_pe -> resolve_imports -> load_into_memory -> init_tls_runtime -> spawn_process`.
 pub fn spawn_process_from_payload(data: &[u8]) -> Result<PeProcessHandle, PeError> {
     let mut image = load_pe(data)?;
     let import_report = resolve_imports(&mut image)?;
-    let tls = init_tls(&image)?;
     let imported_modules = image
         .imports
         .iter()
         .map(|import| import.dll_name.clone())
         .collect::<Vec<_>>();
+    let bound_imports = image.bound_imports.clone();
 
-    let (mapped_base, entry_point) = PE_LOADER.lock().load_into_memory(data)?;
+    let mut loader = PE_LOADER.lock();
+    let (mapped_base, entry_point) = loader.load_into_memory(data)?;
+    drop(loader);
+    let tls = init_tls_runtime(&image, data, mapped_base)?;
     spawn_process_with_contract(
         mapped_base,
         entry_point,
         tls,
         imported_modules,
+        bound_imports,
         import_report,
         0,
+        image.exception_directory.clone(),
     )
 }
 
@@ -1520,4 +2589,84 @@ pub fn orchestrate_native_pe_lifecycle(data: &[u8]) -> Result<PeLaunchReport, Pe
 pub fn load_and_execute(data: &[u8]) -> Result<(), PeError> {
     let handle = spawn_process_from_payload(data)?;
     transfer_entry(handle)
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+struct ImageTlsDirectory64 {
+    start_address_of_raw_data: u64,
+    end_address_of_raw_data: u64,
+    address_of_index: u64,
+    address_of_callbacks: u64,
+    size_of_zero_fill: u32,
+    characteristics: u32,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+struct ImageRuntimeFunctionEntry {
+    begin_address: u32,
+    end_address: u32,
+    unwind_info_address: u32,
+}
+
+fn tls_directory_rva(payload: &[u8]) -> Option<u32> {
+    if payload.len() < 0x40 {
+        return None;
+    }
+    let dos = unsafe { &*(payload.as_ptr() as *const ImageDosHeader) };
+    if dos.e_magic != DOS_MAGIC {
+        return None;
+    }
+    let pe_off = dos.e_lfanew as usize;
+    if pe_off + 4 + size_of::<ImageFileHeader>() + size_of::<ImageOptionalHeader64>()
+        > payload.len()
+    {
+        return None;
+    }
+    if read_u32(&payload[pe_off..]) != PE_SIGNATURE {
+        return None;
+    }
+    let oh_off = pe_off + 4 + size_of::<ImageFileHeader>();
+    let oh = unsafe { &*(payload.as_ptr().add(oh_off) as *const ImageOptionalHeader64) };
+    if oh.magic != PE32_PLUS_MAGIC {
+        return None;
+    }
+    let oh_ptr = oh as *const ImageOptionalHeader64 as *const u8;
+    let dir_base = unsafe { oh_ptr.add(size_of::<ImageOptionalHeader64>()) };
+    let directory =
+        unsafe { &*(dir_base.add(IMAGE_DIRECTORY_ENTRY_TLS * 8) as *const ImageDataDirectory) };
+    Some(directory.virtual_address)
+}
+
+fn collect_tls_callbacks(
+    callbacks_va: u64,
+    mapped_base: u64,
+    image_size: u32,
+    out: &mut [u64; 8],
+) -> u8 {
+    if callbacks_va == 0 {
+        return 0;
+    }
+
+    let image_end = mapped_base.saturating_add(image_size as u64);
+    if callbacks_va < mapped_base || callbacks_va >= image_end {
+        return 0;
+    }
+
+    let mut count = 0u8;
+    let mut current = callbacks_va as *const u64;
+    while (count as usize) < out.len() {
+        let callback = unsafe { *current };
+        if callback == 0 {
+            break;
+        }
+        if callback < mapped_base || callback >= image_end {
+            break;
+        }
+        out[count as usize] = callback;
+        count = count.saturating_add(1);
+        current = unsafe { current.add(1) };
+    }
+    count
 }

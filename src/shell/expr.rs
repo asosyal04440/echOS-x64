@@ -9,10 +9,10 @@
 //! - Parantezler: ( )
 //! - Öncelik sırası ve birleşme kuralları
 
-use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::string::ToString;
-use libm::{powf, sqrtf, sinf, cosf, tanf, log10f, fabsf};
+use alloc::vec::Vec;
+use libm::{cosf, fabsf, log10f, powf, sinf, sqrtf, tanf};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {

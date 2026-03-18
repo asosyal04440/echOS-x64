@@ -1,35 +1,12 @@
-//! # echOS Label Widget
-//!
-//! Metin etiketi bileşeni.
-//!
-//! ## Etiket Ne İşe Yarar?
-//!
-//! `Label`, salt okunur metin göstermek için en basit widget türüdür. Tıklanamaz,
-//! odaklanamaz; yalnızca bir konuma metin yazar. Form elemanlarını açıklamak,
-//! başlık göstermek veya dinamik değerleri (sayaç, durum mesajı vb.) ekrana
-//! yansıtmak için kullanılır.
-//!
-//! ## Genişlik Hesabı
-//!
-//! Monospace (sabit aralıklı) yazı tipinde her karakter 8 piksel genişliğindedir.
-//! Bu nedenle `width = text.len() * 8` formülü metnin piksel genişliğini verir.
-//! Metin değiştiğinde `set_text` hem metni hem genişliği günceller; böylece
-//! hit-testing sınır kutusu her zaman doğru kalır.
-
-use super::{Rect, Widget};
+use super::{draw_render_objects, Rect, Widget};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject, RenderObjectKind, TextRunStyle};
 use crate::gui::theme::Theme;
-
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 
-/// Salt okunur metin etiketi widget'ı.
-///
-/// `text: String` heap üzerinde sahip olunan metin verisidir; `Button<'a>`'den
-/// farklı olarak referans değil değer tutar. Bu, etiketin oluşturulduktan sonra
-/// metnin değiştirilmesine (`set_text`) olanak tanır.
-///
-/// `color: u32` ARGB/RGBA formatında 32-bit piksel rengidir.
 pub struct Label {
     rect: Rect,
     text: String,
@@ -37,70 +14,58 @@ pub struct Label {
 }
 
 impl Label {
-    /// Yeni etiket oluşturur; genişlik metinden otomatik hesaplanır.
-    ///
-    /// `text.to_string()` `ToString` trait'i aracılığıyla `&str`'yi `String`'e
-    /// dönüştürür. Alternatif olarak `String::from(text)` de kullanılabilir;
-    /// ikisi işlevsel olarak eşdeğerdir.
     pub fn new(x: i32, y: i32, text: &str) -> Self {
-        let width = (text.len() * 8) as i32;
         Self {
-            rect: Rect::new(x, y, width, 16),
+            rect: Rect::new(x, y, (text.len() * 8) as i32, 18),
             text: text.to_string(),
             color: Theme::TEXT_PRIMARY.to_u32(),
         }
     }
 
-    /// Builder: metin rengini özelleştirir.
-    ///
-    /// `mut self` alıp `Self` döndüren builder pattern;
-    /// `Label::new(...).with_color(0xFF0000FF)` zincirleme kullanımına izin verir.
     pub fn with_color(mut self, color: u32) -> Self {
         self.color = color;
         self
     }
 
-    /// Metni günceller ve genişliği yeniden hesaplar.
-    ///
-    /// `rect.width` güncellendiği için etiket yeniden çizildiğinde
-    /// sınır kutusu da doğru boyutu yansıtır. `set_text` `String` alır
-    /// çünkü sahipliği devralır; `&str` almak isteseydi ek `to_string()` gerekirdi.
     pub fn set_text(&mut self, text: String) {
         self.text = text;
-        // Boyutu güncelle
         self.rect.width = (self.text.len() * 8) as i32;
     }
 }
 
 impl Widget for Label {
-    /// Metni framebuffer'a çizer.
-    ///
-    /// `draw_string` koordinatları `usize` ister; `as usize` güvenli dönüşüm
-    /// sağlar (i32 pozitifse keserek dönüştürür). Etiket arka plan rengi
-    /// çizmez; altındaki içerik üzerine metin yazar (saydam arka plan).
     fn draw(&self, fb: &mut Framebuffer) {
-        fb.draw_string(
-            self.rect.x as usize,
-            self.rect.y as usize,
-            &self.text,
-            self.color,
-        );
+        draw_render_objects(fb, self.bounds(), &self.render_objects());
     }
 
-    /// Etiketler tıklanamaz; her zaman false döner.
-    ///
-    /// `_x` ve `_y` parametreleri kullanılmaz; `_` öneki derleyici uyarısını
-    /// bastırır. Bu, Widget trait'inin varsayılan olmayan zorunlu metodunun
-    /// "bu widget için işlevsiz" implementasyonudur.
     fn on_click(&mut self, _x: i32, _y: i32) -> bool {
         false
     }
 
-    /// Etiketin sınır dikdörtgenini döndürür.
     fn bounds(&self) -> Rect {
         self.rect
     }
 
-    /// Etiketlerin animasyon durumu yoktur; `update` boş.
-    fn update(&mut self) {}
+    fn render_objects(&self) -> Vec<RenderObject> {
+        vec![RenderObject {
+            object_id: ((self.rect.x as u64) << 32) ^ self.rect.y as u64,
+            bounds: crate::gui::protocol::Rect::new(
+                self.rect.x,
+                self.rect.y,
+                self.rect.width.max(1) as u32,
+                self.rect.height.max(1) as u32,
+            ),
+            clip: None,
+            z_index: 0,
+            opacity: u8::MAX,
+            lane: DamageLane::Text,
+            kind: RenderObjectKind::TextRun {
+                blob_id: 0,
+                text: self.text.clone(),
+                color: self.color,
+                style: TextRunStyle::Ui,
+                max_width: self.rect.width.max(1) as u32,
+            },
+        }]
+    }
 }

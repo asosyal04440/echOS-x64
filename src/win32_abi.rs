@@ -64,6 +64,15 @@ pub const SOCK_STREAM: i32 = 1;
 pub const SOCK_DGRAM: i32 = 2;
 pub const IPPROTO_TCP: i32 = 6;
 pub const IPPROTO_UDP: i32 = 17;
+const SOL_SOCKET: i32 = 0xFFFF;
+const SO_SNDBUF: i32 = 0x1001;
+const SO_RCVBUF: i32 = 0x1002;
+const SO_REUSEADDR: i32 = 0x0004;
+const SO_KEEPALIVE: i32 = 0x0008;
+const SO_RCVTIMEO: i32 = 0x1006;
+const SO_SNDTIMEO: i32 = 0x1005;
+const TCP_NODELAY: i32 = 0x0001;
+const INADDR_NONE: u32 = 0xFFFF_FFFF;
 
 const WSAEINVAL: u32 = 10022;
 const WSAEAFNOSUPPORT: u32 = 10047;
@@ -79,6 +88,21 @@ const WSAENOTCONN: u32 = 10057;
 const WSA_OPERATION_ABORTED: u32 = 995;
 
 static LAST_WSA_ERROR: AtomicU32 = AtomicU32::new(0);
+static UNWIND_LOOKUP_CACHE: Mutex<BTreeMap<u64, Box<[crate::pe_loader::PeRuntimeFunction]>>> =
+    Mutex::new(BTreeMap::new());
+
+const UNW_FLAG_EHANDLER: u8 = 0x1;
+const UNW_FLAG_UHANDLER: u8 = 0x2;
+const UNW_FLAG_CHAININFO: u8 = 0x4;
+const UWOP_PUSH_NONVOL: u8 = 0;
+const UWOP_ALLOC_LARGE: u8 = 1;
+const UWOP_ALLOC_SMALL: u8 = 2;
+const UWOP_SET_FPREG: u8 = 3;
+const UWOP_SAVE_NONVOL: u8 = 4;
+const UWOP_SAVE_NONVOL_FAR: u8 = 5;
+const UWOP_SAVE_XMM128: u8 = 8;
+const UWOP_SAVE_XMM128_FAR: u8 = 9;
+const UWOP_PUSH_MACHFRAME: u8 = 10;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -90,6 +114,197 @@ pub struct WsaData {
     pub max_sockets: u16,
     pub max_udp_dg: u16,
     pub vendor_info: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct M128A {
+    pub low: u64,
+    pub high: i64,
+}
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug)]
+pub struct ContextRecord {
+    pub p1_home: u64,
+    pub p2_home: u64,
+    pub p3_home: u64,
+    pub p4_home: u64,
+    pub p5_home: u64,
+    pub p6_home: u64,
+    pub context_flags: u32,
+    pub mx_csr: u32,
+    pub seg_cs: u16,
+    pub seg_ds: u16,
+    pub seg_es: u16,
+    pub seg_fs: u16,
+    pub seg_gs: u16,
+    pub seg_ss: u16,
+    pub eflags: u32,
+    pub dr0: u64,
+    pub dr1: u64,
+    pub dr2: u64,
+    pub dr3: u64,
+    pub dr6: u64,
+    pub dr7: u64,
+    pub rax: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rbx: u64,
+    pub rsp: u64,
+    pub rbp: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub xmm_registers: [M128A; 16],
+    pub vector_registers: [M128A; 26],
+    pub vector_control: u64,
+    pub debug_control: u64,
+    pub last_branch_to_rip: u64,
+    pub last_branch_from_rip: u64,
+    pub last_exception_to_rip: u64,
+    pub last_exception_from_rip: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NonvolatileContextPointers {
+    pub floating_context: [*mut M128A; 16],
+    pub integer_context: [*mut u64; 16],
+}
+
+impl Default for NonvolatileContextPointers {
+    fn default() -> Self {
+        Self {
+            floating_context: [core::ptr::null_mut(); 16],
+            integer_context: [core::ptr::null_mut(); 16],
+        }
+    }
+}
+
+impl Default for ContextRecord {
+    fn default() -> Self {
+        Self {
+            p1_home: 0,
+            p2_home: 0,
+            p3_home: 0,
+            p4_home: 0,
+            p5_home: 0,
+            p6_home: 0,
+            context_flags: 0,
+            mx_csr: 0x1F80,
+            seg_cs: 0,
+            seg_ds: 0,
+            seg_es: 0,
+            seg_fs: 0,
+            seg_gs: 0,
+            seg_ss: 0,
+            eflags: 0,
+            dr0: 0,
+            dr1: 0,
+            dr2: 0,
+            dr3: 0,
+            dr6: 0,
+            dr7: 0,
+            rax: 0,
+            rcx: 0,
+            rdx: 0,
+            rbx: 0,
+            rsp: 0,
+            rbp: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: 0,
+            xmm_registers: [M128A::default(); 16],
+            vector_registers: [M128A::default(); 26],
+            vector_control: 0,
+            debug_control: 0,
+            last_branch_to_rip: 0,
+            last_branch_from_rip: 0,
+            last_exception_to_rip: 0,
+            last_exception_from_rip: 0,
+        }
+    }
+}
+
+fn synchronize_vector_state(context: &mut ContextRecord) {
+    for (index, value) in context.xmm_registers.iter().copied().enumerate() {
+        if index < context.vector_registers.len() {
+            context.vector_registers[index] = value;
+        }
+    }
+    context.vector_control = context.mx_csr as u64;
+}
+
+fn publish_unwind_transition(context: &mut ContextRecord, previous_rip: u64, previous_rsp: u64) {
+    context.last_branch_from_rip = previous_rip;
+    context.last_branch_to_rip = context.rip;
+    context.last_exception_from_rip = previous_rsp;
+    context.last_exception_to_rip = context.rsp;
+}
+
+fn clear_context_pointers(context_pointers: Option<&mut NonvolatileContextPointers>) {
+    if let Some(context_pointers) = context_pointers {
+        *context_pointers = NonvolatileContextPointers::default();
+    }
+}
+
+fn set_integer_context_pointer(
+    context_pointers: Option<&mut NonvolatileContextPointers>,
+    register: u8,
+    slot: *mut u64,
+) {
+    let Some(context_pointers) = context_pointers else {
+        return;
+    };
+    if let Some(entry) = context_pointers.integer_context.get_mut(register as usize) {
+        *entry = slot;
+    }
+}
+
+fn set_floating_context_pointer(
+    context_pointers: Option<&mut NonvolatileContextPointers>,
+    register: u8,
+    slot: *mut M128A,
+) {
+    let Some(context_pointers) = context_pointers else {
+        return;
+    };
+    if let Some(entry) = context_pointers.floating_context.get_mut(register as usize) {
+        *entry = slot;
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UnwindInfoHeader {
+    version_flags: u8,
+    size_of_prolog: u8,
+    count_of_codes: u8,
+    frame_register_offset: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UnwindCode {
+    code_offset: u8,
+    unwind_op_info: u8,
 }
 
 #[repr(C)]
@@ -119,6 +334,7 @@ struct ProcessHandleState {
     imported_modules: Vec<String>,
     initial_thread_handle: u64,
     terminated: bool,
+    signal_epoch: Arc<AtomicU32>,
 }
 
 #[derive(Clone, Debug)]
@@ -126,8 +342,12 @@ struct ThreadHandleState {
     tid: u64,
     owner_pid: u64,
     entry_point: u64,
+    start_param: u64,
     alertable_waits: u64,
     terminated: bool,
+    exit_code: u32,
+    task_id: Option<u64>,
+    signal_epoch: Arc<AtomicU32>,
 }
 
 #[derive(Clone, Debug)]
@@ -220,6 +440,144 @@ fn close_handle(handle: u64) -> bool {
     }
 }
 
+pub fn register_thread_handle(owner_pid: u64, entry_point: u64, start_param: u64) -> (u64, u64) {
+    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::AcqRel);
+    let signal_epoch = Arc::new(AtomicU32::new(0));
+    let handle = allocate_handle(HandleObject::Thread(ThreadHandleState {
+        tid: thread_id,
+        owner_pid,
+        entry_point,
+        start_param,
+        alertable_waits: 0,
+        terminated: false,
+        exit_code: 259,
+        task_id: None,
+        signal_epoch,
+    }));
+    (handle, thread_id)
+}
+
+pub fn bind_thread_handle_task(handle: u64, task_id: u64) -> bool {
+    let mut table = HANDLE_TABLE.lock();
+    let Some(HandleObject::Thread(thread)) = table.get_mut(&handle) else {
+        return false;
+    };
+    thread.task_id = Some(task_id);
+    true
+}
+
+pub fn thread_handle_task_id(handle: u64) -> Option<u64> {
+    let table = HANDLE_TABLE.lock();
+    match table.get(&handle) {
+        Some(HandleObject::Thread(thread)) => thread.task_id,
+        _ => None,
+    }
+}
+
+pub fn thread_handle_tid(handle: u64) -> Option<u64> {
+    let table = HANDLE_TABLE.lock();
+    match table.get(&handle) {
+        Some(HandleObject::Thread(thread)) => Some(thread.tid),
+        _ => None,
+    }
+}
+
+pub fn thread_handle_owner_pid(handle: u64) -> Option<u64> {
+    let table = HANDLE_TABLE.lock();
+    match table.get(&handle) {
+        Some(HandleObject::Thread(thread)) => Some(thread.owner_pid),
+        _ => None,
+    }
+}
+
+pub fn thread_handle_start_info(handle: u64) -> Option<(u64, u64, u64)> {
+    let table = HANDLE_TABLE.lock();
+    match table.get(&handle) {
+        Some(HandleObject::Thread(thread)) => {
+            Some((thread.owner_pid, thread.entry_point, thread.start_param))
+        }
+        _ => None,
+    }
+}
+
+pub fn mark_thread_handle_terminated(handle: u64) -> bool {
+    mark_thread_handle_terminated_with_exit(handle, 0)
+}
+
+pub fn mark_thread_handle_terminated_with_exit(handle: u64, exit_code: u32) -> bool {
+    let mut table = HANDLE_TABLE.lock();
+    let Some(HandleObject::Thread(thread)) = table.get_mut(&handle) else {
+        return false;
+    };
+    thread.terminated = true;
+    thread.exit_code = exit_code;
+    thread.signal_epoch.fetch_add(1, Ordering::AcqRel);
+    let epoch_addr = thread.signal_epoch.as_ref() as *const AtomicU32 as u64;
+    crate::task::wake_by_address_all(epoch_addr);
+    true
+}
+
+pub fn thread_exit_code(handle: u64) -> Option<u32> {
+    let table = HANDLE_TABLE.lock();
+    match table.get(&handle) {
+        Some(HandleObject::Thread(thread)) => Some(thread.exit_code),
+        _ => None,
+    }
+}
+
+pub fn process_handle_for_pid(pid: u64) -> Option<u64> {
+    let table = HANDLE_TABLE.lock();
+    table.iter().find_map(|(&handle, object)| match object {
+        HandleObject::Process(process) if process.pid == pid => Some(handle),
+        _ => None,
+    })
+}
+
+pub fn process_handle_pid(handle: u64) -> Option<u64> {
+    let table = HANDLE_TABLE.lock();
+    match table.get(&handle) {
+        Some(HandleObject::Process(process)) => Some(process.pid),
+        _ => None,
+    }
+}
+
+pub fn process_initial_thread_handle(handle: u64) -> Option<u64> {
+    let table = HANDLE_TABLE.lock();
+    match table.get(&handle) {
+        Some(HandleObject::Process(process)) => Some(process.initial_thread_handle),
+        _ => None,
+    }
+}
+
+pub fn process_exit_code(handle: u64) -> Option<u32> {
+    let initial_thread = process_initial_thread_handle(handle)?;
+    thread_exit_code(initial_thread)
+}
+
+pub fn mark_process_terminated_with_exit(handle: u64, exit_code: u32) -> bool {
+    let (thread_handle, epoch) = {
+        let mut table = HANDLE_TABLE.lock();
+        let Some(HandleObject::Process(process)) = table.get_mut(&handle) else {
+            return false;
+        };
+        process.terminated = true;
+        process.signal_epoch.fetch_add(1, Ordering::AcqRel);
+        (process.initial_thread_handle, process.signal_epoch.clone())
+    };
+    let _ = mark_thread_handle_terminated_with_exit(thread_handle, exit_code);
+    let epoch_addr = epoch.as_ref() as *const AtomicU32 as u64;
+    crate::task::wake_by_address_all(epoch_addr);
+    true
+}
+
+pub fn current_process_owner_pid(thread_handle: u64) -> Option<u64> {
+    let table = HANDLE_TABLE.lock();
+    match table.get(&thread_handle) {
+        Some(HandleObject::Thread(thread)) => Some(thread.owner_pid),
+        _ => None,
+    }
+}
+
 fn normalize_nt_path(path: &str) -> String {
     let trimmed = path
         .trim_start_matches("\\\\??\\\\")
@@ -301,6 +659,8 @@ fn wait_for_single_object(handle: u64, alertable: bool, timeout: *const i64) -> 
 
             match object {
                 HandleObject::Waitable(waitable) => Some(waitable.signal_epoch.clone()),
+                HandleObject::Thread(thread) => Some(thread.signal_epoch.clone()),
+                HandleObject::Process(process) => Some(process.signal_epoch.clone()),
                 _ => None,
             }
         };
@@ -327,11 +687,13 @@ fn wait_for_single_object(handle: u64, alertable: bool, timeout: *const i64) -> 
 
 pub fn create_waitable_event(manual_reset: bool, initial_state: bool) -> Result<u64, NtStatus> {
     let epoch = Arc::new(AtomicU32::new(initial_state as u32));
-    Ok(allocate_handle(HandleObject::Waitable(WaitableHandleState {
-        signaled: initial_state,
-        manual_reset,
-        signal_epoch: epoch,
-    })))
+    Ok(allocate_handle(HandleObject::Waitable(
+        WaitableHandleState {
+            signaled: initial_state,
+            manual_reset,
+            signal_epoch: epoch,
+        },
+    )))
 }
 
 pub fn set_waitable_event(handle: u64) -> NtStatus {
@@ -403,11 +765,7 @@ pub fn create_io_ring(
     })))
 }
 
-pub unsafe fn register_io_ring_handles(
-    handle: u64,
-    handles: *const u64,
-    count: u32,
-) -> NtStatus {
+pub unsafe fn register_io_ring_handles(handle: u64, handles: *const u64, count: u32) -> NtStatus {
     if handles.is_null() && count != 0 {
         return NtStatus::InvalidHandle;
     }
@@ -531,7 +889,11 @@ fn execute_io_ring_op(
     state: &IoRingHandleState,
     op: &IoRingQueuedOp,
 ) -> IoRingCompletion {
-    let Some(file_handle) = state.registered_handles.get(op.file_index as usize).copied() else {
+    let Some(file_handle) = state
+        .registered_handles
+        .get(op.file_index as usize)
+        .copied()
+    else {
         return IoRingCompletion {
             user_data: op.user_data,
             result_code: NtStatus::InvalidHandle as i32,
@@ -539,7 +901,11 @@ fn execute_io_ring_op(
             operation: op.kind as u32,
         };
     };
-    let Some(buffer) = state.registered_buffers.get(op.buffer_index as usize).copied() else {
+    let Some(buffer) = state
+        .registered_buffers
+        .get(op.buffer_index as usize)
+        .copied()
+    else {
         return IoRingCompletion {
             user_data: op.user_data,
             result_code: NtStatus::InvalidHandle as i32,
@@ -667,10 +1033,7 @@ pub fn submit_io_ring(handle: u64, to_submit: u32, min_complete: u32, flags: u32
     status
 }
 
-pub unsafe fn pop_io_ring_completion(
-    handle: u64,
-    completion: *mut IoRingCompletion,
-) -> NtStatus {
+pub unsafe fn pop_io_ring_completion(handle: u64, completion: *mut IoRingCompletion) -> NtStatus {
     if completion.is_null() {
         return NtStatus::InvalidHandle;
     }
@@ -708,7 +1071,7 @@ pub fn resolve_module_dispatch(module: &str, name: &str) -> Option<u64> {
     match module {
         "ntdll" => resolve_ntdll_symbol(name),
         "ws2_32" | "wsock32" => resolve_ws2_32_symbol(name),
-        "kernel32" | "user32" | "gdi32" => {
+        "kernel32" | "user32" | "gdi32" | "advapi32" | "shell32" | "msvcrt" => {
             let addr = crate::win32::get_fn_address(module, name);
             if addr == 0 || addr == crate::win32::stub_api as *const () as usize as u64 {
                 None
@@ -1017,8 +1380,12 @@ pub unsafe fn nt_create_process(
         tid: thread_id,
         owner_pid: launch.handle.pid,
         entry_point: launch.descriptor.entry_point,
+        start_param: 0,
         alertable_waits: 0,
         terminated: false,
+        exit_code: 259,
+        task_id: None,
+        signal_epoch: Arc::new(AtomicU32::new(0)),
     }));
     let _ = crate::pe_loader::set_initial_thread_handle(launch.handle, thread_handle);
 
@@ -1032,6 +1399,7 @@ pub unsafe fn nt_create_process(
         imported_modules: launch.descriptor.imported_modules,
         initial_thread_handle: thread_handle,
         terminated: false,
+        signal_epoch: Arc::new(AtomicU32::new(0)),
     };
     let handle = allocate_handle(HandleObject::Process(process_state));
     *process_handle = handle;
@@ -1046,9 +1414,7 @@ pub fn resolve_ntdll_symbol(name: &str) -> Option<u64> {
     let addr = match name {
         "NtCreateFile" => ntdll_nt_create_file as *const () as usize as u64,
         "NtReadFile" => ntdll_nt_read_file as *const () as usize as u64,
-        "NtAllocateVirtualMemory" => {
-            ntdll_nt_allocate_virtual_memory as *const () as usize as u64
-        }
+        "NtAllocateVirtualMemory" => ntdll_nt_allocate_virtual_memory as *const () as usize as u64,
         "NtCreateProcess" | "NtCreateProcessEx" | "NtCreateUserProcess" => {
             ntdll_nt_create_process as *const () as usize as u64
         }
@@ -1057,9 +1423,279 @@ pub fn resolve_ntdll_symbol(name: &str) -> Option<u64> {
         "NtSetEvent" => ntdll_nt_set_event as *const () as usize as u64,
         "NtResetEvent" => ntdll_nt_reset_event as *const () as usize as u64,
         "NtClose" => ntdll_nt_close as *const () as usize as u64,
+        "RtlLookupFunctionEntry" => ntdll_rtl_lookup_function_entry as *const () as usize as u64,
+        "RtlVirtualUnwind" => ntdll_rtl_virtual_unwind as *const () as usize as u64,
         _ => return None,
     };
     Some(addr)
+}
+
+fn unwind_cache_key() -> u64 {
+    crate::task::scheduler::current_task_id() as u64
+}
+
+fn lookup_runtime_function_index(
+    control_pc: u64,
+    image_base: u64,
+    entries: &[crate::pe_loader::PeRuntimeFunction],
+) -> Option<usize> {
+    let relative = control_pc.checked_sub(image_base)? as u32;
+    entries
+        .iter()
+        .position(|entry| relative >= entry.begin_address && relative < entry.end_address)
+}
+
+fn current_runtime_function_pointer(
+    control_pc: u64,
+    image_base: *mut u64,
+) -> Option<*const crate::pe_loader::PeRuntimeFunction> {
+    let pid = crate::pe_loader::current_process_pid()?;
+    let descriptor =
+        crate::pe_loader::process_descriptor(crate::pe_loader::PeProcessHandle { pid })?;
+    if !image_base.is_null() {
+        unsafe {
+            *image_base = descriptor.image_base;
+        }
+    }
+    let boxed = descriptor.exception_directory.into_boxed_slice();
+    let index = lookup_runtime_function_index(control_pc, descriptor.image_base, &boxed)?;
+    let ptr = boxed.as_ptr().wrapping_add(index);
+    UNWIND_LOOKUP_CACHE.lock().insert(unwind_cache_key(), boxed);
+    Some(ptr)
+}
+
+unsafe fn register_value(context: &ContextRecord, reg: u8) -> u64 {
+    match reg {
+        0 => context.rax,
+        1 => context.rcx,
+        2 => context.rdx,
+        3 => context.rbx,
+        4 => context.rsp,
+        5 => context.rbp,
+        6 => context.rsi,
+        7 => context.rdi,
+        8 => context.r8,
+        9 => context.r9,
+        10 => context.r10,
+        11 => context.r11,
+        12 => context.r12,
+        13 => context.r13,
+        14 => context.r14,
+        15 => context.r15,
+        _ => 0,
+    }
+}
+
+unsafe fn set_register_value(context: &mut ContextRecord, reg: u8, value: u64) {
+    match reg {
+        0 => context.rax = value,
+        1 => context.rcx = value,
+        2 => context.rdx = value,
+        3 => context.rbx = value,
+        4 => context.rsp = value,
+        5 => context.rbp = value,
+        6 => context.rsi = value,
+        7 => context.rdi = value,
+        8 => context.r8 = value,
+        9 => context.r9 = value,
+        10 => context.r10 = value,
+        11 => context.r11 = value,
+        12 => context.r12 = value,
+        13 => context.r13 = value,
+        14 => context.r14 = value,
+        15 => context.r15 = value,
+        _ => {}
+    }
+}
+
+unsafe fn read_m128a(address: u64) -> M128A {
+    core::ptr::read_unaligned(address as *const M128A)
+}
+
+unsafe fn unwind_info_header<'a>(
+    image_base: u64,
+    entry: &crate::pe_loader::PeRuntimeFunction,
+) -> Option<&'a UnwindInfoHeader> {
+    let address =
+        image_base.checked_add(entry.unwind_info_address as u64)? as *const UnwindInfoHeader;
+    if address.is_null() {
+        return None;
+    }
+    Some(&*address)
+}
+
+unsafe fn unwind_code_slots<'a>(header: &'a UnwindInfoHeader) -> &'a [UnwindCode] {
+    let codes = (header as *const UnwindInfoHeader).add(1) as *const UnwindCode;
+    core::slice::from_raw_parts(codes, header.count_of_codes as usize)
+}
+
+unsafe fn unwind_payload_ptr(header: &UnwindInfoHeader) -> *const u8 {
+    let slots = unwind_code_slots(header);
+    let aligned_slots = (slots.len() + 1) & !1usize;
+    (slots.as_ptr() as *const u8).add(aligned_slots * core::mem::size_of::<UnwindCode>())
+}
+
+unsafe fn apply_unwind_info(
+    context: &mut ContextRecord,
+    header: &UnwindInfoHeader,
+    establisher_frame: *mut u64,
+    mut context_pointers: Option<&mut NonvolatileContextPointers>,
+) -> bool {
+    let frame_register = header.frame_register_offset & 0x0F;
+    let frame_offset = (header.frame_register_offset >> 4) as u64 * 16;
+    let mut stack = context.rsp;
+    let mut frame_base = stack;
+    if frame_register != 0 {
+        frame_base = register_value(context, frame_register).saturating_sub(frame_offset);
+    }
+    if !establisher_frame.is_null() {
+        *establisher_frame = frame_base;
+    }
+
+    let codes = unwind_code_slots(header);
+    let mut index = 0usize;
+    while index < codes.len() {
+        let op = codes[index].unwind_op_info & 0x0F;
+        let info = codes[index].unwind_op_info >> 4;
+        match op {
+            UWOP_PUSH_NONVOL => {
+                let slot = stack as *mut u64;
+                let value = *slot;
+                set_register_value(context, info, value);
+                set_integer_context_pointer(context_pointers.as_deref_mut(), info, slot);
+                stack = stack.saturating_add(8);
+            }
+            UWOP_ALLOC_SMALL => {
+                stack = stack.saturating_add((info as u64) * 8 + 8);
+            }
+            UWOP_ALLOC_LARGE => {
+                if index + 1 >= codes.len() {
+                    break;
+                }
+                let size = if info == 0 {
+                    let scaled = u16::from_le_bytes([
+                        codes[index + 1].code_offset,
+                        codes[index + 1].unwind_op_info,
+                    ]) as u64;
+                    index += 1;
+                    scaled * 8
+                } else {
+                    if index + 2 >= codes.len() {
+                        break;
+                    }
+                    let low = u16::from_le_bytes([
+                        codes[index + 1].code_offset,
+                        codes[index + 1].unwind_op_info,
+                    ]) as u32;
+                    let high = u16::from_le_bytes([
+                        codes[index + 2].code_offset,
+                        codes[index + 2].unwind_op_info,
+                    ]) as u32;
+                    index += 2;
+                    ((high << 16) | low) as u64
+                };
+                stack = stack.saturating_add(size);
+            }
+            UWOP_SET_FPREG => {
+                if frame_register != 0 {
+                    stack = frame_base;
+                }
+            }
+            UWOP_SAVE_NONVOL => {
+                if index + 1 >= codes.len() {
+                    break;
+                }
+                let offset = u16::from_le_bytes([
+                    codes[index + 1].code_offset,
+                    codes[index + 1].unwind_op_info,
+                ]) as u64
+                    * 8;
+                let slot = frame_base.saturating_add(offset) as *mut u64;
+                let value = *slot;
+                set_register_value(context, info, value);
+                set_integer_context_pointer(context_pointers.as_deref_mut(), info, slot);
+                index += 1;
+            }
+            UWOP_SAVE_NONVOL_FAR => {
+                if index + 2 >= codes.len() {
+                    break;
+                }
+                let low = u16::from_le_bytes([
+                    codes[index + 1].code_offset,
+                    codes[index + 1].unwind_op_info,
+                ]) as u32;
+                let high = u16::from_le_bytes([
+                    codes[index + 2].code_offset,
+                    codes[index + 2].unwind_op_info,
+                ]) as u32;
+                let offset = ((high << 16) | low) as u64;
+                let slot = frame_base.saturating_add(offset) as *mut u64;
+                let value = *slot;
+                set_register_value(context, info, value);
+                set_integer_context_pointer(context_pointers.as_deref_mut(), info, slot);
+                index += 2;
+            }
+            UWOP_SAVE_XMM128 => {
+                if index + 1 >= codes.len() {
+                    break;
+                }
+                let offset = u16::from_le_bytes([
+                    codes[index + 1].code_offset,
+                    codes[index + 1].unwind_op_info,
+                ]) as u64
+                    * 16;
+                let slot = frame_base.saturating_add(offset) as *mut M128A;
+                if (info as usize) < context.xmm_registers.len() {
+                    context.xmm_registers[info as usize] = read_m128a(slot as u64);
+                    set_floating_context_pointer(context_pointers.as_deref_mut(), info, slot);
+                }
+                index += 1;
+            }
+            UWOP_SAVE_XMM128_FAR => {
+                if index + 2 >= codes.len() {
+                    break;
+                }
+                let low = u16::from_le_bytes([
+                    codes[index + 1].code_offset,
+                    codes[index + 1].unwind_op_info,
+                ]) as u32;
+                let high = u16::from_le_bytes([
+                    codes[index + 2].code_offset,
+                    codes[index + 2].unwind_op_info,
+                ]) as u32;
+                let offset = ((high << 16) | low) as u64;
+                let slot = frame_base.saturating_add(offset) as *mut M128A;
+                if (info as usize) < context.xmm_registers.len() {
+                    context.xmm_registers[info as usize] = read_m128a(slot as u64);
+                    set_floating_context_pointer(context_pointers.as_deref_mut(), info, slot);
+                }
+                index += 2;
+            }
+            UWOP_PUSH_MACHFRAME => {
+                let error_code_slots = if info == 0 { 0u64 } else { 1u64 };
+                let frame_ptr = stack as *const u64;
+                let rip = *frame_ptr.add(error_code_slots as usize);
+                let cs = *frame_ptr.add((error_code_slots + 1) as usize) as u16;
+                let eflags = *frame_ptr.add((error_code_slots + 2) as usize) as u32;
+                let restored_rsp = *frame_ptr.add((error_code_slots + 3) as usize);
+                let ss = *frame_ptr.add((error_code_slots + 4) as usize) as u16;
+                if !establisher_frame.is_null() {
+                    *establisher_frame = stack;
+                }
+                context.seg_cs = cs;
+                context.eflags = eflags;
+                context.seg_ss = ss;
+                context.rsp = restored_rsp;
+                context.rip = rip;
+                return true;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    context.rsp = stack;
+    false
 }
 
 pub unsafe extern "system" fn ntdll_nt_create_file(
@@ -1177,10 +1813,7 @@ pub unsafe extern "system" fn ntdll_nt_set_event(handle: u64, _previous_state: *
     set_waitable_event(handle) as i32
 }
 
-pub unsafe extern "system" fn ntdll_nt_reset_event(
-    handle: u64,
-    _previous_state: *mut i32,
-) -> i32 {
+pub unsafe extern "system" fn ntdll_nt_reset_event(handle: u64, _previous_state: *mut i32) -> i32 {
     reset_waitable_event(handle) as i32
 }
 
@@ -1192,6 +1825,96 @@ pub unsafe extern "system" fn ntdll_nt_close(handle: u64) -> i32 {
     }
 }
 
+pub unsafe extern "system" fn ntdll_rtl_lookup_function_entry(
+    control_pc: u64,
+    image_base: *mut u64,
+    history_table: *mut u8,
+) -> *const crate::pe_loader::PeRuntimeFunction {
+    let _ = history_table;
+    current_runtime_function_pointer(control_pc, image_base).unwrap_or(core::ptr::null())
+}
+
+pub unsafe extern "system" fn ntdll_rtl_virtual_unwind(
+    handler_type: u32,
+    image_base: u64,
+    control_pc: u64,
+    function_entry: *const crate::pe_loader::PeRuntimeFunction,
+    context_record: *mut ContextRecord,
+    handler_data: *mut *mut u8,
+    establisher_frame: *mut u64,
+    context_pointers: *mut u8,
+) -> *mut u8 {
+    let _ = handler_type;
+    if !handler_data.is_null() {
+        *handler_data = core::ptr::null_mut();
+    }
+    if context_record.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    let context = &mut *context_record;
+    let mut unwind_context_pointers = (!context_pointers.is_null())
+        .then(|| &mut *(context_pointers as *mut NonvolatileContextPointers));
+    clear_context_pointers(unwind_context_pointers.as_deref_mut());
+    let previous_rip = context.rip;
+    let previous_rsp = context.rsp;
+    let mut resolved_image_base = image_base;
+    let mut resolved_entry = function_entry;
+    if resolved_entry.is_null() {
+        resolved_entry = current_runtime_function_pointer(control_pc, &mut resolved_image_base)
+            .unwrap_or(core::ptr::null());
+    }
+
+    if resolved_entry.is_null() {
+        if !establisher_frame.is_null() {
+            *establisher_frame = context.rsp;
+        }
+        let return_address = *(context.rsp as *const u64);
+        context.rsp = context.rsp.saturating_add(8);
+        context.rip = return_address;
+        synchronize_vector_state(context);
+        publish_unwind_transition(context, previous_rip, previous_rsp);
+        return core::ptr::null_mut();
+    }
+
+    let mut entry = &*resolved_entry;
+    let Some(mut header) = unwind_info_header(resolved_image_base, entry) else {
+        return core::ptr::null_mut();
+    };
+    let mut exception_handler = core::ptr::null_mut();
+    if (header.version_flags >> 3) & UNW_FLAG_CHAININFO != 0 {
+        let chain_ptr = unwind_payload_ptr(header) as *const crate::pe_loader::PeRuntimeFunction;
+        entry = &*chain_ptr;
+        if let Some(chained_header) = unwind_info_header(resolved_image_base, entry) {
+            header = chained_header;
+        }
+    } else {
+        let flags = (header.version_flags >> 3) & 0x1F;
+        if flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
+            let payload = unwind_payload_ptr(header);
+            let handler_rva = *(payload as *const u32);
+            if !handler_data.is_null() {
+                *handler_data = payload.add(core::mem::size_of::<u32>()) as *mut u8;
+            }
+            exception_handler = resolved_image_base.saturating_add(handler_rva as u64) as *mut u8;
+        }
+    }
+    let restored_by_unwind = apply_unwind_info(
+        context,
+        header,
+        establisher_frame,
+        unwind_context_pointers.as_deref_mut(),
+    );
+    synchronize_vector_state(context);
+    if !restored_by_unwind {
+        let return_address = *(context.rsp as *const u64);
+        context.rsp = context.rsp.saturating_add(8);
+        context.rip = return_address;
+    }
+    publish_unwind_transition(context, previous_rip, previous_rsp);
+    exception_handler
+}
+
 // ============================================================================
 // WS2_32 ABI THUNKS
 // ============================================================================
@@ -1201,6 +1924,7 @@ pub fn resolve_ws2_32_symbol(name: &str) -> Option<u64> {
         "WSAStartup" => ws2_32_wsa_startup as *const () as usize as u64,
         "WSACleanup" => ws2_32_wsa_cleanup as *const () as usize as u64,
         "WSAGetLastError" => ws2_32_wsa_get_last_error as *const () as usize as u64,
+        "WSASocketA" | "WSASocketW" => ws2_32_wsa_socket as *const () as usize as u64,
         "socket" => ws2_32_socket as *const () as usize as u64,
         "bind" => ws2_32_bind as *const () as usize as u64,
         "listen" => ws2_32_listen as *const () as usize as u64,
@@ -1208,11 +1932,18 @@ pub fn resolve_ws2_32_symbol(name: &str) -> Option<u64> {
         "connect" => ws2_32_connect as *const () as usize as u64,
         "send" => ws2_32_send as *const () as usize as u64,
         "recv" => ws2_32_recv as *const () as usize as u64,
+        "sendto" => ws2_32_sendto as *const () as usize as u64,
+        "recvfrom" => ws2_32_recvfrom as *const () as usize as u64,
         "closesocket" => ws2_32_closesocket as *const () as usize as u64,
         "shutdown" => ws2_32_shutdown as *const () as usize as u64,
         "getsockname" => ws2_32_getsockname as *const () as usize as u64,
         "getpeername" => ws2_32_getpeername as *const () as usize as u64,
+        "getsockopt" => ws2_32_getsockopt as *const () as usize as u64,
+        "setsockopt" => ws2_32_setsockopt as *const () as usize as u64,
         "ioctlsocket" => ws2_32_ioctlsocket as *const () as usize as u64,
+        "htons" | "ntohs" => ws2_32_htons as *const () as usize as u64,
+        "htonl" | "ntohl" => ws2_32_htonl as *const () as usize as u64,
+        "inet_addr" => ws2_32_inet_addr as *const () as usize as u64,
         _ => return None,
     };
     Some(addr)
@@ -1244,6 +1975,17 @@ pub unsafe extern "system" fn ws2_32_wsa_cleanup() -> i32 {
 
 pub unsafe extern "system" fn ws2_32_wsa_get_last_error() -> i32 {
     LAST_WSA_ERROR.load(Ordering::Acquire) as i32
+}
+
+pub unsafe extern "system" fn ws2_32_wsa_socket(
+    af: i32,
+    kind: i32,
+    proto: i32,
+    _protocol_info: *const u8,
+    _group: u32,
+    _flags: u32,
+) -> u64 {
+    ws2_32_socket(af, kind, proto)
 }
 
 pub unsafe extern "system" fn ws2_32_socket(af: i32, kind: i32, proto: i32) -> u64 {
@@ -1434,6 +2176,153 @@ pub unsafe extern "system" fn ws2_32_recv(fd: u64, buf: *mut u8, len: i32, flags
     }
 }
 
+pub unsafe extern "system" fn ws2_32_sendto(
+    fd: u64,
+    buf: *const u8,
+    len: i32,
+    flags: i32,
+    to: *const u8,
+    tolen: i32,
+) -> i32 {
+    let sock = match cast_socket(fd) {
+        Ok(v) => v,
+        Err(code) => {
+            LAST_WSA_ERROR.store(code, Ordering::Release);
+            return SOCKET_ERROR;
+        }
+    };
+    if buf.is_null() || len < 0 {
+        LAST_WSA_ERROR.store(WSAEINVAL, Ordering::Release);
+        return SOCKET_ERROR;
+    }
+    let remote = match parse_sockaddr(to, tolen) {
+        Ok(v) => v,
+        Err(code) => {
+            LAST_WSA_ERROR.store(code, Ordering::Release);
+            return SOCKET_ERROR;
+        }
+    };
+    let src = core::slice::from_raw_parts(buf, len as usize);
+    match socket::sendto(sock, src, remote, flags as u32) {
+        Ok(sent) => {
+            LAST_WSA_ERROR.store(0, Ordering::Release);
+            sent as i32
+        }
+        Err(err) => {
+            LAST_WSA_ERROR.store(map_net_error(err), Ordering::Release);
+            SOCKET_ERROR
+        }
+    }
+}
+
+pub unsafe extern "system" fn ws2_32_recvfrom(
+    fd: u64,
+    buf: *mut u8,
+    len: i32,
+    flags: i32,
+    from: *mut u8,
+    fromlen: *mut i32,
+) -> i32 {
+    let sock = match cast_socket(fd) {
+        Ok(v) => v,
+        Err(code) => {
+            LAST_WSA_ERROR.store(code, Ordering::Release);
+            return SOCKET_ERROR;
+        }
+    };
+    if buf.is_null() || len < 0 {
+        LAST_WSA_ERROR.store(WSAEINVAL, Ordering::Release);
+        return SOCKET_ERROR;
+    }
+    let dst = core::slice::from_raw_parts_mut(buf, len as usize);
+    match socket::recvfrom(sock, dst, flags as u32) {
+        Ok((read, remote)) => {
+            if !from.is_null() && !fromlen.is_null() {
+                if let Err(code) = write_sockaddr(remote, from, fromlen) {
+                    LAST_WSA_ERROR.store(code, Ordering::Release);
+                    return SOCKET_ERROR;
+                }
+            }
+            LAST_WSA_ERROR.store(0, Ordering::Release);
+            read as i32
+        }
+        Err(err) => {
+            LAST_WSA_ERROR.store(map_net_error(err), Ordering::Release);
+            SOCKET_ERROR
+        }
+    }
+}
+
+pub unsafe extern "system" fn ws2_32_setsockopt(
+    fd: u64,
+    level: i32,
+    optname: i32,
+    optval: *const u8,
+    optlen: i32,
+) -> i32 {
+    let sock = match cast_socket(fd) {
+        Ok(v) => v,
+        Err(code) => {
+            LAST_WSA_ERROR.store(code, Ordering::Release);
+            return SOCKET_ERROR;
+        }
+    };
+    let option = match parse_socket_option(level, optname, optval, optlen) {
+        Ok(v) => v,
+        Err(code) => {
+            LAST_WSA_ERROR.store(code, Ordering::Release);
+            return SOCKET_ERROR;
+        }
+    };
+    match socket::setsockopt(sock, option) {
+        Ok(_) => {
+            LAST_WSA_ERROR.store(0, Ordering::Release);
+            0
+        }
+        Err(err) => {
+            LAST_WSA_ERROR.store(map_net_error(err), Ordering::Release);
+            SOCKET_ERROR
+        }
+    }
+}
+
+pub unsafe extern "system" fn ws2_32_getsockopt(
+    fd: u64,
+    level: i32,
+    optname: i32,
+    optval: *mut u8,
+    optlen: *mut i32,
+) -> i32 {
+    let sock = match cast_socket(fd) {
+        Ok(v) => v,
+        Err(code) => {
+            LAST_WSA_ERROR.store(code, Ordering::Release);
+            return SOCKET_ERROR;
+        }
+    };
+    let option = match parse_socket_option_probe(level, optname) {
+        Ok(v) => v,
+        Err(code) => {
+            LAST_WSA_ERROR.store(code, Ordering::Release);
+            return SOCKET_ERROR;
+        }
+    };
+    match socket::getsockopt(sock, option) {
+        Ok(value) => {
+            if let Err(code) = write_sockopt_value(value, optval, optlen) {
+                LAST_WSA_ERROR.store(code, Ordering::Release);
+                return SOCKET_ERROR;
+            }
+            LAST_WSA_ERROR.store(0, Ordering::Release);
+            0
+        }
+        Err(err) => {
+            LAST_WSA_ERROR.store(map_net_error(err), Ordering::Release);
+            SOCKET_ERROR
+        }
+    }
+}
+
 pub unsafe extern "system" fn ws2_32_closesocket(fd: u64) -> i32 {
     let sock = match cast_socket(fd) {
         Ok(v) => v,
@@ -1475,11 +2364,7 @@ pub unsafe extern "system" fn ws2_32_shutdown(fd: u64, how: i32) -> i32 {
     }
 }
 
-pub unsafe extern "system" fn ws2_32_getsockname(
-    fd: u64,
-    name: *mut u8,
-    namelen: *mut i32,
-) -> i32 {
+pub unsafe extern "system" fn ws2_32_getsockname(fd: u64, name: *mut u8, namelen: *mut i32) -> i32 {
     let sock = match cast_socket(fd) {
         Ok(v) => v,
         Err(code) => {
@@ -1505,11 +2390,7 @@ pub unsafe extern "system" fn ws2_32_getsockname(
     }
 }
 
-pub unsafe extern "system" fn ws2_32_getpeername(
-    fd: u64,
-    name: *mut u8,
-    namelen: *mut i32,
-) -> i32 {
+pub unsafe extern "system" fn ws2_32_getpeername(fd: u64, name: *mut u8, namelen: *mut i32) -> i32 {
     let sock = match cast_socket(fd) {
         Ok(v) => v,
         Err(code) => {
@@ -1535,11 +2416,7 @@ pub unsafe extern "system" fn ws2_32_getpeername(
     }
 }
 
-pub unsafe extern "system" fn ws2_32_ioctlsocket(
-    fd: u64,
-    _cmd: u64,
-    argp: *mut u32,
-) -> i32 {
+pub unsafe extern "system" fn ws2_32_ioctlsocket(fd: u64, _cmd: u64, argp: *mut u32) -> i32 {
     let _ = match cast_socket(fd) {
         Ok(v) => v,
         Err(code) => {
@@ -1552,6 +2429,22 @@ pub unsafe extern "system" fn ws2_32_ioctlsocket(
     }
     LAST_WSA_ERROR.store(0, Ordering::Release);
     0
+}
+
+pub extern "system" fn ws2_32_htons(value: u16) -> u16 {
+    value.to_be()
+}
+
+pub extern "system" fn ws2_32_htonl(value: u32) -> u32 {
+    value.to_be()
+}
+
+pub unsafe extern "system" fn ws2_32_inet_addr(cp: *const u8) -> u32 {
+    if cp.is_null() {
+        return INADDR_NONE;
+    }
+    let text = read_c_string_u8(cp);
+    parse_ipv4_text(text.as_str()).unwrap_or(INADDR_NONE)
 }
 
 // ============================================================================
@@ -1587,6 +2480,83 @@ fn map_net_error(err: NetError) -> u32 {
         NetError::NetworkUnreachable | NetError::HostUnreachable => WSAENETUNREACH,
         _ => WSA_OPERATION_ABORTED,
     }
+}
+
+unsafe fn parse_socket_option(
+    level: i32,
+    optname: i32,
+    optval: *const u8,
+    optlen: i32,
+) -> Result<socket::SocketOption, u32> {
+    if optval.is_null() || optlen < 4 {
+        return Err(WSAEINVAL);
+    }
+    let value = *(optval as *const i32);
+    match (level, optname) {
+        (SOL_SOCKET, SO_REUSEADDR) => Ok(socket::SocketOption::ReuseAddr),
+        (SOL_SOCKET, SO_KEEPALIVE) => Ok(socket::SocketOption::KeepAlive),
+        (SOL_SOCKET, SO_RCVBUF) => Ok(socket::SocketOption::RcvBuf(value.max(0) as usize)),
+        (SOL_SOCKET, SO_SNDBUF) => Ok(socket::SocketOption::SndBuf(value.max(0) as usize)),
+        (SOL_SOCKET, SO_RCVTIMEO) => Ok(socket::SocketOption::RcvTimeout(value.max(0) as u64)),
+        (SOL_SOCKET, SO_SNDTIMEO) => Ok(socket::SocketOption::SndTimeout(value.max(0) as u64)),
+        (IPPROTO_TCP, TCP_NODELAY) => Ok(socket::SocketOption::NoDelay),
+        _ => Err(WSAEINVAL),
+    }
+}
+
+fn parse_socket_option_probe(level: i32, optname: i32) -> Result<socket::SocketOption, u32> {
+    match (level, optname) {
+        (SOL_SOCKET, SO_REUSEADDR) => Ok(socket::SocketOption::ReuseAddr),
+        (SOL_SOCKET, SO_KEEPALIVE) => Ok(socket::SocketOption::KeepAlive),
+        (SOL_SOCKET, SO_RCVBUF) => Ok(socket::SocketOption::RcvBuf(0)),
+        (SOL_SOCKET, SO_SNDBUF) => Ok(socket::SocketOption::SndBuf(0)),
+        (SOL_SOCKET, SO_RCVTIMEO) => Ok(socket::SocketOption::RcvTimeout(0)),
+        (SOL_SOCKET, SO_SNDTIMEO) => Ok(socket::SocketOption::SndTimeout(0)),
+        (IPPROTO_TCP, TCP_NODELAY) => Ok(socket::SocketOption::NoDelay),
+        _ => Err(WSAEINVAL),
+    }
+}
+
+unsafe fn write_sockopt_value(value: usize, optval: *mut u8, optlen: *mut i32) -> Result<(), u32> {
+    if optval.is_null() || optlen.is_null() {
+        return Err(WSAEINVAL);
+    }
+    let required = core::mem::size_of::<i32>() as i32;
+    if *optlen < required {
+        return Err(WSAEINVAL);
+    }
+    *(optval as *mut i32) = value.min(i32::MAX as usize) as i32;
+    *optlen = required;
+    Ok(())
+}
+
+fn parse_ipv4_text(text: &str) -> Option<u32> {
+    let mut octets = [0u8; 4];
+    let mut count = 0usize;
+    for part in text.split('.') {
+        if count == 4 || part.is_empty() {
+            return None;
+        }
+        let value = part.parse::<u8>().ok()?;
+        octets[count] = value;
+        count += 1;
+    }
+    if count != 4 {
+        return None;
+    }
+    Some(u32::from_be_bytes(octets))
+}
+
+unsafe fn read_c_string_u8(ptr: *const u8) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    let bytes = core::slice::from_raw_parts(ptr, len);
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 unsafe fn parse_sockaddr(name: *const u8, name_len: i32) -> Result<SocketAddr, u32> {
@@ -1661,4 +2631,294 @@ pub struct UnicodeString {
     pub length: u16,
     pub maximum_length: u16,
     pub buffer: *mut u16,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_function_lookup_matches_control_pc_range() {
+        let entries = [
+            crate::pe_loader::PeRuntimeFunction {
+                begin_address: 0x1000,
+                end_address: 0x1200,
+                unwind_info_address: 0x2000,
+            },
+            crate::pe_loader::PeRuntimeFunction {
+                begin_address: 0x1200,
+                end_address: 0x1500,
+                unwind_info_address: 0x2100,
+            },
+        ];
+        assert_eq!(
+            lookup_runtime_function_index(0x401050, 0x400000, &entries),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_runtime_function_index(0x401250, 0x400000, &entries),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_runtime_function_index(0x401600, 0x400000, &entries),
+            None
+        );
+    }
+
+    #[test]
+    fn virtual_unwind_leaf_frame_pops_return_address() {
+        let mut stack = [0u64; 4];
+        stack[0] = 0xDEAD_BEEF_CAFE_BABEu64;
+        let mut context = ContextRecord {
+            rsp: stack.as_ptr() as u64,
+            rip: 0x401000,
+            ..Default::default()
+        };
+        let mut establisher = 0u64;
+        unsafe {
+            ntdll_rtl_virtual_unwind(
+                0,
+                0x400000,
+                context.rip,
+                core::ptr::null(),
+                &mut context,
+                core::ptr::null_mut(),
+                &mut establisher,
+                core::ptr::null_mut(),
+            );
+        }
+        assert_eq!(establisher, stack.as_ptr() as u64);
+        assert_eq!(context.rip, 0xDEAD_BEEF_CAFE_BABEu64);
+        assert_eq!(context.rsp, stack.as_ptr() as u64 + 8);
+    }
+
+    #[test]
+    fn virtual_unwind_reports_handler_and_handler_data_pointer() {
+        let mut image = [0u8; 0x200];
+        let image_base = image.as_mut_ptr() as u64;
+        let handler_rva = 0x180u32;
+        let handler_data = [0xAAu8, 0xBB, 0xCC, 0xDD];
+
+        image[0x40] = 1 | (UNW_FLAG_EHANDLER << 3);
+        image[0x41] = 0;
+        image[0x42] = 0;
+        image[0x43] = 0;
+        image[0x44..0x48].copy_from_slice(&handler_rva.to_le_bytes());
+        image[0x48..0x4C].copy_from_slice(&handler_data);
+
+        let entry = crate::pe_loader::PeRuntimeFunction {
+            begin_address: 0x1000,
+            end_address: 0x1100,
+            unwind_info_address: 0x40,
+        };
+        let mut stack = [0u64; 2];
+        stack[0] = 0xFACE_CAFE_DEAD_BEEFu64;
+        let mut context = ContextRecord {
+            rsp: stack.as_ptr() as u64,
+            rip: image_base + 0x1000,
+            ..Default::default()
+        };
+        let mut handler_data_out = core::ptr::null_mut();
+        let mut establisher = 0u64;
+        let handler = unsafe {
+            ntdll_rtl_virtual_unwind(
+                0,
+                image_base,
+                context.rip,
+                &entry,
+                &mut context,
+                &mut handler_data_out,
+                &mut establisher,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(handler as u64, image_base + handler_rva as u64);
+        assert_eq!(handler_data_out, unsafe { image.as_mut_ptr().add(0x48) });
+        assert_eq!(
+            unsafe { *(handler_data_out as *const [u8; 4]) },
+            handler_data
+        );
+        assert_eq!(establisher, stack.as_ptr() as u64);
+        assert_eq!(context.rip, 0xFACE_CAFE_DEAD_BEEFu64);
+        assert_eq!(context.rsp, stack.as_ptr() as u64 + 8);
+    }
+
+    #[test]
+    fn virtual_unwind_push_machframe_restores_saved_rsp_and_rip() {
+        let mut image = [0u8; 0x100];
+        image[0x20] = 1;
+        image[0x21] = 0;
+        image[0x22] = 1;
+        image[0x23] = 0;
+        image[0x24] = 0;
+        image[0x25] = UWOP_PUSH_MACHFRAME;
+
+        let entry = crate::pe_loader::PeRuntimeFunction {
+            begin_address: 0x1000,
+            end_address: 0x1100,
+            unwind_info_address: 0x20,
+        };
+        let stack = [
+            0xABCD_EF01_0203_0405u64,
+            0x33u64,
+            0x202u64,
+            0x2000_3000_4000_5000u64,
+            0x2Bu64,
+        ];
+        let mut context = ContextRecord {
+            rsp: stack.as_ptr() as u64,
+            rip: (image.as_ptr() as u64) + 0x1000,
+            ..Default::default()
+        };
+        let mut establisher = 0u64;
+        unsafe {
+            ntdll_rtl_virtual_unwind(
+                0,
+                image.as_ptr() as u64,
+                context.rip,
+                &entry,
+                &mut context,
+                core::ptr::null_mut(),
+                &mut establisher,
+                core::ptr::null_mut(),
+            );
+        }
+        assert_eq!(establisher, stack.as_ptr() as u64);
+        assert_eq!(context.rip, stack[0]);
+        assert_eq!(context.rsp, stack[3]);
+        assert_eq!(context.seg_cs, stack[1] as u16);
+        assert_eq!(context.eflags, stack[2] as u32);
+        assert_eq!(context.seg_ss, stack[4] as u16);
+    }
+
+    #[test]
+    fn virtual_unwind_xmm_save_opcodes_do_not_corrupt_stack_walk() {
+        let mut image = [0u8; 0x100];
+        image[0x20] = 1;
+        image[0x21] = 0;
+        image[0x22] = 5;
+        image[0x23] = 5;
+        image[0x24] = 0;
+        image[0x25] = (1 << 4) | UWOP_SAVE_XMM128;
+        image[0x26] = 0x01;
+        image[0x27] = 0x00;
+        image[0x28] = 0;
+        image[0x29] = (2 << 4) | UWOP_SAVE_XMM128_FAR;
+        image[0x2A] = 0x20;
+        image[0x2B] = 0x00;
+        image[0x2C] = 0x00;
+        image[0x2D] = 0x00;
+
+        let entry = crate::pe_loader::PeRuntimeFunction {
+            begin_address: 0x1000,
+            end_address: 0x1100,
+            unwind_info_address: 0x20,
+        };
+        let xmm1 = M128A {
+            low: 0x1111_2222_3333_4444,
+            high: 0x5555_6666_7777_8888u64 as i64,
+        };
+        let xmm2 = M128A {
+            low: 0x9999_AAAA_BBBB_CCCC,
+            high: 0xDDDD_EEEE_FFFF_0001u64 as i64,
+        };
+        let stack = [0x5566_7788_99AA_BBCCu64, 0u64];
+        let frame = [0u8; 0x240];
+        unsafe {
+            core::ptr::write_unaligned(frame.as_ptr().add(0x10) as *mut M128A, xmm1);
+            core::ptr::write_unaligned(frame.as_ptr().add(0x20) as *mut M128A, xmm2);
+        }
+        let mut context = ContextRecord {
+            rsp: stack.as_ptr() as u64,
+            rbp: frame.as_ptr() as u64,
+            rip: (image.as_ptr() as u64) + 0x1000,
+            ..Default::default()
+        };
+        unsafe {
+            ntdll_rtl_virtual_unwind(
+                0,
+                image.as_ptr() as u64,
+                context.rip,
+                &entry,
+                &mut context,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            );
+        }
+        assert_eq!(context.rip, stack[0]);
+        assert_eq!(context.rsp, stack.as_ptr() as u64 + 8);
+        assert_eq!(context.xmm_registers[1], xmm1);
+        assert_eq!(context.xmm_registers[2], xmm2);
+        assert_eq!(context.vector_registers[1], xmm1);
+        assert_eq!(context.vector_registers[2], xmm2);
+        assert_eq!(context.vector_control, context.mx_csr as u64);
+        assert_eq!(context.last_branch_from_rip, image.as_ptr() as u64 + 0x1000);
+        assert_eq!(context.last_branch_to_rip, stack[0]);
+        assert_eq!(context.last_exception_from_rip, stack.as_ptr() as u64);
+        assert_eq!(context.last_exception_to_rip, stack.as_ptr() as u64 + 8);
+    }
+
+    #[test]
+    fn virtual_unwind_populates_nonvolatile_context_pointers() {
+        let mut image = [0u8; 0x100];
+        image[0x20] = 1;
+        image[0x21] = 0;
+        image[0x22] = 4;
+        image[0x23] = 5;
+        image[0x24] = 0;
+        image[0x25] = (3 << 4) | UWOP_SAVE_NONVOL;
+        image[0x26] = 0x02;
+        image[0x27] = 0x00;
+        image[0x28] = 0;
+        image[0x29] = (1 << 4) | UWOP_SAVE_XMM128;
+        image[0x2A] = 0x02;
+        image[0x2B] = 0x00;
+
+        let entry = crate::pe_loader::PeRuntimeFunction {
+            begin_address: 0x1000,
+            end_address: 0x1100,
+            unwind_info_address: 0x20,
+        };
+        let stack = [0xABCDEF01_02030405u64, 0];
+        let frame = [0u8; 0x80];
+        let saved_rbx = 0x1122_3344_5566_7788u64;
+        let saved_xmm = M128A {
+            low: 0x1111_2222_3333_4444,
+            high: 0x5555_6666_7777_8888u64 as i64,
+        };
+        unsafe {
+            core::ptr::write_unaligned(frame.as_ptr().add(0x10) as *mut u64, saved_rbx);
+            core::ptr::write_unaligned(frame.as_ptr().add(0x20) as *mut M128A, saved_xmm);
+        }
+        let mut context = ContextRecord {
+            rsp: stack.as_ptr() as u64,
+            rbp: frame.as_ptr() as u64,
+            rip: (image.as_ptr() as u64) + 0x1000,
+            ..Default::default()
+        };
+        let mut pointers = NonvolatileContextPointers::default();
+        unsafe {
+            ntdll_rtl_virtual_unwind(
+                0,
+                image.as_ptr() as u64,
+                context.rip,
+                &entry,
+                &mut context,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &mut pointers as *mut _ as *mut u8,
+            );
+        }
+        assert_eq!(context.rbx, saved_rbx);
+        assert_eq!(context.xmm_registers[1], saved_xmm);
+        assert_eq!(
+            pointers.integer_context[3],
+            frame.as_ptr().wrapping_add(0x10) as *mut u64
+        );
+        assert_eq!(
+            pointers.floating_context[1],
+            frame.as_ptr().wrapping_add(0x20) as *mut M128A
+        );
+    }
 }

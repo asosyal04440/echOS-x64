@@ -133,21 +133,120 @@ pub struct CniConfig {
 impl CniConfig {
     /// JSON'dan yapılandırma yükle
     pub fn from_json(json_str: &str) -> Result<Self, CniError> {
-        // Basit JSON ayrıştırıcı (placeholder)
-        crate::serial_println!("[CNI] Parsing config (placeholder)");
+        fn extract_string_value(json: &str, key: &str) -> Option<String> {
+            let needle = format!("\"{}\"", key);
+            let key_start = json.find(&needle)?;
+            let value_start =
+                json[key_start + needle.len()..].find(':')? + key_start + needle.len() + 1;
+            let tail = json[value_start..].trim_start();
+            if !tail.starts_with('"') {
+                return None;
+            }
+            let tail = &tail[1..];
+            let end = tail.find('"')?;
+            Some(tail[..end].to_string())
+        }
+
+        fn extract_i32_value(json: &str, key: &str) -> Option<i32> {
+            let needle = format!("\"{}\"", key);
+            let key_start = json.find(&needle)?;
+            let value_start =
+                json[key_start + needle.len()..].find(':')? + key_start + needle.len() + 1;
+            let digits = json[value_start..]
+                .trim_start()
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit() || *ch == '-')
+                .collect::<String>();
+            if digits.is_empty() {
+                None
+            } else {
+                digits.parse::<i32>().ok()
+            }
+        }
+
+        fn extract_string_array(json: &str, key: &str) -> Vec<String> {
+            let needle = format!("\"{}\"", key);
+            let Some(key_start) = json.find(&needle) else {
+                return Vec::new();
+            };
+            let Some(array_start_rel) = json[key_start + needle.len()..].find('[') else {
+                return Vec::new();
+            };
+            let array_start = key_start + needle.len() + array_start_rel + 1;
+            let Some(array_end_rel) = json[array_start..].find(']') else {
+                return Vec::new();
+            };
+            json[array_start..array_start + array_end_rel]
+                .split(',')
+                .filter_map(|entry| {
+                    let trimmed = entry.trim();
+                    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+                        Some(trimmed[1..trimmed.len() - 1].to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+
+        fn extract_args_object(json: &str) -> BTreeMap<String, String> {
+            let needle = "\"args\"";
+            let Some(key_start) = json.find(needle) else {
+                return BTreeMap::new();
+            };
+            let Some(obj_start_rel) = json[key_start + needle.len()..].find('{') else {
+                return BTreeMap::new();
+            };
+            let obj_start = key_start + needle.len() + obj_start_rel + 1;
+            let Some(obj_end_rel) = json[obj_start..].find('}') else {
+                return BTreeMap::new();
+            };
+            let mut args = BTreeMap::new();
+            for pair in json[obj_start..obj_start + obj_end_rel].split(',') {
+                let mut parts = pair.splitn(2, ':');
+                let Some(key) = parts.next() else { continue };
+                let Some(value) = parts.next() else { continue };
+                let key = key.trim().trim_matches('"');
+                let value = value.trim().trim_matches('"');
+                if !key.is_empty() {
+                    args.insert(key.to_string(), value.to_string());
+                }
+            }
+            args
+        }
+
+        crate::serial_println!("[CNI] Parsing config");
+
+        let dns_servers = {
+            let parsed = extract_string_array(json_str, "dnsServers");
+            if parsed.is_empty() {
+                vec!["8.8.8.8".to_string()]
+            } else {
+                parsed
+            }
+        };
 
         Ok(Self {
-            cni_version: CNI_VERSION.to_string(),
-            container_name: "container".to_string(),
-            container_id: "123456".to_string(),
-            netns: "/var/run/netns/container".to_string(),
-            bridge: DEFAULT_BRIDGE_NAME.to_string(),
-            ip_address: DEFAULT_IP_START.to_string(),
-            gateway: "10.244.0.1".to_string(),
-            subnet: DEFAULT_SUBNET.to_string(),
-            dns_servers: vec!["8.8.8.8".to_string()],
-            mtu: 1500,
-            args: BTreeMap::new(),
+            cni_version: extract_string_value(json_str, "cniVersion")
+                .unwrap_or_else(|| CNI_VERSION.to_string()),
+            container_name: extract_string_value(json_str, "name")
+                .or_else(|| extract_string_value(json_str, "containerName"))
+                .unwrap_or_else(|| "container".to_string()),
+            container_id: extract_string_value(json_str, "containerID")
+                .unwrap_or_else(|| "123456".to_string()),
+            netns: extract_string_value(json_str, "netns")
+                .unwrap_or_else(|| "/var/run/netns/container".to_string()),
+            bridge: extract_string_value(json_str, "bridge")
+                .unwrap_or_else(|| DEFAULT_BRIDGE_NAME.to_string()),
+            ip_address: extract_string_value(json_str, "ipAddress")
+                .unwrap_or_else(|| DEFAULT_IP_START.to_string()),
+            gateway: extract_string_value(json_str, "gateway")
+                .unwrap_or_else(|| "10.244.0.1".to_string()),
+            subnet: extract_string_value(json_str, "subnet")
+                .unwrap_or_else(|| DEFAULT_SUBNET.to_string()),
+            dns_servers,
+            mtu: extract_i32_value(json_str, "mtu").unwrap_or(1500),
+            args: extract_args_object(json_str),
         })
     }
 
@@ -415,6 +514,12 @@ pub struct BridgePlugin {
     ip_pool: IpPool,
     /// Bridge arayüzleri
     bridges: Mutex<BTreeMap<String, BridgeInterface>>,
+    /// Uygulanmış container network kayıtları
+    applied: Mutex<BTreeMap<String, AppliedContainerNetwork>>,
+    /// Sanal arayüz kayıt defteri
+    interfaces: Mutex<BTreeMap<String, VirtualInterface>>,
+    /// Network namespace kayıt defteri
+    namespaces: Mutex<BTreeMap<String, NetworkNamespace>>,
 }
 
 /// Bridge arayüzü
@@ -430,6 +535,37 @@ struct BridgeInterface {
     active: bool,
 }
 
+#[derive(Clone, Debug)]
+struct AppliedContainerNetwork {
+    container_id: String,
+    bridge: String,
+    host_veth: String,
+    container_interface: String,
+    netns: String,
+    assigned_ip: Ipv4Addr,
+    gateway: String,
+    mtu: i32,
+    active: bool,
+}
+
+#[derive(Clone, Debug)]
+struct VirtualInterface {
+    name: String,
+    peer: Option<String>,
+    bridge: Option<String>,
+    netns: Option<String>,
+    ip: Option<Ipv4Addr>,
+    gateway: Option<Ipv4Addr>,
+    mtu: i32,
+    up: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct NetworkNamespace {
+    path: String,
+    interfaces: Vec<String>,
+}
+
 impl BridgePlugin {
     /// Yeni bridge plugin oluştur
     pub fn new() -> Result<Self, CniError> {
@@ -438,6 +574,9 @@ impl BridgePlugin {
         Ok(Self {
             ip_pool,
             bridges: Mutex::new(BTreeMap::new()),
+            applied: Mutex::new(BTreeMap::new()),
+            interfaces: Mutex::new(BTreeMap::new()),
+            namespaces: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -455,26 +594,98 @@ impl BridgePlugin {
         };
 
         bridges.insert(name.to_string(), bridge);
+        self.interfaces.lock().insert(
+            name.to_string(),
+            VirtualInterface {
+                name: name.to_string(),
+                peer: None,
+                bridge: Some(name.to_string()),
+                netns: None,
+                ip: Some(bridge_ip),
+                gateway: None,
+                mtu: 1500,
+                up: true,
+            },
+        );
 
         crate::serial_println!("[CNI] Created bridge {} with IP {}", name, "10.244.0.1");
         Ok(())
     }
 
     /// veth pair oluştur
-    fn create_veth_pair(&self, container_id: &str, bridge_name: &str) -> Result<String, CniError> {
+    fn create_veth_pair(
+        &self,
+        container_id: &str,
+        bridge_name: &str,
+    ) -> Result<(String, String), CniError> {
+        if container_id.len() < 8 {
+            return Err(CniError::InvalidConfig);
+        }
         let veth_name = format!("veth{}", &container_id[..8]);
         let peer_name = format!("eth0");
+
+        {
+            let mut interfaces = self.interfaces.lock();
+            interfaces.insert(
+                veth_name.clone(),
+                VirtualInterface {
+                    name: veth_name.clone(),
+                    peer: Some(peer_name.clone()),
+                    bridge: Some(bridge_name.to_string()),
+                    netns: None,
+                    ip: None,
+                    gateway: None,
+                    mtu: 1500,
+                    up: true,
+                },
+            );
+            interfaces.insert(
+                peer_name.clone(),
+                VirtualInterface {
+                    name: peer_name.clone(),
+                    peer: Some(veth_name.clone()),
+                    bridge: Some(bridge_name.to_string()),
+                    netns: None,
+                    ip: None,
+                    gateway: None,
+                    mtu: 1500,
+                    up: false,
+                },
+            );
+        }
 
         crate::serial_println!("[CNI] Created veth pair: {} <-> {}", veth_name, peer_name);
 
         // veth'i bridge'e bağla
         crate::serial_println!("[CNI] Attached {} to bridge {}", veth_name, bridge_name);
 
-        Ok(peer_name)
+        Ok((veth_name, peer_name))
     }
 
     /// Arayüzü network namespace'e taşı
     fn move_to_netns(&self, interface: &str, netns: &str) -> Result<(), CniError> {
+        if interface.is_empty() || netns.is_empty() {
+            return Err(CniError::InvalidConfig);
+        }
+        {
+            let mut interfaces = self.interfaces.lock();
+            let iface = interfaces
+                .get_mut(interface)
+                .ok_or(CniError::ContainerNotFound)?;
+            iface.netns = Some(netns.to_string());
+        }
+        {
+            let mut namespaces = self.namespaces.lock();
+            let entry = namespaces
+                .entry(netns.to_string())
+                .or_insert_with(|| NetworkNamespace {
+                    path: netns.to_string(),
+                    interfaces: Vec::new(),
+                });
+            if !entry.interfaces.iter().any(|name| name == interface) {
+                entry.interfaces.push(interface.to_string());
+            }
+        }
         crate::serial_println!("[CNI] Moved {} to netns {}", interface, netns);
         Ok(())
     }
@@ -486,6 +697,19 @@ impl BridgePlugin {
         ip: &str,
         gateway: &str,
     ) -> Result<(), CniError> {
+        if interface.is_empty() || parse_ipv4(ip).is_none() || parse_ipv4(gateway).is_none() {
+            return Err(CniError::InvalidConfig);
+        }
+        let parsed_ip = parse_ipv4(ip).ok_or(CniError::InvalidConfig)?;
+        let parsed_gateway = parse_ipv4(gateway).ok_or(CniError::InvalidConfig)?;
+        let mut interfaces = self.interfaces.lock();
+        let iface = interfaces
+            .get_mut(interface)
+            .ok_or(CniError::ContainerNotFound)?;
+        iface.ip = Some(parsed_ip);
+        iface.gateway = Some(parsed_gateway);
+        iface.mtu = 1500;
+        iface.up = true;
         crate::serial_println!(
             "[CNI] Configured {} with IP {} and gateway {}",
             interface,
@@ -493,6 +717,36 @@ impl BridgePlugin {
             gateway
         );
         Ok(())
+    }
+
+    fn rollback_add(
+        &self,
+        container_id: &str,
+        ip: Option<Ipv4Addr>,
+        host_veth: Option<&str>,
+        container_interface: Option<&str>,
+        netns: Option<&str>,
+    ) {
+        if let Some(ip) = ip {
+            let _ = self.ip_pool.release_ip(ip);
+        }
+        if let Some(host_veth) = host_veth {
+            crate::serial_println!("[CNI] Rolled back interface {}", host_veth);
+            self.interfaces.lock().remove(host_veth);
+        }
+        if let Some(container_interface) = container_interface {
+            self.interfaces.lock().remove(container_interface);
+        }
+        if let Some(netns) = netns {
+            if let Some(namespace) = self.namespaces.lock().get_mut(netns) {
+                if let Some(container_interface) = container_interface {
+                    namespace
+                        .interfaces
+                        .retain(|iface| iface != container_interface);
+                }
+            }
+        }
+        self.applied.lock().remove(container_id);
     }
 }
 
@@ -510,13 +764,53 @@ impl CniPlugin for BridgePlugin {
         let ip_str = format!("{}.{}.{}.{}", ip.0[0], ip.0[1], ip.0[2], ip.0[3]);
 
         // veth pair oluştur
-        let veth_interface = self.create_veth_pair(&config.container_id, &config.bridge)?;
+        let (host_veth, container_interface) =
+            match self.create_veth_pair(&config.container_id, &config.bridge) {
+                Ok(veth) => veth,
+                Err(err) => {
+                    self.rollback_add(&config.container_id, Some(ip), None, None, None);
+                    return Err(err);
+                }
+            };
 
         // Arayüzü namespace'e taşı
-        self.move_to_netns(&veth_interface, &config.netns)?;
+        if let Err(err) = self.move_to_netns(&container_interface, &config.netns) {
+            self.rollback_add(
+                &config.container_id,
+                Some(ip),
+                Some(&host_veth),
+                Some(&container_interface),
+                Some(&config.netns),
+            );
+            return Err(err);
+        }
 
         // Arayüzü yapılandır
-        self.configure_interface(&veth_interface, &ip_str, &config.gateway)?;
+        if let Err(err) = self.configure_interface(&container_interface, &ip_str, &config.gateway) {
+            self.rollback_add(
+                &config.container_id,
+                Some(ip),
+                Some(&host_veth),
+                Some(&container_interface),
+                Some(&config.netns),
+            );
+            return Err(err);
+        }
+
+        self.applied.lock().insert(
+            config.container_id.clone(),
+            AppliedContainerNetwork {
+                container_id: config.container_id.clone(),
+                bridge: config.bridge.clone(),
+                host_veth: host_veth.clone(),
+                container_interface: container_interface.clone(),
+                netns: config.netns.clone(),
+                assigned_ip: ip,
+                gateway: config.gateway.clone(),
+                mtu: config.mtu,
+                active: true,
+            },
+        );
 
         crate::serial_println!(
             "[CNI] Assigned IP {} to container {}",
@@ -530,14 +824,22 @@ impl CniPlugin for BridgePlugin {
     fn delete(&self, config: &CniConfig) -> Result<(), CniError> {
         crate::serial_println!("[CNI] DEL container: {}", config.container_id);
 
-        // IP adresini serbest bırak
-        if let Some(ip) = parse_ipv4(&config.ip_address) {
-            self.ip_pool.release_ip(ip)?;
+        let applied = self
+            .applied
+            .lock()
+            .remove(&config.container_id)
+            .ok_or(CniError::ContainerNotFound)?;
+        self.ip_pool.release_ip(applied.assigned_ip)?;
+        self.interfaces.lock().remove(&applied.host_veth);
+        self.interfaces.lock().remove(&applied.container_interface);
+        if let Some(namespace) = self.namespaces.lock().get_mut(&applied.netns) {
+            namespace
+                .interfaces
+                .retain(|iface| iface != &applied.container_interface);
         }
 
         // veth arayüzünü sil
-        let veth_name = format!("veth{}", &config.container_id[..8]);
-        crate::serial_println!("[CNI] Deleted interface {}", veth_name);
+        crate::serial_println!("[CNI] Deleted interface {}", applied.host_veth);
 
         Ok(())
     }
@@ -545,18 +847,68 @@ impl CniPlugin for BridgePlugin {
     fn check(&self, config: &CniConfig) -> Result<(), CniError> {
         crate::serial_println!("[CNI] CHECK container: {}", config.container_id);
 
-        // IP adresinin kullanımda olduğunu kontrol et
-        if let Some(ip) = parse_ipv4(&config.ip_address) {
-            let used_ips = self.ip_pool.used_ips.lock();
-            let ip_u32 = u32::from_be_bytes(ip.0);
+        let applied = self
+            .applied
+            .lock()
+            .get(&config.container_id)
+            .cloned()
+            .ok_or(CniError::ContainerNotFound)?;
 
-            if used_ips.contains_key(&ip_u32) {
-                Ok(())
-            } else {
-                Err(CniError::ContainerNotFound)
-            }
+        if !applied.active
+            || applied.netns != config.netns
+            || applied.bridge != config.bridge
+            || applied.gateway != config.gateway
+            || applied.mtu != config.mtu
+            || applied.container_interface != "eth0"
+        {
+            return Err(CniError::ContainerNotFound);
+        }
+
+        let bridges = self.bridges.lock();
+        let bridge = bridges
+            .get(&applied.bridge)
+            .ok_or(CniError::NetworkNotFound)?;
+        if !bridge.active || bridge.subnet != config.subnet {
+            return Err(CniError::NetworkNotFound);
+        }
+
+        let interfaces = self.interfaces.lock();
+        let host_veth = interfaces
+            .get(&applied.host_veth)
+            .ok_or(CniError::ContainerNotFound)?;
+        let container_iface = interfaces
+            .get(&applied.container_interface)
+            .ok_or(CniError::ContainerNotFound)?;
+        if host_veth.bridge.as_deref() != Some(applied.bridge.as_str())
+            || host_veth.peer.as_deref() != Some(applied.container_interface.as_str())
+            || !host_veth.up
+            || container_iface.netns.as_deref() != Some(applied.netns.as_str())
+            || container_iface.ip != Some(applied.assigned_ip)
+            || container_iface.gateway != parse_ipv4(&config.gateway)
+            || !container_iface.up
+        {
+            return Err(CniError::ContainerNotFound);
+        }
+
+        let namespaces = self.namespaces.lock();
+        let namespace = namespaces
+            .get(&applied.netns)
+            .ok_or(CniError::ContainerNotFound)?;
+        if namespace.path != applied.netns
+            || !namespace
+                .interfaces
+                .iter()
+                .any(|iface| iface == &applied.container_interface)
+        {
+            return Err(CniError::ContainerNotFound);
+        }
+
+        let used_ips = self.ip_pool.used_ips.lock();
+        let ip_u32 = u32::from_be_bytes(applied.assigned_ip.0);
+        if used_ips.contains_key(&ip_u32) {
+            Ok(())
         } else {
-            Err(CniError::InvalidConfig)
+            Err(CniError::ContainerNotFound)
         }
     }
 
@@ -611,34 +963,37 @@ impl CniManager {
         self.default_plugin = name.to_string();
     }
 
-    /// CNI komutu çalıştır
-    pub fn run_command(&self, command: &str, config: &CniConfig) -> Result<CniResult, CniError> {
-        let plugin = self
-            .plugins
+    fn resolve_plugin(&self, config: &CniConfig) -> Result<&dyn CniPlugin, CniError> {
+        self.plugins
             .get(&config.bridge)
             .or_else(|| self.plugins.get(&self.default_plugin))
-            .ok_or(CniError::NetworkNotFound)?;
+            .map(|plugin| plugin.as_ref())
+            .ok_or(CniError::NetworkNotFound)
+    }
+
+    /// CNI komutu çalıştır
+    pub fn run_command(&self, command: &str, config: &CniConfig) -> Result<CniResult, CniError> {
+        let plugin = self.resolve_plugin(config)?;
 
         match command {
             CNI_COMMAND_ADD => plugin.add(config),
-            CNI_COMMAND_DEL => {
-                plugin.delete(config)?;
-                Err(CniError::General(
-                    "DELETE command returns no result".to_string(),
-                ))
-            }
-            CNI_COMMAND_CHECK => {
-                plugin.check(config)?;
-                Err(CniError::General(
-                    "CHECK command returns no result".to_string(),
-                ))
-            }
-            CNI_COMMAND_VERSION => {
-                let version = plugin.version()?;
-                Err(CniError::General(version))
+            CNI_COMMAND_DEL | CNI_COMMAND_CHECK | CNI_COMMAND_VERSION => {
+                Err(CniError::InvalidCommand)
             }
             _ => Err(CniError::InvalidCommand),
         }
+    }
+
+    pub fn run_delete(&self, config: &CniConfig) -> Result<(), CniError> {
+        self.resolve_plugin(config)?.delete(config)
+    }
+
+    pub fn run_check(&self, config: &CniConfig) -> Result<(), CniError> {
+        self.resolve_plugin(config)?.check(config)
+    }
+
+    pub fn run_version(&self, config: &CniConfig) -> Result<String, CniError> {
+        self.resolve_plugin(config)?.version()
     }
 }
 
@@ -668,15 +1023,15 @@ pub fn run_cni_command(command: &str, config_json: &str) -> Result<String, CniEr
             Ok(result.to_json())
         }
         CNI_COMMAND_DEL => {
-            manager.run_command(command, &config)?;
+            manager.run_delete(&config)?;
             Ok(r#"{"code": 0}"#.to_string())
         }
         CNI_COMMAND_CHECK => {
-            manager.run_command(command, &config)?;
+            manager.run_check(&config)?;
             Ok(r#"{"code": 0}"#.to_string())
         }
         CNI_COMMAND_VERSION => {
-            let version = manager.run_command(command, &config)?;
+            let version = manager.run_version(&config)?;
             Ok(format!("{{\"code\": 0, \"result\": {}}}", version))
         }
         _ => Err(CniError::InvalidCommand),

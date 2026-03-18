@@ -47,7 +47,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-use super::http2::{Http2Connection, Http2Error, Http2Stream};
+use super::http2::{Http2Connection, Http2Error, Http2Frame, Http2Stream};
 
 // ============================================================================
 // gRPC SABİTLERİ
@@ -99,10 +99,10 @@ impl From<Http2Error> for GrpcError {
 }
 
 // ============================================================================
-// PROTOCOL BUFFER (Basit Implementasyon)
+// PROTOCOL BUFFER MESSAGE MODEL
 // ============================================================================
 
-/// Basit Protocol Buffer mesajı
+/// Length-delimited Protocol Buffer field map used by the in-tree unary examples.
 #[derive(Clone, Debug)]
 pub struct ProtoMessage {
     fields: BTreeMap<u32, Vec<u8>>,
@@ -125,9 +125,9 @@ impl ProtoMessage {
 
     /// String alanı oku
     pub fn get_string(&self, field_number: u32) -> Option<String> {
-        self.fields.get(&field_number).and_then(|data| {
-            String::from_utf8(data.clone()).ok()
-        })
+        self.fields
+            .get(&field_number)
+            .and_then(|data| String::from_utf8(data.clone()).ok())
     }
 
     /// Serialize et
@@ -159,8 +159,8 @@ impl ProtoMessage {
 
         while offset < data.len() {
             // Field header oku
-            let (field_header, header_offset) = Self::decode_varint(&data[offset..])
-                .ok_or(GrpcError::InvalidMessage)?;
+            let (field_header, header_offset) =
+                Self::decode_varint(&data[offset..]).ok_or(GrpcError::InvalidMessage)?;
             offset += header_offset;
 
             let field_number = (field_header >> 3) as u32;
@@ -171,8 +171,8 @@ impl ProtoMessage {
             }
 
             // Length oku
-            let (length, new_offset) = Self::decode_varint(&data[offset..])
-                .ok_or(GrpcError::InvalidMessage)?;
+            let (length, new_offset) =
+                Self::decode_varint(&data[offset..]).ok_or(GrpcError::InvalidMessage)?;
             offset += new_offset;
 
             if offset + length as usize > data.len() {
@@ -344,59 +344,158 @@ impl GrpcClient {
         request: &ProtoMessage,
     ) -> Result<ProtoMessage, GrpcError> {
         // Servis ve metodu bul
-        let service = self
+        let method = self
             .services
             .get(service_name)
-            .ok_or(GrpcError::Unavailable)?;
-        let method = service
-            .get_method(method_name)
+            .and_then(|service| service.get_method(method_name))
+            .cloned()
             .ok_or(GrpcError::Unavailable)?;
 
         if method.method_type != GrpcMethodType::Unary {
             return Err(GrpcError::InvalidMessage);
         }
 
-        // HTTP/2 stream oluştur
         let stream_id = self.next_stream_id.fetch_add(2, Ordering::SeqCst);
-        
-        // HTTP/2 başlıklar çerçevesi oluştur
-        let headers_frame = self.http2_client.build_request(
-            stream_id as u32,
-            "POST",
-            &format!("/{}/{}", "service.name", method.name),
-            "example.com"
-        );
-        
-        // Veri çerçevesi oluştur (gRPC mesajı ile)
-        let serialized_request = request.serialize();
-        let mut data_payload = Vec::new();
-        data_payload.push(0); // Flags (no compression)
-        data_payload.extend_from_slice(&[
-            (serialized_request.len() >> 24) as u8,
-            (serialized_request.len() >> 16) as u8,
-            (serialized_request.len() >> 8) as u8,
-            serialized_request.len() as u8,
-        ]);
-        data_payload.extend_from_slice(&serialized_request);
-        
-        // TODO: Send frames through Http2Connection
-        // For now, just simulate success
-        Ok(ProtoMessage::new())
+        self.http2_client.create_stream();
+
+        let grpc_request =
+            self.create_grpc_request(service_name, &method, "builtin.local", request)?;
+        let mut request_header_map = BTreeMap::new();
+        for (key, value) in &grpc_request.headers {
+            request_header_map.insert(key.clone(), value.clone());
+        }
+        let encoded_headers = self.http2_client.encoder.encode(&request_header_map);
+        let request_headers_frame = Http2Frame::headers(stream_id as u32, encoded_headers, false);
+        let request_data_frame =
+            Http2Frame::data(stream_id as u32, grpc_request.body.clone(), true);
+        self.http2_client.process_frame(&request_headers_frame)?;
+        self.http2_client.process_frame(&request_data_frame)?;
+
+        let response_message = self.dispatch_builtin_unary(service_name, method_name, request)?;
+        let serialized_response = response_message.serialize();
+        let mut response_body =
+            Vec::with_capacity(GRPC_MESSAGE_HEADER_SIZE + serialized_response.len());
+        response_body.push(0);
+        response_body.extend_from_slice(&(serialized_response.len() as u32).to_be_bytes());
+        response_body.extend_from_slice(&serialized_response);
+
+        let response_headers = vec![
+            (":status".to_string(), "200".to_string()),
+            ("content-type".to_string(), GRPC_CONTENT_TYPE.to_string()),
+            ("grpc-status".to_string(), GRPC_STATUS_OK.to_string()),
+        ];
+        let response = self.process_grpc_response(&response_headers, &response_body)?;
+        Ok(response)
+    }
+
+    pub fn call_unary_remote(
+        &mut self,
+        server_ip: super::Ipv4Addr,
+        port: u16,
+        authority: &str,
+        service_name: &str,
+        method_name: &str,
+        request: &ProtoMessage,
+    ) -> Result<ProtoMessage, GrpcError> {
+        use super::socket::{
+            close, connect, recv, send, socket, AddressFamily, Protocol, SocketType,
+        };
+        use super::{Port, SocketAddr};
+
+        let method = self
+            .services
+            .get(service_name)
+            .and_then(|service| service.get_method(method_name))
+            .cloned()
+            .ok_or(GrpcError::Unavailable)?;
+
+        if method.method_type != GrpcMethodType::Unary {
+            return Err(GrpcError::InvalidMessage);
+        }
+
+        let sock_id = socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::TCP)
+            .map_err(|_| GrpcError::Unavailable)?;
+        connect(sock_id, SocketAddr::new(server_ip, Port(port)))
+            .map_err(|_| GrpcError::Unavailable)?;
+
+        let send_result = (|| -> Result<ProtoMessage, GrpcError> {
+            send(sock_id, super::http2::connection_preface(), 0)
+                .map_err(|_| GrpcError::Unavailable)?;
+
+            let settings = super::http2::Http2Frame::settings(&self.http2_client.settings).encode();
+            send(sock_id, &settings, 0).map_err(|_| GrpcError::Unavailable)?;
+
+            let stream_id = self.http2_client.create_stream();
+            let grpc_request =
+                self.create_grpc_request(service_name, &method, authority, request)?;
+            let mut request_header_map = BTreeMap::new();
+            for (key, value) in &grpc_request.headers {
+                request_header_map.insert(key.clone(), value.clone());
+            }
+            let encoded_headers = self.http2_client.encoder.encode(&request_header_map);
+            let headers_frame = Http2Frame::headers(stream_id, encoded_headers, false).encode();
+            let data_frame = Http2Frame::data(stream_id, grpc_request.body.clone(), true).encode();
+
+            send(sock_id, &headers_frame, 0).map_err(|_| GrpcError::Unavailable)?;
+            send(sock_id, &data_frame, 0).map_err(|_| GrpcError::Unavailable)?;
+
+            let mut wire = Vec::new();
+            let mut recv_buf = [0u8; 8192];
+            loop {
+                let recv_len =
+                    recv(sock_id, &mut recv_buf, 0).map_err(|_| GrpcError::Unavailable)?;
+                if recv_len == 0 {
+                    break;
+                }
+                wire.extend_from_slice(&recv_buf[..recv_len]);
+
+                let mut consumed = 0usize;
+                while consumed < wire.len() {
+                    let Some((frame, used)) = Http2Frame::decode(&wire[consumed..]) else {
+                        break;
+                    };
+                    consumed += used;
+                    self.http2_client.process_frame(&frame)?;
+                }
+
+                if consumed > 0 {
+                    wire.drain(..consumed);
+                }
+
+                if let Some(stream) = self.http2_client.get_stream(stream_id) {
+                    if stream.end_stream {
+                        let headers: Vec<(String, String)> = stream
+                            .headers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        return self.process_grpc_response(&headers, &stream.data);
+                    }
+                }
+            }
+
+            Err(GrpcError::Unavailable)
+        })();
+
+        let _ = close(sock_id);
+        send_result
     }
 
     /// gRPC isteği oluştur
     fn create_grpc_request(
         &self,
+        service_name: &str,
         method: &GrpcMethod,
+        authority: &str,
         request: &ProtoMessage,
     ) -> Result<GrpcMessage, GrpcError> {
         let mut headers = Vec::new();
         headers.push((":method".to_string(), "POST".to_string()));
         headers.push((
             ":path".to_string(),
-            format!("/{}/{}", "service.name", method.name),
+            format!("/{}/{}", service_name, method.name),
         ));
-        headers.push((":authority".to_string(), "example.com".to_string()));
+        headers.push((":authority".to_string(), authority.to_string()));
         headers.push(("content-type".to_string(), GRPC_CONTENT_TYPE.to_string()));
         headers.push(("te".to_string(), "trailers".to_string()));
 
@@ -462,6 +561,23 @@ impl GrpcClient {
         // Protocol Buffer mesajını deserialize et
         ProtoMessage::deserialize(message_data).map_err(|_| GrpcError::DeserializationError)
     }
+
+    fn dispatch_builtin_unary(
+        &self,
+        service_name: &str,
+        method_name: &str,
+        request: &ProtoMessage,
+    ) -> Result<ProtoMessage, GrpcError> {
+        match (service_name, method_name) {
+            ("Greeter", "SayHello") => {
+                let name = request.get_string(1).unwrap_or_else(|| "World".to_string());
+                let mut reply = ProtoMessage::new();
+                reply.add_string(1, &format!("Hello, {}!", name));
+                Ok(reply)
+            }
+            _ => Err(GrpcError::Unavailable),
+        }
+    }
 }
 
 impl Default for GrpcClient {
@@ -489,10 +605,10 @@ pub struct GrpcServer {
     services: BTreeMap<String, GrpcService>,
 }
 
-/// HTTP/2 sunucusu (placeholder)
-pub struct Http2Server {
-    // Placeholder implementation
-}
+/// HTTP/2 sunucusu.
+///
+/// Remote transport kapanana kadar server yolu basari taklidi yapmaz.
+pub struct Http2Server {}
 
 impl Http2Server {
     pub fn new() -> Self {
@@ -500,20 +616,21 @@ impl Http2Server {
     }
 
     pub fn listen(&mut self, port: u16) -> Result<(), GrpcError> {
-        crate::serial_println!("[gRPC] Server listening on port {}", port);
-        Ok(())
+        crate::serial_println!(
+            "[gRPC] Remote HTTP/2 server transport unavailable on port {}",
+            port
+        );
+        Err(GrpcError::Unavailable)
     }
 
     pub fn accept(&mut self) -> Result<GrpcConnection, GrpcError> {
-        // Placeholder - yeni bağlantı kabul et
-        Ok(GrpcConnection::new())
+        // Remote HTTP/2 accept path is not wired yet.
+        Err(GrpcError::Unavailable)
     }
 }
 
 /// gRPC bağlantısı
-pub struct GrpcConnection {
-    // Placeholder implementation
-}
+pub struct GrpcConnection {}
 
 impl GrpcConnection {
     pub fn new() -> Self {
@@ -524,9 +641,9 @@ impl GrpcConnection {
         &mut self,
         services: &BTreeMap<String, GrpcService>,
     ) -> Result<(), GrpcError> {
-        // Placeholder - isteği işle
-        crate::serial_println!("[gRPC] Handling request");
-        Ok(())
+        // Remote HTTP/2 request handling is not wired yet.
+        let _ = services;
+        Err(GrpcError::Unavailable)
     }
 }
 
@@ -570,7 +687,7 @@ pub fn init() {
     crate::serial_println!("[gRPC] gRPC module initialized");
 }
 
-/// Basit Greeter servisi oluştur
+/// In-tree Greeter servisini oluştur
 pub fn create_greeter_service() -> GrpcService {
     let mut service = GrpcService::new("Greeter");
 
@@ -586,7 +703,7 @@ pub fn create_greeter_service() -> GrpcService {
     service
 }
 
-/// Basit Greeter istemcisi test
+/// In-tree Greeter istemci yolu
 pub fn test_greeter_client() -> Result<(), GrpcError> {
     let mut client = GrpcClient::new();
 

@@ -715,7 +715,10 @@ impl TreeRcuDomain {
 
     pub fn read_lock_on_cpu(&self, cpu_id: u32) -> TreeRcuReadGuard<'_> {
         self.enter_on_cpu(cpu_id);
-        TreeRcuReadGuard { domain: self, cpu_id }
+        TreeRcuReadGuard {
+            domain: self,
+            cpu_id,
+        }
     }
 
     pub fn note_quiescent_state(&self, cpu_id: u32) {
@@ -1012,6 +1015,7 @@ pub fn cleanup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::boxed::Box;
 
     #[test]
     fn test_rcu_read_lock() {
@@ -1030,4 +1034,3 @@ mod tests {
         }
     }
 }
-

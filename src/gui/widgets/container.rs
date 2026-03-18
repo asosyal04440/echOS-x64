@@ -20,11 +20,16 @@
 //! `with_title`, `with_background` gibi metodlar `mut self → Self` döndürerek
 //! zincirleme yapılandırma imkanı sunar. Bu Rust'ta yaygın bir ergonomi kalıbıdır.
 
-use super::{Rect, Widget};
+use super::{
+    border_rect_objects, draw_render_objects, solid_rect_object, text_render_object_with_width,
+    Rect, Widget,
+};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject};
 use crate::gui::theme::Theme;
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// Panel kap widget'ı; alt widget'ları gruplayan temel kap.
@@ -136,42 +141,58 @@ impl<'a> Panel<'a> {
     pub fn children_mut(&mut self) -> &mut Vec<Box<dyn Widget + 'a>> {
         &mut self.children
     }
+
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let rect = Rect::new(
+            self.rect.x + self.margin[3],
+            self.rect.y + self.margin[0],
+            self.rect.width - self.margin[1] - self.margin[3],
+            self.rect.height - self.margin[0] - self.margin[2],
+        );
+        let base_id = ((rect.x as u64) << 32) ^ (rect.y as u64);
+        objects.push(solid_rect_object(
+            base_id,
+            rect,
+            self.background,
+            DamageLane::Window,
+            0,
+        ));
+        if let Some(title) = &self.title {
+            objects.push(solid_rect_object(
+                base_id ^ 0x10,
+                Rect::new(rect.x, rect.y, rect.width, 24),
+                Theme::TITLEBAR_BG.to_u32(),
+                DamageLane::Window,
+                1,
+            ));
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x11,
+                Rect::new(rect.x + 8, rect.y + 4, (rect.width - 16).max(1), 18),
+                title,
+                Theme::TEXT_PRIMARY.to_u32(),
+                false,
+                DamageLane::Text,
+                2,
+            ));
+        }
+        if self.border {
+            objects.extend(border_rect_objects(
+                base_id ^ 0x20,
+                rect,
+                Theme::BORDER.to_u32(),
+                DamageLane::Window,
+                3,
+            ));
+        }
+        objects
+    }
 }
 
 impl<'a> Widget for Panel<'a> {
     fn draw(&self, fb: &mut Framebuffer) {
-        // Margin uygulanmış çizim alanı
-        let x = (self.rect.x + self.margin[3]) as usize;
-        let y = (self.rect.y + self.margin[0]) as usize;
-        let w = (self.rect.width - self.margin[1] - self.margin[3]) as usize;
-        let h = (self.rect.height - self.margin[0] - self.margin[2]) as usize;
-
-        // Arka plan rengi tüm paneli doldurur
-        fb.draw_rect(x, y, w, h, self.background);
-
-        // Başlık çubuğu: `if let Some` ile Option deseni açılır.
-        // Başlık varsa 24 piksel yüksekliğinde başlık çubuğu çizilir ve
-        // içerik alanı bu kadar aşağıdan başlar. `content_y` bu offset'i tutar.
-        let content_y = if let Some(title) = &self.title {
-            let title_h = 24;
-            fb.draw_rect(x, y, w, title_h, Theme::TITLEBAR_BG.to_u32());
-            fb.draw_string(x + 8, y + 4, title, Theme::TEXT_PRIMARY.to_u32());
-            title_h as usize
-        } else {
-            0
-        };
-
-        // Kenarlık: panel sınırları boyunca tek piksel kalınlığında çizgi
-        if self.border {
-            for col in x..(x + w) {
-                fb.plot_pixel(col, y, Theme::BORDER.to_u32());
-                fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
-            }
-            for row in y..(y + h) {
-                fb.plot_pixel(x, row, Theme::BORDER.to_u32());
-                fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
-            }
-        }
+        let objects = self.render_primitives();
+        draw_render_objects(fb, self.rect, &objects);
 
         // Alt widget'ları çiz: her biri kendi `draw` metoduyla kendini çizer.
         // Bu, polimorfizmin güzel bir örneğidir; hangi widget türü olduğuna
@@ -244,6 +265,10 @@ impl<'a> Widget for Panel<'a> {
         for child in &mut self.children {
             child.update();
         }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }
 
@@ -368,28 +393,27 @@ impl<'a> TabControl<'a> {
             self.rect.height - self.tab_height as i32,
         )
     }
-}
 
-impl<'a> Widget for TabControl<'a> {
-    fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64) ^ 0x1000_0000;
+        objects.push(solid_rect_object(
+            base_id,
+            Rect::new(self.rect.x, self.rect.y, self.rect.width, self.tab_height as i32),
+            Theme::TITLEBAR_BG.to_u32(),
+            DamageLane::Window,
+            0,
+        ));
+        objects.push(solid_rect_object(
+            base_id ^ 0x01,
+            Rect::new(self.rect.x, self.rect.y + self.tab_height as i32 - 1, self.rect.width, 1),
+            Theme::BORDER.to_u32(),
+            DamageLane::Window,
+            1,
+        ));
 
-        // Sekme çubuğu arka planı
-        fb.draw_rect(x, y, w, self.tab_height, Theme::TITLEBAR_BG.to_u32());
-
-        // Her sekme başlığını çiz; `enumerate()` hem indeks hem değer verir.
-        // Aktif sekme için farklı (açık) arka plan rengi kullanılır.
         for (i, tab) in self.tabs.iter().enumerate() {
             let tab_rect = self.tab_rect(i);
-            let tx = tab_rect.x as usize;
-            let ty = tab_rect.y as usize;
-            let tw = tab_rect.width as usize;
-            let th = tab_rect.height as usize;
-
-            // Sekme arka plan rengi: aktif/hover/normal duruma göre üç seçenek
             let bg_color = if i == self.active_tab {
                 Theme::WINDOW_BG.to_u32()
             } else if self.hovered_tab == Some(i) {
@@ -397,51 +421,65 @@ impl<'a> Widget for TabControl<'a> {
             } else {
                 Theme::TITLEBAR_BG.to_u32()
             };
-            fb.draw_rect(tx, ty, tw, th, bg_color);
-
-            // Sekme kenarlığı: sol, sağ ve üst kenar çizilir (alt yok: içerikle birleşir)
-            for col in tx..(tx + tw) {
-                fb.plot_pixel(col, ty, Theme::BORDER.to_u32());
-            }
-            for row in ty..(ty + th) {
-                fb.plot_pixel(tx, row, Theme::BORDER.to_u32());
-                fb.plot_pixel(tx + tw - 1, row, Theme::BORDER.to_u32());
-            }
-
-            // Sekme başlık metni: dikey ortalama ile hizalanır.
-            // Aktif sekme için birincil metin rengi, diğerleri için ikincil.
-            let text_x = tx + 12;
-            let text_y = ty + (th - 16) / 2;
+            objects.push(solid_rect_object(
+                base_id ^ 0x100 ^ i as u64,
+                tab_rect,
+                bg_color,
+                DamageLane::Window,
+                2,
+            ));
+            objects.extend(border_rect_objects(
+                base_id ^ 0x200 ^ i as u64,
+                tab_rect,
+                Theme::BORDER.to_u32(),
+                DamageLane::Window,
+                3,
+            ));
             let text_color = if i == self.active_tab {
                 Theme::TEXT_PRIMARY.to_u32()
             } else {
                 Theme::TEXT_SECONDARY.to_u32()
             };
-            fb.draw_string(text_x, text_y, &tab.title, text_color);
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x300 ^ i as u64,
+                Rect::new(
+                    tab_rect.x + 12,
+                    tab_rect.y + ((tab_rect.height - 16).max(0) / 2),
+                    (tab_rect.width - 24).max(1),
+                    18,
+                ),
+                &tab.title,
+                text_color,
+                false,
+                DamageLane::Text,
+                4,
+            ));
         }
 
-        // İçerik alanı: sekme çubuğunun altında kalan bölge
         let content = self.content_rect();
-        fb.draw_rect(
-            content.x as usize,
-            content.y as usize,
-            content.width as usize,
-            content.height as usize,
+        objects.push(solid_rect_object(
+            base_id ^ 0x400,
+            content,
             Theme::WINDOW_BG.to_u32(),
-        );
+            DamageLane::Window,
+            1,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 0x500,
+            content,
+            Theme::BORDER.to_u32(),
+            DamageLane::Window,
+            2,
+        ));
 
-        // İçerik alanı kenarlığı: sol, sağ ve alt kenar çizilir
-        for col in content.x as usize..(content.x as usize + content.width as usize) {
-            fb.plot_pixel(col, content.y as usize, Theme::BORDER.to_u32());
-        }
-        for row in content.y as usize..(content.y as usize + content.height as usize) {
-            fb.plot_pixel(content.x as usize, row, Theme::BORDER.to_u32());
-            fb.plot_pixel(
-                content.x as usize + content.width as usize - 1,
-                row,
-                Theme::BORDER.to_u32(),
-            );
-        }
+        objects
+    }
+}
+
+impl<'a> Widget for TabControl<'a> {
+    fn draw(&self, fb: &mut Framebuffer) {
+        let objects = self.render_primitives();
+        draw_render_objects(fb, self.rect, &objects);
 
         // Aktif sekme içeriğini çiz: yalnızca aktif sekmenin paneli görünür.
         // `is_empty()` ve bounds kontrolü index-out-of-bounds güvenliği sağlar.
@@ -501,6 +539,10 @@ impl<'a> Widget for TabControl<'a> {
         if self.active_tab < self.tabs.len() {
             self.tabs[self.active_tab].panel_mut().update();
         }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }
 
@@ -670,19 +712,8 @@ impl<'a> Widget for Splitter<'a> {
         }
 
         // Bölümleme çizgisini çiz: sürüklenirken vurgu rengi, normalde kenarlık rengi
-        let splitter = self.splitter_rect();
-        let splitter_color = if self.dragging {
-            Theme::ACCENT_PRIMARY.to_u32()
-        } else {
-            Theme::BORDER.to_u32()
-        };
-        fb.draw_rect(
-            splitter.x as usize,
-            splitter.y as usize,
-            splitter.width as usize,
-            splitter.height as usize,
-            splitter_color,
-        );
+        let objects = self.render_objects();
+        draw_render_objects(fb, self.rect, &objects);
 
         // İkinci paneli çiz
         if let Some(second) = &self.second {
@@ -773,5 +804,21 @@ impl<'a> Widget for Splitter<'a> {
         if let Some(second) = &mut self.second {
             second.update();
         }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        let splitter = self.splitter_rect();
+        let splitter_color = if self.dragging {
+            Theme::ACCENT_PRIMARY.to_u32()
+        } else {
+            Theme::BORDER.to_u32()
+        };
+        vec![solid_rect_object(
+            ((splitter.x as u64) << 32) ^ splitter.y as u64,
+            splitter,
+            splitter_color,
+            DamageLane::Window,
+            0,
+        )]
     }
 }

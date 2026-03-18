@@ -11,9 +11,15 @@
 //! Bu modül `std` kütüphanesi olmadan çalışır; bu nedenle `sin` ve `cos`
 //! matematik fonksiyonları Taylor serisiyle yaklaşık olarak hesaplanır.
 
-use super::{Rect, Widget};
+use super::{
+    border_rect_objects, draw_render_objects, raster_object, solid_rect_object,
+    text_render_object_with_width, Rect, Widget,
+};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject};
 use crate::gui::theme::Theme;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// `no_std` ortamı için sinüs (sin) yaklaşımı.
@@ -127,80 +133,82 @@ impl ProgressBar {
         }
         self.value * 100 / self.max_value
     }
+
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64);
+        objects.push(solid_rect_object(
+            base_id,
+            self.rect,
+            Theme::BUTTON_BG.to_u32(),
+            DamageLane::Window,
+            0,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 0x10,
+            self.rect,
+            Theme::BORDER.to_u32(),
+            DamageLane::Window,
+            1,
+        ));
+
+        if self.indeterminate {
+            let block_w = (self.rect.width / 4).max(20);
+            let draw_x = (self.rect.x + 2 + self.indeterminate_pos).min(self.rect.x + self.rect.width - 2);
+            let draw_w = block_w.min(self.rect.width.saturating_sub(4).saturating_sub(self.indeterminate_pos));
+            if draw_w > 0 {
+                objects.push(solid_rect_object(
+                    base_id ^ 0x20,
+                    Rect::new(draw_x, self.rect.y + 2, draw_w, self.rect.height - 4),
+                    Theme::ACCENT_PRIMARY.to_u32(),
+                    DamageLane::Window,
+                    2,
+                ));
+            }
+        } else if self.max_value > 0 {
+            let fill_width =
+                ((self.rect.width.saturating_sub(4)) as u32 * self.value / self.max_value) as i32;
+            if fill_width > 0 {
+                objects.push(solid_rect_object(
+                    base_id ^ 0x30,
+                    Rect::new(self.rect.x + 2, self.rect.y + 2, fill_width, self.rect.height - 4),
+                    Theme::ACCENT_PRIMARY.to_u32(),
+                    DamageLane::Window,
+                    2,
+                ));
+            }
+        }
+
+        if !self.indeterminate && self.show_percentage && self.rect.height >= 16 {
+            let pct = self.percentage();
+            let pct_str = alloc::format!("{}%", pct);
+            let text_x = self.rect.x + ((self.rect.width - (pct_str.len() as i32 * 8)).max(0) / 2);
+            let text_color = if self.percentage() > 50 {
+                Theme::DESKTOP_BG.to_u32()
+            } else {
+                Theme::TEXT_PRIMARY.to_u32()
+            };
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x40,
+                Rect::new(text_x, self.rect.y + ((self.rect.height - 16).max(0) / 2), self.rect.width.max(1), 18),
+                &pct_str,
+                text_color,
+                false,
+                DamageLane::Text,
+                3,
+            ));
+        }
+
+        objects
+    }
 }
 
 impl Widget for ProgressBar {
     /// İlerleme çubuğunu çizer.
     /// Belirsiz modda kayar blok; normal modda dolum alanı.
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-
-        // Boş arka plan dikdörtgeni
-        fb.draw_rect(x, y, w, h, Theme::BUTTON_BG.to_u32());
-
-        // Dört kenarlık çizgisi
-        for col in x..(x + w) {
-            fb.plot_pixel(col, y, Theme::BORDER.to_u32());
-            fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
-        }
-        for row in y..(y + h) {
-            fb.plot_pixel(x, row, Theme::BORDER.to_u32());
-            fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
-        }
-
-        if self.indeterminate {
-            // Belirsiz mod: sabit genişlikte kayar blok
-            let block_w = (w / 4).max(20);
-            let pos = self.indeterminate_pos as usize;
-            let draw_x = (x + 2 + pos).min(x + w - 2);
-            let draw_w = block_w.min(w.saturating_sub(4).saturating_sub(pos));
-            if draw_w > 0 {
-                fb.draw_rect(draw_x, y + 2, draw_w, h - 4, Theme::ACCENT_PRIMARY.to_u32());
-            }
-        } else if self.max_value > 0 {
-            // Normal dolum alanı
-            let fill_width = ((w - 4) as u32 * self.value / self.max_value) as usize;
-
-            if self.animated && fill_width > 0 {
-                for i in 0..fill_width {
-                    let color_offset = (i as u32 + self.animation_offset) % 20;
-                    let intensity = if color_offset < 10 {
-                        200 + color_offset * 5
-                    } else {
-                        250 - (color_offset - 10) * 5
-                    };
-                    let color = ((intensity as u32) << 8) | Theme::ACCENT_PRIMARY.to_u32();
-                    for row in (y + 2)..(y + h - 2) {
-                        fb.plot_pixel(x + 2 + i, row, color);
-                    }
-                }
-            } else {
-                fb.draw_rect(
-                    x + 2,
-                    y + 2,
-                    fill_width,
-                    h - 4,
-                    Theme::ACCENT_PRIMARY.to_u32(),
-                );
-            }
-        }
-
-        // Yüzde metni (belirsiz modda gösterilmez)
-        if !self.indeterminate && self.show_percentage && h >= 16 {
-            let pct = self.percentage();
-            let pct_str = alloc::format!("{}%", pct);
-            let text_x = x + (w - pct_str.len() * 8) / 2;
-            let text_y = y + (h - 16) / 2;
-            let text_color = if self.percentage() > 50 {
-                Theme::DESKTOP_BG.to_u32()
-            } else {
-                Theme::TEXT_PRIMARY.to_u32()
-            };
-            fb.draw_string(text_x, text_y, &pct_str, text_color);
-        }
+        let objects = self.render_primitives();
+        draw_render_objects(fb, self.rect, &objects);
     }
 
     /// Animasyon ofsetini ilerletir.
@@ -230,6 +238,10 @@ impl Widget for ProgressBar {
     /// İlerleme çubuğu tıklanabilir değildir; her zaman false döner.
     fn on_click(&mut self, _x: i32, _y: i32) -> bool {
         false
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }
 
@@ -279,51 +291,7 @@ impl Widget for Spinner {
     /// Her segmentin opaklığı sabit bir tabloya göre seçilir (255 → 20).
     /// Renk, ön plan rengi ile pencere arka planı arasında lineer karıştırılır (alpha blend).
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let center = self.size / 2;
-        let radius = (self.size / 2 - 2) as f64;
-
-        // 8 segmenti farklı opaklıklarla çiz
-        for i in 0..8 {
-            let segment_angle = (self.angle as f64 + i as f64 * 45.0).to_radians();
-
-            // Baş segment en parlak (255), kuyruk en soluk (20) — kayış (trail) efekti
-            let opacity = match i {
-                0 => 255,
-                1 => 200,
-                2 => 150,
-                3 => 100,
-                4 => 80,
-                5 => 60,
-                6 => 40,
-                7 => 20,
-                _ => 255,
-            };
-
-            // Her segment için ±15° yay aralığında piksel çiz
-            for angle_offset in -15..=15 {
-                let rad = segment_angle + (angle_offset as f64) * core::f64::consts::PI / 180.0;
-                let px = (center as f64 + radius * cos_approx(rad)) as usize;
-                let py = (center as f64 + radius * sin_approx(rad)) as usize;
-
-                if px < self.size && py < self.size {
-                    // Doğrusal renk karıştırma (linear blend): ön renk × opaklık + arka plan × (1 - opaklık)
-                    let base_color = self.color;
-                    let bg_color = Theme::WINDOW_BG.to_u32();
-
-                    let r = ((base_color >> 16) as u32 * opacity / 255)
-                        + ((bg_color >> 16) as u32 * (255 - opacity) / 255);
-                    let g = (((base_color >> 8) & 0xFF) as u32 * opacity / 255)
-                        + (((bg_color >> 8) & 0xFF) as u32 * (255 - opacity) / 255);
-                    let b = ((base_color & 0xFF) as u32 * opacity / 255)
-                        + ((bg_color & 0xFF) as u32 * (255 - opacity) / 255);
-
-                    let blended = (r << 16) | (g << 8) | b;
-                    fb.plot_pixel(x + px, y + py, blended);
-                }
-            }
-        }
+        draw_render_objects(fb, self.rect, &self.render_objects());
     }
 
     /// Açıyı 15° ilerletir; 360°'ye ulaşınca sıfırlanır.
@@ -341,6 +309,54 @@ impl Widget for Spinner {
     /// Spinner tıklanabilir değildir; her zaman false döner.
     fn on_click(&mut self, _x: i32, _y: i32) -> bool {
         false
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        let center = self.size / 2;
+        let radius = (self.size / 2 - 2) as f64;
+        let mut pixels = vec![0u32; self.size.saturating_mul(self.size)];
+
+        for i in 0..8 {
+            let segment_angle = (self.angle as f64 + i as f64 * 45.0).to_radians();
+            let opacity = match i {
+                0 => 255,
+                1 => 200,
+                2 => 150,
+                3 => 100,
+                4 => 80,
+                5 => 60,
+                6 => 40,
+                7 => 20,
+                _ => 255,
+            };
+
+            for angle_offset in -15..=15 {
+                let rad = segment_angle + (angle_offset as f64) * core::f64::consts::PI / 180.0;
+                let px = (center as f64 + radius * cos_approx(rad)) as i32;
+                let py = (center as f64 + radius * sin_approx(rad)) as i32;
+                if px < 0 || py < 0 || px >= self.size as i32 || py >= self.size as i32 {
+                    continue;
+                }
+
+                let base_color = self.color;
+                let bg_color = Theme::WINDOW_BG.to_u32();
+                let r = ((base_color >> 16) & 0xFF) * opacity / 255
+                    + ((bg_color >> 16) & 0xFF) * (255 - opacity) / 255;
+                let g = ((base_color >> 8) & 0xFF) * opacity / 255
+                    + ((bg_color >> 8) & 0xFF) * (255 - opacity) / 255;
+                let b = (base_color & 0xFF) * opacity / 255
+                    + (bg_color & 0xFF) * (255 - opacity) / 255;
+                pixels[py as usize * self.size + px as usize] = (r << 16) | (g << 8) | b;
+            }
+        }
+
+        Vec::from([raster_object(
+            ((self.rect.x as u64) << 32) ^ self.rect.y as u64 ^ 0x500,
+            self.rect,
+            pixels,
+            DamageLane::Window,
+            0,
+        )])
     }
 }
 
@@ -396,53 +412,7 @@ impl Widget for CircularProgress {
     /// ardından değer oranına karşılık gelen açıya kadar aksent rengiyle üzerine çizilir.
     /// Ortada widget yeterince büyükse yüzde metni gösterilir.
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let center = self.rect.width as usize / 2;
-        let radius = (center - self.thickness / 2 - 1) as f64;
-
-        // Arka plan halkası — tüm 360° BUTTON_BG rengiyle çizilir
-        for angle in 0..360 {
-            let rad = (angle as f64) * core::f64::consts::PI / 180.0;
-            for t in 0..self.thickness {
-                let r = radius - t as f64;
-                let px = (center as f64 + r * cos_approx(rad)) as usize;
-                let py = (center as f64 + r * sin_approx(rad)) as usize;
-                if px < self.rect.width as usize && py < self.rect.height as usize {
-                    fb.plot_pixel(x + px, y + py, Theme::BUTTON_BG.to_u32());
-                }
-            }
-        }
-
-        // Dolum yayı — değer oranınca açı hesaplanır: fill_angle = value * 360 / max
-        if self.max_value > 0 {
-            let fill_angle = (self.value * 360 / self.max_value) as i32;
-
-            for angle in 0..fill_angle {
-                let rad = (angle as f64) * core::f64::consts::PI / 180.0;
-                for t in 0..self.thickness {
-                    let r = radius - t as f64;
-                    let px = (center as f64 + r * cos_approx(rad)) as usize;
-                    let py = (center as f64 + r * sin_approx(rad)) as usize;
-                    if px < self.rect.width as usize && py < self.rect.height as usize {
-                        fb.plot_pixel(x + px, y + py, self.color);
-                    }
-                }
-            }
-        }
-
-        // Orta yüzde metni — widget 40 px'den büyükse çizilir
-        if self.rect.width as usize >= 40 {
-            let pct = if self.max_value > 0 {
-                self.value * 100 / self.max_value
-            } else {
-                0
-            };
-            let pct_str = alloc::format!("{}%", pct);
-            let text_x = x + center - (pct_str.len() * 8) / 2;
-            let text_y = y + center - 8;
-            fb.draw_string(text_x, text_y, &pct_str, Theme::TEXT_PRIMARY.to_u32());
-        }
+        draw_render_objects(fb, self.rect, &self.render_objects());
     }
 
     /// Widget sınırlarını döndürür.
@@ -453,6 +423,70 @@ impl Widget for CircularProgress {
     /// Dairesel ilerleme tıklanabilir değildir; her zaman false döner.
     fn on_click(&mut self, _x: i32, _y: i32) -> bool {
         false
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        let size = self.rect.width.max(1) as usize;
+        let center = size / 2;
+        let radius = (center.saturating_sub(self.thickness / 2 + 1)) as f64;
+        let mut pixels = vec![0u32; size.saturating_mul(size)];
+
+        for angle in 0..360 {
+            let rad = (angle as f64) * core::f64::consts::PI / 180.0;
+            for t in 0..self.thickness {
+                let r = radius - t as f64;
+                let px = (center as f64 + r * cos_approx(rad)) as i32;
+                let py = (center as f64 + r * sin_approx(rad)) as i32;
+                if px >= 0 && py >= 0 && px < size as i32 && py < size as i32 {
+                    pixels[py as usize * size + px as usize] = Theme::BUTTON_BG.to_u32();
+                }
+            }
+        }
+
+        if self.max_value > 0 {
+            let fill_angle = (self.value * 360 / self.max_value) as i32;
+            for angle in 0..fill_angle {
+                let rad = (angle as f64) * core::f64::consts::PI / 180.0;
+                for t in 0..self.thickness {
+                    let r = radius - t as f64;
+                    let px = (center as f64 + r * cos_approx(rad)) as i32;
+                    let py = (center as f64 + r * sin_approx(rad)) as i32;
+                    if px >= 0 && py >= 0 && px < size as i32 && py < size as i32 {
+                        pixels[py as usize * size + px as usize] = self.color;
+                    }
+                }
+            }
+        }
+
+        let mut objects = Vec::from([raster_object(
+            ((self.rect.x as u64) << 32) ^ self.rect.y as u64 ^ 0x700,
+            self.rect,
+            pixels,
+            DamageLane::Window,
+            0,
+        )]);
+
+        if self.rect.width as usize >= 40 {
+            let pct = if self.max_value > 0 {
+                self.value * 100 / self.max_value
+            } else {
+                0
+            };
+            let pct_str = alloc::format!("{}%", pct);
+            let text_x = self.rect.x + center as i32 - (pct_str.len() as i32 * 8) / 2;
+            let text_y = self.rect.y + center as i32 - 8;
+            objects.push(text_render_object_with_width(
+                ((self.rect.x as u64) << 32) ^ self.rect.y as u64 ^ 0x701,
+                Rect::new(text_x, text_y, self.rect.width.max(1), 18),
+                &pct_str,
+                Theme::TEXT_PRIMARY.to_u32(),
+                false,
+                DamageLane::Text,
+                1,
+            ));
+        }
+
+        objects
     }
 }
 

@@ -96,6 +96,7 @@ pub struct DotClient {
     pub server_name: String, // TLS SNI için sunucu adı (örn. "cloudflare-dns.com")
     pub port: u16,           // DoT portu (varsayılan: 853)
     pub timeout_ms: u64,     // Sorgu zaman aşımı (milisaniye)
+    pub retry_budget: u8,    // Ağ/timeout hatalarında yeniden deneme sayısı
     pub connected: bool,     // TLS bağlantısı kuruldu mu?
     pub socket_id: Option<u32>, // TCP soket tanımlayıcısı
     pub cache: BTreeMap<String, CachedResponse>, // DNS yanıt önbelleği
@@ -122,6 +123,7 @@ impl DotClient {
             server_name: server_name.to_string(),
             port: DOT_PORT,
             timeout_ms: 5000, // Varsayılan 5 saniye zaman aşımı
+            retry_budget: 2,
             connected: false,
             socket_id: None,
             cache: BTreeMap::new(),
@@ -215,7 +217,7 @@ impl DotClient {
         if tls.is_established() {
             self.connected = true;
             // TLS state'i ileride session reuse için saklanabilir.
-            // Şu an DotClient yapısı basit tutulduğundan state drop edilir.
+            // Mevcut istemci yalnızca kurulu TCP/TLS kanalı canlı tutar; ayrıntılı oturum yeniden kullanımı ayrı iş kalır.
             crate::serial_println!("[DoT] TLS handshake completed, connection established");
             Ok(())
         } else {
@@ -295,23 +297,60 @@ impl DotClient {
             return Ok(cached.response.clone());
         }
 
-        // Bağlantı kurulu değilse bağlan (TLS handshake dahil)
+        let dns_query = Self::build_query(domain, qtype);
+        let mut last_error = DotError::ConnectionFailed;
+        for attempt in 0..=self.retry_budget {
+            match self.query_once(domain, qtype, &dns_query) {
+                Ok(dns_response) => {
+                    self.cache.insert(
+                        cache_key.clone(),
+                        CachedResponse {
+                            response: dns_response.clone(),
+                            expiry: 0,
+                        },
+                    );
+                    crate::serial_println!(
+                        "[DoT] DNS response received ({} bytes) on attempt {}",
+                        dns_response.len(),
+                        attempt + 1
+                    );
+                    return Ok(dns_response);
+                }
+                Err(err @ DotError::Timeout)
+                | Err(err @ DotError::ConnectionFailed)
+                | Err(err @ DotError::TlsHandshakeFailed)
+                | Err(err @ DotError::NotConnected) => {
+                    last_error = err;
+                    self.disconnect();
+                    crate::serial_println!(
+                        "[DoT] Retry {}/{} for {}",
+                        attempt + 1,
+                        self.retry_budget + 1,
+                        domain
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(last_error)
+    }
+
+    fn query_once(
+        &mut self,
+        domain: &str,
+        qtype: DnsRecordType,
+        dns_query: &[u8],
+    ) -> Result<Vec<u8>, DotError> {
         if !self.connected {
             self.connect()?;
         }
 
         let sock_id = self.socket_id.ok_or(DotError::NotConnected)?;
-
-        // DNS sorgusu oluştur
-        let dns_query = Self::build_query(domain, qtype);
-
-        // TCP üzerinde DNS: mesaj başına 2-byte big-endian uzunluk alanı ekle
         let mut dns_msg = Vec::new();
         dns_msg.extend_from_slice(&(dns_query.len() as u16).to_be_bytes());
-        dns_msg.extend_from_slice(&dns_query);
+        dns_msg.extend_from_slice(dns_query);
 
-        // TLS ile şifrele ve gönder
-        // TLS kaydı olarak sarmalayarak gönder (ApplicationData content type)
         let tls_record =
             crate::net::tls::wrap_record(crate::net::tls::ContentType::ApplicationData, &dns_msg);
         send(sock_id, &tls_record, 0).map_err(|_| DotError::ConnectionFailed)?;
@@ -321,39 +360,27 @@ impl DotClient {
             qtype as u16
         );
 
-        // Yanıtı al (TLS kaydı içinde)
         let mut recv_buf = [0u8; 8192];
         let recv_len = recv(sock_id, &mut recv_buf, 0).map_err(|_| DotError::Timeout)?;
 
         if recv_len < 7 {
-            // En az 5 byte TLS kayıt başlığı + 2 byte DNS uzunluk
             return Err(DotError::InvalidResponse);
         }
 
-        // TLS kayıt başlığını (5 byte) atla → TLS plaintext verisi
-        // Not: TLS established durumunda veri zaten çözümlenmiş olarak gelir
         let tls_payload = &recv_buf[5..recv_len];
-
-        // TCP DNS uzunluk alanını (2 byte) oku ve DNS yanıtını çıkar
         if tls_payload.len() < 2 {
             return Err(DotError::InvalidResponse);
         }
         let dns_len = u16::from_be_bytes([tls_payload[0], tls_payload[1]]) as usize;
         let dns_data_start = 2;
         let dns_data_end = dns_data_start + dns_len.min(tls_payload.len() - 2);
-        let dns_response = tls_payload[dns_data_start..dns_data_end].to_vec();
+        Ok(tls_payload[dns_data_start..dns_data_end].to_vec())
+    }
 
-        // Yanıtı önbelleğe ekle
-        self.cache.insert(
-            cache_key,
-            CachedResponse {
-                response: dns_response.clone(),
-                expiry: 0, // TTL ayrıştırılarak doldurulabilir
-            },
-        );
-
-        crate::serial_println!("[DoT] DNS response received ({} bytes)", dns_response.len());
-        Ok(dns_response)
+    pub fn smoke_a_lookup(&mut self, hostname: &str) -> Result<Ipv4Addr, DotError> {
+        let response = self.query(hostname, DnsRecordType::A)?;
+        let parsed = Self::parse_response(&response)?;
+        parsed.get_a().ok_or(DotError::InvalidResponse)
     }
 
     /// DNS wire format yanıtını ayrıştırır.
@@ -460,7 +487,7 @@ impl DotClient {
     /// Sonsuz döngüye karşı en fazla 5 atlama sınırı uygulanır.
     fn parse_name(data: &[u8], offset: &mut usize) -> Result<String, DotError> {
         let mut name = String::new();
-        let mut jumped = false; // Sıkıştırma atlaması yapıldı mı?
+        let mut resume_offset = None; // Pointer sonrası gerçek akış konumu
         let mut max_jumps = 5; // Döngü koruması: en fazla 5 işaretçi atlaması
 
         loop {
@@ -481,9 +508,8 @@ impl DotClient {
                     return Err(DotError::InvalidResponse);
                 }
                 let ptr = (((data[*offset] & 0x3F) as usize) << 8) | (data[*offset + 1] as usize);
-                if !jumped {
-                    *offset += 2; // Normal akışta 2 byte ilerliyoruz
-                    jumped = true;
+                if resume_offset.is_none() {
+                    resume_offset = Some(*offset + 2);
                 }
                 *offset = ptr; // İşaretçinin gösterdiği konuma atla
                 max_jumps -= 1;
@@ -510,6 +536,9 @@ impl DotClient {
 
         if name.is_empty() {
             name.push('.'); // Kök zone: tek nokta
+        }
+        if let Some(saved_offset) = resume_offset {
+            *offset = saved_offset;
         }
 
         Ok(name)
@@ -603,10 +632,12 @@ pub fn init_dot(server_ip: Ipv4Addr, server_name: &str) {
 
 /// Global DoT istemcisi üzerinden alan adını çözümler.
 ///
-/// İstemci başlatılmamışsa DotError::NotConnected döner.
-/// TLS desteklenene kadar gerçek sorgu yapılamaz.
+/// İstemci başlatılmamışsa Cloudflare varsayılanı ile başlatılır.
 pub fn resolve_dot(domain: &str, qtype: DnsRecordType) -> Result<DotResponse, DotError> {
     let mut client = DOT_CLIENT.lock();
+    if client.is_none() {
+        *client = Some(DotClient::cloudflare());
+    }
     if let Some(client) = client.as_mut() {
         let response_data = client.query(domain, qtype)?;
         DotClient::parse_response(&response_data)

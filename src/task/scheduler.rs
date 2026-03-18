@@ -1624,6 +1624,14 @@ pub fn wake_blocked_task(mut task: Box<Task>) {
     SMP_SCHEDULER.spawn_boxed(task);
 }
 
+pub fn spawn_task(task: Task) -> TaskId {
+    let task_id = task.id;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        SMP_SCHEDULER.spawn(task);
+    });
+    task_id
+}
+
 pub fn block_current_task() {
     let cpu_id = get_current_cpu_id();
     let now = get_ticks() as u64;

@@ -88,8 +88,8 @@ pub struct EchStore {
     command_queue: Mutex<Vec<StoreCommand>>,
     /// Yanıt kuyruğu
     response_queue: Mutex<Vec<StoreResponse>>,
-    /// FAT32 VFS referansı
-    fat32_vfs: Option<Arc<Mutex<()>>>, // Placeholder for FAT32 VFS
+    /// Host-side compatibility hook for legacy direct FAT32 callers
+    fat32_vfs: Option<Arc<Mutex<()>>>,
 }
 
 impl EchStore {
@@ -398,24 +398,24 @@ fn real_list_directory(path: &str) -> Result<Vec<FileEntry>, String> {
             entries.sort_by(|left, right| left.path.cmp(&right.path));
             Ok(entries)
         }
-        "/proc" => Ok(proc_entries()),
-        "/sys" => Ok(static_directory_entries(
-            "/sys",
-            &["version", "devices", "fs", "kernel"],
-        )),
-        "/dev" => Ok(static_directory_entries(
-            "/dev",
-            &["tty", "null", "zero", "random"],
-        )),
-        "/tmp" => Ok(Vec::new()),
-        _ => crate::fs::f2fs::list_dir(&normalized)
+        _ => crate::fs::vfs_unified::list_dir(&normalized)
             .map(|entries| {
                 entries
                     .into_iter()
-                    .map(|entry| file_entry_from_f2fs(&normalized, entry))
+                    .map(|entry| FileEntry {
+                        path: if normalized == "/" {
+                            format!("/{}", entry.name.trim_start_matches('/'))
+                        } else {
+                            format!("{}/{}", normalized.trim_end_matches('/'), entry.name)
+                        },
+                        name: entry.name,
+                        size: entry.size,
+                        is_directory: entry.is_directory,
+                        modified_time: 0,
+                    })
                     .collect()
             })
-            .map_err(fs_error_to_string),
+            .map_err(String::from),
     }
 }
 
@@ -431,37 +431,27 @@ fn real_file_info(path: &str) -> Result<FileEntry, String> {
         });
     }
 
-    if normalized == "/proc" || normalized == "/sys" || normalized == "/dev" || normalized == "/tmp"
-    {
-        return Ok(FileEntry {
-            name: normalized.trim_start_matches('/').to_string(),
-            path: normalized,
-            size: 0,
-            is_directory: true,
-            modified_time: 0,
-        });
-    }
+    let info = crate::fs::vfs_unified::VFS_UNIFIED
+        .lock()
+        .open(&normalized)
+        .map_err(String::from)?;
+    let is_directory = (info.mode & 0o170000) == 0o040000;
+    Ok(FileEntry {
+        name: normalized
+            .split('/')
+            .next_back()
+            .filter(|part| !part.is_empty())
+            .unwrap_or("/")
+            .to_string(),
+        path: normalized,
+        size: info.size,
+        is_directory,
+        modified_time: 0,
+    })
+}
 
-    if normalized.starts_with("/proc/") {
-        let size = crate::fs::vfs_unified::read_file(&normalized)
-            .map(|data| data.len() as u64)
-            .unwrap_or(0);
-        return Ok(FileEntry {
-            name: normalized
-                .split('/')
-                .next_back()
-                .unwrap_or("proc")
-                .to_string(),
-            path: normalized,
-            size,
-            is_directory: false,
-            modified_time: 0,
-        });
-    }
-
-    crate::fs::f2fs::open_entry(&normalized)
-        .map(|entry| file_entry_from_f2fs(parent_dir(&normalized).as_str(), entry))
-        .map_err(fs_error_to_string)
+fn fs_error_to_string(err: rcore_fs::vfs::FsError) -> String {
+    format!("{:?}", err)
 }
 
 fn file_entry_from_f2fs(parent: &str, entry: crate::fs::f2fs::F2fsEntry) -> FileEntry {
@@ -486,62 +476,6 @@ fn file_entry_from_f2fs(parent: &str, entry: crate::fs::f2fs::F2fsEntry) -> File
         is_directory: entry.is_dir,
         modified_time: 0,
     }
-}
-
-fn parent_dir(path: &str) -> String {
-    let normalized = normalize_path(path);
-    if normalized == "/" {
-        return normalized;
-    }
-    let mut parts = normalized.rsplitn(2, '/');
-    let _name = parts.next();
-    let parent = parts.next().unwrap_or("");
-    if parent.is_empty() {
-        String::from("/")
-    } else {
-        String::from(parent)
-    }
-}
-
-fn static_directory_entries(root: &str, names: &[&str]) -> Vec<FileEntry> {
-    names
-        .iter()
-        .map(|name| FileEntry {
-            name: String::from(*name),
-            path: format!("{}/{}", root.trim_end_matches('/'), name),
-            size: 0,
-            is_directory: false,
-            modified_time: 0,
-        })
-        .collect()
-}
-
-fn proc_entries() -> Vec<FileEntry> {
-    [
-        "cpuinfo",
-        "meminfo",
-        "mounts",
-        "uptime",
-        "version",
-        "interrupts",
-        "stat",
-        "loadavg",
-        "driver",
-        "self",
-    ]
-    .iter()
-    .map(|name| FileEntry {
-        name: String::from(*name),
-        path: format!("/proc/{}", name),
-        size: 0,
-        is_directory: matches!(*name, "driver" | "self"),
-        modified_time: 0,
-    })
-    .collect()
-}
-
-fn fs_error_to_string(err: rcore_fs::vfs::FsError) -> String {
-    format!("{:?}", err)
 }
 
 /// Global EchStore örneği

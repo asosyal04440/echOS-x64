@@ -21,8 +21,12 @@
 //! `drag_offset` tıklama noktasının pencere sol üst köşesine göre farkını
 //! tutar; bu sayede sürükleme sırasında pencere imleç altında sabit kalır.
 
-use super::{Rect, Widget, MOD_CTRL};
+use super::{
+    border_rect_objects, draw_render_objects, solid_rect_object, text_render_object_with_width,
+    Rect, Widget, MOD_CTRL,
+};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject};
 use crate::gui::theme::Theme;
 use crate::gui::widgets::button::Button;
 use crate::gui::widgets::label::Label;
@@ -206,111 +210,137 @@ impl<'a> Dialog<'a> {
             button_height,
         )
     }
-}
 
-impl<'a> Widget for Dialog<'a> {
-    fn draw(&self, fb: &mut Framebuffer) {
-        // Görünmez diyalog hiçbir şey çizmez; erken çıkış optimizasyonu
+    fn draw_bounds(&self) -> Rect {
+        if self.visible && self.modal_overlay && self.screen_width > 0 && self.screen_height > 0 {
+            Rect::new(0, 0, self.screen_width as i32, self.screen_height as i32)
+        } else {
+            self.rect
+        }
+    }
+
+    fn render_primitives(&self) -> Vec<RenderObject> {
         if !self.visible {
-            return;
+            return Vec::new();
         }
 
-        // Modal overlay: arka planı %40 karartır
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64);
+
         if self.modal_overlay && self.screen_width > 0 && self.screen_height > 0 {
-            let overlay_color = 0x66000000u32; // %40 opak siyah
-                                               // Performans için basitçe koyu bir dikdörtgen çiz
-            fb.draw_rect(0, 0, self.screen_width, self.screen_height, 0x00181818);
+            objects.push(solid_rect_object(
+                base_id ^ 0x01,
+                Rect::new(0, 0, self.screen_width as i32, self.screen_height as i32),
+                0x00181818,
+                DamageLane::Shell,
+                0,
+            ));
         }
 
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-        let titlebar_h = self.titlebar_height() as usize;
+        objects.push(solid_rect_object(
+            base_id ^ 0x02,
+            Rect::new(self.rect.x + 6, self.rect.y + 6, self.rect.width, self.rect.height),
+            Theme::SHADOW.to_u32(),
+            DamageLane::Shell,
+            1,
+        ));
+        objects.push(solid_rect_object(
+            base_id ^ 0x03,
+            self.rect,
+            Theme::WINDOW_BG.to_u32(),
+            DamageLane::Shell,
+            2,
+        ));
+        objects.push(solid_rect_object(
+            base_id ^ 0x04,
+            Rect::new(self.rect.x, self.rect.y, self.rect.width, self.titlebar_height()),
+            Theme::TITLEBAR_ACTIVE.to_u32(),
+            DamageLane::Shell,
+            3,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 0x05,
+            self.rect,
+            Theme::BORDER.to_u32(),
+            DamageLane::Shell,
+            4,
+        ));
+        objects.push(text_render_object_with_width(
+            base_id ^ 0x06,
+            Rect::new(self.rect.x + 10, self.rect.y + 6, (self.rect.width - 20).max(1), 18),
+            &self.title,
+            Theme::TEXT_PRIMARY.to_u32(),
+            false,
+            DamageLane::Text,
+            5,
+        ));
 
-        // Gölge efekti: diyaloğun sağ ve alt tarafına 6 piksel offset ile
-        // koyu renk dikdörtgen çizilir; derinlik hissi yaratır.
-        fb.draw_rect(x + 6, y + 6, w, h, Theme::SHADOW.to_u32());
-
-        // Arka plan
-        fb.draw_rect(x, y, w, h, Theme::WINDOW_BG.to_u32());
-
-        // Başlık çubuğu: aktif pencere rengini kullanır
-        fb.draw_rect(x, y, w, titlebar_h, Theme::TITLEBAR_ACTIVE.to_u32());
-
-        // Başlık metni: sol kenara 10 piksel iç boşlukla
-        fb.draw_string(x + 10, y + 6, &self.title, Theme::TEXT_PRIMARY.to_u32());
-
-        // Kapatma düğmesi: kırmızı arka plan, "X" metni
         let close_rect = self.close_button_rect();
-        fb.draw_rect(
-            close_rect.x as usize,
-            close_rect.y as usize,
-            close_rect.width as usize,
-            close_rect.height as usize,
+        objects.push(solid_rect_object(
+            base_id ^ 0x07,
+            close_rect,
             Theme::ACCENT_ERROR.to_u32(),
-        );
-        fb.draw_string(
-            close_rect.x as usize + 6,
-            close_rect.y as usize + 2,
+            DamageLane::Shell,
+            5,
+        ));
+        objects.push(text_render_object_with_width(
+            base_id ^ 0x08,
+            Rect::new(close_rect.x + 6, close_rect.y + 2, close_rect.width.max(1), 18),
             "X",
             Theme::TEXT_PRIMARY.to_u32(),
-        );
+            false,
+            DamageLane::Text,
+            6,
+        ));
 
-        // Kenarlık: diyaloğun tüm çevresini çevreler
-        for col in x..(x + w) {
-            fb.plot_pixel(col, y, Theme::BORDER.to_u32());
-            fb.plot_pixel(col, y + h - 1, Theme::BORDER.to_u32());
-        }
-        for row in y..(y + h) {
-            fb.plot_pixel(x, row, Theme::BORDER.to_u32());
-            fb.plot_pixel(x + w - 1, row, Theme::BORDER.to_u32());
-        }
-
-        // İçerik widget'larını çiz: her biri kendi konumunda gösterilir
-        for widget in &self.content_widgets {
-            widget.draw(fb);
-        }
-
-        // Alt butonları çiz: her buton için dikdörtgen, kenarlık ve metin
         for (i, (text, _)) in self.buttons.iter().enumerate() {
             let btn_rect = self.button_rect(i);
-            let is_focused_btn = i == self.focused_button;
-            let bg = if is_focused_btn {
+            let bg = if i == self.focused_button {
                 Theme::ACCENT_PRIMARY.to_u32()
             } else {
                 Theme::BUTTON_BG.to_u32()
             };
-            fb.draw_rect(
-                btn_rect.x as usize,
-                btn_rect.y as usize,
-                btn_rect.width as usize,
-                btn_rect.height as usize,
+            objects.push(solid_rect_object(
+                base_id ^ 0x100 ^ i as u64,
+                btn_rect,
                 bg,
-            );
+                DamageLane::Shell,
+                5,
+            ));
+            objects.extend(border_rect_objects(
+                base_id ^ 0x180 ^ i as u64,
+                btn_rect,
+                Theme::BORDER.to_u32(),
+                DamageLane::Shell,
+                6,
+            ));
+            let text_x =
+                btn_rect.x + ((btn_rect.width - (text.chars().count() as i32 * 8)).max(0) / 2);
+            let text_y = btn_rect.y + ((btn_rect.height - 16).max(0) / 2);
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x200 ^ i as u64,
+                Rect::new(text_x, text_y, btn_rect.width.max(1), 18),
+                text,
+                Theme::TEXT_PRIMARY.to_u32(),
+                false,
+                DamageLane::Text,
+                7,
+            ));
+        }
 
-            // Buton kenarlığı
-            for col in btn_rect.x as usize..(btn_rect.x as usize + btn_rect.width as usize) {
-                fb.plot_pixel(col, btn_rect.y as usize, Theme::BORDER.to_u32());
-                fb.plot_pixel(
-                    col,
-                    btn_rect.y as usize + btn_rect.height as usize - 1,
-                    Theme::BORDER.to_u32(),
-                );
-            }
-            for row in btn_rect.y as usize..(btn_rect.y as usize + btn_rect.height as usize) {
-                fb.plot_pixel(btn_rect.x as usize, row, Theme::BORDER.to_u32());
-                fb.plot_pixel(
-                    btn_rect.x as usize + btn_rect.width as usize - 1,
-                    row,
-                    Theme::BORDER.to_u32(),
-                );
-            }
+        objects
+    }
+}
 
-            // Buton metni ortaya hizalı
-            let text_x = btn_rect.x as usize + (btn_rect.width as usize - text.len() * 8) / 2;
-            let text_y = btn_rect.y as usize + (btn_rect.height as usize - 16) / 2;
-            fb.draw_string(text_x, text_y, text, Theme::TEXT_PRIMARY.to_u32());
+impl<'a> Widget for Dialog<'a> {
+    fn draw(&self, fb: &mut Framebuffer) {
+        if !self.visible {
+            return;
+        }
+        draw_render_objects(fb, self.draw_bounds(), &self.render_primitives());
+
+        for widget in &self.content_widgets {
+            widget.draw(fb);
         }
     }
 
@@ -426,6 +456,10 @@ impl<'a> Widget for Dialog<'a> {
     fn bounds(&self) -> Rect {
         self.rect
     }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
+    }
 }
 
 /// Hazır mesaj kutusu widget'ı; bilgi/uyarı/hata/soru diyaloğu.
@@ -519,56 +553,7 @@ impl Widget for MessageBox {
         if !self.dialog.is_visible() {
             return;
         }
-
-        // Temel diyaloğu çiz (arka plan, başlık, kenarlık, butonlar)
-        self.dialog.draw(fb);
-
-        // İkon: renkli kare içinde merkeze hizalı tek karakter
-        let icon_x = self.dialog.rect.x + 20;
-        let icon_y = self.dialog.rect.y + 50;
-        fb.draw_rect(icon_x as usize, icon_y as usize, 32, 32, self.icon_color());
-        fb.draw_string(
-            icon_x as usize + 12,
-            icon_y as usize + 8,
-            self.icon_char(),
-            Theme::TEXT_PRIMARY.to_u32(),
-        );
-
-        // Mesaj metni: ikonun sağında, otomatik satır kırmalı (word wrap)
-        let msg_x = self.dialog.rect.x + 65;
-        let msg_y = self.dialog.rect.y + 50;
-
-        // Kelime kaydırma: `max_width` pikseli geçen satırlar bölünür.
-        // `split('\n')` manuel satır sonlarını korur.
-        // `start..end` slice sözdizimi ile alt dizeyi byte sınırında kesmek
-        // gerekir; ASCII metinlerde her karakter 1 byte olduğundan güvenlidir.
-        let max_width = self.dialog.rect.width - 85;
-        let mut line_y = msg_y;
-        for line in self.message.split('\n') {
-            if line.len() * 8 > max_width as usize {
-                // Need to wrap
-                let mut start = 0;
-                while start < line.len() {
-                    let end = (start + (max_width as usize / 8)).min(line.len());
-                    fb.draw_string(
-                        msg_x as usize,
-                        line_y as usize,
-                        &line[start..end],
-                        Theme::TEXT_PRIMARY.to_u32(),
-                    );
-                    line_y += 18;
-                    start = end;
-                }
-            } else {
-                fb.draw_string(
-                    msg_x as usize,
-                    line_y as usize,
-                    line,
-                    Theme::TEXT_PRIMARY.to_u32(),
-                );
-                line_y += 18;
-            }
-        }
+        draw_render_objects(fb, self.dialog.draw_bounds(), &self.render_objects());
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {
@@ -581,6 +566,61 @@ impl Widget for MessageBox {
 
     fn bounds(&self) -> Rect {
         self.dialog.bounds()
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        if !self.dialog.is_visible() {
+            return Vec::new();
+        }
+
+        let mut objects = self.dialog.render_primitives();
+        let base_id = ((self.dialog.rect.x as u64) << 32) ^ (self.dialog.rect.y as u64) ^ 0x4000;
+        let icon_rect = Rect::new(self.dialog.rect.x + 20, self.dialog.rect.y + 50, 32, 32);
+        objects.push(solid_rect_object(
+            base_id,
+            icon_rect,
+            self.icon_color(),
+            DamageLane::Shell,
+            8,
+        ));
+        objects.push(text_render_object_with_width(
+            base_id ^ 1,
+            Rect::new(icon_rect.x + 12, icon_rect.y + 8, 12, 18),
+            self.icon_char(),
+            Theme::TEXT_PRIMARY.to_u32(),
+            false,
+            DamageLane::Text,
+            9,
+        ));
+
+        let max_chars = ((self.dialog.rect.width - 85).max(8) / 8) as usize;
+        let mut line_y = self.dialog.rect.y + 50;
+        for line in self.message.split('\n') {
+            let mut start = 0usize;
+            while start < line.len() {
+                let end = (start + max_chars).min(line.len());
+                objects.push(text_render_object_with_width(
+                    base_id ^ 0x100 ^ line_y as u64,
+                    Rect::new(
+                        self.dialog.rect.x + 65,
+                        line_y,
+                        (self.dialog.rect.width - 85).max(1),
+                        18,
+                    ),
+                    &line[start..end],
+                    Theme::TEXT_PRIMARY.to_u32(),
+                    false,
+                    DamageLane::Text,
+                    9,
+                ));
+                line_y += 18;
+                start = end;
+            }
+            if line.is_empty() {
+                line_y += 18;
+            }
+        }
+        objects
     }
 }
 
@@ -703,96 +743,7 @@ impl Widget for FileDialog {
         if !self.dialog.is_visible() {
             return;
         }
-
-        self.dialog.draw(fb);
-
-        // Yol çubuğu: mevcut dizin yolunu gösterir
-        let path_y = self.dialog.rect.y + 35;
-        fb.draw_rect(
-            self.dialog.rect.x as usize + 10,
-            path_y as usize,
-            (self.dialog.rect.width - 20) as usize,
-            20,
-            Theme::BUTTON_BG.to_u32(),
-        );
-        fb.draw_string(
-            self.dialog.rect.x as usize + 15,
-            path_y as usize + 2,
-            &self.current_path,
-            Theme::TEXT_SECONDARY.to_u32(),
-        );
-
-        // Dosya listesi: her dosya 20 piksel satır yüksekliğiyle sıralanır
-        let list_rect = self.file_list_rect();
-        fb.draw_rect(
-            list_rect.x as usize,
-            list_rect.y as usize,
-            list_rect.width as usize,
-            list_rect.height as usize,
-            Theme::BUTTON_BG.to_u32(),
-        );
-
-        // Dosyaları çiz: liste alanı dışına taşanlar atlanır
-        let mut file_y = list_rect.y + 5;
-        for (i, file) in self.files.iter().enumerate() {
-            if file_y + 18 > list_rect.y + list_rect.height {
-                break;
-            }
-
-            // Seçili dosya vurgu rengiyle gösterilir
-            let bg_color = if self.selected_file == Some(i) {
-                Theme::ACCENT_PRIMARY.to_u32()
-            } else {
-                Theme::BUTTON_BG.to_u32()
-            };
-
-            fb.draw_rect(
-                list_rect.x as usize + 2,
-                file_y as usize,
-                (list_rect.width - 4) as usize,
-                18,
-                bg_color,
-            );
-
-            // Seçili satırda metin rengi ters olur (koyu zemin üzerinde açık metin)
-            let text_color = if self.selected_file == Some(i) {
-                Theme::DESKTOP_BG.to_u32()
-            } else {
-                Theme::TEXT_PRIMARY.to_u32()
-            };
-            fb.draw_string(
-                list_rect.x as usize + 5,
-                file_y as usize + 1,
-                file,
-                text_color,
-            );
-
-            file_y += 20;
-        }
-
-        // Dosya adı etiketi ve giriş alanı
-        fb.draw_string(
-            self.dialog.rect.x as usize + 10,
-            self.dialog.rect.y as usize + self.dialog.rect.height as usize - 55,
-            "Filename:",
-            Theme::TEXT_PRIMARY.to_u32(),
-        );
-
-        // Dosya adı giriş kutusu: kullanıcının yazdığı metni gösterir
-        let filename_rect = self.filename_rect();
-        fb.draw_rect(
-            filename_rect.x as usize,
-            filename_rect.y as usize,
-            filename_rect.width as usize,
-            filename_rect.height as usize,
-            Theme::WINDOW_BG.to_u32(),
-        );
-        fb.draw_string(
-            filename_rect.x as usize + 5,
-            filename_rect.y as usize + 4,
-            &self.filename_input,
-            Theme::TEXT_PRIMARY.to_u32(),
-        );
+        draw_render_objects(fb, self.dialog.draw_bounds(), &self.render_objects());
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {
@@ -846,5 +797,114 @@ impl Widget for FileDialog {
 
     fn bounds(&self) -> Rect {
         self.dialog.bounds()
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        if !self.dialog.is_visible() {
+            return Vec::new();
+        }
+
+        let mut objects = self.dialog.render_primitives();
+        let base_id = ((self.dialog.rect.x as u64) << 32) ^ (self.dialog.rect.y as u64) ^ 0x8000;
+        let path_rect = Rect::new(self.dialog.rect.x + 10, self.dialog.rect.y + 35, self.dialog.rect.width - 20, 20);
+        objects.push(solid_rect_object(
+            base_id,
+            path_rect,
+            Theme::BUTTON_BG.to_u32(),
+            DamageLane::Shell,
+            8,
+        ));
+        objects.push(text_render_object_with_width(
+            base_id ^ 1,
+            Rect::new(path_rect.x + 5, path_rect.y + 2, (path_rect.width - 10).max(1), 18),
+            &self.current_path,
+            Theme::TEXT_SECONDARY.to_u32(),
+            false,
+            DamageLane::Text,
+            9,
+        ));
+
+        let list_rect = self.file_list_rect();
+        objects.push(solid_rect_object(
+            base_id ^ 2,
+            list_rect,
+            Theme::BUTTON_BG.to_u32(),
+            DamageLane::Shell,
+            8,
+        ));
+        let mut file_y = list_rect.y + 5;
+        for (i, file) in self.files.iter().enumerate() {
+            if file_y + 18 > list_rect.y + list_rect.height {
+                break;
+            }
+            let row_rect = Rect::new(list_rect.x + 2, file_y, list_rect.width - 4, 18);
+            let bg_color = if self.selected_file == Some(i) {
+                Theme::ACCENT_PRIMARY.to_u32()
+            } else {
+                Theme::BUTTON_BG.to_u32()
+            };
+            let text_color = if self.selected_file == Some(i) {
+                Theme::DESKTOP_BG.to_u32()
+            } else {
+                Theme::TEXT_PRIMARY.to_u32()
+            };
+            objects.push(solid_rect_object(
+                base_id ^ 0x100 ^ i as u64,
+                row_rect,
+                bg_color,
+                DamageLane::Shell,
+                9,
+            ));
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x180 ^ i as u64,
+                Rect::new(row_rect.x + 3, row_rect.y + 1, (row_rect.width - 6).max(1), 18),
+                file,
+                text_color,
+                false,
+                DamageLane::Text,
+                10,
+            ));
+            file_y += 20;
+        }
+
+        objects.push(text_render_object_with_width(
+            base_id ^ 3,
+            Rect::new(
+                self.dialog.rect.x + 10,
+                self.dialog.rect.y + self.dialog.rect.height - 55,
+                90,
+                18,
+            ),
+            "Filename:",
+            Theme::TEXT_PRIMARY.to_u32(),
+            false,
+            DamageLane::Text,
+            9,
+        ));
+        let filename_rect = self.filename_rect();
+        objects.push(solid_rect_object(
+            base_id ^ 4,
+            filename_rect,
+            Theme::WINDOW_BG.to_u32(),
+            DamageLane::Shell,
+            8,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 5,
+            filename_rect,
+            Theme::BORDER.to_u32(),
+            DamageLane::Shell,
+            9,
+        ));
+        objects.push(text_render_object_with_width(
+            base_id ^ 6,
+            Rect::new(filename_rect.x + 5, filename_rect.y + 4, (filename_rect.width - 10).max(1), 18),
+            &self.filename_input,
+            Theme::TEXT_PRIMARY.to_u32(),
+            false,
+            DamageLane::Text,
+            10,
+        ));
+        objects
     }
 }

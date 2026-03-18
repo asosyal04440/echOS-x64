@@ -460,11 +460,7 @@ impl WifiJailController {
         results
     }
 
-    pub fn plan_mlo_for_ssid(
-        &self,
-        ssid: &str,
-        security: WifiSecurity,
-    ) -> Option<WifiMloSession> {
+    pub fn plan_mlo_for_ssid(&self, ssid: &str, security: WifiSecurity) -> Option<WifiMloSession> {
         let mut candidates: Vec<WifiBss> = self
             .scan_results
             .lock()
@@ -512,8 +508,8 @@ impl WifiJailController {
         let efficiency = 92u32.saturating_sub((secondary.len() as u32) * 7);
         let aggregate_mbps = total_raw * efficiency / 100;
 
-        let total_rssi = primary.rssi as i32
-            + secondary.iter().map(|link| link.rssi as i32).sum::<i32>();
+        let total_rssi =
+            primary.rssi as i32 + secondary.iter().map(|link| link.rssi as i32).sum::<i32>();
         let average_rssi = (total_rssi / (1 + secondary.len()) as i32) as i8;
 
         Some(WifiMloSession {

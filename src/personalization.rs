@@ -20,10 +20,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::gui::protocol::{
-    AppId, NotificationEntry, NotificationLevel, Rect, WindowId, WorkspaceId,
+    AppId, NotificationEntry, NotificationLevel, Rect, WindowFlags, WindowId, WindowInfo,
+    WorkspaceId, WorkspaceLayout, WorkspaceRule,
 };
 use crate::gui::theme::ThemeMode;
-use crate::gui::window_manager::{WindowError, WindowManager, MIN_CONTENT_HEIGHT, MIN_CONTENT_WIDTH};
+use crate::gui::window_manager::{
+    WindowError, WindowManager, MIN_CONTENT_HEIGHT, MIN_CONTENT_WIDTH,
+};
 
 // ============================================================================
 // 7.1 Dynamic Theme ("Chameleon")
@@ -282,14 +285,34 @@ pub enum SnapLayout {
     Maximize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowPlacementPlan {
+    pub window_id: WindowId,
+    pub workspace_id: WorkspaceId,
+    pub rect: Rect,
+    pub flags: WindowFlags,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayoutTree {
+    pub workspace_id: WorkspaceId,
+    pub layout: WorkspaceLayout,
+    pub master_window: Option<WindowId>,
+    pub scratchpad_windows: BTreeSet<WindowId>,
+}
+
 pub struct HybridWindowOrchestrator {
     mode: WindowLayoutMode,
+    workspaces: BTreeMap<WorkspaceId, LayoutTree>,
+    rules: BTreeMap<WorkspaceId, WorkspaceRule>,
 }
 
 impl HybridWindowOrchestrator {
     pub fn new() -> Self {
         Self {
             mode: WindowLayoutMode::Floating,
+            workspaces: BTreeMap::new(),
+            rules: BTreeMap::new(),
         }
     }
 
@@ -305,34 +328,126 @@ impl HybridWindowOrchestrator {
         self.mode
     }
 
-    /// Grid-temelli tiling: `c = ceil(sqrt(n))`, `r = ceil(n/c)`.
-    pub fn apply_tiling(&self, wm: &mut WindowManager, work_area: Rect) -> Result<u32, WindowError> {
+    pub fn workspace_layout(&self, workspace_id: WorkspaceId) -> WorkspaceLayout {
+        self.workspaces
+            .get(&workspace_id)
+            .map(|tree| tree.layout)
+            .unwrap_or(WorkspaceLayout::Dwindle)
+    }
+
+    pub fn set_workspace_layout(
+        &mut self,
+        workspace_id: WorkspaceId,
+        layout: WorkspaceLayout,
+    ) -> WorkspaceLayout {
+        let tree = self.ensure_tree(workspace_id);
+        tree.layout = layout;
+        self.mode = if matches!(layout, WorkspaceLayout::Floating) {
+            WindowLayoutMode::Floating
+        } else {
+            WindowLayoutMode::Tiling
+        };
+        layout
+    }
+
+    pub fn workspace_rule(&self, workspace_id: WorkspaceId) -> WorkspaceRule {
+        self.rules
+            .get(&workspace_id)
+            .copied()
+            .unwrap_or_else(|| default_workspace_rule(workspace_id))
+    }
+
+    pub fn set_workspace_rule(&mut self, workspace_id: WorkspaceId, rule: WorkspaceRule) {
+        self.rules.insert(workspace_id, rule);
+    }
+
+    pub fn toggle_scratchpad(&mut self, workspace_id: WorkspaceId, window_id: WindowId) -> bool {
+        let tree = self.ensure_tree(workspace_id);
+        if !tree.scratchpad_windows.insert(window_id) {
+            tree.scratchpad_windows.remove(&window_id);
+            return false;
+        }
+        true
+    }
+
+    pub fn promote_to_master(&mut self, workspace_id: WorkspaceId, window_id: WindowId) {
+        let tree = self.ensure_tree(workspace_id);
+        tree.master_window = Some(window_id);
+        if tree.layout == WorkspaceLayout::Floating {
+            tree.layout = WorkspaceLayout::Master;
+        }
+    }
+
+    pub fn apply_tiling(
+        &mut self,
+        wm: &mut WindowManager,
+        workspace_id: WorkspaceId,
+        work_area: Rect,
+    ) -> Result<u32, WindowError> {
         let windows = wm.ordered_windows();
-        let visible: Vec<_> = windows.into_iter().filter(|w| w.visible).collect();
-        if visible.is_empty() {
+        let plans = self.plan_workspace(&windows, workspace_id, work_area);
+        if plans.is_empty() {
             return Ok(0);
         }
 
-        let n = visible.len() as u32;
-        let mut cols = 1u32;
-        while cols.saturating_mul(cols) < n {
-            cols = cols.saturating_add(1);
-        }
-        let rows = (n + cols - 1) / cols;
-        let tile_w = max(work_area.width / cols, MIN_CONTENT_WIDTH);
-        let tile_h = max(work_area.height / rows, MIN_CONTENT_HEIGHT);
-
-        let mut touched = 0u32;
-        for (idx, win) in visible.iter().enumerate() {
-            let i = idx as u32;
-            let col = i % cols;
-            let row = i / cols;
-            let x = work_area.x + (col * tile_w) as i32;
-            let y = work_area.y + (row * tile_h) as i32;
-            wm.set_window_frame(win.id, x, y, tile_w, tile_h)?;
+        let mut touched: u32 = 0;
+        for plan in plans {
+            wm.set_window_frame(
+                plan.window_id,
+                plan.rect.x,
+                plan.rect.y,
+                plan.rect.width,
+                plan.rect.height,
+            )?;
             touched = touched.saturating_add(1);
         }
         Ok(touched)
+    }
+
+    pub fn plan_workspace(
+        &mut self,
+        windows: &[WindowInfo],
+        workspace_id: WorkspaceId,
+        work_area: Rect,
+    ) -> Vec<WindowPlacementPlan> {
+        let rule = self.workspace_rule(workspace_id);
+        let tree = self.ensure_tree(workspace_id).clone();
+        let mut tiled: Vec<_> = windows
+            .iter()
+            .filter(|window| {
+                window.visible
+                    && window.workspace_id == workspace_id
+                    && !window.flags.floating
+                    && !window.flags.scratchpad
+                    && window.layer_role == crate::gui::protocol::LayerRole::Window
+            })
+            .cloned()
+            .collect();
+
+        if tiled.is_empty() {
+            return Vec::new();
+        }
+
+        let effective_rule = effective_rule_for_count(rule, tiled.len());
+        let usable_area = inset_uniform(work_area, effective_rule.gaps_out as i32);
+        if usable_area.is_empty() {
+            return Vec::new();
+        }
+
+        match tree.layout {
+            WorkspaceLayout::Floating => Vec::new(),
+            WorkspaceLayout::Master => {
+                let preferred_master = tree.master_window;
+                if let Some(master_id) = preferred_master {
+                    tiled.sort_by_key(|window| if window.id == master_id { 0 } else { 1 });
+                }
+                plan_master_layout(&tiled, workspace_id, usable_area, effective_rule)
+            }
+            WorkspaceLayout::Overview => plan_overview_layout(&tiled, workspace_id, usable_area),
+            WorkspaceLayout::Dwindle => {
+                plan_dwindle_layout(&tiled, workspace_id, usable_area, effective_rule)
+            }
+        }
     }
 
     pub fn snap_window(
@@ -353,18 +468,8 @@ impl HybridWindowOrchestrator {
                 work_area.height,
             ),
             SnapLayout::TopLeft => (work_area.x, work_area.y, half_w, half_h),
-            SnapLayout::TopRight => (
-                work_area.x + half_w as i32,
-                work_area.y,
-                half_w,
-                half_h,
-            ),
-            SnapLayout::BottomLeft => (
-                work_area.x,
-                work_area.y + half_h as i32,
-                half_w,
-                half_h,
-            ),
+            SnapLayout::TopRight => (work_area.x + half_w as i32, work_area.y, half_w, half_h),
+            SnapLayout::BottomLeft => (work_area.x, work_area.y + half_h as i32, half_w, half_h),
             SnapLayout::BottomRight => (
                 work_area.x + half_w as i32,
                 work_area.y + half_h as i32,
@@ -384,6 +489,232 @@ impl HybridWindowOrchestrator {
 impl Default for HybridWindowOrchestrator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl HybridWindowOrchestrator {
+    fn ensure_tree(&mut self, workspace_id: WorkspaceId) -> &mut LayoutTree {
+        let default_layout = self
+            .rules
+            .get(&workspace_id)
+            .map(|rule| rule.layout)
+            .unwrap_or(WorkspaceLayout::Dwindle);
+        self.workspaces
+            .entry(workspace_id)
+            .or_insert_with(|| LayoutTree {
+                workspace_id,
+                layout: default_layout,
+                master_window: None,
+                scratchpad_windows: BTreeSet::new(),
+            })
+    }
+}
+
+fn default_workspace_rule(workspace_id: WorkspaceId) -> WorkspaceRule {
+    let mut name = [0u8; 16];
+    let label = match workspace_id {
+        0 => "Prime",
+        1 => "Build",
+        2 => "Observe",
+        3 => "Docs",
+        4 => "Net",
+        5 => "Media",
+        6 => "Lab",
+        7 => "Ops",
+        _ => "Scratchpad",
+    };
+    let bytes = label.as_bytes();
+    let len = bytes.len().min(name.len());
+    name[..len].copy_from_slice(&bytes[..len]);
+    WorkspaceRule::new(name, WorkspaceLayout::Dwindle)
+}
+
+fn effective_rule_for_count(mut rule: WorkspaceRule, window_count: usize) -> WorkspaceRule {
+    if window_count <= 1 {
+        rule.gaps_in = 0;
+        rule.gaps_out = 0;
+        rule.border_size = 0;
+    }
+    rule
+}
+
+fn inset_uniform(rect: Rect, amount: i32) -> Rect {
+    rect.inset(amount, amount, amount, amount)
+}
+
+fn inset_inner(rect: Rect, amount: i32) -> Rect {
+    rect.inset(amount / 2, amount / 2, amount / 2, amount / 2)
+}
+
+fn plan_master_layout(
+    windows: &[WindowInfo],
+    workspace_id: WorkspaceId,
+    work_area: Rect,
+    rule: WorkspaceRule,
+) -> Vec<WindowPlacementPlan> {
+    if windows.is_empty() {
+        return Vec::new();
+    }
+    if windows.len() == 1 {
+        return vec![WindowPlacementPlan {
+            window_id: windows[0].id,
+            workspace_id,
+            rect: inset_inner(work_area, rule.gaps_in as i32),
+            flags: windows[0].flags,
+        }];
+    }
+
+    let master_width = max(
+        ((work_area.width as u64).saturating_mul(60) / 100) as u32,
+        MIN_CONTENT_WIDTH,
+    );
+    let stack_width = work_area.width.saturating_sub(master_width);
+    let master_rect = inset_inner(
+        Rect::new(work_area.x, work_area.y, master_width, work_area.height),
+        rule.gaps_in as i32,
+    );
+
+    let mut plans = vec![WindowPlacementPlan {
+        window_id: windows[0].id,
+        workspace_id,
+        rect: master_rect,
+        flags: windows[0].flags,
+    }];
+
+    let stack_count = (windows.len() - 1) as u32;
+    let stack_height = max(work_area.height / stack_count.max(1), MIN_CONTENT_HEIGHT);
+    for (index, window) in windows.iter().enumerate().skip(1) {
+        let row = (index - 1) as u32;
+        let y = work_area.y + (row * stack_height) as i32;
+        let remaining = work_area.bottom().saturating_sub(y).max(0) as u32;
+        let rect = Rect::new(
+            work_area.x + master_width as i32,
+            y,
+            stack_width.max(MIN_CONTENT_WIDTH),
+            if row + 1 == stack_count {
+                remaining
+            } else {
+                stack_height
+            },
+        );
+        plans.push(WindowPlacementPlan {
+            window_id: window.id,
+            workspace_id,
+            rect: inset_inner(rect, rule.gaps_in as i32),
+            flags: window.flags,
+        });
+    }
+
+    plans
+}
+
+fn plan_overview_layout(
+    windows: &[WindowInfo],
+    workspace_id: WorkspaceId,
+    work_area: Rect,
+) -> Vec<WindowPlacementPlan> {
+    if windows.is_empty() {
+        return Vec::new();
+    }
+
+    let n = windows.len() as u32;
+    let mut cols = 1u32;
+    while cols.saturating_mul(cols) < n {
+        cols = cols.saturating_add(1);
+    }
+    let rows = (n + cols - 1) / cols;
+    let tile_w = max(work_area.width / cols.max(1), MIN_CONTENT_WIDTH);
+    let tile_h = max(work_area.height / rows.max(1), MIN_CONTENT_HEIGHT);
+
+    windows
+        .iter()
+        .enumerate()
+        .map(|(idx, window)| {
+            let idx = idx as u32;
+            let col = idx % cols;
+            let row = idx / cols;
+            WindowPlacementPlan {
+                window_id: window.id,
+                workspace_id,
+                rect: Rect::new(
+                    work_area.x + (col * tile_w) as i32 + 18,
+                    work_area.y + (row * tile_h) as i32 + 18,
+                    tile_w.saturating_sub(36),
+                    tile_h.saturating_sub(36),
+                ),
+                flags: window.flags,
+            }
+        })
+        .collect()
+}
+
+fn plan_dwindle_layout(
+    windows: &[WindowInfo],
+    workspace_id: WorkspaceId,
+    work_area: Rect,
+    rule: WorkspaceRule,
+) -> Vec<WindowPlacementPlan> {
+    let mut plans = Vec::with_capacity(windows.len());
+    let rects = build_dwindle_rects(windows.len(), work_area);
+    for (window, rect) in windows.iter().zip(rects.into_iter()) {
+        plans.push(WindowPlacementPlan {
+            window_id: window.id,
+            workspace_id,
+            rect: inset_inner(rect, rule.gaps_in as i32),
+            flags: window.flags,
+        });
+    }
+    plans
+}
+
+fn build_dwindle_rects(count: usize, root: Rect) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![root];
+    }
+
+    let mut rects = Vec::with_capacity(count);
+    build_dwindle_rects_recursive(count, root, true, &mut rects);
+    rects
+}
+
+fn build_dwindle_rects_recursive(
+    count: usize,
+    rect: Rect,
+    split_vertical: bool,
+    out: &mut Vec<Rect>,
+) {
+    if count == 0 {
+        return;
+    }
+    if count == 1 {
+        out.push(rect);
+        return;
+    }
+
+    let first = 1;
+    let rest = count - first;
+    if split_vertical {
+        let left_width = max(rect.width / 2, MIN_CONTENT_WIDTH);
+        let right_width = rect.width.saturating_sub(left_width);
+        let left = Rect::new(rect.x, rect.y, left_width, rect.height);
+        let right = Rect::new(rect.x + left_width as i32, rect.y, right_width, rect.height);
+        build_dwindle_rects_recursive(first, left, !split_vertical, out);
+        build_dwindle_rects_recursive(rest, right, !split_vertical, out);
+    } else {
+        let top_height = max(rect.height / 2, MIN_CONTENT_HEIGHT);
+        let bottom_height = rect.height.saturating_sub(top_height);
+        let top = Rect::new(rect.x, rect.y, rect.width, top_height);
+        let bottom = Rect::new(
+            rect.x,
+            rect.y + top_height as i32,
+            rect.width,
+            bottom_height,
+        );
+        build_dwindle_rects_recursive(first, top, !split_vertical, out);
+        build_dwindle_rects_recursive(rest, bottom, !split_vertical, out);
     }
 }
 
@@ -503,7 +834,12 @@ impl WidgetEngine {
         Ok(())
     }
 
-    pub fn place_widget(&mut self, widget_id: &str, workspace_id: WorkspaceId, rect: Rect) -> Result<(), String> {
+    pub fn place_widget(
+        &mut self,
+        widget_id: &str,
+        workspace_id: WorkspaceId,
+        rect: Rect,
+    ) -> Result<(), String> {
         if !self.installed.contains_key(widget_id) {
             return Err(format!("widget not installed: {}", widget_id));
         }
@@ -535,7 +871,10 @@ impl WidgetEngine {
                 continue;
             }
             self.last_tick_ms.insert(id.clone(), now_ms);
-            let tick = self.tick_counter.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            let tick = self
+                .tick_counter
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
             events.push(WidgetUpdateEvent {
                 widget_id: id.clone(),
                 tick,
@@ -598,7 +937,11 @@ impl VirtualDesktopManager {
         self.profiles.get(&workspace_id)
     }
 
-    pub fn set_profile(&mut self, workspace_id: WorkspaceId, profile: DesktopProfile) -> Result<(), String> {
+    pub fn set_profile(
+        &mut self,
+        workspace_id: WorkspaceId,
+        profile: DesktopProfile,
+    ) -> Result<(), String> {
         if workspace_id >= self.max_desktops {
             return Err(String::from("workspace out of range"));
         }
@@ -620,7 +963,9 @@ impl VirtualDesktopManager {
         }
 
         let next = if delta_x < 0 {
-            self.active.saturating_add(1).min(self.max_desktops.saturating_sub(1))
+            self.active
+                .saturating_add(1)
+                .min(self.max_desktops.saturating_sub(1))
         } else {
             self.active.saturating_sub(1)
         };
@@ -904,12 +1249,15 @@ impl NotificationCenter {
             return false;
         }
         let key = format!("{}:{}", entry.app_id, entry.title);
-        let group = self.groups.entry(key.clone()).or_insert_with(|| NotificationGroup {
-            key: key.clone(),
-            app_id: entry.app_id,
-            title: entry.title.clone(),
-            entries: Vec::new(),
-        });
+        let group = self
+            .groups
+            .entry(key.clone())
+            .or_insert_with(|| NotificationGroup {
+                key: key.clone(),
+                app_id: entry.app_id,
+                title: entry.title.clone(),
+                entries: Vec::new(),
+            });
         group.entries.push(entry);
         true
     }
@@ -1013,9 +1361,7 @@ fn score_substring(haystack: &str, needle: &str, base: i32) -> i32 {
 }
 
 fn encode_query(q: &str) -> String {
-    q.chars()
-        .map(|c| if c == ' ' { '+' } else { c })
-        .collect()
+    q.chars().map(|c| if c == ' ' { '+' } else { c }).collect()
 }
 
 fn eval_expression(expr: &str) -> Option<i64> {
@@ -1118,4 +1464,84 @@ fn blend(a: u32, b: u32, ratio_255: u32) -> u32 {
     let b = (ab * inv + bb * t) / 255;
 
     0xFF000000 | (r << 16) | (g << 8) | b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::protocol::{LayerRole, WindowBufferMode};
+
+    fn test_window(id: WindowId, workspace_id: WorkspaceId) -> WindowInfo {
+        WindowInfo {
+            id,
+            app_id: id as AppId,
+            surface_id: id,
+            title: format!("window-{id}"),
+            frame_rect: Rect::new(0, 0, 400, 300),
+            content_rect: Rect::new(0, 34, 400, 266),
+            visible: true,
+            focused: false,
+            minimized: false,
+            maximized: false,
+            z_index: id as u32,
+            workspace_id,
+            layer_role: LayerRole::Window,
+            flags: WindowFlags::default(),
+            scene_node_id: id as u64,
+            scene_root: None,
+            semantic_root: None,
+            buffer_mode: WindowBufferMode::Pixels,
+        }
+    }
+
+    #[test]
+    fn smart_gaps_collapse_for_single_window() {
+        let effective = effective_rule_for_count(WorkspaceRule::default(), 1);
+        assert_eq!(effective.gaps_in, 0);
+        assert_eq!(effective.gaps_out, 0);
+        assert_eq!(effective.border_size, 0);
+    }
+
+    #[test]
+    fn master_layout_keeps_primary_pane_wider_than_stack() {
+        let windows = vec![test_window(1, 0), test_window(2, 0), test_window(3, 0)];
+        let plans = plan_master_layout(
+            &windows,
+            0,
+            Rect::new(0, 0, 1200, 800),
+            WorkspaceRule::default(),
+        );
+        assert_eq!(plans.len(), 3);
+        assert!(plans[0].rect.width > plans[1].rect.width);
+        assert!(plans[0].rect.width > plans[2].rect.width);
+    }
+
+    #[test]
+    fn dwindle_layout_produces_non_empty_rectangles() {
+        let windows = vec![
+            test_window(1, 0),
+            test_window(2, 0),
+            test_window(3, 0),
+            test_window(4, 0),
+        ];
+        let plans = plan_dwindle_layout(
+            &windows,
+            0,
+            Rect::new(0, 0, 1440, 900),
+            WorkspaceRule::default(),
+        );
+        assert_eq!(plans.len(), 4);
+        assert!(plans
+            .iter()
+            .all(|plan| plan.rect.width > 0 && plan.rect.height > 0));
+    }
+
+    #[test]
+    fn scratchpad_toggle_round_trips() {
+        let mut orchestrator = HybridWindowOrchestrator::new();
+        assert!(orchestrator.toggle_scratchpad(8, 77));
+        assert!(orchestrator.ensure_tree(8).scratchpad_windows.contains(&77));
+        assert!(!orchestrator.toggle_scratchpad(8, 77));
+        assert!(!orchestrator.ensure_tree(8).scratchpad_windows.contains(&77));
+    }
 }

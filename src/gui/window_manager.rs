@@ -1,6 +1,9 @@
-﻿//! Window manager for the native echOS desktop.
+//! Window manager for the native echOS desktop.
 
-use crate::gui::protocol::{AppId, Point, Rect, SurfaceId, WindowId, WindowInfo};
+use crate::gui::protocol::{
+    AppId, LayerRole, Point, Rect, SceneNodeId, SurfaceId, WindowBufferMode, WindowFlags, WindowId,
+    WindowInfo, WorkspaceId,
+};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -64,10 +67,15 @@ struct WindowRecord {
     minimized: bool,
     maximized: bool,
     z_index: u32,
+    workspace_id: WorkspaceId,
+    layer_role: LayerRole,
+    flags: WindowFlags,
+    scene_node_id: SceneNodeId,
 }
 
 pub struct WindowManager {
     next_id: WindowId,
+    next_scene_node_id: SceneNodeId,
     windows: BTreeMap<WindowId, WindowRecord>,
     focused: Option<WindowId>,
     next_z: u32,
@@ -77,6 +85,7 @@ impl WindowManager {
     pub fn new() -> Self {
         Self {
             next_id: 1,
+            next_scene_node_id: 1,
             windows: BTreeMap::new(),
             focused: None,
             next_z: 1,
@@ -93,6 +102,33 @@ impl WindowManager {
         width: u32,
         height: u32,
     ) -> Result<WindowId, WindowError> {
+        self.create_window_with_meta(
+            app_id,
+            surface_id,
+            title,
+            x,
+            y,
+            width,
+            height,
+            0,
+            LayerRole::Window,
+            WindowFlags::default(),
+        )
+    }
+
+    pub fn create_window_with_meta(
+        &mut self,
+        app_id: AppId,
+        surface_id: SurfaceId,
+        title: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        workspace_id: WorkspaceId,
+        layer_role: LayerRole,
+        flags: WindowFlags,
+    ) -> Result<WindowId, WindowError> {
         if width == 0 || height == 0 {
             return Err(WindowError::InvalidSize);
         }
@@ -100,11 +136,15 @@ impl WindowManager {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let z_index = self.alloc_z();
-        let frame_rect = Rect::new(x, y, width, height.saturating_add(TITLEBAR_HEIGHT));
-        let content_rect = Rect::new(x, y.saturating_add(TITLEBAR_HEIGHT as i32), width, height);
+        let scene_node_id = self.next_scene_node_id;
+        self.next_scene_node_id = self.next_scene_node_id.saturating_add(1);
+        let frame_rect = frame_rect_for_content(x, y, width, height, flags.decorate);
+        let content_rect = frame_to_content_rect(frame_rect, flags.decorate);
 
         for window in self.windows.values_mut() {
-            window.focused = false;
+            if window.layer_role == LayerRole::Window || layer_role == LayerRole::Window {
+                window.focused = false;
+            }
         }
 
         self.windows.insert(
@@ -118,13 +158,19 @@ impl WindowManager {
                 content_rect,
                 restore_rect: frame_rect,
                 visible: true,
-                focused: true,
+                focused: layer_role == LayerRole::Window,
                 minimized: false,
                 maximized: false,
                 z_index,
+                workspace_id,
+                layer_role,
+                flags,
+                scene_node_id,
             },
         );
-        self.focused = Some(id);
+        if layer_role == LayerRole::Window {
+            self.focused = Some(id);
+        }
         Ok(id)
     }
 
@@ -170,8 +216,8 @@ impl WindowManager {
             .ok_or(WindowError::WindowNotFound)?;
         let old_frame = window.frame_rect;
         let old_content = window.content_rect;
-        window.frame_rect = Rect::new(x, y, width, height.saturating_add(TITLEBAR_HEIGHT));
-        window.content_rect = Rect::new(x, y.saturating_add(TITLEBAR_HEIGHT as i32), width, height);
+        window.frame_rect = frame_rect_for_content(x, y, width, height, window.flags.decorate);
+        window.content_rect = frame_to_content_rect(window.frame_rect, window.flags.decorate);
         window.visible = true;
         window.minimized = false;
         if !window.maximized {
@@ -183,6 +229,26 @@ impl WindowManager {
     pub fn focus_window(&mut self, window_id: WindowId) -> Result<Option<Rect>, WindowError> {
         if !self.windows.contains_key(&window_id) {
             return Err(WindowError::WindowNotFound);
+        }
+
+        let layer_role = self
+            .windows
+            .get(&window_id)
+            .map(|window| window.layer_role)
+            .ok_or(WindowError::WindowNotFound)?;
+        if layer_role != LayerRole::Window {
+            let new_z = self.alloc_z();
+            let frame_rect = {
+                let window = self
+                    .windows
+                    .get_mut(&window_id)
+                    .ok_or(WindowError::WindowNotFound)?;
+                window.visible = true;
+                window.minimized = false;
+                window.z_index = new_z;
+                window.frame_rect
+            };
+            return Ok(Some(frame_rect));
         }
 
         let mut damage: Option<Rect> = None;
@@ -268,7 +334,7 @@ impl WindowManager {
 
         if window.maximized {
             window.frame_rect = window.restore_rect;
-            window.content_rect = content_rect_for_frame(window.restore_rect);
+            window.content_rect = frame_to_content_rect(window.restore_rect, window.flags.decorate);
             window.maximized = false;
         } else {
             if !window.minimized {
@@ -278,10 +344,17 @@ impl WindowManager {
                 work_area.x,
                 work_area.y,
                 work_area.width.max(MIN_CONTENT_WIDTH),
-                work_area.height.max(MIN_CONTENT_HEIGHT + TITLEBAR_HEIGHT),
+                work_area.height.max(
+                    MIN_CONTENT_HEIGHT
+                        + if window.flags.decorate {
+                            TITLEBAR_HEIGHT
+                        } else {
+                            0
+                        },
+                ),
             );
             window.frame_rect = frame_rect;
-            window.content_rect = content_rect_for_frame(frame_rect);
+            window.content_rect = frame_to_content_rect(frame_rect, window.flags.decorate);
             window.maximized = true;
             window.visible = true;
             window.minimized = false;
@@ -310,13 +383,63 @@ impl WindowManager {
         self.focused
     }
 
+    pub fn set_window_meta(
+        &mut self,
+        window_id: WindowId,
+        workspace_id: WorkspaceId,
+        layer_role: LayerRole,
+        flags: WindowFlags,
+    ) -> Result<(Rect, Rect), WindowError> {
+        let old_frame;
+        let new_frame;
+        {
+            let window = self
+                .windows
+                .get_mut(&window_id)
+                .ok_or(WindowError::WindowNotFound)?;
+            old_frame = window.frame_rect;
+            window.workspace_id = workspace_id;
+            window.layer_role = layer_role;
+            window.flags = flags;
+            window.frame_rect = frame_rect_for_content(
+                window.content_rect.x,
+                window.content_rect.y,
+                window.content_rect.width,
+                window.content_rect.height,
+                flags.decorate,
+            );
+            window.content_rect = frame_to_content_rect(window.frame_rect, flags.decorate);
+            if layer_role != LayerRole::Window {
+                window.focused = false;
+            }
+            new_frame = window.frame_rect;
+        }
+        if layer_role != LayerRole::Window && self.focused == Some(window_id) {
+            self.focused = None;
+        }
+        Ok((old_frame, new_frame))
+    }
+
+    pub fn set_window_workspace(
+        &mut self,
+        window_id: WindowId,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), WindowError> {
+        let window = self
+            .windows
+            .get_mut(&window_id)
+            .ok_or(WindowError::WindowNotFound)?;
+        window.workspace_id = workspace_id;
+        Ok(())
+    }
+
     pub fn list_windows(&self) -> Vec<WindowInfo> {
         self.windows.values().map(Self::as_info_record).collect()
     }
 
     pub fn ordered_windows(&self) -> Vec<WindowInfo> {
         let mut windows = self.list_windows();
-        windows.sort_by_key(|w| (w.z_index, w.id));
+        windows.sort_by_key(|w| (layer_rank(w.layer_role), w.z_index, w.id));
         windows
     }
 
@@ -336,6 +459,14 @@ impl WindowManager {
         for window in windows.into_iter().filter(|window| window.visible) {
             if !window.frame_rect.contains(point) {
                 continue;
+            }
+
+            if window.layer_role == LayerRole::Background {
+                continue;
+            }
+
+            if !window.flags.decorate || window.layer_role != LayerRole::Window {
+                return Some(WindowHitTarget::Content(window.id));
             }
 
             if let Some(button) = chrome_button_for_point(window.frame_rect, point) {
@@ -374,6 +505,13 @@ impl WindowManager {
             minimized: window.minimized,
             maximized: window.maximized,
             z_index: window.z_index,
+            workspace_id: window.workspace_id,
+            layer_role: window.layer_role,
+            flags: window.flags,
+            scene_node_id: window.scene_node_id,
+            scene_root: None,
+            semantic_root: None,
+            buffer_mode: WindowBufferMode::Pixels,
         }
     }
 
@@ -386,7 +524,7 @@ impl WindowManager {
     fn top_visible_window_id(&self) -> Option<WindowId> {
         self.windows
             .values()
-            .filter(|window| window.visible)
+            .filter(|window| window.visible && window.layer_role == LayerRole::Window)
             .max_by_key(|window| window.z_index)
             .map(|window| window.id)
     }
@@ -484,11 +622,32 @@ fn chrome_button_for_point(frame_rect: Rect, point: Point) -> Option<ChromeButto
     None
 }
 
-fn content_rect_for_frame(frame_rect: Rect) -> Rect {
-    Rect::new(
-        frame_rect.x,
-        frame_rect.y.saturating_add(TITLEBAR_HEIGHT as i32),
-        frame_rect.width,
-        frame_rect.height.saturating_sub(TITLEBAR_HEIGHT),
-    )
+fn layer_rank(role: LayerRole) -> u8 {
+    match role {
+        LayerRole::Background => 0,
+        LayerRole::Bottom => 1,
+        LayerRole::Window => 2,
+        LayerRole::TopBar | LayerRole::Dock => 3,
+        LayerRole::Overlay => 4,
+        LayerRole::Modal => 5,
+        LayerRole::WorkspaceScratchpad => 6,
+    }
+}
+
+fn frame_rect_for_content(x: i32, y: i32, width: u32, height: u32, decorate: bool) -> Rect {
+    let chrome_height = if decorate { TITLEBAR_HEIGHT } else { 0 };
+    Rect::new(x, y, width, height.saturating_add(chrome_height))
+}
+
+fn frame_to_content_rect(frame_rect: Rect, decorate: bool) -> Rect {
+    if decorate {
+        Rect::new(
+            frame_rect.x,
+            frame_rect.y.saturating_add(TITLEBAR_HEIGHT as i32),
+            frame_rect.width,
+            frame_rect.height.saturating_sub(TITLEBAR_HEIGHT),
+        )
+    } else {
+        frame_rect
+    }
 }

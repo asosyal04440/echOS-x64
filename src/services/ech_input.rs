@@ -454,10 +454,17 @@ impl EchInput {
         let is_space = unicode == Some(' ') || scan_code == 0x39;
         let is_comma = unicode == Some(',') || scan_code == 0x33;
         let is_grave = unicode == Some('`') || scan_code == 0x29;
+        let is_s = unicode == Some('s') || unicode == Some('S') || scan_code == 0x1F;
+        let is_enter = unicode == Some('\n') || scan_code == 0x1C;
         let workspace = match scan_code {
             0x02 => Some(0),
             0x03 => Some(1),
             0x04 => Some(2),
+            0x05 => Some(3),
+            0x06 => Some(4),
+            0x07 => Some(5),
+            0x08 => Some(6),
+            0x09 => Some(7),
             _ => None,
         };
 
@@ -478,11 +485,21 @@ impl EchInput {
         }
 
         if matches!(state, KeyState::Pressed) && super_down && is_grave {
-            self.enqueue_shortcut(ShellShortcut::CycleStageSet);
+            self.enqueue_shortcut(ShellShortcut::ToggleOverview);
             return true;
         }
 
-        if matches!(state, KeyState::Pressed) && alt_down {
+        if matches!(state, KeyState::Pressed) && super_down && is_s {
+            self.enqueue_shortcut(ShellShortcut::ToggleScratchpad);
+            return true;
+        }
+
+        if matches!(state, KeyState::Pressed) && super_down && is_enter {
+            self.enqueue_shortcut(ShellShortcut::LaunchTerminal);
+            return true;
+        }
+
+        if matches!(state, KeyState::Pressed) && super_down {
             if let Some(workspace_id) = workspace {
                 self.enqueue_shortcut(ShellShortcut::Workspace(workspace_id));
                 return true;

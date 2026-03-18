@@ -460,7 +460,9 @@ pub fn init() {
     crate::serial_println!("[NIC-Native]   Mutex in hot path: ZERO");
     for dev in crate::drivers::pci::scan().into_iter() {
         if dev.class_code == 0x02 && dev.vendor_id == 0x8086 {
-            if let Some(bar) = crate::drivers::pci::read_bar_mmio(dev.bus, dev.device, dev.function, 0) {
+            if let Some(bar) =
+                crate::drivers::pci::read_bar_mmio(dev.bus, dev.device, dev.function, 0)
+            {
                 let nic = NicNativeDevice::new_intel_8254x("e1000", [0; 6], bar.base);
                 let snap = nic.doorbell_snapshot();
                 crate::serial_println!(

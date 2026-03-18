@@ -1933,13 +1933,27 @@ impl NvmeAsyncBlockDevice {
 
         let (mmio, sq_addr, cq_addr, sq_db, cq_db, queue_size, ioq) = if let Some(c) = ctrl {
             let (sq, cq, sq_db, cq_db, queue_size) = if let Some(ioq0) = c.io_queues.first() {
-                (ioq0.sq_addr, ioq0.cq_addr, ioq0.sq_db, ioq0.cq_db, ioq0.size)
+                (
+                    ioq0.sq_addr,
+                    ioq0.cq_addr,
+                    ioq0.sq_db,
+                    ioq0.cq_db,
+                    ioq0.size,
+                )
             } else if let Some(ref aq) = c.admin_queue {
                 (aq.sq_addr, aq.cq_addr, aq.sq_db, aq.cq_db, aq.size)
             } else {
                 (0, 0, 0, 0, 0)
             };
-            (c.mmio_base, sq, cq, sq_db, cq_db, queue_size, c.io_queues.len() as u32)
+            (
+                c.mmio_base,
+                sq,
+                cq,
+                sq_db,
+                cq_db,
+                queue_size,
+                c.io_queues.len() as u32,
+            )
         } else {
             (0, 0, 0, 0, 0, 0, 0)
         };
@@ -2020,7 +2034,9 @@ impl NvmeAsyncBlockDevice {
             cq_head: AtomicU32::new(0),
             cq_phase: AtomicBool::new(true),
             pending_slots: Box::new(core::array::from_fn(|_| AsyncPendingSlot::new())),
-            ready: AtomicBool::new(mmio_base != 0 && sq_addr != 0 && cq_addr != 0 && queue_size != 0),
+            ready: AtomicBool::new(
+                mmio_base != 0 && sq_addr != 0 && cq_addr != 0 && queue_size != 0,
+            ),
         }
     }
 
@@ -2104,7 +2120,8 @@ impl NvmeAsyncBlockDevice {
             let expected_phase = self.cq_phase.load(Ordering::Acquire);
             let completion = unsafe {
                 core::ptr::read_volatile(
-                    self.queue_ptr::<NvmeCompletion>(self.io_cq_phys).add(cq_head),
+                    self.queue_ptr::<NvmeCompletion>(self.io_cq_phys)
+                        .add(cq_head),
                 )
             };
             if completion.get_phase() != expected_phase {
@@ -2138,7 +2155,11 @@ impl NvmeAsyncBlockDevice {
     #[cfg(not(target_os = "none"))]
     pub unsafe fn inject_verification_completion(&self, cid: u16, status: u16, bytes: u32) {
         let head = self.cq_head.load(Ordering::Acquire) as usize;
-        let phase = if self.cq_phase.load(Ordering::Acquire) { 1 } else { 0 };
+        let phase = if self.cq_phase.load(Ordering::Acquire) {
+            1
+        } else {
+            0
+        };
         let entry = self.queue_ptr::<NvmeCompletion>(self.io_cq_phys).add(head);
         core::ptr::write_volatile(
             entry,

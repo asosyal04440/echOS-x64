@@ -1214,6 +1214,11 @@ pub fn add_animation(animation: Animation) -> u64 {
     ANIMATION_TIMELINE.lock().add(animation)
 }
 
+/// Belirtilen hedefe ait aktif animasyonları temizler.
+pub fn remove_animation(target: &AnimationTarget) {
+    ANIMATION_TIMELINE.lock().remove(target);
+}
+
 /// Global zaman çizelgesini `dt` saniye ilerletir; yeniden çizim gerekiyorsa `true` döner.
 pub fn update_animations(dt: f64) -> bool {
     ANIMATION_TIMELINE.lock().update(dt)

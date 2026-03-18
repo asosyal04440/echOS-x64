@@ -705,10 +705,8 @@ impl IoUring {
         self.submit_doorbells.fetch_add(1, Ordering::Relaxed);
         self.last_submit_batch
             .store(submitted.min(u32::MAX as usize) as u32, Ordering::Relaxed);
-        self.max_submit_batch.fetch_max(
-            submitted.min(u32::MAX as usize) as u32,
-            Ordering::Relaxed,
-        );
+        self.max_submit_batch
+            .fetch_max(submitted.min(u32::MAX as usize) as u32, Ordering::Relaxed);
         Ok(submitted)
     }
 
@@ -750,10 +748,8 @@ impl IoUring {
             self.completion_batches.fetch_add(1, Ordering::Relaxed);
             self.last_completion_batch
                 .store(processed.min(u32::MAX as usize) as u32, Ordering::Relaxed);
-            self.max_completion_batch.fetch_max(
-                processed.min(u32::MAX as usize) as u32,
-                Ordering::Relaxed,
-            );
+            self.max_completion_batch
+                .fetch_max(processed.min(u32::MAX as usize) as u32, Ordering::Relaxed);
         }
 
         processed

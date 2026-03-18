@@ -4,13 +4,13 @@
 //! Bu modül, uygulama paketlerinin kurulumu, kaldırılması ve yönetimi için
 //! lock-free veri yapıları ve hardware-level optimizasyonlar içerir.
 
+use crate::crypto::ed25519::Ed25519PublicKey;
+use crate::services::{get_store, StoreCommand, StoreResponse};
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
-use spin::Mutex;
 use core::fmt;
-use crate::crypto::ed25519::Ed25519PublicKey;
-use crate::services::{StoreCommand, StoreResponse, get_store};
+use spin::Mutex;
 
 /// Paket formatı sihir sayısı
 const MAGIC: [u8; 8] = *b"echBHD01";
@@ -26,6 +26,9 @@ pub enum PackageError {
     PackageNotFound,
     InvalidManifest,
     PermissionDenied,
+    RepositoryUnavailable,
+    UnsafePayloadPath,
+    EmptyPayload,
 }
 
 impl fmt::Display for PackageError {
@@ -39,6 +42,9 @@ impl fmt::Display for PackageError {
             PackageError::PackageNotFound => write!(f, "Paket bulunamadı"),
             PackageError::InvalidManifest => write!(f, "Manifest dosyası hatalı"),
             PackageError::PermissionDenied => write!(f, "İzin reddedildi"),
+            PackageError::RepositoryUnavailable => write!(f, "Paket deposu kullanıma hazır değil"),
+            PackageError::UnsafePayloadPath => write!(f, "Payload içinde güvensiz yol bulundu"),
+            PackageError::EmptyPayload => write!(f, "Paket payload'u boş"),
         }
     }
 }
@@ -96,7 +102,7 @@ impl PackageManager {
         }
 
         let manifest_size = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
-        
+
         if data.len() < MAGIC.len() + 4 + manifest_size + 64 {
             return Err(PackageError::InvalidFormat);
         }
@@ -108,7 +114,9 @@ impl PackageManager {
 
         // Manifest'i parse et
         let manifest = self.parse_manifest(manifest_data)?;
-        let package_name = manifest.name.as_ref()
+        let package_name = manifest
+            .name
+            .as_ref()
             .ok_or(PackageError::InvalidManifest)?
             .clone();
 
@@ -125,7 +133,10 @@ impl PackageManager {
         // İmza kontrolünü gerçekleştir
         // Production modunda hata döndür, dev modunda uyarı bas
         if let Err(e) = self.verify_package_signature(content_to_verify, signature) {
-            crate::serial_println!("[WARNING] Paket imzası geçersiz: {:?} (Geliştirme modu: devam ediliyor)", e);
+            crate::serial_println!(
+                "[WARNING] Paket imzası geçersiz: {:?} (Geliştirme modu: devam ediliyor)",
+                e
+            );
             // return Err(e); // Production için aktif et
         } else {
             crate::serial_println!("[SECURITY] Paket imzası doğrulandı: {}", package_name);
@@ -136,8 +147,11 @@ impl PackageManager {
         let payload_end = signature_start;
         let payload = &data[payload_start..payload_end];
 
-        // Payload'u çıkar (basit tar.gz formatı)
+        // Payload'u çıkar (echBHD payload v1 framing)
         let extracted_files = self.extract_payload(payload)?;
+        if extracted_files.is_empty() {
+            return Err(PackageError::EmptyPayload);
+        }
 
         // Dosyaları EchStore'a yaz
         for (path, content) in extracted_files {
@@ -145,25 +159,26 @@ impl PackageManager {
             full_path.push_str(&package_name);
             full_path.push('/');
             full_path.push_str(&path);
-            
+
             let store = get_store();
             store.send_command(StoreCommand::WriteFile {
                 path: full_path.clone(),
                 data: content,
             });
-            
+
             // Yanıt bekle
             let mut response = None;
-            for _ in 0..1000 { // Timeout koruma
+            for _ in 0..1000 {
+                // Timeout koruma
                 if let Some(resp) = store.receive_response() {
                     response = Some(resp);
                     break;
                 }
                 core::hint::spin_loop();
             }
-            
+
             match response {
-                Some(StoreResponse::Success) => {},
+                Some(StoreResponse::Success) => {}
                 _ => return Err(PackageError::IoError),
             }
         }
@@ -196,12 +211,10 @@ impl PackageManager {
         if let Some(_path) = self.installed_paths.get(name) {
             let mut dir_path = String::from("/apps/");
             dir_path.push_str(name);
-            
+
             let store = get_store();
-            store.send_command(StoreCommand::DeleteFile {
-                path: dir_path,
-            });
-            
+            store.send_command(StoreCommand::DeleteFile { path: dir_path });
+
             // Yanıt bekle
             let mut response = None;
             for _ in 0..1000 {
@@ -211,9 +224,9 @@ impl PackageManager {
                 }
                 core::hint::spin_loop();
             }
-            
+
             match response {
-                Some(StoreResponse::Success) => {},
+                Some(StoreResponse::Success) => {}
                 _ => return Err(PackageError::IoError),
             }
         }
@@ -226,7 +239,8 @@ impl PackageManager {
 
     /// Kurulu paketleri listele
     pub fn list_packages(&self) -> Vec<(String, PackageInfo)> {
-        self.packages.iter()
+        self.packages
+            .iter()
             .map(|(name, info)| (name.clone(), info.clone()))
             .collect()
     }
@@ -239,12 +253,15 @@ impl PackageManager {
     /// Paket ara
     pub fn search_packages(&self, term: &str) -> Vec<(String, PackageInfo)> {
         let term_lower = term.to_lowercase();
-        self.packages.iter()
+        self.packages
+            .iter()
             .filter(|(name, info)| {
-                name.to_lowercase().contains(&term_lower) ||
-                info.description.as_ref()
-                    .map(|desc| desc.to_lowercase().contains(&term_lower))
-                    .unwrap_or(false)
+                name.to_lowercase().contains(&term_lower)
+                    || info
+                        .description
+                        .as_ref()
+                        .map(|desc| desc.to_lowercase().contains(&term_lower))
+                        .unwrap_or(false)
             })
             .map(|(name, info)| (name.clone(), info.clone()))
             .collect()
@@ -252,13 +269,15 @@ impl PackageManager {
 
     /// Paket listesini güncelle
     pub fn update_package_list(&mut self) -> Result<(), PackageError> {
-        // TODO: Uzak paket deposundan güncelleme
-        // Şimdilik yerel paketlerle sınırlı
-        Ok(())
+        Err(PackageError::RepositoryUnavailable)
     }
 
     /// Paket imzasını doğrula
-    pub fn verify_package_signature(&self, content: &[u8], signature: &[u8]) -> Result<(), PackageError> {
+    pub fn verify_package_signature(
+        &self,
+        content: &[u8],
+        signature: &[u8],
+    ) -> Result<(), PackageError> {
         // İmza boyutu kontrolü (Ed25519: 64 byte)
         if signature.len() != 64 {
             return Err(PackageError::InvalidSignature);
@@ -268,18 +287,17 @@ impl PackageManager {
         // Production'da bu anahtar güvenli bir keystore'dan veya boot parametrelerinden gelmeli
         // Şimdilik örnek bir anahtar kullanıyoruz
         let root_key_bytes: [u8; 32] = [
-            0x3b, 0x6a, 0x27, 0xbc, 0xce, 0xb6, 0xa4, 0x2d, 
-            0x62, 0xa3, 0xa8, 0xd0, 0x2a, 0x6f, 0x0d, 0x73,
-            0x65, 0x32, 0x15, 0x77, 0x1d, 0xe2, 0x43, 0xa6, 
-            0x3a, 0xc0, 0x48, 0xa1, 0x8b, 0x59, 0xda, 0x29
+            0x3b, 0x6a, 0x27, 0xbc, 0xce, 0xb6, 0xa4, 0x2d, 0x62, 0xa3, 0xa8, 0xd0, 0x2a, 0x6f,
+            0x0d, 0x73, 0x65, 0x32, 0x15, 0x77, 0x1d, 0xe2, 0x43, 0xa6, 0x3a, 0xc0, 0x48, 0xa1,
+            0x8b, 0x59, 0xda, 0x29,
         ];
-        
+
         let public_key = Ed25519PublicKey::from_bytes(root_key_bytes);
-        
+
         // Slice'ı array'e dönüştür
         let mut signature_array = [0u8; 64];
         signature_array.copy_from_slice(signature);
-        
+
         // İmza doğrulama
         if public_key.verify(content, &signature_array) {
             Ok(())
@@ -288,10 +306,9 @@ impl PackageManager {
         }
     }
 
-    /// Manifest dosyasını parse et (basit TOML benzeri format)
+    /// Manifest dosyasını line-oriented `key="value"` söz dizimiyle parse et
     fn parse_manifest(&self, data: &[u8]) -> Result<PackageInfo, PackageError> {
-        let content = core::str::from_utf8(data)
-            .map_err(|_| PackageError::InvalidManifest)?;
+        let content = core::str::from_utf8(data).map_err(|_| PackageError::InvalidManifest)?;
 
         let mut manifest = PackageInfo::new();
 
@@ -313,10 +330,8 @@ impl PackageManager {
                     "executable" => manifest.executable = Some(value.to_string()),
                     "icon_type" => manifest.icon_type = Some(value.to_string()),
                     "permissions" => {
-                        let perms: Vec<String> = value
-                            .split(',')
-                            .map(|p| p.trim().to_string())
-                            .collect();
+                        let perms: Vec<String> =
+                            value.split(',').map(|p| p.trim().to_string()).collect();
                         manifest.permissions = Some(perms);
                     }
                     _ => {} // Bilinmeyen alanları atla
@@ -327,39 +342,37 @@ impl PackageManager {
         Ok(manifest)
     }
 
-    /// Payload'u çıkar (basit tar.gz formatı)
+    /// Payload'u çıkar (echBHD payload v1: u16 path_len, u32 content_len, path, content)
     fn extract_payload(&self, data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, PackageError> {
-        // TODO: Gerçek tar.gz çıkarımı
-        // Şimdilik basit bir format kullan: "filename\ncontent_length\ncontent"
         let mut files = Vec::new();
         let mut offset = 0;
 
         while offset < data.len() {
-            if let Some(filename_end) = data[offset..].iter().position(|&b| b == b'\n') {
-                let filename = core::str::from_utf8(&data[offset..offset + filename_end])
-                    .map_err(|_| PackageError::InvalidFormat)?;
-                offset += filename_end + 1;
-
-                if let Some(length_end) = data[offset..].iter().position(|&b| b == b'\n') {
-                    let length_str = core::str::from_utf8(&data[offset..offset + length_end])
-                        .map_err(|_| PackageError::InvalidFormat)?;
-                    let length: usize = length_str.parse()
-                        .map_err(|_| PackageError::InvalidFormat)?;
-                    offset += length_end + 1;
-
-                    if offset + length <= data.len() {
-                        let content = data[offset..offset + length].to_vec();
-                        files.push((filename.to_string(), content));
-                        offset += length;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            } else {
-                break;
+            if data.len().saturating_sub(offset) < 6 {
+                return Err(PackageError::InvalidFormat);
             }
+
+            let path_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+            let content_len = u32::from_le_bytes([
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+                data[offset + 5],
+            ]) as usize;
+            offset += 6;
+
+            if offset + path_len + content_len > data.len() {
+                return Err(PackageError::InvalidFormat);
+            }
+
+            let filename = core::str::from_utf8(&data[offset..offset + path_len])
+                .map_err(|_| PackageError::InvalidFormat)?;
+            validate_payload_path(filename)?;
+            offset += path_len;
+
+            let content = data[offset..offset + content_len].to_vec();
+            files.push((filename.to_string(), content));
+            offset += content_len;
         }
 
         Ok(files)
@@ -383,21 +396,28 @@ pub fn get_package_manager() -> &'static Mutex<PackageManager> {
 /// Paket yükleme fonksiyonu (shell komutu için)
 pub fn install_package_from_path(path: &str) -> Result<String, PackageError> {
     let store = get_store();
-    store.send_command(StoreCommand::ReadFile { path: path.to_string() });
-    
-    // Yanıt bekle
-    let mut response = None;
-    for _ in 0..1000 {
-        if let Some(resp) = store.receive_response() {
-            response = Some(resp);
-            break;
-        }
-        core::hint::spin_loop();
-    }
-    
-    let data = match response {
-        Some(StoreResponse::FileData(d)) => d,
+    let data = match store.process_command(StoreCommand::ReadFile {
+        path: path.to_string(),
+    }) {
+        StoreResponse::FileData(d) => d,
+        StoreResponse::Error(_) => return Err(PackageError::IoError),
         _ => return Err(PackageError::IoError),
     };
     get_package_manager().lock().install_package(&data)
+}
+
+fn validate_payload_path(path: &str) -> Result<(), PackageError> {
+    if path.is_empty() || path.starts_with('/') || path.starts_with('\\') {
+        return Err(PackageError::UnsafePayloadPath);
+    }
+    if path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(PackageError::UnsafePayloadPath);
+    }
+    if path.split('\\').count() > 1 || path.contains('\0') {
+        return Err(PackageError::UnsafePayloadPath);
+    }
+    Ok(())
 }

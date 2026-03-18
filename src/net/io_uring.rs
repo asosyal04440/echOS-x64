@@ -604,7 +604,8 @@ impl IoUring {
                         .is_some()
             }
             IORING_OP_READ | IORING_OP_WRITE | IORING_OP_SEND | IORING_OP_RECV => {
-                let has_fixed_file = sqe.flags & IOSQE_FIXED_FILE != 0 && self.resolve_fd(sqe).is_ok();
+                let has_fixed_file =
+                    sqe.flags & IOSQE_FIXED_FILE != 0 && self.resolve_fd(sqe).is_ok();
                 let has_selected_buffer = sqe.flags & IOSQE_BUFFER_SELECT != 0
                     && self.selected_buffer_for_group(sqe.buf_group).is_some();
                 has_fixed_file && (has_selected_buffer || (sqe.addr != 0 && sqe.len != 0))
@@ -764,7 +765,9 @@ impl IoUring {
         let pending: Vec<(u64, IoUringSqe)> = self
             .pending
             .iter()
-            .filter_map(|(user_data, pending)| (!pending.completed).then_some((*user_data, pending.sqe)))
+            .filter_map(|(user_data, pending)| {
+                (!pending.completed).then_some((*user_data, pending.sqe))
+            })
             .collect();
 
         for (user_data, sqe) in pending {
@@ -1027,7 +1030,8 @@ impl IoUring {
                 let mut registered = 0i32;
 
                 for index in 0..sqe.len as usize {
-                    let ptr = (sqe.addr as usize + index * stride) as *const IoUringRegisteredBuffer;
+                    let ptr =
+                        (sqe.addr as usize + index * stride) as *const IoUringRegisteredBuffer;
                     let mut buffer = unsafe { *ptr };
                     if buffer.bgid == 0 {
                         buffer.bgid = sqe.buf_group;
@@ -1069,7 +1073,9 @@ impl IoUring {
     }
 
     pub fn zero_syscall_ready(&self) -> bool {
-        self.sq_poll_active && !self.registered_files.is_empty() && !self.registered_buffers.is_empty()
+        self.sq_poll_active
+            && !self.registered_files.is_empty()
+            && !self.registered_buffers.is_empty()
     }
 
     pub fn zero_syscall_submission_count(&self) -> u64 {

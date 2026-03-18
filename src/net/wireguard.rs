@@ -214,7 +214,11 @@ impl WgPeer {
     /// Örnek: prefix=24 -> mask=0x00FFFFFF -> 192.168.1.0/24 aralığı
     pub fn is_allowed_ip(&self, ip: u32) -> bool {
         for (allowed_ip, prefix_len) in &self.allowed_ips {
-            let mask = if *prefix_len == 0 { 0 } else { !0u32 >> (32 - prefix_len) };
+            let mask = if *prefix_len == 0 {
+                0
+            } else {
+                !0u32 >> (32 - prefix_len)
+            };
             if (ip & mask) == (*allowed_ip & mask) {
                 return true;
             }
@@ -276,7 +280,9 @@ impl WgPeer {
 
         // Parse transport header
         let remote_index = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
-        let nonce = u64::from_le_bytes([pkt[8], pkt[9], pkt[10], pkt[11], pkt[12], pkt[13], pkt[14], pkt[15]]);
+        let nonce = u64::from_le_bytes([
+            pkt[8], pkt[9], pkt[10], pkt[11], pkt[12], pkt[13], pkt[14], pkt[15],
+        ]);
 
         // Oturum indeksini kontrol et
         if remote_index != session.remote_index {
@@ -296,13 +302,14 @@ impl WgPeer {
 
         // ChaCha20-Poly1305 ile şifre çöz
         let ciphertext = &pkt[16..];
-        let decrypted = crate::crypto::chacha20::ChaCha20Poly1305::new(
-            &session.receiving_key,
-            &nonce_bytes,
-        ).decrypt(ciphertext, &[], &[0u8; 16]).unwrap_or_else(|| ciphertext.to_vec());
+        let decrypted =
+            crate::crypto::chacha20::ChaCha20Poly1305::new(&session.receiving_key, &nonce_bytes)
+                .decrypt(ciphertext, &[], &[0u8; 16])
+                .unwrap_or_else(|| ciphertext.to_vec());
 
         // İstatistikleri güncelle
-        self.rx_bytes.fetch_add(decrypted.len() as u64, Ordering::Relaxed);
+        self.rx_bytes
+            .fetch_add(decrypted.len() as u64, Ordering::Relaxed);
 
         Ok(decrypted)
     }
@@ -413,7 +420,12 @@ impl WgDevice {
     }
 
     /// Gelen WireGuard mesajını işle (mesaj tipine göre ayrıştır)
-    pub fn process_message(&self, pkt: &[u8], src_ip: u32, src_port: u16) -> Result<Vec<u8>, WgError> {
+    pub fn process_message(
+        &self,
+        pkt: &[u8],
+        src_ip: u32,
+        src_port: u16,
+    ) -> Result<Vec<u8>, WgError> {
         if pkt.is_empty() {
             return Err(WgError::InvalidPacket);
         }
@@ -493,7 +505,7 @@ impl WgDevice {
         response.extend_from_slice(&local_idx.to_le_bytes()); // sender index
         response.extend_from_slice(&sender_index.to_le_bytes()); // receiver index
         response.extend_from_slice(&resp_ephemeral_pub); // ephemeral public (32)
-        // Encrypted empty payload (16 byte poly1305 tag)
+                                                         // Encrypted empty payload (16 byte poly1305 tag)
         response.extend_from_slice(&[0u8; 16]);
         // MAC1 + MAC2
         response.extend_from_slice(&[0u8; 32]);
@@ -557,7 +569,12 @@ impl WgDevice {
     }
 
     /// Şifreli veri paketini işle (Type 4)
-    fn process_transport(&self, pkt: &[u8], _src_ip: u32, _src_port: u16) -> Result<Vec<u8>, WgError> {
+    fn process_transport(
+        &self,
+        pkt: &[u8],
+        _src_ip: u32,
+        _src_port: u16,
+    ) -> Result<Vec<u8>, WgError> {
         if pkt.len() < 16 {
             return Err(WgError::InvalidPacket);
         }
@@ -616,7 +633,9 @@ impl WgManager {
     /// Yeni WireGuard arayüzü oluştur ve kaydet
     pub fn create_device(&self, name: &str) -> Arc<WgDevice> {
         let device = Arc::new(WgDevice::new(name));
-        self.devices.lock().insert(String::from(name), device.clone());
+        self.devices
+            .lock()
+            .insert(String::from(name), device.clone());
 
         crate::serial_println!("[WG] Created device '{}'", name);
         device

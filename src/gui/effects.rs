@@ -417,8 +417,9 @@ impl KawaseBlur {
                 let sx = x + px;
                 let sy = y + py;
                 if sx < fb.width && sy < fb.height {
-                    let ptr =
-                        unsafe { (fb.base_addr as *mut u32).add(sy * fb.pixels_per_scan_line + sx) };
+                    let ptr = unsafe {
+                        (fb.base_addr as *mut u32).add(sy * fb.pixels_per_scan_line + sx)
+                    };
                     unsafe {
                         *ptr = src[py * width + px];
                     }
@@ -1126,7 +1127,9 @@ pub fn draw_sdf_shadow(
                 continue;
             }
 
-            let ptr = unsafe { (fb.base_addr as *mut u32).add(py as usize * fb.pixels_per_scan_line + px as usize) };
+            let ptr = unsafe {
+                (fb.base_addr as *mut u32).add(py as usize * fb.pixels_per_scan_line + px as usize)
+            };
             let bg = unsafe { *ptr };
             let blended = blend_argb(bg, color, alpha);
             unsafe {
@@ -1175,7 +1178,8 @@ pub fn apply_window_corner_aa(
                     continue;
                 }
                 let ptr = unsafe {
-                    (fb.base_addr as *mut u32).add(sy as usize * fb.pixels_per_scan_line + sx as usize)
+                    (fb.base_addr as *mut u32)
+                        .add(sy as usize * fb.pixels_per_scan_line + sx as usize)
                 };
                 let bg = unsafe { *ptr };
                 let aa = blend_argb(bg, 0x000000, 1.0 - fade);

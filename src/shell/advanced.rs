@@ -93,6 +93,10 @@ impl Environment {
         self.vars.lock().remove(key);
     }
 
+    pub fn clear(&self) {
+        self.vars.lock().clear();
+    }
+
     /// Tüm değişkenleri döndürür
     pub fn list(&self) -> Vec<(String, String)> {
         self.vars
@@ -649,13 +653,7 @@ pub struct Completer {
 impl Completer {
     pub fn new() -> Self {
         Self {
-            builtins: vec![
-                "help", "ver", "echo", "clear", "ls", "cat", "cd", "pwd", "mkdir", "rm", "cp",
-                "mv", "touch", "chmod", "chown", "ps", "kill", "top", "jobs", "fg", "bg", "export",
-                "unset", "env", "set", "history", "alias", "unalias", "source", "exit", "shutdown",
-                "reboot", "uname", "whoami", "id", "date", "time", "uptime", "free", "df", "du",
-                "mount", "umount", "wine", "proton", "linux", "launch",
-            ],
+            builtins: super::builtin_command_names().to_vec(),
         }
     }
 
@@ -1222,6 +1220,10 @@ impl AliasManager {
     /// Alias'ı siler
     pub fn unset(&self, name: &str) {
         self.aliases.lock().remove(name);
+    }
+
+    pub fn clear(&self) {
+        self.aliases.lock().clear();
     }
 
     /// Alias'ı expand eder

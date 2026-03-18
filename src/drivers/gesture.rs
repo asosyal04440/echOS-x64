@@ -3,8 +3,8 @@
 //! Son hareketleri analiz ederek jestleri (swipe) tanır.
 //! lock-free ve allocation-minimal tasarlanmıştır.
 
-use alloc::vec::Vec;
 use crate::cpu::tsc;
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
@@ -38,22 +38,27 @@ impl GestureRecognizer {
 
     pub fn feed(&mut self, dx: i32, dy: i32) -> Option<Gesture> {
         let now = unsafe { tsc::read() };
-        
+
         // Geçmişi temizle (eski kayıtları sil)
         // 3GHz işlemci için 300ms = 900,000,000 tick.
         // Daha hassas bir zamanlama için kalibrasyon gerekir ama şimdilik sabit değer.
-        const TIMEOUT_TICKS: u64 = 900_000_000; 
-        
+        const TIMEOUT_TICKS: u64 = 900_000_000;
+
         if !self.history.is_empty() {
             // retain yerine manuel loop daha performanslı olabilir ama Vec için retain optimize edilmiştir
-            self.history.retain(|p| now >= p.timestamp && now - p.timestamp < TIMEOUT_TICKS);
+            self.history
+                .retain(|p| now >= p.timestamp && now - p.timestamp < TIMEOUT_TICKS);
         }
-        
-        self.history.push(MotionPoint { dx, dy, timestamp: now });
-        
+
+        self.history.push(MotionPoint {
+            dx,
+            dy,
+            timestamp: now,
+        });
+
         self.analyze()
     }
-    
+
     fn analyze(&mut self) -> Option<Gesture> {
         if self.history.len() < 5 {
             return None;
@@ -62,16 +67,16 @@ impl GestureRecognizer {
         // Toplam yer değiştirme
         let mut total_dx = 0;
         let mut total_dy = 0;
-        
+
         for p in &self.history {
             total_dx += p.dx;
             total_dy += p.dy;
         }
-        
+
         // Eşik değerler (hız/mesafe)
         // Çok düşük eşik yanlış tetiklemelere yol açar
-        const SWIPE_THRESHOLD: i32 = 300; 
-        
+        const SWIPE_THRESHOLD: i32 = 300;
+
         if total_dx.abs() > SWIPE_THRESHOLD && total_dx.abs() > total_dy.abs() * 3 {
             // Yatay hareket baskın
             self.history.clear(); // Jest algılandı, geçmişi temizle
@@ -81,7 +86,7 @@ impl GestureRecognizer {
                 return Some(Gesture::SwipeLeft);
             }
         }
-        
+
         if total_dy.abs() > SWIPE_THRESHOLD && total_dy.abs() > total_dx.abs() * 3 {
             // Dikey hareket baskın
             self.history.clear();
@@ -94,7 +99,7 @@ impl GestureRecognizer {
                 return Some(Gesture::SwipeUp);
             }
         }
-        
+
         None
     }
 }

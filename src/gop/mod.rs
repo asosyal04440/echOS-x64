@@ -67,5 +67,5 @@ pub fn init_framebuffer(gop: &mut GraphicsOutput) {
 
 /// Framebuffer'a erişim sağlar
 pub fn get_framebuffer() -> Option<framebuffer::Framebuffer> {
-    unsafe { FRAMEBUFFER }
+    unsafe { FRAMEBUFFER.clone() }
 }

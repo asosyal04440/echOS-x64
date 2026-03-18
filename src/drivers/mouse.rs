@@ -44,11 +44,11 @@
 //! 6. 0xF4 -> mouse  (Paket akışını başlat)
 //! ```
 
+use crate::drivers::gesture::GestureRecognizer;
+use crate::drivers::input::{push_event, InputEvent, MousePacket};
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use spin::Mutex;
 use x86_64::instructions::port::Port;
-use crate::drivers::gesture::GestureRecognizer;
-use crate::drivers::input::{push_event, InputEvent, MousePacket};
 
 // ============================================================================
 // PS/2 PORT SABİTLERİ (PS/2 PORT CONSTANTS)

@@ -23,26 +23,26 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ptr::NonNull;
 use core::ptr;
-use spin::Mutex;
+use core::ptr::NonNull;
 use lazy_static::lazy_static;
-use x86_64::PhysAddr;
+use spin::Mutex;
 use x86_64::instructions::port::Port;
+use x86_64::PhysAddr;
 
 use crate::drivers::block::{BlockDevice, BlockDeviceError, BlockDeviceType};
-use crate::drivers::pci::{PciDevice, scan};
+use crate::drivers::pci::{scan, PciDevice};
 
 // ============================================================================
 // AHCI SABİTLERİ
 // ============================================================================
 
 /// AHCI HBA genel yazmaç ofsetleri
-const AHCI_GHC: usize = 0x04;      // Global HBA Control
-const AHCI_IS: usize = 0x08;       // Interrupt Status
-const AHCI_PI: usize = 0x0C;       // Ports Implemented
-const AHCI_VS: usize = 0x10;       // AHCI Version
-const AHCI_CCC_CTL: usize = 0x14;  // Coalescing Control
+const AHCI_GHC: usize = 0x04; // Global HBA Control
+const AHCI_IS: usize = 0x08; // Interrupt Status
+const AHCI_PI: usize = 0x0C; // Ports Implemented
+const AHCI_VS: usize = 0x10; // AHCI Version
+const AHCI_CCC_CTL: usize = 0x14; // Coalescing Control
 const AHCI_CCC_PORTS: usize = 0x18;
 const AHCI_EM_LOC: usize = 0x1C;
 const AHCI_EM_CTL: usize = 0x20;
@@ -50,52 +50,52 @@ const AHCI_CAP2: usize = 0x24;
 const AHCI_BOHC: usize = 0x28;
 
 /// GHC (Global HBA Control) bitleri
-const GHC_HR: u32 = 1 << 0;    // HBA Reset
-const GHC_IE: u32 = 1 << 1;    // Interrupt Enable
-const GHC_MRSM: u32 = 1 << 2;  // MSI Revert to Single Message
-const GHC_AE: u32 = 1 << 31;   // AHCI Enable
+const GHC_HR: u32 = 1 << 0; // HBA Reset
+const GHC_IE: u32 = 1 << 1; // Interrupt Enable
+const GHC_MRSM: u32 = 1 << 2; // MSI Revert to Single Message
+const GHC_AE: u32 = 1 << 31; // AHCI Enable
 
 /// CAP (HBA Capabilities) bitleri
-const CAP_S64A: u32 = 1 << 31;  // 64-bit Addressing
-const CAP_SNCQ: u32 = 1 << 30;  // Native Command Queuing
-const CAP_SSS: u32 = 1 << 27;   // Staggered Spin-up
-const CAP_SALP: u32 = 1 << 26;  // Aggressive Link Power Mgmt
-const CAP_SAL: u32 = 1 << 25;   // Activity LED
-const CAP_SCLO: u32 = 1 << 24;  // Command List Override
+const CAP_S64A: u32 = 1 << 31; // 64-bit Addressing
+const CAP_SNCQ: u32 = 1 << 30; // Native Command Queuing
+const CAP_SSS: u32 = 1 << 27; // Staggered Spin-up
+const CAP_SALP: u32 = 1 << 26; // Aggressive Link Power Mgmt
+const CAP_SAL: u32 = 1 << 25; // Activity LED
+const CAP_SCLO: u32 = 1 << 24; // Command List Override
 
 /// Port yazmaç ofsetleri (her port 0x80 byte)
-const PORT_CLB: usize = 0x00;      // Command List Base
-const PORT_CLBU: usize = 0x04;     // Command List Base Upper
-const PORT_FB: usize = 0x08;       // FIS Base
-const PORT_FBU: usize = 0x0C;      // FIS Base Upper
-const PORT_IS: usize = 0x10;       // Interrupt Status
-const PORT_IE: usize = 0x14;       // Interrupt Enable
-const PORT_CMD: usize = 0x18;      // Command and Status
-const PORT_TFD: usize = 0x20;      // Task File Data
-const PORT_SIG: usize = 0x24;      // Signature
-const PORT_SSTS: usize = 0x28;     // SATA Status
-const PORT_SCTL: usize = 0x2C;     // SATA Control
-const PORT_SERR: usize = 0x30;     // SATA Error
-const PORT_SACT: usize = 0x34;     // SATA Active
-const PORT_CI: usize = 0x38;       // Command Issue
-const PORT_SNTF: usize = 0x3C;     // SATA Notification
-const PORT_FBS: usize = 0x40;      // FIS-based Switching Control
+const PORT_CLB: usize = 0x00; // Command List Base
+const PORT_CLBU: usize = 0x04; // Command List Base Upper
+const PORT_FB: usize = 0x08; // FIS Base
+const PORT_FBU: usize = 0x0C; // FIS Base Upper
+const PORT_IS: usize = 0x10; // Interrupt Status
+const PORT_IE: usize = 0x14; // Interrupt Enable
+const PORT_CMD: usize = 0x18; // Command and Status
+const PORT_TFD: usize = 0x20; // Task File Data
+const PORT_SIG: usize = 0x24; // Signature
+const PORT_SSTS: usize = 0x28; // SATA Status
+const PORT_SCTL: usize = 0x2C; // SATA Control
+const PORT_SERR: usize = 0x30; // SATA Error
+const PORT_SACT: usize = 0x34; // SATA Active
+const PORT_CI: usize = 0x38; // Command Issue
+const PORT_SNTF: usize = 0x3C; // SATA Notification
+const PORT_FBS: usize = 0x40; // FIS-based Switching Control
 
 /// Port CMD bitleri
-const CMD_ST: u32 = 1 << 0;   // Start
-const CMD_SUD: u32 = 1 << 1;  // Spin-Up Device
-const CMD_POD: u32 = 1 << 2;  // Power On Device
-const CMD_CLO: u32 = 1 << 3;  // Command List Override
-const CMD_FRE: u32 = 1 << 4;  // FIS Receive Enable
-const CMD_FR: u32 = 1 << 14;  // FIS Receive Running
-const CMD_CR: u32 = 1 << 15;  // Command List Running
+const CMD_ST: u32 = 1 << 0; // Start
+const CMD_SUD: u32 = 1 << 1; // Spin-Up Device
+const CMD_POD: u32 = 1 << 2; // Power On Device
+const CMD_CLO: u32 = 1 << 3; // Command List Override
+const CMD_FRE: u32 = 1 << 4; // FIS Receive Enable
+const CMD_FR: u32 = 1 << 14; // FIS Receive Running
+const CMD_CR: u32 = 1 << 15; // Command List Running
 
 /// SATA Status (SSTS) değerleri
-const SSTS_DET_PRESENT: u32 = 0x03;  // Device present, Phy established
+const SSTS_DET_PRESENT: u32 = 0x03; // Device present, Phy established
 
 /// FIS tipleri
-const FIS_TYPE_REG_H2D: u8 = 0x27;  // Register - Host to Device
-const FIS_TYPE_REG_D2H: u8 = 0x34;  // Register - Device to Host
+const FIS_TYPE_REG_H2D: u8 = 0x27; // Register - Host to Device
+const FIS_TYPE_REG_D2H: u8 = 0x34; // Register - Device to Host
 
 /// ATA komutları
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
@@ -113,44 +113,44 @@ pub const BLOCK_SIZE: usize = 512;
 /// AHCI HBA bellek haritası
 #[repr(C)]
 struct AhciHba {
-    cap: u32,           // 0x00 - HBA Capabilities
-    ghc: u32,           // 0x04 - Global HBA Control
-    is: u32,            // 0x08 - Interrupt Status
-    pi: u32,            // 0x0C - Ports Implemented
-    vs: u32,            // 0x10 - AHCI Version
-    ccc_ctl: u32,       // 0x14
-    ccc_pts: u32,       // 0x18
-    em_loc: u32,        // 0x1C
-    em_ctl: u32,        // 0x20
-    cap2: u32,          // 0x24
-    bohc: u32,          // 0x28
-    _rsv: [u8; 116],    // 0x2C - 0x9F
-    vendor: [u8; 96],   // 0xA0 - 0xFF
-    // Portlar 0x100'den başlar
+    cap: u32,        // 0x00 - HBA Capabilities
+    ghc: u32,        // 0x04 - Global HBA Control
+    is: u32,         // 0x08 - Interrupt Status
+    pi: u32,         // 0x0C - Ports Implemented
+    vs: u32,         // 0x10 - AHCI Version
+    ccc_ctl: u32,    // 0x14
+    ccc_pts: u32,    // 0x18
+    em_loc: u32,     // 0x1C
+    em_ctl: u32,     // 0x20
+    cap2: u32,       // 0x24
+    bohc: u32,       // 0x28
+    _rsv: [u8; 116], // 0x2C - 0x9F
+    vendor: [u8; 96], // 0xA0 - 0xFF
+                     // Portlar 0x100'den başlar
 }
 
 /// AHCI Port yazmaçları
 #[repr(C)]
 struct AhciPort {
-    clb: u32,           // 0x00 - Command List Base
-    clbu: u32,          // 0x04
-    fb: u32,            // 0x08 - FIS Base
-    fbu: u32,           // 0x0C
-    is: u32,            // 0x10 - Interrupt Status
-    ie: u32,            // 0x14 - Interrupt Enable
-    cmd: u32,           // 0x18 - Command and Status
-    _rsv0: u32,         // 0x1C
-    tfd: u32,           // 0x20 - Task File Data
-    sig: u32,           // 0x24 - Signature
-    ssts: u32,          // 0x28 - SATA Status
-    sctl: u32,          // 0x2C - SATA Control
-    serr: u32,          // 0x30 - SATA Error
-    sact: u32,          // 0x34 - SATA Active
-    ci: u32,            // 0x38 - Command Issue
-    sntf: u32,          // 0x3C
-    fbs: u32,           // 0x40
-    _rsv1: [u32; 11],   // 0x44 - 0x6F
-    vendor: [u32; 4],   // 0x70 - 0x7F
+    clb: u32,         // 0x00 - Command List Base
+    clbu: u32,        // 0x04
+    fb: u32,          // 0x08 - FIS Base
+    fbu: u32,         // 0x0C
+    is: u32,          // 0x10 - Interrupt Status
+    ie: u32,          // 0x14 - Interrupt Enable
+    cmd: u32,         // 0x18 - Command and Status
+    _rsv0: u32,       // 0x1C
+    tfd: u32,         // 0x20 - Task File Data
+    sig: u32,         // 0x24 - Signature
+    ssts: u32,        // 0x28 - SATA Status
+    sctl: u32,        // 0x2C - SATA Control
+    serr: u32,        // 0x30 - SATA Error
+    sact: u32,        // 0x34 - SATA Active
+    ci: u32,          // 0x38 - Command Issue
+    sntf: u32,        // 0x3C
+    fbs: u32,         // 0x40
+    _rsv1: [u32; 11], // 0x44 - 0x6F
+    vendor: [u32; 4], // 0x70 - 0x7F
 }
 
 /// Command Table yapısı
@@ -170,20 +170,20 @@ struct AhciCommandTable {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct AhciPrdt {
-    dba: u32,       // Data Base Address
-    dbau: u32,      // Data Base Address Upper
+    dba: u32,  // Data Base Address
+    dbau: u32, // Data Base Address Upper
     _rsv: u32,
-    dbc: u32,       // Data Byte Count (bit 0 = interrupt on completion)
+    dbc: u32, // Data Byte Count (bit 0 = interrupt on completion)
 }
 
 /// Command Header
 #[repr(C, align(128))]
 #[derive(Clone, Copy)]
 struct AhciCommandHeader {
-    dw0: u32,       // Flags
-    prdbc: u32,     // PRD Byte Count
-    ctba: u32,      // Command Table Base
-    ctbau: u32,     // Command Table Base Upper
+    dw0: u32,   // Flags
+    prdbc: u32, // PRD Byte Count
+    ctba: u32,  // Command Table Base
+    ctbau: u32, // Command Table Base Upper
     _rsv: [u32; 4],
 }
 
@@ -277,8 +277,12 @@ impl AhciController {
         for dev in devices {
             // SATA AHCI controller: class=0x01, subclass=0x06, prog_if=0x01
             if dev.class_code == 0x01 && dev.subclass == 0x06 && dev.prog_if == 0x01 {
-                crate::serial_println!("[AHCI] Found SATA AHCI controller at {:02x}:{:02x}.{:x}",
-                    dev.bus, dev.device, dev.function);
+                crate::serial_println!(
+                    "[AHCI] Found SATA AHCI controller at {:02x}:{:02x}.{:x}",
+                    dev.bus,
+                    dev.device,
+                    dev.function
+                );
                 return Self::init(&dev);
             }
         }
@@ -321,7 +325,10 @@ impl AhciController {
             }
 
             // Interrupt enable
-            core::ptr::write_volatile(&mut (*base).ghc, core::ptr::read_volatile(&(*base).ghc) | GHC_IE);
+            core::ptr::write_volatile(
+                &mut (*base).ghc,
+                core::ptr::read_volatile(&(*base).ghc) | GHC_IE,
+            );
 
             let port_count = pi.count_ones() as usize;
             crate::serial_println!("[AHCI] {} ports implemented", port_count);
@@ -339,7 +346,11 @@ impl AhciController {
     /// BAR5 değerini oku
     fn read_bar5(dev: &PciDevice) -> Option<u64> {
         // BAR5 offset = 0x24
-        let addr = 0x80000000 | ((dev.bus as u32) << 16) | ((dev.device as u32) << 11) | ((dev.function as u32) << 8) | 0x24;
+        let addr = 0x80000000
+            | ((dev.bus as u32) << 16)
+            | ((dev.device as u32) << 11)
+            | ((dev.function as u32) << 8)
+            | 0x24;
         unsafe {
             Port::<u32>::new(0xCF8).write(addr);
             let bar = Port::<u32>::new(0xCFC).read();
@@ -363,21 +374,25 @@ impl AhciController {
     /// BAR boyutunu hesapla
     fn get_bar_size(dev: &PciDevice, bar_offset: u32) -> u64 {
         unsafe {
-            let addr = 0x80000000 | ((dev.bus as u32) << 16) | ((dev.device as u32) << 11) | ((dev.function as u32) << 8) | bar_offset;
-            
+            let addr = 0x80000000
+                | ((dev.bus as u32) << 16)
+                | ((dev.device as u32) << 11)
+                | ((dev.function as u32) << 8)
+                | bar_offset;
+
             // Original değeri kaydet
             Port::<u32>::new(0xCF8).write(addr);
             let original = Port::<u32>::new(0xCFC).read();
-            
+
             // Tüm bitleri yaz
             Port::<u32>::new(0xCFC).write(0xFFFFFFFF);
             Port::<u32>::new(0xCF8).write(addr);
             let size_bits = Port::<u32>::new(0xCFC).read();
-            
+
             // Restore
             Port::<u32>::new(0xCF8).write(addr);
             Port::<u32>::new(0xCFC).write(original);
-            
+
             // Size = ~(size_bits & 0xFFFFFFF0) + 1
             let size = !(size_bits & 0xFFFFFFF0) + 1;
             size as u64
@@ -400,20 +415,20 @@ impl AhciController {
             if (self.port_mask & (1 << port_idx)) == 0 {
                 continue;
             }
-            
+
             let port = self.get_port(port_idx)?;
-            
+
             unsafe {
                 let ssts = core::ptr::read_volatile(&(*port).ssts);
                 let det = ssts & 0xF;
-                
+
                 crate::serial_println!("[AHCI] Port {} SSTS=0x{:x} DET={}", port_idx, ssts, det);
-                
+
                 // Device present?
                 if det == SSTS_DET_PRESENT {
                     let sig = core::ptr::read_volatile(&(*port).sig);
                     crate::serial_println!("[AHCI] Port {} signature = 0x{:x}", port_idx, sig);
-                    
+
                     // ATA signature = 0x00000101, ATAPI = 0xEB140101
                     if sig == 0x00000101 {
                         crate::serial_println!("[AHCI] Port {} has ATA disk", port_idx);
@@ -438,71 +453,77 @@ impl AhciPortDevice {
             // Port durumunu kontrol et
             let cmd = core::ptr::read_volatile(&(*port).cmd);
             crate::serial_println!("[AHCI] Port {} CMD = 0x{:x}", port_idx, cmd);
-            
+
             // Portu durdur
             core::ptr::write_volatile(&mut (*port).cmd, cmd & !(CMD_ST | CMD_FRE));
-            
+
             // Bekle
             for _ in 0..100000 {
                 core::hint::spin_loop();
             }
-            
+
             // DMA-capable memory ayır (fiziksel olarak contiguous)
             // Command list: 32 * 32 bytes = 1024 bytes = 1 page
             // Command table: 128 + 48 + 8*16 = 256 bytes (ama alignment gerekir)
             // FIS: 256 bytes
-            
+
             let (cmd_list_phys, cmd_list_virt) = crate::memory::dma_alloc(1)?;
             let (cmd_table_phys, cmd_table_virt) = crate::memory::dma_alloc(1)?;
             let (fis_phys, fis_virt) = crate::memory::dma_alloc(1)?;
-            
+
             let cmd_list_phys = cmd_list_phys as u64;
             let cmd_table_phys = cmd_table_phys as u64;
             let fis_phys = fis_phys as u64;
-            
-            crate::serial_println!("[AHCI] DMA buffers: cmd_list={:#x}, cmd_table={:#x}, fis={:#x}", 
-                cmd_list_phys, cmd_table_phys, fis_phys);
-            
+
+            crate::serial_println!(
+                "[AHCI] DMA buffers: cmd_list={:#x}, cmd_table={:#x}, fis={:#x}",
+                cmd_list_phys,
+                cmd_table_phys,
+                fis_phys
+            );
+
             // Buffer'ları sıfırla
             core::ptr::write_bytes(cmd_list_virt.as_ptr(), 0, 4096);
             core::ptr::write_bytes(cmd_table_virt.as_ptr(), 0, 4096);
             core::ptr::write_bytes(fis_virt.as_ptr(), 0, 4096);
-            
+
             // Box wrapper'lar oluştur (virtual address kullanarak)
-            let mut cmd_list: Box<[AhciCommandHeader; 32]> = Box::from_raw(cmd_list_virt.as_ptr() as *mut [AhciCommandHeader; 32]);
-            let mut cmd_table: Box<AhciCommandTable> = Box::from_raw(cmd_table_virt.as_ptr() as *mut AhciCommandTable);
+            let mut cmd_list: Box<[AhciCommandHeader; 32]> =
+                Box::from_raw(cmd_list_virt.as_ptr() as *mut [AhciCommandHeader; 32]);
+            let mut cmd_table: Box<AhciCommandTable> =
+                Box::from_raw(cmd_table_virt.as_ptr() as *mut AhciCommandTable);
             let fis_recv: Box<[u8; 256]> = Box::from_raw(fis_virt.as_ptr() as *mut [u8; 256]);
-            
+
             // Command List Base (physical address)
             core::ptr::write_volatile(&mut (*port).clb, cmd_list_phys as u32);
             core::ptr::write_volatile(&mut (*port).clbu, (cmd_list_phys >> 32) as u32);
-            
+
             // FIS Base (physical address)
             core::ptr::write_volatile(&mut (*port).fb, fis_phys as u32);
             core::ptr::write_volatile(&mut (*port).fbu, (fis_phys >> 32) as u32);
-            
+
             // Interrupt clear
             core::ptr::write_volatile(&mut (*port).is, 0xFFFFFFFF);
             core::ptr::write_volatile(&mut (*port).ie, 0);
-            
+
             // Command Table adresini Command Header'a yaz (physical address)
             let cmd_header = cmd_list.as_mut_ptr();
             (*cmd_header).ctba = cmd_table_phys as u32;
             (*cmd_header).ctbau = (cmd_table_phys >> 32) as u32;
             (*cmd_header).dw0 = (5 << 0) | (1 << 16); // 5 PRD entries, 1 PRDTL
-            
+
             // FIS Receive Enable + Start
             core::ptr::write_volatile(&mut (*port).cmd, CMD_FRE | CMD_ST);
-            
+
             // Bekle
             for _ in 0..100000 {
                 core::hint::spin_loop();
             }
-            
+
             let signature = core::ptr::read_volatile(&(*port).sig);
-            
+
             crate::serial_println!("[AHCI] Port {} initialized, sig={:#x}", port_idx, signature);
-            
+
             Some(Self {
                 port_idx,
                 port_base: port,
@@ -522,26 +543,26 @@ impl AhciPortDevice {
         if buffer.len() < BLOCK_SIZE {
             return Err(AhciError::IoError);
         }
-        
+
         unsafe {
             let port = self.port_base;
-            
+
             // Command table hazırla
             let ct = &mut *self.cmd_table.as_mut();
             let cmd_header = &mut *self.cmd_list.as_mut_ptr();
-            
+
             // PRDT ayarla
             ct.prdt[0].dba = buffer.as_ptr() as u32;
             ct.prdt[0].dbau = 0;
             ct.prdt[0].dbc = (BLOCK_SIZE - 1) as u32; // 0-indexed
-            
+
             // FIS hazırla
             let fis = &mut ct.cfis;
-            fis[0] = FIS_TYPE_REG_H2D;  // FIS type
-            fis[1] = 0x80;              // Command bit
+            fis[0] = FIS_TYPE_REG_H2D; // FIS type
+            fis[1] = 0x80; // Command bit
             fis[2] = ATA_CMD_READ_DMA_EXT;
-            fis[3] = 0;                 // feature
-            
+            fis[3] = 0; // feature
+
             // LBA (48-bit)
             fis[4] = lba as u8;
             fis[5] = (lba >> 8) as u8;
@@ -550,21 +571,21 @@ impl AhciPortDevice {
             fis[8] = (lba >> 24) as u8;
             fis[9] = (lba >> 32) as u8;
             fis[10] = (lba >> 40) as u8;
-            fis[11] = 0;                // feature exp
-            fis[12] = 1;                // sector count low
-            fis[13] = 0;                // sector count high
-            
+            fis[11] = 0; // feature exp
+            fis[12] = 1; // sector count low
+            fis[13] = 0; // sector count high
+
             // Command header
             cmd_header.dw0 = (1 << 16) | 5; // 1 PRDT entry, 5 Dwords
             cmd_header.prdbc = 0;
             cmd_header.ctba = self.cmd_table_phys as u32;
-            
+
             // Interrupt temizle
             core::ptr::write_volatile(&mut (*port).is, 0xFFFFFFFF);
-            
+
             // Command issue
             core::ptr::write_volatile(&mut (*port).ci, 1);
-            
+
             // Bekle (timeout ile)
             let mut timeout = 10000000u64;
             while timeout > 0 {
@@ -575,19 +596,19 @@ impl AhciPortDevice {
                 timeout -= 1;
                 core::hint::spin_loop();
             }
-            
+
             if timeout == 0 {
                 crate::serial_println!("[AHCI] Read timeout at LBA {}", lba);
                 return Err(AhciError::Timeout);
             }
-            
+
             // Task File Data kontrol et
             let tfd = core::ptr::read_volatile(&(*port).tfd);
             if tfd & 0x01 != 0 {
                 crate::serial_println!("[AHCI] Read error TFD=0x{:x}", tfd);
                 return Err(AhciError::CommandFailed);
             }
-            
+
             Ok(())
         }
     }
@@ -597,17 +618,17 @@ impl AhciPortDevice {
         if buffer.len() < BLOCK_SIZE {
             return Err(AhciError::IoError);
         }
-        
+
         unsafe {
             let port = self.port_base;
-            
+
             let ct = &mut *self.cmd_table.as_mut();
             let cmd_header = &mut *self.cmd_list.as_mut_ptr();
-            
+
             ct.prdt[0].dba = buffer.as_ptr() as u32;
             ct.prdt[0].dbau = 0;
             ct.prdt[0].dbc = (BLOCK_SIZE - 1) as u32;
-            
+
             let fis = &mut ct.cfis;
             fis[0] = FIS_TYPE_REG_H2D;
             fis[1] = 0x80;
@@ -623,13 +644,13 @@ impl AhciPortDevice {
             fis[11] = 0;
             fis[12] = 1;
             fis[13] = 0;
-            
+
             cmd_header.dw0 = (1 << 16) | 5 | (1 << 6); // Write bit
             cmd_header.prdbc = 0;
-            
+
             core::ptr::write_volatile(&mut (*port).is, 0xFFFFFFFF);
             core::ptr::write_volatile(&mut (*port).ci, 1);
-            
+
             let mut timeout = 10000000u64;
             while timeout > 0 {
                 let ci = core::ptr::read_volatile(&(*port).ci);
@@ -639,16 +660,16 @@ impl AhciPortDevice {
                 timeout -= 1;
                 core::hint::spin_loop();
             }
-            
+
             if timeout == 0 {
                 return Err(AhciError::Timeout);
             }
-            
+
             let tfd = core::ptr::read_volatile(&(*port).tfd);
             if tfd & 0x01 != 0 {
                 return Err(AhciError::CommandFailed);
             }
-            
+
             Ok(())
         }
     }
@@ -676,12 +697,14 @@ impl AhciBlockDevice {
 impl BlockDevice for AhciBlockDevice {
     fn read_block(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
         let mut port = self.port.lock();
-        port.read_sector(lba, buffer).map_err(|_| BlockDeviceError::IoError)
+        port.read_sector(lba, buffer)
+            .map_err(|_| BlockDeviceError::IoError)
     }
 
     fn write_block(&mut self, lba: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
         let mut port = self.port.lock();
-        port.write_sector(lba, buffer).map_err(|_| BlockDeviceError::IoError)
+        port.write_sector(lba, buffer)
+            .map_err(|_| BlockDeviceError::IoError)
     }
 
     fn block_size(&self) -> u32 {
@@ -714,7 +737,7 @@ lazy_static! {
 /// AHCI'yi başlat
 pub fn init() -> bool {
     crate::serial_println!("[AHCI] Initializing AHCI subsystem...");
-    
+
     match AhciController::find() {
         Some(ctrl) => {
             // Aktif port bul

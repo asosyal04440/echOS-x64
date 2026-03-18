@@ -1,8 +1,8 @@
 //! # VirtIO FFI (Foreign Function Interface) Katmanı
 //!
-//! Bu modül, VirtIO blok cihazı ile Rust kodunu C tabanlı sürücü stublara
-//! bağlayan köprü katmanıdır. Gerçek bir C arka ucu olmadığından stub
-//! (iskelet) implementasyonlar kullanılmaktadır.
+//! Bu modül, VirtIO blok cihazı ile Rust kodunu C ABI üzerinden bağlayan
+//! transport-gorunurluk katmanıdır. Gerçek queue/DMA arka ucu bağlı
+//! olmadığında veri yolu explicit hata ile kapanır.
 //!
 //! ## VirtIO Nedir?
 //!
@@ -27,8 +27,8 @@
 //!  │   virtio_disk_rw(sector, buf, write)          │
 //!  │           │                                   │
 //!  └───────────│───────────────────────────────────┘
-//!              ▼  (stub: gerçek C yok)
-//!         serial_println! (stub mesajı)
+//!              ▼  (queue/DMA backend bagli degilse explicit hata)
+//!         serial_println! (degraded durum raporu)
 //! ```
 //!
 //! ## virt_to_phys_c Fonksiyonu
@@ -50,13 +50,33 @@
 //! ```
 
 use core::sync::atomic::{AtomicU16, Ordering};
-use rcore_fs::dev::{Device, Result as DevResult};
+use rcore_fs::dev::{DevError, Device, Result as DevResult};
 use spin::Mutex;
 
+const INVALID_PHYS_ADDR: u64 = u64::MAX;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtioIoError {
+    DeviceNotInitialized,
+    BackendUnavailable,
+    AddressTranslationFailed,
+}
+
+impl VirtioIoError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeviceNotInitialized => "virtio-ffi: device not initialized",
+            Self::BackendUnavailable => {
+                "virtio-ffi: transport visible but data path backend is unavailable"
+            }
+            Self::AddressTranslationFailed => "virtio-ffi: virtual address translation failed",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// C arka ucu stub implementasyonları
-// Gerçek donanım sürücüsü bağlandığında bu fonksiyonlar gerçek
-// C kütüphanesi tarafından sağlanır.
+// C ABI baslatma koprusu.
+// Gercek queue/DMA backend baglandiginda veri yolu bu katmandan acilabilir.
 // ---------------------------------------------------------------------------
 
 fn virtio_disk_init(base_port: u16) {
@@ -86,24 +106,30 @@ fn virtio_disk_init(base_port: u16) {
     crate::serial_println!("VIRTIO FFI: virtio-blk initialized at {:#x}", base_port);
 }
 
-fn virtio_disk_rw(sector: u64, buf: *mut u8, write: i32) {
+fn virtio_disk_rw(
+    base_port: u16,
+    sector: u64,
+    buf: *mut u8,
+    write: i32,
+) -> Result<(), VirtioIoError> {
     let _lock = LOCK.lock();
-    let port = BASE_PORT.load(Ordering::Relaxed);
-    if port == 0 {
-        crate::serial_println!("VIRTIO FFI: No device initialized");
-        return;
+    if base_port == 0 {
+        crate::serial_println!("VIRTIO FFI: disk op rejected, device not initialized");
+        return Err(VirtioIoError::DeviceNotInitialized);
     }
-    // VirtIO-blk I/O: sektör adresini ve tampon adresini virtqueue'ya yaz
-    unsafe {
-        use x86_64::instructions::port::Port;
-        // Sektör adresini yaz (port + 8, 64-bit)
-        let mut sector_low_port = Port::<u32>::new(port + 8);
-        let mut sector_high_port = Port::<u32>::new(port + 12);
-        sector_low_port.write(sector as u32);
-        sector_high_port.write((sector >> 32) as u32);
-    }
+
     let op = if write != 0 { "write" } else { "read" };
-    crate::serial_println!("VIRTIO FFI: disk {} sector={} buf={:p}", op, sector, buf);
+    crate::serial_println!(
+        "VIRTIO FFI: disk {} sector={} buf={:p} rejected: no real backend",
+        op,
+        sector,
+        buf
+    );
+    Err(VirtioIoError::BackendUnavailable)
+}
+
+fn translate_phys_addr(ptr: *const u8) -> Result<u64, VirtioIoError> {
+    crate::memory::translate_addr(ptr as u64).ok_or(VirtioIoError::AddressTranslationFailed)
 }
 
 // ---------------------------------------------------------------------------
@@ -126,11 +152,15 @@ static BASE_PORT: AtomicU16 = AtomicU16::new(0);
 #[no_mangle]
 pub extern "C" fn virt_to_phys_c(ptr: *const u8) -> u64 {
     let vaddr = ptr as u64;
-    match crate::memory::translate_addr(vaddr) {
-        Some(paddr) => paddr,
-        None => {
-            crate::serial_println!("[VIRTIO FFI] virt_to_phys_c failed for vaddr={:#x}", vaddr);
-            panic!("virt_to_phys_c: unmapped virtual address");
+    match translate_phys_addr(ptr) {
+        Ok(paddr) => paddr,
+        Err(err) => {
+            crate::serial_println!(
+                "[VIRTIO FFI] virt_to_phys_c failed for vaddr={:#x}: {}",
+                vaddr,
+                err.as_str()
+            );
+            INVALID_PHYS_ADDR
         }
     }
 }
@@ -138,7 +168,7 @@ pub extern "C" fn virt_to_phys_c(ptr: *const u8) -> u64 {
 /// VirtIO FFI katmanını başlatır.
 ///
 /// # Adımlar
-/// 1. C stub başlatma fonksiyonunu çağır
+/// 1. C ABI başlatma fonksiyonunu çağır
 /// 2. BASE_PORT atomik değişkenine portu kaydet
 ///
 /// Atomik `SeqCst` (Sequentially Consistent) sıralama kullanılır:
@@ -162,7 +192,10 @@ pub fn device() -> Option<VirtioBlock> {
     if base_port == 0 {
         None
     } else {
-        crate::serial_println!("VIRTIO FFI: device ready base_port=0x{:x}", base_port);
+        crate::serial_println!(
+            "VIRTIO FFI: transport visible at base_port=0x{:x}; data path requires a real backend",
+            base_port
+        );
         Some(VirtioBlock { base_port })
     }
 }
@@ -180,24 +213,18 @@ impl VirtioBlock {
     ///
     /// `buf`: 512 byte'lık sabit boyutlu dizi referansı ([u8; 512])
     /// Mutex kilidi alınarak eşzamanlı erişim engellenir.
-    pub fn read_sector(&self, sector: u64, buf: &mut [u8; 512]) {
-        let _guard = LOCK.lock();
+    pub fn read_sector(&self, sector: u64, buf: &mut [u8; 512]) -> Result<(), VirtioIoError> {
         crate::serial_println!("VIRTIO FFI: read sector={}", sector);
-        unsafe {
-            virtio_disk_rw(sector, buf.as_mut_ptr(), 0);
-        }
+        virtio_disk_rw(self.base_port, sector, buf.as_mut_ptr(), 0)
     }
 
     /// Belirtilen sektöre yazar.
     ///
     /// `buf`: değişmez (immutable) referans → `as *mut u8` cast'i gerekir
     /// write=1 parametresi C fonksiyonuna yazma işlemi olduğunu bildirir.
-    pub fn write_sector(&self, sector: u64, buf: &[u8; 512]) {
-        let _guard = LOCK.lock();
+    pub fn write_sector(&self, sector: u64, buf: &[u8; 512]) -> Result<(), VirtioIoError> {
         crate::serial_println!("VIRTIO FFI: write sector={}", sector);
-        unsafe {
-            virtio_disk_rw(sector, buf.as_ptr() as *mut u8, 1);
-        }
+        virtio_disk_rw(self.base_port, sector, buf.as_ptr() as *mut u8, 1)
     }
 }
 
@@ -217,7 +244,6 @@ impl VirtioBlock {
 /// Döngü her iterasyonda en az 1 sektör işler ve `done` sayacını artırır.
 impl Device for VirtioBlock {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> DevResult<usize> {
-        let _guard = LOCK.lock();
         crate::serial_println!("VIRTIO FFI: read_at offset={} len={}", offset, buf.len());
         let mut sector_buf = [0u8; 512];
         let mut done = 0usize;
@@ -225,9 +251,8 @@ impl Device for VirtioBlock {
         while done < buf.len() {
             let sector = (cur_offset / 512) as u64;
             let within = cur_offset % 512;
-            unsafe {
-                virtio_disk_rw(sector, sector_buf.as_mut_ptr(), 0);
-            }
+            self.read_sector(sector, &mut sector_buf)
+                .map_err(|_| DevError)?;
             let to_copy = core::cmp::min(512 - within, buf.len() - done);
             buf[done..done + to_copy].copy_from_slice(&sector_buf[within..within + to_copy]);
             done += to_copy;
@@ -237,7 +262,6 @@ impl Device for VirtioBlock {
     }
 
     fn write_at(&self, offset: usize, buf: &[u8]) -> DevResult<usize> {
-        let _guard = LOCK.lock();
         crate::serial_println!("VIRTIO FFI: write_at offset={} len={}", offset, buf.len());
         let mut sector_buf = [0u8; 512];
         let mut done = 0usize;
@@ -246,16 +270,14 @@ impl Device for VirtioBlock {
             let sector = (cur_offset / 512) as u64;
             let within = cur_offset % 512;
             // Önce mevcut sektörü oku (read-modify-write: kısmi yazma için gerekli)
-            unsafe {
-                virtio_disk_rw(sector, sector_buf.as_mut_ptr(), 0);
-            }
+            self.read_sector(sector, &mut sector_buf)
+                .map_err(|_| DevError)?;
             let to_copy = core::cmp::min(512 - within, buf.len() - done);
             // Değiştirilecek kısmı güncelle
             sector_buf[within..within + to_copy].copy_from_slice(&buf[done..done + to_copy]);
             // Güncellenmiş sektörü geri yaz
-            unsafe {
-                virtio_disk_rw(sector, sector_buf.as_mut_ptr(), 1);
-            }
+            self.write_sector(sector, &sector_buf)
+                .map_err(|_| DevError)?;
             done += to_copy;
             cur_offset += to_copy;
         }
@@ -265,5 +287,30 @@ impl Device for VirtioBlock {
     /// Önbellek senkronizasyonu (bu implementasyonda gereksiz, her yazma anında senkron).
     fn sync(&self) -> DevResult<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{virt_to_phys_c, VirtioBlock, VirtioIoError, INVALID_PHYS_ADDR};
+
+    #[test]
+    fn sector_io_reports_missing_backend() {
+        let block = VirtioBlock { base_port: 0x1000 };
+        let mut buf = [0u8; 512];
+        assert_eq!(
+            block.read_sector(0, &mut buf),
+            Err(VirtioIoError::BackendUnavailable)
+        );
+        assert_eq!(
+            block.write_sector(0, &buf),
+            Err(VirtioIoError::BackendUnavailable)
+        );
+    }
+
+    #[test]
+    fn virt_to_phys_returns_invalid_sentinel_when_unmapped() {
+        let bogus = usize::MAX as *const u8;
+        assert_eq!(virt_to_phys_c(bogus), INVALID_PHYS_ADDR);
     }
 }

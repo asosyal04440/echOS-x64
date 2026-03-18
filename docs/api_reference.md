@@ -57,20 +57,7 @@ pub trait FileSystem {
 }
 ```
 
-### 2.2 Desteklenen Dosya Sistemleri
-| FS | Durum | Okuma | Yazma | Journal |
-|----|-------|-------|-------|---------|
-| ext4 | ✅ Tam | ✅ | ✅ | ✅ |
-| FAT32 | ✅ Tam | ✅ | ✅ | N/A |
-| tmpfs | ✅ Tam | ✅ | ✅ | N/A |
-| overlayfs | ✅ Tam | ✅ | ✅ | N/A |
-| procfs | ✅ Tam | ✅ | ❌ | N/A |
-| sysfs | ✅ Tam | ✅ | ❌ | N/A |
-| devtmpfs | ✅ Tam | ✅ | ❌ | N/A |
-| XFS | 🔶 Temel | ✅ | 🔶 | ❌ |
-| Btrfs | 🔶 Temel | ✅ | 🔶 | ❌ |
 
----
 
 ## 3. Syscall Arayüzü (Stable)
 
@@ -164,13 +151,3 @@ pub fn sleep(ms: u64);
 
 Tam komut listesi için `help` komutunu çalıştırın.
 
-### Kategori Özeti
-| Kategori | Komut Sayısı | Örnekler |
-|----------|-------------|----------|
-| Core | ~12 | `help`, `echo`, `clear`, `ls`, `cat` |
-| Process | ~6 | `ps`, `kill`, `top`, `bg`, `fg` |
-| Filesystem | ~15 | `mount`, `chmod`, `mkdir`, `rm`, `ln` |
-| System | ~12 | `uname`, `free`, `df`, `uptime`, `lsmod` |
-| Network | ~10 | `ping`, `ifconfig`, `http`, `dns`, `curl` |
-| Driver/Debug | ~15 | `tier-dashboard`, `hotplug`, `perf-audit`, `strace` |
-| Security | ~5 | `kaslr`, `jail-fence`, `cgroup` |

@@ -218,7 +218,7 @@ impl Signal {
 }
 
 /// Sinyal eylemi (Signal action)
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalAction {
     /// Varsayılan eylem (SIG_DFL)
     Default,

@@ -11,9 +11,13 @@
 //! fare üzerine gelme (`on_hover`) olaylarını destekler.
 //! Değer değiştiğinde isteğe bağlı bir `on_change` işleyicisi tetiklenir.
 
-use super::{Rect, Widget};
+use super::{
+    draw_render_objects, solid_rect_object, text_render_object_with_width, Rect, Widget,
+};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject};
 use crate::gui::theme::Theme;
+use alloc::vec::Vec;
 
 /// Kaydırma çubuğunun yönünü belirler.
 /// `Horizontal` yatay, `Vertical` dikey kulanım içindir.
@@ -170,67 +174,118 @@ impl ScrollBar {
         let relative_pos = (pos as usize).min(track_range);
         relative_pos * max_scroll / track_range
     }
+
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64) ^ 0x2000;
+        objects.push(solid_rect_object(
+            base_id,
+            self.rect,
+            Theme::BUTTON_BG.to_u32(),
+            DamageLane::Window,
+            0,
+        ));
+        let thumb = self.thumb_rect();
+        objects.push(solid_rect_object(
+            base_id ^ 1,
+            thumb,
+            if self.dragging {
+                Theme::ACCENT_PRIMARY.to_u32()
+            } else if self.hovered {
+                Theme::BUTTON_HOVER.to_u32()
+            } else {
+                Theme::TEXT_SECONDARY.to_u32()
+            },
+            DamageLane::Window,
+            1,
+        ));
+
+        match self.orientation {
+            Orientation::Horizontal => {
+                let left = Rect::new(self.rect.x, self.rect.y, 16, self.rect.height);
+                let right =
+                    Rect::new(self.rect.x + self.rect.width - 16, self.rect.y, 16, self.rect.height);
+                objects.push(solid_rect_object(
+                    base_id ^ 2,
+                    left,
+                    Theme::TITLEBAR_BG.to_u32(),
+                    DamageLane::Window,
+                    1,
+                ));
+                objects.push(solid_rect_object(
+                    base_id ^ 3,
+                    right,
+                    Theme::TITLEBAR_BG.to_u32(),
+                    DamageLane::Window,
+                    1,
+                ));
+                objects.push(text_render_object_with_width(
+                    base_id ^ 4,
+                    Rect::new(left.x + 4, left.y + ((left.height - 16) / 2), 8, 18),
+                    "<",
+                    Theme::TEXT_PRIMARY.to_u32(),
+                    false,
+                    DamageLane::Text,
+                    2,
+                ));
+                objects.push(text_render_object_with_width(
+                    base_id ^ 5,
+                    Rect::new(right.x + 4, right.y + ((right.height - 16) / 2), 8, 18),
+                    ">",
+                    Theme::TEXT_PRIMARY.to_u32(),
+                    false,
+                    DamageLane::Text,
+                    2,
+                ));
+            }
+            Orientation::Vertical => {
+                let top = Rect::new(self.rect.x, self.rect.y, self.rect.width, 16);
+                let bottom =
+                    Rect::new(self.rect.x, self.rect.y + self.rect.height - 16, self.rect.width, 16);
+                objects.push(solid_rect_object(
+                    base_id ^ 6,
+                    top,
+                    Theme::TITLEBAR_BG.to_u32(),
+                    DamageLane::Window,
+                    1,
+                ));
+                objects.push(solid_rect_object(
+                    base_id ^ 7,
+                    bottom,
+                    Theme::TITLEBAR_BG.to_u32(),
+                    DamageLane::Window,
+                    1,
+                ));
+                objects.push(text_render_object_with_width(
+                    base_id ^ 8,
+                    Rect::new(top.x + ((top.width - 8) / 2), top.y + 2, 8, 18),
+                    "^",
+                    Theme::TEXT_PRIMARY.to_u32(),
+                    false,
+                    DamageLane::Text,
+                    2,
+                ));
+                objects.push(text_render_object_with_width(
+                    base_id ^ 9,
+                    Rect::new(bottom.x + ((bottom.width - 8) / 2), bottom.y + 2, 8, 18),
+                    "v",
+                    Theme::TEXT_PRIMARY.to_u32(),
+                    false,
+                    DamageLane::Text,
+                    2,
+                ));
+            }
+        }
+
+        objects
+    }
 }
 
 impl Widget for ScrollBar {
     /// Kaydırma çubuğunu çizer.
     /// Sırasıyla: iz arka planı → thumb (sürükleme/hover durumuna göre renkli) → ok düğmeleri.
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-
-        // İz arka planı — gri dolgu alanı
-        fb.draw_rect(x, y, w, h, Theme::BUTTON_BG.to_u32());
-
-        // Thumb rengi: sürükleniyorsa aksent, üstündeyse hover, normalde soluk
-        let thumb = self.thumb_rect();
-        let thumb_color = if self.dragging {
-            Theme::ACCENT_PRIMARY.to_u32()
-        } else if self.hovered {
-            Theme::BUTTON_HOVER.to_u32()
-        } else {
-            Theme::TEXT_SECONDARY.to_u32()
-        };
-
-        fb.draw_rect(
-            thumb.x as usize,
-            thumb.y as usize,
-            thumb.width as usize,
-            thumb.height as usize,
-            thumb_color,
-        );
-
-        // Ok düğmeleri — yöne göre "<"/">" veya "^"/"v" karakterleri
-        match self.orientation {
-            Orientation::Horizontal => {
-                // Sol ok düğmesi
-                fb.draw_rect(x, y, 16, h, Theme::TITLEBAR_BG.to_u32());
-                fb.draw_string(x + 4, y + (h - 16) / 2, "<", Theme::TEXT_PRIMARY.to_u32());
-                // Sağ ok düğmesi
-                fb.draw_rect(x + w - 16, y, 16, h, Theme::TITLEBAR_BG.to_u32());
-                fb.draw_string(
-                    x + w - 12,
-                    y + (h - 16) / 2,
-                    ">",
-                    Theme::TEXT_PRIMARY.to_u32(),
-                );
-            }
-            Orientation::Vertical => {
-                // Yukarı ok düğmesi
-                fb.draw_rect(x, y, w, 16, Theme::TITLEBAR_BG.to_u32());
-                fb.draw_string(x + (w - 8) / 2, y + 2, "^", Theme::TEXT_PRIMARY.to_u32());
-                // Aşağı ok düğmesi
-                fb.draw_rect(x, y + h - 16, w, 16, Theme::TITLEBAR_BG.to_u32());
-                fb.draw_string(
-                    x + (w - 8) / 2,
-                    y + h - 14,
-                    "v",
-                    Theme::TEXT_PRIMARY.to_u32(),
-                );
-            }
-        }
+        draw_render_objects(fb, self.rect, &self.render_primitives());
     }
 
     /// Tıklama olayını işler.
@@ -365,6 +420,10 @@ impl Widget for ScrollBar {
     fn bounds(&self) -> Rect {
         self.rect
     }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
+    }
 }
 
 /// Değer seçici kaydırıcı widget'ı.
@@ -462,52 +521,67 @@ impl Slider {
         .max(self.min_value)
         .min(self.max_value)
     }
+
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64) ^ 0x3000;
+        let track_y = self.rect.y + self.rect.height / 2 - 4;
+        objects.push(solid_rect_object(
+            base_id,
+            Rect::new(self.rect.x + 10, track_y, self.rect.width - 20, 8),
+            Theme::BUTTON_BG.to_u32(),
+            DamageLane::Window,
+            0,
+        ));
+        let thumb_x = self.rect.x + 10 + self.thumb_position();
+        let fill_width = (thumb_x - (self.rect.x + 10)).max(0);
+        if fill_width > 0 {
+            objects.push(solid_rect_object(
+                base_id ^ 1,
+                Rect::new(self.rect.x + 10, track_y, fill_width, 8),
+                Theme::ACCENT_PRIMARY.to_u32(),
+                DamageLane::Window,
+                1,
+            ));
+        }
+        objects.push(solid_rect_object(
+            base_id ^ 2,
+            Rect::new(thumb_x - 8, self.rect.y + 2, 16, self.rect.height - 4),
+            if self.dragging {
+                Theme::ACCENT_PRIMARY.to_u32()
+            } else if self.hovered {
+                Theme::BUTTON_HOVER.to_u32()
+            } else {
+                Theme::TEXT_PRIMARY.to_u32()
+            },
+            DamageLane::Window,
+            2,
+        ));
+        let value_str = alloc::format!("{}", self.value);
+        let label_x = self.rect.x + self.rect.width - value_str.len() as i32 * 8 - 5;
+        objects.push(text_render_object_with_width(
+            base_id ^ 3,
+            Rect::new(
+                label_x,
+                self.rect.y + ((self.rect.height - 16) / 2),
+                ((self.rect.x + self.rect.width) - label_x).max(1),
+                18,
+            ),
+            &value_str,
+            Theme::TEXT_SECONDARY.to_u32(),
+            false,
+            DamageLane::Text,
+            3,
+        ));
+        objects
+    }
 }
 
 impl Widget for Slider {
     /// Kaydırıcıyı çizer.
     /// Sırasıyla: gri iz → aksent renkli dolum bölümü → thumb dikdörtgeni → değer etiketi.
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-        // İz dikey olarak ortalanır; yüksekliği 8 pikseldir
-        let track_y = y + h / 2 - 4;
-
-        // Gri iz arka planı — 10 px iç boşlukla başlar
-        fb.draw_rect(x + 10, track_y, w - 20, 8, Theme::BUTTON_BG.to_u32());
-
-        // Soldan thumb'a kadar dolumu aksent rengiyle göster
-        let thumb_x = x + 10 + self.thumb_position() as usize;
-        fb.draw_rect(
-            x + 10,
-            track_y,
-            thumb_x - x - 10,
-            8,
-            Theme::ACCENT_PRIMARY.to_u32(),
-        );
-
-        // Thumb dikdörtgeni — sürükleniyorsa aksent, üstündeyse hover rengi
-        let thumb_color = if self.dragging {
-            Theme::ACCENT_PRIMARY.to_u32()
-        } else if self.hovered {
-            Theme::BUTTON_HOVER.to_u32()
-        } else {
-            Theme::TEXT_PRIMARY.to_u32()
-        };
-
-        fb.draw_rect(thumb_x - 8, y + 2, 16, h as usize - 4, thumb_color);
-
-        // Sağ kenarında mevcut değerin metin etiketi
-        let value_str = alloc::format!("{}", self.value);
-        let label_x = x + w - value_str.len() * 8 - 5;
-        fb.draw_string(
-            label_x,
-            y + (h - 16) / 2,
-            &value_str,
-            Theme::TEXT_SECONDARY.to_u32(),
-        );
+        draw_render_objects(fb, self.rect, &self.render_primitives());
     }
 
     /// Tıklama olayını işler.
@@ -560,5 +634,9 @@ impl Widget for Slider {
     /// Widget sınırlarını döndürür.
     fn bounds(&self) -> Rect {
         self.rect
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }

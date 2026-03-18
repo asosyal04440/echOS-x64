@@ -64,6 +64,12 @@ pub mod wallpaper;
 /// Blur ve gölge efektleri
 pub mod blur;
 
+/// Scene-backed shell surface helpers
+pub mod shell_scene;
+
+/// Shell frame invalidation and publication planning
+pub mod shell_invalidation;
+
 /// Velvet Glove Compositor - echOS native desktop runtime
 pub mod velvet_glove;
 

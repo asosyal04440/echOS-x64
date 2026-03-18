@@ -1,0 +1,888 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>echOS Hypr-Pro Shell Screens</title>
+  <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  <style>
+    :root {
+      --bg-0: #071019;
+      --bg-1: #0d1724;
+      --bg-2: #132131;
+      --surface-0: rgba(13, 23, 36, 0.94);
+      --surface-1: rgba(18, 30, 44, 0.96);
+      --surface-2: rgba(23, 38, 55, 0.98);
+      --line-0: #2b4156;
+      --line-1: #48617a;
+      --text-0: #edf4fb;
+      --text-1: #a6b7ca;
+      --text-2: #6d8196;
+      --aqua: #29e4c6;
+      --azure: #60b8ff;
+      --gold: #ffbb57;
+      --coral: #ff7474;
+      --mint: #5de1a4;
+      --violet: #7f8cff;
+      --radius-sm: 14px;
+      --radius-md: 20px;
+      --radius-lg: 28px;
+      --shadow-lg: 0 26px 90px rgba(0, 0, 0, 0.44);
+      --shadow-md: 0 20px 60px rgba(0, 0, 0, 0.34);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--text-0);
+      font-family: "Segoe UI Variable", "Segoe UI", Arial, sans-serif;
+      background:
+        radial-gradient(circle at 15% 10%, rgba(41, 228, 198, 0.14), transparent 22%),
+        radial-gradient(circle at 88% 12%, rgba(96, 184, 255, 0.12), transparent 20%),
+        linear-gradient(180deg, #071019 0%, #122133 100%);
+    }
+
+    .page {
+      width: 1600px;
+      min-height: 980px;
+      margin: 48px auto;
+      padding: 36px;
+      border-radius: 36px;
+      border: 1px solid rgba(72, 97, 122, 0.7);
+      background: rgba(7, 16, 25, 0.84);
+      box-shadow: var(--shadow-lg);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .page::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(41, 228, 198, 0.04), transparent 18%),
+        linear-gradient(180deg, rgba(96, 184, 255, 0.05), transparent 30%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      color: var(--aqua);
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 42px; line-height: 1.04; }
+    h2 { font-size: 28px; margin-bottom: 12px; }
+    h3 { font-size: 18px; margin-bottom: 8px; }
+    p { color: var(--text-1); line-height: 1.5; }
+
+    .header {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 28px;
+      align-items: end;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+      align-self: start;
+    }
+
+    .pill {
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(43, 65, 86, 0.95);
+      background: rgba(13, 23, 36, 0.92);
+      color: var(--text-1);
+      font-size: 12px;
+    }
+
+    .desktop {
+      margin-top: 30px;
+      min-height: 760px;
+      border-radius: 30px;
+      border: 1px solid rgba(72, 97, 122, 0.85);
+      background:
+        radial-gradient(circle at top left, rgba(41, 228, 198, 0.1), transparent 22%),
+        radial-gradient(circle at top right, rgba(96, 184, 255, 0.12), transparent 24%),
+        linear-gradient(180deg, #0c1722 0%, #132334 100%);
+      position: relative;
+      overflow: hidden;
+      padding: 22px;
+    }
+
+    .mesh {
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(255,255,255,0.018) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(255,255,255,0.018) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: linear-gradient(180deg, rgba(255,255,255,0.22), transparent 88%);
+      pointer-events: none;
+    }
+
+    .topbar {
+      position: relative;
+      z-index: 2;
+      height: 62px;
+      padding: 0 18px;
+      border-radius: 20px;
+      border: 1px solid rgba(43, 65, 86, 0.95);
+      background: rgba(10, 19, 30, 0.84);
+      backdrop-filter: blur(14px);
+      display: grid;
+      grid-template-columns: 200px 1fr 320px;
+      gap: 16px;
+      align-items: center;
+      box-shadow: inset 0 1px 0 rgba(96, 184, 255, 0.18);
+    }
+
+    .brand {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .workspace-pills {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+    }
+
+    .ws {
+      min-width: 56px;
+      height: 38px;
+      border-radius: 14px;
+      border: 1px solid rgba(43, 65, 86, 0.9);
+      background: rgba(13, 23, 36, 0.86);
+      display: grid;
+      place-items: center;
+      color: var(--text-2);
+      font-size: 13px;
+    }
+
+    .ws.active {
+      color: var(--text-0);
+      box-shadow: inset 0 1px 0 var(--aqua);
+      background: linear-gradient(180deg, rgba(20, 36, 51, 0.98), rgba(12, 22, 34, 0.96));
+    }
+
+    .command {
+      height: 40px;
+      border-radius: 14px;
+      border: 1px solid rgba(43, 65, 86, 0.9);
+      background: rgba(9, 16, 24, 0.78);
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+      color: var(--text-2);
+      font-size: 14px;
+    }
+
+    .status {
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--text-1);
+    }
+
+    .hero {
+      position: relative;
+      z-index: 2;
+      width: 420px;
+      margin-top: 28px;
+      padding: 20px;
+      border-radius: 22px;
+      border: 1px solid rgba(43, 65, 86, 0.92);
+      background: rgba(12, 21, 33, 0.8);
+      backdrop-filter: blur(10px);
+      box-shadow: inset 0 1px 0 rgba(41, 228, 198, 0.4);
+    }
+
+    .hero h2 { margin-bottom: 10px; }
+
+    .hero-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .metric {
+      padding: 12px;
+      border-radius: 16px;
+      border: 1px solid rgba(43, 65, 86, 0.92);
+      background: rgba(18, 30, 44, 0.95);
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 20px;
+      margin-bottom: 4px;
+    }
+
+    .window {
+      position: absolute;
+      z-index: 2;
+      border-radius: 24px;
+      border: 1px solid rgba(72, 97, 122, 0.95);
+      background: rgba(18, 29, 42, 0.95);
+      box-shadow: var(--shadow-md);
+      overflow: hidden;
+      backdrop-filter: blur(14px);
+    }
+
+    .window.main {
+      right: 68px;
+      top: 124px;
+      width: 780px;
+      height: 480px;
+    }
+
+    .window.floating {
+      right: 110px;
+      bottom: 130px;
+      width: 300px;
+      height: 238px;
+    }
+
+    .titlebar {
+      height: 56px;
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(15, 24, 35, 0.96);
+      border-bottom: 1px solid rgba(43, 65, 86, 0.95);
+    }
+
+    .title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+      color: var(--text-0);
+    }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+    }
+
+    .control {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+    }
+
+    .window-body {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .terminal-bar {
+      height: 38px;
+      border-radius: 12px;
+      border: 1px solid rgba(43, 65, 86, 0.9);
+      background: rgba(9, 16, 24, 0.76);
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      color: var(--text-2);
+      font-size: 13px;
+    }
+
+    .terminal-grid {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 14px;
+      min-height: 340px;
+    }
+
+    .terminal-side, .terminal-main {
+      border-radius: 18px;
+      border: 1px solid rgba(43, 65, 86, 0.9);
+      background: rgba(11, 19, 28, 0.84);
+      padding: 14px;
+    }
+
+    .nav-item,
+    .line-item,
+    .menu-item,
+    .notif-item,
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(43, 65, 86, 0.88);
+      background: rgba(14, 23, 35, 0.9);
+      color: var(--text-1);
+    }
+
+    .nav-item.active,
+    .line-item.active {
+      box-shadow: inset 0 1px 0 var(--aqua);
+      color: var(--text-0);
+    }
+
+    .line-stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .dock {
+      position: absolute;
+      z-index: 3;
+      left: 50%;
+      bottom: 26px;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 14px;
+      padding: 14px 18px;
+      border-radius: 22px;
+      border: 1px solid rgba(43, 65, 86, 0.95);
+      background: rgba(9, 16, 24, 0.82);
+      backdrop-filter: blur(14px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .app {
+      width: 52px;
+      height: 52px;
+      border-radius: 16px;
+      border: 1px solid rgba(43, 65, 86, 0.9);
+      background: rgba(17, 28, 41, 0.96);
+      display: grid;
+      place-items: center;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-0);
+    }
+
+    .app.active {
+      box-shadow: inset 0 1px 0 var(--aqua);
+    }
+
+    .overlay {
+      position: absolute;
+      z-index: 4;
+      border-radius: 24px;
+      border: 1px solid rgba(72, 97, 122, 0.95);
+      background: rgba(11, 18, 28, 0.88);
+      backdrop-filter: blur(20px);
+      box-shadow: var(--shadow-md);
+      overflow: hidden;
+    }
+
+    .overlay.panel {
+      padding: 18px;
+    }
+
+    .page-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 18px;
+      margin-top: 24px;
+    }
+
+    .mini-card {
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(43, 65, 86, 0.92);
+      background: rgba(12, 20, 30, 0.92);
+    }
+
+    .mini-grid {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .token-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 22px;
+    }
+
+    .token {
+      min-height: 102px;
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(43, 65, 86, 0.92);
+      background: rgba(13, 23, 35, 0.94);
+    }
+
+    .swatch {
+      width: 100%;
+      height: 28px;
+      border-radius: 10px;
+      margin-bottom: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .motion-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+      margin-top: 22px;
+    }
+
+    .motion-card {
+      padding: 18px;
+      border-radius: 20px;
+      border: 1px solid rgba(43, 65, 86, 0.92);
+      background: rgba(13, 23, 35, 0.94);
+    }
+
+    .timeline {
+      margin-top: 16px;
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(22, 33, 46, 0.95);
+      border: 1px solid rgba(43, 65, 86, 0.95);
+    }
+
+    .timeline > span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--aqua), var(--azure));
+    }
+
+    .handoff {
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 24px;
+      margin-top: 24px;
+    }
+
+    .node-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .node {
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(43, 65, 86, 0.92);
+      background: rgba(12, 21, 31, 0.92);
+      font-size: 13px;
+      color: var(--text-1);
+    }
+
+    .caption {
+      font-size: 12px;
+      color: var(--text-2);
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <section class="page" id="desktop">
+    <div class="header">
+      <div>
+        <div class="eyebrow">02 Desktop</div>
+        <h1>Hypr-Pro clean desktop</h1>
+        <p>Boş ama ölü olmayan açılış. Top bar, dock ve tek bir sakin hero yüzeyi var. Launcher varsayılan kapalı, pencere chrome sade ve ürünleşmiş.</p>
+      </div>
+      <div class="pill-row">
+        <span class="pill">Clean desktop default</span>
+        <span class="pill">Dock-first launch</span>
+        <span class="pill">Quiet information density</span>
+        <span class="pill">Terminal as hero window</span>
+      </div>
+    </div>
+    <div class="desktop">
+      <div class="mesh"></div>
+      <div class="topbar">
+        <div class="brand">echOS</div>
+        <div class="workspace-pills">
+          <div class="ws active">1</div>
+          <div class="ws">2</div>
+          <div class="ws">3</div>
+          <div class="ws">4</div>
+          <div class="command">Search / Command</div>
+        </div>
+        <div class="status">
+          <span>NET</span>
+          <span>AUD</span>
+          <span>PWR</span>
+          <span>12:00</span>
+        </div>
+      </div>
+      <div class="hero">
+        <h2>System ready.</h2>
+        <p>Terminal, Files ve Settings dock üstünde bekliyor. Overlay’ler sessiz, workspace alanı nefes alıyor.</p>
+        <div class="hero-metrics">
+          <div class="metric"><strong>6 ms</strong><span>frame avg</span></div>
+          <div class="metric"><strong>3</strong><span>active tasks</span></div>
+          <div class="metric"><strong>2</strong><span>tiles queued</span></div>
+        </div>
+      </div>
+      <div class="window main">
+        <div class="titlebar">
+          <div class="title"><span style="color: var(--aqua);">●</span> Terminal</div>
+          <div class="controls">
+            <span class="control" style="background: var(--gold);"></span>
+            <span class="control" style="background: var(--mint);"></span>
+            <span class="control" style="background: var(--coral);"></span>
+          </div>
+        </div>
+        <div class="window-body">
+          <div class="terminal-bar">~/workspace/echOS | session 01</div>
+          <div class="terminal-grid">
+            <div class="terminal-side">
+              <div class="line-stack">
+                <div class="nav-item active"><span>Pinned</span><span>3</span></div>
+                <div class="nav-item"><span>Recent</span><span>8</span></div>
+                <div class="nav-item"><span>Builds</span><span>2</span></div>
+                <div class="nav-item"><span>Workspaces</span><span>4</span></div>
+              </div>
+            </div>
+            <div class="terminal-main">
+              <div class="line-stack">
+                <div class="line-item active"><span>cargo build --target x86_64-unknown-uefi</span><span>done</span></div>
+                <div class="line-item"><span>qemu smoke --profile fast</span><span>ok</span></div>
+                <div class="line-item"><span>ui shell status</span><span>desktop-ready</span></div>
+                <div class="line-item"><span>_</span><span></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="window floating">
+        <div class="titlebar">
+          <div class="title"><span style="color: var(--azure);">●</span> System Monitor</div>
+          <div class="controls">
+            <span class="control" style="background: var(--gold);"></span>
+            <span class="control" style="background: var(--coral);"></span>
+          </div>
+        </div>
+        <div class="window-body">
+          <div class="line-stack">
+            <div class="line-item"><span>Render budget</span><span>stable</span></div>
+            <div class="line-item"><span>Damage lane</span><span>overlay</span></div>
+            <div class="line-item"><span>Text atlas</span><span>92%</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="dock">
+        <div class="app active">T</div>
+        <div class="app">F</div>
+        <div class="app">S</div>
+        <div class="app">W</div>
+        <div class="app">N</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="page" id="window-chrome">
+    <div class="header">
+      <div>
+        <div class="eyebrow">03 Window Chrome</div>
+        <h1>One chrome language for tiled, floating, modal</h1>
+        <p>Focused, inactive ve modal pencere tipleri aynı sistemden konuşuyor. Fazla neon yok; okunaklı border, sakin elevation ve net hierarchy var.</p>
+      </div>
+      <div class="pill-row">
+        <span class="pill">Focused hierarchy</span>
+        <span class="pill">Low-noise controls</span>
+        <span class="pill">Terminal as reference window</span>
+      </div>
+    </div>
+    <div class="page-grid">
+      <div class="mini-card">
+        <h3>Focused window</h3>
+        <div class="window" style="position: relative; inset: auto; width: 100%; height: 340px; margin-top: 14px;">
+          <div class="titlebar">
+            <div class="title"><span style="color: var(--aqua);">●</span> Terminal</div>
+            <div class="controls">
+              <span class="control" style="background: var(--gold);"></span>
+              <span class="control" style="background: var(--mint);"></span>
+              <span class="control" style="background: var(--coral);"></span>
+            </div>
+          </div>
+          <div class="window-body">
+            <div class="terminal-bar">focused / high-contrast title / thin edge</div>
+            <div class="line-stack">
+              <div class="line-item active"><span>accent top-edge</span><span>aqua</span></div>
+              <div class="line-item"><span>shadow depth</span><span>28px</span></div>
+              <div class="line-item"><span>title opacity</span><span>100%</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="mini-card">
+        <h3>Inactive + modal stack</h3>
+        <div class="desktop" style="min-height: 340px; padding: 18px; margin-top: 14px;">
+          <div class="window" style="position: absolute; left: 28px; top: 38px; width: 72%; height: 230px; opacity: 0.78;">
+            <div class="titlebar"><div class="title"><span style="color: var(--text-2);">●</span> Files</div></div>
+          </div>
+          <div class="overlay panel" style="right: 34px; top: 58px; width: 46%; min-height: 210px;">
+            <h3>Rename project</h3>
+            <div class="mini-grid">
+              <div class="menu-item"><span>Current</span><span>echOS</span></div>
+              <div class="menu-item"><span>Preview</span><span>echOS-next</span></div>
+              <div class="menu-item"><span>Action</span><span>Confirm</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="page" id="launcher-palette">
+    <div class="header">
+      <div>
+        <div class="eyebrow">04 Launcher + Palette</div>
+        <h1>Dock-first launch, command-first search</h1>
+        <p>Launcher bir mega-panel değil. Dock hızlı giriş, palette ise arama ve aksiyon alanı. Aynı anda bağırmıyorlar.</p>
+      </div>
+      <div class="pill-row">
+        <span class="pill">Launcher minimized</span>
+        <span class="pill">Palette primary</span>
+        <span class="pill">Recents + actions</span>
+      </div>
+    </div>
+    <div class="desktop">
+      <div class="mesh"></div>
+      <div class="topbar">
+        <div class="brand">echOS</div>
+        <div class="command">Search apps, files, commands, sessions</div>
+        <div class="status"><span>Workspace 1</span><span>Palette</span><span>12:00</span></div>
+      </div>
+      <div class="overlay panel" style="left: 50%; top: 118px; width: 760px; min-height: 420px; transform: translateX(-50%);">
+        <h2>Command Palette</h2>
+        <p>Tek giriş noktası: uygulama, komut, recent, workspace action.</p>
+        <div class="mini-grid" style="margin-top: 16px;">
+          <div class="menu-item"><span>Launch Terminal</span><span>Enter</span></div>
+          <div class="menu-item"><span>Open Quick Settings</span><span>Cmd+,</span></div>
+          <div class="menu-item"><span>Switch to Workspace 2</span><span>Cmd+2</span></div>
+          <div class="menu-item"><span>Find build logs</span><span>Recent</span></div>
+          <div class="menu-item"><span>Toggle scratchpad</span><span>Cmd+S</span></div>
+        </div>
+      </div>
+      <div class="dock">
+        <div class="app active">T</div>
+        <div class="app">F</div>
+        <div class="app">S</div>
+        <div class="app">B</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="page" id="overview-workspaces">
+    <div class="header">
+      <div>
+        <div class="eyebrow">05 Overview + Workspaces</div>
+        <h1>Overview as a true workspace control surface</h1>
+        <p>Stage rail dekor değil. Thumbnail, layout, activity ve pinned state aynı yüzeyde okunuyor.</p>
+      </div>
+      <div class="pill-row">
+        <span class="pill">Thumbnail-first</span>
+        <span class="pill">Layout metadata</span>
+        <span class="pill">Workspace grammar</span>
+      </div>
+    </div>
+    <div class="desktop">
+      <div class="mesh"></div>
+      <div class="overlay panel" style="left: 50%; top: 72px; width: 1320px; min-height: 650px; transform: translateX(-50%);">
+        <h2>Workspaces</h2>
+        <div class="page-grid">
+          <div class="mini-card">
+            <h3>Workspace 1</h3>
+            <p>Terminal + Monitor · layout: dwindle</p>
+            <div class="desktop" style="min-height: 260px; margin-top: 14px; padding: 16px;">
+              <div class="window" style="position: absolute; left: 18px; top: 20px; width: 58%; height: 190px;"></div>
+              <div class="window" style="position: absolute; right: 18px; top: 52px; width: 28%; height: 142px;"></div>
+            </div>
+          </div>
+          <div class="mini-card">
+            <h3>Workspace 2</h3>
+            <p>Files + Editor · layout: master</p>
+            <div class="desktop" style="min-height: 260px; margin-top: 14px; padding: 16px;">
+              <div class="window" style="position: absolute; left: 18px; top: 20px; width: 62%; height: 194px;"></div>
+              <div class="window" style="position: absolute; right: 18px; top: 20px; width: 26%; height: 92px;"></div>
+              <div class="window" style="position: absolute; right: 18px; top: 122px; width: 26%; height: 92px;"></div>
+            </div>
+          </div>
+          <div class="mini-card">
+            <h3>Workspace 3</h3>
+            <p>Idle shell · layout: clean</p>
+            <div class="desktop" style="min-height: 260px; margin-top: 14px; padding: 16px;">
+              <div class="hero" style="width: 75%; margin-top: 30px;">No active windows. Dock and top bar only.</div>
+            </div>
+          </div>
+          <div class="mini-card">
+            <h3>Special scratchpad</h3>
+            <p>Pinned tools and transient actions</p>
+            <div class="desktop" style="min-height: 260px; margin-top: 14px; padding: 16px;">
+              <div class="overlay panel" style="position: absolute; left: 50%; top: 48px; width: 72%; transform: translateX(-50%); min-height: 160px;">
+                <div class="mini-grid">
+                  <div class="menu-item"><span>Terminal scratch</span><span>hidden</span></div>
+                  <div class="menu-item"><span>Metrics</span><span>pinned</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="page" id="quicksettings-notifications">
+    <div class="header">
+      <div>
+        <div class="eyebrow">06 Quick Settings + Notifications</div>
+        <h1>Utility overlays that stay out of the way</h1>
+        <p>Quick settings sağ üstten akar, notifications ayrı lane’de. Aynı anda açık olsalar bile odak dili çakışmaz.</p>
+      </div>
+      <div class="pill-row">
+        <span class="pill">Overlay priority</span>
+        <span class="pill">Utility-first density</span>
+        <span class="pill">No debug panel feel</span>
+      </div>
+    </div>
+    <div class="desktop">
+      <div class="mesh"></div>
+      <div class="topbar">
+        <div class="brand">echOS</div>
+        <div></div>
+        <div class="status"><span>NET 98%</span><span>AUD 36%</span><span>12:00</span></div>
+      </div>
+      <div class="overlay panel" style="right: 36px; top: 96px; width: 360px; min-height: 440px;">
+        <h2>Quick settings</h2>
+        <div class="mini-grid">
+          <div class="toggle-row"><span>Wi-Fi</span><span>On</span></div>
+          <div class="toggle-row"><span>Audio</span><span>36%</span></div>
+          <div class="toggle-row"><span>Brightness</span><span>82%</span></div>
+          <div class="toggle-row"><span>Render mode</span><span>Hybrid</span></div>
+          <div class="toggle-row"><span>Night accent</span><span>Off</span></div>
+        </div>
+      </div>
+      <div class="overlay panel" style="right: 420px; top: 118px; width: 340px; min-height: 326px;">
+        <h2>Notifications</h2>
+        <div class="mini-grid">
+          <div class="notif-item"><span>Build succeeded</span><span>now</span></div>
+          <div class="notif-item"><span>Workspace 2 synced</span><span>2m</span></div>
+          <div class="notif-item"><span>GPU path idle</span><span>5m</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="page" id="tokens-motion-handoff">
+    <div class="header">
+      <div>
+        <div class="eyebrow">07 Motion · 08 Handoff</div>
+        <h1>Tokens, motion, node boundaries</h1>
+        <p>Rust theme sistemiyle birebir isimlenebilir token seti, tek motion ailesi ve implementation-ready node sınırları.</p>
+      </div>
+      <div class="pill-row">
+        <span class="pill">Token-ready</span>
+        <span class="pill">Motion grammar</span>
+        <span class="pill">Node naming contract</span>
+      </div>
+    </div>
+    <div class="token-grid">
+      <div class="token">
+        <div class="swatch" style="background: #0d1724;"></div>
+        <h3>surface/base</h3>
+        <p>Desktop and idle shell foundation</p>
+      </div>
+      <div class="token">
+        <div class="swatch" style="background: #132131;"></div>
+        <h3>surface/panel</h3>
+        <p>Top bar, dock, quick settings</p>
+      </div>
+      <div class="token">
+        <div class="swatch" style="background: #29e4c6;"></div>
+        <h3>accent/aqua</h3>
+        <p>Focus edge and active state</p>
+      </div>
+      <div class="token">
+        <div class="swatch" style="background: #60b8ff;"></div>
+        <h3>accent/azure</h3>
+        <p>Search, info, secondary glow</p>
+      </div>
+      <div class="token">
+        <div class="swatch" style="background: #ffbb57;"></div>
+        <h3>accent/gold</h3>
+        <p>Window controls and warning accent</p>
+      </div>
+      <div class="token">
+        <div class="swatch" style="background: #edf4fb;"></div>
+        <h3>text/high</h3>
+        <p>Primary chrome and window titles</p>
+      </div>
+      <div class="token">
+        <div class="swatch" style="background: #a6b7ca;"></div>
+        <h3>text/medium</h3>
+        <p>Settings and informative metadata</p>
+      </div>
+      <div class="token">
+        <div class="swatch" style="background: #2b4156;"></div>
+        <h3>line/default</h3>
+        <p>Default edge and separator token</p>
+      </div>
+    </div>
+    <div class="motion-grid">
+      <div class="motion-card">
+        <h3>Workspace switch</h3>
+        <p>180ms · ease-out · slidefade</p>
+        <div class="timeline"><span style="width: 82%;"></span></div>
+      </div>
+      <div class="motion-card">
+        <h3>Overlay reveal</h3>
+        <p>140ms · ease-out · fade + y12</p>
+        <div class="timeline"><span style="width: 64%;"></span></div>
+      </div>
+      <div class="motion-card">
+        <h3>Focus shift</h3>
+        <p>120ms · soft spring · border/shadow only</p>
+        <div class="timeline"><span style="width: 54%;"></span></div>
+      </div>
+    </div>
+    <div class="handoff">
+      <div class="mini-card">
+        <h3>Node map</h3>
+        <div class="node-list">
+          <div class="node">Desktop/TopBar</div>
+          <div class="node">Desktop/Dock</div>
+          <div class="node">WindowChrome/Terminal/Focused</div>
+          <div class="node">Overlay/CommandPalette</div>
+          <div class="node">Overlay/QuickSettings</div>
+          <div class="node">Overlay/Notifications</div>
+          <div class="node">Overview/WorkspaceCard</div>
+        </div>
+      </div>
+      <div class="mini-card">
+        <h3>Implementation notes</h3>
+        <div class="mini-grid">
+          <div class="menu-item"><span>TopBar</span><span>primitive scene</span></div>
+          <div class="menu-item"><span>Dock</span><span>widget + layout tree</span></div>
+          <div class="menu-item"><span>Terminal chrome</span><span>reference component</span></div>
+          <div class="menu-item"><span>Quick settings</span><span>overlay lane</span></div>
+          <div class="menu-item"><span>Overview</span><span>thumbnail grid</span></div>
+        </div>
+        <div class="caption">Node names intentionally match future `get_design_context` and token-to-Rust theme mapping.</div>
+      </div>
+    </div>
+  </section>
+</body>
+</html>

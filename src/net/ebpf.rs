@@ -34,7 +34,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -191,6 +191,10 @@ pub enum EbpfError {
     CallError,
     /// JIT derleme hatası
     JitError,
+    InvalidElf,
+    UnsupportedJit,
+    VerifierRejected,
+    UnsupportedAttach,
 }
 
 // ============================================================================
@@ -210,7 +214,7 @@ pub struct EbpfVm {
     /// Çalıştırılan instruction sayısı
     insn_count: AtomicU64,
     /// JIT derlenmiş kod (varsa)
-    jit_code: Option<Vec<u8>>,
+    jit_program: Option<Vec<crate::ebpf::BpfInsn>>,
 }
 
 impl EbpfVm {
@@ -222,7 +226,7 @@ impl EbpfVm {
             program,
             prog_type,
             insn_count: AtomicU64::new(0),
-            jit_code: None,
+            jit_program: None,
         }
     }
 
@@ -236,11 +240,11 @@ impl EbpfVm {
         self.registers[BPF_REG_1 as usize] = ctx as u64;
 
         // JIT kod varsa onu kullan, yoksa interpreter
-        if let Some(ref jit_code) = self.jit_code.take() {
+        if let Some(ref jit_program) = self.jit_program.take() {
             // JIT kodu var, çalıştır
-            let result = self.execute_jit(jit_code, ctx);
+            let result = self.execute_jit(jit_program, ctx);
             // JIT kodu geri koy (borrowed olduğu için)
-            self.jit_code = Some(jit_code.clone());
+            self.jit_program = Some(jit_program.clone());
             result
         } else {
             // Interpreter modunda çalıştır
@@ -427,11 +431,12 @@ impl EbpfVm {
     }
 
     /// JIT derlenmiş kodu çalıştır
-    fn execute_jit(&mut self, jit_code: &[u8], ctx: *const u8) -> Result<u64, EbpfError> {
-        // JIT kod çalıştırma (placeholder)
-        // Gerçek implementasyon için assembly kodu çağrısı gerekir
-        crate::serial_println!("[eBPF] Executing JIT code (placeholder)");
-        Ok(0)
+    fn execute_jit(
+        &mut self,
+        jit_program: &[crate::ebpf::BpfInsn],
+        ctx: *const u8,
+    ) -> Result<u64, EbpfError> {
+        crate::ebpf_jit::jit_compile_and_run(jit_program, ctx as u64).map_err(map_jit_error)
     }
 
     /// Bellek oku
@@ -463,8 +468,8 @@ impl EbpfVm {
                 _ => Err(EbpfError::MemoryAccess),
             }
         } else {
-            // Context erişimi (placeholder)
-            Ok(0)
+            // Bu VM şu an yalnızca eBPF stack penceresini adreslenebilir kabul eder.
+            Err(EbpfError::MemoryAccess)
         }
     }
 
@@ -491,7 +496,7 @@ impl EbpfVm {
                 _ => return Err(EbpfError::MemoryAccess),
             }
         } else {
-            // Context yazma (placeholder)
+            return Err(EbpfError::MemoryAccess);
         }
         Ok(())
     }
@@ -501,7 +506,7 @@ impl EbpfVm {
         match func_id {
             1 => {
                 // bpf_trace_printk
-                crate::serial_println!("[eBPF] Trace print (placeholder)");
+                crate::serial_println!("[eBPF] Trace print helper invoked");
                 Ok(0)
             }
             2 => {
@@ -518,9 +523,7 @@ impl EbpfVm {
 
     /// JIT derleme
     pub fn jit_compile(&mut self) -> Result<(), EbpfError> {
-        crate::serial_println!("[eBPF] JIT compilation (placeholder)");
-        // JIT derleme implementasyonu
-        self.jit_code = Some(vec![0x90, 0x90]); // NOP x2 (placeholder)
+        self.jit_program = Some(translate_program_to_linux_abi(&self.program)?);
         Ok(())
     }
 }
@@ -532,6 +535,7 @@ impl EbpfVm {
 /// eBPF program yükleyicisi
 pub struct EbpfLoader {
     programs: BTreeMap<String, EbpfVm>,
+    socket_filters: BTreeMap<String, String>,
 }
 
 impl EbpfLoader {
@@ -539,29 +543,155 @@ impl EbpfLoader {
     pub fn new() -> Self {
         Self {
             programs: BTreeMap::new(),
+            socket_filters: BTreeMap::new(),
         }
+    }
+
+    pub fn load_program(
+        &mut self,
+        prog_id: &str,
+        program: Vec<u64>,
+        prog_type: u32,
+    ) -> Result<(), EbpfError> {
+        verify_program(&program, prog_type)?;
+        self.programs
+            .insert(prog_id.to_string(), EbpfVm::new(program, prog_type));
+        Ok(())
     }
 
     /// ELF dosyasından program yükle
     pub fn load_elf(&mut self, elf_data: &[u8], prog_type: u32) -> Result<String, EbpfError> {
-        // ELF ayrıştırma (basit implementasyon)
-        crate::serial_println!("[eBPF] Loading ELF program (placeholder)");
+        if elf_data.len() >= 64
+            && &elf_data[..4] == b"\x7FELF"
+            && elf_data[4] == 2
+            && elf_data[5] == 1
+        {
+            let read_u16 = |offset: usize| -> Option<u16> {
+                elf_data
+                    .get(offset..offset + 2)
+                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            };
+            let read_u32 = |offset: usize| -> Option<u32> {
+                elf_data
+                    .get(offset..offset + 4)
+                    .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            };
+            let read_u64 = |offset: usize| -> Option<u64> {
+                elf_data.get(offset..offset + 8).map(|bytes| {
+                    u64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                        bytes[7],
+                    ])
+                })
+            };
 
-        // Program bytecode'ı çıkar (placeholder)
-        let program = vec![0x00000000000000b7 | 0x01]; // MOV R1, 1 (placeholder)
+            let shoff = read_u64(40).ok_or(EbpfError::InvalidElf)? as usize;
+            let shentsize = read_u16(58).ok_or(EbpfError::InvalidElf)? as usize;
+            let shnum = read_u16(60).ok_or(EbpfError::InvalidElf)? as usize;
+            let shstrndx = read_u16(62).ok_or(EbpfError::InvalidElf)? as usize;
+            if shentsize >= 64
+                && shnum > 0
+                && shstrndx < shnum
+                && shoff + shentsize * shnum <= elf_data.len()
+            {
+                let shstr_off = shoff + shentsize * shstrndx;
+                let shstr_data_off =
+                    read_u64(shstr_off + 24).ok_or(EbpfError::InvalidElf)? as usize;
+                let shstr_size = read_u64(shstr_off + 32).ok_or(EbpfError::InvalidElf)? as usize;
+                if shstr_data_off + shstr_size <= elf_data.len() {
+                    let shstrtab = &elf_data[shstr_data_off..shstr_data_off + shstr_size];
+                    for idx in 0..shnum {
+                        let shdr = shoff + idx * shentsize;
+                        let name_off = read_u32(shdr).ok_or(EbpfError::InvalidElf)? as usize;
+                        let section_type = read_u32(shdr + 4).ok_or(EbpfError::InvalidElf)?;
+                        let data_off = read_u64(shdr + 24).ok_or(EbpfError::InvalidElf)? as usize;
+                        let data_size = read_u64(shdr + 32).ok_or(EbpfError::InvalidElf)? as usize;
+                        if name_off >= shstrtab.len()
+                            || section_type != 1
+                            || data_size == 0
+                            || data_size % 8 != 0
+                        {
+                            continue;
+                        }
+                        let end = shstrtab[name_off..]
+                            .iter()
+                            .position(|b| *b == 0)
+                            .map(|pos| name_off + pos)
+                            .unwrap_or(shstrtab.len());
+                        let Some(name) = core::str::from_utf8(&shstrtab[name_off..end]).ok() else {
+                            continue;
+                        };
+                        if !matches!(name, ".text" | "socket_filter" | "classifier") {
+                            continue;
+                        }
+                        if data_off + data_size > elf_data.len() {
+                            return Err(EbpfError::InvalidElf);
+                        }
 
-        let vm = EbpfVm::new(program, prog_type);
-        let prog_id = format!("prog_{}", self.programs.len());
+                        let mut program = Vec::with_capacity(data_size / 8);
+                        for chunk in elf_data[data_off..data_off + data_size].chunks_exact(8) {
+                            program.push(u64::from_le_bytes([
+                                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5],
+                                chunk[6], chunk[7],
+                            ]));
+                        }
 
-        self.programs.insert(prog_id.clone(), vm);
+                        let prog_id = format!("elf:{}:{}", name, self.programs.len());
+                        self.load_program(&prog_id, program, prog_type)?;
+                        crate::serial_println!("[eBPF] ELF section {} loaded as {}", name, prog_id);
+                        return Ok(prog_id);
+                    }
+                }
+            }
+        }
+        // ELF sihirli baytları doğrulanır; section-to-bytecode dönüşümü destek açılana kadar fail-closed kalır.
+        let _ = prog_type;
+        if elf_data.len() < 16 || &elf_data[..4] != b"\x7FELF" {
+            return Err(EbpfError::InvalidElf);
+        }
+        crate::serial_println!("[eBPF] ELF loader reached unsupported section parser boundary");
 
-        Ok(prog_id)
+        Err(EbpfError::InvalidElf)
     }
 
     /// Programı çalıştır
     pub fn execute_program(&mut self, prog_id: &str, ctx: *const u8) -> Result<u64, EbpfError> {
         let vm = self.programs.get_mut(prog_id).ok_or(EbpfError::CallError)?;
         vm.execute(ctx)
+    }
+
+    pub fn attach_socket_filter(
+        &mut self,
+        attach_point: &str,
+        prog_id: &str,
+    ) -> Result<(), EbpfError> {
+        let vm = self.programs.get(prog_id).ok_or(EbpfError::CallError)?;
+        if vm.prog_type != BPF_PROG_TYPE_SOCKET_FILTER {
+            return Err(EbpfError::UnsupportedAttach);
+        }
+        self.socket_filters
+            .insert(attach_point.to_string(), prog_id.to_string());
+        Ok(())
+    }
+
+    pub fn detach_socket_filter(&mut self, attach_point: &str) -> Result<(), EbpfError> {
+        self.socket_filters
+            .remove(attach_point)
+            .map(|_| ())
+            .ok_or(EbpfError::CallError)
+    }
+
+    pub fn run_socket_filter(
+        &mut self,
+        attach_point: &str,
+        packet: &[u8],
+    ) -> Result<u64, EbpfError> {
+        let prog_id = self
+            .socket_filters
+            .get(attach_point)
+            .cloned()
+            .ok_or(EbpfError::UnsupportedAttach)?;
+        self.execute_program(&prog_id, packet.as_ptr())
     }
 
     /// Programı JIT derle
@@ -574,6 +704,31 @@ impl EbpfLoader {
 impl Default for EbpfLoader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref GLOBAL_EBPF_LOADER: Mutex<EbpfLoader> = Mutex::new(EbpfLoader::new());
+}
+
+pub fn attach_ingress_program(prog_id: &str, program: Vec<u64>) -> Result<(), EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.load_program(prog_id, program, BPF_PROG_TYPE_SOCKET_FILTER)?;
+    loader.attach_socket_filter("net:ingress", prog_id)
+}
+
+pub fn detach_ingress_program() -> Result<(), EbpfError> {
+    GLOBAL_EBPF_LOADER
+        .lock()
+        .detach_socket_filter("net:ingress")
+}
+
+pub fn filter_ingress_packet(packet: &[u8]) -> Result<bool, EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    match loader.run_socket_filter("net:ingress", packet) {
+        Ok(verdict) => Ok(verdict != 0),
+        Err(EbpfError::UnsupportedAttach) => Ok(true),
+        Err(err) => Err(err),
     }
 }
 
@@ -594,6 +749,11 @@ impl EbpfSocketFilter {
         }
     }
 
+    pub fn from_verified_program(program: Vec<u64>) -> Result<Self, EbpfError> {
+        verify_program(&program, BPF_PROG_TYPE_SOCKET_FILTER)?;
+        Ok(Self::new(program))
+    }
+
     /// Paketi filtrele
     pub fn filter_packet(&mut self, packet: &[u8]) -> Result<u64, EbpfError> {
         let ctx = packet.as_ptr();
@@ -610,7 +770,84 @@ pub fn init() {
     crate::serial_println!("[eBPF] eBPF module initialized");
 }
 
-/// Basit eBPF programı oluştur
+fn verify_program(program: &[u64], prog_type: u32) -> Result<(), EbpfError> {
+    if program.is_empty() || program.len() > BPF_MAXINSNS {
+        return Err(EbpfError::VerifierRejected);
+    }
+
+    if prog_type != BPF_PROG_TYPE_SOCKET_FILTER {
+        return Err(EbpfError::UnsupportedAttach);
+    }
+
+    let mut has_exit = false;
+    for (pc, insn) in program.iter().copied().enumerate() {
+        let opcode = ((insn >> 56) & 0xff) as u8;
+        let dst = ((insn >> 48) & 0x0f) as u8;
+        let src = ((insn >> 40) & 0x0f) as u8;
+        if dst > BPF_REG_10 || src > BPF_REG_10 {
+            return Err(EbpfError::InvalidRegister);
+        }
+
+        let class = opcode & 0x07;
+        match class {
+            BPF_LD | BPF_LDX | BPF_ST | BPF_STX | BPF_ALU | BPF_JMP | BPF_RET | BPF_MISC => {}
+            _ => return Err(EbpfError::InvalidOpcode),
+        }
+
+        if opcode == (BPF_JMP | BPF_EXIT) {
+            has_exit = true;
+        }
+
+        if pc == program.len() - 1 && opcode != (BPF_JMP | BPF_EXIT) {
+            return Err(EbpfError::VerifierRejected);
+        }
+    }
+
+    if !has_exit {
+        return Err(EbpfError::VerifierRejected);
+    }
+
+    Ok(())
+}
+
+fn translate_program_to_linux_abi(program: &[u64]) -> Result<Vec<crate::ebpf::BpfInsn>, EbpfError> {
+    let mut translated = Vec::with_capacity(program.len());
+    for insn in program.iter().copied() {
+        let opcode = ((insn >> 56) & 0xff) as u8;
+        let dst = ((insn >> 48) & 0xff) as u8;
+        let src = ((insn >> 40) & 0xff) as u8;
+        let off = ((insn >> 32) & 0xffff) as i16;
+        let imm = insn as i32;
+        if dst > BPF_REG_10 || src > BPF_REG_10 {
+            return Err(EbpfError::InvalidRegister);
+        }
+        translated.push(crate::ebpf::BpfInsn::new(opcode, dst, src, off, imm));
+    }
+    Ok(translated)
+}
+
+fn map_jit_error(err: crate::ebpf::BpfError) -> EbpfError {
+    match err {
+        crate::ebpf::BpfError::DivisionByZero => EbpfError::CallError,
+        crate::ebpf::BpfError::InvalidRegister(_) => EbpfError::InvalidRegister,
+        crate::ebpf::BpfError::StackOutOfBounds { .. }
+        | crate::ebpf::BpfError::MemoryAccessViolation { .. } => EbpfError::MemoryAccess,
+        crate::ebpf::BpfError::InvalidOpcode(_) | crate::ebpf::BpfError::InvalidInstruction(_) => {
+            EbpfError::InvalidOpcode
+        }
+        crate::ebpf::BpfError::ExceededStepLimit => EbpfError::InfiniteLoop,
+        crate::ebpf::BpfError::VerificationFailed(_)
+        | crate::ebpf::BpfError::ProgramTooLarge(_)
+        | crate::ebpf::BpfError::InvalidProgram
+        | crate::ebpf::BpfError::InvalidJumpTarget
+        | crate::ebpf::BpfError::UnreachableInstruction(_) => EbpfError::VerifierRejected,
+        crate::ebpf::BpfError::UnknownHelper(_) | crate::ebpf::BpfError::ReadOnlyRegister => {
+            EbpfError::CallError
+        }
+    }
+}
+
+/// Örnek eBPF socket-filter programı oluştur
 pub fn create_simple_program() -> Vec<u64> {
     vec![
         // R0 = len(skb)

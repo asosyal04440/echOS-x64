@@ -568,7 +568,7 @@ impl Ipv6Packet {
 // Uzantı Başlığı Zinciri:
 //   IPv6 Header → HopByHop Opt. → Routing → Fragment → Dest. Opt. → TCP/UDP
 //
-// Bu implementasyon şimdilik taslak (placeholder) düzeyindedir.
+// Uzantı başlıkları parse/serialize düzeyinde kapsanır; tam route/fragment parity ayrı çalışmadır.
 
 /// Atlama-Atlama (Hop-by-Hop) Seçenekleri başlığı.
 /// Rota üzerindeki her yönlendirici bu başlığı işlemek zorundadır.
@@ -1836,13 +1836,58 @@ pub fn process_icmpv6(ipv6_src: &Ipv6Addr, ipv6_dst: &Ipv6Addr, icmpv6_payload: 
                 reply.len() as u16,
             );
             let pkt = Ipv6Packet::new(reply_header, &reply);
-            let _serialized = pkt.serialize();
-            crate::serial_println!(
-                "[ICMPv6] EchoReply sent to {:?} ({}B)",
-                ipv6_src,
-                reply.len()
+            let serialized = pkt.serialize();
+            let current_tsc = crate::interrupts::get_ticks();
+            let (next_hop, dst_mac) = if let Some(mac) = neighbor_lookup(ipv6_src) {
+                (*ipv6_src, mac)
+            } else if let Some((router_addr, mac)) = select_next_hop(ipv6_src, current_tsc) {
+                (router_addr, mac)
+            } else {
+                let _ = send_neighbor_solicitation(ipv6_src);
+                crate::serial_println!(
+                    "[ICMPv6] EchoReply pending neighbor resolution for {:?}",
+                    ipv6_src
+                );
+                return;
+            };
+            let Some(iface) = super::default_interface() else {
+                crate::serial_println!("[ICMPv6] EchoReply failed: no default interface");
+                return;
+            };
+            let mut iface = iface.lock();
+            let frame = super::ethernet::EthernetFrame::new(
+                dst_mac,
+                iface.mac(),
+                super::ethernet::EtherType::IPV6,
+                &serialized,
             );
-            // TODO: gerçek ağ arayüzüne gönderme (ethernet çerçevesi ile)
+            let mut frame_buf = alloc::vec![0u8; 1514];
+            match frame.serialize(&mut frame_buf) {
+                Ok(len) => match iface.send(&frame_buf[..len]) {
+                    Ok(()) => {
+                        crate::serial_println!(
+                            "[ICMPv6] EchoReply sent to {:?} via {:?} ({}B)",
+                            ipv6_src,
+                            next_hop,
+                            reply.len()
+                        );
+                    }
+                    Err(err) => {
+                        crate::serial_println!(
+                            "[ICMPv6] EchoReply transmit failed for {:?}: {:?}",
+                            ipv6_src,
+                            err
+                        );
+                    }
+                },
+                Err(err) => {
+                    crate::serial_println!(
+                        "[ICMPv6] EchoReply frame build failed for {:?}: {:?}",
+                        ipv6_src,
+                        err
+                    );
+                }
+            }
         }
 
         // ── RouterSolicitation (133) ──
@@ -1852,6 +1897,52 @@ pub fn process_icmpv6(ipv6_src: &Ipv6Addr, ipv6_dst: &Ipv6Addr, icmpv6_payload: 
         }
 
         // ── NeighborSolicitation (135) ──
+        134 => {
+            crate::serial_println!("[ICMPv6/NDP] RouterAdvertisement from {:?}", ipv6_src);
+            if let Some(ra) = RouterAdvertisement::parse(icmpv6_payload) {
+                let mut router_mac = None;
+                let mut offset = 16usize;
+                while offset + 2 <= icmpv6_payload.len() {
+                    let opt_type = icmpv6_payload[offset];
+                    let opt_len = icmpv6_payload[offset + 1] as usize * 8;
+                    if opt_len == 0 || offset + opt_len > icmpv6_payload.len() {
+                        break;
+                    }
+                    if opt_type == 1 && opt_len >= 8 {
+                        router_mac = Some(super::MacAddr::new([
+                            icmpv6_payload[offset + 2],
+                            icmpv6_payload[offset + 3],
+                            icmpv6_payload[offset + 4],
+                            icmpv6_payload[offset + 5],
+                            icmpv6_payload[offset + 6],
+                            icmpv6_payload[offset + 7],
+                        ]));
+                        break;
+                    }
+                    offset += opt_len;
+                }
+
+                if let Some(mac) = router_mac {
+                    neighbor_update(*ipv6_src, mac);
+                    if ra.router_lifetime > 0 {
+                        add_default_router(
+                            *ipv6_src,
+                            ra.router_lifetime as u64,
+                            crate::interrupts::get_ticks(),
+                            *mac.as_bytes(),
+                        );
+                    }
+                }
+
+                crate::serial_println!(
+                    "[ICMPv6/NDP] RA accepted: lifetime={}s prefixes={} dns={}",
+                    ra.router_lifetime,
+                    ra.prefixes.len(),
+                    ra.dns_servers.len()
+                );
+            }
+        }
+
         135 => {
             crate::serial_println!("[ICMPv6/NDP] NeighborSolicitation from {:?}", ipv6_src);
             // Hedef adres (payload[8..24]) bizim adreslerimizden biri mi kontrol et
@@ -1891,6 +1982,101 @@ pub fn process_icmpv6(ipv6_src: &Ipv6Addr, ipv6_dst: &Ipv6Addr, icmpv6_payload: 
 
         _ => {
             crate::serial_println!("[ICMPv6] Unknown type {} from {:?}", msg_type, ipv6_src);
+        }
+    }
+}
+
+pub fn send_neighbor_solicitation(target: &Ipv6Addr) -> Result<(), super::NetError> {
+    let iface = super::default_interface().ok_or(super::NetError::NoInterface)?;
+    let mut iface = iface.lock();
+    let src_addr = link_local_from_mac(iface.mac());
+    let dst_addr = solicited_node_multicast(target);
+
+    let mut payload = NeighborSolicitation::new(*target, Some(iface.mac())).serialize();
+    let checksum = compute_icmpv6_checksum(&src_addr, &dst_addr, &payload);
+    payload[2] = (checksum >> 8) as u8;
+    payload[3] = (checksum & 0xff) as u8;
+
+    let packet = Ipv6Packet::new(
+        Ipv6Header::new(src_addr, dst_addr, 58, payload.len() as u16),
+        &payload,
+    );
+    let serialized = packet.serialize();
+    let frame = super::ethernet::EthernetFrame::new(
+        ipv6_multicast_mac(&dst_addr),
+        iface.mac(),
+        super::ethernet::EtherType::IPV6,
+        &serialized,
+    );
+    let mut frame_buf = alloc::vec![0u8; 1514];
+    let len = frame.serialize(&mut frame_buf)?;
+    iface.send(&frame_buf[..len])?;
+    crate::serial_println!(
+        "[ICMPv6/NDP] NeighborSolicitation sent for {:?} via {:?}",
+        target,
+        dst_addr
+    );
+    Ok(())
+}
+
+pub fn send_router_solicitation() -> Result<(), super::NetError> {
+    let iface = super::default_interface().ok_or(super::NetError::NoInterface)?;
+    let mut iface = iface.lock();
+    let src_addr = link_local_from_mac(iface.mac());
+    let dst_addr = Ipv6Addr::new([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
+
+    let mut payload = RouterSolicitation::new(Some(iface.mac())).serialize();
+    let checksum = compute_icmpv6_checksum(&src_addr, &dst_addr, &payload);
+    payload[2] = (checksum >> 8) as u8;
+    payload[3] = (checksum & 0xff) as u8;
+
+    let packet = Ipv6Packet::new(
+        Ipv6Header::new(src_addr, dst_addr, 58, payload.len() as u16),
+        &payload,
+    );
+    let serialized = packet.serialize();
+    let frame = super::ethernet::EthernetFrame::new(
+        super::MacAddr::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x02]),
+        iface.mac(),
+        super::ethernet::EtherType::IPV6,
+        &serialized,
+    );
+    let mut frame_buf = alloc::vec![0u8; 1514];
+    let len = frame.serialize(&mut frame_buf)?;
+    iface.send(&frame_buf[..len])?;
+    crate::serial_println!("[ICMPv6/NDP] RouterSolicitation sent");
+    Ok(())
+}
+
+fn ipv6_multicast_mac(addr: &Ipv6Addr) -> super::MacAddr {
+    super::MacAddr::new([0x33, 0x33, addr.0[12], addr.0[13], addr.0[14], addr.0[15]])
+}
+
+pub fn process_packet(data: &[u8]) -> Result<(), super::NetError> {
+    let packet = Ipv6Packet::parse(data)?;
+    let (next_header, payload_offset) =
+        walk_extension_headers(&packet.payload, packet.header.next_header);
+    if payload_offset > packet.payload.len() {
+        return Err(super::NetError::InvalidPacket);
+    }
+
+    match next_header {
+        58 => {
+            process_icmpv6(
+                &packet.header.src,
+                &packet.header.dst,
+                &packet.payload[payload_offset..],
+            );
+            Ok(())
+        }
+        _ => {
+            crate::serial_println!(
+                "[IPv6] Unsupported next header {} from {:?} to {:?}",
+                next_header,
+                packet.header.src,
+                packet.header.dst
+            );
+            Ok(())
         }
     }
 }
@@ -1953,6 +2139,7 @@ pub fn neighbor_gc() {
 /// IPv6 modülünü başlatır
 pub fn init() {
     crate::serial_println!("[IPv6] Module initialized");
+    let _ = send_router_solicitation();
 }
 
 // ============================================================================
@@ -2070,12 +2257,11 @@ pub enum DadState {
 /// `tentative_addr` için solicited-node multicast grubuna NS gönderilir.
 /// RFC 4862, varsayılan DupAddrDetectTransmits = 1.
 pub fn dad_start(tentative_addr: &Ipv6Addr) -> DadState {
-    // Solicited-node multicast adresi hesapla
-    let _sol_node = solicited_node_multicast(tentative_addr);
-    // NS gönderildi (gerçek donanım erişimi şu an yok, mantıksal model)
+    let ns_sent = send_neighbor_solicitation(tentative_addr).is_ok();
     crate::serial_println!(
-        "[NDP/DAD] Starting DAD for {:?}, sending NS...",
-        tentative_addr
+        "[NDP/DAD] Starting DAD for {:?}, NS sent={}",
+        tentative_addr,
+        ns_sent
     );
     DadState::InProgress {
         probes_remaining: 0,
@@ -2125,4 +2311,29 @@ pub fn gc_routers(current_tsc: u64) -> usize {
 /// Varsayılan yönlendirici sayısı.
 pub fn default_router_count() -> usize {
     DEFAULT_ROUTERS.lock().len()
+}
+
+/// Returns the best-known next hop and link-layer destination for an IPv6 target.
+pub fn select_next_hop(dest: &Ipv6Addr, current_tsc: u64) -> Option<(Ipv6Addr, super::MacAddr)> {
+    if dest.is_multicast() {
+        return Some((
+            *dest,
+            super::MacAddr::new([0x33, 0x33, dest.0[12], dest.0[13], dest.0[14], dest.0[15]]),
+        ));
+    }
+
+    if let Some(mac) = neighbor_lookup(dest) {
+        return Some((*dest, mac));
+    }
+
+    if dest.is_link_local() {
+        return None;
+    }
+
+    gc_routers(current_tsc);
+    DEFAULT_ROUTERS
+        .lock()
+        .iter()
+        .find(|router| router.expiry_tsc > current_tsc)
+        .map(|router| (router.addr, super::MacAddr::new(router.link_addr)))
 }

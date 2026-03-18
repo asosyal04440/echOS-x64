@@ -77,6 +77,7 @@ const DNS_MESSAGE_CONTENT_TYPE: &str = "application/dns-message";
 pub struct DohClient {
     pub server_url: String,                      // DoH sunucusunun HTTPS URL'si
     pub timeout_ms: u64,                         // Sorgu zaman aşımı (milisaniye)
+    pub retry_budget: u8,                        // Ağ/timeout hatalarında yeniden deneme sayısı
     pub cache: BTreeMap<String, CachedResponse>, // Önceki yanıtların önbelleği
 }
 
@@ -96,6 +97,7 @@ impl DohClient {
         DohClient {
             server_url: server_url.to_string(),
             timeout_ms: 5000, // Varsayılan 5 saniyelik zaman aşımı
+            retry_budget: 2,
             cache: BTreeMap::new(),
         }
     }
@@ -174,29 +176,18 @@ impl DohClient {
     /// `GET /dns-query?dns=<base64url>  HTTP/1.1`
     ///
     /// HTTP/1.1 isteği TLS üzerinden gönderilir.
-    pub fn query_get(&self, domain: &str, qtype: DnsRecordType) -> Result<Vec<u8>, DohError> {
+    pub fn query_get(&mut self, domain: &str, qtype: DnsRecordType) -> Result<Vec<u8>, DohError> {
         let dns_query = Self::build_query(domain, qtype);
-
-        // DNS binary verisini Base64 URL kodla (dolgu karakteri '=' olmadan)
         let encoded = base64url_encode(&dns_query);
-
-        // URL'den host ve path ayrıştır
         let (host, path) = parse_doh_url(&self.server_url);
 
-        // HTTP/1.1 GET isteği oluştur
-        let request = format!(
-            "GET {}?dns={} HTTP/1.1\r\nHost: {}\r\nAccept: {}\r\nConnection: close\r\n\r\n",
-            path, encoded, host, DNS_MESSAGE_CONTENT_TYPE
-        );
-
-        // TLS bağlantısı kur ve HTTP isteğini gönder
-        let response_body = self.send_https_request(&host, request.as_bytes())?;
-
-        crate::serial_println!(
-            "[DoH] GET response received ({} bytes)",
-            response_body.len()
-        );
-        Ok(response_body)
+        self.retry_request("GET", &host, || {
+            format!(
+                "GET {}?dns={} HTTP/1.1\r\nHost: {}\r\nAccept: {}\r\nConnection: close\r\n\r\n",
+                path, encoded, host, DNS_MESSAGE_CONTENT_TYPE
+            )
+            .into_bytes()
+        })
     }
 
     /// DNS sorgusunu HTTPS POST yöntemiyle gönderir.
@@ -205,30 +196,67 @@ impl DohClient {
     /// Content-Type: application/dns-message
     ///
     /// HTTP/1.1 isteği TLS üzerinden gönderilir.
-    pub fn query_post(&self, domain: &str, qtype: DnsRecordType) -> Result<Vec<u8>, DohError> {
+    pub fn query_post(&mut self, domain: &str, qtype: DnsRecordType) -> Result<Vec<u8>, DohError> {
         let dns_query = Self::build_query(domain, qtype);
 
         // URL'den host ve path ayrıştır
         let (host, path) = parse_doh_url(&self.server_url);
 
         // HTTP/1.1 POST isteği oluştur
-        let header = format!(
-            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccept: {}\r\nConnection: close\r\n\r\n",
-            path, host, DNS_MESSAGE_CONTENT_TYPE, dns_query.len(), DNS_MESSAGE_CONTENT_TYPE
-        );
+        self.retry_request("POST", &host, || {
+            let header = format!(
+                "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccept: {}\r\nConnection: close\r\n\r\n",
+                path, host, DNS_MESSAGE_CONTENT_TYPE, dns_query.len(), DNS_MESSAGE_CONTENT_TYPE
+            );
+            let mut request = header.into_bytes();
+            request.extend_from_slice(&dns_query);
+            request
+        })
+    }
 
-        // Header ve body'yi birleştir
-        let mut request = header.into_bytes();
-        request.extend_from_slice(&dns_query);
+    fn retry_request<F>(
+        &mut self,
+        method: &str,
+        host: &str,
+        mut build_request: F,
+    ) -> Result<Vec<u8>, DohError>
+    where
+        F: FnMut() -> Vec<u8>,
+    {
+        let mut last_error = DohError::NetworkError;
+        for attempt in 0..=self.retry_budget {
+            let request = build_request();
+            match self.send_https_request(host, &request) {
+                Ok(response_body) => {
+                    crate::serial_println!(
+                        "[DoH] {} response received ({} bytes) on attempt {}",
+                        method,
+                        response_body.len(),
+                        attempt + 1
+                    );
+                    return Ok(response_body);
+                }
+                Err(err @ DohError::Timeout) | Err(err @ DohError::NetworkError) => {
+                    last_error = err;
+                    crate::serial_println!(
+                        "[DoH] {} retry {}/{} for {}",
+                        method,
+                        attempt + 1,
+                        self.retry_budget + 1,
+                        host
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
 
-        // TLS bağlantısı kur ve HTTP isteğini gönder
-        let response_body = self.send_https_request(&host, &request)?;
+        Err(last_error)
+    }
 
-        crate::serial_println!(
-            "[DoH] POST response received ({} bytes)",
-            response_body.len()
-        );
-        Ok(response_body)
+    pub fn smoke_a_lookup(&mut self, hostname: &str) -> Result<Ipv4Addr, DohError> {
+        let response = self.query_get(hostname, DnsRecordType::A)?;
+        let parsed = Self::parse_response(&response)?;
+        parsed.get_a().ok_or(DohError::InvalidResponse)
     }
 
     /// HTTPS (TLS) üzerinden HTTP isteği gönderir ve yanıt gövdesini döner.
@@ -421,9 +449,8 @@ impl DohClient {
     /// Sonsuz döngüye karşı maksimum 5 atlama sınırı uygulanır.
     fn parse_name(data: &[u8], offset: &mut usize) -> Result<String, DohError> {
         let mut name = String::new();
-        let mut jumped = false; // Sıkıştırma atlama yapıldı mı?
+        let mut resume_offset = None; // Pointer sonrası gerçek akış konumu
         let mut max_jumps = 5; // Döngü önleme: en fazla 5 sıkıştırma atlaması
-        let original_offset = *offset;
 
         loop {
             if *offset >= data.len() {
@@ -443,9 +470,8 @@ impl DohClient {
                     return Err(DohError::InvalidResponse);
                 }
                 let ptr = (((data[*offset] & 0x3F) as usize) << 8) | (data[*offset + 1] as usize);
-                if !jumped {
-                    *offset += 2;
-                    jumped = true;
+                if resume_offset.is_none() {
+                    resume_offset = Some(*offset + 2);
                 }
                 *offset = ptr;
                 max_jumps -= 1;
@@ -472,6 +498,9 @@ impl DohClient {
 
         if name.is_empty() {
             name.push('.'); // Root zone
+        }
+        if let Some(saved_offset) = resume_offset {
+            *offset = saved_offset;
         }
 
         Ok(name)
@@ -643,10 +672,13 @@ pub fn init_doh(server_url: &str) {
 
 /// Global DoH istemcisi üzerinden alan adını çözümler.
 ///
-/// İstemci başlatılmamışsa hata döner.
+/// İstemci başlatılmamışsa Cloudflare varsayılanı ile başlatılır.
 pub fn resolve_doh(domain: &str, qtype: DnsRecordType) -> Result<DnsResponse, DohError> {
-    let client = DOH_CLIENT.lock();
-    if let Some(client) = client.as_ref() {
+    let mut client = DOH_CLIENT.lock();
+    if client.is_none() {
+        *client = Some(DohClient::cloudflare());
+    }
+    if let Some(client) = client.as_mut() {
         let response_data = client.query_get(domain, qtype)?;
         DohClient::parse_response(&response_data)
     } else {

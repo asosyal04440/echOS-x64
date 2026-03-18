@@ -18,8 +18,12 @@
 //! `scroll_offset`, görünür pencerenin metnin başından ne kadar ofsetlendiğini tutar;
 //! imleç ekran dışına çıktığında `update_scroll` bunu otomatik ayarlar.
 
-use super::{Rect, Widget, MOD_CTRL, MOD_SHIFT};
+use super::{
+    border_rect_objects, draw_render_objects, solid_rect_object, text_render_object_with_width,
+    AccessRole, AccessState, AccessibilityInfo, Rect, Widget, MOD_CTRL, MOD_SHIFT,
+};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject};
 use crate::gui::theme::Theme;
 use alloc::string::String;
 use alloc::vec;
@@ -233,91 +237,114 @@ impl TextBox {
         // selection_end her zaman cursor_pos'u takip eder
         self.selection_end = Some(self.cursor_pos);
     }
+
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64);
+        let bg_color = if self.focused {
+            Theme::WINDOW_BG.to_u32()
+        } else {
+            Theme::BUTTON_BG.to_u32()
+        };
+        let border_color = if self.focused {
+            Theme::ACCENT_PRIMARY.to_u32()
+        } else {
+            Theme::BORDER.to_u32()
+        };
+        let text_y = self.rect.y + ((self.rect.height - 16).max(0) / 2);
+        let text_x = self.rect.x + 5;
+
+        objects.push(solid_rect_object(
+            base_id,
+            self.rect,
+            bg_color,
+            DamageLane::Window,
+            0,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 0x10,
+            self.rect,
+            border_color,
+            DamageLane::Window,
+            1,
+        ));
+
+        if self.text.is_empty() && !self.focused {
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x20,
+                Rect::new(text_x, text_y, (self.rect.width - 10).max(1), 18),
+                &self.placeholder,
+                Theme::TEXT_SECONDARY.to_u32(),
+                false,
+                DamageLane::Text,
+                3,
+            ));
+        } else {
+            let display_text = if self.password_mode {
+                alloc::string::ToString::to_string(&"*".repeat(self.text.len()))
+            } else {
+                let start = self.scroll_offset;
+                let end = (start + ((self.rect.width.max(0) as usize).saturating_sub(10) / 8))
+                    .min(self.text.len());
+                alloc::string::ToString::to_string(&self.text[start..end])
+            };
+
+            if let Some((sel_s, sel_e)) = self.selection_range() {
+                let vis_start = self.scroll_offset;
+                let vis_end = vis_start + ((self.rect.width.max(0) as usize).saturating_sub(10) / 8);
+                let hl_start = sel_s.max(vis_start);
+                let hl_end = sel_e.min(vis_end);
+                if hl_start < hl_end {
+                    objects.push(solid_rect_object(
+                        base_id ^ 0x30,
+                        Rect::new(
+                            text_x + ((hl_start - vis_start) as i32 * 8),
+                            text_y,
+                            ((hl_end - hl_start) as i32 * 8).max(1),
+                            16,
+                        ),
+                        Theme::ACCENT_PRIMARY.to_u32(),
+                        DamageLane::Window,
+                        2,
+                    ));
+                }
+            }
+
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x40,
+                Rect::new(text_x, text_y, (self.rect.width - 10).max(1), 18),
+                &display_text,
+                Theme::TEXT_PRIMARY.to_u32(),
+                false,
+                DamageLane::Text,
+                3,
+            ));
+        }
+
+        if self.focused {
+            let cursor_char_pos = self.cursor_pos.saturating_sub(self.scroll_offset) as i32;
+            let cursor_x = text_x + cursor_char_pos * 8;
+            if cursor_x < self.rect.x + self.rect.width - 5 {
+                objects.push(solid_rect_object(
+                    base_id ^ 0x50,
+                    Rect::new(cursor_x, text_y, 1, 16),
+                    Theme::TEXT_PRIMARY.to_u32(),
+                    DamageLane::Cursor,
+                    4,
+                ));
+            }
+        }
+
+        objects
+    }
 }
 
 impl Widget for TextBox {
     /// Metin kutusunu çizer.
     /// Sırasıyla: arka plan → kenarlık (odak durumuna göre renkli) → metin/placeholder → imleç.
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-
-        // Odakta pencere arka planı; odak dışında daha koyu düğme arka planı
-        let bg_color = if self.focused {
-            Theme::WINDOW_BG.to_u32()
-        } else {
-            Theme::BUTTON_BG.to_u32()
-        };
-        fb.draw_rect(x, y, w, h, bg_color);
-
-        // Kenarlık rengi: odaktayken aksent rengi, değilse normal kenarlık rengi
-        let border_color = if self.focused {
-            Theme::ACCENT_PRIMARY.to_u32()
-        } else {
-            Theme::BORDER.to_u32()
-        };
-
-        for col in x..(x + w) {
-            fb.plot_pixel(col, y, border_color);
-            fb.plot_pixel(col, y + h - 1, border_color);
-        }
-        for row in y..(y + h) {
-            fb.plot_pixel(x, row, border_color);
-            fb.plot_pixel(x + w - 1, row, border_color);
-        }
-
-        // Metin dikey olarak ortalanır (5 px sol iç boşlukla)
-        let text_y = y + (h - 16) / 2;
-        let text_x = x + 5;
-
-        if self.text.is_empty() && !self.focused {
-            // Boş ve odak dışındaysa placeholder soluk renkte gösterilir
-            fb.draw_string(
-                text_x,
-                text_y,
-                &self.placeholder,
-                Theme::TEXT_SECONDARY.to_u32(),
-            );
-        } else {
-            // Şifre modunda gerçek karakterler yerine "*" kullanılır
-            let display_text = if self.password_mode {
-                alloc::string::ToString::to_string(&"*".repeat(self.text.len()))
-            } else {
-                // Görünür pencereye sığan karakter dilimini al
-                let start = self.scroll_offset;
-                let end = (start + (w - 10) / 8).min(self.text.len());
-                alloc::string::ToString::to_string(&self.text[start..end])
-            };
-
-            // Seçim vurgusu: seçim aralığı görünür pencereyle kesişiyorsa mavi arka plan çiz
-            if let Some((sel_s, sel_e)) = self.selection_range() {
-                let vis_start = self.scroll_offset;
-                let vis_end = vis_start + (w - 10) / 8;
-                let hl_start = sel_s.max(vis_start);
-                let hl_end = sel_e.min(vis_end);
-                if hl_start < hl_end {
-                    let hl_x = text_x + (hl_start - vis_start) * 8;
-                    let hl_w = (hl_end - hl_start) * 8;
-                    fb.draw_rect(hl_x, text_y, hl_w, 16, Theme::ACCENT_PRIMARY.to_u32());
-                }
-            }
-
-            fb.draw_string(text_x, text_y, &display_text, Theme::TEXT_PRIMARY.to_u32());
-        }
-
-        // İmleç: yalnızca odaktayken dikey çizgi olarak gösterilir
-        if self.focused {
-            let cursor_char_pos = self.cursor_pos.saturating_sub(self.scroll_offset);
-            let cursor_x = text_x + cursor_char_pos * 8;
-            // Görünür alan dışına çıkan imleci çizme
-            if cursor_x < x + w - 5 {
-                for dy in 0..16 {
-                    fb.plot_pixel(cursor_x, text_y + dy, Theme::TEXT_PRIMARY.to_u32());
-                }
-            }
-        }
+        let objects = self.render_primitives();
+        draw_render_objects(fb, self.rect, &objects);
     }
 
     /// Tıklama olayını işler.
@@ -445,6 +472,31 @@ impl Widget for TextBox {
     /// Odak durumunu programatik olarak ayarlar.
     fn set_focus(&mut self, focused: bool) {
         self.focused = focused;
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn accessibility_info(&self) -> AccessibilityInfo<'_> {
+        let mut state = AccessState::empty();
+        if self.focused {
+            state = state.with(AccessState::FOCUSED);
+        }
+        AccessibilityInfo {
+            role: AccessRole::TextInput,
+            label: if self.placeholder.is_empty() {
+                "textbox"
+            } else {
+                &self.placeholder
+            },
+            value: &self.text,
+            state,
+        }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }
 
@@ -586,6 +638,77 @@ impl TextArea {
             self.scroll_col = self.cursor_col - visible_cols + 1;
         }
     }
+
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64) ^ 0x9000_0000;
+        let border_color = if self.focused {
+            Theme::ACCENT_PRIMARY.to_u32()
+        } else {
+            Theme::BORDER.to_u32()
+        };
+        let text_x = self.rect.x + 5;
+        let visible_lines = self.visible_lines();
+        let visible_cols = self.visible_cols();
+
+        objects.push(solid_rect_object(
+            base_id,
+            self.rect,
+            Theme::WINDOW_BG.to_u32(),
+            DamageLane::Window,
+            0,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 0x10,
+            self.rect,
+            border_color,
+            DamageLane::Window,
+            1,
+        ));
+
+        for i in 0..visible_lines {
+            let line_idx = self.scroll_line + i;
+            if line_idx >= self.lines.len() {
+                break;
+            }
+            let line = &self.lines[line_idx];
+            let start = self.scroll_col.min(line.len());
+            let end = (start + visible_cols).min(line.len());
+            let display = &line[start..end];
+            objects.push(text_render_object_with_width(
+                base_id ^ 0x1000 ^ line_idx as u64,
+                Rect::new(
+                    text_x,
+                    self.rect.y + 5 + (i * self.line_height) as i32,
+                    (self.rect.width - 10).max(1),
+                    self.line_height as i32,
+                ),
+                display,
+                Theme::TEXT_PRIMARY.to_u32(),
+                false,
+                DamageLane::Text,
+                2,
+            ));
+        }
+
+        if self.focused {
+            let cursor_screen_line = self.cursor_line.saturating_sub(self.scroll_line);
+            let cursor_screen_col = self.cursor_col.saturating_sub(self.scroll_col);
+            let cursor_x = text_x + (cursor_screen_col as i32 * 8);
+            let cursor_y = self.rect.y + 5 + (cursor_screen_line * self.line_height) as i32;
+            if cursor_x < self.rect.x + self.rect.width - 5 && cursor_y < self.rect.y + self.rect.height - 5 {
+                objects.push(solid_rect_object(
+                    base_id ^ 0x2000,
+                    Rect::new(cursor_x, cursor_y, 1, 16),
+                    Theme::TEXT_PRIMARY.to_u32(),
+                    DamageLane::Cursor,
+                    3,
+                ));
+            }
+        }
+
+        objects
+    }
 }
 
 impl Widget for TextArea {
@@ -593,67 +716,8 @@ impl Widget for TextArea {
     /// Sırasıyla: arka plan → kenarlık → görünür satırlar → imleç.
     /// Yalnızca `scroll_line`'dan itibaren görünür satır sayısı kadar satır çizilir.
     fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let w = self.rect.width as usize;
-        let h = self.rect.height as usize;
-
-        // Sabit pencere arka planı
-        let bg_color = Theme::WINDOW_BG.to_u32();
-        fb.draw_rect(x, y, w, h, bg_color);
-
-        // Odak durumuna göre kenarlık rengi
-        let border_color = if self.focused {
-            Theme::ACCENT_PRIMARY.to_u32()
-        } else {
-            Theme::BORDER.to_u32()
-        };
-
-        for col in x..(x + w) {
-            fb.plot_pixel(col, y, border_color);
-            fb.plot_pixel(col, y + h - 1, border_color);
-        }
-        for row in y..(y + h) {
-            fb.plot_pixel(x, row, border_color);
-            fb.plot_pixel(x + w - 1, row, border_color);
-        }
-
-        // Görünür satırları çiz — yatay kaydırma da dikkate alınır
-        let text_x = x + 5;
-        let mut text_y = y + 5;
-        let visible_lines = self.visible_lines();
-        let visible_cols = self.visible_cols();
-
-        for i in 0..visible_lines {
-            let line_idx = self.scroll_line + i;
-            if line_idx >= self.lines.len() {
-                break;
-            }
-
-            let line = &self.lines[line_idx];
-            // Yatay kaydırma ofseti uygulanır; satır kısa olabilir
-            let start = self.scroll_col.min(line.len());
-            let end = (start + visible_cols).min(line.len());
-            let display = &line[start..end];
-
-            fb.draw_string(text_x, text_y, display, Theme::TEXT_PRIMARY.to_u32());
-            text_y += self.line_height;
-        }
-
-        // İmleç — yalnızca odaktayken çizilir; görünür pencere içinde olduğu kontrol edilir
-        if self.focused {
-            let cursor_screen_line = self.cursor_line - self.scroll_line;
-            let cursor_screen_col = self.cursor_col.saturating_sub(self.scroll_col);
-            let cursor_x = text_x + cursor_screen_col * 8;
-            let cursor_y = y + 5 + cursor_screen_line * self.line_height;
-
-            // İmleç görünür alanın sınırlarına uymuyorsa çizme
-            if cursor_x < x + w - 5 && cursor_y < y + h - 5 {
-                for dy in 0..16 {
-                    fb.plot_pixel(cursor_x, cursor_y + dy, Theme::TEXT_PRIMARY.to_u32());
-                }
-            }
-        }
+        let objects = self.render_primitives();
+        draw_render_objects(fb, self.rect, &objects);
     }
 
     /// Tıklama olayını işler.
@@ -744,5 +808,26 @@ impl Widget for TextArea {
     /// Odak durumunu programatik olarak ayarlar.
     fn set_focus(&mut self, focused: bool) {
         self.focused = focused;
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn accessibility_info(&self) -> AccessibilityInfo<'_> {
+        let mut state = AccessState::empty();
+        if self.focused {
+            state = state.with(AccessState::FOCUSED);
+        }
+        AccessibilityInfo {
+            role: AccessRole::TextInput,
+            label: "textarea",
+            value: "",
+            state,
+        }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }

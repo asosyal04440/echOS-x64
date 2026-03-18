@@ -898,7 +898,7 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
 
     // Global framebuffer'ı kaydet - shell için
     if let Some(fb) = boot_info.framebuffer.as_ref() {
-        ech_os::boot::set_global_framebuffer(*fb);
+        ech_os::boot::set_global_framebuffer(fb.clone());
     }
 
     ech_os::ipc::service_ipc::init();
@@ -1326,9 +1326,7 @@ fn read_boot_control_variable_seed(
     if data.len() != core::mem::size_of::<ech_os::boot::appliance::BootControlBlock>() {
         return None;
     }
-    let block = unsafe {
-        *(data.as_ptr() as *const ech_os::boot::appliance::BootControlBlock)
-    };
+    let block = unsafe { *(data.as_ptr() as *const ech_os::boot::appliance::BootControlBlock) };
     block.validate().then_some(block)
 }
 
@@ -1338,7 +1336,9 @@ fn read_boot_control_seed(
     image: Handle,
 ) -> Option<ech_os::boot::appliance::BootControlBlock> {
     let boot_services = system_table.boot_services();
-    let loaded_image = boot_services.open_protocol_exclusive::<LoadedImage>(image).ok()?;
+    let loaded_image = boot_services
+        .open_protocol_exclusive::<LoadedImage>(image)
+        .ok()?;
     let mut fs = boot_services
         .open_protocol_exclusive::<SimpleFileSystem>(loaded_image.device())
         .ok()?;
@@ -1387,7 +1387,9 @@ fn sync_boot_control_seed(
     let Ok(loaded_image) = boot_services.open_protocol_exclusive::<LoadedImage>(image) else {
         return;
     };
-    let Ok(mut fs) = boot_services.open_protocol_exclusive::<SimpleFileSystem>(loaded_image.device()) else {
+    let Ok(mut fs) =
+        boot_services.open_protocol_exclusive::<SimpleFileSystem>(loaded_image.device())
+    else {
         return;
     };
     let Ok(mut root) = fs.open_volume() else {

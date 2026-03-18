@@ -15,22 +15,22 @@ use std::sync::{Arc, Mutex};
 use ech_os::drivers::wifi_jail::{
     WifiBand, WifiBss, WifiJailController, WifiPhyMode, WifiSecurity,
 };
-use ech_os::memory::{mglru, psi};
-use ech_os::net::io_uring::{
-    get_cqe as io_uring_get_cqe, get_io_uring, io_uring_close, io_uring_register,
-    io_uring_setup, submit_sqe as io_uring_submit_sqe, IoUringParams, IoUringRegisteredBuffer,
-    IoUringSqe, IORING_OP_NOP, IORING_OP_READ_FIXED, IORING_SETUP_SQPOLL, IOSQE_FIXED_FILE,
-};
-use ech_os::task::eas::{select_energy_aware_cpu, CoreKind, CppcPerfCaps, EasCore, EasTask};
-use ech_os::task::eevdf::{EevdfRunQueue, EevdfTask};
-use ech_os::net::socket::{self, AddressFamily, Protocol, SocketType};
 use ech_os::fs::btrfs::{
     register_scrub_volume_with_layout, run_scrub_daemon_pass, scrub_daemon_status,
     scrub_superblock_mirrors_with_layout, stamp_superblock_checksum, verify_superblock_checksum,
     BtrfsScrubIssueKind, BTRFS_CSUM_TYPE_CRC32, BTRFS_CSUM_TYPE_XXHASH, BTRFS_MAGIC,
     BTRFS_SUPERBLOCK_SIZE,
 };
+use ech_os::memory::{mglru, psi};
+use ech_os::net::io_uring::{
+    get_cqe as io_uring_get_cqe, get_io_uring, io_uring_close, io_uring_register, io_uring_setup,
+    submit_sqe as io_uring_submit_sqe, IoUringParams, IoUringRegisteredBuffer, IoUringSqe,
+    IORING_OP_NOP, IORING_OP_READ_FIXED, IORING_SETUP_SQPOLL, IOSQE_FIXED_FILE,
+};
+use ech_os::net::socket::{self, AddressFamily, Protocol, SocketType};
 use ech_os::rcu::{SrcuDomain, TreeRcuDomain};
+use ech_os::task::eas::{select_energy_aware_cpu, CoreKind, CppcPerfCaps, EasCore, EasTask};
+use ech_os::task::eevdf::{EevdfRunQueue, EevdfTask};
 
 // ============================================================================
 // TIER 1 — Lock-Free Veri Yapısı Testleri
@@ -316,7 +316,10 @@ fn test_wifi_mlo_prefers_6ghz_primary_and_multiband_bundle() {
         .expect("MLO session");
 
     assert_eq!(session.primary.band, WifiBand::Band6G);
-    assert!(session.secondary.iter().any(|link| link.band == WifiBand::Band5G));
+    assert!(session
+        .secondary
+        .iter()
+        .any(|link| link.band == WifiBand::Band5G));
     assert!(session.link_count() >= 2);
     assert!(session.aggregate_mbps > session.primary.estimated_mbps);
 }
@@ -466,7 +469,8 @@ fn test_io_uring_register_tracks_files_and_buffers() {
     ];
 
     assert_eq!(
-        io_uring_register(fd, 0, files.as_ptr() as u64, files.len() as u32).expect("register files"),
+        io_uring_register(fd, 0, files.as_ptr() as u64, files.len() as u32)
+            .expect("register files"),
         files.len() as i32
     );
     assert_eq!(
@@ -502,8 +506,8 @@ fn test_io_uring_zero_syscall_fixed_resource_path() {
         ..IoUringParams::default()
     };
     let fd = io_uring_setup(8, Some(params)).expect("io_uring setup");
-    let socket_fd = socket::socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::DEFAULT)
-        .expect("socket");
+    let socket_fd =
+        socket::socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::DEFAULT).expect("socket");
 
     let files = [socket_fd as i32];
     let mut backing = [0u8; 64];
@@ -1220,4 +1224,3 @@ fn test_topological_sort_diamond() {
     assert!(pos(2) < pos(4));
     assert!(pos(3) < pos(4));
 }
-

@@ -928,7 +928,13 @@ impl Default for Ext4FileSystem {
 // ============================================================================
 
 lazy_static::lazy_static! {
-    static ref EXT4_INSTANCES: Mutex<BTreeMap<String, Ext4FileSystem>> = Mutex::new(BTreeMap::new());
+    static ref EXT4_INSTANCES: Mutex<BTreeMap<String, MountedExt4>> = Mutex::new(BTreeMap::new());
+}
+
+#[derive(Clone, Debug)]
+pub struct MountedExt4 {
+    pub fs: Ext4FileSystem,
+    pub device_data: Arc<Vec<u8>>,
 }
 
 /// ext4 dosya sistemini bağlar (mount)
@@ -936,12 +942,26 @@ pub fn mount_ext4(name: &str, device_data: &[u8]) -> Result<(), Ext4Error> {
     let mut fs = Ext4FileSystem::new();
     fs.init(device_data)?;
 
-    EXT4_INSTANCES.lock().insert(name.to_string(), fs);
+    EXT4_INSTANCES.lock().insert(
+        name.to_string(),
+        MountedExt4 {
+            fs,
+            device_data: Arc::new(device_data.to_vec()),
+        },
+    );
     Ok(())
 }
 
 /// İsme göre ext4 dosya sistemi örneğini döndürür
 pub fn get_ext4(name: &str) -> Option<Ext4FileSystem> {
+    EXT4_INSTANCES
+        .lock()
+        .get(name)
+        .map(|mounted| mounted.fs.clone())
+}
+
+/// Isme gore imaj destekli ext4 ornegini dondurur
+pub fn get_mounted_ext4(name: &str) -> Option<MountedExt4> {
     EXT4_INSTANCES.lock().get(name).cloned()
 }
 

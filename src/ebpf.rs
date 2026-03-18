@@ -46,6 +46,20 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+#[cfg(all(feature = "host_smoke", not(target_os = "none"), not(target_os = "uefi")))]
+use std::eprintln;
+
+#[cfg(all(feature = "host_smoke", not(target_os = "none"), not(target_os = "uefi")))]
+fn host_smoke_probe(stage: &str) {
+    if std::env::var_os("PHASE1_DEBUG_EBPF").is_some()
+        || std::env::var_os("PHASE1_SKIP_EBPF_RUN").is_some()
+    {
+        eprintln!("ebpf:{stage}");
+    }
+}
+
+#[cfg(not(all(feature = "host_smoke", not(target_os = "none"), not(target_os = "uefi"))))]
+fn host_smoke_probe(_stage: &str) {}
 
 // ============================================================================
 // Sabitler
@@ -791,6 +805,7 @@ impl BpfVerifier {
     /// 6. R10'a yazma yok (salt okunur FP)
     /// 7. Sıfıra bölme riski (statik tespit edilebilen)
     pub fn verify(program: &[BpfInsn]) -> Result<(), BpfError> {
+        host_smoke_probe("verify:start");
         // 1. Boyut kontrolü
         if program.is_empty() {
             return Err(BpfError::VerificationFailed(String::from("Program boş")));
@@ -798,6 +813,7 @@ impl BpfVerifier {
         if program.len() > BPF_MAX_INSNS {
             return Err(BpfError::ProgramTooLarge(program.len()));
         }
+        host_smoke_probe("verify:size-ok");
 
         // 2. Son talimat EXIT olmalı
         let last = &program[program.len() - 1];
@@ -808,8 +824,10 @@ impl BpfVerifier {
         }
 
         // 3-6. Talimat bazlı kontroller
+        host_smoke_probe("verify:last-ok");
         let mut i = 0;
         while i < program.len() {
+            host_smoke_probe("verify:loop:iter");
             let insn = &program[i];
 
             // Kayıtçı sınır kontrolü
@@ -872,12 +890,14 @@ impl BpfVerifier {
 
             i += 1;
         }
+        host_smoke_probe("verify:loop:end");
 
         crate::serial_println!(
             "[eBPF] Program doğrulandı: {} talimat, güvenli",
             program.len()
         );
 
+        host_smoke_probe("verify:serial:end");
         Ok(())
     }
 }

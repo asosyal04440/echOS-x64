@@ -59,13 +59,13 @@ fn handle_install(args: &[&str]) -> Result<String, crate::shell::scripting::Scri
             result.push_str("✓ ");
             result.push_str(&msg);
             result.push('\n');
-            
+
             // Launchpad'i güncelle
             result.push_str("Launchpad güncelleniyor...\n");
         }
         Err(e) => {
             result.push_str("✗ Paket kurulumu başarısız: ");
-            result.push_str("Unknown error");
+            let _ = write!(result, "{}", e);
             result.push('\n');
         }
     }
@@ -86,18 +86,21 @@ fn handle_remove(args: &[&str]) -> Result<String, crate::shell::scripting::Scrip
     result.push_str(package_name);
     result.push('\n');
 
-    match crate::security::package::get_package_manager().lock().remove_package(package_name) {
+    match crate::security::package::get_package_manager()
+        .lock()
+        .remove_package(package_name)
+    {
         Ok(_) => {
             result.push_str("✓ ");
             result.push_str(package_name);
             result.push_str(" paketi kaldırıldı\n");
-            
+
             // Launchpad'i güncelle
             result.push_str("Launchpad güncelleniyor...\n");
         }
         Err(e) => {
             result.push_str("✗ Paket kaldırma başarısız: ");
-            result.push_str("Unknown error");
+            let _ = write!(result, "{}", e);
             result.push('\n');
         }
     }
@@ -110,8 +113,10 @@ fn handle_list(_args: &[&str]) -> Result<String, crate::shell::scripting::Script
     result.push_str("Kurulu paketler:\n");
     result.push_str("================\n");
 
-    let packages = crate::security::package::get_package_manager().lock().list_packages();
-    
+    let packages = crate::security::package::get_package_manager()
+        .lock()
+        .list_packages();
+
     if packages.is_empty() {
         result.push_str("Hiçbir paket kurulu değil\n");
     } else {
@@ -138,8 +143,11 @@ fn handle_info(args: &[&str]) -> Result<String, crate::shell::scripting::ScriptE
 
     let package_name = args[0];
     let mut result = String::new();
-    
-    match crate::security::package::get_package_manager().lock().get_package_info(package_name) {
+
+    match crate::security::package::get_package_manager()
+        .lock()
+        .get_package_info(package_name)
+    {
         Some(info) => {
             result.push_str("Paket: ");
             result.push_str(package_name);
@@ -153,7 +161,7 @@ fn handle_info(args: &[&str]) -> Result<String, crate::shell::scripting::ScriptE
             result.push_str("Yazar: ");
             result.push_str(info.author.as_deref().unwrap_or("Bilinmiyor"));
             result.push('\n');
-            
+
             if let Some(permissions) = &info.permissions {
                 result.push_str("İzinler:\n");
                 for perm in permissions {
@@ -186,8 +194,10 @@ fn handle_search(args: &[&str]) -> Result<String, crate::shell::scripting::Scrip
     result.push_str(args[0]);
     result.push_str("'\n\n");
 
-    let packages = crate::security::package::get_package_manager().lock().search_packages(&search_term);
-    
+    let packages = crate::security::package::get_package_manager()
+        .lock()
+        .search_packages(&search_term);
+
     if packages.is_empty() {
         result.push_str("Hiçbir sonuç bulunamadı\n");
     } else {
@@ -208,14 +218,17 @@ fn handle_search(args: &[&str]) -> Result<String, crate::shell::scripting::Scrip
 fn handle_update(_args: &[&str]) -> Result<String, crate::shell::scripting::ScriptError> {
     let mut result = String::new();
     result.push_str("Paket listesi güncelleniyor...\n");
-    
-    match crate::security::package::get_package_manager().lock().update_package_list() {
+
+    match crate::security::package::get_package_manager()
+        .lock()
+        .update_package_list()
+    {
         Ok(_) => {
             result.push_str("✓ Paket listesi güncellendi\n");
         }
         Err(e) => {
             result.push_str("✗ Güncelleme başarısız: ");
-            result.push_str("Unknown error");
+            let _ = write!(result, "{}", e);
             result.push('\n');
         }
     }
@@ -236,20 +249,23 @@ fn handle_verify(args: &[&str]) -> Result<String, crate::shell::scripting::Scrip
     result.push_str(package_name);
     result.push('\n');
 
-    match crate::security::package::get_package_manager().lock().verify_package_signature(&[], &[0u8; 64]) {
+    match crate::security::package::get_package_manager()
+        .lock()
+        .verify_package_signature(&[], &[0u8; 64])
+    {
         Ok(()) => {
             result.push_str("✓ ");
             result.push_str(package_name);
             result.push_str(" paketinin imzası geçerli\n");
         }
         Err(crate::security::package::PackageError::InvalidSignature) => {
-             result.push_str("✗ ");
-             result.push_str(package_name);
-             result.push_str(" paketinin imzası geçersiz\n");
+            result.push_str("✗ ");
+            result.push_str(package_name);
+            result.push_str(" paketinin imzası geçersiz\n");
         }
         Err(_e) => {
             result.push_str("✗ Doğrulama başarısız: ");
-            result.push_str("Unknown error");
+            result.push_str("Paket doğrulanamadı");
             result.push('\n');
         }
     }

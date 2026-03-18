@@ -1,27 +1,23 @@
-//! # echOS GOP Framebuffer
-//!
-//! UEFI Graphics Output Protocol frambuffer wrapper.
-//! Piksel çizim, metin rendering ve temel grafik operasyonları.
+//! echOS GOP framebuffer wrapper.
+
+use alloc::vec;
+use alloc::vec::Vec;
+#[cfg(test)]
+use alloc::boxed::Box;
 
 use crate::font;
 use uefi::proto::console::gop::GraphicsOutput;
 
-/// Framebuffer yapısı.
-/// Doğrudan ekran belleğine erişim sağlar.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Framebuffer {
-    /// Framebuffer'ın fiziksel bellek adresi
     pub base_addr: usize,
-    /// Ekran genişliği (piksel)
     pub width: usize,
-    /// Ekran yüksekliği (piksel)
     pub height: usize,
-    /// Satır başına piksel sayısı (stride)
     pub pixels_per_scan_line: usize,
+    shadow_buffer: Option<Vec<u32>>,
 }
 
 impl Framebuffer {
-    /// UEFI GOP'tan yeni framebuffer oluşturur.
     pub fn new(gop: &mut GraphicsOutput) -> Self {
         let mode_info = gop.current_mode_info();
         let (width, height) = mode_info.resolution();
@@ -34,41 +30,67 @@ impl Framebuffer {
             width,
             height,
             pixels_per_scan_line: stride,
+            shadow_buffer: None,
         }
     }
 
-    /// Tek bir piksel çizer.
+    #[cfg(test)]
+    pub fn new_for_test(width: usize, height: usize) -> Self {
+        let stride = width.max(1);
+        let backing = vec![0u32; stride.saturating_mul(height.max(1))].into_boxed_slice();
+        let leaked = Box::leak(backing);
+        Self {
+            base_addr: leaked.as_mut_ptr() as usize,
+            width: width.max(1),
+            height: height.max(1),
+            pixels_per_scan_line: stride,
+            shadow_buffer: None,
+        }
+    }
+
+    #[inline]
+    fn offset(&self, x: usize, y: usize) -> usize {
+        y.saturating_mul(self.pixels_per_scan_line)
+            .saturating_add(x)
+    }
+
     pub fn plot_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x >= self.width || y >= self.height {
             return;
         }
 
-        let offset = (y * self.pixels_per_scan_line + x) * 4;
-        let pixel_addr = (self.base_addr + offset) as *mut u32;
+        let offset = self.offset(x, y);
+        if let Some(shadow) = self.shadow_buffer.as_mut() {
+            shadow[offset] = color;
+            return;
+        }
+
         unsafe {
-            *pixel_addr = color;
+            *((self.base_addr as *mut u32).add(offset)) = color;
         }
     }
 
-    /// Tüm ekranı tek renkle temizler.
     pub fn clear(&mut self, color: u32) {
-        for y in 0..self.height {
-            for x in 0..self.width {
-                self.plot_pixel(x, y, color);
+        if let Some(shadow) = self.shadow_buffer.as_mut() {
+            for pixel in shadow.iter_mut() {
+                *pixel = color;
             }
+            return;
+        }
+
+        for pixel in self.front_buffer_mut().iter_mut() {
+            *pixel = color;
         }
     }
 
-    /// Dikdörtgen çizer.
     pub fn draw_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: u32) {
-        for i in 0..width {
-            for j in 0..height {
-                self.plot_pixel(x + i, y + j, color);
+        for row in 0..height {
+            for col in 0..width {
+                self.plot_pixel(x + col, y + row, color);
             }
         }
     }
 
-    /// Dikdörtgen çerçevesi çizer (outline).
     pub fn draw_rect_outline(
         &mut self,
         x: usize,
@@ -77,36 +99,33 @@ impl Framebuffer {
         height: usize,
         color: u32,
     ) {
-        // Üst kenar
-        for i in 0..width {
-            self.plot_pixel(x + i, y, color);
+        if width == 0 || height == 0 {
+            return;
         }
-        // Alt kenar
-        for i in 0..width {
-            self.plot_pixel(x + i, y + height - 1, color);
+
+        for col in 0..width {
+            self.plot_pixel(x + col, y, color);
+            self.plot_pixel(x + col, y + height - 1, color);
         }
-        // Sol kenar
-        for j in 0..height {
-            self.plot_pixel(x, y + j, color);
-        }
-        // Sağ kenar
-        for j in 0..height {
-            self.plot_pixel(x + width - 1, y + j, color);
+        for row in 0..height {
+            self.plot_pixel(x, y + row, color);
+            self.plot_pixel(x + width - 1, y + row, color);
         }
     }
 
-    /// Bir pikselin rengini okur.
     pub fn get_pixel(&self, x: usize, y: usize) -> u32 {
         if x >= self.width || y >= self.height {
-            return 0x000000;
+            return 0;
         }
 
-        let offset = (y * self.pixels_per_scan_line + x) * 4;
-        let pixel_addr = (self.base_addr + offset) as *const u32;
-        unsafe { *pixel_addr }
+        let offset = self.offset(x, y);
+        if let Some(shadow) = self.shadow_buffer.as_ref() {
+            return shadow[offset];
+        }
+
+        unsafe { *((self.base_addr as *const u32).add(offset)) }
     }
 
-    /// VGA font kullanarak karakter çizer.
     pub fn draw_char(&mut self, x: usize, y: usize, c: char, color: u32) {
         let font_data = font::vga_font::get_font_data(c);
         for (row, byte) in font_data.iter().enumerate() {
@@ -118,7 +137,6 @@ impl Framebuffer {
         }
     }
 
-    /// String çizer (8 piksel karakter genişliği).
     pub fn draw_string(&mut self, x: usize, y: usize, s: &str, color: u32) {
         let mut current_x = x;
         for c in s.chars() {
@@ -127,19 +145,29 @@ impl Framebuffer {
         }
     }
 
-    /// Ekranı yukarı kaydırır.
     pub fn scroll_up(&mut self, lines: usize) {
-        let bytes_per_pixel = 4;
-        let row_stride_bytes = self.pixels_per_scan_line * bytes_per_pixel;
-        let total_rows = self.height;
-
         if lines == 0 {
             return;
         }
 
-        let scroll_rows = lines.min(total_rows);
-        let visible_rows = total_rows - scroll_rows;
+        let scroll_rows = lines.min(self.height);
+        let visible_rows = self.height.saturating_sub(scroll_rows);
+        let row_len = self.pixels_per_scan_line;
 
+        if let Some(shadow) = self.shadow_buffer.as_mut() {
+            for row in 0..visible_rows {
+                let dst = row * row_len;
+                let src = (row + scroll_rows) * row_len;
+                shadow.copy_within(src..src + row_len, dst);
+            }
+            for pixel in shadow.iter_mut().skip(visible_rows * row_len) {
+                *pixel = 0x000000;
+            }
+            return;
+        }
+
+        let bytes_per_pixel = 4;
+        let row_stride_bytes = row_len * bytes_per_pixel;
         unsafe {
             for row in 0..visible_rows {
                 let dst = (self.base_addr + row * row_stride_bytes) as *mut u8;
@@ -148,32 +176,52 @@ impl Framebuffer {
             }
 
             let clear_start = (self.base_addr + visible_rows * row_stride_bytes) as *mut u32;
-            let clear_pixels = self.pixels_per_scan_line * scroll_rows;
-            for i in 0..clear_pixels {
-                *clear_start.add(i) = 0x000000;
+            let clear_pixels = row_len * scroll_rows;
+            for idx in 0..clear_pixels {
+                *clear_start.add(idx) = 0x000000;
             }
         }
     }
 
-    /// Ham buffer'a mutable erişim sağlar.
     pub fn buffer_mut(&mut self) -> &mut [u32] {
-        let len = self.pixels_per_scan_line * self.height;
+        if self.shadow_buffer.is_none() {
+            return self.front_buffer_mut();
+        }
+        self.shadow_buffer.as_mut().unwrap().as_mut_slice()
+    }
+
+    pub fn front_buffer(&self) -> &[u32] {
+        let len = self.pixels_per_scan_line.saturating_mul(self.height);
+        unsafe { core::slice::from_raw_parts(self.base_addr as *const u32, len) }
+    }
+
+    pub fn front_buffer_mut(&mut self) -> &mut [u32] {
+        let len = self.pixels_per_scan_line.saturating_mul(self.height);
         unsafe { core::slice::from_raw_parts_mut(self.base_addr as *mut u32, len) }
     }
 
-    /// Çift tamponlamayı etkinleştirir (stub — GOP tek tampon kullanır).
-    /// desktop::run() tarafından çağrılır; GOP doğrudan fiziksel belleğe yazar
-    /// bu yüzden ek bir arka tampon gerekmez.
     pub fn enable_double_buffering(&mut self) {
-        // GOP framebuffer tek tamponda çalışır; bu fonksiyon gelecekteki
-        // shadow-buffer implementasyonu için yer tutucudur.
+        if self.shadow_buffer.is_some() {
+            return;
+        }
+
+        let len = self.pixels_per_scan_line.saturating_mul(self.height);
+        let mut shadow = vec![0; len];
+        shadow.copy_from_slice(self.front_buffer());
+        self.shadow_buffer = Some(shadow);
     }
 
-    /// Arka tamponu ön tampona kopyalar (stub — GOP tek tampon kullanır).
-    /// desktop::run() her kare sonunda bunu çağırır.
     pub fn swap_buffers(&mut self) {
-        // Tek tampon modunda yazılan her piksel zaten ekrana gider;
-        // gerçek bir double-buffer için burada blit yapılacak.
+        let Some(shadow) = self.shadow_buffer.as_ref() else {
+            return;
+        };
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                shadow.as_ptr(),
+                self.base_addr as *mut u32,
+                shadow.len(),
+            );
+        }
     }
 }
-

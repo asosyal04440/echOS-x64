@@ -25,10 +25,12 @@
 //!
 //! ## Mevcut Durum
 //!
-//! Bu modül şu an smoltcp'yi doğrudan kullanmayan bir **stub** (iskelet)
-//! katmanıdır. Gerçek entegrasyon için smoltcp'nin `Device` trait'inin
-//! VirtIO-Net üzerinde implemente edilmesi gerekir.
+//! Bu modül artık eski smoltcp uyumluluk yüzeyi ile gerçek echOS ağ
+//! modülleri arasında köprü görevi görür. Doğrudan `smoltcp::Device`
+//! entegrasyonu yapılmış değildir; DHCP, DNS, TCP ve HTTP çağrıları
+//! çekirdekteki gerçek netdev/socket/http yollarına yönlendirilir.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -86,10 +88,23 @@ pub fn get_interface() -> &'static Mutex<NetInterface> {
 pub fn init() -> bool {
     crate::serial_println!("[smoltcp] Interface initialized");
 
-    // VirtIO-Net'den MAC adresi al
+    // VirtIO-Net'den MAC adresini yansıt
     if crate::drivers::virtio_net::is_initialized() {
-        crate::serial_println!("[smoltcp] VirtIO-Net available");
+        let mac = crate::drivers::virtio_net::get_mac();
+        let mut iface = NET_INTERFACE.lock();
+        iface.mac = Some(*mac.as_bytes());
+        crate::serial_println!(
+            "[smoltcp] VirtIO-Net available: mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac.as_bytes()[0],
+            mac.as_bytes()[1],
+            mac.as_bytes()[2],
+            mac.as_bytes()[3],
+            mac.as_bytes()[4],
+            mac.as_bytes()[5]
+        );
     }
+
+    sync_from_kernel_config();
 
     true
 }
@@ -107,32 +122,62 @@ pub fn init() -> bool {
 pub fn dhcp_configure() -> bool {
     crate::serial_println!("[smoltcp] DHCP configuration started");
 
-    // TODO: smoltcp DHCP client kullan
-    // Şimdilik QEMU user-mode network için varsayılan IP
-    let mut iface = NET_INTERFACE.lock();
-    iface.ip = Some([10, 0, 2, 15]); // QEMU default guest IP
-    iface.gateway = Some([10, 0, 2, 2]); // QEMU default gateway
-    iface.dns = Some([10, 0, 2, 3]); // QEMU default DNS
-
-    crate::serial_println!("[smoltcp] DHCP configured: IP={:?}", iface.ip);
-    true
+    match crate::net::netdev::configure_dhcp("eth0") {
+        Ok(config) => {
+            let mut iface = NET_INTERFACE.lock();
+            iface.ip = Some(config.ip_addr);
+            iface.gateway = if config.gateway != [0, 0, 0, 0] {
+                Some(config.gateway)
+            } else {
+                None
+            };
+            iface.dns = config.dns_servers.first().copied();
+            if crate::drivers::virtio_net::is_initialized() {
+                iface.mac = Some(*crate::drivers::virtio_net::get_mac().as_bytes());
+            }
+            crate::serial_println!(
+                "[smoltcp] DHCP configured: ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}",
+                config.ip_addr[0],
+                config.ip_addr[1],
+                config.ip_addr[2],
+                config.ip_addr[3],
+                config.gateway[0],
+                config.gateway[1],
+                config.gateway[2],
+                config.gateway[3],
+                iface
+                    .dns
+                    .map(|dns| format!("{}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]))
+                    .unwrap_or_else(|| String::from("none"))
+            );
+            true
+        }
+        Err(err) => {
+            crate::serial_println!("[smoltcp] DHCP configuration failed: {:?}", err);
+            sync_from_kernel_config();
+            false
+        }
+    }
 }
 
 /// Yapılandırılmış IPv4 adresini döndürür.
 /// DHCP veya statik yapılandırma yapılmamışsa `None` döner.
 pub fn get_ip() -> Option<[u8; 4]> {
+    sync_from_kernel_config();
     NET_INTERFACE.lock().ip
 }
 
 /// Varsayılan ağ geçidini döndürür.
 /// Ağ geçidi, yerel ağ dışındaki hostlara ulaşmak için kullanılır.
 pub fn get_gateway() -> Option<[u8; 4]> {
+    sync_from_kernel_config();
     NET_INTERFACE.lock().gateway
 }
 
 /// DNS sunucu adresini döndürür.
 /// Bu adres `dns_lookup()` fonksiyonunda sorgu göndermek için kullanılır.
 pub fn get_dns() -> Option<[u8; 4]> {
+    sync_from_kernel_config();
     NET_INTERFACE.lock().dns
 }
 
@@ -144,15 +189,12 @@ pub fn get_dns() -> Option<[u8; 4]> {
 pub fn dns_lookup(hostname: &str) -> Option<[u8; 4]> {
     crate::serial_println!("[smoltcp] DNS lookup: {}", hostname);
 
-    // TODO: smoltcp DNS socket kullan
-    // Şimdilik bilinen hostlar için hardcoded
     match hostname {
         "localhost" => Some([127, 0, 0, 1]),
         "gateway" => get_gateway(),
-        _ => {
-            crate::serial_println!("[smoltcp] DNS: unknown host");
-            None
-        }
+        _ => crate::net::dns::resolve_default(hostname)
+            .ok()
+            .map(|ip| *ip.as_bytes()),
     }
 }
 
@@ -162,10 +204,38 @@ pub fn dns_lookup(hostname: &str) -> Option<[u8; 4]> {
 ///   1. `smoltcp::socket::tcp::Socket` oluştur.
 ///   2. Rastgele yerel port seç (ephemeral port: 49152–65535).
 ///   3. `connect()` çağır; üç yönlü el sıkışması tamamlanana kadar bekle.
-pub fn tcp_connect(_ip: [u8; 4], _port: u16) -> bool {
-    // TODO: smoltcp TCP socket
-    crate::serial_println!("[smoltcp] TCP connect not implemented");
-    false
+pub fn tcp_connect(ip: [u8; 4], port: u16) -> bool {
+    let sock = match crate::net::socket::socket(
+        crate::net::socket::AddressFamily::IPV4,
+        crate::net::socket::SocketType::STREAM,
+        crate::net::socket::Protocol::TCP,
+    ) {
+        Ok(sock) => sock,
+        Err(err) => {
+            crate::serial_println!("[smoltcp] TCP socket create failed: {:?}", err);
+            return false;
+        }
+    };
+
+    let addr = crate::net::socket::SocketAddr::new(
+        crate::net::Ipv4Addr::from_bytes(ip),
+        crate::net::Port(port),
+    );
+    let connected = crate::net::socket::connect(sock, addr).is_ok();
+    let _ = crate::net::socket::close(sock);
+
+    if !connected {
+        crate::serial_println!(
+            "[smoltcp] TCP connect failed: {}.{}.{}.{}:{}",
+            ip[0],
+            ip[1],
+            ip[2],
+            ip[3],
+            port
+        );
+    }
+
+    connected
 }
 
 /// Belirtilen URL'ye HTTP GET isteği gönderir ve yanıt gövdesini döndürür.
@@ -176,7 +246,28 @@ pub fn tcp_connect(_ip: [u8; 4], _port: u16) -> bool {
 ///   3. TCP bağlantısı kur (port 80 veya HTTPS için 443).
 ///   4. HTTP/1.1 GET isteğini gönder.
 ///   5. Yanıt başlıklarını ayrıştır, gövdeyi oku.
-pub fn http_get(_url: &str) -> Result<Vec<u8>, String> {
-    // TODO: smoltcp HTTP
-    Err(String::from("HTTP not implemented"))
+pub fn http_get(url: &str) -> Result<Vec<u8>, String> {
+    let client = crate::net::http::HttpClient::new();
+    client
+        .download(url)
+        .map_err(|err| format!("HTTP error: {:?}", err))
+}
+
+fn sync_from_kernel_config() {
+    let config = crate::net::get_config();
+    let mut iface = NET_INTERFACE.lock();
+    iface.ip = if config.ip_addr != [0, 0, 0, 0] {
+        Some(config.ip_addr)
+    } else {
+        None
+    };
+    iface.gateway = if config.gateway != [0, 0, 0, 0] {
+        Some(config.gateway)
+    } else {
+        None
+    };
+    iface.dns = config.dns_servers.first().copied();
+    if crate::drivers::virtio_net::is_initialized() {
+        iface.mac = Some(*crate::drivers::virtio_net::get_mac().as_bytes());
+    }
 }

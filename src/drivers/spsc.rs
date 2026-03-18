@@ -1,11 +1,11 @@
 //! # SPSC Lock-Free Ring Buffer
-//! 
+//!
 //! Single-Producer Single-Consumer queue for zero-latency input pipelines.
 //! No Mutex, no locking. Optimized for cacheline boundaries.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct SpscQueue<T, const N: usize> {
     buffer: Box<[Option<T>; N]>,
@@ -17,11 +17,13 @@ impl<T, const N: usize> SpscQueue<T, N> {
     pub fn new() -> Self {
         // Power of two check for bitmasking
         assert!(N.is_power_of_two(), "SPSC Queue size must be power of two");
-        
+
         let mut v: Vec<Option<T>> = Vec::with_capacity(N);
-        for _ in 0..N { v.push(None); }
+        for _ in 0..N {
+            v.push(None);
+        }
         let buffer: Box<[Option<T>]> = v.into_boxed_slice();
-        
+
         // Safety: We ensure N is power of two and indices are managed correctly.
         let buffer_ptr = Box::into_raw(buffer) as *mut [Option<T>; N];
         let buffer = unsafe { Box::from_raw(buffer_ptr) };
@@ -38,7 +40,7 @@ impl<T, const N: usize> SpscQueue<T, N> {
     pub fn push(&self, item: T) -> Result<(), T> {
         let head = self.head.load(Ordering::Acquire);
         let tail = self.tail.load(Ordering::Relaxed);
-        
+
         if tail.wrapping_sub(head) >= N {
             return Err(item); // Full
         }
@@ -49,7 +51,7 @@ impl<T, const N: usize> SpscQueue<T, N> {
             let ptr = self.buffer.as_ptr() as *mut Option<T>;
             &mut *ptr.add(tail & (N - 1))
         };
-        
+
         *slot = Some(item);
         self.tail.store(tail.wrapping_add(1), Ordering::Release);
         Ok(())

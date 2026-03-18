@@ -1,20 +1,22 @@
 //! Minimal native desktop client API for echOS Week-2.
 
-use alloc::format;
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::gui::protocol::{
-    AccessibilityNode, AppHealth, AppId, ClipboardPayload, DesktopPermission, DialogId, DialogKind,
-    DialogRequest, DialogResult, DialogSelection, DamagePacket, FileGrant, NotificationEntry,
-    NotificationLevel, PermissionEntry, PermissionState, Rect, ScreenshotEntry,
-    SessionPowerState, SessionSnapshot, SharedSurfaceDescriptor, ShellAppEntry, ShellShortcut,
-    SurfaceId, WindowId, WindowInfo, WindowInputEvent, WorkspaceId,
+    AccessibilityNode, AppHealth, AppId, ClipboardPayload, DamagePacket, DesktopPermission,
+    DialogId, DialogKind, DialogRequest, DialogResult, DialogSelection, FileGrant, LayerRole,
+    NotificationEntry, NotificationLevel, PermissionEntry, PermissionState, Rect, RenderObject,
+    SceneUpdate, ScreenshotEntry, SessionPowerState, SessionSnapshot, SharedSurfaceDescriptor,
+    ShellAppEntry, ShellShortcut, SurfaceId, WindowFlags, WindowId, WindowInfo, WindowInputEvent,
+    WorkspaceId, WorkspaceLayout, WorkspaceRule,
 };
 use crate::gui::theme::ThemeMode;
+use crate::services::display_atomic::HotPathMetrics;
 use crate::services::FileEntry;
 use crate::services::{
     ech_capture::get_capture_service, ech_clipboard::get_clipboard_service,
@@ -25,7 +27,6 @@ use crate::services::{
     NotificationCommand, NotificationResponse, ShellCommand, ShellResponse, StoreCommand,
     StoreResponse,
 };
-use crate::services::display_atomic::HotPathMetrics;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClientWindow {
@@ -91,6 +92,44 @@ impl DesktopClient {
         }
     }
 
+    pub fn create_layer_window(
+        &self,
+        title: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        workspace_id: WorkspaceId,
+        layer_role: LayerRole,
+        flags: WindowFlags,
+    ) -> Result<ClientWindow, String> {
+        match self
+            .display()?
+            .process_command(DisplayCommand::CreateWindowWithMeta {
+                app_id: self.app_id,
+                title: String::from(title),
+                x,
+                y,
+                width,
+                height,
+                workspace_id,
+                layer_role,
+                flags,
+            }) {
+            DisplayResponse::WindowCreated {
+                window_id,
+                surface_id,
+                content_rect,
+            } => Ok(ClientWindow {
+                window_id,
+                surface_id,
+                content_rect,
+            }),
+            DisplayResponse::Error(err) => Err(err),
+            _ => Err(String::from("display returned unexpected response")),
+        }
+    }
+
     pub fn destroy_window(&self, window_id: WindowId) -> Result<(), String> {
         self.expect_ack(
             self.display()?
@@ -110,6 +149,30 @@ impl DesktopClient {
                     pixels: pixels.to_vec(),
                 }),
         )
+    }
+
+    pub fn commit_scene(&self, window_id: WindowId, mut scene: SceneUpdate) -> Result<(), String> {
+        scene.canonicalize();
+        self.expect_ack(
+            self.display()?
+                .process_command(DisplayCommand::CommitScene { window_id, scene }),
+        )
+    }
+
+    pub fn commit_render_objects(
+        &self,
+        window_id: WindowId,
+        render_objects: Vec<RenderObject>,
+    ) -> Result<(), String> {
+        let mut scene = SceneUpdate {
+            root_id: window_id,
+            revision: 1,
+            render_objects,
+            damage_hint: Vec::new(),
+            semantic_root: None,
+        };
+        scene.canonicalize();
+        self.commit_scene(window_id, scene)
     }
 
     pub fn map_surface(&self, window_id: WindowId) -> Result<SharedSurfaceDescriptor, String> {
@@ -201,6 +264,38 @@ impl DesktopClient {
         )
     }
 
+    pub fn set_window_meta(
+        &self,
+        window_id: WindowId,
+        workspace_id: WorkspaceId,
+        layer_role: LayerRole,
+        flags: WindowFlags,
+    ) -> Result<(), String> {
+        self.expect_ack(
+            self.display()?
+                .process_command(DisplayCommand::SetWindowMeta {
+                    window_id,
+                    workspace_id,
+                    layer_role,
+                    flags,
+                }),
+        )
+    }
+
+    pub fn move_window_to_workspace(
+        &self,
+        window_id: WindowId,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), String> {
+        self.expect_ack(
+            self.display()?
+                .process_command(DisplayCommand::MoveWindowToWorkspace {
+                    window_id,
+                    workspace_id,
+                }),
+        )
+    }
+
     pub fn list_windows(&self) -> Result<Vec<WindowInfo>, String> {
         match self.display()?.process_command(DisplayCommand::ListWindows) {
             DisplayResponse::WindowList { windows } => Ok(windows),
@@ -220,7 +315,10 @@ impl DesktopClient {
         self.expect_ack(self.display()?.process_command(DisplayCommand::Present))
     }
 
-    pub fn set_present_mode(&self, mode: crate::gui::protocol::DisplayPresentMode) -> Result<(), String> {
+    pub fn set_present_mode(
+        &self,
+        mode: crate::gui::protocol::DisplayPresentMode,
+    ) -> Result<(), String> {
         self.expect_ack(
             self.display()?
                 .process_command(DisplayCommand::SetPresentMode { mode }),
@@ -245,7 +343,10 @@ impl DesktopClient {
         )
     }
 
-    pub fn submit_frame_intent(&self, intent: crate::gui::protocol::FrameIntent) -> Result<(), String> {
+    pub fn submit_frame_intent(
+        &self,
+        intent: crate::gui::protocol::FrameIntent,
+    ) -> Result<(), String> {
         self.expect_ack(
             self.display()?
                 .process_command(DisplayCommand::SubmitFrameIntent { intent }),
@@ -582,6 +683,68 @@ impl DesktopClient {
     pub fn workspace(&self) -> Result<WorkspaceId, String> {
         match get_shell_service().process_command(ShellCommand::GetWorkspace) {
             ShellResponse::Workspace(workspace_id) => Ok(workspace_id),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn set_workspace_layout(
+        &self,
+        workspace_id: WorkspaceId,
+        layout: WorkspaceLayout,
+    ) -> Result<(), String> {
+        match get_shell_service().process_command(ShellCommand::SetWorkspaceLayout {
+            workspace_id,
+            layout,
+        }) {
+            ShellResponse::Ack => Ok(()),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn workspace_layout(&self, workspace_id: WorkspaceId) -> Result<WorkspaceLayout, String> {
+        match get_shell_service().process_command(ShellCommand::GetWorkspaceLayout { workspace_id })
+        {
+            ShellResponse::WorkspaceLayout(layout) => Ok(layout),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn set_workspace_rule(
+        &self,
+        workspace_id: WorkspaceId,
+        rule: WorkspaceRule,
+    ) -> Result<(), String> {
+        match get_shell_service()
+            .process_command(ShellCommand::SetWorkspaceRule { workspace_id, rule })
+        {
+            ShellResponse::Ack => Ok(()),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn workspace_rule(&self, workspace_id: WorkspaceId) -> Result<WorkspaceRule, String> {
+        match get_shell_service().process_command(ShellCommand::GetWorkspaceRule { workspace_id }) {
+            ShellResponse::WorkspaceRule(rule) => Ok(rule),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn toggle_scratchpad(&self) -> Result<bool, String> {
+        match get_shell_service().process_command(ShellCommand::ToggleScratchpad) {
+            ShellResponse::ToggleState(state) => Ok(state),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn toggle_overview(&self) -> Result<bool, String> {
+        match get_shell_service().process_command(ShellCommand::ToggleOverview) {
+            ShellResponse::ToggleState(state) => Ok(state),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
         }

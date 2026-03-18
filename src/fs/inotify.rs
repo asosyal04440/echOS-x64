@@ -465,8 +465,10 @@ pub fn sys_inotify_add_watch(fd: i32, pathname: &str, mask: u32) -> i32 {
         return -28; // ENOSPC
     }
 
-    // Get inode from path (placeholder)
-    let inode = hash_path(pathname);
+    let inode = match crate::fs::vfs_unified::VFS_UNIFIED.lock().open(pathname) {
+        Ok(info) => info.inode,
+        Err(_) => return -2, // ENOENT
+    };
 
     let wd = instance.add_watch(inode, pathname, mask);
     INOTIFY_MANAGER.index_watch(inode, fd, wd);
@@ -662,15 +664,6 @@ pub fn notify_close(inode: u64, writable: bool) {
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
-
-/// Simple path hash for inode placeholder
-fn hash_path(path: &str) -> u64 {
-    let mut hash: u64 = 5381;
-    for byte in path.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
-    }
-    hash
-}
 
 /// Generate unique cookie for move events
 fn generate_cookie() -> u32 {

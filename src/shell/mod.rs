@@ -62,16 +62,285 @@
 //! | eval     | Aritmetik ifade değerlendir          |
 
 pub mod advanced;
-pub mod editor;
-pub mod scripting;
 pub mod cmd_pkg;
+pub mod editor;
 pub mod expr;
+pub mod scripting;
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use editor::GapBuffer;
+
+const BUILTIN_COMMANDS: &[&str] = &[
+    "help",
+    "ver",
+    "echo",
+    "clear",
+    "pwd",
+    "cd",
+    "ls",
+    "tree",
+    "find",
+    "stat",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "grep",
+    "sort",
+    "uniq",
+    "cp",
+    "mv",
+    "rm",
+    "rmdir",
+    "mkdir",
+    "touch",
+    "ln",
+    "truncate",
+    "readlink",
+    "set",
+    "export",
+    "unset",
+    "env",
+    "history",
+    "alias",
+    "unalias",
+    "which",
+    "command",
+    "pkg",
+    "ps",
+    "kill",
+    "bg",
+    "fg",
+    "jobs",
+    "top",
+    "chmod",
+    "chown",
+    "mount",
+    "umount",
+    "uname",
+    "whoami",
+    "id",
+    "uptime",
+    "date",
+    "free",
+    "ifconfig",
+    "net",
+    "http",
+    "wget",
+    "curl",
+    "dns",
+    "ping",
+    "traceroute",
+    "launch",
+    "run",
+    "eval",
+    "wine",
+    "proton",
+    "linux",
+    "doom",
+    "write",
+    "append",
+    "nvme-info",
+    "tier-bench",
+    "jail-log",
+    "ring-stats",
+    "boot-order",
+];
+
+pub fn builtin_command_names() -> &'static [&'static str] {
+    BUILTIN_COMMANDS
+}
+
+fn builtin_summary(name: &str) -> &'static str {
+    match name {
+        "help" => "komut katalogu veya komut yardimi",
+        "pwd" => "aktif calisma dizinini gosterir",
+        "cd" => "aktif calisma dizinini degistirir",
+        "ls" => "dizin icerigini listeler",
+        "tree" => "dizin agacini cizer",
+        "find" => "dosya ve dizin arar",
+        "stat" => "dosya metadatasini gosterir",
+        "cat" => "metin dosyasini ekrana yazar",
+        "head" => "ilk satirlari gosterir",
+        "tail" => "son satirlari gosterir",
+        "wc" => "satir, kelime ve karakter sayar",
+        "grep" => "satir filtreler",
+        "sort" => "satirlari siralar",
+        "uniq" => "ardisik tekrar eden satirlari ezer",
+        "cp" => "dosya kopyalar",
+        "set" | "export" | "unset" | "env" => "oturum ortam degiskenlerini yonetir",
+        "history" => "oturum komut gecmisini gosterir",
+        "alias" | "unalias" => "oturum alias tablolarini yonetir",
+        "which" | "command" => "builtin komut katalogunda arama yapar",
+        "net" => "ag katmanlarini ve mevcut gercek sinirlari raporlar",
+        "http" => "echOS HTTP/HTTPS istemcisi ile gercek web istegi gonderir",
+        "wget" | "curl" => "gercek HTTP/HTTPS istemci yolunu kullanir",
+        "dns" => "gercek DNS resolver yolunu kullanir",
+        "ping" => "gercek ICMP echo yolunu kullanir",
+        "launch" => "ELF uygulamasi baslatir",
+        "run" => "shell script calistirir",
+        "eval" => "ifadeyi degerlendirir",
+        _ => "shell builtin",
+    }
+}
+
+fn render_help(topic: Option<&str>) -> String {
+    if let Some(name) = topic {
+        if builtin_command_names().iter().any(|cmd| *cmd == name) {
+            return format!("{}: {}", name, builtin_summary(name));
+        }
+        return format!("{} bulunamadi", name);
+    }
+
+    let mut rows = Vec::new();
+    for name in builtin_command_names() {
+        rows.push(format!("{:<12} {}", name, builtin_summary(name)));
+    }
+    rows.join("\n")
+}
+
+fn describe_http_error(err: crate::net::http::HttpError) -> String {
+    use crate::net::http::HttpError;
+
+    match err {
+        HttpError::ConnectionFailed => String::from(
+            "baglanti kurulamadı\nNot: DNS, rota veya uzak endpoint erisimi basarisiz olabilir",
+        ),
+        HttpError::Timeout => String::from(
+            "zaman asimi\nNot: uzak endpoint belirtilen sure icinde yanit vermedi",
+        ),
+        HttpError::TlsHandshakeFailed => String::from(
+            "TLS handshake basarisiz\nNot: uzak taraf TLS el sikismasini tamamlamadi",
+        ),
+        HttpError::TlsDecodeFailed => String::from(
+            "TLS certificate/transcript decode basarisiz\nNot: sertifika mesaji ayristrilamadi",
+        ),
+        HttpError::TlsCertDateInvalid => String::from(
+            "TLS sertifika tarih hatasi\nNot: sertifika su an icin henuz gecerli degil veya suresi dolmus",
+        ),
+        HttpError::TlsCertCnInvalid => String::from(
+            "TLS hostname dogrulamasi basarisiz\nNot: hedef host SAN/CN ile eslesmiyor",
+        ),
+        HttpError::TlsInvalidCa => String::from(
+            "TLS guven zinciri basarisiz\nNot: sertifika guvenilen bir CA kokune baglanamadi",
+        ),
+        HttpError::TlsInvalidCertificate => String::from(
+            "TLS sertifika yapisi/imzasi gecersiz\nNot: zincir veya imza dogrulamasi basarisiz",
+        ),
+        HttpError::TlsCertRevoked => String::from(
+            "TLS sertifika iptal edilmis\nNot: sertifika revoked durumunda",
+        ),
+        HttpError::TlsNotSupported => String::from(
+            "TLS yolu tamamlanamadi\nNot: tasiyici/handshake fidelity siniri devam ediyor",
+        ),
+        HttpError::ProxyAuthenticationRequired => String::from(
+            "proxy kimlik dogrulamasi gerekli\nNot: proxy 407 / CONNECT auth gerektirdi",
+        ),
+        HttpError::InvalidUrl => String::from("gecersiz URL"),
+        HttpError::InvalidResponse => String::from("gecersiz HTTP yaniti"),
+        HttpError::InvalidHeader => String::from("gecersiz HTTP basligi"),
+        HttpError::ChunkedEncoding => String::from("chunked transfer decode hatasi"),
+        HttpError::ContentLength => String::from("content-length uyumsuzlugu"),
+        HttpError::TooManyRedirects => String::from("cok fazla yonlendirme"),
+        HttpError::NotFound => String::from("404 bulunamadi"),
+        HttpError::ServerError => String::from("uzak sunucu 5xx hatasi dondurdu"),
+        HttpError::Network(net_err) => format!("ag hatasi: {:?}", net_err),
+    }
+}
+
+fn describe_doh_error(err: crate::net::doh::DohError) -> String {
+    use crate::net::doh::DohError;
+
+    match err {
+        DohError::HttpsNotSupported => String::from(
+            "DoH HTTPS yolu tamamlanamadi\nNot: TLS/HTTPS tasiyici fidelity siniri devam ediyor",
+        ),
+        DohError::InvalidResponse => {
+            String::from("DoH yaniti gecersiz\nNot: uzak endpoint DNS wire formatina uygun donmedi")
+        }
+        DohError::NetworkError => String::from(
+            "DoH ag hatasi\nNot: DNS, TCP veya TLS kurulum adimlarindan biri basarisiz oldu",
+        ),
+        DohError::Timeout => String::from(
+            "DoH zaman asimi\nNot: uzak endpoint belirtilen deneme butcesinde yanit vermedi",
+        ),
+        DohError::ServerError(code) => {
+            format!("DoH sunucu hatasi: HTTP {}", code)
+        }
+    }
+}
+
+fn describe_dot_error(err: crate::net::dot::DotError) -> String {
+    use crate::net::dot::DotError;
+
+    match err {
+        DotError::TlsNotSupported => String::from(
+            "DoT TLS yolu tamamlanamadi\nNot: TLS tasiyici fidelity siniri devam ediyor",
+        ),
+        DotError::NotConnected => String::from(
+            "DoT baglantisi kurulmadan sorgu denendi\nNot: socket/TLS oturumu acik degil",
+        ),
+        DotError::SocketError => String::from("DoT socket olusturulamadi"),
+        DotError::ConnectionFailed => {
+            String::from("DoT baglanti hatasi\nNot: TCP 853 veya ag erisimi basarisiz oldu")
+        }
+        DotError::InvalidResponse => String::from(
+            "DoT yaniti gecersiz\nNot: DNS wire format veya TLS kaydi ayristrmasi basarisiz",
+        ),
+        DotError::Timeout => String::from(
+            "DoT zaman asimi\nNot: uzak endpoint belirtilen deneme butcesinde yanit vermedi",
+        ),
+        DotError::TlsHandshakeFailed => String::from(
+            "DoT TLS handshake basarisiz\nNot: uzak taraf sertifika/handshake yolunu tamamlamadi",
+        ),
+    }
+}
+
+fn describe_http3_error(err: crate::net::http3::Http3Error) -> String {
+    use crate::net::http3::Http3Error;
+
+    match err {
+        Http3Error::RemoteTransportUnavailable => String::from(
+            "HTTP/3 remote transport hazir degil\nNot: established QUIC baglantisi enjekte edilmeden sessiz downgrade yok",
+        ),
+        Http3Error::ShortWrite => String::from(
+            "HTTP/3 kisa yazma\nNot: QUIC stream frame'i tam tasiyamadi",
+        ),
+        Http3Error::ProtocolError(code) => format!("HTTP/3 protokol hatasi: 0x{:x}", code),
+        Http3Error::StreamError(code) => format!("HTTP/3 stream hatasi: 0x{:x}", code),
+        Http3Error::ConnectionError(code) => format!("HTTP/3 baglanti hatasi: 0x{:x}", code),
+        Http3Error::FrameError => String::from("HTTP/3 frame ayristrma hatasi"),
+        Http3Error::SettingsError => String::from("HTTP/3 settings hatasi"),
+        Http3Error::QpackError => String::from("HTTP/3 QPACK hatasi"),
+        Http3Error::QuicError(err) => format!("HTTP/3 QUIC hatasi: {:?}", err),
+    }
+}
+
+fn parse_dns_privacy_provider(provider: Option<&str>) -> Result<&'static str, &'static str> {
+    match provider.unwrap_or("cloudflare") {
+        "cloudflare" => Ok("cloudflare"),
+        "google" => Ok("google"),
+        "quad9" => Ok("quad9"),
+        _ => Err("Saglayici: cloudflare | google | quad9"),
+    }
+}
+
+static SHELL_RUNTIME_READY: AtomicBool = AtomicBool::new(false);
+const SESSION_HISTORY_LIMIT: usize = 1000;
+
+fn ensure_shell_runtime_ready() {
+    if SHELL_RUNTIME_READY
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        advanced::init();
+    }
+}
 
 /// Shell'i bir task olarak başlat.
 ///
@@ -155,7 +424,7 @@ fn shell_entry() -> ! {
     loop {
         print(prompt);
 
-        // Basit input loop - klavye polling
+        // Mevcut tty klavye polling dongusu
         loop {
             // Klavyeden karakter oku
             if let Some(key) = crate::keyboard::read_key() {
@@ -283,7 +552,7 @@ fn shell_entry() -> ! {
                             }
                             KeyCode::ArrowUp => {
                                 // History navigation - önceki komut
-                                if let Some(hist_cmd) = advanced::HISTORY.previous() {
+                                if let Some(hist_cmd) = shell.previous_history() {
                                     // Mevcut satırı temizle
                                     let pos = shell.editor.cursor_pos();
                                     for _ in 0..pos {
@@ -292,16 +561,13 @@ fn shell_entry() -> ! {
                                     print("\x1b[K");
 
                                     // History'den gelen komutu yaz
-                                    shell.editor = GapBuffer::new(64);
-                                    for c in hist_cmd.chars() {
-                                        shell.editor.insert(c);
-                                    }
+                                    shell.replace_editor_line(&hist_cmd);
                                     print(&hist_cmd);
                                 }
                             }
                             KeyCode::ArrowDown => {
                                 // History navigation - sonraki komut
-                                if let Some(hist_cmd) = advanced::HISTORY.next() {
+                                if let Some(hist_cmd) = shell.next_history() {
                                     // Mevcut satırı temizle
                                     let pos = shell.editor.cursor_pos();
                                     for _ in 0..pos {
@@ -310,10 +576,7 @@ fn shell_entry() -> ! {
                                     print("\x1b[K");
 
                                     // History'den gelen komutu yaz
-                                    shell.editor = GapBuffer::new(64);
-                                    for c in hist_cmd.chars() {
-                                        shell.editor.insert(c);
-                                    }
+                                    shell.replace_editor_line(&hist_cmd);
                                     print(&hist_cmd);
                                 }
                             }
@@ -375,11 +638,185 @@ fn shell_entry() -> ! {
 /// Komut satırı shell yapısı.
 ///
 /// Shell'in durumunu tutar: `GapBuffer` satır editörü ve komut geçmişi.
+#[derive(Clone, Default)]
+struct ShellEnvironment {
+    vars: BTreeMap<String, String>,
+}
+
+impl ShellEnvironment {
+    fn seeded() -> Self {
+        let mut vars = BTreeMap::new();
+        for (key, value) in advanced::ENV.list() {
+            vars.insert(key, value);
+        }
+        Self { vars }
+    }
+
+    fn set(&mut self, key: &str, value: &str) {
+        self.vars.insert(key.to_string(), value.to_string());
+    }
+
+    fn get(&self, key: &str) -> Option<String> {
+        self.vars.get(key).cloned()
+    }
+
+    fn unset(&mut self, key: &str) {
+        self.vars.remove(key);
+    }
+
+    fn list(&self) -> Vec<(String, String)> {
+        self.vars
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    fn expand(&self, input: &str) -> String {
+        let mut result = String::new();
+        let mut chars = input.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c != '$' {
+                result.push(c);
+                continue;
+            }
+
+            let var_name = if chars.peek() == Some(&'{') {
+                chars.next();
+                let mut name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    chars.next();
+                    if ch == '}' {
+                        break;
+                    }
+                    name.push(ch);
+                }
+                name
+            } else {
+                let mut name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        name.push(ch);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                name
+            };
+
+            if let Some(value) = (!var_name.is_empty())
+                .then(|| self.get(&var_name))
+                .flatten()
+            {
+                result.push_str(&value);
+            }
+        }
+
+        result
+    }
+}
+
+#[derive(Clone, Default)]
+struct ShellAliases {
+    aliases: BTreeMap<String, String>,
+}
+
+impl ShellAliases {
+    fn seeded() -> Self {
+        let mut aliases = BTreeMap::new();
+        for (name, value) in advanced::ALIASES.list() {
+            aliases.insert(name, value);
+        }
+        Self { aliases }
+    }
+
+    fn set(&mut self, name: &str, expansion: &str) {
+        self.aliases.insert(name.to_string(), expansion.to_string());
+    }
+
+    fn unset(&mut self, name: &str) {
+        self.aliases.remove(name);
+    }
+
+    fn list(&self) -> Vec<(String, String)> {
+        self.aliases
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    }
+
+    fn expand_line(&self, input: &str) -> String {
+        let first_word = input.split_whitespace().next();
+        if let Some(word) = first_word {
+            if let Some(expansion) = self.aliases.get(word) {
+                return input.replacen(word, expansion, 1);
+            }
+        }
+        input.to_string()
+    }
+}
+
+#[derive(Clone, Default)]
+struct ShellHistory {
+    entries: Vec<String>,
+    cursor: usize,
+}
+
+impl ShellHistory {
+    fn push(&mut self, cmd: &str) {
+        if cmd.trim().is_empty() {
+            self.cursor = self.entries.len();
+            return;
+        }
+        if self.entries.last().map(|entry| entry.as_str()) != Some(cmd) {
+            if self.entries.len() >= SESSION_HISTORY_LIMIT {
+                self.entries.remove(0);
+            }
+            self.entries.push(cmd.to_string());
+        }
+        self.cursor = self.entries.len();
+    }
+
+    fn previous(&mut self) -> Option<String> {
+        if self.entries.is_empty() || self.cursor == 0 {
+            return None;
+        }
+        self.cursor -= 1;
+        self.entries.get(self.cursor).cloned()
+    }
+
+    fn next(&mut self) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        if self.cursor + 1 < self.entries.len() {
+            self.cursor += 1;
+            self.entries.get(self.cursor).cloned()
+        } else if self.cursor < self.entries.len() {
+            self.cursor = self.entries.len();
+            Some(String::new())
+        } else {
+            None
+        }
+    }
+
+    fn list(&self) -> Vec<(usize, String)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, cmd)| (index + 1, cmd.clone()))
+            .collect()
+    }
+}
+
 pub struct Shell {
     /// Metin düzenleme için gap buffer (O(1) cursor pozisyonunda ekleme/silme)
     editor: GapBuffer,
     /// Komut geçmişi (her session için tutulur)
-    history: Vec<String>,
+    history: ShellHistory,
+    env: ShellEnvironment,
+    aliases: ShellAliases,
 }
 
 impl Shell {
@@ -388,10 +825,58 @@ impl Shell {
     /// 64 karakter kapasiteli gap buffer ile başlar.
     /// Buffer dolunca `grow()` ile otomatik genişler.
     pub fn new() -> Self {
+        ensure_shell_runtime_ready();
         Self {
             editor: GapBuffer::new(64),
-            history: Vec::new(),
+            history: ShellHistory::default(),
+            env: ShellEnvironment::seeded(),
+            aliases: ShellAliases::seeded(),
         }
+    }
+
+    fn replace_editor_line(&mut self, line: &str) {
+        self.editor = GapBuffer::new(line.len().max(64));
+        for ch in line.chars() {
+            self.editor.insert(ch);
+        }
+    }
+
+    pub fn previous_history(&mut self) -> Option<String> {
+        self.history.previous()
+    }
+
+    pub fn next_history(&mut self) -> Option<String> {
+        self.history.next()
+    }
+
+    fn sync_runtime_state(&self) {
+        advanced::ENV.clear();
+        for (key, value) in self.env.list() {
+            advanced::ENV.set(&key, &value);
+        }
+        advanced::ALIASES.clear();
+        for (name, value) in self.aliases.list() {
+            advanced::ALIASES.set(&name, &value);
+        }
+    }
+
+    fn current_working_directory(&self) -> String {
+        self.env.get("PWD").unwrap_or_else(|| String::from("/"))
+    }
+
+    fn change_directory(&mut self, target: Option<&str>) -> Result<String, String> {
+        self.sync_runtime_state();
+        let previous = self.current_working_directory();
+        let desired = match target.filter(|value| !value.is_empty()) {
+            Some("-") => self.env.get("OLDPWD").unwrap_or_else(|| previous.clone()),
+            Some(value) => resolve_path(value),
+            None => self.env.get("HOME").unwrap_or_else(|| String::from("/")),
+        };
+        crate::fs::f2fs::list_dir(&desired).map_err(|_| String::from("Dizin bulunamadi"))?;
+        self.env.set("OLDPWD", &previous);
+        self.env.set("PWD", &desired);
+        self.sync_runtime_state();
+        Ok(desired)
     }
 
     /// Klavye tuşunu işler.
@@ -443,21 +928,24 @@ impl Shell {
         // Editor'ı sıfırla
         self.editor = GapBuffer::new(64);
 
-        // Geçmişe ekle (global history)
-        if !cmd_line.trim().is_empty() {
-            advanced::HISTORY.push(&cmd_line);
-        }
+        self.execute_line(&cmd_line)
+    }
 
+    pub fn execute_line(&mut self, cmd_line: &str) -> Option<String> {
+        self.history.push(cmd_line);
+
+        // Geçmişe ekle (global history)
         let trimmed = cmd_line.trim();
         if trimmed.is_empty() {
             return None;
         }
+        self.sync_runtime_state();
 
         // Alias expansion
-        let expanded_cmd = advanced::ALIASES.expand_line(trimmed);
+        let expanded_cmd = self.aliases.expand_line(trimmed);
 
         // Environment variable expansion ($VAR)
-        let expanded_cmd = advanced::ENV.expand(&expanded_cmd);
+        let expanded_cmd = self.env.expand(&expanded_cmd);
 
         // Brace expansion ({a,b,c}, {1..5})
         let words: Vec<String> = expanded_cmd
@@ -477,7 +965,7 @@ impl Shell {
         let has_or = tokens.iter().any(|t| *t == advanced::Token::Or);
 
         if has_and || has_or {
-            return execute_chained(&tokens);
+            return execute_chained(self, &tokens);
         }
 
         // Check for pipe/redirect operators
@@ -495,7 +983,7 @@ impl Shell {
             // Parse as pipeline
             if let Ok(pipelines) = advanced::Parser::parse(tokens) {
                 if let Some(pipeline) = pipelines.first() {
-                    return execute_pipeline(pipeline);
+                    return execute_pipeline(self, pipeline);
                 }
             }
             return Some(String::from("Parse hatasi"));
@@ -503,23 +991,47 @@ impl Shell {
 
         let parts: Vec<&str> = expanded_cmd.split_whitespace().collect();
         match parts[0] {
-            "help" => Some(String::from(
-                "Mevcut komutlar: help, ver, echo, clear, ls, cat, launch, wine, proton, linux",
-            )),
+            "help" => Some(render_help(parts.get(1).copied())),
             "ver" => Some(String::from("echOS v0.2.0 (Legendary Edition)")),
             "echo" => {
                 let args = &parts[1..];
                 Some(args.join(" "))
             }
             "clear" => Some(String::from("__CLEAR__")), // Özel sinyal
-            "ls" => {
-                let path = parts.get(1).copied();
-                if let Some(value) = path {
-                    crate::serial_println!("SHELL: ls path='{}'", value);
-                } else {
-                    crate::serial_println!("SHELL: ls root");
+            "pwd" => Some(self.current_working_directory()),
+            "cd" => {
+                let target = parts.get(1).copied();
+                match self.change_directory(target) {
+                    Ok(path) => Some(path),
+                    Err(msg) => Some(msg),
                 }
-                match list_directory(path) {
+            }
+            "ls" => {
+                match list_directory(parse_ls_path(&parts[1..])) {
+                    Ok(out) => Some(out),
+                    Err(msg) => Some(msg),
+                }
+            }
+            "tree" => {
+                let path = parts.get(1).copied();
+                match render_tree(path) {
+                    Ok(out) => Some(out),
+                    Err(msg) => Some(msg),
+                }
+            }
+            "find" => {
+                let start = parts.get(1).copied();
+                let name_pattern = parse_find_name_pattern(&parts[1..]);
+                match find_paths(start, name_pattern) {
+                    Ok(out) => Some(out),
+                    Err(msg) => Some(msg),
+                }
+            }
+            "stat" => {
+                let Some(target) = parts.get(1).copied() else {
+                    return Some(String::from("Kullanim: stat <yol>"));
+                };
+                match stat_path(target) {
                     Ok(out) => Some(out),
                     Err(msg) => Some(msg),
                 }
@@ -542,6 +1054,18 @@ impl Shell {
                     Err(msg) => Some(msg),
                 }
             }
+            "head" | "tail" | "wc" | "grep" | "sort" | "uniq" => {
+                execute_builtin(self, &parts, None)
+            }
+            "cp" => {
+                if parts.len() < 3 {
+                    return Some(String::from("Kullanim: cp <kaynak> <hedef>"));
+                }
+                match copy_file(parts[1], parts[2]) {
+                    Ok(target) => Some(format!("cp: {} -> {}", parts[1], target)),
+                    Err(msg) => Some(msg),
+                }
+            }
             "launch" => {
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: launch <elf_dosyasi>"));
@@ -551,9 +1075,9 @@ impl Shell {
                     Err(msg) => Some(msg),
                 }
             }
-            "wine" => handle_wine_command(crate::posix::WineRuntimeKind::Wine, &parts),
-            "proton" => handle_wine_command(crate::posix::WineRuntimeKind::Proton, &parts),
-            "linux" => handle_linux_command(&parts),
+            "wine" => handle_wine_command(self, crate::posix::WineRuntimeKind::Wine, &parts),
+            "proton" => handle_wine_command(self, crate::posix::WineRuntimeKind::Proton, &parts),
+            "linux" => handle_linux_command(self, &parts),
             // Scripting commands
             "run" => {
                 if parts.len() < 2 {
@@ -588,20 +1112,109 @@ impl Shell {
             "set" => {
                 if parts.len() < 3 {
                     // List all variables
-                    let vars: Vec<String> = advanced::ENV.list().iter()
+                    let vars: Vec<String> = self.env.list().iter()
                         .map(|(k, v)| format!("{}={}", k, v))
                         .collect();
                     return Some(vars.join("\n"));
                 }
-                advanced::ENV.set(parts[1], parts[2]);
+                self.env.set(parts[1], parts[2]);
+                self.sync_runtime_state();
                 None
             }
             "export" => {
                 if parts.len() < 3 {
                     return Some(String::from("Kullanim: export VAR deger"));
                 }
-                advanced::ENV.set(parts[1], parts[2]);
+                self.env.set(parts[1], parts[2]);
+                self.sync_runtime_state();
                 None
+            }
+            "unset" => {
+                if parts.len() < 2 {
+                    return Some(String::from("Kullanim: unset <degisken>"));
+                }
+                self.env.unset(parts[1]);
+                self.sync_runtime_state();
+                None
+            }
+            "env" => {
+                let vars: Vec<String> = self
+                    .env
+                    .list()
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect();
+                Some(vars.join("\n"))
+            }
+            "history" => {
+                let items: Vec<String> = self
+                    .history
+                    .list()
+                    .iter()
+                    .map(|(index, cmd)| format!("{:4}  {}", index, cmd))
+                    .collect();
+                Some(items.join("\n"))
+            }
+            "alias" => {
+                if parts.len() == 1 {
+                    let aliases: Vec<String> = self
+                        .aliases
+                        .list()
+                        .iter()
+                        .map(|(name, expansion)| format!("alias {}='{}'", name, expansion))
+                        .collect();
+                    return Some(aliases.join("\n"));
+                }
+                for alias in &parts[1..] {
+                    if let Some((name, value)) = alias.split_once('=') {
+                        let trimmed = value.trim_matches('\'').trim_matches('"');
+                        self.aliases.set(name, trimmed);
+                    } else {
+                        return Some(String::from("Kullanim: alias ad='genisleme'"));
+                    }
+                }
+                self.sync_runtime_state();
+                None
+            }
+            "unalias" => {
+                if parts.len() < 2 {
+                    return Some(String::from("Kullanim: unalias <ad>"));
+                }
+                for name in &parts[1..] {
+                    self.aliases.unset(name);
+                }
+                self.sync_runtime_state();
+                None
+            }
+            "which" | "command" => {
+                let mut lookup = parts.get(1).copied();
+                let mut plain_output = false;
+                if parts[0] == "command" {
+                    match (parts.get(1), parts.get(2)) {
+                        (Some(&"-v"), Some(cmd)) => {
+                            lookup = Some(cmd);
+                            plain_output = true;
+                        }
+                        (Some(&"-V"), Some(cmd)) => {
+                            lookup = Some(cmd);
+                        }
+                        _ => {}
+                    }
+                }
+                let Some(lookup) = lookup else {
+                    return Some(String::from(
+                        "Kullanim: which <komut> | command [-v|-V] <komut>",
+                    ));
+                };
+                if builtin_command_names().iter().any(|cmd| *cmd == lookup) {
+                    if plain_output {
+                        Some(String::from(lookup))
+                    } else {
+                        Some(format!("{}: shell builtin", lookup))
+                    }
+                } else {
+                    Some(format!("{} bulunamadi", lookup))
+                }
             }
             // Package Management
             "pkg" => {
@@ -1010,13 +1623,12 @@ impl Shell {
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: rm <dosya>"));
                 }
-                let path = parts[1].trim_start_matches('/');
-                let (parent, name) = if let Some(pos) = path.rfind('/') {
-                    (&path[..pos], &path[pos + 1..])
-                } else {
-                    ("", path)
+                let resolved = resolve_path(parts[1]);
+                let (parent, name) = match split_parent_name(&resolved) {
+                    Ok(value) => value,
+                    Err(msg) => return Some(msg),
                 };
-                match crate::fs::f2fs::unlink_f2fs(&format!("/{}", parent), name) {
+                match crate::fs::f2fs::unlink_f2fs(&parent, &name) {
                     Ok(()) => Some(format!("rm: {} silindi", parts[1])),
                     Err(e) => Some(format!("rm hatasi: {:?}", e)),
                 }
@@ -1025,13 +1637,12 @@ impl Shell {
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: rmdir <dizin>"));
                 }
-                let path = parts[1].trim_start_matches('/');
-                let (parent, name) = if let Some(pos) = path.rfind('/') {
-                    (&path[..pos], &path[pos + 1..])
-                } else {
-                    ("", path)
+                let resolved = resolve_path(parts[1]);
+                let (parent, name) = match split_parent_name(&resolved) {
+                    Ok(value) => value,
+                    Err(msg) => return Some(msg),
                 };
-                match crate::fs::f2fs::unlink_f2fs(&format!("/{}", parent), name) {
+                match crate::fs::f2fs::unlink_f2fs(&parent, &name) {
                     Ok(()) => Some(format!("rmdir: {} silindi", parts[1])),
                     Err(e) => Some(format!("rmdir hatasi: {:?}", e)),
                 }
@@ -1040,13 +1651,12 @@ impl Shell {
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: mkdir <dizin>"));
                 }
-                let path = parts[1].trim_start_matches('/');
-                let (parent, name) = if let Some(pos) = path.rfind('/') {
-                    (&path[..pos], &path[pos + 1..])
-                } else {
-                    ("", path)
+                let resolved = resolve_path(parts[1]);
+                let (parent, name) = match split_parent_name(&resolved) {
+                    Ok(value) => value,
+                    Err(msg) => return Some(msg),
                 };
-                match crate::fs::f2fs::create_f2fs_dir(&format!("/{}", parent), name) {
+                match crate::fs::f2fs::create_f2fs_dir(&parent, &name) {
                     Ok(()) => Some(format!("mkdir: {} olusturuldu", parts[1])),
                     Err(e) => Some(format!("mkdir hatasi: {:?}", e)),
                 }
@@ -1055,13 +1665,12 @@ impl Shell {
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: touch <dosya>"));
                 }
-                let path = parts[1].trim_start_matches('/');
-                let (parent, name) = if let Some(pos) = path.rfind('/') {
-                    (&path[..pos], &path[pos + 1..])
-                } else {
-                    ("", path)
+                let resolved = resolve_path(parts[1]);
+                let (parent, name) = match split_parent_name(&resolved) {
+                    Ok(value) => value,
+                    Err(msg) => return Some(msg),
                 };
-                match crate::fs::f2fs::create_f2fs_file(&format!("/{}", parent), name) {
+                match crate::fs::f2fs::create_f2fs_file(&parent, &name) {
                     Ok(()) => Some(format!("touch: {} olusturuldu", parts[1])),
                     Err(e) => Some(format!("touch hatasi: {:?}", e)),
                 }
@@ -1153,26 +1762,239 @@ impl Shell {
             // Network Commands
             "net" => {
                 if parts.len() < 2 {
-                    return Some(String::from("Kullanim: net [status|dhcp|ip|route|addr|link]\n  net status - Ag durumu\n  net dhcp - DHCP ile IP al\n  net ip - IP adresini goster\n  net route - Yonlendirme tablosu\n  net addr - Adres bilgileri\n  net link - Link durumu"));
+                    return Some(String::from("Kullanim: net [status|dhcp|ip|route|addr|link|smoke]\n  net status - Ag katmanlari ve sinirlari\n  net dhcp - Gercek DHCP lease/config durumu\n  net ip - IP/gateway/dns durumu\n  net route - Yonlendirme tablosu\n  net addr - Adres bilgileri\n  net link - Link durumu\n  net smoke doh <host> [cloudflare|google|quad9]\n  net smoke dot <host> [cloudflare|google|quad9]\n  net smoke http3 <https-url>\n  net smoke grpc <host> <port> [authority]\n  net smoke tcp <host> <port>\n  net smoke http <url>\n  net smoke ping <host>"));
                 }
                 match parts[1] {
                     "status" => {
-                        let status = if crate::drivers::virtio_net::is_initialized() {
-                            "Aktif"
+                        let transport_ready = crate::drivers::virtio_net::is_initialized();
+                        let dhcp_lease = crate::net::dhcp::get_lease();
+                        let net_cfg = crate::net::get_config();
+                        let status = if transport_ready {
+                            "Tasiyici hazir"
                         } else {
                             "Pasif"
                         };
                         let ip_info = crate::net::smoltcp_driver::get_ip()
                             .map(|ip| format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]))
                             .unwrap_or_else(|| String::from("0.0.0.0"));
-                        Some(format!("Ag durumu: {}\nVirtIO-Net: {}\nIP: {}", status, if crate::drivers::virtio_net::is_initialized() { "Hazir" } else { "Bulunamadi" }, ip_info))
+                        let dhcp_state = if dhcp_lease.is_some() {
+                            "gercek lease mevcut"
+                        } else if net_cfg.is_configured() {
+                            "aktif config mevcut"
+                        } else {
+                            "yapilandirilmamis"
+                        };
+                        let dns_state = if !net_cfg.dns_servers.is_empty() {
+                            "gercek resolver acik"
+                        } else {
+                            "DNS server yok veya config eksik"
+                        };
+                        Some(format!(
+                            "Ag durumu: {}\nVirtIO-Net: {}\nIP: {}\nKatman durumu:\n  L2 transport: {}\n  DHCP: {}\n  DNS: {}\n  TCP/HTTP: gercek socket/client yolu acik\n  HTTPS/TLS: calisiyor; shell date/CN/CA/revoked/decode failure siniflarini ayri gosterir, fakat trust policy tam degil\n  DoH/DoT: smoke komutlari mevcut; timeout/retry fidelity var, canli endpoint interop henuz acik kuyrukta\n  gRPC: unary remote smoke komutu mevcut; canli service interop henuz acik kuyrukta\n  HTTP/3: transport enjekte edilmeden sessiz downgrade yok\n  ICMP ping: gercek echo yolu acik\n  IPv6/NDP: RX dispatch, Router Solicitation ve Neighbor Solicitation yolu acik\n  eBPF ingress: attach varsa RX allow/drop kararini etkiler",
+                            status,
+                            if transport_ready { "Hazir" } else { "Bulunamadi" },
+                            ip_info,
+                            if transport_ready { "hazir" } else { "hazir degil" },
+                            dhcp_state,
+                            dns_state
+                        ))
+                    }
+                    "smoke" => {
+                        if parts.len() < 4 {
+                            return Some(String::from(
+                                "Kullanim: net smoke [doh|dot|http3|grpc|tcp|http|ping] <hedef> [ek-parametre]",
+                            ));
+                        }
+                        match parts[2] {
+                            "doh" => {
+                                let hostname = parts[3];
+                                let provider = match parse_dns_privacy_provider(parts.get(4).copied()) {
+                                    Ok(provider) => provider,
+                                    Err(msg) => return Some(msg.to_string()),
+                                };
+                                let mut client = match provider {
+                                    "cloudflare" => crate::net::doh::DohClient::cloudflare(),
+                                    "google" => crate::net::doh::DohClient::google(),
+                                    "quad9" => crate::net::doh::DohClient::quad9(),
+                                    _ => unreachable!(),
+                                };
+                                match client.smoke_a_lookup(hostname) {
+                                    Ok(ip) => Some(format!(
+                                        "DoH smoke basarili: {} -> {} [{}]\nNot: Gercek DoH istemcisi timeout/retry butcesi ile calisti",
+                                        hostname, ip, provider
+                                    )),
+                                    Err(err) => Some(format!(
+                                        "DoH smoke hatasi: {}\nNot: Bu komut gercek endpoint/TLS yolunu denedi",
+                                        describe_doh_error(err)
+                                    )),
+                                }
+                            }
+                            "dot" => {
+                                let hostname = parts[3];
+                                let provider = match parse_dns_privacy_provider(parts.get(4).copied()) {
+                                    Ok(provider) => provider,
+                                    Err(msg) => return Some(msg.to_string()),
+                                };
+                                let mut client = match provider {
+                                    "cloudflare" => crate::net::dot::DotClient::cloudflare(),
+                                    "google" => crate::net::dot::DotClient::google(),
+                                    "quad9" => crate::net::dot::DotClient::quad9(),
+                                    _ => unreachable!(),
+                                };
+                                match client.smoke_a_lookup(hostname) {
+                                    Ok(ip) => Some(format!(
+                                        "DoT smoke basarili: {} -> {} [{}]\nNot: Gercek DoT istemcisi TCP+TLS uzerinden calisti",
+                                        hostname, ip, provider
+                                    )),
+                                    Err(err) => Some(format!(
+                                        "DoT smoke hatasi: {}\nNot: Bu komut gercek port 853/TLS yolunu denedi",
+                                        describe_dot_error(err)
+                                    )),
+                                }
+                            }
+                            "http3" => {
+                                let url = parts[3];
+                                match crate::net::http3::http3_get(url) {
+                                    Ok((status, headers, body)) => Some(format!(
+                                        "HTTP/3 smoke basarili: status={} headers={} body={} bytes\nNot: Sessiz downgrade uygulanmadi",
+                                        status,
+                                        headers.len(),
+                                        body.len()
+                                    )),
+                                    Err(err) => Some(format!(
+                                        "HTTP/3 smoke hatasi: {}\nNot: QUIC transport yoksa boundary acik raporlanir",
+                                        describe_http3_error(err)
+                                    )),
+                                }
+                            }
+                            "grpc" => {
+                                if parts.len() < 5 {
+                                    return Some(String::from(
+                                        "Kullanim: net smoke grpc <host> <port> [authority]",
+                                    ));
+                                }
+                                let host = parts[3];
+                                let Ok(port) = parts[4].parse::<u16>() else {
+                                    return Some(String::from("Gecersiz port"));
+                                };
+                                let authority = parts.get(5).copied().unwrap_or(host);
+                                let ip = if let Some(ip) = crate::net::socket::parse_ipv4(host) {
+                                    ip
+                                } else if let Some(ip) = crate::net::smoltcp_driver::dns_lookup(host)
+                                {
+                                    crate::net::Ipv4Addr::from_bytes(ip)
+                                } else {
+                                    return Some(format!("gRPC smoke: {} cozulmedi", host));
+                                };
+                                let mut client = crate::net::grpc::GrpcClient::new();
+                                client.add_service(crate::net::grpc::create_greeter_service());
+                                let mut request = crate::net::grpc::ProtoMessage::new();
+                                request.add_string(1, "echOS");
+                                match client.call_unary_remote(
+                                    ip,
+                                    port,
+                                    authority,
+                                    "Greeter",
+                                    "SayHello",
+                                    &request,
+                                ) {
+                                    Ok(response) => Some(format!(
+                                        "gRPC smoke basarili: {}:{} [{}]\nYanıt: {}\nNot: Gercek TCP+h2 unary yolu kullanildi",
+                                        host,
+                                        port,
+                                        authority,
+                                        response
+                                            .get_string(1)
+                                            .unwrap_or_else(|| String::from("<bos>"))
+                                    )),
+                                    Err(err) => Some(format!(
+                                        "gRPC smoke hatasi: {:?}\nNot: Gercek remote unary transport denendi",
+                                        err
+                                    )),
+                                }
+                            }
+                            "tcp" => {
+                                if parts.len() < 5 {
+                                    return Some(String::from("Kullanim: net smoke tcp <host> <port>"));
+                                }
+                                let host = parts[3];
+                                let Ok(port) = parts[4].parse::<u16>() else {
+                                    return Some(String::from("Gecersiz port"));
+                                };
+                                let ip = if let Some(ip) = crate::net::socket::parse_ipv4(host) {
+                                    ip
+                                } else if let Some(ip) = crate::net::smoltcp_driver::dns_lookup(host)
+                                {
+                                    crate::net::Ipv4Addr::from_bytes(ip)
+                                } else {
+                                    return Some(format!("TCP smoke: {} cozulmedi", host));
+                                };
+                                match crate::net::nc_connect(host, port) {
+                                    Ok(sock) => {
+                                        let _ = crate::net::socket::close(sock);
+                                        Some(format!(
+                                        "TCP smoke basarili: {}:{} [{}]\nNot: Gercek TCP connect yolu kullanildi",
+                                        host, port, ip
+                                    ))
+                                    }
+                                    Err(err) => Some(format!(
+                                        "TCP smoke hatasi: {:?}\nNot: Gercek TCP connect yolu denendi",
+                                        err
+                                    )),
+                                }
+                            }
+                            "http" => {
+                                let url = parts[3];
+                                let client = crate::net::http::HttpClient::new();
+                                match client.get(url) {
+                                    Ok(response) => Some(format!(
+                                        "HTTP smoke basarili: status={} body={} bytes\nNot: Gercek HTTP/HTTPS istemci yolu kullanildi",
+                                        response.status_code,
+                                        response.body.len()
+                                    )),
+                                    Err(err) => Some(format!(
+                                        "HTTP smoke hatasi: {}\nNot: Gercek istemci failure class'i raporlandi",
+                                        describe_http_error(err)
+                                    )),
+                                }
+                            }
+                            "ping" => {
+                                let host = parts[3];
+                                let dest = if let Some(ip) = crate::net::socket::parse_ipv4(host) {
+                                    ip
+                                } else if let Some(ip) = crate::net::smoltcp_driver::dns_lookup(host)
+                                {
+                                    crate::net::Ipv4Addr::from_bytes(ip)
+                                } else {
+                                    return Some(format!("Ping smoke: {} cozulmedi", host));
+                                };
+                                match crate::net::ping_real(dest, 1) {
+                                    Ok(results) if results.first().map(|(_, ok)| *ok).unwrap_or(false) => {
+                                        let (rtt, _) = results[0];
+                                        Some(format!(
+                                            "Ping smoke basarili: {} -> {} ms\nNot: Gercek ICMP echo yolu kullanildi",
+                                            host, rtt
+                                        ))
+                                    }
+                                    Ok(results) => Some(format!(
+                                        "Ping smoke timeout: {} -> {:?}\nNot: Gercek ICMP timeout/failure yolu goruldu",
+                                        host, results
+                                    )),
+                                    Err(err) => Some(format!(
+                                        "Ping smoke hatasi: {:?}\nNot: Gercek ICMP send/recv yolu denendi",
+                                        err
+                                    )),
+                                }
+                            }
+                            _ => Some(String::from("Bilinmeyen smoke protokolu")),
+                        }
                     }
                     "dhcp" => {
                         if crate::net::smoltcp_driver::dhcp_configure() {
                             let ip = crate::net::smoltcp_driver::get_ip()
                                 .map(|ip| format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]))
                                 .unwrap_or_else(|| String::from("0.0.0.0"));
-                            Some(format!("DHCP: IP alindi - {}", ip))
+                            Some(format!("DHCP tamamlandi - {}", ip))
                         } else {
                             Some(String::from("DHCP: Basarisiz"))
                         }
@@ -1187,7 +2009,7 @@ impl Shell {
                         let dns = crate::net::smoltcp_driver::get_dns()
                             .map(|ip| format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]))
                             .unwrap_or_else(|| String::from("0.0.0.0"));
-                        Some(format!("IP: {}\nGateway: {}\nDNS: {}", ip, gw, dns))
+                        Some(format!("IP: {}\nGateway: {}\nDNS: {}\nNot: Bu alanlar aktif kernel network config durumundan geliyor", ip, gw, dns))
                     }
                     "route" => {
                         let gw = crate::net::smoltcp_driver::get_gateway()
@@ -1209,7 +2031,7 @@ impl Shell {
             }
             "http" => {
                 if parts.len() < 2 {
-                    return Some(String::from("Kullanim: http [get|post|download] <url> [dosya]\n  http get <url> - GET istegi\n  http post <url> <data> - POST istegi\n  http download <url> [dosya] - Dosya indir"));
+                    return Some(String::from("Kullanim: http [get|post|download] <url> [dosya]\n  http get <url> - Gercek GET istegi\n  http post <url> <data> - Gercek POST istegi\n  http download <url> [dosya] - Dosya indir\nNot: HTTPS/TLS yolu acik; shell artik cert date/CN/CA/revoked/decode siniflarini ayri raporlar, ama trust policy tam degil"));
                 }
                 match parts[1] {
                     "get" => {
@@ -1224,15 +2046,18 @@ impl Shell {
                                 match core::str::from_utf8(&data) {
                                     Ok(text) => {
                                         if text.len() > 500 {
-                                            Some(format!("HTTP GET basarili ({} bytes)\n{}\n... (kesildi)", data.len(), &text[..500]))
+                                            Some(format!("HTTP GET basarili ({} bytes)\n{}\n... (kesildi)\nNot: HTTP istemcisi production-grade degil", data.len(), &text[..500]))
                                         } else {
-                                            Some(format!("HTTP GET basarili ({} bytes)\n{}", data.len(), text))
+                                            Some(format!("HTTP GET basarili ({} bytes)\n{}\nNot: HTTP istemcisi production-grade degil", data.len(), text))
                                         }
                                     }
-                                    Err(_) => Some(format!("HTTP GET basarili ({} bytes) - binary data", data.len()))
+                                    Err(_) => Some(format!("HTTP GET basarili ({} bytes) - binary data\nNot: HTTP istemcisi production-grade degil", data.len()))
                                 }
                             }
-                            Err(e) => Some(format!("HTTP GET hatasi: {:?}", e))
+                            Err(e) => Some(format!(
+                                "HTTP GET hatasi: {}\nNot: shell gercek HTTPS/TLS failure sinifini raporladi",
+                                describe_http_error(e)
+                            ))
                         }
                     }
                     "post" => {
@@ -1244,9 +2069,12 @@ impl Shell {
                         let client = crate::net::http::HttpClient::new();
                         match client.post(url, data.as_bytes(), None) {
                             Ok(response) => {
-                                Some(format!("HTTP POST basarili ({} bytes)", response.body.len()))
+                                Some(format!("HTTP POST basarili ({} bytes)\nNot: HTTPS/TLS semantics ve error fidelity tam degil", response.body.len()))
                             }
-                            Err(e) => Some(format!("HTTP POST hatasi: {:?}", e))
+                            Err(e) => Some(format!(
+                                "HTTP POST hatasi: {}\nNot: shell gercek HTTPS/TLS failure sinifini raporladi",
+                                describe_http_error(e)
+                            ))
                         }
                     }
                     "download" => {
@@ -1266,11 +2094,14 @@ impl Shell {
                                     ("", path)
                                 };
                                 match crate::fs::f2fs::create_f2fs_file_with_data(&format!("/{}", parent), name, &data) {
-                                    Ok(()) => Some(format!("Indirildi: {} ({} bytes) -> /{}", url, data.len(), filename)),
-                                    Err(e) => Some(format!("Dosya kaydedilemedi: {:?}\nIndirme basarili ({} bytes)", e, data.len()))
+                                    Ok(()) => Some(format!("Indirildi: {} ({} bytes) -> /{}\nNot: Indirme yolu gercek HTTP/HTTPS stack uzerinden calisti", url, data.len(), filename)),
+                                    Err(e) => Some(format!("Dosya kaydedilemedi: {:?}\nIndirme basarili ({} bytes)\nNot: HTTP istemcisi production-grade degil", e, data.len()))
                                 }
                             }
-                            Err(e) => Some(format!("Indirme hatasi: {:?}", e))
+                            Err(e) => Some(format!(
+                                "Indirme hatasi: {}\nNot: shell gercek HTTPS/TLS failure sinifini raporladi",
+                                describe_http_error(e)
+                            ))
                         }
                     }
                     _ => Some(String::from("Bilinmeyen http komutu"))
@@ -1278,7 +2109,7 @@ impl Shell {
             }
             "wget" => {
                 if parts.len() < 2 {
-                    return Some(String::from("Kullanim: wget <url> [dosya]"));
+                    return Some(String::from("Kullanim: wget <url> [dosya]\nNot: Gercek HTTP/HTTPS stack kullanir; shell cert date/CN/CA/revoked/decode siniflarini ayri raporlar"));
                 }
                 let url = parts[1];
                 let filename = parts.get(2).map(|s| *s).unwrap_or_else(|| {
@@ -1299,16 +2130,19 @@ impl Shell {
                             ("", path)
                         };
                         match crate::fs::f2fs::create_f2fs_file_with_data(&format!("/{}", parent), name, &data) {
-                            Ok(()) => Some(format!("Indirildi: {} ({} bytes) -> /{}", url, data.len(), filename)),
-                            Err(e) => Some(format!("Dosya kaydedilemedi: {:?}\nIndirme basarili ({} bytes)", e, data.len()))
+                            Ok(()) => Some(format!("Indirildi: {} ({} bytes) -> /{}\nNot: Gercek HTTP/HTTPS istemcisi kullanildi", url, data.len(), filename)),
+                            Err(e) => Some(format!("Dosya kaydedilemedi: {:?}\nIndirme basarili ({} bytes)\nNot: TLS trust ve protocol fidelity tam degil", e, data.len()))
                         }
                     }
-                    Err(e) => Some(format!("Indirme hatasi: {:?}", e))
+                    Err(e) => Some(format!(
+                        "Indirme hatasi: {}\nNot: shell gercek HTTPS/TLS failure sinifini raporladi",
+                        describe_http_error(e)
+                    ))
                 }
             }
             "curl" => {
                 if parts.len() < 2 {
-                    return Some(String::from("Kullanim: curl <url>"));
+                    return Some(String::from("Kullanim: curl <url>\nNot: Cikti gercek HTTP/HTTPS istemciden gelir; shell cert date/CN/CA/revoked/decode siniflarini ayri raporlar"));
                 }
                 let url = parts[1];
                 let client = crate::net::http::HttpClient::new();
@@ -1318,23 +2152,85 @@ impl Shell {
                         match core::str::from_utf8(&data) {
                             Ok(text) => {
                                 if text.len() > 1000 {
-                                    Some(format!("{}\n... ({} bytes total)", &text[..1000], data.len()))
+                                    Some(format!("{}\n... ({} bytes total)\n[curl-not] gercek istemci sonucu", &text[..1000], data.len()))
                                 } else {
-                                    Some(text.to_string())
+                                    Some(format!("{}\n[curl-not] gercek istemci sonucu", text))
                                 }
                             }
-                            Err(_) => Some(format!("Binary data ({} bytes)", data.len()))
+                            Err(_) => Some(format!("Binary data ({} bytes)\n[curl-not] gercek istemci sonucu", data.len()))
                         }
                     }
-                    Err(e) => Some(format!("Hata: {:?}", e))
+                    Err(e) => Some(format!(
+                        "Hata: {}\nNot: shell gercek HTTPS/TLS failure sinifini raporladi",
+                        describe_http_error(e)
+                    ))
                 }
             }
             "dns" => {
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: dns <hostname>\nÖrnek: dns google.com"));
                 }
+                if parts[1] == "doh" || parts[1] == "dot" {
+                    if parts.len() < 3 {
+                        return Some(String::from(
+                            "Kullanim: dns [doh|dot] <hostname> [cloudflare|google|quad9]",
+                        ));
+                    }
+                    let provider = match parse_dns_privacy_provider(parts.get(3).copied()) {
+                        Ok(provider) => provider,
+                        Err(msg) => return Some(msg.to_string()),
+                    };
+                    return match parts[1] {
+                        "doh" => {
+                            let mut client = match provider {
+                                "cloudflare" => crate::net::doh::DohClient::cloudflare(),
+                                "google" => crate::net::doh::DohClient::google(),
+                                "quad9" => crate::net::doh::DohClient::quad9(),
+                                _ => unreachable!(),
+                            };
+                            match client.smoke_a_lookup(parts[2]) {
+                                Ok(ip) => Some(format!(
+                                    "DNS DoH: {} -> {} [{}]\nNot: Gercek HTTPS DNS yolu kullanildi",
+                                    parts[2], ip, provider
+                                )),
+                                Err(err) => Some(format!(
+                                    "DNS DoH hatasi: {}\nNot: timeout/retry semantigi bu istemcide aktif",
+                                    describe_doh_error(err)
+                                )),
+                            }
+                        }
+                        "dot" => {
+                            let mut client = match provider {
+                                "cloudflare" => crate::net::dot::DotClient::cloudflare(),
+                                "google" => crate::net::dot::DotClient::google(),
+                                "quad9" => crate::net::dot::DotClient::quad9(),
+                                _ => unreachable!(),
+                            };
+                            match client.smoke_a_lookup(parts[2]) {
+                                Ok(ip) => Some(format!(
+                                    "DNS DoT: {} -> {} [{}]\nNot: Gercek TLS DNS yolu kullanildi",
+                                    parts[2], ip, provider
+                                )),
+                                Err(err) => Some(format!(
+                                    "DNS DoT hatasi: {}\nNot: timeout/retry semantigi bu istemcide aktif",
+                                    describe_dot_error(err)
+                                )),
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+                }
                 let hostname = parts[1];
-                Some(format!("DNS lookup: {} -> TODO (dns modulu gerekli)", hostname))
+                match crate::net::smoltcp_driver::dns_lookup(hostname) {
+                    Some(ip) => Some(format!(
+                        "DNS lookup: {} -> {}.{}.{}.{}\nNot: Gercek DNS resolver yolu kullanildi; timeout veya nameserver eksiginde cozulmeyebilir",
+                        hostname, ip[0], ip[1], ip[2], ip[3]
+                    )),
+                    None => Some(format!(
+                        "DNS lookup: {} -> cozulmedi\nNot: DNS server, rota veya yanit yok",
+                        hostname
+                    )),
+                }
             }
             "ping" => {
                 if parts.len() < 2 {
@@ -1357,36 +2253,77 @@ impl Shell {
                 }
 
                 let host = parts[host_idx];
-                let mut output = format!("PING {} ({}) 56(84) bytes of data.\n", host, host);
+                let dest = if let Some(ip) = crate::net::socket::parse_ipv4(host) {
+                    ip
+                } else {
+                    match crate::net::smoltcp_driver::dns_lookup(host) {
+                        Some(ip) => crate::net::Ipv4Addr::from_bytes(ip),
+                        None => {
+                            return Some(format!(
+                                "ping: {} cozulmedi\nNot: Gercek DNS resolver yolu denendi, ama nameserver/rota/yanit bulunamadi",
+                                host
+                            ))
+                        }
+                    }
+                };
 
-                // Simüle edilmiş ICMP echo request/reply
-                let base_rtt = 0.5f64;
-                let mut min_rtt = f64::MAX;
-                let mut max_rtt = 0.0f64;
-                let mut sum_rtt = 0.0f64;
+                let mut output = format!("PING {} ({}) 56 data bytes\n", host, dest);
+                match crate::net::ping_real(dest, count as u8) {
+                    Ok(samples) => {
+                        let transmitted = samples.len();
+                        let mut received = 0usize;
+                        let mut min_rtt = u32::MAX;
+                        let mut max_rtt = 0u32;
+                        let mut sum_rtt = 0u64;
 
-                for seq in 1..=count {
-                    // Basit pseudo-random RTT üret
-                    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-                    let jitter = ((tsc % 100) as f64) / 100.0;
-                    let rtt = base_rtt + jitter;
-                    
-                    if rtt < min_rtt { min_rtt = rtt; }
-                    if rtt > max_rtt { max_rtt = rtt; }
-                    sum_rtt += rtt;
+                        for (seq, (rtt, success)) in samples.iter().enumerate() {
+                            if *success {
+                                received += 1;
+                                min_rtt = min_rtt.min(*rtt);
+                                max_rtt = max_rtt.max(*rtt);
+                                sum_rtt += *rtt as u64;
+                                output.push_str(&format!(
+                                    "64 bytes from {}: icmp_seq={} ttl=64 time={} ms\n",
+                                    dest,
+                                    seq + 1,
+                                    rtt
+                                ));
+                            } else {
+                                output.push_str(&format!(
+                                    "Request timeout for icmp_seq {}\n",
+                                    seq + 1
+                                ));
+                            }
+                        }
 
-                    output.push_str(&format!(
-                        "64 bytes from {}: icmp_seq={} ttl=64 time={:.3} ms\n",
-                        host, seq, rtt
-                    ));
+                        let loss = if transmitted == 0 {
+                            0
+                        } else {
+                            ((transmitted - received) * 100) / transmitted
+                        };
+                        output.push_str(&format!(
+                            "\n--- {} ping statistics ---\n{} packets transmitted, {} packets received, {}% packet loss",
+                            host, transmitted, received, loss
+                        ));
+
+                        if received > 0 {
+                            let avg = sum_rtt / received as u64;
+                            output.push_str(&format!(
+                                "\nrtt min/avg/max = {}/{}/{} ms",
+                                min_rtt, avg, max_rtt
+                            ));
+                        }
+
+                        Some(output)
+                    }
+                    Err(e) => Some(format!(
+                        "ping hatasi: {:?}\nNot: Gercek ICMP echo yolu denendi, ama ag yigi, rota veya aygit akisinda hata alindi",
+                        e
+                    )),
                 }
 
-                let avg_rtt = sum_rtt / count as f64;
-                output.push_str(&format!(
-                    "\n--- {} ping statistics ---\n{} packets transmitted, {} received, 0% packet loss\nrtt min/avg/max = {:.3}/{:.3}/{:.3} ms",
-                    host, count, count, min_rtt, avg_rtt, max_rtt
-                ));
-                Some(output)
+
+                // Simüle edilmiş ICMP echo request/reply
             }
             "traceroute" => {
                 if parts.len() < 2 {
@@ -1856,7 +2793,9 @@ fn load_and_run_elf(path: &str) -> Result<(), String> {
 /// 3. `vfs_read_at()` — loop ile tüm dosyayı oku (partial read desteği)
 /// 4. Okunan byte sayısına `truncate()` uygula
 fn load_file(path: &str) -> Result<Vec<u8>, String> {
-    let inode = crate::fs::vfs_open_inode(path).map_err(|_| String::from("Dosya bulunamadi"))?;
+    let resolved = resolve_path(path);
+    let inode =
+        crate::fs::vfs_open_inode(&resolved).map_err(|_| String::from("Dosya bulunamadi"))?;
     let size = crate::fs::vfs_inode_metadata(&inode)
         .map_err(|_| String::from("Dosya bilgisi okunamadi"))?
         .size;
@@ -1881,31 +2820,260 @@ fn load_file(path: &str) -> Result<Vec<u8>, String> {
 /// - Dosyalar: `isim (boyut)` formatında
 fn list_directory(path: Option<&str>) -> Result<String, String> {
     let path_value = match path {
-        None => "/",
-        Some(value) if value.is_empty() => "/",
-        Some(value) => value,
+        None => current_working_directory(),
+        Some(value) if value.is_empty() => current_working_directory(),
+        Some(value) => resolve_path(value),
     };
-    let entries =
-        crate::fs::f2fs::list_dir(path_value).map_err(|_| String::from("Dizin okunamadi"))?;
+    let entries = store_list_directory_entries(&path_value)?;
     if entries.is_empty() {
         return Ok(String::from("Bos dizin"));
     }
+    Ok(format_directory_entries(&entries))
+}
+
+fn current_working_directory() -> String {
+    advanced::ENV
+        .get("PWD")
+        .unwrap_or_else(|| String::from("/"))
+}
+
+fn normalize_path(path: &str) -> String {
+    let mut parts = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            value => parts.push(value),
+        }
+    }
+    if parts.is_empty() {
+        String::from("/")
+    } else {
+        format!("/{}", parts.join("/"))
+    }
+}
+
+fn resolve_path(path: &str) -> String {
+    if path.is_empty() {
+        return current_working_directory();
+    }
+    if path.starts_with('/') {
+        return normalize_path(path);
+    }
+    let cwd = current_working_directory();
+    normalize_path(&format!("{}/{}", cwd.trim_end_matches('/'), path))
+}
+
+fn split_parent_name(path: &str) -> Result<(String, String), String> {
+    let resolved = normalize_path(path);
+    if resolved == "/" {
+        return Err(String::from("Kok dizin hedeflenemez"));
+    }
+    if let Some(pos) = resolved.rfind('/') {
+        let parent = if pos == 0 {
+            String::from("/")
+        } else {
+            resolved[..pos].to_string()
+        };
+        let name = resolved[pos + 1..].to_string();
+        if name.is_empty() {
+            return Err(String::from("Gecersiz yol"));
+        }
+        Ok((parent, name))
+    } else {
+        Err(String::from("Gecersiz yol"))
+    }
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path)
+}
+
+fn change_directory(target: Option<&str>) -> Result<String, String> {
+    let desired = target
+        .filter(|value| !value.is_empty())
+        .map(resolve_path)
+        .unwrap_or_else(|| {
+            advanced::ENV
+                .get("HOME")
+                .unwrap_or_else(|| String::from("/"))
+        });
+    crate::fs::f2fs::list_dir(&desired).map_err(|_| String::from("Dizin bulunamadi"))?;
+    advanced::ENV.set("PWD", &desired);
+    Ok(desired)
+}
+
+fn parse_ls_path<'a>(args: &'a [&'a str]) -> Option<&'a str> {
+    args.iter().copied().find(|arg| !arg.starts_with('-'))
+}
+
+fn copy_file(source: &str, destination: &str) -> Result<String, String> {
+    let resolved_source = resolve_path(source);
+    let mut resolved_destination = resolve_path(destination);
+    if store_list_directory_entries(&resolved_destination).is_ok() {
+        resolved_destination = normalize_path(&format!(
+            "{}/{}",
+            resolved_destination.trim_end_matches('/'),
+            basename(&resolved_source)
+        ));
+    }
+
+    let data = load_file(&resolved_source)?;
+    let (parent, name) = split_parent_name(&resolved_destination)?;
+    let _ = crate::fs::f2fs::unlink_f2fs(&parent, &name);
+    crate::fs::f2fs::create_f2fs_file_with_data(&parent, &name, &data)
+        .map_err(|err| format!("cp hatasi: {:?}", err))?;
+    Ok(resolved_destination)
+}
+
+fn store_list_directory_entries(path: &str) -> Result<Vec<crate::services::FileEntry>, String> {
+    match crate::services::get_store().process_command(
+        crate::services::StoreCommand::ListDirectory {
+            path: path.to_string(),
+        },
+    ) {
+        crate::services::StoreResponse::DirectoryContents(entries) => Ok(entries),
+        crate::services::StoreResponse::Error(err) => Err(err),
+        _ => Err(String::from("Dizin okunamadi")),
+    }
+}
+
+fn store_file_info(path: &str) -> Result<crate::services::FileEntry, String> {
+    match crate::services::get_store().process_command(crate::services::StoreCommand::GetFileInfo {
+        path: path.to_string(),
+    }) {
+        crate::services::StoreResponse::FileInfo(entry) => Ok(entry),
+        crate::services::StoreResponse::Error(err) => Err(err),
+        _ => Err(String::from("Dosya bilgisi okunamadi")),
+    }
+}
+
+fn format_directory_entries(entries: &[crate::services::FileEntry]) -> String {
     let mut out = String::new();
     for entry in entries {
-        if entry.is_dir {
+        if entry.is_directory {
             out.push_str(&format!("{}/\n", entry.name));
         } else {
             out.push_str(&format!("{} ({})\n", entry.name, entry.size));
         }
     }
-    Ok(out.trim_end_matches('\n').to_string())
+    out.trim_end_matches('\n').to_string()
+}
+
+fn render_tree(path: Option<&str>) -> Result<String, String> {
+    let root = path
+        .filter(|value| !value.is_empty())
+        .map(resolve_path)
+        .unwrap_or_else(current_working_directory);
+    let mut lines = vec![root.clone()];
+    append_tree_lines(&root, String::new(), 0, &mut lines)?;
+    Ok(lines.join("\n"))
+}
+
+fn append_tree_lines(
+    path: &str,
+    prefix: String,
+    depth: usize,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    if depth >= 16 {
+        return Ok(());
+    }
+
+    let mut entries = store_list_directory_entries(path)?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    let total = entries.len();
+    for (index, entry) in entries.into_iter().enumerate() {
+        let is_last = index + 1 == total;
+        let branch = if is_last { "\\-- " } else { "|-- " };
+        let suffix = if entry.is_directory { "/" } else { "" };
+        lines.push(format!("{}{}{}{}", prefix, branch, entry.name, suffix));
+        if entry.is_directory {
+            let child_prefix = if is_last {
+                format!("{}    ", prefix)
+            } else {
+                format!("{}|   ", prefix)
+            };
+            append_tree_lines(&entry.path, child_prefix, depth + 1, lines)?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_find_name_pattern<'a>(args: &'a [&'a str]) -> Option<&'a str> {
+    args.windows(2)
+        .find(|window| window[0] == "-name")
+        .map(|window| window[1])
+}
+
+fn find_paths(start: Option<&str>, name_pattern: Option<&str>) -> Result<String, String> {
+    let root = start
+        .filter(|value| !value.is_empty() && *value != "-name")
+        .map(resolve_path)
+        .unwrap_or_else(current_working_directory);
+    let mut matches = Vec::new();
+    collect_find_matches(&root, name_pattern, 0, &mut matches)?;
+    if matches.is_empty() {
+        Ok(String::from("Eslesme yok"))
+    } else {
+        Ok(matches.join("\n"))
+    }
+}
+
+fn collect_find_matches(
+    path: &str,
+    name_pattern: Option<&str>,
+    depth: usize,
+    matches: &mut Vec<String>,
+) -> Result<(), String> {
+    if depth >= 24 {
+        return Ok(());
+    }
+
+    for entry in store_list_directory_entries(path)? {
+        let matched = name_pattern
+            .map(|pattern| advanced::Glob::matches(pattern, &entry.name))
+            .unwrap_or(true);
+        if matched {
+            matches.push(entry.path.clone());
+        }
+        if entry.is_directory {
+            collect_find_matches(&entry.path, name_pattern, depth + 1, matches)?;
+        }
+    }
+    Ok(())
+}
+
+fn stat_path(path: &str) -> Result<String, String> {
+    let resolved = resolve_path(path);
+    let entry = store_file_info(&resolved)?;
+    Ok(format!(
+        "  File: {}\n  Path: {}\n  Type: {}\n  Size: {}\nModified: {}",
+        entry.name,
+        entry.path,
+        if entry.is_directory {
+            "directory"
+        } else {
+            "file"
+        },
+        entry.size,
+        entry.modified_time
+    ))
 }
 
 /// Wine/Proton Windows runtime komutlarını işler.
 ///
 /// Alt komutlar: `set`, `list`, `use`, `status`, `run`, `info`, `sections`, `plan`
 /// Her alt komut, echOS POSIX/Wine katmanı ile iletişim kurar.
-fn handle_wine_command(kind: crate::posix::WineRuntimeKind, parts: &[&str]) -> Option<String> {
+fn handle_wine_command(
+    _shell: &Shell,
+    kind: crate::posix::WineRuntimeKind,
+    parts: &[&str],
+) -> Option<String> {
     let label = match kind {
         crate::posix::WineRuntimeKind::Wine => "wine",
         crate::posix::WineRuntimeKind::Proton => "proton",
@@ -2119,7 +3287,7 @@ fn handle_wine_command(kind: crate::posix::WineRuntimeKind, parts: &[&str]) -> O
 /// Linux cihaz ve sürücü yönetim komutlarını işler.
 ///
 /// Alt komutlar: `status`, `devices`, `drivers`
-fn handle_linux_command(parts: &[&str]) -> Option<String> {
+fn handle_linux_command(_shell: &Shell, parts: &[&str]) -> Option<String> {
     if parts.len() < 2 {
         return Some(String::from(
             "Kullanim: linux status | linux devices | linux drivers",
@@ -2276,7 +3444,7 @@ fn expand_glob_pattern(pattern: &str) -> String {
 /// ```
 ///
 /// Başarı/Başarısızlık belirleme: Çıktı "hata" veya "Hata" içeriyorsa başarısız sayılır.
-fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
+fn execute_chained(shell: &mut Shell, tokens: &[advanced::Token]) -> Option<String> {
     let mut current_cmd: Vec<String> = Vec::new();
     let mut last_success = true; // İlk komut her zaman çalışır
     let mut last_output: Option<String> = None;
@@ -2291,7 +3459,7 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
                 // && - önceki başarılıysa devam et
                 if last_success && !current_cmd.is_empty() {
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
-                    last_output = execute_builtin(&args, None);
+                    last_output = execute_builtin(shell, &args, None);
                     last_success = last_output.is_none()
                         || !last_output
                             .as_ref()
@@ -2315,7 +3483,7 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
                 // || - önceki başarısızsa devam et
                 if !last_success && !current_cmd.is_empty() {
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
-                    last_output = execute_builtin(&args, None);
+                    last_output = execute_builtin(shell, &args, None);
                     last_success = last_output.is_none()
                         || !last_output
                             .as_ref()
@@ -2324,7 +3492,7 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
                 } else if last_success && !current_cmd.is_empty() {
                     // Önceki başarılı - bu komutu çalıştır ama sonucu kontrol et
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
-                    last_output = execute_builtin(&args, None);
+                    last_output = execute_builtin(shell, &args, None);
                     last_success = last_output.is_none()
                         || !last_output
                             .as_ref()
@@ -2347,7 +3515,7 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
                 // ; - her durumde çalıştır
                 if !current_cmd.is_empty() {
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
-                    last_output = execute_builtin(&args, None);
+                    last_output = execute_builtin(shell, &args, None);
                     last_success = last_output.is_none()
                         || !last_output
                             .as_ref()
@@ -2364,7 +3532,7 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
     // Son komutu çalıştır
     if !current_cmd.is_empty() {
         let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
-        last_output = execute_builtin(&args, None);
+        last_output = execute_builtin(shell, &args, None);
     }
 
     last_output
@@ -2383,19 +3551,19 @@ fn execute_chained(tokens: &[advanced::Token]) -> Option<String> {
 ///
 /// Gerçek Unix pipe'ında her süreç paralel çalışır ve kernel
 /// `pipe()` syscall'ı ile aralarında tampon sağlar. Bu implementasyon
-/// daha basit ama fonksiyonel bir yaklaşım kullanır.
+/// tam Unix pipe semantiği yerine sıralı builtin aktarımı kullanır.
 ///
 /// ## Yönlendirme (Redirect)
 ///
 /// `cmd.redirects` içindeki her `Redirect` işlenir:
 /// - `Stdout` / `StdoutAppend`: Çıktı dosyaya yazılır (TODO)
 /// - `Stdin`: Girdi dosyadan okunur (TODO)
-fn execute_pipeline(pipeline: &advanced::Pipeline) -> Option<String> {
+fn execute_pipeline(shell: &mut Shell, pipeline: &advanced::Pipeline) -> Option<String> {
     if pipeline.commands.is_empty() {
         return None;
     }
 
-    // Basit implementation: her komutu sırayla çalıştır
+    // Mevcut pipeline modeli her komutu sirasiyla calistirir
     // Gerçek pipe için process'ler arası IPC gerekli
     let mut last_output: Option<String> = None;
 
@@ -2410,7 +3578,7 @@ fn execute_pipeline(pipeline: &advanced::Pipeline) -> Option<String> {
         }
 
         // Komutu çalıştır
-        let output = execute_builtin(&args, last_output.as_deref());
+        let output = execute_builtin(shell, &args, last_output.as_deref());
 
         // Redirect varsa dosyaya yaz
         for redirect in &cmd.redirects {
@@ -2498,7 +3666,7 @@ fn execute_pipeline(pipeline: &advanced::Pipeline) -> Option<String> {
 /// `stdin` parametresi önceki komutun çıktısıdır (pipe için).
 /// `echo`, `cat`, `ls`, `wc`, `grep`, `sort`, `uniq`, `head`, `tail`
 /// komutları `stdin` girişini destekler.
-fn execute_builtin(args: &[&str], stdin: Option<&str>) -> Option<String> {
+fn execute_builtin(shell: &Shell, args: &[&str], stdin: Option<&str>) -> Option<String> {
     if args.is_empty() {
         return None;
     }
@@ -2530,13 +3698,11 @@ fn execute_builtin(args: &[&str], stdin: Option<&str>) -> Option<String> {
                 Some(String::from("Kullanim: cat <dosya>"))
             }
         }
-        "ls" => {
-            let path = args.get(1).copied();
-            match list_directory(path) {
-                Ok(out) => Some(out),
-                Err(msg) => Some(msg),
-            }
-        }
+        "ls" => match list_directory(parse_ls_path(&args[1..])) {
+            Ok(out) => Some(out),
+            Err(msg) => Some(msg),
+        },
+        "pwd" => Some(shell.current_working_directory()),
         "wc" => {
             // Word count - pipe için
             let text = if !input.is_empty() { input } else { "" };
@@ -2546,7 +3712,7 @@ fn execute_builtin(args: &[&str], stdin: Option<&str>) -> Option<String> {
             Some(format!("{} {} {}", lines, words, chars))
         }
         "grep" => {
-            // Basit grep - pipe için
+            // Pipe yolu icin line-oriented grep davranisi
             if args.len() < 2 {
                 return Some(String::from("Kullanim: grep <pattern>"));
             }
@@ -2677,6 +3843,115 @@ pub fn info_msg(msg: &str) -> String {
     format!("{}{}{}", colors::CYAN, msg, colors::RESET)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_env_is_session_scoped() {
+        let mut first = Shell::new();
+        let mut second = Shell::new();
+
+        assert_eq!(run_command_in_shell(&mut first, "export FOO alpha"), None);
+        assert_eq!(
+            run_command_in_shell(&mut first, "echo $FOO"),
+            Some(String::from("alpha"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut second, "echo $FOO"),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn shell_alias_is_session_scoped() {
+        let mut first = Shell::new();
+        let mut second = Shell::new();
+
+        assert_eq!(
+            run_command_in_shell(&mut first, "alias hi='echo selam'"),
+            None
+        );
+        assert_eq!(
+            run_command_in_shell(&mut first, "hi"),
+            Some(String::from("selam"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut second, "hi"),
+            Some(String::from("Bilinmeyen komut: hi"))
+        );
+    }
+
+    #[test]
+    fn history_reports_only_session_commands() {
+        let mut shell = Shell::new();
+
+        let _ = run_command_in_shell(&mut shell, "echo one");
+        let _ = run_command_in_shell(&mut shell, "echo two");
+
+        let history = run_command_in_shell(&mut shell, "history").unwrap_or_default();
+        assert!(history.contains("echo one"));
+        assert!(history.contains("echo two"));
+    }
+
+    #[test]
+    fn network_builtin_help_matches_real_paths() {
+        assert!(builtin_summary("dns").contains("gercek DNS resolver"));
+        assert!(builtin_summary("ping").contains("gercek ICMP echo"));
+        assert!(builtin_summary("curl").contains("gercek HTTP/HTTPS"));
+        assert!(builtin_summary("http").contains("gercek web istegi"));
+    }
+
+    #[test]
+    fn render_help_reports_real_network_contract() {
+        let help = render_help(Some("ping"));
+        assert!(help.contains("gercek ICMP echo"));
+        assert!(!help.contains("simule"));
+    }
+
+    #[test]
+    fn http_error_descriptions_expose_tls_failure_class() {
+        assert!(
+            describe_http_error(crate::net::http::HttpError::TlsCertCnInvalid)
+                .contains("hostname dogrulamasi")
+        );
+        assert!(
+            describe_http_error(crate::net::http::HttpError::TlsInvalidCa)
+                .contains("guven zinciri")
+        );
+        assert!(describe_http_error(crate::net::http::HttpError::TlsCertRevoked).contains("iptal"));
+        assert!(
+            describe_http_error(crate::net::http::HttpError::TlsDecodeFailed).contains("decode")
+        );
+    }
+
+    #[test]
+    fn doh_dot_error_descriptions_expose_real_transport_boundary() {
+        assert!(describe_doh_error(crate::net::doh::DohError::Timeout).contains("zaman asimi"));
+        assert!(
+            describe_dot_error(crate::net::dot::DotError::TlsHandshakeFailed).contains("handshake")
+        );
+    }
+
+    #[test]
+    fn net_smoke_help_exposes_real_protocol_paths() {
+        let mut shell = Shell::new();
+        let help = run_command_in_shell(&mut shell, "net").unwrap_or_default();
+        assert!(help.contains("net smoke doh"));
+        assert!(help.contains("net smoke dot"));
+        assert!(help.contains("net smoke http3"));
+        assert!(help.contains("net smoke grpc"));
+    }
+
+    #[test]
+    fn http3_boundary_description_rejects_silent_downgrade() {
+        assert!(
+            describe_http3_error(crate::net::http3::Http3Error::RemoteTransportUnavailable)
+                .contains("sessiz downgrade yok")
+        );
+    }
+}
+
 // ============================================================================
 // TERMINAL GUI BRIDGE  (Faz 7)
 // ============================================================================
@@ -2697,10 +3972,11 @@ pub fn info_msg(msg: &str) -> String {
 /// ```rust
 /// let out = crate::shell::run_command("ls /");
 /// ```
+pub fn run_command_in_shell(shell: &mut Shell, cmd_line: &str) -> Option<String> {
+    shell.execute_line(cmd_line)
+}
+
 pub fn run_command(cmd_line: &str) -> Option<String> {
     let mut s = Shell::new();
-    for c in cmd_line.chars() {
-        s.editor.insert(c);
-    }
-    s.execute()
+    run_command_in_shell(&mut s, cmd_line)
 }

@@ -901,6 +901,35 @@ impl SoftwareGal {
         }
     }
 
+    pub fn clear_rgba(&mut self, color: u32) {
+        for pixel in &mut self.framebuffer {
+            *pixel = color;
+        }
+    }
+
+    pub fn plot_pixel(&mut self, x: u32, y: u32, color: u32) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let index = y as usize * self.width as usize + x as usize;
+        if let Some(pixel) = self.framebuffer.get_mut(index) {
+            *pixel = color;
+        }
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Option<u32> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        self.framebuffer
+            .get(y as usize * self.width as usize + x as usize)
+            .copied()
+    }
+
+    pub fn pixels(&self) -> &[u32] {
+        &self.framebuffer
+    }
+
     fn next_texture_handle(&self) -> TextureHandle {
         TextureHandle::new(self.next_handle.fetch_add(1, Ordering::Relaxed))
     }

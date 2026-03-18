@@ -17,20 +17,27 @@ use spin::Mutex;
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::damage::DamageTracker;
 use crate::gui::protocol::{
-    AppId, DamagePacket, DisplayPresentMode, FrameIntent, InputEvent, KeyState, PlaneAssignment,
-    Point, PointerButton, Rect, SharedSurfaceDescriptor, SurfaceId, VblankFeedback, WindowId,
-    WindowInfo,
+    AppId, DamagePacket, DisplayPresentMode, FrameIntent, InputEvent, KeyState, LayerRole,
+    PlaneAssignment, Point, PointerButton, Rect, SceneUpdate, SharedSurfaceDescriptor, SurfaceId,
+    VblankFeedback, WindowBufferMode, WindowFlags, WindowId, WindowInfo, WorkspaceId,
 };
+use crate::gui::renderer::{CpuRenderer, GpuRenderer, Renderer};
 use crate::gui::shell;
 use crate::gui::surface::{SurfaceError, SurfaceInfo, SurfaceManager};
 use crate::gui::surface_memory::SharedSurfaceMemory;
+use crate::gui::text::{TextStyle, TextSystem};
 use crate::gui::theme::{Theme, ThemeMode, WindowChromeVariant};
 use crate::gui::window_manager::{
     chrome_button_rect, titlebar_rect, ChromeButton, ResizeEdge, WindowError, WindowHitTarget,
     WindowManager, BORDER_THICKNESS, CHROME_BUTTON_SIZE, MIN_CONTENT_HEIGHT, MIN_CONTENT_WIDTH,
     TITLEBAR_HEIGHT,
 };
-use crate::services::display_atomic::{AtomicPresenter, HotPathMetrics, SurfacePlacement};
+use crate::services::display_atomic::{
+    AtomicPresenter, HotPathMetrics, MailboxRing, SurfacePlacement,
+};
+
+const DISPLAY_COMMAND_QUEUE_CAPACITY: usize = 256;
+const DISPLAY_RESPONSE_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputRouting {
@@ -81,6 +88,17 @@ pub enum DisplayCommand {
         width: u32,
         height: u32,
     },
+    CreateWindowWithMeta {
+        app_id: AppId,
+        title: String,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        workspace_id: WorkspaceId,
+        layer_role: LayerRole,
+        flags: WindowFlags,
+    },
     DestroyWindow {
         window_id: WindowId,
     },
@@ -105,9 +123,23 @@ pub enum DisplayCommand {
         window_id: WindowId,
         title: String,
     },
+    SetWindowMeta {
+        window_id: WindowId,
+        workspace_id: WorkspaceId,
+        layer_role: LayerRole,
+        flags: WindowFlags,
+    },
+    MoveWindowToWorkspace {
+        window_id: WindowId,
+        workspace_id: WorkspaceId,
+    },
     CommitWindowBuffer {
         window_id: WindowId,
         pixels: Vec<u32>,
+    },
+    CommitScene {
+        window_id: WindowId,
+        scene: SceneUpdate,
     },
     MapWindowSurface {
         window_id: WindowId,
@@ -176,8 +208,8 @@ pub struct EchDisplay {
     atomic_presenter: Mutex<AtomicPresenter>,
     theme_mode: Mutex<ThemeMode>,
     last_presented_frame: AtomicU64,
-    command_queue: Mutex<Vec<DisplayCommand>>,
-    response_queue: Mutex<Vec<DisplayResponse>>,
+    command_queue: MailboxRing<DisplayCommand>,
+    response_queue: MailboxRing<DisplayResponse>,
 }
 
 impl EchDisplay {
@@ -201,12 +233,13 @@ impl EchDisplay {
             atomic_presenter: Mutex::new(AtomicPresenter::new()),
             theme_mode: Mutex::new(Theme::default_mode()),
             last_presented_frame: AtomicU64::new(0),
-            command_queue: Mutex::new(Vec::new()),
-            response_queue: Mutex::new(Vec::new()),
+            command_queue: MailboxRing::with_capacity_pow2(DISPLAY_COMMAND_QUEUE_CAPACITY),
+            response_queue: MailboxRing::with_capacity_pow2(DISPLAY_RESPONSE_QUEUE_CAPACITY),
         }
     }
 
     pub fn start(&self) {
+        self.framebuffer.lock().enable_double_buffering();
         self.running.store(true, Ordering::SeqCst);
         crate::serial_println!("[ECHDISPLAY] Week-2 display service started");
     }
@@ -217,11 +250,11 @@ impl EchDisplay {
     }
 
     pub fn send_command(&self, command: DisplayCommand) {
-        self.command_queue.lock().push(command);
+        let _ = self.command_queue.push_overwrite(command);
     }
 
     pub fn receive_response(&self) -> Option<DisplayResponse> {
-        self.response_queue.lock().pop()
+        self.response_queue.pop()
     }
 
     pub fn shared_surface_for_window(
@@ -248,7 +281,38 @@ impl EchDisplay {
                 y,
                 width,
                 height,
-            } => self.create_window(app_id, &title, x, y, width, height),
+            } => self.create_window(
+                app_id,
+                &title,
+                x,
+                y,
+                width,
+                height,
+                0,
+                LayerRole::Window,
+                WindowFlags::default(),
+            ),
+            DisplayCommand::CreateWindowWithMeta {
+                app_id,
+                title,
+                x,
+                y,
+                width,
+                height,
+                workspace_id,
+                layer_role,
+                flags,
+            } => self.create_window(
+                app_id,
+                &title,
+                x,
+                y,
+                width,
+                height,
+                workspace_id,
+                layer_role,
+                flags,
+            ),
             DisplayCommand::DestroyWindow { window_id } => self.destroy_window(window_id),
             DisplayCommand::MoveWindow { window_id, x, y } => self.move_window(window_id, x, y),
             DisplayCommand::ResizeWindow {
@@ -263,8 +327,21 @@ impl EchDisplay {
             DisplayCommand::SetWindowTitle { window_id, title } => {
                 self.set_window_title(window_id, &title)
             }
+            DisplayCommand::SetWindowMeta {
+                window_id,
+                workspace_id,
+                layer_role,
+                flags,
+            } => self.set_window_meta(window_id, workspace_id, layer_role, flags),
+            DisplayCommand::MoveWindowToWorkspace {
+                window_id,
+                workspace_id,
+            } => self.move_window_to_workspace(window_id, workspace_id),
             DisplayCommand::CommitWindowBuffer { window_id, pixels } => {
                 self.commit_window_buffer(window_id, &pixels)
+            }
+            DisplayCommand::CommitScene { window_id, scene } => {
+                self.commit_window_scene(window_id, scene)
             }
             DisplayCommand::MapWindowSurface { window_id } => self.map_window_surface(window_id),
             DisplayCommand::SubmitWindowDamage { window_id, packet } => {
@@ -275,7 +352,7 @@ impl EchDisplay {
             DisplayCommand::SubmitFrameIntent { intent } => self.submit_frame_intent(intent),
             DisplayCommand::QueryPresentMetrics => self.query_present_metrics(),
             DisplayCommand::ListWindows => {
-                let windows = self.windows.lock().ordered_windows();
+                let windows = self.list_windows_with_buffers();
                 DisplayResponse::WindowList { windows }
             }
             DisplayCommand::ListSurfaces => {
@@ -368,14 +445,9 @@ impl EchDisplay {
 
     pub fn run_service(&self) {
         while self.running.load(Ordering::SeqCst) {
-            let commands = {
-                let mut queue = self.command_queue.lock();
-                core::mem::take(&mut *queue)
-            };
-
-            for command in commands {
+            while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
-                self.response_queue.lock().push(response);
+                let _ = self.response_queue.push_overwrite(response);
             }
 
             let has_surface_damage = self.surfaces.lock().has_dirty_surface();
@@ -400,6 +472,9 @@ impl EchDisplay {
         y: i32,
         width: u32,
         height: u32,
+        workspace_id: WorkspaceId,
+        layer_role: LayerRole,
+        flags: WindowFlags,
     ) -> DisplayResponse {
         let surface_id = {
             let mut surfaces = self.surfaces.lock();
@@ -411,7 +486,18 @@ impl EchDisplay {
 
         let (window_id, content_rect, frame_rect) = {
             let mut windows = self.windows.lock();
-            match windows.create_window(app_id, surface_id, title, x, y, width, height) {
+            match windows.create_window_with_meta(
+                app_id,
+                surface_id,
+                title,
+                x,
+                y,
+                width,
+                height,
+                workspace_id,
+                layer_role,
+                flags,
+            ) {
                 Ok(window_id) => {
                     let content_rect = windows.content_rect(window_id).unwrap_or_default();
                     let frame_rect = windows.frame_rect(window_id).unwrap_or_default();
@@ -455,21 +541,15 @@ impl EchDisplay {
     }
 
     fn move_window(&self, window_id: WindowId, x: i32, y: i32) -> DisplayResponse {
-        let frame = {
+        let content = {
             let windows = self.windows.lock();
-            let Some(frame_rect) = windows.frame_rect(window_id) else {
+            let Some(content_rect) = windows.content_rect(window_id) else {
                 return DisplayResponse::Error(String::from("window not found"));
             };
-            frame_rect
+            content_rect
         };
 
-        match self.update_window_frame(
-            window_id,
-            x,
-            y,
-            frame.width,
-            frame.height.saturating_sub(TITLEBAR_HEIGHT),
-        ) {
+        match self.update_window_frame(window_id, x, y, content.width, content.height) {
             Ok(()) => DisplayResponse::Ack,
             Err(err) => DisplayResponse::Error(err),
         }
@@ -521,6 +601,41 @@ impl EchDisplay {
         }
     }
 
+    fn set_window_meta(
+        &self,
+        window_id: WindowId,
+        workspace_id: WorkspaceId,
+        layer_role: LayerRole,
+        flags: WindowFlags,
+    ) -> DisplayResponse {
+        match self
+            .windows
+            .lock()
+            .set_window_meta(window_id, workspace_id, layer_role, flags)
+        {
+            Ok((old_frame, new_frame)) => {
+                self.damage.lock().mark_rects(&[old_frame, new_frame]);
+                DisplayResponse::Ack
+            }
+            Err(err) => DisplayResponse::Error(window_error_message(err)),
+        }
+    }
+
+    fn move_window_to_workspace(
+        &self,
+        window_id: WindowId,
+        workspace_id: WorkspaceId,
+    ) -> DisplayResponse {
+        match self
+            .windows
+            .lock()
+            .set_window_workspace(window_id, workspace_id)
+        {
+            Ok(()) => DisplayResponse::Ack,
+            Err(err) => DisplayResponse::Error(window_error_message(err)),
+        }
+    }
+
     fn commit_window_buffer(&self, window_id: WindowId, pixels: &[u32]) -> DisplayResponse {
         let (surface_id, content_rect) = {
             let windows = self.windows.lock();
@@ -540,6 +655,45 @@ impl EchDisplay {
         }
     }
 
+    fn commit_window_scene(&self, window_id: WindowId, scene: SceneUpdate) -> DisplayResponse {
+        let (surface_id, content_rect) = {
+            let windows = self.windows.lock();
+            let Some(surface_id) = windows.window_surface(window_id) else {
+                return DisplayResponse::Error(String::from("window not found"));
+            };
+            let content_rect = windows.content_rect(window_id).unwrap_or_default();
+            (surface_id, content_rect)
+        };
+
+        match self.surfaces.lock().commit_scene(surface_id, scene) {
+            Ok(scene_damage) => {
+                if scene_damage.is_empty() {
+                    self.damage.lock().mark_rect(content_rect);
+                } else {
+                    let global_damage = scene_damage
+                        .into_iter()
+                        .filter_map(|rect| {
+                            let translated = Rect::new(
+                                content_rect.x.saturating_add(rect.x),
+                                content_rect.y.saturating_add(rect.y),
+                                rect.width.min(content_rect.width),
+                                rect.height.min(content_rect.height),
+                            );
+                            (!translated.is_empty()).then_some(translated)
+                        })
+                        .collect::<Vec<_>>();
+                    if global_damage.is_empty() {
+                        self.damage.lock().mark_rect(content_rect);
+                    } else {
+                        self.damage.lock().mark_rects(&global_damage);
+                    }
+                }
+                DisplayResponse::Ack
+            }
+            Err(err) => DisplayResponse::Error(surface_error_message(err)),
+        }
+    }
+
     fn map_window_surface(&self, window_id: WindowId) -> DisplayResponse {
         let surface_id = {
             let windows = self.windows.lock();
@@ -553,6 +707,26 @@ impl EchDisplay {
             Ok(descriptor) => DisplayResponse::SurfaceMapped(descriptor),
             Err(err) => DisplayResponse::Error(surface_error_message(err)),
         }
+    }
+
+    fn list_windows_with_buffers(&self) -> Vec<WindowInfo> {
+        let mut windows = self.windows.lock().ordered_windows();
+        let surfaces = self.surfaces.lock();
+        for window in windows.iter_mut() {
+            if let Some(surface) = surfaces.snapshot(window.surface_id) {
+                window.scene_root = surface.scene_update.as_ref().map(|scene| scene.root_id);
+                window.semantic_root = surface
+                    .scene_update
+                    .as_ref()
+                    .and_then(|scene| scene.semantic_root);
+                window.buffer_mode = if surface.scene_update.is_some() {
+                    WindowBufferMode::Scene
+                } else {
+                    WindowBufferMode::Pixels
+                };
+            }
+        }
+        windows
     }
 
     fn submit_window_damage(&self, window_id: WindowId, packet: DamagePacket) -> DisplayResponse {
@@ -626,27 +800,66 @@ impl EchDisplay {
 
         let windows = self.windows.lock().ordered_windows();
         let surfaces = self.surfaces.lock();
-        let snapshots: Vec<(WindowInfo, Vec<u32>)> = windows
+        let snapshots: Vec<(WindowInfo, Vec<u32>, Option<SceneUpdate>)> = windows
             .into_iter()
             .filter(|window| window.visible)
             .filter_map(|window| {
                 surfaces
                     .snapshot(window.surface_id)
-                    .map(|surface| (window, surface.pixels))
+                    .map(|surface| (window, surface.pixels, surface.scene_update))
             })
             .collect();
 
         {
             let mut fb = self.framebuffer.lock();
+            let mut cpu_renderer = CpuRenderer::new();
+            let mut gpu_renderer =
+                GpuRenderer::new(self.screen_rect.width, self.screen_rect.height);
+            let mut title_text_system = TextSystem::new();
             for damage in damage_regions.iter() {
                 shell::draw_desktop_scene(&mut fb, self.screen_rect, *damage, theme_mode);
-                for (window, pixels) in snapshots.iter() {
+                for (window, pixels, scene) in snapshots.iter() {
                     if window.frame_rect.intersects(damage) {
-                        draw_window(&mut fb, window, pixels, *damage, theme_mode);
+                        if let Some(scene) = scene.as_ref() {
+                            match window.layer_role {
+                                LayerRole::TopBar
+                                | LayerRole::Dock
+                                | LayerRole::Overlay
+                                | LayerRole::Modal
+                                | LayerRole::WorkspaceScratchpad => draw_window_scene(
+                                    &mut fb,
+                                    &mut gpu_renderer,
+                                    window,
+                                    scene,
+                                    &mut title_text_system,
+                                    *damage,
+                                    theme_mode,
+                                ),
+                                _ => draw_window_scene(
+                                    &mut fb,
+                                    &mut cpu_renderer,
+                                    window,
+                                    scene,
+                                    &mut title_text_system,
+                                    *damage,
+                                    theme_mode,
+                                ),
+                            }
+                        } else {
+                            draw_window(
+                                &mut fb,
+                                window,
+                                pixels,
+                                &mut title_text_system,
+                                *damage,
+                                theme_mode,
+                            );
+                        }
                     }
                 }
                 draw_cursor(&mut fb, cursor, *damage);
             }
+            fb.swap_buffers();
         }
 
         drop(surfaces);
@@ -1188,9 +1401,41 @@ fn draw_window(
     fb: &mut Framebuffer,
     window: &WindowInfo,
     pixels: &[u32],
+    text_system: &mut TextSystem,
     damage: Rect,
     mode: ThemeMode,
 ) {
+    if window.layer_role == LayerRole::Background {
+        draw_window_content(fb, window.content_rect, pixels, damage);
+        return;
+    }
+
+    if !window.flags.decorate || window.layer_role != LayerRole::Window {
+        if matches!(
+            window.layer_role,
+            LayerRole::Overlay | LayerRole::Modal | LayerRole::WorkspaceScratchpad
+        ) {
+            draw_window_shadow(
+                fb,
+                window.frame_rect,
+                damage,
+                Theme::shadow(crate::gui::theme::Elevation::Floating, mode),
+            );
+            fill_rect_clipped(
+                fb,
+                window.frame_rect,
+                damage,
+                Theme::surface(
+                    crate::gui::theme::SurfaceRole::Overlay,
+                    mode,
+                    WindowChromeVariant::Inactive,
+                ),
+            );
+        }
+        draw_window_content(fb, window.content_rect, pixels, damage);
+        return;
+    }
+
     let tokens = Theme::tokens(mode);
     let chrome = if window.focused {
         WindowChromeVariant::Active
@@ -1251,10 +1496,198 @@ fn draw_window(
     draw_frame_outline(fb, window.frame_rect, damage, border_color);
     draw_chrome_buttons(fb, window, damage, mode);
 
-    if titlebar.intersects(&damage) && !window.title.is_empty() {
-        let tx = (window.frame_rect.x + 16).max(0) as usize;
-        let ty = (window.frame_rect.y + 11).max(0) as usize;
-        fb.draw_string(tx, ty, &window.title, tokens.text.primary);
+    draw_window_title(fb, text_system, window, titlebar, damage, tokens.text.primary);
+}
+
+fn draw_window_scene(
+    fb: &mut Framebuffer,
+    renderer: &mut impl Renderer,
+    window: &WindowInfo,
+    scene: &SceneUpdate,
+    text_system: &mut TextSystem,
+    damage: Rect,
+    mode: ThemeMode,
+) {
+    if window.layer_role == LayerRole::Background {
+        renderer.render_scene(
+            fb,
+            damage,
+            window.content_rect.x,
+            window.content_rect.y,
+            scene,
+            text_system,
+        );
+        return;
+    }
+
+    if !window.flags.decorate || window.layer_role != LayerRole::Window {
+        match window.layer_role {
+            LayerRole::TopBar => {
+                fill_rect_clipped(
+                    fb,
+                    window.frame_rect,
+                    damage,
+                    Theme::shell_surface(crate::gui::theme::ShellSurfaceRole::HaloBar, mode, true),
+                );
+            }
+            LayerRole::Dock => {
+                fill_rect_clipped(
+                    fb,
+                    window.frame_rect,
+                    damage,
+                    Theme::shell_surface(crate::gui::theme::ShellSurfaceRole::Dock, mode, true),
+                );
+            }
+            LayerRole::Overlay | LayerRole::Modal | LayerRole::WorkspaceScratchpad => {
+                draw_window_shadow(
+                    fb,
+                    window.frame_rect,
+                    damage,
+                    Theme::shadow(crate::gui::theme::Elevation::Floating, mode),
+                );
+                fill_rect_clipped(
+                    fb,
+                    window.frame_rect,
+                    damage,
+                    Theme::surface(
+                        crate::gui::theme::SurfaceRole::Overlay,
+                        mode,
+                        WindowChromeVariant::Inactive,
+                    ),
+                );
+            }
+            _ => {}
+        }
+        renderer.render_scene(
+            fb,
+            damage,
+            window.content_rect.x,
+            window.content_rect.y,
+            scene,
+            text_system,
+        );
+        return;
+    }
+
+    let tokens = Theme::tokens(mode);
+    let chrome = if window.focused {
+        WindowChromeVariant::Active
+    } else {
+        WindowChromeVariant::Inactive
+    };
+    let border_color = if window.focused {
+        tokens.borders.focus
+    } else {
+        tokens.borders.subtle
+    };
+
+    draw_window_shadow(
+        fb,
+        window.frame_rect,
+        damage,
+        if window.focused {
+            Theme::shadow(crate::gui::theme::Elevation::Focused, mode)
+        } else {
+            Theme::shadow(crate::gui::theme::Elevation::Floating, mode)
+        },
+    );
+    fill_rect_clipped(
+        fb,
+        window.frame_rect,
+        damage,
+        Theme::surface(crate::gui::theme::SurfaceRole::Window, mode, chrome),
+    );
+    fill_rect_clipped(
+        fb,
+        window.content_rect,
+        damage,
+        if window.focused {
+            Theme::surface(crate::gui::theme::SurfaceRole::Window, mode, chrome)
+        } else {
+            Theme::shade(
+                Theme::surface(crate::gui::theme::SurfaceRole::Window, mode, chrome),
+                -8,
+            )
+        },
+    );
+
+    let titlebar = titlebar_rect(window.frame_rect);
+    fill_rect_clipped(
+        fb,
+        titlebar,
+        damage,
+        Theme::surface(crate::gui::theme::SurfaceRole::WindowTitlebar, mode, chrome),
+    );
+    fill_rect_clipped(
+        fb,
+        Rect::new(titlebar.x, titlebar.y, titlebar.width, 1),
+        damage,
+        tokens.borders.strong,
+    );
+
+    renderer.render_scene(
+        fb,
+        damage,
+        window.content_rect.x,
+        window.content_rect.y,
+        scene,
+        text_system,
+    );
+    draw_frame_outline(fb, window.frame_rect, damage, border_color);
+    draw_chrome_buttons(fb, window, damage, mode);
+
+    draw_window_title(fb, text_system, window, titlebar, damage, tokens.text.primary);
+}
+
+fn draw_window_title(
+    fb: &mut Framebuffer,
+    text_system: &mut TextSystem,
+    window: &WindowInfo,
+    titlebar: Rect,
+    damage: Rect,
+    color: u32,
+) {
+    if !titlebar.intersects(&damage) || window.title.is_empty() {
+        return;
+    }
+
+    let blob = text_system.layout_text_with_style(
+        &window.title,
+        titlebar.width.saturating_sub(92).max(1),
+        TextStyle::ui(),
+        color,
+    );
+    let title_rect = Rect::new(
+        window.frame_rect.x + 16,
+        window.frame_rect.y + 8,
+        blob.width_px.max(1),
+        blob.height_px.max(1),
+    );
+    let Some(render_rect) = title_rect.intersection(&damage) else {
+        return;
+    };
+
+    let offset_x = (render_rect.x - title_rect.x) as usize;
+    let offset_y = (render_rect.y - title_rect.y) as usize;
+    let width = blob.width_px as usize;
+    for row in 0..render_rect.height as usize {
+        let src_row = (offset_y + row) * width;
+        let dst_y = render_rect.y.max(0) as usize + row;
+        if dst_y >= fb.height {
+            break;
+        }
+        for col in 0..render_rect.width as usize {
+            let src_idx = src_row + offset_x + col;
+            let dst_x = render_rect.x.max(0) as usize + col;
+            if dst_x >= fb.width || src_idx >= blob.pixels.len() {
+                break;
+            }
+            let source = blob.pixels[src_idx];
+            if ((source >> 24) & 0xFF) == 0 {
+                continue;
+            }
+            fb.plot_pixel(dst_x, dst_y, source);
+        }
     }
 }
 

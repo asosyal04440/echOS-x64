@@ -436,7 +436,7 @@ mod tests {
         };
 
         unsafe {
-            pmm.init([&desc_dma, &desc_normal].into_iter().copied());
+            pmm.init([desc_dma, desc_normal].iter());
         }
 
         // DMA zone'dan tahsis

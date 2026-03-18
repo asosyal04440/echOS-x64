@@ -763,6 +763,32 @@ impl X509Certificate {
         false
     }
 
+    pub fn basic_constraints_path_len(&self) -> Option<u32> {
+        for ext in &self.extensions {
+            if ext.oid != "2.5.29.19" {
+                continue;
+            }
+            let mut parser = Asn1Parser::new(&ext.value);
+            let Some(elem) = parser.parse_element() else {
+                continue;
+            };
+            if elem.tag != Asn1Tag::Sequence {
+                continue;
+            }
+            for child in &elem.children {
+                if child.tag != Asn1Tag::Integer {
+                    continue;
+                }
+                let mut value = 0u32;
+                for byte in &child.data {
+                    value = (value << 8) | *byte as u32;
+                }
+                return Some(value);
+            }
+        }
+        None
+    }
+
     /// Get key usage
     pub fn key_usage(&self) -> Option<u16> {
         for ext in &self.extensions {
@@ -782,6 +808,97 @@ impl X509Certificate {
             }
         }
         None
+    }
+
+    pub fn extended_key_usage(&self) -> Option<Vec<String>> {
+        for ext in &self.extensions {
+            if ext.oid == "2.5.29.37" {
+                let mut parser = Asn1Parser::new(&ext.value);
+                if let Some(elem) = parser.parse_element() {
+                    if elem.tag == Asn1Tag::Sequence {
+                        let mut usages = Vec::new();
+                        for child in &elem.children {
+                            if child.tag == Asn1Tag::ObjectIdentifier {
+                                usages.push(parse_oid(&child.data));
+                            }
+                        }
+                        return Some(usages);
+                    }
+                }
+                return Some(Vec::new());
+            }
+        }
+        None
+    }
+
+    pub fn has_unknown_critical_extension(&self) -> bool {
+        self.extensions.iter().any(|ext| {
+            ext.critical
+                && !matches!(
+                    ext.oid.as_str(),
+                    "2.5.29.14"
+                        | "2.5.29.15"
+                        | "2.5.29.17"
+                        | "2.5.29.19"
+                        | "2.5.29.31"
+                        | "2.5.29.35"
+                        | "2.5.29.37"
+                        | "1.3.6.1.5.5.7.1.1"
+                )
+        })
+    }
+
+    pub fn allows_server_tls(&self) -> bool {
+        const KU_DIGITAL_SIGNATURE: u16 = 1 << 0;
+        const KU_KEY_ENCIPHERMENT: u16 = 1 << 2;
+        const KU_KEY_AGREEMENT: u16 = 1 << 4;
+        const EKU_SERVER_AUTH: &str = "1.3.6.1.5.5.7.3.1";
+        const EKU_ANY: &str = "2.5.29.37.0";
+
+        if let Some(usage) = self.key_usage() {
+            if usage & (KU_DIGITAL_SIGNATURE | KU_KEY_ENCIPHERMENT | KU_KEY_AGREEMENT) == 0 {
+                return false;
+            }
+        }
+
+        if let Some(eku) = self.extended_key_usage() {
+            return eku.is_empty()
+                || eku
+                    .iter()
+                    .any(|oid| oid == EKU_SERVER_AUTH || oid == EKU_ANY);
+        }
+
+        true
+    }
+
+    pub fn allows_certificate_signing(&self) -> bool {
+        const KU_KEY_CERT_SIGN: u16 = 1 << 5;
+        self.key_usage()
+            .map(|usage| usage & KU_KEY_CERT_SIGN != 0)
+            .unwrap_or(true)
+    }
+
+    pub fn allows_crl_signing(&self) -> bool {
+        const KU_CRL_SIGN: u16 = 1 << 6;
+        self.key_usage()
+            .map(|usage| usage & KU_CRL_SIGN != 0)
+            .unwrap_or(true)
+    }
+
+    pub fn ocsp_responder_urls(&self) -> Vec<String> {
+        self.extensions
+            .iter()
+            .filter(|ext| ext.oid == "1.3.6.1.5.5.7.1.1")
+            .flat_map(|ext| extract_ascii_uris(&ext.value))
+            .collect()
+    }
+
+    pub fn crl_distribution_urls(&self) -> Vec<String> {
+        self.extensions
+            .iter()
+            .filter(|ext| ext.oid == "2.5.29.31")
+            .flat_map(|ext| extract_ascii_uris(&ext.value))
+            .collect()
     }
 }
 
@@ -852,6 +969,38 @@ pub struct CertVerifier {
     pub check_time: u64,
 }
 
+fn trim_der_integer(mut bytes: &[u8]) -> Vec<u8> {
+    while bytes.len() > 1 && bytes[0] == 0 {
+        bytes = &bytes[1..];
+    }
+    bytes.to_vec()
+}
+
+fn parse_rsa_public_key_components(key_data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut parser = Asn1Parser::new(key_data);
+    let root = parser.parse_element()?;
+    if root.tag == Asn1Tag::Sequence && root.children.len() >= 2 {
+        let modulus = trim_der_integer(&root.children[0].data);
+        let exponent = trim_der_integer(&root.children[1].data);
+        if !modulus.is_empty() && !exponent.is_empty() {
+            return Some((modulus, exponent));
+        }
+    }
+    if !key_data.is_empty() {
+        return Some((trim_der_integer(key_data), vec![0x01, 0x00, 0x01]));
+    }
+    None
+}
+
+fn rsa_hash_algorithm(oid: &str) -> Option<crate::crypto::signature::HashAlgorithm> {
+    match oid {
+        "1.2.840.113549.1.1.11" => Some(crate::crypto::signature::HashAlgorithm::Sha256),
+        "1.2.840.113549.1.1.12" => Some(crate::crypto::signature::HashAlgorithm::Sha384),
+        "1.2.840.113549.1.1.13" => Some(crate::crypto::signature::HashAlgorithm::Sha512),
+        _ => None,
+    }
+}
+
 impl CertVerifier {
     pub fn new() -> Self {
         CertVerifier {
@@ -866,16 +1015,18 @@ impl CertVerifier {
             return Err(CertError::InvalidChain);
         }
 
-        // Get current time (simplified)
         let time = if self.check_time > 0 {
             self.check_time
         } else {
-            // Use a fixed time for testing (2024-01-01 00:00:00 UTC)
-            1704067200 // Unix timestamp
+            current_cert_time()
         };
 
         // Verify each certificate in chain
         for (i, cert) in chain.iter().enumerate() {
+            if cert.has_unknown_critical_extension() {
+                return Err(CertError::InvalidKeyUsage);
+            }
+
             // Check validity period
             if !cert.is_valid_at(time) {
                 if time < cert.not_before {
@@ -887,8 +1038,9 @@ impl CertVerifier {
 
             // Check if this is the leaf certificate
             if i == 0 {
-                // Leaf cert - check if it's not a CA
-                // (unless it's self-signed, which is handled below)
+                if !cert.allows_server_tls() {
+                    return Err(CertError::InvalidKeyUsage);
+                }
                 continue;
             }
 
@@ -896,16 +1048,25 @@ impl CertVerifier {
             if !cert.is_ca() {
                 return Err(CertError::NotCA);
             }
+            if !cert.allows_certificate_signing() {
+                return Err(CertError::InvalidKeyUsage);
+            }
+            if let Some(path_len) = cert.basic_constraints_path_len() {
+                let intermediates_below = i.saturating_sub(1) as u32;
+                if intermediates_below > path_len {
+                    return Err(CertError::InvalidChain);
+                }
+            }
         }
 
         // Find trust anchor
         let last_cert = &chain[chain.len() - 1];
 
         // Check if last cert is a trusted root
-        let is_trusted = self.trusted_roots.iter().any(|root| {
-            root.subject.common_name == last_cert.subject.common_name
-                && root.public_key.key_data == last_cert.public_key.key_data
-        });
+        let is_trusted = self
+            .trusted_roots
+            .iter()
+            .any(|root| same_trust_anchor(root, last_cert));
 
         if !is_trusted && chain.len() == 1 {
             return Err(CertError::SelfSigned);
@@ -921,7 +1082,10 @@ impl CertVerifier {
             let issuer = &chain[i + 1];
 
             // Verify issuer name matches
-            if cert.issuer.common_name != issuer.subject.common_name {
+            if cert.issuer.common_name != issuer.subject.common_name
+                || cert.issuer.organization != issuer.subject.organization
+                || cert.issuer.country != issuer.subject.country
+            {
                 return Err(CertError::InvalidChain);
             }
 
@@ -936,19 +1100,19 @@ impl CertVerifier {
             // Verify based on signature algorithm
             let sig_verified = match issuer.public_key.algorithm.as_str() {
                 "1.2.840.113549.1.1.1" | "1.2.840.113549.1.1.11" => {
-                    // RSA / RSA with SHA-256 - simplified verification using HMAC binding
-                    // Full RSA verification would require modular exponentiation
-                    // For now, verify using cryptographic binding
-                    if cert.signature.len() >= 64 && issuer.public_key.key_data.len() >= 64 {
-                        let binding = crate::net::quic::hmac_sha256(
-                            &issuer.public_key.key_data[..32],
-                            &tbs_hash,
-                        );
-                        // Check if signature contains expected binding pattern
-                        cert.signature.windows(8).any(|w| binding[..8] == *w)
-                            || !cert.signature.is_empty() // Trust non-empty signatures
+                    if let (Some((modulus, exponent)), Some(hash_algo)) = (
+                        parse_rsa_public_key_components(&issuer.public_key.key_data),
+                        rsa_hash_algorithm(&cert.signature_algo.algorithm),
+                    ) {
+                        let digest = hash_algo.hash(if !cert.tbs_data.is_empty() {
+                            &cert.tbs_data
+                        } else {
+                            &cert.raw
+                        });
+                        let rsa = crate::crypto::signature::RsaPublicKey::new(modulus, exponent);
+                        rsa.verify_pkcs1_v15(&digest, &cert.signature, hash_algo)
                     } else {
-                        !cert.signature.is_empty()
+                        false
                     }
                 }
                 "1.2.840.10045.2.1" => {
@@ -962,7 +1126,7 @@ impl CertVerifier {
                             crate::crypto::ecdsa::EcdsaPublicKey::from_xy(x_bytes, y_bytes);
                         ec_pubkey.verify(&tbs_hash, &cert.signature)
                     } else {
-                        !cert.signature.is_empty()
+                        false
                     }
                 }
                 "1.3.101.112" => {
@@ -975,16 +1139,16 @@ impl CertVerifier {
                         sig_bytes.copy_from_slice(&cert.signature);
                         ed_pubkey.verify(&tbs_hash, &sig_bytes)
                     } else {
-                        !cert.signature.is_empty()
+                        false
                     }
                 }
                 _ => {
-                    // Unknown algorithm - trust if signature exists
+                    // Unknown algorithm - fail closed until verifier support exists.
                     crate::serial_println!(
                         "[X509] Unknown sig algo: {}",
                         issuer.public_key.algorithm
                     );
-                    !cert.signature.is_empty()
+                    false
                 }
             };
 
@@ -1037,7 +1201,7 @@ impl CertVerifier {
         let now = if self.check_time > 0 {
             self.check_time
         } else {
-            crate::task::scheduler::get_ticks() as u64
+            current_cert_time()
         };
 
         if let Some(next_update) = single.next_update {
@@ -1050,6 +1214,19 @@ impl CertVerifier {
     }
 }
 
+fn same_trust_anchor(root: &X509Certificate, candidate: &X509Certificate) -> bool {
+    if !root.raw.is_empty() && !candidate.raw.is_empty() {
+        return root.raw == candidate.raw;
+    }
+
+    root.subject.common_name == candidate.subject.common_name
+        && root.subject.organization == candidate.subject.organization
+        && root.subject.country == candidate.subject.country
+        && root.serial == candidate.serial
+        && root.public_key.algorithm == candidate.public_key.algorithm
+        && root.public_key.key_data == candidate.public_key.key_data
+}
+
 /// Verify hostname against a certificate's Subject Alternative Names (SANs)
 ///
 /// Parses the subjectAltName extension (OID 2.5.29.17) and checks each
@@ -1059,6 +1236,7 @@ impl CertVerifier {
 /// Falls back to Common Name (CN) if no SANs are present.
 pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
     let hostname_lower = hostname.to_ascii_lowercase();
+    let hostname_ipv4 = parse_ipv4_hostname(&hostname_lower);
 
     // Look for subjectAltName extension (OID 2.5.29.17)
     let mut found_san = false;
@@ -1086,6 +1264,13 @@ pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
                                     return true;
                                 }
                             }
+                        } else if child.class == Asn1Class::ContextSpecific
+                            && child.tag_number == 7
+                            && hostname_ipv4
+                                .map(|octets| child.data.as_slice() == octets.as_slice())
+                                .unwrap_or(false)
+                        {
+                            return true;
                         }
                     }
                     continue;
@@ -1131,11 +1316,22 @@ pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
                             return true;
                         }
                     }
+                } else if tag == 0x87 {
+                    if hostname_ipv4
+                        .map(|octets| &san_data[pos..pos + len] == octets.as_slice())
+                        .unwrap_or(false)
+                    {
+                        return true;
+                    }
                 }
 
                 pos += len;
             }
         }
+    }
+
+    if hostname_ipv4.is_some() {
+        return false;
     }
 
     // If no SAN extension found, fall back to CN
@@ -1145,6 +1341,18 @@ pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
     }
 
     false
+}
+
+fn parse_ipv4_hostname(hostname: &str) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut parts = hostname.split('.');
+    for slot in octets.iter_mut() {
+        *slot = parts.next()?.parse::<u8>().ok()?;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(octets)
 }
 
 /// Match a hostname against a pattern that may contain a wildcard.
@@ -1192,6 +1400,15 @@ impl AsciiLowercase for str {
 impl Default for CertVerifier {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn current_cert_time() -> u64 {
+    let rtc = crate::drivers::rtc::get_unix_time();
+    if rtc > 946684800 {
+        rtc
+    } else {
+        1704067200
     }
 }
 
@@ -1846,7 +2063,7 @@ impl OcspRequest {
         // OCSP Request sequence
         buf.push(0x30); // SEQUENCE
         let len_pos = buf.len();
-        buf.push(0); // Placeholder length
+        buf.push(0); // Top-level DER uzunluğu altta geri doldurulur
 
         // TBSRequest
         buf.push(0x30); // SEQUENCE
@@ -2177,6 +2394,8 @@ pub struct RevocationChecker {
     pub crls: Vec<X509Crl>,
     pub ocsp_cache: Vec<(Vec<u8>, OcspResponse)>,
     pub prefer_ocsp: bool,
+    pub fetch_live: bool,
+    pub hard_fail: bool,
 }
 
 impl RevocationChecker {
@@ -2185,6 +2404,8 @@ impl RevocationChecker {
             crls: Vec::new(),
             ocsp_cache: Vec::new(),
             prefer_ocsp: true,
+            fetch_live: true,
+            hard_fail: false,
         }
     }
 
@@ -2204,6 +2425,11 @@ impl RevocationChecker {
         cert: &X509Certificate,
         issuer: &X509Certificate,
     ) -> Result<(), CertError> {
+        let issuer_matches_crl = |crl: &X509Crl| {
+            crl.issuer.common_name == issuer.subject.common_name
+                && crl.issuer.organization == issuer.subject.organization
+                && crl.issuer.country == issuer.subject.country
+        };
         // Try OCSP first if preferred
         if self.prefer_ocsp {
             if let Some(response) = self
@@ -2218,9 +2444,14 @@ impl RevocationChecker {
 
         // Check CRLs
         for crl in &self.crls {
-            // Check if CRL issuer matches certificate issuer
-            if crl.issuer.common_name == issuer.subject.common_name {
-                if let Some(entry) = crl.is_revoked(&cert.serial) {
+            if issuer_matches_crl(crl) {
+                if !issuer.allows_crl_signing() {
+                    return Err(CertError::InvalidKeyUsage);
+                }
+                if crl.is_expired(current_cert_time()) {
+                    continue;
+                }
+                if let Some(_entry) = crl.is_revoked(&cert.serial) {
                     return Err(CertError::Revoked);
                 }
             }
@@ -2231,31 +2462,553 @@ impl RevocationChecker {
             return Ok(());
         }
 
-        // Otherwise, we couldn't determine revocation status
-        // In production, would make network request to OCSP responder
+        if self.fetch_live {
+            if let Ok(()) = self.fetch_live_status(cert, issuer) {
+                return Ok(());
+            }
+            if self.hard_fail {
+                return Err(CertError::InvalidFormat);
+            }
+        }
+
         Ok(())
     }
 
     fn check_ocsp_status(&self, response: &OcspResponse, serial: &[u8]) -> Result<(), CertError> {
         if response.response_status != OcspResponseStatus::Successful {
             // OCSP failed, fall back to CRL
-            return Ok(());
+            return if self.hard_fail {
+                Err(CertError::InvalidFormat)
+            } else {
+                Ok(())
+            };
         }
 
         if let Some(single) = response.get_cert_status(serial) {
             match single.status {
                 OcspCertStatus::Good => Ok(()),
                 OcspCertStatus::Revoked { .. } => Err(CertError::Revoked),
-                OcspCertStatus::Unknown => Ok(()), // Unknown status, accept
+                OcspCertStatus::Unknown => {
+                    if self.hard_fail {
+                        Err(CertError::InvalidFormat)
+                    } else {
+                        Ok(())
+                    }
+                }
             }
         } else {
-            Ok(())
+            if self.hard_fail {
+                Err(CertError::InvalidFormat)
+            } else {
+                Ok(())
+            }
         }
+    }
+
+    fn fetch_live_status(
+        &self,
+        cert: &X509Certificate,
+        issuer: &X509Certificate,
+    ) -> Result<(), CertError> {
+        if self.prefer_ocsp {
+            for url in cert.ocsp_responder_urls() {
+                if let Ok(response) = fetch_ocsp_response(&url, cert, issuer) {
+                    return self.check_ocsp_status(&response, &cert.serial);
+                }
+            }
+        }
+
+        for url in cert.crl_distribution_urls() {
+            if let Ok(crl) = fetch_crl(&url) {
+                if crl.issuer.common_name == issuer.subject.common_name
+                    && crl.issuer.organization == issuer.subject.organization
+                    && crl.issuer.country == issuer.subject.country
+                {
+                    if !issuer.allows_crl_signing() {
+                        return Err(CertError::InvalidKeyUsage);
+                    }
+                    if crl.is_expired(current_cert_time()) {
+                        continue;
+                    }
+                    if crl.is_revoked(&cert.serial).is_some() {
+                        return Err(CertError::Revoked);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(CertError::InvalidFormat)
     }
 }
 
 impl Default for RevocationChecker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn extract_ascii_uris(data: &[u8]) -> Vec<String> {
+    let mut uris = Vec::new();
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let rest = &data[pos..];
+        let prefix_len = if rest.starts_with(b"http://") {
+            7
+        } else if rest.starts_with(b"https://") {
+            8
+        } else {
+            pos += 1;
+            continue;
+        };
+        let mut end = pos + prefix_len;
+        while end < data.len() {
+            let byte = data[end];
+            if !(byte.is_ascii_graphic() || byte == b'/') {
+                break;
+            }
+            end += 1;
+        }
+        if let Ok(uri) = core::str::from_utf8(&data[pos..end]) {
+            uris.push(uri.to_string());
+        }
+        pos = end;
+    }
+    uris
+}
+
+fn fetch_crl(url: &str) -> Result<X509Crl, CertError> {
+    let response = crate::net::http::HttpClient::new()
+        .get(url)
+        .map_err(|_| CertError::InvalidFormat)?;
+    if !response.is_success() {
+        return Err(CertError::InvalidFormat);
+    }
+    X509Crl::parse(&response.body).ok_or(CertError::InvalidFormat)
+}
+
+fn fetch_ocsp_response(
+    url: &str,
+    cert: &X509Certificate,
+    issuer: &X509Certificate,
+) -> Result<OcspResponse, CertError> {
+    let request = OcspRequest::new(cert, issuer).encode();
+    let response = crate::net::http::HttpClient::new()
+        .post_binary(
+            url,
+            &request,
+            Some("application/ocsp-request"),
+            Some("application/ocsp-response"),
+        )
+        .map_err(|_| CertError::InvalidFormat)?;
+    if !response.is_success() {
+        return Err(CertError::InvalidFormat);
+    }
+    OcspResponse::parse(&response.body).ok_or(CertError::InvalidFormat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_name(common_name: &str) -> X509Name {
+        X509Name {
+            common_name: common_name.to_string(),
+            country: "TR".to_string(),
+            organization: "echOS".to_string(),
+            organizational_unit: String::new(),
+            locality: String::new(),
+            state: String::new(),
+        }
+    }
+
+    fn der_bit_string(value: u8) -> Vec<u8> {
+        vec![0x03, 0x02, 0x00, value]
+    }
+
+    fn der_basic_constraints_ca() -> Vec<u8> {
+        vec![0x30, 0x03, 0x01, 0x01, 0xFF]
+    }
+
+    fn der_basic_constraints_ca_path_len(path_len: u8) -> Vec<u8> {
+        vec![0x30, 0x06, 0x01, 0x01, 0xFF, 0x02, 0x01, path_len]
+    }
+
+    fn der_subject_alt_ip(ip: [u8; 4]) -> Vec<u8> {
+        vec![0x30, 0x06, 0x87, 0x04, ip[0], ip[1], ip[2], ip[3]]
+    }
+
+    fn make_cert(
+        subject_cn: &str,
+        issuer_cn: &str,
+        is_ca: bool,
+        key_usage: Option<u8>,
+        extra_extensions: Vec<X509Extension>,
+    ) -> X509Certificate {
+        let mut extensions = Vec::new();
+        if is_ca {
+            extensions.push(X509Extension {
+                oid: "2.5.29.19".to_string(),
+                critical: true,
+                value: der_basic_constraints_ca(),
+            });
+        }
+        if let Some(usage) = key_usage {
+            extensions.push(X509Extension {
+                oid: "2.5.29.15".to_string(),
+                critical: true,
+                value: der_bit_string(usage),
+            });
+        }
+        extensions.extend(extra_extensions);
+
+        X509Certificate {
+            version: 3,
+            serial: vec![1, 2, 3, 4],
+            signature_algo: SignatureAlgorithm {
+                algorithm: "1.2.840.113549.1.1.11".to_string(),
+                parameters: Vec::new(),
+            },
+            issuer: test_name(issuer_cn),
+            not_before: 1,
+            not_after: u64::MAX,
+            subject: test_name(subject_cn),
+            public_key: X509PublicKey {
+                algorithm: "1.2.840.113549.1.1.11".to_string(),
+                key_data: vec![0x11; 64],
+                curve: None,
+            },
+            extensions,
+            signature: vec![0x22; 64],
+            tbs_data: vec![0x33; 32],
+            raw: vec![0x44; 32],
+        }
+    }
+
+    #[test]
+    fn verify_chain_rejects_unknown_critical_extension() {
+        let cert = make_cert(
+            "leaf.echos.test",
+            "leaf.echos.test",
+            false,
+            Some(0x05),
+            vec![X509Extension {
+                oid: "1.2.3.4.5".to_string(),
+                critical: true,
+                value: vec![0x05, 0x00],
+            }],
+        );
+        let verifier = CertVerifier {
+            trusted_roots: vec![cert.clone()],
+            check_time: 1704067200,
+        };
+        assert!(matches!(
+            verifier.verify_chain(&[cert]),
+            Err(CertError::InvalidKeyUsage)
+        ));
+    }
+
+    #[test]
+    fn verify_hostname_prefers_ip_san_for_ipv4_literals() {
+        let cert = make_cert(
+            "service.echos.test",
+            "service.echos.test",
+            false,
+            Some(0x05),
+            vec![X509Extension {
+                oid: "2.5.29.17".to_string(),
+                critical: false,
+                value: der_subject_alt_ip([127, 0, 0, 1]),
+            }],
+        );
+        assert!(verify_hostname(&cert, "127.0.0.1"));
+        assert!(!verify_hostname(&cert, "127.0.0.2"));
+    }
+
+    #[test]
+    fn verify_chain_rejects_leaf_without_tls_server_usage() {
+        let cert = make_cert(
+            "leaf.echos.test",
+            "leaf.echos.test",
+            false,
+            Some(0x20),
+            Vec::new(),
+        );
+        let verifier = CertVerifier {
+            trusted_roots: vec![cert.clone()],
+            check_time: 1704067200,
+        };
+        assert!(matches!(
+            verifier.verify_chain(&[cert]),
+            Err(CertError::InvalidKeyUsage)
+        ));
+    }
+
+    #[test]
+    fn verify_chain_rejects_ca_without_key_cert_sign() {
+        let leaf = make_cert(
+            "leaf.echos.test",
+            "root.echos.test",
+            false,
+            Some(0x05),
+            Vec::new(),
+        );
+        let root = make_cert(
+            "root.echos.test",
+            "root.echos.test",
+            true,
+            Some(0x04),
+            Vec::new(),
+        );
+        let verifier = CertVerifier {
+            trusted_roots: vec![root.clone()],
+            check_time: 1704067200,
+        };
+        assert!(matches!(
+            verifier.verify_chain(&[leaf, root]),
+            Err(CertError::InvalidKeyUsage)
+        ));
+    }
+
+    #[test]
+    fn verify_chain_rejects_path_len_exceeded() {
+        let leaf = make_cert(
+            "leaf.echos.test",
+            "intermediate.echos.test",
+            false,
+            Some(0x05),
+            Vec::new(),
+        );
+        let intermediate = make_cert(
+            "intermediate.echos.test",
+            "root.echos.test",
+            true,
+            Some(0x20),
+            Vec::new(),
+        );
+        let mut root = make_cert(
+            "root.echos.test",
+            "root.echos.test",
+            true,
+            Some(0x20),
+            Vec::new(),
+        );
+        root.extensions.retain(|ext| ext.oid != "2.5.29.19");
+        root.extensions.push(X509Extension {
+            oid: "2.5.29.19".to_string(),
+            critical: true,
+            value: der_basic_constraints_ca_path_len(0),
+        });
+        let verifier = CertVerifier {
+            trusted_roots: vec![root.clone()],
+            check_time: 1704067200,
+        };
+        assert!(matches!(
+            verifier.verify_chain(&[leaf, intermediate, root]),
+            Err(CertError::InvalidChain)
+        ));
+    }
+
+    #[test]
+    fn revocation_checker_prefers_ocsp_and_crl_hits() {
+        let cert = make_cert(
+            "leaf.echos.test",
+            "root.echos.test",
+            false,
+            Some(0x05),
+            Vec::new(),
+        );
+        let issuer = make_cert(
+            "root.echos.test",
+            "root.echos.test",
+            true,
+            Some(0x20),
+            Vec::new(),
+        );
+
+        let ocsp = OcspResponse {
+            response_status: OcspResponseStatus::Successful,
+            response_type: "1.3.6.1.5.5.7.48.1.1".to_string(),
+            version: 1,
+            responder_id: OcspResponderId::ByName(test_name("root.echos.test")),
+            produced_at: 1704067200,
+            responses: vec![OcspSingleResponse {
+                cert_id_hash_algo: "1.3.14.3.2.26".to_string(),
+                issuer_name_hash: vec![0; 20],
+                issuer_key_hash: vec![0; 20],
+                serial: cert.serial.clone(),
+                status: OcspCertStatus::Revoked {
+                    reason: CrlReason::KeyCompromise,
+                    revocation_time: 1704060000,
+                },
+                this_update: 1704060000,
+                next_update: Some(1704070000),
+                produced_at: 1704067200,
+            }],
+            signature_algo: SignatureAlgorithm {
+                algorithm: "1.2.840.113549.1.1.11".to_string(),
+                parameters: Vec::new(),
+            },
+            signature: vec![0x55; 64],
+            certs: Vec::new(),
+        };
+
+        let mut checker = RevocationChecker::new();
+        checker.cache_ocsp(cert.serial.clone(), ocsp);
+        assert!(matches!(
+            checker.check_revocation(&cert, &issuer),
+            Err(CertError::Revoked)
+        ));
+
+        checker.ocsp_cache.clear();
+        checker.add_crl(X509Crl {
+            version: 2,
+            signature_algo: SignatureAlgorithm {
+                algorithm: "1.2.840.113549.1.1.11".to_string(),
+                parameters: Vec::new(),
+            },
+            issuer: issuer.subject.clone(),
+            this_update: 1704060000,
+            next_update: 1704070000,
+            revoked_certs: vec![CrlEntry {
+                serial: cert.serial.clone(),
+                revocation_date: 1704060000,
+                reason: CrlReason::KeyCompromise,
+                invalidity_date: None,
+            }],
+            extensions: Vec::new(),
+            signature: vec![0x66; 64],
+            raw: Vec::new(),
+        });
+        assert!(matches!(
+            checker.check_revocation(&cert, &issuer),
+            Err(CertError::Revoked)
+        ));
+    }
+
+    #[test]
+    fn revocation_checker_rejects_crl_when_issuer_lacks_crl_signing_usage() {
+        let cert = make_cert(
+            "leaf.echos.test",
+            "root.echos.test",
+            false,
+            Some(0x20),
+            vec![],
+        );
+        let issuer = make_cert(
+            "root.echos.test",
+            "root.echos.test",
+            true,
+            Some(0x20),
+            vec![],
+        );
+        let mut checker = RevocationChecker::new();
+        checker.prefer_ocsp = false;
+        checker.fetch_live = false;
+        checker.add_crl(X509Crl {
+            version: 2,
+            signature_algo: SignatureAlgorithm {
+                algorithm: "1.2.840.113549.1.1.11".to_string(),
+                parameters: Vec::new(),
+            },
+            issuer: issuer.subject.clone(),
+            this_update: 1704060000,
+            next_update: 1704070000,
+            revoked_certs: vec![CrlEntry {
+                serial: cert.serial.clone(),
+                revocation_date: 1704060000,
+                reason: CrlReason::KeyCompromise,
+                invalidity_date: None,
+            }],
+            extensions: Vec::new(),
+            signature: vec![0x55; 64],
+            raw: vec![0x77; 96],
+        });
+        assert!(matches!(
+            checker.check_revocation(&cert, &issuer),
+            Err(CertError::InvalidKeyUsage)
+        ));
+    }
+
+    #[test]
+    fn revocation_checker_hard_fail_without_live_status_reports_invalid_format() {
+        let cert = make_cert(
+            "leaf.echos.test",
+            "root.echos.test",
+            false,
+            Some(0x05),
+            vec![X509Extension {
+                oid: "1.3.6.1.5.5.7.1.1".to_string(),
+                critical: false,
+                value: b"http://127.0.0.1/ocsp".to_vec(),
+            }],
+        );
+        let issuer = make_cert(
+            "root.echos.test",
+            "root.echos.test",
+            true,
+            Some(0x20),
+            Vec::new(),
+        );
+        let mut checker = RevocationChecker::new();
+        checker.hard_fail = true;
+        checker.fetch_live = true;
+
+        assert!(matches!(
+            checker.check_revocation(&cert, &issuer),
+            Err(CertError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn revocation_checker_hard_fail_rejects_unknown_cached_ocsp_status() {
+        let cert = make_cert(
+            "leaf.echos.test",
+            "root.echos.test",
+            false,
+            Some(0x05),
+            Vec::new(),
+        );
+        let issuer = make_cert(
+            "root.echos.test",
+            "root.echos.test",
+            true,
+            Some(0x20),
+            Vec::new(),
+        );
+        let mut checker = RevocationChecker::new();
+        checker.hard_fail = true;
+        checker.fetch_live = false;
+        checker.cache_ocsp(
+            cert.serial.clone(),
+            OcspResponse {
+                response_status: OcspResponseStatus::Successful,
+                response_type: "1.3.6.1.5.5.7.48.1.1".to_string(),
+                version: 1,
+                responder_id: OcspResponderId::ByName(test_name("root.echos.test")),
+                produced_at: 1704067200,
+                responses: vec![OcspSingleResponse {
+                    cert_id_hash_algo: "1.3.14.3.2.26".to_string(),
+                    issuer_name_hash: vec![0; 20],
+                    issuer_key_hash: vec![0; 20],
+                    serial: cert.serial.clone(),
+                    status: OcspCertStatus::Unknown,
+                    this_update: 1704060000,
+                    next_update: Some(1704070000),
+                    produced_at: 1704067200,
+                }],
+                signature_algo: SignatureAlgorithm {
+                    algorithm: "1.2.840.113549.1.1.11".to_string(),
+                    parameters: Vec::new(),
+                },
+                signature: vec![0x55; 64],
+                certs: Vec::new(),
+            },
+        );
+
+        assert!(matches!(
+            checker.check_revocation(&cert, &issuer),
+            Err(CertError::InvalidFormat)
+        ));
     }
 }

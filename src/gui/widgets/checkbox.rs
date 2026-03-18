@@ -18,10 +18,15 @@
 //! sinüs ve kosinüs değerleri hesaplanır. Bu yöntem ilk birkaç terimle bile
 //! iyi bir doğruluk sağlar.
 
-use super::{Rect, Widget};
+use super::{
+    border_rect_objects, draw_render_objects, raster_object, solid_rect_object,
+    text_render_object_with_width, AccessRole, AccessState, AccessibilityInfo, Rect, Widget,
+};
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{DamageLane, RenderObject};
 use crate::gui::theme::Theme;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// no_std ortamı için Taylor serisi tabanlı sinüs yaklaşımı.
@@ -131,60 +136,117 @@ impl CheckBox {
             handler(self.checked);
         }
     }
-}
 
-impl Widget for CheckBox {
-    fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
-        let box_size = 18usize;
-
-        // Checkbox kutusu: hover durumunda farklı arka plan rengi
+    fn render_primitives(&self) -> Vec<RenderObject> {
+        let mut objects = Vec::new();
+        let box_rect = Rect::new(self.rect.x, self.rect.y + 3, 18, 18);
         let bg_color = if self.hovered {
             Theme::BUTTON_HOVER.to_u32()
         } else {
             Theme::BUTTON_BG.to_u32()
         };
-        fb.draw_rect(x, y, box_size, box_size, bg_color);
-
-        // Kenarlık: seçili ise vurgu rengi, değilse normal kenarlık rengi.
-        // Bu görsel geri bildirim kullanıcıya kutunun seçili olduğunu gösterir.
-        let border_color = if self.checked {
+        let border_color = if self.focused || self.checked || self.indeterminate {
             Theme::ACCENT_PRIMARY.to_u32()
         } else {
             Theme::BORDER.to_u32()
         };
+        let text_color = if self.enabled {
+            Theme::TEXT_PRIMARY.to_u32()
+        } else {
+            Theme::TEXT_DISABLED.to_u32()
+        };
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64);
 
-        for col in x..(x + box_size) {
-            fb.plot_pixel(col, y, border_color);
-            fb.plot_pixel(col, y + box_size - 1, border_color);
-        }
-        for row in y..(y + box_size) {
-            fb.plot_pixel(x, row, border_color);
-            fb.plot_pixel(x + box_size - 1, row, border_color);
-        }
+        objects.push(solid_rect_object(
+            base_id,
+            box_rect,
+            bg_color,
+            DamageLane::Window,
+            0,
+        ));
+        objects.extend(border_rect_objects(
+            base_id ^ 0x10,
+            box_rect,
+            border_color,
+            DamageLane::Window,
+            1,
+        ));
 
-        // Tik işareti (checkmark): X şeklinde çizilir.
-        // İki köşegen çizgisi örtüşerek bir X deseni oluşturur.
-        // Gerçek bir tik (v-şekli) için çizgi noktalarını farklı hesaplamak gerekir.
         if self.checked {
-            let check_color = Theme::ACCENT_PRIMARY.to_u32();
-            // Basit X deseni: iki köşegen yönünde 6 piksel çizilir
-            for i in 0..6 {
-                fb.plot_pixel(x + 4 + i, y + 4 + i, check_color);
-                fb.plot_pixel(x + 4 + i, y + 12 - i, check_color);
-            }
+            objects.push(solid_rect_object(
+                base_id ^ 0x20,
+                Rect::new(box_rect.x + 4, box_rect.y + 8, 4, 2),
+                Theme::ACCENT_PRIMARY.to_u32(),
+                DamageLane::Window,
+                2,
+            ));
+            objects.push(solid_rect_object(
+                base_id ^ 0x21,
+                Rect::new(box_rect.x + 7, box_rect.y + 10, 2, 2),
+                Theme::ACCENT_PRIMARY.to_u32(),
+                DamageLane::Window,
+                2,
+            ));
+            objects.push(solid_rect_object(
+                base_id ^ 0x22,
+                Rect::new(box_rect.x + 8, box_rect.y + 9, 2, 2),
+                Theme::ACCENT_PRIMARY.to_u32(),
+                DamageLane::Window,
+                2,
+            ));
+            objects.push(solid_rect_object(
+                base_id ^ 0x23,
+                Rect::new(box_rect.x + 9, box_rect.y + 8, 2, 2),
+                Theme::ACCENT_PRIMARY.to_u32(),
+                DamageLane::Window,
+                2,
+            ));
+            objects.push(solid_rect_object(
+                base_id ^ 0x24,
+                Rect::new(box_rect.x + 10, box_rect.y + 6, 2, 2),
+                Theme::ACCENT_PRIMARY.to_u32(),
+                DamageLane::Window,
+                2,
+            ));
+            objects.push(solid_rect_object(
+                base_id ^ 0x25,
+                Rect::new(box_rect.x + 11, box_rect.y + 4, 2, 2),
+                Theme::ACCENT_PRIMARY.to_u32(),
+                DamageLane::Window,
+                2,
+            ));
+        } else if self.indeterminate {
+            objects.push(solid_rect_object(
+                base_id ^ 0x30,
+                Rect::new(box_rect.x + 4, box_rect.y + 8, 10, 2),
+                Theme::ACCENT_PRIMARY.to_u32(),
+                DamageLane::Window,
+                2,
+            ));
         }
 
-        // Etiket metni: kutunun sağına 8 piksel boşlukla yerleştirilir.
-        // Dikey ortalama: box_size=18, metin yüksekliği~16; (18-16)/2 = 1 olduğundan
-        // +3 piksel offset yeterli görsel hizalamayı sağlar.
-        fb.draw_string(
-            x + box_size + 8,
-            y + 3,
+        objects.push(text_render_object_with_width(
+            base_id ^ 0x40,
+            Rect::new(
+                self.rect.x + 26,
+                self.rect.y + 3,
+                (self.rect.width - 26).max(1),
+                18,
+            ),
             &self.label,
-            Theme::TEXT_PRIMARY.to_u32(),
-        );
+            text_color,
+            false,
+            DamageLane::Text,
+            3,
+        ));
+        objects
+    }
+}
+
+impl Widget for CheckBox {
+    fn draw(&self, fb: &mut Framebuffer) {
+        let objects = self.render_primitives();
+        draw_render_objects(fb, self.rect, &objects);
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {
@@ -210,6 +272,55 @@ impl Widget for CheckBox {
     fn bounds(&self) -> Rect {
         self.rect
     }
+
+    fn on_key(&mut self, key: char, _modifiers: u8, _scancode: u8) -> bool {
+        if self.focused && (key == ' ' || key == '\n') {
+            self.toggle();
+            return true;
+        }
+        false
+    }
+
+    fn can_focus(&self) -> bool {
+        self.enabled
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    fn accessibility_info(&self) -> AccessibilityInfo<'_> {
+        let mut state = AccessState::empty();
+        if self.focused {
+            state = state.with(AccessState::FOCUSED);
+        }
+        if !self.enabled {
+            state = state.with(AccessState::DISABLED);
+        }
+        if self.checked {
+            state = state.with(AccessState::CHECKED);
+        }
+        AccessibilityInfo {
+            role: AccessRole::Checkbox,
+            label: &self.label,
+            value: if self.indeterminate {
+                "mixed"
+            } else if self.checked {
+                "checked"
+            } else {
+                "unchecked"
+            },
+            state,
+        }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
+    }
 }
 
 /// Radyo düğmesi widget'ı; grup içinde tek seçim kontrolü.
@@ -222,6 +333,7 @@ pub struct RadioButton {
     label: String,
     selected: bool,
     hovered: bool,
+    focused: bool,
     group_id: u32,
     on_select: Option<fn(u32)>,
 }
@@ -237,6 +349,7 @@ impl RadioButton {
             label: String::from(label),
             selected: false,
             hovered: false,
+            focused: false,
             group_id,
             on_select: None,
         }
@@ -270,44 +383,33 @@ impl RadioButton {
             handler(self.group_id);
         }
     }
-}
 
-impl Widget for RadioButton {
-    fn draw(&self, fb: &mut Framebuffer) {
-        let x = self.rect.x as usize;
-        let y = self.rect.y as usize;
+    fn render_primitives(&self) -> Vec<RenderObject> {
         let circle_size = 18usize;
         let center = circle_size / 2;
-
-        // Radyo çemberi arka planı
+        let mut pixels = vec![0u32; circle_size * circle_size];
         let bg_color = if self.hovered {
             Theme::BUTTON_HOVER.to_u32()
         } else {
             Theme::BUTTON_BG.to_u32()
         };
-        fb.draw_rect(x, y, circle_size, circle_size, bg_color);
-
-        // Çember çerçevesi: trigonometri ile çizilir.
-        // 0°-360° aralığında her açı için koordinat hesaplanır.
-        // Yarıçap 8 piksel; `f64 as usize` dönüşümü kesme (floor) yapar.
         let border_color = if self.selected {
             Theme::ACCENT_PRIMARY.to_u32()
         } else {
             Theme::BORDER.to_u32()
         };
 
-        // 1 derecelik adımlarla çember çizimi (yaklaşık trigonometri kullanır)
+        for pixel in pixels.iter_mut() {
+            *pixel = bg_color;
+        }
         for angle in 0..360 {
             let rad = (angle as f64) * core::f64::consts::PI / 180.0;
             let px = (center as f64 + 8.0 * cos_approx(rad)) as usize;
             let py = (center as f64 + 8.0 * sin_approx(rad)) as usize;
             if px < circle_size && py < circle_size {
-                fb.plot_pixel(x + px, y + py, border_color);
+                pixels[py * circle_size + px] = border_color;
             }
         }
-
-        // Seçili ise iç dolu çember: yarıçap 4 piksel ile daha küçük bir
-        // çember çizilir; bu klasik radyo butonu görünümünü verir.
         if self.selected {
             let fill_color = Theme::ACCENT_PRIMARY.to_u32();
             for angle in 0..360 {
@@ -315,18 +417,42 @@ impl Widget for RadioButton {
                 let px = (center as f64 + 4.0 * cos_approx(rad)) as usize;
                 let py = (center as f64 + 4.0 * sin_approx(rad)) as usize;
                 if px < circle_size && py < circle_size {
-                    fb.plot_pixel(x + px, y + py, fill_color);
+                    pixels[py * circle_size + px] = fill_color;
                 }
             }
         }
 
-        // Etiket metni: çemberin sağına yerleştirilir
-        fb.draw_string(
-            x + circle_size + 8,
-            y + 3,
-            &self.label,
-            Theme::TEXT_PRIMARY.to_u32(),
-        );
+        let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64);
+        vec![
+            raster_object(
+                base_id,
+                Rect::new(self.rect.x, self.rect.y + 3, circle_size as i32, circle_size as i32),
+                pixels,
+                DamageLane::Window,
+                0,
+            ),
+            text_render_object_with_width(
+                base_id ^ 0x10,
+                Rect::new(
+                    self.rect.x + circle_size as i32 + 8,
+                    self.rect.y + 3,
+                    (self.rect.width - circle_size as i32 - 8).max(1),
+                    18,
+                ),
+                &self.label,
+                Theme::TEXT_PRIMARY.to_u32(),
+                false,
+                DamageLane::Text,
+                1,
+            ),
+        ]
+    }
+}
+
+impl Widget for RadioButton {
+    fn draw(&self, fb: &mut Framebuffer) {
+        let objects = self.render_primitives();
+        draw_render_objects(fb, self.rect, &objects);
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> bool {
@@ -346,6 +472,46 @@ impl Widget for RadioButton {
 
     fn bounds(&self) -> Rect {
         self.rect
+    }
+
+    fn on_key(&mut self, key: char, _modifiers: u8, _scancode: u8) -> bool {
+        if self.focused && (key == ' ' || key == '\n') {
+            self.select();
+            return true;
+        }
+        false
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    fn accessibility_info(&self) -> AccessibilityInfo<'_> {
+        let mut state = AccessState::empty();
+        if self.focused {
+            state = state.with(AccessState::FOCUSED);
+        }
+        if self.selected {
+            state = state.with(AccessState::SELECTED);
+        }
+        AccessibilityInfo {
+            role: AccessRole::RadioButton,
+            label: &self.label,
+            value: if self.selected { "selected" } else { "clear" },
+            state,
+        }
+    }
+
+    fn render_objects(&self) -> Vec<RenderObject> {
+        self.render_primitives()
     }
 }
 

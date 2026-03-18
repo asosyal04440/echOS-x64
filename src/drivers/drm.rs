@@ -536,8 +536,7 @@ impl DrmDevice {
     }
 
     pub fn reservation_snapshot(&self, handle: u32) -> Option<DmaReservationSnapshot> {
-        self.gem_get(handle)
-            .map(|obj| obj.reservation_snapshot())
+        self.gem_get(handle).map(|obj| obj.reservation_snapshot())
     }
 
     pub fn reservation_graph_snapshot(&self, producer_handle: u32) -> Vec<DmaReservationEdge> {
@@ -596,7 +595,9 @@ impl DrmDevice {
                     return Err("reservation handle unavailable");
                 };
                 match obj.try_claim_ww(&ctx) {
-                    Ok(()) => guards.push(DmaResvWwGuard { object: obj.clone() }),
+                    Ok(()) => guards.push(DmaResvWwGuard {
+                        object: obj.clone(),
+                    }),
                     Err(DmaResvLockError::Edeadlk) => {
                         blocked = true;
                         break;
@@ -732,12 +733,7 @@ impl DrmDevice {
         1_000_000_000u64.saturating_div(hz)
     }
 
-    pub fn vblank_ready_at(
-        &self,
-        refresh_hz: u32,
-        now_ns: u64,
-        mode: DisplayPresentMode,
-    ) -> bool {
+    pub fn vblank_ready_at(&self, refresh_hz: u32, now_ns: u64, mode: DisplayPresentMode) -> bool {
         if mode == DisplayPresentMode::Mailbox {
             return true;
         }
@@ -806,12 +802,20 @@ impl DrmDevice {
                     .ok_or("plane not found")?;
                 plane.crtc_id.store(update.crtc_id, Ordering::Release);
                 plane.fb_id.store(update.fb_id, Ordering::Release);
-                plane.crtc_x.store(update.dst.x.max(0) as u32, Ordering::Release);
-                plane.crtc_y.store(update.dst.y.max(0) as u32, Ordering::Release);
+                plane
+                    .crtc_x
+                    .store(update.dst.x.max(0) as u32, Ordering::Release);
+                plane
+                    .crtc_y
+                    .store(update.dst.y.max(0) as u32, Ordering::Release);
                 plane.crtc_w.store(update.dst.width, Ordering::Release);
                 plane.crtc_h.store(update.dst.height, Ordering::Release);
-                plane.src_x.store(update.src.x.max(0) as u32, Ordering::Release);
-                plane.src_y.store(update.src.y.max(0) as u32, Ordering::Release);
+                plane
+                    .src_x
+                    .store(update.src.x.max(0) as u32, Ordering::Release);
+                plane
+                    .src_y
+                    .store(update.src.y.max(0) as u32, Ordering::Release);
                 plane.src_w.store(update.src.width, Ordering::Release);
                 plane.src_h.store(update.src.height, Ordering::Release);
             }
@@ -891,7 +895,12 @@ impl DrmDevice {
                 .filter(|candidate| candidate.opaque)
                 .max_by_key(|candidate| candidate.z)
                 .copied()
-                .or_else(|| txn.planes.iter().max_by_key(|candidate| candidate.z).copied());
+                .or_else(|| {
+                    txn.planes
+                        .iter()
+                        .max_by_key(|candidate| candidate.z)
+                        .copied()
+                });
         }
 
         let mut updates = Vec::new();
@@ -977,7 +986,8 @@ impl DrmDevice {
         self.last_commit_id.store(txn.commit_id, Ordering::Release);
         self.expected_commit_id
             .store(txn.commit_id, Ordering::Release);
-        self.expected_frame_id.store(txn.frame_id, Ordering::Release);
+        self.expected_frame_id
+            .store(txn.frame_id, Ordering::Release);
         self.expected_flip_seq
             .store(result.vblank_seq, Ordering::Release);
         Ok(result)
@@ -1128,8 +1138,10 @@ impl GemObject {
         let mut state = self.reservation.lock();
         match usage {
             DmaReservationUsage::Read => {
-                state.shared_plane_count =
-                    state.shared_plane_count.max(shared_plane_count).saturating_add(1);
+                state.shared_plane_count = state
+                    .shared_plane_count
+                    .max(shared_plane_count)
+                    .saturating_add(1);
             }
             DmaReservationUsage::Write | DmaReservationUsage::Kernel => {
                 state.exclusive_commit_id = commit_id;
@@ -1187,10 +1199,12 @@ impl GemObject {
     }
 
     fn try_claim_ww(&self, ctx: &DmaResvAcquireCtx) -> Result<(), DmaResvLockError> {
-        match self
-            .reservation_ww_state
-            .compare_exchange(0, ctx.stamp, Ordering::AcqRel, Ordering::Acquire)
-        {
+        match self.reservation_ww_state.compare_exchange(
+            0,
+            ctx.stamp,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
             Ok(_) => Ok(()),
             Err(owner_stamp) => {
                 if owner_stamp != 0 && owner_stamp < ctx.stamp {
@@ -1296,7 +1310,9 @@ mod tests {
         assert!(!snap.fence.signaled);
 
         assert!(device.report_flip_complete(10, 33, result.vblank_seq, result.timestamp_ns));
-        let done = device.reservation_snapshot(77).expect("reservation after flip");
+        let done = device
+            .reservation_snapshot(77)
+            .expect("reservation after flip");
         assert_eq!(done.fence.current_value, 33);
         assert!(done.fence.signaled);
     }
@@ -1321,9 +1337,9 @@ pub struct DrmFramebuffer {
     pub height: u32,
     pub format: u32,
     pub handles: [u32; 4],
-    pub pitches: [u32; 4],  // bytes per row for each plane
-    pub offsets: [u32; 4],  // offset within GEM for each plane
-    pub modifier: u64,       // tiling/compression modifier (AMD, Intel tiling)
+    pub pitches: [u32; 4], // bytes per row for each plane
+    pub offsets: [u32; 4], // offset within GEM for each plane
+    pub modifier: u64,     // tiling/compression modifier (AMD, Intel tiling)
     pub ref_count: AtomicU32,
 }
 
@@ -1389,7 +1405,7 @@ pub struct DrmMode {
     pub hsync_end: u16,   // Yatay senkron bitişi
     pub htotal: u16,      // Toplam yatay süre (görünür + blanking)
     pub hskew: u16,
-    pub vdisplay: u16,    // Görünür dikey satır sayısı
+    pub vdisplay: u16, // Görünür dikey satır sayısı
     pub vsync_start: u16,
     pub vsync_end: u16,
     pub vtotal: u16,

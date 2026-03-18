@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>echOS Hypr-Pro Product Shell</title>
+  <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  <style>
+    :root {
+      --bg0: #091018;
+      --bg1: #0e1722;
+      --bg2: #121b28;
+      --panel: rgba(18, 27, 40, 0.94);
+      --panel-2: rgba(24, 36, 50, 0.96);
+      --line: #314355;
+      --line-2: #4d6278;
+      --text-0: #e8eff7;
+      --text-1: #a6b5c6;
+      --text-2: #7a8b9d;
+      --aqua: #26e6c6;
+      --azure: #5ab3ff;
+      --gold: #ffb84d;
+      --coral: #ff6b6b;
+      --mint: #4ddb95;
+      --radius-sm: 10px;
+      --radius-md: 16px;
+      --radius-lg: 22px;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Arial", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(38, 230, 198, 0.18), transparent 22%),
+        radial-gradient(circle at top right, rgba(90, 179, 255, 0.16), transparent 20%),
+        linear-gradient(180deg, #091018 0%, #13202d 100%);
+      color: var(--text-0);
+    }
+
+    .page {
+      width: 1440px;
+      min-height: 960px;
+      margin: 48px auto;
+      padding: 32px;
+      border: 1px solid rgba(77, 98, 120, 0.75);
+      border-radius: 28px;
+      background: rgba(9, 16, 24, 0.82);
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .page::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(38, 230, 198, 0.06), transparent 18%),
+        linear-gradient(180deg, rgba(90, 179, 255, 0.06), transparent 30%);
+      pointer-events: none;
+    }
+
+    .kicker {
+      color: var(--aqua);
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 40px; line-height: 1.05; margin-bottom: 12px; }
+    h2 { font-size: 26px; margin-bottom: 18px; }
+    h3 { font-size: 18px; margin-bottom: 12px; }
+    .lede { color: var(--text-1); font-size: 16px; line-height: 1.5; max-width: 900px; }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 24px;
+      margin-top: 32px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+      margin-top: 24px;
+    }
+
+    .grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid rgba(49, 67, 85, 0.95);
+      border-radius: var(--radius-md);
+      padding: 18px;
+    }
+
+    .panel.topline-aqua { box-shadow: inset 0 1px 0 var(--aqua); }
+    .panel.topline-azure { box-shadow: inset 0 1px 0 var(--azure); }
+    .panel.topline-gold { box-shadow: inset 0 1px 0 var(--gold); }
+    .panel.topline-coral { box-shadow: inset 0 1px 0 var(--coral); }
+
+    .list {
+      display: grid;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(18, 27, 40, 0.9);
+      border: 1px solid rgba(49, 67, 85, 0.95);
+      color: var(--text-1);
+      font-size: 12px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(15, 23, 34, 0.9);
+      border: 1px solid rgba(49, 67, 85, 0.9);
+    }
+
+    .label { color: var(--text-0); font-size: 14px; }
+    .meta { color: var(--text-2); font-size: 12px; }
+
+    .desktop-shot {
+      margin-top: 24px;
+      background: linear-gradient(180deg, #0d1722 0%, #132131 100%);
+      border: 1px solid rgba(77, 98, 120, 0.9);
+      border-radius: 24px;
+      padding: 18px;
+      min-height: 560px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .topbar {
+      height: 58px;
+      border: 1px solid rgba(49, 67, 85, 0.92);
+      border-radius: 18px;
+      background: rgba(14, 23, 34, 0.9);
+      display: grid;
+      grid-template-columns: 180px 1fr 280px;
+      gap: 14px;
+      align-items: center;
+      padding: 0 18px;
+    }
+
+    .topbar .brand { font-size: 20px; font-weight: 700; }
+    .command {
+      height: 38px;
+      border-radius: 12px;
+      border: 1px solid rgba(49, 67, 85, 0.9);
+      background: rgba(9, 16, 24, 0.86);
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+      color: var(--text-2);
+    }
+
+    .status {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      color: var(--text-1);
+      font-size: 13px;
+    }
+
+    .hero {
+      margin-top: 22px;
+      width: 520px;
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(18, 27, 40, 0.88);
+      border: 1px solid rgba(49, 67, 85, 0.9);
+      box-shadow: inset 0 1px 0 rgba(38, 230, 198, 0.9);
+    }
+
+    .window {
+      position: absolute;
+      right: 54px;
+      top: 132px;
+      width: 560px;
+      height: 360px;
+      border-radius: 22px;
+      background: rgba(24, 36, 50, 0.97);
+      border: 1px solid rgba(77, 98, 120, 0.9);
+      box-shadow: 0 28px 90px rgba(0, 0, 0, 0.45);
+      overflow: hidden;
+    }
+
+    .window .titlebar {
+      height: 52px;
+      background: rgba(26, 36, 49, 0.98);
+      border-bottom: 1px solid rgba(49, 67, 85, 0.95);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+    }
+
+    .buttons { display: flex; gap: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 999px; }
+    .term-body {
+      padding: 18px;
+      font-family: "Cascadia Mono", "Consolas", monospace;
+      color: #b8d2ea;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .dock {
+      position: absolute;
+      left: 50%;
+      bottom: 28px;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 14px;
+      padding: 14px 18px;
+      border-radius: 20px;
+      background: rgba(14, 23, 34, 0.9);
+      border: 1px solid rgba(49, 67, 85, 0.92);
+    }
+
+    .app {
+      width: 46px;
+      height: 46px;
+      border-radius: 14px;
+      border: 1px solid rgba(49, 67, 85, 0.9);
+      background: rgba(18, 27, 40, 0.95);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      color: var(--text-0);
+    }
+
+    .token {
+      padding: 14px;
+      border-radius: 14px;
+      background: rgba(18, 27, 40, 0.9);
+      border: 1px solid rgba(49, 67, 85, 0.92);
+      min-height: 84px;
+    }
+
+    .swatch {
+      width: 100%;
+      height: 36px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.08);
+      margin-bottom: 10px;
+    }
+
+    .motion {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    .motion-card {
+      padding: 16px;
+      border-radius: 16px;
+      background: rgba(18, 27, 40, 0.9);
+      border: 1px solid rgba(49, 67, 85, 0.92);
+    }
+
+    .small {
+      font-size: 12px;
+      color: var(--text-2);
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <section class="page">
+    <div class="kicker">00 Audit</div>
+    <h1>echOS shell polish should feel like a product, not a debug console.</h1>
+    <p class="lede">Hypr-Pro means fast, structured, dark, calm, and premium. The shell should feel intentional on an empty desktop and precise under motion, instead of looking like stacked system panels.</p>
+
+    <div class="grid-3">
+      <div class="panel topline-coral">
+        <h3>Prototype-looking</h3>
+        <div class="list">
+          <div class="row"><span class="label">Top bar reads like dashboard</span><span class="meta">too segmented</span></div>
+          <div class="row"><span class="label">Launcher explains the shell</span><span class="meta">copy-heavy</span></div>
+          <div class="row"><span class="label">Overview is list-first</span><span class="meta">not spatial</span></div>
+        </div>
+      </div>
+      <div class="panel topline-gold">
+        <h3>Breaks product feel</h3>
+        <div class="list">
+          <div class="row"><span class="label">Equal emphasis everywhere</span><span class="meta">weak hierarchy</span></div>
+          <div class="row"><span class="label">Too many border lines</span><span class="meta">visual noise</span></div>
+          <div class="row"><span class="label">Overlay vocabulary is inconsistent</span><span class="meta">tool-like labels</span></div>
+        </div>
+      </div>
+      <div class="panel topline-aqua">
+        <h3>Worth keeping</h3>
+        <div class="list">
+          <div class="row"><span class="label">Dark graphite palette base</span><span class="meta">strong foundation</span></div>
+          <div class="row"><span class="label">Clean desktop startup</span><span class="meta">correct product move</span></div>
+          <div class="row"><span class="label">Terminal as reference window</span><span class="meta">good anchor</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="desktop-shot">
+      <div class="topbar">
+        <div class="brand">echOS</div>
+        <div class="command">Search, apps, actions</div>
+        <div class="status"><span>NET</span><span>AUD</span><span>PWR</span><span>12:00</span></div>
+      </div>
+      <div class="hero">
+        <h3>Clean desktop should still feel alive.</h3>
+        <p class="lede" style="font-size:14px;margin-top:8px;">One active workspace, silent overlays, and an obvious launch path. No default launcher sprawl, no internal labels, no visual panic.</p>
+      </div>
+      <div class="window">
+        <div class="titlebar">
+          <div>Terminal</div>
+          <div class="buttons">
+            <div class="dot" style="background:#ffb84d"></div>
+            <div class="dot" style="background:#4ddb95"></div>
+            <div class="dot" style="background:#ff6b6b"></div>
+          </div>
+        </div>
+        <div class="term-body">
+          operator@echos:~$ pwd<br>
+          /home/operator<br><br>
+          operator@echos:~$ ls<br>
+          apps&nbsp;&nbsp;docs&nbsp;&nbsp;workspace<br><br>
+          operator@echos:~$ _
+        </div>
+      </div>
+      <div class="dock">
+        <div class="app">T</div>
+        <div class="app">F</div>
+        <div class="app">S</div>
+        <div class="app">E</div>
+        <div class="app">M</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="page">
+    <div class="kicker">01 Tokens</div>
+    <h1>One disciplined token system, not ad-hoc chrome styling.</h1>
+    <p class="lede">All surfaces should pull from the same shell grammar: graphite depth, restrained accent, quiet borders, and motion that confirms structure instead of decorating it.</p>
+
+    <div class="grid-4">
+      <div class="token"><div class="swatch" style="background:#0e1722"></div><strong>surface.panel</strong><div class="small">top bar, dock, shell chrome</div></div>
+      <div class="token"><div class="swatch" style="background:#121b28"></div><strong>surface.window</strong><div class="small">default product windows</div></div>
+      <div class="token"><div class="swatch" style="background:#26e6c6"></div><strong>accent.primary</strong><div class="small">focus, high-confidence affordances</div></div>
+      <div class="token"><div class="swatch" style="background:#5ab3ff"></div><strong>accent.secondary</strong><div class="small">navigation, shell guidance</div></div>
+      <div class="token"><div class="swatch" style="background:#ffb84d"></div><strong>accent.warning</strong><div class="small">caution, power, risky actions</div></div>
+      <div class="token"><div class="swatch" style="background:#ff6b6b"></div><strong>accent.error</strong><div class="small">destructive or crashed state</div></div>
+      <div class="token"><div class="swatch" style="background:#314355"></div><strong>border.subtle</strong><div class="small">container rhythm, not decoration</div></div>
+      <div class="token"><div class="swatch" style="background:#4d6278"></div><strong>border.focus</strong><div class="small">active or selected emphasis</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel topline-azure">
+        <h2>Typography scale</h2>
+        <div class="list">
+          <div class="row"><span class="label">Display / Shell Hero</span><span class="meta">desktop focal copy</span></div>
+          <div class="row"><span class="label">Title / Window</span><span class="meta">window chrome anchor</span></div>
+          <div class="row"><span class="label">Body / Primary</span><span class="meta">default shell labels</span></div>
+          <div class="row"><span class="label">Meta / System</span><span class="meta">quiet status layer</span></div>
+          <div class="row"><span class="label">Mono / Terminal</span><span class="meta">shell and command zones only</span></div>
+        </div>
+      </div>
+      <div class="panel topline-aqua">
+        <h2>Spacing / radius / depth</h2>
+        <div class="list">
+          <div class="row"><span class="label">4 / 8 / 12 / 16 / 24</span><span class="meta">core spacing ladder</span></div>
+          <div class="row"><span class="label">10 / 16 / 22 px</span><span class="meta">small / medium / large radius</span></div>
+          <div class="row"><span class="label">resting / floating / focused</span><span class="meta">shadow tiers only</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="page">
+    <div class="kicker">02–08 Surface Roadmap</div>
+    <h1>Redesign sequence and implementation-first handoff.</h1>
+    <p class="lede">This file should be reconstructed in Figma page by page, then pulled back into echOS with MCP node queries. The first code parity target is Terminal window chrome, followed by Top Bar, Dock, Quick Settings, and Overview.</p>
+
+    <div class="grid-4">
+      <div class="panel topline-aqua"><h3>02 Desktop</h3><p class="small">Idle desktop, one-terminal desktop, two-window desktop. Launcher closed. Strong central calm.</p></div>
+      <div class="panel topline-azure"><h3>03 Window Chrome</h3><p class="small">Focused terminal, inactive terminal, floating utility, modal. One chrome language.</p></div>
+      <div class="panel topline-gold"><h3>04 Launcher + Palette</h3><p class="small">Split app launcher from command palette. Remove management-console tone.</p></div>
+      <div class="panel topline-aqua"><h3>05 Overview</h3><p class="small">Spatial workspace cards, layout and count, selected workspace calm emphasis.</p></div>
+      <div class="panel topline-azure"><h3>06 Quick + Notify</h3><p class="small">Grouped quick settings, lighter notifications, shared shell language.</p></div>
+      <div class="panel topline-gold"><h3>07 Motion</h3><p class="small">Overlay enter/exit, workspace switch, focus shift, open/close timing.</p></div>
+      <div class="panel topline-coral"><h3>08 Handoff</h3><p class="small">Node naming, token callouts, spacing annotations, implementation-ready states.</p></div>
+      <div class="panel topline-aqua"><h3>First MCP Targets</h3><p class="small">Window/Terminal/Focused, Shell/TopBar/Default, Shell/Dock/Default, Shell/QuickSettings/Default.</p></div>
+    </div>
+
+    <div class="motion">
+      <div class="motion-card"><strong>Focus</strong><div class="small">120–160 ms, ease-out, no flourish.</div></div>
+      <div class="motion-card"><strong>Overlay</strong><div class="small">140–180 ms, fade + shallow slide.</div></div>
+      <div class="motion-card"><strong>Workspace</strong><div class="small">180 ms, structural transition, not cinematic.</div></div>
+      <div class="motion-card"><strong>Window</strong><div class="small">180–220 ms, quick settle, premium restraint.</div></div>
+    </div>
+  </section>
+</body>
+</html>

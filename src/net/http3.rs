@@ -49,7 +49,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-use super::quic::{QuicConnection, QuicStream, QuicError, StreamType};
+use super::quic::{QuicConnection, QuicError, QuicStream, StreamType};
 
 // ============================================================================
 // HTTP/3 SABİTLERİ
@@ -110,6 +110,8 @@ pub enum Http3Error {
     FrameError,
     SettingsError,
     QpackError,
+    RemoteTransportUnavailable,
+    ShortWrite,
 }
 
 impl From<QuicError> for Http3Error {
@@ -138,7 +140,7 @@ pub struct QpackContext {
 impl QpackContext {
     pub fn new() -> Self {
         let mut static_table = Vec::new();
-        
+
         // HTTP/3 statik tablosundan bazı örnekler
         static_table.push((":authority", ""));
         static_table.push((":path", "/"));
@@ -147,7 +149,7 @@ impl QpackContext {
         static_table.push(("content-length", "0"));
         static_table.push(("content-type", "application/json"));
         static_table.push(("user-agent", "echOS-http3/1.0"));
-        
+
         Self {
             dynamic_table: Vec::new(),
             static_table,
@@ -155,13 +157,15 @@ impl QpackContext {
             decoder: QpackDecoder::new(),
         }
     }
-    
+
     pub fn encode_headers(&mut self, headers: &[(String, String)]) -> Result<Vec<u8>, Http3Error> {
-        self.encoder.encode(headers, &self.static_table, &mut self.dynamic_table)
+        self.encoder
+            .encode(headers, &self.static_table, &mut self.dynamic_table)
     }
-    
+
     pub fn decode_headers(&mut self, data: &[u8]) -> Result<Vec<(String, String)>, Http3Error> {
-        self.decoder.decode(data, &self.static_table, &mut self.dynamic_table)
+        self.decoder
+            .decode(data, &self.static_table, &mut self.dynamic_table)
     }
 }
 
@@ -175,7 +179,7 @@ impl QpackEncoder {
     pub fn new() -> Self {
         Self { next_index: 0 }
     }
-    
+
     pub fn encode(
         &mut self,
         headers: &[(String, String)],
@@ -183,7 +187,7 @@ impl QpackEncoder {
         dynamic_table: &mut Vec<(String, String)>,
     ) -> Result<Vec<u8>, Http3Error> {
         let mut encoded = Vec::new();
-        
+
         for (name, value) in headers {
             // Önce statik tabloda ara
             if let Some(index) = static_table.iter().position(|(n, _)| *n == name) {
@@ -191,20 +195,20 @@ impl QpackEncoder {
                 encoded.push(0x80 | (index as u8)); // Static indexed
                 continue;
             }
-            
+
             // Dinamik tabloda ara
             if let Some(index) = dynamic_table.iter().position(|(n, _)| *n == *name) {
                 // Dinamik tabloda bulundu
                 encoded.push(0xC0 | (index as u8)); // Dynamic indexed
                 continue;
             }
-            
+
             // Yeni giriş ekle
             dynamic_table.push((name.clone(), value.clone()));
             let new_index = dynamic_table.len() - 1;
             encoded.push(0xC0 | (new_index as u8)); // Dynamic indexed
         }
-        
+
         Ok(encoded)
     }
 }
@@ -217,11 +221,9 @@ pub struct QpackDecoder {
 
 impl QpackDecoder {
     pub fn new() -> Self {
-        Self {
-            max_entries: 4096,
-        }
+        Self { max_entries: 4096 }
     }
-    
+
     pub fn decode(
         &mut self,
         data: &[u8],
@@ -230,14 +232,14 @@ impl QpackDecoder {
     ) -> Result<Vec<(String, String)>, Http3Error> {
         let mut headers = Vec::new();
         let mut i = 0;
-        
+
         while i < data.len() {
             let byte = data[i];
-            
+
             if byte & 0x80 != 0 {
                 // Indexed field line
                 let index = (byte & 0x7F) as usize;
-                
+
                 if byte & 0x40 != 0 {
                     // Dynamic table
                     if let Some((name, value)) = dynamic_table.get(index) {
@@ -250,10 +252,10 @@ impl QpackDecoder {
                     }
                 }
             }
-            
+
             i += 1;
         }
-        
+
         Ok(headers)
     }
 }
@@ -305,54 +307,70 @@ impl Http3Connection {
             state: Http3ConnectionState::Handshaking,
         }
     }
-    
+
     /// Bağlantıyı başlat
     pub fn connect(&mut self) -> Result<(), Http3Error> {
-        // QUIC bağlantısı zaten başlatılmış kabul ediliyor
-        
+        if self.quic_conn.state != super::quic::QuicState::Established {
+            return Err(Http3Error::RemoteTransportUnavailable);
+        }
+
         // Varsayılan ayarları gönder
         self.send_settings()?;
-        
+
         self.state = Http3ConnectionState::WaitingSettings;
         Ok(())
     }
-    
+
     /// Ayarları gönder
     fn send_settings(&mut self) -> Result<(), Http3Error> {
         let mut frame = Vec::new();
-        
+
         // Frame header
         frame.push(FRAME_SETTINGS);
-        
+
         // Frame length (şimdilik 0)
         frame.extend_from_slice(&[0x00, 0x00, 0x00]);
-        
+
         // Settings
-        self.add_setting(&mut frame, SETTINGS_HEADER_TABLE_SIZE, DEFAULT_SETTINGS_HEADER_TABLE_SIZE);
-        self.add_setting(&mut frame, SETTINGS_MAX_FIELD_SECTION_SIZE, DEFAULT_SETTINGS_MAX_FIELD_SECTION_SIZE);
-        self.add_setting(&mut frame, SETTINGS_QPACK_BLOCKED_STREAMS, DEFAULT_SETTINGS_QPACK_BLOCKED_STREAMS);
-        
+        self.add_setting(
+            &mut frame,
+            SETTINGS_HEADER_TABLE_SIZE,
+            DEFAULT_SETTINGS_HEADER_TABLE_SIZE,
+        );
+        self.add_setting(
+            &mut frame,
+            SETTINGS_MAX_FIELD_SECTION_SIZE,
+            DEFAULT_SETTINGS_MAX_FIELD_SECTION_SIZE,
+        );
+        self.add_setting(
+            &mut frame,
+            SETTINGS_QPACK_BLOCKED_STREAMS,
+            DEFAULT_SETTINGS_QPACK_BLOCKED_STREAMS,
+        );
+
         // Length'i güncelle
         let length = frame.len() - 4;
         frame[1] = (length >> 16) as u8;
         frame[2] = (length >> 8) as u8;
         frame[3] = length as u8;
-        
+
         // Control stream (stream 0) üzerinden gönder
         let control_stream = self.quic_conn.create_stream(StreamType::ClientBiDi);
         if let Some(stream) = self.quic_conn.get_stream_mut(control_stream) {
-            let _ = stream.write(&frame);
+            write_all(stream, &frame)?;
+        } else {
+            return Err(Http3Error::StreamError(H3_CLOSED_CRITICAL_STREAM));
         }
-        
+
         Ok(())
     }
-    
+
     /// Ayar ekle
     fn add_setting(&self, frame: &mut Vec<u8>, identifier: u64, value: u64) {
         frame.push(identifier as u8);
         self.encode_varint(frame, value);
     }
-    
+
     /// Varint kodla
     fn encode_varint(&self, buf: &mut Vec<u8>, value: u64) {
         let mut v = value;
@@ -368,76 +386,88 @@ impl Http3Connection {
             }
         }
     }
-    
+
     /// İstek gönder ve akış ID'si döndür
-    pub fn send_request(&mut self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<u64, Http3Error> {
+    pub fn send_request(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<u64, Http3Error> {
         // Yeni akış oluştur
         let stream_id = self.quic_conn.create_stream(StreamType::ClientBiDi);
-        
+
         // Akışı al
         if let Some(quic_stream) = self.quic_conn.get_stream_mut(stream_id) {
             let mut http3_stream = Http3Stream::new(stream_id, quic_stream.clone());
-            
-            // Başlıkları hazırla
-            let mut header_data = Vec::new();
-            // :method
-            header_data.extend_from_slice(&format!(":method\t{}\t", method).as_bytes());
-            // :path
-            header_data.extend_from_slice(&format!(":path\t{}\t", path).as_bytes());
-            // :scheme
-            header_data.extend_from_slice(b":scheme\thttps\t");
-            // :authority
+
+            // Başlıkları QPACK ile kodla
+            let mut request_headers = Vec::new();
+            request_headers.push((":method".to_string(), method.to_string()));
+            request_headers.push((":path".to_string(), path.to_string()));
+            request_headers.push((":scheme".to_string(), "https".to_string()));
             if let Some((_, host)) = headers.iter().find(|(k, _)| *k == "host") {
-                header_data.extend_from_slice(&format!(":authority\t{}\t", host).as_bytes());
+                request_headers.push((":authority".to_string(), (*host).to_string()));
             }
-            
-            // Diğer başlıklar
+
             for (key, value) in headers {
-                header_data.extend_from_slice(&format!("{}\t{}\t", key, value).as_bytes());
+                if *key != "host" {
+                    request_headers.push(((*key).to_string(), (*value).to_string()));
+                }
             }
-            
-            // HPACK kodlama (placeholder - basit implementasyon)
-            let encoded_headers = header_data; // TODO: HPACK encoding
-            
+
+            let encoded_headers = self.qpack.encode_headers(&request_headers)?;
+
             // Başlıkları gönder
             http3_stream.send_headers(&encoded_headers)?;
-            
+
             // Gövde varsa gönder
             if !body.is_empty() {
                 http3_stream.send_data(body)?;
             }
-            
+
+            self.streams.insert(stream_id, http3_stream);
+
             Ok(stream_id)
         } else {
             Err(Http3Error::ProtocolError(H3_GENERAL_PROTOCOL_ERROR))
         }
     }
-    
+
     /// Yanıt al
-    pub fn receive_response(&mut self, stream_id: u64) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
-        let stream = self.streams.get_mut(&stream_id).ok_or(Http3Error::StreamError(H3_INTERNAL_ERROR))?;
-        
+    pub fn receive_response(
+        &mut self,
+        stream_id: u64,
+    ) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
+        let stream = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(Http3Error::StreamError(H3_INTERNAL_ERROR))?;
+
         let (status_code, headers, body) = stream.receive_response(&mut self.qpack)?;
-        
+
         Ok((status_code, headers, body))
     }
-    
+
     /// Bağlantıyı kapat
     pub fn close(&mut self) -> Result<(), Http3Error> {
         self.state = Http3ConnectionState::Closing;
-        
+
         // GOAWAY çerçevesi gönder
         let mut frame = Vec::new();
         frame.push(FRAME_GOAWAY);
         frame.extend_from_slice(&[0x00, 0x00, 0x08]); // Length = 8
         frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Stream ID
         frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Error code
-        
+
         let control_stream = self.quic_conn.create_stream(StreamType::ClientBiDi);
         if let Some(stream) = self.quic_conn.get_stream_mut(control_stream) {
-            let _ = stream.write(&frame); // Ignore result for close operation
+            write_all(stream, &frame)?;
+        } else {
+            return Err(Http3Error::StreamError(H3_CLOSED_CRITICAL_STREAM));
         }
-        
+
         self.state = Http3ConnectionState::Closed;
         Ok(())
     }
@@ -491,80 +521,93 @@ impl Http3Stream {
             received_body: Vec::new(),
         }
     }
-    
+
     /// Başlıklar gönder
     pub fn send_headers(&mut self, headers: &[u8]) -> Result<(), Http3Error> {
         let mut frame = Vec::new();
-        
+
         // Frame header
         frame.push(FRAME_HEADERS);
-        
+
         // Frame length
-        frame.extend_from_slice(&[(headers.len() >> 16) as u8, (headers.len() >> 8) as u8, headers.len() as u8]);
-        
+        frame.extend_from_slice(&[
+            (headers.len() >> 16) as u8,
+            (headers.len() >> 8) as u8,
+            headers.len() as u8,
+        ]);
+
         // Headers data
         frame.extend_from_slice(headers);
-        
-        let _ = self.quic_stream.write(&frame);
+
+        write_all(&mut self.quic_stream, &frame)?;
         self.state = Http3StreamState::HeadersSent;
-        
+
         Ok(())
     }
-    
+
     /// Veri gönder
     pub fn send_data(&mut self, data: &[u8]) -> Result<(), Http3Error> {
         let mut frame = Vec::new();
-        
+
         // Frame header
         frame.push(FRAME_DATA);
-        
+
         // Frame length
-        frame.extend_from_slice(&[(data.len() >> 16) as u8, (data.len() >> 8) as u8, data.len() as u8]);
-        
+        frame.extend_from_slice(&[
+            (data.len() >> 16) as u8,
+            (data.len() >> 8) as u8,
+            data.len() as u8,
+        ]);
+
         // Data
         frame.extend_from_slice(data);
-        
-        let _ = self.quic_stream.write(&frame);
+
+        write_all(&mut self.quic_stream, &frame)?;
         self.state = Http3StreamState::SendingBody;
-        
+
         Ok(())
     }
-    
+
     /// Yanıt al
-    pub fn receive_response(&mut self, qpack: &mut QpackContext) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
+    pub fn receive_response(
+        &mut self,
+        qpack: &mut QpackContext,
+    ) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
         let mut buffer = vec![0u8; 4096];
         let mut status_code = 200;
         let mut headers = Vec::new();
         let mut body = Vec::new();
-        
+
         loop {
             let n = self.quic_stream.read(&mut buffer);
             if n == 0 {
                 break;
             }
-            
+
             let mut offset = 0;
             while offset < n {
                 if offset + 1 >= n {
                     break;
                 }
-                
+
                 let frame_type = buffer[offset];
-                let frame_len = ((buffer[offset + 1] as u32) << 16) | ((buffer[offset + 2] as u32) << 8) | (buffer[offset + 3] as u32);
+                let frame_len = ((buffer[offset + 1] as u32) << 16)
+                    | ((buffer[offset + 2] as u32) << 8)
+                    | (buffer[offset + 3] as u32);
                 offset += 4;
-                
+
                 if offset + frame_len as usize > n {
                     break;
                 }
-                
+
                 let frame_data = &buffer[offset..offset + frame_len as usize];
                 offset += frame_len as usize;
-                
+
                 match frame_type {
                     FRAME_HEADERS => {
                         let decoded_headers = qpack.decode_headers(frame_data)?;
                         headers.extend(decoded_headers);
-                        
+
                         // Status kodunu bul
                         for (name, value) in &headers {
                             if name == ":status" {
@@ -582,7 +625,7 @@ impl Http3Stream {
                 }
             }
         }
-        
+
         Ok((status_code, headers, body))
     }
 }
@@ -603,10 +646,26 @@ impl Http3Client {
             connections: BTreeMap::new(),
         }
     }
-    
+
+    /// Only an already-established QUIC transport may back an HTTP/3 connection.
+    pub fn register_connection(
+        &mut self,
+        host: &str,
+        quic_conn: QuicConnection,
+    ) -> Result<(), Http3Error> {
+        if quic_conn.state != super::quic::QuicState::Established {
+            return Err(Http3Error::RemoteTransportUnavailable);
+        }
+
+        let mut http3_conn = Http3Connection::new(quic_conn);
+        http3_conn.connect()?;
+        self.connections.insert(host.to_string(), http3_conn);
+        Ok(())
+    }
+
     /// HTTPS isteği gönder
     pub fn get(&mut self, url: &str) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
-        // URL ayrıştır (basit implementasyon)
+        // URL ayrıştır; bu yol yalnızca HTTPS authority/path ayrımını destekler.
         let (host, path) = if url.starts_with("https://") {
             let url_without_scheme = &url[8..];
             if let Some(slash_pos) = url_without_scheme.find('/') {
@@ -619,26 +678,21 @@ impl Http3Client {
         } else {
             return Err(Http3Error::ProtocolError(H3_GENERAL_PROTOCOL_ERROR));
         };
-        
-        // Bağlantı var mı kontrol et
-        if !self.connections.contains_key(&host) {
-            // Yeni QUIC bağlantısı oluştur
-            let quic_conn = QuicConnection::new(8);
-            let mut http3_conn = Http3Connection::new(quic_conn);
-            self.connections.insert(host.clone(), http3_conn);
-        }
-        
-        let connection = self.connections.get_mut(&host).unwrap();
-        
+
+        let connection = self
+            .connections
+            .get_mut(&host)
+            .ok_or(Http3Error::RemoteTransportUnavailable)?;
+
         // İstek gönder
         let stream_id = connection.send_request("GET", &path, &[], &[])?;
-        
+
         // Yanıt al
         let (status, headers, body) = connection.receive_response(stream_id)?;
-        
+
         Ok((status, headers, body))
     }
-    
+
     /// Bağlantıyı kapat
     pub fn close_connection(&mut self, host: &str) -> Result<(), Http3Error> {
         if let Some(connection) = self.connections.get_mut(host) {
@@ -647,6 +701,14 @@ impl Http3Client {
         }
         Ok(())
     }
+}
+
+fn write_all(stream: &mut QuicStream, frame: &[u8]) -> Result<(), Http3Error> {
+    let written = stream.write(frame);
+    if written != frame.len() {
+        return Err(Http3Error::ShortWrite);
+    }
+    Ok(())
 }
 
 impl Default for Http3Client {
@@ -664,7 +726,7 @@ pub fn init() {
     crate::serial_println!("[HTTP3] HTTP/3 module initialized");
 }
 
-/// Basit HTTP/3 GET isteği
+/// Tek çağrılık HTTP/3 GET yordamı
 pub fn http3_get(url: &str) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
     let mut client = Http3Client::new();
     client.get(url)

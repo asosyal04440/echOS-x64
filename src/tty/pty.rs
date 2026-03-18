@@ -704,13 +704,17 @@ pub fn configure_pty_for_shell(pty_pair: &Arc<PtyPair>) {
 ///
 /// # Returns
 /// Komut başarıyla çalıştırıldıysa true
-pub fn execute_command_on_pty(pty_pair: &Arc<PtyPair>, cmd: &str) -> bool {
+pub fn execute_command_on_pty_with_shell(
+    pty_pair: &Arc<PtyPair>,
+    shell: &mut crate::shell::Shell,
+    cmd: &str,
+) -> bool {
     if cmd.is_empty() {
         return false;
     }
 
     // Komut çalıştır
-    if let Some(output) = crate::shell::run_command(cmd) {
+    if let Some(output) = crate::shell::run_command_in_shell(shell, cmd) {
         if output == "__CLEAR__" {
             // Clear screen ANSI sequence
             let _ = pty_pair.slave.write(b"\x1b[2J\x1b[H");
@@ -718,10 +722,13 @@ pub fn execute_command_on_pty(pty_pair: &Arc<PtyPair>, cmd: &str) -> bool {
             let _ = pty_pair.slave.write(output.as_bytes());
             let _ = pty_pair.slave.write(b"\n");
         }
-        true
-    } else {
-        false
     }
+    true
+}
+
+pub fn execute_command_on_pty(pty_pair: &Arc<PtyPair>, cmd: &str) -> bool {
+    let mut shell = crate::shell::Shell::new();
+    execute_command_on_pty_with_shell(pty_pair, &mut shell, cmd)
 }
 
 /// PTY master'dan okunabilir veri var mı kontrol eder.

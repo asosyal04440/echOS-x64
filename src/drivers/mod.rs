@@ -258,7 +258,14 @@ pub mod linux {
             let mut buffer = Vec::with_capacity(count as usize * BLOCK_SIZE);
             for i in 0..count {
                 let mut sector = [0u8; BLOCK_SIZE];
-                self.inner.read_sector(lba as u64 + i as u64, &mut sector);
+                if let Err(err) = self.inner.read_sector(lba as u64 + i as u64, &mut sector) {
+                    crate::serial_println!(
+                        "VIRTIO FFI: read_sectors aborted at lba={} err={}",
+                        lba as u64 + i as u64,
+                        err.as_str()
+                    );
+                    return Vec::new();
+                }
                 buffer.extend_from_slice(&sector);
             }
             buffer
@@ -273,7 +280,15 @@ pub mod linux {
                 let start = i * BLOCK_SIZE;
                 let mut sector = [0u8; BLOCK_SIZE];
                 sector.copy_from_slice(&data[start..start + BLOCK_SIZE]);
-                self.inner.write_sector(lba as u64 + i as u64, &sector);
+                self.inner
+                    .write_sector(lba as u64 + i as u64, &sector)
+                    .map_err(|err| {
+                        crate::serial_println!(
+                            "VIRTIO FFI: write_sectors aborted at lba={} err={}",
+                            lba as u64 + i as u64,
+                            err.as_str()
+                        );
+                    })?;
             }
             Ok(())
         }
@@ -372,24 +387,57 @@ pub mod linux {
             }
         };
         crate::serial_println!("VIRTIO FFI: read sector=0 start");
-        virtio.read_sector(0, &mut probe);
+        if let Err(err) = virtio.read_sector(0, &mut probe) {
+            crate::serial_println!(
+                "BLOCK DEVICE INIT FAILED: VirtIO probe read: {}",
+                err.as_str()
+            );
+            return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
+        }
         crate::serial_println!("VIRTIO FFI: read sector=0 done");
         let mut backup = [0u8; BLOCK_SIZE];
         let mut test = [0u8; BLOCK_SIZE];
         let mut verify = [0u8; BLOCK_SIZE];
         let test_lba = 1u64;
-        virtio.read_sector(test_lba, &mut backup);
+        if let Err(err) = virtio.read_sector(test_lba, &mut backup) {
+            crate::serial_println!(
+                "BLOCK DEVICE INIT FAILED: VirtIO backup read lba={}: {}",
+                test_lba,
+                err.as_str()
+            );
+            return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
+        }
         for i in 0..BLOCK_SIZE {
             test[i] = (i as u8) ^ 0xA5;
         }
-        virtio.write_sector(test_lba, &test);
-        virtio.read_sector(test_lba, &mut verify);
+        if let Err(err) = virtio.write_sector(test_lba, &test) {
+            crate::serial_println!(
+                "BLOCK DEVICE INIT FAILED: VirtIO write/read probe write lba={}: {}",
+                test_lba,
+                err.as_str()
+            );
+            return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
+        }
+        if let Err(err) = virtio.read_sector(test_lba, &mut verify) {
+            crate::serial_println!(
+                "BLOCK DEVICE INIT FAILED: VirtIO write/read probe verify lba={}: {}",
+                test_lba,
+                err.as_str()
+            );
+            return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
+        }
         if verify == test {
             crate::serial_println!("VIRTIO FFI: write/read test OK lba={}", test_lba);
         } else {
             crate::serial_println!("VIRTIO FFI: write/read test FAILED lba={}", test_lba);
         }
-        virtio.write_sector(test_lba, &backup);
+        if let Err(err) = virtio.write_sector(test_lba, &backup) {
+            crate::serial_println!(
+                "VIRTIO FFI: restore skipped after probe failure lba={} err={}",
+                test_lba,
+                err.as_str()
+            );
+        }
         crate::serial_println!("VIRTIO FFI: write/read test restore done lba={}", test_lba);
         // MBR imzası: geleneksel MBR'nin son 2 byte'ı 0x55, 0xAA olmalı
         if probe[510] != 0x55 || probe[511] != 0xAA {
@@ -452,7 +500,9 @@ pub mod linux {
         match crate::drivers::ahci::AhciBlockDevice::new() {
             Some(dev) => {
                 crate::serial_println!("AHCI: found SATA disk");
-                Ok(Box::new(AhciBlockDeviceWrapper { inner: Mutex::new(dev) }))
+                Ok(Box::new(AhciBlockDeviceWrapper {
+                    inner: Mutex::new(dev),
+                }))
             }
             None => {
                 crate::serial_println!("AHCI: no SATA disk found");
@@ -473,7 +523,11 @@ pub mod linux {
             for i in 0..count as u64 {
                 let offset = (i as usize) * BLOCK_SIZE;
                 let sector_buf = &mut buffer[offset..offset + BLOCK_SIZE];
-                let _ = crate::drivers::block::BlockDevice::read_block(&mut *dev, lba as u64 + i, sector_buf);
+                let _ = crate::drivers::block::BlockDevice::read_block(
+                    &mut *dev,
+                    lba as u64 + i,
+                    sector_buf,
+                );
             }
             buffer
         }
@@ -487,7 +541,11 @@ pub mod linux {
             for i in 0..count as u64 {
                 let offset = (i as usize) * BLOCK_SIZE;
                 let sector_data = &data[offset..offset + BLOCK_SIZE];
-                let _ = crate::drivers::block::BlockDevice::write_block(&mut *dev, lba as u64 + i, sector_data);
+                let _ = crate::drivers::block::BlockDevice::write_block(
+                    &mut *dev,
+                    lba as u64 + i,
+                    sector_data,
+                );
             }
             Ok(())
         }
@@ -501,8 +559,12 @@ pub mod linux {
         // Namespace bilgisi alabilirsek, NVMe çalışıyor demektir
         match crate::drivers::nvme::get_namespace_info(nsid) {
             Some((block_size, block_count, _capacity)) => {
-                crate::serial_println!("NVMe: found namespace {} ({} blocks of {} bytes)",
-                    nsid, block_count, block_size);
+                crate::serial_println!(
+                    "NVMe: found namespace {} ({} blocks of {} bytes)",
+                    nsid,
+                    block_count,
+                    block_size
+                );
                 Ok(Box::new(NvmeBlockDeviceWrapper { nsid }))
             }
             None => {
@@ -531,8 +593,7 @@ pub mod linux {
                 return Err(());
             }
             let blocks = (data.len() / BLOCK_SIZE) as u16;
-            crate::drivers::nvme::write(self.nsid, lba as u64, blocks, data)
-                .map_err(|_| ())
+            crate::drivers::nvme::write(self.nsid, lba as u64, blocks, data).map_err(|_| ())
         }
     }
 
