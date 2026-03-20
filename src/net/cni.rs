@@ -494,7 +494,7 @@ fn parse_ipv4(s: &str) -> Option<Ipv4Addr> {
 // ============================================================================
 
 /// CNI plugin arayüzü
-pub trait CniPlugin {
+pub trait CniPlugin: Send + Sync {
     /// Container'a network ekle
     fn add(&self, config: &CniConfig) -> Result<CniResult, CniError>;
 
@@ -1003,6 +1003,15 @@ impl Default for CniManager {
     }
 }
 
+lazy_static::lazy_static! {
+    static ref GLOBAL_CNI_MANAGER: Mutex<CniManager> = Mutex::new(CniManager::new());
+}
+
+#[cfg(test)]
+fn reset_global_cni_manager() {
+    *GLOBAL_CNI_MANAGER.lock() = CniManager::new();
+}
+
 // ============================================================================
 // MODÜL BAŞLATMA
 // ============================================================================
@@ -1015,7 +1024,7 @@ pub fn init() {
 /// CNI komutunu çalıştır (standalone)
 pub fn run_cni_command(command: &str, config_json: &str) -> Result<String, CniError> {
     let config = CniConfig::from_json(config_json)?;
-    let manager = CniManager::new();
+    let manager = GLOBAL_CNI_MANAGER.lock();
 
     match command {
         CNI_COMMAND_ADD => {
@@ -1054,7 +1063,7 @@ pub fn test_cni_add() -> Result<String, CniError> {
         args: BTreeMap::new(),
     };
 
-    let manager = CniManager::new();
+    let manager = GLOBAL_CNI_MANAGER.lock();
     let result = manager.run_command(CNI_COMMAND_ADD, &config)?;
 
     Ok(result.to_json())
@@ -1063,5 +1072,74 @@ pub fn test_cni_add() -> Result<String, CniError> {
 impl core::fmt::Display for CniResult {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.to_json())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config_json() -> String {
+        format!(
+            r#"{{
+  "cniVersion": "{}",
+  "name": "svc",
+  "containerID": "abcdef123456",
+  "netns": "/var/run/netns/abcdef123456",
+  "bridge": "{}",
+  "ipAddress": "",
+  "gateway": "10.244.0.1",
+  "subnet": "{}",
+  "dnsServers": ["8.8.8.8"],
+  "mtu": 1500,
+  "args": {{}}
+}}"#,
+            CNI_VERSION, DEFAULT_BRIDGE_NAME, DEFAULT_SUBNET
+        )
+    }
+
+    #[test]
+    fn run_cni_command_preserves_kernel_owned_state_across_add_check_del() {
+        reset_global_cni_manager();
+        let config_json = sample_config_json();
+
+        let add = run_cni_command(CNI_COMMAND_ADD, &config_json).unwrap();
+        assert!(add.contains("\"cniVersion\": \"0.4.0\""));
+        assert!(add.contains("\"address\": \"10.244.0.2\""));
+        assert!(add.contains("\"interface\": \"eth0\""));
+
+        let check = run_cni_command(CNI_COMMAND_CHECK, &config_json).unwrap();
+        assert!(check.contains("\"code\": 0"));
+
+        let del = run_cni_command(CNI_COMMAND_DEL, &config_json).unwrap();
+        assert!(del.contains("\"code\": 0"));
+
+        let err = run_cni_command(CNI_COMMAND_CHECK, &config_json).unwrap_err();
+        assert_eq!(err, CniError::ContainerNotFound);
+    }
+
+    #[test]
+    fn bridge_plugin_rolls_back_partial_state_on_invalid_netns_move() {
+        let plugin = BridgePlugin::new().unwrap();
+        let config = CniConfig {
+            cni_version: CNI_VERSION.to_string(),
+            container_name: "svc".to_string(),
+            container_id: "abcdef123456".to_string(),
+            netns: String::new(),
+            bridge: DEFAULT_BRIDGE_NAME.to_string(),
+            ip_address: String::new(),
+            gateway: "10.244.0.1".to_string(),
+            subnet: DEFAULT_SUBNET.to_string(),
+            dns_servers: vec!["8.8.8.8".to_string()],
+            mtu: 1500,
+            args: BTreeMap::new(),
+        };
+
+        assert!(matches!(plugin.add(&config), Err(CniError::InvalidConfig)));
+        assert!(plugin.applied.lock().is_empty());
+        let interfaces = plugin.interfaces.lock();
+        assert_eq!(interfaces.len(), 1);
+        assert!(interfaces.contains_key(DEFAULT_BRIDGE_NAME));
+        assert!(plugin.namespaces.lock().is_empty());
     }
 }

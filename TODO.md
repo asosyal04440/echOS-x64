@@ -6,6 +6,12 @@ Bu dosya, echOS icin repo-kok backlog'udur.
 Amac, "ne gercekten calisiyor", "ne davranissal olarak yari-acik", "ne hala fidelity/exactness kuyrugunda" ve
 "hangi sirayla kapatilacak" sorularini tek yerde sabitlemektir.
 
+## 2026-03-19 Urun Karari
+
+- Network yuzeyi yeniden aktif urun hedefinde.
+- `net`, `dns`, `ping`, `http`, `wget`, `curl` shell komutlari tekrar acik.
+- Faz 1 ve Faz 3 historical degil; aktif urun backlog'u olarak kalir.
+
 Kaynaklar:
 - [docs/agent/tam-calismayanlar-audit-2026-03-12.md](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/docs/agent/tam-calismayanlar-audit-2026-03-12.md)
 - [docs/agent/network-capability-matrix.md](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/docs/agent/network-capability-matrix.md)
@@ -59,6 +65,9 @@ Su durum etiketleri kullanilir:
 9. Faz 8: Security / debug / observability
 10. Faz 9: Memory / VM / topology / perf
 11. Faz 10: UI / polish / productization
+
+Not:
+- Faz 1 ve Faz 3 aktif urun roadmap'inde kalir.
 
 ---
 

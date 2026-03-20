@@ -47,7 +47,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-use super::http2::{Http2Connection, Http2Error, Http2Frame, Http2Stream};
+use super::http2::{Http2Connection, Http2Error, Http2Frame};
 
 // ============================================================================
 // gRPC SABİTLERİ
@@ -81,13 +81,16 @@ pub const GRPC_STATUS_INTERNAL: i32 = 13;
 // gRPC HATASI
 // ============================================================================
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GrpcError {
     Http2Error(Http2Error),
     InvalidMessage,
     SerializationError,
     DeserializationError,
     StatusError(i32),
+    StatusMessage(i32, String),
+    HttpStatus(u16),
+    ResetStream(u32),
     DeadlineExceeded,
     Unavailable,
 }
@@ -103,7 +106,7 @@ impl From<Http2Error> for GrpcError {
 // ============================================================================
 
 /// Length-delimited Protocol Buffer field map used by the in-tree unary examples.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtoMessage {
     fields: BTreeMap<u32, Vec<u8>>,
 }
@@ -321,6 +324,13 @@ pub struct GrpcClient {
     next_stream_id: AtomicU64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrpcStreamingResponse {
+    pub headers: BTreeMap<String, String>,
+    pub trailers: BTreeMap<String, String>,
+    pub messages: Vec<ProtoMessage>,
+}
+
 impl GrpcClient {
     /// Yeni gRPC istemcisi oluştur
     pub fn new() -> Self {
@@ -379,12 +389,18 @@ impl GrpcClient {
         response_body.extend_from_slice(&(serialized_response.len() as u32).to_be_bytes());
         response_body.extend_from_slice(&serialized_response);
 
-        let response_headers = vec![
-            (":status".to_string(), "200".to_string()),
-            ("content-type".to_string(), GRPC_CONTENT_TYPE.to_string()),
-            ("grpc-status".to_string(), GRPC_STATUS_OK.to_string()),
-        ];
-        let response = self.process_grpc_response(&response_headers, &response_body)?;
+        let mut response_headers = BTreeMap::new();
+        response_headers.insert(":status".to_string(), "200".to_string());
+        response_headers.insert("content-type".to_string(), GRPC_CONTENT_TYPE.to_string());
+
+        let mut response_trailers = BTreeMap::new();
+        response_trailers.insert("grpc-status".to_string(), GRPC_STATUS_OK.to_string());
+
+        let response = self.process_grpc_response(
+            &response_headers,
+            Some(&response_trailers),
+            &response_body,
+        )?;
         Ok(response)
     }
 
@@ -464,12 +480,14 @@ impl GrpcClient {
 
                 if let Some(stream) = self.http2_client.get_stream(stream_id) {
                     if stream.end_stream {
-                        let headers: Vec<(String, String)> = stream
-                            .headers
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        return self.process_grpc_response(&headers, &stream.data);
+                        if let Some(reset_error) = stream.reset_error {
+                            return Err(GrpcError::ResetStream(reset_error));
+                        }
+                        return self.process_grpc_response(
+                            &stream.headers,
+                            Some(&stream.trailers),
+                            &stream.data,
+                        );
                     }
                 }
             }
@@ -479,6 +497,110 @@ impl GrpcClient {
 
         let _ = close(sock_id);
         send_result
+    }
+
+    pub fn call_server_streaming(
+        &mut self,
+        service_name: &str,
+        method_name: &str,
+        request: &ProtoMessage,
+    ) -> Result<Vec<ProtoMessage>, GrpcError> {
+        let method = self
+            .services
+            .get(service_name)
+            .and_then(|service| service.get_method(method_name))
+            .cloned()
+            .ok_or(GrpcError::Unavailable)?;
+
+        if method.method_type != GrpcMethodType::ServerStreaming {
+            return Err(GrpcError::InvalidMessage);
+        }
+
+        let messages =
+            self.dispatch_builtin_server_streaming(service_name, method_name, request)?;
+        let body = Self::encode_grpc_message_stream(&messages);
+
+        let mut response_headers = BTreeMap::new();
+        response_headers.insert(":status".to_string(), "200".to_string());
+        response_headers.insert("content-type".to_string(), GRPC_CONTENT_TYPE.to_string());
+
+        let mut response_trailers = BTreeMap::new();
+        response_trailers.insert("grpc-status".to_string(), GRPC_STATUS_OK.to_string());
+
+        let response =
+            self.process_grpc_stream_response(&response_headers, Some(&response_trailers), &body)?;
+        Ok(response.messages)
+    }
+
+    pub fn call_server_streaming_remote(
+        &mut self,
+        server_ip: super::Ipv4Addr,
+        port: u16,
+        authority: &str,
+        service_name: &str,
+        method_name: &str,
+        request: &ProtoMessage,
+    ) -> Result<GrpcStreamingResponse, GrpcError> {
+        let method = self
+            .services
+            .get(service_name)
+            .and_then(|service| service.get_method(method_name))
+            .cloned()
+            .ok_or(GrpcError::Unavailable)?;
+
+        if method.method_type != GrpcMethodType::ServerStreaming {
+            return Err(GrpcError::InvalidMessage);
+        }
+
+        self.execute_remote_call(
+            server_ip,
+            port,
+            authority,
+            service_name,
+            &method,
+            &Self::encode_grpc_message_stream(core::slice::from_ref(request)),
+            true,
+        )
+    }
+
+    pub fn call_client_streaming(
+        &mut self,
+        service_name: &str,
+        method_name: &str,
+        requests: &[ProtoMessage],
+    ) -> Result<ProtoMessage, GrpcError> {
+        let method = self
+            .services
+            .get(service_name)
+            .and_then(|service| service.get_method(method_name))
+            .cloned()
+            .ok_or(GrpcError::Unavailable)?;
+
+        if method.method_type != GrpcMethodType::ClientStreaming {
+            return Err(GrpcError::InvalidMessage);
+        }
+
+        self.dispatch_builtin_client_streaming(service_name, method_name, requests)
+    }
+
+    pub fn call_bidi_streaming(
+        &mut self,
+        service_name: &str,
+        method_name: &str,
+        requests: &[ProtoMessage],
+    ) -> Result<Vec<ProtoMessage>, GrpcError> {
+        let method = self
+            .services
+            .get(service_name)
+            .and_then(|service| service.get_method(method_name))
+            .cloned()
+            .ok_or(GrpcError::Unavailable)?;
+
+        if method.method_type != GrpcMethodType::BidiStreaming {
+            return Err(GrpcError::InvalidMessage);
+        }
+
+        self.dispatch_builtin_bidi_streaming(service_name, method_name, requests)
     }
 
     /// gRPC isteği oluştur
@@ -522,17 +644,35 @@ impl GrpcClient {
     /// gRPC yanıtını işle
     fn process_grpc_response(
         &self,
-        headers: &[(String, String)],
+        headers: &BTreeMap<String, String>,
+        trailers: Option<&BTreeMap<String, String>>,
         body: &[u8],
     ) -> Result<ProtoMessage, GrpcError> {
-        // Content-type kontrolü
         let content_type = headers
-            .iter()
-            .find(|(k, _)| k == "content-type")
-            .map(|(_, v)| v.as_str())
+            .get("content-type")
+            .map(String::as_str)
             .unwrap_or("");
+        if !Self::is_grpc_content_type(content_type) {
+            return Err(GrpcError::InvalidMessage);
+        }
 
-        if content_type != GRPC_CONTENT_TYPE {
+        if let Some(http_status) = Self::parse_http_status(headers) {
+            if http_status != 200 {
+                return Err(GrpcError::HttpStatus(http_status));
+            }
+        }
+
+        if let Some((grpc_status, grpc_message)) = Self::parse_grpc_status(headers, trailers)? {
+            if grpc_status != GRPC_STATUS_OK {
+                return if let Some(message) = grpc_message {
+                    Err(GrpcError::StatusMessage(grpc_status, message))
+                } else {
+                    Err(GrpcError::StatusError(grpc_status))
+                };
+            }
+        }
+
+        if body.is_empty() {
             return Err(GrpcError::InvalidMessage);
         }
 
@@ -548,7 +688,7 @@ impl GrpcClient {
             | (body[4] as u32);
 
         if (flags & GRPC_FLAG_COMPRESSED) != 0 {
-            return Err(GrpcError::InvalidMessage); // Compression desteklenmiyor
+            return Err(GrpcError::InvalidMessage);
         }
 
         if body.len() < GRPC_MESSAGE_HEADER_SIZE + length as usize {
@@ -560,6 +700,365 @@ impl GrpcClient {
 
         // Protocol Buffer mesajını deserialize et
         ProtoMessage::deserialize(message_data).map_err(|_| GrpcError::DeserializationError)
+    }
+
+    fn process_grpc_stream_response(
+        &self,
+        headers: &BTreeMap<String, String>,
+        trailers: Option<&BTreeMap<String, String>>,
+        body: &[u8],
+    ) -> Result<GrpcStreamingResponse, GrpcError> {
+        let content_type = headers
+            .get("content-type")
+            .map(String::as_str)
+            .unwrap_or("");
+        if !Self::is_grpc_content_type(content_type) {
+            return Err(GrpcError::InvalidMessage);
+        }
+
+        if let Some(http_status) = Self::parse_http_status(headers) {
+            if http_status != 200 {
+                return Err(GrpcError::HttpStatus(http_status));
+            }
+        }
+
+        if let Some((grpc_status, grpc_message)) = Self::parse_grpc_status(headers, trailers)? {
+            if grpc_status != GRPC_STATUS_OK {
+                return if let Some(message) = grpc_message {
+                    Err(GrpcError::StatusMessage(grpc_status, message))
+                } else {
+                    Err(GrpcError::StatusError(grpc_status))
+                };
+            }
+        }
+
+        let messages = Self::decode_grpc_message_stream(body)?;
+        Ok(GrpcStreamingResponse {
+            headers: headers.clone(),
+            trailers: trailers.cloned().unwrap_or_default(),
+            messages,
+        })
+    }
+
+    fn encode_grpc_message_stream(messages: &[ProtoMessage]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for message in messages {
+            let payload = message.serialize();
+            body.push(0);
+            body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            body.extend_from_slice(&payload);
+        }
+        body
+    }
+
+    fn decode_grpc_message_stream(body: &[u8]) -> Result<Vec<ProtoMessage>, GrpcError> {
+        let mut offset = 0usize;
+        let mut messages = Vec::new();
+
+        while offset < body.len() {
+            if body.len() - offset < GRPC_MESSAGE_HEADER_SIZE {
+                return Err(GrpcError::InvalidMessage);
+            }
+
+            let flags = body[offset];
+            let length = ((body[offset + 1] as u32) << 24)
+                | ((body[offset + 2] as u32) << 16)
+                | ((body[offset + 3] as u32) << 8)
+                | (body[offset + 4] as u32);
+            offset += GRPC_MESSAGE_HEADER_SIZE;
+
+            if (flags & GRPC_FLAG_COMPRESSED) != 0 {
+                return Err(GrpcError::InvalidMessage);
+            }
+
+            if offset + length as usize > body.len() {
+                return Err(GrpcError::InvalidMessage);
+            }
+
+            messages.push(
+                ProtoMessage::deserialize(&body[offset..offset + length as usize])
+                    .map_err(|_| GrpcError::DeserializationError)?,
+            );
+            offset += length as usize;
+        }
+
+        Ok(messages)
+    }
+
+    fn is_grpc_content_type(content_type: &str) -> bool {
+        let lower = content_type.to_ascii_lowercase();
+        lower == GRPC_CONTENT_TYPE
+            || lower.starts_with("application/grpc+")
+            || lower.starts_with("application/grpc;")
+    }
+
+    fn parse_http_status(headers: &BTreeMap<String, String>) -> Option<u16> {
+        headers
+            .get(":status")
+            .and_then(|status| status.parse::<u16>().ok())
+    }
+
+    fn parse_grpc_status(
+        headers: &BTreeMap<String, String>,
+        trailers: Option<&BTreeMap<String, String>>,
+    ) -> Result<Option<(i32, Option<String>)>, GrpcError> {
+        let trailer_status = trailers.and_then(|map| map.get("grpc-status"));
+        let header_status = headers.get("grpc-status");
+        let status_value = trailer_status.or(header_status);
+        let status = match status_value {
+            Some(value) => value
+                .parse::<i32>()
+                .map_err(|_| GrpcError::InvalidMessage)?,
+            None => return Ok(None),
+        };
+
+        let message = trailers
+            .and_then(|map| map.get("grpc-message"))
+            .or_else(|| headers.get("grpc-message"))
+            .map(|value| Self::decode_grpc_status_message(value));
+
+        Ok(Some((status, message)))
+    }
+
+    fn decode_grpc_status_message(raw: &str) -> String {
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = bytes[i + 1];
+                let lo = bytes[i + 2];
+                if let (Some(hi), Some(lo)) =
+                    (Self::decode_hex_nibble(hi), Self::decode_hex_nibble(lo))
+                {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8(out).unwrap_or_else(|_| raw.to_string())
+    }
+
+    fn decode_hex_nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    fn execute_remote_call(
+        &mut self,
+        server_ip: super::Ipv4Addr,
+        port: u16,
+        authority: &str,
+        service_name: &str,
+        method: &GrpcMethod,
+        request_body: &[u8],
+        expect_stream: bool,
+    ) -> Result<GrpcStreamingResponse, GrpcError> {
+        #[cfg(all(test, target_os = "windows"))]
+        {
+            return self.execute_remote_call_host(
+                server_ip,
+                port,
+                authority,
+                service_name,
+                method,
+                request_body,
+                expect_stream,
+            );
+        }
+
+        use super::socket::{
+            close, connect, recv, send, socket, AddressFamily, Protocol, SocketType,
+        };
+        use super::{Port, SocketAddr};
+
+        let sock_id = socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::TCP)
+            .map_err(|_| GrpcError::Unavailable)?;
+        connect(sock_id, SocketAddr::new(server_ip, Port(port)))
+            .map_err(|_| GrpcError::Unavailable)?;
+
+        let send_result = (|| -> Result<GrpcStreamingResponse, GrpcError> {
+            send(sock_id, super::http2::connection_preface(), 0)
+                .map_err(|_| GrpcError::Unavailable)?;
+
+            let settings = super::http2::Http2Frame::settings(&self.http2_client.settings).encode();
+            send(sock_id, &settings, 0).map_err(|_| GrpcError::Unavailable)?;
+
+            let stream_id = self.http2_client.create_stream();
+            let mut grpc_request =
+                self.create_grpc_request(service_name, method, authority, &ProtoMessage::new())?;
+            grpc_request.body = request_body.to_vec();
+
+            let mut request_header_map = BTreeMap::new();
+            for (key, value) in &grpc_request.headers {
+                request_header_map.insert(key.clone(), value.clone());
+            }
+            let encoded_headers = self.http2_client.encoder.encode(&request_header_map);
+            let headers_frame = Http2Frame::headers(stream_id, encoded_headers, false).encode();
+            let data_frame = Http2Frame::data(stream_id, grpc_request.body.clone(), true).encode();
+
+            send(sock_id, &headers_frame, 0).map_err(|_| GrpcError::Unavailable)?;
+            send(sock_id, &data_frame, 0).map_err(|_| GrpcError::Unavailable)?;
+
+            let mut wire = Vec::new();
+            let mut recv_buf = [0u8; 8192];
+            loop {
+                let recv_len =
+                    recv(sock_id, &mut recv_buf, 0).map_err(|_| GrpcError::Unavailable)?;
+                if recv_len == 0 {
+                    break;
+                }
+                wire.extend_from_slice(&recv_buf[..recv_len]);
+
+                let mut consumed = 0usize;
+                while consumed < wire.len() {
+                    let Some((frame, used)) = Http2Frame::decode(&wire[consumed..]) else {
+                        break;
+                    };
+                    consumed += used;
+                    self.http2_client.process_frame(&frame)?;
+                }
+
+                if consumed > 0 {
+                    wire.drain(..consumed);
+                }
+
+                if let Some(stream) = self.http2_client.get_stream(stream_id) {
+                    if stream.end_stream {
+                        if let Some(reset_error) = stream.reset_error {
+                            return Err(GrpcError::ResetStream(reset_error));
+                        }
+                        let response = self.process_grpc_stream_response(
+                            &stream.headers,
+                            Some(&stream.trailers),
+                            &stream.data,
+                        )?;
+                        if !expect_stream && response.messages.len() != 1 {
+                            return Err(GrpcError::InvalidMessage);
+                        }
+                        return Ok(response);
+                    }
+                }
+            }
+
+            Err(GrpcError::Unavailable)
+        })();
+
+        let _ = close(sock_id);
+        send_result
+    }
+
+    #[cfg(all(test, target_os = "windows"))]
+    fn execute_remote_call_host(
+        &mut self,
+        server_ip: super::Ipv4Addr,
+        port: u16,
+        authority: &str,
+        service_name: &str,
+        method: &GrpcMethod,
+        request_body: &[u8],
+        expect_stream: bool,
+    ) -> Result<GrpcStreamingResponse, GrpcError> {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, SocketAddrV4, TcpStream};
+        use std::time::Duration;
+
+        let octets = server_ip.0;
+        let server_ip = std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
+        let mut stream = TcpStream::connect(SocketAddrV4::new(server_ip, port))
+            .map_err(|_| GrpcError::Unavailable)?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .map_err(|_| GrpcError::Unavailable)?;
+        stream
+            .write_all(super::http2::connection_preface())
+            .map_err(|_| GrpcError::Unavailable)?;
+
+        let settings = super::http2::Http2Frame::settings(&self.http2_client.settings).encode();
+        stream
+            .write_all(&settings)
+            .map_err(|_| GrpcError::Unavailable)?;
+
+        let stream_id = self.http2_client.create_stream();
+        let mut grpc_request =
+            self.create_grpc_request(service_name, method, authority, &ProtoMessage::new())?;
+        grpc_request.body = request_body.to_vec();
+
+        let mut request_header_map = BTreeMap::new();
+        for (key, value) in &grpc_request.headers {
+            request_header_map.insert(key.clone(), value.clone());
+        }
+        let encoded_headers = self.http2_client.encoder.encode(&request_header_map);
+        let headers_frame = Http2Frame::headers(stream_id, encoded_headers, false).encode();
+        let data_frame = Http2Frame::data(stream_id, grpc_request.body.clone(), true).encode();
+
+        stream
+            .write_all(&headers_frame)
+            .map_err(|_| GrpcError::Unavailable)?;
+        stream
+            .write_all(&data_frame)
+            .map_err(|_| GrpcError::Unavailable)?;
+        stream.flush().map_err(|_| GrpcError::Unavailable)?;
+
+        let mut wire = Vec::new();
+        let mut recv_buf = [0u8; 8192];
+        loop {
+            let recv_len = match stream.read(&mut recv_buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(_) => return Err(GrpcError::Unavailable),
+            };
+            wire.extend_from_slice(&recv_buf[..recv_len]);
+
+            let mut consumed = 0usize;
+            while consumed < wire.len() {
+                let Some((frame, used)) = Http2Frame::decode(&wire[consumed..]) else {
+                    break;
+                };
+                consumed += used;
+                self.http2_client.process_frame(&frame)?;
+            }
+
+            if consumed > 0 {
+                wire.drain(..consumed);
+            }
+
+            if let Some(stream_state) = self.http2_client.get_stream(stream_id) {
+                if stream_state.end_stream {
+                    if let Some(reset_error) = stream_state.reset_error {
+                        return Err(GrpcError::ResetStream(reset_error));
+                    }
+                    let response = self.process_grpc_stream_response(
+                        &stream_state.headers,
+                        Some(&stream_state.trailers),
+                        &stream_state.data,
+                    )?;
+                    if !expect_stream && response.messages.len() != 1 {
+                        return Err(GrpcError::InvalidMessage);
+                    }
+                    let _ = stream.shutdown(Shutdown::Both);
+                    return Ok(response);
+                }
+            }
+        }
+
+        let _ = stream.shutdown(Shutdown::Both);
+        Err(GrpcError::Unavailable)
     }
 
     fn dispatch_builtin_unary(
@@ -574,6 +1073,68 @@ impl GrpcClient {
                 let mut reply = ProtoMessage::new();
                 reply.add_string(1, &format!("Hello, {}!", name));
                 Ok(reply)
+            }
+            _ => Err(GrpcError::Unavailable),
+        }
+    }
+
+    fn dispatch_builtin_server_streaming(
+        &self,
+        service_name: &str,
+        method_name: &str,
+        request: &ProtoMessage,
+    ) -> Result<Vec<ProtoMessage>, GrpcError> {
+        match (service_name, method_name) {
+            ("Greeter", "SayHelloStream") => {
+                let name = request.get_string(1).unwrap_or_else(|| "World".to_string());
+                let mut first = ProtoMessage::new();
+                first.add_string(1, &format!("Hello, {}!", name));
+                let mut second = ProtoMessage::new();
+                second.add_string(1, &format!("Still here, {}.", name));
+                Ok(vec![first, second])
+            }
+            _ => Err(GrpcError::Unavailable),
+        }
+    }
+
+    fn dispatch_builtin_client_streaming(
+        &self,
+        service_name: &str,
+        method_name: &str,
+        requests: &[ProtoMessage],
+    ) -> Result<ProtoMessage, GrpcError> {
+        match (service_name, method_name) {
+            ("Greeter", "CollectHello") => {
+                let mut names = Vec::new();
+                for request in requests {
+                    if let Some(name) = request.get_string(1) {
+                        names.push(name);
+                    }
+                }
+                let mut reply = ProtoMessage::new();
+                reply.add_string(1, &format!("Collected {} names", names.len()));
+                Ok(reply)
+            }
+            _ => Err(GrpcError::Unavailable),
+        }
+    }
+
+    fn dispatch_builtin_bidi_streaming(
+        &self,
+        service_name: &str,
+        method_name: &str,
+        requests: &[ProtoMessage],
+    ) -> Result<Vec<ProtoMessage>, GrpcError> {
+        match (service_name, method_name) {
+            ("Greeter", "EchoHelloBidi") => {
+                let mut replies = Vec::new();
+                for request in requests {
+                    let mut reply = ProtoMessage::new();
+                    let name = request.get_string(1).unwrap_or_else(|| "World".to_string());
+                    reply.add_string(1, &format!("Echo {}", name));
+                    replies.push(reply);
+                }
+                Ok(replies)
             }
             _ => Err(GrpcError::Unavailable),
         }
@@ -697,8 +1258,29 @@ pub fn create_greeter_service() -> GrpcService {
         "HelloRequest",
         "HelloReply",
     );
+    let say_hello_stream_method = GrpcMethod::new(
+        "SayHelloStream",
+        GrpcMethodType::ServerStreaming,
+        "HelloRequest",
+        "HelloReply",
+    );
+    let collect_hello_method = GrpcMethod::new(
+        "CollectHello",
+        GrpcMethodType::ClientStreaming,
+        "HelloRequest",
+        "HelloReply",
+    );
+    let echo_hello_bidi_method = GrpcMethod::new(
+        "EchoHelloBidi",
+        GrpcMethodType::BidiStreaming,
+        "HelloRequest",
+        "HelloReply",
+    );
 
     service.add_method(say_hello_method);
+    service.add_method(say_hello_stream_method);
+    service.add_method(collect_hello_method);
+    service.add_method(echo_hello_bidi_method);
 
     service
 }
@@ -723,4 +1305,295 @@ pub fn test_greeter_client() -> Result<(), GrpcError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::http2::{connection_preface, HpackEncoder, Http2Connection, Http2Frame};
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener};
+    use std::thread;
+    use std::time::Duration;
+
+    fn encode_grpc_body(message: &ProtoMessage) -> Vec<u8> {
+        let payload = message.serialize();
+        let mut body = Vec::with_capacity(GRPC_MESSAGE_HEADER_SIZE + payload.len());
+        body.push(0);
+        body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        body.extend_from_slice(&payload);
+        body
+    }
+
+    #[test]
+    fn grpc_response_prefers_trailer_status_and_message() {
+        let client = GrpcClient::new();
+        let mut headers = BTreeMap::new();
+        headers.insert(":status".to_string(), "200".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            "application/grpc+proto".to_string(),
+        );
+        headers.insert("grpc-status".to_string(), "0".to_string());
+
+        let mut trailers = BTreeMap::new();
+        trailers.insert(
+            "grpc-status".to_string(),
+            GRPC_STATUS_UNAVAILABLE.to_string(),
+        );
+        trailers.insert("grpc-message".to_string(), "backend%20draining".to_string());
+
+        let err = client
+            .process_grpc_response(&headers, Some(&trailers), &[])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            GrpcError::StatusMessage(GRPC_STATUS_UNAVAILABLE, "backend draining".to_string())
+        );
+    }
+
+    #[test]
+    fn grpc_response_accepts_header_status_and_trailer_ok() {
+        let client = GrpcClient::new();
+        let mut headers = BTreeMap::new();
+        headers.insert(":status".to_string(), "200".to_string());
+        headers.insert("content-type".to_string(), "application/grpc".to_string());
+
+        let mut trailers = BTreeMap::new();
+        trailers.insert("grpc-status".to_string(), GRPC_STATUS_OK.to_string());
+
+        let mut message = ProtoMessage::new();
+        message.add_string(1, "hello");
+        let body = encode_grpc_body(&message);
+
+        let decoded = client
+            .process_grpc_response(&headers, Some(&trailers), &body)
+            .unwrap();
+        assert_eq!(decoded.get_string(1).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn grpc_remote_transport_retains_http2_trailers_and_reset_reason() {
+        let mut client = GrpcClient::new();
+        let stream_id = client.http2_client.create_stream();
+
+        let mut headers = BTreeMap::new();
+        headers.insert(":status".to_string(), "200".to_string());
+        headers.insert("content-type".to_string(), "application/grpc".to_string());
+        let headers_frame = Http2Frame::headers(
+            stream_id,
+            client.http2_client.encoder.encode(&headers),
+            false,
+        );
+        client.http2_client.process_frame(&headers_frame).unwrap();
+
+        let rst = Http2Frame::rst_stream(stream_id, 0x07);
+        client.http2_client.process_frame(&rst).unwrap();
+
+        let stream = client.http2_client.get_stream(stream_id).unwrap();
+        assert_eq!(stream.reset_error, Some(0x07));
+        assert!(stream.end_stream);
+    }
+
+    #[test]
+    fn grpc_server_streaming_builtin_returns_multiple_messages() {
+        let mut client = GrpcClient::new();
+        client.add_service(create_greeter_service());
+
+        let mut request = ProtoMessage::new();
+        request.add_string(1, "Titan");
+        let replies = client
+            .call_server_streaming("Greeter", "SayHelloStream", &request)
+            .unwrap();
+
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0].get_string(1).as_deref(), Some("Hello, Titan!"));
+        assert_eq!(
+            replies[1].get_string(1).as_deref(),
+            Some("Still here, Titan.")
+        );
+    }
+
+    #[test]
+    fn grpc_client_streaming_builtin_aggregates_requests() {
+        let mut client = GrpcClient::new();
+        client.add_service(create_greeter_service());
+
+        let mut first = ProtoMessage::new();
+        first.add_string(1, "A");
+        let mut second = ProtoMessage::new();
+        second.add_string(1, "B");
+
+        let reply = client
+            .call_client_streaming("Greeter", "CollectHello", &[first, second])
+            .unwrap();
+        assert_eq!(reply.get_string(1).as_deref(), Some("Collected 2 names"));
+    }
+
+    #[test]
+    fn grpc_bidi_streaming_builtin_echoes_each_message() {
+        let mut client = GrpcClient::new();
+        client.add_service(create_greeter_service());
+
+        let mut first = ProtoMessage::new();
+        first.add_string(1, "A");
+        let mut second = ProtoMessage::new();
+        second.add_string(1, "B");
+
+        let replies = client
+            .call_bidi_streaming("Greeter", "EchoHelloBidi", &[first, second])
+            .unwrap();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0].get_string(1).as_deref(), Some("Echo A"));
+        assert_eq!(replies[1].get_string(1).as_deref(), Some("Echo B"));
+    }
+
+    #[test]
+    fn grpc_stream_response_decodes_multiple_messages() {
+        let client = GrpcClient::new();
+        let mut headers = BTreeMap::new();
+        headers.insert(":status".to_string(), "200".to_string());
+        headers.insert("content-type".to_string(), "application/grpc".to_string());
+        let mut trailers = BTreeMap::new();
+        trailers.insert("grpc-status".to_string(), GRPC_STATUS_OK.to_string());
+
+        let mut first = ProtoMessage::new();
+        first.add_string(1, "one");
+        let mut second = ProtoMessage::new();
+        second.add_string(1, "two");
+        let body = GrpcClient::encode_grpc_message_stream(&[first, second]);
+
+        let response = client
+            .process_grpc_stream_response(&headers, Some(&trailers), &body)
+            .unwrap();
+        assert_eq!(response.messages.len(), 2);
+        assert_eq!(response.messages[0].get_string(1).as_deref(), Some("one"));
+        assert_eq!(response.messages[1].get_string(1).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn grpc_remote_server_streaming_loopback_preserves_messages_and_trailers() {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+
+            let mut request_wire = Vec::new();
+            let mut recv_buf = [0u8; 4096];
+            while request_wire.len() < connection_preface().len() {
+                let read_len = stream.read(&mut recv_buf).unwrap();
+                if read_len == 0 {
+                    break;
+                }
+                request_wire.extend_from_slice(&recv_buf[..read_len]);
+            }
+            assert_eq!(
+                &request_wire[..connection_preface().len()],
+                connection_preface()
+            );
+
+            let mut request_conn = Http2Connection::new();
+            let request_stream_id = request_conn.create_stream();
+            let mut frame_wire = request_wire.split_off(connection_preface().len());
+            loop {
+                let mut consumed = 0usize;
+                while consumed < frame_wire.len() {
+                    let Some((frame, used)) = Http2Frame::decode(&frame_wire[consumed..]) else {
+                        break;
+                    };
+                    request_conn.process_frame(&frame).unwrap();
+                    consumed += used;
+                }
+                if consumed > 0 {
+                    frame_wire.drain(..consumed);
+                }
+                if request_conn
+                    .get_stream(request_stream_id)
+                    .is_some_and(|state| state.end_stream && !state.data.is_empty())
+                {
+                    break;
+                }
+                let read_len = stream.read(&mut recv_buf).unwrap();
+                if read_len == 0 {
+                    break;
+                }
+                frame_wire.extend_from_slice(&recv_buf[..read_len]);
+            }
+
+            let settings =
+                Http2Frame::settings(&crate::net::http2::Http2Settings::default()).encode();
+            stream.write_all(&settings).unwrap();
+
+            let mut headers = BTreeMap::new();
+            headers.insert(":status".to_string(), "200".to_string());
+            headers.insert("content-type".to_string(), "application/grpc".to_string());
+            let mut encoder = HpackEncoder::new(4096);
+            let headers_frame =
+                Http2Frame::headers(request_stream_id, encoder.encode(&headers), false).encode();
+
+            let mut first = ProtoMessage::new();
+            first.add_string(1, "Hello, remote stream!");
+            let mut second = ProtoMessage::new();
+            second.add_string(1, "Still streaming.");
+            let data_frame = Http2Frame::data(
+                request_stream_id,
+                GrpcClient::encode_grpc_message_stream(&[first, second]),
+                false,
+            )
+            .encode();
+
+            let mut trailers = BTreeMap::new();
+            trailers.insert("grpc-status".to_string(), GRPC_STATUS_OK.to_string());
+            trailers.insert("grpc-message".to_string(), "all%20good".to_string());
+            let trailer_frame =
+                Http2Frame::headers(request_stream_id, encoder.encode(&trailers), true).encode();
+
+            stream.write_all(&headers_frame).unwrap();
+            stream.write_all(&data_frame).unwrap();
+            stream.write_all(&trailer_frame).unwrap();
+            stream.flush().unwrap();
+            let _ = stream.shutdown(Shutdown::Write);
+        });
+
+        thread::sleep(Duration::from_millis(50));
+
+        let mut client = GrpcClient::new();
+        client.add_service(create_greeter_service());
+        let mut request = ProtoMessage::new();
+        request.add_string(1, "Titan");
+        let response = client
+            .call_server_streaming_remote(
+                crate::net::Ipv4Addr::new(127, 0, 0, 1),
+                port,
+                &format!("127.0.0.1:{port}"),
+                "Greeter",
+                "SayHelloStream",
+                &request,
+            )
+            .unwrap();
+
+        server.join().unwrap();
+
+        assert_eq!(response.messages.len(), 2);
+        assert_eq!(
+            response.messages[0].get_string(1).as_deref(),
+            Some("Hello, remote stream!")
+        );
+        assert_eq!(
+            response.messages[1].get_string(1).as_deref(),
+            Some("Still streaming.")
+        );
+        assert_eq!(
+            response.trailers.get("grpc-status").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            response.trailers.get("grpc-message").map(String::as_str),
+            Some("all%20good")
+        );
+    }
 }

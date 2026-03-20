@@ -64,6 +64,7 @@ use spin::Mutex;
 
 use super::dns::DnsHeader;
 use super::dns::DnsRecordType;
+use super::http2::{connection_preface, Http2Connection, Http2Frame};
 use super::ipv6::Ipv6Addr;
 use super::{Ipv4Addr, NetError};
 
@@ -181,6 +182,20 @@ impl DohClient {
         let encoded = base64url_encode(&dns_query);
         let (host, path) = parse_doh_url(&self.server_url);
 
+        if prefers_native_h2(&host) {
+            match self.query_get_native_h2(domain, qtype) {
+                Ok(response) => return Ok(response),
+                Err(err @ DohError::Timeout) | Err(err @ DohError::NetworkError) => {
+                    crate::serial_println!(
+                        "[DoH] Native h2 path fell back to HTTP/1.1 for {}: {:?}",
+                        host,
+                        err
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
         self.retry_request("GET", &host, || {
             format!(
                 "GET {}?dns={} HTTP/1.1\r\nHost: {}\r\nAccept: {}\r\nConnection: close\r\n\r\n",
@@ -188,6 +203,42 @@ impl DohClient {
             )
             .into_bytes()
         })
+    }
+
+    pub fn query_get_native_h2(
+        &mut self,
+        domain: &str,
+        qtype: DnsRecordType,
+    ) -> Result<Vec<u8>, DohError> {
+        let dns_query = Self::build_query(domain, qtype);
+        let (host, path) = parse_doh_url(&self.server_url);
+
+        let mut last_error = DohError::NetworkError;
+        for attempt in 0..=self.retry_budget {
+            let (stream_id, request) = self.build_h2_get_request(&host, &path, &dns_query);
+            match self.send_https_request_h2(&host, stream_id, &request) {
+                Ok(response_body) => {
+                    crate::serial_println!(
+                        "[DoH] Native h2 response received ({} bytes) on attempt {}",
+                        response_body.len(),
+                        attempt + 1
+                    );
+                    return Ok(response_body);
+                }
+                Err(err @ DohError::Timeout) | Err(err @ DohError::NetworkError) => {
+                    last_error = err;
+                    crate::serial_println!(
+                        "[DoH] Native h2 retry {}/{} for {}",
+                        attempt + 1,
+                        self.retry_budget + 1,
+                        host
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(last_error)
     }
 
     /// DNS sorgusunu HTTPS POST yöntemiyle gönderir.
@@ -257,6 +308,58 @@ impl DohClient {
         let response = self.query_get(hostname, DnsRecordType::A)?;
         let parsed = Self::parse_response(&response)?;
         parsed.get_a().ok_or(DohError::InvalidResponse)
+    }
+
+    fn build_h2_get_request(&self, host: &str, path: &str, dns_query: &[u8]) -> (u32, Vec<u8>) {
+        let encoded = base64url_encode(dns_query);
+        let mut connection = Http2Connection::new();
+        let stream_id = connection.create_stream();
+        let request_path = format!("{}?dns={}", path, encoded);
+        let header_block = connection.build_request(stream_id, "GET", &request_path, host);
+
+        let mut request = connection_preface().to_vec();
+        request.extend_from_slice(&Http2Frame::settings(&connection.settings).encode());
+        request.extend_from_slice(&Http2Frame::headers(stream_id, header_block, true).encode());
+        (stream_id, request)
+    }
+
+    fn parse_h2_response(
+        &self,
+        expected_stream_id: u32,
+        response_bytes: &[u8],
+    ) -> Result<Vec<u8>, DohError> {
+        let mut connection = Http2Connection::new();
+        let stream_id = connection.create_stream();
+        if stream_id != expected_stream_id {
+            return Err(DohError::InvalidResponse);
+        }
+
+        let mut cursor = response_bytes;
+        while let Some((frame, consumed)) = Http2Frame::decode(cursor) {
+            connection
+                .process_frame(&frame)
+                .map_err(|_| DohError::InvalidResponse)?;
+            cursor = &cursor[consumed..];
+            if cursor.is_empty() {
+                break;
+            }
+        }
+
+        let stream = connection
+            .get_stream(expected_stream_id)
+            .ok_or(DohError::InvalidResponse)?;
+        if stream.headers.get(":status").map(String::as_str) != Some("200") {
+            return Err(DohError::ServerError(500));
+        }
+        if stream.headers.get("content-type").map(String::as_str) != Some(DNS_MESSAGE_CONTENT_TYPE)
+        {
+            return Err(DohError::InvalidResponse);
+        }
+        if stream.data.is_empty() {
+            return Err(DohError::InvalidResponse);
+        }
+
+        Ok(stream.data.clone())
     }
 
     /// HTTPS (TLS) üzerinden HTTP isteği gönderir ve yanıt gövdesini döner.
@@ -340,6 +443,62 @@ impl DohClient {
         }
 
         Ok(body)
+    }
+
+    fn send_https_request_h2(
+        &self,
+        host: &str,
+        stream_id: u32,
+        request: &[u8],
+    ) -> Result<Vec<u8>, DohError> {
+        use super::socket::{
+            close, connect, recv, send, socket, AddressFamily, Protocol, SocketType,
+        };
+        use super::{Port, SocketAddr};
+
+        let server_ip =
+            crate::net::dns::resolve_default(host).map_err(|_| DohError::NetworkError)?;
+        let sock_id = socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::TCP)
+            .map_err(|_| DohError::NetworkError)?;
+        let addr = SocketAddr::new(server_ip, Port(443));
+        connect(sock_id, addr).map_err(|_| DohError::NetworkError)?;
+
+        let mut tls = crate::net::tls::TlsClient::new();
+        let client_hello = tls.build_client_hello(host);
+        let hello_record =
+            crate::net::tls::wrap_record(crate::net::tls::ContentType::Handshake, &client_hello);
+        send(sock_id, &hello_record, 0).map_err(|_| DohError::NetworkError)?;
+
+        let mut sh_buf = [0u8; 4096];
+        let sh_len = recv(sock_id, &mut sh_buf, 0).map_err(|_| DohError::NetworkError)?;
+        if sh_len > 5 {
+            let _ = tls.process_server_hello(&sh_buf[5..sh_len]);
+        }
+
+        let mut hs_buf = [0u8; 8192];
+        let hs_len = recv(sock_id, &mut hs_buf, 0).map_err(|_| DohError::NetworkError)?;
+        if hs_len > 5 {
+            let _ = tls.process_encrypted_extensions(&hs_buf[5..hs_len]);
+        }
+
+        tls.complete_handshake();
+        if !tls.is_established() {
+            let _ = close(sock_id);
+            return Err(DohError::NetworkError);
+        }
+
+        let tls_record =
+            crate::net::tls::wrap_record(crate::net::tls::ContentType::ApplicationData, request);
+        send(sock_id, &tls_record, 0).map_err(|_| DohError::NetworkError)?;
+
+        let mut resp_buf = [0u8; 16384];
+        let resp_len = recv(sock_id, &mut resp_buf, 0).map_err(|_| DohError::Timeout)?;
+        let _ = close(sock_id);
+        if resp_len < 5 {
+            return Err(DohError::InvalidResponse);
+        }
+
+        self.parse_h2_response(stream_id, &resp_buf[5..resp_len])
     }
 
     /// DoH sunucusundan gelen DNS yanıtını ayrıştırır.
@@ -591,6 +750,10 @@ fn parse_doh_url(url: &str) -> (String, String) {
     }
 }
 
+fn prefers_native_h2(host: &str) -> bool {
+    matches!(host, "dns.quad9.net" | "dns.adguard-dns.com")
+}
+
 /// HTTP yanıtından body kısmını çıkarır.
 ///
 /// Header ve body arasındaki `\r\n\r\n` ayırıcısını bulur.
@@ -714,12 +877,10 @@ pub fn resolve_with_fallback(
 
     // ── 2. DoT dene ───────────────────────────────────────────────────
     crate::serial_println!("[DoH-Fallback] Trying DoT for {}", hostname);
-    match super::dot::resolve_dot(hostname, record_type) {
-        Ok(response) => {
-            if let Some(ip) = response.get_a() {
-                crate::serial_println!("[DoH-Fallback] DoT succeeded for {}", hostname);
-                return Ok(ip);
-            }
+    match super::dot::resolve_dot_sustained(hostname) {
+        Ok(ip) => {
+            crate::serial_println!("[DoH-Fallback] DoT succeeded for {}", hostname);
+            return Ok(ip);
         }
         Err(e) => {
             crate::serial_println!("[DoH-Fallback] DoT failed for {}: {:?}", hostname, e);
@@ -737,5 +898,70 @@ pub fn resolve_with_fallback(
             crate::serial_println!("[DoH-Fallback] All methods failed for {}", hostname);
             Err(DohError::NetworkError)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::http2::{Http2Connection, Http2Frame};
+    use alloc::collections::BTreeMap;
+
+    fn build_dns_a_answer(domain: &str, ip: [u8; 4]) -> Vec<u8> {
+        let mut packet = DohClient::build_query(domain, DnsRecordType::A);
+        packet[2] = 0x81;
+        packet[3] = 0x80;
+        packet[6] = 0x00;
+        packet[7] = 0x01;
+        packet.extend_from_slice(&[0xC0, 0x0C]);
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&4u16.to_be_bytes());
+        packet.extend_from_slice(&ip);
+        packet
+    }
+
+    #[test]
+    fn doh_native_h2_request_uses_preface_settings_and_headers() {
+        let client = DohClient::quad9();
+        let (stream_id, request) =
+            client.build_h2_get_request("dns.quad9.net", "/dns-query", &[0x12, 0x34]);
+
+        assert_eq!(stream_id, 1);
+        assert!(request.starts_with(connection_preface()));
+        let after_preface = &request[connection_preface().len()..];
+        let (settings, consumed) = Http2Frame::decode(after_preface).unwrap();
+        assert_eq!(settings.frame_type, 0x04);
+        let (headers, _) = Http2Frame::decode(&after_preface[consumed..]).unwrap();
+        assert_eq!(headers.frame_type, 0x01);
+        assert!(headers.is_end_stream());
+    }
+
+    #[test]
+    fn doh_native_h2_response_preserves_dns_message_body() {
+        let client = DohClient::quad9();
+        let dns_body = build_dns_a_answer("example.com", [1, 1, 1, 1]);
+        let mut encoder = Http2Connection::new();
+        let _ = encoder.create_stream();
+
+        let mut headers = BTreeMap::new();
+        headers.insert(":status".to_string(), "200".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            DNS_MESSAGE_CONTENT_TYPE.to_string(),
+        );
+
+        let mut response = Vec::new();
+        response.extend_from_slice(&Http2Frame::settings(&encoder.settings).encode());
+        response.extend_from_slice(
+            &Http2Frame::headers(1, encoder.encoder.encode(&headers), false).encode(),
+        );
+        response.extend_from_slice(&Http2Frame::data(1, dns_body.clone(), true).encode());
+
+        let parsed = client.parse_h2_response(1, &response).unwrap();
+        assert_eq!(parsed, dns_body);
+        let dns = DohClient::parse_response(&parsed).unwrap();
+        assert_eq!(dns.get_a(), Some(Ipv4Addr::from_bytes([1, 1, 1, 1])));
     }
 }

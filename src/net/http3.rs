@@ -47,6 +47,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+use lazy_static::lazy_static;
 use spin::Mutex;
 
 use super::quic::{QuicConnection, QuicError, QuicStream, StreamType};
@@ -118,6 +119,19 @@ impl From<QuicError> for Http3Error {
     fn from(err: QuicError) -> Self {
         Http3Error::QuicError(err)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Http3Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub trailers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+lazy_static! {
+    static ref NATIVE_HTTP3_TRANSPORTS: Mutex<BTreeMap<String, QuicConnection>> =
+        Mutex::new(BTreeMap::new());
 }
 
 // ============================================================================
@@ -238,15 +252,15 @@ impl QpackDecoder {
 
             if byte & 0x80 != 0 {
                 // Indexed field line
-                let index = (byte & 0x7F) as usize;
-
                 if byte & 0x40 != 0 {
                     // Dynamic table
+                    let index = (byte & 0x3F) as usize;
                     if let Some((name, value)) = dynamic_table.get(index) {
                         headers.push((name.clone(), value.clone()));
                     }
                 } else {
                     // Static table
+                    let index = (byte & 0x7F) as usize;
                     if let Some((name, value)) = static_table.get(index) {
                         headers.push((name.to_string(), value.to_string()));
                     }
@@ -426,6 +440,7 @@ impl Http3Connection {
             if !body.is_empty() {
                 http3_stream.send_data(body)?;
             }
+            http3_stream.finish_send();
 
             self.streams.insert(stream_id, http3_stream);
 
@@ -436,18 +451,13 @@ impl Http3Connection {
     }
 
     /// Yanıt al
-    pub fn receive_response(
-        &mut self,
-        stream_id: u64,
-    ) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
+    pub fn receive_response(&mut self, stream_id: u64) -> Result<Http3Response, Http3Error> {
         let stream = self
             .streams
             .get_mut(&stream_id)
             .ok_or(Http3Error::StreamError(H3_INTERNAL_ERROR))?;
 
-        let (status_code, headers, body) = stream.receive_response(&mut self.qpack)?;
-
-        Ok((status_code, headers, body))
+        stream.receive_response(&mut self.qpack)
     }
 
     /// Bağlantıyı kapat
@@ -487,6 +497,8 @@ pub struct Http3Stream {
     state: Http3StreamState,
     /// Alınan başlıklar
     received_headers: Option<Vec<(String, String)>>,
+    /// Alınan trailer başlıkları
+    received_trailers: Option<Vec<(String, String)>>,
     /// Alınan gövde
     received_body: Vec<u8>,
 }
@@ -518,6 +530,7 @@ impl Http3Stream {
             quic_stream,
             state: Http3StreamState::Idle,
             received_headers: None,
+            received_trailers: None,
             received_body: Vec::new(),
         }
     }
@@ -568,15 +581,23 @@ impl Http3Stream {
         Ok(())
     }
 
+    pub fn finish_send(&mut self) {
+        self.quic_stream.fin_sent = true;
+        self.state = Http3StreamState::SendComplete;
+    }
+
     /// Yanıt al
     pub fn receive_response(
         &mut self,
         qpack: &mut QpackContext,
-    ) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
+    ) -> Result<Http3Response, Http3Error> {
         let mut buffer = vec![0u8; 4096];
         let mut status_code = 200;
         let mut headers = Vec::new();
+        let mut trailers = Vec::new();
         let mut body = Vec::new();
+        let mut saw_initial_headers = false;
+        let mut saw_trailing_headers = false;
 
         loop {
             let n = self.quic_stream.read(&mut buffer);
@@ -605,10 +626,20 @@ impl Http3Stream {
 
                 match frame_type {
                     FRAME_HEADERS => {
+                        if saw_trailing_headers {
+                            return Err(Http3Error::FrameError);
+                        }
                         let decoded_headers = qpack.decode_headers(frame_data)?;
-                        headers.extend(decoded_headers);
+                        if !saw_initial_headers {
+                            headers.extend(decoded_headers);
+                            saw_initial_headers = true;
+                            self.received_headers = Some(headers.clone());
+                        } else {
+                            trailers.extend(decoded_headers);
+                            saw_trailing_headers = true;
+                            self.received_trailers = Some(trailers.clone());
+                        }
 
-                        // Status kodunu bul
                         for (name, value) in &headers {
                             if name == ":status" {
                                 status_code = value.parse().unwrap_or(200);
@@ -617,16 +648,28 @@ impl Http3Stream {
                         }
                     }
                     FRAME_DATA => {
+                        if !saw_initial_headers || saw_trailing_headers {
+                            return Err(Http3Error::FrameError);
+                        }
                         body.extend_from_slice(frame_data);
+                        self.received_body.extend_from_slice(frame_data);
                     }
                     _ => {
-                        // Diğer çerçeveler şimdilik ignore
+                        if frame_type == FRAME_GOAWAY {
+                            return Err(Http3Error::ConnectionError(H3_REQUEST_CANCELLED));
+                        }
                     }
                 }
             }
         }
 
-        Ok((status_code, headers, body))
+        self.state = Http3StreamState::Complete;
+        Ok(Http3Response {
+            status: status_code,
+            headers,
+            trailers,
+            body,
+        })
     }
 }
 
@@ -657,6 +700,7 @@ impl Http3Client {
             return Err(Http3Error::RemoteTransportUnavailable);
         }
 
+        register_native_connection(host, quic_conn.clone())?;
         let mut http3_conn = Http3Connection::new(quic_conn);
         http3_conn.connect()?;
         self.connections.insert(host.to_string(), http3_conn);
@@ -664,7 +708,7 @@ impl Http3Client {
     }
 
     /// HTTPS isteği gönder
-    pub fn get(&mut self, url: &str) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
+    pub fn get_response(&mut self, url: &str) -> Result<Http3Response, Http3Error> {
         // URL ayrıştır; bu yol yalnızca HTTPS authority/path ayrımını destekler.
         let (host, path) = if url.starts_with("https://") {
             let url_without_scheme = &url[8..];
@@ -679,6 +723,14 @@ impl Http3Client {
             return Err(Http3Error::ProtocolError(H3_GENERAL_PROTOCOL_ERROR));
         };
 
+        if !self.connections.contains_key(&host) {
+            if let Some(quic_conn) = load_native_connection(&host) {
+                let mut http3_conn = Http3Connection::new(quic_conn);
+                http3_conn.connect()?;
+                self.connections.insert(host.clone(), http3_conn);
+            }
+        }
+
         let connection = self
             .connections
             .get_mut(&host)
@@ -688,9 +740,12 @@ impl Http3Client {
         let stream_id = connection.send_request("GET", &path, &[], &[])?;
 
         // Yanıt al
-        let (status, headers, body) = connection.receive_response(stream_id)?;
+        connection.receive_response(stream_id)
+    }
 
-        Ok((status, headers, body))
+    pub fn get(&mut self, url: &str) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
+        let response = self.get_response(url)?;
+        Ok((response.status, response.headers, response.body))
     }
 
     /// Bağlantıyı kapat
@@ -709,6 +764,20 @@ fn write_all(stream: &mut QuicStream, frame: &[u8]) -> Result<(), Http3Error> {
         return Err(Http3Error::ShortWrite);
     }
     Ok(())
+}
+
+pub fn register_native_connection(host: &str, quic_conn: QuicConnection) -> Result<(), Http3Error> {
+    if quic_conn.state != super::quic::QuicState::Established {
+        return Err(Http3Error::RemoteTransportUnavailable);
+    }
+    NATIVE_HTTP3_TRANSPORTS
+        .lock()
+        .insert(host.to_string(), quic_conn);
+    Ok(())
+}
+
+fn load_native_connection(host: &str) -> Option<QuicConnection> {
+    NATIVE_HTTP3_TRANSPORTS.lock().get(host).cloned()
 }
 
 impl Default for Http3Client {
@@ -730,4 +799,146 @@ pub fn init() {
 pub fn http3_get(url: &str) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Http3Error> {
     let mut client = Http3Client::new();
     client.get(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::quic::{QuicConnection, QuicState, StreamType};
+
+    fn encode_frame(frame_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.push(frame_type);
+        frame.extend_from_slice(&[
+            ((payload.len() >> 16) & 0xFF) as u8,
+            ((payload.len() >> 8) & 0xFF) as u8,
+            (payload.len() & 0xFF) as u8,
+        ]);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    #[test]
+    fn http3_stream_separates_headers_body_and_trailers() {
+        let mut qpack = QpackContext::new();
+
+        let mut quic_stream = QuicStream::new(0, StreamType::ClientBiDi);
+        quic_stream.state = super::super::quic::StreamState::Open;
+        quic_stream.recv_buffer.extend_from_slice(&encode_frame(
+            FRAME_HEADERS,
+            &qpack
+                .encode_headers(&[
+                    (":status".to_string(), "200".to_string()),
+                    ("content-type".to_string(), "text/plain".to_string()),
+                ])
+                .unwrap(),
+        ));
+        quic_stream
+            .recv_buffer
+            .extend_from_slice(&encode_frame(FRAME_DATA, b"hello"));
+        quic_stream.recv_buffer.extend_from_slice(&encode_frame(
+            FRAME_HEADERS,
+            &qpack
+                .encode_headers(&[("server-timing".to_string(), "miss".to_string())])
+                .unwrap(),
+        ));
+
+        let mut stream = Http3Stream::new(0, quic_stream);
+        let response = stream.receive_response(&mut qpack).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(k, _)| k == ":status")
+                .map(|(_, v)| v.as_str()),
+            Some("200")
+        );
+        assert_eq!(response.body, b"hello");
+        assert_eq!(
+            response
+                .trailers
+                .iter()
+                .find(|(k, _)| k == "server-timing")
+                .map(|(_, v)| v.as_str()),
+            Some("miss")
+        );
+    }
+
+    #[test]
+    fn http3_stream_rejects_data_before_headers() {
+        let mut qpack = QpackContext::new();
+        let mut quic_stream = QuicStream::new(0, StreamType::ClientBiDi);
+        quic_stream.state = super::super::quic::StreamState::Open;
+        quic_stream
+            .recv_buffer
+            .extend_from_slice(&encode_frame(FRAME_DATA, b"oops"));
+
+        let mut stream = Http3Stream::new(0, quic_stream);
+        let err = stream.receive_response(&mut qpack).unwrap_err();
+        assert_eq!(err, Http3Error::FrameError);
+    }
+
+    #[test]
+    fn native_registry_rehydrates_client_connection() {
+        let mut conn = QuicConnection::new(8);
+        conn.state = QuicState::Established;
+        register_native_connection("native.test", conn).unwrap();
+
+        let loaded = load_native_connection("native.test").unwrap();
+        assert_eq!(loaded.state, QuicState::Established);
+    }
+
+    #[test]
+    fn native_connection_roundtrip_preserves_response_trailers() {
+        let mut client = Http3Client::new();
+        let mut conn = QuicConnection::new(8);
+        conn.state = QuicState::Established;
+        client
+            .register_connection("native.roundtrip", conn)
+            .unwrap();
+
+        let connection = client.connections.get_mut("native.roundtrip").unwrap();
+        let stream_id = connection
+            .send_request("GET", "/demo", &[("host", "native.roundtrip")], &[])
+            .unwrap();
+        let encoded_headers = connection
+            .qpack
+            .encode_headers(&[
+                (":status".to_string(), "200".to_string()),
+                ("content-type".to_string(), "text/plain".to_string()),
+            ])
+            .unwrap();
+        let encoded_trailers = connection
+            .qpack
+            .encode_headers(&[("server-timing".to_string(), "hit".to_string())])
+            .unwrap();
+
+        let stream = connection.streams.get_mut(&stream_id).unwrap();
+        stream
+            .quic_stream
+            .recv_buffer
+            .extend_from_slice(&encode_frame(FRAME_HEADERS, &encoded_headers));
+        stream
+            .quic_stream
+            .recv_buffer
+            .extend_from_slice(&encode_frame(FRAME_DATA, b"native"));
+        stream
+            .quic_stream
+            .recv_buffer
+            .extend_from_slice(&encode_frame(FRAME_HEADERS, &encoded_trailers));
+
+        let response = connection.receive_response(stream_id).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"native");
+        assert_eq!(
+            response
+                .trailers
+                .iter()
+                .find(|(k, _)| k == "server-timing")
+                .map(|(_, v)| v.as_str()),
+            Some("hit")
+        );
+    }
 }

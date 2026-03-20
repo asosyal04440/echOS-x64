@@ -2337,3 +2337,79 @@ pub fn select_next_hop(dest: &Ipv6Addr, current_tsc: u64) -> Option<(Ipv6Addr, s
         .find(|router| router.expiry_tsc > current_tsc)
         .map(|router| (router.addr, super::MacAddr::new(router.link_addr)))
 }
+
+#[cfg(test)]
+fn reset_route_ndp_test_state() {
+    NEIGHBOR_CACHE.lock().clear();
+    DEFAULT_ROUTERS.lock().clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::MacAddr;
+
+    fn ipv6(bytes: [u8; 16]) -> Ipv6Addr {
+        Ipv6Addr::new(bytes)
+    }
+
+    #[test]
+    fn select_next_hop_prefers_neighbor_cache_over_router() {
+        reset_route_ndp_test_state();
+        let dest = ipv6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]);
+        neighbor_update(dest, MacAddr::new([0, 1, 2, 3, 4, 5]));
+        add_default_router(
+            ipv6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            100,
+            10,
+            [6, 7, 8, 9, 10, 11],
+        );
+
+        let (next_hop, mac) = select_next_hop(&dest, 20).unwrap();
+        assert_eq!(next_hop, dest);
+        assert_eq!(*mac.as_bytes(), [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn select_next_hop_maps_multicast_to_33_33() {
+        reset_route_ndp_test_state();
+        let dest = ipv6([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let (next_hop, mac) = select_next_hop(&dest, 0).unwrap();
+        assert_eq!(next_hop, dest);
+        assert_eq!(*mac.as_bytes(), [0x33, 0x33, 0x00, 0x00, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn select_next_hop_uses_live_default_router_and_skips_expired_entries() {
+        reset_route_ndp_test_state();
+        add_default_router(
+            ipv6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            5,
+            10,
+            [0, 0, 0, 0, 0, 1],
+        );
+        add_default_router(
+            ipv6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+            50,
+            10,
+            [0, 0, 0, 0, 0, 2],
+        );
+
+        let dest = ipv6([0x20, 0x01, 0xdb, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
+        let (next_hop, mac) = select_next_hop(&dest, 20).unwrap();
+        assert_eq!(
+            next_hop,
+            ipv6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2])
+        );
+        assert_eq!(*mac.as_bytes(), [0, 0, 0, 0, 0, 2]);
+        assert_eq!(default_router_count(), 1);
+    }
+
+    #[test]
+    fn select_next_hop_returns_none_for_unresolved_link_local() {
+        reset_route_ndp_test_state();
+        let link_local = ipv6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5]);
+        assert!(select_next_hop(&link_local, 0).is_none());
+    }
+}

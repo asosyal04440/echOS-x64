@@ -473,6 +473,7 @@ pub fn init() {
     udp::init();
     dhcp::init();
     dns::init();
+    smoltcp_driver::init();
     ipv6::init();
     netfilter::init();
 
@@ -486,6 +487,7 @@ pub fn init() {
     http3::init();
     wireguard::init();
     grpc::init();
+    let _ = smoltcp_driver::bootstrap_runtime_config();
 
     crate::serial_println!("[NET] Networking stack initialized");
 }

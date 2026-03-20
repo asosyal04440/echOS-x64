@@ -177,6 +177,9 @@ fn builtin_summary(name: &str) -> &'static str {
         "history" => "oturum komut gecmisini gosterir",
         "alias" | "unalias" => "oturum alias tablolarini yonetir",
         "which" | "command" => "builtin komut katalogunda arama yapar",
+        "net" | "http" | "wget" | "curl" | "dns" | "ping" if network_surface_disabled() => {
+            network_surface_summary(name)
+        }
         "net" => "ag katmanlarini ve mevcut gercek sinirlari raporlar",
         "http" => "echOS HTTP/HTTPS istemcisi ile gercek web istegi gonderir",
         "wget" | "curl" => "gercek HTTP/HTTPS istemci yolunu kullanir",
@@ -332,6 +335,30 @@ fn parse_dns_privacy_provider(provider: Option<&str>) -> Result<&'static str, &'
 
 static SHELL_RUNTIME_READY: AtomicBool = AtomicBool::new(false);
 const SESSION_HISTORY_LIMIT: usize = 1000;
+const PRODUCT_NETWORK_SURFACE_ENABLED: bool = true;
+
+fn network_surface_disabled() -> bool {
+    !PRODUCT_NETWORK_SURFACE_ENABLED
+}
+
+fn network_surface_summary(name: &str) -> &'static str {
+    match name {
+        "net" => "ag yuzeyi urun hedefinden cikarildi; network komutlari kapali",
+        "http" | "wget" | "curl" => {
+            "web istemci yuzeyi urun hedefinden cikarildi; network komutlari kapali"
+        }
+        "dns" => "dns yuzeyi urun hedefinden cikarildi; network komutlari kapali",
+        "ping" => "icmp yuzeyi urun hedefinden cikarildi; network komutlari kapali",
+        _ => "network yuzeyi urun hedefinden cikarildi",
+    }
+}
+
+fn network_surface_disabled_response(name: &str) -> String {
+    format!(
+        "{} kullanilamaz\nNot: echOS urun hedefinde network yuzeyi gozden cikarildi ve shell fail-closed durumda",
+        name
+    )
+}
 
 fn ensure_shell_runtime_ready() {
     if SHELL_RUNTIME_READY
@@ -1761,6 +1788,9 @@ impl Shell {
             }
             // Network Commands
             "net" => {
+                if network_surface_disabled() {
+                    return Some(network_surface_disabled_response("net"));
+                }
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: net [status|dhcp|ip|route|addr|link|smoke]\n  net status - Ag katmanlari ve sinirlari\n  net dhcp - Gercek DHCP lease/config durumu\n  net ip - IP/gateway/dns durumu\n  net route - Yonlendirme tablosu\n  net addr - Adres bilgileri\n  net link - Link durumu\n  net smoke doh <host> [cloudflare|google|quad9]\n  net smoke dot <host> [cloudflare|google|quad9]\n  net smoke http3 <https-url>\n  net smoke grpc <host> <port> [authority]\n  net smoke tcp <host> <port>\n  net smoke http <url>\n  net smoke ping <host>"));
                 }
@@ -1790,7 +1820,7 @@ impl Shell {
                             "DNS server yok veya config eksik"
                         };
                         Some(format!(
-                            "Ag durumu: {}\nVirtIO-Net: {}\nIP: {}\nKatman durumu:\n  L2 transport: {}\n  DHCP: {}\n  DNS: {}\n  TCP/HTTP: gercek socket/client yolu acik\n  HTTPS/TLS: calisiyor; shell date/CN/CA/revoked/decode failure siniflarini ayri gosterir, fakat trust policy tam degil\n  DoH/DoT: smoke komutlari mevcut; timeout/retry fidelity var, canli endpoint interop henuz acik kuyrukta\n  gRPC: unary remote smoke komutu mevcut; canli service interop henuz acik kuyrukta\n  HTTP/3: transport enjekte edilmeden sessiz downgrade yok\n  ICMP ping: gercek echo yolu acik\n  IPv6/NDP: RX dispatch, Router Solicitation ve Neighbor Solicitation yolu acik\n  eBPF ingress: attach varsa RX allow/drop kararini etkiler",
+                            "Ag durumu: {}\nVirtIO-Net: {}\nIP: {}\nKatman durumu:\n  L2 transport: {}\n  DHCP: {}\n  DNS: {}\n  TCP/HTTP: gercek socket/client yolu acik\n  HTTPS/TLS: certificate validation matrix kapali; shell date/CN/CA/revoked/decode failure siniflarini ayri gosterir\n  DoH/DoT: native h2 DoH ve sustained DoT resolver matrisi corpus ile kapali\n  gRPC: unary trailer/status/reset mapping ve remote server-streaming loopback corpus kapali; built-in client/bidi streaming cekirdegi acik, genis remote service matrisi henuz acik kuyrukta\n  HTTP/3: native QUIC transport kaydi ve end-to-end response/trailer corpus acik; established QUIC olmadan sessiz downgrade yok, genis canli service matrisi henuz acik kuyrukta\n  ICMP ping: gercek echo yolu acik\n  IPv6/NDP: wider route/NDP corpus kapali; default router ve neighbor secimi mekanik olarak dogrulandi\n  eBPF ingress: ELF/JIT attach/run corpus kapali; attach varsa RX allow/drop kararini etkiler",
                             status,
                             if transport_ready { "Hazir" } else { "Bulunamadi" },
                             ip_info,
@@ -2030,6 +2060,9 @@ impl Shell {
                 }
             }
             "http" => {
+                if network_surface_disabled() {
+                    return Some(network_surface_disabled_response("http"));
+                }
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: http [get|post|download] <url> [dosya]\n  http get <url> - Gercek GET istegi\n  http post <url> <data> - Gercek POST istegi\n  http download <url> [dosya] - Dosya indir\nNot: HTTPS/TLS yolu acik; shell artik cert date/CN/CA/revoked/decode siniflarini ayri raporlar, ama trust policy tam degil"));
                 }
@@ -2108,6 +2141,9 @@ impl Shell {
                 }
             }
             "wget" => {
+                if network_surface_disabled() {
+                    return Some(network_surface_disabled_response("wget"));
+                }
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: wget <url> [dosya]\nNot: Gercek HTTP/HTTPS stack kullanir; shell cert date/CN/CA/revoked/decode siniflarini ayri raporlar"));
                 }
@@ -2141,6 +2177,9 @@ impl Shell {
                 }
             }
             "curl" => {
+                if network_surface_disabled() {
+                    return Some(network_surface_disabled_response("curl"));
+                }
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: curl <url>\nNot: Cikti gercek HTTP/HTTPS istemciden gelir; shell cert date/CN/CA/revoked/decode siniflarini ayri raporlar"));
                 }
@@ -2167,6 +2206,9 @@ impl Shell {
                 }
             }
             "dns" => {
+                if network_surface_disabled() {
+                    return Some(network_surface_disabled_response("dns"));
+                }
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: dns <hostname>\nÖrnek: dns google.com"));
                 }
@@ -2233,6 +2275,9 @@ impl Shell {
                 }
             }
             "ping" => {
+                if network_surface_disabled() {
+                    return Some(network_surface_disabled_response("ping"));
+                }
                 if parts.len() < 2 {
                     return Some(String::from("Kullanim: ping [-c count] <ip|hostname>"));
                 }
@@ -3906,7 +3951,7 @@ mod tests {
     fn render_help_reports_real_network_contract() {
         let help = render_help(Some("ping"));
         assert!(help.contains("gercek ICMP echo"));
-        assert!(!help.contains("simule"));
+        assert!(!help.contains("fail-closed"));
     }
 
     #[test]
@@ -3936,11 +3981,12 @@ mod tests {
     #[test]
     fn net_smoke_help_exposes_real_protocol_paths() {
         let mut shell = Shell::new();
-        let help = run_command_in_shell(&mut shell, "net").unwrap_or_default();
-        assert!(help.contains("net smoke doh"));
-        assert!(help.contains("net smoke dot"));
-        assert!(help.contains("net smoke http3"));
-        assert!(help.contains("net smoke grpc"));
+        let net = run_command_in_shell(&mut shell, "net").unwrap_or_default();
+        assert!(net.contains("net smoke doh"));
+        assert!(net.contains("net smoke dot"));
+        assert!(net.contains("net smoke http3"));
+        assert!(net.contains("net smoke grpc"));
+        assert!(!net.contains("fail-closed"));
     }
 
     #[test]

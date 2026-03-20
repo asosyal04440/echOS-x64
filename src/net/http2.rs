@@ -454,9 +454,12 @@ pub struct Http2Stream {
     pub stream_id: u32,
     pub state: StreamState,
     pub headers: BTreeMap<String, String>,
+    pub trailers: BTreeMap<String, String>,
     pub data: Vec<u8>,
     pub window_size: u32,
     pub end_stream: bool,
+    pub received_headers: bool,
+    pub reset_error: Option<u32>,
 }
 
 impl Http2Stream {
@@ -465,9 +468,12 @@ impl Http2Stream {
             stream_id,
             state: StreamState::Idle,
             headers: BTreeMap::new(),
+            trailers: BTreeMap::new(),
             data: Vec::new(),
             window_size: 65535,
             end_stream: false,
+            received_headers: false,
+            reset_error: None,
         }
     }
 }
@@ -907,7 +913,14 @@ impl Http2Connection {
                     .decode(&frame.payload)
                     .map_err(|_| Http2Error::CompressionError)?;
                 if let Some(stream) = self.streams.get_mut(&frame.stream_id) {
-                    stream.headers = headers;
+                    if !stream.received_headers {
+                        stream.headers = headers;
+                        stream.received_headers = true;
+                    } else {
+                        for (name, value) in headers {
+                            stream.trailers.insert(name, value);
+                        }
+                    }
                     if frame.is_end_stream() {
                         stream.end_stream = true;
                     }
@@ -935,7 +948,20 @@ impl Http2Connection {
                 }
             }
             FRAME_RST_STREAM => {
-                self.streams.remove(&frame.stream_id);
+                if let Some(stream) = self.streams.get_mut(&frame.stream_id) {
+                    if frame.payload.len() >= 4 {
+                        stream.reset_error = Some(u32::from_be_bytes([
+                            frame.payload[0],
+                            frame.payload[1],
+                            frame.payload[2],
+                            frame.payload[3],
+                        ]));
+                    }
+                    stream.end_stream = true;
+                    stream.state = StreamState::Closed;
+                } else {
+                    self.streams.remove(&frame.stream_id);
+                }
             }
             FRAME_GOAWAY => {
                 return Err(Http2Error::GoAway);
@@ -974,6 +1000,67 @@ impl Http2Connection {
 impl Default for Http2Connection {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headers_and_trailers_are_retained_separately() {
+        let mut connection = Http2Connection::new();
+        let stream_id = connection.create_stream();
+
+        let mut response_headers = BTreeMap::new();
+        response_headers.insert(":status".to_string(), "200".to_string());
+        response_headers.insert("content-type".to_string(), "application/grpc".to_string());
+        let headers_frame = Http2Frame::headers(
+            stream_id,
+            connection.encoder.encode(&response_headers),
+            false,
+        );
+        connection.process_frame(&headers_frame).unwrap();
+
+        let mut trailer_headers = BTreeMap::new();
+        trailer_headers.insert("grpc-status".to_string(), "0".to_string());
+        trailer_headers.insert("grpc-message".to_string(), "ok".to_string());
+        let trailer_frame =
+            Http2Frame::headers(stream_id, connection.encoder.encode(&trailer_headers), true);
+        connection.process_frame(&trailer_frame).unwrap();
+
+        let stream = connection.get_stream(stream_id).unwrap();
+        assert_eq!(
+            stream.headers.get(":status").map(String::as_str),
+            Some("200")
+        );
+        assert_eq!(
+            stream.headers.get("content-type").map(String::as_str),
+            Some("application/grpc")
+        );
+        assert_eq!(
+            stream.trailers.get("grpc-status").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            stream.trailers.get("grpc-message").map(String::as_str),
+            Some("ok")
+        );
+        assert!(stream.end_stream);
+    }
+
+    #[test]
+    fn rst_stream_retains_error_code_for_callers() {
+        let mut connection = Http2Connection::new();
+        let stream_id = connection.create_stream();
+
+        let rst = Http2Frame::rst_stream(stream_id, REFUSED_STREAM);
+        connection.process_frame(&rst).unwrap();
+
+        let stream = connection.get_stream(stream_id).unwrap();
+        assert_eq!(stream.reset_error, Some(REFUSED_STREAM));
+        assert!(stream.end_stream);
+        assert_eq!(stream.state, StreamState::Closed);
     }
 }
 

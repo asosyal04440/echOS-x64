@@ -35,6 +35,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+const SLIRP_FALLBACK_IP: [u8; 4] = [10, 0, 2, 15];
+const SLIRP_FALLBACK_NETMASK: [u8; 4] = [255, 255, 255, 0];
+const SLIRP_FALLBACK_GATEWAY: [u8; 4] = [10, 0, 2, 2];
+const SLIRP_FALLBACK_DNS: [u8; 4] = [10, 0, 2, 3];
+
 /// Ağ arabiriminin çalışma zamanı durumunu tutan yapı.
 ///
 /// Tüm alanlar `Option<[u8; N]>` türündedir çünkü yapılandırma
@@ -109,6 +114,65 @@ pub fn init() -> bool {
     true
 }
 
+fn runtime_config_complete(config: &crate::net::NetworkConfig) -> bool {
+    config.ip_addr != [0, 0, 0, 0]
+        && config.gateway != [0, 0, 0, 0]
+        && !config.dns_servers.is_empty()
+}
+
+fn build_slirp_fallback_config() -> crate::net::NetworkConfig {
+    let mut config = crate::net::get_config();
+    config.ip_addr = SLIRP_FALLBACK_IP;
+    config.netmask = SLIRP_FALLBACK_NETMASK;
+    config.gateway = SLIRP_FALLBACK_GATEWAY;
+    if config.dns_servers.is_empty() {
+        config.dns_servers.push(SLIRP_FALLBACK_DNS);
+    }
+    if config.hostname.is_empty() {
+        config.hostname = String::from("echos");
+    }
+    config
+}
+
+fn apply_slirp_fallback() -> bool {
+    let ip = crate::net::Ipv4Addr::from_bytes(SLIRP_FALLBACK_IP);
+    let netmask = crate::net::Ipv4Addr::from_bytes(SLIRP_FALLBACK_NETMASK);
+    let gateway = crate::net::Ipv4Addr::from_bytes(SLIRP_FALLBACK_GATEWAY);
+    if crate::net::netdev::configure_static("eth0", ip, netmask, Some(gateway)).is_err() {
+        sync_from_kernel_config();
+        return false;
+    }
+
+    crate::net::set_config(build_slirp_fallback_config());
+    sync_from_kernel_config();
+    runtime_config_complete(&crate::net::get_config())
+}
+
+pub fn bootstrap_runtime_config() -> bool {
+    sync_from_kernel_config();
+    if runtime_config_complete(&crate::net::get_config()) {
+        return true;
+    }
+
+    if dhcp_configure() && runtime_config_complete(&crate::net::get_config()) {
+        return true;
+    }
+
+    if crate::net::get_interface("eth0").is_some() {
+        crate::serial_println!(
+            "[smoltcp] DHCP incomplete; applying slirp fallback ip=10.0.2.15 gw=10.0.2.2 dns=10.0.2.3"
+        );
+        return apply_slirp_fallback();
+    }
+
+    false
+}
+
+pub fn ensure_runtime_network() -> bool {
+    crate::net::init();
+    bootstrap_runtime_config()
+}
+
 /// Ağı DHCP ile yapılandırır.
 ///
 /// Gerçek implementasyonda smoltcp'nin `dhcpv4::Dhcpv4Client` yapısı kullanılır.
@@ -163,6 +227,7 @@ pub fn dhcp_configure() -> bool {
 /// Yapılandırılmış IPv4 adresini döndürür.
 /// DHCP veya statik yapılandırma yapılmamışsa `None` döner.
 pub fn get_ip() -> Option<[u8; 4]> {
+    let _ = ensure_runtime_network();
     sync_from_kernel_config();
     NET_INTERFACE.lock().ip
 }
@@ -170,6 +235,7 @@ pub fn get_ip() -> Option<[u8; 4]> {
 /// Varsayılan ağ geçidini döndürür.
 /// Ağ geçidi, yerel ağ dışındaki hostlara ulaşmak için kullanılır.
 pub fn get_gateway() -> Option<[u8; 4]> {
+    let _ = ensure_runtime_network();
     sync_from_kernel_config();
     NET_INTERFACE.lock().gateway
 }
@@ -177,6 +243,7 @@ pub fn get_gateway() -> Option<[u8; 4]> {
 /// DNS sunucu adresini döndürür.
 /// Bu adres `dns_lookup()` fonksiyonunda sorgu göndermek için kullanılır.
 pub fn get_dns() -> Option<[u8; 4]> {
+    let _ = ensure_runtime_network();
     sync_from_kernel_config();
     NET_INTERFACE.lock().dns
 }
@@ -188,6 +255,7 @@ pub fn get_dns() -> Option<[u8; 4]> {
 /// Şu an yalnızca "localhost" ve "gateway" için sabit dönüşüm yapılır.
 pub fn dns_lookup(hostname: &str) -> Option<[u8; 4]> {
     crate::serial_println!("[smoltcp] DNS lookup: {}", hostname);
+    let _ = ensure_runtime_network();
 
     match hostname {
         "localhost" => Some([127, 0, 0, 1]),
@@ -205,6 +273,7 @@ pub fn dns_lookup(hostname: &str) -> Option<[u8; 4]> {
 ///   2. Rastgele yerel port seç (ephemeral port: 49152–65535).
 ///   3. `connect()` çağır; üç yönlü el sıkışması tamamlanana kadar bekle.
 pub fn tcp_connect(ip: [u8; 4], port: u16) -> bool {
+    let _ = ensure_runtime_network();
     let sock = match crate::net::socket::socket(
         crate::net::socket::AddressFamily::IPV4,
         crate::net::socket::SocketType::STREAM,
@@ -247,6 +316,7 @@ pub fn tcp_connect(ip: [u8; 4], port: u16) -> bool {
 ///   4. HTTP/1.1 GET isteğini gönder.
 ///   5. Yanıt başlıklarını ayrıştır, gövdeyi oku.
 pub fn http_get(url: &str) -> Result<Vec<u8>, String> {
+    let _ = ensure_runtime_network();
     let client = crate::net::http::HttpClient::new();
     client
         .download(url)
@@ -269,5 +339,36 @@ fn sync_from_kernel_config() {
     iface.dns = config.dns_servers.first().copied();
     if crate::drivers::virtio_net::is_initialized() {
         iface.mac = Some(*crate::drivers::virtio_net::get_mac().as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_config_complete_requires_ip_gateway_and_dns() {
+        let mut config = crate::net::NetworkConfig::new();
+        assert!(!runtime_config_complete(&config));
+        config.ip_addr = SLIRP_FALLBACK_IP;
+        assert!(!runtime_config_complete(&config));
+        config.gateway = SLIRP_FALLBACK_GATEWAY;
+        assert!(!runtime_config_complete(&config));
+        config.dns_servers.push(SLIRP_FALLBACK_DNS);
+        assert!(runtime_config_complete(&config));
+    }
+
+    #[test]
+    fn build_slirp_fallback_config_publishes_dns_and_gateway() {
+        crate::net::set_config(crate::net::NetworkConfig::new());
+        let config = build_slirp_fallback_config();
+        assert_eq!(config.ip_addr, SLIRP_FALLBACK_IP);
+        assert_eq!(config.netmask, SLIRP_FALLBACK_NETMASK);
+        assert_eq!(config.gateway, SLIRP_FALLBACK_GATEWAY);
+        assert_eq!(
+            config.dns_servers.first().copied(),
+            Some(SLIRP_FALLBACK_DNS)
+        );
+        assert_eq!(config.hostname, "echos");
     }
 }

@@ -22,7 +22,7 @@
 //! ```text
 //! DoT (DNS over TLS, RFC 7858):
 //!   - Port: 853 (ayrı ve belirgin, İSS kolayca tespit edebilir)
-//!   - Protokol: TLS + DNS wire format (basit)
+//!   - Protokol: TLS + DNS wire format
 //!   - İzleme: İSS 853 portuna bakarak DoT kullanıldığını anlar
 //!
 //! DoH (DNS over HTTPS, RFC 8484):
@@ -643,5 +643,75 @@ pub fn resolve_dot(domain: &str, qtype: DnsRecordType) -> Result<DotResponse, Do
         DotClient::parse_response(&response_data)
     } else {
         Err(DotError::NotConnected)
+    }
+}
+
+fn sustained_lookup_with<F>(hostname: &str, mut lookup: F) -> Result<Ipv4Addr, DotError>
+where
+    F: FnMut(&str, &mut DotClient) -> Result<Ipv4Addr, DotError>,
+{
+    let mut providers = [
+        ("cloudflare", DotClient::cloudflare()),
+        ("google", DotClient::google()),
+        ("quad9", DotClient::quad9()),
+    ];
+    let mut last_error = DotError::NotConnected;
+
+    for (provider, client) in providers.iter_mut() {
+        match lookup(provider, client) {
+            Ok(ip) => return Ok(ip),
+            Err(err @ DotError::Timeout)
+            | Err(err @ DotError::ConnectionFailed)
+            | Err(err @ DotError::TlsHandshakeFailed)
+            | Err(err @ DotError::NotConnected) => {
+                last_error = err;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(last_error)
+}
+
+pub fn resolve_dot_sustained(hostname: &str) -> Result<Ipv4Addr, DotError> {
+    sustained_lookup_with(hostname, |_, client| client.smoke_a_lookup(hostname))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sustained_lookup_rotates_across_resolvers_on_transient_failures() {
+        let mut visited = Vec::new();
+        let result = sustained_lookup_with("example.com", |provider, _client| {
+            visited.push(provider.to_string());
+            match provider {
+                "cloudflare" => Err(DotError::Timeout),
+                "google" => Err(DotError::TlsHandshakeFailed),
+                "quad9" => Ok(Ipv4Addr::from_bytes([9, 9, 9, 9])),
+                _ => unreachable!(),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(visited, vec!["cloudflare", "google", "quad9"]);
+        assert_eq!(result, Ipv4Addr::from_bytes([9, 9, 9, 9]));
+    }
+
+    #[test]
+    fn sustained_lookup_stops_on_non_transient_parse_failure() {
+        let mut visited = Vec::new();
+        let err = sustained_lookup_with("example.com", |provider, _client| {
+            visited.push(provider.to_string());
+            match provider {
+                "cloudflare" => Err(DotError::InvalidResponse),
+                _ => Ok(Ipv4Addr::from_bytes([1, 1, 1, 1])),
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(visited, vec!["cloudflare"]);
+        assert_eq!(err, DotError::InvalidResponse);
     }
 }

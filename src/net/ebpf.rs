@@ -899,3 +899,107 @@ pub fn create_simple_program() -> Vec<u64> {
         0x0000000000000095 | ((BPF_JMP | BPF_EXIT) as u64) << 56,
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_insn(opcode: u8, dst: u8, src: u8, off: i16, imm: i32) -> u64 {
+        ((opcode as u64) << 56)
+            | ((dst as u64) << 48)
+            | ((src as u64) << 40)
+            | (((off as u16) as u64) << 32)
+            | (imm as u32 as u64)
+    }
+
+    fn build_minimal_elf_with_program(section_name: &str, program: &[u64]) -> Vec<u8> {
+        let mut shstrtab = vec![0u8];
+        let section_name_off = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(section_name.as_bytes());
+        shstrtab.push(0);
+        let shstrtab_name_off = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".shstrtab");
+        shstrtab.push(0);
+
+        let mut text = Vec::with_capacity(program.len() * 8);
+        for insn in program {
+            text.extend_from_slice(&insn.to_le_bytes());
+        }
+
+        let ehsize = 64usize;
+        let shentsize = 64usize;
+        let shnum = 3usize;
+        let shoff = ehsize;
+        let text_off = shoff + shentsize * shnum;
+        let shstr_off = text_off + text.len();
+        let file_size = shstr_off + shstrtab.len();
+
+        let mut elf = vec![0u8; file_size];
+        elf[0..4].copy_from_slice(b"\x7FELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[6] = 1;
+        elf[16..18].copy_from_slice(&1u16.to_le_bytes());
+        elf[18..20].copy_from_slice(&0x3Eu16.to_le_bytes());
+        elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+        elf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+        elf[52..54].copy_from_slice(&(ehsize as u16).to_le_bytes());
+        elf[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
+        elf[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
+        elf[62..64].copy_from_slice(&2u16.to_le_bytes());
+
+        elf[text_off..text_off + text.len()].copy_from_slice(&text);
+        elf[shstr_off..shstr_off + shstrtab.len()].copy_from_slice(&shstrtab);
+
+        let sec1 = shoff + shentsize;
+        elf[sec1..sec1 + 4].copy_from_slice(&section_name_off.to_le_bytes());
+        elf[sec1 + 4..sec1 + 8].copy_from_slice(&1u32.to_le_bytes());
+        elf[sec1 + 24..sec1 + 32].copy_from_slice(&(text_off as u64).to_le_bytes());
+        elf[sec1 + 32..sec1 + 40].copy_from_slice(&(text.len() as u64).to_le_bytes());
+        elf[sec1 + 48..sec1 + 56].copy_from_slice(&8u64.to_le_bytes());
+
+        let sec2 = shoff + shentsize * 2;
+        elf[sec2..sec2 + 4].copy_from_slice(&shstrtab_name_off.to_le_bytes());
+        elf[sec2 + 4..sec2 + 8].copy_from_slice(&3u32.to_le_bytes());
+        elf[sec2 + 24..sec2 + 32].copy_from_slice(&(shstr_off as u64).to_le_bytes());
+        elf[sec2 + 32..sec2 + 40].copy_from_slice(&(shstrtab.len() as u64).to_le_bytes());
+        elf[sec2 + 48..sec2 + 56].copy_from_slice(&1u64.to_le_bytes());
+
+        elf
+    }
+
+    #[test]
+    fn elf_loader_accepts_socket_filter_section_and_jit_runs() {
+        let program = vec![
+            encode_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 1),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let elf = build_minimal_elf_with_program("socket_filter", &program);
+        let mut loader = EbpfLoader::new();
+        let prog_id = loader.load_elf(&elf, BPF_PROG_TYPE_SOCKET_FILTER).unwrap();
+
+        loader.jit_compile(&prog_id).unwrap();
+        loader
+            .attach_socket_filter("test:ingress", &prog_id)
+            .unwrap();
+        let verdict = loader
+            .run_socket_filter("test:ingress", &[0u8; 64])
+            .unwrap();
+        assert_eq!(verdict, 1);
+    }
+
+    #[test]
+    fn ingress_attach_registry_runs_jit_compiled_program() {
+        let program = vec![
+            encode_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 1),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        attach_ingress_program("jit-allow", program).unwrap();
+        {
+            let mut loader = GLOBAL_EBPF_LOADER.lock();
+            loader.jit_compile("jit-allow").unwrap();
+        }
+        assert!(filter_ingress_packet(&[0u8; 32]).unwrap());
+        detach_ingress_program().unwrap();
+    }
+}

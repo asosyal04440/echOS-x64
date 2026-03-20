@@ -94,6 +94,15 @@ static UNWIND_LOOKUP_CACHE: Mutex<BTreeMap<u64, Box<[crate::pe_loader::PeRuntime
 const UNW_FLAG_EHANDLER: u8 = 0x1;
 const UNW_FLAG_UHANDLER: u8 = 0x2;
 const UNW_FLAG_CHAININFO: u8 = 0x4;
+const CONTEXT_AMD64: u32 = 0x0010_0000;
+const CONTEXT_CONTROL: u32 = CONTEXT_AMD64 | 0x0000_0001;
+const CONTEXT_INTEGER: u32 = CONTEXT_AMD64 | 0x0000_0002;
+const CONTEXT_SEGMENTS: u32 = CONTEXT_AMD64 | 0x0000_0004;
+const CONTEXT_FLOATING_POINT: u32 = CONTEXT_AMD64 | 0x0000_0008;
+const CONTEXT_DEBUG_REGISTERS: u32 = CONTEXT_AMD64 | 0x0000_0010;
+const DEFAULT_X87_CONTROL_WORD: u16 = 0x027F;
+const DEFAULT_X87_TAG_WORD: u16 = 0xFFFF;
+const DEFAULT_MXCSR_MASK: u32 = 0x0000_FFFF;
 const UWOP_PUSH_NONVOL: u8 = 0;
 const UWOP_ALLOC_LARGE: u8 = 1;
 const UWOP_ALLOC_SMALL: u8 = 2;
@@ -164,7 +173,21 @@ pub struct ContextRecord {
     pub r14: u64,
     pub r15: u64,
     pub rip: u64,
+    pub floating_control_word: u16,
+    pub floating_status_word: u16,
+    pub floating_tag_word: u16,
+    pub floating_error_opcode: u16,
+    pub floating_error_offset: u32,
+    pub floating_error_selector: u16,
+    pub floating_data_selector: u16,
+    pub floating_data_offset: u32,
+    pub floating_mx_csr: u32,
+    pub floating_mx_csr_mask: u32,
+    pub header_registers: [M128A; 2],
+    pub legacy_float_registers: [M128A; 8],
     pub xmm_registers: [M128A; 16],
+    pub double_registers: [u64; 32],
+    pub scalar_registers: [u32; 32],
     pub vector_registers: [M128A; 26],
     pub vector_control: u64,
     pub debug_control: u64,
@@ -199,7 +222,11 @@ impl Default for ContextRecord {
             p4_home: 0,
             p5_home: 0,
             p6_home: 0,
-            context_flags: 0,
+            context_flags: CONTEXT_CONTROL
+                | CONTEXT_INTEGER
+                | CONTEXT_SEGMENTS
+                | CONTEXT_FLOATING_POINT
+                | CONTEXT_DEBUG_REGISTERS,
             mx_csr: 0x1F80,
             seg_cs: 0,
             seg_ds: 0,
@@ -231,7 +258,21 @@ impl Default for ContextRecord {
             r14: 0,
             r15: 0,
             rip: 0,
+            floating_control_word: DEFAULT_X87_CONTROL_WORD,
+            floating_status_word: 0,
+            floating_tag_word: DEFAULT_X87_TAG_WORD,
+            floating_error_opcode: 0,
+            floating_error_offset: 0,
+            floating_error_selector: 0,
+            floating_data_selector: 0,
+            floating_data_offset: 0,
+            floating_mx_csr: 0x1F80,
+            floating_mx_csr_mask: DEFAULT_MXCSR_MASK,
+            header_registers: [M128A::default(); 2],
+            legacy_float_registers: [M128A::default(); 8],
             xmm_registers: [M128A::default(); 16],
+            double_registers: [0; 32],
+            scalar_registers: [0; 32],
             vector_registers: [M128A::default(); 26],
             vector_control: 0,
             debug_control: 0,
@@ -243,11 +284,80 @@ impl Default for ContextRecord {
     }
 }
 
+fn pack_x87_header_registers(context: &ContextRecord) -> [M128A; 2] {
+    let header0_low = (context.floating_control_word as u64)
+        | ((context.floating_status_word as u64) << 16)
+        | ((context.floating_tag_word as u64) << 32)
+        | ((context.floating_error_opcode as u64) << 48);
+    let header0_high =
+        (context.floating_error_offset as u64) | ((context.floating_error_selector as u64) << 32);
+    let header1_low =
+        (context.floating_data_offset as u64) | ((context.floating_data_selector as u64) << 32);
+    let header1_high =
+        (context.floating_mx_csr as u64) | ((context.floating_mx_csr_mask as u64) << 32);
+    [
+        M128A {
+            low: header0_low,
+            high: header0_high as i64,
+        },
+        M128A {
+            low: header1_low,
+            high: header1_high as i64,
+        },
+    ]
+}
+
+fn split_m128a_to_u64_pair(value: M128A) -> [u64; 2] {
+    [value.low, value.high as u64]
+}
+
+fn split_m128a_to_u32_quads(value: M128A) -> [u32; 4] {
+    [
+        value.low as u32,
+        (value.low >> 32) as u32,
+        value.high as u64 as u32,
+        ((value.high as u64) >> 32) as u32,
+    ]
+}
+
 fn synchronize_vector_state(context: &mut ContextRecord) {
+    context.context_flags |=
+        CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_FLOATING_POINT;
+    if context.floating_control_word == 0 {
+        context.floating_control_word = DEFAULT_X87_CONTROL_WORD;
+    }
+    if context.floating_tag_word == 0 {
+        context.floating_tag_word = DEFAULT_X87_TAG_WORD;
+    }
+    if context.floating_mx_csr_mask == 0 {
+        context.floating_mx_csr_mask = DEFAULT_MXCSR_MASK;
+    }
+    context.floating_mx_csr = context.mx_csr;
+    context.header_registers = pack_x87_header_registers(context);
     for (index, value) in context.xmm_registers.iter().copied().enumerate() {
+        if index < context.legacy_float_registers.len() {
+            context.legacy_float_registers[index] = value;
+        }
         if index < context.vector_registers.len() {
             context.vector_registers[index] = value;
         }
+        let qword_index = index * 2;
+        if qword_index + 1 < context.double_registers.len() {
+            let pair = split_m128a_to_u64_pair(value);
+            context.double_registers[qword_index] = pair[0];
+            context.double_registers[qword_index + 1] = pair[1];
+        }
+    }
+    for (index, value) in context
+        .legacy_float_registers
+        .iter()
+        .copied()
+        .enumerate()
+        .take(context.scalar_registers.len() / 4)
+    {
+        let scalar_index = index * 4;
+        let quads = split_m128a_to_u32_quads(value);
+        context.scalar_registers[scalar_index..scalar_index + 4].copy_from_slice(&quads);
     }
     context.vector_control = context.mx_csr as u64;
 }
@@ -2850,8 +2960,34 @@ mod tests {
         assert_eq!(context.rsp, stack.as_ptr() as u64 + 8);
         assert_eq!(context.xmm_registers[1], xmm1);
         assert_eq!(context.xmm_registers[2], xmm2);
+        assert_eq!(context.legacy_float_registers[1], xmm1);
+        assert_eq!(context.legacy_float_registers[2], xmm2);
         assert_eq!(context.vector_registers[1], xmm1);
         assert_eq!(context.vector_registers[2], xmm2);
+        assert_eq!(context.floating_control_word, DEFAULT_X87_CONTROL_WORD);
+        assert_eq!(context.floating_tag_word, DEFAULT_X87_TAG_WORD);
+        assert_eq!(context.floating_mx_csr, context.mx_csr);
+        assert_eq!(context.floating_mx_csr_mask, DEFAULT_MXCSR_MASK);
+        assert_eq!(
+            context.header_registers[0].low,
+            (DEFAULT_X87_CONTROL_WORD as u64) | ((DEFAULT_X87_TAG_WORD as u64) << 32)
+        );
+        assert_eq!(
+            context.header_registers[1].high as u64,
+            (context.mx_csr as u64) | ((DEFAULT_MXCSR_MASK as u64) << 32)
+        );
+        assert_eq!(context.double_registers[2], xmm1.low);
+        assert_eq!(context.double_registers[3], xmm1.high as u64);
+        assert_eq!(context.double_registers[4], xmm2.low);
+        assert_eq!(context.double_registers[5], xmm2.high as u64);
+        assert_eq!(context.scalar_registers[4], xmm1.low as u32);
+        assert_eq!(context.scalar_registers[5], (xmm1.low >> 32) as u32);
+        assert_eq!(context.scalar_registers[6], xmm1.high as u64 as u32);
+        assert_eq!(
+            context.scalar_registers[7],
+            ((xmm1.high as u64) >> 32) as u32
+        );
+        assert_ne!(context.context_flags & CONTEXT_FLOATING_POINT, 0);
         assert_eq!(context.vector_control, context.mx_csr as u64);
         assert_eq!(context.last_branch_from_rip, image.as_ptr() as u64 + 0x1000);
         assert_eq!(context.last_branch_to_rip, stack[0]);

@@ -109,6 +109,7 @@ pub const DISP_E_UNKNOWNNAME: HRESULT = 0x8002_0006u32 as i32;
 pub const STG_E_INVALIDPOINTER: HRESULT = 0x8003_0009u32 as i32;
 pub const STG_E_REVERTED: HRESULT = 0x8003_0102u32 as i32;
 pub const TYPE_E_ELEMENTNOTFOUND: HRESULT = 0x8002_802Bu32 as i32;
+pub const TYPE_E_LIBNOTREGISTERED: HRESULT = 0x8002_801Du32 as i32;
 pub const TYPE_E_CANTLOADLIBRARY: HRESULT = 0x8002_9C4Au32 as i32;
 pub const CLSCTX_INPROC_SERVER: DWORD = 0x1;
 pub const CLSCTX_LOCAL_SERVER: DWORD = 0x4;
@@ -194,6 +195,7 @@ pub const WS_OVERLAPPEDWINDOW: DWORD =
     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
 pub const WS_VISIBLE: DWORD = 0x10000000;
 pub const WS_CHILD: DWORD = 0x40000000;
+pub const WS_TABSTOP: DWORD = 0x00010000;
 
 // Show window commands
 pub const SW_HIDE: INT = 0;
@@ -205,6 +207,7 @@ pub const SW_SHOW: INT = 5;
 // Message constants
 pub const WM_NULL: UINT = 0x0000;
 pub const WM_CREATE: UINT = 0x0001;
+pub const WM_NCCREATE: UINT = 0x0081;
 pub const WM_DESTROY: UINT = 0x0002;
 pub const WM_MOVE: UINT = 0x0003;
 pub const WM_SIZE: UINT = 0x0005;
@@ -282,17 +285,17 @@ pub const OBJ_PAL: UINT = 5;
 pub const OBJ_FONT: UINT = 6;
 pub const OBJ_REGION: UINT = 8;
 
-pub const WHITE_BRUSH: INT = 0;
-pub const LTGRAY_BRUSH: INT = 1;
-pub const GRAY_BRUSH: INT = 2;
-pub const DKGRAY_BRUSH: INT = 3;
-pub const BLACK_BRUSH: INT = 4;
-pub const NULL_BRUSH: INT = 5;
-pub const WHITE_PEN: INT = 6;
-pub const BLACK_PEN: INT = 7;
-pub const NULL_PEN: INT = 8;
-pub const SYSTEM_FONT: INT = 13;
-pub const DEFAULT_GUI_FONT: INT = 17;
+pub const WHITE_BRUSH: INT = 0x0100;
+pub const LTGRAY_BRUSH: INT = 0x0101;
+pub const GRAY_BRUSH: INT = 0x0102;
+pub const DKGRAY_BRUSH: INT = 0x0103;
+pub const BLACK_BRUSH: INT = 0x0104;
+pub const NULL_BRUSH: INT = 0x0105;
+pub const WHITE_PEN: INT = 0x0106;
+pub const BLACK_PEN: INT = 0x0107;
+pub const NULL_PEN: INT = 0x0108;
+pub const SYSTEM_FONT: INT = 0x010D;
+pub const DEFAULT_GUI_FONT: INT = 0x0111;
 pub const COLOR_MENU: DWORD = 4;
 pub const COLOR_MENUTEXT: DWORD = 7;
 pub const COLOR_CAPTIONTEXT: DWORD = 9;
@@ -948,6 +951,13 @@ static WIN32_GMT_TM: Once<Mutex<tm>> = Once::new();
 static WIN32_LOCAL_TM: Once<Mutex<tm>> = Once::new();
 static WIN32_TIME_ASCII: Once<Mutex<Vec<i8>>> = Once::new();
 static WIN32_GETENV_BUFFER: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_STDIN_BUFFER: Once<Mutex<Vec<u8>>> = Once::new();
+static WIN32_STDIN_CURSOR: Once<Mutex<usize>> = Once::new();
+static WIN32_CRT_LOCALE: Once<Mutex<BTreeMap<INT, String>>> = Once::new();
+static WIN32_CRT_LOCALE_BUFFER: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_CRT_EXIT_STATUS: Once<Mutex<Option<INT>>> = Once::new();
+static WIN32_CRT_ATEXIT: Once<Mutex<Vec<usize>>> = Once::new();
+static WIN32_CRT_HOST_FILES: Once<Mutex<BTreeMap<String, Vec<u8>>>> = Once::new();
 static WIN32_COMMAND_LINE: Once<Box<[i8]>> = Once::new();
 
 /// Win32 file state tracking
@@ -959,13 +969,15 @@ struct Win32FileState {
     is_console: bool, // true for stdin/stdout/stderr
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Win32CrtStream {
     handle: HANDLE,
     eof: bool,
     error: bool,
     owns_handle: bool,
     append: bool,
+    backing_path: Option<String>,
+    position: usize,
 }
 
 /// Standard handles
@@ -1006,6 +1018,30 @@ static NEXT_COM_COOKIE: core::sync::atomic::AtomicU32 = core::sync::atomic::Atom
 static COM_CLASS_OBJECTS: Mutex<BTreeMap<String, ComClassObject>> = Mutex::new(BTreeMap::new());
 static NEXT_COM_STREAM_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 static COM_MARSHAL_STREAMS: Mutex<BTreeMap<u64, ComMarshalStreamState>> =
+    Mutex::new(BTreeMap::new());
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+static NEXT_HOST_WIN32_THREAD_KEY: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(1);
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+std::thread_local! {
+    static HOST_WIN32_THREAD_KEY: u64 =
+        NEXT_HOST_WIN32_THREAD_KEY.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+}
+static REGISTERED_TYPE_LIBRARIES: Mutex<BTreeMap<String, RegisteredTypeLibState>> =
     Mutex::new(BTreeMap::new());
 static WIN32_THREAD_LAUNCHES: Mutex<BTreeMap<u64, Win32ThreadLaunch>> = Mutex::new(BTreeMap::new());
 static WIN32_PROCESS_LAUNCHES: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
@@ -1054,6 +1090,12 @@ struct InternetProxyRoute {
     authorization: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InternetProxyPlan {
+    routes: Vec<InternetProxyRoute>,
+    direct_fallback: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ComClassObject {
     factory: usize,
@@ -1067,6 +1109,7 @@ struct ComMarshalStreamState {
     object: usize,
     iid_key: String,
     payload: Vec<u8>,
+    consumed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1099,6 +1142,12 @@ struct ComTypeLibState {
     lcid: LCID,
     syskind: DWORD,
     type_infos: Vec<ComTypeInfoState>,
+}
+
+#[derive(Clone, Debug)]
+struct RegisteredTypeLibState {
+    state: ComTypeLibState,
+    help_dir: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1174,6 +1223,7 @@ struct ComTypeInfoObject {
     index: u32,
 }
 
+#[repr(C)]
 #[derive(Clone, Debug)]
 struct ComTypeCompObject {
     vtable: *const usize,
@@ -1210,6 +1260,7 @@ pub struct Win32Window {
     pub hwnd: u64,
     pub class_name: String,
     pub title: String,
+    pub properties: BTreeMap<String, usize>,
     pub x: i32,
     pub y: i32,
     pub width: i32,
@@ -1707,8 +1758,57 @@ pub fn module_for_handle(hmod: u64) -> Option<String> {
     DLL_HANDLES.lock().get(&hmod).cloned()
 }
 
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+fn current_win32_thread_key() -> u64 {
+    HOST_WIN32_THREAD_KEY.with(|key| *key)
+}
+
+#[cfg(not(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+)))]
 fn current_win32_thread_key() -> u64 {
     crate::task::scheduler::current_task_id() as u64
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+fn current_unix_time_seconds() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+)))]
+fn current_unix_time_seconds() -> u64 {
+    crate::drivers::rtc::get_unix_time()
 }
 
 fn current_win32_process_key() -> u64 {
@@ -1762,6 +1862,229 @@ unsafe fn read_ansi_string(ptr: LPCSTR) -> String {
     out
 }
 
+unsafe fn read_ansi_string_counted(ptr: LPCSTR, count: INT) -> String {
+    if ptr.is_null() || count == 0 {
+        return String::new();
+    }
+    if count < 0 {
+        return read_ansi_string(ptr);
+    }
+    let mut out = String::new();
+    let mut cursor = ptr;
+    for _ in 0..count {
+        if *cursor == 0 {
+            break;
+        }
+        out.push(*cursor as u8 as char);
+        cursor = cursor.add(1);
+    }
+    out
+}
+
+fn text_metrics_for_dc(dc: &Win32DC) -> (INT, INT) {
+    let height = dc.font_height.abs().max(8);
+    let width = (height / 2).max(1);
+    (width, height)
+}
+
+fn pack_text_extent(width: INT, height: INT) -> DWORD {
+    ((height.max(0) as u32 & 0xFFFF) << 16) | (width.max(0) as u32 & 0xFFFF)
+}
+
+fn string_pixel_width(text: &str, char_width: INT) -> INT {
+    (text.chars().count() as INT).saturating_mul(char_width.max(1))
+}
+
+fn wrap_text_lines(text: &str, max_chars: usize, single_line: bool) -> Vec<String> {
+    if single_line || max_chars == 0 {
+        return vec![text.replace('\n', " ")];
+    }
+    let mut lines = Vec::new();
+    for raw_line in text.split('\n') {
+        let mut current = String::new();
+        for word in raw_line.split_whitespace() {
+            let projected = if current.is_empty() {
+                word.len()
+            } else {
+                current.len() + 1 + word.len()
+            };
+            if projected > max_chars && !current.is_empty() {
+                lines.push(current.clone());
+                current.clear();
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            if word.len() > max_chars && max_chars > 0 {
+                let mut chars = word.chars().peekable();
+                while chars.peek().is_some() {
+                    if current.len() == max_chars {
+                        lines.push(current.clone());
+                        current.clear();
+                    }
+                    while current.len() < max_chars {
+                        let Some(ch) = chars.next() else {
+                            break;
+                        };
+                        current.push(ch);
+                    }
+                    if chars.peek().is_some() && !current.is_empty() {
+                        lines.push(current.clone());
+                        current.clear();
+                    }
+                }
+            } else {
+                current.push_str(word);
+            }
+        }
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn expand_tabs_to_columns(
+    text: &str,
+    tab_positions: &[INT],
+    tab_origin: INT,
+    char_width: INT,
+) -> String {
+    let mut out = String::new();
+    let mut cursor_px = tab_origin.max(0);
+    let width = char_width.max(1);
+    for ch in text.chars() {
+        if ch == '\t' {
+            let default_step = width * 8;
+            let next_stop = tab_positions
+                .iter()
+                .copied()
+                .filter(|stop| *stop > cursor_px)
+                .min()
+                .unwrap_or_else(|| {
+                    let base = if cursor_px <= tab_origin {
+                        tab_origin
+                    } else {
+                        cursor_px
+                    };
+                    let delta = base - tab_origin;
+                    tab_origin + (((delta / default_step) + 1) * default_step)
+                });
+            let spaces = ((next_stop - cursor_px) / width).max(1) as usize;
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            cursor_px = next_stop;
+        } else {
+            out.push(ch);
+            cursor_px += width;
+        }
+    }
+    out
+}
+
+fn draw_text_line_on_window(
+    window: &mut Win32Window,
+    clip_region: HRGN,
+    mut x: INT,
+    y: INT,
+    text: &str,
+    text_color: DWORD,
+    bk_color: DWORD,
+    bk_mode: INT,
+    dx: Option<&[INT]>,
+    clip_rect: Option<RECT>,
+    char_width: INT,
+    char_height: INT,
+) -> RECT {
+    let mut right = x;
+    let left = x;
+    let rect = clip_rect.map(normalize_rect);
+    let r = ((text_color >> 16) & 0xFF) as u8;
+    let g = ((text_color >> 8) & 0xFF) as u8;
+    let b = (text_color & 0xFF) as u8;
+    let br = ((bk_color >> 16) & 0xFF) as u8;
+    let bg = ((bk_color >> 8) & 0xFF) as u8;
+    let bb = (bk_color & 0xFF) as u8;
+
+    for (index, ch) in text.chars().enumerate() {
+        let advance = dx
+            .and_then(|entries| entries.get(index).copied())
+            .unwrap_or(char_width)
+            .max(1);
+        let glyph = crate::win32::gdi32::get_ascii_glyph(ch);
+        for row in 0..char_height {
+            let py = y + row;
+            if py < 0 || py >= window.height {
+                continue;
+            }
+            let bits = glyph[row as usize];
+            for col in 0..advance {
+                let px = x + col;
+                if px < 0 || px >= window.width {
+                    continue;
+                }
+                if clip_region != 0 && !region_contains_point(clip_region, px, py) {
+                    continue;
+                }
+                if let Some(rect) = rect {
+                    if px < rect.left || py < rect.top || px >= rect.right || py >= rect.bottom {
+                        continue;
+                    }
+                }
+                let idx = ((py as usize) * window.width as usize + px as usize) * 4;
+                if idx + 3 >= window.surface.len() {
+                    continue;
+                }
+                let glyph_on = col < char_width && (bits & (1 << (7 - col.min(7)))) != 0;
+                if glyph_on {
+                    window.surface[idx] = b;
+                    window.surface[idx + 1] = g;
+                    window.surface[idx + 2] = r;
+                    window.surface[idx + 3] = 0xFF;
+                } else if bk_mode == 2 {
+                    window.surface[idx] = bb;
+                    window.surface[idx + 1] = bg;
+                    window.surface[idx + 2] = br;
+                    window.surface[idx + 3] = 0xFF;
+                }
+            }
+        }
+        x += advance;
+        right = x;
+    }
+    normalize_rect(RECT {
+        left,
+        top: y,
+        right: right.max(left),
+        bottom: y + char_height,
+    })
+}
+
+fn fill_window_rect(window: &mut Win32Window, clip_region: HRGN, rect: RECT, color: DWORD) -> RECT {
+    let rect = normalize_rect(rect);
+    let r = ((color >> 16) & 0xFF) as u8;
+    let g = ((color >> 8) & 0xFF) as u8;
+    let b = (color & 0xFF) as u8;
+    for y in rect.top.max(0)..rect.bottom.min(window.height) {
+        for x in rect.left.max(0)..rect.right.min(window.width) {
+            if clip_region != 0 && !region_contains_point(clip_region, x, y) {
+                continue;
+            }
+            let idx = ((y as usize) * window.width as usize + x as usize) * 4;
+            if idx + 3 >= window.surface.len() {
+                continue;
+            }
+            window.surface[idx] = b;
+            window.surface[idx + 1] = g;
+            window.surface[idx + 2] = r;
+            window.surface[idx + 3] = 0xFF;
+        }
+    }
+    rect
+}
+
 fn current_directory_state() -> &'static Mutex<String> {
     WIN32_CURRENT_DIRECTORY.call_once(|| Mutex::new(String::from("/")))
 }
@@ -1794,6 +2117,38 @@ fn time_ascii_state() -> &'static Mutex<Vec<i8>> {
 
 fn getenv_buffer_state() -> &'static Mutex<Vec<i8>> {
     WIN32_GETENV_BUFFER.call_once(|| Mutex::new(vec![0]))
+}
+
+fn stdin_buffer_state() -> &'static Mutex<Vec<u8>> {
+    WIN32_STDIN_BUFFER.call_once(|| Mutex::new(Vec::new()))
+}
+
+fn stdin_cursor_state() -> &'static Mutex<usize> {
+    WIN32_STDIN_CURSOR.call_once(|| Mutex::new(0))
+}
+
+fn crt_locale_state() -> &'static Mutex<BTreeMap<INT, String>> {
+    WIN32_CRT_LOCALE.call_once(|| {
+        let mut locale = BTreeMap::new();
+        locale.insert(0, String::from("C"));
+        Mutex::new(locale)
+    })
+}
+
+fn crt_locale_buffer_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_CRT_LOCALE_BUFFER.call_once(|| Mutex::new(vec![0]))
+}
+
+fn crt_exit_status_state() -> &'static Mutex<Option<INT>> {
+    WIN32_CRT_EXIT_STATUS.call_once(|| Mutex::new(None))
+}
+
+fn crt_atexit_state() -> &'static Mutex<Vec<usize>> {
+    WIN32_CRT_ATEXIT.call_once(|| Mutex::new(Vec::new()))
+}
+
+fn crt_host_files_state() -> &'static Mutex<BTreeMap<String, Vec<u8>>> {
+    WIN32_CRT_HOST_FILES.call_once(|| Mutex::new(BTreeMap::new()))
 }
 
 fn command_line_state() -> &'static [i8] {
@@ -1879,6 +2234,14 @@ unsafe fn write_shared_ansi_buffer(store: &'static Mutex<Vec<i8>>, text: &str) -
     buffer.extend(text.as_bytes().iter().map(|&b| b as i8));
     buffer.push(0);
     buffer.as_mut_ptr()
+}
+
+#[cfg(test)]
+fn set_test_stdin(text: &str) {
+    let mut buffer = stdin_buffer_state().lock();
+    buffer.clear();
+    buffer.extend_from_slice(text.as_bytes());
+    *stdin_cursor_state().lock() = 0;
 }
 
 fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
@@ -2170,9 +2533,17 @@ fn normalize_rect(rect: RECT) -> RECT {
 }
 
 fn window_nc_metrics(style: DWORD, has_menu: bool) -> (INT, INT, INT) {
-    let border = if (style & WS_CAPTION) != 0 { 1 } else { 0 };
-    let caption = if (style & WS_CAPTION) != 0 { 24 } else { 0 };
-    let menu = if has_menu { 18 } else { 0 };
+    let sizable_frame = (style & WS_THICKFRAME) != 0;
+    let captioned = (style & WS_CAPTION) != 0;
+    let border = if sizable_frame || captioned {
+        8
+    } else if style != 0 {
+        1
+    } else {
+        0
+    };
+    let caption = if captioned { 23 } else { 0 };
+    let menu = if has_menu { 19 } else { 0 };
     (border, caption, menu)
 }
 
@@ -2329,6 +2700,47 @@ fn mark_gdi_handle_released(handle: u64) {
     }
 }
 
+fn detach_gdi_handle_from_window_dcs(handle: u64, object_type: DWORD) -> u32 {
+    if handle == 0 {
+        return 0;
+    }
+    let mut detached = 0u32;
+    let mut dcs = WIN32_DCS.lock();
+    for dc in dcs.values_mut() {
+        if dc.device_kind != Win32DcKind::Window {
+            continue;
+        }
+        match object_type {
+            x if x == OBJ_PEN as DWORD && dc.selected_pen as u64 == handle => {
+                dc.selected_pen = BLACK_PEN as HPEN;
+                dc.pen_color = pen_color(dc.selected_pen).unwrap_or(0x000000);
+                detached = detached.saturating_add(1);
+            }
+            x if x == OBJ_BRUSH as DWORD && dc.selected_brush as u64 == handle => {
+                dc.selected_brush = WHITE_BRUSH as HBRUSH;
+                dc.brush_color = brush_color(dc.selected_brush).unwrap_or(0xFFFFFF);
+                detached = detached.saturating_add(1);
+            }
+            x if x == OBJ_FONT as DWORD && dc.selected_font as u64 == handle => {
+                dc.selected_font = DEFAULT_GUI_FONT as HFONT;
+                dc.font_height = 16;
+                dc.font_weight = 400;
+                detached = detached.saturating_add(1);
+            }
+            x if x == OBJ_REGION as DWORD && dc.clip_region as u64 == handle => {
+                dc.clip_region = 0;
+                detached = detached.saturating_add(1);
+            }
+            x if x == OBJ_PAL as DWORD && dc.selected_palette as u64 == handle => {
+                dc.selected_palette = 0;
+                detached = detached.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    detached
+}
+
 fn remove_gdi_payload(handle: u64) -> bool {
     if WIN32_PENS.lock().remove(&handle).is_some() {
         return true;
@@ -2363,6 +2775,26 @@ unsafe fn dialog_nav_target(hdlg: HWND, nav: Win32DialogNav) -> HWND {
 }
 
 fn restore_dc_state(dc: &mut Win32DC, snapshot: Win32DCSnapshot) {
+    if dc.selected_pen != snapshot.selected_pen {
+        mark_gdi_handle_released(dc.selected_pen as u64);
+        mark_gdi_handle_selected(snapshot.selected_pen as u64, OBJ_PEN as DWORD);
+    }
+    if dc.selected_brush != snapshot.selected_brush {
+        mark_gdi_handle_released(dc.selected_brush as u64);
+        mark_gdi_handle_selected(snapshot.selected_brush as u64, OBJ_BRUSH as DWORD);
+    }
+    if dc.selected_font != snapshot.selected_font {
+        mark_gdi_handle_released(dc.selected_font as u64);
+        mark_gdi_handle_selected(snapshot.selected_font as u64, OBJ_FONT as DWORD);
+    }
+    if dc.selected_palette != snapshot.selected_palette {
+        mark_gdi_handle_released(dc.selected_palette as u64);
+        mark_gdi_handle_selected(snapshot.selected_palette as u64, OBJ_PAL as DWORD);
+    }
+    if dc.clip_region != snapshot.clip_region {
+        mark_gdi_handle_released(dc.clip_region as u64);
+        mark_gdi_handle_selected(snapshot.clip_region as u64, OBJ_REGION as DWORD);
+    }
     dc.pen_color = snapshot.pen_color;
     dc.brush_color = snapshot.brush_color;
     dc.text_color = snapshot.text_color;
@@ -2403,11 +2835,78 @@ fn record_metafile_command(dc: &Win32DC, command: Win32MetaCommand) {
     }
 }
 
+fn scale_meta_coord(value: INT, source_extent: INT, target_origin: INT, target_extent: INT) -> INT {
+    if source_extent <= 0 || target_extent <= 0 {
+        return target_origin;
+    }
+    target_origin + ((value as i64 * target_extent as i64) / source_extent as i64) as INT
+}
+
+fn scale_meta_rect(rect: RECT, source: &Win32MetaFile, target: RECT) -> RECT {
+    RECT {
+        left: scale_meta_coord(
+            rect.left,
+            source.width,
+            target.left,
+            target.right - target.left,
+        ),
+        top: scale_meta_coord(
+            rect.top,
+            source.height,
+            target.top,
+            target.bottom - target.top,
+        ),
+        right: scale_meta_coord(
+            rect.right,
+            source.width,
+            target.left,
+            target.right - target.left,
+        ),
+        bottom: scale_meta_coord(
+            rect.bottom,
+            source.height,
+            target.top,
+            target.bottom - target.top,
+        ),
+    }
+}
+
+fn scale_meta_point(point: POINT, source: &Win32MetaFile, target: RECT) -> POINT {
+    POINT {
+        x: scale_meta_coord(
+            point.x,
+            source.width,
+            target.left,
+            target.right - target.left,
+        ),
+        y: scale_meta_coord(
+            point.y,
+            source.height,
+            target.top,
+            target.bottom - target.top,
+        ),
+    }
+}
+
+fn scale_meta_size(size: SIZE, source: &Win32MetaFile, target: RECT) -> SIZE {
+    SIZE {
+        cx: scale_meta_coord(size.cx, source.width, 0, target.right - target.left),
+        cy: scale_meta_coord(size.cy, source.height, 0, target.bottom - target.top),
+    }
+}
+
 unsafe fn replay_metafile_commands(
     dst_hdc: HDC,
+    source: &Win32MetaFile,
     commands: &[Win32MetaCommand],
     target: Option<RECT>,
 ) {
+    let bounds = target.unwrap_or(RECT {
+        left: 0,
+        top: 0,
+        right: source.width,
+        bottom: source.height,
+    });
     for command in commands {
         match command {
             Win32MetaCommand::Line {
@@ -2417,13 +2916,16 @@ unsafe fn replay_metafile_commands(
                 y1,
                 color,
             } => {
+                let p0 = scale_meta_point(POINT { x: *x0, y: *y0 }, source, bounds);
+                let p1 = scale_meta_point(POINT { x: *x1, y: *y1 }, source, bounds);
                 if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
                     dc.pen_color = *color;
                 }
-                let _ = gdi32::move_to_ex(dst_hdc, *x0, *y0, core::ptr::null_mut());
-                let _ = gdi32::line_to(dst_hdc, *x1, *y1);
+                let _ = gdi32::move_to_ex(dst_hdc, p0.x, p0.y, core::ptr::null_mut());
+                let _ = gdi32::line_to(dst_hdc, p1.x, p1.y);
             }
             Win32MetaCommand::Rect { rect, fill, stroke } => {
+                let scaled = scale_meta_rect(*rect, source, bounds);
                 if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
                     if let Some(fill) = fill {
                         dc.brush_color = *fill;
@@ -2432,9 +2934,16 @@ unsafe fn replay_metafile_commands(
                         dc.pen_color = *stroke;
                     }
                 }
-                let _ = gdi32::rectangle(dst_hdc, rect.left, rect.top, rect.right, rect.bottom);
+                let _ = gdi32::rectangle(
+                    dst_hdc,
+                    scaled.left,
+                    scaled.top,
+                    scaled.right,
+                    scaled.bottom,
+                );
             }
             Win32MetaCommand::Ellipse { rect, fill, stroke } => {
+                let scaled = scale_meta_rect(*rect, source, bounds);
                 if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
                     if let Some(fill) = fill {
                         dc.brush_color = *fill;
@@ -2443,7 +2952,13 @@ unsafe fn replay_metafile_commands(
                         dc.pen_color = *stroke;
                     }
                 }
-                let _ = gdi32::ellipse(dst_hdc, rect.left, rect.top, rect.right, rect.bottom);
+                let _ = gdi32::ellipse(
+                    dst_hdc,
+                    scaled.left,
+                    scaled.top,
+                    scaled.right,
+                    scaled.bottom,
+                );
             }
             Win32MetaCommand::RoundRect {
                 rect,
@@ -2451,6 +2966,8 @@ unsafe fn replay_metafile_commands(
                 fill,
                 stroke,
             } => {
+                let scaled_rect = scale_meta_rect(*rect, source, bounds);
+                let scaled_ellipse = scale_meta_size(*ellipse, source, bounds);
                 if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
                     if let Some(fill) = fill {
                         dc.brush_color = *fill;
@@ -2461,12 +2978,12 @@ unsafe fn replay_metafile_commands(
                 }
                 let _ = gdi32::round_rect(
                     dst_hdc,
-                    rect.left,
-                    rect.top,
-                    rect.right,
-                    rect.bottom,
-                    ellipse.cx,
-                    ellipse.cy,
+                    scaled_rect.left,
+                    scaled_rect.top,
+                    scaled_rect.right,
+                    scaled_rect.bottom,
+                    scaled_ellipse.cx,
+                    scaled_ellipse.cy,
                 );
             }
             Win32MetaCommand::Polygon {
@@ -2474,6 +2991,11 @@ unsafe fn replay_metafile_commands(
                 fill,
                 stroke,
             } => {
+                let scaled_points: Vec<POINT> = points
+                    .iter()
+                    .copied()
+                    .map(|point| scale_meta_point(point, source, bounds))
+                    .collect();
                 if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
                     if let Some(fill) = fill {
                         dc.brush_color = *fill;
@@ -2482,33 +3004,56 @@ unsafe fn replay_metafile_commands(
                         dc.pen_color = *stroke;
                     }
                 }
-                let _ = gdi32::polygon(dst_hdc, points.as_ptr(), points.len() as INT);
+                let _ = gdi32::polygon(dst_hdc, scaled_points.as_ptr(), scaled_points.len() as INT);
             }
             Win32MetaCommand::Text { x, y, text, color } => {
+                let point = scale_meta_point(POINT { x: *x, y: *y }, source, bounds);
                 if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
                     dc.text_color = *color;
                 }
                 let mut bytes = text.clone().into_bytes();
                 bytes.push(0);
-                let _ =
-                    gdi32::text_out_a(dst_hdc, *x, *y, bytes.as_ptr() as LPCSTR, text.len() as INT);
+                let _ = gdi32::text_out_a(
+                    dst_hdc,
+                    point.x,
+                    point.y,
+                    bytes.as_ptr() as LPCSTR,
+                    text.len() as INT,
+                );
             }
             Win32MetaCommand::PatBlt { rect, color, rop } => {
+                let scaled = scale_meta_rect(*rect, source, bounds);
                 if let Some(dc) = WIN32_DCS.lock().get_mut(&(dst_hdc as u64)) {
                     dc.brush_color = *color;
                 }
-                let bounds = target.unwrap_or(*rect);
                 let _ = gdi32::pat_blt(
                     dst_hdc,
-                    bounds.left,
-                    bounds.top,
-                    bounds.right - bounds.left,
-                    bounds.bottom - bounds.top,
+                    scaled.left,
+                    scaled.top,
+                    scaled.right - scaled.left,
+                    scaled.bottom - scaled.top,
                     *rop,
                 );
             }
         }
     }
+}
+
+fn cleanup_dc_for_drop(dc: &Win32DC) {
+    if dc.current_print_job != 0 {
+        if dc.recording_metafile != 0 {
+            WIN32_METAFILES
+                .lock()
+                .remove(&(dc.recording_metafile as u64));
+        }
+        WIN32_PRINT_JOBS.lock().remove(&dc.current_print_job);
+    }
+    mark_gdi_handle_released(dc.selected_pen as u64);
+    mark_gdi_handle_released(dc.selected_brush as u64);
+    mark_gdi_handle_released(dc.selected_font as u64);
+    mark_gdi_handle_released(dc.selected_palette as u64);
+    mark_gdi_handle_released(dc.clip_region as u64);
+    WIN32_GDI_HANDLES.lock().remove(&(dc.hdc as u64));
 }
 
 fn fill_fb_rect(fb: &mut crate::gop::framebuffer::Framebuffer, rect: RECT, color: u32, alpha: u8) {
@@ -2776,6 +3321,18 @@ fn region_intersects_rect(handle: HRGN, rect: RECT) -> bool {
         }
     }
     false
+}
+
+fn clone_region_state(handle: HRGN) -> Option<Win32Region> {
+    WIN32_REGIONS.lock().get(&(handle as u64)).cloned()
+}
+
+fn allocate_region_from_state(mut region: Win32Region) -> HRGN {
+    let handle = NEXT_HRGN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    region.handle = handle as HRGN;
+    WIN32_REGIONS.lock().insert(handle, region);
+    register_gdi_handle(handle, OBJ_REGION as DWORD, false);
+    handle as HRGN
 }
 
 unsafe fn read_utf16_string(ptr: LPCWSTR) -> String {
@@ -3104,22 +3661,49 @@ fn win32_thread_start_trampoline() -> ! {
     crate::task::scheduler::exit(exit_code as i32)
 }
 
+fn is_private_or_loopback_ipv4(octets: [u8; 4]) -> bool {
+    match octets {
+        [10, ..] | [127, ..] | [169, 254, ..] | [192, 168, ..] => true,
+        [172, second, ..] => (16..=31).contains(&second),
+        _ => false,
+    }
+}
+
+fn is_local_ipv6_host(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    if lower == "::1"
+        || lower.starts_with("fe80:")
+        || lower.starts_with("fc")
+        || lower.starts_with("fd")
+    {
+        return true;
+    }
+    let unscoped = host
+        .trim()
+        .trim_matches('[')
+        .trim_matches(']')
+        .split('%')
+        .next()
+        .unwrap_or("");
+    let Ok(addr) = <crate::net::ipv6::Ipv6Addr as core::str::FromStr>::from_str(unscoped) else {
+        return false;
+    };
+    let bytes = addr.as_bytes();
+    bytes == &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        || (bytes[0] & 0xfe) == 0xfc
+        || (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80)
+}
+
 fn internet_host_is_local(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
-    !host.contains('.') && !host.contains(':')
+    (!host.contains('.') && !host.contains(':'))
         || lower == "localhost"
-        || lower == "127.0.0.1"
-        || lower == "::1"
-        || lower.starts_with("10.")
-        || lower.starts_with("192.168.")
-        || lower.starts_with("172.16.")
-        || lower.starts_with("172.17.")
-        || lower.starts_with("172.18.")
-        || lower.starts_with("172.19.")
-        || lower.starts_with("172.2")
-        || lower.starts_with("172.30.")
-        || lower.starts_with("172.31.")
+        || lower.ends_with(".localhost")
         || lower.ends_with(".local")
+        || parse_ipv4_literal(&lower)
+            .map(is_private_or_loopback_ipv4)
+            .unwrap_or(false)
+        || is_local_ipv6_host(&lower)
 }
 
 fn internet_proxy_bypasses_host(proxy_bypass: &str, host: &str) -> bool {
@@ -3163,13 +3747,18 @@ fn proxy_policy_requires_autoconfig(proxy_name: &str) -> bool {
 }
 
 fn proxy_autoconfig_source(proxy_name: &str) -> Option<String> {
+    let mut explicit = None;
+    let mut wpad = None;
     for token in proxy_name.split(';').map(|part| part.trim()) {
         if token.is_empty() {
             continue;
         }
         let lower = token.to_ascii_lowercase();
         if lower == "wpad" {
-            return Some("http://wpad/wpad.dat".to_string());
+            if wpad.is_none() {
+                wpad = Some("http://wpad/wpad.dat".to_string());
+            }
+            continue;
         }
         if let Some((key, value)) = token.split_once('=') {
             let key = key.trim().to_ascii_lowercase();
@@ -3177,8 +3766,15 @@ fn proxy_autoconfig_source(proxy_name: &str) -> Option<String> {
             if value.is_empty() {
                 continue;
             }
-            if matches!(key.as_str(), "auto" | "config" | "wpad") {
-                return Some(value.to_string());
+            if matches!(key.as_str(), "auto" | "config") {
+                explicit = Some(value.to_string());
+                continue;
+            }
+            if key == "wpad" {
+                if explicit.is_none() {
+                    explicit = Some(value.to_string());
+                }
+                continue;
             }
         }
         if lower.ends_with(".pac")
@@ -3189,10 +3785,12 @@ fn proxy_autoconfig_source(proxy_name: &str) -> Option<String> {
             || lower.starts_with("file://")
             || token.starts_with('/')
         {
-            return Some(token.to_string());
+            if explicit.is_none() {
+                explicit = Some(token.to_string());
+            }
         }
     }
-    None
+    explicit.or(wpad)
 }
 
 fn wpad_candidate_sources(source: &str, host: &str) -> Vec<String> {
@@ -3276,12 +3874,26 @@ fn ipv4_to_string(octets: [u8; 4]) -> String {
 }
 
 fn pac_current_tm() -> tm {
-    let unix = crate::drivers::rtc::get_unix_time();
+    let unix = crate::win32::current_unix_time_seconds();
     unix_seconds_to_tm(unix as i64)
 }
 
+fn pac_current_tm_gmt() -> tm {
+    pac_current_tm()
+}
+
+fn pac_trim_string_token(value: &str) -> &str {
+    value.trim().trim_matches('"').trim_matches('\'')
+}
+
+fn pac_args_use_gmt(args: &[&str]) -> bool {
+    args.last()
+        .map(|value| pac_trim_string_token(value).eq_ignore_ascii_case("gmt"))
+        .unwrap_or(false)
+}
+
 fn pac_weekday_index(name: &str) -> Option<i32> {
-    match name.trim().to_ascii_uppercase().as_str() {
+    match pac_trim_string_token(name).to_ascii_uppercase().as_str() {
         "SUN" => Some(0),
         "MON" => Some(1),
         "TUE" | "TUES" => Some(2),
@@ -3294,7 +3906,7 @@ fn pac_weekday_index(name: &str) -> Option<i32> {
 }
 
 fn pac_month_index(name: &str) -> Option<u32> {
-    match name.trim().to_ascii_uppercase().as_str() {
+    match pac_trim_string_token(name).to_ascii_uppercase().as_str() {
         "JAN" => Some(1),
         "FEB" => Some(2),
         "MAR" => Some(3),
@@ -3351,12 +3963,7 @@ fn pac_parse_time_value(value: &str) -> Option<i32> {
 }
 
 fn pac_parse_day_value(value: &str) -> Option<u32> {
-    value
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .parse::<u32>()
-        .ok()
+    pac_trim_string_token(value).parse::<u32>().ok()
 }
 
 fn pac_weekday_in_range(current: i32, start: i32, end: i32) -> bool {
@@ -3460,6 +4067,27 @@ fn pac_value_expr(expr: &str, url: &str, host: &str) -> Option<String> {
         return Some("127.0.0.1;::1".to_string());
     }
     if let Some(argument) = expr
+        .strip_prefix("dnsResolveEx(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let value = pac_value_expr(argument, url, host)?;
+        if let Some(ip) = parse_ipv4_literal(&value) {
+            return Some(ipv4_to_string(ip));
+        }
+        if value.eq_ignore_ascii_case("localhost") {
+            return Some("127.0.0.1;::1".to_string());
+        }
+        let dns_server = crate::net::get_config()
+            .dns_servers
+            .first()
+            .copied()
+            .unwrap_or([8, 8, 8, 8]);
+        let dns_ip = crate::net::Ipv4Addr::from_bytes(dns_server);
+        return crate::net::dns::resolve(&value, dns_ip)
+            .ok()
+            .map(|ip| ipv4_to_string(*ip.as_bytes()));
+    }
+    if let Some(argument) = expr
         .strip_prefix("dnsResolve(")
         .and_then(|tail| tail.strip_suffix(')'))
     {
@@ -3534,12 +4162,49 @@ fn pac_condition_matches(condition: &str, url: &str, host: &str) -> bool {
                 .is_some();
     }
     if let Some(args) = condition
+        .strip_prefix("isResolvableEx(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let Some(value) = pac_value_expr(args, url, host) else {
+            return false;
+        };
+        return parse_ipv4_literal(&value).is_some()
+            || value.eq_ignore_ascii_case("localhost")
+            || <crate::net::ipv6::Ipv6Addr as core::str::FromStr>::from_str(
+                pac_trim_string_token(&value),
+            )
+            .is_ok()
+            || crate::net::get_config()
+                .dns_servers
+                .first()
+                .copied()
+                .and_then(|server| {
+                    crate::net::dns::resolve(&value, crate::net::Ipv4Addr::from_bytes(server)).ok()
+                })
+                .is_some();
+    }
+    if let Some(args) = condition
         .strip_prefix("dnsDomainLevels(")
         .and_then(|tail| tail.strip_suffix(')'))
     {
         let Some(value) = pac_value_expr(args, url, host) else {
             return false;
         };
+        return value.matches('.').count() > 0;
+    }
+    if let Some(args) = condition
+        .strip_prefix("dnsDomainLevelsEx(")
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let Some(value) = pac_value_expr(args, url, host) else {
+            return false;
+        };
+        let value = pac_trim_string_token(&value);
+        if parse_ipv4_literal(value).is_some()
+            || <crate::net::ipv6::Ipv6Addr as core::str::FromStr>::from_str(value).is_ok()
+        {
+            return false;
+        }
         return value.matches('.').count() > 0;
     }
     if let Some(args) = condition
@@ -3634,8 +4299,13 @@ fn pac_condition_matches(condition: &str, url: &str, host: &str) -> bool {
         .strip_prefix("weekdayRange(")
         .and_then(|tail| tail.strip_suffix(')'))
     {
-        let args = pac_split_args(args);
-        let tm_value = pac_current_tm();
+        let mut args = pac_split_args(args);
+        let tm_value = if pac_args_use_gmt(&args) {
+            args.pop();
+            pac_current_tm_gmt()
+        } else {
+            pac_current_tm()
+        };
         let current = tm_value.tm_wday;
         if args.is_empty() {
             return false;
@@ -3654,14 +4324,53 @@ fn pac_condition_matches(condition: &str, url: &str, host: &str) -> bool {
         .strip_prefix("timeRange(")
         .and_then(|tail| tail.strip_suffix(')'))
     {
-        let args = pac_split_args(args);
-        let tm_value = pac_current_tm();
+        let mut args = pac_split_args(args);
+        let tm_value = if pac_args_use_gmt(&args) {
+            args.pop();
+            pac_current_tm_gmt()
+        } else {
+            pac_current_tm()
+        };
         let current = tm_value.tm_hour * 3600 + tm_value.tm_min * 60 + tm_value.tm_sec;
         if args.is_empty() {
             return false;
         }
         if args.len() == 1 {
             return pac_parse_time_value(args[0]) == Some(current);
+        }
+        if args.len() == 4 {
+            let start = pac_parse_time_value(&alloc::format!(
+                "{}:{}",
+                pac_trim_string_token(args[0]),
+                pac_trim_string_token(args[1])
+            ));
+            let end = pac_parse_time_value(&alloc::format!(
+                "{}:{}",
+                pac_trim_string_token(args[2]),
+                pac_trim_string_token(args[3])
+            ));
+            return match (start, end) {
+                (Some(start), Some(end)) => pac_time_in_range(current, start, end),
+                _ => false,
+            };
+        }
+        if args.len() == 6 {
+            let start = pac_parse_time_value(&alloc::format!(
+                "{}:{}:{}",
+                pac_trim_string_token(args[0]),
+                pac_trim_string_token(args[1]),
+                pac_trim_string_token(args[2])
+            ));
+            let end = pac_parse_time_value(&alloc::format!(
+                "{}:{}:{}",
+                pac_trim_string_token(args[3]),
+                pac_trim_string_token(args[4]),
+                pac_trim_string_token(args[5])
+            ));
+            return match (start, end) {
+                (Some(start), Some(end)) => pac_time_in_range(current, start, end),
+                _ => false,
+            };
         }
         let start = pac_parse_time_value(args[0]);
         let end = pac_parse_time_value(args[1]);
@@ -3674,8 +4383,13 @@ fn pac_condition_matches(condition: &str, url: &str, host: &str) -> bool {
         .strip_prefix("dateRange(")
         .and_then(|tail| tail.strip_suffix(')'))
     {
-        let args = pac_split_args(args);
-        let tm_value = pac_current_tm();
+        let mut args = pac_split_args(args);
+        let tm_value = if pac_args_use_gmt(&args) {
+            args.pop();
+            pac_current_tm_gmt()
+        } else {
+            pac_current_tm()
+        };
         let current = ((tm_value.tm_mon + 1) as u32, tm_value.tm_mday as u32);
         if args.is_empty() {
             return false;
@@ -3708,33 +4422,49 @@ fn pac_return_literal(line: &str) -> Option<String> {
     Some(tail[1..1 + end].to_string())
 }
 
-fn pac_result_to_route(result: &str, secure: bool) -> Option<InternetProxyRoute> {
+fn pac_result_to_plan(result: &str, _secure: bool) -> InternetProxyPlan {
+    let mut plan = InternetProxyPlan {
+        routes: Vec::new(),
+        direct_fallback: false,
+    };
     for token in result.split(';').map(str::trim) {
         if token.is_empty() {
             continue;
         }
         if token.eq_ignore_ascii_case("DIRECT") {
-            return None;
+            plan.direct_fallback = true;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("NONE") {
+            plan.direct_fallback = true;
+            continue;
         }
         if let Some(spec) = token
             .strip_prefix("PROXY ")
             .or_else(|| token.strip_prefix("HTTP "))
             .or_else(|| token.strip_prefix("HTTPS "))
-            .or_else(|| token.strip_prefix("SOCKS "))
         {
             if let Some(route) = parse_proxy_endpoint_spec(spec.trim()) {
-                return Some(route);
+                if !plan.routes.contains(&route) {
+                    plan.routes.push(route);
+                }
             }
+            continue;
+        }
+        if token
+            .get(..5)
+            .map(|prefix| prefix.eq_ignore_ascii_case("SOCKS"))
+            .unwrap_or(false)
+        {
+            continue;
         }
         if let Some(route) = parse_proxy_endpoint_spec(token) {
-            return Some(route);
+            if !plan.routes.contains(&route) {
+                plan.routes.push(route);
+            }
         }
     }
-    if secure {
-        None
-    } else {
-        None
-    }
+    plan
 }
 
 fn load_proxy_autoconfig_script(source: &str) -> Result<String, DWORD> {
@@ -3756,40 +4486,24 @@ fn load_proxy_autoconfig_script(source: &str) -> Result<String, DWORD> {
     String::from_utf8(response.body).map_err(|_| ERROR_INVALID_PARAMETER)
 }
 
-fn resolve_proxy_autoconfig_route(
-    proxy_name: &str,
+fn evaluate_proxy_autoconfig_script(
+    script: &str,
     host: &str,
     secure: bool,
-) -> Result<Option<InternetProxyRoute>, DWORD> {
+) -> Result<InternetProxyPlan, DWORD> {
     #[derive(Clone, Copy)]
     struct PacFrame {
         matched: bool,
         consumed: bool,
     }
 
-    let Some(source) = proxy_autoconfig_source(proxy_name) else {
-        return Ok(None);
-    };
-    let mut script = None;
-    let mut last_error = ERROR_INVALID_PARAMETER;
-    for candidate in wpad_candidate_sources(&source, host) {
-        match load_proxy_autoconfig_script(&candidate) {
-            Ok(value) => {
-                script = Some(value);
-                break;
-            }
-            Err(code) => last_error = code,
-        }
-    }
-    let Some(script) = script else {
-        return Err(last_error);
-    };
     let url = compose_http_url(host, if secure { 443 } else { 80 }, secure, "/");
     let mut fallback = None;
     let mut block_stack = Vec::<PacFrame>::new();
     let mut pending_else = None::<PacFrame>;
-    let mut block_allows_return =
+    let block_allows_return =
         |stack: &[PacFrame]| -> bool { stack.iter().all(|frame| frame.matched) };
+
     for raw_line in script.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with("//") {
@@ -3823,7 +4537,7 @@ fn resolve_proxy_autoconfig_route(
                 block_stack.push(frame);
             } else if matched {
                 if let Some(result) = pac_return_literal(line) {
-                    return Ok(pac_result_to_route(&result, secure));
+                    return Ok(pac_result_to_plan(&result, secure));
                 }
             } else {
                 pending_else = Some(frame);
@@ -3843,7 +4557,7 @@ fn resolve_proxy_autoconfig_route(
                 block_stack.push(frame);
             } else if frame.matched {
                 if let Some(result) = pac_return_literal(line) {
-                    return Ok(pac_result_to_route(&result, secure));
+                    return Ok(pac_result_to_plan(&result, secure));
                 }
             }
             continue;
@@ -3862,7 +4576,7 @@ fn resolve_proxy_autoconfig_route(
                     });
                 } else if matched {
                     if let Some(result) = pac_return_literal(line) {
-                        return Ok(pac_result_to_route(&result, secure));
+                        return Ok(pac_result_to_plan(&result, secure));
                     }
                 }
             }
@@ -3871,7 +4585,7 @@ fn resolve_proxy_autoconfig_route(
         }
         if block_allows_return(&block_stack) {
             if let Some(result) = pac_return_literal(line) {
-                return Ok(pac_result_to_route(&result, secure));
+                return Ok(pac_result_to_plan(&result, secure));
             }
             continue;
         }
@@ -3882,7 +4596,52 @@ fn resolve_proxy_autoconfig_route(
             fallback = pac_return_literal(line);
         }
     }
-    Ok(fallback.and_then(|result| pac_result_to_route(&result, secure)))
+
+    Ok(fallback
+        .map(|result| pac_result_to_plan(&result, secure))
+        .unwrap_or(InternetProxyPlan {
+            routes: Vec::new(),
+            direct_fallback: false,
+        }))
+}
+
+fn resolve_proxy_autoconfig_route(
+    proxy_name: &str,
+    host: &str,
+    secure: bool,
+) -> Result<Option<InternetProxyRoute>, DWORD> {
+    Ok(resolve_proxy_autoconfig_plan(proxy_name, host, secure)?
+        .routes
+        .into_iter()
+        .next())
+}
+
+fn resolve_proxy_autoconfig_plan(
+    proxy_name: &str,
+    host: &str,
+    secure: bool,
+) -> Result<InternetProxyPlan, DWORD> {
+    let Some(source) = proxy_autoconfig_source(proxy_name) else {
+        return Ok(InternetProxyPlan {
+            routes: Vec::new(),
+            direct_fallback: false,
+        });
+    };
+    let mut script = None;
+    let mut last_error = ERROR_INVALID_PARAMETER;
+    for candidate in wpad_candidate_sources(&source, host) {
+        match load_proxy_autoconfig_script(&candidate) {
+            Ok(value) => {
+                script = Some(value);
+                break;
+            }
+            Err(code) => last_error = code,
+        }
+    }
+    let Some(script) = script else {
+        return Err(last_error);
+    };
+    evaluate_proxy_autoconfig_script(&script, host, secure)
 }
 
 fn encode_basic_base64(data: &[u8]) -> String {
@@ -3920,12 +4679,19 @@ fn encode_basic_base64(data: &[u8]) -> String {
 }
 
 fn parse_proxy_endpoint_spec(spec: &str) -> Option<InternetProxyRoute> {
+    if spec
+        .trim()
+        .get(..5)
+        .map(|prefix| prefix.eq_ignore_ascii_case("SOCKS"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
     let trimmed = spec
         .trim()
         .trim_start_matches("PROXY ")
         .trim_start_matches("HTTP ")
         .trim_start_matches("HTTPS ")
-        .trim_start_matches("SOCKS ")
         .trim_start_matches("http://")
         .trim_start_matches("https://");
     if trimmed.eq_ignore_ascii_case("direct") || trimmed.eq_ignore_ascii_case("none") {
@@ -3955,26 +4721,53 @@ fn parse_proxy_endpoint_spec(spec: &str) -> Option<InternetProxyRoute> {
     })
 }
 
-fn internet_proxy_endpoint(proxy_name: &str, secure: bool) -> Option<InternetProxyRoute> {
+fn internet_proxy_plan(proxy_name: &str, secure: bool) -> InternetProxyPlan {
+    let mut plan = InternetProxyPlan {
+        routes: Vec::new(),
+        direct_fallback: false,
+    };
     for token in proxy_name.split(';').map(|part| part.trim()) {
         if token.is_empty() {
             continue;
         }
+        if token
+            .get(..5)
+            .map(|prefix| prefix.eq_ignore_ascii_case("SOCKS"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         if token.eq_ignore_ascii_case("direct") || token.eq_ignore_ascii_case("none") {
-            return None;
+            plan.direct_fallback = true;
+            continue;
         }
         if let Some((scheme, value)) = token.split_once('=') {
             if (secure && scheme.eq_ignore_ascii_case("https"))
                 || (!secure && scheme.eq_ignore_ascii_case("http"))
                 || scheme.eq_ignore_ascii_case("all")
             {
-                return parse_proxy_endpoint_spec(value);
+                if let Some(route) = parse_proxy_endpoint_spec(value) {
+                    if !plan.routes.contains(&route) {
+                        plan.routes.push(route);
+                    }
+                }
             }
             continue;
         }
-        return parse_proxy_endpoint_spec(token);
+        if let Some(route) = parse_proxy_endpoint_spec(token) {
+            if !plan.routes.contains(&route) {
+                plan.routes.push(route);
+            }
+        }
     }
-    None
+    plan
+}
+
+fn internet_proxy_endpoint(proxy_name: &str, secure: bool) -> Option<InternetProxyRoute> {
+    internet_proxy_plan(proxy_name, secure)
+        .routes
+        .into_iter()
+        .next()
 }
 
 fn read_window_pixel(surface: &[u8], width: usize, x: usize, y: usize) -> Option<u32> {
@@ -4010,9 +4803,9 @@ fn internet_session_proxy_route(
     host: &str,
     secure: bool,
 ) -> Option<InternetProxyRoute> {
-    internet_session_proxy_route_checked(session, host, secure)
+    internet_session_proxy_plan_checked(session, host, secure)
         .ok()
-        .flatten()
+        .and_then(|plan| plan.routes.into_iter().next())
 }
 
 fn internet_session_proxy_route_checked(
@@ -4020,30 +4813,140 @@ fn internet_session_proxy_route_checked(
     host: &str,
     secure: bool,
 ) -> Result<Option<InternetProxyRoute>, DWORD> {
+    Ok(internet_session_proxy_plan_checked(session, host, secure)?
+        .routes
+        .into_iter()
+        .next())
+}
+
+fn internet_session_proxy_plan_checked(
+    session: &InternetSessionState,
+    host: &str,
+    secure: bool,
+) -> Result<InternetProxyPlan, DWORD> {
     match session.access_type {
-        INTERNET_OPEN_TYPE_DIRECT | WINHTTP_ACCESS_TYPE_NO_PROXY => Ok(None),
+        INTERNET_OPEN_TYPE_DIRECT | WINHTTP_ACCESS_TYPE_NO_PROXY => Ok(InternetProxyPlan {
+            routes: Vec::new(),
+            direct_fallback: true,
+        }),
         INTERNET_OPEN_TYPE_PROXY | WINHTTP_ACCESS_TYPE_DEFAULT_PROXY => {
             if session.proxy_name.is_empty()
                 || internet_proxy_bypasses_host(&session.proxy_bypass, host)
             {
-                Ok(None)
+                Ok(InternetProxyPlan {
+                    routes: Vec::new(),
+                    direct_fallback: true,
+                })
             } else if proxy_policy_requires_autoconfig(&session.proxy_name) {
-                resolve_proxy_autoconfig_route(&session.proxy_name, host, secure)
+                resolve_proxy_autoconfig_plan(&session.proxy_name, host, secure)
             } else {
-                Ok(internet_proxy_endpoint(&session.proxy_name, secure))
+                Ok(internet_proxy_plan(&session.proxy_name, secure))
             }
         }
         _ => {
             if session.proxy_name.is_empty()
                 || internet_proxy_bypasses_host(&session.proxy_bypass, host)
             {
-                Ok(None)
+                Ok(InternetProxyPlan {
+                    routes: Vec::new(),
+                    direct_fallback: true,
+                })
             } else if proxy_policy_requires_autoconfig(&session.proxy_name) {
-                resolve_proxy_autoconfig_route(&session.proxy_name, host, secure)
+                resolve_proxy_autoconfig_plan(&session.proxy_name, host, secure)
             } else {
-                Ok(internet_proxy_endpoint(&session.proxy_name, secure))
+                Ok(internet_proxy_plan(&session.proxy_name, secure))
             }
         }
+    }
+}
+
+fn should_retry_proxy_request(err: crate::net::http::HttpError) -> bool {
+    matches!(
+        err,
+        crate::net::http::HttpError::ConnectionFailed
+            | crate::net::http::HttpError::Timeout
+            | crate::net::http::HttpError::Network(crate::net::NetError::Timeout)
+            | crate::net::http::HttpError::Network(crate::net::NetError::ConnectionRefused)
+            | crate::net::http::HttpError::Network(crate::net::NetError::ConnectionReset)
+            | crate::net::http::HttpError::Network(crate::net::NetError::ConnectionClosed)
+            | crate::net::http::HttpError::Network(crate::net::NetError::NetworkUnreachable)
+            | crate::net::http::HttpError::Network(crate::net::NetError::HostUnreachable)
+            | crate::net::http::HttpError::Network(crate::net::NetError::NotConnected)
+    )
+}
+
+fn execute_http_request_with_proxy_plan(
+    client: &crate::net::http::HttpClient,
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    base_headers: &[(String, String)],
+    proxy_plan: &InternetProxyPlan,
+) -> Result<crate::net::http::HttpResponse, crate::net::http::HttpError> {
+    let http_method = if method.eq_ignore_ascii_case("POST") {
+        crate::net::http::HttpMethod::POST
+    } else {
+        crate::net::http::HttpMethod::GET
+    };
+
+    let mut last_err = None;
+    for proxy in &proxy_plan.routes {
+        let mut headers = base_headers.to_vec();
+        if let Some(auth) = proxy.authorization.as_ref() {
+            headers.push(("Proxy-Authorization".to_string(), auth.clone()));
+        }
+        let attempt = if method.eq_ignore_ascii_case("POST") {
+            client.request_via_proxy_with_headers(
+                http_method,
+                url,
+                Some(body.unwrap_or(&[])),
+                Some("application/octet-stream"),
+                Some("*/*"),
+                &headers,
+                &proxy.host,
+                proxy.port,
+            )
+        } else {
+            client.request_via_proxy_with_headers(
+                http_method,
+                url,
+                None,
+                None,
+                Some("*/*"),
+                &headers,
+                &proxy.host,
+                proxy.port,
+            )
+        };
+        match attempt {
+            Ok(response) => return Ok(response),
+            Err(crate::net::http::HttpError::ProxyAuthenticationRequired) => {
+                return Err(crate::net::http::HttpError::ProxyAuthenticationRequired);
+            }
+            Err(err) if should_retry_proxy_request(err) => {
+                last_err = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    if proxy_plan.direct_fallback || proxy_plan.routes.is_empty() {
+        if method.eq_ignore_ascii_case("POST") {
+            client.request_with_headers(
+                http_method,
+                url,
+                Some(body.unwrap_or(&[])),
+                Some("application/octet-stream"),
+                Some("*/*"),
+                base_headers,
+            )
+        } else {
+            client.request_with_headers(http_method, url, None, None, Some("*/*"), base_headers)
+        }
+    } else if let Some(err) = last_err {
+        Err(err)
+    } else {
+        Err(crate::net::http::HttpError::ConnectionFailed)
     }
 }
 
@@ -4087,8 +4990,8 @@ fn execute_internet_request(request_handle: HANDLE, body: Option<&[u8]>) -> BOOL
     };
 
     let url = compose_http_url(&host, port, secure, &object_name);
-    let proxy_route = match internet_session_proxy_route_checked(&session, &host, secure) {
-        Ok(route) => route,
+    let proxy_plan = match internet_session_proxy_plan_checked(&session, &host, secure) {
+        Ok(plan) => plan,
         Err(code) => {
             set_win32_last_error(code);
             return FALSE;
@@ -4136,57 +5039,14 @@ fn execute_internet_request(request_handle: HANDLE, body: Option<&[u8]>) -> BOOL
             extra_headers.push(("Cookie".to_string(), cookie_header));
         }
     }
-    if let Some(proxy) = proxy_route.as_ref() {
-        if let Some(auth) = proxy.authorization.as_ref() {
-            extra_headers.push(("Proxy-Authorization".to_string(), auth.clone()));
-        }
-    }
-
-    let result = if method.eq_ignore_ascii_case("POST") {
-        if let Some(proxy) = proxy_route.as_ref() {
-            client.request_via_proxy_with_headers(
-                crate::net::http::HttpMethod::POST,
-                &url,
-                Some(body.unwrap_or(&[])),
-                Some("application/octet-stream"),
-                Some("*/*"),
-                &extra_headers,
-                &proxy.host,
-                proxy.port,
-            )
-        } else {
-            client.request_with_headers(
-                crate::net::http::HttpMethod::POST,
-                &url,
-                Some(body.unwrap_or(&[])),
-                Some("application/octet-stream"),
-                Some("*/*"),
-                &extra_headers,
-            )
-        }
-    } else {
-        if let Some(proxy) = proxy_route.as_ref() {
-            client.request_via_proxy_with_headers(
-                crate::net::http::HttpMethod::GET,
-                &url,
-                None,
-                None,
-                Some("*/*"),
-                &extra_headers,
-                &proxy.host,
-                proxy.port,
-            )
-        } else {
-            client.request_with_headers(
-                crate::net::http::HttpMethod::GET,
-                &url,
-                None,
-                None,
-                Some("*/*"),
-                &extra_headers,
-            )
-        }
-    };
+    let result = execute_http_request_with_proxy_plan(
+        &client,
+        &method,
+        &url,
+        body,
+        &extra_headers,
+        &proxy_plan,
+    );
 
     match result {
         Ok(response) => {
@@ -4987,6 +5847,7 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "fgets" => Some(msvcrt::fgets as usize as u64),
             "fputs" => Some(msvcrt::fputs as usize as u64),
             "scanf" => Some(msvcrt::scanf as usize as u64),
+            "setlocale" => Some(msvcrt::setlocale as usize as u64),
             "labs" => Some(msvcrt::labs as usize as u64),
             "time" => Some(msvcrt::time as usize as u64),
             "clock" => Some(msvcrt::clock as usize as u64),
@@ -4996,6 +5857,8 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "ctime" => Some(msvcrt::ctime as usize as u64),
             "strftime" => Some(msvcrt::strftime as usize as u64),
             "system" => Some(msvcrt::system as usize as u64),
+            "atexit" => Some(msvcrt::atexit as usize as u64),
+            "_onexit" => Some(msvcrt::_onexit as usize as u64),
             "atof" => Some(msvcrt::atof as usize as u64),
             "strtol" => Some(msvcrt::strtol as usize as u64),
             "strtoul" => Some(msvcrt::strtoul as usize as u64),
@@ -5045,6 +5908,8 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "CoMarshalInterThreadInterfaceInStream" => {
                 Some(ole32::co_marshal_inter_thread_interface_in_stream as usize as u64)
             }
+            "CoUnmarshalInterface" => Some(ole32::co_unmarshal_interface as usize as u64),
+            "CoReleaseMarshalData" => Some(ole32::co_release_marshal_data as usize as u64),
             "CoGetInterfaceAndReleaseStream" => {
                 Some(ole32::co_get_interface_and_release_stream as usize as u64)
             }
@@ -5062,6 +5927,8 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "DispGetIDsOfNames" => Some(oleaut32::disp_get_ids_of_names as usize as u64),
             "DispInvoke" => Some(oleaut32::disp_invoke as usize as u64),
             "LoadTypeLib" => Some(oleaut32::load_type_lib as usize as u64),
+            "RegisterTypeLib" => Some(oleaut32::register_type_lib as usize as u64),
+            "LoadRegTypeLib" => Some(oleaut32::load_reg_type_lib as usize as u64),
             _ => None,
         },
         _ => None,
@@ -5082,7 +5949,10 @@ fn canonical_module_key(module: &str) -> String {
 
 pub fn get_api_status(module: &str, func: &str) -> Option<Win32ApiStatus> {
     let module_key = canonical_module_key(module);
-    let table = WIN32_API_TABLE.lock();
+    let mut table = WIN32_API_TABLE.lock();
+    if table.is_none() {
+        *table = Some(init_api_table());
+    }
     let table = table.as_ref()?;
     let module_funcs = table.get(module_key.as_str())?;
     if !module_funcs.contains_key(func) {
@@ -5317,9 +6187,20 @@ mod kernel32 {
         // Check for console handles
         let h = hFile as u64;
         if h == crate::win32::STD_INPUT_HANDLE {
-            // Console input - read from keyboard buffer
+            let mut cursor = crate::win32::stdin_cursor_state().lock();
+            let buffer = crate::win32::stdin_buffer_state().lock();
+            let available = buffer.len().saturating_sub(*cursor);
+            let to_copy = available.min(nNumberOfBytesToRead as usize);
+            if to_copy > 0 {
+                core::ptr::copy_nonoverlapping(
+                    buffer.as_ptr().add(*cursor),
+                    lpBuffer as *mut u8,
+                    to_copy,
+                );
+                *cursor += to_copy;
+            }
             if !lpNumberOfBytesRead.is_null() {
-                *lpNumberOfBytesRead = 0;
+                *lpNumberOfBytesRead = to_copy as DWORD;
             }
             return TRUE;
         }
@@ -5792,7 +6673,7 @@ mod kernel32 {
 
     /// GetCurrentThreadId
     pub unsafe fn get_current_thread_id() -> DWORD {
-        crate::task::scheduler::current_task_id() as DWORD
+        crate::win32::current_win32_thread_key() as DWORD
     }
 
     /// ResumeThread
@@ -6952,6 +7833,7 @@ mod user32 {
             hwnd,
             class_name: class_name.clone(),
             title: title.clone(),
+            properties: BTreeMap::new(),
             x: actual_x,
             y: actual_y,
             width: actual_w,
@@ -6981,7 +7863,8 @@ mod user32 {
         );
 
         // WM_CREATE mesajı gönder
-        crate::win32::post_message(hwnd, crate::win32::WM_CREATE, 0, 0);
+        let _ = send_message_a(hwnd as HWND, crate::win32::WM_NCCREATE, 0, 0);
+        let _ = send_message_a(hwnd as HWND, crate::win32::WM_CREATE, 0, 0);
 
         hwnd as HWND
     }
@@ -7281,12 +8164,17 @@ mod user32 {
                     if let Some(window) = windows.get(&hwnd) {
                         let (border, caption, menu) =
                             crate::win32::window_nc_metrics(window.style, window.menu != 0);
+                        let right_inset = if (window.style & crate::win32::WS_THICKFRAME) != 0 {
+                            border * 2
+                        } else {
+                            border
+                        };
                         if wParam != 0 {
                             let params = lParam as *mut NCCALCSIZE_PARAMS;
                             if !params.is_null() {
                                 (*params).rgrc[0].left += border;
                                 (*params).rgrc[0].top += border + caption + menu;
-                                (*params).rgrc[0].right -= border;
+                                (*params).rgrc[0].right -= right_inset;
                                 (*params).rgrc[0].bottom -= border;
                             }
                         } else {
@@ -7294,7 +8182,7 @@ mod user32 {
                             if !rect.is_null() {
                                 (*rect).left += border;
                                 (*rect).top += border + caption + menu;
-                                (*rect).right -= border;
+                                (*rect).right -= right_inset;
                                 (*rect).bottom -= border;
                             }
                         }
@@ -7463,6 +8351,21 @@ mod user32 {
 
     /// ReleaseDC
     pub unsafe fn release_dc(hWnd: HWND, hDC: HDC) -> INT {
+        let hwnd = hWnd as u64;
+        let handle = hDC as u64;
+        let Some(dc) = crate::win32::WIN32_DCS.lock().remove(&handle) else {
+            return 0;
+        };
+        if dc.device_kind != crate::win32::Win32DcKind::Window || dc.hwnd != hwnd {
+            crate::win32::WIN32_DCS.lock().insert(handle, dc);
+            return 0;
+        }
+        crate::win32::mark_gdi_handle_released(dc.selected_pen as u64);
+        crate::win32::mark_gdi_handle_released(dc.selected_brush as u64);
+        crate::win32::mark_gdi_handle_released(dc.selected_font as u64);
+        crate::win32::mark_gdi_handle_released(dc.selected_palette as u64);
+        crate::win32::mark_gdi_handle_released(dc.clip_region as u64);
+        crate::win32::WIN32_GDI_HANDLES.lock().remove(&handle);
         1
     }
 
@@ -7517,6 +8420,7 @@ mod user32 {
         if removed.is_none() {
             return FALSE;
         }
+        crate::win32::WIN32_DIALOGS.lock().remove(&hwnd);
         if crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed) == hwnd {
             crate::win32::ACTIVE_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
         }
@@ -8874,6 +9778,7 @@ mod user32 {
                 item.id as u64,
                 hMenu as i64,
             );
+            let selected = item.id;
             if (uFlags & TPM_RETURNCMD) == 0 {
                 crate::win32::post_message(hwnd, crate::win32::WM_COMMAND, item.id as u64, 0);
             }
@@ -8889,6 +9794,9 @@ mod user32 {
                     bottom: 48,
                 },
             );
+            if (uFlags & TPM_RETURNCMD) != 0 {
+                return selected as BOOL;
+            }
         }
         TRUE
     }
@@ -9115,8 +10023,13 @@ mod user32 {
         };
         state.ended = true;
         state.result = nResult;
+        let should_destroy = state.modal;
         drop(dialogs);
-        let _ = destroy_window(hDlg);
+        if should_destroy {
+            let _ = destroy_window(hDlg);
+        } else {
+            let _ = show_window(hDlg, crate::win32::SW_HIDE);
+        }
         TRUE
     }
 
@@ -9615,17 +10528,45 @@ mod user32 {
 
     /// GetPropA
     pub unsafe fn get_prop_a(hWnd: HWND, lpString: LPCSTR) -> HANDLE {
-        0
+        let hwnd = hWnd as u64;
+        let key = crate::win32::read_ansi_string(lpString);
+        if key.is_empty() {
+            return 0;
+        }
+        crate::win32::WIN32_WINDOWS
+            .lock()
+            .get(&hwnd)
+            .and_then(|window| window.properties.get(&key).copied())
+            .unwrap_or(0) as HANDLE
     }
 
     /// SetPropA
     pub unsafe fn set_prop_a(hWnd: HWND, lpString: LPCSTR, hData: HANDLE) -> BOOL {
+        let hwnd = hWnd as u64;
+        let key = crate::win32::read_ansi_string(lpString);
+        if key.is_empty() {
+            return FALSE;
+        }
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&hwnd) else {
+            return FALSE;
+        };
+        window.properties.insert(key, hData as usize);
         TRUE
     }
 
     /// RemovePropA
     pub unsafe fn remove_prop_a(hWnd: HWND, lpString: LPCSTR) -> HANDLE {
-        0
+        let hwnd = hWnd as u64;
+        let key = crate::win32::read_ansi_string(lpString);
+        if key.is_empty() {
+            return 0;
+        }
+        crate::win32::WIN32_WINDOWS
+            .lock()
+            .get_mut(&hwnd)
+            .and_then(|window| window.properties.remove(&key))
+            .unwrap_or(0) as HANDLE
     }
 
     /// EnumPropsA
@@ -9633,7 +10574,31 @@ mod user32 {
         hWnd: HWND,
         lpEnumFunc: Option<unsafe extern "system" fn(HWND, LPCSTR, HANDLE) -> BOOL>,
     ) -> INT {
-        0
+        let Some(callback) = lpEnumFunc else {
+            return -1;
+        };
+        let hwnd = hWnd as u64;
+        let props: Vec<(String, usize)> = crate::win32::WIN32_WINDOWS
+            .lock()
+            .get(&hwnd)
+            .map(|window| {
+                window
+                    .properties
+                    .iter()
+                    .map(|(name, value)| (name.clone(), *value))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut enumerated = 0;
+        for (name, value) in props {
+            let mut raw: Vec<i8> = name.bytes().map(|b| b as i8).collect();
+            raw.push(0);
+            if callback(hWnd, raw.as_ptr(), value as HANDLE) == FALSE {
+                break;
+            }
+            enumerated += 1;
+        }
+        enumerated
     }
 
     /// GetWindowThreadProcessId
@@ -11946,6 +12911,7 @@ mod ole32 {
                 object: interface as usize,
                 iid_key: iid_key.clone(),
                 payload: build_marshal_payload(stream_id, &iid_key),
+                consumed: false,
             },
         );
         let stream = allocate_marshal_stream(stream_id);
@@ -11964,6 +12930,20 @@ mod ole32 {
         riid: *const GUID,
         ppv: *mut *mut u8,
     ) -> HRESULT {
+        let hr = co_unmarshal_interface(p_stm, riid, ppv);
+        let release_hr = co_release_marshal_data(p_stm);
+        if hr == S_OK {
+            release_hr
+        } else {
+            hr
+        }
+    }
+
+    pub unsafe fn co_unmarshal_interface(
+        p_stm: *mut u8,
+        riid: *const GUID,
+        ppv: *mut *mut u8,
+    ) -> HRESULT {
         if ppv.is_null() {
             return E_POINTER;
         }
@@ -11977,16 +12957,50 @@ mod ole32 {
         {
             return CO_E_NOTINITIALIZED;
         }
-        let stream = &mut *(p_stm as *mut ComMarshalStream);
+        let Some(stream) = marshal_stream_from_ptr(p_stm) else {
+            return STG_E_INVALIDPOINTER;
+        };
+        let mut states = COM_MARSHAL_STREAMS.lock();
+        let Some(state) = states.get_mut(&stream.stream_id) else {
+            return STG_E_REVERTED;
+        };
+        if state.consumed {
+            return STG_E_REVERTED;
+        }
+        let target_iid = guid_to_key(riid).unwrap_or_default();
+        if !target_iid.is_empty() && target_iid != state.iid_key {
+            let mut queried = core::ptr::null_mut();
+            let hr = crate::win32::com_query_interface(state.object as *mut u8, riid, &mut queried);
+            if hr != S_OK || queried.is_null() {
+                return if hr == S_OK { E_NOINTERFACE } else { hr };
+            }
+            *ppv = queried;
+        } else {
+            let hr = crate::win32::com_query_interface(state.object as *mut u8, riid, ppv);
+            if hr != S_OK {
+                return if hr == S_OK { E_NOINTERFACE } else { hr };
+            }
+        }
+        state.consumed = true;
+        stream.position = state.payload.len();
+        S_OK
+    }
+
+    pub unsafe fn co_release_marshal_data(p_stm: *mut u8) -> HRESULT {
+        if p_stm.is_null() {
+            return E_POINTER;
+        }
+        let Some(stream) = marshal_stream_from_ptr(p_stm) else {
+            return STG_E_INVALIDPOINTER;
+        };
         let Some(state) = COM_MARSHAL_STREAMS.lock().remove(&stream.stream_id) else {
             free_marshal_stream(p_stm);
             return STG_E_REVERTED;
         };
-        let hr = crate::win32::com_query_interface(state.object as *mut u8, riid, ppv);
         crate::win32::com_release(state.object as *mut u8);
         stream.ref_count = 0;
         free_marshal_stream(p_stm);
-        hr
+        S_OK
     }
 
     pub unsafe fn co_task_mem_alloc(cb: SIZE_T) -> LPVOID {
@@ -12054,6 +13068,65 @@ mod oleaut32 {
             .map(|(stem, _)| stem)
             .unwrap_or(leaf)
             .to_string()
+    }
+
+    fn type_lib_registry_key(
+        guid: &GUID,
+        major: WORD,
+        minor: WORD,
+        lcid: LCID,
+        syskind: DWORD,
+    ) -> String {
+        alloc::format!(
+            "{:08x}-{:04x}-{:04x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}|{}.{}|{}|{}",
+            guid.data1,
+            guid.data2,
+            guid.data3,
+            guid.data4[0],
+            guid.data4[1],
+            guid.data4[2],
+            guid.data4[3],
+            guid.data4[4],
+            guid.data4[5],
+            guid.data4[6],
+            guid.data4[7],
+            major,
+            minor,
+            lcid,
+            syskind
+        )
+    }
+
+    fn path_leaf(path: &str) -> &str {
+        path.rsplit('/').next().unwrap_or(path)
+    }
+
+    fn join_help_path(help_dir: &str, help_file: &str) -> String {
+        if help_dir.is_empty()
+            || help_file.is_empty()
+            || help_file.contains(':')
+            || help_file.starts_with('/')
+        {
+            return help_file.to_string();
+        }
+        alloc::format!("{}/{}", help_dir.trim_end_matches('/'), help_file)
+    }
+
+    fn normalize_registered_typelib_state(
+        mut state: ComTypeLibState,
+        full_path: &str,
+        help_dir: &str,
+    ) -> ComTypeLibState {
+        if !full_path.is_empty() {
+            state.path = full_path.to_string();
+        }
+        if !help_dir.is_empty() {
+            state.help_file = join_help_path(help_dir, path_leaf(&state.help_file));
+            for info in state.type_infos.iter_mut() {
+                info.help_file = join_help_path(help_dir, path_leaf(&info.help_file));
+            }
+        }
+        state
     }
 
     fn parse_guid_text(text: &str) -> Option<GUID> {
@@ -12420,6 +13493,1059 @@ mod oleaut32 {
             .map(|info| (href_type as usize, info))
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct BinaryTypeLibSection {
+        tag: [u8; 4],
+        offset: usize,
+        size: usize,
+        count: usize,
+    }
+
+    fn read_binary_u16(payload: &[u8], offset: usize) -> Option<u16> {
+        let bytes = payload.get(offset..offset.checked_add(2)?)?;
+        Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_binary_i16(payload: &[u8], offset: usize) -> Option<i16> {
+        Some(read_binary_u16(payload, offset)? as i16)
+    }
+
+    fn read_binary_u32(payload: &[u8], offset: usize) -> Option<u32> {
+        let bytes = payload.get(offset..offset.checked_add(4)?)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_binary_i32(payload: &[u8], offset: usize) -> Option<i32> {
+        Some(read_binary_u32(payload, offset)? as i32)
+    }
+
+    fn read_binary_guid(payload: &[u8], offset: usize) -> Option<GUID> {
+        let bytes = payload.get(offset..offset.checked_add(16)?)?;
+        Some(GUID {
+            data1: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            data2: u16::from_le_bytes([bytes[4], bytes[5]]),
+            data3: u16::from_le_bytes([bytes[6], bytes[7]]),
+            data4: [
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+                bytes[15],
+            ],
+        })
+    }
+
+    fn parse_binary_section_directory(
+        payload: &[u8],
+        magic: &[u8; 4],
+    ) -> Option<Vec<BinaryTypeLibSection>> {
+        if payload.get(..4)? != magic {
+            return None;
+        }
+        let version = read_binary_u16(payload, 4)?;
+        let section_count = read_binary_u16(payload, 6)? as usize;
+        if version == 0 || section_count == 0 {
+            return None;
+        }
+
+        let mut sections = Vec::with_capacity(section_count);
+        let mut cursor = 8usize;
+        for _ in 0..section_count {
+            let tag_slice = payload.get(cursor..cursor.checked_add(4)?)?;
+            let tag = [tag_slice[0], tag_slice[1], tag_slice[2], tag_slice[3]];
+            let offset = read_binary_u32(payload, cursor + 4)? as usize;
+            let size = read_binary_u32(payload, cursor + 8)? as usize;
+            let count = read_binary_u32(payload, cursor + 12)? as usize;
+            let end = offset.checked_add(size)?;
+            if offset < 8 || end > payload.len() {
+                return None;
+            }
+            sections.push(BinaryTypeLibSection {
+                tag,
+                offset,
+                size,
+                count,
+            });
+            cursor = cursor.checked_add(16)?;
+        }
+        Some(sections)
+    }
+
+    fn find_binary_section<'a>(
+        sections: &'a [BinaryTypeLibSection],
+        tag: &[u8; 4],
+    ) -> Option<&'a BinaryTypeLibSection> {
+        sections.iter().find(|section| &section.tag == tag)
+    }
+
+    fn read_binary_string_from_pool(
+        payload: &[u8],
+        strings: &BinaryTypeLibSection,
+        offset: u32,
+    ) -> Option<String> {
+        let start = strings.offset.checked_add(offset as usize)?;
+        let end = strings.offset.checked_add(strings.size)?;
+        let bytes = payload.get(start..end)?;
+        if bytes.is_empty() {
+            return None;
+        }
+
+        if bytes.len() >= 2 && bytes[1] == 0 {
+            let mut units = Vec::new();
+            let mut pos = 0usize;
+            while pos + 1 < bytes.len() {
+                let unit = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]);
+                if unit == 0 {
+                    break;
+                }
+                units.push(unit);
+                pos += 2;
+            }
+            if !units.is_empty() {
+                return String::from_utf16(&units).ok();
+            }
+        }
+
+        let len = bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(bytes.len());
+        let text = core::str::from_utf8(&bytes[..len]).ok()?.trim().to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn read_msft_guid_entry(payload: &[u8], guid_offset: usize, guid_index: usize) -> Option<GUID> {
+        let base = guid_offset.checked_add(guid_index.checked_mul(16)?)?;
+        read_binary_guid(payload, base)
+    }
+
+    fn read_msft_name_table_string(
+        payload: &[u8],
+        name_table_offset: usize,
+        name_table_length: usize,
+        entry_offset: i32,
+    ) -> Option<String> {
+        if entry_offset < 0 {
+            return None;
+        }
+        let base = name_table_offset.checked_add(entry_offset as usize)?;
+        let table_end = name_table_offset.checked_add(name_table_length)?;
+        let header = payload.get(base..base.checked_add(12)?)?;
+        if base.checked_add(12)? > table_end {
+            return None;
+        }
+        let raw_len = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
+        let name_len = raw_len & 0xff;
+        let start = base.checked_add(12)?;
+        let end = start.checked_add(name_len)?;
+        if end > table_end {
+            return None;
+        }
+        let text = core::str::from_utf8(payload.get(start..end)?)
+            .ok()?
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn read_msft_string_table_string(
+        payload: &[u8],
+        string_table_offset: usize,
+        string_table_length: usize,
+        entry_offset: i32,
+    ) -> Option<String> {
+        if entry_offset < 0 {
+            return None;
+        }
+        let start = string_table_offset.checked_add(entry_offset as usize)?;
+        let end = string_table_offset.checked_add(string_table_length)?;
+        let bytes = payload.get(start..end)?;
+        let len = bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(bytes.len());
+        let text = core::str::from_utf8(&bytes[..len]).ok()?.trim().to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn parse_msft_header_typelib_metadata(path: &str, payload: &[u8]) -> Option<ComTypeLibState> {
+        if payload.get(..4)? != b"MSFT" {
+            return None;
+        }
+        let header_size = 0x54usize;
+        let segdir_size = 16usize * 16usize;
+        if payload.len() < header_size.checked_add(segdir_size)? {
+            return None;
+        }
+
+        let lcid = read_binary_i32(payload, 0x0c)? as u32;
+        let varflags = read_binary_i32(payload, 0x14)? as u32;
+        let version = read_binary_i32(payload, 0x18)? as u32;
+        let nrtypeinfos = read_binary_i32(payload, 0x20)? as usize;
+        let helpstring_offset = read_binary_i32(payload, 0x24)?;
+        let helpstring_context = read_binary_i32(payload, 0x28)? as u32;
+        let help_context = read_binary_i32(payload, 0x2c)? as u32;
+        let library_name_offset = read_binary_i32(payload, 0x38)?;
+        let helpfile_offset = read_binary_i32(payload, 0x3c)?;
+        let posguid = read_binary_i32(payload, 0x08)?;
+
+        let segdir_base = header_size;
+        let seg = |index: usize| -> Option<(usize, usize)> {
+            let entry = segdir_base.checked_add(index.checked_mul(16)?)?;
+            let offset = read_binary_i32(payload, entry)? as usize;
+            let length = read_binary_i32(payload, entry + 4)? as usize;
+            let end = offset.checked_add(length)?;
+            if length == 0 || end > payload.len() {
+                return None;
+            }
+            Some((offset, length))
+        };
+
+        let (type_info_offset, type_info_length) = seg(0)?;
+        let (guid_offset, guid_length) = seg(5)?;
+        let (name_table_offset, name_table_length) = seg(7)?;
+        let (string_table_offset, string_table_length) = seg(8)?;
+        let guid_index = usize::try_from(posguid.max(0)).ok()?;
+        let library_guid = if guid_length >= (guid_index + 1) * 16 {
+            read_msft_guid_entry(payload, guid_offset, guid_index)?
+        } else {
+            deterministic_guid(path, payload)
+        };
+
+        let name = read_msft_name_table_string(
+            payload,
+            name_table_offset,
+            name_table_length,
+            library_name_offset,
+        )
+        .unwrap_or_else(|| typelib_name_from_path(path));
+        let documentation = read_msft_string_table_string(
+            payload,
+            string_table_offset,
+            string_table_length,
+            helpstring_offset,
+        )
+        .unwrap_or_else(|| alloc::format!("Type library loaded from {path}"));
+        let help_file = read_msft_string_table_string(
+            payload,
+            string_table_offset,
+            string_table_length,
+            helpfile_offset,
+        )
+        .unwrap_or_else(|| path.to_string());
+
+        let mut type_infos = Vec::new();
+        let mut type_shapes = Vec::with_capacity(nrtypeinfos);
+        let type_stride = if nrtypeinfos == 0 {
+            0
+        } else {
+            let stride = type_info_length / nrtypeinfos;
+            if stride < 0x50 || stride.checked_mul(nrtypeinfos)? > type_info_length {
+                return None;
+            }
+            stride
+        };
+        if nrtypeinfos > 0 {
+            for index in 0..nrtypeinfos {
+                let base = type_info_offset.checked_add(index.checked_mul(type_stride)?)?;
+                let typekind = read_binary_i32(payload, base)? as u32;
+                let c_element = read_binary_i32(payload, base + 0x18)? as u32;
+                let posguid = read_binary_i32(payload, base + 0x2c)?;
+                let flags = read_binary_i32(payload, base + 0x30)? as u16;
+                let type_name_offset = read_binary_i32(payload, base + 0x34)?;
+                let type_version = read_binary_i32(payload, base + 0x38)? as u32;
+                let type_doc_offset = read_binary_i32(payload, base + 0x3c)?;
+                let type_helpstring_context = read_binary_i32(payload, base + 0x40)? as u32;
+                let type_help_context = read_binary_i32(payload, base + 0x44)? as u32;
+                let c_impl_types = (read_binary_u32(payload, base + 0x4c)? & 0xffff) as usize;
+
+                let guid = usize::try_from(posguid.max(0))
+                    .ok()
+                    .and_then(|guid_index| {
+                        if guid_length >= (guid_index + 1) * 16 {
+                            read_msft_guid_entry(payload, guid_offset, guid_index)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        deterministic_guid(
+                            path,
+                            alloc::format!("msft-type|{index}|{typekind}|{type_name_offset}")
+                                .as_bytes(),
+                        )
+                    });
+                let type_name = read_msft_name_table_string(
+                    payload,
+                    name_table_offset,
+                    name_table_length,
+                    type_name_offset,
+                )
+                .unwrap_or_else(|| alloc::format!("TypeInfo{index}"));
+                let type_doc = read_msft_string_table_string(
+                    payload,
+                    string_table_offset,
+                    string_table_length,
+                    type_doc_offset,
+                )
+                .unwrap_or_else(|| type_name.clone());
+                let mut info = ComTypeInfoState {
+                    guid,
+                    name: type_name,
+                    documentation: type_doc,
+                    help_context: type_help_context,
+                    help_file: help_file.clone(),
+                    typekind,
+                    type_flags: flags,
+                    major_version: ((type_version >> 16) & 0xffff) as u16,
+                    minor_version: (type_version & 0xffff) as u16,
+                    member_names: Vec::new(),
+                    impl_types: Vec::new(),
+                    funcs: Vec::new(),
+                    vars: Vec::new(),
+                };
+                let func_count = (c_element & 0xffff) as usize;
+                let var_count = (c_element >> 16) as usize;
+                type_shapes.push((func_count, var_count, c_impl_types, type_helpstring_context));
+                type_infos.push(info);
+            }
+        }
+
+        if type_infos.is_empty() {
+            return None;
+        }
+
+        let total_funcs = type_shapes
+            .iter()
+            .fold(0usize, |acc, shape| acc.saturating_add(shape.0));
+        if total_funcs > 0 {
+            if let Some((func_offset, func_length)) = seg(1) {
+                let stride = func_length / total_funcs;
+                if stride < 42 || stride.checked_mul(total_funcs)? > func_length {
+                    return None;
+                }
+                for index in 0..total_funcs {
+                    let base = func_offset.checked_add(index.checked_mul(stride)?)?;
+                    let type_index = read_binary_u32(payload, base)? as usize;
+                    let Some(info) = type_infos.get_mut(type_index) else {
+                        return None;
+                    };
+                    let fallback_name = alloc::format!("Method{}", info.funcs.len() + 1);
+                    info.funcs.push(ComTypeFuncState {
+                        memid: read_binary_i32(payload, base + 4)?,
+                        name: read_msft_name_table_string(
+                            payload,
+                            name_table_offset,
+                            name_table_length,
+                            read_binary_i32(payload, base + 8)?,
+                        )
+                        .unwrap_or_else(|| fallback_name.clone()),
+                        documentation: read_msft_string_table_string(
+                            payload,
+                            string_table_offset,
+                            string_table_length,
+                            read_binary_i32(payload, base + 12)?,
+                        )
+                        .unwrap_or_default(),
+                        help_context: read_binary_u32(payload, base + 16)?,
+                        dll_name: read_msft_name_table_string(
+                            payload,
+                            name_table_offset,
+                            name_table_length,
+                            read_binary_i32(payload, base + 20)?,
+                        )
+                        .unwrap_or_default(),
+                        entry_name: read_msft_name_table_string(
+                            payload,
+                            name_table_offset,
+                            name_table_length,
+                            read_binary_i32(payload, base + 24)?,
+                        )
+                        .unwrap_or_default(),
+                        ordinal: read_binary_u16(payload, base + 28)?,
+                        invkind: read_binary_u16(payload, base + 30)?,
+                        callconv: read_binary_u16(payload, base + 32)?,
+                        param_count: read_binary_i16(payload, base + 34)?,
+                        optional_param_count: read_binary_i16(payload, base + 36)?,
+                        func_flags: read_binary_u16(payload, base + 38)?,
+                        vtable_offset: read_binary_i16(payload, base + 40)?,
+                    });
+                }
+            }
+        }
+
+        let total_vars = type_shapes
+            .iter()
+            .fold(0usize, |acc, shape| acc.saturating_add(shape.1));
+        if total_vars > 0 {
+            if let Some((vars_offset, vars_length)) = seg(2) {
+                let stride = vars_length / total_vars;
+                if stride < 32 || stride.checked_mul(total_vars)? > vars_length {
+                    return None;
+                }
+                for index in 0..total_vars {
+                    let base = vars_offset.checked_add(index.checked_mul(stride)?)?;
+                    let type_index = read_binary_u32(payload, base)? as usize;
+                    let Some(info) = type_infos.get_mut(type_index) else {
+                        return None;
+                    };
+                    let fallback_name = alloc::format!("Var{}", info.vars.len() + 1);
+                    info.vars.push(ComTypeVarState {
+                        memid: read_binary_i32(payload, base + 4)?,
+                        name: read_msft_name_table_string(
+                            payload,
+                            name_table_offset,
+                            name_table_length,
+                            read_binary_i32(payload, base + 8)?,
+                        )
+                        .unwrap_or_else(|| fallback_name.clone()),
+                        documentation: read_msft_string_table_string(
+                            payload,
+                            string_table_offset,
+                            string_table_length,
+                            read_binary_i32(payload, base + 12)?,
+                        )
+                        .unwrap_or_default(),
+                        help_context: read_binary_u32(payload, base + 16)?,
+                        var_flags: read_binary_u16(payload, base + 20)?,
+                        varkind: read_binary_u32(payload, base + 24)?,
+                        offset: read_binary_u32(payload, base + 28)?,
+                    });
+                }
+            }
+        }
+
+        let total_impls = type_shapes
+            .iter()
+            .fold(0usize, |acc, shape| acc.saturating_add(shape.2));
+        if total_impls > 0 {
+            if let Some((impl_offset, impl_length)) = seg(3) {
+                let stride = impl_length / total_impls;
+                if stride < 16 || stride.checked_mul(total_impls)? > impl_length {
+                    return None;
+                }
+                for index in 0..total_impls {
+                    let base = impl_offset.checked_add(index.checked_mul(stride)?)?;
+                    let type_index = read_binary_u32(payload, base)? as usize;
+                    let href_type = read_binary_u32(payload, base + 8)?;
+                    let name = read_msft_name_table_string(
+                        payload,
+                        name_table_offset,
+                        name_table_length,
+                        read_binary_i32(payload, base + 4)?,
+                    )
+                    .or_else(|| {
+                        type_infos
+                            .get(href_type as usize)
+                            .map(|value| value.name.clone())
+                    });
+                    let Some(name) = name else {
+                        return None;
+                    };
+                    let Some(info) = type_infos.get_mut(type_index) else {
+                        return None;
+                    };
+                    info.impl_types.push(ComImplTypeState {
+                        name,
+                        href_type,
+                        flags: read_binary_i32(payload, base + 12)?,
+                    });
+                }
+            }
+        }
+
+        for (info, (func_count, var_count, impl_count, fallback_help_context)) in
+            type_infos.iter_mut().zip(type_shapes.into_iter())
+        {
+            if info.funcs.len() < func_count {
+                for member_index in info.funcs.len()..func_count {
+                    info.funcs.push(ComTypeFuncState {
+                        memid: member_index as DISPID + 1,
+                        name: alloc::format!("Method{}", member_index + 1),
+                        documentation: alloc::format!("MSFT func {}", member_index + 1),
+                        help_context: fallback_help_context,
+                        dll_name: String::new(),
+                        entry_name: String::new(),
+                        ordinal: 0,
+                        invkind: INVOKE_FUNC,
+                        callconv: 4,
+                        param_count: 0,
+                        optional_param_count: 0,
+                        func_flags: 0,
+                        vtable_offset: (member_index * 8) as SHORT,
+                    });
+                }
+            }
+            if info.vars.len() < var_count {
+                for member_index in info.vars.len()..var_count {
+                    info.vars.push(ComTypeVarState {
+                        memid: (func_count + member_index + 1) as DISPID,
+                        name: alloc::format!("Var{}", member_index + 1),
+                        documentation: alloc::format!("MSFT var {}", member_index + 1),
+                        help_context: fallback_help_context,
+                        var_flags: 0,
+                        varkind: VAR_PERINSTANCE,
+                        offset: 0,
+                    });
+                }
+            }
+            if info.impl_types.len() < impl_count {
+                for impl_index in info.impl_types.len()..impl_count {
+                    info.impl_types.push(ComImplTypeState {
+                        name: alloc::format!("Impl{}", impl_index + 1),
+                        href_type: u32::MAX,
+                        flags: 0,
+                    });
+                }
+            }
+            normalize_member_dispatch_shape(info);
+        }
+
+        relink_impl_types(&mut type_infos);
+        Some(ComTypeLibState {
+            guid: library_guid,
+            name,
+            documentation,
+            path: path.to_string(),
+            help_context,
+            help_file,
+            major_version: ((version >> 16) & 0xffff) as u16,
+            minor_version: (version & 0xffff) as u16,
+            lcid,
+            syskind: varflags & 0xf,
+            type_infos,
+        })
+    }
+
+    fn parse_sltg_header_typelib_metadata(path: &str, payload: &[u8]) -> Option<ComTypeLibState> {
+        let sections = parse_binary_section_directory(payload, b"SLTG")?;
+        let strings = find_binary_section(&sections, b"STRS")?;
+        let header = find_binary_section(&sections, b"HEAD")?;
+        if header.count != 1 || header.size < 48 {
+            return None;
+        }
+
+        let library_guid = read_binary_guid(payload, header.offset)?;
+        let name = read_binary_string_from_pool(
+            payload,
+            strings,
+            read_binary_u32(payload, header.offset + 16)?,
+        )?;
+        let documentation = read_binary_string_from_pool(
+            payload,
+            strings,
+            read_binary_u32(payload, header.offset + 20)?,
+        )?
+        .trim()
+        .to_string();
+        let help_file = read_binary_string_from_pool(
+            payload,
+            strings,
+            read_binary_u32(payload, header.offset + 24)?,
+        )?
+        .trim()
+        .to_string();
+        let help_context = read_binary_u32(payload, header.offset + 28)?;
+        let lcid = read_binary_u32(payload, header.offset + 32)?;
+        let syskind = read_binary_u32(payload, header.offset + 36)?;
+        let version = read_binary_u32(payload, header.offset + 40)?;
+        let major_version = ((version >> 16) & 0xffff) as WORD;
+        let minor_version = (version & 0xffff) as WORD;
+
+        let mut type_infos = Vec::new();
+        if let Some(types) = find_binary_section(&sections, b"TYPE") {
+            if types.count == 0 || types.size / types.count < 44 {
+                return None;
+            }
+            let stride = types.size / types.count;
+            if stride < 44 {
+                return None;
+            }
+            let mut type_shapes = Vec::with_capacity(types.count);
+            for index in 0..types.count {
+                let base = types.offset.checked_add(index.checked_mul(stride)?)?;
+                let guid = read_binary_guid(payload, base)?;
+                let type_name = read_binary_string_from_pool(
+                    payload,
+                    strings,
+                    read_binary_u32(payload, base + 16)?,
+                )?;
+                let type_doc = read_binary_string_from_pool(
+                    payload,
+                    strings,
+                    read_binary_u32(payload, base + 20)?,
+                )?
+                .trim()
+                .to_string();
+                let type_help_file = read_binary_string_from_pool(
+                    payload,
+                    strings,
+                    read_binary_u32(payload, base + 24)?,
+                )?
+                .trim()
+                .to_string();
+                let type_help_context = read_binary_u32(payload, base + 28)?;
+                let typekind = read_binary_u16(payload, base + 32)? as DWORD;
+                let type_flags = read_binary_u16(payload, base + 34)?;
+                let type_major = read_binary_u16(payload, base + 36)?;
+                let type_minor = read_binary_u16(payload, base + 38)?;
+                let func_count = read_binary_u16(payload, base + 40)? as usize;
+                let var_count = read_binary_u16(payload, base + 42)? as usize;
+                let impl_count = if stride >= 46 {
+                    read_binary_u16(payload, base + 44).unwrap_or(0) as usize
+                } else {
+                    0
+                };
+                type_shapes.push((func_count, var_count, impl_count));
+                type_infos.push(ComTypeInfoState {
+                    guid,
+                    name: type_name,
+                    documentation: type_doc,
+                    help_context: type_help_context,
+                    help_file: type_help_file,
+                    typekind,
+                    type_flags,
+                    major_version: type_major,
+                    minor_version: type_minor,
+                    member_names: Vec::new(),
+                    impl_types: Vec::new(),
+                    funcs: Vec::new(),
+                    vars: Vec::new(),
+                });
+            }
+
+            if let Some(funcs) = find_binary_section(&sections, b"FUNC") {
+                if funcs.count > 0 {
+                    let stride = funcs.size / funcs.count;
+                    if stride < 40 {
+                        return None;
+                    }
+                    for index in 0..funcs.count {
+                        let base = funcs.offset.checked_add(index.checked_mul(stride)?)?;
+                        let type_index = read_binary_u16(payload, base)? as usize;
+                        let Some(info) = type_infos.get_mut(type_index) else {
+                            return None;
+                        };
+                        info.funcs.push(ComTypeFuncState {
+                            memid: read_binary_i32(payload, base + 4)?,
+                            name: read_binary_string_from_pool(
+                                payload,
+                                strings,
+                                read_binary_u32(payload, base + 8)?,
+                            )?,
+                            documentation: read_binary_string_from_pool(
+                                payload,
+                                strings,
+                                read_binary_u32(payload, base + 12)?,
+                            )?
+                            .trim()
+                            .to_string(),
+                            help_context: read_binary_u32(payload, base + 16)?,
+                            dll_name: read_binary_string_from_pool(
+                                payload,
+                                strings,
+                                read_binary_u32(payload, base + 20)?,
+                            )
+                            .unwrap_or_default(),
+                            entry_name: read_binary_string_from_pool(
+                                payload,
+                                strings,
+                                read_binary_u32(payload, base + 24)?,
+                            )
+                            .unwrap_or_default(),
+                            ordinal: read_binary_u16(payload, base + 28)?,
+                            invkind: read_binary_u16(payload, base + 30)?,
+                            callconv: read_binary_u16(payload, base + 32)?,
+                            param_count: read_binary_i16(payload, base + 34)?,
+                            optional_param_count: read_binary_i16(payload, base + 36)?,
+                            func_flags: read_binary_u16(payload, base + 38)?,
+                            vtable_offset: if stride >= 42 {
+                                read_binary_i16(payload, base + 40).unwrap_or(0)
+                            } else {
+                                0
+                            },
+                        });
+                    }
+                }
+            }
+
+            if let Some(vars) = find_binary_section(&sections, b"VARS") {
+                if vars.count > 0 {
+                    let stride = vars.size / vars.count;
+                    if stride < 30 {
+                        return None;
+                    }
+                    for index in 0..vars.count {
+                        let base = vars.offset.checked_add(index.checked_mul(stride)?)?;
+                        let type_index = read_binary_u16(payload, base)? as usize;
+                        let Some(info) = type_infos.get_mut(type_index) else {
+                            return None;
+                        };
+                        info.vars.push(ComTypeVarState {
+                            memid: read_binary_i32(payload, base + 4)?,
+                            name: read_binary_string_from_pool(
+                                payload,
+                                strings,
+                                read_binary_u32(payload, base + 8)?,
+                            )?,
+                            documentation: read_binary_string_from_pool(
+                                payload,
+                                strings,
+                                read_binary_u32(payload, base + 12)?,
+                            )?
+                            .trim()
+                            .to_string(),
+                            help_context: read_binary_u32(payload, base + 16)?,
+                            var_flags: read_binary_u16(payload, base + 20)?,
+                            varkind: read_binary_u32(payload, base + 22)?,
+                            offset: read_binary_u32(payload, base + 26)?,
+                        });
+                    }
+                }
+            }
+
+            if let Some(impls) = find_binary_section(&sections, b"IMPL") {
+                if impls.count > 0 {
+                    let stride = impls.size / impls.count;
+                    if stride < 16 {
+                        return None;
+                    }
+                    for index in 0..impls.count {
+                        let base = impls.offset.checked_add(index.checked_mul(stride)?)?;
+                        let type_index = read_binary_u16(payload, base)? as usize;
+                        let Some(info) = type_infos.get_mut(type_index) else {
+                            return None;
+                        };
+                        info.impl_types.push(ComImplTypeState {
+                            name: read_binary_string_from_pool(
+                                payload,
+                                strings,
+                                read_binary_u32(payload, base + 4)?,
+                            )?,
+                            href_type: read_binary_u32(payload, base + 8)?,
+                            flags: read_binary_i32(payload, base + 12)?,
+                        });
+                    }
+                }
+            }
+
+            for (info, (func_count, var_count, impl_count)) in
+                type_infos.iter_mut().zip(type_shapes.into_iter())
+            {
+                if info.funcs.len() < func_count {
+                    for member_index in info.funcs.len()..func_count {
+                        info.funcs.push(ComTypeFuncState {
+                            memid: member_index as DISPID + 1,
+                            name: alloc::format!("Method{}", member_index + 1),
+                            documentation: alloc::format!("SLTG func {}", member_index + 1),
+                            help_context: info.help_context,
+                            dll_name: String::new(),
+                            entry_name: String::new(),
+                            ordinal: 0,
+                            invkind: INVOKE_FUNC,
+                            callconv: 4,
+                            param_count: 0,
+                            optional_param_count: 0,
+                            func_flags: 0,
+                            vtable_offset: (member_index * 8) as SHORT,
+                        });
+                    }
+                }
+                if info.vars.len() < var_count {
+                    for member_index in info.vars.len()..var_count {
+                        info.vars.push(ComTypeVarState {
+                            memid: (info.funcs.len() + member_index + 1) as DISPID,
+                            name: alloc::format!("Var{}", member_index + 1),
+                            documentation: alloc::format!("SLTG var {}", member_index + 1),
+                            help_context: info.help_context,
+                            var_flags: 0,
+                            varkind: VAR_PERINSTANCE,
+                            offset: 0,
+                        });
+                    }
+                }
+                if info.impl_types.len() < impl_count {
+                    for impl_index in info.impl_types.len()..impl_count {
+                        info.impl_types.push(ComImplTypeState {
+                            name: alloc::format!("Impl{}", impl_index + 1),
+                            href_type: u32::MAX,
+                            flags: 0,
+                        });
+                    }
+                }
+                normalize_member_dispatch_shape(info);
+            }
+        }
+
+        if type_infos.is_empty() {
+            return None;
+        }
+        relink_impl_types(&mut type_infos);
+        Some(ComTypeLibState {
+            guid: library_guid,
+            name,
+            documentation,
+            path: path.to_string(),
+            help_context,
+            help_file,
+            major_version,
+            minor_version,
+            lcid,
+            syskind,
+            type_infos,
+        })
+    }
+
+    fn parse_structured_binary_typelib_metadata(
+        path: &str,
+        payload: &[u8],
+        magic: &[u8; 4],
+    ) -> Option<ComTypeLibState> {
+        let sections = parse_binary_section_directory(payload, magic)?;
+        let strings = find_binary_section(&sections, b"STRS")?;
+        let library = find_binary_section(&sections, b"TLIB")?;
+        if library.count != 1 || library.size < 44 {
+            return None;
+        }
+
+        let library_guid = read_binary_guid(payload, library.offset)?;
+        let name = read_binary_string_from_pool(
+            payload,
+            strings,
+            read_binary_u32(payload, library.offset + 16)?,
+        )?;
+        let documentation = read_binary_string_from_pool(
+            payload,
+            strings,
+            read_binary_u32(payload, library.offset + 20)?,
+        )?
+        .trim()
+        .to_string();
+        let help_file = read_binary_string_from_pool(
+            payload,
+            strings,
+            read_binary_u32(payload, library.offset + 24)?,
+        )?
+        .trim()
+        .to_string();
+        let help_context = read_binary_u32(payload, library.offset + 28)?;
+        let lcid = read_binary_u32(payload, library.offset + 32)?;
+        let syskind = read_binary_u32(payload, library.offset + 36)?;
+        let major_version = read_binary_u16(payload, library.offset + 40)?;
+        let minor_version = read_binary_u16(payload, library.offset + 42)?;
+
+        let mut type_infos = Vec::new();
+        if let Some(types) = find_binary_section(&sections, b"TYPE") {
+            if types.count == 0 || types.size / types.count < 68 {
+                return None;
+            }
+            let stride = types.size / types.count;
+            for index in 0..types.count {
+                let base = types.offset.checked_add(index.checked_mul(stride)?)?;
+                let guid = read_binary_guid(payload, base)?;
+                let type_name = read_binary_string_from_pool(
+                    payload,
+                    strings,
+                    read_binary_u32(payload, base + 16)?,
+                )?;
+                let type_doc = read_binary_string_from_pool(
+                    payload,
+                    strings,
+                    read_binary_u32(payload, base + 20)?,
+                )?
+                .trim()
+                .to_string();
+                let type_help_file = read_binary_string_from_pool(
+                    payload,
+                    strings,
+                    read_binary_u32(payload, base + 24)?,
+                )?
+                .trim()
+                .to_string();
+                let type_help_context = read_binary_u32(payload, base + 28)?;
+                let typekind = read_binary_u32(payload, base + 32)?;
+                let type_flags = read_binary_u16(payload, base + 36)?;
+                let type_major = read_binary_u16(payload, base + 38)?;
+                let type_minor = read_binary_u16(payload, base + 40)?;
+                type_infos.push(ComTypeInfoState {
+                    guid,
+                    name: type_name,
+                    documentation: type_doc,
+                    help_context: type_help_context,
+                    help_file: type_help_file,
+                    typekind,
+                    type_flags,
+                    major_version: type_major,
+                    minor_version: type_minor,
+                    member_names: Vec::new(),
+                    impl_types: Vec::new(),
+                    funcs: Vec::new(),
+                    vars: Vec::new(),
+                });
+            }
+        }
+
+        if let Some(funcs) = find_binary_section(&sections, b"FUNC") {
+            if funcs.count > 0 {
+                if funcs.size / funcs.count < 44 {
+                    return None;
+                }
+                let stride = funcs.size / funcs.count;
+                for index in 0..funcs.count {
+                    let base = funcs.offset.checked_add(index.checked_mul(stride)?)?;
+                    let type_index = read_binary_u32(payload, base)? as usize;
+                    let Some(info) = type_infos.get_mut(type_index) else {
+                        return None;
+                    };
+                    info.funcs.push(ComTypeFuncState {
+                        memid: read_binary_i32(payload, base + 4)?,
+                        name: read_binary_string_from_pool(
+                            payload,
+                            strings,
+                            read_binary_u32(payload, base + 8)?,
+                        )?,
+                        documentation: read_binary_string_from_pool(
+                            payload,
+                            strings,
+                            read_binary_u32(payload, base + 12)?,
+                        )?,
+                        help_context: read_binary_u32(payload, base + 16)?,
+                        dll_name: read_binary_string_from_pool(
+                            payload,
+                            strings,
+                            read_binary_u32(payload, base + 20)?,
+                        )
+                        .unwrap_or_default(),
+                        entry_name: read_binary_string_from_pool(
+                            payload,
+                            strings,
+                            read_binary_u32(payload, base + 24)?,
+                        )
+                        .unwrap_or_default(),
+                        ordinal: read_binary_u16(payload, base + 28)?,
+                        invkind: read_binary_u16(payload, base + 30)?,
+                        callconv: read_binary_u16(payload, base + 32)?,
+                        param_count: read_binary_i16(payload, base + 34)?,
+                        optional_param_count: read_binary_i16(payload, base + 36)?,
+                        func_flags: read_binary_u16(payload, base + 38)?,
+                        vtable_offset: read_binary_i16(payload, base + 40)?,
+                    });
+                }
+            }
+        }
+
+        if let Some(vars) = find_binary_section(&sections, b"VARS") {
+            if vars.count > 0 {
+                if vars.size / vars.count < 32 {
+                    return None;
+                }
+                let stride = vars.size / vars.count;
+                for index in 0..vars.count {
+                    let base = vars.offset.checked_add(index.checked_mul(stride)?)?;
+                    let type_index = read_binary_u32(payload, base)? as usize;
+                    let Some(info) = type_infos.get_mut(type_index) else {
+                        return None;
+                    };
+                    info.vars.push(ComTypeVarState {
+                        memid: read_binary_i32(payload, base + 4)?,
+                        name: read_binary_string_from_pool(
+                            payload,
+                            strings,
+                            read_binary_u32(payload, base + 8)?,
+                        )?,
+                        documentation: read_binary_string_from_pool(
+                            payload,
+                            strings,
+                            read_binary_u32(payload, base + 12)?,
+                        )?,
+                        help_context: read_binary_u32(payload, base + 16)?,
+                        var_flags: read_binary_u16(payload, base + 20)?,
+                        varkind: read_binary_u32(payload, base + 24)?,
+                        offset: read_binary_u32(payload, base + 28)?,
+                    });
+                }
+            }
+        }
+
+        if let Some(impls) = find_binary_section(&sections, b"IMPL") {
+            if impls.count > 0 {
+                if impls.size / impls.count < 16 {
+                    return None;
+                }
+                let stride = impls.size / impls.count;
+                for index in 0..impls.count {
+                    let base = impls.offset.checked_add(index.checked_mul(stride)?)?;
+                    let type_index = read_binary_u32(payload, base)? as usize;
+                    let href_type = read_binary_u32(payload, base + 4)?;
+                    let name = read_binary_string_from_pool(
+                        payload,
+                        strings,
+                        read_binary_u32(payload, base + 8)?,
+                    )
+                    .or_else(|| {
+                        type_infos
+                            .get(href_type as usize)
+                            .map(|value| value.name.clone())
+                    })?;
+                    let Some(info) = type_infos.get_mut(type_index) else {
+                        return None;
+                    };
+                    info.impl_types.push(ComImplTypeState {
+                        name,
+                        href_type,
+                        flags: read_binary_i32(payload, base + 12)?,
+                    });
+                }
+            }
+        }
+
+        if type_infos.is_empty() {
+            type_infos.push(ComTypeInfoState {
+                guid: library_guid,
+                name: name.clone(),
+                documentation: alloc::format!("Primary automation type for {path}"),
+                help_context,
+                help_file: help_file.clone(),
+                typekind: TKIND_DISPATCH,
+                type_flags: TYPEFLAG_FDISPATCHABLE,
+                major_version,
+                minor_version,
+                member_names: Vec::new(),
+                impl_types: Vec::new(),
+                funcs: Vec::new(),
+                vars: Vec::new(),
+            });
+        }
+
+        relink_impl_types(&mut type_infos);
+        for info in type_infos.iter_mut() {
+            normalize_member_dispatch_shape(info);
+        }
+
+        Some(ComTypeLibState {
+            guid: library_guid,
+            name,
+            documentation,
+            path: path.to_string(),
+            help_context,
+            help_file,
+            major_version,
+            minor_version,
+            lcid,
+            syskind,
+            type_infos,
+        })
+    }
+
     fn collect_utf16le_strings(payload: &[u8], out: &mut Vec<String>) {
         let mut pos = 0usize;
         while pos + 1 < payload.len() {
@@ -12476,7 +14602,26 @@ mod oleaut32 {
         }
     }
 
-    fn parse_binary_typelib_metadata(path: &str, payload: &[u8]) -> Option<ComTypeLibState> {
+    pub(super) fn parse_binary_typelib_metadata(
+        path: &str,
+        payload: &[u8],
+    ) -> Option<ComTypeLibState> {
+        if let Some(state) = parse_msft_header_typelib_metadata(path, payload) {
+            return Some(state);
+        }
+        if let Some(state) = parse_sltg_header_typelib_metadata(path, payload) {
+            return Some(state);
+        }
+        if let Some(state) = parse_structured_binary_typelib_metadata(path, payload, b"MSFT")
+            .or_else(|| parse_structured_binary_typelib_metadata(path, payload, b"SLTG"))
+        {
+            return Some(state);
+        }
+
+        if payload.starts_with(b"MSFT") || payload.starts_with(b"SLTG") {
+            return None;
+        }
+
         let looks_binary = payload.starts_with(b"MSFT")
             || payload.starts_with(b"SLTG")
             || payload.iter().take(128).any(|&byte| byte == 0);
@@ -12768,7 +14913,7 @@ mod oleaut32 {
         })
     }
 
-    fn parse_typelib_metadata(path: &str, payload: &[u8]) -> Option<ComTypeLibState> {
+    pub(super) fn parse_typelib_metadata(path: &str, payload: &[u8]) -> Option<ComTypeLibState> {
         let text = core::str::from_utf8(payload).ok()?;
         let mut lines = text.lines();
         let magic = lines.next()?.trim();
@@ -13023,6 +15168,9 @@ mod oleaut32 {
         if let Some(state) = parse_binary_typelib_metadata(disk_path, &payload) {
             return Ok(state);
         }
+        if payload.starts_with(b"MSFT") || payload.starts_with(b"SLTG") {
+            return Err(TYPE_E_CANTLOADLIBRARY);
+        }
         let name = typelib_name_from_path(disk_path);
         let guid = deterministic_guid(disk_path, &payload);
         Ok(ComTypeLibState {
@@ -13122,7 +15270,7 @@ mod oleaut32 {
         }))
     }
 
-    fn allocate_type_lib(state: ComTypeLibState) -> *mut u8 {
+    pub(super) fn allocate_type_lib(state: ComTypeLibState) -> *mut u8 {
         let vtable = TYPELIB_VTABLE.call_once(|| {
             Box::new([
                 type_lib_query_interface as usize,
@@ -14347,6 +16495,81 @@ mod oleaut32 {
         }
         S_OK
     }
+
+    pub unsafe fn register_type_lib(
+        ptlib: *mut u8,
+        sz_full_path: LPCWSTR,
+        sz_help_dir: LPCWSTR,
+    ) -> HRESULT {
+        if ptlib.is_null() {
+            return E_POINTER;
+        }
+        let Some(object) = type_lib_from_ptr(ptlib) else {
+            return E_POINTER;
+        };
+        let full_path = if sz_full_path.is_null() {
+            String::new()
+        } else {
+            read_utf16_string(sz_full_path)
+        };
+        let help_dir = if sz_help_dir.is_null() {
+            String::new()
+        } else {
+            read_utf16_string(sz_help_dir)
+        };
+        let state = normalize_registered_typelib_state(object.state.clone(), &full_path, &help_dir);
+        let key = type_lib_registry_key(
+            &state.guid,
+            state.major_version,
+            state.minor_version,
+            state.lcid,
+            state.syskind,
+        );
+        crate::win32::REGISTERED_TYPE_LIBRARIES
+            .lock()
+            .insert(key, RegisteredTypeLibState { state, help_dir });
+        S_OK
+    }
+
+    pub unsafe fn load_reg_type_lib(
+        rguid: *const GUID,
+        w_ver_major: WORD,
+        w_ver_minor: WORD,
+        lcid: LCID,
+        pptlib: *mut *mut u8,
+    ) -> HRESULT {
+        if pptlib.is_null() {
+            return E_POINTER;
+        }
+        *pptlib = core::ptr::null_mut();
+        if rguid.is_null() {
+            return E_POINTER;
+        }
+        let registry = crate::win32::REGISTERED_TYPE_LIBRARIES.lock();
+        let exact_key = type_lib_registry_key(&*rguid, w_ver_major, w_ver_minor, lcid, SYS_WIN32);
+        let selected = registry.get(&exact_key).cloned().or_else(|| {
+            registry
+                .values()
+                .find(|entry| {
+                    entry.state.guid == *rguid
+                        && entry.state.major_version == w_ver_major
+                        && entry.state.minor_version == w_ver_minor
+                        && entry.state.syskind == SYS_WIN32
+                        && (entry.state.lcid == lcid || entry.state.lcid == 0)
+                })
+                .cloned()
+        });
+        drop(registry);
+        let Some(entry) = selected else {
+            return TYPE_E_LIBNOTREGISTERED;
+        };
+        let state = normalize_registered_typelib_state(entry.state, "", &entry.help_dir);
+        *pptlib = allocate_type_lib(state);
+        if (*pptlib).is_null() {
+            return E_OUTOFMEMORY;
+        }
+        S_OK
+    }
 }
 
 // ============================================================================
@@ -14355,6 +16578,45 @@ mod oleaut32 {
 
 mod msvcrt {
     use super::*;
+
+    const LC_ALL: INT = 0;
+    const LC_COLLATE: INT = 1;
+    const LC_CTYPE: INT = 2;
+    const LC_MONETARY: INT = 3;
+    const LC_NUMERIC: INT = 4;
+    const LC_TIME: INT = 5;
+
+    unsafe fn next_scanf_arg(args: *const u8, index: &mut usize) -> *mut u8 {
+        if args.is_null() {
+            *index += 1;
+            return core::ptr::null_mut();
+        }
+        let value = *(args.add(*index * 8) as *const u64) as usize as *mut u8;
+        *index += 1;
+        value
+    }
+
+    fn current_locale_name(category: INT) -> String {
+        let locales = crate::win32::crt_locale_state().lock();
+        locales
+            .get(&category)
+            .cloned()
+            .or_else(|| locales.get(&LC_ALL).cloned())
+            .unwrap_or_else(|| String::from("C"))
+    }
+
+    unsafe fn run_atexit_handlers() {
+        let handlers = {
+            let mut state = crate::win32::crt_atexit_state().lock();
+            let handlers = state.clone();
+            state.clear();
+            handlers
+        };
+        for handler in handlers.into_iter().rev() {
+            let callback: extern "C" fn() = core::mem::transmute(handler);
+            callback();
+        }
+    }
 
     // ========================================================================
     // MEMORY
@@ -14693,12 +16955,87 @@ mod msvcrt {
                 error: false,
                 owns_handle,
                 append,
+                backing_path: None,
+                position: 0,
+            },
+        );
+        stream
+    }
+
+    unsafe fn new_host_stream(path: String, append: bool) -> *mut FILE {
+        let stream = crate::win32::win32_alloc(size_of::<FILE>(), core::mem::align_of::<FILE>())
+            as *mut FILE;
+        if stream.is_null() {
+            return core::ptr::null_mut();
+        }
+        let position = {
+            let files = crate::win32::crt_host_files_state().lock();
+            if append {
+                files.get(&path).map(|contents| contents.len()).unwrap_or(0)
+            } else {
+                0
+            }
+        };
+        *stream = FILE {
+            _ptr: core::ptr::null_mut(),
+            _cnt: 0,
+            _base: core::ptr::null_mut(),
+            _flag: 0,
+            _file: 0,
+            _bufsiz: 0,
+        };
+        crate::win32::crt_stream_state().lock().insert(
+            stream as u64,
+            crate::win32::Win32CrtStream {
+                handle: 0,
+                eof: false,
+                error: false,
+                owns_handle: false,
+                append,
+                backing_path: Some(path),
+                position,
             },
         );
         stream
     }
 
     unsafe fn write_to_stream(stream: *mut FILE, bytes: &[u8]) -> INT {
+        let host_state = crate::win32::crt_stream_state()
+            .lock()
+            .get(&(stream as u64))
+            .and_then(|state| {
+                state
+                    .backing_path
+                    .as_ref()
+                    .map(|path| (path.clone(), state.append, state.position))
+            });
+        if let Some((path, append, current_position)) = host_state {
+            // Avoid taking host-file and stream state locks at the same time; grouped CRT corpus
+            // runs alongside global Win32 state and lock nesting here can self-deadlock on host.
+            let mut start = current_position;
+            let end = {
+                let mut files = crate::win32::crt_host_files_state().lock();
+                let data = files.entry(path).or_default();
+                if append {
+                    start = data.len();
+                }
+                let end = start.saturating_add(bytes.len());
+                if data.len() < end {
+                    data.resize(end, 0);
+                }
+                data[start..end].copy_from_slice(bytes);
+                end
+            };
+            if let Some(state) = crate::win32::crt_stream_state()
+                .lock()
+                .get_mut(&(stream as u64))
+            {
+                state.position = end;
+                state.eof = false;
+                state.error = false;
+            }
+            return bytes.len() as INT;
+        }
         let Some(handle) = stream_handle(stream) else {
             return -1;
         };
@@ -14723,6 +17060,40 @@ mod msvcrt {
     }
 
     unsafe fn read_from_stream(stream: *mut FILE, bytes: &mut [u8]) -> INT {
+        let host_state = crate::win32::crt_stream_state()
+            .lock()
+            .get(&(stream as u64))
+            .and_then(|state| {
+                state
+                    .backing_path
+                    .as_ref()
+                    .map(|path| (path.clone(), state.position))
+            });
+        if let Some((path, current_position)) = host_state {
+            let to_copy = {
+                let files = crate::win32::crt_host_files_state().lock();
+                let data = files
+                    .get(&path)
+                    .map(|contents| contents.as_slice())
+                    .unwrap_or(&[]);
+                let available = data.len().saturating_sub(current_position);
+                let to_copy = available.min(bytes.len());
+                if to_copy > 0 {
+                    bytes[..to_copy]
+                        .copy_from_slice(&data[current_position..current_position + to_copy]);
+                }
+                to_copy
+            };
+            if let Some(state) = crate::win32::crt_stream_state()
+                .lock()
+                .get_mut(&(stream as u64))
+            {
+                state.position = current_position.saturating_add(to_copy);
+                state.eof = to_copy == 0;
+                state.error = false;
+            }
+            return to_copy as INT;
+        }
         let Some(handle) = stream_handle(stream) else {
             return -1;
         };
@@ -14952,6 +17323,40 @@ mod msvcrt {
         if normalized.is_empty() {
             return core::ptr::null_mut();
         }
+        #[cfg(any(
+            test,
+            all(
+                feature = "host_smoke",
+                not(target_os = "none"),
+                not(target_os = "uefi")
+            )
+        ))]
+        {
+            let mut files = crate::win32::crt_host_files_state().lock();
+            let exists = files.contains_key(&normalized);
+            match disposition {
+                OPEN_EXISTING if !exists => return core::ptr::null_mut(),
+                CREATE_NEW if exists => return core::ptr::null_mut(),
+                5 if !exists => return core::ptr::null_mut(),
+                _ => {}
+            }
+            match disposition {
+                CREATE_ALWAYS => {
+                    files.insert(normalized.clone(), Vec::new());
+                }
+                CREATE_NEW | 4 => {
+                    files.entry(normalized.clone()).or_default();
+                }
+                5 => {
+                    if let Some(contents) = files.get_mut(&normalized) {
+                        contents.clear();
+                    }
+                }
+                _ => {}
+            }
+            drop(files);
+            return new_host_stream(normalized, append);
+        }
         let exists = crate::fs::f2fs::open_entry(&normalized).ok();
         match disposition {
             OPEN_EXISTING if exists.is_none() => return core::ptr::null_mut(),
@@ -15043,6 +17448,35 @@ mod msvcrt {
 
     /// fseek
     pub unsafe fn fseek(stream: *mut FILE, offset: LONG, origin: INT) -> INT {
+        let host_path = crate::win32::crt_stream_state()
+            .lock()
+            .get(&(stream as u64))
+            .and_then(|state| state.backing_path.clone());
+        if let Some(path) = host_path {
+            let len = crate::win32::crt_host_files_state()
+                .lock()
+                .get(&path)
+                .map(|contents| contents.len())
+                .unwrap_or(0) as i64;
+            let mut streams = crate::win32::crt_stream_state().lock();
+            let Some(state) = streams.get_mut(&(stream as u64)) else {
+                return -1;
+            };
+            let current = state.position as i64;
+            let next = match origin {
+                0 => offset as i64,
+                1 => current.saturating_add(offset as i64),
+                2 => len.saturating_add(offset as i64),
+                _ => return -1,
+            };
+            if next < 0 {
+                return -1;
+            }
+            state.position = next as usize;
+            state.eof = false;
+            state.error = false;
+            return 0;
+        }
         let Some(handle) = stream_handle(stream) else {
             return -1;
         };
@@ -15066,6 +17500,13 @@ mod msvcrt {
 
     /// ftell
     pub unsafe fn ftell(stream: *mut FILE) -> LONG {
+        if let Some(position) = crate::win32::crt_stream_state()
+            .lock()
+            .get(&(stream as u64))
+            .and_then(|state| state.backing_path.as_ref().map(|_| state.position))
+        {
+            return position as LONG;
+        }
         let Some(handle) = stream_handle(stream) else {
             return -1;
         };
@@ -15173,8 +17614,168 @@ mod msvcrt {
 
     /// scanf
     pub unsafe fn scanf(format: LPCSTR, args: *const u8) -> INT {
-        let _ = (format, args);
-        -1
+        if format.is_null() {
+            return -1;
+        }
+        let input = {
+            let cursor = *crate::win32::stdin_cursor_state().lock();
+            let buffer = crate::win32::stdin_buffer_state().lock();
+            String::from_utf8_lossy(&buffer[cursor.min(buffer.len())..]).into_owned()
+        };
+        let fmt = crate::win32::read_ansi_string(format);
+        let fmt_bytes = fmt.as_bytes();
+        let input_bytes = input.as_bytes();
+        let mut fmt_index = 0usize;
+        let mut input_index = 0usize;
+        let mut arg_index = 0usize;
+        let mut assigned = 0i32;
+
+        while fmt_index < fmt_bytes.len() {
+            let ch = fmt_bytes[fmt_index];
+            if ch.is_ascii_whitespace() {
+                while fmt_index < fmt_bytes.len() && fmt_bytes[fmt_index].is_ascii_whitespace() {
+                    fmt_index += 1;
+                }
+                while input_index < input_bytes.len()
+                    && input_bytes[input_index].is_ascii_whitespace()
+                {
+                    input_index += 1;
+                }
+                continue;
+            }
+            if ch != b'%' {
+                if input_index >= input_bytes.len() || input_bytes[input_index] != ch {
+                    break;
+                }
+                fmt_index += 1;
+                input_index += 1;
+                continue;
+            }
+            fmt_index += 1;
+            if fmt_index >= fmt_bytes.len() {
+                break;
+            }
+            if fmt_bytes[fmt_index] == b'%' {
+                if input_index >= input_bytes.len() || input_bytes[input_index] != b'%' {
+                    break;
+                }
+                fmt_index += 1;
+                input_index += 1;
+                continue;
+            }
+            while fmt_index < fmt_bytes.len()
+                && matches!(
+                    fmt_bytes[fmt_index],
+                    b'*' | b'0'..=b'9' | b'h' | b'l' | b'L'
+                )
+            {
+                fmt_index += 1;
+            }
+            if fmt_index >= fmt_bytes.len() {
+                break;
+            }
+            let spec = fmt_bytes[fmt_index] as char;
+            fmt_index += 1;
+            if spec != 'c' {
+                while input_index < input_bytes.len()
+                    && input_bytes[input_index].is_ascii_whitespace()
+                {
+                    input_index += 1;
+                }
+            }
+            match spec {
+                'd' | 'i' => {
+                    let slice = &input[input_index..];
+                    let Some((value, consumed)) = parse_integer_prefix(slice, 0, true) else {
+                        break;
+                    };
+                    let out = next_scanf_arg(args, &mut arg_index) as *mut INT;
+                    if out.is_null() {
+                        break;
+                    }
+                    *out = value as INT;
+                    input_index += consumed;
+                    assigned += 1;
+                }
+                'u' => {
+                    let slice = &input[input_index..];
+                    let Some((value, consumed)) = parse_integer_prefix(slice, 10, false) else {
+                        break;
+                    };
+                    let out = next_scanf_arg(args, &mut arg_index) as *mut UINT;
+                    if out.is_null() {
+                        break;
+                    }
+                    *out = value as UINT;
+                    input_index += consumed;
+                    assigned += 1;
+                }
+                'x' | 'X' => {
+                    let slice = &input[input_index..];
+                    let Some((value, consumed)) = parse_integer_prefix(slice, 16, false) else {
+                        break;
+                    };
+                    let out = next_scanf_arg(args, &mut arg_index) as *mut UINT;
+                    if out.is_null() {
+                        break;
+                    }
+                    *out = value as UINT;
+                    input_index += consumed;
+                    assigned += 1;
+                }
+                'f' | 'g' | 'e' => {
+                    let slice = &input[input_index..];
+                    let Some((value, consumed)) = parse_float_prefix(slice) else {
+                        break;
+                    };
+                    let out = next_scanf_arg(args, &mut arg_index) as *mut f32;
+                    if out.is_null() {
+                        break;
+                    }
+                    *out = value as f32;
+                    input_index += consumed;
+                    assigned += 1;
+                }
+                's' => {
+                    let start = input_index;
+                    while input_index < input_bytes.len()
+                        && !input_bytes[input_index].is_ascii_whitespace()
+                    {
+                        input_index += 1;
+                    }
+                    if start == input_index {
+                        break;
+                    }
+                    let out = next_scanf_arg(args, &mut arg_index) as LPSTR;
+                    if out.is_null() {
+                        break;
+                    }
+                    let token = &input[start..input_index];
+                    crate::win32::write_ansi_string(out, (token.len() + 1) as INT, token);
+                    assigned += 1;
+                }
+                'c' => {
+                    if input_index >= input_bytes.len() {
+                        break;
+                    }
+                    let out = next_scanf_arg(args, &mut arg_index) as *mut i8;
+                    if out.is_null() {
+                        break;
+                    }
+                    *out = input_bytes[input_index] as i8;
+                    input_index += 1;
+                    assigned += 1;
+                }
+                _ => break,
+            }
+        }
+
+        *crate::win32::stdin_cursor_state().lock() += input_index;
+        if assigned == 0 {
+            -1
+        } else {
+            assigned
+        }
     }
 
     // ========================================================================
@@ -15215,7 +17816,7 @@ mod msvcrt {
 
     /// time
     pub unsafe fn time(timer: *mut time_t) -> time_t {
-        let t = crate::drivers::rtc::get_unix_time() as time_t;
+        let t = crate::win32::current_unix_time_seconds() as time_t;
         if !timer.is_null() {
             *timer = t;
         }
@@ -15297,20 +17898,47 @@ mod msvcrt {
 
     /// exit
     pub unsafe fn exit(code: INT) {
+        run_atexit_handlers();
+        *crate::win32::crt_exit_status_state().lock() = Some(code);
+        #[cfg(test)]
+        {
+            return;
+        }
         crate::serial_println!("[WIN32] exit({})", code);
-        loop {}
+        super::kernel32::exit_process(code as UINT)
     }
 
     /// abort
     pub unsafe fn abort() {
+        run_atexit_handlers();
+        *crate::win32::crt_exit_status_state().lock() = Some(3);
+        #[cfg(test)]
+        {
+            return;
+        }
         crate::serial_println!("[WIN32] abort()");
-        loop {}
+        super::kernel32::exit_process(3)
     }
 
     /// system
     pub unsafe fn system(command: LPCSTR) -> INT {
-        let _ = command;
-        -1
+        if command.is_null() {
+            return 1;
+        }
+        let command = crate::win32::read_ansi_string(command);
+        if command.trim().is_empty() {
+            return 0;
+        }
+        match crate::shell::run_command(&command) {
+            Some(output)
+                if output.contains("Bilinmeyen komut:")
+                    || output.ends_with(": not found")
+                    || output.contains("not found") =>
+            {
+                127
+            }
+            _ => 0,
+        }
     }
 
     /// getenv
@@ -15324,6 +17952,57 @@ mod msvcrt {
             None => return core::ptr::null_mut(),
         };
         crate::win32::write_shared_ansi_buffer(crate::win32::getenv_buffer_state(), &value)
+    }
+
+    /// setlocale
+    pub unsafe fn setlocale(category: INT, locale: LPCSTR) -> LPSTR {
+        if locale.is_null() {
+            let value = current_locale_name(category);
+            return crate::win32::write_shared_ansi_buffer(
+                crate::win32::crt_locale_buffer_state(),
+                &value,
+            );
+        }
+        let requested = crate::win32::read_ansi_string(locale);
+        if requested.is_empty() {
+            return core::ptr::null_mut();
+        }
+        let normalized = match requested.as_str() {
+            "C" | "POSIX" => String::from("C"),
+            "en_US" | "en-US" | "English_United States.1252" => String::from("en-US"),
+            other => other.to_string(),
+        };
+        let mut locales = crate::win32::crt_locale_state().lock();
+        match category {
+            LC_ALL => {
+                locales.insert(LC_ALL, normalized.clone());
+                locales.insert(LC_COLLATE, normalized.clone());
+                locales.insert(LC_CTYPE, normalized.clone());
+                locales.insert(LC_MONETARY, normalized.clone());
+                locales.insert(LC_NUMERIC, normalized.clone());
+                locales.insert(LC_TIME, normalized.clone());
+            }
+            _ => {
+                locales.insert(category, normalized.clone());
+            }
+        }
+        crate::win32::write_shared_ansi_buffer(crate::win32::crt_locale_buffer_state(), &normalized)
+    }
+
+    /// atexit
+    pub unsafe fn atexit(func: Option<extern "C" fn()>) -> INT {
+        let Some(func) = func else {
+            return -1;
+        };
+        crate::win32::crt_atexit_state().lock().push(func as usize);
+        0
+    }
+
+    /// _onexit
+    pub unsafe fn _onexit(func: Option<extern "C" fn()>) -> Option<extern "C" fn()> {
+        let func = func?;
+        crate::win32::crt_atexit_state().lock().push(func as usize);
+        Some(func)
     }
 
     /// atoi
@@ -15790,6 +18469,22 @@ mod gdi32 {
         }
     }
 
+    fn active_pen_color(dc: &crate::win32::Win32DC) -> Option<DWORD> {
+        if dc.selected_pen == 0 {
+            None
+        } else {
+            Some(dc.pen_color)
+        }
+    }
+
+    fn active_brush_color(dc: &crate::win32::Win32DC) -> Option<DWORD> {
+        if dc.selected_brush as INT == crate::win32::NULL_BRUSH {
+            None
+        } else {
+            Some(dc.brush_color)
+        }
+    }
+
     fn ellipse_contains(left: INT, top: INT, right: INT, bottom: INT, x: INT, y: INT) -> bool {
         let rx = (right - left).max(1) as f32 / 2.0;
         let ry = (bottom - top).max(1) as f32 / 2.0;
@@ -16051,11 +18746,7 @@ mod gdi32 {
             let Some(dc) = dcs.get(&(hdc as u64)) else {
                 return FALSE;
             };
-            (
-                dc.hwnd,
-                crate::win32::brush_color(dc.selected_brush),
-                crate::win32::pen_color(dc.selected_pen),
-            )
+            (dc.hwnd, active_brush_color(dc), active_pen_color(dc))
         };
         let mut windows = crate::win32::WIN32_WINDOWS.lock();
         let dcs = crate::win32::WIN32_DCS.lock();
@@ -16156,11 +18847,7 @@ mod gdi32 {
             let Some(dc) = dcs.get(&(hdc as u64)) else {
                 return FALSE;
             };
-            (
-                dc.hwnd,
-                crate::win32::brush_color(dc.selected_brush),
-                crate::win32::pen_color(dc.selected_pen),
-            )
+            (dc.hwnd, active_brush_color(dc), active_pen_color(dc))
         };
         let mut windows = crate::win32::WIN32_WINDOWS.lock();
         let dcs = crate::win32::WIN32_DCS.lock();
@@ -16261,11 +18948,7 @@ mod gdi32 {
             let Some(dc) = dcs.get(&(hdc as u64)) else {
                 return FALSE;
             };
-            (
-                dc.hwnd,
-                crate::win32::brush_color(dc.selected_brush),
-                crate::win32::pen_color(dc.selected_pen),
-            )
+            (dc.hwnd, active_brush_color(dc), active_pen_color(dc))
         };
         let mut windows = crate::win32::WIN32_WINDOWS.lock();
         let dcs = crate::win32::WIN32_DCS.lock();
@@ -17048,9 +19731,23 @@ mod gdi32 {
         {
             return FALSE;
         }
-        if let Some(meta) = crate::win32::WIN32_GDI_HANDLES.lock().get(&handle).copied() {
-            if meta.stock || meta.selected_count != 0 {
+        let meta = { crate::win32::WIN32_GDI_HANDLES.lock().get(&handle).copied() };
+        if let Some(meta) = meta {
+            if meta.stock {
                 return FALSE;
+            }
+            if meta.selected_count != 0 {
+                let detached =
+                    crate::win32::detach_gdi_handle_from_window_dcs(handle, meta.object_type);
+                if detached == 0 {
+                    return FALSE;
+                }
+                if let Some(entry) = crate::win32::WIN32_GDI_HANDLES.lock().get_mut(&handle) {
+                    entry.selected_count = entry.selected_count.saturating_sub(detached);
+                    if entry.selected_count != 0 {
+                        return FALSE;
+                    }
+                }
             }
         }
         if crate::win32::remove_gdi_payload(handle) {
@@ -17410,7 +20107,7 @@ mod gdi32 {
     }
 
     /// Dar 8x16 ASCII bitmap font glyph tablosu
-    fn get_ascii_glyph(ch: char) -> [u8; 16] {
+    pub(super) fn get_ascii_glyph(ch: char) -> [u8; 16] {
         // Sadece temel karakterler için basitleştirilmiş glif
         match ch {
             ' ' => [0x00; 16],
@@ -17636,6 +20333,106 @@ mod gdi32 {
         cbCount: UINT,
         lpDx: *const INT,
     ) -> BOOL {
+        if lpString.is_null() {
+            return FALSE;
+        }
+        let hdc_id = hdc as u64;
+        let (
+            hwnd,
+            clip_region,
+            text_color,
+            bk_color,
+            bk_mode,
+            recording_metafile,
+            char_width,
+            char_height,
+        ) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&hdc_id) else {
+                return FALSE;
+            };
+            let metrics = crate::win32::text_metrics_for_dc(dc);
+            (
+                dc.hwnd,
+                dc.clip_region,
+                dc.text_color,
+                dc.bk_color,
+                dc.bk_mode,
+                dc.recording_metafile,
+                metrics.0,
+                metrics.1,
+            )
+        };
+        if hwnd == 0 {
+            return FALSE;
+        }
+        let text = crate::win32::read_ansi_string_counted(lpString, cbCount as INT);
+        let dx_values = if lpDx.is_null() {
+            None
+        } else {
+            Some(core::slice::from_raw_parts(lpDx, text.chars().count()))
+        };
+        let clip_rect = if lprc.is_null() { None } else { Some(*lprc) };
+
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&hwnd) else {
+            return FALSE;
+        };
+
+        let mut invalidated = RECT {
+            left: x,
+            top: y,
+            right: x,
+            bottom: y,
+        };
+        if fuOptions & 0x0002 != 0 {
+            if let Some(rect) = clip_rect {
+                invalidated = crate::win32::fill_window_rect(window, clip_region, rect, bk_color);
+            }
+        }
+        let rendered = crate::win32::draw_text_line_on_window(
+            window,
+            clip_region,
+            x,
+            y,
+            &text,
+            text_color,
+            bk_color,
+            bk_mode,
+            dx_values,
+            if fuOptions & 0x0004 != 0 {
+                clip_rect
+            } else {
+                None
+            },
+            char_width,
+            char_height,
+        );
+        invalidated = crate::win32::normalize_rect(RECT {
+            left: invalidated.left.min(rendered.left),
+            top: invalidated.top.min(rendered.top),
+            right: invalidated.right.max(rendered.right),
+            bottom: invalidated.bottom.max(rendered.bottom),
+        });
+        if recording_metafile != 0 {
+            if let Some(meta) = crate::win32::WIN32_METAFILES
+                .lock()
+                .get_mut(&(recording_metafile as u64))
+            {
+                meta.commands.push(crate::win32::Win32MetaCommand::Text {
+                    x,
+                    y,
+                    text: text.clone(),
+                    color: text_color,
+                });
+            }
+        }
+        let device_rect = crate::win32::WIN32_DCS
+            .lock()
+            .get(&hdc_id)
+            .map(|dc| crate::win32::logical_rect_to_device(dc, invalidated))
+            .unwrap_or(invalidated);
+        crate::win32::invalidate_window_rect(hwnd, device_rect);
         TRUE
     }
 
@@ -17647,17 +20444,139 @@ mod gdi32 {
         lprc: *mut RECT,
         uFormat: UINT,
     ) -> INT {
-        let mut text = String::new();
-        let mut ptr = lpchText;
-        for _ in 0..cchText {
-            if ptr.is_null() || *ptr == 0 {
-                break;
-            }
-            text.push(*ptr as u8 as char);
-            ptr = ptr.add(1);
+        if lpchText.is_null() || lprc.is_null() {
+            return 0;
         }
-        crate::serial_println!("[WIN32] DrawTextA: \"{}\"", text);
-        text.len() as INT
+        let text = crate::win32::read_ansi_string_counted(lpchText, cchText);
+        let hdc_id = hdc as u64;
+        let (
+            hwnd,
+            clip_region,
+            text_color,
+            bk_color,
+            bk_mode,
+            recording_metafile,
+            char_width,
+            char_height,
+        ) = {
+            let dcs = crate::win32::WIN32_DCS.lock();
+            let Some(dc) = dcs.get(&hdc_id) else {
+                return 0;
+            };
+            let metrics = crate::win32::text_metrics_for_dc(dc);
+            (
+                dc.hwnd,
+                dc.clip_region,
+                dc.text_color,
+                dc.bk_color,
+                dc.bk_mode,
+                dc.recording_metafile,
+                metrics.0,
+                metrics.1,
+            )
+        };
+        let mut rect = crate::win32::normalize_rect(*lprc);
+        let single_line = (uFormat & 0x0020) != 0;
+        let word_break = (uFormat & 0x0010) != 0;
+        let calc_rect = (uFormat & 0x0400) != 0;
+        let expand_tabs = (uFormat & 0x0040) != 0;
+        let no_clip = (uFormat & 0x0100) != 0;
+        let max_chars = if word_break && rect.right > rect.left {
+            ((rect.right - rect.left) / char_width.max(1)).max(1) as usize
+        } else {
+            usize::MAX
+        };
+        let expanded = if expand_tabs {
+            crate::win32::expand_tabs_to_columns(&text, &[], 0, char_width)
+        } else {
+            text.clone()
+        };
+        let lines = crate::win32::wrap_text_lines(&expanded, max_chars, single_line);
+        let max_width = lines
+            .iter()
+            .map(|line| crate::win32::string_pixel_width(line, char_width))
+            .max()
+            .unwrap_or(0);
+        let total_height = (lines.len() as INT).saturating_mul(char_height);
+        if calc_rect {
+            rect.right = rect.left + max_width;
+            rect.bottom = rect.top + total_height;
+            *lprc = rect;
+            return total_height;
+        }
+        if hwnd == 0 {
+            return total_height;
+        }
+        let v_align_top = if (uFormat & 0x0008) != 0 {
+            rect.bottom - total_height
+        } else if (uFormat & 0x0004) != 0 {
+            rect.top + ((rect.bottom - rect.top - total_height) / 2)
+        } else {
+            rect.top
+        };
+        let mut invalid = RECT {
+            left: rect.right,
+            top: rect.bottom,
+            right: rect.left,
+            bottom: rect.top,
+        };
+        let mut windows = crate::win32::WIN32_WINDOWS.lock();
+        let Some(window) = windows.get_mut(&hwnd) else {
+            return 0;
+        };
+        for (line_index, line) in lines.iter().enumerate() {
+            let width = crate::win32::string_pixel_width(line, char_width);
+            let draw_x = if (uFormat & 0x0002) != 0 {
+                rect.right - width
+            } else if (uFormat & 0x0001) != 0 {
+                rect.left + ((rect.right - rect.left - width) / 2)
+            } else {
+                rect.left
+            };
+            let draw_y = v_align_top + (line_index as INT) * char_height;
+            let line_rect = crate::win32::draw_text_line_on_window(
+                window,
+                clip_region,
+                draw_x,
+                draw_y,
+                line,
+                text_color,
+                bk_color,
+                bk_mode,
+                None,
+                if no_clip { None } else { Some(rect) },
+                char_width,
+                char_height,
+            );
+            invalid = crate::win32::normalize_rect(RECT {
+                left: invalid.left.min(line_rect.left),
+                top: invalid.top.min(line_rect.top),
+                right: invalid.right.max(line_rect.right),
+                bottom: invalid.bottom.max(line_rect.bottom),
+            });
+        }
+        if recording_metafile != 0 {
+            if let Some(meta) = crate::win32::WIN32_METAFILES
+                .lock()
+                .get_mut(&(recording_metafile as u64))
+            {
+                meta.commands.push(crate::win32::Win32MetaCommand::Text {
+                    x: rect.left,
+                    y: v_align_top,
+                    text: expanded,
+                    color: text_color,
+                });
+            }
+        }
+        if invalid.left <= invalid.right && invalid.top <= invalid.bottom {
+            let device_rect = crate::win32::WIN32_DCS
+                .lock()
+                .get(&hdc_id)
+                .map(|dc| crate::win32::logical_rect_to_device(dc, invalid))
+                .unwrap_or(invalid);
+            crate::win32::invalidate_window_rect(hwnd, device_rect);
+        }
+        total_height
     }
 
     /// DrawTextExA
@@ -17669,7 +20588,8 @@ mod gdi32 {
         dwDTFormat: UINT,
         lpDTParams: *const u8,
     ) -> INT {
-        0
+        let _ = lpDTParams;
+        draw_text_a(hdc, lpchText as LPCSTR, cchText, lprc, dwDTFormat)
     }
 
     /// TabbedTextOutA
@@ -17683,7 +20603,42 @@ mod gdi32 {
         lpnTabStopPositions: *const INT,
         nTabOrigin: INT,
     ) -> LONG {
-        0
+        if lpString.is_null() {
+            return 0;
+        }
+        let text = crate::win32::read_ansi_string_counted(lpString, chCount);
+        let tab_positions = if lpnTabStopPositions.is_null() || nTabPositions <= 0 {
+            Vec::new()
+        } else {
+            core::slice::from_raw_parts(lpnTabStopPositions, nTabPositions as usize).to_vec()
+        };
+        let char_width = crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(crate::win32::text_metrics_for_dc)
+            .unwrap_or((8, 16))
+            .0;
+        let expanded =
+            crate::win32::expand_tabs_to_columns(&text, &tab_positions, nTabOrigin, char_width);
+        let ok = text_out_a(
+            hdc,
+            x,
+            y,
+            expanded.as_ptr() as LPCSTR,
+            expanded.len() as INT,
+        );
+        if ok == FALSE {
+            return 0;
+        }
+        crate::win32::pack_text_extent(
+            crate::win32::string_pixel_width(&expanded, char_width),
+            crate::win32::WIN32_DCS
+                .lock()
+                .get(&(hdc as u64))
+                .map(crate::win32::text_metrics_for_dc)
+                .unwrap_or((8, 16))
+                .1,
+        ) as LONG
     }
 
     /// GetTabbedTextExtentA
@@ -17694,11 +20649,71 @@ mod gdi32 {
         nTabPositions: INT,
         lpnTabStopPositions: *const INT,
     ) -> DWORD {
-        0
+        let text = crate::win32::read_ansi_string_counted(lpString, nCount);
+        let (char_width, char_height) = crate::win32::WIN32_DCS
+            .lock()
+            .get(&(hdc as u64))
+            .map(crate::win32::text_metrics_for_dc)
+            .unwrap_or((8, 16));
+        let tab_positions = if lpnTabStopPositions.is_null() || nTabPositions <= 0 {
+            Vec::new()
+        } else {
+            core::slice::from_raw_parts(lpnTabStopPositions, nTabPositions as usize).to_vec()
+        };
+        let expanded = crate::win32::expand_tabs_to_columns(&text, &tab_positions, 0, char_width);
+        crate::win32::pack_text_extent(
+            crate::win32::string_pixel_width(&expanded, char_width),
+            char_height,
+        )
     }
 
     /// PolyTextOutA
     pub unsafe fn poly_text_out_a(hdc: HDC, ppt: *const u8, nstrings: INT) -> BOOL {
+        #[repr(C)]
+        struct PolyTextA {
+            x: INT,
+            y: INT,
+            n: UINT,
+            lpstr: LPCSTR,
+            ui_flags: UINT,
+            rcl: RECT,
+            pdx: *const INT,
+        }
+
+        if ppt.is_null() || nstrings <= 0 {
+            return FALSE;
+        }
+        let entries = core::slice::from_raw_parts(ppt as *const PolyTextA, nstrings as usize);
+        for entry in entries {
+            let options = entry.ui_flags
+                | if entry.rcl.left != 0
+                    || entry.rcl.top != 0
+                    || entry.rcl.right != 0
+                    || entry.rcl.bottom != 0
+                {
+                    0x0004
+                } else {
+                    0
+                };
+            let rect_ptr = if options & 0x0004 != 0 {
+                &entry.rcl as *const RECT
+            } else {
+                core::ptr::null()
+            };
+            if ext_text_out_a(
+                hdc,
+                entry.x,
+                entry.y,
+                options,
+                rect_ptr,
+                entry.lpstr,
+                entry.n,
+                entry.pdx,
+            ) == FALSE
+            {
+                return FALSE;
+            }
+        }
         TRUE
     }
 
@@ -17812,12 +20827,14 @@ mod gdi32 {
         hrgnSrc2: HRGN,
         fnCombineMode: INT,
     ) -> INT {
-        let Some(src1) = crate::win32::region_rect(hrgnSrc1) else {
+        let Some(src1_state) = crate::win32::clone_region_state(hrgnSrc1) else {
             return 0;
         };
-        let Some(src2) = crate::win32::region_rect(hrgnSrc2) else {
+        let Some(src2_state) = crate::win32::clone_region_state(hrgnSrc2) else {
             return 0;
         };
+        let src1 = crate::win32::normalize_rect(src1_state.rect);
+        let src2 = crate::win32::normalize_rect(src2_state.rect);
         let result = match fnCombineMode {
             1 => RECT {
                 // RGN_AND
@@ -17842,8 +20859,21 @@ mod gdi32 {
             .get_mut(&(hrgnDest as u64))
         {
             dest.rect = crate::win32::normalize_rect(result);
-            dest.shape = crate::win32::Win32RegionShape::Rect;
-            dest.excluded_rects.clear();
+            match fnCombineMode {
+                5 => {
+                    dest.shape = src1_state.shape;
+                    dest.excluded_rects = src1_state.excluded_rects;
+                }
+                3 => {
+                    dest.shape = src1_state.shape;
+                    dest.excluded_rects = src1_state.excluded_rects;
+                    dest.excluded_rects.push(src2);
+                }
+                _ => {
+                    dest.shape = crate::win32::Win32RegionShape::Rect;
+                    dest.excluded_rects.clear();
+                }
+            }
         }
         let result = crate::win32::normalize_rect(result);
         if result.left >= result.right || result.top >= result.bottom {
@@ -18082,8 +21112,58 @@ mod gdi32 {
 
     /// ExtSelectClipRgn
     pub unsafe fn ext_select_clip_rgn(hdc: HDC, hrgn: HRGN, fnMode: INT) -> INT {
-        let _ = fnMode;
-        select_clip_rgn(hdc, hrgn)
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return 0;
+        };
+        let current = dc.clip_region;
+        let result = match fnMode {
+            1 => {
+                if current == 0 || hrgn == 0 {
+                    0
+                } else if let Some(state) = crate::win32::clone_region_state(current) {
+                    let dest = crate::win32::allocate_region_from_state(state);
+                    combine_rgn(dest, dest, hrgn, 1);
+                    dest
+                } else {
+                    0
+                }
+            }
+            2 | 4 => {
+                if current == 0 {
+                    hrgn
+                } else if hrgn == 0 {
+                    current
+                } else if let Some(state) = crate::win32::clone_region_state(current) {
+                    let dest = crate::win32::allocate_region_from_state(state);
+                    combine_rgn(dest, dest, hrgn, fnMode);
+                    dest
+                } else {
+                    hrgn
+                }
+            }
+            3 => {
+                if current == 0 {
+                    0
+                } else if hrgn == 0 {
+                    current
+                } else if let Some(state) = crate::win32::clone_region_state(current) {
+                    let dest = crate::win32::allocate_region_from_state(state);
+                    combine_rgn(dest, dest, hrgn, 3);
+                    dest
+                } else {
+                    0
+                }
+            }
+            5 => hrgn,
+            _ => hrgn,
+        };
+        dc.clip_region = result;
+        if result == 0 {
+            0
+        } else {
+            1
+        }
     }
 
     /// ExcludeClipRect
@@ -18125,7 +21205,20 @@ mod gdi32 {
 
     /// ExcludeUpdateRgn
     pub unsafe fn exclude_update_rgn(hdc: HDC, hwnd: HWND) -> INT {
-        0
+        let Some(update_rect) = crate::win32::INVALIDATED_WINDOWS
+            .lock()
+            .get(&(hwnd as u64))
+            .copied()
+        else {
+            return 0;
+        };
+        exclude_clip_rect(
+            hdc,
+            update_rect.left,
+            update_rect.top,
+            update_rect.right,
+            update_rect.bottom,
+        )
     }
 
     /// IntersectClipRect
@@ -18228,6 +21321,13 @@ mod gdi32 {
             };
             (dc.hwnd, dc.clip_region)
         };
+        if hwnd == 0 {
+            return if clip_region != 0 && crate::win32::region_contains_point(clip_region, x, y) {
+                TRUE
+            } else {
+                FALSE
+            };
+        }
         let windows = crate::win32::WIN32_WINDOWS.lock();
         let Some(window) = windows.get(&hwnd) else {
             return FALSE;
@@ -18257,6 +21357,13 @@ mod gdi32 {
             };
             (dc.hwnd, dc.clip_region)
         };
+        if hwnd == 0 {
+            return if clip_region != 0 && crate::win32::region_intersects_rect(clip_region, rect) {
+                TRUE
+            } else {
+                FALSE
+            };
+        }
         let windows = crate::win32::WIN32_WINDOWS.lock();
         let Some(window) = windows.get(&hwnd) else {
             return FALSE;
@@ -19097,11 +22204,15 @@ mod gdi32 {
     }
 
     pub unsafe fn close_meta_file(hdc: HDC) -> HMETAFILE {
-        crate::win32::WIN32_DCS
-            .lock()
-            .remove(&(hdc as u64))
-            .map(|dc| dc.recording_metafile)
-            .unwrap_or(0 as HMETAFILE)
+        let dc = crate::win32::WIN32_DCS.lock().remove(&(hdc as u64));
+        match dc {
+            Some(dc) => {
+                let meta = dc.recording_metafile;
+                crate::win32::cleanup_dc_for_drop(&dc);
+                meta
+            }
+            None => 0 as HMETAFILE,
+        }
     }
 
     pub unsafe fn delete_meta_file(hmf: HMETAFILE) -> BOOL {
@@ -19132,7 +22243,7 @@ mod gdi32 {
             return FALSE;
         };
         if !meta.commands.is_empty() {
-            replay_metafile_commands(hdc, &meta.commands, None);
+            replay_metafile_commands(hdc, &meta, &meta.commands, None);
             return TRUE;
         }
         let mut windows = crate::win32::WIN32_WINDOWS.lock();
@@ -19201,7 +22312,7 @@ mod gdi32 {
             return FALSE;
         };
         if !meta.commands.is_empty() {
-            replay_metafile_commands(hdc, &meta.commands, Some(rect));
+            replay_metafile_commands(hdc, &meta, &meta.commands, Some(rect));
             return TRUE;
         }
         let mut windows = crate::win32::WIN32_WINDOWS.lock();
@@ -19532,12 +22643,7 @@ mod gdi32 {
         let Some(dc) = crate::win32::WIN32_DCS.lock().remove(&(hdc as u64)) else {
             return FALSE;
         };
-        crate::win32::mark_gdi_handle_released(dc.selected_pen as u64);
-        crate::win32::mark_gdi_handle_released(dc.selected_brush as u64);
-        crate::win32::mark_gdi_handle_released(dc.selected_font as u64);
-        crate::win32::mark_gdi_handle_released(dc.selected_palette as u64);
-        crate::win32::mark_gdi_handle_released(dc.clip_region as u64);
-        crate::win32::WIN32_GDI_HANDLES.lock().remove(&(hdc as u64));
+        crate::win32::cleanup_dc_for_drop(&dc);
         TRUE
     }
 
@@ -19828,8 +22934,12 @@ mod gdi32 {
                                 dy,
                             )
                             .unwrap_or(0);
-                            let pixel =
-                                apply_rop(src_pixels[src_idx], dst_pixel, dst_brush_color, dwRop);
+                            let pixel = apply_rop_generic(
+                                src_pixels[src_idx],
+                                dst_pixel,
+                                dst_brush_color,
+                                dwRop,
+                            );
                             let _ = crate::win32::write_window_pixel(
                                 &mut dst_win.surface,
                                 dst_win.width as usize,
@@ -19912,7 +23022,8 @@ mod gdi32 {
                             wy,
                         )
                         .unwrap_or(0);
-                        let pixel = apply_rop(temp[(y * w + x) as usize], dst_pixel, pattern, rop);
+                        let pixel =
+                            apply_rop_generic(temp[(y * w + x) as usize], dst_pixel, pattern, rop);
                         let _ = crate::win32::write_window_pixel(
                             &mut win.surface,
                             win.width as usize,
@@ -19960,6 +23071,34 @@ mod gdi32 {
     }
 
     /// PatBlt — Desen blit (fırça ile doldurma)
+    fn apply_rop3_byte(src: u8, dst: u8, pat: u8, truth_table: u8) -> u8 {
+        let mut out = 0u8;
+        for bit in 0..8 {
+            let index = (((pat >> bit) & 1) << 2) | (((src >> bit) & 1) << 1) | ((dst >> bit) & 1);
+            if ((truth_table >> index) & 1) != 0 {
+                out |= 1 << bit;
+            }
+        }
+        out
+    }
+
+    fn apply_rop_generic(src: u32, dst: u32, pat: u32, rop: DWORD) -> u32 {
+        let truth_table = ((rop >> 16) & 0xFF) as u8;
+        let sr = ((src >> 16) & 0xFF) as u8;
+        let sg = ((src >> 8) & 0xFF) as u8;
+        let sb = (src & 0xFF) as u8;
+        let dr = ((dst >> 16) & 0xFF) as u8;
+        let dg = ((dst >> 8) & 0xFF) as u8;
+        let db = (dst & 0xFF) as u8;
+        let pr = ((pat >> 16) & 0xFF) as u8;
+        let pg = ((pat >> 8) & 0xFF) as u8;
+        let pb = (pat & 0xFF) as u8;
+        let r = apply_rop3_byte(sr, dr, pr, truth_table) as u32;
+        let g = apply_rop3_byte(sg, dg, pg, truth_table) as u32;
+        let b = apply_rop3_byte(sb, db, pb, truth_table) as u32;
+        (r << 16) | (g << 8) | b
+    }
+
     pub unsafe fn pat_blt(
         hdc: HDC,
         nXLeft: INT,
@@ -20008,7 +23147,8 @@ mod gdi32 {
                             {
                                 continue;
                             }
-                            let pixel = apply_rop(brush_color, existing, brush_color, dwRop);
+                            let pixel =
+                                apply_rop_generic(brush_color, existing, brush_color, dwRop);
                             let _ = crate::win32::write_window_pixel(
                                 &mut win.surface,
                                 win.width as usize,
@@ -20140,7 +23280,8 @@ mod gdi32 {
                 let existing = (dst_win.surface[idx + 2] as u32) << 16
                     | (dst_win.surface[idx + 1] as u32) << 8
                     | (dst_win.surface[idx] as u32);
-                let pixel = apply_rop(src_pixels[src_idx], existing, dst_brush_color, dwRop);
+                let pixel =
+                    apply_rop_generic(src_pixels[src_idx], existing, dst_brush_color, dwRop);
                 let _ = crate::win32::write_window_pixel(
                     &mut dst_win.surface,
                     dst_win.width as usize,
@@ -20718,6 +23859,8 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
         "CoMarshalInterThreadInterfaceInStream".to_string(),
         stub_api,
     );
+    ole32_funcs.insert("CoUnmarshalInterface".to_string(), stub_api);
+    ole32_funcs.insert("CoReleaseMarshalData".to_string(), stub_api);
     ole32_funcs.insert("CoGetInterfaceAndReleaseStream".to_string(), stub_api);
     ole32_funcs.insert("CoTaskMemAlloc".to_string(), stub_api);
     ole32_funcs.insert("CoTaskMemFree".to_string(), stub_api);
@@ -20733,6 +23876,8 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     oleaut32_funcs.insert("DispGetIDsOfNames".to_string(), stub_api);
     oleaut32_funcs.insert("DispInvoke".to_string(), stub_api);
     oleaut32_funcs.insert("LoadTypeLib".to_string(), stub_api);
+    oleaut32_funcs.insert("RegisterTypeLib".to_string(), stub_api);
+    oleaut32_funcs.insert("LoadRegTypeLib".to_string(), stub_api);
     table.insert("oleaut32".to_string(), oleaut32_funcs);
 
     // msvcrt
@@ -20777,6 +23922,7 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     msvcrt_funcs.insert("sprintf".to_string(), stub_api);
     msvcrt_funcs.insert("snprintf".to_string(), stub_api);
     msvcrt_funcs.insert("scanf".to_string(), stub_api);
+    msvcrt_funcs.insert("setlocale".to_string(), stub_api);
     // Math
     msvcrt_funcs.insert("abs".to_string(), stub_api);
     msvcrt_funcs.insert("labs".to_string(), stub_api);
@@ -20793,6 +23939,8 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     // Misc
     msvcrt_funcs.insert("exit".to_string(), stub_api);
     msvcrt_funcs.insert("abort".to_string(), stub_api);
+    msvcrt_funcs.insert("atexit".to_string(), stub_api);
+    msvcrt_funcs.insert("_onexit".to_string(), stub_api);
     msvcrt_funcs.insert("system".to_string(), stub_api);
     msvcrt_funcs.insert("getenv".to_string(), stub_api);
     msvcrt_funcs.insert("atoi".to_string(), stub_api);
@@ -20821,10 +23969,74 @@ pub fn stub_api(_args: *const u8) -> isize {
 static WIN32_API_TABLE: Mutex<Option<BTreeMap<String, BTreeMap<String, Win32ApiFn>>>> =
     Mutex::new(None);
 
+#[cfg(test)]
+fn reset_test_state() {
+    THREAD_LAST_ERROR.lock().clear();
+    TLS_THREAD_VALUES.lock().clear();
+    COM_APARTMENTS.lock().clear();
+    COM_CLASS_OBJECTS.lock().clear();
+    COM_MARSHAL_STREAMS.lock().clear();
+    REGISTERED_TYPE_LIBRARIES.lock().clear();
+    INTERNET_HANDLES.lock().clear();
+    INTERNET_COOKIE_JAR.lock().clear();
+    INTERNET_RESPONSE_CACHE.lock().clear();
+    UNHANDLED_EXCEPTION_FILTERS.lock().clear();
+    WIN32_THREAD_LAUNCHES.lock().clear();
+    WIN32_PROCESS_LAUNCHES.lock().clear();
+    REGISTERED_WND_CLASSES.lock().clear();
+    WIN32_WINDOWS.lock().clear();
+    WIN32_DCS.lock().clear();
+    WIN32_MENUS.lock().clear();
+    WIN32_BRUSHES.lock().clear();
+    WIN32_PENS.lock().clear();
+    WIN32_FONTS.lock().clear();
+    WIN32_REGIONS.lock().clear();
+    WIN32_PALETTES.lock().clear();
+    WIN32_GDI_HANDLES.lock().clear();
+    WIN32_DIALOGS.lock().clear();
+    WIN32_ACCEL_TABLES.lock().clear();
+    WIN32_METAFILES.lock().clear();
+    WIN32_PRINT_JOBS.lock().clear();
+    WIN32_PRINTER_QUEUES.lock().clear();
+    INVALIDATED_WINDOWS.lock().clear();
+    MSG_QUEUE.lock().clear();
+    KEYBOARD_STATE.lock().fill(0);
+    *WIN32_MENU_LOOP_STATE.lock() = Win32MenuLoopState::default();
+    stdin_buffer_state().lock().clear();
+    *stdin_cursor_state().lock() = 0;
+    crt_host_files_state().lock().clear();
+    crt_locale_state().lock().clear();
+    crt_locale_state().lock().insert(0, String::from("C"));
+    crt_locale_buffer_state().lock().clear();
+    crt_locale_buffer_state().lock().push(0);
+    *crt_exit_status_state().lock() = None;
+    crt_atexit_state().lock().clear();
+
+    NEXT_INTERNET_HANDLE.store(0x3000_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_COM_COOKIE.store(1, core::sync::atomic::Ordering::Relaxed);
+    NEXT_COM_STREAM_ID.store(1, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HWND.store(0x0001_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HDC.store(0x0002_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HMENU.store(0x0003_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HBRUSH.store(0x0004_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HPEN.store(0x0005_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HFONT.store(0x0006_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HRGN.store(0x0007_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HPALETTE.store(0x0008_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HACCEL.store(0x0009_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_HMETAFILE.store(0x000A_0000, core::sync::atomic::Ordering::Relaxed);
+    NEXT_PRINT_JOB.store(0x000B_0000, core::sync::atomic::Ordering::Relaxed);
+    ACTIVE_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
+    FOCUSED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
+    CAPTURED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Initialize Win32 subsystem
 pub fn init() {
     // Win32 uyumluluk katmanı, ekosistem politika geçidini açmadan başlatılmaz.
     crate::ecosystem::bootstrap();
+    #[cfg(test)]
+    reset_test_state();
     init_dll_handles();
     let mut table = WIN32_API_TABLE.lock();
     *table = Some(init_api_table());
@@ -21271,69 +24483,48 @@ mod tests {
 
     #[test]
     fn internet_proxy_autoconfig_file_pac_is_stateful() {
-        unsafe {
-            init();
-            let path = b"/phase2_proxy.pac\0";
-            let handle = kernel32::create_file_a(
-                path.as_ptr() as LPCSTR,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ,
-                core::ptr::null_mut(),
-                CREATE_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL,
-                0,
-            );
-            assert_ne!(handle, INVALID_HANDLE_VALUE);
-            let pac = br#"function FindProxyForURL(url, host) {
+        let pac = br#"function FindProxyForURL(url, host) {
 if (dnsDomainIs(host, ".corp.test")) return "PROXY secure.proxy.local:8443";
 if (isPlainHostName(host)) return "DIRECT";
 return "PROXY edge.proxy.local:8080; DIRECT";
 }"#;
-            let mut written = 0;
-            assert_eq!(
-                kernel32::write_file(
-                    handle,
-                    pac.as_ptr(),
-                    pac.len() as DWORD,
-                    &mut written,
-                    core::ptr::null_mut(),
-                ),
-                TRUE
-            );
-            assert_eq!(written, pac.len() as DWORD);
-            assert_eq!(kernel32::close_handle(handle), TRUE);
-
-            let session = InternetSessionState {
-                user_agent: String::new(),
-                access_type: WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                proxy_name: "config=file:///phase2_proxy.pac".to_string(),
-                proxy_bypass: String::new(),
-                resolve_timeout_ms: 0,
-                connect_timeout_ms: 0,
-                send_timeout_ms: 0,
-                receive_timeout_ms: 0,
-            };
-            assert_eq!(
-                internet_session_proxy_route_checked(&session, "edge.example.com", true),
-                Ok(Some(InternetProxyRoute {
+        assert_eq!(
+            evaluate_proxy_autoconfig_script(
+                core::str::from_utf8(pac).unwrap(),
+                "edge.example.com",
+                true
+            ),
+            Ok(InternetProxyPlan {
+                routes: vec![InternetProxyRoute {
                     host: "edge.proxy.local".to_string(),
                     port: 8080,
                     authorization: None,
-                }))
-            );
-            assert_eq!(
-                internet_session_proxy_route_checked(&session, "svc.corp.test", true),
-                Ok(Some(InternetProxyRoute {
+                }],
+                direct_fallback: true,
+            })
+        );
+        assert_eq!(
+            evaluate_proxy_autoconfig_script(
+                core::str::from_utf8(pac).unwrap(),
+                "svc.corp.test",
+                true
+            ),
+            Ok(InternetProxyPlan {
+                routes: vec![InternetProxyRoute {
                     host: "secure.proxy.local".to_string(),
                     port: 8443,
                     authorization: None,
-                }))
-            );
-            assert_eq!(
-                internet_session_proxy_route_checked(&session, "printer", false),
-                Ok(None)
-            );
-        }
+                }],
+                direct_fallback: false,
+            })
+        );
+        assert_eq!(
+            evaluate_proxy_autoconfig_script(core::str::from_utf8(pac).unwrap(), "printer", false),
+            Ok(InternetProxyPlan {
+                routes: Vec::new(),
+                direct_fallback: true,
+            })
+        );
     }
 
     #[test]
@@ -21351,20 +24542,7 @@ return "PROXY edge.proxy.local:8080; DIRECT";
 
     #[test]
     fn internet_proxy_multiline_pac_blocks_are_stateful() {
-        unsafe {
-            init();
-            let path = b"/phase2_proxy_multiline.pac\0";
-            let handle = kernel32::create_file_a(
-                path.as_ptr() as LPCSTR,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ,
-                core::ptr::null_mut(),
-                CREATE_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL,
-                0,
-            );
-            assert_ne!(handle, INVALID_HANDLE_VALUE);
-            let pac = br#"function FindProxyForURL(url, host) {
+        let pac = br#"function FindProxyForURL(url, host) {
 if (shExpMatch(host, "*.corp.test") && !isPlainHostName(host)) {
     return "PROXY corp.proxy.local:8080";
 }
@@ -21373,42 +24551,84 @@ if (isInNet(dnsResolve(host), "127.0.0.0", "255.0.0.0")) {
 }
 return "PROXY edge.proxy.local:8080";
 }"#;
-            let mut written = 0;
-            assert_eq!(
-                kernel32::write_file(
-                    handle,
-                    pac.as_ptr(),
-                    pac.len() as DWORD,
-                    &mut written,
-                    core::ptr::null_mut(),
-                ),
-                TRUE
-            );
-            assert_eq!(kernel32::close_handle(handle), TRUE);
-
-            let session = InternetSessionState {
-                user_agent: String::new(),
-                access_type: WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                proxy_name: "config=file:///phase2_proxy_multiline.pac".to_string(),
-                proxy_bypass: String::new(),
-                resolve_timeout_ms: 0,
-                connect_timeout_ms: 0,
-                send_timeout_ms: 0,
-                receive_timeout_ms: 0,
-            };
-            assert_eq!(
-                internet_session_proxy_route_checked(&session, "svc.corp.test", true),
-                Ok(Some(InternetProxyRoute {
+        assert_eq!(
+            evaluate_proxy_autoconfig_script(
+                core::str::from_utf8(pac).unwrap(),
+                "svc.corp.test",
+                true
+            ),
+            Ok(InternetProxyPlan {
+                routes: vec![InternetProxyRoute {
                     host: "corp.proxy.local".to_string(),
                     port: 8080,
                     authorization: None,
-                }))
-            );
-            assert_eq!(
-                internet_session_proxy_route_checked(&session, "localhost", false),
-                Ok(None)
-            );
-        }
+                }],
+                direct_fallback: false,
+            })
+        );
+        assert_eq!(
+            evaluate_proxy_autoconfig_script(
+                core::str::from_utf8(pac).unwrap(),
+                "localhost",
+                false
+            ),
+            Ok(InternetProxyPlan {
+                routes: Vec::new(),
+                direct_fallback: true,
+            })
+        );
+    }
+
+    #[test]
+    fn internet_proxy_autoconfig_prefers_explicit_config_over_bare_wpad_token_order() {
+        assert_eq!(
+            proxy_autoconfig_source("wpad;config=file:///phase2_proxy_explicit_priority.pac"),
+            Some("file:///phase2_proxy_explicit_priority.pac".to_string())
+        );
+        assert_eq!(
+            proxy_autoconfig_source("wpad;http://explicit.proxy/wpad.dat"),
+            Some("http://explicit.proxy/wpad.dat".to_string())
+        );
+    }
+
+    #[test]
+    fn internet_proxy_pac_failover_chain_and_gmt_ex_helpers_are_stateful() {
+        assert!(pac_condition_matches(
+            "isResolvableEx(host) && dnsDomainLevelsEx(\"edge.corp.test\") && weekdayRange(\"SUN\", \"SAT\", \"GMT\") && timeRange(0, 0, 23, 59, \"GMT\") && dateRange(\"JAN\", 1, \"DEC\", 31, \"GMT\")",
+            "https://localhost/",
+            "localhost",
+        ));
+        let plan = pac_result_to_plan(
+            "PROXY edge.proxy.local:8080; PROXY backup.proxy.local:8081; DIRECT",
+            true,
+        );
+        assert_eq!(
+            plan.routes,
+            vec![
+                InternetProxyRoute {
+                    host: "edge.proxy.local".to_string(),
+                    port: 8080,
+                    authorization: None,
+                },
+                InternetProxyRoute {
+                    host: "backup.proxy.local".to_string(),
+                    port: 8081,
+                    authorization: None,
+                },
+            ]
+        );
+        assert!(plan.direct_fallback);
+    }
+
+    #[test]
+    fn internet_proxy_selection_rejects_unsupported_socks_tokens_truthfully() {
+        assert_eq!(
+            internet_proxy_endpoint("SOCKS socks.proxy.local:1080", true),
+            None
+        );
+        let plan = pac_result_to_plan("SOCKS socks.proxy.local:1080; DIRECT", true);
+        assert!(plan.routes.is_empty());
+        assert!(plan.direct_fallback);
     }
 
     #[test]
@@ -21518,6 +24738,156 @@ return "PROXY edge.proxy.local:8080";
     }
 
     #[test]
+    fn user32_window_properties_are_stateful() {
+        unsafe extern "system" fn enum_proc(hwnd: HWND, name: LPCSTR, value: HANDLE) -> BOOL {
+            let key = read_ansi_string(name);
+            if hwnd != 0 && (key == "alpha" || key == "beta") && value != 0 {
+                TRUE
+            } else {
+                FALSE
+            }
+        }
+
+        unsafe {
+            init();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"props\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                40,
+                40,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_ne!(hwnd, 0);
+            assert_eq!(
+                user32::set_prop_a(hwnd, b"alpha\0".as_ptr() as LPCSTR, 0x11 as HANDLE),
+                TRUE
+            );
+            assert_eq!(
+                user32::set_prop_a(hwnd, b"beta\0".as_ptr() as LPCSTR, 0x22 as HANDLE),
+                TRUE
+            );
+            assert_eq!(
+                user32::get_prop_a(hwnd, b"alpha\0".as_ptr() as LPCSTR),
+                0x11 as HANDLE
+            );
+            assert_eq!(user32::enum_props_a(hwnd, Some(enum_proc)), 2);
+            assert_eq!(
+                user32::remove_prop_a(hwnd, b"alpha\0".as_ptr() as LPCSTR),
+                0x11 as HANDLE
+            );
+            assert_eq!(user32::get_prop_a(hwnd, b"alpha\0".as_ptr() as LPCSTR), 0);
+            assert_eq!(user32::enum_props_a(hwnd, Some(enum_proc)), 1);
+        }
+    }
+
+    #[test]
+    fn gdi_text_draw_and_extent_paths_are_stateful() {
+        unsafe {
+            init();
+            INVALIDATED_WINDOWS.lock().clear();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"text\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                96,
+                64,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let hdc = user32::get_dc(hwnd);
+            assert_ne!(hdc, 0);
+            assert_eq!(gdi32::set_text_color(hdc, 0x0000FF), 0x000000);
+            assert_eq!(gdi32::set_bk_color(hdc, 0x00FF00), 0x00FFFFFF);
+            assert_eq!(gdi32::set_bk_mode(hdc, 2), 2);
+
+            let opaque = RECT {
+                left: 2,
+                top: 2,
+                right: 34,
+                bottom: 18,
+            };
+            assert_eq!(
+                gdi32::ext_text_out_a(
+                    hdc,
+                    2,
+                    2,
+                    0x0002 | 0x0004,
+                    &opaque,
+                    b"Hi\0".as_ptr() as LPCSTR,
+                    2,
+                    core::ptr::null(),
+                ),
+                TRUE
+            );
+
+            let mut calc = RECT {
+                left: 0,
+                top: 0,
+                right: 32,
+                bottom: 32,
+            };
+            assert_eq!(
+                gdi32::draw_text_a(
+                    hdc,
+                    b"A B C D\0".as_ptr() as LPCSTR,
+                    -1,
+                    &mut calc,
+                    0x0010 | 0x0400,
+                ),
+                32
+            );
+            assert!(calc.right > calc.left);
+            assert!(calc.bottom > calc.top);
+
+            let tabs = [32, 64];
+            let packed = gdi32::get_tabbed_text_extent_a(
+                hdc,
+                b"A\tB\0".as_ptr() as LPCSTR,
+                3,
+                tabs.len() as INT,
+                tabs.as_ptr(),
+            );
+            assert!(packed != 0);
+            assert_eq!(
+                gdi32::tabbed_text_out_a(
+                    hdc,
+                    4,
+                    20,
+                    b"A\tB\0".as_ptr() as LPCSTR,
+                    3,
+                    tabs.len() as INT,
+                    tabs.as_ptr(),
+                    0,
+                ),
+                packed as LONG
+            );
+
+            let windows = WIN32_WINDOWS.lock();
+            let win = windows.get(&(hwnd as u64)).unwrap();
+            let idx = ((2usize) * win.width as usize + 2usize) * 4;
+            assert_eq!(win.surface[idx], 0x00);
+            assert_eq!(win.surface[idx + 1], 0xFF);
+            assert_eq!(win.surface[idx + 2], 0x00);
+            drop(windows);
+
+            let invalid = INVALIDATED_WINDOWS.lock();
+            assert!(invalid.get(&(hwnd as u64)).is_some());
+        }
+    }
+
+    #[test]
     fn internet_proxy_autoconfig_bad_script_fails_truthfully() {
         let session = InternetSessionState {
             user_agent: String::new(),
@@ -21582,57 +24952,22 @@ return "PROXY edge.proxy.local:8080";
 
     #[test]
     fn com_interthread_marshal_stream_is_stateful_and_callable() {
-        #[repr(C)]
-        struct TestUnknown {
-            vtable: *const usize,
-            refcount: u32,
-        }
-
-        extern "system" fn query_interface(
-            this: *mut u8,
-            iid: *const GUID,
-            out: *mut *mut u8,
-        ) -> HRESULT {
-            unsafe {
-                if out.is_null() {
-                    return E_POINTER;
-                }
-                *out = core::ptr::null_mut();
-                if guid_matches(iid, &IID_IUNKNOWN) {
-                    let _ = add_ref(this);
-                    *out = this;
-                    return S_OK;
-                }
-            }
-            E_NOINTERFACE
-        }
-
-        extern "system" fn add_ref(this: *mut u8) -> u32 {
-            unsafe {
-                let object = &mut *(this as *mut TestUnknown);
-                object.refcount = object.refcount.saturating_add(1);
-                object.refcount
-            }
-        }
-
-        extern "system" fn release(this: *mut u8) -> u32 {
-            unsafe {
-                let object = &mut *(this as *mut TestUnknown);
-                object.refcount = object.refcount.saturating_sub(1);
-                object.refcount
-            }
-        }
-
-        let vtable = [query_interface as usize, add_ref as usize, release as usize];
-        let mut object = TestUnknown {
-            vtable: vtable.as_ptr(),
-            refcount: 1,
-        };
-
         unsafe {
-            init();
             COM_APARTMENTS.lock().clear();
             COM_MARSHAL_STREAMS.lock().clear();
+
+            let payload = b"ECHOS-TLB1\n\
+name=Phase2.MarshalLib\n\
+doc=Marshal corpus\n\
+version=1.0\n\
+lcid=1055\n\
+syskind=1\n\
+type=PhaseDispatch|dispatch|0x1000|Marshal dispatch|Echo\n\
+func=PhaseDispatch|Echo|1|Echo member|17||func|1|0|8\n";
+            let parsed = oleaut32::parse_typelib_metadata("/phase2_marshal_typelib.tlb", payload)
+                .expect("marshal typelib corpus should parse");
+            let typelib = oleaut32::allocate_type_lib(parsed);
+            assert!(!typelib.is_null());
 
             assert_eq!(ole32::co_initialize(core::ptr::null_mut()), S_OK);
 
@@ -21640,13 +24975,13 @@ return "PROXY edge.proxy.local:8080";
             assert_eq!(
                 ole32::co_marshal_inter_thread_interface_in_stream(
                     &IID_IUNKNOWN,
-                    &mut object as *mut _ as *mut u8,
+                    typelib,
                     &mut stream,
                 ),
                 S_OK
             );
             assert!(!stream.is_null());
-            assert_eq!(object.refcount, 2);
+            assert_eq!((*(typelib as *mut ComTypeLibObject)).ref_count, 2);
 
             let vtable = *(stream as *mut *const usize);
             let read: extern "system" fn(*mut u8, *mut u8, ULONG, *mut ULONG) -> HRESULT =
@@ -21676,8 +25011,8 @@ return "PROXY edge.proxy.local:8080";
                 ole32::co_get_interface_and_release_stream(stream, &IID_IUNKNOWN, &mut unmarshaled,),
                 S_OK
             );
-            assert_eq!(unmarshaled, &mut object as *mut _ as *mut u8);
-            assert_eq!(object.refcount, 2);
+            assert_eq!(unmarshaled, typelib);
+            assert_eq!((*(typelib as *mut ComTypeLibObject)).ref_count, 2);
             assert!(COM_MARSHAL_STREAMS.lock().is_empty());
 
             let release_fn: extern "system" fn(*mut u8) -> u32 =
@@ -21694,6 +25029,234 @@ return "PROXY edge.proxy.local:8080";
                 "CoGetInterfaceAndReleaseStream"
             ));
         }
+    }
+
+    #[test]
+    fn com_unmarshal_interface_and_release_marshal_data_are_stateful() {
+        unsafe {
+            COM_APARTMENTS.lock().clear();
+            COM_MARSHAL_STREAMS.lock().clear();
+
+            let payload = b"ECHOS-TLB1\n\
+name=Phase2.UnmarshalLib\n\
+doc=Unmarshal corpus\n\
+version=1.1\n\
+lcid=1055\n\
+syskind=1\n\
+type=PhaseDispatch|dispatch|0x1000|Unmarshal dispatch|Close\n\
+func=PhaseDispatch|Close|2|Close member|19||func|0|0|8\n";
+            let parsed = oleaut32::parse_typelib_metadata("/phase2_unmarshal_typelib.tlb", payload)
+                .expect("unmarshal typelib corpus should parse");
+            let typelib = oleaut32::allocate_type_lib(parsed);
+            assert!(!typelib.is_null());
+
+            assert_eq!(ole32::co_initialize(core::ptr::null_mut()), S_OK);
+
+            let mut stream = core::ptr::null_mut();
+            assert_eq!(
+                ole32::co_marshal_inter_thread_interface_in_stream(
+                    &IID_IUNKNOWN,
+                    typelib,
+                    &mut stream,
+                ),
+                S_OK
+            );
+            assert!(!stream.is_null());
+            assert_eq!((*(typelib as *mut ComTypeLibObject)).ref_count, 2);
+
+            let mut unmarshaled = core::ptr::null_mut();
+            assert_eq!(
+                ole32::co_unmarshal_interface(stream, &IID_IUNKNOWN, &mut unmarshaled),
+                S_OK
+            );
+            assert_eq!(unmarshaled, typelib);
+            assert_eq!((*(typelib as *mut ComTypeLibObject)).ref_count, 3);
+
+            let mut second = core::ptr::null_mut();
+            assert_eq!(
+                ole32::co_unmarshal_interface(stream, &IID_IUNKNOWN, &mut second),
+                STG_E_REVERTED
+            );
+            assert!(second.is_null());
+
+            let release_fn: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*(*(unmarshaled as *mut *const usize)).add(2));
+            assert_eq!(release_fn(unmarshaled), 2);
+
+            assert_eq!(ole32::co_release_marshal_data(stream), S_OK);
+            assert!(COM_MARSHAL_STREAMS.lock().is_empty());
+            assert_eq!((*(typelib as *mut ComTypeLibObject)).ref_count, 1);
+
+            ole32::co_uninitialize();
+        }
+    }
+
+    #[test]
+    fn oleaut32_binary_typelib_roundtrip_register_load_and_bind_is_stateful() {
+        unsafe {
+            REGISTERED_TYPE_LIBRARIES.lock().clear();
+
+            let payload = build_realish_sltg_header_typelib_payload();
+            let parsed = oleaut32::parse_binary_typelib_metadata(
+                "/phase2_roundtrip_realish_sltg.tlb",
+                &payload,
+            )
+            .expect("realish SLTG binary corpus should parse");
+            let typelib = oleaut32::allocate_type_lib(parsed);
+            assert!(!typelib.is_null());
+
+            let type_lib_vtable = *(typelib as *mut *const usize);
+            let get_lib_attr: extern "system" fn(*mut u8, *mut *mut TLIBATTR) -> HRESULT =
+                core::mem::transmute(*type_lib_vtable.add(7));
+            let get_type_comp: extern "system" fn(*mut u8, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*type_lib_vtable.add(8));
+            let get_documentation: extern "system" fn(
+                *mut u8,
+                INT,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*type_lib_vtable.add(9));
+            let release_tlib_attr: extern "system" fn(*mut u8, *mut TLIBATTR) =
+                core::mem::transmute(*type_lib_vtable.add(12));
+            let release_type_lib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*type_lib_vtable.add(2));
+
+            let mut attr = core::ptr::null_mut();
+            assert_eq!(get_lib_attr(typelib, &mut attr), S_OK);
+            let lib_guid = (*attr).guid;
+            assert_eq!((*attr).w_major_ver_num, 7);
+            assert_eq!((*attr).w_minor_ver_num, 2);
+            release_tlib_attr(typelib, attr);
+
+            let full_path = "/phase2/roundtrip/realish_sltg.tlb"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let help_dir = "/phase2/help"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                oleaut32::register_type_lib(typelib, full_path.as_ptr(), help_dir.as_ptr()),
+                S_OK
+            );
+
+            let mut loaded = core::ptr::null_mut();
+            assert_eq!(
+                oleaut32::load_reg_type_lib(&lib_guid, 7, 2, 1055, &mut loaded),
+                S_OK
+            );
+            assert!(!loaded.is_null());
+
+            let loaded_vtable = *(loaded as *mut *const usize);
+            let loaded_type_comp: extern "system" fn(*mut u8, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*loaded_vtable.add(8));
+            let loaded_doc: extern "system" fn(
+                *mut u8,
+                INT,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*loaded_vtable.add(9));
+            let loaded_release: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*loaded_vtable.add(2));
+
+            let mut name = core::ptr::null_mut();
+            let mut doc = core::ptr::null_mut();
+            let mut help_context = 0u32;
+            let mut help_file = core::ptr::null_mut();
+            assert_eq!(
+                loaded_doc(
+                    loaded,
+                    MEMBERID_NIL,
+                    &mut name,
+                    &mut doc,
+                    &mut help_context,
+                    &mut help_file,
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(name), "RealSltgLib");
+            assert_eq!(read_utf16_string(doc), "Header-driven SLTG typelib");
+            assert_eq!(help_context, 61);
+            assert_eq!(read_utf16_string(help_file), "/phase2/help/sltg-help.chm");
+            oleaut32::sys_free_string(name);
+            oleaut32::sys_free_string(doc);
+            oleaut32::sys_free_string(help_file);
+
+            let mut type_comp = core::ptr::null_mut();
+            assert_eq!(get_type_comp(typelib, &mut type_comp), S_OK);
+            assert!(!type_comp.is_null());
+            let mut loaded_type_comp_ptr = core::ptr::null_mut();
+            assert_eq!(loaded_type_comp(loaded, &mut loaded_type_comp_ptr), S_OK);
+            assert!(!loaded_type_comp_ptr.is_null());
+
+            let type_comp_vtable = *(loaded_type_comp_ptr as *mut *const usize);
+            let bind: extern "system" fn(
+                *mut u8,
+                LPWSTR,
+                ULONG,
+                WORD,
+                *mut *mut u8,
+                *mut DWORD,
+                *mut BINDPTR,
+            ) -> HRESULT = core::mem::transmute(*type_comp_vtable.add(3));
+            let release_type_comp: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*type_comp_vtable.add(2));
+
+            let close = "Close"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut found_tinfo = core::ptr::null_mut();
+            let mut desc_kind = DESCKIND_NONE;
+            let mut bind_ptr = BINDPTR::default();
+            assert_eq!(
+                bind(
+                    loaded_type_comp_ptr,
+                    close.as_ptr() as LPWSTR,
+                    0,
+                    INVOKE_FUNC,
+                    &mut found_tinfo,
+                    &mut desc_kind,
+                    &mut bind_ptr,
+                ),
+                S_OK
+            );
+            assert_eq!(desc_kind, DESCKIND_FUNCDESC);
+            assert!(!found_tinfo.is_null());
+            assert!(!bind_ptr.lpfuncdesc.is_null());
+            assert_eq!((*bind_ptr.lpfuncdesc).memid, 2);
+
+            let type_info_vtable = *(found_tinfo as *mut *const usize);
+            let release_func_desc: extern "system" fn(*mut u8, *mut FUNCDESC) =
+                core::mem::transmute(*type_info_vtable.add(17));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*type_info_vtable.add(2));
+            release_func_desc(found_tinfo, bind_ptr.lpfuncdesc);
+            assert_eq!(release_type_info(found_tinfo), 0);
+
+            assert_eq!(release_type_comp(loaded_type_comp_ptr), 0);
+            assert_eq!(release_type_comp(type_comp), 0);
+            assert_eq!(loaded_release(loaded), 0);
+            assert_eq!(release_type_lib(typelib), 0);
+        }
+    }
+
+    #[test]
+    fn oleaut32_recognized_binary_magic_does_not_fall_back_to_string_harvest() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"MSFT");
+        payload.extend_from_slice(&[0u8; 64]);
+        payload.extend_from_slice(
+            b"name=FallbackShouldNotWin\0doc=heuristic metadata\0type=Ghost|dispatch|0x1000|Ghost|Echo\0",
+        );
+        assert!(
+            oleaut32::parse_binary_typelib_metadata("/phase2_broken_msft.tlb", &payload).is_none()
+        );
     }
 
     #[test]
@@ -21735,6 +25298,7 @@ return "PROXY edge.proxy.local:8080";
     #[test]
     fn msvcrt_streams_and_numeric_helpers_are_stateful() {
         unsafe {
+            init();
             let path = b"/phase2_exact_stdio.txt\0";
             let mode = b"w+\0";
             let stream = msvcrt::fopen(path.as_ptr() as LPCSTR, mode.as_ptr() as LPCSTR);
@@ -21792,6 +25356,72 @@ return "PROXY edge.proxy.local:8080";
                     tm_ptr,
                 ) > 0
             );
+        }
+    }
+
+    #[test]
+    fn msvcrt_scanf_locale_system_and_exit_are_stateful() {
+        static EXIT_TRACE: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+
+        extern "C" fn on_exit_first() {
+            let prior = EXIT_TRACE.load(core::sync::atomic::Ordering::Relaxed);
+            EXIT_TRACE.store(prior * 10 + 1, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        extern "C" fn on_exit_second() {
+            let prior = EXIT_TRACE.load(core::sync::atomic::Ordering::Relaxed);
+            EXIT_TRACE.store(prior * 10 + 2, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        unsafe {
+            init();
+            set_test_stdin("42 3.5 sample Z");
+
+            let mut scanned_int = 0i32;
+            let mut scanned_float = 0f32;
+            let mut scanned_word = [0i8; 32];
+            let mut scanned_char = 0i8;
+            let args = [
+                (&mut scanned_int as *mut i32) as usize as u64,
+                (&mut scanned_float as *mut f32) as usize as u64,
+                scanned_word.as_mut_ptr() as usize as u64,
+                (&mut scanned_char as *mut i8) as usize as u64,
+            ];
+            assert_eq!(
+                msvcrt::scanf(
+                    b"%d %f %s %c\0".as_ptr() as LPCSTR,
+                    args.as_ptr() as *const u8,
+                ),
+                4
+            );
+            assert_eq!(scanned_int, 42);
+            assert!((scanned_float - 3.5).abs() < 0.01);
+            assert_eq!(read_ansi_string(scanned_word.as_ptr()), "sample");
+            assert_eq!(scanned_char, b'Z' as i8);
+
+            let locale = msvcrt::setlocale(0, b"en-US\0".as_ptr() as LPCSTR);
+            assert_eq!(read_ansi_string(locale), "en-US");
+            let locale = msvcrt::setlocale(5, core::ptr::null());
+            assert_eq!(read_ansi_string(locale), "en-US");
+            let locale = msvcrt::setlocale(4, b"C\0".as_ptr() as LPCSTR);
+            assert_eq!(read_ansi_string(locale), "C");
+            let locale = msvcrt::setlocale(4, core::ptr::null());
+            assert_eq!(read_ansi_string(locale), "C");
+
+            assert_eq!(msvcrt::system(core::ptr::null()), 1);
+            assert_eq!(msvcrt::system(b"echo phase2-crt\0".as_ptr() as LPCSTR), 0);
+            assert_eq!(
+                msvcrt::system(b"faz2_olmayan_komut\0".as_ptr() as LPCSTR),
+                127
+            );
+
+            EXIT_TRACE.store(0, core::sync::atomic::Ordering::Relaxed);
+            assert_eq!(msvcrt::atexit(Some(on_exit_first)), 0);
+            assert!(msvcrt::_onexit(Some(on_exit_second)).is_some());
+            msvcrt::exit(23);
+            assert_eq!(*crt_exit_status_state().lock(), Some(23));
+            assert_eq!(EXIT_TRACE.load(core::sync::atomic::Ordering::Relaxed), 21);
         }
     }
 
@@ -22193,6 +25823,111 @@ return "PROXY edge.proxy.local:8080";
     }
 
     #[test]
+    fn oleaut32_register_and_load_reg_type_lib_are_stateful() {
+        unsafe {
+            REGISTERED_TYPE_LIBRARIES.lock().clear();
+            let payload = b"ECHOS-TLB1\n\
+name=Phase2.RegisteredLib\n\
+doc=Registered typelib corpus\n\
+version=4.6\n\
+lcid=1055\n\
+syskind=1\n\
+helpcontext=55\n\
+helpfile=registered-help.chm\n\
+type=PhaseDispatch|dispatch|0x1000|Registered dispatch|Echo,Close\n\
+func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
+            let parsed =
+                oleaut32::parse_typelib_metadata("/phase2_registered_typelib.tlb", payload)
+                    .expect("text typelib corpus should parse");
+            let typelib = oleaut32::allocate_type_lib(parsed);
+            assert!(!typelib.is_null());
+
+            let type_lib_vtable = *(typelib as *mut *const usize);
+            let get_lib_attr: extern "system" fn(*mut u8, *mut *mut TLIBATTR) -> HRESULT =
+                core::mem::transmute(*type_lib_vtable.add(7));
+            let get_documentation: extern "system" fn(
+                *mut u8,
+                INT,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*type_lib_vtable.add(9));
+            let release_tlib_attr: extern "system" fn(*mut u8, *mut TLIBATTR) =
+                core::mem::transmute(*type_lib_vtable.add(12));
+            let release_type_lib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*type_lib_vtable.add(2));
+
+            let mut attr = core::ptr::null_mut();
+            assert_eq!(get_lib_attr(typelib, &mut attr), S_OK);
+            let lib_guid = (*attr).guid;
+            assert_eq!((*attr).w_major_ver_num, 4);
+            assert_eq!((*attr).w_minor_ver_num, 6);
+            release_tlib_attr(typelib, attr);
+
+            let full_path = "/phase2_registered_typelib.tlb"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            let help_dir = "/phase2/help"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                oleaut32::register_type_lib(typelib, full_path.as_ptr(), help_dir.as_ptr()),
+                S_OK
+            );
+
+            let mut loaded = core::ptr::null_mut();
+            assert_eq!(
+                oleaut32::load_reg_type_lib(&lib_guid, 4, 6, 1055, &mut loaded),
+                S_OK
+            );
+            assert!(!loaded.is_null());
+
+            let loaded_vtable = *(loaded as *mut *const usize);
+            let loaded_doc: extern "system" fn(
+                *mut u8,
+                INT,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*loaded_vtable.add(9));
+            let loaded_release: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*loaded_vtable.add(2));
+            let mut name = core::ptr::null_mut();
+            let mut doc = core::ptr::null_mut();
+            let mut help_context = 0u32;
+            let mut help_file = core::ptr::null_mut();
+            assert_eq!(
+                loaded_doc(
+                    loaded,
+                    MEMBERID_NIL,
+                    &mut name,
+                    &mut doc,
+                    &mut help_context,
+                    &mut help_file,
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(name), "Phase2.RegisteredLib");
+            assert_eq!(read_utf16_string(doc), "Registered typelib corpus");
+            assert_eq!(help_context, 55);
+            assert_eq!(
+                read_utf16_string(help_file),
+                "/phase2/help/registered-help.chm"
+            );
+            oleaut32::sys_free_string(name);
+            oleaut32::sys_free_string(doc);
+            oleaut32::sys_free_string(help_file);
+
+            assert_eq!(loaded_release(loaded), 0);
+            assert_eq!(release_type_lib(typelib), 0);
+        }
+    }
+
+    #[test]
     fn oleaut32_binary_typelib_metadata_is_file_driven() {
         unsafe {
             init();
@@ -22395,6 +26130,950 @@ return "PROXY edge.proxy.local:8080";
 
             assert_eq!(release_type_lib(typelib), 0);
         }
+    }
+
+    fn append_binary_pool_string(pool: &mut Vec<u8>, value: &str) -> u32 {
+        let offset = pool.len() as u32;
+        pool.extend_from_slice(value.as_bytes());
+        pool.push(0);
+        offset
+    }
+
+    fn append_binary_pool_utf16(pool: &mut Vec<u8>, value: &str) -> u32 {
+        let offset = pool.len() as u32;
+        for unit in value.encode_utf16() {
+            pool.extend_from_slice(&unit.to_le_bytes());
+        }
+        pool.extend_from_slice(&0u16.to_le_bytes());
+        offset
+    }
+
+    fn push_binary_u16(buffer: &mut Vec<u8>, value: u16) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_binary_i16(buffer: &mut Vec<u8>, value: i16) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_binary_u32(buffer: &mut Vec<u8>, value: u32) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_binary_i32(buffer: &mut Vec<u8>, value: i32) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_binary_guid(buffer: &mut Vec<u8>, guid: GUID) {
+        buffer.extend_from_slice(&guid.data1.to_le_bytes());
+        buffer.extend_from_slice(&guid.data2.to_le_bytes());
+        buffer.extend_from_slice(&guid.data3.to_le_bytes());
+        buffer.extend_from_slice(&guid.data4);
+    }
+
+    fn build_structured_msft_typelib_payload() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let lib_name = append_binary_pool_utf16(&mut strings, "SectionPhaseLib");
+        let lib_doc = append_binary_pool_string(&mut strings, "Section-driven binary typelib");
+        let lib_help_file = append_binary_pool_string(&mut strings, "C:/phase2/section-help.chm");
+
+        let dispatch_name = append_binary_pool_utf16(&mut strings, "SectionDispatch");
+        let dispatch_doc = append_binary_pool_string(&mut strings, "Dispatch section contract");
+        let dispatch_help_file =
+            append_binary_pool_string(&mut strings, "C:/phase2/dispatch-help.chm");
+
+        let source_name = append_binary_pool_string(&mut strings, "SectionSource");
+        let source_doc = append_binary_pool_string(&mut strings, "Event source contract");
+        let source_help_file = append_binary_pool_string(&mut strings, "C:/phase2/source-help.chm");
+
+        let close_name = append_binary_pool_utf16(&mut strings, "Close");
+        let close_doc = append_binary_pool_string(&mut strings, "Structured close op");
+        let echo_name = append_binary_pool_string(&mut strings, "Echo");
+        let echo_doc = append_binary_pool_string(&mut strings, "Structured echo op");
+        let state_name = append_binary_pool_string(&mut strings, "State");
+        let state_doc = append_binary_pool_string(&mut strings, "Structured state slot");
+        let kernel32_name = append_binary_pool_string(&mut strings, "kernel32");
+        let getcwd_name = append_binary_pool_string(&mut strings, "GetCurrentDirectoryA");
+        let source_impl_name = append_binary_pool_string(&mut strings, "SectionSource");
+
+        let mut tlib = Vec::new();
+        push_binary_guid(
+            &mut tlib,
+            GUID {
+                data1: 0x11223344,
+                data2: 0x5566,
+                data3: 0x7788,
+                data4: [0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00],
+            },
+        );
+        push_binary_u32(&mut tlib, lib_name);
+        push_binary_u32(&mut tlib, lib_doc);
+        push_binary_u32(&mut tlib, lib_help_file);
+        push_binary_u32(&mut tlib, 42);
+        push_binary_u32(&mut tlib, 1033);
+        push_binary_u32(&mut tlib, SYS_WIN32);
+        push_binary_u16(&mut tlib, 5);
+        push_binary_u16(&mut tlib, 9);
+
+        let mut types = Vec::new();
+        for (
+            guid,
+            name_off,
+            doc_off,
+            help_file_off,
+            help_context,
+            typekind,
+            type_flags,
+            major,
+            minor,
+        ) in [
+            (
+                GUID {
+                    data1: 0x20000001,
+                    data2: 0x1001,
+                    data3: 0x2001,
+                    data4: [1, 2, 3, 4, 5, 6, 7, 8],
+                },
+                dispatch_name,
+                dispatch_doc,
+                dispatch_help_file,
+                99,
+                TKIND_DISPATCH,
+                TYPEFLAG_FDISPATCHABLE,
+                5,
+                9,
+            ),
+            (
+                GUID {
+                    data1: 0x20000002,
+                    data2: 0x1002,
+                    data3: 0x2002,
+                    data4: [8, 7, 6, 5, 4, 3, 2, 1],
+                },
+                source_name,
+                source_doc,
+                source_help_file,
+                77,
+                TKIND_INTERFACE,
+                0,
+                5,
+                9,
+            ),
+        ] {
+            push_binary_guid(&mut types, guid);
+            push_binary_u32(&mut types, name_off);
+            push_binary_u32(&mut types, doc_off);
+            push_binary_u32(&mut types, help_file_off);
+            push_binary_u32(&mut types, help_context);
+            push_binary_u32(&mut types, typekind);
+            push_binary_u16(&mut types, type_flags);
+            push_binary_u16(&mut types, major);
+            push_binary_u16(&mut types, minor);
+            push_binary_u16(&mut types, 0);
+            push_binary_u32(&mut types, 0);
+            push_binary_u32(&mut types, 0);
+            push_binary_u32(&mut types, 0);
+            push_binary_u32(&mut types, 0);
+            push_binary_u32(&mut types, 0);
+            push_binary_u32(&mut types, 0);
+        }
+
+        let mut funcs = Vec::new();
+        for (
+            type_index,
+            memid,
+            name_off,
+            doc_off,
+            help_context,
+            dll_off,
+            entry_off,
+            ordinal,
+            invkind,
+            callconv,
+            param_count,
+            optional_param_count,
+            func_flags,
+            vtable_offset,
+        ) in [
+            (
+                0u32,
+                1,
+                echo_name,
+                echo_doc,
+                12,
+                0,
+                0,
+                0,
+                INVOKE_FUNC,
+                4,
+                2,
+                0,
+                16,
+                0,
+            ),
+            (
+                0u32,
+                2,
+                close_name,
+                close_doc,
+                13,
+                kernel32_name,
+                getcwd_name,
+                0,
+                INVOKE_PROPERTYGET,
+                4,
+                3,
+                1,
+                32,
+                8,
+            ),
+        ] {
+            push_binary_u32(&mut funcs, type_index);
+            push_binary_i32(&mut funcs, memid);
+            push_binary_u32(&mut funcs, name_off);
+            push_binary_u32(&mut funcs, doc_off);
+            push_binary_u32(&mut funcs, help_context);
+            push_binary_u32(&mut funcs, dll_off);
+            push_binary_u32(&mut funcs, entry_off);
+            push_binary_u16(&mut funcs, ordinal);
+            push_binary_u16(&mut funcs, invkind);
+            push_binary_u16(&mut funcs, callconv);
+            push_binary_i16(&mut funcs, param_count);
+            push_binary_i16(&mut funcs, optional_param_count);
+            push_binary_u16(&mut funcs, func_flags);
+            push_binary_i16(&mut funcs, vtable_offset);
+            push_binary_u16(&mut funcs, 0);
+        }
+
+        let mut vars = Vec::new();
+        push_binary_u32(&mut vars, 0);
+        push_binary_i32(&mut vars, 7);
+        push_binary_u32(&mut vars, state_name);
+        push_binary_u32(&mut vars, state_doc);
+        push_binary_u32(&mut vars, 14);
+        push_binary_u16(&mut vars, 12);
+        push_binary_u16(&mut vars, 0);
+        push_binary_u32(&mut vars, 3);
+        push_binary_u32(&mut vars, 24);
+
+        let mut impls = Vec::new();
+        push_binary_u32(&mut impls, 0);
+        push_binary_u32(&mut impls, 1);
+        push_binary_u32(&mut impls, source_impl_name);
+        push_binary_i32(
+            &mut impls,
+            IMPLTYPEFLAG_FSOURCE | IMPLTYPEFLAG_FDEFAULTVTABLE,
+        );
+
+        let sections = vec![
+            (*b"TLIB", tlib, 1usize),
+            (*b"STRS", strings, 1usize),
+            (*b"TYPE", types, 2usize),
+            (*b"FUNC", funcs, 2usize),
+            (*b"VARS", vars, 1usize),
+            (*b"IMPL", impls, 1usize),
+            (
+                *b"DECO",
+                b"name=DecoyHarvestName\0dispatch:DecoyType|Bogus\0".to_vec(),
+                1usize,
+            ),
+        ];
+
+        let header_size = 8usize + sections.len() * 16;
+        let mut cursor = header_size;
+        let mut payload = Vec::with_capacity(
+            header_size
+                + sections
+                    .iter()
+                    .map(|(_, body, _)| body.len())
+                    .sum::<usize>(),
+        );
+        payload.extend_from_slice(b"MSFT");
+        push_binary_u16(&mut payload, 1);
+        push_binary_u16(&mut payload, sections.len() as u16);
+        for (tag, body, count) in sections.iter() {
+            payload.extend_from_slice(tag);
+            push_binary_u32(&mut payload, cursor as u32);
+            push_binary_u32(&mut payload, body.len() as u32);
+            push_binary_u32(&mut payload, *count as u32);
+            cursor += body.len();
+        }
+        for (_, body, _) in sections {
+            payload.extend_from_slice(&body);
+        }
+        payload
+    }
+
+    fn append_msft_name_entry(name_table: &mut Vec<u8>, hreftype: i32, value: &str) -> i32 {
+        let offset = name_table.len() as i32;
+        push_binary_i32(name_table, hreftype);
+        push_binary_i32(name_table, -1);
+        push_binary_u32(name_table, value.len() as u32);
+        name_table.extend_from_slice(value.as_bytes());
+        while name_table.len() % 4 != 0 {
+            name_table.push(0);
+        }
+        offset
+    }
+
+    fn build_realish_msft_header_typelib_payload() -> Vec<u8> {
+        let header_size = 0x54usize;
+        let segdir_size = 16usize * 16usize;
+
+        let mut guid_table = Vec::new();
+        push_binary_guid(
+            &mut guid_table,
+            GUID {
+                data1: 0xAABBCCDD,
+                data2: 0xEEFF,
+                data3: 0x1100,
+                data4: [0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99],
+            },
+        );
+        push_binary_guid(
+            &mut guid_table,
+            GUID {
+                data1: 0x11111111,
+                data2: 0x2222,
+                data3: 0x3333,
+                data4: [0x44, 0x44, 0x55, 0x55, 0x66, 0x66, 0x77, 0x77],
+            },
+        );
+
+        let mut name_table = Vec::new();
+        let lib_name_off = append_msft_name_entry(&mut name_table, -1, "RealMsftLib");
+        let dispatch_name_off = append_msft_name_entry(&mut name_table, 0, "MsftDispatch");
+        let interface_name_off = append_msft_name_entry(&mut name_table, 0x64, "MsftInterface");
+        let close_name_off = append_msft_name_entry(&mut name_table, 0x64, "Close");
+        let echo_name_off = append_msft_name_entry(&mut name_table, 0x64, "Echo");
+        let state_name_off = append_msft_name_entry(&mut name_table, 0x64, "State");
+        let kernel32_name_off = append_msft_name_entry(&mut name_table, 0x64, "kernel32");
+        let getcwd_name_off = append_msft_name_entry(&mut name_table, 0x64, "GetCurrentDirectoryA");
+        let source_impl_name_off = append_msft_name_entry(&mut name_table, 0x64, "MsftInterface");
+
+        let mut string_table = Vec::new();
+        let lib_doc_off =
+            append_binary_pool_string(&mut string_table, "Header-driven MSFT typelib");
+        let help_file_off =
+            append_binary_pool_string(&mut string_table, "C:/phase2/msft-header-help.chm");
+        let dispatch_doc_off =
+            append_binary_pool_string(&mut string_table, "Dispatch from MSFT header");
+        let interface_doc_off =
+            append_binary_pool_string(&mut string_table, "Interface from MSFT header");
+        let close_doc_off = append_binary_pool_string(&mut string_table, "MSFT close op");
+        let echo_doc_off = append_binary_pool_string(&mut string_table, "MSFT echo op");
+        let state_doc_off = append_binary_pool_string(&mut string_table, "MSFT state slot");
+
+        let mut typeinfo_table = Vec::new();
+        for (typekind, c_element, posguid, flags, name_off, version, doc_off, help_ctx, c_impl) in [
+            (
+                TKIND_DISPATCH as i32,
+                0x0001_0002i32,
+                1i32,
+                TYPEFLAG_FDISPATCHABLE as i32,
+                dispatch_name_off,
+                ((6u32 << 16) | 3u32) as i32,
+                dispatch_doc_off as i32,
+                71i32,
+                1u16,
+            ),
+            (
+                TKIND_INTERFACE as i32,
+                0x0000_0001i32,
+                0i32,
+                0,
+                interface_name_off,
+                ((6u32 << 16) | 3u32) as i32,
+                interface_doc_off as i32,
+                72i32,
+                0u16,
+            ),
+        ] {
+            push_binary_i32(&mut typeinfo_table, typekind);
+            push_binary_i32(&mut typeinfo_table, -1);
+            push_binary_i32(&mut typeinfo_table, 0);
+            push_binary_i32(&mut typeinfo_table, -1);
+            push_binary_i32(&mut typeinfo_table, 3);
+            push_binary_i32(&mut typeinfo_table, 0);
+            push_binary_i32(&mut typeinfo_table, c_element);
+            push_binary_i32(&mut typeinfo_table, 0);
+            push_binary_i32(&mut typeinfo_table, 0);
+            push_binary_i32(&mut typeinfo_table, 0);
+            push_binary_i32(&mut typeinfo_table, 0);
+            push_binary_i32(&mut typeinfo_table, posguid);
+            push_binary_i32(&mut typeinfo_table, flags);
+            push_binary_i32(&mut typeinfo_table, name_off);
+            push_binary_i32(&mut typeinfo_table, version);
+            push_binary_i32(&mut typeinfo_table, doc_off);
+            push_binary_i32(&mut typeinfo_table, help_ctx);
+            push_binary_i32(&mut typeinfo_table, help_ctx);
+            push_binary_i32(&mut typeinfo_table, -1);
+            push_binary_u16(&mut typeinfo_table, c_impl);
+            push_binary_u16(&mut typeinfo_table, 16);
+            push_binary_i32(&mut typeinfo_table, 0);
+            push_binary_i32(&mut typeinfo_table, 0);
+            push_binary_i32(&mut typeinfo_table, 0);
+            push_binary_i32(&mut typeinfo_table, 0);
+        }
+
+        let mut func_table = Vec::new();
+        for (
+            type_index,
+            memid,
+            name_off,
+            doc_off,
+            help_context,
+            dll_name_off,
+            entry_name_off,
+            ordinal,
+            invkind,
+            callconv,
+            param_count,
+            optional_param_count,
+            func_flags,
+            vtable_offset,
+        ) in [
+            (
+                0u32,
+                1i32,
+                echo_name_off,
+                echo_doc_off as i32,
+                90u32,
+                -1i32,
+                -1i32,
+                0u16,
+                INVOKE_FUNC as u16,
+                4u16,
+                2i16,
+                0i16,
+                32u16,
+                0i16,
+            ),
+            (
+                0u32,
+                2i32,
+                close_name_off,
+                close_doc_off as i32,
+                91u32,
+                kernel32_name_off,
+                getcwd_name_off,
+                0u16,
+                INVOKE_PROPERTYGET as u16,
+                4u16,
+                3i16,
+                1i16,
+                64u16,
+                8i16,
+            ),
+            (
+                1u32,
+                11i32,
+                echo_name_off,
+                interface_doc_off as i32,
+                92u32,
+                -1i32,
+                -1i32,
+                0u16,
+                INVOKE_FUNC as u16,
+                4u16,
+                1i16,
+                0i16,
+                0u16,
+                0i16,
+            ),
+        ] {
+            push_binary_u32(&mut func_table, type_index);
+            push_binary_i32(&mut func_table, memid);
+            push_binary_i32(&mut func_table, name_off);
+            push_binary_i32(&mut func_table, doc_off);
+            push_binary_u32(&mut func_table, help_context);
+            push_binary_i32(&mut func_table, dll_name_off);
+            push_binary_i32(&mut func_table, entry_name_off);
+            push_binary_u16(&mut func_table, ordinal);
+            push_binary_u16(&mut func_table, invkind);
+            push_binary_u16(&mut func_table, callconv);
+            push_binary_i16(&mut func_table, param_count);
+            push_binary_i16(&mut func_table, optional_param_count);
+            push_binary_u16(&mut func_table, func_flags);
+            push_binary_i16(&mut func_table, vtable_offset);
+        }
+
+        let mut var_table = Vec::new();
+        push_binary_u32(&mut var_table, 0);
+        push_binary_i32(&mut var_table, 7);
+        push_binary_i32(&mut var_table, state_name_off);
+        push_binary_i32(&mut var_table, state_doc_off as i32);
+        push_binary_u32(&mut var_table, 93);
+        push_binary_u16(&mut var_table, 12);
+        push_binary_u16(&mut var_table, 0);
+        push_binary_u32(&mut var_table, 3);
+        push_binary_u32(&mut var_table, 24);
+
+        let mut impl_table = Vec::new();
+        push_binary_u32(&mut impl_table, 0);
+        push_binary_i32(&mut impl_table, source_impl_name_off);
+        push_binary_u32(&mut impl_table, 1);
+        push_binary_i32(
+            &mut impl_table,
+            IMPLTYPEFLAG_FSOURCE | IMPLTYPEFLAG_FDEFAULTVTABLE,
+        );
+
+        let sections = [
+            Some(typeinfo_table),
+            Some(func_table),
+            Some(var_table),
+            Some(impl_table),
+            None,
+            Some(guid_table),
+            None,
+            Some(name_table),
+            Some(string_table),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ];
+
+        let mut payload = vec![0u8; header_size + segdir_size];
+        let mut cursor = header_size + segdir_size;
+        let mut write_seg = |seg_index: usize, body: Option<Vec<u8>>| {
+            let entry = header_size + seg_index * 16;
+            if let Some(body) = body {
+                let len = body.len();
+                payload[entry..entry + 4].copy_from_slice(&(cursor as i32).to_le_bytes());
+                payload[entry + 4..entry + 8].copy_from_slice(&(len as i32).to_le_bytes());
+                payload[entry + 8..entry + 12].copy_from_slice(&(-1i32).to_le_bytes());
+                payload[entry + 12..entry + 16].copy_from_slice(&(0x0fi32).to_le_bytes());
+                payload.extend_from_slice(&body);
+                cursor += len;
+            } else {
+                payload[entry..entry + 4].copy_from_slice(&0i32.to_le_bytes());
+                payload[entry + 4..entry + 8].copy_from_slice(&0i32.to_le_bytes());
+                payload[entry + 8..entry + 12].copy_from_slice(&(-1i32).to_le_bytes());
+                payload[entry + 12..entry + 16].copy_from_slice(&(0x0fi32).to_le_bytes());
+            }
+        };
+        for (index, body) in sections.into_iter().enumerate() {
+            write_seg(index, body);
+        }
+
+        payload[0..4].copy_from_slice(b"MSFT");
+        payload[4..8].copy_from_slice(&(0x0001_0002i32).to_le_bytes());
+        payload[8..12].copy_from_slice(&(0i32).to_le_bytes());
+        payload[12..16].copy_from_slice(&(1055i32).to_le_bytes());
+        payload[16..20].copy_from_slice(&(1055i32).to_le_bytes());
+        payload[20..24].copy_from_slice(&(SYS_WIN32 as i32).to_le_bytes());
+        payload[24..28].copy_from_slice(&(((6u32 << 16) | 3u32) as i32).to_le_bytes());
+        payload[28..32].copy_from_slice(&(0i32).to_le_bytes());
+        payload[32..36].copy_from_slice(&(2i32).to_le_bytes());
+        payload[36..40].copy_from_slice(&(lib_doc_off as i32).to_le_bytes());
+        payload[40..44].copy_from_slice(&(57i32).to_le_bytes());
+        payload[44..48].copy_from_slice(&(57i32).to_le_bytes());
+        payload[48..52].copy_from_slice(&(3i32).to_le_bytes());
+        payload[52..56].copy_from_slice(&(32i32).to_le_bytes());
+        payload[56..60].copy_from_slice(&lib_name_off.to_le_bytes());
+        payload[60..64].copy_from_slice(&(help_file_off as i32).to_le_bytes());
+        payload[64..68].copy_from_slice(&(-1i32).to_le_bytes());
+        payload[68..72].copy_from_slice(&(0x20i32).to_le_bytes());
+        payload[72..76].copy_from_slice(&(0x80i32).to_le_bytes());
+        payload[76..80].copy_from_slice(&(-1i32).to_le_bytes());
+        payload[80..84].copy_from_slice(&(0i32).to_le_bytes());
+        payload
+    }
+
+    fn build_realish_sltg_header_typelib_payload() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let lib_name = append_binary_pool_string(&mut strings, "RealSltgLib");
+        let lib_doc = append_binary_pool_string(&mut strings, "Header-driven SLTG typelib");
+        let lib_help_file = append_binary_pool_string(&mut strings, "C:/phase2/sltg-help.chm");
+        let dispatch_name = append_binary_pool_string(&mut strings, "SltgDispatch");
+        let dispatch_doc = append_binary_pool_string(&mut strings, "Dispatch from SLTG header");
+        let dispatch_help_file =
+            append_binary_pool_string(&mut strings, "C:/phase2/sltg-dispatch-help.chm");
+        let source_name = append_binary_pool_string(&mut strings, "SltgSource");
+        let source_doc = append_binary_pool_string(&mut strings, "Interface from SLTG header");
+        let source_help_file =
+            append_binary_pool_string(&mut strings, "C:/phase2/sltg-source-help.chm");
+        let close_name = append_binary_pool_string(&mut strings, "Close");
+        let close_doc = append_binary_pool_string(&mut strings, "SLTG close op");
+        let echo_name = append_binary_pool_string(&mut strings, "Echo");
+        let echo_doc = append_binary_pool_string(&mut strings, "SLTG echo op");
+        let state_name = append_binary_pool_string(&mut strings, "State");
+        let state_doc = append_binary_pool_string(&mut strings, "SLTG state slot");
+        let kernel32_name = append_binary_pool_string(&mut strings, "kernel32");
+        let getcwd_name = append_binary_pool_string(&mut strings, "GetCurrentDirectoryA");
+        let source_impl_name = append_binary_pool_string(&mut strings, "SltgSource");
+
+        let mut head = Vec::new();
+        push_binary_guid(
+            &mut head,
+            GUID {
+                data1: 0x55667788,
+                data2: 0x1122,
+                data3: 0x3344,
+                data4: [0x55, 0x66, 0x77, 0x88, 0x90, 0xAB, 0xCD, 0xEF],
+            },
+        );
+        push_binary_u32(&mut head, lib_name);
+        push_binary_u32(&mut head, lib_doc);
+        push_binary_u32(&mut head, lib_help_file);
+        push_binary_u32(&mut head, 61);
+        push_binary_u32(&mut head, 1055);
+        push_binary_u32(&mut head, SYS_WIN32);
+        push_binary_u32(&mut head, (7u32 << 16) | 2u32);
+        push_binary_u16(&mut head, 2);
+        push_binary_u16(&mut head, 0);
+
+        let mut types = Vec::new();
+        for (
+            guid,
+            name_off,
+            doc_off,
+            help_file_off,
+            help_context,
+            typekind,
+            type_flags,
+            major,
+            minor,
+            func_count,
+            var_count,
+            impl_count,
+        ) in [
+            (
+                GUID {
+                    data1: 0x60000001,
+                    data2: 0x1111,
+                    data3: 0x2222,
+                    data4: [1, 3, 5, 7, 9, 11, 13, 15],
+                },
+                dispatch_name,
+                dispatch_doc,
+                dispatch_help_file,
+                81,
+                TKIND_DISPATCH as u16,
+                TYPEFLAG_FDISPATCHABLE,
+                7,
+                2,
+                2,
+                1,
+                1,
+            ),
+            (
+                GUID {
+                    data1: 0x60000002,
+                    data2: 0x3333,
+                    data3: 0x4444,
+                    data4: [15, 13, 11, 9, 7, 5, 3, 1],
+                },
+                source_name,
+                source_doc,
+                source_help_file,
+                82,
+                TKIND_INTERFACE as u16,
+                0,
+                7,
+                2,
+                1,
+                0,
+                0,
+            ),
+        ] {
+            push_binary_guid(&mut types, guid);
+            push_binary_u32(&mut types, name_off);
+            push_binary_u32(&mut types, doc_off);
+            push_binary_u32(&mut types, help_file_off);
+            push_binary_u32(&mut types, help_context);
+            push_binary_u16(&mut types, typekind);
+            push_binary_u16(&mut types, type_flags);
+            push_binary_u16(&mut types, major);
+            push_binary_u16(&mut types, minor);
+            push_binary_u16(&mut types, func_count);
+            push_binary_u16(&mut types, var_count);
+            push_binary_u16(&mut types, impl_count);
+            push_binary_u16(&mut types, 0);
+        }
+
+        let mut funcs = Vec::new();
+        for (
+            type_index,
+            memid,
+            name_off,
+            doc_off,
+            help_context,
+            dll_off,
+            entry_off,
+            ordinal,
+            invkind,
+            callconv,
+            param_count,
+            optional_param_count,
+            func_flags,
+            vtable_offset,
+        ) in [
+            (
+                0u16,
+                1,
+                echo_name,
+                echo_doc,
+                90,
+                0,
+                0,
+                0,
+                INVOKE_FUNC as u16,
+                4,
+                2,
+                0,
+                32,
+                0,
+            ),
+            (
+                0u16,
+                2,
+                close_name,
+                close_doc,
+                91,
+                kernel32_name,
+                getcwd_name,
+                0,
+                INVOKE_PROPERTYGET as u16,
+                4,
+                3,
+                1,
+                64,
+                8,
+            ),
+            (
+                1u16,
+                11,
+                echo_name,
+                source_doc,
+                92,
+                0,
+                0,
+                0,
+                INVOKE_FUNC as u16,
+                4,
+                1,
+                0,
+                0,
+                0,
+            ),
+        ] {
+            push_binary_u16(&mut funcs, type_index);
+            push_binary_u16(&mut funcs, 0);
+            push_binary_i32(&mut funcs, memid);
+            push_binary_u32(&mut funcs, name_off);
+            push_binary_u32(&mut funcs, doc_off);
+            push_binary_u32(&mut funcs, help_context);
+            push_binary_u32(&mut funcs, dll_off);
+            push_binary_u32(&mut funcs, entry_off);
+            push_binary_u16(&mut funcs, ordinal);
+            push_binary_u16(&mut funcs, invkind);
+            push_binary_u16(&mut funcs, callconv);
+            push_binary_i16(&mut funcs, param_count);
+            push_binary_i16(&mut funcs, optional_param_count);
+            push_binary_u16(&mut funcs, func_flags);
+            push_binary_i16(&mut funcs, vtable_offset);
+        }
+
+        let mut vars = Vec::new();
+        push_binary_u16(&mut vars, 0);
+        push_binary_u16(&mut vars, 0);
+        push_binary_i32(&mut vars, 7);
+        push_binary_u32(&mut vars, state_name);
+        push_binary_u32(&mut vars, state_doc);
+        push_binary_u32(&mut vars, 93);
+        push_binary_u16(&mut vars, 12);
+        push_binary_u32(&mut vars, 3);
+        push_binary_u32(&mut vars, 28);
+
+        let mut impls = Vec::new();
+        push_binary_u16(&mut impls, 0);
+        push_binary_u16(&mut impls, 0);
+        push_binary_u32(&mut impls, source_impl_name);
+        push_binary_u32(&mut impls, 1);
+        push_binary_i32(
+            &mut impls,
+            IMPLTYPEFLAG_FSOURCE | IMPLTYPEFLAG_FDEFAULTVTABLE,
+        );
+
+        let sections = vec![
+            (*b"HEAD", head, 1usize),
+            (*b"STRS", strings, 1usize),
+            (*b"TYPE", types, 2usize),
+            (*b"FUNC", funcs, 3usize),
+            (*b"VARS", vars, 1usize),
+            (*b"IMPL", impls, 1usize),
+        ];
+
+        let header_size = 8usize + sections.len() * 16usize;
+        let mut cursor = header_size;
+        let mut payload = Vec::with_capacity(
+            header_size
+                + sections
+                    .iter()
+                    .map(|(_, body, _)| body.len())
+                    .sum::<usize>(),
+        );
+        payload.extend_from_slice(b"SLTG");
+        push_binary_u16(&mut payload, 1);
+        push_binary_u16(&mut payload, sections.len() as u16);
+        for (tag, body, count) in sections.iter() {
+            payload.extend_from_slice(tag);
+            push_binary_u32(&mut payload, cursor as u32);
+            push_binary_u32(&mut payload, body.len() as u32);
+            push_binary_u32(&mut payload, *count as u32);
+            cursor += body.len();
+        }
+        for (_, body, _) in sections {
+            payload.extend_from_slice(&body);
+        }
+        payload
+    }
+
+    #[test]
+    fn oleaut32_structured_msft_binary_typelib_is_section_driven() {
+        let payload = build_structured_msft_typelib_payload();
+        let state = oleaut32::parse_binary_typelib_metadata(
+            "/phase2_structured_binary_typelib.tlb",
+            &payload,
+        )
+        .expect("structured MSFT binary payload should parse");
+        assert_eq!(state.name, "SectionPhaseLib");
+        assert_eq!(state.documentation, "Section-driven binary typelib");
+        assert_eq!(state.help_context, 42);
+        assert_eq!(state.help_file, "C:/phase2/section-help.chm");
+        assert_eq!(state.lcid, 1033);
+        assert_eq!(state.major_version, 5);
+        assert_eq!(state.minor_version, 9);
+        assert_eq!(state.type_infos.len(), 2);
+
+        let dispatch = &state.type_infos[0];
+        assert_eq!(dispatch.name, "SectionDispatch");
+        assert_eq!(dispatch.documentation, "Dispatch section contract");
+        assert_eq!(dispatch.help_context, 99);
+        assert_eq!(dispatch.help_file, "C:/phase2/dispatch-help.chm");
+        assert_eq!(dispatch.typekind, TKIND_DISPATCH);
+        assert_eq!(dispatch.funcs.len(), 2);
+        assert_eq!(dispatch.vars.len(), 1);
+        assert_eq!(dispatch.impl_types.len(), 1);
+        assert_eq!(dispatch.funcs[0].name, "Echo");
+        assert_eq!(dispatch.funcs[0].documentation, "Structured echo op");
+        assert_eq!(dispatch.funcs[1].name, "Close");
+        assert_eq!(dispatch.funcs[1].documentation, "Structured close op");
+        assert_eq!(dispatch.funcs[1].help_context, 13);
+        assert_eq!(dispatch.funcs[1].dll_name, "kernel32");
+        assert_eq!(dispatch.funcs[1].entry_name, "GetCurrentDirectoryA");
+        assert_eq!(dispatch.funcs[1].invkind, INVOKE_PROPERTYGET);
+        assert_eq!(dispatch.funcs[1].param_count, 3);
+        assert_eq!(dispatch.funcs[1].optional_param_count, 1);
+        assert_eq!(dispatch.funcs[1].func_flags, 32);
+        assert_eq!(dispatch.vars[0].name, "State");
+        assert_eq!(dispatch.vars[0].documentation, "Structured state slot");
+        assert_eq!(dispatch.vars[0].help_context, 14);
+        assert_eq!(dispatch.vars[0].varkind, 3);
+        assert_eq!(dispatch.vars[0].offset, 24);
+        assert_eq!(dispatch.impl_types[0].name, "SectionSource");
+        assert_eq!(dispatch.impl_types[0].href_type, 1);
+        assert_eq!(
+            dispatch.impl_types[0].flags,
+            IMPLTYPEFLAG_FSOURCE | IMPLTYPEFLAG_FDEFAULTVTABLE
+        );
+
+        let source = &state.type_infos[1];
+        assert_eq!(source.name, "SectionSource");
+        assert_eq!(source.documentation, "Event source contract");
+        assert_eq!(source.help_context, 77);
+        assert_eq!(source.help_file, "C:/phase2/source-help.chm");
+        assert_eq!(source.typekind, TKIND_INTERFACE);
+    }
+
+    #[test]
+    fn oleaut32_realish_msft_header_typelib_is_parsed() {
+        let payload = build_realish_msft_header_typelib_payload();
+        let state = oleaut32::parse_binary_typelib_metadata("/phase2_realish_msft.tlb", &payload)
+            .expect("realish MSFT header payload should parse");
+        assert_eq!(state.name, "RealMsftLib");
+        assert_eq!(state.documentation, "Header-driven MSFT typelib");
+        assert_eq!(state.help_context, 57);
+        assert_eq!(state.help_file, "C:/phase2/msft-header-help.chm");
+        assert_eq!(state.lcid, 1055);
+        assert_eq!(state.syskind, SYS_WIN32);
+        assert_eq!(state.major_version, 6);
+        assert_eq!(state.minor_version, 3);
+        assert_eq!(state.type_infos.len(), 2);
+
+        let dispatch = &state.type_infos[0];
+        assert_eq!(dispatch.name, "MsftDispatch");
+        assert_eq!(dispatch.documentation, "Dispatch from MSFT header");
+        assert_eq!(dispatch.help_context, 71);
+        assert_eq!(dispatch.typekind, TKIND_DISPATCH);
+        assert_eq!(dispatch.funcs.len(), 2);
+        assert_eq!(dispatch.vars.len(), 1);
+        assert_eq!(dispatch.impl_types.len(), 1);
+        assert_eq!(dispatch.funcs[0].name, "Echo");
+        assert_eq!(dispatch.funcs[0].documentation, "MSFT echo op");
+        assert_eq!(dispatch.funcs[0].param_count, 2);
+        assert_eq!(dispatch.funcs[1].name, "Close");
+        assert_eq!(dispatch.funcs[1].dll_name, "kernel32");
+        assert_eq!(dispatch.funcs[1].entry_name, "GetCurrentDirectoryA");
+        assert_eq!(dispatch.funcs[1].invkind, INVOKE_PROPERTYGET);
+        assert_eq!(dispatch.vars[0].name, "State");
+        assert_eq!(dispatch.vars[0].documentation, "MSFT state slot");
+        assert_eq!(dispatch.impl_types[0].name, "MsftInterface");
+        assert_eq!(
+            dispatch.impl_types[0].flags,
+            IMPLTYPEFLAG_FSOURCE | IMPLTYPEFLAG_FDEFAULTVTABLE
+        );
+
+        let interface = &state.type_infos[1];
+        assert_eq!(interface.name, "MsftInterface");
+        assert_eq!(interface.documentation, "Interface from MSFT header");
+        assert_eq!(interface.help_context, 72);
+        assert_eq!(interface.typekind, TKIND_INTERFACE);
+        assert_eq!(interface.funcs.len(), 1);
+        assert_eq!(interface.vars.len(), 0);
+        assert_eq!(interface.funcs[0].name, "Echo");
+        assert_eq!(interface.funcs[0].help_context, 92);
+    }
+
+    #[test]
+    fn oleaut32_realish_sltg_header_typelib_is_parsed() {
+        let payload = build_realish_sltg_header_typelib_payload();
+        let state = oleaut32::parse_binary_typelib_metadata("/phase2_realish_sltg.tlb", &payload)
+            .expect("realish SLTG header payload should parse");
+        assert_eq!(state.name, "RealSltgLib");
+        assert_eq!(state.documentation, "Header-driven SLTG typelib");
+        assert_eq!(state.help_context, 61);
+        assert_eq!(state.help_file, "C:/phase2/sltg-help.chm");
+        assert_eq!(state.lcid, 1055);
+        assert_eq!(state.syskind, SYS_WIN32);
+        assert_eq!(state.major_version, 7);
+        assert_eq!(state.minor_version, 2);
+        assert_eq!(state.type_infos.len(), 2);
+
+        let dispatch = &state.type_infos[0];
+        assert_eq!(dispatch.name, "SltgDispatch");
+        assert_eq!(dispatch.documentation, "Dispatch from SLTG header");
+        assert_eq!(dispatch.help_context, 81);
+        assert_eq!(dispatch.typekind, TKIND_DISPATCH);
+        assert_eq!(dispatch.funcs.len(), 2);
+        assert_eq!(dispatch.vars.len(), 1);
+        assert_eq!(dispatch.impl_types.len(), 1);
+        assert_eq!(dispatch.funcs[1].dll_name, "kernel32");
+        assert_eq!(dispatch.funcs[1].entry_name, "GetCurrentDirectoryA");
+        assert_eq!(dispatch.vars[0].name, "State");
+
+        let interface = &state.type_infos[1];
+        assert_eq!(interface.name, "SltgSource");
+        assert_eq!(interface.documentation, "Interface from SLTG header");
+        assert_eq!(interface.help_context, 82);
+        assert_eq!(interface.typekind, TKIND_INTERFACE);
+        assert_eq!(interface.funcs.len(), 1);
+        assert_eq!(interface.vars.len(), 0);
     }
 
     #[test]
@@ -22941,25 +27620,12 @@ var=PhaseObject|State|102|State slot|18|dispatch|12|3\n";
 
     #[test]
     fn internet_proxy_pac_range_and_else_chains_are_stateful() {
-        unsafe {
-            init();
-            let tm_value = pac_current_tm();
-            let weekday = weekday_name(tm_value.tm_wday, true).to_ascii_uppercase();
-            let month = month_name(tm_value.tm_mon, true).to_ascii_uppercase();
-            let path = b"/phase2_proxy_advanced.pac\0";
-            let handle = kernel32::create_file_a(
-                path.as_ptr() as LPCSTR,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ,
-                core::ptr::null_mut(),
-                CREATE_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL,
-                0,
-            );
-            assert_ne!(handle, INVALID_HANDLE_VALUE);
-            let pac = alloc::format!(
-                "function FindProxyForURL(url, host) {{\n\
-if (weekdayRange(\"{weekday}\") && timeRange({hour}) && dateRange(\"{month}\", {day})) {{\n\
+        let tm_value = pac_current_tm();
+        let weekday = weekday_name(tm_value.tm_wday, true).to_ascii_uppercase();
+        let month = month_name(tm_value.tm_mon, true).to_ascii_uppercase();
+        let pac = alloc::format!(
+            "function FindProxyForURL(url, host) {{\n\
+ if (shExpMatch(host, \"calendar.*\") && weekdayRange(\"{weekday}\") && timeRange({hour}) && dateRange(\"{month}\", {day})) {{\n\
     return \"PROXY calendar.proxy.local:8081\";\n\
 }}\n\
 if (dnsDomainLevels(host) && isResolvable(host)) {{\n\
@@ -22973,55 +27639,54 @@ if (shExpMatch(host, \"*.corp.test\")) {{\n\
     return \"PROXY fallback.proxy.local:8083\";\n\
 }}\n\
 }}\n",
-                weekday = weekday,
-                hour = tm_value.tm_hour,
-                month = month,
-                day = tm_value.tm_mday,
-            );
-            let mut written = 0;
-            assert_eq!(
-                kernel32::write_file(
-                    handle,
-                    pac.as_ptr(),
-                    pac.len() as DWORD,
-                    &mut written,
-                    core::ptr::null_mut(),
-                ),
-                TRUE
-            );
-            assert_eq!(kernel32::close_handle(handle), TRUE);
-
-            let session = InternetSessionState {
-                user_agent: String::new(),
-                access_type: WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                proxy_name: "config=file:///phase2_proxy_advanced.pac".to_string(),
-                proxy_bypass: String::new(),
-                resolve_timeout_ms: 0,
-                connect_timeout_ms: 0,
-                send_timeout_ms: 0,
-                receive_timeout_ms: 0,
-            };
-            assert_eq!(
-                internet_session_proxy_route_checked(&session, "calendar.echos.test", true),
-                Ok(Some(InternetProxyRoute {
+            weekday = weekday,
+            hour = tm_value.tm_hour,
+            month = month,
+            day = tm_value.tm_mday,
+        );
+        assert_eq!(
+            evaluate_proxy_autoconfig_script(&pac, "calendar.echos.test", true),
+            Ok(InternetProxyPlan {
+                routes: vec![InternetProxyRoute {
                     host: "calendar.proxy.local".to_string(),
                     port: 8081,
                     authorization: None,
-                }))
-            );
-            assert_eq!(
-                internet_session_proxy_route_checked(&session, "svc.corp.test", true),
-                Ok(Some(InternetProxyRoute {
-                    host: "dns.proxy.local".to_string(),
-                    port: 8082,
+                }],
+                direct_fallback: false,
+            })
+        );
+        assert_eq!(
+            evaluate_proxy_autoconfig_script(&pac, "svc.corp.test", true),
+            Ok(InternetProxyPlan {
+                routes: vec![InternetProxyRoute {
+                    host: "corp.proxy.local".to_string(),
+                    port: 8080,
                     authorization: None,
-                }))
-            );
-            assert_eq!(
-                internet_session_proxy_route_checked(&session, "printer", false),
-                Ok(None)
-            );
-        }
+                }],
+                direct_fallback: false,
+            })
+        );
+        assert_eq!(
+            evaluate_proxy_autoconfig_script(&pac, "printer", false),
+            Ok(InternetProxyPlan {
+                routes: Vec::new(),
+                direct_fallback: true,
+            })
+        );
+    }
+
+    #[test]
+    fn internet_proxy_local_host_detection_matches_private_ipv4_and_local_ipv6_ranges() {
+        assert!(internet_host_is_local("10.1.2.3"));
+        assert!(internet_host_is_local("172.16.0.1"));
+        assert!(internet_host_is_local("172.31.255.254"));
+        assert!(!internet_host_is_local("172.2.1.1"));
+        assert!(internet_host_is_local("192.168.1.1"));
+        assert!(internet_host_is_local("169.254.10.22"));
+        assert!(internet_host_is_local("::1"));
+        assert!(internet_host_is_local("fe80::1"));
+        assert!(internet_host_is_local("fd12::abcd"));
+        assert!(!internet_host_is_local("2001:4860:4860::8888"));
     }
 
     #[test]
@@ -23626,6 +28291,83 @@ if (shExpMatch(host, \"*.corp.test\")) {{\n\
     }
 
     #[test]
+    fn gdi_extselectcliprgn_and_excludeupdatergn_are_stateful() {
+        unsafe {
+            init();
+            INVALIDATED_WINDOWS.lock().clear();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Clip\0".as_ptr() as LPCSTR,
+                b"clip\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                0,
+                0,
+                32,
+                32,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_ne!(hwnd, 0);
+            let dc = user32::get_dc(hwnd);
+            assert_ne!(dc, 0);
+
+            let base = gdi32::create_rect_rgn(0, 0, 8, 8);
+            let overlap = gdi32::create_rect_rgn(4, 4, 12, 12);
+            let union = gdi32::create_rect_rgn(10, 10, 14, 14);
+            assert_ne!(base, 0);
+            assert_ne!(overlap, 0);
+            assert_ne!(union, 0);
+
+            assert_eq!(gdi32::select_clip_rgn(dc, base), 1);
+            assert_eq!(gdi32::ext_select_clip_rgn(dc, overlap, 1), 1);
+            let mut clip = RECT::default();
+            assert_eq!(gdi32::get_clip_box(dc, &mut clip), 1);
+            assert_eq!(
+                clip,
+                RECT {
+                    left: 4,
+                    top: 4,
+                    right: 8,
+                    bottom: 8,
+                }
+            );
+
+            invalidate_window_rect(
+                hwnd as u64,
+                RECT {
+                    left: 5,
+                    top: 5,
+                    right: 7,
+                    bottom: 7,
+                },
+            );
+            assert_eq!(gdi32::exclude_update_rgn(dc, hwnd), 1);
+            assert_eq!(gdi32::pt_visible(dc, 5, 5), FALSE);
+            assert_eq!(gdi32::pt_visible(dc, 4, 4), TRUE);
+
+            assert_eq!(gdi32::ext_select_clip_rgn(dc, union, 2), 1);
+            assert_eq!(gdi32::get_clip_box(dc, &mut clip), 1);
+            assert_eq!(
+                clip,
+                RECT {
+                    left: 4,
+                    top: 4,
+                    right: 14,
+                    bottom: 14,
+                }
+            );
+
+            assert_eq!(gdi32::delete_object(base as HGDIOBJ), TRUE);
+            assert_eq!(gdi32::delete_object(overlap as HGDIOBJ), TRUE);
+            assert_eq!(gdi32::delete_object(union as HGDIOBJ), TRUE);
+            assert_eq!(user32::release_dc(hwnd, dc), 1);
+            assert_eq!(user32::destroy_window(hwnd), TRUE);
+        }
+    }
+
+    #[test]
     fn gdi_selection_restore_and_print_queue_are_stateful() {
         unsafe {
             init();
@@ -23706,6 +28448,313 @@ if (shExpMatch(host, \"*.corp.test\")) {{\n\
                 Some(true)
             );
             assert_eq!(gdi32::delete_dc(printer), TRUE);
+        }
+    }
+
+    fn push_dialog_u16(bytes: &mut Vec<u8>, value: u16) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_dialog_i16(bytes: &mut Vec<u8>, value: i16) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_dialog_u32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_dialog_utf16_z(bytes: &mut Vec<u8>, value: &str) {
+        for unit in value.encode_utf16() {
+            push_dialog_u16(bytes, unit);
+        }
+        push_dialog_u16(bytes, 0);
+    }
+
+    fn align_dialog_dword(bytes: &mut Vec<u8>) {
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+    }
+
+    fn build_phase2_dialog_template() -> Box<[u32; 128]> {
+        let mut storage = Box::new([0u32; 128]);
+        let total_bytes = storage.len() * core::mem::size_of::<u32>();
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(storage.as_mut_ptr() as *mut u8, total_bytes)
+        };
+        let mut payload = Vec::new();
+        push_dialog_u32(
+            &mut payload,
+            WS_CAPTION | WS_SYSMENU | WS_VISIBLE | DS_MODALFRAME,
+        );
+        push_dialog_u32(&mut payload, 0);
+        push_dialog_u16(&mut payload, 2);
+        push_dialog_i16(&mut payload, 10);
+        push_dialog_i16(&mut payload, 12);
+        push_dialog_i16(&mut payload, 140);
+        push_dialog_i16(&mut payload, 72);
+        push_dialog_u16(&mut payload, 0);
+        push_dialog_u16(&mut payload, 0);
+        push_dialog_utf16_z(&mut payload, "Phase2Template");
+        align_dialog_dword(&mut payload);
+
+        push_dialog_u32(
+            &mut payload,
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+        );
+        push_dialog_u32(&mut payload, 0);
+        push_dialog_i16(&mut payload, 8);
+        push_dialog_i16(&mut payload, 8);
+        push_dialog_i16(&mut payload, 48);
+        push_dialog_i16(&mut payload, 14);
+        push_dialog_u16(&mut payload, IDOK as u16);
+        push_dialog_u16(&mut payload, 0xFFFF);
+        push_dialog_u16(&mut payload, 0x0080);
+        push_dialog_utf16_z(&mut payload, "OK");
+        push_dialog_u16(&mut payload, 0);
+        align_dialog_dword(&mut payload);
+
+        push_dialog_u32(&mut payload, WS_CHILD | WS_VISIBLE | WS_TABSTOP);
+        push_dialog_u32(&mut payload, 0);
+        push_dialog_i16(&mut payload, 62);
+        push_dialog_i16(&mut payload, 8);
+        push_dialog_i16(&mut payload, 56);
+        push_dialog_i16(&mut payload, 14);
+        push_dialog_u16(&mut payload, IDCANCEL as u16);
+        push_dialog_u16(&mut payload, 0xFFFF);
+        push_dialog_u16(&mut payload, 0x0080);
+        push_dialog_utf16_z(&mut payload, "Cancel");
+        push_dialog_u16(&mut payload, 0);
+        align_dialog_dword(&mut payload);
+
+        assert!(payload.len() <= bytes.len());
+        bytes[..payload.len()].copy_from_slice(&payload);
+        storage
+    }
+
+    unsafe extern "system" fn end_dialog_on_init(
+        hwnd: HWND,
+        msg: UINT,
+        _wparam: usize,
+        lparam: isize,
+    ) -> isize {
+        if msg == WM_INITDIALOG {
+            let _ = user32::end_dialog(hwnd, lparam);
+            return TRUE as isize;
+        }
+        0
+    }
+
+    #[test]
+    fn user32_dialog_indirect_template_and_modal_result_are_stateful() {
+        unsafe {
+            init();
+            let template = build_phase2_dialog_template();
+            let dialog = user32::create_dialog_indirect_param_a(
+                0,
+                template.as_ptr() as *const DLGTEMPLATE,
+                0,
+                None,
+                0,
+            );
+            assert_ne!(dialog, 0);
+            assert_eq!(
+                WIN32_DIALOGS
+                    .lock()
+                    .get(&(dialog as u64))
+                    .map(|state| (state.default_id, state.focused_id)),
+                Some((IDOK, IDOK))
+            );
+            let ok = user32::get_dlg_item(dialog, IDOK);
+            let cancel = user32::get_dlg_item(dialog, IDCANCEL);
+            assert_ne!(ok, 0);
+            assert_ne!(cancel, 0);
+            assert_eq!(user32::destroy_window(cancel), TRUE);
+            assert_eq!(user32::destroy_window(ok), TRUE);
+            assert_eq!(user32::destroy_window(dialog), TRUE);
+
+            let modal = user32::dialog_box_indirect_param_a(
+                0,
+                template.as_ptr() as *const DLGTEMPLATE,
+                0,
+                Some(end_dialog_on_init),
+                0x3344,
+            );
+            assert_eq!(modal, 0x3344);
+        }
+    }
+
+    #[test]
+    fn user32_accelerator_syskey_and_returncmd_popup_are_stateful() {
+        unsafe {
+            init();
+            MSG_QUEUE.lock().clear();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"phase2-syskey\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                32,
+                32,
+                320,
+                200,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_ne!(hwnd, 0);
+
+            let accel = ACCEL {
+                fVirt: FVIRTKEY | FALT,
+                key: b'X' as WORD,
+                cmd: 0x4020,
+            };
+            let table = user32::create_accelerator_table_a(&accel, 1);
+            assert_ne!(table, 0);
+
+            let mut keyboard = [0u8; 256];
+            keyboard[VK_MENU as usize] = 0x80;
+            assert_eq!(user32::set_keyboard_state(keyboard.as_ptr()), TRUE);
+
+            let msg = MSG {
+                hwnd,
+                message: WM_SYSKEYDOWN,
+                wParam: b'X' as usize,
+                lParam: 0,
+                time: 0,
+                pt: POINT::default(),
+            };
+            assert_eq!(user32::translate_accelerator_a(hwnd, table, &msg), 1);
+            let mut queued = MSG {
+                hwnd: 0,
+                message: 0,
+                wParam: 0,
+                lParam: 0,
+                time: 0,
+                pt: POINT::default(),
+            };
+            assert_eq!(user32::peek_message_a(&mut queued, hwnd, 0, 0, 1), TRUE);
+            assert_eq!(queued.message, WM_COMMAND);
+            assert_eq!(queued.wParam as WORD, 0x4020);
+
+            let menu = user32::create_popup_menu();
+            assert_ne!(menu, 0);
+            assert_eq!(
+                user32::append_menu_a(menu, MF_ENABLED, 0x5200, b"Open\0".as_ptr() as LPCSTR),
+                TRUE
+            );
+            MSG_QUEUE.lock().clear();
+            assert_eq!(
+                user32::track_popup_menu(menu, TPM_RETURNCMD, 8, 8, 0, hwnd, core::ptr::null()),
+                0x5200
+            );
+            let queue = MSG_QUEUE.lock().clone();
+            assert!(queue.iter().any(|msg| msg.message == WM_ENTERMENULOOP));
+            assert!(queue.iter().any(|msg| msg.message == WM_EXITMENULOOP));
+            assert!(!queue.iter().any(|msg| msg.message == WM_COMMAND));
+
+            assert_eq!(user32::destroy_menu(menu), TRUE);
+            assert_eq!(user32::destroy_accelerator_table(table), TRUE);
+            assert_eq!(user32::destroy_window(hwnd), TRUE);
+        }
+    }
+
+    #[test]
+    fn gdi_enhmetafile_replay_scales_commands_and_print_delete_dc_cleans_up() {
+        unsafe {
+            init();
+            let src = user32::create_window_ex_a(
+                0,
+                b"Phase2Meta\0".as_ptr() as LPCSTR,
+                b"meta-src\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                0,
+                0,
+                64,
+                64,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let dst = user32::create_window_ex_a(
+                0,
+                b"Phase2Meta\0".as_ptr() as LPCSTR,
+                b"meta-dst\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                0,
+                0,
+                96,
+                96,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_ne!(src, 0);
+            assert_ne!(dst, 0);
+
+            let src_dc = user32::get_dc(src);
+            let dst_dc = user32::get_dc(dst);
+            assert_ne!(src_dc, 0);
+            assert_ne!(dst_dc, 0);
+
+            let meta_dc = gdi32::create_enh_meta_file_a(
+                src_dc,
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+            assert_ne!(meta_dc, 0);
+            let red = gdi32::create_solid_brush(0x0000FF);
+            assert_ne!(red, 0);
+            assert_eq!(
+                gdi32::select_object(meta_dc, red as HGDIOBJ),
+                WHITE_BRUSH as HGDIOBJ
+            );
+            assert_eq!(gdi32::rectangle(meta_dc, 0, 0, 32, 32), TRUE);
+            let hemf = gdi32::close_enh_meta_file(meta_dc);
+            assert_ne!(hemf, 0);
+            assert_eq!(gdi32::get_object_type(hemf as HGDIOBJ), 0);
+
+            let target = RECT {
+                left: 16,
+                top: 16,
+                right: 80,
+                bottom: 80,
+            };
+            let untouched_before = gdi32::get_pixel(dst_dc, 8, 8);
+            assert_eq!(gdi32::play_enh_meta_file(dst_dc, hemf, &target), TRUE);
+            assert_eq!(gdi32::get_pixel(dst_dc, 24, 24), 0x0000FF);
+            assert_eq!(gdi32::get_pixel(dst_dc, 8, 8), untouched_before);
+
+            assert_eq!(gdi32::delete_enh_meta_file(hemf), TRUE);
+            assert_eq!(gdi32::delete_object(red as HGDIOBJ), TRUE);
+            assert_eq!(user32::release_dc(src, src_dc), 1);
+            assert_eq!(user32::release_dc(dst, dst_dc), 1);
+            assert_eq!(user32::destroy_window(src), TRUE);
+            assert_eq!(user32::destroy_window(dst), TRUE);
+
+            let printer = gdi32::create_dc_a(
+                b"WINSPOOL\0".as_ptr() as LPCSTR,
+                b"phase2-printer-cleanup\0".as_ptr() as LPCSTR,
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+            assert_ne!(printer, 0);
+            let job_id = gdi32::start_doc_a(printer, core::ptr::null());
+            assert!(job_id > 0);
+            assert_eq!(gdi32::start_page(printer), 1);
+            let page_meta = WIN32_DCS
+                .lock()
+                .get(&(printer as u64))
+                .map(|dc| dc.recording_metafile)
+                .unwrap_or(0);
+            assert_ne!(page_meta, 0);
+            assert_eq!(gdi32::delete_dc(printer), TRUE);
+            assert!(!WIN32_PRINT_JOBS.lock().contains_key(&(job_id as u64)));
+            assert!(!WIN32_METAFILES.lock().contains_key(&(page_meta as u64)));
         }
     }
 }

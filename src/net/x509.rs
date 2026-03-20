@@ -73,11 +73,13 @@
 //!  1.2.840.10045.4.3.2   = ecdsa-with-SHA256
 //! ```
 
+use crate::net::ipv6::Ipv6Addr;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::str::FromStr;
 use sha1::{Digest as Sha1Digest, Sha1};
 use spin::Mutex;
 
@@ -1038,6 +1040,9 @@ impl CertVerifier {
 
             // Check if this is the leaf certificate
             if i == 0 {
+                if cert.is_ca() {
+                    return Err(CertError::InvalidChain);
+                }
                 if !cert.allows_server_tls() {
                     return Err(CertError::InvalidKeyUsage);
                 }
@@ -1237,6 +1242,7 @@ fn same_trust_anchor(root: &X509Certificate, candidate: &X509Certificate) -> boo
 pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
     let hostname_lower = hostname.to_ascii_lowercase();
     let hostname_ipv4 = parse_ipv4_hostname(&hostname_lower);
+    let hostname_ipv6 = parse_ipv6_hostname(&hostname_lower);
 
     // Look for subjectAltName extension (OID 2.5.29.17)
     let mut found_san = false;
@@ -1250,7 +1256,7 @@ pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
             let data = &ext.value;
 
             // The value may be wrapped in an OCTET STRING; try parsing as SEQUENCE
-            let san_data = if !data.is_empty() && data[0] == 0x30 {
+            let san_data_storage = if !data.is_empty() && data[0] == 0x30 {
                 // SEQUENCE wrapper - parse the outer TLV
                 let mut p = Asn1Parser::new(data);
                 if let Some(elem) = p.parse_element() {
@@ -1266,19 +1272,19 @@ pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
                             }
                         } else if child.class == Asn1Class::ContextSpecific
                             && child.tag_number == 7
-                            && hostname_ipv4
-                                .map(|octets| child.data.as_slice() == octets.as_slice())
-                                .unwrap_or(false)
+                            && hostname_ip_matches(&child.data, hostname_ipv4, hostname_ipv6)
                         {
                             return true;
                         }
                     }
-                    continue;
+                    Some(elem.data.clone())
+                } else {
+                    None
                 }
-                data
             } else {
-                data
+                None
             };
+            let san_data = san_data_storage.as_deref().unwrap_or(data);
 
             // Fallback: manually parse TLV entries from raw bytes
             while pos < san_data.len() {
@@ -1317,9 +1323,7 @@ pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
                         }
                     }
                 } else if tag == 0x87 {
-                    if hostname_ipv4
-                        .map(|octets| &san_data[pos..pos + len] == octets.as_slice())
-                        .unwrap_or(false)
+                    if hostname_ip_matches(&san_data[pos..pos + len], hostname_ipv4, hostname_ipv6)
                     {
                         return true;
                     }
@@ -1330,7 +1334,7 @@ pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
         }
     }
 
-    if hostname_ipv4.is_some() {
+    if hostname_ipv4.is_some() || hostname_ipv6.is_some() {
         return false;
     }
 
@@ -1353,6 +1357,103 @@ fn parse_ipv4_hostname(hostname: &str) -> Option<[u8; 4]> {
         return None;
     }
     Some(octets)
+}
+
+fn parse_ipv6_hostname(hostname: &str) -> Option<[u8; 16]> {
+    let unscoped = hostname
+        .trim()
+        .trim_matches('[')
+        .trim_matches(']')
+        .split('%')
+        .next()?;
+    Ipv6Addr::from_str(unscoped)
+        .ok()
+        .map(|ip| *ip.as_bytes())
+        .or_else(|| parse_ipv6_hostname_fallback(unscoped))
+}
+
+fn parse_ipv6_hostname_fallback(hostname: &str) -> Option<[u8; 16]> {
+    fn parse_hextet(token: &str) -> Option<u16> {
+        if token.is_empty() || token.len() > 4 {
+            return None;
+        }
+        u16::from_str_radix(token, 16).ok()
+    }
+
+    fn parse_ipv4_tail(token: &str) -> Option<[u16; 2]> {
+        let octets = parse_ipv4_hostname(token)?;
+        Some([
+            u16::from_be_bytes([octets[0], octets[1]]),
+            u16::from_be_bytes([octets[2], octets[3]]),
+        ])
+    }
+
+    fn collect_segments(part: &str, out: &mut Vec<u16>) -> Option<()> {
+        if part.is_empty() {
+            return Some(());
+        }
+        let tokens: Vec<&str> = part.split(':').collect();
+        for (index, token) in tokens.iter().enumerate() {
+            if token.is_empty() {
+                return None;
+            }
+            if token.contains('.') {
+                if index != tokens.len() - 1 {
+                    return None;
+                }
+                let tail = parse_ipv4_tail(token)?;
+                out.push(tail[0]);
+                out.push(tail[1]);
+                continue;
+            }
+            out.push(parse_hextet(token)?);
+        }
+        Some(())
+    }
+
+    let mut segments = Vec::new();
+    if let Some((head, tail)) = hostname.split_once("::") {
+        let mut head_segments = Vec::new();
+        let mut tail_segments = Vec::new();
+        collect_segments(head, &mut head_segments)?;
+        collect_segments(tail, &mut tail_segments)?;
+        if head_segments.len() + tail_segments.len() > 8 {
+            return None;
+        }
+        segments.extend_from_slice(&head_segments);
+        segments.resize(8 - tail_segments.len(), 0);
+        segments.extend_from_slice(&tail_segments);
+    } else {
+        collect_segments(hostname, &mut segments)?;
+        if segments.len() != 8 {
+            return None;
+        }
+    }
+
+    if segments.len() != 8 {
+        return None;
+    }
+
+    let mut octets = [0u8; 16];
+    for (index, segment) in segments.iter().copied().enumerate() {
+        let bytes = segment.to_be_bytes();
+        octets[index * 2] = bytes[0];
+        octets[index * 2 + 1] = bytes[1];
+    }
+    Some(octets)
+}
+
+fn hostname_ip_matches(
+    san_data: &[u8],
+    hostname_ipv4: Option<[u8; 4]>,
+    hostname_ipv6: Option<[u8; 16]>,
+) -> bool {
+    hostname_ipv4
+        .map(|octets| san_data == octets.as_slice())
+        .unwrap_or(false)
+        || hostname_ipv6
+            .map(|octets| san_data == octets.as_slice())
+            .unwrap_or(false)
 }
 
 /// Match a hostname against a pattern that may contain a wildcard.
@@ -2398,6 +2499,13 @@ pub struct RevocationChecker {
     pub hard_fail: bool,
 }
 
+#[derive(Clone, Debug)]
+enum RevocationProbe {
+    Good,
+    Revoked,
+    Indeterminate(CertError),
+}
+
 impl RevocationChecker {
     pub fn new() -> Self {
         RevocationChecker {
@@ -2430,7 +2538,9 @@ impl RevocationChecker {
                 && crl.issuer.organization == issuer.subject.organization
                 && crl.issuer.country == issuer.subject.country
         };
-        // Try OCSP first if preferred
+        let mut last_error = None;
+
+        // Try OCSP first if preferred.
         if self.prefer_ocsp {
             if let Some(response) = self
                 .ocsp_cache
@@ -2438,11 +2548,15 @@ impl RevocationChecker {
                 .find(|(s, _)| s == &cert.serial)
                 .map(|(_, r)| r)
             {
-                return self.check_ocsp_status(response, &cert.serial);
+                match self.probe_ocsp_status(response, &cert.serial) {
+                    RevocationProbe::Good => return Ok(()),
+                    RevocationProbe::Revoked => return Err(CertError::Revoked),
+                    RevocationProbe::Indeterminate(err) => last_error = Some(err),
+                }
             }
         }
 
-        // Check CRLs
+        // Check CRLs after OCSP indeterminate or when OCSP is unavailable.
         for crl in &self.crls {
             if issuer_matches_crl(crl) {
                 if !issuer.allows_crl_signing() {
@@ -2454,54 +2568,56 @@ impl RevocationChecker {
                 if let Some(_entry) = crl.is_revoked(&cert.serial) {
                     return Err(CertError::Revoked);
                 }
+                return Ok(());
             }
         }
 
-        // If OCSP not preferred and not found in cache, check CRLs only
         if !self.prefer_ocsp {
             return Ok(());
         }
 
         if self.fetch_live {
-            if let Ok(()) = self.fetch_live_status(cert, issuer) {
-                return Ok(());
+            match self.fetch_live_status(cert, issuer) {
+                Ok(()) => return Ok(()),
+                Err(CertError::Revoked) => return Err(CertError::Revoked),
+                Err(err) => last_error = Some(err),
             }
-            if self.hard_fail {
-                return Err(CertError::InvalidFormat);
-            }
+        }
+
+        if self.hard_fail {
+            return Err(last_error.unwrap_or(CertError::InvalidFormat));
         }
 
         Ok(())
     }
 
     fn check_ocsp_status(&self, response: &OcspResponse, serial: &[u8]) -> Result<(), CertError> {
+        match self.probe_ocsp_status(response, serial) {
+            RevocationProbe::Good => Ok(()),
+            RevocationProbe::Revoked => Err(CertError::Revoked),
+            RevocationProbe::Indeterminate(err) => {
+                if self.hard_fail {
+                    Err(err)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn probe_ocsp_status(&self, response: &OcspResponse, serial: &[u8]) -> RevocationProbe {
         if response.response_status != OcspResponseStatus::Successful {
-            // OCSP failed, fall back to CRL
-            return if self.hard_fail {
-                Err(CertError::InvalidFormat)
-            } else {
-                Ok(())
-            };
+            return RevocationProbe::Indeterminate(CertError::InvalidFormat);
         }
 
         if let Some(single) = response.get_cert_status(serial) {
             match single.status {
-                OcspCertStatus::Good => Ok(()),
-                OcspCertStatus::Revoked { .. } => Err(CertError::Revoked),
-                OcspCertStatus::Unknown => {
-                    if self.hard_fail {
-                        Err(CertError::InvalidFormat)
-                    } else {
-                        Ok(())
-                    }
-                }
+                OcspCertStatus::Good => RevocationProbe::Good,
+                OcspCertStatus::Revoked { .. } => RevocationProbe::Revoked,
+                OcspCertStatus::Unknown => RevocationProbe::Indeterminate(CertError::InvalidFormat),
             }
         } else {
-            if self.hard_fail {
-                Err(CertError::InvalidFormat)
-            } else {
-                Ok(())
-            }
+            RevocationProbe::Indeterminate(CertError::InvalidFormat)
         }
     }
 
@@ -2510,35 +2626,43 @@ impl RevocationChecker {
         cert: &X509Certificate,
         issuer: &X509Certificate,
     ) -> Result<(), CertError> {
+        let mut last_error = CertError::InvalidFormat;
         if self.prefer_ocsp {
             for url in cert.ocsp_responder_urls() {
-                if let Ok(response) = fetch_ocsp_response(&url, cert, issuer) {
-                    return self.check_ocsp_status(&response, &cert.serial);
+                match fetch_ocsp_response(&url, cert, issuer) {
+                    Ok(response) => match self.check_ocsp_status(&response, &cert.serial) {
+                        Ok(()) => return Ok(()),
+                        Err(err) => last_error = err,
+                    },
+                    Err(err) => last_error = err,
                 }
             }
         }
 
         for url in cert.crl_distribution_urls() {
-            if let Ok(crl) = fetch_crl(&url) {
-                if crl.issuer.common_name == issuer.subject.common_name
-                    && crl.issuer.organization == issuer.subject.organization
-                    && crl.issuer.country == issuer.subject.country
-                {
-                    if !issuer.allows_crl_signing() {
-                        return Err(CertError::InvalidKeyUsage);
+            match fetch_crl(&url) {
+                Ok(crl) => {
+                    if crl.issuer.common_name == issuer.subject.common_name
+                        && crl.issuer.organization == issuer.subject.organization
+                        && crl.issuer.country == issuer.subject.country
+                    {
+                        if !issuer.allows_crl_signing() {
+                            return Err(CertError::InvalidKeyUsage);
+                        }
+                        if crl.is_expired(current_cert_time()) {
+                            continue;
+                        }
+                        if crl.is_revoked(&cert.serial).is_some() {
+                            return Err(CertError::Revoked);
+                        }
+                        return Ok(());
                     }
-                    if crl.is_expired(current_cert_time()) {
-                        continue;
-                    }
-                    if crl.is_revoked(&cert.serial).is_some() {
-                        return Err(CertError::Revoked);
-                    }
-                    return Ok(());
                 }
+                Err(err) => last_error = err,
             }
         }
 
-        Err(CertError::InvalidFormat)
+        Err(last_error)
     }
 }
 
@@ -2638,6 +2762,12 @@ mod tests {
         vec![0x30, 0x06, 0x87, 0x04, ip[0], ip[1], ip[2], ip[3]]
     }
 
+    fn der_subject_alt_ipv6(ip: [u8; 16]) -> Vec<u8> {
+        let mut value = vec![0x30, 0x12, 0x87, 0x10];
+        value.extend_from_slice(&ip);
+        value
+    }
+
     fn make_cert(
         subject_cn: &str,
         issuer_cn: &str,
@@ -2726,6 +2856,25 @@ mod tests {
     }
 
     #[test]
+    fn verify_hostname_prefers_ip_san_for_ipv6_literals() {
+        let cert = make_cert(
+            "service.echos.test",
+            "service.echos.test",
+            false,
+            Some(0x05),
+            vec![X509Extension {
+                oid: "2.5.29.17".to_string(),
+                critical: false,
+                value: der_subject_alt_ipv6([
+                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+                ]),
+            }],
+        );
+        assert!(verify_hostname(&cert, "2001:db8::1"));
+        assert!(!verify_hostname(&cert, "2001:db8::2"));
+    }
+
+    #[test]
     fn verify_chain_rejects_leaf_without_tls_server_usage() {
         let cert = make_cert(
             "leaf.echos.test",
@@ -2741,6 +2890,25 @@ mod tests {
         assert!(matches!(
             verifier.verify_chain(&[cert]),
             Err(CertError::InvalidKeyUsage)
+        ));
+    }
+
+    #[test]
+    fn verify_chain_rejects_ca_leaf_even_when_root_trusts_it() {
+        let cert = make_cert(
+            "leaf.echos.test",
+            "leaf.echos.test",
+            true,
+            Some(0x25),
+            Vec::new(),
+        );
+        let verifier = CertVerifier {
+            trusted_roots: vec![cert.clone()],
+            check_time: 1704067200,
+        };
+        assert!(matches!(
+            verifier.verify_chain(&[cert]),
+            Err(CertError::InvalidChain)
         ));
     }
 
@@ -2822,7 +2990,7 @@ mod tests {
             "root.echos.test",
             "root.echos.test",
             true,
-            Some(0x20),
+            Some(0x60),
             Vec::new(),
         );
 
@@ -2940,7 +3108,7 @@ mod tests {
             vec![X509Extension {
                 oid: "1.3.6.1.5.5.7.1.1".to_string(),
                 critical: false,
-                value: b"http://127.0.0.1/ocsp".to_vec(),
+                value: b"http:///ocsp".to_vec(),
             }],
         );
         let issuer = make_cert(
@@ -3010,5 +3178,87 @@ mod tests {
             checker.check_revocation(&cert, &issuer),
             Err(CertError::InvalidFormat)
         ));
+    }
+
+    #[test]
+    fn verify_hostname_does_not_fallback_to_cn_when_dns_san_present() {
+        let cert = make_cert(
+            "cn-only.echos.test",
+            "cn-only.echos.test",
+            false,
+            Some(0x05),
+            vec![X509Extension {
+                oid: "2.5.29.17".to_string(),
+                critical: false,
+                value: vec![
+                    0x30, 0x10, 0x82, 0x0e, b'a', b'p', b'i', b'.', b'e', b'c', b'h', b'o', b's',
+                    b'.', b't', b'e', b's', b't',
+                ],
+            }],
+        );
+        assert!(verify_hostname(&cert, "api.echos.test"));
+        assert!(!verify_hostname(&cert, "cn-only.echos.test"));
+    }
+
+    #[test]
+    fn revocation_checker_falls_back_to_crl_after_unknown_ocsp_status() {
+        let cert = make_cert(
+            "leaf.echos.test",
+            "root.echos.test",
+            false,
+            Some(0x05),
+            Vec::new(),
+        );
+        let issuer = make_cert(
+            "root.echos.test",
+            "root.echos.test",
+            true,
+            Some(0x60),
+            Vec::new(),
+        );
+        let mut checker = RevocationChecker::new();
+        checker.hard_fail = true;
+        checker.fetch_live = false;
+        checker.cache_ocsp(
+            cert.serial.clone(),
+            OcspResponse {
+                response_status: OcspResponseStatus::Successful,
+                response_type: "1.3.6.1.5.5.7.48.1.1".to_string(),
+                version: 1,
+                responder_id: OcspResponderId::ByName(test_name("root.echos.test")),
+                produced_at: 1704067200,
+                responses: vec![OcspSingleResponse {
+                    cert_id_hash_algo: "1.3.14.3.2.26".to_string(),
+                    issuer_name_hash: vec![0; 20],
+                    issuer_key_hash: vec![0; 20],
+                    serial: cert.serial.clone(),
+                    status: OcspCertStatus::Unknown,
+                    this_update: 1704060000,
+                    next_update: Some(1704070000),
+                    produced_at: 1704067200,
+                }],
+                signature_algo: SignatureAlgorithm {
+                    algorithm: "1.2.840.113549.1.1.11".to_string(),
+                    parameters: Vec::new(),
+                },
+                signature: vec![0x55; 64],
+                certs: Vec::new(),
+            },
+        );
+        checker.add_crl(X509Crl {
+            version: 2,
+            signature_algo: SignatureAlgorithm {
+                algorithm: "1.2.840.113549.1.1.11".to_string(),
+                parameters: Vec::new(),
+            },
+            issuer: issuer.subject.clone(),
+            this_update: 1704060000,
+            next_update: 1704070000,
+            revoked_certs: vec![],
+            extensions: Vec::new(),
+            signature: vec![0x66; 64],
+            raw: Vec::new(),
+        });
+        assert!(checker.check_revocation(&cert, &issuer).is_ok());
     }
 }

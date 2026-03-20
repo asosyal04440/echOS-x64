@@ -89,7 +89,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::tls::{AesGcm, ChaCha20Poly1305, CipherSuite, X25519};
@@ -235,11 +235,30 @@ impl ConnectionId {
     /// Kriptografik olarak güçlü rastgele byte'lardan Connection ID üretir.
     /// `len` byte, güvenli rastgele sayı üretecinden alınır.
     pub fn random(len: usize) -> Self {
-        let mut data = Vec::with_capacity(len);
-        for _ in 0..len {
-            data.push(crate::random::next_u32() as u8);
+        #[cfg(target_os = "windows")]
+        {
+            static HOST_CONN_ID_SEED: AtomicU32 = AtomicU32::new(0xC1D5_EED5);
+
+            let mut data = Vec::with_capacity(len);
+            let mut seed = HOST_CONN_ID_SEED.load(Ordering::Relaxed);
+            for _ in 0..len {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                data.push(seed as u8);
+            }
+            HOST_CONN_ID_SEED.store(seed, Ordering::Relaxed);
+            return ConnectionId { data };
         }
-        ConnectionId { data }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut data = Vec::with_capacity(len);
+            for _ in 0..len {
+                data.push(crate::random::next_u32() as u8);
+            }
+            ConnectionId { data }
+        }
     }
 
     /// Connection ID'nin byte uzunluğu.
@@ -960,7 +979,9 @@ impl QuicConnection {
         let stream_id = self.next_stream_id;
         self.next_stream_id += 4; // Stream IDs are spaced by 4
 
-        let stream = QuicStream::new(stream_id, stream_type);
+        let mut stream = QuicStream::new(stream_id, stream_type);
+        stream.state = StreamState::Open;
+        stream.send_max_offset = self.max_stream_data;
         self.streams.insert(stream_id, stream);
 
         stream_id
@@ -1375,6 +1396,25 @@ impl QuicServer {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn created_stream_starts_open_with_send_window() {
+        let mut conn = QuicConnection::new(8);
+        conn.state = QuicState::Established;
+        conn.max_stream_data = 8192;
+
+        let stream_id = conn.create_stream(StreamType::ClientBiDi);
+        let stream = conn.get_stream(stream_id).unwrap();
+
+        assert_eq!(stream.state, StreamState::Open);
+        assert_eq!(stream.send_max_offset, 8192);
+        assert!(stream.can_write());
     }
 }
 
