@@ -251,12 +251,12 @@ fn handle_verify(args: &[&str]) -> Result<String, crate::shell::scripting::Scrip
 
     match crate::security::package::get_package_manager()
         .lock()
-        .verify_package_signature(&[], &[0u8; 64])
+        .verify_installed_package(package_name)
     {
         Ok(()) => {
             result.push_str("✓ ");
             result.push_str(package_name);
-            result.push_str(" paketinin imzası geçerli\n");
+            result.push_str(" paket bütünlüğü doğrulandı\n");
         }
         Err(crate::security::package::PackageError::InvalidSignature) => {
             result.push_str("✗ ");

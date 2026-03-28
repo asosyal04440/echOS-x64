@@ -230,8 +230,14 @@ pub enum ScriptToken {
 /// | Alıntı türü | Escape | Değişken genişletme |
 /// |-------------|--------|---------------------|
 /// | `'...'`     | Hayır  | Hayır               |
-/// | `"..."`     | `\\c`  | Henüz hayır (TODO)  |
+/// | `"..."`     | `\\c`  | Kısmi escape desteği |
 pub struct ScriptLexer;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LexGrouping {
+    Arithmetic,
+    CommandSub,
+}
 
 impl ScriptLexer {
     /// Kaynak metni token listesine dönüştürür.
@@ -243,6 +249,7 @@ impl ScriptLexer {
     pub fn tokenize(source: &str) -> Vec<ScriptToken> {
         let mut tokens = Vec::new();
         let mut chars = source.chars().peekable();
+        let mut grouping_stack = Vec::new();
 
         while let Some(c) = chars.next() {
             match c {
@@ -269,6 +276,7 @@ impl ScriptLexer {
                     if chars.peek() == Some(&'(') {
                         chars.next();
                         tokens.push(ScriptToken::ArithStart);
+                        grouping_stack.push(LexGrouping::Arithmetic);
                     } else {
                         tokens.push(ScriptToken::LeftParen);
                     }
@@ -279,6 +287,12 @@ impl ScriptLexer {
                     if chars.peek() == Some(&')') {
                         chars.next();
                         tokens.push(ScriptToken::ArithEnd);
+                        if matches!(grouping_stack.last(), Some(LexGrouping::Arithmetic)) {
+                            grouping_stack.pop();
+                        }
+                    } else if matches!(grouping_stack.last(), Some(LexGrouping::CommandSub)) {
+                        grouping_stack.pop();
+                        tokens.push(ScriptToken::CommandSubEnd);
                     } else {
                         tokens.push(ScriptToken::RightParen);
                     }
@@ -383,8 +397,10 @@ impl ScriptLexer {
                         if chars.peek() == Some(&'(') {
                             chars.next();
                             tokens.push(ScriptToken::ArithStart);
+                            grouping_stack.push(LexGrouping::Arithmetic);
                         } else {
                             tokens.push(ScriptToken::CommandSubStart);
+                            grouping_stack.push(LexGrouping::CommandSub);
                         }
                     } else if chars.peek() == Some(&'{') {
                         // ${VAR} formu — '}' ye kadar değişken adı oku
@@ -1548,6 +1564,21 @@ lazy_static::lazy_static! {
     /// Yorumlayıcının her yerde `SCRIPT_STATE.set_local()` gibi çağrılarla
     /// erişebileceği merkezi durum deposudur.
     pub static ref SCRIPT_STATE: ScriptState = ScriptState::new();
+    static ref SCRIPT_SHELL: Mutex<crate::shell::Shell> = Mutex::new(crate::shell::Shell::new());
+}
+
+fn reset_script_runtime() {
+    SCRIPT_STATE.local_vars.lock().clear();
+    SCRIPT_STATE.functions.lock().clear();
+    SCRIPT_STATE.clear_flags();
+    *SCRIPT_STATE.return_value.lock() = None;
+    *SCRIPT_SHELL.lock() = crate::shell::Shell::new();
+}
+
+fn run_shell_command(cmd_line: &str) -> (i64, Option<String>) {
+    let mut shell = SCRIPT_SHELL.lock();
+    let output = crate::shell::run_command_in_shell(&mut shell, cmd_line);
+    (crate::shell::command_exit_code(&output), output)
 }
 
 /// Betik yorumlayıcısı.
@@ -1596,7 +1627,7 @@ impl Interpreter {
     /// Her `Stmt` varyantı için farklı bir yürütme stratejisi uygulanır:
     ///
     /// - `Assign`: `eval_expr()` ile değeri hesapla, `local`/`export` bayrağına göre yaz
-    /// - `Command`: argümanları `eval_expr()` ile değerlendir, serial port'a logla (TODO: gerçek çalıştırma)
+    /// - `Command`: argümanları `eval_expr()` ile değerlendir, shell session'ında çalıştır
     /// - `If`: `is_truthy()` ile dalı seç, seçilen gövdeyi `execute()` ile çalıştır
     /// - `While`: `is_truthy()` doğru olduğu sürece `execute(body)` döngüsü
     /// - `For`: her öğe için `set_local(var)` yap, `execute(body)` çalıştır
@@ -1621,10 +1652,12 @@ impl Interpreter {
                 } else if *export {
                     // export VAR=değer — ortam değişkenine aktarır
                     super::advanced::ENV.set(name, &val);
+                    SCRIPT_SHELL.lock().set_session_env(name, &val);
                 } else {
                     // Normal atama — hem yerel hem ortama yazar
                     SCRIPT_STATE.set_local(name, &val);
                     super::advanced::ENV.set(name, &val);
+                    SCRIPT_SHELL.lock().set_session_env(name, &val);
                 }
 
                 Ok(0)
@@ -1637,10 +1670,10 @@ impl Interpreter {
                     .map(|a| Self::eval_expr(a))
                     .collect::<Result<Vec<_>, _>>()?;
 
-                // Komutu çalıştır
-                // TODO: Gerçek komut çalıştırma ile entegre edilecek
-                crate::serial_println!("[SCRIPT] Command: {}", evaluated.join(" "));
-                Ok(0)
+                let cmd_line = evaluated.join(" ");
+                crate::serial_println!("[SCRIPT] Command: {}", cmd_line);
+                let (exit_code, _output) = run_shell_command(&cmd_line);
+                Ok(exit_code)
             }
 
             Stmt::If {
@@ -1806,7 +1839,7 @@ impl Interpreter {
     /// Number(n)       → n.to_string()
     /// Variable(name)  → SCRIPT_STATE.get_var(name)
     /// Arithmetic(e)   → eval_arithmetic(e).to_string()
-    /// CommandSub(args)→ "" (TODO: komut çiktisi yakalanacak)
+    /// CommandSub(args)→ komut çıktısı
     /// Binary(op,l,r)  → eval_arithmetic(l) op eval_arithmetic(r) → 0 veya 1 → .to_string()
     /// Unary(op,e)     → eval_arithmetic(e) | op uy → .to_string()
     /// Test(inner)     → is_truthy(inner) → "1" veya "0"
@@ -1832,8 +1865,8 @@ impl Interpreter {
                     .collect::<Result<Vec<_>, _>>()?;
                 let cmd_line = cmd.join(" ");
                 crate::serial_println!("[SCRIPT] Command substitution: {}", cmd_line);
-                // Shell'in run_command fonksiyonunu kullanarak çalıştır
-                let output = crate::shell::run_command(&cmd_line).unwrap_or_default();
+                let (_exit_code, output) = run_shell_command(&cmd_line);
+                let output = output.unwrap_or_default();
                 // Sondaki newline'ları kaldır (bash davranışı)
                 Ok(output.trim_end_matches('\n').to_string())
             }
@@ -1958,6 +1991,7 @@ impl Interpreter {
 /// assert_eq!(code, 0);
 /// ```
 pub fn run_script(source: &str) -> Result<i64, ScriptError> {
+    reset_script_runtime();
     let tokens = ScriptLexer::tokenize(source);
     let mut parser = ScriptParser::new(tokens);
     let stmts = parser.parse()?;
@@ -1989,4 +2023,31 @@ pub fn eval_expression(expr_str: &str) -> Result<String, ScriptError> {
     let mut parser = ScriptParser::new(tokens);
     let expr = parser.parse_expr()?;
     Interpreter::eval_expr(&expr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::advanced;
+
+    #[test]
+    fn lexer_emits_command_sub_end_for_assignment_rhs() {
+        let tokens = ScriptLexer::tokenize("MSG=$(echo $FOO)\n");
+        assert!(tokens.contains(&ScriptToken::CommandSubStart));
+        assert!(tokens.contains(&ScriptToken::CommandSubEnd));
+    }
+
+    #[test]
+    fn script_command_substitution_reuses_shell_session_env() {
+        let result = run_script("export FOO=alpha\nMSG=$(echo $FOO)\n").unwrap();
+        assert_eq!(result, 0);
+        assert_eq!(SCRIPT_STATE.get_var("MSG"), Some(String::from("alpha")));
+    }
+
+    #[test]
+    fn script_commands_execute_against_real_shell_session() {
+        let result = run_script("export FOO=alpha\necho $FOO\n").unwrap();
+        assert_eq!(result, 0);
+        assert_eq!(advanced::ENV.get("FOO"), Some(String::from("alpha")));
+    }
 }

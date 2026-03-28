@@ -140,7 +140,6 @@ pub enum HttpError {
     TlsInvalidCa,                // Sertifika zinciri guvenilen CA'ya baglanamadi
     TlsInvalidCertificate,       // Sertifika zinciri yapisi veya imzasi gecersiz
     TlsCertRevoked,              // Sertifika iptal edilmis
-    TlsNotSupported,             // TLS handshake/record yolu mevcut taÅŸÄ±yÄ±cÄ± ile tamamlanamadÄ±
 }
 
 impl From<NetError> for HttpError {

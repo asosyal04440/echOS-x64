@@ -36,7 +36,7 @@
 //! | Semicolon      | `;`    | Sıralı çalıştırma                     |
 
 use alloc::borrow::ToOwned;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -666,7 +666,7 @@ impl Completer {
     /// tek eleman varsa otomatik tamamla;
     /// birden fazla ise listele + ortak prefix tamamla.
     pub fn complete(&self, input: &str, cursor_pos: usize) -> Vec<String> {
-        let mut completions = Vec::new();
+        let mut completions = BTreeSet::new();
 
         // Cursor position'a göre current word'ü bul
         let before_cursor = &input[..cursor_pos];
@@ -680,19 +680,40 @@ impl Completer {
                 // Built-in komutları kontrol et
                 for &cmd in &self.builtins {
                     if cmd.starts_with(prefix) {
-                        completions.push(cmd.to_string());
+                        completions.insert(cmd.to_string());
                     }
                 }
 
-                // TODO: PATH'teki executable'ları da ekle
+                for cmd in self.complete_path_executables(prefix) {
+                    completions.insert(cmd);
+                }
             } else {
                 // Sonraki kelimeler (dosya/dizin tamamlama)
                 let prefix = words.last().copied().unwrap_or("");
-                completions = self.complete_path(prefix);
+                completions.extend(self.complete_path(prefix));
             }
         }
 
-        completions
+        completions.into_iter().collect()
+    }
+
+    fn complete_path_executables(&self, prefix: &str) -> Vec<String> {
+        let mut completions = BTreeSet::new();
+        let path_value = ENV
+            .get("PATH")
+            .unwrap_or_else(|| String::from("/bin:/usr/bin:/sbin"));
+
+        for dir in path_value.split(':').filter(|segment| !segment.is_empty()) {
+            if let Ok(entries) = crate::fs::f2fs::list_dir(dir) {
+                for entry in entries {
+                    if entry.name.starts_with(prefix) {
+                        completions.insert(entry.name);
+                    }
+                }
+            }
+        }
+
+        completions.into_iter().collect()
     }
 
     /// Dosya/dizin yolu tamamlama.
@@ -1326,5 +1347,12 @@ mod tests {
         let pipelines = Parser::parse(tokens).unwrap();
         assert_eq!(pipelines.len(), 1);
         assert_eq!(pipelines[0].commands.len(), 2);
+    }
+
+    #[test]
+    fn completer_includes_path_entries_for_command_position() {
+        ENV.set("PATH", "/");
+        let completions = Completer::new().complete("rea", 3);
+        assert!(completions.iter().any(|item| item == "readme.md"));
     }
 }

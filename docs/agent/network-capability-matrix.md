@@ -64,8 +64,9 @@ Tarih: 2026-03-16
 
 ## Phase Boundary
 
-- Faz 1 exact kapandi: transport, core DHCP/DNS/TCP/HTTP/HTTPS bridge, gercek ICMP echo, modern protocol interop, IPv6 control-plane smoke, CNI lifecycle smoke ve interpreter-disi eBPF runtime artik mekanik kanitla destekleniyor.
-- Faz 3 exact kapandi: HTTPS trust matrix, native h2 DoH parity, sustained DoT resolver matrix, wider IPv6 route/NDP corpus, kernel-owned CNI netns parity ve eBPF ELF/JIT corpus mekanik kanitla destekleniyor.
+- Faz 1 repo-visible supported scope icin `tam uyumlu/exact` seviyesinde kapali. 2026-03-20 strict source audit'te `src/net/netdev.rs`, `src/net/doh.rs`, `src/net/dot.rs`, `src/net/http.rs`, `src/net/http2.rs` ve `src/net/quic.rs` uzerindeki stale `stub` / `NotSupported` / `simplified` boundary'leri temizlendi; HPACK Huffman-flagli string decode'u da mekanik corpus ile kapandi.
+- Faz 3 repo-visible supported scope icin `tam uyumlu/exact` seviyesinde kapali. Matrix disinda kalan ancillary veya future-facing unsupported ag yuzeyleri yeni user-facing capability olarak ilan edilmedikce bu kapanisi bozmaz; yeniden acilis yalniz yeni destekli network surface expose edilirse yapilir.
+- Faz 1 `evrensel parity` icin tanimlanan `N-UNI` programi artik `Verified`. 2026-03-21 itibariyla dual-stack `SocketAddr` / TCP / UDP / RAW user-plane parity, registry-backed IPv6 next-header dispatch ve IPv6 PRE_ROUTING / FORWARD / LOCAL_IN ile LOCAL_OUT / POST_ROUTING hook parity ayni declared contract altinda mekanik corpus ile kapandi.
 
 ## Exactness Exit Criteria
 
@@ -91,4 +92,4 @@ Faz 1'in `tam uyumlu/exact` sayilmasi icin su kapilarin kapanmasi gerekir:
 - eBPF host-side JIT compile/run yolu artik `0xC0000096` ile dusmuyor; host-safe serial logging ve Windows x64 nonvolatile register preserve duzeltmeleriyle kapanmis durumda.
 - DoH core smoke Cloudflare/Google ile canli yanit veriyor; Quad9'in HTTP/1.1 DoH reddi provider-side policy degisimi olarak kayda geciyor ve DoT matrisiyle ayri raporlaniyor.
 
-Bu kosullar 2026-03-16 host smoke ve mevcut corpus ile kapanmis kabul edilir.
+Bu kanitlar Faz 1/Faz 3 repo-visible supported scope'unda strict source audit ile birlikte `tam uyumlu/exact` closure'u destekler. Bu closure, matrix disinda kalan unsupported ancillary protokolleri degil, kullaniciya ilan edilen network core ve advanced fidelity yuzeyini kapsar.

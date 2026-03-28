@@ -50,6 +50,7 @@ use super::task::{ExecutionMode, Priority, Task, TaskContext, TaskId, TaskState}
 use crate::cpu::{cpu_slots, epoch::SMP_EPOCH_DOMAIN};
 use crate::memory_barriers::{smp_mb, smp_wmb};
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -406,6 +407,30 @@ pub fn spawn_with_priority(
     task_id
 }
 
+pub fn spawn_with_priority_in_address_space(
+    entry_point: fn() -> !,
+    priority: Priority,
+    name: &'static str,
+    address_space: Option<Arc<Mutex<crate::memory::AddressSpace>>>,
+) -> TaskId {
+    if name == "gpu_test" {
+        crate::serial_println!("DEBUG: Task struct oluÅŸturuluyor...");
+    }
+    let task_id = SMP_SCHEDULER.allocate_task_id();
+    let mut task = Task::with_priority_and_id(entry_point, priority, name, task_id);
+    task.cold.address_space = address_space;
+
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        SMP_SCHEDULER.spawn(task);
+    });
+    let _ = crate::task::ghost::publish_event(crate::task::ghost::MSG_TASK_NEW, task_id as u64, 0);
+    if name == "gpu_test" {
+        crate::serial_println!("DEBUG: Task kuyruÄŸa eklendi! PID: {}", task_id);
+    }
+
+    task_id
+}
+
 /// Sistem tick sayısını döndürür.
 pub fn get_ticks() -> usize {
     TICK_COUNT.load(Ordering::Relaxed)
@@ -703,6 +728,70 @@ pub fn exec_current_user_image(image: &[u8]) -> Result<(), ()> {
     unsafe { crate::task::user::enter_user_mode(user.entry, user.stack_top) }
 }
 
+pub fn spawn_user_image_task(
+    image: &[u8],
+    priority: Priority,
+    name: &'static str,
+) -> Result<TaskId, ()> {
+    spawn_user_image_task_with_address_space(image, priority, name).map(|(task_id, _)| task_id)
+}
+
+pub fn spawn_user_image_task_with_address_space(
+    image: &[u8],
+    priority: Priority,
+    name: &'static str,
+) -> Result<(TaskId, Arc<Mutex<crate::memory::AddressSpace>>), ()> {
+    let address_space = crate::memory::create_address_space(image);
+    crate::memory::set_active_address_space(Some(address_space.clone()));
+    let user_pml4 = match crate::memory::create_user_pml4() {
+        Some(frame) => frame,
+        None => {
+            crate::memory::set_active_address_space(None);
+            return Err(());
+        }
+    };
+    let pml4_phys = user_pml4.start_address().as_u64();
+    let phys_offset = crate::memory::active_physical_offset();
+    let pml4_virt = VirtAddr::new(phys_offset + pml4_phys);
+    let table = unsafe { &mut *(pml4_virt.as_mut_ptr()) };
+    let mut mapper = unsafe { OffsetPageTable::new(table, VirtAddr::new(phys_offset)) };
+    let frame_allocator = match unsafe { crate::memory::global_memory_manager_mut() } {
+        Some(allocator) => allocator,
+        None => {
+            crate::memory::set_active_address_space(None);
+            return Err(());
+        }
+    };
+
+    if crate::vdso::map_to_user(&mut mapper).is_err() {
+        crate::serial_println!("[vDSO] Failed to map vDSO to spawned user task");
+    }
+
+    let user = match crate::elf::load_user_elf(image, &mut mapper, frame_allocator) {
+        Ok(user) => user,
+        Err(_) => {
+            crate::memory::set_active_address_space(None);
+            return Err(());
+        }
+    };
+    crate::memory::set_active_address_space(None);
+
+    let task_id = SMP_SCHEDULER.allocate_task_id();
+    let mut task =
+        Task::with_priority_and_id(crate::task::user::fork_child_start, priority, name, task_id);
+    task.cold.mode = ExecutionMode::LegacyRing3;
+    task.cold.page_table = Some(user_pml4);
+    task.cold.address_space = Some(address_space.clone());
+    task.cold.user_entry = Some(user.entry.as_u64());
+    task.cold.user_stack_top = Some(user.stack_top.as_u64());
+
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        SMP_SCHEDULER.spawn(task);
+    });
+    let _ = crate::task::ghost::publish_event(crate::task::ghost::MSG_TASK_NEW, task_id as u64, 0);
+    Ok((task_id, address_space))
+}
+
 // ============================================================================
 // CONTEXT SWITCH
 // ============================================================================
@@ -767,7 +856,10 @@ fn choose_victim_cpu(cpu_id: u32) -> Option<usize> {
             }
             if cpu_slots::package_id(victim as u32) == pkg {
                 score = score.saturating_add(48);
-            } else if matches!(pressure.class, SchedulerPressureClass::Elevated | SchedulerPressureClass::Critical) {
+            } else if matches!(
+                pressure.class,
+                SchedulerPressureClass::Elevated | SchedulerPressureClass::Critical
+            ) {
                 score = score.saturating_sub(12);
             }
             if cpu_slots::core_id(victim as u32) != core {
@@ -851,7 +943,8 @@ fn take_committed_policy_task(cpu_id: u32, now_tick: u64) -> Option<Box<Task>> {
     let task_id = decision.task_id as TaskId;
 
     if let Some(task) = take_task_from_worker_by_id(cpu_id as usize, task_id) {
-        let _ = crate::task::ghost::note_policy_dispatch(cpu_id, decision.task_id, decision.generation);
+        let _ =
+            crate::task::ghost::note_policy_dispatch(cpu_id, decision.task_id, decision.generation);
         return Some(task);
     }
 
@@ -859,8 +952,11 @@ fn take_committed_policy_task(cpu_id: u32, now_tick: u64) -> Option<Box<Task>> {
         .filter(|victim_cpu| *victim_cpu != cpu_id)
     {
         if let Some(task) = steal_task_from_victim_by_id(victim_cpu as usize, task_id) {
-            let _ =
-                crate::task::ghost::note_policy_dispatch(cpu_id, decision.task_id, decision.generation);
+            let _ = crate::task::ghost::note_policy_dispatch(
+                cpu_id,
+                decision.task_id,
+                decision.generation,
+            );
             return Some(task);
         }
     }

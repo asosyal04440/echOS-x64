@@ -453,7 +453,7 @@ impl ColorStruct {
 pub struct Theme;
 
 impl Theme {
-    pub const HALO_BAR_HEIGHT: usize = 36;
+    pub const HALO_BAR_HEIGHT: usize = 60;
     pub const PULSE_DOCK_HEIGHT: usize = 68;
     pub const CORNER_RADIUS: usize = 14;
     pub const SHADOW_SPREAD: usize = 22;

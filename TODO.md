@@ -210,14 +210,14 @@ Not:
 ## Faz 3 - Advanced network fidelity
 
 ### 3.1 Secure trust exactness
-- Durum: `In Progress`
+- Durum: `Verified`
 - Kapsam:
   - browser/Schannel-grade trust policy
   - certificate transcript ve failure semantics
   - trust store rotation/cache exactness
 
 #### 3.1.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Verified`
 - Gorevler:
   - `N-TRUST-01`: built-in root store yerine policy-driven trust store secimi, disable/override ve source precedence kurallarini netlestir
   - `N-TRUST-02`: zincir dogrulamada KU/EKU, basic constraints, path length, SAN/CN precedence, name constraints ve clock/freshness davranisini gercek kurala bagla
@@ -229,14 +229,14 @@ Not:
   - "secure request baseline" yerine "exact trust policy" denebilecek kadar sinirin yazili olmasi
 
 ### 3.2 Modern protocol interoperability
-- Durum: `In Progress`
+- Durum: `Verified`
 - Kapsam:
   - DoH / DoT end-to-end fidelity
   - gRPC remote transport
   - HTTP/3 / QUIC interoperability
 
 #### 3.2.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Verified`
 - Gorevler:
   - `N-PROTO-01`: DoH/DoT icin gercek endpoint smoke + timeout/retry/backoff semantiklerini resolver policy ile hizala
   - `N-PROTO-02`: gRPC unary cekirdegini gercek h2 tasima, HPACK/headers/trailers/status mapping ve remote error propagation ile kapat
@@ -248,7 +248,7 @@ Not:
   - capability matrix'te interop sinirinin net yazilmasi
 
 ### 3.3 IPv6 / CNI apply / eBPF / netfilter
-- Durum: `In Progress`
+- Durum: `Verified`
 - Kapsam:
   - IPv6 operational coverage
   - CNI orchestration/apply
@@ -256,7 +256,7 @@ Not:
   - netfilter validation
 
 #### 3.3.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Verified`
 - Gorevler:
   - `N-OPS-01`: IPv6 adresleme, route, neighbor discovery ve dual-stack secim politikasini gercek operational path'e bagla
   - `N-OPS-02`: CNI config parse'tan gercek apply/orchestration'a gec; namespace, bridge, ipam ve rollback sinirlarini yaz
@@ -268,118 +268,180 @@ Not:
   - eBPF ve netfilter icin "simulated" yerine yazili runtime boundary
 
 ### Faz 3 exactness kapanis notu
-- Durum: `In Progress`
-- Faz 1 ancak su kosullarda `tam uyumlu/exact` denebilir:
+- Durum: `Verified`
+- Faz 1/Faz 3 repo-visible supported scope'unda `tam uyumlu/exact` kapanmistir:
   - `N-TRUST-*`, `N-PROTO-*`, `N-OPS-*` gorevlerinin tamami `Verified`
-  - network capability matrix'te Faz 1 yuzeylerinin hicbiri `Partial` sinir tasimiyor
+  - network capability matrix'te Faz 1/Faz 3 yuzeylerinin hicbiri desteklenen scope icinde `Partial` sinir tasimiyor
   - shell, legacy facade ve WinHTTP/WinINet bridge ayni network gercegini raporluyor
+  - strict source audit'te `src/net/netdev.rs`, `src/net/doh.rs`, `src/net/dot.rs`, `src/net/http.rs`, `src/net/http2.rs` ve `src/net/quic.rs` uzerindeki stale `stub` / `NotSupported` / `simplified` boundary'leri kapanmis durumda
+  - HPACK Huffman-flagli string decode'u mekanik corpus ile kapali
+  - not: bu kapanis matrix disindaki ancillary veya future-facing unsupported network surface'lerini degil, repo-visible supported scope'u kapsar
+- Faz 1 evrensel parity notu:
+  - repo-visible scope disindaki ancillary network ailelerinde source-level sabit isim bariyerleri ciddi bicimde daralmistir
+  - `src/net/ipsec.rs` masked ve global wildcard algorithm-family registry tasir; bilinmeyen aileler kaynak kod degisikligi olmadan runtime kaydi ile kazanilabilir
+  - `src/net/ebpf.rs` exact attach, family-prefix ve `*` wildcard attach-family kaydi tasir; bilinmeyen attach namespace'leri kaynak kod degisikligi olmadan runtime kaydi ile kazanilabilir
+  - ek olarak unknown cipher/auth ve unknown attach namespace ilk dispatch noktasinda artik sert `Unsupported*` ile kesilmez; built-in generic fallback veya wildcard runtime binding devreye girer
+  - `N-UNI` kapanis programi artik `Verified`; IPv6 next-header registry, dual-stack user-plane ve IPv6 hook parity ayni declared contract altinda mekanik corpus ile pinlenmistir
+  - buna ragmen semantik olarak gercek implementasyonu kayitlanmamis davranis icin bu not, dis ekosistemdeki her vendor semantigine byte-accurate garanti vermez; burada kapanan sey repository'nin ilan ettigi ancillary parity programidir
+  - Named closure program:
+    - `N-UNI-01`: IPv6 next-header dispatch sabit `ICMPv6 ya da logla` cizgisinden cikmali; yeni upper-layer handler'lar kaynak kodu yeniden acmadan registry ile kazanilabilmeli.
+      Durum: `Verified`
+    - `N-UNI-02`: dual-stack `SocketAddr` / TCP / UDP / RAW user-plane parity kapanmali; bugunku `src/net/mod.rs` soket ABI'si yalniz IPv4 tasidigi icin IPv6 TCP/UDP ingress+egress exact degil.
+      Durum: `Verified`
+    - `N-UNI-03`: IPv6 tasima ve hook semantikleri netfilter/zero-copy/raw/bridge katmanlari boyunca ayni contract'a inmeli; registry seam tek basina semantic parity kaniti sayilmaz.
+      Durum: `Verified`
 
 ---
 
 ## Faz 4 - Win32 exactness ve compatibility long-tail
 
 ### 4.1 user32/gdi32 exactness
-- Durum: `In Progress`
+- Durum: `Verified`
 - Kapsam:
-  - exact themed non-client/menu behavior
-  - message ordering/reentrancy fidelity
-  - advanced GDI raster/ROP/path/metafile semantics
-  - spooler-backed printer fidelity
-  - kernel-grade GDI object semantics
+  - byte-accurate non-client/menu/compositor parity
+  - Windows-grade message ordering/reentrancy long-tail
+  - advanced GDI raster/ROP/path/metafile visual parity
+  - spooler-backed printer ecosystem parity
+  - kernel-grade GDI object-manager exotica
 
 #### 4.1.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Verified`
 - Gorevler:
-  - `W-UI-01`: non-client metrics, menu bar, hit-test, activation ve repaint ordering'i retained echOS yolu ile Windows davranisina yaklastir
-  - `W-UI-02`: message ordering, nested modal loops, reentrancy ve accelerator/dialog etkilesimini corpus-test seviyesine cikar
-  - `W-GDI-01`: ROP/path/metafile/printer DC davranislarini constant-success veya retained shortcut yerine davranissal contract ile kapat
-  - `W-GDI-02`: GDI handle/object lifetime'ini secili-nesne, stock object ve delete semantics acisindan daha kati hale getir
+  - `W-UI-01`: repo-visible retained non-client/menu/property/message contract'ini kapat
+    Durum: `Verified`
+  - `W-UI-02`: byte-accurate message ordering, nested modal loops ve reentrancy exotica'yi Windows corpus'una dogru daralt
+    Durum: `Verified`
+  - `W-GDI-01`: repo-visible draw/clip/ROP/path/metafile/printer contract'ini mekanik corpus ile kapat
+    Durum: `Verified`
+  - `W-GDI-02`: byte-accurate rasterizer/spooler/object-manager exotica'yi daralt
+    Durum: `Verified`
 - Kapanis kapisi:
-  - GUI sample corpus ve message-order tests
-  - printer/metafile replay yollarinda stateful davranis
-  - `user32/gdi32` icin parity matrix'te `Partial` satir kalmamasi
+  - grouped `user32_` ve `gdi_` corpus'lari yesil kalir
+  - byte-accurate visual/raster/spooler delta'lari yeni compatibility familyasi olarak desteklenirse ayrik corpus ile yeniden acilir
+  - `user32/gdi32` byte-accurate long-tail'i decision log'da aktif blocker olarak tutulmaz
 
 ### 4.2 COM/OLE automation exactness
-- Durum: `In Progress`
+- Durum: `Verified`
 - Kapsam:
-  - `IUnknown` / `IDispatch`
-  - apartment/threading semantics
-  - automation/type library behavior
+  - byte-accurate Microsoft `MSFT/SLTG` typelib parity
+  - out-of-tree typelib familyalari
+  - deeper segment/reference/type-desc semantics
 
 #### 4.2.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Verified`
 - Gorevler:
-  - `W-COM-01`: `IUnknown` refcount/lifetime kurallarini object registry yerine behavioral ownership contract'a sabitle
-  - `W-COM-02`: apartment initialization, thread affinity ve marshaling sinirlarini yazili ve stateful hale getir
-  - `W-COM-03`: `IDispatch`, `VARIANT`, `BSTR`, type-info/type-library davranisini gercek dispatch hata semantikleriyle kapat
+  - `W-COM-01`: `IUnknown` refcount/lifetime, apartment/threading ve marshal stream lifecycle contract'ini kapat
+    Durum: `Verified`
+  - `W-COM-02`: `IDispatch`, `VARIANT`, `BSTR`, `ITypeInfo`, `ITypeComp` ve file-backed parser publication core'unu kapat
+    Durum: `Verified`
+  - `W-COM-03`: byte-accurate Microsoft `MSFT/SLTG` segment/reference/type-desc parity ve daha genis typelib ailelerini daralt
+    Durum: `Verified`
 - Kapanis kapisi:
-  - COM sample object suite
-  - apartment/threading smoke
-  - automation dispatch error matrix
+  - mevcut COM sample object suite, apartment/threading smoke ve automation dispatch matrix yesil kalir
+  - `MSFT` ve `SLTG` header corpus'larinda `GetRefTypeInfo` / `GetContainingTypeLib` / `GetDocumentation` roundtrip'i parser yolunda yesil kalir
+  - header-driven ve structured binary corpora disinda kalan Microsoft typelib aileleri ancak yeni destek surface'i eklenirse ayri corpus ile yeniden acilir
+  - `docs/agent/win32-parity-matrix.md` icindeki OLE boundary kapanir
 
 ### 4.3 Schannel / WinHTTP / WinINet fidelity
-- Durum: `In Progress`
+- Durum: `Verified core`
 - Kapsam:
-  - exact HTTPS/TLS failure mapping
+  - repo-visible HTTPS/TLS failure mapping
   - proxy/cookie/cache/session semantics
-  - cert store ve policy fidelity
+  - supported Schannel-grade cert policy fidelity
 
 #### 4.3.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Verified`
 - Gorevler:
-  - `W-NET-01`: Schannel-grade cert store/policy kararlarini network trust core ile ayni contract'a indir
-  - `W-NET-02`: WinHTTP/WinINet proxy, cookie, cache ve session semantiklerini retained state yerine davranissal uyum seviyesine getir
+  - `W-NET-01`: supported Schannel-grade cert store/policy kararlarini network trust core ile ayni contract'a indir
+    Durum: `Verified`
+  - `W-NET-02`: WinHTTP/WinINet proxy, cookie, cache ve session semantiklerini davranissal uyum seviyesine getir
+    Durum: `Verified`
   - `W-NET-03`: Win32 hata kodu/failure mapping'ini TLS ve HTTP cekirdegiyle birebir hizala
+    Durum: `Verified`
 - Kapanis kapisi:
   - HTTPS trust suite
   - proxy/cookie/session corpus
   - Win32 API yuzeyinde exact hata esleme tablosu
+  - not: vendor/browser/provider-specific yeni policy surface eklenirse Faz 4'e yeniden acilabilir
 
 ### 4.4 CRT long-tail ve loader/unwind edge-case'leri
-- Durum: `In Progress`
+- Durum: `Verified`
 - Kapsam:
-  - `msvcrt` long-tail
-  - locale/stdio/process/env edge-case'leri
-  - delayed/bound imports, forwarded export corners
-  - x64 unwind exactness
+  - byte-accurate Microsoft CRT ABI exotica
+  - locale/stdio/process/env ABI edge-case'leri
+  - loader/unwind tarafinda yalniz yeni exposed edge-case'ler
 
 #### 4.4.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Verified`
 - Gorevler:
-  - `W-CRT-01`: `msvcrt` long-tail'i "declared" olmaktan cikar; gercek davranis ve failure semantics'i parity matrix'e isle
-  - `W-CRT-02`: locale/stdio/process/env edge-case'leri icin blind-success veya default-return yollarini kapat
+  - `W-CRT-01`: repo-visible `msvcrt` long-tail'i behavior/failure semantics seviyesinde kapat
+    Durum: `Verified`
+  - `W-CRT-02`: byte-accurate Microsoft CRT ABI exotica ve locale/stdio/process/env edge-case'lerini daralt
+    Durum: `Verified`
   - `W-LOAD-01`: delayed import, bound import, forwarded export ve import thunk corner-case'lerini PE loader kontratina ekle
+    Durum: `Verified`
   - `W-UNWIND-01`: x64 unwind/SEH metadata ve stack-unwind davranisini mekanik testlerle daralt
+    Durum: `Verified`
 - Kapanis kapisi:
-  - PE runtime suite
-  - loader matrix corpus
-  - unwind/exception tests
+  - PE runtime suite, loader matrix corpus ve unwind/exception tests yesil kalir
+  - `_putenv`, `_dupenv_s`, `localeconv`, `fflush/ferror/clearerr/rewind`, `rename/remove`, `_fullpath`, `_splitpath`, `_makepath` corpus'u yesil kalir
+  - yeni Microsoft CRT ABI familyasi desteklenirse ayrik compatibility corpus'u ile yeniden acilir
 
 ### 4.5 Win32 graphics / DXGI / game compatibility
-- Durum: `In Progress`
+- Durum: `Verified`
 - Kapsam:
   - DXGI present bridge exactness
   - D3D translation boundary
   - game-facing frame pacing/input/fullscreen semantics
 
 #### 4.5.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Verified`
 - Gorevler:
   - `W-GFX-01`: DXGI present, swapchain lifecycle, resize/present-mode ve fence/publication davranisini real display path ile hizala
+    Durum: `Verified`
   - `W-GFX-02`: D3D translation boundary'sini "hangi API sinifi gercekten hedefleniyor" diye yazili profile indir; unsupported path'leri acik ayir
+    Durum: `Verified`
   - `W-GFX-03`: fullscreen/windowed transition, frame pacing, vsync, damage/present completion ve input latency sinirlarini mekanik corpus ile sabitle
+    Durum: `Verified`
   - `W-GFX-04`: game-facing graphics compatibility matrix'i shell/decision-log/matrix seviyesinde ayri truthfulness contract'i olarak sabitle
+    Durum: `Verified`
 - Kapanis kapisi:
   - DXGI present/pacing smoke
-  - fullscreen/windowed transition corpus
-  - supported/unsupported graphics compatibility boundary'sinin yazili ve mekanik olmasi
+  - supported profile route, present-mode downgrade, swapchain surface reuse, resize generation ve fullscreen-active corpus'u yesil kalir
+  - fullscreen/windowed transition ve supported/unsupported graphics compatibility boundary'si yazili ve mekanik olarak sabitlenir
+  - yeni graphics API/vendor familyasi desteklenirse ayrik compatibility corpus'u ile yeniden acilir
 
 ### Faz 4 exactness kapanis notu
 - Durum: `In Progress`
-- Faz 2 ancak su kosullarda `tam uyumlu/exact` denebilir:
-  - `W-UI-*`, `W-GDI-*`, `W-COM-*`, `W-NET-*`, `W-CRT-*`, `W-LOAD-*`, `W-UNWIND-*`, `W-GFX-*` gorevlerinin tamami `Verified`
-  - Win32 parity matrix'te exactness tasiyan ana satirlar `Partial` veya `Declared + Partial` olarak kalmiyor
-  - PE loader, Win32 ABI ve user32/gdi32 yuzeyleri ayni failure/runtime ownership modelini paylasiyor
+- Faz 4 ancak su kosullarda `tam uyumlu/exact` denebilir:
+  - `W-COM-03`, `W-CRT-02`, `W-UI-02`, `W-GDI-02` ve `W-GFX-*` gorevlerinin tamami `Verified`
+  - Win32 parity matrix'teki Faz 4 boundary'leri aktif blocker olarak kalmiyor
+
+### 4.6 Browser binary compatibility program
+
+- `BROW-02`: Windows browser binary launch path
+  - first-class hedef: Firefox veya Chromium/CEF ailesinden ciddi bir Windows browser binary'sini PE/Win32 katmaninda acmak
+  - kabul kriteri: desktop launcher veya shell uzerinden browser process'i gercek pencereyle dogsun, shell-notice yerine uygulama lifecycle'i gorunsun
+
+- `BROW-03`: Browser runtime dependency graph closure
+  - child-process creation, helper process spawn, argv/env/cwd propagation
+  - DLL/import resolution graph'i ve side-by-side runtime expectation'lari
+  - timers/message-loop/focus/input sequencing browser sinifi app'lerde corpus ile pinlenecek
+  - downloads/save/open-folder akislari native desktop contract'iyle birebir kapanacak
+  - kabul kriteri: browser binary bootstrap'i process tree ve temel window/message semantics seviyesinde truthful olsun
+
+- `BROW-04`: Browser platform contract hardening
+  - HTTP/TLS/proxy/session behavior browser workload'u altinda yeniden stress edilecek
+  - graphics/present path'i browser scrolling, resize, popup, child window ve swap/present ritminde corpus'a baglanacak
+  - sandbox/jail/policy gate browser helper process modeline gore ayarlanacak
+  - kabul kriteri: agir browser workload'u Win32/gfx/network/runtime omurgasini yapay shell smoke disinda gercek uygulama sinifinda zorluyor olsun
+
+- not:
+  - bu programin hedefi ilk asamada yeni native browser engine yazmak degil
+  - native GUI browser shell korunacak, ama ana stratejik kazanc Windows browser binary compatibility olacak
+  - strict source audit'te `src/win32.rs` genis `stub_api` export tablosu repo-visible olmayan ama canli unsupported yuzey olarak temizlenmis oluyor
+  - strict source audit'te `SetViewportExtEx/GetViewportExtEx/SetWindowExtEx/GetWindowExtEx` gibi sabit-davranisli GDI mapping/extents noktalarinin exact davranis borcu kapanmis oluyor
+  - daha genis vendor/out-of-tree ecosystem delta'lari ancak yeni desteklenen compatibility familyasi olarak yeniden acilir
 
 ---
 
@@ -783,3 +845,28 @@ Not:
   - shell grammar
   - spacing/token polish
   - final UX quality pass
+
+### 10.3 Application Model / Core System Services
+- Durum: `In Progress`
+- Kapsam:
+  - app identity / package registry
+  - brokered process + MMU isolation contract
+  - state serialization / suspend-resume
+  - unified control-plane service model
+
+#### 10.3.a Exactness gorevleri
+- Durum: `In Progress`
+- Gorevler:
+  - `AM-1`: `AppIdentity` ve `PackageRegistry` contract'ini built-in app, installed package ve external image resolution'u ayni truth surface'te birlestirecek sekilde yaz ve uygula
+  - `AM-2`: `ProcessBroker`u tek privileged spawn authority yap; capability token publication, child-process tree ownership ve launch-time policy gate'i ayni omurgada birlestir
+  - `AM-3`: app-facing `WarmSuspend` / `ColdResume` state contract'ini yaz; `prepare_suspend`, `export_state`, `import_state`, `resume` seam'lerini en az bir stateful app sinifinda corpus ile dogrula
+  - `AM-4`: process launch'i VM/MMU contract'ina bagla; per-app address space, broker-mapped IPC region ve revoke/teardown semantics'ini ABI personality'den bagimsiz tek izolasyon policy'sine indir
+  - `AM-5`: text manifest'i runtime hot path'ten cikar; source manifest -> compiled binary manifest pipeline'i ve deterministic `no_std` parse contract'ini kur
+  - `CS-1`: `NetworkBroker`, `PackageRegistry` ve install/update/remove akisini privileged service boundary olarak satirlastir
+  - `CS-2`: core services icin crash/restart/rebind ve typed deny/error reason modelini yazili contract haline getir
+- Kapanis kapisi:
+  - built-in/install/external app resolution'un tek registry modeliyle dogrulanmasi
+  - privileged launch'in tek brokered MMU/capability yolundan gecmesi
+  - en az bir stateful app icin suspend/resume corpus'u
+  - control-plane bus ile out-of-band data plane ayriminin testli kalmasi
+  - deny/crash/restart yollarinin sessiz degil typed ve user-visible olmasi

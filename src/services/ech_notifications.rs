@@ -10,9 +10,13 @@ use spin::Mutex;
 use crate::gui::protocol::{
     DesktopPermission, NotificationEntry, NotificationRequest, PermissionState,
 };
-use crate::services::ech_shell::{get_shell_service, ShellCommand, ShellResponse};
+use crate::ipc::request_shell_sync;
+use crate::services::display_atomic::MailboxRing;
+use crate::services::ech_shell::{ShellCommand, ShellResponse};
 
 const MAX_NOTIFICATIONS: usize = 32;
+const NOTIFICATION_COMMAND_QUEUE_CAPACITY: usize = 128;
+const NOTIFICATION_RESPONSE_QUEUE_CAPACITY: usize = 128;
 
 #[derive(Clone, Debug)]
 pub enum NotificationCommand {
@@ -43,8 +47,8 @@ pub struct EchNotifications {
     running: AtomicBool,
     next_id: AtomicU64,
     entries: Mutex<Vec<NotificationEntry>>,
-    command_queue: Mutex<Vec<NotificationCommand>>,
-    response_queue: Mutex<Vec<NotificationResponse>>,
+    command_queue: MailboxRing<NotificationCommand>,
+    response_queue: MailboxRing<NotificationResponse>,
 }
 
 impl EchNotifications {
@@ -53,8 +57,8 @@ impl EchNotifications {
             running: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             entries: Mutex::new(Vec::new()),
-            command_queue: Mutex::new(Vec::new()),
-            response_queue: Mutex::new(Vec::new()),
+            command_queue: MailboxRing::with_capacity_pow2(NOTIFICATION_COMMAND_QUEUE_CAPACITY),
+            response_queue: MailboxRing::with_capacity_pow2(NOTIFICATION_RESPONSE_QUEUE_CAPACITY),
         }
     }
 
@@ -63,12 +67,12 @@ impl EchNotifications {
         crate::serial_println!("[ECHNOTIFY] service started");
     }
 
-    pub fn send_command(&self, command: NotificationCommand) {
-        self.command_queue.lock().push(command);
+    pub fn send_command(&self, command: NotificationCommand) -> bool {
+        self.command_queue.try_push(command).is_ok()
     }
 
     pub fn receive_response(&self) -> Option<NotificationResponse> {
-        self.response_queue.lock().pop()
+        self.response_queue.pop()
     }
 
     pub fn process_command(&self, command: NotificationCommand) -> NotificationResponse {
@@ -95,9 +99,12 @@ impl EchNotifications {
                 while entries.len() > MAX_NOTIFICATIONS {
                     entries.remove(0);
                 }
-                let _ = get_shell_service().process_command(ShellCommand::NoteNotification {
-                    app_id: request.app_id,
-                });
+                let _ = request_shell_sync(
+                    request.app_id,
+                    ShellCommand::NoteNotification {
+                        app_id: request.app_id,
+                    },
+                );
                 NotificationResponse::NotificationId(id)
             }
             NotificationCommand::List {
@@ -121,9 +128,12 @@ impl EchNotifications {
                 let mut entries = self.entries.lock();
                 if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
                     entry.read = true;
-                    let _ = get_shell_service().process_command(ShellCommand::ClearNotifications {
-                        app_id: Some(app_id),
-                    });
+                    let _ = request_shell_sync(
+                        app_id,
+                        ShellCommand::ClearNotifications {
+                            app_id: Some(app_id),
+                        },
+                    );
                     NotificationResponse::Ack
                 } else {
                     NotificationResponse::Error(String::from("notification not found"))
@@ -131,9 +141,12 @@ impl EchNotifications {
             }
             NotificationCommand::Clear { app_id } => {
                 self.entries.lock().clear();
-                let _ = get_shell_service().process_command(ShellCommand::ClearNotifications {
-                    app_id: if app_id == 1 { None } else { Some(app_id) },
-                });
+                let _ = request_shell_sync(
+                    app_id,
+                    ShellCommand::ClearNotifications {
+                        app_id: if app_id == 1 { None } else { Some(app_id) },
+                    },
+                );
                 NotificationResponse::Ack
             }
         }
@@ -141,14 +154,9 @@ impl EchNotifications {
 
     pub fn run_service(&self) {
         while self.running.load(Ordering::SeqCst) {
-            let commands = {
-                let mut queue = self.command_queue.lock();
-                core::mem::take(&mut *queue)
-            };
-
-            for command in commands {
+            while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
-                self.response_queue.lock().push(response);
+                let _ = self.response_queue.push_overwrite(response);
             }
 
             for _ in 0..1000 {
@@ -183,14 +191,14 @@ use crate::gui::protocol::AppId;
 
 fn permission_granted(app_id: AppId, permission: DesktopPermission) -> bool {
     matches!(
-        get_shell_service().process_command(ShellCommand::GetPermission { app_id, permission }),
-        ShellResponse::Permission(PermissionState::Granted)
+        request_shell_sync(app_id, ShellCommand::GetPermission { app_id, permission }),
+        Some(ShellResponse::Permission(PermissionState::Granted))
     )
 }
 
 fn resolve_source_name(app_id: AppId) -> String {
-    match get_shell_service().process_command(ShellCommand::ListApps) {
-        ShellResponse::Apps(apps) => apps
+    match request_shell_sync(app_id, ShellCommand::ListApps) {
+        Some(ShellResponse::Apps(apps)) => apps
             .into_iter()
             .find(|entry| entry.app_id == app_id)
             .map(|entry| entry.name)

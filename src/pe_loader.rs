@@ -444,6 +444,29 @@ pub struct PeImportResolutionReport {
     pub unresolved: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeImportFailure {
+    pub dll_name: String,
+    pub symbol_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeLaunchDiagnostics {
+    pub imported_modules: Vec<String>,
+    pub import_report: PeImportResolutionReport,
+    pub unresolved_imports: Vec<PeImportFailure>,
+}
+
+impl PeLaunchDiagnostics {
+    pub fn can_launch(&self) -> bool {
+        self.unresolved_imports.is_empty()
+    }
+
+    pub fn primary_failure(&self) -> Option<&PeImportFailure> {
+        self.unresolved_imports.first()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeTlsContext {
     pub tls_base: u64,
@@ -1817,6 +1840,7 @@ const PE_USER_STACK_SIZE: usize = 2 * 1024 * 1024;
 static NEXT_PE_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
 static PE_PROCESS_TABLE: Mutex<BTreeMap<u64, PeProcessDescriptor>> = Mutex::new(BTreeMap::new());
 static PE_TASK_BINDINGS: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
+static PE_PENDING_LAUNCHES: Mutex<BTreeMap<u64, PeProcessHandle>> = Mutex::new(BTreeMap::new());
 
 /// Spin mutex korumalı global PE yükleyici örneği
 static PE_LOADER: Mutex<PeLoader> = Mutex::new(PeLoader {
@@ -1838,14 +1862,25 @@ pub fn resolve_import(dll_name: &str, func_name: &str) -> Option<u64> {
     PE_LOADER.lock().resolve_import(dll_name, func_name)
 }
 
+fn import_symbol_name(function: &ImportFunction) -> String {
+    if !function.name.is_empty() {
+        return function.name.clone();
+    }
+    if let Some(ordinal) = function.ordinal {
+        return alloc::format!("#{}", ordinal);
+    }
+    String::from("<anonymous>")
+}
+
 /// PE import tablosunu Win32/NT ABI köprüsüne çöz.
 ///
 /// Çözümleme sonucunda her import fonksiyonunun `resolved_address` alanı güncellenir.
 /// `stub_api` dönen girdiler başarısız kabul edilir.
-pub fn resolve_imports(image: &mut PeImage) -> Result<PeImportResolutionReport, PeError> {
+pub fn collect_launch_diagnostics(image: &mut PeImage) -> PeLaunchDiagnostics {
     let mut total = 0usize;
     let mut resolved = 0usize;
     let mut unresolved = 0usize;
+    let mut unresolved_imports = Vec::new();
     let stub_addr = crate::win32::stub_api as *const () as usize as u64;
 
     for import in image.imports.iter_mut() {
@@ -1858,6 +1893,10 @@ pub fn resolve_imports(image: &mut PeImage) -> Result<PeImportResolutionReport, 
             if resolved_addr == 0 || resolved_addr == stub_addr {
                 function.resolved_address = None;
                 unresolved += 1;
+                unresolved_imports.push(PeImportFailure {
+                    dll_name: import.dll_name.clone(),
+                    symbol_name: import_symbol_name(function),
+                });
                 continue;
             }
             function.resolved_address = Some(resolved_addr);
@@ -1865,15 +1904,32 @@ pub fn resolve_imports(image: &mut PeImage) -> Result<PeImportResolutionReport, 
         }
     }
 
-    let report = PeImportResolutionReport {
-        total,
-        resolved,
-        unresolved,
-    };
-    if unresolved != 0 {
+    PeLaunchDiagnostics {
+        imported_modules: image
+            .imports
+            .iter()
+            .map(|import| import.dll_name.clone())
+            .collect(),
+        import_report: PeImportResolutionReport {
+            total,
+            resolved,
+            unresolved,
+        },
+        unresolved_imports,
+    }
+}
+
+pub fn resolve_imports(image: &mut PeImage) -> Result<PeImportResolutionReport, PeError> {
+    let diagnostics = collect_launch_diagnostics(image);
+    if !diagnostics.can_launch() {
         return Err(PeError::ImportNotFound);
     }
-    Ok(report)
+    Ok(diagnostics.import_report)
+}
+
+pub fn preflight_launch_diagnostics(data: &[u8]) -> Result<PeLaunchDiagnostics, PeError> {
+    let mut image = load_pe(data)?;
+    Ok(collect_launch_diagnostics(&mut image))
 }
 
 #[cfg(test)]
@@ -1925,6 +1981,34 @@ mod tests {
         assert_eq!(
             loader.resolve_import("api-ms-win-core-synch-l1-2-0.dll", "ForwardSleep"),
             Some(0x1234_5678)
+        );
+    }
+
+    #[test]
+    fn collect_launch_diagnostics_names_unresolved_imports() {
+        let mut image = empty_image();
+        image.imports.push(ImportEntry {
+            dll_name: String::from("browserhelper.dll"),
+            functions: vec![ImportFunction {
+                name: String::from("CreateSandboxBroker"),
+                ordinal: None,
+                thunk_address: 0,
+                resolved_address: None,
+            }],
+        });
+
+        let diagnostics = collect_launch_diagnostics(&mut image);
+        assert!(!diagnostics.can_launch());
+        assert_eq!(diagnostics.import_report.total, 1);
+        assert_eq!(diagnostics.import_report.unresolved, 1);
+        assert_eq!(diagnostics.unresolved_imports.len(), 1);
+        assert_eq!(
+            diagnostics.unresolved_imports[0].dll_name,
+            "browserhelper.dll"
+        );
+        assert_eq!(
+            diagnostics.unresolved_imports[0].symbol_name,
+            "CreateSandboxBroker"
         );
     }
 
@@ -2514,6 +2598,16 @@ pub fn set_initial_thread_handle(handle: PeProcessHandle, thread_handle: u64) ->
     }
 }
 
+fn pe_process_start_trampoline() -> ! {
+    let task_id = crate::task::scheduler::current_task_id() as u64;
+    let Some(handle) = PE_PENDING_LAUNCHES.lock().remove(&task_id) else {
+        crate::task::scheduler::exit(87);
+    };
+    let result = transfer_entry(handle);
+    let exit_code = if result.is_ok() { 0 } else { 193 };
+    crate::task::scheduler::exit(exit_code)
+}
+
 /// Kullanıcı process kaydındaki entry point'e transfer yapar.
 pub fn transfer_entry(handle: PeProcessHandle) -> Result<(), PeError> {
     let descriptor = process_descriptor(handle).ok_or(PeError::EntryNotFound)?;
@@ -2577,6 +2671,19 @@ pub fn orchestrate_native_pe_lifecycle(data: &[u8]) -> Result<PeLaunchReport, Pe
         descriptor: descriptor.clone(),
         import_report: descriptor.import_report,
     })
+}
+
+pub fn spawn_process_task_from_payload(
+    data: &[u8],
+    priority: crate::task::task::Priority,
+    name: &'static str,
+) -> Result<(PeProcessHandle, crate::task::task::TaskId), PeError> {
+    let handle = spawn_process_from_payload(data)?;
+    let task = crate::task::task::Task::with_priority(pe_process_start_trampoline, priority, name);
+    let task_id = task.id;
+    PE_PENDING_LAUNCHES.lock().insert(task_id as u64, handle);
+    let _ = crate::task::scheduler::spawn_task(task);
+    Ok((handle, task_id))
 }
 
 /// Bir PE dosyasını belleğe yükle ve çalıştır.

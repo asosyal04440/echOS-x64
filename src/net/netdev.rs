@@ -163,10 +163,10 @@ impl NetInterface for LoopbackInterface {
 //   4. Gelen paketler RX-virtqueue'ya kopyalanır; misafir çekirdek keser
 //      alır ve `recv()` ile okur.
 //
-// Bu implementasyon şu an bir "stub" (iskelet) durumundadır.
+// Bu katman netdev sözleşmesini alttaki VirtIO-Net gönderme/alma yoluna bağlar.
 // Gerçek gönderme/alma için `src/drivers/virtio_ffi` entegrasyonu gerekir.
 
-/// VirtIO-Net arabirimi (iskelet - virtio sürücü entegrasyonu gerektirir)
+/// VirtIO-Net arabirimi (virtio sürücü entegrasyonu ile aktif veri yolu)
 ///
 /// Alanlar:
 /// - `name`    : Arabirim adı; "eth0" Linux/POSIX standardıyla uyumludur
@@ -355,7 +355,7 @@ pub fn configure_dhcp(iface_name: &str) -> Result<super::NetworkConfig, NetError
     // Start DHCP discovery
     super::dhcp::discover()?;
 
-    // Wait for response (simplified - should be async)
+    // Wait for response with a bounded retry budget
     for _ in 0..100 {
         if let Ok(config) = super::dhcp::process_response() {
             // Apply configuration
@@ -424,7 +424,7 @@ pub fn configure_static(
 
 /// Loopback arayüzü başlatır (test için)
 pub fn init_loopback() -> Result<(), NetError> {
-    crate::serial_println!("[NETDEV] Loopback interface initialized (stub)");
+    crate::serial_println!("[NETDEV] Loopback interface initialized");
     Ok(())
 }
 

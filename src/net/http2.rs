@@ -55,6 +55,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+#[path = "http2_huffman.rs"]
+mod http2_huffman;
+
 // HTTP/2 Çerçeve Türleri
 // Her çerçeve türü farklı bir amaca hizmet eder:
 // - DATA: Asıl uygulama verisi taşır
@@ -603,7 +606,9 @@ impl HpackEncoder {
     fn encode_string(&self, s: &str, buf: &mut Vec<u8>) {
         let bytes = s.as_bytes();
 
-        // Use Huffman encoding for efficiency (simplified - just use literal)
+        // Emit RFC-valid literal strings. Huffman coding is optional on the
+        // wire, so the encoder keeps literal form unless a future corpus
+        // requires compressed output.
         if bytes.len() < 127 {
             buf.push(bytes.len() as u8);
         } else {
@@ -745,11 +750,21 @@ impl HpackDecoder {
         }
 
         let first = data[*pos];
-        let _huffman = (first & 0x80) != 0;
+        let huffman = (first & 0x80) != 0;
         let len = self.decode_integer(data, pos, 7)? as usize;
 
         if *pos + len > data.len() {
             return Err(HpackError::UnexpectedEnd);
+        }
+
+        if huffman {
+            let decoded = http2_huffman::decode_huffman(&data[*pos..*pos + len])
+                .map_err(|_| HpackError::InvalidHuffman)?;
+            let s = core::str::from_utf8(&decoded)
+                .map_err(|_| HpackError::InvalidUtf8)?
+                .to_string();
+            *pos += len;
+            return Ok(s);
         }
 
         let s = core::str::from_utf8(&data[*pos..*pos + len])
@@ -809,6 +824,7 @@ pub enum HpackError {
     InvalidPrefix,
     UnexpectedEnd,
     InvalidUtf8,
+    InvalidHuffman,
 }
 
 /// HTTP/2 Bağlantısı
@@ -1061,6 +1077,16 @@ mod tests {
         assert_eq!(stream.reset_error, Some(REFUSED_STREAM));
         assert!(stream.end_stream);
         assert_eq!(stream.state, StreamState::Closed);
+    }
+
+    #[test]
+    fn huffman_literal_string_decodes() {
+        let decoder = HpackDecoder::new(4096);
+        let mut pos = 0usize;
+        let encoded = [0x88, 0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f];
+        let decoded = decoder.decode_string(&encoded, &mut pos).unwrap();
+        assert_eq!(decoded, "custom-key");
+        assert_eq!(pos, encoded.len());
     }
 }
 

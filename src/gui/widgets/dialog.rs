@@ -31,7 +31,8 @@ use crate::gui::theme::Theme;
 use crate::gui::widgets::button::Button;
 use crate::gui::widgets::label::Label;
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 /// Diyalog işlem sonucu; kullanıcının hangi butona bastığını temsil eder.
@@ -239,7 +240,12 @@ impl<'a> Dialog<'a> {
 
         objects.push(solid_rect_object(
             base_id ^ 0x02,
-            Rect::new(self.rect.x + 6, self.rect.y + 6, self.rect.width, self.rect.height),
+            Rect::new(
+                self.rect.x + 6,
+                self.rect.y + 6,
+                self.rect.width,
+                self.rect.height,
+            ),
             Theme::SHADOW.to_u32(),
             DamageLane::Shell,
             1,
@@ -253,7 +259,12 @@ impl<'a> Dialog<'a> {
         ));
         objects.push(solid_rect_object(
             base_id ^ 0x04,
-            Rect::new(self.rect.x, self.rect.y, self.rect.width, self.titlebar_height()),
+            Rect::new(
+                self.rect.x,
+                self.rect.y,
+                self.rect.width,
+                self.titlebar_height(),
+            ),
             Theme::TITLEBAR_ACTIVE.to_u32(),
             DamageLane::Shell,
             3,
@@ -267,7 +278,12 @@ impl<'a> Dialog<'a> {
         ));
         objects.push(text_render_object_with_width(
             base_id ^ 0x06,
-            Rect::new(self.rect.x + 10, self.rect.y + 6, (self.rect.width - 20).max(1), 18),
+            Rect::new(
+                self.rect.x + 10,
+                self.rect.y + 6,
+                (self.rect.width - 20).max(1),
+                18,
+            ),
             &self.title,
             Theme::TEXT_PRIMARY.to_u32(),
             false,
@@ -285,7 +301,12 @@ impl<'a> Dialog<'a> {
         ));
         objects.push(text_render_object_with_width(
             base_id ^ 0x08,
-            Rect::new(close_rect.x + 6, close_rect.y + 2, close_rect.width.max(1), 18),
+            Rect::new(
+                close_rect.x + 6,
+                close_rect.y + 2,
+                close_rect.width.max(1),
+                18,
+            ),
             "X",
             Theme::TEXT_PRIMARY.to_u32(),
             false,
@@ -632,14 +653,11 @@ pub enum FileDialogType {
     SelectFolder,
 }
 
-/// Dosya diyaloğu widget'ı (basitleştirilmiş; gerçek dosya sistemi entegrasyonu yok).
+/// Dosya diyaloğu widget'ı.
 ///
-/// `files: Vec<String>` gösterilecek dosya adlarını tutar; bu liste dışarıdan
-/// `set_files()` ile doldurulur. Gerçek bir OS'ta bu liste `/` veya seçilen
-/// dizinin içeriğini okuyarak doldurulur.
-///
-/// `filename_input: String` kullanıcının klavyede yazdığı dosya adını tutar;
-/// `on_key` metodunda karakter ekleme/silme işlenir.
+/// Diyalog mevcut yolu gerçek dosya sisteminden okuyup satırları dizin ve dosya
+/// olarak yayınlar. Dizinler `/` sonekiyle gösterilir ve tıklanınca içine
+/// girilir; dosyalar seçilip ad alanına kopyalanır.
 pub struct FileDialog {
     dialog: Dialog<'static>,
     dialog_type: FileDialogType,
@@ -662,24 +680,34 @@ impl FileDialog {
         dialog = dialog.add_button("Cancel", DialogResult::Cancel);
         dialog = dialog.add_button("Open", DialogResult::Ok);
 
-        Self {
+        let mut dialog_widget = Self {
             dialog,
             dialog_type,
             current_path: String::from("/"),
             files: Vec::new(),
             selected_file: None,
             filename_input: String::new(),
-        }
+        };
+        dialog_widget.reload_filesystem_entries();
+        dialog_widget
     }
 
     /// Mevcut dizin yolunu ayarlar.
     pub fn set_path(&mut self, path: &str) {
-        self.current_path = String::from(path);
+        self.current_path = normalize_dialog_path(path);
+        self.selected_file = None;
+        if self.dialog_type == FileDialogType::SelectFolder {
+            self.filename_input = self.current_path.clone();
+        } else {
+            self.filename_input.clear();
+        }
+        self.reload_filesystem_entries();
     }
 
     /// Gösterilecek dosya listesini ayarlar.
     pub fn set_files(&mut self, files: Vec<String>) {
         self.files = files;
+        self.selected_file = None;
     }
 
     /// Seçili dosya adını döndürür; seçim yapılmadıysa None.
@@ -687,9 +715,13 @@ impl FileDialog {
     /// `and_then(|i| self.files.get(i))`: Option zinciri; indeks geçerliyse
     /// dosya adına erişir. `map(|s| s.as_str())`: String'i &str'ye dönüştürür.
     pub fn selected_file(&self) -> Option<&str> {
-        self.selected_file
-            .and_then(|i| self.files.get(i))
-            .map(|s| s.as_str())
+        self.selected_file.and_then(|i| self.files.get(i)).map(|s| {
+            if let Some(value) = s.strip_suffix('/') {
+                value
+            } else {
+                s.as_str()
+            }
+        })
     }
 
     /// Dosya adı giriş alanındaki metni döndürür.
@@ -699,6 +731,7 @@ impl FileDialog {
 
     /// Diyaloğu ekranda gösterir.
     pub fn show(&mut self, screen_width: usize, screen_height: usize) {
+        self.reload_filesystem_entries();
         self.dialog.show(screen_width, screen_height);
     }
 
@@ -736,6 +769,100 @@ impl FileDialog {
             24,
         )
     }
+
+    fn reload_filesystem_entries(&mut self) {
+        let mut entries = crate::fs::read_dir(&self.current_path)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, is_dir)| if is_dir { format!("{}/", name) } else { name })
+            .collect::<Vec<_>>();
+        entries.sort();
+        if self.current_path != "/" {
+            entries.insert(0, String::from("../"));
+        }
+        self.files = entries;
+        if self.dialog_type == FileDialogType::SelectFolder && self.filename_input.is_empty() {
+            self.filename_input = self.current_path.clone();
+        }
+    }
+
+    fn activate_entry(&mut self, index: usize) {
+        let Some(entry) = self.files.get(index).cloned() else {
+            return;
+        };
+        self.selected_file = Some(index);
+        if entry == "../" {
+            self.current_path = dialog_parent_path(&self.current_path);
+            self.filename_input = if self.dialog_type == FileDialogType::SelectFolder {
+                self.current_path.clone()
+            } else {
+                String::new()
+            };
+            self.selected_file = None;
+            self.reload_filesystem_entries();
+            return;
+        }
+
+        if let Some(name) = entry.strip_suffix('/') {
+            self.current_path = dialog_join_path(&self.current_path, name);
+            self.filename_input = if self.dialog_type == FileDialogType::SelectFolder {
+                self.current_path.clone()
+            } else {
+                String::new()
+            };
+            self.selected_file = None;
+            self.reload_filesystem_entries();
+            return;
+        }
+
+        self.filename_input = dialog_join_path(&self.current_path, &entry);
+    }
+}
+
+fn normalize_dialog_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        String::from("/")
+    } else if trimmed.starts_with('/') {
+        trimmed.trim_end_matches('/').to_string().if_empty_root()
+    } else {
+        format!("/{}", trimmed.trim_end_matches('/')).if_empty_root()
+    }
+}
+
+fn dialog_parent_path(path: &str) -> String {
+    let normalized = normalize_dialog_path(path);
+    if normalized == "/" {
+        return normalized;
+    }
+    match normalized.rfind('/') {
+        Some(0) | None => String::from("/"),
+        Some(index) => normalized[..index].to_string(),
+    }
+}
+
+fn dialog_join_path(parent: &str, name: &str) -> String {
+    let parent = normalize_dialog_path(parent);
+    let name = name.trim_matches('/');
+    if parent == "/" {
+        format!("/{}", name)
+    } else {
+        format!("{}/{}", parent, name)
+    }
+}
+
+trait FileDialogPathExt {
+    fn if_empty_root(self) -> String;
+}
+
+impl FileDialogPathExt for String {
+    fn if_empty_root(self) -> String {
+        if self.is_empty() {
+            String::from("/")
+        } else {
+            self
+        }
+    }
 }
 
 impl Widget for FileDialog {
@@ -757,8 +884,7 @@ impl Widget for FileDialog {
             let relative_y = y - list_rect.y - 5;
             let index = (relative_y / 20) as usize;
             if index < self.files.len() {
-                self.selected_file = Some(index);
-                self.filename_input = self.files[index].clone();
+                self.activate_entry(index);
             }
             return true;
         }
@@ -806,7 +932,12 @@ impl Widget for FileDialog {
 
         let mut objects = self.dialog.render_primitives();
         let base_id = ((self.dialog.rect.x as u64) << 32) ^ (self.dialog.rect.y as u64) ^ 0x8000;
-        let path_rect = Rect::new(self.dialog.rect.x + 10, self.dialog.rect.y + 35, self.dialog.rect.width - 20, 20);
+        let path_rect = Rect::new(
+            self.dialog.rect.x + 10,
+            self.dialog.rect.y + 35,
+            self.dialog.rect.width - 20,
+            20,
+        );
         objects.push(solid_rect_object(
             base_id,
             path_rect,
@@ -816,7 +947,12 @@ impl Widget for FileDialog {
         ));
         objects.push(text_render_object_with_width(
             base_id ^ 1,
-            Rect::new(path_rect.x + 5, path_rect.y + 2, (path_rect.width - 10).max(1), 18),
+            Rect::new(
+                path_rect.x + 5,
+                path_rect.y + 2,
+                (path_rect.width - 10).max(1),
+                18,
+            ),
             &self.current_path,
             Theme::TEXT_SECONDARY.to_u32(),
             false,
@@ -857,7 +993,12 @@ impl Widget for FileDialog {
             ));
             objects.push(text_render_object_with_width(
                 base_id ^ 0x180 ^ i as u64,
-                Rect::new(row_rect.x + 3, row_rect.y + 1, (row_rect.width - 6).max(1), 18),
+                Rect::new(
+                    row_rect.x + 3,
+                    row_rect.y + 1,
+                    (row_rect.width - 6).max(1),
+                    18,
+                ),
                 file,
                 text_color,
                 false,
@@ -898,7 +1039,12 @@ impl Widget for FileDialog {
         ));
         objects.push(text_render_object_with_width(
             base_id ^ 6,
-            Rect::new(filename_rect.x + 5, filename_rect.y + 4, (filename_rect.width - 10).max(1), 18),
+            Rect::new(
+                filename_rect.x + 5,
+                filename_rect.y + 4,
+                (filename_rect.width - 10).max(1),
+                18,
+            ),
             &self.filename_input,
             Theme::TEXT_PRIMARY.to_u32(),
             false,

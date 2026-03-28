@@ -21,16 +21,17 @@ use crate::ebpf::{self, BpfAttachPoint, BpfError};
 use crate::elf::{parse_elf, ElfError, ElfImage};
 use crate::gpu3d::{
     self, AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentReference,
-    AttachmentStoreOp, BlendFactor, BlendOp, ColorBlendAttachmentState, ColorBlendState,
-    CompareOp, CullMode, DependencyFlags, DepthStencilState, FenceHandle, FrontFace, Format,
-    ImageLayout, LogicOp, PipelineDesc, PipelineStageFlags, PolygonMode, PrimitiveTopology,
-    RenderPassDesc, ShaderDesc, ShaderStage, StencilOp, StencilOpState, SubpassDependency,
-    SubpassDescription, VertexInputRate,
+    AttachmentStoreOp, BlendFactor, BlendOp, ColorBlendAttachmentState, ColorBlendState, CompareOp,
+    CullMode, DependencyFlags, DepthStencilState, FenceHandle, Format, FrontFace, ImageLayout,
+    LogicOp, PipelineDesc, PipelineStageFlags, PolygonMode, PrimitiveTopology, RenderPassDesc,
+    ShaderDesc, ShaderStage, StencilOp, StencilOpState, SubpassDependency, SubpassDescription,
+    VertexInputRate,
 };
 use crate::gui::protocol::{
     CompositorPass, DamageTile, DisplayPresentMode, FrameIntent, Point, Rect, ScanoutCandidate,
-    SurfaceTransform, SurfaceId, VblankFeedback,
+    SurfaceId, SurfaceTransform, VblankFeedback,
 };
+use crate::ipc::request_display_sync;
 use crate::pe_loader::{load_pe, PeError, PeImage};
 use crate::services::ech_display::{DisplayCommand, DisplayResponse};
 
@@ -107,6 +108,42 @@ impl GraphicsBackend {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphicsApiProfile {
+    DxgiPresentOnly,
+    D3d11ToVulkan,
+    D3d12ToVulkan,
+}
+
+impl GraphicsApiProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DxgiPresentOnly => "dxgi-present-only",
+            Self::D3d11ToVulkan => "d3d11-to-vulkan",
+            Self::D3d12ToVulkan => "d3d12-to-vulkan",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DxgiTargetRoute {
+    backend: GraphicsBackend,
+    profile: GraphicsApiProfile,
+    fullscreen_capable: bool,
+    damage_tracked: bool,
+    latency_queue_depth: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DxgiSwapchainState {
+    surface_id: SurfaceId,
+    width: u32,
+    height: u32,
+    resize_generation: u32,
+    last_present_mode: DisplayPresentMode,
+    fullscreen_active: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DxgiSurfaceDesc {
     pub surface_id: SurfaceId,
@@ -131,14 +168,28 @@ pub struct DxgiPresentResult {
     pub present_id: u64,
     pub surface: DxgiSurfaceDesc,
     pub backend: GraphicsBackend,
+    pub profile: GraphicsApiProfile,
+    pub surface_reused: bool,
+    pub resize_generation: u32,
+    pub requested_present_mode: DisplayPresentMode,
+    pub effective_present_mode: DisplayPresentMode,
+    pub present_mode_honored: bool,
     pub shader_cache_hit: bool,
     pub pipeline_cache_hit: bool,
     pub fence: FenceHandle,
     pub feedback: Option<VblankFeedback>,
+    pub completion_id: u64,
+    pub frame_budget_ns: u64,
+    pub damage: Rect,
+    pub fullscreen_capable: bool,
+    pub fullscreen_active: bool,
+    pub damage_tracked: bool,
+    pub latency_queue_depth: u8,
 }
 
 pub struct DxgiPresentBridge {
-    targets: BTreeMap<String, GraphicsBackend>,
+    targets: BTreeMap<String, DxgiTargetRoute>,
+    swapchains: Mutex<BTreeMap<String, DxgiSwapchainState>>,
     next_surface_id: AtomicU64,
     next_present_id: AtomicU64,
 }
@@ -146,46 +197,192 @@ pub struct DxgiPresentBridge {
 impl DxgiPresentBridge {
     pub fn new() -> Self {
         let mut targets = BTreeMap::new();
-        targets.insert(String::from("d3d9"), GraphicsBackend::Vulkan);
-        targets.insert(String::from("d3d11"), GraphicsBackend::Vulkan);
-        targets.insert(String::from("d3d12"), GraphicsBackend::Vulkan);
-        targets.insert(String::from("dxgi"), GraphicsBackend::Vulkan);
+        targets.insert(
+            String::from("d3d11"),
+            DxgiTargetRoute {
+                backend: GraphicsBackend::Vulkan,
+                profile: GraphicsApiProfile::D3d11ToVulkan,
+                fullscreen_capable: true,
+                damage_tracked: true,
+                latency_queue_depth: 2,
+            },
+        );
+        targets.insert(
+            String::from("d3d12"),
+            DxgiTargetRoute {
+                backend: GraphicsBackend::Vulkan,
+                profile: GraphicsApiProfile::D3d12ToVulkan,
+                fullscreen_capable: true,
+                damage_tracked: true,
+                latency_queue_depth: 3,
+            },
+        );
+        targets.insert(
+            String::from("dxgi"),
+            DxgiTargetRoute {
+                backend: GraphicsBackend::Vulkan,
+                profile: GraphicsApiProfile::DxgiPresentOnly,
+                fullscreen_capable: true,
+                damage_tracked: true,
+                latency_queue_depth: 2,
+            },
+        );
         Self {
             targets,
+            swapchains: Mutex::new(BTreeMap::new()),
             next_surface_id: AtomicU64::new(0x4000),
             next_present_id: AtomicU64::new(1),
         }
     }
 
     pub fn target_for(&self, api: &str) -> Option<GraphicsBackend> {
+        self.targets
+            .get(&api.to_lowercase())
+            .map(|route| route.backend)
+    }
+
+    fn route_for(&self, api: &str) -> Option<DxgiTargetRoute> {
         self.targets.get(&api.to_lowercase()).copied()
     }
 
     pub fn describe_targets(&self) -> Vec<String> {
         self.targets
             .iter()
-            .map(|(api, backend)| format!("{}=>{}", api, backend.as_str()))
+            .map(|(api, route)| {
+                format!(
+                    "{}=>{}/{}{}",
+                    api,
+                    route.backend.as_str(),
+                    route.profile.as_str(),
+                    if route.fullscreen_capable {
+                        ":fullscreen"
+                    } else {
+                        ":windowed"
+                    }
+                )
+            })
             .collect()
     }
 
-    fn build_surface(&self, request: &DxgiPresentRequest) -> DxgiSurfaceDesc {
-        DxgiSurfaceDesc {
-            surface_id: self.next_surface_id.fetch_add(1, Ordering::Relaxed),
+    fn frame_budget_ns(refresh_hz: u32) -> u64 {
+        if refresh_hz == 0 {
+            0
+        } else {
+            1_000_000_000u64 / refresh_hz as u64
+        }
+    }
+
+    fn effective_present_mode(
+        request: &DxgiPresentRequest,
+        _route: DxgiTargetRoute,
+    ) -> DisplayPresentMode {
+        request.present_mode
+    }
+
+    fn target_refresh_hz(present_mode: DisplayPresentMode, route: DxgiTargetRoute) -> u32 {
+        match present_mode {
+            DisplayPresentMode::Mailbox => 240,
+            DisplayPresentMode::VblankFifo => 120,
+            DisplayPresentMode::AdaptiveSync => {
+                if route.profile == GraphicsApiProfile::DxgiPresentOnly {
+                    165
+                } else {
+                    240
+                }
+            }
+        }
+    }
+
+    fn clamp_damage(request: &DxgiPresentRequest) -> Rect {
+        let left = request.damage.x.clamp(0, request.width as i32);
+        let top = request.damage.y.clamp(0, request.height as i32);
+        let requested_right = request
+            .damage
+            .x
+            .saturating_add(request.damage.width.min(i32::MAX as u32) as i32);
+        let requested_bottom = request
+            .damage
+            .y
+            .saturating_add(request.damage.height.min(i32::MAX as u32) as i32);
+        let right = requested_right.clamp(left, request.width as i32);
+        let bottom = requested_bottom.clamp(top, request.height as i32);
+        Rect::new(
+            left,
+            top,
+            right.saturating_sub(left) as u32,
+            bottom.saturating_sub(top) as u32,
+        )
+    }
+
+    fn acquire_surface(
+        &self,
+        request: &DxgiPresentRequest,
+        route: DxgiTargetRoute,
+        effective_present_mode: DisplayPresentMode,
+    ) -> (DxgiSurfaceDesc, bool, u32, bool) {
+        let key = request.api.to_lowercase();
+        let fullscreen_active = route.fullscreen_capable
+            && request.opaque
+            && !matches!(effective_present_mode, DisplayPresentMode::VblankFifo);
+        let mut swapchains = self.swapchains.lock();
+        if let Some(state) = swapchains.get_mut(&key) {
+            let reused = state.width == request.width && state.height == request.height;
+            if !reused {
+                state.surface_id = self.next_surface_id.fetch_add(1, Ordering::Relaxed);
+                state.width = request.width;
+                state.height = request.height;
+                state.resize_generation = state.resize_generation.saturating_add(1);
+            }
+            state.last_present_mode = effective_present_mode;
+            state.fullscreen_active = fullscreen_active;
+            return (
+                DxgiSurfaceDesc {
+                    surface_id: state.surface_id,
+                    width: state.width,
+                    height: state.height,
+                    format: Format::B8G8R8A8Unorm,
+                    api: key,
+                },
+                reused,
+                state.resize_generation,
+                state.fullscreen_active,
+            );
+        }
+        let surface_id = self.next_surface_id.fetch_add(1, Ordering::Relaxed);
+        swapchains.insert(
+            key.clone(),
+            DxgiSwapchainState {
+                surface_id,
+                width: request.width,
+                height: request.height,
+                resize_generation: 0,
+                last_present_mode: effective_present_mode,
+                fullscreen_active,
+            },
+        );
+        let surface = DxgiSurfaceDesc {
+            surface_id,
             width: request.width,
             height: request.height,
             format: Format::B8G8R8A8Unorm,
-            api: request.api.to_lowercase(),
-        }
+            api: key,
+        };
+        (surface, false, 0, fullscreen_active)
     }
 
     fn prime_gpu_contract(
         &self,
         request: &DxgiPresentRequest,
     ) -> Result<(bool, bool, FenceHandle), EcosystemError> {
-        let backend = self
-            .target_for(&request.api)
+        let route = self
+            .route_for(&request.api)
             .ok_or(EcosystemError::InvalidProbeSpec)?;
-        let shader_prefix = format!("dxgi:{}:{}", request.api.to_lowercase(), backend.as_str());
+        let shader_prefix = format!(
+            "dxgi:{}:{}:{}",
+            request.api.to_lowercase(),
+            route.backend.as_str(),
+            route.profile.as_str()
+        );
         let (vertex_shader, shader_cache_hit_a) = gpu3d::cache_shader_program(
             &format!("{}:vs", shader_prefix),
             ShaderDesc {
@@ -307,65 +504,87 @@ impl DxgiPresentBridge {
             },
         );
         let fence = gpu3d::register_named_fence(&format!("{}:present-fence", shader_prefix), false);
-        Ok((shader_cache_hit_a && shader_cache_hit_b, pipeline_cache_hit, fence))
+        Ok((
+            shader_cache_hit_a && shader_cache_hit_b,
+            pipeline_cache_hit,
+            fence,
+        ))
     }
 
-    pub fn present(&self, request: DxgiPresentRequest) -> Result<DxgiPresentResult, EcosystemError> {
-        let backend = self
-            .target_for(&request.api)
+    pub fn present(
+        &self,
+        request: DxgiPresentRequest,
+    ) -> Result<DxgiPresentResult, EcosystemError> {
+        if request.width == 0 || request.height == 0 {
+            return Err(EcosystemError::InvalidProbeSpec);
+        }
+        let route = self
+            .route_for(&request.api)
             .ok_or(EcosystemError::InvalidProbeSpec)?;
-        let surface = self.build_surface(&request);
+        let effective_present_mode = Self::effective_present_mode(&request, route);
+        let (surface, surface_reused, resize_generation, fullscreen_active) =
+            self.acquire_surface(&request, route, effective_present_mode);
         let (shader_cache_hit, pipeline_cache_hit, fence) = self.prime_gpu_contract(&request)?;
         let present_id = self.next_present_id.fetch_add(1, Ordering::Relaxed);
         let _ = gpu3d::set_fence_target(fence, present_id);
+        let damage = Self::clamp_damage(&request);
+        let target_refresh_hz = Self::target_refresh_hz(effective_present_mode, route);
+        let frame_budget_ns = Self::frame_budget_ns(target_refresh_hz);
 
         let intent = FrameIntent {
             frame_id: present_id,
             enqueue_timestamp_ns: crate::cpu::tsc::read_ns(),
             damage_tiles: vec![DamageTile {
-                x: request.damage.x.max(0) as u16,
-                y: request.damage.y.max(0) as u16,
-                width: request.damage.width.min(u16::MAX as u32) as u16,
-                height: request.damage.height.min(u16::MAX as u32) as u16,
+                x: damage.x.max(0) as u16,
+                y: damage.y.max(0) as u16,
+                width: damage.width.min(u16::MAX as u32) as u16,
+                height: damage.height.min(u16::MAX as u32) as u16,
             }],
             candidates: vec![ScanoutCandidate {
                 surface_id: surface.surface_id,
                 z: 0,
                 opaque: request.opaque,
                 transform: SurfaceTransform::Identity,
-                damage: request.damage,
+                damage,
             }],
             composed_passes: vec![CompositorPass::BaseComposite],
-            target_refresh_hz: match request.present_mode {
-                DisplayPresentMode::Mailbox => 240,
-                DisplayPresentMode::VblankFifo => 120,
-                DisplayPresentMode::AdaptiveSync => 240,
-            },
-            mode: request.present_mode,
+            target_refresh_hz,
+            mode: effective_present_mode,
             cursor_position: Some(Point::new(0, 0)),
         };
 
-        let feedback = crate::services::ech_display::get_display()
-            .lock()
-            .clone()
-            .and_then(|display| {
-                match display.process_command(DisplayCommand::SubmitFrameIntent { intent }) {
-                    DisplayResponse::Presented { feedback, .. } => Some(feedback),
-                    _ => None,
-                }
-            });
+        let feedback = match request_display_sync(0, DisplayCommand::SubmitFrameIntent { intent }) {
+            Some(DisplayResponse::Presented { feedback, .. }) => Some(feedback),
+            _ => None,
+        };
         if let Some(feedback) = feedback {
             let _ = gpu3d::signal_fence_value(fence, feedback.presented_frame_id);
         }
+        let completion_id = feedback
+            .map(|feedback| feedback.presented_frame_id)
+            .unwrap_or(present_id);
 
         Ok(DxgiPresentResult {
             present_id,
             surface,
-            backend,
+            backend: route.backend,
+            profile: route.profile,
+            surface_reused,
+            resize_generation,
+            requested_present_mode: request.present_mode,
+            effective_present_mode,
+            present_mode_honored: effective_present_mode == request.present_mode,
             shader_cache_hit,
             pipeline_cache_hit,
             fence,
             feedback,
+            completion_id,
+            frame_budget_ns,
+            damage,
+            fullscreen_capable: route.fullscreen_capable,
+            fullscreen_active,
+            damage_tracked: route.damage_tracked,
+            latency_queue_depth: route.latency_queue_depth,
         })
     }
 }
@@ -517,7 +736,10 @@ impl AtomicUpdateManager {
     }
 
     pub fn commit_staged_patch(&mut self) -> Result<UpdateCommitReport, EcosystemError> {
-        let patch = self.staged_patch.clone().ok_or(EcosystemError::NoStagedPatch)?;
+        let patch = self
+            .staged_patch
+            .clone()
+            .ok_or(EcosystemError::NoStagedPatch)?;
         let active_image = self.active_image().to_vec();
         let next_image = Self::apply_delta(&active_image, &patch)?;
         let next_slot = self.active_slot.other();
@@ -675,9 +897,7 @@ impl EcosystemCoordinator {
     }
 
     pub fn translate_dll(&self, dll_name: &str) -> Option<String> {
-        self.dll_translation
-            .get(&dll_name.to_lowercase())
-            .cloned()
+        self.dll_translation.get(&dll_name.to_lowercase()).cloned()
     }
 
     pub fn dxvk_target(&self, api: &str) -> Option<String> {
@@ -686,7 +906,10 @@ impl EcosystemCoordinator {
             .map(|backend| backend.as_str().to_string())
     }
 
-    pub fn present_dxgi(&self, request: DxgiPresentRequest) -> Result<DxgiPresentResult, EcosystemError> {
+    pub fn present_dxgi(
+        &self,
+        request: DxgiPresentRequest,
+    ) -> Result<DxgiPresentResult, EcosystemError> {
         self.dxgi_bridge.present(request)
     }
 
@@ -706,7 +929,9 @@ impl EcosystemCoordinator {
         if manifest.signature_required && requested.is_empty() {
             return false;
         }
-        requested.iter().all(|cap| manifest.capabilities.iter().any(|c| c == cap))
+        requested
+            .iter()
+            .all(|cap| manifest.capabilities.iter().any(|c| c == cap))
     }
 
     /// bpftrace uyumlu spec:
@@ -852,4 +1077,201 @@ pub fn anti_cheat_attestation(
     last_seq: u64,
 ) -> crate::security::anti_cheat::AntiCheatAttestationReport {
     coordinator().lock().anti_cheat_attestation(last_seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dxgi_bridge_reports_supported_profiles_truthfully() {
+        let bridge = DxgiPresentBridge::new();
+        assert_eq!(bridge.target_for("d3d11"), Some(GraphicsBackend::Vulkan));
+        assert_eq!(bridge.target_for("d3d12"), Some(GraphicsBackend::Vulkan));
+        assert_eq!(bridge.target_for("dxgi"), Some(GraphicsBackend::Vulkan));
+        assert_eq!(bridge.target_for("d3d9"), None);
+        assert_eq!(bridge.target_for("opengl"), None);
+
+        let targets = bridge.describe_targets();
+        assert!(targets
+            .iter()
+            .any(|entry| entry == "d3d11=>vulkan/d3d11-to-vulkan:fullscreen"));
+        assert!(targets
+            .iter()
+            .any(|entry| entry == "d3d12=>vulkan/d3d12-to-vulkan:fullscreen"));
+        assert!(targets
+            .iter()
+            .any(|entry| entry == "dxgi=>vulkan/dxgi-present-only:windowed"));
+        assert!(!targets.iter().any(|entry| entry.starts_with("d3d9=>")));
+    }
+
+    #[test]
+    fn dxgi_present_clamps_damage_and_reports_frame_budget() {
+        let bridge = DxgiPresentBridge::new();
+        let result = bridge
+            .present(DxgiPresentRequest {
+                api: String::from("d3d11"),
+                width: 128,
+                height: 72,
+                damage: Rect::new(-8, -4, 320, 160),
+                opaque: true,
+                present_mode: DisplayPresentMode::VblankFifo,
+            })
+            .expect("supported DXGI route should present");
+        assert_eq!(result.backend, GraphicsBackend::Vulkan);
+        assert_eq!(result.profile, GraphicsApiProfile::D3d11ToVulkan);
+        assert_eq!(result.damage, Rect::new(0, 0, 128, 72));
+        assert_eq!(
+            result.requested_present_mode,
+            DisplayPresentMode::VblankFifo
+        );
+        assert_eq!(
+            result.effective_present_mode,
+            DisplayPresentMode::VblankFifo
+        );
+        assert!(result.present_mode_honored);
+        assert_eq!(result.frame_budget_ns, 1_000_000_000u64 / 120);
+        assert_eq!(result.completion_id, result.present_id);
+        assert!(result.fullscreen_capable);
+        assert!(result.damage_tracked);
+        assert_eq!(result.latency_queue_depth, 2);
+    }
+
+    #[test]
+    fn dxgi_present_rejects_zero_sized_or_unsupported_routes() {
+        let bridge = DxgiPresentBridge::new();
+        assert!(matches!(
+            bridge.present(DxgiPresentRequest {
+                api: String::from("d3d9"),
+                width: 64,
+                height: 64,
+                damage: Rect::new(0, 0, 16, 16),
+                opaque: false,
+                present_mode: DisplayPresentMode::Mailbox,
+            }),
+            Err(EcosystemError::InvalidProbeSpec)
+        ));
+        assert!(matches!(
+            bridge.present(DxgiPresentRequest {
+                api: String::from("dxgi"),
+                width: 0,
+                height: 64,
+                damage: Rect::new(0, 0, 16, 16),
+                opaque: false,
+                present_mode: DisplayPresentMode::Mailbox,
+            }),
+            Err(EcosystemError::InvalidProbeSpec)
+        ));
+    }
+
+    #[test]
+    fn dxgi_present_honors_requested_modes_across_supported_routes() {
+        let bridge = DxgiPresentBridge::new();
+        let dxgi_result = bridge
+            .present(DxgiPresentRequest {
+                api: String::from("dxgi"),
+                width: 1920,
+                height: 1080,
+                damage: Rect::new(0, 0, 64, 64),
+                opaque: true,
+                present_mode: DisplayPresentMode::AdaptiveSync,
+            })
+            .expect("dxgi route should honor adaptive sync");
+        assert_eq!(
+            dxgi_result.requested_present_mode,
+            DisplayPresentMode::AdaptiveSync
+        );
+        assert_eq!(
+            dxgi_result.effective_present_mode,
+            DisplayPresentMode::AdaptiveSync
+        );
+        assert!(dxgi_result.present_mode_honored);
+        assert_eq!(dxgi_result.frame_budget_ns, 1_000_000_000u64 / 165);
+        assert!(dxgi_result.fullscreen_capable);
+        assert!(dxgi_result.fullscreen_active);
+
+        let d3d11_result = bridge
+            .present(DxgiPresentRequest {
+                api: String::from("d3d11"),
+                width: 1920,
+                height: 1080,
+                damage: Rect::new(4, 4, 64, 64),
+                opaque: true,
+                present_mode: DisplayPresentMode::AdaptiveSync,
+            })
+            .expect("d3d11 path should honor adaptive sync");
+        assert_eq!(
+            d3d11_result.effective_present_mode,
+            DisplayPresentMode::AdaptiveSync
+        );
+        assert!(d3d11_result.present_mode_honored);
+        assert_eq!(d3d11_result.frame_budget_ns, 1_000_000_000u64 / 240);
+        assert!(d3d11_result.fullscreen_capable);
+    }
+
+    #[test]
+    fn dxgi_present_reuses_surface_and_tracks_resize_generation() {
+        let bridge = DxgiPresentBridge::new();
+        let first = bridge
+            .present(DxgiPresentRequest {
+                api: String::from("d3d12"),
+                width: 1280,
+                height: 720,
+                damage: Rect::new(0, 0, 1280, 720),
+                opaque: true,
+                present_mode: DisplayPresentMode::Mailbox,
+            })
+            .expect("first present should allocate a swapchain surface");
+        assert!(!first.surface_reused);
+        assert_eq!(first.resize_generation, 0);
+        assert!(first.fullscreen_active);
+
+        let second = bridge
+            .present(DxgiPresentRequest {
+                api: String::from("d3d12"),
+                width: 1280,
+                height: 720,
+                damage: Rect::new(8, 8, 64, 64),
+                opaque: true,
+                present_mode: DisplayPresentMode::Mailbox,
+            })
+            .expect("same-size present should reuse swapchain surface");
+        assert!(second.surface_reused);
+        assert_eq!(second.resize_generation, 0);
+        assert_eq!(second.surface.surface_id, first.surface.surface_id);
+        assert!(second.fullscreen_active);
+
+        let resized = bridge
+            .present(DxgiPresentRequest {
+                api: String::from("d3d12"),
+                width: 1920,
+                height: 1080,
+                damage: Rect::new(0, 0, 1920, 1080),
+                opaque: true,
+                present_mode: DisplayPresentMode::Mailbox,
+            })
+            .expect("resize should rotate swapchain surface and bump generation");
+        assert!(!resized.surface_reused);
+        assert_eq!(resized.resize_generation, 1);
+        assert_ne!(resized.surface.surface_id, first.surface.surface_id);
+        assert!(resized.fullscreen_active);
+    }
+
+    #[test]
+    fn dxgi_present_reports_transparent_dxgi_route_as_non_fullscreen() {
+        let bridge = DxgiPresentBridge::new();
+        let result = bridge
+            .present(DxgiPresentRequest {
+                api: String::from("dxgi"),
+                width: 1024,
+                height: 768,
+                damage: Rect::new(0, 0, 128, 128),
+                opaque: false,
+                present_mode: DisplayPresentMode::Mailbox,
+            })
+            .expect("transparent dxgi route should remain windowed");
+        assert!(result.fullscreen_capable);
+        assert!(!result.fullscreen_active);
+        assert_eq!(result.effective_present_mode, DisplayPresentMode::Mailbox);
+    }
 }

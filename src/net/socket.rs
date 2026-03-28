@@ -29,11 +29,16 @@
 //! socket() → connect() → send()/recv() → close()
 //! ```
 
+use super::ip::{self, IpProtocol, Ipv4Packet};
+use super::ipv6::{self, Ipv6Header, Ipv6Packet};
 use super::tcp;
 use super::udp;
-use super::{Ipv4Addr, NetError, Port};
+use super::{allocate_socket_id, send_packet, IpAddr, Ipv4Addr, NetError, Port};
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
+use spin::Mutex;
 
 // Re-export SocketAddr for other modules
 pub use super::SocketAddr;
@@ -42,7 +47,7 @@ pub use super::SocketAddr;
 ///
 /// Linux'ta `AF_INET` (2) ile IPv4, `AF_INET6` (10) ile IPv6 seçilir.
 /// Bu değerler POSIX standardında sabitlenmiştir.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AddressFamily {
     UNSPEC = 0,
     IPV4 = 2,  // AF_INET
@@ -115,20 +120,206 @@ pub struct Socket {
     pub nonblocking: bool,
 }
 
+#[derive(Clone, Debug)]
+struct RawSocketState {
+    id: u32,
+    protocol: Protocol,
+    family: AddressFamily,
+    bound_ip: Option<IpAddr>,
+    peer: Option<IpAddr>,
+    rx_queue: VecDeque<(SocketAddr, Vec<u8>)>,
+}
+
+impl RawSocketState {
+    fn new(id: u32, protocol: Protocol, family: AddressFamily) -> Self {
+        Self {
+            id,
+            protocol,
+            family,
+            bound_ip: None,
+            peer: None,
+            rx_queue: VecDeque::new(),
+        }
+    }
+}
+
+static RAW_SOCKETS: Mutex<BTreeMap<u32, RawSocketState>> = Mutex::new(BTreeMap::new());
+
+fn protocol_to_ip_protocol(protocol: Protocol) -> Option<IpProtocol> {
+    match protocol {
+        Protocol::IP => Some(IpProtocol::UNKNOWN),
+        Protocol::ICMP => Some(IpProtocol::ICMP),
+        Protocol::TCP => Some(IpProtocol::TCP),
+        Protocol::UDP => Some(IpProtocol::UDP),
+        Protocol::DEFAULT => None,
+    }
+}
+
+fn create_raw_socket(protocol: Protocol, family: AddressFamily) -> u32 {
+    let id = allocate_socket_id();
+    RAW_SOCKETS
+        .lock()
+        .insert(id, RawSocketState::new(id, protocol, family));
+    id
+}
+
+fn has_raw_socket(socket_id: u32) -> bool {
+    RAW_SOCKETS.lock().contains_key(&socket_id)
+}
+
+fn raw_bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
+    let mut sockets = RAW_SOCKETS.lock();
+    let socket = sockets.get_mut(&socket_id).ok_or(NetError::InvalidFd)?;
+    socket.bound_ip = if addr.ip.is_unspecified() {
+        None
+    } else {
+        Some(addr.ip)
+    };
+    Ok(())
+}
+
+fn raw_connect(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
+    let mut sockets = RAW_SOCKETS.lock();
+    let socket = sockets.get_mut(&socket_id).ok_or(NetError::InvalidFd)?;
+    socket.peer = Some(addr.ip);
+    Ok(())
+}
+
+fn raw_send_to(socket_id: u32, data: &[u8], dest: SocketAddr) -> Result<usize, NetError> {
+    let sockets = RAW_SOCKETS.lock();
+    let socket = sockets.get(&socket_id).ok_or(NetError::InvalidFd)?;
+    let protocol = socket.protocol;
+    let family = socket.family;
+    let src = socket.bound_ip.unwrap_or_else(|| match family {
+        AddressFamily::IPV6 => IpAddr::V6(super::ipv6::local_ipv6()),
+        _ => IpAddr::V4(super::local_ip()),
+    });
+    drop(sockets);
+
+    if protocol == Protocol::IP {
+        let version = data.first().map(|b| b >> 4);
+        if version != Some(4) && version != Some(6) {
+            return Err(NetError::InvalidPacket);
+        }
+        send_packet(data)?;
+        return Ok(data.len());
+    }
+
+    let ip_proto = protocol_to_ip_protocol(protocol).ok_or(NetError::ProtocolError)?;
+    match (src, dest.ip) {
+        (IpAddr::V4(src_ip), IpAddr::V4(dst_ip)) => {
+            let mut buf = vec![0u8; 1500];
+            let len = {
+                let packet = Ipv4Packet::new(src_ip, dst_ip, ip_proto, data);
+                packet.serialize(&mut buf)?
+            };
+            send_packet(&buf[..len])?;
+        }
+        (IpAddr::V6(src_ip), IpAddr::V6(dst_ip)) => {
+            let header = Ipv6Header::new(src_ip, dst_ip, ip_proto as u8, data.len() as u16);
+            let packet = Ipv6Packet::new(header, data);
+            let serialized = packet.serialize();
+            send_packet(&serialized)?;
+        }
+        _ => return Err(NetError::InvalidParam),
+    }
+    Ok(data.len())
+}
+
+fn raw_recv_from(
+    socket_id: u32,
+    buf: &mut [u8],
+    flags: u32,
+) -> Result<(usize, SocketAddr), NetError> {
+    let peek = (flags & MSG_PEEK) != 0;
+    let mut sockets = RAW_SOCKETS.lock();
+    let socket = sockets.get_mut(&socket_id).ok_or(NetError::InvalidFd)?;
+    let maybe_entry = if peek {
+        socket.rx_queue.front().cloned()
+    } else {
+        socket.rx_queue.pop_front()
+    };
+    let Some((src, packet)) = maybe_entry else {
+        return Err(NetError::WouldBlock);
+    };
+    let len = packet.len().min(buf.len());
+    buf[..len].copy_from_slice(&packet[..len]);
+    Ok((len, src))
+}
+
+fn raw_close(socket_id: u32) -> bool {
+    RAW_SOCKETS.lock().remove(&socket_id).is_some()
+}
+
+pub fn deliver_raw_ipv4(packet: &[u8], header: &super::ip::Ipv4Header) {
+    let mut sockets = RAW_SOCKETS.lock();
+    for socket in sockets.values_mut() {
+        let protocol_matches = match socket.protocol {
+            Protocol::DEFAULT | Protocol::IP => true,
+            Protocol::ICMP => header.protocol == IpProtocol::ICMP,
+            Protocol::TCP => header.protocol == IpProtocol::TCP,
+            Protocol::UDP => header.protocol == IpProtocol::UDP,
+        };
+        if !protocol_matches {
+            continue;
+        }
+        if let Some(bound_ip) = socket.bound_ip {
+            if bound_ip != IpAddr::V4(header.dst) {
+                continue;
+            }
+        }
+        if let Some(peer) = socket.peer {
+            if peer != IpAddr::V4(header.src) {
+                continue;
+            }
+        }
+        socket
+            .rx_queue
+            .push_back((SocketAddr::new(header.src, Port(0)), packet.to_vec()));
+    }
+}
+
+pub fn deliver_raw_ipv6(packet: &[u8], header: &super::ipv6::Ipv6Header) {
+    let mut sockets = RAW_SOCKETS.lock();
+    for socket in sockets.values_mut() {
+        let protocol_matches = match socket.protocol {
+            Protocol::DEFAULT | Protocol::IP => true,
+            Protocol::ICMP => header.next_header == super::ipv6::Ipv6NextHeader::Icmpv6 as u8,
+            Protocol::TCP => header.next_header == super::ipv6::Ipv6NextHeader::Tcp as u8,
+            Protocol::UDP => header.next_header == super::ipv6::Ipv6NextHeader::Udp as u8,
+        };
+        if !protocol_matches {
+            continue;
+        }
+        if let Some(bound_ip) = socket.bound_ip {
+            if bound_ip != IpAddr::V6(header.dst) {
+                continue;
+            }
+        }
+        if let Some(peer) = socket.peer {
+            if peer != IpAddr::V6(header.src) {
+                continue;
+            }
+        }
+        socket
+            .rx_queue
+            .push_back((SocketAddr::new(header.src, Port(0)), packet.to_vec()));
+    }
+}
+
 impl Socket {
     /// Yeni bir soket oluşturur.
     ///
-    /// `sock_type`'a göre TCP veya UDP katmanında gerçek soket nesnesi oluşturulur.
-    /// RAW soketler henüz desteklenmediğinden NotSupported hatası döner.
+    /// `sock_type`'a göre TCP, UDP veya RAW katmanında gerçek soket nesnesi oluşturulur.
     pub fn new(
         domain: AddressFamily,
         sock_type: SocketType,
         protocol: Protocol,
     ) -> Result<Self, NetError> {
         let id = match sock_type {
-            SocketType::STREAM => tcp::create_socket(),
-            SocketType::DGRAM => udp::create_socket(),
-            SocketType::RAW => return Err(NetError::NotSupported),
+            SocketType::STREAM => tcp::create_socket(domain),
+            SocketType::DGRAM => udp::create_socket(domain),
+            SocketType::RAW => create_raw_socket(protocol, domain),
         };
 
         Ok(Socket {
@@ -168,6 +359,10 @@ pub fn socket(
 /// Bir sunucu uygulaması hangi portu dinleyeceğini `bind()` ile belirtir.
 /// Önce TCP ile denenir; başarısız olursa UDP'ye geçilir.
 pub fn bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
+    if has_raw_socket(socket_id) {
+        return raw_bind(socket_id, addr);
+    }
+
     // Determine socket type from ID (hacky but works)
     if tcp::bind(socket_id, addr).is_ok() {
         return Ok(());
@@ -197,6 +392,9 @@ pub fn accept(socket_id: u32) -> Result<(u32, SocketAddr), NetError> {
 /// TCP üç yönlü el sıkışmasını (SYN → SYN-ACK → ACK) başlatır.
 /// Bağlantı tamamlanana kadar bloklar.
 pub fn connect(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
+    if has_raw_socket(socket_id) {
+        return raw_connect(socket_id, addr);
+    }
     tcp::connect(socket_id, addr)
 }
 
@@ -215,6 +413,18 @@ pub const MSG_NOSIGNAL: u32 = 0x4000; // Don't generate SIGPIPE
 ///
 /// Dönen değer gerçekte gönderilen bayt sayısıdır.
 pub fn send(socket_id: u32, data: &[u8], flags: u32) -> Result<usize, NetError> {
+    if has_raw_socket(socket_id) {
+        let peer = {
+            let sockets = RAW_SOCKETS.lock();
+            sockets
+                .get(&socket_id)
+                .and_then(|sock| sock.peer)
+                .ok_or(NetError::NotConnected)?
+        };
+        let _ = flags;
+        return raw_send_to(socket_id, data, SocketAddr::new(peer, Port(0)));
+    }
+
     let nonblocking = (flags & MSG_DONTWAIT) != 0;
 
     // Check if socket is in nonblocking mode or MSG_DONTWAIT is set
@@ -280,6 +490,9 @@ pub fn sendto(
     flags: u32,
 ) -> Result<usize, NetError> {
     let _ = flags;
+    if has_raw_socket(socket_id) {
+        return raw_send_to(socket_id, data, dest);
+    }
     udp::send_to(socket_id, data, dest)
 }
 
@@ -292,7 +505,9 @@ pub fn recvfrom(
     buf: &mut [u8],
     flags: u32,
 ) -> Result<(usize, SocketAddr), NetError> {
-    let _ = flags;
+    if has_raw_socket(socket_id) {
+        return raw_recv_from(socket_id, buf, flags);
+    }
     udp::recv_from(socket_id, buf)
 }
 
@@ -301,6 +516,10 @@ pub fn recvfrom(
 /// Hem TCP hem UDP için kapatma denenir; hatalar yok sayılır.
 /// TCP'de FIN paketi gönderilir ve bağlantı sonlandırılır.
 pub fn close(socket_id: u32) -> Result<(), NetError> {
+    if raw_close(socket_id) {
+        SOCKET_OPTIONS.lock().remove(&socket_id);
+        return Ok(());
+    }
     tcp::close(socket_id).ok();
     udp::close(socket_id);
     Ok(())
@@ -434,22 +653,39 @@ pub fn shutdown(socket_id: u32, how: i32) -> Result<(), NetError> {
 ///
 /// TCP/UDP katmanından yerel adresi sorgular.
 pub fn getsockname(socket_id: u32) -> Result<SocketAddr, NetError> {
+    if has_raw_socket(socket_id) {
+        let sockets = RAW_SOCKETS.lock();
+        let socket = sockets.get(&socket_id).ok_or(NetError::InvalidFd)?;
+        let default_ip = match socket.family {
+            AddressFamily::IPV6 => IpAddr::V6(ipv6::Ipv6Addr::UNSPECIFIED),
+            _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        return Ok(SocketAddr::new(
+            socket.bound_ip.unwrap_or(default_ip),
+            Port(0),
+        ));
+    }
+
     // TCP bağlantılarında yerel adres
     if let Ok(addr) = tcp::get_connection_local_addr(socket_id) {
         return Ok(addr);
     }
     // Bind edilmiş UDP soketleri için
     // Varsayılan: 0.0.0.0:0
-    Ok(SocketAddr {
-        ip: Ipv4Addr([0, 0, 0, 0]),
-        port: Port(0),
-    })
+    Ok(SocketAddr::default())
 }
 
 /// `getpeername(2)` — Bağlı olduğumuz uzak tarafın adresini döndürür.
 ///
 /// Yalnızca bağlı TCP soketleri için geçerlidir.
 pub fn getpeername(socket_id: u32) -> Result<SocketAddr, NetError> {
+    if has_raw_socket(socket_id) {
+        let sockets = RAW_SOCKETS.lock();
+        let socket = sockets.get(&socket_id).ok_or(NetError::InvalidFd)?;
+        let peer = socket.peer.ok_or(NetError::NotConnected)?;
+        return Ok(SocketAddr::new(peer, Port(0)));
+    }
+
     if let Ok(addr) = tcp::get_connection_remote_addr(socket_id) {
         return Ok(addr);
     }
@@ -848,6 +1084,10 @@ pub fn epoll_close(epfd: i32) -> Result<(), NetError> {
 /// 0 bayt (EOF) okuması ve bağlantıyı kapatması gerekir.
 /// UDP için: alım tamponu boş değilse okunabilir.
 pub fn can_read(socket_id: u32) -> bool {
+    if let Some(raw) = RAW_SOCKETS.lock().get(&socket_id) {
+        return !raw.rx_queue.is_empty();
+    }
+
     // Try TCP first, then UDP
     if let Some(conn) = tcp::get_connection(socket_id) {
         return !conn.rx_buffer.is_empty()
@@ -868,6 +1108,10 @@ pub fn can_read(socket_id: u32) -> bool {
 /// SYN_SENT, CLOSE_WAIT gibi ara durumlarda yazma bloklanır.
 /// UDP için: bağlantısız olduğundan her zaman yazılabilirdir.
 pub fn can_write(socket_id: u32) -> bool {
+    if RAW_SOCKETS.lock().contains_key(&socket_id) {
+        return true;
+    }
+
     if let Some(conn) = tcp::get_connection(socket_id) {
         return conn.state == tcp::TcpState::Established;
     }
@@ -934,6 +1178,10 @@ pub fn format_ipv4(ip: Ipv4Addr) -> alloc::string::String {
     alloc::format!("{}.{}.{}.{}", ip.0[0], ip.0[1], ip.0[2], ip.0[3])
 }
 
+pub fn format_ipaddr(ip: IpAddr) -> alloc::string::String {
+    alloc::format!("{}", ip)
+}
+
 /// Port numarası dizesini `Port` sarmalayıcı türüne çevirir.
 ///
 /// Geçerli port aralığı: 0–65535 (u16). Bunun dışındaki değerler `None` döner.
@@ -941,4 +1189,93 @@ pub fn format_ipv4(ip: Ipv4Addr) -> alloc::string::String {
 pub fn parse_port(s: &str) -> Option<Port> {
     let port: u16 = s.parse().ok()?;
     Some(Port(port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use spin::Mutex;
+
+    #[test]
+    fn raw_socket_send_wraps_payload_and_recv_delivers_ipv4_packet() {
+        if super::super::default_interface().is_none() {
+            super::super::register_interface(Arc::new(Mutex::new(
+                super::super::netdev::LoopbackInterface::new(),
+            )));
+        }
+        let sock = socket(AddressFamily::IPV4, SocketType::RAW, Protocol::ICMP).unwrap();
+        bind(sock, SocketAddr::new(Ipv4Addr::new(10, 0, 2, 15), Port(0))).unwrap();
+        connect(sock, SocketAddr::new(Ipv4Addr::new(1, 1, 1, 1), Port(0))).unwrap();
+
+        let payload = [8u8, 0, 0, 0, 0, 1, 0, 1];
+        let sent = send(sock, &payload, 0).unwrap();
+        assert_eq!(sent, payload.len());
+
+        let mut frame = vec![0u8; 128];
+        let packet = Ipv4Packet::new(
+            Ipv4Addr::new(1, 1, 1, 1),
+            Ipv4Addr::new(10, 0, 2, 15),
+            IpProtocol::ICMP,
+            &payload,
+        );
+        let len = packet.serialize(&mut frame).unwrap();
+        deliver_raw_ipv4(&frame[..len], &packet.header);
+
+        let mut recv_buf = [0u8; 128];
+        let (recv_len, src) = recvfrom(sock, &mut recv_buf, 0).unwrap();
+        assert_eq!(src.ip, IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+        let recv_packet = Ipv4Packet::parse(&recv_buf[..recv_len]).unwrap();
+        assert_eq!(recv_packet.header.protocol, IpProtocol::ICMP);
+        assert_eq!(recv_packet.payload, payload);
+    }
+
+    #[test]
+    fn raw_socket_recv_delivers_ipv6_packet() {
+        let sock = socket(AddressFamily::IPV6, SocketType::RAW, Protocol::UDP).unwrap();
+        bind(
+            sock,
+            SocketAddr::new(
+                super::super::ipv6::Ipv6Addr::from_segments([0xfe80, 0, 0, 0, 0, 0, 0, 1]),
+                Port(0),
+            ),
+        )
+        .unwrap();
+        connect(
+            sock,
+            SocketAddr::new(
+                super::super::ipv6::Ipv6Addr::from_segments([0x2001, 0xdb8, 0, 0, 0, 0, 0, 2]),
+                Port(0),
+            ),
+        )
+        .unwrap();
+
+        let payload = [0xdeu8, 0xad, 0xbe, 0xef];
+        let packet = super::ipv6::Ipv6Packet::new(
+            super::ipv6::Ipv6Header::new(
+                super::super::ipv6::Ipv6Addr::from_segments([0x2001, 0xdb8, 0, 0, 0, 0, 0, 2]),
+                super::super::ipv6::Ipv6Addr::from_segments([0xfe80, 0, 0, 0, 0, 0, 0, 1]),
+                super::ipv6::Ipv6NextHeader::Udp as u8,
+                payload.len() as u16,
+            ),
+            &payload,
+        );
+        let serialized = packet.serialize();
+        deliver_raw_ipv6(&serialized, &packet.header);
+
+        let mut recv_buf = [0u8; 128];
+        let (recv_len, src) = recvfrom(sock, &mut recv_buf, 0).unwrap();
+        assert_eq!(
+            src.ip,
+            IpAddr::V6(super::super::ipv6::Ipv6Addr::from_segments([
+                0x2001, 0xdb8, 0, 0, 0, 0, 0, 2,
+            ]))
+        );
+        let recv_packet = super::ipv6::Ipv6Packet::parse(&recv_buf[..recv_len]).unwrap();
+        assert_eq!(
+            recv_packet.header.next_header,
+            super::ipv6::Ipv6NextHeader::Udp as u8
+        );
+        assert_eq!(recv_packet.payload, payload);
+    }
 }

@@ -1,4 +1,6 @@
-use crate::gui::protocol::{FrameTicket, InvalidationReason, InvalidationTarget, SceneInvalidation};
+use crate::gui::protocol::{
+    FrameTicket, InvalidationReason, InvalidationTarget, SceneInvalidation,
+};
 use alloc::vec::Vec;
 
 const TARGET_COUNT: usize = 14;
@@ -60,6 +62,7 @@ impl ShellInvalidationState {
             InvalidationTarget::Switcher,
             InvalidationTarget::LockScreen,
             InvalidationTarget::WorkspaceViewport,
+            InvalidationTarget::Wallpaper,
         ] {
             state.mark(target, InvalidationReason::StateChanged);
         }
@@ -114,7 +117,10 @@ mod tests {
         let mut state = ShellInvalidationState::new();
         state.mark(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
         state.mark(InvalidationTarget::TopBar, InvalidationReason::FocusChanged);
-        state.mark(InvalidationTarget::QuickSettings, InvalidationReason::AnimationAdvanced);
+        state.mark(
+            InvalidationTarget::QuickSettings,
+            InvalidationReason::AnimationAdvanced,
+        );
 
         let frame = state.take_frame_plan().expect("expected frame plan");
         assert_eq!(frame.frame_ticket, 1);

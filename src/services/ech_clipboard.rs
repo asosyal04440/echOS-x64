@@ -8,9 +8,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 use crate::gui::protocol::{AppId, ClipboardPayload, DesktopPermission, PermissionState};
-use crate::services::ech_shell::{get_shell_service, ShellCommand, ShellResponse};
+use crate::ipc::request_shell_sync;
+use crate::services::display_atomic::MailboxRing;
+use crate::services::ech_shell::{ShellCommand, ShellResponse};
 
 const MAX_HISTORY_ITEMS: usize = 16;
+const CLIPBOARD_COMMAND_QUEUE_CAPACITY: usize = 128;
+const CLIPBOARD_RESPONSE_QUEUE_CAPACITY: usize = 128;
 
 #[derive(Clone, Debug)]
 pub enum ClipboardCommand {
@@ -42,8 +46,8 @@ pub struct EchClipboard {
     running: AtomicBool,
     current: Mutex<ClipboardPayload>,
     history: Mutex<VecDeque<ClipboardPayload>>,
-    command_queue: Mutex<Vec<ClipboardCommand>>,
-    response_queue: Mutex<Vec<ClipboardResponse>>,
+    command_queue: MailboxRing<ClipboardCommand>,
+    response_queue: MailboxRing<ClipboardResponse>,
 }
 
 impl EchClipboard {
@@ -52,8 +56,8 @@ impl EchClipboard {
             running: AtomicBool::new(false),
             current: Mutex::new(ClipboardPayload::Empty),
             history: Mutex::new(VecDeque::new()),
-            command_queue: Mutex::new(Vec::new()),
-            response_queue: Mutex::new(Vec::new()),
+            command_queue: MailboxRing::with_capacity_pow2(CLIPBOARD_COMMAND_QUEUE_CAPACITY),
+            response_queue: MailboxRing::with_capacity_pow2(CLIPBOARD_RESPONSE_QUEUE_CAPACITY),
         }
     }
 
@@ -62,12 +66,12 @@ impl EchClipboard {
         crate::serial_println!("[ECHCLIPBOARD] service started");
     }
 
-    pub fn send_command(&self, command: ClipboardCommand) {
-        self.command_queue.lock().push(command);
+    pub fn send_command(&self, command: ClipboardCommand) -> bool {
+        self.command_queue.try_push(command).is_ok()
     }
 
     pub fn receive_response(&self) -> Option<ClipboardResponse> {
-        self.response_queue.lock().pop()
+        self.response_queue.pop()
     }
 
     pub fn process_command(&self, command: ClipboardCommand) -> ClipboardResponse {
@@ -128,14 +132,9 @@ impl EchClipboard {
 
     pub fn run_service(&self) {
         while self.running.load(Ordering::SeqCst) {
-            let commands = {
-                let mut queue = self.command_queue.lock();
-                core::mem::take(&mut *queue)
-            };
-
-            for command in commands {
+            while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
-                self.response_queue.lock().push(response);
+                let _ = self.response_queue.push_overwrite(response);
             }
 
             for _ in 0..1000 {
@@ -168,7 +167,7 @@ pub fn service_task() -> ! {
 
 fn permission_granted(app_id: AppId, permission: DesktopPermission) -> bool {
     matches!(
-        get_shell_service().process_command(ShellCommand::GetPermission { app_id, permission }),
-        ShellResponse::Permission(PermissionState::Granted)
+        request_shell_sync(app_id, ShellCommand::GetPermission { app_id, permission }),
+        Some(ShellResponse::Permission(PermissionState::Granted))
     )
 }

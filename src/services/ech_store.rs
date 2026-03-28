@@ -25,6 +25,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 use lazy_static::lazy_static;
+use crate::services::display_atomic::MailboxRing;
+
+const STORE_COMMAND_QUEUE_CAPACITY: usize = 128;
+const STORE_RESPONSE_QUEUE_CAPACITY: usize = 128;
 
 /// Dosya sistemi girişi
 #[derive(Clone, Debug)]
@@ -43,6 +47,8 @@ pub enum StoreCommand {
     ReadFile { path: String },
     /// Dosyaya yaz
     WriteFile { path: String, data: Vec<u8> },
+    /// Dosya veya dizin yeniden adlandir
+    RenamePath { from: String, to: String },
     /// Dosya sil
     DeleteFile { path: String },
     /// Dizin oluştur
@@ -85,9 +91,9 @@ pub struct EchStore {
     /// Dosya sistemi önbelleği
     file_cache: Mutex<BTreeMap<String, Vec<u8>>>,
     /// Komut kuyruğu
-    command_queue: Mutex<Vec<StoreCommand>>,
+    command_queue: MailboxRing<StoreCommand>,
     /// Yanıt kuyruğu
-    response_queue: Mutex<Vec<StoreResponse>>,
+    response_queue: MailboxRing<StoreResponse>,
     /// Host-side compatibility hook for legacy direct FAT32 callers
     fat32_vfs: Option<Arc<Mutex<()>>>,
 }
@@ -98,8 +104,8 @@ impl EchStore {
         Self {
             running: AtomicBool::new(false),
             file_cache: Mutex::new(BTreeMap::new()),
-            command_queue: Mutex::new(Vec::new()),
-            response_queue: Mutex::new(Vec::new()),
+            command_queue: MailboxRing::with_capacity_pow2(STORE_COMMAND_QUEUE_CAPACITY),
+            response_queue: MailboxRing::with_capacity_pow2(STORE_RESPONSE_QUEUE_CAPACITY),
             fat32_vfs: None,
         }
     }
@@ -122,27 +128,22 @@ impl EchStore {
     }
 
     /// Komut gönder
-    pub fn send_command(&self, command: StoreCommand) {
-        self.command_queue.lock().push(command);
+    pub fn send_command(&self, command: StoreCommand) -> bool {
+        self.command_queue.try_push(command).is_ok()
     }
 
     /// Yanıt al (non-blocking)
     pub fn receive_response(&self) -> Option<StoreResponse> {
-        self.response_queue.lock().pop()
+        self.response_queue.pop()
     }
 
     /// Ana servis döngüsü (kernel task olarak çalıştırılır)
     pub fn run_service(&self) {
         while self.running.load(Ordering::SeqCst) {
             // Komutları işle
-            let commands = {
-                let mut queue = self.command_queue.lock();
-                core::mem::take(&mut *queue)
-            };
-
-            for command in commands {
+            while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
-                self.response_queue.lock().push(response);
+                let _ = self.response_queue.push_overwrite(response);
             }
 
             // Kısa bekleme
@@ -157,6 +158,7 @@ impl EchStore {
         match command {
             StoreCommand::ReadFile { path } => self.read_file(&path),
             StoreCommand::WriteFile { path, data } => self.write_file(&path, data),
+            StoreCommand::RenamePath { from, to } => self.rename_path(&from, &to),
             StoreCommand::DeleteFile { path } => self.delete_file(&path),
             StoreCommand::CreateDirectory { path } => self.create_directory(&path),
             StoreCommand::DeleteDirectory { path } => self.delete_directory(&path),
@@ -236,6 +238,38 @@ impl EchStore {
         match crate::fs::f2fs::unlink_f2fs(&parent, &name) {
             Ok(()) => {
                 self.file_cache.lock().remove(&normalized);
+                StoreResponse::Success
+            }
+            Err(err) => StoreResponse::Error(fs_error_to_string(err)),
+        }
+    }
+
+    /// Dosya veya dizini ayni ebeveyn altinda yeniden adlandir
+    fn rename_path(&self, from: &str, to: &str) -> StoreResponse {
+        crate::serial_println!("[ECHSTORE] Renaming path: {} -> {}", from, to);
+        if is_virtual_path(from) || is_virtual_path(to) {
+            return StoreResponse::Error(String::from("virtual filesystem is read-only"));
+        }
+
+        let from_normalized = normalize_path(from);
+        let to_normalized = normalize_path(to);
+        let (from_parent, from_name) = match split_parent_name(&from_normalized) {
+            Ok(parts) => parts,
+            Err(err) => return StoreResponse::Error(err),
+        };
+        let (to_parent, to_name) = match split_parent_name(&to_normalized) {
+            Ok(parts) => parts,
+            Err(err) => return StoreResponse::Error(err),
+        };
+        if from_parent != to_parent {
+            return StoreResponse::Error(String::from(
+                "cross-directory rename is not supported by ech_store",
+            ));
+        }
+
+        match crate::fs::f2fs::rename_f2fs(&from_parent, &from_name, &to_name) {
+            Ok(()) => {
+                self.file_cache.lock().remove(&from_normalized);
                 StoreResponse::Success
             }
             Err(err) => StoreResponse::Error(fs_error_to_string(err)),

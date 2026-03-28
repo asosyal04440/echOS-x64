@@ -143,7 +143,9 @@ fn tile_compact(regions: &[Rect], screen: Rect) -> Vec<Rect> {
             let mut extended = false;
             for slot in row_runs.iter_mut() {
                 if let Some(existing) = slot.as_mut() {
-                    if existing.x == rect.x && existing.width == rect.width && existing.bottom() == rect.y
+                    if existing.x == rect.x
+                        && existing.width == rect.width
+                        && existing.bottom() == rect.y
                     {
                         existing.height = existing.height.saturating_add(rect.height);
                         extended = true;
@@ -204,7 +206,9 @@ fn partial_redraw_cost(regions: &[Rect]) -> u64 {
             tiles_x * tiles_y
         })
         .sum::<u64>();
-    damaged_pixels + damaged_tiles * TILE_COST_WEIGHT as u64 + regions.len() as u64 * BATCH_COST_WEIGHT as u64
+    damaged_pixels
+        + damaged_tiles * TILE_COST_WEIGHT as u64
+        + regions.len() as u64 * BATCH_COST_WEIGHT as u64
 }
 
 fn full_redraw_cost(screen: Rect) -> u64 {

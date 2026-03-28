@@ -185,7 +185,8 @@ impl<'a> Widget for Button<'a> {
                 },
             },
             RenderObject {
-                object_id: 0x1000_0000_0000_0000u64 ^ (((self.rect.x as u64) << 32) ^ self.rect.y as u64),
+                object_id: 0x1000_0000_0000_0000u64
+                    ^ (((self.rect.x as u64) << 32) ^ self.rect.y as u64),
                 bounds: crate::gui::protocol::Rect::new(self.rect.x, self.rect.y, bounds.width, 1),
                 clip: None,
                 z_index: 1,
@@ -197,7 +198,8 @@ impl<'a> Widget for Button<'a> {
                 },
             },
             RenderObject {
-                object_id: 0x2000_0000_0000_0000u64 ^ (((self.rect.x as u64) << 32) ^ self.rect.y as u64),
+                object_id: 0x2000_0000_0000_0000u64
+                    ^ (((self.rect.x as u64) << 32) ^ self.rect.y as u64),
                 bounds: text_bounds,
                 clip: None,
                 z_index: 2,

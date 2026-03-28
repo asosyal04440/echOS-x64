@@ -1,34 +1,34 @@
 //! # Font Rasterleyici (Rasterizer)
 //!
-//! Glyph (harf şekli) dış hat vektörlerini piksel bitmap'lerine dönüştürür.
+//! Glyph (harf ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ekli) dÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ hat vektÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶rlerini piksel bitmap'lerine dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶nÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸tÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼rÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼r.
 //!
 //! ## Rasterizasyon Nedir?
-//! Vektör tabanlı font verileri (bezier eğrileri, doğru parçaları) matematiksel
-//! formüllere dayanır; ekrana çizmek için bu formülleri piksel ızgarasına
-//! dönüştürmek gerekir. Bu işleme "rasterizasyon" denir.
+//! VektÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶r tabanlÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± font verileri (bezier eÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸rileri, doÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸ru parÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§alarÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±) matematiksel
+//! formÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼llere dayanÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±r; ekrana ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§izmek iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in bu formÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼lleri piksel ÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±zgarasÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±na
+//! dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶nÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸tÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼rmek gerekir. Bu iÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸leme "rasterizasyon" denir.
 //!
 //! ## Temel Kavramlar
-//! - **Glyph**: Tek bir karakterin görsel temsili (örn. 'A' harfinin şekli)
-//! - **Contour**: Bir glyphin kapalı yolunu oluşturan nokta dizisi
-//! - **Scanline algoritması**: Her yatay tarama satırı için yol kesişimlerini
+//! - **Glyph**: Tek bir karakterin gÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶rsel temsili (ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶rn. 'A' harfinin ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ekli)
+//! - **Contour**: Bir glyphin kapalÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± yolunu oluÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸turan nokta dizisi
+//! - **Scanline algoritmasÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±**: Her yatay tarama satÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in yol kesiÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸imlerini
 //!   bulur ve doldurulacak pikselleri belirler
-//! - **Winding number**: Bir noktanın contour içinde mi dışında mı olduğunu
-//!   belirleyen sayı; imzalı kesişim sayısıyla hesaplanır
-//! - **Anti-aliasing**: Kenar piksellerine kısmi saydamlık değeri atanarak
-//!   kademeli geçiş oluşturulması ve pürüzlü görünümün azaltılması
-//! - **Advance width**: Bir karakterden sonra bir sonrakini yerleştirmek için
+//! - **Winding number**: Bir noktanÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±n contour iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§inde mi dÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±nda mÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± olduÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸unu
+//!   belirleyen sayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±; imzalÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± kesiÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸im sayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±sÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±yla hesaplanÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±r
+//! - **Anti-aliasing**: Kenar piksellerine kÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±smi saydamlÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±k deÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸eri atanarak
+//!   kademeli geÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§iÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ oluÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸turulmasÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± ve pÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼rÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼zlÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ gÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶rÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼nÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼mÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼n azaltÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±lmasÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±
+//! - **Advance width**: Bir karakterden sonra bir sonrakini yerleÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸tirmek iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in
 //!   ilerlenecek yatay piksel mesafesi
 
 use super::truetype::{Glyph, GlyphContour, GlyphPoint, TrueTypeFont};
 use alloc::vec;
 use alloc::vec::Vec;
-use libm::powf;
+use libm::{powf, roundf};
 
-/// no_std ortamı için özel tavan (ceiling) fonksiyonu.
-/// Standart kütüphanede `f32::ceil()` bulunur; ancak çekirdek modunda
-/// kayan nokta runtime desteği olmadığından cast hilesine başvuruyoruz:
-/// tamsayıya dönüşüm otomatik olarak `truncate` (sıfıra yuvarlama)
-/// yapar; pozitif sayılar için truncate == floor olduğundan bir ekleme
+/// no_std ortamÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶zel tavan (ceiling) fonksiyonu.
+/// Standart kÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼tÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼phanede `f32::ceil()` bulunur; ancak ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ekirdek modunda
+/// kayan nokta runtime desteÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸i olmadÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ndan cast hilesine baÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸vuruyoruz:
+/// tamsayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ya dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶nÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼m otomatik olarak `truncate` (sÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±fÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ra yuvarlama)
+/// yapar; pozitif sayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±lar iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in truncate == floor olduÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸undan bir ekleme
 /// ile tavan elde edilir.
 fn ceil_f32(x: f32) -> f32 {
     let i = x as i32 as f32;
@@ -39,10 +39,10 @@ fn ceil_f32(x: f32) -> f32 {
     }
 }
 
-/// no_std ortamı için özel taban (floor) fonksiyonu.
-/// `ceil_f32` ile aynı mantık; negatif sayılarda truncate değeri
-/// matematiksel tabandan büyük olduğundan bunu düzeltmek için
-/// bir çıkarma yapılır.
+/// no_std ortamÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶zel taban (floor) fonksiyonu.
+/// `ceil_f32` ile aynÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± mantÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±k; negatif sayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±larda truncate deÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸eri
+/// matematiksel tabandan bÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼yÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼k olduÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸undan bunu dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼zeltmek iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in
+/// bir ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±karma yapÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±lÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±r.
 fn floor_f32(x: f32) -> f32 {
     let i = x as i32 as f32;
     if x < i {
@@ -52,11 +52,11 @@ fn floor_f32(x: f32) -> f32 {
     }
 }
 
-/// Rasterize edilmiş (pikselleştirilmiş) glyph bitmap'i.
+/// Rasterize edilmiÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ (pikselleÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸tirilmiÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸) glyph bitmap'i.
 ///
-/// Vektörden piksel ızgarasına dönüştürülmüş harf verisi.
-/// `bitmap` alanı, her piksel için 0–255 arası alfa (saydamlık)
-/// değerleri içerir: 0 = tam saydam, 255 = tam opak.
+/// VektÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶rden piksel ÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±zgarasÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±na dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶nÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸tÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼rÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼lmÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ harf verisi.
+/// `bitmap` alanÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±, her piksel iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in 0ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ255 arasÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± alfa (saydamlÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±k)
+/// deÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸erleri iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§erir: 0 = tam saydam, 255 = tam opak.
 #[derive(Clone, Debug)]
 pub struct RasterGlyph {
     pub width: usize,
@@ -64,13 +64,13 @@ pub struct RasterGlyph {
     pub offset_x: i32,
     pub offset_y: i32,
     pub advance: f32,
-    pub bitmap: Vec<u8>, // Her piksel için alfa değeri (0-255)
+    pub bitmap: Vec<u8>, // Her piksel iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in alfa deÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸eri (0-255)
 }
 
 /// Rasterizasyon metrik verileri.
 ///
-/// Bitmap'in framebuffer üzerindeki konumunu belirlemek için kullanılır:
-/// `offset_x`/`offset_y` glyphin sol altından ölçülen imzero-point ofsetidir.
+/// Bitmap'in framebuffer ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼zerindeki konumunu belirlemek iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in kullanÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±lÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±r:
+/// `offset_x`/`offset_y` glyphin sol altÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ndan ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶lÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼len imzero-point ofsetidir.
 #[derive(Clone, Copy, Debug)]
 pub struct RasterMetrics {
     pub width: usize,
@@ -79,17 +79,17 @@ pub struct RasterMetrics {
     pub offset_y: i32,
 }
 
-/// Glyph rasterleyici ana yapısı.
+/// Glyph rasterleyici ana yapÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±sÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±.
 ///
-/// Dahili tamponları yeniden kullanarak her rasterizasyon için
-/// heap ayırma maliyetini düşürür. `scanline` tamponu bir satırdaki
-/// her sütun için kaplama (coverage) değerini tutar;
-/// `winding` tamponu ise o noktanın contour içinde olup olmadığını
-/// belirlemek için imzalı kesişim sayısını depolar.
+/// Dahili tamponlarÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± yeniden kullanarak her rasterizasyon iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in
+/// heap ayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rma maliyetini dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼rÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼r. `scanline` tamponu bir satÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rdaki
+/// her sÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼tun iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in kaplama (coverage) deÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸erini tutar;
+/// `winding` tamponu ise o noktanÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±n contour iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§inde olup olmadÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±nÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±
+/// belirlemek iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in imzalÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± kesiÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸im sayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±sÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±nÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± depolar.
 pub struct Rasterizer {
-    // Tarama satırı işleme için dahili tampon; her çağrıda temizlenir
+    // Tarama satÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± iÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸leme iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in dahili tampon; her ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§aÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸rÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±da temizlenir
     scanline: Vec<f32>,
-    // Winding sayı tamponu; pozitif = sola döndürme, negatif = sağa döndürme
+    // Winding sayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± tamponu; pozitif = sola dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶ndÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼rme, negatif = saÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸a dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶ndÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼rme
     winding: Vec<i32>,
     subpixel_aa: bool,
     gamma: f32,
@@ -105,66 +105,66 @@ impl Rasterizer {
         }
     }
 
-    /// Belirli bir boyutta glyph'i rasterize eder (vektörden piksele dönüştürür).
-    ///
-    /// `size` noktasal font büyüklüğüne karşılık gelir (örn. 16.0 = 16pt).
-    /// `scale = size / units_per_em` formülüyle font koordinat birimlerinden
-    /// piksel koordinatlarına dönüşüm katsayısı hesaplanır.
-    /// Sıfır boyutlu glyphler (boşluk karakteri gibi) için boş bitmap döndürülür.
     pub fn rasterize(
         &mut self,
         font: &TrueTypeFont,
         glyph: &Glyph,
         size: f32,
     ) -> Option<RasterGlyph> {
-        let scale = size / font.units_per_em as f32;
-
-        // Bitmap boyutunu hesapla: glyphin sınırlayıcı kutusunu ölçeklendirip
-        // tavan alma yoluyla tam piksel boyutuna yuvarlıyoruz
-        let bounds = &glyph.bounds;
-        let width = ceil_f32((bounds.x_max - bounds.x_min) as f32 * scale) as usize;
-        let height = ceil_f32((bounds.y_max - bounds.y_min) as f32 * scale) as usize;
-
-        if width == 0 || height == 0 {
+        let scale = if font.units_per_em == 0 {
+            1.0
+        } else {
+            size / font.units_per_em as f32
+        };
+        let metrics = Self::compute_metrics(glyph, scale);
+        if metrics.width == 0 || metrics.height == 0 {
             return Some(RasterGlyph {
                 width: 0,
                 height: 0,
-                offset_x: 0,
-                offset_y: 0,
+                offset_x: metrics.offset_x,
+                offset_y: metrics.offset_y,
                 advance: glyph.advance_width as f32 * scale,
                 bitmap: Vec::new(),
             });
         }
 
-        let offset_x = floor_f32(glyph.left_side_bearing as f32 * scale) as i32;
-        let offset_y = floor_f32(bounds.y_max as f32 * scale) as i32;
-
-        let mut bitmap = vec![0u8; width * height];
-
-        // Gerçek outline rendering yerine şimdilik sade dikdörtgen çizimi;
-        // ileride bezier eğrileriyle tam vektör rasterizasyonu yapılacak
-        self.render_simple(&mut bitmap, width, height, glyph, scale);
-
+        let mut bitmap = vec![0u8; metrics.width * metrics.height];
+        if glyph.contours.is_empty() {
+            self.render_simple(&mut bitmap, metrics.width, metrics.height, glyph, scale);
+        } else {
+            self.render_outline(&mut bitmap, metrics.width, metrics.height, glyph, scale);
+        }
         if self.subpixel_aa {
-            self.apply_subpixel_gamma(&mut bitmap, width, height);
+            self.apply_subpixel_gamma(&mut bitmap, metrics.width, metrics.height);
         }
 
         Some(RasterGlyph {
-            width,
-            height,
-            offset_x,
-            offset_y,
+            width: metrics.width,
+            height: metrics.height,
+            offset_x: metrics.offset_x,
+            offset_y: metrics.offset_y,
             advance: glyph.advance_width as f32 * scale,
             bitmap,
         })
     }
 
-    /// Sade dikdörtgen dolgu ile basit rasterizasyon (tam outline rendering için yer tutucu).
+    fn compute_metrics(glyph: &Glyph, scale: f32) -> RasterMetrics {
+        let x_min = floor_f32(glyph.bounds.x_min as f32 * scale) as i32;
+        let y_min = floor_f32(glyph.bounds.y_min as f32 * scale) as i32;
+        let x_max = ceil_f32(glyph.bounds.x_max as f32 * scale) as i32;
+        let y_max = ceil_f32(glyph.bounds.y_max as f32 * scale) as i32;
+        RasterMetrics {
+            width: x_max.saturating_sub(x_min).max(0) as usize,
+            height: y_max.saturating_sub(y_min).max(0) as usize,
+            offset_x: x_min,
+            offset_y: y_max,
+        }
+    }
+
+    /// Bitmap fallback for contourless glyphs.
     ///
-    /// Gerçek bir FontRenderer bezier eğrilerini örnekleyerek her piksel için
-    /// kaplama değeri hesaplar. Bu basit sürüm tüm glyphi dolu bir kutu olarak
-    /// çizer; kenar piksellerine 128 (yarı saydam) değeri atanarak ham bir
-    /// anti-aliasing taklidi yapılır.
+    /// Real outline glyphs now flow through `render_outline()`; this path stays
+    /// limited to contour-free glyphs whose bounds still need a visible alpha mask.
     fn render_simple(
         &mut self,
         bitmap: &mut [u8],
@@ -175,28 +175,28 @@ impl Rasterizer {
     ) {
         let bounds = &glyph.bounds;
 
-        // Sınırlayıcı kutu değişkenleri; ileride bezier örnekleme için kullanılacak
+        // SÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±nÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rlayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±cÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± kutu deÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸iÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸kenleri; ileride bezier ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶rnekleme iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in kullanÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±lacak
         let x_start = 0usize;
         let x_end = width;
         let y_start = 0usize;
         let y_end = height;
 
-        // Tüm pikselleri tam opak (255) ile doldur
+        // TÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼m pikselleri tam opak (255) ile doldur
         for y in y_start..y_end {
             for x in x_start..x_end {
                 let idx = y * width + x;
                 if idx < bitmap.len() {
-                    // Gelecekte buraya anti-aliasing kaplama değeri gelecek
+                    // Contoursuz glyph fallback pathi tam opak ic bolge ile yayinlanir.
                     bitmap[idx] = 255;
                 }
             }
         }
 
-        // Kenar pikselleri için basit anti-aliasing: 128 = %50 saydamlık
-        // Gerçek AA, piksel merkezinin eğriye olan mesafesine göre hesaplanır
+        // Fallback yolunda kenarlar yari opak yazilir; outline glyphler bu yolu kullanmaz.
+        // Outline coverage ayrik supersampling ile ayrica hesaplanir.
         if width > 2 && height > 2 {
             for x in 0..width {
-                // Üst kenar
+                // ÃƒÆ’Ã†â€™Ãƒâ€¦Ã¢â‚¬Å“st kenar
                 bitmap[x] = 128;
                 // Alt kenar
                 bitmap[(height - 1) * width + x] = 128;
@@ -204,20 +204,20 @@ impl Rasterizer {
             for y in 0..height {
                 // Sol kenar
                 bitmap[y * width] = 128;
-                // Sağ kenar
+                // SaÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸ kenar
                 bitmap[y * width + width - 1] = 128;
             }
         }
     }
 
-    /// Scanline algoritmasıyla glyph dış hatlarını rasterize eder.
+    /// Scanline algoritmasÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±yla glyph dÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ hatlarÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±nÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± rasterize eder.
     ///
-    /// Klasik dolu-çokgen rasterizasyon yöntemi:
-    /// 1. Her yatay tarama satırı (scanline) için tüm contour kenarlarını dolaş.
-    /// 2. Kenarın o satırla kesişip kesişmediğini kontrol et.
-    /// 3. Kesişim noktasındaki winding sayısını güncelle.
-    /// 4. Winding ≠ 0 olan sütunlar çizgi içindedir → pikseli doldur.
-    /// Bu yöntem TrueType'ın "non-zero winding" doldurma kuralına uygundur.
+    /// Klasik dolu-ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§okgen rasterizasyon yÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶ntemi:
+    /// 1. Her yatay tarama satÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± (scanline) iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§in tÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼m contour kenarlarÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±nÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± dolaÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸.
+    /// 2. KenarÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±n o satÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rla kesiÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ip kesiÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸mediÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸ini kontrol et.
+    /// 3. KesiÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸im noktasÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ndaki winding sayÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±sÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±nÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â± gÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ncelle.
+    /// 4. Winding ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â  0 olan sÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼tunlar ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§izgi iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§indedir ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€Â¢ pikseli doldur.
+    /// Bu yÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶ntem TrueType'ÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±n "non-zero winding" doldurma kuralÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±na uygundur.
     fn apply_subpixel_gamma(&self, bitmap: &mut [u8], width: usize, height: usize) {
         if width < 3 || height == 0 {
             return;
@@ -239,89 +239,183 @@ impl Rasterizer {
         bitmap.copy_from_slice(&filtered);
     }
 
-    #[allow(dead_code)]
     fn render_outline(
         &mut self,
         bitmap: &mut [u8],
         width: usize,
         height: usize,
-        contours: &[GlyphContour],
+        glyph: &Glyph,
         scale: f32,
     ) {
-        // Tarama satırı tamponu büyüklüğünü güvence altına al
         if self.scanline.len() < width {
             self.scanline.resize(width, 0.0);
+        }
+        if self.winding.len() < width {
             self.winding.resize(width, 0);
         }
 
-        // Her tarama satırını işle
+        let contours: Vec<Vec<(f32, f32)>> = glyph
+            .contours
+            .iter()
+            .map(|contour| self.flatten_contour(&contour.points, scale))
+            .filter(|contour| contour.len() >= 3)
+            .collect();
+
+        if contours.is_empty() {
+            self.render_simple(bitmap, width, height, glyph, scale);
+            return;
+        }
+
+        let sample_offsets = [0.125f32, 0.375f32, 0.625f32, 0.875f32];
+        let bounds = &glyph.bounds;
+
         for y in 0..height {
-            // Tamponu temizle: bir önceki satırdan kalan veriler silinir
-            for i in 0..width {
-                self.scanline[i] = 0.0;
-                self.winding[i] = 0;
-            }
-
-            // Font koordinat sistemindeki y değeri (ölçeklenmiş gerçek koordinat)
-            let scan_y = y as f32 / scale;
-            for contour in contours {
-                self.process_contour(&contour.points, scan_y, scale);
-            }
-
-            // Winding sıfırdan farklıyken içi doldur; değişim noktaları kenar pikseli
-            let mut inside = false;
             for x in 0..width {
-                if self.winding[x] != 0 {
-                    inside = !inside;
+                let mut covered = 0u32;
+                for &sy in &sample_offsets {
+                    let sample_y = bounds.y_max as f32 - (y as f32 + sy) / scale;
+                    for &sx in &sample_offsets {
+                        let sample_x = bounds.x_min as f32 + (x as f32 + sx) / scale;
+                        if Self::point_in_outline(sample_x, sample_y, &contours) {
+                            covered += 1;
+                        }
+                    }
                 }
-                if inside {
-                    bitmap[y * width + x] = 255;
-                }
+
+                let coverage = covered as f32 / 16.0;
+                self.scanline[x] = coverage;
+                bitmap[y * width + x] = roundf(coverage * 255.0) as u8;
             }
         }
     }
 
-    #[allow(dead_code)]
-    fn process_contour(&mut self, points: &[GlyphPoint], scan_y: f32, scale: f32) {
-        if points.len() < 2 {
-            return;
+    fn flatten_contour(&self, points: &[GlyphPoint], scale: f32) -> Vec<(f32, f32)> {
+        if points.is_empty() {
+            return Vec::new();
         }
 
-        let n = points.len();
-        for i in 0..n {
-            let p0 = &points[i];
-            let p1 = &points[(i + 1) % n]; // Kapalı yol: son nokta ilk noktaya bağlanır
+        let mut expanded = Vec::with_capacity(points.len() * 2);
+        for i in 0..points.len() {
+            let current = points[i];
+            let next = points[(i + 1) % points.len()];
+            expanded.push(current);
+            if !current.on_curve && !next.on_curve {
+                expanded.push(GlyphPoint {
+                    x: ((current.x as i32 + next.x as i32) / 2) as i16,
+                    y: ((current.y as i32 + next.y as i32) / 2) as i16,
+                    on_curve: true,
+                });
+            }
+        }
 
-            // Kenarın tarama satırını kesip kesmediğini kontrol et:
-            // Bir kenar ancak bir ucu satırın üstünde, diğeri altındaysa keser
-            let y0 = p0.y as f32;
-            let y1 = p1.y as f32;
+        let start_idx = expanded
+            .iter()
+            .position(|point| point.on_curve)
+            .unwrap_or(0);
+        let mut ordered = Vec::with_capacity(expanded.len());
+        for i in 0..expanded.len() {
+            ordered.push(expanded[(start_idx + i) % expanded.len()]);
+        }
 
-            if (y0 <= scan_y && y1 > scan_y) || (y1 <= scan_y && y0 > scan_y) {
-                // Lineer interpolasyonla kesişim x koordinatı: x = x0 + t*(x1-x0)
-                let t = (scan_y - y0) / (y1 - y0);
-                let x = (p0.x as f32 + t * (p1.x as f32 - p0.x as f32)) * scale;
-                let x_idx = x as usize;
+        if ordered.is_empty() {
+            return Vec::new();
+        }
 
-                if x_idx < self.winding.len() {
-                    // Non-zero winding kuralı: yukarı gide → +1, aşağı gide → -1
-                    if y0 < y1 {
-                        self.winding[x_idx] += 1;
-                    } else {
-                        self.winding[x_idx] -= 1;
+        let mut flattened = Vec::new();
+        let start = (ordered[0].x as f32, ordered[0].y as f32);
+        flattened.push(start);
+
+        let mut cursor = 0usize;
+        while cursor < ordered.len() {
+            let current = ordered[cursor % ordered.len()];
+            let next = ordered[(cursor + 1) % ordered.len()];
+
+            if next.on_curve {
+                if (cursor + 1) % ordered.len() != 0 {
+                    flattened.push((next.x as f32, next.y as f32));
+                }
+                cursor += 1;
+                continue;
+            }
+
+            let end = ordered[(cursor + 2) % ordered.len()];
+            self.append_quadratic(
+                &mut flattened,
+                (current.x as f32, current.y as f32),
+                (next.x as f32, next.y as f32),
+                (end.x as f32, end.y as f32),
+                scale,
+            );
+            cursor += 2;
+        }
+
+        if flattened.last().copied() != Some(start) {
+            flattened.push(start);
+        }
+
+        flattened
+    }
+
+    fn append_quadratic(
+        &self,
+        flattened: &mut Vec<(f32, f32)>,
+        start: (f32, f32),
+        control: (f32, f32),
+        end: (f32, f32),
+        scale: f32,
+    ) {
+        let span = ((start.0 - control.0).abs() + (start.1 - control.1).abs())
+            .max((control.0 - end.0).abs() + (control.1 - end.1).abs())
+            .max((start.0 - end.0).abs() + (start.1 - end.1).abs());
+        let segments = ceil_f32((span * scale) / 8.0).clamp(4.0, 24.0) as usize;
+
+        for step in 1..=segments {
+            let t = step as f32 / segments as f32;
+            let inv_t = 1.0 - t;
+            let x = inv_t * inv_t * start.0 + 2.0 * inv_t * t * control.0 + t * t * end.0;
+            let y = inv_t * inv_t * start.1 + 2.0 * inv_t * t * control.1 + t * t * end.1;
+            flattened.push((x, y));
+        }
+    }
+
+    fn point_in_outline(px: f32, py: f32, contours: &[Vec<(f32, f32)>]) -> bool {
+        let mut winding = 0i32;
+
+        for contour in contours {
+            if contour.len() < 2 {
+                continue;
+            }
+
+            for edge in contour.windows(2) {
+                let (x0, y0) = edge[0];
+                let (x1, y1) = edge[1];
+
+                if y0 <= py {
+                    if y1 > py {
+                        let cross = (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0);
+                        if cross > 0.0 {
+                            winding += 1;
+                        }
+                    }
+                } else if y1 <= py {
+                    let cross = (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0);
+                    if cross < 0.0 {
+                        winding -= 1;
                     }
                 }
             }
         }
+
+        winding != 0
     }
 
-    /// 8×8 piksel bitmap font karakterini rasterize eder.
+    /// 8ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â8 piksel bitmap font karakterini rasterize eder.
     ///
-    /// Bitmap fontlar, her karakteri 8 baytlık bir dizi ile temsil eder:
-    /// her bayt bir satırı, her bit ise o satırdaki bir pikseli gösterir.
-    /// `0x80 >> col` maskesi ile sütun biti test edilir; `scale` faktörü
-    /// ile büyütme yapılarak her bit birden fazla piksel kapsar.
-    /// Bu yöntem TrueType ayrıştırma başarısız olduğunda geri dönüş olarak kullanılır.
+    /// Bitmap fontlar, her karakteri 8 baytlÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±k bir dizi ile temsil eder:
+    /// her bayt bir satÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±, her bit ise o satÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rdaki bir pikseli gÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶sterir.
+    /// `0x80 >> col` maskesi ile sÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼tun biti test edilir; `scale` faktÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶rÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼
+    /// ile bÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼yÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼tme yapÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±larak her bit birden fazla piksel kapsar.
+    /// Bu yÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶ntem TrueType ayrÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸tÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rma baÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸arÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±sÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±z olduÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸unda geri dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¶nÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ olarak kullanÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±lÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±r.
     pub fn rasterize_bitmap(&self, char_bits: &[u8; 8], size: f32) -> RasterGlyph {
         let scale = (size / 8.0).max(1.0) as usize;
         let width = 8 * scale;
@@ -332,8 +426,8 @@ impl Rasterizer {
         for (row, &bits) in char_bits.iter().enumerate() {
             for col in 0..8 {
                 if bits & (0x80 >> col) != 0 {
-                    // Ölçeklenmiş piksel bloğunu doldur:
-                    // scale=2 ise her bit 2×2 piksel bloğuna genişler
+                    // ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“lÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§eklenmiÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ piksel bloÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸unu doldur:
+                    // scale=2 ise her bit 2ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â2 piksel bloÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸una geniÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ler
                     for dy in 0..scale {
                         for dx in 0..scale {
                             let x = col * scale + dx;
@@ -365,18 +459,18 @@ impl Default for Rasterizer {
     }
 }
 
-/// Yerleşik 8×8 piksel bitmap font verisi (96 yazdırılabilir ASCII karakter).
+/// YerleÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸ik 8ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â8 piksel bitmap font verisi (96 yazdÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±rÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±labilir ASCII karakter).
 ///
-/// ASCII tablosunda 0x20 (boşluk) ile 0x7F (DEL) arasındaki karakterleri içerir.
-/// Her karakter 8 baytla temsil edilir: bir bayt = bir yatay satır,
-/// bir bit = bir piksel (1=dolu, 0=boş). En yüksek değerlikli bit (MSB) solda.
+/// ASCII tablosunda 0x20 (boÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸luk) ile 0x7F (DEL) arasÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±ndaki karakterleri iÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§erir.
+/// Her karakter 8 baytla temsil edilir: bir bayt = bir yatay satÃƒÆ’Ã¢â‚¬ÂÃƒâ€šÃ‚Â±r,
+/// bir bit = bir piksel (1=dolu, 0=boÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€¦Ã‚Â¸). En yÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¼ksek deÃƒÆ’Ã¢â‚¬ÂÃƒâ€¦Ã‚Â¸erlikli bit (MSB) solda.
 ///
-/// Örnek: 'A' (0x41)
+/// ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“rnek: 'A' (0x41)
 /// ```text
-/// 0x38 = 00111000  →   ***
-/// 0x6C = 01101100  →  ** **
-/// 0xC6 = 11000110  → **   **
-/// 0xFE = 11111110  → *******
+/// 0x38 = 00111000  ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€Â¢   ***
+/// 0x6C = 01101100  ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€Â¢  ** **
+/// 0xC6 = 11000110  ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€Â¢ **   **
+/// 0xFE = 11111110  ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€Â¢ *******
 /// ... vb.
 /// ```
 pub const BITMAP_FONT: [[u8; 8]; 96] = [
@@ -573,3 +667,47 @@ pub const BITMAP_FONT: [[u8; 8]; 96] = [
     // DEL (0x7F)
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_font() -> TrueTypeFont {
+        TrueTypeFont::parse(include_bytes!("../../../assets/fonts/Roboto.ttf"))
+            .expect("Roboto.ttf should parse as a TrueType font")
+    }
+
+    #[test]
+    fn truetype_parser_emits_real_outline_points_for_roboto_a() {
+        let font = load_font();
+        let glyph = font.glyph('A').expect("Roboto should contain glyph A");
+
+        assert!(!glyph.contours.is_empty());
+        assert!(glyph
+            .contours
+            .iter()
+            .all(|contour| contour.points.len() >= 3));
+        let total_points: usize = glyph
+            .contours
+            .iter()
+            .map(|contour| contour.points.len())
+            .sum();
+        assert!(total_points > glyph.contours.len() * 3);
+    }
+
+    #[test]
+    fn outline_rasterizer_preserves_holes_and_exterior_space() {
+        let font = load_font();
+        let glyph = font.glyph('O').expect("Roboto should contain glyph O");
+        let mut rasterizer = Rasterizer::new();
+        let raster = rasterizer
+            .rasterize(&font, glyph, 48.0)
+            .expect("contour glyph should rasterize");
+
+        assert!(raster.bitmap.iter().any(|&pixel| pixel == 0));
+        assert!(raster.bitmap.iter().any(|&pixel| pixel > 0));
+        let opaque_pixels = raster.bitmap.iter().filter(|&&pixel| pixel > 200).count();
+        assert!(opaque_pixels > 0);
+        assert!(opaque_pixels < raster.bitmap.len());
+    }
+}

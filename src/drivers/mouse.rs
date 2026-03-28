@@ -46,7 +46,7 @@
 
 use crate::drivers::gesture::GestureRecognizer;
 use crate::drivers::input::{push_event, InputEvent, MousePacket};
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
@@ -78,6 +78,49 @@ pub static MOUSE_LEFT: AtomicBool = AtomicBool::new(false);
 pub static MOUSE_RIGHT: AtomicBool = AtomicBool::new(false);
 pub static MOUSE_MIDDLE: AtomicBool = AtomicBool::new(false);
 
+#[repr(C, align(64))]
+struct MousePublicationState {
+    sequence: AtomicU64,
+    x: AtomicI32,
+    y: AtomicI32,
+    buttons: AtomicU8,
+}
+
+impl MousePublicationState {
+    const fn new(x: i32, y: i32, buttons: u8) -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            x: AtomicI32::new(x),
+            y: AtomicI32::new(y),
+            buttons: AtomicU8::new(buttons),
+        }
+    }
+
+    fn begin_write(&self) -> u64 {
+        loop {
+            let sequence = self.sequence.load(Ordering::Relaxed);
+            if (sequence & 1) != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            if self
+                .sequence
+                .compare_exchange_weak(sequence, sequence + 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return sequence + 2;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn finish_write(&self, published_sequence: u64) {
+        self.sequence.store(published_sequence, Ordering::Release);
+    }
+}
+
+static MOUSE_PUBLICATION: MousePublicationState = MousePublicationState::new(640, 400, 0);
+
 // Paket buffer (3 byte'lık döngü): IRQ başına 1 byte gelir, 3 byte = 1 tam paket
 static MOUSE_CYCLE: Mutex<u8> = Mutex::new(0); // Hangi byte bekleniyor: 0, 1, 2
 static MOUSE_PACKET: Mutex<[u8; 3]> = Mutex::new([0; 3]); // Toplanan paket byte'ları
@@ -93,11 +136,67 @@ pub static mut SCREEN_HEIGHT: i32 = 800;
 // ============================================================================
 
 /// Mouse buton durumları: sol, sağ, orta tuşların basılı olup olmadığı
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MouseButtons {
     pub left: bool,   // Sol tuş (bit 0 flags byte)
     pub right: bool,  // Sağ tuş (bit 1 flags byte)
     pub middle: bool, // Orta tuş / scroll wheel tıklaması (bit 2 flags byte)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MouseSnapshot {
+    pub x: i32,
+    pub y: i32,
+    pub buttons: MouseButtons,
+}
+
+const fn encode_mouse_buttons(buttons: MouseButtons) -> u8 {
+    (buttons.left as u8) | ((buttons.right as u8) << 1) | ((buttons.middle as u8) << 2)
+}
+
+const fn decode_mouse_buttons(bits: u8) -> MouseButtons {
+    MouseButtons {
+        left: (bits & 0x01) != 0,
+        right: (bits & 0x02) != 0,
+        middle: (bits & 0x04) != 0,
+    }
+}
+
+fn publish_snapshot(x: i32, y: i32, buttons: MouseButtons) {
+    let published_sequence = MOUSE_PUBLICATION.begin_write();
+    MOUSE_PUBLICATION.x.store(x, Ordering::Relaxed);
+    MOUSE_PUBLICATION.y.store(y, Ordering::Relaxed);
+    MOUSE_PUBLICATION
+        .buttons
+        .store(encode_mouse_buttons(buttons), Ordering::Relaxed);
+    MOUSE_X.store(x, Ordering::Relaxed);
+    MOUSE_Y.store(y, Ordering::Relaxed);
+    MOUSE_LEFT.store(buttons.left, Ordering::Relaxed);
+    MOUSE_RIGHT.store(buttons.right, Ordering::Relaxed);
+    MOUSE_MIDDLE.store(buttons.middle, Ordering::Relaxed);
+    MOUSE_PUBLICATION.finish_write(published_sequence);
+}
+
+pub fn publish_state(x: i32, y: i32, buttons: MouseButtons) {
+    publish_snapshot(x, y, buttons);
+}
+
+pub fn snapshot() -> MouseSnapshot {
+    loop {
+        let sequence = MOUSE_PUBLICATION.sequence.load(Ordering::Acquire);
+        if (sequence & 1) != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        let x = MOUSE_PUBLICATION.x.load(Ordering::Relaxed);
+        let y = MOUSE_PUBLICATION.y.load(Ordering::Relaxed);
+        let buttons = decode_mouse_buttons(MOUSE_PUBLICATION.buttons.load(Ordering::Relaxed));
+        let end_sequence = MOUSE_PUBLICATION.sequence.load(Ordering::Acquire);
+        if sequence == end_sequence {
+            return MouseSnapshot { x, y, buttons };
+        }
+        core::hint::spin_loop();
+    }
 }
 
 // =============================================================================
@@ -305,16 +404,21 @@ pub fn handle_packet(packet_byte: u8) {
             // Global pozisyonu güncelle (atomik işlemler, thread-safe)
             let screen_w = unsafe { SCREEN_WIDTH };
             let screen_h = unsafe { SCREEN_HEIGHT };
-            let new_x = (MOUSE_X.load(Ordering::Relaxed) + dx).clamp(0, screen_w - 1);
-            let new_y = (MOUSE_Y.load(Ordering::Relaxed) - dy).clamp(0, screen_h - 1);
-            MOUSE_X.store(new_x, Ordering::Relaxed);
+            let previous = snapshot();
+            let new_x = (previous.x + dx).clamp(0, screen_w - 1);
+            let new_y = (previous.y - dy).clamp(0, screen_h - 1);
+            publish_snapshot(
+                new_x,
+                new_y,
+                MouseButtons {
+                    left: (flags & 0x01) != 0,
+                    right: (flags & 0x02) != 0,
+                    middle: (flags & 0x04) != 0,
+                },
+            );
             // Y ekseni: PS/2 protokolünde Y yukari=pozitif, ekranda yukari=negatif
-            MOUSE_Y.store(new_y, Ordering::Relaxed);
 
             // Buton durumlarını güncelle (flags byte'ının alt 3 biti)
-            MOUSE_LEFT.store((flags & 0x01) != 0, Ordering::Relaxed); // Bit 0: sol tuş
-            MOUSE_RIGHT.store((flags & 0x02) != 0, Ordering::Relaxed); // Bit 1: sağ tuş
-            MOUSE_MIDDLE.store((flags & 0x04) != 0, Ordering::Relaxed); // Bit 2: orta tuş
 
             // EchInput pointer route'u yalnızca Mouse paket event'leri üzerinden çalışır.
             // Cursor state'i güncelledikten sonra tam paketi kuyruğa bas.
@@ -338,11 +442,17 @@ pub fn set_bounds(width: i32, height: i32) {
         SCREEN_WIDTH = width.max(1);
         SCREEN_HEIGHT = height.max(1);
         // Mevcut koordinatları yeni sınırlara kırp (atomik işlemler)
-        let x = MOUSE_X.load(Ordering::Relaxed).clamp(0, SCREEN_WIDTH - 1);
-        let y = MOUSE_Y.load(Ordering::Relaxed).clamp(0, SCREEN_HEIGHT - 1);
-        MOUSE_X.store(x, Ordering::Relaxed);
-        MOUSE_Y.store(y, Ordering::Relaxed);
+        let current = snapshot();
+        let x = current.x.clamp(0, SCREEN_WIDTH - 1);
+        let y = current.y.clamp(0, SCREEN_HEIGHT - 1);
+        publish_snapshot(x, y, current.buttons);
     }
+}
+
+/// Canli mouse clamp sinirlarini dondurur.
+/// Output geometry drift tespiti yapan ust servisler bu gercegi kullanir.
+pub fn get_bounds() -> (i32, i32) {
+    unsafe { (SCREEN_WIDTH, SCREEN_HEIGHT) }
 }
 
 // =============================================================================
@@ -352,20 +462,14 @@ pub fn set_bounds(width: i32, height: i32) {
 /// Mouse pozisyonunu döndürür.
 /// Döner: (x, y) piksel koordinatları; (0,0) sol-üst köşe
 pub fn get_position() -> (i32, i32) {
-    (
-        MOUSE_X.load(Ordering::Relaxed),
-        MOUSE_Y.load(Ordering::Relaxed),
-    )
+    let snapshot = snapshot();
+    (snapshot.x, snapshot.y)
 }
 
 /// Mouse buton durumlarını döndürür.
 /// IRQ12 tabanlı güncellemeden sonra çağrılmalıdır.
 pub fn get_buttons() -> MouseButtons {
-    MouseButtons {
-        left: MOUSE_LEFT.load(Ordering::Relaxed),
-        right: MOUSE_RIGHT.load(Ordering::Relaxed),
-        middle: MOUSE_MIDDLE.load(Ordering::Relaxed),
-    }
+    snapshot().buttons
 }
 
 /// Polling ile mouse verisi okur (Interrupt'sız mod için).
@@ -479,4 +583,64 @@ pub fn reinit_streaming() {
     // ACK byte'ını oku ve yoksay
     wait_read();
     let _ack = unsafe { data_port.read() };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_bounds_updates_pointer_clamp_for_runtime_framebuffer_size() {
+        publish_state(1817, 877, MouseButtons::default());
+
+        set_bounds(1920, 1080);
+        let (x, y) = get_position();
+        let (screen_width, screen_height) = unsafe { (SCREEN_WIDTH, SCREEN_HEIGHT) };
+
+        assert_eq!((x, y), (1817, 877));
+        assert_eq!(screen_width, 1920);
+        assert_eq!(screen_height, 1080);
+    }
+
+    #[test]
+    fn set_bounds_clamps_legacy_pointer_inside_new_screen_rect() {
+        publish_state(4096, 4096, MouseButtons::default());
+
+        set_bounds(1920, 1080);
+        let (x, y) = get_position();
+
+        assert_eq!((x, y), (1919, 1079));
+    }
+
+    #[test]
+    fn get_bounds_reports_latest_runtime_screen_limits() {
+        set_bounds(1600, 900);
+
+        assert_eq!(get_bounds(), (1600, 900));
+    }
+
+    #[test]
+    fn publish_state_roundtrips_coherent_snapshot() {
+        publish_state(
+            321,
+            654,
+            MouseButtons {
+                left: true,
+                right: false,
+                middle: true,
+            },
+        );
+
+        let snapshot = snapshot();
+        assert_eq!(snapshot.x, 321);
+        assert_eq!(snapshot.y, 654);
+        assert_eq!(
+            snapshot.buttons,
+            MouseButtons {
+                left: true,
+                right: false,
+                middle: true,
+            }
+        );
+    }
 }

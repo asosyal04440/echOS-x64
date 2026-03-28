@@ -236,9 +236,6 @@ pub enum SignatureScheme {
 pub enum TlsError {
     InvalidState,
     InvalidMessage,
-    UnsupportedCipherSuite,
-    UnsupportedGroup,
-    UnsupportedSignatureScheme,
     KeyExchangeFailed,
     DecryptionFailed,
     EncryptionFailed,
@@ -248,7 +245,6 @@ pub enum TlsError {
     ConnectionClosed,
     Alert(AlertLevel, AlertDescription),
     InternalError,
-    NotSupported,
 }
 
 /// TLS alert levels

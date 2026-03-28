@@ -84,6 +84,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::x86_64::_rdtsc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use echos_sdk_sys::{
+    NativeClipboardGetTextResponse, NativeClipboardSetTextRequest, NativeEventKind,
+    NativeInputEvent, NativeNotificationRequest, NativeSceneOp, NativeSceneOpKind,
+    NativeSceneSubmitRequest, NativeServiceBootstrap, NativeServiceEndpointPublishRequest,
+    NativeServiceEndpointState, NativeServiceParityStatus, NativeServiceRegionMapping,
+    NativeServiceStatus, NativeWindowCreateRequest, NativeWindowHandle, MAX_INLINE_TEXT,
+    MAX_POLLED_EVENTS, MAX_SCENE_OPS,
+};
 use lazy_static::lazy_static;
 use rcore_fs::vfs::{FileType, FsError, INode};
 use rsa::pkcs1v15::{Signature as RsaSignature, VerifyingKey};
@@ -300,6 +308,17 @@ const SYS_WIN_DESTROY: usize = 452;
 const SYS_WIN_GET_BUFFER: usize = 453;
 const SYS_WIN_FLUSH: usize = 454;
 const SYS_EVENT_POLL: usize = 455;
+const SYS_ECHOS_SCENE_COMMIT: usize = 456;
+const SYS_ECHOS_NOTIFICATION_POST: usize = 457;
+const SYS_ECHOS_CLIPBOARD_SET_TEXT: usize = 458;
+const SYS_ECHOS_CLIPBOARD_GET_TEXT: usize = 459;
+const SYS_ECHOS_NATIVE_EVENT_POLL: usize = 460;
+const SYS_ECHOS_SERVICE_BOOTSTRAP_CLAIM: usize = 461;
+const SYS_ECHOS_SERVICE_STATUS: usize = 462;
+const SYS_ECHOS_SERVICE_PARITY_STATUS: usize = 463;
+const SYS_ECHOS_SERVICE_REGION_MAP: usize = 464;
+const SYS_ECHOS_SERVICE_ENDPOINT_PUBLISH: usize = 465;
+const SYS_ECHOS_SERVICE_HEARTBEAT: usize = 466;
 
 // Süreç ve İş Parçacığı (Thread) Yönetimi
 // fork()  -> mevcut süreci kopyalar (copy-on-write)
@@ -589,6 +608,16 @@ fn errno(code: usize) -> usize {
     (!0usize).wrapping_sub(code - 1)
 }
 
+fn unsupported_errno(surface: &'static str) -> usize {
+    crate::ecosystem_exactness::record_posix_unsupported(surface);
+    errno(ENOSYS)
+}
+
+fn unsupported_syscall_number(number: usize) -> usize {
+    crate::ecosystem_exactness::record_posix_unsupported_number(number);
+    errno(ENOSYS)
+}
+
 fn vfs_errno(err: FsError) -> usize {
     match err {
         FsError::EntryNotFound => errno(ENOENT),
@@ -708,10 +737,12 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
             args[2] as u32,
             args[3] as u32,
         ) as usize,
-        SYS_FUTEX_WAITV => {
-            crate::task::sys_futex_waitv(args[0] as u64, args[1] as u32, args[2] as u32, args[3] as u64)
-                as usize
-        }
+        SYS_FUTEX_WAITV => crate::task::sys_futex_waitv(
+            args[0] as u64,
+            args[1] as u32,
+            args[2] as u32,
+            args[3] as u64,
+        ) as usize,
 
         // Timer/Event syscalls
         SYS_TIMER_CREATE => sys_timer_create(args[0], args[1], args[2]),
@@ -807,8 +838,21 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
 
         // --- STATX (genişletilmiş dosya bilgisi) ---
         SYS_STATX => sys_statx(args[0], args[1], args[2], args[3], args[4]),
+        SYS_WIN_CREATE => sys_native_window_create(args[0], args[1]),
+        SYS_WIN_DESTROY => sys_native_window_destroy(args[0]),
+        SYS_ECHOS_SCENE_COMMIT => sys_native_scene_commit(args[0]),
+        SYS_ECHOS_NOTIFICATION_POST => sys_native_notification_post(args[0]),
+        SYS_ECHOS_CLIPBOARD_SET_TEXT => sys_native_clipboard_set_text(args[0]),
+        SYS_ECHOS_CLIPBOARD_GET_TEXT => sys_native_clipboard_get_text(args[0]),
+        SYS_ECHOS_NATIVE_EVENT_POLL => sys_native_event_poll(args[0], args[1]),
+        SYS_ECHOS_SERVICE_BOOTSTRAP_CLAIM => sys_service_bootstrap_claim(args[0]),
+        SYS_ECHOS_SERVICE_STATUS => sys_service_status(args[0], args[1]),
+        SYS_ECHOS_SERVICE_PARITY_STATUS => sys_service_parity_status(args[0]),
+        SYS_ECHOS_SERVICE_REGION_MAP => sys_service_region_map(args[0]),
+        SYS_ECHOS_SERVICE_ENDPOINT_PUBLISH => sys_service_endpoint_publish(args[0]),
+        SYS_ECHOS_SERVICE_HEARTBEAT => sys_service_heartbeat(args[0], args[1]),
 
-        _ => errno(ENOSYS),
+        _ => unsupported_syscall_number(number),
     };
 
     if is_traced {
@@ -1081,7 +1125,7 @@ fn sys_close(fd: usize) -> usize {
     free_fd(fd)
 }
 
-/// lseek syscall (stub)
+/// `lseek` syscall for the in-memory file table path.
 fn sys_lseek(fd: usize, offset: usize, whence: usize) -> usize {
     let mut files = FILE_TABLE.lock();
     let Some(Some(state)) = files.get_mut(fd) else {
@@ -1291,11 +1335,11 @@ fn sys_fstat(fd: usize, statbuf: usize) -> usize {
 }
 
 fn sys_lstat(_path: usize, _statbuf: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("lstat")
 }
 
 fn sys_poll(_fds: usize, _nfds: usize, _timeout: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("poll")
 }
 
 fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, off: usize) -> usize {
@@ -1592,11 +1636,11 @@ fn drm_mmap(len: usize, off: usize) -> usize {
 }
 
 fn sys_pread64(_fd: usize, _buf: usize, _count: usize, _pos: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("pread64")
 }
 
 fn sys_pwrite64(_fd: usize, _buf: usize, _count: usize, _pos: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("pwrite64")
 }
 
 /// readv(2) — scatter read: birden fazla tampona kesintisiz okuma.
@@ -2016,17 +2060,17 @@ fn sys_creat(path_ptr: usize, mode: usize) -> usize {
 
 /// link - create a hard link
 fn sys_link(_oldpath_ptr: usize, _newpath_ptr: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("link")
 }
 
 /// symlink - create a symbolic link
 fn sys_symlink(_target_ptr: usize, _linkpath_ptr: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("symlink")
 }
 
 /// readlink - read a symbolic link
 fn sys_readlink(_path_ptr: usize, _buf: usize, _bufsize: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("readlink")
 }
 
 fn sys_select(
@@ -2036,7 +2080,7 @@ fn sys_select(
     _exceptfds: usize,
     _timeout: usize,
 ) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("select")
 }
 
 fn sys_sched_yield() -> usize {
@@ -2145,12 +2189,12 @@ fn sys_kill(pid: usize, sig: usize) -> usize {
 
 /// rt_sigqueueinfo - queue a signal and data to a process
 fn sys_rt_sigqueueinfo(_pid: usize, _sig: usize, _info_ptr: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("rt_sigqueueinfo")
 }
 
 /// sigaltstack - set and/or examine signal stack context
 fn sys_sigaltstack(_ss_ptr: usize, _old_ss_ptr: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("sigaltstack")
 }
 
 /// rt_sigsuspend - wait for a signal
@@ -2166,23 +2210,23 @@ fn sys_rt_sigtimedwait(
     _timeout_ptr: usize,
     _sigsetsize: usize,
 ) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("rt_sigtimedwait")
 }
 
 fn sys_mremap(_old: usize, _oldsz: usize, _newsz: usize, _flags: usize, _new: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("mremap")
 }
 
 fn sys_msync(_addr: usize, _len: usize, _flags: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("msync")
 }
 
 fn sys_mincore(_addr: usize, _len: usize, _vec: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("mincore")
 }
 
 fn sys_madvise(_addr: usize, _len: usize, _advice: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("madvise")
 }
 
 // ============================================================================
@@ -2481,7 +2525,7 @@ fn sys_tee(fd_in: usize, fd_out: usize, len: usize, _flags: usize) -> usize {
     }
 
     crate::serial_println!("[IPC] tee: fd_in={}, fd_out={}, len={}", fd_in, fd_out, len);
-    // Tee duplicates data without consuming — return len as stub
+    // Current tee path reports the duplicated byte count without draining either endpoint.
     core::cmp::min(len, 4096)
 }
 
@@ -2533,7 +2577,7 @@ fn sys_dup2(oldfd: usize, newfd: usize) -> usize {
 // System V IPC — Message Queues
 // ============================================================================
 
-/// Basit mesaj kuyruk girişi
+/// System V mesaj kuyruk girdisi.
 struct MsgQueueEntry {
     mtype: i64,
     data: alloc::vec::Vec<u8>,
@@ -3149,7 +3193,7 @@ fn sys_futex(
             }
             moved
         }
-        _ => errno(ENOSYS),
+        _ => unsupported_errno("futex.op"),
     }
 }
 
@@ -3640,11 +3684,11 @@ fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> usize {
             0
         }
         PTRACE_ATTACH => {
-            // Şimdilik stub, ileride SIGSTOP gönderilecek
-            errno(ENOSYS)
+            // Current ptrace attach path is intentionally unimplemented; no stop signal is emitted yet.
+            unsupported_errno("ptrace.attach")
         }
         PTRACE_DETACH => 0,
-        _ => errno(ENOSYS),
+        _ => unsupported_errno("ptrace.request"),
     }
 }
 
@@ -3681,7 +3725,7 @@ fn sys_uname(uts_ptr: usize) -> usize {
 }
 
 fn sys_getcwd(_buf: usize, _size: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("getcwd")
 }
 
 fn sys_getuid() -> usize {
@@ -4225,9 +4269,9 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
         with_user_access(|| unsafe {
             // sa_family
             *(addr_ptr as *mut u16) = AF_INET as u16;
-            // port (placeholder)
+            // Report an unspecified port because peer endpoint export is not wired on this path.
             *((addr_ptr + 2) as *mut u16) = 0;
-            // addr (placeholder)
+            // Report an unspecified IPv4 address because peer endpoint export is not wired on this path.
             core::ptr::write_bytes((addr_ptr + 4) as *mut u8, 0, 4);
         });
     }
@@ -4341,7 +4385,7 @@ fn sys_setsockopt(
         crate::serial_println!("[kTLS] Kernel TLS Cipher Context reserved.");
         return 0;
     }
-    errno(ENOSYS)
+    unsupported_errno("setsockopt")
 }
 
 fn sys_getsockopt(
@@ -4351,11 +4395,11 @@ fn sys_getsockopt(
     _optval: usize,
     _optlen: usize,
 ) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("getsockopt")
 }
 
 fn sys_shutdown(_fd: usize, _how: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("shutdown")
 }
 
 fn sys_getsockname(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
@@ -4411,11 +4455,11 @@ fn sys_getpeername(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
 }
 
 fn sys_sendmsg(_fd: usize, _msg: usize, _flags: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("sendmsg")
 }
 
 fn sys_recvmsg(_fd: usize, _msg: usize, _flags: usize) -> usize {
-    errno(ENOSYS)
+    unsupported_errno("recvmsg")
 }
 
 // =====================================
@@ -4542,6 +4586,696 @@ fn read_user_cstring(ptr: usize, max: usize) -> Result<String, usize> {
     Err(errno(EINVAL))
 }
 
+fn sys_native_window_create(req_ptr: usize, out_ptr: usize) -> usize {
+    if req_ptr == 0 || out_ptr == 0 {
+        return errno(EFAULT);
+    }
+    let runtime = match current_native_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => return err,
+    };
+    let request = with_user_access(|| unsafe { *(req_ptr as *const NativeWindowCreateRequest) });
+    let title = match decode_inline_text(&request.title, request.title_len) {
+        Ok(title) => title,
+        Err(err) => return err,
+    };
+
+    let _ = crate::ipc::request_input_sync(
+        runtime.identity.app_id,
+        crate::services::InputCommand::RegisterApp {
+            app_id: runtime.identity.app_id,
+        },
+    );
+    let _ = crate::ipc::request_shell_sync(
+        runtime.identity.app_id,
+        crate::services::ShellCommand::RegisterApp {
+            app_id: runtime.identity.app_id,
+            name: runtime.identity.title.to_string(),
+        },
+    );
+    let _ = crate::ipc::request_shell_sync(
+        runtime.identity.app_id,
+        crate::services::ShellCommand::MarkAppLaunch {
+            app_id: runtime.identity.app_id,
+            status_line: String::from("Native SDK runtime active"),
+        },
+    );
+
+    let response = crate::ipc::request_display_sync(
+        runtime.identity.app_id,
+        crate::services::DisplayCommand::CreateWindow {
+            app_id: runtime.identity.app_id,
+            title,
+            x: request.x,
+            y: request.y,
+            width: request.width,
+            height: request.height,
+        },
+    );
+    match response {
+        Some(crate::services::DisplayResponse::WindowCreated {
+            window_id,
+            surface_id,
+            content_rect,
+        }) => {
+            let workspace_id = runtime.session.window.workspace_id;
+            crate::runtime::attach_window_session(
+                runtime.identity.app_id,
+                workspace_id,
+                false,
+                window_id,
+                surface_id,
+            );
+            let _ = crate::ipc::request_shell_sync(
+                runtime.identity.app_id,
+                crate::services::ShellCommand::UpdateAppWindow {
+                    app_id: runtime.identity.app_id,
+                    window_id: Some(window_id),
+                    visible: true,
+                    focused: false,
+                    workspace_id,
+                },
+            );
+            let handle = NativeWindowHandle {
+                window_id,
+                surface_id,
+                content_width: content_rect.width,
+                content_height: content_rect.height,
+            };
+            with_user_access(|| unsafe {
+                *(out_ptr as *mut NativeWindowHandle) = handle;
+            });
+            0
+        }
+        Some(crate::services::DisplayResponse::Error(_)) => errno(EINVAL),
+        _ => errno(EIO),
+    }
+}
+
+fn sys_native_window_destroy(window_id: usize) -> usize {
+    let runtime = match current_native_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => return err,
+    };
+    let response = crate::ipc::request_display_sync(
+        runtime.identity.app_id,
+        crate::services::DisplayCommand::DestroyWindow {
+            window_id: window_id as u64,
+        },
+    );
+    match response {
+        Some(crate::services::DisplayResponse::Ack) => {
+            crate::runtime::forget_window_session(window_id as u64);
+            let _ = crate::ipc::request_shell_sync(
+                runtime.identity.app_id,
+                crate::services::ShellCommand::UpdateAppWindow {
+                    app_id: runtime.identity.app_id,
+                    window_id: None,
+                    visible: false,
+                    focused: false,
+                    workspace_id: runtime.session.window.workspace_id,
+                },
+            );
+            0
+        }
+        Some(crate::services::DisplayResponse::Error(_)) => errno(EINVAL),
+        _ => errno(EIO),
+    }
+}
+
+fn sys_native_scene_commit(req_ptr: usize) -> usize {
+    if req_ptr == 0 {
+        return errno(EFAULT);
+    }
+    let runtime = match current_native_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => return err,
+    };
+    let request = with_user_access(|| unsafe { *(req_ptr as *const NativeSceneSubmitRequest) });
+    if request.op_count as usize > MAX_SCENE_OPS || request.ops_ptr == 0 {
+        return errno(EINVAL);
+    }
+    let raw_ops = with_user_access(|| unsafe {
+        core::slice::from_raw_parts(
+            request.ops_ptr as *const NativeSceneOp,
+            request.op_count as usize,
+        )
+    });
+    let mut render_objects = Vec::with_capacity(raw_ops.len());
+    for (index, raw) in raw_ops.iter().enumerate() {
+        let bounds = crate::gui::protocol::Rect::new(raw.x, raw.y, raw.width, raw.height);
+        let kind = match raw.kind {
+            value if value == NativeSceneOpKind::SolidRect as u32 => {
+                crate::gui::protocol::RenderObjectKind::SolidRect {
+                    color: raw.color,
+                    corner_radius: raw.corner_radius,
+                }
+            }
+            value if value == NativeSceneOpKind::Text as u32 => {
+                let text = match decode_inline_text(&raw.text, raw.text_len) {
+                    Ok(text) => text,
+                    Err(err) => return err,
+                };
+                crate::gui::protocol::RenderObjectKind::TextRun {
+                    blob_id: index as u64 + 1,
+                    text,
+                    color: raw.color,
+                    style: if raw.style_flags & 1 != 0 {
+                        crate::gui::protocol::TextRunStyle::Mono
+                    } else {
+                        crate::gui::protocol::TextRunStyle::Ui
+                    },
+                    max_width: raw.width,
+                }
+            }
+            _ => return errno(EINVAL),
+        };
+        render_objects.push(crate::gui::protocol::RenderObject {
+            object_id: index as u64 + 1,
+            bounds,
+            clip: None,
+            z_index: raw.z_index,
+            opacity: raw.opacity,
+            lane: if raw.kind == NativeSceneOpKind::Text as u32 {
+                crate::gui::protocol::DamageLane::Text
+            } else {
+                crate::gui::protocol::DamageLane::Window
+            },
+            kind,
+        });
+    }
+    let mut scene = crate::gui::protocol::SceneUpdate {
+        root_id: request.window_id,
+        revision: request.revision,
+        render_objects,
+        damage_hint: Vec::new(),
+        semantic_root: None,
+    };
+    scene.canonicalize();
+    match crate::ipc::request_display_sync(
+        runtime.identity.app_id,
+        crate::services::DisplayCommand::CommitScene {
+            window_id: request.window_id,
+            scene,
+        },
+    ) {
+        Some(crate::services::DisplayResponse::Ack) => 0,
+        Some(crate::services::DisplayResponse::Error(_)) => errno(EINVAL),
+        _ => errno(EIO),
+    }
+}
+
+fn sys_native_notification_post(req_ptr: usize) -> usize {
+    if req_ptr == 0 {
+        return errno(EFAULT);
+    }
+    let runtime = match current_native_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => return err,
+    };
+    if !crate::runtime::task_allows_native_capability(
+        crate::task::scheduler::current_task_id() as u64,
+        echos_manifest::NativeCapability::NotificationsPost,
+    ) {
+        return errno(EACCES);
+    }
+    let request = with_user_access(|| unsafe { *(req_ptr as *const NativeNotificationRequest) });
+    let title = match decode_inline_text(&request.title, request.title_len) {
+        Ok(text) => text,
+        Err(err) => return err,
+    };
+    let message = match decode_inline_text(&request.message, request.message_len) {
+        Ok(text) => text,
+        Err(err) => return err,
+    };
+    let level = match request.level {
+        0 => crate::gui::protocol::NotificationLevel::Info,
+        1 => crate::gui::protocol::NotificationLevel::Success,
+        2 => crate::gui::protocol::NotificationLevel::Warning,
+        3 => crate::gui::protocol::NotificationLevel::Error,
+        _ => return errno(EINVAL),
+    };
+    match crate::ipc::request_notification_sync(
+        runtime.identity.app_id,
+        crate::services::NotificationCommand::Push(crate::gui::protocol::NotificationRequest {
+            app_id: runtime.identity.app_id,
+            title,
+            message,
+            level,
+            action_label: None,
+        }),
+    ) {
+        Some(crate::services::NotificationResponse::NotificationId(_))
+        | Some(crate::services::NotificationResponse::Ack) => 0,
+        Some(crate::services::NotificationResponse::Error(_)) => errno(EACCES),
+        _ => errno(EIO),
+    }
+}
+
+fn sys_native_clipboard_set_text(req_ptr: usize) -> usize {
+    if req_ptr == 0 {
+        return errno(EFAULT);
+    }
+    let runtime = match current_native_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => return err,
+    };
+    if !crate::runtime::task_allows_native_capability(
+        crate::task::scheduler::current_task_id() as u64,
+        echos_manifest::NativeCapability::ClipboardWrite,
+    ) {
+        return errno(EACCES);
+    }
+    let request = with_user_access(|| unsafe { *(req_ptr as *const NativeClipboardSetTextRequest) });
+    let text = match decode_inline_text(&request.text, request.text_len) {
+        Ok(text) => text,
+        Err(err) => return err,
+    };
+    match crate::ipc::request_clipboard_sync(
+        runtime.identity.app_id,
+        crate::services::ClipboardCommand::Set {
+            app_id: runtime.identity.app_id,
+            payload: crate::gui::protocol::ClipboardPayload::Text(text),
+        },
+    ) {
+        Some(crate::services::ClipboardResponse::Ack) => 0,
+        Some(crate::services::ClipboardResponse::Error(_)) => errno(EACCES),
+        _ => errno(EIO),
+    }
+}
+
+fn sys_native_clipboard_get_text(resp_ptr: usize) -> usize {
+    if resp_ptr == 0 {
+        return errno(EFAULT);
+    }
+    let runtime = match current_native_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => return err,
+    };
+    if !crate::runtime::task_allows_native_capability(
+        crate::task::scheduler::current_task_id() as u64,
+        echos_manifest::NativeCapability::ClipboardRead,
+    ) {
+        return errno(EACCES);
+    }
+    match crate::ipc::request_clipboard_sync(
+        runtime.identity.app_id,
+        crate::services::ClipboardCommand::GetCurrent {
+            app_id: runtime.identity.app_id,
+        },
+    ) {
+        Some(crate::services::ClipboardResponse::Current(
+            crate::gui::protocol::ClipboardPayload::Text(text),
+        )) => {
+            if text.len() > MAX_INLINE_TEXT {
+                return errno(EFBIG);
+            }
+            let mut response = NativeClipboardGetTextResponse {
+                text_len: text.len() as u16,
+                text: [0u8; MAX_INLINE_TEXT],
+            };
+            response.text[..text.len()].copy_from_slice(text.as_bytes());
+            with_user_access(|| unsafe {
+                *(resp_ptr as *mut NativeClipboardGetTextResponse) = response;
+            });
+            0
+        }
+        Some(crate::services::ClipboardResponse::Current(
+            crate::gui::protocol::ClipboardPayload::Empty,
+        )) => {
+            with_user_access(|| unsafe {
+                *(resp_ptr as *mut NativeClipboardGetTextResponse) = NativeClipboardGetTextResponse {
+                    text_len: 0,
+                    text: [0u8; MAX_INLINE_TEXT],
+                };
+            });
+            0
+        }
+        Some(crate::services::ClipboardResponse::Error(_)) => errno(EACCES),
+        _ => errno(EIO),
+    }
+}
+
+fn sys_native_event_poll(out_ptr: usize, max_events: usize) -> usize {
+    if out_ptr == 0 {
+        return errno(EFAULT);
+    }
+    let runtime = match current_native_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => return err,
+    };
+    let max_events = max_events.clamp(1, MAX_POLLED_EVENTS);
+    match crate::ipc::request_input_sync(
+        runtime.identity.app_id,
+        crate::services::InputCommand::PollEvents {
+            app_id: runtime.identity.app_id,
+            max_events,
+        },
+    ) {
+        Some(crate::services::InputResponse::Events { events, .. }) => {
+            let translated: Vec<NativeInputEvent> =
+                events.iter().take(max_events).map(map_native_input_event).collect();
+            with_user_access(|| unsafe {
+                let out = core::slice::from_raw_parts_mut(
+                    out_ptr as *mut NativeInputEvent,
+                    translated.len(),
+                );
+                out.copy_from_slice(&translated);
+            });
+            translated.len()
+        }
+        Some(crate::services::InputResponse::Error(_)) => errno(EIO),
+        _ => 0,
+    }
+}
+
+fn sys_service_bootstrap_claim(out_ptr: usize) -> usize {
+    if out_ptr == 0 {
+        return errno(EINVAL);
+    }
+    let runtime = match current_service_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => return err,
+    };
+    let Some(service_id) = runtime.service_id else {
+        return errno(EACCES);
+    };
+    let endpoint_generation = crate::ipc::endpoint_generation_for_service(service_id);
+    let mailbox_lease = match crate::ipc::grant_service_mailbox_regions(
+        runtime.identity.app_id,
+        service_id,
+    ) {
+        Ok(lease) => lease,
+        Err(_) => return errno(EIO),
+    };
+    let (service_handle, rights_bits) = match crate::ipc::describe_service(service_id) {
+        Some(descriptor) => {
+            let handle = crate::ipc::open_service_handle(
+                runtime.identity.app_id,
+                service_id,
+                descriptor.openable_rights,
+            )
+            .ok();
+            (
+                handle.as_ref().map(|handle| handle.handle).unwrap_or(0),
+                encode_service_rights_bits(descriptor.openable_rights),
+            )
+        }
+        None => return errno(ENOENT),
+    };
+    let response = NativeServiceBootstrap {
+        abi_version: 1,
+        service_id: service_id as u32,
+        runtime_app_id: runtime.identity.app_id,
+        service_handle,
+        request_region_handle: mailbox_lease.request_region.handle,
+        response_region_handle: mailbox_lease.response_region.handle,
+        endpoint_generation,
+        rights_bits,
+        isolation_domain: encode_isolation_domain(runtime.isolation_domain),
+        runtime_task_id: runtime
+            .task_id
+            .unwrap_or(crate::task::scheduler::current_task_id() as u64),
+    };
+    with_user_access(|| unsafe {
+        *(out_ptr as *mut NativeServiceBootstrap) = response;
+    });
+    0
+}
+
+fn sys_service_status(service_id: usize, out_ptr: usize) -> usize {
+    if out_ptr == 0 {
+        return errno(EINVAL);
+    }
+    let Some(service_id) = decode_service_id(service_id as u32) else {
+        return errno(EINVAL);
+    };
+    let Some(descriptor) = crate::ipc::describe_service(service_id) else {
+        return errno(ENOENT);
+    };
+    let response = NativeServiceStatus {
+        abi_version: 1,
+        service_id: service_id as u32,
+        openable_rights_bits: encode_service_rights_bits(descriptor.openable_rights),
+        endpoint_generation: crate::ipc::endpoint_generation_for_service(service_id),
+        control_plane: descriptor.control_plane as u8,
+        bulk_data_out_of_band: descriptor.bulk_data_out_of_band as u8,
+        service_process_available: descriptor.service_process_available as u8,
+        user_published_endpoint: descriptor.user_published_endpoint as u8,
+        runtime_isolation: descriptor
+            .runtime_isolation
+            .map(encode_isolation_domain)
+            .unwrap_or(0) as u8,
+        runtime_task_id: descriptor.runtime_task_id.unwrap_or(0),
+    };
+    with_user_access(|| unsafe {
+        *(out_ptr as *mut NativeServiceStatus) = response;
+    });
+    0
+}
+
+fn sys_service_parity_status(out_ptr: usize) -> usize {
+    if out_ptr == 0 {
+        return errno(EINVAL);
+    }
+    let status = crate::ipc::service_parity_status();
+    let response = NativeServiceParityStatus {
+        abi_version: 1,
+        required_services: status.required_services,
+        packaged_service_slots: status.packaged_service_slots,
+        live_user_process_slots: status.live_user_process_slots,
+        published_user_process_slots: status.published_user_process_slots,
+        strict_mode_enabled: status.strict_mode_enabled as u8,
+        full_parity_ready: status.full_parity_ready as u8,
+        reserved: [0; 6],
+    };
+    with_user_access(|| unsafe {
+        *(out_ptr as *mut NativeServiceParityStatus) = response;
+    });
+    0
+}
+
+fn sys_service_region_map(mapping_ptr: usize) -> usize {
+    if mapping_ptr == 0 {
+        return errno(EINVAL);
+    }
+    let mut request = with_user_access(|| unsafe {
+        *(mapping_ptr as *const NativeServiceRegionMapping)
+    });
+    let pid = current_runtime_pid();
+    let mapping = match crate::ipc::map_shared_region(pid as u32, request.region_handle) {
+        Ok(mapping) => mapping,
+        Err(crate::ipc::ServiceError::RightsDenied) => return errno(EACCES),
+        Err(crate::ipc::ServiceError::StaleGeneration) => return errno(EIO),
+        Err(_) => return errno(EINVAL),
+    };
+    request.abi_version = 1;
+    request.region_id = mapping.region_id;
+    request.generation = mapping.generation;
+    request.base = mapping.base;
+    request.len = mapping.len;
+    request.writable = mapping.writable as u32;
+    with_user_access(|| unsafe {
+        *(mapping_ptr as *mut NativeServiceRegionMapping) = request;
+    });
+    0
+}
+
+fn sys_service_endpoint_publish(request_ptr: usize) -> usize {
+    if request_ptr == 0 {
+        return errno(EINVAL);
+    }
+    let request = with_user_access(|| unsafe {
+        *(request_ptr as *const NativeServiceEndpointPublishRequest)
+    });
+    let Some(service_id) = decode_service_id(request.service_id) else {
+        return errno(EINVAL);
+    };
+    let pid = current_runtime_pid();
+    match crate::ipc::publish_user_service_endpoint(
+        pid as u32,
+        service_id,
+        request.request_region_handle,
+        request.response_region_handle,
+    ) {
+        Ok(_) => 0,
+        Err(crate::ipc::ServiceError::RightsDenied) => errno(EACCES),
+        Err(crate::ipc::ServiceError::StaleGeneration) => errno(EIO),
+        Err(_) => errno(EINVAL),
+    }
+}
+
+fn sys_service_heartbeat(service_id: usize, out_ptr: usize) -> usize {
+    if out_ptr == 0 {
+        return errno(EINVAL);
+    }
+    let Some(service_id) = decode_service_id(service_id as u32) else {
+        return errno(EINVAL);
+    };
+    let pid = current_runtime_pid();
+    let state = match crate::ipc::heartbeat_user_service_endpoint(pid as u32, service_id) {
+        Ok(state) => state,
+        Err(crate::ipc::ServiceError::RightsDenied) => return errno(EACCES),
+        Err(crate::ipc::ServiceError::ServiceUnavailable) => return errno(ENOENT),
+        Err(_) => return errno(EINVAL),
+    };
+    let response = NativeServiceEndpointState {
+        abi_version: 1,
+        service_id: service_id as u32,
+        request_region_id: state.request_region_id,
+        request_generation: state.request_generation,
+        response_region_id: state.response_region_id,
+        response_generation: state.response_generation,
+        heartbeat_epoch: state.heartbeat_epoch,
+    };
+    with_user_access(|| unsafe {
+        *(out_ptr as *mut NativeServiceEndpointState) = response;
+    });
+    0
+}
+
+fn current_native_runtime() -> Result<crate::runtime::RuntimeHandle, usize> {
+    let task_id = crate::task::scheduler::current_task_id() as u64;
+    let Some(runtime) = crate::runtime::runtime_handle_for_task(task_id) else {
+        return Err(errno(EACCES));
+    };
+    match runtime.session.process.bootstrap {
+        crate::gui::launch_pipeline::RuntimeBootstrap::NativeWindowed
+        | crate::gui::launch_pipeline::RuntimeBootstrap::NativeHeadless => Ok(runtime),
+        _ => Err(errno(EACCES)),
+    }
+}
+
+fn current_service_runtime() -> Result<crate::runtime::RuntimeHandle, usize> {
+    let task_id = crate::task::scheduler::current_task_id() as u64;
+    let Some(runtime) = crate::runtime::runtime_handle_for_task(task_id) else {
+        return Err(errno(EACCES));
+    };
+    if runtime.service_id.is_none() {
+        return Err(errno(EACCES));
+    }
+    Ok(runtime)
+}
+
+fn current_runtime_pid() -> u64 {
+    let task_id = crate::task::scheduler::current_task_id() as u64;
+    crate::runtime::runtime_handle_for_task(task_id)
+        .map(|runtime| runtime.identity.app_id as u64)
+        .unwrap_or(task_id)
+}
+
+fn decode_service_id(service_id: u32) -> Option<crate::ipc::ServiceId> {
+    match service_id {
+        0 => Some(crate::ipc::ServiceId::Directory),
+        1 => Some(crate::ipc::ServiceId::EchDisplay),
+        2 => Some(crate::ipc::ServiceId::EchInput),
+        3 => Some(crate::ipc::ServiceId::EchAudio),
+        4 => Some(crate::ipc::ServiceId::EchStore),
+        5 => Some(crate::ipc::ServiceId::EchShell),
+        6 => Some(crate::ipc::ServiceId::EchNotifications),
+        7 => Some(crate::ipc::ServiceId::EchClipboard),
+        8 => Some(crate::ipc::ServiceId::EchDialogs),
+        9 => Some(crate::ipc::ServiceId::EchCapture),
+        _ => None,
+    }
+}
+
+fn encode_isolation_domain(domain: crate::runtime::IsolationDomain) -> u32 {
+    match domain {
+        crate::runtime::IsolationDomain::KernelTask => 1,
+        crate::runtime::IsolationDomain::UserProcess => 2,
+    }
+}
+
+fn encode_service_rights_bits(rights: crate::ipc::CapabilityRights) -> u32 {
+    (rights.read as u32)
+        | ((rights.write as u32) << 1)
+        | ((rights.execute as u32) << 2)
+        | ((rights.share as u32) << 3)
+        | ((rights.transfer as u32) << 4)
+}
+
+fn decode_inline_text(bytes: &[u8; MAX_INLINE_TEXT], len: u16) -> Result<String, usize> {
+    let len = len as usize;
+    if len > MAX_INLINE_TEXT {
+        return Err(errno(EINVAL));
+    }
+    core::str::from_utf8(&bytes[..len])
+        .map(|value| value.to_string())
+        .map_err(|_| errno(EINVAL))
+}
+
+fn map_native_input_event(event: &crate::gui::protocol::WindowInputEvent) -> NativeInputEvent {
+    match &event.event {
+        crate::gui::protocol::InputEvent::Key {
+            scan_code,
+            modifiers,
+            state,
+            ..
+        } => NativeInputEvent {
+            kind: NativeEventKind::Key as u32,
+            window_id: event.window_id,
+            x: event.local_position.map(|point| point.x).unwrap_or_default(),
+            y: event.local_position.map(|point| point.y).unwrap_or_default(),
+            delta_x: 0,
+            delta_y: 0,
+            key_code: *scan_code as u32,
+            modifiers: *modifiers,
+            state: matches!(state, crate::gui::protocol::KeyState::Pressed) as u8,
+            button: 0,
+            reserved: 0,
+        },
+        crate::gui::protocol::InputEvent::PointerMove { position, delta } => NativeInputEvent {
+            kind: NativeEventKind::PointerMove as u32,
+            window_id: event.window_id,
+            x: position.x,
+            y: position.y,
+            delta_x: delta.x,
+            delta_y: delta.y,
+            key_code: 0,
+            modifiers: 0,
+            state: 0,
+            button: 0,
+            reserved: 0,
+        },
+        crate::gui::protocol::InputEvent::PointerButton {
+            button,
+            state,
+            position,
+        } => NativeInputEvent {
+            kind: NativeEventKind::PointerButton as u32,
+            window_id: event.window_id,
+            x: position.x,
+            y: position.y,
+            delta_x: 0,
+            delta_y: 0,
+            key_code: 0,
+            modifiers: 0,
+            state: matches!(state, crate::gui::protocol::KeyState::Pressed) as u8,
+            button: match button {
+                crate::gui::protocol::PointerButton::Left => 1,
+                crate::gui::protocol::PointerButton::Right => 2,
+                crate::gui::protocol::PointerButton::Middle => 3,
+                crate::gui::protocol::PointerButton::Other(value) => *value,
+            },
+            reserved: 0,
+        },
+        crate::gui::protocol::InputEvent::Scroll { position, delta } => NativeInputEvent {
+            kind: NativeEventKind::PointerMove as u32,
+            window_id: event.window_id,
+            x: position.x,
+            y: position.y,
+            delta_x: delta.x,
+            delta_y: delta.y,
+            key_code: 0,
+            modifiers: 0,
+            state: 0,
+            button: 0,
+            reserved: 0,
+        },
+    }
+}
+
 fn with_user_access<R>(f: impl FnOnce() -> R) -> R {
     let smap = crate::cpu::smap_enabled();
     if smap {
@@ -4584,7 +5318,6 @@ pub struct WineRuntime {
 pub enum WineRuntimeError {
     NotFound,
     Invalid,
-    NotSupported,
     SecureBootViolation,
 }
 

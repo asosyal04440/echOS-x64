@@ -472,3 +472,11 @@ pub fn init() {
 pub fn controller_count() -> usize {
     AUDIO_CONTROLLERS.lock().len()
 }
+
+/// İlk denetleyici için görünür durum özetini döndürür.
+pub fn primary_controller_status() -> Option<(u32, bool)> {
+    let controllers = AUDIO_CONTROLLERS.lock();
+    controllers
+        .first()
+        .map(|controller| (controller.volume(), controller.is_muted()))
+}

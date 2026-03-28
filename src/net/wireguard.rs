@@ -656,6 +656,32 @@ impl WgManager {
 lazy_static::lazy_static! {
     pub static ref WG_MANAGER: WgManager = WgManager::new();
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WgRuntimeStatus {
+    pub devices: usize,
+    pub active_devices: usize,
+    pub established_peers: usize,
+}
+
+pub fn runtime_status() -> WgRuntimeStatus {
+    let devices = WG_MANAGER.devices.lock();
+    let mut snapshot = WgRuntimeStatus {
+        devices: devices.len(),
+        ..WgRuntimeStatus::default()
+    };
+    for device in devices.values() {
+        if device.is_up.load(Ordering::Relaxed) {
+            snapshot.active_devices += 1;
+        }
+        let peers = device.peers.lock();
+        for peer in peers.values() {
+            if peer.session.lock().established {
+                snapshot.established_peers += 1;
+            }
+        }
+    }
+    snapshot
+}
 
 // ============================================================================
 // HATA TİPİ

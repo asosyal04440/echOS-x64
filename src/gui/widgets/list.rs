@@ -222,7 +222,12 @@ impl ListView {
 
             let item = &self.items[item_index];
             let item_y = item_y_start + (i * self.item_height) as i32;
-            let row_rect = Rect::new(self.rect.x + 1, item_y, self.rect.width - 2, self.item_height as i32);
+            let row_rect = Rect::new(
+                self.rect.x + 1,
+                item_y,
+                self.rect.width - 2,
+                self.item_height as i32,
+            );
             if item.selected {
                 objects.push(solid_rect_object(
                     base_id ^ 0x1000 ^ item_index as u64,
@@ -280,7 +285,12 @@ impl ListView {
             let scroll_bar_y = self.rect.y + (h * self.scroll_offset / self.items.len()) as i32;
             objects.push(solid_rect_object(
                 base_id ^ 0x5000,
-                Rect::new(self.rect.x + self.rect.width - 8, scroll_bar_y, 6, scroll_bar_height),
+                Rect::new(
+                    self.rect.x + self.rect.width - 8,
+                    scroll_bar_y,
+                    6,
+                    scroll_bar_height,
+                ),
                 Theme::BUTTON_BG.to_u32(),
                 DamageLane::Window,
                 5,
@@ -576,7 +586,12 @@ impl TreeView {
 
             let (_, text, expanded, selected, level) = &self.flattened[item_index];
             let item_y = item_y_start + (i * self.item_height) as i32;
-            let row_rect = Rect::new(self.rect.x + 1, item_y, self.rect.width - 2, self.item_height as i32);
+            let row_rect = Rect::new(
+                self.rect.x + 1,
+                item_y,
+                self.rect.width - 2,
+                self.item_height as i32,
+            );
             if *selected {
                 objects.push(solid_rect_object(
                     base_id ^ 0x1000 ^ item_index as u64,

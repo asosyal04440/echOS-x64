@@ -7,21 +7,22 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use crate::ipc::{
+    request_capture_sync, request_clipboard_sync, request_dialog_sync, request_display_sync,
+    request_input_sync, request_notification_sync, request_shell_sync, request_store_sync,
+};
 use crate::gui::protocol::{
     AccessibilityNode, AppHealth, AppId, ClipboardPayload, DamagePacket, DesktopPermission,
     DialogId, DialogKind, DialogRequest, DialogResult, DialogSelection, FileGrant, LayerRole,
-    NotificationEntry, NotificationLevel, PermissionEntry, PermissionState, Rect, RenderObject,
-    SceneUpdate, ScreenshotEntry, SessionPowerState, SessionSnapshot, SharedSurfaceDescriptor,
-    ShellAppEntry, ShellShortcut, SurfaceId, WindowFlags, WindowId, WindowInfo, WindowInputEvent,
-    WorkspaceId, WorkspaceLayout, WorkspaceRule,
+    NotificationEntry, NotificationLevel, OutputMode, PermissionEntry, PermissionState, Rect,
+    RenderObject, SceneUpdate, ScreenshotEntry, SessionPowerState, SessionSnapshot,
+    SharedSurfaceDescriptor, ShellAppEntry, ShellShortcut, SurfaceId, WindowFlags, WindowId,
+    WindowInfo, WindowInputEvent, WorkspaceId, WorkspaceLayout, WorkspaceRule,
 };
 use crate::gui::theme::ThemeMode;
 use crate::services::display_atomic::HotPathMetrics;
 use crate::services::FileEntry;
 use crate::services::{
-    ech_capture::get_capture_service, ech_clipboard::get_clipboard_service,
-    ech_dialogs::get_dialogs_service, ech_display::get_display, ech_input::get_input,
-    ech_notifications::get_notifications_service, ech_shell::get_shell_service, get_store,
     CaptureCommand, CaptureResponse, ClipboardCommand, ClipboardResponse, DialogCommand,
     DialogResponse, DisplayCommand, DisplayResponse, InputCommand, InputResponse,
     NotificationCommand, NotificationResponse, ShellCommand, ShellResponse, StoreCommand,
@@ -42,13 +43,12 @@ pub struct DesktopClient {
 
 impl DesktopClient {
     pub fn connect(app_id: AppId) -> Result<Self, String> {
-        let input = get_input();
-        match input.process_command(InputCommand::RegisterApp { app_id }) {
-            InputResponse::FocusChanged { .. } | InputResponse::Ack => Ok(Self {
+        match request_input_sync(app_id, InputCommand::RegisterApp { app_id }) {
+            Some(InputResponse::FocusChanged { .. }) | Some(InputResponse::Ack) => Ok(Self {
                 app_id,
                 mapped_surfaces: Mutex::new(BTreeMap::new()),
             }),
-            InputResponse::Error(err) => Err(err),
+            Some(InputResponse::Error(err)) => Err(err),
             _ => Ok(Self {
                 app_id,
                 mapped_surfaces: Mutex::new(BTreeMap::new()),
@@ -68,26 +68,36 @@ impl DesktopClient {
         width: u32,
         height: u32,
     ) -> Result<ClientWindow, String> {
-        match self
-            .display()?
-            .process_command(DisplayCommand::CreateWindow {
+        match request_display_sync(
+            self.app_id,
+            DisplayCommand::CreateWindow {
                 app_id: self.app_id,
                 title: String::from(title),
                 x,
                 y,
                 width,
                 height,
-            }) {
-            DisplayResponse::WindowCreated {
+            },
+        ) {
+            Some(DisplayResponse::WindowCreated {
                 window_id,
                 surface_id,
                 content_rect,
-            } => Ok(ClientWindow {
-                window_id,
-                surface_id,
-                content_rect,
-            }),
-            DisplayResponse::Error(err) => Err(err),
+            }) => {
+                let _ = crate::runtime::attach_window_session(
+                    self.app_id,
+                    0,
+                    false,
+                    window_id,
+                    surface_id,
+                );
+                Ok(ClientWindow {
+                    window_id,
+                    surface_id,
+                    content_rect,
+                })
+            }
+            Some(DisplayResponse::Error(err)) => Err(err),
             _ => Err(String::from("display returned unexpected response")),
         }
     }
@@ -103,9 +113,9 @@ impl DesktopClient {
         layer_role: LayerRole,
         flags: WindowFlags,
     ) -> Result<ClientWindow, String> {
-        match self
-            .display()?
-            .process_command(DisplayCommand::CreateWindowWithMeta {
+        match request_display_sync(
+            self.app_id,
+            DisplayCommand::CreateWindowWithMeta {
                 app_id: self.app_id,
                 title: String::from(title),
                 x,
@@ -115,26 +125,38 @@ impl DesktopClient {
                 workspace_id,
                 layer_role,
                 flags,
-            }) {
-            DisplayResponse::WindowCreated {
+            },
+        ) {
+            Some(DisplayResponse::WindowCreated {
                 window_id,
                 surface_id,
                 content_rect,
-            } => Ok(ClientWindow {
-                window_id,
-                surface_id,
-                content_rect,
-            }),
-            DisplayResponse::Error(err) => Err(err),
+            }) => {
+                let _ = crate::runtime::attach_window_session(
+                    self.app_id,
+                    workspace_id,
+                    false,
+                    window_id,
+                    surface_id,
+                );
+                Ok(ClientWindow {
+                    window_id,
+                    surface_id,
+                    content_rect,
+                })
+            }
+            Some(DisplayResponse::Error(err)) => Err(err),
             _ => Err(String::from("display returned unexpected response")),
         }
     }
 
     pub fn destroy_window(&self, window_id: WindowId) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::DestroyWindow { window_id }),
-        )
+        let result =
+            self.expect_ack(self.display_response(DisplayCommand::DestroyWindow { window_id })?);
+        if result.is_ok() {
+            crate::runtime::forget_window_session(window_id);
+        }
+        result
     }
 
     pub fn present(&self, window_id: WindowId, pixels: &[u32]) -> Result<(), String> {
@@ -142,21 +164,15 @@ impl DesktopClient {
             return Ok(());
         }
 
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::CommitWindowBuffer {
-                    window_id,
-                    pixels: pixels.to_vec(),
-                }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::CommitWindowBuffer {
+            window_id,
+            pixels: pixels.to_vec(),
+        })?)
     }
 
     pub fn commit_scene(&self, window_id: WindowId, mut scene: SceneUpdate) -> Result<(), String> {
         scene.canonicalize();
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::CommitScene { window_id, scene }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::CommitScene { window_id, scene })?)
     }
 
     pub fn commit_render_objects(
@@ -176,9 +192,7 @@ impl DesktopClient {
     }
 
     pub fn map_surface(&self, window_id: WindowId) -> Result<SharedSurfaceDescriptor, String> {
-        let descriptor = match self
-            .display()?
-            .process_command(DisplayCommand::MapWindowSurface { window_id })
+        let descriptor = match self.display_response(DisplayCommand::MapWindowSurface { window_id })?
         {
             DisplayResponse::SurfaceMapped(descriptor) => descriptor,
             DisplayResponse::Error(err) => return Err(err),
@@ -195,25 +209,22 @@ impl DesktopClient {
         generation: u64,
         rect: Rect,
     ) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::SubmitWindowDamage {
-                    window_id,
-                    packet: DamagePacket {
-                        surface_id,
-                        generation,
-                        rect,
-                    },
-                }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::SubmitWindowDamage {
+            window_id,
+            packet: DamagePacket {
+                surface_id,
+                generation,
+                rect,
+            },
+        })?)
     }
 
     pub fn move_window(&self, window_id: WindowId, x: i32, y: i32) -> Result<(), String> {
-        self.expect_ack(self.display()?.process_command(DisplayCommand::MoveWindow {
+        self.expect_ack(self.display_response(DisplayCommand::MoveWindow {
             window_id,
             x,
             y,
-        }))
+        })?)
     }
 
     pub fn resize_window(
@@ -222,25 +233,19 @@ impl DesktopClient {
         width: u32,
         height: u32,
     ) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::ResizeWindow {
-                    window_id,
-                    width,
-                    height,
-                }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::ResizeWindow {
+            window_id,
+            width,
+            height,
+        })?)
     }
 
     pub fn focus_window(&self, window_id: WindowId) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::FocusWindow { window_id }),
-        )?;
+        self.expect_ack(self.display_response(DisplayCommand::FocusWindow { window_id })?)?;
 
-        match get_input().process_command(InputCommand::RequestFocus {
+        match self.input_response(InputCommand::RequestFocus {
             app_id: self.app_id,
-        }) {
+        })? {
             InputResponse::FocusChanged { .. } | InputResponse::Ack => Ok(()),
             InputResponse::Error(err) => Err(err),
             _ => Ok(()),
@@ -248,19 +253,15 @@ impl DesktopClient {
     }
 
     pub fn set_title(&self, window_id: WindowId, title: &str) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::SetWindowTitle {
-                    window_id,
-                    title: String::from(title),
-                }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::SetWindowTitle {
+            window_id,
+            title: String::from(title),
+        })?)
     }
 
     pub fn set_visibility(&self, window_id: WindowId, visible: bool) -> Result<(), String> {
         self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::SetWindowVisibility { window_id, visible }),
+            self.display_response(DisplayCommand::SetWindowVisibility { window_id, visible })?,
         )
     }
 
@@ -271,15 +272,12 @@ impl DesktopClient {
         layer_role: LayerRole,
         flags: WindowFlags,
     ) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::SetWindowMeta {
-                    window_id,
-                    workspace_id,
-                    layer_role,
-                    flags,
-                }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::SetWindowMeta {
+            window_id,
+            workspace_id,
+            layer_role,
+            flags,
+        })?)
     }
 
     pub fn move_window_to_workspace(
@@ -287,17 +285,14 @@ impl DesktopClient {
         window_id: WindowId,
         workspace_id: WorkspaceId,
     ) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::MoveWindowToWorkspace {
-                    window_id,
-                    workspace_id,
-                }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::MoveWindowToWorkspace {
+            window_id,
+            workspace_id,
+        })?)
     }
 
     pub fn list_windows(&self) -> Result<Vec<WindowInfo>, String> {
-        match self.display()?.process_command(DisplayCommand::ListWindows) {
+        match self.display_response(DisplayCommand::ListWindows)? {
             DisplayResponse::WindowList { windows } => Ok(windows),
             DisplayResponse::Error(err) => Err(err),
             _ => Err(String::from("display returned unexpected response")),
@@ -312,24 +307,50 @@ impl DesktopClient {
     }
 
     pub fn present_frame(&self) -> Result<(), String> {
-        self.expect_ack(self.display()?.process_command(DisplayCommand::Present))
+        self.expect_ack(self.display_response(DisplayCommand::Present)?)
     }
 
     pub fn set_present_mode(
         &self,
         mode: crate::gui::protocol::DisplayPresentMode,
     ) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::SetPresentMode { mode }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::SetPresentMode { mode })?)
+    }
+
+    pub fn query_output_mode(&self) -> Result<(OutputMode, OutputMode, OutputMode), String> {
+        match self.display_response(DisplayCommand::QueryOutputMode)? {
+            DisplayResponse::OutputModeState {
+                current,
+                requested,
+                effective,
+            } => Ok((current, requested, effective)),
+            DisplayResponse::Error(err) => Err(err),
+            _ => Err(String::from("display returned unexpected response")),
+        }
+    }
+
+    pub fn list_output_modes(&self) -> Result<Vec<OutputMode>, String> {
+        match self.display_response(DisplayCommand::ListOutputModes)? {
+            DisplayResponse::OutputModeCatalog { modes } => Ok(modes),
+            DisplayResponse::Error(err) => Err(err),
+            _ => Err(String::from("display returned unexpected response")),
+        }
+    }
+
+    pub fn set_output_mode(&self, mode: OutputMode) -> Result<(OutputMode, OutputMode, OutputMode), String> {
+        match self.display_response(DisplayCommand::SetOutputMode { mode })? {
+            DisplayResponse::OutputModeState {
+                current,
+                requested,
+                effective,
+            } => Ok((current, requested, effective)),
+            DisplayResponse::Error(err) => Err(err),
+            _ => Err(String::from("display returned unexpected response")),
+        }
     }
 
     pub fn present_metrics(&self) -> Result<HotPathMetrics, String> {
-        match self
-            .display()?
-            .process_command(DisplayCommand::QueryPresentMetrics)
-        {
+        match self.display_response(DisplayCommand::QueryPresentMetrics)? {
             DisplayResponse::PresentMetrics { metrics } => Ok(metrics),
             DisplayResponse::Error(err) => Err(err),
             _ => Err(String::from("display returned unexpected response")),
@@ -337,27 +358,21 @@ impl DesktopClient {
     }
 
     pub fn set_theme_mode(&self, mode: ThemeMode) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::SetThemeMode { mode }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::SetThemeMode { mode })?)
     }
 
     pub fn submit_frame_intent(
         &self,
         intent: crate::gui::protocol::FrameIntent,
     ) -> Result<(), String> {
-        self.expect_ack(
-            self.display()?
-                .process_command(DisplayCommand::SubmitFrameIntent { intent }),
-        )
+        self.expect_ack(self.display_response(DisplayCommand::SubmitFrameIntent { intent })?)
     }
 
     pub fn clipboard_set(&self, payload: ClipboardPayload) -> Result<(), String> {
-        match get_clipboard_service().process_command(ClipboardCommand::Set {
+        match self.clipboard_response(ClipboardCommand::Set {
             app_id: self.app_id,
             payload,
-        }) {
+        })? {
             ClipboardResponse::Ack => Ok(()),
             ClipboardResponse::Error(err) => Err(err),
             _ => Err(String::from("clipboard returned unexpected response")),
@@ -365,9 +380,9 @@ impl DesktopClient {
     }
 
     pub fn clipboard_get(&self) -> Result<ClipboardPayload, String> {
-        match get_clipboard_service().process_command(ClipboardCommand::GetCurrent {
+        match self.clipboard_response(ClipboardCommand::GetCurrent {
             app_id: self.app_id,
-        }) {
+        })? {
             ClipboardResponse::Current(payload) => Ok(payload),
             ClipboardResponse::Error(err) => Err(err),
             _ => Err(String::from("clipboard returned unexpected response")),
@@ -380,7 +395,7 @@ impl DesktopClient {
         message: &str,
         level: NotificationLevel,
     ) -> Result<u64, String> {
-        match get_notifications_service().process_command(NotificationCommand::Push(
+        match self.notification_response(NotificationCommand::Push(
             crate::gui::protocol::NotificationRequest {
                 app_id: self.app_id,
                 title: String::from(title),
@@ -388,7 +403,7 @@ impl DesktopClient {
                 level,
                 action_label: Some(String::from("Open")),
             },
-        )) {
+        ))? {
             NotificationResponse::NotificationId(id) => Ok(id),
             NotificationResponse::Error(err) => Err(err),
             _ => Err(String::from("notifications returned unexpected response")),
@@ -396,11 +411,11 @@ impl DesktopClient {
     }
 
     pub fn list_notifications(&self, max_items: usize) -> Result<Vec<NotificationEntry>, String> {
-        match get_notifications_service().process_command(NotificationCommand::List {
+        match self.notification_response(NotificationCommand::List {
             app_id: self.app_id,
             include_read: true,
             max_items,
-        }) {
+        })? {
             NotificationResponse::Notifications(entries) => Ok(entries),
             NotificationResponse::Error(err) => Err(err),
             _ => Err(String::from("notifications returned unexpected response")),
@@ -408,9 +423,9 @@ impl DesktopClient {
     }
 
     pub fn clear_notifications(&self) -> Result<(), String> {
-        match get_notifications_service().process_command(NotificationCommand::Clear {
+        match self.notification_response(NotificationCommand::Clear {
             app_id: self.app_id,
-        }) {
+        })? {
             NotificationResponse::Ack => Ok(()),
             NotificationResponse::Error(err) => Err(err),
             _ => Err(String::from("notifications returned unexpected response")),
@@ -418,10 +433,10 @@ impl DesktopClient {
     }
 
     pub fn mark_notification_read(&self, id: u64) -> Result<(), String> {
-        match get_notifications_service().process_command(NotificationCommand::MarkRead {
+        match self.notification_response(NotificationCommand::MarkRead {
             app_id: self.app_id,
             id,
-        }) {
+        })? {
             NotificationResponse::Ack => Ok(()),
             NotificationResponse::Error(err) => Err(err),
             _ => Err(String::from("notifications returned unexpected response")),
@@ -435,13 +450,13 @@ impl DesktopClient {
         message: &str,
         path_hint: &str,
     ) -> Result<DialogId, String> {
-        match get_dialogs_service().process_command(DialogCommand::Request {
+        match self.dialog_response(DialogCommand::Request {
             app_id: self.app_id,
             kind,
             title: String::from(title),
             message: String::from(message),
             path_hint: String::from(path_hint),
-        }) {
+        })? {
             DialogResponse::Requested(id) => Ok(id),
             DialogResponse::Error(err) => Err(err),
             _ => Err(String::from("dialogs returned unexpected response")),
@@ -461,10 +476,10 @@ impl DesktopClient {
     }
 
     pub fn poll_dialog_result(&self, dialog_id: DialogId) -> Result<Option<DialogResult>, String> {
-        match get_dialogs_service().process_command(DialogCommand::PollResult {
+        match self.dialog_response(DialogCommand::PollResult {
             app_id: self.app_id,
             dialog_id,
-        }) {
+        })? {
             DialogResponse::Result(result) => Ok(result),
             DialogResponse::Error(err) => Err(err),
             _ => Err(String::from("dialogs returned unexpected response")),
@@ -472,7 +487,7 @@ impl DesktopClient {
     }
 
     pub fn list_pending_dialogs(&self, max_items: usize) -> Result<Vec<DialogRequest>, String> {
-        match get_dialogs_service().process_command(DialogCommand::ListPending { max_items }) {
+        match self.dialog_response(DialogCommand::ListPending { max_items })? {
             DialogResponse::Pending(requests) => Ok(requests),
             DialogResponse::Error(err) => Err(err),
             _ => Err(String::from("dialogs returned unexpected response")),
@@ -484,10 +499,10 @@ impl DesktopClient {
         dialog_id: DialogId,
         selection: DialogSelection,
     ) -> Result<(), String> {
-        match get_dialogs_service().process_command(DialogCommand::Resolve {
+        match self.dialog_response(DialogCommand::Resolve {
             dialog_id,
             selection,
-        }) {
+        })? {
             DialogResponse::Ack => Ok(()),
             DialogResponse::Error(err) => Err(err),
             _ => Err(String::from("dialogs returned unexpected response")),
@@ -495,10 +510,10 @@ impl DesktopClient {
     }
 
     pub fn register_shell_app(&self, name: &str) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::RegisterApp {
+        match self.shell_response(ShellCommand::RegisterApp {
             app_id: self.app_id,
             name: String::from(name),
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -506,10 +521,10 @@ impl DesktopClient {
     }
 
     pub fn mark_app_launched(&self, status_line: &str) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::MarkAppLaunch {
+        match self.shell_response(ShellCommand::MarkAppLaunch {
             app_id: self.app_id,
             status_line: String::from(status_line),
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -517,11 +532,11 @@ impl DesktopClient {
     }
 
     pub fn mark_app_exited(&self, clean: bool, status_line: &str) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::MarkAppExit {
+        match self.shell_response(ShellCommand::MarkAppExit {
             app_id: self.app_id,
             clean,
             status_line: String::from(status_line),
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -529,10 +544,10 @@ impl DesktopClient {
     }
 
     pub fn record_app_fault(&self, detail: &str) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::RecordAppFault {
+        match self.shell_response(ShellCommand::RecordAppFault {
             app_id: self.app_id,
             detail: String::from(detail),
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -540,10 +555,10 @@ impl DesktopClient {
     }
 
     pub fn clear_app_attention(&self, status_line: Option<&str>) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::ClearAppAttention {
+        match self.shell_response(ShellCommand::ClearAppAttention {
             app_id: self.app_id,
             status_line: status_line.map(String::from),
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -555,11 +570,11 @@ impl DesktopClient {
         permission: DesktopPermission,
         state: PermissionState,
     ) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::SetPermission {
+        match self.shell_response(ShellCommand::SetPermission {
             app_id: self.app_id,
             permission,
             state,
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -570,10 +585,10 @@ impl DesktopClient {
         &self,
         permission: DesktopPermission,
     ) -> Result<PermissionState, String> {
-        match get_shell_service().process_command(ShellCommand::GetPermission {
+        match self.shell_response(ShellCommand::GetPermission {
             app_id: self.app_id,
             permission,
-        }) {
+        })? {
             ShellResponse::Permission(state) => Ok(state),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -581,9 +596,9 @@ impl DesktopClient {
     }
 
     pub fn list_permissions(&self) -> Result<Vec<PermissionEntry>, String> {
-        match get_shell_service().process_command(ShellCommand::ListPermissions {
+        match self.shell_response(ShellCommand::ListPermissions {
             app_id: self.app_id,
-        }) {
+        })? {
             ShellResponse::Permissions(entries) => Ok(entries),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -591,11 +606,11 @@ impl DesktopClient {
     }
 
     pub fn grant_file_access(&self, path_prefix: &str, read_only: bool) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::GrantFileAccess {
+        match self.shell_response(ShellCommand::GrantFileAccess {
             app_id: self.app_id,
             path_prefix: String::from(path_prefix),
             read_only,
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -603,9 +618,9 @@ impl DesktopClient {
     }
 
     pub fn list_file_grants(&self) -> Result<Vec<FileGrant>, String> {
-        match get_shell_service().process_command(ShellCommand::ListFileGrants {
+        match self.shell_response(ShellCommand::ListFileGrants {
             app_id: self.app_id,
-        }) {
+        })? {
             ShellResponse::FileGrants(grants) => Ok(grants),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -613,10 +628,10 @@ impl DesktopClient {
     }
 
     pub fn set_auto_restore(&self, enabled: bool) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::SetAutoRestore {
+        match self.shell_response(ShellCommand::SetAutoRestore {
             app_id: self.app_id,
             enabled,
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -624,10 +639,10 @@ impl DesktopClient {
     }
 
     pub fn publish_accessibility_tree(&self, nodes: Vec<AccessibilityNode>) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::SetAccessibilityTree {
+        match self.shell_response(ShellCommand::SetAccessibilityTree {
             app_id: self.app_id,
             nodes,
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -635,9 +650,9 @@ impl DesktopClient {
     }
 
     pub fn accessibility_tree(&self) -> Result<Vec<AccessibilityNode>, String> {
-        match get_shell_service().process_command(ShellCommand::GetAccessibilityTree {
+        match self.shell_response(ShellCommand::GetAccessibilityTree {
             app_id: self.app_id,
-        }) {
+        })? {
             ShellResponse::AccessibilityTree(nodes) => Ok(nodes),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -651,13 +666,13 @@ impl DesktopClient {
         focused: bool,
         workspace_id: WorkspaceId,
     ) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::UpdateAppWindow {
+        match self.shell_response(ShellCommand::UpdateAppWindow {
             app_id: self.app_id,
             window_id,
             visible,
             focused,
             workspace_id,
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -665,7 +680,7 @@ impl DesktopClient {
     }
 
     pub fn list_shell_apps(&self) -> Result<Vec<ShellAppEntry>, String> {
-        match get_shell_service().process_command(ShellCommand::ListApps) {
+        match self.shell_response(ShellCommand::ListApps)? {
             ShellResponse::Apps(apps) => Ok(apps),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -673,7 +688,7 @@ impl DesktopClient {
     }
 
     pub fn set_workspace(&self, workspace_id: WorkspaceId) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::SetWorkspace { workspace_id }) {
+        match self.shell_response(ShellCommand::SetWorkspace { workspace_id })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -681,7 +696,7 @@ impl DesktopClient {
     }
 
     pub fn workspace(&self) -> Result<WorkspaceId, String> {
-        match get_shell_service().process_command(ShellCommand::GetWorkspace) {
+        match self.shell_response(ShellCommand::GetWorkspace)? {
             ShellResponse::Workspace(workspace_id) => Ok(workspace_id),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -693,10 +708,10 @@ impl DesktopClient {
         workspace_id: WorkspaceId,
         layout: WorkspaceLayout,
     ) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::SetWorkspaceLayout {
+        match self.shell_response(ShellCommand::SetWorkspaceLayout {
             workspace_id,
             layout,
-        }) {
+        })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -704,8 +719,7 @@ impl DesktopClient {
     }
 
     pub fn workspace_layout(&self, workspace_id: WorkspaceId) -> Result<WorkspaceLayout, String> {
-        match get_shell_service().process_command(ShellCommand::GetWorkspaceLayout { workspace_id })
-        {
+        match self.shell_response(ShellCommand::GetWorkspaceLayout { workspace_id })? {
             ShellResponse::WorkspaceLayout(layout) => Ok(layout),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -717,9 +731,7 @@ impl DesktopClient {
         workspace_id: WorkspaceId,
         rule: WorkspaceRule,
     ) -> Result<(), String> {
-        match get_shell_service()
-            .process_command(ShellCommand::SetWorkspaceRule { workspace_id, rule })
-        {
+        match self.shell_response(ShellCommand::SetWorkspaceRule { workspace_id, rule })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -727,7 +739,7 @@ impl DesktopClient {
     }
 
     pub fn workspace_rule(&self, workspace_id: WorkspaceId) -> Result<WorkspaceRule, String> {
-        match get_shell_service().process_command(ShellCommand::GetWorkspaceRule { workspace_id }) {
+        match self.shell_response(ShellCommand::GetWorkspaceRule { workspace_id })? {
             ShellResponse::WorkspaceRule(rule) => Ok(rule),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -735,7 +747,7 @@ impl DesktopClient {
     }
 
     pub fn toggle_scratchpad(&self) -> Result<bool, String> {
-        match get_shell_service().process_command(ShellCommand::ToggleScratchpad) {
+        match self.shell_response(ShellCommand::ToggleScratchpad)? {
             ShellResponse::ToggleState(state) => Ok(state),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -743,7 +755,7 @@ impl DesktopClient {
     }
 
     pub fn toggle_overview(&self) -> Result<bool, String> {
-        match get_shell_service().process_command(ShellCommand::ToggleOverview) {
+        match self.shell_response(ShellCommand::ToggleOverview)? {
             ShellResponse::ToggleState(state) => Ok(state),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -751,7 +763,7 @@ impl DesktopClient {
     }
 
     pub fn set_power_state(&self, power_state: SessionPowerState) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::SetPowerState { power_state }) {
+        match self.shell_response(ShellCommand::SetPowerState { power_state })? {
             ShellResponse::Ack => Ok(()),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -759,7 +771,7 @@ impl DesktopClient {
     }
 
     pub fn session_snapshot(&self) -> Result<SessionSnapshot, String> {
-        match get_shell_service().process_command(ShellCommand::GetSessionSnapshot) {
+        match self.shell_response(ShellCommand::GetSessionSnapshot)? {
             ShellResponse::SessionSnapshot(snapshot) => Ok(snapshot),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
@@ -767,10 +779,10 @@ impl DesktopClient {
     }
 
     pub fn capture_screen(&self, label: &str) -> Result<ScreenshotEntry, String> {
-        match get_capture_service().process_command(CaptureCommand::CaptureDesktop {
+        match self.capture_response(CaptureCommand::CaptureDesktop {
             app_id: self.app_id,
             label: String::from(label),
-        }) {
+        })? {
             CaptureResponse::Captured(entry) => Ok(entry),
             CaptureResponse::Error(err) => Err(err),
             _ => Err(String::from("capture returned unexpected response")),
@@ -778,10 +790,10 @@ impl DesktopClient {
     }
 
     pub fn list_captures(&self, max_items: usize) -> Result<Vec<ScreenshotEntry>, String> {
-        match get_capture_service().process_command(CaptureCommand::ListCaptures {
+        match self.capture_response(CaptureCommand::ListCaptures {
             app_id: self.app_id,
             max_items,
-        }) {
+        })? {
             CaptureResponse::Captures(entries) => Ok(entries),
             CaptureResponse::Error(err) => Err(err),
             _ => Err(String::from("capture returned unexpected response")),
@@ -791,10 +803,10 @@ impl DesktopClient {
     pub fn save_capture_ppm(&self, capture_id: u64, path: &str) -> Result<(), String> {
         self.ensure_permission(DesktopPermission::ScreenCapture)?;
         self.ensure_file_access(path, true)?;
-        match get_capture_service().process_command(CaptureCommand::GetCapture {
+        match self.capture_response(CaptureCommand::GetCapture {
             app_id: self.app_id,
             capture_id,
-        }) {
+        })? {
             CaptureResponse::CaptureData { entry, pixels } => {
                 let mut output =
                     format!("P6\n{} {}\n255\n", entry.width, entry.height).into_bytes();
@@ -811,9 +823,9 @@ impl DesktopClient {
     }
 
     pub fn register_shortcut_sink(&self) -> Result<(), String> {
-        match get_input().process_command(InputCommand::RegisterShortcutSink {
+        match self.input_response(InputCommand::RegisterShortcutSink {
             app_id: self.app_id,
-        }) {
+        })? {
             InputResponse::Ack => Ok(()),
             InputResponse::Error(err) => Err(err),
             _ => Err(String::from("input returned unexpected response")),
@@ -821,10 +833,10 @@ impl DesktopClient {
     }
 
     pub fn poll_shortcuts(&self, max_events: usize) -> Result<Vec<ShellShortcut>, String> {
-        match get_input().process_command(InputCommand::PollShortcuts {
+        match self.input_response(InputCommand::PollShortcuts {
             app_id: self.app_id,
             max_events,
-        }) {
+        })? {
             InputResponse::Shortcuts(shortcuts) => Ok(shortcuts),
             InputResponse::Error(err) => Err(err),
             _ => Err(String::from("input returned unexpected response")),
@@ -832,10 +844,10 @@ impl DesktopClient {
     }
 
     pub fn poll_input(&self, max_events: usize) -> Result<Vec<WindowInputEvent>, String> {
-        match get_input().process_command(InputCommand::PollEvents {
+        match self.input_response(InputCommand::PollEvents {
             app_id: self.app_id,
             max_events,
-        }) {
+        })? {
             InputResponse::Events { events, .. } => Ok(events),
             InputResponse::Error(err) => Err(err),
             _ => Err(String::from("input returned unexpected response")),
@@ -845,9 +857,9 @@ impl DesktopClient {
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, false)?;
-        match get_store().process_command(StoreCommand::ReadFile {
+        match self.store_response(StoreCommand::ReadFile {
             path: String::from(path),
-        }) {
+        })? {
             StoreResponse::FileData(data) => Ok(data),
             StoreResponse::Error(err) => Err(err),
             _ => Err(String::from("store returned unexpected response")),
@@ -857,10 +869,24 @@ impl DesktopClient {
     pub fn write_file(&self, path: &str, data: &[u8]) -> Result<(), String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, true)?;
-        match get_store().process_command(StoreCommand::WriteFile {
+        match self.store_response(StoreCommand::WriteFile {
             path: String::from(path),
             data: data.to_vec(),
-        }) {
+        })? {
+            StoreResponse::Success => Ok(()),
+            StoreResponse::Error(err) => Err(err),
+            _ => Err(String::from("store returned unexpected response")),
+        }
+    }
+
+    pub fn rename_path(&self, from: &str, to: &str) -> Result<(), String> {
+        self.ensure_permission(DesktopPermission::FileSystem)?;
+        self.ensure_file_access(from, true)?;
+        self.ensure_file_access(to, true)?;
+        match self.store_response(StoreCommand::RenamePath {
+            from: String::from(from),
+            to: String::from(to),
+        })? {
             StoreResponse::Success => Ok(()),
             StoreResponse::Error(err) => Err(err),
             _ => Err(String::from("store returned unexpected response")),
@@ -870,9 +896,21 @@ impl DesktopClient {
     pub fn delete_file(&self, path: &str) -> Result<(), String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, true)?;
-        match get_store().process_command(StoreCommand::DeleteFile {
+        match self.store_response(StoreCommand::DeleteFile {
             path: String::from(path),
-        }) {
+        })? {
+            StoreResponse::Success => Ok(()),
+            StoreResponse::Error(err) => Err(err),
+            _ => Err(String::from("store returned unexpected response")),
+        }
+    }
+
+    pub fn delete_directory(&self, path: &str) -> Result<(), String> {
+        self.ensure_permission(DesktopPermission::FileSystem)?;
+        self.ensure_file_access(path, true)?;
+        match self.store_response(StoreCommand::DeleteDirectory {
+            path: String::from(path),
+        })? {
             StoreResponse::Success => Ok(()),
             StoreResponse::Error(err) => Err(err),
             _ => Err(String::from("store returned unexpected response")),
@@ -882,9 +920,9 @@ impl DesktopClient {
     pub fn create_directory(&self, path: &str) -> Result<(), String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, true)?;
-        match get_store().process_command(StoreCommand::CreateDirectory {
+        match self.store_response(StoreCommand::CreateDirectory {
             path: String::from(path),
-        }) {
+        })? {
             StoreResponse::Success => Ok(()),
             StoreResponse::Error(err) => Err(err),
             _ => Err(String::from("store returned unexpected response")),
@@ -894,22 +932,13 @@ impl DesktopClient {
     pub fn list_directory(&self, path: &str) -> Result<Vec<FileEntry>, String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, false)?;
-        match get_store().process_command(StoreCommand::ListDirectory {
+        match self.store_response(StoreCommand::ListDirectory {
             path: String::from(path),
-        }) {
+        })? {
             StoreResponse::DirectoryContents(entries) => Ok(entries),
             StoreResponse::Error(err) => Err(err),
             _ => Err(String::from("store returned unexpected response")),
         }
-    }
-
-    fn display(
-        &self,
-    ) -> Result<alloc::sync::Arc<crate::services::ech_display::EchDisplay>, String> {
-        get_display()
-            .lock()
-            .clone()
-            .ok_or_else(|| String::from("display service unavailable"))
     }
 
     fn expect_ack(&self, response: DisplayResponse) -> Result<(), String> {
@@ -920,12 +949,53 @@ impl DesktopClient {
         }
     }
 
+    fn display_response(&self, command: DisplayCommand) -> Result<DisplayResponse, String> {
+        request_display_sync(self.app_id, command)
+            .ok_or_else(|| String::from("display service unavailable"))
+    }
+
+    fn input_response(&self, command: InputCommand) -> Result<InputResponse, String> {
+        request_input_sync(self.app_id, command)
+            .ok_or_else(|| String::from("input service unavailable"))
+    }
+
+    fn shell_response(&self, command: ShellCommand) -> Result<ShellResponse, String> {
+        request_shell_sync(self.app_id, command)
+            .ok_or_else(|| String::from("shell service unavailable"))
+    }
+
+    fn notification_response(
+        &self,
+        command: NotificationCommand,
+    ) -> Result<NotificationResponse, String> {
+        request_notification_sync(self.app_id, command)
+            .ok_or_else(|| String::from("notification service unavailable"))
+    }
+
+    fn clipboard_response(&self, command: ClipboardCommand) -> Result<ClipboardResponse, String> {
+        request_clipboard_sync(self.app_id, command)
+            .ok_or_else(|| String::from("clipboard service unavailable"))
+    }
+
+    fn dialog_response(&self, command: DialogCommand) -> Result<DialogResponse, String> {
+        request_dialog_sync(self.app_id, command)
+            .ok_or_else(|| String::from("dialog service unavailable"))
+    }
+
+    fn capture_response(&self, command: CaptureCommand) -> Result<CaptureResponse, String> {
+        request_capture_sync(self.app_id, command)
+            .ok_or_else(|| String::from("capture service unavailable"))
+    }
+
+    fn store_response(&self, command: StoreCommand) -> Result<StoreResponse, String> {
+        request_store_sync(self.app_id, command)
+            .ok_or_else(|| String::from("store service unavailable"))
+    }
+
     fn present_zero_copy(&self, window_id: WindowId, pixels: &[u32]) -> Result<(), String> {
         let descriptor = self.cached_surface_descriptor(window_id)?;
-        let display = self.display()?;
-        let (_, shared_surface) = display
-            .shared_surface_for_window(window_id)
-            .ok_or_else(|| String::from("shared surface unavailable"))?;
+        let shared_surface = crate::gui::surface_memory::resolve_data_plane_surface(descriptor)
+            .map_err(|_| String::from("shared surface unavailable"))?;
 
         Self::write_shared_surface(&shared_surface, pixels)?;
         let generation = shared_surface.generation();
@@ -965,11 +1035,11 @@ impl DesktopClient {
     }
 
     fn ensure_file_access(&self, path: &str, write: bool) -> Result<(), String> {
-        match get_shell_service().process_command(ShellCommand::CheckFileAccess {
+        match self.shell_response(ShellCommand::CheckFileAccess {
             app_id: self.app_id,
             path: String::from(path),
             write,
-        }) {
+        })? {
             ShellResponse::FileAccess(true) => Ok(()),
             ShellResponse::FileAccess(false) => Err(String::from("file access not granted")),
             ShellResponse::Error(err) => Err(err),

@@ -154,8 +154,14 @@ impl ProgressBar {
 
         if self.indeterminate {
             let block_w = (self.rect.width / 4).max(20);
-            let draw_x = (self.rect.x + 2 + self.indeterminate_pos).min(self.rect.x + self.rect.width - 2);
-            let draw_w = block_w.min(self.rect.width.saturating_sub(4).saturating_sub(self.indeterminate_pos));
+            let draw_x =
+                (self.rect.x + 2 + self.indeterminate_pos).min(self.rect.x + self.rect.width - 2);
+            let draw_w = block_w.min(
+                self.rect
+                    .width
+                    .saturating_sub(4)
+                    .saturating_sub(self.indeterminate_pos),
+            );
             if draw_w > 0 {
                 objects.push(solid_rect_object(
                     base_id ^ 0x20,
@@ -171,7 +177,12 @@ impl ProgressBar {
             if fill_width > 0 {
                 objects.push(solid_rect_object(
                     base_id ^ 0x30,
-                    Rect::new(self.rect.x + 2, self.rect.y + 2, fill_width, self.rect.height - 4),
+                    Rect::new(
+                        self.rect.x + 2,
+                        self.rect.y + 2,
+                        fill_width,
+                        self.rect.height - 4,
+                    ),
                     Theme::ACCENT_PRIMARY.to_u32(),
                     DamageLane::Window,
                     2,
@@ -190,7 +201,12 @@ impl ProgressBar {
             };
             objects.push(text_render_object_with_width(
                 base_id ^ 0x40,
-                Rect::new(text_x, self.rect.y + ((self.rect.height - 16).max(0) / 2), self.rect.width.max(1), 18),
+                Rect::new(
+                    text_x,
+                    self.rect.y + ((self.rect.height - 16).max(0) / 2),
+                    self.rect.width.max(1),
+                    18,
+                ),
                 &pct_str,
                 text_color,
                 false,
@@ -344,8 +360,8 @@ impl Widget for Spinner {
                     + ((bg_color >> 16) & 0xFF) * (255 - opacity) / 255;
                 let g = ((base_color >> 8) & 0xFF) * opacity / 255
                     + ((bg_color >> 8) & 0xFF) * (255 - opacity) / 255;
-                let b = (base_color & 0xFF) * opacity / 255
-                    + (bg_color & 0xFF) * (255 - opacity) / 255;
+                let b =
+                    (base_color & 0xFF) * opacity / 255 + (bg_color & 0xFF) * (255 - opacity) / 255;
                 pixels[py as usize * self.size + px as usize] = (r << 16) | (g << 8) | b;
             }
         }

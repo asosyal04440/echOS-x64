@@ -58,6 +58,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::ethernet::{EtherType, EthernetFrame, EthernetHeader};
+use super::socket;
 use super::{Ipv4Addr, MacAddr, NetError, SocketAddr};
 
 // ============================================================================
@@ -687,7 +688,7 @@ impl IoUring {
 
     pub fn submit_batch(&mut self, sqes: &[Sqe]) -> Result<usize, NetError> {
         if !self.active.load(Ordering::Relaxed) {
-            return Err(NetError::NotSupported);
+            return Err(NetError::ConnectionClosed);
         }
 
         let mut submitted = 0usize;
@@ -768,6 +769,9 @@ impl IoUring {
             }
             OpCode::Send => self.process_send(sqe),
             OpCode::Recv => self.process_recv(sqe),
+            OpCode::Accept => self.process_accept(sqe),
+            OpCode::Connect => self.process_connect(sqe),
+            OpCode::Close => self.process_close(sqe),
             OpCode::MapBuf => {
                 // Map buffer to userspace
                 // Would set up page table mappings
@@ -777,8 +781,22 @@ impl IoUring {
                 // Unmap buffer from userspace
                 Ok(0)
             }
-            _ => Err(NetError::NotSupported),
         }
+    }
+
+    fn process_accept(&mut self, sqe: &Sqe) -> Result<u32, NetError> {
+        let (accepted, _) = socket::accept(sqe.socket_id)?;
+        Ok(accepted)
+    }
+
+    fn process_connect(&mut self, sqe: &Sqe) -> Result<u32, NetError> {
+        socket::connect(sqe.socket_id, sqe.addr)?;
+        Ok(0)
+    }
+
+    fn process_close(&mut self, sqe: &Sqe) -> Result<u32, NetError> {
+        socket::close(sqe.socket_id)?;
+        Ok(0)
     }
 
     /// Process send operation
@@ -1188,4 +1206,81 @@ pub fn init() {
     }
 
     crate::serial_println!("[ZC-NET] Zero-copy networking initialized");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::ipv6::Ipv6Addr;
+    use crate::net::socket::{self, AddressFamily, Protocol, SocketType};
+    use crate::net::Port;
+
+    #[test]
+    fn zero_copy_connect_and_close_ops_are_stateful() {
+        let socket_id = socket::socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::TCP)
+            .expect("socket create");
+        let mut ring = IoUring::new(1).expect("ring");
+
+        let mut connect = Sqe::new(OpCode::Connect, socket_id, 0x10);
+        connect.addr = SocketAddr::new(Ipv4Addr([127, 0, 0, 1]), Port(443));
+        ring.submit(connect).expect("submit connect");
+        assert_eq!(ring.process(), 1);
+        let cqe = ring.complete().expect("connect completion");
+        assert_eq!(cqe.user_data, 0x10);
+        assert_eq!(cqe.result, 0);
+
+        let close = Sqe::new(OpCode::Close, socket_id, 0x11);
+        ring.submit(close).expect("submit close");
+        assert_eq!(ring.process(), 1);
+        let cqe = ring.complete().expect("close completion");
+        assert_eq!(cqe.user_data, 0x11);
+        assert_eq!(cqe.result, 0);
+    }
+
+    #[test]
+    fn zero_copy_ipv6_connect_and_close_ops_are_stateful() {
+        let socket_id = socket::socket(AddressFamily::IPV6, SocketType::STREAM, Protocol::TCP)
+            .expect("socket create");
+        let mut ring = IoUring::new(1).expect("ring");
+
+        let mut connect = Sqe::new(OpCode::Connect, socket_id, 0x12);
+        connect.addr = SocketAddr::new(
+            Ipv6Addr::from_segments([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]),
+            Port(8443),
+        );
+        ring.submit(connect).expect("submit connect");
+        assert_eq!(ring.process(), 1);
+        let cqe = ring.complete().expect("connect completion");
+        assert_eq!(cqe.user_data, 0x12);
+        assert_eq!(cqe.result, 0);
+
+        let close = Sqe::new(OpCode::Close, socket_id, 0x13);
+        ring.submit(close).expect("submit close");
+        assert_eq!(ring.process(), 1);
+        let cqe = ring.complete().expect("close completion");
+        assert_eq!(cqe.user_data, 0x13);
+        assert_eq!(cqe.result, 0);
+    }
+
+    #[test]
+    fn zero_copy_accept_op_reports_listener_wouldblock_without_queue_entry() {
+        let listener = socket::socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::TCP)
+            .expect("listener create");
+        socket::bind(
+            listener,
+            SocketAddr::new(Ipv4Addr([127, 0, 0, 1]), Port(8080)),
+        )
+        .expect("bind");
+        socket::listen(listener, 4).expect("listen");
+
+        let mut ring = IoUring::new(2).expect("ring");
+        let accept = Sqe::new(OpCode::Accept, listener, 0x20);
+        ring.submit(accept).expect("submit accept");
+        assert_eq!(ring.process(), 1);
+        let cqe = ring.complete().expect("accept completion");
+        assert_eq!(cqe.user_data, 0x20);
+        assert_eq!(cqe.result, -(NetError::WouldBlock as i32));
+
+        socket::close(listener).expect("close listener");
+    }
 }

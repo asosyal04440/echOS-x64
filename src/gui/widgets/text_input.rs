@@ -291,7 +291,8 @@ impl TextBox {
 
             if let Some((sel_s, sel_e)) = self.selection_range() {
                 let vis_start = self.scroll_offset;
-                let vis_end = vis_start + ((self.rect.width.max(0) as usize).saturating_sub(10) / 8);
+                let vis_end =
+                    vis_start + ((self.rect.width.max(0) as usize).saturating_sub(10) / 8);
                 let hl_start = sel_s.max(vis_start);
                 let hl_end = sel_e.min(vis_end);
                 if hl_start < hl_end {
@@ -696,7 +697,9 @@ impl TextArea {
             let cursor_screen_col = self.cursor_col.saturating_sub(self.scroll_col);
             let cursor_x = text_x + (cursor_screen_col as i32 * 8);
             let cursor_y = self.rect.y + 5 + (cursor_screen_line * self.line_height) as i32;
-            if cursor_x < self.rect.x + self.rect.width - 5 && cursor_y < self.rect.y + self.rect.height - 5 {
+            if cursor_x < self.rect.x + self.rect.width - 5
+                && cursor_y < self.rect.y + self.rect.height - 5
+            {
                 objects.push(solid_rect_object(
                     base_id ^ 0x2000,
                     Rect::new(cursor_x, cursor_y, 1, 16),

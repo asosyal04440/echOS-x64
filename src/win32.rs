@@ -259,6 +259,30 @@ pub const VK_UP: INT = 0x26;
 pub const VK_RIGHT: INT = 0x27;
 pub const VK_DOWN: INT = 0x28;
 pub const KEYEVENTF_KEYUP: DWORD = 0x0002;
+pub const MOUSEEVENTF_MOVE: DWORD = 0x0001;
+pub const MOUSEEVENTF_LEFTDOWN: DWORD = 0x0002;
+pub const MOUSEEVENTF_LEFTUP: DWORD = 0x0004;
+pub const MOUSEEVENTF_RIGHTDOWN: DWORD = 0x0008;
+pub const MOUSEEVENTF_RIGHTUP: DWORD = 0x0010;
+pub const MOUSEEVENTF_MIDDLEDOWN: DWORD = 0x0020;
+pub const MOUSEEVENTF_MIDDLEUP: DWORD = 0x0040;
+pub const MOUSEEVENTF_ABSOLUTE: DWORD = 0x8000;
+
+pub const MK_LBUTTON: UINT = 0x0001;
+pub const MK_RBUTTON: UINT = 0x0002;
+pub const MK_MBUTTON: UINT = 0x0010;
+
+pub const GM_COMPATIBLE: INT = 1;
+pub const GM_ADVANCED: INT = 2;
+
+pub const MM_TEXT: INT = 1;
+pub const MM_LOMETRIC: INT = 2;
+pub const MM_HIMETRIC: INT = 3;
+pub const MM_LOENGLISH: INT = 4;
+pub const MM_HIENGLISH: INT = 5;
+pub const MM_TWIPS: INT = 6;
+pub const MM_ISOTROPIC: INT = 7;
+pub const MM_ANISOTROPIC: INT = 8;
 
 pub const MF_INSERT: UINT = 0x0000;
 pub const MF_CHANGE: UINT = 0x0080;
@@ -912,6 +936,54 @@ pub struct tm {
     pub tm_isdst: INT,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct lconv {
+    pub decimal_point: LPSTR,
+    pub thousands_sep: LPSTR,
+    pub grouping: LPSTR,
+    pub int_curr_symbol: LPSTR,
+    pub currency_symbol: LPSTR,
+    pub mon_decimal_point: LPSTR,
+    pub mon_thousands_sep: LPSTR,
+    pub mon_grouping: LPSTR,
+    pub positive_sign: LPSTR,
+    pub negative_sign: LPSTR,
+    pub int_frac_digits: i8,
+    pub frac_digits: i8,
+    pub p_cs_precedes: i8,
+    pub p_sep_by_space: i8,
+    pub n_cs_precedes: i8,
+    pub n_sep_by_space: i8,
+    pub p_sign_posn: i8,
+    pub n_sign_posn: i8,
+}
+
+impl Default for lconv {
+    fn default() -> Self {
+        Self {
+            decimal_point: core::ptr::null_mut(),
+            thousands_sep: core::ptr::null_mut(),
+            grouping: core::ptr::null_mut(),
+            int_curr_symbol: core::ptr::null_mut(),
+            currency_symbol: core::ptr::null_mut(),
+            mon_decimal_point: core::ptr::null_mut(),
+            mon_thousands_sep: core::ptr::null_mut(),
+            mon_grouping: core::ptr::null_mut(),
+            positive_sign: core::ptr::null_mut(),
+            negative_sign: core::ptr::null_mut(),
+            int_frac_digits: 2,
+            frac_digits: 2,
+            p_cs_precedes: 1,
+            p_sep_by_space: 0,
+            n_cs_precedes: 1,
+            n_sep_by_space: 0,
+            p_sign_posn: 1,
+            n_sign_posn: 1,
+        }
+    }
+}
+
 // ============================================================================
 // WIN32 API TABLE
 // ============================================================================
@@ -955,6 +1027,14 @@ static WIN32_STDIN_BUFFER: Once<Mutex<Vec<u8>>> = Once::new();
 static WIN32_STDIN_CURSOR: Once<Mutex<usize>> = Once::new();
 static WIN32_CRT_LOCALE: Once<Mutex<BTreeMap<INT, String>>> = Once::new();
 static WIN32_CRT_LOCALE_BUFFER: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_CRT_LOCALECONV_DECIMAL: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_CRT_LOCALECONV_THOUSANDS: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_CRT_LOCALECONV_GROUPING: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_CRT_LOCALECONV_INT_CURR: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_CRT_LOCALECONV_CURR: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_CRT_LOCALECONV_POSITIVE: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_CRT_LOCALECONV_NEGATIVE: Once<Mutex<Vec<i8>>> = Once::new();
+static WIN32_CRT_LOCALECONV: Once<Mutex<usize>> = Once::new();
 static WIN32_CRT_EXIT_STATUS: Once<Mutex<Option<INT>>> = Once::new();
 static WIN32_CRT_ATEXIT: Once<Mutex<Vec<usize>>> = Once::new();
 static WIN32_CRT_HOST_FILES: Once<Mutex<BTreeMap<String, Vec<u8>>>> = Once::new();
@@ -1011,8 +1091,110 @@ static INTERNET_RESPONSE_CACHE: Mutex<BTreeMap<String, crate::net::http::HttpRes
 static UNHANDLED_EXCEPTION_FILTERS: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
 static NEXT_INTERNET_HANDLE: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0x3000_0000);
-static CAPTURED_HWND: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static FOCUSED_HWND: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WindowPublicationSnapshot {
+    active: u64,
+    focused: u64,
+    captured: u64,
+}
+
+#[repr(C, align(64))]
+struct WindowPublicationState {
+    sequence: core::sync::atomic::AtomicU64,
+    active: core::sync::atomic::AtomicU64,
+    focused: core::sync::atomic::AtomicU64,
+    captured: core::sync::atomic::AtomicU64,
+}
+
+impl WindowPublicationState {
+    const fn new() -> Self {
+        Self {
+            sequence: core::sync::atomic::AtomicU64::new(0),
+            active: core::sync::atomic::AtomicU64::new(0),
+            focused: core::sync::atomic::AtomicU64::new(0),
+            captured: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn begin_write(&self) -> u64 {
+        loop {
+            let sequence = self.sequence.load(core::sync::atomic::Ordering::Relaxed);
+            if (sequence & 1) != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            if self
+                .sequence
+                .compare_exchange_weak(
+                    sequence,
+                    sequence + 1,
+                    core::sync::atomic::Ordering::Acquire,
+                    core::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return sequence + 2;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn finish_write(&self, published_sequence: u64) {
+        self.sequence
+            .store(published_sequence, core::sync::atomic::Ordering::Release);
+    }
+
+    fn snapshot(&self) -> WindowPublicationSnapshot {
+        loop {
+            let sequence = self.sequence.load(core::sync::atomic::Ordering::Acquire);
+            if (sequence & 1) != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            let snapshot = WindowPublicationSnapshot {
+                active: self.active.load(core::sync::atomic::Ordering::Relaxed),
+                focused: self.focused.load(core::sync::atomic::Ordering::Relaxed),
+                captured: self.captured.load(core::sync::atomic::Ordering::Relaxed),
+            };
+            let end_sequence = self.sequence.load(core::sync::atomic::Ordering::Acquire);
+            if sequence == end_sequence {
+                return snapshot;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn publish(&self, snapshot: WindowPublicationSnapshot) {
+        let published_sequence = self.begin_write();
+        self.active
+            .store(snapshot.active, core::sync::atomic::Ordering::Relaxed);
+        self.focused
+            .store(snapshot.focused, core::sync::atomic::Ordering::Relaxed);
+        self.captured
+            .store(snapshot.captured, core::sync::atomic::Ordering::Relaxed);
+        self.finish_write(published_sequence);
+    }
+
+    fn update<F: FnOnce(&mut WindowPublicationSnapshot)>(&self, mutate: F) {
+        let published_sequence = self.begin_write();
+        let mut snapshot = WindowPublicationSnapshot {
+            active: self.active.load(core::sync::atomic::Ordering::Relaxed),
+            focused: self.focused.load(core::sync::atomic::Ordering::Relaxed),
+            captured: self.captured.load(core::sync::atomic::Ordering::Relaxed),
+        };
+        mutate(&mut snapshot);
+        self.active
+            .store(snapshot.active, core::sync::atomic::Ordering::Relaxed);
+        self.focused
+            .store(snapshot.focused, core::sync::atomic::Ordering::Relaxed);
+        self.captured
+            .store(snapshot.captured, core::sync::atomic::Ordering::Relaxed);
+        self.finish_write(published_sequence);
+    }
+}
+
+static WINDOW_PUBLICATION_STATE: WindowPublicationState = WindowPublicationState::new();
 static INVALIDATED_WINDOWS: Mutex<BTreeMap<u64, RECT>> = Mutex::new(BTreeMap::new());
 static NEXT_COM_COOKIE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 static COM_CLASS_OBJECTS: Mutex<BTreeMap<String, ComClassObject>> = Mutex::new(BTreeMap::new());
@@ -1165,6 +1347,10 @@ struct ComTypeFuncState {
     optional_param_count: SHORT,
     func_flags: WORD,
     vtable_offset: SHORT,
+    return_vt: WORD,
+    return_href_type: DWORD,
+    param_vts: Vec<WORD>,
+    param_href_types: Vec<DWORD>,
 }
 
 #[derive(Clone, Debug)]
@@ -1176,6 +1362,8 @@ struct ComTypeVarState {
     var_flags: WORD,
     varkind: DWORD,
     offset: ULONG,
+    vt: WORD,
+    href_type: DWORD,
 }
 
 #[derive(Clone, Debug)]
@@ -1319,7 +1507,9 @@ pub struct Win32DC {
     pub path_points: Vec<POINT>,
     pub map_mode: INT,
     pub viewport_org: POINT,
+    pub viewport_ext: SIZE,
     pub window_org: POINT,
+    pub window_ext: SIZE,
     pub world_transform: [f32; 6],
     pub device_kind: Win32DcKind,
     pub device_name: String,
@@ -1364,7 +1554,9 @@ pub struct Win32DCSnapshot {
     path_points: Vec<POINT>,
     map_mode: INT,
     viewport_org: POINT,
+    viewport_ext: SIZE,
     window_org: POINT,
+    window_ext: SIZE,
     world_transform: [f32; 6],
     font_height: i32,
     font_weight: i32,
@@ -1573,19 +1765,138 @@ static WIN32_MENU_LOOP_STATE: Mutex<Win32MenuLoopState> = Mutex::new(Win32MenuLo
 /// Global mesaj kuyruğu (tüm pencereler için)
 static MSG_QUEUE: Mutex<Vec<Win32Msg>> = Mutex::new(Vec::new());
 
-/// Aktif (focused) pencere
-static ACTIVE_HWND: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ReportedPointerSnapshot {
+    x: INT,
+    y: INT,
+    buttons: crate::drivers::mouse::MouseButtons,
+    swap_buttons: bool,
+}
+
+#[repr(C, align(64))]
+struct ReportedPointerPublicationState {
+    sequence: core::sync::atomic::AtomicU64,
+    x: core::sync::atomic::AtomicI32,
+    y: core::sync::atomic::AtomicI32,
+    buttons: core::sync::atomic::AtomicU8,
+    swap_buttons: core::sync::atomic::AtomicBool,
+}
+
+impl ReportedPointerPublicationState {
+    const fn new() -> Self {
+        Self {
+            sequence: core::sync::atomic::AtomicU64::new(0),
+            x: core::sync::atomic::AtomicI32::new(0),
+            y: core::sync::atomic::AtomicI32::new(0),
+            buttons: core::sync::atomic::AtomicU8::new(0),
+            swap_buttons: core::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn begin_write(&self) -> u64 {
+        loop {
+            let sequence = self.sequence.load(core::sync::atomic::Ordering::Relaxed);
+            if (sequence & 1) != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            if self
+                .sequence
+                .compare_exchange_weak(
+                    sequence,
+                    sequence + 1,
+                    core::sync::atomic::Ordering::Acquire,
+                    core::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return sequence + 2;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn finish_write(&self, published_sequence: u64) {
+        self.sequence
+            .store(published_sequence, core::sync::atomic::Ordering::Release);
+    }
+
+    fn snapshot(&self) -> ReportedPointerSnapshot {
+        loop {
+            let sequence = self.sequence.load(core::sync::atomic::Ordering::Acquire);
+            if (sequence & 1) != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            let snapshot = ReportedPointerSnapshot {
+                x: self.x.load(core::sync::atomic::Ordering::Relaxed),
+                y: self.y.load(core::sync::atomic::Ordering::Relaxed),
+                buttons: decode_mouse_button_bits(
+                    self.buttons.load(core::sync::atomic::Ordering::Relaxed),
+                ),
+                swap_buttons: self
+                    .swap_buttons
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            };
+            let end_sequence = self.sequence.load(core::sync::atomic::Ordering::Acquire);
+            if sequence == end_sequence {
+                return snapshot;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn update<F: FnOnce(&mut ReportedPointerSnapshot)>(&self, mutate: F) {
+        let published_sequence = self.begin_write();
+        let mut snapshot = ReportedPointerSnapshot {
+            x: self.x.load(core::sync::atomic::Ordering::Relaxed),
+            y: self.y.load(core::sync::atomic::Ordering::Relaxed),
+            buttons: decode_mouse_button_bits(
+                self.buttons.load(core::sync::atomic::Ordering::Relaxed),
+            ),
+            swap_buttons: self
+                .swap_buttons
+                .load(core::sync::atomic::Ordering::Relaxed),
+        };
+        mutate(&mut snapshot);
+        self.x
+            .store(snapshot.x, core::sync::atomic::Ordering::Relaxed);
+        self.y
+            .store(snapshot.y, core::sync::atomic::Ordering::Relaxed);
+        self.buttons.store(
+            encode_mouse_button_bits(snapshot.buttons),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        self.swap_buttons
+            .store(snapshot.swap_buttons, core::sync::atomic::Ordering::Relaxed);
+        self.finish_write(published_sequence);
+    }
+}
+
+static REPORTED_POINTER_PUBLICATION_STATE: ReportedPointerPublicationState =
+    ReportedPointerPublicationState::new();
 
 /// Mesaj kuyruğuna mesaj ekle
 pub fn post_message(hwnd: u64, message: u32, wparam: u64, lparam: i64) -> bool {
+    post_message_with_point(hwnd, message, wparam, lparam, 0, 0)
+}
+
+pub fn post_message_with_point(
+    hwnd: u64,
+    message: u32,
+    wparam: u64,
+    lparam: i64,
+    pt_x: i32,
+    pt_y: i32,
+) -> bool {
     MSG_QUEUE.lock().push(Win32Msg {
         hwnd,
         message,
         wparam,
         lparam,
         time: get_tick_count_internal(),
-        pt_x: 0,
-        pt_y: 0,
+        pt_x,
+        pt_y,
     });
     true
 }
@@ -1842,9 +2153,7 @@ fn map_http_error_to_internet_error(err: crate::net::http::HttpError) -> DWORD {
         HttpError::TlsCertRevoked => ERROR_INTERNET_SEC_CERT_REVOKED,
         HttpError::TlsDecodeFailed => ERROR_INTERNET_DECODING_FAILED,
         HttpError::TlsInvalidCertificate => ERROR_INTERNET_SEC_INVALID_CERT,
-        HttpError::TlsHandshakeFailed | HttpError::TlsNotSupported => {
-            ERROR_INTERNET_SEC_CERT_ERRORS
-        }
+        HttpError::TlsHandshakeFailed => ERROR_INTERNET_SEC_CERT_ERRORS,
         _ => ERROR_INTERNET_CANNOT_CONNECT,
     }
 }
@@ -2139,6 +2448,45 @@ fn crt_locale_buffer_state() -> &'static Mutex<Vec<i8>> {
     WIN32_CRT_LOCALE_BUFFER.call_once(|| Mutex::new(vec![0]))
 }
 
+fn crt_localeconv_decimal_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_CRT_LOCALECONV_DECIMAL.call_once(|| Mutex::new(vec![0]))
+}
+
+fn crt_localeconv_thousands_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_CRT_LOCALECONV_THOUSANDS.call_once(|| Mutex::new(vec![0]))
+}
+
+fn crt_localeconv_grouping_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_CRT_LOCALECONV_GROUPING.call_once(|| Mutex::new(vec![0]))
+}
+
+fn crt_localeconv_int_curr_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_CRT_LOCALECONV_INT_CURR.call_once(|| Mutex::new(vec![0]))
+}
+
+fn crt_localeconv_curr_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_CRT_LOCALECONV_CURR.call_once(|| Mutex::new(vec![0]))
+}
+
+fn crt_localeconv_positive_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_CRT_LOCALECONV_POSITIVE.call_once(|| Mutex::new(vec![0]))
+}
+
+fn crt_localeconv_negative_state() -> &'static Mutex<Vec<i8>> {
+    WIN32_CRT_LOCALECONV_NEGATIVE.call_once(|| Mutex::new(vec![0]))
+}
+
+unsafe fn crt_localeconv_state() -> *mut lconv {
+    let holder = WIN32_CRT_LOCALECONV.call_once(|| {
+        let ptr = win32_alloc(size_of::<lconv>(), core::mem::align_of::<lconv>()) as *mut lconv;
+        if !ptr.is_null() {
+            *ptr = lconv::default();
+        }
+        Mutex::new(ptr as usize)
+    });
+    *holder.lock() as *mut lconv
+}
+
 fn crt_exit_status_state() -> &'static Mutex<Option<INT>> {
     WIN32_CRT_EXIT_STATUS.call_once(|| Mutex::new(None))
 }
@@ -2216,6 +2564,57 @@ fn normalize_win32_path(path: &str) -> String {
         normalized = normalized.replace("//", "/");
     }
     crate::fs::resolve_mount_path(&collapse_win32_path(&normalized))
+}
+
+fn win32_path_from_normalized(path: &str) -> String {
+    let normalized = collapse_win32_path(path);
+    let trimmed = normalized.trim_matches('/');
+    if trimmed.is_empty() {
+        String::from("C:\\")
+    } else {
+        alloc::format!("C:\\{}", trimmed.replace('/', "\\"))
+    }
+}
+
+fn split_win32_path_components(path: &str) -> (String, String, String, String) {
+    let trimmed = path.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return (String::new(), String::new(), String::new(), String::new());
+    }
+
+    let mut drive = String::new();
+    let mut remainder = trimmed.replace('/', "\\");
+    if remainder.len() >= 2 && remainder.as_bytes()[1] == b':' {
+        drive.push_str(&remainder[..2]);
+        remainder = remainder[2..].to_string();
+    }
+
+    let (directory, file_part) = match remainder.rfind('\\') {
+        Some(index) => (
+            remainder[..=index].to_string(),
+            remainder[index + 1..].to_string(),
+        ),
+        None => (String::new(), remainder),
+    };
+
+    let (filename, extension) = match file_part.rfind('.') {
+        Some(index) if index > 0 => (
+            file_part[..index].to_string(),
+            file_part[index..].to_string(),
+        ),
+        _ => (file_part, String::new()),
+    };
+
+    (drive, directory, filename, extension)
+}
+
+unsafe fn write_component_buffer(buffer: LPSTR, value: &str) {
+    if buffer.is_null() {
+        return;
+    }
+    let bytes = core::slice::from_raw_parts_mut(buffer as *mut u8, value.len() + 1);
+    bytes[..value.len()].copy_from_slice(value.as_bytes());
+    bytes[value.len()] = 0;
 }
 
 fn environment_key(name: &str) -> String {
@@ -2523,6 +2922,23 @@ fn win32_process_start_trampoline() -> ! {
     crate::task::scheduler::exit(exit_code as i32)
 }
 
+pub(crate) fn spawn_bound_process_task(
+    process_handle: u64,
+    thread_handle: u64,
+    priority: crate::task::task::Priority,
+    name: &'static str,
+) -> Result<u64, &'static str> {
+    let task =
+        crate::task::task::Task::with_priority(win32_process_start_trampoline, priority, name);
+    let task_id = task.id as u64;
+    WIN32_PROCESS_LAUNCHES
+        .lock()
+        .insert(task_id, process_handle);
+    let _ = crate::win32_abi::bind_thread_handle_task(thread_handle, task_id);
+    let _ = crate::task::scheduler::spawn_task(task);
+    Ok(task_id)
+}
+
 fn normalize_rect(rect: RECT) -> RECT {
     RECT {
         left: rect.left.min(rect.right),
@@ -2562,16 +2978,104 @@ fn window_client_origin(window: &Win32Window) -> (INT, INT) {
     (window.x + border, window.y + border + caption + menu)
 }
 
+fn default_map_mode_extents(mode: INT) -> (SIZE, SIZE) {
+    match mode {
+        MM_LOMETRIC => (SIZE { cx: 96, cy: 96 }, SIZE { cx: 254, cy: -254 }),
+        MM_HIMETRIC => (
+            SIZE { cx: 96, cy: 96 },
+            SIZE {
+                cx: 2540,
+                cy: -2540,
+            },
+        ),
+        MM_LOENGLISH => (SIZE { cx: 96, cy: 96 }, SIZE { cx: 100, cy: -100 }),
+        MM_HIENGLISH => (
+            SIZE { cx: 96, cy: 96 },
+            SIZE {
+                cx: 1000,
+                cy: -1000,
+            },
+        ),
+        MM_TWIPS => (
+            SIZE { cx: 96, cy: 96 },
+            SIZE {
+                cx: 1440,
+                cy: -1440,
+            },
+        ),
+        MM_ISOTROPIC | MM_ANISOTROPIC | MM_TEXT | _ => {
+            (SIZE { cx: 1, cy: 1 }, SIZE { cx: 1, cy: 1 })
+        }
+    }
+}
+
+fn map_mode_or_default(mode: INT) -> INT {
+    if mode == 0 {
+        MM_TEXT
+    } else {
+        mode
+    }
+}
+
+fn sanitized_extent(ext: SIZE) -> SIZE {
+    SIZE {
+        cx: if ext.cx == 0 { 1 } else { ext.cx },
+        cy: if ext.cy == 0 { 1 } else { ext.cy },
+    }
+}
+
+fn apply_page_transform(dc: &Win32DC, x: f32, y: f32) -> (f32, f32) {
+    let viewport_ext = sanitized_extent(dc.viewport_ext);
+    let window_ext = sanitized_extent(dc.window_ext);
+    (
+        x * (viewport_ext.cx as f32 / window_ext.cx as f32) + dc.viewport_org.x as f32,
+        y * (viewport_ext.cy as f32 / window_ext.cy as f32) + dc.viewport_org.y as f32,
+    )
+}
+
+fn invert_page_transform(dc: &Win32DC, x: f32, y: f32) -> (f32, f32) {
+    let viewport_ext = sanitized_extent(dc.viewport_ext);
+    let window_ext = sanitized_extent(dc.window_ext);
+    (
+        (x - dc.viewport_org.x as f32) * (window_ext.cx as f32 / viewport_ext.cx as f32),
+        (y - dc.viewport_org.y as f32) * (window_ext.cy as f32 / viewport_ext.cy as f32),
+    )
+}
+
+fn apply_world_transform(dc: &Win32DC, x: f32, y: f32) -> (f32, f32) {
+    let m = dc.world_transform;
+    (x * m[0] + y * m[2] + m[4], x * m[1] + y * m[3] + m[5])
+}
+
+fn invert_world_transform(dc: &Win32DC, x: f32, y: f32) -> Option<(f32, f32)> {
+    let m = dc.world_transform;
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 0.000_001 {
+        return None;
+    }
+    let translated_x = x - m[4];
+    let translated_y = y - m[5];
+    Some((
+        (translated_x * m[3] - translated_y * m[2]) / det,
+        (translated_y * m[0] - translated_x * m[1]) / det,
+    ))
+}
+
 fn logical_to_device(dc: &Win32DC, x: INT, y: INT) -> (INT, INT) {
     let logical_x = (x - dc.window_org.x) as f32;
     let logical_y = (y - dc.window_org.y) as f32;
-    let m = dc.world_transform;
-    let transformed_x = logical_x * m[0] + logical_y * m[2] + m[4];
-    let transformed_y = logical_x * m[1] + logical_y * m[3] + m[5];
-    (
-        round_f32_to_int(transformed_x) + dc.viewport_org.x,
-        round_f32_to_int(transformed_y) + dc.viewport_org.y,
-    )
+    let (world_x, world_y) = apply_world_transform(dc, logical_x, logical_y);
+    let (device_x, device_y) = apply_page_transform(dc, world_x, world_y);
+    (round_f32_to_int(device_x), round_f32_to_int(device_y))
+}
+
+fn device_to_logical(dc: &Win32DC, x: INT, y: INT) -> Option<(INT, INT)> {
+    let (page_x, page_y) = invert_page_transform(dc, x as f32, y as f32);
+    let (logical_x, logical_y) = invert_world_transform(dc, page_x, page_y)?;
+    Some((
+        round_f32_to_int(logical_x) + dc.window_org.x,
+        round_f32_to_int(logical_y) + dc.window_org.y,
+    ))
 }
 
 fn round_f32_to_int(value: f32) -> INT {
@@ -2603,6 +3107,194 @@ fn logical_rect_to_device(dc: &Win32DC, rect: RECT) -> RECT {
         out.bottom = out.bottom.max(y);
     }
     normalize_rect(out)
+}
+
+const fn encode_mouse_button_bits(buttons: crate::drivers::mouse::MouseButtons) -> u8 {
+    (buttons.left as u8) | ((buttons.right as u8) << 1) | ((buttons.middle as u8) << 2)
+}
+
+const fn decode_mouse_button_bits(bits: u8) -> crate::drivers::mouse::MouseButtons {
+    crate::drivers::mouse::MouseButtons {
+        left: (bits & 0x01) != 0,
+        right: (bits & 0x02) != 0,
+        middle: (bits & 0x04) != 0,
+    }
+}
+
+fn window_publication_snapshot() -> WindowPublicationSnapshot {
+    WINDOW_PUBLICATION_STATE.snapshot()
+}
+
+fn update_window_publication<F: FnOnce(&mut WindowPublicationSnapshot)>(mutate: F) {
+    WINDOW_PUBLICATION_STATE.update(mutate);
+}
+
+fn clear_window_publication_for(hwnd: u64) {
+    update_window_publication(|snapshot| {
+        if snapshot.active == hwnd {
+            snapshot.active = 0;
+        }
+        if snapshot.focused == hwnd {
+            snapshot.focused = 0;
+        }
+        if snapshot.captured == hwnd {
+            snapshot.captured = 0;
+        }
+    });
+}
+
+fn reported_pointer_snapshot() -> ReportedPointerSnapshot {
+    REPORTED_POINTER_PUBLICATION_STATE.snapshot()
+}
+
+fn update_reported_pointer_publication<F: FnOnce(&mut ReportedPointerSnapshot)>(mutate: F) {
+    REPORTED_POINTER_PUBLICATION_STATE.update(mutate);
+}
+
+fn store_mouse_state(x: INT, y: INT, buttons: crate::drivers::mouse::MouseButtons) {
+    crate::drivers::mouse::publish_state(x, y, buttons);
+}
+
+fn update_reported_mouse_state(x: INT, y: INT, buttons: crate::drivers::mouse::MouseButtons) {
+    update_reported_pointer_publication(|snapshot| {
+        snapshot.x = x;
+        snapshot.y = y;
+        snapshot.buttons = buttons;
+    });
+}
+
+fn packed_mouse_lparam(x: INT, y: INT) -> i64 {
+    (((y as i64) & 0xFFFF) << 16) | ((x as i64) & 0xFFFF)
+}
+
+fn effective_mouse_buttons(
+    buttons: crate::drivers::mouse::MouseButtons,
+) -> crate::drivers::mouse::MouseButtons {
+    if !reported_pointer_snapshot().swap_buttons {
+        return buttons;
+    }
+    crate::drivers::mouse::MouseButtons {
+        left: buttons.right,
+        right: buttons.left,
+        middle: buttons.middle,
+    }
+}
+
+fn mouse_wparam(buttons: crate::drivers::mouse::MouseButtons) -> u64 {
+    let buttons = effective_mouse_buttons(buttons);
+    let mut mask = 0u64;
+    if buttons.left {
+        mask |= MK_LBUTTON as u64;
+    }
+    if buttons.right {
+        mask |= MK_RBUTTON as u64;
+    }
+    if buttons.middle {
+        mask |= MK_MBUTTON as u64;
+    }
+    mask
+}
+
+fn mouse_target_window(screen_x: INT, screen_y: INT) -> Option<(u64, INT, INT)> {
+    let routing = window_publication_snapshot();
+    let captured = routing.captured;
+    if captured != 0 {
+        let windows = WIN32_WINDOWS.lock();
+        let window = windows.get(&captured)?;
+        let (client_left, client_top) = window_client_origin(window);
+        return Some((captured, screen_x - client_left, screen_y - client_top));
+    }
+
+    let windows = WIN32_WINDOWS.lock();
+    for (&hwnd, window) in windows.iter().rev() {
+        if !window.visible {
+            continue;
+        }
+        let outer = window_total_bounds(window);
+        if screen_x >= outer.left
+            && screen_x < outer.right
+            && screen_y >= outer.top
+            && screen_y < outer.bottom
+        {
+            let (client_left, client_top) = window_client_origin(window);
+            return Some((hwnd, screen_x - client_left, screen_y - client_top));
+        }
+    }
+
+    let active = routing.active;
+    let window = windows.get(&active)?;
+    let (client_left, client_top) = window_client_origin(window);
+    Some((active, screen_x - client_left, screen_y - client_top))
+}
+
+fn dispatch_mouse_transition(
+    previous_x: INT,
+    previous_y: INT,
+    previous_buttons: crate::drivers::mouse::MouseButtons,
+    x: INT,
+    y: INT,
+    buttons: crate::drivers::mouse::MouseButtons,
+) {
+    let previous_buttons = effective_mouse_buttons(previous_buttons);
+    let buttons = effective_mouse_buttons(buttons);
+
+    if (buttons.left && !previous_buttons.left)
+        || (buttons.right && !previous_buttons.right)
+        || (buttons.middle && !previous_buttons.middle)
+    {
+        if let Some((hwnd, _, _)) = mouse_target_window(x, y) {
+            unsafe {
+                let _ = user32::set_focus(hwnd as HWND);
+            }
+        }
+    }
+
+    if x != previous_x || y != previous_y {
+        if let Some((hwnd, client_x, client_y)) = mouse_target_window(x, y) {
+            post_message_with_point(
+                hwnd,
+                WM_MOUSEMOVE,
+                mouse_wparam(buttons),
+                packed_mouse_lparam(client_x, client_y),
+                x,
+                y,
+            );
+        }
+    }
+
+    if previous_buttons.left != buttons.left {
+        if let Some((hwnd, client_x, client_y)) = mouse_target_window(x, y) {
+            post_message_with_point(
+                hwnd,
+                if buttons.left {
+                    WM_LBUTTONDOWN
+                } else {
+                    WM_LBUTTONUP
+                },
+                mouse_wparam(buttons),
+                packed_mouse_lparam(client_x, client_y),
+                x,
+                y,
+            );
+        }
+    }
+
+    if previous_buttons.right != buttons.right {
+        if let Some((hwnd, client_x, client_y)) = mouse_target_window(x, y) {
+            post_message_with_point(
+                hwnd,
+                if buttons.right {
+                    WM_RBUTTONDOWN
+                } else {
+                    WM_RBUTTONUP
+                },
+                mouse_wparam(buttons),
+                packed_mouse_lparam(client_x, client_y),
+                x,
+                y,
+            );
+        }
+    }
 }
 
 fn polygon_bounds_root(points: &[POINT]) -> RECT {
@@ -2817,7 +3509,9 @@ fn restore_dc_state(dc: &mut Win32DC, snapshot: Win32DCSnapshot) {
     dc.path_points = snapshot.path_points;
     dc.map_mode = snapshot.map_mode;
     dc.viewport_org = snapshot.viewport_org;
+    dc.viewport_ext = snapshot.viewport_ext;
     dc.window_org = snapshot.window_org;
+    dc.window_ext = snapshot.window_ext;
     dc.world_transform = snapshot.world_transform;
     dc.font_height = snapshot.font_height;
     dc.font_weight = snapshot.font_weight;
@@ -3093,7 +3787,7 @@ fn draw_window_non_client_to_fb(
         return;
     }
     let outer = window_total_bounds(window);
-    let active = ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed) == window.hwnd;
+    let active = window_publication_snapshot().active == window.hwnd;
     let caption_color: u32 = if active { 0xFF1D3552 } else { 0xFF122030 };
     let menu_color: u32 = 0xFF101B2B;
     let border_color: u32 = 0xFF2B4362;
@@ -5185,6 +5879,10 @@ pub fn win32_realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
 /// Return the kernel virtual address of a named Win32 API function.
 /// The PE loader writes this address directly into the in-memory IAT slot.
 pub fn get_fn_address(module: &str, name: &str) -> u64 {
+    resolve_fn_address_internal(module, name, true)
+}
+
+fn resolve_fn_address_internal(module: &str, name: &str, record_exactness: bool) -> u64 {
     // Normalise module name: strip ".dll" suffix, lowercase
     let mod_key: &str = &module.to_lowercase();
     let mod_key = mod_key.trim_end_matches(".dll");
@@ -5553,6 +6251,7 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("msvcrt", "fwrite") => msvcrt::fwrite as usize as u64,
         ("msvcrt", "fseek") => msvcrt::fseek as usize as u64,
         ("msvcrt", "ftell") => msvcrt::ftell as usize as u64,
+        ("msvcrt", "fflush") => msvcrt::fflush as usize as u64,
         ("msvcrt", "atoi") => msvcrt::atoi as usize as u64,
         ("msvcrt", "atol") => msvcrt::atol as usize as u64,
         ("msvcrt", "rand") => msvcrt::rand as usize as u64,
@@ -5561,6 +6260,14 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("msvcrt", "exit") => msvcrt::exit as usize as u64,
         ("msvcrt", "abort") => msvcrt::abort as usize as u64,
         ("msvcrt", "getenv") => msvcrt::getenv as usize as u64,
+        ("msvcrt", "_putenv") => msvcrt::_putenv as usize as u64,
+        ("msvcrt", "_dupenv_s") => msvcrt::_dupenv_s as usize as u64,
+        ("msvcrt", "localeconv") => msvcrt::localeconv as usize as u64,
+        ("msvcrt", "_fullpath") => msvcrt::_fullpath as usize as u64,
+        ("msvcrt", "_splitpath") => msvcrt::_splitpath as usize as u64,
+        ("msvcrt", "_makepath") => msvcrt::_makepath as usize as u64,
+        ("msvcrt", "remove") => msvcrt::remove as usize as u64,
+        ("msvcrt", "rename") => msvcrt::rename as usize as u64,
         ("msvcrt", "qsort") => msvcrt::qsort as usize as u64,
         ("msvcrt", "bsearch") => msvcrt::bsearch as usize as u64,
         // ---- shell32 --------------------------------------------------------
@@ -5569,7 +6276,12 @@ pub fn get_fn_address(module: &str, name: &str) -> u64 {
         ("shell32", "SHGetSpecialFolderPathA") => {
             shell32::sh_get_special_folder_path_a as usize as u64
         }
-        _ => extended_fn_address(mod_key, name).unwrap_or_else(|| stub_api as usize as u64),
+        _ => extended_fn_address(mod_key, name).unwrap_or_else(|| {
+            if record_exactness {
+                crate::ecosystem_exactness::record_win32_stub(mod_key, name);
+            }
+            stub_api as usize as u64
+        }),
     }
 }
 
@@ -5604,7 +6316,10 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "VkKeyScanExA" => Some(user32::vk_key_scan_ex_a as usize as u64),
             "GetKeyNameTextA" => Some(user32::get_key_name_text_a as usize as u64),
             "OemKeyScan" => Some(user32::oem_key_scan as usize as u64),
+            "GetDoubleClickTime" => Some(user32::get_double_click_time as usize as u64),
+            "SwapMouseButton" => Some(user32::swap_mouse_button as usize as u64),
             "SetDoubleClickTime" => Some(user32::set_double_click_time as usize as u64),
+            "mouse_event" => Some(user32::mouse_event as usize as u64),
             "BeginPaint" => Some(user32::begin_paint as usize as u64),
             "EndPaint" => Some(user32::end_paint as usize as u64),
             "InvalidateRect" => Some(user32::invalidate_rect as usize as u64),
@@ -5651,6 +6366,9 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "SetClipboardViewer" => Some(user32::set_clipboard_viewer as usize as u64),
             "GetClipboardViewer" => Some(user32::get_clipboard_viewer as usize as u64),
             "ChangeClipboardChain" => Some(user32::change_clipboard_chain as usize as u64),
+            "IsClipboardFormatAvailable" => {
+                Some(user32::is_clipboard_format_available as usize as u64)
+            }
             "LoadBitmapA" => Some(user32::load_bitmap_a as usize as u64),
             "LoadStringA" => Some(user32::load_string_a as usize as u64),
             "LoadImageA" => Some(user32::load_image_a as usize as u64),
@@ -5665,6 +6383,10 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "SetPropA" => Some(user32::set_prop_a as usize as u64),
             "RemovePropA" => Some(user32::remove_prop_a as usize as u64),
             "EnumPropsA" => Some(user32::enum_props_a as usize as u64),
+            "IsWindowEnabled" => Some(user32::is_window_enabled as usize as u64),
+            "GetWindowThreadProcessId" => {
+                Some(user32::get_window_thread_process_id as usize as u64)
+            }
             "GetQueueStatus" => Some(user32::get_queue_status as usize as u64),
             "GetInputState" => Some(user32::get_input_state as usize as u64),
             _ => None,
@@ -5740,6 +6462,8 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
                 Some(gdi32::create_elliptic_rgn_indirect as usize as u64)
             }
             "CreateRoundRectRgn" => Some(gdi32::create_round_rect_rgn as usize as u64),
+            "OffsetRgn" => Some(gdi32::offset_rgn as usize as u64),
+            "PtInRegion" => Some(gdi32::pt_in_region as usize as u64),
             "RectInRegion" => Some(gdi32::rect_in_region as usize as u64),
             "SelectClipRgn" => Some(gdi32::select_clip_rgn as usize as u64),
             "ExcludeClipRect" => Some(gdi32::exclude_clip_rect as usize as u64),
@@ -5749,12 +6473,32 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "RectVisible" => Some(gdi32::rect_visible as usize as u64),
             "GetCurrentPositionEx" => Some(gdi32::get_current_position_ex as usize as u64),
             "GetGraphicsMode" => Some(gdi32::get_graphics_mode as usize as u64),
+            "SetGraphicsMode" => Some(gdi32::set_graphics_mode as usize as u64),
+            "SetMapMode" => Some(gdi32::set_map_mode as usize as u64),
+            "GetMapMode" => Some(gdi32::get_map_mode as usize as u64),
+            "SetViewportOrgEx" => Some(gdi32::set_viewport_org_ex as usize as u64),
+            "GetViewportOrgEx" => Some(gdi32::get_viewport_org_ex as usize as u64),
+            "SetWindowOrgEx" => Some(gdi32::set_window_org_ex as usize as u64),
+            "GetWindowOrgEx" => Some(gdi32::get_window_org_ex as usize as u64),
+            "SetViewportExtEx" => Some(gdi32::set_viewport_ext_ex as usize as u64),
+            "GetViewportExtEx" => Some(gdi32::get_viewport_ext_ex as usize as u64),
+            "SetWindowExtEx" => Some(gdi32::set_window_ext_ex as usize as u64),
+            "GetWindowExtEx" => Some(gdi32::get_window_ext_ex as usize as u64),
+            "DPtoLP" => Some(gdi32::dp_to_lp as usize as u64),
+            "LPtoDP" => Some(gdi32::lp_to_dp as usize as u64),
             "GetPolyFillMode" => Some(gdi32::get_poly_fill_mode as usize as u64),
             "SetPolyFillMode" => Some(gdi32::set_poly_fill_mode as usize as u64),
             "GetStretchBltMode" => Some(gdi32::get_stretch_blt_mode as usize as u64),
             "SetStretchBltMode" => Some(gdi32::set_stretch_blt_mode as usize as u64),
             "GetROP2" => Some(gdi32::get_rop2 as usize as u64),
             "SetROP2" => Some(gdi32::set_rop2 as usize as u64),
+            "ExtTextOutA" => Some(gdi32::ext_text_out_a as usize as u64),
+            "DrawTextA" => Some(gdi32::draw_text_a as usize as u64),
+            "DrawTextExA" => Some(gdi32::draw_text_ex_a as usize as u64),
+            "CreatePolygonRgn" => Some(gdi32::create_polygon_rgn as usize as u64),
+            "FillRgn" => Some(gdi32::fill_rgn as usize as u64),
+            "FrameRgn" => Some(gdi32::frame_rgn as usize as u64),
+            "GetRgnBox" => Some(gdi32::get_rgn_box as usize as u64),
             _ => None,
         },
         "advapi32" => match name {
@@ -5841,13 +6585,18 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "_heapmin" => Some(msvcrt::_heapmin as usize as u64),
             "strncat" => Some(msvcrt::strncat as usize as u64),
             "strrchr" => Some(msvcrt::strrchr as usize as u64),
+            "fflush" => Some(msvcrt::fflush as usize as u64),
             "feof" => Some(msvcrt::feof as usize as u64),
+            "ferror" => Some(msvcrt::ferror as usize as u64),
             "fgetc" => Some(msvcrt::fgetc as usize as u64),
             "fputc" => Some(msvcrt::fputc as usize as u64),
             "fgets" => Some(msvcrt::fgets as usize as u64),
             "fputs" => Some(msvcrt::fputs as usize as u64),
+            "clearerr" => Some(msvcrt::clearerr as usize as u64),
+            "rewind" => Some(msvcrt::rewind as usize as u64),
             "scanf" => Some(msvcrt::scanf as usize as u64),
             "setlocale" => Some(msvcrt::setlocale as usize as u64),
+            "localeconv" => Some(msvcrt::localeconv as usize as u64),
             "labs" => Some(msvcrt::labs as usize as u64),
             "time" => Some(msvcrt::time as usize as u64),
             "clock" => Some(msvcrt::clock as usize as u64),
@@ -5859,6 +6608,13 @@ fn extended_fn_address(module: &str, name: &str) -> Option<u64> {
             "system" => Some(msvcrt::system as usize as u64),
             "atexit" => Some(msvcrt::atexit as usize as u64),
             "_onexit" => Some(msvcrt::_onexit as usize as u64),
+            "_putenv" => Some(msvcrt::_putenv as usize as u64),
+            "_dupenv_s" => Some(msvcrt::_dupenv_s as usize as u64),
+            "_fullpath" => Some(msvcrt::_fullpath as usize as u64),
+            "_splitpath" => Some(msvcrt::_splitpath as usize as u64),
+            "_makepath" => Some(msvcrt::_makepath as usize as u64),
+            "remove" => Some(msvcrt::remove as usize as u64),
+            "rename" => Some(msvcrt::rename as usize as u64),
             "atof" => Some(msvcrt::atof as usize as u64),
             "strtol" => Some(msvcrt::strtol as usize as u64),
             "strtoul" => Some(msvcrt::strtoul as usize as u64),
@@ -5947,6 +6703,12 @@ fn canonical_module_key(module: &str) -> String {
     }
 }
 
+const WIN32_EXACTNESS_BOUNDARIES: &[(&str, &str)] = &[];
+
+pub fn known_exactness_boundaries() -> &'static [(&'static str, &'static str)] {
+    WIN32_EXACTNESS_BOUNDARIES
+}
+
 pub fn get_api_status(module: &str, func: &str) -> Option<Win32ApiStatus> {
     let module_key = canonical_module_key(module);
     let mut table = WIN32_API_TABLE.lock();
@@ -5958,7 +6720,7 @@ pub fn get_api_status(module: &str, func: &str) -> Option<Win32ApiStatus> {
     if !module_funcs.contains_key(func) {
         return None;
     }
-    let addr = get_fn_address(module_key.as_str(), func);
+    let addr = resolve_fn_address_internal(module_key.as_str(), func, false);
     if addr != stub_api as usize as u64 {
         Some(Win32ApiStatus::Implemented)
     } else {
@@ -5975,6 +6737,51 @@ pub fn is_implemented_api(module: &str, func: &str) -> bool {
         get_api_status(module, func),
         Some(Win32ApiStatus::Implemented)
     )
+}
+
+pub fn declared_stubbed_exports(limit: usize) -> Vec<(String, String)> {
+    let mut table = WIN32_API_TABLE.lock();
+    if table.is_none() {
+        *table = Some(init_api_table());
+    }
+    let Some(table) = table.as_ref() else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for (module, functions) in table.iter() {
+        for function in functions.keys() {
+            if resolve_fn_address_internal(module.as_str(), function.as_str(), false)
+                == stub_api as usize as u64
+            {
+                entries.push((module.clone(), function.clone()));
+                if limit != 0 && entries.len() >= limit {
+                    return entries;
+                }
+            }
+        }
+    }
+    entries
+}
+
+pub fn declared_stubbed_export_count() -> usize {
+    let mut table = WIN32_API_TABLE.lock();
+    if table.is_none() {
+        *table = Some(init_api_table());
+    }
+    let Some(table) = table.as_ref() else {
+        return 0;
+    };
+    let mut count = 0usize;
+    for (module, functions) in table.iter() {
+        for function in functions.keys() {
+            if resolve_fn_address_internal(module.as_str(), function.as_str(), false)
+                == stub_api as usize as u64
+            {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 /// Win32 API module
@@ -6429,17 +7236,12 @@ mod kernel32 {
             crate::win32::set_win32_last_error(6);
             return FALSE;
         };
-        let mut task = crate::task::task::Task::with_priority(
-            crate::win32::win32_process_start_trampoline,
+        let _ = crate::win32::spawn_bound_process_task(
+            process_handle,
+            thread_handle,
             crate::task::task::Priority::Normal,
             "win32-process",
         );
-        let task_id = task.id as u64;
-        crate::win32::WIN32_PROCESS_LAUNCHES
-            .lock()
-            .insert(task_id, process_handle);
-        let _ = crate::win32_abi::bind_thread_handle_task(thread_handle, task_id);
-        let _ = crate::task::scheduler::spawn_task(task);
         populate_process_information(lpProcessInformation, process_handle, thread_handle);
         crate::win32::set_win32_last_error(0);
         TRUE
@@ -8019,73 +8821,48 @@ mod user32 {
 
     /// Fare ve klavye olaylarını Win32 mesaj kuyruğuna çevir
     fn poll_input_events() {
-        // Fare pozisyonunu al
-        let (mx, my) = crate::drivers::mouse::get_position();
-        let buttons = crate::drivers::mouse::get_buttons();
+        // Fare snapshot'unu tek publication alanÄ±ndan al
+        let mouse = crate::drivers::mouse::snapshot();
+        let mx = mouse.x;
+        let my = mouse.y;
+        let buttons = mouse.buttons;
 
         // Aktif pencereyi bul
-        let active_hwnd = crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed);
+        let active_hwnd = crate::win32::window_publication_snapshot().active;
         if active_hwnd == 0 {
             // İlk görünür pencereyi aktif yap
             let windows = crate::win32::WIN32_WINDOWS.lock();
             for (&hwnd, win) in windows.iter() {
                 if win.visible {
                     drop(windows);
-                    crate::win32::ACTIVE_HWND.store(hwnd, core::sync::atomic::Ordering::Relaxed);
+                    crate::win32::update_window_publication(|snapshot| {
+                        snapshot.active = hwnd;
+                    });
                     break;
                 }
             }
         }
 
         // Fare hareket mesajı (her frame'de değil, değişiklikte)
-        static LAST_MX: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
-        static LAST_MY: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+        let previous = crate::win32::reported_pointer_snapshot();
+        let previous_x = previous.x;
+        let previous_y = previous.y;
 
-        let last_x = LAST_MX.load(core::sync::atomic::Ordering::Relaxed);
-        let last_y = LAST_MY.load(core::sync::atomic::Ordering::Relaxed);
-
-        if mx != last_x || my != last_y {
-            LAST_MX.store(mx, core::sync::atomic::Ordering::Relaxed);
-            LAST_MY.store(my, core::sync::atomic::Ordering::Relaxed);
-
-            let hwnd = crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed);
-            if hwnd != 0 {
-                let lparam = ((my as i64 & 0xFFFF) << 16) | (mx as i64 & 0xFFFF);
-                crate::win32::post_message(hwnd, crate::win32::WM_MOUSEMOVE, 0, lparam);
-            }
-        }
-
-        // Fare buton mesajları
-        static LAST_LEFT: core::sync::atomic::AtomicBool =
-            core::sync::atomic::AtomicBool::new(false);
-        static LAST_RIGHT: core::sync::atomic::AtomicBool =
-            core::sync::atomic::AtomicBool::new(false);
-
-        let last_left = LAST_LEFT.load(core::sync::atomic::Ordering::Relaxed);
-        let last_right = LAST_RIGHT.load(core::sync::atomic::Ordering::Relaxed);
-
-        if buttons.left != last_left || buttons.right != last_right {
-            LAST_LEFT.store(buttons.left, core::sync::atomic::Ordering::Relaxed);
-            LAST_RIGHT.store(buttons.right, core::sync::atomic::Ordering::Relaxed);
-            let hwnd = crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed);
-
-            if hwnd != 0 {
-                let lparam = ((my as i64 & 0xFFFF) << 16) | (mx as i64 & 0xFFFF);
-
-                // Sol buton
-                if buttons.left && !last_left {
-                    crate::win32::post_message(hwnd, crate::win32::WM_LBUTTONDOWN, 1, lparam);
-                } else if !buttons.left && last_left {
-                    crate::win32::post_message(hwnd, crate::win32::WM_LBUTTONUP, 0, lparam);
-                }
-
-                // Sağ buton
-                if buttons.right && !last_right {
-                    crate::win32::post_message(hwnd, crate::win32::WM_RBUTTONDOWN, 2, lparam);
-                } else if !buttons.right && last_right {
-                    crate::win32::post_message(hwnd, crate::win32::WM_RBUTTONUP, 0, lparam);
-                }
-            }
+        if mx != previous_x
+            || my != previous_y
+            || buttons.left != previous.buttons.left
+            || buttons.right != previous.buttons.right
+            || buttons.middle != previous.buttons.middle
+        {
+            crate::win32::update_reported_mouse_state(mx, my, buttons);
+            crate::win32::dispatch_mouse_transition(
+                previous_x,
+                previous_y,
+                previous.buttons,
+                mx,
+                my,
+                buttons,
+            );
         }
     }
 
@@ -8329,9 +9106,11 @@ mod user32 {
             path_active: false,
             path_closed: false,
             path_points: Vec::new(),
-            map_mode: 1,
+            map_mode: MM_TEXT,
             viewport_org: POINT::default(),
+            viewport_ext: SIZE { cx: 1, cy: 1 },
             window_org: POINT::default(),
+            window_ext: SIZE { cx: 1, cy: 1 },
             world_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             device_kind: crate::win32::Win32DcKind::Window,
             device_name: String::new(),
@@ -8421,15 +9200,7 @@ mod user32 {
             return FALSE;
         }
         crate::win32::WIN32_DIALOGS.lock().remove(&hwnd);
-        if crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed) == hwnd {
-            crate::win32::ACTIVE_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
-        }
-        if crate::win32::FOCUSED_HWND.load(core::sync::atomic::Ordering::Relaxed) == hwnd {
-            crate::win32::FOCUSED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
-        }
-        if crate::win32::CAPTURED_HWND.load(core::sync::atomic::Ordering::Relaxed) == hwnd {
-            crate::win32::CAPTURED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
-        }
+        crate::win32::clear_window_publication_for(hwnd);
         crate::win32::post_message(hwnd, crate::win32::WM_DESTROY, 0, 0);
         TRUE
     }
@@ -8610,7 +9381,7 @@ mod user32 {
 
     /// GetForegroundWindow
     pub unsafe fn get_foreground_window() -> HWND {
-        crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed) as HWND
+        crate::win32::window_publication_snapshot().active as HWND
     }
 
     /// SetForegroundWindow
@@ -8640,7 +9411,9 @@ mod user32 {
             );
             crate::win32::post_message(previous as u64, crate::win32::WM_NCPAINT, 0, 0);
         }
-        crate::win32::ACTIVE_HWND.store(hWnd as u64, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::update_window_publication(|snapshot| {
+            snapshot.active = hWnd as u64;
+        });
         crate::win32::post_message(
             hWnd as u64,
             crate::win32::WM_NCACTIVATE,
@@ -8671,7 +9444,7 @@ mod user32 {
 
     /// GetFocus
     pub unsafe fn get_focus() -> HWND {
-        crate::win32::FOCUSED_HWND.load(core::sync::atomic::Ordering::Relaxed) as HWND
+        crate::win32::window_publication_snapshot().focused as HWND
     }
 
     /// SetFocus
@@ -8685,8 +9458,10 @@ mod user32 {
             crate::win32::post_message(previous as u64, crate::win32::WM_KILLFOCUS, hWnd as u64, 0);
             crate::win32::post_message(previous as u64, crate::win32::WM_NCPAINT, 0, 0);
         }
-        crate::win32::FOCUSED_HWND.store(hwnd, core::sync::atomic::Ordering::Relaxed);
-        if crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed) != hwnd {
+        crate::win32::update_window_publication(|snapshot| {
+            snapshot.focused = hwnd;
+        });
+        if crate::win32::window_publication_snapshot().active != hwnd {
             let _ = set_foreground_window(hWnd);
         }
         crate::win32::post_message(hwnd, crate::win32::WM_SETFOCUS, previous as u64, 0);
@@ -8696,19 +9471,23 @@ mod user32 {
 
     /// GetCapture
     pub unsafe fn get_capture() -> HWND {
-        crate::win32::CAPTURED_HWND.load(core::sync::atomic::Ordering::Relaxed) as HWND
+        crate::win32::window_publication_snapshot().captured as HWND
     }
 
     /// SetCapture
     pub unsafe fn set_capture(hWnd: HWND) -> HWND {
         let previous = get_capture();
-        crate::win32::CAPTURED_HWND.store(hWnd as u64, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::update_window_publication(|snapshot| {
+            snapshot.captured = hWnd as u64;
+        });
         previous
     }
 
     /// ReleaseCapture
     pub unsafe fn release_capture() -> BOOL {
-        crate::win32::CAPTURED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
+        crate::win32::update_window_publication(|snapshot| {
+            snapshot.captured = 0;
+        });
         TRUE
     }
 
@@ -9248,16 +10027,34 @@ mod user32 {
 
     /// GetCursorPos
     pub unsafe fn get_cursor_pos(lpPoint: *mut POINT) -> BOOL {
-        if !lpPoint.is_null() {
-            (*lpPoint).x = 0;
-            (*lpPoint).y = 0;
+        if lpPoint.is_null() {
+            return FALSE;
         }
+        let mouse = crate::drivers::mouse::snapshot();
+        (*lpPoint).x = mouse.x;
+        (*lpPoint).y = mouse.y;
         TRUE
     }
 
     /// SetCursorPos
     pub unsafe fn set_cursor_pos(x: INT, y: INT) -> BOOL {
-        crate::serial_println!("[WIN32] SetCursorPos: {},{}", x, y);
+        let (max_x, max_y) = crate::drivers::mouse::get_bounds();
+        let clamped_x = x.clamp(0, max_x.saturating_sub(1));
+        let clamped_y = y.clamp(0, max_y.saturating_sub(1));
+        let previous = crate::drivers::mouse::snapshot();
+        let previous_buttons = previous.buttons;
+        let previous_x = previous.x;
+        let previous_y = previous.y;
+        crate::win32::store_mouse_state(clamped_x, clamped_y, previous_buttons);
+        crate::win32::update_reported_mouse_state(clamped_x, clamped_y, previous_buttons);
+        crate::win32::dispatch_mouse_transition(
+            previous_x,
+            previous_y,
+            previous_buttons,
+            clamped_x,
+            clamped_y,
+            previous_buttons,
+        );
         TRUE
     }
 
@@ -9269,7 +10066,128 @@ mod user32 {
         cButtons: DWORD,
         dwExtraInfo: usize,
     ) {
-        let _ = (dwFlags, dx, dy, cButtons, dwExtraInfo);
+        let _ = (cButtons, dwExtraInfo);
+        let previous = crate::drivers::mouse::snapshot();
+        let previous_buttons = previous.buttons;
+        let previous_x = previous.x;
+        let previous_y = previous.y;
+        let (max_x, max_y) = crate::drivers::mouse::get_bounds();
+        let mut next_x = previous_x;
+        let mut next_y = previous_y;
+        if (dwFlags & MOUSEEVENTF_ABSOLUTE) != 0 {
+            let width = max_x.saturating_sub(1).max(1);
+            let height = max_y.saturating_sub(1).max(1);
+            next_x = (((dx as u64 * width as u64) + 32767) / 65535) as INT;
+            next_y = (((dy as u64 * height as u64) + 32767) / 65535) as INT;
+        } else if (dwFlags & MOUSEEVENTF_MOVE) != 0 {
+            next_x = next_x.saturating_add(dx as i32);
+            next_y = next_y.saturating_add(dy as i32);
+        }
+        next_x = next_x.clamp(0, max_x.saturating_sub(1));
+        next_y = next_y.clamp(0, max_y.saturating_sub(1));
+
+        let mut current_buttons = previous_buttons;
+        crate::win32::store_mouse_state(next_x, next_y, current_buttons);
+        crate::win32::update_reported_mouse_state(next_x, next_y, current_buttons);
+        crate::win32::dispatch_mouse_transition(
+            previous_x,
+            previous_y,
+            previous_buttons,
+            next_x,
+            next_y,
+            current_buttons,
+        );
+
+        if (dwFlags & MOUSEEVENTF_LEFTDOWN) != 0 {
+            let mut next_buttons = current_buttons;
+            next_buttons.left = true;
+            crate::win32::store_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::update_reported_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::dispatch_mouse_transition(
+                next_x,
+                next_y,
+                current_buttons,
+                next_x,
+                next_y,
+                next_buttons,
+            );
+            current_buttons = next_buttons;
+        }
+        if (dwFlags & MOUSEEVENTF_RIGHTDOWN) != 0 {
+            let mut next_buttons = current_buttons;
+            next_buttons.right = true;
+            crate::win32::store_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::update_reported_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::dispatch_mouse_transition(
+                next_x,
+                next_y,
+                current_buttons,
+                next_x,
+                next_y,
+                next_buttons,
+            );
+            current_buttons = next_buttons;
+        }
+        if (dwFlags & MOUSEEVENTF_MIDDLEDOWN) != 0 {
+            let mut next_buttons = current_buttons;
+            next_buttons.middle = true;
+            crate::win32::store_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::update_reported_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::dispatch_mouse_transition(
+                next_x,
+                next_y,
+                current_buttons,
+                next_x,
+                next_y,
+                next_buttons,
+            );
+            current_buttons = next_buttons;
+        }
+        if (dwFlags & MOUSEEVENTF_LEFTUP) != 0 {
+            let mut next_buttons = current_buttons;
+            next_buttons.left = false;
+            crate::win32::store_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::update_reported_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::dispatch_mouse_transition(
+                next_x,
+                next_y,
+                current_buttons,
+                next_x,
+                next_y,
+                next_buttons,
+            );
+            current_buttons = next_buttons;
+        }
+        if (dwFlags & MOUSEEVENTF_RIGHTUP) != 0 {
+            let mut next_buttons = current_buttons;
+            next_buttons.right = false;
+            crate::win32::store_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::update_reported_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::dispatch_mouse_transition(
+                next_x,
+                next_y,
+                current_buttons,
+                next_x,
+                next_y,
+                next_buttons,
+            );
+            current_buttons = next_buttons;
+        }
+        if (dwFlags & MOUSEEVENTF_MIDDLEUP) != 0 {
+            let mut next_buttons = current_buttons;
+            next_buttons.middle = false;
+            crate::win32::store_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::update_reported_mouse_state(next_x, next_y, next_buttons);
+            crate::win32::dispatch_mouse_transition(
+                next_x,
+                next_y,
+                current_buttons,
+                next_x,
+                next_y,
+                next_buttons,
+            );
+            current_buttons = next_buttons;
+        }
     }
 
     /// GetDoubleClickTime
@@ -9284,7 +10202,15 @@ mod user32 {
 
     /// SwapMouseButton
     pub unsafe fn swap_mouse_button(fSwap: BOOL) -> BOOL {
-        FALSE
+        let previous = crate::win32::reported_pointer_snapshot().swap_buttons;
+        crate::win32::update_reported_pointer_publication(|snapshot| {
+            snapshot.swap_buttons = fSwap != FALSE;
+        });
+        if previous {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 
     /// GetSystemMetrics
@@ -13019,10 +13945,18 @@ mod ole32 {
 mod oleaut32 {
     use super::*;
 
-    const VT_EMPTY: u16 = 0;
-    const VT_BSTR: u16 = 8;
+    pub(super) const VT_EMPTY: u16 = 0;
+    pub(super) const VT_VOID: u16 = 1;
+    pub(super) const VT_I4: u16 = 3;
+    pub(super) const VT_BSTR: u16 = 8;
+    pub(super) const VT_DISPATCH: u16 = 9;
+    pub(super) const VT_BOOL: u16 = 11;
+    pub(super) const VT_VARIANT: u16 = 12;
+    pub(super) const VT_USERDEFINED: u16 = 29;
+    pub(super) const VT_UNKNOWN: u16 = 13;
+    pub(super) const VT_UI4: u16 = 19;
     static TYPELIB_VTABLE: Once<Box<[usize; 13]>> = Once::new();
-    static TYPEINFO_VTABLE: Once<Box<[usize; 19]>> = Once::new();
+    static TYPEINFO_VTABLE: Once<Box<[usize; 21]>> = Once::new();
     static TYPECOMP_VTABLE: Once<Box<[usize; 5]>> = Once::new();
 
     fn alloc_bstr_text(text: &str) -> BSTR {
@@ -13196,6 +14130,10 @@ mod oleaut32 {
                 optional_param_count: 0,
                 func_flags: 0,
                 vtable_offset: index as SHORT * 8,
+                return_vt: VT_EMPTY,
+                return_href_type: 0,
+                param_vts: Vec::new(),
+                param_href_types: Vec::new(),
             })
             .collect()
     }
@@ -13251,6 +14189,86 @@ mod oleaut32 {
         value
             .and_then(|raw| raw.trim().parse::<u32>().ok())
             .unwrap_or(0)
+    }
+
+    fn parse_vartype(value: Option<&str>) -> WORD {
+        match value
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "empty" => VT_EMPTY,
+            "void" => VT_VOID,
+            "i4" | "int" | "long" => VT_I4,
+            "u4" | "uint" | "dword" => VT_UI4,
+            "bstr" | "string" => VT_BSTR,
+            "dispatch" | "idispatch" => VT_DISPATCH,
+            "bool" | "boolean" => VT_BOOL,
+            "variant" => VT_VARIANT,
+            "userdefined" | "udt" => VT_USERDEFINED,
+            "unknown" | "iunknown" => VT_UNKNOWN,
+            other => other.parse::<u16>().unwrap_or(VT_EMPTY),
+        }
+    }
+
+    fn parse_vartype_and_href(value: Option<&str>) -> (WORD, DWORD) {
+        let raw = value.unwrap_or_default().trim();
+        if raw.is_empty() {
+            return (VT_EMPTY, 0);
+        }
+        if let Some((vt, href)) = raw.split_once('@') {
+            return (
+                parse_vartype(Some(vt)),
+                href.trim().parse::<u32>().unwrap_or(0),
+            );
+        }
+        if let Some((vt, href)) = raw.split_once(':') {
+            return (
+                parse_vartype(Some(vt)),
+                href.trim().parse::<u32>().unwrap_or(0),
+            );
+        }
+        (parse_vartype(Some(raw)), 0)
+    }
+
+    fn parse_vartype_list(value: Option<&str>, count: SHORT) -> Vec<WORD> {
+        let Some(raw) = value.map(str::trim) else {
+            return Vec::new();
+        };
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        let limit = core::cmp::max(count, 0) as usize;
+        raw.split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .take(limit)
+            .map(|entry| parse_vartype(Some(entry)))
+            .collect()
+    }
+
+    fn parse_vartype_ref_list(value: Option<&str>, count: SHORT) -> (Vec<WORD>, Vec<DWORD>) {
+        let Some(raw) = value.map(str::trim) else {
+            return (Vec::new(), Vec::new());
+        };
+        if raw.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let limit = core::cmp::max(count, 0) as usize;
+        let mut vts = Vec::new();
+        let mut hrefs = Vec::new();
+        for entry in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .take(limit)
+        {
+            let (vt, href) = parse_vartype_and_href(Some(entry));
+            vts.push(vt);
+            hrefs.push(href);
+        }
+        (vts, hrefs)
     }
 
     fn parse_impl_type_flags(value: Option<&str>) -> INT {
@@ -13333,6 +14351,10 @@ mod oleaut32 {
         param_count: Option<SHORT>,
         optional_param_count: Option<SHORT>,
         func_flags: Option<WORD>,
+        return_vt: Option<WORD>,
+        return_href_type: Option<DWORD>,
+        param_vts: Option<Vec<WORD>>,
+        param_href_types: Option<Vec<DWORD>>,
     ) {
         if let Some(info) = type_infos
             .iter_mut()
@@ -13359,6 +14381,10 @@ mod oleaut32 {
                 optional_param_count: optional_param_count.unwrap_or(0),
                 func_flags: func_flags.unwrap_or(0),
                 vtable_offset: info.funcs.len() as SHORT * 8,
+                return_vt: return_vt.unwrap_or(VT_EMPTY),
+                return_href_type: return_href_type.unwrap_or(0),
+                param_vts: param_vts.unwrap_or_default(),
+                param_href_types: param_href_types.unwrap_or_default(),
             });
             normalize_member_dispatch_shape(info);
         }
@@ -13374,6 +14400,8 @@ mod oleaut32 {
         varkind: Option<DWORD>,
         offset: Option<ULONG>,
         var_flags: Option<WORD>,
+        vt: Option<WORD>,
+        href_type: Option<DWORD>,
     ) {
         if let Some(info) = type_infos
             .iter_mut()
@@ -13389,6 +14417,8 @@ mod oleaut32 {
                 var_flags: var_flags.unwrap_or(0),
                 varkind: varkind.unwrap_or(VAR_PERINSTANCE),
                 offset: offset.unwrap_or(0),
+                vt: vt.unwrap_or(VT_EMPTY),
+                href_type: href_type.unwrap_or(0),
             });
             normalize_member_dispatch_shape(info);
         }
@@ -13878,6 +14908,70 @@ mod oleaut32 {
                         optional_param_count: read_binary_i16(payload, base + 36)?,
                         func_flags: read_binary_u16(payload, base + 38)?,
                         vtable_offset: read_binary_i16(payload, base + 40)?,
+                        return_vt: if stride >= 44 {
+                            read_binary_u16(payload, base + 42).unwrap_or(VT_EMPTY)
+                        } else {
+                            VT_EMPTY
+                        },
+                        return_href_type: if stride >= 48 {
+                            let param_count =
+                                core::cmp::max(read_binary_i16(payload, base + 34).unwrap_or(0), 0)
+                                    as usize;
+                            let href_offset = base
+                                .checked_add(44 + param_count.saturating_mul(2))
+                                .unwrap_or(base + stride);
+                            if href_offset + 4 <= base + stride {
+                                read_binary_u32(payload, href_offset).unwrap_or(0)
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        },
+                        param_vts: if stride >= 44 {
+                            let param_count =
+                                core::cmp::max(read_binary_i16(payload, base + 34).unwrap_or(0), 0)
+                                    as usize;
+                            let mut values = Vec::new();
+                            for param_index in 0..param_count {
+                                let Some(vt_offset) =
+                                    base.checked_add(44 + param_index.checked_mul(2)?)
+                                else {
+                                    break;
+                                };
+                                if vt_offset + 2 > base + stride {
+                                    break;
+                                }
+                                values
+                                    .push(read_binary_u16(payload, vt_offset).unwrap_or(VT_EMPTY));
+                            }
+                            values
+                        } else {
+                            Vec::new()
+                        },
+                        param_href_types: if stride >= 48 {
+                            let param_count =
+                                core::cmp::max(read_binary_i16(payload, base + 34).unwrap_or(0), 0)
+                                    as usize;
+                            let href_base = base
+                                .checked_add(48 + param_count.saturating_mul(2))
+                                .unwrap_or(base + stride);
+                            let mut values = Vec::new();
+                            for param_index in 0..param_count {
+                                let Some(href_offset) =
+                                    href_base.checked_add(param_index.checked_mul(4)?)
+                                else {
+                                    break;
+                                };
+                                if href_offset + 4 > base + stride {
+                                    break;
+                                }
+                                values.push(read_binary_u32(payload, href_offset).unwrap_or(0));
+                            }
+                            values
+                        } else {
+                            Vec::new()
+                        },
                     });
                 }
             }
@@ -13919,6 +15013,16 @@ mod oleaut32 {
                         var_flags: read_binary_u16(payload, base + 20)?,
                         varkind: read_binary_u32(payload, base + 24)?,
                         offset: read_binary_u32(payload, base + 28)?,
+                        vt: if stride >= 34 {
+                            read_binary_u16(payload, base + 32).unwrap_or(VT_EMPTY)
+                        } else {
+                            VT_EMPTY
+                        },
+                        href_type: if stride >= 38 {
+                            read_binary_u32(payload, base + 34).unwrap_or(0)
+                        } else {
+                            0
+                        },
                     });
                 }
             }
@@ -13982,6 +15086,10 @@ mod oleaut32 {
                         optional_param_count: 0,
                         func_flags: 0,
                         vtable_offset: (member_index * 8) as SHORT,
+                        return_vt: VT_EMPTY,
+                        return_href_type: 0,
+                        param_vts: Vec::new(),
+                        param_href_types: Vec::new(),
                     });
                 }
             }
@@ -13995,6 +15103,8 @@ mod oleaut32 {
                         var_flags: 0,
                         varkind: VAR_PERINSTANCE,
                         offset: 0,
+                        vt: VT_EMPTY,
+                        href_type: 0,
                     });
                 }
             }
@@ -14173,6 +15283,74 @@ mod oleaut32 {
                             } else {
                                 0
                             },
+                            return_vt: if stride >= 44 {
+                                read_binary_u16(payload, base + 42).unwrap_or(VT_EMPTY)
+                            } else {
+                                VT_EMPTY
+                            },
+                            return_href_type: if stride >= 48 {
+                                let param_count = core::cmp::max(
+                                    read_binary_i16(payload, base + 34).unwrap_or(0),
+                                    0,
+                                ) as usize;
+                                let href_offset = base
+                                    .checked_add(44 + param_count.saturating_mul(2))
+                                    .unwrap_or(base + stride);
+                                if href_offset + 4 <= base + stride {
+                                    read_binary_u32(payload, href_offset).unwrap_or(0)
+                                } else {
+                                    0
+                                }
+                            } else {
+                                0
+                            },
+                            param_vts: if stride >= 44 {
+                                let param_count = core::cmp::max(
+                                    read_binary_i16(payload, base + 34).unwrap_or(0),
+                                    0,
+                                ) as usize;
+                                let mut values = Vec::new();
+                                for param_index in 0..param_count {
+                                    let Some(vt_offset) =
+                                        base.checked_add(44 + param_index.checked_mul(2)?)
+                                    else {
+                                        break;
+                                    };
+                                    if vt_offset + 2 > base + stride {
+                                        break;
+                                    }
+                                    values.push(
+                                        read_binary_u16(payload, vt_offset).unwrap_or(VT_EMPTY),
+                                    );
+                                }
+                                values
+                            } else {
+                                Vec::new()
+                            },
+                            param_href_types: if stride >= 48 {
+                                let param_count = core::cmp::max(
+                                    read_binary_i16(payload, base + 34).unwrap_or(0),
+                                    0,
+                                ) as usize;
+                                let href_base = base
+                                    .checked_add(48 + param_count.saturating_mul(2))
+                                    .unwrap_or(base + stride);
+                                let mut values = Vec::new();
+                                for param_index in 0..param_count {
+                                    let Some(href_offset) =
+                                        href_base.checked_add(param_index.checked_mul(4)?)
+                                    else {
+                                        break;
+                                    };
+                                    if href_offset + 4 > base + stride {
+                                        break;
+                                    }
+                                    values.push(read_binary_u32(payload, href_offset).unwrap_or(0));
+                                }
+                                values
+                            } else {
+                                Vec::new()
+                            },
                         });
                     }
                 }
@@ -14208,6 +15386,16 @@ mod oleaut32 {
                             var_flags: read_binary_u16(payload, base + 20)?,
                             varkind: read_binary_u32(payload, base + 22)?,
                             offset: read_binary_u32(payload, base + 26)?,
+                            vt: if stride >= 32 {
+                                read_binary_u16(payload, base + 30).unwrap_or(VT_EMPTY)
+                            } else {
+                                VT_EMPTY
+                            },
+                            href_type: if stride >= 36 {
+                                read_binary_u32(payload, base + 32).unwrap_or(0)
+                            } else {
+                                0
+                            },
                         });
                     }
                 }
@@ -14257,6 +15445,10 @@ mod oleaut32 {
                             optional_param_count: 0,
                             func_flags: 0,
                             vtable_offset: (member_index * 8) as SHORT,
+                            return_vt: VT_EMPTY,
+                            return_href_type: 0,
+                            param_vts: Vec::new(),
+                            param_href_types: Vec::new(),
                         });
                     }
                 }
@@ -14270,6 +15462,8 @@ mod oleaut32 {
                             var_flags: 0,
                             varkind: VAR_PERINSTANCE,
                             offset: 0,
+                            vt: VT_EMPTY,
+                            href_type: 0,
                         });
                     }
                 }
@@ -14438,6 +15632,34 @@ mod oleaut32 {
                         optional_param_count: read_binary_i16(payload, base + 36)?,
                         func_flags: read_binary_u16(payload, base + 38)?,
                         vtable_offset: read_binary_i16(payload, base + 40)?,
+                        return_vt: if stride >= 44 {
+                            read_binary_u16(payload, base + 42).unwrap_or(VT_EMPTY)
+                        } else {
+                            VT_EMPTY
+                        },
+                        return_href_type: 0,
+                        param_vts: if stride >= 44 {
+                            let param_count =
+                                core::cmp::max(read_binary_i16(payload, base + 34).unwrap_or(0), 0)
+                                    as usize;
+                            let mut values = Vec::new();
+                            for param_index in 0..param_count {
+                                let Some(vt_offset) =
+                                    base.checked_add(44 + param_index.checked_mul(2)?)
+                                else {
+                                    break;
+                                };
+                                if vt_offset + 2 > base + stride {
+                                    break;
+                                }
+                                values
+                                    .push(read_binary_u16(payload, vt_offset).unwrap_or(VT_EMPTY));
+                            }
+                            values
+                        } else {
+                            Vec::new()
+                        },
+                        param_href_types: Vec::new(),
                     });
                 }
             }
@@ -14471,6 +15693,12 @@ mod oleaut32 {
                         var_flags: read_binary_u16(payload, base + 20)?,
                         varkind: read_binary_u32(payload, base + 24)?,
                         offset: read_binary_u32(payload, base + 28)?,
+                        vt: if stride >= 34 {
+                            read_binary_u16(payload, base + 32).unwrap_or(VT_EMPTY)
+                        } else {
+                            VT_EMPTY
+                        },
+                        href_type: 0,
                     });
                 }
             }
@@ -14726,6 +15954,9 @@ mod oleaut32 {
                 let param_count = Some(parse_dispatch_short(parts.next()));
                 let optional_param_count = Some(parse_dispatch_short(parts.next()));
                 let func_flags = Some(parse_dispatch_word(parts.next()));
+                let (return_vt, return_href_type) = parse_vartype_and_href(parts.next());
+                let (param_vts, param_href_types) =
+                    parse_vartype_ref_list(parts.next(), param_count.unwrap_or(0));
                 append_type_info_func(
                     &mut type_infos,
                     type_name,
@@ -14738,6 +15969,10 @@ mod oleaut32 {
                     param_count,
                     optional_param_count,
                     func_flags,
+                    Some(return_vt),
+                    Some(return_href_type),
+                    Some(param_vts),
+                    Some(param_href_types),
                 );
                 continue;
             }
@@ -14754,6 +15989,7 @@ mod oleaut32 {
                 let varkind = Some(parse_var_kind(parts.next()));
                 let offset = Some(parse_var_offset(parts.next()));
                 let var_flags = Some(parse_dispatch_word(parts.next()));
+                let (vt, href_type) = parse_vartype_and_href(parts.next());
                 append_type_info_var(
                     &mut type_infos,
                     type_name,
@@ -14764,6 +16000,8 @@ mod oleaut32 {
                     varkind,
                     offset,
                     var_flags,
+                    Some(vt),
+                    Some(href_type),
                 );
                 continue;
             }
@@ -15041,7 +16279,7 @@ mod oleaut32 {
                 continue;
             }
             if let Some(value) = line.strip_prefix("func=") {
-                let mut parts = value.splitn(10, '|').map(str::trim);
+                let mut parts = value.splitn(12, '|').map(str::trim);
                 let type_name = parts.next().unwrap_or_default();
                 let func_name = parts.next().unwrap_or_default();
                 if type_name.is_empty() || func_name.is_empty() {
@@ -15064,6 +16302,9 @@ mod oleaut32 {
                 let param_count = Some(parse_dispatch_short(parts.next()));
                 let optional_param_count = Some(parse_dispatch_short(parts.next()));
                 let func_flags = Some(parse_dispatch_word(parts.next()));
+                let (return_vt, return_href_type) = parse_vartype_and_href(parts.next());
+                let (param_vts, param_href_types) =
+                    parse_vartype_ref_list(parts.next(), param_count.unwrap_or(0));
                 append_type_info_func(
                     &mut type_infos,
                     type_name,
@@ -15076,11 +16317,15 @@ mod oleaut32 {
                     param_count,
                     optional_param_count,
                     func_flags,
+                    Some(return_vt),
+                    Some(return_href_type),
+                    Some(param_vts),
+                    Some(param_href_types),
                 );
                 continue;
             }
             if let Some(value) = line.strip_prefix("var=") {
-                let mut parts = value.splitn(8, '|').map(str::trim);
+                let mut parts = value.splitn(9, '|').map(str::trim);
                 let type_name = parts.next().unwrap_or_default();
                 let var_name = parts.next().unwrap_or_default();
                 if type_name.is_empty() || var_name.is_empty() {
@@ -15101,6 +16346,7 @@ mod oleaut32 {
                 let varkind = Some(parse_var_kind(parts.next()));
                 let offset = Some(parse_var_offset(parts.next()));
                 let var_flags = Some(parse_dispatch_word(parts.next()));
+                let (vt, href_type) = parse_vartype_and_href(parts.next());
                 append_type_info_var(
                     &mut type_infos,
                     type_name,
@@ -15111,6 +16357,8 @@ mod oleaut32 {
                     varkind,
                     offset,
                     var_flags,
+                    Some(vt),
+                    Some(href_type),
                 );
                 continue;
             }
@@ -15243,10 +16491,31 @@ mod oleaut32 {
     }
 
     fn allocate_func_desc(func: &ComTypeFuncState) -> *mut FUNCDESC {
+        let param_descs = if func.param_vts.is_empty() {
+            core::ptr::null_mut()
+        } else {
+            let mut descs = func
+                .param_vts
+                .iter()
+                .enumerate()
+                .map(|(index, &vt)| ELEMDESC {
+                    tdesc: TYPEDESC {
+                        union_data: TypeDescUnion {
+                            hreftype: func.param_href_types.get(index).copied().unwrap_or(0),
+                        },
+                        vt,
+                    },
+                    idldesc: IDLDESC::default(),
+                })
+                .collect::<Vec<_>>();
+            let ptr = descs.as_mut_ptr();
+            core::mem::forget(descs);
+            ptr
+        };
         Box::into_raw(Box::new(FUNCDESC {
             memid: func.memid,
             lprgscode: core::ptr::null_mut(),
-            lprgelemdesc_param: core::ptr::null_mut(),
+            lprgelemdesc_param: param_descs,
             funckind: FUNC_PUREVIRTUAL,
             invkind: func.invkind,
             callconv: func.callconv,
@@ -15254,7 +16523,15 @@ mod oleaut32 {
             c_params_opt: func.optional_param_count,
             o_vft: func.vtable_offset,
             c_scodes: 0,
-            elemdesc_func: ELEMDESC::default(),
+            elemdesc_func: ELEMDESC {
+                tdesc: TYPEDESC {
+                    union_data: TypeDescUnion {
+                        hreftype: func.return_href_type,
+                    },
+                    vt: func.return_vt,
+                },
+                idldesc: IDLDESC::default(),
+            },
             w_func_flags: func.func_flags,
         }))
     }
@@ -15264,7 +16541,15 @@ mod oleaut32 {
             memid: var.memid,
             lpstr_schema: core::ptr::null_mut(),
             o_inst: var.offset,
-            elemdesc_var: ELEMDESC::default(),
+            elemdesc_var: ELEMDESC {
+                tdesc: TYPEDESC {
+                    union_data: TypeDescUnion {
+                        hreftype: var.href_type,
+                    },
+                    vt: var.vt,
+                },
+                idldesc: IDLDESC::default(),
+            },
             w_var_flags: var.var_flags,
             varkind: var.varkind,
         }))
@@ -15318,6 +16603,8 @@ mod oleaut32 {
                 type_info_create_instance as usize,
                 type_info_get_containing_type_lib as usize,
                 type_info_release_type_attr as usize,
+                type_info_release_func_desc as usize,
+                type_info_release_var_desc as usize,
             ])
         });
         let object = Box::new(ComTypeInfoObject {
@@ -16356,6 +17643,28 @@ mod oleaut32 {
         unsafe {
             if !attr.is_null() {
                 let _ = Box::from_raw(attr);
+            }
+        }
+    }
+
+    extern "system" fn type_info_release_func_desc(_this: *mut u8, desc: *mut FUNCDESC) {
+        unsafe {
+            if desc.is_null() {
+                return;
+            }
+            let mut boxed = Box::from_raw(desc);
+            if !boxed.lprgelemdesc_param.is_null() && boxed.c_params > 0 {
+                let len = boxed.c_params as usize;
+                let _ = Vec::from_raw_parts(boxed.lprgelemdesc_param, len, len);
+                boxed.lprgelemdesc_param = core::ptr::null_mut();
+            }
+        }
+    }
+
+    extern "system" fn type_info_release_var_desc(_this: *mut u8, desc: *mut VARDESC) {
+        unsafe {
+            if !desc.is_null() {
+                let _ = Box::from_raw(desc);
             }
         }
     }
@@ -17518,6 +18827,21 @@ mod msvcrt {
         }
     }
 
+    /// fflush
+    pub unsafe fn fflush(stream: *mut FILE) -> INT {
+        if stream.is_null() {
+            return 0;
+        }
+        if let Some(state) = crate::win32::crt_stream_state()
+            .lock()
+            .get_mut(&(stream as u64))
+        {
+            state.error = false;
+            return 0;
+        }
+        -1
+    }
+
     /// feof
     pub unsafe fn feof(stream: *mut FILE) -> INT {
         crate::win32::crt_stream_state()
@@ -17525,6 +18849,32 @@ mod msvcrt {
             .get(&(stream as u64))
             .map(|state| if state.eof { 1 } else { 0 })
             .unwrap_or(0)
+    }
+
+    /// ferror
+    pub unsafe fn ferror(stream: *mut FILE) -> INT {
+        crate::win32::crt_stream_state()
+            .lock()
+            .get(&(stream as u64))
+            .map(|state| if state.error { 1 } else { 0 })
+            .unwrap_or(0)
+    }
+
+    /// clearerr
+    pub unsafe fn clearerr(stream: *mut FILE) {
+        if let Some(state) = crate::win32::crt_stream_state()
+            .lock()
+            .get_mut(&(stream as u64))
+        {
+            state.eof = false;
+            state.error = false;
+        }
+    }
+
+    /// rewind
+    pub unsafe fn rewind(stream: *mut FILE) {
+        let _ = fseek(stream, 0, 0);
+        clearerr(stream);
     }
 
     /// fgetc
@@ -17580,6 +18930,82 @@ mod msvcrt {
         }
         let text = crate::win32::read_ansi_string(s);
         write_to_stream(stream, text.as_bytes())
+    }
+
+    /// remove
+    pub unsafe fn remove(path: LPCSTR) -> INT {
+        if path.is_null() {
+            return -1;
+        }
+        let raw_path = crate::win32::read_ansi_string(path);
+        let normalized = crate::win32::normalize_win32_path(&raw_path);
+        if normalized.is_empty() {
+            return -1;
+        }
+        #[cfg(any(
+            test,
+            all(
+                feature = "host_smoke",
+                not(target_os = "none"),
+                not(target_os = "uefi")
+            )
+        ))]
+        {
+            if crate::win32::crt_host_files_state()
+                .lock()
+                .remove(&normalized)
+                .is_some()
+            {
+                return 0;
+            }
+        }
+        if super::kernel32::delete_file_a(path) == TRUE {
+            0
+        } else {
+            -1
+        }
+    }
+
+    /// rename
+    pub unsafe fn rename(old_path: LPCSTR, new_path: LPCSTR) -> INT {
+        if old_path.is_null() || new_path.is_null() {
+            return -1;
+        }
+        let old_raw = crate::win32::read_ansi_string(old_path);
+        let new_raw = crate::win32::read_ansi_string(new_path);
+        let old_normalized = crate::win32::normalize_win32_path(&old_raw);
+        let new_normalized = crate::win32::normalize_win32_path(&new_raw);
+        if old_normalized.is_empty() || new_normalized.is_empty() {
+            return -1;
+        }
+        #[cfg(any(
+            test,
+            all(
+                feature = "host_smoke",
+                not(target_os = "none"),
+                not(target_os = "uefi")
+            )
+        ))]
+        {
+            let mut files = crate::win32::crt_host_files_state().lock();
+            let Some(contents) = files.remove(&old_normalized) else {
+                return -1;
+            };
+            files.insert(new_normalized.clone(), contents);
+            drop(files);
+            let mut streams = crate::win32::crt_stream_state().lock();
+            for state in streams.values_mut() {
+                if state.backing_path.as_deref() == Some(old_normalized.as_str()) {
+                    state.backing_path = Some(new_normalized.clone());
+                }
+            }
+            return 0;
+        }
+        if super::kernel32::move_file_a(old_path, new_path) == TRUE {
+            0
+        } else {
+            -1
+        }
     }
 
     /// fprintf
@@ -17954,6 +19380,53 @@ mod msvcrt {
         crate::win32::write_shared_ansi_buffer(crate::win32::getenv_buffer_state(), &value)
     }
 
+    /// _putenv
+    pub unsafe fn _putenv(option: LPCSTR) -> INT {
+        if option.is_null() {
+            return -1;
+        }
+        let raw = crate::win32::read_ansi_string(option);
+        let Some((key, value)) = raw.split_once('=') else {
+            return -1;
+        };
+        let key = crate::win32::environment_key(key);
+        let mut env = crate::win32::environment_state().lock();
+        if value.is_empty() {
+            env.remove(&key);
+        } else {
+            env.insert(key, value.to_string());
+        }
+        0
+    }
+
+    /// _dupenv_s
+    pub unsafe fn _dupenv_s(buffer: *mut LPSTR, count: *mut SIZE_T, varname: LPCSTR) -> INT {
+        if !buffer.is_null() {
+            *buffer = core::ptr::null_mut();
+        }
+        if !count.is_null() {
+            *count = 0;
+        }
+        if varname.is_null() || buffer.is_null() {
+            return ERROR_INVALID_PARAMETER as INT;
+        }
+        let key = crate::win32::environment_key(&crate::win32::read_ansi_string(varname));
+        let Some(value) = crate::win32::environment_state().lock().get(&key).cloned() else {
+            return 0;
+        };
+        let len = value.len() as SIZE_T + 1;
+        let ptr = crate::win32::win32_alloc(len as usize, 1) as LPSTR;
+        if ptr.is_null() {
+            return ERROR_INSUFFICIENT_BUFFER as INT;
+        }
+        crate::win32::write_ansi_string(ptr, len as INT, &value);
+        *buffer = ptr;
+        if !count.is_null() {
+            *count = len;
+        }
+        0
+    }
+
     /// setlocale
     pub unsafe fn setlocale(category: INT, locale: LPCSTR) -> LPSTR {
         if locale.is_null() {
@@ -17987,6 +19460,148 @@ mod msvcrt {
             }
         }
         crate::win32::write_shared_ansi_buffer(crate::win32::crt_locale_buffer_state(), &normalized)
+    }
+
+    unsafe fn write_localeconv_field(store: &'static Mutex<Vec<i8>>, text: &str) -> LPSTR {
+        crate::win32::write_shared_ansi_buffer(store, text)
+    }
+
+    /// localeconv
+    pub unsafe fn localeconv() -> *mut lconv {
+        let numeric = current_locale_name(LC_NUMERIC);
+        let monetary = current_locale_name(LC_MONETARY);
+        let decimal = ".";
+        let thousands = if numeric.eq_ignore_ascii_case("C") {
+            ""
+        } else {
+            ","
+        };
+        let grouping = if thousands.is_empty() { "" } else { "\x03" };
+        let currency = if monetary.eq_ignore_ascii_case("C") {
+            ""
+        } else {
+            "$"
+        };
+        let int_curr = if monetary.eq_ignore_ascii_case("C") {
+            ""
+        } else {
+            "USD "
+        };
+
+        let conv = crate::win32::crt_localeconv_state();
+        if conv.is_null() {
+            return core::ptr::null_mut();
+        }
+        (*conv).decimal_point =
+            write_localeconv_field(crate::win32::crt_localeconv_decimal_state(), decimal);
+        (*conv).thousands_sep =
+            write_localeconv_field(crate::win32::crt_localeconv_thousands_state(), thousands);
+        (*conv).grouping =
+            write_localeconv_field(crate::win32::crt_localeconv_grouping_state(), grouping);
+        (*conv).int_curr_symbol =
+            write_localeconv_field(crate::win32::crt_localeconv_int_curr_state(), int_curr);
+        (*conv).currency_symbol =
+            write_localeconv_field(crate::win32::crt_localeconv_curr_state(), currency);
+        (*conv).mon_decimal_point =
+            write_localeconv_field(crate::win32::crt_localeconv_decimal_state(), decimal);
+        (*conv).mon_thousands_sep =
+            write_localeconv_field(crate::win32::crt_localeconv_thousands_state(), thousands);
+        (*conv).mon_grouping =
+            write_localeconv_field(crate::win32::crt_localeconv_grouping_state(), grouping);
+        (*conv).positive_sign =
+            write_localeconv_field(crate::win32::crt_localeconv_positive_state(), "");
+        (*conv).negative_sign =
+            write_localeconv_field(crate::win32::crt_localeconv_negative_state(), "-");
+        conv
+    }
+
+    /// _fullpath
+    pub unsafe fn _fullpath(abs_path: LPSTR, rel_path: LPCSTR, max_len: SIZE_T) -> LPSTR {
+        if rel_path.is_null() {
+            return core::ptr::null_mut();
+        }
+        let raw = crate::win32::read_ansi_string(rel_path);
+        if raw.trim().is_empty() {
+            return core::ptr::null_mut();
+        }
+        let normalized = crate::win32::normalize_win32_path(&raw);
+        let rendered = crate::win32::win32_path_from_normalized(&normalized);
+        let required = rendered.len() + 1;
+        if max_len != 0 && required > max_len as usize {
+            return core::ptr::null_mut();
+        }
+        let out = if abs_path.is_null() {
+            crate::win32::win32_alloc(required, 1) as LPSTR
+        } else {
+            abs_path
+        };
+        if out.is_null() {
+            return core::ptr::null_mut();
+        }
+        crate::win32::write_ansi_string(out, required as INT, &rendered);
+        out
+    }
+
+    /// _splitpath
+    pub unsafe fn _splitpath(path: LPCSTR, drive: LPSTR, dir: LPSTR, fname: LPSTR, ext: LPSTR) {
+        if path.is_null() {
+            crate::win32::write_component_buffer(drive, "");
+            crate::win32::write_component_buffer(dir, "");
+            crate::win32::write_component_buffer(fname, "");
+            crate::win32::write_component_buffer(ext, "");
+            return;
+        }
+        let raw = crate::win32::read_ansi_string(path);
+        let (drive_part, dir_part, file_part, ext_part) =
+            crate::win32::split_win32_path_components(&raw);
+        crate::win32::write_component_buffer(drive, &drive_part);
+        crate::win32::write_component_buffer(dir, &dir_part);
+        crate::win32::write_component_buffer(fname, &file_part);
+        crate::win32::write_component_buffer(ext, &ext_part);
+    }
+
+    /// _makepath
+    pub unsafe fn _makepath(path: LPSTR, drive: LPCSTR, dir: LPCSTR, fname: LPCSTR, ext: LPCSTR) {
+        if path.is_null() {
+            return;
+        }
+        let drive = if drive.is_null() {
+            String::new()
+        } else {
+            crate::win32::read_ansi_string(drive)
+        };
+        let mut dir = if dir.is_null() {
+            String::new()
+        } else {
+            crate::win32::read_ansi_string(dir).replace('/', "\\")
+        };
+        let fname = if fname.is_null() {
+            String::new()
+        } else {
+            crate::win32::read_ansi_string(fname)
+        };
+        let mut ext = if ext.is_null() {
+            String::new()
+        } else {
+            crate::win32::read_ansi_string(ext)
+        };
+        if !dir.is_empty() && !dir.ends_with('\\') {
+            dir.push('\\');
+        }
+        if !ext.is_empty() && !ext.starts_with('.') {
+            ext.insert(0, '.');
+        }
+        let mut rendered = String::new();
+        if !drive.is_empty() {
+            rendered.push_str(&drive);
+            if !drive.ends_with(':') {
+                rendered.push(':');
+            }
+        }
+        rendered.push_str(&dir);
+        rendered.push_str(&fname);
+        rendered.push_str(&ext);
+        crate::win32::write_ansi_string(path, (rendered.len() + 1) as INT, &rendered);
     }
 
     /// atexit
@@ -18331,7 +19946,9 @@ mod gdi32 {
                 path_points: dc.path_points.clone(),
                 map_mode: dc.map_mode,
                 viewport_org: dc.viewport_org,
+                viewport_ext: dc.viewport_ext,
                 window_org: dc.window_org,
+                window_ext: dc.window_ext,
                 world_transform: dc.world_transform,
                 device_kind: dc.device_kind,
                 device_name: dc.device_name.clone(),
@@ -19209,9 +20826,11 @@ mod gdi32 {
             path_active: false,
             path_closed: false,
             path_points: Vec::new(),
-            map_mode: 1,
+            map_mode: MM_TEXT,
             viewport_org: POINT::default(),
+            viewport_ext: SIZE { cx: 1, cy: 1 },
             window_org: POINT::default(),
+            window_ext: SIZE { cx: 1, cy: 1 },
             world_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             device_kind: crate::win32::Win32DcKind::Window,
             device_name: String::new(),
@@ -19274,9 +20893,11 @@ mod gdi32 {
             path_active: false,
             path_closed: false,
             path_points: Vec::new(),
-            map_mode: 1,
+            map_mode: MM_TEXT,
             viewport_org: POINT::default(),
+            viewport_ext: SIZE { cx: 1, cy: 1 },
             window_org: POINT::default(),
+            window_ext: SIZE { cx: 1, cy: 1 },
             world_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             device_kind: crate::win32::Win32DcKind::Window,
             device_name: String::new(),
@@ -21394,7 +23015,10 @@ mod gdi32 {
             return 0;
         };
         let previous = dc.map_mode;
-        dc.map_mode = if iMode == 0 { 1 } else { iMode };
+        dc.map_mode = map_mode_or_default(iMode);
+        let (viewport_ext, window_ext) = default_map_mode_extents(dc.map_mode);
+        dc.viewport_ext = viewport_ext;
+        dc.window_ext = window_ext;
         previous
     }
 
@@ -21404,7 +23028,7 @@ mod gdi32 {
             .lock()
             .get(&(hdc as u64))
             .map(|dc| dc.map_mode)
-            .unwrap_or(1)
+            .unwrap_or(MM_TEXT)
     }
 
     /// SetViewportOrgEx
@@ -21461,29 +23085,59 @@ mod gdi32 {
 
     /// SetViewportExtEx
     pub unsafe fn set_viewport_ext_ex(hdc: HDC, x: INT, y: INT, lpsize: *mut SIZE) -> BOOL {
+        if x == 0 || y == 0 {
+            return FALSE;
+        }
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        if !lpsize.is_null() {
+            *lpsize = dc.viewport_ext;
+        }
+        dc.viewport_ext = SIZE { cx: x, cy: y };
         TRUE
     }
 
     /// GetViewportExtEx
     pub unsafe fn get_viewport_ext_ex(hdc: HDC, lpsize: *mut SIZE) -> BOOL {
-        if !lpsize.is_null() {
-            (*lpsize).cx = 1;
-            (*lpsize).cy = 1;
+        if lpsize.is_null() {
+            return FALSE;
         }
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return FALSE;
+        };
+        *lpsize = dc.viewport_ext;
         TRUE
     }
 
     /// SetWindowExtEx
     pub unsafe fn set_window_ext_ex(hdc: HDC, x: INT, y: INT, lpsize: *mut SIZE) -> BOOL {
+        if x == 0 || y == 0 {
+            return FALSE;
+        }
+        let mut dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get_mut(&(hdc as u64)) else {
+            return FALSE;
+        };
+        if !lpsize.is_null() {
+            *lpsize = dc.window_ext;
+        }
+        dc.window_ext = SIZE { cx: x, cy: y };
         TRUE
     }
 
     /// GetWindowExtEx
     pub unsafe fn get_window_ext_ex(hdc: HDC, lpsize: *mut SIZE) -> BOOL {
-        if !lpsize.is_null() {
-            (*lpsize).cx = 1;
-            (*lpsize).cy = 1;
+        if lpsize.is_null() {
+            return FALSE;
         }
+        let dcs = crate::win32::WIN32_DCS.lock();
+        let Some(dc) = dcs.get(&(hdc as u64)) else {
+            return FALSE;
+        };
+        *lpsize = dc.window_ext;
         TRUE
     }
 
@@ -21498,8 +23152,11 @@ mod gdi32 {
         };
         for index in 0..c as usize {
             let point = &mut *lppt.add(index);
-            point.x = point.x - dc.viewport_org.x + dc.window_org.x;
-            point.y = point.y - dc.viewport_org.y + dc.window_org.y;
+            let Some((x, y)) = crate::win32::device_to_logical(dc, point.x, point.y) else {
+                return FALSE;
+            };
+            point.x = x;
+            point.y = y;
         }
         TRUE
     }
@@ -22120,7 +23777,7 @@ mod gdi32 {
 
     fn create_meta_dc(enhanced: bool) -> HDC {
         let source_hwnd = {
-            let active = crate::win32::ACTIVE_HWND.load(core::sync::atomic::Ordering::Relaxed);
+            let active = crate::win32::window_publication_snapshot().active;
             if active != 0 {
                 active
             } else {
@@ -22181,9 +23838,11 @@ mod gdi32 {
                 path_active: false,
                 path_closed: false,
                 path_points: Vec::new(),
-                map_mode: 1,
+                map_mode: MM_TEXT,
                 viewport_org: POINT::default(),
+                viewport_ext: SIZE { cx: 1, cy: 1 },
                 window_org: POINT::default(),
+                window_ext: SIZE { cx: 1, cy: 1 },
                 world_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
                 device_kind: crate::win32::Win32DcKind::MetaFile,
                 device_name: String::new(),
@@ -22568,7 +24227,9 @@ mod gdi32 {
                     dc.font_weight,
                     dc.map_mode,
                     dc.viewport_org,
+                    dc.viewport_ext,
                     dc.window_org,
+                    dc.window_ext,
                     dc.world_transform,
                     dc.graphics_mode,
                     dc.arc_direction,
@@ -22585,11 +24246,13 @@ mod gdi32 {
                 2,
                 16,
                 400,
-                1,
+                MM_TEXT,
                 POINT::default(),
+                SIZE { cx: 1, cy: 1 },
                 POINT::default(),
+                SIZE { cx: 1, cy: 1 },
                 [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-                1,
+                GM_COMPATIBLE,
                 1,
                 1,
                 1,
@@ -22614,17 +24277,19 @@ mod gdi32 {
                 clip_region: 0,
                 recording_metafile: 0,
                 rop2: 13,
-                graphics_mode: source.12,
-                arc_direction: source.13,
-                poly_fill_mode: source.14,
-                stretch_blt_mode: source.15,
+                graphics_mode: source.14,
+                arc_direction: source.15,
+                poly_fill_mode: source.16,
+                stretch_blt_mode: source.17,
                 path_active: false,
                 path_closed: false,
                 path_points: Vec::new(),
                 map_mode: source.8,
                 viewport_org: source.9,
-                window_org: source.10,
-                world_transform: source.11,
+                viewport_ext: source.10,
+                window_org: source.11,
+                window_ext: source.12,
+                world_transform: source.13,
                 device_kind: crate::win32::Win32DcKind::Memory,
                 device_name: String::new(),
                 current_print_job: 0,
@@ -22676,7 +24341,9 @@ mod gdi32 {
             path_points: dc.path_points.clone(),
             map_mode: dc.map_mode,
             viewport_org: dc.viewport_org,
+            viewport_ext: dc.viewport_ext,
             window_org: dc.window_org,
+            window_ext: dc.window_ext,
             world_transform: dc.world_transform,
             font_height: dc.font_height,
             font_weight: dc.font_weight,
@@ -23431,7 +25098,6 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     let mut user32_funcs: BTreeMap<String, Win32ApiFn> = BTreeMap::new();
     user32_funcs.insert("RegisterClassA".to_string(), stub_api);
     user32_funcs.insert("RegisterClassExA".to_string(), stub_api);
-    user32_funcs.insert("UnregisterClassA".to_string(), stub_api);
     user32_funcs.insert("CreateWindowExA".to_string(), stub_api);
     user32_funcs.insert("DestroyWindow".to_string(), stub_api);
     user32_funcs.insert("ShowWindow".to_string(), stub_api);
@@ -23494,8 +25160,6 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     user32_funcs.insert("GetCursorPos".to_string(), stub_api);
     user32_funcs.insert("SetCursorPos".to_string(), stub_api);
     user32_funcs.insert("mouse_event".to_string(), stub_api);
-    user32_funcs.insert("GetDoubleClickTime".to_string(), stub_api);
-    user32_funcs.insert("SwapMouseButton".to_string(), stub_api);
     user32_funcs.insert("GetSystemMetrics".to_string(), stub_api);
     // Menus
     user32_funcs.insert("CreateMenu".to_string(), stub_api);
@@ -23535,7 +25199,6 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     user32_funcs.insert("EmptyClipboard".to_string(), stub_api);
     user32_funcs.insert("GetClipboardData".to_string(), stub_api);
     user32_funcs.insert("SetClipboardData".to_string(), stub_api);
-    user32_funcs.insert("IsClipboardFormatAvailable".to_string(), stub_api);
     // Resources
     user32_funcs.insert("LoadIconA".to_string(), stub_api);
     user32_funcs.insert("LoadCursorA".to_string(), stub_api);
@@ -23560,7 +25223,6 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     user32_funcs.insert("GetPropA".to_string(), stub_api);
     user32_funcs.insert("SetPropA".to_string(), stub_api);
     user32_funcs.insert("RemovePropA".to_string(), stub_api);
-    user32_funcs.insert("GetWindowThreadProcessId".to_string(), stub_api);
     user32_funcs.insert("AttachThreadInput".to_string(), stub_api);
     table.insert("user32".to_string(), user32_funcs);
 
@@ -23647,11 +25309,9 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     gdi32_funcs.insert("CreateRoundRectRgn".to_string(), stub_api);
     gdi32_funcs.insert("CreatePolygonRgn".to_string(), stub_api);
     gdi32_funcs.insert("CombineRgn".to_string(), stub_api);
-    gdi32_funcs.insert("OffsetRgn".to_string(), stub_api);
     gdi32_funcs.insert("FillRgn".to_string(), stub_api);
     gdi32_funcs.insert("FrameRgn".to_string(), stub_api);
     gdi32_funcs.insert("GetRgnBox".to_string(), stub_api);
-    gdi32_funcs.insert("PtInRegion".to_string(), stub_api);
     gdi32_funcs.insert("RectInRegion".to_string(), stub_api);
     // Clipping
     gdi32_funcs.insert("SelectClipRgn".to_string(), stub_api);
@@ -23702,7 +25362,6 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     gdi32_funcs.insert("PlayEnhMetaFile".to_string(), stub_api);
     // Misc
     gdi32_funcs.insert("GetGraphicsMode".to_string(), stub_api);
-    gdi32_funcs.insert("SetGraphicsMode".to_string(), stub_api);
     gdi32_funcs.insert("GetPolyFillMode".to_string(), stub_api);
     gdi32_funcs.insert("SetPolyFillMode".to_string(), stub_api);
     gdi32_funcs.insert("GetStretchBltMode".to_string(), stub_api);
@@ -23711,9 +25370,6 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     gdi32_funcs.insert("SetROP2".to_string(), stub_api);
     gdi32_funcs.insert("GetCurrentPositionEx".to_string(), stub_api);
     // OpenGL
-    gdi32_funcs.insert("ChoosePixelFormat".to_string(), stub_api);
-    gdi32_funcs.insert("SetPixelFormat".to_string(), stub_api);
-    gdi32_funcs.insert("SwapBuffers".to_string(), stub_api);
     table.insert("gdi32".to_string(), gdi32_funcs);
 
     // advapi32
@@ -23912,17 +25568,28 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     msvcrt_funcs.insert("fwrite".to_string(), stub_api);
     msvcrt_funcs.insert("fseek".to_string(), stub_api);
     msvcrt_funcs.insert("ftell".to_string(), stub_api);
+    msvcrt_funcs.insert("fflush".to_string(), stub_api);
     msvcrt_funcs.insert("feof".to_string(), stub_api);
+    msvcrt_funcs.insert("ferror".to_string(), stub_api);
     msvcrt_funcs.insert("fgetc".to_string(), stub_api);
     msvcrt_funcs.insert("fputc".to_string(), stub_api);
     msvcrt_funcs.insert("fgets".to_string(), stub_api);
     msvcrt_funcs.insert("fputs".to_string(), stub_api);
+    msvcrt_funcs.insert("clearerr".to_string(), stub_api);
+    msvcrt_funcs.insert("rewind".to_string(), stub_api);
     msvcrt_funcs.insert("fprintf".to_string(), stub_api);
     msvcrt_funcs.insert("printf".to_string(), stub_api);
     msvcrt_funcs.insert("sprintf".to_string(), stub_api);
     msvcrt_funcs.insert("snprintf".to_string(), stub_api);
     msvcrt_funcs.insert("scanf".to_string(), stub_api);
     msvcrt_funcs.insert("setlocale".to_string(), stub_api);
+    msvcrt_funcs.insert("localeconv".to_string(), stub_api);
+    msvcrt_funcs.insert("_fullpath".to_string(), stub_api);
+    msvcrt_funcs.insert("_splitpath".to_string(), stub_api);
+    msvcrt_funcs.insert("_makepath".to_string(), stub_api);
+    msvcrt_funcs.insert("_fullpath".to_string(), stub_api);
+    msvcrt_funcs.insert("_splitpath".to_string(), stub_api);
+    msvcrt_funcs.insert("_makepath".to_string(), stub_api);
     // Math
     msvcrt_funcs.insert("abs".to_string(), stub_api);
     msvcrt_funcs.insert("labs".to_string(), stub_api);
@@ -23943,6 +25610,10 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     msvcrt_funcs.insert("_onexit".to_string(), stub_api);
     msvcrt_funcs.insert("system".to_string(), stub_api);
     msvcrt_funcs.insert("getenv".to_string(), stub_api);
+    msvcrt_funcs.insert("_putenv".to_string(), stub_api);
+    msvcrt_funcs.insert("_dupenv_s".to_string(), stub_api);
+    msvcrt_funcs.insert("remove".to_string(), stub_api);
+    msvcrt_funcs.insert("rename".to_string(), stub_api);
     msvcrt_funcs.insert("atoi".to_string(), stub_api);
     msvcrt_funcs.insert("atol".to_string(), stub_api);
     msvcrt_funcs.insert("atof".to_string(), stub_api);
@@ -24026,9 +25697,11 @@ fn reset_test_state() {
     NEXT_HACCEL.store(0x0009_0000, core::sync::atomic::Ordering::Relaxed);
     NEXT_HMETAFILE.store(0x000A_0000, core::sync::atomic::Ordering::Relaxed);
     NEXT_PRINT_JOB.store(0x000B_0000, core::sync::atomic::Ordering::Relaxed);
-    ACTIVE_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
-    FOCUSED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
-    CAPTURED_HWND.store(0, core::sync::atomic::Ordering::Relaxed);
+    WINDOW_PUBLICATION_STATE.publish(WindowPublicationSnapshot::default());
+    REPORTED_POINTER_PUBLICATION_STATE.update(|snapshot| {
+        *snapshot = ReportedPointerSnapshot::default();
+    });
+    crate::drivers::mouse::publish_state(0, 0, crate::drivers::mouse::MouseButtons::default());
 }
 
 /// Initialize Win32 subsystem
@@ -24061,6 +25734,7 @@ pub fn get_proc_address_internal(module: &str, func: &str) -> FARPROC {
 
 #[cfg(test)]
 mod tests {
+    use super::oleaut32::{VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VT_UI4, VT_VARIANT};
     use super::*;
 
     #[test]
@@ -24116,14 +25790,161 @@ mod tests {
     }
 
     #[test]
-    fn stubbed_exports_do_not_resolve_via_get_proc_address() {
+    fn undeclared_exports_do_not_resolve_via_get_proc_address() {
         init();
-        assert!(is_declared_api("user32", "UnregisterClassA"));
-        assert_eq!(
-            get_api_status("user32", "UnregisterClassA"),
-            Some(Win32ApiStatus::Stubbed)
-        );
+        assert!(!is_declared_api("user32", "UnregisterClassA"));
+        assert_eq!(get_api_status("user32", "UnregisterClassA"), None);
         assert_eq!(get_proc_address("user32", "UnregisterClassA"), None);
+    }
+
+    #[test]
+    fn declared_user32_mouse_exports_report_current_status() {
+        init();
+        assert!(is_implemented_api("user32", "mouse_event"));
+        assert_eq!(
+            get_proc_address("user32", "mouse_event"),
+            Some(user32::mouse_event as usize as u64)
+        );
+    }
+
+    #[test]
+    fn gdi_extents_and_world_transform_roundtrip_is_stateful() {
+        unsafe {
+            init();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"gdi-transform\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                80,
+                80,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            let hdc = user32::get_dc(hwnd);
+            assert_ne!(hdc, 0);
+
+            let mut previous_origin = POINT { x: -1, y: -1 };
+            let mut previous_extent = SIZE { cx: -1, cy: -1 };
+            assert_eq!(gdi32::set_map_mode(hdc, MM_ANISOTROPIC), MM_TEXT);
+            assert_eq!(
+                gdi32::set_window_org_ex(hdc, 5, 7, &mut previous_origin),
+                TRUE
+            );
+            assert_eq!(previous_origin.x, 0);
+            assert_eq!(previous_origin.y, 0);
+            assert_eq!(
+                gdi32::set_viewport_org_ex(hdc, 100, 200, &mut previous_origin),
+                TRUE
+            );
+            assert_eq!(previous_origin.x, 0);
+            assert_eq!(previous_origin.y, 0);
+            assert_eq!(
+                gdi32::set_window_ext_ex(hdc, 10, -20, &mut previous_extent),
+                TRUE
+            );
+            assert_eq!(previous_extent.cx, 1);
+            assert_eq!(previous_extent.cy, 1);
+            assert_eq!(
+                gdi32::set_viewport_ext_ex(hdc, 20, 40, &mut previous_extent),
+                TRUE
+            );
+            assert_eq!(previous_extent.cx, 1);
+            assert_eq!(previous_extent.cy, 1);
+
+            let mut extent = SIZE { cx: 0, cy: 0 };
+            assert_eq!(gdi32::get_window_ext_ex(hdc, &mut extent), TRUE);
+            assert_eq!(extent.cx, 10);
+            assert_eq!(extent.cy, -20);
+            assert_eq!(gdi32::get_viewport_ext_ex(hdc, &mut extent), TRUE);
+            assert_eq!(extent.cx, 20);
+            assert_eq!(extent.cy, 40);
+
+            assert_eq!(gdi32::set_graphics_mode(hdc, GM_ADVANCED), GM_COMPATIBLE);
+            let xf = [1.0f32, 0.0, 0.0, 1.0, 3.0, -4.0];
+            assert_eq!(
+                gdi32::set_world_transform(hdc, xf.as_ptr() as *const u8),
+                TRUE
+            );
+
+            let mut point = POINT { x: 15, y: 27 };
+            assert_eq!(gdi32::lp_to_dp(hdc, &mut point, 1), TRUE);
+            assert_eq!(point.x, 126);
+            assert_eq!(point.y, 168);
+            assert_eq!(gdi32::dp_to_lp(hdc, &mut point, 1), TRUE);
+            assert_eq!(point.x, 15);
+            assert_eq!(point.y, 27);
+        }
+    }
+
+    #[test]
+    fn user32_mouse_event_absolute_move_and_click_publish_messages() {
+        unsafe {
+            init();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"Phase2Window\0".as_ptr() as LPCSTR,
+                b"mouse-event\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                100,
+                100,
+                120,
+                90,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_ne!(hwnd, 0);
+            assert_eq!(user32::show_window(hwnd, SW_SHOW), FALSE);
+            let _ = user32::set_foreground_window(hwnd);
+            MSG_QUEUE.lock().clear();
+
+            let (screen_x, screen_y) = {
+                let windows = WIN32_WINDOWS.lock();
+                let window = windows.get(&(hwnd as u64)).unwrap();
+                let (client_left, client_top) = window_client_origin(window);
+                (client_left + 12, client_top + 18)
+            };
+            let (screen_w, screen_h) = crate::drivers::mouse::get_bounds();
+            let absolute_x = ((screen_x.max(0) as u64) * 65535
+                / screen_w.saturating_sub(1).max(1) as u64) as DWORD;
+            let absolute_y = ((screen_y.max(0) as u64) * 65535
+                / screen_h.saturating_sub(1).max(1) as u64) as DWORD;
+            user32::mouse_event(
+                MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP,
+                absolute_x,
+                absolute_y,
+                0,
+                0,
+            );
+
+            let mut cursor = POINT { x: 0, y: 0 };
+            assert_eq!(user32::get_cursor_pos(&mut cursor), TRUE);
+            assert_eq!(cursor.x, screen_x);
+            assert_eq!(cursor.y, screen_y);
+
+            let queue = MSG_QUEUE.lock();
+            let mouse_messages = queue
+                .iter()
+                .filter(|msg| matches!(msg.message, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(mouse_messages.len(), 3);
+            assert_eq!(mouse_messages[0].message, WM_MOUSEMOVE);
+            assert_eq!(mouse_messages[1].message, WM_LBUTTONDOWN);
+            assert_eq!(mouse_messages[2].message, WM_LBUTTONUP);
+            for msg in &mouse_messages {
+                assert_eq!(msg.hwnd, hwnd as u64);
+                assert_eq!(msg.pt_x, screen_x);
+                assert_eq!(msg.pt_y, screen_y);
+                assert_eq!(msg.lparam, packed_mouse_lparam(12, 18));
+            }
+        }
     }
 
     #[test]
@@ -24670,12 +26491,16 @@ return "PROXY edge.proxy.local:8080";
             assert_ne!(region, 0);
             let regions = WIN32_REGIONS.lock();
             let state = regions.get(&(region as u64)).unwrap();
-            match &state.shape {
-                Win32RegionShape::Polygon { alternate_fill, .. } => {
-                    assert_eq!(*alternate_fill, false);
-                }
-                _ => panic!("expected polygon region"),
-            }
+            assert!(
+                matches!(
+                    &state.shape,
+                    Win32RegionShape::Polygon {
+                        alternate_fill: false,
+                        ..
+                    }
+                ),
+                "expected polygon region"
+            );
             drop(regions);
             assert_eq!(gdi32::delete_object(region as HGDIOBJ), TRUE);
         }
@@ -25422,6 +27247,113 @@ func=PhaseDispatch|Close|2|Close member|19||func|0|0|8\n";
             msvcrt::exit(23);
             assert_eq!(*crt_exit_status_state().lock(), Some(23));
             assert_eq!(EXIT_TRACE.load(core::sync::atomic::Ordering::Relaxed), 21);
+        }
+    }
+
+    #[test]
+    fn msvcrt_abi_exotica_env_locale_and_stdio_edges_are_stateful() {
+        unsafe {
+            init();
+
+            let path = b"/phase4_crt_stdio.txt\0";
+            let renamed = b"/phase4_crt_stdio_renamed.txt\0";
+            let stream = msvcrt::fopen(path.as_ptr() as LPCSTR, b"w+\0".as_ptr() as LPCSTR);
+            assert!(!stream.is_null());
+            assert_eq!(msvcrt::fwrite(b"abc".as_ptr(), 1, 3, stream), 3);
+            assert_eq!(msvcrt::fflush(stream), 0);
+            assert_eq!(msvcrt::fseek(stream, 0, 0), 0);
+
+            let mut byte = [0u8; 1];
+            assert_eq!(msvcrt::fread(byte.as_mut_ptr(), 1, 1, stream), 1);
+            assert_eq!(msvcrt::fread(byte.as_mut_ptr(), 1, 1, stream), 1);
+            assert_eq!(msvcrt::fread(byte.as_mut_ptr(), 1, 1, stream), 1);
+            assert_eq!(msvcrt::fread(byte.as_mut_ptr(), 1, 1, stream), 0);
+            assert_eq!(msvcrt::feof(stream), 1);
+            assert_eq!(msvcrt::ferror(stream), 0);
+
+            msvcrt::clearerr(stream);
+            assert_eq!(msvcrt::feof(stream), 0);
+            msvcrt::rewind(stream);
+            assert_eq!(msvcrt::ftell(stream), 0);
+            assert_eq!(msvcrt::fclose(stream), 0);
+
+            assert_eq!(
+                msvcrt::rename(path.as_ptr() as LPCSTR, renamed.as_ptr() as LPCSTR),
+                0
+            );
+            assert!(crt_host_files_state()
+                .lock()
+                .contains_key("/phase4_crt_stdio_renamed.txt"));
+            assert_eq!(msvcrt::remove(renamed.as_ptr() as LPCSTR), 0);
+            assert!(!crt_host_files_state()
+                .lock()
+                .contains_key("/phase4_crt_stdio_renamed.txt"));
+
+            assert_eq!(
+                msvcrt::_putenv(b"PHASE4_EDGE=enabled\0".as_ptr() as LPCSTR),
+                0
+            );
+            assert_eq!(
+                read_ansi_string(msvcrt::getenv(b"PHASE4_EDGE\0".as_ptr() as LPCSTR)),
+                "enabled"
+            );
+
+            let mut dup = core::ptr::null_mut();
+            let mut count: SIZE_T = 0;
+            assert_eq!(
+                msvcrt::_dupenv_s(&mut dup, &mut count, b"PHASE4_EDGE\0".as_ptr() as LPCSTR,),
+                0
+            );
+            assert_eq!(count, 8);
+            assert_eq!(read_ansi_string(dup), "enabled");
+            win32_dealloc(dup as *mut u8);
+
+            let mut full = [0i8; 128];
+            let full_ptr = msvcrt::_fullpath(
+                full.as_mut_ptr(),
+                b".\\phase4\\edge.txt\0".as_ptr() as LPCSTR,
+                full.len() as SIZE_T,
+            );
+            assert_eq!(full_ptr, full.as_mut_ptr());
+            assert_eq!(read_ansi_string(full.as_ptr()), "C:\\phase4\\edge.txt");
+
+            let mut drive = [0i8; 8];
+            let mut dir = [0i8; 64];
+            let mut fname = [0i8; 32];
+            let mut ext = [0i8; 16];
+            msvcrt::_splitpath(
+                full.as_ptr() as LPCSTR,
+                drive.as_mut_ptr(),
+                dir.as_mut_ptr(),
+                fname.as_mut_ptr(),
+                ext.as_mut_ptr(),
+            );
+            assert_eq!(read_ansi_string(drive.as_ptr()), "C:");
+            assert_eq!(read_ansi_string(dir.as_ptr()), "\\phase4\\");
+            assert_eq!(read_ansi_string(fname.as_ptr()), "edge");
+            assert_eq!(read_ansi_string(ext.as_ptr()), ".txt");
+
+            let mut rebuilt = [0i8; 128];
+            msvcrt::_makepath(
+                rebuilt.as_mut_ptr(),
+                drive.as_ptr() as LPCSTR,
+                dir.as_ptr() as LPCSTR,
+                fname.as_ptr() as LPCSTR,
+                ext.as_ptr() as LPCSTR,
+            );
+            assert_eq!(read_ansi_string(rebuilt.as_ptr()), "C:\\phase4\\edge.txt");
+
+            let locale = msvcrt::setlocale(4, b"en-US\0".as_ptr() as LPCSTR);
+            assert_eq!(read_ansi_string(locale), "en-US");
+            let locale = msvcrt::setlocale(3, b"en-US\0".as_ptr() as LPCSTR);
+            assert_eq!(read_ansi_string(locale), "en-US");
+            let conv = msvcrt::localeconv();
+            assert!(!conv.is_null());
+            assert_eq!(read_ansi_string((*conv).decimal_point), ".");
+            assert_eq!(read_ansi_string((*conv).thousands_sep), ",");
+            assert_eq!(read_ansi_string((*conv).currency_symbol), "$");
+            assert_eq!(read_ansi_string((*conv).int_curr_symbol), "USD ");
+            assert_eq!(read_ansi_string((*conv).negative_sign), "-");
         }
     }
 
@@ -26294,6 +28226,8 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
             optional_param_count,
             func_flags,
             vtable_offset,
+            return_vt,
+            param_vt_slots,
         ) in [
             (
                 0u32,
@@ -26310,6 +28244,8 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
                 0,
                 16,
                 0,
+                VT_BSTR,
+                [VT_I4, VT_BSTR, VT_EMPTY],
             ),
             (
                 0u32,
@@ -26326,6 +28262,8 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
                 1,
                 32,
                 8,
+                VT_UI4,
+                [VT_BSTR, VT_UI4, VT_VARIANT],
             ),
         ] {
             push_binary_u32(&mut funcs, type_index);
@@ -26342,7 +28280,10 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
             push_binary_i16(&mut funcs, optional_param_count);
             push_binary_u16(&mut funcs, func_flags);
             push_binary_i16(&mut funcs, vtable_offset);
-            push_binary_u16(&mut funcs, 0);
+            push_binary_u16(&mut funcs, return_vt);
+            for vt in param_vt_slots {
+                push_binary_u16(&mut funcs, vt);
+            }
         }
 
         let mut vars = Vec::new();
@@ -26355,6 +28296,7 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
         push_binary_u16(&mut vars, 0);
         push_binary_u32(&mut vars, 3);
         push_binary_u32(&mut vars, 24);
+        push_binary_u16(&mut vars, VT_UI4);
 
         let mut impls = Vec::new();
         push_binary_u32(&mut impls, 0);
@@ -26516,6 +28458,8 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
             push_binary_i32(&mut typeinfo_table, 0);
         }
 
+        const MSFT_FUNC_RECORD_STRIDE: usize = 66;
+        const MSFT_VAR_RECORD_STRIDE: usize = 38;
         let mut func_table = Vec::new();
         for (
             type_index,
@@ -26532,6 +28476,10 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
             optional_param_count,
             func_flags,
             vtable_offset,
+            return_vt,
+            return_href_type,
+            param_vt_slots,
+            param_href_slots,
         ) in [
             (
                 0u32,
@@ -26548,6 +28496,10 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
                 0i16,
                 32u16,
                 0i16,
+                oleaut32::VT_USERDEFINED,
+                1u32,
+                [oleaut32::VT_USERDEFINED, VT_BSTR, VT_EMPTY],
+                [1u32, 0u32, 0u32],
             ),
             (
                 0u32,
@@ -26564,6 +28516,10 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
                 1i16,
                 64u16,
                 8i16,
+                VT_UI4,
+                0u32,
+                [VT_BSTR, VT_UI4, VT_VARIANT],
+                [0u32, 0u32, 0u32],
             ),
             (
                 1u32,
@@ -26580,6 +28536,10 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
                 0i16,
                 0u16,
                 0i16,
+                VT_BOOL,
+                0u32,
+                [VT_BSTR, VT_EMPTY, VT_EMPTY],
+                [0u32, 0u32, 0u32],
             ),
         ] {
             push_binary_u32(&mut func_table, type_index);
@@ -26596,6 +28556,27 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
             push_binary_i16(&mut func_table, optional_param_count);
             push_binary_u16(&mut func_table, func_flags);
             push_binary_i16(&mut func_table, vtable_offset);
+            push_binary_u16(&mut func_table, return_vt);
+            for vt in param_vt_slots
+                .into_iter()
+                .take(core::cmp::max(param_count, 0) as usize)
+            {
+                push_binary_u16(&mut func_table, vt);
+            }
+            push_binary_u32(&mut func_table, return_href_type);
+            for href in param_href_slots
+                .into_iter()
+                .take(core::cmp::max(param_count, 0) as usize)
+            {
+                push_binary_u32(&mut func_table, href);
+            }
+            let record_len = 44usize
+                .saturating_add(core::cmp::max(param_count, 0) as usize * 2)
+                .saturating_add(4)
+                .saturating_add(core::cmp::max(param_count, 0) as usize * 4);
+            if record_len < MSFT_FUNC_RECORD_STRIDE {
+                func_table.resize(func_table.len() + (MSFT_FUNC_RECORD_STRIDE - record_len), 0);
+            }
         }
 
         let mut var_table = Vec::new();
@@ -26608,6 +28589,11 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
         push_binary_u16(&mut var_table, 0);
         push_binary_u32(&mut var_table, 3);
         push_binary_u32(&mut var_table, 24);
+        push_binary_u16(&mut var_table, oleaut32::VT_USERDEFINED);
+        push_binary_u32(&mut var_table, 1);
+        if var_table.len() < MSFT_VAR_RECORD_STRIDE {
+            var_table.resize(MSFT_VAR_RECORD_STRIDE, 0);
+        }
 
         let mut impl_table = Vec::new();
         push_binary_u32(&mut impl_table, 0);
@@ -26796,6 +28782,8 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
             push_binary_u16(&mut types, 0);
         }
 
+        const SLTG_FUNC_RECORD_STRIDE: usize = 66;
+        const SLTG_VAR_RECORD_STRIDE: usize = 36;
         let mut funcs = Vec::new();
         for (
             type_index,
@@ -26812,6 +28800,10 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
             optional_param_count,
             func_flags,
             vtable_offset,
+            return_vt,
+            return_href_type,
+            param_vt_slots,
+            param_href_slots,
         ) in [
             (
                 0u16,
@@ -26828,6 +28820,10 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
                 0,
                 32,
                 0,
+                oleaut32::VT_USERDEFINED,
+                1u32,
+                [oleaut32::VT_USERDEFINED, VT_BSTR, VT_EMPTY],
+                [1u32, 0u32, 0u32],
             ),
             (
                 0u16,
@@ -26844,6 +28840,10 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
                 1,
                 64,
                 8,
+                VT_UI4,
+                0u32,
+                [VT_BSTR, VT_UI4, VT_VARIANT],
+                [0u32, 0u32, 0u32],
             ),
             (
                 1u16,
@@ -26860,6 +28860,10 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
                 0,
                 0,
                 0,
+                VT_BOOL,
+                0u32,
+                [VT_BSTR, VT_EMPTY, VT_EMPTY],
+                [0u32, 0u32, 0u32],
             ),
         ] {
             push_binary_u16(&mut funcs, type_index);
@@ -26877,6 +28881,27 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
             push_binary_i16(&mut funcs, optional_param_count);
             push_binary_u16(&mut funcs, func_flags);
             push_binary_i16(&mut funcs, vtable_offset);
+            push_binary_u16(&mut funcs, return_vt);
+            for vt in param_vt_slots
+                .into_iter()
+                .take(core::cmp::max(param_count, 0) as usize)
+            {
+                push_binary_u16(&mut funcs, vt);
+            }
+            push_binary_u32(&mut funcs, return_href_type);
+            for href in param_href_slots
+                .into_iter()
+                .take(core::cmp::max(param_count, 0) as usize)
+            {
+                push_binary_u32(&mut funcs, href);
+            }
+            let record_len = 44usize
+                .saturating_add(core::cmp::max(param_count, 0) as usize * 2)
+                .saturating_add(4)
+                .saturating_add(core::cmp::max(param_count, 0) as usize * 4);
+            if record_len < SLTG_FUNC_RECORD_STRIDE {
+                funcs.resize(funcs.len() + (SLTG_FUNC_RECORD_STRIDE - record_len), 0);
+            }
         }
 
         let mut vars = Vec::new();
@@ -26889,6 +28914,11 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
         push_binary_u16(&mut vars, 12);
         push_binary_u32(&mut vars, 3);
         push_binary_u32(&mut vars, 28);
+        push_binary_u16(&mut vars, oleaut32::VT_USERDEFINED);
+        push_binary_u32(&mut vars, 1);
+        if vars.len() < SLTG_VAR_RECORD_STRIDE {
+            vars.resize(SLTG_VAR_RECORD_STRIDE, 0);
+        }
 
         let mut impls = Vec::new();
         push_binary_u16(&mut impls, 0);
@@ -26962,6 +28992,11 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
         assert_eq!(dispatch.impl_types.len(), 1);
         assert_eq!(dispatch.funcs[0].name, "Echo");
         assert_eq!(dispatch.funcs[0].documentation, "Structured echo op");
+        assert_eq!(dispatch.funcs[0].return_vt, oleaut32::VT_USERDEFINED);
+        assert_eq!(
+            dispatch.funcs[0].param_vts,
+            vec![oleaut32::VT_I4, oleaut32::VT_BSTR]
+        );
         assert_eq!(dispatch.funcs[1].name, "Close");
         assert_eq!(dispatch.funcs[1].documentation, "Structured close op");
         assert_eq!(dispatch.funcs[1].help_context, 13);
@@ -26971,11 +29006,17 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
         assert_eq!(dispatch.funcs[1].param_count, 3);
         assert_eq!(dispatch.funcs[1].optional_param_count, 1);
         assert_eq!(dispatch.funcs[1].func_flags, 32);
+        assert_eq!(dispatch.funcs[1].return_vt, oleaut32::VT_UI4);
+        assert_eq!(
+            dispatch.funcs[1].param_vts,
+            vec![oleaut32::VT_BSTR, oleaut32::VT_UI4, oleaut32::VT_VARIANT]
+        );
         assert_eq!(dispatch.vars[0].name, "State");
         assert_eq!(dispatch.vars[0].documentation, "Structured state slot");
         assert_eq!(dispatch.vars[0].help_context, 14);
         assert_eq!(dispatch.vars[0].varkind, 3);
         assert_eq!(dispatch.vars[0].offset, 24);
+        assert_eq!(dispatch.vars[0].vt, oleaut32::VT_UI4);
         assert_eq!(dispatch.impl_types[0].name, "SectionSource");
         assert_eq!(dispatch.impl_types[0].href_type, 1);
         assert_eq!(
@@ -27017,12 +29058,26 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
         assert_eq!(dispatch.funcs[0].name, "Echo");
         assert_eq!(dispatch.funcs[0].documentation, "MSFT echo op");
         assert_eq!(dispatch.funcs[0].param_count, 2);
+        assert_eq!(dispatch.funcs[0].return_vt, oleaut32::VT_USERDEFINED);
+        assert_eq!(dispatch.funcs[0].return_href_type, 1);
+        assert_eq!(
+            dispatch.funcs[0].param_vts,
+            vec![oleaut32::VT_USERDEFINED, oleaut32::VT_BSTR]
+        );
+        assert_eq!(dispatch.funcs[0].param_href_types, vec![1, 0]);
         assert_eq!(dispatch.funcs[1].name, "Close");
         assert_eq!(dispatch.funcs[1].dll_name, "kernel32");
         assert_eq!(dispatch.funcs[1].entry_name, "GetCurrentDirectoryA");
         assert_eq!(dispatch.funcs[1].invkind, INVOKE_PROPERTYGET);
+        assert_eq!(dispatch.funcs[1].return_vt, oleaut32::VT_UI4);
+        assert_eq!(
+            dispatch.funcs[1].param_vts,
+            vec![oleaut32::VT_BSTR, oleaut32::VT_UI4, oleaut32::VT_VARIANT]
+        );
         assert_eq!(dispatch.vars[0].name, "State");
         assert_eq!(dispatch.vars[0].documentation, "MSFT state slot");
+        assert_eq!(dispatch.vars[0].vt, oleaut32::VT_USERDEFINED);
+        assert_eq!(dispatch.vars[0].href_type, 1);
         assert_eq!(dispatch.impl_types[0].name, "MsftInterface");
         assert_eq!(
             dispatch.impl_types[0].flags,
@@ -27038,6 +29093,8 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
         assert_eq!(interface.vars.len(), 0);
         assert_eq!(interface.funcs[0].name, "Echo");
         assert_eq!(interface.funcs[0].help_context, 92);
+        assert_eq!(interface.funcs[0].return_vt, oleaut32::VT_BOOL);
+        assert_eq!(interface.funcs[0].param_vts, vec![oleaut32::VT_BSTR]);
     }
 
     #[test]
@@ -27063,9 +29120,23 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
         assert_eq!(dispatch.funcs.len(), 2);
         assert_eq!(dispatch.vars.len(), 1);
         assert_eq!(dispatch.impl_types.len(), 1);
+        assert_eq!(dispatch.funcs[0].return_vt, oleaut32::VT_USERDEFINED);
+        assert_eq!(dispatch.funcs[0].return_href_type, 1);
+        assert_eq!(
+            dispatch.funcs[0].param_vts,
+            vec![oleaut32::VT_USERDEFINED, oleaut32::VT_BSTR]
+        );
+        assert_eq!(dispatch.funcs[0].param_href_types, vec![1, 0]);
         assert_eq!(dispatch.funcs[1].dll_name, "kernel32");
         assert_eq!(dispatch.funcs[1].entry_name, "GetCurrentDirectoryA");
+        assert_eq!(dispatch.funcs[1].return_vt, oleaut32::VT_UI4);
+        assert_eq!(
+            dispatch.funcs[1].param_vts,
+            vec![oleaut32::VT_BSTR, oleaut32::VT_UI4, oleaut32::VT_VARIANT]
+        );
         assert_eq!(dispatch.vars[0].name, "State");
+        assert_eq!(dispatch.vars[0].vt, oleaut32::VT_USERDEFINED);
+        assert_eq!(dispatch.vars[0].href_type, 1);
 
         let interface = &state.type_infos[1];
         assert_eq!(interface.name, "SltgSource");
@@ -27074,6 +29145,419 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
         assert_eq!(interface.typekind, TKIND_INTERFACE);
         assert_eq!(interface.funcs.len(), 1);
         assert_eq!(interface.vars.len(), 0);
+        assert_eq!(interface.funcs[0].return_vt, oleaut32::VT_BOOL);
+        assert_eq!(interface.funcs[0].param_vts, vec![oleaut32::VT_BSTR]);
+    }
+
+    #[test]
+    fn oleaut32_msft_binary_ref_type_info_and_containing_typelib_are_stateful() {
+        unsafe {
+            let payload = build_realish_msft_header_typelib_payload();
+            let parsed = oleaut32::parse_binary_typelib_metadata("/phase4_msft_ref.tlb", &payload)
+                .expect("realish MSFT header payload should parse");
+            let typelib = oleaut32::allocate_type_lib(parsed);
+            assert!(!typelib.is_null());
+
+            let typelib_vtable = *(typelib as *mut *const usize);
+            let get_type_info: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*typelib_vtable.add(4));
+            let release_typelib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*typelib_vtable.add(2));
+
+            let mut dispatch_info = core::ptr::null_mut();
+            assert_eq!(get_type_info(typelib, 0, &mut dispatch_info), S_OK);
+            assert!(!dispatch_info.is_null());
+
+            let info_vtable = *(dispatch_info as *mut *const usize);
+            let get_ref_type_info: extern "system" fn(*mut u8, DWORD, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(14));
+            let get_containing_type_lib: extern "system" fn(
+                *mut u8,
+                *mut *mut u8,
+                *mut UINT,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(17));
+            let get_documentation: extern "system" fn(
+                *mut u8,
+                DISPID,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(12));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*info_vtable.add(2));
+
+            let mut referenced_info = core::ptr::null_mut();
+            assert_eq!(
+                get_ref_type_info(dispatch_info, 1, &mut referenced_info),
+                S_OK
+            );
+            assert!(!referenced_info.is_null());
+
+            let mut containing = core::ptr::null_mut();
+            let mut index = 0u32;
+            assert_eq!(
+                get_containing_type_lib(referenced_info, &mut containing, &mut index),
+                S_OK
+            );
+            assert_eq!(index, 1);
+            assert!(!containing.is_null());
+
+            let mut name = core::ptr::null_mut();
+            let mut doc = core::ptr::null_mut();
+            let mut help_context = 0u32;
+            let mut help_file = core::ptr::null_mut();
+            assert_eq!(
+                get_documentation(
+                    referenced_info,
+                    MEMBERID_NIL,
+                    &mut name,
+                    &mut doc,
+                    &mut help_context,
+                    &mut help_file,
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(name), "MsftInterface");
+            assert_eq!(read_utf16_string(doc), "Interface from MSFT header");
+            assert_eq!(help_context, 72);
+            assert_eq!(
+                read_utf16_string(help_file),
+                "C:/phase2/msft-header-help.chm"
+            );
+            oleaut32::sys_free_string(name);
+            oleaut32::sys_free_string(doc);
+            oleaut32::sys_free_string(help_file);
+
+            let release_containing: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*(*(containing as *mut *const usize)).add(2));
+            let release_referenced: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*(*(referenced_info as *mut *const usize)).add(2));
+            assert_eq!(release_containing(containing), 0);
+            assert_eq!(release_referenced(referenced_info), 0);
+            assert_eq!(release_type_info(dispatch_info), 0);
+            assert_eq!(release_typelib(typelib), 0);
+        }
+    }
+
+    #[test]
+    fn oleaut32_sltg_binary_ref_type_info_and_containing_typelib_are_stateful() {
+        unsafe {
+            let payload = build_realish_sltg_header_typelib_payload();
+            let parsed = oleaut32::parse_binary_typelib_metadata("/phase4_sltg_ref.tlb", &payload)
+                .expect("realish SLTG header payload should parse");
+            let typelib = oleaut32::allocate_type_lib(parsed);
+            assert!(!typelib.is_null());
+
+            let typelib_vtable = *(typelib as *mut *const usize);
+            let get_type_info: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*typelib_vtable.add(4));
+            let release_typelib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*typelib_vtable.add(2));
+
+            let mut dispatch_info = core::ptr::null_mut();
+            assert_eq!(get_type_info(typelib, 0, &mut dispatch_info), S_OK);
+            assert!(!dispatch_info.is_null());
+
+            let info_vtable = *(dispatch_info as *mut *const usize);
+            let get_ref_type_info: extern "system" fn(*mut u8, DWORD, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(14));
+            let get_containing_type_lib: extern "system" fn(
+                *mut u8,
+                *mut *mut u8,
+                *mut UINT,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(17));
+            let get_documentation: extern "system" fn(
+                *mut u8,
+                DISPID,
+                *mut BSTR,
+                *mut BSTR,
+                *mut DWORD,
+                *mut BSTR,
+            ) -> HRESULT = core::mem::transmute(*info_vtable.add(12));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*info_vtable.add(2));
+
+            let mut referenced_info = core::ptr::null_mut();
+            assert_eq!(
+                get_ref_type_info(dispatch_info, 1, &mut referenced_info),
+                S_OK
+            );
+            assert!(!referenced_info.is_null());
+
+            let mut containing = core::ptr::null_mut();
+            let mut index = 0u32;
+            assert_eq!(
+                get_containing_type_lib(referenced_info, &mut containing, &mut index),
+                S_OK
+            );
+            assert_eq!(index, 1);
+            assert!(!containing.is_null());
+
+            let mut name = core::ptr::null_mut();
+            let mut doc = core::ptr::null_mut();
+            let mut help_context = 0u32;
+            let mut help_file = core::ptr::null_mut();
+            assert_eq!(
+                get_documentation(
+                    referenced_info,
+                    MEMBERID_NIL,
+                    &mut name,
+                    &mut doc,
+                    &mut help_context,
+                    &mut help_file,
+                ),
+                S_OK
+            );
+            assert_eq!(read_utf16_string(name), "SltgSource");
+            assert_eq!(read_utf16_string(doc), "Interface from SLTG header");
+            assert_eq!(help_context, 82);
+            assert_eq!(
+                read_utf16_string(help_file),
+                "C:/phase2/sltg-source-help.chm"
+            );
+            oleaut32::sys_free_string(name);
+            oleaut32::sys_free_string(doc);
+            oleaut32::sys_free_string(help_file);
+
+            let release_containing: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*(*(containing as *mut *const usize)).add(2));
+            let release_referenced: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*(*(referenced_info as *mut *const usize)).add(2));
+            assert_eq!(release_containing(containing), 0);
+            assert_eq!(release_referenced(referenced_info), 0);
+            assert_eq!(release_type_info(dispatch_info), 0);
+            assert_eq!(release_typelib(typelib), 0);
+        }
+    }
+
+    #[test]
+    fn oleaut32_msft_binary_typelib_publishes_typedescs_via_func_and_var_desc() {
+        unsafe {
+            let payload = build_realish_msft_header_typelib_payload();
+            let parsed =
+                oleaut32::parse_binary_typelib_metadata("/phase4_msft_descs.tlb", &payload)
+                    .expect("realish MSFT header payload should parse");
+            let typelib = oleaut32::allocate_type_lib(parsed);
+            assert!(!typelib.is_null());
+
+            let typelib_vtable = *(typelib as *mut *const usize);
+            let get_type_info: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*typelib_vtable.add(4));
+            let release_type_lib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*typelib_vtable.add(2));
+
+            let mut typeinfo = core::ptr::null_mut();
+            assert_eq!(get_type_info(typelib, 0, &mut typeinfo), S_OK);
+            assert!(!typeinfo.is_null());
+
+            let info_vtable = *(typeinfo as *mut *const usize);
+            let get_func_desc: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(5));
+            let get_var_desc: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(6));
+            let release_func_desc: extern "system" fn(*mut u8, *mut FUNCDESC) =
+                core::mem::transmute(*info_vtable.add(19));
+            let release_var_desc: extern "system" fn(*mut u8, *mut VARDESC) =
+                core::mem::transmute(*info_vtable.add(20));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*info_vtable.add(2));
+
+            let mut func_desc_raw = core::ptr::null_mut();
+            assert_eq!(get_func_desc(typeinfo, 0, &mut func_desc_raw), S_OK);
+            let func_desc = func_desc_raw as *mut FUNCDESC;
+            assert_eq!(
+                (*func_desc).elemdesc_func.tdesc.vt,
+                oleaut32::VT_USERDEFINED
+            );
+            assert_eq!((*func_desc).elemdesc_func.tdesc.union_data.hreftype, 1);
+            assert_eq!((*func_desc).c_params, 2);
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param.add(0)).tdesc.vt,
+                oleaut32::VT_USERDEFINED
+            );
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param.add(0))
+                    .tdesc
+                    .union_data
+                    .hreftype,
+                1
+            );
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param.add(1)).tdesc.vt,
+                oleaut32::VT_BSTR
+            );
+            release_func_desc(typeinfo, func_desc);
+
+            func_desc_raw = core::ptr::null_mut();
+            assert_eq!(get_func_desc(typeinfo, 1, &mut func_desc_raw), S_OK);
+            let func_desc = func_desc_raw as *mut FUNCDESC;
+            assert_eq!((*func_desc).elemdesc_func.tdesc.vt, oleaut32::VT_UI4);
+            assert_eq!((*func_desc).c_params, 3);
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param.add(0)).tdesc.vt,
+                oleaut32::VT_BSTR
+            );
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param.add(1)).tdesc.vt,
+                oleaut32::VT_UI4
+            );
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param.add(2)).tdesc.vt,
+                oleaut32::VT_VARIANT
+            );
+            release_func_desc(typeinfo, func_desc);
+
+            let mut var_desc_raw = core::ptr::null_mut();
+            assert_eq!(get_var_desc(typeinfo, 0, &mut var_desc_raw), S_OK);
+            let var_desc = var_desc_raw as *mut VARDESC;
+            assert_eq!((*var_desc).elemdesc_var.tdesc.vt, oleaut32::VT_USERDEFINED);
+            assert_eq!((*var_desc).elemdesc_var.tdesc.union_data.hreftype, 1);
+            release_var_desc(typeinfo, var_desc);
+
+            assert_eq!(release_type_info(typeinfo), 0);
+            assert_eq!(release_type_lib(typelib), 0);
+        }
+    }
+
+    #[test]
+    fn oleaut32_sltg_binary_typelib_publishes_userdefined_hreftypes_via_descs() {
+        unsafe {
+            let payload = build_realish_sltg_header_typelib_payload();
+            let parsed =
+                oleaut32::parse_binary_typelib_metadata("/phase4_sltg_descs.tlb", &payload)
+                    .expect("realish SLTG header payload should parse");
+            let typelib = oleaut32::allocate_type_lib(parsed);
+            assert!(!typelib.is_null());
+
+            let typelib_vtable = *(typelib as *mut *const usize);
+            let get_type_info: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*typelib_vtable.add(4));
+            let release_type_lib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*typelib_vtable.add(2));
+
+            let mut typeinfo = core::ptr::null_mut();
+            assert_eq!(get_type_info(typelib, 0, &mut typeinfo), S_OK);
+            assert!(!typeinfo.is_null());
+
+            let info_vtable = *(typeinfo as *mut *const usize);
+            let get_func_desc: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(5));
+            let get_var_desc: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(6));
+            let release_func_desc: extern "system" fn(*mut u8, *mut FUNCDESC) =
+                core::mem::transmute(*info_vtable.add(19));
+            let release_var_desc: extern "system" fn(*mut u8, *mut VARDESC) =
+                core::mem::transmute(*info_vtable.add(20));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*info_vtable.add(2));
+
+            let mut func_desc_raw = core::ptr::null_mut();
+            assert_eq!(get_func_desc(typeinfo, 0, &mut func_desc_raw), S_OK);
+            let func_desc = func_desc_raw as *mut FUNCDESC;
+            assert_eq!(
+                (*func_desc).elemdesc_func.tdesc.vt,
+                oleaut32::VT_USERDEFINED
+            );
+            assert_eq!((*func_desc).elemdesc_func.tdesc.union_data.hreftype, 1);
+            assert_eq!((*func_desc).c_params, 2);
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param.add(0)).tdesc.vt,
+                oleaut32::VT_USERDEFINED
+            );
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param.add(0))
+                    .tdesc
+                    .union_data
+                    .hreftype,
+                1
+            );
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param.add(1)).tdesc.vt,
+                oleaut32::VT_BSTR
+            );
+            release_func_desc(typeinfo, func_desc);
+
+            let mut var_desc_raw = core::ptr::null_mut();
+            assert_eq!(get_var_desc(typeinfo, 0, &mut var_desc_raw), S_OK);
+            let var_desc = var_desc_raw as *mut VARDESC;
+            assert_eq!((*var_desc).elemdesc_var.tdesc.vt, oleaut32::VT_USERDEFINED);
+            assert_eq!((*var_desc).elemdesc_var.tdesc.union_data.hreftype, 1);
+            release_var_desc(typeinfo, var_desc);
+
+            assert_eq!(release_type_info(typeinfo), 0);
+            assert_eq!(release_type_lib(typelib), 0);
+        }
+    }
+
+    #[test]
+    fn oleaut32_text_typelib_publishes_userdefined_hreftypes_via_descs() {
+        unsafe {
+            let payload = b"ECHOS-TLB1\n\
+name=Phase4.UserDefined\n\
+doc=Type ref publication corpus\n\
+type=PhaseSource|interface|0x0000|Source contract|Changed\n\
+type=PhaseDispatch|dispatch|0x1000|Dispatch contract|Connect,SourceState\n\
+impl=PhaseDispatch|PhaseSource|source\n\
+func=PhaseDispatch|Connect|41|Type-ref op|9||func|1|0|0|userdefined@0|userdefined@0\n\
+var=PhaseDispatch|SourceState|42|Source slot|10|dispatch|0|0|userdefined@0\n";
+            let parsed =
+                oleaut32::parse_typelib_metadata("/phase4_typelib_userdefined_descs.tlb", payload)
+                    .expect("text typelib payload should parse");
+            let typelib = oleaut32::allocate_type_lib(parsed);
+            assert!(!typelib.is_null());
+
+            let typelib_vtable = *(typelib as *mut *const usize);
+            let get_type_info: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*typelib_vtable.add(4));
+            let release_type_lib: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*typelib_vtable.add(2));
+
+            let mut typeinfo = core::ptr::null_mut();
+            assert_eq!(get_type_info(typelib, 1, &mut typeinfo), S_OK);
+            assert!(!typeinfo.is_null());
+
+            let info_vtable = *(typeinfo as *mut *const usize);
+            let get_func_desc: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(5));
+            let get_var_desc: extern "system" fn(*mut u8, UINT, *mut *mut u8) -> HRESULT =
+                core::mem::transmute(*info_vtable.add(6));
+            let release_func_desc: extern "system" fn(*mut u8, *mut FUNCDESC) =
+                core::mem::transmute(*info_vtable.add(19));
+            let release_var_desc: extern "system" fn(*mut u8, *mut VARDESC) =
+                core::mem::transmute(*info_vtable.add(20));
+            let release_type_info: extern "system" fn(*mut u8) -> u32 =
+                core::mem::transmute(*info_vtable.add(2));
+
+            let mut func_desc_raw = core::ptr::null_mut();
+            assert_eq!(get_func_desc(typeinfo, 0, &mut func_desc_raw), S_OK);
+            let func_desc = func_desc_raw as *mut FUNCDESC;
+            assert_eq!(
+                (*func_desc).elemdesc_func.tdesc.vt,
+                oleaut32::VT_USERDEFINED
+            );
+            assert_eq!((*func_desc).elemdesc_func.tdesc.union_data.hreftype, 0);
+            assert_eq!((*func_desc).c_params, 1);
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param).tdesc.vt,
+                oleaut32::VT_USERDEFINED
+            );
+            assert_eq!(
+                (*(*func_desc).lprgelemdesc_param).tdesc.union_data.hreftype,
+                0
+            );
+            release_func_desc(typeinfo, func_desc);
+
+            let mut var_desc_raw = core::ptr::null_mut();
+            assert_eq!(get_var_desc(typeinfo, 0, &mut var_desc_raw), S_OK);
+            let var_desc = var_desc_raw as *mut VARDESC;
+            assert_eq!((*var_desc).elemdesc_var.tdesc.vt, oleaut32::VT_USERDEFINED);
+            assert_eq!((*var_desc).elemdesc_var.tdesc.union_data.hreftype, 0);
+            release_var_desc(typeinfo, var_desc);
+
+            assert_eq!(release_type_info(typeinfo), 0);
+            assert_eq!(release_type_lib(typelib), 0);
+        }
     }
 
     #[test]
@@ -28756,5 +31240,61 @@ if (shExpMatch(host, \"*.corp.test\")) {{\n\
             assert!(!WIN32_PRINT_JOBS.lock().contains_key(&(job_id as u64)));
             assert!(!WIN32_METAFILES.lock().contains_key(&(page_meta as u64)));
         }
+    }
+
+    #[test]
+    fn window_publication_snapshot_tracks_active_focus_capture_coherently() {
+        unsafe {
+            init();
+        }
+
+        update_window_publication(|snapshot| {
+            snapshot.active = 0x11;
+            snapshot.focused = 0x22;
+            snapshot.captured = 0x33;
+        });
+
+        assert_eq!(
+            window_publication_snapshot(),
+            WindowPublicationSnapshot {
+                active: 0x11,
+                focused: 0x22,
+                captured: 0x33,
+            }
+        );
+    }
+
+    #[test]
+    fn reported_pointer_snapshot_tracks_buttons_and_swap_policy_coherently() {
+        unsafe {
+            init();
+        }
+
+        update_reported_mouse_state(
+            120,
+            240,
+            crate::drivers::mouse::MouseButtons {
+                left: true,
+                right: false,
+                middle: true,
+            },
+        );
+        update_reported_pointer_publication(|snapshot| {
+            snapshot.swap_buttons = true;
+        });
+
+        assert_eq!(
+            reported_pointer_snapshot(),
+            ReportedPointerSnapshot {
+                x: 120,
+                y: 240,
+                buttons: crate::drivers::mouse::MouseButtons {
+                    left: true,
+                    right: false,
+                    middle: true,
+                },
+                swap_buttons: true,
+            }
+        );
     }
 }

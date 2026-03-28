@@ -69,6 +69,7 @@ pub mod http3;
 pub mod io_uring;
 pub mod io_uring_nvme;
 pub mod ip;
+pub mod ipsec;
 pub mod ipv6;
 pub mod netdev;
 pub mod netfilter;
@@ -265,6 +266,69 @@ impl core::fmt::Display for Ipv4Addr {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IpAddr {
+    V4(Ipv4Addr),
+    V6(ipv6::Ipv6Addr),
+}
+
+impl IpAddr {
+    pub fn is_unspecified(&self) -> bool {
+        match self {
+            IpAddr::V4(ip) => ip.is_unspecified(),
+            IpAddr::V6(ip) => ip.is_unspecified(),
+        }
+    }
+
+    pub fn as_ipv4(&self) -> Option<Ipv4Addr> {
+        match self {
+            IpAddr::V4(ip) => Some(*ip),
+            IpAddr::V6(ip) => ip.to_ipv4_mapped(),
+        }
+    }
+
+    pub fn as_ipv6(&self) -> Option<ipv6::Ipv6Addr> {
+        match self {
+            IpAddr::V4(ip) => Some(ipv6::Ipv6Addr::from_ipv4_mapped(*ip)),
+            IpAddr::V6(ip) => Some(*ip),
+        }
+    }
+
+    pub fn family(&self) -> crate::net::socket::AddressFamily {
+        match self {
+            IpAddr::V4(_) => crate::net::socket::AddressFamily::IPV4,
+            IpAddr::V6(_) => crate::net::socket::AddressFamily::IPV6,
+        }
+    }
+}
+
+impl Default for IpAddr {
+    fn default() -> Self {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    }
+}
+
+impl From<Ipv4Addr> for IpAddr {
+    fn from(value: Ipv4Addr) -> Self {
+        IpAddr::V4(value)
+    }
+}
+
+impl From<ipv6::Ipv6Addr> for IpAddr {
+    fn from(value: ipv6::Ipv6Addr) -> Self {
+        IpAddr::V6(value)
+    }
+}
+
+impl core::fmt::Display for IpAddr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            IpAddr::V4(ip) => write!(f, "{}", ip),
+            IpAddr::V6(ip) => write!(f, "{}", ip.to_string()),
+        }
+    }
+}
+
 // ============================================================================
 // PORT NUMARASI
 // ============================================================================
@@ -317,18 +381,28 @@ impl Port {
 /// Soket adresi (IP + Port)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SocketAddr {
-    pub ip: Ipv4Addr,
+    pub ip: IpAddr,
     pub port: Port,
 }
 
 impl SocketAddr {
-    pub fn new(ip: Ipv4Addr, port: Port) -> Self {
-        SocketAddr { ip, port }
+    pub fn new<T: Into<IpAddr>>(ip: T, port: Port) -> Self {
+        SocketAddr {
+            ip: ip.into(),
+            port,
+        }
     }
 
     pub fn unspecified(port: Port) -> Self {
         SocketAddr {
-            ip: Ipv4Addr::UNSPECIFIED,
+            ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            port,
+        }
+    }
+
+    pub fn unspecified_v6(port: Port) -> Self {
+        SocketAddr {
+            ip: IpAddr::V6(ipv6::Ipv6Addr::UNSPECIFIED),
             port,
         }
     }
@@ -596,7 +670,51 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
 /// Paketi varsayılan ağ arabirimi üzerinden gönderir
 pub fn send_packet(data: &[u8]) -> Result<(), NetError> {
     let iface = default_interface().ok_or(NetError::NoInterface)?;
-    iface.lock().send(data)?;
+    let mut tx_buf = data.to_vec();
+    let iface_name = {
+        let guard = iface.lock();
+        String::from(guard.name())
+    };
+    if ip::Ipv4Packet::parse(&tx_buf).is_ok() {
+        let local_out = netfilter::process_ipv4_packet(
+            &mut tx_buf,
+            netfilter::NF_INET_LOCAL_OUT,
+            None,
+            Some(iface_name.as_str()),
+        )?;
+        if local_out == netfilter::NF_DROP {
+            return Ok(());
+        }
+        let post_routing = netfilter::process_ipv4_packet(
+            &mut tx_buf,
+            netfilter::NF_INET_POST_ROUTING,
+            None,
+            Some(iface_name.as_str()),
+        )?;
+        if post_routing == netfilter::NF_DROP {
+            return Ok(());
+        }
+    } else if ipv6::Ipv6Packet::parse(&tx_buf).is_ok() {
+        let local_out = netfilter::process_ipv6_packet(
+            &mut tx_buf,
+            netfilter::NF_INET_LOCAL_OUT,
+            None,
+            Some(iface_name.as_str()),
+        )?;
+        if local_out == netfilter::NF_DROP {
+            return Ok(());
+        }
+        let post_routing = netfilter::process_ipv6_packet(
+            &mut tx_buf,
+            netfilter::NF_INET_POST_ROUTING,
+            None,
+            Some(iface_name.as_str()),
+        )?;
+        if post_routing == netfilter::NF_DROP {
+            return Ok(());
+        }
+    }
+    iface.lock().send(&tx_buf)?;
     Ok(())
 }
 
@@ -654,12 +772,12 @@ pub fn get_socket_stats() -> Vec<SocketStats> {
             proto: String::from("tcp"),
             local: format!(
                 "{}:{}",
-                socket::format_ipv4(conn.local.ip),
+                socket::format_ipaddr(conn.local.ip),
                 conn.local.port.0
             ),
             remote: format!(
                 "{}:{}",
-                socket::format_ipv4(conn.remote.ip),
+                socket::format_ipaddr(conn.remote.ip),
                 conn.remote.port.0
             ),
             state: String::from(state_str),
@@ -676,7 +794,7 @@ pub fn get_socket_stats() -> Vec<SocketStats> {
             proto: String::from("udp"),
             local: format!(
                 "{}:{}",
-                socket::format_ipv4(sock.local.ip),
+                socket::format_ipaddr(sock.local.ip),
                 sock.local.port.0
             ),
             remote: String::from("*:*"),
@@ -889,6 +1007,7 @@ pub use dhcp::*;
 pub use dns::*;
 pub use ethernet::*;
 pub use ip::*;
+pub use ipsec::*;
 pub use ipv6::*;
 pub use quic::*;
 pub use socket::*;

@@ -4,7 +4,9 @@ use crate::gui::protocol::{
     AppId, DamageEpoch, FenceId, GpuBufferHandle, Rect, SceneUpdate, SharedSurfaceDescriptor,
     SurfaceId, WindowBufferMode,
 };
-use crate::gui::surface_memory::SharedSurfaceMemory;
+use crate::gui::surface_memory::{
+    publish_data_plane_surface, revoke_data_plane_surface, SharedSurfaceMemory,
+};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -160,11 +162,24 @@ impl SurfaceManager {
     }
 
     pub fn destroy_surface(&mut self, surface_id: SurfaceId) -> bool {
-        self.surfaces.remove(&surface_id).is_some()
+        if let Some(surface) = self.surfaces.remove(&surface_id) {
+            revoke_data_plane_surface(surface.app_id, surface_id);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn destroy_surfaces_for_app(&mut self, app_id: AppId) {
+        let revoked = self
+            .surfaces
+            .iter()
+            .filter_map(|(surface_id, surface)| (surface.app_id == app_id).then_some(*surface_id))
+            .collect::<Vec<_>>();
         self.surfaces.retain(|_, s| s.app_id != app_id);
+        for surface_id in revoked {
+            revoke_data_plane_surface(app_id, surface_id);
+        }
     }
 
     pub fn set_geometry(
@@ -286,6 +301,10 @@ impl SurfaceManager {
             height: surface.rect.height,
             pixel_stride: surface.rect.width,
             generation: shared.generation(),
+        })
+        .map(|descriptor| {
+            publish_data_plane_surface(descriptor, &shared);
+            descriptor
         })
     }
 
@@ -418,14 +437,20 @@ mod tests {
         let previous = SceneUpdate {
             root_id: 1,
             revision: 1,
-            render_objects: vec![solid(1, Rect::new(0, 0, 40, 20)), solid(2, Rect::new(50, 0, 30, 20))],
+            render_objects: vec![
+                solid(1, Rect::new(0, 0, 40, 20)),
+                solid(2, Rect::new(50, 0, 30, 20)),
+            ],
             damage_hint: Vec::new(),
             semantic_root: None,
         };
         let next = SceneUpdate {
             root_id: 1,
             revision: 2,
-            render_objects: vec![solid(1, Rect::new(0, 0, 40, 20)), solid(2, Rect::new(56, 0, 30, 20))],
+            render_objects: vec![
+                solid(1, Rect::new(0, 0, 40, 20)),
+                solid(2, Rect::new(56, 0, 30, 20)),
+            ],
             damage_hint: Vec::new(),
             semantic_root: None,
         };
@@ -441,14 +466,20 @@ mod tests {
         let first = SceneUpdate {
             root_id: 3,
             revision: 1,
-            render_objects: vec![solid(1, Rect::new(0, 0, 20, 20)), solid(2, Rect::new(24, 0, 20, 20))],
+            render_objects: vec![
+                solid(1, Rect::new(0, 0, 20, 20)),
+                solid(2, Rect::new(24, 0, 20, 20)),
+            ],
             damage_hint: Vec::new(),
             semantic_root: None,
         };
         let second = SceneUpdate {
             root_id: 3,
             revision: 2,
-            render_objects: vec![solid(1, Rect::new(0, 0, 20, 20)), solid(2, Rect::new(30, 0, 20, 20))],
+            render_objects: vec![
+                solid(1, Rect::new(0, 0, 20, 20)),
+                solid(2, Rect::new(30, 0, 20, 20)),
+            ],
             damage_hint: Vec::new(),
             semantic_root: None,
         };

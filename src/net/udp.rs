@@ -44,8 +44,9 @@
 //! ```
 
 use super::ip::{IpProtocol, Ipv4Packet};
+use super::ipv6::{Ipv6Header, Ipv6NextHeader, Ipv6Packet};
 use super::socket::SocketAddr;
-use super::{allocate_socket_id, Ipv4Addr, NetError, Port};
+use super::{allocate_socket_id, socket::AddressFamily, IpAddr, Ipv4Addr, NetError, Port};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -187,7 +188,8 @@ pub fn verify_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, segment: &[u8]) -> bo
             return true;
         }
     }
-    compute_checksum(src_ip, dst_ip, segment) == 0
+    let verification = compute_checksum(src_ip, dst_ip, segment);
+    verification == 0 || verification == 0xFFFF
 }
 
 /// UDP soketi
@@ -199,6 +201,7 @@ pub fn verify_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, segment: &[u8]) -> bo
 pub struct UdpSocket {
     /// Benzersiz soket kimliği
     pub id: u32,
+    pub family: AddressFamily,
     /// Yerel adres (IP + Port)
     pub local: SocketAddr,
     /// Alınan datagramların tamponu: (kaynak_adres, veri) çiftleri
@@ -207,9 +210,10 @@ pub struct UdpSocket {
 
 impl UdpSocket {
     /// Yeni UDP soketi oluştur
-    pub fn new() -> Self {
+    pub fn new(family: AddressFamily) -> Self {
         UdpSocket {
             id: allocate_socket_id(),
+            family,
             local: SocketAddr::default(),
             rx_buffer: Vec::new(),
         }
@@ -238,11 +242,37 @@ impl UdpSocket {
         header.serialize(&mut segment)?;
         segment[UdpHeader::SIZE..].copy_from_slice(data);
 
-        // IP katmanına gönder (UDP protokol numarası = 17)
-        let mut ip_buf = vec![0u8; 1500];
-        let len = super::ip::build_packet(dst.ip, IpProtocol::UDP, &segment, &mut ip_buf)?;
-
-        super::send_packet(&ip_buf[..len])?;
+        match (self.local.ip, dst.ip) {
+            (IpAddr::V4(mut src_ip), IpAddr::V4(dst_ip)) => {
+                if src_ip.is_unspecified() {
+                    src_ip = super::local_ip();
+                }
+                let checksum = compute_checksum(src_ip, dst_ip, &segment);
+                segment[6..8].copy_from_slice(&checksum.to_be_bytes());
+                let mut ip_buf = vec![0u8; 1500];
+                let len = super::ip::build_packet(dst_ip, IpProtocol::UDP, &segment, &mut ip_buf)?;
+                super::send_packet(&ip_buf[..len])?;
+            }
+            (IpAddr::V6(mut src_ip), IpAddr::V6(dst_ip)) => {
+                if src_ip.is_unspecified() {
+                    src_ip = super::ipv6::local_ipv6();
+                }
+                let checksum = compute_checksum_v6(src_ip, dst_ip, &segment);
+                segment[6..8].copy_from_slice(&checksum.to_be_bytes());
+                let packet = Ipv6Packet::new(
+                    Ipv6Header::new(
+                        src_ip,
+                        dst_ip,
+                        Ipv6NextHeader::Udp as u8,
+                        segment.len() as u16,
+                    ),
+                    &segment,
+                );
+                let serialized = packet.serialize();
+                super::send_packet(&serialized)?;
+            }
+            _ => return Err(NetError::InvalidParam),
+        }
 
         Ok(data.len())
     }
@@ -282,7 +312,7 @@ impl UdpSocket {
 /// Tüm aktif UDP soketleri: soket_id -> UdpSocket
 static UDP_SOCKETS: Mutex<BTreeMap<u32, Box<UdpSocket>>> = Mutex::new(BTreeMap::new());
 /// Port -> soket kimliği eşleşmesi (gelen paket yönlendirme için)
-static UDP_BINDINGS: Mutex<BTreeMap<Port, u32>> = Mutex::new(BTreeMap::new());
+static UDP_BINDINGS: Mutex<BTreeMap<(AddressFamily, Port), u32>> = Mutex::new(BTreeMap::new());
 
 /// UDP alt sistemini başlat
 pub fn init() {
@@ -290,8 +320,8 @@ pub fn init() {
 }
 
 /// Yeni UDP soketi oluştur ve ID döndür
-pub fn create_socket() -> u32 {
-    let sock = UdpSocket::new();
+pub fn create_socket(family: AddressFamily) -> u32 {
+    let sock = UdpSocket::new(family);
     let id = sock.id;
     UDP_SOCKETS.lock().insert(id, Box::new(sock));
     id
@@ -310,7 +340,9 @@ fn allocate_ephemeral_port() -> Port {
         // Port zaten kullanılıyor mu kontrol et
         let bindings = UDP_BINDINGS.lock();
         let candidate = Port(port);
-        if !bindings.contains_key(&candidate) {
+        if !bindings.contains_key(&(AddressFamily::IPV4, candidate))
+            && !bindings.contains_key(&(AddressFamily::IPV6, candidate))
+        {
             return candidate;
         }
         // Kullanımdaysa bir sonrakini dene (wrap-around)
@@ -332,7 +364,9 @@ pub fn bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
     sock.bind(bind_addr)?;
 
     // Port -> socket_id eşleşmesini kaydet
-    UDP_BINDINGS.lock().insert(bind_addr.port, socket_id);
+    UDP_BINDINGS
+        .lock()
+        .insert((sock.family, bind_addr.port), socket_id);
 
     Ok(())
 }
@@ -354,7 +388,7 @@ pub fn recv_from(socket_id: u32, buf: &mut [u8]) -> Result<(usize, SocketAddr), 
 /// UDP soketini kapat ve port bağlamasını temizle
 pub fn close(socket_id: u32) {
     if let Some(sock) = UDP_SOCKETS.lock().remove(&socket_id) {
-        UDP_BINDINGS.lock().remove(&sock.local.port);
+        UDP_BINDINGS.lock().remove(&(sock.family, sock.local.port));
     }
 }
 
@@ -402,7 +436,7 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
 
     // Hedef porta kayıtlı soketi bul
     let bindings = UDP_BINDINGS.lock();
-    if let Some(&socket_id) = bindings.get(&udp_header.dst_port) {
+    if let Some(&socket_id) = bindings.get(&(AddressFamily::IPV4, udp_header.dst_port)) {
         drop(bindings); // Kilidi serbest bırak (deadlock önlemi)
 
         let mut socks = UDP_SOCKETS.lock();
@@ -413,6 +447,77 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
     }
 
     Ok(())
+}
+
+pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
+    if !verify_checksum_v6(
+        ip_packet.header.src,
+        ip_packet.header.dst,
+        &ip_packet.payload,
+    ) {
+        crate::serial_println!("[UDPv6] Checksum verification failed, dropping packet");
+        return Err(NetError::ChecksumError);
+    }
+
+    let udp_header = UdpHeader::parse(&ip_packet.payload)?;
+    let data = &ip_packet.payload[UdpHeader::SIZE..udp_header.length as usize];
+    let src = SocketAddr::new(ip_packet.header.src, udp_header.src_port);
+
+    let bindings = UDP_BINDINGS.lock();
+    if let Some(&socket_id) = bindings.get(&(AddressFamily::IPV6, udp_header.dst_port)) {
+        drop(bindings);
+
+        let mut socks = UDP_SOCKETS.lock();
+        if let Some(sock) = socks.get_mut(&socket_id) {
+            sock.rx_buffer.push((src, data.to_vec()));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn compute_checksum_v6(
+    src_ip: super::ipv6::Ipv6Addr,
+    dst_ip: super::ipv6::Ipv6Addr,
+    segment: &[u8],
+) -> u16 {
+    let mut sum: u32 = 0;
+    for chunk in src_ip.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    for chunk in dst_ip.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    let len = segment.len() as u32;
+    sum += (len >> 16) as u32;
+    sum += len & 0xFFFF;
+    sum += Ipv6NextHeader::Udp as u32;
+    let mut i = 0;
+    while i + 1 < segment.len() {
+        sum += u16::from_be_bytes([segment[i], segment[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < segment.len() {
+        sum += (segment[i] as u32) << 8;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    let result = !(sum as u16);
+    if result == 0 {
+        0xFFFF
+    } else {
+        result
+    }
+}
+
+pub fn verify_checksum_v6(
+    src_ip: super::ipv6::Ipv6Addr,
+    dst_ip: super::ipv6::Ipv6Addr,
+    segment: &[u8],
+) -> bool {
+    let verification = compute_checksum_v6(src_ip, dst_ip, segment);
+    verification == 0 || verification == 0xFFFF
 }
 
 // ============================================================================
@@ -430,6 +535,47 @@ pub fn list_sockets() -> Vec<UdpSocketInfo> {
     let bindings = UDP_BINDINGS.lock();
     bindings
         .keys()
-        .map(|p| UdpSocketInfo { port: p.0 })
+        .map(|(_, p)| UdpSocketInfo { port: p.0 })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn udp_ipv6_process_packet_routes_bound_socket() {
+        let socket_id = create_socket(AddressFamily::IPV6);
+        bind(socket_id, SocketAddr::unspecified_v6(Port(53530))).unwrap();
+
+        let payload = [1u8, 2, 3, 4, 5];
+        let header = UdpHeader::new(
+            Port(40000),
+            Port(53530),
+            (UdpHeader::SIZE + payload.len()) as u16,
+        );
+        let mut segment = vec![0u8; UdpHeader::SIZE + payload.len()];
+        header.serialize(&mut segment).unwrap();
+        segment[UdpHeader::SIZE..].copy_from_slice(&payload);
+
+        let src = super::super::ipv6::Ipv6Addr::from_segments([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
+        let dst = super::super::ipv6::Ipv6Addr::from_segments([0x2001, 0xdb8, 0, 0, 0, 0, 0, 2]);
+        let checksum = compute_checksum_v6(src, dst, &segment);
+        segment[6..8].copy_from_slice(&checksum.to_be_bytes());
+
+        let packet = Ipv6Packet::new(
+            Ipv6Header::new(src, dst, Ipv6NextHeader::Udp as u8, segment.len() as u16),
+            &segment,
+        );
+        process_ipv6_packet(&packet).unwrap();
+
+        let mut buf = [0u8; 16];
+        let (len, addr) = recv_from(socket_id, &mut buf).unwrap();
+        assert_eq!(len, payload.len());
+        assert_eq!(&buf[..len], &payload);
+        assert_eq!(addr.ip, IpAddr::V6(src));
+        assert_eq!(addr.port, Port(40000));
+
+        close(socket_id);
+    }
 }

@@ -2,7 +2,9 @@
 
 use crate::gui::protocol::Point;
 use crate::gui::scroll_physics::ScrollMomentum;
-use crate::gui::widgets::{ElementId, EventPhase, EventResult, FocusPolicy, RenderBox, WidgetEvent};
+use crate::gui::widgets::{
+    ElementId, EventPhase, EventResult, FocusPolicy, RenderBox, WidgetEvent,
+};
 use alloc::vec;
 use alloc::vec::Vec;
 use libm::{powf, roundf};
@@ -215,7 +217,9 @@ impl InputRouter {
             result = merge_event_results(result, handler(element_id, EventPhase::Bubble, event));
         }
         if result.capture_pointer {
-            self.capture = route.target.map(|element_id| PointerCaptureToken { element_id });
+            self.capture = route
+                .target
+                .map(|element_id| PointerCaptureToken { element_id });
         }
         if result.release_pointer {
             self.capture = None;
@@ -281,7 +285,10 @@ mod tests {
             },
         );
         assert!(down.capture_pointer);
-        assert_eq!(router.pointer_capture(), Some(PointerCaptureToken { element_id: 2 }));
+        assert_eq!(
+            router.pointer_capture(),
+            Some(PointerCaptureToken { element_id: 2 })
+        );
 
         let moved = router.route_pointer(&render_boxes, Point::new(1, 1));
         assert_eq!(moved.target, Some(2));

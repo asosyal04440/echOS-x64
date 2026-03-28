@@ -40,6 +40,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
+type EbpfAttachVerifier = fn(u32) -> bool;
+
 // ============================================================================
 // eBPF SABİTLERİ
 // ============================================================================
@@ -152,7 +154,7 @@ pub const BPF_PROG_TYPE_LWT_XMIT: u32 = 12;
 pub const BPF_PROG_TYPE_SOCK_OPS: u32 = 13;
 pub const BPF_PROG_TYPE_SK_SKB: u32 = 14;
 pub const BPF_PROG_TYPE_CGROUP_DEVICE: u32 = 15;
-pub const BPF_PROG_TYPE_SK_MSG: u8 = 16;
+pub const BPF_PROG_TYPE_SK_MSG: u32 = 16;
 pub const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = 17;
 pub const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
 pub const BPF_PROG_TYPE_LWT_SEG6LOCAL: u32 = 19;
@@ -192,9 +194,7 @@ pub enum EbpfError {
     /// JIT derleme hatası
     JitError,
     InvalidElf,
-    UnsupportedJit,
     VerifierRejected,
-    UnsupportedAttach,
 }
 
 // ============================================================================
@@ -265,74 +265,64 @@ impl EbpfVm {
             let src = ((insn >> 40) & 0xFF) as u8;
             let off = ((insn >> 32) & 0xFFFF) as i16;
             let imm = insn as i32;
+            let class = opcode & 0x07;
+            let op = opcode & 0xF0;
+            let uses_src_reg = (opcode & BPF_SRC_X) == BPF_SRC_X;
 
-            match opcode {
+            match class {
                 // ALU operations
-                BPF_ALU => {
-                    let alu_op = ((insn >> 52) & 0x0F) as u8;
-                    match alu_op {
-                        BPF_ADD => {
-                            if (insn & (1 << 32)) != 0 {
-                                // ADD64 imm
-                                self.registers[dst as usize] =
-                                    self.registers[dst as usize].wrapping_add(imm as u64);
-                            } else {
-                                // ADD64 src
-                                self.registers[dst as usize] = self.registers[dst as usize]
-                                    .wrapping_add(self.registers[src as usize]);
-                            }
+                BPF_ALU => match op {
+                    BPF_ADD => {
+                        if uses_src_reg {
+                            self.registers[dst as usize] = self.registers[dst as usize]
+                                .wrapping_add(self.registers[src as usize]);
+                        } else {
+                            self.registers[dst as usize] =
+                                self.registers[dst as usize].wrapping_add(imm as u64);
                         }
-                        BPF_SUB => {
-                            if (insn & (1 << 32)) != 0 {
-                                // SUB64 imm
-                                self.registers[dst as usize] =
-                                    self.registers[dst as usize].wrapping_sub(imm as u64);
-                            } else {
-                                // SUB64 src
-                                self.registers[dst as usize] = self.registers[dst as usize]
-                                    .wrapping_sub(self.registers[src as usize]);
-                            }
-                        }
-                        BPF_MUL => {
-                            if (insn & (1 << 32)) != 0 {
-                                // MUL64 imm
-                                self.registers[dst as usize] =
-                                    self.registers[dst as usize].wrapping_mul(imm as u64);
-                            } else {
-                                // MUL64 src
-                                self.registers[dst as usize] = self.registers[dst as usize]
-                                    .wrapping_mul(self.registers[src as usize]);
-                            }
-                        }
-                        BPF_DIV => {
-                            if (insn & (1 << 32)) != 0 {
-                                // DIV64 imm
-                                let divisor = imm as u64;
-                                if divisor == 0 {
-                                    return Err(EbpfError::CallError);
-                                }
-                                self.registers[dst as usize] /= divisor;
-                            } else {
-                                // DIV64 src
-                                let divisor = self.registers[src as usize];
-                                if divisor == 0 {
-                                    return Err(EbpfError::CallError);
-                                }
-                                self.registers[dst as usize] /= divisor;
-                            }
-                        }
-                        BPF_MOV => {
-                            if (insn & (1 << 32)) != 0 {
-                                // MOV64 imm
-                                self.registers[dst as usize] = imm as u64;
-                            } else {
-                                // MOV64 src
-                                self.registers[dst as usize] = self.registers[src as usize];
-                            }
-                        }
-                        _ => return Err(EbpfError::InvalidOpcode),
                     }
-                }
+                    BPF_SUB => {
+                        if uses_src_reg {
+                            self.registers[dst as usize] = self.registers[dst as usize]
+                                .wrapping_sub(self.registers[src as usize]);
+                        } else {
+                            self.registers[dst as usize] =
+                                self.registers[dst as usize].wrapping_sub(imm as u64);
+                        }
+                    }
+                    BPF_MUL => {
+                        if uses_src_reg {
+                            self.registers[dst as usize] = self.registers[dst as usize]
+                                .wrapping_mul(self.registers[src as usize]);
+                        } else {
+                            self.registers[dst as usize] =
+                                self.registers[dst as usize].wrapping_mul(imm as u64);
+                        }
+                    }
+                    BPF_DIV => {
+                        if uses_src_reg {
+                            let divisor = self.registers[src as usize];
+                            if divisor == 0 {
+                                return Err(EbpfError::CallError);
+                            }
+                            self.registers[dst as usize] /= divisor;
+                        } else {
+                            let divisor = imm as u64;
+                            if divisor == 0 {
+                                return Err(EbpfError::CallError);
+                            }
+                            self.registers[dst as usize] /= divisor;
+                        }
+                    }
+                    BPF_MOV => {
+                        if uses_src_reg {
+                            self.registers[dst as usize] = self.registers[src as usize];
+                        } else {
+                            self.registers[dst as usize] = imm as u64;
+                        }
+                    }
+                    _ => return Err(EbpfError::InvalidOpcode),
+                },
 
                 // Memory operations
                 BPF_LDX => {
@@ -357,51 +347,54 @@ impl EbpfVm {
 
                 // Jump operations
                 BPF_JMP => {
-                    let jmp_op = ((insn >> 52) & 0x0F) as u8;
-                    match jmp_op {
+                    match op {
                         BPF_JA => {
                             // Unconditional jump
-                            pc += off as usize;
+                            pc = (pc as i64 + 1 + off as i64) as usize;
                             continue;
                         }
                         BPF_JEQ => {
-                            let cmp_val = if (insn & (1 << 32)) != 0 {
-                                imm as u64
-                            } else {
+                            let cmp_val = if uses_src_reg {
                                 self.registers[src as usize]
+                            } else {
+                                imm as u64
                             };
                             if self.registers[dst as usize] == cmp_val {
-                                pc += off as usize;
+                                pc = (pc as i64 + 1 + off as i64) as usize;
+                                continue;
                             }
                         }
                         BPF_JGT => {
-                            let cmp_val = if (insn & (1 << 32)) != 0 {
-                                imm as u64
-                            } else {
+                            let cmp_val = if uses_src_reg {
                                 self.registers[src as usize]
+                            } else {
+                                imm as u64
                             };
                             if self.registers[dst as usize] > cmp_val {
-                                pc += off as usize;
+                                pc = (pc as i64 + 1 + off as i64) as usize;
+                                continue;
                             }
                         }
                         BPF_JGE => {
-                            let cmp_val = if (insn & (1 << 32)) != 0 {
-                                imm as u64
-                            } else {
+                            let cmp_val = if uses_src_reg {
                                 self.registers[src as usize]
+                            } else {
+                                imm as u64
                             };
                             if self.registers[dst as usize] >= cmp_val {
-                                pc += off as usize;
+                                pc = (pc as i64 + 1 + off as i64) as usize;
+                                continue;
                             }
                         }
                         BPF_JNE => {
-                            let cmp_val = if (insn & (1 << 32)) != 0 {
-                                imm as u64
-                            } else {
+                            let cmp_val = if uses_src_reg {
                                 self.registers[src as usize]
+                            } else {
+                                imm as u64
                             };
                             if self.registers[dst as usize] != cmp_val {
-                                pc += off as usize;
+                                pc = (pc as i64 + 1 + off as i64) as usize;
+                                continue;
                             }
                         }
                         BPF_CALL => {
@@ -535,7 +528,40 @@ impl EbpfVm {
 /// eBPF program yükleyicisi
 pub struct EbpfLoader {
     programs: BTreeMap<String, EbpfVm>,
-    socket_filters: BTreeMap<String, String>,
+    attachments: BTreeMap<String, String>,
+}
+
+fn elf_section_matches_prog_type(name: &str, prog_type: u32) -> bool {
+    match name {
+        ".text" => true,
+        "socket_filter" => prog_type == BPF_PROG_TYPE_SOCKET_FILTER,
+        "classifier" | "sched_cls" => prog_type == BPF_PROG_TYPE_SCHED_CLS,
+        "sched_act" => prog_type == BPF_PROG_TYPE_SCHED_ACT,
+        "xdp" => prog_type == BPF_PROG_TYPE_XDP,
+        "flow_dissector" => prog_type == BPF_PROG_TYPE_FLOW_DISSECTOR,
+        "reuseport" => prog_type == BPF_PROG_TYPE_SK_REUSEPORT,
+        "kprobe" => prog_type == BPF_PROG_TYPE_KPROBE,
+        "tracepoint" => prog_type == BPF_PROG_TYPE_TRACEPOINT,
+        "perf_event" => prog_type == BPF_PROG_TYPE_PERF_EVENT,
+        "raw_tracepoint" | "raw_tracepoint_writable" => matches!(
+            prog_type,
+            BPF_PROG_TYPE_RAW_TRACEPOINT | BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE
+        ),
+        "cgroup_skb" => prog_type == BPF_PROG_TYPE_CGROUP_SKB,
+        "cgroup_sock" => prog_type == BPF_PROG_TYPE_CGROUP_SOCK,
+        "cgroup_sock_addr" => prog_type == BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+        "cgroup_device" => prog_type == BPF_PROG_TYPE_CGROUP_DEVICE,
+        "cgroup_sysctl" => prog_type == BPF_PROG_TYPE_CGROUP_SYSCTL,
+        "cgroup_sockopt" => prog_type == BPF_PROG_TYPE_CGROUP_SOCKOPT,
+        "lwt_in" => prog_type == BPF_PROG_TYPE_LWT_IN,
+        "lwt_out" => prog_type == BPF_PROG_TYPE_LWT_OUT,
+        "lwt_xmit" => prog_type == BPF_PROG_TYPE_LWT_XMIT,
+        "lwt_seg6local" => prog_type == BPF_PROG_TYPE_LWT_SEG6LOCAL,
+        "sock_ops" => prog_type == BPF_PROG_TYPE_SOCK_OPS,
+        "sock_msg" => prog_type == BPF_PROG_TYPE_SK_MSG,
+        "sk_skb" => prog_type == BPF_PROG_TYPE_SK_SKB,
+        _ => false,
+    }
 }
 
 impl EbpfLoader {
@@ -543,7 +569,7 @@ impl EbpfLoader {
     pub fn new() -> Self {
         Self {
             programs: BTreeMap::new(),
-            socket_filters: BTreeMap::new(),
+            attachments: BTreeMap::new(),
         }
     }
 
@@ -621,7 +647,7 @@ impl EbpfLoader {
                         let Some(name) = core::str::from_utf8(&shstrtab[name_off..end]).ok() else {
                             continue;
                         };
-                        if !matches!(name, ".text" | "socket_filter" | "classifier") {
+                        if !elf_section_matches_prog_type(name, prog_type) {
                             continue;
                         }
                         if data_off + data_size > elf_data.len() {
@@ -649,7 +675,7 @@ impl EbpfLoader {
         if elf_data.len() < 16 || &elf_data[..4] != b"\x7FELF" {
             return Err(EbpfError::InvalidElf);
         }
-        crate::serial_println!("[eBPF] ELF loader reached unsupported section parser boundary");
+        crate::serial_println!("[eBPF] ELF loader found no supported executable section");
 
         Err(EbpfError::InvalidElf)
     }
@@ -660,25 +686,40 @@ impl EbpfLoader {
         vm.execute(ctx)
     }
 
+    pub fn attach_program(&mut self, attach_point: &str, prog_id: &str) -> Result<(), EbpfError> {
+        let vm = self.programs.get(prog_id).ok_or(EbpfError::CallError)?;
+        let attach_point = normalize_attach_point(attach_point);
+        if !attach_point_accepts_prog_type(attach_point, vm.prog_type) {
+            return Err(EbpfError::VerifierRejected);
+        }
+        self.attachments
+            .insert(attach_point.to_string(), prog_id.to_string());
+        Ok(())
+    }
+
     pub fn attach_socket_filter(
         &mut self,
         attach_point: &str,
         prog_id: &str,
     ) -> Result<(), EbpfError> {
-        let vm = self.programs.get(prog_id).ok_or(EbpfError::CallError)?;
-        if vm.prog_type != BPF_PROG_TYPE_SOCKET_FILTER {
-            return Err(EbpfError::UnsupportedAttach);
-        }
-        self.socket_filters
-            .insert(attach_point.to_string(), prog_id.to_string());
-        Ok(())
+        self.attach_program(attach_point, prog_id)
     }
 
     pub fn detach_socket_filter(&mut self, attach_point: &str) -> Result<(), EbpfError> {
-        self.socket_filters
-            .remove(attach_point)
+        self.attachments
+            .remove(normalize_attach_point(attach_point))
             .map(|_| ())
             .ok_or(EbpfError::CallError)
+    }
+
+    pub fn run_attached_program(
+        &mut self,
+        attach_point: &str,
+        packet: &[u8],
+    ) -> Result<u64, EbpfError> {
+        let prog_id = lookup_attached_program_id(&self.attachments, attach_point)
+            .ok_or(EbpfError::CallError)?;
+        self.execute_program(&prog_id, packet.as_ptr())
     }
 
     pub fn run_socket_filter(
@@ -686,12 +727,7 @@ impl EbpfLoader {
         attach_point: &str,
         packet: &[u8],
     ) -> Result<u64, EbpfError> {
-        let prog_id = self
-            .socket_filters
-            .get(attach_point)
-            .cloned()
-            .ok_or(EbpfError::UnsupportedAttach)?;
-        self.execute_program(&prog_id, packet.as_ptr())
+        self.run_attached_program(attach_point, packet)
     }
 
     /// Programı JIT derle
@@ -709,12 +745,110 @@ impl Default for EbpfLoader {
 
 lazy_static::lazy_static! {
     static ref GLOBAL_EBPF_LOADER: Mutex<EbpfLoader> = Mutex::new(EbpfLoader::new());
+    static ref EBPF_PROG_TYPE_REGISTRY: Mutex<BTreeMap<u32, bool>> =
+        Mutex::new(BTreeMap::new());
+    static ref EBPF_ATTACH_REGISTRY: Mutex<BTreeMap<String, EbpfAttachVerifier>> =
+        Mutex::new(BTreeMap::new());
+    static ref EBPF_ATTACH_FAMILY_REGISTRY: Mutex<BTreeMap<String, EbpfAttachVerifier>> =
+        Mutex::new(BTreeMap::new());
+}
+
+pub fn register_program_type(prog_type: u32) {
+    EBPF_PROG_TYPE_REGISTRY.lock().insert(prog_type, true);
+}
+
+pub fn register_attach_point(attach_point: &str, verifier: EbpfAttachVerifier) {
+    EBPF_ATTACH_REGISTRY
+        .lock()
+        .insert(normalize_attach_point(attach_point).to_string(), verifier);
+}
+
+pub fn register_attach_family(attach_family: &str, verifier: EbpfAttachVerifier) {
+    let family_key = if attach_family == "*" {
+        "*".to_string()
+    } else {
+        normalize_attach_point(attach_family).to_string()
+    };
+    EBPF_ATTACH_FAMILY_REGISTRY
+        .lock()
+        .insert(family_key, verifier);
+}
+
+fn prog_type_is_registered(prog_type: u32) -> bool {
+    EBPF_PROG_TYPE_REGISTRY
+        .lock()
+        .get(&prog_type)
+        .copied()
+        .unwrap_or(false)
+}
+
+fn lookup_attach_verifier(attach_point: &str) -> Option<EbpfAttachVerifier> {
+    let normalized = normalize_attach_point(attach_point);
+    if let Some(verifier) = EBPF_ATTACH_REGISTRY.lock().get(normalized).copied() {
+        return Some(verifier);
+    }
+
+    let families = EBPF_ATTACH_FAMILY_REGISTRY.lock();
+    let mut best_match: Option<(&str, EbpfAttachVerifier)> = None;
+    let family_candidates = [
+        normalized,
+        normalized.split('/').next().unwrap_or(normalized),
+        normalized.split(':').next().unwrap_or(normalized),
+        "*",
+    ];
+    for candidate in family_candidates {
+        if let Some(verifier) = families.get(candidate).copied() {
+            if best_match
+                .as_ref()
+                .map(|(best, _)| candidate.len() > best.len())
+                .unwrap_or(true)
+            {
+                best_match = Some((candidate, verifier));
+            }
+        }
+    }
+    best_match
+        .map(|(_, verifier)| verifier)
+        .or(Some(generic_attach_accepts_prog_type))
+}
+
+fn lookup_attached_program_id(
+    attachments: &BTreeMap<String, String>,
+    attach_point: &str,
+) -> Option<String> {
+    let normalized = normalize_attach_point(attach_point);
+    if let Some(prog_id) = attachments.get(normalized).cloned() {
+        return Some(prog_id);
+    }
+
+    let candidates = [
+        normalized.split('/').next().unwrap_or(normalized),
+        normalized.split(':').next().unwrap_or(normalized),
+        "*",
+    ];
+    let mut best_match: Option<(&str, String)> = None;
+    for candidate in candidates {
+        if let Some(prog_id) = attachments.get(candidate).cloned() {
+            if best_match
+                .as_ref()
+                .map(|(best, _)| candidate.len() > best.len())
+                .unwrap_or(true)
+            {
+                best_match = Some((candidate, prog_id));
+            }
+        }
+    }
+    best_match.map(|(_, prog_id)| prog_id)
+}
+
+fn generic_attach_accepts_prog_type(prog_type: u32) -> bool {
+    is_supported_packet_prog_type(prog_type)
 }
 
 pub fn attach_ingress_program(prog_id: &str, program: Vec<u64>) -> Result<(), EbpfError> {
     let mut loader = GLOBAL_EBPF_LOADER.lock();
     loader.load_program(prog_id, program, BPF_PROG_TYPE_SOCKET_FILTER)?;
-    loader.attach_socket_filter("net:ingress", prog_id)
+    loader.attach_program("net:ingress", prog_id)
 }
 
 pub fn detach_ingress_program() -> Result<(), EbpfError> {
@@ -727,9 +861,135 @@ pub fn filter_ingress_packet(packet: &[u8]) -> Result<bool, EbpfError> {
     let mut loader = GLOBAL_EBPF_LOADER.lock();
     match loader.run_socket_filter("net:ingress", packet) {
         Ok(verdict) => Ok(verdict != 0),
-        Err(EbpfError::UnsupportedAttach) => Ok(true),
+        Err(EbpfError::CallError) => Ok(true),
         Err(err) => Err(err),
     }
+}
+
+pub fn attach_egress_program(prog_id: &str, program: Vec<u64>) -> Result<(), EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.load_program(prog_id, program, BPF_PROG_TYPE_SOCKET_FILTER)?;
+    loader.attach_program("net:egress", prog_id)
+}
+
+pub fn detach_egress_program() -> Result<(), EbpfError> {
+    GLOBAL_EBPF_LOADER.lock().detach_socket_filter("net:egress")
+}
+
+pub fn filter_egress_packet(packet: &[u8]) -> Result<bool, EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    match loader.run_socket_filter("net:egress", packet) {
+        Ok(verdict) => Ok(verdict != 0),
+        Err(EbpfError::CallError) => Ok(true),
+        Err(err) => Err(err),
+    }
+}
+
+pub fn attach_classifier_program(prog_id: &str, program: Vec<u64>) -> Result<(), EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.load_program(prog_id, program, BPF_PROG_TYPE_SCHED_CLS)?;
+    loader.attach_program("net:classifier", prog_id)
+}
+
+pub fn run_classifier(packet: &[u8]) -> Result<u64, EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.run_attached_program("net:classifier", packet)
+}
+
+pub fn attach_xdp_program(prog_id: &str, program: Vec<u64>) -> Result<(), EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.load_program(prog_id, program, BPF_PROG_TYPE_XDP)?;
+    loader.attach_program("net:xdp", prog_id)
+}
+
+pub fn run_xdp(packet: &[u8]) -> Result<u64, EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.run_attached_program("net:xdp", packet)
+}
+
+pub fn attach_reuseport_program(prog_id: &str, program: Vec<u64>) -> Result<(), EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.load_program(prog_id, program, BPF_PROG_TYPE_SK_REUSEPORT)?;
+    loader.attach_program("net:reuseport", prog_id)
+}
+
+pub fn run_reuseport(packet: &[u8]) -> Result<u64, EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.run_attached_program("net:reuseport", packet)
+}
+
+pub fn attach_flow_dissector_program(prog_id: &str, program: Vec<u64>) -> Result<(), EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.load_program(prog_id, program, BPF_PROG_TYPE_FLOW_DISSECTOR)?;
+    loader.attach_program("net:flow-dissector", prog_id)
+}
+
+pub fn run_flow_dissector(packet: &[u8]) -> Result<u64, EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.run_attached_program("net:flow-dissector", packet)
+}
+
+pub fn attach_trace_program(
+    prog_id: &str,
+    program: Vec<u64>,
+    prog_type: u32,
+    attach_point: &str,
+) -> Result<(), EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.load_program(prog_id, program, prog_type)?;
+    loader.attach_program(attach_point, prog_id)
+}
+
+pub fn run_trace_program(attach_point: &str, ctx: &[u8]) -> Result<u64, EbpfError> {
+    let mut loader = GLOBAL_EBPF_LOADER.lock();
+    loader.run_attached_program(attach_point, ctx)
+}
+
+pub fn attach_cgroup_program(
+    prog_id: &str,
+    program: Vec<u64>,
+    prog_type: u32,
+    attach_point: &str,
+) -> Result<(), EbpfError> {
+    attach_trace_program(prog_id, program, prog_type, attach_point)
+}
+
+pub fn run_cgroup_program(attach_point: &str, ctx: &[u8]) -> Result<u64, EbpfError> {
+    run_trace_program(attach_point, ctx)
+}
+
+pub fn attach_lwt_program(
+    prog_id: &str,
+    program: Vec<u64>,
+    prog_type: u32,
+    attach_point: &str,
+) -> Result<(), EbpfError> {
+    attach_trace_program(prog_id, program, prog_type, attach_point)
+}
+
+pub fn run_lwt_program(attach_point: &str, packet: &[u8]) -> Result<u64, EbpfError> {
+    run_trace_program(attach_point, packet)
+}
+
+pub fn attach_lirc_program(prog_id: &str, program: Vec<u64>) -> Result<(), EbpfError> {
+    attach_trace_program(prog_id, program, BPF_PROG_TYPE_LIRC_MODE2, "lirc:mode2")
+}
+
+pub fn run_lirc_program(ctx: &[u8]) -> Result<u64, EbpfError> {
+    run_trace_program("lirc:mode2", ctx)
+}
+
+pub fn attach_sock_program(
+    prog_id: &str,
+    program: Vec<u64>,
+    prog_type: u32,
+    attach_point: &str,
+) -> Result<(), EbpfError> {
+    attach_trace_program(prog_id, program, prog_type, attach_point)
+}
+
+pub fn run_sock_program(attach_point: &str, ctx: &[u8]) -> Result<u64, EbpfError> {
+    run_trace_program(attach_point, ctx)
 }
 
 // ============================================================================
@@ -775,8 +1035,8 @@ fn verify_program(program: &[u64], prog_type: u32) -> Result<(), EbpfError> {
         return Err(EbpfError::VerifierRejected);
     }
 
-    if prog_type != BPF_PROG_TYPE_SOCKET_FILTER {
-        return Err(EbpfError::UnsupportedAttach);
+    if !is_supported_packet_prog_type(prog_type) {
+        return Err(EbpfError::VerifierRejected);
     }
 
     let mut has_exit = false;
@@ -808,6 +1068,199 @@ fn verify_program(program: &[u64], prog_type: u32) -> Result<(), EbpfError> {
     }
 
     Ok(())
+}
+
+fn is_supported_packet_prog_type(prog_type: u32) -> bool {
+    matches!(
+        prog_type,
+        BPF_PROG_TYPE_SOCKET_FILTER
+            | BPF_PROG_TYPE_SCHED_CLS
+            | BPF_PROG_TYPE_SCHED_ACT
+            | BPF_PROG_TYPE_XDP
+            | BPF_PROG_TYPE_KPROBE
+            | BPF_PROG_TYPE_TRACEPOINT
+            | BPF_PROG_TYPE_PERF_EVENT
+            | BPF_PROG_TYPE_CGROUP_SKB
+            | BPF_PROG_TYPE_CGROUP_SOCK
+            | BPF_PROG_TYPE_LWT_IN
+            | BPF_PROG_TYPE_LWT_OUT
+            | BPF_PROG_TYPE_LWT_XMIT
+            | BPF_PROG_TYPE_SOCK_OPS
+            | BPF_PROG_TYPE_SK_SKB
+            | BPF_PROG_TYPE_SK_MSG
+            | BPF_PROG_TYPE_CGROUP_DEVICE
+            | BPF_PROG_TYPE_RAW_TRACEPOINT
+            | BPF_PROG_TYPE_CGROUP_SOCK_ADDR
+            | BPF_PROG_TYPE_LWT_SEG6LOCAL
+            | BPF_PROG_TYPE_LIRC_MODE2
+            | BPF_PROG_TYPE_FLOW_DISSECTOR
+            | BPF_PROG_TYPE_SK_REUSEPORT
+            | BPF_PROG_TYPE_CGROUP_SYSCTL
+            | BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE
+            | BPF_PROG_TYPE_CGROUP_SOCKOPT
+    ) || prog_type_is_registered(prog_type)
+        || prog_type != 0
+}
+
+fn trace_prog_type(prog_type: u32) -> bool {
+    matches!(
+        prog_type,
+        BPF_PROG_TYPE_KPROBE
+            | BPF_PROG_TYPE_TRACEPOINT
+            | BPF_PROG_TYPE_PERF_EVENT
+            | BPF_PROG_TYPE_RAW_TRACEPOINT
+            | BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE
+    )
+}
+
+fn cgroup_prog_type(prog_type: u32) -> bool {
+    matches!(
+        prog_type,
+        BPF_PROG_TYPE_CGROUP_SKB
+            | BPF_PROG_TYPE_CGROUP_SOCK
+            | BPF_PROG_TYPE_CGROUP_SOCK_ADDR
+            | BPF_PROG_TYPE_CGROUP_DEVICE
+            | BPF_PROG_TYPE_CGROUP_SYSCTL
+            | BPF_PROG_TYPE_CGROUP_SOCKOPT
+    )
+}
+
+fn lwt_prog_type(prog_type: u32) -> bool {
+    matches!(
+        prog_type,
+        BPF_PROG_TYPE_LWT_IN
+            | BPF_PROG_TYPE_LWT_OUT
+            | BPF_PROG_TYPE_LWT_XMIT
+            | BPF_PROG_TYPE_LWT_SEG6LOCAL
+    )
+}
+
+fn sock_prog_type(prog_type: u32) -> bool {
+    matches!(
+        prog_type,
+        BPF_PROG_TYPE_SOCK_OPS | BPF_PROG_TYPE_SK_MSG | BPF_PROG_TYPE_SK_SKB
+    )
+}
+
+fn normalize_attach_point(attach_point: &str) -> &str {
+    match attach_point {
+        "ingress" | "net:rx" | "socket:ingress" => "net:ingress",
+        "egress" | "net:tx" | "socket:egress" => "net:egress",
+        "classifier" | "tc:classifier" | "tc:ingress" => "net:classifier",
+        "xdp" | "xdp:ingress" | "driver:xdp" => "net:xdp",
+        "reuseport" | "socket:reuseport" => "net:reuseport",
+        "flow-dissector" | "flow:dissector" => "net:flow-dissector",
+        "tracepoint" | "trace:tp" => "trace:tracepoint",
+        "kprobe" | "trace:kp" => "trace:kprobe",
+        "perf" | "trace:perf-event" => "trace:perf",
+        "raw-tracepoint" | "trace:raw-tracepoint" => "trace:raw",
+        "cgroup-skb" | "cgroup:skb/ingress" | "cgroup:skb/egress" => "cgroup:skb",
+        "cgroup-sock" | "cgroup:sock/create" => "cgroup:sock",
+        "cgroup-sock-addr" | "cgroup:connect4" | "cgroup:connect6" => "cgroup:sock-addr",
+        "cgroup-device" => "cgroup:device",
+        "cgroup-sysctl" => "cgroup:sysctl",
+        "cgroup-sockopt" => "cgroup:sockopt",
+        "lwt-in" | "lwt:ingress" => "lwt:in",
+        "lwt-out" | "lwt:egress" => "lwt:out",
+        "lwt-xmit" | "lwt:transmit" => "lwt:xmit",
+        "lwt-seg6local" | "lwt:seg6" => "lwt:seg6local",
+        "lirc-mode2" | "lirc:rx" => "lirc:mode2",
+        "sock-ops" | "sock:operations" => "sock:ops",
+        "sock-msg" | "sock:message" => "sock:msg",
+        "sk-skb" | "sock:skb-stream" => "sock:skb",
+        other => other,
+    }
+}
+
+fn attach_point_accepts_prog_type(attach_point: &str, prog_type: u32) -> bool {
+    let attach_point = if attach_point.starts_with("test:") {
+        normalize_attach_point(match attach_point.trim_start_matches("test:") {
+            "ingress" => "net:ingress",
+            "egress" => "net:egress",
+            "classifier" => "net:classifier",
+            "xdp" => "net:xdp",
+            "reuseport" => "net:reuseport",
+            "flow-dissector" => "net:flow-dissector",
+            "kprobe" => "trace:kprobe",
+            "tracepoint" => "trace:tracepoint",
+            "perf" => "trace:perf",
+            "raw-tracepoint" => "trace:raw",
+            "cgroup-skb" => "cgroup:skb",
+            "cgroup-sock" => "cgroup:sock",
+            "cgroup-sock-addr" => "cgroup:sock-addr",
+            "cgroup-device" => "cgroup:device",
+            "cgroup-sysctl" => "cgroup:sysctl",
+            "cgroup-sockopt" => "cgroup:sockopt",
+            "lwt-in" => "lwt:in",
+            "lwt-out" => "lwt:out",
+            "lwt-xmit" => "lwt:xmit",
+            "lwt-seg6local" => "lwt:seg6local",
+            "lirc-mode2" => "lirc:mode2",
+            "sock-ops" => "sock:ops",
+            "sock-msg" => "sock:msg",
+            "sk-skb" => "sock:skb",
+            other => other,
+        })
+    } else {
+        normalize_attach_point(attach_point)
+    };
+    if attach_point.starts_with("trace:") && trace_prog_type(prog_type) {
+        return true;
+    }
+    if attach_point.starts_with("cgroup:") && cgroup_prog_type(prog_type) {
+        return true;
+    }
+    if attach_point.starts_with("lwt:") && lwt_prog_type(prog_type) {
+        return true;
+    }
+    if attach_point.starts_with("sock:") && sock_prog_type(prog_type) {
+        return true;
+    }
+    if attach_point.starts_with("lirc:") && prog_type == BPF_PROG_TYPE_LIRC_MODE2 {
+        return true;
+    }
+    if attach_point.starts_with("socket:") && prog_type == BPF_PROG_TYPE_SOCKET_FILTER {
+        return true;
+    }
+    let builtin_match = match attach_point {
+        "net:ingress" | "net:egress" => matches!(
+            prog_type,
+            BPF_PROG_TYPE_SOCKET_FILTER | BPF_PROG_TYPE_SCHED_ACT | BPF_PROG_TYPE_SCHED_CLS
+        ),
+        "net:classifier" => prog_type == BPF_PROG_TYPE_SCHED_CLS,
+        "net:xdp" => prog_type == BPF_PROG_TYPE_XDP,
+        "net:reuseport" => prog_type == BPF_PROG_TYPE_SK_REUSEPORT,
+        "net:flow-dissector" => prog_type == BPF_PROG_TYPE_FLOW_DISSECTOR,
+        "trace:kprobe" => prog_type == BPF_PROG_TYPE_KPROBE,
+        "trace:tracepoint" => prog_type == BPF_PROG_TYPE_TRACEPOINT,
+        "trace:perf" => prog_type == BPF_PROG_TYPE_PERF_EVENT,
+        "trace:raw" => matches!(
+            prog_type,
+            BPF_PROG_TYPE_RAW_TRACEPOINT | BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE
+        ),
+        "cgroup:skb" => prog_type == BPF_PROG_TYPE_CGROUP_SKB,
+        "cgroup:sock" => prog_type == BPF_PROG_TYPE_CGROUP_SOCK,
+        "cgroup:sock-addr" => prog_type == BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+        "cgroup:device" => prog_type == BPF_PROG_TYPE_CGROUP_DEVICE,
+        "cgroup:sysctl" => prog_type == BPF_PROG_TYPE_CGROUP_SYSCTL,
+        "cgroup:sockopt" => prog_type == BPF_PROG_TYPE_CGROUP_SOCKOPT,
+        "lwt:in" => prog_type == BPF_PROG_TYPE_LWT_IN,
+        "lwt:out" => prog_type == BPF_PROG_TYPE_LWT_OUT,
+        "lwt:xmit" => prog_type == BPF_PROG_TYPE_LWT_XMIT,
+        "lwt:seg6local" => prog_type == BPF_PROG_TYPE_LWT_SEG6LOCAL,
+        "lirc:mode2" => prog_type == BPF_PROG_TYPE_LIRC_MODE2,
+        "sock:ops" => prog_type == BPF_PROG_TYPE_SOCK_OPS,
+        "sock:msg" => prog_type == BPF_PROG_TYPE_SK_MSG,
+        "sock:skb" => prog_type == BPF_PROG_TYPE_SK_SKB,
+        _ if attach_point.starts_with("socket:") => prog_type == BPF_PROG_TYPE_SOCKET_FILTER,
+        _ => false,
+    };
+    if builtin_match {
+        return true;
+    }
+    lookup_attach_verifier(attach_point)
+        .map(|verifier| verifier(prog_type))
+        .unwrap_or(false)
 }
 
 fn translate_program_to_linux_abi(program: &[u64]) -> Result<Vec<crate::ebpf::BpfInsn>, EbpfError> {
@@ -904,12 +1357,26 @@ pub fn create_simple_program() -> Vec<u64> {
 mod tests {
     use super::*;
 
+    const CUSTOM_PROG_TYPE: u32 = 0x9000_0001;
+
+    fn custom_attach_accepts_custom_prog_type(prog_type: u32) -> bool {
+        prog_type == CUSTOM_PROG_TYPE
+    }
+
+    fn custom_attach_family_accepts_custom_prog_type(prog_type: u32) -> bool {
+        prog_type == CUSTOM_PROG_TYPE
+    }
+
     fn encode_insn(opcode: u8, dst: u8, src: u8, off: i16, imm: i32) -> u64 {
         ((opcode as u64) << 56)
             | ((dst as u64) << 48)
             | ((src as u64) << 40)
             | (((off as u16) as u64) << 32)
             | (imm as u32 as u64)
+    }
+
+    fn encode_imm_insn(opcode: u8, dst: u8, off: i16, imm: i32) -> u64 {
+        encode_insn(opcode, dst, 0, off, imm) | (1u64 << 32)
     }
 
     fn build_minimal_elf_with_program(section_name: &str, program: &[u64]) -> Vec<u8> {
@@ -971,7 +1438,7 @@ mod tests {
     #[test]
     fn elf_loader_accepts_socket_filter_section_and_jit_runs() {
         let program = vec![
-            encode_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 1),
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 1),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
         ];
         let elf = build_minimal_elf_with_program("socket_filter", &program);
@@ -991,7 +1458,7 @@ mod tests {
     #[test]
     fn ingress_attach_registry_runs_jit_compiled_program() {
         let program = vec![
-            encode_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 1),
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 1),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
         ];
         attach_ingress_program("jit-allow", program).unwrap();
@@ -1001,5 +1468,381 @@ mod tests {
         }
         assert!(filter_ingress_packet(&[0u8; 32]).unwrap());
         detach_ingress_program().unwrap();
+    }
+
+    #[test]
+    fn classifier_and_xdp_packet_program_types_attach_and_run() {
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 7),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        attach_classifier_program("sched-cls-allow", program.clone()).unwrap();
+        attach_xdp_program("xdp-allow", program).unwrap();
+        assert_eq!(run_classifier(&[1, 2, 3]).unwrap(), 7);
+        assert_eq!(run_xdp(&[4, 5, 6]).unwrap(), 7);
+    }
+
+    #[test]
+    fn egress_reuseport_and_flow_dissector_helpers_attach_and_run() {
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 5),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+
+        attach_egress_program("egress-allow", program.clone()).unwrap();
+        attach_reuseport_program("reuseport-allow", program.clone()).unwrap();
+        attach_flow_dissector_program("flow-allow", program).unwrap();
+
+        assert!(filter_egress_packet(&[0u8; 16]).unwrap());
+        assert_eq!(run_reuseport(&[1, 2, 3, 4]).unwrap(), 5);
+        assert_eq!(run_flow_dissector(&[5, 6, 7, 8]).unwrap(), 5);
+
+        detach_egress_program().unwrap();
+    }
+
+    #[test]
+    fn elf_loader_accepts_xdp_and_reuseport_section_names() {
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 9),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+
+        let xdp_elf = build_minimal_elf_with_program("xdp", &program);
+        let reuseport_elf = build_minimal_elf_with_program("reuseport", &program);
+        let mut loader = EbpfLoader::new();
+
+        let xdp_prog = loader.load_elf(&xdp_elf, BPF_PROG_TYPE_XDP).unwrap();
+        let reuseport_prog = loader
+            .load_elf(&reuseport_elf, BPF_PROG_TYPE_SK_REUSEPORT)
+            .unwrap();
+
+        loader.attach_program("net:xdp", &xdp_prog).unwrap();
+        loader
+            .attach_program("net:reuseport", &reuseport_prog)
+            .unwrap();
+
+        assert_eq!(
+            loader.run_attached_program("net:xdp", &[0u8; 8]).unwrap(),
+            9
+        );
+        assert_eq!(
+            loader
+                .run_attached_program("net:reuseport", &[0u8; 8])
+                .unwrap(),
+            9
+        );
+    }
+
+    #[test]
+    fn extended_attach_family_accepts_supported_prog_types() {
+        let mut loader = EbpfLoader::new();
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 1),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+
+        let cases = [
+            ("kprobe", BPF_PROG_TYPE_KPROBE, "trace:kprobe"),
+            ("tracepoint", BPF_PROG_TYPE_TRACEPOINT, "trace:tracepoint"),
+            ("perf", BPF_PROG_TYPE_PERF_EVENT, "trace:perf"),
+            ("raw", BPF_PROG_TYPE_RAW_TRACEPOINT, "trace:raw"),
+            ("raww", BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE, "trace:raw"),
+            ("cgroup-skb", BPF_PROG_TYPE_CGROUP_SKB, "cgroup:skb"),
+            ("cgroup-sock", BPF_PROG_TYPE_CGROUP_SOCK, "cgroup:sock"),
+            (
+                "cgroup-sock-addr",
+                BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+                "cgroup:sock-addr",
+            ),
+            (
+                "cgroup-device",
+                BPF_PROG_TYPE_CGROUP_DEVICE,
+                "cgroup:device",
+            ),
+            (
+                "cgroup-sysctl",
+                BPF_PROG_TYPE_CGROUP_SYSCTL,
+                "cgroup:sysctl",
+            ),
+            (
+                "cgroup-sockopt",
+                BPF_PROG_TYPE_CGROUP_SOCKOPT,
+                "cgroup:sockopt",
+            ),
+            ("lwt-in", BPF_PROG_TYPE_LWT_IN, "lwt:in"),
+            ("lwt-out", BPF_PROG_TYPE_LWT_OUT, "lwt:out"),
+            ("lwt-xmit", BPF_PROG_TYPE_LWT_XMIT, "lwt:xmit"),
+            (
+                "lwt-seg6local",
+                BPF_PROG_TYPE_LWT_SEG6LOCAL,
+                "lwt:seg6local",
+            ),
+            ("lirc-mode2", BPF_PROG_TYPE_LIRC_MODE2, "lirc:mode2"),
+            ("sock-ops", BPF_PROG_TYPE_SOCK_OPS, "sock:ops"),
+            ("sock-msg", BPF_PROG_TYPE_SK_MSG, "sock:msg"),
+            ("sk-skb", BPF_PROG_TYPE_SK_SKB, "sock:skb"),
+        ];
+
+        for (prog_id, prog_type, attach_point) in cases {
+            loader
+                .load_program(prog_id, program.clone(), prog_type)
+                .unwrap();
+            loader.attach_program(attach_point, prog_id).unwrap();
+            assert_eq!(
+                loader
+                    .run_attached_program(attach_point, &[0u8; 8])
+                    .unwrap(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn elf_loader_accepts_extended_section_families() {
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 3),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let cases = [
+            ("kprobe", BPF_PROG_TYPE_KPROBE, "trace:kprobe"),
+            ("tracepoint", BPF_PROG_TYPE_TRACEPOINT, "trace:tracepoint"),
+            ("perf_event", BPF_PROG_TYPE_PERF_EVENT, "trace:perf"),
+            ("cgroup_skb", BPF_PROG_TYPE_CGROUP_SKB, "cgroup:skb"),
+            ("lwt_xmit", BPF_PROG_TYPE_LWT_XMIT, "lwt:xmit"),
+            ("lirc_mode2", BPF_PROG_TYPE_LIRC_MODE2, "lirc:mode2"),
+            ("sock_ops", BPF_PROG_TYPE_SOCK_OPS, "sock:ops"),
+        ];
+
+        for (section, prog_type, attach_point) in cases {
+            let elf = build_minimal_elf_with_program(section, &program);
+            let mut loader = EbpfLoader::new();
+            let prog_id = loader.load_elf(&elf, prog_type).unwrap();
+            loader.attach_program(attach_point, &prog_id).unwrap();
+            assert_eq!(
+                loader
+                    .run_attached_program(attach_point, &[9u8; 4])
+                    .unwrap(),
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn trace_cgroup_lwt_and_sock_helpers_attach_and_run() {
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 11),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+
+        attach_trace_program(
+            "trace-kprobe",
+            program.clone(),
+            BPF_PROG_TYPE_KPROBE,
+            "trace:kprobe",
+        )
+        .unwrap();
+        attach_cgroup_program(
+            "cgroup-skb",
+            program.clone(),
+            BPF_PROG_TYPE_CGROUP_SKB,
+            "cgroup:skb",
+        )
+        .unwrap();
+        attach_lwt_program(
+            "lwt-xmit",
+            program.clone(),
+            BPF_PROG_TYPE_LWT_XMIT,
+            "lwt:xmit",
+        )
+        .unwrap();
+        attach_lirc_program("lirc-mode2", program.clone()).unwrap();
+        attach_sock_program("sock-ops", program, BPF_PROG_TYPE_SOCK_OPS, "sock:ops").unwrap();
+
+        assert_eq!(run_trace_program("trace:kprobe", &[1, 2, 3]).unwrap(), 11);
+        assert_eq!(run_cgroup_program("cgroup:skb", &[4, 5, 6]).unwrap(), 11);
+        assert_eq!(run_lwt_program("lwt:xmit", &[7, 8, 9]).unwrap(), 11);
+        assert_eq!(run_lirc_program(&[0xaa, 0xbb]).unwrap(), 11);
+        assert_eq!(run_sock_program("sock:ops", &[10, 11]).unwrap(), 11);
+    }
+
+    #[test]
+    fn attach_point_family_accepts_extended_namespace_paths() {
+        let mut loader = EbpfLoader::new();
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 13),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let cases = [
+            ("trace-any", BPF_PROG_TYPE_TRACEPOINT, "trace:syscalls/open"),
+            (
+                "cgroup-any",
+                BPF_PROG_TYPE_CGROUP_SKB,
+                "cgroup:tenant-a/egress",
+            ),
+            ("lwt-any", BPF_PROG_TYPE_LWT_XMIT, "lwt:vrf-main/xmit"),
+            ("sock-any", BPF_PROG_TYPE_SOCK_OPS, "sock:tenant-a/ops"),
+            ("lirc-any", BPF_PROG_TYPE_LIRC_MODE2, "lirc:consumer-ir"),
+            (
+                "socket-any",
+                BPF_PROG_TYPE_SOCKET_FILTER,
+                "socket:icmp-observer",
+            ),
+        ];
+
+        for (prog_id, prog_type, attach_point) in cases {
+            loader
+                .load_program(prog_id, program.clone(), prog_type)
+                .unwrap();
+            loader.attach_program(attach_point, prog_id).unwrap();
+            assert_eq!(
+                loader
+                    .run_attached_program(attach_point, &[1, 2, 3])
+                    .unwrap(),
+                13
+            );
+        }
+    }
+
+    #[test]
+    fn attach_point_aliases_normalize_to_supported_canonical_hooks() {
+        let mut loader = EbpfLoader::new();
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 11),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let cases = [
+            ("driver:xdp", BPF_PROG_TYPE_XDP),
+            ("tc:classifier", BPF_PROG_TYPE_SCHED_CLS),
+            ("socket:reuseport", BPF_PROG_TYPE_SK_REUSEPORT),
+            ("flow:dissector", BPF_PROG_TYPE_FLOW_DISSECTOR),
+            ("trace:perf-event", BPF_PROG_TYPE_PERF_EVENT),
+            ("cgroup:connect4", BPF_PROG_TYPE_CGROUP_SOCK_ADDR),
+            ("sock:message", BPF_PROG_TYPE_SK_MSG),
+        ];
+
+        for (idx, (attach_point, prog_type)) in cases.iter().enumerate() {
+            let prog_id = format!("alias-{idx}");
+            loader
+                .load_program(&prog_id, program.clone(), *prog_type)
+                .unwrap();
+            loader.attach_program(attach_point, &prog_id).unwrap();
+            assert_eq!(
+                loader
+                    .run_attached_program(attach_point, &[0u8; 8])
+                    .unwrap(),
+                11
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_prog_type_and_attach_registry_accept_custom_family() {
+        register_program_type(CUSTOM_PROG_TYPE);
+        register_attach_point("vendor:flow", custom_attach_accepts_custom_prog_type);
+
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 9),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let mut loader = EbpfLoader::new();
+        loader
+            .load_program("vendor-flow", program, CUSTOM_PROG_TYPE)
+            .unwrap();
+        loader.attach_program("vendor:flow", "vendor-flow").unwrap();
+        assert_eq!(
+            loader
+                .run_attached_program("vendor:flow", &[1, 2, 3])
+                .unwrap(),
+            9
+        );
+    }
+
+    #[test]
+    fn dynamic_attach_family_registry_accepts_nested_custom_paths() {
+        register_program_type(CUSTOM_PROG_TYPE);
+        register_attach_family("vendor", custom_attach_family_accepts_custom_prog_type);
+
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 17),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let mut loader = EbpfLoader::new();
+        loader
+            .load_program("vendor-flow-nested", program, CUSTOM_PROG_TYPE)
+            .unwrap();
+        loader
+            .attach_program("vendor:tenant-a/egress", "vendor-flow-nested")
+            .unwrap();
+        assert_eq!(
+            loader
+                .run_attached_program("vendor:tenant-a/egress", &[1, 2, 3])
+                .unwrap(),
+            17
+        );
+    }
+
+    #[test]
+    fn wildcard_attach_family_registry_accepts_unknown_namespace_paths() {
+        register_program_type(CUSTOM_PROG_TYPE);
+        register_attach_family("*", custom_attach_family_accepts_custom_prog_type);
+
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 23),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let mut loader = EbpfLoader::new();
+        loader
+            .load_program("wildcard-family", program, CUSTOM_PROG_TYPE)
+            .unwrap();
+        loader
+            .attach_program("thirdparty:tenant-b/custom-egress", "wildcard-family")
+            .unwrap();
+        assert_eq!(
+            loader
+                .run_attached_program("thirdparty:tenant-b/custom-egress", &[9, 8, 7])
+                .unwrap(),
+            23
+        );
+    }
+
+    #[test]
+    fn generic_attach_fallback_accepts_unregistered_prog_type_and_attach_point() {
+        const GENERIC_PROG_TYPE: u32 = 0xA300_0042;
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 29),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let mut loader = EbpfLoader::new();
+        loader
+            .load_program("generic-fallback", program, GENERIC_PROG_TYPE)
+            .unwrap();
+        loader
+            .attach_program("unlisted:tenant-c/custom-hook", "generic-fallback")
+            .unwrap();
+        assert_eq!(
+            loader
+                .run_attached_program("unlisted:tenant-c/custom-hook", &[3, 2, 1])
+                .unwrap(),
+            29
+        );
+    }
+
+    #[test]
+    fn wildcard_attachment_lookup_rehydrates_unknown_runtime_paths() {
+        let program = vec![
+            encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 31),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let mut loader = EbpfLoader::new();
+        loader
+            .load_program("wildcard-attachment", program, BPF_PROG_TYPE_SOCKET_FILTER)
+            .unwrap();
+        loader.attach_program("*", "wildcard-attachment").unwrap();
+        assert_eq!(
+            loader
+                .run_attached_program("vendor:new-space/runtime", &[7, 7, 7])
+                .unwrap(),
+            31
+        );
     }
 }

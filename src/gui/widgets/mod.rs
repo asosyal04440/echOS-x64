@@ -18,8 +18,8 @@
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::input_pipeline::{FocusTree, GestureArena, GestureKind, InputRouter};
 use crate::gui::protocol::{
-    AccessibilityNode, AccessibilityRole, AppId, DamageLane, Point, RenderObject,
-    RenderObjectKind, TextRunStyle,
+    AccessibilityNode, AccessibilityRole, AppId, DamageLane, Point, RenderObject, RenderObjectKind,
+    TextRunStyle,
 };
 use crate::gui::renderer::render_object_list;
 use crate::gui::text::TextSystem;
@@ -560,13 +560,15 @@ impl CompiledWidgetTree {
     ) -> EventResult {
         let render_boxes = self.render_boxes();
         let route = self.router.route_pointer(&render_boxes, point);
-        let result = self.router.dispatch(&render_boxes, point, event, |element_id, phase, evt| {
-            let index = element_id.saturating_sub(1) as usize;
-            widgets
-                .get_mut(index)
-                .map(|widget| (*widget).event(phase, evt))
-                .unwrap_or_default()
-        });
+        let result = self
+            .router
+            .dispatch(&render_boxes, point, event, |element_id, phase, evt| {
+                let index = element_id.saturating_sub(1) as usize;
+                widgets
+                    .get_mut(index)
+                    .map(|widget| (*widget).event(phase, evt))
+                    .unwrap_or_default()
+            });
 
         if result.request_focus {
             let previous = self.focus_tree.focused();

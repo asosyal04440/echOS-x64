@@ -599,7 +599,6 @@ impl DotResponse {
 /// DoT hata türleri.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DotError {
-    TlsNotSupported,    // TLS henüz desteklenmiyor (TODO: rustls/mbedtls entegrasyonu)
     NotConnected,       // Sorgu öncesinde bağlantı kurulmamış
     SocketError,        // TCP soket oluşturulamadı
     ConnectionFailed,   // TCP bağlantısı kurulamadı

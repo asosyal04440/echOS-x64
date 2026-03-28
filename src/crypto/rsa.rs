@@ -43,6 +43,7 @@
 use crate::crypto::{rdrand_bytes, Sha3};
 use alloc::vec;
 use alloc::vec::Vec;
+use sha1::{Digest as Sha1Digest, Sha1};
 
 // ============================================================================
 // Big Integer Arithmetic (2048-bit support)
@@ -249,12 +250,15 @@ impl BigInt {
                 result = result.mod_reduce(modulus);
             }
 
-            // Square base
-            base = base.mul(&base);
-            base = base.mod_reduce(modulus);
-
             // Shift exponent right by 1 bit
             exponent.shr(1);
+            if exponent.is_zero() {
+                break;
+            }
+
+            // Square base only if more exponent bits remain.
+            base = base.mul(&base);
+            base = base.mod_reduce(modulus);
         }
 
         result
@@ -454,12 +458,22 @@ impl RsaPublicKey {
         }
     }
 
+    /// Return modulus bytes in big-endian form.
+    pub fn modulus_bytes(&self) -> Vec<u8> {
+        self.n.to_be_bytes()
+    }
+
+    /// Return exponent bytes in big-endian form.
+    pub fn exponent_bytes(&self) -> Vec<u8> {
+        self.e.to_be_bytes()
+    }
+
     /// Verify RSA-PKCS#1 v1.5 signature
     ///
     /// Parameters:
     ///   - message: The signed message
     ///   - signature: Raw signature bytes
-    ///   - hash_type: "sha256" or "sha512"
+    ///   - hash_type: "sha1", "sha256" or "sha512"
     /// Returns:
     ///   - true if signature is valid
     pub fn verify(&self, message: &[u8], signature: &[u8], hash_type: &str) -> bool {
@@ -503,6 +517,11 @@ impl RsaPublicKey {
 
         // Hash the message
         let hash = match hash_type {
+            "sha1" => {
+                let mut hasher = Sha1::new();
+                hasher.update(message);
+                hasher.finalize().to_vec()
+            }
             "sha256" => {
                 let mut hasher = Sha3::sha3_256();
                 hasher.update(message);
@@ -530,6 +549,18 @@ impl RsaPublicKey {
         let mut result = Vec::new();
 
         match hash_type {
+            "sha1" => {
+                // SHA-1 OID: 1.3.14.3.2.26
+                result.extend_from_slice(&[
+                    0x30, 0x21, // SEQUENCE, length 33
+                    0x30, 0x09, // SEQUENCE, length 9
+                    0x06, 0x05, // OID, length 5
+                    0x2b, 0x0e, 0x03, 0x02, 0x1a, // SHA-1 OID
+                    0x05, 0x00, // NULL
+                    0x04, 0x14, // OCTET STRING, length 20
+                ]);
+                result.extend_from_slice(hash);
+            }
             "sha256" => {
                 // SHA-256 OID: 1.2.840.113549.2.7
                 result.extend_from_slice(&[
@@ -725,12 +756,17 @@ impl RsaPrivateKey {
     ///
     /// Parameters:
     ///   - message: The message to sign
-    ///   - hash_type: "sha256" or "sha512"
+    ///   - hash_type: "sha1", "sha256" or "sha512"
     /// Returns:
     ///   - Signature bytes
     pub fn sign(&self, message: &[u8], hash_type: &str) -> Vec<u8> {
         // Hash the message
         let hash = match hash_type {
+            "sha1" => {
+                let mut hasher = Sha1::new();
+                hasher.update(message);
+                hasher.finalize().to_vec()
+            }
             "sha256" => {
                 let mut hasher = Sha3::sha3_256();
                 hasher.update(message);

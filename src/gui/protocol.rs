@@ -1,4 +1,4 @@
-﻿//! Week-2 desktop protocol shared between EchDisplay and EchInput.
+//! Week-2 desktop protocol shared between EchDisplay and EchInput.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -62,6 +62,23 @@ pub enum DisplayPresentMode {
     Mailbox,
     VblankFifo,
     AdaptiveSync,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputMode {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_hz: u32,
+}
+
+impl OutputMode {
+    pub const fn new(width: u32, height: u32, refresh_hz: u32) -> Self {
+        Self {
+            width,
+            height,
+            refresh_hz,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -325,14 +342,8 @@ impl SceneUpdate {
         self.render_objects
             .sort_by_key(|object| (object.z_index, object.object_id));
         self.damage_hint.retain(|rect| !rect.is_empty());
-        self.damage_hint.sort_by_key(|rect| {
-            (
-                rect.y,
-                rect.x,
-                rect.height,
-                rect.width,
-            )
-        });
+        self.damage_hint
+            .sort_by_key(|rect| (rect.y, rect.x, rect.height, rect.width));
         self.damage_hint.dedup();
     }
 }

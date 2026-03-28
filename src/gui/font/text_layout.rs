@@ -1,22 +1,22 @@
-//! # Metin Düzeni (Text Layout)
+//! # Metin DÃƒÂ¼zeni (Text Layout)
 //!
-//! Metin biçimlendirme ve düzen hesaplaması; karakterleri ekran koordinatlarına yerleştirir.
+//! Metin biÃƒÂ§imlendirme ve dÃƒÂ¼zen hesaplamasÃ„Â±; karakterleri ekran koordinatlarÃ„Â±na yerleÃ…Å¸tirir.
 //!
-//! ## Metin Düzeni Nedir?
-//! Ham bir karakter dizisini ekranda doğru konuma yerleştirmek için gereken
-//! tüm geometrik hesaplama sürecine "text layout" denir. Bu süreç şunları içerir:
+//! ## Metin DÃƒÂ¼zeni Nedir?
+//! Ham bir karakter dizisini ekranda doÃ„Å¸ru konuma yerleÃ…Å¸tirmek iÃƒÂ§in gereken
+//! tÃƒÂ¼m geometrik hesaplama sÃƒÂ¼recine "text layout" denir. Bu sÃƒÂ¼reÃƒÂ§ Ã…Å¸unlarÃ„Â± iÃƒÂ§erir:
 //!
-//! - **Shaping**: Unicode karakterleri glyph dizilerine dönüştürme
-//! - **Metrics**: Her glyphin genişlik (advance) ve yükseklik bilgisi
-//! - **Line breaking**: Maksimum genişliğe göre satır kırma
-//! - **Alignment**: Sola/sağa/ortaya/iki yana hizalama
-//! - **Hit testing**: Fare tıklamasından karakter konumu bulma
+//! - **Shaping**: Unicode karakterleri glyph dizilerine dÃƒÂ¶nÃƒÂ¼Ã…Å¸tÃƒÂ¼rme
+//! - **Metrics**: Her glyphin geniÃ…Å¸lik (advance) ve yÃƒÂ¼kseklik bilgisi
+//! - **Line breaking**: Maksimum geniÃ…Å¸liÃ„Å¸e gÃƒÂ¶re satÃ„Â±r kÃ„Â±rma
+//! - **Alignment**: Sola/saÃ„Å¸a/ortaya/iki yana hizalama
+//! - **Hit testing**: Fare tÃ„Â±klamasÃ„Â±ndan karakter konumu bulma
 //!
-//! ## Veri Yapıları
-//! - `LayoutGlyph`: Tek bir glyphin x/y konumu ve advance genişliği
-//! - `LayoutRun`: Aynı biçimlendirmeye sahip ardışık karakter dizisi
-//! - `LayoutLine`: Bir metin satırı; birden fazla run içerebilir
-//! - `TextLayout`: Tüm satırları kapsayan düzen sonucu
+//! ## Veri YapÃ„Â±larÃ„Â±
+//! - `LayoutGlyph`: Tek bir glyphin x/y konumu ve advance geniÃ…Å¸liÃ„Å¸i
+//! - `LayoutRun`: AynÃ„Â± biÃƒÂ§imlendirmeye sahip ardÃ„Â±Ã…Å¸Ã„Â±k karakter dizisi
+//! - `LayoutLine`: Bir metin satÃ„Â±rÃ„Â±; birden fazla run iÃƒÂ§erebilir
+//! - `TextLayout`: TÃƒÂ¼m satÃ„Â±rlarÃ„Â± kapsayan dÃƒÂ¼zen sonucu
 
 use super::rasterizer::RasterGlyph;
 use super::truetype::{Glyph, TrueTypeFont};
@@ -125,11 +125,11 @@ fn kerning_adjust(prev: Option<char>, current: char, size: f32) -> f32 {
     }
 }
 
-/// Düzenlenmiş tek bir glyph'in ekran üzerindeki konumu.
+/// DÃƒÂ¼zenlenmiÃ…Å¸ tek bir glyph'in ekran ÃƒÂ¼zerindeki konumu.
 ///
-/// `glyph_index`: Font içindeki glyph tablosu indeksi (cmap ile Unicode'dan türetilir).
-/// `x` / `y`: Satır başına göre göreli piksel koordinatı.
-/// `advance`: Sonraki glyphın başlayacağı x kaydırma miktarı (piksel).
+/// `glyph_index`: Font iÃƒÂ§indeki glyph tablosu indeksi (cmap ile Unicode'dan tÃƒÂ¼retilir).
+/// `x` / `y`: SatÃ„Â±r baÃ…Å¸Ã„Â±na gÃƒÂ¶re gÃƒÂ¶reli piksel koordinatÃ„Â±.
+/// `advance`: Sonraki glyphÃ„Â±n baÃ…Å¸layacaÃ„Å¸Ã„Â± x kaydÃ„Â±rma miktarÃ„Â± (piksel).
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutGlyph {
     pub glyph_index: u16,
@@ -138,10 +138,10 @@ pub struct LayoutGlyph {
     pub advance: f32,
 }
 
-/// Aynı biçimlendirme özelliklerine (renk, stil vb.) sahip ardışık glyph dizisi.
+/// AynÃ„Â± biÃƒÂ§imlendirme ÃƒÂ¶zelliklerine (renk, stil vb.) sahip ardÃ„Â±Ã…Å¸Ã„Â±k glyph dizisi.
 ///
-/// Zengin metin sistemlerinde farklı renkler veya kalınlık gibi özellikler değiştikçe
-/// yeni bir run başlar. Sade metinde tek satır genellikle tek run'dan oluşur.
+/// Zengin metin sistemlerinde farklÃ„Â± renkler veya kalÃ„Â±nlÃ„Â±k gibi ÃƒÂ¶zellikler deÃ„Å¸iÃ…Å¸tikÃƒÂ§e
+/// yeni bir run baÃ…Å¸lar. Sade metinde tek satÃ„Â±r genellikle tek run'dan oluÃ…Å¸ur.
 #[derive(Clone, Debug)]
 pub struct LayoutRun {
     pub start: usize,
@@ -150,10 +150,10 @@ pub struct LayoutRun {
     pub width: f32,
 }
 
-/// Tek bir metin satırının tüm geometrik verisi.
+/// Tek bir metin satÃ„Â±rÃ„Â±nÃ„Â±n tÃƒÂ¼m geometrik verisi.
 ///
-/// `baseline`: Metnin ana çizgisinin y koordinatı; harflerin diplerinin oturduğu çizgi.
-/// Genellikle satır yüksekliğinin %80'i olarak hesaplanır.
+/// `baseline`: Metnin ana ÃƒÂ§izgisinin y koordinatÃ„Â±; harflerin diplerinin oturduÃ„Å¸u ÃƒÂ§izgi.
+/// Genellikle satÃ„Â±r yÃƒÂ¼ksekliÃ„Å¸inin %80'i olarak hesaplanÃ„Â±r.
 #[derive(Clone, Debug)]
 pub struct LayoutLine {
     pub start: usize,
@@ -164,7 +164,7 @@ pub struct LayoutLine {
     pub baseline: f32,
 }
 
-/// Tüm metnin düzen sonucu: satırlar, toplam boyut ve sarmalama genişliği.
+/// TÃƒÂ¼m metnin dÃƒÂ¼zen sonucu: satÃ„Â±rlar, toplam boyut ve sarmalama geniÃ…Å¸liÃ„Å¸i.
 #[derive(Clone, Debug)]
 pub struct TextLayout {
     pub text: String,
@@ -175,13 +175,13 @@ pub struct TextLayout {
 }
 
 impl TextLayout {
-    /// Metni düzenler; isteğe bağlı maksimum genişliğe göre satıra sarar.
+    /// Metni dÃƒÂ¼zenler; isteÃ„Å¸e baÃ„Å¸lÃ„Â± maksimum geniÃ…Å¸liÃ„Å¸e gÃƒÂ¶re satÃ„Â±ra sarar.
     ///
-    /// `scale = size / units_per_em` ile font birimi → piksel dönüşümü yapılır.
-    /// `line_height = size * 1.2` tipik bir satır aralığı katsayısıdır (%120).
-    /// Algoritma karakterleri tek tek dolaşır:
-    /// - `\n` → satır sonu zorlaması
-    /// - Boşluk/tire ve max_width aşımı → kelime sarmalama
+    /// `scale = size / units_per_em` ile font birimi Ã¢â€ â€™ piksel dÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼mÃƒÂ¼ yapÃ„Â±lÃ„Â±r.
+    /// `line_height = size * 1.2` tipik bir satÃ„Â±r aralÃ„Â±Ã„Å¸Ã„Â± katsayÃ„Â±sÃ„Â±dÃ„Â±r (%120).
+    /// Algoritma karakterleri tek tek dolaÃ…Å¸Ã„Â±r:
+    /// - `\n` Ã¢â€ â€™ satÃ„Â±r sonu zorlamasÃ„Â±
+    /// - BoÃ…Å¸luk/tire ve max_width aÃ…Å¸Ã„Â±mÃ„Â± Ã¢â€ â€™ kelime sarmalama
     pub fn layout(text: &str, font: &TrueTypeFont, size: f32, max_width: Option<f32>) -> Self {
         let bidi_reordered = reorder_bidi_runs(text);
         let shaped_text = apply_ligatures(&bidi_reordered);
@@ -423,18 +423,59 @@ impl TextLayout {
 
     /// Layout with alignment
     pub fn with_alignment(mut self, alignment: TextAlignment, max_width: f32) -> Self {
-        for line in &mut self.lines {
-            let offset = match alignment {
-                TextAlignment::Left => 0.0,
-                TextAlignment::Center => (max_width - line.width) / 2.0,
-                TextAlignment::Right => max_width - line.width,
-                TextAlignment::Justify => {
-                    // Distribute extra space among glyphs
-                    0.0 // TODO: Implement justification
-                }
-            };
+        let shaped_text = self.text.clone();
+        let line_count = self.lines.len();
 
-            // Offset all glyphs
+        for line_idx in 0..line_count {
+            let line = &mut self.lines[line_idx];
+            let mut offset = 0.0;
+
+            match alignment {
+                TextAlignment::Left => {}
+                TextAlignment::Center => {
+                    offset = (max_width - line.width) / 2.0;
+                }
+                TextAlignment::Right => {
+                    offset = max_width - line.width;
+                }
+                TextAlignment::Justify => {
+                    let extra = max_width - line.width;
+                    let is_last_line = line_idx + 1 == line_count;
+                    if !is_last_line && extra > 0.0 {
+                        let mut whitespace_count = 0usize;
+                        for run in &line.runs {
+                            whitespace_count += shaped_text[run.start..run.end]
+                                .chars()
+                                .take(run.glyphs.len())
+                                .filter(|ch| ch.is_whitespace())
+                                .count();
+                        }
+
+                        if whitespace_count > 0 {
+                            let extra_per_gap = extra / whitespace_count as f32;
+                            let mut distributed_total = 0.0;
+                            for run in &mut line.runs {
+                                let mut run_extra = 0.0;
+                                for (glyph, ch) in run
+                                    .glyphs
+                                    .iter_mut()
+                                    .zip(shaped_text[run.start..run.end].chars())
+                                {
+                                    glyph.x += distributed_total;
+                                    if ch.is_whitespace() {
+                                        glyph.advance += extra_per_gap;
+                                        distributed_total += extra_per_gap;
+                                        run_extra += extra_per_gap;
+                                    }
+                                }
+                                run.width += run_extra;
+                            }
+                            line.width = max_width;
+                        }
+                    }
+                }
+            }
+
             for run in &mut line.runs {
                 for glyph in &mut run.glyphs {
                     glyph.x += offset;
@@ -489,4 +530,52 @@ pub struct RichTextRun {
 pub struct RichTextLayout {
     pub runs: Vec<RichTextRun>,
     pub layout: TextLayout,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_font() -> TrueTypeFont {
+        TrueTypeFont::parse(include_bytes!("../../../assets/fonts/Roboto.ttf"))
+            .expect("Roboto.ttf should parse as a TrueType font")
+    }
+
+    fn line_space_advances(layout: &TextLayout, line_idx: usize) -> Vec<f32> {
+        let line = &layout.lines[line_idx];
+        let mut advances = Vec::new();
+        for run in &line.runs {
+            for (glyph, ch) in run
+                .glyphs
+                .iter()
+                .zip(layout.text[run.start..run.end].chars())
+            {
+                if ch.is_whitespace() {
+                    advances.push(glyph.advance);
+                }
+            }
+        }
+        advances
+    }
+
+    #[test]
+    fn justify_distributes_extra_width_across_whitespace_on_non_terminal_lines() {
+        let font = load_font();
+        let layout = TextLayout::layout("alpha beta\nomega", &font, 18.0, None);
+        let target_width = layout.lines[0].width + 48.0;
+        let justified = layout
+            .clone()
+            .with_alignment(TextAlignment::Justify, target_width);
+
+        assert!((justified.lines[0].width - target_width).abs() < 0.01);
+        assert!((justified.lines[1].width - layout.lines[1].width).abs() < 0.01);
+
+        let original_spaces = line_space_advances(&layout, 0);
+        let justified_spaces = line_space_advances(&justified, 0);
+        assert_eq!(original_spaces.len(), justified_spaces.len());
+        assert!(justified_spaces
+            .iter()
+            .zip(original_spaces.iter())
+            .all(|(after, before)| after > before));
+    }
 }

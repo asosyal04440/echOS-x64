@@ -18,8 +18,9 @@ use crate::gop::framebuffer::Framebuffer;
 use crate::gui::damage::DamageTracker;
 use crate::gui::protocol::{
     AppId, DamagePacket, DisplayPresentMode, FrameIntent, InputEvent, KeyState, LayerRole,
-    PlaneAssignment, Point, PointerButton, Rect, SceneUpdate, SharedSurfaceDescriptor, SurfaceId,
-    VblankFeedback, WindowBufferMode, WindowFlags, WindowId, WindowInfo, WorkspaceId,
+    OutputMode, PlaneAssignment, Point, PointerButton, Rect, SceneUpdate,
+    SharedSurfaceDescriptor, SurfaceId, VblankFeedback, WindowBufferMode, WindowFlags, WindowId,
+    WindowInfo, WorkspaceId,
 };
 use crate::gui::renderer::{CpuRenderer, GpuRenderer, Renderer};
 use crate::gui::shell;
@@ -35,6 +36,7 @@ use crate::gui::window_manager::{
 use crate::services::display_atomic::{
     AtomicPresenter, HotPathMetrics, MailboxRing, SurfacePlacement,
 };
+use crate::services::ech_shell::{get_shell_service, ShellCommand, ShellResponse};
 
 const DISPLAY_COMMAND_QUEUE_CAPACITY: usize = 256;
 const DISPLAY_RESPONSE_QUEUE_CAPACITY: usize = 256;
@@ -151,12 +153,20 @@ pub enum DisplayCommand {
     SetPresentMode {
         mode: DisplayPresentMode,
     },
+    SetOutputMode {
+        mode: OutputMode,
+    },
     SetThemeMode {
         mode: ThemeMode,
     },
     SubmitFrameIntent {
         intent: FrameIntent,
     },
+    RouteInputEvent {
+        event: InputEvent,
+    },
+    QueryOutputMode,
+    ListOutputModes,
     QueryPresentMetrics,
     ListWindows,
     ListSurfaces,
@@ -188,6 +198,15 @@ pub enum DisplayResponse {
         feedback: VblankFeedback,
         assignment: PlaneAssignment,
     },
+    InputRoute(InputRouting),
+    OutputModeState {
+        current: OutputMode,
+        requested: OutputMode,
+        effective: OutputMode,
+    },
+    OutputModeCatalog {
+        modes: Vec<OutputMode>,
+    },
     PresentMetrics {
         metrics: HotPathMetrics,
     },
@@ -197,7 +216,10 @@ pub enum DisplayResponse {
 pub struct EchDisplay {
     framebuffer: Arc<Mutex<Framebuffer>>,
     running: AtomicBool,
-    screen_rect: Rect,
+    screen_rect: Mutex<Rect>,
+    physical_output_mode: OutputMode,
+    requested_output_mode: Mutex<OutputMode>,
+    effective_output_mode: Mutex<OutputMode>,
     surfaces: Mutex<SurfaceManager>,
     windows: Mutex<WindowManager>,
     damage: Mutex<DamageTracker>,
@@ -218,17 +240,26 @@ impl EchDisplay {
             let fb = framebuffer.lock();
             Rect::new(0, 0, fb.width as u32, fb.height as u32)
         };
+        let physical_output_mode = OutputMode::new(screen_rect.width, screen_rect.height, 60);
+        crate::drivers::mouse::set_bounds(screen_rect.width as i32, screen_rect.height as i32);
+        let cursor_origin = Point::new(
+            (screen_rect.width as i32 / 2).max(0),
+            (screen_rect.height as i32 / 2).max(0),
+        );
 
         Self {
             framebuffer,
             running: AtomicBool::new(false),
-            screen_rect,
+            screen_rect: Mutex::new(screen_rect),
+            physical_output_mode,
+            requested_output_mode: Mutex::new(physical_output_mode),
+            effective_output_mode: Mutex::new(physical_output_mode),
             surfaces: Mutex::new(SurfaceManager::new()),
             windows: Mutex::new(WindowManager::new()),
             damage: Mutex::new(DamageTracker::new()),
             interaction: Mutex::new(None),
             pointer_capture: Mutex::new(None),
-            cursor_position: Mutex::new(Point::new(640, 400)),
+            cursor_position: Mutex::new(cursor_origin),
             swallow_left_release: Mutex::new(false),
             atomic_presenter: Mutex::new(AtomicPresenter::new()),
             theme_mode: Mutex::new(Theme::default_mode()),
@@ -249,8 +280,64 @@ impl EchDisplay {
         crate::serial_println!("[ECHDISPLAY] Week-2 display service stopped");
     }
 
-    pub fn send_command(&self, command: DisplayCommand) {
-        let _ = self.command_queue.push_overwrite(command);
+    fn screen_rect(&self) -> Rect {
+        *self.screen_rect.lock()
+    }
+
+    fn ensure_runtime_pointer_geometry(&self) {
+        let screen_rect = self.screen_rect();
+        let expected = (screen_rect.width as i32, screen_rect.height as i32);
+        let current = crate::drivers::mouse::get_bounds();
+        if current == expected {
+            return;
+        }
+
+        sync_output_geometry(screen_rect.width, screen_rect.height);
+        let mut cursor = self.cursor_position.lock();
+        cursor.x = cursor.x.clamp(0, screen_rect.right().saturating_sub(1));
+        cursor.y = cursor.y.clamp(0, screen_rect.bottom().saturating_sub(1));
+        self.damage.lock().mark_rect(screen_rect);
+    }
+
+    fn supported_output_modes(&self) -> Vec<OutputMode> {
+        const CANDIDATES: &[(u32, u32)] = &[
+            (3840, 2160),
+            (2560, 1440),
+            (1920, 1080),
+            (1680, 1050),
+            (1600, 900),
+            (1440, 900),
+            (1366, 768),
+            (1280, 800),
+            (1280, 720),
+            (1024, 768),
+            (800, 600),
+        ];
+
+        let physical = self.physical_output_mode;
+        let mut modes = Vec::new();
+        for (width, height) in CANDIDATES.iter().copied() {
+            if width <= physical.width && height <= physical.height {
+                let mode = OutputMode::new(width, height, physical.refresh_hz);
+                if !modes.contains(&mode) {
+                    modes.push(mode);
+                }
+            }
+        }
+        if !modes.contains(&physical) {
+            modes.push(physical);
+        }
+        modes.sort_by(|lhs, rhs| {
+            rhs.width
+                .cmp(&lhs.width)
+                .then(rhs.height.cmp(&lhs.height))
+                .then(rhs.refresh_hz.cmp(&lhs.refresh_hz))
+        });
+        modes
+    }
+
+    pub fn send_command(&self, command: DisplayCommand) -> bool {
+        self.command_queue.try_push(command).is_ok()
     }
 
     pub fn receive_response(&self) -> Option<DisplayResponse> {
@@ -348,8 +435,14 @@ impl EchDisplay {
                 self.submit_window_damage(window_id, packet)
             }
             DisplayCommand::SetPresentMode { mode } => self.set_present_mode(mode),
+            DisplayCommand::SetOutputMode { mode } => self.set_output_mode(mode),
             DisplayCommand::SetThemeMode { mode } => self.set_theme_mode(mode),
             DisplayCommand::SubmitFrameIntent { intent } => self.submit_frame_intent(intent),
+            DisplayCommand::RouteInputEvent { event } => {
+                DisplayResponse::InputRoute(self.dispatch_input_event(&event))
+            }
+            DisplayCommand::QueryOutputMode => self.query_output_mode(),
+            DisplayCommand::ListOutputModes => self.list_output_modes(),
             DisplayCommand::QueryPresentMetrics => self.query_present_metrics(),
             DisplayCommand::ListWindows => {
                 let windows = self.list_windows_with_buffers();
@@ -365,6 +458,7 @@ impl EchDisplay {
     }
 
     pub fn dispatch_input_event(&self, event: &InputEvent) -> InputRouting {
+        self.ensure_runtime_pointer_geometry();
         match event {
             InputEvent::Key { .. } => self
                 .focused_window_route(None, false)
@@ -445,6 +539,7 @@ impl EchDisplay {
 
     pub fn run_service(&self) {
         while self.running.load(Ordering::SeqCst) {
+            self.ensure_runtime_pointer_geometry();
             while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
                 let _ = self.response_queue.push_overwrite(response);
@@ -762,7 +857,9 @@ impl EchDisplay {
     }
 
     fn present(&self) -> DisplayResponse {
-        let damage_regions = self.damage.lock().take(self.screen_rect);
+        self.ensure_runtime_pointer_geometry();
+        let screen_rect = self.screen_rect();
+        let damage_regions = self.damage.lock().take(screen_rect);
         if damage_regions.is_empty() {
             self.surfaces.lock().clear_dirty();
             return self.service_present_queue();
@@ -775,8 +872,7 @@ impl EchDisplay {
         if native_scanout_available {
             {
                 let mut presenter = self.atomic_presenter.lock();
-                let intent =
-                    presenter.build_intent(self.screen_rect, &damage_regions, &placements, cursor);
+                let intent = presenter.build_intent(screen_rect, &damage_regions, &placements, cursor);
                 presenter.enqueue(intent);
             }
 
@@ -810,14 +906,23 @@ impl EchDisplay {
             })
             .collect();
 
+        // Desktop shortcuts now live in a dedicated background shell surface; the
+        // wallpaper path should stay atmosphere-only.
+        let show_desktop_dashboard = false;
+
         {
             let mut fb = self.framebuffer.lock();
             let mut cpu_renderer = CpuRenderer::new();
-            let mut gpu_renderer =
-                GpuRenderer::new(self.screen_rect.width, self.screen_rect.height);
+            let mut gpu_renderer = GpuRenderer::new(screen_rect.width, screen_rect.height);
             let mut title_text_system = TextSystem::new();
             for damage in damage_regions.iter() {
-                shell::draw_desktop_scene(&mut fb, self.screen_rect, *damage, theme_mode);
+                shell::draw_desktop_scene(
+                    &mut fb,
+                    screen_rect,
+                    *damage,
+                    theme_mode,
+                    show_desktop_dashboard,
+                );
                 for (window, pixels, scene) in snapshots.iter() {
                     if window.frame_rect.intersects(damage) {
                         if let Some(scene) = scene.as_ref() {
@@ -970,9 +1075,47 @@ impl EchDisplay {
         DisplayResponse::Ack
     }
 
+    fn set_output_mode(&self, mode: OutputMode) -> DisplayResponse {
+        let supported = self.supported_output_modes();
+        if !supported.contains(&mode) {
+            return DisplayResponse::Error(String::from(
+                "output mode unsupported on current framebuffer",
+            ));
+        }
+
+        let old_rect = self.screen_rect();
+        {
+            let mut fb = self.framebuffer.lock();
+            let physical = self.physical_output_mode;
+            fb.width = physical.width as usize;
+            fb.height = physical.height as usize;
+            fb.clear(0x000000);
+            fb.width = mode.width as usize;
+            fb.height = mode.height as usize;
+        }
+
+        let new_rect = Rect::new(0, 0, mode.width, mode.height);
+        *self.requested_output_mode.lock() = mode;
+        *self.effective_output_mode.lock() = mode;
+        *self.screen_rect.lock() = new_rect;
+        sync_output_geometry(mode.width, mode.height);
+        {
+            let mut cursor = self.cursor_position.lock();
+            cursor.x = cursor.x.clamp(0, new_rect.right().saturating_sub(1));
+            cursor.y = cursor.y.clamp(0, new_rect.bottom().saturating_sub(1));
+        }
+        self.damage.lock().mark_rects(&[old_rect, new_rect]);
+
+        DisplayResponse::OutputModeState {
+            current: self.physical_output_mode,
+            requested: mode,
+            effective: mode,
+        }
+    }
+
     fn set_theme_mode(&self, mode: ThemeMode) -> DisplayResponse {
         *self.theme_mode.lock() = mode;
-        self.damage.lock().mark_rect(self.screen_rect);
+        self.damage.lock().mark_rect(self.screen_rect());
         DisplayResponse::Ack
     }
 
@@ -986,6 +1129,20 @@ impl EchDisplay {
         DisplayResponse::PresentMetrics { metrics }
     }
 
+    fn query_output_mode(&self) -> DisplayResponse {
+        DisplayResponse::OutputModeState {
+            current: self.physical_output_mode,
+            requested: *self.requested_output_mode.lock(),
+            effective: *self.effective_output_mode.lock(),
+        }
+    }
+
+    fn list_output_modes(&self) -> DisplayResponse {
+        DisplayResponse::OutputModeCatalog {
+            modes: self.supported_output_modes(),
+        }
+    }
+
     fn service_present_queue(&self) -> DisplayResponse {
         if crate::drivers::gpu_native::device_count() == 0 {
             return DisplayResponse::Ack;
@@ -994,7 +1151,7 @@ impl EchDisplay {
         let placements = self.collect_surface_placements();
         let mut presenter = self.atomic_presenter.lock();
         let now_ns = crate::cpu::tsc::read_ns();
-        match presenter.commit_latest(self.screen_rect, &placements, now_ns) {
+        match presenter.commit_latest(self.screen_rect(), &placements, now_ns) {
             Ok((intent, assignment, feedback)) => {
                 self.last_presented_frame
                     .store(feedback.presented_frame_id, Ordering::Release);
@@ -1265,7 +1422,7 @@ impl EchDisplay {
     }
 
     fn work_area(&self) -> Rect {
-        shell::desktop_work_area(self.screen_rect)
+        shell::desktop_work_area(self.screen_rect())
     }
 
     fn collect_surface_placements(&self) -> Vec<SurfacePlacement> {
@@ -1299,13 +1456,14 @@ impl EchDisplay {
     }
 
     fn update_cursor(&self, position: Point) {
+        let screen_rect = self.screen_rect();
         let clamped = Point::new(
             position
                 .x
-                .clamp(0, self.screen_rect.right().saturating_sub(1)),
+                .clamp(0, screen_rect.right().saturating_sub(1)),
             position
                 .y
-                .clamp(0, self.screen_rect.bottom().saturating_sub(1)),
+                .clamp(0, screen_rect.bottom().saturating_sub(1)),
         );
         let mut cursor = self.cursor_position.lock();
         let old_rect = cursor_rect(*cursor);
@@ -1496,7 +1654,14 @@ fn draw_window(
     draw_frame_outline(fb, window.frame_rect, damage, border_color);
     draw_chrome_buttons(fb, window, damage, mode);
 
-    draw_window_title(fb, text_system, window, titlebar, damage, tokens.text.primary);
+    draw_window_title(
+        fb,
+        text_system,
+        window,
+        titlebar,
+        damage,
+        tokens.text.primary,
+    );
 }
 
 fn draw_window_scene(
@@ -1636,7 +1801,14 @@ fn draw_window_scene(
     draw_frame_outline(fb, window.frame_rect, damage, border_color);
     draw_chrome_buttons(fb, window, damage, mode);
 
-    draw_window_title(fb, text_system, window, titlebar, damage, tokens.text.primary);
+    draw_window_title(
+        fb,
+        text_system,
+        window,
+        titlebar,
+        damage,
+        tokens.text.primary,
+    );
 }
 
 fn draw_window_title(
@@ -2001,6 +2173,12 @@ lazy_static::lazy_static! {
     static ref ECH_DISPLAY: Mutex<Option<Arc<EchDisplay>>> = Mutex::new(None);
 }
 
+fn sync_output_geometry(width: u32, height: u32) {
+    crate::drivers::mouse::set_bounds(width as i32, height as i32);
+    crate::gfx::scaling::init_from_resolution(width, height);
+    crate::gui::login::init(width as usize, height as usize);
+}
+
 pub fn init() {
     crate::drivers::gpu_native::init();
     crate::drivers::drm::init();
@@ -2013,6 +2191,7 @@ pub fn init() {
         }
     };
 
+    sync_output_geometry(fb.width as u32, fb.height as u32);
     let fb = Arc::new(Mutex::new(fb));
     let display = Arc::new(EchDisplay::new(fb));
     display.start();
@@ -2035,5 +2214,92 @@ pub fn service_task() -> ! {
         for _ in 0..1000 {
             core::hint::spin_loop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sync_output_geometry, DisplayCommand, DisplayResponse, EchDisplay, InputRouting};
+    use crate::drivers::mouse::{get_bounds, get_position, set_bounds, MOUSE_X, MOUSE_Y};
+    use crate::gfx::scaling::get_scale_factor;
+    use crate::gop::framebuffer::Framebuffer;
+    use crate::gui::protocol::{InputEvent, KeyState, OutputMode};
+    use alloc::sync::Arc;
+    use core::sync::atomic::Ordering;
+    use spin::Mutex;
+
+    #[test]
+    fn sync_output_geometry_updates_mouse_bounds_and_scale() {
+        MOUSE_X.store(4096, Ordering::Relaxed);
+        MOUSE_Y.store(4096, Ordering::Relaxed);
+
+        sync_output_geometry(1920, 1080);
+
+        assert_eq!(get_position(), (1919, 1079));
+        assert_eq!(get_scale_factor(), 100);
+    }
+
+    #[test]
+    fn output_mode_catalog_is_bounded_by_live_framebuffer() {
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
+        let modes = display.supported_output_modes();
+
+        assert!(modes.contains(&OutputMode::new(1920, 1080, 60)));
+        assert!(modes.contains(&OutputMode::new(1280, 720, 60)));
+        assert!(!modes.contains(&OutputMode::new(2560, 1440, 60)));
+    }
+
+    #[test]
+    fn set_output_mode_updates_effective_rect_and_mouse_bounds() {
+        MOUSE_X.store(4096, Ordering::Relaxed);
+        MOUSE_Y.store(4096, Ordering::Relaxed);
+
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
+        let response = display.set_output_mode(OutputMode::new(1280, 720, 60));
+
+        let DisplayResponse::OutputModeState {
+            current,
+            requested,
+            effective,
+        } = response
+        else {
+            unreachable!("set_output_mode must return output state")
+        };
+        assert_eq!(current, OutputMode::new(1920, 1080, 60));
+        assert_eq!(requested, OutputMode::new(1280, 720, 60));
+        assert_eq!(effective, OutputMode::new(1280, 720, 60));
+
+        assert_eq!(display.screen_rect(), crate::gui::protocol::Rect::new(0, 0, 1280, 720));
+        assert_eq!(get_position(), (1279, 719));
+    }
+
+    #[test]
+    fn ensure_runtime_pointer_geometry_resyncs_bounds_when_runtime_drift_detected() {
+        MOUSE_X.store(4096, Ordering::Relaxed);
+        MOUSE_Y.store(4096, Ordering::Relaxed);
+
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
+
+        set_bounds(1280, 800);
+        display.ensure_runtime_pointer_geometry();
+
+        assert_eq!(get_bounds(), (1920, 1080));
+        assert_eq!(get_position(), (1279, 799));
+        assert_eq!(display.screen_rect(), crate::gui::protocol::Rect::new(0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn route_input_event_command_returns_routing_response() {
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1280, 720))));
+        let response = display.process_command(DisplayCommand::RouteInputEvent {
+            event: InputEvent::Key {
+                unicode: Some('a'),
+                scan_code: 30,
+                modifiers: 0,
+                state: KeyState::Pressed,
+            },
+        });
+
+        assert!(matches!(response, DisplayResponse::InputRoute(InputRouting::None)));
     }
 }

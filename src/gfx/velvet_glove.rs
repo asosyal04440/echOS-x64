@@ -9,14 +9,20 @@ use crate::gui::animation::{
     Animation, AnimationTarget, AnimationTargetType,
 };
 use crate::gui::client::{ClientWindow, DesktopClient};
+use crate::gui::icon_pack::{emit_desktop_icon_rects, DesktopIconKind};
+use crate::gui::launch_pipeline::{
+    AbiPersonality, AppDescriptor, AppInstallRoot, AppPresentation, AppResolution, AppTrust,
+    CapabilityProfile, ExecutionContext, LaunchIntent, LaunchSession, LaunchSource,
+    LoaderDispatch, PackageRecord, RuntimeBootstrap, StateContract,
+};
 use crate::gui::layout::{layout_flex, EdgeInsets, FlexDirection, FlexItem};
 use crate::gui::protocol::{
     AccessibilityNode, AccessibilityRole, AppHealth, ClipboardPayload, CommandPaletteAction,
     DamageLane, DesktopPermission, DialogKind, DialogSelection, InputEvent, InvalidationReason,
-    InvalidationTarget, KeyState, LayerRole, NotificationEntry, NotificationLevel,
-    PermissionState, Point, Rect, RenderObjectKind, SceneNodeId, SessionPowerState,
-    SessionSnapshot, ShellAppEntry, ShellShortcut, ShellState, StageSet, WindowFlags, WindowId,
-    WindowInputEvent, WorkspaceLayout, WorkspaceRule, MOD_CTRL,
+    InvalidationTarget, KeyState, LayerRole, NotificationEntry, NotificationLevel, PermissionState,
+    Point, Rect, RenderObjectKind, SceneNodeId, SessionPowerState, SessionSnapshot, ShellAppEntry,
+    ShellShortcut, ShellState, StageSet, WindowFlags, WindowId, WindowInputEvent, WorkspaceLayout,
+    WorkspaceRule, MOD_CTRL,
 };
 use crate::gui::scene::SceneGraph;
 use crate::gui::text::{TextStyle, TextSystem};
@@ -24,6 +30,7 @@ use crate::gui::theme::{ShellLayoutProfile, Theme, ThemeMode};
 use crate::gui::window_manager::{
     BORDER_THICKNESS, MIN_CONTENT_HEIGHT, MIN_CONTENT_WIDTH, TITLEBAR_HEIGHT,
 };
+use crate::net::http::{HttpClient, HttpUrl};
 use crate::personalization::{hybrid_windowing, virtual_desktops};
 use crate::security::users::USER_DB;
 use crate::services::FileEntry;
@@ -37,6 +44,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
+use htmlparser::{ElementEnd as HtmlElementEnd, Token as HtmlToken, Tokenizer as HtmlTokenizer};
 use x86_64::instructions::port::PortWriteOnly;
 
 const SHELL_APP_ID: u32 = 1;
@@ -44,8 +52,38 @@ const TERMINAL_APP_ID: u32 = 10;
 const FILES_APP_ID: u32 = 11;
 const SETTINGS_APP_ID: u32 = 12;
 const EDITOR_APP_ID: u32 = 13;
+const BROWSER_APP_ID: u32 = 14;
+const RECYCLE_SHORTCUT_APP_ID: u32 = 15;
+const FIREFOX_BINARY_APP_ID: u32 = 16;
+const CHROMIUM_BINARY_APP_ID: u32 = 17;
+const CEF_BINARY_APP_ID: u32 = 18;
 const WORKSPACE_COUNT: u8 = 8;
 const SCRATCHPAD_WORKSPACE: u8 = WORKSPACE_COUNT;
+const DESKTOP_SHORTCUT_ICON_SIZE: i32 = 56;
+const DESKTOP_SHORTCUT_STEP_Y: i32 = 102;
+
+const FIREFOX_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/firefox/firefox.exe",
+    "/downloads/firefox.exe",
+    "/programs/firefox/firefox.exe",
+    "/apps/firefox/firefox.exe",
+];
+
+const CHROMIUM_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/chromium/chrome.exe",
+    "/downloads/chromium/chromium.exe",
+    "/downloads/chrome.exe",
+    "/programs/chromium/chrome.exe",
+    "/apps/chromium/chrome.exe",
+];
+
+const CEF_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/cef/cefclient.exe",
+    "/downloads/cefclient.exe",
+    "/programs/cef/cefclient.exe",
+    "/apps/cef/cefclient.exe",
+];
+const DESKTOP_BOOTSTRAP_SERVICE_RETRY_TICKS: usize = 32;
 
 const FONT_WIDTH: i32 = 8;
 const FONT_HEIGHT: i32 = 16;
@@ -92,6 +130,20 @@ fn default_workspace_rule(workspace_id: u8) -> WorkspaceRule {
     WorkspaceRule::new(name, WorkspaceLayout::Dwindle)
 }
 
+fn top_bar_workspace_label(workspace_id: u8) -> &'static str {
+    match workspace_id {
+        0 => "Prime",
+        1 => "Build",
+        2 => "Observe",
+        3 => "Docs",
+        4 => "Net",
+        5 => "Media",
+        6 => "Lab",
+        7 => "Ops",
+        _ => "Scratch",
+    }
+}
+
 #[derive(Clone, Copy)]
 struct UiPalette {
     window_bg: u32,
@@ -130,17 +182,25 @@ fn hybrid_titan_palette(theme_mode: ThemeMode) -> UiPalette {
 enum AppKind {
     Terminal,
     Files,
+    Browser,
     Settings,
     Editor,
 }
 
 impl AppKind {
-    const ALL: [Self; 4] = [Self::Terminal, Self::Files, Self::Settings, Self::Editor];
+    const ALL: [Self; 5] = [
+        Self::Terminal,
+        Self::Files,
+        Self::Browser,
+        Self::Settings,
+        Self::Editor,
+    ];
 
     fn app_id(self) -> u32 {
         match self {
             Self::Terminal => TERMINAL_APP_ID,
             Self::Files => FILES_APP_ID,
+            Self::Browser => BROWSER_APP_ID,
             Self::Settings => SETTINGS_APP_ID,
             Self::Editor => EDITOR_APP_ID,
         }
@@ -150,6 +210,7 @@ impl AppKind {
         match self {
             Self::Terminal => "Terminal",
             Self::Files => "Files",
+            Self::Browser => "Web",
             Self::Settings => "Settings",
             Self::Editor => "Editor",
         }
@@ -159,6 +220,7 @@ impl AppKind {
         match self {
             Self::Terminal => ACCENT_MINT,
             Self::Files => ACCENT_BLUE,
+            Self::Browser => ACCENT_SOFT,
             Self::Settings => ACCENT_GOLD,
             Self::Editor => ACCENT_CORAL,
         }
@@ -168,17 +230,59 @@ impl AppKind {
         match self {
             Self::Terminal => '1',
             Self::Files => '2',
-            Self::Settings => '3',
-            Self::Editor => '4',
+            Self::Browser => '3',
+            Self::Settings => '4',
+            Self::Editor => '5',
         }
     }
 
-    fn dock_label(self) -> &'static str {
+    fn icon(self) -> DesktopIconKind {
         match self {
-            Self::Terminal => "T",
-            Self::Files => "F",
-            Self::Settings => "S",
-            Self::Editor => "W",
+            Self::Terminal => DesktopIconKind::Terminal,
+            Self::Files => DesktopIconKind::Files,
+            Self::Browser => DesktopIconKind::Browser,
+            Self::Settings => DesktopIconKind::Settings,
+            Self::Editor => DesktopIconKind::Editor,
+        }
+    }
+
+    fn descriptor(self) -> AppDescriptor {
+        let capabilities = match self {
+            Self::Terminal => CapabilityProfile::shell_defaults(),
+            Self::Files => CapabilityProfile::file_worker(),
+            Self::Browser => CapabilityProfile::file_worker(),
+            Self::Settings => CapabilityProfile::shell_defaults(),
+            Self::Editor => CapabilityProfile::file_worker(),
+        };
+        let descriptor = AppDescriptor::new(
+            self.app_id(),
+            self.title(),
+            self.title(),
+            LoaderDispatch::Native,
+            AbiPersonality::Native,
+            AppPresentation::Windowed,
+            capabilities,
+        )
+        .with_install_root(AppInstallRoot::SystemApps)
+        .with_trust(AppTrust::Platform);
+        match self {
+            Self::Browser => descriptor
+                .with_package_id("echos.web")
+                .with_file_associations(&[".html", ".htm", ".url"])
+                .with_state_contract(StateContract::WarmSuspend),
+            Self::Editor => descriptor
+                .with_package_id("echos.editor")
+                .with_file_associations(&[".txt", ".md", ".log"])
+                .with_state_contract(StateContract::ColdResume),
+            Self::Files => descriptor
+                .with_package_id("echos.files")
+                .with_state_contract(StateContract::WarmSuspend),
+            Self::Terminal => descriptor
+                .with_package_id("echos.terminal")
+                .with_state_contract(StateContract::WarmSuspend),
+            Self::Settings => descriptor
+                .with_package_id("echos.settings")
+                .with_state_contract(StateContract::WarmSuspend),
         }
     }
 }
@@ -187,10 +291,94 @@ fn app_kind_from_id(app_id: u32) -> Option<AppKind> {
     match app_id {
         TERMINAL_APP_ID => Some(AppKind::Terminal),
         FILES_APP_ID => Some(AppKind::Files),
+        BROWSER_APP_ID => Some(AppKind::Browser),
         SETTINGS_APP_ID => Some(AppKind::Settings),
         EDITOR_APP_ID => Some(AppKind::Editor),
         _ => None,
     }
+}
+
+fn browser_binary_descriptor(
+    app_id: u32,
+    slug: &'static str,
+    title: &'static str,
+) -> AppDescriptor {
+    AppDescriptor::new(
+        app_id,
+        slug,
+        title,
+        LoaderDispatch::Pe,
+        AbiPersonality::Win32,
+        AppPresentation::ShellOwned,
+        CapabilityProfile::shell_defaults(),
+    )
+    .with_package_id(match slug {
+        "firefox-binary" => "org.mozilla.firefox",
+        "chromium-binary" => "org.chromium.browser",
+        "cef-binary" => "org.cef.browser",
+        _ => slug,
+    })
+    .with_install_root(AppInstallRoot::UserApps)
+    .with_trust(AppTrust::Installed)
+    .with_state_contract(StateContract::WarmSuspend)
+}
+
+fn desktop_launch_registry() -> [PackageRecord; 9] {
+    [
+        PackageRecord {
+            aliases: &["terminal", "shell", "console"],
+            descriptor: AppKind::Terminal.descriptor(),
+            external_candidates: &[],
+        },
+        PackageRecord {
+            aliases: &["files", "file manager", "explorer"],
+            descriptor: AppKind::Files.descriptor(),
+            external_candidates: &[],
+        },
+        PackageRecord {
+            aliases: &["settings", "preferences", "control"],
+            descriptor: AppKind::Settings.descriptor(),
+            external_candidates: &[],
+        },
+        PackageRecord {
+            aliases: &["editor", "notes", "edit"],
+            descriptor: AppKind::Editor.descriptor(),
+            external_candidates: &[],
+        },
+        PackageRecord {
+            aliases: &["web", "browser", "internet"],
+            descriptor: DesktopShortcutKind::Web.descriptor(),
+            external_candidates: &[],
+        },
+        PackageRecord {
+            aliases: &["recycle", "recycle bin", "trash"],
+            descriptor: DesktopShortcutKind::RecycleBin.descriptor(),
+            external_candidates: &[],
+        },
+        PackageRecord {
+            aliases: &["firefox", "mozilla firefox", "browser-firefox"],
+            descriptor: browser_binary_descriptor(
+                FIREFOX_BINARY_APP_ID,
+                "firefox-binary",
+                "Firefox",
+            ),
+            external_candidates: FIREFOX_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["chromium", "chrome", "google chrome", "browser-chromium"],
+            descriptor: browser_binary_descriptor(
+                CHROMIUM_BINARY_APP_ID,
+                "chromium-binary",
+                "Chromium",
+            ),
+            external_candidates: CHROMIUM_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["cef", "cefclient", "cef browser"],
+            descriptor: browser_binary_descriptor(CEF_BINARY_APP_ID, "cef-binary", "CEF Browser"),
+            external_candidates: CEF_BINARY_CANDIDATES,
+        },
+    ]
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -208,6 +396,115 @@ impl LaunchResult {
             Self::Focused => "focused",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DesktopShortcutKind {
+    Terminal,
+    Files,
+    Web,
+    Settings,
+    RecycleBin,
+}
+
+impl DesktopShortcutKind {
+    const ALL: [Self; 5] = [
+        Self::Terminal,
+        Self::Files,
+        Self::Web,
+        Self::Settings,
+        Self::RecycleBin,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Terminal => "Terminal",
+            Self::Files => "Files",
+            Self::Web => "Web",
+            Self::Settings => "Settings",
+            Self::RecycleBin => "Recycle Bin",
+        }
+    }
+
+    fn icon(self) -> DesktopIconKind {
+        match self {
+            Self::Terminal => DesktopIconKind::Terminal,
+            Self::Files => DesktopIconKind::Files,
+            Self::Web => DesktopIconKind::Browser,
+            Self::Settings => DesktopIconKind::Settings,
+            Self::RecycleBin => DesktopIconKind::Recycle,
+        }
+    }
+
+    fn accent(self) -> u32 {
+        match self {
+            Self::Terminal => ACCENT_MINT,
+            Self::Files => ACCENT_BLUE,
+            Self::Web => ACCENT_SOFT,
+            Self::Settings => ACCENT_GOLD,
+            Self::RecycleBin => 0xFF536476,
+        }
+    }
+
+    fn app_kind(self) -> Option<AppKind> {
+        match self {
+            Self::Terminal => Some(AppKind::Terminal),
+            Self::Files => Some(AppKind::Files),
+            Self::Web => Some(AppKind::Browser),
+            Self::Settings => Some(AppKind::Settings),
+            Self::RecycleBin => None,
+        }
+    }
+
+    fn route_label(self) -> &'static str {
+        match self {
+            Self::Terminal => "desktop-terminal",
+            Self::Files => "desktop-files",
+            Self::Web => "desktop-web",
+            Self::Settings => "desktop-settings",
+            Self::RecycleBin => "desktop-recycle-bin",
+        }
+    }
+
+    fn descriptor(self) -> AppDescriptor {
+        match self {
+            Self::Terminal | Self::Files | Self::Web | Self::Settings => self
+                .app_kind()
+                .expect("desktop native shortcut")
+                .descriptor(),
+            Self::RecycleBin => AppDescriptor::new(
+                RECYCLE_SHORTCUT_APP_ID,
+                "recycle-bin",
+                "Recycle Bin",
+                LoaderDispatch::Native,
+                AbiPersonality::Native,
+                AppPresentation::SpecialAction,
+                CapabilityProfile::shell_defaults(),
+            )
+            .with_package_id("echos.recycle-bin")
+            .with_install_root(AppInstallRoot::SystemApps)
+            .with_trust(AppTrust::Platform),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DesktopShortcutEntry {
+    kind: DesktopShortcutKind,
+    icon_rect: Rect,
+    label_x: i32,
+    label_y: i32,
+    hit_rect: Rect,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TopBarStatusSummary {
+    net: String,
+    cpu: String,
+    vpn: String,
+    aud: String,
+    time: String,
+    power: String,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -327,16 +624,31 @@ fn refresh_shell_surface_animation(client: &DesktopClient, window: &mut SessionW
     changed
 }
 
-fn set_shell_surface_visibility(
-    client: &DesktopClient,
-    window: &mut SessionWindow,
-    visible: bool,
-) {
+fn set_shell_surface_visibility(client: &DesktopClient, window: &mut SessionWindow, visible: bool) {
     let _ = client.set_visibility(window.window_id, visible);
     window.visible = visible;
     window.desired_visible = visible;
     window.opacity = if visible { 1.0 } else { 0.0 };
     window.fading_out = false;
+}
+
+fn desktop_visibility_recovery_needed(
+    power_state: SessionPowerState,
+    shell_logged_in: bool,
+    lock_screen_visible: bool,
+    top_bar_visible: bool,
+    task_strip_visible: bool,
+    appliance_auto_login_pending: bool,
+    desktop_ready_published: bool,
+) -> bool {
+    if power_state != SessionPowerState::Active {
+        return false;
+    }
+
+    let should_be_on_desktop =
+        shell_logged_in || appliance_auto_login_pending || desktop_ready_published;
+    should_be_on_desktop
+        && (!shell_logged_in || lock_screen_visible || !top_bar_visible || !task_strip_visible)
 }
 
 fn task_strip_window_rect(screen: Rect) -> Rect {
@@ -372,6 +684,7 @@ struct AppSnapshot {
 
 struct ShellRuntime {
     client: DesktopClient,
+    desktop: SessionWindow,
     top_bar: SessionWindow,
     task_strip: SessionWindow,
     launcher: SessionWindow,
@@ -398,6 +711,8 @@ struct ShellRuntime {
     notification_index: usize,
     auth_input: String,
     logged_in: bool,
+    selected_shortcut: Option<DesktopShortcutKind>,
+    last_shortcut_click: Option<(DesktopShortcutKind, u64)>,
     invalidation: ShellInvalidationState,
 }
 
@@ -434,6 +749,25 @@ struct SettingsApp {
     dirty: bool,
 }
 
+struct BrowserApp {
+    client: DesktopClient,
+    window: Option<SessionWindow>,
+    workspace_id: u8,
+    address_input: String,
+    current_url: Option<String>,
+    content_type: String,
+    preview_lines: Vec<String>,
+    links: Vec<BrowserLink>,
+    status: String,
+    dirty: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BrowserLink {
+    label: String,
+    url: String,
+}
+
 struct EditorApp {
     client: DesktopClient,
     window: Option<SessionWindow>,
@@ -464,15 +798,27 @@ struct DesktopSession {
     text_system: TextSystem,
     terminal: TerminalApp,
     files: FilesApp,
+    browser: BrowserApp,
     settings: SettingsApp,
     editor: EditorApp,
     appliance_auto_login_pending: bool,
+    suspend_resume_smoke_pending: bool,
     desktop_ready_published: bool,
     app_basket_committed: bool,
     last_tick_ns: u64,
 }
 
 pub struct VelvetGloveCompositor;
+
+#[derive(Default)]
+struct UnifiedEventLoopBatch {
+    shell_events: Vec<WindowInputEvent>,
+    terminal_events: Vec<WindowInputEvent>,
+    files_events: Vec<WindowInputEvent>,
+    browser_events: Vec<WindowInputEvent>,
+    settings_events: Vec<WindowInputEvent>,
+    editor_events: Vec<WindowInputEvent>,
+}
 
 impl VelvetGloveCompositor {
     pub fn run(fb: &mut Framebuffer) -> ! {
@@ -501,6 +847,62 @@ impl VelvetGloveCompositor {
 }
 
 impl DesktopSession {
+    fn bootstrap_retry<T, F>(label: &str, mut op: F) -> Result<T, String>
+    where
+        F: FnMut() -> Result<T, String>,
+    {
+        let mut last_err = None;
+        for attempt in 0..DESKTOP_BOOTSTRAP_SERVICE_RETRY_TICKS {
+            match op() {
+                Ok(value) => return Ok(value),
+                Err(err) if err.contains("service unavailable") => {
+                    last_err = Some(err);
+                    if attempt + 1 < DESKTOP_BOOTSTRAP_SERVICE_RETRY_TICKS {
+                        crate::task::scheduler::sleep(1);
+                        continue;
+                    }
+                }
+                Err(err) => return Err(format!("{}: {}", label, err)),
+            }
+        }
+
+        Err(format!(
+            "{}: {}",
+            label,
+            last_err.unwrap_or_else(|| String::from("service unavailable"))
+        ))
+    }
+
+    fn poll_unified_event_loop(&self) -> UnifiedEventLoopBatch {
+        UnifiedEventLoopBatch {
+            shell_events: self.shell.client.poll_input(32).unwrap_or_default(),
+            terminal_events: self.terminal.client.poll_input(32).unwrap_or_default(),
+            files_events: self.files.client.poll_input(32).unwrap_or_default(),
+            browser_events: self.browser.client.poll_input(32).unwrap_or_default(),
+            settings_events: self.settings.client.poll_input(32).unwrap_or_default(),
+            editor_events: self.editor.client.poll_input(32).unwrap_or_default(),
+        }
+    }
+
+    fn drive_unified_event_loop(
+        &mut self,
+        batch: UnifiedEventLoopBatch,
+        commands: &mut Vec<SessionCommand>,
+    ) {
+        self.handle_shell_events(batch.shell_events, commands);
+        if self.is_locked() {
+            return;
+        }
+        self.terminal.handle_events(batch.terminal_events, commands);
+        self.files.handle_events(batch.files_events, commands);
+        self.browser.handle_events(batch.browser_events, commands);
+        self.settings.handle_events(batch.settings_events);
+        self.editor.handle_events(batch.editor_events);
+        self.terminal.poll_platform();
+        self.browser.poll_platform();
+        self.editor.poll_platform();
+    }
+
     fn invalidate_shell(&mut self, target: InvalidationTarget, reason: InvalidationReason) {
         self.shell.invalidation.mark(target, reason);
     }
@@ -532,28 +934,49 @@ impl DesktopSession {
     fn commit_shell_surface(
         &self,
         window: &SessionWindow,
-        width: usize,
-        height: usize,
         pixels: Vec<u32>,
     ) -> Result<(), String> {
-        self.shell.client.commit_scene(
-            window.window_id,
-            raster_surface_scene(window.window_id, width, height, pixels, DamageLane::Shell),
-        )
+        self.shell.client.present(window.window_id, &pixels)
     }
 
     fn new(screen: Rect) -> Result<Self, String> {
         debug_marker(b"N00\n");
         crate::serial_println!("[DESKTOP] session bootstrap step=connect");
-        let shell_client = DesktopClient::connect(SHELL_APP_ID)?;
-        let terminal_client = DesktopClient::connect(TERMINAL_APP_ID)?;
-        let files_client = DesktopClient::connect(FILES_APP_ID)?;
-        let settings_client = DesktopClient::connect(SETTINGS_APP_ID)?;
-        let editor_client = DesktopClient::connect(EDITOR_APP_ID)?;
-        let _ = shell_client.register_shortcut_sink();
+        let shell_client = Self::bootstrap_retry("shell client connect", || {
+            DesktopClient::connect(SHELL_APP_ID)
+        })?;
+        let terminal_client = Self::bootstrap_retry("terminal client connect", || {
+            DesktopClient::connect(TERMINAL_APP_ID)
+        })?;
+        let files_client = Self::bootstrap_retry("files client connect", || {
+            DesktopClient::connect(FILES_APP_ID)
+        })?;
+        let browser_client = Self::bootstrap_retry("browser client connect", || {
+            DesktopClient::connect(BROWSER_APP_ID)
+        })?;
+        let settings_client = Self::bootstrap_retry("settings client connect", || {
+            DesktopClient::connect(SETTINGS_APP_ID)
+        })?;
+        let editor_client = Self::bootstrap_retry("editor client connect", || {
+            DesktopClient::connect(EDITOR_APP_ID)
+        })?;
+        let _ = Self::bootstrap_retry("shortcut sink registration", || {
+            shell_client.register_shortcut_sink()
+        });
 
         debug_marker(b"N10\n");
         crate::serial_println!("[DESKTOP] session bootstrap step=shell-windows");
+        let desktop_rect = desktop_surface_rect(screen);
+        let desktop_window = shell_client.create_layer_window(
+            "Desktop Shortcuts",
+            desktop_rect.x,
+            desktop_rect.y,
+            desktop_rect.width,
+            desktop_rect.height,
+            0,
+            LayerRole::Background,
+            shell_layer_flags(),
+        )?;
         let top_bar_window = shell_client.create_layer_window(
             "Top Bar",
             screen.x + 18,
@@ -675,16 +1098,19 @@ impl DesktopSession {
         crate::serial_println!("[DESKTOP] session bootstrap step=register-apps");
         let _ = terminal_client.register_shell_app("Terminal");
         let _ = files_client.register_shell_app("Files");
+        let _ = browser_client.register_shell_app("Web");
         let _ = settings_client.register_shell_app("Settings");
         let _ = editor_client.register_shell_app("Editor");
         crate::serial_println!("[DESKTOP] session bootstrap step=permissions");
         grant_default_permissions(&shell_client, true);
         grant_default_permissions(&terminal_client, true);
         grant_default_permissions(&files_client, true);
+        grant_default_permissions(&browser_client, true);
         grant_default_permissions(&editor_client, true);
         grant_default_permissions(&settings_client, true);
         grant_default_file_access(&terminal_client, &["/workspace", "/"]);
         grant_default_file_access(&files_client, &["/", "/workspace", "/system"]);
+        grant_default_file_access(&browser_client, &["/", "/workspace", "/downloads"]);
         grant_default_file_access(&editor_client, &["/workspace"]);
         grant_default_file_access(&settings_client, &["/system", "/workspace"]);
         grant_default_file_access(&shell_client, &["/", "/workspace", "/system"]);
@@ -712,6 +1138,7 @@ impl DesktopSession {
             screen,
             shell: ShellRuntime {
                 client: shell_client,
+                desktop: SessionWindow::from_client_window(desktop_window),
                 top_bar: SessionWindow::from_client_window(top_bar_window),
                 task_strip: SessionWindow::from_client_window(task_strip_window),
                 launcher: SessionWindow::from_client_window(launcher_window),
@@ -741,6 +1168,8 @@ impl DesktopSession {
                 notification_index: 0,
                 auth_input: String::new(),
                 logged_in: false,
+                selected_shortcut: None,
+                last_shortcut_click: None,
                 invalidation: ShellInvalidationState::bootstrap_shell(),
             },
             text_system: TextSystem::new(),
@@ -768,6 +1197,21 @@ impl DesktopSession {
                 status: String::from("Ready"),
                 dirty: true,
             },
+            browser: BrowserApp {
+                client: browser_client,
+                window: None,
+                workspace_id: 0,
+                address_input: String::from("http://example.com/"),
+                current_url: None,
+                content_type: String::from("text/plain"),
+                preview_lines: vec![
+                    String::from("Enter a URL, then press Enter or click Open."),
+                    String::from("Use Download to store binaries under /downloads."),
+                ],
+                links: Vec::new(),
+                status: String::from("Browser ready"),
+                dirty: true,
+            },
             settings: SettingsApp {
                 client: settings_client,
                 window: None,
@@ -789,6 +1233,7 @@ impl DesktopSession {
                 dirty: true,
             },
             appliance_auto_login_pending: crate::boot::appliance::auto_login_requested(),
+            suspend_resume_smoke_pending: crate::boot::appliance::suspend_resume_smoke_requested(),
             desktop_ready_published: false,
             app_basket_committed: false,
             last_tick_ns: get_time_ns(),
@@ -852,31 +1297,16 @@ impl DesktopSession {
         self.handle_shell_shortcuts();
         self.restore_faulted_apps();
         self.run_appliance_auto_login();
+        self.enforce_desktop_visibility_contract();
 
         let mut commands = Vec::new();
-        if let Ok(events) = self.shell.client.poll_input(32) {
-            self.handle_shell_events(events, &mut commands);
-        }
-        if !self.is_locked() {
-            if let Ok(events) = self.terminal.client.poll_input(32) {
-                self.terminal.handle_events(events, &mut commands);
-            }
-            if let Ok(events) = self.files.client.poll_input(32) {
-                self.files.handle_events(events, &mut commands);
-            }
-            if let Ok(events) = self.settings.client.poll_input(32) {
-                self.settings.handle_events(events);
-            }
-            if let Ok(events) = self.editor.client.poll_input(32) {
-                self.editor.handle_events(events);
-            }
-            self.terminal.poll_platform();
-            self.editor.poll_platform();
-        }
+        let batch = self.poll_unified_event_loop();
+        self.drive_unified_event_loop(batch, &mut commands);
 
         for command in commands {
             self.apply_command(command);
         }
+        self.enforce_desktop_visibility_contract();
 
         self.publish_accessibility();
         let _ = self.render_shell();
@@ -895,6 +1325,60 @@ impl DesktopSession {
         // the entire session. present() exits immediately when there is no damage, so
         // the overhead on quiet frames is a single Mutex::lock + is_empty() check.
         let _ = self.shell.client.present_frame();
+    }
+
+    fn enforce_desktop_visibility_contract(&mut self) {
+        let Ok(snapshot) = self.shell.client.session_snapshot() else {
+            return;
+        };
+
+        if !desktop_visibility_recovery_needed(
+            snapshot.power_state,
+            self.shell.logged_in,
+            self.shell.lock_screen.visible,
+            self.shell.top_bar.visible,
+            self.shell.task_strip.visible,
+            self.appliance_auto_login_pending,
+            self.desktop_ready_published,
+        ) {
+            return;
+        }
+
+        self.shell.logged_in = true;
+        self.set_login_visibility(false);
+        let _ = self.relayout_active_workspace();
+        let _ = apply_workspace_visibility(
+            &self.terminal.client,
+            &mut self.terminal.window,
+            self.terminal.workspace_id,
+            self.shell.active_workspace,
+        );
+        let _ = apply_workspace_visibility(
+            &self.files.client,
+            &mut self.files.window,
+            self.files.workspace_id,
+            self.shell.active_workspace,
+        );
+        let _ = apply_workspace_visibility(
+            &self.browser.client,
+            &mut self.browser.window,
+            self.browser.workspace_id,
+            self.shell.active_workspace,
+        );
+        let _ = apply_workspace_visibility(
+            &self.settings.client,
+            &mut self.settings.window,
+            self.settings.workspace_id,
+            self.shell.active_workspace,
+        );
+        let _ = apply_workspace_visibility(
+            &self.editor.client,
+            &mut self.editor.window,
+            self.editor.workspace_id,
+            self.shell.active_workspace,
+        );
+        let _ = self.shell.client.focus_window(self.shell.top_bar.window_id);
+        self.mark_shell_dirty();
     }
 
     fn refresh_shell_surface_animations(&mut self) {
@@ -947,7 +1431,10 @@ impl DesktopSession {
         self.appliance_auto_login_pending = false;
         self.shell.auth_input.clear();
         self.shell.auth_input.push_str("echos");
-        self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::LockScreen,
+            InvalidationReason::StateChanged,
+        );
         crate::serial_println!("[DESKTOP] appliance auto-login attempt");
         self.attempt_login();
     }
@@ -965,16 +1452,76 @@ impl DesktopSession {
                     self.attempt_login();
                 } else if is_backspace_key(input) {
                     self.shell.auth_input.pop();
-                    self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::LockScreen,
+                        InvalidationReason::StateChanged,
+                    );
                 } else if let Some(ch) = printable_key(input) {
                     self.shell.auth_input.push(ch);
-                    self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::LockScreen,
+                        InvalidationReason::StateChanged,
+                    );
                 }
                 continue;
             }
 
             if self.is_locked() {
                 continue;
+            }
+
+            if event.window_id == self.shell.desktop.window_id {
+                match input {
+                    InputEvent::PointerButton {
+                        button: crate::gui::protocol::PointerButton::Left,
+                        state: KeyState::Pressed,
+                        ..
+                    } => {
+                        let now = get_time_ns();
+                        if let Some(local) = event.local_position {
+                            if let Some(shortcut) = desktop_shortcut_hit(
+                                local,
+                                self.shell.desktop.content_rect.width as usize,
+                                self.shell.desktop.content_rect.height as usize,
+                            ) {
+                                self.select_desktop_shortcut(Some(shortcut));
+                                self.shell.last_shortcut_click = Some((shortcut, now));
+                                self.activate_desktop_shortcut(shortcut, commands);
+                            } else {
+                                self.select_desktop_shortcut(None);
+                                self.shell.last_shortcut_click = None;
+                            }
+                        }
+                    }
+                    InputEvent::PointerButton {
+                        button: crate::gui::protocol::PointerButton::Right,
+                        state: KeyState::Pressed,
+                        ..
+                    } => {
+                        if let Some(local) = event.local_position {
+                            if let Some(shortcut) = desktop_shortcut_hit(
+                                local,
+                                self.shell.desktop.content_rect.width as usize,
+                                self.shell.desktop.content_rect.height as usize,
+                            ) {
+                                self.select_desktop_shortcut(Some(shortcut));
+                                self.shell.last_shortcut_click = Some((shortcut, get_time_ns()));
+                                self.open_desktop_shortcut_context(shortcut, commands);
+                            } else {
+                                self.select_desktop_shortcut(None);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if is_enter_key(input) {
+                    if let Some(shortcut) = self.shell.selected_shortcut {
+                        self.activate_desktop_shortcut(shortcut, commands);
+                    }
+                } else if is_escape_key(input) {
+                    self.select_desktop_shortcut(None);
+                }
             }
 
             if event.window_id == self.shell.top_bar.window_id {
@@ -985,21 +1532,39 @@ impl DesktopSession {
                         ..
                     } => {
                         if let Some(local) = event.local_position {
-                            if top_bar_power_hit(
+                            let top_bar_width = self.shell.top_bar.content_rect.width as i32;
+                            if top_bar_apps_hit(local, top_bar_width) {
+                                let _ = self.open_files_path("/programs");
+                            } else if let Some(workspace_id) = top_bar_workspace_hit(
                                 local,
-                                self.shell.top_bar.content_rect.width as i32,
+                                top_bar_width,
+                                self.shell.active_workspace,
                             ) {
-                                self.toggle_power_state();
-                            } else if top_bar_command_hit(
-                                local,
-                                self.shell.top_bar.content_rect.width as i32,
-                            ) {
-                                self.toggle_command_palette();
-                            } else if top_bar_quick_settings_hit(
-                                local,
-                                self.shell.top_bar.content_rect.width as i32,
-                            ) {
-                                self.toggle_quick_settings();
+                                commands.push(SessionCommand::SwitchWorkspace(workspace_id));
+                            } else if top_bar_command_hit(local, top_bar_width) {
+                                let _ = self.activate_app(AppKind::Terminal);
+                            } else if let Some(kind) = top_bar_status_hit(local, top_bar_width) {
+                                match kind {
+                                    TopBarStatusKind::Cpu => self.push_notice(String::from(
+                                        "CPU telemetry panel is not wired yet; use Settings from the dock",
+                                    )),
+                                    TopBarStatusKind::Power => self.push_notice(String::from(
+                                        "Power controls are temporarily routed off the top bar to avoid lock-screen misfires",
+                                    )),
+                                    TopBarStatusKind::Net => self.push_notice(String::from(
+                                        "Network status is live; controls will return after the top-bar panel path is hardened",
+                                    )),
+                                    TopBarStatusKind::Vpn => self.push_notice(String::from(
+                                        "VPN status is live; controls will return after the top-bar panel path is hardened",
+                                    )),
+                                    TopBarStatusKind::Aud => self.push_notice(String::from(
+                                        "Audio status is live; controls will return after the top-bar panel path is hardened",
+                                    )),
+                                }
+                            } else if top_bar_time_hit(local, top_bar_width) {
+                                self.push_notice(String::from(
+                                    "Clock and session controls are temporarily top-bar read-only",
+                                ));
                             }
                         }
                     }
@@ -1007,7 +1572,9 @@ impl DesktopSession {
                         button: crate::gui::protocol::PointerButton::Right,
                         state: KeyState::Pressed,
                         ..
-                    } => self.cycle_switcher(),
+                    } => self.push_notice(String::from(
+                        "Top bar right click reserved; use Alt+Tab or the dock",
+                    )),
                     _ => {}
                 }
 
@@ -1057,19 +1624,31 @@ impl DesktopSession {
                 } else if is_backspace_key(input) {
                     self.shell.command_query.pop();
                     self.shell.command_selection = 0;
-                    self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::CommandPalette,
+                        InvalidationReason::StateChanged,
+                    );
                 } else if key_scan_pressed(input, 0x24) {
                     self.shell.command_selection = self.shell.command_selection.saturating_add(1);
-                    self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::CommandPalette,
+                        InvalidationReason::StateChanged,
+                    );
                 } else if key_scan_pressed(input, 0x25) {
                     self.shell.command_selection = self.shell.command_selection.saturating_sub(1);
-                    self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::CommandPalette,
+                        InvalidationReason::StateChanged,
+                    );
                 } else if let Some(ch) = printable_key(input) {
                     if self.shell.command_query.len() < 48 {
                         self.shell.command_query.push(ch);
                     }
                     self.shell.command_selection = 0;
-                    self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::CommandPalette,
+                        InvalidationReason::StateChanged,
+                    );
                 }
             }
 
@@ -1193,12 +1772,7 @@ impl DesktopSession {
                         ..
                     } => {
                         if let Some(local) = event.local_position {
-                            if let Some(workspace_id) = task_strip_workspace_hit(
-                                local,
-                                self.shell.task_strip.content_rect.width as usize,
-                            ) {
-                                commands.push(SessionCommand::SwitchWorkspace(workspace_id));
-                            } else if let Some(kind) = task_strip_app_hit(
+                            if let Some(kind) = task_strip_app_hit(
                                 local,
                                 self.shell.task_strip.content_rect.width as usize,
                             ) {
@@ -1206,7 +1780,9 @@ impl DesktopSession {
                                     crate::gui::protocol::PointerButton::Right => {
                                         self.open_context_menu(kind)
                                     }
-                                    _ => commands.push(SessionCommand::Activate(kind)),
+                                    _ => commands.push(SessionCommand::Launch(
+                                        self.launch_intent_for_app(kind, LaunchSource::TaskStrip),
+                                    )),
                                 }
                             }
                         }
@@ -1215,7 +1791,9 @@ impl DesktopSession {
                 }
 
                 if let Some(kind) = app_shortcut_from_input(input) {
-                    commands.push(SessionCommand::Activate(kind));
+                    commands.push(SessionCommand::Launch(
+                        self.launch_intent_for_app(kind, LaunchSource::TaskStrip),
+                    ));
                 } else {
                     match digit_key_pressed(input) {
                         _ if key_scan_pressed(input, 0x0F) => self.cycle_switcher(),
@@ -1237,7 +1815,9 @@ impl DesktopSession {
                                     crate::gui::protocol::PointerButton::Right => {
                                         self.open_context_menu(kind)
                                     }
-                                    _ => commands.push(SessionCommand::Activate(kind)),
+                                    _ => commands.push(SessionCommand::Launch(
+                                        self.launch_intent_for_app(kind, LaunchSource::Launcher),
+                                    )),
                                 }
                             }
                         }
@@ -1246,7 +1826,9 @@ impl DesktopSession {
                 }
 
                 if let Some(kind) = app_shortcut_from_input(input) {
-                    commands.push(SessionCommand::Activate(kind));
+                    commands.push(SessionCommand::Launch(
+                        self.launch_intent_for_app(kind, LaunchSource::Launcher),
+                    ));
                 } else if key_scan_pressed(input, 0x0F) {
                     self.cycle_switcher();
                 }
@@ -1267,17 +1849,34 @@ impl DesktopSession {
                                         let _ = self.shell.client.mark_notification_read(entry.id);
                                         if entry.action_label.is_some() {
                                             if let Some(kind) = app_kind_from_id(entry.app_id) {
-                                                commands.push(SessionCommand::Activate(kind));
+                                                commands.push(SessionCommand::Launch(
+                                                    self.launch_intent_for_app(
+                                                        kind,
+                                                        LaunchSource::Notification,
+                                                    ),
+                                                ));
                                             }
                                         }
                                         self.push_notice(format!(
                                             "Notification {} acknowledged",
                                             entry.id
                                         ));
-                                        self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
-                                        self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
-                                        self.invalidate_shell(InvalidationTarget::Dock, InvalidationReason::StateChanged);
-                                        self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
+                                        self.invalidate_shell(
+                                            InvalidationTarget::NotificationCenter,
+                                            InvalidationReason::StateChanged,
+                                        );
+                                        self.invalidate_shell(
+                                            InvalidationTarget::TopBar,
+                                            InvalidationReason::StateChanged,
+                                        );
+                                        self.invalidate_shell(
+                                            InvalidationTarget::Dock,
+                                            InvalidationReason::StateChanged,
+                                        );
+                                        self.invalidate_shell(
+                                            InvalidationTarget::Launcher,
+                                            InvalidationReason::StateChanged,
+                                        );
                                     }
                                 }
                             }
@@ -1288,10 +1887,16 @@ impl DesktopSession {
 
                 if key_scan_pressed(input, 0x24) {
                     self.shell.notification_index = self.shell.notification_index.saturating_add(1);
-                    self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::NotificationCenter,
+                        InvalidationReason::StateChanged,
+                    );
                 } else if key_scan_pressed(input, 0x25) {
                     self.shell.notification_index = self.shell.notification_index.saturating_sub(1);
-                    self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::NotificationCenter,
+                        InvalidationReason::StateChanged,
+                    );
                 } else if key_scan_pressed(input, 0x18) {
                     if let Ok(entries) = self.shell.client.list_notifications(6) {
                         let display_entries: Vec<_> = entries.into_iter().rev().collect();
@@ -1303,10 +1908,18 @@ impl DesktopSession {
                             let _ = self.shell.client.mark_notification_read(entry.id);
                             if entry.action_label.is_some() {
                                 if let Some(kind) = app_kind_from_id(entry.app_id) {
-                                    commands.push(SessionCommand::Activate(kind));
+                                    commands.push(SessionCommand::Launch(
+                                        self.launch_intent_for_app(
+                                            kind,
+                                            LaunchSource::Notification,
+                                        ),
+                                    ));
                                 }
                             }
-                            self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
+                            self.invalidate_shell(
+                                InvalidationTarget::NotificationCenter,
+                                InvalidationReason::StateChanged,
+                            );
                         }
                     }
                 } else if key_scan_pressed(input, 0x2E) {
@@ -1337,12 +1950,18 @@ impl DesktopSession {
                     self.resolve_pending_dialog(true);
                 } else if is_backspace_key(input) {
                     self.shell.dialog_input.pop();
-                    self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::Dialog,
+                        InvalidationReason::StateChanged,
+                    );
                 } else if is_escape_key(input) {
                     self.resolve_pending_dialog(false);
                 } else if let Some(ch) = printable_key(input) {
                     self.shell.dialog_input.push(ch);
-                    self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
+                    self.invalidate_shell(
+                        InvalidationTarget::Dialog,
+                        InvalidationReason::StateChanged,
+                    );
                 }
             }
         }
@@ -1350,9 +1969,20 @@ impl DesktopSession {
 
     fn apply_command(&mut self, command: SessionCommand) {
         match command {
-            SessionCommand::Activate(kind) => {
-                if let Err(err) = self.activate_app(kind) {
-                    self.push_notice(format!("{} launch failed: {}", kind.title(), err));
+            SessionCommand::Launch(intent) => {
+                if let Err(err) = self.dispatch_launch_intent(intent) {
+                    self.push_notice(format!(
+                        "{} launch failed: {}",
+                        intent.descriptor.title, err
+                    ));
+                }
+            }
+            SessionCommand::LaunchExternal(intent, path) => {
+                if let Err(err) = self.dispatch_external_launch_intent(intent, &path) {
+                    self.push_notice(format!(
+                        "{} launch failed: {}",
+                        intent.descriptor.title, err
+                    ));
                 }
             }
             SessionCommand::SwitchWorkspace(workspace_id) => {
@@ -1362,7 +1992,9 @@ impl DesktopSession {
             }
             SessionCommand::Notify(message) => self.push_notice(message),
             SessionCommand::OpenEditorPath(path) => {
-                if let Err(err) = self.activate_app(AppKind::Editor) {
+                let intent =
+                    self.launch_intent_for_app(AppKind::Editor, LaunchSource::DocumentOpen);
+                if let Err(err) = self.dispatch_launch_intent(intent) {
                     self.push_notice(format!("Editor launch failed: {}", err));
                     return;
                 }
@@ -1393,7 +2025,9 @@ impl DesktopSession {
                 ShellShortcut::ToggleOverview => self.toggle_overview(),
                 ShellShortcut::ToggleScratchpad => self.toggle_terminal_scratchpad(),
                 ShellShortcut::LaunchTerminal => {
-                    let _ = self.activate_app(AppKind::Terminal);
+                    let intent =
+                        self.launch_intent_for_app(AppKind::Terminal, LaunchSource::ShellShortcut);
+                    let _ = self.dispatch_launch_intent(intent);
                 }
             }
         }
@@ -1408,12 +2042,11 @@ impl DesktopSession {
 
     fn set_login_visibility(&mut self, visible: bool) {
         let stage_rail_visible = false;
-        set_shell_surface_visibility(
-            &self.shell.client,
-            &mut self.shell.lock_screen,
-            visible,
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.lock_screen, visible);
+        self.invalidate_shell(
+            InvalidationTarget::LockScreen,
+            InvalidationReason::StateChanged,
         );
-        self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
 
         set_shell_surface_visibility(&self.shell.client, &mut self.shell.top_bar, !visible);
         set_shell_surface_visibility(&self.shell.client, &mut self.shell.task_strip, !visible);
@@ -1430,13 +2063,23 @@ impl DesktopSession {
         set_shell_surface_visibility(&self.shell.client, &mut self.shell.context_menu, false);
         set_shell_surface_visibility(&self.shell.client, &mut self.shell.switcher, false);
 
-        self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::QuickSettings,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::CommandPalette,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Overview,
+            InvalidationReason::StateChanged,
+        );
 
         for window in [
             self.terminal.window.as_ref(),
             self.files.window.as_ref(),
+            self.browser.window.as_ref(),
             self.settings.window.as_ref(),
             self.editor.window.as_ref(),
         ] {
@@ -1460,6 +2103,12 @@ impl DesktopSession {
             &self.files.client,
             &mut self.files.window,
             self.files.workspace_id,
+            self.shell.active_workspace,
+        );
+        let _ = apply_workspace_visibility(
+            &self.browser.client,
+            &mut self.browser.window,
+            self.browser.workspace_id,
             self.shell.active_workspace,
         );
         let _ = apply_workspace_visibility(
@@ -1497,6 +2146,24 @@ impl DesktopSession {
             crate::boot::appliance::mark_boot_success();
             self.app_basket_committed = true;
         }
+
+        if app_basket_ready && self.suspend_resume_smoke_pending {
+            self.suspend_resume_smoke_pending = false;
+            crate::boot::appliance::clear_suspend_resume_smoke_request();
+            crate::serial_println!("[SMOKE] suspend-resume arm");
+            match crate::power::system_suspend() {
+                Ok(()) => {
+                    crate::serial_println!("[SMOKE] suspend-resume ok");
+                    self.push_notice(String::from("Suspend/resume smoke completed"));
+                    self.mark_shell_dirty();
+                }
+                Err(err) => {
+                    crate::serial_println!("[SMOKE] suspend-resume fail: {:?}", err);
+                    self.push_notice(String::from("Suspend/resume smoke failed"));
+                    self.mark_shell_dirty();
+                }
+            }
+        }
     }
 
     fn attempt_login(&mut self) {
@@ -1509,7 +2176,10 @@ impl DesktopSession {
         } else {
             self.shell.auth_input.clear();
             self.push_notice(String::from("Authentication failed"));
-            self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
+            self.invalidate_shell(
+                InvalidationTarget::LockScreen,
+                InvalidationReason::StateChanged,
+            );
         }
     }
 
@@ -1523,12 +2193,14 @@ impl DesktopSession {
         for entry in entries {
             if entry.health == AppHealth::Crashed && entry.auto_restore {
                 if let Some(kind) = app_kind_from_id(entry.app_id) {
-                    let _ = self.activate_app(kind);
-                    let _ = self
-                        .shell
-                        .client
-                        .clear_app_attention(Some("auto-restored after fault"));
-                    self.push_notice(format!("{} auto-restored", kind.title()));
+                    let intent = self.launch_intent_for_app(kind, LaunchSource::FaultRecovery);
+                    if self.dispatch_launch_intent(intent).is_ok() {
+                        let _ = self
+                            .shell
+                            .client
+                            .clear_app_attention(Some("auto-restored after fault"));
+                        self.push_notice(format!("{} auto-restored", kind.title()));
+                    }
                 }
             }
         }
@@ -1608,6 +2280,7 @@ impl DesktopSession {
         let _ = self.shell.client.publish_accessibility_tree(nodes);
         self.terminal.publish_accessibility();
         self.files.publish_accessibility();
+        self.browser.publish_accessibility();
         self.settings.publish_accessibility();
         self.editor.publish_accessibility();
     }
@@ -1616,6 +2289,7 @@ impl DesktopSession {
         let has_window = match kind {
             AppKind::Terminal => self.terminal.window.is_some(),
             AppKind::Files => self.files.window.is_some(),
+            AppKind::Browser => self.browser.window.is_some(),
             AppKind::Settings => self.settings.window.is_some(),
             AppKind::Editor => self.editor.window.is_some(),
         };
@@ -1636,6 +2310,12 @@ impl DesktopSession {
                     self.files.workspace_id = self.shell.active_workspace;
                 }
                 self.files.ensure_window(self.screen)?
+            }
+            AppKind::Browser => {
+                if self.browser.window.is_none() {
+                    self.browser.workspace_id = self.shell.active_workspace;
+                }
+                self.browser.ensure_window(self.screen)?
             }
             AppKind::Settings => {
                 if self.settings.window.is_none() {
@@ -1663,6 +2343,21 @@ impl DesktopSession {
         Ok(())
     }
 
+    fn open_files_path(&mut self, path: &str) -> Result<(), String> {
+        self.files.current_path = String::from(path);
+        if self.files.window.is_some() {
+            self.files.refresh()?;
+        }
+        self.activate_app(AppKind::Files)
+    }
+
+    fn open_settings_hub(&mut self, detail: &str) -> Result<(), String> {
+        self.settings.dirty = true;
+        self.activate_app(AppKind::Settings)?;
+        self.push_notice(String::from(detail));
+        Ok(())
+    }
+
     fn push_notice(&mut self, notice: String) {
         if self.settings.notifications {
             let _ = self
@@ -1674,23 +2369,103 @@ impl DesktopSession {
         while self.shell.notices.len() > 8 {
             self.shell.notices.remove(0);
         }
-        self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::NotificationCenter,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Launcher,
+            InvalidationReason::StateChanged,
+        );
         self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
         self.invalidate_shell(InvalidationTarget::Dock, InvalidationReason::StateChanged);
     }
 
+    fn select_desktop_shortcut(&mut self, selection: Option<DesktopShortcutKind>) {
+        if self.shell.selected_shortcut != selection {
+            self.shell.selected_shortcut = selection;
+            self.invalidate_shell(
+                InvalidationTarget::Wallpaper,
+                InvalidationReason::FocusChanged,
+            );
+        }
+    }
+
+    fn activate_desktop_shortcut(
+        &mut self,
+        shortcut: DesktopShortcutKind,
+        commands: &mut Vec<SessionCommand>,
+    ) {
+        commands.push(SessionCommand::Launch(
+            self.launch_intent_for_shortcut(shortcut, LaunchSource::DesktopShortcut),
+        ));
+    }
+
+    fn open_desktop_shortcut_context(
+        &mut self,
+        shortcut: DesktopShortcutKind,
+        commands: &mut Vec<SessionCommand>,
+    ) {
+        if let Some(kind) = shortcut.app_kind() {
+            self.open_context_menu(kind);
+            return;
+        }
+
+        match shortcut {
+            DesktopShortcutKind::Web => {
+                commands.push(SessionCommand::Launch(
+                    self.launch_intent_for_shortcut(shortcut, LaunchSource::ContextMenu),
+                ));
+            }
+            DesktopShortcutKind::RecycleBin => {
+                commands.push(SessionCommand::Launch(
+                    self.launch_intent_for_shortcut(shortcut, LaunchSource::ContextMenu),
+                ));
+            }
+            DesktopShortcutKind::Terminal
+            | DesktopShortcutKind::Files
+            | DesktopShortcutKind::Settings => {
+                self.activate_desktop_shortcut(shortcut, commands);
+            }
+        }
+    }
+
     fn mark_shell_dirty(&mut self) {
+        self.invalidate_shell(
+            InvalidationTarget::Wallpaper,
+            InvalidationReason::StateChanged,
+        );
         self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
         self.invalidate_shell(InvalidationTarget::Dock, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::Launcher,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::NotificationCenter,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::QuickSettings,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::CommandPalette,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Overview,
+            InvalidationReason::StateChanged,
+        );
         self.invalidate_shell(InvalidationTarget::Dialog, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::ContextMenu, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::Switcher, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::ContextMenu,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Switcher,
+            InvalidationReason::StateChanged,
+        );
     }
 
     fn switch_workspace(&mut self, workspace_id: u8) -> Result<(), String> {
@@ -1720,6 +2495,12 @@ impl DesktopSession {
             &self.files.client,
             &mut self.files.window,
             self.files.workspace_id,
+            self.shell.active_workspace,
+        )?;
+        apply_workspace_visibility(
+            &self.browser.client,
+            &mut self.browser.window,
+            self.browser.workspace_id,
             self.shell.active_workspace,
         )?;
         apply_workspace_visibility(
@@ -1753,9 +2534,178 @@ impl DesktopSession {
         match kind {
             AppKind::Terminal => self.terminal.workspace_id,
             AppKind::Files => self.files.workspace_id,
+            AppKind::Browser => self.browser.workspace_id,
             AppKind::Settings => self.settings.workspace_id,
             AppKind::Editor => self.editor.workspace_id,
         }
+    }
+
+    fn app_has_window(&self, kind: AppKind) -> bool {
+        match kind {
+            AppKind::Terminal => self.terminal.window.is_some(),
+            AppKind::Files => self.files.window.is_some(),
+            AppKind::Browser => self.browser.window.is_some(),
+            AppKind::Settings => self.settings.window.is_some(),
+            AppKind::Editor => self.editor.window.is_some(),
+        }
+    }
+
+    fn launch_intent_for_app(&self, kind: AppKind, source: LaunchSource) -> LaunchIntent {
+        LaunchIntent::new(
+            kind.descriptor(),
+            ExecutionContext::new(source, self.shell.active_workspace, kind.title()),
+        )
+    }
+
+    fn launch_intent_for_shortcut(
+        &self,
+        shortcut: DesktopShortcutKind,
+        source: LaunchSource,
+    ) -> LaunchIntent {
+        LaunchIntent::new(
+            shortcut.descriptor(),
+            ExecutionContext::new(source, self.shell.active_workspace, shortcut.route_label()),
+        )
+    }
+
+    fn launch_registry(&self) -> [PackageRecord; 9] {
+        desktop_launch_registry()
+    }
+
+    fn launch_resolution(&self, query: &str) -> Option<AppResolution> {
+        let registry = self.launch_registry();
+        crate::runtime::RuntimePackageRegistry::new(&registry)
+            .resolve_with_probe(query, launch_path_exists)
+    }
+
+    fn evaluate_launch_policy(&self, intent: &LaunchIntent) -> Result<(), String> {
+        for permission in intent
+            .descriptor
+            .capabilities
+            .permissions()
+            .into_iter()
+            .flatten()
+        {
+            if self.shell.client.permission_state(permission)? == PermissionState::Denied {
+                return Err(format!(
+                    "policy gate blocked {}: {:?} denied",
+                    intent.descriptor.title, permission
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn dispatch_launch_session(
+        &mut self,
+        session: LaunchSession,
+        path: Option<&str>,
+    ) -> Result<(), String> {
+        match session.process.bootstrap {
+            RuntimeBootstrap::NativeWindowed => {
+                if let Some(path) = path {
+                    let title = session.intent.descriptor.title;
+                    let task_name = session.intent.descriptor.slug;
+                    let runtime = crate::runtime::spawn_native_runtime(
+                        session,
+                        crate::task::task::Priority::Normal,
+                        task_name,
+                        path,
+                    )?;
+                    self.push_notice(format!(
+                        "{} launched through Native SDK runtime (rt#{})",
+                        title, runtime.id
+                    ));
+                    return Ok(());
+                }
+                let _ = crate::runtime::register_launch_session(
+                    session,
+                    None,
+                    None,
+                    None,
+                    crate::runtime::IsolationDomain::KernelTask,
+                    None,
+                );
+                let Some(kind) = app_kind_from_id(session.window.app_id) else {
+                    return Err(format!(
+                        "launch resolution lost native descriptor for app {}",
+                        session.intent.descriptor.title
+                    ));
+                };
+                if !self.app_has_window(kind)
+                    && self.shell.active_workspace != session.window.workspace_id
+                {
+                    self.switch_workspace(session.window.workspace_id)?;
+                }
+                self.activate_app(kind)
+            }
+            RuntimeBootstrap::NativeSpecialAction => match session.window.app_id {
+                RECYCLE_SHORTCUT_APP_ID => {
+                    let _ = crate::runtime::register_launch_session(
+                        session,
+                        None,
+                        None,
+                        None,
+                        crate::runtime::IsolationDomain::KernelTask,
+                        None,
+                    );
+                    self.push_notice(String::from("Recycle Bin is empty"));
+                    Ok(())
+                }
+                app_id => Err(format!("native special action {} not resolved", app_id)),
+            },
+            RuntimeBootstrap::NativeHeadless => Err(String::from(
+                "headless runtime cannot be launched from desktop surface",
+            )),
+            RuntimeBootstrap::Win32Bridge => {
+                let path = path.ok_or_else(|| String::from("PE launch path missing"))?;
+                let image = load_launch_image(path)?;
+                crate::posix::prepare_windows_launch(&image)
+                    .map_err(format_windows_launch_error)?;
+                let runtime = crate::runtime::spawn_pe_runtime(
+                    session,
+                    &image,
+                    crate::task::task::Priority::Normal,
+                    "pe-runtime",
+                    Some(path),
+                )?;
+                self.push_notice(format!(
+                    "{} routed through Win32 bridge (rt#{})",
+                    path, runtime.id
+                ));
+                Ok(())
+            }
+            RuntimeBootstrap::PosixBridge => {
+                let path = path.ok_or_else(|| String::from("ELF launch path missing"))?;
+                let image = load_launch_image(path)?;
+                let runtime = crate::runtime::spawn_elf_runtime(
+                    session,
+                    &image,
+                    crate::task::task::Priority::Normal,
+                    "elf-runtime",
+                    Some(path),
+                )?;
+                self.push_notice(format!(
+                    "{} routed through POSIX bridge (rt#{})",
+                    path, runtime.id
+                ));
+                Ok(())
+            }
+        }
+    }
+
+    fn dispatch_launch_intent(&mut self, intent: LaunchIntent) -> Result<(), String> {
+        self.evaluate_launch_policy(&intent)?;
+        self.dispatch_launch_session(intent.canonical_session(), None)
+    }
+
+    fn dispatch_external_launch_intent(
+        &mut self,
+        intent: LaunchIntent,
+        path: &str,
+    ) -> Result<(), String> {
+        self.evaluate_launch_policy(&intent)?;
+        self.dispatch_launch_session(intent.canonical_session(), Some(path))
     }
 
     fn cycle_switcher(&mut self) {
@@ -1783,7 +2733,10 @@ impl DesktopSession {
             .shell
             .client
             .focus_window(self.shell.switcher.window_id);
-        self.invalidate_shell(InvalidationTarget::Switcher, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::Switcher,
+            InvalidationReason::StateChanged,
+        );
     }
 
     fn close_switcher(&mut self) {
@@ -1795,7 +2748,10 @@ impl DesktopSession {
                 self.settings.animations,
                 0.12,
             );
-            self.invalidate_shell(InvalidationTarget::Switcher, InvalidationReason::StateChanged);
+            self.invalidate_shell(
+                InvalidationTarget::Switcher,
+                InvalidationReason::StateChanged,
+            );
         }
     }
 
@@ -1807,7 +2763,8 @@ impl DesktopSession {
         }
         let selected = candidates[self.shell.switcher_index.min(candidates.len() - 1)];
         self.close_switcher();
-        let _ = self.activate_app(selected);
+        let intent = self.launch_intent_for_app(selected, LaunchSource::ShellShortcut);
+        let _ = self.dispatch_launch_intent(intent);
     }
 
     fn toggle_command_palette(&mut self) {
@@ -1832,7 +2789,10 @@ impl DesktopSession {
             .client
             .focus_window(self.shell.command_palette.window_id);
         self.shell.command_selection = 0;
-        self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::CommandPalette,
+            InvalidationReason::StateChanged,
+        );
     }
 
     fn close_command_palette(&mut self) {
@@ -1846,7 +2806,10 @@ impl DesktopSession {
             );
             self.shell.command_query.clear();
             self.shell.command_selection = 0;
-            self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
+            self.invalidate_shell(
+                InvalidationTarget::CommandPalette,
+                InvalidationReason::StateChanged,
+            );
         }
     }
 
@@ -1869,7 +2832,35 @@ impl DesktopSession {
                 .client
                 .focus_window(self.shell.quick_settings.window_id);
         }
-        self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::QuickSettings,
+            InvalidationReason::StateChanged,
+        );
+    }
+
+    fn toggle_notifications_center(&mut self) {
+        if self.is_locked() {
+            return;
+        }
+        self.close_command_palette();
+        let next_visible = !self.shell.notifications.desired_visible;
+        animate_shell_surface(
+            &self.shell.client,
+            &mut self.shell.notifications,
+            next_visible,
+            self.settings.animations,
+            0.14,
+        );
+        if next_visible {
+            let _ = self
+                .shell
+                .client
+                .focus_window(self.shell.notifications.window_id);
+        }
+        self.invalidate_shell(
+            InvalidationTarget::NotificationCenter,
+            InvalidationReason::StateChanged,
+        );
     }
 
     fn apply_quick_settings_toggle(&mut self, index: usize, commands: &mut Vec<SessionCommand>) {
@@ -1900,7 +2891,10 @@ impl DesktopSession {
                     }
                 ));
                 self.settings.dirty = true;
-                self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::QuickSettings,
+                    InvalidationReason::StateChanged,
+                );
             }
             2 => {
                 self.settings.animations = !self.settings.animations;
@@ -1913,14 +2907,23 @@ impl DesktopSession {
                     }
                 ));
                 self.settings.dirty = true;
-                self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::QuickSettings,
+                    InvalidationReason::StateChanged,
+                );
             }
             3 => self.toggle_power_state(),
             4 => {
                 let _ = self.shell.client.clear_notifications();
                 self.push_notice(String::from("Notifications cleared"));
-                self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
-                self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::NotificationCenter,
+                    InvalidationReason::StateChanged,
+                );
+                self.invalidate_shell(
+                    InvalidationTarget::QuickSettings,
+                    InvalidationReason::StateChanged,
+                );
             }
             5 => {
                 commands.push(SessionCommand::SwitchWorkspace(0));
@@ -1957,6 +2960,20 @@ impl DesktopSession {
             title: String::from("Open Editor"),
             category: String::from("Apps"),
             shortcut: String::from("4"),
+            enabled: true,
+        });
+        actions.push(CommandPaletteAction {
+            id: 5,
+            title: String::from("Open Web"),
+            category: String::from("Apps"),
+            shortcut: String::from("5"),
+            enabled: true,
+        });
+        actions.push(CommandPaletteAction {
+            id: 6,
+            title: String::from("Open Recycle Bin"),
+            category: String::from("Apps"),
+            shortcut: String::from("6"),
             enabled: true,
         });
         for workspace_id in 0..WORKSPACE_COUNT {
@@ -2026,14 +3043,41 @@ impl DesktopSession {
             return self.command_palette_actions();
         }
 
-        self.command_palette_actions()
+        let mut actions: Vec<_> = self
+            .command_palette_actions()
             .into_iter()
             .filter(|action| {
                 action.enabled
                     && (action.title.to_ascii_lowercase().contains(&query)
                         || action.category.to_ascii_lowercase().contains(&query))
             })
-            .collect()
+            .collect();
+        if let Some(action) = self.external_palette_action(self.shell.command_query.trim()) {
+            actions.push(action);
+        }
+        actions
+    }
+
+    fn external_palette_action(&self, query: &str) -> Option<CommandPaletteAction> {
+        let resolution = self.launch_resolution(query)?;
+        let descriptor = resolution.descriptor();
+        let path = resolution.path().unwrap_or(descriptor.title);
+        let category = if resolution.missing_candidates().is_some() {
+            String::from("Win32 Bridge Missing")
+        } else {
+            String::from(match descriptor.loader {
+                LoaderDispatch::Pe => "Win32 Bridge",
+                LoaderDispatch::Elf => "POSIX Bridge",
+                LoaderDispatch::Native => "Native",
+            })
+        };
+        Some(CommandPaletteAction {
+            id: 90,
+            title: format!("Launch {} ({})", path, descriptor.title),
+            category,
+            shortcut: String::from("Enter"),
+            enabled: true,
+        })
     }
 
     fn execute_command_palette_selection(&mut self, commands: &mut Vec<SessionCommand>) {
@@ -2047,10 +3091,26 @@ impl DesktopSession {
             .min(actions.len().saturating_sub(1));
         let selected = &actions[index];
         match selected.id {
-            1 => commands.push(SessionCommand::Activate(AppKind::Terminal)),
-            2 => commands.push(SessionCommand::Activate(AppKind::Files)),
-            3 => commands.push(SessionCommand::Activate(AppKind::Settings)),
-            4 => commands.push(SessionCommand::Activate(AppKind::Editor)),
+            1 => commands.push(SessionCommand::Launch(
+                self.launch_intent_for_app(AppKind::Terminal, LaunchSource::CommandPalette),
+            )),
+            2 => commands.push(SessionCommand::Launch(
+                self.launch_intent_for_app(AppKind::Files, LaunchSource::CommandPalette),
+            )),
+            3 => commands.push(SessionCommand::Launch(
+                self.launch_intent_for_app(AppKind::Settings, LaunchSource::CommandPalette),
+            )),
+            4 => commands.push(SessionCommand::Launch(
+                self.launch_intent_for_app(AppKind::Editor, LaunchSource::CommandPalette),
+            )),
+            5 => commands.push(SessionCommand::Launch(self.launch_intent_for_shortcut(
+                DesktopShortcutKind::Web,
+                LaunchSource::CommandPalette,
+            ))),
+            6 => commands.push(SessionCommand::Launch(self.launch_intent_for_shortcut(
+                DesktopShortcutKind::RecycleBin,
+                LaunchSource::CommandPalette,
+            ))),
             10..=17 => commands.push(SessionCommand::SwitchWorkspace((selected.id - 10) as u8)),
             20 => self.apply_quick_settings_toggle(0, commands),
             21 => self.toggle_quick_settings(),
@@ -2061,6 +3121,30 @@ impl DesktopSession {
             24 => {
                 if let Ok(entry) = self.shell.client.capture_screen("palette") {
                     self.push_notice(format!("Captured screen {}", entry.id));
+                }
+            }
+            90 => {
+                let query = self.shell.command_query.trim();
+                if let Some(resolution) = self.launch_resolution(query) {
+                    if let Some(candidates) = resolution.missing_candidates() {
+                        self.push_notice(format!(
+                            "{} binary not found; searched {}",
+                            resolution.descriptor().title,
+                            candidates.join(", ")
+                        ));
+                        self.close_command_palette();
+                        return;
+                    }
+                    let intent = resolution.launch_intent(ExecutionContext::new(
+                        LaunchSource::CommandPalette,
+                        self.shell.active_workspace,
+                        "command-palette-external",
+                    ));
+                    if let Some(path) = resolution.path() {
+                        commands.push(SessionCommand::LaunchExternal(intent, path.to_string()));
+                    } else {
+                        commands.push(SessionCommand::Launch(intent));
+                    }
                 }
             }
             _ => {}
@@ -2099,7 +3183,10 @@ impl DesktopSession {
                 .iter()
                 .position(|set| set.id as u8 == self.shell.active_workspace)
                 .unwrap_or(0);
-            self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+            self.invalidate_shell(
+                InvalidationTarget::Overview,
+                InvalidationReason::StateChanged,
+            );
         }
     }
 
@@ -2138,7 +3225,10 @@ impl DesktopSession {
             let _ = self.shell.client.focus_window(window_id);
         }
         self.shell.active_stage_set = index.min(self.shell.stage_sets.len().saturating_sub(1));
-        self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::Overview,
+            InvalidationReason::StateChanged,
+        );
     }
 
     fn toggle_overview(&mut self) {
@@ -2160,7 +3250,10 @@ impl DesktopSession {
                 .client
                 .focus_window(self.shell.stage_rail.window_id);
         }
-        self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::Overview,
+            InvalidationReason::StateChanged,
+        );
         self.push_notice(if visible {
             String::from("Workspace overview open")
         } else {
@@ -2174,7 +3267,8 @@ impl DesktopSession {
         }
         if self.terminal.window.is_none() {
             self.terminal.workspace_id = self.shell.active_workspace;
-            let _ = self.activate_app(AppKind::Terminal);
+            let intent = self.launch_intent_for_app(AppKind::Terminal, LaunchSource::ShellShortcut);
+            let _ = self.dispatch_launch_intent(intent);
         }
         let Some(window) = self.terminal.window.as_mut() else {
             return;
@@ -2247,7 +3341,10 @@ impl DesktopSession {
         }
         self.push_notice(format!("Session {}", power_state_label(next)));
         self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
-        self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::Launcher,
+            InvalidationReason::StateChanged,
+        );
     }
 
     fn open_context_menu(&mut self, kind: AppKind) {
@@ -2267,7 +3364,10 @@ impl DesktopSession {
             .shell
             .client
             .focus_window(self.shell.context_menu.window_id);
-        self.invalidate_shell(InvalidationTarget::ContextMenu, InvalidationReason::StateChanged);
+        self.invalidate_shell(
+            InvalidationTarget::ContextMenu,
+            InvalidationReason::StateChanged,
+        );
     }
 
     fn close_context_menu(&mut self) {
@@ -2280,7 +3380,10 @@ impl DesktopSession {
                 self.settings.animations,
                 0.12,
             );
-            self.invalidate_shell(InvalidationTarget::ContextMenu, InvalidationReason::StateChanged);
+            self.invalidate_shell(
+                InvalidationTarget::ContextMenu,
+                InvalidationReason::StateChanged,
+            );
         }
     }
 
@@ -2290,7 +3393,10 @@ impl DesktopSession {
         };
 
         let result = match action {
-            ContextAction::Focus => self.activate_app(kind),
+            ContextAction::Focus => {
+                let intent = self.launch_intent_for_app(kind, LaunchSource::ContextMenu);
+                self.dispatch_launch_intent(intent)
+            }
             ContextAction::Minimize => self.minimize_app(kind),
             ContextAction::SnapLeft => self.snap_app(kind, SnapLayout::Left),
             ContextAction::SnapRight => self.snap_app(kind, SnapLayout::Right),
@@ -2317,6 +3423,11 @@ impl DesktopSession {
                 &self.files.client,
                 &mut self.files.window,
                 self.files.workspace_id,
+            )?,
+            AppKind::Browser => minimize_app_window(
+                &self.browser.client,
+                &mut self.browser.window,
+                self.browser.workspace_id,
             )?,
             AppKind::Settings => minimize_app_window(
                 &self.settings.client,
@@ -2347,6 +3458,12 @@ impl DesktopSession {
                 &mut self.files.window,
                 &mut self.files.dirty,
                 self.files.workspace_id,
+            )?,
+            AppKind::Browser => close_app_window(
+                &self.browser.client,
+                &mut self.browser.window,
+                &mut self.browser.dirty,
+                self.browser.workspace_id,
             )?,
             AppKind::Settings => close_app_window(
                 &self.settings.client,
@@ -2382,6 +3499,12 @@ impl DesktopSession {
                 &mut self.files.workspace_id,
                 self.shell.active_workspace,
             )?,
+            AppKind::Browser => move_app_workspace(
+                &self.browser.client,
+                &mut self.browser.window,
+                &mut self.browser.workspace_id,
+                self.shell.active_workspace,
+            )?,
             AppKind::Settings => move_app_workspace(
                 &self.settings.client,
                 &mut self.settings.window,
@@ -2414,6 +3537,12 @@ impl DesktopSession {
             AppKind::Files => snap_app_window(
                 &self.files.client,
                 &mut self.files.window,
+                work_area,
+                layout,
+            )?,
+            AppKind::Browser => snap_app_window(
+                &self.browser.client,
+                &mut self.browser.window,
                 work_area,
                 layout,
             )?,
@@ -2488,6 +3617,7 @@ impl DesktopSession {
         let client = match app_kind_from_id(app_id) {
             Some(AppKind::Terminal) => &self.terminal.client,
             Some(AppKind::Files) => &self.files.client,
+            Some(AppKind::Browser) => &self.browser.client,
             Some(AppKind::Settings) => &self.settings.client,
             Some(AppKind::Editor) => &self.editor.client,
             None => return Ok(()),
@@ -2521,6 +3651,26 @@ impl DesktopSession {
     }
 
     fn sync_window_states(&mut self) {
+        if sync_shell_window(&self.shell.client, &mut self.shell.desktop).is_none() {
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.desktop,
+                "Desktop Shortcuts",
+                desktop_surface_rect(self.screen),
+                0,
+                LayerRole::Background,
+                true,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(
+                    InvalidationTarget::Wallpaper,
+                    InvalidationReason::StateChanged,
+                );
+                self.push_notice(String::from("Desktop shortcuts restored"));
+            }
+        }
+
         if sync_shell_window(&self.shell.client, &mut self.shell.top_bar).is_none() {
             if restore_shell_window(
                 &self.shell.client,
@@ -2578,7 +3728,10 @@ impl DesktopSession {
             )
             .is_ok()
             {
-                self.invalidate_shell(InvalidationTarget::Launcher, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::Launcher,
+                    InvalidationReason::StateChanged,
+                );
                 self.push_notice(String::from("Session Shell restored"));
             }
         }
@@ -2595,7 +3748,10 @@ impl DesktopSession {
             )
             .is_ok()
             {
-                self.invalidate_shell(InvalidationTarget::NotificationCenter, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::NotificationCenter,
+                    InvalidationReason::StateChanged,
+                );
                 self.push_notice(String::from("Notifications restored"));
             }
         }
@@ -2612,7 +3768,10 @@ impl DesktopSession {
             )
             .is_ok()
             {
-                self.invalidate_shell(InvalidationTarget::QuickSettings, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::QuickSettings,
+                    InvalidationReason::StateChanged,
+                );
                 self.push_notice(String::from("Quick Settings restored"));
             }
         }
@@ -2634,7 +3793,10 @@ impl DesktopSession {
             )
             .is_ok()
             {
-                self.invalidate_shell(InvalidationTarget::CommandPalette, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::CommandPalette,
+                    InvalidationReason::StateChanged,
+                );
                 self.push_notice(String::from("Command Palette restored"));
             }
         }
@@ -2652,7 +3814,10 @@ impl DesktopSession {
             )
             .is_ok()
             {
-                self.invalidate_shell(InvalidationTarget::Overview, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::Overview,
+                    InvalidationReason::StateChanged,
+                );
                 self.push_notice(String::from("Workspace Overview restored"));
             }
         }
@@ -2696,7 +3861,10 @@ impl DesktopSession {
             )
             .is_ok()
             {
-                self.invalidate_shell(InvalidationTarget::ContextMenu, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::ContextMenu,
+                    InvalidationReason::StateChanged,
+                );
                 self.push_notice(String::from("Context Menu restored"));
             }
         }
@@ -2719,7 +3887,10 @@ impl DesktopSession {
             )
             .is_ok()
             {
-                self.invalidate_shell(InvalidationTarget::Switcher, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::Switcher,
+                    InvalidationReason::StateChanged,
+                );
                 self.push_notice(String::from("App Switcher restored"));
             }
         }
@@ -2742,7 +3913,10 @@ impl DesktopSession {
             )
             .is_ok()
             {
-                self.invalidate_shell(InvalidationTarget::LockScreen, InvalidationReason::StateChanged);
+                self.invalidate_shell(
+                    InvalidationTarget::LockScreen,
+                    InvalidationReason::StateChanged,
+                );
                 self.push_notice(String::from("Login restored"));
             }
         }
@@ -2751,6 +3925,9 @@ impl DesktopSession {
             self.mark_shell_dirty();
         }
         if self.files.sync(self.shell.active_workspace) {
+            self.mark_shell_dirty();
+        }
+        if self.browser.sync(self.shell.active_workspace) {
             self.mark_shell_dirty();
         }
         if self.settings.sync(self.shell.active_workspace) {
@@ -2805,10 +3982,22 @@ impl DesktopSession {
         };
 
         let selection = if accept {
-            let path = if self.shell.dialog_input.is_empty() {
+            let raw_path = if self.shell.dialog_input.is_empty() {
                 dialog_default_path(&request)
             } else {
                 self.shell.dialog_input.clone()
+            };
+            let path = match validate_dialog_selection(&request, &raw_path) {
+                Ok(path) => path,
+                Err(err) => {
+                    self.shell.pending_dialog = Some(request);
+                    self.push_notice(err);
+                    self.invalidate_shell(
+                        InvalidationTarget::Dialog,
+                        InvalidationReason::StateChanged,
+                    );
+                    return;
+                }
             };
             if matches!(
                 request.kind,
@@ -2867,14 +4056,32 @@ impl DesktopSession {
         let theme_mode = self.shell.theme_mode;
         let _pending_reasons = frame_plan.pending.as_slice();
 
+        if frame_plan.touches(InvalidationTarget::Wallpaper) {
+            let width = self.shell.desktop.content_rect.width as usize;
+            let height = self.shell.desktop.content_rect.height as usize;
+            self.shell.client.commit_scene(
+                self.shell.desktop.window_id,
+                raster_surface_scene(
+                    self.shell.desktop.window_id,
+                    width,
+                    height,
+                    paint_desktop_shortcuts_surface(
+                        width,
+                        height,
+                        theme_mode,
+                        self.shell.selected_shortcut,
+                    ),
+                    DamageLane::Shell,
+                ),
+            )?;
+        }
+
         if frame_plan.touches(InvalidationTarget::TopBar) {
             let width = self.shell.top_bar.content_rect.width as usize;
             let height = self.shell.top_bar.content_rect.height as usize;
-            self.shell.client.commit_scene(
-                self.shell.top_bar.window_id,
-                build_top_bar_scene(
-                    self.shell.top_bar.window_id,
-                    &mut self.text_system,
+            self.commit_shell_surface(
+                &self.shell.top_bar,
+                paint_top_bar_surface(
                     width,
                     height,
                     self.shell.active_workspace,
@@ -2887,11 +4094,9 @@ impl DesktopSession {
         if frame_plan.touches(InvalidationTarget::Dock) {
             let width = self.shell.task_strip.content_rect.width as usize;
             let height = self.shell.task_strip.content_rect.height as usize;
-            self.shell.client.commit_scene(
-                self.shell.task_strip.window_id,
-                build_task_strip_scene(
-                    self.shell.task_strip.window_id,
-                    &mut self.text_system,
+            self.commit_shell_surface(
+                &self.shell.task_strip,
+                paint_task_strip_surface(
                     width,
                     height,
                     &snapshots,
@@ -2908,73 +4113,55 @@ impl DesktopSession {
         {
             let width = self.shell.launcher.content_rect.width as usize;
             let height = self.shell.launcher.content_rect.height as usize;
-            let slide_px =
-                (((1.0 - self.shell.launcher.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
-            self.shell.client.commit_scene(
-                self.shell.launcher.window_id,
-                apply_scene_overlay_transform(
-                    build_launcher_scene(
-                        self.shell.launcher.window_id,
-                        &mut self.text_system,
-                        width,
-                        height,
-                        &snapshots,
-                        &session_snapshot,
-                        &self.shell.notices,
-                        theme_mode,
-                        self.shell.layout_profile,
-                    ),
-                    self.shell.launcher.opacity,
-                    slide_px,
+            self.commit_shell_surface(
+                &self.shell.launcher,
+                paint_launcher_surface(
+                    width,
+                    height,
+                    &snapshots,
+                    &session_snapshot,
+                    &self.shell.notices,
+                    theme_mode,
+                    self.shell.layout_profile,
                 ),
             )?;
         }
 
-        if frame_plan.touches(InvalidationTarget::NotificationCenter) && self.shell.notifications.visible
+        if frame_plan.touches(InvalidationTarget::NotificationCenter)
+            && self.shell.notifications.visible
         {
-            let entries = self.shell.client.list_notifications(6).unwrap_or_else(|_| Vec::new());
+            let entries = self
+                .shell
+                .client
+                .list_notifications(6)
+                .unwrap_or_else(|_| Vec::new());
             let width = self.shell.notifications.content_rect.width as usize;
             let height = self.shell.notifications.content_rect.height as usize;
-            let slide_px =
-                (((1.0 - self.shell.notifications.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
-            self.shell.client.commit_scene(
-                self.shell.notifications.window_id,
-                apply_scene_overlay_transform(
-                    build_notifications_scene(
-                        self.shell.notifications.window_id,
-                        &mut self.text_system,
-                        width,
-                        height,
-                        &entries,
-                        self.shell.notification_index,
-                        theme_mode,
-                    ),
-                    self.shell.notifications.opacity,
-                    slide_px,
+            self.commit_shell_surface(
+                &self.shell.notifications,
+                paint_notifications_surface(
+                    width,
+                    height,
+                    &entries,
+                    self.shell.notification_index,
+                    theme_mode,
                 ),
             )?;
         }
 
-        if frame_plan.touches(InvalidationTarget::QuickSettings) && self.shell.quick_settings.visible
+        if frame_plan.touches(InvalidationTarget::QuickSettings)
+            && self.shell.quick_settings.visible
         {
             let width = self.shell.quick_settings.content_rect.width as usize;
             let height = self.shell.quick_settings.content_rect.height as usize;
-            let slide_px =
-                (((1.0 - self.shell.quick_settings.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
-            self.shell.client.commit_scene(
-                self.shell.quick_settings.window_id,
-                apply_scene_overlay_transform(
-                    build_quick_settings_scene(
-                        self.shell.quick_settings.window_id,
-                        &mut self.text_system,
-                        width,
-                        height,
-                        theme_mode,
-                        self.settings.notifications,
-                        self.settings.animations,
-                    ),
-                    self.shell.quick_settings.opacity,
-                    slide_px,
+            self.commit_shell_surface(
+                &self.shell.quick_settings,
+                paint_quick_settings_surface(
+                    width,
+                    height,
+                    theme_mode,
+                    self.settings.notifications,
+                    self.settings.animations,
                 ),
             )?;
         }
@@ -2985,24 +4172,15 @@ impl DesktopSession {
             let actions = self.filtered_palette_actions();
             let width = self.shell.command_palette.content_rect.width as usize;
             let height = self.shell.command_palette.content_rect.height as usize;
-            let slide_px =
-                (((1.0 - self.shell.command_palette.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5)
-                    as i32;
-            self.shell.client.commit_scene(
-                self.shell.command_palette.window_id,
-                apply_scene_overlay_transform(
-                    build_command_palette_scene(
-                        self.shell.command_palette.window_id,
-                        &mut self.text_system,
-                        width,
-                        height,
-                        &actions,
-                        &self.shell.command_query,
-                        self.shell.command_selection,
-                        theme_mode,
-                    ),
-                    self.shell.command_palette.opacity,
-                    slide_px,
+            self.commit_shell_surface(
+                &self.shell.command_palette,
+                paint_command_palette_surface(
+                    width,
+                    height,
+                    &actions,
+                    &self.shell.command_query,
+                    self.shell.command_selection,
+                    theme_mode,
                 ),
             )?;
         }
@@ -3010,22 +4188,14 @@ impl DesktopSession {
         if frame_plan.touches(InvalidationTarget::Overview) && self.shell.stage_rail.visible {
             let width = self.shell.stage_rail.content_rect.width as usize;
             let height = self.shell.stage_rail.content_rect.height as usize;
-            let slide_px =
-                (((1.0 - self.shell.stage_rail.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
-            self.shell.client.commit_scene(
-                self.shell.stage_rail.window_id,
-                apply_scene_overlay_transform(
-                    build_stage_rail_scene(
-                        self.shell.stage_rail.window_id,
-                        &mut self.text_system,
-                        width,
-                        height,
-                        &self.shell.stage_sets,
-                        self.shell.active_stage_set,
-                        theme_mode,
-                    ),
-                    self.shell.stage_rail.opacity,
-                    slide_px,
+            self.commit_shell_surface(
+                &self.shell.stage_rail,
+                paint_stage_rail_surface(
+                    width,
+                    height,
+                    &self.shell.stage_sets,
+                    self.shell.active_stage_set,
+                    theme_mode,
                 ),
             )?;
         }
@@ -3033,22 +4203,14 @@ impl DesktopSession {
         if frame_plan.touches(InvalidationTarget::Dialog) && self.shell.dialog.visible {
             let width = self.shell.dialog.content_rect.width as usize;
             let height = self.shell.dialog.content_rect.height as usize;
-            let slide_px =
-                (((1.0 - self.shell.dialog.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
-            self.shell.client.commit_scene(
-                self.shell.dialog.window_id,
-                apply_scene_overlay_transform(
-                    build_dialog_scene(
-                        self.shell.dialog.window_id,
-                        &mut self.text_system,
-                        width,
-                        height,
-                        self.shell.pending_dialog.as_ref(),
-                        &self.shell.dialog_input,
-                        theme_mode,
-                    ),
-                    self.shell.dialog.opacity,
-                    slide_px,
+            self.commit_shell_surface(
+                &self.shell.dialog,
+                paint_dialog_surface(
+                    width,
+                    height,
+                    self.shell.pending_dialog.as_ref(),
+                    &self.shell.dialog_input,
+                    theme_mode,
                 ),
             )?;
         }
@@ -3056,22 +4218,9 @@ impl DesktopSession {
         if frame_plan.touches(InvalidationTarget::ContextMenu) && self.shell.context_menu.visible {
             let width = self.shell.context_menu.content_rect.width as usize;
             let height = self.shell.context_menu.content_rect.height as usize;
-            let slide_px =
-                (((1.0 - self.shell.context_menu.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
-            self.shell.client.commit_scene(
-                self.shell.context_menu.window_id,
-                apply_scene_overlay_transform(
-                    build_context_menu_scene(
-                        self.shell.context_menu.window_id,
-                        &mut self.text_system,
-                        width,
-                        height,
-                        self.shell.context_target,
-                        theme_mode,
-                    ),
-                    self.shell.context_menu.opacity,
-                    slide_px,
-                ),
+            self.commit_shell_surface(
+                &self.shell.context_menu,
+                paint_context_menu_surface(width, height, self.shell.context_target, theme_mode),
             )?;
         }
 
@@ -3079,23 +4228,15 @@ impl DesktopSession {
             let candidates = self.switcher_candidates();
             let width = self.shell.switcher.content_rect.width as usize;
             let height = self.shell.switcher.content_rect.height as usize;
-            let slide_px =
-                (((1.0 - self.shell.switcher.opacity.clamp(0.0, 1.0)) * 14.0) + 0.5) as i32;
-            self.shell.client.commit_scene(
-                self.shell.switcher.window_id,
-                apply_scene_overlay_transform(
-                    build_switcher_scene(
-                        self.shell.switcher.window_id,
-                        &mut self.text_system,
-                        width,
-                        height,
-                        &candidates,
-                        self.shell.switcher_index,
-                        self.shell.active_workspace,
-                        theme_mode,
-                    ),
-                    self.shell.switcher.opacity,
-                    slide_px,
+            self.commit_shell_surface(
+                &self.shell.switcher,
+                paint_switcher_surface(
+                    width,
+                    height,
+                    &candidates,
+                    self.shell.switcher_index,
+                    self.shell.active_workspace,
+                    theme_mode,
                 ),
             )?;
         }
@@ -3123,6 +4264,7 @@ impl DesktopSession {
     fn render_apps(&mut self) -> Result<(), String> {
         self.terminal.render()?;
         self.files.render()?;
+        self.browser.render()?;
         self.settings.render()?;
         self.editor.render()?;
         Ok(())
@@ -3132,6 +4274,7 @@ impl DesktopSession {
         let mut snapshots = vec![
             self.terminal.snapshot(),
             self.files.snapshot(),
+            self.browser.snapshot(),
             self.settings.snapshot(),
             self.editor.snapshot(),
         ];
@@ -3154,7 +4297,8 @@ impl DesktopSession {
 
 #[derive(Clone)]
 enum SessionCommand {
-    Activate(AppKind),
+    Launch(LaunchIntent),
+    LaunchExternal(LaunchIntent, String),
     SwitchWorkspace(u8),
     Notify(String),
     OpenEditorPath(String),
@@ -3276,6 +4420,7 @@ fn file_association_kind(path: &str) -> Option<AppKind> {
         return Some(kind);
     }
     match path.rsplit('.').next() {
+        Some("html" | "htm") => Some(AppKind::Browser),
         Some("txt" | "rs" | "md" | "cfg" | "json" | "toml" | "log") => Some(AppKind::Editor),
         Some("png" | "jpg" | "jpeg" | "bmp") => Some(AppKind::Files),
         _ => Some(AppKind::Editor),
@@ -3284,10 +4429,317 @@ fn file_association_kind(path: &str) -> Option<AppKind> {
 
 fn file_association_label(path: &str) -> &'static str {
     match path.rsplit('.').next() {
+        Some("html" | "htm") => "browser",
         Some("txt" | "rs" | "md" | "cfg" | "json" | "toml" | "log") => "editor",
         Some("png" | "jpg" | "jpeg" | "bmp") => "preview",
         _ => "open",
     }
+}
+
+fn browser_http_error_label(err: crate::net::http::HttpError) -> String {
+    format!("browser request failed: {:?}", err)
+}
+
+fn normalize_browser_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::from("https://example.com/");
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    format!("https://{}", trimmed)
+}
+
+fn browser_window_title(url: &str) -> String {
+    HttpUrl::parse(url)
+        .ok()
+        .map(|parsed| parsed.host)
+        .unwrap_or_else(|| String::from("Web"))
+}
+
+fn browser_response_is_html(url: &str, response: &crate::net::http::HttpResponse) -> bool {
+    response
+        .headers
+        .get("content-type")
+        .map(|content_type| {
+            content_type.contains("text/html") || content_type.contains("application/xhtml")
+        })
+        .unwrap_or_else(|| {
+            url.ends_with(".html")
+                || url.ends_with(".htm")
+                || response.body.starts_with(b"<!DOCTYPE html")
+                || response.body.starts_with(b"<html")
+        })
+}
+
+fn browser_plain_preview(body: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in body.lines() {
+        let normalized = collapse_browser_whitespace(line);
+        if !normalized.is_empty() {
+            lines.push(normalized);
+        }
+        if lines.len() >= 14 {
+            break;
+        }
+    }
+    lines
+}
+
+fn browser_binary_preview(url: &str, content_type: &str, body_len: usize) -> Vec<String> {
+    let file_name = browser_download_path(url, content_type);
+    vec![
+        format!("Binary response: {}", content_type),
+        format!("Size: {} bytes", body_len),
+        format!("Download target: {}", file_name),
+        String::from("Use Download to store this payload under /downloads."),
+    ]
+}
+
+#[derive(Default)]
+struct BrowserDocument {
+    lines: Vec<String>,
+    links: Vec<BrowserLink>,
+}
+
+fn parse_browser_document(base_url: &str, html: &str) -> BrowserDocument {
+    let mut document = BrowserDocument::default();
+    let mut current_anchor_href: Option<String> = None;
+    let mut current_anchor_text = String::new();
+    let mut in_title = false;
+
+    for token in HtmlTokenizer::from(html) {
+        let Ok(token) = token else {
+            continue;
+        };
+        match token {
+            HtmlToken::ElementStart { local, .. } => {
+                let tag = local.as_str();
+                if tag.eq_ignore_ascii_case("a") {
+                    current_anchor_href = Some(String::new());
+                    current_anchor_text.clear();
+                } else if tag.eq_ignore_ascii_case("title") {
+                    in_title = true;
+                }
+            }
+            HtmlToken::Attribute { local, value, .. } => {
+                if let Some(href) = current_anchor_href.as_mut() {
+                    if local.as_str().eq_ignore_ascii_case("href") {
+                        *href = resolve_browser_url(
+                            base_url,
+                            value.map(|span| span.as_str()).unwrap_or(""),
+                        );
+                    }
+                }
+            }
+            HtmlToken::Text { text } => {
+                let normalized = collapse_browser_whitespace(text.as_str());
+                if normalized.is_empty() {
+                    continue;
+                }
+                if in_title && document.lines.is_empty() {
+                    document.lines.push(format!("Title: {}", normalized));
+                } else if document.lines.len() < 12 {
+                    document.lines.push(normalized.clone());
+                }
+                if current_anchor_href.is_some() {
+                    if !current_anchor_text.is_empty() {
+                        current_anchor_text.push(' ');
+                    }
+                    current_anchor_text.push_str(&normalized);
+                }
+            }
+            HtmlToken::ElementEnd { end, .. } => match end {
+                HtmlElementEnd::Close(_, local) => {
+                    let tag = local.as_str();
+                    if tag.eq_ignore_ascii_case("title") {
+                        in_title = false;
+                    }
+                    if tag.eq_ignore_ascii_case("a") {
+                        finalize_browser_link(
+                            &mut document.links,
+                            current_anchor_href.take(),
+                            &mut current_anchor_text,
+                        );
+                    }
+                }
+                HtmlElementEnd::Empty => {
+                    finalize_browser_link(
+                        &mut document.links,
+                        current_anchor_href.take(),
+                        &mut current_anchor_text,
+                    );
+                }
+                HtmlElementEnd::Open => {}
+            },
+            _ => {}
+        }
+    }
+
+    finalize_browser_link(
+        &mut document.links,
+        current_anchor_href.take(),
+        &mut current_anchor_text,
+    );
+    if document.lines.is_empty() {
+        document.lines.push(String::from(
+            "HTML response fetched. No preview text surfaced.",
+        ));
+    }
+    document.links.truncate(6);
+    document
+}
+
+fn finalize_browser_link(
+    links: &mut Vec<BrowserLink>,
+    href: Option<String>,
+    current_anchor_text: &mut String,
+) {
+    let Some(url) = href else {
+        current_anchor_text.clear();
+        return;
+    };
+    if url.is_empty() {
+        current_anchor_text.clear();
+        return;
+    }
+    let label = if current_anchor_text.trim().is_empty() {
+        browser_window_title(&url)
+    } else {
+        current_anchor_text.trim().to_string()
+    };
+    links.push(BrowserLink { label, url });
+    current_anchor_text.clear();
+}
+
+fn collapse_browser_whitespace(text: &str) -> String {
+    let mut normalized = String::new();
+    let mut last_was_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                normalized.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            normalized.push(ch);
+            last_was_space = false;
+        }
+    }
+    normalized.trim().to_string()
+}
+
+fn resolve_browser_url(base_url: &str, raw_href: &str) -> String {
+    let href = raw_href.trim();
+    if href.is_empty() {
+        return String::new();
+    }
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
+    }
+    let Ok(base) = HttpUrl::parse(base_url) else {
+        return href.to_string();
+    };
+    let mut resolved = String::new();
+    resolved.push_str(&base.scheme);
+    resolved.push_str("://");
+    resolved.push_str(&base.host);
+    if (base.scheme == "http" && base.port != 80) || (base.scheme == "https" && base.port != 443) {
+        resolved.push(':');
+        resolved.push_str(&base.port.to_string());
+    }
+    if href.starts_with('/') {
+        resolved.push_str(href);
+        return resolved;
+    }
+    let parent = if let Some((prefix, _)) = base.path.rsplit_once('/') {
+        if prefix.is_empty() {
+            "/"
+        } else {
+            prefix
+        }
+    } else {
+        "/"
+    };
+    resolved.push_str(parent);
+    if !resolved.ends_with('/') {
+        resolved.push('/');
+    }
+    resolved.push_str(href);
+    resolved
+}
+
+fn browser_download_path(url: &str, content_type: &str) -> String {
+    let parsed = HttpUrl::parse(url).ok();
+    let candidate = parsed
+        .as_ref()
+        .and_then(|parsed| parsed.path.rsplit('/').find(|segment| !segment.is_empty()))
+        .unwrap_or("");
+    let fallback = match content_type {
+        ct if ct.contains("html") => "index.html",
+        ct if ct.contains("json") => "payload.json",
+        ct if ct.contains("text") => "download.txt",
+        _ => "download.bin",
+    };
+    let chosen = if candidate.is_empty() || !candidate.contains('.') {
+        fallback
+    } else {
+        candidate
+    };
+    let sanitized: String = candidate
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => ch,
+        })
+        .collect();
+    let sanitized = if sanitized.is_empty() {
+        chosen.to_string()
+    } else if chosen == fallback && !candidate.contains('.') {
+        fallback.to_string()
+    } else {
+        sanitized
+    };
+    format!("/downloads/{}", sanitized)
+}
+
+fn browser_start_page_lines() -> Vec<String> {
+    vec![
+        String::from("Native browser shell is ready."),
+        String::from("Type or paste a URL into the address bar, then press Enter."),
+        String::from("Use Open to fetch a page and Download to save the current URL."),
+        String::from("Downloaded files are written to /downloads."),
+    ]
+}
+
+fn browser_address_rect(width: i32) -> Rect {
+    Rect::new(18, 54, (width - 288).max(180) as u32, 32)
+}
+
+fn browser_open_button_rect(width: i32) -> Rect {
+    Rect::new(width - 252, 54, 70, 32)
+}
+
+fn browser_refresh_button_rect(width: i32) -> Rect {
+    Rect::new(width - 170, 54, 80, 32)
+}
+
+fn browser_download_button_rect(width: i32) -> Rect {
+    Rect::new(width - 78, 54, 60, 32)
+}
+
+fn browser_link_rect(index: usize, width: i32) -> Rect {
+    Rect::new(
+        18,
+        356 + index as i32 * 52,
+        (width - 36).max(120) as u32,
+        42,
+    )
+}
+
+fn browser_link_hit(local: Point, width: i32, link_count: usize) -> Option<usize> {
+    (0..link_count.min(6)).find(|index| browser_link_rect(*index, width).contains(local))
 }
 
 fn thumbnail_color_for_path(path: &str) -> u32 {
@@ -3390,7 +4842,7 @@ impl TerminalApp {
         match command.as_str() {
             "help" => {
                 self.lines.push(String::from(
-                    "local: clear | open terminal|files|settings|editor | copy <text> | paste | open-file | save-file | pick-folder | screenshot | grants | accessibility",
+                    "local: clear | open terminal|files|web|settings|editor | copy <text> | paste | open-file | save-file | pick-folder | screenshot | grants | accessibility",
                 ));
                 self.lines.push(String::from(
                     "shell: pwd | cd <dir> | ls [path] | tree [path] | find [path] -name <glob> | stat <path> | cp <src> <dst> | mv | rm | mkdir | touch | head | tail | wc | grep | sort | uniq | env | history | alias | which | command",
@@ -3400,10 +4852,71 @@ impl TerminalApp {
                 self.lines.clear();
                 self.lines.push(String::from("screen cleared"));
             }
-            "open terminal" => commands.push(SessionCommand::Activate(AppKind::Terminal)),
-            "open files" => commands.push(SessionCommand::Activate(AppKind::Files)),
-            "open settings" => commands.push(SessionCommand::Activate(AppKind::Settings)),
-            "open editor" => commands.push(SessionCommand::Activate(AppKind::Editor)),
+            "open terminal" => commands.push(SessionCommand::Launch(LaunchIntent::new(
+                AppKind::Terminal.descriptor(),
+                ExecutionContext::new(
+                    LaunchSource::ShellShortcut,
+                    self.workspace_id,
+                    "terminal-open",
+                ),
+            ))),
+            "open files" => commands.push(SessionCommand::Launch(LaunchIntent::new(
+                AppKind::Files.descriptor(),
+                ExecutionContext::new(
+                    LaunchSource::ShellShortcut,
+                    self.workspace_id,
+                    "terminal-open",
+                ),
+            ))),
+            "open settings" => commands.push(SessionCommand::Launch(LaunchIntent::new(
+                AppKind::Settings.descriptor(),
+                ExecutionContext::new(
+                    LaunchSource::ShellShortcut,
+                    self.workspace_id,
+                    "terminal-open",
+                ),
+            ))),
+            "open web" => commands.push(SessionCommand::Launch(LaunchIntent::new(
+                AppKind::Browser.descriptor(),
+                ExecutionContext::new(
+                    LaunchSource::ShellShortcut,
+                    self.workspace_id,
+                    "terminal-open",
+                ),
+            ))),
+            "open firefox" | "open chromium" | "open chrome" | "open cef" => {
+                if let Some(resolution) =
+                    crate::runtime::RuntimePackageRegistry::new(&desktop_launch_registry())
+                        .resolve_with_probe(&command, launch_path_exists)
+                {
+                    if let Some(candidates) = resolution.missing_candidates() {
+                        self.lines.push(format!(
+                            "{} binary not found; searched {}",
+                            resolution.descriptor().title,
+                            candidates.join(", ")
+                        ));
+                    } else {
+                        let intent = resolution.launch_intent(ExecutionContext::new(
+                            LaunchSource::ShellShortcut,
+                            self.workspace_id,
+                            "terminal-browser-binary",
+                        ));
+                        if let Some(path) = resolution.path() {
+                            commands.push(SessionCommand::LaunchExternal(intent, path.to_string()));
+                        } else {
+                            commands.push(SessionCommand::Launch(intent));
+                        }
+                    }
+                }
+            }
+            "open editor" => commands.push(SessionCommand::Launch(LaunchIntent::new(
+                AppKind::Editor.descriptor(),
+                ExecutionContext::new(
+                    LaunchSource::ShellShortcut,
+                    self.workspace_id,
+                    "terminal-open",
+                ),
+            ))),
             "paste" => match self.client.clipboard_get() {
                 Ok(ClipboardPayload::Text(text)) => self.lines.push(format!("clipboard: {}", text)),
                 Ok(ClipboardPayload::Files(paths)) => {
@@ -3781,8 +5294,27 @@ impl FilesApp {
             return;
         }
 
+        if let Some(resolution) = crate::gui::launch_pipeline::resolve_external_image(&entry.path) {
+            let intent = resolution.launch_intent(ExecutionContext::new(
+                LaunchSource::FileAssociation,
+                self.workspace_id,
+                file_association_label(&entry.path),
+            ));
+            if let Some(path) = resolution.path() {
+                commands.push(SessionCommand::LaunchExternal(intent, path.to_string()));
+            }
+            return;
+        }
+
         if let Some(kind) = file_association_kind(&entry.path) {
-            commands.push(SessionCommand::Activate(kind));
+            commands.push(SessionCommand::Launch(LaunchIntent::new(
+                kind.descriptor(),
+                ExecutionContext::new(
+                    LaunchSource::FileAssociation,
+                    self.workspace_id,
+                    file_association_label(&entry.path),
+                ),
+            )));
             return;
         }
 
@@ -3800,7 +5332,7 @@ impl FilesApp {
         };
 
         if entry.is_directory {
-            self.client.delete_file(&entry.path)?;
+            self.client.delete_directory(&entry.path)?;
         } else {
             self.client.delete_file(&entry.path)?;
         }
@@ -3819,20 +5351,13 @@ impl FilesApp {
         let Some(entry) = self.entries.get(self.selected).cloned() else {
             return Ok(());
         };
-        if entry.is_directory {
-            self.status = String::from("directory rename unsupported");
-            self.dirty = true;
-            return Ok(());
-        }
         let new_name = if let Some((stem, ext)) = entry.name.rsplit_once('.') {
             format!("{}-renamed.{}", stem, ext)
         } else {
             format!("{}-renamed", entry.name)
         };
         let new_path = join_path(&self.current_path, &new_name);
-        let data = self.client.read_file(&entry.path)?;
-        self.client.write_file(&new_path, &data)?;
-        self.client.delete_file(&entry.path)?;
+        self.client.rename_path(&entry.path, &new_path)?;
         self.status = format!("Renamed {} -> {}", entry.name, new_name);
         self.refresh()
     }
@@ -3945,6 +5470,365 @@ impl FilesApp {
         let _ = self.client.publish_accessibility_tree(nodes);
     }
 }
+
+impl BrowserApp {
+    fn show_start_page(&mut self) {
+        self.address_input = String::from("https://example.com/");
+        self.current_url = Some(String::from("echos://start"));
+        self.status = String::from("Start page ready");
+        self.preview_lines = browser_start_page_lines();
+        self.links.clear();
+        self.dirty = true;
+    }
+
+    fn prime_homepage(&mut self) {
+        if self.current_url.is_some() {
+            return;
+        }
+        self.show_start_page();
+    }
+
+    fn ensure_window(&mut self, screen: Rect) -> Result<LaunchResult, String> {
+        let result = ensure_window_visible(
+            &self.client,
+            &mut self.window,
+            "Web",
+            Rect::new(screen.x + 196, screen.y + 118, 820, 520),
+            self.workspace_id,
+        )?;
+        if self.current_url.is_none() {
+            self.prime_homepage();
+        }
+        self.dirty = true;
+        Ok(result)
+    }
+
+    fn sync(&mut self, active_workspace: u8) -> bool {
+        match sync_window_state(
+            &self.client,
+            &mut self.window,
+            self.workspace_id,
+            active_workspace,
+        ) {
+            WindowSync::Changed => {
+                self.dirty = true;
+                true
+            }
+            WindowSync::Closed => {
+                let _ = self.client.mark_app_exited(true, "window closed");
+                self.dirty = true;
+                true
+            }
+            WindowSync::Unchanged => false,
+        }
+    }
+
+    fn handle_events(
+        &mut self,
+        events: Vec<WindowInputEvent>,
+        _commands: &mut Vec<SessionCommand>,
+    ) {
+        let Some(window) = self.window else {
+            return;
+        };
+
+        for event in events {
+            if event.window_id != window.window_id {
+                continue;
+            }
+
+            match &event.event {
+                InputEvent::PointerButton {
+                    button: crate::gui::protocol::PointerButton::Left,
+                    state: KeyState::Pressed,
+                    ..
+                } => {
+                    if let Some(local) = event.local_position {
+                        if browser_open_button_rect(window.content_rect.width as i32)
+                            .contains(local)
+                        {
+                            let _ = self.open_current_url();
+                        } else if browser_download_button_rect(window.content_rect.width as i32)
+                            .contains(local)
+                        {
+                            let _ = self.download_current_url();
+                        } else if browser_refresh_button_rect(window.content_rect.width as i32)
+                            .contains(local)
+                        {
+                            let _ = self.refresh_current_url();
+                        } else if let Some(index) = browser_link_hit(
+                            local,
+                            window.content_rect.width as i32,
+                            self.links.len(),
+                        ) {
+                            if let Some(link) = self.links.get(index) {
+                                self.address_input = link.url.clone();
+                                let _ = self.open_current_url();
+                            }
+                        }
+                    }
+                }
+                InputEvent::Key { .. } => {
+                    if ctrl_scan_pressed(&event.event, 0x20) {
+                        let _ = self.download_current_url();
+                    } else if ctrl_scan_pressed(&event.event, 0x13) {
+                        let _ = self.refresh_current_url();
+                    } else if is_backspace_key(&event.event) {
+                        self.address_input.pop();
+                        self.dirty = true;
+                    } else if is_enter_key(&event.event) {
+                        let _ = self.open_current_url();
+                    } else if let Some(ch) = printable_key(&event.event) {
+                        self.address_input.push(ch);
+                        self.dirty = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn poll_platform(&mut self) {}
+
+    fn open_current_url(&mut self) -> Result<(), String> {
+        if !crate::net::smoltcp_driver::ensure_runtime_network() {
+            return Err(String::from("network bootstrap failed"));
+        }
+        let normalized = normalize_browser_url(&self.address_input);
+        self.address_input = normalized.clone();
+        let response = HttpClient::new()
+            .get(&normalized)
+            .map_err(browser_http_error_label)?;
+        self.apply_response(&normalized, response)
+    }
+
+    fn refresh_current_url(&mut self) -> Result<(), String> {
+        if self.current_url.is_none() {
+            return self.open_current_url();
+        }
+        self.open_current_url()
+    }
+
+    fn download_current_url(&mut self) -> Result<(), String> {
+        if matches!(self.current_url.as_deref(), Some("echos://start")) {
+            return Err(String::from("enter a concrete URL before downloading"));
+        }
+        if !crate::net::smoltcp_driver::ensure_runtime_network() {
+            return Err(String::from("network bootstrap failed"));
+        }
+        let url = normalize_browser_url(
+            self.current_url
+                .as_deref()
+                .unwrap_or(self.address_input.as_str()),
+        );
+        let bytes = HttpClient::new()
+            .download(&url)
+            .map_err(browser_http_error_label)?;
+        let _ = self.client.create_directory("/downloads");
+        let path = browser_download_path(&url, &self.content_type);
+        self.client.write_file(&path, &bytes)?;
+        let _ = self.client.notify(
+            "Browser",
+            &format!("Saved {}", path),
+            NotificationLevel::Info,
+        );
+        self.status = format!("Saved {} ({} bytes)", path, bytes.len());
+        self.preview_lines
+            .insert(0, format!("Saved download: {}", path));
+        self.preview_lines.truncate(18);
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn apply_response(
+        &mut self,
+        url: &str,
+        response: crate::net::http::HttpResponse,
+    ) -> Result<(), String> {
+        self.current_url = Some(url.to_string());
+        self.content_type = response
+            .headers
+            .get("content-type")
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        self.links.clear();
+        if browser_response_is_html(url, &response) {
+            let document = parse_browser_document(url, &response.body_as_string());
+            self.preview_lines = document.lines;
+            self.links = document.links;
+        } else if self.content_type.starts_with("text/")
+            || self.content_type.contains("json")
+            || self.content_type.contains("xml")
+        {
+            self.preview_lines = browser_plain_preview(&response.body_as_string());
+        } else {
+            self.preview_lines =
+                browser_binary_preview(url, &self.content_type, response.body.len());
+        }
+        if self.preview_lines.is_empty() {
+            self.preview_lines
+                .push(String::from("Response body is empty or not previewable."));
+        }
+        self.status = format!(
+            "HTTP {}  {}  {} bytes",
+            response.status_code,
+            self.content_type,
+            response.body.len()
+        );
+        if let Some(window) = self.window {
+            let _ = self.client.set_title(
+                window.window_id,
+                &format!("Web - {}", browser_window_title(url)),
+            );
+        }
+        let _ = self.client.mark_app_launched(&self.status);
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn render(&mut self) -> Result<(), String> {
+        let Some(window) = self.window else {
+            return Ok(());
+        };
+        if !window.visible || !self.dirty {
+            return Ok(());
+        }
+
+        let mut canvas = Canvas::new(
+            window.content_rect.width as usize,
+            window.content_rect.height as usize,
+            WINDOW_BG,
+        );
+        canvas.fill_rect(Rect::new(0, 0, window.content_rect.width, 94), PANEL_BG);
+        canvas.fill_rect(Rect::new(0, 94, window.content_rect.width, 1), BORDER);
+        canvas.draw_text(18, 16, "Web", TEXT_PRIMARY);
+        canvas.draw_text(18, 36, &self.status, TEXT_MUTED);
+
+        let address_rect = browser_address_rect(window.content_rect.width as i32);
+        canvas.fill_rect(address_rect, 0xFF0A1420);
+        canvas.stroke_rect(address_rect, ACCENT_BLUE);
+        canvas.draw_text(
+            address_rect.x + 10,
+            address_rect.y + 8,
+            &self.address_input,
+            TEXT_PRIMARY,
+        );
+
+        for (rect, label, accent) in [
+            (
+                browser_open_button_rect(window.content_rect.width as i32),
+                "Open",
+                ACCENT_MINT,
+            ),
+            (
+                browser_refresh_button_rect(window.content_rect.width as i32),
+                "Refresh",
+                ACCENT_SOFT,
+            ),
+            (
+                browser_download_button_rect(window.content_rect.width as i32),
+                "Download",
+                ACCENT_GOLD,
+            ),
+        ] {
+            canvas.fill_rect(rect, PANEL_ALT);
+            canvas.stroke_rect(rect, accent);
+            canvas.draw_text(rect.x + 12, rect.y + 8, label, TEXT_PRIMARY);
+        }
+
+        let mut y = 116;
+        if let Some(url) = self.current_url.as_ref() {
+            canvas.draw_text(18, y, url, TEXT_SECONDARY);
+            y += 24;
+        }
+
+        for line in self.preview_lines.iter().take(12) {
+            canvas.draw_text(18, y, line, TEXT_SECONDARY);
+            y += 18;
+            if y > window.content_rect.height as i32 - 120 {
+                break;
+            }
+        }
+
+        if !self.links.is_empty() {
+            y += 8;
+            canvas.draw_text(18, y, "Links", TEXT_PRIMARY);
+            y += 22;
+            for (index, link) in self.links.iter().take(6).enumerate() {
+                let rect = browser_link_rect(index, window.content_rect.width as i32);
+                canvas.fill_rect(rect, PANEL_BG);
+                canvas.stroke_rect(rect, ACCENT_BLUE);
+                canvas.draw_text(rect.x + 12, rect.y + 6, &link.label, TEXT_PRIMARY);
+                canvas.draw_text(rect.x + 12, rect.y + 24, &link.url, TEXT_MUTED);
+            }
+        }
+
+        let footer_y = max(window.content_rect.height as i32 - 34, 0);
+        canvas.fill_rect(
+            Rect::new(0, footer_y, window.content_rect.width, 34),
+            PANEL_BG,
+        );
+        canvas.fill_rect(Rect::new(0, footer_y, window.content_rect.width, 1), BORDER);
+        canvas.draw_text(
+            18,
+            footer_y + 10,
+            "Enter URL, Enter to open, Ctrl+D to download, Ctrl+R to refresh",
+            TEXT_MUTED,
+        );
+
+        self.client
+            .present(window.window_id, &canvas.into_pixels())?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn snapshot(&self) -> AppSnapshot {
+        let detail = self
+            .current_url
+            .clone()
+            .unwrap_or_else(|| self.status.clone());
+        snapshot_for_window(AppKind::Browser, self.window, self.workspace_id, detail)
+    }
+
+    fn publish_accessibility(&self) {
+        let Some(window) = self.window else {
+            return;
+        };
+        let mut nodes = vec![
+            AccessibilityNode {
+                id: 1,
+                app_id: self.client.app_id(),
+                role: AccessibilityRole::Window,
+                label: String::from("Web"),
+                description: self.status.clone(),
+                focused: window.focused,
+                bounds: window.content_rect,
+            },
+            AccessibilityNode {
+                id: 2,
+                app_id: self.client.app_id(),
+                role: AccessibilityRole::Input,
+                label: String::from("Address"),
+                description: self.address_input.clone(),
+                focused: window.focused,
+                bounds: browser_address_rect(window.content_rect.width as i32),
+            },
+        ];
+        for (index, link) in self.links.iter().take(6).enumerate() {
+            nodes.push(AccessibilityNode {
+                id: (index + 3) as u64,
+                app_id: self.client.app_id(),
+                role: AccessibilityRole::Button,
+                label: link.label.clone(),
+                description: link.url.clone(),
+                focused: false,
+                bounds: browser_link_rect(index, window.content_rect.width as i32),
+            });
+        }
+        let _ = self.client.publish_accessibility_tree(nodes);
+    }
+}
+
 impl SettingsApp {
     fn ensure_window(&mut self, screen: Rect) -> Result<LaunchResult, String> {
         let result = ensure_window_visible(
@@ -5006,8 +6890,9 @@ fn app_shortcut_from_input(input: &InputEvent) -> Option<AppKind> {
     match digit_key_pressed(input) {
         Some(1) => Some(AppKind::Terminal),
         Some(2) => Some(AppKind::Files),
-        Some(3) => Some(AppKind::Settings),
-        Some(4) => Some(AppKind::Editor),
+        Some(3) => Some(AppKind::Browser),
+        Some(4) => Some(AppKind::Settings),
+        Some(5) => Some(AppKind::Editor),
         _ => None,
     }
 }
@@ -5023,6 +6908,42 @@ fn debug_marker(bytes: &[u8]) {
     }
 }
 
+fn launch_path_exists(path: &str) -> bool {
+    crate::fs::vfs_open_inode(path).is_ok()
+}
+
+fn load_launch_image(path: &str) -> Result<Vec<u8>, String> {
+    let inode = crate::fs::vfs_open_inode(path).map_err(|_| String::from("Dosya bulunamadi"))?;
+    let size = crate::fs::vfs_inode_metadata(&inode)
+        .map_err(|_| String::from("Dosya bilgisi okunamadi"))?
+        .size;
+    let mut data = vec![0u8; size];
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let read = crate::fs::vfs_read_at(&inode, offset, &mut data[offset..])
+            .map_err(|_| String::from("Dosya okunamadi"))?;
+        if read == 0 {
+            break;
+        }
+        offset += read;
+    }
+    data.truncate(offset);
+    if data.is_empty() {
+        return Err(String::from("Goruntu bos veya okunamadi"));
+    }
+    Ok(data)
+}
+
+fn format_windows_launch_error(err: crate::posix::WineRuntimeError) -> String {
+    match err {
+        crate::posix::WineRuntimeError::NotFound => String::from("Runtime secilmedi"),
+        crate::posix::WineRuntimeError::Invalid => String::from("Gecersiz hedef"),
+        crate::posix::WineRuntimeError::SecureBootViolation => {
+            String::from("Secure Boot aktif, imzasiz PE reddedildi")
+        }
+    }
+}
+
 fn dialog_default_path(request: &crate::gui::protocol::DialogRequest) -> String {
     if !request.path_hint.is_empty() {
         return request.path_hint.clone();
@@ -5033,6 +6954,67 @@ fn dialog_default_path(request: &crate::gui::protocol::DialogRequest) -> String 
         DialogKind::SaveFile => String::from("/workspace/output.txt"),
         DialogKind::PickFolder => String::from("/workspace"),
         DialogKind::Message => String::from("Acknowledged"),
+    }
+}
+
+fn normalize_dialog_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return String::from("/");
+    }
+    let without_trailing = trimmed.trim_end_matches('/');
+    if without_trailing.is_empty() {
+        return String::from("/");
+    }
+    if without_trailing.starts_with('/') {
+        String::from(without_trailing)
+    } else {
+        format!("/{}", without_trailing)
+    }
+}
+
+fn dialog_parent_path(path: &str) -> String {
+    let normalized = normalize_dialog_path(path);
+    if normalized == "/" {
+        return normalized;
+    }
+    match normalized.rfind('/') {
+        Some(0) | None => String::from("/"),
+        Some(index) => normalized[..index].to_string(),
+    }
+}
+
+fn dialog_entry_exists(path: &str) -> Option<crate::fs::f2fs::F2fsEntry> {
+    crate::fs::f2fs::open_entry(&normalize_dialog_path(path)).ok()
+}
+
+fn validate_dialog_selection(
+    request: &crate::gui::protocol::DialogRequest,
+    path: &str,
+) -> Result<String, String> {
+    let normalized = normalize_dialog_path(path);
+    match request.kind {
+        DialogKind::OpenFile => match dialog_entry_exists(&normalized) {
+            Some(entry) if !entry.is_dir => Ok(normalized),
+            Some(_) => Err(String::from("Open file dialog bir dosya bekliyor")),
+            None => Err(String::from("Secilen dosya bulunamadi")),
+        },
+        DialogKind::SaveFile => {
+            if matches!(dialog_entry_exists(&normalized), Some(entry) if entry.is_dir) {
+                return Err(String::from("Save file dialog bir dosya yolu bekliyor"));
+            }
+            let parent = dialog_parent_path(&normalized);
+            match dialog_entry_exists(&parent) {
+                Some(entry) if entry.is_dir => Ok(normalized),
+                _ => Err(String::from("Hedef dizin bulunamadi")),
+            }
+        }
+        DialogKind::PickFolder => match dialog_entry_exists(&normalized) {
+            Some(entry) if entry.is_dir => Ok(normalized),
+            Some(_) => Err(String::from("Pick folder dialog bir dizin bekliyor")),
+            None => Err(String::from("Secilen dizin bulunamadi")),
+        },
+        DialogKind::Message => Ok(normalized),
     }
 }
 
@@ -5126,27 +7108,64 @@ fn toggle_permission(state: Result<PermissionState, String>) -> PermissionState 
 
 #[derive(Clone, Copy)]
 struct TopBarLayout {
-    workspace_start: i32,
+    apps_rect: Rect,
+    workspace_rect: Rect,
     command_rect: Rect,
-    quick_rect: Rect,
-    power_rect: Rect,
-    status_start: i32,
+    status_rects: [Rect; 5],
+    time_rect: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TopBarStatusKind {
+    Net,
+    Cpu,
+    Vpn,
+    Aud,
+    Power,
 }
 
 fn top_bar_layout(width: i32) -> TopBarLayout {
-    let width = width.max(320);
-    let power_rect = Rect::new(width.saturating_sub(74), 10, 58, 38);
-    let quick_rect = Rect::new(power_rect.x.saturating_sub(116), 10, 104, 38);
-    let command_rect = Rect::new(width.saturating_div(2).saturating_sub(103), 10, 206, 38);
-    let workspace_start = command_rect.x.saturating_sub(292).max(210);
-    let status_start = quick_rect.x.saturating_sub(118);
+    let width = width.max(1240);
+    let row_y = 12;
+    let row_h = 34;
+    let apps_rect = Rect::new(120, row_y, 54, row_h as u32);
+    let workspace_rect = Rect::new(
+        apps_rect.right().saturating_add(16),
+        row_y,
+        234,
+        row_h as u32,
+    );
+    let time_rect = Rect::new(width.saturating_sub(136), row_y, 118, row_h as u32);
+    let status_widths = [48, 52, 58, 50, 50];
+    let mut cursor = time_rect.x.saturating_sub(12);
+    let mut status_rects = [Rect::new(-10_000, -10_000, 1, 1); 5];
+    for index in (0..status_rects.len()).rev() {
+        let width_px = status_widths[index];
+        cursor = cursor.saturating_sub(width_px);
+        status_rects[index] = Rect::new(cursor, row_y, width_px as u32, row_h as u32);
+        cursor = cursor.saturating_sub(10);
+    }
+    let command_left = workspace_rect.right().saturating_add(26);
+    let command_right = status_rects[0].x.saturating_sub(18);
+    let command_span = command_right.saturating_sub(command_left);
+    let command_width = if command_span >= 120 {
+        command_span.min(180)
+    } else {
+        command_span
+    };
+    let command_rect = Rect::new(
+        command_left + command_span.saturating_sub(command_width) / 2,
+        row_y,
+        command_width as u32,
+        row_h as u32,
+    );
 
     TopBarLayout {
-        workspace_start,
+        apps_rect,
+        workspace_rect,
         command_rect,
-        quick_rect,
-        power_rect,
-        status_start,
+        status_rects,
+        time_rect,
     }
 }
 
@@ -5156,13 +7175,31 @@ fn top_bar_workspace_rect(index: u8, width: i32) -> Rect {
         return Rect::new(-10_000, -10_000, 1, 1);
     }
     let gap = 10;
-    let button_width = 56;
+    let button_width = 48i32;
     Rect::new(
-        layout.workspace_start + index as i32 * (button_width + gap),
-        10,
+        layout.workspace_rect.x + index as i32 * (button_width + gap),
+        layout.workspace_rect.y,
         button_width as u32,
-        38,
+        layout.workspace_rect.height,
     )
+}
+
+fn top_bar_workspace_hit(local: Point, width: i32, active_workspace: u8) -> Option<u8> {
+    let workspace_start = ((active_workspace as usize) / 4) as u8 * 4;
+    for slot in 0..4u8 {
+        let workspace_id = workspace_start.saturating_add(slot);
+        if workspace_id >= WORKSPACE_COUNT {
+            break;
+        }
+        if top_bar_workspace_rect(slot, width).contains(local) {
+            return Some(workspace_id);
+        }
+    }
+    None
+}
+
+fn top_bar_apps_hit(local: Point, width: i32) -> bool {
+    top_bar_layout(width).apps_rect.contains(local)
 }
 
 fn task_strip_workspace_rect(index: u8) -> Rect {
@@ -5185,7 +7222,12 @@ fn task_strip_icon_rect(index: usize, width: usize) -> Rect {
         Theme::PULSE_DOCK_HEIGHT as u32,
     );
     let icons = layout_flex(
-        Rect::new(dock_rect.x + 19, dock_rect.y + 14, dock_rect.width.saturating_sub(38), 52),
+        Rect::new(
+            dock_rect.x + 19,
+            dock_rect.y + 14,
+            dock_rect.width.saturating_sub(38),
+            52,
+        ),
         FlexDirection::Row,
         EdgeInsets::default(),
         14,
@@ -5201,6 +7243,61 @@ fn task_strip_icon_rect(index: usize, width: usize) -> Rect {
         .get(index)
         .copied()
         .unwrap_or(Rect::new(-10_000, -10_000, 1, 1))
+}
+
+fn desktop_surface_rect(screen: Rect) -> Rect {
+    crate::gui::shell::desktop_work_area(screen)
+}
+
+fn desktop_shortcut_label_width(label: &str) -> i32 {
+    (label.len() as i32).saturating_mul(FONT_WIDTH)
+}
+
+fn desktop_shortcut_entries(width: usize, height: usize) -> [DesktopShortcutEntry; 5] {
+    let work = Rect::new(0, 0, width as u32, height as u32).inset(18, 14, 18, 18);
+    let left = work.x + 18;
+    let top = work.y + 10;
+    DesktopShortcutKind::ALL.map(|kind| {
+        let index = match kind {
+            DesktopShortcutKind::Terminal => 0,
+            DesktopShortcutKind::Files => 1,
+            DesktopShortcutKind::Web => 2,
+            DesktopShortcutKind::Settings => 3,
+            DesktopShortcutKind::RecycleBin => 4,
+        } as i32;
+        let icon_rect = Rect::new(
+            left,
+            top + DESKTOP_SHORTCUT_STEP_Y * index,
+            DESKTOP_SHORTCUT_ICON_SIZE as u32,
+            DESKTOP_SHORTCUT_ICON_SIZE as u32,
+        );
+        let label = kind.label();
+        let label_width = desktop_shortcut_label_width(label);
+        let label_x = icon_rect.x + ((icon_rect.width as i32 - label_width) / 2);
+        let label_y = icon_rect.y + DESKTOP_SHORTCUT_ICON_SIZE + 10;
+        let hit_x = (label_x.min(icon_rect.x) - 8).max(0);
+        let hit_right = (label_x + label_width).max(icon_rect.right()) + 8;
+        let hit_rect = Rect::new(
+            hit_x,
+            icon_rect.y - 8,
+            hit_right.saturating_sub(hit_x) as u32,
+            (label_y + FONT_HEIGHT - (icon_rect.y - 8)) as u32,
+        );
+        DesktopShortcutEntry {
+            kind,
+            icon_rect,
+            label_x,
+            label_y,
+            hit_rect,
+        }
+    })
+}
+
+fn desktop_shortcut_hit(local: Point, width: usize, height: usize) -> Option<DesktopShortcutKind> {
+    desktop_shortcut_entries(width, height)
+        .into_iter()
+        .find(|entry| entry.hit_rect.contains(local))
+        .map(|entry| entry.kind)
 }
 
 fn quick_settings_row_rect(index: usize, width: usize) -> Rect {
@@ -5228,16 +7325,31 @@ fn stage_rail_row_rect(index: usize, width: usize) -> Rect {
     Rect::new(x, y, card_width as u32, 196)
 }
 
-fn top_bar_power_hit(local: Point, width: i32) -> bool {
-    top_bar_layout(width).power_rect.contains(local)
-}
-
 fn top_bar_command_hit(local: Point, width: i32) -> bool {
     top_bar_layout(width).command_rect.contains(local)
 }
 
-fn top_bar_quick_settings_hit(local: Point, width: i32) -> bool {
-    top_bar_layout(width).quick_rect.contains(local)
+fn top_bar_status_hit(local: Point, width: i32) -> Option<TopBarStatusKind> {
+    top_bar_layout(width)
+        .status_rects
+        .iter()
+        .enumerate()
+        .find_map(|(index, rect)| {
+            if !rect.contains(local) {
+                return None;
+            }
+            Some(match index {
+                0 => TopBarStatusKind::Net,
+                1 => TopBarStatusKind::Cpu,
+                2 => TopBarStatusKind::Vpn,
+                3 => TopBarStatusKind::Aud,
+                _ => TopBarStatusKind::Power,
+            })
+        })
+}
+
+fn top_bar_time_hit(local: Point, width: i32) -> bool {
+    top_bar_layout(width).time_rect.contains(local)
 }
 
 fn notification_hit(local: Point) -> Option<usize> {
@@ -5279,6 +7391,86 @@ fn theme_mode_label(mode: ThemeMode) -> &'static str {
         ThemeMode::Dark => "Dark",
         ThemeMode::Light => "Light",
         ThemeMode::Auto => "Auto",
+    }
+}
+
+fn month_label(month: u8) -> &'static str {
+    match month {
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
+        _ => "--",
+    }
+}
+
+fn top_bar_status_summary(power_state: SessionPowerState) -> TopBarStatusSummary {
+    let cpu_load = crate::task::scheduler::get_cpu_load(0);
+    let cpu = if cpu_load.is_sign_negative() {
+        0
+    } else {
+        (cpu_load + 0.5) as u32
+    };
+    let net = if crate::net::smoltcp_driver::get_ip().is_some() {
+        String::from("NET UP")
+    } else if let Some(gateway) = crate::net::smoltcp_driver::get_gateway() {
+        format!("GW {:02}", gateway[3])
+    } else {
+        String::from("NET OFF")
+    };
+    let wg = crate::net::wireguard::runtime_status();
+    let vpn = if wg.active_devices > 0 {
+        if wg.established_peers > 0 {
+            String::from("VPN ON")
+        } else if wg.devices > 0 {
+            String::from("VPN IDLE")
+        } else {
+            String::from("VPN ON")
+        }
+    } else {
+        String::from("VPN OFF")
+    };
+    let aud = if let Some(mixer) = crate::drivers::audio::get_mixer() {
+        if mixer.master_muted {
+            String::from("MUTED")
+        } else {
+            format!("VOL {}", mixer.master_volume.min(99))
+        }
+    } else if let Some((volume, muted)) = crate::drivers::audio_jail::primary_controller_status() {
+        if muted {
+            String::from("MUTED")
+        } else {
+            format!("VOL {}", volume.min(99))
+        }
+    } else {
+        String::from("AUD --")
+    };
+    let dt = crate::drivers::rtc::get_cached_datetime();
+    TopBarStatusSummary {
+        net,
+        cpu: format!("CPU {}%", cpu.min(99)),
+        vpn,
+        aud,
+        time: format!(
+            "{:02}:{:02}  {:02} {}",
+            dt.hour,
+            dt.minute,
+            dt.day,
+            month_label(dt.month)
+        ),
+        power: match power_state {
+            SessionPowerState::Active => String::from("PWR ON"),
+            SessionPowerState::Locked => String::from("LOCK"),
+            SessionPowerState::Suspended => String::from("SLEEP"),
+        },
     }
 }
 
@@ -5338,109 +7530,40 @@ fn push_scene_icon(
     rect: Rect,
     accent: u32,
 ) {
-    let inset = 10;
+    let inset = 8;
     let inner = Rect::new(
         rect.x + inset,
         rect.y + inset,
         rect.width.saturating_sub((inset as u32) * 2),
         rect.height.saturating_sub((inset as u32) * 2),
     );
-    match kind {
-        AppKind::Terminal => {
-            push_scene_round_rect(scene, parent, inner, accent, 8);
-            push_scene_rect(
-                scene,
-                parent,
-                Rect::new(inner.x + 4, inner.y + 5, inner.width.saturating_sub(8), 3),
-                0xFF0A131E,
-            );
-            push_scene_rect(scene, parent, Rect::new(inner.x + 6, inner.y + 13, 10, 3), 0xFF0A131E);
-            push_scene_rect(
-                scene,
-                parent,
-                Rect::new(inner.x + 18, inner.y + 19, inner.width.saturating_sub(24), 3),
-                0xFF0A131E,
-            );
-        }
-        AppKind::Files => {
-            let tab = Rect::new(inner.x + 4, inner.y + 5, inner.width / 3, 6);
-            let body = Rect::new(
-                inner.x + 3,
-                inner.y + 10,
-                inner.width.saturating_sub(6),
-                inner.height.saturating_sub(13),
-            );
-            push_scene_round_rect(scene, parent, body, accent, 7);
-            push_scene_round_rect(scene, parent, tab, accent, 4);
-        }
-        AppKind::Settings => {
-            push_scene_round_rect(
-                scene,
-                parent,
-                Rect::new(inner.x + 4, inner.y + 6, inner.width.saturating_sub(8), 5),
-                accent,
-                3,
-            );
-            push_scene_round_rect(
-                scene,
-                parent,
-                Rect::new(inner.x + 4, inner.y + 14, inner.width.saturating_sub(8), 5),
-                accent,
-                3,
-            );
-            push_scene_round_rect(
-                scene,
-                parent,
-                Rect::new(inner.x + 4, inner.y + 22, inner.width.saturating_sub(8), 5),
-                accent,
-                3,
-            );
-            push_scene_round_rect(scene, parent, Rect::new(inner.x + 9, inner.y + 4, 7, 9), 0xFF0A131E, 3);
-            push_scene_round_rect(scene, parent, Rect::new(inner.x + 17, inner.y + 12, 7, 9), 0xFF0A131E, 3);
-            push_scene_round_rect(scene, parent, Rect::new(inner.x + 13, inner.y + 20, 7, 9), 0xFF0A131E, 3);
-        }
-        AppKind::Editor => {
-            push_scene_round_rect(scene, parent, inner, accent, 8);
-            push_scene_rect(
-                scene,
-                parent,
-                Rect::new(inner.x + 6, inner.y + 6, 3, inner.height.saturating_sub(12)),
-                0xFF0A131E,
-            );
-            push_scene_rect(
-                scene,
-                parent,
-                Rect::new(inner.x + 14, inner.y + 8, inner.width.saturating_sub(20), 3),
-                0xFF0A131E,
-            );
-            push_scene_rect(
-                scene,
-                parent,
-                Rect::new(inner.x + 14, inner.y + 15, inner.width.saturating_sub(24), 3),
-                0xFF0A131E,
-            );
-            push_scene_rect(
-                scene,
-                parent,
-                Rect::new(inner.x + 14, inner.y + 22, inner.width.saturating_sub(16), 3),
-                0xFF0A131E,
-            );
-        }
-    }
+    emit_desktop_icon_rects(kind.icon(), inner, |segment| {
+        push_scene_round_rect(scene, parent, segment, accent, 2);
+    });
 }
 
 fn push_scene_outline(scene: &mut SceneGraph, parent: SceneNodeId, bounds: Rect, color: u32) {
     if bounds.width == 0 || bounds.height == 0 {
         return;
     }
-    push_scene_rect(scene, parent, Rect::new(bounds.x, bounds.y, bounds.width, 1), color);
+    push_scene_rect(
+        scene,
+        parent,
+        Rect::new(bounds.x, bounds.y, bounds.width, 1),
+        color,
+    );
     push_scene_rect(
         scene,
         parent,
         Rect::new(bounds.x, bounds.bottom().saturating_sub(1), bounds.width, 1),
         color,
     );
-    push_scene_rect(scene, parent, Rect::new(bounds.x, bounds.y, 1, bounds.height), color);
+    push_scene_rect(
+        scene,
+        parent,
+        Rect::new(bounds.x, bounds.y, 1, bounds.height),
+        color,
+    );
     push_scene_rect(
         scene,
         parent,
@@ -5506,31 +7629,53 @@ fn build_top_bar_scene(
     scene.set_semantic_root(Some(window_id));
     let root = scene.root();
     let layout = top_bar_layout(width as i32);
+    let status = top_bar_status_summary(snapshot.power_state);
 
     push_scene_panel(
         &mut scene,
         root,
         Rect::new(0, 0, width as u32, height as u32),
-        0xD60A131E,
-        palette.border,
-        20,
-        Some(0x2E60B8FF),
+        0xE1081018,
+        0x12243446,
+        0,
+        None,
     );
 
     push_scene_text(
         &mut scene,
         text_system,
         root,
-        18,
-        17,
+        24,
+        22,
         180,
         "echOS",
+        palette.text_primary,
+    );
+    push_scene_rect(
+        &mut scene,
+        root,
+        Rect::new(
+            layout.apps_rect.x,
+            layout.apps_rect.bottom() - 2,
+            layout.apps_rect.width,
+            2,
+        ),
+        palette.accent_blue,
+    );
+    push_scene_text(
+        &mut scene,
+        text_system,
+        root,
+        layout.apps_rect.x,
+        layout.apps_rect.y + 12,
+        layout.apps_rect.width,
+        "Apps",
         palette.text_primary,
     );
 
     let workspace_start = ((active_workspace as usize) / 4) * 4;
     let workspace_rects = layout_flex(
-        Rect::new(layout.workspace_start, 10, 266, 38),
+        layout.workspace_rect,
         FlexDirection::Row,
         EdgeInsets {
             left: 0,
@@ -5539,28 +7684,42 @@ fn build_top_bar_scene(
             bottom: 1,
         },
         10,
-        &[FlexItem::fixed(56), FlexItem::fixed(56), FlexItem::fixed(56), FlexItem::fixed(56)],
+        &[
+            FlexItem::fixed(48),
+            FlexItem::fixed(48),
+            FlexItem::fixed(48),
+            FlexItem::fixed(48),
+        ],
     );
     for (index, rect) in workspace_rects.iter().enumerate() {
         let workspace_id = (workspace_start + index).min(WORKSPACE_COUNT as usize - 1) as u8;
         let active = workspace_id == active_workspace;
-        push_scene_panel(
+        if active {
+            push_scene_rect(
+                &mut scene,
+                root,
+                Rect::new(rect.x - 4, rect.y + 4, rect.width + 8, rect.height.saturating_sub(8)),
+                0x7A101A25,
+            );
+        }
+        push_scene_rect(
             &mut scene,
             root,
-            *rect,
-            if active { 0xF2142433 } else { 0xDB0D1724 },
-            palette.border,
-            14,
-            if active { Some(palette.accent_mint) } else { None },
+            Rect::new(rect.x, rect.bottom() - 2, rect.width, 2),
+            if active {
+                palette.accent_mint
+            } else {
+                0xFF1C2B39
+            },
         );
         push_scene_text(
             &mut scene,
             text_system,
             root,
-            rect.x + ((rect.width as i32 - 10) / 2),
-            rect.y + 11,
-            16,
-            &(workspace_id + 1).to_string(),
+            rect.x + 2,
+            rect.y + 12,
+            rect.width.saturating_sub(4),
+            top_bar_workspace_label(workspace_id),
             if active {
                 palette.text_primary
             } else {
@@ -5569,88 +7728,72 @@ fn build_top_bar_scene(
         );
     }
 
-    push_scene_panel(
-        &mut scene,
-        root,
-        layout.command_rect,
-        0xC7091018,
-        palette.border,
-        14,
-        None,
-    );
     push_scene_text(
         &mut scene,
         text_system,
         root,
-        layout.command_rect.x + 15,
-        layout.command_rect.y + 10,
-        layout.command_rect.width.saturating_sub(30),
-        "Search / Command",
+        layout.command_rect.x,
+        layout.command_rect.y + 12,
+        layout.command_rect.width,
+        "Desktop",
         palette.text_muted,
     );
 
-    let right_labels = ["NET", "AUD", "PWR"];
-    let mut status_x = layout.status_start;
-    for label in right_labels {
+    let right_labels = [
+        (status.net.as_str(), palette.accent_blue),
+        (status.cpu.as_str(), palette.accent_soft),
+        (status.vpn.as_str(), palette.accent_blue),
+        (status.aud.as_str(), palette.accent_mint),
+        (status.power.as_str(), palette.accent_gold),
+    ];
+    for (rect, (label, accent)) in layout.status_rects.iter().zip(right_labels.iter()) {
+        push_scene_rect(
+            &mut scene,
+            root,
+            Rect::new(rect.x, rect.y + 10, 1, rect.height.saturating_sub(20)),
+            0xFF213445,
+        );
+        push_scene_rect(
+            &mut scene,
+            root,
+            Rect::new(rect.x + 8, rect.y + 15, 4, 4),
+            *accent,
+        );
         push_scene_text(
             &mut scene,
             text_system,
             root,
-            status_x,
-            17,
-            30,
+            rect.x + 16,
+            rect.y + 12,
+            rect.width.saturating_sub(18),
             label,
-            palette.text_secondary,
+            if *accent == palette.accent_gold {
+                palette.text_primary
+            } else {
+                palette.text_secondary
+            },
         );
-        status_x += 34;
     }
-    push_scene_panel(
+    push_scene_rect(
         &mut scene,
         root,
-        layout.quick_rect,
-        0xD00E1723,
-        palette.border,
-        14,
-        Some(palette.accent_blue),
+        Rect::new(
+            layout.time_rect.x,
+            layout.time_rect.bottom() - 2,
+            layout.time_rect.width,
+            2,
+        ),
+        palette.accent_gold,
     );
     push_scene_text(
         &mut scene,
         text_system,
         root,
-        layout.quick_rect.x + 16,
-        layout.quick_rect.y + 10,
-        layout.quick_rect.width.saturating_sub(32),
-        "Panel",
+        layout.time_rect.x + 16,
+        layout.time_rect.y + 12,
+        layout.time_rect.width.saturating_sub(32),
+        &status.time,
         palette.text_primary,
-    );
-    push_scene_panel(
-        &mut scene,
-        root,
-        layout.power_rect,
-        0xD00E1723,
-        palette.border,
-        14,
-        Some(palette.accent_gold),
-    );
-    push_scene_text(
-        &mut scene,
-        text_system,
-        root,
-        layout.power_rect.x + 14,
-        layout.power_rect.y + 10,
-        layout.power_rect.width.saturating_sub(28),
-        "Lock",
-        palette.text_primary,
-    );
-    push_scene_text(
-        &mut scene,
-        text_system,
-        root,
-        width as i32 - 120,
-        17,
-        44,
-        "12:00",
-        palette.text_secondary,
     );
 
     let mut update = scene.snapshot(window_id);
@@ -5691,7 +7834,12 @@ fn build_task_strip_scene(
     );
 
     let icons_rect = layout_flex(
-        Rect::new(dock_rect.x + 19, dock_rect.y + 14, dock_rect.width.saturating_sub(38), 52),
+        Rect::new(
+            dock_rect.x + 19,
+            dock_rect.y + 14,
+            dock_rect.width.saturating_sub(38),
+            52,
+        ),
         FlexDirection::Row,
         EdgeInsets::default(),
         14,
@@ -5717,7 +7865,14 @@ fn build_task_strip_scene(
         (Some(AppKind::Files), palette.accent_blue),
         (Some(AppKind::Settings), palette.accent_gold),
         (Some(AppKind::Editor), palette.accent_coral),
-        (None, if snapshots.iter().any(|s| s.needs_attention) { palette.accent_gold } else { palette.text_secondary }),
+        (
+            None,
+            if snapshots.iter().any(|s| s.needs_attention) {
+                palette.accent_gold
+            } else {
+                palette.text_secondary
+            },
+        ),
     ];
     for (index, rect) in icons_rect.iter().enumerate() {
         let (kind, accent) = dock_items[index];
@@ -5732,12 +7887,23 @@ fn build_task_strip_scene(
             if active { Some(accent) } else { None },
         );
         if let Some(kind) = kind {
-            push_scene_icon(&mut scene, root, kind, *rect, if active { palette.text_primary } else { accent });
+            push_scene_icon(
+                &mut scene,
+                root,
+                kind,
+                *rect,
+                if active { palette.text_primary } else { accent },
+            );
         } else {
-            let badge = Rect::new(rect.x + 14, rect.y + 12, rect.width.saturating_sub(28), rect.height.saturating_sub(24));
-            push_scene_round_rect(&mut scene, root, badge, accent, 12);
-            push_scene_round_rect(&mut scene, root, Rect::new(rect.x + rect.width as i32 / 2 - 3, rect.y + 14, 6, 6), 0xFF0A131E, 3);
-            push_scene_round_rect(&mut scene, root, Rect::new(rect.x + rect.width as i32 / 2 - 3, rect.bottom() - 20, 6, 6), 0xFF0A131E, 3);
+            let badge = Rect::new(
+                rect.x + 10,
+                rect.y + 10,
+                rect.width.saturating_sub(20),
+                rect.height.saturating_sub(20),
+            );
+            emit_desktop_icon_rects(DesktopIconKind::Alerts, badge, |segment| {
+                push_scene_round_rect(&mut scene, root, segment, accent, 2);
+            });
         }
     }
 
@@ -5837,13 +8003,36 @@ fn build_launcher_scene(
             18,
             if active { Some(kind.accent()) } else { None },
         );
+        let icon_badge = Rect::new(rect.x + 16, rect.y + 12, 34, 34);
+        push_scene_round_rect(&mut scene, root, icon_badge, 0xD00B1520, 10);
+        push_scene_outline(
+            &mut scene,
+            root,
+            icon_badge,
+            if active {
+                kind.accent()
+            } else {
+                palette.border
+            },
+        );
+        push_scene_icon(
+            &mut scene,
+            root,
+            *kind,
+            Rect::new(icon_badge.x + 3, icon_badge.y + 3, 28, 28),
+            if active {
+                kind.accent()
+            } else {
+                palette.text_secondary
+            },
+        );
         push_scene_text(
             &mut scene,
             text_system,
             root,
-            rect.x + 18,
+            rect.x + 62,
             rect.y + 18,
-            rect.width.saturating_sub(36),
+            rect.width.saturating_sub(80),
             kind.title(),
             palette.text_primary,
         );
@@ -5851,13 +8040,17 @@ fn build_launcher_scene(
             &mut scene,
             text_system,
             root,
-            rect.x + 18,
+            rect.x + 62,
             rect.y + 42,
-            rect.width.saturating_sub(36),
+            rect.width.saturating_sub(80),
             snapshot
                 .map(|s| app_health_label(s.health, s.visible, s.focused))
                 .unwrap_or("ready"),
-            if active { palette.text_secondary } else { palette.text_muted },
+            if active {
+                palette.text_secondary
+            } else {
+                palette.text_muted
+            },
         );
     }
 
@@ -5879,7 +8072,12 @@ fn build_launcher_scene(
         "Toggle scratchpad",
     ];
     for (index, label) in recents.iter().enumerate() {
-        let rect = Rect::new(18, 292 + index as i32 * 54, width.saturating_sub(36) as u32, 44);
+        let rect = Rect::new(
+            18,
+            292 + index as i32 * 54,
+            width.saturating_sub(36) as u32,
+            44,
+        );
         push_scene_panel(
             &mut scene,
             root,
@@ -5887,7 +8085,11 @@ fn build_launcher_scene(
             0xE00E1723,
             palette.border,
             14,
-            if index == 0 { Some(palette.accent_blue) } else { None },
+            if index == 0 {
+                Some(palette.accent_blue)
+            } else {
+                None
+            },
         );
         push_scene_text(
             &mut scene,
@@ -5982,10 +8184,19 @@ fn build_quick_settings_scene(
         ),
         ("Theme", theme_mode_label(theme_mode), palette.accent_gold),
         ("Desktop", "Hybrid", palette.accent_soft),
-        ("Notifications", if notifications { "Open" } else { "Muted" }, palette.text_secondary),
+        (
+            "Notifications",
+            if notifications { "Open" } else { "Muted" },
+            palette.text_secondary,
+        ),
     ];
     for (index, (label, value, accent)) in rows.iter().enumerate() {
-        let rect = Rect::new(18, 86 + index as i32 * 58, width.saturating_sub(36) as u32, 46);
+        let rect = Rect::new(
+            18,
+            86 + index as i32 * 58,
+            width.saturating_sub(36) as u32,
+            46,
+        );
         push_scene_panel(
             &mut scene,
             root,
@@ -6063,7 +8274,12 @@ fn build_stage_rail_scene(
         palette.text_muted,
     );
     let cards = crate::gui::layout::layout_grid(
-        Rect::new(18, 82, width.saturating_sub(36) as u32, height.saturating_sub(100) as u32),
+        Rect::new(
+            18,
+            82,
+            width.saturating_sub(36) as u32,
+            height.saturating_sub(100) as u32,
+        ),
         EdgeInsets::default(),
         2,
         0,
@@ -6081,7 +8297,11 @@ fn build_stage_rail_scene(
             if selected { 0xF2142433 } else { 0xE0111C29 },
             palette.border,
             20,
-            if selected { Some(palette.accent_mint) } else { None },
+            if selected {
+                Some(palette.accent_mint)
+            } else {
+                None
+            },
         );
         push_scene_text(
             &mut scene,
@@ -6112,7 +8332,12 @@ fn build_stage_rail_scene(
             ),
             palette.text_secondary,
         );
-        let thumb = Rect::new(rect.x + 16, rect.y + 78, rect.width.saturating_sub(32), rect.height.saturating_sub(94));
+        let thumb = Rect::new(
+            rect.x + 16,
+            rect.y + 78,
+            rect.width.saturating_sub(32),
+            rect.height.saturating_sub(94),
+        );
         push_scene_panel(
             &mut scene,
             root,
@@ -6122,7 +8347,12 @@ fn build_stage_rail_scene(
             16,
             None,
         );
-        let left = Rect::new(thumb.x + 14, thumb.y + 16, thumb.width / 2, thumb.height.saturating_sub(32));
+        let left = Rect::new(
+            thumb.x + 14,
+            thumb.y + 16,
+            thumb.width / 2,
+            thumb.height.saturating_sub(32),
+        );
         push_scene_round_rect(&mut scene, root, left, 0xF018293B, 14);
         if stage.window_ids.len() > 1 {
             let right_top = Rect::new(
@@ -6134,7 +8364,12 @@ fn build_stage_rail_scene(
                 thumb.width / 4,
                 thumb.height / 2 - 10,
             );
-            let right_bottom = Rect::new(right_top.x, right_top.bottom() + 10, right_top.width, right_top.height);
+            let right_bottom = Rect::new(
+                right_top.x,
+                right_top.bottom() + 10,
+                right_top.width,
+                right_top.height,
+            );
             push_scene_round_rect(&mut scene, root, right_top, 0xEE142233, 12);
             push_scene_round_rect(&mut scene, root, right_bottom, 0xEE142233, 12);
         }
@@ -6156,8 +8391,18 @@ fn build_context_menu_scene(
     scene.set_semantic_root(Some(window_id));
     let root = scene.root();
     push_scene_rect(&mut scene, root, bounds, palette.window_bg);
-    push_scene_rect(&mut scene, root, Rect::new(0, 0, width as u32, 36), palette.panel_bg);
-    push_scene_rect(&mut scene, root, Rect::new(0, 36, width as u32, 1), palette.border);
+    push_scene_rect(
+        &mut scene,
+        root,
+        Rect::new(0, 0, width as u32, 36),
+        palette.panel_bg,
+    );
+    push_scene_rect(
+        &mut scene,
+        root,
+        Rect::new(0, 36, width as u32, 1),
+        palette.border,
+    );
     push_scene_text(
         &mut scene,
         text_system,
@@ -6230,8 +8475,18 @@ fn build_switcher_scene(
     scene.set_semantic_root(Some(window_id));
     let root = scene.root();
     push_scene_rect(&mut scene, root, bounds, palette.window_bg);
-    push_scene_rect(&mut scene, root, Rect::new(0, 0, width as u32, 44), palette.panel_bg);
-    push_scene_rect(&mut scene, root, Rect::new(0, 44, width as u32, 1), palette.border);
+    push_scene_rect(
+        &mut scene,
+        root,
+        Rect::new(0, 0, width as u32, 44),
+        palette.panel_bg,
+    );
+    push_scene_rect(
+        &mut scene,
+        root,
+        Rect::new(0, 44, width as u32, 1),
+        palette.border,
+    );
     push_scene_text(
         &mut scene,
         text_system,
@@ -6259,13 +8514,21 @@ fn build_switcher_scene(
             &mut scene,
             root,
             rect,
-            if selected { palette.panel_alt } else { palette.panel_bg },
+            if selected {
+                palette.panel_alt
+            } else {
+                palette.panel_bg
+            },
         );
         push_scene_outline(
             &mut scene,
             root,
             rect,
-            if selected { kind.accent() } else { palette.border },
+            if selected {
+                kind.accent()
+            } else {
+                palette.border
+            },
         );
         push_scene_rect(
             &mut scene,
@@ -6322,8 +8585,18 @@ fn build_dialog_scene(
     scene.set_semantic_root(Some(window_id));
     let root = scene.root();
     push_scene_rect(&mut scene, root, bounds, palette.window_bg);
-    push_scene_rect(&mut scene, root, Rect::new(0, 0, width as u32, 58), palette.panel_bg);
-    push_scene_rect(&mut scene, root, Rect::new(0, 58, width as u32, 1), palette.border);
+    push_scene_rect(
+        &mut scene,
+        root,
+        Rect::new(0, 0, width as u32, 58),
+        palette.panel_bg,
+    );
+    push_scene_rect(
+        &mut scene,
+        root,
+        Rect::new(0, 58, width as u32, 1),
+        palette.border,
+    );
     push_scene_text(
         &mut scene,
         text_system,
@@ -6506,7 +8779,11 @@ fn build_notifications_scene(
             &mut scene,
             root,
             rect,
-            if index == selected_index { 0xF2142433 } else { 0xE00E1723 },
+            if index == selected_index {
+                0xF2142433
+            } else {
+                0xE00E1723
+            },
             palette.border,
             14,
             Some(accent),
@@ -6529,7 +8806,11 @@ fn build_notifications_scene(
             rect.y + 13,
             40,
             notification_level_label(notice.level),
-            if notice.read { palette.text_muted } else { accent },
+            if notice.read {
+                palette.text_muted
+            } else {
+                accent
+            },
         );
         y += 58;
     }
@@ -6551,8 +8832,18 @@ fn build_lock_scene(
     scene.set_semantic_root(Some(window_id));
     let root = scene.root();
     push_scene_rect(&mut scene, root, bounds, palette.window_bg);
-    push_scene_rect(&mut scene, root, Rect::new(0, 0, width as u32, 64), palette.panel_bg);
-    push_scene_rect(&mut scene, root, Rect::new(0, 64, width as u32, 1), palette.border);
+    push_scene_rect(
+        &mut scene,
+        root,
+        Rect::new(0, 0, width as u32, 64),
+        palette.panel_bg,
+    );
+    push_scene_rect(
+        &mut scene,
+        root,
+        Rect::new(0, 64, width as u32, 1),
+        palette.border,
+    );
     push_scene_text(
         &mut scene,
         text_system,
@@ -6694,12 +8985,25 @@ fn build_command_palette_scene(
         query_rect.x + 14,
         query_rect.y + 12,
         query_rect.width.saturating_sub(20),
-        if query.is_empty() { "Type to filter actions" } else { query },
-        if query.is_empty() { palette.text_muted } else { palette.text_primary },
+        if query.is_empty() {
+            "Type to filter actions"
+        } else {
+            query
+        },
+        if query.is_empty() {
+            palette.text_muted
+        } else {
+            palette.text_primary
+        },
     );
     for (index, action) in actions.iter().take(6).enumerate() {
         let selected = index == selected_index.min(actions.len().saturating_sub(1));
-        let rect = Rect::new(18, 138 + index as i32 * 54, width.saturating_sub(36) as u32, 44);
+        let rect = Rect::new(
+            18,
+            138 + index as i32 * 54,
+            width.saturating_sub(36) as u32,
+            44,
+        );
         push_scene_panel(
             &mut scene,
             root,
@@ -6707,7 +9011,11 @@ fn build_command_palette_scene(
             if selected { 0xF2142433 } else { 0xE00E1723 },
             palette.border,
             14,
-            if selected { Some(palette.accent_blue) } else { None },
+            if selected {
+                Some(palette.accent_blue)
+            } else {
+                None
+            },
         );
         push_scene_text(
             &mut scene,
@@ -6893,42 +9201,69 @@ fn paint_top_bar_surface(
     theme_mode: ThemeMode,
 ) -> Vec<u32> {
     let palette = hybrid_titan_palette(theme_mode);
-    let profile = Theme::layout_profile(width as u32);
     let layout = top_bar_layout(width as i32);
+    let status = top_bar_status_summary(snapshot.power_state);
     let mut canvas = Canvas::new(width, height, palette.panel_bg);
     canvas.fill_rect(
         Rect::new(0, 0, width as u32, height as u32),
-        palette.panel_bg,
+        0xE1081018,
     );
     canvas.fill_rect(
         Rect::new(0, height as i32 - 1, width as u32, 1),
         palette.border,
     );
-    canvas.draw_text(18, 10, "echOS Desktop", palette.text_primary);
+    canvas_draw_top_bar_text(&mut canvas, 24, 22, "echOS", palette.text_primary);
 
-    for index in 0..WORKSPACE_COUNT {
-        let rect = top_bar_workspace_rect(index, width as i32);
-        let active = index == active_workspace;
+    canvas.fill_rect(
+        Rect::new(
+            layout.apps_rect.x,
+            layout.apps_rect.bottom() - 2,
+            layout.apps_rect.width,
+            2,
+        ),
+        palette.accent_blue,
+    );
+    canvas_draw_top_bar_centered_text(&mut canvas, layout.apps_rect, "Apps", palette.text_primary);
+
+    let workspace_start = ((active_workspace as usize) / 4) * 4;
+    let workspace_rects = layout_flex(
+        layout.workspace_rect,
+        FlexDirection::Row,
+        EdgeInsets {
+            left: 0,
+            top: 1,
+            right: 0,
+            bottom: 1,
+        },
+        10,
+        &[
+            FlexItem::fixed(48),
+            FlexItem::fixed(48),
+            FlexItem::fixed(48),
+            FlexItem::fixed(48),
+        ],
+    );
+    for (slot, rect) in workspace_rects.iter().enumerate() {
+        let workspace_id = (workspace_start + slot).min(WORKSPACE_COUNT as usize - 1) as u8;
+        let active = workspace_id == active_workspace;
+        if active {
+            canvas.fill_rect(
+                Rect::new(rect.x - 4, rect.y + 4, rect.width + 8, rect.height.saturating_sub(8)),
+                0x7A101A25,
+            );
+        }
         canvas.fill_rect(
-            rect,
+            Rect::new(rect.x, rect.bottom() - 2, rect.width, 2),
             if active {
-                palette.panel_alt
+                palette.accent_mint
             } else {
-                palette.window_bg
+                0xFF1C2B39
             },
         );
-        canvas.stroke_rect(
-            rect,
-            if active {
-                palette.accent_blue
-            } else {
-                palette.border
-            },
-        );
-        canvas.draw_text(
-            rect.x + 8,
-            rect.y + 7,
-            &(index.saturating_add(1)).to_string(),
+        canvas_draw_top_bar_centered_text(
+            &mut canvas,
+            *rect,
+            top_bar_workspace_label(workspace_id),
             if active {
                 palette.text_primary
             } else {
@@ -6936,67 +9271,469 @@ fn paint_top_bar_surface(
             },
         );
     }
-
-    let status = format!(
-        "{} unread  {} live  {} fault  {}",
-        snapshot.unread_notifications,
-        snapshot.apps_running,
-        snapshot.apps_crashed,
-        if snapshot.boot_clean_desktop {
-            "clean"
-        } else {
-            "active"
-        }
-    );
-    let status_x = match profile {
-        ShellLayoutProfile::Desktop => width as i32 - 278,
-        ShellLayoutProfile::Compact => width as i32 - 252,
-    };
-    canvas.draw_text(status_x, 10, &status, palette.text_secondary);
-    if matches!(profile, ShellLayoutProfile::Desktop) && height > 46 {
-        canvas.draw_text(
-            width as i32 - 278,
-            34,
-            &format!(
-                "{}  {}  Super+Space palette  Super+, settings  Super+` overview",
-                power_state_label(snapshot.power_state),
-                if snapshot.shell_ready {
-                    "shell-ready"
-                } else {
-                    "shell-syncing"
-                }
-            ),
-            palette.text_muted,
-        );
-    }
     let command_rect = layout.command_rect;
-    canvas.fill_rect(command_rect, palette.window_bg);
-    canvas.stroke_rect(command_rect, palette.border);
-    canvas.draw_text(
-        command_rect.x + 12,
-        command_rect.y + 8,
-        "Search / Command",
+    canvas_draw_top_bar_text(
+        &mut canvas,
+        command_rect.x,
+        command_rect.y + ((command_rect.height as i32 - FONT_HEIGHT) / 2),
+        "Desktop",
         palette.text_muted,
     );
-    let quick_rect = layout.quick_rect;
-    canvas.fill_rect(quick_rect, palette.panel_alt);
-    canvas.stroke_rect(quick_rect, palette.accent_blue);
-    canvas.draw_text(
-        quick_rect.x + 8,
-        quick_rect.y + 8,
-        "Panel",
-        palette.text_primary,
+    let status_pills = [
+        (
+            layout.status_rects[0],
+            status.net.as_str(),
+            palette.accent_blue,
+        ),
+        (
+            layout.status_rects[1],
+            status.cpu.as_str(),
+            palette.accent_soft,
+        ),
+        (
+            layout.status_rects[2],
+            status.vpn.as_str(),
+            palette.accent_blue,
+        ),
+        (
+            layout.status_rects[3],
+            status.aud.as_str(),
+            palette.accent_mint,
+        ),
+        (
+            layout.status_rects[4],
+            status.power.as_str(),
+            palette.accent_gold,
+        ),
+    ];
+    for (rect, label, accent) in status_pills {
+        canvas.fill_rect(
+            Rect::new(rect.x, rect.y + 10, 1, rect.height.saturating_sub(20)),
+            0xFF213445,
+        );
+        canvas.fill_rect(Rect::new(rect.x + 8, rect.y + 15, 4, 4), accent);
+        canvas_draw_top_bar_text(
+            &mut canvas,
+            rect.x + 16,
+            rect.y + ((rect.height as i32 - FONT_HEIGHT) / 2),
+            label,
+            if accent == palette.accent_gold {
+                palette.text_primary
+            } else {
+                palette.text_secondary
+            },
+        );
+    }
+    let time_rect = layout.time_rect;
+    canvas.fill_rect(
+        Rect::new(
+            time_rect.x,
+            time_rect.bottom() - 2,
+            time_rect.width,
+            2,
+        ),
+        palette.accent_gold,
     );
-    let power_rect = layout.power_rect;
-    canvas.fill_rect(power_rect, palette.panel_alt);
-    canvas.stroke_rect(power_rect, palette.accent_gold);
-    canvas.draw_text(
-        power_rect.x + 18,
-        power_rect.y + 8,
-        "Lock",
+    canvas_draw_top_bar_centered_text(
+        &mut canvas,
+        time_rect,
+        &status.time,
         palette.text_primary,
     );
     canvas.into_pixels()
+}
+
+fn paint_desktop_shortcuts_surface(
+    width: usize,
+    height: usize,
+    theme_mode: ThemeMode,
+    selected: Option<DesktopShortcutKind>,
+) -> Vec<u32> {
+    let palette = hybrid_titan_palette(theme_mode);
+    let mut canvas = Canvas::new(width, height, 0x0000_0000);
+    for entry in desktop_shortcut_entries(width, height) {
+        let selected_now = selected == Some(entry.kind);
+        if selected_now {
+            let highlight = entry.hit_rect.inset(-6, -6, -6, -6);
+            canvas.fill_rect(highlight, 0xFF122030);
+            canvas.stroke_rect(highlight, entry.kind.accent());
+        }
+        canvas.fill_rect(entry.icon_rect, entry.kind.accent());
+        canvas.stroke_rect(
+            entry.icon_rect,
+            if selected_now {
+                palette.text_primary
+            } else {
+                palette.border
+            },
+        );
+        let glyph_rect = Rect::new(
+            entry.icon_rect.x + 10,
+            entry.icon_rect.y + 10,
+            entry.icon_rect.width.saturating_sub(20),
+            entry.icon_rect.height.saturating_sub(20),
+        );
+        emit_desktop_icon_rects(entry.kind.icon(), glyph_rect, |segment| {
+            canvas.fill_rect(segment, 0xFF09131E);
+        });
+        canvas.draw_text(
+            entry.label_x,
+            entry.label_y,
+            entry.kind.label(),
+            if selected_now {
+                palette.text_primary
+            } else {
+                palette.text_secondary
+            },
+        );
+    }
+    canvas.into_pixels()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rects_overlap(a: Rect, b: Rect) -> bool {
+        a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
+    }
+
+    #[test]
+    fn top_bar_layout_keeps_command_and_status_clusters_disjoint() {
+        let layout = top_bar_layout(1600);
+        assert!(layout.apps_rect.right() < layout.workspace_rect.x);
+        assert!(layout.workspace_rect.right() < layout.command_rect.x);
+        assert!(layout.command_rect.right() < layout.status_rects[0].x);
+        assert!(layout.status_rects[4].right() < layout.time_rect.x);
+        assert!(!rects_overlap(layout.apps_rect, layout.workspace_rect));
+        assert!(!rects_overlap(layout.command_rect, layout.status_rects[0]));
+        assert!(!rects_overlap(layout.status_rects[4], layout.time_rect));
+    }
+
+    #[test]
+    fn top_bar_raster_surface_contains_title_and_command_text_pixels() {
+        let snapshot = SessionSnapshot {
+            workspace_id: 0,
+            workspace_layout: WorkspaceLayout::Dwindle,
+            power_state: SessionPowerState::Active,
+            unread_notifications: 0,
+            apps_running: 0,
+            apps_crashed: 0,
+            overview_active: false,
+            scratchpad_visible: false,
+            shell_ready: true,
+            boot_clean_desktop: true,
+            output_scale: 1,
+            text_scale: 1,
+            locale: String::from("en-US"),
+            theme_variant: String::from("hybrid-titan"),
+            shell_state: ShellState::DesktopReady,
+        };
+        let width = 1600usize;
+        let height = Theme::HALO_BAR_HEIGHT as usize;
+        let pixels = paint_top_bar_surface(width, height, 0, &snapshot, ThemeMode::Dark);
+        let background = hybrid_titan_palette(ThemeMode::Dark).panel_bg;
+
+        let title_bounds = Rect::new(18, 14, 72, 18);
+        let apps_bounds = top_bar_layout(width as i32).apps_rect;
+        let command_bounds = top_bar_layout(width as i32).command_rect;
+        let metric_bounds = top_bar_layout(width as i32).status_rects[0];
+        let time_bounds = top_bar_layout(width as i32).time_rect;
+        let title_non_bg = count_non_background_pixels(&pixels, width, title_bounds, background);
+        let apps_non_bg = count_non_background_pixels(&pixels, width, apps_bounds, background);
+        let command_non_bg =
+            count_non_background_pixels(&pixels, width, command_bounds, background);
+        let metric_non_bg = count_non_background_pixels(&pixels, width, metric_bounds, background);
+        let time_non_bg = count_non_background_pixels(&pixels, width, time_bounds, background);
+
+        assert!(
+            title_non_bg > 24,
+            "title text should mark visible glyph pixels"
+        );
+        assert!(apps_non_bg > 48, "apps pill should carry visible pixels");
+        assert!(
+            command_non_bg > 80,
+            "command prompt text should mark visible glyph pixels"
+        );
+        assert!(
+            metric_non_bg > 48,
+            "network metric pill should carry visible text or outline pixels"
+        );
+        assert!(time_non_bg > 48, "clock pill should carry visible pixels");
+    }
+
+    #[test]
+    fn desktop_shortcut_hit_detects_terminal_and_recycle_bin() {
+        let entries = desktop_shortcut_entries(320, 720);
+        let terminal = entries[0];
+        let recycle = entries[4];
+        assert_eq!(
+            desktop_shortcut_hit(
+                Point::new(terminal.icon_rect.x + 10, terminal.icon_rect.y + 10),
+                320,
+                720
+            ),
+            Some(DesktopShortcutKind::Terminal)
+        );
+        assert_eq!(
+            desktop_shortcut_hit(
+                Point::new(recycle.label_x + 12, recycle.label_y + 4),
+                320,
+                720
+            ),
+            Some(DesktopShortcutKind::RecycleBin)
+        );
+    }
+
+    #[test]
+    fn desktop_shortcut_surface_contains_visible_terminal_pixels() {
+        let pixels = paint_desktop_shortcuts_surface(320, 720, ThemeMode::Dark, None);
+        let background = 0x0000_0000;
+        let terminal_bounds = desktop_shortcut_entries(320, 720)[0].hit_rect;
+        let visible = count_non_background_pixels(&pixels, 320, terminal_bounds, background);
+        assert!(
+            visible > 120,
+            "desktop shortcut surface should paint visible terminal shortcut pixels"
+        );
+    }
+
+    #[test]
+    fn desktop_shortcuts_publish_browser_window_and_recycle_special_descriptors() {
+        let web = DesktopShortcutKind::Web.descriptor();
+        let recycle = DesktopShortcutKind::RecycleBin.descriptor();
+        assert_eq!(web.app_id, BROWSER_APP_ID);
+        assert_eq!(web.presentation, AppPresentation::Windowed);
+        assert_eq!(web.loader, LoaderDispatch::Native);
+        assert_eq!(web.abi, AbiPersonality::Native);
+        assert_eq!(recycle.presentation, AppPresentation::SpecialAction);
+        assert_eq!(recycle.loader, LoaderDispatch::Native);
+        assert_eq!(recycle.abi, AbiPersonality::Native);
+    }
+
+    #[test]
+    fn browser_url_normalization_prefers_https_and_default_home() {
+        assert_eq!(normalize_browser_url(""), "https://example.com/");
+        assert_eq!(normalize_browser_url("example.org"), "https://example.org");
+        assert_eq!(
+            normalize_browser_url("http://insecure.test/file.exe"),
+            "http://insecure.test/file.exe"
+        );
+    }
+
+    #[test]
+    fn browser_start_page_lines_are_local_and_actionable() {
+        let lines = browser_start_page_lines();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("Native browser shell is ready."));
+        assert!(lines[1].contains("press Enter"));
+        assert!(lines[2].contains("Use Open"));
+        assert!(lines[3].contains("/downloads"));
+    }
+
+    #[test]
+    fn desktop_visibility_recovery_triggers_for_active_session_with_stale_lock_screen() {
+        assert!(desktop_visibility_recovery_needed(
+            SessionPowerState::Active,
+            true,
+            true,
+            false,
+            false,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn desktop_visibility_recovery_stays_idle_for_locked_session() {
+        assert!(!desktop_visibility_recovery_needed(
+            SessionPowerState::Locked,
+            false,
+            true,
+            false,
+            false,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn browser_document_parser_extracts_title_preview_and_absolute_links() {
+        let html = r#"
+            <html>
+                <head><title>echOS Downloads</title></head>
+                <body>
+                    <p>Latest nightly builds and release notes.</p>
+                    <a href="/downloads/echos-installer.exe">Download installer</a>
+                    <a href="docs/release-notes.html">Release notes</a>
+                </body>
+            </html>
+        "#;
+        let document = parse_browser_document("https://echos.dev/store/index.html", html);
+        assert!(document
+            .lines
+            .iter()
+            .any(|line| line.contains("Title: echOS Downloads")));
+        assert!(document
+            .lines
+            .iter()
+            .any(|line| line.contains("Latest nightly builds and release notes.")));
+        assert_eq!(document.links.len(), 2);
+        assert_eq!(document.links[0].label, "Download installer");
+        assert_eq!(
+            document.links[0].url,
+            "https://echos.dev/downloads/echos-installer.exe"
+        );
+        assert_eq!(
+            document.links[1].url,
+            "https://echos.dev/store/docs/release-notes.html"
+        );
+    }
+
+    #[test]
+    fn browser_download_path_preserves_filename_and_derives_fallbacks() {
+        assert_eq!(
+            browser_download_path(
+                "https://downloads.echos.dev/releases/echos-setup.exe",
+                "application/octet-stream"
+            ),
+            "/downloads/echos-setup.exe"
+        );
+        assert_eq!(
+            browser_download_path("https://docs.echos.dev", "text/html"),
+            "/downloads/index.html"
+        );
+        assert_eq!(
+            browser_download_path("https://api.echos.dev/latest", "application/json"),
+            "/downloads/payload.json"
+        );
+    }
+
+    #[test]
+    fn desktop_launch_registry_resolves_firefox_binary_when_candidate_exists() {
+        let registry = desktop_launch_registry();
+        let resolution = crate::runtime::RuntimePackageRegistry::new(&registry)
+            .resolve_with_probe("firefox", |path| path == "/programs/firefox/firefox.exe")
+            .expect("resolution");
+        assert_eq!(resolution.path(), Some("/programs/firefox/firefox.exe"));
+        assert_eq!(resolution.descriptor().title, "Firefox");
+        assert_eq!(resolution.descriptor().loader, LoaderDispatch::Pe);
+    }
+
+    #[test]
+    fn desktop_launch_registry_reports_missing_cef_candidates() {
+        let registry = desktop_launch_registry();
+        let resolution = crate::runtime::RuntimePackageRegistry::new(&registry)
+            .resolve_with_probe("cef", |_| false)
+            .expect("resolution");
+        assert!(resolution.path().is_none());
+        assert_eq!(resolution.missing_candidates(), Some(CEF_BINARY_CANDIDATES));
+        assert_eq!(resolution.descriptor().title, "CEF Browser");
+    }
+
+    #[test]
+    fn desktop_web_shortcut_projects_native_windowed_launch_contract() {
+        let session = LaunchIntent::new(
+            DesktopShortcutKind::Web.descriptor(),
+            ExecutionContext::new(LaunchSource::DesktopShortcut, 0, "desktop-web"),
+        )
+        .canonical_session();
+
+        assert_eq!(session.intent.descriptor.app_id, BROWSER_APP_ID);
+        assert_eq!(session.process.bootstrap, RuntimeBootstrap::NativeWindowed);
+        assert_eq!(session.window.app_id, BROWSER_APP_ID);
+        assert_eq!(
+            session.event_loop,
+            crate::gui::launch_pipeline::UnifiedEventLoopContract::DesktopWindowed
+        );
+    }
+
+    #[test]
+    fn launcher_quick_settings_and_palette_raster_surfaces_emit_visible_text_pixels() {
+        let snapshot = SessionSnapshot {
+            workspace_id: 0,
+            workspace_layout: WorkspaceLayout::Dwindle,
+            power_state: SessionPowerState::Active,
+            unread_notifications: 0,
+            apps_running: 0,
+            apps_crashed: 0,
+            overview_active: false,
+            scratchpad_visible: false,
+            shell_ready: true,
+            boot_clean_desktop: true,
+            output_scale: 1,
+            text_scale: 1,
+            locale: String::from("en-US"),
+            theme_variant: String::from("hybrid-titan"),
+            shell_state: ShellState::DesktopReady,
+        };
+        let launcher = paint_launcher_surface(
+            520,
+            320,
+            &[],
+            &snapshot,
+            &[],
+            ThemeMode::Dark,
+            ShellLayoutProfile::Desktop,
+        );
+        let quick_settings =
+            paint_quick_settings_surface(360, 240, ThemeMode::Dark, true, true);
+        let palette = paint_command_palette_surface(
+            520,
+            320,
+            &[CommandPaletteAction {
+                id: 1,
+                title: String::from("Open Web"),
+                category: String::from("Launch"),
+                shortcut: String::from("Enter"),
+                enabled: true,
+            }],
+            "",
+            0,
+            ThemeMode::Dark,
+        );
+        let background = hybrid_titan_palette(ThemeMode::Dark).window_bg;
+
+        assert!(
+            count_non_background_pixels(&launcher, 520, Rect::new(0, 0, 520, 320), background)
+                > 800,
+            "launcher raster should paint visible glyphs and panels"
+        );
+        assert!(
+            count_non_background_pixels(
+                &quick_settings,
+                360,
+                Rect::new(0, 0, 360, 240),
+                background
+            ) > 600,
+            "quick settings raster should paint visible glyphs and rows"
+        );
+        assert!(
+            count_non_background_pixels(&palette, 520, Rect::new(0, 0, 520, 320), background)
+                > 800,
+            "command palette raster should paint visible glyphs and rows"
+        );
+    }
+
+    fn count_non_background_pixels(
+        pixels: &[u32],
+        width: usize,
+        rect: Rect,
+        background: u32,
+    ) -> usize {
+        let mut count = 0usize;
+        for y in rect.y.max(0) as usize..rect.bottom().max(0) as usize {
+            let row = y.saturating_mul(width);
+            for x in rect.x.max(0) as usize..rect.right().max(0) as usize {
+                let idx = row.saturating_add(x);
+                if let Some(pixel) = pixels.get(idx) {
+                    if *pixel != background {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
 }
 
 fn paint_task_strip_surface(
@@ -7007,97 +9744,73 @@ fn paint_task_strip_surface(
     theme_mode: ThemeMode,
 ) -> Vec<u32> {
     let palette = hybrid_titan_palette(theme_mode);
-    let mut canvas = Canvas::new(width, height, palette.panel_alt);
-    canvas.fill_rect(
-        Rect::new(0, 0, width as u32, height as u32),
-        palette.panel_alt,
+    let dock_width = 354u32.min(width as u32);
+    let dock_rect = Rect::new(
+        ((width as i32 - dock_width as i32) / 2).max(0),
+        0,
+        dock_width,
+        height as u32,
     );
-    canvas.fill_rect(Rect::new(0, 0, width as u32, 1), palette.border);
-    canvas.draw_text(18, 10, "Spaces", palette.text_muted);
+    let mut canvas = Canvas::new(width, height, 0x00000000);
+    canvas.fill_rect(dock_rect, 0xD1091018);
+    canvas.stroke_rect(dock_rect, palette.border);
 
-    for index in 0..WORKSPACE_COUNT {
-        let rect = task_strip_workspace_rect(index);
-        let active = index == active_workspace;
-        canvas.fill_rect(
-            rect,
-            if active {
-                palette.panel_bg
-            } else {
-                palette.window_bg
-            },
-        );
-        canvas.stroke_rect(
-            rect,
-            if active {
-                palette.accent_mint
-            } else {
-                palette.border
-            },
-        );
-        canvas.draw_text(
-            rect.x + 8,
-            rect.y + 10,
-            &(index.saturating_add(1)).to_string(),
-            if active {
-                palette.text_primary
+    let mut focused_kind = None;
+    for snapshot in snapshots.iter() {
+        if snapshot.focused || (snapshot.workspace_id == active_workspace && snapshot.visible) {
+            focused_kind = Some(snapshot.kind);
+            if snapshot.focused {
+                break;
+            }
+        }
+    }
+
+    let dock_items = [
+        (Some(AppKind::Terminal), palette.accent_mint),
+        (Some(AppKind::Files), palette.accent_blue),
+        (Some(AppKind::Settings), palette.accent_gold),
+        (Some(AppKind::Editor), palette.accent_coral),
+        (
+            None,
+            if snapshots.iter().any(|s| s.needs_attention) {
+                palette.accent_gold
             } else {
                 palette.text_secondary
             },
-        );
-    }
+        ),
+    ];
 
-    canvas.draw_text(246, 10, "Apps", palette.text_muted);
-    for (index, snapshot) in snapshots.iter().enumerate() {
-        let rect = Rect::new(246 + index as i32 * 118, 12, 106, 48);
-        let on_active_workspace = snapshot.workspace_id == active_workspace;
-        let border = if snapshot.focused {
-            snapshot.kind.accent()
-        } else if snapshot.needs_attention {
-            palette.accent_gold
-        } else if snapshot.health == AppHealth::Crashed {
-            palette.accent_coral
-        } else if on_active_workspace && snapshot.visible {
-            palette.accent_soft
+    for index in 0..dock_items.len() {
+        let rect = task_strip_icon_rect(index, width);
+        let (kind, accent) = dock_items[index];
+        let active = kind.is_some() && kind == focused_kind;
+        canvas.fill_rect(rect, 0xF1111C29);
+        canvas.stroke_rect(rect, if active { accent } else { palette.border });
+
+        if let Some(kind) = kind {
+            let glyph_rect = Rect::new(
+                rect.x + 10,
+                rect.y + 10,
+                rect.width.saturating_sub(20),
+                rect.height.saturating_sub(20),
+            );
+            emit_desktop_icon_rects(kind.icon(), glyph_rect, |segment| {
+                canvas.fill_rect(segment, if active { palette.text_primary } else { accent });
+            });
         } else {
-            palette.border
-        };
-        canvas.fill_rect(
-            rect,
-            if on_active_workspace {
-                palette.panel_bg
-            } else {
-                palette.window_bg
-            },
-        );
-        canvas.stroke_rect(rect, border);
-        canvas.fill_rect(
-            Rect::new(rect.x + 10, rect.y + 14, 10, 10),
-            snapshot.kind.accent(),
-        );
-        canvas.draw_text(
-            rect.x + 28,
-            rect.y + 8,
-            snapshot.kind.title(),
-            palette.text_primary,
-        );
-        canvas.draw_text(
-            rect.x + 28,
-            rect.y + 24,
-            app_health_label(snapshot.health, snapshot.visible, snapshot.focused),
-            if on_active_workspace {
-                palette.text_secondary
-            } else {
-                palette.text_muted
-            },
-        );
+            let badge = Rect::new(
+                rect.x + 10,
+                rect.y + 12,
+                rect.width.saturating_sub(20),
+                rect.height.saturating_sub(24),
+            );
+            canvas.fill_rect(badge, 0xFF111821);
+            canvas.stroke_rect(badge, accent);
+            let text = if snapshots.iter().any(|s| s.needs_attention) { "!" } else { "i" };
+            canvas.draw_text(badge.x + ((badge.width as i32 - FONT_WIDTH) / 2), badge.y + 12, text, accent);
+        }
     }
 
-    canvas.draw_text(
-        width as i32 - 208,
-        28,
-        "Super+1..8 spaces  Super+S scratch",
-        palette.text_muted,
-    );
     canvas.into_pixels()
 }
 
@@ -7702,3 +10415,14 @@ impl Canvas {
     }
 }
 
+fn canvas_draw_top_bar_text(canvas: &mut Canvas, x: i32, y: i32, text: &str, color: u32) {
+    canvas.draw_text(x + 1, y + 1, text, 0xFF081019);
+    canvas.draw_text(x, y, text, color);
+}
+
+fn canvas_draw_top_bar_centered_text(canvas: &mut Canvas, rect: Rect, text: &str, color: u32) {
+    let text_width = (text.len() as i32).saturating_mul(FONT_WIDTH);
+    let text_x = rect.x + ((rect.width as i32 - text_width) / 2).max(0);
+    let text_y = rect.y + ((rect.height as i32 - FONT_HEIGHT) / 2).max(0);
+    canvas_draw_top_bar_text(canvas, text_x, text_y, text, color);
+}

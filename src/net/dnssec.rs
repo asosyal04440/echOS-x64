@@ -67,6 +67,16 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(not(target_os = "uefi"))]
+use ed448_goldilocks_plus::{Signature as Ed448Signature, VerifyingKey as Ed448VerifyingKey};
+#[cfg(not(target_os = "uefi"))]
+use p256::ecdsa::signature::Verifier;
+#[cfg(not(target_os = "uefi"))]
+use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
+#[cfg(not(target_os = "uefi"))]
+use p384::ecdsa::{Signature as P384Signature, VerifyingKey as P384VerifyingKey};
+use sha1::Sha1;
+use sha2::{Digest, Sha256, Sha384};
 use spin::Mutex;
 
 // ============================================================================
@@ -101,6 +111,10 @@ const ED448: u8 = 16; // Ed448 (yüksek güvenlik)
 const DIGEST_SHA1: u8 = 1; // SHA-1 (önerilmez, geriye dönük uyumluluk)
 const DIGEST_SHA256: u8 = 2; // SHA-256 (önerilir)
 const DIGEST_SHA384: u8 = 4; // SHA-384 (yüksek güvenlik)
+
+type DnssecAlgorithmVerifier = fn(public_key: &[u8], signature: &[u8], signed_data: &[u8]) -> bool;
+type DnssecDigestCalculator =
+    fn(key: &DnsKey, domain: &str, canonical_data: &[u8]) -> Option<Vec<u8>>;
 
 /// DNSKEY kaydı.
 ///
@@ -337,8 +351,8 @@ impl RrSig {
     /// İmzayı RRset üzerinde doğrular.
     ///
     /// Bu implementasyon key-tag, algoritma ve zaman geçerliliğini kontrol eder.
-    /// Ed25519 için tam kriptografik doğrulama yapılır (crate::crypto entegrasyonu).
-    /// ECDSA ve RSA için FIXME: external crate gerekir.
+    /// Ed25519, ECDSA P-256 ve RSA/SHA-2 aileleri crate::crypto üstünden doğrulanır.
+    /// Destek dışı algoritmalar fail-closed olarak reddedilir.
     ///
     /// Parametre:
     ///   - rrset: Doğrulanacak DNS kayıt kümesi (kanonik formatta)
@@ -419,44 +433,54 @@ impl RrSig {
                     false
                 }
             }
-            ECDSA_P256_SHA256 => {
-                // ECDSA P-256/SHA-256 doğrulaması (RFC 8624 Section 2.2)
-                // DNSKEY algorithm 13: NIST P-256 eğrisi kullanır
-                if key.public_key.len() != 64 {
+            ECDSA_P256_SHA256 => verify_ecdsa_signature(
+                &key.public_key,
+                &self.signature,
+                32,
+                self.key_tag,
+                "P-256",
+                |pubkey, sig| verify_p256_signature(pubkey, sig, &signed_data),
+            ),
+            ECDSA_P384_SHA384 => verify_ecdsa_signature(
+                &key.public_key,
+                &self.signature,
+                48,
+                self.key_tag,
+                "P-384",
+                |pubkey, sig| verify_p384_signature(pubkey, sig, &signed_data),
+            ),
+            ED448 => {
+                if key.public_key.len() != 57 {
                     crate::serial_println!(
-                        "[DNSSEC] Invalid ECDSA P-256 key length: {}",
+                        "[DNSSEC] Invalid Ed448 key length: {}",
                         key.public_key.len()
                     );
                     return false;
                 }
 
-                if self.signature.len() != 64 {
-                    crate::serial_println!("[DNSSEC] Invalid ECDSA signature length");
+                if self.signature.len() != 114 {
+                    crate::serial_println!(
+                        "[DNSSEC] Invalid Ed448 signature length: {}",
+                        self.signature.len()
+                    );
                     return false;
                 }
 
-                // Parse public key from DNSKEY format (X || Y, each 32 bytes)
-                let x_bytes: [u8; 32] = key.public_key[0..32].try_into().unwrap();
-                let y_bytes: [u8; 32] = key.public_key[32..64].try_into().unwrap();
-
-                let ec_pubkey = crate::crypto::ecdsa::EcdsaPublicKey::from_xy(x_bytes, y_bytes);
-
-                // Verify signature
-                if ec_pubkey.verify(&signed_data, &self.signature) {
+                if verify_ed448_signature(&key.public_key, &self.signature, &signed_data) {
                     crate::serial_println!(
-                        "[DNSSEC] ✓ ECDSA P-256 signature verified (key_tag={})",
+                        "[DNSSEC] ✓ Ed448 signature verified (key_tag={})",
                         self.key_tag
                     );
                     true
                 } else {
                     crate::serial_println!(
-                        "[DNSSEC] ✗ ECDSA P-256 signature verification failed (key_tag={})",
+                        "[DNSSEC] ✗ Ed448 signature verification failed (key_tag={})",
                         self.key_tag
                     );
                     false
                 }
             }
-            RSA_SHA256 | RSA_SHA512 => {
+            RSA_SHA1 | RSA_SHA1_NSEC3 | RSA_SHA256 | RSA_SHA512 => {
                 // RSA imza doğrulaması (RFC 8624 Section 1.2)
                 // DNSKEY algorithm 8 (RSA/SHA-256) veya 10 (RSA/SHA-512)
                 if key.public_key.is_empty() {
@@ -492,10 +516,11 @@ impl RrSig {
                     crate::crypto::rsa::RsaPublicKey::new(modulus_bytes, exponent_bytes);
 
                 // Determine hash type based on algorithm
-                let hash_type = if self.algorithm == RSA_SHA256 {
-                    "sha256"
-                } else {
-                    "sha512"
+                let hash_type = match self.algorithm {
+                    RSA_SHA1 | RSA_SHA1_NSEC3 => "sha1",
+                    RSA_SHA256 => "sha256",
+                    RSA_SHA512 => "sha512",
+                    _ => return false,
                 };
 
                 // Verify RSA signature
@@ -518,12 +543,23 @@ impl RrSig {
                 }
             }
             _ => {
-                crate::serial_println!(
-                    "[DNSSEC] Unsupported signature algorithm: {} (key_tag={})",
-                    self.algorithm,
-                    self.key_tag
-                );
-                false
+                if let Some(verifier) = lookup_algorithm_verifier(self.algorithm) {
+                    let verified = verifier(&key.public_key, &self.signature, &signed_data);
+                    crate::serial_println!(
+                        "[DNSSEC] {} custom verifier {} (key_tag={})",
+                        if verified { "✓" } else { "✗" },
+                        self.algorithm,
+                        self.key_tag
+                    );
+                    verified
+                } else {
+                    crate::serial_println!(
+                        "[DNSSEC] No verifier registered for algorithm {} (key_tag={})",
+                        self.algorithm,
+                        self.key_tag
+                    );
+                    false
+                }
             }
         }
     }
@@ -562,15 +598,8 @@ impl RrSig {
         signed_data.extend_from_slice(&self.signature_inception.to_be_bytes());
         signed_data.extend_from_slice(&self.key_tag.to_be_bytes());
 
-        // Signer name (canonical form: length-prefixed labels, root=0x00)
-        // Basitleştirilmiş: domain'i wire format'a çevir
-        for label in self.signer_name.split('.') {
-            if !label.is_empty() {
-                signed_data.push(label.len() as u8);
-                signed_data.extend_from_slice(label.as_bytes());
-            }
-        }
-        signed_data.push(0x00); // Root label terminator
+        // Signer name canonical wire form: lower-case labels + root terminator.
+        signed_data.extend_from_slice(&canonical_dns_name_wire(&self.signer_name));
 
         // RRset'i ekle (zaten kanonik formatta olduğunu varsayıyoruz)
         // Canonical form: owner name, class, TTL, RDATA length, RDATA
@@ -578,6 +607,128 @@ impl RrSig {
 
         signed_data
     }
+}
+
+fn canonical_dns_name_wire(name: &str) -> Vec<u8> {
+    let trimmed = name.trim_end_matches('.');
+    if trimmed.is_empty() {
+        return vec![0];
+    }
+
+    let mut wire = Vec::with_capacity(trimmed.len() + 2);
+    for label in trimmed.split('.') {
+        let lower = label.to_ascii_lowercase();
+        wire.push(lower.len() as u8);
+        wire.extend_from_slice(lower.as_bytes());
+    }
+    wire.push(0);
+    wire
+}
+
+fn verify_ecdsa_signature<F>(
+    public_key: &[u8],
+    signature: &[u8],
+    coord_size: usize,
+    key_tag: u16,
+    curve_name: &str,
+    verify: F,
+) -> bool
+where
+    F: FnOnce(&[u8], &[u8]) -> bool,
+{
+    if public_key.len() != coord_size * 2 {
+        crate::serial_println!(
+            "[DNSSEC] Invalid ECDSA {} key length: {}",
+            curve_name,
+            public_key.len()
+        );
+        return false;
+    }
+
+    if signature.len() != coord_size * 2 {
+        crate::serial_println!(
+            "[DNSSEC] Invalid ECDSA {} signature length: {}",
+            curve_name,
+            signature.len()
+        );
+        return false;
+    }
+
+    if verify(public_key, signature) {
+        crate::serial_println!(
+            "[DNSSEC] ✓ ECDSA {} signature verified (key_tag={})",
+            curve_name,
+            key_tag
+        );
+        true
+    } else {
+        crate::serial_println!(
+            "[DNSSEC] ✗ ECDSA {} signature verification failed (key_tag={})",
+            curve_name,
+            key_tag
+        );
+        false
+    }
+}
+
+fn sec1_uncompressed_key(public_key: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(public_key.len() + 1);
+    encoded.push(0x04);
+    encoded.extend_from_slice(public_key);
+    encoded
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn verify_p256_signature(public_key: &[u8], signature: &[u8], signed_data: &[u8]) -> bool {
+    let sec1 = sec1_uncompressed_key(public_key);
+    let Ok(verifying_key) = P256VerifyingKey::from_sec1_bytes(&sec1) else {
+        return false;
+    };
+    let Ok(signature) = P256Signature::from_slice(signature) else {
+        return false;
+    };
+    verifying_key.verify(signed_data, &signature).is_ok()
+}
+
+#[cfg(target_os = "uefi")]
+fn verify_p256_signature(_public_key: &[u8], _signature: &[u8], _signed_data: &[u8]) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn verify_p384_signature(public_key: &[u8], signature: &[u8], signed_data: &[u8]) -> bool {
+    let sec1 = sec1_uncompressed_key(public_key);
+    let Ok(verifying_key) = P384VerifyingKey::from_sec1_bytes(&sec1) else {
+        return false;
+    };
+    let Ok(signature) = P384Signature::from_slice(signature) else {
+        return false;
+    };
+    verifying_key.verify(signed_data, &signature).is_ok()
+}
+
+#[cfg(target_os = "uefi")]
+fn verify_p384_signature(_public_key: &[u8], _signature: &[u8], _signed_data: &[u8]) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn verify_ed448_signature(public_key: &[u8], signature: &[u8], signed_data: &[u8]) -> bool {
+    let Ok(public_key) = <&[u8; 57]>::try_from(public_key) else {
+        return false;
+    };
+    let Ok(verifying_key) = Ed448VerifyingKey::from_bytes(public_key) else {
+        return false;
+    };
+    let Ok(signature) = Ed448Signature::try_from(signature) else {
+        return false;
+    };
+    verifying_key.verify_raw(&signature, signed_data).is_ok()
+}
+
+#[cfg(target_os = "uefi")]
+fn verify_ed448_signature(_public_key: &[u8], _signature: &[u8], _signed_data: &[u8]) -> bool {
+    false
 }
 
 /// DS kaydı (Delegation Signer).
@@ -647,19 +798,23 @@ impl DsRecord {
 
         // Belirtilen özet türüne göre hash hesapla
         match digest_type {
-            DIGEST_SHA256 => {
-                let mut hasher = crate::crypto::Sha3::sha3_256();
+            DIGEST_SHA1 => {
+                let mut hasher = Sha1::new();
                 hasher.update(&data);
-                let hash = hasher.finalize();
-                Some(hash[..32].to_vec())
+                Some(hasher.finalize().to_vec())
+            }
+            DIGEST_SHA256 => {
+                let mut hasher = Sha256::new();
+                hasher.update(&data);
+                Some(hasher.finalize().to_vec())
             }
             DIGEST_SHA384 => {
-                let mut hasher = crate::crypto::Sha3::sha3_512();
+                let mut hasher = Sha384::new();
                 hasher.update(&data);
-                let hash = hasher.finalize();
-                Some(hash[..48].to_vec())
+                Some(hasher.finalize().to_vec())
             }
-            _ => None, // Desteklenmeyen özet türü
+            _ => lookup_digest_calculator(digest_type)
+                .and_then(|calculator| calculator(key, domain, &data)),
         }
     }
 
@@ -884,6 +1039,10 @@ impl Default for DnssecValidator {
 // Global DNSSEC doğrulayıcısı: tüm DNSSEC doğrulama işlemleri bu nesne üzerinden yürütülür
 lazy_static::lazy_static! {
     static ref DNSSEC_VALIDATOR: Mutex<DnssecValidator> = Mutex::new(DnssecValidator::new());
+    static ref DNSSEC_ALGORITHM_REGISTRY: Mutex<BTreeMap<u8, DnssecAlgorithmVerifier>> =
+        Mutex::new(BTreeMap::new());
+    static ref DNSSEC_DS_DIGEST_REGISTRY: Mutex<BTreeMap<u8, DnssecDigestCalculator>> =
+        Mutex::new(BTreeMap::new());
 }
 
 // ============================================================================
@@ -921,6 +1080,9 @@ pub struct Nsec3Record {
     pub iterations: u16,
     /// Tuz değeri (hash girdisine eklenerek gökkuşağı tablosu saldırısını önler)
     pub salt: Vec<u8>,
+    /// Owner adının ilk label'ından çözülen gerçek NSEC3 hash'i.
+    /// Owner label çözülemiyorsa tam interval kanıtı üretilemez.
+    pub owner_hashed_label: Option<Vec<u8>>,
     /// Sıradaki hash'lenmiş owner name (sıralı zincirdeki bir sonraki kayıt)
     pub next_hashed_owner: Vec<u8>,
     /// Bu isimde mevcut kayıt türlerinin bit haritası (NSEC ile aynı format)
@@ -975,61 +1137,37 @@ impl Nsec3Record {
             flags,
             iterations,
             salt,
+            owner_hashed_label: None,
             next_hashed_owner,
             type_bitmap,
         })
     }
 
-    /// Verilen alan adının bu NSEC3 kaydının kapsadığı aralığa düşüp
-    /// düşmediğini kontrol eder (basitleştirilmiş).
+    pub fn parse_with_owner(owner_name: &str, data: &[u8]) -> Option<Self> {
+        let mut record = Self::parse(data)?;
+        record.owner_hashed_label = decode_nsec3_owner_label(owner_name);
+        Some(record)
+    }
+
+    /// Verilen alan adının bu NSEC3 kaydının `next_hashed_owner` üst sınırının
+    /// altında kalıp kalmadığını kontrol eder.
     ///
     /// Tam doğrulama için:
     ///   1. Alan adını hash'le: IH(name, iterations) = H(H(…H(name|salt)…)|salt)
     ///   2. Hash'i bu kaydın owner hash'i ile next_hashed_owner arasında mı kontrol et
     ///
-    /// Bu basitleştirilmiş versiyon, alan adının hash'inin owner ve
-    /// next_hashed_owner arasına düşüp düşmediğini hash boyutu karşılaştırması
-    /// ile yaklaşık olarak kontrol eder. Tam SHA-1 iterasyonlu hash hesaplaması
-    /// gerektiğinden, burada sadece yapısal kontrol yapılır.
+    /// Bu kayıt owner-side hashed label çözülmüşse RFC 5155 tarzı dairesel
+    /// interval karşılaştırması üretir; owner hash yoksa doğrulama yapılmaz.
     pub fn covers_name(&self, name: &str) -> bool {
-        // Basitleştirilmiş kontrol: alan adının uzunluk tabanlı hash aralığı
-        // Gerçek implementasyon SHA-1 iterasyonlu hash hesaplaması gerektirir.
-        if self.next_hashed_owner.is_empty() {
+        let owner_hash = match self.owner_hashed_label.as_ref() {
+            Some(owner_hash) if !owner_hash.is_empty() => owner_hash.as_slice(),
+            _ => return false,
+        };
+        if self.hash_algorithm != 1 || self.next_hashed_owner.is_empty() {
             return false;
         }
-
-        // Alan adından basit bir hash üret (gerçekte SHA-1 + salt + iterations olmalı)
-        let name_lower = name.to_lowercase();
-        let mut simple_hash: u32 = 0;
-        for b in name_lower.as_bytes() {
-            simple_hash = simple_hash.wrapping_mul(31).wrapping_add(*b as u32);
-        }
-        // Salt'ı da ekle
-        for b in &self.salt {
-            simple_hash = simple_hash.wrapping_mul(31).wrapping_add(*b as u32);
-        }
-
-        // next_hashed_owner'ın ilk 4 byte'ını karşılaştırma değeri olarak kullan
-        let next_val = if self.next_hashed_owner.len() >= 4 {
-            u32::from_be_bytes([
-                self.next_hashed_owner[0],
-                self.next_hashed_owner[1],
-                self.next_hashed_owner[2],
-                self.next_hashed_owner[3],
-            ])
-        } else {
-            // Kısa hash için mevcut byte'ları kullan
-            let mut val = 0u32;
-            for (i, b) in self.next_hashed_owner.iter().enumerate() {
-                val |= (*b as u32) << (8 * (3 - i));
-            }
-            val
-        };
-
-        // Basit aralık kontrolü: hash değeri next_hashed_owner'dan küçük mü?
-        // NOT: Bu tam bir NSEC3 doğrulaması değildir. Tam doğrulama için
-        // RFC 5155 Bölüm 8'deki algoritmaya uygun hash hesaplaması gerekir.
-        simple_hash < next_val
+        let candidate_hash = hash_nsec3_name(name, &self.salt, self.iterations);
+        compare_nsec3_interval(owner_hash, &self.next_hashed_owner, &candidate_hash)
     }
 
     /// Bit haritasında belirtilen kayıt türünün olup olmadığını kontrol eder.
@@ -1062,6 +1200,93 @@ impl Nsec3Record {
     }
 }
 
+fn hash_nsec3_name(name: &str, salt: &[u8], iterations: u16) -> Vec<u8> {
+    let wire = canonical_dns_name_wire(name);
+    let mut hasher = Sha1::new();
+    hasher.update(&wire);
+    hasher.update(salt);
+    let mut digest = hasher.finalize().to_vec();
+
+    for _ in 0..iterations {
+        let mut hasher = Sha1::new();
+        hasher.update(&digest);
+        hasher.update(salt);
+        digest = hasher.finalize().to_vec();
+    }
+
+    digest
+}
+
+fn compare_nsec3_interval(owner: &[u8], next: &[u8], candidate: &[u8]) -> bool {
+    match owner.cmp(next) {
+        core::cmp::Ordering::Less => owner < candidate && candidate < next,
+        core::cmp::Ordering::Greater => candidate > owner || candidate < next,
+        core::cmp::Ordering::Equal => candidate != owner,
+    }
+}
+
+fn decode_nsec3_owner_label(owner_name: &str) -> Option<Vec<u8>> {
+    let first_label = owner_name
+        .trim_end_matches('.')
+        .split('.')
+        .next()
+        .filter(|label| !label.is_empty())?;
+    decode_base32hex_no_pad(first_label)
+}
+
+fn decode_base32hex_no_pad(label: &str) -> Option<Vec<u8>> {
+    let mut acc = 0u32;
+    let mut bits = 0u8;
+    let mut out = Vec::new();
+
+    for ch in label.bytes() {
+        let value = match ch {
+            b'0'..=b'9' => ch - b'0',
+            b'A'..=b'V' => 10 + (ch - b'A'),
+            b'a'..=b'v' => 10 + (ch - b'a'),
+            _ => return None,
+        } as u32;
+
+        acc = (acc << 5) | value;
+        bits += 5;
+
+        while bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+
+    Some(out)
+}
+
+#[cfg(test)]
+fn encode_base32hex_no_pad(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
+    let mut acc = 0u32;
+    let mut bits = 0u8;
+    let mut out = String::new();
+
+    for byte in bytes {
+        acc = (acc << 8) | *byte as u32;
+        bits += 8;
+
+        while bits >= 5 {
+            bits -= 5;
+            let idx = ((acc >> bits) & 0x1f) as usize;
+            out.push(ALPHABET[idx] as char);
+            acc &= (1 << bits) - 1;
+        }
+    }
+
+    if bits > 0 {
+        let idx = ((acc << (5 - bits)) & 0x1f) as usize;
+        out.push(ALPHABET[idx] as char);
+    }
+
+    out
+}
+
 /// Global DNSSEC doğrulayıcısının bir kopyasını döner.
 pub fn get_validator() -> DnssecValidator {
     DNSSEC_VALIDATOR.lock().clone()
@@ -1072,7 +1297,404 @@ pub fn add_trust_anchor(key: DnsKey, ds: Option<DsRecord>) {
     DNSSEC_VALIDATOR.lock().add_root_anchor(key, ds);
 }
 
+pub fn register_signature_algorithm(algorithm: u8, verifier: DnssecAlgorithmVerifier) {
+    DNSSEC_ALGORITHM_REGISTRY.lock().insert(algorithm, verifier);
+}
+
+fn lookup_algorithm_verifier(algorithm: u8) -> Option<DnssecAlgorithmVerifier> {
+    DNSSEC_ALGORITHM_REGISTRY.lock().get(&algorithm).copied()
+}
+
+pub fn register_ds_digest(digest_type: u8, calculator: DnssecDigestCalculator) {
+    DNSSEC_DS_DIGEST_REGISTRY
+        .lock()
+        .insert(digest_type, calculator);
+}
+
+fn lookup_digest_calculator(digest_type: u8) -> Option<DnssecDigestCalculator> {
+    DNSSEC_DS_DIGEST_REGISTRY.lock().get(&digest_type).copied()
+}
+
 /// Global DNSSEC doğrulayıcısı kullanarak bir DNSKEY kaydını doğrular.
 pub fn validate_dnssec(domain: &str, key: &DnsKey, ds: Option<&DsRecord>) -> DnssecState {
     DNSSEC_VALIDATOR.lock().validate_dnskey(domain, key, ds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed448_goldilocks_plus::SigningKey as Ed448SigningKey;
+    use p256::ecdsa::{signature::Signer as P256Signer, SigningKey as P256SigningKey};
+    use p384::ecdsa::{signature::Signer as P384Signer, SigningKey as P384SigningKey};
+
+    const TEST_CUSTOM_ALGORITHM: u8 = 253;
+    const TEST_CUSTOM_DIGEST: u8 = 253;
+
+    fn xor_signature_verifier(public_key: &[u8], signature: &[u8], signed_data: &[u8]) -> bool {
+        if public_key.is_empty() || signature.len() != signed_data.len() {
+            return false;
+        }
+        let key = public_key[0];
+        signed_data
+            .iter()
+            .zip(signature.iter())
+            .all(|(msg, sig)| (*msg ^ key) == *sig)
+    }
+
+    fn xor_digest_calculator(
+        key: &DnsKey,
+        _domain: &str,
+        canonical_data: &[u8],
+    ) -> Option<Vec<u8>> {
+        if key.public_key.is_empty() || canonical_data.is_empty() {
+            return None;
+        }
+        let seed = key.public_key[0];
+        let mut digest = vec![0u8; 24];
+        let digest_len = digest.len();
+        for (idx, byte) in canonical_data.iter().copied().enumerate() {
+            let slot = idx % digest_len;
+            digest[slot] ^= byte ^ seed ^ idx as u8;
+        }
+        Some(digest)
+    }
+
+    fn encode_dnskey_rsa_public_key(pubkey: &crate::crypto::rsa::RsaPublicKey) -> Vec<u8> {
+        let exponent = pubkey.exponent_bytes();
+        let modulus = pubkey.modulus_bytes();
+        let mut encoded = Vec::with_capacity(1 + exponent.len() + modulus.len());
+        encoded.push(exponent.len() as u8);
+        encoded.extend_from_slice(&exponent);
+        encoded.extend_from_slice(&modulus);
+        encoded
+    }
+
+    #[test]
+    fn ds_calculate_uses_rfc_digest_lengths() {
+        let key = DnsKey {
+            flags: 257,
+            protocol: 3,
+            algorithm: RSA_SHA256,
+            public_key: vec![0x01, 0x02, 0x03, 0x04, 0x05],
+            key_tag: 0,
+        };
+
+        let sha1 = DsRecord::calculate(&key, "example.com", DIGEST_SHA1).unwrap();
+        let sha256 = DsRecord::calculate(&key, "example.com", DIGEST_SHA256).unwrap();
+        let sha384 = DsRecord::calculate(&key, "example.com", DIGEST_SHA384).unwrap();
+
+        assert_eq!(sha1.len(), 20);
+        assert_eq!(sha256.len(), 32);
+        assert_eq!(sha384.len(), 48);
+        assert_ne!(sha1, sha256);
+        assert_ne!(sha256, sha384);
+    }
+
+    #[test]
+    fn rrsig_verify_signature_accepts_rsa_sha1_family() {
+        let public = crate::crypto::rsa::RsaPublicKey::new(&[0xff; 64], &[0x01]);
+        let key = DnsKey {
+            flags: 257,
+            protocol: 3,
+            algorithm: RSA_SHA1,
+            public_key: encode_dnskey_rsa_public_key(&public),
+            key_tag: 0,
+        };
+        let key = DnsKey {
+            key_tag: DnsKey::calculate_key_tag(
+                key.flags,
+                key.protocol,
+                key.algorithm,
+                &key.public_key,
+            ),
+            ..key
+        };
+
+        let rrset = b"\x03www\x07example\x03com\x00\x00\x01\x00\x01";
+        let signer_name = "example.com".to_string();
+        let unsigned_rrsig = RrSig {
+            type_covered: 1,
+            algorithm: RSA_SHA1,
+            labels: 3,
+            original_ttl: 300,
+            signature_expiration: u32::MAX,
+            signature_inception: 0,
+            key_tag: key.key_tag,
+            signer_name,
+            signature: Vec::new(),
+        };
+        let signed_data = unsigned_rrsig.build_signed_data(rrset);
+        let mut hasher = Sha1::new();
+        hasher.update(&signed_data);
+        let hash = hasher.finalize();
+        let digest_info: [u8; 35] = [
+            0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04,
+            0x14, hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8],
+            hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15], hash[16],
+            hash[17], hash[18], hash[19],
+        ];
+        let mut signature = Vec::with_capacity(64);
+        signature.push(0x00);
+        signature.push(0x01);
+        signature.extend(core::iter::repeat_n(0xff, 64 - digest_info.len() - 3));
+        signature.push(0x00);
+        signature.extend_from_slice(&digest_info);
+        let rrsig = RrSig {
+            signature,
+            ..unsigned_rrsig
+        };
+
+        assert!(rrsig.verify_signature(rrset, &key));
+    }
+
+    #[test]
+    fn rrsig_verify_signature_accepts_ecdsa_p256_sha256_family() {
+        let signing_key =
+            P256SigningKey::from_slice(&[0x11; 32]).expect("deterministic p256 signing key");
+        let verifying_key = signing_key.verifying_key();
+        let encoded = verifying_key.to_encoded_point(false);
+        let key = DnsKey {
+            flags: 257,
+            protocol: 3,
+            algorithm: ECDSA_P256_SHA256,
+            public_key: encoded.as_bytes()[1..].to_vec(),
+            key_tag: 0,
+        };
+        let key = DnsKey {
+            key_tag: DnsKey::calculate_key_tag(
+                key.flags,
+                key.protocol,
+                key.algorithm,
+                &key.public_key,
+            ),
+            ..key
+        };
+
+        let rrset = b"\x03www\x07example\x03com\x00\x00\x01\x00\x01";
+        let unsigned_rrsig = RrSig {
+            type_covered: 1,
+            algorithm: ECDSA_P256_SHA256,
+            labels: 3,
+            original_ttl: 300,
+            signature_expiration: u32::MAX,
+            signature_inception: 0,
+            key_tag: key.key_tag,
+            signer_name: "example.com".to_string(),
+            signature: Vec::new(),
+        };
+        let signed_data = unsigned_rrsig.build_signed_data(rrset);
+        let signature: p256::ecdsa::Signature = signing_key.sign(&signed_data);
+        let rrsig = RrSig {
+            signature: signature.to_bytes().to_vec(),
+            ..unsigned_rrsig
+        };
+
+        assert!(rrsig.verify_signature(rrset, &key));
+    }
+
+    #[test]
+    fn rrsig_verify_signature_accepts_ecdsa_p384_sha384_family() {
+        let signing_key =
+            P384SigningKey::from_slice(&[0x22; 48]).expect("deterministic p384 signing key");
+        let verifying_key = signing_key.verifying_key();
+        let encoded = verifying_key.to_encoded_point(false);
+        let key = DnsKey {
+            flags: 257,
+            protocol: 3,
+            algorithm: ECDSA_P384_SHA384,
+            public_key: encoded.as_bytes()[1..].to_vec(),
+            key_tag: 0,
+        };
+        let key = DnsKey {
+            key_tag: DnsKey::calculate_key_tag(
+                key.flags,
+                key.protocol,
+                key.algorithm,
+                &key.public_key,
+            ),
+            ..key
+        };
+
+        let rrset = b"\x03api\x07example\x03com\x00\x00\x10\x00\x01";
+        let unsigned_rrsig = RrSig {
+            type_covered: 16,
+            algorithm: ECDSA_P384_SHA384,
+            labels: 3,
+            original_ttl: 300,
+            signature_expiration: u32::MAX,
+            signature_inception: 0,
+            key_tag: key.key_tag,
+            signer_name: "example.com".to_string(),
+            signature: Vec::new(),
+        };
+        let signed_data = unsigned_rrsig.build_signed_data(rrset);
+        let signature: p384::ecdsa::Signature = signing_key.sign(&signed_data);
+        let rrsig = RrSig {
+            signature: signature.to_bytes().to_vec(),
+            ..unsigned_rrsig
+        };
+
+        assert!(rrsig.verify_signature(rrset, &key));
+    }
+
+    #[test]
+    fn rrsig_verify_signature_accepts_ed448_family() {
+        let signing_key =
+            Ed448SigningKey::try_from(&[0x33; 57][..]).expect("deterministic ed448 signing key");
+        let verifying_key = signing_key.verifying_key();
+        let key = DnsKey {
+            flags: 257,
+            protocol: 3,
+            algorithm: ED448,
+            public_key: verifying_key.as_bytes().to_vec(),
+            key_tag: 0,
+        };
+        let key = DnsKey {
+            key_tag: DnsKey::calculate_key_tag(
+                key.flags,
+                key.protocol,
+                key.algorithm,
+                &key.public_key,
+            ),
+            ..key
+        };
+
+        let rrset = b"\x04edge\x07example\x03com\x00\x00\x1c\x00\x01";
+        let unsigned_rrsig = RrSig {
+            type_covered: 28,
+            algorithm: ED448,
+            labels: 3,
+            original_ttl: 300,
+            signature_expiration: u32::MAX,
+            signature_inception: 0,
+            key_tag: key.key_tag,
+            signer_name: "example.com".to_string(),
+            signature: Vec::new(),
+        };
+        let signed_data = unsigned_rrsig.build_signed_data(rrset);
+        let signature = signing_key.sign_raw(&signed_data);
+        let rrsig = RrSig {
+            signature: signature.to_bytes().to_vec(),
+            ..unsigned_rrsig
+        };
+
+        assert!(rrsig.verify_signature(rrset, &key));
+    }
+
+    #[test]
+    fn build_signed_data_canonicalizes_signer_name_wire_format() {
+        let rrsig = RrSig {
+            type_covered: 1,
+            algorithm: RSA_SHA256,
+            labels: 2,
+            original_ttl: 300,
+            signature_expiration: 0x01020304,
+            signature_inception: 0x05060708,
+            key_tag: 0x1122,
+            signer_name: "MiXeD.Example.COM.".to_string(),
+            signature: Vec::new(),
+        };
+
+        let signed = rrsig.build_signed_data(&[0xde, 0xad]);
+        let signer_wire = canonical_dns_name_wire("mixed.example.com.");
+
+        assert!(signed
+            .windows(signer_wire.len())
+            .any(|window| window == signer_wire.as_slice()));
+        assert_eq!(&signed[signed.len() - 2..], &[0xde, 0xad]);
+    }
+
+    #[test]
+    fn nsec3_parse_with_owner_and_cover_check_use_real_sha1_interval() {
+        let owner_hash = hash_nsec3_name("alpha.example.com.", b"salt", 1);
+        let next_hash = vec![0xff; owner_hash.len()];
+
+        let owner_label = encode_base32hex_no_pad(&owner_hash);
+        let owner_name = alloc::format!("{}.example.com.", owner_label);
+
+        let mut rdata = Vec::new();
+        rdata.push(1);
+        rdata.push(0);
+        rdata.extend_from_slice(&1u16.to_be_bytes());
+        rdata.push(4);
+        rdata.extend_from_slice(b"salt");
+        rdata.push(next_hash.len() as u8);
+        rdata.extend_from_slice(&next_hash);
+
+        let record = Nsec3Record::parse_with_owner(&owner_name, &rdata).expect("nsec3");
+        let covered_name = (0..512)
+            .map(|idx| alloc::format!("candidate-{}.example.com.", idx))
+            .find(|name| record.covers_name(name))
+            .expect("need one hash inside interval");
+
+        assert!(record.covers_name(&covered_name));
+        assert!(!record.covers_name("alpha.example.com."));
+    }
+
+    #[test]
+    fn rrsig_verify_signature_uses_registered_custom_algorithm_verifier() {
+        register_signature_algorithm(TEST_CUSTOM_ALGORITHM, xor_signature_verifier);
+
+        let key = DnsKey {
+            flags: 257,
+            protocol: 3,
+            algorithm: TEST_CUSTOM_ALGORITHM,
+            public_key: vec![0x5a],
+            key_tag: 0,
+        };
+        let key = DnsKey {
+            key_tag: DnsKey::calculate_key_tag(
+                key.flags,
+                key.protocol,
+                key.algorithm,
+                &key.public_key,
+            ),
+            ..key
+        };
+
+        let rrset = b"\x03svc\x07example\x03com\x00\x00\x01\x00\x01";
+        let unsigned_rrsig = RrSig {
+            type_covered: 1,
+            algorithm: TEST_CUSTOM_ALGORITHM,
+            labels: 3,
+            original_ttl: 300,
+            signature_expiration: u32::MAX,
+            signature_inception: 0,
+            key_tag: key.key_tag,
+            signer_name: "example.com".to_string(),
+            signature: Vec::new(),
+        };
+        let signed_data = unsigned_rrsig.build_signed_data(rrset);
+        let signature = signed_data.iter().map(|byte| *byte ^ 0x5a).collect();
+        let rrsig = RrSig {
+            signature,
+            ..unsigned_rrsig
+        };
+
+        assert!(rrsig.verify_signature(rrset, &key));
+    }
+
+    #[test]
+    fn ds_calculate_uses_registered_custom_digest_family() {
+        register_ds_digest(TEST_CUSTOM_DIGEST, xor_digest_calculator);
+        let key = DnsKey {
+            flags: 257,
+            protocol: 3,
+            algorithm: RSA_SHA256,
+            public_key: vec![0x42, 0x10, 0x99, 0x77],
+            key_tag: 0,
+        };
+        let digest = DsRecord::calculate(&key, "example.com", TEST_CUSTOM_DIGEST).unwrap();
+        assert_eq!(digest.len(), 24);
+        let ds = DsRecord {
+            key_tag: 0x1001,
+            algorithm: key.algorithm,
+            digest_type: TEST_CUSTOM_DIGEST,
+            digest: digest.clone(),
+        };
+        assert!(ds.verify(&key, "example.com"));
+        let mut mismatched = ds.clone();
+        mismatched.digest[0] ^= 0x5a;
+        assert!(!mismatched.verify(&key, "example.com"));
+    }
 }

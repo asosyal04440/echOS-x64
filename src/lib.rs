@@ -19,7 +19,10 @@
 //! - **task**: Preemptive multitasking scheduler
 
 #![no_std]
-#![cfg_attr(any(target_os = "none", target_os = "uefi"), feature(abi_x86_interrupt))]
+#![cfg_attr(
+    any(target_os = "none", target_os = "uefi"),
+    feature(abi_x86_interrupt)
+)]
 #![feature(c_variadic)]
 #![allow(dead_code)]
 #![allow(clippy::all)]
@@ -115,12 +118,16 @@ pub mod ipc;
 /// Sistem servisleri (Faz 3) - EchDisplay, EchInput, EchAudio, EchStore
 pub mod services;
 
+/// Uyumluluk/ekosistem koordinatörü (FAZ VIII)
+pub mod ecosystem;
+pub mod ecosystem_exactness;
 /// Grafiksel kullanıcı arayüzü
 pub mod gui;
 /// Kişiselleştirme ve etkileşim motoru (FAZ VII)
 pub mod personalization;
-/// Uyumluluk/ekosistem koordinatörü (FAZ VIII)
-pub mod ecosystem;
+/// Sistem-geneli kanonik launch/bootstrap/window runtime omurgası
+pub mod runtime;
+pub mod runtime_supervisor;
 
 /// Tile-based grafik engine
 pub mod gfx;
@@ -168,6 +175,7 @@ pub mod net;
 pub mod crypto;
 
 pub mod elf;
+pub mod ironshim_app;
 pub mod ironshim_bridge;
 pub mod linux_glue;
 /// POSIX uyumluluk katmanı — syscall dispatcher + pipe/sem/msgq/dlopen alt modülleri
@@ -176,10 +184,10 @@ pub mod posix;
 pub mod shim_layer;
 pub mod vdso;
 
+pub mod valkyrie_virt;
 /// Sanallaştırma desteği (VMX/SVM, EPT) — hypervisor yetenekleri sağlar.
 /// Intel VT-x ve AMD-V donanım sanallaştırmasını kullanır.
 pub mod virt;
-pub mod valkyrie_virt;
 
 /// Makine öğrenimi motoru (ONNX Runtime) — AI model çıkartımı
 /// CPU/GPU hızlandırmalı sinir ağı çıkarımı sağlar.

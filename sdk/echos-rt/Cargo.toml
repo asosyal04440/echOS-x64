@@ -1,0 +1,7 @@
+[package]
+name = "echos-rt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+echos-manifest = { path = "../echos-manifest", default-features = false }

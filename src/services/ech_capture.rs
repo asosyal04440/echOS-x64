@@ -9,10 +9,14 @@ use spin::Mutex;
 use crate::gui::protocol::{
     AppId, DesktopPermission, PermissionState, ScreenshotEntry, ScreenshotId,
 };
-use crate::services::ech_display::{get_display, DisplayCommand, DisplayResponse};
-use crate::services::ech_shell::{get_shell_service, ShellCommand, ShellResponse};
+use crate::ipc::{request_display_sync, request_shell_sync};
+use crate::services::display_atomic::MailboxRing;
+use crate::services::ech_display::{DisplayCommand, DisplayResponse};
+use crate::services::ech_shell::{ShellCommand, ShellResponse};
 
 const MAX_CAPTURES: usize = 8;
+const CAPTURE_COMMAND_QUEUE_CAPACITY: usize = 128;
+const CAPTURE_RESPONSE_QUEUE_CAPACITY: usize = 128;
 
 #[derive(Clone, Debug)]
 pub enum CaptureCommand {
@@ -51,8 +55,8 @@ pub struct EchCapture {
     running: AtomicBool,
     next_id: AtomicU64,
     captures: Mutex<Vec<CaptureRecord>>,
-    command_queue: Mutex<Vec<CaptureCommand>>,
-    response_queue: Mutex<Vec<CaptureResponse>>,
+    command_queue: MailboxRing<CaptureCommand>,
+    response_queue: MailboxRing<CaptureResponse>,
 }
 
 impl EchCapture {
@@ -61,14 +65,22 @@ impl EchCapture {
             running: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             captures: Mutex::new(Vec::new()),
-            command_queue: Mutex::new(Vec::new()),
-            response_queue: Mutex::new(Vec::new()),
+            command_queue: MailboxRing::with_capacity_pow2(CAPTURE_COMMAND_QUEUE_CAPACITY),
+            response_queue: MailboxRing::with_capacity_pow2(CAPTURE_RESPONSE_QUEUE_CAPACITY),
         }
     }
 
     pub fn start(&self) {
         self.running.store(true, Ordering::SeqCst);
         crate::serial_println!("[ECHCAPTURE] service started");
+    }
+
+    pub fn send_command(&self, command: CaptureCommand) -> bool {
+        self.command_queue.try_push(command).is_ok()
+    }
+
+    pub fn receive_response(&self) -> Option<CaptureResponse> {
+        self.response_queue.pop()
     }
 
     pub fn process_command(&self, command: CaptureCommand) -> CaptureResponse {
@@ -79,16 +91,12 @@ impl EchCapture {
                         "screen capture permission denied",
                     ));
                 }
-                let display = match get_display().lock().clone() {
-                    Some(display) => display,
-                    None => return CaptureResponse::Error(String::from("display unavailable")),
-                };
-                match display.process_command(DisplayCommand::SnapshotDesktop) {
-                    DisplayResponse::DesktopSnapshot {
+                match request_display_sync(app_id, DisplayCommand::SnapshotDesktop) {
+                    Some(DisplayResponse::DesktopSnapshot {
                         width,
                         height,
                         pixels,
-                    } => {
+                    }) => {
                         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
                         let entry = ScreenshotEntry {
                             id,
@@ -107,10 +115,11 @@ impl EchCapture {
                         }
                         CaptureResponse::Captured(entry)
                     }
-                    DisplayResponse::Error(err) => CaptureResponse::Error(err),
-                    _ => {
+                    Some(DisplayResponse::Error(err)) => CaptureResponse::Error(err),
+                    Some(_) => {
                         CaptureResponse::Error(String::from("display returned unexpected response"))
                     }
+                    None => CaptureResponse::Error(String::from("display unavailable")),
                 }
             }
             CaptureCommand::ListCaptures { app_id, max_items } => {
@@ -149,13 +158,9 @@ impl EchCapture {
 
     pub fn run_service(&self) {
         while self.running.load(Ordering::SeqCst) {
-            let commands = {
-                let mut queue = self.command_queue.lock();
-                core::mem::take(&mut *queue)
-            };
-            for command in commands {
+            while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
-                self.response_queue.lock().push(response);
+                let _ = self.response_queue.push_overwrite(response);
             }
             for _ in 0..1000 {
                 core::hint::spin_loop();
@@ -187,7 +192,7 @@ pub fn service_task() -> ! {
 
 fn permission_granted(app_id: AppId, permission: DesktopPermission) -> bool {
     matches!(
-        get_shell_service().process_command(ShellCommand::GetPermission { app_id, permission }),
-        ShellResponse::Permission(PermissionState::Granted)
+        request_shell_sync(app_id, ShellCommand::GetPermission { app_id, permission }),
+        Some(ShellResponse::Permission(PermissionState::Granted))
     )
 }

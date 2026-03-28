@@ -367,6 +367,59 @@ pub static kernel_end: u8 = 0;
 #[no_mangle]
 pub static boot_lma_end: u8 = 0;
 
+#[cfg(target_os = "uefi")]
+fn gop_mode_rank(width: usize, height: usize, target_width: usize, target_height: usize) -> u8 {
+    if width == target_width && height == target_height {
+        3
+    } else if width >= target_width && height >= target_height {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(target_os = "uefi")]
+fn configure_preferred_gop_mode(gop: &mut GraphicsOutput) {
+    let current = gop.current_mode_info().resolution();
+    let target = (1920usize, 1080usize);
+    let mut best_mode = None;
+    let mut best_rank = gop_mode_rank(current.0, current.1, target.0, target.1);
+    let mut best_area = current.0.saturating_mul(current.1);
+    let mut best_dims = current;
+
+    for mode in gop.modes() {
+        let dims = mode.info().resolution();
+        let rank = gop_mode_rank(dims.0, dims.1, target.0, target.1);
+        let area = dims.0.saturating_mul(dims.1);
+        let better = rank > best_rank
+            || (rank == best_rank && area > best_area)
+            || (rank == best_rank && area == best_area && dims > best_dims);
+        if better {
+            best_rank = rank;
+            best_area = area;
+            best_dims = dims;
+            best_mode = Some(mode);
+        }
+    }
+
+    if let Some(mode) = best_mode {
+        let dims = mode.info().resolution();
+        if dims != current {
+            if gop.set_mode(&mode).is_ok() {
+                serial_write_str(&format_args!(
+                    "[UEFI] GOP mode selected: {}x{}\n",
+                    dims.0, dims.1
+                ));
+            } else {
+                serial_write_str(&format_args!(
+                    "[UEFI] GOP mode switch failed, keeping {}x{}\n",
+                    current.0, current.1
+                ));
+            }
+        }
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 #[no_mangle]
 pub extern "C" fn kernel_entry(boot_info_addr: usize, kaslr_offset: u64, boot_magic: u64) -> ! {
@@ -857,6 +910,9 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
         "[CPU] Topology detection completed ({} CPUs)\n",
         cpu_count
     ));
+    ech_os::power::init(cpu_count);
+    ech_os::power::init_acpi_power();
+    serial_write_str(&format_args!("[PWR] Power manager initialized\n"));
     ech_os::numa::init(4); // Maksimum 4 NUMA düğümü
     serial_write_str(&format_args!("[CPU] NUMA manager initialized\n"));
 
@@ -1203,7 +1259,10 @@ pub extern "efiapi" fn efi_main(image: Handle, mut system_table: SystemTable<Boo
                     .open_protocol_exclusive::<GraphicsOutput>(handle)
                     .ok()
             });
-        gop.as_mut().map(|gop| Framebuffer::new(gop))
+        gop.as_mut().map(|gop| {
+            configure_preferred_gop_mode(gop);
+            Framebuffer::new(gop)
+        })
     };
 
     serial_write_str(&format_args!("[UEFI] Finding ACPI table...\n"));

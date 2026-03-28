@@ -12,6 +12,7 @@ const BOOT_CONTROL_MAGIC: u32 = u32::from_le_bytes(*b"ECBC");
 const BOOT_CONTROL_VERSION: u16 = 1;
 const DEFAULT_BOOT_ATTEMPTS: u8 = 3;
 const BOOT_FLAG_AUTO_LOGIN: u8 = 1 << 0;
+const BOOT_FLAG_SUSPEND_RESUME_SMOKE: u8 = 1 << 1;
 #[cfg(target_os = "uefi")]
 const APPLIANCE_VENDOR_GUID: VariableVendor = VariableVendor(uefi::Guid::new(
     [0x83, 0x61, 0x26, 0x6d],
@@ -202,6 +203,10 @@ impl BootControlBlock {
         (self.boot_flags() & BOOT_FLAG_AUTO_LOGIN) != 0
     }
 
+    pub fn suspend_resume_smoke_enabled(&self) -> bool {
+        (self.boot_flags() & BOOT_FLAG_SUSPEND_RESUME_SMOKE) != 0
+    }
+
     pub fn begin_boot(&mut self) {
         let pending = self.pending_slot();
         let active = self.active_slot();
@@ -363,6 +368,26 @@ pub fn current_system_partition_label() -> &'static str {
 
 pub fn auto_login_requested() -> bool {
     (BOOT_FLAGS.load(Ordering::Acquire) as u8 & BOOT_FLAG_AUTO_LOGIN) != 0
+}
+
+pub fn suspend_resume_smoke_requested() -> bool {
+    (BOOT_FLAGS.load(Ordering::Acquire) as u8 & BOOT_FLAG_SUSPEND_RESUME_SMOKE) != 0
+}
+
+pub fn clear_suspend_resume_smoke_request() {
+    let snapshot = {
+        let mut guard = BOOT_CONTROL_SHADOW.lock();
+        let mut flags = guard.boot_flags();
+        if (flags & BOOT_FLAG_SUSPEND_RESUME_SMOKE) == 0 {
+            return;
+        }
+        flags &= !BOOT_FLAG_SUSPEND_RESUME_SMOKE;
+        guard.set_boot_flags(flags);
+        *guard = guard.with_crc();
+        *guard
+    };
+    BOOT_FLAGS.store(snapshot.boot_flags() as u32, Ordering::Release);
+    persist_shadow(&snapshot);
 }
 
 pub fn publish_stage(stage: BootStage) {

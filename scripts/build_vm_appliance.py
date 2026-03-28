@@ -16,6 +16,8 @@ LINUX_FS_GUID = uuid.UUID("0fc63daf-8483-4772-8e79-3d69d8477de4")
 BOOT_CONTROL_MAGIC = struct.unpack("<I", b"ECBC")[0]
 BOOT_CONTROL_VERSION = 1
 BOOT_CONTROL_SIZE = 136
+BOOT_FLAG_AUTO_LOGIN = 1 << 0
+BOOT_FLAG_SUSPEND_RESUME_SMOKE = 1 << 1
 
 SLOT_IDS = {
     "none": 0,
@@ -321,7 +323,12 @@ def create_layout(disk_bytes: int) -> list[dict]:
     return layout
 
 
-def build_boot_control(active_slot: str, pending_slot: str, auto_login: bool) -> bytes:
+def build_boot_control(
+    active_slot: str,
+    pending_slot: str,
+    auto_login: bool,
+    suspend_resume_smoke: bool,
+) -> bytes:
     active = SLOT_IDS[active_slot]
     pending = SLOT_IDS[pending_slot]
     blob = bytearray(BOOT_CONTROL_SIZE)
@@ -338,7 +345,12 @@ def build_boot_control(active_slot: str, pending_slot: str, auto_login: bool) ->
     struct.pack_into("<Q", blob, 24, 1)
     struct.pack_into("<Q", blob, 32, 0)
     struct.pack_into("<Q", blob, 40, 0)
-    blob[48] = 0x01 if auto_login else 0x00
+    boot_flags = 0
+    if auto_login:
+        boot_flags |= BOOT_FLAG_AUTO_LOGIN
+    if suspend_resume_smoke:
+        boot_flags |= BOOT_FLAG_SUSPEND_RESUME_SMOKE
+    blob[48] = boot_flags
     struct.pack_into("<I", blob, 128, 0)
     crc = zlib.crc32(blob) & 0xFFFFFFFF
     struct.pack_into("<I", blob, 128, crc)
@@ -354,13 +366,19 @@ def main() -> None:
     parser.add_argument("--active-slot", choices=SLOT_IDS.keys(), default="system_a")
     parser.add_argument("--pending-slot", choices=SLOT_IDS.keys(), default="none")
     parser.add_argument("--auto-login", action="store_true")
+    parser.add_argument("--suspend-resume-smoke", action="store_true")
     args = parser.parse_args()
 
     efi_bytes = args.efi.read_bytes()
     if args.bootctrl:
         bootctrl_bytes = args.bootctrl.read_bytes()
     else:
-        bootctrl_bytes = build_boot_control(args.active_slot, args.pending_slot, args.auto_login)
+        bootctrl_bytes = build_boot_control(
+            args.active_slot,
+            args.pending_slot,
+            args.auto_login,
+            args.suspend_resume_smoke,
+        )
     disk_bytes = args.disk_mib * MiB
     layout = create_layout(disk_bytes)
     disk_sectors = disk_bytes // SECTOR_SIZE
@@ -390,6 +408,7 @@ def main() -> None:
             "active_slot": args.active_slot,
             "pending_slot": args.pending_slot,
             "auto_login": args.auto_login,
+            "suspend_resume_smoke": args.suspend_resume_smoke,
         },
         "partitions": [
             {

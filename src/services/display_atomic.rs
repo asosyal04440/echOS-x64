@@ -117,6 +117,22 @@ impl<T> MailboxRing<T> {
         }
     }
 
+    pub fn try_push(&self, value: T) -> Result<(), T> {
+        let head = self.head.value.load(Ordering::Acquire);
+        let tail = self.tail.value.load(Ordering::Relaxed);
+        if tail.wrapping_sub(head) >= self.capacity() {
+            return Err(value);
+        }
+
+        unsafe {
+            self.slot_ptr(tail).write(value);
+        }
+        self.tail
+            .value
+            .store(tail.wrapping_add(1), Ordering::Release);
+        Ok(())
+    }
+
     pub fn pop(&self) -> Option<T> {
         loop {
             let head = self.head.value.load(Ordering::Relaxed);
@@ -217,12 +233,8 @@ pub struct HotPathMetrics {
 fn atomic_fetch_max(target: &AtomicU64, candidate: u64) {
     let mut current = target.load(Ordering::Relaxed);
     while candidate > current {
-        match target.compare_exchange_weak(
-            current,
-            candidate,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
+        match target.compare_exchange_weak(current, candidate, Ordering::Release, Ordering::Relaxed)
+        {
             Ok(_) => break,
             Err(observed) => current = observed,
         }
@@ -554,14 +566,11 @@ impl FrameScheduler {
         sorted_indices.sort_by_key(|idx| core::cmp::Reverse(candidates[*idx].z));
 
         let primary_idx = self.choose_primary(screen, &candidates, &sorted_indices);
-        let cursor_idx = sorted_indices
-            .iter()
-            .copied()
-            .find(|idx| {
-                Some(*idx) != primary_idx
-                    && candidates[*idx].dst.width <= 128
-                    && candidates[*idx].dst.height <= 128
-            });
+        let cursor_idx = sorted_indices.iter().copied().find(|idx| {
+            Some(*idx) != primary_idx
+                && candidates[*idx].dst.width <= 128
+                && candidates[*idx].dst.height <= 128
+        });
 
         let overlay_limit = device.max_overlay_planes().max(1);
         let mut assignment = PlaneAssignment::empty();
@@ -646,7 +655,6 @@ impl FrameScheduler {
         screen: Rect,
         placements: &[SurfacePlacement],
     ) -> Result<Option<(FrameIntent, PlaneAssignment, VblankFeedback)>, &'static str> {
-
         let mut latest_vblank = None;
         while let Some(event) = self.vblank_queue.pop() {
             latest_vblank = Some(event);
@@ -689,11 +697,14 @@ impl FrameScheduler {
                     .fetch_add(commit_latency_ns, Ordering::AcqRel);
                 atomic_fetch_max(&self.max_commit_latency_ns, commit_latency_ns);
 
-                self.inflight_commit_id.store(txn.commit_id, Ordering::Release);
-                self.inflight_frame_id.store(txn.frame_id, Ordering::Release);
+                self.inflight_commit_id
+                    .store(txn.commit_id, Ordering::Release);
+                self.inflight_frame_id
+                    .store(txn.frame_id, Ordering::Release);
                 self.expected_flip_seq
                     .store(result.vblank_seq, Ordering::Release);
-                self.last_refresh_hz.store(result.refresh_hz, Ordering::Release);
+                self.last_refresh_hz
+                    .store(result.refresh_hz, Ordering::Release);
                 self.inflight_enqueue_ns
                     .store(intent.enqueue_timestamp_ns, Ordering::Release);
                 self.inflight_commit_start_ns
@@ -843,8 +854,7 @@ impl AtomicPresenter {
             let mut injected = false;
             let gpu_count = crate::drivers::gpu_native::device_count();
             for device_index in 0..gpu_count {
-                if let Some(event) = crate::drivers::gpu_native::dispatch_vblank_irq(device_index)
-                {
+                if let Some(event) = crate::drivers::gpu_native::dispatch_vblank_irq(device_index) {
                     self.scheduler.on_vblank_event(event);
                     injected = true;
                 }

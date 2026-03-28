@@ -458,7 +458,18 @@ pub fn compute_checksum(data: &[u8]) -> u16 {
 /// 2. Hedef IP bizim mi? (unicast, broadcast veya multicast)
 /// 3. Protokol alanına göre ICMP, TCP veya UDP'ye yönlendir
 pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
-    let packet = Ipv4Packet::parse(data)?;
+    let mut filtered_buf = data.to_vec();
+    let prerouting_verdict = super::netfilter::process_ipv4_packet(
+        &mut filtered_buf,
+        super::netfilter::NF_INET_PRE_ROUTING,
+        Some("eth0"),
+        None,
+    )?;
+    if prerouting_verdict == super::netfilter::NF_DROP {
+        return Ok(());
+    }
+
+    let mut packet = Ipv4Packet::parse(&filtered_buf)?;
 
     // ── Source Route Rejection (RFC 7126) ──
     // IHL > 5 demek IP seçenekleri mevcut; LSRR (0x83) ve SSRR (0x89) güvenlik riski.
@@ -505,7 +516,7 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
     {
         // ── TTL Decrement on Forward ──
         // Yönlendirme durumunda TTL'i azalt; 0'a düşerse paketi sil.
-        let mut fwd_data = data.to_vec();
+        let mut fwd_data = filtered_buf.clone();
         let ttl = fwd_data[8];
         if ttl <= 1 {
             crate::serial_println!(
@@ -525,6 +536,15 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
         let new_cksum = compute_checksum(&fwd_data[..hdr_len]);
         fwd_data[10..12].copy_from_slice(&new_cksum.to_be_bytes());
         // Not for us — forward would happen here; for now just drop.
+        let forward_verdict = super::netfilter::process_ipv4_packet(
+            &mut fwd_data,
+            super::netfilter::NF_INET_FORWARD,
+            Some("eth0"),
+            None,
+        )?;
+        if forward_verdict == super::netfilter::NF_DROP {
+            return Ok(());
+        }
         return Ok(());
     }
 
@@ -533,12 +553,37 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
     let mf = (packet.header.flags & 0x01) != 0;
     if mf || packet.header.fragment_offset > 0 {
         if let Some(reassembled) = reassemble_fragment(&packet.header, packet.payload) {
+            let mut raw_buf = vec![0u8; packet.header.header_len() + reassembled.len()];
+            let mut raw_header = packet.header;
+            raw_header.flags = 0;
+            raw_header.fragment_offset = 0;
+            raw_header.total_length = (raw_header.header_len() + reassembled.len()) as u16;
+            let raw_packet = Ipv4Packet {
+                header: raw_header,
+                payload: &reassembled,
+            };
+            if let Ok(len) = raw_packet.serialize(&mut raw_buf) {
+                super::socket::deliver_raw_ipv4(&raw_buf[..len], &raw_header);
+            }
             // Birleştirilmiş yükle protokol dağıtımı yap
             dispatch_protocol(&packet.header, &reassembled)?;
         }
         // Henüz tamamlanmamış — sessizce bekle
         return Ok(());
     }
+
+    let local_in_verdict = super::netfilter::process_ipv4_packet(
+        &mut filtered_buf,
+        super::netfilter::NF_INET_LOCAL_IN,
+        Some("eth0"),
+        None,
+    )?;
+    if local_in_verdict == super::netfilter::NF_DROP {
+        return Ok(());
+    }
+    packet = Ipv4Packet::parse(&filtered_buf)?;
+
+    super::socket::deliver_raw_ipv4(&filtered_buf, &packet.header);
 
     // Parçalanmamış paket — doğrudan protokol dağıtımı
     dispatch_protocol(&packet.header, packet.payload)?;

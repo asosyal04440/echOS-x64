@@ -2691,10 +2691,11 @@ unsafe fn write_sockaddr(addr: SocketAddr, out: *mut u8, out_len: *mut i32) -> R
         return Err(WSAEINVAL);
     }
     let dst = out as *mut SockAddrIn;
+    let ipv4 = addr.ip.as_ipv4().ok_or(WSAEAFNOSUPPORT)?;
     *dst = SockAddrIn {
         sin_family: AF_INET as u16,
         sin_port: addr.port.as_u16().to_be(),
-        sin_addr: u32::from_ne_bytes(*addr.ip.as_bytes()),
+        sin_addr: u32::from_ne_bytes(*ipv4.as_bytes()),
         sin_zero: [0; 8],
     };
     *out_len = required;

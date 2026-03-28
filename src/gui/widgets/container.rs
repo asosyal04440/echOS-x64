@@ -399,14 +399,24 @@ impl<'a> TabControl<'a> {
         let base_id = ((self.rect.x as u64) << 32) ^ (self.rect.y as u64) ^ 0x1000_0000;
         objects.push(solid_rect_object(
             base_id,
-            Rect::new(self.rect.x, self.rect.y, self.rect.width, self.tab_height as i32),
+            Rect::new(
+                self.rect.x,
+                self.rect.y,
+                self.rect.width,
+                self.tab_height as i32,
+            ),
             Theme::TITLEBAR_BG.to_u32(),
             DamageLane::Window,
             0,
         ));
         objects.push(solid_rect_object(
             base_id ^ 0x01,
-            Rect::new(self.rect.x, self.rect.y + self.tab_height as i32 - 1, self.rect.width, 1),
+            Rect::new(
+                self.rect.x,
+                self.rect.y + self.tab_height as i32 - 1,
+                self.rect.width,
+                1,
+            ),
             Theme::BORDER.to_u32(),
             DamageLane::Window,
             1,

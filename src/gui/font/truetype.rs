@@ -16,6 +16,7 @@
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use libm::roundf;
 
 /// TrueType yazı tipi yapısı; ayrıştırılmış tablolar ve glif listesini barındırır
 pub struct TrueTypeFont {
@@ -445,15 +446,7 @@ impl TrueTypeFont {
         let mut glyphs = Vec::with_capacity(loca.len().saturating_sub(1));
 
         for i in 0..loca.len().saturating_sub(1) {
-            let glyph_offset = offset + loca[i] as usize;
-            let next_offset = offset + loca[i + 1] as usize;
-
-            let (bounds, contours) =
-                if glyph_offset < next_offset && glyph_offset + 10 <= data.len() {
-                    Self::parse_glyph_outline(data, glyph_offset, next_offset)
-                } else {
-                    (GlyphBounds::default(), Vec::new())
-                };
+            let (bounds, contours) = Self::parse_glyph_entry(data, offset, loca, i as u16, 0);
 
             let metric = h_metrics.get(i).copied().unwrap_or(HorizontalMetric {
                 advance_width: 0,
@@ -472,10 +465,40 @@ impl TrueTypeFont {
         glyphs
     }
 
+    fn parse_glyph_entry(
+        data: &[u8],
+        glyf_base: usize,
+        loca: &[u32],
+        glyph_index: u16,
+        depth: usize,
+    ) -> (GlyphBounds, Vec<GlyphContour>) {
+        const MAX_COMPONENT_DEPTH: usize = 8;
+
+        if depth > MAX_COMPONENT_DEPTH {
+            return (GlyphBounds::default(), Vec::new());
+        }
+
+        let glyph_slot = glyph_index as usize;
+        if glyph_slot + 1 >= loca.len() {
+            return (GlyphBounds::default(), Vec::new());
+        }
+
+        let glyph_offset = glyf_base + loca[glyph_slot] as usize;
+        let next_offset = glyf_base + loca[glyph_slot + 1] as usize;
+        if glyph_offset >= next_offset || glyph_offset + 10 > data.len() {
+            return (GlyphBounds::default(), Vec::new());
+        }
+
+        Self::parse_glyph_outline(data, glyf_base, loca, glyph_offset, next_offset, depth)
+    }
+
     fn parse_glyph_outline(
         data: &[u8],
+        glyf_base: usize,
+        loca: &[u32],
         offset: usize,
         end_offset: usize,
+        depth: usize,
     ) -> (GlyphBounds, Vec<GlyphContour>) {
         if offset + 12 > data.len() {
             return (GlyphBounds::default(), Vec::new());
@@ -491,6 +514,11 @@ impl TrueTypeFont {
         };
 
         if num_contours <= 0 {
+            if num_contours < 0 {
+                return Self::parse_composite_glyph_outline(
+                    data, glyf_base, loca, offset, end_offset, bounds, depth,
+                );
+            }
             return (bounds, Vec::new());
         }
 
@@ -507,12 +535,250 @@ impl TrueTypeFont {
 
         // Basitleştirilmiş uygulama: boş konturlar döndürür
         // Tam uygulama nokta verilerini de ayrıştırır
-        let contours = contour_ends
+        if contour_ends.is_empty() {
+            return (bounds, Vec::new());
+        }
+
+        let point_count = contour_ends.last().copied().unwrap_or(0).saturating_add(1);
+        let instruction_len_offset = offset + 10 + num_contours * 2;
+        if instruction_len_offset + 2 > end_offset || instruction_len_offset + 2 > data.len() {
+            return (bounds, Vec::new());
+        }
+
+        let instruction_len = u16::from_be_bytes([
+            data[instruction_len_offset],
+            data[instruction_len_offset + 1],
+        ]) as usize;
+        let mut cursor = instruction_len_offset + 2 + instruction_len;
+        if cursor > end_offset || cursor > data.len() {
+            return (bounds, Vec::new());
+        }
+
+        let mut flags = Vec::with_capacity(point_count);
+        while flags.len() < point_count && cursor < end_offset && cursor < data.len() {
+            let flag = data[cursor];
+            cursor += 1;
+            flags.push(flag);
+            if flag & 0x08 != 0 {
+                if cursor >= end_offset || cursor >= data.len() {
+                    break;
+                }
+                let repeat = data[cursor] as usize;
+                cursor += 1;
+                for _ in 0..repeat {
+                    if flags.len() == point_count {
+                        break;
+                    }
+                    flags.push(flag);
+                }
+            }
+        }
+
+        if flags.len() != point_count {
+            return (bounds, Vec::new());
+        }
+
+        let mut x_coords = Vec::with_capacity(point_count);
+        let mut current_x = 0i16;
+        for &flag in &flags {
+            let delta = if flag & 0x02 != 0 {
+                if cursor >= end_offset || cursor >= data.len() {
+                    return (bounds, Vec::new());
+                }
+                let short = data[cursor] as i16;
+                cursor += 1;
+                if flag & 0x10 != 0 {
+                    short
+                } else {
+                    -short
+                }
+            } else if flag & 0x10 != 0 {
+                0
+            } else {
+                if cursor + 1 >= end_offset || cursor + 1 >= data.len() {
+                    return (bounds, Vec::new());
+                }
+                let long = i16::from_be_bytes([data[cursor], data[cursor + 1]]);
+                cursor += 2;
+                long
+            };
+            current_x = current_x.saturating_add(delta);
+            x_coords.push(current_x);
+        }
+
+        let mut y_coords = Vec::with_capacity(point_count);
+        let mut current_y = 0i16;
+        for &flag in &flags {
+            let delta = if flag & 0x04 != 0 {
+                if cursor >= end_offset || cursor >= data.len() {
+                    return (bounds, Vec::new());
+                }
+                let short = data[cursor] as i16;
+                cursor += 1;
+                if flag & 0x20 != 0 {
+                    short
+                } else {
+                    -short
+                }
+            } else if flag & 0x20 != 0 {
+                0
+            } else {
+                if cursor + 1 >= end_offset || cursor + 1 >= data.len() {
+                    return (bounds, Vec::new());
+                }
+                let long = i16::from_be_bytes([data[cursor], data[cursor + 1]]);
+                cursor += 2;
+                long
+            };
+            current_y = current_y.saturating_add(delta);
+            y_coords.push(current_y);
+        }
+
+        let points: Vec<GlyphPoint> = flags
             .iter()
-            .map(|_| GlyphContour { points: Vec::new() })
+            .zip(x_coords.iter().zip(y_coords.iter()))
+            .map(|(&flag, (&x, &y))| GlyphPoint {
+                x,
+                y,
+                on_curve: flag & 0x01 != 0,
+            })
             .collect();
 
+        let mut contours = Vec::with_capacity(num_contours);
+        let mut start = 0usize;
+        for end in contour_ends {
+            if end >= points.len() || start > end {
+                break;
+            }
+            contours.push(GlyphContour {
+                points: points[start..=end].to_vec(),
+            });
+            start = end + 1;
+        }
+
         (bounds, contours)
+    }
+
+    fn parse_composite_glyph_outline(
+        data: &[u8],
+        glyf_base: usize,
+        loca: &[u32],
+        offset: usize,
+        end_offset: usize,
+        bounds: GlyphBounds,
+        depth: usize,
+    ) -> (GlyphBounds, Vec<GlyphContour>) {
+        const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+        const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+        const WE_HAVE_A_SCALE: u16 = 0x0008;
+        const MORE_COMPONENTS: u16 = 0x0020;
+        const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
+        const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+        const WE_HAVE_INSTRUCTIONS: u16 = 0x0100;
+
+        let mut cursor = offset + 10;
+        let mut contours = Vec::new();
+
+        loop {
+            if cursor + 4 > end_offset || cursor + 4 > data.len() {
+                break;
+            }
+
+            let flags = u16::from_be_bytes([data[cursor], data[cursor + 1]]);
+            let component_index = u16::from_be_bytes([data[cursor + 2], data[cursor + 3]]);
+            cursor += 4;
+
+            let (arg1, arg2) = if flags & ARG_1_AND_2_ARE_WORDS != 0 {
+                if cursor + 4 > end_offset || cursor + 4 > data.len() {
+                    break;
+                }
+                let a = i16::from_be_bytes([data[cursor], data[cursor + 1]]);
+                let b = i16::from_be_bytes([data[cursor + 2], data[cursor + 3]]);
+                cursor += 4;
+                (a, b)
+            } else {
+                if cursor + 2 > end_offset || cursor + 2 > data.len() {
+                    break;
+                }
+                let a = data[cursor] as i8 as i16;
+                let b = data[cursor + 1] as i8 as i16;
+                cursor += 2;
+                (a, b)
+            };
+
+            let (dx, dy) = if flags & ARGS_ARE_XY_VALUES != 0 {
+                (arg1 as f32, arg2 as f32)
+            } else {
+                (0.0, 0.0)
+            };
+
+            let mut xx = 1.0f32;
+            let mut xy = 0.0f32;
+            let mut yx = 0.0f32;
+            let mut yy = 1.0f32;
+
+            if flags & WE_HAVE_A_SCALE != 0 {
+                if cursor + 2 > end_offset || cursor + 2 > data.len() {
+                    break;
+                }
+                let scale =
+                    Self::f2dot14_to_f32(i16::from_be_bytes([data[cursor], data[cursor + 1]]));
+                cursor += 2;
+                xx = scale;
+                yy = scale;
+            } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+                if cursor + 4 > end_offset || cursor + 4 > data.len() {
+                    break;
+                }
+                xx = Self::f2dot14_to_f32(i16::from_be_bytes([data[cursor], data[cursor + 1]]));
+                yy = Self::f2dot14_to_f32(i16::from_be_bytes([data[cursor + 2], data[cursor + 3]]));
+                cursor += 4;
+            } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
+                if cursor + 8 > end_offset || cursor + 8 > data.len() {
+                    break;
+                }
+                xx = Self::f2dot14_to_f32(i16::from_be_bytes([data[cursor], data[cursor + 1]]));
+                yx = Self::f2dot14_to_f32(i16::from_be_bytes([data[cursor + 2], data[cursor + 3]]));
+                xy = Self::f2dot14_to_f32(i16::from_be_bytes([data[cursor + 4], data[cursor + 5]]));
+                yy = Self::f2dot14_to_f32(i16::from_be_bytes([data[cursor + 6], data[cursor + 7]]));
+                cursor += 8;
+            }
+
+            let (_component_bounds, component_contours) =
+                Self::parse_glyph_entry(data, glyf_base, loca, component_index, depth + 1);
+
+            for contour in component_contours {
+                let mut points = Vec::with_capacity(contour.points.len());
+                for point in contour.points {
+                    let x = point.x as f32;
+                    let y = point.y as f32;
+                    points.push(GlyphPoint {
+                        x: roundf(x * xx + y * xy + dx) as i16,
+                        y: roundf(x * yx + y * yy + dy) as i16,
+                        on_curve: point.on_curve,
+                    });
+                }
+                contours.push(GlyphContour { points });
+            }
+
+            if flags & MORE_COMPONENTS == 0 {
+                if flags & WE_HAVE_INSTRUCTIONS != 0
+                    && cursor + 2 <= end_offset
+                    && cursor + 2 <= data.len()
+                {
+                    let instruction_len =
+                        u16::from_be_bytes([data[cursor], data[cursor + 1]]) as usize;
+                    cursor = cursor.saturating_add(2 + instruction_len);
+                }
+                break;
+            }
+        }
+
+        (bounds, contours)
+    }
+
+    fn f2dot14_to_f32(value: i16) -> f32 {
+        value as f32 / 16384.0
     }
 
     fn parse_name(data: &[u8], offset: usize, _len: usize) -> (String, String) {

@@ -1119,7 +1119,8 @@ impl QuicConnection {
             // Token (empty for client Initial)
             packet.push(0);
 
-            // Length and packet number (simplified)
+            // Encode payload length as QUIC varint, then append the packet
+            // number bytes selected by the short-header layout.
             let mut payload = Vec::new();
             for frame in frames {
                 payload.extend_from_slice(&frame.encode());

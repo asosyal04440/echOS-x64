@@ -24,6 +24,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 use lazy_static::lazy_static;
+use crate::services::display_atomic::MailboxRing;
+
+const AUDIO_COMMAND_QUEUE_CAPACITY: usize = 128;
+const AUDIO_RESPONSE_QUEUE_CAPACITY: usize = 128;
 
 /// Ses formatları
 #[derive(Clone, Debug)]
@@ -110,9 +114,9 @@ pub struct EchAudio {
     /// Ses veri kuyruğu
     audio_queue: Mutex<VecDeque<(u32, Vec<u8>)>>, // (channel_id, data)
     /// Komut kuyruğu
-    command_queue: Mutex<Vec<AudioCommand>>,
+    command_queue: MailboxRing<AudioCommand>,
     /// Yanıt kuyruğu
-    response_queue: Mutex<Vec<AudioResponse>>,
+    response_queue: MailboxRing<AudioResponse>,
     /// PipeWire-benzeri kanal yönlendirme grafı
     routing_graph: Mutex<Vec<AudioRoute>>,
     /// Kanal başına DSP profili (HRTF/AGC/AEC)
@@ -132,8 +136,8 @@ impl EchAudio {
             running: AtomicBool::new(false),
             channels: Mutex::new(Vec::new()),
             audio_queue: Mutex::new(VecDeque::new()),
-            command_queue: Mutex::new(Vec::new()),
-            response_queue: Mutex::new(Vec::new()),
+            command_queue: MailboxRing::with_capacity_pow2(AUDIO_COMMAND_QUEUE_CAPACITY),
+            response_queue: MailboxRing::with_capacity_pow2(AUDIO_RESPONSE_QUEUE_CAPACITY),
             routing_graph: Mutex::new(Vec::new()),
             dsp_profiles: Mutex::new(BTreeMap::new()),
             echo_taps: Mutex::new(BTreeMap::new()),
@@ -160,27 +164,22 @@ impl EchAudio {
     }
 
     /// Komut gönder
-    pub fn send_command(&self, command: AudioCommand) {
-        self.command_queue.lock().push(command);
+    pub fn send_command(&self, command: AudioCommand) -> bool {
+        self.command_queue.try_push(command).is_ok()
     }
 
     /// Yanıt al (non-blocking)
     pub fn receive_response(&self) -> Option<AudioResponse> {
-        self.response_queue.lock().pop()
+        self.response_queue.pop()
     }
 
     /// Ana servis döngüsü (kernel task olarak çalıştırılır)
     pub fn run_service(&self) {
         while self.running.load(Ordering::SeqCst) {
             // Komutları işle
-            let commands = {
-                let mut queue = self.command_queue.lock();
-                core::mem::take(&mut *queue)
-            };
-
-            for command in commands {
+            while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
-                self.response_queue.lock().push(response);
+                let _ = self.response_queue.push_overwrite(response);
             }
 
             // Ses verilerini işle
@@ -194,7 +193,7 @@ impl EchAudio {
     }
 
     /// Komutu işle
-    fn process_command(&self, command: AudioCommand) -> AudioResponse {
+    pub(crate) fn process_command(&self, command: AudioCommand) -> AudioResponse {
         match command {
             AudioCommand::CreateChannel {
                 format,
@@ -409,8 +408,8 @@ impl EchAudio {
             let mut taps = self.echo_taps.lock();
             let echo = *taps.get(&channel_id).unwrap_or(&0i16);
             for s in samples.iter_mut() {
-                let cancelled = (*s as i32 - ((echo as i32 * 3) / 4))
-                    .clamp(i16::MIN as i32, i16::MAX as i32);
+                let cancelled =
+                    (*s as i32 - ((echo as i32 * 3) / 4)).clamp(i16::MIN as i32, i16::MAX as i32);
                 *s = cancelled as i16;
             }
             if let Some(last) = samples.last().copied() {

@@ -338,7 +338,10 @@ mod tests {
         );
 
         let first = graph.snapshot(1);
-        assert_eq!(first.damage_hint, vec![Rect::new(0, 0, 80, 40), Rect::new(0, 0, 12, 8)]);
+        assert_eq!(
+            first.damage_hint,
+            vec![Rect::new(0, 0, 80, 40), Rect::new(0, 0, 12, 8)]
+        );
 
         let second = graph.snapshot(1);
         assert!(second.damage_hint.is_empty());

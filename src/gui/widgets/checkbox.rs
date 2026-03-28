@@ -426,7 +426,12 @@ impl RadioButton {
         vec![
             raster_object(
                 base_id,
-                Rect::new(self.rect.x, self.rect.y + 3, circle_size as i32, circle_size as i32),
+                Rect::new(
+                    self.rect.x,
+                    self.rect.y + 3,
+                    circle_size as i32,
+                    circle_size as i32,
+                ),
                 pixels,
                 DamageLane::Window,
                 0,

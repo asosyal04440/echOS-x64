@@ -11,9 +11,7 @@
 //! fare üzerine gelme (`on_hover`) olaylarını destekler.
 //! Değer değiştiğinde isteğe bağlı bir `on_change` işleyicisi tetiklenir.
 
-use super::{
-    draw_render_objects, solid_rect_object, text_render_object_with_width, Rect, Widget,
-};
+use super::{draw_render_objects, solid_rect_object, text_render_object_with_width, Rect, Widget};
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::protocol::{DamageLane, RenderObject};
 use crate::gui::theme::Theme;
@@ -203,8 +201,12 @@ impl ScrollBar {
         match self.orientation {
             Orientation::Horizontal => {
                 let left = Rect::new(self.rect.x, self.rect.y, 16, self.rect.height);
-                let right =
-                    Rect::new(self.rect.x + self.rect.width - 16, self.rect.y, 16, self.rect.height);
+                let right = Rect::new(
+                    self.rect.x + self.rect.width - 16,
+                    self.rect.y,
+                    16,
+                    self.rect.height,
+                );
                 objects.push(solid_rect_object(
                     base_id ^ 2,
                     left,
@@ -240,8 +242,12 @@ impl ScrollBar {
             }
             Orientation::Vertical => {
                 let top = Rect::new(self.rect.x, self.rect.y, self.rect.width, 16);
-                let bottom =
-                    Rect::new(self.rect.x, self.rect.y + self.rect.height - 16, self.rect.width, 16);
+                let bottom = Rect::new(
+                    self.rect.x,
+                    self.rect.y + self.rect.height - 16,
+                    self.rect.width,
+                    16,
+                );
                 objects.push(solid_rect_object(
                     base_id ^ 6,
                     top,

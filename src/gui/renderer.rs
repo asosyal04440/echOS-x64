@@ -1,10 +1,10 @@
-use alloc::vec::Vec;
-use core::ptr::NonNull;
 use crate::gfx::gal::{Gal, SoftwareGal};
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::protocol::{Rect, RenderObject, RenderObjectKind, SceneUpdate};
 use crate::gui::text::{TextStyle, TextSystem};
+use alloc::vec::Vec;
 use core::ops::Range;
+use core::ptr::NonNull;
 
 pub trait Renderer {
     fn render_scene(
@@ -348,7 +348,8 @@ impl Renderer for GpuRenderer {
         text_system: &mut TextSystem,
     ) {
         if self.backend.pixel_len() != framebuffer.width.saturating_mul(framebuffer.height) {
-            self.backend.resize(framebuffer.width as u32, framebuffer.height as u32);
+            self.backend
+                .resize(framebuffer.width as u32, framebuffer.height as u32);
         }
         self.backend.clear_rgba(0);
         let frame = compile_render_frame(&scene.render_objects);
@@ -361,7 +362,8 @@ impl Renderer for GpuRenderer {
             &frame,
             text_system,
         );
-        self.backend.present_damage_to_framebuffer(framebuffer, damage);
+        self.backend
+            .present_damage_to_framebuffer(framebuffer, damage);
     }
 }
 
@@ -457,7 +459,13 @@ fn draw_render_object(
             if *corner_radius == 0 {
                 fill_rect(framebuffer, render_rect, *color);
             } else {
-                fill_rounded_rect(framebuffer, translated, render_rect, *color, *corner_radius as u32);
+                fill_rounded_rect(
+                    framebuffer,
+                    translated,
+                    render_rect,
+                    *color,
+                    *corner_radius as u32,
+                );
             }
         }
         RenderObjectKind::Raster {
@@ -490,7 +498,12 @@ fn draw_render_object(
             *max_width,
             text_system,
         ),
-        RenderObjectKind::GlyphRun { width, height, pixels, .. } => draw_raster(
+        RenderObjectKind::GlyphRun {
+            width,
+            height,
+            pixels,
+            ..
+        } => draw_raster(
             framebuffer,
             translated,
             render_rect,
@@ -775,7 +788,13 @@ fn draw_render_object_gpu(
         RenderObjectKind::SolidRect {
             color,
             corner_radius,
-        } => fill_rounded_rect_gpu(backend, translated, render_rect, *color, *corner_radius as u32),
+        } => fill_rounded_rect_gpu(
+            backend,
+            translated,
+            render_rect,
+            *color,
+            *corner_radius as u32,
+        ),
         RenderObjectKind::Raster {
             width,
             height,
@@ -837,7 +856,12 @@ fn draw_render_object_gpu(
                 object.opacity,
             );
         }
-        RenderObjectKind::GlyphRun { width, height, pixels, .. } => draw_raster_gpu(
+        RenderObjectKind::GlyphRun {
+            width,
+            height,
+            pixels,
+            ..
+        } => draw_raster_gpu(
             backend,
             translated,
             render_rect,
@@ -894,8 +918,10 @@ fn draw_raster_gpu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::protocol::{
+        DamageLane, Rect, RenderObject, RenderObjectKind, SceneUpdate, TextRunStyle,
+    };
     use alloc::vec;
-    use crate::gui::protocol::{DamageLane, Rect, RenderObject, RenderObjectKind, SceneUpdate, TextRunStyle};
 
     fn sample_scene() -> SceneUpdate {
         SceneUpdate {

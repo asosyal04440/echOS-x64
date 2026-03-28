@@ -18,6 +18,15 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+static NEXT_HOST_RANDOM_CPU_KEY: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+std::thread_local! {
+    static HOST_RANDOM_CPU_KEY: u32 =
+        NEXT_HOST_RANDOM_CPU_KEY.fetch_add(1, Ordering::AcqRel) % (MAX_CPUS as u32);
+}
+
 /// Desteklenen maksimum CPU sayısı.
 const MAX_CPUS: usize = 32;
 
@@ -42,6 +51,19 @@ static GLOBAL_ENTROPY: AtomicU64 = AtomicU64::new(0);
 /// Test ve üretim ortamları için yeniden üretilebilir (reproducible) sayı dizileri
 /// oluşturmaya yarar. 0xA5A5A5A5 çarpraz bit deseni ile başlatılır.
 static DETERMINISTIC_SEED: AtomicU32 = AtomicU32::new(0xA5A5A5A5);
+
+#[inline]
+fn current_rng_cpu_id() -> usize {
+    #[cfg(any(target_os = "none", target_os = "uefi"))]
+    {
+        crate::cpu::smp::current_cpu_id() as usize
+    }
+
+    #[cfg(all(not(target_os = "none"), not(target_os = "uefi")))]
+    {
+        HOST_RANDOM_CPU_KEY.with(|cpu_id| *cpu_id as usize)
+    }
+}
 
 /// RNG'yi başlangıç tohumuyla başlatır.
 ///
@@ -70,7 +92,7 @@ pub fn init(seed: u32) {
 pub fn add_entropy(value: u64) {
     // Entropi değerini bit döndürme ve XOR ile karıştır (avalanche etkisi)
     let mixed = value ^ value.rotate_left(17) ^ value.rotate_right(23);
-    let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+    let cpu_id = current_rng_cpu_id();
 
     if cpu_id < MAX_CPUS {
         // Mevcut CPU'nun havuzuna XOR ile karıştır
@@ -90,7 +112,7 @@ pub fn add_entropy(value: u64) {
 /// Xorshift algoritması uygulanır; ardından CPU'nun entropi havuzuyla XOR'lanarak
 /// çıktı kalitesi artırılır. Kilit almadan çalışır (lock-free).
 pub fn next_u32() -> u32 {
-    let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+    let cpu_id = current_rng_cpu_id();
     // Geçerli CPU'nun tohumunu seç; aralık dışıysa BSP'ye geri düş
     let seed_ptr = if cpu_id < MAX_CPUS {
         &SEEDS[cpu_id]

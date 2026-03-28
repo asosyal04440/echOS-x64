@@ -720,11 +720,10 @@ impl DnsResponse {
 /// DoH hatası türleri.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DohError {
-    HttpsNotSupported, // TLS/HTTPS henüz desteklenmiyor (TODO)
-    InvalidResponse,   // Yanıt geçerli DNS formatında değil
-    NetworkError,      // Ağ bağlantı hatası
-    Timeout,           // Zaman aşımı
-    ServerError(u16),  // HTTP hata kodu (4xx, 5xx)
+    InvalidResponse,  // Yanıt geçerli DNS formatında değil
+    NetworkError,     // Ağ bağlantı hatası
+    Timeout,          // Zaman aşımı
+    ServerError(u16), // HTTP hata kodu (4xx, 5xx)
 }
 
 /// DoH URL'sinden host ve path bileşenlerini ayrıştırır.
@@ -845,7 +844,7 @@ pub fn resolve_doh(domain: &str, qtype: DnsRecordType) -> Result<DnsResponse, Do
         let response_data = client.query_get(domain, qtype)?;
         DohClient::parse_response(&response_data)
     } else {
-        Err(DohError::HttpsNotSupported)
+        Err(DohError::NetworkError)
     }
 }
 

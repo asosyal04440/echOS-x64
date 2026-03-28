@@ -72,6 +72,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use crate::ipc::request_store_sync;
 use core::sync::atomic::{AtomicBool, Ordering};
 use editor::GapBuffer;
 
@@ -238,9 +239,6 @@ fn describe_http_error(err: crate::net::http::HttpError) -> String {
         HttpError::TlsCertRevoked => String::from(
             "TLS sertifika iptal edilmis\nNot: sertifika revoked durumunda",
         ),
-        HttpError::TlsNotSupported => String::from(
-            "TLS yolu tamamlanamadi\nNot: tasiyici/handshake fidelity siniri devam ediyor",
-        ),
         HttpError::ProxyAuthenticationRequired => String::from(
             "proxy kimlik dogrulamasi gerekli\nNot: proxy 407 / CONNECT auth gerektirdi",
         ),
@@ -260,9 +258,6 @@ fn describe_doh_error(err: crate::net::doh::DohError) -> String {
     use crate::net::doh::DohError;
 
     match err {
-        DohError::HttpsNotSupported => String::from(
-            "DoH HTTPS yolu tamamlanamadi\nNot: TLS/HTTPS tasiyici fidelity siniri devam ediyor",
-        ),
         DohError::InvalidResponse => {
             String::from("DoH yaniti gecersiz\nNot: uzak endpoint DNS wire formatina uygun donmedi")
         }
@@ -282,9 +277,6 @@ fn describe_dot_error(err: crate::net::dot::DotError) -> String {
     use crate::net::dot::DotError;
 
     match err {
-        DotError::TlsNotSupported => String::from(
-            "DoT TLS yolu tamamlanamadi\nNot: TLS tasiyici fidelity siniri devam ediyor",
-        ),
         DotError::NotConnected => String::from(
             "DoT baglantisi kurulmadan sorgu denendi\nNot: socket/TLS oturumu acik degil",
         ),
@@ -324,6 +316,57 @@ fn describe_http3_error(err: crate::net::http3::Http3Error) -> String {
     }
 }
 
+fn format_kb_human(kb: usize) -> String {
+    const MIB_KB: usize = 1024;
+    const GIB_KB: usize = 1024 * 1024;
+
+    if kb >= GIB_KB {
+        format!("{}G", kb / GIB_KB)
+    } else if kb >= MIB_KB {
+        format!("{}M", kb / MIB_KB)
+    } else {
+        format!("{}K", kb)
+    }
+}
+
+fn render_memory_info() -> String {
+    let stats = crate::memory::get_memory_stats();
+    let used_kb = stats.total_kb.saturating_sub(stats.free_kb);
+
+    format!(
+        "              total        used        free   available\nMem:     {:>10} {:>10} {:>10} {:>10}\nSwap:    {:>10} {:>10} {:>10}",
+        format_kb_human(stats.total_kb),
+        format_kb_human(used_kb),
+        format_kb_human(stats.free_kb),
+        format_kb_human(stats.available_kb),
+        format_kb_human(stats.swap_total_kb),
+        format_kb_human(stats.swap_total_kb.saturating_sub(stats.swap_free_kb)),
+        format_kb_human(stats.swap_free_kb),
+    )
+}
+
+fn render_df_info() -> String {
+    let mounts = crate::fs::mount::MOUNT_TABLE.list();
+    if mounts.is_empty() {
+        return String::from("Filesystem     Type       Mounted on    Size Used Avail Use%");
+    }
+
+    let mut out = String::from("Filesystem     Type       Mounted on    Size Used Avail Use%\n");
+    for mount in mounts {
+        out.push_str(&format!(
+            "{:<14} {:<10} {:<13} {:>4} {:>4} {:>5} {:>4}\n",
+            mount.source,
+            mount.fs_type.as_str(),
+            mount.target,
+            "n/a",
+            "n/a",
+            "n/a",
+            "n/a"
+        ));
+    }
+    out.trim_end().to_string()
+}
+
 fn parse_dns_privacy_provider(provider: Option<&str>) -> Result<&'static str, &'static str> {
     match provider.unwrap_or("cloudflare") {
         "cloudflare" => Ok("cloudflare"),
@@ -336,6 +379,19 @@ fn parse_dns_privacy_provider(provider: Option<&str>) -> Result<&'static str, &'
 static SHELL_RUNTIME_READY: AtomicBool = AtomicBool::new(false);
 const SESSION_HISTORY_LIMIT: usize = 1000;
 const PRODUCT_NETWORK_SURFACE_ENABLED: bool = true;
+
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+lazy_static::lazy_static! {
+    static ref HOST_SHELL_FILES: spin::Mutex<BTreeMap<String, Vec<u8>>> =
+        spin::Mutex::new(BTreeMap::new());
+}
 
 fn network_surface_disabled() -> bool {
     !PRODUCT_NETWORK_SURFACE_ENABLED
@@ -358,6 +414,109 @@ fn network_surface_disabled_response(name: &str) -> String {
         "{} kullanilamaz\nNot: echOS urun hedefinde network yuzeyi gozden cikarildi ve shell fail-closed durumda",
         name
     )
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+fn host_shell_file(path: &str) -> Option<Vec<u8>> {
+    HOST_SHELL_FILES.lock().get(path).cloned()
+}
+
+#[cfg(not(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+)))]
+fn host_shell_file(_path: &str) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+fn host_shell_write_file(path: &str, data: &[u8], append: bool) -> usize {
+    let mut files = HOST_SHELL_FILES.lock();
+    let entry = files.entry(path.to_string()).or_default();
+    if append {
+        entry.extend_from_slice(data);
+    } else {
+        entry.clear();
+        entry.extend_from_slice(data);
+    }
+    data.len()
+}
+
+#[cfg(not(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+)))]
+fn host_shell_write_file(_path: &str, _data: &[u8], _append: bool) -> usize {
+    0
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+fn host_shell_remove_file(path: &str) -> bool {
+    HOST_SHELL_FILES.lock().remove(path).is_some()
+}
+
+#[cfg(not(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+)))]
+fn host_shell_remove_file(_path: &str) -> bool {
+    false
+}
+
+pub(crate) fn output_indicates_failure(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    output.starts_with("Kullanim:")
+        || output.starts_with("Usage:")
+        || output.starts_with("Bilinmeyen komut:")
+        || lower.contains(" hata")
+        || lower.contains("hatasi")
+        || lower.contains("basarisiz")
+        || lower.contains("bulunamadi")
+}
+
+pub(crate) fn command_exit_code(output: &Option<String>) -> i64 {
+    if output
+        .as_ref()
+        .map(|value| output_indicates_failure(value))
+        .unwrap_or(false)
+    {
+        1
+    } else {
+        0
+    }
 }
 
 fn ensure_shell_runtime_ready() {
@@ -874,6 +1033,10 @@ impl Shell {
 
     pub fn next_history(&mut self) -> Option<String> {
         self.history.next()
+    }
+
+    pub(crate) fn set_session_env(&mut self, key: &str, value: &str) {
+        self.env.set(key, value);
     }
 
     fn sync_runtime_state(&self) {
@@ -1540,18 +1703,11 @@ impl Shell {
                 Some(format!("up {}:{:02}:{:02}", hours, mins % 60, secs % 60))
             }
             "date" => {
-                // TODO: RTC'den tarih oku
                 let dt = crate::drivers::rtc::get_cached_datetime();
                 Some(dt.to_string())
             }
-            "free" => {
-                // TODO: Gerçek memory info
-                Some(String::from("              total        used        free\nMem:         256M         64M        192M\nSwap:          0B          0B          0B"))
-            }
-            "df" => {
-                // TODO: Gerçek disk info
-                Some(String::from("Filesystem     Size  Used Avail Use% Mounted on\n/dev/sda1      256M   64M  192M  25% /"))
-            }
+            "free" => Some(render_memory_info()),
+            "df" => Some(render_df_info()),
             // ─── Shell Batch 2: lsmod / iostat / netstat / ifconfig ───
             "lsmod" => {
                 use alloc::format;
@@ -1651,6 +1807,16 @@ impl Shell {
                     return Some(String::from("Kullanim: rm <dosya>"));
                 }
                 let resolved = resolve_path(parts[1]);
+                if cfg!(any(
+                    test,
+                    all(feature = "host_smoke", not(target_os = "none"), not(target_os = "uefi"))
+                )) {
+                    return Some(if host_shell_remove_file(&resolved) {
+                        format!("rm: {} silindi", parts[1])
+                    } else {
+                        String::from("rm hatasi: Dosya bulunamadi")
+                    });
+                }
                 let (parent, name) = match split_parent_name(&resolved) {
                     Ok(value) => value,
                     Err(msg) => return Some(msg),
@@ -2413,8 +2579,16 @@ impl Shell {
                 if parts.len() < 3 {
                     return Some(String::from("Kullanim: write <dosya> <icerik>"));
                 }
+                let resolved = resolve_path(parts[1]);
                 let path = parts[1].trim_start_matches('/');
                 let content = parts[2..].join(" ");
+                if cfg!(any(
+                    test,
+                    all(feature = "host_smoke", not(target_os = "none"), not(target_os = "uefi"))
+                )) {
+                    let written = host_shell_write_file(&resolved, content.as_bytes(), false);
+                    return Some(format!("write: {} -> {} bytes", parts[1], written));
+                }
                 let (parent, name) = if let Some(pos) = path.rfind('/') {
                     (&path[..pos], &path[pos + 1..])
                 } else {
@@ -2430,8 +2604,11 @@ impl Shell {
                 if parts.len() < 3 {
                     return Some(String::from("Kullanim: append <dosya> <icerik>"));
                 }
-                // TODO: append operation for f2fs
-                Some(String::from("append: TODO - f2fs append desteği gerekli"))
+                let content = parts[2..].join(" ");
+                return match append_file(parts[1], content.as_bytes()) {
+                    Ok(written) => Some(format!("append: {} -> {} bytes", parts[1], written)),
+                    Err(err) => Some(err),
+                };
             }
             // ===============================================
             // H12 Shell Commands — nvme-info, tier-bench, jail-log, ring-stats
@@ -2839,6 +3016,9 @@ fn load_and_run_elf(path: &str) -> Result<(), String> {
 /// 4. Okunan byte sayısına `truncate()` uygula
 fn load_file(path: &str) -> Result<Vec<u8>, String> {
     let resolved = resolve_path(path);
+    if let Some(data) = host_shell_file(&resolved) {
+        return Ok(data);
+    }
     let inode =
         crate::fs::vfs_open_inode(&resolved).map_err(|_| String::from("Dosya bulunamadi"))?;
     let size = crate::fs::vfs_inode_metadata(&inode)
@@ -2932,6 +3112,37 @@ fn split_parent_name(path: &str) -> Result<(String, String), String> {
     }
 }
 
+fn append_file(path: &str, data: &[u8]) -> Result<usize, String> {
+    let resolved = resolve_path(path);
+    if cfg!(any(
+        test,
+        all(
+            feature = "host_smoke",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )
+    )) {
+        return Ok(host_shell_write_file(&resolved, data, true));
+    }
+
+    if let Ok(inode) = crate::fs::vfs_open_inode(&resolved) {
+        let end = crate::fs::vfs_inode_metadata(&inode)
+            .map_err(|_| String::from("Dosya bilgisi okunamadi"))?
+            .size;
+        let fd = crate::fs::sys_open(&resolved, crate::posix::O_WRONLY);
+        crate::fs::sys_seek(fd, end);
+        let result =
+            crate::fs::sys_write(fd, data).map_err(|err| format!("append hatasi: {:?}", err));
+        let _ = crate::fs::sys_close(fd);
+        return result;
+    }
+
+    let (parent, name) = split_parent_name(&resolved)?;
+    crate::fs::f2fs::create_f2fs_file_with_data(&parent, &name, data)
+        .map_err(|err| format!("append hatasi: {:?}", err))?;
+    Ok(data.len())
+}
+
 fn basename(path: &str) -> &str {
     path.rsplit('/')
         .find(|segment| !segment.is_empty())
@@ -2976,24 +3187,28 @@ fn copy_file(source: &str, destination: &str) -> Result<String, String> {
 }
 
 fn store_list_directory_entries(path: &str) -> Result<Vec<crate::services::FileEntry>, String> {
-    match crate::services::get_store().process_command(
+    match request_store_sync(
+        0,
         crate::services::StoreCommand::ListDirectory {
             path: path.to_string(),
         },
     ) {
-        crate::services::StoreResponse::DirectoryContents(entries) => Ok(entries),
-        crate::services::StoreResponse::Error(err) => Err(err),
-        _ => Err(String::from("Dizin okunamadi")),
+        Some(crate::services::StoreResponse::DirectoryContents(entries)) => Ok(entries),
+        Some(crate::services::StoreResponse::Error(err)) => Err(err),
+        Some(_) | None => Err(String::from("Dizin okunamadi")),
     }
 }
 
 fn store_file_info(path: &str) -> Result<crate::services::FileEntry, String> {
-    match crate::services::get_store().process_command(crate::services::StoreCommand::GetFileInfo {
-        path: path.to_string(),
-    }) {
-        crate::services::StoreResponse::FileInfo(entry) => Ok(entry),
-        crate::services::StoreResponse::Error(err) => Err(err),
-        _ => Err(String::from("Dosya bilgisi okunamadi")),
+    match request_store_sync(
+        0,
+        crate::services::StoreCommand::GetFileInfo {
+            path: path.to_string(),
+        },
+    ) {
+        Some(crate::services::StoreResponse::FileInfo(entry)) => Ok(entry),
+        Some(crate::services::StoreResponse::Error(err)) => Err(err),
+        Some(_) | None => Err(String::from("Dosya bilgisi okunamadi")),
     }
 }
 
@@ -3199,9 +3414,6 @@ fn handle_wine_command(
                     Some(String::from("Runtime secilmedi"))
                 }
                 Err(crate::posix::WineRuntimeError::Invalid) => Some(String::from("Gecersiz hedef")),
-                Err(crate::posix::WineRuntimeError::NotSupported) => {
-                    Some(String::from("PE calistirma henuz desteklenmiyor"))
-                }
                 Err(crate::posix::WineRuntimeError::SecureBootViolation) => {
                     Some(String::from("Secure Boot aktif, imzasiz PE reddedildi"))
                 }
@@ -3263,9 +3475,6 @@ fn handle_wine_command(
                 Err(crate::posix::WineRuntimeError::NotFound) => {
                     Some(String::from("Runtime secilmedi"))
                 }
-                Err(crate::posix::WineRuntimeError::NotSupported) => {
-                    Some(String::from("PE calistirma henuz desteklenmiyor"))
-                }
                 Err(crate::posix::WineRuntimeError::SecureBootViolation) => {
                     Some(String::from("Secure Boot aktif, imzasiz PE reddedildi"))
                 }
@@ -3314,9 +3523,6 @@ fn handle_wine_command(
                     Some(String::from("Runtime secilmedi"))
                 }
                 Err(crate::posix::WineRuntimeError::Invalid) => Some(String::from("Gecersiz hedef")),
-                Err(crate::posix::WineRuntimeError::NotSupported) => {
-                    Some(String::from("PE calistirma henuz desteklenmiyor"))
-                }
                 Err(crate::posix::WineRuntimeError::SecureBootViolation) => {
                     Some(String::from("Secure Boot aktif, imzasiz PE reddedildi"))
                 }
@@ -3505,11 +3711,7 @@ fn execute_chained(shell: &mut Shell, tokens: &[advanced::Token]) -> Option<Stri
                 if last_success && !current_cmd.is_empty() {
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
                     last_output = execute_builtin(shell, &args, None);
-                    last_success = last_output.is_none()
-                        || !last_output
-                            .as_ref()
-                            .map(|o| o.contains("hata") || o.contains("Hata"))
-                            .unwrap_or(false);
+                    last_success = command_exit_code(&last_output) == 0;
                 }
                 current_cmd.clear();
 
@@ -3529,20 +3731,12 @@ fn execute_chained(shell: &mut Shell, tokens: &[advanced::Token]) -> Option<Stri
                 if !last_success && !current_cmd.is_empty() {
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
                     last_output = execute_builtin(shell, &args, None);
-                    last_success = last_output.is_none()
-                        || !last_output
-                            .as_ref()
-                            .map(|o| o.contains("hata") || o.contains("Hata"))
-                            .unwrap_or(false);
+                    last_success = command_exit_code(&last_output) == 0;
                 } else if last_success && !current_cmd.is_empty() {
                     // Önceki başarılı - bu komutu çalıştır ama sonucu kontrol et
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
                     last_output = execute_builtin(shell, &args, None);
-                    last_success = last_output.is_none()
-                        || !last_output
-                            .as_ref()
-                            .map(|o| o.contains("hata") || o.contains("Hata"))
-                            .unwrap_or(false);
+                    last_success = command_exit_code(&last_output) == 0;
                 }
                 current_cmd.clear();
 
@@ -3561,11 +3755,7 @@ fn execute_chained(shell: &mut Shell, tokens: &[advanced::Token]) -> Option<Stri
                 if !current_cmd.is_empty() {
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
                     last_output = execute_builtin(shell, &args, None);
-                    last_success = last_output.is_none()
-                        || !last_output
-                            .as_ref()
-                            .map(|o| o.contains("hata") || o.contains("Hata"))
-                            .unwrap_or(false);
+                    last_success = command_exit_code(&last_output) == 0;
                 }
                 current_cmd.clear();
             }
@@ -3601,8 +3791,8 @@ fn execute_chained(shell: &mut Shell, tokens: &[advanced::Token]) -> Option<Stri
 /// ## Yönlendirme (Redirect)
 ///
 /// `cmd.redirects` içindeki her `Redirect` işlenir:
-/// - `Stdout` / `StdoutAppend`: Çıktı dosyaya yazılır (TODO)
-/// - `Stdin`: Girdi dosyadan okunur (TODO)
+/// - `Stdout` / `StdoutAppend`: Çıktı dosyaya yazılır
+/// - `Stdin`: Girdi dosyadan okunur
 fn execute_pipeline(shell: &mut Shell, pipeline: &advanced::Pipeline) -> Option<String> {
     if pipeline.commands.is_empty() {
         return None;
@@ -3995,6 +4185,39 @@ mod tests {
             describe_http3_error(crate::net::http3::Http3Error::RemoteTransportUnavailable)
                 .contains("sessiz downgrade yok")
         );
+    }
+
+    #[test]
+    fn free_builtin_reports_runtime_memory_stats() {
+        let mut shell = Shell::new();
+        let output = run_command_in_shell(&mut shell, "free").unwrap_or_default();
+        let stats = crate::memory::get_memory_stats();
+
+        assert!(output.contains("available"));
+        assert!(output.contains(&format_kb_human(stats.total_kb)));
+    }
+
+    #[test]
+    fn df_builtin_reports_truthful_mount_contract() {
+        let mut shell = Shell::new();
+        let output = run_command_in_shell(&mut shell, "df").unwrap_or_default();
+
+        assert!(output.contains("Filesystem"));
+        assert!(!output.contains("/dev/sda1      256M"));
+    }
+
+    #[test]
+    fn append_builtin_extends_existing_file() {
+        let mut shell = Shell::new();
+        let _ = run_command_in_shell(&mut shell, "rm /shell-append-test.txt");
+        let _ = run_command_in_shell(&mut shell, "write /shell-append-test.txt alpha");
+        let append = run_command_in_shell(&mut shell, "append /shell-append-test.txt beta")
+            .unwrap_or_default();
+        let content =
+            run_command_in_shell(&mut shell, "cat /shell-append-test.txt").unwrap_or_default();
+
+        assert!(append.contains("bytes"));
+        assert_eq!(content, "alphabeta");
     }
 }
 

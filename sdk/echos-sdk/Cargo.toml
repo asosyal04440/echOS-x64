@@ -1,0 +1,9 @@
+[package]
+name = "echos-sdk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+echos-manifest = { path = "../echos-manifest", default-features = false }
+echos-rt = { path = "../echos-rt", default-features = false }
+echos-sdk-sys = { path = "../echos-sdk-sys", default-features = false }

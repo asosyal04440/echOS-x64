@@ -3,6 +3,8 @@ param(
     [string]$Mode = "auto",
     [ValidateSet("fast", "debug")]
     [string]$Profile = "fast",
+    [int]$DisplayWidth = 1920,
+    [int]$DisplayHeight = 1080,
     [int]$CpuCount = 0,
     [switch]$RebuildIso,
     [switch]$NoBuild,
@@ -12,7 +14,8 @@ param(
     [int]$ResetAfterSeconds = 0,
     [switch]$NoAutoLogin,
     [switch]$Headless,
-    [switch]$ForceVarsReset
+    [switch]$ForceVarsReset,
+    [switch]$SuspendResumeSmoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -92,6 +95,10 @@ Write-Host "Profile: $Profile" -ForegroundColor DarkGray
 $traceEnabled = $Profile -eq "debug"
 $fastProfile = $Profile -eq "fast"
 $accelArgs = if ($fastProfile) { @("-accel", "tcg") } else { @("-accel", "whpx", "-accel", "tcg") }
+$videoArgs = @(
+    "-vga", "none",
+    "-device", "VGA,xres=$DisplayWidth,yres=$DisplayHeight,edid=on"
+)
 $hostCpuCount = [Environment]::ProcessorCount
 $defaultFastCpuCount = [Math]::Min([Math]::Max($hostCpuCount, 1), 4)
 $qemuCpuCount = if ($CpuCount -gt 0) {
@@ -162,7 +169,7 @@ if ($useIso) {
         "-monitor", "none",
         "-no-reboot",
         "-no-shutdown"
-    ) + $displayArgs + $accelArgs
+    ) + $displayArgs + $videoArgs + $accelArgs
     if ($traceEnabled) {
         $qemuArgs += @("-d", "int,guest_errors,unimp,pcall,mmu,cpu_reset", "-D", $traceLogPath)
     }
@@ -194,6 +201,9 @@ if ($useIso) {
     )
     if (-not $NoAutoLogin) {
         $builderArgs += "--auto-login"
+    }
+    if ($SuspendResumeSmoke) {
+        $builderArgs += "--suspend-resume-smoke"
     }
     & $python.Source @builderArgs
     if ($LASTEXITCODE -ne 0) { throw "Appliance image build failed" }
@@ -238,7 +248,7 @@ if ($useIso) {
         "-no-shutdown",
         "-netdev", "user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::4443-:443",
         "-device", "virtio-net-pci,netdev=net0,disable-modern=off,disable-legacy=on"
-    ) + $displayArgs + $accelArgs
+    ) + $displayArgs + $videoArgs + $accelArgs
     if ($traceEnabled) {
         $qemuArgs += @("-d", "int,guest_errors,unimp,pcall,mmu,cpu_reset", "-D", $traceLogPath)
     }
@@ -272,6 +282,24 @@ if (-not $useIso) {
             Write-Host "Injecting hard reset after $ResetAfterSeconds seconds" -ForegroundColor DarkYellow
             try { $proc.Kill() } catch {}
         }
+    } elseif ($SuspendResumeSmoke) {
+        if ($NoAutoLogin) {
+            try { $proc.Kill() } catch {}
+            throw "Suspend/resume smoke auto-login gerektirir"
+        }
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SMOKE] suspend-resume arm" -TimeoutSec 120)) {
+            try { $proc.Kill() } catch {}
+            throw "Suspend/resume smoke arm marker not observed"
+        }
+        Start-Sleep -Seconds 2
+        Send-MonitorCommand -MonitorHost $monitorHost -Port $monitorPort -Command "system_wakeup"
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SMOKE] suspend-resume ok" -TimeoutSec 120)) {
+            try { $proc.Kill() } catch {}
+            throw "Suspend/resume smoke did not complete"
+        }
+        if ($Headless -and -not $proc.HasExited) {
+            try { $proc.Kill() } catch {}
+        }
     } elseif (-not $NoAutoLogin) {
         if (Wait-FileMarker -Path $serialLogPath -Marker "[BOOTCTRL] success" -TimeoutSec 90) {
             if ($Headless -and -not $proc.HasExited) {
@@ -298,6 +326,9 @@ if (-not $useIso) {
             "[BOOTCTRL] stage=app-basket-ready",
             "[BOOTCTRL] success"
         )
+    }
+    if ($SuspendResumeSmoke) {
+        $requiredMarkers += "[SMOKE] suspend-resume ok"
     }
 
     $serialContent = if (Test-Path $serialLogPath) { Get-Content $serialLogPath -Raw } else { "" }

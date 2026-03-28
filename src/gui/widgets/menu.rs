@@ -181,7 +181,12 @@ impl MenuBar {
         ));
         objects.push(solid_rect_object(
             base_id ^ 1,
-            Rect::new(self.rect.x, self.rect.y + self.rect.height - 1, self.rect.width, 1),
+            Rect::new(
+                self.rect.x,
+                self.rect.y + self.rect.height - 1,
+                self.rect.width,
+                1,
+            ),
             Theme::BORDER.to_u32(),
             DamageLane::Window,
             1,
@@ -205,7 +210,12 @@ impl MenuBar {
             }
             objects.push(text_render_object_with_width(
                 base_id ^ 0x80 ^ i as u64,
-                Rect::new(menu_x + 8, self.rect.y + ((self.rect.height - 16) / 2), menu_w.max(1), 18),
+                Rect::new(
+                    menu_x + 8,
+                    self.rect.y + ((self.rect.height - 16) / 2),
+                    menu_w.max(1),
+                    18,
+                ),
                 title,
                 if self.open_menu == Some(i) {
                     Theme::DESKTOP_BG.to_u32()
@@ -266,7 +276,12 @@ impl MenuBar {
                         let shortcut_x = dropdown_x + 200 - item.shortcut.len() as i32 * 8 - 8;
                         objects.push(text_render_object_with_width(
                             base_id ^ 0x280 ^ i as u64,
-                            Rect::new(shortcut_x, item_y + 4, (200 - (shortcut_x - dropdown_x)).max(1), 18),
+                            Rect::new(
+                                shortcut_x,
+                                item_y + 4,
+                                (200 - (shortcut_x - dropdown_x)).max(1),
+                                18,
+                            ),
                             &item.shortcut,
                             Theme::TEXT_SECONDARY.to_u32(),
                             false,
@@ -518,7 +533,12 @@ impl ContextMenu {
                     let shortcut_x = self.x + self.width - item.shortcut.len() as i32 * 8 - 8;
                     objects.push(text_render_object_with_width(
                         base_id ^ 0x60 ^ i as u64,
-                        Rect::new(shortcut_x, item_y + 4, (self.width - (shortcut_x - self.x)).max(1), 18),
+                        Rect::new(
+                            shortcut_x,
+                            item_y + 4,
+                            (self.width - (shortcut_x - self.x)).max(1),
+                            18,
+                        ),
                         &item.shortcut,
                         Theme::TEXT_SECONDARY.to_u32(),
                         false,

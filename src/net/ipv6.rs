@@ -62,6 +62,11 @@ use alloc::vec::Vec;
 use core::str::FromStr;
 use spin::Mutex;
 
+type Ipv6NextHeaderHandler = fn(&Ipv6Addr, &Ipv6Addr, &[u8]) -> Result<(), super::NetError>;
+
+static IPV6_NEXT_HEADER_HANDLERS: Mutex<BTreeMap<u8, Ipv6NextHeaderHandler>> =
+    Mutex::new(BTreeMap::new());
+
 // ============================================================================
 // IPv6 ADRESİ
 // ============================================================================
@@ -2052,33 +2057,129 @@ fn ipv6_multicast_mac(addr: &Ipv6Addr) -> super::MacAddr {
     super::MacAddr::new([0x33, 0x33, addr.0[12], addr.0[13], addr.0[14], addr.0[15]])
 }
 
+fn process_icmpv6_handler(
+    ipv6_src: &Ipv6Addr,
+    ipv6_dst: &Ipv6Addr,
+    payload: &[u8],
+) -> Result<(), super::NetError> {
+    process_icmpv6(ipv6_src, ipv6_dst, payload);
+    Ok(())
+}
+
+fn process_tcp_handler(
+    ipv6_src: &Ipv6Addr,
+    ipv6_dst: &Ipv6Addr,
+    payload: &[u8],
+) -> Result<(), super::NetError> {
+    let packet = Ipv6Packet::new(
+        Ipv6Header::new(
+            *ipv6_src,
+            *ipv6_dst,
+            Ipv6NextHeader::Tcp as u8,
+            payload.len() as u16,
+        ),
+        payload,
+    );
+    super::tcp::process_ipv6_packet(&packet)
+}
+
+fn process_udp_handler(
+    ipv6_src: &Ipv6Addr,
+    ipv6_dst: &Ipv6Addr,
+    payload: &[u8],
+) -> Result<(), super::NetError> {
+    let packet = Ipv6Packet::new(
+        Ipv6Header::new(
+            *ipv6_src,
+            *ipv6_dst,
+            Ipv6NextHeader::Udp as u8,
+            payload.len() as u16,
+        ),
+        payload,
+    );
+    super::udp::process_ipv6_packet(&packet)
+}
+
+pub fn register_next_header_handler(next_header: u8, handler: Ipv6NextHeaderHandler) {
+    IPV6_NEXT_HEADER_HANDLERS
+        .lock()
+        .insert(next_header, handler);
+}
+
+fn lookup_next_header_handler(next_header: u8) -> Option<Ipv6NextHeaderHandler> {
+    IPV6_NEXT_HEADER_HANDLERS.lock().get(&next_header).copied()
+}
+
 pub fn process_packet(data: &[u8]) -> Result<(), super::NetError> {
-    let packet = Ipv6Packet::parse(data)?;
+    let mut filtered_buf = data.to_vec();
+    let prerouting_verdict = super::netfilter::process_ipv6_packet(
+        &mut filtered_buf,
+        super::netfilter::NF_INET_PRE_ROUTING,
+        Some("eth0"),
+        None,
+    )?;
+    if prerouting_verdict == super::netfilter::NF_DROP {
+        return Ok(());
+    }
+
+    let mut packet = Ipv6Packet::parse(&filtered_buf)?;
+    let local = local_ipv6();
+    if packet.header.dst != local && !packet.header.dst.is_multicast() {
+        let mut fwd_data = filtered_buf.clone();
+        if packet.header.hop_limit <= 1 {
+            crate::serial_println!(
+                "[IPv6] Hop limit expired for packet from {} to {}",
+                packet.header.src.to_string(),
+                packet.header.dst.to_string()
+            );
+            return Ok(());
+        }
+        fwd_data[7] = fwd_data[7].saturating_sub(1);
+        let forward_verdict = super::netfilter::process_ipv6_packet(
+            &mut fwd_data,
+            super::netfilter::NF_INET_FORWARD,
+            Some("eth0"),
+            None,
+        )?;
+        if forward_verdict == super::netfilter::NF_DROP {
+            return Ok(());
+        }
+        return Ok(());
+    }
+
+    let local_in_verdict = super::netfilter::process_ipv6_packet(
+        &mut filtered_buf,
+        super::netfilter::NF_INET_LOCAL_IN,
+        Some("eth0"),
+        None,
+    )?;
+    if local_in_verdict == super::netfilter::NF_DROP {
+        return Ok(());
+    }
+
+    packet = Ipv6Packet::parse(&filtered_buf)?;
+    super::socket::deliver_raw_ipv6(&filtered_buf, &packet.header);
     let (next_header, payload_offset) =
         walk_extension_headers(&packet.payload, packet.header.next_header);
     if payload_offset > packet.payload.len() {
         return Err(super::NetError::InvalidPacket);
     }
 
-    match next_header {
-        58 => {
-            process_icmpv6(
-                &packet.header.src,
-                &packet.header.dst,
-                &packet.payload[payload_offset..],
-            );
-            Ok(())
-        }
-        _ => {
-            crate::serial_println!(
-                "[IPv6] Unsupported next header {} from {:?} to {:?}",
-                next_header,
-                packet.header.src,
-                packet.header.dst
-            );
-            Ok(())
-        }
+    if let Some(handler) = lookup_next_header_handler(next_header) {
+        return handler(
+            &packet.header.src,
+            &packet.header.dst,
+            &packet.payload[payload_offset..],
+        );
     }
+
+    crate::serial_println!(
+        "[IPv6] No handler for next header {} from {:?} to {:?}",
+        next_header,
+        packet.header.src,
+        packet.header.dst
+    );
+    Ok(())
 }
 
 // ============================================================================
@@ -2139,7 +2240,18 @@ pub fn neighbor_gc() {
 /// IPv6 modülünü başlatır
 pub fn init() {
     crate::serial_println!("[IPv6] Module initialized");
+    register_next_header_handler(58, process_icmpv6_handler);
+    register_next_header_handler(Ipv6NextHeader::Tcp as u8, process_tcp_handler);
+    register_next_header_handler(Ipv6NextHeader::Udp as u8, process_udp_handler);
     let _ = send_router_solicitation();
+}
+
+pub fn local_ipv6() -> Ipv6Addr {
+    if let Some(iface) = super::default_interface() {
+        let iface = iface.lock();
+        return link_local_from_mac(iface.mac());
+    }
+    Ipv6Addr::UNSPECIFIED
 }
 
 // ============================================================================
@@ -2348,6 +2460,22 @@ fn reset_route_ndp_test_state() {
 mod tests {
     use super::*;
     use crate::net::MacAddr;
+    use crate::net::{netfilter, udp, Port, SocketAddr};
+    use alloc::vec;
+    use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+
+    static CUSTOM_NEXT_HEADER_HITS: AtomicUsize = AtomicUsize::new(0);
+    static CUSTOM_NEXT_HEADER_LAST: AtomicU8 = AtomicU8::new(0);
+
+    fn custom_next_header_handler(
+        _src: &Ipv6Addr,
+        _dst: &Ipv6Addr,
+        payload: &[u8],
+    ) -> Result<(), super::super::NetError> {
+        CUSTOM_NEXT_HEADER_HITS.fetch_add(1, Ordering::SeqCst);
+        CUSTOM_NEXT_HEADER_LAST.store(payload.first().copied().unwrap_or(0), Ordering::SeqCst);
+        Ok(())
+    }
 
     fn ipv6(bytes: [u8; 16]) -> Ipv6Addr {
         Ipv6Addr::new(bytes)
@@ -2411,5 +2539,95 @@ mod tests {
         reset_route_ndp_test_state();
         let link_local = ipv6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5]);
         assert!(select_next_hop(&link_local, 0).is_none());
+    }
+
+    #[test]
+    fn ipv6_process_packet_dispatches_registered_next_header_handlers() {
+        register_next_header_handler(253, custom_next_header_handler);
+        CUSTOM_NEXT_HEADER_HITS.store(0, Ordering::SeqCst);
+        CUSTOM_NEXT_HEADER_LAST.store(0, Ordering::SeqCst);
+
+        let payload = [0x42, 0x99, 0x11];
+        let packet = Ipv6Packet::new(
+            Ipv6Header::new(
+                ipv6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]),
+                ipv6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]),
+                253,
+                payload.len() as u16,
+            ),
+            &payload,
+        );
+
+        let serialized = packet.serialize();
+        process_packet(&serialized).unwrap();
+
+        assert_eq!(CUSTOM_NEXT_HEADER_HITS.load(Ordering::SeqCst), 1);
+        assert_eq!(CUSTOM_NEXT_HEADER_LAST.load(Ordering::SeqCst), 0x42);
+    }
+
+    #[test]
+    fn ipv6_prerouting_dnat_packet_demuxes_udp_socket_after_rewrite() {
+        netfilter::init();
+        let listener = udp::create_socket(crate::net::socket::AddressFamily::IPV6);
+        udp::bind(listener, SocketAddr::unspecified_v6(Port(53531))).unwrap();
+        let rewritten_dst = local_ipv6();
+
+        let external_dst = ipv6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53,
+        ]);
+        let mut dnat = netfilter::IptEntry::new();
+        dnat.family = netfilter::NFPROTO_IPV6;
+        dnat.dst_ip6 = *external_dst.as_bytes();
+        dnat.dst_mask6 = [0xff; 16];
+        dnat.dst_ports = (53, 53);
+        dnat.target = netfilter::IptTarget::dnat_v6(rewritten_dst, 53531);
+        netfilter::NETFILTER
+            .add_rule(netfilter::IPTABLES_NAT_TABLE, "PREROUTING", dnat)
+            .unwrap();
+
+        let mut segment = vec![0u8; crate::net::udp::UdpHeader::SIZE + 4];
+        let mut udp_header =
+            crate::net::udp::UdpHeader::new(Port(40500), Port(53), segment.len() as u16);
+        udp_header.serialize(&mut segment).unwrap();
+        segment[crate::net::udp::UdpHeader::SIZE..].copy_from_slice(b"dns6");
+        let src = ipv6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15,
+        ]);
+        udp_header.checksum = crate::net::udp::compute_checksum_v6(src, external_dst, &segment);
+        udp_header.serialize(&mut segment).unwrap();
+
+        let packet = Ipv6Packet::new(
+            Ipv6Header::new(
+                src,
+                external_dst,
+                Ipv6NextHeader::Udp as u8,
+                segment.len() as u16,
+            ),
+            &segment,
+        );
+        let mut serialized = packet.serialize();
+        let verdict = netfilter::process_ipv6_packet(
+            &mut serialized,
+            netfilter::NF_INET_PRE_ROUTING,
+            Some("eth0"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(verdict, netfilter::NF_ACCEPT);
+
+        let rewritten = Ipv6Packet::parse(&serialized).unwrap();
+        assert_eq!(rewritten.header.dst, rewritten_dst);
+        assert!(crate::net::udp::verify_checksum_v6(
+            rewritten.header.src,
+            rewritten.header.dst,
+            &rewritten.payload
+        ));
+        udp::process_ipv6_packet(&rewritten).unwrap();
+
+        let mut buf = [0u8; 32];
+        let (len, addr) = udp::recv_from(listener, &mut buf).unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(addr.ip, crate::net::IpAddr::V6(src));
+        assert_eq!(&buf[..len], b"dns6");
     }
 }

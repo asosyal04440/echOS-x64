@@ -167,6 +167,7 @@ pub mod mglru;
 pub mod oom;
 pub mod paging;
 pub mod pmm;
+pub mod shared_region;
 /// Pressure Stall Information (PSI) — bellek baskısı telemetrisi
 pub mod psi;
 /// Şeffaf büyük sayfa (Transparent Huge Pages) — 4K→2M collapse/split
@@ -1781,6 +1782,74 @@ pub fn create_address_space(image: &[u8]) -> Arc<Mutex<AddressSpace>> {
         stack_base: 0,
         stack_top: 0,
     }))
+}
+
+pub fn create_empty_address_space() -> Arc<Mutex<AddressSpace>> {
+    create_address_space(&[])
+}
+
+pub fn address_space_id(space: &Arc<Mutex<AddressSpace>>) -> u64 {
+    space.lock().id
+}
+
+pub fn allocate_user_mmap_in(space: &Arc<Mutex<AddressSpace>>, size: u64) -> Option<u64> {
+    if size == 0 {
+        return None;
+    }
+    let page_mask = !(PAGE_SIZE as u64 - 1);
+    let aligned = size.saturating_add(PAGE_SIZE as u64 - 1) & page_mask;
+    let mut guard = space.lock();
+    let base = ensure_mmap_base(&mut guard);
+    let (stack_base, _) = ensure_stack_bounds(&mut guard, USER_STACK_PAGES);
+    if guard.mmap_next == 0 {
+        guard.mmap_next = stack_base;
+    }
+    let next = guard.mmap_next.min(stack_base);
+    let new_next = next.saturating_sub(aligned);
+    let end = new_next.saturating_add(aligned);
+    if new_next < base || end > stack_base || !is_user_range(new_next, aligned) {
+        return None;
+    }
+    guard.mmap_next = new_next;
+    Some(new_next)
+}
+
+pub fn register_shared_anon_region_in(
+    space: &Arc<Mutex<AddressSpace>>,
+    start: u64,
+    size: u64,
+    flags: PageTableFlags,
+    shared_id: Option<u64>,
+) -> Option<u64> {
+    if size == 0 {
+        return None;
+    }
+    let page_mask = !(PAGE_SIZE as u64 - 1);
+    let start = start & page_mask;
+    let end = start
+        .saturating_add(size)
+        .saturating_add(PAGE_SIZE as u64 - 1)
+        & page_mask;
+    if end <= start || !is_user_range(start, end.saturating_sub(start)) {
+        return None;
+    }
+    let flags = enforce_wx(flags | PageTableFlags::USER_ACCESSIBLE);
+    let shared_id = shared_id.unwrap_or_else(next_shared_anon_id);
+    let inserted = {
+        let mut guard = space.lock();
+        insert_vma(
+            &mut guard,
+            Vma {
+                start,
+                end,
+                flags,
+                kind: VmaKind::Anonymous { id: shared_id },
+                cow: false,
+                shared: true,
+            },
+        )
+    };
+    inserted.then_some(shared_id)
 }
 
 pub fn clone_address_space_for_cow(

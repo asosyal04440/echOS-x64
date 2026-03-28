@@ -6,6 +6,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
+use crate::services::display_atomic::MailboxRing;
+
+const SHELL_COMMAND_QUEUE_CAPACITY: usize = 256;
+const SHELL_RESPONSE_QUEUE_CAPACITY: usize = 256;
 
 use crate::gui::protocol::{
     AccessibilityNode, AppHealth, AppId, DesktopPermission, FileGrant, PermissionEntry,
@@ -145,8 +149,8 @@ pub struct EchShell {
     permissions: Mutex<BTreeMap<AppId, BTreeMap<DesktopPermission, PermissionState>>>,
     file_grants: Mutex<BTreeMap<AppId, Vec<FileGrant>>>,
     accessibility: Mutex<BTreeMap<AppId, Vec<AccessibilityNode>>>,
-    command_queue: Mutex<Vec<ShellCommand>>,
-    response_queue: Mutex<Vec<ShellResponse>>,
+    command_queue: MailboxRing<ShellCommand>,
+    response_queue: MailboxRing<ShellResponse>,
 }
 
 impl EchShell {
@@ -164,8 +168,8 @@ impl EchShell {
             permissions: Mutex::new(BTreeMap::new()),
             file_grants: Mutex::new(BTreeMap::new()),
             accessibility: Mutex::new(BTreeMap::new()),
-            command_queue: Mutex::new(Vec::new()),
-            response_queue: Mutex::new(Vec::new()),
+            command_queue: MailboxRing::with_capacity_pow2(SHELL_COMMAND_QUEUE_CAPACITY),
+            response_queue: MailboxRing::with_capacity_pow2(SHELL_RESPONSE_QUEUE_CAPACITY),
         }
     }
 
@@ -174,12 +178,12 @@ impl EchShell {
         crate::serial_println!("[ECHSHELL] service started");
     }
 
-    pub fn send_command(&self, command: ShellCommand) {
-        self.command_queue.lock().push(command);
+    pub fn send_command(&self, command: ShellCommand) -> bool {
+        self.command_queue.try_push(command).is_ok()
     }
 
     pub fn receive_response(&self) -> Option<ShellResponse> {
-        self.response_queue.lock().pop()
+        self.response_queue.pop()
     }
 
     pub fn process_command(&self, command: ShellCommand) -> ShellResponse {
@@ -570,14 +574,9 @@ impl EchShell {
 
     pub fn run_service(&self) {
         while self.running.load(Ordering::SeqCst) {
-            let commands = {
-                let mut queue = self.command_queue.lock();
-                core::mem::take(&mut *queue)
-            };
-
-            for command in commands {
+            while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
-                self.response_queue.lock().push(response);
+                let _ = self.response_queue.push_overwrite(response);
             }
 
             for _ in 0..1000 {

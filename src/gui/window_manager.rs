@@ -455,6 +455,7 @@ impl WindowManager {
     pub fn hit_test(&self, point: Point) -> Option<WindowHitTarget> {
         let mut windows = self.ordered_windows();
         windows.reverse();
+        let mut background_hit = None;
 
         for window in windows.into_iter().filter(|window| window.visible) {
             if !window.frame_rect.contains(point) {
@@ -462,6 +463,9 @@ impl WindowManager {
             }
 
             if window.layer_role == LayerRole::Background {
+                if window.content_rect.contains(point) {
+                    background_hit = Some(WindowHitTarget::Content(window.id));
+                }
                 continue;
             }
 
@@ -489,7 +493,7 @@ impl WindowManager {
             return Some(WindowHitTarget::Content(window.id));
         }
 
-        None
+        background_hit
     }
 
     fn as_info_record(window: &WindowRecord) -> WindowInfo {
@@ -649,5 +653,72 @@ fn frame_to_content_rect(frame_rect: Rect, decorate: bool) -> Rect {
         )
     } else {
         frame_rect
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hit_test_returns_background_content_when_no_higher_layer_matches() {
+        let mut windows = WindowManager::new();
+        let background = windows
+            .create_window_with_meta(
+                7,
+                70,
+                "Desktop",
+                0,
+                0,
+                1280,
+                720,
+                0,
+                LayerRole::Background,
+                WindowFlags::layer_shell(),
+            )
+            .expect("background window should be created");
+
+        assert_eq!(
+            windows.hit_test(Point::new(40, 40)),
+            Some(WindowHitTarget::Content(background))
+        );
+    }
+
+    #[test]
+    fn hit_test_prefers_top_bar_over_background_shell_surface() {
+        let mut windows = WindowManager::new();
+        let _background = windows
+            .create_window_with_meta(
+                7,
+                70,
+                "Desktop",
+                0,
+                0,
+                1280,
+                720,
+                0,
+                LayerRole::Background,
+                WindowFlags::layer_shell(),
+            )
+            .expect("background window should be created");
+        let top_bar = windows
+            .create_window_with_meta(
+                7,
+                71,
+                "Top Bar",
+                18,
+                18,
+                1244,
+                60,
+                0,
+                LayerRole::TopBar,
+                WindowFlags::layer_shell(),
+            )
+            .expect("top bar should be created");
+
+        assert_eq!(
+            windows.hit_test(Point::new(32, 32)),
+            Some(WindowHitTarget::Content(top_bar))
+        );
     }
 }

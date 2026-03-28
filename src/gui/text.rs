@@ -258,14 +258,7 @@ impl TextSystem {
         text: &str,
         color: u32,
     ) -> RenderObject {
-        self.text_object_with_style(
-            object_id,
-            bounds,
-            z_index,
-            text,
-            color,
-            TextRunStyle::Ui,
-        )
+        self.text_object_with_style(object_id, bounds, z_index, text, color, TextRunStyle::Ui)
     }
 
     pub fn text_object_with_style(

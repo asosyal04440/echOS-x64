@@ -21,10 +21,14 @@ use crate::gui::protocol::{
     MOD_SUPER,
 };
 use crate::gui::shared_ring::SharedRing;
-use crate::services::ech_display::{get_display, InputRouting};
+use crate::ipc::request_display_sync;
+use crate::services::display_atomic::MailboxRing;
+use crate::services::ech_display::{DisplayCommand, DisplayResponse, InputRouting};
 
 const MAX_EVENTS_PER_APP: usize = 1024;
 const MOUSE_BUTTON_DEBOUNCE_NS: u64 = 8_000_000;
+const INPUT_COMMAND_QUEUE_CAPACITY: usize = 256;
+const INPUT_RESPONSE_QUEUE_CAPACITY: usize = 256;
 
 /// Input servisi komutlari.
 #[derive(Clone, Debug)]
@@ -74,8 +78,8 @@ pub struct EchInput {
     app_queues: Mutex<BTreeMap<AppId, SharedRing<WindowInputEvent>>>,
     shortcut_sink: Mutex<Option<AppId>>,
     shortcut_queue: Mutex<SharedRing<ShellShortcut>>,
-    command_queue: Mutex<Vec<InputCommand>>,
-    response_queue: Mutex<Vec<InputResponse>>,
+    command_queue: MailboxRing<InputCommand>,
+    response_queue: MailboxRing<InputResponse>,
     last_cursor: Mutex<Point>,
     last_buttons: Mutex<ButtonState>,
     last_button_change_ns: Mutex<ButtonDebounce>,
@@ -92,8 +96,8 @@ impl EchInput {
             app_queues: Mutex::new(BTreeMap::new()),
             shortcut_sink: Mutex::new(None),
             shortcut_queue: Mutex::new(SharedRing::with_capacity_pow2(MAX_EVENTS_PER_APP)),
-            command_queue: Mutex::new(Vec::new()),
-            response_queue: Mutex::new(Vec::new()),
+            command_queue: MailboxRing::with_capacity_pow2(INPUT_COMMAND_QUEUE_CAPACITY),
+            response_queue: MailboxRing::with_capacity_pow2(INPUT_RESPONSE_QUEUE_CAPACITY),
             last_cursor: Mutex::new(Point::new(640, 400)),
             last_buttons: Mutex::new(ButtonState::default()),
             last_button_change_ns: Mutex::new(ButtonDebounce::default()),
@@ -113,12 +117,12 @@ impl EchInput {
         crate::serial_println!("[ECHINPUT] Week-2 input service stopped");
     }
 
-    pub fn send_command(&self, command: InputCommand) {
-        self.command_queue.lock().push(command);
+    pub fn send_command(&self, command: InputCommand) -> bool {
+        self.command_queue.try_push(command).is_ok()
     }
 
     pub fn receive_response(&self) -> Option<InputResponse> {
-        self.response_queue.lock().pop()
+        self.response_queue.pop()
     }
 
     pub fn process_command(&self, command: InputCommand) -> InputResponse {
@@ -201,14 +205,9 @@ impl EchInput {
         while self.running.load(Ordering::SeqCst) {
             self.drain_raw_input();
 
-            let commands = {
-                let mut queue = self.command_queue.lock();
-                core::mem::take(&mut *queue)
-            };
-
-            for command in commands {
+            while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
-                self.response_queue.lock().push(response);
+                let _ = self.response_queue.push_overwrite(response);
             }
 
             for _ in 0..1000 {
@@ -377,17 +376,20 @@ impl EchInput {
             return;
         }
 
-        let routing = get_display()
-            .lock()
-            .clone()
-            .map(|display| display.dispatch_input_event(&event))
-            .unwrap_or_else(|| {
-                self.focus
-                    .lock()
-                    .focused_app()
-                    .map(InputRouting::FocusOnly)
-                    .unwrap_or(InputRouting::None)
-            });
+        let routing = match request_display_sync(
+            0,
+            DisplayCommand::RouteInputEvent {
+                event: event.clone(),
+            },
+        ) {
+            Some(DisplayResponse::InputRoute(routing)) => routing,
+            _ => self
+                .focus
+                .lock()
+                .focused_app()
+                .map(InputRouting::FocusOnly)
+                .unwrap_or(InputRouting::None),
+        };
 
         match routing {
             InputRouting::None => {}

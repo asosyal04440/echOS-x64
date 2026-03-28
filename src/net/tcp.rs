@@ -35,12 +35,16 @@
 //! ```
 
 use super::ip::{IpProtocol, Ipv4Packet};
-use super::{allocate_socket_id, Ipv4Addr, NetError, Port, SocketAddr};
+use super::ipv6::{Ipv6NextHeader, Ipv6Packet};
+use super::socket::AddressFamily;
+use super::{allocate_socket_id, IpAddr, Ipv4Addr, NetError, Port, SocketAddr};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use spin::Mutex;
 
 // ============================================================================
@@ -456,6 +460,11 @@ impl FastRetransmitState {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TfoCookie(pub [u8; 8]);
 
+type HmacSha256 = Hmac<Sha256>;
+
+static TCP_TIMESTAMP_COUNTER: AtomicU32 = AtomicU32::new(0);
+static TCP_TFO_COOKIE_EPOCH: AtomicU32 = AtomicU32::new(0x5a17_c0de);
+
 impl TfoCookie {
     pub fn new() -> Self {
         let mut cookie = [0u8; 8];
@@ -466,25 +475,36 @@ impl TfoCookie {
     }
 
     pub fn generate(server_ip: Ipv4Addr, time_ms: u64) -> Self {
-        // Basit çerez: IP + zaman karması (üretim ortamında kriptografik MAC kullanılır)
+        let mut mac = HmacSha256::new_from_slice(&tfo_secret(server_ip))
+            .expect("TCP TFO HMAC key length is fixed");
+        mac.update(&server_ip.0);
+        mac.update(&time_ms.to_be_bytes());
+        let digest = mac.finalize().into_bytes();
         let mut cookie = [0u8; 8];
-        cookie[..4].copy_from_slice(&server_ip.0);
-        cookie[4..8].copy_from_slice(&(time_ms as u32).to_be_bytes());
-
-        // Rastgele XOR ile karıştır
-        let rand = crate::random::next_u32();
-        for i in 0..4 {
-            cookie[i] ^= (rand >> (i * 8)) as u8;
-        }
-
+        cookie.copy_from_slice(&digest[..8]);
         TfoCookie(cookie)
     }
 
     pub fn verify(&self, server_ip: Ipv4Addr, time_window: u64) -> bool {
-        // Basitleştirilmiş doğrulama - üretimde kriptografi kullanılır
         let expected = TfoCookie::generate(server_ip, time_window);
         self.0 == expected.0
     }
+}
+
+fn tfo_secret(server_ip: Ipv4Addr) -> [u8; 16] {
+    let epoch = TCP_TFO_COOKIE_EPOCH.load(Ordering::Relaxed);
+    let mut secret = [0u8; 16];
+    secret[..4].copy_from_slice(&server_ip.0);
+    secret[4..8].copy_from_slice(&epoch.to_be_bytes());
+    secret[8..12].copy_from_slice(&(epoch.rotate_left(7) ^ 0xa5a5_5a5a).to_be_bytes());
+    secret[12..16].copy_from_slice(&(epoch.wrapping_mul(0x9e37_79b9)).to_be_bytes());
+    secret
+}
+
+fn next_tcp_timestamp() -> u32 {
+    TCP_TIMESTAMP_COUNTER
+        .fetch_add(1000, Ordering::Relaxed)
+        .wrapping_add(1000)
 }
 
 /// TFO bağlantı durumu - çerezler ve bekleyen SYN verisi
@@ -614,13 +634,8 @@ impl TimestampOption {
 
     /// Şimdiki zamanla oluştur (ts_ecr karşı taraftan gelen değer)
     pub fn now(ts_ecr: u32) -> Self {
-        // Basit monoton sayaç kullanarak zaman damgası oluştur
-        static mut TIMESTAMP_COUNTER: u32 = 0;
-        unsafe {
-            TIMESTAMP_COUNTER = TIMESTAMP_COUNTER.wrapping_add(1000);
-            let ts_val = TIMESTAMP_COUNTER;
-            TimestampOption { ts_val, ts_ecr }
-        }
+        let ts_val = next_tcp_timestamp();
+        TimestampOption { ts_val, ts_ecr }
     }
 
     /// Zaman damgası seçeneğini serileştir: [8][10][ts_val][ts_ecr]
@@ -645,8 +660,7 @@ impl TimestampOption {
 
     /// Zaman damgasından RTT hesapla: şimdiki_zaman - ts_ecr
     pub fn calculate_rtt(&self) -> u32 {
-        // Basitleştirilmiş RTT hesaplaması
-        let now = crate::random::next_u32();
+        let now = TCP_TIMESTAMP_COUNTER.load(Ordering::Relaxed);
         now.wrapping_sub(self.ts_ecr)
     }
 }
@@ -1043,6 +1057,49 @@ pub fn verify_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, segment: &[u8]) -> bo
     compute_checksum(src_ip, dst_ip, segment) == 0
 }
 
+pub fn compute_checksum_v6(
+    src_ip: super::ipv6::Ipv6Addr,
+    dst_ip: super::ipv6::Ipv6Addr,
+    segment: &[u8],
+) -> u16 {
+    let mut sum: u32 = 0;
+
+    for chunk in src_ip.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    for chunk in dst_ip.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+
+    let len = segment.len() as u32;
+    sum += (len >> 16) & 0xFFFF;
+    sum += len & 0xFFFF;
+    sum += Ipv6NextHeader::Tcp as u32;
+
+    let mut i = 0;
+    while i + 1 < segment.len() {
+        sum += u16::from_be_bytes([segment[i], segment[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < segment.len() {
+        sum += (segment[i] as u32) << 8;
+    }
+
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    !(sum as u16)
+}
+
+pub fn verify_checksum_v6(
+    src_ip: super::ipv6::Ipv6Addr,
+    dst_ip: super::ipv6::Ipv6Addr,
+    segment: &[u8],
+) -> bool {
+    compute_checksum_v6(src_ip, dst_ip, segment) == 0
+}
+
 /// TCP bağlantı durumu makinesi.
 /// Her durum, hangi paketlerin kabul edileceğini ve
 /// hangi geçişlerin yapılabileceğini belirler.
@@ -1085,6 +1142,7 @@ pub enum TcpState {
 #[derive(Clone, Debug)]
 pub struct TcpConnection {
     pub id: u32,
+    pub family: AddressFamily,
     pub local: SocketAddr,
     pub remote: SocketAddr,
     pub state: TcpState,
@@ -1127,9 +1185,10 @@ pub struct TcpConnection {
 }
 
 impl TcpConnection {
-    pub fn new(local: SocketAddr) -> Self {
+    pub fn new(local: SocketAddr, family: AddressFamily) -> Self {
         TcpConnection {
             id: allocate_socket_id(),
+            family,
             local,
             remote: SocketAddr::default(),
             state: TcpState::Closed,
@@ -1279,16 +1338,39 @@ impl TcpConnection {
         segment[TcpHeader::MIN_SIZE..].copy_from_slice(data);
 
         // Sağlama toplamını sahte başlık ile hesapla
-        let src_ip = super::local_ip();
-        header.checksum = compute_checksum(src_ip, self.remote.ip, &segment);
-        header.serialize(&mut segment)?;
+        match (self.local.ip, self.remote.ip) {
+            (IpAddr::V4(mut src_ip), IpAddr::V4(dst_ip)) => {
+                if src_ip.is_unspecified() {
+                    src_ip = super::local_ip();
+                }
+                header.checksum = compute_checksum(src_ip, dst_ip, &segment);
+                header.serialize(&mut segment)?;
 
-        // IP katmanından gönder
-        let mut ip_buf = vec![0u8; 1500];
-        let len = super::ip::build_packet(self.remote.ip, IpProtocol::TCP, &segment, &mut ip_buf)?;
+                let mut ip_buf = vec![0u8; 1500];
+                let len = super::ip::build_packet(dst_ip, IpProtocol::TCP, &segment, &mut ip_buf)?;
+                super::send_packet(&ip_buf[..len])?;
+            }
+            (IpAddr::V6(mut src_ip), IpAddr::V6(dst_ip)) => {
+                if src_ip.is_unspecified() {
+                    src_ip = super::ipv6::local_ipv6();
+                }
+                header.checksum = compute_checksum_v6(src_ip, dst_ip, &segment);
+                header.serialize(&mut segment)?;
 
-        // Ethernet çerçevesi oluştur ve gönder
-        super::send_packet(&ip_buf[..len])?;
+                let packet = super::ipv6::Ipv6Packet::new(
+                    super::ipv6::Ipv6Header::new(
+                        src_ip,
+                        dst_ip,
+                        Ipv6NextHeader::Tcp as u8,
+                        segment.len() as u16,
+                    ),
+                    &segment,
+                );
+                let serialized = packet.serialize();
+                super::send_packet(&serialized)?;
+            }
+            _ => return Err(NetError::InvalidParam),
+        }
 
         Ok(())
     }
@@ -1306,7 +1388,10 @@ impl TcpConnection {
                     // Yeni bağlantı girişimi - el sıkışmanın ilk adımı
                     self.remote = SocketAddr::new(
                         // IP, IP katmanından gelir
-                        Ipv4Addr::UNSPECIFIED,
+                        match self.family {
+                            AddressFamily::IPV6 => IpAddr::V6(super::ipv6::Ipv6Addr::UNSPECIFIED),
+                            _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                        },
                         header.src_port,
                     );
                     self.seq_num = crate::random::rand_u64() as u32;
@@ -1722,6 +1807,8 @@ pub struct BbrState {
     pub bbrv3_enabled: bool,
     pub inflight_hi: u32,
     pub ecn_alpha: f64,
+    pub full_bw: u64,
+    pub full_bw_rounds: u8,
 }
 
 /// BBR modları
@@ -1822,6 +1909,8 @@ impl BbrState {
             bbrv3_enabled: false,
             inflight_hi: 1460 * 100,
             ecn_alpha: 0.0,
+            full_bw: 0,
+            full_bw_rounds: 0,
         }
     }
 
@@ -1943,10 +2032,25 @@ impl BbrState {
 
     /// Tam bant genişliğine ulaşıldı mı kontrol et (Startup aşaması bitiyor mu?).
     /// Gerçek BBR'de bant genişliği büyüme oranı izlenir.
-    fn is_full_bw_reached(&self) -> bool {
-        // Basitleştirilmiş: bant genişliği > 0 ve 3 tur geçti
-        // Gerçek implementasyonda bant genişliği büyüme oranı %25'in altındaysa
-        self.bw > 0 && self.round_count > 3
+    fn is_full_bw_reached(&mut self) -> bool {
+        if self.bw == 0 {
+            return false;
+        }
+
+        let bw_threshold = if self.full_bw == 0 {
+            0
+        } else {
+            ((self.full_bw as u128 * 5) / 4) as u64
+        };
+
+        if self.full_bw == 0 || self.bw >= bw_threshold {
+            self.full_bw = self.bw;
+            self.full_bw_rounds = 0;
+            return false;
+        }
+
+        self.full_bw_rounds = self.full_bw_rounds.saturating_add(1);
+        self.full_bw_rounds >= 3
     }
 
     /// Kayıp olayını işle.
@@ -2112,7 +2216,7 @@ impl CcState {
 // spin::Mutex ile iş parçacığı güvenliği sağlanır.
 
 static TCP_CONNECTIONS: Mutex<BTreeMap<u32, Box<TcpConnection>>> = Mutex::new(BTreeMap::new());
-static TCP_LISTENERS: Mutex<BTreeMap<Port, u32>> = Mutex::new(BTreeMap::new());
+static TCP_LISTENERS: Mutex<BTreeMap<(AddressFamily, Port), u32>> = Mutex::new(BTreeMap::new());
 /// Kabul kuyruğu: dinleyici soket ID'si -> bekleyen çocuk bağlantı ID'leri
 static ACCEPT_QUEUE: Mutex<BTreeMap<u32, Vec<u32>>> = Mutex::new(BTreeMap::new());
 
@@ -2122,8 +2226,12 @@ pub fn init() {
 }
 
 /// Yeni TCP soketi oluştur ve bağlantı tablosuna ekle
-pub fn create_socket() -> u32 {
-    let conn = TcpConnection::new(SocketAddr::default());
+pub fn create_socket(family: AddressFamily) -> u32 {
+    let local = match family {
+        AddressFamily::IPV6 => SocketAddr::unspecified_v6(Port(0)),
+        _ => SocketAddr::default(),
+    };
+    let conn = TcpConnection::new(local, family);
     let id = conn.id;
     TCP_CONNECTIONS.lock().insert(id, Box::new(conn));
     id
@@ -2152,7 +2260,7 @@ pub fn listen(socket_id: u32, backlog: usize) -> Result<(), NetError> {
 
     // Dinleyici olarak kaydet
     let mut listeners = TCP_LISTENERS.lock();
-    listeners.insert(conn.local.port, socket_id);
+    listeners.insert((conn.family, conn.local.port), socket_id);
 
     Ok(())
 }
@@ -2360,6 +2468,14 @@ pub fn get_connection_remote_addr(socket_id: u32) -> Result<SocketAddr, NetError
 /// Gelen TCP paketini işle.
 /// Hedef porta göre mevcut bağlantı veya dinleyici aranır.
 pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
+    if !verify_checksum(
+        ip_packet.header.src,
+        ip_packet.header.dst,
+        ip_packet.payload,
+    ) {
+        crate::serial_println!("[TCP] IPv4 checksum verification failed, dropping packet");
+        return Err(NetError::ChecksumError);
+    }
     let tcp_header = TcpHeader::parse(ip_packet.payload)?;
     let data = &ip_packet.payload[tcp_header.header_len()..];
 
@@ -2369,7 +2485,10 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
     // Kurulu bağlantı ara (hem yerel hem uzak port eşleşmeli)
     let mut found_id = None;
     for (_, conn) in conns.iter() {
-        if conn.local.port == tcp_header.dst_port && conn.remote.port == tcp_header.src_port {
+        if conn.family == AddressFamily::IPV4
+            && conn.local.port == tcp_header.dst_port
+            && conn.remote.port == tcp_header.src_port
+        {
             found_id = Some(conn.id);
             break;
         }
@@ -2379,14 +2498,14 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
     if let Some(id) = found_id {
         let mut conns = TCP_CONNECTIONS.lock();
         if let Some(conn) = conns.get_mut(&id) {
-            conn.remote.ip = ip_packet.header.src;
+            conn.remote.ip = IpAddr::V4(ip_packet.header.src);
             return conn.on_packet(&tcp_header, data);
         }
     }
 
     // Dinleyici ara (sadece hedef port kontrol edilir)
     let listeners = TCP_LISTENERS.lock();
-    if let Some(&listener_id) = listeners.get(&tcp_header.dst_port) {
+    if let Some(&listener_id) = listeners.get(&(AddressFamily::IPV4, tcp_header.dst_port)) {
         drop(listeners);
 
         if tcp_header.flags.syn {
@@ -2397,7 +2516,7 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
             };
 
             if let Some(local_addr) = local_addr {
-                let mut child = TcpConnection::new(local_addr);
+                let mut child = TcpConnection::new(local_addr, AddressFamily::IPV4);
                 child.remote = SocketAddr::new(ip_packet.header.src, tcp_header.src_port);
                 child.seq_num = crate::random::rand_u64() as u32;
                 child.ack_num = tcp_header.seq_num.wrapping_add(1);
@@ -2424,12 +2543,85 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
         // SYN olmayan paketler için dinleyiciyi kontrol et
         let mut conns = TCP_CONNECTIONS.lock();
         if let Some(conn) = conns.get_mut(&listener_id) {
-            conn.remote.ip = ip_packet.header.src;
+            conn.remote.ip = IpAddr::V4(ip_packet.header.src);
             return conn.on_packet(&tcp_header, data);
         }
     }
 
     // Eşleşen bağlantı yok - RST gönderilebilir
+    Ok(())
+}
+
+pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
+    if !verify_checksum_v6(
+        ip_packet.header.src,
+        ip_packet.header.dst,
+        &ip_packet.payload,
+    ) {
+        crate::serial_println!("[TCPv6] Checksum verification failed, dropping packet");
+        return Err(NetError::ChecksumError);
+    }
+
+    let tcp_header = TcpHeader::parse(&ip_packet.payload)?;
+    let data = &ip_packet.payload[tcp_header.header_len()..];
+
+    let conns = TCP_CONNECTIONS.lock();
+    let mut found_id = None;
+    for (_, conn) in conns.iter() {
+        if conn.family == AddressFamily::IPV6
+            && conn.local.port == tcp_header.dst_port
+            && conn.remote.port == tcp_header.src_port
+        {
+            found_id = Some(conn.id);
+            break;
+        }
+    }
+    drop(conns);
+
+    if let Some(id) = found_id {
+        let mut conns = TCP_CONNECTIONS.lock();
+        if let Some(conn) = conns.get_mut(&id) {
+            conn.remote.ip = IpAddr::V6(ip_packet.header.src);
+            return conn.on_packet(&tcp_header, data);
+        }
+    }
+
+    let listeners = TCP_LISTENERS.lock();
+    if let Some(&listener_id) = listeners.get(&(AddressFamily::IPV6, tcp_header.dst_port)) {
+        drop(listeners);
+
+        if tcp_header.flags.syn {
+            let local_addr = {
+                let conns = TCP_CONNECTIONS.lock();
+                conns.get(&listener_id).map(|c| c.local)
+            };
+
+            if let Some(local_addr) = local_addr {
+                let mut child = TcpConnection::new(local_addr, AddressFamily::IPV6);
+                child.remote = SocketAddr::new(ip_packet.header.src, tcp_header.src_port);
+                child.seq_num = crate::random::rand_u64() as u32;
+                child.ack_num = tcp_header.seq_num.wrapping_add(1);
+                child.state = TcpState::SynReceived;
+                let _ = child.send_packet(TcpFlags::syn_ack(), &[]);
+                let child_id = child.id;
+
+                TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                ACCEPT_QUEUE
+                    .lock()
+                    .entry(listener_id)
+                    .or_insert_with(Vec::new)
+                    .push(child_id);
+            }
+            return Ok(());
+        }
+
+        let mut conns = TCP_CONNECTIONS.lock();
+        if let Some(conn) = conns.get_mut(&listener_id) {
+            conn.remote.ip = IpAddr::V6(ip_packet.header.src);
+            return conn.on_packet(&tcp_header, data);
+        }
+    }
+
     Ok(())
 }
 
@@ -2440,9 +2632,9 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
 /// netstat komutu için bağlantı özeti
 #[derive(Clone, Debug)]
 pub struct TcpConnInfo {
-    pub local_ip: Ipv4Addr,
+    pub local_ip: IpAddr,
     pub local_port: u16,
-    pub remote_ip: Ipv4Addr,
+    pub remote_ip: IpAddr,
     pub remote_port: u16,
     pub state: TcpState,
 }
@@ -2528,5 +2720,112 @@ impl SackCongestionState {
     pub fn on_loss(&mut self) {
         self.ssthresh = (self.cwnd / 2).max(2);
         self.cwnd = self.ssthresh;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tfo_cookie_generation_is_mac_scoped_to_ip_and_window() {
+        TCP_TFO_COOKIE_EPOCH.store(0x1234_5678, Ordering::Relaxed);
+
+        let server = Ipv4Addr::new(203, 0, 113, 10);
+        let other = Ipv4Addr::new(203, 0, 113, 11);
+        let cookie = TfoCookie::generate(server, 123_456);
+
+        assert!(cookie.verify(server, 123_456));
+        assert!(!cookie.verify(server, 123_457));
+        assert!(!cookie.verify(other, 123_456));
+    }
+
+    #[test]
+    fn timestamp_option_uses_monotonic_counter_for_rtt() {
+        TCP_TIMESTAMP_COUNTER.store(0, Ordering::Relaxed);
+
+        let first = TimestampOption::now(0);
+        let second = TimestampOption::now(first.ts_val);
+
+        assert_eq!(first.ts_val, 1000);
+        assert_eq!(second.ts_val, 2000);
+        assert_eq!(second.calculate_rtt(), 1000);
+    }
+
+    #[test]
+    fn bbr_startup_requires_stalled_growth_before_drain() {
+        let mut bbr = BbrState::new();
+
+        bbr.on_ack(1460, 1_000, 1_000);
+        assert_eq!(bbr.mode, BbrMode::Startup);
+
+        bbr.on_ack(1825, 1_000, 2_000);
+        assert_eq!(bbr.mode, BbrMode::Startup);
+
+        bbr.on_ack(1830, 1_000, 3_000);
+        assert_eq!(bbr.mode, BbrMode::Startup);
+
+        bbr.on_ack(1832, 1_000, 4_000);
+        assert_eq!(bbr.mode, BbrMode::Startup);
+
+        bbr.on_ack(1831, 1_000, 5_000);
+        assert_eq!(bbr.mode, BbrMode::Drain);
+        assert!(bbr.full_bw >= 1_825_000);
+        assert!(bbr.full_bw_rounds >= 3);
+    }
+
+    #[test]
+    fn tcp_ipv6_listener_demuxes_syn_into_child_queue() {
+        let listener = create_socket(AddressFamily::IPV6);
+        bind(listener, SocketAddr::unspecified_v6(Port(54000))).unwrap();
+        listen(listener, 4).unwrap();
+
+        let src_ip =
+            super::super::ipv6::Ipv6Addr::from_segments([0x2001, 0xdb8, 0, 0, 0, 0, 0, 10]);
+        let dst_ip =
+            super::super::ipv6::Ipv6Addr::from_segments([0x2001, 0xdb8, 0, 0, 0, 0, 0, 20]);
+
+        let mut header = TcpHeader {
+            src_port: Port(41000),
+            dst_port: Port(54000),
+            seq_num: 1234,
+            ack_num: 0,
+            data_offset: 5,
+            flags: TcpFlags::syn(),
+            window_size: 65535,
+            checksum: 0,
+            urgent_ptr: 0,
+        };
+        let mut segment = vec![0u8; TcpHeader::MIN_SIZE];
+        header.serialize(&mut segment).unwrap();
+        header.checksum = compute_checksum_v6(src_ip, dst_ip, &segment);
+        header.serialize(&mut segment).unwrap();
+
+        let packet = Ipv6Packet::new(
+            super::super::ipv6::Ipv6Header::new(
+                src_ip,
+                dst_ip,
+                Ipv6NextHeader::Tcp as u8,
+                segment.len() as u16,
+            ),
+            &segment,
+        );
+
+        process_ipv6_packet(&packet).unwrap();
+
+        let child_ids = ACCEPT_QUEUE
+            .lock()
+            .get(&listener)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(child_ids.len(), 1);
+        let child_id = child_ids[0];
+
+        let conns = TCP_CONNECTIONS.lock();
+        let child = conns.get(&child_id).unwrap();
+        assert_eq!(child.family, AddressFamily::IPV6);
+        assert_eq!(child.remote.ip, IpAddr::V6(src_ip));
+        assert_eq!(child.remote.port, Port(41000));
+        assert_eq!(child.state, TcpState::SynReceived);
     }
 }
