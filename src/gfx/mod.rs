@@ -70,6 +70,9 @@ pub mod shell_scene;
 /// Shell frame invalidation and publication planning
 pub mod shell_invalidation;
 
+/// Shell launch registry and package resolution glue
+pub mod velvet_glove_registry;
+
 /// Velvet Glove Compositor - echOS native desktop runtime
 pub mod velvet_glove;
 

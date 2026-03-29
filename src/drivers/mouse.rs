@@ -46,7 +46,7 @@
 
 use crate::drivers::gesture::GestureRecognizer;
 use crate::drivers::input::{push_event, InputEvent, MousePacket};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
@@ -68,15 +68,6 @@ const COMMAND_PORT: u16 = 0x64; // PS/2 komut portu (yazma için; status ile ayn
 
 // Atomic state: thread-safe mouse position and button state
 // IRQ handler updates these, compositor reads them without unsafe blocks
-
-/// Mevcut mouse X koordinatı (piksel; 0=sol kenar)
-pub static MOUSE_X: AtomicI32 = AtomicI32::new(640);
-/// Mevcut mouse Y koordinatı (piksel; 0=üst kenar)
-pub static MOUSE_Y: AtomicI32 = AtomicI32::new(400);
-/// Mevcut mouse buton durumları (atomik bayraklar)
-pub static MOUSE_LEFT: AtomicBool = AtomicBool::new(false);
-pub static MOUSE_RIGHT: AtomicBool = AtomicBool::new(false);
-pub static MOUSE_MIDDLE: AtomicBool = AtomicBool::new(false);
 
 #[repr(C, align(64))]
 struct MousePublicationState {
@@ -169,11 +160,6 @@ fn publish_snapshot(x: i32, y: i32, buttons: MouseButtons) {
     MOUSE_PUBLICATION
         .buttons
         .store(encode_mouse_buttons(buttons), Ordering::Relaxed);
-    MOUSE_X.store(x, Ordering::Relaxed);
-    MOUSE_Y.store(y, Ordering::Relaxed);
-    MOUSE_LEFT.store(buttons.left, Ordering::Relaxed);
-    MOUSE_RIGHT.store(buttons.right, Ordering::Relaxed);
-    MOUSE_MIDDLE.store(buttons.middle, Ordering::Relaxed);
     MOUSE_PUBLICATION.finish_write(published_sequence);
 }
 

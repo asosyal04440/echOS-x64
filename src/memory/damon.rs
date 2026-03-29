@@ -101,20 +101,17 @@ impl DamonState {
         })
     }
 
-    fn record_access(
-        &mut self,
-        key: DamonKey,
-        node_id: u16,
-        accessed: bool,
-        now_tick: u64,
-    ) {
-        let entry = self.entries.entry((key.space_id, key.page_index)).or_insert(DamonEntry {
-            key,
-            node_id,
-            heat: 0,
-            last_access_tick: now_tick,
-            samples: 0,
-        });
+    fn record_access(&mut self, key: DamonKey, node_id: u16, accessed: bool, now_tick: u64) {
+        let entry = self
+            .entries
+            .entry((key.space_id, key.page_index))
+            .or_insert(DamonEntry {
+                key,
+                node_id,
+                heat: 0,
+                last_access_tick: now_tick,
+                samples: 0,
+            });
         entry.node_id = node_id;
         entry.samples = entry.samples.saturating_add(1);
         if accessed {
@@ -139,13 +136,16 @@ impl DamonState {
     }
 
     fn record_refault(&mut self, key: DamonKey, now_tick: u64) {
-        let entry = self.entries.entry((key.space_id, key.page_index)).or_insert(DamonEntry {
-            key,
-            node_id: 0,
-            heat: 0,
-            last_access_tick: now_tick,
-            samples: 0,
-        });
+        let entry = self
+            .entries
+            .entry((key.space_id, key.page_index))
+            .or_insert(DamonEntry {
+                key,
+                node_id: 0,
+                heat: 0,
+                last_access_tick: now_tick,
+                samples: 0,
+            });
         entry.heat = entry.heat.saturating_add(REFAULT_BOOST).min(DAMON_HEAT_MAX);
         entry.last_access_tick = now_tick;
         self.refault_boosts = self.refault_boosts.saturating_add(1);

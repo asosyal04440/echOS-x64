@@ -221,9 +221,7 @@ impl OomState {
 
     /// Süreç kritikliği (0-100) ayarla.
     pub fn set_criticality(&self, pid: TaskId, criticality: u8) {
-        self.criticality
-            .lock()
-            .insert(pid, criticality.min(100));
+        self.criticality.lock().insert(pid, criticality.min(100));
     }
 
     /// Süreç kritikliği al.

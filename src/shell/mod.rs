@@ -56,7 +56,7 @@
 //! | http     | HTTP GET/POST/download              |
 //! | wget     | URL'den dosya indir                 |
 //! | curl     | URL içeriği göster                  |
-//! | wine     | Windows PE çalıştırma               |
+//! | wincompat| Windows PE çalıştırma               |
 //! | launch   | ELF userspace uygulaması çalıştır   |
 //! | run      | Shell script çalıştır               |
 //! | eval     | Aritmetik ifade değerlendir          |
@@ -67,12 +67,12 @@ pub mod editor;
 pub mod expr;
 pub mod scripting;
 
+use crate::ipc::request_store_sync;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::ipc::request_store_sync;
 use core::sync::atomic::{AtomicBool, Ordering};
 use editor::GapBuffer;
 
@@ -140,8 +140,8 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "launch",
     "run",
     "eval",
-    "wine",
-    "proton",
+    "wincompat",
+    "gamecompat",
     "linux",
     "doom",
     "write",
@@ -1265,8 +1265,16 @@ impl Shell {
                     Err(msg) => Some(msg),
                 }
             }
-            "wine" => handle_wine_command(self, crate::posix::WineRuntimeKind::Wine, &parts),
-            "proton" => handle_wine_command(self, crate::posix::WineRuntimeKind::Proton, &parts),
+            "wincompat" => handle_windows_runtime_command(
+                self,
+                crate::posix::WindowsRuntimeFlavor::DesktopCompat,
+                &parts,
+            ),
+            "gamecompat" => handle_windows_runtime_command(
+                self,
+                crate::posix::WindowsRuntimeFlavor::GameCompat,
+                &parts,
+            ),
             "linux" => handle_linux_command(self, &parts),
             // Scripting commands
             "run" => {
@@ -3325,18 +3333,18 @@ fn stat_path(path: &str) -> Result<String, String> {
     ))
 }
 
-/// Wine/Proton Windows runtime komutlarını işler.
+/// Windows compatibility runtime komutlarını işler.
 ///
 /// Alt komutlar: `set`, `list`, `use`, `status`, `run`, `info`, `sections`, `plan`
-/// Her alt komut, echOS POSIX/Wine katmanı ile iletişim kurar.
-fn handle_wine_command(
+/// Her alt komut, echOS POSIX Windows runtime katmanı ile iletişim kurar.
+fn handle_windows_runtime_command(
     _shell: &Shell,
-    kind: crate::posix::WineRuntimeKind,
+    flavor: crate::posix::WindowsRuntimeFlavor,
     parts: &[&str],
 ) -> Option<String> {
-    let label = match kind {
-        crate::posix::WineRuntimeKind::Wine => "wine",
-        crate::posix::WineRuntimeKind::Proton => "proton",
+    let label = match flavor {
+        crate::posix::WindowsRuntimeFlavor::DesktopCompat => "wincompat",
+        crate::posix::WindowsRuntimeFlavor::GameCompat => "gamecompat",
     };
     if parts.len() < 2 {
         return Some(format!(
@@ -3350,22 +3358,22 @@ fn handle_wine_command(
                 return Some(format!("Kullanim: {} set <root>", label));
             }
             let root = parts[2];
-            match crate::posix::upsert_wine_runtime(label, root, kind) {
+            match crate::posix::upsert_windows_runtime(label, root, flavor) {
                 Ok(_) => Some(format!("{} runtime ayarlandi: {}", label, root)),
                 Err(_) => Some(String::from("Runtime ayari basarisiz")),
             }
         }
         "list" => {
-            let runtimes = crate::posix::list_wine_runtimes();
+            let runtimes = crate::posix::list_windows_runtimes();
             if runtimes.is_empty() {
                 return Some(String::from("Runtime bulunamadi"));
             }
             let mut out = String::new();
-            let active = crate::posix::current_wine_runtime();
+            let active = crate::posix::current_windows_runtime();
             for runtime in runtimes {
-                let kind_name = match runtime.kind {
-                    crate::posix::WineRuntimeKind::Wine => "wine",
-                    crate::posix::WineRuntimeKind::Proton => "proton",
+                let runtime_flavor = match runtime.flavor {
+                    crate::posix::WindowsRuntimeFlavor::DesktopCompat => "desktop-compat",
+                    crate::posix::WindowsRuntimeFlavor::GameCompat => "game-compat",
                 };
                 let marker = match &active {
                     Some(active_runtime) if active_runtime.name == runtime.name => "*",
@@ -3373,7 +3381,7 @@ fn handle_wine_command(
                 };
                 out.push_str(&format!(
                     "{} {} {} {}\n",
-                    marker, runtime.name, kind_name, runtime.root_path
+                    marker, runtime.name, runtime_flavor, runtime.root_path
                 ));
             }
             Some(out.trim_end().to_string())
@@ -3382,20 +3390,20 @@ fn handle_wine_command(
             if parts.len() < 3 {
                 return Some(format!("Kullanim: {} use <ad>", label));
             }
-            match crate::posix::select_wine_runtime(parts[2]) {
+            match crate::posix::select_windows_runtime(parts[2]) {
                 Ok(()) => Some(format!("Aktif runtime: {}", parts[2])),
                 Err(_) => Some(String::from("Runtime bulunamadi")),
             }
         }
-        "status" => match crate::posix::current_wine_runtime() {
+        "status" => match crate::posix::current_windows_runtime() {
             Some(runtime) => {
-                let kind_name = match runtime.kind {
-                    crate::posix::WineRuntimeKind::Wine => "wine",
-                    crate::posix::WineRuntimeKind::Proton => "proton",
+                let runtime_flavor = match runtime.flavor {
+                    crate::posix::WindowsRuntimeFlavor::DesktopCompat => "desktop-compat",
+                    crate::posix::WindowsRuntimeFlavor::GameCompat => "game-compat",
                 };
                 Some(format!(
                     "aktif runtime: {} {} {}",
-                    runtime.name, kind_name, runtime.root_path
+                    runtime.name, runtime_flavor, runtime.root_path
                 ))
             }
             None => Some(String::from("Aktif runtime yok")),
@@ -3410,11 +3418,11 @@ fn handle_wine_command(
             };
             match crate::posix::run_windows_app_image(&data) {
                 Ok(()) => None,
-                Err(crate::posix::WineRuntimeError::NotFound) => {
+                Err(crate::posix::WindowsRuntimeError::NotFound) => {
                     Some(String::from("Runtime secilmedi"))
                 }
-                Err(crate::posix::WineRuntimeError::Invalid) => Some(String::from("Gecersiz hedef")),
-                Err(crate::posix::WineRuntimeError::SecureBootViolation) => {
+                Err(crate::posix::WindowsRuntimeError::Invalid) => Some(String::from("Gecersiz hedef")),
+                Err(crate::posix::WindowsRuntimeError::SecureBootViolation) => {
                     Some(String::from("Secure Boot aktif, imzasiz PE reddedildi"))
                 }
             }
@@ -3469,13 +3477,13 @@ fn handle_wine_command(
                     }
                     Some(out.trim_end().to_string())
                 }
-                Err(crate::posix::WineRuntimeError::Invalid) => {
+                Err(crate::posix::WindowsRuntimeError::Invalid) => {
                     Some(String::from("Gecersiz hedef"))
                 }
-                Err(crate::posix::WineRuntimeError::NotFound) => {
+                Err(crate::posix::WindowsRuntimeError::NotFound) => {
                     Some(String::from("Runtime secilmedi"))
                 }
-                Err(crate::posix::WineRuntimeError::SecureBootViolation) => {
+                Err(crate::posix::WindowsRuntimeError::SecureBootViolation) => {
                     Some(String::from("Secure Boot aktif, imzasiz PE reddedildi"))
                 }
             }
@@ -3490,14 +3498,14 @@ fn handle_wine_command(
             };
             match crate::posix::prepare_windows_launch(&data) {
                 Ok(plan) => {
-                    let kind_name = match plan.runtime.kind {
-                        crate::posix::WineRuntimeKind::Wine => "wine",
-                        crate::posix::WineRuntimeKind::Proton => "proton",
+                    let runtime_flavor = match plan.runtime.flavor {
+                        crate::posix::WindowsRuntimeFlavor::DesktopCompat => "desktop-compat",
+                        crate::posix::WindowsRuntimeFlavor::GameCompat => "game-compat",
                     };
                     crate::serial_println!(
-                        "wine plan runtime={} kind={} root={} pe64={} machine=0x{:04x} sections={} entry=0x{:08x} image_base=0x{:016x} subsystem=0x{:04x}",
+                        "windows plan runtime={} flavor={} root={} pe64={} machine=0x{:04x} sections={} entry=0x{:08x} image_base=0x{:016x} subsystem=0x{:04x}",
                         plan.runtime.name,
-                        kind_name,
+                        runtime_flavor,
                         plan.runtime.root_path,
                         plan.pe_info.is_64,
                         plan.pe_info.machine,
@@ -3507,9 +3515,9 @@ fn handle_wine_command(
                         plan.pe_info.subsystem
                     );
                     Some(format!(
-                        "runtime={} kind={} root={} pe64={} machine=0x{:04x} sections={} entry=0x{:08x} image_base=0x{:016x} subsystem=0x{:04x}",
+                        "runtime={} flavor={} root={} pe64={} machine=0x{:04x} sections={} entry=0x{:08x} image_base=0x{:016x} subsystem=0x{:04x}",
                         plan.runtime.name,
-                        kind_name,
+                        runtime_flavor,
                         plan.runtime.root_path,
                         plan.pe_info.is_64,
                         plan.pe_info.machine,
@@ -3519,11 +3527,11 @@ fn handle_wine_command(
                         plan.pe_info.subsystem
                     ))
                 }
-                Err(crate::posix::WineRuntimeError::NotFound) => {
+                Err(crate::posix::WindowsRuntimeError::NotFound) => {
                     Some(String::from("Runtime secilmedi"))
                 }
-                Err(crate::posix::WineRuntimeError::Invalid) => Some(String::from("Gecersiz hedef")),
-                Err(crate::posix::WineRuntimeError::SecureBootViolation) => {
+                Err(crate::posix::WindowsRuntimeError::Invalid) => Some(String::from("Gecersiz hedef")),
+                Err(crate::posix::WindowsRuntimeError::SecureBootViolation) => {
                     Some(String::from("Secure Boot aktif, imzasiz PE reddedildi"))
                 }
             }

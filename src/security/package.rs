@@ -12,7 +12,9 @@ use echos_manifest::{
     AppRuntime, CompiledAppManifest, NativeCapability, PackageSignatureMetadata,
     SignatureAlgorithm, SourceAppManifest, TrustDomain,
 };
-use p256::ecdsa::{Signature as P256Signature, SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey};
+use p256::ecdsa::{
+    Signature as P256Signature, SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey,
+};
 use sha2::{Digest, Sha256};
 use signature::{Signer, Verifier};
 use spin::Mutex;
@@ -29,19 +31,16 @@ const EMBEDDED_PLATFORM_REVOCATION_EPOCH: u32 = 0;
 const EMBEDDED_REVOKED_SIGNER_KEY_IDS: &[&str] = &[];
 
 pub const DEV_PACKAGE_SIGNING_SEED: [u8; 32] = [
-    0x45, 0x63, 0x68, 0x4f, 0x53, 0x2d, 0x4e, 0x61, 0x74, 0x69, 0x76, 0x65, 0x2d, 0x50, 0x6b,
-    0x67, 0x2d, 0x44, 0x65, 0x76, 0x2d, 0x4b, 0x65, 0x79, 0x2d, 0x30, 0x31, 0x2d, 0x42, 0x48,
-    0x44, 0x31,
+    0x45, 0x63, 0x68, 0x4f, 0x53, 0x2d, 0x4e, 0x61, 0x74, 0x69, 0x76, 0x65, 0x2d, 0x50, 0x6b, 0x67,
+    0x2d, 0x44, 0x65, 0x76, 0x2d, 0x4b, 0x65, 0x79, 0x2d, 0x30, 0x31, 0x2d, 0x42, 0x48, 0x44, 0x31,
 ];
 const PLATFORM_PACKAGE_SIGNING_SEED: [u8; 32] = [
-    0x65, 0x63, 0x68, 0x4f, 0x53, 0x2d, 0x70, 0x6c, 0x61, 0x74, 0x66, 0x6f, 0x72, 0x6d, 0x2d,
-    0x72, 0x6f, 0x6f, 0x74, 0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x76, 0x31, 0x2d, 0x62, 0x68, 0x64,
-    0x2d, 0x30,
+    0x65, 0x63, 0x68, 0x4f, 0x53, 0x2d, 0x70, 0x6c, 0x61, 0x74, 0x66, 0x6f, 0x72, 0x6d, 0x2d, 0x72,
+    0x6f, 0x6f, 0x74, 0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x76, 0x31, 0x2d, 0x62, 0x68, 0x64, 0x2d, 0x30,
 ];
 const STORE_PACKAGE_SIGNING_SEED: [u8; 32] = [
-    0x65, 0x63, 0x68, 0x4f, 0x53, 0x2d, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x2d, 0x72, 0x6f, 0x6f,
-    0x74, 0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x76, 0x31, 0x2d, 0x62, 0x68, 0x64, 0x2d, 0x30, 0x30,
-    0x31, 0x21,
+    0x65, 0x63, 0x68, 0x4f, 0x53, 0x2d, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x2d, 0x72, 0x6f, 0x6f, 0x74,
+    0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x76, 0x31, 0x2d, 0x62, 0x68, 0x64, 0x2d, 0x30, 0x30, 0x31, 0x21,
 ];
 
 #[derive(Clone, Copy)]
@@ -388,7 +387,7 @@ impl PackageManager {
         }
         Ok(verified)
     }
- 
+
     fn install_legacy_package(
         &mut self,
         manifest_data: Vec<u8>,
@@ -415,8 +414,10 @@ impl PackageManager {
             }
         }
         if let Some(executable) = &manifest.executable {
-            self.installed_paths
-                .insert(package_name.clone(), bundle_file_path(&package_name, executable));
+            self.installed_paths.insert(
+                package_name.clone(),
+                bundle_file_path(&package_name, executable),
+            );
         }
         self.packages.insert(package_name.clone(), manifest);
         let mut success = package_name.clone();
@@ -435,10 +436,11 @@ impl PackageManager {
             .ok_or(PackageError::SignatureMetadataMissing)?;
         let compiled_bytes = lookup_payload(&parsed.payload_files, COMPILED_MANIFEST_PATH)
             .ok_or(PackageError::MissingPackagedPayload)?;
-        let compiled_manifest = CompiledAppManifest::decode(&compiled_bytes).map_err(|err| match err {
-            echos_manifest::ManifestError::UnsupportedVersion => PackageError::UnsupportedAbi,
-            _ => PackageError::InvalidManifest,
-        })?;
+        let compiled_manifest =
+            CompiledAppManifest::decode(&compiled_bytes).map_err(|err| match err {
+                echos_manifest::ManifestError::UnsupportedVersion => PackageError::UnsupportedAbi,
+                _ => PackageError::InvalidManifest,
+            })?;
         if let Some(source) = source_manifest.as_ref() {
             validate_manifest_pair(source, &compiled_manifest)?;
         }
@@ -489,7 +491,10 @@ impl PackageManager {
         let compiled_manifest_path = bundle_file_path(&package_name, COMPILED_MANIFEST_PATH);
         let capability_set = compiled_manifest.capabilities();
         let installed = InstalledPackagedApp {
-            runtime_app_id: hash_manifest_app_id(&compiled_manifest.app_id, compiled_manifest.runtime),
+            runtime_app_id: hash_manifest_app_id(
+                &compiled_manifest.app_id,
+                compiled_manifest.runtime,
+            ),
             manifest_app_id: leak_string(compiled_manifest.app_id.clone()),
             package_id: leak_string(compiled_manifest.app_id.clone()),
             title: leak_string(compiled_manifest.name.clone()),
@@ -552,10 +557,11 @@ impl PackageManager {
         }
         let compiled_bytes = lookup_payload(&parsed.payload_files, COMPILED_MANIFEST_PATH)
             .ok_or(PackageError::MissingPackagedPayload)?;
-        let compiled_manifest = CompiledAppManifest::decode(&compiled_bytes).map_err(|err| match err {
-            echos_manifest::ManifestError::UnsupportedVersion => PackageError::UnsupportedAbi,
-            _ => PackageError::InvalidManifest,
-        })?;
+        let compiled_manifest =
+            CompiledAppManifest::decode(&compiled_bytes).map_err(|err| match err {
+                echos_manifest::ManifestError::UnsupportedVersion => PackageError::UnsupportedAbi,
+                _ => PackageError::InvalidManifest,
+            })?;
         if compiled_manifest.app_id != installed.compiled_manifest.app_id
             || compiled_manifest.entry != installed.compiled_manifest.entry
             || compiled_manifest.sdk_version != installed.compiled_manifest.sdk_version
@@ -601,11 +607,11 @@ impl PackageManager {
         let payload_files = self.extract_payload(payload)?;
         let signature_metadata = lookup_payload(&payload_files, SIGNATURE_METADATA_PATH)
             .map(|bytes| {
-                PackageSignatureMetadata::decode(&bytes)
-                    .map_err(|_| PackageError::InvalidFormat)
+                PackageSignatureMetadata::decode(&bytes).map_err(|_| PackageError::InvalidFormat)
             })
             .transpose()?;
-        let package_digest = canonical_package_digest(&data[manifest_start..manifest_end], &payload_files)?;
+        let package_digest =
+            canonical_package_digest(&data[manifest_start..manifest_end], &payload_files)?;
         if let Some(metadata) = signature_metadata.as_ref() {
             if metadata.package_digest != package_digest {
                 return Err(PackageError::HashMismatch);
@@ -660,8 +666,12 @@ impl PackageManager {
                 "executable" => manifest.executable = Some(value.to_string()),
                 "icon_type" => manifest.icon_type = Some(value.to_string()),
                 "permissions" => {
-                    manifest.permissions =
-                        Some(value.split(',').map(|part| part.trim().to_string()).collect());
+                    manifest.permissions = Some(
+                        value
+                            .split(',')
+                            .map(|part| part.trim().to_string())
+                            .collect(),
+                    );
                 }
                 _ => {}
             }
@@ -719,20 +729,56 @@ pub fn install_package_from_path(path: &str) -> Result<String, PackageError> {
     get_package_manager().lock().install_package(&data)
 }
 
+pub fn install_bundle(bytes: &[u8]) -> Result<String, PackageError> {
+    get_package_manager().lock().install_package(bytes)
+}
+
 pub fn resolve_installed_app(query: &str) -> Option<InstalledPackagedApp> {
     get_package_manager().lock().installed_app(query)
+}
+
+pub fn list_installed_apps() -> Vec<InstalledPackagedApp> {
+    get_package_manager()
+        .lock()
+        .packaged_apps
+        .values()
+        .cloned()
+        .collect()
 }
 
 pub fn resolve_installed_native_app(query: &str) -> Option<InstalledNativeApp> {
     get_package_manager().lock().installed_native_app(query)
 }
 
+#[cfg(test)]
+pub fn register_test_installed_app(installed: InstalledPackagedApp) {
+    let mut manager = get_package_manager().lock();
+    manager
+        .packaged_apps
+        .insert(installed.package_id.to_string(), installed.clone());
+    manager.installed_paths.insert(
+        installed.package_id.to_string(),
+        installed.bundle_root.to_string(),
+    );
+}
+
+#[cfg(test)]
+pub fn clear_test_installed_apps() {
+    let mut manager = get_package_manager().lock();
+    manager.packaged_apps.clear();
+    manager.installed_paths.clear();
+}
+
 pub fn verify_packaged_launch(entry_path: &str) -> Result<VerifiedPackagedLaunch, PackageError> {
-    get_package_manager().lock().verify_packaged_launch(entry_path)
+    get_package_manager()
+        .lock()
+        .verify_packaged_launch(entry_path)
 }
 
 pub fn verify_native_launch(entry_path: &str) -> Result<VerifiedNativeLaunch, PackageError> {
-    get_package_manager().lock().verify_native_launch(entry_path)
+    get_package_manager()
+        .lock()
+        .verify_native_launch(entry_path)
 }
 
 pub fn build_signed_bundle(
@@ -752,23 +798,23 @@ pub fn build_signed_bundle(
         &[
             (
                 String::from(COMPILED_MANIFEST_PATH),
-                compiled.encode().map_err(|_| PackageError::InvalidManifest)?,
+                compiled
+                    .encode()
+                    .map_err(|_| PackageError::InvalidManifest)?,
             ),
             (compiled.entry.clone(), entry_bytes.to_vec()),
         ],
     )?;
-    let signature_metadata = package_signature_metadata(
-        trust_domain,
-        manifest_digest,
-        package_digest,
-        entry_digest,
-    );
+    let signature_metadata =
+        package_signature_metadata(trust_domain, manifest_digest, package_digest, entry_digest);
     rebuild_bundle_bytes_with_metadata(
         source_text.as_bytes(),
         &[
             (
                 String::from(COMPILED_MANIFEST_PATH),
-                compiled.encode().map_err(|_| PackageError::InvalidManifest)?,
+                compiled
+                    .encode()
+                    .map_err(|_| PackageError::InvalidManifest)?,
             ),
             (compiled.entry.clone(), entry_bytes.to_vec()),
         ],
@@ -778,8 +824,8 @@ pub fn build_signed_bundle(
 
 pub fn inspect_signed_bundle(bytes: &[u8]) -> Result<BundleInspection, PackageError> {
     let parsed = PackageManager::new().parse_signed_bundle(bytes)?;
-    let source_text = core::str::from_utf8(&parsed.source_manifest)
-        .map_err(|_| PackageError::InvalidManifest)?;
+    let source_text =
+        core::str::from_utf8(&parsed.source_manifest).map_err(|_| PackageError::InvalidManifest)?;
     let source_manifest =
         SourceAppManifest::parse(source_text).map_err(|_| PackageError::InvalidManifest)?;
     let compiled_bytes = lookup_payload(&parsed.payload_files, COMPILED_MANIFEST_PATH)
@@ -838,10 +884,7 @@ fn sign_with_seed(content: &[u8], seed: &[u8; 32]) -> [u8; 64] {
     signature
 }
 
-fn sign_with_firmware_key_seed(
-    content: &[u8],
-    seed: &[u8; 32],
-) -> Result<[u8; 64], PackageError> {
+fn sign_with_firmware_key_seed(content: &[u8], seed: &[u8; 32]) -> Result<[u8; 64], PackageError> {
     let signing_key =
         P256SigningKey::from_slice(seed).map_err(|_| PackageError::InvalidSignature)?;
     let signature: P256Signature = signing_key.sign(content);
@@ -923,13 +966,18 @@ fn trust_root_for_domain(trust_domain: TrustDomain) -> Option<TrustRootRecord> {
         .find(|root| root.trust_domain == trust_domain)
 }
 
-fn sign_with_trust_domain(content: &[u8], trust_domain: TrustDomain) -> Result<[u8; 64], PackageError> {
+fn sign_with_trust_domain(
+    content: &[u8],
+    trust_domain: TrustDomain,
+) -> Result<[u8; 64], PackageError> {
     let Some(root) = trust_root_for_domain(trust_domain) else {
         return Err(PackageError::InvalidSignature);
     };
     match root.signature_algorithm {
         SignatureAlgorithm::Ed25519 => Ok(sign_with_seed(content, root.signing_seed)),
-        SignatureAlgorithm::FirmwarePublishedKey => sign_with_firmware_key_seed(content, root.signing_seed),
+        SignatureAlgorithm::FirmwarePublishedKey => {
+            sign_with_firmware_key_seed(content, root.signing_seed)
+        }
     }
 }
 
@@ -1274,10 +1322,10 @@ mod tests {
     fn signed_bundle_roundtrip_validates_signature_and_payload() {
         let source = demo_source(AppRuntime::Native, "hello.elf");
         let entry = b"fake-elf-image".to_vec();
-        let compiled =
-            CompiledAppManifest::from_source(&source, super::sha256_array(&entry)).expect("compiled");
-        let bundle =
-            build_signed_bundle(&source, &compiled, &entry, TrustDomain::Developer).expect("bundle");
+        let compiled = CompiledAppManifest::from_source(&source, super::sha256_array(&entry))
+            .expect("compiled");
+        let bundle = build_signed_bundle(&source, &compiled, &entry, TrustDomain::Developer)
+            .expect("bundle");
         let parsed = PackageManager::new()
             .parse_signed_bundle(&bundle)
             .expect("signed bundle");
@@ -1303,29 +1351,35 @@ mod tests {
     fn tampered_bundle_fails_signature_verification() {
         let source = demo_source(AppRuntime::Native, "hello.elf");
         let entry = b"fake-elf-image".to_vec();
-        let compiled =
-            CompiledAppManifest::from_source(&source, super::sha256_array(&entry)).expect("compiled");
-        let mut bundle =
-            build_signed_bundle(&source, &compiled, &entry, TrustDomain::Developer).expect("bundle");
+        let compiled = CompiledAppManifest::from_source(&source, super::sha256_array(&entry))
+            .expect("compiled");
+        let mut bundle = build_signed_bundle(&source, &compiled, &entry, TrustDomain::Developer)
+            .expect("bundle");
         let index = bundle.len().saturating_sub(70);
         bundle[index] ^= 0xAA;
         let err = PackageManager::new()
             .parse_signed_bundle(&bundle)
             .expect_err("signature should fail");
-        assert!(matches!(err, PackageError::HashMismatch | PackageError::InvalidSignature));
+        assert!(matches!(
+            err,
+            PackageError::HashMismatch | PackageError::InvalidSignature
+        ));
     }
 
     #[test]
     fn inspection_reports_signature_metadata() {
         let source = demo_source(AppRuntime::Pe, "hello.exe");
         let entry = b"fake-pe-image".to_vec();
-        let compiled =
-            CompiledAppManifest::from_source(&source, super::sha256_array(&entry)).expect("compiled");
-        let bundle =
-            build_signed_bundle(&source, &compiled, &entry, TrustDomain::Developer).expect("bundle");
+        let compiled = CompiledAppManifest::from_source(&source, super::sha256_array(&entry))
+            .expect("compiled");
+        let bundle = build_signed_bundle(&source, &compiled, &entry, TrustDomain::Developer)
+            .expect("bundle");
         let inspection = inspect_signed_bundle(&bundle).expect("inspect");
         assert_eq!(inspection.compiled_manifest.runtime, AppRuntime::Pe);
-        assert_eq!(inspection.signature_metadata.trust_domain, TrustDomain::Developer);
+        assert_eq!(
+            inspection.signature_metadata.trust_domain,
+            TrustDomain::Developer
+        );
     }
 
     #[test]

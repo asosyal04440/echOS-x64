@@ -1,20 +1,21 @@
 //! Session shell registry, permissions, and recovery metadata service.
 
+use crate::services::display_atomic::MailboxRing;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
-use crate::services::display_atomic::MailboxRing;
 
 const SHELL_COMMAND_QUEUE_CAPACITY: usize = 256;
 const SHELL_RESPONSE_QUEUE_CAPACITY: usize = 256;
 
 use crate::gui::protocol::{
-    AccessibilityNode, AppHealth, AppId, DesktopPermission, FileGrant, PermissionEntry,
-    PermissionState, SessionPowerState, SessionSnapshot, ShellAppEntry, WindowId, WorkspaceId,
-    WorkspaceLayout, WorkspaceRule,
+    AccessibilityNode, AccessibilityProfile, AppHealth, AppId, DesktopPermission, DisplayProfile,
+    FileGrant, MotionProfile, PermissionEntry, PermissionState, RestoreDisposition,
+    SessionPowerState, SessionSnapshot, ShellAppEntry, ShellDensityProfile, StageSet,
+    StageSetPolicy, WindowId, WindowRule, WorkspaceId, WorkspaceLayout, WorkspaceRule,
 };
 
 #[derive(Clone, Debug)]
@@ -86,6 +87,10 @@ pub enum ShellCommand {
     GetAccessibilityTree {
         app_id: AppId,
     },
+    SetAccessibilityProfile {
+        profile: AccessibilityProfile,
+    },
+    GetAccessibilityProfile,
     NoteNotification {
         app_id: AppId,
     },
@@ -115,6 +120,37 @@ pub enum ShellCommand {
     SetPowerState {
         power_state: SessionPowerState,
     },
+    SetDisplayProfileState {
+        profile: DisplayProfile,
+    },
+    GetDisplayProfileState,
+    SetClipboardHistoryLen {
+        len: u32,
+    },
+    SetShellDensity {
+        profile: ShellDensityProfile,
+    },
+    GetShellDensity,
+    SetMotionProfile {
+        profile: MotionProfile,
+    },
+    GetMotionProfile,
+    SetRestoreDisposition {
+        disposition: RestoreDisposition,
+    },
+    GetRestoreDisposition,
+    SetStageSets {
+        sets: Vec<StageSet>,
+    },
+    GetStageSets,
+    SetStageSetPolicy {
+        policy: StageSetPolicy,
+    },
+    GetStageSetPolicy,
+    SetWindowRules {
+        rules: Vec<WindowRule>,
+    },
+    GetWindowRules,
     GetSessionSnapshot,
     ListApps,
 }
@@ -132,6 +168,14 @@ pub enum ShellResponse {
     FileAccess(bool),
     FileGrants(Vec<FileGrant>),
     AccessibilityTree(Vec<AccessibilityNode>),
+    AccessibilityProfile(AccessibilityProfile),
+    DisplayProfile(DisplayProfile),
+    ShellDensity(ShellDensityProfile),
+    MotionProfile(MotionProfile),
+    RestoreDisposition(RestoreDisposition),
+    StageSets(Vec<StageSet>),
+    StageSetPolicy(StageSetPolicy),
+    WindowRules(Vec<WindowRule>),
     SessionSnapshot(SessionSnapshot),
     Error(String),
 }
@@ -145,10 +189,19 @@ pub struct EchShell {
     overview_active: AtomicBool,
     scratchpad_visible: AtomicBool,
     unread_notifications: Mutex<u32>,
+    clipboard_history_len: Mutex<u32>,
     apps: Mutex<BTreeMap<AppId, ShellAppEntry>>,
     permissions: Mutex<BTreeMap<AppId, BTreeMap<DesktopPermission, PermissionState>>>,
     file_grants: Mutex<BTreeMap<AppId, Vec<FileGrant>>>,
     accessibility: Mutex<BTreeMap<AppId, Vec<AccessibilityNode>>>,
+    accessibility_profile: Mutex<AccessibilityProfile>,
+    display_profile: Mutex<DisplayProfile>,
+    shell_density: Mutex<ShellDensityProfile>,
+    motion_profile: Mutex<MotionProfile>,
+    restore_state: Mutex<RestoreDisposition>,
+    stage_sets: Mutex<Vec<StageSet>>,
+    stage_set_policy: Mutex<StageSetPolicy>,
+    window_rules: Mutex<Vec<WindowRule>>,
     command_queue: MailboxRing<ShellCommand>,
     response_queue: MailboxRing<ShellResponse>,
 }
@@ -164,10 +217,19 @@ impl EchShell {
             overview_active: AtomicBool::new(false),
             scratchpad_visible: AtomicBool::new(false),
             unread_notifications: Mutex::new(0),
+            clipboard_history_len: Mutex::new(0),
             apps: Mutex::new(BTreeMap::new()),
             permissions: Mutex::new(BTreeMap::new()),
             file_grants: Mutex::new(BTreeMap::new()),
             accessibility: Mutex::new(BTreeMap::new()),
+            accessibility_profile: Mutex::new(AccessibilityProfile::default()),
+            display_profile: Mutex::new(DisplayProfile::default()),
+            shell_density: Mutex::new(ShellDensityProfile::Balanced),
+            motion_profile: Mutex::new(MotionProfile::Standard),
+            restore_state: Mutex::new(RestoreDisposition::RestoreIfClean),
+            stage_sets: Mutex::new(Vec::new()),
+            stage_set_policy: Mutex::new(StageSetPolicy::default()),
+            window_rules: Mutex::new(Vec::new()),
             command_queue: MailboxRing::with_capacity_pow2(SHELL_COMMAND_QUEUE_CAPACITY),
             response_queue: MailboxRing::with_capacity_pow2(SHELL_RESPONSE_QUEUE_CAPACITY),
         }
@@ -424,6 +486,13 @@ impl EchShell {
                     .unwrap_or_else(Vec::new);
                 ShellResponse::AccessibilityTree(nodes)
             }
+            ShellCommand::SetAccessibilityProfile { profile } => {
+                *self.accessibility_profile.lock() = profile;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetAccessibilityProfile => {
+                ShellResponse::AccessibilityProfile(*self.accessibility_profile.lock())
+            }
             ShellCommand::NoteNotification { app_id } => {
                 let mut unread = self.unread_notifications.lock();
                 *unread = unread.saturating_add(1);
@@ -510,6 +579,57 @@ impl EchShell {
                 *self.power_state.lock() = power_state;
                 ShellResponse::Ack
             }
+            ShellCommand::SetDisplayProfileState { profile } => {
+                *self.display_profile.lock() = profile;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetDisplayProfileState => {
+                ShellResponse::DisplayProfile(self.display_profile.lock().clone())
+            }
+            ShellCommand::SetClipboardHistoryLen { len } => {
+                *self.clipboard_history_len.lock() = len;
+                ShellResponse::Ack
+            }
+            ShellCommand::SetShellDensity { profile } => {
+                *self.shell_density.lock() = profile;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetShellDensity => {
+                ShellResponse::ShellDensity(*self.shell_density.lock())
+            }
+            ShellCommand::SetMotionProfile { profile } => {
+                *self.motion_profile.lock() = profile;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetMotionProfile => {
+                ShellResponse::MotionProfile(*self.motion_profile.lock())
+            }
+            ShellCommand::SetRestoreDisposition { disposition } => {
+                *self.restore_state.lock() = disposition;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetRestoreDisposition => {
+                ShellResponse::RestoreDisposition(*self.restore_state.lock())
+            }
+            ShellCommand::SetStageSets { sets } => {
+                *self.stage_sets.lock() = sets;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetStageSets => ShellResponse::StageSets(self.stage_sets.lock().clone()),
+            ShellCommand::SetStageSetPolicy { policy } => {
+                *self.stage_set_policy.lock() = policy;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetStageSetPolicy => {
+                ShellResponse::StageSetPolicy(*self.stage_set_policy.lock())
+            }
+            ShellCommand::SetWindowRules { rules } => {
+                *self.window_rules.lock() = rules;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetWindowRules => {
+                ShellResponse::WindowRules(self.window_rules.lock().clone())
+            }
             ShellCommand::GetSessionSnapshot => {
                 let apps = self.apps.lock();
                 let apps_running = apps.values().filter(|entry| entry.running).count() as u32;
@@ -532,6 +652,14 @@ impl EchShell {
                 } else {
                     crate::gui::protocol::ShellState::DesktopReady
                 };
+                let accessibility_profile = *self.accessibility_profile.lock();
+                let display_profile = self.display_profile.lock().clone();
+                let output_scale = display_profile
+                    .outputs
+                    .iter()
+                    .find(|output| output.output_id == display_profile.primary_output)
+                    .map(|output| output.scale_100x as u32)
+                    .unwrap_or(100);
                 ShellResponse::SessionSnapshot(SessionSnapshot {
                     workspace_id,
                     workspace_layout,
@@ -543,8 +671,15 @@ impl EchShell {
                     scratchpad_visible: self.scratchpad_visible.load(Ordering::Acquire),
                     shell_ready: self.running.load(Ordering::Acquire),
                     boot_clean_desktop: apps_running == 0,
-                    output_scale: 1,
-                    text_scale: 1,
+                    output_scale,
+                    text_scale: accessibility_profile.text_scale_100x as u32,
+                    clipboard_history_len: *self.clipboard_history_len.lock(),
+                    accessibility_profile,
+                    display_profile,
+                    shell_density: *self.shell_density.lock(),
+                    motion_profile: *self.motion_profile.lock(),
+                    restore_state: *self.restore_state.lock(),
+                    stage_set_policy: *self.stage_set_policy.lock(),
                     locale: String::from("en-US"),
                     theme_variant: String::from("hybrid-titan"),
                     shell_state,

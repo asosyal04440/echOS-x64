@@ -12,6 +12,9 @@
 //! - Section Headers — .text (kod), .data, .rdata, .bss vb.
 //! - Sections — Gerçek ikili veri
 
+use super::kernel::tasking::task::Win32ThreadState;
+use super::kernel::{memory as kernel_memory, tasking};
+use super::{serial_println, win32, win32_abi};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -22,6 +25,11 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
+use x86_64::structures::paging::{
+    mapper::MapToError, FrameAllocator, Mapper, OffsetPageTable, Page, PageTableFlags, PhysFrame,
+    Size4KiB,
+};
+use x86_64::VirtAddr;
 
 // ============================================================================
 // PE SABİTLERİ
@@ -88,6 +96,358 @@ pub enum PeError {
     InvalidExport,         // Geçersiz dışa aktarma girişi
 }
 
+fn align_up(value: usize, align: usize) -> usize {
+    let mask = align.saturating_sub(1);
+    value.saturating_add(mask) & !mask
+}
+
+fn choose_user_image_base(
+    space: &Arc<spin::Mutex<kernel_memory::AddressSpace>>,
+    preferred_base: u64,
+    image_size: u64,
+) -> Option<u64> {
+    if kernel_memory::is_user_range(preferred_base, image_size) {
+        return Some(preferred_base);
+    }
+    kernel_memory::allocate_user_mmap_in(space, image_size)
+}
+
+fn section_page_flags(characteristics: u32) -> PageTableFlags {
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if characteristics & IMAGE_SCN_MEM_WRITE != 0 {
+        flags |= PageTableFlags::WRITABLE;
+    }
+    if characteristics & IMAGE_SCN_MEM_EXECUTE == 0 {
+        flags |= PageTableFlags::NO_EXECUTE;
+    }
+    flags
+}
+
+fn register_user_stack_region(
+    space: &Arc<spin::Mutex<kernel_memory::AddressSpace>>,
+) -> Result<(u64, u64), PeError> {
+    kernel_memory::set_active_address_space(Some(space.clone()));
+    let (stack_base, stack_top) = kernel_memory::user_stack_bounds();
+    let lazy_size = (kernel_memory::USER_STACK_PAGES as u64)
+        .saturating_mul(kernel_memory::PAGE_SIZE as u64)
+        .saturating_sub(kernel_memory::PAGE_SIZE as u64);
+    let guard_start = stack_base.saturating_add(kernel_memory::PAGE_SIZE as u64);
+    let flags =
+        PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+    let ok = kernel_memory::register_lazy_region(guard_start, lazy_size, flags);
+    kernel_memory::set_active_address_space(None);
+    if !ok {
+        return Err(PeError::MemoryAllocation);
+    }
+    Ok((stack_base, stack_top))
+}
+
+fn allocate_page_aligned_kernel_blob(bytes: &[u8]) -> Result<(*mut u8, usize), PeError> {
+    let size = align_up(bytes.len().max(1), 4096);
+    let ptr = win32::win32_alloc(size, 4096);
+    if ptr.is_null() {
+        return Err(PeError::MemoryAllocation);
+    }
+    unsafe {
+        core::ptr::write_bytes(ptr, 0, size);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+    }
+    Ok((ptr, size))
+}
+
+unsafe fn user_mapper_for_page_table(page_table: PhysFrame) -> OffsetPageTable<'static> {
+    let phys_offset = kernel_memory::active_physical_offset();
+    let pml4_phys = page_table.start_address().as_u64();
+    let pml4_virt = VirtAddr::new(phys_offset + pml4_phys);
+    let table = &mut *(pml4_virt.as_mut_ptr());
+    OffsetPageTable::new(table, VirtAddr::new(phys_offset))
+}
+
+fn map_kernel_blob_into_user(
+    mapper: &mut OffsetPageTable,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    user_base: u64,
+    kernel_ptr: *mut u8,
+    len: usize,
+    flags: PageTableFlags,
+) -> Result<(), PeError> {
+    let page_count = align_up(len.max(1), 4096) / 4096;
+    for index in 0..page_count {
+        let src = unsafe { kernel_ptr.add(index * 4096) } as usize;
+        let phys = kernel_memory::virt_to_phys(src);
+        if phys == 0 {
+            return Err(PeError::MemoryAllocation);
+        }
+        let frame = PhysFrame::<Size4KiB>::containing_address(x86_64::PhysAddr::new(phys as u64));
+        let page = Page::containing_address(VirtAddr::new(user_base + (index as u64) * 4096));
+        let table_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let result = kernel_memory::paging::with_wp_disabled(|| unsafe {
+            mapper.map_to_with_table_flags(page, frame, flags, table_flags, frame_allocator)
+        });
+        match result {
+            Ok(flush) => flush.flush(),
+            Err(MapToError::PageAlreadyMapped(_)) => {}
+            Err(_) => return Err(PeError::MemoryAllocation),
+        }
+    }
+    Ok(())
+}
+
+struct UserBlobBuilder {
+    base: u64,
+    bytes: Vec<u8>,
+}
+
+impl UserBlobBuilder {
+    fn new(base: u64) -> Self {
+        Self {
+            base,
+            bytes: Vec::new(),
+        }
+    }
+
+    fn reserve_zeroed(&mut self, size: usize, align: usize) -> (usize, u64) {
+        let offset = align_up(self.bytes.len(), align.max(1));
+        let end = offset.saturating_add(size);
+        if self.bytes.len() < end {
+            self.bytes.resize(end, 0);
+        }
+        (offset, self.base.saturating_add(offset as u64))
+    }
+
+    fn push_utf16(&mut self, text: &str) -> Win32UnicodeString {
+        let mut encoded = text.encode_utf16().collect::<Vec<_>>();
+        encoded.push(0);
+        let byte_len = encoded.len().saturating_mul(2);
+        let (offset, addr) = self.reserve_zeroed(byte_len, 2);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                encoded.as_ptr() as *const u8,
+                self.bytes.as_mut_ptr().add(offset),
+                byte_len,
+            );
+        }
+        Win32UnicodeString {
+            length: byte_len.saturating_sub(2) as u16,
+            maximum_length: byte_len as u16,
+            buffer: addr,
+        }
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8], align: usize) -> u64 {
+        let (offset, addr) = self.reserve_zeroed(bytes.len(), align);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.bytes.as_mut_ptr().add(offset),
+                bytes.len(),
+            );
+        }
+        addr
+    }
+
+    fn push_struct<T: Copy>(&mut self, value: &T) -> u64 {
+        let (offset, addr) = self.reserve_zeroed(size_of::<T>(), core::mem::align_of::<T>());
+        unsafe {
+            core::ptr::write(self.bytes.as_mut_ptr().add(offset) as *mut T, *value);
+        }
+        addr
+    }
+}
+
+fn build_process_bootstrap_blob(
+    pid: u64,
+    image_base: u64,
+    stack_top: u64,
+    entry_rip: u64,
+    initial_thread_handle: u64,
+    exception_directory: &[PeRuntimeFunction],
+    user_base: u64,
+) -> (Vec<u8>, Win32BootstrapBundle, Win32ThreadState) {
+    let mut blob = UserBlobBuilder::new(user_base);
+    let image_path_name = blob.push_utf16(&alloc::format!("C:\\\\echOS\\\\proc\\\\{pid}.exe"));
+    let command_line = blob.push_utf16(&alloc::format!("proc-{pid}"));
+    let current_directory = blob.push_utf16("C:\\");
+    let environment = blob.push_bytes(b"OS=echOS\0PATH=C:\\\0SYSTEMROOT=C:\\\0\0", 2);
+    let process_params = Win32ProcessParameters {
+        image_path_name,
+        command_line,
+        current_directory,
+        environment,
+    };
+    let process_params_addr = blob.push_struct(&process_params);
+    let heap_seed = 1u64;
+    let peb = Win32Peb {
+        image_base_address: image_base,
+        process_heap: heap_seed,
+        process_parameters: process_params_addr,
+        loader_data: 0,
+        os_major_version: 10,
+        os_minor_version: 0,
+        subsystem: 2,
+        _reserved: 0,
+    };
+    let peb_addr = blob.push_struct(&peb);
+    let teb_addr_hint = blob
+        .base
+        .saturating_add(align_up(blob.bytes.len(), core::mem::align_of::<Win32Teb>()) as u64);
+    let teb = Win32Teb {
+        nt_tib: [0; 0x30],
+        self_pointer: teb_addr_hint,
+        environment_pointer: process_params_addr,
+        client_id_process: pid,
+        client_id_thread: initial_thread_handle,
+        active_rpc_handle: 0,
+        thread_local_storage_pointer: 0,
+        process_environment_block: peb_addr,
+        last_error_value: 0,
+        count_of_owned_critical_sections: 0,
+        tls_slots: [0; WIN32_TEB_TLS_SLOT_COUNT],
+    };
+    let teb_addr = blob.push_struct(&teb);
+    let bundle = Win32BootstrapBundle {
+        teb: teb_addr,
+        peb: peb_addr,
+        process_params: process_params_addr,
+        heap_seed,
+        loader_state: 0,
+        runtime_function_count: exception_directory.len() as u32,
+    };
+    let thread = Win32ThreadState {
+        teb_base: bundle.teb,
+        peb_base: bundle.peb,
+        process_parameters_base: bundle.process_params,
+        user_stack_top: stack_top,
+        entry_rip,
+        initial_rcx: 0,
+        heap_seed,
+        owner_pid: pid,
+        thread_handle: initial_thread_handle,
+        gs_base_shadow: bundle.teb,
+        bootstrap_flags: 0,
+    };
+    (blob.bytes, bundle, thread)
+}
+
+fn build_thread_bootstrap_blob(
+    owner_pid: u64,
+    thread_handle: u64,
+    entry_rip: u64,
+    initial_rcx: u64,
+    stack_top: u64,
+    process_params: u64,
+    peb: u64,
+    heap_seed: u64,
+    user_base: u64,
+) -> (Vec<u8>, Win32ThreadState) {
+    let mut blob = UserBlobBuilder::new(user_base);
+    let teb_addr_hint = blob
+        .base
+        .saturating_add(align_up(blob.bytes.len(), core::mem::align_of::<Win32Teb>()) as u64);
+    let teb = Win32Teb {
+        nt_tib: [0; 0x30],
+        self_pointer: teb_addr_hint,
+        environment_pointer: process_params,
+        client_id_process: owner_pid,
+        client_id_thread: thread_handle,
+        active_rpc_handle: 0,
+        thread_local_storage_pointer: 0,
+        process_environment_block: peb,
+        last_error_value: 0,
+        count_of_owned_critical_sections: 0,
+        tls_slots: [0; WIN32_TEB_TLS_SLOT_COUNT],
+    };
+    let teb_addr = blob.push_struct(&teb);
+    let thread = Win32ThreadState {
+        teb_base: teb_addr,
+        peb_base: peb,
+        process_parameters_base: process_params,
+        user_stack_top: stack_top,
+        entry_rip,
+        initial_rcx,
+        heap_seed,
+        owner_pid,
+        thread_handle,
+        gs_base_shadow: teb_addr,
+        bootstrap_flags: 1,
+    };
+    (blob.bytes, thread)
+}
+
+fn build_user_abi_veneer_blob(
+    imports: &[ImportEntry],
+    user_base: u64,
+) -> Result<(Vec<u8>, BTreeMap<(String, String), u64>), PeError> {
+    let mut blob = Vec::new();
+    let mut veneer_map = BTreeMap::new();
+    for import in imports {
+        let dll_key = import.dll_name.to_lowercase();
+        for function in &import.functions {
+            let key = (dll_key.clone(), function.name.clone());
+            if veneer_map.contains_key(&key) {
+                continue;
+            }
+            let Some(service_id) =
+                win32::resolve_user_abi_service(&import.dll_name, &function.name)
+            else {
+                return Err(PeError::ImportNotFound);
+            };
+            let offset = align_up(blob.len(), WIN32_USER_VENEER_ALIGN);
+            if blob.len() < offset {
+                blob.resize(offset, 0x90);
+            }
+            let start = blob.len();
+            let syscall_nr = win32::user_abi_syscall_number(service_id) as u32;
+            blob.extend_from_slice(&[0x48, 0x89, 0xCF]);
+            blob.extend_from_slice(&[0x48, 0x89, 0xD6]);
+            blob.extend_from_slice(&[0x4C, 0x89, 0xC2]);
+            blob.extend_from_slice(&[0x4D, 0x89, 0xCA]);
+            blob.push(0xB8);
+            blob.extend_from_slice(&syscall_nr.to_le_bytes());
+            blob.extend_from_slice(&[0x0F, 0x05, 0xC3]);
+            veneer_map.insert(key, user_base.saturating_add(start as u64));
+        }
+    }
+    Ok((blob, veneer_map))
+}
+
+fn map_section_specs(
+    mapper: &mut OffsetPageTable,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    kernel_image_base: u64,
+    user_image_base: u64,
+    header_size: u64,
+    image_size: u64,
+    sections: &[SectionMapSpec],
+) -> Result<(), PeError> {
+    let header_flags =
+        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+    map_kernel_blob_into_user(
+        mapper,
+        frame_allocator,
+        user_image_base,
+        kernel_image_base as *mut u8,
+        align_up(header_size as usize, 4096),
+        header_flags,
+    )?;
+    for section in sections {
+        let offset = section.start.saturating_sub(user_image_base);
+        if offset >= image_size {
+            continue;
+        }
+        let kernel_ptr = (kernel_image_base.saturating_add(offset)) as *mut u8;
+        map_kernel_blob_into_user(
+            mapper,
+            frame_allocator,
+            section.start,
+            kernel_ptr,
+            align_up(section.size as usize, 4096),
+            section.flags,
+        )?;
+    }
+    Ok(())
+}
 // ============================================================================
 // DOS BAŞLIĞI
 // ============================================================================
@@ -511,6 +871,64 @@ pub struct PeProcessHandle {
     pub pid: u64,
 }
 
+pub const WIN32_TEB_TLS_SLOT_COUNT: usize = 64;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Win32UnicodeString {
+    pub length: u16,
+    pub maximum_length: u16,
+    pub buffer: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Win32ProcessParameters {
+    pub image_path_name: Win32UnicodeString,
+    pub command_line: Win32UnicodeString,
+    pub current_directory: Win32UnicodeString,
+    pub environment: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Win32Peb {
+    pub image_base_address: u64,
+    pub process_heap: u64,
+    pub process_parameters: u64,
+    pub loader_data: u64,
+    pub os_major_version: u32,
+    pub os_minor_version: u32,
+    pub subsystem: u32,
+    pub _reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Win32Teb {
+    pub nt_tib: [u8; 0x30],
+    pub self_pointer: u64,
+    pub environment_pointer: u64,
+    pub client_id_process: u64,
+    pub client_id_thread: u64,
+    pub active_rpc_handle: u64,
+    pub thread_local_storage_pointer: u64,
+    pub process_environment_block: u64,
+    pub last_error_value: u32,
+    pub count_of_owned_critical_sections: u32,
+    pub tls_slots: [u64; WIN32_TEB_TLS_SLOT_COUNT],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Win32BootstrapBundle {
+    pub teb: u64,
+    pub peb: u64,
+    pub process_params: u64,
+    pub heap_seed: u64,
+    pub loader_state: u64,
+    pub runtime_function_count: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeProcessDescriptor {
     pub pid: u64,
@@ -525,6 +943,7 @@ pub struct PeProcessDescriptor {
     pub import_report: PeImportResolutionReport,
     pub initial_thread_handle: u64,
     pub exception_directory: Vec<PeRuntimeFunction>,
+    pub bootstrap: Win32BootstrapBundle,
 }
 
 #[repr(C)]
@@ -540,6 +959,35 @@ pub struct PeLaunchReport {
     pub handle: PeProcessHandle,
     pub descriptor: PeProcessDescriptor,
     pub import_report: PeImportResolutionReport,
+}
+
+const WIN32_USER_VENEER_ALIGN: usize = 16;
+const WIN32_USER_VENEER_STACK_MAX: usize = 8;
+const WIN32_USER_STACK_ALIGN: usize = 4096;
+
+#[derive(Clone)]
+struct PeUserMappedImage {
+    address_space: Arc<spin::Mutex<kernel_memory::AddressSpace>>,
+    page_table: PhysFrame,
+    image_base: u64,
+    entry_point: u64,
+    stack_base: u64,
+    stack_top: u64,
+    bootstrap: Win32BootstrapBundle,
+    initial_thread: Win32ThreadState,
+}
+
+#[derive(Clone, Copy)]
+struct SectionMapSpec {
+    start: u64,
+    size: u64,
+    flags: PageTableFlags,
+}
+
+#[derive(Clone)]
+struct PeProcessRuntimeState {
+    address_space: Arc<spin::Mutex<kernel_memory::AddressSpace>>,
+    page_table: PhysFrame,
 }
 
 // ============================================================================
@@ -693,8 +1141,8 @@ impl PeLoader {
     ) -> Result<Vec<ImportEntry>, PeError> {
         let mut imports = Vec::new();
 
-        // İçe aktarma dizinini bul — isteğe bağlı başlık sonrası 112. baytta
-        let import_dir_offset = optional_offset + 112; // İsteğe bağlı başlık alanlarından sonra
+        // İçe aktarma dizinini gerçek veri dizini indeksinden oku.
+        let import_dir_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_IMPORT * 8;
         if import_dir_offset + size_of::<ImageDataDirectory>() > data.len() {
             return Ok(imports);
         }
@@ -1268,7 +1716,7 @@ impl PeLoader {
         let entry_rva = oh.address_of_entry_point as u64;
 
         // ---- Ham görüntü için bellek ayır (page-aligned, sıfırlanmış) ------
-        let mem = crate::win32::win32_alloc(image_size, 4096);
+        let mem = win32::win32_alloc(image_size, 4096);
         if mem.is_null() {
             return Err(PeError::MemoryAllocation);
         }
@@ -1308,7 +1756,7 @@ impl PeLoader {
         }
 
         let mapped_base = mem as u64;
-        crate::serial_println!(
+        serial_println!(
             "[PE] Belleğe yüklendi: preferred_base={:#x}, mapped_base={:#x}, size={:#x}",
             preferred_base,
             mapped_base,
@@ -1408,7 +1856,7 @@ impl PeLoader {
             }
             pos += block_size;
         }
-        crate::serial_println!("[PE] Temel yer değiştirme uygulandı (delta={:#x})", delta);
+        serial_println!("[PE] Temel yer değiştirme uygulandı (delta={:#x})", delta);
     }
 
     /// IAT'ı çöz: her içe aktarılan işlev için gerçek kernel fonksiyon adresini yaz.
@@ -1499,11 +1947,11 @@ impl PeLoader {
 
                 let fn_addr = self
                     .resolve_import(&dll_name.to_lowercase(), &func_name)
-                    .unwrap_or_else(|| crate::win32::get_fn_address(&dll_name, &func_name));
-                if fn_addr == crate::win32::stub_api as *const () as usize as u64 {
-                    crate::serial_println!("[PE] Çözümsüz: {}!{}", dll_name, func_name);
+                    .unwrap_or_else(|| win32::get_fn_address(&dll_name, &func_name));
+                if fn_addr == win32::stub_api as *const () as usize as u64 {
+                    serial_println!("[PE] Çözümsüz: {}!{}", dll_name, func_name);
                 } else {
-                    crate::serial_println!("[PE] IAT: {}!{} = {:#x}", dll_name, func_name, fn_addr);
+                    serial_println!("[PE] IAT: {}!{} = {:#x}", dll_name, func_name, fn_addr);
                 }
 
                 // IAT dilimini bellekte yaz
@@ -1513,7 +1961,7 @@ impl PeLoader {
                         let slot = mem.add(iat_slot_rva) as *mut u64;
                         let current = *slot;
                         if bound_descriptor_match && current != 0 {
-                            crate::serial_println!(
+                            serial_println!(
                                 "[PE] Bound IAT korundu: {}!{} = {:#x}",
                                 dll_name,
                                 func_name,
@@ -1521,7 +1969,7 @@ impl PeLoader {
                             );
                         } else {
                             if desc.time_date_stamp != 0 && current != 0 {
-                                crate::serial_println!(
+                                serial_println!(
                                     "[PE] Bound IAT gecersiz; yeniden cozuluyor: {}!{}",
                                     dll_name,
                                     func_name
@@ -1611,14 +2059,14 @@ impl PeLoader {
                 };
                 let fn_addr = self
                     .resolve_import(&dll_name.to_lowercase(), &func_name)
-                    .unwrap_or_else(|| crate::win32::get_fn_address(&dll_name, &func_name));
+                    .unwrap_or_else(|| win32::get_fn_address(&dll_name, &func_name));
                 let iat_slot_rva = iat_start_rva + thunk_index * 8;
                 if iat_slot_rva + 8 <= oh.size_of_image as usize {
                     unsafe {
                         let slot = mem.add(iat_slot_rva) as *mut u64;
                         let current = *slot;
                         if bound_descriptor_match && current != 0 {
-                            crate::serial_println!(
+                            serial_println!(
                                 "[PE] Bound delay-IAT korundu: {}!{} = {:#x}",
                                 dll_name,
                                 func_name,
@@ -1626,7 +2074,7 @@ impl PeLoader {
                             );
                         } else {
                             if desc.time_stamp != 0 && current != 0 {
-                                crate::serial_println!(
+                                serial_println!(
                                     "[PE] Bound delay-IAT gecersiz; yeniden cozuluyor: {}!{}",
                                     dll_name,
                                     func_name
@@ -1640,6 +2088,176 @@ impl PeLoader {
             }
 
             index += 1;
+        }
+        Ok(())
+    }
+
+    fn resolve_delay_iat_user_abi(
+        &mut self,
+        mem: *mut u8,
+        data: &[u8],
+        oh: &ImageOptionalHeader64,
+        veneer_map: &BTreeMap<(String, String), u64>,
+    ) -> Result<(), PeError> {
+        let oh_ptr = oh as *const ImageOptionalHeader64 as *const u8;
+        let dir_base = unsafe { oh_ptr.add(size_of::<ImageOptionalHeader64>()) };
+        let delay_dir = unsafe {
+            &*(dir_base.add(IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * 8) as *const ImageDataDirectory)
+        };
+        if delay_dir.virtual_address == 0 || delay_dir.size == 0 {
+            return Ok(());
+        }
+
+        let Some(file_off) = self.rva_to_file_offset_2(data, oh, delay_dir.virtual_address) else {
+            return Ok(());
+        };
+        let desc_size = size_of::<ImageDelayImportDescriptor>();
+        let mut index = 0usize;
+        loop {
+            let desc_off = file_off + index * desc_size;
+            if desc_off + desc_size > data.len() {
+                break;
+            }
+            let desc =
+                unsafe { &*(data.as_ptr().add(desc_off) as *const ImageDelayImportDescriptor) };
+            if desc.name == 0
+                && desc.delay_import_name_table == 0
+                && desc.delay_import_address_table == 0
+            {
+                break;
+            }
+            let Some(name_off) = self.rva_to_file_offset_2(data, oh, desc.name) else {
+                index += 1;
+                continue;
+            };
+            let dll_name = read_cstring(data, name_off, 128);
+            let dll_key = dll_name.to_lowercase();
+            let thunk_rva = if desc.delay_import_name_table != 0 {
+                desc.delay_import_name_table
+            } else {
+                desc.delay_import_address_table
+            };
+            let Some(thunk_off) = self.rva_to_file_offset_2(data, oh, thunk_rva) else {
+                index += 1;
+                continue;
+            };
+            let iat_start_rva = desc.delay_import_address_table as usize;
+            let mut thunk_index = 0usize;
+            loop {
+                let entry_off = thunk_off + thunk_index * 8;
+                if entry_off + 8 > data.len() {
+                    break;
+                }
+                let thunk = unsafe { &*(data.as_ptr().add(entry_off) as *const ImageThunkData64) };
+                if thunk.ordinal_or_address == 0 {
+                    break;
+                }
+                let func_name = if thunk.is_ordinal() {
+                    alloc::format!("#{}", thunk.ordinal())
+                } else {
+                    let Some(hint_off) = self.rva_to_file_offset_2(data, oh, thunk.hint_name_rva())
+                    else {
+                        thunk_index += 1;
+                        continue;
+                    };
+                    read_cstring(data, hint_off + 2, 128)
+                };
+                let Some(&fn_addr) = veneer_map.get(&(dll_key.clone(), func_name.clone())) else {
+                    return Err(PeError::ImportNotFound);
+                };
+                let iat_slot_rva = iat_start_rva + thunk_index * 8;
+                if iat_slot_rva + 8 <= oh.size_of_image as usize {
+                    unsafe {
+                        let slot = mem.add(iat_slot_rva) as *mut u64;
+                        *slot = fn_addr;
+                    }
+                }
+                thunk_index += 1;
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn resolve_iat_user_abi(
+        &mut self,
+        mem: *mut u8,
+        data: &[u8],
+        oh: &ImageOptionalHeader64,
+        veneer_map: &BTreeMap<(String, String), u64>,
+    ) -> Result<(), PeError> {
+        let oh_ptr = oh as *const ImageOptionalHeader64 as *const u8;
+        let dir_base = unsafe { oh_ptr.add(size_of::<ImageOptionalHeader64>()) };
+        let import_dir = unsafe {
+            &*(dir_base.add(IMAGE_DIRECTORY_ENTRY_IMPORT * 8) as *const ImageDataDirectory)
+        };
+        if import_dir.virtual_address == 0 {
+            return Ok(());
+        }
+        let Some(file_off) = self.rva_to_file_offset_2(data, oh, import_dir.virtual_address) else {
+            return Ok(());
+        };
+        let desc_size = size_of::<ImageImportDescriptor>();
+        let mut i = 0usize;
+        loop {
+            let desc_off = file_off + i * desc_size;
+            if desc_off + desc_size > data.len() {
+                break;
+            }
+            let desc = unsafe { &*(data.as_ptr().add(desc_off) as *const ImageImportDescriptor) };
+            if desc.name == 0 && desc.first_thunk == 0 {
+                break;
+            }
+            let Some(name_off) = self.rva_to_file_offset_2(data, oh, desc.name) else {
+                i += 1;
+                continue;
+            };
+            let dll_name = read_cstring(data, name_off, 128);
+            let dll_key = dll_name.to_lowercase();
+            let ilt_rva = if desc.original_first_thunk != 0 {
+                desc.original_first_thunk
+            } else {
+                desc.first_thunk
+            };
+            let Some(ilt_off) = self.rva_to_file_offset_2(data, oh, ilt_rva) else {
+                i += 1;
+                continue;
+            };
+            let iat_start_rva = desc.first_thunk as usize;
+            let mut j = 0usize;
+            loop {
+                let thunk_off = ilt_off + j * 8;
+                if thunk_off + 8 > data.len() {
+                    break;
+                }
+                let thunk = unsafe { &*(data.as_ptr().add(thunk_off) as *const ImageThunkData64) };
+                if thunk.ordinal_or_address == 0 {
+                    break;
+                }
+                let func_name = if thunk.is_ordinal() {
+                    alloc::format!("#{}", thunk.ordinal())
+                } else {
+                    let hn_rva = thunk.hint_name_rva();
+                    match self.rva_to_file_offset_2(data, oh, hn_rva) {
+                        Some(hn_off) => read_cstring(data, hn_off + 2, 128),
+                        None => String::from("<unknown>"),
+                    }
+                };
+                let Some(&veneer_addr) = veneer_map.get(&(dll_key.clone(), func_name.clone()))
+                else {
+                    serial_println!("[PE] User ABI veneer missing: {}!{}", dll_name, func_name);
+                    return Err(PeError::ImportNotFound);
+                };
+                let iat_slot_rva = iat_start_rva + j * 8;
+                if iat_slot_rva + 8 <= oh.size_of_image as usize {
+                    unsafe {
+                        let slot = mem.add(iat_slot_rva) as *mut u64;
+                        *slot = veneer_addr;
+                    }
+                }
+                j += 1;
+            }
+            i += 1;
         }
         Ok(())
     }
@@ -1676,6 +2294,83 @@ impl PeLoader {
         None
     }
 
+    fn load_into_user_buffer(
+        &mut self,
+        data: &[u8],
+        user_base: u64,
+        veneer_map: &BTreeMap<(String, String), u64>,
+    ) -> Result<(u64, u64, u64, u64, Vec<SectionMapSpec>), PeError> {
+        if data.len() < 0x40 {
+            return Err(PeError::InvalidDosHeader);
+        }
+        let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
+        if dos.e_magic != DOS_MAGIC {
+            return Err(PeError::InvalidDosHeader);
+        }
+        let pe_off = dos.e_lfanew as usize;
+        if pe_off + 4 > data.len() {
+            return Err(PeError::InvalidPeSignature);
+        }
+        if read_u32(&data[pe_off..]) != PE_SIGNATURE {
+            return Err(PeError::InvalidPeSignature);
+        }
+        let fh_off = pe_off + 4;
+        let fh = unsafe { &*(data.as_ptr().add(fh_off) as *const ImageFileHeader) };
+        if MachineType::from_u16(fh.machine) != MachineType::AMD64 {
+            return Err(PeError::NotPe64);
+        }
+        let oh_off = fh_off + size_of::<ImageFileHeader>();
+        let oh = unsafe { &*(data.as_ptr().add(oh_off) as *const ImageOptionalHeader64) };
+        if oh.magic != PE32_PLUS_MAGIC {
+            return Err(PeError::NotPe64);
+        }
+        let image_size = oh.size_of_image as usize;
+        let mem = win32::win32_alloc(image_size, 4096);
+        if mem.is_null() {
+            return Err(PeError::MemoryAllocation);
+        }
+        unsafe {
+            core::ptr::write_bytes(mem, 0, image_size);
+            core::ptr::copy_nonoverlapping(data.as_ptr(), mem, oh.size_of_headers as usize);
+        }
+        let sec_table_off = oh_off + fh.size_of_optional_header as usize;
+        let mut sections = Vec::new();
+        for i in 0..fh.number_of_sections as usize {
+            let sh_off = sec_table_off + i * size_of::<ImageSectionHeader>();
+            if sh_off + size_of::<ImageSectionHeader>() > data.len() {
+                break;
+            }
+            let sh = unsafe { &*(data.as_ptr().add(sh_off) as *const ImageSectionHeader) };
+            let dst_rva = sh.virtual_address as usize;
+            let src_off = sh.pointer_to_raw_data as usize;
+            let src_len = sh.size_of_raw_data as usize;
+            if src_len != 0 && src_off + src_len <= data.len() && dst_rva + src_len <= image_size {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        data.as_ptr().add(src_off),
+                        mem.add(dst_rva),
+                        src_len,
+                    );
+                }
+            }
+            sections.push(SectionMapSpec {
+                start: user_base.saturating_add(sh.virtual_address as u64),
+                size: sh.virtual_size.max(sh.size_of_raw_data).max(1) as u64,
+                flags: section_page_flags(sh.characteristics),
+            });
+        }
+        self.apply_base_relocations(mem, data, oh, oh.image_base, user_base);
+        self.resolve_iat_user_abi(mem, data, oh, veneer_map)?;
+        self.resolve_delay_iat_user_abi(mem, data, oh, veneer_map)?;
+        Ok((
+            mem as u64,
+            user_base.saturating_add(oh.address_of_entry_point as u64),
+            oh.size_of_headers as u64,
+            oh.size_of_image as u64,
+            sections,
+        ))
+    }
+
     // ========================================================================
     // PROCESS BAŞLATMA
     // ========================================================================
@@ -1689,11 +2384,11 @@ impl PeLoader {
         let (mapped_base, entry_point) = loader.load_into_memory(data)?;
         drop(loader); // Kilidi serbest bırak
 
-        crate::serial_println!("[PE] Çalıştırılıyor: entry_point={:#x}", entry_point);
+        serial_println!("[PE] Çalıştırılıyor: entry_point={:#x}", entry_point);
 
         // Kullanıcı yığını için 1 MB bellek ayır
         const STACK_SIZE: usize = 1 * 1024 * 1024;
-        let stack = crate::win32::win32_alloc(STACK_SIZE, 16);
+        let stack = win32::win32_alloc(STACK_SIZE, 16);
         if stack.is_null() {
             return Err(PeError::MemoryAllocation);
         }
@@ -1724,7 +2419,7 @@ impl PeLoader {
             );
         }
 
-        crate::serial_println!("[PE] Giriş noktası döndü.");
+        serial_println!("[PE] Giriş noktası döndü.");
         Ok(())
     }
 
@@ -1756,7 +2451,7 @@ impl PeLoader {
         }
 
         // Win32 API emülasyonunda ara (echOS'un kendi Win32 katmanı)
-        crate::win32::get_proc_address(dll_name, func_name)
+        win32::get_proc_address(dll_name, func_name)
     }
 
     fn bound_timestamp_matches(&self, dll_name: &str, expected_timestamp: u32) -> bool {
@@ -1839,6 +2534,8 @@ fn split_forwarder_target(target: &str) -> Option<(String, String)> {
 const PE_USER_STACK_SIZE: usize = 2 * 1024 * 1024;
 static NEXT_PE_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
 static PE_PROCESS_TABLE: Mutex<BTreeMap<u64, PeProcessDescriptor>> = Mutex::new(BTreeMap::new());
+static PE_PROCESS_RUNTIME_TABLE: Mutex<BTreeMap<u64, PeProcessRuntimeState>> =
+    Mutex::new(BTreeMap::new());
 static PE_TASK_BINDINGS: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 static PE_PENDING_LAUNCHES: Mutex<BTreeMap<u64, PeProcessHandle>> = Mutex::new(BTreeMap::new());
 
@@ -1881,15 +2578,15 @@ pub fn collect_launch_diagnostics(image: &mut PeImage) -> PeLaunchDiagnostics {
     let mut resolved = 0usize;
     let mut unresolved = 0usize;
     let mut unresolved_imports = Vec::new();
-    let stub_addr = crate::win32::stub_api as *const () as usize as u64;
+    let stub_addr = win32::stub_api as *const () as usize as u64;
 
     for import in image.imports.iter_mut() {
         let dll = import.dll_name.to_lowercase();
         for function in import.functions.iter_mut() {
             total += 1;
-            let resolved_addr = crate::win32_abi::resolve_module_dispatch(&dll, &function.name)
+            let resolved_addr = win32_abi::resolve_module_dispatch(&dll, &function.name)
                 .or_else(|| resolve_import(&dll, &function.name))
-                .unwrap_or_else(|| crate::win32::get_fn_address(&dll, &function.name));
+                .unwrap_or_else(|| win32::get_fn_address(&dll, &function.name));
             if resolved_addr == 0 || resolved_addr == stub_addr {
                 function.resolved_address = None;
                 unresolved += 1;
@@ -1935,6 +2632,7 @@ pub fn preflight_launch_diagnostics(data: &[u8]) -> Result<PeLaunchDiagnostics, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::mem::offset_of;
 
     fn empty_image() -> PeImage {
         PeImage {
@@ -2010,6 +2708,85 @@ mod tests {
             diagnostics.unresolved_imports[0].symbol_name,
             "CreateSandboxBroker"
         );
+    }
+
+    #[test]
+    fn win32_teb_keeps_peb_pointer_at_gs_0x60_contract() {
+        assert_eq!(offset_of!(Win32Teb, process_environment_block), 0x60);
+    }
+
+    #[test]
+    fn spawn_process_contract_populates_win32_bootstrap_bundle() {
+        let handle = spawn_process_with_contract(
+            0x1400_0000_0,
+            0x1400_0100_0,
+            PeTlsContext::disabled(),
+            Vec::new(),
+            Vec::new(),
+            PeImportResolutionReport {
+                total: 0,
+                resolved: 0,
+                unresolved: 0,
+            },
+            0x44,
+            vec![PeRuntimeFunction {
+                begin_address: 0x1000,
+                end_address: 0x1100,
+                unwind_info_address: 0x2000,
+            }],
+        )
+        .expect("process contract");
+        let descriptor = process_descriptor(handle).expect("descriptor");
+        assert_ne!(descriptor.bootstrap.teb, 0);
+        assert_ne!(descriptor.bootstrap.peb, 0);
+        assert_ne!(descriptor.bootstrap.process_params, 0);
+        assert_eq!(descriptor.bootstrap.runtime_function_count, 1);
+        unsafe {
+            let teb = descriptor.bootstrap.teb as *const Win32Teb;
+            let peb = descriptor.bootstrap.peb as *const Win32Peb;
+            assert_eq!((*teb).process_environment_block, descriptor.bootstrap.peb);
+            assert_eq!((*teb).client_id_process, descriptor.pid);
+            assert_eq!((*teb).client_id_thread, 0x44);
+            assert_eq!((*peb).image_base_address, descriptor.image_base);
+            assert_eq!(
+                (*peb).process_parameters,
+                descriptor.bootstrap.process_params
+            );
+        }
+    }
+
+    #[test]
+    fn thread_bootstrap_reuses_process_peb_and_process_parameters() {
+        let handle = spawn_process_with_contract(
+            0x1400_1000_0,
+            0x1400_1010_0,
+            PeTlsContext::disabled(),
+            Vec::new(),
+            Vec::new(),
+            PeImportResolutionReport {
+                total: 0,
+                resolved: 0,
+                unresolved: 0,
+            },
+            0x55,
+            Vec::new(),
+        )
+        .expect("process contract");
+        let descriptor = process_descriptor(handle).expect("descriptor");
+        let thread = build_thread_bootstrap(descriptor.pid, 0x66, 0x1400_1020_0, 0x1234)
+            .expect("thread bootstrap");
+        assert_eq!(thread.peb_base, descriptor.bootstrap.peb);
+        assert_eq!(
+            thread.process_parameters_base,
+            descriptor.bootstrap.process_params
+        );
+        assert_eq!(thread.initial_rcx, 0x1234);
+        unsafe {
+            let teb = thread.teb_base as *const Win32Teb;
+            assert_eq!((*teb).client_id_process, descriptor.pid);
+            assert_eq!((*teb).client_id_thread, 0x66);
+            assert_eq!((*teb).process_environment_block, descriptor.bootstrap.peb);
+        }
     }
 
     fn make_single_import_image(descriptor_timestamp: u32, initial_iat_value: u64) -> Vec<u8> {
@@ -2187,6 +2964,103 @@ mod tests {
         data
     }
 
+    fn make_delay_import_image() -> Vec<u8> {
+        let mut data = make_single_import_image(0, 0);
+
+        let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
+        let file_header_offset = dos.e_lfanew as usize + 4;
+        let file_header =
+            unsafe { &mut *(data.as_mut_ptr().add(file_header_offset) as *mut ImageFileHeader) };
+        let optional_offset = file_header_offset + size_of::<ImageFileHeader>();
+        let optional =
+            unsafe { &mut *(data.as_mut_ptr().add(optional_offset) as *mut ImageOptionalHeader64) };
+        optional.size_of_image = 0x3000;
+
+        let delay_directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * 8;
+        let delay_directory = ImageDataDirectory {
+            virtual_address: 0x10C0,
+            size: (size_of::<ImageDelayImportDescriptor>() * 2) as u32,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(delay_directory_offset) as *mut ImageDataDirectory,
+                delay_directory,
+            );
+        }
+
+        let section_offset = optional_offset + file_header.size_of_optional_header as usize;
+        let section = ImageSectionHeader {
+            name: [b'.', b'i', b'd', b'a', b't', b'a', 0, 0],
+            virtual_size: 0x700,
+            virtual_address: 0x1000,
+            size_of_raw_data: 0x700,
+            pointer_to_raw_data: 0x200,
+            pointer_to_relocations: 0,
+            pointer_to_linenumbers: 0,
+            number_of_relocations: 0,
+            number_of_linenumbers: 0,
+            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(section_offset) as *mut ImageSectionHeader,
+                section,
+            );
+        }
+        file_header.number_of_sections = 1;
+
+        let delay_descriptor = ImageDelayImportDescriptor {
+            attributes: 0,
+            name: 0x1140,
+            module_handle: 0,
+            delay_import_address_table: 0x1120,
+            delay_import_name_table: 0x1100,
+            bound_delay_import_table: 0,
+            unload_delay_import_table: 0,
+            time_stamp: 0,
+        };
+        let delay_descriptor_offset = 0x2C0usize;
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(delay_descriptor_offset) as *mut ImageDelayImportDescriptor,
+                delay_descriptor,
+            );
+            core::ptr::write_unaligned(
+                data.as_mut_ptr()
+                    .add(delay_descriptor_offset + size_of::<ImageDelayImportDescriptor>())
+                    as *mut ImageDelayImportDescriptor,
+                ImageDelayImportDescriptor::default(),
+            );
+        }
+
+        let delay_int_offset = 0x300usize;
+        let delay_iat_offset = 0x320usize;
+        let delay_hint_name_rva = 0x1150u32;
+        let delay_thunk = ImageThunkData64 {
+            ordinal_or_address: delay_hint_name_rva as u64,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(delay_int_offset) as *mut ImageThunkData64,
+                delay_thunk,
+            );
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(delay_int_offset + 8) as *mut ImageThunkData64,
+                ImageThunkData64 {
+                    ordinal_or_address: 0,
+                },
+            );
+            core::ptr::write_unaligned(data.as_mut_ptr().add(delay_iat_offset) as *mut u64, 0);
+            core::ptr::write_unaligned(data.as_mut_ptr().add(delay_iat_offset + 8) as *mut u64, 0);
+        }
+
+        data[0x340..0x34B].copy_from_slice(b"user32.dll\0");
+        data[0x350..0x352].copy_from_slice(&0u16.to_le_bytes());
+        data[0x352..0x362].copy_from_slice(b"CreateWindowExA\0");
+
+        data
+    }
+
     #[test]
     fn parse_bound_import_directory_retains_descriptor_and_forwarders() {
         let mut loader = PeLoader::new();
@@ -2354,6 +3228,59 @@ mod tests {
     }
 
     #[test]
+    fn load_into_user_buffer_routes_delay_iat_through_user_abi_veneer() {
+        let data = make_delay_import_image();
+        let image = load_pe(&data).expect("load");
+        let (_, veneer_map) =
+            build_user_abi_veneer_blob(&image.imports, 0x7000_0000).expect("veneer map");
+        let mut loader = PeLoader::new();
+        let (kernel_base, _, _, _, _) = loader
+            .load_into_user_buffer(&data, 0x1800_0000_0, &veneer_map)
+            .expect("user buffer");
+
+        let normal_import = image
+            .imports
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .functions
+                    .iter()
+                    .map(move |function| (entry.dll_name.as_str(), function))
+            })
+            .find(|(_, function)| function.thunk_address == image.image_base + 0x1060)
+            .expect("normal import entry");
+        let delayed_import = image
+            .imports
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .functions
+                    .iter()
+                    .map(move |function| (entry.dll_name.as_str(), function))
+            })
+            .find(|(_, function)| function.thunk_address == image.image_base + 0x1120)
+            .expect("delay import entry");
+        let normal = veneer_map
+            .get(&(normal_import.0.to_lowercase(), normal_import.1.name.clone()))
+            .copied()
+            .expect("normal veneer");
+        let delayed = veneer_map
+            .get(&(
+                delayed_import.0.to_lowercase(),
+                delayed_import.1.name.clone(),
+            ))
+            .copied()
+            .expect("delay veneer");
+
+        unsafe {
+            let normal_slot = *((kernel_base + 0x1060) as *const u64);
+            let delay_slot = *((kernel_base + 0x1120) as *const u64);
+            assert_eq!(normal_slot, normal);
+            assert_eq!(delay_slot, delayed);
+        }
+    }
+
+    #[test]
     fn load_into_memory_keeps_bound_iat_when_timestamp_matches_registered_dll() {
         let mut loader = PeLoader::new();
         let mut target = empty_image();
@@ -2370,7 +3297,7 @@ mod tests {
         let slot = unsafe { *((mapped_base as *const u8).add(0x1060) as *const u64) };
         assert_eq!(slot, 0x1111_2222_3333_4444);
         unsafe {
-            crate::win32::win32_dealloc(mapped_base as *mut u8);
+            win32::win32_dealloc(mapped_base as *mut u8);
         }
     }
 
@@ -2391,7 +3318,7 @@ mod tests {
         let slot = unsafe { *((mapped_base as *const u8).add(0x1060) as *const u64) };
         assert_eq!(slot, 0x55AA_55AA_55AA_55AA);
         unsafe {
-            crate::win32::win32_dealloc(mapped_base as *mut u8);
+            win32::win32_dealloc(mapped_base as *mut u8);
         }
     }
 }
@@ -2411,7 +3338,7 @@ pub fn init_tls(image: &PeImage) -> Result<PeTlsContext, PeError> {
         .max(tls_section.raw_data.len() as u32)
         .max(1);
     let alignment = 16usize;
-    let tls_ptr = crate::win32::win32_alloc(tls_size as usize, alignment);
+    let tls_ptr = win32::win32_alloc(tls_size as usize, alignment);
     if tls_ptr.is_null() {
         return Err(PeError::MemoryAllocation);
     }
@@ -2496,7 +3423,7 @@ fn invoke_tls_process_attach(descriptor: &PeProcessDescriptor) {
 }
 
 pub fn current_process_pid() -> Option<u64> {
-    let task_id = crate::task::scheduler::current_task_id() as u64;
+    let task_id = tasking::scheduler::current_task_id() as u64;
     PE_TASK_BINDINGS.lock().get(&task_id).copied()
 }
 
@@ -2516,6 +3443,249 @@ pub fn invoke_tls_thread_detach(pid: u64) -> bool {
     };
     invoke_tls_callbacks(&descriptor, DLL_THREAD_DETACH);
     true
+}
+
+fn allocate_utf16_buffer(text: &str) -> Result<Win32UnicodeString, PeError> {
+    let utf16 = text.encode_utf16().collect::<Vec<_>>();
+    let byte_len = utf16.len().saturating_mul(2);
+    let total = byte_len.saturating_add(2);
+    let ptr = win32::win32_alloc(total, 2);
+    if ptr.is_null() {
+        return Err(PeError::MemoryAllocation);
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(utf16.as_ptr() as *const u8, ptr, byte_len);
+        ptr.add(byte_len).write(0);
+        ptr.add(byte_len + 1).write(0);
+    }
+    Ok(Win32UnicodeString {
+        length: byte_len as u16,
+        maximum_length: total as u16,
+        buffer: ptr as u64,
+    })
+}
+
+fn build_process_parameters(pid: u64) -> Result<u64, PeError> {
+    let image_path_name =
+        allocate_utf16_buffer(&alloc::format!("C:\\\\echOS\\\\proc\\\\{pid}.exe"))?;
+    let command_line = allocate_utf16_buffer(&alloc::format!("proc-{pid}"))?;
+    let current_directory = allocate_utf16_buffer("C:\\")?;
+    let environment_text = "OS=echOS\0PATH=C:\\\0SYSTEMROOT=C:\\\0\0";
+    let environment_ptr = win32::win32_alloc(environment_text.len(), 2);
+    if environment_ptr.is_null() {
+        return Err(PeError::MemoryAllocation);
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            environment_text.as_ptr(),
+            environment_ptr,
+            environment_text.len(),
+        );
+    }
+    let params_ptr = win32::win32_alloc(
+        core::mem::size_of::<Win32ProcessParameters>(),
+        core::mem::align_of::<Win32ProcessParameters>(),
+    ) as *mut Win32ProcessParameters;
+    if params_ptr.is_null() {
+        return Err(PeError::MemoryAllocation);
+    }
+    unsafe {
+        *params_ptr = Win32ProcessParameters {
+            image_path_name,
+            command_line,
+            current_directory,
+            environment: environment_ptr as u64,
+        };
+    }
+    Ok(params_ptr as u64)
+}
+
+fn build_process_bootstrap(
+    pid: u64,
+    image_base: u64,
+    stack_base: u64,
+    stack_top: u64,
+    entry_rip: u64,
+    initial_thread_handle: u64,
+    exception_directory: &[PeRuntimeFunction],
+) -> Result<(Win32BootstrapBundle, Win32ThreadState), PeError> {
+    let process_params = build_process_parameters(pid)?;
+    let peb_ptr = win32::win32_alloc(
+        core::mem::size_of::<Win32Peb>(),
+        core::mem::align_of::<Win32Peb>(),
+    ) as *mut Win32Peb;
+    if peb_ptr.is_null() {
+        return Err(PeError::MemoryAllocation);
+    }
+    let heap_seed = 1u64;
+    unsafe {
+        *peb_ptr = Win32Peb {
+            image_base_address: image_base,
+            process_heap: heap_seed,
+            process_parameters: process_params,
+            loader_data: 0,
+            os_major_version: 10,
+            os_minor_version: 0,
+            subsystem: 2,
+            _reserved: 0,
+        };
+    }
+
+    let teb_ptr = win32::win32_alloc(
+        core::mem::size_of::<Win32Teb>(),
+        core::mem::align_of::<Win32Teb>(),
+    ) as *mut Win32Teb;
+    if teb_ptr.is_null() {
+        return Err(PeError::MemoryAllocation);
+    }
+    unsafe {
+        *teb_ptr = Win32Teb {
+            nt_tib: [0; 0x30],
+            self_pointer: teb_ptr as u64,
+            environment_pointer: process_params,
+            client_id_process: pid,
+            client_id_thread: initial_thread_handle,
+            active_rpc_handle: 0,
+            thread_local_storage_pointer: 0,
+            process_environment_block: peb_ptr as u64,
+            last_error_value: 0,
+            count_of_owned_critical_sections: 0,
+            tls_slots: [0; WIN32_TEB_TLS_SLOT_COUNT],
+        };
+    }
+    let bundle = Win32BootstrapBundle {
+        teb: teb_ptr as u64,
+        peb: peb_ptr as u64,
+        process_params,
+        heap_seed,
+        loader_state: 0,
+        runtime_function_count: exception_directory.len() as u32,
+    };
+    let thread = Win32ThreadState {
+        teb_base: bundle.teb,
+        peb_base: bundle.peb,
+        process_parameters_base: bundle.process_params,
+        user_stack_top: stack_top,
+        entry_rip,
+        initial_rcx: 0,
+        heap_seed: bundle.heap_seed,
+        owner_pid: pid,
+        thread_handle: initial_thread_handle,
+        gs_base_shadow: bundle.teb,
+        bootstrap_flags: 0,
+    };
+    let _ = stack_base;
+    Ok((bundle, thread))
+}
+
+pub fn build_thread_bootstrap(
+    owner_pid: u64,
+    thread_handle: u64,
+    entry_rip: u64,
+    initial_rcx: u64,
+) -> Result<Win32ThreadState, PeError> {
+    let descriptor = PE_PROCESS_TABLE
+        .lock()
+        .get(&owner_pid)
+        .cloned()
+        .ok_or(PeError::EntryNotFound)?;
+    if let Some(runtime) = PE_PROCESS_RUNTIME_TABLE.lock().get(&owner_pid).cloned() {
+        let (_stack_base, stack_top) = register_user_stack_region(&runtime.address_space)?;
+        let teb_base = kernel_memory::allocate_user_mmap_in(&runtime.address_space, 4096)
+            .ok_or(PeError::MemoryAllocation)?;
+        let (blob, thread) = build_thread_bootstrap_blob(
+            owner_pid,
+            thread_handle,
+            entry_rip,
+            initial_rcx,
+            stack_top,
+            descriptor.bootstrap.process_params,
+            descriptor.bootstrap.peb,
+            descriptor.bootstrap.heap_seed,
+            teb_base,
+        );
+        let (teb_kernel, teb_len) = allocate_page_aligned_kernel_blob(&blob)?;
+        let mut mapper = unsafe { user_mapper_for_page_table(runtime.page_table) };
+        let frame_allocator =
+            unsafe { kernel_memory::global_memory_manager_mut().ok_or(PeError::MemoryAllocation)? };
+        map_kernel_blob_into_user(
+            &mut mapper,
+            frame_allocator,
+            teb_base,
+            teb_kernel,
+            teb_len,
+            PageTableFlags::PRESENT
+                | PageTableFlags::USER_ACCESSIBLE
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE,
+        )?;
+        let _ = kernel_memory::register_shared_anon_region_in(
+            &runtime.address_space,
+            teb_base,
+            teb_len as u64,
+            PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+            None,
+        );
+        return Ok(thread);
+    }
+    let stack_ptr = win32::win32_alloc(PE_USER_STACK_SIZE, 16);
+    if stack_ptr.is_null() {
+        return Err(PeError::MemoryAllocation);
+    }
+    let stack_top = (stack_ptr as u64).saturating_add(PE_USER_STACK_SIZE as u64 - 16);
+    let teb_ptr = win32::win32_alloc(
+        core::mem::size_of::<Win32Teb>(),
+        core::mem::align_of::<Win32Teb>(),
+    ) as *mut Win32Teb;
+    if teb_ptr.is_null() {
+        return Err(PeError::MemoryAllocation);
+    }
+    unsafe {
+        *teb_ptr = Win32Teb {
+            nt_tib: [0; 0x30],
+            self_pointer: teb_ptr as u64,
+            environment_pointer: descriptor.bootstrap.process_params,
+            client_id_process: owner_pid,
+            client_id_thread: thread_handle,
+            active_rpc_handle: 0,
+            thread_local_storage_pointer: 0,
+            process_environment_block: descriptor.bootstrap.peb,
+            last_error_value: 0,
+            count_of_owned_critical_sections: 0,
+            tls_slots: [0; WIN32_TEB_TLS_SLOT_COUNT],
+        };
+    }
+    Ok(Win32ThreadState {
+        teb_base: teb_ptr as u64,
+        peb_base: descriptor.bootstrap.peb,
+        process_parameters_base: descriptor.bootstrap.process_params,
+        user_stack_top: stack_top,
+        entry_rip,
+        initial_rcx,
+        heap_seed: descriptor.bootstrap.heap_seed,
+        owner_pid,
+        thread_handle,
+        gs_base_shadow: teb_ptr as u64,
+        bootstrap_flags: 0,
+    })
+}
+
+pub fn current_teb_base() -> Option<u64> {
+    tasking::scheduler::current_win32_thread_state().map(|state| state.teb_base)
+}
+
+pub fn current_peb_base() -> Option<u64> {
+    tasking::scheduler::current_win32_thread_state().map(|state| state.peb_base)
+}
+
+pub unsafe fn current_teb() -> Option<&'static mut Win32Teb> {
+    let teb = current_teb_base()? as *mut Win32Teb;
+    (!teb.is_null()).then(|| &mut *teb)
+}
+
+pub unsafe fn current_peb() -> Option<&'static mut Win32Peb> {
+    let peb = current_peb_base()? as *mut Win32Peb;
+    (!peb.is_null()).then(|| &mut *peb)
 }
 
 /// Yüklenmiş görüntü için process kaydı oluşturur, stack bootstrap yapar.
@@ -2550,25 +3720,37 @@ pub fn spawn_process_with_contract(
     initial_thread_handle: u64,
     exception_directory: Vec<PeRuntimeFunction>,
 ) -> Result<PeProcessHandle, PeError> {
-    let stack_ptr = crate::win32::win32_alloc(PE_USER_STACK_SIZE, 16);
+    let stack_ptr = win32::win32_alloc(PE_USER_STACK_SIZE, 16);
     if stack_ptr.is_null() {
         return Err(PeError::MemoryAllocation);
     }
 
     let pid = NEXT_PE_PROCESS_ID.fetch_add(1, Ordering::Relaxed);
+    let stack_base = stack_ptr as u64;
+    let stack_top = stack_base.saturating_add(PE_USER_STACK_SIZE as u64 - 16);
+    let (bootstrap, _) = build_process_bootstrap(
+        pid,
+        image_base,
+        stack_base,
+        stack_top,
+        entry_point,
+        initial_thread_handle,
+        &exception_directory,
+    )?;
     let descriptor = PeProcessDescriptor {
         pid,
         image_base,
         entry_point,
-        stack_base: stack_ptr as u64,
+        stack_base,
         stack_size: PE_USER_STACK_SIZE as u32,
-        stack_top: (stack_ptr as u64).saturating_add(PE_USER_STACK_SIZE as u64 - 16),
+        stack_top,
         tls,
         imported_modules,
         bound_imports,
         import_report,
         initial_thread_handle,
         exception_directory,
+        bootstrap,
     };
     PE_PROCESS_TABLE.lock().insert(pid, descriptor);
     Ok(PeProcessHandle { pid })
@@ -2592,6 +3774,12 @@ pub fn current_process_exception_directory() -> Option<Vec<PeRuntimeFunction>> {
 pub fn set_initial_thread_handle(handle: PeProcessHandle, thread_handle: u64) -> bool {
     if let Some(descriptor) = PE_PROCESS_TABLE.lock().get_mut(&handle.pid) {
         descriptor.initial_thread_handle = thread_handle;
+        let teb = descriptor.bootstrap.teb as *mut Win32Teb;
+        unsafe {
+            if !teb.is_null() {
+                (*teb).client_id_thread = thread_handle;
+            }
+        }
         true
     } else {
         false
@@ -2599,21 +3787,28 @@ pub fn set_initial_thread_handle(handle: PeProcessHandle, thread_handle: u64) ->
 }
 
 fn pe_process_start_trampoline() -> ! {
-    let task_id = crate::task::scheduler::current_task_id() as u64;
+    let task_id = tasking::scheduler::current_task_id() as u64;
     let Some(handle) = PE_PENDING_LAUNCHES.lock().remove(&task_id) else {
-        crate::task::scheduler::exit(87);
+        tasking::scheduler::exit(87);
     };
     let result = transfer_entry(handle);
     let exit_code = if result.is_ok() { 0 } else { 193 };
-    crate::task::scheduler::exit(exit_code)
+    tasking::scheduler::exit(exit_code)
 }
 
 /// Kullanıcı process kaydındaki entry point'e transfer yapar.
 pub fn transfer_entry(handle: PeProcessHandle) -> Result<(), PeError> {
     let descriptor = process_descriptor(handle).ok_or(PeError::EntryNotFound)?;
-    let task_id = crate::task::scheduler::current_task_id() as u64;
+    let task_id = tasking::scheduler::current_task_id() as u64;
     PE_TASK_BINDINGS.lock().insert(task_id, handle.pid);
     invoke_tls_process_attach(&descriptor);
+    if let Some(thread) = tasking::scheduler::current_win32_thread_state() {
+        if tasking::scheduler::current_execution_mode()
+            == Some(tasking::task::ExecutionMode::LegacyRing3)
+        {
+            unsafe { tasking::user_exec::enter_win32_user_mode(thread, 0) };
+        }
+    }
     let rsp = descriptor.stack_top & !15u64;
     let entry = descriptor.entry_point;
 
@@ -2673,16 +3868,157 @@ pub fn orchestrate_native_pe_lifecycle(data: &[u8]) -> Result<PeLaunchReport, Pe
     })
 }
 
+fn prepare_user_mapped_pe(data: &[u8]) -> Result<(PeProcessHandle, PeUserMappedImage), PeError> {
+    let mut image = load_pe(data)?;
+    let import_report = resolve_imports(&mut image)?;
+    let imported_modules = image
+        .imports
+        .iter()
+        .map(|import| import.dll_name.clone())
+        .collect::<Vec<_>>();
+    let owned_image: Arc<[u8]> = Arc::from(data.to_vec().into_boxed_slice());
+    let address_space = kernel_memory::create_address_space_owned(owned_image);
+    let user_base =
+        choose_user_image_base(&address_space, image.image_base, image.image_size as u64)
+            .ok_or(PeError::MemoryAllocation)?;
+
+    kernel_memory::set_active_address_space(Some(address_space.clone()));
+    let user_pml4 = kernel_memory::create_user_pml4().ok_or(PeError::MemoryAllocation)?;
+    let pml4_phys = user_pml4.start_address().as_u64();
+    let phys_offset = kernel_memory::active_physical_offset();
+    let pml4_virt = VirtAddr::new(phys_offset + pml4_phys);
+    let table = unsafe { &mut *(pml4_virt.as_mut_ptr()) };
+    let mut mapper = unsafe { OffsetPageTable::new(table, VirtAddr::new(phys_offset)) };
+    let frame_allocator =
+        unsafe { kernel_memory::global_memory_manager_mut().ok_or(PeError::MemoryAllocation)? };
+
+    let veneer_base = kernel_memory::allocate_user_mmap_in(&address_space, 4096)
+        .ok_or(PeError::MemoryAllocation)?;
+    let (veneer_blob, veneer_map) = build_user_abi_veneer_blob(&image.imports, veneer_base)?;
+    let mut loader = PE_LOADER.lock();
+    let (kernel_image_base, entry_point, header_size, image_size, sections) =
+        loader.load_into_user_buffer(data, user_base, &veneer_map)?;
+    drop(loader);
+
+    map_section_specs(
+        &mut mapper,
+        frame_allocator,
+        kernel_image_base,
+        user_base,
+        header_size,
+        image_size,
+        &sections,
+    )?;
+    let veneer_flags =
+        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+    let (veneer_kernel, veneer_len) = allocate_page_aligned_kernel_blob(&veneer_blob)?;
+    map_kernel_blob_into_user(
+        &mut mapper,
+        frame_allocator,
+        veneer_base,
+        veneer_kernel,
+        veneer_len,
+        veneer_flags & !PageTableFlags::NO_EXECUTE,
+    )?;
+    let _ = kernel_memory::register_shared_anon_region_in(
+        &address_space,
+        veneer_base,
+        veneer_len as u64,
+        PageTableFlags::USER_ACCESSIBLE,
+        None,
+    );
+
+    let (stack_base, stack_top) = register_user_stack_region(&address_space)?;
+    let pid = NEXT_PE_PROCESS_ID.fetch_add(1, Ordering::Relaxed);
+    let (initial_thread_handle, _) = win32_abi::register_thread_handle(pid, entry_point, 0);
+    let bootstrap_base = kernel_memory::allocate_user_mmap_in(&address_space, 4096)
+        .ok_or(PeError::MemoryAllocation)?;
+    let (bootstrap_blob, bootstrap, initial_thread) = build_process_bootstrap_blob(
+        pid,
+        user_base,
+        stack_top,
+        entry_point,
+        initial_thread_handle,
+        &image.exception_directory,
+        bootstrap_base,
+    );
+    let (bootstrap_kernel, bootstrap_len) = allocate_page_aligned_kernel_blob(&bootstrap_blob)?;
+    map_kernel_blob_into_user(
+        &mut mapper,
+        frame_allocator,
+        bootstrap_base,
+        bootstrap_kernel,
+        bootstrap_len,
+        PageTableFlags::PRESENT
+            | PageTableFlags::USER_ACCESSIBLE
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_EXECUTE,
+    )?;
+    let _ = kernel_memory::register_shared_anon_region_in(
+        &address_space,
+        bootstrap_base,
+        bootstrap_len as u64,
+        PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+        None,
+    );
+    kernel_memory::set_active_address_space(None);
+
+    let tls = init_tls_runtime(&image, data, user_base)?;
+    let descriptor = PeProcessDescriptor {
+        pid,
+        image_base: user_base,
+        entry_point,
+        stack_base,
+        stack_size: PE_USER_STACK_SIZE as u32,
+        stack_top,
+        tls,
+        imported_modules,
+        bound_imports: image.bound_imports.clone(),
+        import_report,
+        initial_thread_handle,
+        exception_directory: image.exception_directory.clone(),
+        bootstrap,
+    };
+    PE_PROCESS_TABLE.lock().insert(pid, descriptor);
+    PE_PROCESS_RUNTIME_TABLE.lock().insert(
+        pid,
+        PeProcessRuntimeState {
+            address_space: address_space.clone(),
+            page_table: user_pml4,
+        },
+    );
+    Ok((
+        PeProcessHandle { pid },
+        PeUserMappedImage {
+            address_space,
+            page_table: user_pml4,
+            image_base: user_base,
+            entry_point,
+            stack_base,
+            stack_top,
+            bootstrap,
+            initial_thread,
+        },
+    ))
+}
+
 pub fn spawn_process_task_from_payload(
     data: &[u8],
-    priority: crate::task::task::Priority,
+    priority: tasking::task::Priority,
     name: &'static str,
-) -> Result<(PeProcessHandle, crate::task::task::TaskId), PeError> {
-    let handle = spawn_process_from_payload(data)?;
-    let task = crate::task::task::Task::with_priority(pe_process_start_trampoline, priority, name);
+) -> Result<(PeProcessHandle, tasking::task::TaskId), PeError> {
+    let (handle, user_image) = prepare_user_mapped_pe(data)?;
+    let descriptor = process_descriptor(handle).ok_or(PeError::EntryNotFound)?;
+    let mut task = tasking::task::Task::with_priority(pe_process_start_trampoline, priority, name);
+    task.cold.mode = tasking::task::ExecutionMode::LegacyRing3;
+    task.cold.page_table = Some(user_image.page_table);
+    task.cold.address_space = Some(user_image.address_space.clone());
+    task.cold.user_entry = Some(user_image.entry_point);
+    task.cold.user_stack_top = Some(user_image.stack_top);
+    task.cold.win32 = Some(user_image.initial_thread);
     let task_id = task.id;
     PE_PENDING_LAUNCHES.lock().insert(task_id as u64, handle);
-    let _ = crate::task::scheduler::spawn_task(task);
+    let _ = tasking::scheduler::spawn_task(task);
     Ok((handle, task_id))
 }
 

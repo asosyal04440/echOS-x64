@@ -15,7 +15,8 @@ param(
     [switch]$NoAutoLogin,
     [switch]$Headless,
     [switch]$ForceVarsReset,
-    [switch]$SuspendResumeSmoke
+    [switch]$SuspendResumeSmoke,
+    [switch]$PackagedPeSmoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,6 +62,10 @@ function Send-MonitorCommand {
     } finally {
         $client.Dispose()
     }
+}
+
+if ($SuspendResumeSmoke -and $PackagedPeSmoke) {
+    throw "SuspendResumeSmoke ve PackagedPeSmoke ayni anda kosulmaz"
 }
 
 try { taskkill /IM qemu-system-x86_64.exe /F 2>$null | Out-Null } catch {}
@@ -178,6 +183,7 @@ if ($useIso) {
     $imagePath = Join-Path $artifactDir "echos_vm.raw"
     $manifestPath = Join-Path $artifactDir "echos_vm.json"
     $builderPath = Join-Path $projectRoot "scripts\build_vm_appliance.py"
+    $peSmokeBundlePath = $null
 
     $qemuShare = "C:\Program Files\qemu\share"
     $ovmfCode = Join-Path $qemuShare "edk2-x86_64-code.fd"
@@ -190,6 +196,28 @@ if ($useIso) {
         if ($LASTEXITCODE -ne 0) { throw "UEFI build failed" }
     }
     if (-not (Test-Path $efiPath)) { throw "EFI binary not found at $efiPath" }
+
+    if ($PackagedPeSmoke) {
+        if ($NoAutoLogin) {
+            throw "Packaged PE smoke auto-login gerektirir"
+        }
+        $peSmokeManifest = Join-Path $projectRoot "tools\\pe_smoke_windowed\\Cargo.toml"
+        $echsdkPath = Join-Path $projectRoot "target\\x86_64-pc-windows-msvc\\debug\\echsdk.exe"
+        $peSmokeRoot = Join-Path $projectRoot "tools\\pe_smoke_windowed"
+        $peSmokeBundlePath = Join-Path $artifactDir "pe_smoke_windowed.bhd"
+
+        Write-Host "Building packaged PE smoke sample..." -ForegroundColor Yellow
+        cargo build --quiet --release --target x86_64-pc-windows-msvc --manifest-path $peSmokeManifest
+        if ($LASTEXITCODE -ne 0) { throw "PE smoke sample build failed" }
+
+        Write-Host "Building echosdk host tool..." -ForegroundColor Yellow
+        cargo build --quiet --bin echsdk --target x86_64-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) { throw "echsdk host build failed" }
+        if (-not (Test-Path $echsdkPath)) { throw "echsdk host tool not found at $echsdkPath" }
+
+        & $echsdkPath sign $peSmokeRoot developer $peSmokeBundlePath
+        if ($LASTEXITCODE -ne 0) { throw "PE smoke bundle signing failed" }
+    }
 
     Write-Host "Building raw GPT appliance disk..." -ForegroundColor Yellow
     $builderArgs = @(
@@ -204,6 +232,9 @@ if ($useIso) {
     }
     if ($SuspendResumeSmoke) {
         $builderArgs += "--suspend-resume-smoke"
+    }
+    if ($PackagedPeSmoke) {
+        $builderArgs += @("--pe-smoke-bundle", $peSmokeBundlePath)
     }
     & $python.Source @builderArgs
     if ($LASTEXITCODE -ne 0) { throw "Appliance image build failed" }
@@ -300,6 +331,22 @@ if (-not $useIso) {
         if ($Headless -and -not $proc.HasExited) {
             try { $proc.Kill() } catch {}
         }
+    } elseif ($PackagedPeSmoke) {
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SMOKE] packaged-pe install ok" -TimeoutSec 120)) {
+            try { $proc.Kill() } catch {}
+            throw "Packaged PE smoke install marker not observed"
+        }
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SMOKE] packaged-pe launch ok" -TimeoutSec 120)) {
+            try { $proc.Kill() } catch {}
+            throw "Packaged PE smoke launch marker not observed"
+        }
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[WIN32] CreateWindowExA:" -TimeoutSec 120)) {
+            try { $proc.Kill() } catch {}
+            throw "Packaged PE smoke window marker not observed"
+        }
+        if ($Headless -and -not $proc.HasExited) {
+            try { $proc.Kill() } catch {}
+        }
     } elseif (-not $NoAutoLogin) {
         if (Wait-FileMarker -Path $serialLogPath -Marker "[BOOTCTRL] success" -TimeoutSec 90) {
             if ($Headless -and -not $proc.HasExited) {
@@ -329,6 +376,13 @@ if (-not $useIso) {
     }
     if ($SuspendResumeSmoke) {
         $requiredMarkers += "[SMOKE] suspend-resume ok"
+    }
+    if ($PackagedPeSmoke) {
+        $requiredMarkers += @(
+            "[SMOKE] packaged-pe install ok",
+            "[SMOKE] packaged-pe launch ok",
+            "[WIN32] CreateWindowExA:"
+        )
     }
 
     $serialContent = if (Test-Path $serialLogPath) { Get-Content $serialLogPath -Raw } else { "" }

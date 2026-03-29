@@ -1302,6 +1302,11 @@ pub extern "efiapi" fn efi_main(image: Handle, mut system_table: SystemTable<Boo
     }
     let seed_from_esp = read_boot_control_seed(&mut system_table, image);
     let seed_from_var = read_boot_control_variable_seed(&mut system_table);
+    if let Some(bundle) =
+        read_efi_boot_file(&mut system_table, image, cstr16!("EFI\\BOOT\\PESMOKE.BHD"))
+    {
+        ech_os::boot::appliance::seed_packaged_pe_smoke_bundle(bundle);
+    }
     let mut boot_control = ech_os::boot::appliance::merge_seed(seed_from_esp, seed_from_var);
     boot_control.begin_boot();
     sync_boot_control_seed(&mut system_table, image, &boot_control);
@@ -1390,10 +1395,11 @@ fn read_boot_control_variable_seed(
 }
 
 #[cfg(target_os = "uefi")]
-fn read_boot_control_seed(
+fn read_efi_boot_file(
     system_table: &mut SystemTable<Boot>,
     image: Handle,
-) -> Option<ech_os::boot::appliance::BootControlBlock> {
+    path: &CStr16,
+) -> Option<Vec<u8>> {
     let boot_services = system_table.boot_services();
     let loaded_image = boot_services
         .open_protocol_exclusive::<LoadedImage>(image)
@@ -1403,19 +1409,35 @@ fn read_boot_control_seed(
         .ok()?;
     let mut root = fs.open_volume().ok()?;
     let handle = root
-        .open(
-            cstr16!("EFI\\BOOT\\BOOTCTRL.BIN"),
-            FileMode::Read,
-            FileAttribute::empty(),
-        )
+        .open(path, FileMode::Read, FileAttribute::empty())
         .ok()?;
     let mut file = handle.into_regular_file()?;
-    let mut raw = [0u8; core::mem::size_of::<ech_os::boot::appliance::BootControlBlock>()];
-    let len = file.read(&mut raw).ok()?;
-    if len != raw.len() {
+    let info = file
+        .get_boxed_info::<uefi::proto::media::file::FileInfo>()
+        .ok()?;
+    let file_size = info.file_size() as usize;
+    if file_size == 0 {
         return None;
     }
-    let block = unsafe { *(raw.as_ptr() as *const ech_os::boot::appliance::BootControlBlock) };
+    let mut raw = vec![0u8; file_size];
+    let len = file.read(&mut raw).ok()?;
+    if len == 0 {
+        return None;
+    }
+    raw.truncate(len);
+    Some(raw)
+}
+
+#[cfg(target_os = "uefi")]
+fn read_boot_control_seed(
+    system_table: &mut SystemTable<Boot>,
+    image: Handle,
+) -> Option<ech_os::boot::appliance::BootControlBlock> {
+    let mut raw = read_efi_boot_file(system_table, image, cstr16!("EFI\\BOOT\\BOOTCTRL.BIN"))?;
+    if raw.len() != core::mem::size_of::<ech_os::boot::appliance::BootControlBlock>() {
+        return None;
+    }
+    let block = unsafe { *(raw.as_mut_ptr() as *const ech_os::boot::appliance::BootControlBlock) };
     block.validate().then_some(block)
 }
 

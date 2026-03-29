@@ -71,7 +71,13 @@ class FatNode:
         self.size = len(data)
 
 
-def build_fat16_image(total_bytes: int, hidden_sectors: int, efi_bytes: bytes, bootctrl_bytes: bytes) -> bytes:
+def build_fat16_image(
+    total_bytes: int,
+    hidden_sectors: int,
+    efi_bytes: bytes,
+    bootctrl_bytes: bytes,
+    pe_smoke_bundle: bytes | None,
+) -> bytes:
     total_sectors = total_bytes // SECTOR_SIZE
     sectors_per_cluster = 4
     reserved_sectors = 1
@@ -94,6 +100,8 @@ def build_fat16_image(total_bytes: int, hidden_sectors: int, efi_bytes: bytes, b
     boot = FatNode("BOOT", True)
     boot.children.append(FatNode("BOOTX64.EFI", False, efi_bytes))
     boot.children.append(FatNode("BOOTCTRL.BIN", False, bootctrl_bytes))
+    if pe_smoke_bundle:
+        boot.children.append(FatNode("PESMOKE.BHD", False, pe_smoke_bundle))
     boot.children.append(
         FatNode(
             "APPLINFO.TXT",
@@ -367,6 +375,7 @@ def main() -> None:
     parser.add_argument("--pending-slot", choices=SLOT_IDS.keys(), default="none")
     parser.add_argument("--auto-login", action="store_true")
     parser.add_argument("--suspend-resume-smoke", action="store_true")
+    parser.add_argument("--pe-smoke-bundle", type=Path)
     args = parser.parse_args()
 
     efi_bytes = args.efi.read_bytes()
@@ -379,6 +388,7 @@ def main() -> None:
             args.auto_login,
             args.suspend_resume_smoke,
         )
+    pe_smoke_bundle = args.pe_smoke_bundle.read_bytes() if args.pe_smoke_bundle else None
     disk_bytes = args.disk_mib * MiB
     layout = create_layout(disk_bytes)
     disk_sectors = disk_bytes // SECTOR_SIZE
@@ -389,7 +399,13 @@ def main() -> None:
 
     esp = next(part for part in layout if part["name"] == "esp")
     esp_bytes = (esp["last_lba"] - esp["first_lba"] + 1) * SECTOR_SIZE
-    esp_image = build_fat16_image(esp_bytes, esp["first_lba"], efi_bytes, bootctrl_bytes)
+    esp_image = build_fat16_image(
+        esp_bytes,
+        esp["first_lba"],
+        efi_bytes,
+        bootctrl_bytes,
+        pe_smoke_bundle,
+    )
     protective_mbr, primary_gpt, backup_gpt = build_partition_table(disk_sectors, layout)
 
     with args.output.open("r+b") as image:
@@ -409,6 +425,7 @@ def main() -> None:
             "pending_slot": args.pending_slot,
             "auto_login": args.auto_login,
             "suspend_resume_smoke": args.suspend_resume_smoke,
+            "pe_smoke_bundle": str(args.pe_smoke_bundle) if args.pe_smoke_bundle else None,
         },
         "partitions": [
             {

@@ -24,8 +24,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-use lazy_static::lazy_static;
 use crate::services::display_atomic::MailboxRing;
+use lazy_static::lazy_static;
 
 const STORE_COMMAND_QUEUE_CAPACITY: usize = 128;
 const STORE_RESPONSE_QUEUE_CAPACITY: usize = 128;

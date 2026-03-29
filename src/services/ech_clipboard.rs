@@ -10,7 +10,7 @@ use spin::Mutex;
 use crate::gui::protocol::{AppId, ClipboardPayload, DesktopPermission, PermissionState};
 use crate::ipc::request_shell_sync;
 use crate::services::display_atomic::MailboxRing;
-use crate::services::ech_shell::{ShellCommand, ShellResponse};
+use crate::services::ech_shell::{get_shell_service, ShellCommand, ShellResponse};
 
 const MAX_HISTORY_ITEMS: usize = 16;
 const CLIPBOARD_COMMAND_QUEUE_CAPACITY: usize = 128;
@@ -91,6 +91,9 @@ impl EchClipboard {
                 while history.len() > MAX_HISTORY_ITEMS {
                     history.pop_back();
                 }
+                let _ = get_shell_service().process_command(ShellCommand::SetClipboardHistoryLen {
+                    len: history.len() as u32,
+                });
                 ClipboardResponse::Ack
             }
             ClipboardCommand::GetCurrent { app_id } => {
@@ -125,6 +128,8 @@ impl EchClipboard {
                 }
                 *self.current.lock() = ClipboardPayload::Empty;
                 self.history.lock().clear();
+                let _ = get_shell_service()
+                    .process_command(ShellCommand::SetClipboardHistoryLen { len: 0 });
                 ClipboardResponse::Ack
             }
         }

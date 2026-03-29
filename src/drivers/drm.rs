@@ -720,6 +720,24 @@ impl DrmDevice {
             .collect()
     }
 
+    pub fn connected_connector_count(&self) -> usize {
+        self.connectors
+            .lock()
+            .iter()
+            .filter(|connector| connector.detect() == DrmConnectorStatus::Connected)
+            .count()
+    }
+
+    pub fn max_mode_refresh_hz(&self) -> u32 {
+        self.connectors
+            .lock()
+            .iter()
+            .filter(|connector| connector.detect() == DrmConnectorStatus::Connected)
+            .flat_map(|connector| connector.modes.lock().iter().map(|mode| mode.vrefresh).collect::<Vec<_>>())
+            .max()
+            .unwrap_or(60)
+    }
+
     pub fn max_overlay_planes(&self) -> usize {
         self.planes
             .lock()

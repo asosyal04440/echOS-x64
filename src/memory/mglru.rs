@@ -108,13 +108,7 @@ impl MglruState {
         }
     }
 
-    fn on_access(
-        &mut self,
-        key: MglruPageKey,
-        node_id: u16,
-        accessed_bit: bool,
-        now_tick: u64,
-    ) {
+    fn on_access(&mut self, key: MglruPageKey, node_id: u16, accessed_bit: bool, now_tick: u64) {
         let map_key = (key.space_id, key.page_index);
         if let Some(mut entry) = self.entries.get(&map_key).copied() {
             if accessed_bit {

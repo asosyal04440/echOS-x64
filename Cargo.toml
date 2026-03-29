@@ -14,6 +14,7 @@ members = [
     "sdk/echos-sdk-sys",
     "sdk/echos-sdk",
     "sdk/echos-rt",
+    "tools/arch_guard",
 ]
 
 

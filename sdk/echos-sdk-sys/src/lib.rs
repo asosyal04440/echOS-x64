@@ -20,10 +20,13 @@ pub const SYS_ECHOS_SERVICE_PARITY_STATUS: usize = 463;
 pub const SYS_ECHOS_SERVICE_REGION_MAP: usize = 464;
 pub const SYS_ECHOS_SERVICE_ENDPOINT_PUBLISH: usize = 465;
 pub const SYS_ECHOS_SERVICE_HEARTBEAT: usize = 466;
+pub const SYS_ECHOS_NOTIFICATION_SERVICE_RECV: usize = 467;
+pub const SYS_ECHOS_NOTIFICATION_SERVICE_RESPOND: usize = 468;
 
 pub const MAX_INLINE_TEXT: usize = 96;
 pub const MAX_SCENE_OPS: usize = 64;
 pub const MAX_POLLED_EVENTS: usize = 32;
+pub const MAX_SERVICE_NOTIFICATION_ITEMS: usize = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +205,79 @@ pub struct NativeServiceEndpointState {
     pub response_region_id: u64,
     pub response_generation: u64,
     pub heartbeat_epoch: u64,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeServiceNotificationCommandKind {
+    None = 0,
+    Push = 1,
+    List = 2,
+    MarkRead = 3,
+    Clear = 4,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeServiceNotificationResponseKind {
+    None = 0,
+    Ack = 1,
+    NotificationId = 2,
+    Notifications = 3,
+    Error = 4,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeServiceNotificationEntry {
+    pub id: u64,
+    pub app_id: u32,
+    pub level: u32,
+    pub read: u8,
+    pub reserved: [u8; 3],
+    pub timestamp_ticks: u64,
+    pub source_name_len: u16,
+    pub title_len: u16,
+    pub message_len: u16,
+    pub action_label_len: u16,
+    pub source_name: [u8; MAX_INLINE_TEXT],
+    pub title: [u8; MAX_INLINE_TEXT],
+    pub message: [u8; MAX_INLINE_TEXT],
+    pub action_label: [u8; MAX_INLINE_TEXT],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeServiceNotificationRequest {
+    pub abi_version: u32,
+    pub request_id: u64,
+    pub kind: u32,
+    pub app_id: u32,
+    pub include_read: u32,
+    pub max_items: u32,
+    pub notification_id: u64,
+    pub level: u32,
+    pub title_len: u16,
+    pub message_len: u16,
+    pub action_label_len: u16,
+    pub reserved: u16,
+    pub title: [u8; MAX_INLINE_TEXT],
+    pub message: [u8; MAX_INLINE_TEXT],
+    pub action_label: [u8; MAX_INLINE_TEXT],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeServiceNotificationResponse {
+    pub abi_version: u32,
+    pub request_id: u64,
+    pub kind: u32,
+    pub notification_id: u64,
+    pub entry_count: u32,
+    pub error_len: u16,
+    pub reserved: u16,
+    pub error: [u8; MAX_INLINE_TEXT],
+    pub entries: [NativeServiceNotificationEntry; MAX_SERVICE_NOTIFICATION_ITEMS],
 }
 
 #[inline]

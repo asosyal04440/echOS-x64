@@ -586,6 +586,258 @@ pub struct StageSet {
     pub pinned: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreDisposition {
+    NoRestore,
+    RestoreIfClean,
+    RestoreIfPinned,
+    ForceRestoreShellOwned,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapTemplate {
+    LeftHalf,
+    RightHalf,
+    TopHalf,
+    BottomHalf,
+    TopLeftQuarter,
+    TopRightQuarter,
+    BottomLeftQuarter,
+    BottomRightQuarter,
+    LeftThird,
+    CenterThird,
+    RightThird,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapGroup {
+    pub id: u64,
+    pub template: SnapTemplate,
+    pub monitor_id: u32,
+    pub window_ids: Vec<WindowId>,
+    pub restore: RestoreDisposition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StageSetPolicy {
+    pub active_stage_set: Option<u64>,
+    pub restore_on_login: bool,
+    pub follow_workspace: bool,
+}
+
+impl Default for StageSetPolicy {
+    fn default() -> Self {
+        Self {
+            active_stage_set: None,
+            restore_on_login: true,
+            follow_workspace: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellDensityProfile {
+    Comfort,
+    Balanced,
+    Compact,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotionProfile {
+    Calm,
+    Standard,
+    Expressive,
+    Reduced,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VrrPolicy {
+    Off,
+    On,
+    Auto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HdrPolicy {
+    Off,
+    On,
+    Auto,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowRule {
+    pub app_id: Option<AppId>,
+    pub title_contains: Option<String>,
+    pub workspace_id: Option<WorkspaceId>,
+    pub monitor_id: Option<u32>,
+    pub force_floating: bool,
+    pub pin: bool,
+    pub scratchpad: bool,
+    pub pseudotile: bool,
+    pub snap_template: Option<SnapTemplate>,
+    pub restore: RestoreDisposition,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayCapability {
+    pub connected_outputs: u8,
+    pub fractional_scaling: bool,
+    pub adaptive_sync: bool,
+    pub hdr_output: bool,
+    pub hdr_metadata: bool,
+    pub ten_bit_scanout: bool,
+    pub icc_profile: bool,
+    pub color_transform: bool,
+    pub mirror: bool,
+    pub rotation: bool,
+    pub multi_monitor: bool,
+    pub direct_scanout: bool,
+    pub max_refresh_hz: u32,
+    pub supported_scales_100x: Vec<u16>,
+    pub supported_modes: Vec<OutputMode>,
+}
+
+impl Default for DisplayCapability {
+    fn default() -> Self {
+        Self {
+            connected_outputs: 1,
+            fractional_scaling: true,
+            adaptive_sync: false,
+            hdr_output: false,
+            hdr_metadata: false,
+            ten_bit_scanout: false,
+            icc_profile: false,
+            color_transform: false,
+            mirror: false,
+            rotation: false,
+            multi_monitor: false,
+            direct_scanout: false,
+            max_refresh_hz: 60,
+            supported_scales_100x: alloc::vec![100, 125, 150, 175, 200],
+            supported_modes: alloc::vec![OutputMode::new(1920, 1080, 60)],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MonitorPolicy {
+    pub output_id: u32,
+    pub scale_100x: u16,
+    pub text_scale_100x: u16,
+    pub refresh_hz: u32,
+    pub vrr_policy: VrrPolicy,
+    pub hdr_policy: HdrPolicy,
+    pub transform: SurfaceTransform,
+    pub mirror_target: Option<u32>,
+    pub workspace_binding: Option<WorkspaceId>,
+    pub color_profile: String,
+}
+
+impl MonitorPolicy {
+    pub fn single_output(output_mode: OutputMode) -> Self {
+        Self {
+            output_id: 0,
+            scale_100x: 100,
+            text_scale_100x: 100,
+            refresh_hz: output_mode.refresh_hz,
+            vrr_policy: VrrPolicy::Auto,
+            hdr_policy: HdrPolicy::Off,
+            transform: SurfaceTransform::Identity,
+            mirror_target: None,
+            workspace_binding: Some(0),
+            color_profile: String::from("srgb"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayProfile {
+    pub primary_output: u32,
+    pub outputs: Vec<MonitorPolicy>,
+    pub capability: DisplayCapability,
+}
+
+impl DisplayProfile {
+    pub fn single_output(output_mode: OutputMode) -> Self {
+        Self {
+            primary_output: 0,
+            outputs: alloc::vec![MonitorPolicy::single_output(output_mode)],
+            capability: DisplayCapability {
+                max_refresh_hz: output_mode.refresh_hz,
+                supported_modes: alloc::vec![output_mode],
+                ..DisplayCapability::default()
+            },
+        }
+    }
+}
+
+impl Default for DisplayProfile {
+    fn default() -> Self {
+        Self::single_output(OutputMode::new(1920, 1080, 60))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessibilityProfile {
+    pub screen_reader: bool,
+    pub magnifier: bool,
+    pub contrast_theme: bool,
+    pub color_filter: bool,
+    pub reduced_motion: bool,
+    pub sticky_keys: bool,
+    pub slow_keys: bool,
+    pub cursor_scale_100x: u16,
+    pub text_scale_100x: u16,
+    pub captions_enabled: bool,
+    pub voice_access_mode: bool,
+}
+
+impl Default for AccessibilityProfile {
+    fn default() -> Self {
+        Self {
+            screen_reader: false,
+            magnifier: false,
+            contrast_theme: false,
+            color_filter: false,
+            reduced_motion: false,
+            sticky_keys: false,
+            slow_keys: false,
+            cursor_scale_100x: 100,
+            text_scale_100x: 100,
+            captions_enabled: false,
+            voice_access_mode: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessibilityEventKind {
+    FocusChanged,
+    WindowOpened,
+    WindowClosed,
+    DialogOpened,
+    SelectionChanged,
+    NotificationPosted,
+    ValueChanged,
+    LiveRegionChanged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccessibilityEvent {
+    pub app_id: AppId,
+    pub window_id: Option<WindowId>,
+    pub node_id: Option<u64>,
+    pub kind: AccessibilityEventKind,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptionEvent {
+    pub app_id: AppId,
+    pub source_label: String,
+    pub text: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DesktopPermission {
     ClipboardRead,
@@ -723,6 +975,13 @@ pub struct SessionSnapshot {
     pub boot_clean_desktop: bool,
     pub output_scale: u32,
     pub text_scale: u32,
+    pub clipboard_history_len: u32,
+    pub accessibility_profile: AccessibilityProfile,
+    pub display_profile: DisplayProfile,
+    pub shell_density: ShellDensityProfile,
+    pub motion_profile: MotionProfile,
+    pub restore_state: RestoreDisposition,
+    pub stage_set_policy: StageSetPolicy,
     pub locale: String,
     pub theme_variant: String,
     pub shell_state: ShellState,

@@ -11,8 +11,10 @@
 //!
 //!
 
-use crate::net::socket::{self, AddressFamily, Protocol, SocketType};
-use crate::net::{Ipv4Addr, NetError, Port, SocketAddr};
+use super::kernel::tasking;
+use super::net::socket::{self, AddressFamily, Protocol, SocketType};
+use super::net::{self, Ipv4Addr, NetError, Port, SocketAddr};
+use super::{fs, pe_loader, security, win32};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
@@ -88,7 +90,7 @@ const WSAENOTCONN: u32 = 10057;
 const WSA_OPERATION_ABORTED: u32 = 995;
 
 static LAST_WSA_ERROR: AtomicU32 = AtomicU32::new(0);
-static UNWIND_LOOKUP_CACHE: Mutex<BTreeMap<u64, Box<[crate::pe_loader::PeRuntimeFunction]>>> =
+static UNWIND_LOOKUP_CACHE: Mutex<BTreeMap<u64, Box<[pe_loader::PeRuntimeFunction]>>> =
     Mutex::new(BTreeMap::new());
 
 const UNW_FLAG_EHANDLER: u8 = 0x1;
@@ -542,7 +544,7 @@ fn close_handle(handle: u64) -> bool {
     let object = HANDLE_TABLE.lock().remove(&handle);
     match object {
         Some(HandleObject::IoRing(state)) => {
-            let _ = crate::net::io_uring::io_uring_close(state.ring_fd);
+            let _ = net::io_uring::io_uring_close(state.ring_fd);
             true
         }
         Some(_) => true,
@@ -623,7 +625,7 @@ pub fn mark_thread_handle_terminated_with_exit(handle: u64, exit_code: u32) -> b
     thread.exit_code = exit_code;
     thread.signal_epoch.fetch_add(1, Ordering::AcqRel);
     let epoch_addr = thread.signal_epoch.as_ref() as *const AtomicU32 as u64;
-    crate::task::wake_by_address_all(epoch_addr);
+    tasking::wake_by_address_all(epoch_addr);
     true
 }
 
@@ -676,7 +678,7 @@ pub fn mark_process_terminated_with_exit(handle: u64, exit_code: u32) -> bool {
     };
     let _ = mark_thread_handle_terminated_with_exit(thread_handle, exit_code);
     let epoch_addr = epoch.as_ref() as *const AtomicU32 as u64;
-    crate::task::wake_by_address_all(epoch_addr);
+    tasking::wake_by_address_all(epoch_addr);
     true
 }
 
@@ -707,11 +709,11 @@ fn normalize_nt_path(path: &str) -> String {
 }
 
 fn load_file_bytes(path: &str) -> Result<Vec<u8>, NtStatus> {
-    crate::fs::vfs_unified::read_file(path).map_err(|_| NtStatus::NoSuchFile)
+    fs::vfs_unified::read_file(path).map_err(|_| NtStatus::NoSuchFile)
 }
 
 fn current_ticks() -> u64 {
-    crate::task::scheduler::get_ticks() as u64
+    tasking::scheduler::get_ticks() as u64
 }
 
 fn current_signaled_state(object: &HandleObject) -> bool {
@@ -783,7 +785,7 @@ fn wait_for_single_object(handle: u64, alertable: bool, timeout: *const i64) -> 
             return NtStatus::Timeout;
         };
         let observed = wait_epoch.load(Ordering::Acquire);
-        let woke = crate::task::wait_on_address(
+        let woke = tasking::wait_on_address(
             wait_epoch.as_ref() as *const AtomicU32 as u64,
             &observed as *const u32 as *const u8,
             core::mem::size_of::<u32>(),
@@ -819,9 +821,9 @@ pub fn set_waitable_event(handle: u64) -> NtStatus {
 
     let epoch_addr = epoch.as_ref() as *const AtomicU32 as u64;
     if wake_all {
-        crate::task::wake_by_address_all(epoch_addr);
+        tasking::wake_by_address_all(epoch_addr);
     } else {
-        crate::task::wake_by_address_single(epoch_addr);
+        tasking::wake_by_address_single(epoch_addr);
     }
     NtStatus::Success
 }
@@ -841,15 +843,15 @@ pub unsafe fn wait_on_address(
     size: usize,
     timeout_ms: u32,
 ) -> bool {
-    crate::task::wait_on_address(address as u64, compare_address, size, timeout_ms)
+    tasking::wait_on_address(address as u64, compare_address, size, timeout_ms)
 }
 
 pub unsafe fn wake_by_address_single(address: *const u8) {
-    let _ = crate::task::wake_by_address_single(address as u64);
+    let _ = tasking::wake_by_address_single(address as u64);
 }
 
 pub unsafe fn wake_by_address_all(address: *const u8) {
-    let _ = crate::task::wake_by_address_all(address as u64);
+    let _ = tasking::wake_by_address_all(address as u64);
 }
 
 pub fn create_io_ring(
@@ -860,7 +862,7 @@ pub fn create_io_ring(
 ) -> Result<u64, NtStatus> {
     let _ = version;
     let entries = submission_queue_size.max(completion_queue_size).max(1);
-    let ring_fd = crate::net::io_uring::io_uring_setup(entries, None)
+    let ring_fd = net::io_uring::io_uring_setup(entries, None)
         .map_err(|_| NtStatus::UnsatisfiedRequirement)?;
     Ok(allocate_handle(HandleObject::IoRing(IoRingHandleState {
         ring_fd,
@@ -1127,14 +1129,9 @@ pub fn submit_io_ring(handle: u64, to_submit: u32, min_complete: u32, flags: u32
     let remaining_submit = to_submit.saturating_sub(processed as u32);
     let remaining_complete = min_complete.saturating_sub(processed as u32);
     let status = if remaining_submit != 0 || remaining_complete != 0 {
-        crate::net::io_uring::io_uring_enter(
-            state.ring_fd,
-            remaining_submit,
-            remaining_complete,
-            flags,
-        )
-        .map(|_| NtStatus::Success)
-        .unwrap_or(NtStatus::UnsatisfiedRequirement)
+        net::io_uring::io_uring_enter(state.ring_fd, remaining_submit, remaining_complete, flags)
+            .map(|_| NtStatus::Success)
+            .unwrap_or(NtStatus::UnsatisfiedRequirement)
     } else {
         NtStatus::Success
     };
@@ -1158,7 +1155,7 @@ pub unsafe fn pop_io_ring_completion(handle: u64, completion: *mut IoRingComplet
         return NtStatus::Success;
     }
 
-    if let Some(cqe) = crate::net::io_uring::get_cqe(state.ring_fd) {
+    if let Some(cqe) = net::io_uring::get_cqe(state.ring_fd) {
         *completion = IoRingCompletion {
             user_data: cqe.user_data,
             result_code: cqe.res,
@@ -1182,8 +1179,8 @@ pub fn resolve_module_dispatch(module: &str, name: &str) -> Option<u64> {
         "ntdll" => resolve_ntdll_symbol(name),
         "ws2_32" | "wsock32" => resolve_ws2_32_symbol(name),
         "kernel32" | "user32" | "gdi32" | "advapi32" | "shell32" | "msvcrt" => {
-            let addr = crate::win32::get_fn_address(module, name);
-            if addr == 0 || addr == crate::win32::stub_api as *const () as usize as u64 {
+            let addr = win32::get_fn_address(module, name);
+            if addr == 0 || addr == win32::stub_api as *const () as usize as u64 {
                 None
             } else {
                 Some(addr)
@@ -1466,7 +1463,7 @@ pub unsafe fn nt_create_process(
     if process_handle.is_null() {
         return NtStatus::InvalidHandle;
     }
-    if debug_port != 0 && !crate::security::anti_cheat::enforce_debug_attach("nt-create-process") {
+    if debug_port != 0 && !security::anti_cheat::enforce_debug_attach("nt-create-process") {
         return NtStatus::AccessDenied;
     }
 
@@ -1480,7 +1477,7 @@ pub unsafe fn nt_create_process(
         Ok(bytes) => bytes,
         Err(err) => return err,
     };
-    let launch = match crate::pe_loader::orchestrate_native_pe_lifecycle(&payload) {
+    let launch = match pe_loader::orchestrate_native_pe_lifecycle(&payload) {
         Ok(report) => report,
         Err(_) => return NtStatus::NoSuchFile,
     };
@@ -1497,7 +1494,7 @@ pub unsafe fn nt_create_process(
         task_id: None,
         signal_epoch: Arc::new(AtomicU32::new(0)),
     }));
-    let _ = crate::pe_loader::set_initial_thread_handle(launch.handle, thread_handle);
+    let _ = pe_loader::set_initial_thread_handle(launch.handle, thread_handle);
 
     let process_state = ProcessHandleState {
         pid: launch.handle.pid,
@@ -1533,6 +1530,12 @@ pub fn resolve_ntdll_symbol(name: &str) -> Option<u64> {
         "NtSetEvent" => ntdll_nt_set_event as *const () as usize as u64,
         "NtResetEvent" => ntdll_nt_reset_event as *const () as usize as u64,
         "NtClose" => ntdll_nt_close as *const () as usize as u64,
+        "NtCurrentTeb" => ntdll_nt_current_teb as *const () as usize as u64,
+        "RtlGetCurrentPeb" => ntdll_rtl_get_current_peb as *const () as usize as u64,
+        "RtlDispatchException" => ntdll_rtl_dispatch_exception as *const () as usize as u64,
+        "KiUserExceptionDispatcher" => {
+            ntdll_ki_user_exception_dispatcher as *const () as usize as u64
+        }
         "RtlLookupFunctionEntry" => ntdll_rtl_lookup_function_entry as *const () as usize as u64,
         "RtlVirtualUnwind" => ntdll_rtl_virtual_unwind as *const () as usize as u64,
         _ => return None,
@@ -1541,13 +1544,40 @@ pub fn resolve_ntdll_symbol(name: &str) -> Option<u64> {
 }
 
 fn unwind_cache_key() -> u64 {
-    crate::task::scheduler::current_task_id() as u64
+    #[cfg(test)]
+    {
+        return 0;
+    }
+    tasking::scheduler::current_task_id() as u64
+}
+
+#[cfg(test)]
+static TEST_UNWIND_IMAGE_BASE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+fn seed_test_unwind_cache(image_base: u64, entries: &[pe_loader::PeRuntimeFunction]) {
+    TEST_UNWIND_IMAGE_BASE.store(image_base, Ordering::Release);
+    UNWIND_LOOKUP_CACHE
+        .lock()
+        .insert(unwind_cache_key(), entries.to_vec().into_boxed_slice());
+}
+
+pub unsafe extern "system" fn ntdll_nt_current_teb() -> *mut pe_loader::Win32Teb {
+    pe_loader::current_teb()
+        .map(|teb| teb as *mut pe_loader::Win32Teb)
+        .unwrap_or(core::ptr::null_mut())
+}
+
+pub unsafe extern "system" fn ntdll_rtl_get_current_peb() -> *mut pe_loader::Win32Peb {
+    pe_loader::current_peb()
+        .map(|peb| peb as *mut pe_loader::Win32Peb)
+        .unwrap_or(core::ptr::null_mut())
 }
 
 fn lookup_runtime_function_index(
     control_pc: u64,
     image_base: u64,
-    entries: &[crate::pe_loader::PeRuntimeFunction],
+    entries: &[pe_loader::PeRuntimeFunction],
 ) -> Option<usize> {
     let relative = control_pc.checked_sub(image_base)? as u32;
     entries
@@ -1558,10 +1588,33 @@ fn lookup_runtime_function_index(
 fn current_runtime_function_pointer(
     control_pc: u64,
     image_base: *mut u64,
-) -> Option<*const crate::pe_loader::PeRuntimeFunction> {
-    let pid = crate::pe_loader::current_process_pid()?;
-    let descriptor =
-        crate::pe_loader::process_descriptor(crate::pe_loader::PeProcessHandle { pid })?;
+) -> Option<*const pe_loader::PeRuntimeFunction> {
+    #[cfg(test)]
+    {
+        let cached_image_base = TEST_UNWIND_IMAGE_BASE.load(Ordering::Acquire);
+        let cached_entries = UNWIND_LOOKUP_CACHE
+            .lock()
+            .get(&unwind_cache_key())
+            .map(|entries| entries.to_vec());
+        if let Some(entries) = cached_entries {
+            if cached_image_base != 0 {
+                if !image_base.is_null() {
+                    unsafe {
+                        *image_base = cached_image_base;
+                    }
+                }
+                let index = lookup_runtime_function_index(control_pc, cached_image_base, &entries)?;
+                let boxed = entries.into_boxed_slice();
+                let ptr = boxed.as_ptr().wrapping_add(index);
+                UNWIND_LOOKUP_CACHE.lock().insert(unwind_cache_key(), boxed);
+                return Some(ptr);
+            }
+            return None;
+        }
+    }
+
+    let pid = pe_loader::current_process_pid()?;
+    let descriptor = pe_loader::process_descriptor(pe_loader::PeProcessHandle { pid })?;
     if !image_base.is_null() {
         unsafe {
             *image_base = descriptor.image_base;
@@ -1624,7 +1677,7 @@ unsafe fn read_m128a(address: u64) -> M128A {
 
 unsafe fn unwind_info_header<'a>(
     image_base: u64,
-    entry: &crate::pe_loader::PeRuntimeFunction,
+    entry: &pe_loader::PeRuntimeFunction,
 ) -> Option<&'a UnwindInfoHeader> {
     let address =
         image_base.checked_add(entry.unwind_info_address as u64)? as *const UnwindInfoHeader;
@@ -1939,7 +1992,7 @@ pub unsafe extern "system" fn ntdll_rtl_lookup_function_entry(
     control_pc: u64,
     image_base: *mut u64,
     history_table: *mut u8,
-) -> *const crate::pe_loader::PeRuntimeFunction {
+) -> *const pe_loader::PeRuntimeFunction {
     let _ = history_table;
     current_runtime_function_pointer(control_pc, image_base).unwrap_or(core::ptr::null())
 }
@@ -1948,7 +2001,7 @@ pub unsafe extern "system" fn ntdll_rtl_virtual_unwind(
     handler_type: u32,
     image_base: u64,
     control_pc: u64,
-    function_entry: *const crate::pe_loader::PeRuntimeFunction,
+    function_entry: *const pe_loader::PeRuntimeFunction,
     context_record: *mut ContextRecord,
     handler_data: *mut *mut u8,
     establisher_frame: *mut u64,
@@ -1993,7 +2046,7 @@ pub unsafe extern "system" fn ntdll_rtl_virtual_unwind(
     };
     let mut exception_handler = core::ptr::null_mut();
     if (header.version_flags >> 3) & UNW_FLAG_CHAININFO != 0 {
-        let chain_ptr = unwind_payload_ptr(header) as *const crate::pe_loader::PeRuntimeFunction;
+        let chain_ptr = unwind_payload_ptr(header) as *const pe_loader::PeRuntimeFunction;
         entry = &*chain_ptr;
         if let Some(chained_header) = unwind_info_header(resolved_image_base, entry) {
             header = chained_header;
@@ -2023,6 +2076,69 @@ pub unsafe extern "system" fn ntdll_rtl_virtual_unwind(
     }
     publish_unwind_transition(context, previous_rip, previous_rsp);
     exception_handler
+}
+
+pub unsafe extern "system" fn ntdll_rtl_dispatch_exception(
+    exception_record: *const win32::EXCEPTION_RECORD,
+    context_record: *mut ContextRecord,
+) -> u8 {
+    if exception_record.is_null() || context_record.is_null() {
+        return 0;
+    }
+    let _record = &*exception_record;
+    let context = &mut *context_record;
+    let mut depth = 0u32;
+    loop {
+        if context.rip == 0 || context.rsp == 0 {
+            return 0;
+        }
+        let previous_rip = context.rip;
+        let previous_rsp = context.rsp;
+        let mut image_base = 0u64;
+        let function =
+            ntdll_rtl_lookup_function_entry(context.rip, &mut image_base, core::ptr::null_mut());
+        if function.is_null() {
+            return 0;
+        }
+        let mut handler_data = core::ptr::null_mut();
+        let mut establisher = 0u64;
+        let handler = ntdll_rtl_virtual_unwind(
+            0,
+            image_base,
+            context.rip,
+            function,
+            context,
+            &mut handler_data,
+            &mut establisher,
+            core::ptr::null_mut(),
+        );
+        if !handler.is_null() {
+            return 1;
+        }
+        if context.rip == 0
+            || context.rsp == 0
+            || (context.rip == previous_rip && context.rsp == previous_rsp)
+        {
+            return 0;
+        }
+        depth = depth.saturating_add(1);
+        if depth >= 64 {
+            return 0;
+        }
+    }
+}
+
+pub unsafe extern "system" fn ntdll_ki_user_exception_dispatcher(
+    exception_record: *mut win32::EXCEPTION_RECORD,
+    context_record: *mut ContextRecord,
+) -> ! {
+    let exit_code = if exception_record.is_null() {
+        0xC000_0005u32
+    } else {
+        (*exception_record).ExceptionCode
+    };
+    let _ = ntdll_rtl_dispatch_exception(exception_record.cast_const(), context_record);
+    tasking::scheduler::exit(exit_code as i32)
 }
 
 // ============================================================================
@@ -2751,12 +2867,12 @@ mod tests {
     #[test]
     fn runtime_function_lookup_matches_control_pc_range() {
         let entries = [
-            crate::pe_loader::PeRuntimeFunction {
+            pe_loader::PeRuntimeFunction {
                 begin_address: 0x1000,
                 end_address: 0x1200,
                 unwind_info_address: 0x2000,
             },
-            crate::pe_loader::PeRuntimeFunction {
+            pe_loader::PeRuntimeFunction {
                 begin_address: 0x1200,
                 end_address: 0x1500,
                 unwind_info_address: 0x2100,
@@ -2817,7 +2933,7 @@ mod tests {
         image[0x44..0x48].copy_from_slice(&handler_rva.to_le_bytes());
         image[0x48..0x4C].copy_from_slice(&handler_data);
 
-        let entry = crate::pe_loader::PeRuntimeFunction {
+        let entry = pe_loader::PeRuntimeFunction {
             begin_address: 0x1000,
             end_address: 0x1100,
             unwind_info_address: 0x40,
@@ -2864,7 +2980,7 @@ mod tests {
         image[0x24] = 0;
         image[0x25] = UWOP_PUSH_MACHFRAME;
 
-        let entry = crate::pe_loader::PeRuntimeFunction {
+        let entry = pe_loader::PeRuntimeFunction {
             begin_address: 0x1000,
             end_address: 0x1100,
             unwind_info_address: 0x20,
@@ -2920,7 +3036,7 @@ mod tests {
         image[0x2C] = 0x00;
         image[0x2D] = 0x00;
 
-        let entry = crate::pe_loader::PeRuntimeFunction {
+        let entry = pe_loader::PeRuntimeFunction {
             begin_address: 0x1000,
             end_address: 0x1100,
             unwind_info_address: 0x20,
@@ -3012,7 +3128,7 @@ mod tests {
         image[0x2A] = 0x02;
         image[0x2B] = 0x00;
 
-        let entry = crate::pe_loader::PeRuntimeFunction {
+        let entry = pe_loader::PeRuntimeFunction {
             begin_address: 0x1000,
             end_address: 0x1100,
             unwind_info_address: 0x20,
@@ -3057,5 +3173,62 @@ mod tests {
             pointers.floating_context[1],
             frame.as_ptr().wrapping_add(0x20) as *mut M128A
         );
+    }
+
+    #[test]
+    fn rtl_dispatch_exception_reports_handler_visibility() {
+        let mut image = [0u8; 0x200];
+        let image_base = image.as_mut_ptr() as u64;
+        let handler_rva = 0x180u32;
+        image[0x40] = 1 | (UNW_FLAG_EHANDLER << 3);
+        image[0x41] = 0;
+        image[0x42] = 0;
+        image[0x43] = 0;
+        image[0x44..0x48].copy_from_slice(&handler_rva.to_le_bytes());
+        let entry = pe_loader::PeRuntimeFunction {
+            begin_address: 0x1000,
+            end_address: 0x1100,
+            unwind_info_address: 0x40,
+        };
+        let mut stack = [0xFACE_CAFE_DEAD_BEEFu64, 0];
+        let mut context = ContextRecord {
+            rsp: stack.as_mut_ptr() as u64,
+            rip: image_base + 0x1000,
+            ..Default::default()
+        };
+        let record = win32::EXCEPTION_RECORD {
+            ExceptionCode: 0xC000_0005,
+            ExceptionFlags: 0,
+            ExceptionRecord: core::ptr::null_mut(),
+            ExceptionAddress: context.rip as *mut _,
+            NumberParameters: 0,
+            ExceptionInformation: [0; 15],
+        };
+        seed_test_unwind_cache(image_base, &[entry]);
+        let dispatched =
+            unsafe { ntdll_rtl_dispatch_exception(&record, &mut context as *mut ContextRecord) };
+        assert_eq!(dispatched, 1);
+        assert_eq!(context.rip, stack[0]);
+        assert_eq!(context.rsp, stack.as_ptr() as u64 + 8);
+    }
+
+    #[test]
+    fn rtl_dispatch_exception_fails_closed_when_unwind_makes_no_progress() {
+        let mut context = ContextRecord {
+            rsp: 0,
+            rip: 0,
+            ..Default::default()
+        };
+        let record = win32::EXCEPTION_RECORD {
+            ExceptionCode: 0xC000_0005,
+            ExceptionFlags: 0,
+            ExceptionRecord: core::ptr::null_mut(),
+            ExceptionAddress: core::ptr::null_mut(),
+            NumberParameters: 0,
+            ExceptionInformation: [0; 15],
+        };
+        let dispatched =
+            unsafe { ntdll_rtl_dispatch_exception(&record, &mut context as *mut ContextRecord) };
+        assert_eq!(dispatched, 0);
     }
 }

@@ -1,0 +1,296 @@
+current_wave = 7
+ratchet_facade_prefixes = [
+    "crate::runtime_layer::runtime_api",
+    "crate::runtime_layer::bootstrap_api",
+    "crate::runtime_layer::service_api",
+]
+
+[[namespaces]]
+name = "kernel"
+root = "src/kernel"
+
+[[namespaces]]
+name = "subsystems"
+root = "src/subsystems"
+
+[[namespaces]]
+name = "runtime_layer"
+root = "src/runtime_layer"
+
+[[namespaces]]
+name = "compat"
+root = "src/compat"
+
+[[namespaces]]
+name = "product"
+root = "src/product"
+
+[[managed_files]]
+namespace = "kernel"
+path = "src/task/user.rs"
+forbid_legacy_prefixes = [
+    "crate::memory",
+    "crate::task",
+    "crate::cpu",
+    "crate::gdt",
+    "crate::interrupts",
+    "crate::syscall",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/runtime.rs"
+forbid_legacy_prefixes = [
+    "crate::memory",
+    "crate::task",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/ipc/service_ipc.rs"
+forbid_legacy_prefixes = [
+    "crate::memory",
+    "crate::task",
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/ipc/service_ipc/compat.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/ipc/service_ipc/runtime_bridge.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/ipc/service_ipc/api.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/ipc/service_ipc/endpoints.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/ipc/service_ipc/handles.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/ipc/service_ipc/transport.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/runtime_layer/runtime_api.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/runtime_layer/bootstrap_api.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/runtime_layer/runtime_model.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/runtime_layer/runtime_registry.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/runtime_layer/runtime_state.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/runtime_layer/runtime_spawn.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/runtime_layer/service_control.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "compat"
+path = "src/win32_abi.rs"
+forbid_legacy_prefixes = [
+    "crate::task",
+]
+
+[[managed_files]]
+namespace = "compat"
+path = "src/pe_loader.rs"
+forbid_legacy_prefixes = [
+    "crate::memory",
+    "crate::task",
+]
+
+[[managed_files]]
+namespace = "runtime_layer"
+path = "src/services/mod.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "product"
+path = "src/gui/client.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "product"
+path = "src/gfx/velvet_glove.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "product"
+path = "src/gfx/velvet_glove/launch.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "compat"
+path = "src/posix.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "compat"
+path = "src/posix/service_bridge.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "compat"
+path = "src/posix/native_scene_bridge.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "compat"
+path = "src/posix/process_bridge.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "compat"
+path = "src/posix/windows_runtime.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "compat"
+path = "src/posix/windows_image.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[managed_files]]
+namespace = "compat"
+path = "src/ironshim_app.rs"
+forbid_legacy_prefixes = [
+    "crate::runtime::",
+]
+
+[[forbidden_edges]]
+from = "kernel"
+to = "product"
+
+[[forbidden_edges]]
+from = "kernel"
+to = "compat"
+
+[[forbidden_edges]]
+from = "subsystems"
+to = "product"
+
+[[forbidden_edges]]
+from = "product"
+to = "kernel"
+
+[[surface_rules]]
+from = "product"
+to = "runtime_layer"
+allow = [
+    "capture_client_contract",
+    "clipboard_client_contract",
+    "dialog_client_contract",
+    "display_client_contract",
+    "input_client_contract",
+    "launch_contract",
+    "notification_client_contract",
+    "package_registry_contract",
+    "shell_client_contract",
+    "store_client_contract",
+    "window_session_contract",
+    "service_parity_contract",
+]
+
+[[surface_rules]]
+from = "compat"
+to = "runtime_layer"
+allow = [
+    "launch_contract",
+    "process_broker_contract",
+    "native_scene_contract",
+    "capability_contract",
+    "display_client_contract",
+    "input_client_contract",
+    "shell_client_contract",
+    "notification_client_contract",
+    "clipboard_client_contract",
+    "service_endpoint_contract",
+    "service_parity_contract",
+]
+
+[[surface_rules]]
+from = "subsystems"
+to = "runtime_layer"
+allow = ["service_api"]
+
+

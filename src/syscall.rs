@@ -233,6 +233,10 @@ pub extern "sysv64" fn syscall_dispatcher(
     a5: u64,
     a6: u64,
 ) -> i64 {
+    if num >= crate::win32::WIN32_USER_ABI_SYSCALL_BASE {
+        let service_id = (num - crate::win32::WIN32_USER_ABI_SYSCALL_BASE) as u32;
+        return crate::win32::dispatch_user_abi(service_id, [a1, a2, a3, a4]);
+    }
     let ret = crate::posix::dispatch(
         num as usize,
         [

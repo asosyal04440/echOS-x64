@@ -9,10 +9,14 @@ use echos_sdk_sys::{
     syscall1, syscall2, NativeClipboardGetTextResponse, NativeClipboardSetTextRequest,
     NativeEventKind, NativeInputEvent, NativeNotificationRequest, NativeSceneOp,
     NativeSceneSubmitRequest, NativeServiceBootstrap, NativeServiceEndpointPublishRequest,
-    NativeServiceEndpointState, NativeServiceParityStatus, NativeServiceRegionMapping,
-    NativeServiceStatus, NativeWindowCreateRequest, NativeWindowHandle, EACCES, EFBIG, EINVAL,
-    ENOSYS, MAX_INLINE_TEXT, MAX_POLLED_EVENTS, SYS_ECHOS_CLIPBOARD_GET_TEXT,
+    NativeServiceEndpointState, NativeServiceNotificationCommandKind,
+    NativeServiceNotificationEntry, NativeServiceNotificationRequest,
+    NativeServiceNotificationResponse, NativeServiceNotificationResponseKind,
+    NativeServiceParityStatus, NativeServiceRegionMapping, NativeServiceStatus,
+    NativeWindowCreateRequest, NativeWindowHandle, EACCES, EFBIG, EINVAL, ENOSYS, MAX_INLINE_TEXT,
+    MAX_POLLED_EVENTS, MAX_SERVICE_NOTIFICATION_ITEMS, SYS_ECHOS_CLIPBOARD_GET_TEXT,
     SYS_ECHOS_CLIPBOARD_SET_TEXT, SYS_ECHOS_EVENT_POLL, SYS_ECHOS_NOTIFICATION_POST,
+    SYS_ECHOS_NOTIFICATION_SERVICE_RECV, SYS_ECHOS_NOTIFICATION_SERVICE_RESPOND,
     SYS_ECHOS_SCENE_COMMIT, SYS_ECHOS_SERVICE_BOOTSTRAP_CLAIM, SYS_ECHOS_SERVICE_ENDPOINT_PUBLISH,
     SYS_ECHOS_SERVICE_HEARTBEAT, SYS_ECHOS_SERVICE_PARITY_STATUS, SYS_ECHOS_SERVICE_REGION_MAP,
     SYS_ECHOS_SERVICE_STATUS, SYS_ECHOS_WIN_CREATE, SYS_ECHOS_WIN_DESTROY,
@@ -246,6 +250,63 @@ pub trait ServiceApplication {
     fn tick(&mut self, _ctx: &mut ServiceContext) -> Result<(), Error> {
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServiceNotificationCommand {
+    Push {
+        app_id: u32,
+        title: String,
+        message: String,
+        level: NotificationLevel,
+        action_label: Option<String>,
+    },
+    List {
+        app_id: u32,
+        include_read: bool,
+        max_items: usize,
+    },
+    MarkRead {
+        app_id: u32,
+        id: u64,
+    },
+    Clear {
+        app_id: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceNotificationEntry {
+    pub id: u64,
+    pub app_id: u32,
+    pub source_name: String,
+    pub title: String,
+    pub message: String,
+    pub level: NotificationLevel,
+    pub read: bool,
+    pub timestamp_ticks: u64,
+    pub action_label: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServiceNotificationResponse {
+    Ack,
+    NotificationId(u64),
+    Notifications(Vec<ServiceNotificationEntry>),
+    Error(String),
+}
+
+pub trait NotificationServiceApplication {
+    fn bootstrap(&mut self, _ctx: &mut ServiceContext) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn handle(
+        &mut self,
+        _ctx: &mut ServiceContext,
+        _request_id: u64,
+        _request: ServiceNotificationCommand,
+    ) -> Result<ServiceNotificationResponse, Error>;
 }
 
 impl AppContext {
@@ -551,6 +612,191 @@ pub fn service_heartbeat(service_id: ServiceId) -> Result<ServiceEndpointState, 
     })
 }
 
+pub fn receive_notification_service_request(
+) -> Result<Option<(u64, ServiceNotificationCommand)>, Error> {
+    let mut raw = NativeServiceNotificationRequest {
+        abi_version: 0,
+        request_id: 0,
+        kind: NativeServiceNotificationCommandKind::None as u32,
+        app_id: 0,
+        include_read: 0,
+        max_items: 0,
+        notification_id: 0,
+        level: 0,
+        title_len: 0,
+        message_len: 0,
+        action_label_len: 0,
+        reserved: 0,
+        title: [0u8; MAX_INLINE_TEXT],
+        message: [0u8; MAX_INLINE_TEXT],
+        action_label: [0u8; MAX_INLINE_TEXT],
+    };
+    let rc = unsafe {
+        syscall1(
+            SYS_ECHOS_NOTIFICATION_SERVICE_RECV,
+            (&mut raw as *mut NativeServiceNotificationRequest) as usize,
+        )
+    };
+    if rc < 0 {
+        return Err(map_error(rc));
+    }
+    if raw.kind == NativeServiceNotificationCommandKind::None as u32 || raw.request_id == 0 {
+        return Ok(None);
+    }
+    let request = match raw.kind {
+        kind if kind == NativeServiceNotificationCommandKind::Push as u32 => {
+            ServiceNotificationCommand::Push {
+                app_id: raw.app_id,
+                title: decode_inline_text(&raw.title, raw.title_len)?,
+                message: decode_inline_text(&raw.message, raw.message_len)?,
+                level: decode_notification_level(raw.level)?,
+                action_label: decode_optional_inline_text(&raw.action_label, raw.action_label_len)?,
+            }
+        }
+        kind if kind == NativeServiceNotificationCommandKind::List as u32 => {
+            ServiceNotificationCommand::List {
+                app_id: raw.app_id,
+                include_read: raw.include_read != 0,
+                max_items: raw.max_items as usize,
+            }
+        }
+        kind if kind == NativeServiceNotificationCommandKind::MarkRead as u32 => {
+            ServiceNotificationCommand::MarkRead {
+                app_id: raw.app_id,
+                id: raw.notification_id,
+            }
+        }
+        kind if kind == NativeServiceNotificationCommandKind::Clear as u32 => {
+            ServiceNotificationCommand::Clear { app_id: raw.app_id }
+        }
+        _ => return Err(Error::InvalidInput),
+    };
+    Ok(Some((raw.request_id, request)))
+}
+
+pub fn send_notification_service_response(
+    request_id: u64,
+    response: &ServiceNotificationResponse,
+) -> Result<(), Error> {
+    let mut raw = NativeServiceNotificationResponse {
+        abi_version: 1,
+        request_id,
+        kind: NativeServiceNotificationResponseKind::None as u32,
+        notification_id: 0,
+        entry_count: 0,
+        error_len: 0,
+        reserved: 0,
+        error: [0u8; MAX_INLINE_TEXT],
+        entries: [NativeServiceNotificationEntry {
+            id: 0,
+            app_id: 0,
+            level: 0,
+            read: 0,
+            reserved: [0; 3],
+            timestamp_ticks: 0,
+            source_name_len: 0,
+            title_len: 0,
+            message_len: 0,
+            action_label_len: 0,
+            source_name: [0u8; MAX_INLINE_TEXT],
+            title: [0u8; MAX_INLINE_TEXT],
+            message: [0u8; MAX_INLINE_TEXT],
+            action_label: [0u8; MAX_INLINE_TEXT],
+        }; MAX_SERVICE_NOTIFICATION_ITEMS],
+    };
+    match response {
+        ServiceNotificationResponse::Ack => {
+            raw.kind = NativeServiceNotificationResponseKind::Ack as u32;
+        }
+        ServiceNotificationResponse::NotificationId(id) => {
+            raw.kind = NativeServiceNotificationResponseKind::NotificationId as u32;
+            raw.notification_id = *id;
+        }
+        ServiceNotificationResponse::Notifications(entries) => {
+            raw.kind = NativeServiceNotificationResponseKind::Notifications as u32;
+            if entries.len() > MAX_SERVICE_NOTIFICATION_ITEMS {
+                return Err(Error::StateTooLarge);
+            }
+            raw.entry_count = entries.len() as u32;
+            for (slot, entry) in raw.entries.iter_mut().zip(entries.iter()) {
+                let (source_name_len, source_name) = inline_text(&entry.source_name)?;
+                let (title_len, title) = inline_text(&entry.title)?;
+                let (message_len, message) = inline_text(&entry.message)?;
+                let (action_label_len, action_label) =
+                    optional_inline_text(entry.action_label.as_deref())?;
+                *slot = NativeServiceNotificationEntry {
+                    id: entry.id,
+                    app_id: entry.app_id,
+                    level: notification_level(entry.level.clone()),
+                    read: entry.read as u8,
+                    reserved: [0; 3],
+                    timestamp_ticks: entry.timestamp_ticks,
+                    source_name_len,
+                    title_len,
+                    message_len,
+                    action_label_len,
+                    source_name,
+                    title,
+                    message,
+                    action_label,
+                };
+            }
+        }
+        ServiceNotificationResponse::Error(message) => {
+            raw.kind = NativeServiceNotificationResponseKind::Error as u32;
+            let (error_len, error) = inline_text(message)?;
+            raw.error_len = error_len;
+            raw.error = error;
+        }
+    }
+    let rc = unsafe {
+        syscall1(
+            SYS_ECHOS_NOTIFICATION_SERVICE_RESPOND,
+            (&mut raw as *mut NativeServiceNotificationResponse) as usize,
+        )
+    };
+    if rc < 0 {
+        Err(map_error(rc))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn run_notification_service<A: NotificationServiceApplication>(mut app: A) -> ! {
+    let bootstrap = claim_service_bootstrap().unwrap_or_else(|_| panic_loop());
+    if bootstrap.service_id != ServiceId::EchNotifications {
+        panic_loop();
+    }
+    let request_region =
+        map_service_region(bootstrap.request_region_handle, true).unwrap_or_else(|_| panic_loop());
+    let response_region =
+        map_service_region(bootstrap.response_region_handle, true).unwrap_or_else(|_| panic_loop());
+    publish_service_endpoint(
+        bootstrap.service_id,
+        bootstrap.request_region_handle,
+        bootstrap.response_region_handle,
+    )
+    .unwrap_or_else(|_| panic_loop());
+    let mut ctx = ServiceContext {
+        bootstrap,
+        request_region,
+        response_region,
+    };
+    let _ = app.bootstrap(&mut ctx);
+    loop {
+        if let Ok(Some((request_id, request))) = receive_notification_service_request() {
+            let response = app
+                .handle(&mut ctx, request_id, request)
+                .unwrap_or_else(|_| {
+                    ServiceNotificationResponse::Error(String::from("service handler failed"))
+                });
+            let _ = send_notification_service_response(request_id, &response);
+        }
+        let _ = ctx.heartbeat();
+        core::hint::spin_loop();
+    }
+}
+
 pub fn run_service<A: ServiceApplication>(mut app: A) -> ! {
     let bootstrap = claim_service_bootstrap().unwrap_or_else(|_| panic_loop());
     let request_region =
@@ -756,12 +1002,50 @@ fn inline_text(value: &str) -> Result<(u16, [u8; MAX_INLINE_TEXT]), Error> {
     Ok((value.len() as u16, out))
 }
 
+fn optional_inline_text(value: Option<&str>) -> Result<(u16, [u8; MAX_INLINE_TEXT]), Error> {
+    match value {
+        Some(value) => inline_text(value),
+        None => Ok((0, [0u8; MAX_INLINE_TEXT])),
+    }
+}
+
+fn decode_inline_text(bytes: &[u8; MAX_INLINE_TEXT], len: u16) -> Result<String, Error> {
+    let len = len as usize;
+    if len > MAX_INLINE_TEXT {
+        return Err(Error::InvalidInput);
+    }
+    core::str::from_utf8(&bytes[..len])
+        .map(|text| text.to_string())
+        .map_err(|_| Error::Utf8)
+}
+
+fn decode_optional_inline_text(
+    bytes: &[u8; MAX_INLINE_TEXT],
+    len: u16,
+) -> Result<Option<String>, Error> {
+    if len == 0 {
+        Ok(None)
+    } else {
+        decode_inline_text(bytes, len).map(Some)
+    }
+}
+
 fn notification_level(level: NotificationLevel) -> u32 {
     match level {
         NotificationLevel::Info => 0,
         NotificationLevel::Success => 1,
         NotificationLevel::Warning => 2,
         NotificationLevel::Error => 3,
+    }
+}
+
+fn decode_notification_level(raw: u32) -> Result<NotificationLevel, Error> {
+    match raw {
+        0 => Ok(NotificationLevel::Info),
+        1 => Ok(NotificationLevel::Success),
+        2 => Ok(NotificationLevel::Warning),
+        3 => Ok(NotificationLevel::Error),
+        _ => Err(Error::InvalidInput),
     }
 }
 

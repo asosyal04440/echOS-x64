@@ -78,8 +78,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use x86_64::structures::paging::PageTableFlags;
 use spin::Mutex;
+use x86_64::structures::paging::PageTableFlags;
 
 // ============================================================================
 // THP SABİTLERİ
@@ -553,7 +553,8 @@ impl ThpManager {
     }
 
     pub fn set_scan_interval_ticks(&self, ticks: u64) {
-        self.scan_interval_ticks.store(ticks.max(1), Ordering::Relaxed);
+        self.scan_interval_ticks
+            .store(ticks.max(1), Ordering::Relaxed);
     }
 }
 

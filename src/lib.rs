@@ -48,6 +48,21 @@ extern crate std;
 /// Heap bellek allocator'ları
 pub mod allocator;
 
+/// Wave-1 namespace spine — kernel-core façade.
+pub mod kernel;
+
+/// Wave-1 namespace spine — temporary subsystem bucket.
+pub mod subsystems;
+
+/// Wave-1 namespace spine — runtime/service façade layer.
+pub mod runtime_layer;
+
+/// Wave-1 namespace spine — compatibility façade layer.
+pub mod compat;
+
+/// Wave-1 namespace spine — product/UI façade layer.
+pub mod product;
+
 pub mod acpi;
 
 /// Windows PE/COFF ikili dosyalarını yükleyen loader.

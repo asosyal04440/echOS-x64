@@ -9,6 +9,8 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::arch::asm;
+use core::sync::atomic::{AtomicU32, Ordering};
 use spin::{Mutex, Once};
 
 // ============================================================================
@@ -1014,8 +1016,6 @@ pub static ALLOC_MAP: Mutex<BTreeMap<u64, (usize, usize)>> = Mutex::new(BTreeMap
 // ============================================================================
 
 static FILE_HANDLES: Mutex<BTreeMap<u64, Win32FileState>> = Mutex::new(BTreeMap::new());
-static NEXT_FILE_HANDLE: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0x1000_0000);
 static WIN32_CURRENT_DIRECTORY: Once<Mutex<String>> = Once::new();
 static WIN32_ENVIRONMENT: Once<Mutex<BTreeMap<String, String>>> = Once::new();
 static WIN32_CRT_STREAMS: Once<Mutex<BTreeMap<u64, Win32CrtStream>>> = Once::new();
@@ -1039,6 +1039,154 @@ static WIN32_CRT_EXIT_STATUS: Once<Mutex<Option<INT>>> = Once::new();
 static WIN32_CRT_ATEXIT: Once<Mutex<Vec<usize>>> = Once::new();
 static WIN32_CRT_HOST_FILES: Once<Mutex<BTreeMap<String, Vec<u8>>>> = Once::new();
 static WIN32_COMMAND_LINE: Once<Box<[i8]>> = Once::new();
+static NEXT_USER_ABI_SERVICE_ID: AtomicU32 = AtomicU32::new(1);
+static WIN32_USER_ABI_BY_NAME: Once<Mutex<BTreeMap<(String, String), u32>>> = Once::new();
+static WIN32_USER_ABI_SERVICES: Once<Mutex<BTreeMap<u32, Win32UserAbiService>>> = Once::new();
+
+pub const WIN32_USER_ABI_SYSCALL_BASE: u64 = 0x4543_0000;
+const WIN32_USER_ABI_STACK_ARGS: usize = 8;
+
+#[derive(Clone, Debug)]
+struct Win32UserAbiService {
+    module: String,
+    name: String,
+    target: u64,
+}
+
+fn win32_user_abi_by_name() -> &'static Mutex<BTreeMap<(String, String), u32>> {
+    WIN32_USER_ABI_BY_NAME.call_once(|| Mutex::new(BTreeMap::new()))
+}
+
+fn win32_user_abi_services() -> &'static Mutex<BTreeMap<u32, Win32UserAbiService>> {
+    WIN32_USER_ABI_SERVICES.call_once(|| Mutex::new(BTreeMap::new()))
+}
+
+pub fn user_abi_syscall_number(service_id: u32) -> u64 {
+    WIN32_USER_ABI_SYSCALL_BASE + service_id as u64
+}
+
+pub fn resolve_user_abi_service(module: &str, name: &str) -> Option<u32> {
+    let module_key = module.to_lowercase();
+    let name_key = name.to_string();
+    if let Some(id) = win32_user_abi_by_name()
+        .lock()
+        .get(&(module_key.clone(), name_key.clone()))
+        .copied()
+    {
+        return Some(id);
+    }
+    let target = resolve_fn_address_internal(module_key.as_str(), name_key.as_str(), false);
+    if target == stub_api as *const () as usize as u64 {
+        return None;
+    }
+    let id = NEXT_USER_ABI_SERVICE_ID.fetch_add(1, Ordering::AcqRel);
+    win32_user_abi_services().lock().insert(
+        id,
+        Win32UserAbiService {
+            module: module_key.clone(),
+            name: name_key.clone(),
+            target,
+        },
+    );
+    win32_user_abi_by_name()
+        .lock()
+        .insert((module_key, name_key), id);
+    Some(id)
+}
+
+unsafe fn read_user_stack_arg(base_rsp: u64, index: usize) -> u64 {
+    let address = base_rsp
+        .saturating_add(0x28)
+        .saturating_add((index as u64).saturating_mul(8));
+    if !crate::memory::is_user_range(address, 8) {
+        return 0;
+    }
+    core::ptr::read_unaligned(address as *const u64)
+}
+
+unsafe fn invoke_user_abi_target(
+    target: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    stack_args: &[u64; WIN32_USER_ABI_STACK_ARGS],
+) -> u64 {
+    let s0 = stack_args[0];
+    let s1 = stack_args[1];
+    let s2 = stack_args[2];
+    let s3 = stack_args[3];
+    let s4 = stack_args[4];
+    let s5 = stack_args[5];
+    let s6 = stack_args[6];
+    let s7 = stack_args[7];
+    let ret: u64;
+    asm!(
+        "sub rsp, 0x60",
+        "mov [rsp + 0x20], {s0}",
+        "mov [rsp + 0x28], {s1}",
+        "mov [rsp + 0x30], {s2}",
+        "mov [rsp + 0x38], {s3}",
+        "mov [rsp + 0x40], {s4}",
+        "mov [rsp + 0x48], {s5}",
+        "mov [rsp + 0x50], {s6}",
+        "mov [rsp + 0x58], {s7}",
+        "mov rcx, {a1}",
+        "mov rdx, {a2}",
+        "mov r8, {a3}",
+        "mov r9, {a4}",
+        "call {target}",
+        "add rsp, 0x60",
+        a1 = in(reg) a1,
+        a2 = in(reg) a2,
+        a3 = in(reg) a3,
+        a4 = in(reg) a4,
+        s0 = in(reg) s0,
+        s1 = in(reg) s1,
+        s2 = in(reg) s2,
+        s3 = in(reg) s3,
+        s4 = in(reg) s4,
+        s5 = in(reg) s5,
+        s6 = in(reg) s6,
+        s7 = in(reg) s7,
+        target = in(reg) target,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("rdx") _,
+        lateout("r8") _,
+        lateout("r9") _,
+        lateout("r10") _,
+        lateout("r11") _,
+    );
+    ret
+}
+
+pub fn dispatch_user_abi(service_id: u32, args: [u64; 4]) -> i64 {
+    let Some(service) = win32_user_abi_services().lock().get(&service_id).cloned() else {
+        return 0;
+    };
+    let (user_rsp, _, _) = crate::syscall::current_user_context();
+    let mut stack_args = [0u64; WIN32_USER_ABI_STACK_ARGS];
+    for (index, slot) in stack_args.iter_mut().enumerate() {
+        *slot = unsafe { read_user_stack_arg(user_rsp, index) };
+    }
+    crate::serial_println!(
+        "[WIN32-ABI] {}!{} via service {}",
+        service.module,
+        service.name,
+        service_id
+    );
+    unsafe {
+        invoke_user_abi_target(
+            service.target,
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            &stack_args,
+        ) as i64
+    }
+}
 
 /// Win32 file state tracking
 #[derive(Clone)]
@@ -1089,8 +1237,205 @@ static INTERNET_COOKIE_JAR: Mutex<BTreeMap<String, BTreeMap<String, String>>> =
 static INTERNET_RESPONSE_CACHE: Mutex<BTreeMap<String, crate::net::http::HttpResponse>> =
     Mutex::new(BTreeMap::new());
 static UNHANDLED_EXCEPTION_FILTERS: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
-static NEXT_INTERNET_HANDLE: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0x3000_0000);
+
+#[repr(transparent)]
+struct AtomicCounterU64(core::sync::atomic::AtomicU64);
+
+impl AtomicCounterU64 {
+    const fn new(seed: u64) -> Self {
+        Self(core::sync::atomic::AtomicU64::new(seed))
+    }
+
+    fn next_relaxed(&self) -> u64 {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn next_relaxed_with_stride(&self, stride: u64) -> u64 {
+        self.0
+            .fetch_add(stride, core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn reset_relaxed(&self, seed: u64) {
+        self.0.store(seed, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[repr(transparent)]
+struct AtomicCounterU32(core::sync::atomic::AtomicU32);
+
+impl AtomicCounterU32 {
+    const fn new(seed: u32) -> Self {
+        Self(core::sync::atomic::AtomicU32::new(seed))
+    }
+
+    fn next_relaxed(&self) -> u32 {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn reset_relaxed(&self, seed: u32) {
+        self.0.store(seed, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[repr(C, align(64))]
+struct Win32ColdAllocators {
+    file_handle: AtomicCounterU64,
+    internet_handle: AtomicCounterU64,
+    com_cookie: AtomicCounterU32,
+    com_stream_id: AtomicCounterU64,
+    host_thread_key: AtomicCounterU64,
+    hwnd: AtomicCounterU64,
+    hdc: AtomicCounterU64,
+    hmenu: AtomicCounterU64,
+    hbrush: AtomicCounterU64,
+    hpen: AtomicCounterU64,
+    hfont: AtomicCounterU64,
+    hrgn: AtomicCounterU64,
+    hpalette: AtomicCounterU64,
+    haccel: AtomicCounterU64,
+    hmetafile: AtomicCounterU64,
+    print_job: AtomicCounterU64,
+    dll_module: AtomicCounterU64,
+    sync_handle: AtomicCounterU64,
+    registry_handle: AtomicCounterU64,
+}
+
+impl Win32ColdAllocators {
+    const fn new() -> Self {
+        Self {
+            file_handle: AtomicCounterU64::new(0x1000_0000),
+            internet_handle: AtomicCounterU64::new(0x3000_0000),
+            com_cookie: AtomicCounterU32::new(1),
+            com_stream_id: AtomicCounterU64::new(1),
+            host_thread_key: AtomicCounterU64::new(1),
+            hwnd: AtomicCounterU64::new(0x0001_0000),
+            hdc: AtomicCounterU64::new(0x0002_0000),
+            hmenu: AtomicCounterU64::new(0x0003_0000),
+            hbrush: AtomicCounterU64::new(0x0004_0000),
+            hpen: AtomicCounterU64::new(0x0005_0000),
+            hfont: AtomicCounterU64::new(0x0006_0000),
+            hrgn: AtomicCounterU64::new(0x0007_0000),
+            hpalette: AtomicCounterU64::new(0x0008_0000),
+            haccel: AtomicCounterU64::new(0x0009_0000),
+            hmetafile: AtomicCounterU64::new(0x000A_0000),
+            print_job: AtomicCounterU64::new(0x000B_0000),
+            dll_module: AtomicCounterU64::new(0x0010_C000),
+            sync_handle: AtomicCounterU64::new(0x2000_0000),
+            registry_handle: AtomicCounterU64::new(0x8000_0001),
+        }
+    }
+
+    #[cfg(test)]
+    fn reset_for_tests(&self) {
+        self.internet_handle.reset_relaxed(0x3000_0000);
+        self.com_cookie.reset_relaxed(1);
+        self.com_stream_id.reset_relaxed(1);
+        self.host_thread_key.reset_relaxed(1);
+        self.hwnd.reset_relaxed(0x0001_0000);
+        self.hdc.reset_relaxed(0x0002_0000);
+        self.hmenu.reset_relaxed(0x0003_0000);
+        self.hbrush.reset_relaxed(0x0004_0000);
+        self.hpen.reset_relaxed(0x0005_0000);
+        self.hfont.reset_relaxed(0x0006_0000);
+        self.hrgn.reset_relaxed(0x0007_0000);
+        self.hpalette.reset_relaxed(0x0008_0000);
+        self.haccel.reset_relaxed(0x0009_0000);
+        self.hmetafile.reset_relaxed(0x000A_0000);
+        self.print_job.reset_relaxed(0x000B_0000);
+        self.file_handle.reset_relaxed(0x1000_0000);
+        self.dll_module.reset_relaxed(0x0010_C000);
+        self.sync_handle.reset_relaxed(0x2000_0000);
+        self.registry_handle.reset_relaxed(0x8000_0001);
+    }
+}
+
+static WIN32_COLD_ALLOCATORS: Win32ColdAllocators = Win32ColdAllocators::new();
+
+fn next_file_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.file_handle.next_relaxed()
+}
+
+fn next_internet_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.internet_handle.next_relaxed()
+}
+
+fn next_com_cookie() -> u32 {
+    WIN32_COLD_ALLOCATORS.com_cookie.next_relaxed()
+}
+
+fn next_com_stream_id() -> u64 {
+    WIN32_COLD_ALLOCATORS.com_stream_id.next_relaxed()
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+fn next_host_win32_thread_key() -> u64 {
+    WIN32_COLD_ALLOCATORS.host_thread_key.next_relaxed()
+}
+
+fn next_hwnd_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.hwnd.next_relaxed()
+}
+
+fn next_hdc_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.hdc.next_relaxed()
+}
+
+fn next_hmenu_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.hmenu.next_relaxed()
+}
+
+fn next_hbrush_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.hbrush.next_relaxed()
+}
+
+fn next_hpen_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.hpen.next_relaxed()
+}
+
+fn next_hfont_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.hfont.next_relaxed()
+}
+
+fn next_hrgn_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.hrgn.next_relaxed()
+}
+
+fn next_hpalette_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.hpalette.next_relaxed()
+}
+
+fn next_haccel_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.haccel.next_relaxed()
+}
+
+fn next_hmetafile_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.hmetafile.next_relaxed()
+}
+
+fn next_print_job_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.print_job.next_relaxed()
+}
+
+fn next_dll_module_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS
+        .dll_module
+        .next_relaxed_with_stride(0x1000)
+}
+
+fn next_sync_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.sync_handle.next_relaxed()
+}
+
+fn next_registry_handle() -> u64 {
+    WIN32_COLD_ALLOCATORS.registry_handle.next_relaxed()
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct WindowPublicationSnapshot {
@@ -1196,9 +1541,7 @@ impl WindowPublicationState {
 
 static WINDOW_PUBLICATION_STATE: WindowPublicationState = WindowPublicationState::new();
 static INVALIDATED_WINDOWS: Mutex<BTreeMap<u64, RECT>> = Mutex::new(BTreeMap::new());
-static NEXT_COM_COOKIE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 static COM_CLASS_OBJECTS: Mutex<BTreeMap<String, ComClassObject>> = Mutex::new(BTreeMap::new());
-static NEXT_COM_STREAM_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 static COM_MARSHAL_STREAMS: Mutex<BTreeMap<u64, ComMarshalStreamState>> =
     Mutex::new(BTreeMap::new());
 #[cfg(any(
@@ -1209,19 +1552,8 @@ static COM_MARSHAL_STREAMS: Mutex<BTreeMap<u64, ComMarshalStreamState>> =
         not(target_os = "uefi")
     )
 ))]
-static NEXT_HOST_WIN32_THREAD_KEY: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(1);
-#[cfg(any(
-    test,
-    all(
-        feature = "host_smoke",
-        not(target_os = "none"),
-        not(target_os = "uefi")
-    )
-))]
 std::thread_local! {
-    static HOST_WIN32_THREAD_KEY: u64 =
-        NEXT_HOST_WIN32_THREAD_KEY.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    static HOST_WIN32_THREAD_KEY: u64 = next_host_win32_thread_key();
 }
 static REGISTERED_TYPE_LIBRARIES: Mutex<BTreeMap<String, RegisteredTypeLibState>> =
     Mutex::new(BTreeMap::new());
@@ -1726,35 +2058,21 @@ struct Win32MenuLoopState {
 
 /// HWND → Win32Window mapping
 static WIN32_WINDOWS: Mutex<BTreeMap<u64, Win32Window>> = Mutex::new(BTreeMap::new());
-static NEXT_HWND: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0001_0000);
 
 /// HDC → Win32DC mapping
 static WIN32_DCS: Mutex<BTreeMap<u64, Win32DC>> = Mutex::new(BTreeMap::new());
-static NEXT_HDC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0002_0000);
 static WIN32_MENUS: Mutex<BTreeMap<u64, Win32Menu>> = Mutex::new(BTreeMap::new());
-static NEXT_HMENU: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0003_0000);
 static WIN32_BRUSHES: Mutex<BTreeMap<u64, Win32Brush>> = Mutex::new(BTreeMap::new());
-static NEXT_HBRUSH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0004_0000);
 static WIN32_PENS: Mutex<BTreeMap<u64, Win32Pen>> = Mutex::new(BTreeMap::new());
-static NEXT_HPEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0005_0000);
 static WIN32_FONTS: Mutex<BTreeMap<u64, Win32Font>> = Mutex::new(BTreeMap::new());
-static NEXT_HFONT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0006_0000);
 static WIN32_REGIONS: Mutex<BTreeMap<u64, Win32Region>> = Mutex::new(BTreeMap::new());
-static NEXT_HRGN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0007_0000);
 static WIN32_PALETTES: Mutex<BTreeMap<u64, Win32Palette>> = Mutex::new(BTreeMap::new());
 static WIN32_GDI_HANDLES: Mutex<BTreeMap<u64, Win32GdiHandleMeta>> = Mutex::new(BTreeMap::new());
-static NEXT_HPALETTE: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0x0008_0000);
 static WIN32_DIALOGS: Mutex<BTreeMap<u64, Win32DialogState>> = Mutex::new(BTreeMap::new());
 static WIN32_ACCEL_TABLES: Mutex<BTreeMap<u64, Win32AccelTable>> = Mutex::new(BTreeMap::new());
-static NEXT_HACCEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x0009_0000);
 static WIN32_METAFILES: Mutex<BTreeMap<u64, Win32MetaFile>> = Mutex::new(BTreeMap::new());
-static NEXT_HMETAFILE: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0x000A_0000);
 static WIN32_PRINT_JOBS: Mutex<BTreeMap<u64, Win32PrintJob>> = Mutex::new(BTreeMap::new());
 static WIN32_PRINTER_QUEUES: Mutex<BTreeMap<String, Vec<u64>>> = Mutex::new(BTreeMap::new());
-static NEXT_PRINT_JOB: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0x000B_0000);
 static KEYBOARD_STATE: Mutex<[BYTE; 256]> = Mutex::new([0; 256]);
 static WIN32_MENU_LOOP_STATE: Mutex<Win32MenuLoopState> = Mutex::new(Win32MenuLoopState {
     hwnd: 0,
@@ -2057,9 +2375,7 @@ pub fn handle_for_module(name: &str) -> u64 {
         }
     }
     // Assign a new handle: use a simple counter above our static range
-    static NEXT_HANDLE: core::sync::atomic::AtomicU64 =
-        core::sync::atomic::AtomicU64::new(0x0010_C000);
-    let h = NEXT_HANDLE.fetch_add(0x1000, core::sync::atomic::Ordering::Relaxed);
+    let h = next_dll_module_handle();
     DLL_HANDLES.lock().insert(h, key.to_string());
     h
 }
@@ -2126,7 +2442,18 @@ fn current_win32_process_key() -> u64 {
     crate::pe_loader::current_process_pid().unwrap_or_else(current_win32_thread_key)
 }
 
+fn current_win32_teb() -> Option<&'static mut crate::pe_loader::Win32Teb> {
+    unsafe { crate::pe_loader::current_teb() }
+}
+
+fn current_win32_peb() -> Option<&'static mut crate::pe_loader::Win32Peb> {
+    unsafe { crate::pe_loader::current_peb() }
+}
+
 fn win32_last_error() -> DWORD {
+    if let Some(teb) = current_win32_teb() {
+        return teb.last_error_value;
+    }
     THREAD_LAST_ERROR
         .lock()
         .get(&current_win32_thread_key())
@@ -2135,6 +2462,10 @@ fn win32_last_error() -> DWORD {
 }
 
 fn set_win32_last_error(code: DWORD) {
+    if let Some(teb) = current_win32_teb() {
+        teb.last_error_value = code;
+        return;
+    }
     THREAD_LAST_ERROR
         .lock()
         .insert(current_win32_thread_key(), code);
@@ -4022,7 +4353,7 @@ fn clone_region_state(handle: HRGN) -> Option<Win32Region> {
 }
 
 fn allocate_region_from_state(mut region: Win32Region) -> HRGN {
-    let handle = NEXT_HRGN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let handle = next_hrgn_handle();
     region.handle = handle as HRGN;
     WIN32_REGIONS.lock().insert(handle, region);
     register_gdi_handle(handle, OBJ_REGION as DWORD, false);
@@ -4043,7 +4374,7 @@ unsafe fn read_utf16_string(ptr: LPCWSTR) -> String {
 }
 
 fn allocate_internet_handle(state: InternetHandleState) -> HANDLE {
-    let handle = NEXT_INTERNET_HANDLE.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    let handle = next_internet_handle();
     INTERNET_HANDLES.lock().insert(handle, state);
     handle
 }
@@ -4346,6 +4677,13 @@ fn win32_thread_start_trampoline() -> ! {
         crate::task::scheduler::exit(87);
     };
     let _ = crate::pe_loader::invoke_tls_thread_attach(launch.owner_pid);
+    if let Some(thread) = crate::task::scheduler::current_win32_thread_state() {
+        if crate::task::scheduler::current_execution_mode()
+            == Some(crate::task::task::ExecutionMode::LegacyRing3)
+        {
+            unsafe { crate::task::user::enter_win32_user_mode(thread, 0) };
+        }
+    }
     let start: unsafe extern "system" fn(LPVOID) -> DWORD =
         unsafe { core::mem::transmute(launch.start_routine) };
     let exit_code = unsafe { start(launch.parameter as LPVOID) };
@@ -6961,8 +7299,7 @@ mod kernel32 {
         }
 
         // Allocate Win32 handle
-        let handle =
-            crate::win32::NEXT_FILE_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_file_handle();
         crate::win32::FILE_HANDLES.lock().insert(
             handle,
             crate::win32::Win32FileState {
@@ -7354,6 +7691,23 @@ mod kernel32 {
             crate::task::task::Priority::Normal,
             "win32-thread",
         );
+        if let Ok(thread_bootstrap) = crate::pe_loader::build_thread_bootstrap(
+            owner_pid,
+            handle,
+            lpStartAddress as u64,
+            lpParameter as u64,
+        ) {
+            if crate::task::scheduler::current_execution_mode()
+                == Some(crate::task::task::ExecutionMode::LegacyRing3)
+            {
+                task.cold.mode = crate::task::task::ExecutionMode::LegacyRing3;
+                task.cold.page_table = crate::task::scheduler::current_user_page_table();
+                task.cold.address_space = crate::task::scheduler::current_address_space();
+            }
+            task.cold.user_entry = Some(thread_bootstrap.entry_rip);
+            task.cold.user_stack_top = Some(thread_bootstrap.user_stack_top);
+            task.cold.win32 = Some(thread_bootstrap);
+        }
         let task_id = task.id as u64;
         crate::win32::WIN32_THREAD_LAUNCHES.lock().insert(
             task_id,
@@ -7438,6 +7792,13 @@ mod kernel32 {
             return FALSE;
         }
         drop(slots);
+        if let Some(teb) = crate::win32::current_win32_teb() {
+            if let Some(slot) = teb.tls_slots.get_mut(dwTlsIndex as usize) {
+                *slot = lpTlsValue as u64;
+                crate::win32::set_win32_last_error(0);
+                return TRUE;
+            }
+        }
         crate::win32::TLS_THREAD_VALUES
             .lock()
             .entry(crate::win32::current_win32_thread_key())
@@ -7459,6 +7820,12 @@ mod kernel32 {
             return core::ptr::null_mut();
         }
         drop(slots);
+        if let Some(teb) = crate::win32::current_win32_teb() {
+            if let Some(slot) = teb.tls_slots.get(dwTlsIndex as usize) {
+                crate::win32::set_win32_last_error(0);
+                return (*slot) as LPVOID;
+            }
+        }
         let value = crate::win32::TLS_THREAD_VALUES
             .lock()
             .get(&crate::win32::current_win32_thread_key())
@@ -7475,6 +7842,9 @@ mod kernel32 {
 
     /// GetCurrentThreadId
     pub unsafe fn get_current_thread_id() -> DWORD {
+        if let Some(teb) = crate::win32::current_win32_teb() {
+            return teb.client_id_thread as DWORD;
+        }
         crate::win32::current_win32_thread_key() as DWORD
     }
 
@@ -7689,9 +8059,6 @@ mod kernel32 {
 
     /// Sync object state tracking
     static SYNC_OBJECTS: Mutex<BTreeMap<u64, SyncObject>> = Mutex::new(BTreeMap::new());
-    static NEXT_SYNC_HANDLE: core::sync::atomic::AtomicU64 =
-        core::sync::atomic::AtomicU64::new(0x2000_0000);
-
     struct SyncObject {
         obj_type: SyncType,
         signaled: bool,
@@ -7713,7 +8080,7 @@ mod kernel32 {
         bInitialOwner: BOOL,
         lpName: LPCSTR,
     ) -> HANDLE {
-        let handle = NEXT_SYNC_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_sync_handle();
         SYNC_OBJECTS.lock().insert(
             handle,
             SyncObject {
@@ -7746,7 +8113,7 @@ mod kernel32 {
         lMaximumCount: LONG,
         lpName: LPCSTR,
     ) -> HANDLE {
-        let handle = NEXT_SYNC_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_sync_handle();
         SYNC_OBJECTS.lock().insert(
             handle,
             SyncObject {
@@ -7924,6 +8291,9 @@ mod kernel32 {
 
     /// GetProcessHeap
     pub unsafe fn get_process_heap() -> HANDLE {
+        if let Some(peb) = crate::win32::current_win32_peb() {
+            return peb.process_heap as HANDLE;
+        }
         1 as HANDLE
     }
 
@@ -8612,7 +8982,7 @@ mod user32 {
         };
 
         // Yeni HWND ata
-        let hwnd = crate::win32::NEXT_HWND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let hwnd = crate::win32::next_hwnd_handle();
 
         // Pencere surface'i oluştur (BGRA format)
         let surface_size = (actual_w * actual_h * 4) as usize;
@@ -9080,7 +9450,7 @@ mod user32 {
         let hwnd = hWnd as u64;
 
         // Yeni DC oluştur
-        let hdc = crate::win32::NEXT_HDC.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let hdc = crate::win32::next_hdc_handle();
 
         let dc = crate::win32::Win32DC {
             hdc,
@@ -9773,7 +10143,7 @@ mod user32 {
         if lpaccel.is_null() || cEntries <= 0 {
             return 0;
         }
-        let handle = crate::win32::NEXT_HACCEL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_haccel_handle();
         let mut entries = Vec::with_capacity(cEntries as usize);
         for index in 0..cEntries as usize {
             let accel = *lpaccel.add(index);
@@ -10456,7 +10826,7 @@ mod user32 {
 
     /// CreateMenu
     pub unsafe fn create_menu() -> HMENU {
-        let handle = crate::win32::NEXT_HMENU.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_hmenu_handle();
         crate::win32::WIN32_MENUS.lock().insert(
             handle,
             crate::win32::Win32Menu {
@@ -10470,7 +10840,7 @@ mod user32 {
 
     /// CreatePopupMenu
     pub unsafe fn create_popup_menu() -> HMENU {
-        let handle = crate::win32::NEXT_HMENU.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_hmenu_handle();
         crate::win32::WIN32_MENUS.lock().insert(
             handle,
             crate::win32::Win32Menu {
@@ -11573,9 +11943,6 @@ mod advapi32 {
     static REGISTRY_HANDLES: Mutex<BTreeMap<u64, String>> = Mutex::new(BTreeMap::new());
     /// Registry key-value store: "HKEY\subkey\value" -> (type, data)
     static REGISTRY_DATA: Mutex<BTreeMap<String, (DWORD, Vec<u8>)>> = Mutex::new(BTreeMap::new());
-    static NEXT_REG_HANDLE: core::sync::atomic::AtomicU64 =
-        core::sync::atomic::AtomicU64::new(0x8000_0001);
-
     /// Predefined registry handles
     const HKEY_CLASSES_ROOT: u64 = 0x80000000;
     const HKEY_CURRENT_USER: u64 = 0x80000001;
@@ -11634,7 +12001,7 @@ mod advapi32 {
         };
 
         // Allocate new handle and register it
-        let handle = NEXT_REG_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_registry_handle();
         REGISTRY_HANDLES.lock().insert(handle, full_path.clone());
 
         *phkResult = handle as HKEY;
@@ -11691,7 +12058,7 @@ mod advapi32 {
         let key_exists = REGISTRY_HANDLES.lock().values().any(|p| p == &full_path);
 
         // Allocate new handle
-        let handle = NEXT_REG_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_registry_handle();
         REGISTRY_HANDLES.lock().insert(handle, full_path.clone());
 
         *phkResult = handle as HKEY;
@@ -13387,8 +13754,7 @@ mod ole32 {
         let Some(key) = guid_to_key(rclsid) else {
             return E_POINTER;
         };
-        let cookie =
-            crate::win32::NEXT_COM_COOKIE.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        let cookie = crate::win32::next_com_cookie();
         crate::win32::com_add_ref(p_unk);
         crate::win32::COM_CLASS_OBJECTS.lock().insert(
             key,
@@ -13788,8 +14154,7 @@ mod ole32 {
                 crate::win32::com_add_ref(state.object as *mut u8);
                 state.clone()
             };
-            let stream_id =
-                crate::win32::NEXT_COM_STREAM_ID.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            let stream_id = crate::win32::next_com_stream_id();
             COM_MARSHAL_STREAMS.lock().insert(stream_id, cloned_state);
             let cloned = allocate_marshal_stream(stream_id);
             if cloned.is_null() {
@@ -13829,8 +14194,7 @@ mod ole32 {
             return if hr == S_OK { E_NOINTERFACE } else { hr };
         }
         let iid_key = guid_to_key(riid).unwrap_or_default();
-        let stream_id =
-            crate::win32::NEXT_COM_STREAM_ID.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        let stream_id = crate::win32::next_com_stream_id();
         COM_MARSHAL_STREAMS.lock().insert(
             stream_id,
             ComMarshalStreamState {
@@ -18689,8 +19053,7 @@ mod msvcrt {
             flags
         };
         let fd = crate::fs::sys_open(&normalized, flags);
-        let handle =
-            crate::win32::NEXT_FILE_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_file_handle();
         crate::win32::FILE_HANDLES.lock().insert(
             handle,
             crate::win32::Win32FileState {
@@ -21136,7 +21499,7 @@ mod gdi32 {
 
     /// CreateSolidBrush
     pub unsafe fn create_solid_brush(crColor: DWORD) -> HBRUSH {
-        let handle = crate::win32::NEXT_HBRUSH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_hbrush_handle();
         crate::win32::WIN32_BRUSHES.lock().insert(
             handle,
             crate::win32::Win32Brush {
@@ -21202,7 +21565,7 @@ mod gdi32 {
 
     /// CreatePen
     pub unsafe fn create_pen(fnPenStyle: INT, nWidth: INT, crColor: DWORD) -> HPEN {
-        let handle = crate::win32::NEXT_HPEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_hpen_handle();
         crate::win32::WIN32_PENS.lock().insert(
             handle,
             crate::win32::Win32Pen {
@@ -21436,7 +21799,7 @@ mod gdi32 {
         pszFaceName: LPCSTR,
     ) -> HFONT {
         let name = read_ansi_string(pszFaceName);
-        let handle = crate::win32::NEXT_HFONT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_hfont_handle();
         crate::win32::WIN32_FONTS.lock().insert(
             handle,
             crate::win32::Win32Font {
@@ -22344,7 +22707,7 @@ mod gdi32 {
 
     /// CreateRectRgn
     pub unsafe fn create_rect_rgn(left: INT, top: INT, right: INT, bottom: INT) -> HRGN {
-        let handle = crate::win32::NEXT_HRGN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_hrgn_handle();
         crate::win32::WIN32_REGIONS.lock().insert(
             handle,
             crate::win32::Win32Region {
@@ -22404,7 +22767,7 @@ mod gdi32 {
             return 0;
         }
         let points = core::slice::from_raw_parts(lppt, cPoints as usize);
-        let handle = crate::win32::NEXT_HRGN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_hrgn_handle();
         let bounds = crate::win32::polygon_bounds_root(points);
         crate::win32::WIN32_REGIONS.lock().insert(
             handle,
@@ -23391,8 +23754,7 @@ mod gdi32 {
         for index in 0..header.palNumEntries as usize {
             entries.push(*entry_ptr.add(index));
         }
-        let handle =
-            crate::win32::NEXT_HPALETTE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_hpalette_handle();
         crate::win32::WIN32_PALETTES
             .lock()
             .insert(handle, crate::win32::Win32Palette { handle, entries });
@@ -23796,8 +24158,7 @@ mod gdi32 {
                 .map(|window| (window.width.max(1), window.height.max(1)))
                 .unwrap_or((1024, 768))
         };
-        let meta_handle =
-            crate::win32::NEXT_HMETAFILE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let meta_handle = crate::win32::next_hmetafile_handle();
         crate::win32::WIN32_METAFILES.lock().insert(
             meta_handle,
             crate::win32::Win32MetaFile {
@@ -23811,7 +24172,7 @@ mod gdi32 {
                 printer_name: String::new(),
             },
         );
-        let hdc = crate::win32::NEXT_HDC.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let hdc = crate::win32::next_hdc_handle();
         crate::win32::WIN32_DCS.lock().insert(
             hdc,
             crate::win32::Win32DC {
@@ -24019,8 +24380,7 @@ mod gdi32 {
                 dc.device_name = device.clone();
             }
             if !device.is_empty() {
-                let meta_handle = crate::win32::NEXT_HMETAFILE
-                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                let meta_handle = crate::win32::next_hmetafile_handle();
                 crate::win32::WIN32_METAFILES.lock().insert(
                     meta_handle,
                     crate::win32::Win32MetaFile {
@@ -24061,8 +24421,7 @@ mod gdi32 {
     }
 
     fn create_print_page_metafile(printer_name: &str) -> HMETAFILE {
-        let meta_handle =
-            crate::win32::NEXT_HMETAFILE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let meta_handle = crate::win32::next_hmetafile_handle();
         crate::win32::WIN32_METAFILES.lock().insert(
             meta_handle,
             crate::win32::Win32MetaFile {
@@ -24102,8 +24461,7 @@ mod gdi32 {
         } else {
             dc.device_name.clone()
         };
-        let job_id =
-            crate::win32::NEXT_PRINT_JOB.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let job_id = crate::win32::next_print_job_handle();
         crate::win32::WIN32_PRINT_JOBS.lock().insert(
             job_id,
             crate::win32::Win32PrintJob {
@@ -24257,7 +24615,7 @@ mod gdi32 {
                 1,
                 1,
             ));
-        let handle = crate::win32::NEXT_HDC.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let handle = crate::win32::next_hdc_handle();
         crate::win32::WIN32_DCS.lock().insert(
             handle,
             crate::win32::Win32DC {
@@ -25683,20 +26041,7 @@ fn reset_test_state() {
     *crt_exit_status_state().lock() = None;
     crt_atexit_state().lock().clear();
 
-    NEXT_INTERNET_HANDLE.store(0x3000_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_COM_COOKIE.store(1, core::sync::atomic::Ordering::Relaxed);
-    NEXT_COM_STREAM_ID.store(1, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HWND.store(0x0001_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HDC.store(0x0002_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HMENU.store(0x0003_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HBRUSH.store(0x0004_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HPEN.store(0x0005_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HFONT.store(0x0006_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HRGN.store(0x0007_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HPALETTE.store(0x0008_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HACCEL.store(0x0009_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_HMETAFILE.store(0x000A_0000, core::sync::atomic::Ordering::Relaxed);
-    NEXT_PRINT_JOB.store(0x000B_0000, core::sync::atomic::Ordering::Relaxed);
+    WIN32_COLD_ALLOCATORS.reset_for_tests();
     WINDOW_PUBLICATION_STATE.publish(WindowPublicationSnapshot::default());
     REPORTED_POINTER_PUBLICATION_STATE.update(|snapshot| {
         *snapshot = ReportedPointerSnapshot::default();

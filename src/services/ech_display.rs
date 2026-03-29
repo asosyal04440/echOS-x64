@@ -8,6 +8,8 @@
 //! - Pointer hit-test, drag and resize capture
 //! - Native window chrome actions
 
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -17,10 +19,11 @@ use spin::Mutex;
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::damage::DamageTracker;
 use crate::gui::protocol::{
-    AppId, DamagePacket, DisplayPresentMode, FrameIntent, InputEvent, KeyState, LayerRole,
-    OutputMode, PlaneAssignment, Point, PointerButton, Rect, SceneUpdate,
-    SharedSurfaceDescriptor, SurfaceId, VblankFeedback, WindowBufferMode, WindowFlags, WindowId,
-    WindowInfo, WorkspaceId,
+    AppId, DamageEpoch, DamagePacket, DisplayCapability, DisplayPresentMode, DisplayProfile,
+    FrameIntent, HdrPolicy, InputEvent, KeyState, LayerRole, MonitorPolicy, OutputMode,
+    PlaneAssignment, Point, PointerButton, Rect, SceneNodeId, SceneRootId, SceneUpdate,
+    SharedSurfaceDescriptor, SurfaceId, SurfaceTransform, VblankFeedback, VrrPolicy,
+    WindowBufferMode, WindowFlags, WindowId, WindowInfo, WorkspaceId,
 };
 use crate::gui::renderer::{CpuRenderer, GpuRenderer, Renderer};
 use crate::gui::shell;
@@ -40,6 +43,195 @@ use crate::services::ech_shell::{get_shell_service, ShellCommand, ShellResponse}
 
 const DISPLAY_COMMAND_QUEUE_CAPACITY: usize = 256;
 const DISPLAY_RESPONSE_QUEUE_CAPACITY: usize = 256;
+const COMPOSITION_DIAGNOSTIC_HISTORY: usize = 12;
+
+#[derive(Clone, Debug)]
+enum SurfaceContent {
+    Pixels(Vec<u32>),
+    Scene(SceneUpdate),
+}
+
+#[derive(Clone, Debug)]
+struct ComposedWindowSnapshot {
+    id: WindowId,
+    app_id: AppId,
+    surface_id: SurfaceId,
+    title: String,
+    frame_rect: Rect,
+    content_rect: Rect,
+    visible: bool,
+    focused: bool,
+    minimized: bool,
+    maximized: bool,
+    z_index: u32,
+    workspace_id: WorkspaceId,
+    layer_role: LayerRole,
+    flags: WindowFlags,
+    scene_node_id: SceneNodeId,
+    scene_root: Option<SceneRootId>,
+    semantic_root: Option<u64>,
+    buffer_mode: WindowBufferMode,
+    shared_mapped: bool,
+    gpu_buffer_handle: u64,
+    damage_epoch: DamageEpoch,
+    fence_id: u64,
+    content: SurfaceContent,
+}
+
+impl ComposedWindowSnapshot {
+    fn window_info(&self) -> WindowInfo {
+        WindowInfo {
+            id: self.id,
+            app_id: self.app_id,
+            surface_id: self.surface_id,
+            title: self.title.clone(),
+            frame_rect: self.frame_rect,
+            content_rect: self.content_rect,
+            visible: self.visible,
+            focused: self.focused,
+            minimized: self.minimized,
+            maximized: self.maximized,
+            z_index: self.z_index,
+            workspace_id: self.workspace_id,
+            layer_role: self.layer_role,
+            flags: self.flags,
+            scene_node_id: self.scene_node_id,
+            scene_root: self.scene_root,
+            semantic_root: self.semantic_root,
+            buffer_mode: self.buffer_mode,
+        }
+    }
+
+    fn placement(&self) -> SurfacePlacement {
+        SurfacePlacement {
+            surface_id: self.surface_id,
+            rect: self.frame_rect,
+            z_index: self.z_index,
+            opaque: !self.minimized,
+        }
+    }
+}
+
+fn layer_rank(role: LayerRole) -> u8 {
+    match role {
+        LayerRole::Background => 0,
+        LayerRole::Bottom => 1,
+        LayerRole::Window => 2,
+        LayerRole::TopBar | LayerRole::Dock => 3,
+        LayerRole::Overlay => 4,
+        LayerRole::Modal => 5,
+        LayerRole::WorkspaceScratchpad => 6,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompositionDiagnosticCode {
+    UnresolvedSurface,
+    DuplicateSurfaceResolution,
+    BufferModeMismatch,
+    StaleSharedSurface,
+    InconsistentSceneMetadata,
+}
+
+impl CompositionDiagnosticCode {
+    const fn index(self) -> usize {
+        match self {
+            Self::UnresolvedSurface => 0,
+            Self::DuplicateSurfaceResolution => 1,
+            Self::BufferModeMismatch => 2,
+            Self::StaleSharedSurface => 3,
+            Self::InconsistentSceneMetadata => 4,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::UnresolvedSurface => "unresolved-surface",
+            Self::DuplicateSurfaceResolution => "duplicate-surface",
+            Self::BufferModeMismatch => "buffer-mode-mismatch",
+            Self::StaleSharedSurface => "stale-shared-surface",
+            Self::InconsistentSceneMetadata => "inconsistent-scene-metadata",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompositionDiagnosticEvent {
+    code: CompositionDiagnosticCode,
+    window_id: WindowId,
+    surface_id: SurfaceId,
+}
+
+#[derive(Clone, Debug)]
+struct CompositionDiagnostics {
+    counts: [u64; 5],
+    recent: Vec<CompositionDiagnosticEvent>,
+}
+
+impl CompositionDiagnostics {
+    fn new() -> Self {
+        Self {
+            counts: [0; 5],
+            recent: Vec::new(),
+        }
+    }
+
+    fn record(
+        &mut self,
+        code: CompositionDiagnosticCode,
+        window_id: WindowId,
+        surface_id: SurfaceId,
+    ) {
+        self.counts[code.index()] = self.counts[code.index()].saturating_add(1);
+        if self.recent.len() >= COMPOSITION_DIAGNOSTIC_HISTORY {
+            self.recent.remove(0);
+        }
+        self.recent.push(CompositionDiagnosticEvent {
+            code,
+            window_id,
+            surface_id,
+        });
+    }
+
+    fn count(&self, code: CompositionDiagnosticCode) -> u64 {
+        self.counts[code.index()]
+    }
+
+    fn overlay_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for code in [
+            CompositionDiagnosticCode::UnresolvedSurface,
+            CompositionDiagnosticCode::DuplicateSurfaceResolution,
+            CompositionDiagnosticCode::BufferModeMismatch,
+            CompositionDiagnosticCode::StaleSharedSurface,
+            CompositionDiagnosticCode::InconsistentSceneMetadata,
+        ] {
+            let count = self.count(code);
+            if count > 0 {
+                lines.push(format!("{}: {}", code.label(), count));
+            }
+        }
+        if let Some(last) = self.recent.last() {
+            lines.push(format!(
+                "last={} w{} s{}",
+                last.code.label(),
+                last.window_id,
+                last.surface_id
+            ));
+        }
+        lines
+    }
+}
+
+struct PresentPlan {
+    theme_mode: ThemeMode,
+    native_scanout_available: bool,
+    cursor: Point,
+    placements: Vec<SurfacePlacement>,
+    snapshots: Vec<ComposedWindowSnapshot>,
+    diagnostics_overlay: Vec<String>,
+    show_desktop_dashboard: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputRouting {
@@ -156,6 +348,9 @@ pub enum DisplayCommand {
     SetOutputMode {
         mode: OutputMode,
     },
+    SetDisplayProfile {
+        profile: DisplayProfile,
+    },
     SetThemeMode {
         mode: ThemeMode,
     },
@@ -167,6 +362,8 @@ pub enum DisplayCommand {
     },
     QueryOutputMode,
     ListOutputModes,
+    QueryDisplayCapability,
+    QueryDisplayProfile,
     QueryPresentMetrics,
     ListWindows,
     ListSurfaces,
@@ -207,6 +404,8 @@ pub enum DisplayResponse {
     OutputModeCatalog {
         modes: Vec<OutputMode>,
     },
+    DisplayCapability(DisplayCapability),
+    DisplayProfile(DisplayProfile),
     PresentMetrics {
         metrics: HotPathMetrics,
     },
@@ -220,6 +419,7 @@ pub struct EchDisplay {
     physical_output_mode: OutputMode,
     requested_output_mode: Mutex<OutputMode>,
     effective_output_mode: Mutex<OutputMode>,
+    display_profile: Mutex<DisplayProfile>,
     surfaces: Mutex<SurfaceManager>,
     windows: Mutex<WindowManager>,
     damage: Mutex<DamageTracker>,
@@ -229,6 +429,8 @@ pub struct EchDisplay {
     swallow_left_release: Mutex<bool>,
     atomic_presenter: Mutex<AtomicPresenter>,
     theme_mode: Mutex<ThemeMode>,
+    diagnostics: Mutex<CompositionDiagnostics>,
+    joined_damage_epochs: Mutex<BTreeMap<SurfaceId, DamageEpoch>>,
     last_presented_frame: AtomicU64,
     command_queue: MailboxRing<DisplayCommand>,
     response_queue: MailboxRing<DisplayResponse>,
@@ -254,6 +456,7 @@ impl EchDisplay {
             physical_output_mode,
             requested_output_mode: Mutex::new(physical_output_mode),
             effective_output_mode: Mutex::new(physical_output_mode),
+            display_profile: Mutex::new(DisplayProfile::single_output(physical_output_mode)),
             surfaces: Mutex::new(SurfaceManager::new()),
             windows: Mutex::new(WindowManager::new()),
             damage: Mutex::new(DamageTracker::new()),
@@ -263,6 +466,8 @@ impl EchDisplay {
             swallow_left_release: Mutex::new(false),
             atomic_presenter: Mutex::new(AtomicPresenter::new()),
             theme_mode: Mutex::new(Theme::default_mode()),
+            diagnostics: Mutex::new(CompositionDiagnostics::new()),
+            joined_damage_epochs: Mutex::new(BTreeMap::new()),
             last_presented_frame: AtomicU64::new(0),
             command_queue: MailboxRing::with_capacity_pow2(DISPLAY_COMMAND_QUEUE_CAPACITY),
             response_queue: MailboxRing::with_capacity_pow2(DISPLAY_RESPONSE_QUEUE_CAPACITY),
@@ -297,6 +502,187 @@ impl EchDisplay {
         cursor.x = cursor.x.clamp(0, screen_rect.right().saturating_sub(1));
         cursor.y = cursor.y.clamp(0, screen_rect.bottom().saturating_sub(1));
         self.damage.lock().mark_rect(screen_rect);
+    }
+
+    fn record_composition_diagnostic(
+        &self,
+        code: CompositionDiagnosticCode,
+        window_id: WindowId,
+        surface_id: SurfaceId,
+    ) {
+        self.diagnostics.lock().record(code, window_id, surface_id);
+        crate::serial_println!(
+            "[ECHDISPLAY][DIAG] code={} window={} surface={}",
+            code.label(),
+            window_id,
+            surface_id
+        );
+    }
+
+    fn is_debug_diagnostics_enabled(&self) -> bool {
+        cfg!(debug_assertions)
+    }
+
+    fn snapshot_join(&self, presentable_only: bool) -> Vec<ComposedWindowSnapshot> {
+        let windows = self.windows.lock().ordered_windows();
+        let surfaces = self.surfaces.lock();
+        let mut epochs = self.joined_damage_epochs.lock();
+        let mut seen_surfaces = BTreeSet::new();
+        let mut snapshots = Vec::new();
+
+        for window in windows.into_iter() {
+            if presentable_only && (!window.visible || window.minimized) {
+                continue;
+            }
+
+            let Some(surface) = surfaces.snapshot(window.surface_id) else {
+                self.record_composition_diagnostic(
+                    CompositionDiagnosticCode::UnresolvedSurface,
+                    window.id,
+                    window.surface_id,
+                );
+                continue;
+            };
+
+            if !seen_surfaces.insert(surface.id) {
+                self.record_composition_diagnostic(
+                    CompositionDiagnosticCode::DuplicateSurfaceResolution,
+                    window.id,
+                    surface.id,
+                );
+                continue;
+            }
+
+            let buffer_mode = if surface.scene_update.is_some() {
+                WindowBufferMode::Scene
+            } else {
+                WindowBufferMode::Pixels
+            };
+            let scene_root = surface.scene_update.as_ref().map(|scene| scene.root_id);
+            let semantic_root = surface
+                .scene_update
+                .as_ref()
+                .and_then(|scene| scene.semantic_root);
+
+            if matches!(buffer_mode, WindowBufferMode::Pixels)
+                && (scene_root.is_some() || semantic_root.is_some())
+            {
+                self.record_composition_diagnostic(
+                    CompositionDiagnosticCode::BufferModeMismatch,
+                    window.id,
+                    surface.id,
+                );
+            }
+
+            if matches!(buffer_mode, WindowBufferMode::Scene) && scene_root.is_none() {
+                self.record_composition_diagnostic(
+                    CompositionDiagnosticCode::InconsistentSceneMetadata,
+                    window.id,
+                    surface.id,
+                );
+                continue;
+            }
+
+            let expected_len = surface.rect.width as usize * surface.rect.height as usize;
+            if matches!(buffer_mode, WindowBufferMode::Pixels)
+                && surface.pixels.len() != expected_len
+            {
+                self.record_composition_diagnostic(
+                    CompositionDiagnosticCode::StaleSharedSurface,
+                    window.id,
+                    surface.id,
+                );
+                continue;
+            }
+
+            if let Some(previous_epoch) = epochs.get(&surface.id).copied() {
+                if surface.damage_epoch < previous_epoch {
+                    self.record_composition_diagnostic(
+                        CompositionDiagnosticCode::StaleSharedSurface,
+                        window.id,
+                        surface.id,
+                    );
+                    continue;
+                }
+            }
+            epochs.insert(surface.id, surface.damage_epoch);
+
+            let content = match surface.scene_update {
+                Some(scene) => SurfaceContent::Scene(scene),
+                None => SurfaceContent::Pixels(surface.pixels),
+            };
+
+            snapshots.push(ComposedWindowSnapshot {
+                id: window.id,
+                app_id: window.app_id,
+                surface_id: window.surface_id,
+                title: window.title,
+                frame_rect: window.frame_rect,
+                content_rect: window.content_rect,
+                visible: window.visible,
+                focused: window.focused,
+                minimized: window.minimized,
+                maximized: window.maximized,
+                z_index: window.z_index,
+                workspace_id: window.workspace_id,
+                layer_role: window.layer_role,
+                flags: window.flags,
+                scene_node_id: window.scene_node_id,
+                scene_root,
+                semantic_root,
+                buffer_mode,
+                shared_mapped: surface.shared.is_some(),
+                gpu_buffer_handle: surface.gpu_buffer_handle,
+                damage_epoch: surface.damage_epoch,
+                fence_id: surface.fence_id,
+                content,
+            });
+        }
+
+        snapshots
+    }
+
+    fn ordering(&self, presentable_only: bool) -> Vec<ComposedWindowSnapshot> {
+        let mut snapshots = self.snapshot_join(presentable_only);
+        snapshots.sort_by_key(|window| (layer_rank(window.layer_role), window.z_index, window.id));
+        snapshots
+    }
+
+    fn damage_translate(&self, content_rect: Rect, local_damage: &[Rect]) -> Vec<Rect> {
+        local_damage
+            .iter()
+            .copied()
+            .filter_map(|rect| {
+                let translated = Rect::new(
+                    content_rect.x.saturating_add(rect.x),
+                    content_rect.y.saturating_add(rect.y),
+                    rect.width.min(content_rect.width),
+                    rect.height.min(content_rect.height),
+                );
+                (!translated.is_empty()).then_some(translated)
+            })
+            .collect()
+    }
+
+    fn present_plan(&self, _screen_rect: Rect) -> PresentPlan {
+        let snapshots = self.ordering(true);
+        let placements = snapshots
+            .iter()
+            .map(ComposedWindowSnapshot::placement)
+            .collect();
+        PresentPlan {
+            theme_mode: *self.theme_mode.lock(),
+            native_scanout_available: crate::drivers::gpu_native::device_count() > 0,
+            cursor: *self.cursor_position.lock(),
+            placements,
+            diagnostics_overlay: if self.is_debug_diagnostics_enabled() {
+                self.diagnostics.lock().overlay_lines()
+            } else {
+                Vec::new()
+            },
+            snapshots,
+            show_desktop_dashboard: false,
+        }
     }
 
     fn supported_output_modes(&self) -> Vec<OutputMode> {
@@ -334,6 +720,114 @@ impl EchDisplay {
                 .then(rhs.refresh_hz.cmp(&lhs.refresh_hz))
         });
         modes
+    }
+
+    fn detect_display_capability(&self) -> DisplayCapability {
+        let supported_modes = self.supported_output_modes();
+        let mut capability = DisplayCapability {
+            max_refresh_hz: supported_modes
+                .iter()
+                .map(|mode| mode.refresh_hz)
+                .max()
+                .unwrap_or(self.physical_output_mode.refresh_hz),
+            supported_modes: supported_modes.clone(),
+            direct_scanout: crate::drivers::gpu_native::device_count() > 0,
+            ..DisplayCapability::default()
+        };
+
+        if let Some(device) = crate::drivers::drm::DRM_MANAGER.first_device() {
+            let connected_outputs = device.connected_connector_count().max(1);
+            capability.connected_outputs = connected_outputs.min(u8::MAX as usize) as u8;
+            capability.multi_monitor = connected_outputs > 1;
+            capability.mirror = connected_outputs > 1;
+            capability.rotation = device.connected_connector_count() > 0;
+            capability.adaptive_sync = true;
+            capability.max_refresh_hz = capability.max_refresh_hz.max(device.max_mode_refresh_hz());
+            capability.direct_scanout = capability.direct_scanout
+                || !device
+                    .plane_ids_by_type(crate::drivers::drm::DrmPlaneType::Primary)
+                    .is_empty();
+            capability.hdr_output = false;
+            capability.hdr_metadata = false;
+            capability.ten_bit_scanout = false;
+            capability.icc_profile = false;
+            capability.color_transform = false;
+        }
+
+        capability
+    }
+
+    fn sanitize_display_profile(&self, mut profile: DisplayProfile) -> DisplayProfile {
+        let capability = self.detect_display_capability();
+        let current_mode = *self.effective_output_mode.lock();
+
+        if profile.outputs.is_empty() {
+            profile
+                .outputs
+                .push(MonitorPolicy::single_output(current_mode));
+        }
+
+        for output in profile.outputs.iter_mut() {
+            if !capability.fractional_scaling {
+                output.scale_100x = 100;
+            }
+            if !capability.adaptive_sync {
+                output.vrr_policy = VrrPolicy::Off;
+            }
+            if !capability.hdr_output || !capability.hdr_metadata {
+                output.hdr_policy = HdrPolicy::Off;
+            }
+            if !capability.rotation {
+                output.transform = SurfaceTransform::Identity;
+            }
+            if !capability.multi_monitor {
+                output.mirror_target = None;
+            }
+
+            output.refresh_hz = output
+                .refresh_hz
+                .clamp(1, capability.max_refresh_hz.max(current_mode.refresh_hz));
+            output.scale_100x = capability
+                .supported_scales_100x
+                .iter()
+                .copied()
+                .min_by_key(|scale| scale.abs_diff(output.scale_100x))
+                .unwrap_or(100);
+            output.text_scale_100x = output.text_scale_100x.clamp(75, 300);
+        }
+
+        profile.capability = capability;
+        if !profile
+            .outputs
+            .iter()
+            .any(|output| output.output_id == profile.primary_output)
+        {
+            profile.primary_output = profile.outputs[0].output_id;
+        }
+        profile
+    }
+
+    fn sync_shell_display_profile(&self, profile: DisplayProfile) {
+        let _ =
+            get_shell_service().process_command(ShellCommand::SetDisplayProfileState { profile });
+    }
+
+    fn query_display_capability(&self) -> DisplayResponse {
+        DisplayResponse::DisplayCapability(self.detect_display_capability())
+    }
+
+    fn query_display_profile(&self) -> DisplayResponse {
+        let profile = self.sanitize_display_profile(self.display_profile.lock().clone());
+        *self.display_profile.lock() = profile.clone();
+        self.sync_shell_display_profile(profile.clone());
+        DisplayResponse::DisplayProfile(profile)
+    }
+
+    fn set_display_profile(&self, profile: DisplayProfile) -> DisplayResponse {
+        let profile = self.sanitize_display_profile(profile);
+        *self.display_profile.lock() = profile.clone();
+        self.sync_shell_display_profile(profile.clone());
+        DisplayResponse::DisplayProfile(profile)
     }
 
     pub fn send_command(&self, command: DisplayCommand) -> bool {
@@ -436,6 +930,7 @@ impl EchDisplay {
             }
             DisplayCommand::SetPresentMode { mode } => self.set_present_mode(mode),
             DisplayCommand::SetOutputMode { mode } => self.set_output_mode(mode),
+            DisplayCommand::SetDisplayProfile { profile } => self.set_display_profile(profile),
             DisplayCommand::SetThemeMode { mode } => self.set_theme_mode(mode),
             DisplayCommand::SubmitFrameIntent { intent } => self.submit_frame_intent(intent),
             DisplayCommand::RouteInputEvent { event } => {
@@ -443,6 +938,8 @@ impl EchDisplay {
             }
             DisplayCommand::QueryOutputMode => self.query_output_mode(),
             DisplayCommand::ListOutputModes => self.list_output_modes(),
+            DisplayCommand::QueryDisplayCapability => self.query_display_capability(),
+            DisplayCommand::QueryDisplayProfile => self.query_display_profile(),
             DisplayCommand::QueryPresentMetrics => self.query_present_metrics(),
             DisplayCommand::ListWindows => {
                 let windows = self.list_windows_with_buffers();
@@ -765,18 +1262,7 @@ impl EchDisplay {
                 if scene_damage.is_empty() {
                     self.damage.lock().mark_rect(content_rect);
                 } else {
-                    let global_damage = scene_damage
-                        .into_iter()
-                        .filter_map(|rect| {
-                            let translated = Rect::new(
-                                content_rect.x.saturating_add(rect.x),
-                                content_rect.y.saturating_add(rect.y),
-                                rect.width.min(content_rect.width),
-                                rect.height.min(content_rect.height),
-                            );
-                            (!translated.is_empty()).then_some(translated)
-                        })
-                        .collect::<Vec<_>>();
+                    let global_damage = self.damage_translate(content_rect, &scene_damage);
                     if global_damage.is_empty() {
                         self.damage.lock().mark_rect(content_rect);
                     } else {
@@ -805,23 +1291,10 @@ impl EchDisplay {
     }
 
     fn list_windows_with_buffers(&self) -> Vec<WindowInfo> {
-        let mut windows = self.windows.lock().ordered_windows();
-        let surfaces = self.surfaces.lock();
-        for window in windows.iter_mut() {
-            if let Some(surface) = surfaces.snapshot(window.surface_id) {
-                window.scene_root = surface.scene_update.as_ref().map(|scene| scene.root_id);
-                window.semantic_root = surface
-                    .scene_update
-                    .as_ref()
-                    .and_then(|scene| scene.semantic_root);
-                window.buffer_mode = if surface.scene_update.is_some() {
-                    WindowBufferMode::Scene
-                } else {
-                    WindowBufferMode::Pixels
-                };
-            }
-        }
-        windows
+        self.ordering(false)
+            .into_iter()
+            .map(|snapshot| snapshot.window_info())
+            .collect()
     }
 
     fn submit_window_damage(&self, window_id: WindowId, packet: DamagePacket) -> DisplayResponse {
@@ -864,15 +1337,17 @@ impl EchDisplay {
             self.surfaces.lock().clear_dirty();
             return self.service_present_queue();
         }
-        let theme_mode = *self.theme_mode.lock();
-        let native_scanout_available = crate::drivers::gpu_native::device_count() > 0;
+        let plan = self.present_plan(screen_rect);
 
-        let placements = self.collect_surface_placements();
-        let cursor = *self.cursor_position.lock();
-        if native_scanout_available {
+        if plan.native_scanout_available {
             {
                 let mut presenter = self.atomic_presenter.lock();
-                let intent = presenter.build_intent(screen_rect, &damage_regions, &placements, cursor);
+                let intent = presenter.build_intent(
+                    screen_rect,
+                    &damage_regions,
+                    &plan.placements,
+                    plan.cursor,
+                );
                 presenter.enqueue(intent);
             }
 
@@ -894,22 +1369,6 @@ impl EchDisplay {
             }
         }
 
-        let windows = self.windows.lock().ordered_windows();
-        let surfaces = self.surfaces.lock();
-        let snapshots: Vec<(WindowInfo, Vec<u32>, Option<SceneUpdate>)> = windows
-            .into_iter()
-            .filter(|window| window.visible)
-            .filter_map(|window| {
-                surfaces
-                    .snapshot(window.surface_id)
-                    .map(|surface| (window, surface.pixels, surface.scene_update))
-            })
-            .collect();
-
-        // Desktop shortcuts now live in a dedicated background shell surface; the
-        // wallpaper path should stay atmosphere-only.
-        let show_desktop_dashboard = false;
-
         {
             let mut fb = self.framebuffer.lock();
             let mut cpu_renderer = CpuRenderer::new();
@@ -920,12 +1379,13 @@ impl EchDisplay {
                     &mut fb,
                     screen_rect,
                     *damage,
-                    theme_mode,
-                    show_desktop_dashboard,
+                    plan.theme_mode,
+                    plan.show_desktop_dashboard,
                 );
-                for (window, pixels, scene) in snapshots.iter() {
-                    if window.frame_rect.intersects(damage) {
-                        if let Some(scene) = scene.as_ref() {
+                for snapshot in plan.snapshots.iter() {
+                    if snapshot.frame_rect.intersects(damage) {
+                        let window = snapshot.window_info();
+                        if let SurfaceContent::Scene(scene) = &snapshot.content {
                             match window.layer_role {
                                 LayerRole::TopBar
                                 | LayerRole::Dock
@@ -934,40 +1394,45 @@ impl EchDisplay {
                                 | LayerRole::WorkspaceScratchpad => draw_window_scene(
                                     &mut fb,
                                     &mut gpu_renderer,
-                                    window,
+                                    &window,
                                     scene,
                                     &mut title_text_system,
                                     *damage,
-                                    theme_mode,
+                                    plan.theme_mode,
                                 ),
                                 _ => draw_window_scene(
                                     &mut fb,
                                     &mut cpu_renderer,
-                                    window,
+                                    &window,
                                     scene,
                                     &mut title_text_system,
                                     *damage,
-                                    theme_mode,
+                                    plan.theme_mode,
                                 ),
                             }
-                        } else {
+                        } else if let SurfaceContent::Pixels(pixels) = &snapshot.content {
                             draw_window(
                                 &mut fb,
-                                window,
+                                &window,
                                 pixels,
                                 &mut title_text_system,
                                 *damage,
-                                theme_mode,
+                                plan.theme_mode,
                             );
                         }
                     }
                 }
-                draw_cursor(&mut fb, cursor, *damage);
+                draw_diagnostics_overlay(
+                    &mut fb,
+                    &mut title_text_system,
+                    *damage,
+                    &plan.diagnostics_overlay,
+                );
+                draw_cursor(&mut fb, plan.cursor, *damage);
             }
             fb.swap_buffers();
         }
 
-        drop(surfaces);
         self.surfaces.lock().clear_dirty();
         DisplayResponse::Ack
     }
@@ -1099,6 +1564,27 @@ impl EchDisplay {
         *self.effective_output_mode.lock() = mode;
         *self.screen_rect.lock() = new_rect;
         sync_output_geometry(mode.width, mode.height);
+        {
+            let current = self.display_profile.lock().clone();
+            let primary_output = current.primary_output;
+            let updated_outputs = current
+                .outputs
+                .into_iter()
+                .map(|mut output| {
+                    if output.output_id == primary_output {
+                        output.refresh_hz = mode.refresh_hz;
+                    }
+                    output
+                })
+                .collect();
+            let updated = self.sanitize_display_profile(DisplayProfile {
+                primary_output,
+                outputs: updated_outputs,
+                capability: current.capability,
+            });
+            *self.display_profile.lock() = updated.clone();
+            self.sync_shell_display_profile(updated);
+        }
         {
             let mut cursor = self.cursor_position.lock();
             cursor.x = cursor.x.clamp(0, new_rect.right().saturating_sub(1));
@@ -1426,17 +1912,9 @@ impl EchDisplay {
     }
 
     fn collect_surface_placements(&self) -> Vec<SurfacePlacement> {
-        self.windows
-            .lock()
-            .ordered_windows()
+        self.ordering(true)
             .into_iter()
-            .filter(|window| window.visible)
-            .map(|window| SurfacePlacement {
-                surface_id: window.surface_id,
-                rect: window.frame_rect,
-                z_index: window.z_index,
-                opaque: !window.minimized,
-            })
+            .map(|snapshot| snapshot.placement())
             .collect()
     }
 
@@ -1458,12 +1936,8 @@ impl EchDisplay {
     fn update_cursor(&self, position: Point) {
         let screen_rect = self.screen_rect();
         let clamped = Point::new(
-            position
-                .x
-                .clamp(0, screen_rect.right().saturating_sub(1)),
-            position
-                .y
-                .clamp(0, screen_rect.bottom().saturating_sub(1)),
+            position.x.clamp(0, screen_rect.right().saturating_sub(1)),
+            position.y.clamp(0, screen_rect.bottom().saturating_sub(1)),
         );
         let mut cursor = self.cursor_position.lock();
         let old_rect = cursor_rect(*cursor);
@@ -1863,6 +2337,71 @@ fn draw_window_title(
     }
 }
 
+fn draw_diagnostics_overlay(
+    fb: &mut Framebuffer,
+    text_system: &mut TextSystem,
+    damage: Rect,
+    lines: &[String],
+) {
+    if lines.is_empty() {
+        return;
+    }
+
+    let max_chars = lines.iter().map(|line| line.len()).max().unwrap_or(0) as u32;
+    let line_height = 18u32;
+    let panel_width = (max_chars.saturating_mul(8)).saturating_add(24).max(180);
+    let panel_height = line_height
+        .saturating_mul(lines.len() as u32)
+        .saturating_add(16);
+    let panel = Rect::new(12, 12, panel_width, panel_height);
+    let Some(panel_damage) = panel.intersection(&damage) else {
+        return;
+    };
+
+    fill_rect_clipped(fb, panel, panel_damage, 0xCC111827);
+    draw_rect_outline_clipped(fb, panel, panel_damage, 0xFF60A5FA);
+
+    for (index, line) in lines.iter().enumerate() {
+        let blob = text_system.layout_text_with_style(
+            line,
+            panel.width.saturating_sub(16).max(1),
+            TextStyle::mono(),
+            0xFFF8FAFC,
+        );
+        let line_rect = Rect::new(
+            panel.x + 8,
+            panel.y + 8 + (index as i32 * line_height as i32),
+            blob.width_px.max(1),
+            blob.height_px.max(1),
+        );
+        let Some(render_rect) = line_rect.intersection(&panel_damage) else {
+            continue;
+        };
+        let offset_x = (render_rect.x - line_rect.x) as usize;
+        let offset_y = (render_rect.y - line_rect.y) as usize;
+        let width = blob.width_px as usize;
+        for row in 0..render_rect.height as usize {
+            let src_row = (offset_y + row) * width;
+            let dst_y = render_rect.y.max(0) as usize + row;
+            if dst_y >= fb.height {
+                break;
+            }
+            for col in 0..render_rect.width as usize {
+                let src_idx = src_row + offset_x + col;
+                let dst_x = render_rect.x.max(0) as usize + col;
+                if dst_x >= fb.width || src_idx >= blob.pixels.len() {
+                    break;
+                }
+                let source = blob.pixels[src_idx];
+                if ((source >> 24) & 0xFF) == 0 {
+                    continue;
+                }
+                fb.plot_pixel(dst_x, dst_y, source);
+            }
+        }
+    }
+}
+
 fn draw_window_content(fb: &mut Framebuffer, content_rect: Rect, pixels: &[u32], damage: Rect) {
     let Some(clip) = content_rect.intersection(&damage) else {
         return;
@@ -2219,19 +2758,26 @@ pub fn service_task() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{sync_output_geometry, DisplayCommand, DisplayResponse, EchDisplay, InputRouting};
-    use crate::drivers::mouse::{get_bounds, get_position, set_bounds, MOUSE_X, MOUSE_Y};
+    use super::{
+        sync_output_geometry, CompositionDiagnosticCode, DisplayCommand, DisplayResponse,
+        EchDisplay, InputRouting,
+    };
+    use crate::drivers::mouse::{
+        get_bounds, get_position, publish_state, set_bounds, MouseButtons,
+    };
     use crate::gfx::scaling::get_scale_factor;
+    use crate::gfx::shell_scene::raster_surface_scene;
     use crate::gop::framebuffer::Framebuffer;
-    use crate::gui::protocol::{InputEvent, KeyState, OutputMode};
+    use crate::gui::protocol::{
+        DamageLane, DisplayProfile, HdrPolicy, InputEvent, KeyState, OutputMode,
+    };
+    use alloc::string::String;
     use alloc::sync::Arc;
-    use core::sync::atomic::Ordering;
     use spin::Mutex;
 
     #[test]
     fn sync_output_geometry_updates_mouse_bounds_and_scale() {
-        MOUSE_X.store(4096, Ordering::Relaxed);
-        MOUSE_Y.store(4096, Ordering::Relaxed);
+        publish_state(4096, 4096, MouseButtons::default());
 
         sync_output_geometry(1920, 1080);
 
@@ -2251,8 +2797,7 @@ mod tests {
 
     #[test]
     fn set_output_mode_updates_effective_rect_and_mouse_bounds() {
-        MOUSE_X.store(4096, Ordering::Relaxed);
-        MOUSE_Y.store(4096, Ordering::Relaxed);
+        publish_state(4096, 4096, MouseButtons::default());
 
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
         let response = display.set_output_mode(OutputMode::new(1280, 720, 60));
@@ -2269,14 +2814,16 @@ mod tests {
         assert_eq!(requested, OutputMode::new(1280, 720, 60));
         assert_eq!(effective, OutputMode::new(1280, 720, 60));
 
-        assert_eq!(display.screen_rect(), crate::gui::protocol::Rect::new(0, 0, 1280, 720));
+        assert_eq!(
+            display.screen_rect(),
+            crate::gui::protocol::Rect::new(0, 0, 1280, 720)
+        );
         assert_eq!(get_position(), (1279, 719));
     }
 
     #[test]
     fn ensure_runtime_pointer_geometry_resyncs_bounds_when_runtime_drift_detected() {
-        MOUSE_X.store(4096, Ordering::Relaxed);
-        MOUSE_Y.store(4096, Ordering::Relaxed);
+        publish_state(4096, 4096, MouseButtons::default());
 
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
 
@@ -2285,7 +2832,10 @@ mod tests {
 
         assert_eq!(get_bounds(), (1920, 1080));
         assert_eq!(get_position(), (1279, 799));
-        assert_eq!(display.screen_rect(), crate::gui::protocol::Rect::new(0, 0, 1920, 1080));
+        assert_eq!(
+            display.screen_rect(),
+            crate::gui::protocol::Rect::new(0, 0, 1920, 1080)
+        );
     }
 
     #[test]
@@ -2300,6 +2850,131 @@ mod tests {
             },
         });
 
-        assert!(matches!(response, DisplayResponse::InputRoute(InputRouting::None)));
+        assert!(matches!(
+            response,
+            DisplayResponse::InputRoute(InputRouting::None)
+        ));
+    }
+
+    #[test]
+    fn list_windows_reflects_scene_surface_metadata_from_joined_snapshot() {
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1280, 720))));
+        let response = display.process_command(DisplayCommand::CreateWindow {
+            app_id: 77,
+            title: String::from("Scene Window"),
+            x: 40,
+            y: 48,
+            width: 320,
+            height: 220,
+        });
+        let DisplayResponse::WindowCreated {
+            window_id,
+            content_rect,
+            ..
+        } = response
+        else {
+            unreachable!("window should be created")
+        };
+        let scene = raster_surface_scene(
+            window_id,
+            content_rect.width as usize,
+            content_rect.height as usize,
+            alloc::vec![0xFF223344; (content_rect.width * content_rect.height) as usize],
+            DamageLane::Shell,
+        );
+        let _ = display.process_command(DisplayCommand::CommitScene { window_id, scene });
+
+        let DisplayResponse::WindowList { windows } =
+            display.process_command(DisplayCommand::ListWindows)
+        else {
+            unreachable!("window listing should succeed")
+        };
+        let window = windows
+            .into_iter()
+            .find(|window| window.id == window_id)
+            .expect("joined window info");
+        assert_eq!(
+            window.buffer_mode,
+            crate::gui::protocol::WindowBufferMode::Scene
+        );
+        assert_eq!(window.scene_root, Some(window_id));
+        assert!(window.semantic_root.is_none());
+    }
+
+    #[test]
+    fn unresolved_visible_windows_emit_diagnostic_and_are_excluded_from_present() {
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1280, 720))));
+        let response = display.process_command(DisplayCommand::CreateWindow {
+            app_id: 88,
+            title: String::from("Broken Window"),
+            x: 64,
+            y: 72,
+            width: 300,
+            height: 180,
+        });
+        let DisplayResponse::WindowCreated { window_id, .. } = response else {
+            unreachable!("window should be created")
+        };
+        let surface_id = display
+            .windows
+            .lock()
+            .ordered_windows()
+            .into_iter()
+            .find(|window| window.id == window_id)
+            .expect("window metadata")
+            .surface_id;
+        let _ = display.surfaces.lock().destroy_surface(surface_id);
+        display
+            .damage
+            .lock()
+            .mark_rect(crate::gui::protocol::Rect::new(0, 0, 1280, 720));
+
+        let response = display.process_command(DisplayCommand::Present);
+        assert!(matches!(
+            response,
+            DisplayResponse::Ack | DisplayResponse::Presented { .. }
+        ));
+        assert_eq!(
+            display
+                .diagnostics
+                .lock()
+                .count(CompositionDiagnosticCode::UnresolvedSurface),
+            1
+        );
+    }
+
+    #[test]
+    fn query_display_capability_reports_supported_modes() {
+        crate::drivers::drm::init();
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
+
+        let DisplayResponse::DisplayCapability(capability) =
+            display.process_command(DisplayCommand::QueryDisplayCapability)
+        else {
+            unreachable!("display capability should be returned")
+        };
+
+        assert!(capability.connected_outputs >= 1);
+        assert!(capability.fractional_scaling);
+        assert!(capability
+            .supported_modes
+            .contains(&OutputMode::new(1280, 720, 60)));
+    }
+
+    #[test]
+    fn set_display_profile_disables_unsupported_hdr_policy() {
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
+        let mut profile = DisplayProfile::single_output(OutputMode::new(1920, 1080, 60));
+        profile.outputs[0].scale_100x = 163;
+        profile.outputs[0].hdr_policy = HdrPolicy::On;
+
+        let DisplayResponse::DisplayProfile(updated) =
+            display.process_command(DisplayCommand::SetDisplayProfile { profile })
+        else {
+            unreachable!("display profile should be returned")
+        };
+
+        assert_eq!(updated.outputs[0].hdr_policy, HdrPolicy::Off);
+        assert!(matches!(updated.outputs[0].scale_100x, 150 | 175));
     }
 }

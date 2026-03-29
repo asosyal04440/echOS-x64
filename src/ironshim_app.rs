@@ -1,7 +1,10 @@
 //! IronShim app personality bridge for packaged PE/ELF runtimes.
 
-use crate::gui::launch_pipeline::AbiPersonality;
-use crate::runtime::{BrokeredLaunch, CapabilityTokenId, ProcessBrokerTicket};
+use super::ecosystem_exactness;
+use super::gui::launch_pipeline::AbiPersonality;
+use super::runtime_layer::process_broker_contract::{
+    BrokeredLaunch, CapabilityTokenId, ProcessBroker, ProcessBrokerTicket,
+};
 use alloc::vec::Vec;
 use ironshim_rs::{enforce_syscall, AuditEvent, AuditSink, Error, SyscallPolicy, SyscallRequest};
 
@@ -43,7 +46,10 @@ pub struct IronShimLaunchEnvelope {
     pub adapter: AdapterKind,
 }
 
-pub fn prepare_packaged_bridge(launch: &BrokeredLaunch, personality: AbiPersonality) -> IronShimLaunchEnvelope {
+pub fn prepare_packaged_bridge(
+    launch: &BrokeredLaunch,
+    personality: AbiPersonality,
+) -> IronShimLaunchEnvelope {
     IronShimLaunchEnvelope {
         ticket: launch.ticket,
         capability_token: launch.token.id,
@@ -100,14 +106,17 @@ pub fn translate_posix_request(syscall_number: u32, arg0: usize) -> SyscallReque
     }
 }
 
-pub fn enforce_bridge_request(launch: &BrokeredLaunch, request: &SyscallRequest) -> Result<(), Error> {
+pub fn enforce_bridge_request(
+    launch: &BrokeredLaunch,
+    request: &SyscallRequest,
+) -> Result<(), Error> {
     let policy = AppBridgePolicy {
         launch: launch.clone(),
     };
     let audit = AuditRecorder::default();
     let result = enforce_syscall(&policy, &audit, request);
     if matches!(result, Err(Error::Unsupported)) {
-        crate::ecosystem_exactness::record_ironshim_unsupported(alloc::format!(
+        ecosystem_exactness::record_ironshim_unsupported(alloc::format!(
             "{:?}:req={}",
             launch.process_class,
             request.args[0]
@@ -167,18 +176,21 @@ impl AuditSink for AuditRecorder {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ecosystem_exactness::{
+        reset_runtime_counters, snapshot, ExactnessSurfaceKind,
+    };
+    use super::super::gui::launch_pipeline::{
+        AbiPersonality, AppDescriptor, AppPresentation, CapabilityProfile, ExecutionContext,
+        LaunchIntent, LaunchSource, LoaderDispatch,
+    };
+    use super::super::runtime_layer::launch_contract::IsolationDomain;
+    use super::super::runtime_layer::process_broker_contract::{BrokeredLaunch, ProcessBroker};
     use super::{
         enforce_bridge_request, prepare_packaged_bridge, translate_posix_request,
         translate_win32_request, ABI_OPEN_DIALOG, ABI_OPEN_FILE_GRANT, ABI_UNSUPPORTED,
     };
-    use crate::ecosystem_exactness::{reset_runtime_counters, snapshot, ExactnessSurfaceKind};
-    use crate::gui::launch_pipeline::{
-        AbiPersonality, AppDescriptor, AppPresentation, CapabilityProfile, ExecutionContext,
-        LaunchIntent, LaunchSource, LoaderDispatch,
-    };
-    use crate::runtime::{IsolationDomain, ProcessBroker};
 
-    fn brokered_launch(profile: CapabilityProfile) -> crate::runtime::BrokeredLaunch {
+    fn brokered_launch(profile: CapabilityProfile) -> BrokeredLaunch {
         let descriptor = AppDescriptor::new(
             19,
             "demo",

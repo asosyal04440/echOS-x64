@@ -46,7 +46,9 @@
 //! ```
 
 use super::deque::{Stealer, Worker};
-use super::task::{ExecutionMode, Priority, Task, TaskContext, TaskId, TaskState};
+use super::task::{
+    ExecutionMode, Priority, Task, TaskContext, TaskId, TaskState, Win32ThreadState,
+};
 use crate::cpu::{cpu_slots, epoch::SMP_EPOCH_DOMAIN};
 use crate::memory_barriers::{smp_mb, smp_wmb};
 use alloc::boxed::Box;
@@ -57,10 +59,12 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::OffsetPageTable;
+use x86_64::registers::model_specific::Msr;
+use x86_64::structures::paging::{OffsetPageTable, PhysFrame};
 use x86_64::VirtAddr;
 
 const MAX_CPUS: usize = 8192;
+const MSR_GS_BASE: u32 = 0xC000_0101;
 
 static mut WORKERS: Vec<Option<Worker<Task>>> = Vec::new();
 static mut STEALERS: Vec<Option<Stealer<Task>>> = Vec::new();
@@ -295,6 +299,26 @@ pub fn current_user_target() -> Option<(u64, u64)> {
     }
 }
 
+pub fn current_win32_thread_state() -> Option<Win32ThreadState> {
+    let cpu_id = get_current_cpu_id();
+    unsafe {
+        PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)
+            .and_then(|t| t.as_ref())
+            .and_then(|task| task.cold.win32)
+    }
+}
+
+#[inline(always)]
+unsafe fn read_user_gs_base() -> u64 {
+    Msr::new(MSR_GS_BASE).read()
+}
+
+#[inline(always)]
+unsafe fn write_user_gs_base(base: u64) {
+    Msr::new(MSR_GS_BASE).write(base);
+}
+
 pub fn current_task_id() -> TaskId {
     let cpu_id = get_current_cpu_id();
     unsafe {
@@ -303,6 +327,36 @@ pub fn current_task_id() -> TaskId {
             .and_then(|t| t.as_ref())
             .map(|task| task.id)
             .unwrap_or(0)
+    }
+}
+
+pub fn current_execution_mode() -> Option<ExecutionMode> {
+    let cpu_id = get_current_cpu_id();
+    unsafe {
+        PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)
+            .and_then(|t| t.as_ref())
+            .map(|task| task.cold.mode)
+    }
+}
+
+pub fn current_user_page_table() -> Option<PhysFrame> {
+    let cpu_id = get_current_cpu_id();
+    unsafe {
+        PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)
+            .and_then(|t| t.as_ref())
+            .and_then(|task| task.cold.page_table)
+    }
+}
+
+pub fn current_address_space() -> Option<Arc<Mutex<crate::memory::AddressSpace>>> {
+    let cpu_id = get_current_cpu_id();
+    unsafe {
+        PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)
+            .and_then(|t| t.as_ref())
+            .and_then(|task| task.cold.address_space.clone())
     }
 }
 
@@ -998,11 +1052,17 @@ pub fn schedule() {
             let new_context_ptr: *const TaskContext;
             let mut old_flags = crate::task::task::TaskFlags::NONE;
             let mut new_flags = crate::task::task::TaskFlags::NONE;
+            let mut incoming_user_gs_base = 0u64;
 
             if let Some(mut current) = PER_CPU_CURRENT_TASK[cpu_id as usize].take() {
                 let task_ptr: *mut Task = &mut *current as *mut Task;
                 old_context_ptr = unsafe { &mut (*task_ptr).context as *mut TaskContext };
                 old_flags = current.hot.flags;
+                if current.cold.mode == ExecutionMode::LegacyRing3 {
+                    if let Some(state) = current.cold.win32.as_mut() {
+                        state.gs_base_shadow = unsafe { read_user_gs_base() };
+                    }
+                }
 
                 if current.state == TaskState::Running {
                     let delta = now.saturating_sub(current.last_start);
@@ -1186,6 +1246,18 @@ pub fn schedule() {
                 new_context_ptr = &next_ref.context;
                 target_kernel_stack_top = next_ref.kernel_stack_top;
                 new_flags = next_ref.hot.flags;
+                incoming_user_gs_base = next_ref
+                    .cold
+                    .win32
+                    .filter(|_| next_ref.cold.mode == ExecutionMode::LegacyRing3)
+                    .map(|state| {
+                        if state.gs_base_shadow != 0 {
+                            state.gs_base_shadow
+                        } else {
+                            state.teb_base
+                        }
+                    })
+                    .unwrap_or(0);
             } else {
                 let idle_task = &PER_CPU_IDLE_TASK[cpu_id as usize];
                 new_context_ptr = &idle_task.context;
@@ -1193,10 +1265,14 @@ pub fn schedule() {
                 crate::memory::set_active_address_space(None);
                 target_kernel_stack_top = idle_task.kernel_stack_top;
                 new_flags = idle_task.hot.flags; // idle = NO_FPU
+                incoming_user_gs_base = 0;
             }
 
             crate::gdt::set_kernel_stack(VirtAddr::new(target_kernel_stack_top));
             crate::syscall::set_kernel_stack_for_current_cpu(target_kernel_stack_top);
+            unsafe {
+                write_user_gs_base(incoming_user_gs_base);
+            }
 
             // FPU mode flags hesapla — asm'e RDX olarak geçirilir
             let mut fpu_mode: u64 = 0;

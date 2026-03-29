@@ -151,6 +151,7 @@ use x86_64::{PhysAddr, VirtAddr};
 
 /// cgroups v2 bellek denetleyicisi — limit, soft limit, swap limit
 pub mod cgroup;
+pub mod damon;
 /// Erken önyükleme için doğrudan 2MB huge-page kurulumu (kaynak: pagging.rs)
 #[path = "pagging.rs"]
 pub mod early_paging;
@@ -161,15 +162,14 @@ pub mod frame_allocator;
 pub mod kasan;
 /// memfd_create — güvenli anonim bellek dosyaları
 pub mod memfd;
-pub mod damon;
 /// Multi-Gen LRU (MGLRU) — sıcak/soğuk nesil tabanlı reclaim sinyali
 pub mod mglru;
 pub mod oom;
 pub mod paging;
 pub mod pmm;
-pub mod shared_region;
 /// Pressure Stall Information (PSI) — bellek baskısı telemetrisi
 pub mod psi;
+pub mod shared_region;
 /// Şeffaf büyük sayfa (Transparent Huge Pages) — 4K→2M collapse/split
 pub mod thp;
 /// Bellek sıkıştırma ve swap: ZSwap/ZRam, LZ4/ZSTD
@@ -558,10 +558,11 @@ struct Vma {
     shared: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ImageRef {
     base: usize,
     len: usize,
+    owner: Option<Arc<[u8]>>,
 }
 
 struct PageCacheEntry {
@@ -1582,6 +1583,23 @@ pub struct AddressSpace {
     stack_top: u64,
 }
 
+fn image_ref_from_slice(image: &[u8]) -> ImageRef {
+    ImageRef {
+        base: image.as_ptr() as usize,
+        len: image.len(),
+        owner: None,
+    }
+}
+
+fn image_ref_from_owned(image: Arc<[u8]>) -> ImageRef {
+    let slice = image.as_ref();
+    ImageRef {
+        base: slice.as_ptr() as usize,
+        len: slice.len(),
+        owner: Some(image),
+    }
+}
+
 static DEFAULT_ADDRESS_SPACE: Mutex<AddressSpace> = Mutex::new(AddressSpace {
     id: 0,
     vmas: Vec::new(),
@@ -1771,10 +1789,21 @@ pub fn create_address_space(image: &[u8]) -> Arc<Mutex<AddressSpace>> {
     Arc::new(Mutex::new(AddressSpace {
         id: next_address_space_id(),
         vmas: Vec::new(),
-        image: Some(ImageRef {
-            base: image.as_ptr() as usize,
-            len: image.len(),
-        }),
+        image: Some(image_ref_from_slice(image)),
+        heap_base: 0,
+        heap_break: 0,
+        mmap_base: 0,
+        mmap_next: 0,
+        stack_base: 0,
+        stack_top: 0,
+    }))
+}
+
+pub fn create_address_space_owned(image: Arc<[u8]>) -> Arc<Mutex<AddressSpace>> {
+    Arc::new(Mutex::new(AddressSpace {
+        id: next_address_space_id(),
+        vmas: Vec::new(),
+        image: Some(image_ref_from_owned(image)),
         heap_base: 0,
         heap_break: 0,
         mmap_base: 0,
@@ -2440,10 +2469,7 @@ fn reclaim_pages_scoped(target: usize, global: bool) -> usize {
             node_hint,
             now_tick,
         );
-        let mg_victim = mglru::pick_victim(
-            if global { None } else { Some(space_id) },
-            node_hint,
-        );
+        let mg_victim = mglru::pick_victim(if global { None } else { Some(space_id) }, node_hint);
         let space_hint = if global {
             damon_victim
                 .map(|v| v.key.space_id)
@@ -2455,11 +2481,9 @@ fn reclaim_pages_scoped(target: usize, global: bool) -> usize {
             .map(|v| v.node_id)
             .or_else(|| mg_victim.map(|v| v.node_id))
             .or(node_hint);
-        let entry = LRU.lock().pop_oldest_balanced(
-            class_hint,
-            space_hint,
-            node_select,
-        );
+        let entry = LRU
+            .lock()
+            .pop_oldest_balanced(class_hint, space_hint, node_select);
         let Some(entry) = entry else {
             break;
         };
@@ -2468,8 +2492,8 @@ fn reclaim_pages_scoped(target: usize, global: bool) -> usize {
             break;
         }
         if let Some(hint) = damon::hint_for_page(entry.space_id, entry.page_index, now_tick) {
-            let preserve_hot = matches!(hint.temperature, damon::DamonTemperature::Hot)
-                && !pressure_critical;
+            let preserve_hot =
+                matches!(hint.temperature, damon::DamonTemperature::Hot) && !pressure_critical;
             let preserve_warm = matches!(hint.temperature, damon::DamonTemperature::Warm)
                 && pressure.full_avg10 < 200
                 && scan_budget > 0;
@@ -2792,10 +2816,13 @@ pub fn register_cow_region(start: u64, size: u64, flags: PageTableFlags) -> bool
 
 pub fn set_user_image(image: &[u8]) {
     with_address_space_mut(|space| {
-        space.image = Some(ImageRef {
-            base: image.as_ptr() as usize,
-            len: image.len(),
-        });
+        space.image = Some(image_ref_from_slice(image));
+    });
+}
+
+pub fn set_user_image_owned(image: Arc<[u8]>) {
+    with_address_space_mut(|space| {
+        space.image = Some(image_ref_from_owned(image));
     });
 }
 
@@ -3166,7 +3193,7 @@ fn handle_anon_lazy_fault(addr: u64, region: &Vma) -> bool {
 }
 
 fn handle_image_lazy_fault(addr: u64, region: &Vma) -> bool {
-    let image = with_address_space_ref(|space| space.image);
+    let image = with_address_space_ref(|space| space.image.clone());
     let Some(image) = image else {
         return false;
     };

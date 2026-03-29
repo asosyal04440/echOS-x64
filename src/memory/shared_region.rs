@@ -9,7 +9,9 @@ use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::structures::paging::PageTableFlags;
 
-use super::{address_space_id, allocate_user_mmap_in, register_shared_anon_region_in, AddressSpace};
+use super::{
+    address_space_id, allocate_user_mmap_in, register_shared_anon_region_in, AddressSpace,
+};
 
 pub type SharedRegionId = u64;
 pub type SharedRegionGeneration = u64;
@@ -46,7 +48,12 @@ lazy_static! {
         Mutex::new(BTreeMap::new());
 }
 
-pub fn create_ipc_region(owner_pid: u64, name: &str, len: u64, writable: bool) -> SharedRegionLease {
+pub fn create_ipc_region(
+    owner_pid: u64,
+    name: &str,
+    len: u64,
+    writable: bool,
+) -> SharedRegionLease {
     let region = SharedRegionLease {
         id: NEXT_SHARED_REGION_ID.fetch_add(1, Ordering::Relaxed),
         owner_pid,
@@ -148,7 +155,9 @@ pub fn unmap_ipc_region(pid: u64, region_id: SharedRegionId) -> bool {
     if region.revoked {
         return false;
     }
-    region.mapped_pids.retain(|mapped| *mapped != pid || *mapped == region.owner_pid);
+    region
+        .mapped_pids
+        .retain(|mapped| *mapped != pid || *mapped == region.owner_pid);
     if pid != region.owner_pid {
         region.mapped_vaddrs.remove(&pid);
     }

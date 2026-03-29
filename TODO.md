@@ -858,7 +858,9 @@ Not:
 - Durum: `In Progress`
 - Gorevler:
   - `AM-1`: `AppIdentity` ve `PackageRegistry` contract'ini built-in app, installed package ve external image resolution'u ayni truth surface'te birlestirecek sekilde yaz ve uygula
+    Durum: `Verified`
   - `AM-2`: `ProcessBroker`u tek privileged spawn authority yap; capability token publication, child-process tree ownership ve launch-time policy gate'i ayni omurgada birlestir
+    Durum: `Verified`
   - `AM-3`: app-facing `WarmSuspend` / `ColdResume` state contract'ini yaz; `prepare_suspend`, `export_state`, `import_state`, `resume` seam'lerini en az bir stateful app sinifinda corpus ile dogrula
   - `AM-4`: process launch'i VM/MMU contract'ina bagla; per-app address space, broker-mapped IPC region ve revoke/teardown semantics'ini ABI personality'den bagimsiz tek izolasyon policy'sine indir
   - `AM-5`: text manifest'i runtime hot path'ten cikar; source manifest -> compiled binary manifest pipeline'i ve deterministic `no_std` parse contract'ini kur
@@ -870,3 +872,20 @@ Not:
   - en az bir stateful app icin suspend/resume corpus'u
   - control-plane bus ile out-of-band data plane ayriminin testli kalmasi
   - deny/crash/restart yollarinin sessiz degil typed ve user-visible olmasi
+
+#### 10.3.b AM-1 / AM-2 kapanis notu
+- Durum: `Verified`
+- `AM-1` repo-visible contract'i artik [src/gui/launch_pipeline.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/gui/launch_pipeline.rs), [src/security/package.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/security/package.rs) ve [src/runtime.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/runtime.rs) uzerinden tek truth surface'te calisir:
+  - built-in app, installed package, external candidate ve external image resolution'u ayni `PackageRegistryEntry` modeliyle yayinlanir
+  - alias, app-id ve file-association resolution'u ayni registry seam'ine baglidir
+  - package registry bus yuzeyi ayni truth'u [src/ipc/service_ipc.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/ipc/service_ipc.rs) uzerinden yayinlar
+- `AM-2` repo-visible contract'i artik [src/runtime.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/runtime.rs) ve [src/ipc/service_ipc.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/ipc/service_ipc.rs) uzerinden tek privileged launch omurgasina baglidir:
+  - `ProcessBroker` capability token publication'ini ve launch-time policy gate'i tek otoritede toplar
+  - parent/child process tree ownership'i `BrokeredLaunch` ve broker introspection bus contract'i ile yayinlanir
+  - runtime task -> broker ticket -> child ticket zinciri mekanik corpus ile dogrulanir
+- Mekanik kanit:
+  - `runtime::tests::package_registry_entries_unify_built_in_and_installed_truth_surface`
+  - `runtime::tests::process_broker_records_child_tree_under_parent_ticket`
+  - `ipc::service_ipc::tests::package_registry_service_lists_built_in_entries`
+  - `ipc::service_ipc::tests::process_broker_service_describes_registered_launch_and_children`
+  - `cargo test --no-run --target x86_64-pc-windows-msvc --lib`

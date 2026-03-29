@@ -338,6 +338,7 @@ pub struct RecoveryRecord {
 static BOOT_CONTROL_SHADOW: Mutex<BootControlBlock> = Mutex::new(BootControlBlock::new());
 static CURRENT_BOOT_STAGE: AtomicU32 = AtomicU32::new(BootStage::LoaderEntry as u32);
 static BOOT_FLAGS: AtomicU32 = AtomicU32::new(0);
+static PACKAGED_PE_SMOKE_BUNDLE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 pub fn init_shadow(block: BootControlBlock) {
     let mut guard = BOOT_CONTROL_SHADOW.lock();
@@ -388,6 +389,14 @@ pub fn clear_suspend_resume_smoke_request() {
     };
     BOOT_FLAGS.store(snapshot.boot_flags() as u32, Ordering::Release);
     persist_shadow(&snapshot);
+}
+
+pub fn seed_packaged_pe_smoke_bundle(bytes: Vec<u8>) {
+    *PACKAGED_PE_SMOKE_BUNDLE.lock() = Some(bytes);
+}
+
+pub fn take_packaged_pe_smoke_bundle() -> Option<Vec<u8>> {
+    PACKAGED_PE_SMOKE_BUNDLE.lock().take()
 }
 
 pub fn publish_stage(stage: BootStage) {
@@ -493,7 +502,10 @@ pub fn merge_seed(
     file_seed: Option<BootControlBlock>,
     persisted: Option<BootControlBlock>,
 ) -> BootControlBlock {
-    match (file_seed.filter(|seed| seed.validate()), persisted.filter(|seed| seed.validate())) {
+    match (
+        file_seed.filter(|seed| seed.validate()),
+        persisted.filter(|seed| seed.validate()),
+    ) {
         (Some(file), Some(var)) => {
             let mut merged = if var.boot_epoch >= file.boot_epoch {
                 var

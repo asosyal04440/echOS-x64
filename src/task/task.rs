@@ -231,6 +231,21 @@ pub struct RseqState {
     pub event_counter: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Win32ThreadState {
+    pub teb_base: u64,
+    pub peb_base: u64,
+    pub process_parameters_base: u64,
+    pub user_stack_top: u64,
+    pub entry_rip: u64,
+    pub initial_rcx: u64,
+    pub heap_seed: u64,
+    pub owner_pid: u64,
+    pub thread_handle: u64,
+    pub gs_base_shadow: u64,
+    pub bootstrap_flags: u32,
+}
+
 // ============================================================================
 // TASK
 // ============================================================================
@@ -279,6 +294,7 @@ pub struct TaskColdData {
     /// Alt süreç PID listesi — fork ile oluşturulan çocuklar
     pub children: Vec<TaskId>,
     pub rseq: RseqState,
+    pub win32: Option<Win32ThreadState>,
 }
 
 /// Bir işletim sistemi task'ı (thread/process).
@@ -401,6 +417,7 @@ impl Task {
                 parent_pid: None,
                 children: Vec::new(),
                 rseq: RseqState::default(),
+                win32: None,
             },
         }
     }
