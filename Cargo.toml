@@ -53,7 +53,7 @@ pc-keyboard = "0.7.0"
 # std::HashMap yerine no_std uyumlu hash tablosu implementasyonu
 hashbrown = { version = "0.14", default-features = false, features = ["alloc"] }
 # Rastgele sayı üreteci - no_std için küçük boyutlu SmallRng kullanır
-rand = { version = "0.8", default-features = false, features = ["small_rng"] }
+rand = { version = "0.9", default-features = false, features = ["small_rng"] }
 # Gömülü sistemler için grafik çizim kütüphanesi - pikseller, şekiller, yazı tipi desteği
 embedded-graphics = "0.8"
 embedded-graphics-core = "0.4"
@@ -147,7 +147,7 @@ libc = "0.2"
 # Linux/Windows (host) üzerinde çalışan testler için rand bağımlılığı
 # `cfg(not(target_os = "none"))`: "none" hedefi = bare-metal çekirdek ortamı
 [target.'cfg(not(target_os = "none"))'.dev-dependencies]
-rand = "0.8"
+rand = "0.9"
 
 [target.'cfg(not(target_os = "uefi"))'.dependencies]
 # RustCrypto prime-order NIST curves - DNSSEC ECDSA P-384 parity.
