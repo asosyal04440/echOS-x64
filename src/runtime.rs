@@ -34,7 +34,8 @@ pub use super::runtime_layer::runtime_state::{
     annotate_runtime_handle, runtime_handle, window_session, RuntimeCoordinator,
 };
 pub use super::runtime_layer::window_session_contract::{
-    attach_window_session, forget_window_session, WindowSessionHandle,
+    attach_window_session, attach_window_session_with_display, forget_window_session,
+    WindowSessionHandle,
 };
 
 #[cfg(test)]
@@ -89,6 +90,10 @@ mod tests {
             compiled_manifest_path: "/apps/org.echos.browser/app.manifest.bin",
             compiled_manifest: compiled,
             capability_set: vec![NativeCapability::NotificationsPost],
+            payload_store_paths: alloc::collections::BTreeMap::new(),
+            bundle_backing: package::InstalledBundleBacking::copied_archive(
+                "/apps/org.echos.browser/browser.app",
+            ),
             package_digest: [0x11; 32],
             manifest_digest: [0x22; 32],
             entry_digest: [0x33; 32],

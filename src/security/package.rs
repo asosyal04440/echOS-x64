@@ -5,6 +5,8 @@ use crate::ipc::request_store_sync;
 use crate::services::{StoreCommand, StoreResponse};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+#[cfg(test)]
+use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
@@ -24,6 +26,7 @@ const SIGNATURE_LEN: usize = 64;
 const COMPILED_MANIFEST_PATH: &str = "app.manifest.bin";
 const SIGNATURE_METADATA_PATH: &str = "app.signature.bin";
 const BUNDLE_STORE_ROOT: &str = "/apps/.bundles";
+const CONTENT_STORE_ROOT: &str = "/apps/.content";
 const LIVE_REVOCATION_FEED_PATH: &str = "/config/security/package_revocations.feed";
 const REVOCATION_FEED_MAGIC: [u8; 8] = *b"echRVK01";
 const REVOCATION_FEED_VERSION: u16 = 1;
@@ -111,6 +114,61 @@ impl PackageTrustLevel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstalledBundleBackingKind {
+    CopiedArchive,
+    ReferencedSeedPath,
+    ReferencedLoopImage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstalledBundleBacking {
+    pub kind: InstalledBundleBackingKind,
+    pub source_path: &'static str,
+    pub offset: u64,
+    pub length: u64,
+}
+
+impl InstalledBundleBacking {
+    pub const fn copied_archive(path: &'static str) -> Self {
+        Self {
+            kind: InstalledBundleBackingKind::CopiedArchive,
+            source_path: path,
+            offset: 0,
+            length: 0,
+        }
+    }
+
+    pub const fn referenced_path(path: &'static str) -> Self {
+        Self {
+            kind: InstalledBundleBackingKind::ReferencedSeedPath,
+            source_path: path,
+            offset: 0,
+            length: 0,
+        }
+    }
+
+    pub const fn referenced_loop_image(path: &'static str, offset: u64, length: u64) -> Self {
+        Self {
+            kind: InstalledBundleBackingKind::ReferencedLoopImage,
+            source_path: path,
+            offset,
+            length,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BundleInstallSource<'a> {
+    CopyIntoStore,
+    ReferencedPath(&'a str),
+    ReferencedLoopImage {
+        image_path: &'a str,
+        offset: usize,
+        length: usize,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub enum PackageError {
     InvalidMagic,
@@ -160,7 +218,7 @@ impl fmt::Display for PackageError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageInfo {
     pub name: Option<String>,
     pub version: Option<String>,
@@ -197,6 +255,8 @@ pub struct InstalledPackagedApp {
     pub compiled_manifest_path: &'static str,
     pub compiled_manifest: CompiledAppManifest,
     pub capability_set: Vec<NativeCapability>,
+    pub payload_store_paths: BTreeMap<String, String>,
+    pub bundle_backing: InstalledBundleBacking,
     pub package_digest: [u8; 32],
     pub manifest_digest: [u8; 32],
     pub entry_digest: [u8; 32],
@@ -247,6 +307,14 @@ impl PackageManager {
     }
 
     pub fn install_package(&mut self, data: &[u8]) -> Result<String, PackageError> {
+        self.install_package_with_source(data, BundleInstallSource::CopyIntoStore)
+    }
+
+    fn install_package_with_source(
+        &mut self,
+        data: &[u8],
+        source: BundleInstallSource<'_>,
+    ) -> Result<String, PackageError> {
         let parsed = self.parse_signed_bundle(data)?;
         if parsed.payload_files.is_empty() {
             return Err(PackageError::EmptyPayload);
@@ -260,7 +328,7 @@ impl PackageManager {
             .iter()
             .any(|(path, _)| path == COMPILED_MANIFEST_PATH)
         {
-            return self.install_packaged_app(parsed, source_manifest);
+            return self.install_packaged_app(parsed, source_manifest, source);
         }
 
         self.install_legacy_package(parsed.source_manifest, parsed.payload_files)
@@ -271,17 +339,20 @@ impl PackageManager {
             return Err(PackageError::PackageNotFound);
         }
 
-        let mut dir_path = String::from("/apps/");
-        dir_path.push_str(name);
-        match store_request(StoreCommand::DeleteFile { path: dir_path }) {
-            Ok(StoreResponse::Success) => {}
-            Ok(_) | Err(_) => return Err(PackageError::IoError),
-        }
-
         if let Some(installed) = self.packaged_apps.remove(name) {
-            let _ = store_request(StoreCommand::DeleteFile {
-                path: installed.bundle_path.to_string(),
-            });
+            if installed.bundle_backing.kind == InstalledBundleBackingKind::CopiedArchive {
+                let _ = store_request(StoreCommand::DeleteFile {
+                    path: installed.bundle_path.to_string(),
+                });
+            }
+            remove_unused_payload_blobs(&installed, &self.packaged_apps);
+        } else {
+            let mut dir_path = String::from("/apps/");
+            dir_path.push_str(name);
+            match store_request(StoreCommand::DeleteFile { path: dir_path }) {
+                Ok(StoreResponse::Success) => {}
+                Ok(_) | Err(_) => return Err(PackageError::IoError),
+            }
         }
 
         self.packages.remove(name);
@@ -429,6 +500,7 @@ impl PackageManager {
         &mut self,
         parsed: ParsedBundle,
         source_manifest: Option<SourceAppManifest>,
+        install_source: BundleInstallSource<'_>,
     ) -> Result<String, PackageError> {
         let signature_metadata = parsed
             .signature_metadata
@@ -461,34 +533,21 @@ impl PackageManager {
         {
             return Err(PackageError::HashMismatch);
         }
-        for (path, content) in &parsed.payload_files {
-            let response = store_request(StoreCommand::WriteFile {
-                path: bundle_file_path(&package_name, path),
-                data: content.clone(),
-            });
-            match response {
-                Ok(StoreResponse::Success) => {}
-                Ok(_) | Err(_) => return Err(PackageError::IoError),
-            }
-        }
-        let bundle_path = bundle_archive_path(&package_name);
-        let _ = store_request(StoreCommand::CreateDirectory {
-            path: BUNDLE_STORE_ROOT.to_string(),
-        });
-        let rebuilt = rebuild_bundle_bytes_with_metadata(
-            &parsed.source_manifest,
-            &parsed.payload_files,
+        let payload_store_paths = self.materialize_payload_blobs(&parsed.payload_files)?;
+        let (bundle_path, bundle_backing) = self.materialize_bundle_backing(
+            &package_name,
+            &parsed,
             &signature_metadata,
+            install_source,
         )?;
-        match store_request(StoreCommand::WriteFile {
-            path: bundle_path.clone(),
-            data: rebuilt,
-        }) {
-            Ok(StoreResponse::Success) => {}
-            Ok(_) | Err(_) => return Err(PackageError::IoError),
-        }
-        let entry_path = bundle_file_path(&package_name, &compiled_manifest.entry);
-        let compiled_manifest_path = bundle_file_path(&package_name, COMPILED_MANIFEST_PATH);
+        let entry_path = payload_store_paths
+            .get(compiled_manifest.entry.as_str())
+            .cloned()
+            .ok_or(PackageError::MissingPackagedPayload)?;
+        let compiled_manifest_path = payload_store_paths
+            .get(COMPILED_MANIFEST_PATH)
+            .cloned()
+            .ok_or(PackageError::MissingPackagedPayload)?;
         let capability_set = compiled_manifest.capabilities();
         let installed = InstalledPackagedApp {
             runtime_app_id: hash_manifest_app_id(
@@ -504,6 +563,8 @@ impl PackageManager {
             compiled_manifest_path: leak_string(compiled_manifest_path),
             compiled_manifest: compiled_manifest.clone(),
             capability_set: capability_set.clone(),
+            payload_store_paths: payload_store_paths.clone(),
+            bundle_backing,
             package_digest: parsed.package_digest,
             manifest_digest,
             entry_digest,
@@ -535,12 +596,7 @@ impl PackageManager {
         &self,
         installed: &InstalledPackagedApp,
     ) -> Result<ParsedBundle, PackageError> {
-        let data = match store_request(StoreCommand::ReadFile {
-            path: installed.bundle_path.to_string(),
-        }) {
-            Ok(StoreResponse::FileData(bytes)) => bytes,
-            Ok(_) | Err(_) => return Err(PackageError::IoError),
-        };
+        let data = read_bundle_backing(&installed.bundle_backing)?;
         let parsed = self.parse_signed_bundle(&data)?;
         if parsed.package_digest != installed.package_digest {
             return Err(PackageError::HashMismatch);
@@ -585,6 +641,59 @@ impl PackageManager {
             return Err(PackageError::HashMismatch);
         }
         Ok(parsed)
+    }
+
+    fn materialize_bundle_backing(
+        &self,
+        package_name: &str,
+        parsed: &ParsedBundle,
+        signature_metadata: &PackageSignatureMetadata,
+        install_source: BundleInstallSource<'_>,
+    ) -> Result<(String, InstalledBundleBacking), PackageError> {
+        match install_source {
+            BundleInstallSource::CopyIntoStore => {
+                let bundle_path = bundle_archive_path(package_name);
+                let _ = store_request(StoreCommand::CreateDirectory {
+                    path: BUNDLE_STORE_ROOT.to_string(),
+                });
+                let rebuilt = rebuild_bundle_bytes_with_metadata(
+                    &parsed.source_manifest,
+                    &parsed.payload_files,
+                    signature_metadata,
+                )?;
+                match store_request(StoreCommand::WriteFile {
+                    path: bundle_path.clone(),
+                    data: rebuilt,
+                }) {
+                    Ok(StoreResponse::Success) => {}
+                    Ok(_) | Err(_) => return Err(PackageError::IoError),
+                }
+                let leaked = leak_string(bundle_path.clone());
+                Ok((bundle_path, InstalledBundleBacking::copied_archive(leaked)))
+            }
+            BundleInstallSource::ReferencedPath(path) => {
+                let leaked = leak_string(path.to_string());
+                Ok((
+                    path.to_string(),
+                    InstalledBundleBacking::referenced_path(leaked),
+                ))
+            }
+            BundleInstallSource::ReferencedLoopImage {
+                image_path,
+                offset,
+                length,
+            } => {
+                let leaked = leak_string(image_path.to_string());
+                Ok((
+                    image_path.to_string(),
+                    InstalledBundleBacking::referenced_loop_image(
+                        leaked,
+                        offset as u64,
+                        length as u64,
+                    ),
+                ))
+            }
+        }
     }
 
     fn parse_signed_bundle(&self, data: &[u8]) -> Result<ParsedBundle, PackageError> {
@@ -709,10 +818,53 @@ impl PackageManager {
         }
         Ok(files)
     }
+
+    fn materialize_payload_blobs(
+        &self,
+        payload_files: &[(String, Vec<u8>)],
+    ) -> Result<BTreeMap<String, String>, PackageError> {
+        let _ = store_request(StoreCommand::CreateDirectory {
+            path: CONTENT_STORE_ROOT.to_string(),
+        });
+        let mut out = BTreeMap::new();
+        for (relative_path, content) in payload_files {
+            let digest = sha256_array(content.as_slice());
+            let blob_path = content_blob_path(&digest, relative_path.as_str());
+            let shard_path = content_shard_root(&digest);
+            let _ = store_request(StoreCommand::CreateDirectory { path: shard_path });
+            let exists = matches!(
+                store_request(StoreCommand::FileExists {
+                    path: blob_path.clone(),
+                }),
+                Ok(StoreResponse::BooleanResult(true))
+            );
+            if !exists {
+                match store_request(StoreCommand::WriteFile {
+                    path: blob_path.clone(),
+                    data: content.clone(),
+                }) {
+                    Ok(StoreResponse::Success) => {}
+                    Ok(_) | Err(_) => return Err(PackageError::IoError),
+                }
+            }
+            out.insert(relative_path.clone(), blob_path);
+        }
+        Ok(out)
+    }
 }
 
 lazy_static::lazy_static! {
     static ref PACKAGE_MANAGER: Mutex<PackageManager> = Mutex::new(PackageManager::new());
+}
+
+#[cfg(test)]
+lazy_static::lazy_static! {
+    static ref TEST_PACKAGE_STORE: Mutex<BTreeMap<String, Vec<u8>>> = Mutex::new(BTreeMap::new());
+    static ref TEST_PACKAGE_DIRECTORIES: Mutex<BTreeSet<String>> = {
+        let mut directories = BTreeSet::new();
+        directories.insert(String::from("/"));
+        Mutex::new(directories)
+    };
 }
 
 pub fn get_package_manager() -> &'static Mutex<PackageManager> {
@@ -731,6 +883,39 @@ pub fn install_package_from_path(path: &str) -> Result<String, PackageError> {
 
 pub fn install_bundle(bytes: &[u8]) -> Result<String, PackageError> {
     get_package_manager().lock().install_package(bytes)
+}
+
+pub fn install_bundle_from_path_reference(path: &str) -> Result<String, PackageError> {
+    let data = match store_request(StoreCommand::ReadFile {
+        path: path.to_string(),
+    }) {
+        Ok(StoreResponse::FileData(d)) => d,
+        Ok(StoreResponse::Error(_)) | Ok(_) | Err(_) => return Err(PackageError::IoError),
+    };
+    get_package_manager()
+        .lock()
+        .install_package_with_source(&data, BundleInstallSource::ReferencedPath(path))
+}
+
+pub fn install_bundle_from_loop_image_reference(
+    image_path: &str,
+    offset: usize,
+    length: usize,
+) -> Result<String, PackageError> {
+    let bytes = crate::security::seed_store::read_loop_image_bundle(image_path, offset, length)
+        .map_err(|_| PackageError::IoError)?;
+    get_package_manager().lock().install_package_with_source(
+        &bytes,
+        BundleInstallSource::ReferencedLoopImage {
+            image_path,
+            offset,
+            length,
+        },
+    )
+}
+
+pub fn remove_installed_package(name: &str) -> Result<(), PackageError> {
+    get_package_manager().lock().remove_package(name)
 }
 
 pub fn resolve_installed_app(query: &str) -> Option<InstalledPackagedApp> {
@@ -767,6 +952,22 @@ pub fn clear_test_installed_apps() {
     let mut manager = get_package_manager().lock();
     manager.packaged_apps.clear();
     manager.installed_paths.clear();
+}
+
+#[cfg(test)]
+pub fn clear_test_store() {
+    TEST_PACKAGE_STORE.lock().clear();
+    let mut directories = TEST_PACKAGE_DIRECTORIES.lock();
+    directories.clear();
+    directories.insert(String::from("/"));
+}
+
+#[cfg(test)]
+pub fn write_test_store_file(path: &str, data: &[u8]) {
+    let _ = test_store_request(StoreCommand::WriteFile {
+        path: path.to_string(),
+        data: data.to_vec(),
+    });
 }
 
 pub fn verify_packaged_launch(entry_path: &str) -> Result<VerifiedPackagedLaunch, PackageError> {
@@ -853,8 +1054,175 @@ pub fn build_revocation_feed(
     .encode_signed()
 }
 
+pub fn publish_revocation_feed(bytes: &[u8]) -> Result<(), PackageError> {
+    RevocationFeed::decode_signed(bytes)?;
+    match store_request(StoreCommand::WriteFile {
+        path: LIVE_REVOCATION_FEED_PATH.to_string(),
+        data: bytes.to_vec(),
+    }) {
+        Ok(StoreResponse::Success) => Ok(()),
+        Ok(_) | Err(_) => Err(PackageError::IoError),
+    }
+}
+
 fn store_request(command: StoreCommand) -> Result<StoreResponse, PackageError> {
-    request_store_sync(0, command).ok_or(PackageError::IoError)
+    #[cfg(test)]
+    {
+        if let Some(response) = request_store_sync(0, command.clone()) {
+            if !matches!(response, StoreResponse::Error(_)) {
+                return Ok(response);
+            }
+        }
+        return Ok(test_store_request(command));
+    }
+    #[cfg(not(test))]
+    {
+        request_store_sync(0, command).ok_or(PackageError::IoError)
+    }
+}
+
+#[cfg(test)]
+fn test_store_request(command: StoreCommand) -> StoreResponse {
+    match command {
+        StoreCommand::CreateDirectory { path } => {
+            let normalized = normalize_test_store_path(path.as_str());
+            let mut directories = TEST_PACKAGE_DIRECTORIES.lock();
+            ensure_test_store_parents(&mut directories, normalized.as_str());
+            directories.insert(normalized);
+            StoreResponse::Success
+        }
+        StoreCommand::WriteFile { path, data } => {
+            let normalized = normalize_test_store_path(path.as_str());
+            let mut directories = TEST_PACKAGE_DIRECTORIES.lock();
+            let parent = test_store_parent(normalized.as_str());
+            if !directories.contains(parent.as_str()) {
+                ensure_test_store_parents(&mut directories, parent.as_str());
+                directories.insert(parent);
+            }
+            drop(directories);
+            TEST_PACKAGE_STORE.lock().insert(normalized, data);
+            StoreResponse::Success
+        }
+        StoreCommand::ReadFile { path } => {
+            let normalized = normalize_test_store_path(path.as_str());
+            match TEST_PACKAGE_STORE.lock().get(normalized.as_str()) {
+                Some(bytes) => StoreResponse::FileData(bytes.clone()),
+                None => StoreResponse::Error(String::from("test-store: not found")),
+            }
+        }
+        StoreCommand::FileExists { path } => {
+            let normalized = normalize_test_store_path(path.as_str());
+            let exists = TEST_PACKAGE_STORE.lock().contains_key(normalized.as_str())
+                || TEST_PACKAGE_DIRECTORIES
+                    .lock()
+                    .contains(normalized.as_str());
+            StoreResponse::BooleanResult(exists)
+        }
+        StoreCommand::DeleteFile { path } => {
+            let normalized = normalize_test_store_path(path.as_str());
+            if TEST_PACKAGE_STORE
+                .lock()
+                .remove(normalized.as_str())
+                .is_some()
+            {
+                StoreResponse::Success
+            } else {
+                StoreResponse::Error(String::from("test-store: not found"))
+            }
+        }
+        StoreCommand::DeleteDirectory { path } => {
+            let normalized = normalize_test_store_path(path.as_str());
+            TEST_PACKAGE_DIRECTORIES.lock().remove(normalized.as_str());
+            StoreResponse::Success
+        }
+        other => StoreResponse::Error(alloc::format!("test-store: unsupported command {other:?}")),
+    }
+}
+
+#[cfg(test)]
+fn normalize_test_store_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        String::from("/")
+    } else if trimmed == "/" {
+        String::from("/")
+    } else if trimmed.starts_with('/') {
+        let normalized = trimmed.trim_end_matches('/');
+        if normalized.is_empty() {
+            String::from("/")
+        } else {
+            normalized.to_string()
+        }
+    } else {
+        alloc::format!("/{}", trimmed.trim_end_matches('/'))
+    }
+}
+
+#[cfg(test)]
+fn test_store_parent(path: &str) -> String {
+    if path == "/" {
+        return String::from("/");
+    }
+    match path.rsplit_once('/') {
+        Some((parent, _)) if !parent.is_empty() => parent.to_string(),
+        _ => String::from("/"),
+    }
+}
+
+#[cfg(test)]
+fn ensure_test_store_parents(directories: &mut BTreeSet<String>, path: &str) {
+    let normalized = normalize_test_store_path(path);
+    if normalized == "/" {
+        directories.insert(normalized);
+        return;
+    }
+    let mut cursor = String::new();
+    for segment in normalized.split('/').filter(|segment| !segment.is_empty()) {
+        cursor.push('/');
+        cursor.push_str(segment);
+        directories.insert(cursor.clone());
+    }
+}
+
+fn read_bundle_backing(backing: &InstalledBundleBacking) -> Result<Vec<u8>, PackageError> {
+    match backing.kind {
+        InstalledBundleBackingKind::CopiedArchive
+        | InstalledBundleBackingKind::ReferencedSeedPath => {
+            match store_request(StoreCommand::ReadFile {
+                path: backing.source_path.to_string(),
+            }) {
+                Ok(StoreResponse::FileData(bytes)) => Ok(bytes),
+                Ok(_) | Err(_) => Err(PackageError::IoError),
+            }
+        }
+        InstalledBundleBackingKind::ReferencedLoopImage => {
+            crate::security::seed_store::read_loop_image_bundle(
+                backing.source_path,
+                backing.offset as usize,
+                backing.length as usize,
+            )
+            .map_err(|_| PackageError::IoError)
+        }
+    }
+}
+
+fn remove_unused_payload_blobs(
+    installed: &InstalledPackagedApp,
+    remaining: &BTreeMap<String, InstalledPackagedApp>,
+) {
+    for blob_path in installed.payload_store_paths.values() {
+        let still_used = remaining.values().any(|app| {
+            app.payload_store_paths
+                .values()
+                .any(|candidate| candidate == blob_path)
+        });
+        if still_used {
+            continue;
+        }
+        let _ = store_request(StoreCommand::DeleteFile {
+            path: blob_path.clone(),
+        });
+    }
 }
 
 pub fn sign_dev_package(content: &[u8]) -> [u8; 64] {
@@ -1210,6 +1578,26 @@ fn bundle_archive_path(package_name: &str) -> String {
     path
 }
 
+fn content_shard_root(digest: &[u8; 32]) -> String {
+    let mut path = String::from(CONTENT_STORE_ROOT);
+    path.push('/');
+    append_hex_byte(&mut path, digest[0]);
+    path
+}
+
+fn content_blob_path(digest: &[u8; 32], relative_path: &str) -> String {
+    let mut path = content_shard_root(digest);
+    path.push('/');
+    append_hex_digest(&mut path, digest);
+    if let Some((_, extension)) = relative_path.rsplit_once('.') {
+        path.push('.');
+        path.push_str(extension);
+    } else {
+        path.push_str(".blob");
+    }
+    path
+}
+
 fn bundle_root(package_name: &str) -> String {
     let mut path = String::from("/apps/");
     path.push_str(package_name);
@@ -1240,6 +1628,18 @@ fn hash_manifest_app_id(value: &str, runtime: AppRuntime) -> AppId {
 
 fn leak_string(value: String) -> &'static str {
     Box::leak(value.into_boxed_str())
+}
+
+fn append_hex_byte(out: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(HEX[(byte >> 4) as usize] as char);
+    out.push(HEX[(byte & 0x0f) as usize] as char);
+}
+
+fn append_hex_digest(out: &mut String, digest: &[u8; 32]) {
+    for byte in digest {
+        append_hex_byte(out, *byte);
+    }
 }
 
 fn sha256_array(data: &[u8]) -> [u8; 32] {

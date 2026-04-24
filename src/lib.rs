@@ -165,12 +165,13 @@ pub mod numa;
 pub mod pid_namespace;
 pub mod power;
 pub mod preempt;
-pub mod profiler;
 /// Rastgele sayı üretici
 pub mod random;
 pub mod rcu;
 pub mod topology;
 pub mod tty;
+pub mod update;
+pub mod userland;
 pub mod uts_user_ns;
 
 /// Debug araçları

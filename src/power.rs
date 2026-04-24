@@ -286,6 +286,7 @@ impl CpuPowerDesc {
             // IA32_PERF_CTL MSR'a (0x199) yeni P-state değeri yaz
             let freq = &self.frequencies[freq_idx as usize];
             let perf_ctl_value = (freq_idx as u64) << 8; // P-state indeks (bit 15:8)
+            #[cfg(not(any(test, target_os = "windows")))]
             unsafe {
                 // MSR 0x199 = IA32_PERF_CTL
                 // wrmsr: ECX=MSR index, EAX=low 32, EDX=high 32
@@ -299,6 +300,8 @@ impl CpuPowerDesc {
                     options(nomem, nostack)
                 );
             }
+            #[cfg(any(test, target_os = "windows"))]
+            let _ = perf_ctl_value;
 
             self.current_pstate.store(freq_idx, Ordering::Release);
             self.freq_transitions.fetch_add(1, Ordering::Relaxed);
@@ -706,7 +709,7 @@ impl PowerManager {
         crate::serial_println!("Power: Preparing system suspend...");
 
         // 1. Flush CPU caches (WBINVD)
-        #[cfg(not(feature = "simics"))]
+        #[cfg(not(any(feature = "simics", test, target_os = "windows")))]
         unsafe {
             core::arch::asm!("wbinvd", options(nostack, preserves_flags));
         }
@@ -733,7 +736,7 @@ impl PowerManager {
         crate::serial_println!("Power: Resuming system...");
 
         // 1. BSP cache'lerini invalidate et
-        #[cfg(not(feature = "simics"))]
+        #[cfg(not(any(feature = "simics", test, target_os = "windows")))]
         unsafe {
             core::arch::asm!("wbinvd", options(nostack, preserves_flags));
         }
@@ -749,7 +752,7 @@ impl PowerManager {
         }
 
         // 3. AP'leri uyandır (INIT-SIPI via LAPIC ICR)
-        #[cfg(not(feature = "simics"))]
+        #[cfg(not(any(feature = "simics", test, target_os = "windows")))]
         {
             // ICR low register (offset 0x300): INIT IPI, all excluding self
             crate::apic::lapic::write_reg(0x300, 0x000C4500);

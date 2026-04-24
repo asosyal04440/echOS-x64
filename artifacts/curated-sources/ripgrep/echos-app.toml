@@ -1,0 +1,13 @@
+app_id = "ripgrep"
+name = "ripgrep"
+version = "1.0.0"
+entry = "rg.exe"
+sdk_version = 1
+runtime = "pe"
+presentation = "shell-owned"
+capabilities = ["fs.read", "dialogs.open", "dialogs.save", "notifications.post", "clipboard.read", "clipboard.write"]
+default_window.title = "ripgrep"
+default_window.width = 1240
+default_window.height = 820
+state_contract = "warm-suspend"
+restart_policy = "never"

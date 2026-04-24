@@ -21,7 +21,10 @@ fn current_snapshot(state: &RseqState) -> RseqUserArea {
 }
 
 pub fn sync_user_area(state: &RseqState) {
-    if !state.registered || state.area_ptr == 0 || state.area_len < core::mem::size_of::<RseqUserArea>() as u32 {
+    if !state.registered
+        || state.area_ptr == 0
+        || state.area_len < core::mem::size_of::<RseqUserArea>() as u32
+    {
         return;
     }
 

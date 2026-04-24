@@ -795,12 +795,10 @@ pub fn can_cpu_online(cpu_id: u32) -> bool {
 
 impl CpuHotplugManager {
     fn acquire_hotplug_gate(&self) -> Result<HotplugGateGuard<'_>, HotplugError> {
-        match self.hotplug_gate.compare_exchange(
-            false,
-            true,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .hotplug_gate
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => Ok(HotplugGateGuard {
                 gate: &self.hotplug_gate,
             }),

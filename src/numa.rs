@@ -876,12 +876,10 @@ impl NumaManager {
     }
 
     fn acquire_migration_gate(&self) -> Result<MigrationGateGuard<'_>, NumaError> {
-        match self.migration_gate.compare_exchange(
-            false,
-            true,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .migration_gate
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => Ok(MigrationGateGuard {
                 gate: &self.migration_gate,
             }),

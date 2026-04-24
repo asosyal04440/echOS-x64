@@ -1,0 +1,8 @@
+flowchart LR
+    A[Request NORMAL] --> B{NORMAL available}
+    B -->|Yes| C[Allocate NORMAL]
+    B -->|No| D{DMA32 available}
+    D -->|Yes| E[Allocate DMA32 fallback]
+    D -->|No| F{DMA available}
+    F -->|Yes| G[Allocate DMA fallback]
+    F -->|No| H[Allocation fail]

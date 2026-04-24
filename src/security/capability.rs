@@ -246,7 +246,10 @@ impl CapabilityTable {
             children: Vec::new(),
         };
 
-        self.capabilities.get_mut(&parent_id)?.children.push(child_id);
+        self.capabilities
+            .get_mut(&parent_id)?
+            .children
+            .push(child_id);
         self.handles.insert(handle, child_id);
         self.capabilities.insert(child_id, child);
         Some(child_id)
@@ -301,8 +304,13 @@ lazy_static! {
     static ref CAP_TABLES: Mutex<BTreeMap<u64, CapabilityTable>> = Mutex::new(BTreeMap::new());
 }
 
-fn ensure_process_inner(tables: &mut BTreeMap<u64, CapabilityTable>, pid: u64) -> &mut CapabilityTable {
-    tables.entry(pid).or_insert_with(|| CapabilityTable::new(pid))
+fn ensure_process_inner(
+    tables: &mut BTreeMap<u64, CapabilityTable>,
+    pid: u64,
+) -> &mut CapabilityTable {
+    tables
+        .entry(pid)
+        .or_insert_with(|| CapabilityTable::new(pid))
 }
 
 pub fn init_process(pid: u64) {
@@ -491,7 +499,9 @@ pub fn resolve_service_handle(
     rights: CapRights,
 ) -> Result<ServiceCapabilityRecord, CapabilityError> {
     let tables = CAP_TABLES.lock();
-    let table = tables.get(&pid).ok_or(CapabilityError::ProcessNotInitialized)?;
+    let table = tables
+        .get(&pid)
+        .ok_or(CapabilityError::ProcessNotInitialized)?;
     let cap = table
         .get_by_handle(handle)
         .ok_or(CapabilityError::InvalidHandle)?;
@@ -507,7 +517,9 @@ pub fn resolve_request_handle(
     handle: UserHandle,
 ) -> Result<RequestCapabilityRecord, CapabilityError> {
     let tables = CAP_TABLES.lock();
-    let table = tables.get(&pid).ok_or(CapabilityError::ProcessNotInitialized)?;
+    let table = tables
+        .get(&pid)
+        .ok_or(CapabilityError::ProcessNotInitialized)?;
     let cap = table
         .get_by_handle(handle)
         .ok_or(CapabilityError::InvalidHandle)?;
@@ -523,7 +535,9 @@ pub fn resolve_shared_region_handle(
     rights: CapRights,
 ) -> Result<SharedRegionCapabilityRecord, CapabilityError> {
     let tables = CAP_TABLES.lock();
-    let table = tables.get(&pid).ok_or(CapabilityError::ProcessNotInitialized)?;
+    let table = tables
+        .get(&pid)
+        .ok_or(CapabilityError::ProcessNotInitialized)?;
     let cap = table
         .get_by_handle(handle)
         .ok_or(CapabilityError::InvalidHandle)?;
@@ -542,12 +556,10 @@ mod tests {
     fn service_handle_resolution_is_pid_local() {
         init_process(7);
         init_process(8);
-        let handle = open_service_handle(7, 3, CapRights::READ_WRITE, 1, None)
-            .expect("handle");
+        let handle = open_service_handle(7, 3, CapRights::READ_WRITE, 1, None).expect("handle");
         assert!(resolve_service_handle(7, handle, CapRights::READ).is_ok());
         assert_eq!(
-            resolve_service_handle(8, handle, CapRights::READ)
-                .expect_err("foreign pid must fail"),
+            resolve_service_handle(8, handle, CapRights::READ).expect_err("foreign pid must fail"),
             CapabilityError::InvalidHandle
         );
     }
@@ -555,8 +567,7 @@ mod tests {
     #[test]
     fn revoke_handle_removes_user_visible_slot() {
         init_process(11);
-        let handle = open_service_handle(11, 5, CapRights::READ_WRITE, 1, None)
-            .expect("handle");
+        let handle = open_service_handle(11, 5, CapRights::READ_WRITE, 1, None).expect("handle");
         revoke_handle(11, handle).expect("revoke");
         assert_eq!(
             resolve_service_handle(11, handle, CapRights::READ)

@@ -1,0 +1,14 @@
+flowchart TD
+    A[User page fault] --> B{Protection violation}
+    B -->|Write fault| C[handle_cow_fault]
+    B -->|No| D[handle_lazy_fault]
+    D --> E{Vma kind}
+    E -->|Anonymous| F[anon lazy map]
+    E -->|Image| G[image lazy map]
+    E -->|File| H[file lazy map]
+    F --> I{THP eligible}
+    I -->|Yes| J[try_map_thp_anon 2MiB]
+    I -->|No| K[map 4KiB page]
+    C --> L{refcount > 1}
+    L -->|Yes| M[copy page and remap writable]
+    L -->|No| N[upgrade writable flags]

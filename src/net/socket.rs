@@ -1194,16 +1194,10 @@ pub fn parse_port(s: &str) -> Option<Port> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::sync::Arc;
-    use spin::Mutex;
 
     #[test]
     fn raw_socket_send_wraps_payload_and_recv_delivers_ipv4_packet() {
-        if super::super::default_interface().is_none() {
-            super::super::register_interface(Arc::new(Mutex::new(
-                super::super::netdev::LoopbackInterface::new(),
-            )));
-        }
+        super::super::ensure_loopback_interface_for_tests();
         let sock = socket(AddressFamily::IPV4, SocketType::RAW, Protocol::ICMP).unwrap();
         bind(sock, SocketAddr::new(Ipv4Addr::new(10, 0, 2, 15), Port(0))).unwrap();
         connect(sock, SocketAddr::new(Ipv4Addr::new(1, 1, 1, 1), Port(0))).unwrap();

@@ -1,0 +1,8 @@
+sequenceDiagram
+    participant I as Initiator
+    participant R as Responder
+    I->>R: Type1 Initiation
+    R->>I: Type2 Response
+    Note over I,R: Session keys installed
+    I->>R: Type4 Transport data
+    R->>I: Type4 Transport data

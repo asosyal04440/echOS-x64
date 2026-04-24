@@ -1217,6 +1217,7 @@ mod tests {
 
     #[test]
     fn zero_copy_connect_and_close_ops_are_stateful() {
+        crate::net::ensure_loopback_interface_for_tests();
         let socket_id = socket::socket(AddressFamily::IPV4, SocketType::STREAM, Protocol::TCP)
             .expect("socket create");
         let mut ring = IoUring::new(1).expect("ring");
@@ -1239,6 +1240,7 @@ mod tests {
 
     #[test]
     fn zero_copy_ipv6_connect_and_close_ops_are_stateful() {
+        crate::net::ensure_loopback_interface_for_tests();
         let socket_id = socket::socket(AddressFamily::IPV6, SocketType::STREAM, Protocol::TCP)
             .expect("socket create");
         let mut ring = IoUring::new(1).expect("ring");

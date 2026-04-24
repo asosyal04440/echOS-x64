@@ -77,9 +77,17 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
+#[cfg(not(target_os = "uefi"))]
+use p256::ecdsa::signature::Verifier;
+#[cfg(not(target_os = "uefi"))]
+use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
+#[cfg(not(target_os = "uefi"))]
+use p384::ecdsa::{Signature as P384Signature, VerifyingKey as P384VerifyingKey};
 use sha2::{Digest, Sha256, Sha384};
+use spin::Mutex;
 
 // ============================================================================
 // TLS SABİTLERİ VE TEMEL TİPLER
@@ -88,6 +96,8 @@ use sha2::{Digest, Sha256, Sha384};
 /// TLS 1.3 protokol sürüm kodu
 /// Not: 0x0303 = TLS 1.2 uyumluluğu için, gerçek sürüm uzantıda belirtilir
 pub const TLS_VERSION_1_3: u16 = 0x0303;
+
+static TLS_X509_ROOTS_READY: AtomicBool = AtomicBool::new(false);
 
 /// TLS 1.3 kayıt türleri (record layer content type)
 ///
@@ -499,8 +509,9 @@ impl KeySchedule {
         hkdf_label.extend_from_slice(context);
 
         let mut output = [0u8; 32];
-        let hkdf = Hkdf::<Sha256>::from_prk(secret).expect("Invalid PRK");
-        hkdf.expand(&hkdf_label, &mut output).ok();
+        if let Ok(hkdf) = Hkdf::<Sha256>::from_prk(secret) {
+            let _ = hkdf.expand(&hkdf_label, &mut output);
+        }
 
         output
     }
@@ -519,6 +530,24 @@ impl KeySchedule {
 
     pub fn server_application_traffic_secret(&self) -> Option<&[u8; 32]> {
         self.server_application_traffic_secret.as_ref()
+    }
+
+    pub fn server_finished_verify_data(&self, transcript_hash: &[u8]) -> Option<Vec<u8>> {
+        let secret = self.server_handshake_traffic_secret.as_ref()?;
+        let finished_key = self.hkdf_expand_label(secret, b"finished", &[], 32);
+        let mut hmac = Hmac::<Sha256>::new_from_slice(&finished_key).ok()?;
+        hmac.update(transcript_hash);
+        Some(hmac.finalize().into_bytes().to_vec())
+    }
+
+    pub fn resumption_psk(&self, transcript_hash: &[u8], nonce: &[u8]) -> Option<Vec<u8>> {
+        let master_secret = self.master_secret.as_ref()?;
+        let resumption_master =
+            self.hkdf_expand_label(master_secret, b"res master", transcript_hash, 32);
+        Some(
+            self.hkdf_expand_label(&resumption_master, b"resumption", nonce, 32)
+                .to_vec(),
+        )
     }
 }
 
@@ -557,6 +586,17 @@ pub struct TlsClient {
     cipher_suite: Option<CipherSuite>,
     key_schedule: KeySchedule,
     transcript: Vec<u8>,
+    server_name: Option<String>,
+    offered_psk_ticket: Option<SessionTicket>,
+    selected_psk_identity: Option<u16>,
+    pending_session_tickets: Vec<Vec<u8>>,
+    client_hello_random: [u8; 32],
+    server_random: Option<[u8; 32]>,
+    client_private_key: Option<[u8; 32]>,
+    client_public_key: Option<[u8; 32]>,
+    server_public_key: Option<[u8; 32]>,
+    peer_cert_chain: Option<Vec<crate::net::x509::X509Certificate>>,
+    peer_public_key: Option<crate::net::x509::X509PublicKey>,
     client_seq: u64,
     server_seq: u64,
 }
@@ -568,6 +608,17 @@ impl TlsClient {
             cipher_suite: None,
             key_schedule: KeySchedule::new(),
             transcript: Vec::new(),
+            server_name: None,
+            offered_psk_ticket: None,
+            selected_psk_identity: None,
+            pending_session_tickets: Vec::new(),
+            client_hello_random: [0u8; 32],
+            server_random: None,
+            client_private_key: None,
+            client_public_key: None,
+            server_public_key: None,
+            peer_cert_chain: None,
+            peer_public_key: None,
             client_seq: 0,
             server_seq: 0,
         }
@@ -587,27 +638,42 @@ impl TlsClient {
     ///   - key_share (51): ECDHE için geçici public key paylaşılır
     ///   - signature_algorithms (13): Desteklenen imza şemaları listesi
     pub fn build_client_hello(&mut self, hostname: &str) -> Vec<u8> {
-        let mut body = Vec::new();
+        self.state = TlsState::Initial;
+        self.cipher_suite = None;
+        self.key_schedule = KeySchedule::new();
+        self.transcript.clear();
+        self.server_name = Some(hostname.to_string());
+        self.offered_psk_ticket = None;
+        self.selected_psk_identity = None;
+        self.pending_session_tickets.clear();
+        self.server_random = None;
+        self.client_private_key = None;
+        self.client_public_key = None;
+        self.server_public_key = None;
+        self.peer_cert_chain = None;
+        self.peer_public_key = None;
+        self.client_seq = 0;
+        self.server_seq = 0;
 
-        // Protocol version
-        body.extend_from_slice(&TLS_VERSION_1_3.to_be_bytes());
+        let mut body = Vec::new();
+        let mut binder_meta: Option<(usize, usize, CipherSuite, Vec<u8>)> = None;
+
+        // Protocol version (legacy_version)
+        body.extend_from_slice(&0x0303u16.to_be_bytes());
 
         // Random (32 bytes)
-        crate::random::fill_bytes(&mut [0u8; 32]);
-        for _ in 0..32 {
-            body.push(crate::random::next_u32() as u8);
-        }
+        crate::random::fill_bytes(&mut self.client_hello_random);
+        body.extend_from_slice(&self.client_hello_random);
 
         // Session ID (empty)
         body.push(0);
 
         // Cipher suites
-        let cipher_suites: [u16; 3] = [
+        let cipher_suites: [u16; 2] = [
             CipherSuite::ChaCha20Poly1305Sha256 as u16,
-            CipherSuite::Aes256GcmSha384 as u16,
             CipherSuite::Aes128GcmSha256 as u16,
         ];
-        body.push((cipher_suites.len() * 2) as u8);
+        body.extend_from_slice(&((cipher_suites.len() * 2) as u16).to_be_bytes());
         for suite in &cipher_suites {
             body.extend_from_slice(&suite.to_be_bytes());
         }
@@ -621,6 +687,7 @@ impl TlsClient {
 
         // Server Name extension (type 0)
         let mut sni = Vec::new();
+        sni.extend_from_slice(&((hostname.len() + 3) as u16).to_be_bytes());
         sni.push(0);
         sni.extend_from_slice(&(hostname.len() as u16).to_be_bytes());
         sni.extend_from_slice(hostname.as_bytes());
@@ -637,12 +704,14 @@ impl TlsClient {
         extensions.extend_from_slice(&versions);
 
         // Key Share extension (type 51)
+        let (client_private_key, client_public_key) = X25519::generate_keypair();
+        self.client_private_key = Some(client_private_key);
+        self.client_public_key = Some(client_public_key);
         let mut key_share = Vec::new();
+        key_share.extend_from_slice(&36u16.to_be_bytes());
         key_share.extend_from_slice(&(NamedGroup::X25519 as u16).to_be_bytes());
         key_share.extend_from_slice(&32u16.to_be_bytes());
-        for _ in 0..32 {
-            key_share.push(crate::random::next_u32() as u8);
-        }
+        key_share.extend_from_slice(&client_public_key);
         extensions.extend_from_slice(&51u16.to_be_bytes());
         extensions.extend_from_slice(&(key_share.len() as u16).to_be_bytes());
         extensions.extend_from_slice(&key_share);
@@ -662,6 +731,33 @@ impl TlsClient {
         extensions.extend_from_slice(&(sig_algo_data.len() as u16).to_be_bytes());
         extensions.extend_from_slice(&sig_algo_data);
 
+        if let Some(ticket) = TLS_SESSION_CACHE.lock().find_for_server(hostname).cloned() {
+            let hash_len = session_ticket_hash_len(ticket.cipher_suite);
+            let mut psk_ext = Vec::new();
+            let mut identities = Vec::new();
+            identities.extend_from_slice(&(ticket.ticket.len() as u16).to_be_bytes());
+            identities.extend_from_slice(&ticket.ticket);
+            identities.extend_from_slice(&ticket.obfuscated_age().to_be_bytes());
+            psk_ext.extend_from_slice(&(identities.len() as u16).to_be_bytes());
+            psk_ext.extend_from_slice(&identities);
+            psk_ext.extend_from_slice(&((1 + hash_len) as u16).to_be_bytes());
+            psk_ext.push(hash_len as u8);
+            let binder_start = psk_ext.len();
+            psk_ext.resize(psk_ext.len() + hash_len, 0);
+
+            extensions.extend_from_slice(&41u16.to_be_bytes());
+            extensions.extend_from_slice(&(psk_ext.len() as u16).to_be_bytes());
+            let ext_payload_start = extensions.len();
+            extensions.extend_from_slice(&psk_ext);
+            binder_meta = Some((
+                ext_payload_start + binder_start,
+                ext_payload_start + binder_start + hash_len,
+                ticket.cipher_suite,
+                ticket.resumption_secret.clone(),
+            ));
+            self.offered_psk_ticket = Some(ticket);
+        }
+
         body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
         body.extend_from_slice(&extensions);
 
@@ -674,6 +770,12 @@ impl TlsClient {
         let mut hello = Vec::new();
         hello.extend_from_slice(&header.to_bytes());
         hello.extend_from_slice(&body);
+
+        if let Some((_binder_start, _binder_end, cipher_suite, resumption_secret)) = binder_meta {
+            if !fill_tls13_resumption_binder(&mut hello, 0, cipher_suite, &resumption_secret) {
+                self.offered_psk_ticket = None;
+            }
+        }
 
         self.transcript.extend_from_slice(&hello);
         self.state = TlsState::ClientHelloSent;
@@ -694,45 +796,142 @@ impl TlsClient {
             return Err(TlsError::InvalidState);
         }
 
-        let header = HandshakeHeader::parse(data)?;
-        if header.msg_type != HandshakeType::ServerHello {
+        let body = expect_handshake_message(data, HandshakeType::ServerHello)?;
+        if body.len() < 40 {
             return Err(TlsError::InvalidMessage);
         }
-
-        let body = &data[HandshakeHeader::SIZE..];
         let mut offset = 0;
 
-        offset += 2; // Version
-        offset += 32; // Random
+        let legacy_version = u16::from_be_bytes([body[offset], body[offset + 1]]);
+        if legacy_version != 0x0303 {
+            return Err(TlsError::InvalidMessage);
+        }
+        offset += 2;
 
+        let mut server_random = [0u8; 32];
+        server_random.copy_from_slice(&body[offset..offset + 32]);
+        if has_tls13_downgrade_sentinel(&server_random) {
+            return Err(TlsError::InvalidMessage);
+        }
+        offset += 32;
+
+        if offset >= body.len() {
+            return Err(TlsError::InvalidMessage);
+        }
         let session_id_len = body[offset] as usize;
+        if session_id_len > 32 || offset + 1 + session_id_len + 5 > body.len() {
+            return Err(TlsError::InvalidMessage);
+        }
         offset += 1 + session_id_len;
 
         let suite = u16::from_be_bytes([body[offset], body[offset + 1]]);
-        self.cipher_suite = CipherSuite::from_u16(suite);
+        let cipher_suite = CipherSuite::from_u16(suite).ok_or(TlsError::InvalidMessage)?;
+        if !matches!(
+            cipher_suite,
+            CipherSuite::Aes128GcmSha256 | CipherSuite::ChaCha20Poly1305Sha256
+        ) {
+            return Err(TlsError::InvalidMessage);
+        }
+        self.cipher_suite = Some(cipher_suite);
         offset += 2;
-        offset += 1; // Compression
+        if body[offset] != 0 {
+            return Err(TlsError::InvalidMessage);
+        }
+        offset += 1;
 
         // Parse extensions
-        if offset + 2 <= body.len() {
-            let ext_len = u16::from_be_bytes([body[offset], body[offset + 1]]) as usize;
-            offset += 2;
+        if offset + 2 > body.len() {
+            return Err(TlsError::InvalidMessage);
+        }
+        let ext_len = u16::from_be_bytes([body[offset], body[offset + 1]]) as usize;
+        offset += 2;
+        if offset + ext_len != body.len() {
+            return Err(TlsError::InvalidMessage);
+        }
 
-            let ext_end = offset + ext_len;
-            while offset + 4 <= ext_end {
-                let ext_type = u16::from_be_bytes([body[offset], body[offset + 1]]);
-                let ext_len = u16::from_be_bytes([body[offset + 2], body[offset + 3]]) as usize;
-                offset += 4;
+        let ext_end = offset + ext_len;
+        let mut selected_tls13 = false;
+        let mut server_key_share = None;
+        let mut selected_psk_identity = None;
+        while offset + 4 <= ext_end {
+            let ext_type = u16::from_be_bytes([body[offset], body[offset + 1]]);
+            let ext_len = u16::from_be_bytes([body[offset + 2], body[offset + 3]]) as usize;
+            offset += 4;
+            if offset + ext_len > ext_end {
+                return Err(TlsError::InvalidMessage);
+            }
+            let ext_body = &body[offset..offset + ext_len];
 
-                if ext_type == 51 && offset + ext_len <= body.len() {
-                    // Key Share - skip for now
+            match ext_type {
+                43 => {
+                    if ext_len != 2 || u16::from_be_bytes([ext_body[0], ext_body[1]]) != 0x0304 {
+                        return Err(TlsError::InvalidMessage);
+                    }
+                    selected_tls13 = true;
                 }
+                51 => {
+                    if ext_len != 36 {
+                        return Err(TlsError::InvalidMessage);
+                    }
+                    let group = u16::from_be_bytes([ext_body[0], ext_body[1]]);
+                    let key_len = u16::from_be_bytes([ext_body[2], ext_body[3]]) as usize;
+                    if NamedGroup::from_u16(group) != Some(NamedGroup::X25519)
+                        || key_len != 32
+                        || ext_body.len() != 4 + key_len
+                    {
+                        return Err(TlsError::InvalidMessage);
+                    }
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&ext_body[4..]);
+                    server_key_share = Some(key);
+                }
+                41 => {
+                    if ext_len != 2 {
+                        return Err(TlsError::InvalidMessage);
+                    }
+                    selected_psk_identity = Some(u16::from_be_bytes([ext_body[0], ext_body[1]]));
+                }
+                _ => {}
+            }
 
-                offset += ext_len;
+            offset += ext_len;
+        }
+        if offset != ext_end || !selected_tls13 {
+            return Err(TlsError::InvalidMessage);
+        }
+
+        self.selected_psk_identity = selected_psk_identity;
+        match selected_psk_identity {
+            Some(identity) => {
+                let Some(ticket) = self.offered_psk_ticket.as_ref() else {
+                    return Err(TlsError::InvalidMessage);
+                };
+                if identity != 0 || ticket.cipher_suite != cipher_suite {
+                    self.offered_psk_ticket = None;
+                    return Err(TlsError::InvalidMessage);
+                }
+            }
+            None => {
+                self.offered_psk_ticket = None;
             }
         }
 
-        self.transcript.extend_from_slice(data);
+        let client_private_key = self.client_private_key.ok_or(TlsError::KeyExchangeFailed)?;
+        let server_key_share = server_key_share.ok_or(TlsError::KeyExchangeFailed)?;
+        let shared_secret = X25519::diffie_hellman(&client_private_key, &server_key_share);
+        if shared_secret.iter().all(|byte| *byte == 0) {
+            return Err(TlsError::KeyExchangeFailed);
+        }
+
+        let mut handshake_transcript = self.transcript.clone();
+        handshake_transcript.extend_from_slice(data);
+        let hash = transcript_hash(&handshake_transcript);
+        self.key_schedule
+            .derive_handshake_secret(&shared_secret, &hash);
+
+        self.transcript = handshake_transcript;
+        self.server_random = Some(server_random);
+        self.server_public_key = Some(server_key_share);
         self.state = TlsState::ServerHelloReceived;
 
         Ok(())
@@ -744,8 +943,15 @@ impl TlsClient {
     /// Sunucunun desteklediği uzantıları (ALPN, max_fragment_length vb.) içerir.
     /// TLS 1.3'te bu mesaj el sıkışma sırrıyla şifrelenir (ilk şifreli mesaj).
     pub fn process_encrypted_extensions(&mut self, data: &[u8]) -> Result<(), TlsError> {
-        let header = HandshakeHeader::parse(data)?;
-        if header.msg_type != HandshakeType::EncryptedExtensions {
+        if self.state != TlsState::ServerHelloReceived {
+            return Err(TlsError::InvalidState);
+        }
+        let body = expect_handshake_message(data, HandshakeType::EncryptedExtensions)?;
+        if body.len() < 2 {
+            return Err(TlsError::InvalidMessage);
+        }
+        let ext_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+        if ext_len + 2 != body.len() {
             return Err(TlsError::InvalidMessage);
         }
 
@@ -758,13 +964,20 @@ impl TlsClient {
     ///
     /// Sunucu X.509 sertifika zincirini gönderir (yaprak + ara CA'lar).
     /// Her sertifika DER formatında kodlanmıştır.
-    /// Gerçek uygulamada: x509::parse_certificate_chain() ile doğrulama yapılır.
     pub fn process_certificate(&mut self, data: &[u8]) -> Result<(), TlsError> {
-        let header = HandshakeHeader::parse(data)?;
-        if header.msg_type != HandshakeType::Certificate {
-            return Err(TlsError::InvalidMessage);
+        if self.state != TlsState::EncryptedExtensionsReceived {
+            return Err(TlsError::InvalidState);
         }
 
+        let body = expect_handshake_message(data, HandshakeType::Certificate)?;
+
+        let cert_chain =
+            parse_tls13_certificate_entries(body).ok_or(TlsError::InvalidCertificate)?;
+        let peer_public_key =
+            validate_tls13_server_certificate_chain(&cert_chain, self.server_name.as_deref())?;
+
+        self.peer_cert_chain = Some(cert_chain);
+        self.peer_public_key = Some(peer_public_key);
         self.transcript.extend_from_slice(data);
         self.state = TlsState::CertificateReceived;
         Ok(())
@@ -776,9 +989,38 @@ impl TlsClient {
     /// İmza: "TLS 1.3, server CertificateVerify" öneki + transcript_hash üzerinde.
     /// İstemci bu imzayı sertifikadaki public key ile doğrulamalıdır.
     pub fn process_certificate_verify(&mut self, data: &[u8]) -> Result<(), TlsError> {
-        let header = HandshakeHeader::parse(data)?;
-        if header.msg_type != HandshakeType::CertificateVerify {
+        if self.state != TlsState::CertificateReceived {
+            return Err(TlsError::InvalidState);
+        }
+        let body = expect_handshake_message(data, HandshakeType::CertificateVerify)?;
+        if body.len() < 4 {
             return Err(TlsError::InvalidMessage);
+        }
+
+        let scheme = parse_signature_scheme(u16::from_be_bytes([body[0], body[1]]))
+            .ok_or(TlsError::InvalidMessage)?;
+        let sig_len = u16::from_be_bytes([body[2], body[3]]) as usize;
+        if body.len() != 4 + sig_len {
+            return Err(TlsError::InvalidMessage);
+        }
+
+        let transcript = transcript_hash(&self.transcript);
+        let verify_message = build_server_certificate_verify_message(&transcript);
+        if self
+            .peer_cert_chain
+            .as_ref()
+            .map(|chain| chain.is_empty())
+            .unwrap_or(true)
+        {
+            return Err(TlsError::CertificateVerificationFailed);
+        }
+        let peer_public_key = self
+            .peer_public_key
+            .as_ref()
+            .ok_or(TlsError::CertificateVerificationFailed)?;
+        if !verify_tls13_certificate_signature(peer_public_key, scheme, &verify_message, &body[4..])
+        {
+            return Err(TlsError::CertificateVerificationFailed);
         }
 
         self.transcript.extend_from_slice(data);
@@ -794,9 +1036,25 @@ impl TlsClient {
     ///
     /// Bu mesaj alındıktan sonra istemci de kendi Finished mesajını gönderir.
     pub fn process_finished(&mut self, data: &[u8]) -> Result<(), TlsError> {
-        let header = HandshakeHeader::parse(data)?;
-        if header.msg_type != HandshakeType::Finished {
+        if self.state != TlsState::CertificateVerifyReceived {
+            return Err(TlsError::InvalidState);
+        }
+        let body = expect_handshake_message(data, HandshakeType::Finished)?;
+        let expected_len = self
+            .cipher_suite
+            .and_then(finished_verify_len)
+            .ok_or(TlsError::InvalidState)?;
+        if body.len() != expected_len {
             return Err(TlsError::InvalidMessage);
+        }
+
+        let hash = transcript_hash(&self.transcript);
+        let expected = self
+            .key_schedule
+            .server_finished_verify_data(&hash)
+            .ok_or(TlsError::InvalidState)?;
+        if !constant_time_eq(body, &expected) {
+            return Err(TlsError::CertificateVerificationFailed);
         }
 
         self.transcript.extend_from_slice(data);
@@ -812,9 +1070,48 @@ impl TlsClient {
     ///   3. Durum Established olarak işaretlenir
     ///   4. Uygulama verisi artık gönderilebilir/alınabilir
     pub fn complete_handshake(&mut self) {
+        if self.state != TlsState::FinishedReceived {
+            return;
+        }
         let hash = Sha256::digest(&self.transcript);
         self.key_schedule.derive_master_secret(&hash);
         self.state = TlsState::Established;
+        let pending = core::mem::take(&mut self.pending_session_tickets);
+        for ticket in pending {
+            let _ = self.cache_new_session_ticket(&ticket);
+        }
+    }
+
+    pub fn process_new_session_ticket(&mut self, data: &[u8]) -> Result<(), TlsError> {
+        if !matches!(
+            self.state,
+            TlsState::FinishedReceived | TlsState::Established
+        ) {
+            return Err(TlsError::InvalidState);
+        }
+        if self.state != TlsState::Established {
+            self.pending_session_tickets.push(data.to_vec());
+            return Ok(());
+        }
+        self.cache_new_session_ticket(data)
+    }
+
+    fn cache_new_session_ticket(&mut self, data: &[u8]) -> Result<(), TlsError> {
+        let server_name = self.server_name.as_deref().ok_or(TlsError::InvalidState)?;
+        let cipher_suite = self.cipher_suite.ok_or(TlsError::InvalidState)?;
+        let transcript = transcript_hash(&self.transcript);
+        let resumption_psk = self
+            .key_schedule
+            .resumption_psk(
+                &transcript,
+                extract_new_session_ticket_nonce(data).ok_or(TlsError::InvalidMessage)?,
+            )
+            .ok_or(TlsError::InvalidState)?;
+        let ticket =
+            parse_new_session_ticket(data, server_name, cipher_suite, Some(&resumption_psk))
+                .ok_or(TlsError::InvalidMessage)?;
+        TLS_SESSION_CACHE.lock().add(ticket);
+        Ok(())
     }
 
     pub fn state(&self) -> &TlsState {
@@ -832,6 +1129,356 @@ impl Default for TlsClient {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn expect_handshake_message<'a>(
+    data: &'a [u8],
+    expected: HandshakeType,
+) -> Result<&'a [u8], TlsError> {
+    let header = HandshakeHeader::parse(data)?;
+    if header.msg_type != expected {
+        return Err(TlsError::InvalidMessage);
+    }
+    let total_len = HandshakeHeader::SIZE + header.length as usize;
+    if data.len() != total_len {
+        return Err(TlsError::InvalidMessage);
+    }
+    Ok(&data[HandshakeHeader::SIZE..])
+}
+
+fn ensure_x509_roots() {
+    if TLS_X509_ROOTS_READY
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        crate::net::x509::init_builtin_roots();
+    }
+}
+
+fn map_cert_error_to_tls_error(err: crate::net::x509::CertError) -> TlsError {
+    match err {
+        crate::net::x509::CertError::InvalidFormat
+        | crate::net::x509::CertError::UnknownIssuer
+        | crate::net::x509::CertError::InvalidSignature
+        | crate::net::x509::CertError::InvalidChain
+        | crate::net::x509::CertError::SelfSigned
+        | crate::net::x509::CertError::NotCA
+        | crate::net::x509::CertError::InvalidKeyUsage => TlsError::InvalidCertificate,
+        crate::net::x509::CertError::Expired
+        | crate::net::x509::CertError::NotYetValid
+        | crate::net::x509::CertError::Revoked => TlsError::CertificateVerificationFailed,
+    }
+}
+
+fn validate_tls13_server_certificate_chain(
+    cert_chain: &[crate::net::x509::X509Certificate],
+    server_name: Option<&str>,
+) -> Result<crate::net::x509::X509PublicKey, TlsError> {
+    if cert_chain.is_empty() {
+        return Err(TlsError::InvalidCertificate);
+    }
+
+    ensure_x509_roots();
+    let verifier = crate::net::x509::CertVerifier::new();
+    verifier
+        .verify_chain(cert_chain)
+        .map_err(map_cert_error_to_tls_error)?;
+
+    if let Some(hostname) = server_name {
+        if !crate::net::x509::verify_hostname(&cert_chain[0], hostname) {
+            return Err(TlsError::CertificateVerificationFailed);
+        }
+    }
+
+    let peer_public_key = cert_chain[0].public_key.clone();
+    if peer_public_key.key_data.is_empty() {
+        return Err(TlsError::InvalidCertificate);
+    }
+
+    Ok(peer_public_key)
+}
+
+fn parse_signature_scheme(value: u16) -> Option<SignatureScheme> {
+    match value {
+        0x0404 => Some(SignatureScheme::EcdsaSecp256r1Sha256),
+        0x0503 => Some(SignatureScheme::EcdsaSecp384r1Sha384),
+        0x0804 => Some(SignatureScheme::RsaPssRsaeSha256),
+        0x0805 => Some(SignatureScheme::RsaPssRsaeSha384),
+        0x0807 => Some(SignatureScheme::Ed25519),
+        _ => None,
+    }
+}
+
+fn finished_verify_len(cipher_suite: CipherSuite) -> Option<usize> {
+    match cipher_suite {
+        CipherSuite::Aes128GcmSha256 | CipherSuite::ChaCha20Poly1305Sha256 => Some(32),
+        CipherSuite::Aes256GcmSha384 => None,
+    }
+}
+
+fn has_tls13_downgrade_sentinel(server_random: &[u8; 32]) -> bool {
+    matches!(&server_random[24..], b"DOWNGRD\x00" | b"DOWNGRD\x01")
+}
+
+fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
+    crate::crypto::constant_time_eq(lhs, rhs)
+}
+
+fn build_server_certificate_verify_message(transcript_hash: &[u8; 32]) -> Vec<u8> {
+    let mut message = vec![0x20u8; 64];
+    message.extend_from_slice(b"TLS 1.3, server CertificateVerify");
+    message.push(0);
+    message.extend_from_slice(transcript_hash);
+    message
+}
+
+fn parse_tls13_leaf_public_key(
+    cert_message_body: &[u8],
+) -> Option<crate::net::x509::X509PublicKey> {
+    if cert_message_body.is_empty() {
+        return None;
+    }
+
+    let request_context_len = cert_message_body[0] as usize;
+    let list_offset = 1 + request_context_len;
+    if list_offset + 3 > cert_message_body.len() {
+        return None;
+    }
+
+    let cert_list_len = ((cert_message_body[list_offset] as usize) << 16)
+        | ((cert_message_body[list_offset + 1] as usize) << 8)
+        | (cert_message_body[list_offset + 2] as usize);
+    let list_start = list_offset + 3;
+    let list_end = list_start.checked_add(cert_list_len)?;
+    if list_end > cert_message_body.len() || list_start + 3 > list_end {
+        return None;
+    }
+
+    let cert_len = ((cert_message_body[list_start] as usize) << 16)
+        | ((cert_message_body[list_start + 1] as usize) << 8)
+        | (cert_message_body[list_start + 2] as usize);
+    let cert_start = list_start + 3;
+    let cert_end = cert_start.checked_add(cert_len)?;
+    if cert_end + 2 > list_end {
+        return None;
+    }
+
+    let ext_len =
+        u16::from_be_bytes([cert_message_body[cert_end], cert_message_body[cert_end + 1]]) as usize;
+    if cert_end + 2 + ext_len > list_end {
+        return None;
+    }
+
+    let cert = crate::net::x509::X509Certificate::parse(&cert_message_body[cert_start..cert_end])?;
+    Some(cert.public_key)
+}
+
+fn parse_tls13_certificate_entries(
+    cert_message_body: &[u8],
+) -> Option<Vec<crate::net::x509::X509Certificate>> {
+    if cert_message_body.is_empty() {
+        return None;
+    }
+
+    let request_context_len = cert_message_body[0] as usize;
+    let list_offset = 1 + request_context_len;
+    if list_offset + 3 > cert_message_body.len() {
+        return None;
+    }
+
+    let cert_list_len = ((cert_message_body[list_offset] as usize) << 16)
+        | ((cert_message_body[list_offset + 1] as usize) << 8)
+        | (cert_message_body[list_offset + 2] as usize);
+    let list_start = list_offset + 3;
+    let list_end = list_start.checked_add(cert_list_len)?;
+    if list_end > cert_message_body.len() {
+        return None;
+    }
+
+    let mut certs = Vec::new();
+    let mut pos = list_start;
+    while pos + 3 <= list_end {
+        let cert_len = ((cert_message_body[pos] as usize) << 16)
+            | ((cert_message_body[pos + 1] as usize) << 8)
+            | (cert_message_body[pos + 2] as usize);
+        pos += 3;
+
+        let cert_end = pos.checked_add(cert_len)?;
+        if cert_len == 0 || cert_end + 2 > list_end {
+            return None;
+        }
+
+        let cert = crate::net::x509::X509Certificate::parse(&cert_message_body[pos..cert_end])?;
+        certs.push(cert);
+        pos = cert_end;
+
+        let ext_len =
+            u16::from_be_bytes([cert_message_body[pos], cert_message_body[pos + 1]]) as usize;
+        pos += 2;
+        let ext_end = pos.checked_add(ext_len)?;
+        if ext_end > list_end {
+            return None;
+        }
+        pos = ext_end;
+    }
+
+    if pos != list_end || certs.is_empty() {
+        return None;
+    }
+
+    Some(certs)
+}
+
+fn verify_tls13_certificate_signature(
+    public_key: &crate::net::x509::X509PublicKey,
+    scheme: SignatureScheme,
+    verify_message: &[u8],
+    signature: &[u8],
+) -> bool {
+    match scheme {
+        SignatureScheme::RsaPssRsaeSha256 | SignatureScheme::RsaPssRsaeSha384 => {
+            let Some((modulus, exponent)) =
+                parse_tls_rsa_public_key_components(&public_key.key_data)
+            else {
+                return false;
+            };
+            let hash_algo = match scheme {
+                SignatureScheme::RsaPssRsaeSha256 => {
+                    crate::crypto::signature::HashAlgorithm::Sha256
+                }
+                SignatureScheme::RsaPssRsaeSha384 => {
+                    crate::crypto::signature::HashAlgorithm::Sha384
+                }
+                _ => unreachable!(),
+            };
+            let digest = hash_algo.hash(verify_message);
+            crate::crypto::signature::RsaPublicKey::new(modulus, exponent)
+                .verify_pss(&digest, signature, hash_algo)
+        }
+        SignatureScheme::EcdsaSecp256r1Sha256 => {
+            verify_p256_certificate_signature(&public_key.key_data, signature, verify_message)
+        }
+        SignatureScheme::EcdsaSecp384r1Sha384 => {
+            verify_p384_certificate_signature(&public_key.key_data, signature, verify_message)
+        }
+        SignatureScheme::Ed25519 => {
+            if public_key.key_data.len() != 32 || signature.len() != 64 {
+                return false;
+            }
+            let Ok(key_bytes) = public_key.key_data.as_slice().try_into() else {
+                return false;
+            };
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(signature);
+            let key = crate::crypto::ed25519::Ed25519PublicKey::from_bytes(key_bytes);
+            key.verify(verify_message, &sig)
+        }
+        _ => false,
+    }
+}
+
+fn parse_tls_rsa_public_key_components(key_data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut parser = crate::net::x509::Asn1Parser::new(key_data);
+    let root = parser.parse_element()?;
+    if root.tag != crate::net::x509::Asn1Tag::Sequence || root.children.len() < 2 {
+        return None;
+    }
+
+    let modulus = trim_der_integer(&root.children[0].data);
+    let exponent = trim_der_integer(&root.children[1].data);
+    if modulus.is_empty() || exponent.is_empty() {
+        return None;
+    }
+    Some((modulus, exponent))
+}
+
+fn trim_der_integer(mut bytes: &[u8]) -> Vec<u8> {
+    while bytes.len() > 1 && bytes[0] == 0 {
+        bytes = &bytes[1..];
+    }
+    bytes.to_vec()
+}
+
+fn ecdsa_der_to_fixed(signature: &[u8], coordinate_len: usize) -> Option<Vec<u8>> {
+    let mut parser = crate::net::x509::Asn1Parser::new(signature);
+    let root = parser.parse_element()?;
+    if root.tag != crate::net::x509::Asn1Tag::Sequence || root.children.len() != 2 {
+        return None;
+    }
+
+    let r = normalize_ecdsa_integer(&root.children[0].data, coordinate_len)?;
+    let s = normalize_ecdsa_integer(&root.children[1].data, coordinate_len)?;
+    let mut fixed = Vec::with_capacity(coordinate_len * 2);
+    fixed.extend_from_slice(&r);
+    fixed.extend_from_slice(&s);
+    Some(fixed)
+}
+
+fn normalize_ecdsa_integer(integer: &[u8], coordinate_len: usize) -> Option<Vec<u8>> {
+    let integer = trim_der_integer(integer);
+    if integer.len() > coordinate_len {
+        return None;
+    }
+
+    let mut normalized = vec![0u8; coordinate_len - integer.len()];
+    normalized.extend_from_slice(&integer);
+    Some(normalized)
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn verify_p256_certificate_signature(
+    public_key: &[u8],
+    signature: &[u8],
+    verify_message: &[u8],
+) -> bool {
+    let normalized = match ecdsa_der_to_fixed(signature, 32) {
+        Some(value) => value,
+        None => return false,
+    };
+    let Ok(signature) = P256Signature::from_slice(&normalized) else {
+        return false;
+    };
+    let Ok(verifying_key) = P256VerifyingKey::from_sec1_bytes(public_key) else {
+        return false;
+    };
+    verifying_key.verify(verify_message, &signature).is_ok()
+}
+
+#[cfg(target_os = "uefi")]
+fn verify_p256_certificate_signature(
+    _public_key: &[u8],
+    _signature: &[u8],
+    _verify_message: &[u8],
+) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn verify_p384_certificate_signature(
+    public_key: &[u8],
+    signature: &[u8],
+    verify_message: &[u8],
+) -> bool {
+    let normalized = match ecdsa_der_to_fixed(signature, 48) {
+        Some(value) => value,
+        None => return false,
+    };
+    let Ok(signature) = P384Signature::from_slice(&normalized) else {
+        return false;
+    };
+    let Ok(verifying_key) = P384VerifyingKey::from_sec1_bytes(public_key) else {
+        return false;
+    };
+    verifying_key.verify(verify_message, &signature).is_ok()
+}
+
+#[cfg(target_os = "uefi")]
+fn verify_p384_certificate_signature(
+    _public_key: &[u8],
+    _signature: &[u8],
+    _verify_message: &[u8],
+) -> bool {
+    false
 }
 
 // ============================================================================
@@ -879,6 +1526,245 @@ pub fn transcript_hash(transcript: &[u8]) -> [u8; 32] {
     result
 }
 
+fn session_ticket_hash_len(cipher_suite: CipherSuite) -> usize {
+    match cipher_suite {
+        CipherSuite::Aes128GcmSha256 | CipherSuite::ChaCha20Poly1305Sha256 => 32,
+        CipherSuite::Aes256GcmSha384 => 48,
+    }
+}
+
+fn digest_for_cipher_suite(cipher_suite: CipherSuite, data: &[u8]) -> Vec<u8> {
+    match cipher_suite {
+        CipherSuite::Aes128GcmSha256 | CipherSuite::ChaCha20Poly1305Sha256 => {
+            Sha256::digest(data).to_vec()
+        }
+        CipherSuite::Aes256GcmSha384 => Sha384::digest(data).to_vec(),
+    }
+}
+
+fn hmac_for_cipher_suite(cipher_suite: CipherSuite, key: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    match cipher_suite {
+        CipherSuite::Aes128GcmSha256 | CipherSuite::ChaCha20Poly1305Sha256 => {
+            let mut hmac = Hmac::<Sha256>::new_from_slice(key).ok()?;
+            hmac.update(data);
+            Some(hmac.finalize().into_bytes().to_vec())
+        }
+        CipherSuite::Aes256GcmSha384 => {
+            let mut hmac = Hmac::<Sha384>::new_from_slice(key).ok()?;
+            hmac.update(data);
+            Some(hmac.finalize().into_bytes().to_vec())
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ClientHelloPskBinder {
+    binder_start: usize,
+    binder_end: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ClientHelloPskState {
+    transcript_prefix: Vec<u8>,
+    binders: Vec<ClientHelloPskBinder>,
+}
+
+fn parse_tls13_client_hello_psk_state(client_hello: &[u8]) -> Option<ClientHelloPskState> {
+    let body = parse_tls_handshake_body(client_hello, HandshakeType::ClientHello)?;
+    if body.len() < 38 {
+        return None;
+    }
+
+    let mut offset = 0usize;
+    if u16::from_be_bytes([body[offset], body[offset + 1]]) != 0x0303 {
+        return None;
+    }
+    offset += 2 + 32;
+
+    let session_id_len = *body.get(offset)? as usize;
+    offset = offset.checked_add(1 + session_id_len)?;
+    if offset + 2 > body.len() {
+        return None;
+    }
+
+    let cipher_suites_len = u16::from_be_bytes([body[offset], body[offset + 1]]) as usize;
+    if cipher_suites_len == 0 || cipher_suites_len % 2 != 0 {
+        return None;
+    }
+    offset = offset.checked_add(2 + cipher_suites_len)?;
+    if offset >= body.len() {
+        return None;
+    }
+
+    let compression_len = body[offset] as usize;
+    offset = offset.checked_add(1 + compression_len)?;
+    if offset + 2 > body.len() {
+        return None;
+    }
+
+    let extensions_len = u16::from_be_bytes([body[offset], body[offset + 1]]) as usize;
+    offset += 2;
+    let extensions_end = offset.checked_add(extensions_len)?;
+    if extensions_end != body.len() {
+        return None;
+    }
+
+    while offset + 4 <= extensions_end {
+        let ext_type = u16::from_be_bytes([body[offset], body[offset + 1]]);
+        let ext_len = u16::from_be_bytes([body[offset + 2], body[offset + 3]]) as usize;
+        offset += 4;
+        let ext_end = offset.checked_add(ext_len)?;
+        if ext_end > extensions_end {
+            return None;
+        }
+
+        if ext_type == 41 {
+            if ext_end != extensions_end {
+                return None;
+            }
+            return parse_tls13_pre_shared_key_extension(client_hello, 4 + offset, ext_len);
+        }
+
+        offset = ext_end;
+    }
+
+    None
+}
+
+fn parse_tls13_pre_shared_key_extension(
+    client_hello: &[u8],
+    ext_payload_abs: usize,
+    ext_len: usize,
+) -> Option<ClientHelloPskState> {
+    let ext_end_abs = ext_payload_abs.checked_add(ext_len)?;
+    if ext_end_abs > client_hello.len() || ext_len < 4 {
+        return None;
+    }
+    let ext = &client_hello[ext_payload_abs..ext_end_abs];
+
+    let identities_len = u16::from_be_bytes([ext[0], ext[1]]) as usize;
+    let identities_start = 2usize;
+    let identities_end = identities_start.checked_add(identities_len)?;
+    if identities_len == 0 || identities_end + 2 > ext.len() {
+        return None;
+    }
+
+    let mut identity_count = 0usize;
+    let mut pos = identities_start;
+    while pos < identities_end {
+        if pos + 2 > identities_end {
+            return None;
+        }
+        let identity_len = u16::from_be_bytes([ext[pos], ext[pos + 1]]) as usize;
+        pos += 2;
+        let identity_end = pos.checked_add(identity_len)?;
+        if identity_len == 0 || identity_end + 4 > identities_end {
+            return None;
+        }
+        pos = identity_end + 4;
+        identity_count += 1;
+    }
+    if pos != identities_end || identity_count == 0 {
+        return None;
+    }
+
+    let binder_vector_len_abs = ext_payload_abs + identities_end;
+    let binders_len = u16::from_be_bytes([ext[identities_end], ext[identities_end + 1]]) as usize;
+    pos = identities_end + 2;
+    let binders_end = pos.checked_add(binders_len)?;
+    if binders_len == 0 || binders_end != ext.len() {
+        return None;
+    }
+
+    let mut binders = Vec::new();
+    while pos < binders_end {
+        let binder_len = *ext.get(pos)? as usize;
+        pos += 1;
+        let binder_start = ext_payload_abs.checked_add(pos)?;
+        let binder_end = binder_start.checked_add(binder_len)?;
+        if binder_len == 0 || binder_end > ext_end_abs {
+            return None;
+        }
+        binders.push(ClientHelloPskBinder {
+            binder_start,
+            binder_end,
+        });
+        pos += binder_len;
+    }
+    if pos != binders_end || binders.len() != identity_count {
+        return None;
+    }
+
+    Some(ClientHelloPskState {
+        transcript_prefix: client_hello[..binder_vector_len_abs].to_vec(),
+        binders,
+    })
+}
+
+fn tls13_resumption_binder(
+    client_hello_transcript_prefix: &[u8],
+    cipher_suite: CipherSuite,
+    resumption_secret: &[u8],
+) -> Option<Vec<u8>> {
+    if resumption_secret.len() != session_ticket_hash_len(cipher_suite) {
+        return None;
+    }
+    let transcript_hash = digest_for_cipher_suite(cipher_suite, client_hello_transcript_prefix);
+    let binder_key = hmac_for_cipher_suite(cipher_suite, resumption_secret, b"res binder")?;
+    hmac_for_cipher_suite(cipher_suite, &binder_key, &transcript_hash)
+}
+
+fn fill_tls13_resumption_binder(
+    client_hello: &mut [u8],
+    selected_identity: u16,
+    cipher_suite: CipherSuite,
+    resumption_secret: &[u8],
+) -> bool {
+    let Some(psk_state) = parse_tls13_client_hello_psk_state(client_hello) else {
+        return false;
+    };
+    let Some(binder) = psk_state.binders.get(selected_identity as usize) else {
+        return false;
+    };
+    let Some(expected) = tls13_resumption_binder(
+        &psk_state.transcript_prefix,
+        cipher_suite,
+        resumption_secret,
+    ) else {
+        return false;
+    };
+    if expected.len() != binder.binder_end - binder.binder_start {
+        return false;
+    }
+    client_hello[binder.binder_start..binder.binder_end].copy_from_slice(&expected);
+    true
+}
+
+pub fn verify_tls13_psk_binder(
+    client_hello: &[u8],
+    selected_identity: u16,
+    cipher_suite: CipherSuite,
+    resumption_secret: &[u8],
+) -> bool {
+    let Some(psk_state) = parse_tls13_client_hello_psk_state(client_hello) else {
+        return false;
+    };
+    let Some(binder) = psk_state.binders.get(selected_identity as usize) else {
+        return false;
+    };
+    let Some(expected) = tls13_resumption_binder(
+        &psk_state.transcript_prefix,
+        cipher_suite,
+        resumption_secret,
+    ) else {
+        return false;
+    };
+    constant_time_eq(
+        &client_hello[binder.binder_start..binder.binder_end],
+        &expected,
+    )
+}
+
 // ============================================================================
 // AES-GCM UYGULAMASI (no_std uyumlu)
 // ============================================================================
@@ -913,11 +1799,11 @@ pub struct Aes {
 
 impl Aes {
     /// Create new AES instance with key
-    pub fn new(key: &[u8]) -> Self {
+    pub fn new(key: &[u8]) -> Result<Self, TlsError> {
         match key.len() {
-            16 => Self::new_aes128(key),
-            32 => Self::new_aes256(key),
-            _ => panic!("Invalid AES key length"),
+            16 => Ok(Self::new_aes128(key)),
+            32 => Ok(Self::new_aes256(key)),
+            _ => Err(TlsError::InvalidMessage),
         }
     }
 
@@ -1249,15 +2135,13 @@ impl Aes {
 /// - gmul(): Galois alan çarpımı (0xe1000... indirgeme polinomu)
 pub struct AesGcm {
     aes: Aes,
-    key_len: usize,
 }
 
 impl AesGcm {
-    pub fn new(key: &[u8]) -> Self {
-        AesGcm {
-            aes: Aes::new(key),
-            key_len: key.len(),
-        }
+    pub fn new(key: &[u8]) -> Result<Self, TlsError> {
+        Ok(AesGcm {
+            aes: Aes::new(key)?,
+        })
     }
 
     /// GCM modu ile şifrele (CTR + GHASH)
@@ -1265,23 +2149,26 @@ impl AesGcm {
     /// Döndürür: (şifreli_veri, 16-byte mac_etiketi)
     /// nonce: 12-byte IV, her şifreleme işleminde benzersiz olmalı
     /// aad: Kimlik doğrulanacak ama şifrelenmeyecek ek veri
-    pub fn encrypt(&self, nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> (Vec<u8>, [u8; 16]) {
+    pub fn encrypt(
+        &self,
+        nonce: &[u8],
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, [u8; 16]), TlsError> {
+        if nonce.len() != 12 {
+            return Err(TlsError::InvalidMessage);
+        }
+
         let mut ciphertext = vec![0u8; plaintext.len()];
         let mut tag = [0u8; 16];
 
         // Generate counter block
         let mut counter = [0u8; 16];
-        counter[..12].copy_from_slice(&nonce[..12]);
+        counter[..12].copy_from_slice(nonce);
         counter[15] = 1; // Counter starts at 1
 
         // GCTR encryption
-        let mut block_counter = counter.clone();
         for (i, chunk) in plaintext.chunks(16).enumerate() {
-            block_counter[15] = (i + 2) as u8; // Counter for keystream
-            let mut keystream = [0u8; 16];
-            self.aes.encrypt_block(&mut keystream);
-
-            // Fix: use proper counter
             let mut enc_counter = counter.clone();
             enc_counter[15] = (i + 2) as u8;
             let mut enc_block = enc_counter;
@@ -1302,7 +2189,7 @@ impl AesGcm {
             tag[i] = ghash[i] ^ tag_block[i];
         }
 
-        (ciphertext, tag)
+        Ok((ciphertext, tag))
     }
 
     /// GCM modu ile şifre çöz ve kimlik doğrula
@@ -1316,7 +2203,11 @@ impl AesGcm {
         aad: &[u8],
         ciphertext: &[u8],
         tag: &[u8; 16],
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Vec<u8>, TlsError> {
+        if nonce.len() != 12 {
+            return Err(TlsError::InvalidMessage);
+        }
+
         // Verify tag first
         let ghash = self.ghash(aad, ciphertext);
         let mut tag_block = [0u8; 16];
@@ -1327,14 +2218,14 @@ impl AesGcm {
             expected_tag[i] = ghash[i] ^ tag_block[i];
         }
 
-        if expected_tag != *tag {
-            return None; // Authentication failed
+        if !constant_time_eq(&expected_tag, tag) {
+            return Err(TlsError::DecryptionFailed);
         }
 
         // Decrypt
         let mut plaintext = vec![0u8; ciphertext.len()];
         let mut counter = [0u8; 16];
-        counter[..12].copy_from_slice(&nonce[..12]);
+        counter[..12].copy_from_slice(nonce);
 
         for (i, chunk) in ciphertext.chunks(16).enumerate() {
             let mut enc_counter = counter.clone();
@@ -1347,7 +2238,7 @@ impl AesGcm {
             }
         }
 
-        Some(plaintext)
+        Ok(plaintext)
     }
 
     /// GHASH kimlik doğrulama fonksiyonu
@@ -1931,7 +2822,7 @@ impl ChaCha20Poly1305 {
         poly.update(ciphertext);
         let expected_tag = poly.finalize();
 
-        if expected_tag != *tag {
+        if !constant_time_eq(&expected_tag, tag) {
             return None;
         }
 
@@ -2230,9 +3121,7 @@ impl X25519 {
     /// Generate keypair
     pub fn generate_keypair() -> ([u8; 32], [u8; 32]) {
         let mut private = [0u8; 32];
-        for i in 0..32 {
-            private[i] = crate::random::next_u32() as u8;
-        }
+        crate::random::fill_bytes(&mut private);
 
         // Clamp private key
         private[0] &= 248;
@@ -2414,14 +3303,16 @@ impl TlsKeySchedule {
         // HMAC-Hash(salt, ikm)
         match self.cipher_suite {
             CipherSuite::Aes128GcmSha256 | CipherSuite::ChaCha20Poly1305Sha256 => {
-                let mut hmac = Hmac::<Sha256>::new_from_slice(salt)
-                    .unwrap_or_else(|_| Hmac::<Sha256>::new_from_slice(&[0u8; 32]).unwrap());
+                let Ok(mut hmac) = Hmac::<Sha256>::new_from_slice(salt) else {
+                    return Vec::new();
+                };
                 hmac.update(ikm);
                 hmac.finalize().into_bytes().to_vec()
             }
             CipherSuite::Aes256GcmSha384 => {
-                let mut hmac = Hmac::<Sha384>::new_from_slice(salt)
-                    .unwrap_or_else(|_| Hmac::<Sha384>::new_from_slice(&[0u8; 48]).unwrap());
+                let Ok(mut hmac) = Hmac::<Sha384>::new_from_slice(salt) else {
+                    return Vec::new();
+                };
                 hmac.update(ikm);
                 hmac.finalize().into_bytes().to_vec()
             }
@@ -2569,35 +3460,41 @@ impl TlsKeySchedule {
         let derived_secret = self.derive_secret(&self.early_secret, b"derived", &[]);
 
         // handshake_secret = HKDF-Extract(derived_secret, ECDHE)
-        self.handshake_secret = Some(self.hkdf_extract(&derived_secret, ecdhe_secret));
-
-        let hs = self.handshake_secret.as_ref().unwrap();
+        let handshake_secret = self.hkdf_extract(&derived_secret, ecdhe_secret);
 
         // c_hs_secret = Derive-Secret(handshake_secret, "c hs traffic", transcript_hash)
-        self.client_hs_secret = Some(self.derive_secret(hs, b"c hs traffic", transcript_hash));
+        self.client_hs_secret =
+            Some(self.derive_secret(&handshake_secret, b"c hs traffic", transcript_hash));
 
         // s_hs_secret = Derive-Secret(handshake_secret, "s hs traffic", transcript_hash)
-        self.server_hs_secret = Some(self.derive_secret(hs, b"s hs traffic", transcript_hash));
+        self.server_hs_secret =
+            Some(self.derive_secret(&handshake_secret, b"s hs traffic", transcript_hash));
+
+        self.handshake_secret = Some(handshake_secret);
     }
 
     /// Compute master secret and application traffic secrets
     pub fn derive_master_secret(&mut self, transcript_hash: &[u8]) {
-        let hs = self.handshake_secret.as_ref().unwrap();
+        let Some(hs) = self.handshake_secret.as_ref() else {
+            return;
+        };
 
         // Derive-Secret(handshake_secret, "derived", empty_hash)
         let derived_secret = self.derive_secret(hs, b"derived", &[]);
 
         // master_secret = HKDF-Extract(derived_secret, 0)
         let zero = vec![0u8; self.hash_len];
-        self.master_secret = Some(self.hkdf_extract(&derived_secret, &zero));
-
-        let ms = self.master_secret.as_ref().unwrap();
+        let master_secret = self.hkdf_extract(&derived_secret, &zero);
 
         // c_ap_secret = Derive-Secret(master_secret, "c ap traffic", transcript_hash)
-        self.client_app_secret = Some(self.derive_secret(ms, b"c ap traffic", transcript_hash));
+        self.client_app_secret =
+            Some(self.derive_secret(&master_secret, b"c ap traffic", transcript_hash));
 
         // s_ap_secret = Derive-Secret(master_secret, "s ap traffic", transcript_hash)
-        self.server_app_secret = Some(self.derive_secret(ms, b"s ap traffic", transcript_hash));
+        self.server_app_secret =
+            Some(self.derive_secret(&master_secret, b"s ap traffic", transcript_hash));
+
+        self.master_secret = Some(master_secret);
     }
 
     /// Derive traffic keys from traffic secret
@@ -2661,16 +3558,31 @@ pub struct TlsCrypto {
 }
 
 impl TlsCrypto {
-    pub fn new(cipher_suite: CipherSuite, key: &[u8], iv: &[u8; 12]) -> Self {
-        TlsCrypto {
+    pub fn new(cipher_suite: CipherSuite, key: &[u8], iv: &[u8; 12]) -> Result<Self, TlsError> {
+        match cipher_suite {
+            CipherSuite::Aes128GcmSha256 | CipherSuite::Aes256GcmSha384 => {
+                Aes::new(key).map(|_| ())?;
+            }
+            CipherSuite::ChaCha20Poly1305Sha256 => {
+                if key.len() != 32 {
+                    return Err(TlsError::InvalidMessage);
+                }
+            }
+        }
+
+        Ok(TlsCrypto {
             cipher_suite,
             key: key.to_vec(),
             iv: *iv,
-        }
+        })
     }
 
     /// Encrypt TLS record
-    pub fn encrypt_record(&self, content_type: ContentType, plaintext: &[u8]) -> Vec<u8> {
+    pub fn encrypt_record(
+        &self,
+        content_type: ContentType,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, TlsError> {
         // Add content type and padding
         let mut data = plaintext.to_vec();
         data.push(content_type as u8);
@@ -2683,57 +3595,68 @@ impl TlsCrypto {
 
         match self.cipher_suite {
             CipherSuite::Aes128GcmSha256 | CipherSuite::Aes256GcmSha384 => {
-                let aes_gcm = AesGcm::new(&self.key);
-                let (ciphertext, tag) = aes_gcm.encrypt(&self.iv, &[], &data);
+                let aes_gcm = AesGcm::new(&self.key)?;
+                let (ciphertext, tag) = aes_gcm.encrypt(&self.iv, &[], &data)?;
 
                 let mut result = ciphertext;
                 result.extend_from_slice(&tag);
-                result
+                Ok(result)
             }
             CipherSuite::ChaCha20Poly1305Sha256 => {
                 let nonce = self.iv;
-                let chacha =
-                    ChaCha20Poly1305::new(&self.key.as_slice().try_into().unwrap_or([0u8; 32]));
+                let chacha_key: [u8; 32] = self
+                    .key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| TlsError::InvalidMessage)?;
+                let chacha = ChaCha20Poly1305::new(&chacha_key);
                 let (ciphertext, tag) = chacha.encrypt(&nonce, &[], &data);
 
                 let mut result = ciphertext;
                 result.extend_from_slice(&tag);
-                result
+                Ok(result)
             }
         }
     }
 
     /// Decrypt TLS record
-    pub fn decrypt_record(&self, ciphertext: &[u8]) -> Option<(ContentType, Vec<u8>)> {
+    pub fn decrypt_record(&self, ciphertext: &[u8]) -> Result<(ContentType, Vec<u8>), TlsError> {
         if ciphertext.len() < 16 {
-            return None;
+            return Err(TlsError::InvalidMessage);
         }
 
         let (ct, tag) = ciphertext.split_at(ciphertext.len() - 16);
-        let tag_arr: [u8; 16] = tag.try_into().ok()?;
+        let tag_arr: [u8; 16] = tag.try_into().map_err(|_| TlsError::InvalidMessage)?;
 
         let plaintext = match self.cipher_suite {
             CipherSuite::Aes128GcmSha256 | CipherSuite::Aes256GcmSha384 => {
-                let aes_gcm = AesGcm::new(&self.key);
+                let aes_gcm = AesGcm::new(&self.key)?;
                 aes_gcm.decrypt(&self.iv, &[], ct, &tag_arr)?
             }
             CipherSuite::ChaCha20Poly1305Sha256 => {
                 let nonce = self.iv;
-                let chacha =
-                    ChaCha20Poly1305::new(&self.key.as_slice().try_into().unwrap_or([0u8; 32]));
-                chacha.decrypt(&nonce, &[], ct, &tag_arr)?
+                let chacha_key: [u8; 32] = self
+                    .key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| TlsError::InvalidMessage)?;
+                let chacha = ChaCha20Poly1305::new(&chacha_key);
+                chacha
+                    .decrypt(&nonce, &[], ct, &tag_arr)
+                    .ok_or(TlsError::DecryptionFailed)?
             }
         };
 
         // Extract content type from end
         if plaintext.is_empty() {
-            return None;
+            return Err(TlsError::InvalidMessage);
         }
 
-        let content_type = ContentType::from_u8(plaintext[plaintext.len() - 1])?;
+        let content_type =
+            ContentType::from_u8(plaintext[plaintext.len() - 1]).ok_or(TlsError::InvalidMessage)?;
         let data = plaintext[..plaintext.len() - 1].to_vec();
 
-        Some((content_type, data))
+        Ok((content_type, data))
     }
 }
 
@@ -2798,6 +3721,8 @@ pub struct SessionTicket {
     pub nonce: Vec<u8>,
     /// Ticket data (encrypted)
     pub ticket: Vec<u8>,
+    /// Server name associated with the ticket
+    pub server_name: String,
     /// Early data configuration
     pub early_data: EarlyDataConfig,
     /// Creation timestamp
@@ -2810,12 +3735,17 @@ pub struct SessionTicket {
 
 impl SessionTicket {
     /// Create a new session ticket
-    pub fn new(cipher_suite: CipherSuite, resumption_secret: &[u8]) -> Self {
+    pub fn new(server_name: &str, cipher_suite: CipherSuite, resumption_secret: &[u8]) -> Self {
         SessionTicket {
             lifetime: 86400, // 24 hours
             age_add: crate::random::next_u32(),
-            nonce: vec![crate::random::next_u32() as u8; 8],
+            nonce: {
+                let mut nonce = vec![0u8; 8];
+                crate::random::fill_bytes(&mut nonce);
+                nonce
+            },
             ticket: Vec::new(),
+            server_name: server_name.to_string(),
             early_data: EarlyDataConfig::default(),
             created_at: crate::task::scheduler::get_ticks() as u64,
             resumption_secret: resumption_secret.to_vec(),
@@ -2950,10 +3880,12 @@ impl ZeroRttState {
 
         // Create early data record
         let early_secret = ticket.derive_early_secret();
-        let mut crypto = TlsCrypto::new(ticket.cipher_suite, &early_secret, &[0u8; 12]);
+        let crypto = TlsCrypto::new(ticket.cipher_suite, &early_secret, &[0u8; 12]).ok()?;
 
         // Encrypt as 0-RTT record (content type 0x17 = Application Data)
-        let encrypted = crypto.encrypt_record(ContentType::ApplicationData, &data[..to_send]);
+        let encrypted = crypto
+            .encrypt_record(ContentType::ApplicationData, &data[..to_send])
+            .ok()?;
 
         self.early_data_sent += to_send;
         self.early_data_buffer.extend_from_slice(&data[..to_send]);
@@ -3022,7 +3954,7 @@ pub struct SessionCache {
 }
 
 impl SessionCache {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         SessionCache {
             sessions: Vec::new(),
             max_sessions: 100,
@@ -3044,8 +3976,12 @@ impl SessionCache {
 
     /// Find session for server
     pub fn find_for_server(&self, server_name: &str) -> Option<&SessionTicket> {
-        // Simplified - would match by server name and other criteria
-        self.sessions.iter().find(|t| t.is_valid())
+        self.sessions.iter().rev().find(|ticket| {
+            ticket.is_valid()
+                && ticket.server_name == server_name
+                && !ticket.ticket.is_empty()
+                && ticket.resumption_secret.len() == session_ticket_hash_len(ticket.cipher_suite)
+        })
     }
 
     /// Remove session
@@ -3064,6 +4000,8 @@ impl Default for SessionCache {
         Self::new()
     }
 }
+
+static TLS_SESSION_CACHE: Mutex<SessionCache> = Mutex::new(SessionCache::new());
 
 // ============================================================================
 // 0-RTT DESTEKLİ TLS 1.3 EL SIKIŞTIRMA (Handshake with 0-RTT)
@@ -3100,6 +4038,8 @@ impl Default for SessionCache {
 pub struct TlsHandshakeExt {
     /// Base handshake state
     pub state: TlsState,
+    /// Cipher suite selected for the current connection
+    pub cipher_suite: Option<CipherSuite>,
     /// 0-RTT state
     pub zero_rtt: ZeroRttState,
     /// Session cache
@@ -3108,199 +4048,160 @@ pub struct TlsHandshakeExt {
     pub server_name: Option<String>,
     /// Whether to request early data
     pub request_early_data: bool,
+    /// Server-selected PSK identity from ServerHello
+    pub selected_identity: Option<u16>,
 }
 
 impl TlsHandshakeExt {
     pub fn new() -> Self {
         TlsHandshakeExt {
             state: TlsState::Initial,
+            cipher_suite: None,
             zero_rtt: ZeroRttState::new(),
             session_cache: SessionCache::new(),
             server_name: None,
             request_early_data: false,
+            selected_identity: None,
         }
     }
 
     /// Start handshake with potential 0-RTT
     pub fn start_with_early_data(&mut self, server_name: &str) -> Option<Vec<u8>> {
         self.server_name = Some(server_name.to_string());
+        self.cipher_suite = None;
+        self.selected_identity = None;
+        self.request_early_data = false;
+        self.zero_rtt = ZeroRttState::new();
 
         // Check for cached session
         if let Some(ticket) = self.session_cache.find_for_server(server_name) {
             self.zero_rtt = ZeroRttState::with_ticket(ticket.clone());
             self.request_early_data = true;
-
-            // Build ClientHello with pre_shared_key extension
-            let mut client_hello = self.build_client_hello();
-
-            // Add pre_shared_key extension
-            let obfuscated_age = ticket.obfuscated_age();
-            client_hello.extend_from_slice(&[0x00, 0x2a]); // pre_shared_key extension type
-            client_hello.extend_from_slice(&(4 + ticket.ticket.len() as u16).to_be_bytes());
-            client_hello.extend_from_slice(&(ticket.ticket.len() as u16).to_be_bytes());
-            client_hello.extend_from_slice(&ticket.ticket);
-            client_hello.extend_from_slice(&obfuscated_age.to_be_bytes());
-
-            // Compute PSK binder: HMAC-SHA256 over transcript hash up to binder list
-            // The binder is computed over a transcript hash of the ClientHello
-            // with the binder field zeroed out.
-            {
-                let binder_key = {
-                    // early_secret = HKDF-Extract(0, PSK)
-                    // binder_key = Derive-Secret(early_secret, "res binder", "")
-                    // Simplified: HMAC-SHA256(resumption_secret, "res binder")
-                    let mut k_ipad = [0x36u8; 64];
-                    let mut k_opad = [0x5cu8; 64];
-                    for (i, &b) in ticket.resumption_secret.iter().enumerate().take(64) {
-                        k_ipad[i] ^= b;
-                        k_opad[i] ^= b;
-                    }
-                    let mut inner_data = k_ipad.to_vec();
-                    inner_data.extend_from_slice(b"res binder");
-                    let mut hasher = Sha256::new();
-                    hasher.update(&inner_data);
-                    let inner_hash = hasher.finalize();
-                    let mut outer_data = k_opad.to_vec();
-                    outer_data.extend_from_slice(&inner_hash);
-                    let mut hasher2 = Sha256::new();
-                    hasher2.update(&outer_data);
-                    hasher2.finalize().to_vec()
-                };
-
-                // Transcript hash = SHA-256(ClientHello without binder)
-                let mut transcript_hasher = Sha256::new();
-                transcript_hasher.update(&client_hello);
-                let transcript_hash = transcript_hasher.finalize();
-
-                // binder = HMAC-SHA256(binder_key, transcript_hash)
-                let binder = {
-                    let mut k_ipad = [0x36u8; 64];
-                    let mut k_opad = [0x5cu8; 64];
-                    for (i, &b) in binder_key.iter().enumerate().take(64) {
-                        k_ipad[i] ^= b;
-                        k_opad[i] ^= b;
-                    }
-                    let mut inner_data = k_ipad.to_vec();
-                    inner_data.extend_from_slice(&transcript_hash);
-                    let mut hasher = Sha256::new();
-                    hasher.update(&inner_data);
-                    let inner_hash = hasher.finalize();
-                    let mut outer_data = k_opad.to_vec();
-                    outer_data.extend_from_slice(&inner_hash);
-                    let mut hasher2 = Sha256::new();
-                    hasher2.update(&outer_data);
-                    hasher2.finalize().to_vec()
-                };
-
-                // Append binder list: u16 binders_len, u8 binder_len, binder
-                let binder_len = binder.len() as u8;
-                let binders_total = 1 + binder.len() as u16; // 1 byte length prefix + binder
-                client_hello.extend_from_slice(&binders_total.to_be_bytes());
-                client_hello.push(binder_len);
-                client_hello.extend_from_slice(&binder);
-            }
-
-            // Add early_data extension
-            client_hello.extend_from_slice(&[0x00, 0x2a]); // early_data extension
-            client_hello.extend_from_slice(&[0x00, 0x00]); // empty
-
-            return Some(client_hello);
         }
 
-        // No cached session, regular handshake
         Some(self.build_client_hello())
     }
 
     /// Build ClientHello message with proper TLS 1.3 extensions
     fn build_client_hello(&self) -> Vec<u8> {
-        let mut hello = Vec::new();
+        let hostname = self.server_name.as_deref().unwrap_or("localhost");
+        let mut body = Vec::new();
+        let mut binder_meta: Option<(usize, usize, CipherSuite, Vec<u8>)> = None;
 
-        // Handshake type: ClientHello (0x01)
-        hello.push(0x01);
+        body.extend_from_slice(&0x0303u16.to_be_bytes());
+        let mut random = [0u8; 32];
+        crate::random::fill_bytes(&mut random);
+        body.extend_from_slice(&random);
+        body.push(0);
 
-        // Length placeholder (3 bytes) - will be filled at the end
-        let len_pos = hello.len();
-        hello.extend_from_slice(&[0x00, 0x00, 0x00]);
-
-        // Version: TLS 1.2 (0x0303) - used for compatibility
-        hello.extend_from_slice(&[0x03, 0x03]);
-
-        // Random (32 bytes)
-        for _ in 0..32 {
-            hello.push(crate::random::next_u32() as u8);
+        let cipher_suites = [
+            CipherSuite::Aes128GcmSha256 as u16,
+            CipherSuite::ChaCha20Poly1305Sha256 as u16,
+        ];
+        body.extend_from_slice(&((cipher_suites.len() * 2) as u16).to_be_bytes());
+        for suite in &cipher_suites {
+            body.extend_from_slice(&suite.to_be_bytes());
         }
 
-        // Session ID (32 bytes for TLS 1.3 compatibility mode)
-        hello.push(32);
-        for i in 0..32u8 {
-            hello.push(i ^ 0xAA);
-        }
+        body.push(1);
+        body.push(0);
 
-        // Cipher suites
-        hello.extend_from_slice(&[0x00, 0x06]); // 3 cipher suites
-        hello.extend_from_slice(&[0x13, 0x01]); // TLS_AES_128_GCM_SHA256
-        hello.extend_from_slice(&[0x13, 0x02]); // TLS_AES_256_GCM_SHA384
-        hello.extend_from_slice(&[0x13, 0x03]); // TLS_CHACHA20_POLY1305_SHA256
-
-        // Compression methods
-        hello.push(0x01); // 1 method
-        hello.push(0x00); // null compression
-
-        // Build extensions
         let mut exts = Vec::new();
 
-        // SNI extension (type=0x0000) - Server Name Indication
-        let hostname = b"localhost";
-        exts.extend_from_slice(&[0x00, 0x00]); // extension type
-        let sni_len = 5 + hostname.len();
-        exts.extend_from_slice(&(sni_len as u16).to_be_bytes());
-        exts.extend_from_slice(&((sni_len - 2) as u16).to_be_bytes());
-        exts.push(0x00); // host_name type
-        exts.extend_from_slice(&(hostname.len() as u16).to_be_bytes());
-        exts.extend_from_slice(hostname);
+        let mut sni = Vec::new();
+        sni.extend_from_slice(&((hostname.len() + 3) as u16).to_be_bytes());
+        sni.push(0);
+        sni.extend_from_slice(&(hostname.len() as u16).to_be_bytes());
+        sni.extend_from_slice(hostname.as_bytes());
+        exts.extend_from_slice(&0u16.to_be_bytes());
+        exts.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&sni);
 
-        // Supported Versions extension (type=0x002b) - TLS 1.3
-        exts.extend_from_slice(&[0x00, 0x2b]); // extension type
-        exts.extend_from_slice(&[0x00, 0x03]); // length
-        exts.extend_from_slice(&[0x02]); // versions length
-        exts.extend_from_slice(&[0x03, 0x04]); // TLS 1.3 (0x0304)
+        exts.extend_from_slice(&43u16.to_be_bytes());
+        exts.extend_from_slice(&3u16.to_be_bytes());
+        exts.push(2);
+        exts.extend_from_slice(&0x0304u16.to_be_bytes());
 
-        // Supported Groups extension (type=0x000a)
-        exts.extend_from_slice(&[0x00, 0x0a]); // extension type
-        exts.extend_from_slice(&[0x00, 0x04]); // length
-        exts.extend_from_slice(&[0x00, 0x02]); // groups length
-        exts.extend_from_slice(&[0x00, 0x1d]); // x25519
+        exts.extend_from_slice(&10u16.to_be_bytes());
+        exts.extend_from_slice(&4u16.to_be_bytes());
+        exts.extend_from_slice(&2u16.to_be_bytes());
+        exts.extend_from_slice(&(NamedGroup::X25519 as u16).to_be_bytes());
 
-        // Signature Algorithms extension (type=0x000d)
-        exts.extend_from_slice(&[0x00, 0x0d]); // extension type
-        exts.extend_from_slice(&[0x00, 0x08]); // length
-        exts.extend_from_slice(&[0x00, 0x06]); // algorithms length
-        exts.extend_from_slice(&[0x04, 0x03]); // ecdsa_secp256r1_sha256
-        exts.extend_from_slice(&[0x08, 0x04]); // rsa_pss_rsae_sha256
-        exts.extend_from_slice(&[0x08, 0x07]); // ed25519
-
-        // Key Share extension (type=0x0033) - X25519 public key
-        let mut public_key = [0u8; 32];
-        for i in 0..32 {
-            public_key[i] = crate::random::next_u32() as u8;
+        let sig_algos = [
+            SignatureScheme::RsaPssRsaeSha256 as u16,
+            SignatureScheme::EcdsaSecp256r1Sha256 as u16,
+            SignatureScheme::Ed25519 as u16,
+        ];
+        let mut sig_algo_data = Vec::new();
+        sig_algo_data.extend_from_slice(&((sig_algos.len() * 2) as u16).to_be_bytes());
+        for algo in &sig_algos {
+            sig_algo_data.extend_from_slice(&algo.to_be_bytes());
         }
-        exts.extend_from_slice(&[0x00, 0x33]); // extension type
-        exts.extend_from_slice(&[0x00, 0x26]); // length (38 bytes)
-        exts.extend_from_slice(&[0x00, 0x24]); // client key share length (36 bytes)
-        exts.extend_from_slice(&[0x00, 0x1d]); // x25519 group
-        exts.extend_from_slice(&[0x00, 0x20]); // key exchange length (32 bytes)
-        exts.extend_from_slice(&public_key);
+        exts.extend_from_slice(&13u16.to_be_bytes());
+        exts.extend_from_slice(&(sig_algo_data.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&sig_algo_data);
 
-        // Extensions length
-        let ext_len = exts.len() as u16;
-        hello.extend_from_slice(&ext_len.to_be_bytes());
-        hello.extend_from_slice(&exts);
+        let (_, public_key) = X25519::generate_keypair();
+        let mut key_share = Vec::new();
+        key_share.extend_from_slice(&36u16.to_be_bytes());
+        key_share.extend_from_slice(&(NamedGroup::X25519 as u16).to_be_bytes());
+        key_share.extend_from_slice(&32u16.to_be_bytes());
+        key_share.extend_from_slice(&public_key);
+        exts.extend_from_slice(&51u16.to_be_bytes());
+        exts.extend_from_slice(&(key_share.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&key_share);
 
-        // Fill in length field
-        let body_len = (hello.len() - len_pos - 3) as u32;
-        hello[len_pos] = ((body_len >> 16) & 0xFF) as u8;
-        hello[len_pos + 1] = ((body_len >> 8) & 0xFF) as u8;
-        hello[len_pos + 2] = (body_len & 0xFF) as u8;
+        if self.request_early_data {
+            if let Some(ticket) = self.zero_rtt.ticket.as_ref() {
+                if !ticket.ticket.is_empty()
+                    && ticket.resumption_secret.len()
+                        == session_ticket_hash_len(ticket.cipher_suite)
+                {
+                    exts.extend_from_slice(&42u16.to_be_bytes());
+                    exts.extend_from_slice(&0u16.to_be_bytes());
+
+                    let hash_len = session_ticket_hash_len(ticket.cipher_suite);
+                    let mut psk_ext = Vec::new();
+                    let mut identities = Vec::new();
+                    identities.extend_from_slice(&(ticket.ticket.len() as u16).to_be_bytes());
+                    identities.extend_from_slice(&ticket.ticket);
+                    identities.extend_from_slice(&ticket.obfuscated_age().to_be_bytes());
+                    psk_ext.extend_from_slice(&(identities.len() as u16).to_be_bytes());
+                    psk_ext.extend_from_slice(&identities);
+                    psk_ext.extend_from_slice(&((1 + hash_len) as u16).to_be_bytes());
+                    psk_ext.push(hash_len as u8);
+                    let binder_start = psk_ext.len();
+                    psk_ext.resize(psk_ext.len() + hash_len, 0);
+
+                    exts.extend_from_slice(&41u16.to_be_bytes());
+                    exts.extend_from_slice(&(psk_ext.len() as u16).to_be_bytes());
+                    let ext_payload_start = exts.len();
+                    exts.extend_from_slice(&psk_ext);
+                    binder_meta = Some((
+                        ext_payload_start + binder_start,
+                        ext_payload_start + binder_start + hash_len,
+                        ticket.cipher_suite,
+                        ticket.resumption_secret.clone(),
+                    ));
+                }
+            }
+        }
+
+        let body_prefix_len = body.len();
+        body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+        body.extend_from_slice(&exts);
+
+        let mut hello = Vec::new();
+        hello.push(HandshakeType::ClientHello as u8);
+        let body_len = body.len() as u32;
+        hello.push(((body_len >> 16) & 0xFF) as u8);
+        hello.push(((body_len >> 8) & 0xFF) as u8);
+        hello.push((body_len & 0xFF) as u8);
+        hello.extend_from_slice(&body);
+
+        if let Some((_binder_start, _binder_end, cipher_suite, resumption_secret)) = binder_meta {
+            let _ = fill_tls13_resumption_binder(&mut hello, 0, cipher_suite, &resumption_secret);
+        }
 
         hello
     }
@@ -3311,52 +4212,66 @@ impl TlsHandshakeExt {
             return None;
         }
 
-        let msg_type = data[0];
-
-        match msg_type {
-            0x02 => {
-                // ServerHello
+        match HandshakeType::from_u8(data[0]) {
+            Some(HandshakeType::ServerHello) => {
                 self.state = TlsState::ServerHelloReceived;
-
-                // Check for early_data indication
-                // Server may accept or reject 0-RTT
                 if self.zero_rtt.state == EarlyDataState::Pending {
-                    // Check if server selected PSK
-                    // For now, assume rejected
-                    self.zero_rtt.on_reject();
+                    if let Some((selected_identity, cipher_suite)) =
+                        parse_server_hello_psk_selection(data)
+                    {
+                        self.cipher_suite = Some(cipher_suite);
+                        self.selected_identity = Some(selected_identity);
+                        let ticket = self.zero_rtt.ticket.as_ref();
+                        let accepted = selected_identity == 0
+                            && ticket.is_some()
+                            && ticket
+                                .map(|t| t.cipher_suite == cipher_suite)
+                                .unwrap_or(false);
+                        if !accepted {
+                            self.zero_rtt.on_reject();
+                        }
+                    } else {
+                        self.zero_rtt.on_reject();
+                    }
                 }
-
-                // Continue with handshake
                 None
             }
-            0x04 => {
-                // NewSessionTicket
-                if data.len() > 4 {
-                    let lifetime = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-                    let ticket_len = data[8] as usize;
-
-                    if data.len() > 9 + ticket_len {
-                        let ticket_data = &data[9..9 + ticket_len];
-
-                        let ticket = SessionTicket {
-                            lifetime,
-                            age_add: crate::random::next_u32(),
-                            nonce: vec![0],
-                            ticket: ticket_data.to_vec(),
-                            early_data: EarlyDataConfig::default(),
-                            created_at: crate::task::scheduler::get_ticks() as u64,
-                            resumption_secret: vec![0; 32],
-                            cipher_suite: CipherSuite::Aes128GcmSha256,
-                        };
-
+            Some(HandshakeType::NewSessionTicket) => {
+                let server_name = self.server_name.clone()?;
+                let cipher_suite = self
+                    .cipher_suite
+                    .or_else(|| {
+                        self.zero_rtt
+                            .ticket
+                            .as_ref()
+                            .map(|ticket| ticket.cipher_suite)
+                    })
+                    .unwrap_or(CipherSuite::Aes128GcmSha256);
+                if let Some(ticket) =
+                    parse_new_session_ticket(data, &server_name, cipher_suite, None)
+                {
+                    if ticket.resumption_secret.len()
+                        == session_ticket_hash_len(ticket.cipher_suite)
+                    {
                         self.session_cache.add(ticket);
                     }
                 }
                 None
             }
-            0x14 => {
-                // EncryptedExtensions
-                // Check for early_data extension
+            Some(HandshakeType::EncryptedExtensions) => {
+                self.state = TlsState::EncryptedExtensionsReceived;
+                if self.zero_rtt.state == EarlyDataState::Pending {
+                    if self.selected_identity == Some(0)
+                        && encrypted_extensions_has_early_data(data)
+                    {
+                        self.zero_rtt.on_accept();
+                    } else {
+                        self.zero_rtt.on_reject();
+                    }
+                }
+                None
+            }
+            Some(HandshakeType::Finished) => {
                 self.state = TlsState::FinishedReceived;
                 None
             }
@@ -3376,6 +4291,492 @@ impl TlsHandshakeExt {
         } else {
             None
         }
+    }
+}
+
+fn parse_tls_handshake_body(data: &[u8], expected: HandshakeType) -> Option<&[u8]> {
+    if data.len() < 4 || data[0] != expected as u8 {
+        return None;
+    }
+    let body_len = ((data[1] as usize) << 16) | ((data[2] as usize) << 8) | data[3] as usize;
+    if data.len() != 4 + body_len {
+        return None;
+    }
+    Some(&data[4..])
+}
+
+fn parse_server_hello_psk_selection(data: &[u8]) -> Option<(u16, CipherSuite)> {
+    let body = parse_tls_handshake_body(data, HandshakeType::ServerHello)?;
+    if body.len() < 40 {
+        return None;
+    }
+    let session_id_len = body[34] as usize;
+    let suite_offset = 35 + session_id_len;
+    if suite_offset + 5 > body.len() {
+        return None;
+    }
+    let cipher_suite = CipherSuite::from_u16(u16::from_be_bytes([
+        body[suite_offset],
+        body[suite_offset + 1],
+    ]))?;
+    if body[suite_offset + 2] != 0 {
+        return None;
+    }
+    let ext_len = u16::from_be_bytes([body[suite_offset + 3], body[suite_offset + 4]]) as usize;
+    if suite_offset + 5 + ext_len != body.len() {
+        return None;
+    }
+
+    let mut cursor = suite_offset + 5;
+    let end = cursor + ext_len;
+    while cursor + 4 <= end {
+        let ext_type = u16::from_be_bytes([body[cursor], body[cursor + 1]]);
+        let ext_data_len = u16::from_be_bytes([body[cursor + 2], body[cursor + 3]]) as usize;
+        cursor += 4;
+        if cursor + ext_data_len > end {
+            return None;
+        }
+        if ext_type == 41 && ext_data_len == 2 {
+            let selected_identity = u16::from_be_bytes([body[cursor], body[cursor + 1]]);
+            return Some((selected_identity, cipher_suite));
+        }
+        cursor += ext_data_len;
+    }
+
+    None
+}
+
+fn encrypted_extensions_has_early_data(data: &[u8]) -> bool {
+    let Some(body) = parse_tls_handshake_body(data, HandshakeType::EncryptedExtensions) else {
+        return false;
+    };
+    if body.len() < 2 {
+        return false;
+    }
+    let ext_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+    if ext_len + 2 != body.len() {
+        return false;
+    }
+
+    let mut cursor = 2usize;
+    let end = cursor + ext_len;
+    while cursor + 4 <= end {
+        let ext_type = u16::from_be_bytes([body[cursor], body[cursor + 1]]);
+        let ext_data_len = u16::from_be_bytes([body[cursor + 2], body[cursor + 3]]) as usize;
+        cursor += 4;
+        if cursor + ext_data_len > end {
+            return false;
+        }
+        if ext_type == 42 && ext_data_len == 0 {
+            return true;
+        }
+        cursor += ext_data_len;
+    }
+
+    false
+}
+
+fn extract_new_session_ticket_nonce(data: &[u8]) -> Option<&[u8]> {
+    let body = parse_tls_handshake_body(data, HandshakeType::NewSessionTicket)?;
+    if body.len() < 9 {
+        return None;
+    }
+    let nonce_len = body[8] as usize;
+    if 9 + nonce_len + 2 > body.len() {
+        return None;
+    }
+    Some(&body[9..9 + nonce_len])
+}
+
+fn parse_new_session_ticket(
+    data: &[u8],
+    server_name: &str,
+    cipher_suite: CipherSuite,
+    resumption_psk: Option<&[u8]>,
+) -> Option<SessionTicket> {
+    let body = parse_tls_handshake_body(data, HandshakeType::NewSessionTicket)?;
+    if body.len() < 9 {
+        return None;
+    }
+
+    let lifetime = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+    let age_add = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+    let nonce_len = body[8] as usize;
+    if 9 + nonce_len + 2 > body.len() {
+        return None;
+    }
+    let nonce = body[9..9 + nonce_len].to_vec();
+    let mut cursor = 9 + nonce_len;
+    let ticket_len = u16::from_be_bytes([body[cursor], body[cursor + 1]]) as usize;
+    cursor += 2;
+    if cursor + ticket_len + 2 > body.len() || ticket_len == 0 {
+        return None;
+    }
+    let ticket = body[cursor..cursor + ticket_len].to_vec();
+    cursor += ticket_len;
+    let ext_len = u16::from_be_bytes([body[cursor], body[cursor + 1]]) as usize;
+    cursor += 2;
+    if cursor + ext_len != body.len() {
+        return None;
+    }
+
+    let mut early_data = EarlyDataConfig {
+        enabled: false,
+        ..EarlyDataConfig::default()
+    };
+    let mut ext_cursor = cursor;
+    let ext_end = cursor + ext_len;
+    while ext_cursor + 4 <= ext_end {
+        let ext_type = u16::from_be_bytes([body[ext_cursor], body[ext_cursor + 1]]);
+        let ext_data_len =
+            u16::from_be_bytes([body[ext_cursor + 2], body[ext_cursor + 3]]) as usize;
+        ext_cursor += 4;
+        if ext_cursor + ext_data_len > ext_end {
+            return None;
+        }
+        if ext_type == 42 {
+            if ext_data_len != 4 {
+                return None;
+            }
+            early_data.enabled = true;
+            early_data.max_early_data_size = u32::from_be_bytes([
+                body[ext_cursor],
+                body[ext_cursor + 1],
+                body[ext_cursor + 2],
+                body[ext_cursor + 3],
+            ]);
+        }
+        ext_cursor += ext_data_len;
+    }
+
+    Some(SessionTicket {
+        lifetime,
+        age_add,
+        nonce,
+        ticket,
+        server_name: server_name.to_string(),
+        early_data,
+        created_at: crate::task::scheduler::get_ticks() as u64,
+        resumption_secret: resumption_psk.unwrap_or(&[]).to_vec(),
+        cipher_suite,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_name(common_name: &str) -> crate::net::x509::X509Name {
+        crate::net::x509::X509Name {
+            common_name: common_name.to_string(),
+            country: "TR".to_string(),
+            organization: "echOS".to_string(),
+            organizational_unit: String::new(),
+            locality: String::new(),
+            state: String::new(),
+        }
+    }
+
+    fn test_leaf_cert(
+        common_name: &str,
+        san_dns: Option<&str>,
+    ) -> crate::net::x509::X509Certificate {
+        let mut extensions = vec![crate::net::x509::X509Extension {
+            oid: "2.5.29.15".to_string(),
+            critical: true,
+            value: vec![0x03, 0x02, 0x00, 0x05],
+        }];
+
+        if let Some(host) = san_dns {
+            let host_bytes = host.as_bytes();
+            let mut san = Vec::new();
+            san.push(0x30);
+            san.push((host_bytes.len() + 2) as u8);
+            san.push(0x82);
+            san.push(host_bytes.len() as u8);
+            san.extend_from_slice(host_bytes);
+            extensions.push(crate::net::x509::X509Extension {
+                oid: "2.5.29.17".to_string(),
+                critical: false,
+                value: san,
+            });
+        }
+
+        crate::net::x509::X509Certificate {
+            version: 3,
+            serial: vec![1, 2, 3, 4],
+            signature_algo: crate::net::x509::SignatureAlgorithm {
+                algorithm: "1.2.840.113549.1.1.11".to_string(),
+                parameters: Vec::new(),
+            },
+            issuer: test_name("root.echos.test"),
+            not_before: 1,
+            not_after: u64::MAX,
+            subject: test_name(common_name),
+            public_key: crate::net::x509::X509PublicKey {
+                algorithm: "1.2.840.113549.1.1.1".to_string(),
+                key_data: vec![0x11; 64],
+                curve: None,
+            },
+            extensions,
+            signature: vec![0x22; 64],
+            tbs_data: vec![0x33; 32],
+            raw: vec![0x44; 32],
+        }
+    }
+
+    fn install_trust_anchor(cert: &crate::net::x509::X509Certificate) {
+        TLS_X509_ROOTS_READY.store(true, Ordering::SeqCst);
+        crate::net::x509::clear_root_cas();
+        crate::net::x509::add_root_ca(cert.clone());
+    }
+
+    fn handshake_message(kind: HandshakeType, body: &[u8]) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(4 + body.len());
+        msg.push(kind as u8);
+        msg.push(((body.len() >> 16) & 0xff) as u8);
+        msg.push(((body.len() >> 8) & 0xff) as u8);
+        msg.push((body.len() & 0xff) as u8);
+        msg.extend_from_slice(body);
+        msg
+    }
+
+    fn server_hello_with_group(random: [u8; 32], group: NamedGroup) -> Vec<u8> {
+        server_hello_with_group_and_psk(random, group, None)
+    }
+
+    fn server_hello_with_group_and_psk(
+        random: [u8; 32],
+        group: NamedGroup,
+        selected_psk_identity: Option<u16>,
+    ) -> Vec<u8> {
+        let (_, server_public_key) = X25519::generate_keypair();
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&43u16.to_be_bytes());
+        extensions.extend_from_slice(&2u16.to_be_bytes());
+        extensions.extend_from_slice(&0x0304u16.to_be_bytes());
+        extensions.extend_from_slice(&51u16.to_be_bytes());
+        extensions.extend_from_slice(&36u16.to_be_bytes());
+        extensions.extend_from_slice(&(group as u16).to_be_bytes());
+        extensions.extend_from_slice(&32u16.to_be_bytes());
+        extensions.extend_from_slice(&server_public_key);
+        if let Some(identity) = selected_psk_identity {
+            extensions.extend_from_slice(&41u16.to_be_bytes());
+            extensions.extend_from_slice(&2u16.to_be_bytes());
+            extensions.extend_from_slice(&identity.to_be_bytes());
+        }
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&0x0303u16.to_be_bytes());
+        body.extend_from_slice(&random);
+        body.push(0);
+        body.extend_from_slice(&(CipherSuite::Aes128GcmSha256 as u16).to_be_bytes());
+        body.push(0);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extensions);
+        handshake_message(HandshakeType::ServerHello, &body)
+    }
+
+    fn test_session_ticket(server_name: &str, secret: &[u8]) -> SessionTicket {
+        let mut ticket = SessionTicket::new(server_name, CipherSuite::Aes128GcmSha256, secret);
+        ticket.ticket = vec![0xA5, 0x5A, 0xE1, 0x1E];
+        ticket
+    }
+
+    fn client_hello_extensions_len_offset(client_hello: &[u8]) -> usize {
+        let body = parse_tls_handshake_body(client_hello, HandshakeType::ClientHello).unwrap();
+        let mut offset = 2 + 32;
+        offset += 1 + body[offset] as usize;
+        let suites_len = u16::from_be_bytes([body[offset], body[offset + 1]]) as usize;
+        offset += 2 + suites_len;
+        offset += 1 + body[offset] as usize;
+        4 + offset
+    }
+
+    fn append_empty_extension_after_psk(client_hello: &[u8]) -> Vec<u8> {
+        let mut mutated = client_hello.to_vec();
+        let body_len =
+            ((mutated[1] as usize) << 16) | ((mutated[2] as usize) << 8) | mutated[3] as usize;
+        let ext_len_offset = client_hello_extensions_len_offset(client_hello);
+        let ext_len = u16::from_be_bytes([mutated[ext_len_offset], mutated[ext_len_offset + 1]]);
+        let new_body_len = body_len + 4;
+        mutated[1] = ((new_body_len >> 16) & 0xff) as u8;
+        mutated[2] = ((new_body_len >> 8) & 0xff) as u8;
+        mutated[3] = (new_body_len & 0xff) as u8;
+        mutated[ext_len_offset..ext_len_offset + 2].copy_from_slice(&(ext_len + 4).to_be_bytes());
+        mutated.extend_from_slice(&0xfffeu16.to_be_bytes());
+        mutated.extend_from_slice(&0u16.to_be_bytes());
+        mutated
+    }
+
+    #[test]
+    fn process_server_hello_rejects_tls13_downgrade_sentinel() {
+        let mut client = TlsClient::new();
+        let _ = client.build_client_hello("api.echos.test");
+        let mut random = [0xA5u8; 32];
+        random[24..].copy_from_slice(b"DOWNGRD\x01");
+
+        let err = client
+            .process_server_hello(&server_hello_with_group(random, NamedGroup::X25519))
+            .expect_err("TLS 1.3 client must reject downgrade sentinel in ServerHello.random");
+
+        assert_eq!(err, TlsError::InvalidMessage);
+        assert_eq!(client.state, TlsState::ClientHelloSent);
+    }
+
+    #[test]
+    fn process_server_hello_rejects_non_x25519_key_share() {
+        let mut client = TlsClient::new();
+        let _ = client.build_client_hello("api.echos.test");
+
+        let err = client
+            .process_server_hello(&server_hello_with_group(
+                [0x11u8; 32],
+                NamedGroup::Secp256r1,
+            ))
+            .expect_err("server-selected KEX group must match the offered X25519 lane");
+
+        assert_eq!(err, TlsError::InvalidMessage);
+        assert_eq!(client.state, TlsState::ClientHelloSent);
+    }
+
+    #[test]
+    fn process_server_hello_rejects_unoffered_psk_selection() {
+        TLS_SESSION_CACHE.lock().clear();
+        let mut client = TlsClient::new();
+        let _ = client.build_client_hello("api.echos.test");
+
+        let err = client
+            .process_server_hello(&server_hello_with_group_and_psk(
+                [0x21u8; 32],
+                NamedGroup::X25519,
+                Some(0),
+            ))
+            .expect_err("server must not select PSK when client did not offer one");
+
+        assert_eq!(err, TlsError::InvalidMessage);
+        assert_eq!(client.state, TlsState::ClientHelloSent);
+    }
+
+    #[test]
+    fn tls13_state_machine_rejects_pre_serverhello_encrypted_extensions() {
+        let mut client = TlsClient::new();
+        let _ = client.build_client_hello("api.echos.test");
+        let encrypted_extensions = handshake_message(HandshakeType::EncryptedExtensions, &[0, 0]);
+
+        let err = client
+            .process_encrypted_extensions(&encrypted_extensions)
+            .expect_err("encrypted extensions before ServerHello must fail closed");
+
+        assert_eq!(err, TlsError::InvalidState);
+    }
+
+    #[test]
+    fn tls13_psk_binder_verify_accepts_generated_clienthello_and_rejects_tamper() {
+        let secret = vec![0x42u8; 32];
+        let mut handshake = TlsHandshakeExt::new();
+        handshake
+            .session_cache
+            .add(test_session_ticket("api.echos.test", &secret));
+        let hello = handshake
+            .start_with_early_data("api.echos.test")
+            .expect("cached session must build PSK ClientHello");
+
+        assert!(verify_tls13_psk_binder(
+            &hello,
+            0,
+            CipherSuite::Aes128GcmSha256,
+            &secret
+        ));
+
+        let psk_state = parse_tls13_client_hello_psk_state(&hello).unwrap();
+        let mut tampered = hello.clone();
+        tampered[psk_state.binders[0].binder_start] ^= 0x01;
+        assert!(!verify_tls13_psk_binder(
+            &tampered,
+            0,
+            CipherSuite::Aes128GcmSha256,
+            &secret
+        ));
+        assert!(!verify_tls13_psk_binder(
+            &hello,
+            0,
+            CipherSuite::Aes128GcmSha256,
+            &[0x24u8; 32]
+        ));
+    }
+
+    #[test]
+    fn tls13_psk_binder_verify_rejects_when_psk_extension_is_not_last() {
+        let secret = vec![0x7Bu8; 32];
+        let mut handshake = TlsHandshakeExt::new();
+        handshake
+            .session_cache
+            .add(test_session_ticket("api.echos.test", &secret));
+        let hello = handshake
+            .start_with_early_data("api.echos.test")
+            .expect("cached session must build PSK ClientHello");
+        let mutated = append_empty_extension_after_psk(&hello);
+
+        assert!(!verify_tls13_psk_binder(
+            &mutated,
+            0,
+            CipherSuite::Aes128GcmSha256,
+            &secret
+        ));
+    }
+
+    #[test]
+    fn aes_gcm_rejects_invalid_key_length_without_panic() {
+        assert!(matches!(
+            AesGcm::new(&[0xA5u8; 24]),
+            Err(TlsError::InvalidMessage)
+        ));
+    }
+
+    #[test]
+    fn aes_gcm_rejects_short_nonce_without_slice_panic() {
+        let aes_gcm = AesGcm::new(&[0x11u8; 16]).expect("AES-128 key must initialize");
+        let err = aes_gcm
+            .encrypt(&[0x22u8; 8], &[], b"payload")
+            .expect_err("GCM nonce must be exactly 96 bits");
+        assert_eq!(err, TlsError::InvalidMessage);
+    }
+
+    #[test]
+    fn validate_tls13_server_certificate_chain_rejects_hostname_mismatch() {
+        let leaf = test_leaf_cert("api.echos.test", Some("api.echos.test"));
+        install_trust_anchor(&leaf);
+
+        let result = validate_tls13_server_certificate_chain(&[leaf], Some("wrong.echos.test"));
+        assert_eq!(result.unwrap_err(), TlsError::CertificateVerificationFailed);
+    }
+
+    #[test]
+    fn validate_tls13_server_certificate_chain_accepts_matching_hostname() {
+        let leaf = test_leaf_cert("api.echos.test", Some("api.echos.test"));
+        install_trust_anchor(&leaf);
+
+        let expected_key = leaf.public_key.key_data.clone();
+        let result = validate_tls13_server_certificate_chain(&[leaf], Some("api.echos.test"));
+        let key = result.expect("matching hostname and trusted anchor must pass");
+        assert_eq!(key.key_data, expected_key);
+    }
+
+    #[test]
+    fn validate_tls13_server_certificate_chain_rejects_empty_chain() {
+        let result = validate_tls13_server_certificate_chain(&[], Some("api.echos.test"));
+        assert_eq!(result.unwrap_err(), TlsError::InvalidCertificate);
+    }
+
+    #[test]
+    fn parse_tls13_certificate_entries_rejects_truncated_body() {
+        assert!(parse_tls13_certificate_entries(&[0x00, 0x00, 0x00, 0x10]).is_none());
+    }
+
+    #[test]
+    fn parse_tls13_certificate_entries_rejects_empty_list() {
+        assert!(parse_tls13_certificate_entries(&[0x00, 0x00, 0x00, 0x00]).is_none());
     }
 }
 

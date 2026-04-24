@@ -261,7 +261,10 @@ pub struct TaskHotData {
     pub last_start: u64,
     pub affinity: u32,
     pub last_cpu: u32,
+    pub kernel_stack_guard_base: u64,
+    pub kernel_stack_bottom: u64,
     pub kernel_stack_top: u64,
+    pub kernel_stack_low_watermark: u64,
     /// AOT davranış bayrakları — context switch optimizasyonları
     pub flags: TaskFlags,
 }
@@ -281,7 +284,7 @@ pub struct TaskColdData {
     pub ptrace_flags: u32,
     pub tracer_pid: Option<TaskId>,
     pub seccomp_mode: u32,
-    pub stack: KernelStack,
+    pub stack: Arc<KernelStack>,
     /// Background task mı (job control için)
     pub is_background: bool,
     /// POSIX sinyal yöneticisi (Arc ile paylaşılır — Clone uyumluluğu için)
@@ -370,18 +373,20 @@ impl Task {
         const STACK_SIZE: usize = 16384; // 64KB -> 16KB
         let mut stack = KernelStack::new(GUARD_PAGE_SIZE + STACK_SIZE)
             .expect("Failed to allocate kernel stack");
-
-        // Guard page: stack'in en altındaki 4KB
-        // Bu alanı "zehirle" — debug pattern ile doldur (0xCC = INT3 opcode)
-        // Gerçek koruma: page table'da PRESENT bit'i kaldırılarak yapılır
-        for byte in stack[..GUARD_PAGE_SIZE].iter_mut() {
-            *byte = 0xCC;
+        if !stack.enable_guard_pages(1) {
+            panic!("Failed to activate kernel stack guard page");
         }
 
-        // Stack top: guard page'den sonraki 64KB'ın tepesi, 16-byte hizalı
-        let stack_bottom = stack.as_mut_ptr() as u64 + GUARD_PAGE_SIZE as u64;
+        // Stack top: guard page'den sonraki 16KB'ın tepesi, 16-byte hizalı
+        let stack_guard_base = stack.as_ptr() as u64;
+        let stack_bottom = stack.usable_mut_ptr() as u64;
         let mut stack_top = stack_bottom + STACK_SIZE as u64;
         stack_top &= !0xFu64;
+        if !crate::memory::is_kernel_stack_virt_addr(stack_bottom)
+            || !crate::memory::is_kernel_stack_virt_addr(stack_top.saturating_sub(1))
+        {
+            panic!("KernelStack RSP is outside dedicated stack VA window");
+        }
 
         Self {
             hot: TaskHotData {
@@ -393,7 +398,10 @@ impl Task {
                 last_start: 0,
                 affinity: 0xFFFFFFFF, // Tüm CPU'larda çalışabilir
                 last_cpu: 0,
-                kernel_stack_top: stack_top as u64,
+                kernel_stack_guard_base: stack_guard_base,
+                kernel_stack_bottom: stack_bottom,
+                kernel_stack_top: stack_top,
+                kernel_stack_low_watermark: stack_top,
                 flags: TaskFlags::FPU_PRISTINE, // İlk xrstor atlanır
             },
             context: TaskContext::new(entry_point as u64, stack_top),
@@ -410,7 +418,7 @@ impl Task {
                 ptrace_flags: 0,
                 tracer_pid: None,
                 seccomp_mode: 0, // 0 = Devre dışı
-                stack,
+                stack: Arc::new(stack),
                 is_background: false,
                 signals: Arc::new(SignalHandlers::new()),
                 pcid: 0, // 0 = kernel PCID (NativeRust tasks)

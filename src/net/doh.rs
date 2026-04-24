@@ -92,6 +92,74 @@ pub struct CachedResponse {
     pub expiry: u64,       // Unix zaman damgası: bu zamandan sonra geçersiz
 }
 
+fn tls_strip_records(data: &[u8]) -> Vec<u8> {
+    let mut plaintext = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor + 5 <= data.len() {
+        let record_len = u16::from_be_bytes([data[cursor + 3], data[cursor + 4]]) as usize;
+        let record_end = cursor.saturating_add(5).saturating_add(record_len);
+        if record_end > data.len() {
+            break;
+        }
+        plaintext.extend_from_slice(&data[cursor + 5..record_end]);
+        cursor = record_end;
+    }
+
+    if plaintext.is_empty() && data.len() > 5 {
+        plaintext.extend_from_slice(&data[5..]);
+    }
+
+    plaintext
+}
+
+fn process_tls_server_handshake_flight(
+    tls: &mut crate::net::tls::TlsClient,
+    handshake_bytes: &[u8],
+) -> Result<bool, DohError> {
+    let mut offset = 0usize;
+    let mut saw_finished = false;
+
+    while offset + 4 <= handshake_bytes.len() {
+        let msg_len = ((handshake_bytes[offset + 1] as usize) << 16)
+            | ((handshake_bytes[offset + 2] as usize) << 8)
+            | (handshake_bytes[offset + 3] as usize);
+        let msg_end = offset + 4 + msg_len;
+        if msg_end > handshake_bytes.len() {
+            break;
+        }
+
+        let msg = &handshake_bytes[offset..msg_end];
+        match handshake_bytes[offset] {
+            2 => tls
+                .process_server_hello(msg)
+                .map_err(|_| DohError::NetworkError)?,
+            8 => tls
+                .process_encrypted_extensions(msg)
+                .map_err(|_| DohError::NetworkError)?,
+            11 => tls
+                .process_certificate(msg)
+                .map_err(|_| DohError::NetworkError)?,
+            15 => tls
+                .process_certificate_verify(msg)
+                .map_err(|_| DohError::NetworkError)?,
+            20 => {
+                tls.process_finished(msg)
+                    .map_err(|_| DohError::NetworkError)?;
+                saw_finished = true;
+            }
+            4 => tls
+                .process_new_session_ticket(msg)
+                .map_err(|_| DohError::NetworkError)?,
+            _ => {}
+        }
+
+        offset = msg_end;
+    }
+
+    Ok(saw_finished)
+}
+
 impl DohClient {
     /// Belirtilen URL ile yeni bir DoH istemcisi oluşturur.
     pub fn new(server_url: &str) -> Self {
@@ -370,6 +438,7 @@ impl DohClient {
     /// 3. TLS handshake gerçekleştir
     /// 4. HTTP isteğini TLS kaydı olarak gönder
     /// 5. Yanıtı al ve HTTP body'sini ayrıştır
+    #[allow(unreachable_code)]
     fn send_https_request(&self, host: &str, request: &[u8]) -> Result<Vec<u8>, DohError> {
         use super::socket::{
             close, connect, recv, send, socket, AddressFamily, Protocol, SocketType,
@@ -394,6 +463,55 @@ impl DohClient {
         let hello_record =
             crate::net::tls::wrap_record(crate::net::tls::ContentType::Handshake, &client_hello);
         send(sock_id, &hello_record, 0).map_err(|_| DohError::NetworkError)?;
+
+        let mut saw_finished = false;
+        for _ in 0..4 {
+            let mut hs_buf = [0u8; 8192];
+            let hs_len = recv(sock_id, &mut hs_buf, 0).map_err(|_| DohError::NetworkError)?;
+            if hs_len == 0 {
+                break;
+            }
+
+            let handshake_bytes = tls_strip_records(&hs_buf[..hs_len]);
+            if handshake_bytes.is_empty() {
+                continue;
+            }
+
+            saw_finished = process_tls_server_handshake_flight(&mut tls, &handshake_bytes)?;
+            if saw_finished {
+                break;
+            }
+        }
+
+        tls.complete_handshake();
+
+        if !saw_finished || !tls.is_established() {
+            let _ = close(sock_id);
+            crate::serial_println!("[DoH] TLS handshake failed for {}", host);
+            return Err(DohError::NetworkError);
+        }
+        crate::serial_println!("[DoH] TLS established with {}", host);
+
+        let tls_record =
+            crate::net::tls::wrap_record(crate::net::tls::ContentType::ApplicationData, request);
+        send(sock_id, &tls_record, 0).map_err(|_| DohError::NetworkError)?;
+
+        let mut resp_buf = [0u8; 16384];
+        let resp_len = recv(sock_id, &mut resp_buf, 0).map_err(|_| DohError::Timeout)?;
+        let _ = close(sock_id);
+
+        if resp_len < 5 {
+            return Err(DohError::InvalidResponse);
+        }
+
+        let http_response = &resp_buf[5..resp_len];
+        let body = extract_http_body(http_response);
+
+        if body.is_empty() {
+            return Err(DohError::InvalidResponse);
+        }
+
+        return Ok(body);
 
         // ServerHello al
         let mut sh_buf = [0u8; 4096];
@@ -445,6 +563,7 @@ impl DohClient {
         Ok(body)
     }
 
+    #[allow(unreachable_code)]
     fn send_https_request_h2(
         &self,
         host: &str,
@@ -468,6 +587,44 @@ impl DohClient {
         let hello_record =
             crate::net::tls::wrap_record(crate::net::tls::ContentType::Handshake, &client_hello);
         send(sock_id, &hello_record, 0).map_err(|_| DohError::NetworkError)?;
+
+        let mut saw_finished = false;
+        for _ in 0..4 {
+            let mut hs_buf = [0u8; 8192];
+            let hs_len = recv(sock_id, &mut hs_buf, 0).map_err(|_| DohError::NetworkError)?;
+            if hs_len == 0 {
+                break;
+            }
+
+            let handshake_bytes = tls_strip_records(&hs_buf[..hs_len]);
+            if handshake_bytes.is_empty() {
+                continue;
+            }
+
+            saw_finished = process_tls_server_handshake_flight(&mut tls, &handshake_bytes)?;
+            if saw_finished {
+                break;
+            }
+        }
+
+        tls.complete_handshake();
+        if !saw_finished || !tls.is_established() {
+            let _ = close(sock_id);
+            return Err(DohError::NetworkError);
+        }
+
+        let tls_record =
+            crate::net::tls::wrap_record(crate::net::tls::ContentType::ApplicationData, request);
+        send(sock_id, &tls_record, 0).map_err(|_| DohError::NetworkError)?;
+
+        let mut resp_buf = [0u8; 16384];
+        let resp_len = recv(sock_id, &mut resp_buf, 0).map_err(|_| DohError::Timeout)?;
+        let _ = close(sock_id);
+        if resp_len < 5 {
+            return Err(DohError::InvalidResponse);
+        }
+
+        return self.parse_h2_response(stream_id, &resp_buf[5..resp_len]);
 
         let mut sh_buf = [0u8; 4096];
         let sh_len = recv(sock_id, &mut sh_buf, 0).map_err(|_| DohError::NetworkError)?;

@@ -244,7 +244,7 @@ impl DhcpMessage {
     ///
     /// Minimum 236 byte gerektirir. Options alanı sihirli çerezden sonra başlar.
     pub fn parse(data: &[u8]) -> Result<Self, NetError> {
-        if data.len() < Self::MIN_SIZE {
+        if data.len() < Self::MIN_SIZE + Self::MAGIC_COOKIE.len() {
             return Err(NetError::InvalidPacket);
         }
 
@@ -259,6 +259,12 @@ impl DhcpMessage {
         let yiaddr = Ipv4Addr::from_bytes([data[16], data[17], data[18], data[19]]);
         let siaddr = Ipv4Addr::from_bytes([data[20], data[21], data[22], data[23]]);
         let giaddr = Ipv4Addr::from_bytes([data[24], data[25], data[26], data[27]]);
+        if op != 1 && op != 2 {
+            return Err(NetError::InvalidPacket);
+        }
+        if htype != 1 || hlen == 0 || hlen as usize > 16 {
+            return Err(NetError::InvalidPacket);
+        }
 
         let mut chaddr = [0u8; 16];
         chaddr.copy_from_slice(&data[28..44]);
@@ -270,6 +276,14 @@ impl DhcpMessage {
         file.copy_from_slice(&data[108..236]);
 
         let options = data[236..].to_vec();
+        if options.len() < Self::MAGIC_COOKIE.len()
+            || options[..Self::MAGIC_COOKIE.len()] != Self::MAGIC_COOKIE
+        {
+            return Err(NetError::InvalidPacket);
+        }
+        if !Self::validate_options(&options) {
+            return Err(NetError::InvalidPacket);
+        }
 
         Ok(DhcpMessage {
             op,
@@ -323,12 +337,10 @@ impl DhcpMessage {
     /// - Length (1 byte): Değer uzunluğu
     /// - Value (Length byte): Değer
     pub fn get_message_type(&self) -> DhcpMessageType {
-        for i in 0..self.options.len() {
-            if self.options[i] == 53 && i + 2 < self.options.len() {
-                return DhcpMessageType::from_u8(self.options[i + 2]);
-            }
-        }
-        DhcpMessageType::Unknown
+        self.get_option(53)
+            .filter(|value| value.len() == 1)
+            .map(|value| DhcpMessageType::from_u8(value[0]))
+            .unwrap_or(DhcpMessageType::Unknown)
     }
 
     /// Options alanından belirtilen kod numarasına sahip seçeneği döner.
@@ -336,6 +348,11 @@ impl DhcpMessage {
     /// TLV formatını okuyarak sihirli çerezi (ilk 4 byte) atlayıp
     /// istenen seçeneğin değerini döner. Seçenek bulunamazsa `None` döner.
     pub fn get_option(&self, code: u8) -> Option<&[u8]> {
+        if self.options.len() < Self::MAGIC_COOKIE.len()
+            || self.options[..Self::MAGIC_COOKIE.len()] != Self::MAGIC_COOKIE
+        {
+            return None;
+        }
         let mut i = 4; // Sihirli çerezi atla (Magic Cookie, 4 byte)
         while i < self.options.len() {
             let opt_code = self.options[i];
@@ -350,12 +367,47 @@ impl DhcpMessage {
                 break;
             }
             let opt_len = self.options[i + 1] as usize;
-            if opt_code == code {
-                return Some(&self.options[i + 2..i + 2 + opt_len]);
+            let opt_end = i.checked_add(2)?.checked_add(opt_len)?;
+            if opt_end > self.options.len() {
+                break;
             }
-            i += 2 + opt_len; // Sonraki seçeneğe geç
+            if opt_code == code {
+                return Some(&self.options[i + 2..opt_end]);
+            }
+            i = opt_end; // Sonraki seçeneğe geç
         }
         None
+    }
+
+    fn validate_options(options: &[u8]) -> bool {
+        if options.len() < Self::MAGIC_COOKIE.len()
+            || options[..Self::MAGIC_COOKIE.len()] != Self::MAGIC_COOKIE
+        {
+            return false;
+        }
+        let mut i = Self::MAGIC_COOKIE.len();
+        while i < options.len() {
+            let opt_code = options[i];
+            if opt_code == 255 {
+                return true;
+            }
+            if opt_code == 0 {
+                i += 1;
+                continue;
+            }
+            if i + 1 >= options.len() {
+                return false;
+            }
+            let opt_len = options[i + 1] as usize;
+            let Some(opt_end) = i.checked_add(2).and_then(|base| base.checked_add(opt_len)) else {
+                return false;
+            };
+            if opt_end > options.len() {
+                return false;
+            }
+            i = opt_end;
+        }
+        false
     }
 }
 
@@ -658,12 +710,12 @@ pub fn process_response() -> Result<super::NetworkConfig, NetError> {
             config.ip_addr = *msg.yiaddr.as_bytes();
 
             // Option 1: Alt ağ maskesi
-            if let Some(mask) = msg.get_option(1) {
+            if let Some(mask) = msg.get_option(1).filter(|value| value.len() >= 4) {
                 config.netmask = [mask[0], mask[1], mask[2], mask[3]];
             }
 
             // Option 3: Varsayılan ağ geçidi
-            if let Some(gw) = msg.get_option(3) {
+            if let Some(gw) = msg.get_option(3).filter(|value| value.len() >= 4) {
                 config.gateway = [gw[0], gw[1], gw[2], gw[3]];
             }
 
@@ -898,5 +950,43 @@ pub fn dhcp_timer_check() {
             let _ = sendto(sock, &data, dst, 0);
             let _ = close(sock);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dhcp_packet_with_options(options: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0u8; DhcpMessage::MIN_SIZE];
+        packet[0] = 2;
+        packet[1] = 1;
+        packet[2] = 6;
+        packet.extend_from_slice(options);
+        packet
+    }
+
+    #[test]
+    fn dhcp_parse_rejects_truncated_option_value() {
+        let mut options = Vec::from(DhcpMessage::MAGIC_COOKIE);
+        options.extend_from_slice(&[53, 2, 1]);
+        let packet = dhcp_packet_with_options(&options);
+
+        assert_eq!(
+            DhcpMessage::parse(&packet).unwrap_err(),
+            NetError::InvalidPacket
+        );
+    }
+
+    #[test]
+    fn dhcp_parse_rejects_missing_end_option() {
+        let mut options = Vec::from(DhcpMessage::MAGIC_COOKIE);
+        options.extend_from_slice(&[53, 1, DhcpMessageType::Ack as u8]);
+        let packet = dhcp_packet_with_options(&options);
+
+        assert_eq!(
+            DhcpMessage::parse(&packet).unwrap_err(),
+            NetError::InvalidPacket
+        );
     }
 }

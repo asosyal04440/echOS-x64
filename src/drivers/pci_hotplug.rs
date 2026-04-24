@@ -414,6 +414,17 @@ impl PciHotplugManager {
                     if present && slot.state == SlotState::Empty {
                         slot.state = SlotState::PoweredOn;
                         slot.insertions += 1;
+                        if !crate::drivers::iommu::sync_hotplug_device(
+                            slot.bdf.bus,
+                            slot.bdf.device,
+                            slot.bdf.function,
+                            true,
+                        ) {
+                            crate::serial_println!(
+                                "[PCI-HP] Slot {} IOMMU sync failed on insert",
+                                slot.physical_slot
+                            );
+                        }
                         crate::serial_println!(
                             "[PCI-HP] Slot {} device inserted",
                             slot.physical_slot
@@ -421,6 +432,12 @@ impl PciHotplugManager {
                     } else if !present && slot.state == SlotState::PoweredOn {
                         slot.state = SlotState::SurpriseRemoval;
                         slot.removals += 1;
+                        let _ = crate::drivers::iommu::sync_hotplug_device(
+                            slot.bdf.bus,
+                            slot.bdf.device,
+                            slot.bdf.function,
+                            false,
+                        );
                         crate::serial_println!(
                             "[PCI-HP] Slot {} device surprise removed!",
                             slot.physical_slot
@@ -433,6 +450,12 @@ impl PciHotplugManager {
                     if slot.state == SlotState::PoweredOn {
                         slot.state = SlotState::SurpriseRemoval;
                         slot.removals += 1;
+                        let _ = crate::drivers::iommu::sync_hotplug_device(
+                            slot.bdf.bus,
+                            slot.bdf.device,
+                            slot.bdf.function,
+                            false,
+                        );
                         crate::serial_println!(
                             "[PCI-HP] Slot {} DLLSC — surprise removal detected",
                             slot.physical_slot

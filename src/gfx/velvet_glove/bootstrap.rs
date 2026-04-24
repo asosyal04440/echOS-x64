@@ -2,6 +2,7 @@ use super::*;
 use crate::runtime_layer::{display_client_contract, input_client_contract, shell_client_contract};
 
 const DESKTOP_BOOTSTRAP_SERVICE_RETRY_TICKS: usize = 32;
+const WORKSPACE_WALLPAPER_IDS: [u32; WORKSPACE_COUNT as usize] = [11, 4, 9, 3, 6, 12, 5, 8];
 
 pub(super) struct DesktopBootstrapClients {
     pub shell_client: DesktopClient,
@@ -20,6 +21,11 @@ pub(super) struct DesktopShellWindows {
     pub notifications_window: ClientWindow,
     pub quick_settings_window: ClientWindow,
     pub command_palette_window: ClientWindow,
+    pub clipboard_history_window: ClientWindow,
+    pub capture_history_window: ClientWindow,
+    pub seed_catalog_window: ClientWindow,
+    pub magnifier_window: ClientWindow,
+    pub captions_window: ClientWindow,
     pub stage_rail_window: ClientWindow,
     pub dialog_window: ClientWindow,
     pub context_menu_window: ClientWindow,
@@ -111,6 +117,17 @@ pub(super) fn task_strip_window_rect(screen: Rect) -> Rect {
     )
 }
 
+pub(super) fn lock_window_rect(screen: Rect) -> Rect {
+    let width = screen.width.saturating_sub(96).min(640).max(420);
+    let height = screen.height.saturating_sub(128).min(380).max(300);
+    Rect::new(
+        screen.x + ((screen.width.saturating_sub(width)) / 2) as i32,
+        screen.y + ((screen.height.saturating_sub(height)) / 2) as i32,
+        width,
+        height,
+    )
+}
+
 pub(super) fn create_shell_windows(
     screen: Rect,
     shell_client: &DesktopClient,
@@ -193,6 +210,56 @@ pub(super) fn create_shell_windows(
         LayerRole::Overlay,
         super::shell_layer_flags(),
     )?;
+    let clipboard_history_window = shell_client.create_layer_window(
+        "Clipboard History",
+        screen.right() - 364,
+        screen.y + 108,
+        320,
+        248,
+        0,
+        LayerRole::Overlay,
+        super::shell_layer_flags(),
+    )?;
+    let capture_history_window = shell_client.create_layer_window(
+        "Screenshot Shelf",
+        screen.right() - 364,
+        screen.y + 108,
+        320,
+        264,
+        0,
+        LayerRole::Overlay,
+        super::shell_layer_flags(),
+    )?;
+    let seed_catalog_window = shell_client.create_layer_window(
+        "Seed Catalog",
+        screen.x + (screen.width as i32 / 2) - 220,
+        screen.y + 108,
+        440,
+        320,
+        0,
+        LayerRole::Overlay,
+        super::shell_layer_flags(),
+    )?;
+    let magnifier_window = shell_client.create_layer_window(
+        "Accessibility Magnifier",
+        screen.x + 18,
+        screen.y + 108,
+        320,
+        164,
+        0,
+        LayerRole::Overlay,
+        super::shell_layer_flags(),
+    )?;
+    let captions_window = shell_client.create_layer_window(
+        "Live Captions",
+        screen.x + (screen.width as i32 / 2) - 260,
+        screen.bottom() - 188,
+        520,
+        112,
+        0,
+        LayerRole::Overlay,
+        super::shell_layer_flags(),
+    )?;
     let stage_rail_window = shell_client.create_layer_window(
         "Workspace Overview",
         screen.x + 18,
@@ -233,12 +300,13 @@ pub(super) fn create_shell_windows(
         LayerRole::Overlay,
         super::shell_layer_flags(),
     )?;
+    let lock_rect = lock_window_rect(screen);
     let lock_window = shell_client.create_layer_window(
         "Login",
-        screen.x + (screen.width as i32 / 2) - 240,
-        screen.y + (screen.height as i32 / 2) - 160,
-        480,
-        320,
+        lock_rect.x,
+        lock_rect.y,
+        lock_rect.width,
+        lock_rect.height,
         0,
         LayerRole::Modal,
         super::shell_layer_flags(),
@@ -250,6 +318,11 @@ pub(super) fn create_shell_windows(
     let _ = shell_client.set_visibility(notifications_window.window_id, false);
     let _ = shell_client.set_visibility(quick_settings_window.window_id, false);
     let _ = shell_client.set_visibility(command_palette_window.window_id, false);
+    let _ = shell_client.set_visibility(clipboard_history_window.window_id, false);
+    let _ = shell_client.set_visibility(capture_history_window.window_id, false);
+    let _ = shell_client.set_visibility(seed_catalog_window.window_id, false);
+    let _ = shell_client.set_visibility(magnifier_window.window_id, false);
+    let _ = shell_client.set_visibility(captions_window.window_id, false);
 
     Ok(DesktopShellWindows {
         desktop_window,
@@ -259,6 +332,11 @@ pub(super) fn create_shell_windows(
         notifications_window,
         quick_settings_window,
         command_palette_window,
+        clipboard_history_window,
+        capture_history_window,
+        seed_catalog_window,
+        magnifier_window,
+        captions_window,
         stage_rail_window,
         dialog_window,
         context_menu_window,
@@ -323,7 +401,10 @@ pub(super) fn configure_shell_environment(clients: &DesktopBootstrapClients) {
         let _ = virtual_desktops().lock().set_profile(
             workspace_id,
             crate::personalization::DesktopProfile {
-                wallpaper_id: workspace_id as u32,
+                wallpaper_id: WORKSPACE_WALLPAPER_IDS
+                    .get(workspace_id as usize)
+                    .copied()
+                    .unwrap_or(11),
                 icon_pack: rule.default_name_str(),
             },
         );

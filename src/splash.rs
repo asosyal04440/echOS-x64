@@ -93,7 +93,12 @@ impl Splash {
         );
 
         let fill_width = ((self.beam_rect.width as u64 * value as u64) / 100) as u32;
-        let beam_fill = Rect::new(self.beam_rect.x, self.beam_rect.y, fill_width, self.beam_rect.height);
+        let beam_fill = Rect::new(
+            self.beam_rect.x,
+            self.beam_rect.y,
+            fill_width,
+            self.beam_rect.height,
+        );
         shell::fill_rect_clipped(
             fb,
             beam_fill,

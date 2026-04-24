@@ -89,7 +89,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::tls::{AesGcm, ChaCha20Poly1305, CipherSuite, X25519};
@@ -101,6 +101,7 @@ use super::tls::{AesGcm, ChaCha20Poly1305, CipherSuite, X25519};
 /// QUIC sürüm 1 (RFC 9000). Paket başlığında version alanına yazılır.
 /// Sürüm müzakeresi (Version Negotiation) için 0x00000000 kullanılır.
 pub const QUIC_VERSION_1: u32 = 0x00000001;
+const MAX_ACK_RANGES: u64 = 256;
 
 /// QUIC paket tipleri (uzun başlık için).
 /// Her tip farklı bağlantı kurulumu aşamasına karşılık gelir.
@@ -235,30 +236,11 @@ impl ConnectionId {
     /// Kriptografik olarak güçlü rastgele byte'lardan Connection ID üretir.
     /// `len` byte, güvenli rastgele sayı üretecinden alınır.
     pub fn random(len: usize) -> Self {
-        #[cfg(target_os = "windows")]
-        {
-            static HOST_CONN_ID_SEED: AtomicU32 = AtomicU32::new(0xC1D5_EED5);
-
-            let mut data = Vec::with_capacity(len);
-            let mut seed = HOST_CONN_ID_SEED.load(Ordering::Relaxed);
-            for _ in 0..len {
-                seed ^= seed << 13;
-                seed ^= seed >> 17;
-                seed ^= seed << 5;
-                data.push(seed as u8);
-            }
-            HOST_CONN_ID_SEED.store(seed, Ordering::Relaxed);
-            return ConnectionId { data };
+        let mut data = vec![0u8; len];
+        if !crate::crypto::rdrand_bytes(&mut data) {
+            crate::random::fill_bytes(&mut data);
         }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let mut data = Vec::with_capacity(len);
-            for _ in 0..len {
-                data.push(crate::random::next_u32() as u8);
-            }
-            ConnectionId { data }
-        }
+        ConnectionId { data }
     }
 
     /// Connection ID'nin byte uzunluğu.
@@ -743,6 +725,9 @@ impl QuicFrame {
                 let largest_ack = Self::decode_varint(data, pos)?;
                 let ack_delay = Self::decode_varint(data, pos)?;
                 let ack_range_count = Self::decode_varint(data, pos)?;
+                if ack_range_count > MAX_ACK_RANGES {
+                    return None;
+                }
                 let first_ack_range = Self::decode_varint(data, pos)?;
                 let mut ack_ranges = Vec::new();
                 for _ in 0..ack_range_count {
@@ -1200,7 +1185,7 @@ impl QuicClient {
         // TLS 1.3 ClientHello (RFC 8446 Section 4.1.2)
         let mut client_hello = Vec::with_capacity(128);
         client_hello.push(0x01); // HandshakeType = ClientHello
-                                 // Length placeholder (3 bytes) — sonra doldurulacak
+                                 // Reserve the 3-byte length field and patch it after the body is encoded.
         let len_pos = client_hello.len();
         client_hello.extend_from_slice(&[0x00, 0x00, 0x00]);
         // ProtocolVersion = TLS 1.2 (uyumluluk için; gerçek sürüm extension'da)
@@ -1417,6 +1402,19 @@ mod tests {
         assert_eq!(stream.send_max_offset, 8192);
         assert!(stream.can_write());
     }
+
+    #[test]
+    fn decode_rejects_ack_with_excessive_ranges() {
+        let mut frame = Vec::new();
+        frame.push(QuicFrameType::Ack as u8);
+        QuicFrame::encode_varint(&mut frame, 7);
+        QuicFrame::encode_varint(&mut frame, 0);
+        QuicFrame::encode_varint(&mut frame, MAX_ACK_RANGES + 1);
+        QuicFrame::encode_varint(&mut frame, 0);
+
+        let mut pos = 0;
+        assert!(QuicFrame::decode(&frame, &mut pos).is_none());
+    }
 }
 
 impl Default for QuicServer {
@@ -1430,7 +1428,11 @@ impl Default for QuicServer {
 // ============================================================================
 
 /// QUIC AEAD nonce (IV + packet number)
-pub fn compute_nonce(iv: &[u8], packet_number: u64) -> [u8; 12] {
+pub fn compute_nonce(iv: &[u8], packet_number: u64) -> Option<[u8; 12]> {
+    if iv.len() != 12 {
+        return None;
+    }
+
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(iv);
 
@@ -1440,7 +1442,7 @@ pub fn compute_nonce(iv: &[u8], packet_number: u64) -> [u8; 12] {
         nonce[4 + i] ^= pn_bytes[i];
     }
 
-    nonce
+    Some(nonce)
 }
 
 /// QUIC header protection mask using AES-ECB (RFC 9001 Section 5.4.3)
@@ -1655,30 +1657,30 @@ pub fn encrypt_packet_payload(
     iv: &[u8],
     packet_number: u64,
     aad: &[u8],
-) -> Vec<u8> {
-    let nonce = compute_nonce(iv, packet_number);
+) -> Option<Vec<u8>> {
+    let nonce = compute_nonce(iv, packet_number)?;
 
     // Use AES-GCM or ChaCha20-Poly1305
     if key.len() == 16 {
         // AES-128-GCM
-        let cipher = AesGcm::new(key);
-        let (ciphertext, tag) = cipher.encrypt(&nonce, aad, plaintext);
+        let cipher = AesGcm::new(key).ok()?;
+        let (ciphertext, tag) = cipher.encrypt(&nonce, aad, plaintext).ok()?;
         // Append tag to ciphertext
         let mut result = ciphertext;
         result.extend_from_slice(&tag);
-        result
+        Some(result)
     } else if key.len() == 32 {
         // ChaCha20-Poly1305
-        let key_arr: [u8; 32] = key.try_into().unwrap_or([0u8; 32]);
+        let key_arr: [u8; 32] = key.try_into().ok()?;
         let cipher = ChaCha20Poly1305::new(&key_arr);
         let mut nonce_arr = [0u8; 12];
-        nonce_arr.copy_from_slice(&nonce[..12]);
+        nonce_arr.copy_from_slice(&nonce);
         let (ciphertext, tag) = cipher.encrypt(&nonce_arr, aad, plaintext);
         let mut result = ciphertext;
         result.extend_from_slice(&tag);
-        result
+        Some(result)
     } else {
-        plaintext.to_vec()
+        None
     }
 }
 
@@ -1694,21 +1696,21 @@ pub fn decrypt_packet_payload(
         return None;
     }
 
-    let nonce = compute_nonce(iv, packet_number);
+    let nonce = compute_nonce(iv, packet_number)?;
     let (enc_data, tag) = ciphertext.split_at(ciphertext.len() - 16);
     let tag_arr: [u8; 16] = tag.try_into().ok()?;
 
     if key.len() == 16 {
-        let cipher = AesGcm::new(key);
-        cipher.decrypt(&nonce, aad, enc_data, &tag_arr)
+        let cipher = AesGcm::new(key).ok()?;
+        cipher.decrypt(&nonce, aad, enc_data, &tag_arr).ok()
     } else if key.len() == 32 {
         let key_arr: [u8; 32] = key.try_into().ok()?;
         let cipher = ChaCha20Poly1305::new(&key_arr);
         let mut nonce_arr = [0u8; 12];
-        nonce_arr.copy_from_slice(&nonce[..12]);
+        nonce_arr.copy_from_slice(&nonce);
         cipher.decrypt(&nonce_arr, aad, enc_data, &tag_arr)
     } else {
-        Some(ciphertext.to_vec())
+        None
     }
 }
 
@@ -2049,7 +2051,7 @@ impl LossRecovery {
                 if self.congestion_window > min_cwnd {
                     self.congestion_window = min_cwnd;
                 }
-                // ProbeRtt süresi dolduğunda (basit yaklaşım: hemen çık)
+                // Current policy exits ProbeRtt after applying the minimum window sample.
                 self.congestion_state = if self.congestion_window < self.ssthresh {
                     CongestionState::SlowStart
                 } else {

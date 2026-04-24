@@ -49,9 +49,11 @@
 //!               └─ veri buradan kopyalanır
 //! ```
 
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use rcore_fs::dev::{DevError, Device, Result as DevResult};
 use spin::Mutex;
+use virtio_drivers::transport::pci::bus::DeviceFunction;
+use virtio_drivers::transport::pci::PciTransport;
 
 const INVALID_PHYS_ADDR: u64 = u64::MAX;
 
@@ -117,19 +119,40 @@ fn virtio_disk_rw(
         crate::serial_println!("VIRTIO FFI: disk op rejected, device not initialized");
         return Err(VirtioIoError::DeviceNotInitialized);
     }
+    if buf.is_null() {
+        return Err(VirtioIoError::AddressTranslationFailed);
+    }
+    if !BACKEND_READY.load(Ordering::Acquire) {
+        let op = if write != 0 { "write" } else { "read" };
+        crate::serial_println!(
+            "VIRTIO FFI: disk {} sector={} buf={:p} rejected: backend not ready",
+            op,
+            sector,
+            buf
+        );
+        return Err(VirtioIoError::BackendUnavailable);
+    }
 
-    let op = if write != 0 { "write" } else { "read" };
-    crate::serial_println!(
-        "VIRTIO FFI: disk {} sector={} buf={:p} rejected: no real backend",
-        op,
-        sector,
-        buf
-    );
-    Err(VirtioIoError::BackendUnavailable)
+    let sector_buf = unsafe { core::slice::from_raw_parts_mut(buf, 512) };
+    if write != 0 {
+        super::virtio_blk::write_sector(sector, sector_buf)
+            .map_err(|_| VirtioIoError::BackendUnavailable)
+    } else {
+        super::virtio_blk::read_sector(sector, sector_buf)
+            .map_err(|_| VirtioIoError::BackendUnavailable)
+    }
 }
 
 fn translate_phys_addr(ptr: *const u8) -> Result<u64, VirtioIoError> {
-    crate::memory::translate_addr(ptr as u64).ok_or(VirtioIoError::AddressTranslationFailed)
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        let _ = ptr;
+        return Err(VirtioIoError::AddressTranslationFailed);
+    }
+    #[cfg(not(any(test, target_os = "windows")))]
+    {
+        crate::memory::translate_addr(ptr as u64).ok_or(VirtioIoError::AddressTranslationFailed)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +163,7 @@ fn translate_phys_addr(ptr: *const u8) -> Result<u64, VirtioIoError> {
 
 static LOCK: Mutex<()> = Mutex::new(());
 static BASE_PORT: AtomicU16 = AtomicU16::new(0);
+static BACKEND_READY: AtomicBool = AtomicBool::new(false);
 
 /// Sanal adresi fiziksel adrese çeviren C-ABI fonksiyon.
 ///
@@ -165,6 +189,31 @@ pub extern "C" fn virt_to_phys_c(ptr: *const u8) -> u64 {
     }
 }
 
+fn init_transport_backend(bus: u8, device: u8, function: u8) -> Result<(), VirtioIoError> {
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        let _ = (bus, device, function);
+        return Err(VirtioIoError::BackendUnavailable);
+    }
+    #[cfg(not(any(test, target_os = "windows")))]
+    {
+        let mut root = super::pci_root::create_pci_root();
+        let df = DeviceFunction {
+            bus,
+            device,
+            function,
+        };
+        let transport = PciTransport::new::<super::virtio_hal::VirtioHal>(&mut root, df)
+            .map_err(|_| VirtioIoError::BackendUnavailable)?;
+        if super::virtio_blk::init(transport) {
+            BACKEND_READY.store(true, Ordering::Release);
+            Ok(())
+        } else {
+            Err(VirtioIoError::BackendUnavailable)
+        }
+    }
+}
+
 /// VirtIO FFI katmanını başlatır.
 ///
 /// # Adımlar
@@ -173,13 +222,42 @@ pub extern "C" fn virt_to_phys_c(ptr: *const u8) -> u64 {
 ///
 /// Atomik `SeqCst` (Sequentially Consistent) sıralama kullanılır:
 /// Bu en güçlü sıralamadır; tüm CPU çekirdekleri aynı sırayı görür.
-pub fn init(base_port: u16) {
+pub fn init(bus: u8, device: u8, function: u8, base_port: u16) {
     crate::serial_println!("VIRTIO FFI: init base_port=0x{:x}", base_port);
-    unsafe {
-        virtio_disk_init(base_port);
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        let _ = (bus, device, function);
+        BASE_PORT.store(base_port, Ordering::SeqCst);
+        BACKEND_READY.store(false, Ordering::Release);
+        crate::serial_println!("VIRTIO FFI: host test target, port I/O disabled");
+        return;
     }
-    BASE_PORT.store(base_port, Ordering::SeqCst);
-    crate::serial_println!("VIRTIO FFI: init done");
+    #[cfg(not(any(test, target_os = "windows")))]
+    {
+        unsafe {
+            virtio_disk_init(base_port);
+        }
+        BASE_PORT.store(base_port, Ordering::SeqCst);
+        match init_transport_backend(bus, device, function) {
+            Ok(()) => crate::serial_println!(
+                "VIRTIO FFI: queue/DMA backend ready at {:02x}:{:02x}.{}",
+                bus,
+                device,
+                function
+            ),
+            Err(err) => {
+                BACKEND_READY.store(false, Ordering::Release);
+                crate::serial_println!(
+                    "VIRTIO FFI: queue/DMA backend unavailable at {:02x}:{:02x}.{}: {}",
+                    bus,
+                    device,
+                    function,
+                    err.as_str()
+                );
+            }
+        }
+        crate::serial_println!("VIRTIO FFI: init done");
+    }
 }
 
 /// Başlatılmış VirtIO blok cihazını döndürür.
@@ -292,12 +370,15 @@ impl Device for VirtioBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::{virt_to_phys_c, VirtioBlock, VirtioIoError, INVALID_PHYS_ADDR};
+    use core::sync::atomic::Ordering;
+
+    use super::{virt_to_phys_c, VirtioBlock, VirtioIoError, BACKEND_READY, INVALID_PHYS_ADDR};
 
     #[test]
     fn sector_io_reports_missing_backend() {
         let block = VirtioBlock { base_port: 0x1000 };
         let mut buf = [0u8; 512];
+        BACKEND_READY.store(false, Ordering::SeqCst);
         assert_eq!(
             block.read_sector(0, &mut buf),
             Err(VirtioIoError::BackendUnavailable)

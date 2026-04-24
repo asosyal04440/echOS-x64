@@ -36,7 +36,7 @@ arch-guard = "run --target x86_64-pc-windows-msvc -p arch_guard --"
 
 [build]
 target = "x86_64-unknown-uefi"
-jobs = 4
+# jobs = otomatik (CPU çekirdek sayısı kadar)
 
 [profile.dev]
 debug = 1
@@ -76,4 +76,14 @@ rustflags = [
     # `-no-pie` olmadan bazı bağlayıcılar PIE uyumlu kod üretmeye çalışır,
     # bu da çekirdeğin yanlış adreste çalışmasına neden olur.
     "-C", "link-arg=-no-pie",
+    "-C", "llvm-args=--x86-slh-indirect",
+    "-C", "llvm-args=--x86-slh-lfence",
+    "-C", "llvm-args=--x86-slh-fence-call-and-ret",
+]
+
+[target.x86_64-unknown-uefi]
+rustflags = [
+    "-C", "llvm-args=--x86-slh-indirect",
+    "-C", "llvm-args=--x86-slh-lfence",
+    "-C", "llvm-args=--x86-slh-fence-call-and-ret",
 ]

@@ -1377,6 +1377,9 @@ fn process_tls_server_handshake_flight(
                     .map_err(|_| HttpError::TlsHandshakeFailed)?;
                 saw_finished = true;
             }
+            4 => tls
+                .process_new_session_ticket(msg)
+                .map_err(|_| HttpError::TlsHandshakeFailed)?,
             _ => {}
         }
 

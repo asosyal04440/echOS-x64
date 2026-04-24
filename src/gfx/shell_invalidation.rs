@@ -3,7 +3,7 @@ use crate::gui::protocol::{
 };
 use alloc::vec::Vec;
 
-const TARGET_COUNT: usize = 14;
+const TARGET_COUNT: usize = 19;
 
 fn target_index(target: InvalidationTarget) -> usize {
     match target {
@@ -13,20 +13,25 @@ fn target_index(target: InvalidationTarget) -> usize {
         InvalidationTarget::Overview => 3,
         InvalidationTarget::QuickSettings => 4,
         InvalidationTarget::CommandPalette => 5,
-        InvalidationTarget::NotificationCenter => 6,
-        InvalidationTarget::Dialog => 7,
-        InvalidationTarget::ContextMenu => 8,
-        InvalidationTarget::Switcher => 9,
-        InvalidationTarget::LockScreen => 10,
-        InvalidationTarget::WorkspaceViewport => 11,
-        InvalidationTarget::Cursor => 12,
-        InvalidationTarget::Wallpaper => 13,
+        InvalidationTarget::ClipboardHistory => 6,
+        InvalidationTarget::CaptureHistory => 7,
+        InvalidationTarget::SeedCatalog => 8,
+        InvalidationTarget::Magnifier => 9,
+        InvalidationTarget::Captions => 10,
+        InvalidationTarget::NotificationCenter => 11,
+        InvalidationTarget::Dialog => 12,
+        InvalidationTarget::ContextMenu => 13,
+        InvalidationTarget::Switcher => 14,
+        InvalidationTarget::LockScreen => 15,
+        InvalidationTarget::WorkspaceViewport => 16,
+        InvalidationTarget::Cursor => 17,
+        InvalidationTarget::Wallpaper => 18,
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ShellInvalidationState {
-    pending_mask: u16,
+    pending_mask: u32,
     pending: Vec<SceneInvalidation>,
     next_frame_ticket: FrameTicket,
 }
@@ -35,7 +40,7 @@ pub struct ShellInvalidationState {
 pub struct ShellFramePlan {
     pub frame_ticket: FrameTicket,
     pub pending: Vec<SceneInvalidation>,
-    mask: u16,
+    mask: u32,
 }
 
 impl ShellInvalidationState {
@@ -56,6 +61,11 @@ impl ShellInvalidationState {
             InvalidationTarget::Overview,
             InvalidationTarget::QuickSettings,
             InvalidationTarget::CommandPalette,
+            InvalidationTarget::ClipboardHistory,
+            InvalidationTarget::CaptureHistory,
+            InvalidationTarget::SeedCatalog,
+            InvalidationTarget::Magnifier,
+            InvalidationTarget::Captions,
             InvalidationTarget::NotificationCenter,
             InvalidationTarget::Dialog,
             InvalidationTarget::ContextMenu,
@@ -70,7 +80,7 @@ impl ShellInvalidationState {
     }
 
     pub fn mark(&mut self, target: InvalidationTarget, reason: InvalidationReason) {
-        let bit = 1u16 << target_index(target).min(TARGET_COUNT - 1);
+        let bit = 1u32 << target_index(target).min(TARGET_COUNT - 1);
         self.pending_mask |= bit;
         if !self
             .pending
@@ -103,7 +113,7 @@ impl ShellInvalidationState {
 
 impl ShellFramePlan {
     pub fn touches(&self, target: InvalidationTarget) -> bool {
-        let bit = 1u16 << target_index(target).min(TARGET_COUNT - 1);
+        let bit = 1u32 << target_index(target).min(TARGET_COUNT - 1);
         self.mask & bit != 0
     }
 }

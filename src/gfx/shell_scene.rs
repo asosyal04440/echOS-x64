@@ -1,4 +1,6 @@
-use crate::gui::protocol::{DamageLane, Rect, RenderObjectKind, SceneNodeId, SceneUpdate, WindowId};
+use crate::gui::protocol::{
+    DamageLane, Rect, RenderObjectKind, SceneNodeId, SceneUpdate, WindowId,
+};
 use crate::gui::scene::SceneGraph;
 use crate::gui::text::{TextStyle, TextSystem};
 use alloc::vec::Vec;

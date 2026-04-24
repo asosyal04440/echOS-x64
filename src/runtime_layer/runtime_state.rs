@@ -1,3 +1,4 @@
+use super::super::gui::launch_pipeline::ExternalDisplayContract;
 use super::super::gui::launch_pipeline::{LaunchSession, RuntimeBootstrap};
 use super::super::gui::protocol::{AppId, SurfaceId, WindowId, WorkspaceId};
 use super::super::ipc::ServiceId;
@@ -12,8 +13,8 @@ use lazy_static::lazy_static;
 use spin::Mutex;
 
 use super::runtime_model::{
-    BrokeredLaunch, CapabilityToken, IsolationDomain, ProcessBrokerTicket, ProcessClass,
-    RuntimeHandle, RuntimeHandleId, WindowSessionHandle, WindowSessionSpec,
+    BrokeredLaunch, CapabilityToken, ExternalRuntimeGraph, IsolationDomain, ProcessBrokerTicket,
+    ProcessClass, RuntimeHandle, RuntimeHandleId, WindowSessionHandle, WindowSessionSpec,
 };
 
 #[derive(Default)]
@@ -100,6 +101,49 @@ impl RuntimeCoordinator {
                 .lock()
                 .authorize_launch(session, image_path.as_deref(), isolation_domain)
         };
+        self.register_runtime_from_grant(
+            session,
+            task_id,
+            image_path,
+            address_space,
+            isolation_domain,
+            service_id,
+            grant,
+        )
+    }
+
+    fn register_runtime_from_ticket(
+        &mut self,
+        session: LaunchSession,
+        task_id: Option<u64>,
+        image_path: Option<String>,
+        address_space: Option<Arc<Mutex<AddressSpace>>>,
+        isolation_domain: IsolationDomain,
+        service_id: Option<ServiceId>,
+        broker_ticket: ProcessBrokerTicket,
+    ) -> Option<RuntimeHandle> {
+        let grant = PROCESS_BROKER.lock().launch(broker_ticket)?;
+        Some(self.register_runtime_from_grant(
+            session,
+            task_id,
+            image_path,
+            address_space,
+            isolation_domain,
+            service_id,
+            grant,
+        ))
+    }
+
+    fn register_runtime_from_grant(
+        &mut self,
+        session: LaunchSession,
+        task_id: Option<u64>,
+        image_path: Option<String>,
+        address_space: Option<Arc<Mutex<AddressSpace>>>,
+        isolation_domain: IsolationDomain,
+        service_id: Option<ServiceId>,
+        grant: BrokeredLaunch,
+    ) -> RuntimeHandle {
         let id = Self::allocate_handle_id();
         let handle = RuntimeHandle {
             id,
@@ -180,6 +224,16 @@ impl RuntimeCoordinator {
     pub fn runtime_for_service(&self, service_id: ServiceId) -> Option<RuntimeHandle> {
         let handle_id = *self.services.get(&service_id)?;
         self.handles.get(&handle_id).cloned()
+    }
+
+    pub fn runtime_for_broker_ticket(
+        &self,
+        broker_ticket: ProcessBrokerTicket,
+    ) -> Option<RuntimeHandle> {
+        self.handles
+            .values()
+            .find(|handle| handle.broker_ticket == broker_ticket)
+            .cloned()
     }
 
     pub fn annotate_runtime(
@@ -264,10 +318,12 @@ impl ProcessBroker {
             token,
             address_space_handle: Self::allocate_address_space_handle(),
             session_contract: encode_session_contract(session),
+            external_display: session.process.external_display,
             resume_token: installed
                 .as_ref()
                 .and_then(super::super::runtime_supervisor::resume_token_for_app),
             image_path: image_path.map(|value| value.to_string()),
+            external_runtime_graph: None,
         };
         self.launches.insert(ticket, grant.clone());
         if let Some(parent_ticket) = parent_ticket {
@@ -313,6 +369,16 @@ impl ProcessBroker {
             .get(&ticket)
             .map(|launch| launch.child_tickets.clone())
             .unwrap_or_default()
+    }
+
+    pub fn annotate_external_runtime_graph(
+        &mut self,
+        ticket: ProcessBrokerTicket,
+        graph: ExternalRuntimeGraph,
+    ) -> Option<BrokeredLaunch> {
+        let launch = self.launches.get_mut(&ticket)?;
+        launch.external_runtime_graph = Some(graph);
+        Some(launch.clone())
     }
 }
 
@@ -375,6 +441,55 @@ pub fn register_launch_session_with_parent(
     )
 }
 
+pub fn reserve_launch_grant(
+    session: LaunchSession,
+    image_path: Option<&str>,
+    isolation_domain: IsolationDomain,
+) -> BrokeredLaunch {
+    PROCESS_BROKER
+        .lock()
+        .authorize_launch(session, image_path, isolation_domain)
+}
+
+pub fn reserve_child_launch_grant(
+    parent_ticket: ProcessBrokerTicket,
+    session: LaunchSession,
+    image_path: Option<&str>,
+    isolation_domain: IsolationDomain,
+) -> BrokeredLaunch {
+    PROCESS_BROKER.lock().authorize_child_launch(
+        parent_ticket,
+        session,
+        image_path,
+        isolation_domain,
+    )
+}
+
+pub fn register_launch_session_from_grant(
+    session: LaunchSession,
+    task_id: Option<u64>,
+    image_path: Option<String>,
+    address_space: Option<Arc<Mutex<AddressSpace>>>,
+    isolation_domain: IsolationDomain,
+    service_id: Option<ServiceId>,
+    broker_ticket: ProcessBrokerTicket,
+) -> Option<RuntimeHandle> {
+    let app_id = session.intent.descriptor.app_id as u64;
+    super::super::security::capability::init_process(app_id);
+    if let Some(task_id) = task_id {
+        super::super::security::capability::init_process(task_id);
+    }
+    RUNTIME_COORDINATOR.lock().register_runtime_from_ticket(
+        session,
+        task_id,
+        image_path,
+        address_space,
+        isolation_domain,
+        service_id,
+        broker_ticket,
+    )
+}
+
 pub fn attach_window_session(
     app_id: AppId,
     workspace_id: WorkspaceId,
@@ -382,12 +497,31 @@ pub fn attach_window_session(
     window_id: WindowId,
     surface_id: SurfaceId,
 ) -> WindowSessionHandle {
+    attach_window_session_with_display(
+        app_id,
+        workspace_id,
+        shell_owned,
+        window_id,
+        surface_id,
+        ExternalDisplayContract::default(),
+    )
+}
+
+pub fn attach_window_session_with_display(
+    app_id: AppId,
+    workspace_id: WorkspaceId,
+    shell_owned: bool,
+    window_id: WindowId,
+    surface_id: SurfaceId,
+    external_display: ExternalDisplayContract,
+) -> WindowSessionHandle {
     let spec = WindowSessionSpec {
         app_id,
         workspace_id,
         shell_owned,
         window_id,
         surface_id,
+        external_display,
     };
     RUNTIME_COORDINATOR.lock().attach_window(spec, None)
 }
@@ -418,6 +552,14 @@ pub fn runtime_handle_for_service(service_id: ServiceId) -> Option<RuntimeHandle
     RUNTIME_COORDINATOR.lock().runtime_for_service(service_id)
 }
 
+pub fn runtime_handle_for_broker_ticket(
+    broker_ticket: ProcessBrokerTicket,
+) -> Option<RuntimeHandle> {
+    RUNTIME_COORDINATOR
+        .lock()
+        .runtime_for_broker_ticket(broker_ticket)
+}
+
 pub fn window_session(window_id: WindowId) -> Option<WindowSessionHandle> {
     RUNTIME_COORDINATOR.lock().window(window_id)
 }
@@ -428,6 +570,15 @@ pub fn brokered_launch(ticket: ProcessBrokerTicket) -> Option<BrokeredLaunch> {
 
 pub fn brokered_launch_children(ticket: ProcessBrokerTicket) -> Vec<ProcessBrokerTicket> {
     PROCESS_BROKER.lock().children(ticket)
+}
+
+pub fn annotate_brokered_launch_runtime_graph(
+    ticket: ProcessBrokerTicket,
+    graph: ExternalRuntimeGraph,
+) -> Option<BrokeredLaunch> {
+    PROCESS_BROKER
+        .lock()
+        .annotate_external_runtime_graph(ticket, graph)
 }
 
 pub fn runtime_address_space_for_pid(pid: u64) -> Option<Arc<Mutex<AddressSpace>>> {

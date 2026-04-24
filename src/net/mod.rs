@@ -590,6 +590,17 @@ pub fn get_interface(name: &str) -> Option<Arc<Mutex<dyn NetInterface>>> {
 /// Varsayılan ağ arabirimini döndürür (listede ilk kayıtlı arabirim)
 pub fn default_interface() -> Option<Arc<Mutex<dyn NetInterface>>> {
     let interfaces = NET_INTERFACES.lock();
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        for iface in interfaces.iter() {
+            let guard = iface.lock();
+            if guard.name() == "lo" && guard.is_up() {
+                drop(guard);
+                return Some(iface.clone());
+            }
+        }
+    }
+
     for iface in interfaces.iter() {
         let guard = iface.lock();
         if guard.name() != "lo" && guard.is_up() {
@@ -608,6 +619,15 @@ pub fn default_interface() -> Option<Arc<Mutex<dyn NetInterface>>> {
 /// Yeni benzersiz soket kimliği ayırır ve döndürür
 pub fn allocate_socket_id() -> u32 {
     NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn ensure_loopback_interface_for_tests() {
+    if get_interface("lo").is_some() {
+        return;
+    }
+
+    register_interface(Arc::new(Mutex::new(netdev::LoopbackInterface::new())));
 }
 
 /// Ağın yapılandırılıp yapılandırılmadığını kontrol eder (IP atanmış mı?)

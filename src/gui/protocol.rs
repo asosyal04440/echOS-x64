@@ -245,6 +245,11 @@ pub enum InvalidationTarget {
     Overview,
     QuickSettings,
     CommandPalette,
+    ClipboardHistory,
+    CaptureHistory,
+    SeedCatalog,
+    Magnifier,
+    Captions,
     NotificationCenter,
     Dialog,
     ContextMenu,
@@ -582,8 +587,12 @@ pub struct CommandPaletteAction {
 pub struct StageSet {
     pub id: u64,
     pub name: String,
+    pub workspace_id: WorkspaceId,
+    pub monitor_id: u32,
     pub window_ids: Vec<WindowId>,
+    pub snap_groups: Vec<SnapGroup>,
     pub pinned: bool,
+    pub restore: RestoreDisposition,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -778,9 +787,17 @@ impl Default for DisplayProfile {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MagnifierMode {
+    Docked,
+    Lens,
+    Fullscreen,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AccessibilityProfile {
     pub screen_reader: bool,
     pub magnifier: bool,
+    pub magnifier_mode: MagnifierMode,
     pub contrast_theme: bool,
     pub color_filter: bool,
     pub reduced_motion: bool,
@@ -797,6 +814,7 @@ impl Default for AccessibilityProfile {
         Self {
             screen_reader: false,
             magnifier: false,
+            magnifier_mode: MagnifierMode::Docked,
             contrast_theme: false,
             color_filter: false,
             reduced_motion: false,
@@ -836,6 +854,32 @@ pub struct CaptionEvent {
     pub app_id: AppId,
     pub source_label: String,
     pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechEvent {
+    pub app_id: AppId,
+    pub source_label: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechState {
+    pub active: Option<SpeechEvent>,
+    pub pending: alloc::vec::Vec<SpeechEvent>,
+    pub dropped_count: u32,
+    pub coalesced_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccessibilityFocusState {
+    pub app_id: AppId,
+    pub window_id: Option<WindowId>,
+    pub node_id: u64,
+    pub role: AccessibilityRole,
+    pub label: String,
+    pub description: String,
+    pub bounds: Rect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

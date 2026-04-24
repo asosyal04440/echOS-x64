@@ -192,6 +192,20 @@ pub fn request_process_broker_sync(
     service_control::request_process_broker_sync(app_id, command)
 }
 
+pub fn request_update_installer_sync(
+    app_id: u32,
+    command: UpdateInstallerCommand,
+) -> Option<UpdateInstallerResponse> {
+    service_control::request_update_installer_sync(app_id, command)
+}
+
+pub fn request_network_broker_sync(
+    app_id: u32,
+    command: NetworkBrokerCommand,
+) -> Option<NetworkBrokerResponse> {
+    service_control::request_network_broker_sync(app_id, command)
+}
+
 pub fn request_display_sync(app_id: u32, command: DisplayCommand) -> Option<DisplayResponse> {
     match get_service_ipc().request_sync_compat(
         app_id,

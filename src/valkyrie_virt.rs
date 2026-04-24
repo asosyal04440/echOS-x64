@@ -140,7 +140,7 @@ pub enum VmcsField {
     GuestGsSelector = 0x0000080a,
     GuestLdtrSelector = 0x0000080c,
     GuestTrSelector = 0x0000080e,
-    
+
     /// Host state
     HostEsSelector = 0x00000c00,
     HostCsSelector = 0x00000c02,
@@ -149,7 +149,7 @@ pub enum VmcsField {
     HostFsSelector = 0x00000c08,
     HostGsSelector = 0x00000c0a,
     HostTrSelector = 0x00000c0c,
-    
+
     /// Control fields
     PinBasedVmExecControl = 0x00004000,
     CpuBasedVmExecControl = 0x00004002,
@@ -157,7 +157,7 @@ pub enum VmcsField {
     VmExitControls = 0x0000400c,
     VmEntryControls = 0x00004012,
     EptPointer = 0x0000401a,
-    
+
     /// Guest state
     GuestCr0 = 0x00006800,
     GuestCr3 = 0x00006802,
@@ -172,7 +172,7 @@ pub mod vmcs_control {
     /// Pin-based controls
     pub const PIN_BASED_EXTERNAL_INTERRUPT_EXIT: u32 = 0x00000001;
     pub const PIN_BASED_NMI_EXIT: u32 = 0x00000008;
-    
+
     /// Primary processor-based controls
     pub const CPU_BASED_HLT_EXITING: u32 = 0x00000080;
     pub const CPU_BASED_INVLPG_EXITING: u32 = 0x00000200;
@@ -189,7 +189,7 @@ pub mod vmcs_control {
     pub const CPU_BASED_ENABLE_VPID: u32 = 0x02000000;
     pub const CPU_BASED_WBINVD_EXITING: u32 = 0x04000000;
     pub const CPU_BASED_UNRESTRICTED_GUEST: u32 = 0x20000000;
-    
+
     /// Secondary processor-based controls
     pub const SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES: u32 = 0x00000001;
     pub const SECONDARY_EXEC_ENABLE_EPT: u32 = 0x00000002;
@@ -202,7 +202,7 @@ pub mod vmcs_control {
     pub const SECONDARY_EXEC_ENABLE_ENCLS_EXITING: u32 = 0x00004000;
     pub const SECONDARY_EXEC_RDSEED_EXITING: u32 = 0x00010000;
     pub const SECONDARY_EXEC_ENABLE_PCOMMIT: u32 = 0x00020000;
-    
+
     /// VM exit controls
     pub const VM_EXIT_SAVE_DEBUG_CONTROLS: u32 = 0x00000002;
     pub const VM_EXIT_HOST_ADDR_SPACE_SIZE: u32 = 0x00000200;
@@ -214,7 +214,7 @@ pub mod vmcs_control {
     pub const VM_EXIT_LOAD_IA32_EFER: u32 = 0x00008000;
     pub const VM_EXIT_SAVE_VMX_PREEMPTION_TIMER: u32 = 0x00020000;
     pub const VM_EXIT_CLEAR_BNDCFGS: u32 = 0x00400000;
-    
+
     /// VM entry controls
     pub const VM_ENTRY_LOAD_DEBUG_CONTROLS: u32 = 0x00000002;
     pub const VM_ENTRY_IA32E_MODE: u32 = 0x00000200;
@@ -242,40 +242,40 @@ impl Vmcs {
     pub fn new() -> Self {
         // VMCS 4KB aligned olmalı
         let mut region = vec![0u8; 4096];
-        
+
         // VMCS revision ID (ilk 31 bit)
         let revision: u32 = 0x1; // Minimum VMCS revision fallback
-        
+
         // Revision'ı VMCS'e yaz
         region[0..4].copy_from_slice(&revision.to_le_bytes());
-        
+
         Self {
             region,
             revision,
             fields: BTreeMap::new(),
         }
     }
-    
+
     /// Alan yaz
     pub fn write_field(&mut self, field: VmcsField, value: u64) {
         self.fields.insert(field, value);
-        
+
         // Gerçek implementasyonda VMXWRITE komutu kullanılmalı
         crate::serial_println!("[VMCS] Write field {:?} = 0x{:x}", field, value);
     }
-    
+
     /// Alan oku
     pub fn read_field(&self, field: VmcsField) -> Option<u64> {
         self.fields.get(&field).copied()
     }
-    
+
     /// VMCS'i yükle
     pub fn load(&self) -> Result<(), ValkyrieError> {
         // Gerçek implementasyonda VMCLEAR + VMPTRLD komutları kullanılmalı
         crate::serial_println!("[VMCS] Loading VMCS");
         Ok(())
     }
-    
+
     /// VMCS'i temizle
     pub fn clear(&mut self) -> Result<(), ValkyrieError> {
         // Gerçek implementasyonda VMCLEAR komutu kullanılmalı
@@ -326,14 +326,14 @@ pub struct ValkyrieRegisters {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
-    
+
     /// Control registers
     pub cr0: u64,
     pub cr2: u64,
     pub cr3: u64,
     pub cr4: u64,
     pub cr8: u64,
-    
+
     /// Segment registers
     pub es: ValkyrieSegment,
     pub cs: ValkyrieSegment,
@@ -343,13 +343,13 @@ pub struct ValkyrieRegisters {
     pub gs: ValkyrieSegment,
     pub tr: ValkyrieSegment,
     pub ldt: ValkyrieSegment,
-    
+
     /// System registers
     pub rip: u64,
     pub rflags: u64,
     pub efer: u64,
     pub apic_base: u64,
-    
+
     /// MSRs
     pub msrs: BTreeMap<u32, u64>,
 }
@@ -375,7 +375,7 @@ impl ValkyrieVcpu {
     /// Yeni vCPU oluştur
     pub fn new(vcpu_id: u32) -> Self {
         let mut vmcs = Vmcs::new();
-        
+
         // VMCS alanlarını varsayılan değerlerle ayarla
         vmcs.write_field(VmcsField::PinBasedVmExecControl, 0);
         vmcs.write_field(
@@ -392,7 +392,7 @@ impl ValkyrieVcpu {
             VmcsField::VmEntryControls,
             vmcs_control::VM_ENTRY_IA32E_MODE as u64,
         );
-        
+
         Self {
             vcpu_id,
             vmcs,
@@ -402,47 +402,56 @@ impl ValkyrieVcpu {
             vm_exits: AtomicU64::new(0),
         }
     }
-    
+
     /// vCPU'yu başlat
     pub fn initialize(&mut self) -> Result<(), ValkyrieError> {
         // VMCS'i yükle
         self.vmcs.load()?;
-        
+
         // Register'ları varsayılan değerlerle ayarla
         self.registers.reset();
-        
+
         // VMCS'e register değerlerini yaz
-        self.vmcs.write_field(VmcsField::GuestRip, self.registers.rip);
-        self.vmcs.write_field(VmcsField::GuestRsp, self.registers.rsp);
-        self.vmcs.write_field(VmcsField::GuestRflags, self.registers.rflags);
-        self.vmcs.write_field(VmcsField::GuestCr0, self.registers.cr0);
-        self.vmcs.write_field(VmcsField::GuestCr3, self.registers.cr3);
-        self.vmcs.write_field(VmcsField::GuestCr4, self.registers.cr4);
-        
-        self.state.store(ValkyrieVcpuState::Ready as u64, Ordering::SeqCst);
-        
+        self.vmcs
+            .write_field(VmcsField::GuestRip, self.registers.rip);
+        self.vmcs
+            .write_field(VmcsField::GuestRsp, self.registers.rsp);
+        self.vmcs
+            .write_field(VmcsField::GuestRflags, self.registers.rflags);
+        self.vmcs
+            .write_field(VmcsField::GuestCr0, self.registers.cr0);
+        self.vmcs
+            .write_field(VmcsField::GuestCr3, self.registers.cr3);
+        self.vmcs
+            .write_field(VmcsField::GuestCr4, self.registers.cr4);
+
+        self.state
+            .store(ValkyrieVcpuState::Ready as u64, Ordering::SeqCst);
+
         crate::serial_println!("[VALKYRIE] vCPU {} initialized", self.vcpu_id);
-        
+
         Ok(())
     }
-    
+
     /// vCPU'yu çalıştır
     pub fn run(&mut self) -> Result<ValkyrieVmExit, ValkyrieError> {
         let current_state = self.get_state();
         if current_state != ValkyrieVcpuState::Ready && current_state != ValkyrieVcpuState::Exited {
             return Err(ValkyrieError::PermissionDenied);
         }
-        
-        self.state.store(ValkyrieVcpuState::Running as u64, Ordering::SeqCst);
-        
+
+        self.state
+            .store(ValkyrieVcpuState::Running as u64, Ordering::SeqCst);
+
         let start_time = crate::interrupts::get_ticks();
-        
+
         // Gerçek implementasyonda VMLAUNCH/VMRESUME komutu kullanılmalı
         crate::serial_println!("[VALKYRIE] Running vCPU {}", self.vcpu_id);
-        
+
         // VM exit kaydı üret ve ileri ilerleme yap
         self.registers.rip = self.registers.rip.wrapping_add(4);
-        self.vmcs.write_field(VmcsField::GuestRip, self.registers.rip);
+        self.vmcs
+            .write_field(VmcsField::GuestRip, self.registers.rip);
         let exit_code = if (self.registers.rflags & (1 << 9)) == 0 {
             0x1E
         } else {
@@ -456,16 +465,17 @@ impl ValkyrieVcpu {
             guest_rip: self.registers.rip,
             guest_rsp: self.registers.rsp,
         };
-        
+
         self.vm_exits.fetch_add(1, Ordering::SeqCst);
-        self.state.store(ValkyrieVcpuState::Exited as u64, Ordering::SeqCst);
-        
+        self.state
+            .store(ValkyrieVcpuState::Exited as u64, Ordering::SeqCst);
+
         let elapsed = crate::interrupts::get_ticks() - start_time;
         self.runtime.fetch_add(elapsed, Ordering::SeqCst);
-        
+
         Ok(exit_reason)
     }
-    
+
     /// Durumu al
     pub fn get_state(&self) -> ValkyrieVcpuState {
         match self.state.load(Ordering::SeqCst) {
@@ -477,12 +487,12 @@ impl ValkyrieVcpu {
             _ => ValkyrieVcpuState::Uninitialized,
         }
     }
-    
+
     /// Çalışma süresini al
     pub fn get_runtime(&self) -> u64 {
         self.runtime.load(Ordering::SeqCst)
     }
-    
+
     /// VM exit sayısını al
     pub fn get_vm_exits(&self) -> u64 {
         self.vm_exits.load(Ordering::SeqCst)
@@ -539,7 +549,7 @@ impl ValkyrieRegisters {
             msrs: BTreeMap::new(),
         }
     }
-    
+
     /// Reset register'ları
     pub fn reset(&mut self) {
         *self = Self::new();
@@ -564,7 +574,7 @@ impl ValkyrieSegment {
             unusable: false,
         }
     }
-    
+
     /// Yeni kod segmenti
     pub fn new_code() -> Self {
         Self {
@@ -582,7 +592,7 @@ impl ValkyrieSegment {
             unusable: false,
         }
     }
-    
+
     /// Yeni veri segmenti
     pub fn new_data() -> Self {
         Self {
@@ -706,30 +716,33 @@ impl ValkyrieVm {
             created_time: crate::interrupts::get_ticks(),
             runtime: AtomicU64::new(0),
         };
-        
+
         // vCPU'ları oluştur
         for i in 0..vm.config.vcpu_count {
             let vcpu = Arc::new(Mutex::new(ValkyrieVcpu::new(i)));
             vm.vcpus.lock().insert(i, vcpu);
         }
-        
+
         vm
     }
-    
+
     /// Bellek bölgesi ekle
     pub fn add_memory_region(&mut self, region: ValkyrieMemoryRegion) -> Result<(), ValkyrieError> {
         let mut regions = self.memory_regions.lock();
-        
+
         if regions.contains_key(&region.region_id) {
             return Err(ValkyrieError::AlreadyExists);
         }
-        
+
         let region_id = region.region_id;
         regions.insert(region_id, region);
-        
-        crate::serial_println!("[VALKYRIE] Added memory region {} to VM {}", 
-            region_id, self.vm_id);
-        
+
+        crate::serial_println!(
+            "[VALKYRIE] Added memory region {} to VM {}",
+            region_id,
+            self.vm_id
+        );
+
         Ok(())
     }
 
@@ -755,70 +768,71 @@ impl ValkyrieVm {
         self.enclave_regions.lock().push(region);
         Ok(())
     }
-    
+
     /// vCPU al
     pub fn get_vcpu(&self, vcpu_id: u32) -> Result<Arc<Mutex<ValkyrieVcpu>>, ValkyrieError> {
-        self.vcpus.lock()
+        self.vcpus
+            .lock()
             .get(&vcpu_id)
             .cloned()
             .ok_or(ValkyrieError::VcpuNotFound)
     }
-    
+
     /// VM'i başlat
     pub fn start(&mut self) -> Result<(), ValkyrieError> {
         let current_state = self.get_state();
         if current_state != ValkyrieVmState::Created && current_state != ValkyrieVmState::Shutdown {
             return Err(ValkyrieError::PermissionDenied);
         }
-        
+
         // vCPU'ları başlat
         let vcpus = self.vcpus.lock();
         for (_, vcpu) in vcpus.iter() {
             vcpu.lock().initialize()?;
         }
-        
+
         self.set_state(ValkyrieVmState::Running);
-        
+
         crate::serial_println!("[VALKYRIE] Started VM {} ({})", self.vm_id, self.name);
-        
+
         Ok(())
     }
-    
+
     /// VM'i durdur
     pub fn pause(&mut self) -> Result<(), ValkyrieError> {
         if self.get_state() != ValkyrieVmState::Running {
             return Err(ValkyrieError::PermissionDenied);
         }
-        
+
         self.set_state(ValkyrieVmState::Paused);
-        
+
         crate::serial_println!("[VALKYRIE] Paused VM {} ({})", self.vm_id, self.name);
-        
+
         Ok(())
     }
-    
+
     /// VM'i devam ettir
     pub fn resume(&mut self) -> Result<(), ValkyrieError> {
         if self.get_state() != ValkyrieVmState::Paused {
             return Err(ValkyrieError::PermissionDenied);
         }
-        
+
         self.set_state(ValkyrieVmState::Running);
-        
+
         crate::serial_println!("[VALKYRIE] Resumed VM {} ({})", self.vm_id, self.name);
-        
+
         Ok(())
     }
-    
+
     /// VM'i kapat
     pub fn shutdown(&mut self) -> Result<(), ValkyrieError> {
         self.set_state(ValkyrieVmState::Shutdown);
-        
+
         crate::serial_println!("[VALKYRIE] Shutdown VM {} ({})", self.vm_id, self.name);
-        
+
         Ok(())
     }
-    
+
     /// Durumu al
     pub fn get_state(&self) -> ValkyrieVmState {
         match self.state.load(Ordering::SeqCst) {
@@ -829,40 +843,35 @@ impl ValkyrieVm {
             _ => ValkyrieVmState::Error,
         }
     }
-    
+
     /// Durumu ayarla
     fn set_state(&self, state: ValkyrieVmState) {
         self.state.store(state as u64, Ordering::SeqCst);
     }
-    
+
     /// Çalışma süresini güncelle
     pub fn update_runtime(&self) {
         if self.get_state() == ValkyrieVmState::Running {
             self.runtime.fetch_add(1, Ordering::SeqCst);
         }
     }
-    
+
     /// İstatistikleri al
     pub fn get_stats(&self) -> ValkyrieVmStats {
         let vcpus = self.vcpus.lock();
         let regions = self.memory_regions.lock();
-        
+
         let mut active_vcpus = 0;
         for (_, vcpu) in vcpus.iter() {
             if vcpu.lock().get_state() == ValkyrieVcpuState::Running {
                 active_vcpus += 1;
             }
         }
-        
+
         let total_memory: u64 = regions.values().map(|r| r.size).sum();
         let sriov_vfs = self.assigned_vfs.lock().len();
-        let enclave_bytes: u64 = self
-            .enclave_regions
-            .lock()
-            .iter()
-            .map(|r| r.size)
-            .sum();
-        
+        let enclave_bytes: u64 = self.enclave_regions.lock().iter().map(|r| r.size).sum();
+
         ValkyrieVmStats {
             vm_id: self.vm_id,
             name: self.name.clone(),
@@ -923,7 +932,7 @@ impl ValkyrieManager {
             total_vms: AtomicUsize::new(0),
         }
     }
-    
+
     /// Hardware desteğini tespit et
     fn detect_hardware_support() -> ValkyrieCapabilities {
         #[cfg(target_arch = "x86_64")]
@@ -971,35 +980,45 @@ impl ValkyrieManager {
             };
         }
         // CPUID ile virtualization desteğini kontrol et
-        
     }
-    
+
     /// Valkyrie'yi başlat
     pub fn init(&self) -> Result<(), ValkyrieError> {
         if !self.hardware_support.vtx_supported && !self.hardware_support.amdv_supported {
             return Err(ValkyrieError::NotSupported);
         }
-        
+
         crate::serial_println!("[VALKYRIE] Initializing Valkyrie virtualization");
-        crate::serial_println!("[VALKYRIE] VT-x supported: {}", self.hardware_support.vtx_supported);
-        crate::serial_println!("[VALKYRIE] EPT supported: {}", self.hardware_support.ept_supported);
+        crate::serial_println!(
+            "[VALKYRIE] VT-x supported: {}",
+            self.hardware_support.vtx_supported
+        );
+        crate::serial_println!(
+            "[VALKYRIE] EPT supported: {}",
+            self.hardware_support.ept_supported
+        );
         crate::serial_println!(
             "[VALKYRIE] SR-IOV: {}, Enclave: {}",
             self.hardware_support.sriov_supported,
             self.hardware_support.enclave_supported
         );
-        
+
         self.active.store(true, Ordering::SeqCst);
-        
+
         crate::serial_println!("[VALKYRIE] Valkyrie initialized");
-        
+
         Ok(())
     }
-    
+
     /// VM oluştur
-    pub fn create_vm(&self, vm_id: u32, name: &str, config: ValkyrieVmConfig) -> Result<Arc<Mutex<ValkyrieVm>>, ValkyrieError> {
+    pub fn create_vm(
+        &self,
+        vm_id: u32,
+        name: &str,
+        config: ValkyrieVmConfig,
+    ) -> Result<Arc<Mutex<ValkyrieVm>>, ValkyrieError> {
         let mut vms = self.vms.lock();
-        
+
         if vms.contains_key(&vm_id) {
             return Err(ValkyrieError::AlreadyExists);
         }
@@ -1007,17 +1026,15 @@ impl ValkyrieManager {
         if config.nested_virtualization && !self.hardware_support.nested_supported {
             return Err(ValkyrieError::CapabilityMismatch);
         }
-        if config.sriov_vf_count > 0
-            && (!self.hardware_support.sriov_supported || !config.iommu)
-        {
+        if config.sriov_vf_count > 0 && (!self.hardware_support.sriov_supported || !config.iommu) {
             return Err(ValkyrieError::CapabilityMismatch);
         }
         if config.enclave_mb > 0 && !self.hardware_support.enclave_supported {
             return Err(ValkyrieError::CapabilityMismatch);
         }
-        
+
         let vm = Arc::new(Mutex::new(ValkyrieVm::new(vm_id, name, config)));
-        
+
         // Varsayılan bellek bölgesini ekle
         let memory_region = ValkyrieMemoryRegion {
             region_id: 0,
@@ -1027,7 +1044,7 @@ impl ValkyrieManager {
             memory_type: ValkyrieMemoryType::Ram,
             flags: 0,
         };
-        
+
         {
             let mut vm_guard = vm.lock();
             vm_guard.add_memory_region(memory_region)?;
@@ -1048,23 +1065,24 @@ impl ValkyrieManager {
                 vm_guard.add_enclave_region(enclave)?;
             }
         }
-        
+
         vms.insert(vm_id, vm.clone());
         self.total_vms.fetch_add(1, Ordering::SeqCst);
-        
+
         crate::serial_println!("[VALKYRIE] Created VM {} ({})", vm_id, name);
-        
+
         Ok(vm)
     }
-    
+
     /// VM al
     pub fn get_vm(&self, vm_id: u32) -> Result<Arc<Mutex<ValkyrieVm>>, ValkyrieError> {
-        self.vms.lock()
+        self.vms
+            .lock()
             .get(&vm_id)
             .cloned()
             .ok_or(ValkyrieError::VmNotFound)
     }
-    
+
     /// VM sil
     pub fn destroy_vm(&self, vm_id: u32) -> Result<(), ValkyrieError> {
         if self.vms.lock().remove(&vm_id).is_some() {
@@ -1075,41 +1093,41 @@ impl ValkyrieManager {
             Err(ValkyrieError::VmNotFound)
         }
     }
-    
+
     /// Tüm VM'ları listele
     pub fn list_vms(&self) -> Vec<u32> {
         self.vms.lock().keys().cloned().collect()
     }
-    
+
     /// Hardware desteğini al
     pub fn get_hardware_support(&self) -> ValkyrieCapabilities {
         self.hardware_support
     }
-    
+
     /// İstatistikleri al
     pub fn get_stats(&self) -> ValkyrieStats {
         let vms = self.vms.lock();
-        
+
         let mut running_vms = 0;
         let mut paused_vms = 0;
         let mut total_vcpus = 0;
         let mut active_vcpus = 0;
         let mut total_memory_mb: usize = 0;
-        
+
         for (_, vm) in vms.iter() {
             let vm_stats = vm.lock().get_stats();
-            
+
             match vm_stats.state {
                 ValkyrieVmState::Running => running_vms += 1,
                 ValkyrieVmState::Paused => paused_vms += 1,
                 _ => {}
             }
-            
+
             total_vcpus += vm_stats.vcpu_count;
             active_vcpus += vm_stats.active_vcpus;
             total_memory_mb = total_memory_mb.saturating_add(vm_stats.memory_mb as usize);
         }
-        
+
         ValkyrieStats {
             total_vms: self.total_vms.load(Ordering::SeqCst),
             running_vms,
@@ -1199,7 +1217,11 @@ pub fn init_valkyrie() -> Result<(), ValkyrieError> {
 }
 
 /// VM oluştur
-pub fn create_vm(vm_id: u32, name: &str, config: ValkyrieVmConfig) -> Result<Arc<Mutex<ValkyrieVm>>, ValkyrieError> {
+pub fn create_vm(
+    vm_id: u32,
+    name: &str,
+    config: ValkyrieVmConfig,
+) -> Result<Arc<Mutex<ValkyrieVm>>, ValkyrieError> {
     get_manager().create_vm(vm_id, name, config)
 }
 
@@ -1211,10 +1233,10 @@ pub fn get_vm(vm_id: u32) -> Result<Arc<Mutex<ValkyrieVm>>, ValkyrieError> {
 /// Valkyrie testi
 pub fn test_valkyrie() -> Result<(), ValkyrieError> {
     crate::serial_println!("[VALKYRIE] Testing Valkyrie virtualization");
-    
+
     // Valkyrie'yi başlat
     init_valkyrie()?;
-    
+
     // Hardware desteğini kontrol et
     let hw_support = get_manager().get_hardware_support();
     crate::serial_println!("[VALKYRIE] Hardware Support:");
@@ -1223,7 +1245,7 @@ pub fn test_valkyrie() -> Result<(), ValkyrieError> {
     crate::serial_println!("  IOMMU: {}", hw_support.iommu_supported);
     crate::serial_println!("  SR-IOV: {}", hw_support.sriov_supported);
     crate::serial_println!("  Enclave: {}", hw_support.enclave_supported);
-    
+
     // VM konfigürasyonu
     let config = ValkyrieVmConfig {
         vcpu_count: 2,
@@ -1237,29 +1259,32 @@ pub fn test_valkyrie() -> Result<(), ValkyrieError> {
         sriov_vf_count: if hw_support.sriov_supported { 1 } else { 0 },
         enclave_mb: if hw_support.enclave_supported { 16 } else { 0 },
     };
-    
+
     // VM oluştur
     let vm = create_vm(3001, "test_vm", config)?;
-    
+
     // VM'i başlat
     vm.lock().start()?;
-    
+
     // vCPU'ları çalıştır
     {
         let vcpu0 = vm.lock().get_vcpu(0)?;
         let mut vcpu0_data = vcpu0.lock();
-        
+
         match vcpu0_data.run() {
             Ok(exit) => {
-                crate::serial_println!("[VALKYRIE] vCPU 0 exited: code=0x{:x}, rip=0x{:x}", 
-                    exit.exit_code, exit.guest_rip);
+                crate::serial_println!(
+                    "[VALKYRIE] vCPU 0 exited: code=0x{:x}, rip=0x{:x}",
+                    exit.exit_code,
+                    exit.guest_rip
+                );
             }
             Err(e) => {
                 crate::serial_println!("[VALKYRIE] vCPU 0 error: {:?}", e);
             }
         }
     }
-    
+
     // VM istatistikleri
     let vm_stats = vm.lock().get_stats();
     crate::serial_println!("[VALKYRIE] VM Stats:");
@@ -1271,13 +1296,13 @@ pub fn test_valkyrie() -> Result<(), ValkyrieError> {
     crate::serial_println!("  Runtime: {} ticks", vm_stats.runtime);
     crate::serial_println!("  SR-IOV VFs: {}", vm_stats.sriov_vfs);
     crate::serial_println!("  Enclave bytes: {}", vm_stats.enclave_bytes);
-    
+
     // VM'i durdur
     vm.lock().pause()?;
-    
+
     // VM'i sil
     get_manager().destroy_vm(3001)?;
-    
+
     // Manager istatistikleri
     let manager_stats = get_manager().get_stats();
     crate::serial_println!("[VALKYRIE] Manager Stats:");
@@ -1285,8 +1310,8 @@ pub fn test_valkyrie() -> Result<(), ValkyrieError> {
     crate::serial_println!("  Running VMs: {}", manager_stats.running_vms);
     crate::serial_println!("  Total vCPUs: {}", manager_stats.total_vcpus);
     crate::serial_println!("  Total Memory: {} MB", manager_stats.total_memory_mb);
-    
+
     crate::serial_println!("[VALKYRIE] Valkyrie test completed");
-    
+
     Ok(())
 }

@@ -112,6 +112,74 @@ pub struct CachedResponse {
     pub expiry: u64,       // Bu zamandan sonra önbellek içeriği eskidir
 }
 
+fn tls_strip_records(data: &[u8]) -> Vec<u8> {
+    let mut plaintext = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor + 5 <= data.len() {
+        let record_len = u16::from_be_bytes([data[cursor + 3], data[cursor + 4]]) as usize;
+        let record_end = cursor.saturating_add(5).saturating_add(record_len);
+        if record_end > data.len() {
+            break;
+        }
+        plaintext.extend_from_slice(&data[cursor + 5..record_end]);
+        cursor = record_end;
+    }
+
+    if plaintext.is_empty() && data.len() > 5 {
+        plaintext.extend_from_slice(&data[5..]);
+    }
+
+    plaintext
+}
+
+fn process_tls_server_handshake_flight(
+    tls: &mut crate::net::tls::TlsClient,
+    handshake_bytes: &[u8],
+) -> Result<bool, DotError> {
+    let mut offset = 0usize;
+    let mut saw_finished = false;
+
+    while offset + 4 <= handshake_bytes.len() {
+        let msg_len = ((handshake_bytes[offset + 1] as usize) << 16)
+            | ((handshake_bytes[offset + 2] as usize) << 8)
+            | (handshake_bytes[offset + 3] as usize);
+        let msg_end = offset + 4 + msg_len;
+        if msg_end > handshake_bytes.len() {
+            break;
+        }
+
+        let msg = &handshake_bytes[offset..msg_end];
+        match handshake_bytes[offset] {
+            2 => tls
+                .process_server_hello(msg)
+                .map_err(|_| DotError::TlsHandshakeFailed)?,
+            8 => tls
+                .process_encrypted_extensions(msg)
+                .map_err(|_| DotError::TlsHandshakeFailed)?,
+            11 => tls
+                .process_certificate(msg)
+                .map_err(|_| DotError::TlsHandshakeFailed)?,
+            15 => tls
+                .process_certificate_verify(msg)
+                .map_err(|_| DotError::TlsHandshakeFailed)?,
+            20 => {
+                tls.process_finished(msg)
+                    .map_err(|_| DotError::TlsHandshakeFailed)?;
+                saw_finished = true;
+            }
+            4 => tls
+                .process_new_session_ticket(msg)
+                .map_err(|_| DotError::TlsHandshakeFailed)?,
+            _ => {}
+        }
+
+        offset = msg_end;
+    }
+
+    Ok(saw_finished)
+}
+
 impl DotClient {
     /// Yeni bir DoT istemcisi oluşturur.
     ///
@@ -156,6 +224,7 @@ impl DotClient {
     /// 2. DoT sunucusuna TCP bağlan
     /// 3. TLS ClientHello gönder ve ServerHello al
     /// 4. TLS Handshake tamamla
+    #[allow(unreachable_code)]
     pub fn connect(&mut self) -> Result<(), DotError> {
         if self.connected {
             return Ok(());
@@ -181,6 +250,38 @@ impl DotClient {
             crate::net::tls::wrap_record(crate::net::tls::ContentType::Handshake, &client_hello);
         send(sock_id, &hello_record, 0).map_err(|_| DotError::ConnectionFailed)?;
         crate::serial_println!("[DoT] TLS ClientHello sent to {}", self.server_name);
+
+        let mut saw_finished = false;
+        for _ in 0..4 {
+            let mut hs_buf = [0u8; 8192];
+            let hs_len = recv(sock_id, &mut hs_buf, 0).map_err(|_| DotError::ConnectionFailed)?;
+            if hs_len == 0 {
+                break;
+            }
+
+            let handshake_bytes = tls_strip_records(&hs_buf[..hs_len]);
+            if handshake_bytes.is_empty() {
+                continue;
+            }
+
+            saw_finished = process_tls_server_handshake_flight(&mut tls, &handshake_bytes)?;
+            if saw_finished {
+                break;
+            }
+        }
+
+        tls.complete_handshake();
+
+        if saw_finished && tls.is_established() {
+            self.connected = true;
+            crate::serial_println!("[DoT] TLS handshake completed, connection established");
+            return Ok(());
+        }
+
+        crate::serial_println!("[DoT] TLS handshake did not reach Established state");
+        let _ = close(sock_id);
+        self.socket_id = None;
+        return Err(DotError::TlsHandshakeFailed);
 
         // 2. ServerHello al ve işle
         let mut sh_buf = [0u8; 4096];

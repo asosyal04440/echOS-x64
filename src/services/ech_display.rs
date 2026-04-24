@@ -12,6 +12,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
@@ -44,10 +45,13 @@ use crate::services::ech_shell::{get_shell_service, ShellCommand, ShellResponse}
 const DISPLAY_COMMAND_QUEUE_CAPACITY: usize = 256;
 const DISPLAY_RESPONSE_QUEUE_CAPACITY: usize = 256;
 const COMPOSITION_DIAGNOSTIC_HISTORY: usize = 12;
+const DEFAULT_DESKTOP_WIDTH: u32 = 1920;
+const DEFAULT_DESKTOP_HEIGHT: u32 = 1080;
 
 #[derive(Clone, Debug)]
 enum SurfaceContent {
-    Pixels(Vec<u32>),
+    PixelsOwned(Vec<u32>),
+    PixelsShared(Arc<SharedSurfaceMemory>),
     Scene(SceneUpdate),
 }
 
@@ -109,6 +113,42 @@ impl ComposedWindowSnapshot {
             z_index: self.z_index,
             opaque: !self.minimized,
         }
+    }
+}
+
+fn translate_rect(rect: Rect, offset_x: i32, offset_y: i32) -> Rect {
+    Rect::new(
+        rect.x.saturating_sub(offset_x),
+        rect.y.saturating_sub(offset_y),
+        rect.width,
+        rect.height,
+    )
+}
+
+fn translated_window_info(
+    snapshot: &ComposedWindowSnapshot,
+    offset_x: i32,
+    offset_y: i32,
+) -> WindowInfo {
+    WindowInfo {
+        id: snapshot.id,
+        app_id: snapshot.app_id,
+        surface_id: snapshot.surface_id,
+        title: snapshot.title.clone(),
+        frame_rect: translate_rect(snapshot.frame_rect, offset_x, offset_y),
+        content_rect: translate_rect(snapshot.content_rect, offset_x, offset_y),
+        visible: snapshot.visible,
+        focused: snapshot.focused,
+        minimized: snapshot.minimized,
+        maximized: snapshot.maximized,
+        z_index: snapshot.z_index,
+        workspace_id: snapshot.workspace_id,
+        layer_role: snapshot.layer_role,
+        flags: snapshot.flags,
+        scene_node_id: snapshot.scene_node_id,
+        scene_root: snapshot.scene_root,
+        semantic_root: snapshot.semantic_root,
+        buffer_mode: snapshot.buffer_mode,
     }
 }
 
@@ -231,6 +271,39 @@ struct PresentPlan {
     snapshots: Vec<ComposedWindowSnapshot>,
     diagnostics_overlay: Vec<String>,
     show_desktop_dashboard: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayRuntimeActivity {
+    Idle,
+    Interactive,
+    Animation,
+    Fullscreen,
+}
+
+impl DisplayRuntimeActivity {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Interactive => "interactive",
+            Self::Animation => "animation",
+            Self::Fullscreen => "fullscreen",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EffectiveMonitorRuntimeState {
+    output_id: u32,
+    scale_100x: u16,
+    text_scale_100x: u16,
+    requested_vrr: VrrPolicy,
+    effective_vrr: VrrPolicy,
+    requested_hdr: HdrPolicy,
+    effective_hdr: HdrPolicy,
+    refresh_hz: u32,
+    mirrored: bool,
+    transform: SurfaceTransform,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -429,6 +502,10 @@ pub struct EchDisplay {
     swallow_left_release: Mutex<bool>,
     atomic_presenter: Mutex<AtomicPresenter>,
     theme_mode: Mutex<ThemeMode>,
+    runtime_activity: Mutex<DisplayRuntimeActivity>,
+    effective_outputs: Mutex<Vec<EffectiveMonitorRuntimeState>>,
+    effective_vrr_policy: Mutex<VrrPolicy>,
+    effective_hdr_policy: Mutex<HdrPolicy>,
     diagnostics: Mutex<CompositionDiagnostics>,
     joined_damage_epochs: Mutex<BTreeMap<SurfaceId, DamageEpoch>>,
     last_presented_frame: AtomicU64,
@@ -436,13 +513,32 @@ pub struct EchDisplay {
     response_queue: MailboxRing<DisplayResponse>,
 }
 
+fn preferred_initial_output_mode(physical: OutputMode) -> OutputMode {
+    if physical.width >= DEFAULT_DESKTOP_WIDTH && physical.height >= DEFAULT_DESKTOP_HEIGHT {
+        OutputMode::new(
+            DEFAULT_DESKTOP_WIDTH,
+            DEFAULT_DESKTOP_HEIGHT,
+            physical.refresh_hz,
+        )
+    } else {
+        physical
+    }
+}
+
 impl EchDisplay {
     pub fn new(framebuffer: Arc<Mutex<Framebuffer>>) -> Self {
-        let screen_rect = {
-            let fb = framebuffer.lock();
-            Rect::new(0, 0, fb.width as u32, fb.height as u32)
+        let (screen_rect, physical_output_mode, effective_output_mode) = {
+            let mut fb = framebuffer.lock();
+            let physical = OutputMode::new(fb.width as u32, fb.height as u32, 60);
+            let effective = preferred_initial_output_mode(physical);
+            fb.width = effective.width as usize;
+            fb.height = effective.height as usize;
+            (
+                Rect::new(0, 0, effective.width, effective.height),
+                physical,
+                effective,
+            )
         };
-        let physical_output_mode = OutputMode::new(screen_rect.width, screen_rect.height, 60);
         crate::drivers::mouse::set_bounds(screen_rect.width as i32, screen_rect.height as i32);
         let cursor_origin = Point::new(
             (screen_rect.width as i32 / 2).max(0),
@@ -454,9 +550,9 @@ impl EchDisplay {
             running: AtomicBool::new(false),
             screen_rect: Mutex::new(screen_rect),
             physical_output_mode,
-            requested_output_mode: Mutex::new(physical_output_mode),
-            effective_output_mode: Mutex::new(physical_output_mode),
-            display_profile: Mutex::new(DisplayProfile::single_output(physical_output_mode)),
+            requested_output_mode: Mutex::new(effective_output_mode),
+            effective_output_mode: Mutex::new(effective_output_mode),
+            display_profile: Mutex::new(DisplayProfile::single_output(effective_output_mode)),
             surfaces: Mutex::new(SurfaceManager::new()),
             windows: Mutex::new(WindowManager::new()),
             damage: Mutex::new(DamageTracker::new()),
@@ -466,6 +562,10 @@ impl EchDisplay {
             swallow_left_release: Mutex::new(false),
             atomic_presenter: Mutex::new(AtomicPresenter::new()),
             theme_mode: Mutex::new(Theme::default_mode()),
+            runtime_activity: Mutex::new(DisplayRuntimeActivity::Idle),
+            effective_outputs: Mutex::new(Vec::new()),
+            effective_vrr_policy: Mutex::new(VrrPolicy::Off),
+            effective_hdr_policy: Mutex::new(HdrPolicy::Off),
             diagnostics: Mutex::new(CompositionDiagnostics::new()),
             joined_damage_epochs: Mutex::new(BTreeMap::new()),
             last_presented_frame: AtomicU64::new(0),
@@ -483,6 +583,76 @@ impl EchDisplay {
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         crate::serial_println!("[ECHDISPLAY] Week-2 display service stopped");
+    }
+
+    pub fn capture_composed_region(
+        &self,
+        region: Rect,
+        exclude_windows: &[WindowId],
+        include_cursor: bool,
+    ) -> Vec<u32> {
+        let Some(region) = region.intersection(&self.screen_rect()) else {
+            return Vec::new();
+        };
+
+        let exclude: BTreeSet<WindowId> = exclude_windows.iter().copied().collect();
+        let mut fb = Framebuffer::new_offscreen(region.width as usize, region.height as usize);
+        let mut cpu_renderer = CpuRenderer::new();
+        let mut title_text_system = TextSystem::new();
+        let damage = Rect::new(0, 0, region.width, region.height);
+        let mode = *self.theme_mode.lock();
+
+        for snapshot in self.ordering(true).iter() {
+            if exclude.contains(&snapshot.id) || snapshot.frame_rect.intersection(&region).is_none()
+            {
+                continue;
+            }
+
+            let window = translated_window_info(snapshot, region.x, region.y);
+            match &snapshot.content {
+                SurfaceContent::Scene(scene) => draw_window_scene(
+                    &mut fb,
+                    &mut cpu_renderer,
+                    &window,
+                    scene,
+                    &mut title_text_system,
+                    damage,
+                    mode,
+                ),
+                SurfaceContent::PixelsOwned(pixels) => draw_window(
+                    &mut fb,
+                    &window,
+                    pixels,
+                    &mut title_text_system,
+                    damage,
+                    mode,
+                ),
+                SurfaceContent::PixelsShared(shared) => shared.with_pixels(|pixels| {
+                    draw_window(
+                        &mut fb,
+                        &window,
+                        pixels,
+                        &mut title_text_system,
+                        damage,
+                        mode,
+                    );
+                }),
+            }
+        }
+
+        if include_cursor {
+            let cursor = *self.cursor_position.lock();
+            draw_cursor(
+                &mut fb,
+                Point::new(
+                    cursor.x.saturating_sub(region.x),
+                    cursor.y.saturating_sub(region.y),
+                ),
+                damage,
+            );
+        }
+
+        fb.front_buffer().to_vec()
     }
 
     fn screen_rect(&self) -> Rect {
@@ -583,16 +753,26 @@ impl EchDisplay {
                 continue;
             }
 
-            let expected_len = surface.rect.width as usize * surface.rect.height as usize;
-            if matches!(buffer_mode, WindowBufferMode::Pixels)
-                && surface.pixels.len() != expected_len
-            {
-                self.record_composition_diagnostic(
-                    CompositionDiagnosticCode::StaleSharedSurface,
-                    window.id,
-                    surface.id,
-                );
-                continue;
+            if matches!(buffer_mode, WindowBufferMode::Pixels) {
+                let expected_len = surface.rect.width as usize * surface.rect.height as usize;
+                let dimensions_match = surface
+                    .shared
+                    .as_ref()
+                    .map(|shared| shared.dimensions() == (surface.rect.width, surface.rect.height))
+                    .unwrap_or(true);
+                let storage_valid = if surface.shared.is_some() {
+                    dimensions_match
+                } else {
+                    surface.pixels.len() == expected_len
+                };
+                if !storage_valid {
+                    self.record_composition_diagnostic(
+                        CompositionDiagnosticCode::StaleSharedSurface,
+                        window.id,
+                        surface.id,
+                    );
+                    continue;
+                }
             }
 
             if let Some(previous_epoch) = epochs.get(&surface.id).copied() {
@@ -607,9 +787,13 @@ impl EchDisplay {
             }
             epochs.insert(surface.id, surface.damage_epoch);
 
+            let shared_mapped = surface.shared.is_some();
             let content = match surface.scene_update {
                 Some(scene) => SurfaceContent::Scene(scene),
-                None => SurfaceContent::Pixels(surface.pixels),
+                None => match surface.shared {
+                    Some(shared) => SurfaceContent::PixelsShared(shared),
+                    None => SurfaceContent::PixelsOwned(surface.pixels),
+                },
             };
 
             snapshots.push(ComposedWindowSnapshot {
@@ -631,7 +815,7 @@ impl EchDisplay {
                 scene_root,
                 semantic_root,
                 buffer_mode,
-                shared_mapped: surface.shared.is_some(),
+                shared_mapped,
                 gpu_buffer_handle: surface.gpu_buffer_handle,
                 damage_epoch: surface.damage_epoch,
                 fence_id: surface.fence_id,
@@ -666,20 +850,63 @@ impl EchDisplay {
 
     fn present_plan(&self, _screen_rect: Rect) -> PresentPlan {
         let snapshots = self.ordering(true);
+        let profile = self.display_profile.lock().clone();
+        self.refresh_runtime_display_state(&profile, &snapshots);
         let placements = snapshots
             .iter()
             .map(ComposedWindowSnapshot::placement)
             .collect();
+        let diagnostics_overlay = if self.is_debug_diagnostics_enabled() {
+            let mut lines = self.diagnostics.lock().overlay_lines();
+            let primary = profile
+                .outputs
+                .iter()
+                .find(|output| output.output_id == profile.primary_output)
+                .or_else(|| profile.outputs.first());
+            if let Some(primary) = primary {
+                lines.push(format!(
+                    "display={} scale={} text={} vrr={} hdr={} activity={}",
+                    primary.output_id,
+                    primary.scale_100x,
+                    primary.text_scale_100x,
+                    match *self.effective_vrr_policy.lock() {
+                        VrrPolicy::Off => "off",
+                        VrrPolicy::On => "on",
+                        VrrPolicy::Auto => "auto",
+                    },
+                    match *self.effective_hdr_policy.lock() {
+                        HdrPolicy::Off => "off",
+                        HdrPolicy::On => "on",
+                        HdrPolicy::Auto => "auto",
+                    },
+                    self.runtime_activity.lock().label(),
+                ));
+            }
+            for output in self.effective_outputs.lock().iter() {
+                lines.push(format!(
+                    "out{} {}%/{}% {}Hz {:?}->{:?} {:?}->{:?}{} {:?}",
+                    output.output_id,
+                    output.scale_100x,
+                    output.text_scale_100x,
+                    output.refresh_hz,
+                    output.requested_vrr,
+                    output.effective_vrr,
+                    output.requested_hdr,
+                    output.effective_hdr,
+                    if output.mirrored { " mirror" } else { "" },
+                    output.transform,
+                ));
+            }
+            lines
+        } else {
+            Vec::new()
+        };
         PresentPlan {
             theme_mode: *self.theme_mode.lock(),
             native_scanout_available: crate::drivers::gpu_native::device_count() > 0,
             cursor: *self.cursor_position.lock(),
             placements,
-            diagnostics_overlay: if self.is_debug_diagnostics_enabled() {
-                self.diagnostics.lock().overlay_lines()
-            } else {
-                Vec::new()
-            },
+            diagnostics_overlay,
             snapshots,
             show_desktop_dashboard: false,
         }
@@ -690,6 +917,7 @@ impl EchDisplay {
             (3840, 2160),
             (2560, 1440),
             (1920, 1080),
+            (1920, 1020),
             (1680, 1050),
             (1600, 900),
             (1440, 900),
@@ -757,16 +985,281 @@ impl EchDisplay {
         capability
     }
 
+    fn current_shell_state(&self) -> Option<crate::gui::protocol::ShellState> {
+        match get_shell_service().process_command(ShellCommand::GetSessionSnapshot) {
+            ShellResponse::SessionSnapshot(snapshot) => Some(snapshot.shell_state),
+            _ => None,
+        }
+    }
+
+    fn output_rects_for_profile(
+        &self,
+        screen_rect: Rect,
+        profile: &DisplayProfile,
+    ) -> Vec<(u32, Rect)> {
+        if profile.outputs.is_empty() {
+            return vec![(0, screen_rect)];
+        }
+        let count = profile.outputs.len() as u32;
+        let base_width = (screen_rect.width / count).max(1);
+        let mut x = screen_rect.x;
+        let mut rects = Vec::with_capacity(profile.outputs.len());
+        for (index, output) in profile.outputs.iter().enumerate() {
+            let remaining = screen_rect.right().saturating_sub(x);
+            let width = if index + 1 == profile.outputs.len() {
+                remaining.max(1) as u32
+            } else {
+                base_width.min(remaining.max(1) as u32)
+            };
+            rects.push((
+                output.output_id,
+                Rect::new(x, screen_rect.y, width, screen_rect.height),
+            ));
+            x = x.saturating_add(width as i32);
+        }
+        rects
+    }
+
+    fn output_rect_for_policy(
+        &self,
+        screen_rect: Rect,
+        profile: &DisplayProfile,
+        output_id: u32,
+    ) -> Rect {
+        self.output_rects_for_profile(screen_rect, profile)
+            .into_iter()
+            .find(|(candidate, _)| *candidate == output_id)
+            .map(|(_, rect)| rect)
+            .unwrap_or(screen_rect)
+    }
+
+    fn output_for_workspace(profile: &DisplayProfile, workspace_id: WorkspaceId) -> u32 {
+        profile
+            .outputs
+            .iter()
+            .find(|output| output.workspace_binding == Some(workspace_id))
+            .map(|output| output.output_id)
+            .unwrap_or(profile.primary_output)
+    }
+
+    fn frame_needs_output_rescue(frame: Rect, target_output: Rect) -> bool {
+        if target_output.width == 0 || target_output.height == 0 {
+            return false;
+        }
+        let intersection = frame.intersection(&target_output);
+        let visible_area = intersection
+            .map(|rect| rect.width.saturating_mul(rect.height))
+            .unwrap_or(0);
+        let frame_area = frame.width.saturating_mul(frame.height).max(1);
+        visible_area.saturating_mul(100) < frame_area.saturating_mul(60)
+    }
+
+    fn reanchor_frame_to_output(frame: Rect, target_output: Rect) -> Rect {
+        let width = frame.width.min(target_output.width.max(1));
+        let height = frame.height.min(target_output.height.max(1));
+        let max_x = target_output
+            .right()
+            .saturating_sub(width as i32)
+            .max(target_output.x);
+        let max_y = target_output
+            .bottom()
+            .saturating_sub(height as i32)
+            .max(target_output.y);
+        Rect::new(
+            frame.x.clamp(target_output.x, max_x),
+            frame.y.clamp(target_output.y, max_y),
+            width,
+            height,
+        )
+    }
+
+    fn effective_display_activity(
+        &self,
+        profile: &DisplayProfile,
+        snapshots: &[ComposedWindowSnapshot],
+    ) -> DisplayRuntimeActivity {
+        if snapshots.iter().any(|snapshot| {
+            if !snapshot.visible || snapshot.minimized || snapshot.layer_role != LayerRole::Window {
+                return false;
+            }
+            let output_id = Self::output_for_workspace(profile, snapshot.workspace_id);
+            let output_rect = self.output_rect_for_policy(self.screen_rect(), profile, output_id);
+            let covered = snapshot
+                .frame_rect
+                .intersection(&output_rect)
+                .map(|rect| rect.width.saturating_mul(rect.height))
+                .unwrap_or(0);
+            let output_area = output_rect.width.saturating_mul(output_rect.height).max(1);
+            covered.saturating_mul(100) >= output_area.saturating_mul(90)
+        }) {
+            return DisplayRuntimeActivity::Fullscreen;
+        }
+        if self.interaction.lock().is_some() || self.pointer_capture.lock().is_some() {
+            return DisplayRuntimeActivity::Interactive;
+        }
+        match self.current_shell_state() {
+            Some(crate::gui::protocol::ShellState::OverlayInteractive)
+            | Some(crate::gui::protocol::ShellState::WorkspaceTransition) => {
+                DisplayRuntimeActivity::Animation
+            }
+            _ => DisplayRuntimeActivity::Idle,
+        }
+    }
+
+    fn effective_vrr_for_activity(
+        &self,
+        capability: &DisplayCapability,
+        output: &MonitorPolicy,
+        activity: DisplayRuntimeActivity,
+    ) -> VrrPolicy {
+        if !capability.adaptive_sync {
+            return VrrPolicy::Off;
+        }
+        match output.vrr_policy {
+            VrrPolicy::Off => VrrPolicy::Off,
+            VrrPolicy::On => VrrPolicy::On,
+            VrrPolicy::Auto => match activity {
+                DisplayRuntimeActivity::Idle => VrrPolicy::Off,
+                DisplayRuntimeActivity::Interactive
+                | DisplayRuntimeActivity::Animation
+                | DisplayRuntimeActivity::Fullscreen => VrrPolicy::On,
+            },
+        }
+    }
+
+    fn effective_hdr_for_activity(
+        &self,
+        capability: &DisplayCapability,
+        output: &MonitorPolicy,
+        activity: DisplayRuntimeActivity,
+    ) -> HdrPolicy {
+        if !capability.hdr_output || !capability.hdr_metadata || !capability.ten_bit_scanout {
+            return HdrPolicy::Off;
+        }
+        match output.hdr_policy {
+            HdrPolicy::Off => HdrPolicy::Off,
+            HdrPolicy::On => HdrPolicy::On,
+            HdrPolicy::Auto => match activity {
+                DisplayRuntimeActivity::Fullscreen => HdrPolicy::On,
+                DisplayRuntimeActivity::Idle
+                | DisplayRuntimeActivity::Interactive
+                | DisplayRuntimeActivity::Animation => HdrPolicy::Off,
+            },
+        }
+    }
+
+    fn refresh_runtime_display_state(
+        &self,
+        profile: &DisplayProfile,
+        snapshots: &[ComposedWindowSnapshot],
+    ) {
+        let activity = self.effective_display_activity(profile, snapshots);
+        let effective_outputs: Vec<EffectiveMonitorRuntimeState> = profile
+            .outputs
+            .iter()
+            .map(|output| EffectiveMonitorRuntimeState {
+                output_id: output.output_id,
+                scale_100x: output.scale_100x,
+                text_scale_100x: output.text_scale_100x,
+                requested_vrr: output.vrr_policy,
+                effective_vrr: self.effective_vrr_for_activity(
+                    &profile.capability,
+                    output,
+                    activity,
+                ),
+                requested_hdr: output.hdr_policy,
+                effective_hdr: self.effective_hdr_for_activity(
+                    &profile.capability,
+                    output,
+                    activity,
+                ),
+                refresh_hz: output.refresh_hz,
+                mirrored: output.mirror_target.is_some(),
+                transform: output.transform,
+            })
+            .collect();
+        *self.runtime_activity.lock() = activity;
+        *self.effective_outputs.lock() = effective_outputs.clone();
+        if let Some(primary) = effective_outputs
+            .iter()
+            .find(|output| output.output_id == profile.primary_output)
+            .or_else(|| effective_outputs.first())
+        {
+            crate::gfx::scaling::set_scale_factor(primary.scale_100x as u32);
+            *self.effective_vrr_policy.lock() = primary.effective_vrr;
+            *self.effective_hdr_policy.lock() = primary.effective_hdr;
+            self.atomic_presenter
+                .lock()
+                .set_mode(match primary.effective_vrr {
+                    VrrPolicy::Off => DisplayPresentMode::VblankFifo,
+                    VrrPolicy::On | VrrPolicy::Auto => DisplayPresentMode::AdaptiveSync,
+                });
+        }
+    }
+
+    fn apply_runtime_display_profile(&self, profile: &DisplayProfile) {
+        self.refresh_runtime_display_state(profile, &[]);
+    }
+
+    fn harmonize_mirror_workspace_bindings(profile: &mut DisplayProfile) {
+        let workspace_bindings: BTreeMap<u32, WorkspaceId> = profile
+            .outputs
+            .iter()
+            .filter_map(|output| {
+                output
+                    .workspace_binding
+                    .map(|binding| (output.output_id, binding))
+            })
+            .collect();
+        for output in profile.outputs.iter_mut() {
+            if let Some(target) = output.mirror_target {
+                output.workspace_binding = workspace_bindings
+                    .get(&target)
+                    .copied()
+                    .or(output.workspace_binding);
+            }
+        }
+    }
+
     fn sanitize_display_profile(&self, mut profile: DisplayProfile) -> DisplayProfile {
         let capability = self.detect_display_capability();
         let current_mode = *self.effective_output_mode.lock();
 
         if profile.outputs.is_empty() {
+            profile.outputs = vec![MonitorPolicy::single_output(current_mode)];
+        } else if !capability.multi_monitor {
+            let mut primary = profile.outputs.remove(0);
+            primary.output_id = 0;
+            primary.mirror_target = None;
+            primary.workspace_binding = Some(primary.workspace_binding.unwrap_or(0));
+            profile.primary_output = 0;
+            profile.outputs = vec![primary];
+        } else {
+            let mut seen = BTreeSet::new();
             profile
                 .outputs
-                .push(MonitorPolicy::single_output(current_mode));
+                .retain(|output| seen.insert(output.output_id));
+            let expected_outputs = capability.connected_outputs.max(1) as u32;
+            for output_id in 0..expected_outputs {
+                if !profile
+                    .outputs
+                    .iter()
+                    .any(|output| output.output_id == output_id)
+                {
+                    let mut output = MonitorPolicy::single_output(current_mode);
+                    output.output_id = output_id;
+                    output.workspace_binding = Some(output_id as WorkspaceId);
+                    profile.outputs.push(output);
+                }
+            }
+            profile.outputs.sort_by_key(|output| output.output_id);
         }
 
+        let valid_output_ids: BTreeSet<u32> = profile
+            .outputs
+            .iter()
+            .map(|output| output.output_id)
+            .collect();
         for output in profile.outputs.iter_mut() {
             if !capability.fractional_scaling {
                 output.scale_100x = 100;
@@ -780,7 +1273,14 @@ impl EchDisplay {
             if !capability.rotation {
                 output.transform = SurfaceTransform::Identity;
             }
-            if !capability.multi_monitor {
+            if !capability.multi_monitor || output.mirror_target == Some(output.output_id) {
+                output.mirror_target = None;
+            }
+            if output
+                .mirror_target
+                .map(|target| !valid_output_ids.contains(&target))
+                .unwrap_or(false)
+            {
                 output.mirror_target = None;
             }
 
@@ -794,7 +1294,11 @@ impl EchDisplay {
                 .min_by_key(|scale| scale.abs_diff(output.scale_100x))
                 .unwrap_or(100);
             output.text_scale_100x = output.text_scale_100x.clamp(75, 300);
+            if output.workspace_binding.is_none() {
+                output.workspace_binding = Some(output.output_id as WorkspaceId);
+            }
         }
+        Self::harmonize_mirror_workspace_bindings(&mut profile);
 
         profile.capability = capability;
         if !profile
@@ -805,6 +1309,62 @@ impl EchDisplay {
             profile.primary_output = profile.outputs[0].output_id;
         }
         profile
+    }
+
+    fn apply_monitor_policy_to_windows(&self, previous: &DisplayProfile, current: &DisplayProfile) {
+        let screen_rect = self.screen_rect();
+        let primary_workspace = current
+            .outputs
+            .iter()
+            .find(|output| output.output_id == current.primary_output)
+            .and_then(|output| output.workspace_binding)
+            .unwrap_or(0);
+        let current_workspaces: BTreeSet<WorkspaceId> = current
+            .outputs
+            .iter()
+            .filter_map(|output| output.workspace_binding)
+            .collect();
+        let previous_workspaces: BTreeSet<WorkspaceId> = previous
+            .outputs
+            .iter()
+            .filter_map(|output| output.workspace_binding)
+            .collect();
+        let windows = self.windows.lock().ordered_windows();
+        for window in windows {
+            let mut next_workspace = window.workspace_id;
+            if !current_workspaces.contains(&window.workspace_id) {
+                next_workspace = primary_workspace;
+            }
+            let old_output = Self::output_for_workspace(previous, window.workspace_id);
+            let new_output = Self::output_for_workspace(current, next_workspace);
+            let target_output_rect = self.output_rect_for_policy(screen_rect, current, new_output);
+            let binding_changed = next_workspace != window.workspace_id;
+            let output_changed = old_output != new_output
+                || (!previous_workspaces.contains(&window.workspace_id)
+                    && current_workspaces.contains(&next_workspace));
+            if binding_changed {
+                if let Ok((old_frame, new_frame)) = self.windows.lock().set_window_meta(
+                    window.id,
+                    next_workspace,
+                    window.layer_role,
+                    window.flags,
+                ) {
+                    self.damage.lock().mark_rects(&[old_frame, new_frame]);
+                }
+            }
+            if output_changed
+                || Self::frame_needs_output_rescue(window.frame_rect, target_output_rect)
+            {
+                let frame = Self::reanchor_frame_to_output(window.frame_rect, target_output_rect);
+                let _ = self.update_window_frame(
+                    window.id,
+                    frame.x,
+                    frame.y,
+                    window.content_rect.width,
+                    window.content_rect.height,
+                );
+            }
+        }
     }
 
     fn sync_shell_display_profile(&self, profile: DisplayProfile) {
@@ -819,13 +1379,17 @@ impl EchDisplay {
     fn query_display_profile(&self) -> DisplayResponse {
         let profile = self.sanitize_display_profile(self.display_profile.lock().clone());
         *self.display_profile.lock() = profile.clone();
+        self.apply_runtime_display_profile(&profile);
         self.sync_shell_display_profile(profile.clone());
         DisplayResponse::DisplayProfile(profile)
     }
 
     fn set_display_profile(&self, profile: DisplayProfile) -> DisplayResponse {
+        let previous = self.display_profile.lock().clone();
         let profile = self.sanitize_display_profile(profile);
         *self.display_profile.lock() = profile.clone();
+        self.apply_monitor_policy_to_windows(&previous, &profile);
+        self.apply_runtime_display_profile(&profile);
         self.sync_shell_display_profile(profile.clone());
         DisplayResponse::DisplayProfile(profile)
     }
@@ -1410,7 +1974,7 @@ impl EchDisplay {
                                     plan.theme_mode,
                                 ),
                             }
-                        } else if let SurfaceContent::Pixels(pixels) = &snapshot.content {
+                        } else if let SurfaceContent::PixelsOwned(pixels) = &snapshot.content {
                             draw_window(
                                 &mut fb,
                                 &window,
@@ -1419,6 +1983,17 @@ impl EchDisplay {
                                 *damage,
                                 plan.theme_mode,
                             );
+                        } else if let SurfaceContent::PixelsShared(shared) = &snapshot.content {
+                            shared.with_pixels(|pixels| {
+                                draw_window(
+                                    &mut fb,
+                                    &window,
+                                    pixels,
+                                    &mut title_text_system,
+                                    *damage,
+                                    plan.theme_mode,
+                                );
+                            });
                         }
                     }
                 }
@@ -1567,9 +2142,11 @@ impl EchDisplay {
         {
             let current = self.display_profile.lock().clone();
             let primary_output = current.primary_output;
+            let capability = current.capability.clone();
             let updated_outputs = current
                 .outputs
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|mut output| {
                     if output.output_id == primary_output {
                         output.refresh_hz = mode.refresh_hz;
@@ -1580,9 +2157,11 @@ impl EchDisplay {
             let updated = self.sanitize_display_profile(DisplayProfile {
                 primary_output,
                 outputs: updated_outputs,
-                capability: current.capability,
+                capability,
             });
             *self.display_profile.lock() = updated.clone();
+            self.apply_monitor_policy_to_windows(&current, &updated);
+            self.apply_runtime_display_profile(&updated);
             self.sync_shell_display_profile(updated);
         }
         {
@@ -2769,7 +3348,8 @@ mod tests {
     use crate::gfx::shell_scene::raster_surface_scene;
     use crate::gop::framebuffer::Framebuffer;
     use crate::gui::protocol::{
-        DamageLane, DisplayProfile, HdrPolicy, InputEvent, KeyState, OutputMode,
+        DamageLane, DisplayProfile, HdrPolicy, InputEvent, KeyState, LayerRole, OutputMode, Rect,
+        VrrPolicy,
     };
     use alloc::string::String;
     use alloc::sync::Arc;
@@ -2976,5 +3556,160 @@ mod tests {
 
         assert_eq!(updated.outputs[0].hdr_policy, HdrPolicy::Off);
         assert!(matches!(updated.outputs[0].scale_100x, 150 | 175));
+        assert_eq!(get_scale_factor(), updated.outputs[0].scale_100x as u32);
+    }
+
+    #[test]
+    fn set_display_profile_rebuilds_primary_output_when_missing() {
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
+        let mut profile = DisplayProfile::single_output(OutputMode::new(1920, 1080, 60));
+        profile.primary_output = 9;
+        profile.outputs[0].output_id = 3;
+
+        let DisplayResponse::DisplayProfile(updated) =
+            display.process_command(DisplayCommand::SetDisplayProfile { profile })
+        else {
+            unreachable!("display profile should be returned")
+        };
+
+        assert_eq!(updated.primary_output, updated.outputs[0].output_id);
+    }
+
+    #[test]
+    fn mirrored_outputs_adopt_target_workspace_binding() {
+        let mut profile = DisplayProfile::single_output(OutputMode::new(1920, 1080, 60));
+        profile.outputs.push(crate::gui::protocol::MonitorPolicy {
+            output_id: 1,
+            mirror_target: Some(0),
+            workspace_binding: Some(7),
+            ..crate::gui::protocol::MonitorPolicy::single_output(OutputMode::new(1920, 1080, 60))
+        });
+        EchDisplay::harmonize_mirror_workspace_bindings(&mut profile);
+
+        assert_eq!(profile.outputs.len(), 2);
+        assert_eq!(
+            profile.outputs[1].workspace_binding,
+            profile.outputs[0].workspace_binding
+        );
+    }
+
+    #[test]
+    fn display_profile_rescues_windows_from_removed_workspace_binding() {
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
+        let initial = DisplayProfile {
+            primary_output: 0,
+            outputs: alloc::vec![
+                crate::gui::protocol::MonitorPolicy::single_output(OutputMode::new(1920, 1080, 60)),
+                crate::gui::protocol::MonitorPolicy {
+                    output_id: 1,
+                    workspace_binding: Some(2),
+                    ..crate::gui::protocol::MonitorPolicy::single_output(OutputMode::new(
+                        1920, 1080, 60
+                    ))
+                },
+            ],
+            capability: crate::gui::protocol::DisplayCapability {
+                connected_outputs: 2,
+                multi_monitor: true,
+                mirror: true,
+                ..crate::gui::protocol::DisplayCapability::default()
+            },
+        };
+        *display.display_profile.lock() = initial.clone();
+        let _ = display.process_command(DisplayCommand::CreateWindowWithMeta {
+            app_id: 91,
+            title: String::from("Workspace 2"),
+            x: 1100,
+            y: 120,
+            width: 480,
+            height: 320,
+            workspace_id: 2,
+            layer_role: LayerRole::Window,
+            flags: crate::gui::protocol::WindowFlags::default(),
+        });
+
+        let single = DisplayProfile::single_output(OutputMode::new(1920, 1080, 60));
+        let window_id = display
+            .list_windows_with_buffers()
+            .into_iter()
+            .find(|window| window.title == "Workspace 2")
+            .expect("window metadata")
+            .id;
+        display.apply_monitor_policy_to_windows(&initial, &single);
+        *display.display_profile.lock() = single;
+
+        let rescued = display
+            .list_windows_with_buffers()
+            .into_iter()
+            .find(|window| window.id == window_id)
+            .expect("rescued window");
+
+        assert_eq!(rescued.workspace_id, 0);
+        assert!(Rect::new(0, 0, 1920, 1080)
+            .intersection(&rescued.frame_rect)
+            .is_some());
+    }
+
+    #[test]
+    fn runtime_display_state_enters_fullscreen_auto_mode_when_window_covers_output() {
+        let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
+        let profile = DisplayProfile {
+            primary_output: 0,
+            outputs: alloc::vec![crate::gui::protocol::MonitorPolicy {
+                output_id: 0,
+                scale_100x: 100,
+                text_scale_100x: 100,
+                refresh_hz: 144,
+                vrr_policy: VrrPolicy::Auto,
+                hdr_policy: HdrPolicy::Auto,
+                transform: crate::gui::protocol::SurfaceTransform::Identity,
+                mirror_target: None,
+                workspace_binding: Some(0),
+                color_profile: String::from("srgb"),
+            }],
+            capability: crate::gui::protocol::DisplayCapability {
+                adaptive_sync: true,
+                hdr_output: true,
+                hdr_metadata: true,
+                ten_bit_scanout: true,
+                max_refresh_hz: 144,
+                ..crate::gui::protocol::DisplayCapability::default()
+            },
+        };
+        let DisplayResponse::WindowCreated {
+            window_id,
+            content_rect,
+            ..
+        } = display.process_command(DisplayCommand::CreateWindowWithMeta {
+            app_id: 92,
+            title: String::from("Fullscreen-ish"),
+            x: 0,
+            y: 0,
+            width: 1919,
+            height: 1046,
+            workspace_id: 0,
+            layer_role: LayerRole::Window,
+            flags: crate::gui::protocol::WindowFlags::default(),
+        })
+        else {
+            unreachable!("window should be created")
+        };
+        let scene = raster_surface_scene(
+            window_id,
+            content_rect.width as usize,
+            content_rect.height as usize,
+            alloc::vec![0xFF0F172A; (content_rect.width * content_rect.height) as usize],
+            DamageLane::Window,
+        );
+        let _ = display.process_command(DisplayCommand::CommitScene { window_id, scene });
+        let snapshots = display.ordering(true);
+        display.refresh_runtime_display_state(&profile, &snapshots);
+
+        assert_eq!(
+            *display.runtime_activity.lock(),
+            super::DisplayRuntimeActivity::Fullscreen
+        );
+        assert_eq!(*display.effective_vrr_policy.lock(), VrrPolicy::On);
+        assert_eq!(*display.effective_hdr_policy.lock(), HdrPolicy::On);
     }
 }

@@ -43,7 +43,10 @@ pub struct CommittedResumeState {
 }
 
 pub fn resume_token_for_app(app: &InstalledPackagedApp) -> Option<u64> {
-    load_committed_state(app).ok().flatten().map(|state| state.generation)
+    load_committed_state(app)
+        .ok()
+        .flatten()
+        .map(|state| state.generation)
 }
 
 pub fn commit_inline_state(
@@ -310,7 +313,10 @@ fn read_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, SupervisorError> {
     Ok(u64::from_le_bytes(read_fixed::<8>(bytes, cursor)?))
 }
 
-fn read_fixed<const N: usize>(bytes: &[u8], cursor: &mut usize) -> Result<[u8; N], SupervisorError> {
+fn read_fixed<const N: usize>(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<[u8; N], SupervisorError> {
     if *cursor + N > bytes.len() {
         return Err(SupervisorError::ResumeDescriptorInvalid);
     }

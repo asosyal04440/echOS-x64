@@ -1,0 +1,32 @@
+{
+  "profile_name": "single-pc-uefi-nvme-gop-ps2-wired",
+  "generated_at": "2026-04-23",
+  "requirements": {
+    "firmware": {
+      "required": "UEFI"
+    },
+    "boot_storage": {
+      "required_families": [
+        "NVMe"
+      ]
+    },
+    "input": {
+      "primary_keyboard": "PS2",
+      "usb_keyboard_required": false
+    },
+    "display": {
+      "boot_path": "UEFI_GOP",
+      "native_drm_required": false
+    },
+    "network": {
+      "required_kind": "wired_ethernet"
+    }
+  },
+  "out_of_scope_for_admission": [
+    "audio",
+    "wifi",
+    "bluetooth",
+    "usb_mouse_required",
+    "native_drm_atomic_modeset"
+  ]
+}

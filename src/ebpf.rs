@@ -46,10 +46,18 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-#[cfg(all(feature = "host_smoke", not(target_os = "none"), not(target_os = "uefi")))]
+#[cfg(all(
+    feature = "host_smoke",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
 use std::eprintln;
 
-#[cfg(all(feature = "host_smoke", not(target_os = "none"), not(target_os = "uefi")))]
+#[cfg(all(
+    feature = "host_smoke",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+))]
 fn host_smoke_probe(stage: &str) {
     if std::env::var_os("PHASE1_DEBUG_EBPF").is_some()
         || std::env::var_os("PHASE1_SKIP_EBPF_RUN").is_some()
@@ -58,7 +66,11 @@ fn host_smoke_probe(stage: &str) {
     }
 }
 
-#[cfg(not(all(feature = "host_smoke", not(target_os = "none"), not(target_os = "uefi"))))]
+#[cfg(not(all(
+    feature = "host_smoke",
+    not(target_os = "none"),
+    not(target_os = "uefi")
+)))]
 fn host_smoke_probe(_stage: &str) {}
 
 // ============================================================================

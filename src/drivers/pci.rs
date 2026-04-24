@@ -215,11 +215,18 @@ pub unsafe fn request_regions(dev: *mut crate::linux_glue::PciDev) -> i32 {
 /// Tüm PCI veri yolunu tarar. ACPI MCFG tablosu varsa ECAM, yoksa
 /// geleneksel Port I/O yöntemi kullanılır.
 pub fn scan() -> Vec<PciDevice> {
-    let entries = crate::cpu::acpi::get_mcfg_entries();
-    if !entries.is_empty() {
-        scan_ecam(&entries)
-    } else {
-        scan_legacy()
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        return Vec::new();
+    }
+    #[cfg(not(any(test, target_os = "windows")))]
+    {
+        let entries = crate::cpu::acpi::get_mcfg_entries();
+        if !entries.is_empty() {
+            scan_ecam(&entries)
+        } else {
+            scan_legacy()
+        }
     }
 }
 
@@ -766,44 +773,60 @@ pub fn configure_pci_interrupts(
 /// PCI config alanını cihazın erişim yöntemine göre okur.
 /// ACPI MCFG tablosunda eşleşen segment varsa ECAM, aksi halde Legacy PIO kullanılır.
 pub fn read_config_dword(bus: u8, device: u8, function: u8, offset: u16) -> u32 {
-    let aligned = offset & 0xFFFC;
-    let entries = crate::cpu::acpi::get_mcfg_entries();
-    for entry in entries {
-        if bus >= entry.start_bus && bus <= entry.end_bus {
-            return read_ecam_dword(entry.base_address, bus, device, function, aligned);
-        }
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        let _ = (bus, device, function, offset);
+        return 0xFFFF_FFFF;
     }
-    read_legacy_dword(bus, device, function, aligned as u8)
+    #[cfg(not(any(test, target_os = "windows")))]
+    {
+        let aligned = offset & 0xFFFC;
+        let entries = crate::cpu::acpi::get_mcfg_entries();
+        for entry in entries {
+            if bus >= entry.start_bus && bus <= entry.end_bus {
+                return read_ecam_dword(entry.base_address, bus, device, function, aligned);
+            }
+        }
+        read_legacy_dword(bus, device, function, aligned as u8)
+    }
 }
 
 /// PCI config alanına cihazın erişim yöntemine göre yazar.
 /// ECAM modunda doğrudan bellek yazımı; Legacy modunda 0xCF8/0xCFC port yazımı kullanılır.
 pub fn write_config_dword(bus: u8, device: u8, function: u8, offset: u16, value: u32) {
-    let aligned = offset & 0xFFFC;
-    let entries = crate::cpu::acpi::get_mcfg_entries();
-    for entry in entries {
-        if bus >= entry.start_bus && bus <= entry.end_bus {
-            let address = entry.base_address
-                + ((bus as u64) << 20)
-                + ((device as u64) << 15)
-                + ((function as u64) << 12)
-                + ((aligned as u64) & 0xFFC);
-            unsafe {
-                write_volatile(address as *mut u32, value);
-            }
-            return;
-        }
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        let _ = (bus, device, function, offset, value);
+        return;
     }
-    let address: u32 = 0x8000_0000
-        | ((bus as u32) << 16)
-        | ((device as u32) << 11)
-        | ((function as u32) << 8)
-        | ((aligned as u32) & 0xFC);
-    unsafe {
-        let mut addr_port = Port::<u32>::new(0xCF8);
-        let mut data_port = Port::<u32>::new(0xCFC);
-        addr_port.write(address);
-        data_port.write(value);
+    #[cfg(not(any(test, target_os = "windows")))]
+    {
+        let aligned = offset & 0xFFFC;
+        let entries = crate::cpu::acpi::get_mcfg_entries();
+        for entry in entries {
+            if bus >= entry.start_bus && bus <= entry.end_bus {
+                let address = entry.base_address
+                    + ((bus as u64) << 20)
+                    + ((device as u64) << 15)
+                    + ((function as u64) << 12)
+                    + ((aligned as u64) & 0xFFC);
+                unsafe {
+                    write_volatile(address as *mut u32, value);
+                }
+                return;
+            }
+        }
+        let address: u32 = 0x8000_0000
+            | ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | ((aligned as u32) & 0xFC);
+        unsafe {
+            let mut addr_port = Port::<u32>::new(0xCF8);
+            let mut data_port = Port::<u32>::new(0xCFC);
+            addr_port.write(address);
+            data_port.write(value);
+        }
     }
 }
 

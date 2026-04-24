@@ -1,0 +1,12 @@
+flowchart TD
+    A[Input bytes] --> B[BitIterator read bit by bit]
+    B --> C[Accumulate current code and len]
+    C --> D{Code exists in table}
+    D -->|Yes symbol| E[Emit symbol byte]
+    D -->|EOS symbol| F[Error EosInString]
+    D -->|No| G[Read next bit]
+    E --> G
+    G --> H{End of input}
+    H -->|Yes| I[Validate EOS style padding]
+    I -->|valid| J[Decoded output]
+    I -->|invalid| K[InvalidPadding]

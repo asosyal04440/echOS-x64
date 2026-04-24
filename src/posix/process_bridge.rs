@@ -40,7 +40,9 @@ pub(super) fn sys_wait4(pid: usize, status: usize, options: usize, _rusage: usiz
                 } else {
                     ((code as u32 & 0xFF) << 8) as i32
                 };
-                super::with_user_access(|| unsafe { *(status as *mut i32) = value });
+                if let Err(err) = super::write_user(status, value) {
+                    return err;
+                }
             }
             return tid as usize;
         }
@@ -77,7 +79,9 @@ pub(super) fn sys_clone(
     match task::scheduler::fork_current_user_task(user_rip, new_rsp as u64) {
         Some(pid) => {
             if (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 {
-                super::with_user_access(|| unsafe { *(ptid as *mut usize) = pid });
+                if let Err(err) = super::write_user(ptid, pid) {
+                    return err;
+                }
             }
             if (flags & CLONE_CHILD_CLEARTID) != 0 && ctid != 0 {
                 let _ = ctid;

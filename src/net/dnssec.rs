@@ -1326,9 +1326,62 @@ mod tests {
     use ed448_goldilocks_plus::SigningKey as Ed448SigningKey;
     use p256::ecdsa::{signature::Signer as P256Signer, SigningKey as P256SigningKey};
     use p384::ecdsa::{signature::Signer as P384Signer, SigningKey as P384SigningKey};
+    use rsa::rand_core::{CryptoRng, Error as RandError, RngCore};
+    use rsa::traits::PublicKeyParts;
+    use rsa::{Pkcs1v15Sign, RsaPrivateKey as ExternalRsaPrivateKey};
 
     const TEST_CUSTOM_ALGORITHM: u8 = 253;
     const TEST_CUSTOM_DIGEST: u8 = 253;
+
+    const RSA_SHA1_DIGESTINFO_PREFIX: &[u8] = &[
+        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14,
+    ];
+
+    struct TestCryptoRng {
+        state: u64,
+    }
+
+    impl TestCryptoRng {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+
+        fn next_word(&mut self) -> u64 {
+            let mut x = self.state;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.state = x;
+            x
+        }
+    }
+
+    impl RngCore for TestCryptoRng {
+        fn next_u32(&mut self) -> u32 {
+            self.next_word() as u32
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.next_word()
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            let mut offset = 0;
+            while offset < dest.len() {
+                let word = self.next_word().to_le_bytes();
+                let chunk = core::cmp::min(8, dest.len() - offset);
+                dest[offset..offset + chunk].copy_from_slice(&word[..chunk]);
+                offset += chunk;
+            }
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RandError> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for TestCryptoRng {}
 
     fn xor_signature_verifier(public_key: &[u8], signature: &[u8], signed_data: &[u8]) -> bool {
         if public_key.is_empty() || signature.len() != signed_data.len() {
@@ -1392,7 +1445,13 @@ mod tests {
 
     #[test]
     fn rrsig_verify_signature_accepts_rsa_sha1_family() {
-        let public = crate::crypto::rsa::RsaPublicKey::new(&[0xff; 64], &[0x01]);
+        let mut keygen_rng = TestCryptoRng::new(0x4d59_5df4_d0f3_3173);
+        let private = ExternalRsaPrivateKey::new(&mut keygen_rng, 1024)
+            .expect("deterministic RSA key generation");
+        let public = crate::crypto::rsa::RsaPublicKey::new(
+            &private.n().to_bytes_be(),
+            &private.e().to_bytes_be(),
+        );
         let key = DnsKey {
             flags: 257,
             protocol: 3,
@@ -1427,18 +1486,14 @@ mod tests {
         let mut hasher = Sha1::new();
         hasher.update(&signed_data);
         let hash = hasher.finalize();
-        let digest_info: [u8; 35] = [
-            0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04,
-            0x14, hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8],
-            hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15], hash[16],
-            hash[17], hash[18], hash[19],
-        ];
-        let mut signature = Vec::with_capacity(64);
-        signature.push(0x00);
-        signature.push(0x01);
-        signature.extend(core::iter::repeat_n(0xff, 64 - digest_info.len() - 3));
-        signature.push(0x00);
-        signature.extend_from_slice(&digest_info);
+        let padding = Pkcs1v15Sign {
+            hash_len: Some(20),
+            prefix: RSA_SHA1_DIGESTINFO_PREFIX.to_vec().into_boxed_slice(),
+        };
+        let mut sign_rng = TestCryptoRng::new(0xa5a5_5a5a_1357_2468);
+        let signature = private
+            .sign_with_rng(&mut sign_rng, padding, hash.as_slice())
+            .expect("RSA SHA-1 PKCS#1 v1.5 signing");
         let rrsig = RrSig {
             signature,
             ..unsigned_rrsig

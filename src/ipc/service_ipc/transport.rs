@@ -186,6 +186,13 @@ impl ServiceIpcManager {
                     );
                     continue;
                 }
+                ServiceId::NetworkBroker => {
+                    self.complete_immediate_response(
+                        &envelope,
+                        dispatch_network_broker_command(envelope.message.clone()),
+                    );
+                    continue;
+                }
                 ServiceId::PackageRegistry => {
                     self.complete_immediate_response(
                         &envelope,
@@ -197,6 +204,13 @@ impl ServiceIpcManager {
                     self.complete_immediate_response(
                         &envelope,
                         dispatch_process_broker_command(envelope.message.clone()),
+                    );
+                    continue;
+                }
+                ServiceId::UpdateInstaller => {
+                    self.complete_immediate_response(
+                        &envelope,
+                        dispatch_update_installer_command(envelope.message.clone()),
                     );
                     continue;
                 }
@@ -248,6 +262,12 @@ impl ServiceIpcManager {
     fn dispatch_to_service(&self, envelope: &MessageEnvelope) -> ServiceResponse {
         if envelope.to_service == ServiceId::Directory {
             return dispatch_directory_command(envelope.message.clone());
+        }
+        if envelope.to_service == ServiceId::NetworkBroker {
+            return dispatch_network_broker_command(envelope.message.clone());
+        }
+        if envelope.to_service == ServiceId::UpdateInstaller {
+            return dispatch_update_installer_command(envelope.message.clone());
         }
         let current_generation = self.endpoint_generation(envelope.to_service);
         if current_generation == 0 {

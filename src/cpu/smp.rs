@@ -28,6 +28,7 @@
 //!   [AP kurulumu tamamlandı]
 //! ```
 
+use crate::allocator::stack::KernelStack;
 use crate::cpu::smp_state::{CpuAffinity, CpuHotplugState, CPU_STATES};
 use crate::cpu::{cpu_slots, epoch::SMP_EPOCH_DOMAIN};
 use crate::memory::active_physical_offset;
@@ -67,6 +68,7 @@ static TLB_SHOOTDOWN_WATCHDOGS: AtomicUsize = AtomicUsize::new(0);
 static TLB_SHOOTDOWN_LAST_TARGETS: AtomicUsize = AtomicUsize::new(0);
 static TLB_SHOOTDOWN_LAST_ACKS: AtomicUsize = AtomicUsize::new(0);
 static TLB_SHOOTDOWN_LAST_DURATION: AtomicUsize = AtomicUsize::new(0);
+static PANIC_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Her CPU için per-CPU veri yapısı
 #[repr(C, align(64))]
@@ -100,7 +102,7 @@ pub struct SmpState {
     /// Her CPU için ayrı veri dizisi (per-CPU yapıları)
     pub per_cpu_data: Vec<&'static mut PerCpuData>,
     pub syscall_cpu_data: Vec<&'static mut crate::syscall::CpuData>,
-    pub syscall_stacks: Vec<&'static mut [u8]>,
+    pub syscall_stacks: Vec<KernelStack>,
     pub cpu_apic_ids: Vec<u32>,
     /// AP startup flag'leri
     pub ap_started: Vec<AtomicBool>,
@@ -108,6 +110,11 @@ pub struct SmpState {
 
 /// Mevcut CPU'nun kimlik numarasını döndür (GS segment tabanından okunur)
 pub fn get_current_cpu_id() -> u32 {
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        return 0;
+    }
+
     // GS tabanı syscall::CpuData yapısını gösterir.
     // CpuData yerleşimi:
     //   0  -> user_rsp_scratch (u64)
@@ -462,6 +469,31 @@ pub fn send_tlb_shootdown_ipi() {
     TLB_SHOOTDOWN_LAST_DURATION.store(elapsed, Ordering::SeqCst);
     let _ = guard_epoch;
     SMP_EPOCH_DOMAIN.leave(current_cpu);
+}
+
+pub fn panic_stop_requested() -> bool {
+    PANIC_STOP_REQUESTED.load(Ordering::Acquire)
+}
+
+pub fn panic_stop_this_cpu() -> ! {
+    loop {
+        unsafe {
+            core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
+pub fn broadcast_panic_stop() {
+    PANIC_STOP_REQUESTED.store(true, Ordering::Release);
+    let current_apic = read_local_apic_id();
+    for apic_id in cpu_slots::online_apic_targets(current_apic) {
+        unsafe {
+            // Best-effort fixed IPI poke. Remote CPUs observe the global panic-stop
+            // flag on their next interrupt/tick and self-halt instead of continuing
+            // scheduler traffic after a kernel panic.
+            send_ipi(apic_id, 0, crate::interrupts::IPI_TLB_VECTOR as u32);
+        }
+    }
 }
 
 pub fn notify_tlb_shootdown_ack() {
@@ -910,48 +942,56 @@ fn wait_for_batch_online(target_online: u32, batch_size: u32) -> u32 {
 
 /// Fiziksel bellekten yığın (stack) tahsis et — heap bozulmasını önlemek için TLSF'yi atlar.
 /// Çerçeve tahsisi için global bellek yöneticisini kullanır; yığın HHDM ile eşlenir.
-unsafe fn allocate_stack_phys() -> Option<(&'static mut [u8], u64)> {
+unsafe fn allocate_stack_phys() -> Option<(KernelStack, u64)> {
     let stack_size = crate::syscall::SYSCALL_STACK_SIZE;
-    let frame_size = 4096u64;
-    let frames_needed = ((stack_size as u64 + frame_size - 1) / frame_size) as usize;
+    const GUARD_PAGE_SIZE: usize = 4096;
 
     crate::serial_println!(
-        "SMP: Allocating {} bytes ({} frames) from physical memory",
-        stack_size,
-        frames_needed
+        "SMP: Allocating {} bytes syscall stack plus guard from PMM-backed stack VA",
+        stack_size
     );
 
     // Global bellek yöneticisi ile ardışık fiziksel çerçeveler tahsis et
-    let mm = crate::memory::global_memory_manager_mut()?;
-    let start_frame = mm.allocate_contiguous_frames(frames_needed)?;
-    let phys_start = start_frame.start_address().as_u64();
+    let mut stack = KernelStack::new(stack_size.saturating_add(GUARD_PAGE_SIZE))?;
+    if !stack.enable_guard_pages(1) {
+        crate::serial_println!("[SMP] failed to activate syscall stack guard page");
+        return None;
+    }
 
-    crate::serial_println!(
-        "SMP: Allocated contiguous physical memory at {:#x}",
-        phys_start
-    );
+    let virt_start = stack.usable_ptr() as u64;
 
     // HHDM üzerinden sanal adrese eşle
-    let hhdm = crate::memory::active_physical_offset();
-    let virt_start = phys_start + hhdm;
+    // RSP must use the dedicated stack VA alias, not the HHDM alias.
 
     // Belleği sıfırla (güvensiz başlangıç değerlerini temizle)
-    core::ptr::write_bytes(virt_start as *mut u8, 0, stack_size);
+    debug_assert!(stack.usable_len() >= stack_size);
 
-    let stack_ptr = virt_start as *mut u8;
-    let stack_slice = core::slice::from_raw_parts_mut(stack_ptr, stack_size);
+    if !crate::memory::is_kernel_stack_virt_addr(virt_start) {
+        crate::serial_println!(
+            "[SMP] syscall stack bottom outside dedicated VA: {:#x}",
+            virt_start
+        );
+        return None;
+    }
 
     // Hizalanmış yığın tepesini hesapla (16 bayt hizalama — ABI gereksinimi)
     let mut stack_top = virt_start + stack_size as u64;
     stack_top &= !0xFu64;
+    if !crate::memory::is_kernel_stack_virt_addr(stack_top.saturating_sub(1)) {
+        crate::serial_println!(
+            "[SMP] syscall stack top outside dedicated VA: {:#x}",
+            stack_top
+        );
+        return None;
+    }
 
     crate::serial_println!(
-        "SMP: Stack allocated at virt={:#x}, top={:#x}",
+        "SMP: Stack allocated at dedicated_va={:#x}, top={:#x}",
         virt_start,
         stack_top
     );
 
-    Some((stack_slice, stack_top))
+    Some((stack, stack_top))
 }
 
 /// Fiziksel bellekten küçük bir yapı tahsis et (TLSF'yi atlar).
@@ -1241,8 +1281,9 @@ pub fn balance_load() {
         );
     }
 
-    let avg_load = if online_count > 0 {
-        total_load / online_count
+    let effective_online = (load_count as u32).max(1);
+    let avg_load = if total_load > 0 {
+        total_load.saturating_add(effective_online - 1) / effective_online
     } else {
         0
     };
@@ -1258,15 +1299,21 @@ pub fn balance_load() {
     );
 
     // ACTIVE BALANCING: Eğer load dengesizliği varsa
-    let imbalance_threshold = (avg_load as f32 * 0.25) as u32; // %25 tolerance
-    if max_load > avg_load + imbalance_threshold && min_load < avg_load {
+    drop(state);
+
+    let imbalance_threshold = if avg_load <= 1 {
+        0
+    } else {
+        (avg_load / 4).max(1)
+    };
+    if max_load > avg_load.saturating_add(imbalance_threshold) && min_load < avg_load {
         #[cfg(not(feature = "simics"))]
         crate::serial_println!("CFS: Active balancing triggered - imbalance detected");
 
         // İzole CPU'ları atla
         if !CPU_STATES.is_isolated(overloaded_cpu) && !CPU_STATES.is_isolated(underloaded_cpu) {
             // Task migration önerisi (gerçek migration scheduler'da yapılacak)
-            let tasks_to_migrate = (max_load - avg_load) / 2;
+            let tasks_to_migrate = max_load.saturating_sub(avg_load).saturating_add(1) / 2;
             #[cfg(not(feature = "simics"))]
             crate::serial_println!(
                 "CFS: Suggesting migration of {} tasks from CPU {} to CPU {}",
@@ -1301,14 +1348,10 @@ fn trigger_active_balance(from_cpu: u32, to_cpu: u32, tasks: u32) {
     }
 
     if migrated > 0 {
-        cpu_slots::set_load(
-            from_cpu,
-            cpu_slots::load(from_cpu).saturating_sub(migrated as u32),
-        );
-        cpu_slots::set_load(
-            to_cpu,
-            cpu_slots::load(to_cpu).saturating_add(migrated as u32),
-        );
+        let from_load = crate::task::scheduler::queued_task_count(from_cpu);
+        let to_load = crate::task::scheduler::queued_task_count(to_cpu);
+        update_cpu_load(from_cpu, from_load);
+        update_cpu_load(to_cpu, to_load);
     }
 
     #[cfg(not(feature = "simics"))]
@@ -1323,7 +1366,7 @@ fn trigger_active_balance(from_cpu: u32, to_cpu: u32, tasks: u32) {
 /// Load average güncelle (exponential moving average)
 fn update_load_average(loads: [(u32, u32); 256], count: usize) {
     // Linux tarzı load average (1min, 5min, 15min)
-    // Şimdilik basit tracking
+    // Fixed-size per-CPU load history: deterministic storage, no allocation in rebalance path.
     static LOAD_HISTORY: Mutex<[(u64, u32); 256]> = Mutex::new([(0, 0); 256]);
 
     let mut history = LOAD_HISTORY.lock();
@@ -1399,7 +1442,7 @@ impl TicketLock {
     }
 }
 
-/// Basit RCU (Read-Copy-Update) implementasyonu
+/// Counter-based RCU (Read-Copy-Update) implementation for bounded SMP metadata updates.
 pub struct SimpleRcu {
     grace_counter: AtomicU32,
     reader_count: AtomicU32,
@@ -1641,6 +1684,11 @@ pub fn init() {
 }
 
 pub fn read_local_apic_id() -> u32 {
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        return 0;
+    }
+
     if has_x2apic() {
         return unsafe { Msr::new(0x802).read() as u32 };
     }
@@ -1648,6 +1696,11 @@ pub fn read_local_apic_id() -> u32 {
 }
 
 pub fn current_cpu_id() -> u32 {
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        return 0;
+    }
+
     // SMP init olmadan önce çağrılabilir, bu durumda BSP (CPU 0) döndür
     let apic_id = unsafe { read_apic_reg(0x20) >> 24 };
 

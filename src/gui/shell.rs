@@ -4,6 +4,8 @@ use crate::gop::framebuffer::Framebuffer;
 use crate::gui::icon_pack::{emit_desktop_icon_rects, DesktopIconKind};
 use crate::gui::protocol::Rect;
 use crate::gui::theme::{ButtonRole, Theme, ThemeMode};
+use crate::gui::wallpaper;
+use crate::personalization::virtual_desktops;
 
 pub const HALO_BAR_HEIGHT: i32 = Theme::HALO_BAR_HEIGHT as i32;
 pub const PULSE_DOCK_HEIGHT: i32 = Theme::PULSE_DOCK_HEIGHT as i32;
@@ -44,6 +46,11 @@ pub fn draw_desktop_scene(
 }
 
 pub fn draw_wallpaper_backdrop(fb: &mut Framebuffer, screen: Rect, clip: Rect, mode: ThemeMode) {
+    let active_workspace = virtual_desktops().lock().active();
+    if wallpaper::draw_workspace_backdrop(fb, active_workspace, clip) {
+        return;
+    }
+
     let tokens = Theme::tokens(mode);
     let Some(clipped) = screen.intersection(&clip) else {
         return;
@@ -522,6 +529,8 @@ pub fn fill_blended_rect(fb: &mut Framebuffer, rect: Rect, clip: Rect, color: u3
 mod tests {
     use super::*;
     use crate::gop::framebuffer::Framebuffer;
+    use crate::personalization::{virtual_desktops, DesktopProfile};
+    use alloc::string::String;
 
     fn rects_overlap(a: Rect, b: Rect) -> bool {
         a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
@@ -575,5 +584,44 @@ mod tests {
         draw_desktop_scene(&mut scene, screen, clip, ThemeMode::Dark, false);
 
         assert_eq!(wallpaper.front_buffer(), scene.front_buffer());
+    }
+
+    #[test]
+    fn workspace_profiles_drive_distinct_backdrops() {
+        let screen = Rect::new(0, 0, 640, 360);
+        let clip = screen;
+        {
+            let mut desktops = virtual_desktops().lock();
+            let _ = desktops.set_profile(
+                0,
+                DesktopProfile {
+                    wallpaper_id: 11,
+                    icon_pack: String::from("test-aurora"),
+                },
+            );
+            let _ = desktops.set_profile(
+                1,
+                DesktopProfile {
+                    wallpaper_id: 4,
+                    icon_pack: String::from("test-ocean"),
+                },
+            );
+            let _ = desktops.switch_to(0);
+        }
+
+        let mut aurora = Framebuffer::new_for_test(screen.width as usize, screen.height as usize);
+        draw_wallpaper_backdrop(&mut aurora, screen, clip, ThemeMode::Dark);
+
+        {
+            let mut desktops = virtual_desktops().lock();
+            let _ = desktops.switch_to(1);
+        }
+        let mut ocean = Framebuffer::new_for_test(screen.width as usize, screen.height as usize);
+        draw_wallpaper_backdrop(&mut ocean, screen, clip, ThemeMode::Dark);
+
+        assert_ne!(aurora.front_buffer(), ocean.front_buffer());
+
+        let mut desktops = virtual_desktops().lock();
+        let _ = desktops.switch_to(0);
     }
 }

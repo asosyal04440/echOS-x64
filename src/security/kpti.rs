@@ -39,10 +39,7 @@ pub fn init() {
     let meltdown_guard = vendor_is_intel();
     MELTDOWN_GUARD.store(meltdown_guard, Ordering::Relaxed);
     KPTI_ENABLED.store(true, Ordering::SeqCst);
-    crate::serial_println!(
-        "[KPTI] enabled (meltdown_guard={})",
-        meltdown_guard
-    );
+    crate::serial_println!("[KPTI] enabled (meltdown_guard={})", meltdown_guard);
 }
 
 pub fn is_enabled() -> bool {

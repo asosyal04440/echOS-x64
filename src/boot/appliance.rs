@@ -339,6 +339,7 @@ static BOOT_CONTROL_SHADOW: Mutex<BootControlBlock> = Mutex::new(BootControlBloc
 static CURRENT_BOOT_STAGE: AtomicU32 = AtomicU32::new(BootStage::LoaderEntry as u32);
 static BOOT_FLAGS: AtomicU32 = AtomicU32::new(0);
 static PACKAGED_PE_SMOKE_BUNDLE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+static CURATED_APP_BUNDLES: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 pub fn init_shadow(block: BootControlBlock) {
     let mut guard = BOOT_CONTROL_SHADOW.lock();
@@ -397,6 +398,17 @@ pub fn seed_packaged_pe_smoke_bundle(bytes: Vec<u8>) {
 
 pub fn take_packaged_pe_smoke_bundle() -> Option<Vec<u8>> {
     PACKAGED_PE_SMOKE_BUNDLE.lock().take()
+}
+
+pub fn seed_curated_app_bundle(bytes: Vec<u8>) {
+    CURATED_APP_BUNDLES.lock().push(bytes);
+}
+
+pub fn take_curated_app_bundles() -> Vec<Vec<u8>> {
+    let mut guard = CURATED_APP_BUNDLES.lock();
+    let mut out = Vec::new();
+    core::mem::swap(&mut *guard, &mut out);
+    out
 }
 
 pub fn publish_stage(stage: BootStage) {

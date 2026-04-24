@@ -69,6 +69,10 @@ use sha2::{Digest, Sha256, Sha384};
 // RSA İMZA DOĞRULAMA
 // ============================================================================
 
+fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
+    crate::crypto::constant_time_eq(lhs, rhs)
+}
+
 /// RSA Açık Anahtarı — modulus (n) ve açık üs (e).
 ///
 /// TLS 1.2 ve X.509 sertifika doğrulamasında kullanılır.
@@ -123,7 +127,7 @@ impl RsaPublicKey {
         let padded = self.build_pkcs1_v15_padding(hash, hash_algo);
 
         // Hesaplanan ve beklenen değerleri karşılaştır
-        m == padded
+        constant_time_eq(&m, &padded)
     }
 
     /// PSS (Probabilistic Signature Scheme) imza doğrulaması.
@@ -208,7 +212,7 @@ impl RsaPublicKey {
         let h_prime = hash_algo.hash(&m_prime);
 
         // Adım 9: H == H' ise imza geçerli
-        h == h_prime
+        constant_time_eq(h, &h_prime)
     }
 
     /// PKCS#1 v1.5 dolgu yapısını oluşturur.
@@ -775,6 +779,13 @@ mod tests {
         let seed = b"seed";
         let mask = mgf1(seed, 32, HashAlgorithm::Sha256);
         assert_eq!(mask.len(), 32);
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_length_and_content_mismatch() {
+        assert!(constant_time_eq(b"echos", b"echos"));
+        assert!(!constant_time_eq(b"echos", b"echoS"));
+        assert!(!constant_time_eq(b"echos", b"echo"));
     }
 
     #[test]

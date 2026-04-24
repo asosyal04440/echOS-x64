@@ -25,14 +25,16 @@ use super::super::runtime_layer::{
 use super::super::services::display_atomic::HotPathMetrics;
 use super::super::services::FileEntry;
 use super::protocol::{
-    AccessibilityNode, AccessibilityProfile, AppHealth, AppId, ClipboardPayload, DamagePacket,
-    DesktopPermission, DialogId, DialogKind, DialogRequest, DialogResult, DialogSelection,
-    DisplayCapability, DisplayPresentMode, DisplayProfile, FileGrant, FrameIntent, LayerRole,
-    MotionProfile, NotificationEntry, NotificationLevel, NotificationRequest, OutputMode,
-    PermissionEntry, PermissionState, Rect, RenderObject, RestoreDisposition, SceneUpdate,
-    ScreenshotEntry, SessionPowerState, SessionSnapshot, SharedSurfaceDescriptor, ShellAppEntry,
-    ShellDensityProfile, ShellShortcut, StageSet, StageSetPolicy, SurfaceId, WindowFlags, WindowId,
-    WindowInfo, WindowInputEvent, WindowRule, WorkspaceId, WorkspaceLayout, WorkspaceRule,
+    AccessibilityEvent, AccessibilityFocusState, AccessibilityNode, AccessibilityProfile,
+    AppHealth, AppId, CaptionEvent, ClipboardPayload, DamagePacket, DesktopPermission, DialogId,
+    DialogKind, DialogRequest, DialogResult, DialogSelection, DisplayCapability,
+    DisplayPresentMode, DisplayProfile, FileGrant, FrameIntent, LayerRole, MotionProfile,
+    NotificationEntry, NotificationLevel, NotificationRequest, OutputMode, PermissionEntry,
+    PermissionState, Rect, RenderObject, RestoreDisposition, SceneUpdate, ScreenshotEntry,
+    SessionPowerState, SessionSnapshot, SharedSurfaceDescriptor, ShellAppEntry,
+    ShellDensityProfile, ShellShortcut, SpeechState, StageSet, StageSetPolicy, SurfaceId,
+    WindowFlags, WindowId, WindowInfo, WindowInputEvent, WindowRule, WorkspaceId, WorkspaceLayout,
+    WorkspaceRule,
 };
 use super::surface_memory::{resolve_data_plane_surface, SharedSurfaceMemory};
 use super::theme::ThemeMode;
@@ -725,6 +727,97 @@ impl DesktopClient {
         }
     }
 
+    pub fn record_accessibility_event(&self, event: AccessibilityEvent) -> Result<(), String> {
+        match self.shell_response(ShellCommand::RecordAccessibilityEvent { event })? {
+            ShellResponse::Ack => Ok(()),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn accessibility_events(
+        &self,
+        max_items: usize,
+    ) -> Result<Vec<AccessibilityEvent>, String> {
+        match self.shell_response(ShellCommand::ListAccessibilityEvents { max_items })? {
+            ShellResponse::AccessibilityEvents(events) => Ok(events),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn clear_accessibility_events(&self) -> Result<(), String> {
+        match self.shell_response(ShellCommand::ClearAccessibilityEvents)? {
+            ShellResponse::Ack => Ok(()),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn push_caption_event(&self, event: CaptionEvent) -> Result<(), String> {
+        match self.shell_response(ShellCommand::PushCaptionEvent { event })? {
+            ShellResponse::Ack => Ok(()),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn caption_events(&self, max_items: usize) -> Result<Vec<CaptionEvent>, String> {
+        match self.shell_response(ShellCommand::ListCaptionEvents { max_items })? {
+            ShellResponse::CaptionEvents(events) => Ok(events),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn clear_caption_events(&self) -> Result<(), String> {
+        match self.shell_response(ShellCommand::ClearCaptionEvents)? {
+            ShellResponse::Ack => Ok(()),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn speech_state(&self, max_items: usize) -> Result<SpeechState, String> {
+        match self.shell_response(ShellCommand::GetSpeechState { max_items })? {
+            ShellResponse::SpeechState(state) => Ok(state),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn advance_speech_lane(&self) -> Result<SpeechState, String> {
+        match self.shell_response(ShellCommand::AdvanceSpeechLane)? {
+            ShellResponse::SpeechState(state) => Ok(state),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn tick_speech_lane(&self, now_ns: u64) -> Result<SpeechState, String> {
+        match self.shell_response(ShellCommand::TickSpeechLane { now_ns })? {
+            ShellResponse::SpeechState(state) => Ok(state),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn clear_speech_lane(&self) -> Result<(), String> {
+        match self.shell_response(ShellCommand::ClearSpeechLane)? {
+            ShellResponse::Ack => Ok(()),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn accessibility_focus(&self) -> Result<Option<AccessibilityFocusState>, String> {
+        match self.shell_response(ShellCommand::GetAccessibilityFocus)? {
+            ShellResponse::AccessibilityFocus(focus) => Ok(focus),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
     pub fn update_shell_window(
         &self,
         window_id: Option<WindowId>,
@@ -839,6 +932,52 @@ impl DesktopClient {
     pub fn session_snapshot(&self) -> Result<SessionSnapshot, String> {
         match self.shell_response(ShellCommand::GetSessionSnapshot)? {
             ShellResponse::SessionSnapshot(snapshot) => Ok(snapshot),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn set_locale(&self, locale: &str) -> Result<(), String> {
+        match self.shell_response(ShellCommand::SetLocale {
+            locale: String::from(locale),
+        })? {
+            ShellResponse::Ack => Ok(()),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn locale(&self) -> Result<String, String> {
+        match self.shell_response(ShellCommand::GetLocale)? {
+            ShellResponse::Locale(locale) => Ok(locale),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn list_speech_voices(&self) -> Result<Vec<crate::audio::tts::VoiceCatalogEntry>, String> {
+        match self.shell_response(ShellCommand::ListSpeechVoices)? {
+            ShellResponse::SpeechVoices(voices) => Ok(voices),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn set_speech_voice(&self, voice_id: Option<&str>) -> Result<(), String> {
+        match self.shell_response(ShellCommand::SetSpeechVoice {
+            voice_id: voice_id.map(String::from),
+        })? {
+            ShellResponse::Ack => Ok(()),
+            ShellResponse::Error(err) => Err(err),
+            _ => Err(String::from("shell returned unexpected response")),
+        }
+    }
+
+    pub fn speech_output_status(
+        &self,
+    ) -> Result<crate::services::ech_shell::SpeechOutputStatus, String> {
+        match self.shell_response(ShellCommand::GetSpeechOutputStatus)? {
+            ShellResponse::SpeechOutputStatus(status) => Ok(status),
             ShellResponse::Error(err) => Err(err),
             _ => Err(String::from("shell returned unexpected response")),
         }
@@ -1019,88 +1158,60 @@ impl DesktopClient {
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, false)?;
-        match self.store_response(StoreCommand::ReadFile {
+        expect_store_file_data(self.store_response(StoreCommand::ReadFile {
             path: String::from(path),
-        })? {
-            StoreResponse::FileData(data) => Ok(data),
-            StoreResponse::Error(err) => Err(err),
-            _ => Err(String::from("store returned unexpected response")),
-        }
+        })?)
     }
 
     pub fn write_file(&self, path: &str, data: &[u8]) -> Result<(), String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, true)?;
-        match self.store_response(StoreCommand::WriteFile {
+        expect_store_success(self.store_response(StoreCommand::WriteFile {
             path: String::from(path),
             data: data.to_vec(),
-        })? {
-            StoreResponse::Success => Ok(()),
-            StoreResponse::Error(err) => Err(err),
-            _ => Err(String::from("store returned unexpected response")),
-        }
+        })?)
     }
 
     pub fn rename_path(&self, from: &str, to: &str) -> Result<(), String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(from, true)?;
         self.ensure_file_access(to, true)?;
-        match self.store_response(StoreCommand::RenamePath {
+        expect_store_success(self.store_response(StoreCommand::RenamePath {
             from: String::from(from),
             to: String::from(to),
-        })? {
-            StoreResponse::Success => Ok(()),
-            StoreResponse::Error(err) => Err(err),
-            _ => Err(String::from("store returned unexpected response")),
-        }
+        })?)
     }
 
     pub fn delete_file(&self, path: &str) -> Result<(), String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, true)?;
-        match self.store_response(StoreCommand::DeleteFile {
+        expect_store_success(self.store_response(StoreCommand::DeleteFile {
             path: String::from(path),
-        })? {
-            StoreResponse::Success => Ok(()),
-            StoreResponse::Error(err) => Err(err),
-            _ => Err(String::from("store returned unexpected response")),
-        }
+        })?)
     }
 
     pub fn delete_directory(&self, path: &str) -> Result<(), String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, true)?;
-        match self.store_response(StoreCommand::DeleteDirectory {
+        expect_store_success(self.store_response(StoreCommand::DeleteDirectory {
             path: String::from(path),
-        })? {
-            StoreResponse::Success => Ok(()),
-            StoreResponse::Error(err) => Err(err),
-            _ => Err(String::from("store returned unexpected response")),
-        }
+        })?)
     }
 
     pub fn create_directory(&self, path: &str) -> Result<(), String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, true)?;
-        match self.store_response(StoreCommand::CreateDirectory {
+        expect_store_success(self.store_response(StoreCommand::CreateDirectory {
             path: String::from(path),
-        })? {
-            StoreResponse::Success => Ok(()),
-            StoreResponse::Error(err) => Err(err),
-            _ => Err(String::from("store returned unexpected response")),
-        }
+        })?)
     }
 
     pub fn list_directory(&self, path: &str) -> Result<Vec<FileEntry>, String> {
         self.ensure_permission(DesktopPermission::FileSystem)?;
         self.ensure_file_access(path, false)?;
-        match self.store_response(StoreCommand::ListDirectory {
+        expect_store_directory(self.store_response(StoreCommand::ListDirectory {
             path: String::from(path),
-        })? {
-            StoreResponse::DirectoryContents(entries) => Ok(entries),
-            StoreResponse::Error(err) => Err(err),
-            _ => Err(String::from("store returned unexpected response")),
-        }
+        })?)
     }
 
     fn expect_ack(&self, response: DisplayResponse) -> Result<(), String> {
@@ -1219,15 +1330,86 @@ impl DesktopClient {
     }
 
     fn ensure_file_access(&self, path: &str, write: bool) -> Result<(), String> {
-        match self.shell_response(ShellCommand::CheckFileAccess {
+        expect_shell_file_access(self.shell_response(ShellCommand::CheckFileAccess {
             app_id: self.app_id,
             path: String::from(path),
             write,
-        })? {
-            ShellResponse::FileAccess(true) => Ok(()),
-            ShellResponse::FileAccess(false) => Err(String::from("file access not granted")),
-            ShellResponse::Error(err) => Err(err),
-            _ => Err(String::from("shell returned unexpected response")),
-        }
+        })?)
+    }
+}
+
+fn expect_store_file_data(response: StoreResponse) -> Result<Vec<u8>, String> {
+    match response {
+        StoreResponse::FileData(data) => Ok(data),
+        StoreResponse::Error(err) => Err(err),
+        _ => Err(String::from("store returned unexpected response")),
+    }
+}
+
+fn expect_store_success(response: StoreResponse) -> Result<(), String> {
+    match response {
+        StoreResponse::Success => Ok(()),
+        StoreResponse::Error(err) => Err(err),
+        _ => Err(String::from("store returned unexpected response")),
+    }
+}
+
+fn expect_store_directory(response: StoreResponse) -> Result<Vec<FileEntry>, String> {
+    match response {
+        StoreResponse::DirectoryContents(entries) => Ok(entries),
+        StoreResponse::Error(err) => Err(err),
+        _ => Err(String::from("store returned unexpected response")),
+    }
+}
+
+fn expect_shell_file_access(response: ShellResponse) -> Result<(), String> {
+    match response {
+        ShellResponse::FileAccess(true) => Ok(()),
+        ShellResponse::FileAccess(false) => Err(String::from("file access not granted")),
+        ShellResponse::Error(err) => Err(err),
+        _ => Err(String::from("shell returned unexpected response")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gui_store_helpers_preserve_exact_store_errors() {
+        assert_eq!(
+            expect_store_file_data(StoreResponse::Error(String::from(
+                "xfs: unified reads are not wired to a real backend",
+            )))
+            .unwrap_err(),
+            "xfs: unified reads are not wired to a real backend"
+        );
+        assert_eq!(
+            expect_store_success(StoreResponse::Error(String::from(
+                "xfs: unified VFS open is not wired to a real backend",
+            )))
+            .unwrap_err(),
+            "xfs: unified VFS open is not wired to a real backend"
+        );
+        assert_eq!(
+            expect_store_directory(StoreResponse::Error(String::from(
+                "xfs: unified directory listing is not wired to a real backend",
+            )))
+            .unwrap_err(),
+            "xfs: unified directory listing is not wired to a real backend"
+        );
+    }
+
+    #[test]
+    fn gui_shell_file_access_helper_preserves_exact_shell_errors() {
+        assert_eq!(
+            expect_shell_file_access(ShellResponse::Error(String::from("app not registered")))
+                .unwrap_err(),
+            "app not registered"
+        );
+        assert_eq!(
+            expect_shell_file_access(ShellResponse::FileAccess(false)).unwrap_err(),
+            "file access not granted"
+        );
     }
 }

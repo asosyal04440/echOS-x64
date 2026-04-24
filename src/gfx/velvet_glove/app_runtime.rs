@@ -90,7 +90,7 @@ pub(super) fn file_association_kind(path: &str) -> Option<AppKind> {
     match path.rsplit('.').next() {
         Some("html" | "htm") => Some(AppKind::Browser),
         Some("txt" | "rs" | "md" | "cfg" | "json" | "toml" | "log") => Some(AppKind::Editor),
-        Some("png" | "jpg" | "jpeg" | "bmp") => Some(AppKind::Files),
+        Some("png" | "jpg" | "jpeg" | "bmp" | "qoi") => Some(AppKind::Files),
         _ => Some(AppKind::Editor),
     }
 }
@@ -99,7 +99,7 @@ pub(super) fn file_association_label(path: &str) -> &'static str {
     match path.rsplit('.').next() {
         Some("html" | "htm") => "browser",
         Some("txt" | "rs" | "md" | "cfg" | "json" | "toml" | "log") => "editor",
-        Some("png" | "jpg" | "jpeg" | "bmp") => "preview",
+        Some("png" | "jpg" | "jpeg" | "bmp" | "qoi") => "preview",
         _ => "open",
     }
 }
@@ -419,7 +419,7 @@ pub(super) fn browser_link_hit(local: Point, width: i32, link_count: usize) -> O
 
 pub(super) fn thumbnail_color_for_path(path: &str) -> u32 {
     match path.rsplit('.').next() {
-        Some("png" | "jpg" | "jpeg" | "bmp") => ACCENT_CORAL,
+        Some("png" | "jpg" | "jpeg" | "bmp" | "qoi") => ACCENT_CORAL,
         Some("rs" | "toml") => ACCENT_BLUE,
         Some("cfg" | "json" | "log") => ACCENT_GOLD,
         _ => ACCENT_SOFT,
@@ -428,22 +428,24 @@ pub(super) fn thumbnail_color_for_path(path: &str) -> u32 {
 
 pub(super) fn thumbnail_label_for_path(path: &str) -> &'static str {
     match path.rsplit('.').next() {
-        Some("png" | "jpg" | "jpeg" | "bmp") => "I",
+        Some("png" | "jpg" | "jpeg" | "bmp" | "qoi") => "I",
         Some("rs") => "R",
         Some("toml" | "cfg" | "json") => "C",
         _ => "F",
     }
 }
+
+pub(super) fn is_previewable_image_path(path: &str) -> bool {
+    matches!(path.rsplit('.').next(), Some("bmp" | "qoi" | "BMP" | "QOI"))
+}
 impl TerminalApp {
-    pub(super) fn ensure_window(&mut self, screen: Rect) -> Result<LaunchResult, String> {
+    pub(super) fn ensure_window(
+        &mut self,
+        _screen: Rect,
+        policy: &WindowLaunchPolicy,
+    ) -> Result<LaunchResult, String> {
         self.ensure_backend()?;
-        let result = ensure_window_visible(
-            &self.client,
-            &mut self.window,
-            "Terminal",
-            Rect::new(screen.x + 86, screen.y + 126, 720, 420),
-            self.workspace_id,
-        )?;
+        let result = ensure_window_visible(&self.client, &mut self.window, "Terminal", *policy)?;
         self.sync_winsize();
         self.dirty = true;
         Ok(result)
@@ -521,10 +523,13 @@ impl TerminalApp {
         match command.as_str() {
             "help" => {
                 self.lines.push(String::from(
-                    "local: clear | open terminal|files|web|settings|editor | copy <text> | paste | open-file | save-file | pick-folder | screenshot | grants | accessibility",
+                    "local: clear | open terminal|files|web|settings|editor|<app> | copy <text> | paste | open-file | save-file | pick-folder | screenshot | grants | accessibility",
                 ));
                 self.lines.push(String::from(
                     "shell: pwd | cd <dir> | ls [path] | tree [path] | find [path] -name <glob> | stat <path> | cp <src> <dst> | mv | rm | mkdir | touch | head | tail | wc | grep | sort | uniq | env | history | alias | which | command",
+                ));
+                self.lines.push(String::from(
+                    "apps: firefox | chromium | cef | helix | yazi | zellij | bottom | gitui | posting | glow | ripgrep | fd | bat",
                 ));
             }
             "clear" => {
@@ -564,12 +569,10 @@ impl TerminalApp {
                 ),
             ))),
             "open firefox" | "open chromium" | "open chrome" | "open cef" => {
-                if let Some(resolution) =
-                    crate::runtime_layer::package_registry_contract::RuntimePackageRegistry::new(
-                        &desktop_launch_registry(),
-                    )
-                    .resolve_with_probe(&command, launch::launch_path_exists)
-                {
+                if let Some(resolution) = launch::resolve_launch_resolution_with_seed_install(
+                    &desktop_launch_registry(),
+                    &command,
+                ) {
                     if let Some(candidates) = resolution.missing_candidates() {
                         self.lines.push(format!(
                             "{} binary not found; searched {}",
@@ -598,6 +601,34 @@ impl TerminalApp {
                     "terminal-open",
                 ),
             ))),
+            other if other.starts_with("open ") => {
+                let query = other[5..].trim();
+                if let Some(resolution) = launch::resolve_launch_resolution_with_seed_install(
+                    &desktop_launch_registry(),
+                    query,
+                ) {
+                    if let Some(candidates) = resolution.missing_candidates() {
+                        self.lines.push(format!(
+                            "{} binary not found; searched {}",
+                            resolution.descriptor().title,
+                            candidates.join(", ")
+                        ));
+                    } else {
+                        let intent = resolution.launch_intent(ExecutionContext::new(
+                            LaunchSource::ShellShortcut,
+                            self.workspace_id,
+                            "terminal-open-external",
+                        ));
+                        if let Some(path) = resolution.path() {
+                            commands.push(SessionCommand::LaunchExternal(intent, path.to_string()));
+                        } else {
+                            commands.push(SessionCommand::Launch(intent));
+                        }
+                    }
+                } else {
+                    self.lines.push(format!("unknown app: {}", query));
+                }
+            }
             "paste" => match self.client.clipboard_get() {
                 Ok(ClipboardPayload::Text(text)) => self.lines.push(format!("clipboard: {}", text)),
                 Ok(ClipboardPayload::Files(paths)) => {
@@ -811,8 +842,7 @@ impl TerminalApp {
         canvas.draw_text(18, footer_y + 10, ">", ACCENT_MINT);
         canvas.draw_text(34, footer_y + 10, &self.input, TEXT_PRIMARY);
 
-        self.client
-            .present(window.window_id, &canvas.into_pixels())?;
+        self.client.present(window.window_id, canvas.pixels())?;
         self.dirty = false;
         Ok(())
     }
@@ -860,14 +890,12 @@ impl TerminalApp {
 }
 
 impl FilesApp {
-    pub(super) fn ensure_window(&mut self, screen: Rect) -> Result<LaunchResult, String> {
-        let result = ensure_window_visible(
-            &self.client,
-            &mut self.window,
-            "Files",
-            Rect::new(screen.x + 232, screen.y + 168, 580, 360),
-            self.workspace_id,
-        )?;
+    pub(super) fn ensure_window(
+        &mut self,
+        _screen: Rect,
+        policy: &WindowLaunchPolicy,
+    ) -> Result<LaunchResult, String> {
+        let result = ensure_window_visible(&self.client, &mut self.window, "Files", *policy)?;
         if crate::boot::appliance::auto_login_requested() && self.entries.is_empty() {
             self.status = format!("Deferred appliance scan for {}", self.current_path);
             self.dirty = true;
@@ -960,9 +988,45 @@ impl FilesApp {
         let entries = self.client.list_directory(&self.current_path)?;
         self.entries = entries;
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
+        self.preload_thumbnails();
         self.status = format!("{} items in {}", self.entries.len(), self.current_path);
         self.dirty = true;
         Ok(())
+    }
+
+    fn preload_thumbnails(&mut self) {
+        let mut retained = Vec::new();
+        for entry in self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_directory && is_previewable_image_path(&entry.path))
+            .take(10)
+        {
+            retained.push(entry.path.clone());
+            if self.thumbnail_cache.contains_key(&entry.path) {
+                continue;
+            }
+            let Ok(bytes) = self.client.read_file(&entry.path) else {
+                continue;
+            };
+            let Ok(decoded) = crate::gfx::image_assets::ArgbImage::decode_path(&entry.path, &bytes)
+            else {
+                continue;
+            };
+            let Ok(resized) = decoded.resize_exact(18, 18) else {
+                continue;
+            };
+            self.thumbnail_cache.insert(
+                entry.path.clone(),
+                ThumbnailBitmap {
+                    width: resized.width,
+                    height: resized.height,
+                    pixels: resized.pixels,
+                },
+            );
+        }
+        self.thumbnail_cache
+            .retain(|path, _| retained.iter().any(|retained_path| retained_path == path));
     }
 
     pub(super) fn activate_selected(&mut self, commands: &mut Vec<SessionCommand>) {
@@ -1076,13 +1140,24 @@ impl FilesApp {
                 thumbnail_color_for_path(&entry.path)
             };
             canvas.stroke_rect(rect, if selected { accent } else { BORDER });
-            canvas.fill_rect(Rect::new(rect.x + 12, rect.y + 12, 18, 18), accent);
-            canvas.draw_text(
-                rect.x + 16,
-                rect.y + 18,
-                thumbnail_label_for_path(&entry.path),
-                WINDOW_BG,
-            );
+            let thumb_rect = Rect::new(rect.x + 12, rect.y + 12, 18, 18);
+            canvas.fill_rect(thumb_rect, accent);
+            if let Some(bitmap) = self.thumbnail_cache.get(&entry.path) {
+                canvas.draw_argb_bitmap(
+                    thumb_rect.x,
+                    thumb_rect.y,
+                    bitmap.width,
+                    bitmap.height,
+                    &bitmap.pixels,
+                );
+            } else {
+                canvas.draw_text(
+                    rect.x + 16,
+                    rect.y + 18,
+                    thumbnail_label_for_path(&entry.path),
+                    WINDOW_BG,
+                );
+            }
             canvas.draw_text(34, y + 4, &entry.name, TEXT_PRIMARY);
             let detail = if entry.is_directory {
                 String::from("directory")
@@ -1108,8 +1183,7 @@ impl FilesApp {
         canvas.fill_rect(Rect::new(0, footer_y, window.content_rect.width, 1), BORDER);
         canvas.draw_text(18, footer_y + 10, &self.status, TEXT_MUTED);
 
-        self.client
-            .present(window.window_id, &canvas.into_pixels())?;
+        self.client.present(window.window_id, canvas.pixels())?;
         self.dirty = false;
         Ok(())
     }
@@ -1173,14 +1247,12 @@ impl BrowserApp {
         self.show_start_page();
     }
 
-    pub(super) fn ensure_window(&mut self, screen: Rect) -> Result<LaunchResult, String> {
-        let result = ensure_window_visible(
-            &self.client,
-            &mut self.window,
-            "Web",
-            Rect::new(screen.x + 196, screen.y + 118, 820, 520),
-            self.workspace_id,
-        )?;
+    pub(super) fn ensure_window(
+        &mut self,
+        _screen: Rect,
+        policy: &WindowLaunchPolicy,
+    ) -> Result<LaunchResult, String> {
+        let result = ensure_window_visible(&self.client, &mut self.window, "Web", *policy)?;
         if self.current_url.is_none() {
             self.prime_homepage();
         }
@@ -1461,8 +1533,7 @@ impl BrowserApp {
             TEXT_MUTED,
         );
 
-        self.client
-            .present(window.window_id, &canvas.into_pixels())?;
+        self.client.present(window.window_id, canvas.pixels())?;
         self.dirty = false;
         Ok(())
     }
@@ -1515,14 +1586,12 @@ impl BrowserApp {
 }
 
 impl SettingsApp {
-    pub(super) fn ensure_window(&mut self, screen: Rect) -> Result<LaunchResult, String> {
-        let result = ensure_window_visible(
-            &self.client,
-            &mut self.window,
-            "Settings",
-            Rect::new(screen.x + 314, screen.y + 108, 480, 520),
-            self.workspace_id,
-        )?;
+    pub(super) fn ensure_window(
+        &mut self,
+        _screen: Rect,
+        policy: &WindowLaunchPolicy,
+    ) -> Result<LaunchResult, String> {
+        let result = ensure_window_visible(&self.client, &mut self.window, "Settings", *policy)?;
         self.dirty = true;
         Ok(result)
     }
@@ -1623,11 +1692,26 @@ impl SettingsApp {
         if !profile.screen_reader {
             profile.screen_reader = true;
         } else if !profile.magnifier {
+            profile.screen_reader = false;
             profile.magnifier = true;
+            profile.magnifier_mode = MagnifierMode::Docked;
+        } else if profile.magnifier_mode != MagnifierMode::Lens {
+            profile.magnifier_mode = MagnifierMode::Lens;
+        } else if profile.magnifier_mode != MagnifierMode::Fullscreen {
+            profile.magnifier_mode = MagnifierMode::Fullscreen;
         } else if !profile.captions_enabled {
+            profile.magnifier = false;
+            profile.magnifier_mode = MagnifierMode::Docked;
             profile.captions_enabled = true;
         } else if !profile.reduced_motion {
+            profile.captions_enabled = false;
             profile.reduced_motion = true;
+        } else if !profile.sticky_keys {
+            profile.reduced_motion = false;
+            profile.sticky_keys = true;
+        } else if !profile.slow_keys {
+            profile.sticky_keys = false;
+            profile.slow_keys = true;
         } else {
             profile = AccessibilityProfile::default();
         }
@@ -1792,8 +1876,7 @@ impl SettingsApp {
             y += 64;
         }
 
-        self.client
-            .present(window.window_id, &canvas.into_pixels())?;
+        self.client.present(window.window_id, canvas.pixels())?;
         self.dirty = false;
         Ok(())
     }
@@ -1857,14 +1940,12 @@ impl SettingsApp {
 }
 
 impl EditorApp {
-    pub(super) fn ensure_window(&mut self, screen: Rect) -> Result<LaunchResult, String> {
-        let result = ensure_window_visible(
-            &self.client,
-            &mut self.window,
-            "Editor",
-            Rect::new(screen.x + 162, screen.y + 148, 620, 400),
-            self.workspace_id,
-        )?;
+    pub(super) fn ensure_window(
+        &mut self,
+        _screen: Rect,
+        policy: &WindowLaunchPolicy,
+    ) -> Result<LaunchResult, String> {
+        let result = ensure_window_visible(&self.client, &mut self.window, "Editor", *policy)?;
         self.dirty = true;
         Ok(result)
     }
@@ -2026,8 +2107,7 @@ impl EditorApp {
         };
         canvas.draw_text(18, footer_y + 8, &status, TEXT_SECONDARY);
 
-        self.client
-            .present(window.window_id, &canvas.into_pixels())?;
+        self.client.present(window.window_id, canvas.pixels())?;
         self.dirty = false;
         Ok(())
     }

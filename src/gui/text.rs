@@ -1,3 +1,4 @@
+use crate::allocator::doctrine::{alloc_surface_pixels, SurfacePixelBuffer, SurfacePixelFormat};
 use crate::gui::protocol::{
     AtlasId, DamageLane, Rect, RenderObject, RenderObjectKind, TextBlobId, TextRunStyle,
 };
@@ -215,7 +216,23 @@ impl TextSystem {
             width_px = width_px.min(max_width.max(1));
         }
 
-        let mut pixels = vec![0u32; width_px.saturating_mul(height_px) as usize];
+        let mut pixels = match alloc_surface_pixels(
+            width_px.max(1) as usize,
+            height_px.max(1) as usize,
+            SurfacePixelFormat::Argb8888,
+        ) {
+            Ok(pixels) => pixels,
+            Err(error) => {
+                crate::serial_println!(
+                    "[TEXT] doctrine fallback width={} height={} text='{}' err={:?}",
+                    width_px,
+                    height_px,
+                    text,
+                    error
+                );
+                SurfacePixelBuffer::Heap(vec![0u32; width_px.saturating_mul(height_px) as usize])
+            }
+        };
         for run in buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
                 let physical = glyph.physical((0.0, run.line_y), 1.0);
@@ -231,11 +248,32 @@ impl TextSystem {
                             return;
                         }
                         let index = py as usize * width_px as usize + px as usize;
-                        pixels[index] = blend_source_over(pixels[index], source.0);
+                        let pixels_slice = pixels.as_mut_slice();
+                        pixels_slice[index] = blend_source_over(pixels_slice[index], source.0);
                     },
                 );
             }
         }
+
+        let pixels = match pixels {
+            SurfacePixelBuffer::Heap(pixels) => pixels,
+            SurfacePixelBuffer::PageBacked(pixels) => {
+                let fallback = pixels.as_slice().to_vec();
+                match SurfacePixelBuffer::PageBacked(pixels).snapshot_vec("gui.text.blob_pixels") {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        crate::serial_println!(
+                            "[TEXT] glyph snapshot doctrine fallback width={} height={} text='{}' err={:?}",
+                            width_px,
+                            height_px,
+                            text,
+                            error
+                        );
+                        fallback
+                    }
+                }
+            }
+        };
 
         self.atlas.store(
             key,

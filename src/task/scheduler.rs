@@ -93,29 +93,85 @@ impl SmpScheduler {
     }
 
     pub fn spawn(&self, task: Task) {
-        let cpu_id = get_current_cpu_id() as usize;
-        unsafe {
-            if let Some(worker) = WORKERS.get(cpu_id).and_then(|w| w.as_ref()) {
-                worker.push(Box::new(task));
-            } else if let Some(worker) = WORKERS.get(0).and_then(|w| w.as_ref()) {
-                worker.push(Box::new(task));
-            } else {
-                crate::serial_println!("ERROR: No workers available to spawn task!");
-            }
+        let task = Box::new(task);
+        let target_cpu = choose_spawn_cpu(&task);
+        if let Some(actual_cpu) = enqueue_boxed_task(target_cpu, task) {
+            publish_worker_load(actual_cpu);
+        } else {
+            crate::serial_println!("ERROR: No workers available to spawn task!");
         }
     }
 
     // Zaten box'lanmış görevler için dahili yardımcı (örn. timer'dan gelen görevler)
     pub fn spawn_boxed(&self, task: Box<Task>) {
-        let cpu_id = get_current_cpu_id() as usize;
+        let target_cpu = choose_spawn_cpu(&task);
+        if let Some(actual_cpu) = enqueue_boxed_task(target_cpu, task) {
+            publish_worker_load(actual_cpu);
+        } else {
+            crate::serial_println!("ERROR: No workers available to spawn task!");
+        }
+    }
+}
+
+fn task_can_run_on_cpu(task: &Task, cpu_id: u32) -> bool {
+    task.hot.affinity == 0xFFFF_FFFF || (cpu_id < 32 && (task.hot.affinity & (1u32 << cpu_id)) != 0)
+}
+
+fn queued_task_count_usize(cpu_id: usize) -> u32 {
+    unsafe {
+        WORKERS
+            .get(cpu_id)
+            .and_then(|w| w.as_ref())
+            .map(|worker| worker.len() as u32)
+            .unwrap_or(0)
+    }
+}
+
+pub fn queued_task_count(cpu_id: u32) -> u32 {
+    queued_task_count_usize(cpu_id as usize)
+}
+
+fn publish_worker_load(cpu_id: usize) {
+    crate::cpu::smp::update_cpu_load(cpu_id as u32, queued_task_count_usize(cpu_id));
+}
+
+fn choose_spawn_cpu(task: &Task) -> usize {
+    let current_cpu = get_current_cpu_id() as usize;
+    let cpu_limit = SMP_SCHEDULER.cpu_count.load(Ordering::Relaxed).max(1) as usize;
+    let mut best_cpu = current_cpu.min(cpu_limit.saturating_sub(1));
+    let mut best_load = queued_task_count_usize(best_cpu);
+
+    for cpu in 0..cpu_limit {
+        let cpu_id = cpu as u32;
+        if !cpu_slots::is_online(cpu_id) || !task_can_run_on_cpu(task, cpu_id) {
+            continue;
+        }
         unsafe {
-            if let Some(worker) = WORKERS.get(cpu_id).and_then(|w| w.as_ref()) {
-                worker.push(task);
-            } else if let Some(worker) = WORKERS.get(0).and_then(|w| w.as_ref()) {
-                worker.push(task);
-            } else {
-                crate::serial_println!("ERROR: No workers available to spawn task!");
+            if WORKERS.get(cpu).and_then(|w| w.as_ref()).is_none() {
+                continue;
             }
+        }
+
+        let load = queued_task_count_usize(cpu);
+        if load < best_load || (load == best_load && cpu == current_cpu) {
+            best_cpu = cpu;
+            best_load = load;
+        }
+    }
+
+    best_cpu
+}
+
+fn enqueue_boxed_task(target_cpu: usize, task: Box<Task>) -> Option<usize> {
+    unsafe {
+        if let Some(worker) = WORKERS.get(target_cpu).and_then(|w| w.as_ref()) {
+            worker.push(task);
+            Some(target_cpu)
+        } else if let Some(worker) = WORKERS.get(0).and_then(|w| w.as_ref()) {
+            worker.push(task);
+            Some(0)
+        } else {
+            None
         }
     }
 }
@@ -281,6 +337,55 @@ pub fn current_kernel_stack_top() -> u64 {
                 .map(|t| t.kernel_stack_top)
                 .unwrap_or(0)
         }
+    }
+}
+
+pub fn classify_current_kernel_stack_fault(addr: u64) -> Option<&'static str> {
+    let cpu_id = get_current_cpu_id();
+    unsafe {
+        let task = PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)
+            .and_then(|t| t.as_ref())?;
+        if addr >= task.hot.kernel_stack_guard_base && addr < task.hot.kernel_stack_bottom {
+            Some("KERNEL_STACK_GUARD_PAGE")
+        } else {
+            None
+        }
+    }
+}
+
+pub fn record_current_stack_pointer(rsp: u64) {
+    let cpu_id = get_current_cpu_id();
+    unsafe {
+        if let Some(task) = PER_CPU_CURRENT_TASK
+            .get_mut(cpu_id as usize)
+            .and_then(|slot| slot.as_mut())
+        {
+            if rsp >= task.hot.kernel_stack_bottom
+                && rsp <= task.hot.kernel_stack_top
+                && rsp < task.hot.kernel_stack_low_watermark
+            {
+                task.hot.kernel_stack_low_watermark = rsp;
+            }
+        }
+    }
+}
+
+pub fn current_kernel_stack_usage() -> Option<(u64, u64)> {
+    let cpu_id = get_current_cpu_id();
+    unsafe {
+        let task = PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)
+            .and_then(|t| t.as_ref())?;
+        let capacity = task
+            .hot
+            .kernel_stack_top
+            .saturating_sub(task.hot.kernel_stack_bottom);
+        let used = task
+            .hot
+            .kernel_stack_top
+            .saturating_sub(task.hot.kernel_stack_low_watermark);
+        Some((used, capacity))
     }
 }
 
@@ -1294,6 +1399,7 @@ pub fn schedule() {
 
             // Bağlam değişiminden önce son bellek bariyeri
             smp_mb();
+            crate::security::spectre::on_context_switch();
             switch_context(old_context_ptr, new_context_ptr, fpu_mode);
 
             // Context switch'ten döndük — eski task (biz) tekrar çalışıyor.
@@ -1447,6 +1553,12 @@ pub struct TaskInfo {
     pub state: TaskState,
     pub priority: Priority,
     pub cpu_usage: u32,
+    pub rss_pages: usize,
+    pub swap_pages: usize,
+    pub committed_pages: usize,
+    pub runtime_ticks: u64,
+    pub is_kernel: bool,
+    pub children: usize,
 }
 
 /// Tüm task'ları listeler (ps komutu için)
@@ -1458,12 +1570,30 @@ pub fn list_tasks() -> Vec<TaskInfo> {
     x86_64::instructions::interrupts::without_interrupts(|| unsafe {
         for i in 0..PER_CPU_CURRENT_TASK.len() {
             if let Some(task) = &PER_CPU_CURRENT_TASK[i] {
+                let page_counts = task
+                    .cold
+                    .address_space
+                    .as_ref()
+                    .map(crate::memory::address_space_page_counts)
+                    .unwrap_or_default();
+                let running_delta = if task.state == TaskState::Running {
+                    now.saturating_sub(task.hot.last_start)
+                } else {
+                    0
+                };
                 tasks.push(TaskInfo {
                     pid: task.id,
                     name: task.cold.name,
                     state: task.state,
                     priority: task.hot.priority,
                     cpu_usage: now.saturating_sub(task.hot.last_start).min(u32::MAX as u64) as u32,
+                    rss_pages: page_counts.resident_pages(),
+                    swap_pages: page_counts.swapped_pages,
+                    committed_pages: page_counts.committed_pages,
+                    runtime_ticks: task.cold.exec_runtime.saturating_add(running_delta),
+                    is_kernel: !matches!(task.cold.mode, ExecutionMode::LegacyRing3)
+                        || task.cold.address_space.is_none(),
+                    children: task.cold.children.len(),
                 });
             }
         }
@@ -1471,12 +1601,25 @@ pub fn list_tasks() -> Vec<TaskInfo> {
         // Zombie task'ları al
         let zombies = ZOMBIE_TASKS.lock();
         for task in zombies.iter() {
+            let page_counts = task
+                .cold
+                .address_space
+                .as_ref()
+                .map(crate::memory::address_space_page_counts)
+                .unwrap_or_default();
             tasks.push(TaskInfo {
                 pid: task.id,
                 name: task.cold.name,
                 state: TaskState::Zombie,
                 priority: task.hot.priority,
                 cpu_usage: 0,
+                rss_pages: page_counts.resident_pages(),
+                swap_pages: page_counts.swapped_pages,
+                committed_pages: page_counts.committed_pages,
+                runtime_ticks: task.cold.exec_runtime,
+                is_kernel: !matches!(task.cold.mode, ExecutionMode::LegacyRing3)
+                    || task.cold.address_space.is_none(),
+                children: task.cold.children.len(),
             });
         }
     });

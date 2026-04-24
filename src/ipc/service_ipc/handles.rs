@@ -9,7 +9,11 @@ impl ServiceIpcManager {
     ) -> Result<ServiceHandleDescriptor, ServiceError> {
         if !matches!(
             service,
-            ServiceId::Directory | ServiceId::PackageRegistry | ServiceId::ProcessBroker
+            ServiceId::Directory
+                | ServiceId::NetworkBroker
+                | ServiceId::PackageRegistry
+                | ServiceId::ProcessBroker
+                | ServiceId::UpdateInstaller
         ) && self.ensure_runtime_endpoint(service).is_none()
         {
             return Err(ServiceError::ServiceUnavailable);
@@ -123,9 +127,11 @@ pub(in crate::ipc::service_ipc) fn map_capability_error(error: CapabilityError) 
 
 pub(in crate::ipc::service_ipc) fn default_rights_for(service: ServiceId) -> CapabilityRights {
     match service {
-        ServiceId::Directory | ServiceId::PackageRegistry | ServiceId::ProcessBroker => {
-            CapRights::READ_WRITE
-        }
+        ServiceId::Directory
+        | ServiceId::NetworkBroker
+        | ServiceId::PackageRegistry
+        | ServiceId::ProcessBroker
+        | ServiceId::UpdateInstaller => CapRights::READ_WRITE,
         _ => CapRights::READ_WRITE,
     }
 }
@@ -133,6 +139,7 @@ pub(in crate::ipc::service_ipc) fn default_rights_for(service: ServiceId) -> Cap
 pub(in crate::ipc::service_ipc) fn service_id_from_u64(value: u64) -> Option<ServiceId> {
     match value {
         0 => Some(ServiceId::Directory),
+        13 => Some(ServiceId::NetworkBroker),
         1 => Some(ServiceId::EchDisplay),
         2 => Some(ServiceId::EchInput),
         3 => Some(ServiceId::EchAudio),
@@ -144,6 +151,7 @@ pub(in crate::ipc::service_ipc) fn service_id_from_u64(value: u64) -> Option<Ser
         9 => Some(ServiceId::EchCapture),
         10 => Some(ServiceId::PackageRegistry),
         11 => Some(ServiceId::ProcessBroker),
+        12 => Some(ServiceId::UpdateInstaller),
         _ => None,
     }
 }

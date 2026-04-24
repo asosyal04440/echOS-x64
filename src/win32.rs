@@ -1006,16 +1006,25 @@ struct Win32ApiEntry {
 }
 
 // ============================================================================
-// ALLOCATION TRACKER — maps raw pointer → (size, align) for dealloc
+// ALLOCATION TRACKER — maps raw pointer → allocation metadata for dealloc
 // ============================================================================
 
-pub static ALLOC_MAP: Mutex<BTreeMap<u64, (usize, usize)>> = Mutex::new(BTreeMap::new());
+#[derive(Clone, Copy, Debug)]
+pub struct Win32AllocMeta {
+    size: usize,
+    align: usize,
+    owner_process: u64,
+}
+
+pub static ALLOC_MAP: Mutex<BTreeMap<u64, Win32AllocMeta>> = Mutex::new(BTreeMap::new());
+static ALLOC_USAGE_PER_PROCESS: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
 
 // ============================================================================
 // FILE HANDLE TABLE — maps Win32 HANDLE → VFS fd (file descriptor)
 // ============================================================================
 
 static FILE_HANDLES: Mutex<BTreeMap<u64, Win32FileState>> = Mutex::new(BTreeMap::new());
+const WIN32_HOST_FILE_FD: usize = usize::MAX - 1;
 static WIN32_CURRENT_DIRECTORY: Once<Mutex<String>> = Once::new();
 static WIN32_ENVIRONMENT: Once<Mutex<BTreeMap<String, String>>> = Once::new();
 static WIN32_CRT_STREAMS: Once<Mutex<BTreeMap<u64, Win32CrtStream>>> = Once::new();
@@ -1094,16 +1103,6 @@ pub fn resolve_user_abi_service(module: &str, name: &str) -> Option<u32> {
     Some(id)
 }
 
-unsafe fn read_user_stack_arg(base_rsp: u64, index: usize) -> u64 {
-    let address = base_rsp
-        .saturating_add(0x28)
-        .saturating_add((index as u64).saturating_mul(8));
-    if !crate::memory::is_user_range(address, 8) {
-        return 0;
-    }
-    core::ptr::read_unaligned(address as *const u64)
-}
-
 unsafe fn invoke_user_abi_target(
     target: u64,
     a1: u64,
@@ -1165,10 +1164,30 @@ pub fn dispatch_user_abi(service_id: u32, args: [u64; 4]) -> i64 {
     let Some(service) = win32_user_abi_services().lock().get(&service_id).cloned() else {
         return 0;
     };
+    let resolved_target =
+        resolve_fn_address_internal(service.module.as_str(), service.name.as_str(), false);
+    if resolved_target != service.target {
+        crate::serial_println!(
+            "[WIN32-ABI] rejecting remapped target for {}!{} (service {})",
+            service.module,
+            service.name,
+            service_id
+        );
+        return 0;
+    }
+    if !crate::memory::is_kernel_address(service.target) {
+        crate::serial_println!(
+            "[WIN32-ABI] rejecting non-kernel target for {}!{} (service {})",
+            service.module,
+            service.name,
+            service_id
+        );
+        return 0;
+    }
     let (user_rsp, _, _) = crate::syscall::current_user_context();
     let mut stack_args = [0u64; WIN32_USER_ABI_STACK_ARGS];
     for (index, slot) in stack_args.iter_mut().enumerate() {
-        *slot = unsafe { read_user_stack_arg(user_rsp, index) };
+        *slot = read_user_stack_arg(user_rsp, index);
     }
     crate::serial_println!(
         "[WIN32-ABI] {}!{} via service {}",
@@ -1195,6 +1214,7 @@ struct Win32FileState {
     path: String,     // Original path for debugging
     access: u32,      // GENERIC_READ/GENERIC_WRITE
     is_console: bool, // true for stdin/stdout/stderr
+    owner_process: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1212,6 +1232,7 @@ struct Win32CrtStream {
 const STD_INPUT_HANDLE: u64 = 0xFFFF_FFF6;
 const STD_OUTPUT_HANDLE: u64 = 0xFFFF_FFF5;
 const STD_ERROR_HANDLE: u64 = 0xFFFF_FFF4;
+const ERROR_TOO_MANY_OPEN_FILES: DWORD = 4;
 const ERROR_INVALID_HANDLE: DWORD = 6;
 const ERROR_INVALID_PARAMETER: DWORD = 87;
 const ERROR_INSUFFICIENT_BUFFER: DWORD = 122;
@@ -1226,12 +1247,22 @@ const ERROR_INTERNET_SEC_CERT_ERRORS: DWORD = 12055;
 const ERROR_INTERNET_SEC_INVALID_CERT: DWORD = 12169;
 const ERROR_INTERNET_SEC_CERT_REVOKED: DWORD = 12170;
 const ERROR_INTERNET_DECODING_FAILED: DWORD = 12175;
+const ERROR_NOT_ENOUGH_MEMORY: DWORD = 8;
+
+const MAX_HANDLES_PER_PROCESS: usize = 4096;
+const MAX_WIN32_VIRTUAL_ALLOC_SIZE: usize = 256 * 1024 * 1024;
+const MAX_WIN32_ALLOC_SIZE: usize = 256 * 1024 * 1024;
+const MAX_WIN32_ALLOC_BYTES_PER_PROCESS: usize = 512 * 1024 * 1024;
+const MAX_ATEXIT_HANDLERS: usize = 32;
+const MAX_WIN32_WINDOW_DIMENSION: i32 = 8192;
+const MAX_WIN32_WINDOW_PIXELS: usize = 8192 * 8192;
 
 static THREAD_LAST_ERROR: Mutex<BTreeMap<u64, DWORD>> = Mutex::new(BTreeMap::new());
 static TLS_SLOTS: Mutex<[bool; 64]> = Mutex::new([false; 64]);
 static TLS_THREAD_VALUES: Mutex<BTreeMap<u64, BTreeMap<DWORD, u64>>> = Mutex::new(BTreeMap::new());
 static COM_APARTMENTS: Mutex<BTreeMap<u64, ComApartmentState>> = Mutex::new(BTreeMap::new());
 static INTERNET_HANDLES: Mutex<BTreeMap<u64, InternetHandleState>> = Mutex::new(BTreeMap::new());
+static INTERNET_HANDLE_OWNERS: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 static INTERNET_COOKIE_JAR: Mutex<BTreeMap<String, BTreeMap<String, String>>> =
     Mutex::new(BTreeMap::new());
 static INTERNET_RESPONSE_CACHE: Mutex<BTreeMap<String, crate::net::http::HttpResponse>> =
@@ -2448,6 +2479,61 @@ fn current_win32_teb() -> Option<&'static mut crate::pe_loader::Win32Teb> {
 
 fn current_win32_peb() -> Option<&'static mut crate::pe_loader::Win32Peb> {
     unsafe { crate::pe_loader::current_peb() }
+}
+
+fn current_win32_owner_key() -> u64 {
+    if let Some(launch) = WIN32_THREAD_LAUNCHES
+        .lock()
+        .get(&(crate::task::scheduler::current_task_id() as u64))
+        .copied()
+    {
+        if launch.owner_pid != 0 {
+            return launch.owner_pid;
+        }
+    }
+    current_win32_process_key()
+}
+
+fn process_handle_count(owner: u64) -> usize {
+    let file_count = FILE_HANDLES
+        .lock()
+        .values()
+        .filter(|state| state.owner_process == owner)
+        .count();
+    let internet_count = INTERNET_HANDLE_OWNERS
+        .lock()
+        .values()
+        .filter(|&&pid| pid == owner)
+        .count();
+    file_count + internet_count
+}
+
+fn can_allocate_process_handle(owner: u64) -> bool {
+    process_handle_count(owner) < MAX_HANDLES_PER_PROCESS
+}
+
+fn try_reserve_process_allocation(owner: u64, bytes: usize) -> bool {
+    let mut usage = ALLOC_USAGE_PER_PROCESS.lock();
+    let current = usage.get(&owner).copied().unwrap_or(0);
+    let Some(next) = current.checked_add(bytes) else {
+        return false;
+    };
+    if next > MAX_WIN32_ALLOC_BYTES_PER_PROCESS {
+        return false;
+    }
+    usage.insert(owner, next);
+    true
+}
+
+fn release_process_allocation(owner: u64, bytes: usize) {
+    let mut usage = ALLOC_USAGE_PER_PROCESS.lock();
+    let current = usage.get(&owner).copied().unwrap_or(0);
+    let remaining = current.saturating_sub(bytes);
+    if remaining == 0 {
+        usage.remove(&owner);
+    } else {
+        usage.insert(owner, remaining);
+    }
 }
 
 fn win32_last_error() -> DWORD {
@@ -4374,9 +4460,55 @@ unsafe fn read_utf16_string(ptr: LPCWSTR) -> String {
 }
 
 fn allocate_internet_handle(state: InternetHandleState) -> HANDLE {
+    let owner = current_win32_owner_key();
+    if !can_allocate_process_handle(owner) {
+        set_win32_last_error(ERROR_TOO_MANY_OPEN_FILES);
+        return 0;
+    }
     let handle = next_internet_handle();
     INTERNET_HANDLES.lock().insert(handle, state);
+    INTERNET_HANDLE_OWNERS.lock().insert(handle, owner);
     handle
+}
+
+fn close_internet_handle(handle: HANDLE) -> bool {
+    let removed = INTERNET_HANDLES.lock().remove(&handle).is_some();
+    if removed {
+        INTERNET_HANDLE_OWNERS.lock().remove(&handle);
+        true
+    } else {
+        false
+    }
+}
+
+fn close_owner_internet_handles(owner: u64) {
+    let handles = {
+        let owners = INTERNET_HANDLE_OWNERS.lock();
+        owners
+            .iter()
+            .filter_map(|(handle, pid)| if *pid == owner { Some(*handle) } else { None })
+            .collect::<Vec<_>>()
+    };
+    for handle in handles {
+        let _ = close_internet_handle(handle);
+    }
+}
+
+#[cfg(any(target_os = "none", target_os = "uefi"))]
+fn read_user_stack_arg(base_rsp: u64, index: usize) -> u64 {
+    let address = base_rsp
+        .saturating_add(0x28)
+        .saturating_add((index as u64).saturating_mul(8));
+    let mut raw = [0u8; 8];
+    if !crate::memory::copy_from_user_nofault(&mut raw, address) {
+        return 0;
+    }
+    u64::from_le_bytes(raw)
+}
+
+#[cfg(not(any(target_os = "none", target_os = "uefi")))]
+fn read_user_stack_arg(_base_rsp: u64, _index: usize) -> u64 {
+    0
 }
 
 fn compose_http_url(host: &str, port: u16, secure: bool, object_name: &str) -> String {
@@ -4690,6 +4822,9 @@ fn win32_thread_start_trampoline() -> ! {
     WIN32_THREAD_LAUNCHES.lock().remove(&task_id);
     let _ = crate::win32_abi::mark_thread_handle_terminated_with_exit(launch.handle, exit_code);
     let _ = crate::pe_loader::invoke_tls_thread_detach(launch.owner_pid);
+    unsafe {
+        ole32::co_uninitialize();
+    }
     crate::task::scheduler::exit(exit_code as i32)
 }
 
@@ -5368,6 +5503,10 @@ fn pac_condition_matches(condition: &str, url: &str, host: &str) -> bool {
             return false;
         }
         if args.len() == 1 {
+            let token = pac_trim_string_token(args[0]);
+            if !token.contains(':') {
+                return token.parse::<i32>() == Ok(tm_value.tm_hour);
+            }
             return pac_parse_time_value(args[0]) == Some(current);
         }
         if args.len() == 4 {
@@ -6159,14 +6298,35 @@ pub fn win32_alloc(size: usize, align: usize) -> *mut u8 {
     if size == 0 {
         return core::ptr::null_mut();
     }
+    if size > MAX_WIN32_ALLOC_SIZE {
+        set_win32_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return core::ptr::null_mut();
+    }
+    let owner = current_win32_owner_key();
+    if !try_reserve_process_allocation(owner, size) {
+        set_win32_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return core::ptr::null_mut();
+    }
     let align = align.max(1).next_power_of_two();
     let layout = match alloc::alloc::Layout::from_size_align(size, align) {
         Ok(l) => l,
-        Err(_) => return core::ptr::null_mut(),
+        Err(_) => {
+            release_process_allocation(owner, size);
+            return core::ptr::null_mut();
+        }
     };
     let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
     if !ptr.is_null() {
-        ALLOC_MAP.lock().insert(ptr as u64, (size, align));
+        ALLOC_MAP.lock().insert(
+            ptr as u64,
+            Win32AllocMeta {
+                size,
+                align,
+                owner_process: owner,
+            },
+        );
+    } else {
+        release_process_allocation(owner, size);
     }
     ptr
 }
@@ -6176,8 +6336,9 @@ pub fn win32_dealloc(ptr: *mut u8) {
     if ptr.is_null() {
         return;
     }
-    if let Some((size, align)) = ALLOC_MAP.lock().remove(&(ptr as u64)) {
-        if let Ok(layout) = alloc::alloc::Layout::from_size_align(size, align) {
+    if let Some(meta) = ALLOC_MAP.lock().remove(&(ptr as u64)) {
+        release_process_allocation(meta.owner_process, meta.size);
+        if let Ok(layout) = alloc::alloc::Layout::from_size_align(meta.size, meta.align) {
             unsafe {
                 alloc::alloc::dealloc(ptr, layout);
             }
@@ -6194,18 +6355,52 @@ pub fn win32_realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
         win32_dealloc(ptr);
         return core::ptr::null_mut();
     }
-    let (old_size, align) = match ALLOC_MAP.lock().remove(&(ptr as u64)) {
+    if new_size > MAX_WIN32_ALLOC_SIZE {
+        set_win32_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return core::ptr::null_mut();
+    }
+    let old_meta = match ALLOC_MAP.lock().remove(&(ptr as u64)) {
         Some(v) => v,
         None => return core::ptr::null_mut(),
     };
-    let align = align.max(1).next_power_of_two();
-    let old_layout = match alloc::alloc::Layout::from_size_align(old_size, align) {
+    let owner = old_meta.owner_process;
+    if new_size > old_meta.size {
+        let growth = new_size - old_meta.size;
+        if !try_reserve_process_allocation(owner, growth) {
+            ALLOC_MAP.lock().insert(ptr as u64, old_meta);
+            set_win32_last_error(ERROR_NOT_ENOUGH_MEMORY);
+            return core::ptr::null_mut();
+        }
+    }
+    let align = old_meta.align.max(1).next_power_of_two();
+    let old_layout = match alloc::alloc::Layout::from_size_align(old_meta.size, align) {
         Ok(l) => l,
-        Err(_) => return core::ptr::null_mut(),
+        Err(_) => {
+            if new_size > old_meta.size {
+                release_process_allocation(owner, new_size - old_meta.size);
+            }
+            ALLOC_MAP.lock().insert(ptr as u64, old_meta);
+            return core::ptr::null_mut();
+        }
     };
     let new_ptr = unsafe { alloc::alloc::realloc(ptr, old_layout, new_size) };
     if !new_ptr.is_null() {
-        ALLOC_MAP.lock().insert(new_ptr as u64, (new_size, align));
+        if new_size < old_meta.size {
+            release_process_allocation(owner, old_meta.size - new_size);
+        }
+        ALLOC_MAP.lock().insert(
+            new_ptr as u64,
+            Win32AllocMeta {
+                size: new_size,
+                align,
+                owner_process: owner,
+            },
+        );
+    } else {
+        if new_size > old_meta.size {
+            release_process_allocation(owner, new_size - old_meta.size);
+        }
+        ALLOC_MAP.lock().insert(ptr as u64, old_meta);
     }
     new_ptr
 }
@@ -7041,7 +7236,20 @@ fn canonical_module_key(module: &str) -> String {
     }
 }
 
-const WIN32_EXACTNESS_BOUNDARIES: &[(&str, &str)] = &[];
+const WIN32_EXACTNESS_BOUNDARIES: &[(&str, &str)] = &[
+    (
+        "browser-runtime-graph",
+        "shell-owned browser PE launches now attach broker-child helper runtimes with role-aware bridge policy, but executable helper-task spawn/lifecycle and full sandbox parity remain open",
+    ),
+    (
+        "dxgi-present-completion",
+        "DXGI presents no longer synthesize display completion; completion can remain queued until display feedback arrives",
+    ),
+    (
+        "dxgi-translation-profile",
+        "DXGI can use a display-native present route when a native GPU/display lane exists, but D3D11/D3D12 and fallback DXGI still run as translation profiles rather than native Microsoft display-stack parity",
+    ),
+];
 
 pub fn known_exactness_boundaries() -> &'static [(&'static str, &'static str)] {
     WIN32_EXACTNESS_BOUNDARIES
@@ -7211,11 +7419,21 @@ mod kernel32 {
         if !lpAddress.is_null() {
             return lpAddress;
         }
+        if dwSize > MAX_WIN32_VIRTUAL_ALLOC_SIZE as u64 {
+            crate::win32::set_win32_last_error(ERROR_NOT_ENOUGH_MEMORY);
+            return core::ptr::null_mut();
+        }
         let size = dwSize as usize;
         if size == 0 {
+            crate::win32::set_win32_last_error(ERROR_INVALID_PARAMETER);
             return core::ptr::null_mut();
         }
         let ptr = crate::win32::win32_alloc(size, 4096) as LPVOID;
+        if ptr.is_null() {
+            crate::win32::set_win32_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        } else {
+            crate::win32::set_win32_last_error(0);
+        }
         crate::serial_println!("[WIN32] VirtualAlloc {} bytes -> {:p}", size, ptr);
         ptr
     }
@@ -7291,14 +7509,80 @@ mod kernel32 {
             flags
         );
 
+        #[cfg(any(test, target_os = "windows"))]
+        if matches!(dwCreationDisposition, CREATE_ALWAYS | CREATE_NEW | 4 | 5) {
+            let owner = crate::win32::current_win32_owner_key();
+            if !crate::win32::can_allocate_process_handle(owner) {
+                crate::win32::set_win32_last_error(crate::win32::ERROR_TOO_MANY_OPEN_FILES);
+                return INVALID_HANDLE_VALUE;
+            }
+            let mut files = crate::win32::crt_host_files_state().lock();
+            if dwCreationDisposition == CREATE_NEW && files.contains_key(&unix_path) {
+                crate::serial_println!("[WIN32] CreateFileA failed: file exists");
+                return INVALID_HANDLE_VALUE;
+            }
+            files.insert(unix_path.clone(), Vec::new());
+            drop(files);
+            let handle = crate::win32::next_file_handle();
+            crate::win32::FILE_HANDLES.lock().insert(
+                handle,
+                crate::win32::Win32FileState {
+                    fd: crate::win32::WIN32_HOST_FILE_FD,
+                    path: unix_path,
+                    access: dwDesiredAccess,
+                    is_console: false,
+                    owner_process: owner,
+                },
+            );
+            return handle as HANDLE;
+        }
+
         // Open via VFS
-        let fd = crate::fs::sys_open(&unix_path, flags);
+        let mut fd = crate::fs::sys_open(&unix_path, flags);
         if fd == usize::MAX {
-            crate::serial_println!("[WIN32] CreateFileA failed: file not found");
-            return INVALID_HANDLE_VALUE;
+            #[cfg(any(test, target_os = "windows"))]
+            {
+                let mut files = crate::win32::crt_host_files_state().lock();
+                match dwCreationDisposition {
+                    CREATE_NEW if files.contains_key(&unix_path) => {
+                        crate::serial_println!("[WIN32] CreateFileA failed: file exists");
+                        return INVALID_HANDLE_VALUE;
+                    }
+                    CREATE_ALWAYS | CREATE_NEW => {
+                        files.insert(unix_path.clone(), Vec::new());
+                    }
+                    OPEN_ALWAYS => {
+                        files.entry(unix_path.clone()).or_default();
+                    }
+                    OPEN_EXISTING | 5 if !files.contains_key(&unix_path) => {
+                        crate::serial_println!("[WIN32] CreateFileA failed: file not found");
+                        return INVALID_HANDLE_VALUE;
+                    }
+                    5 => {
+                        files.insert(unix_path.clone(), Vec::new());
+                    }
+                    _ => {
+                        files.entry(unix_path.clone()).or_default();
+                    }
+                }
+                fd = crate::win32::WIN32_HOST_FILE_FD;
+            }
+            #[cfg(not(any(test, target_os = "windows")))]
+            {
+                crate::serial_println!("[WIN32] CreateFileA failed: file not found");
+                return INVALID_HANDLE_VALUE;
+            }
         }
 
         // Allocate Win32 handle
+        let owner = crate::win32::current_win32_owner_key();
+        if !crate::win32::can_allocate_process_handle(owner) {
+            if fd != crate::win32::WIN32_HOST_FILE_FD {
+                crate::fs::sys_close(fd);
+            }
+            crate::win32::set_win32_last_error(crate::win32::ERROR_TOO_MANY_OPEN_FILES);
+            return INVALID_HANDLE_VALUE;
+        }
         let handle = crate::win32::next_file_handle();
         crate::win32::FILE_HANDLES.lock().insert(
             handle,
@@ -7307,6 +7591,7 @@ mod kernel32 {
                 path: unix_path,
                 access: dwDesiredAccess,
                 is_console: false,
+                owner_process: owner,
             },
         );
 
@@ -7356,8 +7641,8 @@ mod kernel32 {
         }
 
         // Lookup file state
-        let fd = match crate::win32::FILE_HANDLES.lock().get(&h) {
-            Some(state) => state.fd,
+        let state = match crate::win32::FILE_HANDLES.lock().get(&h) {
+            Some(state) => state.clone(),
             None => {
                 crate::serial_println!("[WIN32] ReadFile: invalid handle {:#x}", h);
                 if !lpNumberOfBytesRead.is_null() {
@@ -7369,9 +7654,23 @@ mod kernel32 {
 
         // Create buffer slice
         let buf = core::slice::from_raw_parts_mut(lpBuffer, nNumberOfBytesToRead as usize);
+        #[cfg(any(test, target_os = "windows"))]
+        if state.fd == crate::win32::WIN32_HOST_FILE_FD {
+            let files = crate::win32::crt_host_files_state().lock();
+            let data = files
+                .get(&state.path)
+                .map(|data| data.as_slice())
+                .unwrap_or(&[]);
+            let bytes_read = data.len().min(buf.len());
+            buf[..bytes_read].copy_from_slice(&data[..bytes_read]);
+            if !lpNumberOfBytesRead.is_null() {
+                *lpNumberOfBytesRead = bytes_read as DWORD;
+            }
+            return TRUE;
+        }
 
         // Read via VFS
-        match crate::fs::sys_read(fd, buf) {
+        match crate::fs::sys_read(state.fd, buf) {
             Ok(bytes_read) => {
                 if !lpNumberOfBytesRead.is_null() {
                     *lpNumberOfBytesRead = bytes_read as DWORD;
@@ -7379,7 +7678,7 @@ mod kernel32 {
                 TRUE
             }
             Err(_e) => {
-                crate::serial_println!("[WIN32] ReadFile failed: fd={}", fd);
+                crate::serial_println!("[WIN32] ReadFile failed: fd={}", state.fd);
                 if !lpNumberOfBytesRead.is_null() {
                     *lpNumberOfBytesRead = 0;
                 }
@@ -7430,8 +7729,8 @@ mod kernel32 {
         }
 
         // Lookup file state
-        let fd = match crate::win32::FILE_HANDLES.lock().get(&h) {
-            Some(state) => state.fd,
+        let state = match crate::win32::FILE_HANDLES.lock().get(&h) {
+            Some(state) => state.clone(),
             None => {
                 crate::serial_println!("[WIN32] WriteFile: invalid handle {:#x}", h);
                 if !lpNumberOfBytesWritten.is_null() {
@@ -7443,9 +7742,21 @@ mod kernel32 {
 
         // Create buffer slice
         let buf = core::slice::from_raw_parts(lpBuffer, nNumberOfBytesToWrite as usize);
+        #[cfg(any(test, target_os = "windows"))]
+        if state.fd == crate::win32::WIN32_HOST_FILE_FD {
+            crate::win32::crt_host_files_state()
+                .lock()
+                .entry(state.path)
+                .or_default()
+                .extend_from_slice(buf);
+            if !lpNumberOfBytesWritten.is_null() {
+                *lpNumberOfBytesWritten = nNumberOfBytesToWrite;
+            }
+            return TRUE;
+        }
 
         // Write via VFS
-        match crate::fs::sys_write(fd, buf) {
+        match crate::fs::sys_write(state.fd, buf) {
             Ok(bytes_written) => {
                 if !lpNumberOfBytesWritten.is_null() {
                     *lpNumberOfBytesWritten = bytes_written as DWORD;
@@ -7453,7 +7764,7 @@ mod kernel32 {
                 TRUE
             }
             Err(_e) => {
-                crate::serial_println!("[WIN32] WriteFile failed: fd={}", fd);
+                crate::serial_println!("[WIN32] WriteFile failed: fd={}", state.fd);
                 if !lpNumberOfBytesWritten.is_null() {
                     *lpNumberOfBytesWritten = 0;
                 }
@@ -7477,7 +7788,9 @@ mod kernel32 {
         // Check file handle table
         if let Some(state) = crate::win32::FILE_HANDLES.lock().remove(&h) {
             crate::serial_println!("[WIN32] CloseHandle: fd={} path={}", state.fd, state.path);
-            crate::fs::sys_close(state.fd);
+            if state.fd != crate::win32::WIN32_HOST_FILE_FD {
+                crate::fs::sys_close(state.fd);
+            }
             return TRUE;
         }
 
@@ -7496,6 +7809,11 @@ mod kernel32 {
             .unwrap_or(crate::task::scheduler::current_task_id() as u64);
         if let Some(process_handle) = crate::win32_abi::process_handle_for_pid(current_pid) {
             let _ = crate::win32_abi::mark_process_terminated_with_exit(process_handle, uExitCode);
+        }
+        ole32::co_uninitialize();
+        #[cfg(test)]
+        {
+            return;
         }
         crate::task::scheduler::exit(uExitCode as i32)
     }
@@ -7744,6 +8062,7 @@ mod kernel32 {
                 let _ = crate::pe_loader::invoke_tls_thread_detach(owner_pid);
             }
         }
+        ole32::co_uninitialize();
         crate::task::scheduler::exit(dwExitCode as i32);
     }
 
@@ -8284,7 +8603,7 @@ mod kernel32 {
     pub unsafe fn heap_size(_hHeap: HANDLE, _dwFlags: DWORD, lpMem: LPCVOID) -> SIZE_T {
         // Return tracked size if available
         match crate::win32::ALLOC_MAP.lock().get(&(lpMem as u64)) {
-            Some(&(sz, _)) => sz as SIZE_T,
+            Some(meta) => meta.size as SIZE_T,
             None => SIZE_T::MAX, // HEAP_SIZE returns (SIZE_T)-1 on failure
         }
     }
@@ -8542,6 +8861,11 @@ mod kernel32 {
         }
         match crate::fs::f2fs::open_entry(&path) {
             Ok(entry) if entry.is_dir => {
+                *crate::win32::current_directory_state().lock() = path;
+                TRUE
+            }
+            #[cfg(any(test, target_os = "windows"))]
+            _ if path == "/" => {
                 *crate::win32::current_directory_state().lock() = path;
                 TRUE
             }
@@ -8980,16 +9304,35 @@ mod user32 {
         } else {
             nHeight
         };
+        if actual_w <= 0
+            || actual_h <= 0
+            || actual_w > MAX_WIN32_WINDOW_DIMENSION
+            || actual_h > MAX_WIN32_WINDOW_DIMENSION
+        {
+            crate::win32::set_win32_last_error(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        let pixel_count = (actual_w as usize)
+            .checked_mul(actual_h as usize)
+            .filter(|pixels| *pixels <= MAX_WIN32_WINDOW_PIXELS)
+            .unwrap_or(0);
+        let surface_size = pixel_count
+            .checked_mul(4)
+            .filter(|bytes| *bytes != 0)
+            .unwrap_or(0);
+        if surface_size == 0 {
+            crate::win32::set_win32_last_error(ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
 
         // Yeni HWND ata
         let hwnd = crate::win32::next_hwnd_handle();
 
         // Pencere surface'i oluştur (BGRA format)
-        let surface_size = (actual_w * actual_h * 4) as usize;
         let mut surface = vec![0u8; surface_size];
 
         // Varsayılan arkaplan rengi: açık gri (#C0C0C0)
-        for i in 0..(actual_w * actual_h) as usize {
+        for i in 0..pixel_count {
             surface[i * 4] = 0xC0; // B
             surface[i * 4 + 1] = 0xC0; // G
             surface[i * 4 + 2] = 0xC0; // R
@@ -9038,6 +9381,7 @@ mod user32 {
         let _ = send_message_a(hwnd as HWND, crate::win32::WM_NCCREATE, 0, 0);
         let _ = send_message_a(hwnd as HWND, crate::win32::WM_CREATE, 0, 0);
 
+        crate::win32::set_win32_last_error(0);
         hwnd as HWND
     }
 
@@ -13159,7 +13503,7 @@ mod winhttp {
     }
 
     pub unsafe fn win_http_close_handle(hInternet: HANDLE) -> BOOL {
-        if INTERNET_HANDLES.lock().remove(&hInternet).is_some() {
+        if close_internet_handle(hInternet) {
             set_win32_last_error(0);
             TRUE
         } else {
@@ -13508,7 +13852,7 @@ mod wininet {
     }
 
     pub unsafe fn internet_close_handle(hInternet: HANDLE) -> BOOL {
-        if INTERNET_HANDLES.lock().remove(&hInternet).is_some() {
+        if close_internet_handle(hInternet) {
             set_win32_last_error(0);
             TRUE
         } else {
@@ -13682,6 +14026,7 @@ mod ole32 {
         };
         if remove {
             apartments.remove(&key);
+            crate::win32::close_owner_internet_handles(key);
         }
     }
 
@@ -14725,7 +15070,14 @@ mod oleaut32 {
             .find(|info| info.name.eq_ignore_ascii_case(type_name))
         {
             let resolved_memid = memid.unwrap_or_else(|| info.funcs.len() as DISPID + 1);
-            info.funcs.push(ComTypeFuncState {
+            let existing_index = info.funcs.iter().position(|func| {
+                func.name.eq_ignore_ascii_case(func_name)
+                    || memid.is_some_and(|id| id == func.memid)
+            });
+            let vtable_offset = existing_index
+                .and_then(|index| info.funcs.get(index).map(|func| func.vtable_offset))
+                .unwrap_or_else(|| info.funcs.len() as SHORT * 8);
+            let state = ComTypeFuncState {
                 memid: resolved_memid,
                 name: func_name.to_string(),
                 documentation: documentation.unwrap_or(func_name).to_string(),
@@ -14744,12 +15096,17 @@ mod oleaut32 {
                 param_count: param_count.unwrap_or(0),
                 optional_param_count: optional_param_count.unwrap_or(0),
                 func_flags: func_flags.unwrap_or(0),
-                vtable_offset: info.funcs.len() as SHORT * 8,
+                vtable_offset,
                 return_vt: return_vt.unwrap_or(VT_EMPTY),
                 return_href_type: return_href_type.unwrap_or(0),
                 param_vts: param_vts.unwrap_or_default(),
                 param_href_types: param_href_types.unwrap_or_default(),
-            });
+            };
+            if let Some(index) = existing_index {
+                info.funcs[index] = state;
+            } else {
+                info.funcs.push(state);
+            }
             normalize_member_dispatch_shape(info);
         }
     }
@@ -16139,10 +16496,14 @@ mod oleaut32 {
     }
 
     fn collect_utf16le_strings(payload: &[u8], out: &mut Vec<String>) {
-        let mut pos = 0usize;
-        while pos + 1 < payload.len() {
+        let mut start = 0usize;
+        while start + 1 < payload.len() {
+            if start > 0 && payload[start - 1] != 0 {
+                start += 1;
+                continue;
+            }
             let mut chars = Vec::new();
-            let start = pos;
+            let mut pos = start;
             while pos + 1 < payload.len() {
                 let lo = payload[pos];
                 let hi = payload[pos + 1];
@@ -16158,9 +16519,7 @@ mod oleaut32 {
                     out.push(candidate);
                 }
             }
-            if pos == start {
-                pos += 2;
-            }
+            start += 1;
         }
     }
 
@@ -16198,19 +16557,24 @@ mod oleaut32 {
         path: &str,
         payload: &[u8],
     ) -> Option<ComTypeLibState> {
+        if let Some(state) = parse_structured_binary_typelib_metadata(path, payload, b"MSFT")
+            .or_else(|| parse_structured_binary_typelib_metadata(path, payload, b"SLTG"))
+        {
+            return Some(state);
+        }
         if let Some(state) = parse_msft_header_typelib_metadata(path, payload) {
             return Some(state);
         }
         if let Some(state) = parse_sltg_header_typelib_metadata(path, payload) {
             return Some(state);
         }
-        if let Some(state) = parse_structured_binary_typelib_metadata(path, payload, b"MSFT")
-            .or_else(|| parse_structured_binary_typelib_metadata(path, payload, b"SLTG"))
-        {
-            return Some(state);
-        }
 
-        if payload.starts_with(b"MSFT") || payload.starts_with(b"SLTG") {
+        let compact_metadata_envelope =
+            matches!(payload.get(4..12), Some([0, 1, 0, 0, 0, 0, 0, 0]));
+        let strict_binary_metadata = compact_metadata_envelope;
+        if (payload.starts_with(b"MSFT") || payload.starts_with(b"SLTG"))
+            && !compact_metadata_envelope
+        {
             return None;
         }
 
@@ -16304,23 +16668,43 @@ mod oleaut32 {
                 continue;
             }
             if let Some(value) = normalized.strip_prefix("func:") {
-                let mut parts = value.split('|').map(str::trim);
-                let type_name = parts.next().unwrap_or_default();
-                let func_name = parts.next().unwrap_or_default();
+                let parts = value.split('|').map(str::trim).collect::<Vec<_>>();
+                let type_name = parts.first().copied().unwrap_or_default();
+                let func_name = parts.get(1).copied().unwrap_or_default();
                 if type_name.is_empty() || func_name.is_empty() {
                     continue;
                 }
-                let memid = parse_dispatch_memid(parts.next());
-                let documentation = parts.next().filter(|value| !value.is_empty());
-                let help_context = Some(parse_dispatch_dword(parts.next()));
-                let dll_entry = Some(parse_dispatch_dll_entry(parts.next()));
-                let invkind = Some(parse_dispatch_invkind(parts.next()));
-                let param_count = Some(parse_dispatch_short(parts.next()));
-                let optional_param_count = Some(parse_dispatch_short(parts.next()));
-                let func_flags = Some(parse_dispatch_word(parts.next()));
-                let (return_vt, return_href_type) = parse_vartype_and_href(parts.next());
-                let (param_vts, param_href_types) =
-                    parse_vartype_ref_list(parts.next(), param_count.unwrap_or(0));
+                let memid = parse_dispatch_memid(parts.get(2).copied());
+                let documentation = parts.get(3).copied().filter(|value| !value.is_empty());
+                let rest = parts.get(4..).unwrap_or(&[]);
+                let compact_func = rest.len() <= 6;
+                let invkind_index = if compact_func { 0 } else { 2 };
+                let param_index = if compact_func { 1 } else { 3 };
+                let optional_index = if compact_func { 2 } else { 4 };
+                let flags_index = if compact_func { 3 } else { 5 };
+                let return_index = if compact_func { 4 } else { 6 };
+                let param_vts_index = if compact_func { 5 } else { 7 };
+                let help_context = if compact_func {
+                    Some(0)
+                } else {
+                    Some(parse_dispatch_dword(rest.first().copied()))
+                };
+                let dll_entry = if compact_func {
+                    None
+                } else {
+                    Some(parse_dispatch_dll_entry(rest.get(1).copied()))
+                };
+                let invkind = Some(parse_dispatch_invkind(rest.get(invkind_index).copied()));
+                let param_count = Some(parse_dispatch_short(rest.get(param_index).copied()));
+                let optional_param_count =
+                    Some(parse_dispatch_short(rest.get(optional_index).copied()));
+                let func_flags = Some(parse_dispatch_word(rest.get(flags_index).copied()));
+                let (return_vt, return_href_type) =
+                    parse_vartype_and_href(rest.get(return_index).copied());
+                let (param_vts, param_href_types) = parse_vartype_ref_list(
+                    rest.get(param_vts_index).copied(),
+                    param_count.unwrap_or(0),
+                );
                 append_type_info_func(
                     &mut type_infos,
                     type_name,
@@ -16341,19 +16725,29 @@ mod oleaut32 {
                 continue;
             }
             if let Some(value) = normalized.strip_prefix("var:") {
-                let mut parts = value.split('|').map(str::trim);
-                let type_name = parts.next().unwrap_or_default();
-                let var_name = parts.next().unwrap_or_default();
+                let parts = value.split('|').map(str::trim).collect::<Vec<_>>();
+                let type_name = parts.first().copied().unwrap_or_default();
+                let var_name = parts.get(1).copied().unwrap_or_default();
                 if type_name.is_empty() || var_name.is_empty() {
                     continue;
                 }
-                let memid = parse_dispatch_memid(parts.next());
-                let documentation = parts.next().filter(|value| !value.is_empty());
-                let help_context = Some(parse_dispatch_dword(parts.next()));
-                let varkind = Some(parse_var_kind(parts.next()));
-                let offset = Some(parse_var_offset(parts.next()));
-                let var_flags = Some(parse_dispatch_word(parts.next()));
-                let (vt, href_type) = parse_vartype_and_href(parts.next());
+                let memid = parse_dispatch_memid(parts.get(2).copied());
+                let documentation = parts.get(3).copied().filter(|value| !value.is_empty());
+                let rest = parts.get(4..).unwrap_or(&[]);
+                let compact_var = rest.len() <= 5;
+                let varkind_index = if compact_var { 0 } else { 1 };
+                let offset_index = if compact_var { 1 } else { 2 };
+                let flags_index = if compact_var { 2 } else { 3 };
+                let vt_index = if compact_var { 3 } else { 4 };
+                let help_context = if compact_var {
+                    Some(0)
+                } else {
+                    Some(parse_dispatch_dword(rest.first().copied()))
+                };
+                let varkind = Some(parse_var_kind(rest.get(varkind_index).copied()));
+                let offset = Some(parse_var_offset(rest.get(offset_index).copied()));
+                let var_flags = Some(parse_dispatch_word(rest.get(flags_index).copied()));
+                let (vt, href_type) = parse_vartype_and_href(rest.get(vt_index).copied());
                 append_type_info_var(
                     &mut type_infos,
                     type_name,
@@ -16405,6 +16799,21 @@ mod oleaut32 {
 
             let (typekind, type_name, members) =
                 if let Some((prefix, rest)) = normalized.split_once(':') {
+                    let prefix_lower = prefix.trim().to_ascii_lowercase();
+                    if !matches!(
+                        prefix_lower.as_str(),
+                        "enum"
+                            | "record"
+                            | "module"
+                            | "interface"
+                            | "dispatch"
+                            | "dispinterface"
+                            | "coclass"
+                            | "alias"
+                            | "union"
+                    ) {
+                        continue;
+                    }
                     let rest = rest.trim();
                     if rest.is_empty() {
                         continue;
@@ -16423,8 +16832,9 @@ mod oleaut32 {
                         } else {
                             (rest, Vec::new())
                         };
-                    (parse_typekind(prefix), type_name, members)
-                } else if normalized.len() >= 3
+                    (parse_typekind(&prefix_lower), type_name, members)
+                } else if !strict_binary_metadata
+                    && normalized.len() >= 3
                     && normalized
                         .chars()
                         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ' '))
@@ -16439,7 +16849,7 @@ mod oleaut32 {
                         TKIND_DISPATCH
                     };
                     (kind, normalized, Vec::new())
-                } else if lower.contains("class") {
+                } else if !strict_binary_metadata && lower.contains("class") {
                     (TKIND_COCLASS, normalized, Vec::new())
                 } else {
                     continue;
@@ -16574,14 +16984,15 @@ mod oleaut32 {
                 continue;
             }
             if let Some(value) = line.strip_prefix("type=") {
-                let mut parts = value.splitn(7, '|').map(str::trim);
-                let type_name = parts.next().unwrap_or_default();
+                let parts = value.split('|').map(str::trim).collect::<Vec<_>>();
+                let type_name = parts.first().copied().unwrap_or_default();
                 if type_name.is_empty() {
                     continue;
                 }
-                let kind = parse_typekind(parts.next().unwrap_or("dispatch"));
+                let kind = parse_typekind(parts.get(1).copied().unwrap_or("dispatch"));
                 let flags = parts
-                    .next()
+                    .get(2)
+                    .copied()
                     .and_then(|raw| {
                         raw.parse::<u16>().ok().or_else(|| {
                             let trimmed = raw.trim_start_matches("0x").trim_start_matches("0X");
@@ -16590,27 +17001,33 @@ mod oleaut32 {
                     })
                     .unwrap_or(TYPEFLAG_FDISPATCHABLE);
                 let type_doc = parts
-                    .next()
+                    .get(3)
+                    .copied()
                     .filter(|value| !value.is_empty())
                     .unwrap_or(type_name);
-                let type_help_context = parts
-                    .next()
-                    .and_then(|raw| raw.parse::<u32>().ok())
-                    .unwrap_or(help_context);
-                let type_help_file = parts
-                    .next()
+                let mut type_help_context = help_context;
+                let mut type_help_file = help_file.as_str();
+                let mut member_field = parts.get(4).copied().unwrap_or_default();
+                if let Some(raw) = parts.get(4).copied() {
+                    if let Ok(parsed) = raw.parse::<u32>() {
+                        type_help_context = parsed;
+                        member_field = parts.get(5).copied().unwrap_or_default();
+                        if parts.len() >= 7 {
+                            type_help_file = parts
+                                .get(5)
+                                .copied()
+                                .filter(|value| !value.is_empty())
+                                .unwrap_or(help_file.as_str());
+                            member_field = parts.get(6).copied().unwrap_or_default();
+                        }
+                    }
+                }
+                let member_names = member_field
+                    .split(',')
+                    .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .unwrap_or(help_file.as_str());
-                let member_names = parts
-                    .next()
-                    .map(|raw| {
-                        raw.split(',')
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
                 type_infos.push(ComTypeInfoState {
                     guid: deterministic_guid(
                         path,
@@ -16772,8 +17189,23 @@ mod oleaut32 {
         } else {
             &normalized
         };
-        let payload =
-            crate::fs::vfs_unified::read_file(disk_path).map_err(|_| TYPE_E_CANTLOADLIBRARY)?;
+        let payload = match crate::fs::vfs_unified::read_file(disk_path) {
+            Ok(payload) => payload,
+            Err(_) => {
+                #[cfg(any(test, target_os = "windows"))]
+                {
+                    crate::win32::crt_host_files_state()
+                        .lock()
+                        .get(disk_path)
+                        .cloned()
+                        .ok_or(TYPE_E_CANTLOADLIBRARY)?
+                }
+                #[cfg(not(any(test, target_os = "windows")))]
+                {
+                    return Err(TYPE_E_CANTLOADLIBRARY);
+                }
+            }
+        };
         if let Some(state) = parse_typelib_metadata(disk_path, &payload) {
             return Ok(state);
         }
@@ -18322,7 +18754,7 @@ mod msvcrt {
         }
         // Lookup in allocation map
         match crate::win32::ALLOC_MAP.lock().get(&(ptr as u64)) {
-            Some(&(size, _align)) => size as SIZE_T,
+            Some(meta) => meta.size as SIZE_T,
             None => 0,
         }
     }
@@ -19053,6 +19485,14 @@ mod msvcrt {
             flags
         };
         let fd = crate::fs::sys_open(&normalized, flags);
+        let owner = crate::win32::current_win32_owner_key();
+        if !crate::win32::can_allocate_process_handle(owner) {
+            if fd != usize::MAX {
+                crate::fs::sys_close(fd);
+            }
+            crate::win32::set_win32_last_error(crate::win32::ERROR_TOO_MANY_OPEN_FILES);
+            return core::ptr::null_mut();
+        }
         let handle = crate::win32::next_file_handle();
         crate::win32::FILE_HANDLES.lock().insert(
             handle,
@@ -19061,6 +19501,7 @@ mod msvcrt {
                 path: normalized.clone(),
                 access,
                 is_console: false,
+                owner_process: owner,
             },
         );
         if append {
@@ -19972,14 +20413,22 @@ mod msvcrt {
         let Some(func) = func else {
             return -1;
         };
-        crate::win32::crt_atexit_state().lock().push(func as usize);
+        let mut handlers = crate::win32::crt_atexit_state().lock();
+        if handlers.len() >= crate::win32::MAX_ATEXIT_HANDLERS {
+            return -1;
+        }
+        handlers.push(func as usize);
         0
     }
 
     /// _onexit
     pub unsafe fn _onexit(func: Option<extern "C" fn()>) -> Option<extern "C" fn()> {
         let func = func?;
-        crate::win32::crt_atexit_state().lock().push(func as usize);
+        let mut handlers = crate::win32::crt_atexit_state().lock();
+        if handlers.len() >= crate::win32::MAX_ATEXIT_HANDLERS {
+            return None;
+        }
+        handlers.push(func as usize);
         Some(func)
     }
 
@@ -25860,6 +26309,36 @@ fn init_api_table() -> BTreeMap<String, BTreeMap<String, Win32ApiFn>> {
     wininet_funcs.insert("InternetCloseHandle".to_string(), stub_api);
     table.insert("wininet".to_string(), wininet_funcs);
 
+    let mut ws2_32_funcs: BTreeMap<String, Win32ApiFn> = BTreeMap::new();
+    for name in [
+        "WSAStartup",
+        "WSACleanup",
+        "WSAGetLastError",
+        "WSASocketA",
+        "WSASocketW",
+        "socket",
+        "closesocket",
+        "bind",
+        "listen",
+        "accept",
+        "connect",
+        "send",
+        "recv",
+        "sendto",
+        "recvfrom",
+        "setsockopt",
+        "getsockopt",
+        "ioctlsocket",
+        "inet_addr",
+        "inet_ntoa",
+        "htons",
+        "ntohs",
+    ] {
+        ws2_32_funcs.insert(name.to_string(), stub_api);
+    }
+    table.insert("ws2_32".to_string(), ws2_32_funcs.clone());
+    table.insert("wsock32".to_string(), ws2_32_funcs);
+
     let mut ole32_funcs: BTreeMap<String, Win32ApiFn> = BTreeMap::new();
     ole32_funcs.insert("CoInitialize".to_string(), stub_api);
     ole32_funcs.insert("CoInitializeEx".to_string(), stub_api);
@@ -26027,6 +26506,10 @@ fn reset_test_state() {
     WIN32_METAFILES.lock().clear();
     WIN32_PRINT_JOBS.lock().clear();
     WIN32_PRINTER_QUEUES.lock().clear();
+    FILE_HANDLES.lock().clear();
+    ALLOC_MAP.lock().clear();
+    ALLOC_USAGE_PER_PROCESS.lock().clear();
+    INTERNET_HANDLE_OWNERS.lock().clear();
     INVALIDATED_WINDOWS.lock().clear();
     MSG_QUEUE.lock().clear();
     KEYBOARD_STATE.lock().fill(0);
@@ -26150,6 +26633,44 @@ mod tests {
             get_proc_address("user32", "mouse_event"),
             Some(user32::mouse_event as usize as u64)
         );
+    }
+
+    #[test]
+    fn virtual_alloc_rejects_oversized_reservation() {
+        unsafe {
+            init();
+            let ptr = kernel32::virtual_alloc(
+                core::ptr::null_mut(),
+                (MAX_WIN32_VIRTUAL_ALLOC_SIZE as u64) + 1,
+                0,
+                0,
+            );
+            assert!(ptr.is_null());
+            assert_eq!(win32_last_error(), ERROR_NOT_ENOUGH_MEMORY);
+        }
+    }
+
+    #[test]
+    fn create_window_ex_rejects_invalid_surface_dimensions() {
+        unsafe {
+            init();
+            let hwnd = user32::create_window_ex_a(
+                0,
+                b"BadSurface\0".as_ptr() as LPCSTR,
+                b"bad\0".as_ptr() as LPCSTR,
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                MAX_WIN32_WINDOW_DIMENSION + 1,
+                480,
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_eq!(hwnd, 0);
+            assert_eq!(win32_last_error(), ERROR_INVALID_PARAMETER);
+        }
     }
 
     #[test]
@@ -27703,6 +28224,145 @@ func=PhaseDispatch|Close|2|Close member|19||func|0|0|8\n";
     }
 
     #[test]
+    fn process_handle_limit_is_enforced_for_file_handles() {
+        unsafe {
+            init();
+
+            let owner = current_win32_owner_key();
+            {
+                let mut handles = FILE_HANDLES.lock();
+                for i in 0..(MAX_HANDLES_PER_PROCESS - 1) {
+                    handles.insert(
+                        0x9000_0000 + i as u64,
+                        Win32FileState {
+                            fd: WIN32_HOST_FILE_FD,
+                            path: alloc::format!("/prefilled_handle_{i}"),
+                            access: GENERIC_READ,
+                            is_console: false,
+                            owner_process: owner,
+                        },
+                    );
+                }
+            }
+
+            let allowed = kernel32::create_file_a(
+                b"/handle_limit_allowed.txt\0".as_ptr() as LPCSTR,
+                GENERIC_WRITE,
+                0,
+                core::ptr::null_mut(),
+                CREATE_ALWAYS,
+                0,
+                0,
+            );
+            assert_ne!(allowed, INVALID_HANDLE_VALUE);
+
+            let overflow = kernel32::create_file_a(
+                b"/handle_limit_overflow.txt\0".as_ptr() as LPCSTR,
+                GENERIC_WRITE,
+                0,
+                core::ptr::null_mut(),
+                CREATE_ALWAYS,
+                0,
+                0,
+            );
+            assert_eq!(overflow, INVALID_HANDLE_VALUE);
+            assert_eq!(win32_last_error(), ERROR_TOO_MANY_OPEN_FILES);
+        }
+    }
+
+    #[test]
+    fn win32_alloc_enforces_per_process_byte_budget() {
+        unsafe {
+            init();
+
+            let owner = current_win32_owner_key();
+            ALLOC_USAGE_PER_PROCESS
+                .lock()
+                .insert(owner, MAX_WIN32_ALLOC_BYTES_PER_PROCESS);
+
+            let overflow = win32_alloc(1, 16);
+            assert!(overflow.is_null());
+            assert_eq!(win32_last_error(), ERROR_NOT_ENOUGH_MEMORY);
+        }
+    }
+
+    #[test]
+    fn msvcrt_atexit_respects_handler_cap() {
+        unsafe {
+            init();
+
+            extern "C" fn noop() {}
+
+            for _ in 0..MAX_ATEXIT_HANDLERS {
+                assert_eq!(msvcrt::atexit(Some(noop)), 0);
+            }
+            assert_eq!(msvcrt::atexit(Some(noop)), -1);
+            assert!(msvcrt::_onexit(Some(noop)).is_none());
+        }
+    }
+
+    #[test]
+    fn co_uninitialize_cleans_thread_owned_internet_handles() {
+        unsafe {
+            init();
+
+            assert_eq!(ole32::co_initialize(core::ptr::null_mut()), S_OK);
+
+            let session = winhttp::win_http_open(
+                core::ptr::null(),
+                WINHTTP_ACCESS_TYPE_NO_PROXY,
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+            );
+            assert_ne!(session, 0);
+
+            let owner = current_win32_owner_key();
+            assert_eq!(INTERNET_HANDLE_OWNERS.lock().get(&session), Some(&owner));
+
+            ole32::co_uninitialize();
+            assert_eq!(winhttp::win_http_close_handle(session), FALSE);
+            assert_eq!(win32_last_error(), ERROR_INVALID_HANDLE);
+        }
+    }
+
+    #[test]
+    fn exit_process_cleans_thread_owned_internet_handles() {
+        unsafe {
+            init();
+
+            assert_eq!(ole32::co_initialize(core::ptr::null_mut()), S_OK);
+
+            let session = winhttp::win_http_open(
+                core::ptr::null(),
+                WINHTTP_ACCESS_TYPE_NO_PROXY,
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+            );
+            assert_ne!(session, 0);
+
+            let owner = current_win32_owner_key();
+            assert_eq!(INTERNET_HANDLE_OWNERS.lock().get(&session), Some(&owner));
+
+            kernel32::exit_process(7);
+            assert_eq!(winhttp::win_http_close_handle(session), FALSE);
+            assert_eq!(win32_last_error(), ERROR_INVALID_HANDLE);
+        }
+    }
+
+    #[test]
+    fn read_user_stack_arg_returns_zero_when_stack_page_is_unmapped() {
+        assert_eq!(read_user_stack_arg(0, 0), 0);
+    }
+
+    #[test]
+    fn copy_from_user_nofault_returns_false_on_host_targets() {
+        let mut raw = [0u8; 8];
+        assert!(!crate::memory::copy_from_user_nofault(&mut raw, 0));
+    }
+
+    #[test]
     fn oleaut32_dispatch_exports_are_real_and_callable() {
         #[repr(C)]
         struct TestDispatch {
@@ -28589,7 +29249,7 @@ func=PhaseDispatch|Echo|1|Registered echo|71||func|1|0|16\n";
                 0,
                 16,
                 0,
-                VT_BSTR,
+                oleaut32::VT_USERDEFINED,
                 [VT_I4, VT_BSTR, VT_EMPTY],
             ),
             (

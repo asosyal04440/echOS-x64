@@ -36,6 +36,7 @@
 //!  └────────────────────────────────────────┘
 //! ```
 
+use crate::allocator::doctrine::{alloc_surface_pixels, SurfacePixelBuffer, SurfacePixelFormat};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -57,6 +58,9 @@ pub mod gpu_compute;
 
 /// DPI Scaling System — resolution-aware scaling for high-DPI displays
 pub mod scaling;
+
+/// Image decode and resize helpers for shell surfaces
+pub mod image_assets;
 
 /// Animasyonlu duvar kağıdı motoru
 pub mod wallpaper;
@@ -80,13 +84,13 @@ pub struct Surface {
     pub width: usize,
     pub height: usize,
     pub stride: usize,
-    pub buffer: Vec<u32>,
+    pub buffer: SurfacePixelBuffer,
 }
 
 impl Surface {
     /// Her pikseli sabit renkle doldurur.
     pub fn fill(&mut self, color: u32) {
-        for p in self.buffer.iter_mut() {
+        for p in self.buffer.as_mut_slice().iter_mut() {
             *p = color;
         }
     }
@@ -117,8 +121,8 @@ impl Surface {
             let dst_row = dy as usize * self.stride;
             for dx in clip_x0..clip_x1 {
                 let sx = dx - dst_x;
-                let src_px = src.buffer[src_row + sx as usize];
-                let dst_px = self.buffer[dst_row + dx as usize];
+                let src_px = src.buffer.as_slice()[src_row + sx as usize];
+                let dst_px = self.buffer.as_slice()[dst_row + dx as usize];
                 // Kaynak pikselin kendi alpha değeri varsa (ARGB formatı bit 31..24)
                 // etkin alpha = kaynak_alpha × opacity / 255 şeklinde hesaplanır
                 let src_a = ((src_px >> 24) & 0xFF) as u32;
@@ -127,7 +131,8 @@ impl Surface {
                 let r = (((src_px >> 16) & 0xFF) * eff_a + ((dst_px >> 16) & 0xFF) * eff_inv) / 255;
                 let g = (((src_px >> 8) & 0xFF) * eff_a + ((dst_px >> 8) & 0xFF) * eff_inv) / 255;
                 let b = ((src_px & 0xFF) * eff_a + (dst_px & 0xFF) * eff_inv) / 255;
-                self.buffer[dst_row + dx as usize] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                self.buffer.as_mut_slice()[dst_row + dx as usize] =
+                    0xFF000000 | (r << 16) | (g << 8) | b;
             }
         }
     }
@@ -141,7 +146,7 @@ impl Surface {
         for row in y0..y1 {
             let start = row * self.stride + x0;
             let end = row * self.stride + x1;
-            for p in &mut self.buffer[start..end] {
+            for p in &mut self.buffer.as_mut_slice()[start..end] {
                 *p = color;
             }
         }
@@ -157,16 +162,48 @@ impl Surface {
 
     pub fn new(width: usize, height: usize, stride: usize) -> Self {
         let len = stride.saturating_mul(height);
+        let buffer = match alloc_surface_pixels(
+            stride.max(1),
+            height.max(1),
+            SurfacePixelFormat::Argb8888,
+        ) {
+            Ok(buffer) if buffer.len() == len => buffer,
+            Ok(mut buffer) => {
+                let current_len = buffer.len();
+                if current_len != len {
+                    crate::serial_println!(
+                        "[GFX] surface pixel buffer len mismatch current={} expected={} width={} height={} stride={}",
+                        current_len,
+                        len,
+                        width,
+                        height,
+                        stride
+                    );
+                    let _ = buffer.resize_zeroed(len);
+                }
+                buffer
+            }
+            Err(error) => {
+                crate::serial_println!(
+                    "[GFX] surface allocation doctrine fallback width={} height={} stride={} err={:?}",
+                    width,
+                    height,
+                    stride,
+                    error
+                );
+                SurfacePixelBuffer::Heap(vec![0u32; len])
+            }
+        };
         Self {
             width,
             height,
             stride,
-            buffer: vec![0u32; len],
+            buffer,
         }
     }
 
     pub fn buffer_mut(&mut self) -> &mut [u32] {
-        &mut self.buffer
+        self.buffer.as_mut_slice()
     }
 
     pub unsafe fn blit_rect_to(
@@ -250,7 +287,7 @@ impl OpenGlContext {
     }
 
     pub fn clear(&mut self) {
-        for pixel in self.surface.buffer.iter_mut() {
+        for pixel in self.surface.buffer.as_mut_slice().iter_mut() {
             *pixel = self.clear_color;
         }
     }
@@ -297,7 +334,7 @@ impl OpenGlContext {
                     let color = pack_color(r, g, b);
                     let idx = (y as usize) * self.surface.stride + (x as usize);
                     if idx < self.surface.buffer.len() {
-                        self.surface.buffer[idx] = color;
+                        self.surface.buffer.as_mut_slice()[idx] = color;
                     }
                 }
             }

@@ -161,11 +161,7 @@ impl EevdfRunQueue {
 
     pub fn stats(&self) -> EevdfStats {
         let by_deadline = self.by_deadline.lock();
-        let min_deadline = by_deadline
-            .iter()
-            .next()
-            .map(|(k, _)| k.vd)
-            .unwrap_or(0);
+        let min_deadline = by_deadline.iter().next().map(|(k, _)| k.vd).unwrap_or(0);
         EevdfStats {
             tasks: by_deadline.len(),
             vtime: self.vtime(),

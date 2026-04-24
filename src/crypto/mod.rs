@@ -50,6 +50,21 @@ pub use hw_aes::{rdrand_bytes, rdseed_bytes};
 pub use sha3::{keccak256, sha3_256, sha3_512, Sha3};
 pub use signature::{EcdsaPublicKey, EllipticCurve, HashAlgorithm, RsaPublicKey};
 
+/// Constant-time equality for fixed-length secret-derived byte strings.
+///
+/// Length mismatch is public protocol structure and fails before byte comparison.
+pub fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
+    if lhs.len() != rhs.len() {
+        return false;
+    }
+
+    let mut diff = 0u8;
+    for (&left, &right) in lhs.iter().zip(rhs.iter()) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
 // ============================================================================
 // KAT (Known Answer Tests) - FIPS 140-2 Uyumlu Testler
 // ============================================================================
@@ -245,4 +260,16 @@ pub fn run_all_kat_tests() -> alloc::vec::Vec<KatResult> {
 pub fn init_kat_tests() -> bool {
     let results = run_all_kat_tests();
     results.iter().all(|r| r.passed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_time_eq_rejects_length_and_content_mismatch() {
+        assert!(constant_time_eq(b"echos", b"echos"));
+        assert!(!constant_time_eq(b"echos", b"echoS"));
+        assert!(!constant_time_eq(b"echos", b"echo"));
+    }
 }

@@ -6,8 +6,8 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use spin::Mutex;
 use core::sync::atomic::{AtomicBool, Ordering};
+use spin::Mutex;
 
 /// Paket izin türleri
 #[derive(Debug, Clone, PartialEq)]
@@ -132,16 +132,16 @@ impl PermissionDialogManager {
         let mut title = String::new();
         title.push_str(&request.package_name);
         title.push_str(" izin istiyor");
-        
+
         let mut message = String::from("Aşağıdaki izinler gerekiyor:\n");
-        
+
         for (i, permission) in request.permissions.iter().take(3).enumerate() {
             message.push_str(permission.icon());
             message.push(' ');
             message.push_str(permission.to_user_friendly());
             message.push('\n');
         }
-        
+
         if request.permissions.len() > 3 {
             message.push_str("ve ");
             let remaining = request.permissions.len() - 3;
@@ -163,7 +163,7 @@ impl PermissionDialogManager {
         header.push_str(")\nGeliştirici: ");
         header.push_str(&request.package_author);
         header.push_str("\nİstenen izinler:\n");
-        
+
         crate::serial_println!("{}", header);
 
         for permission in &request.permissions {
@@ -212,7 +212,7 @@ impl PermissionDialogManager {
     /// Otomatik onay modunu ayarla (geliştirme/test için)
     pub fn set_auto_approve(&self, enabled: bool) {
         self.auto_approve.store(enabled, Ordering::Relaxed);
-        
+
         let message = if enabled {
             "Otomatik izin onayı açıldı"
         } else {
@@ -226,7 +226,7 @@ impl PermissionDialogManager {
     pub fn check_permission(&self, package_name: &str, permission: &PermissionType) -> bool {
         // TODO: Kayıtlı izinleri kontrol et
         // Şimdilik sadece notification göster
-        
+
         let mut message = String::new();
         message.push_str(package_name);
         message.push_str(" izin kontrolü: ");
@@ -241,7 +241,7 @@ impl PermissionDialogManager {
     /// Tüm izinleri göster (ayarlar paneli için)
     pub fn show_all_permissions(&self) {
         let mut content = String::from("Tüm İzin Türleri:\n\n");
-        
+
         for permission in [
             PermissionType::NetworkAccess,
             PermissionType::FileSystemRead,
@@ -281,7 +281,12 @@ pub fn get_permission_dialog_manager() -> &'static PermissionDialogManager {
 }
 
 /// Paket izin isteği göster (kolay kullanım fonksiyonu)
-pub fn show_permission_request(package_name: &str, package_version: &str, package_author: &str, permissions: Vec<PermissionType>) -> bool {
+pub fn show_permission_request(
+    package_name: &str,
+    package_version: &str,
+    package_author: &str,
+    permissions: Vec<PermissionType>,
+) -> bool {
     let request = PermissionRequest {
         package_name: package_name.to_string(),
         package_version: package_version.to_string(),

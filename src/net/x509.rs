@@ -205,6 +205,10 @@ pub struct Asn1Parser<'a> {
     pos: usize,
 }
 
+const MAX_ASN1_TAG_BYTES: usize = 5;
+const MAX_ASN1_LENGTH_BYTES: usize = core::mem::size_of::<usize>();
+const MAX_ASN1_ELEMENT_LEN: usize = 1 << 20;
+
 impl<'a> Asn1Parser<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         Asn1Parser { data, pos: 0 }
@@ -236,12 +240,17 @@ impl<'a> Asn1Parser<'a> {
         let tag_number = if (tag_byte & 0x1F) == 0x1F {
             // Long form
             let mut num = 0u32;
+            let mut tag_bytes = 0usize;
             loop {
                 if self.pos >= self.data.len() {
                     return None;
                 }
                 let b = self.data[self.pos];
                 self.pos += 1;
+                tag_bytes += 1;
+                if tag_bytes > MAX_ASN1_TAG_BYTES {
+                    return None;
+                }
                 num = (num << 7) | ((b & 0x7F) as u32);
                 if (b & 0x80) == 0 {
                     break;
@@ -274,7 +283,13 @@ impl<'a> Asn1Parser<'a> {
         } else {
             // Long form
             let num_bytes = (len_byte & 0x7F) as usize;
-            if self.pos + num_bytes > self.data.len() {
+            if num_bytes == 0
+                || num_bytes > MAX_ASN1_LENGTH_BYTES
+                || self.pos + num_bytes > self.data.len()
+            {
+                return None;
+            }
+            if self.data[self.pos] == 0 {
                 return None;
             }
 
@@ -283,11 +298,14 @@ impl<'a> Asn1Parser<'a> {
                 len = (len << 8) | (self.data[self.pos] as usize);
                 self.pos += 1;
             }
+            if len < 0x80 || len > MAX_ASN1_ELEMENT_LEN {
+                return None;
+            }
             len
         };
 
         // Read data
-        if self.pos + length > self.data.len() {
+        if length > MAX_ASN1_ELEMENT_LEN || self.pos + length > self.data.len() {
             return None;
         }
 
@@ -300,6 +318,9 @@ impl<'a> Asn1Parser<'a> {
             let mut kids = Vec::new();
             while let Some(child) = parser.parse_element() {
                 kids.push(child);
+            }
+            if parser.pos != data.len() {
+                return None;
             }
             kids
         } else {
@@ -384,6 +405,15 @@ pub struct X509Name {
 impl X509Name {
     pub fn new() -> Self {
         X509Name::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.common_name.is_empty()
+            && self.country.is_empty()
+            && self.organization.is_empty()
+            && self.organizational_unit.is_empty()
+            && self.locality.is_empty()
+            && self.state.is_empty()
     }
 
     /// ASN.1 dizisinden isim alanlarını ayrıştır
@@ -516,6 +546,12 @@ pub struct X509Extension {
 impl X509Certificate {
     /// Parse X.509 certificate from DER bytes
     pub fn parse(der: &[u8]) -> Option<Self> {
+        const MAX_X509_DER_LEN: usize = 128 * 1024;
+        const MAX_X509_EXTENSION_COUNT: usize = 64;
+
+        if der.is_empty() || der.len() > MAX_X509_DER_LEN {
+            return None;
+        }
         let mut parser = Asn1Parser::new(der);
         let root = parser.parse_element()?;
 
@@ -706,6 +742,9 @@ impl X509Certificate {
                                     critical,
                                     value,
                                 });
+                                if extensions.len() > MAX_X509_EXTENSION_COUNT {
+                                    return None;
+                                }
                             }
                         }
                     }
@@ -723,6 +762,25 @@ impl X509Certificate {
         } else {
             sig_value.data.clone()
         };
+
+        if issuer.is_empty() {
+            return None;
+        }
+        if subject.is_empty() && !has_nonempty_subject_alt_name(&extensions) {
+            return None;
+        }
+        if subject_alt_name_has_empty_entries(&extensions) {
+            return None;
+        }
+        if signature_algo.algorithm != tbs_sig_algo.algorithm {
+            return None;
+        }
+        if not_before == 0 || not_after == 0 || not_before > not_after {
+            return None;
+        }
+        if public_key.key_data.is_empty() || signature.is_empty() {
+            return None;
+        }
 
         Some(X509Certificate {
             version,
@@ -1025,6 +1083,12 @@ impl CertVerifier {
 
         // Verify each certificate in chain
         for (i, cert) in chain.iter().enumerate() {
+            if cert.issuer.is_empty()
+                || (cert.subject.is_empty() && !has_nonempty_subject_alt_name(&cert.extensions))
+                || subject_alt_name_has_empty_entries(&cert.extensions)
+            {
+                return Err(CertError::InvalidFormat);
+            }
             if cert.has_unknown_critical_extension() {
                 return Err(CertError::InvalidKeyUsage);
             }
@@ -1232,6 +1296,62 @@ fn same_trust_anchor(root: &X509Certificate, candidate: &X509Certificate) -> boo
         && root.public_key.key_data == candidate.public_key.key_data
 }
 
+enum SubjectAltNameEntry {
+    Dns(String),
+    Ip(Vec<u8>),
+}
+
+fn parse_subject_alt_name_entries(value: &[u8]) -> Option<Vec<SubjectAltNameEntry>> {
+    let mut parser = Asn1Parser::new(value);
+    let root = parser.parse_element()?;
+    if root.tag != Asn1Tag::Sequence {
+        return None;
+    }
+
+    let mut entries = Vec::new();
+    for child in &root.children {
+        if child.class != Asn1Class::ContextSpecific {
+            return None;
+        }
+        match child.tag_number {
+            2 => {
+                let dns_name = core::str::from_utf8(&child.data)
+                    .ok()?
+                    .trim()
+                    .to_ascii_lowercase();
+                if dns_name.is_empty() {
+                    return None;
+                }
+                entries.push(SubjectAltNameEntry::Dns(dns_name));
+            }
+            7 => {
+                if child.data.is_empty() || !matches!(child.data.len(), 4 | 16) {
+                    return None;
+                }
+                entries.push(SubjectAltNameEntry::Ip(child.data.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    Some(entries)
+}
+
+fn has_nonempty_subject_alt_name(extensions: &[X509Extension]) -> bool {
+    extensions.iter().any(|ext| {
+        ext.oid == "2.5.29.17"
+            && parse_subject_alt_name_entries(&ext.value)
+                .map(|entries| !entries.is_empty())
+                .unwrap_or(false)
+    })
+}
+
+fn subject_alt_name_has_empty_entries(extensions: &[X509Extension]) -> bool {
+    extensions
+        .iter()
+        .any(|ext| ext.oid == "2.5.29.17" && parse_subject_alt_name_entries(&ext.value).is_none())
+}
+
 /// Verify hostname against a certificate's Subject Alternative Names (SANs)
 ///
 /// Parses the subjectAltName extension (OID 2.5.29.17) and checks each
@@ -1249,87 +1369,22 @@ pub fn verify_hostname(cert: &X509Certificate, hostname: &str) -> bool {
     for ext in &cert.extensions {
         if ext.oid == "2.5.29.17" {
             found_san = true;
-            // Parse the SAN extension value as ASN.1
-            // subjectAltName is a SEQUENCE OF GeneralName
-            // GeneralName with tag [2] (context-specific, tag 2) = dNSName (IA5String)
-            let mut pos = 0;
-            let data = &ext.value;
-
-            // The value may be wrapped in an OCTET STRING; try parsing as SEQUENCE
-            let san_data_storage = if !data.is_empty() && data[0] == 0x30 {
-                // SEQUENCE wrapper - parse the outer TLV
-                let mut p = Asn1Parser::new(data);
-                if let Some(elem) = p.parse_element() {
-                    // Process children (GeneralName entries)
-                    for child in &elem.children {
-                        if child.class == Asn1Class::ContextSpecific && child.tag_number == 2 {
-                            // dNSName
-                            if let Ok(dns_name) = core::str::from_utf8(&child.data) {
-                                if hostname_matches(&hostname_lower, &dns_name.to_ascii_lowercase())
-                                {
-                                    return true;
-                                }
-                            }
-                        } else if child.class == Asn1Class::ContextSpecific
-                            && child.tag_number == 7
-                            && hostname_ip_matches(&child.data, hostname_ipv4, hostname_ipv6)
-                        {
-                            return true;
-                        }
-                    }
-                    Some(elem.data.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
+            let Some(entries) = parse_subject_alt_name_entries(&ext.value) else {
+                return false;
             };
-            let san_data = san_data_storage.as_deref().unwrap_or(data);
-
-            // Fallback: manually parse TLV entries from raw bytes
-            while pos < san_data.len() {
-                if pos + 2 > san_data.len() {
-                    break;
-                }
-                let tag = san_data[pos];
-                pos += 1;
-
-                // Parse length
-                let len = if san_data[pos] < 0x80 {
-                    let l = san_data[pos] as usize;
-                    pos += 1;
-                    l
-                } else if san_data[pos] == 0x81 {
-                    pos += 1;
-                    if pos >= san_data.len() {
-                        break;
-                    }
-                    let l = san_data[pos] as usize;
-                    pos += 1;
-                    l
-                } else {
-                    break;
-                };
-
-                if pos + len > san_data.len() {
-                    break;
-                }
-
-                // tag 0x82 = context-specific [2] = dNSName
-                if tag == 0x82 {
-                    if let Ok(dns_name) = core::str::from_utf8(&san_data[pos..pos + len]) {
+            for entry in entries {
+                match entry {
+                    SubjectAltNameEntry::Dns(dns_name) => {
                         if hostname_matches(&hostname_lower, &dns_name.to_ascii_lowercase()) {
                             return true;
                         }
                     }
-                } else if tag == 0x87 {
-                    if hostname_ip_matches(&san_data[pos..pos + len], hostname_ipv4, hostname_ipv6)
-                    {
-                        return true;
+                    SubjectAltNameEntry::Ip(bytes) => {
+                        if hostname_ip_matches(&bytes, hostname_ipv4, hostname_ipv6) {
+                            return true;
+                        }
                     }
                 }
-
-                pos += len;
             }
         }
     }
@@ -1705,6 +1760,10 @@ pub fn init_builtin_roots() {
 
 /// Parse certificate chain from TLS handshake
 pub fn parse_certificate_chain(cert_data: &[u8]) -> Vec<X509Certificate> {
+    const MAX_TLS_CERT_CHAIN_BYTES: usize = 256 * 1024;
+    const MAX_TLS_CERT_CHAIN_DEPTH: usize = 8;
+    const MAX_TLS_CERT_DER_LEN: usize = 64 * 1024;
+
     let mut certs = Vec::new();
     let mut pos = 0;
 
@@ -1720,20 +1779,28 @@ pub fn parse_certificate_chain(cert_data: &[u8]) -> Vec<X509Certificate> {
 
     let total_len =
         ((cert_data[0] as usize) << 16) | ((cert_data[1] as usize) << 8) | (cert_data[2] as usize);
+    if total_len == 0 || total_len > MAX_TLS_CERT_CHAIN_BYTES || total_len + 3 > cert_data.len() {
+        return certs;
+    }
     pos = 3;
 
     while pos + 3 <= cert_data.len() && pos < total_len + 3 {
+        if certs.len() >= MAX_TLS_CERT_CHAIN_DEPTH {
+            return Vec::new();
+        }
         let cert_len = ((cert_data[pos] as usize) << 16)
             | ((cert_data[pos + 1] as usize) << 8)
             | (cert_data[pos + 2] as usize);
         pos += 3;
 
-        if pos + cert_len > cert_data.len() {
-            break;
+        if cert_len == 0 || cert_len > MAX_TLS_CERT_DER_LEN || pos + cert_len > total_len + 3 {
+            return Vec::new();
         }
 
         if let Some(cert) = X509Certificate::parse(&cert_data[pos..pos + cert_len]) {
             certs.push(cert);
+        } else {
+            return Vec::new();
         }
 
         pos += cert_len;
@@ -1861,8 +1928,11 @@ impl X509Crl {
             idx += 1;
             time
         } else {
-            this_update + 86400 // Default 24 hours
+            return None;
         };
+        if next_update < this_update || issuer.is_empty() {
+            return None;
+        }
 
         // Revoked certificates
         let mut revoked_certs = Vec::new();
@@ -2836,6 +2906,14 @@ mod tests {
             verifier.verify_chain(&[cert]),
             Err(CertError::InvalidKeyUsage)
         ));
+    }
+
+    #[test]
+    fn parse_certificate_chain_rejects_oversized_der_entries() {
+        let mut message = vec![0x01, 0x00, 0x04];
+        message.extend_from_slice(&[0x01, 0x00, 0x01]);
+        message.extend(core::iter::repeat(0u8).take(65_537));
+        assert!(parse_certificate_chain(&message).is_empty());
     }
 
     #[test]

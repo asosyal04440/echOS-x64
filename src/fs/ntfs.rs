@@ -33,6 +33,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -637,6 +638,30 @@ impl NtfsFileSystem {
         Ok(())
     }
 
+    pub fn init_from_storage(&mut self, storage: &NtfsStorage) -> Result<(), NtfsError> {
+        let boot_bytes = storage.read_exact(0, 512)?;
+        let boot = NtfsBootSector::parse(boot_bytes.as_slice()).ok_or(NtfsError::InvalidFormat)?;
+
+        let total_sectors = boot.total_sectors;
+        let cluster_size = boot.cluster_size();
+        let mft_offset = boot.mft_offset();
+        let mft_entry_size = boot.mft_entry_size();
+
+        self.boot_sector = boot;
+        self.cluster_size = cluster_size;
+        self.mft_offset = mft_offset;
+        self.mft_entry_size = mft_entry_size;
+
+        crate::serial_println!(
+            "[NTFS] BaÅŸlatÄ±ldÄ±: {} sektÃ¶r, {} bayt/kÃ¼me, MFT'nin konumu {}",
+            total_sectors,
+            cluster_size,
+            mft_offset
+        );
+
+        Ok(())
+    }
+
     /// Belirtilen numaralı MFT girişini aygıt verisinden okur
     pub fn read_mft_entry(
         &self,
@@ -654,6 +679,18 @@ impl NtfsFileSystem {
         let mut entry = MftEntry::parse(entry_data).ok_or(NtfsError::Corrupted)?;
         entry.entry_number = entry_num;
 
+        Ok(entry)
+    }
+
+    pub fn read_mft_entry_from_storage(
+        &self,
+        entry_num: u64,
+        storage: &NtfsStorage,
+    ) -> Result<MftEntry, NtfsError> {
+        let offset = self.mft_offset + entry_num * self.mft_entry_size;
+        let entry_bytes = storage.read_exact(offset as usize, self.mft_entry_size as usize)?;
+        let mut entry = MftEntry::parse(entry_bytes.as_slice()).ok_or(NtfsError::Corrupted)?;
+        entry.entry_number = entry_num;
         Ok(entry)
     }
 
@@ -696,6 +733,43 @@ impl NtfsFileSystem {
         }
     }
 
+    pub fn read_file_from_storage(
+        &self,
+        entry: &MftEntry,
+        storage: &NtfsStorage,
+    ) -> Result<Vec<u8>, NtfsError> {
+        let data_attr = entry.get_data_attribute().ok_or(NtfsError::NotFound)?;
+
+        match &data_attr.content {
+            AttributeContent::Resident { .. } => data_attr
+                .get_resident_data()
+                .map(|data| data.to_vec())
+                .ok_or(NtfsError::ReadError),
+            AttributeContent::NonResident { data_runs, .. } => {
+                let mut data = Vec::new();
+                let mut current_lcn: i64 = 0;
+
+                for run in data_runs {
+                    current_lcn += run.lcn;
+
+                    if current_lcn < 0 {
+                        data.extend(
+                            core::iter::repeat(0u8).take((run.length * self.cluster_size) as usize),
+                        );
+                        continue;
+                    }
+
+                    let offset = current_lcn as u64 * self.cluster_size;
+                    let length = (run.length * self.cluster_size) as usize;
+                    let chunk = storage.read_exact(offset as usize, length)?;
+                    data.extend_from_slice(chunk.as_slice());
+                }
+
+                Ok(data)
+            }
+        }
+    }
+
     /// MFT girişinden dosya adını alır
     pub fn get_file_name(&self, entry: &MftEntry) -> Option<String> {
         let attr = entry.get_filename_attribute()?;
@@ -708,21 +782,33 @@ impl NtfsFileSystem {
         self.list_directory(MFT_ROOTDIR, device_data)
     }
 
+    pub fn read_root_dir_from_storage(
+        &self,
+        storage: &NtfsStorage,
+    ) -> Result<Vec<NtfsDirEntry>, NtfsError> {
+        self.list_directory_from_storage(MFT_ROOTDIR, storage)
+    }
+
     /// Verilen MFT girişinin meta verisini döndürür
     pub fn get_metadata(&self, entry: &MftEntry) -> Option<NtfsMetadata> {
         let filename_attr = self.read_filename_attr(entry)?;
-        let allocated_size = match entry.get_data_attribute()?.content {
-            AttributeContent::Resident { data_length, .. } => data_length as u64,
-            AttributeContent::NonResident {
-                last_vcn,
-                start_vcn,
-                ..
-            } => last_vcn.saturating_sub(start_vcn).saturating_add(1) * self.cluster_size,
+        let file_type = file_type_from_filename_attr(&filename_attr);
+        let allocated_size = match entry.get_data_attribute() {
+            Some(data_attr) => match data_attr.content {
+                AttributeContent::Resident { data_length, .. } => data_length as u64,
+                AttributeContent::NonResident {
+                    last_vcn,
+                    start_vcn,
+                    ..
+                } => last_vcn.saturating_sub(start_vcn).saturating_add(1) * self.cluster_size,
+            },
+            None if matches!(file_type, NtfsFileType::Directory) => 0,
+            None => return None,
         };
         Some(NtfsMetadata {
             size: filename_attr.file_size,
             allocated_size,
-            file_type: file_type_from_filename_attr(&filename_attr),
+            file_type,
             flags: filename_attr.flags,
             created: filename_attr.created,
             modified: filename_attr.modified,
@@ -747,6 +833,27 @@ impl NtfsFileSystem {
         self.read_mft_entry(current, device_data)
     }
 
+    pub fn resolve_path_from_storage(
+        &self,
+        path: &str,
+        storage: &NtfsStorage,
+    ) -> Result<MftEntry, NtfsError> {
+        if path.trim_matches('/').is_empty() {
+            return self.read_mft_entry_from_storage(MFT_ROOTDIR, storage);
+        }
+
+        let mut current = MFT_ROOTDIR;
+        for component in path
+            .trim_matches('/')
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+        {
+            let child = self.find_child_entry_from_storage(current, component, storage)?;
+            current = child.entry_number;
+        }
+        self.read_mft_entry_from_storage(current, storage)
+    }
+
     pub fn list_directory(
         &self,
         parent_entry: u64,
@@ -754,7 +861,46 @@ impl NtfsFileSystem {
     ) -> Result<Vec<NtfsDirEntry>, NtfsError> {
         let mut result = Vec::new();
         for entry_num in 0..self.max_mft_entries(device_data) {
+            if entry_num == parent_entry {
+                continue;
+            }
             let Ok(entry) = self.read_mft_entry(entry_num, device_data) else {
+                continue;
+            };
+            if !entry.is_valid() {
+                continue;
+            }
+            let Some(filename_attr) = self.read_filename_attr(&entry) else {
+                continue;
+            };
+            if normalize_file_reference(filename_attr.parent_directory) != parent_entry {
+                continue;
+            }
+            let metadata = self.get_metadata(&entry);
+            result.push(NtfsDirEntry {
+                name: filename_attr.name,
+                inode: entry.entry_number,
+                file_type: metadata
+                    .as_ref()
+                    .map(|meta| meta.file_type)
+                    .unwrap_or(NtfsFileType::Unknown),
+                size: metadata.map(|meta| meta.size).unwrap_or(0),
+            });
+        }
+        Ok(result)
+    }
+
+    pub fn list_directory_from_storage(
+        &self,
+        parent_entry: u64,
+        storage: &NtfsStorage,
+    ) -> Result<Vec<NtfsDirEntry>, NtfsError> {
+        let mut result = Vec::new();
+        for entry_num in 0..self.max_mft_entries_from_storage(storage)? {
+            if entry_num == parent_entry {
+                continue;
+            }
+            let Ok(entry) = self.read_mft_entry_from_storage(entry_num, storage) else {
                 continue;
             };
             if !entry.is_valid() {
@@ -803,11 +949,45 @@ impl NtfsFileSystem {
         Ok((total, used, free))
     }
 
+    pub fn bitmap_usage_from_storage(
+        &self,
+        storage: &NtfsStorage,
+    ) -> Result<(u64, u64, u64), NtfsError> {
+        let bitmap_entry = self.read_mft_entry_from_storage(MFT_BITMAP, storage)?;
+        let bitmap = self.read_file_from_storage(&bitmap_entry, storage)?;
+        let total_clusters =
+            self.boot_sector.total_sectors / self.boot_sector.sectors_per_cluster as u64;
+        let mut used_clusters = 0u64;
+        for (byte_index, byte) in bitmap.iter().enumerate() {
+            for bit in 0..8 {
+                let cluster = byte_index as u64 * 8 + bit;
+                if cluster >= total_clusters {
+                    break;
+                }
+                if (byte >> bit) & 1 == 1 {
+                    used_clusters += 1;
+                }
+            }
+        }
+        let total = total_clusters.saturating_mul(self.cluster_size);
+        let used = used_clusters.saturating_mul(self.cluster_size);
+        let free = total.saturating_sub(used);
+        Ok((total, used, free))
+    }
+
     fn max_mft_entries(&self, device_data: &[u8]) -> u64 {
         if self.mft_entry_size == 0 || self.mft_offset as usize >= device_data.len() {
             return 0;
         }
         ((device_data.len() - self.mft_offset as usize) / self.mft_entry_size as usize) as u64
+    }
+
+    fn max_mft_entries_from_storage(&self, storage: &NtfsStorage) -> Result<u64, NtfsError> {
+        let image_len = storage.image_len()?;
+        if self.mft_entry_size == 0 || self.mft_offset as usize >= image_len {
+            return Ok(0);
+        }
+        Ok(((image_len - self.mft_offset as usize) / self.mft_entry_size as usize) as u64)
     }
 
     fn read_filename_attr(&self, entry: &MftEntry) -> Option<FileNameAttr> {
@@ -824,6 +1004,32 @@ impl NtfsFileSystem {
     ) -> Result<MftEntry, NtfsError> {
         for entry_num in 0..self.max_mft_entries(device_data) {
             let Ok(entry) = self.read_mft_entry(entry_num, device_data) else {
+                continue;
+            };
+            if !entry.is_valid() {
+                continue;
+            }
+            let Some(filename_attr) = self.read_filename_attr(&entry) else {
+                continue;
+            };
+            if normalize_file_reference(filename_attr.parent_directory) != parent_entry {
+                continue;
+            }
+            if ntfs_name_matches(&filename_attr.name, name) {
+                return Ok(entry);
+            }
+        }
+        Err(NtfsError::NotFound)
+    }
+
+    fn find_child_entry_from_storage(
+        &self,
+        parent_entry: u64,
+        name: &str,
+        storage: &NtfsStorage,
+    ) -> Result<MftEntry, NtfsError> {
+        for entry_num in 0..self.max_mft_entries_from_storage(storage)? {
+            let Ok(entry) = self.read_mft_entry_from_storage(entry_num, storage) else {
                 continue;
             };
             if !entry.is_valid() {
@@ -858,9 +1064,67 @@ lazy_static::lazy_static! {
 }
 
 #[derive(Clone, Debug)]
+pub enum NtfsStorage {
+    Resident(Arc<Vec<u8>>),
+    LoopbackDevice(String),
+}
+
+impl NtfsStorage {
+    pub fn image_len(&self) -> Result<usize, NtfsError> {
+        match self {
+            Self::Resident(image) => Ok(image.len()),
+            Self::LoopbackDevice(name) => {
+                let device =
+                    crate::drivers::loopback::open(name.as_str()).ok_or(NtfsError::ReadError)?;
+                let descriptor = device.descriptor();
+                Ok(descriptor.block_count as usize * descriptor.block_size as usize)
+            }
+        }
+    }
+
+    pub fn read_exact(&self, offset: usize, len: usize) -> Result<Vec<u8>, NtfsError> {
+        match self {
+            Self::Resident(image) => {
+                let end = offset.checked_add(len).ok_or(NtfsError::ReadError)?;
+                if end > image.len() {
+                    return Err(NtfsError::ReadError);
+                }
+                Ok(image[offset..end].to_vec())
+            }
+            Self::LoopbackDevice(name) => {
+                let mut device =
+                    crate::drivers::loopback::open(name.as_str()).ok_or(NtfsError::ReadError)?;
+                let descriptor = device.descriptor();
+                let block_size = descriptor.block_size as usize;
+                let total_len = descriptor.block_count as usize * block_size;
+                let end = offset.checked_add(len).ok_or(NtfsError::ReadError)?;
+                if end > total_len {
+                    return Err(NtfsError::ReadError);
+                }
+                let start_block = offset / block_size;
+                let end_block = (end + block_size - 1) / block_size;
+                let mut blocks = Vec::with_capacity((end_block - start_block) * block_size);
+                for lba in start_block..end_block {
+                    let mut block = vec![0u8; block_size];
+                    crate::drivers::block::BlockDevice::read_block(
+                        &mut device,
+                        lba as u64,
+                        block.as_mut_slice(),
+                    )
+                    .map_err(|_| NtfsError::ReadError)?;
+                    blocks.extend_from_slice(block.as_slice());
+                }
+                let inner_offset = offset % block_size;
+                Ok(blocks[inner_offset..inner_offset + len].to_vec())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct MountedNtfs {
     pub fs: NtfsFileSystem,
-    pub device_data: Arc<Vec<u8>>,
+    pub storage: NtfsStorage,
 }
 
 /// NTFS dosya sistemini bağlar (mount)
@@ -872,9 +1136,20 @@ pub fn mount_ntfs(name: &str, device_data: &[u8]) -> Result<(), NtfsError> {
         name.to_string(),
         MountedNtfs {
             fs,
-            device_data: Arc::new(device_data.to_vec()),
+            storage: NtfsStorage::Resident(Arc::new(device_data.to_vec())),
         },
     );
+    Ok(())
+}
+
+pub fn mount_ntfs_loopback(name: &str, device_name: &str) -> Result<(), NtfsError> {
+    let mut fs = NtfsFileSystem::new();
+    let storage = NtfsStorage::LoopbackDevice(device_name.to_string());
+    fs.init_from_storage(&storage)?;
+
+    NTFS_INSTANCES
+        .lock()
+        .insert(name.to_string(), MountedNtfs { fs, storage });
     Ok(())
 }
 

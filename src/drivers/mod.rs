@@ -93,6 +93,12 @@ pub mod virtio_hal;
 /// Blok cihaz soyutlaması: tüm disk türleri için ortak trait (BlockDevice)
 pub mod block;
 
+/// Sysfs-benzeri genel cihaz kaydı ve sürücü bağlama modeli
+pub mod driver_model;
+
+/// Dosya-backed image'leri genel blok aygıtı olarak sunan loopback sürücüsü
+pub mod loopback;
+
 /// RTC (Real-Time Clock) sürücsü: CMOS port 0x70/0x71 üzerinden tarih/saat okuma
 pub mod rtc;
 
@@ -477,20 +483,31 @@ pub mod linux {
         }
 
         // NVMe bulunamazsa ATA dene
-        crate::serial_println!("BLOCK DEVICE FALLBACK: trying ATA");
-        let mut drive = AtaDrive::new(0x1F0); // Primary ATA I/O portu: 0x1F0
-        match drive.detect() {
-            Ok(true) => {
-                crate::serial_println!("BLOCK DEVICE ATA OK: drive detected");
-                Ok(Box::new(drive))
-            }
-            Ok(false) => {
-                crate::serial_println!("BLOCK DEVICE ATA NOT FOUND: no drive");
-                Err(LinuxDriverError::NotFound)
-            }
-            Err(e) => {
-                crate::serial_println!("BLOCK DEVICE ATA ERROR: {:?}", e);
-                Err(LinuxDriverError::Io)
+        #[cfg(any(test, target_os = "windows"))]
+        {
+            crate::serial_println!(
+                "BLOCK DEVICE FALLBACK: ATA skipped on host/test without ring0 port I/O"
+            );
+            return Err(LinuxDriverError::NotFound);
+        }
+
+        #[cfg(not(any(test, target_os = "windows")))]
+        {
+            crate::serial_println!("BLOCK DEVICE FALLBACK: trying ATA");
+            let mut drive = AtaDrive::new(0x1F0); // Primary ATA I/O portu: 0x1F0
+            match drive.detect() {
+                Ok(true) => {
+                    crate::serial_println!("BLOCK DEVICE ATA OK: drive detected");
+                    Ok(Box::new(drive))
+                }
+                Ok(false) => {
+                    crate::serial_println!("BLOCK DEVICE ATA NOT FOUND: no drive");
+                    Err(LinuxDriverError::NotFound)
+                }
+                Err(e) => {
+                    crate::serial_println!("BLOCK DEVICE ATA ERROR: {:?}", e);
+                    Err(LinuxDriverError::Io)
+                }
             }
         }
     }
@@ -792,7 +809,7 @@ pub mod linux {
                 pci::write_config_dword(dev.bus, dev.device, dev.function, 0x04, command);
                 if let Some(bar) = pci::read_bar_io(dev.bus, dev.device, dev.function, 0) {
                     if bar.base != 0 {
-                        virtio_ffi::init(bar.base as u16);
+                        virtio_ffi::init(dev.bus, dev.device, dev.function, bar.base as u16);
                         crate::serial_println!(
                             "VIRTIO BLK: init via legacy io base=0x{:x}",
                             bar.base

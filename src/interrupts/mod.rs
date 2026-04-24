@@ -847,6 +847,29 @@ extern "x86-interrupt" fn page_fault_handler(
         let kind = classify_user_stack_fault(addr).unwrap_or("PAGE_FAULT");
         user_fault_exit(kind, rip, Some(addr), Some(error_code.bits() as u64));
     } else {
+        let fault_addr = Cr2::read().as_u64();
+        if let Some(kind) = crate::task::scheduler::classify_current_kernel_stack_fault(fault_addr)
+        {
+            let rip = stack_frame.instruction_pointer.as_u64();
+            if let Some((used, capacity)) = crate::task::scheduler::current_kernel_stack_usage() {
+                crate::serial_println!(
+                    "KERNEL STACK FAULT: {} RIP={:#x} ADDR={:#x} USED={}/{} bytes",
+                    kind,
+                    rip,
+                    fault_addr,
+                    used,
+                    capacity
+                );
+            } else {
+                crate::serial_println!(
+                    "KERNEL STACK FAULT: {} RIP={:#x} ADDR={:#x}",
+                    kind,
+                    rip,
+                    fault_addr
+                );
+            }
+            crate::task::scheduler::exit(1);
+        }
         crate::serial_println!("EXCEPTION: PAGE FAULT");
         crate::serial_println!("Accessed Address: {:?}", Cr2::read());
         crate::serial_println!("Error Code: {:?}", error_code);
@@ -963,7 +986,11 @@ pub fn mark_bsp_init_complete() {
 ///   9. Bekleyen softirq'ları çalıştır (bottom-half işleme)
 ///  10. TSC-deadline modunda sonraki timer deadline'ını arm et
 #[cfg(not(target_os = "windows"))]
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
+    if crate::cpu::smp::panic_stop_requested() {
+        crate::cpu::smp::panic_stop_this_cpu();
+    }
+    crate::task::scheduler::record_current_stack_pointer(stack_frame.stack_pointer.as_u64());
     unsafe {
         x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b't');
     }
@@ -1223,6 +1250,9 @@ fn record_irq(vector: u8) {
 }
 
 fn dispatch_irq(vector: u8) -> bool {
+    if crate::cpu::smp::panic_stop_requested() {
+        crate::cpu::smp::panic_stop_this_cpu();
+    }
     // Lock-free shadow array'lerden oku — sıfır contention
     let flow_u8 = IRQ_FLOWS_FAST[vector as usize].load(Ordering::Acquire);
     let flow = match flow_u8 {

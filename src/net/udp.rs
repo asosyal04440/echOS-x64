@@ -51,12 +51,10 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Mutex;
 
-/// Sonraki kısa ömürlü (ephemeral) port numarası.
-/// IANA tanımlı dinamik port aralığı: 49152–65535
-static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
+const EPHEMERAL_PORT_START: u16 = 49152;
+const EPHEMERAL_PORT_END: u16 = 65535;
 
 /// UDP başlık yapısı (8 byte sabit)
 ///
@@ -90,6 +88,9 @@ impl UdpHeader {
         let dst_port = Port(u16::from_be_bytes([data[2], data[3]]));
         let length = u16::from_be_bytes([data[4], data[5]]);
         let checksum = u16::from_be_bytes([data[6], data[7]]);
+        if length < Self::SIZE as u16 || length as usize > data.len() {
+            return Err(NetError::InvalidPacket);
+        }
 
         Ok(UdpHeader {
             src_port,
@@ -230,15 +231,17 @@ impl UdpSocket {
     /// Her çağrı ayrı bir UDP datagramı oluşturur ve IP katmanına iletir.
     /// Bağlantısız olduğu için her çağrıda hedef adres belirtilir.
     pub fn send_to(&mut self, data: &[u8], dst: SocketAddr) -> Result<usize, NetError> {
+        let Some(udp_len) = UdpHeader::SIZE.checked_add(data.len()) else {
+            return Err(NetError::InvalidPacket);
+        };
+        if udp_len > u16::MAX as usize {
+            return Err(NetError::InvalidPacket);
+        }
         // UDP başlığını oluştur: uzunluk = başlık(8) + veri
-        let header = UdpHeader::new(
-            self.local.port,
-            dst.port,
-            (UdpHeader::SIZE + data.len()) as u16,
-        );
+        let header = UdpHeader::new(self.local.port, dst.port, udp_len as u16);
 
         // Başlığı ve veriyi birleştir
-        let mut segment = vec![0u8; UdpHeader::SIZE + data.len()];
+        let mut segment = vec![0u8; udp_len];
         header.serialize(&mut segment)?;
         segment[UdpHeader::SIZE..].copy_from_slice(data);
 
@@ -327,26 +330,42 @@ pub fn create_socket(family: AddressFamily) -> u32 {
     id
 }
 
-/// Soketi belirtilen adrese bağla ve port tablosunu güncelle
-/// Kısa ömürlü port tahsis et (49152–65535 aralığından döngüsel)
-fn allocate_ephemeral_port() -> Port {
-    loop {
-        let port = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed);
-        // 65535'i aştıysa başa sar
-        if port < 49152 {
-            NEXT_EPHEMERAL_PORT.store(49152, Ordering::Relaxed);
-            continue;
+/// Soketi belirtilen adrese bağla ve port tablosunu güncelle.
+/// Kısa ömürlü port tahsisi artık sıralı sayaç yerine rastgele seçilir.
+fn allocate_ephemeral_port() -> Result<Port, NetError> {
+    let candidate_count = (EPHEMERAL_PORT_END - EPHEMERAL_PORT_START + 1) as usize;
+    let mut warned_fallback = false;
+
+    for _ in 0..candidate_count {
+        let (port, secure_rng) =
+            crate::random::secure_range_u16(EPHEMERAL_PORT_START, EPHEMERAL_PORT_END);
+        if !secure_rng && !warned_fallback {
+            crate::serial_println!(
+                "[UDP] secure RNG unavailable; ephemeral port selection is entropy-mixed fallback"
+            );
+            warned_fallback = true;
         }
-        // Port zaten kullanılıyor mu kontrol et
+
         let bindings = UDP_BINDINGS.lock();
         let candidate = Port(port);
         if !bindings.contains_key(&(AddressFamily::IPV4, candidate))
             && !bindings.contains_key(&(AddressFamily::IPV6, candidate))
         {
-            return candidate;
+            return Ok(candidate);
         }
-        // Kullanımdaysa bir sonrakini dene (wrap-around)
     }
+
+    for port in EPHEMERAL_PORT_START..=EPHEMERAL_PORT_END {
+        let bindings = UDP_BINDINGS.lock();
+        let candidate = Port(port);
+        if !bindings.contains_key(&(AddressFamily::IPV4, candidate))
+            && !bindings.contains_key(&(AddressFamily::IPV6, candidate))
+        {
+            return Ok(candidate);
+        }
+    }
+
+    Err(NetError::AddrNotAvailable)
 }
 
 pub fn bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
@@ -355,7 +374,7 @@ pub fn bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
 
     // Port 0 ise otomatik olarak kısa ömürlü port tahsis et
     let bind_addr = if addr.port.0 == 0 {
-        let eport = allocate_ephemeral_port();
+        let eport = allocate_ephemeral_port()?;
         SocketAddr::new(addr.ip, eport)
     } else {
         addr
@@ -542,6 +561,86 @@ pub fn list_sockets() -> Vec<UdpSocketInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bind_port_zero_assigns_ephemeral_ports_in_range_without_collision() {
+        let socket_a = create_socket(AddressFamily::IPV4);
+        let socket_b = create_socket(AddressFamily::IPV4);
+
+        bind(socket_a, SocketAddr::new(Ipv4Addr::UNSPECIFIED, Port(0))).unwrap();
+        bind(socket_b, SocketAddr::new(Ipv4Addr::UNSPECIFIED, Port(0))).unwrap();
+
+        let sock_a = get_socket(socket_a).expect("socket A must exist");
+        let sock_b = get_socket(socket_b).expect("socket B must exist");
+
+        assert!((EPHEMERAL_PORT_START..=EPHEMERAL_PORT_END).contains(&sock_a.local.port.0));
+        assert!((EPHEMERAL_PORT_START..=EPHEMERAL_PORT_END).contains(&sock_b.local.port.0));
+        assert_ne!(sock_a.local.port, sock_b.local.port);
+
+        close(socket_a);
+        close(socket_b);
+    }
+
+    #[test]
+    fn bind_port_zero_avoids_cross_family_ephemeral_port_reuse() {
+        let socket_v4 = create_socket(AddressFamily::IPV4);
+        let socket_v6 = create_socket(AddressFamily::IPV6);
+
+        bind(socket_v4, SocketAddr::new(Ipv4Addr::UNSPECIFIED, Port(0))).unwrap();
+        bind(socket_v6, SocketAddr::unspecified_v6(Port(0))).unwrap();
+
+        let sock_v4 = get_socket(socket_v4).expect("v4 socket must exist");
+        let sock_v6 = get_socket(socket_v6).expect("v6 socket must exist");
+
+        assert_ne!(sock_v4.local.port, sock_v6.local.port);
+
+        close(socket_v4);
+        close(socket_v6);
+    }
+
+    #[test]
+    fn bind_port_zero_fails_closed_when_ephemeral_space_is_exhausted() {
+        UDP_SOCKETS.lock().clear();
+        UDP_BINDINGS.lock().clear();
+
+        let socket_id = create_socket(AddressFamily::IPV4);
+        {
+            let mut bindings = UDP_BINDINGS.lock();
+            for port in EPHEMERAL_PORT_START..=EPHEMERAL_PORT_END {
+                bindings.insert((AddressFamily::IPV4, Port(port)), u32::MAX);
+                bindings.insert((AddressFamily::IPV6, Port(port)), u32::MAX - 1);
+            }
+        }
+
+        let err = bind(socket_id, SocketAddr::new(Ipv4Addr::UNSPECIFIED, Port(0)))
+            .expect_err("exhausted ephemeral port space must return an error");
+        assert_eq!(err, NetError::AddrNotAvailable);
+
+        close(socket_id);
+        UDP_BINDINGS.lock().clear();
+    }
+
+    #[test]
+    fn udp_header_parse_rejects_length_smaller_than_header() {
+        let mut segment = [0u8; UdpHeader::SIZE];
+        segment[4..6].copy_from_slice(&7u16.to_be_bytes());
+
+        assert_eq!(
+            UdpHeader::parse(&segment).unwrap_err(),
+            NetError::InvalidPacket
+        );
+    }
+
+    #[test]
+    fn udp_header_parse_rejects_length_beyond_buffer() {
+        let mut segment = [0u8; UdpHeader::SIZE];
+        segment[4..6].copy_from_slice(&9u16.to_be_bytes());
+
+        assert_eq!(
+            UdpHeader::parse(&segment).unwrap_err(),
+            NetError::InvalidPacket
+        );
+    }
 
     #[test]
     fn udp_ipv6_process_packet_routes_bound_socket() {

@@ -28,6 +28,7 @@ use lazy_static::lazy_static;
 
 const AUDIO_COMMAND_QUEUE_CAPACITY: usize = 128;
 const AUDIO_RESPONSE_QUEUE_CAPACITY: usize = 128;
+const AUDIO_DATA_QUEUE_CAPACITY: usize = 64;
 
 /// Ses formatları
 #[derive(Clone, Debug)]
@@ -46,6 +47,68 @@ pub struct AudioChannel {
     pub sample_rate: u32,
     pub channels: u8, // 1 = mono, 2 = stereo
     pub volume: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioErrorKind {
+    InvalidChannel,
+    EmptyPayload,
+    QueueSaturated,
+    UnsupportedFormat,
+    ServiceUnavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioError {
+    pub kind: AudioErrorKind,
+    pub detail: String,
+    pub retryable: bool,
+}
+
+impl AudioError {
+    fn invalid_channel(channel_id: u32) -> Self {
+        Self {
+            kind: AudioErrorKind::InvalidChannel,
+            detail: alloc::format!("Channel {} not found", channel_id),
+            retryable: false,
+        }
+    }
+
+    fn empty_payload(channel_id: u32) -> Self {
+        Self {
+            kind: AudioErrorKind::EmptyPayload,
+            detail: alloc::format!("Channel {} payload is empty", channel_id),
+            retryable: false,
+        }
+    }
+
+    fn queue_saturated(channel_id: u32) -> Self {
+        Self {
+            kind: AudioErrorKind::QueueSaturated,
+            detail: alloc::format!("Channel {} queue saturated", channel_id),
+            retryable: true,
+        }
+    }
+
+    fn unsupported_format(sample_rate: u32, channels: u8) -> Self {
+        Self {
+            kind: AudioErrorKind::UnsupportedFormat,
+            detail: alloc::format!(
+                "Unsupported audio channel format {}Hz {}ch",
+                sample_rate,
+                channels
+            ),
+            retryable: false,
+        }
+    }
+
+    pub fn service_unavailable(detail: String) -> Self {
+        Self {
+            kind: AudioErrorKind::ServiceUnavailable,
+            detail,
+            retryable: true,
+        }
+    }
 }
 
 /// EchAudio servisi komutları
@@ -102,7 +165,7 @@ pub enum AudioResponse {
     /// Kanal oluşturuldu
     ChannelCreated { channel_id: u32 },
     /// Hata oluştu
-    Error(String),
+    Error(AudioError),
 }
 
 /// EchAudio servisi
@@ -214,6 +277,9 @@ impl EchAudio {
 
     /// Ses kanalını oluştur
     fn create_channel(&self, format: AudioFormat, sample_rate: u32, channels: u8) -> AudioResponse {
+        if sample_rate == 0 || channels == 0 {
+            return AudioResponse::Error(AudioError::unsupported_format(sample_rate, channels));
+        }
         let channel_id = self.channels.lock().len() as u32 + 1;
 
         let channel = AudioChannel {
@@ -258,14 +324,28 @@ impl EchAudio {
             crate::serial_println!("[ECHAUDIO] Closed audio channel {}", channel_id);
             AudioResponse::Success
         } else {
-            AudioResponse::Error(alloc::format!("Channel {} not found", channel_id))
+            AudioResponse::Error(AudioError::invalid_channel(channel_id))
         }
     }
 
     /// Ses verisi gönder
     fn send_audio_data(&self, channel_id: u32, data: Vec<u8>) -> AudioResponse {
-        // Ses verisini kuyruğa ekle
-        self.audio_queue.lock().push_back((channel_id, data));
+        if data.is_empty() {
+            return AudioResponse::Error(AudioError::empty_payload(channel_id));
+        }
+        if !self
+            .channels
+            .lock()
+            .iter()
+            .any(|channel| channel.id == channel_id)
+        {
+            return AudioResponse::Error(AudioError::invalid_channel(channel_id));
+        }
+        let mut queue = self.audio_queue.lock();
+        if queue.len() >= AUDIO_DATA_QUEUE_CAPACITY {
+            return AudioResponse::Error(AudioError::queue_saturated(channel_id));
+        }
+        queue.push_back((channel_id, data));
         AudioResponse::Success
     }
 
@@ -281,12 +361,20 @@ impl EchAudio {
             );
             AudioResponse::Success
         } else {
-            AudioResponse::Error(alloc::format!("Channel {} not found", channel_id))
+            AudioResponse::Error(AudioError::invalid_channel(channel_id))
         }
     }
 
     /// Ses efektini uygula
     fn apply_effect(&self, channel_id: u32, effect_type: AudioEffect) -> AudioResponse {
+        if !self
+            .channels
+            .lock()
+            .iter()
+            .any(|channel| channel.id == channel_id)
+        {
+            return AudioResponse::Error(AudioError::invalid_channel(channel_id));
+        }
         let mut profiles = self.dsp_profiles.lock();
         let profile = profiles.entry(channel_id).or_insert(DspProfile::default());
         match effect_type {
@@ -384,7 +472,8 @@ impl EchAudio {
             .unwrap_or_default();
 
         if profile.hrtf_enabled {
-            // Basit HRTF pan: kanal id parity'e göre L/R dengele.
+            // Deterministic stereo weighting keeps this service-side mix path bounded until
+            // a device-specific HRTF kernel is introduced behind the same profile flag.
             let pan_q15: i16 = if channel_id & 1 == 0 { 23170 } else { 16384 }; // ~0.707 / 0.5
             for pair in samples.chunks_exact_mut(2) {
                 pair[0] = ((pair[0] as i32 * pan_q15 as i32) >> 15) as i16;
@@ -440,5 +529,82 @@ pub fn service_task() -> ! {
     svc.run_service();
     loop {
         core::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_service_rejects_invalid_channel_and_empty_payload_with_typed_errors() {
+        let audio = EchAudio::new();
+
+        match audio.process_command(AudioCommand::SendAudioData {
+            channel_id: 7,
+            data: alloc::vec![1, 2, 3, 4],
+        }) {
+            AudioResponse::Error(error) => {
+                assert_eq!(error.kind, AudioErrorKind::InvalidChannel);
+                assert!(!error.retryable);
+            }
+            other => panic!("unexpected response: {:?}", other),
+        }
+
+        let AudioResponse::ChannelCreated { channel_id } =
+            audio.process_command(AudioCommand::CreateChannel {
+                format: AudioFormat::PCM16,
+                sample_rate: 16_000,
+                channels: 1,
+            })
+        else {
+            panic!("channel should be created")
+        };
+
+        match audio.process_command(AudioCommand::SendAudioData {
+            channel_id,
+            data: Vec::new(),
+        }) {
+            AudioResponse::Error(error) => {
+                assert_eq!(error.kind, AudioErrorKind::EmptyPayload);
+                assert!(!error.retryable);
+            }
+            other => panic!("unexpected response: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn audio_service_fails_closed_when_stream_queue_is_saturated() {
+        let audio = EchAudio::new();
+        let AudioResponse::ChannelCreated { channel_id } =
+            audio.process_command(AudioCommand::CreateChannel {
+                format: AudioFormat::PCM16,
+                sample_rate: 16_000,
+                channels: 1,
+            })
+        else {
+            panic!("channel should be created")
+        };
+
+        for _ in 0..AUDIO_DATA_QUEUE_CAPACITY {
+            assert!(matches!(
+                audio.process_command(AudioCommand::SendAudioData {
+                    channel_id,
+                    data: alloc::vec![1, 0, 2, 0],
+                }),
+                AudioResponse::Success
+            ));
+        }
+
+        match audio.process_command(AudioCommand::SendAudioData {
+            channel_id,
+            data: alloc::vec![3, 0, 4, 0],
+        }) {
+            AudioResponse::Error(error) => {
+                assert_eq!(error.kind, AudioErrorKind::QueueSaturated);
+                assert!(error.retryable);
+            }
+            other => panic!("unexpected response: {:?}", other),
+        }
     }
 }

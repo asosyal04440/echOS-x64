@@ -86,6 +86,8 @@ const RX_QUEUE_SIZE: usize = 256;
 const MAX_PACKET_SIZE: usize = 1514;
 /// IEEE 802.3 minimumu: 64 byte (padding ile)
 const MIN_PACKET_SIZE: usize = 64;
+/// FCS hariÃ§ minimum anlamlÄ± Ethernet Ã§erÃ§evesi
+const MIN_ETHERNET_FRAME_SIZE: usize = 14;
 
 // VirtIO-Net özellik bitleri (VirtIO spesifikasyonu Bölüm 5.1.3)
 const VIRTIO_NET_F_CSUM: u64 = 1 << 0; // Donanım checksum hesaplama
@@ -410,6 +412,9 @@ impl VirtioNetDevice {
         if !self.active {
             return Err(NetError::NoInterface);
         }
+        if data.len() < MIN_ETHERNET_FRAME_SIZE || data.len() > MAX_PACKET_SIZE {
+            return Err(NetError::InvalidPacket);
+        }
 
         let prev_domain = crate::cpu::smp::current_dma_domain();
         crate::cpu::smp::set_current_dma_domain(self.dma_domain);
@@ -452,6 +457,11 @@ impl VirtioNetDevice {
             if let Ok(rx_buf) = driver.receive() {
                 let data: Vec<u8> = rx_buf.packet().to_vec();
                 let len = data.len();
+                if !(MIN_ETHERNET_FRAME_SIZE..=MAX_PACKET_SIZE).contains(&len) {
+                    crate::serial_println!("[VIRTIO-NET] Dropping malformed RX packet len={}", len);
+                    crate::cpu::smp::set_current_dma_domain(prev_domain);
+                    return None;
+                }
 
                 self.rx_count += 1;
                 self.rx_bytes += len as u64;

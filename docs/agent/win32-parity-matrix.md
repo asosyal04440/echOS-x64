@@ -36,17 +36,20 @@ Status anlami:
 
 ## Current High-Risk Gaps
 
-- Strict source audit'e gore aktif blocker kalmadi; mevcut repo-visible surface icin `echsdk exactness strict` sifir blocker ile geciyor.
-- Declared Win32 stub export tablosu `0`, bilinen behavior boundary listesi `0`, runtime unsupported counter'lari `0` durumuna inmistir.
-- Host-side `echsdk test` lane'i artik strict exactness gate'i zorunlu calistirir; snapshot regress ederse packaging/test kabul kapisi fail-closed olur.
+- `echsdk exactness strict` artik aktif blocker tasir ve fail-closed davranir. Declared Win32 stub export tablosu `0` olsa da bilinen behavior boundary listesi browser runtime graph ve DXGI present/translation truthfulness aciklarini mekanik blocker olarak yuzeye cikarir.
+- Host-side `echsdk test` lane'i strict exactness gate'ini zorunlu calistirmaya devam eder; bu gate artik browser/gfx long-tail icin de kirmizi gorebilir, yani packaging/test kabul kapisi sadece stub export sayimina bakarak yesil olmaz.
 - `SetViewportExtEx/GetViewportExtEx/SetWindowExtEx/GetWindowExtEx` artik DC state icinde retained extent tasir ve `DPtoLP/LPtoDP` ile birlikte page-transform matemigine katilir; sabit 1:1 mapping boundary'si kapanmistir.
 - `user32!mouse_event` artik resolve olmakla kalmaz, absolute/relative pointer hareketi ve ordered button transition publish eder; sentetik input behavior boundary'si kapanmistir.
+- Browser-class Windows desktop GUI/binary stacks ve browser workload altindaki graphics/runtime fidelity Phase 4 parity acisindan hala acik bir compatibility lane'dir; curated-app matrix bugunku packaged-contract boundary'sini unsupported diye yazar, ama process-broker artik browser shell PE launch'lar icin structured runtime graph state, broker-child helper runtime attach'i ve helper-role aware bridge policy yayimlar.
+- DXGI present bridge artik sentetik completion uydurmaz; `DxgiPresentResult` display feedback yoksa `queued-without-display-feedback` sonucu dondurur ve native GPU/display lane varsa `dxgi` icin `display-native/dxgi-native-present` route'unu secebilir. Bu truthfulness artisi, native Microsoft display-stack parity'nin kapandigi anlamina gelmez.
 - Yeni Microsoft typelib familyasi, CRT ABI ailesi veya graphics/vendor-specific compatibility surface desteklenecekse ilgili corpus ile yeniden acilir; strict gate yalniz mevcut declared surface icin closure iddia eder.
+- Acik behavior boundary listesi browser runtime graph, DXGI completion truthfulness ve DXGI translation profile lanes'ini explicit olarak [src/win32.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/win32.rs) icindeki `WIN32_EXACTNESS_BOUNDARIES` uzerinden publish eder.
 
 ## Phase Boundary
 
-- Faz 2 `Verified core` seviyesinin otesine gecip mevcut declared repo-visible surface icin strict exactness gate'ini kapatmistir. Loader/export/import core, process/thread/TLS runtime core, visible SEH contract, WinHTTP/WinINet bridge, COM class-factory core, repo-visible `user32/gdi32` retained behavior ve `CRT / msvcrt` surface mekanik olarak dogrulanmis; `echsdk exactness strict` sifir blocker ile gecmistir.
-- Faz 4 `Verified compatibility long-tail` mevcut destekli aileler icin mekanik olarak kapali durumdadir. Supported `MSFT/SLTG` typelib intake/publication, supported CRT ABI exotica corpus'u ve supported DXGI/game-facing graphics compatibility boundary'si mevcut repo-visible contract icin strict audit'e engel olmayan seviyededir.
+- Faz 2 `Verified core` seviyesinin otesine gecip mevcut declared repo-visible surface icin strict exactness gate'ini mekanik fail-closed hale getirmistir. Loader/export/import core, process/thread/TLS runtime core, visible SEH contract, WinHTTP/WinINet bridge, COM class-factory core, repo-visible `user32/gdi32` retained behavior ve `CRT / msvcrt` surface mekanik olarak dogrulanmis; buna karsin `echsdk exactness strict` artik browser/gfx blockers'i de tasidigi icin yesil kalmak zorunda degildir.
+- Faz 4 hala `In Progress` olarak okunmalidir. Supported `MSFT/SLTG` typelib intake/publication ve supported CRT ABI exotica corpus'u gucludur; ancak DXGI/game-facing graphics tarafinda native `dxgi` route yalniz native GPU/display lane'de acilirken D3D11/D3D12 ile fallback DXGI translation-profile + queued-without-feedback completion boundary'si surer, browser tarafinda ise structured runtime graph + broker-child runtime attach + helper-role aware policy'ye ragmen executable helper-process/sandbox/platform-hardening closure'u acik kaldigi icin Phase 4 exactness acik kalir.
+- Browser-class Windows binary compatibility bugunku declared curated/package surface'e dahil olmayabilir, fakat roadmap ve compatibility long-tail borcu olarak Faz 4 icinde acik kalir. Supported contract'a alinacaksa `BROW-*` icin ayri corpus ve saha smoke'u gerekir.
 - Daha genis vendor/out-of-tree ecosystem delta'lari veya yeni compatibility familyalari bu closure'un icinde varsayilmaz; desteklenirse yeniden backlog ve corpus ile acilir.
 
 ## Exactness Exit Criteria

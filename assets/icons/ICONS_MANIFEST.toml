@@ -1,0 +1,141 @@
+[icon_set]
+name = "echOS Lucide Core Icons"
+primary_source = "Lucide"
+source_repository = "https://github.com/lucide-icons/lucide"
+source_commit = "3c62e4bfef50fb88dd9618439b46811af912ba4a"
+license = "ISC"
+license_file = "assets/icons/licenses/lucide-LICENSE.txt"
+imported_at = "2026-04-17"
+policy = "Selected SVG source assets only; runtime formats must be generated from this manifest."
+
+[[icons]]
+name = "app-window"
+file = "assets/icons/source/lucide/app-window.svg"
+upstream_path = "icons/app-window.svg"
+purpose = "Window/session UI surfaces"
+
+[[icons]]
+name = "cpu"
+file = "assets/icons/source/lucide/cpu.svg"
+upstream_path = "icons/cpu.svg"
+purpose = "CPU and scheduler diagnostics"
+
+[[icons]]
+name = "hard-drive"
+file = "assets/icons/source/lucide/hard-drive.svg"
+upstream_path = "icons/hard-drive.svg"
+purpose = "Storage and block device UI"
+
+[[icons]]
+name = "info"
+file = "assets/icons/source/lucide/info.svg"
+upstream_path = "icons/info.svg"
+purpose = "Informational dialogs and diagnostics"
+
+[[icons]]
+name = "keyboard"
+file = "assets/icons/source/lucide/keyboard.svg"
+upstream_path = "icons/keyboard.svg"
+purpose = "Keyboard input settings"
+
+[[icons]]
+name = "lock"
+file = "assets/icons/source/lucide/lock.svg"
+upstream_path = "icons/lock.svg"
+purpose = "Lock, authorization, and secure state UI"
+
+[[icons]]
+name = "memory-stick"
+file = "assets/icons/source/lucide/memory-stick.svg"
+upstream_path = "icons/memory-stick.svg"
+purpose = "Memory and RAM diagnostics"
+
+[[icons]]
+name = "microchip"
+file = "assets/icons/source/lucide/microchip.svg"
+upstream_path = "icons/microchip.svg"
+purpose = "Hardware and chipset surfaces"
+
+[[icons]]
+name = "monitor"
+file = "assets/icons/source/lucide/monitor.svg"
+upstream_path = "icons/monitor.svg"
+purpose = "Display and framebuffer UI"
+
+[[icons]]
+name = "mouse"
+file = "assets/icons/source/lucide/mouse.svg"
+upstream_path = "icons/mouse.svg"
+purpose = "Pointer input settings"
+
+[[icons]]
+name = "network"
+file = "assets/icons/source/lucide/network.svg"
+upstream_path = "icons/network.svg"
+purpose = "Network topology and connectivity UI"
+
+[[icons]]
+name = "package"
+file = "assets/icons/source/lucide/package.svg"
+upstream_path = "icons/package.svg"
+purpose = "Package manager and install surfaces"
+
+[[icons]]
+name = "power"
+file = "assets/icons/source/lucide/power.svg"
+upstream_path = "icons/power.svg"
+purpose = "Power, shutdown, and reboot actions"
+
+[[icons]]
+name = "search"
+file = "assets/icons/source/lucide/search.svg"
+upstream_path = "icons/search.svg"
+purpose = "Search surfaces"
+
+[[icons]]
+name = "server"
+file = "assets/icons/source/lucide/server.svg"
+upstream_path = "icons/server.svg"
+purpose = "Services and local daemon UI"
+
+[[icons]]
+name = "settings"
+file = "assets/icons/source/lucide/settings.svg"
+upstream_path = "icons/settings.svg"
+purpose = "Settings and preferences"
+
+[[icons]]
+name = "shield"
+file = "assets/icons/source/lucide/shield.svg"
+upstream_path = "icons/shield.svg"
+purpose = "Security center and trust state UI"
+
+[[icons]]
+name = "terminal"
+file = "assets/icons/source/lucide/terminal.svg"
+upstream_path = "icons/terminal.svg"
+purpose = "Shell and command surfaces"
+
+[[icons]]
+name = "triangle-alert"
+file = "assets/icons/source/lucide/triangle-alert.svg"
+upstream_path = "icons/triangle-alert.svg"
+purpose = "Warnings and high-severity diagnostics"
+
+[[icons]]
+name = "usb"
+file = "assets/icons/source/lucide/usb.svg"
+upstream_path = "icons/usb.svg"
+purpose = "USB device surfaces"
+
+[[icons]]
+name = "volume-2"
+file = "assets/icons/source/lucide/volume-2.svg"
+upstream_path = "icons/volume-2.svg"
+purpose = "Audio output and volume UI"
+
+[[icons]]
+name = "wifi"
+file = "assets/icons/source/lucide/wifi.svg"
+upstream_path = "icons/wifi.svg"
+purpose = "Wireless networking UI"

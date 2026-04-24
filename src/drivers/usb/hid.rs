@@ -624,7 +624,13 @@ impl HidDriver {
         // Interrupt uç noktalarını bul
         for iface in &self.device.interfaces {
             if iface.interface_number == self.interface {
-                // Şimdilik HID sınıfından klavye varsayılır
+                let mut state = self.state.lock();
+                state.device_type = match (iface.subclass, iface.protocol) {
+                    (1, 1) => HidDeviceType::Keyboard,
+                    (1, 2) => HidDeviceType::Mouse,
+                    _ => HidDeviceType::Generic,
+                };
+                drop(state);
 
                 for ep in &iface.endpoints {
                     if ep.transfer_type == UsbTransferType::Interrupt {
@@ -676,8 +682,8 @@ impl HidDriver {
             length: 0,
         };
 
-        // Kontrol aktarımı gönder (TODO: gerçek uygulama)
-        let _ = setup;
+        let mut device = self.device.clone();
+        device.control_transfer(setup, None)?;
 
         self.state.lock().boot_protocol = boot;
         Ok(())
@@ -698,8 +704,8 @@ impl HidDriver {
             length: 0,
         };
 
-        let _ = setup;
-        Ok(())
+        let mut device = self.device.clone();
+        device.control_transfer(setup, None)
     }
 
     /// Klavye LED'lerini ayarlar (SET_REPORT çıkış raporu).
@@ -721,8 +727,10 @@ impl HidDriver {
             length: 1,
         };
 
-        let _ = setup;
+        let mut report = [leds];
         drop(state);
+        let mut device = self.device.clone();
+        device.control_transfer(setup, Some(&mut report))?;
 
         // Interrupt OUT uç noktası varsa oradan gönder
         // self.send_output_report(&[leds])?;
@@ -762,7 +770,11 @@ impl HidDriver {
     /// Gerçek implementasyonda Interrupt IN uç noktasından okunur.
     /// Uç nokta sorgulaması periyodik zamanlayıcıya veya kesme işleyicisine bağlanmalıdır.
     pub fn poll(&self) -> Result<HidEvent, UsbError> {
-        // Gerçek uygulamada: interrupt IN uç noktasından oku
+        let endpoint = self.interrupt_in.ok_or(UsbError::NoDevice)?;
+        let mut device = self.device.clone();
+        if let Some(report) = device.interrupt_transfer_in(endpoint)? {
+            return Ok(self.process_report(&report));
+        }
         Ok(HidEvent::None)
     }
 

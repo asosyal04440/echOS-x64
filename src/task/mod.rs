@@ -23,10 +23,10 @@ pub mod task;
 /// Öncelik + yaşlandırma (aging) tabanlı zamanlayıcı
 pub mod scheduler;
 
+pub mod eas;
+pub mod eevdf;
 /// Gerçek Zamanlı Zamanlayıcı (SCHED_FIFO / SCHED_RR)
 pub mod rt_scheduler;
-pub mod eevdf;
-pub mod eas;
 
 /// Kullanıcı modu görev desteği (Ring3)
 pub mod user;

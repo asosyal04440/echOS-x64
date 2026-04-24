@@ -21,6 +21,7 @@ use core::mem;
 
 use super::gal::{Gal, TextureDesc, TextureFormat, TextureHandle, TextureUsage};
 use super::{Surface, SwapChain};
+use crate::allocator::doctrine::{alloc_surface_pixels, SurfacePixelBuffer, SurfacePixelFormat};
 
 // ============================================================================
 // DÖŞEME SABİTLERİ
@@ -43,7 +44,7 @@ pub const MAX_TILES: usize = 256;
 // ============================================================================
 
 /// Tek render döşemesi
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Tile {
     /// Döşeme koordinatlarında X konumu
     pub tx: usize,
@@ -62,13 +63,68 @@ pub struct Tile {
     /// Değişim tespiti için içerik karması
     pub content_hash: u64,
     /// Döşeme yüzey tamponu
-    pub buffer: Vec<u32>,
+    pub buffer: SurfacePixelBuffer,
     /// Son render edilen kare
     pub last_frame: u64,
 }
 
+impl Clone for Tile {
+    fn clone(&self) -> Self {
+        let buffer = match alloc_surface_pixels(
+            self.width.max(1),
+            self.height.max(1),
+            SurfacePixelFormat::Argb8888,
+        ) {
+            Ok(mut buffer) => {
+                let copy_len = buffer.len().min(self.buffer.len());
+                buffer.as_mut_slice()[..copy_len]
+                    .copy_from_slice(&self.buffer.as_slice()[..copy_len]);
+                buffer
+            }
+            Err(error) => {
+                crate::serial_println!(
+                    "[TILE] doctrine fallback clone tx={} ty={} width={} height={} err={:?}",
+                    self.tx,
+                    self.ty,
+                    self.width,
+                    self.height,
+                    error
+                );
+                SurfacePixelBuffer::Heap(self.buffer.as_slice().to_vec())
+            }
+        };
+        Self {
+            tx: self.tx,
+            ty: self.ty,
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+            dirty: self.dirty,
+            content_hash: self.content_hash,
+            buffer,
+            last_frame: self.last_frame,
+        }
+    }
+}
+
 impl Tile {
     pub fn new(tx: usize, ty: usize, x: usize, y: usize, width: usize, height: usize) -> Self {
+        let buffer =
+            match alloc_surface_pixels(width.max(1), height.max(1), SurfacePixelFormat::Argb8888) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    crate::serial_println!(
+                        "[TILE] doctrine fallback new tx={} ty={} width={} height={} err={:?}",
+                        tx,
+                        ty,
+                        width,
+                        height,
+                        error
+                    );
+                    SurfacePixelBuffer::Heap(vec![0; width * height])
+                }
+            };
         Tile {
             tx,
             ty,
@@ -78,7 +134,7 @@ impl Tile {
             height,
             dirty: true,
             content_hash: 0,
-            buffer: vec![0; width * height],
+            buffer,
             last_frame: 0,
         }
     }
@@ -86,7 +142,7 @@ impl Tile {
     /// Döşemeyi bir renkle temizle
     #[inline]
     pub fn clear(&mut self, color: u32) {
-        for pixel in &mut self.buffer {
+        for pixel in self.buffer.as_mut_slice().iter_mut() {
             *pixel = color;
         }
         self.dirty = true;
@@ -96,7 +152,7 @@ impl Tile {
     #[inline]
     pub fn set_pixel(&mut self, local_x: usize, local_y: usize, color: u32) {
         if local_x < self.width && local_y < self.height {
-            self.buffer[local_y * self.width + local_x] = color;
+            self.buffer.as_mut_slice()[local_y * self.width + local_x] = color;
             self.dirty = true;
         }
     }
@@ -105,7 +161,7 @@ impl Tile {
     #[inline]
     pub fn get_pixel(&self, local_x: usize, local_y: usize) -> u32 {
         if local_x < self.width && local_y < self.height {
-            self.buffer[local_y * self.width + local_x]
+            self.buffer.as_slice()[local_y * self.width + local_x]
         } else {
             0
         }
@@ -134,16 +190,16 @@ impl Tile {
                     break;
                 }
 
-                fb[fb_offset + col] = self.buffer[tile_offset + col];
+                fb[fb_offset + col] = self.buffer.as_slice()[tile_offset + col];
             }
         }
     }
 
     /// Değişim tespiti için içerik karmasını hesapla
     pub fn compute_hash(&mut self) {
-        // Basit karma: tüm piksellerin XOR'u
+        // Tile cache invalidation için order-independent lightweight pixel fold.
         let mut hash: u64 = 0;
-        for (i, pixel) in self.buffer.iter().enumerate() {
+        for (i, pixel) in self.buffer.as_slice().iter().enumerate() {
             hash ^= (*pixel as u64).wrapping_add((i as u64).wrapping_mul(31));
         }
         self.content_hash = hash;

@@ -83,6 +83,10 @@ use spin::Mutex;
 
 /// DNS sunucu portu: hem UDP hem TCP'de kullanılır
 const DNS_PORT: u16 = 53;
+// Fail-closed bound to break cyclic DNS compression pointers.
+const MAX_DNS_COMPRESSION_JUMPS: usize = 10;
+const MAX_DNS_LABEL_LEN: usize = 63;
+const MAX_DNS_NAME_LEN: usize = 255;
 
 /// DNS kayıt türleri (Resource Record Types).
 ///
@@ -342,48 +346,7 @@ impl DnsAnswer {
     /// İşaretçi paketin başka bir bölümündeki alan adına atlar,
     /// bu sayede tekrarlayan alan adları için bant genişliği tasarrufu sağlanır.
     fn parse_name(data: &[u8], pos: &mut usize) -> Result<String, NetError> {
-        let mut name = String::new();
-        let mut jumped = false; // İşaretçi atlaması yapıldı mı?
-        let mut jumped_pos = 0; // Atlama sonrası geri dönülecek konum
-
-        loop {
-            let len = data[*pos] as usize;
-            *pos += 1;
-
-            if len == 0 {
-                break; // Root label: alan adının sonu
-            }
-
-            // DNS sıkıştırma: ilk 2 bit 11 ise (0xC0) işaretçidir
-            if (len & 0xC0) == 0xC0 {
-                if !jumped {
-                    jumped_pos = *pos + 1; // Atlama sonrası devam edilecek konum
-                    jumped = true;
-                }
-                let offset = ((len & 0x3F) << 8) | (data[*pos] as usize);
-                *pos = offset; // İşaretçinin gösterdiği konuma atla
-                continue;
-            }
-
-            if *pos + len > data.len() {
-                return Err(NetError::InvalidPacket);
-            }
-
-            if !name.is_empty() {
-                name.push('.');
-            }
-
-            for i in 0..len {
-                name.push(data[*pos + i] as char);
-            }
-            *pos += len;
-        }
-
-        if jumped {
-            *pos = jumped_pos; // Atlama yapıldıysa doğru konuma dön
-        }
-
-        Ok(name)
+        parse_dns_name(data, pos)
     }
 
     /// Kayıt A tipi ise IPv4 adresini döner.
@@ -584,7 +547,12 @@ fn resolve_with_depth(
     bind(sock_id, SocketAddr::new(Ipv4Addr::UNSPECIFIED, Port(0)))?;
 
     // DNS sorgusu oluştur
-    let id = crate::random::rand_u64() as u16;
+    let (id, secure_id) = crate::random::secure_u16();
+    if !secure_id {
+        crate::serial_println!(
+            "[DNS] secure RNG unavailable; query id uses entropy-mixed fallback"
+        );
+    }
     let header = DnsHeader::new_query(id);
     let question = DnsQuestion::new(hostname);
 
@@ -603,32 +571,25 @@ fn resolve_with_depth(
     // Yanıtı al
     let mut resp_buf = vec![0u8; 512];
     let (len, _) = recvfrom(sock_id, &mut resp_buf, 0)?;
+    let resp_data = &resp_buf[..len];
 
     close(sock_id)?;
 
     // Yanıt başlığını ayrıştır
-    let resp_header = DnsHeader::parse(&resp_buf)?;
+    let resp_header = DnsHeader::parse(resp_data)?;
 
-    if !resp_header.is_response() || !resp_header.is_valid() {
+    if resp_header.id != id || !resp_header.is_response() || !resp_header.is_valid() {
         return Err(NetError::ProtocolError);
     }
 
     // Soru bölümünü atla (ayrıştırma yapılmıyor, sadece ilerle)
     let mut offset = DnsHeader::SIZE;
     for _ in 0..resp_header.qdcount {
-        // Alan adını atla
-        while offset < len && resp_buf[offset] != 0 {
-            let lbl_len = resp_buf[offset] as usize;
-            if lbl_len & 0xC0 == 0xC0 {
-                offset += 2; // Sıkıştırma işaretçisi: 2 byte
-                break;
-            }
-            offset += 1 + lbl_len;
+        parse_dns_name(resp_data, &mut offset)?;
+        if offset + 4 > len {
+            return Err(NetError::InvalidPacket);
         }
-        if offset < len && resp_buf[offset] == 0 {
-            offset += 1; // Root label
-        }
-        offset += 4; // QTYPE + QCLASS
+        offset += 4;
     }
 
     // ── 3. Yanıt kayıtlarını ayrıştır ─────────────────────────────────
@@ -636,7 +597,7 @@ fn resolve_with_depth(
     let mut cname_target: Option<String> = None;
 
     for _ in 0..resp_header.ancount {
-        let (answer, new_offset) = DnsAnswer::parse(&resp_buf, offset)?;
+        let (answer, new_offset) = DnsAnswer::parse(resp_data, offset)?;
         offset = new_offset;
 
         // A kaydı bulundu — önbelleğe kaydet ve döndür
@@ -705,56 +666,68 @@ fn parse_name_from_rdata(
     rdata_offset: usize,
 ) -> Result<String, NetError> {
     let mut pos = rdata_offset;
+    let parsed = parse_dns_name(full_packet, &mut pos)?;
+    if parsed.is_empty() {
+        return Err(NetError::InvalidPacket);
+    }
+    Ok(parsed)
+}
+
+fn parse_dns_name(data: &[u8], pos: &mut usize) -> Result<String, NetError> {
+    let mut cursor = *pos;
     let mut name = String::new();
     let mut jumped = false;
     let mut jumped_pos = 0usize;
+    let mut jumps = 0usize;
 
     loop {
-        if pos >= full_packet.len() {
-            break;
+        if cursor >= data.len() {
+            return Err(NetError::InvalidPacket);
         }
-        let len = full_packet[pos] as usize;
-        pos += 1;
+
+        let len = data[cursor] as usize;
+        cursor += 1;
 
         if len == 0 {
             break;
         }
 
-        // Sıkıştırma işaretçisi
         if (len & 0xC0) == 0xC0 {
-            if pos >= full_packet.len() {
+            if cursor >= data.len() || jumps >= MAX_DNS_COMPRESSION_JUMPS {
+                return Err(NetError::InvalidPacket);
+            }
+            let offset = ((len & 0x3F) << 8) | data[cursor] as usize;
+            if offset >= data.len() {
                 return Err(NetError::InvalidPacket);
             }
             if !jumped {
-                jumped_pos = pos + 1;
+                jumped_pos = cursor + 1;
                 jumped = true;
             }
-            let ptr = ((len & 0x3F) << 8) | (full_packet[pos] as usize);
-            pos = ptr;
+            cursor = offset;
+            jumps += 1;
             continue;
         }
 
-        if pos + len > full_packet.len() {
+        if (len & 0xC0) != 0 || len > MAX_DNS_LABEL_LEN || cursor + len > data.len() {
+            return Err(NetError::InvalidPacket);
+        }
+
+        let next_len = name.len() + len + usize::from(!name.is_empty());
+        if next_len > MAX_DNS_NAME_LEN {
             return Err(NetError::InvalidPacket);
         }
 
         if !name.is_empty() {
             name.push('.');
         }
-        for i in 0..len {
-            name.push(full_packet[pos + i] as char);
+        for &byte in &data[cursor..cursor + len] {
+            name.push(byte as char);
         }
-        pos += len;
+        cursor += len;
     }
 
-    if jumped {
-        // Restore position after pointer jump (not needed for return value)
-        let _ = jumped_pos;
-    }
-
-    if name.is_empty() {
-        return Err(NetError::InvalidPacket);
-    }
+    *pos = if jumped { jumped_pos } else { cursor };
     Ok(name)
 }
 
@@ -769,5 +742,79 @@ pub fn resolve_default(hostname: &str) -> Result<Ipv4Addr, NetError> {
     } else {
         // Fallback: Google Public DNS
         resolve(hostname, Ipv4Addr::new(8, 8, 8, 8))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dns_query_id_uses_secure_u16_range() {
+        let mut observed_nonzero = false;
+        for _ in 0..64 {
+            let (id, _) = crate::random::secure_u16();
+            if id != 0 {
+                observed_nonzero = true;
+            }
+        }
+        assert!(observed_nonzero);
+    }
+
+    #[test]
+    fn parse_dns_name_supports_valid_compression_pointer() {
+        let packet = [
+            0x03, b'w', b'w', b'w', 0xC0, 0x06, 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+            0x03, b'c', b'o', b'm', 0x00,
+        ];
+        let mut pos = 0usize;
+
+        let parsed = parse_dns_name(&packet, &mut pos).expect("valid compressed name");
+
+        assert_eq!(parsed, "www.example.com");
+        assert_eq!(pos, 6);
+    }
+
+    #[test]
+    fn parse_dns_name_rejects_self_referential_pointer_loop() {
+        let packet = [0xC0, 0x00];
+        let mut pos = 0usize;
+
+        assert!(matches!(
+            parse_dns_name(&packet, &mut pos),
+            Err(NetError::InvalidPacket)
+        ));
+    }
+
+    #[test]
+    fn parse_dns_name_rejects_mutual_pointer_loop() {
+        let packet = [0xC0, 0x02, 0xC0, 0x00];
+        let mut pos = 0usize;
+
+        assert!(matches!(
+            parse_dns_name(&packet, &mut pos),
+            Err(NetError::InvalidPacket)
+        ));
+    }
+
+    #[test]
+    fn parse_name_from_rdata_rejects_pointer_loop() {
+        let packet = [0xC0, 0x00];
+
+        assert!(matches!(
+            parse_name_from_rdata(&packet, &packet, 0),
+            Err(NetError::InvalidPacket)
+        ));
+    }
+
+    #[test]
+    fn parse_dns_name_rejects_out_of_bounds_start_cursor() {
+        let packet = [0x00u8];
+        let mut pos = packet.len();
+
+        assert!(matches!(
+            parse_dns_name(&packet, &mut pos),
+            Err(NetError::InvalidPacket)
+        ));
     }
 }

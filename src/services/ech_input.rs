@@ -17,16 +17,19 @@ use crate::drivers::input::{InputEvent as RawInputEvent, MousePacket};
 use crate::gui::focus::FocusManager;
 use crate::gui::input_pipeline::InputPipeline;
 use crate::gui::protocol::{
-    AppId, InputEvent, KeyState, Point, PointerButton, ShellShortcut, WindowInputEvent, MOD_ALT,
-    MOD_SUPER,
+    AccessibilityProfile, AppId, InputEvent, KeyState, Point, PointerButton, ShellShortcut,
+    WindowInputEvent, MOD_ALT, MOD_CTRL, MOD_SUPER,
 };
 use crate::gui::shared_ring::SharedRing;
 use crate::ipc::request_display_sync;
 use crate::services::display_atomic::MailboxRing;
 use crate::services::ech_display::{DisplayCommand, DisplayResponse, InputRouting};
+use crate::services::ech_shell::{get_shell_service, ShellCommand, ShellResponse};
 
 const MAX_EVENTS_PER_APP: usize = 1024;
 const MOUSE_BUTTON_DEBOUNCE_NS: u64 = 8_000_000;
+const ACCESSIBILITY_PROFILE_REFRESH_NS: u64 = 50_000_000;
+const SLOW_KEYS_DELAY_NS: u64 = 250_000_000;
 const INPUT_COMMAND_QUEUE_CAPACITY: usize = 256;
 const INPUT_RESPONSE_QUEUE_CAPACITY: usize = 256;
 
@@ -72,6 +75,12 @@ struct ButtonDebounce {
     middle_ns: u64,
 }
 
+#[derive(Clone)]
+struct PendingSlowKey {
+    event: InputEvent,
+    ready_ns: u64,
+}
+
 pub struct EchInput {
     running: AtomicBool,
     focus: Mutex<FocusManager>,
@@ -85,6 +94,10 @@ pub struct EchInput {
     last_button_change_ns: Mutex<ButtonDebounce>,
     pipeline: Mutex<InputPipeline>,
     last_scroll_poll_ns: Mutex<u64>,
+    last_accessibility_refresh_ns: Mutex<u64>,
+    accessibility_profile: Mutex<AccessibilityProfile>,
+    latched_modifiers: Mutex<u8>,
+    pending_slow_keys: Mutex<BTreeMap<u16, PendingSlowKey>>,
     alt_switch_armed: AtomicBool,
 }
 
@@ -103,6 +116,10 @@ impl EchInput {
             last_button_change_ns: Mutex::new(ButtonDebounce::default()),
             pipeline: Mutex::new(InputPipeline::new()),
             last_scroll_poll_ns: Mutex::new(crate::cpu::tsc::read_ns()),
+            last_accessibility_refresh_ns: Mutex::new(0),
+            accessibility_profile: Mutex::new(AccessibilityProfile::default()),
+            latched_modifiers: Mutex::new(0),
+            pending_slow_keys: Mutex::new(BTreeMap::new()),
             alt_switch_armed: AtomicBool::new(false),
         }
     }
@@ -126,6 +143,7 @@ impl EchInput {
     }
 
     pub fn process_command(&self, command: InputCommand) -> InputResponse {
+        self.refresh_accessibility_profile(false);
         // Clients poll this service synchronously; drain the raw driver queue here too so
         // pointer/keyboard interaction does not depend solely on the background service task.
         self.drain_raw_input();
@@ -203,7 +221,9 @@ impl EchInput {
 
     pub fn run_service(&self) {
         while self.running.load(Ordering::SeqCst) {
+            self.refresh_accessibility_profile(false);
             self.drain_raw_input();
+            self.flush_pending_slow_keys();
 
             while let Some(command) = self.command_queue.pop() {
                 let response = self.process_command(command);
@@ -372,8 +392,20 @@ impl EchInput {
     }
 
     fn route_event(&self, event: InputEvent) {
+        let Some(event) = self.apply_accessibility_filters(event) else {
+            return;
+        };
+
         if self.intercept_shortcut(&event) {
             return;
+        }
+
+        self.dispatch_event(event);
+    }
+
+    fn dispatch_event(&self, event: InputEvent) {
+        if matches!(event, InputEvent::Key { .. }) {
+            self.flush_pending_slow_keys();
         }
 
         let routing = match request_display_sync(
@@ -416,6 +448,125 @@ impl EchInput {
                     },
                 );
             }
+        }
+    }
+
+    fn refresh_accessibility_profile(&self, force: bool) {
+        let now_ns = crate::cpu::tsc::read_ns();
+        {
+            let mut last = self.last_accessibility_refresh_ns.lock();
+            if !force && now_ns.saturating_sub(*last) < ACCESSIBILITY_PROFILE_REFRESH_NS {
+                return;
+            }
+            *last = now_ns;
+        }
+
+        if let ShellResponse::AccessibilityProfile(profile) =
+            get_shell_service().process_command(ShellCommand::GetAccessibilityProfile)
+        {
+            *self.accessibility_profile.lock() = profile;
+            if !profile.sticky_keys {
+                *self.latched_modifiers.lock() = 0;
+            }
+            if !profile.slow_keys {
+                self.pending_slow_keys.lock().clear();
+            }
+        }
+    }
+
+    fn apply_accessibility_filters(&self, event: InputEvent) -> Option<InputEvent> {
+        let profile = *self.accessibility_profile.lock();
+        let InputEvent::Key {
+            unicode,
+            scan_code,
+            modifiers,
+            state,
+        } = event
+        else {
+            return Some(event);
+        };
+
+        let modifier_mask = sticky_modifier_mask(scan_code);
+        if profile.sticky_keys {
+            if modifier_mask != 0 {
+                if matches!(state, KeyState::Pressed) {
+                    let mut latched = self.latched_modifiers.lock();
+                    *latched |= modifier_mask;
+                }
+                return None;
+            }
+        } else {
+            *self.latched_modifiers.lock() = 0;
+        }
+
+        let effective_modifiers = if profile.sticky_keys && matches!(state, KeyState::Pressed) {
+            let mut latched = self.latched_modifiers.lock();
+            let combined = modifiers | *latched;
+            *latched = 0;
+            combined
+        } else {
+            modifiers
+        };
+
+        let filtered = InputEvent::Key {
+            unicode,
+            scan_code,
+            modifiers: effective_modifiers,
+            state,
+        };
+
+        if profile.slow_keys && modifier_mask == 0 {
+            match state {
+                KeyState::Pressed => {
+                    self.pending_slow_keys.lock().insert(
+                        scan_code,
+                        PendingSlowKey {
+                            event: filtered,
+                            ready_ns: crate::cpu::tsc::read_ns().saturating_add(SLOW_KEYS_DELAY_NS),
+                        },
+                    );
+                    return None;
+                }
+                KeyState::Released => {
+                    if self.pending_slow_keys.lock().remove(&scan_code).is_some() {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        Some(filtered)
+    }
+
+    fn flush_pending_slow_keys(&self) {
+        let now_ns = crate::cpu::tsc::read_ns();
+        let mut ready = Vec::new();
+        {
+            let pending = self.pending_slow_keys.lock();
+            for (&scan_code, entry) in pending.iter() {
+                if now_ns >= entry.ready_ns {
+                    ready.push(scan_code);
+                }
+            }
+        }
+        if ready.is_empty() {
+            return;
+        }
+
+        let mut pending = self.pending_slow_keys.lock();
+        let mut events = Vec::with_capacity(ready.len());
+        for scan_code in ready {
+            if let Some(entry) = pending.remove(&scan_code) {
+                events.push(entry.event);
+            }
+        }
+        drop(pending);
+
+        for event in events {
+            if self.intercept_shortcut(&event) {
+                continue;
+            }
+            self.dispatch_event(event);
         }
     }
 
@@ -549,6 +700,15 @@ fn translate_key_state(state: pc_keyboard::KeyState) -> KeyState {
     }
 }
 
+fn sticky_modifier_mask(scan_code: u16) -> u8 {
+    match scan_code {
+        0x1D => MOD_CTRL,
+        0x38 => MOD_ALT,
+        0x5B | 0x5C => MOD_SUPER,
+        _ => 0,
+    }
+}
+
 lazy_static::lazy_static! {
     static ref ECH_INPUT: Arc<EchInput> = Arc::new(EchInput::new());
 }
@@ -567,5 +727,65 @@ pub fn service_task() -> ! {
     svc.run_service();
     loop {
         core::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sticky_keys_latch_modifier_into_next_key_press() {
+        let input = EchInput::new();
+        *input.accessibility_profile.lock() = AccessibilityProfile {
+            sticky_keys: true,
+            ..AccessibilityProfile::default()
+        };
+
+        let modifier = input.apply_accessibility_filters(InputEvent::Key {
+            unicode: None,
+            scan_code: 0x1D,
+            modifiers: 0,
+            state: KeyState::Pressed,
+        });
+        assert!(modifier.is_none());
+
+        let forwarded = input.apply_accessibility_filters(InputEvent::Key {
+            unicode: Some('c'),
+            scan_code: 0x2E,
+            modifiers: 0,
+            state: KeyState::Pressed,
+        });
+        assert!(matches!(
+            forwarded,
+            Some(InputEvent::Key { modifiers, .. }) if modifiers & MOD_CTRL != 0
+        ));
+    }
+
+    #[test]
+    fn slow_keys_cancel_press_when_key_released_early() {
+        let input = EchInput::new();
+        *input.accessibility_profile.lock() = AccessibilityProfile {
+            slow_keys: true,
+            ..AccessibilityProfile::default()
+        };
+
+        let press = input.apply_accessibility_filters(InputEvent::Key {
+            unicode: Some('a'),
+            scan_code: 0x1E,
+            modifiers: 0,
+            state: KeyState::Pressed,
+        });
+        assert!(press.is_none());
+        assert!(input.pending_slow_keys.lock().contains_key(&0x1E));
+
+        let release = input.apply_accessibility_filters(InputEvent::Key {
+            unicode: Some('a'),
+            scan_code: 0x1E,
+            modifiers: 0,
+            state: KeyState::Released,
+        });
+        assert!(release.is_none());
+        assert!(!input.pending_slow_keys.lock().contains_key(&0x1E));
     }
 }

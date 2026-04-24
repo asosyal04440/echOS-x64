@@ -149,8 +149,10 @@ impl SurfaceManager {
             rect: Rect::new(0, 0, width, height),
             visible: true,
             z_index: id as u32,
-            pixels: vec![0; len],
-            shared: Some(SharedSurfaceMemory::new(width, height)),
+            pixels: Vec::new(),
+            shared: Some(
+                SharedSurfaceMemory::new(width, height).map_err(|_| SurfaceError::OutOfMemory)?,
+            ),
             dirty: true,
             gpu_buffer_handle: id,
             damage_epoch: 1,
@@ -198,11 +200,13 @@ impl SurfaceManager {
             .get_mut(&surface_id)
             .ok_or(SurfaceError::SurfaceNotFound)?;
         surface.rect = Rect::new(x, y, width, height);
-        if surface.pixels.len() != len {
+        if surface.shared.is_none() && surface.pixels.len() != len {
             surface.pixels.resize(len, 0);
         }
         if let Some(shared) = surface.shared.as_ref() {
-            shared.resize(width, height);
+            shared
+                .resize(width, height)
+                .map_err(|_| SurfaceError::OutOfMemory)?;
         }
         surface.dirty = true;
         surface.damage_epoch = surface.damage_epoch.saturating_add(1);
@@ -248,9 +252,12 @@ impl SurfaceManager {
         if pixels.len() != expected {
             return Err(SurfaceError::BufferSizeMismatch);
         }
-        surface.pixels.copy_from_slice(pixels);
         if let Some(shared) = surface.shared.as_ref() {
             let _ = shared.write_full(pixels);
+            surface.pixels.clear();
+        } else {
+            surface.pixels.clear();
+            surface.pixels.extend_from_slice(pixels);
         }
         surface.scene_update = None;
         surface.dirty = true;
@@ -288,12 +295,20 @@ impl SurfaceManager {
             .surfaces
             .get_mut(&surface_id)
             .ok_or(SurfaceError::SurfaceNotFound)?;
+        if surface.shared.is_none() {
+            let shared = SharedSurfaceMemory::new(surface.rect.width, surface.rect.height)
+                .map_err(|_| SurfaceError::OutOfMemory)?;
+            if !surface.pixels.is_empty() {
+                let _ = shared.write_full(surface.pixels.as_slice());
+                surface.pixels.clear();
+            }
+            surface.shared = Some(shared);
+        }
         let shared = surface
             .shared
-            .get_or_insert_with(|| {
-                SharedSurfaceMemory::new(surface.rect.width, surface.rect.height)
-            })
-            .clone();
+            .as_ref()
+            .cloned()
+            .ok_or(SurfaceError::OutOfMemory)?;
         Ok(SharedSurfaceDescriptor {
             client_id: surface.app_id,
             surface_id,
@@ -350,13 +365,7 @@ impl SurfaceManager {
     }
 
     pub fn snapshot(&self, surface_id: SurfaceId) -> Option<SurfaceRecord> {
-        self.surfaces.get(&surface_id).map(|surface| {
-            let mut cloned = surface.clone();
-            if let Some(shared) = surface.shared.as_ref() {
-                cloned.pixels = shared.snapshot().pixels;
-            }
-            cloned
-        })
+        self.surfaces.get(&surface_id).cloned()
     }
 
     pub fn list_surfaces(&self) -> Vec<SurfaceInfo> {

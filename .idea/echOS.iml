@@ -5,6 +5,13 @@
       <sourceFolder url="file://$MODULE_DIR$/benches" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/sdk/echos-manifest/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/sdk/echos-rt/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/sdk/echos-sdk-sys/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/sdk/echos-sdk/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/third_party/ironshim-rs/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/arch_guard/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

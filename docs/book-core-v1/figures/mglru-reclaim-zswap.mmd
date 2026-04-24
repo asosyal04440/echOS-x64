@@ -1,0 +1,12 @@
+flowchart TD
+    A[Page access telemetry] --> B[MGLRU generations]
+    B --> C[Promote hot pages]
+    B --> D[Demote cold pages]
+    D --> E[Pick victim oldest generation]
+    E --> F{Anonymous or file page}
+    F -->|Anonymous| G[Try zswap compress]
+    F -->|File dirty shared| H[Writeback queue]
+    F -->|Image clean| I[Drop page]
+    G --> J{zpool full}
+    J -->|Yes| K[Push to disk swap]
+    J -->|No| L[Keep compressed in RAM]

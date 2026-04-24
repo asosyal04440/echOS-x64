@@ -21,15 +21,16 @@
 //!
 //! Tüm bu özellikler boot sırasında `security::init()` ile etkinleştirilir.
 
+pub mod anti_cheat;
 pub mod capability;
 pub mod cfi;
-pub mod landlock;
 pub mod kpti;
+pub mod landlock;
 pub mod mac;
 pub mod mpk;
-pub mod anti_cheat;
 pub mod seccomp;
 pub mod simics_gate;
+pub mod spectre;
 pub mod tpm;
 pub mod users;
 
@@ -39,6 +40,9 @@ pub mod kaslr;
 /// Paket yönetim sistemi - .bhd formatında uygulama paketleri
 pub mod package;
 
+/// Seed package source abstraction - boot queue + mounted seed stores
+pub mod seed_store;
+
 /// Paket izin dialog sistemi - kullanıcı onay mekanizması
 pub mod permission_dialog;
 
@@ -46,6 +50,20 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::model_specific::Msr;
+
+#[cfg(debug_assertions)]
+macro_rules! sec_serial_println {
+    ($($arg:tt)*) => {
+        crate::serial_println!($($arg)*);
+    };
+}
+
+#[cfg(not(debug_assertions))]
+macro_rules! sec_serial_println {
+    ($($arg:tt)*) => {{
+        let _ = core::format_args!($($arg)*);
+    }};
+}
 
 // ============================================================================
 // SMEP/SMAP - Supervisor Mode Execution/Access Prevention
@@ -183,7 +201,7 @@ pub fn init_stack_canary() {
     let canary = crate::random::rand_u64() ^ 0xCAFEBABE_DEADBEEF;
     STACK_CANARY.store(canary, Ordering::SeqCst);
 
-    crate::serial_println!("[SEC] Stack canary initialized: {:#x}", canary);
+    sec_serial_println!("[SEC] Stack canary initialized");
 }
 
 /// CPU başına farklı canary değeri türetir.
@@ -200,7 +218,7 @@ pub fn init_per_cpu_canary(cpu_id: u32) {
     }
     canaries[idx] = canary;
 
-    crate::serial_println!("[SEC] CPU {} stack canary: {:#x}", cpu_id, canary);
+    sec_serial_println!("[SEC] CPU {} stack canary derived", cpu_id);
 }
 
 /// Mevcut CPU'nun canary değerini döndürür.
@@ -222,8 +240,8 @@ pub fn get_current_canary() -> u64 {
 /// Dönüş tipi `!` (never) = bu fonksiyon asla geri dönmez.
 #[no_mangle]
 pub extern "C" fn __stack_chk_fail() -> ! {
-    crate::serial_println!("[SEC] *** STACK CANARY VIOLATION ***");
-    crate::serial_println!("[SEC] Buffer overflow detected! Halting...");
+    sec_serial_println!("[SEC] *** STACK CANARY VIOLATION ***");
+    sec_serial_println!("[SEC] Buffer overflow detected! Halting...");
 
     // Kernel panic - saldırı tespit edildi, sistem güvenli biçimde durduruldu
     panic!("Stack buffer overflow detected - possible exploit attempt!");
@@ -272,17 +290,14 @@ pub fn init_aslr() {
     let mmap_offset = (crate::random::rand_u64() % crate::memory::USER_MMAP_RANDOM_RANGE) & !0xFFF;
     let stack_offset =
         (crate::random::rand_u64() % crate::memory::USER_STACK_RANDOM_RANGE) & !0xFFF;
-    let heap_offset = (crate::random::rand_u64() % (64 * 1024 * 1024)) & !0xFFF;
+    let heap_offset = (crate::random::rand_u64() % crate::memory::USER_HEAP_RANDOM_RANGE) & !0xFFF;
 
     MMAP_ASLR_OFFSET.store(mmap_offset, Ordering::SeqCst);
     STACK_ASLR_OFFSET.store(stack_offset, Ordering::SeqCst);
     HEAP_ASLR_OFFSET.store(heap_offset, Ordering::SeqCst);
     ASLR_ENABLED.store(true, Ordering::SeqCst);
 
-    crate::serial_println!("[SEC] ASLR enabled:");
-    crate::serial_println!("  MMAP offset: {:#x}", mmap_offset);
-    crate::serial_println!("  Stack offset: {:#x}", stack_offset);
-    crate::serial_println!("  Heap offset: {:#x}", heap_offset);
+    sec_serial_println!("[SEC] ASLR enabled");
 }
 
 /// ASLR uygulanmış mmap başlangıç adresini hesaplar.
@@ -355,7 +370,7 @@ pub fn enable_nx() {
         // Bit 11 = NXE (No-Execute Enable) - tüm PTE'lerin NX bitini aktifleştirir
         efer.write(val | (1 << 11));
         NX_ENABLED.store(true, Ordering::SeqCst);
-        crate::serial_println!("[SEC] NX/DEP enabled - Non-executable memory protection active");
+        sec_serial_println!("[SEC] NX/DEP enabled - Non-executable memory protection active");
     }
 }
 
@@ -387,9 +402,7 @@ static WXORX_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Etkinleştirildikten sonra `check_wxorx()` ile her sayfa eşlemesi denetlenir.
 pub fn enable_wxorx() {
     WXORX_ENABLED.store(true, Ordering::SeqCst);
-    crate::serial_println!(
-        "[SEC] W^X policy enabled - Pages cannot be both writable and executable"
-    );
+    sec_serial_println!("[SEC] W^X policy enabled - Pages cannot be both writable and executable");
 }
 
 /// W^X kuralını kontrol eder: hem yazılabilir hem çalıştırılabilir ise `false` döner.
@@ -437,7 +450,7 @@ pub fn init() {
         use x86_64::instructions::port::PortWriteOnly;
         PortWriteOnly::<u8>::new(0xE9).write(b'S'); // Entered security::init
     }
-    crate::serial_println!("[SEC] Initializing security subsystem...");
+    sec_serial_println!("[SEC] Initializing security subsystem...");
 
     unsafe {
         x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'1');
@@ -478,13 +491,14 @@ pub fn init() {
     // Adım 7: CFI ve KPTI koruma katmanları
     cfi::init();
     kpti::init();
+    spectre::init();
     kpti::register_sensitive_range(0xFFFF_8000_0000_0000, 0x0000_8000_0000_0000);
 
     // Adım 8: Seccomp ve path-based sandbox policy motoru
     seccomp::init();
     landlock::init();
     if let Err(err) = crate::valkyrie_virt::init_valkyrie() {
-        crate::serial_println!(
+        sec_serial_println!(
             "[SEC] Valkyrie-V init skipped: {:?} (fallback to non-hypervisor sandbox)",
             err
         );
@@ -497,14 +511,15 @@ pub fn init() {
     unsafe {
         x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'9');
     }
-    crate::serial_println!("[SEC] Security subsystem initialized ✓");
+    sec_serial_println!("[SEC] Security subsystem initialized ✓");
 }
 
 /// Her CPU'ya özgü güvenlik başlatması yapar (per-CPU canary türetme).
 /// SMP sistemlerde her fiziksel çekirdek başlatıldığında çağrılır.
 pub fn init_cpu_security(cpu_id: u32) {
     init_per_cpu_canary(cpu_id);
-    crate::serial_println!("[SEC] CPU {} security initialized", cpu_id);
+    spectre::init_cpu();
+    sec_serial_println!("[SEC] CPU {} security initialized", cpu_id);
 }
 
 // ============================================================================
@@ -541,36 +556,30 @@ pub enum SecurityEvent {
 pub fn log_security_event(event: SecurityEvent) {
     match event {
         SecurityEvent::StackCanaryViolation => {
-            crate::serial_println!("[SEC/AUDIT] *** STACK CANARY VIOLATION ***");
+            sec_serial_println!("[SEC/AUDIT] *** STACK CANARY VIOLATION ***");
         }
         SecurityEvent::NxViolation => {
-            crate::serial_println!(
+            sec_serial_println!(
                 "[SEC/AUDIT] NX violation - attempt to execute non-executable memory"
             );
         }
         SecurityEvent::SmepViolation => {
-            crate::serial_println!(
-                "[SEC/AUDIT] SMEP violation - kernel tried to execute user code"
-            );
+            sec_serial_println!("[SEC/AUDIT] SMEP violation - kernel tried to execute user code");
         }
         SecurityEvent::SmapViolation => {
-            crate::serial_println!(
-                "[SEC/AUDIT] SMAP violation - kernel tried to access user memory"
-            );
+            sec_serial_println!("[SEC/AUDIT] SMAP violation - kernel tried to access user memory");
         }
         SecurityEvent::WxorxViolation => {
-            crate::serial_println!(
-                "[SEC/AUDIT] W^X violation - page is both writable and executable"
-            );
+            sec_serial_println!("[SEC/AUDIT] W^X violation - page is both writable and executable");
         }
         SecurityEvent::SeccompViolation(syscall) => {
-            crate::serial_println!(
+            sec_serial_println!(
                 "[SEC/AUDIT] Seccomp violation - syscall {} blocked",
                 syscall
             );
         }
         SecurityEvent::SuspiciousSyscall(syscall) => {
-            crate::serial_println!("[SEC/AUDIT] Suspicious syscall {} detected", syscall);
+            sec_serial_println!("[SEC/AUDIT] Suspicious syscall {} detected", syscall);
         }
     }
 }

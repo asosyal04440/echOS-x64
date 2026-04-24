@@ -163,7 +163,11 @@ impl ServiceIpcManager {
     ) -> Option<BoundServiceEndpoint> {
         if matches!(
             service,
-            ServiceId::Directory | ServiceId::PackageRegistry | ServiceId::ProcessBroker
+            ServiceId::Directory
+                | ServiceId::NetworkBroker
+                | ServiceId::PackageRegistry
+                | ServiceId::ProcessBroker
+                | ServiceId::UpdateInstaller
         ) {
             return None;
         }
@@ -176,7 +180,11 @@ impl ServiceIpcManager {
     ) -> EndpointGeneration {
         if matches!(
             service,
-            ServiceId::Directory | ServiceId::PackageRegistry | ServiceId::ProcessBroker
+            ServiceId::Directory
+                | ServiceId::NetworkBroker
+                | ServiceId::PackageRegistry
+                | ServiceId::ProcessBroker
+                | ServiceId::UpdateInstaller
         ) {
             return 1;
         }

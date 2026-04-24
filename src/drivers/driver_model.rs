@@ -139,7 +139,9 @@ impl Device {
 
     /// sysfs özelliğini günceller (örn. "vendor" = "0x8086")
     pub fn set_attr(&self, name: &str, value: &str) {
-        self.attrs.lock().insert(String::from(name), String::from(value));
+        self.attrs
+            .lock()
+            .insert(String::from(name), String::from(value));
     }
 
     /// sysfs özelliğini okur; yoksa None döner
@@ -364,28 +366,46 @@ impl DriverModel {
     /// Cihaz sınıfı kaydeder (örn. "block", "net")
     pub fn register_class(&self, name: &str, dev_type: DeviceType) -> Arc<DeviceClass> {
         let class = Arc::new(DeviceClass::new(name, dev_type));
-        self.classes.write().insert(String::from(name), class.clone());
+        self.classes
+            .write()
+            .insert(String::from(name), class.clone());
         class
     }
 
     /// Sürücüyü cihaza bağlar: probe() çağrılır, başarılıysa bağlantı kurulur
     pub fn bind(&self, device_id: u64, driver_id: u64) -> Result<(), DriverError> {
-        let device = self.devices.read().get(&device_id).cloned()
+        let device = self
+            .devices
+            .read()
+            .get(&device_id)
+            .cloned()
             .ok_or(DriverError::DeviceNotFound)?;
-        let driver = self.drivers.read().get(&driver_id).cloned()
+        let driver = self
+            .drivers
+            .read()
+            .get(&driver_id)
+            .cloned()
             .ok_or(DriverError::DriverNotFound)?;
 
         driver.probe(&device)?;
         device.bind_driver(driver_id);
 
-        crate::serial_println!("[DRIVER] Bound driver {} to device {}", driver_id, device_id);
+        crate::serial_println!(
+            "[DRIVER] Bound driver {} to device {}",
+            driver_id,
+            device_id
+        );
 
         Ok(())
     }
 
     /// Sürücüyü cihazdan ayırır: remove() çağrılır, driver alanı None yapılır
     pub fn unbind(&self, device_id: u64) -> Result<(), DriverError> {
-        let device = self.devices.read().get(&device_id).cloned()
+        let device = self
+            .devices
+            .read()
+            .get(&device_id)
+            .cloned()
             .ok_or(DriverError::DeviceNotFound)?;
 
         if let Some(driver_id) = *device.driver.lock() {
@@ -416,7 +436,8 @@ impl DriverModel {
 
     /// Tüm cihazları listeler: (id, ad, tür) üçlüsü döner
     pub fn list_devices(&self) -> Vec<(u64, String, DeviceType)> {
-        self.devices.read()
+        self.devices
+            .read()
             .iter()
             .map(|(id, dev)| (*id, dev.name.clone(), dev.dev_type))
             .collect()

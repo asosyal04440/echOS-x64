@@ -13,7 +13,7 @@
 //! ## Serbest Liste Bellek Düzeni:
 //!
 //! ```
-//!  head (dummy)
+//!  head (sentinel)
 //!    |
 //!    v
 //!  +----------+     +----------+     +----------+
@@ -106,7 +106,7 @@ impl ListNode {
 /// Bağlı liste tabanlı heap allocator.
 ///
 /// `head` alanı, gerçek bir serbest blok değil; listenin başını işaret etmek
-/// için kullanılan dummy (kukla) bir düğümdür. Bu teknik, "sentinel node"
+/// için kullanılan sentinel düğümdür. Bu teknik, "sentinel node"
 /// deseni olarak bilinir ve liste başını özel bir durum olarak ele almayı önler.
 pub struct LinkedListAllocator {
     head: ListNode,
@@ -115,7 +115,7 @@ pub struct LinkedListAllocator {
 impl LinkedListAllocator {
     /// Yeni boş allocator oluşturur.
     ///
-    /// `head` dummy düğümü boyut=0 ile başlatılır. `init` çağrılana kadar
+    /// `head` sentinel düğümü boyut=0 ile başlatılır. `init` çağrılana kadar
     /// bu allocator kullanılamaz.
     pub const fn new() -> Self {
         Self {
@@ -179,12 +179,15 @@ impl LinkedListAllocator {
             if let Ok(alloc_start) = Self::alloc_from_region(&region, size, align) {
                 // Uygun bölge bulundu: listeden çıkar
                 let next = region.next.take();
-                let ret = Some((current.next.take().unwrap(), alloc_start));
+                let ret = current.next.take().map(|node| (node, alloc_start));
                 current.next = next;
                 return ret;
             } else {
                 // Bu blok uygun değil, bir sonrakine geç
-                current = current.next.as_mut().unwrap();
+                let Some(next) = current.next.as_mut() else {
+                    return None;
+                };
+                current = next;
             }
         }
 
@@ -227,14 +230,14 @@ impl LinkedListAllocator {
     /// Serbest bırakma sırasında blok başına bir ListNode yazılacağından,
     /// en küçük allocation birimi `size_of::<ListNode>()` kadardır.
     /// Aynı şekilde hizalama da ListNode'un hizalamasından düşük olamaz.
-    fn size_align(layout: Layout) -> (usize, usize) {
+    fn size_align(layout: Layout) -> Option<(usize, usize)> {
         let layout = layout
             .align_to(mem::align_of::<ListNode>())
-            .expect("Hizalama ayarlanamadı")
+            .ok()?
             .pad_to_align();
         // Minimum boyut: ListNode boyutu (dealloc sırasında düğüm yazılabilmesi için)
         let size = layout.size().max(mem::size_of::<ListNode>());
-        (size, layout.align())
+        Some((size, layout.align()))
     }
 }
 
@@ -247,12 +250,17 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
     /// 3. Blok bulunduysa fazlalığı serbest listeye geri ekle.
     /// 4. Alloc başlangıç adresini döndür.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let (size, align) = LinkedListAllocator::size_align(layout);
+        let Some((size, align)) = LinkedListAllocator::size_align(layout) else {
+            return ptr::null_mut();
+        };
         // GlobalAlloc trait'i &self alır; iç mutability için raw pointer cast kullanılır
         let self_ptr = self as *const Self as *mut Self;
 
         if let Some((region, alloc_start)) = (*self_ptr).find_region(size, align) {
-            let alloc_end = alloc_start.checked_add(size).expect("overflow");
+            let Some(alloc_end) = alloc_start.checked_add(size) else {
+                (*self_ptr).add_free_region(region.start_addr(), region.size);
+                return ptr::null_mut();
+            };
             let excess_size = region.end_addr() - alloc_end;
             // Fazlalık varsa onu serbest listeye geri ekle (zaten ListNode sığacak büyüklükte)
             if excess_size > 0 {
@@ -270,7 +278,9 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
     /// Zaman karmaşıklığı: O(1) — her zaman liste başına eklenir.
     /// Not: Komşu serbest blokların birleştirilmesi (coalescing) yapılmaz.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let (size, _) = LinkedListAllocator::size_align(layout);
+        let Some((size, _)) = LinkedListAllocator::size_align(layout) else {
+            return;
+        };
         let self_ptr = self as *const Self as *mut Self;
         // ptr adresine ListNode yaz ve serbest listeye ekle
         (*self_ptr).add_free_region(ptr as usize, size)

@@ -90,6 +90,7 @@ const WSAENOTCONN: u32 = 10057;
 const WSA_OPERATION_ABORTED: u32 = 995;
 
 static LAST_WSA_ERROR: AtomicU32 = AtomicU32::new(0);
+static INET_NTOA_BUFFER: Mutex<[u8; 16]> = Mutex::new([0; 16]);
 static UNWIND_LOOKUP_CACHE: Mutex<BTreeMap<u64, Box<[pe_loader::PeRuntimeFunction]>>> =
     Mutex::new(BTreeMap::new());
 
@@ -2170,6 +2171,7 @@ pub fn resolve_ws2_32_symbol(name: &str) -> Option<u64> {
         "htons" | "ntohs" => ws2_32_htons as *const () as usize as u64,
         "htonl" | "ntohl" => ws2_32_htonl as *const () as usize as u64,
         "inet_addr" => ws2_32_inet_addr as *const () as usize as u64,
+        "inet_ntoa" => ws2_32_inet_ntoa as *const () as usize as u64,
         _ => return None,
     };
     Some(addr)
@@ -2673,9 +2675,39 @@ pub unsafe extern "system" fn ws2_32_inet_addr(cp: *const u8) -> u32 {
     parse_ipv4_text(text.as_str()).unwrap_or(INADDR_NONE)
 }
 
+pub extern "system" fn ws2_32_inet_ntoa(addr: u32) -> *const u8 {
+    let octets = addr.to_be_bytes();
+    let mut buffer = INET_NTOA_BUFFER.lock();
+    buffer.fill(0);
+    let mut pos = 0usize;
+    for (index, octet) in octets.iter().copied().enumerate() {
+        write_decimal_octet(&mut buffer, &mut pos, octet);
+        if index != 3 {
+            buffer[pos] = b'.';
+            pos += 1;
+        }
+    }
+    LAST_WSA_ERROR.store(0, Ordering::Release);
+    buffer.as_ptr()
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+fn write_decimal_octet(buffer: &mut [u8; 16], pos: &mut usize, value: u8) {
+    if value >= 100 {
+        buffer[*pos] = b'0' + (value / 100);
+        *pos += 1;
+        buffer[*pos] = b'0' + ((value / 10) % 10);
+        *pos += 1;
+    } else if value >= 10 {
+        buffer[*pos] = b'0' + (value / 10);
+        *pos += 1;
+    }
+    buffer[*pos] = b'0' + (value % 10);
+    *pos += 1;
+}
 
 fn cast_socket(fd: u64) -> Result<u32, u32> {
     if let Some(object) = HANDLE_TABLE.lock().get(&fd).cloned() {

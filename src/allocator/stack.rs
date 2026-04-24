@@ -7,7 +7,10 @@
 //! Yöneticisi'nden (PMM) sayfa tahsis eder. HHDM (Higher Half Direct Map) aracılığıyla
 //! fiziksel adresleri sanal adrese çevirir.
 
-use crate::memory::{global_memory_manager_mut, PHYSICAL_MEMORY_OFFSET};
+use crate::memory::{
+    allocate_contiguous_frames, deallocate_contiguous_frames, map_kernel_stack_pages,
+    remap_kernel_guard_page, unmap_kernel_guard_page, unmap_kernel_stack_pages,
+};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
@@ -45,7 +48,9 @@ use x86_64::PhysAddr;
 #[derive(Debug)]
 pub struct KernelStack {
     ptr: NonNull<u8>,
+    phys_start: PhysAddr,
     pages: usize,
+    guard_pages: usize,
     layout: core::alloc::Layout, // İlerideki hizalama ihtiyaçları için saklanır; şu an kullanılmıyor
 }
 
@@ -87,12 +92,16 @@ impl KernelStack {
         // Sayfa sayısına yuvarla: her zaman tam sayfa tahsis edilir
         let pages = (size_in_bytes + 4095) / 4096;
 
-        let mm = unsafe { global_memory_manager_mut() }?;
-        let frame = mm.allocate_contiguous_frames(pages)?;
+        let frame = allocate_contiguous_frames(pages)?;
 
         let phys_addr = frame.start_address();
-        // HHDM: fiziksel adrese sabit offset eklenerek sanal adres elde edilir
-        let virt_addr = phys_addr.as_u64() + PHYSICAL_MEMORY_OFFSET;
+        let virt_addr = match map_kernel_stack_pages(phys_addr.as_u64(), pages) {
+            Some(value) => value,
+            None => {
+                deallocate_contiguous_frames(frame, pages);
+                return None;
+            }
+        };
 
         let ptr = NonNull::new(virt_addr as *mut u8)?;
 
@@ -103,30 +112,63 @@ impl KernelStack {
             ptr::write_bytes(ptr.as_ptr(), 0, pages * 4096);
         }
 
+        let stack_bytes = pages.checked_mul(4096)?;
+        let layout = core::alloc::Layout::from_size_align(stack_bytes, 4096).ok()?;
+
         Some(Self {
             ptr,
+            phys_start: phys_addr,
             pages,
-            layout: core::alloc::Layout::from_size_align(pages * 4096, 4096).unwrap(),
+            guard_pages: 0,
+            layout,
         })
     }
 
-    /// Stack'in fiziksel adresini döndürür.
-    ///
-    /// İki durumu ele alır:
-    /// - HHDM eşlemeli stack: doğrudan offset çıkarma ile fiziksel adres hesaplanır.
-    /// - Heap'ten ayrılan stack: sayfa tablosu çevirisi (translate_addr) kullanılır.
-    pub fn phys_addr(&self) -> PhysAddr {
-        let virt_addr = self.ptr.as_ptr() as u64;
-
-        if virt_addr >= PHYSICAL_MEMORY_OFFSET {
-            // HHDM eşlemeli stack: sanal adres - offset = fiziksel adres
-            PhysAddr::new(virt_addr - PHYSICAL_MEMORY_OFFSET)
-        } else {
-            // Heap'ten ayrılan stack: sayfa tablosu çevirisi gerekli
-            use x86_64::VirtAddr;
-            crate::memory::paging::translate_addr(VirtAddr::new(virt_addr))
-                .expect("KernelStack sanal adresi eşlenmemiş")
+    pub fn enable_guard_pages(&mut self, guard_pages: usize) -> bool {
+        if guard_pages == 0 {
+            self.guard_pages = 0;
+            return true;
         }
+        if guard_pages >= self.pages {
+            return false;
+        }
+
+        let guard_bytes = guard_pages.saturating_mul(4096);
+        for page_idx in 0..guard_pages {
+            let guard_virt = self.ptr.as_ptr() as u64 + (page_idx * 4096) as u64;
+            if !unmap_kernel_guard_page(guard_virt) {
+                for rollback_idx in 0..page_idx {
+                    let rollback_virt = self.ptr.as_ptr() as u64 + (rollback_idx * 4096) as u64;
+                    let rollback_phys = self.phys_addr().as_u64() + (rollback_idx * 4096) as u64;
+                    let _ = remap_kernel_guard_page(rollback_virt, rollback_phys);
+                }
+                return false;
+            }
+        }
+        self.guard_pages = guard_pages;
+        debug_assert!(guard_bytes < self.len());
+        true
+    }
+
+    pub fn guard_pages(&self) -> usize {
+        self.guard_pages
+    }
+
+    pub fn usable_ptr(&self) -> *const u8 {
+        unsafe { self.ptr.as_ptr().add(self.guard_pages * 4096) }
+    }
+
+    pub fn usable_mut_ptr(&mut self) -> *mut u8 {
+        unsafe { self.ptr.as_ptr().add(self.guard_pages * 4096) }
+    }
+
+    pub fn usable_len(&self) -> usize {
+        self.len().saturating_sub(self.guard_pages * 4096)
+    }
+
+    /// Stack'in fiziksel adresini döndürür.
+    pub fn phys_addr(&self) -> PhysAddr {
+        self.phys_start
     }
 
     /// Stack başlangıcının sanal adresini (immutable pointer) döndürür.
@@ -156,11 +198,14 @@ impl KernelStack {
 /// KernelStack scope dışına çıktığında otomatik olarak bellek serbest bırakılır.
 impl Drop for KernelStack {
     fn drop(&mut self) {
-        let mm = unsafe { global_memory_manager_mut() };
-        if let Some(mm) = mm {
-            let start_frame = PhysFrame::containing_address(self.phys_addr());
-            mm.deallocate_contiguous_frames(start_frame, self.pages);
+        if !unmap_kernel_stack_pages(self.ptr.as_ptr() as u64, self.pages) {
+            crate::serial_println!(
+                "[STACK] stack VA unmap incomplete; physical frames still returned phys={:#x}",
+                self.phys_start.as_u64()
+            );
         }
+        let start_frame = PhysFrame::containing_address(self.phys_start);
+        deallocate_contiguous_frames(start_frame, self.pages);
     }
 }
 
@@ -171,14 +216,14 @@ impl Deref for KernelStack {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.pages * 4096) }
+        unsafe { slice::from_raw_parts(self.usable_ptr(), self.usable_len()) }
     }
 }
 
 /// KernelStack'i mutable byte dilimi olarak kullanmayı sağlar.
 impl DerefMut for KernelStack {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.pages * 4096) }
+        unsafe { slice::from_raw_parts_mut(self.usable_mut_ptr(), self.usable_len()) }
     }
 }
 
@@ -188,13 +233,20 @@ impl DerefMut for KernelStack {
 /// aynı fiziksel belleğe işaret ederdi ve drop sırasında çift serbest bırakma
 /// (double free) hatası oluşurdu. Bu nedenle yeni fiziksel frame'ler tahsis
 /// edilerek içerik kopyalanır.
-impl Clone for KernelStack {
-    fn clone(&self) -> Self {
-        // Sahip olduğumuz belleği kopyalamak için derin kopya gereklidir
-        let new_stack = Self::new(self.len()).expect("Stack klonu için bellek ayrılamadı");
-        unsafe {
-            ptr::copy_nonoverlapping(self.as_ptr(), new_stack.ptr.as_ptr(), self.len());
+impl KernelStack {
+    pub fn try_clone_stack(&self) -> Option<Self> {
+        // Sahip olduğumuz belleği kopyalamak için derin kopya gereklidir.
+        let mut new_stack = Self::new(self.len())?;
+        if self.guard_pages != 0 && !new_stack.enable_guard_pages(self.guard_pages) {
+            return None;
         }
-        new_stack
+        unsafe {
+            ptr::copy_nonoverlapping(
+                self.usable_ptr(),
+                new_stack.usable_mut_ptr(),
+                self.usable_len(),
+            );
+        }
+        Some(new_stack)
     }
 }

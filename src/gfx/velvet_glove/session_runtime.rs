@@ -49,6 +49,7 @@ impl DesktopSession {
             self.appliance_auto_login_pending,
             self.desktop_ready_published,
         ) {
+            self.stabilize_shell_watchdog(snapshot.power_state);
             return;
         }
 
@@ -87,6 +88,78 @@ impl DesktopSession {
         );
         let _ = self.shell.client.focus_window(self.shell.top_bar.window_id);
         self.mark_shell_dirty();
+        self.stabilize_shell_watchdog(snapshot.power_state);
+    }
+
+    fn stabilize_shell_watchdog(&mut self, power_state: SessionPowerState) {
+        let now = get_time_ns();
+        let mut recovered = false;
+
+        if power_state == SessionPowerState::Locked || !self.shell.logged_in {
+            for window in [
+                &mut self.shell.notifications,
+                &mut self.shell.quick_settings,
+                &mut self.shell.command_palette,
+                &mut self.shell.clipboard_history,
+                &mut self.shell.capture_history,
+                &mut self.shell.seed_catalog,
+                &mut self.shell.stage_rail,
+                &mut self.shell.context_menu,
+                &mut self.shell.switcher,
+            ] {
+                if window.visible || window.desired_visible {
+                    set_shell_surface_visibility(&self.shell.client, window, false);
+                    recovered = true;
+                }
+            }
+        } else {
+            if !self.shell.top_bar.visible {
+                set_shell_surface_visibility(&self.shell.client, &mut self.shell.top_bar, true);
+                recovered = true;
+            }
+            if !self.shell.task_strip.visible {
+                set_shell_surface_visibility(&self.shell.client, &mut self.shell.task_strip, true);
+                recovered = true;
+            }
+            if self.shell.lock_screen.visible {
+                set_shell_surface_visibility(
+                    &self.shell.client,
+                    &mut self.shell.lock_screen,
+                    false,
+                );
+                recovered = true;
+            }
+
+            let mut active_overlay: Option<&'static str> = None;
+            for (label, window) in [
+                ("quick-settings", &mut self.shell.quick_settings),
+                ("command-palette", &mut self.shell.command_palette),
+                ("clipboard-history", &mut self.shell.clipboard_history),
+                ("capture-history", &mut self.shell.capture_history),
+                ("seed-catalog", &mut self.shell.seed_catalog),
+                ("notifications", &mut self.shell.notifications),
+                ("switcher", &mut self.shell.switcher),
+                ("context-menu", &mut self.shell.context_menu),
+            ] {
+                if !(window.visible || window.desired_visible) {
+                    continue;
+                }
+                if active_overlay.is_none() {
+                    active_overlay = Some(label);
+                    continue;
+                }
+                set_shell_surface_visibility(&self.shell.client, window, false);
+                recovered = true;
+            }
+        }
+
+        if recovered {
+            self.mark_shell_dirty();
+            if now.saturating_sub(self.last_shell_recovery_ns) > 1_000_000_000 {
+                self.last_shell_recovery_ns = now;
+                self.push_notice(String::from("Shell watchdog recovered desktop surfaces"));
+            }
+        }
     }
 
     pub(super) fn run_appliance_auto_login(&mut self) {
@@ -150,6 +223,20 @@ impl DesktopSession {
             self.shell.active_workspace,
         );
         let _ = self.shell.client.focus_window(self.shell.top_bar.window_id);
+        if let Ok(policy) = self.shell.client.stage_set_policy() {
+            if policy.restore_on_login {
+                if let Some(active_stage_set) = policy.active_stage_set {
+                    if let Some(index) = self
+                        .shell
+                        .stage_sets
+                        .iter()
+                        .position(|stage| stage.id == active_stage_set)
+                    {
+                        self.activate_stage_set(index);
+                    }
+                }
+            }
+        }
         self.push_notice(String::from("Session unlocked"));
         self.mark_shell_dirty();
     }
@@ -166,6 +253,10 @@ impl DesktopSession {
             && !self.shell.lock_screen.visible;
 
         if app_basket_ready && !self.app_basket_committed {
+            if let Err(err) = crate::update::apply_staged_boot_updates() {
+                crate::serial_println!("[UPDATE] staged boot apply failed: {}", err);
+                return;
+            }
             crate::boot::appliance::publish_stage(
                 crate::boot::appliance::BootStage::AppBasketReady,
             );
@@ -192,9 +283,71 @@ impl DesktopSession {
         }
 
         if app_basket_ready {
+            self.run_mixed_update_smoke();
             if let Some(bundle) = crate::boot::appliance::take_packaged_pe_smoke_bundle() {
                 self.run_packaged_pe_smoke(bundle);
             }
+            let _ = crate::security::seed_store::pump_seed_hash_queue(2);
+            let _ = crate::security::seed_store::refresh_seed_catalog();
+        }
+    }
+
+    pub(super) fn run_mixed_update_smoke(&mut self) {
+        if self.update_smoke_attempted {
+            return;
+        }
+        self.update_smoke_attempted = true;
+        let Some(locator) = crate::update::smoke_request_locator() else {
+            return;
+        };
+        crate::serial_println!("[SMOKE] mixed-update arm locator={}", locator);
+        let inspection = match crate::update::inspect_update_source(locator.as_str()) {
+            Ok(inspection) => inspection,
+            Err(err) => {
+                crate::serial_println!("[SMOKE] mixed-update inspect fail: {}", err);
+                self.push_notice(String::from("Mixed update smoke inspect failed"));
+                self.mark_shell_dirty();
+                return;
+            }
+        };
+        crate::serial_println!(
+            "[SMOKE] mixed-update inspect ok release={} class={} reboot={}",
+            inspection.index.release,
+            inspection.plan.class.as_str(),
+            inspection.plan.requires_reboot
+        );
+        let report = match crate::update::apply_update_source(locator.as_str()) {
+            Ok(report) => report,
+            Err(err) => {
+                crate::serial_println!("[SMOKE] mixed-update apply fail: {}", err);
+                self.push_notice(String::from("Mixed update smoke apply failed"));
+                self.mark_shell_dirty();
+                return;
+            }
+        };
+        if let Err(err) = crate::update::clear_smoke_request() {
+            crate::serial_println!("[SMOKE] mixed-update request clear fail: {}", err);
+        }
+        if report.requires_reboot {
+            crate::serial_println!(
+                "[SMOKE] mixed-update stage ok release={} target_slot={}",
+                report.release,
+                report
+                    .target_slot
+                    .map(crate::update::slot_to_str)
+                    .unwrap_or("none")
+            );
+            self.push_notice(String::from("Mixed update smoke staged; rebooting"));
+            self.mark_shell_dirty();
+            crate::serial_println!("[SMOKE] mixed-update reboot arm");
+            crate::init::reboot();
+        } else {
+            crate::serial_println!(
+                "[SMOKE] mixed-update unexpected live-state release={}",
+                report.release
+            );
+            self.push_notice(String::from("Mixed update smoke did not require reboot"));
+            self.mark_shell_dirty();
         }
     }
 
@@ -231,7 +384,7 @@ impl DesktopSession {
             }
         }
 
-        let Some(resolution) = self.launch_resolution(app_id.as_str()) else {
+        let Some(resolution) = self.ensure_launch_resolution(app_id.as_str()) else {
             crate::serial_println!("[SMOKE] packaged-pe launch fail: unresolved");
             self.push_notice(String::from("Packaged PE smoke launch unresolved"));
             self.mark_shell_dirty();

@@ -9,8 +9,11 @@ use super::super::services::{NotificationCommand, NotificationResponse};
 use super::super::task;
 
 pub(super) fn sys_service_bootstrap_claim(out_ptr: usize) -> usize {
-    if out_ptr == 0 {
-        return super::errno(super::EINVAL);
+    if let Err(err) = super::validate_user_range(
+        out_ptr,
+        core::mem::size_of::<super::NativeServiceBootstrap>(),
+    ) {
+        return err;
     }
     let runtime = match current_service_runtime() {
         Ok(runtime) => runtime,
@@ -58,15 +61,17 @@ pub(super) fn sys_service_bootstrap_claim(out_ptr: usize) -> usize {
             .task_id
             .unwrap_or(task::scheduler::current_task_id() as u64),
     };
-    super::with_user_access(|| unsafe {
-        *(out_ptr as *mut super::NativeServiceBootstrap) = response;
-    });
+    if let Err(err) = super::write_user(out_ptr, response) {
+        return err;
+    }
     0
 }
 
 pub(super) fn sys_service_status(service_id: usize, out_ptr: usize) -> usize {
-    if out_ptr == 0 {
-        return super::errno(super::EINVAL);
+    if let Err(err) =
+        super::validate_user_range(out_ptr, core::mem::size_of::<super::NativeServiceStatus>())
+    {
+        return err;
     }
     let Some(service_id) = decode_service_id(service_id as u32) else {
         return super::errno(super::EINVAL);
@@ -89,15 +94,18 @@ pub(super) fn sys_service_status(service_id: usize, out_ptr: usize) -> usize {
             .unwrap_or(0) as u8,
         runtime_task_id: descriptor.runtime_task_id.unwrap_or(0),
     };
-    super::with_user_access(|| unsafe {
-        *(out_ptr as *mut super::NativeServiceStatus) = response;
-    });
+    if let Err(err) = super::write_user(out_ptr, response) {
+        return err;
+    }
     0
 }
 
 pub(super) fn sys_service_parity_status(out_ptr: usize) -> usize {
-    if out_ptr == 0 {
-        return super::errno(super::EINVAL);
+    if let Err(err) = super::validate_user_range(
+        out_ptr,
+        core::mem::size_of::<super::NativeServiceParityStatus>(),
+    ) {
+        return err;
     }
     let status = service_parity_contract::service_parity_status();
     let response = super::NativeServiceParityStatus {
@@ -110,19 +118,17 @@ pub(super) fn sys_service_parity_status(out_ptr: usize) -> usize {
         full_parity_ready: status.full_parity_ready as u8,
         reserved: [0; 6],
     };
-    super::with_user_access(|| unsafe {
-        *(out_ptr as *mut super::NativeServiceParityStatus) = response;
-    });
+    if let Err(err) = super::write_user(out_ptr, response) {
+        return err;
+    }
     0
 }
 
 pub(super) fn sys_service_region_map(mapping_ptr: usize) -> usize {
-    if mapping_ptr == 0 {
-        return super::errno(super::EINVAL);
-    }
-    let mut request = super::with_user_access(|| unsafe {
-        *(mapping_ptr as *const super::NativeServiceRegionMapping)
-    });
+    let mut request = match super::read_user::<super::NativeServiceRegionMapping>(mapping_ptr) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
     let pid = current_runtime_pid();
     let mapping =
         match service_endpoint_contract::map_shared_region(pid as u32, request.region_handle) {
@@ -141,19 +147,18 @@ pub(super) fn sys_service_region_map(mapping_ptr: usize) -> usize {
     request.base = mapping.base;
     request.len = mapping.len;
     request.writable = mapping.writable as u32;
-    super::with_user_access(|| unsafe {
-        *(mapping_ptr as *mut super::NativeServiceRegionMapping) = request;
-    });
+    if let Err(err) = super::write_user(mapping_ptr, request) {
+        return err;
+    }
     0
 }
 
 pub(super) fn sys_service_endpoint_publish(request_ptr: usize) -> usize {
-    if request_ptr == 0 {
-        return super::errno(super::EINVAL);
-    }
-    let request = super::with_user_access(|| unsafe {
-        *(request_ptr as *const super::NativeServiceEndpointPublishRequest)
-    });
+    let request = match super::read_user::<super::NativeServiceEndpointPublishRequest>(request_ptr)
+    {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
     let Some(service_id) = decode_service_id(request.service_id) else {
         return super::errno(super::EINVAL);
     };
@@ -172,8 +177,11 @@ pub(super) fn sys_service_endpoint_publish(request_ptr: usize) -> usize {
 }
 
 pub(super) fn sys_service_heartbeat(service_id: usize, out_ptr: usize) -> usize {
-    if out_ptr == 0 {
-        return super::errno(super::EINVAL);
+    if let Err(err) = super::validate_user_range(
+        out_ptr,
+        core::mem::size_of::<super::NativeServiceEndpointState>(),
+    ) {
+        return err;
     }
     let Some(service_id) = decode_service_id(service_id as u32) else {
         return super::errno(super::EINVAL);
@@ -199,15 +207,18 @@ pub(super) fn sys_service_heartbeat(service_id: usize, out_ptr: usize) -> usize 
         response_generation: state.response_generation,
         heartbeat_epoch: state.heartbeat_epoch,
     };
-    super::with_user_access(|| unsafe {
-        *(out_ptr as *mut super::NativeServiceEndpointState) = response;
-    });
+    if let Err(err) = super::write_user(out_ptr, response) {
+        return err;
+    }
     0
 }
 
 pub(super) fn sys_notification_service_recv(out_ptr: usize) -> usize {
-    if out_ptr == 0 {
-        return super::errno(super::EINVAL);
+    if let Err(err) = super::validate_user_range(
+        out_ptr,
+        core::mem::size_of::<super::NativeServiceNotificationRequest>(),
+    ) {
+        return err;
     }
     let runtime = match current_service_runtime() {
         Ok(runtime) => runtime,
@@ -251,16 +262,17 @@ pub(super) fn sys_notification_service_recv(out_ptr: usize) -> usize {
         }
         Err(_) => return super::errno(super::EINVAL),
     }
-    super::with_user_access(|| unsafe {
-        *(out_ptr as *mut super::NativeServiceNotificationRequest) = response;
-    });
+    if let Err(err) = super::write_user(out_ptr, response) {
+        return err;
+    }
     0
 }
 
 pub(super) fn sys_notification_service_respond(request_ptr: usize) -> usize {
-    if request_ptr == 0 {
-        return super::errno(super::EINVAL);
-    }
+    let request = match super::read_user::<super::NativeServiceNotificationResponse>(request_ptr) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
     let runtime = match current_service_runtime() {
         Ok(runtime) => runtime,
         Err(err) => return err,
@@ -268,9 +280,6 @@ pub(super) fn sys_notification_service_respond(request_ptr: usize) -> usize {
     if runtime.service_id != Some(service_endpoint_contract::ServiceId::EchNotifications) {
         return super::errno(super::EACCES);
     }
-    let request = super::with_user_access(|| unsafe {
-        *(request_ptr as *const super::NativeServiceNotificationResponse)
-    });
     let response = match decode_notification_service_response(&request) {
         Ok(response) => response,
         Err(err) => return err,
@@ -398,6 +407,7 @@ fn current_runtime_pid() -> u64 {
 fn decode_service_id(service_id: u32) -> Option<service_endpoint_contract::ServiceId> {
     match service_id {
         0 => Some(service_endpoint_contract::ServiceId::Directory),
+        13 => Some(service_endpoint_contract::ServiceId::NetworkBroker),
         1 => Some(service_endpoint_contract::ServiceId::EchDisplay),
         2 => Some(service_endpoint_contract::ServiceId::EchInput),
         3 => Some(service_endpoint_contract::ServiceId::EchAudio),
@@ -407,6 +417,9 @@ fn decode_service_id(service_id: u32) -> Option<service_endpoint_contract::Servi
         7 => Some(service_endpoint_contract::ServiceId::EchClipboard),
         8 => Some(service_endpoint_contract::ServiceId::EchDialogs),
         9 => Some(service_endpoint_contract::ServiceId::EchCapture),
+        10 => Some(service_endpoint_contract::ServiceId::PackageRegistry),
+        11 => Some(service_endpoint_contract::ServiceId::ProcessBroker),
+        12 => Some(service_endpoint_contract::ServiceId::UpdateInstaller),
         _ => None,
     }
 }

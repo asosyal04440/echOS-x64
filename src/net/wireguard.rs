@@ -42,6 +42,7 @@
 //!   -> Varsayılan rotadaki tüm trafik Peer B'den geçer
 //! ```
 
+use crate::crypto::{ChaCha20Poly1305, X25519PrivateKey, X25519PublicKey};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -67,6 +68,21 @@ pub const WG_MSG_RESPONSE: u8 = 2;
 pub const WG_MSG_COOKIE_REPLY: u8 = 3;
 /// Mesaj tipi 4: Şifreli veri taşıma
 pub const WG_MSG_TRANSPORT: u8 = 4;
+
+/// WireGuard transport başlığı: type(1) + reserved(3) + receiver_index(4) + nonce(8)
+const WG_TRANSPORT_HEADER_LEN: usize = 16;
+/// ChaCha20-Poly1305 doğrulama etiketi
+const WG_TRANSPORT_TAG_LEN: usize = 16;
+/// Initiation paket uzunluğu: sabit 148 byte
+const WG_INITIATION_LEN: usize = 148;
+/// Initiation paketinde MAC1 öncesi doğrulanan gövde uzunluğu
+const WG_INITIATION_BODY_LEN: usize = 116;
+/// WireGuard MAC alanı uzunluğu (MAC1/MAC2)
+const WG_MAC_LEN: usize = 16;
+/// MAC1 anahtar türetme etiketi
+const WG_MAC1_LABEL: &[u8; 7] = b"wg-mac1";
+/// Henüz geçerli bir inbound nonce kabul edilmediğini gösteren sentinel değer
+const WG_NONCE_UNINITIALIZED: u64 = u64::MAX;
 
 // ============================================================================
 // WIREGUARD ANAHTARI
@@ -180,6 +196,10 @@ pub struct WgSession {
     pub is_initiator: bool,
     /// Oturum kuruldu mu?
     pub established: bool,
+    /// Initiator tarafında response bekleyen ephemeral private key
+    pub pending_initiator_private: [u8; 32],
+    /// Handshake response bekleniyor mu?
+    pub handshake_pending: bool,
 }
 
 impl WgPeer {
@@ -201,9 +221,11 @@ impl WgPeer {
                 sending_key: [0u8; 32],
                 receiving_key: [0u8; 32],
                 sending_nonce: 0,
-                receiving_nonce: 0,
+                receiving_nonce: WG_NONCE_UNINITIALIZED,
                 is_initiator: false,
                 established: false,
+                pending_initiator_private: [0u8; 32],
+                handshake_pending: false,
             }),
         }
     }
@@ -247,12 +269,26 @@ impl WgPeer {
         let nonce = session.sending_nonce;
         session.sending_nonce += 1; // Nonce sayacını artır (tekrar önleme)
 
-        // Build transport message
-        let mut transport = Vec::new();
+        if session.remote_index == 0 {
+            return Err(WgError::NoSession);
+        }
+
+        // 12 byte nonce: 4 byte sıfır + 8 byte little-endian counter
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[4..12].copy_from_slice(&nonce.to_le_bytes());
+
+        // Build transport header
+        let mut transport =
+            Vec::with_capacity(WG_TRANSPORT_HEADER_LEN + pkt.len() + WG_TRANSPORT_TAG_LEN);
         transport.push(WG_MSG_TRANSPORT);
-        transport.extend_from_slice(&session.local_index.to_le_bytes());
+        transport.extend_from_slice(&[0u8; 3]); // reserved
+        transport.extend_from_slice(&session.remote_index.to_le_bytes()); // receiver index
         transport.extend_from_slice(&nonce.to_le_bytes());
-        transport.extend_from_slice(pkt);
+
+        let mut aead = ChaCha20Poly1305::new(&session.sending_key, &nonce_bytes);
+        let (ciphertext, tag) = aead.encrypt(pkt, &transport[..WG_TRANSPORT_HEADER_LEN]);
+        transport.extend_from_slice(&ciphertext);
+        transport.extend_from_slice(&tag);
 
         // İstatistikleri güncelle
         self.tx_bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
@@ -268,7 +304,8 @@ impl WgPeer {
     /// nonce'ları reddeder. Bu sayede eski paketlerin tekrar
     /// oynatılması engellenir.
     pub fn decrypt_packet(&self, pkt: &[u8]) -> Result<Vec<u8>, WgError> {
-        if pkt.len() < 16 || pkt[0] != WG_MSG_TRANSPORT {
+        if pkt.len() < WG_TRANSPORT_HEADER_LEN + WG_TRANSPORT_TAG_LEN || pkt[0] != WG_MSG_TRANSPORT
+        {
             return Err(WgError::InvalidPacket);
         }
 
@@ -279,33 +316,41 @@ impl WgPeer {
         }
 
         // Parse transport header
-        let remote_index = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
+        let receiver_index = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
         let nonce = u64::from_le_bytes([
             pkt[8], pkt[9], pkt[10], pkt[11], pkt[12], pkt[13], pkt[14], pkt[15],
         ]);
 
         // Oturum indeksini kontrol et
-        if remote_index != session.remote_index {
+        if receiver_index != session.local_index {
             return Err(WgError::InvalidIndex);
         }
 
         // Check for replay (tekrar saldırısı kontrolü)
         // Replay pencere kontrolü (kayan pencere)
-        if nonce <= session.receiving_nonce {
+        if session.receiving_nonce != WG_NONCE_UNINITIALIZED && nonce <= session.receiving_nonce {
             return Err(WgError::Replay);
         }
-        session.receiving_nonce = nonce;
 
         // 12 byte nonce: 4 byte sıfır + 8 byte little-endian counter
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[4..12].copy_from_slice(&nonce.to_le_bytes());
 
         // ChaCha20-Poly1305 ile şifre çöz
-        let ciphertext = &pkt[16..];
-        let decrypted =
-            crate::crypto::chacha20::ChaCha20Poly1305::new(&session.receiving_key, &nonce_bytes)
-                .decrypt(ciphertext, &[], &[0u8; 16])
-                .unwrap_or_else(|| ciphertext.to_vec());
+        let ciphertext_and_tag = &pkt[WG_TRANSPORT_HEADER_LEN..];
+        if ciphertext_and_tag.len() < WG_TRANSPORT_TAG_LEN {
+            return Err(WgError::InvalidPacket);
+        }
+        let split_at = ciphertext_and_tag.len() - WG_TRANSPORT_TAG_LEN;
+        let ciphertext = &ciphertext_and_tag[..split_at];
+        let mut tag = [0u8; WG_TRANSPORT_TAG_LEN];
+        tag.copy_from_slice(&ciphertext_and_tag[split_at..]);
+
+        let mut aead = ChaCha20Poly1305::new(&session.receiving_key, &nonce_bytes);
+        let decrypted = aead
+            .decrypt(ciphertext, &pkt[..WG_TRANSPORT_HEADER_LEN], &tag)
+            .ok_or(WgError::CryptoError)?;
+        session.receiving_nonce = nonce;
 
         // İstatistikleri güncelle
         self.rx_bytes
@@ -336,6 +381,8 @@ pub struct WgDevice {
     pub peers: Mutex<BTreeMap<[u8; WG_KEY_SIZE], Arc<WgPeer>>>,
     /// Firewall mark (paket etiketleme)
     pub fwmark: AtomicU32,
+    /// Stateless MAC2 cookie türetme gizli anahtarı
+    mac2_cookie_secret: [u8; 32],
     /// Arayüz aktif mi?
     pub is_up: AtomicBool,
     /// İstatistikler
@@ -357,6 +404,8 @@ impl WgDevice {
     /// Yeni WireGuard arayüzü oluştur
     pub fn new(name: &str) -> Self {
         let private_key = WgKey::generate();
+        let mut mac2_cookie_secret = [0u8; 32];
+        crate::crypto::rdrand_bytes(&mut mac2_cookie_secret);
         // Public key = X25519(private_key, BasePoint)
         let x25519_priv = crate::crypto::ed25519::X25519PrivateKey::from_bytes(private_key.0);
         let public_key = WgKey::from_bytes(*x25519_priv.public_key().as_bytes());
@@ -368,6 +417,7 @@ impl WgDevice {
             public_key,
             peers: Mutex::new(BTreeMap::new()),
             fwmark: AtomicU32::new(0),
+            mac2_cookie_secret,
             is_up: AtomicBool::new(false),
             stats: Mutex::new(WgStats::default()),
         }
@@ -401,6 +451,29 @@ impl WgDevice {
         None
     }
 
+    fn select_handshake_peer(&self, src_ip: u32, src_port: u16) -> Result<Arc<WgPeer>, WgError> {
+        let peers = self.peers.lock();
+
+        // Tek peer kurulumlarında endpoint henüz öğrenilmemiş olabilir;
+        // bu durumda mevcut davranışı koru.
+        if peers.len() == 1 {
+            return peers.values().next().cloned().ok_or(WgError::PeerNotFound);
+        }
+
+        let mut selected: Option<Arc<WgPeer>> = None;
+        for peer in peers.values() {
+            if peer.endpoint_ip == src_ip && peer.endpoint_port == src_port {
+                if selected.is_some() {
+                    // Çoklu eşleşme durumunda fail-closed: yanlış peer'a bağlama yapma.
+                    return Err(WgError::AuthFailed);
+                }
+                selected = Some(peer.clone());
+            }
+        }
+
+        selected.ok_or(WgError::PeerNotFound)
+    }
+
     /// El sıkışma başlat
     ///
     /// Noise_IKpsk2 protokolüne göre:
@@ -412,7 +485,17 @@ impl WgDevice {
         // Create and send initiation message
         let mut session = peer.session.lock();
         session.local_index = rand_u32();
+        session.remote_index = 0;
+        session.sending_nonce = 0;
+        session.receiving_nonce = WG_NONCE_UNINITIALIZED;
         session.is_initiator = true;
+        session.established = false;
+
+        let initiator_ephemeral = generate_x25519_private();
+        session
+            .pending_initiator_private
+            .copy_from_slice(initiator_ephemeral.as_bytes());
+        session.handshake_pending = true;
 
         crate::serial_println!("[WG] Initiating handshake with peer");
 
@@ -431,7 +514,7 @@ impl WgDevice {
         }
 
         match pkt[0] {
-            WG_MSG_INITIATION => self.process_initiation(pkt),
+            WG_MSG_INITIATION => self.process_initiation(pkt, src_ip, src_port),
             WG_MSG_RESPONSE => self.process_response(pkt),
             WG_MSG_COOKIE_REPLY => self.process_cookie_reply(pkt),
             WG_MSG_TRANSPORT => self.process_transport(pkt, src_ip, src_port),
@@ -446,66 +529,79 @@ impl WgDevice {
     /// 2. ECDH hesapla (static_local, ephemeral_remote)
     /// 3. Oturum anahtarlarını türet
     /// 4. Response mesajı oluştur
-    fn process_initiation(&self, pkt: &[u8]) -> Result<Vec<u8>, WgError> {
-        if pkt.len() < 148 {
+    fn process_initiation(
+        &self,
+        pkt: &[u8],
+        src_ip: u32,
+        src_port: u16,
+    ) -> Result<Vec<u8>, WgError> {
+        if pkt.len() < WG_INITIATION_LEN {
             return Err(WgError::InvalidPacket);
         }
 
         // Parse initiation message fields
         let sender_index = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
-        let ephemeral_pub = &pkt[8..40]; // 32 byte ephemeral public key
+        if sender_index == 0 {
+            return Err(WgError::InvalidPacket);
+        }
+
+        let mut init_ephemeral_bytes = [0u8; 32];
+        init_ephemeral_bytes.copy_from_slice(&pkt[8..40]); // 32 byte ephemeral public key
         let _encrypted_static = &pkt[40..88]; // 48 byte (32 + 16 tag)
         let _encrypted_timestamp = &pkt[88..116]; // 28 byte (12 + 16 tag)
-        let _mac1 = &pkt[116..132]; // 16 byte MAC1
-        let _mac2 = &pkt[132..148]; // 16 byte MAC2
 
-        // Oturum anahtarlarını ECDH ile türet
-        // Noise IK: ECDH(s_local, e_remote) || ECDH(e_local, e_remote)
-        let private_key = {
-            let pk = self.peers.lock();
-            // Use device private key from first available peer context
-            let mut key = [0u8; 32];
-            // Hash ephemeral key with our context for key derivation
-            for i in 0..32 {
-                key[i] = ephemeral_pub[i] ^ (i as u8).wrapping_mul(0x47);
-            }
-            key
+        let peer = self.select_handshake_peer(src_ip, src_port)?;
+
+        if !self.verify_initiation_mac1(pkt) {
+            crate::serial_println!("[WG] Dropping initiation: MAC1 verification failed");
+            return Err(WgError::AuthFailed);
+        }
+
+        if !self.verify_initiation_mac2(pkt, sender_index, src_ip, src_port) {
+            crate::serial_println!("[WG] Dropping initiation: MAC2 verification failed");
+            return Err(WgError::AuthFailed);
+        }
+
+        let local_static_private = {
+            let local_private = self.private_key.lock();
+            X25519PrivateKey::from_bytes(local_private.0)
         };
+        let initiator_ephemeral_pub = X25519PublicKey::from_bytes(init_ephemeral_bytes);
 
         // Ephemeral key pair üret (response için)
-        let (resp_ephemeral_priv, resp_ephemeral_pub) = crate::net::tls::X25519::generate_keypair();
+        let responder_ephemeral_private = generate_x25519_private();
+        let responder_ephemeral_pub = responder_ephemeral_private.public_key();
 
-        // Oturum anahtarlarını hesapla
-        let mut shared = [0u8; 32];
-        for i in 0..32 {
-            shared[i] = private_key[i] ^ ephemeral_pub[i] ^ resp_ephemeral_pub[i];
-        }
-        let transport_key = crate::net::quic::sha256_hash(&shared);
+        // Oturum anahtarlarını gerçek X25519 ECDH ile türet
+        let static_shared = local_static_private.diffie_hellman(&initiator_ephemeral_pub);
+        let ephemeral_shared = responder_ephemeral_private.diffie_hellman(&initiator_ephemeral_pub);
+        let (init_to_resp, resp_to_init) =
+            derive_handshake_transport_keys(&static_shared, &ephemeral_shared);
 
-        // Peer oturumunu güncelle
-        for peer in self.peers.lock().values() {
+        let local_idx;
+        {
             let mut session = peer.session.lock();
             session.remote_index = sender_index;
             session.local_index = rand_u32();
+            session.sending_key.copy_from_slice(&resp_to_init);
+            session.receiving_key.copy_from_slice(&init_to_resp);
+            session.sending_nonce = 0;
+            session.receiving_nonce = WG_NONCE_UNINITIALIZED;
+            session.is_initiator = false;
             session.established = true;
-            if transport_key.len() >= 32 {
-                session.sending_key[..32].copy_from_slice(&transport_key[..32]);
-                // Receiving key = hash of sending key
-                let rk = crate::net::quic::sha256_hash(&transport_key);
-                session.receiving_key[..32].copy_from_slice(&rk[..32]);
-            }
-            break; // İlk peer'a ata
+            session.pending_initiator_private = [0u8; 32];
+            session.handshake_pending = false;
+            local_idx = session.local_index;
         }
 
         // Response mesajı oluştur (Type 2)
         let mut response = Vec::with_capacity(92);
         response.push(WG_MSG_RESPONSE);
         response.extend_from_slice(&[0, 0, 0]); // reserved
-        let local_idx = rand_u32();
         response.extend_from_slice(&local_idx.to_le_bytes()); // sender index
         response.extend_from_slice(&sender_index.to_le_bytes()); // receiver index
-        response.extend_from_slice(&resp_ephemeral_pub); // ephemeral public (32)
-                                                         // Encrypted empty payload (16 byte poly1305 tag)
+        response.extend_from_slice(responder_ephemeral_pub.as_bytes()); // ephemeral public (32)
+                                                                        // Encrypted empty payload (16 byte poly1305 tag)
         response.extend_from_slice(&[0u8; 16]);
         // MAC1 + MAC2
         response.extend_from_slice(&[0u8; 32]);
@@ -524,30 +620,47 @@ impl WgDevice {
 
         let sender_index = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
         let receiver_index = u32::from_le_bytes([pkt[8], pkt[9], pkt[10], pkt[11]]);
-        let ephemeral_pub = &pkt[12..44]; // 32 byte ephemeral public key
-
-        // Oturum anahtarlarını türet
-        for peer in self.peers.lock().values() {
-            let mut session = peer.session.lock();
-            if session.local_index == receiver_index {
-                session.remote_index = sender_index;
-                session.established = true;
-                // Transport anahtarları
-                let mut key_material = [0u8; 64];
-                for i in 0..32 {
-                    key_material[i] = ephemeral_pub[i] ^ session.sending_key[i];
-                    key_material[32 + i] = ephemeral_pub[i] ^ (i as u8).wrapping_mul(0x5A);
-                }
-                let derived = crate::net::quic::sha256_hash(&key_material);
-                session.sending_key[..32].copy_from_slice(&derived[..32]);
-                let rk = crate::net::quic::sha256_hash(&derived);
-                session.receiving_key[..32].copy_from_slice(&rk[..32]);
-                crate::serial_println!("[WG] Handshake response processed, session established");
-                break;
-            }
+        if sender_index == 0 || receiver_index == 0 {
+            return Err(WgError::InvalidPacket);
         }
 
-        Ok(Vec::new()) // No further response needed
+        let mut responder_ephemeral_bytes = [0u8; 32];
+        responder_ephemeral_bytes.copy_from_slice(&pkt[12..44]); // 32 byte ephemeral public key
+        let responder_ephemeral_pub = X25519PublicKey::from_bytes(responder_ephemeral_bytes);
+
+        // Oturum anahtarlarını gerçek X25519 ECDH ile türet
+        for peer in self.peers.lock().values() {
+            let mut session = peer.session.lock();
+            if session.local_index != receiver_index
+                || !session.is_initiator
+                || !session.handshake_pending
+            {
+                continue;
+            }
+
+            let initiator_ephemeral_private =
+                X25519PrivateKey::from_bytes(session.pending_initiator_private);
+            let peer_static_pub = X25519PublicKey::from_bytes(peer.public_key.0);
+            let static_shared = initiator_ephemeral_private.diffie_hellman(&peer_static_pub);
+            let ephemeral_shared =
+                initiator_ephemeral_private.diffie_hellman(&responder_ephemeral_pub);
+            let (init_to_resp, resp_to_init) =
+                derive_handshake_transport_keys(&static_shared, &ephemeral_shared);
+
+            session.remote_index = sender_index;
+            session.sending_key.copy_from_slice(&init_to_resp);
+            session.receiving_key.copy_from_slice(&resp_to_init);
+            session.sending_nonce = 0;
+            session.receiving_nonce = WG_NONCE_UNINITIALIZED;
+            session.pending_initiator_private = [0u8; 32];
+            session.handshake_pending = false;
+            session.established = true;
+
+            crate::serial_println!("[WG] Handshake response processed, session established");
+            return Ok(Vec::new());
+        }
+
+        Err(WgError::PeerNotFound)
     }
 
     /// Cookie yanıt mesajını işle (Type 3) - DoS koruması
@@ -568,6 +681,80 @@ impl WgDevice {
         Ok(Vec::new()) // Cookie saklandı, yanıt gerekmez
     }
 
+    fn verify_initiation_mac1(&self, pkt: &[u8]) -> bool {
+        if pkt.len() < WG_INITIATION_LEN {
+            return false;
+        }
+
+        let mac1_key = Self::derive_mac1_key(self.public_key.as_bytes());
+        let expected_mac1 = Self::compute_mac_tag(&mac1_key, &pkt[..WG_INITIATION_BODY_LEN]);
+        let recv_mac1 = &pkt[WG_INITIATION_BODY_LEN..WG_INITIATION_BODY_LEN + WG_MAC_LEN];
+
+        Self::constant_time_eq(&expected_mac1, recv_mac1)
+    }
+
+    fn verify_initiation_mac2(
+        &self,
+        pkt: &[u8],
+        sender_index: u32,
+        src_ip: u32,
+        src_port: u16,
+    ) -> bool {
+        if pkt.len() < WG_INITIATION_LEN {
+            return false;
+        }
+
+        let recv_mac2 = &pkt[WG_INITIATION_BODY_LEN + WG_MAC_LEN..WG_INITIATION_LEN];
+        if Self::is_zero_tag(recv_mac2) {
+            return true;
+        }
+
+        let cookie = self.derive_cookie(src_ip, src_port, sender_index);
+        let expected_mac2 =
+            Self::compute_mac_tag(&cookie, &pkt[..WG_INITIATION_BODY_LEN + WG_MAC_LEN]);
+
+        Self::constant_time_eq(&expected_mac2, recv_mac2)
+    }
+
+    fn derive_mac1_key(responder_public_key: &[u8; WG_KEY_SIZE]) -> [u8; 32] {
+        let mut material = [0u8; WG_MAC1_LABEL.len() + WG_KEY_SIZE];
+        material[..WG_MAC1_LABEL.len()].copy_from_slice(WG_MAC1_LABEL);
+        material[WG_MAC1_LABEL.len()..].copy_from_slice(responder_public_key);
+
+        let digest = crate::net::quic::sha256_hash(&material);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&digest[..32]);
+        key
+    }
+
+    fn derive_cookie(&self, src_ip: u32, src_port: u16, sender_index: u32) -> [u8; 16] {
+        let mut endpoint_material = [0u8; 10];
+        endpoint_material[..4].copy_from_slice(&src_ip.to_be_bytes());
+        endpoint_material[4..6].copy_from_slice(&src_port.to_be_bytes());
+        endpoint_material[6..10].copy_from_slice(&sender_index.to_be_bytes());
+
+        let cookie_hmac =
+            crate::net::quic::hmac_sha256(&self.mac2_cookie_secret, &endpoint_material);
+        let mut cookie = [0u8; 16];
+        cookie.copy_from_slice(&cookie_hmac[..16]);
+        cookie
+    }
+
+    fn compute_mac_tag(key: &[u8], msg: &[u8]) -> [u8; WG_MAC_LEN] {
+        let mac = crate::net::quic::hmac_sha256(key, msg);
+        let mut tag = [0u8; WG_MAC_LEN];
+        tag.copy_from_slice(&mac[..WG_MAC_LEN]);
+        tag
+    }
+
+    fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+        crate::crypto::constant_time_eq(left, right)
+    }
+
+    fn is_zero_tag(tag: &[u8]) -> bool {
+        tag.iter().all(|&byte| byte == 0)
+    }
+
     /// Şifreli veri paketini işle (Type 4)
     fn process_transport(
         &self,
@@ -575,7 +762,7 @@ impl WgDevice {
         _src_ip: u32,
         _src_port: u16,
     ) -> Result<Vec<u8>, WgError> {
-        if pkt.len() < 16 {
+        if pkt.len() < WG_TRANSPORT_HEADER_LEN + WG_TRANSPORT_TAG_LEN {
             return Err(WgError::InvalidPacket);
         }
 
@@ -585,7 +772,7 @@ impl WgDevice {
         // Find peer by index
         for peer in self.peers.lock().values() {
             let session = peer.session.lock();
-            if session.remote_index == index {
+            if session.local_index == index {
                 drop(session);
                 return peer.decrypt_packet(pkt);
             }
@@ -607,6 +794,38 @@ impl WgDevice {
 /// Donanım RNG (RDRAND) veya yazlım PRNG kullanır.
 fn rand_u32() -> u32 {
     crate::random::next_u32()
+}
+
+fn generate_x25519_private() -> X25519PrivateKey {
+    let mut seed = [0u8; 32];
+    crate::crypto::rdrand_bytes(&mut seed);
+    X25519PrivateKey::from_bytes(seed)
+}
+
+fn derive_handshake_transport_keys(
+    static_shared: &[u8; 32],
+    ephemeral_shared: &[u8; 32],
+) -> ([u8; 32], [u8; 32]) {
+    (
+        derive_transport_key(static_shared, ephemeral_shared, b"wg-init-to-resp"),
+        derive_transport_key(static_shared, ephemeral_shared, b"wg-resp-to-init"),
+    )
+}
+
+fn derive_transport_key(
+    static_shared: &[u8; 32],
+    ephemeral_shared: &[u8; 32],
+    label: &[u8],
+) -> [u8; 32] {
+    let mut input = Vec::with_capacity(64 + label.len());
+    input.extend_from_slice(static_shared);
+    input.extend_from_slice(ephemeral_shared);
+    input.extend_from_slice(label);
+
+    let digest = crate::net::quic::sha256_hash(&input);
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&digest[..32]);
+    key
 }
 
 // ============================================================================
@@ -702,6 +921,231 @@ pub enum WgError {
     Replay,
     /// Şifreleme/Çözme hatası
     CryptoError,
+    /// MAC doğrulaması başarısız
+    AuthFailed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_device_with_peer() -> WgDevice {
+        let device = WgDevice::new("wg-test");
+        device.add_peer(Arc::new(WgPeer::new(WgKey::generate())));
+        device
+    }
+
+    fn add_peer_with_endpoint(
+        device: &WgDevice,
+        endpoint_ip: u32,
+        endpoint_port: u16,
+    ) -> Arc<WgPeer> {
+        let mut peer = WgPeer::new(WgKey::generate());
+        peer.endpoint_ip = endpoint_ip;
+        peer.endpoint_port = endpoint_port;
+        let peer = Arc::new(peer);
+        device.add_peer(peer.clone());
+        peer
+    }
+
+    fn build_initiation_packet(
+        device: &WgDevice,
+        src_ip: u32,
+        src_port: u16,
+        sender_index: u32,
+        mac1_mode: MacMode,
+        mac2_mode: MacMode,
+    ) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.resize(WG_INITIATION_LEN, 0);
+        pkt[0] = WG_MSG_INITIATION;
+        pkt[4..8].copy_from_slice(&sender_index.to_le_bytes());
+
+        let ephemeral = generate_x25519_private().public_key();
+        pkt[8..40].copy_from_slice(ephemeral.as_bytes());
+
+        match mac1_mode {
+            MacMode::Zero => {}
+            MacMode::Invalid => pkt[WG_INITIATION_BODY_LEN..WG_INITIATION_BODY_LEN + WG_MAC_LEN]
+                .copy_from_slice(&[0xAB; WG_MAC_LEN]),
+            MacMode::Valid => {
+                let mac1_key = WgDevice::derive_mac1_key(device.public_key.as_bytes());
+                let mac1 = WgDevice::compute_mac_tag(&mac1_key, &pkt[..WG_INITIATION_BODY_LEN]);
+                pkt[WG_INITIATION_BODY_LEN..WG_INITIATION_BODY_LEN + WG_MAC_LEN]
+                    .copy_from_slice(&mac1);
+            }
+        }
+
+        match mac2_mode {
+            MacMode::Zero => {}
+            MacMode::Invalid => pkt[WG_INITIATION_BODY_LEN + WG_MAC_LEN..WG_INITIATION_LEN]
+                .copy_from_slice(&[0xCD; WG_MAC_LEN]),
+            MacMode::Valid => {
+                let cookie = device.derive_cookie(src_ip, src_port, sender_index);
+                let mac2 =
+                    WgDevice::compute_mac_tag(&cookie, &pkt[..WG_INITIATION_BODY_LEN + WG_MAC_LEN]);
+                pkt[WG_INITIATION_BODY_LEN + WG_MAC_LEN..WG_INITIATION_LEN].copy_from_slice(&mac2);
+            }
+        }
+
+        pkt
+    }
+
+    #[derive(Clone, Copy)]
+    enum MacMode {
+        Zero,
+        Invalid,
+        Valid,
+    }
+
+    #[test]
+    fn wireguard_initiation_rejects_invalid_mac1() {
+        let device = build_device_with_peer();
+        let src_ip = 0xC0A8_010A;
+        let src_port = 51820;
+        let sender_index = 0x1122_3344;
+
+        let pkt = build_initiation_packet(
+            &device,
+            src_ip,
+            src_port,
+            sender_index,
+            MacMode::Invalid,
+            MacMode::Zero,
+        );
+
+        let err = device
+            .process_message(&pkt, src_ip, src_port)
+            .expect_err("invalid MAC1 must be rejected");
+        assert_eq!(err, WgError::AuthFailed);
+    }
+
+    #[test]
+    fn wireguard_initiation_rejects_invalid_mac2_when_present() {
+        let device = build_device_with_peer();
+        let src_ip = 0x0A00_0002;
+        let src_port = 51820;
+        let sender_index = 0x5566_7788;
+
+        let pkt = build_initiation_packet(
+            &device,
+            src_ip,
+            src_port,
+            sender_index,
+            MacMode::Valid,
+            MacMode::Invalid,
+        );
+
+        let err = device
+            .process_message(&pkt, src_ip, src_port)
+            .expect_err("non-zero invalid MAC2 must be rejected");
+        assert_eq!(err, WgError::AuthFailed);
+    }
+
+    #[test]
+    fn wireguard_initiation_accepts_valid_mac1_and_mac2() {
+        let device = build_device_with_peer();
+        let src_ip = 0x0A00_0003;
+        let src_port = 51820;
+        let sender_index = 0x99AA_BBCC;
+
+        let pkt = build_initiation_packet(
+            &device,
+            src_ip,
+            src_port,
+            sender_index,
+            MacMode::Valid,
+            MacMode::Valid,
+        );
+
+        let response = device
+            .process_message(&pkt, src_ip, src_port)
+            .expect("valid MAC1+MAC2 must pass");
+        assert_eq!(response.first().copied(), Some(WG_MSG_RESPONSE));
+    }
+
+    #[test]
+    fn wireguard_initiation_selects_peer_by_source_endpoint() {
+        let device = WgDevice::new("wg-test-multi");
+        let src_ip = 0x0A00_0042;
+        let src_port = 51821;
+        let sender_index = 0x0102_0304;
+
+        let peer_one = add_peer_with_endpoint(&device, 0x0A00_0041, src_port);
+        let peer_two = add_peer_with_endpoint(&device, src_ip, src_port);
+
+        let pkt = build_initiation_packet(
+            &device,
+            src_ip,
+            src_port,
+            sender_index,
+            MacMode::Valid,
+            MacMode::Valid,
+        );
+
+        let response = device
+            .process_message(&pkt, src_ip, src_port)
+            .expect("matching endpoint peer must be selected");
+        assert_eq!(response.first().copied(), Some(WG_MSG_RESPONSE));
+
+        let session_one = peer_one.session.lock();
+        assert!(!session_one.established);
+        drop(session_one);
+
+        let session_two = peer_two.session.lock();
+        assert!(session_two.established);
+        assert_eq!(session_two.remote_index, sender_index);
+    }
+
+    #[test]
+    fn wireguard_initiation_rejects_when_multi_peer_endpoint_unmatched() {
+        let device = WgDevice::new("wg-test-unmatched");
+        let src_ip = 0x0A00_0050;
+        let src_port = 51822;
+        let sender_index = 0x1111_2222;
+
+        add_peer_with_endpoint(&device, 0x0A00_0051, src_port);
+        add_peer_with_endpoint(&device, 0x0A00_0052, src_port);
+
+        let pkt = build_initiation_packet(
+            &device,
+            src_ip,
+            src_port,
+            sender_index,
+            MacMode::Valid,
+            MacMode::Valid,
+        );
+
+        let err = device
+            .process_message(&pkt, src_ip, src_port)
+            .expect_err("unmatched endpoint must be rejected");
+        assert_eq!(err, WgError::PeerNotFound);
+    }
+
+    #[test]
+    fn wireguard_initiation_rejects_when_multi_peer_endpoint_ambiguous() {
+        let device = WgDevice::new("wg-test-ambiguous");
+        let src_ip = 0x0A00_0060;
+        let src_port = 51823;
+        let sender_index = 0x3333_4444;
+
+        add_peer_with_endpoint(&device, src_ip, src_port);
+        add_peer_with_endpoint(&device, src_ip, src_port);
+
+        let pkt = build_initiation_packet(
+            &device,
+            src_ip,
+            src_port,
+            sender_index,
+            MacMode::Valid,
+            MacMode::Valid,
+        );
+
+        let err = device
+            .process_message(&pkt, src_ip, src_port)
+            .expect_err("ambiguous endpoint mapping must fail-closed");
+        assert_eq!(err, WgError::AuthFailed);
+    }
 }
 
 // ============================================================================

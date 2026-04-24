@@ -29,11 +29,13 @@ std::thread_local! {
 
 /// Desteklenen maksimum CPU sayısı.
 const MAX_CPUS: usize = 32;
+const UNINITIALIZED_SEED: u32 = 0;
+const FALLBACK_NONZERO_SEED: u32 = 0x9E37_79B9;
 
 /// CPU başına RNG tohum (seed) değerleri.
 ///
 /// Her CPU kendi tohumunu korur: atomik kilit gerekmez, çekirdek başına izole durum sağlanır.
-static SEEDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(123456789) }; MAX_CPUS];
+static SEEDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(UNINITIALIZED_SEED) }; MAX_CPUS];
 
 /// CPU başına entropi havuzları.
 ///
@@ -51,6 +53,44 @@ static GLOBAL_ENTROPY: AtomicU64 = AtomicU64::new(0);
 /// Test ve üretim ortamları için yeniden üretilebilir (reproducible) sayı dizileri
 /// oluşturmaya yarar. 0xA5A5A5A5 çarpraz bit deseni ile başlatılır.
 static DETERMINISTIC_SEED: AtomicU32 = AtomicU32::new(0xA5A5A5A5);
+
+#[inline]
+fn xorshift32_step(mut x: u32) -> u32 {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    x
+}
+
+#[inline]
+fn tsc_entropy() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe { core::arch::x86_64::_rdtsc() as u64 }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0
+    }
+}
+
+fn secure_seed_material(cpu_id: usize) -> u32 {
+    let mut bytes = [0u8; 4];
+    if crate::crypto::rdseed_bytes(&mut bytes) || crate::crypto::rdrand_bytes(&mut bytes) {
+        let seeded = u32::from_le_bytes(bytes) ^ (cpu_id as u32).wrapping_mul(0x9E37_79B9);
+        return seeded.max(1);
+    }
+
+    let ticks = crate::interrupts::get_ticks() as u64;
+    let mixed = ticks
+        ^ tsc_entropy()
+        ^ GLOBAL_ENTROPY.load(Ordering::Relaxed)
+        ^ ((cpu_id as u64) << 32)
+        ^ 0xA5A5_5A5A_A5A5_5A5A;
+    let seeded = (mixed as u32) ^ ((mixed >> 32) as u32);
+    seeded.max(1)
+}
 
 #[inline]
 fn current_rng_cpu_id() -> usize {
@@ -74,15 +114,28 @@ fn current_rng_cpu_id() -> usize {
 /// çarpanıyla (0x9E3779B9) benzersiz türev tohumlar hesaplanır.
 /// Bu yaklaşım, her CPU'nun birbirinden bağımsız sayı üretmesini sağlar.
 pub fn init(seed: u32) {
-    let valid_seed = if seed == 0 { 123456789 } else { seed };
+    let base_seed = if seed == 0 {
+        secure_seed_material(0)
+    } else {
+        seed
+    };
     // BSP (CPU 0) seed'ini ayarla
-    SEEDS[0].store(valid_seed, Ordering::Relaxed);
+    SEEDS[0].store(base_seed.max(1), Ordering::Release);
 
     // Diğer CPU'lar için seed'i türet
     for i in 1..MAX_CPUS {
-        let sub_seed = valid_seed.wrapping_add((i as u32).wrapping_mul(0x9E3779B9)); // Altın oran
-        SEEDS[i].store(sub_seed, Ordering::Relaxed);
+        let derived = if seed == 0 {
+            secure_seed_material(i)
+        } else {
+            base_seed.wrapping_add((i as u32).wrapping_mul(0x9E37_79B9))
+        };
+        SEEDS[i].store(derived.max(1), Ordering::Release);
     }
+
+    GLOBAL_ENTROPY.fetch_xor(
+        ((base_seed as u64) << 32) ^ tsc_entropy() ^ crate::interrupts::get_ticks() as u64,
+        Ordering::Relaxed,
+    );
 }
 
 /// Entropi havuzuna yeni bir değer karıştırır.
@@ -120,31 +173,29 @@ pub fn next_u32() -> u32 {
         &SEEDS[0] // BSP'ye geri düş
     };
 
-    let mut x = seed_ptr.load(Ordering::Relaxed);
-    if x == 0 {
-        // Sıfır tohum Xorshift'i bozar; CPU ID ekleyerek kaç
-        x = 123456789 + (cpu_id as u32);
+    let mut current = seed_ptr.load(Ordering::Acquire);
+    loop {
+        let seeded = if current == UNINITIALIZED_SEED {
+            secure_seed_material(cpu_id)
+        } else {
+            current
+        };
+        let mut next = xorshift32_step(seeded);
+
+        let entropy = if cpu_id < MAX_CPUS {
+            ENTROPY_POOL[cpu_id].load(Ordering::Relaxed)
+        } else {
+            GLOBAL_ENTROPY.load(Ordering::Relaxed)
+        };
+        next ^= entropy as u32;
+        next ^= (entropy >> 32) as u32;
+        next = next.max(FALLBACK_NONZERO_SEED);
+
+        match seed_ptr.compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return next,
+            Err(observed) => current = observed,
+        }
     }
-
-    // Xorshift algoritması: üç adımda iyi dağılım
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-
-    // CPU'ya özgü entropi havuzuyla ekstra rastlantısallık ekle
-    let entropy = if cpu_id < MAX_CPUS {
-        ENTROPY_POOL[cpu_id].load(Ordering::Relaxed)
-    } else {
-        GLOBAL_ENTROPY.load(Ordering::Relaxed)
-    };
-
-    // Entropinin hem alt hem üst 32 bitini dahil et
-    x ^= entropy as u32;
-    x ^= (entropy >> 32) as u32;
-
-    // Yeni tohumu kaydet
-    seed_ptr.store(x, Ordering::Relaxed);
-    x
 }
 
 /// Rastgele bir u64 değeri üretir.
@@ -156,15 +207,58 @@ pub fn rand_u64() -> u64 {
     (high << 32) | low
 }
 
+fn best_effort_secure_u32() -> (u32, bool) {
+    let mut bytes = [0u8; 4];
+    if crate::crypto::rdseed_bytes(&mut bytes) || crate::crypto::rdrand_bytes(&mut bytes) {
+        return (u32::from_le_bytes(bytes), true);
+    }
+
+    let fallback = rand_u64() ^ crate::interrupts::get_ticks();
+    let mixed = (fallback as u32) ^ ((fallback >> 32) as u32);
+    (mixed, false)
+}
+
+pub fn secure_u16() -> (u16, bool) {
+    let (value, secure) = best_effort_secure_u32();
+    ((value & 0xFFFF) as u16, secure)
+}
+
+pub fn secure_range_u16(min_inclusive: u16, max_inclusive: u16) -> (u16, bool) {
+    if min_inclusive >= max_inclusive {
+        return (min_inclusive, true);
+    }
+
+    let span = (max_inclusive as u32)
+        .saturating_sub(min_inclusive as u32)
+        .saturating_add(1);
+    let zone = u32::MAX - (u32::MAX % span);
+    let mut secure = true;
+
+    loop {
+        let (sample, sample_secure) = best_effort_secure_u32();
+        secure &= sample_secure;
+        if sample < zone {
+            let value = min_inclusive as u32 + (sample % span);
+            return (value as u16, secure);
+        }
+    }
+}
+
 /// `[0, max)` aralığında rastgele bir sayı üretir.
 ///
 /// `max == 0` ise sıfır döner (sıfıra bölünme koruması).
-/// Büyük `max` değerlerinde modüler sapma oluşabilir; olasılık dağılımı tam düzgün değildir.
+/// Rejection sampling ile modulo bias engellenir.
 pub fn next_range(max: u32) -> u32 {
     if max == 0 {
         return 0;
     }
-    next_u32() % max
+    let zone = u32::MAX - (u32::MAX % max);
+    loop {
+        let sample = next_u32();
+        if sample < zone {
+            return sample % max;
+        }
+    }
 }
 
 /// Verilen tamponu (buffer) rastgele baytlarla doldurur.
@@ -172,6 +266,10 @@ pub fn next_range(max: u32) -> u32 {
 /// Her 4 baytlık blok için `next_u32()` çağrısı yapılır.
 /// Artan tampon boyutunda verimlidir.
 pub fn fill_bytes(buf: &mut [u8]) {
+    if crate::crypto::rdseed_bytes(buf) || crate::crypto::rdrand_bytes(buf) {
+        return;
+    }
+
     let mut offset = 0;
     while offset < buf.len() {
         let value = next_u32();
@@ -189,13 +287,20 @@ pub fn fill_bytes(buf: &mut [u8]) {
 /// Global `DETERMINISTIC_SEED` üzerinde Xorshift uygular. Aynı tohum
 /// verildiğinde her çalıştırmada aynı sayı dizisi üretilir.
 fn deterministic_next_u32() -> u32 {
-    let mut x = DETERMINISTIC_SEED.load(Ordering::Relaxed);
-    // Standart Xorshift32 parametreleri (13, 17, 5)
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    DETERMINISTIC_SEED.store(x, Ordering::Relaxed);
-    x
+    let mut current = DETERMINISTIC_SEED.load(Ordering::Acquire);
+    loop {
+        let seeded = if current == 0 { 0xA5A5_A5A5 } else { current };
+        let next = xorshift32_step(seeded).max(1);
+        match DETERMINISTIC_SEED.compare_exchange(
+            current,
+            next,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return next,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 /// Verilen tamponu deterministik (yeniden üretilebilir) rastgele baytlarla doldurur.

@@ -1,0 +1,11 @@
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: ClientHello
+    S->>C: ServerHello
+    S->>C: EncryptedExtensions
+    S->>C: Certificate
+    S->>C: CertificateVerify
+    S->>C: Finished
+    C->>S: Finished
+    Note over C,S: Application data phase starts

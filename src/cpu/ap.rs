@@ -23,12 +23,7 @@ fn ap_marker(byte: u8) {
 #[cfg(not(target_os = "windows"))]
 #[unsafe(naked)]
 unsafe extern "C" fn park_secondary_cpu() -> ! {
-    naked_asm!(
-        "cli",
-        "1:",
-        "hlt",
-        "jmp 1b"
-    );
+    naked_asm!("cli", "1:", "hlt", "jmp 1b");
 }
 
 #[cfg(target_os = "windows")]
@@ -85,17 +80,17 @@ pub extern "sysv64" fn ap_entry(cpu_data: &'static mut CpuData) -> ! {
         // Hata durumunda bile devam etmeye çalış, log bas
         ap_marker(b'E');
     }
-    
+
     crate::apic::lapic::mask_timer();
     crate::cpu::init_secondary_cpu();
     crate::syscall::init();
-    
+
     // Online işaretini vermeden önce stack/instruction stream'in temiz olduğundan emin ol
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    
+
     // AP'yi online işaretle
     crate::cpu::smp::mark_cpu_online(cpu_id, cpu_id);
-    
+
     // Doğrudan park moduna geç - return yok, stack kullanımı yok
     unsafe { park_secondary_cpu() }
 }

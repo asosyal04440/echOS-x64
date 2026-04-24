@@ -69,7 +69,7 @@ use uefi::proto::tcg::{EventType, PcrIndex};
 #[cfg(target_os = "uefi")]
 use uefi::table::boot::MemoryType;
 #[cfg(target_os = "uefi")]
-use uefi::table::runtime::VariableVendor;
+use uefi::table::runtime::{ResetType, VariableAttributes, VariableVendor};
 #[cfg(target_os = "uefi")]
 use uefi::CStr16;
 
@@ -78,8 +78,23 @@ const BOOT_MAGIC_UEFI: u64 = 0x55454649;
 const BOOT_MAGIC_MB2: u64 = 0x36d76289;
 #[cfg(target_os = "uefi")]
 const CMDLINE_MAX_LEN: usize = 4096;
+#[cfg(target_os = "uefi")]
+const SECURE_BOOT_ENROLL_MAGIC: u32 = 0x5342_4531;
+#[cfg(target_os = "uefi")]
+const SECURE_BOOT_ENROLL_PENDING_RESET: u8 = 1 << 0;
+#[cfg(target_os = "uefi")]
+const SECURE_BOOT_ENROLL_FAILED: u8 = 1 << 1;
 #[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 const LIMINE_REVISION: u64 = 4;
+
+#[cfg(target_os = "uefi")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SecureBootEnrollState {
+    magic: u32,
+    flags: u8,
+    _reserved: [u8; 3],
+}
 
 #[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
 #[used]
@@ -170,6 +185,39 @@ fn serial_write_str(args: &fmt::Arguments) {
     let _ = port.write_fmt(*args);
 }
 
+fn init_platform_iommu() -> bool {
+    let cpu_acpi_ok = ech_os::cpu::acpi::init();
+    if cpu_acpi_ok {
+        serial_write_str(&format_args!("[SMP] CPU ACPI tables parsed\n"));
+    } else {
+        serial_write_str(&format_args!(
+            "[SMP] CPU ACPI init failed, using CPUID topology\n"
+        ));
+    }
+
+    let iommu_tables_ok = ech_os::memory::init_iommu();
+    if iommu_tables_ok {
+        serial_write_str(&format_args!(
+            "[IOMMU] DMAR parsed and domains initialized\n"
+        ));
+    } else {
+        serial_write_str(&format_args!("[IOMMU] DMAR not available\n"));
+    }
+
+    let iommu_hw_ok = ech_os::drivers::iommu::init();
+    if iommu_hw_ok {
+        serial_write_str(&format_args!(
+            "[IOMMU] DMA remapping enabled before device init\n"
+        ));
+    } else if iommu_tables_ok {
+        serial_write_str(&format_args!(
+            "[IOMMU] Hardware enable/self-test failed, keeping device init constrained\n"
+        ));
+    }
+
+    iommu_tables_ok && iommu_hw_ok
+}
+
 fn parse_swap_cmdline(cmdline: &str) -> Option<(u32, u32)> {
     let mut lba: Option<u64> = None;
     let mut slots: Option<u64> = None;
@@ -251,12 +299,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     let message = info.message();
     serial_write_str(&format_args!("[PANIC] Message: {}\n", message));
+    ech_os::cpu::smp::broadcast_panic_stop();
     ech_os::boot::appliance::record_panic();
-    loop {
-        unsafe {
-            asm!("hlt");
-        }
-    }
+    ech_os::cpu::smp::panic_stop_this_cpu();
 }
 
 #[cfg(target_os = "windows")]
@@ -368,6 +413,11 @@ pub static kernel_end: u8 = 0;
 pub static boot_lma_end: u8 = 0;
 
 #[cfg(target_os = "uefi")]
+const PREFERRED_GOP_WIDTH: usize = 1920;
+#[cfg(target_os = "uefi")]
+const PREFERRED_GOP_HEIGHT: usize = 1080;
+
+#[cfg(target_os = "uefi")]
 fn gop_mode_rank(width: usize, height: usize, target_width: usize, target_height: usize) -> u8 {
     if width == target_width && height == target_height {
         3
@@ -381,7 +431,7 @@ fn gop_mode_rank(width: usize, height: usize, target_width: usize, target_height
 #[cfg(target_os = "uefi")]
 fn configure_preferred_gop_mode(gop: &mut GraphicsOutput) {
     let current = gop.current_mode_info().resolution();
-    let target = (1920usize, 1080usize);
+    let target = (PREFERRED_GOP_WIDTH, PREFERRED_GOP_HEIGHT);
     let mut best_mode = None;
     let mut best_rank = gop_mode_rank(current.0, current.1, target.0, target.1);
     let mut best_area = current.0.saturating_mul(current.1);
@@ -392,8 +442,12 @@ fn configure_preferred_gop_mode(gop: &mut GraphicsOutput) {
         let rank = gop_mode_rank(dims.0, dims.1, target.0, target.1);
         let area = dims.0.saturating_mul(dims.1);
         let better = rank > best_rank
-            || (rank == best_rank && area > best_area)
-            || (rank == best_rank && area == best_area && dims > best_dims);
+            || (rank == best_rank
+                && rank == 2
+                && (area < best_area || (area == best_area && dims < best_dims)))
+            || (rank == best_rank
+                && rank != 2
+                && (area > best_area || (area == best_area && dims > best_dims)));
         if better {
             best_rank = rank;
             best_area = area;
@@ -847,6 +901,14 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     // TTY alt sistemini başlat - klavye interrupt'ları öncesinde!
     ech_os::tty::init();
 
+    ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::AcpiInit);
+    let iommu_ready = init_platform_iommu();
+    if !iommu_ready {
+        serial_write_str(&format_args!(
+            "[IOMMU] Proceeding without full hardware isolation for unavailable units\n"
+        ));
+    }
+
     // VirtIO-Net driver'ı başlat
     if ech_os::drivers::virtio_net::auto_init() {
         serial_write_str(&format_args!("[NET] VirtIO-Net driver initialized\n"));
@@ -859,24 +921,6 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
 
     if let (Some(framebuffer), Some(screen)) = (boot_info.framebuffer.as_mut(), splash.as_mut()) {
         screen.update_progress(framebuffer, 75);
-    }
-
-    let cpu_acpi_ok = ech_os::cpu::acpi::init();
-    ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::AcpiInit);
-    if cpu_acpi_ok {
-        serial_write_str(&format_args!("[SMP] CPU ACPI tables parsed\n"));
-    } else {
-        serial_write_str(&format_args!(
-            "[SMP] CPU ACPI init failed, using CPUID topology\n"
-        ));
-    }
-    let iommu_ok = ech_os::memory::init_iommu();
-    if iommu_ok {
-        serial_write_str(&format_args!(
-            "[IOMMU] DMAR parsed and domains initialized\n"
-        ));
-    } else {
-        serial_write_str(&format_args!("[IOMMU] DMAR not available\n"));
     }
 
     // Bellek alt sistemlerini başlat (OOM, THP, Cgroup, Memfd, ZSwap)
@@ -965,6 +1009,24 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     // SIMD dispatch fn ptr cache — CPUID bir kez çağrılır, sonra sıfır overhead
     ech_os::gfx::simd::init_simd_dispatch();
 
+    if run_boot_tests {
+        let self_ok = ech_os::debug::boot_self_check();
+        if !self_ok {
+            serial_write_str(&format_args!("[PANIC] Boot self-check failed!\n"));
+            loop {
+                unsafe { asm!("hlt") };
+            }
+        }
+        ech_os::boot::safety::BootWatchdog::complete();
+        ech_os::boot::safety::BOOT_SAFETY
+            .enter_phase(ech_os::boot::safety::BootPhase::UserspaceReady);
+        let report = ech_os::boot::safety::get_report();
+        serial_write_str(&format_args!(
+            "[BOOT_TEST] PASS self_check=1 violations={} heap_corruptions={} smp_failures={}\n",
+            report.violation_count, report.heap_corruptions, report.smp_failures
+        ));
+    }
+
     // Shell yerine yeni compositor tabanlı GUI'yi başlat
     serial_write_str(&format_args!(
         "[BOOT] Starting Velvet Glove compositor...\n"
@@ -976,43 +1038,6 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
         serial_write_str(&format_args!("[BOOT] No framebuffer, starting shell...\n"));
         ech_os::shell::run_shell();
     }
-
-    // // ech_os::debug::init_telemetry();
-
-    // // Smoke tests
-    // // let self_ok = ech_os::debug::boot_self_check();
-    let self_ok = true;
-    if !self_ok {
-        serial_write_str(&format_args!("[PANIC] Self-check failed!\n"));
-        loop {
-            unsafe { asm!("hlt") };
-        }
-    }
-
-    serial_write_str(&format_args!("[OS] Basic boot sequence complete.\n"));
-    ech_os::boot::safety::BootWatchdog::complete();
-    ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::UserspaceReady);
-
-    // Report boot safety status
-    let report = ech_os::boot::safety::get_report();
-    serial_write_str(&format_args!(
-        "[BOOT_SAFETY] Complete - violations: {}, heap_corruptions: {}, smp_failures: {}\n",
-        report.violation_count, report.heap_corruptions, report.smp_failures
-    ));
-
-    // // Gelişmiş testler
-    // // ech_os::debug::run_ring3_smoketest();
-
-    // // Stress testleri (sadece DEBUG mode'da ve istenirse)
-    #[cfg(feature = "stress_test")]
-    {
-        // ech_os::debug::run_vm_security_tests();
-        // ech_os::debug::run_vm_stress_tests();
-        // ech_os::debug::run_irq_stress_tests();
-        // ech_os::debug::run_long_stability_checks();
-    }
-
-    ech_os::task::scheduler::idle_loop();
 }
 
 #[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
@@ -1090,23 +1115,7 @@ unsafe fn boot_pipeline_limine(kaslr_offset: u64) -> ! {
     ech_os::vdso::init();
     // TTY alt sistemini başlat - klavye interrupt'ları öncesinde!
     ech_os::tty::init();
-
-    let cpu_acpi_ok = ech_os::cpu::acpi::init();
-    if cpu_acpi_ok {
-        serial_write_str(&format_args!("[SMP] CPU ACPI tables parsed\n"));
-    } else {
-        serial_write_str(&format_args!(
-            "[SMP] CPU ACPI init failed, using CPUID topology\n"
-        ));
-    }
-    let iommu_ok = ech_os::memory::init_iommu();
-    if iommu_ok {
-        serial_write_str(&format_args!(
-            "[IOMMU] DMAR parsed and domains initialized\n"
-        ));
-    } else {
-        serial_write_str(&format_args!("[IOMMU] DMAR not available\n"));
-    }
+    let _ = init_platform_iommu();
 
     // CRITICAL: Scheduler ve Workers SMP'den ÖNCE init edilmeli!
     ech_os::task::scheduler::init();
@@ -1195,15 +1204,7 @@ unsafe fn boot_pipeline_multiboot(boot_info_addr: usize, kaslr_offset: u64) -> !
     ech_os::interrupts::init();
     // TTY alt sistemini başlat - klavye interrupt'ları öncesinde!
     ech_os::tty::init();
-
-    let cpu_acpi_ok = ech_os::cpu::acpi::init();
-    if cpu_acpi_ok {
-        serial_write_str(&format_args!("[SMP] CPU ACPI tables parsed\n"));
-    } else {
-        serial_write_str(&format_args!(
-            "[SMP] CPU ACPI init failed, using CPUID topology\n"
-        ));
-    }
+    let _ = init_platform_iommu();
 
     // CRITICAL: Scheduler ve Workers SMP'den ÖNCE init edilmeli!
     ech_os::task::scheduler::init();
@@ -1269,6 +1270,11 @@ pub extern "efiapi" fn efi_main(image: Handle, mut system_table: SystemTable<Boo
     let rsdp_address =
         ech_os::acpi::find_acpi_table(system_table.config_table()).unwrap_or(0) as u64;
 
+    serial_write_str(&format_args!("[UEFI] Checking secure boot enrollment...\n"));
+    if let Err(status) = auto_enroll_secure_boot_payloads(&mut system_table, image) {
+        return status;
+    }
+
     serial_write_str(&format_args!("[UEFI] Detecting secure boot...\n"));
     let secure_boot = detect_secure_boot(&system_table);
 
@@ -1306,6 +1312,24 @@ pub extern "efiapi" fn efi_main(image: Handle, mut system_table: SystemTable<Boo
         read_efi_boot_file(&mut system_table, image, cstr16!("EFI\\BOOT\\PESMOKE.BHD"))
     {
         ech_os::boot::appliance::seed_packaged_pe_smoke_bundle(bundle);
+    }
+    let mut curated_slots = 0usize;
+    let mut curated_bytes = 0usize;
+    for index in 1..=32u8 {
+        let Some(path) = curated_app_bundle_path(index) else {
+            break;
+        };
+        let Some(bundle_size) = efi_boot_file_size(&mut system_table, image, path) else {
+            continue;
+        };
+        curated_slots = curated_slots.saturating_add(1);
+        curated_bytes = curated_bytes.saturating_add(bundle_size);
+    }
+    if curated_slots != 0 {
+        serial_write_str(&format_args!(
+            "[UEFI] Deferred curated bundles on ESP: slots={} bytes={}\n",
+            curated_slots, curated_bytes
+        ));
     }
     let mut boot_control = ech_os::boot::appliance::merge_seed(seed_from_esp, seed_from_var);
     boot_control.begin_boot();
@@ -1395,6 +1419,45 @@ fn read_boot_control_variable_seed(
 }
 
 #[cfg(target_os = "uefi")]
+fn curated_app_bundle_path(index: u8) -> Option<&'static CStr16> {
+    match index {
+        1 => Some(cstr16!("EFI\\BOOT\\APP0001.BHD")),
+        2 => Some(cstr16!("EFI\\BOOT\\APP0002.BHD")),
+        3 => Some(cstr16!("EFI\\BOOT\\APP0003.BHD")),
+        4 => Some(cstr16!("EFI\\BOOT\\APP0004.BHD")),
+        5 => Some(cstr16!("EFI\\BOOT\\APP0005.BHD")),
+        6 => Some(cstr16!("EFI\\BOOT\\APP0006.BHD")),
+        7 => Some(cstr16!("EFI\\BOOT\\APP0007.BHD")),
+        8 => Some(cstr16!("EFI\\BOOT\\APP0008.BHD")),
+        9 => Some(cstr16!("EFI\\BOOT\\APP0009.BHD")),
+        10 => Some(cstr16!("EFI\\BOOT\\APP0010.BHD")),
+        11 => Some(cstr16!("EFI\\BOOT\\APP0011.BHD")),
+        12 => Some(cstr16!("EFI\\BOOT\\APP0012.BHD")),
+        13 => Some(cstr16!("EFI\\BOOT\\APP0013.BHD")),
+        14 => Some(cstr16!("EFI\\BOOT\\APP0014.BHD")),
+        15 => Some(cstr16!("EFI\\BOOT\\APP0015.BHD")),
+        16 => Some(cstr16!("EFI\\BOOT\\APP0016.BHD")),
+        17 => Some(cstr16!("EFI\\BOOT\\APP0017.BHD")),
+        18 => Some(cstr16!("EFI\\BOOT\\APP0018.BHD")),
+        19 => Some(cstr16!("EFI\\BOOT\\APP0019.BHD")),
+        20 => Some(cstr16!("EFI\\BOOT\\APP0020.BHD")),
+        21 => Some(cstr16!("EFI\\BOOT\\APP0021.BHD")),
+        22 => Some(cstr16!("EFI\\BOOT\\APP0022.BHD")),
+        23 => Some(cstr16!("EFI\\BOOT\\APP0023.BHD")),
+        24 => Some(cstr16!("EFI\\BOOT\\APP0024.BHD")),
+        25 => Some(cstr16!("EFI\\BOOT\\APP0025.BHD")),
+        26 => Some(cstr16!("EFI\\BOOT\\APP0026.BHD")),
+        27 => Some(cstr16!("EFI\\BOOT\\APP0027.BHD")),
+        28 => Some(cstr16!("EFI\\BOOT\\APP0028.BHD")),
+        29 => Some(cstr16!("EFI\\BOOT\\APP0029.BHD")),
+        30 => Some(cstr16!("EFI\\BOOT\\APP0030.BHD")),
+        31 => Some(cstr16!("EFI\\BOOT\\APP0031.BHD")),
+        32 => Some(cstr16!("EFI\\BOOT\\APP0032.BHD")),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "uefi")]
 fn read_efi_boot_file(
     system_table: &mut SystemTable<Boot>,
     image: Handle,
@@ -1426,6 +1489,30 @@ fn read_efi_boot_file(
     }
     raw.truncate(len);
     Some(raw)
+}
+
+#[cfg(target_os = "uefi")]
+fn efi_boot_file_size(
+    system_table: &mut SystemTable<Boot>,
+    image: Handle,
+    path: &CStr16,
+) -> Option<usize> {
+    let boot_services = system_table.boot_services();
+    let loaded_image = boot_services
+        .open_protocol_exclusive::<LoadedImage>(image)
+        .ok()?;
+    let mut fs = boot_services
+        .open_protocol_exclusive::<SimpleFileSystem>(loaded_image.device())
+        .ok()?;
+    let mut root = fs.open_volume().ok()?;
+    let handle = root
+        .open(path, FileMode::Read, FileAttribute::empty())
+        .ok()?;
+    let mut file = handle.into_regular_file()?;
+    let info = file
+        .get_boxed_info::<uefi::proto::media::file::FileInfo>()
+        .ok()?;
+    Some(info.file_size() as usize)
 }
 
 #[cfg(target_os = "uefi")]
@@ -1489,6 +1576,162 @@ fn sync_boot_control_seed(
     let _ = file.set_position(0);
     let _ = file.write(bytes);
     let _ = file.flush();
+}
+
+#[cfg(target_os = "uefi")]
+fn read_secure_boot_enroll_state(
+    system_table: &mut SystemTable<Boot>,
+) -> Option<SecureBootEnrollState> {
+    let runtime = system_table.runtime_services();
+    let (data, _) = runtime
+        .get_variable_boxed(
+            cstr16!("echOSSecureBootEnroll"),
+            &appliance_variable_vendor(),
+        )
+        .ok()?;
+    if data.len() != core::mem::size_of::<SecureBootEnrollState>() {
+        return None;
+    }
+    let state = unsafe { *(data.as_ptr() as *const SecureBootEnrollState) };
+    (state.magic == SECURE_BOOT_ENROLL_MAGIC).then_some(state)
+}
+
+#[cfg(target_os = "uefi")]
+fn write_secure_boot_enroll_state(
+    system_table: &mut SystemTable<Boot>,
+    flags: u8,
+) -> Result<(), Status> {
+    let runtime = system_table.runtime_services();
+    let state = SecureBootEnrollState {
+        magic: SECURE_BOOT_ENROLL_MAGIC,
+        flags,
+        _reserved: [0; 3],
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&state as *const SecureBootEnrollState).cast::<u8>(),
+            core::mem::size_of::<SecureBootEnrollState>(),
+        )
+    };
+    runtime
+        .set_variable(
+            cstr16!("echOSSecureBootEnroll"),
+            &appliance_variable_vendor(),
+            VariableAttributes::NON_VOLATILE
+                | VariableAttributes::BOOTSERVICE_ACCESS
+                | VariableAttributes::RUNTIME_ACCESS,
+            bytes,
+        )
+        .map_err(|err| err.status())
+}
+
+#[cfg(target_os = "uefi")]
+fn write_global_variable_payload(
+    system_table: &mut SystemTable<Boot>,
+    name: &CStr16,
+    payload: &[u8],
+) -> Result<(), Status> {
+    system_table
+        .runtime_services()
+        .set_variable(
+            name,
+            &VariableVendor::GLOBAL_VARIABLE,
+            VariableAttributes::NON_VOLATILE
+                | VariableAttributes::BOOTSERVICE_ACCESS
+                | VariableAttributes::RUNTIME_ACCESS
+                | VariableAttributes::TIME_BASED_AUTHENTICATED_WRITE_ACCESS,
+            payload,
+        )
+        .map_err(|err| err.status())
+}
+
+#[cfg(target_os = "uefi")]
+fn auto_enroll_secure_boot_payloads(
+    system_table: &mut SystemTable<Boot>,
+    image: Handle,
+) -> Result<(), Status> {
+    let secure_boot = read_global_u8_variable(system_table, cstr16!("SecureBoot")).unwrap_or(0);
+    let setup_mode = read_global_u8_variable(system_table, cstr16!("SetupMode")).unwrap_or(0);
+    let state = read_secure_boot_enroll_state(system_table);
+    let enroll_requested =
+        read_efi_boot_file(system_table, image, cstr16!("EFI\\BOOT\\SBENROLL.ON")).is_some();
+
+    if secure_boot == 1 && setup_mode == 0 {
+        if state.is_some_and(|state| state.flags != 0) {
+            let _ = write_secure_boot_enroll_state(system_table, 0);
+            serial_write_str(&format_args!("[UEFI] Secure Boot enroll state verified\n"));
+        }
+        return Ok(());
+    }
+
+    if !enroll_requested {
+        if state.is_some_and(|state| (state.flags & SECURE_BOOT_ENROLL_PENDING_RESET) != 0) {
+            serial_write_str(&format_args!(
+                "[UEFI] Secure Boot enroll pending without trigger\n"
+            ));
+            return Err(Status::SECURITY_VIOLATION);
+        }
+        return Ok(());
+    }
+
+    if state.is_some_and(|state| (state.flags & SECURE_BOOT_ENROLL_FAILED) != 0) {
+        serial_write_str(&format_args!(
+            "[UEFI] Secure Boot enroll previously failed\n"
+        ));
+        return Err(Status::SECURITY_VIOLATION);
+    }
+
+    if setup_mode != 1 {
+        serial_write_str(&format_args!(
+            "[UEFI] Secure Boot enroll trigger ignored outside setup mode\n"
+        ));
+        return Ok(());
+    }
+
+    if state.is_some_and(|state| (state.flags & SECURE_BOOT_ENROLL_PENDING_RESET) != 0) {
+        let _ = write_secure_boot_enroll_state(system_table, SECURE_BOOT_ENROLL_FAILED);
+        serial_write_str(&format_args!(
+            "[UEFI] Secure Boot enroll did not transition firmware out of setup mode\n"
+        ));
+        return Err(Status::SECURITY_VIOLATION);
+    }
+
+    let payloads = [
+        ("PK", cstr16!("PK"), cstr16!("EFI\\BOOT\\PK.AUT")),
+        ("KEK", cstr16!("KEK"), cstr16!("EFI\\BOOT\\KEK.AUT")),
+        ("db", cstr16!("db"), cstr16!("EFI\\BOOT\\DB.AUT")),
+        ("dbx", cstr16!("dbx"), cstr16!("EFI\\BOOT\\DBX.AUT")),
+    ];
+    serial_write_str(&format_args!(
+        "[UEFI] Secure Boot auto-enroll trigger detected\n"
+    ));
+    for (label, variable_name, path) in payloads {
+        let payload = read_efi_boot_file(system_table, image, path).ok_or_else(|| {
+            serial_write_str(&format_args!(
+                "[UEFI] Missing Secure Boot payload for {}\n",
+                label
+            ));
+            let _ = write_secure_boot_enroll_state(system_table, SECURE_BOOT_ENROLL_FAILED);
+            Status::SECURITY_VIOLATION
+        })?;
+        write_global_variable_payload(system_table, variable_name, &payload).map_err(|status| {
+            serial_write_str(&format_args!(
+                "[UEFI] Secure Boot variable write failed for {}\n",
+                label
+            ));
+            let _ = write_secure_boot_enroll_state(system_table, SECURE_BOOT_ENROLL_FAILED);
+            status
+        })?;
+        serial_write_str(&format_args!(
+            "[UEFI] Secure Boot variable enrolled: {}\n",
+            label
+        ));
+    }
+    write_secure_boot_enroll_state(system_table, SECURE_BOOT_ENROLL_PENDING_RESET)?;
+    serial_write_str(&format_args!(
+        "[UEFI] Secure Boot enroll complete, rebooting for verification\n"
+    ));
+    ech_os::boot::reset_uefi_system(ResetType::WARM, Status::SUCCESS)
 }
 
 #[cfg(target_os = "uefi")]

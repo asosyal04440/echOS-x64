@@ -18,14 +18,19 @@
 //! `lerp_color(c1, c2, t, alpha)`: Her kanal için doğrusal interpolasyon + alpha ölçekleme.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use libm::{cosf, sinf, sqrtf};
 use spin::Mutex;
 
+use crate::fs::vfs_unified;
+use crate::gfx::image_assets::ArgbImage;
 use crate::gop::framebuffer::Framebuffer;
+use crate::gui::protocol::{Point, Rect, WorkspaceId};
 use crate::gui::theme::{Color, Theme};
+use crate::personalization::{chameleon_theme, virtual_desktops};
 
 // ============================================================================
 // DUVAR KAĞIDI SABİTLERİ
@@ -63,7 +68,7 @@ pub enum WallpaperType {
         interval: f32, // saniye
         shuffle: bool,
     },
-    /// Animasyonlu (basit efektler)
+    /// Animasyonlu efektler
     Animated(AnimatedType),
 }
 
@@ -185,6 +190,14 @@ pub struct WallpaperManager {
     pub prev_frame: Vec<u32>,
     /// Önceki kare önbelleğini kullan
     pub use_cache: bool,
+    image_cache: BTreeMap<String, CachedWallpaperImage>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedWallpaperImage {
+    width: usize,
+    height: usize,
+    pixels: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +229,7 @@ impl WallpaperManager {
             anim_time: 0.0,
             prev_frame: Vec::new(),
             use_cache: false,
+            image_cache: BTreeMap::new(),
         };
 
         manager.add_default_wallpapers();
@@ -292,6 +306,7 @@ impl WallpaperManager {
         self.current_index = index;
         self.transitioning = true;
         self.use_cache = true;
+        self.sync_current_palette();
     }
 
     /// Duvar kağıdını kimliğe göre ayarla
@@ -367,7 +382,7 @@ impl WallpaperManager {
     }
 
     /// Duvar kağıdını çiz
-    pub fn draw(&self, fb: &mut Framebuffer) {
+    pub fn draw(&mut self, fb: &mut Framebuffer) {
         if self.wallpapers.is_empty() {
             // Varsayılan renkle doldur
             for y in 0..fb.height {
@@ -392,6 +407,28 @@ impl WallpaperManager {
 
     /// Geçiş türüne göre eski ve yeni duvar kağıdı arasındaki geçişi framebuffer'a uygular.
     /// Fade/CrossFade için alfa karıştırma; SlideLeft/SlideRight için yatay öteleme kullanılır.
+    pub fn draw_clipped(&mut self, fb: &mut Framebuffer, clip: Rect) {
+        let Some(clipped) = clip.intersection(&Rect::new(0, 0, fb.width as u32, fb.height as u32))
+        else {
+            return;
+        };
+        if self.wallpapers.is_empty() {
+            for y in clipped.y.max(0) as usize..clipped.bottom().max(0) as usize {
+                for x in clipped.x.max(0) as usize..clipped.right().max(0) as usize {
+                    fb.plot_pixel(x, y, Theme::DESKTOP_BG.to_u32());
+                }
+            }
+            return;
+        }
+
+        let wallpaper = self.wallpapers[self.current_index].clone();
+        if self.transitioning && self.use_cache {
+            self.draw_transition_clipped(fb, &wallpaper, clipped);
+        } else {
+            self.draw_wallpaper_type_clipped(fb, &wallpaper.wallpaper_type, 1.0, clipped);
+        }
+    }
+
     fn draw_transition(&self, fb: &mut Framebuffer, wallpaper: &Wallpaper) {
         let progress = wallpaper.transition_progress;
 
@@ -589,7 +626,7 @@ impl WallpaperManager {
     }
 
     fn draw_stars(&self, fb: &mut Framebuffer, alpha: f32) {
-        // Basit yıldız alanı animasyonu
+        // Deterministik yıldız alanı animasyonu
         let time = self.anim_time;
 
         // Konuma göre sahte-rastgele yıldızlar oluştur
@@ -717,6 +754,427 @@ impl WallpaperManager {
         }
     }
 
+    fn draw_transition_clipped(&mut self, fb: &mut Framebuffer, wallpaper: &Wallpaper, clip: Rect) {
+        let progress = wallpaper.transition_progress;
+        match self.transition_type {
+            TransitionType::Fade | TransitionType::CrossFade => {
+                if let Some(prev_id) = wallpaper.previous {
+                    if let Some(prev) = self.wallpapers.iter().find(|w| w.id == prev_id).cloned() {
+                        self.draw_wallpaper_type_clipped(
+                            fb,
+                            &prev.wallpaper_type,
+                            1.0 - progress,
+                            clip,
+                        );
+                    }
+                }
+                self.draw_wallpaper_type_clipped(fb, &wallpaper.wallpaper_type, progress, clip);
+            }
+            TransitionType::SlideLeft => {
+                let offset = (self.screen_width as f32 * progress) as i32;
+                if let Some(prev_id) = wallpaper.previous {
+                    if let Some(prev) = self.wallpapers.iter().find(|w| w.id == prev_id).cloned() {
+                        self.draw_wallpaper_offset_clipped(fb, &prev.wallpaper_type, -offset, clip);
+                    }
+                }
+                self.draw_wallpaper_offset_clipped(
+                    fb,
+                    &wallpaper.wallpaper_type,
+                    self.screen_width as i32 - offset,
+                    clip,
+                );
+            }
+            TransitionType::SlideRight => {
+                let offset = (self.screen_width as f32 * progress) as i32;
+                if let Some(prev_id) = wallpaper.previous {
+                    if let Some(prev) = self.wallpapers.iter().find(|w| w.id == prev_id).cloned() {
+                        self.draw_wallpaper_offset_clipped(fb, &prev.wallpaper_type, offset, clip);
+                    }
+                }
+                self.draw_wallpaper_offset_clipped(
+                    fb,
+                    &wallpaper.wallpaper_type,
+                    -(self.screen_width as i32) + offset,
+                    clip,
+                );
+            }
+            _ => self.draw_wallpaper_type_clipped(fb, &wallpaper.wallpaper_type, progress, clip),
+        }
+    }
+
+    fn draw_wallpaper_type_clipped(
+        &mut self,
+        fb: &mut Framebuffer,
+        wallpaper_type: &WallpaperType,
+        alpha: f32,
+        clip: Rect,
+    ) {
+        match wallpaper_type {
+            WallpaperType::Solid(color) => {
+                let color = Self::alpha_color(*color, alpha);
+                for y in clip.y.max(0) as usize..clip.bottom().max(0) as usize {
+                    for x in clip.x.max(0) as usize..clip.right().max(0) as usize {
+                        fb.plot_pixel(x, y, color);
+                    }
+                }
+            }
+            WallpaperType::Gradient(top, bottom) => {
+                for y in clip.y.max(0) as usize..clip.bottom().max(0) as usize {
+                    let t = y as f32 / fb.height as f32;
+                    let color = Self::lerp_color(*top, *bottom, t, alpha);
+                    for x in clip.x.max(0) as usize..clip.right().max(0) as usize {
+                        fb.plot_pixel(x, y, color);
+                    }
+                }
+            }
+            WallpaperType::RadialGradient {
+                center_color,
+                edge_color,
+            } => {
+                let center_x = fb.width / 2;
+                let center_y = fb.height / 2;
+                let max_dist = sqrtf((center_x * center_x + center_y * center_y) as f32);
+                for y in clip.y.max(0) as usize..clip.bottom().max(0) as usize {
+                    for x in clip.x.max(0) as usize..clip.right().max(0) as usize {
+                        let dx = x as i32 - center_x as i32;
+                        let dy = y as i32 - center_y as i32;
+                        let dist = sqrtf((dx * dx + dy * dy) as f32);
+                        let t = (dist / max_dist).min(1.0);
+                        let color = Self::lerp_color(*center_color, *edge_color, t, alpha);
+                        fb.plot_pixel(x, y, color);
+                    }
+                }
+            }
+            WallpaperType::Image(path) => {
+                if !self.draw_cached_image_wallpaper(fb, path, alpha, clip) {
+                    self.draw_wallpaper_type_clipped(
+                        fb,
+                        &WallpaperType::Solid(Theme::DESKTOP_BG.to_u32()),
+                        alpha,
+                        clip,
+                    );
+                }
+            }
+            WallpaperType::Dynamic { day_image, .. } => self.draw_wallpaper_type_clipped(
+                fb,
+                &WallpaperType::Image(day_image.clone()),
+                alpha,
+                clip,
+            ),
+            WallpaperType::Slideshow { images, .. } => {
+                if let Some(path) =
+                    images.get(self.slideshow_index.min(images.len().saturating_sub(1)))
+                {
+                    self.draw_wallpaper_type_clipped(
+                        fb,
+                        &WallpaperType::Image(path.clone()),
+                        alpha,
+                        clip,
+                    );
+                }
+            }
+            WallpaperType::Animated(anim_type) => {
+                self.draw_animated_clipped(fb, *anim_type, alpha, clip)
+            }
+        }
+    }
+
+    fn draw_wallpaper_offset_clipped(
+        &mut self,
+        fb: &mut Framebuffer,
+        wallpaper_type: &WallpaperType,
+        offset: i32,
+        clip: Rect,
+    ) {
+        match wallpaper_type {
+            WallpaperType::Solid(color) => {
+                for y in clip.y.max(0) as usize..clip.bottom().max(0) as usize {
+                    let start_x = clip.x.max(offset).max(0) as usize;
+                    let end_x = clip
+                        .right()
+                        .min(fb.width as i32 + offset)
+                        .max(start_x as i32) as usize;
+                    for x in start_x..end_x {
+                        fb.plot_pixel(x, y, *color);
+                    }
+                }
+            }
+            WallpaperType::Gradient(top, bottom) => {
+                for y in clip.y.max(0) as usize..clip.bottom().max(0) as usize {
+                    let t = y as f32 / fb.height as f32;
+                    let color = Self::lerp_color(*top, *bottom, t, 1.0);
+                    let start_x = clip.x.max(offset).max(0) as usize;
+                    let end_x = clip
+                        .right()
+                        .min(fb.width as i32 + offset)
+                        .max(start_x as i32) as usize;
+                    for x in start_x..end_x {
+                        fb.plot_pixel(x, y, color);
+                    }
+                }
+            }
+            _ => self.draw_wallpaper_type_clipped(fb, wallpaper_type, 1.0, clip),
+        }
+    }
+
+    fn draw_animated_clipped(
+        &self,
+        fb: &mut Framebuffer,
+        anim_type: AnimatedType,
+        alpha: f32,
+        clip: Rect,
+    ) {
+        let base_top = 0x0F0F23;
+        let base_bottom = 0x000011;
+        for y in clip.y.max(0) as usize..clip.bottom().max(0) as usize {
+            let t = y as f32 / fb.height as f32;
+            let base_color = Self::lerp_color(base_top, base_bottom, t, alpha);
+            for x in clip.x.max(0) as usize..clip.right().max(0) as usize {
+                fb.plot_pixel(x, y, base_color);
+            }
+        }
+
+        match anim_type {
+            AnimatedType::Stars => self.draw_stars_clipped(fb, alpha, clip),
+            AnimatedType::Aurora => self.draw_aurora_clipped(fb, alpha, clip),
+            AnimatedType::Waves => self.draw_waves_clipped(fb, alpha, clip),
+            AnimatedType::Particles => self.draw_particles_clipped(fb, alpha, clip),
+        }
+    }
+
+    fn draw_stars_clipped(&self, fb: &mut Framebuffer, alpha: f32, clip: Rect) {
+        let time = self.anim_time;
+        for i in 0..200 {
+            let seed = i * 7919;
+            let x = seed % fb.width;
+            let y = (seed * 3) % fb.height;
+            let twinkle = (sinf(time * 2.0 + seed as f32 * 0.1) + 1.0) / 2.0;
+            let brightness = (0.3 + 0.7 * twinkle) * alpha;
+            let star_color = Self::alpha_color(0xFFFFFF, brightness);
+            let primary = Point::new(x as i32, y as i32);
+            if clip.contains(primary) {
+                fb.plot_pixel(x, y, star_color);
+            }
+            let secondary = Point::new(x as i32 + 1, y as i32);
+            if x + 1 < fb.width && clip.contains(secondary) {
+                fb.plot_pixel(x + 1, y, star_color);
+            }
+        }
+    }
+
+    fn draw_aurora_clipped(&self, fb: &mut Framebuffer, alpha: f32, clip: Rect) {
+        let time = self.anim_time;
+        for y in clip.y.max(0) as usize..clip.bottom().max(0) as usize {
+            for x in clip.x.max(0) as usize..clip.right().max(0) as usize {
+                let wave1 = (sinf(x as f32 * 0.01 + time * 0.5) * 50.0) as i32;
+                let wave2 = (sinf(x as f32 * 0.02 + time * 0.3) * 30.0) as i32;
+                let aurora_y = fb.height as i32 / 2 + wave1 + wave2;
+                let dist = (y as i32 - aurora_y).abs();
+                if dist < 80 {
+                    let intensity = (1.0 - dist as f32 / 80.0) * alpha * 0.4;
+                    let hue = (x as f32 * 0.003 + time * 0.2) % 1.0;
+                    let color = if hue < 0.5 {
+                        Self::lerp_color(0x00FF88, 0x8800FF, hue * 2.0, intensity)
+                    } else {
+                        Self::lerp_color(0x8800FF, 0x00FF88, (hue - 0.5) * 2.0, intensity)
+                    };
+                    let bg = fb.get_pixel(x, y);
+                    fb.plot_pixel(x, y, Self::blend_color(bg, color));
+                }
+            }
+        }
+    }
+
+    fn draw_waves_clipped(&self, fb: &mut Framebuffer, alpha: f32, clip: Rect) {
+        let time = self.anim_time;
+        for y in clip.y.max(0) as usize..clip.bottom().max(0) as usize {
+            for x in clip.x.max(0) as usize..clip.right().max(0) as usize {
+                let wave1 = (sinf(x as f32 * 0.02 + time * 1.5) * 20.0) as i32;
+                let wave2 = (sinf(x as f32 * 0.03 - time * 1.2) * 15.0) as i32;
+                let wave3 = (sinf(x as f32 * 0.01 + time * 0.8) * 25.0) as i32;
+                let wave_y = fb.height as i32 - 100 + wave1 + wave2 + wave3;
+                if y as i32 > wave_y {
+                    let depth = (y as i32 - wave_y) as f32;
+                    let intensity = (depth / 100.0).min(1.0) * alpha;
+                    let color = Self::lerp_color(0x006994, 0x001F3F, intensity, intensity);
+                    fb.plot_pixel(x, y, color);
+                }
+            }
+        }
+    }
+
+    fn draw_particles_clipped(&self, fb: &mut Framebuffer, alpha: f32, clip: Rect) {
+        let time = self.anim_time;
+        for i in 0..50 {
+            let seed = i * 1234;
+            let base_x = (seed % fb.width) as f32;
+            let base_y = ((seed * 7) % fb.height) as f32;
+            let x = (base_x + sinf(time) * 20.0 + cosf(time) * 15.0) as usize % fb.width;
+            let y = (base_y + sinf(time * 0.5) * 30.0) as usize % fb.height;
+            let color = Self::alpha_color(0xFFFFFF, 0.3 * alpha);
+            for py in 0..4 {
+                for px in 0..4 {
+                    let draw_x = x + px;
+                    let draw_y = y + py;
+                    if draw_x < fb.width
+                        && draw_y < fb.height
+                        && clip.contains(Point::new(draw_x as i32, draw_y as i32))
+                    {
+                        fb.plot_pixel(draw_x, draw_y, color);
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_cached_image_wallpaper(
+        &mut self,
+        fb: &mut Framebuffer,
+        path: &str,
+        alpha: f32,
+        clip: Rect,
+    ) -> bool {
+        if self.ensure_cached_image(path, fb.width, fb.height).is_err() {
+            return false;
+        }
+        let Some(image) = self.image_cache.get(path).cloned() else {
+            return false;
+        };
+        for y in clip.y.max(0) as usize..clip.bottom().max(0) as usize {
+            for x in clip.x.max(0) as usize..clip.right().max(0) as usize {
+                let src = image.pixels[y.saturating_mul(image.width).saturating_add(x)];
+                if alpha >= 0.995 {
+                    fb.plot_pixel(x, y, src);
+                } else {
+                    let bg = fb.get_pixel(x, y);
+                    fb.plot_pixel(x, y, Self::blend_alpha(bg, src, alpha));
+                }
+            }
+        }
+        true
+    }
+
+    fn ensure_cached_image(
+        &mut self,
+        path: &str,
+        width: usize,
+        height: usize,
+    ) -> Result<(), String> {
+        if let Some(image) = self.image_cache.get(path) {
+            if image.width == width && image.height == height {
+                return Ok(());
+            }
+        }
+        let bytes = vfs_unified::read_file(path).map_err(String::from)?;
+        let image = ArgbImage::decode_path(path, &bytes)?;
+        let resized = image.resize_exact(width as u32, height as u32)?;
+        self.image_cache.insert(
+            String::from(path),
+            CachedWallpaperImage {
+                width,
+                height,
+                pixels: resized.pixels,
+            },
+        );
+        Ok(())
+    }
+
+    fn sync_current_palette(&mut self) {
+        let Some(wallpaper) = self.wallpapers.get(self.current_index).cloned() else {
+            return;
+        };
+        match wallpaper.wallpaper_type {
+            WallpaperType::Solid(color) => {
+                chameleon_theme()
+                    .lock()
+                    .derive_palette_from_gradient(color, color);
+            }
+            WallpaperType::Gradient(top, bottom) => {
+                chameleon_theme()
+                    .lock()
+                    .derive_palette_from_gradient(top, bottom);
+            }
+            WallpaperType::RadialGradient {
+                center_color,
+                edge_color,
+            } => {
+                chameleon_theme()
+                    .lock()
+                    .derive_palette_from_gradient(center_color, edge_color);
+            }
+            WallpaperType::Image(path) => {
+                if self
+                    .ensure_cached_image(&path, self.screen_width, self.screen_height)
+                    .is_ok()
+                {
+                    if let Some(image) = self.image_cache.get(&path) {
+                        chameleon_theme()
+                            .lock()
+                            .derive_palette_from_wallpaper_samples(&image.pixels);
+                    }
+                }
+            }
+            WallpaperType::Dynamic { day_image, .. } => {
+                if self
+                    .ensure_cached_image(&day_image, self.screen_width, self.screen_height)
+                    .is_ok()
+                {
+                    if let Some(image) = self.image_cache.get(&day_image) {
+                        chameleon_theme()
+                            .lock()
+                            .derive_palette_from_wallpaper_samples(&image.pixels);
+                    }
+                }
+            }
+            WallpaperType::Slideshow { images, .. } => {
+                if let Some(path) =
+                    images.get(self.slideshow_index.min(images.len().saturating_sub(1)))
+                {
+                    if self
+                        .ensure_cached_image(path, self.screen_width, self.screen_height)
+                        .is_ok()
+                    {
+                        if let Some(image) = self.image_cache.get(path) {
+                            chameleon_theme()
+                                .lock()
+                                .derive_palette_from_wallpaper_samples(&image.pixels);
+                        }
+                    }
+                }
+            }
+            WallpaperType::Animated(AnimatedType::Aurora) => {
+                chameleon_theme()
+                    .lock()
+                    .derive_palette_from_gradient(0xFF26E6C6, 0xFF5AB3FF);
+            }
+            WallpaperType::Animated(AnimatedType::Waves) => {
+                chameleon_theme()
+                    .lock()
+                    .derive_palette_from_gradient(0xFF006994, 0xFF001F3F);
+            }
+            WallpaperType::Animated(AnimatedType::Stars | AnimatedType::Particles) => {
+                chameleon_theme()
+                    .lock()
+                    .derive_palette_from_gradient(0xFF0F0F23, 0xFF000011);
+            }
+        };
+    }
+
+    fn blend_alpha(background: u32, foreground: u32, alpha: f32) -> u32 {
+        let alpha = alpha.clamp(0.0, 1.0);
+        let inv = 1.0 - alpha;
+        let br = ((background >> 16) & 0xFF) as f32;
+        let bg = ((background >> 8) & 0xFF) as f32;
+        let bb = (background & 0xFF) as f32;
+        let fr = ((foreground >> 16) & 0xFF) as f32;
+        let fg = ((foreground >> 8) & 0xFF) as f32;
+        let fb = (foreground & 0xFF) as f32;
+        let r = (br * inv + fr * alpha + 0.5).clamp(0.0, 255.0) as u32;
+        let g = (bg * inv + fg * alpha + 0.5).clamp(0.0, 255.0) as u32;
+        let b = (bb * inv + fb * alpha + 0.5).clamp(0.0, 255.0) as u32;
+        0xFF00_0000 | (r << 16) | (g << 8) | b
+    }
+
     /// `c1` ve `c2` renkleri arasında `t` (0.0-1.0) parametresiyle lineer interpolasyon yapar;
     /// sonucu `alpha` ile ölçekler. Formül: `kanal = (c1 + (c2 - c1) * t) * alpha`
     fn lerp_color(c1: u32, c2: u32, t: f32, alpha: f32) -> u32 {
@@ -764,8 +1222,28 @@ impl WallpaperManager {
 
     /// Yeniden boyutlandır
     pub fn resize(&mut self, width: usize, height: usize) {
+        if self.screen_width != width || self.screen_height != height {
+            self.image_cache.clear();
+        }
         self.screen_width = width;
         self.screen_height = height;
+    }
+
+    pub fn sync_workspace_profile(&mut self, workspace_id: WorkspaceId) {
+        let profile = {
+            let desktops = virtual_desktops().lock();
+            desktops.profile(workspace_id).cloned()
+        };
+        let Some(profile) = profile else {
+            return;
+        };
+        let previous = self.current_index;
+        self.set_wallpaper_by_id(profile.wallpaper_id);
+        if self.current_index != previous {
+            self.wallpapers[self.current_index].transition_progress = 1.0;
+            self.transitioning = false;
+            self.use_cache = false;
+        }
     }
 
     /// Geçerli duvar kağıdı adını al
@@ -800,4 +1278,16 @@ pub fn init(width: usize, height: usize) {
 /// Duvar kağıdı yöneticisine erişim sağla
 pub fn get_wallpaper() -> &'static Mutex<WallpaperManager> {
     &WALLPAPER
+}
+
+pub fn draw_workspace_backdrop(
+    fb: &mut Framebuffer,
+    workspace_id: WorkspaceId,
+    clip: Rect,
+) -> bool {
+    let mut wallpaper = WALLPAPER.lock();
+    wallpaper.resize(fb.width, fb.height);
+    wallpaper.sync_workspace_profile(workspace_id);
+    wallpaper.draw_clipped(fb, clip);
+    true
 }

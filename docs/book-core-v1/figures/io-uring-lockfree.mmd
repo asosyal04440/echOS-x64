@@ -1,0 +1,12 @@
+flowchart LR
+    A[User writes SQE entry] --> B[smp_wmb]
+    B --> C[tail Release store]
+    C --> D[Kernel sees tail Acquire]
+    D --> E[smp_rmb]
+    E --> F[Kernel reads SQE and executes]
+    F --> G[Kernel writes CQE]
+    G --> H[smp_wmb]
+    H --> I[cq tail Release store]
+    I --> J[User reads cq tail Acquire]
+    J --> K[smp_rmb]
+    K --> L[User reads CQE]

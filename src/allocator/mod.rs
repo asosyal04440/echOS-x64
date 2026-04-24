@@ -35,6 +35,7 @@
 //! + 100 MiB         --> Heap sonu (HEAP_START + HEAP_SIZE)
 //! ```
 
+pub mod doctrine;
 pub mod slab;
 pub mod stack;
 pub mod tlsf;
@@ -334,7 +335,9 @@ pub unsafe fn heap_alloc(size: usize) -> *mut u8 {
     }
     let header = core::mem::size_of::<usize>();
     let total = size.saturating_add(header);
-    let layout = Layout::from_size_align(total, core::mem::align_of::<usize>()).unwrap();
+    let Ok(layout) = Layout::from_size_align(total, core::mem::align_of::<usize>()) else {
+        return ptr::null_mut();
+    };
     let raw = alloc::alloc::alloc(layout);
     if raw.is_null() {
         return ptr::null_mut();
@@ -356,6 +359,8 @@ pub unsafe fn heap_free(ptr: *mut u8) {
     let raw = ptr.sub(header);
     let size = (raw as *mut usize).read();
     let total = size.saturating_add(header);
-    let layout = Layout::from_size_align(total, core::mem::align_of::<usize>()).unwrap();
+    let Ok(layout) = Layout::from_size_align(total, core::mem::align_of::<usize>()) else {
+        return;
+    };
     alloc::alloc::dealloc(raw, layout);
 }

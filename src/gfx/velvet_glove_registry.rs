@@ -12,6 +12,16 @@ const RECYCLE_SHORTCUT_APP_ID: u32 = 15;
 const FIREFOX_BINARY_APP_ID: u32 = 16;
 const CHROMIUM_BINARY_APP_ID: u32 = 17;
 const CEF_BINARY_APP_ID: u32 = 18;
+const HELIX_BINARY_APP_ID: u32 = 19;
+const YAZI_BINARY_APP_ID: u32 = 20;
+const ZELLIJ_BINARY_APP_ID: u32 = 21;
+const BOTTOM_BINARY_APP_ID: u32 = 22;
+const GITUI_BINARY_APP_ID: u32 = 23;
+const POSTING_BINARY_APP_ID: u32 = 24;
+const GLOW_BINARY_APP_ID: u32 = 25;
+const RIPGREP_BINARY_APP_ID: u32 = 26;
+const FD_BINARY_APP_ID: u32 = 27;
+const BAT_BINARY_APP_ID: u32 = 28;
 
 const FIREFOX_BINARY_CANDIDATES: &[&str] = &[
     "/downloads/firefox/firefox.exe",
@@ -33,6 +43,76 @@ pub(crate) const CEF_BINARY_CANDIDATES: &[&str] = &[
     "/downloads/cefclient.exe",
     "/programs/cef/cefclient.exe",
     "/apps/cef/cefclient.exe",
+];
+
+const HELIX_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/helix/hx.exe",
+    "/downloads/hx.exe",
+    "/programs/helix/hx.exe",
+    "/apps/helix/hx.exe",
+];
+
+const YAZI_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/yazi/yazi.exe",
+    "/downloads/yazi.exe",
+    "/programs/yazi/yazi.exe",
+    "/apps/yazi/yazi.exe",
+];
+
+const ZELLIJ_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/zellij/zellij.exe",
+    "/downloads/zellij.exe",
+    "/programs/zellij/zellij.exe",
+    "/apps/zellij/zellij.exe",
+];
+
+const BOTTOM_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/bottom/btm.exe",
+    "/downloads/btm.exe",
+    "/programs/bottom/btm.exe",
+    "/apps/bottom/btm.exe",
+];
+
+const GITUI_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/gitui/gitui.exe",
+    "/downloads/gitui.exe",
+    "/programs/gitui/gitui.exe",
+    "/apps/gitui/gitui.exe",
+];
+
+const POSTING_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/posting/posting.exe",
+    "/downloads/posting.exe",
+    "/programs/posting/posting.exe",
+    "/apps/posting/posting.exe",
+];
+
+const GLOW_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/glow/glow.exe",
+    "/downloads/glow.exe",
+    "/programs/glow/glow.exe",
+    "/apps/glow/glow.exe",
+];
+
+const RIPGREP_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/ripgrep/rg.exe",
+    "/downloads/rg.exe",
+    "/programs/ripgrep/rg.exe",
+    "/apps/ripgrep/rg.exe",
+];
+
+const FD_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/fd/fd.exe",
+    "/downloads/fd.exe",
+    "/programs/fd/fd.exe",
+    "/apps/fd/fd.exe",
+];
+
+const BAT_BINARY_CANDIDATES: &[&str] = &[
+    "/downloads/bat/bat.exe",
+    "/downloads/bat.exe",
+    "/programs/bat/bat.exe",
+    "/apps/bat/bat.exe",
 ];
 
 fn native_window_descriptor(
@@ -151,7 +231,28 @@ fn browser_binary_descriptor(
     .with_state_contract(StateContract::WarmSuspend)
 }
 
-pub(crate) fn desktop_launch_registry() -> [PackageRecord; 9] {
+fn curated_tool_descriptor(
+    app_id: u32,
+    slug: &'static str,
+    title: &'static str,
+    package_id: &'static str,
+) -> AppDescriptor {
+    AppDescriptor::new(
+        app_id,
+        slug,
+        title,
+        LoaderDispatch::Pe,
+        AbiPersonality::Win32,
+        AppPresentation::ShellOwned,
+        CapabilityProfile::file_worker(),
+    )
+    .with_package_id(package_id)
+    .with_install_root(AppInstallRoot::UserApps)
+    .with_trust(AppTrust::Installed)
+    .with_state_contract(StateContract::WarmSuspend)
+}
+
+pub(crate) fn desktop_launch_registry() -> [PackageRecord; 19] {
     [
         PackageRecord {
             aliases: &["terminal", "shell", "console"],
@@ -206,5 +307,128 @@ pub(crate) fn desktop_launch_registry() -> [PackageRecord; 9] {
             descriptor: browser_binary_descriptor(CEF_BINARY_APP_ID, "cef-binary", "CEF Browser"),
             external_candidates: CEF_BINARY_CANDIDATES,
         },
+        PackageRecord {
+            aliases: &["helix", "hx", "helix editor", "code editor"],
+            descriptor: curated_tool_descriptor(
+                HELIX_BINARY_APP_ID,
+                "helix-binary",
+                "Helix",
+                "org.helix.editor",
+            ),
+            external_candidates: HELIX_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["yazi", "file navigator", "yazi fm"],
+            descriptor: curated_tool_descriptor(
+                YAZI_BINARY_APP_ID,
+                "yazi-binary",
+                "Yazi",
+                "dev.yazi.fm",
+            ),
+            external_candidates: YAZI_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["zellij", "terminal workspace", "multiplexer"],
+            descriptor: curated_tool_descriptor(
+                ZELLIJ_BINARY_APP_ID,
+                "zellij-binary",
+                "Zellij",
+                "org.zellij.workspace",
+            ),
+            external_candidates: ZELLIJ_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["bottom", "btm", "system monitor"],
+            descriptor: curated_tool_descriptor(
+                BOTTOM_BINARY_APP_ID,
+                "bottom-binary",
+                "bottom",
+                "org.bottom.monitor",
+            ),
+            external_candidates: BOTTOM_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["gitui", "git ui", "git client"],
+            descriptor: curated_tool_descriptor(
+                GITUI_BINARY_APP_ID,
+                "gitui-binary",
+                "GitUI",
+                "org.gitui.client",
+            ),
+            external_candidates: GITUI_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["posting", "api client", "http client"],
+            descriptor: curated_tool_descriptor(
+                POSTING_BINARY_APP_ID,
+                "posting-binary",
+                "Posting",
+                "dev.posting.client",
+            ),
+            external_candidates: POSTING_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["glow", "markdown viewer", "md viewer"],
+            descriptor: curated_tool_descriptor(
+                GLOW_BINARY_APP_ID,
+                "glow-binary",
+                "Glow",
+                "org.glow.viewer",
+            ),
+            external_candidates: GLOW_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["ripgrep", "rg", "search code"],
+            descriptor: curated_tool_descriptor(
+                RIPGREP_BINARY_APP_ID,
+                "ripgrep-binary",
+                "ripgrep",
+                "org.ripgrep.tool",
+            ),
+            external_candidates: RIPGREP_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["fd", "find files", "fd find"],
+            descriptor: curated_tool_descriptor(FD_BINARY_APP_ID, "fd-binary", "fd", "org.fd.find"),
+            external_candidates: FD_BINARY_CANDIDATES,
+        },
+        PackageRecord {
+            aliases: &["bat", "cat viewer", "syntax cat"],
+            descriptor: curated_tool_descriptor(
+                BAT_BINARY_APP_ID,
+                "bat-binary",
+                "bat",
+                "org.bat.viewer",
+            ),
+            external_candidates: BAT_BINARY_CANDIDATES,
+        },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::desktop_launch_registry;
+    use crate::runtime_layer::package_registry_contract::RuntimePackageRegistry;
+
+    #[test]
+    fn curated_tool_registry_resolves_helix_candidate_path() {
+        let registry = desktop_launch_registry();
+        let resolution = RuntimePackageRegistry::new(&registry)
+            .resolve_with_probe("helix", |path| path == "/apps/helix/hx.exe")
+            .expect("helix resolution");
+        assert_eq!(resolution.descriptor().title, "Helix");
+        assert_eq!(resolution.path(), Some("/apps/helix/hx.exe"));
+    }
+
+    #[test]
+    fn curated_tool_registry_reports_missing_bottom_candidates() {
+        let registry = desktop_launch_registry();
+        let resolution = RuntimePackageRegistry::new(&registry)
+            .resolve_with_probe("bottom", |_| false)
+            .expect("bottom resolution");
+        let candidates = resolution
+            .missing_candidates()
+            .expect("missing candidate set");
+        assert!(candidates.iter().any(|path| path.contains("btm.exe")));
+    }
 }

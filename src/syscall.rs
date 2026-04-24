@@ -112,6 +112,14 @@ pub fn init() {
 /// SWAPGS sonrası GS segmentinin `CpuData` yapısını göstermesi için
 /// her CPU'nun başlangıcında çağrılması gerekir.
 pub unsafe fn init_cpu_data(cpu_data: *mut CpuData) {
+    let stack_top = (*cpu_data).kernel_stack_top;
+    if stack_top != 0 && !is_dedicated_kernel_stack_top(stack_top) {
+        crate::serial_println!(
+            "[SYSCALL] CpuData kernel_stack_top outside dedicated stack VA: {:#x}",
+            stack_top
+        );
+    }
+
     let mut kernel_gs_base = Msr::new(MSR_KERNEL_GS_BASE);
     kernel_gs_base.write(cpu_data as u64);
 }
@@ -120,7 +128,20 @@ pub unsafe fn init_cpu_data(cpu_data: *mut CpuData) {
 ///
 /// Yeni bir görev (task) zamanlandığında çağrılmalıdır; böylece SYSCALL
 /// sırasında doğru çekirdek yığını kullanılır.
-pub fn set_kernel_stack_for_current_cpu(stack_top: u64) {
+#[inline]
+fn is_dedicated_kernel_stack_top(stack_top: u64) -> bool {
+    stack_top != 0 && crate::memory::is_kernel_stack_virt_addr(stack_top.saturating_sub(1))
+}
+
+pub fn set_kernel_stack_for_current_cpu(stack_top: u64) -> bool {
+    if !is_dedicated_kernel_stack_top(stack_top) {
+        crate::serial_println!(
+            "[SYSCALL] refusing kernel_stack_top outside dedicated stack VA: {:#x}",
+            stack_top
+        );
+        return false;
+    }
+
     unsafe {
         let mut msr = Msr::new(MSR_KERNEL_GS_BASE);
         let base = msr.read();
@@ -128,6 +149,7 @@ pub fn set_kernel_stack_for_current_cpu(stack_top: u64) {
         // GS:8 pozisyonunu (kernel_stack_top) güncelle
         (*data).kernel_stack_top = stack_top;
     }
+    true
 }
 
 /// Geçerli CPU'nun kullanıcı bağlamını (RSP, RIP, RFLAGS) okur.
@@ -233,6 +255,7 @@ pub extern "sysv64" fn syscall_dispatcher(
     a5: u64,
     a6: u64,
 ) -> i64 {
+    crate::security::spectre::kernel_entry_barrier();
     if num >= crate::win32::WIN32_USER_ABI_SYSCALL_BASE {
         let service_id = (num - crate::win32::WIN32_USER_ABI_SYSCALL_BASE) as u32;
         return crate::win32::dispatch_user_abi(service_id, [a1, a2, a3, a4]);

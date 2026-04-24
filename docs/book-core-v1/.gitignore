@@ -1,0 +1,7 @@
+node_modules/
+out/*.pdf
+out/*.html
+figures/generated/*.svg
+
+!out/.gitkeep
+!figures/generated/.gitkeep

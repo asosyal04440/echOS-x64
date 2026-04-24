@@ -151,16 +151,7 @@ impl Argon2 {
         let mut argon2 = Argon2::new(config);
         let computed = argon2.hash(password, salt, &[], &[]);
 
-        // Sabit zamanlı karşılaştırma — zamanlama tabanlı yan kanal saldırılarına karşı
-        if computed.len() != expected_hash.len() {
-            return false;
-        }
-
-        let mut result = 0u8;
-        for i in 0..computed.len() {
-            result |= computed[i] ^ expected_hash[i];
-        }
-        result == 0
+        crate::crypto::constant_time_eq(&computed, expected_hash)
     }
 
     fn initial_hash(&self, password: &[u8], salt: &[u8], secret: &[u8], ad: &[u8]) -> [u8; 64] {
@@ -384,15 +375,6 @@ impl PasswordHash {
         let mut argon2 = Argon2::new(config);
         let computed = argon2.hash(password, &self.salt, &[], &[]);
 
-        // Sabit zamanlı karşılaştırma — yan kanal saldırılarına karşı
-        if computed.len() != self.hash.len() {
-            return false;
-        }
-
-        let mut result = 0u8;
-        for i in 0..computed.len() {
-            result |= computed[i] ^ self.hash[i];
-        }
-        result == 0
+        crate::crypto::constant_time_eq(&computed, &self.hash)
     }
 }

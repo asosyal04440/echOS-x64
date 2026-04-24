@@ -1466,7 +1466,11 @@ impl GpuDevice {
                 monitored_value: initial_value,
                 signal_count: signaled as u64,
                 last_signal_tick: crate::interrupts::get_ticks(),
-                log: if signaled { vec![initial_value] } else { Vec::new() },
+                log: if signaled {
+                    vec![initial_value]
+                } else {
+                    Vec::new()
+                },
             },
         );
         self.fence_registry.insert(name.to_string(), handle);
@@ -1491,7 +1495,10 @@ impl GpuDevice {
             return Err(GpuError::InvalidHandle);
         };
         if signaled {
-            let next_value = fence.current_value.saturating_add(1).max(fence.monitored_value.max(1));
+            let next_value = fence
+                .current_value
+                .saturating_add(1)
+                .max(fence.monitored_value.max(1));
             Self::update_fence_value(fence, next_value);
         } else {
             fence.monitored_value = fence.current_value.saturating_add(1);

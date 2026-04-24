@@ -1,0 +1,12 @@
+flowchart TD
+    A[Timer tick] --> B{RT task exists}
+    B -->|Yes| C[Run highest RT priority]
+    B -->|No| D{Local worker has task}
+    D -->|Yes| E[Worker pop LIFO]
+    D -->|No| F{Can steal from other CPU}
+    F -->|Yes| G[Steal from top FIFO]
+    F -->|No| H[Run idle loop]
+    C --> I[Context switch]
+    E --> I
+    G --> I
+    H --> I

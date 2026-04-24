@@ -965,6 +965,15 @@ impl TcpHeader {
         let seq_num = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let ack_num = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
         let data_offset = (data[12] >> 4) & 0x0F;
+        if data_offset < 5 {
+            return Err(NetError::InvalidPacket);
+        }
+        let Some(header_len) = (data_offset as usize).checked_mul(4) else {
+            return Err(NetError::InvalidPacket);
+        };
+        if header_len > data.len() {
+            return Err(NetError::InvalidPacket);
+        }
         let flags = TcpFlags::from_u8(data[13]);
         let window_size = u16::from_be_bytes([data[14], data[15]]);
         let checksum = u16::from_be_bytes([data[16], data[17]]);
@@ -1004,7 +1013,7 @@ impl TcpHeader {
 
     /// Başlık uzunluğunu bayt cinsinden döndür (data_offset * 4)
     pub fn header_len(&self) -> usize {
-        (self.data_offset as usize) * 4
+        (self.data_offset as usize).saturating_mul(4)
     }
 }
 
@@ -2772,6 +2781,27 @@ mod tests {
         assert_eq!(bbr.mode, BbrMode::Drain);
         assert!(bbr.full_bw >= 1_825_000);
         assert!(bbr.full_bw_rounds >= 3);
+    }
+
+    #[test]
+    fn tcp_header_parse_rejects_data_offset_beyond_segment() {
+        let mut segment = [0u8; TcpHeader::MIN_SIZE];
+        segment[12] = 15 << 4;
+
+        assert_eq!(
+            TcpHeader::parse(&segment).unwrap_err(),
+            NetError::InvalidPacket
+        );
+    }
+
+    #[test]
+    fn sack_block_len_tracks_wrapping_sequence_space() {
+        let block = SackBlock::new(u32::MAX - 3, 4);
+
+        assert_eq!(block.len(), 8);
+        assert!(block.contains(u32::MAX - 1));
+        assert!(block.contains(1));
+        assert!(!block.contains(8));
     }
 
     #[test]

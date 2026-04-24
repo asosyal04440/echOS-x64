@@ -1,10 +1,14 @@
 //! Shared zero-copy surface memory with damage generation tracking.
 
+use crate::allocator::doctrine::{
+    alloc_surface_pixels, DoctrineError, SurfacePixelBuffer, SurfacePixelFormat,
+};
 use crate::gui::protocol::{ClientId, Rect, SharedSurfaceDescriptor, SurfaceId};
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::min;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -21,6 +25,12 @@ pub enum DataPlaneResolveError {
     DescriptorMismatch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceAllocError {
+    OutOfMemory,
+    PolicyViolation,
+}
+
 #[derive(Clone)]
 pub struct SurfaceSnapshot {
     pub width: u32,
@@ -29,13 +39,23 @@ pub struct SurfaceSnapshot {
     pub pixels: Vec<u32>,
 }
 
+fn map_doctrine_error(error: DoctrineError) -> SurfaceAllocError {
+    crate::serial_println!("[SURFACE] doctrine allocation error: {:?}", error);
+    match error {
+        DoctrineError::OutOfMemory => SurfaceAllocError::OutOfMemory,
+        DoctrineError::PolicyViolation(_)
+        | DoctrineError::ExceptionDenied(_)
+        | DoctrineError::InvalidRegistry(_) => SurfaceAllocError::PolicyViolation,
+    }
+}
+
 #[derive(Debug)]
 pub struct SharedSurfaceMemory {
     width: AtomicU32,
     height: AtomicU32,
     generation: AtomicU64,
     damage: Mutex<Vec<Rect>>,
-    pixels: Mutex<Vec<u32>>,
+    pixels: Mutex<SurfacePixelBuffer>,
 }
 
 lazy_static! {
@@ -44,23 +64,49 @@ lazy_static! {
 }
 
 impl SharedSurfaceMemory {
-    pub fn new(width: u32, height: u32) -> Arc<Self> {
-        let len = (width as usize).saturating_mul(height as usize);
-        Arc::new(Self {
+    pub fn new(width: u32, height: u32) -> Result<Arc<Self>, SurfaceAllocError> {
+        crate::serial_println!(
+            "[SURFACE] allocate shared surface {}x{} ({} bytes)",
+            width,
+            height,
+            (width as usize)
+                .saturating_mul(height as usize)
+                .saturating_mul(core::mem::size_of::<u32>())
+        );
+        Ok(Arc::new(Self {
             width: AtomicU32::new(width),
             height: AtomicU32::new(height),
             generation: AtomicU64::new(1),
             damage: Mutex::new(vec![Rect::new(0, 0, width, height)]),
-            pixels: Mutex::new(vec![0; len]),
-        })
+            pixels: Mutex::new(
+                alloc_surface_pixels(
+                    width as usize,
+                    height as usize,
+                    SurfacePixelFormat::Argb8888,
+                )
+                .map_err(map_doctrine_error)?,
+            ),
+        }))
     }
 
-    pub fn resize(&self, width: u32, height: u32) {
+    pub fn resize(&self, width: u32, height: u32) -> Result<(), SurfaceAllocError> {
+        crate::serial_println!(
+            "[SURFACE] resize shared surface {}x{} ({} bytes)",
+            width,
+            height,
+            (width as usize)
+                .saturating_mul(height as usize)
+                .saturating_mul(core::mem::size_of::<u32>())
+        );
         self.width.store(width, Ordering::Release);
         self.height.store(height, Ordering::Release);
         let len = (width as usize).saturating_mul(height as usize);
-        self.pixels.lock().resize(len, 0);
+        self.pixels
+            .lock()
+            .resize_zeroed(len)
+            .map_err(map_doctrine_error)?;
         self.submit_damage(Rect::new(0, 0, width, height));
+        Ok(())
     }
 
     pub fn write_full(&self, pixels: &[u32]) -> Result<(), ()> {
@@ -75,13 +121,29 @@ impl SharedSurfaceMemory {
         Ok(())
     }
 
-    pub fn snapshot(&self) -> SurfaceSnapshot {
-        SurfaceSnapshot {
+    pub fn snapshot(&self) -> Result<SurfaceSnapshot, SurfaceAllocError> {
+        Ok(SurfaceSnapshot {
             width: self.width.load(Ordering::Acquire),
             height: self.height.load(Ordering::Acquire),
             generation: self.generation.load(Ordering::Acquire),
-            pixels: self.pixels.lock().clone(),
-        }
+            pixels: self
+                .pixels
+                .lock()
+                .snapshot_vec("gui.shared_surface.snapshot")
+                .map_err(map_doctrine_error)?,
+        })
+    }
+
+    pub fn with_pixels<R>(&self, f: impl FnOnce(&[u32]) -> R) -> R {
+        let pixels = self.pixels.lock();
+        f(pixels.as_slice())
+    }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        (
+            self.width.load(Ordering::Acquire),
+            self.height.load(Ordering::Acquire),
+        )
     }
 
     pub fn submit_damage(&self, rect: Rect) {
@@ -112,9 +174,10 @@ pub fn publish_data_plane_surface(
 }
 
 pub fn revoke_data_plane_surface(client_id: ClientId, surface_id: SurfaceId) {
-    DATA_PLANE_REGISTRY
-        .lock()
-        .remove(&DataPlaneKey { client_id, surface_id });
+    DATA_PLANE_REGISTRY.lock().remove(&DataPlaneKey {
+        client_id,
+        surface_id,
+    });
 }
 
 pub fn resolve_data_plane_surface(
@@ -130,8 +193,8 @@ pub fn resolve_data_plane_surface(
         .and_then(Weak::upgrade)
         .ok_or(DataPlaneResolveError::SurfaceUnavailable)?;
 
-    let snapshot = surface.snapshot();
-    if snapshot.width != descriptor.width || snapshot.height != descriptor.height {
+    let (width, height) = surface.dimensions();
+    if width != descriptor.width || height != descriptor.height {
         return Err(DataPlaneResolveError::DescriptorMismatch);
     }
 
@@ -152,7 +215,7 @@ mod tests {
             pixel_stride: 64,
             generation: 1,
         };
-        let surface = SharedSurfaceMemory::new(64, 32);
+        let surface = SharedSurfaceMemory::new(64, 32).expect("surface alloc");
         publish_data_plane_surface(descriptor, &surface);
 
         let resolved = resolve_data_plane_surface(descriptor).expect("surface must resolve");
@@ -171,9 +234,9 @@ mod tests {
             pixel_stride: 64,
             generation: 1,
         };
-        let surface = SharedSurfaceMemory::new(64, 32);
+        let surface = SharedSurfaceMemory::new(64, 32).expect("surface alloc");
         publish_data_plane_surface(descriptor, &surface);
-        surface.resize(80, 32);
+        surface.resize(80, 32).expect("resize");
 
         assert!(matches!(
             resolve_data_plane_surface(descriptor),
@@ -193,7 +256,7 @@ mod tests {
             pixel_stride: 16,
             generation: 1,
         };
-        let surface = SharedSurfaceMemory::new(16, 16);
+        let surface = SharedSurfaceMemory::new(16, 16).expect("surface alloc");
         publish_data_plane_surface(descriptor, &surface);
         revoke_data_plane_surface(descriptor.client_id, descriptor.surface_id);
 

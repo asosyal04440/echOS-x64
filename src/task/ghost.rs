@@ -147,11 +147,13 @@ impl GhostRing {
     pub const fn new() -> Self {
         Self {
             header: GhostQueueHeader::new(GHOST_QUEUE_CAPACITY),
-            entries: UnsafeCell::new([GhostMessage {
-                msg_type: 0,
-                task_id: 0,
-                payload: 0,
-            }; GHOST_QUEUE_CAPACITY as usize]),
+            entries: UnsafeCell::new(
+                [GhostMessage {
+                    msg_type: 0,
+                    task_id: 0,
+                    payload: 0,
+                }; GHOST_QUEUE_CAPACITY as usize],
+            ),
             dropped: AtomicU64::new(0),
         }
     }
@@ -314,13 +316,7 @@ impl GhostAgent {
         status
     }
 
-    pub fn update_task_status(
-        &self,
-        task_id: u64,
-        flags: u32,
-        cpu_id: u32,
-        vruntime: u64,
-    ) -> bool {
+    pub fn update_task_status(&self, task_id: u64, flags: u32, cpu_id: u32, vruntime: u64) -> bool {
         let Some(status) = self.tasks.iter().find(|status| status.task_id == task_id) else {
             return false;
         };

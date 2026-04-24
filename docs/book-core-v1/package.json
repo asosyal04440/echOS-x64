@@ -1,0 +1,22 @@
+{
+  "name": "book-core-v1",
+  "version": "1.0.0",
+  "description": "Bu klasor, echOS icin lisans ogrencilerine yonelik Cilt 1 (core) kitap kaynaklarini icerir.",
+  "main": "index.js",
+  "scripts": {
+    "expand": "python .\\scripts\\generate_expanded_content.py",
+    "diagrams": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\render-diagrams.ps1",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\build.ps1 -Mode internals",
+    "build:legacy": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\build.ps1 -Mode legacy",
+    "ai-scan": "python .\\scripts\\ai_risk_scan.py .\\out\\echos-cilt1-core-v0.1.pdf",
+    "test": "echo \"No test target\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "^11.12.0",
+    "puppeteer": "^23.11.1"
+  }
+}

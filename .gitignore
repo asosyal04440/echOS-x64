@@ -42,11 +42,23 @@ symbols.txt
 !LICENSE.txt
 !NOTICE
 
+# Curated app packaging artifacts
+artifacts/curated-downloads/
+artifacts/curated-bundles/*.bhd
+artifacts/curated-sources/*/*.exe
+
+# Generated documentation outputs
+docs/book-core-v1/out/*
+!docs/book-core-v1/out/.gitkeep
+docs/book-core-v1/figures/generated/*
+!docs/book-core-v1/figures/generated/.gitkeep
+
 # Runtime / temp files
 vhdx_update.log
 OVMF_VARS.fd
 echOS_teknik_rapor.pdf
 .codex_*.ps1
+tmp_espeak_voices.json
 
 # Disk/Firmware Images (too large for GitHub)
 *.vhdx

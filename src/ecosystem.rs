@@ -98,18 +98,21 @@ pub struct Win32PreparedImage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphicsBackend {
     Vulkan,
+    DisplayNative,
 }
 
 impl GraphicsBackend {
     fn as_str(self) -> &'static str {
         match self {
             Self::Vulkan => "vulkan",
+            Self::DisplayNative => "display-native",
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphicsApiProfile {
+    DxgiNativePresent,
     DxgiPresentOnly,
     D3d11ToVulkan,
     D3d12ToVulkan,
@@ -118,6 +121,7 @@ pub enum GraphicsApiProfile {
 impl GraphicsApiProfile {
     fn as_str(self) -> &'static str {
         match self {
+            Self::DxgiNativePresent => "dxgi-native-present",
             Self::DxgiPresentOnly => "dxgi-present-only",
             Self::D3d11ToVulkan => "d3d11-to-vulkan",
             Self::D3d12ToVulkan => "d3d12-to-vulkan",
@@ -178,13 +182,33 @@ pub struct DxgiPresentResult {
     pub pipeline_cache_hit: bool,
     pub fence: FenceHandle,
     pub feedback: Option<VblankFeedback>,
-    pub completion_id: u64,
+    pub completion: DxgiPresentCompletion,
     pub frame_budget_ns: u64,
     pub damage: Rect,
     pub fullscreen_capable: bool,
     pub fullscreen_active: bool,
     pub damage_tracked: bool,
     pub latency_queue_depth: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DxgiPresentCompletion {
+    DisplayFeedback {
+        completion_id: u64,
+        feedback: VblankFeedback,
+    },
+    QueuedWithoutDisplayFeedback {
+        queued_present_id: u64,
+    },
+}
+
+impl DxgiPresentCompletion {
+    pub const fn completion_id(self) -> Option<u64> {
+        match self {
+            Self::DisplayFeedback { completion_id, .. } => Some(completion_id),
+            Self::QueuedWithoutDisplayFeedback { .. } => None,
+        }
+    }
 }
 
 pub struct DxgiPresentBridge {
@@ -236,17 +260,33 @@ impl DxgiPresentBridge {
     }
 
     pub fn target_for(&self, api: &str) -> Option<GraphicsBackend> {
-        self.targets
-            .get(&api.to_lowercase())
-            .map(|route| route.backend)
+        self.route_for(api).map(|route| route.backend)
     }
 
     fn route_for(&self, api: &str) -> Option<DxgiTargetRoute> {
-        self.targets.get(&api.to_lowercase()).copied()
+        Self::route_for_with_native_device(api, crate::drivers::gpu_native::device_count() > 0)
+            .or_else(|| self.targets.get(&api.to_lowercase()).copied())
+    }
+
+    fn route_for_with_native_device(
+        api: &str,
+        native_device_present: bool,
+    ) -> Option<DxgiTargetRoute> {
+        if !api.eq_ignore_ascii_case("dxgi") || !native_device_present {
+            return None;
+        }
+        Some(DxgiTargetRoute {
+            backend: GraphicsBackend::DisplayNative,
+            profile: GraphicsApiProfile::DxgiNativePresent,
+            fullscreen_capable: true,
+            damage_tracked: true,
+            latency_queue_depth: 1,
+        })
     }
 
     pub fn describe_targets(&self) -> Vec<String> {
-        self.targets
+        let mut described = self
+            .targets
             .iter()
             .map(|(api, route)| {
                 format!(
@@ -261,7 +301,21 @@ impl DxgiPresentBridge {
                     }
                 )
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(route) = Self::route_for_with_native_device("dxgi", true) {
+            described.retain(|entry| !entry.starts_with("dxgi=>"));
+            described.push(format!(
+                "dxgi=>{}/{}{}",
+                route.backend.as_str(),
+                route.profile.as_str(),
+                if route.fullscreen_capable {
+                    ":fullscreen"
+                } else {
+                    ":windowed"
+                }
+            ));
+        }
+        described
     }
 
     fn frame_budget_ns(refresh_hz: u32) -> u64 {
@@ -286,6 +340,8 @@ impl DxgiPresentBridge {
             DisplayPresentMode::AdaptiveSync => {
                 if route.profile == GraphicsApiProfile::DxgiPresentOnly {
                     165
+                } else if route.profile == GraphicsApiProfile::DxgiNativePresent {
+                    240
                 } else {
                     240
                 }
@@ -553,16 +609,23 @@ impl DxgiPresentBridge {
             cursor_position: Some(Point::new(0, 0)),
         };
 
-        let feedback = match request_display_sync(0, DisplayCommand::SubmitFrameIntent { intent }) {
-            Some(DisplayResponse::Presented { feedback, .. }) => Some(feedback),
-            _ => None,
+        let completion = match request_display_sync(0, DisplayCommand::SubmitFrameIntent { intent })
+        {
+            Some(DisplayResponse::Presented { feedback, .. }) => {
+                let _ = gpu3d::signal_fence_value(fence, feedback.presented_frame_id);
+                DxgiPresentCompletion::DisplayFeedback {
+                    completion_id: feedback.presented_frame_id,
+                    feedback,
+                }
+            }
+            _ => DxgiPresentCompletion::QueuedWithoutDisplayFeedback {
+                queued_present_id: present_id,
+            },
         };
-        if let Some(feedback) = feedback {
-            let _ = gpu3d::signal_fence_value(fence, feedback.presented_frame_id);
-        }
-        let completion_id = feedback
-            .map(|feedback| feedback.presented_frame_id)
-            .unwrap_or(present_id);
+        let feedback = match completion {
+            DxgiPresentCompletion::DisplayFeedback { feedback, .. } => Some(feedback),
+            DxgiPresentCompletion::QueuedWithoutDisplayFeedback { .. } => None,
+        };
 
         Ok(DxgiPresentResult {
             present_id,
@@ -578,7 +641,7 @@ impl DxgiPresentBridge {
             pipeline_cache_hit,
             fence,
             feedback,
-            completion_id,
+            completion,
             frame_budget_ns,
             damage,
             fullscreen_capable: route.fullscreen_capable,
@@ -1095,14 +1158,27 @@ mod tests {
         let targets = bridge.describe_targets();
         assert!(targets
             .iter()
+            .any(|entry| entry == "dxgi=>display-native/dxgi-native-present:fullscreen"));
+        assert!(targets
+            .iter()
             .any(|entry| entry == "d3d11=>vulkan/d3d11-to-vulkan:fullscreen"));
         assert!(targets
             .iter()
             .any(|entry| entry == "d3d12=>vulkan/d3d12-to-vulkan:fullscreen"));
-        assert!(targets
-            .iter()
-            .any(|entry| entry == "dxgi=>vulkan/dxgi-present-only:windowed"));
         assert!(!targets.iter().any(|entry| entry.starts_with("d3d9=>")));
+    }
+
+    #[test]
+    fn dxgi_native_route_isolated_from_d3d_translation_profiles() {
+        let native = DxgiPresentBridge::route_for_with_native_device("dxgi", true)
+            .expect("native dxgi route");
+        assert_eq!(native.backend, GraphicsBackend::DisplayNative);
+        assert_eq!(native.profile, GraphicsApiProfile::DxgiNativePresent);
+        assert_eq!(native.latency_queue_depth, 1);
+
+        assert!(DxgiPresentBridge::route_for_with_native_device("d3d11", true).is_none());
+        assert!(DxgiPresentBridge::route_for_with_native_device("d3d12", true).is_none());
+        assert!(DxgiPresentBridge::route_for_with_native_device("dxgi", false).is_none());
     }
 
     #[test]
@@ -1131,7 +1207,14 @@ mod tests {
         );
         assert!(result.present_mode_honored);
         assert_eq!(result.frame_budget_ns, 1_000_000_000u64 / 120);
-        assert_eq!(result.completion_id, result.present_id);
+        assert_eq!(
+            result.completion,
+            DxgiPresentCompletion::QueuedWithoutDisplayFeedback {
+                queued_present_id: result.present_id,
+            }
+        );
+        assert_eq!(result.completion.completion_id(), None);
+        assert!(result.feedback.is_none());
         assert!(result.fullscreen_capable);
         assert!(result.damage_tracked);
         assert_eq!(result.latency_queue_depth, 2);

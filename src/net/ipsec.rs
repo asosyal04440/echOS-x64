@@ -273,6 +273,8 @@ pub struct SecurityAssociation {
     pub replay_bitmap: AtomicU64,
     /// Son görülen sıra numarası
     pub last_seq: AtomicU32,
+    /// Replay bitmap/last_seq güncellemeleri için SA-yerel kilit
+    replay_lock: Mutex<()>,
     /// Geçerlilik süresi (Unix zaman damgası)
     pub expires: u64,
     /// SA etkin mi?
@@ -310,6 +312,7 @@ impl SecurityAssociation {
             replay_window: 64,
             replay_bitmap: AtomicU64::new(0),
             last_seq: AtomicU32::new(0),
+            replay_lock: Mutex::new(()),
             expires: 0,
             active: AtomicBool::new(true),
             stats: Mutex::new(SaStats::default()),
@@ -334,12 +337,13 @@ impl SecurityAssociation {
     /// seq=50  → bitmap'de var mı? Varsa tekrar saldırısı!
     /// ```
     pub fn check_replay(&self, seq: u32) -> bool {
-        let last = self.last_seq.load(Ordering::Relaxed);
+        let _replay_guard = self.replay_lock.lock();
+        let last = self.last_seq.load(Ordering::SeqCst);
 
         if seq > last {
             // Yeni paket: pencereyi ilerlet ve bitmap güncelle
             let diff = seq - last;
-            let mut bitmap = self.replay_bitmap.load(Ordering::Relaxed);
+            let mut bitmap = self.replay_bitmap.load(Ordering::SeqCst);
 
             if diff < 64 {
                 bitmap = (bitmap << diff) | 1;
@@ -347,8 +351,8 @@ impl SecurityAssociation {
                 bitmap = 1;
             }
 
-            self.replay_bitmap.store(bitmap, Ordering::Relaxed);
-            self.last_seq.store(seq, Ordering::Relaxed);
+            self.replay_bitmap.store(bitmap, Ordering::SeqCst);
+            self.last_seq.store(seq, Ordering::SeqCst);
             return true;
         }
 
@@ -361,7 +365,7 @@ impl SecurityAssociation {
 
         // Check if already seen
         // Bitmap'te kontrol et: bu pozisyon 1 ise daha önce görülmüş → tekrar saldırısı
-        let bitmap = self.replay_bitmap.load(Ordering::Relaxed);
+        let bitmap = self.replay_bitmap.load(Ordering::SeqCst);
         let mask = 1u64 << diff;
 
         if bitmap & mask != 0 {
@@ -370,7 +374,7 @@ impl SecurityAssociation {
         }
 
         // Mark as seen
-        self.replay_bitmap.fetch_or(mask, Ordering::Relaxed);
+        self.replay_bitmap.fetch_or(mask, Ordering::SeqCst);
         true
     }
 
@@ -378,8 +382,28 @@ impl SecurityAssociation {
     pub fn encrypt(&self, pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
         match self.enc_alg {
             IPSEC_ENC_NULL => Ok(pkt.to_vec()),
-            IPSEC_ENC_DES_CBC => self.encrypt_des_cbc(pkt),
-            IPSEC_ENC_3DES_CBC => self.encrypt_3des_cbc(pkt),
+            IPSEC_ENC_DES_CBC => {
+                #[cfg(feature = "ipsec_legacy_weak_crypto")]
+                {
+                    Self::warn_weak_cipher_enabled("DES-CBC");
+                    self.encrypt_des_cbc(pkt)
+                }
+                #[cfg(not(feature = "ipsec_legacy_weak_crypto"))]
+                {
+                    Self::reject_weak_cipher("DES-CBC")
+                }
+            }
+            IPSEC_ENC_3DES_CBC => {
+                #[cfg(feature = "ipsec_legacy_weak_crypto")]
+                {
+                    Self::warn_weak_cipher_enabled("3DES-CBC");
+                    self.encrypt_3des_cbc(pkt)
+                }
+                #[cfg(not(feature = "ipsec_legacy_weak_crypto"))]
+                {
+                    Self::reject_weak_cipher("3DES-CBC")
+                }
+            }
             IPSEC_ENC_AES_CBC => self.encrypt_aes_cbc(pkt),
             IPSEC_ENC_AES_CTR => self.encrypt_aes_ctr(pkt),
             IPSEC_ENC_AES_GCM => self.encrypt_aes_gcm(pkt),
@@ -395,8 +419,28 @@ impl SecurityAssociation {
     pub fn decrypt(&self, pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
         match self.enc_alg {
             IPSEC_ENC_NULL => Ok(pkt.to_vec()),
-            IPSEC_ENC_DES_CBC => self.decrypt_des_cbc(pkt),
-            IPSEC_ENC_3DES_CBC => self.decrypt_3des_cbc(pkt),
+            IPSEC_ENC_DES_CBC => {
+                #[cfg(feature = "ipsec_legacy_weak_crypto")]
+                {
+                    Self::warn_weak_cipher_enabled("DES-CBC");
+                    self.decrypt_des_cbc(pkt)
+                }
+                #[cfg(not(feature = "ipsec_legacy_weak_crypto"))]
+                {
+                    Self::reject_weak_cipher("DES-CBC")
+                }
+            }
+            IPSEC_ENC_3DES_CBC => {
+                #[cfg(feature = "ipsec_legacy_weak_crypto")]
+                {
+                    Self::warn_weak_cipher_enabled("3DES-CBC");
+                    self.decrypt_3des_cbc(pkt)
+                }
+                #[cfg(not(feature = "ipsec_legacy_weak_crypto"))]
+                {
+                    Self::reject_weak_cipher("3DES-CBC")
+                }
+            }
             IPSEC_ENC_AES_CBC => self.decrypt_aes_cbc(pkt),
             IPSEC_ENC_AES_CTR => self.decrypt_aes_ctr(pkt),
             IPSEC_ENC_AES_GCM => self.decrypt_aes_gcm(pkt),
@@ -406,6 +450,23 @@ impl SecurityAssociation {
                 (entry.decrypt)(self, pkt)
             }
         }
+    }
+
+    #[cfg(feature = "ipsec_legacy_weak_crypto")]
+    fn warn_weak_cipher_enabled(cipher: &str) {
+        crate::serial_println!(
+            "[IPSEC] WARNING: weak cipher {} is enabled via feature ipsec_legacy_weak_crypto",
+            cipher
+        );
+    }
+
+    #[cfg(not(feature = "ipsec_legacy_weak_crypto"))]
+    fn reject_weak_cipher(cipher: &str) -> Result<Vec<u8>, IpsecError> {
+        crate::serial_println!(
+            "[IPSEC] WARNING: weak cipher {} rejected (feature ipsec_legacy_weak_crypto is disabled)",
+            cipher
+        );
+        Err(IpsecError::WeakCipherDisabled)
     }
 
     /// AES-CBC şifreleme (RFC 3602)
@@ -419,9 +480,7 @@ impl SecurityAssociation {
 
         // Rastgele IV (16 byte)
         let mut iv = [0u8; 16];
-        for i in 0..16 {
-            iv[i] = crate::random::next_u32() as u8;
-        }
+        crate::random::fill_bytes(&mut iv);
 
         // PKCS#7 padding
         let pad_len = 16 - (pkt.len() % 16);
@@ -476,13 +535,7 @@ impl SecurityAssociation {
             prev.copy_from_slice(chunk);
         }
 
-        // PKCS#7 padding kaldır
-        if let Some(&pad_len) = result.last() {
-            let pad = pad_len as usize;
-            if pad > 0 && pad <= 16 && result.len() >= pad {
-                result.truncate(result.len() - pad);
-            }
-        }
+        Self::strip_pkcs7(&mut result, 16)?;
 
         Ok(result)
     }
@@ -494,9 +547,7 @@ impl SecurityAssociation {
             .ok_or(IpsecError::InvalidKey)?;
 
         let mut iv = [0u8; DES_BLOCK_SIZE];
-        for byte in &mut iv {
-            *byte = crate::random::next_u32() as u8;
-        }
+        crate::random::fill_bytes(&mut iv);
 
         let mut padded = pkt.to_vec();
         let pad_len = DES_BLOCK_SIZE - (pkt.len() % DES_BLOCK_SIZE);
@@ -551,9 +602,7 @@ impl SecurityAssociation {
     fn encrypt_3des_cbc(&self, pkt: &[u8]) -> Result<Vec<u8>, IpsecError> {
         let (k1, k2, k3) = Self::extract_3des_keys(&self.enc_key)?;
         let mut iv = [0u8; DES_BLOCK_SIZE];
-        for byte in &mut iv {
-            *byte = crate::random::next_u32() as u8;
-        }
+        crate::random::fill_bytes(&mut iv);
 
         let mut padded = pkt.to_vec();
         let pad_len = DES_BLOCK_SIZE - (pkt.len() % DES_BLOCK_SIZE);
@@ -616,9 +665,7 @@ impl SecurityAssociation {
         }
 
         let mut counter_block = [0u8; 16];
-        for byte in &mut counter_block {
-            *byte = crate::random::next_u32() as u8;
-        }
+        crate::random::fill_bytes(&mut counter_block);
 
         let mut result = Vec::with_capacity(16 + pkt.len());
         result.extend_from_slice(&counter_block);
@@ -674,9 +721,9 @@ impl SecurityAssociation {
         if self.enc_key.len() >= 20 {
             nonce[..4].copy_from_slice(&self.enc_key[16..20]);
         }
-        for i in 4..12 {
-            nonce[i] = crate::random::next_u32() as u8;
-        }
+        let mut random = [0u8; 8];
+        crate::random::fill_bytes(&mut random);
+        nonce[4..12].copy_from_slice(&random);
 
         let cipher = AesNi::new(key);
         let (ciphertext, tag) = self.aes_gcm_seal(&cipher, &nonce, pkt, &[])?;
@@ -720,9 +767,7 @@ impl SecurityAssociation {
             .map_err(|_| IpsecError::InvalidKey)?;
 
         let mut nonce = [0u8; 12];
-        for byte in &mut nonce {
-            *byte = crate::random::next_u32() as u8;
-        }
+        crate::random::fill_bytes(&mut nonce);
 
         let mut cipher = ChaCha20Poly1305::new(&key, &nonce);
         let (ciphertext, tag) = cipher.encrypt(pkt, &[]);
@@ -872,11 +917,7 @@ impl SecurityAssociation {
             expected_tag[idx] = ghash[idx] ^ tag_mask[idx];
         }
 
-        let mut tag_diff = 0u8;
-        for idx in 0..16 {
-            tag_diff |= expected_tag[idx] ^ recv_tag[idx];
-        }
-        if tag_diff != 0 {
+        if !crate::crypto::constant_time_eq(&expected_tag, recv_tag) {
             return Err(IpsecError::DecryptionFailed);
         }
 
@@ -901,22 +942,8 @@ impl SecurityAssociation {
     /// Kullanılan algoritmaya göre HMAC veya AES-XCBC-96 ile
     /// bütünlük kontrol değeri hesaplar.
     pub fn calculate_icv(&self, data: &[u8]) -> Vec<u8> {
-        let auth_key = if self.auth_key.is_empty() {
-            &self.enc_key
-        } else {
-            &self.auth_key
-        };
-
-        let icv_len = match self.auth_alg {
-            IPSEC_AUTH_HMAC_SHA1 => 12,
-            IPSEC_AUTH_HMAC_SHA256 => 16,
-            IPSEC_AUTH_HMAC_SHA384 => 24,
-            IPSEC_AUTH_HMAC_SHA512 => 32,
-            IPSEC_AUTH_AES_XCBC => 12,
-            _ => lookup_auth_registry(self.auth_alg)
-                .map(|entry| entry.icv_len)
-                .unwrap_or_else(|| default_auth_icv_len(auth_key)),
-        };
+        let auth_key = self.auth_key_material();
+        let icv_len = self.icv_len();
 
         if self.auth_alg == IPSEC_AUTH_AES_XCBC {
             return Self::aes_xcbc_mac_96(auth_key, data)
@@ -950,18 +977,32 @@ impl SecurityAssociation {
         full_hmac[..icv_len.min(full_hmac.len())].to_vec()
     }
 
+    fn auth_key_material(&self) -> &[u8] {
+        if self.auth_key.is_empty() {
+            &self.enc_key
+        } else {
+            &self.auth_key
+        }
+    }
+
+    fn icv_len(&self) -> usize {
+        let auth_key = self.auth_key_material();
+        match self.auth_alg {
+            IPSEC_AUTH_HMAC_SHA1 => 12,
+            IPSEC_AUTH_HMAC_SHA256 => 16,
+            IPSEC_AUTH_HMAC_SHA384 => 24,
+            IPSEC_AUTH_HMAC_SHA512 => 32,
+            IPSEC_AUTH_AES_XCBC => 12,
+            _ => lookup_auth_registry(self.auth_alg)
+                .map(|entry| entry.icv_len)
+                .unwrap_or_else(|| default_auth_icv_len(auth_key)),
+        }
+    }
+
     /// ICV doğrula
     pub fn verify_icv(&self, data: &[u8], icv: &[u8]) -> bool {
         let expected = self.calculate_icv(data);
-        // Sabit zamanlı karşılaştırma (timing attack koruması)
-        if expected.len() != icv.len() {
-            return false;
-        }
-        let mut diff = 0u8;
-        for (a, b) in expected.iter().zip(icv.iter()) {
-            diff |= a ^ b;
-        }
-        diff == 0
+        crate::crypto::constant_time_eq(&expected, icv)
     }
 
     fn strip_pkcs7(buf: &mut Vec<u8>, block_size: usize) -> Result<(), IpsecError> {
@@ -1253,7 +1294,15 @@ fn default_encrypt_cipher(sa: &SecurityAssociation, pkt: &[u8]) -> Result<Vec<u8
     } else if sa.enc_key.len() >= 16 {
         sa.encrypt_aes_ctr(pkt)
     } else if sa.enc_key.len() >= 8 {
-        sa.encrypt_des_cbc(pkt)
+        #[cfg(feature = "ipsec_legacy_weak_crypto")]
+        {
+            SecurityAssociation::warn_weak_cipher_enabled("DES-CBC (fallback)");
+            sa.encrypt_des_cbc(pkt)
+        }
+        #[cfg(not(feature = "ipsec_legacy_weak_crypto"))]
+        {
+            SecurityAssociation::reject_weak_cipher("DES-CBC (fallback)")
+        }
     } else {
         Err(IpsecError::InvalidKey)
     }
@@ -1265,7 +1314,15 @@ fn default_decrypt_cipher(sa: &SecurityAssociation, pkt: &[u8]) -> Result<Vec<u8
     } else if sa.enc_key.len() >= 16 {
         sa.decrypt_aes_ctr(pkt)
     } else if sa.enc_key.len() >= 8 {
-        sa.decrypt_des_cbc(pkt)
+        #[cfg(feature = "ipsec_legacy_weak_crypto")]
+        {
+            SecurityAssociation::warn_weak_cipher_enabled("DES-CBC (fallback)");
+            sa.decrypt_des_cbc(pkt)
+        }
+        #[cfg(not(feature = "ipsec_legacy_weak_crypto"))]
+        {
+            SecurityAssociation::reject_weak_cipher("DES-CBC (fallback)")
+        }
     } else {
         Err(IpsecError::InvalidKey)
     }
@@ -1565,15 +1622,48 @@ impl IpsecManager {
         let seq = u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
 
         if let Some(sa) = self.get_sa(spi) {
+            let icv_len = sa.icv_len();
+            if pkt.len() < 8 + icv_len {
+                return Err(IpsecError::InvalidPacket);
+            }
+
+            let encrypted_end = pkt.len() - icv_len;
+            let encrypted = &pkt[8..encrypted_end];
+            let recv_icv = &pkt[encrypted_end..];
+
+            if encrypted.is_empty() {
+                return Err(IpsecError::InvalidPacket);
+            }
+
+            if !sa.verify_icv(encrypted, recv_icv) {
+                {
+                    let mut sa_stats = sa.stats.lock();
+                    sa_stats.auth_errors += 1;
+                }
+                let mut stats = self.stats.lock();
+                stats.auth_failures += 1;
+                return Err(IpsecError::AuthFailed);
+            }
+
             // Check replay
             if !sa.check_replay(seq) {
+                {
+                    let mut sa_stats = sa.stats.lock();
+                    sa_stats.replay_errors += 1;
+                }
                 let mut stats = self.stats.lock();
                 stats.replay_failures += 1;
                 return Err(IpsecError::ReplayAttack);
             }
 
             // Decrypt
-            let decrypted = sa.decrypt(&pkt[8..])?;
+            let decrypted = sa.decrypt(encrypted)?;
+
+            {
+                let mut sa_stats = sa.stats.lock();
+                sa_stats.packets_in += 1;
+                sa_stats.bytes_in += decrypted.len() as u64;
+            }
 
             let mut stats = self.stats.lock();
             stats.packets_decrypted += 1;
@@ -1604,6 +1694,7 @@ pub enum IpsecError {
     PolicyNotFound,
     InvalidPacket,
     InvalidKey,
+    WeakCipherDisabled,
     AuthFailed,
     ReplayAttack,
     EncryptionFailed,
@@ -1774,6 +1865,7 @@ mod tests {
         assert_eq!(decrypted, plaintext);
     }
 
+    #[cfg(feature = "ipsec_legacy_weak_crypto")]
     #[test]
     fn ipsec_des_cbc_roundtrip_is_stateful() {
         let sa = build_sa(IPSEC_ENC_DES_CBC, 8);
@@ -1784,6 +1876,7 @@ mod tests {
         assert_eq!(decrypted, plaintext);
     }
 
+    #[cfg(feature = "ipsec_legacy_weak_crypto")]
     #[test]
     fn ipsec_3des_cbc_roundtrip_is_stateful() {
         let sa = build_sa(IPSEC_ENC_3DES_CBC, 24);
@@ -1792,6 +1885,34 @@ mod tests {
         assert!(encrypted.len() > plaintext.len());
         let decrypted = sa.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[cfg(not(feature = "ipsec_legacy_weak_crypto"))]
+    #[test]
+    fn ipsec_des_cbc_rejected_when_legacy_feature_disabled() {
+        let sa = build_sa(IPSEC_ENC_DES_CBC, 8);
+        assert_eq!(
+            sa.encrypt(b"echos-ipsec-des-cbc-disabled").unwrap_err(),
+            IpsecError::WeakCipherDisabled
+        );
+        assert_eq!(
+            sa.decrypt(b"echos-ipsec-des-cbc-disabled").unwrap_err(),
+            IpsecError::WeakCipherDisabled
+        );
+    }
+
+    #[cfg(not(feature = "ipsec_legacy_weak_crypto"))]
+    #[test]
+    fn ipsec_3des_cbc_rejected_when_legacy_feature_disabled() {
+        let sa = build_sa(IPSEC_ENC_3DES_CBC, 24);
+        assert_eq!(
+            sa.encrypt(b"echos-ipsec-3des-cbc-disabled").unwrap_err(),
+            IpsecError::WeakCipherDisabled
+        );
+        assert_eq!(
+            sa.decrypt(b"echos-ipsec-3des-cbc-disabled").unwrap_err(),
+            IpsecError::WeakCipherDisabled
+        );
     }
 
     #[test]
@@ -1969,6 +2090,7 @@ mod tests {
 
     #[test]
     fn ipsec_unknown_auth_algorithm_uses_default_family_dispatch() {
+        IPSEC_AUTH_FAMILY_REGISTRY.lock().clear();
         let mut sa = build_sa(IPSEC_ENC_AES_CTR, 16);
         sa.auth_alg = 0xC812;
         sa.auth_key = (0..48).map(|idx| idx as u8).collect();
@@ -1976,5 +2098,89 @@ mod tests {
         let icv = sa.calculate_icv(payload);
         assert_eq!(icv.len(), 24);
         assert!(sa.verify_icv(payload, &icv));
+    }
+
+    #[test]
+    fn ipsec_replay_rejects_duplicate_sequence() {
+        let sa = SecurityAssociation::new(0x1100, IPPROTO_ESP, IPSEC_MODE_TRANSPORT);
+        assert!(sa.check_replay(1));
+        assert!(!sa.check_replay(1));
+    }
+
+    #[test]
+    fn ipsec_process_inbound_accepts_valid_icv_and_updates_stats() {
+        let manager = IpsecManager::new();
+        manager.set_enabled(true);
+
+        let spi = 0x2200;
+        let mut sa_cfg = SecurityAssociation::new(spi, IPPROTO_ESP, IPSEC_MODE_TRANSPORT);
+        sa_cfg.enc_alg = IPSEC_ENC_AES_CTR;
+        sa_cfg.auth_alg = IPSEC_AUTH_HMAC_SHA256;
+        sa_cfg.enc_key = (0..16).map(|idx| idx as u8).collect();
+        sa_cfg.auth_key = (0..32).map(|idx| (idx as u8).wrapping_add(0x31)).collect();
+        let sa = Arc::new(sa_cfg);
+        manager.sas.lock().insert(spi, sa.clone());
+
+        let payload = b"echos-ipsec-inbound-valid-icv";
+        let encrypted = sa.encrypt(payload).unwrap();
+        let icv = sa.calculate_icv(&encrypted);
+
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&spi.to_be_bytes());
+        pkt.extend_from_slice(&1u32.to_be_bytes());
+        pkt.extend_from_slice(&encrypted);
+        pkt.extend_from_slice(&icv);
+
+        let decrypted = manager.process_inbound(&pkt).unwrap();
+        assert_eq!(decrypted, payload);
+
+        let stats = manager.stats.lock().clone();
+        assert_eq!(stats.packets_decrypted, 1);
+        assert_eq!(stats.auth_failures, 0);
+        assert_eq!(stats.replay_failures, 0);
+
+        let sa_stats = sa.stats.lock();
+        assert_eq!(sa_stats.packets_in, 1);
+        assert_eq!(sa_stats.bytes_in, payload.len() as u64);
+        assert_eq!(sa_stats.auth_errors, 0);
+    }
+
+    #[test]
+    fn ipsec_process_inbound_rejects_invalid_icv_and_counts_auth_failure() {
+        let manager = IpsecManager::new();
+        manager.set_enabled(true);
+
+        let spi = 0x2300;
+        let mut sa_cfg = SecurityAssociation::new(spi, IPPROTO_ESP, IPSEC_MODE_TRANSPORT);
+        sa_cfg.enc_alg = IPSEC_ENC_AES_CTR;
+        sa_cfg.auth_alg = IPSEC_AUTH_HMAC_SHA256;
+        sa_cfg.enc_key = (0..16).map(|idx| idx as u8).collect();
+        sa_cfg.auth_key = (0..32).map(|idx| (idx as u8).wrapping_add(0x41)).collect();
+        let sa = Arc::new(sa_cfg);
+        manager.sas.lock().insert(spi, sa.clone());
+
+        let payload = b"echos-ipsec-inbound-invalid-icv";
+        let encrypted = sa.encrypt(payload).unwrap();
+        let mut icv = sa.calculate_icv(&encrypted);
+        icv[0] ^= 0x80;
+
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&spi.to_be_bytes());
+        pkt.extend_from_slice(&1u32.to_be_bytes());
+        pkt.extend_from_slice(&encrypted);
+        pkt.extend_from_slice(&icv);
+
+        let err = manager.process_inbound(&pkt).unwrap_err();
+        assert_eq!(err, IpsecError::AuthFailed);
+
+        let stats = manager.stats.lock().clone();
+        assert_eq!(stats.packets_decrypted, 0);
+        assert_eq!(stats.auth_failures, 1);
+        assert_eq!(stats.replay_failures, 0);
+
+        let sa_stats = sa.stats.lock();
+        assert_eq!(sa_stats.packets_in, 0);
+        assert_eq!(sa_stats.auth_errors, 1);
+        assert_eq!(sa_stats.replay_errors, 0);
     }
 }

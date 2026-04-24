@@ -96,11 +96,7 @@ pub fn enter_syscall_scope(sysno: u64) -> CfiScope {
     let pid = crate::task::scheduler::current_task_id();
     let token = scope_token(pid, sysno);
     if is_enabled() {
-        SHADOW_STACKS
-            .lock()
-            .entry(pid)
-            .or_default()
-            .push(token);
+        SHADOW_STACKS.lock().entry(pid).or_default().push(token);
     }
     CfiScope { pid, token }
 }

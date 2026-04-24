@@ -57,7 +57,8 @@ lazy_static::lazy_static! {
 }
 
 pub fn init() {
-    let secure_boot_enabled = crate::security::is_nx_enabled() && crate::security::is_aslr_enabled();
+    let secure_boot_enabled =
+        crate::security::is_nx_enabled() && crate::security::is_aslr_enabled();
     let code_integrity = crate::security::is_nx_enabled() && crate::security::is_wxorx_enabled();
     let runtime_tamper = crate::security::is_smep_enabled() && crate::security::is_smap_enabled();
     let audit = true;
@@ -176,7 +177,10 @@ pub fn attestation_report(last_seq: u64) -> AntiCheatAttestationReport {
     if last_seq != 0 && delta_events.is_empty() && snapshot.kernel_event_audit {
         let observed = LAST_TELEMETRY_GAP_SEQ.load(Ordering::Acquire);
         if observed != last_seq {
-            record_runtime_violation(RuntimeViolation::TelemetryGap, "no attestation delta events");
+            record_runtime_violation(
+                RuntimeViolation::TelemetryGap,
+                "no attestation delta events",
+            );
             LAST_TELEMETRY_GAP_SEQ.store(last_seq, Ordering::Release);
             delta_events = events_since(last_seq);
         }

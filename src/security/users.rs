@@ -203,6 +203,20 @@ impl UserDatabase {
             .cloned()
     }
 
+    pub fn set_password_hash(
+        &self,
+        username: &str,
+        password_hash: String,
+    ) -> Result<(), &'static str> {
+        let mut users = self.users.lock();
+        let user = users
+            .values_mut()
+            .find(|u| u.username == username)
+            .ok_or("Kullanici bulunamadi")?;
+        user.password_hash = password_hash;
+        Ok(())
+    }
+
     /// Grup ekle
     pub fn add_group(&self, entry: GroupEntry) {
         let gid = entry.gid;

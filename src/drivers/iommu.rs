@@ -1989,7 +1989,132 @@ pub enum IommuError {
 // BAŞLATMA (INITIALIZATION)
 // ============================================================================
 
-pub fn init() {
-    // ACPI DMAR tablosunu (Intel) veya IVRS tablosunu (AMD) tara ve birimleri keşfet
-    crate::serial_println!("[IOMMU] Subsystem initialized");
+pub fn init() -> bool {
+    let units = crate::cpu::acpi::get_dmar_units();
+    if units.is_empty() {
+        crate::serial_println!("[IOMMU] No DMAR units discovered");
+        return false;
+    }
+
+    {
+        let mut registered = IOMMU_MANAGER.units.lock();
+        registered.clear();
+    }
+    IOMMU_MANAGER.iommu_enabled.store(false, Ordering::SeqCst);
+
+    for unit in units {
+        let unit_id = IOMMU_MANAGER.register_unit(IommuVendor::Intel, unit.register_base);
+        let Some(iommu) = IOMMU_MANAGER.get_unit(unit_id) else {
+            crate::serial_println!("[IOMMU] Failed to fetch registered unit {}", unit_id);
+            return false;
+        };
+        let domain_id = iommu.create_domain();
+        for device in unit.devices {
+            let bdf = ((device.bus as u16) << 8)
+                | ((device.device as u16) << 3)
+                | (device.function as u16);
+            if let Err(err) = iommu.assign_device_to_domain(domain_id, unit.segment, bdf) {
+                crate::serial_println!(
+                    "[IOMMU] Domain attach failed seg={} bdf={:#x}: {:?}",
+                    unit.segment,
+                    bdf,
+                    err
+                );
+                return false;
+            }
+        }
+    }
+
+    if let Err(err) = IOMMU_MANAGER.init_all() {
+        crate::serial_println!("[IOMMU] Hardware init failed: {:?}", err);
+        return false;
+    }
+    if let Err(err) = IOMMU_MANAGER.enable_all() {
+        crate::serial_println!("[IOMMU] Hardware enable failed: {:?}", err);
+        return false;
+    }
+    if !run_self_test() {
+        crate::serial_println!("[IOMMU] Self-test failed");
+        return false;
+    }
+
+    crate::serial_println!("[IOMMU] Early-boot DMA remapping online");
+    true
+}
+
+pub fn sync_hotplug_device(bus: u8, device: u8, function: u8, present: bool) -> bool {
+    let Some(unit) = IOMMU_MANAGER.get_unit(0) else {
+        return !present;
+    };
+    if present && !unit.enabled.load(Ordering::Acquire) {
+        return false;
+    }
+
+    let bdf = ((bus as u16) << 8) | ((device as u16) << 3) | (function as u16);
+    if present {
+        let already_attached = {
+            let domains = unit.domains.lock();
+            domains.values().any(|domain| {
+                domain
+                    .devices
+                    .lock()
+                    .iter()
+                    .any(|&(segment, attached_bdf)| segment == 0 && attached_bdf == bdf)
+            })
+        };
+        if already_attached {
+            return true;
+        }
+        let domain_id = unit.create_domain();
+        return unit.assign_device_to_domain(domain_id, 0, bdf).is_ok();
+    }
+
+    let mut detached = false;
+    let domains = unit.domains.lock();
+    for domain in domains.values() {
+        let had_device = domain
+            .devices
+            .lock()
+            .iter()
+            .any(|&(segment, attached_bdf)| segment == 0 && attached_bdf == bdf);
+        if had_device {
+            domain.detach_device(0, bdf);
+            detached = true;
+        }
+    }
+    detached || !unit.enabled.load(Ordering::Acquire)
+}
+
+fn run_self_test() -> bool {
+    let Some(unit) = IOMMU_MANAGER.get_unit(0) else {
+        return false;
+    };
+    let domain_id = unit.create_domain();
+    let Some(domain) = unit.get_domain(domain_id) else {
+        return false;
+    };
+
+    const TEST_DMA: u64 = 0x4000_0000;
+    const TEST_PHYS: u64 = 0x0020_0000;
+    const TEST_SIZE: u64 = 0x1000;
+
+    if domain
+        .map(TEST_DMA, TEST_PHYS, TEST_SIZE, true, true)
+        .is_err()
+    {
+        return false;
+    }
+    let mapped = matches!(
+        domain.translate(TEST_DMA),
+        Some(translation) if translation.present
+            && translation.phys_addr == TEST_PHYS
+            && translation.size == TEST_SIZE
+            && translation.read_perm
+            && translation.write_perm
+    );
+    let unmapped_neighbor = domain.translate(TEST_DMA + TEST_SIZE).is_none();
+    let unmapped = domain.unmap(TEST_DMA);
+    let cleared = domain.translate(TEST_DMA).is_none();
+
+    mapped && unmapped_neighbor && unmapped && cleared
 }

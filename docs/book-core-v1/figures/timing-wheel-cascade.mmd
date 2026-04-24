@@ -1,0 +1,13 @@
+flowchart TD
+    A[Schedule sleep task] --> B{wake diff}
+    B -->|<256| C[Level 0]
+    B -->|<65536| D[Level 1]
+    B -->|<16M| E[Level 2]
+    B -->|else| F[Level 3]
+    C --> G[Every tick process current slot]
+    D --> H[When L0 wraps cascade L1]
+    E --> I[When L1 wraps cascade L2]
+    F --> J[When L2 wraps cascade L3]
+    H --> G
+    I --> G
+    J --> G

@@ -167,6 +167,15 @@ pub enum NvmeError {
     FeatureNotSupported, // MSI/MSI-X veya istenen özellik desteklenmiyor
 }
 
+#[inline]
+fn dma_buffer_phys(ptr: *const u8) -> Result<u64, NvmeError> {
+    let vaddr = ptr as u64;
+    crate::memory::try_virt_to_phys_u64(vaddr).ok_or_else(|| {
+        crate::serial_println!("[NVME] DMA buffer translation failed: vaddr={:#x}", vaddr);
+        NvmeError::DataTransferError
+    })
+}
+
 // ============================================================================
 // DENETLEYİCİ YETENEKLERİ (CONTROLLER CAPABILITIES)
 // ============================================================================
@@ -1059,7 +1068,7 @@ impl NvmeController {
         let mut cmd = NvmeCommand::read(cid, nsid, lba, blocks);
 
         // Tampon fiziksel adresini PRP alanına yaz
-        let buffer_phys = crate::memory::virt_to_phys_u64(buffer.as_ptr() as u64);
+        let buffer_phys = dma_buffer_phys(buffer.as_ptr())?;
         cmd.set_buffer(buffer_phys, buffer.len());
 
         unsafe {
@@ -1084,7 +1093,7 @@ impl NvmeController {
         let cid = self.get_cid();
         let mut cmd = NvmeCommand::write(cid, nsid, lba, blocks);
 
-        let buffer_phys = crate::memory::virt_to_phys_u64(buffer.as_ptr() as u64);
+        let buffer_phys = dma_buffer_phys(buffer.as_ptr())?;
         cmd.set_buffer(buffer_phys, buffer.len());
 
         unsafe {
@@ -1128,7 +1137,7 @@ impl NvmeController {
 
         let cid = self.get_cid();
         let mut cmd = NvmeCommand::zone_append(cid, nsid, zone_start_lba, blocks);
-        let buffer_phys = crate::memory::virt_to_phys_u64(buffer.as_ptr() as u64);
+        let buffer_phys = dma_buffer_phys(buffer.as_ptr())?;
         cmd.set_buffer(buffer_phys, buffer.len());
         let completion = unsafe { self.submit_admin_command(&cmd)? };
 
@@ -1202,7 +1211,7 @@ impl NvmeController {
         let cid = self.get_cid();
         let mut cmd =
             NvmeCommand::zone_mgmt_recv(cid, nsid, zone_start_lba, report_buffer.len() as u32);
-        let buffer_phys = crate::memory::virt_to_phys_u64(report_buffer.as_ptr() as u64);
+        let buffer_phys = dma_buffer_phys(report_buffer.as_ptr())?;
         cmd.set_buffer(buffer_phys, report_buffer.len());
         unsafe {
             self.submit_admin_command(&cmd)?;
@@ -1252,7 +1261,7 @@ impl NvmeController {
         cmd.cdw10 = 0x02 | (127 << 16);
 
         let buffer = vec![0u8; 512];
-        let buffer_phys = crate::memory::virt_to_phys_u64(buffer.as_ptr() as u64);
+        let buffer_phys = dma_buffer_phys(buffer.as_ptr())?;
         cmd.set_buffer(buffer_phys, 512);
 
         unsafe {

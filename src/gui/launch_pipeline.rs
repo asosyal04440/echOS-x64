@@ -336,11 +336,41 @@ impl LaunchIntent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DpiVirtualizationMode {
+    Native,
+    BitmapScale,
+    SystemAware,
+    PerMonitorAware,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalDisplayContract {
+    pub output_id: u32,
+    pub ui_scale_100x: u16,
+    pub text_scale_100x: u16,
+    pub cursor_scale_100x: u16,
+    pub dpi_virtualization: DpiVirtualizationMode,
+}
+
+impl Default for ExternalDisplayContract {
+    fn default() -> Self {
+        Self {
+            output_id: 0,
+            ui_scale_100x: 100,
+            text_scale_100x: 100,
+            cursor_scale_100x: 100,
+            dpi_virtualization: DpiVirtualizationMode::Native,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessContract {
     pub loader: LoaderDispatch,
     pub abi: AbiPersonality,
     pub bootstrap: RuntimeBootstrap,
     pub shell_owned: bool,
+    pub external_display: ExternalDisplayContract,
 }
 
 impl ProcessContract {
@@ -368,6 +398,13 @@ impl ProcessContract {
             abi: descriptor.abi,
             bootstrap,
             shell_owned: matches!(descriptor.presentation, AppPresentation::ShellOwned),
+            external_display: ExternalDisplayContract {
+                output_id: 0,
+                ui_scale_100x: 100,
+                text_scale_100x: 100,
+                cursor_scale_100x: 100,
+                dpi_virtualization: DpiVirtualizationMode::Native,
+            },
         }
     }
 }
@@ -415,6 +452,14 @@ impl LaunchSession {
             window,
             event_loop,
         }
+    }
+
+    pub const fn with_external_display_contract(
+        mut self,
+        contract: ExternalDisplayContract,
+    ) -> Self {
+        self.process.external_display = contract;
+        self
     }
 }
 
@@ -648,9 +693,9 @@ mod tests {
     use super::{
         looks_like_external_image_query, resolve_external_image, resolve_file_association,
         resolve_launch_query, resolve_launch_query_with_probe, AbiPersonality, AppDescriptor,
-        AppInstallRoot, AppPresentation, AppTrust, CapabilityProfile, ExecutionContext,
-        LaunchIntent, LaunchSource, LoaderDispatch, PackageRecord, RuntimeBootstrap,
-        StateContract, UnifiedEventLoopContract,
+        AppInstallRoot, AppPresentation, AppTrust, CapabilityProfile, DpiVirtualizationMode,
+        ExecutionContext, ExternalDisplayContract, LaunchIntent, LaunchSource, LoaderDispatch,
+        PackageRecord, RuntimeBootstrap, StateContract, UnifiedEventLoopContract,
     };
 
     #[test]
@@ -727,6 +772,37 @@ mod tests {
     }
 
     #[test]
+    fn launch_session_accepts_external_display_contract_for_bridge_runtimes() {
+        let descriptor = AppDescriptor::new(
+            65,
+            "demo-pe",
+            "Demo PE",
+            LoaderDispatch::Pe,
+            AbiPersonality::Win32,
+            AppPresentation::ShellOwned,
+            CapabilityProfile::shell_defaults(),
+        );
+        let session = LaunchIntent::new(
+            descriptor,
+            ExecutionContext::new(LaunchSource::CommandPalette, 2, "demo-pe"),
+        )
+        .canonical_session()
+        .with_external_display_contract(ExternalDisplayContract {
+            output_id: 3,
+            ui_scale_100x: 150,
+            text_scale_100x: 175,
+            cursor_scale_100x: 125,
+            dpi_virtualization: DpiVirtualizationMode::BitmapScale,
+        });
+        assert_eq!(session.process.external_display.output_id, 3);
+        assert_eq!(session.process.external_display.ui_scale_100x, 150);
+        assert_eq!(
+            session.process.external_display.dpi_virtualization,
+            DpiVirtualizationMode::BitmapScale
+        );
+    }
+
+    #[test]
     fn registry_query_resolves_builtin_alias_before_falling_back() {
         let descriptor = AppDescriptor::new(
             7,
@@ -752,7 +828,10 @@ mod tests {
             AppPresentation::Windowed
         );
         assert_eq!(resolution.descriptor().package_id, "echos.web");
-        assert_eq!(resolution.manifest().state_contract, StateContract::WarmSuspend);
+        assert_eq!(
+            resolution.manifest().state_contract,
+            StateContract::WarmSuspend
+        );
     }
 
     #[test]
@@ -844,6 +923,9 @@ mod tests {
         }];
         let resolution = resolve_file_association("/workspace/notes.md", &registry).expect("assoc");
         assert_eq!(resolution.identity().package_id, "echos.editor");
-        assert_eq!(resolution.manifest().state_contract, StateContract::ColdResume);
+        assert_eq!(
+            resolution.manifest().state_contract,
+            StateContract::ColdResume
+        );
     }
 }

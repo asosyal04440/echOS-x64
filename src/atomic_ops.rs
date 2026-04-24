@@ -534,7 +534,8 @@ impl QSpinLock {
     }
 
     pub fn set_adaptive_spin_loops(&self, loops: u32) {
-        self.adaptive_spin_loops.store(loops.max(64), Ordering::Release);
+        self.adaptive_spin_loops
+            .store(loops.max(64), Ordering::Release);
     }
 
     pub fn lock(&self) -> QSpinGuard<'_> {

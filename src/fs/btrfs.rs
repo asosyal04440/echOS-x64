@@ -32,12 +32,13 @@
 //! - RAID 0/1/5/6/10 desteği
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use sha2::{Digest, Sha256};
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 // ============================================================================
 // Magic Numbers & Constants
@@ -66,6 +67,15 @@ pub const BTRFS_CSUM_TYPE_CRC32: u16 = 0;
 pub const BTRFS_CSUM_TYPE_XXHASH: u16 = 1;
 pub const BTRFS_CSUM_TYPE_SHA256: u16 = 2;
 pub const BTRFS_CSUM_TYPE_BLAKE2: u16 = 3;
+pub const BTRFS_FIRST_CHUNK_TREE_OBJECTID: u64 = 256;
+pub const BTRFS_FT_REG_FILE: u8 = 1;
+pub const BTRFS_FT_DIR: u8 = 2;
+const BTRFS_HEADER_SIZE: usize = 101;
+const BTRFS_LEAF_ITEM_SIZE: usize = 25;
+const BTRFS_KEY_PTR_SIZE: usize = 33;
+const BTRFS_DIR_ITEM_DATA_SIZE: usize = 30;
+const BTRFS_ROOT_ITEM_MIN_SIZE: usize = 239;
+const BTRFS_SUPERBLOCK_SYS_CHUNK_ARRAY_OFFSET: usize = 811;
 
 // ============================================================================
 // Object IDs — Well-Known Tree Roots
@@ -115,6 +125,8 @@ pub const BTRFS_BLOCK_GROUP_ITEM_KEY: u8 = 192;
 pub const BTRFS_CHUNK_ITEM_KEY: u8 = 228;
 /// Device item
 pub const BTRFS_DEV_ITEM_KEY: u8 = 216;
+/// Root item readonly flag
+pub const BTRFS_ROOT_SUBVOL_RDONLY: u64 = 1 << 0;
 
 // ============================================================================
 // Inode Mode Bits
@@ -208,8 +220,16 @@ pub struct BtrfsSuperblock {
     pub incompat_flags: u64,
     /// Checksum type (CRC32C, xxHash, SHA256, BLAKE2)
     pub csum_type: u16,
+    /// Root tree level
+    pub root_level: u8,
+    /// Chunk tree level
+    pub chunk_root_level: u8,
+    /// Log tree level
+    pub log_root_level: u8,
     /// Label (256 bytes max)
     pub label: [u8; 256],
+    /// Embedded system chunk array used to bootstrap logical → physical mapping
+    pub sys_chunk_array: Vec<u8>,
 }
 
 impl BtrfsSuperblock {
@@ -238,6 +258,15 @@ impl BtrfsSuperblock {
             let copy_len = core::cmp::min(256, label_end - 299);
             label[..copy_len].copy_from_slice(&data[299..299 + copy_len]);
         }
+        let sys_chunk_array_size =
+            u32::from_le_bytes([data[160], data[161], data[162], data[163]]) as usize;
+        let sys_chunk_start = BTRFS_SUPERBLOCK_SYS_CHUNK_ARRAY_OFFSET;
+        let sys_chunk_end = sys_chunk_start.saturating_add(sys_chunk_array_size);
+        let sys_chunk_array = if sys_chunk_end <= data.len() {
+            data[sys_chunk_start..sys_chunk_end].to_vec()
+        } else {
+            Vec::new()
+        };
 
         Some(Self {
             csum,
@@ -281,7 +310,7 @@ impl BtrfsSuperblock {
             node_size: u32::from_le_bytes([data[148], data[149], data[150], data[151]]),
             leaf_size: u32::from_le_bytes([data[152], data[153], data[154], data[155]]),
             stripe_size: u32::from_le_bytes([data[156], data[157], data[158], data[159]]),
-            sys_chunk_array_size: u32::from_le_bytes([data[160], data[161], data[162], data[163]]),
+            sys_chunk_array_size: sys_chunk_array_size as u32,
             chunk_root_generation: u64::from_le_bytes([
                 data[164], data[165], data[166], data[167], data[168], data[169], data[170],
                 data[171],
@@ -299,7 +328,11 @@ impl BtrfsSuperblock {
                 data[195],
             ]),
             csum_type: u16::from_le_bytes([data[196], data[197]]),
+            root_level: data[198],
+            chunk_root_level: data[199],
+            log_root_level: data[200],
             label,
+            sys_chunk_array,
         })
     }
 
@@ -472,7 +505,8 @@ fn xxhash64(data: &[u8]) -> u64 {
             index += 32;
         }
 
-        acc = v1.rotate_left(1)
+        acc = v1
+            .rotate_left(1)
             .wrapping_add(v2.rotate_left(7))
             .wrapping_add(v3.rotate_left(12))
             .wrapping_add(v4.rotate_left(18));
@@ -668,10 +702,7 @@ pub fn scrub_superblock_mirror_images(images: &[BtrfsScrubMirrorImage]) -> Btrfs
     report
 }
 
-pub fn scrub_superblock_mirrors_with_layout(
-    disk_data: &[u8],
-    mirrors: &[u64],
-) -> BtrfsScrubReport {
+pub fn scrub_superblock_mirrors_with_layout(disk_data: &[u8], mirrors: &[u64]) -> BtrfsScrubReport {
     let images = capture_scrub_mirror_images(disk_data, mirrors);
     scrub_superblock_mirror_images(&images)
 }
@@ -694,7 +725,10 @@ pub fn register_scrub_volume_with_layout(mount_point: &str, disk_data: &[u8], mi
     };
 
     let mut volumes = BTRFS_SCRUB_VOLUMES.lock();
-    if let Some(existing) = volumes.iter_mut().find(|entry| entry.mount_point == mount_point) {
+    if let Some(existing) = volumes
+        .iter_mut()
+        .find(|entry| entry.mount_point == mount_point)
+    {
         *existing = volume;
     } else {
         volumes.push(volume);
@@ -1135,6 +1169,91 @@ impl BtrfsExtentData {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct BtrfsRootItem {
+    pub generation: u64,
+    pub root_dirid: u64,
+    pub bytenr: u64,
+    pub byte_limit: u64,
+    pub bytes_used: u64,
+    pub last_snapshot: u64,
+    pub flags: u64,
+    pub refs: u32,
+    pub level: u8,
+}
+
+impl BtrfsRootItem {
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < BTRFS_ROOT_ITEM_MIN_SIZE {
+            return None;
+        }
+
+        Some(Self {
+            generation: u64::from_le_bytes([
+                data[160], data[161], data[162], data[163], data[164], data[165], data[166],
+                data[167],
+            ]),
+            root_dirid: u64::from_le_bytes([
+                data[168], data[169], data[170], data[171], data[172], data[173], data[174],
+                data[175],
+            ]),
+            bytenr: u64::from_le_bytes([
+                data[176], data[177], data[178], data[179], data[180], data[181], data[182],
+                data[183],
+            ]),
+            byte_limit: u64::from_le_bytes([
+                data[184], data[185], data[186], data[187], data[188], data[189], data[190],
+                data[191],
+            ]),
+            bytes_used: u64::from_le_bytes([
+                data[192], data[193], data[194], data[195], data[196], data[197], data[198],
+                data[199],
+            ]),
+            last_snapshot: u64::from_le_bytes([
+                data[200], data[201], data[202], data[203], data[204], data[205], data[206],
+                data[207],
+            ]),
+            flags: u64::from_le_bytes([
+                data[208], data[209], data[210], data[211], data[212], data[213], data[214],
+                data[215],
+            ]),
+            refs: u32::from_le_bytes([data[216], data[217], data[218], data[219]]),
+            level: data[238],
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BtrfsDirectoryEntry {
+    pub name: String,
+    pub inode: u64,
+    pub file_type: u8,
+}
+
+#[derive(Clone, Debug)]
+struct BtrfsCollectedItem {
+    key: BtrfsKey,
+    data: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct BtrfsFileExtentRecord {
+    file_offset: u64,
+    extent: BtrfsExtentData,
+    inline_data: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub enum BtrfsStorage {
+    Resident(Arc<Vec<u8>>),
+}
+
+#[derive(Clone, Debug)]
+pub struct MountedBtrfs {
+    pub fs: BtrfsFilesystem,
+    pub storage: BtrfsStorage,
+}
+
 // ============================================================================
 // Chunk Item (Logical → Physical mapping)
 // ============================================================================
@@ -1286,6 +1405,7 @@ pub struct BtrfsSubvolume {
 // ============================================================================
 
 /// Btrfs dosya sistemi yöneticisi
+#[derive(Clone, Debug)]
 pub struct BtrfsFilesystem {
     /// Parse edilmiş superblock
     pub superblock: BtrfsSuperblock,
@@ -1295,6 +1415,18 @@ pub struct BtrfsFilesystem {
     pub inode_cache: BTreeMap<u64, BtrfsInodeItem>,
     /// Chunk map (logical → physical)
     pub chunk_map: Vec<(u64, u64, BtrfsChunkItem)>, // (logical_start, logical_end, chunk)
+    /// Root item cache (subvolume id → root item)
+    pub root_items: BTreeMap<u64, BtrfsRootItem>,
+    /// Directory entry cache (directory inode → entries)
+    pub directory_entries: BTreeMap<u64, Vec<BtrfsDirectoryEntry>>,
+    /// File extent cache (inode → extent descriptors)
+    file_extents: BTreeMap<u64, Vec<BtrfsFileExtentRecord>>,
+    /// Varsayılan subvolume id
+    pub default_subvolume_id: u64,
+    /// Varsayılan subvolume kök inode id
+    pub default_root_dirid: u64,
+    /// Varsayılan subvolume FS tree root logical bytenr
+    pub default_fs_tree_bytenr: u64,
     /// Mount noktası
     pub mount_point: String,
 }
@@ -1307,6 +1439,12 @@ impl BtrfsFilesystem {
             subvolumes: Vec::new(),
             inode_cache: BTreeMap::new(),
             chunk_map: Vec::new(),
+            root_items: BTreeMap::new(),
+            directory_entries: BTreeMap::new(),
+            file_extents: BTreeMap::new(),
+            default_subvolume_id: BTRFS_FS_TREE_OBJECTID,
+            default_root_dirid: BTRFS_FIRST_FREE_OBJECTID,
+            default_fs_tree_bytenr: 0,
             mount_point: String::from(mount_point),
         }
     }
@@ -1323,33 +1461,82 @@ impl BtrfsFilesystem {
         });
     }
 
+    fn upsert_chunk(
+        &mut self,
+        logical_start: u64,
+        chunk: BtrfsChunkItem,
+    ) -> Result<(), &'static str> {
+        self.chunk_mapping_supported(&chunk)?;
+        let logical_end = logical_start.saturating_add(chunk.length);
+        self.chunk_map
+            .retain(|(start, _, _)| *start != logical_start);
+        self.chunk_map.push((logical_start, logical_end, chunk));
+        self.chunk_map.sort_by_key(|(start, _, _)| *start);
+        Ok(())
+    }
+
+    fn load_system_chunk_array(&mut self) -> Result<(), &'static str> {
+        let mut cursor = 0usize;
+        let bytes = self.superblock.sys_chunk_array.clone();
+        while cursor < bytes.len() {
+            if bytes[cursor..].iter().all(|byte| *byte == 0) {
+                break;
+            }
+            if cursor + 17 > bytes.len() {
+                return Err("btrfs: truncated system chunk key");
+            }
+            let key = BtrfsKey::from_bytes(&bytes[cursor..cursor + 17])
+                .ok_or("btrfs: invalid system chunk key")?;
+            cursor += 17;
+            if key.item_type != BTRFS_CHUNK_ITEM_KEY {
+                return Err("btrfs: unsupported system chunk entry");
+            }
+            if cursor + 48 > bytes.len() {
+                return Err("btrfs: truncated system chunk item");
+            }
+            let num_stripes = u16::from_le_bytes([bytes[cursor + 44], bytes[cursor + 45]]) as usize;
+            let chunk_size = 48usize.saturating_add(num_stripes.saturating_mul(32));
+            if cursor + chunk_size > bytes.len() {
+                return Err("btrfs: truncated system chunk stripe array");
+            }
+            let chunk = BtrfsChunkItem::from_bytes(&bytes[cursor..cursor + chunk_size])
+                .ok_or("btrfs: invalid system chunk item")?;
+            self.upsert_chunk(key.offset, chunk)?;
+            cursor += chunk_size;
+        }
+        Ok(())
+    }
+
     /// Snapshot oluşturur (O(1) CoW klon)
-    pub fn create_snapshot(&mut self, source_id: u64, name: &str, readonly: bool) -> u64 {
-        let snap_id = BTRFS_FIRST_FREE_OBJECTID + self.subvolumes.len() as u64;
-        self.subvolumes.push(BtrfsSubvolume {
-            id: snap_id,
-            parent_id: source_id,
-            name: String::from(name),
-            generation: self.superblock.generation,
-            readonly,
-            root_generation: self.superblock.generation,
-        });
+    pub fn create_snapshot(
+        &mut self,
+        _source_id: u64,
+        _name: &str,
+        _readonly: bool,
+    ) -> Result<u64, &'static str> {
+        Err("btrfs: snapshot creation is not supported on the resident read-only backend")
+    }
 
-        crate::serial_println!(
-            "[Btrfs] Snapshot created: {} (id={}, parent={}, ro={})",
-            name,
-            snap_id,
-            source_id,
-            readonly
-        );
-
-        snap_id
+    fn chunk_mapping_supported(&self, chunk: &BtrfsChunkItem) -> Result<(), &'static str> {
+        if self.superblock.num_devices != 1 {
+            return Err("btrfs: multi-device volumes are not supported");
+        }
+        if chunk.raid_type_str() != "single" {
+            return Err("btrfs: raid chunk profiles are not supported");
+        }
+        if chunk.num_stripes != 1 || chunk.stripes.len() != 1 || chunk.sub_stripes > 1 {
+            return Err("btrfs: multi-stripe chunks are not supported");
+        }
+        Ok(())
     }
 
     /// Logical adres → physical adrese çevirir
     pub fn logical_to_physical(&self, logical: u64) -> Option<u64> {
         for (start, end, chunk) in &self.chunk_map {
             if logical >= *start && logical < *end {
+                if self.chunk_mapping_supported(chunk).is_err() {
+                    return None;
+                }
                 let offset = logical - start;
                 if let Some(stripe) = chunk.stripes.first() {
                     return Some(stripe.offset + offset);
@@ -1357,6 +1544,335 @@ impl BtrfsFilesystem {
             }
         }
         None
+    }
+
+    fn read_logical_range(
+        &self,
+        storage: &BtrfsStorage,
+        logical: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, &'static str> {
+        let mut physical = None;
+        for (start, end, chunk) in &self.chunk_map {
+            if logical >= *start && logical < *end {
+                self.chunk_mapping_supported(chunk)?;
+                let offset = logical - start;
+                if let Some(stripe) = chunk.stripes.first() {
+                    physical = Some(stripe.offset + offset);
+                    break;
+                }
+            }
+        }
+        let physical = physical.ok_or("btrfs: logical address is not mapped")?;
+        let start = physical as usize;
+        let end = start
+            .checked_add(len)
+            .ok_or("btrfs: address overflow while reading")?;
+        match storage {
+            BtrfsStorage::Resident(image) => {
+                if end > image.len() {
+                    return Err("btrfs: read exceeds resident image");
+                }
+                Ok(image[start..end].to_vec())
+            }
+        }
+    }
+
+    fn collect_tree_items(
+        &self,
+        storage: &BtrfsStorage,
+        logical: u64,
+        items: &mut Vec<BtrfsCollectedItem>,
+        visited: &mut Vec<u64>,
+    ) -> Result<(), &'static str> {
+        if visited.iter().any(|seen| *seen == logical) {
+            return Err("btrfs: tree cycle detected");
+        }
+        visited.push(logical);
+
+        let block =
+            self.read_logical_range(storage, logical, self.superblock.node_size as usize)?;
+        let header = BtrfsHeader::from_bytes(&block).ok_or("btrfs: invalid tree header")?;
+        if header.bytenr != logical {
+            return Err("btrfs: tree header bytenr mismatch");
+        }
+        if header.fsid != self.superblock.fsid {
+            return Err("btrfs: tree header fsid mismatch");
+        }
+
+        if header.is_leaf() {
+            let item_table_end =
+                BTRFS_HEADER_SIZE.saturating_add(header.nritems as usize * BTRFS_LEAF_ITEM_SIZE);
+            if item_table_end > block.len() {
+                return Err("btrfs: truncated leaf item table");
+            }
+            for index in 0..header.nritems as usize {
+                let slot = BTRFS_HEADER_SIZE + index * BTRFS_LEAF_ITEM_SIZE;
+                let item = BtrfsItem::from_bytes(&block[slot..slot + BTRFS_LEAF_ITEM_SIZE])
+                    .ok_or("btrfs: invalid leaf item")?;
+                let data_start = item.offset as usize;
+                let data_end = data_start
+                    .checked_add(item.size as usize)
+                    .ok_or("btrfs: leaf item overflow")?;
+                if data_start < item_table_end || data_end > block.len() {
+                    return Err("btrfs: leaf item payload out of range");
+                }
+                items.push(BtrfsCollectedItem {
+                    key: item.key,
+                    data: block[data_start..data_end].to_vec(),
+                });
+            }
+        } else {
+            let ptr_table_end =
+                BTRFS_HEADER_SIZE.saturating_add(header.nritems as usize * BTRFS_KEY_PTR_SIZE);
+            if ptr_table_end > block.len() {
+                return Err("btrfs: truncated internal node pointer table");
+            }
+            for index in 0..header.nritems as usize {
+                let slot = BTRFS_HEADER_SIZE + index * BTRFS_KEY_PTR_SIZE;
+                let key_ptr = BtrfsKeyPtr::from_bytes(&block[slot..slot + BTRFS_KEY_PTR_SIZE])
+                    .ok_or("btrfs: invalid tree key pointer")?;
+                self.collect_tree_items(storage, key_ptr.blockptr, items, visited)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn load_chunk_tree(&mut self, storage: &BtrfsStorage) -> Result<(), &'static str> {
+        let mut items = Vec::new();
+        let mut visited = Vec::new();
+        self.collect_tree_items(
+            storage,
+            self.superblock.chunk_root,
+            &mut items,
+            &mut visited,
+        )?;
+        for item in items {
+            if item.key.item_type != BTRFS_CHUNK_ITEM_KEY {
+                continue;
+            }
+            let chunk =
+                BtrfsChunkItem::from_bytes(&item.data).ok_or("btrfs: invalid chunk tree item")?;
+            self.upsert_chunk(item.key.offset, chunk)?;
+        }
+        if self.chunk_map.is_empty() {
+            return Err("btrfs: chunk map bootstrap produced no mappings");
+        }
+        Ok(())
+    }
+
+    fn load_root_tree(&mut self, storage: &BtrfsStorage) -> Result<(), &'static str> {
+        let mut items = Vec::new();
+        let mut visited = Vec::new();
+        self.collect_tree_items(storage, self.superblock.root, &mut items, &mut visited)?;
+
+        let mut best_default_root: Option<(BtrfsKey, BtrfsRootItem)> = None;
+        for item in items {
+            if item.key.item_type != BTRFS_ROOT_ITEM_KEY {
+                continue;
+            }
+            let root_item =
+                BtrfsRootItem::from_bytes(&item.data).ok_or("btrfs: invalid root item")?;
+            self.root_items.insert(item.key.objectid, root_item.clone());
+            if item.key.objectid == BTRFS_FS_TREE_OBJECTID
+                && best_default_root
+                    .as_ref()
+                    .is_none_or(|(best_key, _)| item.key.offset > best_key.offset)
+            {
+                best_default_root = Some((item.key, root_item));
+            }
+        }
+
+        let (_, default_root) = best_default_root.ok_or("btrfs: default fs tree root missing")?;
+        self.default_subvolume_id = BTRFS_FS_TREE_OBJECTID;
+        self.default_root_dirid = default_root.root_dirid;
+        self.default_fs_tree_bytenr = default_root.bytenr;
+        self.subvolumes.clear();
+        self.subvolumes.push(BtrfsSubvolume {
+            id: self.default_subvolume_id,
+            parent_id: 0,
+            name: String::from("top"),
+            generation: default_root.generation,
+            readonly: (default_root.flags & BTRFS_ROOT_SUBVOL_RDONLY) != 0,
+            root_generation: default_root.generation,
+        });
+
+        Ok(())
+    }
+
+    fn index_fs_tree_items(&mut self, items: Vec<BtrfsCollectedItem>) -> Result<(), &'static str> {
+        self.inode_cache.clear();
+        self.directory_entries.clear();
+        self.file_extents.clear();
+
+        for item in items {
+            match item.key.item_type {
+                BTRFS_INODE_ITEM_KEY => {
+                    let inode = BtrfsInodeItem::from_bytes(&item.data)
+                        .ok_or("btrfs: invalid inode item")?;
+                    self.inode_cache.insert(item.key.objectid, inode);
+                }
+                BTRFS_DIR_ITEM_KEY | BTRFS_DIR_INDEX_KEY => {
+                    let entries = parse_directory_entries(&item.data)?;
+                    self.directory_entries
+                        .entry(item.key.objectid)
+                        .or_default()
+                        .extend(entries);
+                }
+                BTRFS_EXTENT_DATA_KEY => {
+                    let extent = BtrfsExtentData::from_bytes(&item.data)
+                        .ok_or("btrfs: invalid extent data")?;
+                    if extent.compression != 0 {
+                        return Err("btrfs: compressed extents are not supported");
+                    }
+                    let inline_data = if extent.is_inline() {
+                        item.data[21..].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    self.file_extents
+                        .entry(item.key.objectid)
+                        .or_default()
+                        .push(BtrfsFileExtentRecord {
+                            file_offset: item.key.offset,
+                            extent,
+                            inline_data,
+                        });
+                }
+                _ => {}
+            }
+        }
+
+        for extents in self.file_extents.values_mut() {
+            extents.sort_by_key(|record| record.file_offset);
+        }
+
+        Ok(())
+    }
+
+    fn load_default_fs_tree(&mut self, storage: &BtrfsStorage) -> Result<(), &'static str> {
+        if self.default_fs_tree_bytenr == 0 {
+            return Err("btrfs: default fs tree root not resolved");
+        }
+        let mut items = Vec::new();
+        let mut visited = Vec::new();
+        self.collect_tree_items(
+            storage,
+            self.default_fs_tree_bytenr,
+            &mut items,
+            &mut visited,
+        )?;
+        self.index_fs_tree_items(items)?;
+        if !self.inode_cache.contains_key(&self.default_root_dirid) {
+            return Err("btrfs: default root inode missing");
+        }
+        Ok(())
+    }
+
+    pub fn load_from_storage(&mut self, storage: &BtrfsStorage) -> Result<(), &'static str> {
+        if self.superblock.num_devices != 1 {
+            return Err("btrfs: multi-device volumes are not supported");
+        }
+        self.load_system_chunk_array()?;
+        self.load_chunk_tree(storage)?;
+        self.load_root_tree(storage)?;
+        self.load_default_fs_tree(storage)?;
+        Ok(())
+    }
+
+    pub fn get_inode(&self, inode: u64) -> Result<BtrfsInodeItem, &'static str> {
+        self.inode_cache
+            .get(&inode)
+            .cloned()
+            .ok_or("btrfs: inode not found")
+    }
+
+    pub fn root_inode(&self) -> u64 {
+        self.default_root_dirid
+    }
+
+    pub fn resolve_path(&self, path: &str) -> Result<u64, &'static str> {
+        let mut current = self.root_inode();
+        let trimmed = path.trim_matches('/');
+        if trimmed.is_empty() {
+            return Ok(current);
+        }
+
+        for component in trimmed.split('/').filter(|component| !component.is_empty()) {
+            let inode = self.get_inode(current)?;
+            if !inode.is_directory() {
+                return Err("btrfs: parent is not a directory");
+            }
+            let entries = self
+                .directory_entries
+                .get(&current)
+                .ok_or("btrfs: directory entries missing")?;
+            let next = entries
+                .iter()
+                .find(|entry| entry.name == component)
+                .map(|entry| entry.inode)
+                .ok_or("btrfs: file not found")?;
+            current = next;
+        }
+
+        Ok(current)
+    }
+
+    pub fn list_directory(&self, inode: u64) -> Result<Vec<BtrfsDirectoryEntry>, &'static str> {
+        let inode_item = self.get_inode(inode)?;
+        if !inode_item.is_directory() {
+            return Err("btrfs: path is not a directory");
+        }
+        Ok(self
+            .directory_entries
+            .get(&inode)
+            .cloned()
+            .unwrap_or_else(Vec::new))
+    }
+
+    pub fn read_file_from_storage(
+        &self,
+        inode: u64,
+        storage: &BtrfsStorage,
+    ) -> Result<Vec<u8>, &'static str> {
+        let inode_item = self.get_inode(inode)?;
+        if inode_item.is_directory() {
+            return Err("btrfs: path is a directory");
+        }
+
+        let mut file = vec![0u8; inode_item.size as usize];
+        let extents = self
+            .file_extents
+            .get(&inode)
+            .cloned()
+            .unwrap_or_else(Vec::new);
+
+        for record in extents {
+            let source = if record.extent.is_inline() {
+                record.inline_data
+            } else if record.extent.extent_type == BtrfsExtentType::Regular as u8 {
+                self.read_logical_range(
+                    storage,
+                    record
+                        .extent
+                        .disk_bytenr
+                        .saturating_add(record.extent.offset),
+                    record.extent.num_bytes as usize,
+                )?
+            } else {
+                return Err("btrfs: prealloc extents are not supported");
+            };
+
+            let start = record.file_offset as usize;
+            if start >= file.len() {
+                continue;
+            }
+            let copy_len = core::cmp::min(source.len(), file.len() - start);
+            file[start..start + copy_len].copy_from_slice(&source[..copy_len]);
+        }
+
+        Ok(file)
     }
 
     /// Dosya sistemi bilgilerini yazdırır
@@ -1381,8 +1897,44 @@ impl BtrfsFilesystem {
         crate::serial_println!("[Btrfs] Checksum: {}", self.superblock.csum_type_str());
         crate::serial_println!("[Btrfs] Devices: {}", self.superblock.num_devices);
         crate::serial_println!("[Btrfs] Subvolumes: {}", self.subvolumes.len());
+        crate::serial_println!("[Btrfs] Root inode: {}", self.default_root_dirid);
         crate::serial_println!("[Btrfs] Mount: {}", self.mount_point);
     }
+}
+
+fn parse_directory_entries(data: &[u8]) -> Result<Vec<BtrfsDirectoryEntry>, &'static str> {
+    let mut entries = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < data.len() {
+        if cursor + BTRFS_DIR_ITEM_DATA_SIZE > data.len() {
+            return Err("btrfs: truncated directory entry");
+        }
+        let location = BtrfsKey::from_bytes(&data[cursor..cursor + 17])
+            .ok_or("btrfs: invalid directory entry key")?;
+        let data_len = u16::from_le_bytes([data[cursor + 25], data[cursor + 26]]) as usize;
+        let name_len = u16::from_le_bytes([data[cursor + 27], data[cursor + 28]]) as usize;
+        let file_type = data[cursor + 29];
+        let total_len = BTRFS_DIR_ITEM_DATA_SIZE
+            .checked_add(name_len)
+            .and_then(|size| size.checked_add(data_len))
+            .ok_or("btrfs: directory entry length overflow")?;
+        if cursor + total_len > data.len() {
+            return Err("btrfs: directory entry payload out of range");
+        }
+        let name_start = cursor + BTRFS_DIR_ITEM_DATA_SIZE;
+        let name_end = name_start + name_len;
+        let name = core::str::from_utf8(&data[name_start..name_end])
+            .map_err(|_| "btrfs: invalid utf-8 directory entry name")?;
+        entries.push(BtrfsDirectoryEntry {
+            name: String::from(name),
+            inode: location.objectid,
+            file_type,
+        });
+        cursor += total_len;
+    }
+
+    Ok(entries)
 }
 
 // ============================================================================
@@ -1390,7 +1942,8 @@ impl BtrfsFilesystem {
 // ============================================================================
 
 lazy_static::lazy_static! {
-    static ref BTRFS_FILESYSTEMS: Mutex<Vec<BtrfsFilesystem>> = Mutex::new(Vec::new());
+    static ref BTRFS_FILESYSTEMS: Mutex<BTreeMap<String, MountedBtrfs>> =
+        Mutex::new(BTreeMap::new());
     static ref BTRFS_SCRUB_VOLUMES: Mutex<Vec<BtrfsScrubVolume>> = Mutex::new(Vec::new());
     static ref BTRFS_SCRUB_LAST_REPORTS: Mutex<Vec<BtrfsScrubDaemonVolumeReport>> =
         Mutex::new(Vec::new());
@@ -1413,6 +1966,14 @@ pub fn init() {
 
 /// Btrfs mount eder
 pub fn mount_from_data(disk_data: &[u8], mount_point: &str) -> Result<(), &'static str> {
+    mount_named_from_data(mount_point, disk_data, mount_point)
+}
+
+pub fn mount_named_from_data(
+    name: &str,
+    disk_data: &[u8],
+    mount_point: &str,
+) -> Result<(), &'static str> {
     if disk_data.len() < BTRFS_SUPER_OFFSET + BTRFS_SUPERBLOCK_SIZE {
         return Err("Disk too small for Btrfs");
     }
@@ -1424,11 +1985,14 @@ pub fn mount_from_data(disk_data: &[u8], mount_point: &str) -> Result<(), &'stat
     )
     .ok_or("Invalid Btrfs superblock")?;
 
+    let storage = BtrfsStorage::Resident(Arc::new(disk_data.to_vec()));
     let mut fs = BtrfsFilesystem::new(sb, mount_point);
-    fs.add_default_subvolume();
+    fs.load_from_storage(&storage)?;
     fs.print_info();
 
-    BTRFS_FILESYSTEMS.lock().push(fs);
+    BTRFS_FILESYSTEMS
+        .lock()
+        .insert(name.to_string(), MountedBtrfs { fs, storage });
     register_scrub_volume(mount_point, disk_data);
     let attention_required = run_scrub_daemon_pass();
     if attention_required > 0 {
@@ -1444,4 +2008,12 @@ pub fn mount_from_data(disk_data: &[u8], mount_point: &str) -> Result<(), &'stat
 /// Mount edilmiş Btrfs sayısı
 pub fn mounted_count() -> usize {
     BTRFS_FILESYSTEMS.lock().len()
+}
+
+pub fn get_mounted_btrfs(name: &str) -> Option<MountedBtrfs> {
+    BTRFS_FILESYSTEMS.lock().get(name).cloned()
+}
+
+pub fn unmount_btrfs(name: &str) -> bool {
+    BTRFS_FILESYSTEMS.lock().remove(name).is_some()
 }

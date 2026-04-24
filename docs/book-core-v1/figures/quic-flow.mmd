@@ -1,0 +1,9 @@
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: Initial with ClientHello
+    S->>C: Initial and Handshake
+    C->>S: Handshake Finished
+    Note over C,S: 1-RTT keys active
+    C->>S: STREAM frame data
+    S->>C: ACK ranges

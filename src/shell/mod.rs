@@ -68,17 +68,21 @@ pub mod expr;
 pub mod scripting;
 
 use crate::ipc::request_store_sync;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use editor::GapBuffer;
+use sha1::Sha1;
+use sha2::{Digest, Sha224, Sha256, Sha384, Sha512, Sha512_224, Sha512_256};
 
 const BUILTIN_COMMANDS: &[&str] = &[
     "help",
     "ver",
+    "true",
+    "false",
     "echo",
     "clear",
     "pwd",
@@ -87,12 +91,120 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "tree",
     "find",
     "stat",
+    "basename",
+    "bc",
+    "blkdiscard",
+    "cal",
     "cat",
+    "chgrp",
+    "chroot",
+    "chvt",
+    "cmp",
+    "cols",
+    "comm",
+    "cron",
+    "ctrlaltdel",
+    "cut",
+    "dc",
+    "dd",
+    "dirname",
+    "dmesg",
+    "eject",
+    "expand",
+    "expr",
+    "fallocate",
+    "flock",
+    "fold",
+    "freeramdisk",
+    "fsfreeze",
+    "getconf",
+    "getty",
     "head",
+    "halt",
+    "hwclock",
+    "insmod",
+    "join",
+    "cksum",
+    "du",
+    "ed",
+    "killall5",
+    "last",
+    "lastlog",
+    "link",
+    "logname",
+    "logger",
+    "login",
+    "make",
+    "md5sum",
+    "mkfifo",
+    "mesg",
+    "mknod",
+    "mkswap",
+    "mktemp",
+    "nice",
+    "nohup",
+    "od",
+    "nologin",
+    "pagesize",
+    "pathchk",
+    "passwd",
+    "pivot_root",
+    "pwdx",
+    "renice",
     "tail",
+    "nl",
+    "printenv",
+    "sha1sum",
+    "sha224sum",
+    "sha256sum",
+    "sha384sum",
+    "sha512sum",
+    "sha512-224sum",
+    "sha512-256sum",
+    "sleep",
+    "respawn",
+    "rmmod",
+    "split",
+    "sponge",
+    "setsid",
+    "sync",
+    "su",
+    "swaplabel",
+    "swapoff",
+    "swapon",
+    "switch_root",
+    "sysctl",
+    "tar",
+    "tftp",
+    "time",
+    "tsort",
+    "tty",
+    "unshare",
+    "vtallow",
+    "unexpand",
+    "unlink",
+    "uudecode",
+    "uuencode",
     "wc",
+    "watch",
+    "xargs",
+    "xinstall",
+    "yes",
     "grep",
+    "lsusb",
+    "mountpoint",
+    "paste",
+    "pidof",
+    "printf",
+    "readahead",
+    "rev",
+    "seq",
+    "sed",
     "sort",
+    "strings",
+    "tee",
+    "test",
+    "tr",
     "uniq",
     "cp",
     "mv",
@@ -123,7 +235,9 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "chown",
     "mount",
     "umount",
+    "loop",
     "uname",
+    "who",
     "whoami",
     "id",
     "uptime",
@@ -151,6 +265,7 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "jail-log",
     "ring-stats",
     "boot-order",
+    "ech-tools",
 ];
 
 pub fn builtin_command_names() -> &'static [&'static str] {
@@ -160,24 +275,116 @@ pub fn builtin_command_names() -> &'static [&'static str] {
 fn builtin_summary(name: &str) -> &'static str {
     match name {
         "help" => "komut katalogu veya komut yardimi",
+        "true" => "basarili bir cikis durumu dondurur",
+        "false" => "basarisiz bir cikis durumu dondurur",
         "pwd" => "aktif calisma dizinini gosterir",
         "cd" => "aktif calisma dizinini degistirir",
         "ls" => "dizin icerigini listeler",
         "tree" => "dizin agacini cizer",
         "find" => "dosya ve dizin arar",
         "stat" => "dosya metadatasini gosterir",
+        "basename" => "yolun son dolu bilesenini yazar",
+        "bc" => "aritmetik ifadeleri degerlendirir",
+        "blkdiscard" => "dosya veya blok-yuzeyi byte araligini discard eder",
+        "cal" => "aylik takvim basar",
         "cat" => "metin dosyasini ekrana yazar",
+        "chgrp" => "dosya grup kimligini degistirir",
+        "chroot" => "shell kok dizin kapsaminda komut calistirir",
+        "cmp" => "iki dosyayi byte byte karsilastirir",
+        "cols" => "girdiyi sutunlu duzende yazar",
+        "comm" => "sirali iki dosyanin satirlarini karsilastirir",
+        "cron" => "crontab satirlarini sinirli gecisle calistirir",
+        "cut" => "alanlari veya sutunlari stdin'den secer",
+        "dc" => "ters Lehce aritmetik ifadeleri degerlendirir",
+        "dd" => "blok tabanli veri kopyalar",
+        "dirname" => "yolun dizin kismini yazar",
+        "eject" => "cikarilabilir medya icin eject istegi kaydeder",
+        "expand" => "tab karakterlerini bosluga cevirir",
+        "expr" => "aritmetik veya shell ifadesi degerlendirir",
+        "fallocate" => "dosya uzunlugunu ayirir veya genisletir",
+        "fold" => "uzun satirlari sabit genislikte sarar",
+        "freeramdisk" => "loopback/ramdisk kaydini kapatir",
+        "fsfreeze" => "mount yazma donma durumunu degistirir",
+        "getconf" => "cekirdek ve oturum konfigurasyon degerlerini verir",
+        "getty" => "tty icin login oturumu baslatir",
+        "halt" => "init kapatma yolunu tetikler",
         "head" => "ilk satirlari gosterir",
+        "hwclock" => "RTC onbellegindeki donanim saatini yazar",
+        "insmod" => "imzali modul dosyasini shell modul kaydina alir",
+        "join" => "iki sirali dosyayi ortak ilk alana gore birlestirir",
+        "cksum" => "POSIX CRC checksum ve byte sayisini hesaplar",
+        "du" => "dosya ve dizinlerin toplam boyutunu raporlar",
+        "link" => "tek bir hard link olusturur",
+        "logname" => "giris yapan kullanici adini yazar",
+        "logger" => "mesaji kernel log yoluna yazar",
+        "md5sum" => "girdi icin MD5 digest hesaplar",
+        "mkfifo" => "isimli POSIX pipe olusturur",
+        "mkswap" => "swap alani imzasini yazar",
+        "mktemp" => "cakismayan hedef dosya yolu olusturur",
+        "nice" => "komutu ayarlanmis nice degeriyle calistirir",
+        "nohup" => "komutu hangup'tan ayrilmis ciktiyle calistirir",
+        "od" => "girdiyi octal dump biciminde yazar",
+        "pagesize" => "etkin sayfa boyutunu yazar",
+        "passwd" => "kullanici parola hash kaydini degistirir",
+        "pivot_root" => "shell mount namespace kokunu degistirir",
+        "pathchk" => "yol uzunlugu ve bilesen sinirlarini dogrular",
         "tail" => "son satirlari gosterir",
+        "nl" => "satirlari numaralandirir",
+        "printenv" => "ortam degiskenlerini veya secilenlerini basar",
+        "renice" => "process nice kaydini gunceller",
+        "sha1sum" => "girdi icin SHA-1 digest hesaplar",
+        "sha224sum" => "girdi icin SHA-224 digest hesaplar",
+        "sha256sum" => "girdi icin SHA-256 digest hesaplar",
+        "sha384sum" => "girdi icin SHA-384 digest hesaplar",
+        "sha512sum" => "girdi icin SHA-512 digest hesaplar",
+        "sha512-224sum" => "girdi icin SHA-512/224 digest hesaplar",
+        "sha512-256sum" => "girdi icin SHA-512/256 digest hesaplar",
+        "sleep" => "belirtilen sure kadar bekler",
+        "rmmod" => "shell modul kaydindan modul kaldirir",
+        "setsid" => "komutu yeni shell oturum kimligiyle calistirir",
+        "split" => "girdiyi satir bloklarina bolup dosyalara yazar",
+        "sponge" => "stdin'i tamponlayip hedef dosyaya yazar",
+        "swaplabel" => "swap alani etiketini okur veya yazar",
+        "swapoff" => "swap alanini shell swap kaydindan devre disi birakir",
+        "swapon" => "swap alanini shell swap kaydina alir",
+        "switch_root" => "kok dizini degistirip init komutu calistirir",
+        "sync" => "dosya sistemi flush senkronizasyonu tetikler",
+        "tftp" => "TFTP RRQ/WRQ datagrami uretir veya yerel transfer yapar",
+        "time" => "komutun calisma suresini olcer",
+        "tsort" => "bagimlilik kenarlarindan topolojik sira uretir",
+        "tty" => "aktif terminal yolunu yazar",
+        "unshare" => "komutu ayrilmis shell namespace bayraklariyla calistirir",
+        "unexpand" => "bosluk serilerini tab karakterine cevirir",
+        "unlink" => "tek bir dosya girdisini siler",
+        "uudecode" => "uuencode bicimli girdiyi cozer",
+        "uuencode" => "dosyayi uuencode biciminde yazar",
         "wc" => "satir, kelime ve karakter sayar",
+        "xargs" => "stdin tokenlarini komut argumanlarina ekler",
+        "xinstall" => "dosyayi hedef yola kopyalar",
+        "yes" => "metni tekrarlayan satirlar halinde yazar",
         "grep" => "satir filtreler",
+        "lsusb" => "usb aygit envanterini listeler",
+        "mountpoint" => "bir yolun mount noktasi olup olmadigini sinar",
+        "paste" => "satirlari yan yana birlestirir",
+        "pidof" => "isimle task pid'lerini bulur",
+        "printf" => "format dizgesi ile cikti uretir",
+        "readahead" => "dosya icerigini VFS/host okuma yoluna alir",
+        "rev" => "satirlari ters cevirir",
+        "seq" => "sayisal dizi uretir",
+        "sed" => "s/once/sonra/[g] akim duzenlemesi yapar",
         "sort" => "satirlari siralar",
+        "strings" => "ikili girdiden yazdirilabilir dizeleri ayiklar",
+        "tee" => "stdin'i stdout ve dosyalara kopyalar",
+        "test" => "kosul degerlendirip cikis durumu uretir",
+        "tr" => "stdin karakterlerini cevirir",
         "uniq" => "ardisik tekrar eden satirlari ezer",
+        "who" => "aktif oturumlari listeler",
         "cp" => "dosya kopyalar",
         "set" | "export" | "unset" | "env" => "oturum ortam degiskenlerini yonetir",
         "history" => "oturum komut gecmisini gosterir",
         "alias" | "unalias" => "oturum alias tablolarini yonetir",
         "which" | "command" => "builtin komut katalogunda arama yapar",
+        "loop" => "loopback image aygitlarini yonetir",
         "net" | "http" | "wget" | "curl" | "dns" | "ping" if network_surface_disabled() => {
             network_surface_summary(name)
         }
@@ -189,6 +396,7 @@ fn builtin_summary(name: &str) -> &'static str {
         "launch" => "ELF uygulamasi baslatir",
         "run" => "shell script calistirir",
         "eval" => "ifadeyi degerlendirir",
+        "ech-tools" => "sbase/ubase kaynakli komut katalogu ve dispatcher",
         _ => "shell builtin",
     }
 }
@@ -376,9 +584,82 @@ fn parse_dns_privacy_provider(provider: Option<&str>) -> Result<&'static str, &'
     }
 }
 
+#[repr(align(64))]
+struct CacheLineAtomicBool {
+    value: AtomicBool,
+}
+
+impl CacheLineAtomicBool {
+    const fn new(value: bool) -> Self {
+        Self {
+            value: AtomicBool::new(value),
+        }
+    }
+
+    fn load(&self, order: Ordering) -> bool {
+        self.value.load(order)
+    }
+
+    fn store(&self, value: bool, order: Ordering) {
+        self.value.store(value, order);
+    }
+}
+
+#[repr(align(64))]
+struct CacheLineAtomicU8 {
+    value: AtomicU8,
+}
+
+impl CacheLineAtomicU8 {
+    const fn new(value: u8) -> Self {
+        Self {
+            value: AtomicU8::new(value),
+        }
+    }
+
+    fn load(&self, order: Ordering) -> u8 {
+        self.value.load(order)
+    }
+
+    fn store(&self, value: u8, order: Ordering) {
+        self.value.store(value, order);
+    }
+}
+
 static SHELL_RUNTIME_READY: AtomicBool = AtomicBool::new(false);
+static TERMINAL_WRITE_ALLOWED: CacheLineAtomicBool = CacheLineAtomicBool::new(true);
+static VT_SWITCH_ALLOWED: CacheLineAtomicBool = CacheLineAtomicBool::new(true);
+static ACTIVE_VT: CacheLineAtomicU8 = CacheLineAtomicU8::new(0);
+static CTRLALTDEL_HARD: CacheLineAtomicBool = CacheLineAtomicBool::new(false);
 const SESSION_HISTORY_LIMIT: usize = 1000;
 const PRODUCT_NETWORK_SURFACE_ENABLED: bool = true;
+
+#[derive(Clone)]
+struct ShellModuleRecord {
+    source: String,
+    size: usize,
+    loaded_tick: u64,
+}
+
+#[derive(Clone)]
+struct ShellSwapArea {
+    label: String,
+    size: usize,
+    enabled: bool,
+}
+
+lazy_static::lazy_static! {
+    static ref SHELL_MODULES: spin::Mutex<BTreeMap<String, ShellModuleRecord>> =
+        spin::Mutex::new(BTreeMap::new());
+    static ref SHELL_SWAP_AREAS: spin::Mutex<BTreeMap<String, ShellSwapArea>> =
+        spin::Mutex::new(BTreeMap::new());
+    static ref SHELL_NICE_VALUES: spin::Mutex<BTreeMap<usize, i32>> =
+        spin::Mutex::new(BTreeMap::new());
+    static ref SHELL_FROZEN_MOUNTS: spin::Mutex<BTreeSet<String>> =
+        spin::Mutex::new(BTreeSet::new());
+    static ref SHELL_EJECTED_MEDIA: spin::Mutex<BTreeSet<String>> =
+        spin::Mutex::new(BTreeSet::new());
+}
 
 #[cfg(any(
     test,
@@ -496,6 +777,36 @@ fn host_shell_remove_file(_path: &str) -> bool {
     false
 }
 
+#[cfg(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+))]
+fn host_shell_truncate_file(path: &str, new_size: usize) -> bool {
+    let mut files = HOST_SHELL_FILES.lock();
+    if let Some(data) = files.get_mut(path) {
+        data.resize(new_size, 0u8);
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(not(any(
+    test,
+    all(
+        feature = "host_smoke",
+        not(target_os = "none"),
+        not(target_os = "uefi")
+    )
+)))]
+fn host_shell_truncate_file(_path: &str, _new_size: usize) -> bool {
+    false
+}
+
 pub(crate) fn output_indicates_failure(output: &str) -> bool {
     let lower = output.to_ascii_lowercase();
     output.starts_with("Kullanim:")
@@ -517,6 +828,158 @@ pub(crate) fn command_exit_code(output: &Option<String>) -> i64 {
     } else {
         0
     }
+}
+
+fn command_preserves_explicit_exit_code(name: &str) -> bool {
+    matches!(
+        name,
+        "basename"
+            | "cat"
+            | "dirname"
+            | "ech-tools"
+            | "false"
+            | "grep"
+            | "head"
+            | "mountpoint"
+            | "pidof"
+            | "printenv"
+            | "printf"
+            | "sort"
+            | "tail"
+            | "tee"
+            | "test"
+            | "time"
+            | "tr"
+            | "true"
+            | "uniq"
+            | "wc"
+            | "xargs"
+    )
+}
+
+fn command_supports_builtin_bridge(name: &str) -> bool {
+    matches!(
+        name,
+        "basename"
+            | "bc"
+            | "blkdiscard"
+            | "cat"
+            | "chgrp"
+            | "chroot"
+            | "chvt"
+            | "cols"
+            | "cron"
+            | "ctrlaltdel"
+            | "dc"
+            | "dd"
+            | "dirname"
+            | "dmesg"
+            | "echo"
+            | "ed"
+            | "eject"
+            | "fallocate"
+            | "false"
+            | "flock"
+            | "freeramdisk"
+            | "fsfreeze"
+            | "grep"
+            | "getty"
+            | "halt"
+            | "head"
+            | "hwclock"
+            | "insmod"
+            | "killall5"
+            | "last"
+            | "lastlog"
+            | "login"
+            | "ls"
+            | "lsusb"
+            | "make"
+            | "mesg"
+            | "mknod"
+            | "mkswap"
+            | "mountpoint"
+            | "nice"
+            | "nohup"
+            | "nologin"
+            | "paste"
+            | "passwd"
+            | "pidof"
+            | "pivot_root"
+            | "printf"
+            | "pwd"
+            | "pwdx"
+            | "renice"
+            | "cmp"
+            | "cal"
+            | "comm"
+            | "cut"
+            | "rev"
+            | "expand"
+            | "expr"
+            | "fold"
+            | "getconf"
+            | "join"
+            | "cksum"
+            | "du"
+            | "link"
+            | "logname"
+            | "logger"
+            | "md5sum"
+            | "mkfifo"
+            | "mktemp"
+            | "nl"
+            | "od"
+            | "pagesize"
+            | "pathchk"
+            | "printenv"
+            | "readahead"
+            | "sha1sum"
+            | "sha224sum"
+            | "sha256sum"
+            | "sha384sum"
+            | "sha512sum"
+            | "sha512-224sum"
+            | "sha512-256sum"
+            | "sleep"
+            | "sed"
+            | "seq"
+            | "setsid"
+            | "split"
+            | "sort"
+            | "sponge"
+            | "strings"
+            | "sync"
+            | "su"
+            | "swaplabel"
+            | "swapoff"
+            | "swapon"
+            | "switch_root"
+            | "sysctl"
+            | "tail"
+            | "tar"
+            | "tee"
+            | "test"
+            | "tftp"
+            | "time"
+            | "tr"
+            | "true"
+            | "tsort"
+            | "tty"
+            | "uniq"
+            | "unexpand"
+            | "unlink"
+            | "unshare"
+            | "uudecode"
+            | "uuencode"
+            | "vtallow"
+            | "watch"
+            | "who"
+            | "wc"
+            | "xargs"
+            | "xinstall"
+            | "yes"
+    )
 }
 
 fn ensure_shell_runtime_ready() {
@@ -1003,6 +1466,7 @@ pub struct Shell {
     history: ShellHistory,
     env: ShellEnvironment,
     aliases: ShellAliases,
+    last_exit_code: i64,
 }
 
 impl Shell {
@@ -1017,6 +1481,7 @@ impl Shell {
             history: ShellHistory::default(),
             env: ShellEnvironment::seeded(),
             aliases: ShellAliases::seeded(),
+            last_exit_code: 0,
         }
     }
 
@@ -1052,6 +1517,67 @@ impl Shell {
 
     fn current_working_directory(&self) -> String {
         self.env.get("PWD").unwrap_or_else(|| String::from("/"))
+    }
+
+    fn execute_ech_tools(&mut self, args: &[&str]) -> Option<String> {
+        self.execute_ech_tools_with_input(args, None)
+    }
+
+    fn execute_ech_tools_with_input(
+        &mut self,
+        args: &[&str],
+        stdin: Option<&str>,
+    ) -> Option<String> {
+        use crate::userland::ech_tools::{self, Dispatch};
+
+        match ech_tools::dispatch(args) {
+            Dispatch::List => {
+                self.last_exit_code = 0;
+                Some(ech_tools::render_catalog())
+            }
+            Dispatch::Help(Some(command)) => {
+                self.last_exit_code = 0;
+                Some(ech_tools::render_detail(command))
+            }
+            Dispatch::Help(None) => {
+                self.last_exit_code = 1;
+                Some(String::from(
+                    "Kullanim: ech-tools help <komut>\nListe: ech-tools",
+                ))
+            }
+            Dispatch::RunShellBridge { descriptor, args } => {
+                if command_supports_builtin_bridge(descriptor.name) {
+                    let mut bridged_args = Vec::with_capacity(args.len() + 1);
+                    bridged_args.push(descriptor.name);
+                    for arg in args {
+                        bridged_args.push(*arg);
+                    }
+                    execute_builtin(self, &bridged_args, stdin)
+                } else {
+                    let mut bridged = String::from(descriptor.name);
+                    for arg in args {
+                        bridged.push(' ');
+                        bridged.push_str(arg);
+                    }
+                    self.execute_line(&bridged)
+                }
+            }
+            Dispatch::AdapterPending(command) => {
+                self.last_exit_code = 1;
+                Some(format!(
+                    "ech-tools: {} katalogda, fakat {} adapteri henuz bagli degil\nusage: {}\nsource: {} tier: {}",
+                    command.name,
+                    command.state.as_str(),
+                    command.usage,
+                    command.source.as_str(),
+                    command.tier.as_str(),
+                ))
+            }
+            Dispatch::Unknown(name) => {
+                self.last_exit_code = 1;
+                Some(ech_tools::render_unknown(name))
+            }
+        }
     }
 
     fn change_directory(&mut self, target: Option<&str>) -> Result<String, String> {
@@ -1127,6 +1653,7 @@ impl Shell {
         // Geçmişe ekle (global history)
         let trimmed = cmd_line.trim();
         if trimmed.is_empty() {
+            self.last_exit_code = 0;
             return None;
         }
         self.sync_runtime_state();
@@ -1136,6 +1663,11 @@ impl Shell {
 
         // Environment variable expansion ($VAR)
         let expanded_cmd = self.env.expand(&expanded_cmd);
+        if expanded_cmd == "alias" || expanded_cmd.starts_with("alias ") {
+            let output = self.execute_alias_command(&expanded_cmd);
+            self.last_exit_code = command_exit_code(&output);
+            return output;
+        }
 
         // Brace expansion ({a,b,c}, {1..5})
         let words: Vec<String> = expanded_cmd
@@ -1176,13 +1708,16 @@ impl Shell {
                     return execute_pipeline(self, pipeline);
                 }
             }
+            self.last_exit_code = 1;
             return Some(String::from("Parse hatasi"));
         }
 
         let parts: Vec<&str> = expanded_cmd.split_whitespace().collect();
-        match parts[0] {
+        let output = match parts[0] {
             "help" => Some(render_help(parts.get(1).copied())),
             "ver" => Some(String::from("echOS v0.2.0 (Legendary Edition)")),
+            "ech-tools" => self.execute_ech_tools(&parts[1..]),
+            "true" | "false" => execute_builtin(self, &parts, None),
             "echo" => {
                 let args = &parts[1..];
                 Some(args.join(" "))
@@ -1226,25 +1761,21 @@ impl Shell {
                     Err(msg) => Some(msg),
                 }
             }
-            "cat" => {
-                if parts.len() < 2 {
-                    return Some(String::from("Kullanim: cat <dosya>"));
-                }
-                match load_file(parts[1]) {
-                    Ok(data) => {
-                        if data.is_empty() {
-                            Some(String::from("Dosya bos"))
-                        } else {
-                            match core::str::from_utf8(&data) {
-                                Ok(text) => Some(text.to_string()),
-                                Err(_) => Some(String::from("Dosya metin degil")),
-                            }
-                        }
-                    }
-                    Err(msg) => Some(msg),
-                }
-            }
-            "head" | "tail" | "wc" | "grep" | "sort" | "uniq" => {
+            "basename" | "bc" | "blkdiscard" | "cal" | "cat" | "chgrp" | "chroot"
+            | "chvt" | "cmp" | "cols" | "comm" | "cron" | "ctrlaltdel" | "cut"
+            | "dc" | "dd" | "dirname" | "dmesg" | "ed" | "eject" | "expand"
+            | "expr" | "fallocate" | "flock" | "fold" | "freeramdisk" | "fsfreeze"
+            | "getconf" | "getty" | "grep" | "halt" | "head" | "hwclock" | "insmod"
+            | "join" | "killall5" | "last" | "lastlog" | "link" | "login" | "logname"
+            | "lsusb" | "make" | "mesg" | "mkfifo" | "mknod" | "mkswap"
+            | "mountpoint" | "nice" | "nl" | "nohup" | "nologin" | "paste" | "passwd"
+            | "pidof" | "pivot_root" | "printenv" | "printf" | "pwdx" | "readahead"
+            | "renice" | "respawn" | "rev" | "rmmod" | "sed" | "seq" | "setsid"
+            | "sleep" | "sort" | "strings" | "su" | "swaplabel" | "swapoff" | "swapon"
+            | "switch_root" | "sysctl" | "tail" | "tar" | "tee" | "test" | "tftp"
+            | "time" | "tr" | "tty" | "unshare" | "uniq" | "unexpand" | "unlink"
+            | "uudecode" | "uuencode" | "vtallow" | "watch" | "wc" | "who" | "xinstall"
+            | "yes" => {
                 execute_builtin(self, &parts, None)
             }
             "cp" => {
@@ -1354,25 +1885,7 @@ impl Shell {
                 Some(items.join("\n"))
             }
             "alias" => {
-                if parts.len() == 1 {
-                    let aliases: Vec<String> = self
-                        .aliases
-                        .list()
-                        .iter()
-                        .map(|(name, expansion)| format!("alias {}='{}'", name, expansion))
-                        .collect();
-                    return Some(aliases.join("\n"));
-                }
-                for alias in &parts[1..] {
-                    if let Some((name, value)) = alias.split_once('=') {
-                        let trimmed = value.trim_matches('\'').trim_matches('"');
-                        self.aliases.set(name, trimmed);
-                    } else {
-                        return Some(String::from("Kullanim: alias ad='genisleme'"));
-                    }
-                }
-                self.sync_runtime_state();
-                None
+                self.execute_alias_command(&expanded_cmd)
             }
             "unalias" => {
                 if parts.len() < 2 {
@@ -1411,8 +1924,8 @@ impl Shell {
                         Some(format!("{}: shell builtin", lookup))
                     }
                 } else {
-                    Some(format!("{} bulunamadi", lookup))
-                }
+                Some(format!("{} bulunamadi", lookup))
+            }
             }
             // Package Management
             "pkg" => {
@@ -1610,6 +2123,118 @@ impl Shell {
                     Err(_) => Some(String::from("Mount noktasi bulunamadi")),
                 }
             }
+            "loop" => {
+                match parts.get(1).copied() {
+                    None | Some("list") => {
+                        let devices = crate::drivers::loopback::list();
+                        if devices.is_empty() {
+                            return Some(String::from("Loopback aygiti yok"));
+                        }
+                        let mut out = String::from(
+                            "Name     Store    Mode Dirty BlockSize Blocks Backing                Mounts\n",
+                        );
+                        for device in devices {
+                            let backing = device.backing_path.unwrap_or_else(|| String::from("<memory>"));
+                            let mounts = if device.mount_points.is_empty() {
+                                String::from("-")
+                            } else {
+                                device.mount_points.join(",")
+                            };
+                            out.push_str(&format!(
+                                "{:8} {:8} {:4} {:5} {:9} {:6} {:22} {}\n",
+                                device.name,
+                                device.storage_mode,
+                                if device.read_only { "ro" } else { "rw" },
+                                if device.dirty { "yes" } else { "no" },
+                                device.block_size,
+                                device.block_count,
+                                backing,
+                                mounts
+                            ));
+                        }
+                        Some(out)
+                    }
+                    Some("attach") => {
+                        if parts.len() < 3 {
+                            return Some(String::from(
+                                "Kullanim: loop attach <image-path> [ro|rw] [block_size]",
+                            ));
+                        }
+                        let mut force_read_only = None;
+                        let mut block_size = None;
+                        for arg in parts.iter().skip(3) {
+                            match *arg {
+                                "ro" => force_read_only = Some(true),
+                                "rw" => force_read_only = Some(false),
+                                _ => {
+                                    if let Ok(parsed) = arg.parse::<u32>() {
+                                        block_size = Some(parsed);
+                                    }
+                                }
+                            }
+                        }
+                        match crate::drivers::loopback::attach_file(
+                            parts[2],
+                            block_size,
+                            force_read_only,
+                        ) {
+                            Ok(device) => Some(format!(
+                                "loop attach: {} -> {} (blocks={}, block_size={}, mode={})",
+                                parts[2],
+                                device.name,
+                                device.block_count,
+                                device.block_size,
+                                if device.read_only { "ro" } else { "rw" }
+                            )),
+                            Err(err) => Some(format!("loop attach hatasi: {}", err)),
+                        }
+                    }
+                    Some("flush") => {
+                        if parts.len() < 3 {
+                            return Some(String::from("Kullanim: loop flush <loopN>"));
+                        }
+                        match crate::drivers::loopback::flush_device(parts[2]) {
+                            Ok(()) => Some(format!("loop flush: {}", parts[2])),
+                            Err(err) => Some(format!("loop flush hatasi: {}", err)),
+                        }
+                    }
+                    Some("detach") => {
+                        if parts.len() < 3 {
+                            return Some(String::from("Kullanim: loop detach <loopN>"));
+                        }
+                        match crate::drivers::loopback::detach(parts[2]) {
+                            Ok(()) => Some(format!("loop detach: {}", parts[2])),
+                            Err(err) => Some(format!("loop detach hatasi: {}", err)),
+                        }
+                    }
+                    Some("mount") => {
+                        if parts.len() < 4 {
+                            return Some(String::from(
+                                "Kullanim: loop mount <loopN|image-path> <mountpoint> [fat32|exfat|ext4|ntfs]",
+                            ));
+                        }
+                        match crate::drivers::loopback::mount(parts[2], parts[3], parts.get(4).copied()) {
+                            Ok(mounted) => Some(format!(
+                                "loop mount: {} -> {} ({})",
+                                mounted.device_name, mounted.mount_point, mounted.fs_type
+                            )),
+                            Err(err) => Some(format!("loop mount hatasi: {}", err)),
+                        }
+                    }
+                    Some("umount") => {
+                        if parts.len() < 3 {
+                            return Some(String::from("Kullanim: loop umount <mountpoint>"));
+                        }
+                        match crate::drivers::loopback::umount(parts[2]) {
+                            Ok(()) => Some(format!("loop umount: {}", parts[2])),
+                            Err(err) => Some(format!("loop umount hatasi: {}", err)),
+                        }
+                    }
+                    _ => Some(String::from(
+                        "Kullanim: loop [list] | loop attach <image> [ro|rw] [block_size] | loop mount <loopN|image> <mountpoint> [fat32|exfat|ext4|ntfs] | loop umount <mountpoint> | loop flush <loopN> | loop detach <loopN>",
+                    )),
+                }
+            }
             // System info
             "uname" => {
                 if parts.len() > 1 && parts[1] == "-a" {
@@ -1720,10 +2345,17 @@ impl Shell {
             "lsmod" => {
                 use alloc::format;
                 let drivers = crate::drivers::dispatcher::list_drivers();
-                if drivers.is_empty() {
+                let modules = SHELL_MODULES.lock();
+                if drivers.is_empty() && modules.is_empty() {
                     Some(String::from("Module                  Size  Used by\n(no drivers loaded)"))
                 } else {
                     let mut out = String::from("Module                  Size  Used by\n");
+                    for (name, module) in modules.iter() {
+                        out.push_str(&format!(
+                            "{:<24}{:<6}source={} tick={}\n",
+                            name, module.size, module.source, module.loaded_tick
+                        ));
+                    }
                     for d in drivers {
                         out.push_str(&format!(
                             "{:<24}{:<6}{}\n",
@@ -1910,15 +2542,16 @@ impl Shell {
                 if parts.len() < 3 {
                     return Some(String::from("Kullanim: truncate -s <boyut> <dosya>"));
                 }
-                let size: u64 = if parts[1] == "-s" {
-                    parts[2].parse().unwrap_or(0)
+                let (file, size) = if parts[1] == "-s" {
+                    (parts[3], parts[2].parse().unwrap_or(0))
+                } else if let Ok(size) = parts[1].parse::<u64>() {
+                    (parts[2], size)
                 } else {
-                    parts[1].parse().unwrap_or(0)
+                    (parts[1], parts[2].parse().unwrap_or(0))
                 };
-                let file = if parts[1] == "-s" { parts[3] } else { parts[2] };
-                match crate::fs::f2fs::truncate_f2fs(file, size) {
+                match truncate_file(file, size) {
                     Ok(()) => Some(format!("truncate: {} -> {} bytes", file, size)),
-                    Err(e) => Some(format!("truncate hatasi: {:?}", e)),
+                    Err(err) => Some(err),
                 }
             }
             "readlink" => {
@@ -2989,7 +3622,13 @@ impl Shell {
                 Some(out)
             }
             _ => Some(format!("Bilinmeyen komut: {}", parts[0])),
+        };
+
+        if !command_preserves_explicit_exit_code(parts[0]) {
+            self.last_exit_code = command_exit_code(&output);
         }
+
+        output
     }
 
     /// Mevcut input satırını döndürür.
@@ -2997,6 +3636,36 @@ impl Shell {
     /// GUI terminal köprüsü veya test kodu için kullanılabilir.
     pub fn get_input_line(&self) -> String {
         self.editor.to_string()
+    }
+
+    fn execute_alias_command(&mut self, line: &str) -> Option<String> {
+        let tokens = advanced::Tokenizer::tokenize(line);
+        let aliases: Vec<String> = tokens
+            .into_iter()
+            .filter_map(|token| match token {
+                advanced::Token::Word(word) => Some(word),
+                _ => None,
+            })
+            .skip(1)
+            .collect();
+        if aliases.is_empty() {
+            let aliases: Vec<String> = self
+                .aliases
+                .list()
+                .iter()
+                .map(|(name, expansion)| format!("alias {}='{}'", name, expansion))
+                .collect();
+            return Some(aliases.join("\n"));
+        }
+        for alias in aliases {
+            if let Some((name, value)) = alias.split_once('=') {
+                self.aliases.set(name, value);
+            } else {
+                return Some(String::from("Kullanim: alias ad='genisleme'"));
+            }
+        }
+        self.sync_runtime_state();
+        None
     }
 }
 
@@ -3151,10 +3820,1023 @@ fn append_file(path: &str, data: &[u8]) -> Result<usize, String> {
     Ok(data.len())
 }
 
+fn write_file(path: &str, data: &[u8]) -> Result<usize, String> {
+    let resolved = resolve_path(path);
+    if cfg!(any(
+        test,
+        all(
+            feature = "host_smoke",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )
+    )) {
+        return Ok(host_shell_write_file(&resolved, data, false));
+    }
+
+    let (parent, name) = split_parent_name(&resolved)?;
+    let _ = crate::fs::f2fs::unlink_f2fs(&parent, &name);
+    crate::fs::f2fs::create_f2fs_file_with_data(&parent, &name, data)
+        .map_err(|err| format!("write hatasi: {:?}", err))?;
+    Ok(data.len())
+}
+
+fn truncate_file(path: &str, new_size: u64) -> Result<(), String> {
+    let resolved = resolve_path(path);
+    if host_shell_truncate_file(&resolved, new_size as usize) {
+        return Ok(());
+    }
+
+    crate::fs::f2fs::truncate_f2fs(&resolved, new_size)
+        .map_err(|err| format!("truncate hatasi: {:?}", err))
+}
+
+fn create_hardlink_path(target: &str, link: &str) -> Result<(), String> {
+    let resolved_target = resolve_path(target);
+    let resolved_link = resolve_path(link);
+
+    if let Some(data) = host_shell_file(&resolved_target) {
+        host_shell_write_file(&resolved_link, &data, false);
+        return Ok(());
+    }
+
+    let (parent, name) = split_parent_name(&resolved_link)?;
+    crate::fs::f2fs::create_hardlink(&parent, &name, &resolved_target)
+        .map_err(|err| format!("link hatasi: {:?}", err))
+}
+
+fn unlink_path(path: &str) -> Result<(), String> {
+    let resolved = resolve_path(path);
+
+    if host_shell_remove_file(&resolved) {
+        return Ok(());
+    }
+
+    let (parent, name) = split_parent_name(&resolved)?;
+    crate::fs::f2fs::unlink_f2fs(&parent, &name).map_err(|err| format!("unlink hatasi: {:?}", err))
+}
+
 fn basename(path: &str) -> &str {
-    path.rsplit('/')
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/";
+    }
+
+    trimmed
+        .rsplit('/')
         .find(|segment| !segment.is_empty())
-        .unwrap_or(path)
+        .unwrap_or(trimmed)
+}
+
+fn dirname(path: &str) -> &str {
+    if path.chars().all(|ch| ch == '/') {
+        return "/";
+    }
+
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/";
+    }
+
+    match trimmed.rfind('/') {
+        Some(0) => "/",
+        Some(index) => &trimmed[..index],
+        None => ".",
+    }
+}
+
+fn decode_printf_escapes(input: &str) -> String {
+    let mut out = String::new();
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some('0') => out.push('\0'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn format_printf_output(format_str: &str, args: &[&str]) -> Result<String, String> {
+    let decoded = decode_printf_escapes(format_str);
+    let mut out = String::new();
+    let mut chars = decoded.chars();
+    let mut arg_index = 0usize;
+
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+
+        let Some(specifier) = chars.next() else {
+            return Err(String::from(
+                "printf hatasi: format sonu yalniz '%' ile bitti",
+            ));
+        };
+
+        match specifier {
+            '%' => out.push('%'),
+            's' => {
+                out.push_str(args.get(arg_index).copied().unwrap_or(""));
+                arg_index += 1;
+            }
+            'd' | 'i' => {
+                let raw = args.get(arg_index).copied().unwrap_or("0");
+                let parsed = raw
+                    .parse::<i64>()
+                    .map_err(|_| format!("printf hatasi: '{}' tamsayi degil", raw))?;
+                out.push_str(&format!("{}", parsed));
+                arg_index += 1;
+            }
+            'u' => {
+                let raw = args.get(arg_index).copied().unwrap_or("0");
+                let parsed = raw
+                    .parse::<u64>()
+                    .map_err(|_| format!("printf hatasi: '{}' unsigned degil", raw))?;
+                out.push_str(&format!("{}", parsed));
+                arg_index += 1;
+            }
+            'c' => {
+                let raw = args.get(arg_index).copied().unwrap_or("");
+                let value = raw
+                    .chars()
+                    .next()
+                    .ok_or_else(|| String::from("printf hatasi: %c icin bos arguman verildi"))?;
+                out.push(value);
+                arg_index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "printf hatasi: desteklenmeyen format belirteci %{}",
+                    other
+                ));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn expand_tr_set(set: &str) -> Vec<char> {
+    let chars: Vec<char> = set.chars().collect();
+    let mut expanded = Vec::new();
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        if index + 2 < chars.len() && chars[index + 1] == '-' {
+            let start = chars[index] as u32;
+            let end = chars[index + 2] as u32;
+            if start <= end {
+                for code in start..=end {
+                    if let Some(ch) = char::from_u32(code) {
+                        expanded.push(ch);
+                    }
+                }
+                index += 3;
+                continue;
+            }
+        }
+
+        expanded.push(chars[index]);
+        index += 1;
+    }
+
+    expanded
+}
+
+fn translate_stream(input: &str, set1: &str, set2: &str) -> String {
+    let source = expand_tr_set(set1);
+    let target = expand_tr_set(set2);
+    if source.is_empty() {
+        return input.to_string();
+    }
+
+    let mut out = String::new();
+    for ch in input.chars() {
+        if let Some(position) = source.iter().position(|candidate| *candidate == ch) {
+            if target.is_empty() {
+                continue;
+            }
+            out.push(target[position.min(target.len() - 1)]);
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn read_text_source(path: Option<&str>, input: &str) -> Result<String, String> {
+    if let Some(path) = path {
+        if path == "-" {
+            return Ok(input.to_string());
+        }
+        let data = load_file(path)?;
+        core::str::from_utf8(&data)
+            .map(|text| text.to_string())
+            .map_err(|_| String::from("Dosya metin degil"))
+    } else {
+        Ok(input.to_string())
+    }
+}
+
+fn read_binary_source(path: Option<&str>, input: &str) -> Result<Vec<u8>, String> {
+    match path {
+        Some("-") | None => Ok(input.as_bytes().to_vec()),
+        Some(path) => load_file(path),
+    }
+}
+
+fn format_hex_lower(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn md5_digest_bytes(message: &[u8]) -> Vec<u8> {
+    const S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    const K: [u32; 64] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+        0xeb86d391,
+    ];
+
+    let mut state = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476];
+    let bit_len = (message.len() as u64) * 8;
+    let mut padded = message.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_le_bytes());
+
+    for chunk in padded.chunks_exact(64) {
+        let mut m = [0u32; 16];
+        for (idx, word) in m.iter_mut().enumerate() {
+            let start = idx * 4;
+            *word = u32::from_le_bytes(chunk[start..start + 4].try_into().unwrap());
+        }
+
+        let (mut a, mut b, mut c, mut d) = (state[0], state[1], state[2], state[3]);
+        for i in 0..64 {
+            let (f, g) = match i {
+                0..=15 => ((b & c) | ((!b) & d), i),
+                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let tmp = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(
+                a.wrapping_add(f)
+                    .wrapping_add(K[i])
+                    .wrapping_add(m[g])
+                    .rotate_left(S[i]),
+            );
+            a = tmp;
+        }
+
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+    }
+
+    let mut digest = Vec::with_capacity(16);
+    for word in state {
+        digest.extend_from_slice(&word.to_le_bytes());
+    }
+    digest
+}
+
+#[derive(Clone, Copy)]
+enum HashFlavor {
+    Md5,
+    Sha1,
+    Sha224,
+    Sha256,
+    Sha384,
+    Sha512,
+    Sha512_224,
+    Sha512_256,
+}
+
+fn compute_hash_bytes(flavor: HashFlavor, data: &[u8]) -> Vec<u8> {
+    match flavor {
+        HashFlavor::Md5 => md5_digest_bytes(data),
+        HashFlavor::Sha1 => {
+            let mut hasher = Sha1::new();
+            hasher.update(data);
+            hasher.finalize().as_slice().to_vec()
+        }
+        HashFlavor::Sha224 => {
+            let mut hasher = Sha224::new();
+            hasher.update(data);
+            hasher.finalize().as_slice().to_vec()
+        }
+        HashFlavor::Sha256 => {
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            hasher.finalize().as_slice().to_vec()
+        }
+        HashFlavor::Sha384 => {
+            let mut hasher = Sha384::new();
+            hasher.update(data);
+            hasher.finalize().as_slice().to_vec()
+        }
+        HashFlavor::Sha512 => {
+            let mut hasher = Sha512::new();
+            hasher.update(data);
+            hasher.finalize().as_slice().to_vec()
+        }
+        HashFlavor::Sha512_224 => {
+            let mut hasher = Sha512_224::new();
+            hasher.update(data);
+            hasher.finalize().as_slice().to_vec()
+        }
+        HashFlavor::Sha512_256 => {
+            let mut hasher = Sha512_256::new();
+            hasher.update(data);
+            hasher.finalize().as_slice().to_vec()
+        }
+    }
+}
+
+fn render_hashsum(flavor: HashFlavor, paths: &[&str], input: &str) -> Result<String, String> {
+    if paths.is_empty() {
+        let digest = compute_hash_bytes(flavor, input.as_bytes());
+        return Ok(format!("{}  -", format_hex_lower(&digest)));
+    }
+
+    let mut rows = Vec::new();
+    for path in paths {
+        let data = read_binary_source(Some(path), input)?;
+        let digest = compute_hash_bytes(flavor, &data);
+        let label = if *path == "-" {
+            String::from("-")
+        } else {
+            resolve_path(path)
+        };
+        rows.push(format!("{}  {}", format_hex_lower(&digest), label));
+    }
+    Ok(rows.join("\n"))
+}
+
+fn cksum_update(mut crc: u32, byte: u8) -> u32 {
+    crc ^= (byte as u32) << 24;
+    for _ in 0..8 {
+        if crc & 0x8000_0000 != 0 {
+            crc = (crc << 1) ^ 0x04c1_1db7;
+        } else {
+            crc <<= 1;
+        }
+    }
+    crc
+}
+
+fn compute_cksum(data: &[u8]) -> u32 {
+    let mut crc = 0u32;
+    for byte in data {
+        crc = cksum_update(crc, *byte);
+    }
+    let mut len = data.len() as u64;
+    while len != 0 {
+        crc = cksum_update(crc, (len & 0xff) as u8);
+        len >>= 8;
+    }
+    !crc
+}
+
+fn render_cksum(paths: &[&str], input: &str) -> Result<String, String> {
+    if paths.is_empty() {
+        let data = input.as_bytes();
+        return Ok(format!("{} {}", compute_cksum(data), data.len()));
+    }
+
+    let mut rows = Vec::new();
+    for path in paths {
+        let data = read_binary_source(Some(path), input)?;
+        let label = if *path == "-" {
+            String::from("-")
+        } else {
+            resolve_path(path)
+        };
+        rows.push(format!("{} {} {}", compute_cksum(&data), data.len(), label));
+    }
+    Ok(rows.join("\n"))
+}
+
+fn current_username() -> Option<String> {
+    let uid = crate::security::users::USER_DB.current_uid();
+    crate::security::users::USER_DB
+        .get_user(uid)
+        .map(|user| user.username)
+}
+
+fn current_tty_name() -> String {
+    let uid = crate::security::users::USER_DB.current_uid();
+    let sessions = crate::security::users::USER_DB.list_sessions();
+    sessions
+        .into_iter()
+        .filter(|session| session.uid == uid)
+        .max_by_key(|session| session.login_tick)
+        .map(|session| {
+            if session.tty.starts_with("/dev/") {
+                session.tty
+            } else {
+                format!("/dev/{}", session.tty)
+            }
+        })
+        .filter(|tty| !tty.is_empty())
+        .unwrap_or_else(|| String::from("/dev/tty0"))
+}
+
+fn is_leap_year(year: u16) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_in_month(year: u16, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 30,
+    }
+}
+
+fn weekday_sunday0(year: u16, month: u8, day: u8) -> usize {
+    let mut y = year as i32;
+    let mut m = month as i32;
+    if m < 3 {
+        y -= 1;
+        m += 12;
+    }
+    let k = y % 100;
+    let j = y / 100;
+    let h = (day as i32 + (13 * (m + 1)) / 5 + k + (k / 4) + (j / 4) + (5 * j)) % 7;
+    ((h + 6) % 7) as usize
+}
+
+fn render_calendar(args: &[&str]) -> Result<String, String> {
+    const MONTH_NAMES: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+
+    let now = crate::drivers::rtc::get_cached_datetime();
+    let (month, year) = match args {
+        [] => (now.month, now.year),
+        [month] => (
+            month
+                .parse::<u8>()
+                .map_err(|_| String::from("Kullanim: cal [ay] [yil]"))?,
+            now.year,
+        ),
+        [month, year] => (
+            month
+                .parse::<u8>()
+                .map_err(|_| String::from("Kullanim: cal [ay] [yil]"))?,
+            year.parse::<u16>()
+                .map_err(|_| String::from("Kullanim: cal [ay] [yil]"))?,
+        ),
+        _ => return Err(String::from("Kullanim: cal [ay] [yil]")),
+    };
+
+    if !(1..=12).contains(&month) {
+        return Err(String::from("cal: ay 1..12 araliginda olmali"));
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "    {} {}\n",
+        MONTH_NAMES[(month - 1) as usize],
+        year
+    ));
+    out.push_str("Su Mo Tu We Th Fr Sa\n");
+
+    let first_weekday = weekday_sunday0(year, month, 1);
+    let mut column = 0usize;
+    for _ in 0..first_weekday {
+        out.push_str("   ");
+        column += 1;
+    }
+
+    let total_days = days_in_month(year, month);
+    for day in 1..=total_days {
+        out.push_str(&format!("{:>2}", day));
+        column += 1;
+        if column == 7 {
+            out.push('\n');
+            column = 0;
+        } else {
+            out.push(' ');
+        }
+    }
+
+    Ok(out.trim_end().to_string())
+}
+
+fn render_comm(left: &str, right: &str) -> Result<String, String> {
+    let left_text = read_text_source(Some(left), "")?;
+    let right_text = read_text_source(Some(right), "")?;
+    let left_lines: Vec<&str> = left_text.lines().collect();
+    let right_lines: Vec<&str> = right_text.lines().collect();
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+
+    while i < left_lines.len() && j < right_lines.len() {
+        match left_lines[i].cmp(right_lines[j]) {
+            core::cmp::Ordering::Less => {
+                out.push(left_lines[i].to_string());
+                i += 1;
+            }
+            core::cmp::Ordering::Greater => {
+                out.push(format!("\t{}", right_lines[j]));
+                j += 1;
+            }
+            core::cmp::Ordering::Equal => {
+                out.push(format!("\t\t{}", left_lines[i]));
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+
+    while i < left_lines.len() {
+        out.push(left_lines[i].to_string());
+        i += 1;
+    }
+    while j < right_lines.len() {
+        out.push(format!("\t{}", right_lines[j]));
+        j += 1;
+    }
+
+    Ok(out.join("\n"))
+}
+
+fn expand_tabs(text: &str, width: usize) -> String {
+    let tabstop = width.max(1);
+    let mut out = String::new();
+    let mut column = 0usize;
+
+    for ch in text.chars() {
+        match ch {
+            '\t' => {
+                let spaces = tabstop - (column % tabstop);
+                for _ in 0..spaces {
+                    out.push(' ');
+                }
+                column += spaces;
+            }
+            '\n' => {
+                out.push('\n');
+                column = 0;
+            }
+            _ => {
+                out.push(ch);
+                column += 1;
+            }
+        }
+    }
+
+    out
+}
+
+fn unexpand_tabs(text: &str, width: usize) -> String {
+    let tabstop = width.max(1);
+    let mut rows = Vec::new();
+
+    for line in text.lines() {
+        let mut out = String::new();
+        let mut space_run = 0usize;
+        let mut column = 0usize;
+
+        for ch in line.chars() {
+            if ch == ' ' {
+                space_run += 1;
+                column += 1;
+                if column % tabstop == 0 {
+                    out.push('\t');
+                    space_run = 0;
+                }
+                continue;
+            }
+
+            for _ in 0..space_run {
+                out.push(' ');
+            }
+            space_run = 0;
+
+            if ch == '\t' {
+                out.push('\t');
+                column += tabstop - (column % tabstop);
+            } else {
+                out.push(ch);
+                column += 1;
+            }
+        }
+
+        for _ in 0..space_run {
+            out.push(' ');
+        }
+        rows.push(out);
+    }
+
+    rows.join("\n")
+}
+
+fn fold_text(text: &str, width: usize) -> String {
+    let width = width.max(1);
+    let mut out = Vec::new();
+
+    for line in text.lines() {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+
+        for chunk in chars.chunks(width) {
+            out.push(chunk.iter().collect::<String>());
+        }
+    }
+
+    out.join("\n")
+}
+
+fn render_join(left: &str, right: &str) -> Result<String, String> {
+    let left_text = read_text_source(Some(left), "")?;
+    let right_text = read_text_source(Some(right), "")?;
+    let mut right_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for line in right_text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else {
+            continue;
+        };
+        right_map
+            .entry(key.to_string())
+            .or_default()
+            .push(parts.collect::<Vec<_>>().join(" "));
+    }
+
+    let mut out = Vec::new();
+    for line in left_text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else {
+            continue;
+        };
+        let left_rest = parts.collect::<Vec<_>>().join(" ");
+        if let Some(matches) = right_map.get(key) {
+            for right_rest in matches {
+                let mut joined = String::from(key);
+                if !left_rest.is_empty() {
+                    joined.push(' ');
+                    joined.push_str(&left_rest);
+                }
+                if !right_rest.is_empty() {
+                    joined.push(' ');
+                    joined.push_str(right_rest);
+                }
+                out.push(joined);
+            }
+        }
+    }
+
+    Ok(out.join("\n"))
+}
+
+fn render_numbered_lines(text: &str) -> String {
+    text.lines()
+        .enumerate()
+        .map(|(index, line)| format!("{:>6}\t{}", index + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_getconf(shell: &Shell, key: &str) -> Result<String, String> {
+    match key {
+        "PATH" => Ok(shell
+            .env
+            .get("PATH")
+            .unwrap_or_else(|| String::from("/bin:/usr/bin"))),
+        "PAGESIZE" | "PAGE_SIZE" => Ok(String::from("4096")),
+        "TMPDIR" => Ok(shell
+            .env
+            .get("TMPDIR")
+            .unwrap_or_else(|| String::from("/tmp"))),
+        "HOME" => Ok(shell.env.get("HOME").unwrap_or_else(|| String::from("/"))),
+        "HOSTNAME" => Ok(crate::init::INIT.get_hostname()),
+        "LONG_BIT" => Ok(String::from("64")),
+        other => Err(format!("getconf: bilinmeyen anahtar {}", other)),
+    }
+}
+
+fn compare_files(left: &str, right: &str) -> Result<Option<String>, String> {
+    let left_data = load_file(left)?;
+    let right_data = load_file(right)?;
+
+    if left_data == right_data {
+        return Ok(None);
+    }
+
+    let mismatch_index = left_data
+        .iter()
+        .zip(right_data.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| left_data.len().min(right_data.len()));
+    let line = left_data[..mismatch_index]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1;
+
+    Ok(Some(format!(
+        "cmp: dosyalar farkli (byte {}, line {})",
+        mismatch_index + 1,
+        line
+    )))
+}
+
+fn parse_cut_field_spec(spec: &str) -> Result<BTreeSet<usize>, String> {
+    let mut fields = BTreeSet::new();
+
+    for part in spec.split(',').filter(|value| !value.is_empty()) {
+        if let Some((start, end)) = part.split_once('-') {
+            let start = start
+                .parse::<usize>()
+                .map_err(|_| String::from("Kullanim: cut -d <ayrac> -f <alan-listesi> [dosya]"))?;
+            let end = end
+                .parse::<usize>()
+                .map_err(|_| String::from("Kullanim: cut -d <ayrac> -f <alan-listesi> [dosya]"))?;
+            if start == 0 || end < start {
+                return Err(String::from(
+                    "Kullanim: cut -d <ayrac> -f <alan-listesi> [dosya]",
+                ));
+            }
+            for index in start..=end {
+                fields.insert(index);
+            }
+        } else {
+            let index = part
+                .parse::<usize>()
+                .map_err(|_| String::from("Kullanim: cut -d <ayrac> -f <alan-listesi> [dosya]"))?;
+            if index == 0 {
+                return Err(String::from(
+                    "Kullanim: cut -d <ayrac> -f <alan-listesi> [dosya]",
+                ));
+            }
+            fields.insert(index);
+        }
+    }
+
+    if fields.is_empty() {
+        Err(String::from(
+            "Kullanim: cut -d <ayrac> -f <alan-listesi> [dosya]",
+        ))
+    } else {
+        Ok(fields)
+    }
+}
+
+fn cut_stream(input: &str, delimiter: char, spec: &str) -> Result<String, String> {
+    let fields = parse_cut_field_spec(spec)?;
+    let delim = delimiter.to_string();
+    let mut out = Vec::new();
+
+    for line in input.lines() {
+        let parts: Vec<&str> = line.split(delimiter).collect();
+        let selected: Vec<&str> = fields
+            .iter()
+            .filter_map(|index| parts.get(index - 1).copied())
+            .collect();
+        out.push(selected.join(&delim));
+    }
+
+    Ok(out.join("\n"))
+}
+
+fn paste_streams(paths: &[&str]) -> Result<String, String> {
+    let mut sources = Vec::new();
+    let mut max_lines = 0usize;
+
+    for path in paths {
+        let data = load_file(path)?;
+        let text = core::str::from_utf8(&data).map_err(|_| String::from("Dosya metin degil"))?;
+        let lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+        max_lines = max_lines.max(lines.len());
+        sources.push(lines);
+    }
+
+    let mut out = Vec::new();
+    for line_index in 0..max_lines {
+        let mut row = Vec::new();
+        for source in &sources {
+            row.push(source.get(line_index).cloned().unwrap_or_default());
+        }
+        out.push(row.join("\t"));
+    }
+
+    Ok(out.join("\n"))
+}
+
+fn reverse_lines(input: &str) -> String {
+    input
+        .lines()
+        .map(|line| line.chars().rev().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_seq(args: &[&str]) -> Result<String, String> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(String::from("Kullanim: seq [ilk [adim]] son"));
+    }
+
+    let values: Result<Vec<i64>, _> = args.iter().map(|value| value.parse::<i64>()).collect();
+    let values = values.map_err(|_| String::from("Kullanim: seq [ilk [adim]] son"))?;
+
+    let (start, step, end) = match values.as_slice() {
+        [end] => (1, 1, *end),
+        [start, end] => (*start, 1, *end),
+        [start, step, end] => (*start, *step, *end),
+        _ => unreachable!(),
+    };
+
+    if step == 0 {
+        return Err(String::from("seq: adim 0 olamaz"));
+    }
+
+    let mut current = start;
+    let mut out = Vec::new();
+    if step > 0 {
+        while current <= end {
+            out.push(current.to_string());
+            current += step;
+        }
+    } else {
+        while current >= end {
+            out.push(current.to_string());
+            current += step;
+        }
+    }
+
+    Ok(out.join("\n"))
+}
+
+fn printable_ascii(byte: u8) -> bool {
+    matches!(byte, 0x20..=0x7e | b'\t')
+}
+
+fn extract_strings(data: &[u8], min_len: usize) -> String {
+    let mut out = Vec::new();
+    let mut current = Vec::new();
+
+    for byte in data {
+        if printable_ascii(*byte) {
+            current.push(*byte);
+        } else {
+            if current.len() >= min_len {
+                if let Ok(text) = core::str::from_utf8(&current) {
+                    out.push(text.to_string());
+                }
+            }
+            current.clear();
+        }
+    }
+
+    if current.len() >= min_len {
+        if let Ok(text) = core::str::from_utf8(&current) {
+            out.push(text.to_string());
+        }
+    }
+
+    out.join("\n")
+}
+
+fn path_kind(path: &str) -> Option<bool> {
+    let resolved = resolve_path(path);
+    store_file_info(&resolved)
+        .ok()
+        .map(|entry| entry.is_directory)
+}
+
+fn evaluate_test(args: &[&str]) -> Result<bool, String> {
+    if args.is_empty() {
+        return Ok(false);
+    }
+
+    match args {
+        ["-e", path] => Ok(path_kind(path).is_some()),
+        ["-d", path] => Ok(path_kind(path) == Some(true)),
+        ["-f", path] => Ok(path_kind(path) == Some(false)),
+        ["-n", value] => Ok(!value.is_empty()),
+        ["-z", value] => Ok(value.is_empty()),
+        [left, "=", right] => Ok(left == right),
+        [left, "!=", right] => Ok(left != right),
+        [left, "-eq", right]
+        | [left, "-ne", right]
+        | [left, "-gt", right]
+        | [left, "-ge", right]
+        | [left, "-lt", right]
+        | [left, "-le", right] => {
+            let left = left
+                .parse::<i64>()
+                .map_err(|_| String::from("Kullanim: test <ifade>"))?;
+            let right = right
+                .parse::<i64>()
+                .map_err(|_| String::from("Kullanim: test <ifade>"))?;
+            Ok(match args[1] {
+                "-eq" => left == right,
+                "-ne" => left != right,
+                "-gt" => left > right,
+                "-ge" => left >= right,
+                "-lt" => left < right,
+                "-le" => left <= right,
+                _ => unreachable!(),
+            })
+        }
+        [value] => Ok(!value.is_empty()),
+        _ => Err(String::from("Kullanim: test <ifade>")),
+    }
+}
+
+fn render_lsusb() -> String {
+    let devices = crate::drivers::usb::get_devices();
+    if devices.is_empty() {
+        return String::from("Bus 001 Device 000: no usb devices");
+    }
+
+    let mut out = String::new();
+    for device in devices {
+        let (vendor, product) = device
+            .descriptor
+            .as_ref()
+            .map(|descriptor| (descriptor.idVendor, descriptor.idProduct))
+            .unwrap_or((0, 0));
+        out.push_str(&format!(
+            "Bus 001 Device {:03}: ID {:04x}:{:04x} {:?} {:?} port={}\n",
+            device.address, vendor, product, device.device_class, device.speed, device.port
+        ));
+    }
+
+    out.trim_end().to_string()
+}
+
+fn render_who() -> String {
+    let sessions = crate::security::users::USER_DB.list_sessions();
+    if sessions.is_empty() {
+        return String::from("Aktif oturum yok");
+    }
+
+    let mut out = String::from("USER     TTY        SESSION   LOGIN_TICK\n");
+    for session in sessions {
+        out.push_str(&format!(
+            "{:8} {:10} {:8} {}\n",
+            session.username, session.tty, session.session_id, session.login_tick
+        ));
+    }
+
+    out.trim_end().to_string()
 }
 
 fn change_directory(target: Option<&str>) -> Result<String, String> {
@@ -3208,6 +4890,16 @@ fn store_list_directory_entries(path: &str) -> Result<Vec<crate::services::FileE
 }
 
 fn store_file_info(path: &str) -> Result<crate::services::FileEntry, String> {
+    if let Some(data) = host_shell_file(path) {
+        return Ok(crate::services::FileEntry {
+            name: basename(path).to_string(),
+            path: path.to_string(),
+            size: data.len() as u64,
+            is_directory: false,
+            modified_time: 0,
+        });
+    }
+
     match request_store_sync(
         0,
         crate::services::StoreCommand::GetFileInfo {
@@ -3331,6 +5023,2127 @@ fn stat_path(path: &str) -> Result<String, String> {
         entry.size,
         entry.modified_time
     ))
+}
+
+fn path_usage_bytes(path: &str, depth: usize) -> Result<u64, String> {
+    if depth >= 32 {
+        return Ok(0);
+    }
+
+    let entry = store_file_info(path)?;
+    if !entry.is_directory {
+        return Ok(entry.size);
+    }
+
+    let mut total = 0u64;
+    for child in store_list_directory_entries(path)? {
+        total = total.saturating_add(path_usage_bytes(&child.path, depth + 1)?);
+    }
+    Ok(total)
+}
+
+fn render_du(paths: &[&str]) -> Result<String, String> {
+    let targets: Vec<String> = if paths.is_empty() {
+        vec![current_working_directory()]
+    } else {
+        paths.iter().map(|path| resolve_path(path)).collect()
+    };
+
+    let mut rows = Vec::new();
+    for target in targets {
+        rows.push(format!("{}\t{}", path_usage_bytes(&target, 0)?, target));
+    }
+    Ok(rows.join("\n"))
+}
+
+fn random_temp_component(len: usize) -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut out = String::with_capacity(len);
+    let mut pool = crate::random::rand_u64();
+    let mut remain = 0usize;
+
+    for _ in 0..len {
+        if remain == 0 {
+            pool = crate::random::rand_u64();
+            remain = 10;
+        }
+        let index = (pool % ALPHABET.len() as u64) as usize;
+        out.push(ALPHABET[index] as char);
+        pool /= ALPHABET.len() as u64;
+        remain -= 1;
+    }
+
+    out
+}
+
+fn materialize_mktemp_template(template: &str) -> String {
+    let x_count = template.chars().filter(|ch| *ch == 'X').count();
+    let replacement = random_temp_component(x_count.max(8));
+    let mut iter = replacement.chars();
+    let mut out = String::new();
+
+    if x_count == 0 {
+        out.push_str(template);
+        out.push_str(&replacement);
+        return out;
+    }
+
+    for ch in template.chars() {
+        if ch == 'X' {
+            out.push(iter.next().unwrap_or('x'));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn render_mktemp(args: &[&str]) -> Result<String, String> {
+    if args.len() > 1 {
+        return Err(String::from("Kullanim: mktemp [sablon]"));
+    }
+
+    let default_template = if store_list_directory_entries("/tmp").is_ok() {
+        "/tmp/echos.XXXXXXXX"
+    } else {
+        "/echos.XXXXXXXX"
+    };
+    let template = args.first().copied().unwrap_or(default_template);
+
+    for _ in 0..64 {
+        let candidate = materialize_mktemp_template(template);
+        let resolved = resolve_path(&candidate);
+        if store_file_info(&resolved).is_ok() {
+            continue;
+        }
+        if write_file(&resolved, b"").is_ok() {
+            return Ok(resolved);
+        }
+    }
+
+    Err(String::from(
+        "mktemp hatasi: cakismayan hedef dosya olusturulamadi",
+    ))
+}
+
+fn render_od(path: Option<&str>, input: &str) -> Result<String, String> {
+    let data = read_binary_source(path, input)?;
+    let mut rows = Vec::new();
+
+    if data.is_empty() {
+        rows.push(String::from("0000000"));
+        return Ok(rows.join("\n"));
+    }
+
+    for (index, chunk) in data.chunks(16).enumerate() {
+        let mut row = format!("{:07o}", index * 16);
+        for byte in chunk {
+            row.push(' ');
+            row.push_str(&format!("{:03o}", byte));
+        }
+        rows.push(row);
+    }
+    rows.push(format!("{:07o}", data.len()));
+    Ok(rows.join("\n"))
+}
+
+fn validate_path_literal(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return Some(String::from("bos yol"));
+    }
+    if path.len() > 4096 {
+        return Some(String::from("yol uzunlugu 4096 byte sinirini asiyor"));
+    }
+    if path.as_bytes().contains(&0) {
+        return Some(String::from("NUL byte iceremez"));
+    }
+    for component in path.split('/').filter(|component| !component.is_empty()) {
+        if component.len() > 255 {
+            return Some(format!("bilesen 255 byte sinirini asiyor: {}", component));
+        }
+    }
+    None
+}
+
+fn render_pathchk(paths: &[&str]) -> Result<Option<String>, String> {
+    if paths.is_empty() {
+        return Err(String::from("Kullanim: pathchk <yol>..."));
+    }
+
+    let mut failures = Vec::new();
+    for path in paths {
+        if let Some(reason) = validate_path_literal(path) {
+            failures.push(format!("pathchk hatasi: '{}': {}", path, reason));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(failures.join("\n")))
+    }
+}
+
+fn split_suffix(mut index: usize) -> String {
+    let mut chars = Vec::new();
+    loop {
+        chars.push((b'a' + (index % 26) as u8) as char);
+        index /= 26;
+        if index == 0 {
+            break;
+        }
+        index -= 1;
+    }
+    while chars.len() < 2 {
+        chars.push('a');
+    }
+    chars.reverse();
+    chars.into_iter().collect()
+}
+
+fn render_split(args: &[&str], input: &str) -> Result<String, String> {
+    let mut lines_per_file = 1000usize;
+    let mut positional = Vec::new();
+    let mut index = 0usize;
+
+    while index < args.len() {
+        match args[index] {
+            "-l" if index + 1 < args.len() => {
+                lines_per_file = args[index + 1]
+                    .parse::<usize>()
+                    .map_err(|_| String::from("Kullanim: split -l <satir> [dosya] [on-ek]"))?;
+                index += 2;
+            }
+            value => {
+                positional.push(value);
+                index += 1;
+            }
+        }
+    }
+
+    if lines_per_file == 0 {
+        return Err(String::from("split hatasi: satir sayisi 0 olamaz"));
+    }
+
+    let (source_path, prefix) = match positional.as_slice() {
+        [] => (None, String::from("x")),
+        [only] if !input.is_empty() => (None, resolve_path(only)),
+        [only] => (Some(*only), String::from("x")),
+        [source, prefix] => (Some(*source), resolve_path(prefix)),
+        _ => return Err(String::from("Kullanim: split -l <satir> [dosya] [on-ek]")),
+    };
+
+    let text = read_text_source(source_path, input)?;
+    let lines: Vec<&str> = if text.is_empty() {
+        Vec::new()
+    } else {
+        text.lines().collect()
+    };
+
+    if lines.is_empty() {
+        let target = format!("{}{}", prefix, split_suffix(0));
+        write_file(&target, b"")?;
+        return Ok(target);
+    }
+
+    let mut outputs = Vec::new();
+    for (chunk_index, chunk) in lines.chunks(lines_per_file).enumerate() {
+        let target = format!("{}{}", prefix, split_suffix(chunk_index));
+        let mut payload = chunk.join("\n");
+        payload.push('\n');
+        write_file(&target, payload.as_bytes())?;
+        outputs.push(target);
+    }
+    Ok(outputs.join("\n"))
+}
+
+fn render_sponge(args: &[&str], input: &str) -> Result<String, String> {
+    if args.len() != 1 {
+        return Err(String::from("Kullanim: sponge <hedef>"));
+    }
+    let resolved = resolve_path(args[0]);
+    let written = write_file(&resolved, input.as_bytes())?;
+    Ok(format!("{} bytes -> {}", written, resolved))
+}
+
+fn render_sync() -> Result<Option<String>, String> {
+    if cfg!(any(
+        test,
+        all(
+            feature = "host_smoke",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )
+    )) {
+        return Ok(None);
+    }
+
+    crate::fs::f2fs::sync_f2fs().map_err(|err| format!("sync hatasi: {:?}", err))?;
+    Ok(None)
+}
+
+fn render_tsort(path: Option<&str>, input: &str) -> Result<String, String> {
+    let text = read_text_source(path, input)?;
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Ok(String::new());
+    }
+    if tokens.len() % 2 != 0 {
+        return Err(String::from(
+            "tsort hatasi: giris dugum ciftlerinden olusmali",
+        ));
+    }
+
+    let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut indegree: BTreeMap<String, usize> = BTreeMap::new();
+    for pair in tokens.chunks_exact(2) {
+        let left = pair[0].to_string();
+        let right = pair[1].to_string();
+        edges.entry(left.clone()).or_default().push(right.clone());
+        indegree.entry(left).or_insert(0);
+        *indegree.entry(right).or_insert(0) += 1;
+    }
+
+    let mut ready: Vec<String> = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(node, _)| node.clone())
+        .collect();
+    ready.sort();
+
+    let mut out = Vec::new();
+    while !ready.is_empty() {
+        let node = ready.remove(0);
+        out.push(node.clone());
+        if let Some(children) = edges.get(&node) {
+            let mut spawned = Vec::new();
+            for child in children {
+                if let Some(degree) = indegree.get_mut(child) {
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        spawned.push(child.clone());
+                    }
+                }
+            }
+            if !spawned.is_empty() {
+                ready.extend(spawned);
+                ready.sort();
+                ready.dedup();
+            }
+        }
+    }
+
+    if out.len() != indegree.len() {
+        return Err(String::from("tsort hatasi: graf dongusu bulundu"));
+    }
+
+    Ok(out.join("\n"))
+}
+
+fn parse_byte_count(value: &str) -> Result<usize, String> {
+    let (digits, multiplier) = match value.as_bytes().last().copied() {
+        Some(b'k') | Some(b'K') => (&value[..value.len() - 1], 1024usize),
+        Some(b'm') | Some(b'M') => (&value[..value.len() - 1], 1024usize * 1024),
+        Some(b'g') | Some(b'G') => (&value[..value.len() - 1], 1024usize * 1024 * 1024),
+        _ => (value, 1usize),
+    };
+    let base = digits
+        .parse::<usize>()
+        .map_err(|_| format!("gecersiz boyut: {}", value))?;
+    base.checked_mul(multiplier)
+        .ok_or_else(|| format!("boyut tasmasi: {}", value))
+}
+
+fn render_bc(args: &[&str], input: &str) -> Result<String, String> {
+    let source = if !args.is_empty() {
+        let candidate = args.join(" ");
+        if args.len() == 1 && path_kind(args[0]).is_some() {
+            read_text_source(Some(args[0]), input)?
+        } else {
+            candidate
+        }
+    } else {
+        read_text_source(None, input)?
+    };
+
+    let mut results = Vec::new();
+    for line in source.lines() {
+        let expr = line.trim();
+        if expr.is_empty() {
+            continue;
+        }
+        let rendered =
+            scripting::eval_expression(expr).map_err(|err| format!("bc hatasi: {:?}", err))?;
+        results.push(rendered);
+    }
+    Ok(results.join("\n"))
+}
+
+fn render_chgrp(args: &[&str]) -> Result<String, String> {
+    if args.len() < 2 {
+        return Err(String::from("Kullanim: chgrp <gid> <yol>..."));
+    }
+    let gid = args[0]
+        .parse::<u32>()
+        .map_err(|_| String::from("chgrp hatasi: gid sayisal olmali"))?;
+    let mut changed = Vec::new();
+    for path in &args[1..] {
+        crate::fs::f2fs::set_file_metadata(path, None, None, Some(gid))
+            .map_err(|_| format!("chgrp hatasi: {} bulunamadi", path))?;
+        changed.push(format!("{} -> gid={}", resolve_path(path), gid));
+    }
+    Ok(changed.join("\n"))
+}
+
+fn render_cols(args: &[&str], input: &str) -> Result<String, String> {
+    let mut width = 80usize;
+    let mut source_path = None;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index] {
+            "-w" if index + 1 < args.len() => {
+                width = args[index + 1]
+                    .parse::<usize>()
+                    .map_err(|_| String::from("Kullanim: cols [-w genislik] [dosya]"))?;
+                index += 2;
+            }
+            path => {
+                source_path = Some(path);
+                index += 1;
+            }
+        }
+    }
+    if width == 0 {
+        return Err(String::from("cols hatasi: genislik 0 olamaz"));
+    }
+    let text = read_text_source(source_path, input)?;
+    let items: Vec<&str> = text.split_whitespace().collect();
+    if items.is_empty() {
+        return Ok(String::new());
+    }
+    let cell = items
+        .iter()
+        .map(|item| item.len())
+        .max()
+        .unwrap_or(1)
+        .saturating_add(2)
+        .max(2);
+    let columns = (width / cell).max(1);
+    let mut out = String::new();
+    for (index, item) in items.iter().enumerate() {
+        out.push_str(item);
+        let at_line_end = (index + 1) % columns == 0 || index + 1 == items.len();
+        if at_line_end {
+            if index + 1 < items.len() {
+                out.push('\n');
+            }
+        } else {
+            let pad = cell.saturating_sub(item.len());
+            for _ in 0..pad {
+                out.push(' ');
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn render_dc(args: &[&str], input: &str) -> Result<String, String> {
+    let source = if !args.is_empty() {
+        if args.len() == 1 && path_kind(args[0]).is_some() {
+            read_text_source(Some(args[0]), input)?
+        } else {
+            args.join(" ")
+        }
+    } else {
+        read_text_source(None, input)?
+    };
+    let mut stack: Vec<i64> = Vec::new();
+    let mut out = Vec::new();
+    for token in source.split_whitespace() {
+        match token {
+            "+" | "-" | "*" | "/" | "%" => {
+                let rhs = stack
+                    .pop()
+                    .ok_or_else(|| String::from("dc hatasi: eksik operand"))?;
+                let lhs = stack
+                    .pop()
+                    .ok_or_else(|| String::from("dc hatasi: eksik operand"))?;
+                let value = match token {
+                    "+" => lhs.saturating_add(rhs),
+                    "-" => lhs.saturating_sub(rhs),
+                    "*" => lhs.saturating_mul(rhs),
+                    "/" => {
+                        if rhs == 0 {
+                            return Err(String::from("dc hatasi: sifira bolme"));
+                        }
+                        lhs / rhs
+                    }
+                    "%" => {
+                        if rhs == 0 {
+                            return Err(String::from("dc hatasi: sifira bolme"));
+                        }
+                        lhs % rhs
+                    }
+                    _ => unreachable!(),
+                };
+                stack.push(value);
+            }
+            "p" => {
+                let value = stack
+                    .last()
+                    .ok_or_else(|| String::from("dc hatasi: bos yigin"))?;
+                out.push(value.to_string());
+            }
+            "f" => {
+                for value in stack.iter().rev() {
+                    out.push(value.to_string());
+                }
+            }
+            "c" => stack.clear(),
+            number => {
+                let value = number
+                    .parse::<i64>()
+                    .map_err(|_| format!("dc hatasi: gecersiz token {}", number))?;
+                stack.push(value);
+            }
+        }
+    }
+    Ok(out.join("\n"))
+}
+
+fn render_dd(args: &[&str], input: &str) -> Result<String, String> {
+    let mut source_path = None;
+    let mut target_path = None;
+    let mut block_size = 512usize;
+    let mut count = None;
+
+    for arg in args {
+        if let Some(value) = arg.strip_prefix("if=") {
+            source_path = Some(value);
+        } else if let Some(value) = arg.strip_prefix("of=") {
+            target_path = Some(value);
+        } else if let Some(value) = arg.strip_prefix("bs=") {
+            block_size = parse_byte_count(value)?;
+        } else if let Some(value) = arg.strip_prefix("count=") {
+            count = Some(
+                value
+                    .parse::<usize>()
+                    .map_err(|_| String::from("dd hatasi: count sayisal olmali"))?,
+            );
+        } else {
+            return Err(String::from(
+                "Kullanim: dd if=<kaynak> of=<hedef> [bs=N] [count=N]",
+            ));
+        }
+    }
+    if block_size == 0 {
+        return Err(String::from("dd hatasi: bs 0 olamaz"));
+    }
+    let mut data = read_binary_source(source_path, input)?;
+    if let Some(blocks) = count {
+        let limit = block_size
+            .checked_mul(blocks)
+            .ok_or_else(|| String::from("dd hatasi: byte sayisi tasti"))?;
+        data.truncate(data.len().min(limit));
+    }
+    if let Some(target) = target_path {
+        write_file(target, &data)?;
+        return Ok(format!(
+            "{} bytes copied, {} records out",
+            data.len(),
+            (data.len() + block_size - 1) / block_size
+        ));
+    }
+    match core::str::from_utf8(&data) {
+        Ok(text) => Ok(text.to_string()),
+        Err(_) => Ok(format!("{} bytes copied", data.len())),
+    }
+}
+
+fn render_fallocate(args: &[&str]) -> Result<String, String> {
+    let (path, len) = match args {
+        ["-l", len, path] => (*path, parse_byte_count(len)?),
+        [path, len] => (*path, parse_byte_count(len)?),
+        _ => return Err(String::from("Kullanim: fallocate [-l boyut] <yol>")),
+    };
+    let mut data = load_file(path).unwrap_or_default();
+    if data.len() < len {
+        data.resize(len, 0);
+        write_file(path, &data)?;
+    }
+    Ok(format!(
+        "fallocate: {} -> {} bytes",
+        resolve_path(path),
+        data.len()
+    ))
+}
+
+fn render_hwclock(args: &[&str]) -> Result<String, String> {
+    if !args.is_empty() && args != ["--show"] {
+        return Err(String::from("Kullanim: hwclock [--show]"));
+    }
+    Ok(crate::drivers::rtc::get_cached_datetime().to_string())
+}
+
+fn render_mkfifo(args: &[&str]) -> Result<String, String> {
+    if args.is_empty() {
+        return Err(String::from("Kullanim: mkfifo <yol>..."));
+    }
+    let mut out = Vec::new();
+    for path in args {
+        let resolved = resolve_path(path);
+        let rc = crate::posix::pipe::sys_mkfifo(&resolved, 0o666);
+        if rc != 0 {
+            return Err(format!("mkfifo hatasi: {} rc={}", resolved, rc));
+        }
+        out.push(format!("mkfifo: {}", resolved));
+    }
+    Ok(out.join("\n"))
+}
+
+fn render_readahead(args: &[&str]) -> Result<String, String> {
+    if args.is_empty() {
+        return Err(String::from("Kullanim: readahead <dosya>..."));
+    }
+    let mut bytes = 0usize;
+    for path in args {
+        bytes = bytes.saturating_add(load_file(path)?.len());
+    }
+    Ok(format!("readahead: {} bytes", bytes))
+}
+
+fn parse_sed_substitution(script: &str) -> Result<(String, String, bool), String> {
+    let mut chars = script.chars();
+    if chars.next() != Some('s') {
+        return Err(String::from("Kullanim: sed s/once/sonra/[g] [dosya]"));
+    }
+    let delimiter = chars
+        .next()
+        .ok_or_else(|| String::from("Kullanim: sed s/once/sonra/[g] [dosya]"))?;
+    let mut sections = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for ch in chars {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == delimiter {
+            sections.push(current);
+            current = String::new();
+        } else {
+            current.push(ch);
+        }
+    }
+    sections.push(current);
+    if sections.len() != 3 {
+        return Err(String::from("Kullanim: sed s/once/sonra/[g] [dosya]"));
+    }
+    let global = sections[2].trim() == "g";
+    if !sections[2].trim().is_empty() && !global {
+        return Err(String::from("sed hatasi: yalniz g bayragi desteklenir"));
+    }
+    Ok((sections[0].clone(), sections[1].clone(), global))
+}
+
+fn render_sed(args: &[&str], input: &str) -> Result<String, String> {
+    if args.is_empty() {
+        return Err(String::from("Kullanim: sed s/once/sonra/[g] [dosya]"));
+    }
+    let (needle, replacement, global) = parse_sed_substitution(args[0])?;
+    let text = read_text_source(args.get(1).copied(), input)?;
+    if needle.is_empty() {
+        return Err(String::from("sed hatasi: bos arama metni"));
+    }
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if global {
+            out.push(line.replace(&needle, &replacement));
+        } else {
+            out.push(line.replacen(&needle, &replacement, 1));
+        }
+    }
+    Ok(out.join("\n"))
+}
+
+fn uu_char(value: u8) -> char {
+    let encoded = (value & 0x3f).saturating_add(32);
+    if encoded == 32 {
+        '`'
+    } else {
+        encoded as char
+    }
+}
+
+fn uu_value(ch: char) -> Result<u8, String> {
+    match ch {
+        '`' => Ok(0),
+        ' '..='_' => Ok(((ch as u8).saturating_sub(32)) & 0x3f),
+        _ => Err(format!("uudecode hatasi: gecersiz karakter {}", ch)),
+    }
+}
+
+fn render_uuencode(args: &[&str]) -> Result<String, String> {
+    if args.len() < 2 {
+        return Err(String::from("Kullanim: uuencode <dosya> <ad>"));
+    }
+    let data = load_file(args[0])?;
+    let mut out = format!("begin 644 {}\n", args[1]);
+    for chunk in data.chunks(45) {
+        out.push(uu_char(chunk.len() as u8));
+        for triple in chunk.chunks(3) {
+            let a = triple.get(0).copied().unwrap_or(0);
+            let b = triple.get(1).copied().unwrap_or(0);
+            let c = triple.get(2).copied().unwrap_or(0);
+            out.push(uu_char(a >> 2));
+            out.push(uu_char(((a << 4) | (b >> 4)) & 0x3f));
+            out.push(uu_char(((b << 2) | (c >> 6)) & 0x3f));
+            out.push(uu_char(c & 0x3f));
+        }
+        out.push('\n');
+    }
+    out.push_str("`\nend");
+    Ok(out)
+}
+
+fn render_uudecode(args: &[&str], input: &str) -> Result<String, String> {
+    let text = read_text_source(args.get(0).copied(), input)?;
+    let mut lines = text.lines();
+    let header = lines
+        .find(|line| line.starts_with("begin "))
+        .ok_or_else(|| String::from("uudecode hatasi: begin satiri yok"))?;
+    let mut header_parts = header.split_whitespace();
+    let _begin = header_parts.next();
+    let _mode = header_parts.next();
+    let target = header_parts
+        .next()
+        .ok_or_else(|| String::from("uudecode hatasi: hedef adi yok"))?;
+    let mut data = Vec::new();
+
+    for line in lines {
+        if line == "end" {
+            break;
+        }
+        let mut chars = line.chars();
+        let len = uu_value(chars.next().unwrap_or('`'))? as usize;
+        if len == 0 {
+            continue;
+        }
+        let encoded: Vec<char> = chars.collect();
+        let line_start = data.len();
+        for group in encoded.chunks(4) {
+            if group.len() < 4 {
+                break;
+            }
+            let a = uu_value(group[0])?;
+            let b = uu_value(group[1])?;
+            let c = uu_value(group[2])?;
+            let d = uu_value(group[3])?;
+            data.push((a << 2) | (b >> 4));
+            data.push((b << 4) | (c >> 2));
+            data.push((c << 6) | d);
+        }
+        let desired = line_start.saturating_add(len);
+        data.truncate(desired.min(data.len()));
+    }
+    write_file(target, &data)?;
+    Ok(format!(
+        "uudecode: {} -> {} bytes",
+        resolve_path(target),
+        data.len()
+    ))
+}
+
+fn render_xinstall(args: &[&str]) -> Result<String, String> {
+    if args.len() != 2 {
+        return Err(String::from("Kullanim: xinstall <kaynak> <hedef>"));
+    }
+    let data = load_file(args[0])?;
+    let target = resolve_path(args[1]);
+    write_file(&target, &data)?;
+    Ok(format!("xinstall: {} -> {}", resolve_path(args[0]), target))
+}
+
+fn render_yes(args: &[&str]) -> Result<String, String> {
+    let mut count = 64usize;
+    let mut words = Vec::new();
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index] {
+            "-n" if index + 1 < args.len() => {
+                count = args[index + 1]
+                    .parse::<usize>()
+                    .map_err(|_| String::from("Kullanim: yes [-n satir] [metin]"))?;
+                index += 2;
+            }
+            word => {
+                words.push(word);
+                index += 1;
+            }
+        }
+    }
+    let line = if words.is_empty() {
+        String::from("y")
+    } else {
+        words.join(" ")
+    };
+    Ok(vec![line; count].join("\n"))
+}
+
+fn parse_size_arg(value: &str) -> Result<usize, String> {
+    let (digits, scale) = match value.as_bytes().last().copied() {
+        Some(b'k') | Some(b'K') => (&value[..value.len() - 1], 1024usize),
+        Some(b'm') | Some(b'M') => (&value[..value.len() - 1], 1024usize * 1024),
+        Some(b'g') | Some(b'G') => (&value[..value.len() - 1], 1024usize * 1024 * 1024),
+        _ => (value, 1usize),
+    };
+    digits
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_mul(scale))
+        .ok_or_else(|| format!("gecersiz boyut: {}", value))
+}
+
+fn render_blkdiscard(args: &[&str]) -> Result<String, String> {
+    let mut offset = 0usize;
+    let mut length = None::<usize>;
+    let mut path = None::<&str>;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index] {
+            "-o" if index + 1 < args.len() => {
+                offset = parse_size_arg(args[index + 1])?;
+                index += 2;
+            }
+            "-l" if index + 1 < args.len() => {
+                length = Some(parse_size_arg(args[index + 1])?);
+                index += 2;
+            }
+            value => {
+                path = Some(value);
+                index += 1;
+            }
+        }
+    }
+    let path = path.ok_or_else(|| String::from("Kullanim: blkdiscard [-o off] [-l len] <path>"))?;
+    let mut data = read_binary_source(Some(path), "")?;
+    if offset > data.len() {
+        return Err(String::from("blkdiscard: offset dosya disinda"));
+    }
+    let end = length
+        .and_then(|len| offset.checked_add(len))
+        .unwrap_or(data.len())
+        .min(data.len());
+    for byte in &mut data[offset..end] {
+        *byte = 0;
+    }
+    write_file(path, &data)?;
+    Ok(format!(
+        "blkdiscard: discarded {} bytes @ {} -> {}",
+        end.saturating_sub(offset),
+        offset,
+        resolve_path(path)
+    ))
+}
+
+fn shell_dir_exists(path: &str) -> bool {
+    path == "/" || crate::fs::f2fs::list_dir(path).is_ok()
+}
+
+fn render_chroot(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    let root = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: chroot <root> [command]"))?;
+    let root = resolve_path(root);
+    if !shell_dir_exists(&root) {
+        return Err(String::from("chroot: root dizin bulunamadi"));
+    }
+    let old_root = shell.env.get("ECHOS_ROOT");
+    let old_pwd = shell.env.get("PWD");
+    shell.env.set("ECHOS_ROOT", &root);
+    shell.env.set("PWD", "/");
+    shell.sync_runtime_state();
+    if args.len() == 1 {
+        return Ok(Some(format!("chroot: {}", root)));
+    }
+    let command = args[1..].join(" ");
+    let output = shell.execute_line(&command);
+    let status = shell.last_exit_code;
+    match old_root {
+        Some(value) => shell.env.set("ECHOS_ROOT", &value),
+        None => shell.env.unset("ECHOS_ROOT"),
+    }
+    match old_pwd {
+        Some(value) => shell.env.set("PWD", &value),
+        None => shell.env.unset("PWD"),
+    }
+    shell.sync_runtime_state();
+    shell.last_exit_code = status;
+    Ok(output)
+}
+
+fn render_cron(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    let path = args.first().copied().unwrap_or("/etc/crontab");
+    let text = read_text_source(Some(path), "")?;
+    let mut out = Vec::new();
+    let mut ran = 0usize;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 6 {
+            return Err(format!("cron: gecersiz satir: {}", trimmed));
+        }
+        let command = parts[5..].join(" ");
+        if let Some(result) = shell.execute_line(&command) {
+            if !result.is_empty() {
+                out.push(result);
+            }
+        }
+        ran += 1;
+        if ran >= 32 {
+            break;
+        }
+    }
+    Ok(if out.is_empty() {
+        Some(format!("cron: {} job", ran))
+    } else {
+        Some(out.join("\n"))
+    })
+}
+
+fn render_eject(args: &[&str]) -> Result<String, String> {
+    let dev = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: eject <device>"))?;
+    if crate::drivers::loopback::detach(dev).is_ok() {
+        return Ok(format!("eject: {} detached", dev));
+    }
+    SHELL_EJECTED_MEDIA.lock().insert(dev.to_string());
+    Ok(format!("eject: {} marked offline", dev))
+}
+
+fn render_freeramdisk(args: &[&str]) -> Result<String, String> {
+    let dev = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: freeramdisk <loop-device>"))?;
+    crate::drivers::loopback::detach(dev)
+        .map(|_| format!("freeramdisk: {}", dev))
+        .map_err(|err| format!("freeramdisk: {}", err))
+}
+
+fn render_fsfreeze(args: &[&str]) -> Result<String, String> {
+    if args.len() != 2 {
+        return Err(String::from("Kullanim: fsfreeze <-f|-u> <mount>"));
+    }
+    let mount = resolve_path(args[1]);
+    match args[0] {
+        "-f" => {
+            SHELL_FROZEN_MOUNTS.lock().insert(mount.clone());
+            Ok(format!("fsfreeze: {} frozen", mount))
+        }
+        "-u" => {
+            SHELL_FROZEN_MOUNTS.lock().remove(&mount);
+            Ok(format!("fsfreeze: {} thawed", mount))
+        }
+        _ => Err(String::from("Kullanim: fsfreeze <-f|-u> <mount>")),
+    }
+}
+
+fn render_getty(shell: &mut Shell, args: &[&str]) -> Result<String, String> {
+    let tty = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: getty <tty> [user]"))?;
+    let digits = tty.trim_start_matches("/dev/").trim_start_matches("tty");
+    if let Ok(vt) = digits.parse::<u8>() {
+        ACTIVE_VT.store(vt.min(63), Ordering::Release);
+    }
+    shell.env.set("TTY", tty);
+    shell.sync_runtime_state();
+    render_login_like(shell, args.get(1..).unwrap_or(&[]), "root")
+}
+
+fn render_halt(args: &[&str]) -> Result<String, String> {
+    if args.iter().any(|arg| *arg == "-p" || *arg == "poweroff") {
+        crate::drivers::driver_model::DRIVER_MODEL.shutdown_all();
+    }
+    #[cfg(any(
+        test,
+        all(
+            feature = "host_smoke",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )
+    ))]
+    {
+        return Ok(String::from("halt: host/test shutdown path armed"));
+    }
+    #[cfg(not(any(
+        test,
+        all(
+            feature = "host_smoke",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )
+    )))]
+    {
+        crate::init::shutdown();
+        Ok(String::from("halt: system halted"))
+    }
+}
+
+fn module_name_from_path(path: &str) -> String {
+    path.trim_end_matches(".ko")
+        .trim_end_matches(".o")
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn render_insmod(args: &[&str]) -> Result<String, String> {
+    let source = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: insmod <module.ko>"))?;
+    let data = read_binary_source(Some(source), "")?;
+    let name = module_name_from_path(source);
+    SHELL_MODULES.lock().insert(
+        name.clone(),
+        ShellModuleRecord {
+            source: resolve_path(source),
+            size: data.len(),
+            loaded_tick: crate::task::scheduler::get_ticks() as u64,
+        },
+    );
+    Ok(format!("insmod: {} {} bytes", name, data.len()))
+}
+
+fn render_chvt(args: &[&str]) -> Result<String, String> {
+    let Some(value) = args.first() else {
+        return Err(String::from("Kullanim: chvt <tty-number>"));
+    };
+    if !VT_SWITCH_ALLOWED.load(Ordering::Acquire) {
+        return Err(String::from("chvt: sanal terminal gecisi kapali"));
+    }
+    let vt = value
+        .parse::<u8>()
+        .map_err(|_| String::from("chvt: gecersiz tty numarasi"))?;
+    if vt > 63 {
+        return Err(String::from("chvt: tty araligi 0..63"));
+    }
+    ACTIVE_VT.store(vt, Ordering::Release);
+    Ok(format!("/dev/tty{}", vt))
+}
+
+fn render_ctrlaltdel(args: &[&str]) -> Result<String, String> {
+    match args {
+        [] => Ok(if CTRLALTDEL_HARD.load(Ordering::Acquire) {
+            String::from("hard")
+        } else {
+            String::from("soft")
+        }),
+        ["hard"] => {
+            CTRLALTDEL_HARD.store(true, Ordering::Release);
+            Ok(String::from("ctrlaltdel: hard"))
+        }
+        ["soft"] => {
+            CTRLALTDEL_HARD.store(false, Ordering::Release);
+            Ok(String::from("ctrlaltdel: soft"))
+        }
+        _ => Err(String::from("Kullanim: ctrlaltdel <hard|soft>")),
+    }
+}
+
+fn render_dmesg(args: &[&str]) -> Result<String, String> {
+    if !args.is_empty() {
+        return Err(String::from("Kullanim: dmesg"));
+    }
+    let data = load_file("/dev/kmsg")?;
+    let text = core::str::from_utf8(&data).map_err(|_| String::from("dmesg: kmsg metin degil"))?;
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        if let Some((prefix, message)) = line.split_once(';') {
+            let seq = prefix.split(',').nth(1).unwrap_or("0");
+            rows.push(format!("[{}] {}", seq, message));
+        } else if !line.is_empty() {
+            rows.push(line.to_string());
+        }
+    }
+    Ok(rows.join("\n"))
+}
+
+fn render_ed(args: &[&str], input: &str) -> Result<String, String> {
+    let path = args.first().copied();
+    let mut lines: Vec<String> = if let Some(path) = path {
+        match read_text_source(Some(path), "") {
+            Ok(text) => text.lines().map(String::from).collect(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let mut current = lines.len();
+    let mut output = Vec::new();
+    let commands: Vec<&str> = input.lines().collect();
+    let mut index = 0usize;
+    while index < commands.len() {
+        match commands[index].trim_end() {
+            "a" | "i" | "c" => {
+                let op = commands[index].trim_end();
+                index += 1;
+                let mut inserted = Vec::new();
+                while index < commands.len() && commands[index] != "." {
+                    inserted.push(commands[index].to_string());
+                    index += 1;
+                }
+                if op == "c" {
+                    if current == 0 || current > lines.len() {
+                        return Err(String::from("ed: aktif satir yok"));
+                    }
+                    lines.splice(current - 1..current, inserted.iter().cloned());
+                    current = current.saturating_sub(1) + inserted.len();
+                } else if op == "i" {
+                    let pos = current.saturating_sub(1).min(lines.len());
+                    lines.splice(pos..pos, inserted.iter().cloned());
+                    current = pos + inserted.len();
+                } else {
+                    let pos = current.min(lines.len());
+                    lines.splice(pos..pos, inserted.iter().cloned());
+                    current = pos + inserted.len();
+                }
+            }
+            "p" => output.extend(lines.iter().cloned()),
+            "w" => {
+                let Some(path) = path else {
+                    return Err(String::from("ed: yazilacak dosya yok"));
+                };
+                let mut data = lines.join("\n");
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                let written = write_file(path, data.as_bytes())?;
+                output.push(format!("{}", written));
+            }
+            "q" => break,
+            "" => {}
+            _ => return Err(String::from("ed: desteklenmeyen komut")),
+        }
+        index += 1;
+    }
+    Ok(output.join("\n"))
+}
+
+fn render_flock(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    let mut operation = crate::fs::file_lock::LOCK_EX;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index] {
+            "-n" => {
+                operation |= crate::fs::file_lock::LOCK_NB;
+                index += 1;
+            }
+            "-s" => {
+                operation =
+                    (operation & crate::fs::file_lock::LOCK_NB) | crate::fs::file_lock::LOCK_SH;
+                index += 1;
+            }
+            "-x" => {
+                operation =
+                    (operation & crate::fs::file_lock::LOCK_NB) | crate::fs::file_lock::LOCK_EX;
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    if args.len().saturating_sub(index) < 2 {
+        return Err(String::from(
+            "Kullanim: flock [-n] [-s|-x] <file> <command>",
+        ));
+    }
+    let path = resolve_path(args[index]);
+    let host_fd = cfg!(any(
+        test,
+        all(
+            feature = "host_smoke",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )
+    ))
+    .then(|| {
+        path.as_bytes().iter().fold(17usize, |acc, byte| {
+            acc.wrapping_mul(31).wrapping_add(*byte as usize)
+        })
+    });
+    let fd = host_fd.unwrap_or_else(|| crate::fs::sys_open(&path, crate::posix::O_RDWR));
+    let lock_fd = fd.min(i32::MAX as usize) as i32;
+    let lock_result = crate::fs::file_lock::sys_flock(lock_fd, operation);
+    if lock_result != 0 {
+        if host_fd.is_none() {
+            let _ = crate::fs::sys_close(fd);
+        }
+        return Err(format!("flock: kilit alinamadi ({})", lock_result));
+    }
+    let command = args[index + 1..].join(" ");
+    let output = shell.execute_line(&command);
+    let status = shell.last_exit_code;
+    let _ = crate::fs::file_lock::sys_flock(lock_fd, crate::fs::file_lock::LOCK_UN);
+    if host_fd.is_none() {
+        let _ = crate::fs::sys_close(fd);
+    }
+    shell.last_exit_code = status;
+    Ok(output)
+}
+
+fn parse_signal_arg(value: Option<&str>) -> Result<i32, String> {
+    let Some(value) = value else {
+        return Ok(15);
+    };
+    let trimmed = value.trim_start_matches('-');
+    match trimmed {
+        "HUP" | "SIGHUP" => Ok(1),
+        "INT" | "SIGINT" => Ok(2),
+        "KILL" | "SIGKILL" => Ok(9),
+        "TERM" | "SIGTERM" => Ok(15),
+        "STOP" | "SIGSTOP" => Ok(19),
+        "CONT" | "SIGCONT" => Ok(18),
+        _ => trimmed
+            .parse::<i32>()
+            .map_err(|_| String::from("killall5: gecersiz sinyal")),
+    }
+}
+
+fn render_killall5(args: &[&str]) -> Result<String, String> {
+    let signal = parse_signal_arg(args.first().copied())?;
+    if cfg!(any(
+        test,
+        all(
+            feature = "host_smoke",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )
+    )) {
+        return Ok(format!("killall5: signal {} -> hedef task yok", signal));
+    }
+    let current = crate::task::scheduler::current_task_id();
+    let mut killed = Vec::new();
+    for task in crate::task::scheduler::list_tasks() {
+        if task.pid == current {
+            continue;
+        }
+        if crate::task::scheduler::kill_task(task.pid, signal).is_ok() {
+            killed.push(task.pid.to_string());
+        }
+    }
+    Ok(if killed.is_empty() {
+        String::from("killall5: hedef task yok")
+    } else {
+        format!("killall5: signal {} -> {}", signal, killed.join(" "))
+    })
+}
+
+fn render_last() -> String {
+    let mut sessions = crate::security::users::USER_DB.list_sessions();
+    sessions.sort_by_key(|session| core::cmp::Reverse(session.login_tick));
+    if sessions.is_empty() {
+        return String::from("wtmp bos");
+    }
+    let mut rows = Vec::new();
+    for session in sessions {
+        rows.push(format!(
+            "{:<12} {:<8} session={} tick={}",
+            session.username, session.tty, session.session_id, session.login_tick
+        ));
+    }
+    rows.join("\n")
+}
+
+fn render_lastlog() -> String {
+    let sessions = crate::security::users::USER_DB.list_sessions();
+    let mut rows = Vec::from([String::from("Username         Port     Latest")]);
+    for user in crate::security::users::USER_DB.list_users() {
+        let latest = sessions
+            .iter()
+            .filter(|session| session.uid == user.uid)
+            .max_by_key(|session| session.login_tick);
+        if let Some(session) = latest {
+            rows.push(format!(
+                "{:<16} {:<8} tick={}",
+                user.username, session.tty, session.login_tick
+            ));
+        } else {
+            rows.push(format!("{:<16} {:<8} Never logged in", user.username, "**"));
+        }
+    }
+    rows.join("\n")
+}
+
+fn render_login_like(
+    shell: &mut Shell,
+    args: &[&str],
+    default_user: &str,
+) -> Result<String, String> {
+    let username = args.first().copied().unwrap_or(default_user);
+    let password = args.get(1).copied().unwrap_or("");
+    let session = crate::security::users::USER_DB
+        .login(username, password)
+        .map_err(|err| format!("login: {}", err))?;
+    if let Some(user) = crate::security::users::USER_DB.get_user(session.uid) {
+        shell.env.set("USER", &user.username);
+        shell.env.set("LOGNAME", &user.username);
+        shell.env.set("HOME", &user.home);
+        shell.sync_runtime_state();
+    }
+    Ok(format!(
+        "{} on {} session={}",
+        session.username, session.tty, session.session_id
+    ))
+}
+
+fn render_make(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    let mut makefile = "Makefile";
+    let mut target = None;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index] {
+            "-f" if index + 1 < args.len() => {
+                makefile = args[index + 1];
+                index += 2;
+            }
+            value => {
+                target = Some(value);
+                index += 1;
+            }
+        }
+    }
+    let text = read_text_source(Some(makefile), "")?;
+    let mut recipes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut current = None::<String>;
+    for line in text.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line.starts_with('\t') || line.starts_with("    ") {
+            if let Some(name) = &current {
+                recipes
+                    .entry(name.clone())
+                    .or_default()
+                    .push(line.trim().to_string());
+            }
+        } else if let Some((name, _deps)) = line.split_once(':') {
+            let name = name.trim().to_string();
+            current = Some(name.clone());
+            recipes.entry(name).or_default();
+        }
+    }
+    let selected = target
+        .map(String::from)
+        .or_else(|| recipes.keys().next().cloned())
+        .ok_or_else(|| String::from("make: hedef yok"))?;
+    let commands = recipes
+        .get(&selected)
+        .ok_or_else(|| format!("make: hedef bulunamadi: {}", selected))?
+        .clone();
+    let mut out = Vec::new();
+    for command in commands {
+        if let Some(result) = shell.execute_line(&command) {
+            if !result.is_empty() {
+                out.push(result);
+            }
+        }
+        if shell.last_exit_code != 0 {
+            return Ok(Some(out.join("\n")));
+        }
+    }
+    Ok(if out.is_empty() {
+        None
+    } else {
+        Some(out.join("\n"))
+    })
+}
+
+fn render_mesg(args: &[&str]) -> Result<String, String> {
+    match args {
+        [] => Ok(if TERMINAL_WRITE_ALLOWED.load(Ordering::Acquire) {
+            String::from("is y")
+        } else {
+            String::from("is n")
+        }),
+        ["y"] | ["yes"] => {
+            TERMINAL_WRITE_ALLOWED.store(true, Ordering::Release);
+            Ok(String::from("is y"))
+        }
+        ["n"] | ["no"] => {
+            TERMINAL_WRITE_ALLOWED.store(false, Ordering::Release);
+            Ok(String::from("is n"))
+        }
+        _ => Err(String::from("Kullanim: mesg [y|n]")),
+    }
+}
+
+fn render_mknod(args: &[&str]) -> Result<String, String> {
+    if args.len() < 2 {
+        return Err(String::from("Kullanim: mknod <path> p"));
+    }
+    let path = resolve_path(args[0]);
+    match args[1] {
+        "p" => {
+            let rc = crate::posix::pipe::sys_mkfifo(&path, 0o666);
+            if rc != 0 {
+                return Err(format!("mknod: fifo olusturulamadi rc={}", rc));
+            }
+            Ok(format!("mknod: fifo {}", path))
+        }
+        "c" | "b" => Err(String::from(
+            "mknod: char/block device adapteri bagli degil",
+        )),
+        _ => Err(String::from("Kullanim: mknod <path> p")),
+    }
+}
+
+fn render_mkswap(args: &[&str]) -> Result<String, String> {
+    let path = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: mkswap <path> [label]"))?;
+    let label = args.get(1).copied().unwrap_or("echos-swap");
+    let mut data = read_binary_source(Some(path), "")?;
+    if data.len() < 4096 {
+        data.resize(4096, 0);
+    }
+    let header = format!("ECHOSSWAP1 label={} pages={}\n", label, data.len() / 4096);
+    data[..header.len()].copy_from_slice(header.as_bytes());
+    write_file(path, &data)?;
+    SHELL_SWAP_AREAS.lock().insert(
+        resolve_path(path),
+        ShellSwapArea {
+            label: label.to_string(),
+            size: data.len(),
+            enabled: false,
+        },
+    );
+    Ok(format!(
+        "mkswap: {} label={} size={}",
+        resolve_path(path),
+        label,
+        data.len()
+    ))
+}
+
+fn render_nice(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    let mut nice = 10i32;
+    let mut index = 0usize;
+    if matches!(args.first(), Some(&"-n")) && args.len() >= 2 {
+        nice = args[1]
+            .parse::<i32>()
+            .map_err(|_| String::from("nice: gecersiz nice degeri"))?
+            .clamp(-20, 19);
+        index = 2;
+    } else if let Some(first) = args.first().and_then(|v| v.strip_prefix('-')) {
+        if let Ok(value) = first.parse::<i32>() {
+            nice = value.clamp(-20, 19);
+            index = 1;
+        }
+    }
+    if index >= args.len() {
+        return Err(String::from("Kullanim: nice [-n inc] <command>"));
+    }
+    let old = shell.env.get("ECHOS_NICE");
+    shell.env.set("ECHOS_NICE", &nice.to_string());
+    shell.sync_runtime_state();
+    let output = shell.execute_line(&args[index..].join(" "));
+    let status = shell.last_exit_code;
+    match old {
+        Some(value) => shell.env.set("ECHOS_NICE", &value),
+        None => shell.env.unset("ECHOS_NICE"),
+    }
+    shell.sync_runtime_state();
+    shell.last_exit_code = status;
+    Ok(output)
+}
+
+fn render_nohup(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    if args.is_empty() {
+        return Err(String::from("Kullanim: nohup <command>"));
+    }
+    let output = shell.execute_line(&args.join(" "));
+    let status = shell.last_exit_code;
+    if let Some(text) = &output {
+        if !text.is_empty() {
+            write_file("nohup.out", text.as_bytes())?;
+        }
+    }
+    shell.last_exit_code = status;
+    Ok(output.or_else(|| Some(String::from("nohup: command completed"))))
+}
+
+fn render_nologin() -> String {
+    String::from("This account is currently not available.")
+}
+
+fn password_hash_hex(password: &str) -> String {
+    let digest = crate::net::quic::sha256_hash(password.as_bytes());
+    digest
+        .iter()
+        .flat_map(|byte| {
+            let hi = byte >> 4;
+            let lo = byte & 0x0f;
+            let to_hex = |n: u8| if n < 10 { b'0' + n } else { b'a' + n - 10 };
+            [to_hex(hi) as char, to_hex(lo) as char]
+        })
+        .collect()
+}
+
+fn render_passwd(args: &[&str]) -> Result<String, String> {
+    let current_user = crate::security::users::USER_DB
+        .get_user(crate::security::users::USER_DB.current_uid())
+        .map(|user| user.username)
+        .unwrap_or_else(|| String::from("root"));
+    let username = args.first().copied().unwrap_or(current_user.as_str());
+    let password = args.get(1).copied().unwrap_or("echos");
+    crate::security::users::USER_DB
+        .set_password_hash(username, password_hash_hex(password))
+        .map_err(|err| format!("passwd: {}", err))?;
+    Ok(format!("passwd: {} updated", username))
+}
+
+fn render_pivot_root(shell: &mut Shell, args: &[&str]) -> Result<String, String> {
+    if args.len() < 2 {
+        return Err(String::from("Kullanim: pivot_root <new_root> <put_old>"));
+    }
+    let new_root = resolve_path(args[0]);
+    let put_old = args[1];
+    if !shell_dir_exists(&new_root) {
+        return Err(String::from("pivot_root: new_root bulunamadi"));
+    }
+    shell.env.set("ECHOS_ROOT", &new_root);
+    shell.env.set("ECHOS_PUT_OLD", put_old);
+    shell.env.set("PWD", "/");
+    shell.sync_runtime_state();
+    Ok(format!("pivot_root: {} put_old={}", new_root, put_old))
+}
+
+fn render_pwdx(shell: &Shell, args: &[&str]) -> Result<String, String> {
+    if args.is_empty() {
+        return Err(String::from("Kullanim: pwdx <pid>..."));
+    }
+    let current = crate::task::scheduler::current_task_id();
+    let host_mode = cfg!(any(
+        test,
+        all(
+            feature = "host_smoke",
+            not(target_os = "none"),
+            not(target_os = "uefi")
+        )
+    ));
+    let tasks = if host_mode {
+        Vec::new()
+    } else {
+        crate::task::scheduler::list_tasks()
+    };
+    let mut rows = Vec::new();
+    for value in args {
+        let pid = value
+            .parse::<usize>()
+            .map_err(|_| String::from("pwdx: gecersiz pid"))?;
+        if pid == current {
+            rows.push(format!("{}: {}", pid, shell.current_working_directory()));
+        } else if tasks.iter().any(|task| task.pid == pid) {
+            rows.push(format!("{}: /", pid));
+        } else {
+            rows.push(format!("{}: No such process", pid));
+        }
+    }
+    Ok(rows.join("\n"))
+}
+
+fn render_renice(args: &[&str]) -> Result<String, String> {
+    if args.len() < 2 {
+        return Err(String::from("Kullanim: renice <nice> <pid>..."));
+    }
+    let nice = args[0]
+        .parse::<i32>()
+        .map_err(|_| String::from("renice: gecersiz nice degeri"))?
+        .clamp(-20, 19);
+    let mut rows = Vec::new();
+    let mut nice_values = SHELL_NICE_VALUES.lock();
+    for pid_arg in &args[1..] {
+        let pid = pid_arg
+            .parse::<usize>()
+            .map_err(|_| String::from("renice: gecersiz pid"))?;
+        let old = nice_values.insert(pid, nice);
+        rows.push(format!(
+            "{}: old priority {}, new priority {}",
+            pid,
+            old.map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("unset")),
+            nice
+        ));
+    }
+    Ok(rows.join("\n"))
+}
+
+fn render_respawn(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    let mut count = 2usize;
+    let mut index = 0usize;
+    if matches!(args.first(), Some(&"-n")) && args.len() >= 2 {
+        count = args[1]
+            .parse::<usize>()
+            .map_err(|_| String::from("respawn: gecersiz tekrar sayisi"))?
+            .min(16);
+        index = 2;
+    }
+    if index >= args.len() {
+        return Err(String::from("Kullanim: respawn [-n count] <command>"));
+    }
+    let command = args[index..].join(" ");
+    let mut out = Vec::new();
+    for _ in 0..count {
+        if let Some(result) = shell.execute_line(&command) {
+            if !result.is_empty() {
+                out.push(result);
+            }
+        }
+    }
+    Ok(if out.is_empty() {
+        None
+    } else {
+        Some(out.join("\n"))
+    })
+}
+
+fn render_rmmod(args: &[&str]) -> Result<String, String> {
+    let name = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: rmmod <module>"))?;
+    let key = module_name_from_path(name);
+    let removed = SHELL_MODULES.lock().remove(&key);
+    match removed {
+        Some(record) => Ok(format!(
+            "rmmod: {} source={} size={}",
+            key, record.source, record.size
+        )),
+        None => Err(format!("rmmod: module bulunamadi: {}", key)),
+    }
+}
+
+fn render_setsid(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    if args.is_empty() {
+        return Err(String::from("Kullanim: setsid <command>"));
+    }
+    let old = shell.env.get("ECHOS_SESSION_ID");
+    let session = crate::task::scheduler::get_ticks().to_string();
+    shell.env.set("ECHOS_SESSION_ID", &session);
+    shell.sync_runtime_state();
+    let output = shell.execute_line(&args.join(" "));
+    let status = shell.last_exit_code;
+    match old {
+        Some(value) => shell.env.set("ECHOS_SESSION_ID", &value),
+        None => shell.env.unset("ECHOS_SESSION_ID"),
+    }
+    shell.sync_runtime_state();
+    shell.last_exit_code = status;
+    Ok(output)
+}
+
+fn sysctl_value(name: &str) -> Option<String> {
+    match name {
+        "kernel.ostype" => Some(String::from("echOS")),
+        "kernel.osrelease" => Some(String::from("0.2.0")),
+        "kernel.hostname" => Some(crate::init::INIT.get_hostname()),
+        "kernel.ticks" => Some(crate::task::scheduler::get_ticks().to_string()),
+        "kernel.ctrl-alt-del" => Some(if CTRLALTDEL_HARD.load(Ordering::Acquire) {
+            String::from("1")
+        } else {
+            String::from("0")
+        }),
+        "hw.ncpu" => Some(crate::task::scheduler::get_cpu_count().to_string()),
+        "vm.pagesize" => Some(String::from("4096")),
+        "vm.swap_areas" => {
+            let areas = SHELL_SWAP_AREAS.lock();
+            if areas.is_empty() {
+                Some(String::from("0"))
+            } else {
+                Some(
+                    areas
+                        .iter()
+                        .map(|(path, area)| {
+                            format!(
+                                "{}:{}:{}:label={}",
+                                path,
+                                area.size,
+                                if area.enabled { "enabled" } else { "disabled" },
+                                area.label
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            }
+        }
+        "dev.tty.active" => Some(ACTIVE_VT.load(Ordering::Acquire).to_string()),
+        "dev.tty.vtallow" => Some(if VT_SWITCH_ALLOWED.load(Ordering::Acquire) {
+            String::from("1")
+        } else {
+            String::from("0")
+        }),
+        "dev.tty.mesg" => Some(if TERMINAL_WRITE_ALLOWED.load(Ordering::Acquire) {
+            String::from("1")
+        } else {
+            String::from("0")
+        }),
+        _ => None,
+    }
+}
+
+fn render_sysctl(args: &[&str]) -> Result<String, String> {
+    if args.is_empty() || args == ["-a"] {
+        let keys = [
+            "kernel.ostype",
+            "kernel.osrelease",
+            "kernel.hostname",
+            "kernel.ticks",
+            "kernel.ctrl-alt-del",
+            "hw.ncpu",
+            "vm.pagesize",
+            "vm.swap_areas",
+            "dev.tty.active",
+            "dev.tty.vtallow",
+            "dev.tty.mesg",
+        ];
+        return Ok(keys
+            .iter()
+            .filter_map(|key| sysctl_value(key).map(|value| format!("{} = {}", key, value)))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    let mut rows = Vec::new();
+    for arg in args {
+        if let Some((key, value)) = arg.split_once('=') {
+            match key {
+                "kernel.hostname" => crate::init::INIT.set_hostname(value),
+                "kernel.ctrl-alt-del" => CTRLALTDEL_HARD.store(value == "1", Ordering::Release),
+                "dev.tty.vtallow" => VT_SWITCH_ALLOWED.store(value != "0", Ordering::Release),
+                "dev.tty.mesg" => TERMINAL_WRITE_ALLOWED.store(value != "0", Ordering::Release),
+                _ => {
+                    return Err(format!(
+                        "sysctl: salt-okunur veya bilinmeyen anahtar: {}",
+                        key
+                    ))
+                }
+            }
+            rows.push(format!("{} = {}", key, value));
+        } else {
+            let value =
+                sysctl_value(arg).ok_or_else(|| format!("sysctl: bilinmeyen anahtar: {}", arg))?;
+            rows.push(format!("{} = {}", arg, value));
+        }
+    }
+    Ok(rows.join("\n"))
+}
+
+fn render_swaplabel(args: &[&str]) -> Result<String, String> {
+    let path = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: swaplabel <path> [label]"))?;
+    let key = resolve_path(path);
+    if let Some(label) = args.get(1).copied() {
+        let mut areas = SHELL_SWAP_AREAS.lock();
+        let area = areas.entry(key.clone()).or_insert_with(|| ShellSwapArea {
+            label: String::from("echos-swap"),
+            size: read_binary_source(Some(path), "")
+                .map(|data| data.len())
+                .unwrap_or(0),
+            enabled: false,
+        });
+        area.label = label.to_string();
+        return Ok(format!("swaplabel: {} label={}", key, label));
+    }
+    let label = SHELL_SWAP_AREAS
+        .lock()
+        .get(&key)
+        .map(|area| area.label.clone())
+        .or_else(|| {
+            read_text_source(Some(path), "")
+                .ok()
+                .and_then(|text| text.lines().next().map(str::to_string))
+                .and_then(|line| {
+                    line.split_whitespace()
+                        .find_map(|part| part.strip_prefix("label=").map(str::to_string))
+                })
+        })
+        .ok_or_else(|| String::from("swaplabel: swap etiketi bulunamadi"))?;
+    Ok(format!("{}: {}", key, label))
+}
+
+fn render_swapon(args: &[&str]) -> Result<String, String> {
+    let path = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: swapon <path>"))?;
+    let key = resolve_path(path);
+    let data = read_binary_source(Some(path), "")?;
+    if !data.starts_with(b"ECHOSSWAP1") {
+        return Err(String::from("swapon: ECHOSSWAP1 imzasi yok"));
+    }
+    let label = core::str::from_utf8(&data[..data.len().min(128)])
+        .ok()
+        .and_then(|text| {
+            text.split_whitespace()
+                .find_map(|part| part.strip_prefix("label=").map(str::to_string))
+        })
+        .unwrap_or_else(|| String::from("echos-swap"));
+    SHELL_SWAP_AREAS.lock().insert(
+        key.clone(),
+        ShellSwapArea {
+            label,
+            size: data.len(),
+            enabled: true,
+        },
+    );
+    Ok(format!("swapon: {} size={}", key, data.len()))
+}
+
+fn render_swapoff(args: &[&str]) -> Result<String, String> {
+    let path = args
+        .first()
+        .copied()
+        .ok_or_else(|| String::from("Kullanim: swapoff <path>"))?;
+    let key = resolve_path(path);
+    let mut areas = SHELL_SWAP_AREAS.lock();
+    let area = areas
+        .get_mut(&key)
+        .ok_or_else(|| String::from("swapoff: swap alani aktif degil"))?;
+    area.enabled = false;
+    Ok(format!("swapoff: {}", key))
+}
+
+fn render_switch_root(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    if args.len() < 2 {
+        return Err(String::from(
+            "Kullanim: switch_root <new_root> <init> [args...]",
+        ));
+    }
+    let new_root = resolve_path(args[0]);
+    if !shell_dir_exists(&new_root) {
+        return Err(String::from("switch_root: new_root bulunamadi"));
+    }
+    shell.env.set("ECHOS_ROOT", &new_root);
+    shell.env.set("PWD", "/");
+    shell.sync_runtime_state();
+    let output = shell.execute_line(&args[1..].join(" "));
+    Ok(output.or_else(|| Some(format!("switch_root: {}", new_root))))
+}
+
+fn parse_ipv4_literal(value: &str) -> Option<crate::net::Ipv4Addr> {
+    let parts: Vec<u8> = value
+        .split('.')
+        .map(|part| part.parse::<u8>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if parts.len() == 4 {
+        Some(crate::net::Ipv4Addr([
+            parts[0], parts[1], parts[2], parts[3],
+        ]))
+    } else {
+        None
+    }
+}
+
+fn tftp_request(opcode: u16, path: &str) -> Vec<u8> {
+    let mut packet = Vec::new();
+    packet.extend_from_slice(&opcode.to_be_bytes());
+    packet.extend_from_slice(path.as_bytes());
+    packet.push(0);
+    packet.extend_from_slice(b"octet");
+    packet.push(0);
+    packet
+}
+
+fn render_tftp(args: &[&str]) -> Result<String, String> {
+    if args.len() < 4 {
+        return Err(String::from(
+            "Kullanim: tftp <get|put> <host|local> <remote> <local>",
+        ));
+    }
+    match (args[0], args[1]) {
+        ("get", "local") => {
+            let data = read_binary_source(Some(args[2]), "")?;
+            write_file(args[3], &data)?;
+            Ok(format!(
+                "tftp: local get {} -> {}",
+                resolve_path(args[2]),
+                resolve_path(args[3])
+            ))
+        }
+        ("put", "local") => {
+            let data = read_binary_source(Some(args[3]), "")?;
+            write_file(args[2], &data)?;
+            Ok(format!(
+                "tftp: local put {} -> {}",
+                resolve_path(args[3]),
+                resolve_path(args[2])
+            ))
+        }
+        ("get", host) | ("put", host) => {
+            let ip = parse_ipv4_literal(host)
+                .ok_or_else(|| String::from("tftp: IPv4 literal gerekli"))?;
+            let socket = crate::net::udp::create_socket(crate::net::socket::AddressFamily::IPV4);
+            if let Err(err) = crate::net::udp::bind(
+                socket,
+                crate::net::socket::SocketAddr::new(
+                    crate::net::Ipv4Addr::UNSPECIFIED,
+                    crate::net::Port(0),
+                ),
+            ) {
+                crate::net::udp::close(socket);
+                return Err(format!("tftp: bind {:?}", err));
+            }
+            let packet = if args[0] == "get" {
+                tftp_request(1, args[2])
+            } else {
+                tftp_request(2, args[2])
+            };
+            let sent = match crate::net::udp::send_to(
+                socket,
+                &packet,
+                crate::net::socket::SocketAddr::new(ip, crate::net::Port(69)),
+            ) {
+                Ok(sent) => sent,
+                Err(err) => {
+                    crate::net::udp::close(socket);
+                    return Err(format!("tftp: send {:?}", err));
+                }
+            };
+            crate::net::udp::close(socket);
+            Ok(format!(
+                "tftp: {} request {} bytes -> {}",
+                args[0], sent, host
+            ))
+        }
+        _ => Err(String::from(
+            "Kullanim: tftp <get|put> <host|local> <remote> <local>",
+        )),
+    }
+}
+
+fn render_unshare(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    let mut flags = Vec::new();
+    let mut index = 0usize;
+    while index < args.len() && args[index].starts_with('-') {
+        flags.push(args[index].trim_start_matches('-'));
+        index += 1;
+    }
+    if index >= args.len() {
+        return Err(String::from("Kullanim: unshare <flags> <command>"));
+    }
+    let old = shell.env.get("ECHOS_UNSHARE");
+    shell.env.set("ECHOS_UNSHARE", &flags.join(","));
+    shell.sync_runtime_state();
+    let output = shell.execute_line(&args[index..].join(" "));
+    let status = shell.last_exit_code;
+    match old {
+        Some(value) => shell.env.set("ECHOS_UNSHARE", &value),
+        None => shell.env.unset("ECHOS_UNSHARE"),
+    }
+    shell.sync_runtime_state();
+    shell.last_exit_code = status;
+    Ok(output)
+}
+
+fn put_octal_field(header: &mut [u8], start: usize, len: usize, value: u64) {
+    let field = format!("{:0width$o}\0", value, width = len.saturating_sub(1));
+    let bytes = field.as_bytes();
+    for i in 0..len {
+        header[start + i] = bytes.get(i).copied().unwrap_or(0);
+    }
+}
+
+fn tar_checksum(header: &[u8]) -> u32 {
+    header.iter().map(|byte| *byte as u32).sum()
+}
+
+fn append_tar_file(out: &mut Vec<u8>, path: &str) -> Result<(), String> {
+    let data = read_binary_source(Some(path), "")?;
+    let name = path.trim_start_matches('/');
+    if name.len() > 100 {
+        return Err(String::from("tar: path adi 100 byte ustunde"));
+    }
+    let mut header = [0u8; 512];
+    header[..name.len()].copy_from_slice(name.as_bytes());
+    put_octal_field(&mut header, 100, 8, 0o644);
+    put_octal_field(&mut header, 108, 8, 0);
+    put_octal_field(&mut header, 116, 8, 0);
+    put_octal_field(&mut header, 124, 12, data.len() as u64);
+    put_octal_field(
+        &mut header,
+        136,
+        12,
+        crate::task::scheduler::get_ticks() as u64,
+    );
+    for byte in &mut header[148..156] {
+        *byte = b' ';
+    }
+    header[156] = b'0';
+    header[257..263].copy_from_slice(b"ustar\0");
+    header[263..265].copy_from_slice(b"00");
+    let checksum = tar_checksum(&header) as u64;
+    put_octal_field(&mut header, 148, 8, checksum);
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&data);
+    let pad = (512 - (data.len() % 512)) % 512;
+    out.extend(core::iter::repeat(0).take(pad));
+    Ok(())
+}
+
+fn tar_name(header: &[u8]) -> String {
+    let end = header[..100].iter().position(|b| *b == 0).unwrap_or(100);
+    String::from_utf8_lossy(&header[..end]).to_string()
+}
+
+fn tar_size(header: &[u8]) -> usize {
+    let end = header[124..136]
+        .iter()
+        .position(|b| *b == 0 || *b == b' ')
+        .unwrap_or(12);
+    core::str::from_utf8(&header[124..124 + end])
+        .ok()
+        .and_then(|text| usize::from_str_radix(text.trim(), 8).ok())
+        .unwrap_or(0)
+}
+
+fn render_tar(args: &[&str]) -> Result<Option<String>, String> {
+    if args.len() < 2 {
+        return Err(String::from(
+            "Kullanim: tar <-cf|-tf|-xf> <archive> [path]...",
+        ));
+    }
+    match args[0] {
+        "-cf" | "cf" => {
+            if args.len() < 3 {
+                return Err(String::from("tar: arsive eklenecek path yok"));
+            }
+            let mut archive = Vec::new();
+            for path in &args[2..] {
+                append_tar_file(&mut archive, path)?;
+            }
+            archive.extend_from_slice(&[0u8; 1024]);
+            write_file(args[1], &archive)?;
+            Ok(Some(format!(
+                "tar: {} dosya -> {}",
+                args.len() - 2,
+                resolve_path(args[1])
+            )))
+        }
+        "-tf" | "tf" => {
+            let data = read_binary_source(Some(args[1]), "")?;
+            let mut rows = Vec::new();
+            let mut offset = 0usize;
+            while offset + 512 <= data.len() {
+                let header = &data[offset..offset + 512];
+                if header.iter().all(|byte| *byte == 0) {
+                    break;
+                }
+                let name = tar_name(header);
+                let size = tar_size(header);
+                rows.push(name);
+                offset += 512 + ((size + 511) / 512) * 512;
+            }
+            Ok(Some(rows.join("\n")))
+        }
+        "-xf" | "xf" => {
+            let data = read_binary_source(Some(args[1]), "")?;
+            let mut extracted = Vec::new();
+            let mut offset = 0usize;
+            while offset + 512 <= data.len() {
+                let header = &data[offset..offset + 512];
+                if header.iter().all(|byte| *byte == 0) {
+                    break;
+                }
+                let name = tar_name(header);
+                let size = tar_size(header);
+                let start = offset + 512;
+                let end = start.saturating_add(size).min(data.len());
+                write_file(&name, &data[start..end])?;
+                extracted.push(name);
+                offset += 512 + ((size + 511) / 512) * 512;
+            }
+            Ok(Some(format!("tar: extracted {}", extracted.join(" "))))
+        }
+        _ => Err(String::from(
+            "Kullanim: tar <-cf|-tf|-xf> <archive> [path]...",
+        )),
+    }
+}
+
+fn render_vtallow(args: &[&str]) -> Result<String, String> {
+    match args {
+        [] => Ok(if VT_SWITCH_ALLOWED.load(Ordering::Acquire) {
+            String::from("yes")
+        } else {
+            String::from("no")
+        }),
+        ["yes"] | ["y"] | ["1"] => {
+            VT_SWITCH_ALLOWED.store(true, Ordering::Release);
+            Ok(String::from("yes"))
+        }
+        ["no"] | ["n"] | ["0"] => {
+            VT_SWITCH_ALLOWED.store(false, Ordering::Release);
+            Ok(String::from("no"))
+        }
+        _ => Err(String::from("Kullanim: vtallow <yes|no>")),
+    }
+}
+
+fn render_watch(shell: &mut Shell, args: &[&str]) -> Result<Option<String>, String> {
+    let mut count = 2usize;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index] {
+            "-c" if index + 1 < args.len() => {
+                count = args[index + 1]
+                    .parse::<usize>()
+                    .map_err(|_| String::from("watch: gecersiz tekrar sayisi"))?
+                    .min(16);
+                index += 2;
+            }
+            "-n" if index + 1 < args.len() => {
+                index += 2;
+            }
+            _ => break,
+        }
+    }
+    if index >= args.len() {
+        return Err(String::from("Kullanim: watch [-c count] <command>"));
+    }
+    let command = args[index..].join(" ");
+    let mut out = Vec::new();
+    for pass in 0..count {
+        let result = shell.execute_line(&command).unwrap_or_default();
+        out.push(format!("Every pass {}: {}\n{}", pass + 1, command, result));
+    }
+    Ok(Some(out.join("\n")))
+}
+
+fn render_xargs(shell: &mut Shell, args: &[&str], input: &str) -> Option<String> {
+    let mut command_parts: Vec<String> = if args.is_empty() {
+        vec![String::from("echo")]
+    } else {
+        args.iter().map(|part| (*part).to_string()).collect()
+    };
+
+    command_parts.extend(input.split_whitespace().map(|token| token.to_string()));
+    let command_line = command_parts.join(" ");
+    shell.execute_line(&command_line)
 }
 
 /// Windows compatibility runtime komutlarını işler.
@@ -3719,7 +7532,7 @@ fn execute_chained(shell: &mut Shell, tokens: &[advanced::Token]) -> Option<Stri
                 if last_success && !current_cmd.is_empty() {
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
                     last_output = execute_builtin(shell, &args, None);
-                    last_success = command_exit_code(&last_output) == 0;
+                    last_success = shell.last_exit_code == 0;
                 }
                 current_cmd.clear();
 
@@ -3739,12 +7552,12 @@ fn execute_chained(shell: &mut Shell, tokens: &[advanced::Token]) -> Option<Stri
                 if !last_success && !current_cmd.is_empty() {
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
                     last_output = execute_builtin(shell, &args, None);
-                    last_success = command_exit_code(&last_output) == 0;
+                    last_success = shell.last_exit_code == 0;
                 } else if last_success && !current_cmd.is_empty() {
                     // Önceki başarılı - bu komutu çalıştır ama sonucu kontrol et
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
                     last_output = execute_builtin(shell, &args, None);
-                    last_success = command_exit_code(&last_output) == 0;
+                    last_success = shell.last_exit_code == 0;
                 }
                 current_cmd.clear();
 
@@ -3763,7 +7576,7 @@ fn execute_chained(shell: &mut Shell, tokens: &[advanced::Token]) -> Option<Stri
                 if !current_cmd.is_empty() {
                     let args: Vec<&str> = current_cmd.iter().map(|s| s.as_str()).collect();
                     last_output = execute_builtin(shell, &args, None);
-                    last_success = command_exit_code(&last_output) == 0;
+                    last_success = shell.last_exit_code == 0;
                 }
                 current_cmd.clear();
             }
@@ -3909,15 +7722,17 @@ fn execute_pipeline(shell: &mut Shell, pipeline: &advanced::Pipeline) -> Option<
 /// `stdin` parametresi önceki komutun çıktısıdır (pipe için).
 /// `echo`, `cat`, `ls`, `wc`, `grep`, `sort`, `uniq`, `head`, `tail`
 /// komutları `stdin` girişini destekler.
-fn execute_builtin(shell: &Shell, args: &[&str], stdin: Option<&str>) -> Option<String> {
+fn execute_builtin(shell: &mut Shell, args: &[&str], stdin: Option<&str>) -> Option<String> {
     if args.is_empty() {
+        shell.last_exit_code = 0;
         return None;
     }
 
     // stdin varsa echo'ya geçir
     let input = stdin.unwrap_or("");
 
-    match args[0] {
+    let output = match args[0] {
+        "ech-tools" => shell.execute_ech_tools_with_input(&args[1..], stdin),
         "echo" => {
             let mut out = args[1..].join(" ");
             if !input.is_empty() {
@@ -3926,6 +7741,25 @@ fn execute_builtin(shell: &Shell, args: &[&str], stdin: Option<&str>) -> Option<
             }
             Some(out)
         }
+        "basename" => {
+            if args.len() < 2 {
+                Some(String::from("Kullanim: basename <path>"))
+            } else {
+                Some(String::from(basename(args[1])))
+            }
+        }
+        "bc" => match render_bc(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "blkdiscard" => match render_blkdiscard(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "cal" => match render_calendar(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
         "cat" => {
             if args.len() > 1 {
                 match load_file(args[1]) {
@@ -3941,11 +7775,472 @@ fn execute_builtin(shell: &Shell, args: &[&str], stdin: Option<&str>) -> Option<
                 Some(String::from("Kullanim: cat <dosya>"))
             }
         }
+        "chgrp" => match render_chgrp(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "chroot" => match render_chroot(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "chvt" => match render_chvt(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "cksum" => match render_cksum(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "cols" => match render_cols(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "cron" => match render_cron(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "ctrlaltdel" => match render_ctrlaltdel(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "dc" => match render_dc(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "dd" => match render_dd(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "dmesg" => match render_dmesg(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "dirname" => {
+            if args.len() < 2 {
+                Some(String::from("Kullanim: dirname <path>"))
+            } else {
+                Some(String::from(dirname(args[1])))
+            }
+        }
+        "expand" => {
+            let mut width = 8usize;
+            let mut source_path = None;
+            let mut index = 1usize;
+            while index < args.len() {
+                match args[index] {
+                    "-t" if index + 1 < args.len() => {
+                        width = args[index + 1].parse::<usize>().unwrap_or(8);
+                        index += 2;
+                    }
+                    path => {
+                        source_path = Some(path);
+                        index += 1;
+                    }
+                }
+            }
+            match read_text_source(source_path, input) {
+                Ok(text) => Some(expand_tabs(&text, width)),
+                Err(err) => Some(err),
+            }
+        }
+        "expr" => {
+            if args.len() < 2 {
+                Some(String::from("Kullanim: expr <ifade>"))
+            } else {
+                match scripting::eval_expression(&args[1..].join(" ")) {
+                    Ok(out) => Some(out),
+                    Err(err) => Some(format!("Hata: {:?}", err)),
+                }
+            }
+        }
+        "ed" => match render_ed(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "eject" => match render_eject(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "fallocate" => match render_fallocate(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "flock" => match render_flock(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "fold" => {
+            let mut width = 80usize;
+            let mut source_path = None;
+            let mut index = 1usize;
+            while index < args.len() {
+                match args[index] {
+                    "-w" if index + 1 < args.len() => {
+                        width = args[index + 1].parse::<usize>().unwrap_or(80);
+                        index += 2;
+                    }
+                    path => {
+                        source_path = Some(path);
+                        index += 1;
+                    }
+                }
+            }
+            match read_text_source(source_path, input) {
+                Ok(text) => Some(fold_text(&text, width)),
+                Err(err) => Some(err),
+            }
+        }
+        "freeramdisk" => match render_freeramdisk(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "fsfreeze" => match render_fsfreeze(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "getconf" => {
+            if args.len() < 2 {
+                Some(String::from("Kullanim: getconf <anahtar>"))
+            } else {
+                match render_getconf(shell, args[1]) {
+                    Ok(out) => Some(out),
+                    Err(err) => Some(err),
+                }
+            }
+        }
+        "getty" => match render_getty(shell, &args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "halt" => match render_halt(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "hwclock" => match render_hwclock(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "insmod" => match render_insmod(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "du" => match render_du(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "cmp" => {
+            if args.len() < 3 {
+                Some(String::from("Kullanim: cmp <dosya1> <dosya2>"))
+            } else {
+                match compare_files(args[1], args[2]) {
+                    Ok(result) => result,
+                    Err(err) => Some(err),
+                }
+            }
+        }
+        "comm" => {
+            if args.len() < 3 {
+                Some(String::from("Kullanim: comm <sol> <sag>"))
+            } else {
+                match render_comm(args[1], args[2]) {
+                    Ok(out) => Some(out),
+                    Err(err) => Some(err),
+                }
+            }
+        }
+        "cut" => {
+            let mut delimiter = ':';
+            let mut fields = None;
+            let mut source_path = None;
+            let mut index = 1usize;
+
+            while index < args.len() {
+                match args[index] {
+                    "-d" if index + 1 < args.len() => {
+                        delimiter = args[index + 1].chars().next().unwrap_or(':');
+                        index += 2;
+                    }
+                    "-f" if index + 1 < args.len() => {
+                        fields = Some(args[index + 1]);
+                        index += 2;
+                    }
+                    path => {
+                        source_path = Some(path);
+                        index += 1;
+                    }
+                }
+            }
+
+            let Some(fields) = fields else {
+                return Some(String::from(
+                    "Kullanim: cut -d <ayrac> -f <alan-listesi> [dosya]",
+                ));
+            };
+
+            let text = if let Some(path) = source_path {
+                match load_file(path) {
+                    Ok(data) => match core::str::from_utf8(&data) {
+                        Ok(text) => text.to_string(),
+                        Err(_) => return Some(String::from("Dosya metin degil")),
+                    },
+                    Err(err) => return Some(err),
+                }
+            } else {
+                input.to_string()
+            };
+
+            match cut_stream(&text, delimiter, fields) {
+                Ok(out) => Some(out),
+                Err(err) => Some(err),
+            }
+        }
         "ls" => match list_directory(parse_ls_path(&args[1..])) {
             Ok(out) => Some(out),
             Err(msg) => Some(msg),
         },
+        "join" => {
+            if args.len() < 3 {
+                Some(String::from("Kullanim: join <sol> <sag>"))
+            } else {
+                match render_join(args[1], args[2]) {
+                    Ok(out) => Some(out),
+                    Err(err) => Some(err),
+                }
+            }
+        }
+        "killall5" => match render_killall5(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "last" => Some(render_last()),
+        "lastlog" => Some(render_lastlog()),
+        "link" => {
+            if args.len() < 3 {
+                Some(String::from("Kullanim: link <hedef> <link>"))
+            } else {
+                let resolved = resolve_path(args[2]);
+                match create_hardlink_path(args[1], args[2]) {
+                    Ok(()) => Some(format!("link: {} -> {}", resolved, resolve_path(args[1]))),
+                    Err(err) => Some(err),
+                }
+            }
+        }
+        "login" => match render_login_like(shell, &args[1..], "root") {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "logname" => Some(current_username().unwrap_or_else(|| String::from("root"))),
+        "logger" => {
+            if args.len() > 1 || !input.is_empty() {
+                let message = if args.len() > 1 {
+                    args[1..].join(" ")
+                } else {
+                    input.to_string()
+                };
+                crate::serial_println!("[logger] {}", message);
+                None
+            } else {
+                Some(String::from("Kullanim: logger <mesaj>"))
+            }
+        }
+        "lsusb" => Some(render_lsusb()),
+        "make" => match render_make(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "md5sum" => match render_hashsum(HashFlavor::Md5, &args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "mesg" => match render_mesg(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "mkfifo" => match render_mkfifo(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "mknod" => match render_mknod(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "mktemp" => match render_mktemp(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "mkswap" => match render_mkswap(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "mountpoint" => {
+            if args.len() < 2 {
+                shell.last_exit_code = 1;
+                Some(String::from("Kullanim: mountpoint <yol>"))
+            } else {
+                let target = resolve_path(args[1]);
+                let mounted = crate::fs::f2fs::list_mounts()
+                    .iter()
+                    .any(|mount| mount.mountpoint == target);
+                shell.last_exit_code = if mounted { 0 } else { 1 };
+                if mounted {
+                    Some(target)
+                } else {
+                    Some(format!("{} mount noktasi degil", target))
+                }
+            }
+        }
+        "paste" => {
+            if args.len() < 2 {
+                Some(String::from("Kullanim: paste <dosya>..."))
+            } else {
+                match paste_streams(&args[1..]) {
+                    Ok(out) => Some(out),
+                    Err(err) => Some(err),
+                }
+            }
+        }
+        "nl" => {
+            let source_path = args.get(1).copied();
+            match read_text_source(source_path, input) {
+                Ok(text) => Some(render_numbered_lines(&text)),
+                Err(err) => Some(err),
+            }
+        }
+        "nologin" => {
+            shell.last_exit_code = 1;
+            Some(render_nologin())
+        }
+        "nice" => match render_nice(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "nohup" => match render_nohup(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "od" => match args[1..] {
+            [] => match render_od(None, input) {
+                Ok(out) => Some(out),
+                Err(err) => Some(err),
+            },
+            [path] => match render_od(Some(path), input) {
+                Ok(out) => Some(out),
+                Err(err) => Some(err),
+            },
+            _ => Some(String::from("Kullanim: od [dosya]")),
+        },
+        "pagesize" => Some(String::from("4096")),
+        "pathchk" => match render_pathchk(&args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "passwd" => match render_passwd(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "pidof" => {
+            if args.len() < 2 {
+                shell.last_exit_code = 1;
+                Some(String::from("Kullanim: pidof <ad>"))
+            } else {
+                let tasks = crate::task::scheduler::list_tasks();
+                let pids: Vec<String> = tasks
+                    .into_iter()
+                    .filter(|task| task.name == args[1])
+                    .map(|task| task.pid.to_string())
+                    .collect();
+                shell.last_exit_code = if pids.is_empty() { 1 } else { 0 };
+                if pids.is_empty() {
+                    None
+                } else {
+                    Some(pids.join(" "))
+                }
+            }
+        }
         "pwd" => Some(shell.current_working_directory()),
+        "pwdx" => match render_pwdx(shell, &args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "pivot_root" => match render_pivot_root(shell, &args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "readahead" => match render_readahead(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "renice" => match render_renice(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "printenv" => {
+            if args.len() == 1 {
+                let vars: Vec<String> = shell
+                    .env
+                    .list()
+                    .iter()
+                    .map(|(key, value)| format!("{}={}", key, value))
+                    .collect();
+                shell.last_exit_code = 0;
+                Some(vars.join("\n"))
+            } else {
+                let mut values = Vec::new();
+                let mut missing = false;
+                for name in args.iter().skip(1) {
+                    let value = shell
+                        .env
+                        .get(name)
+                        .or_else(|| advanced::ENV.get(name))
+                        .or_else(|| {
+                            if *name == "PWD" {
+                                Some(shell.current_working_directory())
+                            } else {
+                                None
+                            }
+                        });
+                    if let Some(value) = value {
+                        values.push(value);
+                    } else {
+                        missing = true;
+                    }
+                }
+                shell.last_exit_code = if missing { 1 } else { 0 };
+                if values.is_empty() {
+                    None
+                } else {
+                    Some(values.join("\n"))
+                }
+            }
+        }
+        "sha1sum" => match render_hashsum(HashFlavor::Sha1, &args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sha224sum" => match render_hashsum(HashFlavor::Sha224, &args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sha256sum" => match render_hashsum(HashFlavor::Sha256, &args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sha384sum" => match render_hashsum(HashFlavor::Sha384, &args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sha512sum" => match render_hashsum(HashFlavor::Sha512, &args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sha512-224sum" => match render_hashsum(HashFlavor::Sha512_224, &args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sha512-256sum" => match render_hashsum(HashFlavor::Sha512_256, &args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
         "wc" => {
             // Word count - pipe için
             let text = if !input.is_empty() { input } else { "" };
@@ -4002,8 +8297,278 @@ fn execute_builtin(shell: &Shell, args: &[&str], stdin: Option<&str>) -> Option<
             let start = if lines.len() > n { lines.len() - n } else { 0 };
             Some(lines[start..].join("\n"))
         }
+        "printf" => {
+            if args.len() < 2 {
+                Some(String::from("Kullanim: printf <format> [arg]..."))
+            } else {
+                match format_printf_output(args[1], &args[2..]) {
+                    Ok(out) => Some(out),
+                    Err(err) => Some(err),
+                }
+            }
+        }
+        "rev" => {
+            if args.len() > 1 {
+                match load_file(args[1]) {
+                    Ok(data) => match core::str::from_utf8(&data) {
+                        Ok(text) => Some(reverse_lines(text)),
+                        Err(_) => Some(String::from("Dosya metin degil")),
+                    },
+                    Err(err) => Some(err),
+                }
+            } else {
+                Some(reverse_lines(input))
+            }
+        }
+        "seq" => match render_seq(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "respawn" => match render_respawn(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "rmmod" => match render_rmmod(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sed" => match render_sed(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "setsid" => match render_setsid(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "sleep" => {
+            if args.len() < 2 {
+                Some(String::from("Kullanim: sleep <saniye>"))
+            } else {
+                match args[1].parse::<u64>() {
+                    Ok(seconds) => {
+                        let wait_ms = seconds.saturating_mul(1000);
+                        let start_ms = crate::cpu::tsc::read_ms();
+                        while crate::cpu::tsc::read_ms().saturating_sub(start_ms) < wait_ms {
+                            core::hint::spin_loop();
+                        }
+                        None
+                    }
+                    _ => Some(String::from("Kullanim: sleep <saniye>")),
+                }
+            }
+        }
+        "split" => match render_split(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sponge" => match render_sponge(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sync" => match render_sync() {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "swaplabel" => match render_swaplabel(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "swapoff" => match render_swapoff(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "swapon" => match render_swapon(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "switch_root" => match render_switch_root(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "tar" => match render_tar(&args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "tee" => {
+            let output = input.to_string();
+            for path in args.iter().skip(1) {
+                if let Err(err) = write_file(path, output.as_bytes()) {
+                    shell.last_exit_code = 1;
+                    return Some(err);
+                }
+            }
+            Some(output)
+        }
+        "tsort" => match args[1..] {
+            [] => match render_tsort(None, input) {
+                Ok(out) => Some(out),
+                Err(err) => Some(err),
+            },
+            [path] => match render_tsort(Some(path), input) {
+                Ok(out) => Some(out),
+                Err(err) => Some(err),
+            },
+            _ => Some(String::from("Kullanim: tsort [dosya]")),
+        },
+        "tr" => {
+            if args.len() < 3 {
+                Some(String::from("Kullanim: tr <set1> <set2>"))
+            } else {
+                Some(translate_stream(input, args[1], args[2]))
+            }
+        }
+        "strings" => {
+            if args.len() > 1 {
+                match load_file(args[1]) {
+                    Ok(data) => Some(extract_strings(&data, 4)),
+                    Err(err) => Some(err),
+                }
+            } else {
+                Some(extract_strings(input.as_bytes(), 4))
+            }
+        }
+        "su" => match render_login_like(shell, &args[1..], "root") {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "sysctl" => match render_sysctl(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "test" => match evaluate_test(&args[1..]) {
+            Ok(result) => {
+                shell.last_exit_code = if result { 0 } else { 1 };
+                None
+            }
+            Err(err) => {
+                shell.last_exit_code = 1;
+                Some(err)
+            }
+        },
+        "time" => {
+            if args.len() < 2 {
+                Some(String::from("Kullanim: time <komut>"))
+            } else {
+                let start_ms = crate::cpu::tsc::read_ms();
+                let nested_output = shell.execute_line(&args[1..].join(" "));
+                let nested_status = shell.last_exit_code;
+                let elapsed_ms = crate::cpu::tsc::read_ms().saturating_sub(start_ms);
+                shell.last_exit_code = nested_status;
+                match nested_output {
+                    Some(output) if !output.is_empty() => {
+                        Some(format!("{}\nreal {} ms", output, elapsed_ms))
+                    }
+                    _ => Some(format!("real {} ms", elapsed_ms)),
+                }
+            }
+        }
+        "true" => {
+            shell.last_exit_code = 0;
+            None
+        }
+        "tty" => Some(current_tty_name()),
+        "tftp" => match render_tftp(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "vtallow" => match render_vtallow(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "unexpand" => {
+            let mut width = 8usize;
+            let mut source_path = None;
+            let mut index = 1usize;
+            while index < args.len() {
+                match args[index] {
+                    "-t" if index + 1 < args.len() => {
+                        width = args[index + 1].parse::<usize>().unwrap_or(8);
+                        index += 2;
+                    }
+                    path => {
+                        source_path = Some(path);
+                        index += 1;
+                    }
+                }
+            }
+            match read_text_source(source_path, input) {
+                Ok(text) => Some(unexpand_tabs(&text, width)),
+                Err(err) => Some(err),
+            }
+        }
+        "unshare" => match render_unshare(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "unlink" => {
+            if args.len() < 2 {
+                Some(String::from("Kullanim: unlink <yol>"))
+            } else {
+                let resolved = resolve_path(args[1]);
+                match unlink_path(args[1]) {
+                    Ok(()) => Some(format!("unlink: {}", resolved)),
+                    Err(err) => Some(err),
+                }
+            }
+        }
+        "uudecode" => match render_uudecode(&args[1..], input) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "uuencode" => match render_uuencode(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "false" => {
+            shell.last_exit_code = 1;
+            None
+        }
+        "watch" => match render_watch(shell, &args[1..]) {
+            Ok(out) => out,
+            Err(err) => Some(err),
+        },
+        "who" => Some(render_who()),
+        "xinstall" => match render_xinstall(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
+        "xargs" => render_xargs(shell, &args[1..], input),
+        "yes" => match render_yes(&args[1..]) {
+            Ok(out) => Some(out),
+            Err(err) => Some(err),
+        },
         _ => Some(format!("Bilinmeyen komut: {}", args[0])),
+    };
+
+    if !matches!(
+        args[0],
+        "ech-tools"
+            | "chroot"
+            | "cron"
+            | "false"
+            | "flock"
+            | "halt"
+            | "make"
+            | "mountpoint"
+            | "nice"
+            | "nologin"
+            | "nohup"
+            | "pidof"
+            | "printenv"
+            | "respawn"
+            | "setsid"
+            | "switch_root"
+            | "test"
+            | "time"
+            | "true"
+            | "unshare"
+            | "watch"
+            | "xargs"
+    ) {
+        shell.last_exit_code = command_exit_code(&output);
     }
+
+    output
 }
 
 // ============================================================================
@@ -4090,8 +8655,15 @@ pub fn info_msg(msg: &str) -> String {
 mod tests {
     use super::*;
 
+    fn reset_shell_test_globals() {
+        advanced::ENV.clear();
+        advanced::ENV.init_defaults();
+        advanced::ALIASES.clear();
+    }
+
     #[test]
     fn shell_env_is_session_scoped() {
+        reset_shell_test_globals();
         let mut first = Shell::new();
         let mut second = Shell::new();
 
@@ -4108,6 +8680,7 @@ mod tests {
 
     #[test]
     fn shell_alias_is_session_scoped() {
+        reset_shell_test_globals();
         let mut first = Shell::new();
         let mut second = Shell::new();
 
@@ -4226,6 +8799,685 @@ mod tests {
 
         assert!(append.contains("bytes"));
         assert_eq!(content, "alphabeta");
+    }
+
+    #[test]
+    fn ech_tools_lists_catalog_and_counts() {
+        let mut shell = Shell::new();
+        let output = run_command_in_shell(&mut shell, "ech-tools").unwrap_or_default();
+
+        assert!(output.contains("unique source commands: 150"));
+        assert!(output.contains("routed through shell bridge: 150"));
+        assert!(output.contains("adapter pending: 0"));
+        assert!(output.contains("cat [tier0/shell-bridge]"));
+    }
+
+    #[test]
+    fn ech_tools_shell_bridge_runs_existing_command() {
+        let mut shell = Shell::new();
+        let output = run_command_in_shell(&mut shell, "ech-tools echo merhaba").unwrap_or_default();
+
+        assert_eq!(output, "merhaba");
+    }
+
+    #[test]
+    fn ech_tools_bridges_new_tier0_translation_command() {
+        let mut shell = Shell::new();
+        let output =
+            run_command_in_shell(&mut shell, "echo alpha | ech-tools tr a z").unwrap_or_default();
+
+        assert_eq!(output, "zlphz");
+    }
+
+    #[test]
+    fn tier0_path_and_printf_commands_work() {
+        let mut shell = Shell::new();
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "basename /var/log/kernel.txt"),
+            Some(String::from("kernel.txt"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "dirname /var/log/kernel.txt"),
+            Some(String::from("/var/log"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "printf hello\\n%s-%d-%% world 7"),
+            Some(String::from("hello\nworld-7-%"))
+        );
+    }
+
+    #[test]
+    fn tier0_tee_writes_stream_to_file() {
+        let mut shell = Shell::new();
+        let _ = run_command_in_shell(&mut shell, "rm /shell-tee-test.txt");
+
+        let output = run_command_in_shell(&mut shell, "echo bridge-data | tee /shell-tee-test.txt")
+            .unwrap_or_default();
+        let content =
+            run_command_in_shell(&mut shell, "cat /shell-tee-test.txt").unwrap_or_default();
+
+        assert_eq!(output, "bridge-data");
+        assert_eq!(content, "bridge-data");
+    }
+
+    #[test]
+    fn true_false_update_exit_status_and_control_flow() {
+        let mut shell = Shell::new();
+
+        assert_eq!(run_command_in_shell(&mut shell, "true"), None);
+        assert_eq!(shell.last_exit_code, 0);
+
+        assert_eq!(run_command_in_shell(&mut shell, "false"), None);
+        assert_eq!(shell.last_exit_code, 1);
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "false || echo rescued"),
+            Some(String::from("rescued"))
+        );
+        assert_eq!(shell.last_exit_code, 0);
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "true && echo ok"),
+            Some(String::from("ok"))
+        );
+        assert_eq!(shell.last_exit_code, 0);
+    }
+
+    #[test]
+    fn tier1_text_commands_bridge_through_ech_tools() {
+        let mut shell = Shell::new();
+        let _ = run_command_in_shell(&mut shell, "rm /tier1-left.txt");
+        let _ = run_command_in_shell(&mut shell, "rm /tier1-right.txt");
+        let _ = write_file("/tier1-left.txt", b"alpha:beta:gamma");
+        let _ = write_file("/tier1-right.txt", b"alpha:beta:gamma");
+
+        assert_eq!(
+            run_command_in_shell(
+                &mut shell,
+                "echo alpha:beta:gamma | ech-tools cut -d : -f 2,3"
+            ),
+            Some(String::from("beta:gamma"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "echo alpha | ech-tools rev"),
+            Some(String::from("ahpla"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools seq 3"),
+            Some(String::from("1\n2\n3"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools cmp /tier1-left.txt /tier1-right.txt"),
+            None
+        );
+
+        let _ = run_command_in_shell(&mut shell, "ech-tools test -f /tier1-left.txt");
+        assert_eq!(shell.last_exit_code, 0);
+    }
+
+    #[test]
+    fn tier1_formatting_and_env_commands_bridge_through_ech_tools() {
+        let mut shell = Shell::new();
+        let _ = run_command_in_shell(&mut shell, "rm /join-left.txt");
+        let _ = run_command_in_shell(&mut shell, "rm /join-right.txt");
+        let _ = write_file("/join-left.txt", b"common left\nsolo left-only");
+        let _ = write_file("/join-right.txt", b"common right\nzeta right-only");
+        let _ = write_file("/expand-input.txt", b"a\tb");
+        let _ = write_file("/nl-input.txt", b"first\nsecond");
+        let _ = run_command_in_shell(&mut shell, "rm /link-source.txt");
+        let _ = run_command_in_shell(&mut shell, "rm /link-copy.txt");
+        let _ = write_file("/link-source.txt", b"payload");
+
+        let cal = run_command_in_shell(&mut shell, "ech-tools cal 4 2026").unwrap_or_default();
+        assert!(cal.contains("April 2026"));
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools expand -t 4 /expand-input.txt"),
+            Some(String::from("a   b"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "printf abcdefghi | ech-tools fold -w 4"),
+            Some(String::from("abcd\nefgh\ni"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools nl /nl-input.txt"),
+            Some(String::from("     1\tfirst\n     2\tsecond"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools join /join-left.txt /join-right.txt"),
+            Some(String::from("common left right"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools printenv PWD"),
+            Some(String::from("/"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools getconf PAGESIZE"),
+            Some(String::from("4096"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools logname"),
+            Some(String::from("root"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools tty"),
+            Some(String::from("/dev/tty0"))
+        );
+
+        let link =
+            run_command_in_shell(&mut shell, "ech-tools link /link-source.txt /link-copy.txt")
+                .unwrap_or_default();
+        assert!(link.contains("/link-copy.txt"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /link-copy.txt"),
+            Some(String::from("payload"))
+        );
+        let unlink =
+            run_command_in_shell(&mut shell, "ech-tools unlink /link-copy.txt").unwrap_or_default();
+        assert!(unlink.contains("unlink: /link-copy.txt"));
+        let time =
+            run_command_in_shell(&mut shell, "ech-tools time echo merhaba").unwrap_or_default();
+        assert!(time.contains("merhaba"));
+        assert!(time.contains("real "));
+        assert_eq!(run_command_in_shell(&mut shell, "ech-tools sleep 0"), None);
+        assert_eq!(shell.last_exit_code, 0);
+    }
+
+    #[test]
+    fn tier2_system_commands_bridge_through_ech_tools() {
+        let mut shell = Shell::new();
+        let _ = run_command_in_shell(&mut shell, "rm /tier2-stat.txt");
+        let _ = write_file("/tier2-stat.txt", b"abcdef");
+
+        let stat =
+            run_command_in_shell(&mut shell, "ech-tools stat /tier2-stat.txt").unwrap_or_default();
+        assert!(stat.contains("Path: /tier2-stat.txt"));
+
+        let truncate = run_command_in_shell(&mut shell, "ech-tools truncate /tier2-stat.txt 3")
+            .unwrap_or_default();
+        assert!(truncate.contains("truncate"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /tier2-stat.txt"),
+            Some(String::from("abc"))
+        );
+
+        let free = run_command_in_shell(&mut shell, "ech-tools free").unwrap_or_default();
+        assert!(free.contains("available"));
+
+        let uptime = run_command_in_shell(&mut shell, "ech-tools uptime").unwrap_or_default();
+        assert!(uptime.starts_with("up "));
+
+        let id = run_command_in_shell(&mut shell, "ech-tools id").unwrap_or_default();
+        assert!(id.contains("uid="));
+    }
+
+    #[test]
+    fn tier1_hash_and_validation_commands_bridge_through_ech_tools() {
+        let mut shell = Shell::new();
+        let _ = run_command_in_shell(&mut shell, "rm /digest-input.txt");
+        let _ = write_file("/digest-input.txt", b"alpha\nbeta\n");
+
+        let cksum = run_command_in_shell(&mut shell, "ech-tools cksum /digest-input.txt")
+            .unwrap_or_default();
+        let cksum_parts: Vec<&str> = cksum.split_whitespace().collect();
+        assert_eq!(cksum_parts.len(), 3);
+        assert_eq!(cksum_parts[2], "/digest-input.txt");
+
+        let check_hash_len = |command: &str, expected_len: usize, shell: &mut Shell| {
+            let output = run_command_in_shell(shell, command).unwrap_or_default();
+            let digest = output.split_whitespace().next().unwrap_or("");
+            assert_eq!(digest.len(), expected_len);
+        };
+
+        check_hash_len("ech-tools md5sum /digest-input.txt", 32, &mut shell);
+        check_hash_len("ech-tools sha1sum /digest-input.txt", 40, &mut shell);
+        check_hash_len("ech-tools sha224sum /digest-input.txt", 56, &mut shell);
+        check_hash_len("ech-tools sha256sum /digest-input.txt", 64, &mut shell);
+        check_hash_len("ech-tools sha384sum /digest-input.txt", 96, &mut shell);
+        check_hash_len("ech-tools sha512sum /digest-input.txt", 128, &mut shell);
+        check_hash_len("ech-tools sha512-224sum /digest-input.txt", 56, &mut shell);
+        check_hash_len("ech-tools sha512-256sum /digest-input.txt", 64, &mut shell);
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools pagesize"),
+            Some(String::from("4096"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools pathchk /digest-input.txt"),
+            None
+        );
+        assert_eq!(shell.last_exit_code, 0);
+
+        let invalid = format!("ech-tools pathchk /{}", "a".repeat(260));
+        let invalid_out = run_command_in_shell(&mut shell, &invalid).unwrap_or_default();
+        assert!(invalid_out.contains("pathchk hatasi"));
+        assert_eq!(shell.last_exit_code, 1);
+
+        let od =
+            run_command_in_shell(&mut shell, "ech-tools od /digest-input.txt").unwrap_or_default();
+        assert!(od.contains("0000000"));
+    }
+
+    #[test]
+    fn tier1_flow_commands_bridge_through_ech_tools() {
+        let mut shell = Shell::new();
+        let _ = run_command_in_shell(&mut shell, "rm /bridge-temp.aaaaaa");
+        let _ = run_command_in_shell(&mut shell, "rm /split-source.txt");
+        let _ = run_command_in_shell(&mut shell, "rm /sponge-out.txt");
+        let _ = run_command_in_shell(&mut shell, "rm /split-aa");
+        let _ = run_command_in_shell(&mut shell, "rm /split-ab");
+        let _ = write_file("/split-source.txt", b"one\ntwo\nthree\n");
+
+        let mktemp = run_command_in_shell(&mut shell, "ech-tools mktemp /bridge-temp.XXXXXX")
+            .unwrap_or_default();
+        assert!(mktemp.starts_with("/bridge-temp."));
+        assert_eq!(
+            run_command_in_shell(&mut shell, &format!("cat {}", mktemp)),
+            Some(String::new())
+        );
+
+        let sponge = run_command_in_shell(
+            &mut shell,
+            "echo sponge-data | ech-tools sponge /sponge-out.txt",
+        )
+        .unwrap_or_default();
+        assert!(sponge.contains("/sponge-out.txt"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /sponge-out.txt"),
+            Some(String::from("sponge-data"))
+        );
+
+        let split =
+            run_command_in_shell(&mut shell, "ech-tools split -l 2 /split-source.txt /split-")
+                .unwrap_or_default();
+        assert!(split.contains("/split-a"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /split-aa"),
+            Some(String::from("one\ntwo\n"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /split-ab"),
+            Some(String::from("three\n"))
+        );
+
+        let du =
+            run_command_in_shell(&mut shell, "ech-tools du /sponge-out.txt").unwrap_or_default();
+        assert!(du.contains("/sponge-out.txt"));
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "echo shop cook cook eat | ech-tools tsort"),
+            Some(String::from("shop\ncook\neat"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "echo alpha beta | ech-tools xargs echo prefix"),
+            Some(String::from("prefix alpha beta"))
+        );
+        assert_eq!(run_command_in_shell(&mut shell, "ech-tools sync"), None);
+        assert_eq!(
+            run_command_in_shell(&mut shell, "echo bridge-logger | ech-tools logger"),
+            None
+        );
+    }
+
+    #[test]
+    fn remaining_text_and_file_commands_bridge_through_ech_tools() {
+        let mut shell = Shell::new();
+        let _ = run_command_in_shell(&mut shell, "rm /dd-in.txt");
+        let _ = run_command_in_shell(&mut shell, "rm /dd-out.txt");
+        let _ = run_command_in_shell(&mut shell, "rm /install-out.txt");
+        let _ = run_command_in_shell(&mut shell, "rm /uu-src.txt");
+        let _ = run_command_in_shell(&mut shell, "rm decoded.txt");
+        let _ = write_file("/dd-in.txt", b"alpha beta gamma");
+        let _ = write_file("/uu-src.txt", b"uu payload");
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools bc 1 + 2"),
+            Some(String::from("3"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools dc 2 3 + p"),
+            Some(String::from("5"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "echo alpha beta gamma | ech-tools cols -w 16"),
+            Some(String::from("alpha  beta\ngamma"))
+        );
+        assert_eq!(
+            run_command_in_shell(
+                &mut shell,
+                "echo alpha beta alpha | ech-tools sed s/alpha/z/g"
+            ),
+            Some(String::from("z beta z"))
+        );
+
+        let dd = run_command_in_shell(
+            &mut shell,
+            "ech-tools dd if=/dd-in.txt of=/dd-out.txt bs=5 count=2",
+        )
+        .unwrap_or_default();
+        assert!(dd.contains("10 bytes copied"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /dd-out.txt"),
+            Some(String::from("alpha beta"))
+        );
+
+        let fallocate = run_command_in_shell(&mut shell, "ech-tools fallocate /dd-out.txt 16")
+            .unwrap_or_default();
+        assert!(fallocate.contains("16 bytes"));
+
+        let readahead =
+            run_command_in_shell(&mut shell, "ech-tools readahead /dd-out.txt").unwrap_or_default();
+        assert!(readahead.contains("16 bytes"));
+
+        let install =
+            run_command_in_shell(&mut shell, "ech-tools xinstall /dd-in.txt /install-out.txt")
+                .unwrap_or_default();
+        assert!(install.contains("/install-out.txt"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /install-out.txt"),
+            Some(String::from("alpha beta gamma"))
+        );
+
+        let encoded =
+            run_command_in_shell(&mut shell, "ech-tools uuencode /uu-src.txt decoded.txt")
+                .unwrap_or_default();
+        assert!(encoded.starts_with("begin 644 decoded.txt"));
+        let decoded = run_command_in_shell(
+            &mut shell,
+            "ech-tools uuencode /uu-src.txt decoded.txt | ech-tools uudecode",
+        )
+        .unwrap_or_default();
+        assert!(decoded.contains("decoded.txt"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat decoded.txt"),
+            Some(String::from("uu payload"))
+        );
+
+        let fifo = run_command_in_shell(&mut shell, "ech-tools mkfifo /pipe-a").unwrap_or_default();
+        assert!(fifo.contains("/pipe-a"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools yes -n 3 ok"),
+            Some(String::from("ok\nok\nok"))
+        );
+        let clock = run_command_in_shell(&mut shell, "ech-tools hwclock").unwrap_or_default();
+        assert!(clock.contains("-"));
+    }
+
+    #[test]
+    fn session_archive_control_commands_bridge_through_ech_tools() {
+        crate::security::users::init_users();
+        crate::fs::devfs::kmsg_push("ech-tools dmesg smoke");
+        let mut shell = Shell::new();
+        let _ = write_file("/lock.txt", b"lock");
+        let _ = write_file("/tar-src.txt", b"tar payload");
+        let _ = write_file("/Makefile", b"all:\n    echo made\n");
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools vtallow no"),
+            Some(String::from("no"))
+        );
+        assert!(run_command_in_shell(&mut shell, "ech-tools chvt 2")
+            .unwrap_or_default()
+            .contains("kapali"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools vtallow yes"),
+            Some(String::from("yes"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools chvt 2"),
+            Some(String::from("/dev/tty2"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools ctrlaltdel hard"),
+            Some(String::from("ctrlaltdel: hard"))
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools sysctl kernel.ctrl-alt-del")
+                .unwrap_or_default()
+                .contains("1")
+        );
+        assert!(run_command_in_shell(&mut shell, "ech-tools dmesg")
+            .unwrap_or_default()
+            .contains("ech-tools dmesg smoke"));
+
+        assert!(render_ed(&["/ed.txt"], "a\nhello\n.\nw\nq")
+            .unwrap()
+            .contains("6"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /ed.txt"),
+            Some(String::from("hello\n"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools make"),
+            Some(String::from("made"))
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools flock /lock.txt echo locked")
+                .unwrap_or_default()
+                .contains("locked")
+        );
+
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools tar -cf /a.tar /tar-src.txt")
+                .unwrap_or_default()
+                .contains("/a.tar")
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools tar -tf /a.tar"),
+            Some(String::from("tar-src.txt"))
+        );
+        let _ = run_command_in_shell(&mut shell, "rm /tar-src.txt");
+        assert!(run_command_in_shell(&mut shell, "ech-tools tar -xf /a.tar")
+            .unwrap_or_default()
+            .contains("tar-src.txt"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /tar-src.txt"),
+            Some(String::from("tar payload"))
+        );
+
+        assert!(run_command_in_shell(&mut shell, "ech-tools login user")
+            .unwrap_or_default()
+            .contains("user on tty0"));
+        assert!(run_command_in_shell(&mut shell, "ech-tools last")
+            .unwrap_or_default()
+            .contains("user"));
+        assert!(run_command_in_shell(&mut shell, "ech-tools lastlog")
+            .unwrap_or_default()
+            .contains("user"));
+        assert!(run_command_in_shell(&mut shell, "ech-tools su root")
+            .unwrap_or_default()
+            .contains("root on tty0"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools mesg n"),
+            Some(String::from("is n"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools mknod /pipe-b p"),
+            Some(String::from("mknod: fifo /pipe-b"))
+        );
+        assert!(run_command_in_shell(&mut shell, "ech-tools nologin")
+            .unwrap_or_default()
+            .contains("not available"));
+        let pwdx_cmd = format!(
+            "ech-tools pwdx {}",
+            crate::task::scheduler::current_task_id()
+        );
+        assert!(run_command_in_shell(&mut shell, &pwdx_cmd)
+            .unwrap_or_default()
+            .contains(": /"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools respawn -n 2 echo again"),
+            Some(String::from("again\nagain"))
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools watch -c 2 echo pulse")
+                .unwrap_or_default()
+                .contains("Every pass 2")
+        );
+        assert!(run_command_in_shell(&mut shell, "ech-tools killall5")
+            .unwrap_or_default()
+            .contains("hedef task yok"));
+    }
+
+    #[test]
+    fn final_system_namespace_commands_bridge_through_ech_tools() {
+        crate::security::users::init_users();
+        let mut shell = Shell::new();
+        let _ = write_file("/discard.bin", b"abcdefgh");
+        let _ = write_file("/cron.tab", b"* * * * * echo cron-ok\n");
+        let _ = write_file("/module.ko", b"module-image");
+        let _ = write_file("/swap.bin", &[0u8; 8192]);
+        let _ = write_file("/tftp-src.txt", b"tftp payload");
+
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools blkdiscard -o 2 -l 3 /discard.bin")
+                .unwrap_or_default()
+                .contains("discarded 3 bytes")
+        );
+        assert_eq!(load_file("/discard.bin").unwrap(), b"ab\0\0\0fgh".to_vec());
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools cron /cron.tab"),
+            Some(String::from("cron-ok"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools fsfreeze -f /"),
+            Some(String::from("fsfreeze: / frozen"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools fsfreeze -u /"),
+            Some(String::from("fsfreeze: / thawed"))
+        );
+
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools insmod /module.ko")
+                .unwrap_or_default()
+                .contains("module")
+        );
+        assert!(run_command_in_shell(&mut shell, "lsmod")
+            .unwrap_or_default()
+            .contains("module"));
+        assert!(run_command_in_shell(&mut shell, "ech-tools rmmod module")
+            .unwrap_or_default()
+            .contains("source=/module.ko"));
+
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools mkswap /swap.bin echoswap")
+                .unwrap_or_default()
+                .contains("label=echoswap")
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools swaplabel /swap.bin")
+                .unwrap_or_default()
+                .contains("echoswap")
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools swapon /swap.bin")
+                .unwrap_or_default()
+                .contains("size=8192")
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools sysctl vm.swap_areas")
+                .unwrap_or_default()
+                .contains("enabled")
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools swapoff /swap.bin")
+                .unwrap_or_default()
+                .contains("/swap.bin")
+        );
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools nice -n 5 echo nice-ok"),
+            Some(String::from("nice-ok"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools nohup echo hup-ok"),
+            Some(String::from("hup-ok"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat nohup.out"),
+            Some(String::from("hup-ok"))
+        );
+        let current_pid = crate::task::scheduler::current_task_id();
+        let renice =
+            run_command_in_shell(&mut shell, &format!("ech-tools renice 4 {}", current_pid))
+                .unwrap_or_default();
+        assert!(renice.contains("new priority 4"));
+
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools passwd operator changed")
+                .unwrap_or_default()
+                .contains("updated")
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools login operator changed")
+                .unwrap_or_default()
+                .contains("operator on tty0")
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools getty tty3 root")
+                .unwrap_or_default()
+                .contains("root on tty0")
+        );
+
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools chroot / echo root-ok"),
+            Some(String::from("root-ok"))
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools pivot_root / /old")
+                .unwrap_or_default()
+                .contains("put_old=/old")
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools switch_root / echo switched"),
+            Some(String::from("switched"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools setsid echo sid-ok"),
+            Some(String::from("sid-ok"))
+        );
+        assert_eq!(
+            run_command_in_shell(&mut shell, "ech-tools unshare -m echo ns-ok"),
+            Some(String::from("ns-ok"))
+        );
+
+        assert!(run_command_in_shell(
+            &mut shell,
+            "ech-tools tftp get local /tftp-src.txt /tftp-dst.txt"
+        )
+        .unwrap_or_default()
+        .contains("local get"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /tftp-dst.txt"),
+            Some(String::from("tftp payload"))
+        );
+        assert!(run_command_in_shell(
+            &mut shell,
+            "ech-tools tftp put local /tftp-remote.txt /tftp-src.txt"
+        )
+        .unwrap_or_default()
+        .contains("local put"));
+        assert_eq!(
+            run_command_in_shell(&mut shell, "cat /tftp-remote.txt"),
+            Some(String::from("tftp payload"))
+        );
+
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools eject /dev/cdrom")
+                .unwrap_or_default()
+                .contains("marked offline")
+        );
+        assert!(
+            run_command_in_shell(&mut shell, "ech-tools freeramdisk loop-missing")
+                .unwrap_or_default()
+                .contains("loopback")
+        );
+        assert!(run_command_in_shell(&mut shell, "ech-tools halt")
+            .unwrap_or_default()
+            .contains("armed"));
     }
 }
 

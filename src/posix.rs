@@ -454,6 +454,7 @@ const PROT_EXEC: usize = 0x4;
 const MAP_SHARED: usize = 0x01;
 const MAP_PRIVATE: usize = 0x02;
 const MAP_FIXED: usize = 0x10;
+const MAP_FIXED_NOREPLACE: usize = 0x100000;
 const MAP_ANON: usize = 0x20;
 
 const SIG_BLOCK: usize = 0;
@@ -986,6 +987,9 @@ fn sys_write(fd: usize, buf: usize, count: usize) -> usize {
     if count == 0 {
         return 0;
     }
+    if let Err(err) = validate_user_range(buf, count) {
+        return err;
+    }
     let bytes =
         with_user_access(|| unsafe { core::slice::from_raw_parts(buf as *const u8, count) });
     match get_fd(fd) {
@@ -1015,6 +1019,9 @@ fn sys_write(fd: usize, buf: usize, count: usize) -> usize {
 fn sys_read(fd: usize, buf: usize, count: usize) -> usize {
     if count == 0 {
         return 0;
+    }
+    if let Err(err) = validate_user_range(buf, count) {
+        return err;
     }
     match get_fd(fd) {
         Some(FdKind::Stdin) => with_user_access(|| {
@@ -1177,8 +1184,8 @@ fn sys_lseek(fd: usize, offset: usize, whence: usize) -> usize {
 }
 
 fn sys_stat(path: usize, statbuf: usize) -> usize {
-    if statbuf == 0 {
-        return errno(EFAULT);
+    if let Err(err) = validate_user_range(statbuf, core::mem::size_of::<Stat>()) {
+        return err;
     }
     let path = match read_user_cstring(path, 256) {
         Ok(value) => value,
@@ -1186,7 +1193,9 @@ fn sys_stat(path: usize, statbuf: usize) -> usize {
     };
     if path == "/dev/null" || path == "/dev/zero" || path == "/dev/dri/card0" {
         let stat = stat_for_special(S_IFCHR | MODE_CHAR, 0);
-        with_user_access(|| unsafe { *(statbuf as *mut Stat) = stat });
+        if let Err(err) = write_user(statbuf, stat) {
+            return err;
+        }
         return 0;
     }
     if fs::f2fs::detect_f2fs().unwrap_or(false) {
@@ -1195,7 +1204,9 @@ fn sys_stat(path: usize, statbuf: usize) -> usize {
             Err(_) => return errno(ENOENT),
         };
         let stat = stat_from_f2fs_entry(&entry);
-        with_user_access(|| unsafe { *(statbuf as *mut Stat) = stat });
+        if let Err(err) = write_user(statbuf, stat) {
+            return err;
+        }
         return 0;
     }
     let entry = match fs::f2fs::open_entry(&path) {
@@ -1203,7 +1214,9 @@ fn sys_stat(path: usize, statbuf: usize) -> usize {
         Err(_) => return errno(ENOENT),
     };
     let stat = stat_from_f2fs_entry(&entry);
-    with_user_access(|| unsafe { *(statbuf as *mut Stat) = stat });
+    if let Err(err) = write_user(statbuf, stat) {
+        return err;
+    }
     0
 }
 
@@ -1279,14 +1292,16 @@ fn stat_from_f2fs_entry(entry: &F2fsEntry) -> Stat {
 /// Özel dosyalar (stdin/out/err, /dev/null, /dev/zero, DRM) için
 /// sabit değerler döndürülür.
 fn sys_fstat(fd: usize, statbuf: usize) -> usize {
-    if statbuf == 0 {
-        return errno(EFAULT);
+    if let Err(err) = validate_user_range(statbuf, core::mem::size_of::<Stat>()) {
+        return err;
     }
 
     // stdin/stdout/stderr
     if fd <= 2 {
         let stat = stat_for_special(S_IFCHR | MODE_CHAR, 0);
-        with_user_access(|| unsafe { *(statbuf as *mut Stat) = stat });
+        if let Err(err) = write_user(statbuf, stat) {
+            return err;
+        }
         return 0;
     }
 
@@ -1294,12 +1309,16 @@ fn sys_fstat(fd: usize, statbuf: usize) -> usize {
     match get_fd(fd) {
         Some(FdKind::Null) | Some(FdKind::Zero) => {
             let stat = stat_for_special(S_IFCHR | MODE_CHAR, 0);
-            with_user_access(|| unsafe { *(statbuf as *mut Stat) = stat });
+            if let Err(err) = write_user(statbuf, stat) {
+                return err;
+            }
             0
         }
         Some(FdKind::Drm) => {
             let stat = stat_for_special(S_IFCHR | MODE_CHAR, 0);
-            with_user_access(|| unsafe { *(statbuf as *mut Stat) = stat });
+            if let Err(err) = write_user(statbuf, stat) {
+                return err;
+            }
             0
         }
         Some(FdKind::File) => {
@@ -1348,7 +1367,9 @@ fn sys_fstat(fd: usize, statbuf: usize) -> usize {
                     Err(_) => stat_for_special(S_IFREG | MODE_FILE, state.size as i64),
                 };
                 drop(files);
-                with_user_access(|| unsafe { *(statbuf as *mut Stat) = stat });
+                if let Err(err) = write_user(statbuf, stat) {
+                    return err;
+                }
                 0
             } else {
                 errno(EBADF)
@@ -1356,7 +1377,9 @@ fn sys_fstat(fd: usize, statbuf: usize) -> usize {
         }
         Some(FdKind::Pipe) => {
             let stat = stat_for_special(S_IFIFO | 0o600, 0);
-            with_user_access(|| unsafe { *(statbuf as *mut Stat) = stat });
+            if let Err(err) = write_user(statbuf, stat) {
+                return err;
+            }
             0
         }
         _ => errno(EBADF),
@@ -1381,10 +1404,15 @@ fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, off: 
     let is_anon = flags & MAP_ANON != 0 || fd == usize::MAX;
     let is_private = flags & MAP_PRIVATE != 0;
     let is_shared = flags & MAP_SHARED != 0;
+    let is_fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
+    let no_replace = flags & MAP_FIXED_NOREPLACE != 0;
     if is_private == is_shared {
         return errno(EINVAL);
     }
     if !is_anon && off % kernel_memory::PAGE_SIZE != 0 {
+        return errno(EINVAL);
+    }
+    if is_fixed && addr == 0 {
         return errno(EINVAL);
     }
     let target = if addr != 0 {
@@ -1408,8 +1436,15 @@ fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, off: 
     if prot & PROT_EXEC == 0 {
         page_flags |= PageTableFlags::NO_EXECUTE;
     }
-    if flags & MAP_FIXED != 0 && addr == 0 {
-        return errno(EINVAL);
+    if is_fixed {
+        if kernel_memory::user_stack_guards_region(target, len as u64)
+            || kernel_memory::user_heap_guards_region(target, len as u64)
+        {
+            return errno(EPERM);
+        }
+        if no_replace && kernel_memory::user_region_overlaps(target, len as u64) {
+            return errno(EEXIST);
+        }
     }
     if is_anon {
         if is_shared {
@@ -1533,10 +1568,10 @@ fn handle_drm_ioctl(cmd: usize, arg: usize) -> usize {
 }
 
 fn drm_version(arg: usize) -> usize {
-    if arg == 0 {
-        return errno(EFAULT);
-    }
-    let mut ver = with_user_access(|| unsafe { *(arg as *const DrmVersion) });
+    let mut ver = match read_user::<DrmVersion>(arg) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
     let name = "virtio_gpu";
     let name_len = ver.name_len;
     ver.version_major = 0;
@@ -1548,23 +1583,24 @@ fn drm_version(arg: usize) -> usize {
     if ver.name != 0 && name_len > 0 {
         let max = name_len.saturating_sub(1);
         let copy_len = core::cmp::min(name.len(), max);
-        with_user_access(|| unsafe {
-            let dest = ver.name as *mut u8;
-            core::ptr::copy_nonoverlapping(name.as_ptr(), dest, copy_len);
-            *dest.add(copy_len) = 0;
-        });
+        if let Err(err) = write_user_bytes(ver.name, &name.as_bytes()[..copy_len]) {
+            return err;
+        }
+        if let Err(err) = write_user::<u8>(ver.name.saturating_add(copy_len), 0u8) {
+            return err;
+        }
     }
-    with_user_access(|| unsafe {
-        *(arg as *mut DrmVersion) = ver;
-    });
+    if let Err(err) = write_user(arg, ver) {
+        return err;
+    }
     0
 }
 
 fn drm_virtgpu_resource_create(arg: usize) -> usize {
-    if arg == 0 {
-        return errno(EFAULT);
-    }
-    let mut req = with_user_access(|| unsafe { *(arg as *const DrmVirtgpuResourceCreate) });
+    let mut req = match read_user::<DrmVirtgpuResourceCreate>(arg) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
     let width = req.width.max(1);
     let height = req.height.max(1);
     let handle = match drivers::virtio_gpu::drm_resource_create_3d(width, height) {
@@ -1572,9 +1608,9 @@ fn drm_virtgpu_resource_create(arg: usize) -> usize {
         None => return errno(EIO),
     };
     req.handle = handle;
-    with_user_access(|| unsafe {
-        *(arg as *mut DrmVirtgpuResourceCreate) = req;
-    });
+    if let Err(err) = write_user(arg, req) {
+        return err;
+    }
     let mut size = if req.size != 0 {
         req.size as usize
     } else {
@@ -1590,10 +1626,10 @@ fn drm_virtgpu_resource_create(arg: usize) -> usize {
 }
 
 fn drm_virtgpu_map(arg: usize) -> usize {
-    if arg == 0 {
-        return errno(EFAULT);
-    }
-    let mut req = with_user_access(|| unsafe { *(arg as *const DrmVirtgpuMap) });
+    let mut req = match read_user::<DrmVirtgpuMap>(arg) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
     if req.handle == 0 {
         return errno(EINVAL);
     }
@@ -1601,23 +1637,26 @@ fn drm_virtgpu_map(arg: usize) -> usize {
         return errno(EINVAL);
     }
     req.offset = req.handle as u64;
-    with_user_access(|| unsafe {
-        *(arg as *mut DrmVirtgpuMap) = req;
-    });
+    if let Err(err) = write_user(arg, req) {
+        return err;
+    }
     0
 }
 
 fn drm_virtgpu_execbuffer(arg: usize) -> usize {
-    if arg == 0 {
-        return errno(EFAULT);
-    }
-    let req = with_user_access(|| unsafe { *(arg as *const DrmVirtgpuExecbuffer) });
+    let req = match read_user::<DrmVirtgpuExecbuffer>(arg) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
     if req.command == 0 || req.size == 0 {
         return errno(EINVAL);
     }
-    let ok = with_user_access(|| unsafe {
-        drivers::virtio_gpu::drm_submit_3d_command(req.command as *const u8, req.size as usize)
-    });
+    let cmd_len = req.size as usize;
+    let mut command = vec![0u8; cmd_len];
+    if let Err(err) = copy_from_user(&mut command, req.command as usize) {
+        return err;
+    }
+    let ok = unsafe { drivers::virtio_gpu::drm_submit_3d_command(command.as_ptr(), cmd_len) };
     if ok {
         0
     } else {
@@ -1677,16 +1716,29 @@ fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> usize {
     if iovcnt == 0 || iovcnt > 1024 {
         return errno(EINVAL);
     }
+    let iov_bytes = iovcnt.saturating_mul(core::mem::size_of::<[usize; 2]>());
+    if let Err(err) = validate_user_range(iov, iov_bytes) {
+        return err;
+    }
     let fd_num = fd as i32;
-    let iov_ptr = iov as *const [usize; 2]; // [iov_base, iov_len]
+    let mut iov_entries = vec![[0usize; 2]; iovcnt];
+    if let Err(err) = copy_from_user_slice(&mut iov_entries, iov) {
+        return err;
+    }
     let mut total = 0usize;
 
     for i in 0..iovcnt {
-        let entry = unsafe { &*iov_ptr.add(i) };
+        let entry = &iov_entries[i];
         let base = entry[0];
         let len = entry[1];
         if len == 0 {
             continue;
+        }
+        if let Err(err) = validate_user_range(base, len) {
+            if total > 0 {
+                return total;
+            }
+            return err;
         }
 
         // Her bir iovec için sys_read çağrısı yap (mevcut fd altyapısını kullanır)
@@ -1712,16 +1764,29 @@ fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> usize {
     if iovcnt == 0 || iovcnt > 1024 {
         return errno(EINVAL);
     }
+    let iov_bytes = iovcnt.saturating_mul(core::mem::size_of::<[usize; 2]>());
+    if let Err(err) = validate_user_range(iov, iov_bytes) {
+        return err;
+    }
     let fd_num = fd as i32;
-    let iov_ptr = iov as *const [usize; 2];
+    let mut iov_entries = vec![[0usize; 2]; iovcnt];
+    if let Err(err) = copy_from_user_slice(&mut iov_entries, iov) {
+        return err;
+    }
     let mut total = 0usize;
 
     for i in 0..iovcnt {
-        let entry = unsafe { &*iov_ptr.add(i) };
+        let entry = &iov_entries[i];
         let base = entry[0];
         let len = entry[1];
         if len == 0 {
             continue;
+        }
+        if let Err(err) = validate_user_range(base, len) {
+            if total > 0 {
+                return total;
+            }
+            return err;
         }
 
         let result = sys_write(fd_num as usize, base, len);
@@ -1826,8 +1891,8 @@ fn sys_access(path: usize, mode: usize) -> usize {
 
 /// getrusage(2) — İşlem kaynak kullanım bilgisini döndürür
 fn sys_getrusage(who: usize, usage_ptr: usize) -> usize {
-    if usage_ptr == 0 {
-        return errno(EFAULT);
+    if let Err(err) = validate_user_range(usage_ptr, 18 * core::mem::size_of::<u64>()) {
+        return err;
     }
     // struct rusage: 18 x u64 = 144 bytes (Linux layout)
     // İlk iki alan: ru_utime (user time), ru_stime (system time) → struct timeval (16 bytes each)
@@ -1851,8 +1916,8 @@ fn sys_getrusage(who: usize, usage_ptr: usize) -> usize {
 
 /// sysinfo(2) — Genel sistem bilgisini döndürür
 fn sys_sysinfo(info_ptr: usize) -> usize {
-    if info_ptr == 0 {
-        return errno(EFAULT);
+    if let Err(err) = validate_user_range(info_ptr, 16 * core::mem::size_of::<u64>()) {
+        return err;
     }
     let ticks = tasking::scheduler::get_ticks() as u64;
     let uptime = ticks / 1000; // seconds
@@ -1893,6 +1958,9 @@ fn sys_sysinfo(info_ptr: usize) -> usize {
 fn sys_times(buf_ptr: usize) -> usize {
     let ticks = tasking::scheduler::get_ticks();
     if buf_ptr != 0 {
+        if let Err(err) = validate_user_range(buf_ptr, 4 * core::mem::size_of::<u64>()) {
+            return err;
+        }
         // struct tms: tms_utime, tms_stime, tms_cutime, tms_cstime (4 x i64)
         with_user_access(|| unsafe {
             let ptr = buf_ptr as *mut u64;
@@ -2123,6 +2191,7 @@ type SigHandler = usize;
 
 /// Signal action structure
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct SigAction {
     sa_handler: SigHandler,
     sa_flags: usize,
@@ -2144,6 +2213,9 @@ fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: 
 
     // Save old action if requested
     if oldact_ptr != 0 {
+        if let Err(err) = validate_user_range(oldact_ptr, core::mem::size_of::<SigAction>()) {
+            return err;
+        }
         let handlers = SIGNAL_HANDLERS.lock();
         let old_handler = handlers[sig_idx];
         drop(handlers);
@@ -2154,15 +2226,17 @@ fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: 
             sa_restorer: 0,
             sa_mask: [0; 1],
         };
-        with_user_access(|| unsafe {
-            *(oldact_ptr as *mut SigAction) = old_action;
-        });
+        if let Err(err) = write_user(oldact_ptr, old_action) {
+            return err;
+        }
     }
 
     // Set new action if requested
     if act_ptr != 0 {
-        let new_action: SigAction =
-            with_user_access(|| unsafe { core::ptr::read(act_ptr as *const SigAction) });
+        let new_action = match read_user::<SigAction>(act_ptr) {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
         let mut handlers = SIGNAL_HANDLERS.lock();
         handlers[sig_idx] = new_action.sa_handler;
     }
@@ -2174,15 +2248,21 @@ fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: 
 fn sys_rt_sigprocmask(_how: usize, set_ptr: usize, oldset_ptr: usize, _sigsetsize: usize) -> usize {
     // Save old mask if requested
     if oldset_ptr != 0 {
+        if let Err(err) = validate_user_range(oldset_ptr, core::mem::size_of::<u64>()) {
+            return err;
+        }
         let mask = SIGNAL_MASKS.lock();
-        with_user_access(|| unsafe {
-            *(oldset_ptr as *mut u64) = *mask;
-        });
+        if let Err(err) = write_user(oldset_ptr, *mask) {
+            return err;
+        }
     }
 
     // Set new mask if requested
     if set_ptr != 0 {
-        let new_mask = with_user_access(|| unsafe { *(set_ptr as *const u64) });
+        let new_mask = match read_user::<u64>(set_ptr) {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
         let mut mask = SIGNAL_MASKS.lock();
         *mask = new_mask;
     }
@@ -2401,8 +2481,8 @@ lazy_static! {
 
 /// pipe - create pipe
 fn sys_pipe(pipefd_ptr: usize) -> usize {
-    if pipefd_ptr == 0 {
-        return errno(EFAULT);
+    if let Err(err) = validate_user_range(pipefd_ptr, 2 * core::mem::size_of::<u32>()) {
+        return err;
     }
 
     // Allocate two FDs for read and write ends
@@ -2424,10 +2504,12 @@ fn sys_pipe(pipefd_ptr: usize) -> usize {
     PIPE_TABLE.lock().insert(read_fd, pipe);
 
     // Write pipefds to user memory
-    with_user_access(|| unsafe {
-        *(pipefd_ptr as *mut u32) = read_fd as u32;
-        *((pipefd_ptr + 4) as *mut u32) = write_fd as u32;
-    });
+    if let Err(err) = write_user(pipefd_ptr, read_fd as u32) {
+        return err;
+    }
+    if let Err(err) = write_user(pipefd_ptr + core::mem::size_of::<u32>(), write_fd as u32) {
+        return err;
+    }
 
     serial_println!("[IPC] pipe: read_fd={}, write_fd={}", read_fd, write_fd);
     0
@@ -2438,8 +2520,8 @@ fn sys_pipe(pipefd_ptr: usize) -> usize {
 /// Linux pipe2(2) uyumlu: O_NONBLOCK ve O_CLOEXEC flag desteği.
 /// flags = 0 olduğunda pipe() ile aynıdır.
 fn sys_pipe2(pipefd_ptr: usize, flags: usize) -> usize {
-    if pipefd_ptr == 0 {
-        return errno(EFAULT);
+    if let Err(err) = validate_user_range(pipefd_ptr, 2 * core::mem::size_of::<u32>()) {
+        return err;
     }
 
     let read_fd = allocate_fd(FdKind::Pipe);
@@ -2457,10 +2539,12 @@ fn sys_pipe2(pipefd_ptr: usize, flags: usize) -> usize {
 
     PIPE_TABLE.lock().insert(read_fd, pipe);
 
-    with_user_access(|| unsafe {
-        *(pipefd_ptr as *mut u32) = read_fd as u32;
-        *((pipefd_ptr + 4) as *mut u32) = write_fd as u32;
-    });
+    if let Err(err) = write_user(pipefd_ptr, read_fd as u32) {
+        return err;
+    }
+    if let Err(err) = write_user(pipefd_ptr + core::mem::size_of::<u32>(), write_fd as u32) {
+        return err;
+    }
 
     let nonblock = flags & (O_NONBLOCK as usize) != 0;
     let cloexec = flags & 0x80000 != 0; // O_CLOEXEC
@@ -2674,21 +2758,29 @@ fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, _msgflg: usize) -> usize 
         Some(q) => q,
         None => return errno(EINVAL),
     };
+    if let Err(err) = validate_user_range(msgp, msgsz.saturating_add(core::mem::size_of::<i64>())) {
+        return err;
+    }
 
     if queue.used_bytes + msgsz > queue.max_bytes {
         return errno(EAGAIN);
     }
 
     // msgp yapısı: { mtype: i64, mtext: [u8; msgsz] }
-    let mtype = unsafe { *(msgp as *const i64) };
+    let mtype = match read_user::<i64>(msgp) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
     if mtype <= 0 {
         return errno(EINVAL);
     }
-
-    let data_ptr = (msgp + 8) as *const u8;
-    let data = unsafe { core::slice::from_raw_parts(data_ptr, msgsz) };
-    let mut entry_data = alloc::vec::Vec::with_capacity(msgsz);
-    entry_data.extend_from_slice(data);
+    let mut entry_data = vec![0u8; msgsz];
+    if let Err(err) = copy_from_user(
+        &mut entry_data,
+        msgp.saturating_add(core::mem::size_of::<i64>()),
+    ) {
+        return err;
+    }
 
     queue.used_bytes += msgsz;
     queue.messages.push(MsgQueueEntry {
@@ -2705,6 +2797,9 @@ fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: usize, _msgflg: u
         Some(q) => q,
         None => return errno(EINVAL),
     };
+    if let Err(err) = validate_user_range(msgp, msgsz.saturating_add(core::mem::size_of::<i64>())) {
+        return err;
+    }
 
     let msgtyp = msgtyp as i64;
     let idx = if msgtyp == 0 {
@@ -2740,10 +2835,14 @@ fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: usize, _msgflg: u
     queue.used_bytes -= entry.data.len();
 
     // Hedefe kopyala
-    unsafe {
-        *(msgp as *mut i64) = entry.mtype;
-        let dst = (msgp + 8) as *mut u8;
-        core::ptr::copy_nonoverlapping(entry.data.as_ptr(), dst, copy_len);
+    if let Err(err) = write_user(msgp, entry.mtype) {
+        return err;
+    }
+    if let Err(err) = write_user_bytes(
+        msgp.saturating_add(core::mem::size_of::<i64>()),
+        &entry.data[..copy_len],
+    ) {
+        return err;
     }
     copy_len
 }
@@ -2823,6 +2922,9 @@ fn sys_semop(semid: usize, sops: usize, nsops: usize) -> usize {
     if nsops == 0 || nsops > 32 {
         return errno(EINVAL);
     }
+    if let Err(err) = validate_user_range(sops, nsops.saturating_mul(6)) {
+        return err;
+    }
     let mut sets = SEM_SETS.lock();
     let set = match sets.get_mut(&(semid as i32)) {
         Some(s) => s,
@@ -2830,11 +2932,14 @@ fn sys_semop(semid: usize, sops: usize, nsops: usize) -> usize {
     };
 
     // struct sembuf = [u16, i16, i16] = 6 bytes each
-    let ptr = sops as *const u8;
+    let mut ops = vec![0u8; nsops.saturating_mul(6)];
+    if let Err(err) = copy_from_user(&mut ops, sops) {
+        return err;
+    }
     for i in 0..nsops {
-        let base = unsafe { ptr.add(i * 6) };
-        let sem_num = unsafe { u16::from_ne_bytes([*base, *base.add(1)]) } as usize;
-        let sem_op = unsafe { i16::from_ne_bytes([*base.add(2), *base.add(3)]) };
+        let base = i * 6;
+        let sem_num = u16::from_ne_bytes([ops[base], ops[base + 1]]) as usize;
+        let sem_op = i16::from_ne_bytes([ops[base + 2], ops[base + 3]]);
         // sem_flg at offset 4 (IPC_NOWAIT etc.)
 
         if sem_num >= set.values.len() {
@@ -2922,6 +3027,11 @@ fn sys_statx(dirfd: usize, pathname: usize, _flags: usize, mask: usize, statxbuf
     let _ = dirfd; // AT_FDCWD varsayılıyor
     let _ = mask; // Tüm alanlar doldurulur
 
+    if let Err(err) = validate_user_range(statxbuf, core::mem::size_of::<Statx>()) {
+        return err;
+    }
+    let buf = statxbuf as *mut Statx;
+
     // Dosya adını oku
     let path = match read_user_cstring(pathname, 256) {
         Ok(value) => value,
@@ -2930,14 +3040,13 @@ fn sys_statx(dirfd: usize, pathname: usize, _flags: usize, mask: usize, statxbuf
 
     // Özel cihaz dosyaları
     if path == "/dev/null" || path == "/dev/zero" || path == "/dev/dri/card0" {
-        let buf = statxbuf as *mut Statx;
-        unsafe {
+        with_user_access(|| unsafe {
             core::ptr::write_bytes(buf, 0, 1);
             (*buf).stx_mask = 0x0FFF;
             (*buf).stx_blksize = 4096;
             (*buf).stx_nlink = 1;
             (*buf).stx_mode = (S_IFCHR | MODE_CHAR) as u16;
-        }
+        });
         return 0;
     }
 
@@ -2947,7 +3056,6 @@ fn sys_statx(dirfd: usize, pathname: usize, _flags: usize, mask: usize, statxbuf
         Err(_) => return errno(ENOENT),
     };
 
-    let buf = statxbuf as *mut Statx;
     let mode = if entry.is_dir {
         S_IFDIR | MODE_DIR
     } else {
@@ -2958,7 +3066,7 @@ fn sys_statx(dirfd: usize, pathname: usize, _flags: usize, mask: usize, statxbuf
     } else {
         entry.size as u64
     };
-    unsafe {
+    with_user_access(|| unsafe {
         core::ptr::write_bytes(buf, 0, 1);
         (*buf).stx_mask = 0x0FFF; // STATX_BASIC_STATS
         (*buf).stx_blksize = 4096;
@@ -2966,7 +3074,7 @@ fn sys_statx(dirfd: usize, pathname: usize, _flags: usize, mask: usize, statxbuf
         (*buf).stx_mode = mode as u16;
         (*buf).stx_size = size;
         (*buf).stx_blocks = (size + 511) / 512;
-    }
+    });
     0
 }
 
@@ -3006,12 +3114,18 @@ fn sys_futex(
     // Strip private/clock flags for command match
     let cmd = op & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
+    if let Err(err) = validate_user_range(uaddr, core::mem::size_of::<u32>()) {
+        return err;
+    }
+    if matches!(cmd, FUTEX_REQUEUE | FUTEX_CMP_REQUEUE) {
+        if let Err(err) = validate_user_range(uaddr2, core::mem::size_of::<u32>()) {
+            return err;
+        }
+    }
+
     match cmd {
         FUTEX_WAIT => {
             // Check if *uaddr == val, if so sleep
-            if uaddr == 0 {
-                return errno(EINVAL);
-            }
             let current =
                 with_user_access(|| unsafe { core::ptr::read_volatile(uaddr as *const u32) });
             if current as usize != val {
@@ -3028,9 +3142,6 @@ fn sys_futex(
         }
         FUTEX_WAKE => {
             // Wake up to val waiters on uaddr
-            if uaddr == 0 {
-                return errno(EINVAL);
-            }
             let mut waiters = FUTEX_WAITERS.lock();
             let mut woken = 0usize;
             waiters.retain(|w| {
@@ -3046,9 +3157,6 @@ fn sys_futex(
         }
         FUTEX_WAIT_BITSET => {
             // val3 = bitmask; only wake if (waiter.mask & waker.mask) != 0
-            if uaddr == 0 {
-                return errno(EINVAL);
-            }
             let bitmask = val3 as u32;
             if bitmask == 0 {
                 return errno(EINVAL);
@@ -3067,9 +3175,6 @@ fn sys_futex(
             0
         }
         FUTEX_WAKE_BITSET => {
-            if uaddr == 0 {
-                return errno(EINVAL);
-            }
             let bitmask = val3 as u32;
             if bitmask == 0 {
                 return errno(EINVAL);
@@ -3094,9 +3199,6 @@ fn sys_futex(
         }
         FUTEX_LOCK_PI => {
             // Priority-inheritance futex lock
-            if uaddr == 0 {
-                return errno(EINVAL);
-            }
             let current_pid = tasking::scheduler::current_task_id();
             let mut pi_table = FUTEX_PI_TABLE.lock();
             let entry = pi_table.entry(uaddr).or_insert(FutexPiState {
@@ -3130,9 +3232,6 @@ fn sys_futex(
             }
         }
         FUTEX_UNLOCK_PI => {
-            if uaddr == 0 {
-                return errno(EINVAL);
-            }
             let current_pid = tasking::scheduler::current_task_id();
             let mut pi_table = FUTEX_PI_TABLE.lock();
             if let Some(entry) = pi_table.get_mut(&uaddr) {
@@ -3164,9 +3263,6 @@ fn sys_futex(
             }
         }
         FUTEX_TRYLOCK_PI => {
-            if uaddr == 0 {
-                return errno(EINVAL);
-            }
             let current_pid = tasking::scheduler::current_task_id();
             let mut pi_table = FUTEX_PI_TABLE.lock();
             let entry = pi_table.entry(uaddr).or_insert(FutexPiState {
@@ -3260,9 +3356,12 @@ fn sys_timer_create(_clockid: usize, _sevp: usize, timerid_ptr: usize) -> usize 
     TIMER_TABLE.lock().insert(timerid, timer);
 
     if timerid_ptr != 0 {
-        with_user_access(|| unsafe {
-            *(timerid_ptr as *mut usize) = timerid;
-        });
+        if let Err(err) = validate_user_range(timerid_ptr, core::mem::size_of::<usize>()) {
+            return err;
+        }
+        if let Err(err) = write_user(timerid_ptr, timerid) {
+            return err;
+        }
     }
 
     serial_println!("[TIMER] timer_create: timerid={}", timerid);
@@ -3283,19 +3382,34 @@ fn sys_timer_settime(
 
     // Save old value
     if old_value_ptr != 0 {
-        with_user_access(|| unsafe {
-            *(old_value_ptr as *mut u64) = timer.value_ns;
-            *((old_value_ptr + 8) as *mut u64) = timer.interval_ns;
-        });
+        if let Err(err) = validate_user_range(old_value_ptr, 2 * core::mem::size_of::<u64>()) {
+            return err;
+        }
+        if let Err(err) = write_user(old_value_ptr, timer.value_ns) {
+            return err;
+        }
+        if let Err(err) = write_user(
+            old_value_ptr.saturating_add(core::mem::size_of::<u64>()),
+            timer.interval_ns,
+        ) {
+            return err;
+        }
     }
 
     // Set new value
     if new_value_ptr != 0 {
-        let (value, interval) = with_user_access(|| unsafe {
-            let v = *(new_value_ptr as *const u64);
-            let i = *((new_value_ptr + 8) as *const u64);
-            (v, i)
-        });
+        if let Err(err) = validate_user_range(new_value_ptr, 2 * core::mem::size_of::<u64>()) {
+            return err;
+        }
+        let value = match read_user::<u64>(new_value_ptr) {
+            Ok(v) => v,
+            Err(err) => return err,
+        };
+        let interval =
+            match read_user::<u64>(new_value_ptr.saturating_add(core::mem::size_of::<u64>())) {
+                Ok(v) => v,
+                Err(err) => return err,
+            };
         timer.value_ns = value;
         timer.interval_ns = interval;
         timer.armed = value > 0;
@@ -3312,10 +3426,18 @@ fn sys_timer_gettime(timerid: usize, curr_value_ptr: usize) -> usize {
     };
 
     if curr_value_ptr != 0 {
-        with_user_access(|| unsafe {
-            *(curr_value_ptr as *mut u64) = timer.value_ns;
-            *((curr_value_ptr + 8) as *mut u64) = timer.interval_ns;
-        });
+        if let Err(err) = validate_user_range(curr_value_ptr, 2 * core::mem::size_of::<u64>()) {
+            return err;
+        }
+        if let Err(err) = write_user(curr_value_ptr, timer.value_ns) {
+            return err;
+        }
+        if let Err(err) = write_user(
+            curr_value_ptr.saturating_add(core::mem::size_of::<u64>()),
+            timer.interval_ns,
+        ) {
+            return err;
+        }
     }
 
     0
@@ -3374,6 +3496,8 @@ fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: usize) -> usize {
     const EPOLL_CTL_DEL: usize = 2;
     const EPOLL_CTL_MOD: usize = 3;
 
+    let event_size = core::mem::size_of::<EpollEvent>();
+
     let mut table = EPOLL_TABLE.lock();
 
     // epfd → epollid eşlemesi (basitleştirilmiş: epfd == epollid varsayımı)
@@ -3386,7 +3510,13 @@ fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: usize) -> usize {
         EPOLL_CTL_ADD => {
             // Yeni FD ekle
             let ev = if event != 0 {
-                with_user_access(|| unsafe { *(event as *const EpollEvent) })
+                if let Err(err) = validate_user_range(event, event_size) {
+                    return err;
+                }
+                match read_user::<EpollEvent>(event) {
+                    Ok(value) => value,
+                    Err(err) => return err,
+                }
             } else {
                 EpollEvent {
                     events: 0,
@@ -3416,7 +3546,13 @@ fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: usize) -> usize {
         }
         EPOLL_CTL_MOD => {
             let ev = if event != 0 {
-                with_user_access(|| unsafe { *(event as *const EpollEvent) })
+                if let Err(err) = validate_user_range(event, event_size) {
+                    return err;
+                }
+                match read_user::<EpollEvent>(event) {
+                    Ok(value) => value,
+                    Err(err) => return err,
+                }
             } else {
                 return errno(EINVAL);
             };
@@ -3457,6 +3593,10 @@ fn sys_epoll_pwait(
 
     if events_ptr == 0 || maxevents == 0 {
         return errno(EINVAL);
+    }
+    let events_bytes = maxevents.saturating_mul(core::mem::size_of::<EpollEvent>());
+    if let Err(err) = validate_user_range(events_ptr, events_bytes) {
+        return err;
     }
 
     let timeout_ms = timeout as i64; // -1 = infinite, 0 = non-blocking
@@ -3571,10 +3711,10 @@ fn sys_pause() -> usize {
 
 /// nanosleep syscall (scheduler tick tabanlı)
 fn sys_nanosleep(req_ptr: usize, _rem_ptr: usize) -> usize {
-    if req_ptr == 0 {
-        return errno(EINVAL);
-    }
-    let req = with_user_access(|| unsafe { *(req_ptr as *const Timespec) });
+    let req = match read_user::<Timespec>(req_ptr) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
     if req.tv_sec < 0 || req.tv_nsec < 0 {
         return errno(EINVAL);
     }
@@ -3641,12 +3781,21 @@ fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> usize {
             0
         }
         PTRACE_PEEKTEXT | PTRACE_PEEKDATA => {
-            let mut val: usize = 0;
-            let _ = with_user_access(|| unsafe { val = *(addr as *const usize) });
-            val
+            if let Err(err) = validate_user_range(addr, core::mem::size_of::<usize>()) {
+                return err;
+            }
+            match read_user::<usize>(addr) {
+                Ok(value) => value,
+                Err(err) => err,
+            }
         }
         PTRACE_POKETEXT | PTRACE_POKEDATA => {
-            let _ = with_user_access(|| unsafe { *(addr as *mut usize) = data });
+            if let Err(err) = validate_user_range(addr, core::mem::size_of::<usize>()) {
+                return err;
+            }
+            if let Err(err) = write_user(addr, data) {
+                return err;
+            }
             0
         }
         PTRACE_CONT => {
@@ -3663,6 +3812,7 @@ fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> usize {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct UtsName {
     sysname: [u8; 65],
     nodename: [u8; 65],
@@ -3673,8 +3823,8 @@ struct UtsName {
 }
 
 fn sys_uname(uts_ptr: usize) -> usize {
-    if uts_ptr == 0 {
-        return errno(EFAULT);
+    if let Err(err) = validate_user_range(uts_ptr, core::mem::size_of::<UtsName>()) {
+        return err;
     }
     let mut uts = UtsName {
         sysname: [0; 65],
@@ -3690,7 +3840,9 @@ fn sys_uname(uts_ptr: usize) -> usize {
     fill_cstring(&mut uts.version, "echos");
     fill_cstring(&mut uts.machine, "x86_64");
     fill_cstring(&mut uts.domainname, "local");
-    with_user_access(|| unsafe { *(uts_ptr as *mut UtsName) = uts });
+    if let Err(err) = write_user(uts_ptr, uts) {
+        return err;
+    }
     0
 }
 
@@ -3721,8 +3873,8 @@ fn sys_getppid() -> usize {
 
 /// clock_gettime syscall (tick tabanlı)
 fn sys_clock_gettime(clock_id: usize, tp_ptr: usize) -> usize {
-    if tp_ptr == 0 {
-        return errno(EINVAL);
+    if let Err(err) = validate_user_range(tp_ptr, core::mem::size_of::<Timespec>()) {
+        return err;
     }
     if clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC {
         return errno(EINVAL);
@@ -3733,7 +3885,9 @@ fn sys_clock_gettime(clock_id: usize, tp_ptr: usize) -> usize {
         tv_sec: (ns / 1_000_000_000) as i64,
         tv_nsec: (ns % 1_000_000_000) as i64,
     };
-    with_user_access(|| unsafe { *(tp_ptr as *mut Timespec) = ts });
+    if let Err(err) = write_user(tp_ptr, ts) {
+        return err;
+    }
     0
 }
 
@@ -3744,13 +3898,15 @@ fn sys_getrandom(buf: usize, len: usize, flags: usize) -> usize {
     if flags & !(GRND_NONBLOCK | GRND_RANDOM | GRND_DETERMINISTIC) != 0 {
         return errno(EINVAL);
     }
-    if buf == 0 || !kernel_memory::is_user_range(buf as u64, len as u64) {
-        return errno(EFAULT);
+    if let Err(err) = validate_user_range(buf, len) {
+        return err;
     }
     if flags & GRND_DETERMINISTIC != 0 {
-        let out =
-            with_user_access(|| unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) });
-        random::fill_bytes_deterministic(out);
+        let mut out = vec![0u8; len];
+        random::fill_bytes_deterministic(&mut out);
+        if let Err(err) = write_user_bytes(buf, &out) {
+            return err;
+        }
         return len;
     }
     let ticks = tasking::scheduler::get_ticks() as u64;
@@ -3760,8 +3916,11 @@ fn sys_getrandom(buf: usize, len: usize, flags: usize) -> usize {
         mix ^= mix.rotate_left(29);
     }
     random::add_entropy(mix);
-    let out = with_user_access(|| unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) });
-    random::fill_bytes(out);
+    let mut out = vec![0u8; len];
+    random::fill_bytes(&mut out);
+    if let Err(err) = write_user_bytes(buf, &out) {
+        return err;
+    }
     len
 }
 
@@ -4022,9 +4181,15 @@ fn sys_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> usize {
     if addr_ptr == 0 || addr_len < 2 {
         return errno(EINVAL);
     }
+    if let Err(err) = validate_user_range(addr_ptr, addr_len) {
+        return err;
+    }
 
     // Read sockaddr_in structure
-    let sa_family = with_user_access(|| unsafe { *(addr_ptr as *const u16) });
+    let sa_family = match read_user::<u16>(addr_ptr) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
 
     if sa_family as usize != sock.domain {
         return errno(EAFNOSUPPORT);
@@ -4032,10 +4197,10 @@ fn sys_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> usize {
 
     // For AF_INET, read port (in network byte order)
     if sock.domain == AF_INET && addr_len >= 4 {
-        let port = with_user_access(|| unsafe {
-            let ptr = (addr_ptr + 2) as *const u16;
-            u16::from_be(*ptr)
-        });
+        let port = match read_user::<u16>(addr_ptr + 2) {
+            Ok(value) => u16::from_be(value),
+            Err(err) => return err,
+        };
         sock.local_port = port;
         serial_println!("[SOCKET] Bind fd={} to port {}", fd, port);
     }
@@ -4112,6 +4277,9 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
 
     // Fill in peer address if requested
     if addr_ptr != 0 {
+        if let Err(err) = validate_user_range(addr_ptr, 16) {
+            return err;
+        }
         with_user_access(|| unsafe {
             // sa_family
             *(addr_ptr as *mut u16) = AF_INET as u16;
@@ -4122,6 +4290,9 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
         });
     }
     if addr_len_ptr != 0 {
+        if let Err(err) = validate_user_range(addr_len_ptr, core::mem::size_of::<u32>()) {
+            return err;
+        }
         with_user_access(|| unsafe {
             *(addr_len_ptr as *mut u32) = 16; // sizeof(sockaddr_in)
         });
@@ -4144,16 +4315,19 @@ fn sys_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> usize {
     if addr_ptr == 0 || addr_len < 8 {
         return errno(EINVAL);
     }
+    if let Err(err) = validate_user_range(addr_ptr, addr_len) {
+        return err;
+    }
 
     // Read peer address
-    let (port, addr) = with_user_access(|| unsafe {
-        let port = u16::from_be(*((addr_ptr + 2) as *const u16));
-        let a0 = *((addr_ptr + 4) as *const u8);
-        let a1 = *((addr_ptr + 5) as *const u8);
-        let a2 = *((addr_ptr + 6) as *const u8);
-        let a3 = *((addr_ptr + 7) as *const u8);
-        (port, [a0, a1, a2, a3])
-    });
+    let port = match read_user::<u16>(addr_ptr + 2) {
+        Ok(value) => u16::from_be(value),
+        Err(err) => return err,
+    };
+    let mut addr = [0u8; 4];
+    if let Err(err) = copy_from_user(&mut addr, addr_ptr + 4) {
+        return err;
+    }
 
     sock.remote_port = port;
     sock.remote_addr = addr;
@@ -4184,15 +4358,19 @@ fn sys_sendto(
         return errno(EBADF);
     };
 
+    if let Err(err) = validate_user_range(buf, len) {
+        return err;
+    }
+
     // For connected sockets, use stored remote address
     // For unconnected, use provided address
     let _ = (sock, addr_ptr, addr_len, flags);
 
     // Read buffer and send via network stack
     let mut data = vec![0u8; len];
-    with_user_access(|| unsafe {
-        core::ptr::copy_nonoverlapping(buf as *const u8, data.as_mut_ptr(), len);
-    });
+    if let Err(err) = copy_from_user(&mut data, buf) {
+        return err;
+    }
 
     serial_println!("[SOCKET] Send fd={} len={} bytes", fd, len);
     len
@@ -4200,8 +4378,8 @@ fn sys_sendto(
 
 fn sys_recvfrom(
     fd: usize,
-    buf: usize,
-    len: usize,
+    _buf: usize,
+    _len: usize,
     flags: usize,
     addr_ptr: usize,
     addr_len_ptr: usize,
@@ -4214,7 +4392,7 @@ fn sys_recvfrom(
     let _ = (sock, flags, addr_ptr, addr_len_ptr);
 
     // Would receive from network stack
-    serial_println!("[SOCKET] Recv fd={} len={}", fd, len);
+    serial_println!("[SOCKET] Recv fd={} len={}", fd, _len);
     0
 }
 
@@ -4255,6 +4433,9 @@ fn sys_getsockname(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
     };
 
     if addr_ptr != 0 {
+        if let Err(err) = validate_user_range(addr_ptr, 16) {
+            return err;
+        }
         with_user_access(|| unsafe {
             *(addr_ptr as *mut u16) = sock.domain as u16;
             *((addr_ptr + 2) as *mut u16) = sock.local_port.to_be();
@@ -4265,6 +4446,9 @@ fn sys_getsockname(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
         });
     }
     if addr_len_ptr != 0 {
+        if let Err(err) = validate_user_range(addr_len_ptr, core::mem::size_of::<u32>()) {
+            return err;
+        }
         with_user_access(|| unsafe {
             *(addr_len_ptr as *mut u32) = 16;
         });
@@ -4283,6 +4467,9 @@ fn sys_getpeername(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
     }
 
     if addr_ptr != 0 {
+        if let Err(err) = validate_user_range(addr_ptr, 16) {
+            return err;
+        }
         with_user_access(|| unsafe {
             *(addr_ptr as *mut u16) = sock.domain as u16;
             *((addr_ptr + 2) as *mut u16) = sock.remote_port.to_be();
@@ -4293,6 +4480,9 @@ fn sys_getpeername(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
         });
     }
     if addr_len_ptr != 0 {
+        if let Err(err) = validate_user_range(addr_len_ptr, core::mem::size_of::<u32>()) {
+            return err;
+        }
         with_user_access(|| unsafe {
             *(addr_len_ptr as *mut u32) = 16;
         });
@@ -4418,11 +4608,10 @@ fn get_fd(fd: usize) -> Option<FdKind> {
 
 /// User pointer'dan null-terminated string okur
 fn read_user_cstring(ptr: usize, max: usize) -> Result<String, usize> {
-    if ptr == 0 {
-        return Err(errno(EFAULT));
-    }
+    validate_user_ptr(ptr)?;
     let mut out = String::new();
     for i in 0..max {
+        validate_user_ptr(ptr.saturating_add(i))?;
         let b = with_user_access(|| unsafe { *(ptr as *const u8).add(i) });
         if b == 0 {
             return Ok(out);
@@ -4430,6 +4619,148 @@ fn read_user_cstring(ptr: usize, max: usize) -> Result<String, usize> {
         out.push(b as char);
     }
     Err(errno(EINVAL))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mmap_requires_nonzero_addr_for_fixed_modes() {
+        let ret_fixed = sys_mmap(
+            0,
+            4096,
+            0,
+            MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+            usize::MAX,
+            0,
+        );
+        assert_eq!(ret_fixed, errno(EINVAL));
+
+        let ret_noreplace = sys_mmap(
+            0,
+            4096,
+            0,
+            MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE,
+            usize::MAX,
+            0,
+        );
+        assert_eq!(ret_noreplace, errno(EINVAL));
+    }
+
+    #[test]
+    fn mmap_fixed_noreplace_rejects_existing_mapping() {
+        let first = sys_mmap(0, 4096, 0, MAP_PRIVATE | MAP_ANON, usize::MAX, 0);
+        assert!(posix_errno(first).is_none());
+
+        let overlap = sys_mmap(
+            first,
+            4096,
+            0,
+            MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE,
+            usize::MAX,
+            0,
+        );
+        assert_eq!(overlap, errno(EEXIST));
+    }
+
+    #[test]
+    fn mmap_fixed_rejects_stack_guard_region() {
+        let (_, stack_top) = kernel_memory::user_stack_bounds();
+        let ret = sys_mmap(
+            stack_top as usize,
+            4096,
+            0,
+            MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+            usize::MAX,
+            0,
+        );
+        assert_eq!(ret, errno(EPERM));
+    }
+
+    #[test]
+    fn getrandom_rejects_null_user_buffer() {
+        let ret = sys_getrandom(0, 32, 0);
+        assert_eq!(ret, errno(EFAULT));
+    }
+
+    #[test]
+    fn readv_rejects_invalid_iov_pointer() {
+        let ret = sys_readv(0, 0, 1);
+        assert_eq!(ret, errno(EFAULT));
+    }
+
+    #[test]
+    fn msgsnd_rejects_invalid_message_pointer() {
+        let qid = sys_msgget(IPC_PRIVATE, IPC_CREAT | 0o600);
+        assert!(posix_errno(qid).is_none());
+        let ret = sys_msgsnd(qid, 0, 8, 0);
+        assert_eq!(ret, errno(EFAULT));
+        assert_eq!(sys_msgctl(qid, IPC_RMID, 0), 0);
+    }
+}
+
+fn validate_user_ptr(ptr: usize) -> Result<(), usize> {
+    if ptr == 0 {
+        return Err(errno(EFAULT));
+    }
+    if !kernel_memory::is_user_range(ptr as u64, 1) {
+        return Err(errno(EFAULT));
+    }
+    Ok(())
+}
+
+fn validate_user_range(ptr: usize, len: usize) -> Result<(), usize> {
+    if len == 0 {
+        return Ok(());
+    }
+    if ptr == 0 {
+        return Err(errno(EFAULT));
+    }
+    if !kernel_memory::is_user_range(ptr as u64, len as u64) {
+        return Err(errno(EFAULT));
+    }
+    Ok(())
+}
+
+fn copy_from_user(dst: &mut [u8], src_ptr: usize) -> Result<(), usize> {
+    validate_user_range(src_ptr, dst.len())?;
+    with_user_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(src_ptr as *const u8, dst.as_mut_ptr(), dst.len());
+    });
+    Ok(())
+}
+
+fn copy_from_user_slice<T: Copy>(dst: &mut [T], src_ptr: usize) -> Result<(), usize> {
+    let bytes = dst.len().saturating_mul(core::mem::size_of::<T>());
+    validate_user_range(src_ptr, bytes)?;
+    with_user_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(src_ptr as *const T, dst.as_mut_ptr(), dst.len());
+    });
+    Ok(())
+}
+
+fn write_user_bytes(dst_ptr: usize, src: &[u8]) -> Result<(), usize> {
+    validate_user_range(dst_ptr, src.len())?;
+    with_user_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr as *mut u8, src.len());
+    });
+    Ok(())
+}
+
+fn read_user<T: Copy>(ptr: usize) -> Result<T, usize> {
+    validate_user_range(ptr, core::mem::size_of::<T>())?;
+    Ok(with_user_access(|| unsafe {
+        core::ptr::read(ptr as *const T)
+    }))
+}
+
+fn write_user<T: Copy>(ptr: usize, value: T) -> Result<(), usize> {
+    validate_user_range(ptr, core::mem::size_of::<T>())?;
+    with_user_access(|| unsafe {
+        core::ptr::write(ptr as *mut T, value);
+    });
+    Ok(())
 }
 
 fn decode_inline_text(bytes: &[u8; MAX_INLINE_TEXT], len: u16) -> Result<String, usize> {

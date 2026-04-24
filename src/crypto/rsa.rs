@@ -40,10 +40,100 @@
 //! 6. Return (h == h')
 //! ```
 
-use crate::crypto::{rdrand_bytes, Sha3};
+use crate::crypto::rdrand_bytes;
 use alloc::vec;
 use alloc::vec::Vec;
+use rsa::rand_core::{CryptoRng, Error as RandError, RngCore};
+use rsa::{
+    BigUint as ExternalBigUint, Pkcs1v15Sign, RsaPrivateKey as ExternalRsaPrivateKey,
+    RsaPublicKey as ExternalRsaPublicKey,
+};
 use sha1::{Digest as Sha1Digest, Sha1};
+use sha2::{Sha256, Sha512};
+
+const RSA_SHA1_DIGESTINFO_PREFIX: &[u8] = &[
+    0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14,
+];
+const RSA_SHA256_DIGESTINFO_PREFIX: &[u8] = &[
+    0x30, 0x31, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+    0x00, 0x04, 0x20,
+];
+const RSA_SHA512_DIGESTINFO_PREFIX: &[u8] = &[
+    0x30, 0x51, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05,
+    0x00, 0x04, 0x40,
+];
+
+struct RdrandCryptoRng;
+
+impl RngCore for RdrandCryptoRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        rdrand_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        rdrand_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        rdrand_bytes(dest);
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RandError> {
+        rdrand_bytes(dest);
+        Ok(())
+    }
+}
+
+impl CryptoRng for RdrandCryptoRng {}
+
+fn rsa_pkcs1v15_hash_and_padding(
+    message: &[u8],
+    hash_type: &str,
+) -> Option<(Vec<u8>, Pkcs1v15Sign)> {
+    match hash_type {
+        "sha1" => {
+            let mut hasher = Sha1::new();
+            hasher.update(message);
+            let hash = hasher.finalize().to_vec();
+            Some((
+                hash,
+                Pkcs1v15Sign {
+                    hash_len: Some(20),
+                    prefix: RSA_SHA1_DIGESTINFO_PREFIX.to_vec().into_boxed_slice(),
+                },
+            ))
+        }
+        "sha256" => {
+            let mut hasher = Sha256::new();
+            hasher.update(message);
+            let hash = hasher.finalize().to_vec();
+            Some((
+                hash,
+                Pkcs1v15Sign {
+                    hash_len: Some(32),
+                    prefix: RSA_SHA256_DIGESTINFO_PREFIX.to_vec().into_boxed_slice(),
+                },
+            ))
+        }
+        "sha512" => {
+            let mut hasher = Sha512::new();
+            hasher.update(message);
+            let hash = hasher.finalize().to_vec();
+            Some((
+                hash,
+                Pkcs1v15Sign {
+                    hash_len: Some(64),
+                    prefix: RSA_SHA512_DIGESTINFO_PREFIX.to_vec().into_boxed_slice(),
+                },
+            ))
+        }
+        _ => None,
+    }
+}
 
 // ============================================================================
 // Big Integer Arithmetic (2048-bit support)
@@ -64,6 +154,10 @@ impl BigInt {
 
     /// Create from bytes (big-endian)
     fn from_be_bytes(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            return BigInt::from_u64(0);
+        }
+
         let num_limbs = (bytes.len() + 7) / 8;
         let mut limbs = Vec::with_capacity(num_limbs);
         limbs.resize(num_limbs, 0);
@@ -84,6 +178,10 @@ impl BigInt {
 
     /// Convert to bytes (big-endian)
     fn to_be_bytes(&self) -> Vec<u8> {
+        if self.limbs.is_empty() {
+            return vec![0];
+        }
+
         let mut bytes = Vec::with_capacity(self.limbs.len() * 8);
 
         for limb in self.limbs.iter().rev() {
@@ -92,12 +190,12 @@ impl BigInt {
             }
         }
 
-        // Remove leading zeros
-        while bytes.len() > 1 && bytes[0] == 0 {
-            bytes.remove(0);
-        }
+        let first_non_zero = bytes
+            .iter()
+            .position(|&byte| byte != 0)
+            .unwrap_or(bytes.len().saturating_sub(1));
 
-        bytes
+        bytes[first_non_zero..].to_vec()
     }
 
     /// Addition
@@ -237,6 +335,9 @@ impl BigInt {
 
     /// Modular exponentiation: base^exp mod modulus
     /// Using square-and-multiply algorithm
+    ///
+    /// Legacy private-op lane only; production sign path uses RustCrypto.
+    #[cfg(feature = "rsa_legacy_private_ops")]
     fn mod_pow(&self, exp: &BigInt, modulus: &BigInt) -> BigInt {
         let mut result = BigInt::from_u64(1);
         let mut base = self.clone();
@@ -266,29 +367,15 @@ impl BigInt {
 
     /// Modular reduction: self mod modulus
     fn mod_reduce(&self, modulus: &BigInt) -> BigInt {
-        if self.limbs.len() < modulus.limbs.len() {
-            return self.clone();
+        if modulus.is_zero() {
+            return BigInt::from_u64(0);
         }
 
-        let mut remainder = self.clone();
+        let value = ExternalBigUint::from_bytes_be(&self.to_be_bytes());
+        let modulus_value = ExternalBigUint::from_bytes_be(&modulus.to_be_bytes());
+        let remainder = value % modulus_value;
 
-        // Align modulus with most significant part of remainder
-        let shift = (remainder.limbs.len() - modulus.limbs.len()) * 64;
-
-        for i in (0..=shift).rev() {
-            let mut shifted_mod = modulus.clone();
-            // Shift left by i bits (simplified, should be by words)
-            for _ in 0..i / 64 {
-                shifted_mod.limbs.insert(0, 0);
-            }
-
-            // Subtract while possible
-            while remainder.ge(&shifted_mod) {
-                remainder = remainder.sub(&shifted_mod);
-            }
-        }
-
-        remainder
+        BigInt::from_be_bytes(&remainder.to_bytes_be())
     }
 
     /// Right shift by n bits
@@ -333,86 +420,60 @@ impl BigInt {
 
     /// Extended Euclidean Algorithm for modular inverse
     fn mod_inverse(&self, modulus: &BigInt) -> Option<BigInt> {
-        if self.is_zero() {
+        if self.is_zero() || modulus.is_zero() {
             return None;
         }
 
         let mut t = BigInt::from_u64(0);
         let mut newt = BigInt::from_u64(1);
         let mut r = modulus.clone();
-        let mut newr = self.clone();
+        let mut newr = self.mod_reduce(modulus);
 
-        while !newr.is_zero() {
-            let quotient = r.div(&newr);
-
-            let tmp_t = t.clone();
-            let tmp_newt = newt.clone();
-            t = newt;
-            let q_times_newt = quotient.mul(&tmp_newt);
-            newt = if tmp_t.ge(&q_times_newt) {
-                tmp_t.sub(&q_times_newt)
-            } else {
-                // Handle negative result (simplified)
-                BigInt::from_u64(0)
-            };
-
-            let tmp_r = r.clone();
-            let tmp_newr = newr.clone();
-            r = newr;
-            let q_times_newr = quotient.mul(&tmp_newr);
-            newr = if tmp_r.ge(&q_times_newr) {
-                tmp_r.sub(&q_times_newr)
-            } else {
-                BigInt::from_u64(0)
-            };
+        if newr.is_zero() {
+            return None;
         }
 
-        if r.limbs.len() > 1 || r.limbs[0] > 1 {
+        while !newr.is_zero() {
+            let quotient = r.div(&newr)?;
+
+            let q_times_newt = quotient.mul(&newt).mod_reduce(modulus);
+            let next_t = if t.ge(&q_times_newt) {
+                t.sub(&q_times_newt)
+            } else {
+                t.add(modulus).sub(&q_times_newt)
+            }
+            .mod_reduce(modulus);
+
+            let q_times_newr = quotient.mul(&newr);
+            if q_times_newr.gt(&r) {
+                return None;
+            }
+            let next_r = r.sub(&q_times_newr);
+
+            t = newt;
+            newt = next_t;
+            r = newr;
+            newr = next_r;
+        }
+
+        if !r.is_one() {
             return None; // No inverse exists
         }
 
-        if t.limbs.len() > 1 || (t.limbs.len() == 1 && t.limbs[0] & 0x8000000000000000 != 0) {
-            Some(t.add(modulus))
-        } else {
-            Some(t)
-        }
+        Some(t.mod_reduce(modulus))
     }
 
     /// Division
-    fn div(&self, divisor: &BigInt) -> BigInt {
+    fn div(&self, divisor: &BigInt) -> Option<BigInt> {
         if divisor.is_zero() {
-            return BigInt::from_u64(0);
+            return None;
         }
 
-        let mut quotient = BigInt::from_u64(0);
-        let mut remainder = self.clone();
+        let dividend = ExternalBigUint::from_bytes_be(&self.to_be_bytes());
+        let divisor_value = ExternalBigUint::from_bytes_be(&divisor.to_be_bytes());
+        let quotient = dividend / divisor_value;
 
-        // Normalize divisor
-        let mut normalized_divisor = divisor.clone();
-        let mut shift_count = 0;
-
-        while normalized_divisor.limbs.len() < remainder.limbs.len()
-            || (normalized_divisor.limbs.len() == remainder.limbs.len()
-                && !remainder.ge(&normalized_divisor))
-        {
-            normalized_divisor = normalized_divisor.shl(1);
-            shift_count += 1;
-        }
-
-        // Long division
-        for i in (0..=shift_count).rev() {
-            let mut shifted_divisor = divisor.clone();
-            for _ in 0..i {
-                shifted_divisor = shifted_divisor.shl(1);
-            }
-
-            if remainder.ge(&shifted_divisor) {
-                remainder = remainder.sub(&shifted_divisor);
-                quotient = quotient.add(&BigInt::from_u64(1 << i));
-            }
-        }
-
-        quotient
+        Some(BigInt::from_be_bytes(&quotient.to_bytes_be()))
     }
 
     /// Left shift
@@ -468,6 +529,12 @@ impl RsaPublicKey {
         self.e.to_be_bytes()
     }
 
+    fn to_external_key(&self) -> Option<ExternalRsaPublicKey> {
+        let n = ExternalBigUint::from_bytes_be(&self.n.to_be_bytes());
+        let e = ExternalBigUint::from_bytes_be(&self.e.to_be_bytes());
+        ExternalRsaPublicKey::new(n, e).ok()
+    }
+
     /// Verify RSA-PKCS#1 v1.5 signature
     ///
     /// Parameters:
@@ -477,69 +544,13 @@ impl RsaPublicKey {
     /// Returns:
     ///   - true if signature is valid
     pub fn verify(&self, message: &[u8], signature: &[u8], hash_type: &str) -> bool {
-        // Convert signature to integer
-        let sig_int = BigInt::from_be_bytes(signature);
-
-        // Verify signature is in valid range [0, n-1]
-        if sig_int.ge(&self.n) {
+        let Some(pub_key) = self.to_external_key() else {
             return false;
-        }
-
-        // RSA operation: m = s^e mod n
-        let m_int = sig_int.mod_pow(&self.e, &self.n);
-
-        // Convert to bytes
-        let mut m_bytes = m_int.to_be_bytes();
-
-        // Pad to modulus size
-        let key_size = (self.n.limbs.len() * 8);
-        while m_bytes.len() < key_size {
-            m_bytes.insert(0, 0);
-        }
-
-        // Verify PKCS#1 v1.5 padding
-        if m_bytes.len() < 11 || m_bytes[0] != 0x00 || m_bytes[1] != 0x01 {
-            return false;
-        }
-
-        // Find 0x00 separator after padding bytes
-        let mut separator_idx = 2;
-        while separator_idx < m_bytes.len() && m_bytes[separator_idx] == 0xFF {
-            separator_idx += 1;
-        }
-
-        if separator_idx >= m_bytes.len() || m_bytes[separator_idx] != 0x00 {
-            return false;
-        }
-
-        // Extract DigestInfo
-        let digest_info = &m_bytes[separator_idx + 1..];
-
-        // Hash the message
-        let hash = match hash_type {
-            "sha1" => {
-                let mut hasher = Sha1::new();
-                hasher.update(message);
-                hasher.finalize().to_vec()
-            }
-            "sha256" => {
-                let mut hasher = Sha3::sha3_256();
-                hasher.update(message);
-                hasher.finalize()
-            }
-            "sha512" => {
-                let mut hasher = Sha3::sha3_512();
-                hasher.update(message);
-                hasher.finalize()
-            }
-            _ => return false,
         };
-
-        // Build expected DigestInfo (simplified ASN.1 DER)
-        let expected_digest_info = self.build_digest_info(&hash, hash_type);
-
-        // Compare
-        digest_info == expected_digest_info
+        let Some((hash, padding)) = rsa_pkcs1v15_hash_and_padding(message, hash_type) else {
+            return false;
+        };
+        pub_key.verify(padding, &hash, signature).is_ok()
     }
 
     /// Build DigestInfo structure (ASN.1 DER encoding)
@@ -613,6 +624,7 @@ impl RsaPrivateKey {
     ///
     /// Parameters:
     ///   - key_size: Key size in bits (2048 recommended)
+    #[cfg(feature = "rsa_legacy_private_ops")]
     pub fn generate(key_size: usize) -> Self {
         // Generate two large primes using Miller-Rabin primality test
         let p = Self::generate_prime(key_size / 2);
@@ -646,6 +658,7 @@ impl RsaPrivateKey {
     }
 
     /// Generate a probable prime using Miller-Rabin test
+    #[cfg(feature = "rsa_legacy_private_ops")]
     fn generate_prime(bits: usize) -> BigInt {
         loop {
             // Generate random odd number with specified bit length
@@ -677,6 +690,7 @@ impl RsaPrivateKey {
     ///
     /// Returns true if n is probably prime, false if composite
     /// k: number of rounds (higher = more accurate)
+    #[cfg(feature = "rsa_legacy_private_ops")]
     fn miller_rabin_test(n: &BigInt, k: usize) -> bool {
         // Handle small numbers
         if n.limbs.len() == 1 {
@@ -735,6 +749,7 @@ impl RsaPrivateKey {
     }
 
     /// Generate random number in range [min, max)
+    #[cfg(feature = "rsa_legacy_private_ops")]
     fn random_range(min: &BigInt, max: &BigInt) -> BigInt {
         let range = max.sub(min);
         let mut bytes = vec![0u8; range.limbs.len() * 8];
@@ -752,6 +767,15 @@ impl RsaPrivateKey {
         }
     }
 
+    fn to_external_key(&self) -> Option<ExternalRsaPrivateKey> {
+        let n = ExternalBigUint::from_bytes_be(&self.n.to_be_bytes());
+        let e = ExternalBigUint::from_bytes_be(&self.e.to_be_bytes());
+        let d = ExternalBigUint::from_bytes_be(&self.d.to_be_bytes());
+        let p = ExternalBigUint::from_bytes_be(&self.p.to_be_bytes());
+        let q = ExternalBigUint::from_bytes_be(&self.q.to_be_bytes());
+        ExternalRsaPrivateKey::from_components(n, e, d, vec![p, q]).ok()
+    }
+
     /// Sign a message using RSA-PKCS#1 v1.5
     ///
     /// Parameters:
@@ -760,56 +784,22 @@ impl RsaPrivateKey {
     /// Returns:
     ///   - Signature bytes
     pub fn sign(&self, message: &[u8], hash_type: &str) -> Vec<u8> {
-        // Hash the message
-        let hash = match hash_type {
-            "sha1" => {
-                let mut hasher = Sha1::new();
-                hasher.update(message);
-                hasher.finalize().to_vec()
-            }
-            "sha256" => {
-                let mut hasher = Sha3::sha3_256();
-                hasher.update(message);
-                hasher.finalize()
-            }
-            "sha512" => {
-                let mut hasher = Sha3::sha3_512();
-                hasher.update(message);
-                hasher.finalize()
-            }
-            _ => panic!("Unsupported hash type"),
+        let Some((hash, padding)) = rsa_pkcs1v15_hash_and_padding(message, hash_type) else {
+            return Vec::new();
         };
-
-        // Build DigestInfo
-        let digest_info = self.public_key().build_digest_info(&hash, hash_type);
-
-        // Build padded message
-        let key_size = self.n.limbs.len() * 8;
-        let mut padded = Vec::with_capacity(key_size);
-        padded.push(0x00);
-        padded.push(0x01);
-
-        // Padding bytes (0xFF)
-        let padding_len = key_size - digest_info.len() - 3;
-        for _ in 0..padding_len {
-            padded.push(0xFF);
-        }
-
-        padded.push(0x00);
-        padded.extend_from_slice(&digest_info);
-
-        // Convert to integer
-        let m_int = BigInt::from_be_bytes(&padded);
-
-        // RSA operation: s = m^d mod n
-        // Using CRT for efficiency
-        let s = self.rsa_crt_private_op(&m_int);
-
-        // Convert to bytes
-        s.to_be_bytes()
+        let Some(private_key) = self.to_external_key() else {
+            return Vec::new();
+        };
+        let mut rng = RdrandCryptoRng;
+        private_key
+            .sign_with_rng(&mut rng, padding, &hash)
+            .unwrap_or_else(|_| Vec::new())
     }
 
-    /// RSA private operation using Chinese Remainder Theorem
+    /// RSA private operation using Chinese Remainder Theorem.
+    ///
+    /// Legacy private-op lane only; production sign path uses RustCrypto.
+    #[cfg(feature = "rsa_legacy_private_ops")]
     fn rsa_crt_private_op(&self, m: &BigInt) -> BigInt {
         // m1 = m^dp mod p
         let m1 = m.mod_pow(&self.dp, &self.p);
@@ -830,5 +820,220 @@ impl RsaPrivateKey {
 
         // s = m2 + h * q
         m2.add(&h_mod_p.mul(&self.q))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+
+    struct TestCryptoRng {
+        state: u64,
+    }
+
+    impl TestCryptoRng {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+
+        fn next_word(&mut self) -> u64 {
+            let mut x = self.state;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.state = x;
+            x
+        }
+    }
+
+    impl RngCore for TestCryptoRng {
+        fn next_u32(&mut self) -> u32 {
+            self.next_word() as u32
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.next_word()
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            let mut offset = 0;
+            while offset < dest.len() {
+                let word = self.next_word().to_le_bytes();
+                let chunk = core::cmp::min(8, dest.len() - offset);
+                dest[offset..offset + chunk].copy_from_slice(&word[..chunk]);
+                offset += chunk;
+            }
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RandError> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for TestCryptoRng {}
+
+    fn left_pad_to_len(mut bytes: Vec<u8>, target_len: usize) -> Vec<u8> {
+        if bytes.len() >= target_len {
+            return bytes;
+        }
+
+        let mut padded = vec![0u8; target_len - bytes.len()];
+        padded.append(&mut bytes);
+        padded
+    }
+
+    #[test]
+    fn sha256_mapping_uses_sha2_digest_not_sha3() {
+        let message = b"echos-rsa-sha2-mapping";
+        let (hash, padding) =
+            rsa_pkcs1v15_hash_and_padding(message, "sha256").expect("sha256 mapping available");
+
+        let mut sha256 = Sha256::new();
+        sha256.update(message);
+        let sha2_hash = sha256.finalize();
+
+        assert_eq!(hash, sha2_hash.to_vec());
+        assert_ne!(hash.as_slice(), &crate::crypto::sha3_256(message));
+        assert_eq!(padding.prefix.as_ref(), RSA_SHA256_DIGESTINFO_PREFIX);
+    }
+
+    #[test]
+    fn verify_rejects_pkcs1v15_digestinfo_with_trailing_garbage() {
+        let mut rng = TestCryptoRng::new(0x9e37_79b9_7f4a_7c15);
+        let private =
+            ExternalRsaPrivateKey::new(&mut rng, 1024).expect("deterministic RSA key generation");
+
+        let message = b"pkcs1v15 trailing garbage must be rejected";
+        let mut sha256 = Sha256::new();
+        sha256.update(message);
+        let digest = sha256.finalize();
+
+        let mut digest_info = Vec::from(RSA_SHA256_DIGESTINFO_PREFIX);
+        digest_info.extend_from_slice(&digest);
+
+        let modulus_len = private.n().to_bytes_be().len();
+        let garbage_len = 8;
+        let ff_len = modulus_len
+            .checked_sub(digest_info.len() + garbage_len + 3)
+            .expect("modulus length supports PKCS#1 v1.5 block");
+        assert!(ff_len >= 8);
+
+        let mut encoded_message = Vec::with_capacity(modulus_len);
+        encoded_message.push(0x00);
+        encoded_message.push(0x01);
+        encoded_message.extend(core::iter::repeat_n(0xff, ff_len));
+        encoded_message.push(0x00);
+        encoded_message.extend_from_slice(&digest_info);
+        encoded_message.extend(core::iter::repeat_n(0x42, garbage_len));
+
+        let encoded_int = ExternalBigUint::from_bytes_be(&encoded_message);
+        let forged_signature = encoded_int.modpow(private.d(), private.n());
+        let signature = left_pad_to_len(forged_signature.to_bytes_be(), modulus_len);
+
+        let public = RsaPublicKey::new(&private.n().to_bytes_be(), &private.e().to_bytes_be());
+        assert!(!public.verify(message, &signature, "sha256"));
+    }
+
+    #[test]
+    fn bigint_division_by_zero_returns_none() {
+        let dividend = BigInt::from_u64(1234);
+        let divisor = BigInt::from_u64(0);
+
+        assert!(dividend.div(&divisor).is_none());
+    }
+
+    #[test]
+    fn mod_inverse_handles_negative_intermediate_coefficients() {
+        let value = BigInt::from_u64(17);
+        let modulus = BigInt::from_u64(3120);
+
+        let inverse = value
+            .mod_inverse(&modulus)
+            .expect("17 must be invertible modulo 3120");
+        assert_eq!(inverse, BigInt::from_u64(2753));
+
+        let one = value.mul(&inverse).mod_reduce(&modulus);
+        assert_eq!(one, BigInt::from_u64(1));
+    }
+
+    #[test]
+    fn mod_inverse_returns_none_for_non_coprime_values() {
+        let value = BigInt::from_u64(12);
+        let modulus = BigInt::from_u64(18);
+
+        assert!(value.mod_inverse(&modulus).is_none());
+    }
+
+    #[test]
+    fn bigint_mod_reduce_matches_biguint_remainder() {
+        let value = BigInt::from_be_bytes(&[
+            0x8f, 0x72, 0x14, 0x9d, 0xe1, 0x6a, 0x3c, 0xb8, 0x55, 0x20, 0x93, 0xfe, 0x44, 0x7a,
+            0x61, 0xd0, 0xab, 0x31, 0x19, 0x4e, 0x76, 0xcf, 0x80, 0x12, 0x33, 0x98, 0xee, 0x4a,
+            0x7c, 0xd2, 0x01, 0x65,
+        ]);
+        let modulus = BigInt::from_be_bytes(&[
+            0x01, 0xff, 0x10, 0x29, 0x63, 0x7b, 0x4a, 0xd8, 0x9c, 0xee, 0x74, 0x21, 0x5b, 0x6f,
+            0x93, 0x0d,
+        ]);
+
+        let reduced = value.mod_reduce(&modulus);
+        let expected = ExternalBigUint::from_bytes_be(&value.to_be_bytes())
+            % ExternalBigUint::from_bytes_be(&modulus.to_be_bytes());
+        let expected_bytes = {
+            let bytes = expected.to_bytes_be();
+            if bytes.is_empty() {
+                vec![0]
+            } else {
+                bytes
+            }
+        };
+
+        assert_eq!(reduced.to_be_bytes(), expected_bytes);
+    }
+
+    #[test]
+    fn sign_and_verify_roundtrip_uses_external_rsa_lane() {
+        let mut keygen_rng = TestCryptoRng::new(0x1234_5678_9abc_def0);
+        let private = ExternalRsaPrivateKey::new(&mut keygen_rng, 1024)
+            .expect("deterministic RSA key generation");
+
+        let local = RsaPrivateKey {
+            n: BigInt::from_be_bytes(&private.n().to_bytes_be()),
+            e: BigInt::from_be_bytes(&private.e().to_bytes_be()),
+            d: BigInt::from_be_bytes(&private.d().to_bytes_be()),
+            p: BigInt::from_be_bytes(&private.primes()[0].to_bytes_be()),
+            q: BigInt::from_be_bytes(&private.primes()[1].to_bytes_be()),
+            dp: BigInt::from_u64(1),
+            dq: BigInt::from_u64(1),
+            qinv: BigInt::from_u64(1),
+        };
+
+        let message = b"echos-rsa-external-lane-roundtrip";
+        let signature = local.sign(message, "sha256");
+        assert!(!signature.is_empty());
+
+        let public = RsaPublicKey::new(&private.n().to_bytes_be(), &private.e().to_bytes_be());
+        assert!(public.verify(message, &signature, "sha256"));
+    }
+
+    #[test]
+    fn sign_unknown_hash_returns_empty_without_panic() {
+        let key = RsaPrivateKey {
+            n: BigInt::from_u64(1),
+            e: BigInt::from_u64(1),
+            d: BigInt::from_u64(1),
+            p: BigInt::from_u64(1),
+            q: BigInt::from_u64(1),
+            dp: BigInt::from_u64(1),
+            dq: BigInt::from_u64(1),
+            qinv: BigInt::from_u64(1),
+        };
+
+        let result =
+            std::panic::catch_unwind(|| key.sign(b"echos-rsa-unsupported-hash", "sha3-512"));
+        assert!(result.is_ok(), "unsupported hash must not panic");
+        assert!(result.unwrap().is_empty());
     }
 }

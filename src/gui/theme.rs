@@ -713,3 +713,32 @@ impl Theme {
         ColorStruct::from_u32(DARK_THEME_TOKENS.surfaces.desktop_top);
     pub const SHADOW: ColorStruct = ColorStruct::from_u32(DARK_THEME_TOKENS.shadows.resting);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_spacing_and_radii_ladders_are_monotonic() {
+        for tokens in [&DARK_THEME_TOKENS, &LIGHT_THEME_TOKENS] {
+            assert!(tokens.spacing.xs < tokens.spacing.sm);
+            assert!(tokens.spacing.sm < tokens.spacing.md);
+            assert!(tokens.spacing.md < tokens.spacing.lg);
+            assert!(tokens.spacing.lg < tokens.spacing.xl);
+            assert!(tokens.radii.sm < tokens.radii.md);
+            assert!(tokens.radii.md < tokens.radii.lg);
+            assert!(tokens.radii.lg < tokens.radii.xl);
+        }
+    }
+
+    #[test]
+    fn theme_resolution_and_layout_profile_follow_screen_policy() {
+        assert_eq!(Theme::resolve_mode(ThemeMode::Auto, true), ThemeMode::Dark);
+        assert_eq!(
+            Theme::resolve_mode(ThemeMode::Auto, false),
+            ThemeMode::Light
+        );
+        assert_eq!(Theme::layout_profile(1279), ShellLayoutProfile::Compact);
+        assert_eq!(Theme::layout_profile(1280), ShellLayoutProfile::Desktop);
+    }
+}

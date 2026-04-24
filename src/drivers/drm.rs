@@ -733,7 +733,14 @@ impl DrmDevice {
             .lock()
             .iter()
             .filter(|connector| connector.detect() == DrmConnectorStatus::Connected)
-            .flat_map(|connector| connector.modes.lock().iter().map(|mode| mode.vrefresh).collect::<Vec<_>>())
+            .flat_map(|connector| {
+                connector
+                    .modes
+                    .lock()
+                    .iter()
+                    .map(|mode| mode.vrefresh)
+                    .collect::<Vec<_>>()
+            })
             .max()
             .unwrap_or(60)
     }
@@ -981,6 +988,7 @@ impl DrmDevice {
         let mut tracked = Vec::new();
         for plane in txn.planes.iter() {
             tracked.push(plane.buffer.handle as u32);
+            let _ = self.ensure_gem_for_plane_buffer(&plane.buffer);
         }
         let _ww_guards = self.lock_reservation_set(&tracked)?;
         for plane in txn.planes.iter() {

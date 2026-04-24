@@ -1,0 +1,40 @@
+# echOS text and binary policy.
+# This file is intentionally narrow: do not run `git add --renormalize`
+# as part of worktree triage or feature commits.
+
+*.rs text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.mmd text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.simics text eol=lf
+*.ps1 text eol=lf
+
+*.bhd binary
+*.zip binary
+*.tar.gz binary
+*.exe binary
+*.dll binary
+*.img binary
+*.iso binary
+*.vhdx binary
+*.craff binary
+*.fd binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.bmp binary
+*.wav binary
+*.mp3 binary
+
+.gitattributes text eol=lf
+.gitignore text eol=lf

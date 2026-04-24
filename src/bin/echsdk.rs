@@ -1,12 +1,17 @@
 use ech_os::security::package::{
     build_revocation_feed, build_signed_bundle, inspect_signed_bundle,
 };
+use ech_os::update::{
+    build_signed_index, hex_digest, inspect_signed_index, UpdateArtifact, UpdateArtifactKind,
+    UpdateIndex, UpdateIndexSignatureProfile,
+};
 use echos_manifest::{CompiledAppManifest, SourceAppManifest, TrustDomain};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     if let Err(err) = run() {
@@ -77,6 +82,34 @@ fn run() -> Result<(), String> {
             let strict = matches!(args.next().as_deref(), Some("strict"));
             cmd_exactness(strict)
         }
+        "field-profile" => {
+            let sub = args
+                .next()
+                .ok_or_else(|| String::from("usage: echosdk field-profile <capture|validate> ..."))?;
+            match sub.as_str() {
+                "capture" => {
+                    let output = args
+                        .next()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from("artifacts/field/physical_profile.json"));
+                    cmd_field_profile_capture(&output)
+                }
+                "validate" => {
+                    let profile = args
+                        .next()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from("artifacts/field/physical_profile.json"));
+                    let admission = args
+                        .next()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            PathBuf::from("docs/agent/single-pc-admission-profile.json")
+                        });
+                    cmd_field_profile_validate(&profile, &admission)
+                }
+                _ => Err(format!("unknown field-profile subcommand: {}", sub)),
+            }
+        }
         "install" => {
             let bundle = args
                 .next()
@@ -85,11 +118,37 @@ fn run() -> Result<(), String> {
             cmd_install(Path::new(&bundle), &stage_root)
         }
         "update" => {
-            let bundle = args
+            let sub = args
                 .next()
-                .ok_or_else(|| String::from("missing bundle path"))?;
-            let stage_root = stage_root_arg(args.next());
-            cmd_update(Path::new(&bundle), &stage_root)
+                .ok_or_else(|| String::from("usage: echosdk update <publish|inspect|stage> ..."))?;
+            match sub.as_str() {
+                "publish" => {
+                    let spec = args
+                        .next()
+                        .ok_or_else(|| String::from("missing update spec path"))?;
+                    let out = args
+                        .next()
+                        .ok_or_else(|| String::from("missing signed index output path"))?;
+                    let profile = parse_update_signing_profile(
+                        args.next().as_deref().unwrap_or("engineering"),
+                    )?;
+                    cmd_update_publish(Path::new(&spec), Path::new(&out), profile)
+                }
+                "inspect" => {
+                    let index = args
+                        .next()
+                        .ok_or_else(|| String::from("missing signed index path"))?;
+                    cmd_update_inspect(Path::new(&index))
+                }
+                "stage" => {
+                    let bundle = args
+                        .next()
+                        .ok_or_else(|| String::from("missing bundle path"))?;
+                    let stage_root = stage_root_arg(args.next());
+                    cmd_update_stage(Path::new(&bundle), &stage_root)
+                }
+                _ => Err(format!("unknown update subcommand: {}", sub)),
+            }
         }
         "remove" => {
             let bundle_name = args
@@ -253,9 +312,111 @@ fn cmd_install(bundle: &Path, stage_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_update(bundle: &Path, stage_root: &Path) -> Result<(), String> {
+fn cmd_update_stage(bundle: &Path, stage_root: &Path) -> Result<(), String> {
     cmd_verify(bundle)?;
     cmd_install(bundle, stage_root)
+}
+
+fn cmd_update_publish(
+    spec_path: &Path,
+    output: &Path,
+    profile: UpdateIndexSignatureProfile,
+) -> Result<(), String> {
+    let spec_text = fs::read_to_string(spec_path).map_err(io_error)?;
+    let spec = parse_update_publish_spec(&spec_text, spec_path.parent())?;
+    let mut artifacts = Vec::with_capacity(spec.artifacts.len());
+    for artifact in spec.artifacts {
+        let payload = fs::read(&artifact.payload_path).map_err(io_error)?;
+        let bytes = payload.len() as u64;
+        let digest = sha256_array(&payload);
+        let mut built = match artifact.kind {
+            UpdateArtifactKind::PlatformImage => UpdateArtifact::for_platform_image(
+                artifact.id.as_str(),
+                artifact.version.as_str(),
+                artifact.source_locator.as_str(),
+                bytes,
+                digest,
+            ),
+            UpdateArtifactKind::ServiceBundle => UpdateArtifact::for_service_bundle(
+                artifact
+                    .package_id
+                    .as_deref()
+                    .unwrap_or(artifact.id.as_str()),
+                artifact.version.as_str(),
+                artifact.source_locator.as_str(),
+                bytes,
+                digest,
+                artifact.reboot_required,
+            ),
+            UpdateArtifactKind::UserBundle => UpdateArtifact::for_user_bundle(
+                artifact
+                    .package_id
+                    .as_deref()
+                    .unwrap_or(artifact.id.as_str()),
+                artifact.version.as_str(),
+                artifact.source_locator.as_str(),
+                bytes,
+                digest,
+            ),
+            UpdateArtifactKind::SeedCatalog => UpdateArtifact::for_seed_catalog(
+                artifact.id.as_str(),
+                artifact.version.as_str(),
+                artifact.source_locator.as_str(),
+                bytes,
+                digest,
+            ),
+            UpdateArtifactKind::RevocationFeed => UpdateArtifact::for_revocation_feed(
+                artifact.version.as_str(),
+                artifact.source_locator.as_str(),
+                bytes,
+                digest,
+            ),
+        };
+        built.requested_slot = artifact.requested_slot;
+        artifacts.push(built);
+    }
+
+    let index = UpdateIndex {
+        channel: spec.channel,
+        release: spec.release,
+        published_epoch: spec.published_epoch,
+        artifacts,
+    };
+    let bytes = build_signed_index(&index, profile).map_err(|err| err.to_string())?;
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+    }
+    fs::write(output, bytes).map_err(io_error)?;
+    println!("{}", output.display());
+    Ok(())
+}
+
+fn cmd_update_inspect(index_path: &Path) -> Result<(), String> {
+    let bytes = fs::read(index_path).map_err(io_error)?;
+    let inspection = inspect_signed_index(&bytes, ech_os::boot::appliance::SlotId::SystemA)
+        .map_err(|err| err.to_string())?;
+    println!(
+        "Update {} [{}] signer={} class={} reboot={}",
+        inspection.index.release,
+        inspection.index.channel,
+        inspection.signature.signer_key_id,
+        inspection.plan.class.as_str(),
+        inspection.plan.requires_reboot
+    );
+    for artifact in inspection.index.artifacts {
+        println!(
+            "  {} {} v{} bytes={} digest={} source={}",
+            artifact.kind.as_str(),
+            artifact.id,
+            artifact.version,
+            artifact.bytes,
+            hex_digest(&artifact.digest),
+            artifact.source
+        );
+    }
+    Ok(())
 }
 
 fn cmd_remove(bundle_name: &str, stage_root: &Path) -> Result<(), String> {
@@ -333,6 +494,52 @@ fn cmd_exactness(strict: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_field_profile_capture(output: &Path) -> Result<(), String> {
+    run_powershell_script(
+        Path::new("scripts/capture_physical_profile.ps1"),
+        &[String::from("-OutputPath"), output.display().to_string()],
+    )
+}
+
+fn cmd_field_profile_validate(profile: &Path, admission: &Path) -> Result<(), String> {
+    run_powershell_script(
+        Path::new("scripts/validate_physical_profile.ps1"),
+        &[
+            String::from("-ProfilePath"),
+            profile.display().to_string(),
+            String::from("-AdmissionProfilePath"),
+            admission.display().to_string(),
+        ],
+    )
+}
+
+fn run_powershell_script(script: &Path, args: &[String]) -> Result<(), String> {
+    if !cfg!(windows) {
+        return Err(String::from(
+            "field-profile tooling currently requires Windows PowerShell host access",
+        ));
+    }
+    if !script.is_file() {
+        return Err(format!("script not found: {}", script.display()));
+    }
+    let mut command = Command::new("powershell");
+    command.arg("-NoProfile").arg("-File").arg(script);
+    for arg in args {
+        command.arg(arg);
+    }
+    let status = command
+        .status()
+        .map_err(|err| format!("failed to launch PowerShell for {}: {}", script.display(), err))?;
+    if !status.success() {
+        return Err(format!(
+            "PowerShell script failed (exit {:?}): {}",
+            status.code(),
+            script.display()
+        ));
+    }
+    Ok(())
+}
+
 fn root_arg(arg: Option<String>) -> PathBuf {
     arg.map(PathBuf::from)
         .unwrap_or_else(|| env::current_dir().expect("cwd"))
@@ -345,6 +552,135 @@ fn stage_root_arg(arg: Option<String>) -> PathBuf {
 
 fn parse_trust_domain(value: &str) -> Result<TrustDomain, String> {
     TrustDomain::parse(value).map_err(|_| format!("unsupported trust domain: {}", value))
+}
+
+#[derive(Debug)]
+struct UpdatePublishSpec {
+    channel: String,
+    release: String,
+    published_epoch: u64,
+    artifacts: Vec<UpdatePublishArtifactSpec>,
+}
+
+#[derive(Debug)]
+struct UpdatePublishArtifactSpec {
+    kind: UpdateArtifactKind,
+    id: String,
+    version: String,
+    payload_path: PathBuf,
+    source_locator: String,
+    reboot_required: bool,
+    package_id: Option<String>,
+    requested_slot: Option<ech_os::boot::appliance::SlotId>,
+}
+
+fn parse_update_signing_profile(value: &str) -> Result<UpdateIndexSignatureProfile, String> {
+    UpdateIndexSignatureProfile::parse(value)
+        .ok_or_else(|| format!("unsupported update signing profile: {}", value))
+}
+
+fn parse_update_publish_spec(
+    text: &str,
+    base_dir: Option<&Path>,
+) -> Result<UpdatePublishSpec, String> {
+    let mut channel = None;
+    let mut release = None;
+    let mut published_epoch = None;
+    let mut artifacts = Vec::new();
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!("invalid update spec line: {}", line));
+        };
+        match key.trim() {
+            "channel" => channel = Some(value.trim().to_string()),
+            "release" => release = Some(value.trim().to_string()),
+            "published_epoch" => {
+                published_epoch = Some(
+                    value
+                        .trim()
+                        .parse::<u64>()
+                        .map_err(|_| String::from("published_epoch must be u64"))?,
+                )
+            }
+            "artifact" => artifacts.push(parse_update_artifact_spec(value.trim(), base_dir)?),
+            other => return Err(format!("unknown update spec key: {}", other)),
+        }
+    }
+
+    let published_epoch = published_epoch.unwrap_or_else(current_unix_epoch);
+    Ok(UpdatePublishSpec {
+        channel: channel.ok_or_else(|| String::from("update spec missing channel"))?,
+        release: release.ok_or_else(|| String::from("update spec missing release"))?,
+        published_epoch,
+        artifacts,
+    })
+}
+
+fn parse_update_artifact_spec(
+    value: &str,
+    base_dir: Option<&Path>,
+) -> Result<UpdatePublishArtifactSpec, String> {
+    let fields = value.split('|').map(str::trim).collect::<Vec<_>>();
+    if fields.len() != 8 {
+        return Err(String::from(
+            "artifact line must be kind|id|version|payload_path|source_locator|reboot_required|package_id_or_-|slot_or_-",
+        ));
+    }
+    let kind = UpdateArtifactKind::parse(fields[0])
+        .ok_or_else(|| format!("unsupported artifact kind: {}", fields[0]))?;
+    let payload_path = match base_dir {
+        Some(base) => base.join(fields[3]),
+        None => PathBuf::from(fields[3]),
+    };
+    Ok(UpdatePublishArtifactSpec {
+        kind,
+        id: fields[1].to_string(),
+        version: fields[2].to_string(),
+        payload_path,
+        source_locator: fields[4].to_string(),
+        reboot_required: parse_bool(fields[5])?,
+        package_id: parse_dash_option(fields[6]),
+        requested_slot: parse_slot(fields[7])?,
+    })
+}
+
+fn parse_bool(value: &str) -> Result<bool, String> {
+    match value {
+        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        _ => Err(format!("invalid boolean value: {}", value)),
+    }
+}
+
+fn parse_dash_option(value: &str) -> Option<String> {
+    if value == "-" {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn parse_slot(value: &str) -> Result<Option<ech_os::boot::appliance::SlotId>, String> {
+    match value {
+        "-" => Ok(None),
+        "system_a" => Ok(Some(ech_os::boot::appliance::SlotId::SystemA)),
+        "system_b" => Ok(Some(ech_os::boot::appliance::SlotId::SystemB)),
+        "recovery" => Ok(Some(ech_os::boot::appliance::SlotId::Recovery)),
+        "none" => Ok(Some(ech_os::boot::appliance::SlotId::None)),
+        _ => Err(format!("invalid slot value: {}", value)),
+    }
+}
+
+fn current_unix_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn sha256_array(data: &[u8]) -> [u8; 32] {
@@ -415,7 +751,7 @@ fn pascal(value: &str) -> String {
 }
 
 fn print_help() {
-    println!("echsdk <new|manifest check|build|package|sign|verify|revocation-feed|exactness [strict]|install|update|remove|repair|launch|run|test>");
+    println!("echsdk <new|manifest check|build|package|sign|verify|revocation-feed|exactness [strict]|field-profile <capture|validate>|install|update <publish|inspect|stage>|remove|repair|launch|run|test>");
 }
 
 fn io_error(err: impl core::fmt::Display) -> String {
@@ -424,7 +760,8 @@ fn io_error(err: impl core::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_template, service_template};
+    use super::{manifest_template, parse_update_publish_spec, service_template};
+    use std::path::Path;
 
     #[test]
     fn service_manifest_is_headless_and_stateless() {
@@ -440,5 +777,29 @@ mod tests {
         assert!(source.contains("struct EchoServiceService;"));
         assert!(source.contains("impl ServiceApplication for EchoServiceService"));
         assert!(source.contains("run_service(EchoServiceService)"));
+    }
+
+    #[test]
+    fn update_publish_spec_parses_artifacts_and_slots() {
+        let spec = parse_update_publish_spec(
+            "channel=engineering\nrelease=2026.04.08.1\npublished_epoch=42\nartifact=platform|echos-platform|2.1.0|payloads/platform.img|https://updates/echos-platform.img|true|-|system_b\nartifact=user|org.echos.editor|1.5.0|payloads/editor.bhd|https://updates/editor.bhd|false|org.echos.editor|-\n",
+            Some(Path::new("C:/repo/specs")),
+        )
+        .expect("spec");
+        assert_eq!(spec.channel, "engineering");
+        assert_eq!(spec.release, "2026.04.08.1");
+        assert_eq!(spec.artifacts.len(), 2);
+        assert_eq!(
+            spec.artifacts[0].requested_slot,
+            Some(ech_os::boot::appliance::SlotId::SystemB)
+        );
+        assert_eq!(
+            spec.artifacts[0].payload_path,
+            Path::new("C:/repo/specs").join("payloads/platform.img")
+        );
+        assert_eq!(
+            spec.artifacts[1].package_id.as_deref(),
+            Some("org.echos.editor")
+        );
     }
 }

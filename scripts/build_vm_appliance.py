@@ -7,6 +7,8 @@ import uuid
 import zlib
 from pathlib import Path
 
+from build_f2fs_slot_image import MiB as SLOT_IMAGE_MIB, build_system_slot_image
+
 SECTOR_SIZE = 512
 MiB = 1024 * 1024
 
@@ -61,6 +63,16 @@ def short_name(name: str) -> bytes:
     return (base + ext).encode("ascii")
 
 
+def is_fat83_name(name: str) -> bool:
+    base, dot, ext = name.partition(".")
+    if not base or len(base) > 8:
+        return False
+    if dot and (not ext or len(ext) > 3):
+        return False
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
+    return all(ch in allowed for ch in base) and all(ch in allowed for ch in ext)
+
+
 class FatNode:
     def __init__(self, name: str, directory: bool, data: bytes = b""):
         self.name = name
@@ -77,22 +89,30 @@ def build_fat16_image(
     efi_bytes: bytes,
     bootctrl_bytes: bytes,
     pe_smoke_bundle: bytes | None,
+    curated_bundles: list[bytes],
+    esp_extra_files: list[tuple[str, bytes]],
 ) -> bytes:
     total_sectors = total_bytes // SECTOR_SIZE
-    sectors_per_cluster = 4
     reserved_sectors = 1
     root_entries = 512
     root_dir_sectors = (root_entries * 32 + (SECTOR_SIZE - 1)) // SECTOR_SIZE
     fat_count = 2
 
-    fat_sectors = 1
+    sectors_per_cluster = 4
     while True:
-        data_sectors = total_sectors - reserved_sectors - fat_count * fat_sectors - root_dir_sectors
-        cluster_count = data_sectors // sectors_per_cluster
-        next_fat_sectors = math.ceil(((cluster_count + 2) * 2) / SECTOR_SIZE)
-        if next_fat_sectors == fat_sectors:
+        fat_sectors = 1
+        while True:
+            data_sectors = total_sectors - reserved_sectors - fat_count * fat_sectors - root_dir_sectors
+            cluster_count = data_sectors // sectors_per_cluster
+            next_fat_sectors = math.ceil(((cluster_count + 2) * 2) / SECTOR_SIZE)
+            if next_fat_sectors == fat_sectors:
+                break
+            fat_sectors = next_fat_sectors
+        if cluster_count <= 0xFFF5:
             break
-        fat_sectors = next_fat_sectors
+        sectors_per_cluster *= 2
+        if sectors_per_cluster > 128:
+            raise RuntimeError("ESP FAT16 geometry exceeds supported cluster size")
 
     cluster_bytes = sectors_per_cluster * SECTOR_SIZE
     root = FatNode("ROOT", True)
@@ -102,6 +122,10 @@ def build_fat16_image(
     boot.children.append(FatNode("BOOTCTRL.BIN", False, bootctrl_bytes))
     if pe_smoke_bundle:
         boot.children.append(FatNode("PESMOKE.BHD", False, pe_smoke_bundle))
+    for index, bundle in enumerate(curated_bundles, start=1):
+        boot.children.append(FatNode(f"APP{index:04d}.BHD", False, bundle))
+    for guest_name, payload in esp_extra_files:
+        boot.children.append(FatNode(guest_name, False, payload))
     boot.children.append(
         FatNode(
             "APPLINFO.TXT",
@@ -235,6 +259,200 @@ def build_fat16_image(
     return bytes(image)
 
 
+def build_seed_loop_image(curated_bundles: list[bytes]) -> bytes:
+    header = bytearray()
+    header.extend(b"echSID01")
+    header.extend(struct.pack("<H", 1))
+    header.extend(struct.pack("<H", len(curated_bundles)))
+    header.extend(struct.pack("<I", 0))
+
+    records = bytearray()
+    payload = bytearray()
+    payload_offset = 16
+    payload_offset += sum(20 + len(f"bundle-{index + 1}".encode("utf-8")) for index in range(len(curated_bundles)))
+    for index, bundle in enumerate(curated_bundles, start=1):
+        identity = f"bundle-{index}".encode("utf-8")
+        records.extend(struct.pack("<Q", payload_offset))
+        records.extend(struct.pack("<Q", len(bundle)))
+        records.extend(struct.pack("<H", len(identity)))
+        records.extend(struct.pack("<H", 0))
+        records.extend(identity)
+        payload.extend(bundle)
+        payload_offset += len(bundle)
+    return bytes(header + records + payload)
+
+
+def build_seed_fat16_image(
+    total_bytes: int,
+    hidden_sectors: int,
+    curated_bundles: list[bytes],
+) -> bytes:
+    seed_loop_image = build_seed_loop_image(curated_bundles)
+    total_sectors = total_bytes // SECTOR_SIZE
+    reserved_sectors = 1
+    root_entries = 512
+    root_dir_sectors = (root_entries * 32 + (SECTOR_SIZE - 1)) // SECTOR_SIZE
+    fat_count = 2
+
+    sectors_per_cluster = 4
+    while True:
+        fat_sectors = 1
+        while True:
+            data_sectors = total_sectors - reserved_sectors - fat_count * fat_sectors - root_dir_sectors
+            cluster_count = data_sectors // sectors_per_cluster
+            next_fat_sectors = math.ceil(((cluster_count + 2) * 2) / SECTOR_SIZE)
+            if next_fat_sectors == fat_sectors:
+                break
+            fat_sectors = next_fat_sectors
+        if cluster_count <= 0xFFF5:
+            break
+        sectors_per_cluster *= 2
+        if sectors_per_cluster > 128:
+            raise RuntimeError("seed FAT16 geometry exceeds supported cluster size")
+
+    cluster_bytes = sectors_per_cluster * SECTOR_SIZE
+    root = FatNode("ROOT", True)
+    apps = FatNode("APPS", True)
+    for index, bundle in enumerate(curated_bundles, start=1):
+        apps.children.append(FatNode(f"APP{index:04d}.BHD", False, bundle))
+    root.children.append(apps)
+    root.children.append(FatNode("APPS.IMG", False, seed_loop_image))
+    root.children.append(
+        FatNode(
+            "SEEDINFO.TXT",
+            False,
+            b"echOS seed partition\napps under /APPS\nloop image APPS.IMG\n",
+        )
+    )
+
+    nodes = []
+
+    def collect(node: FatNode) -> None:
+        for child in node.children:
+            nodes.append(child)
+            if child.directory:
+                collect(child)
+
+    collect(root)
+
+    fat_entries = [0x0000] * (cluster_count + 2)
+    fat_entries[0] = 0xFFF8
+    fat_entries[1] = 0xFFFF
+    next_cluster = 2
+
+    def allocate(node: FatNode) -> None:
+        nonlocal next_cluster
+        if node.directory:
+            needed_clusters = 1
+        else:
+            needed_clusters = max(1, math.ceil(len(node.data) / cluster_bytes))
+        node.first_cluster = next_cluster
+        for idx in range(needed_clusters):
+            cluster = next_cluster + idx
+            fat_entries[cluster] = 0xFFFF if idx == needed_clusters - 1 else cluster + 1
+        next_cluster += needed_clusters
+
+    for node in nodes:
+        allocate(node)
+
+    if next_cluster > len(fat_entries):
+        raise RuntimeError("seed FAT16 cluster budget exhausted")
+
+    boot_sector = bytearray(SECTOR_SIZE)
+    boot_sector[0:3] = b"\xEB\x3C\x90"
+    boot_sector[3:11] = b"ECHOSSED"
+    struct.pack_into("<H", boot_sector, 11, SECTOR_SIZE)
+    boot_sector[13] = sectors_per_cluster
+    struct.pack_into("<H", boot_sector, 14, reserved_sectors)
+    boot_sector[16] = fat_count
+    struct.pack_into("<H", boot_sector, 17, root_entries)
+    struct.pack_into("<H", boot_sector, 19, 0 if total_sectors >= 0x10000 else total_sectors)
+    boot_sector[21] = 0xF8
+    struct.pack_into("<H", boot_sector, 22, fat_sectors)
+    struct.pack_into("<H", boot_sector, 24, 32)
+    struct.pack_into("<H", boot_sector, 26, 64)
+    struct.pack_into("<I", boot_sector, 28, hidden_sectors)
+    struct.pack_into("<I", boot_sector, 32, total_sectors if total_sectors >= 0x10000 else 0)
+    boot_sector[36] = 0x80
+    boot_sector[38] = 0x29
+    struct.pack_into("<I", boot_sector, 39, 0xEC71A55E)
+    boot_sector[43:54] = b"ECHOS_SEED "
+    boot_sector[54:62] = b"FAT16   "
+    boot_sector[510:512] = b"\x55\xAA"
+
+    fat = bytearray(fat_sectors * SECTOR_SIZE)
+    for index, entry in enumerate(fat_entries[: (fat_sectors * SECTOR_SIZE) // 2]):
+        struct.pack_into("<H", fat, index * 2, entry)
+
+    root_dir = bytearray(root_dir_sectors * SECTOR_SIZE)
+    root_offset = 0
+    for child in root.children:
+        root_dir[root_offset : root_offset + 32] = dir_entry(
+            short_name(child.name), 0x10 if child.directory else 0x20, child.first_cluster, child.size
+        )
+        root_offset += 32
+
+    data = bytearray(data_sectors * SECTOR_SIZE)
+
+    def write_cluster(cluster: int, payload: bytes) -> None:
+        start = (cluster - 2) * cluster_bytes
+        data[start : start + len(payload)] = payload
+
+    def build_directory(node: FatNode, parent_cluster: int) -> bytes:
+        directory = bytearray(cluster_bytes)
+        offset = 0
+        directory[offset : offset + 32] = dir_entry(b".          ", 0x10, node.first_cluster, 0)
+        offset += 32
+        directory[offset : offset + 32] = dir_entry(b"..         ", 0x10, parent_cluster, 0)
+        offset += 32
+        for child in node.children:
+            directory[offset : offset + 32] = dir_entry(
+                short_name(child.name),
+                0x10 if child.directory else 0x20,
+                child.first_cluster,
+                child.size,
+            )
+            offset += 32
+        return bytes(directory)
+
+    for child in root.children:
+        if child.directory:
+            write_cluster(child.first_cluster, build_directory(child, 0))
+            for file_node in child.children:
+                remaining = file_node.data
+                cluster = file_node.first_cluster
+                while remaining:
+                    chunk = remaining[:cluster_bytes]
+                    write_cluster(cluster, chunk)
+                    remaining = remaining[cluster_bytes:]
+                    cluster = fat_entries[cluster]
+                    if cluster == 0xFFFF:
+                        break
+        else:
+            remaining = child.data
+            cluster = child.first_cluster
+            while remaining:
+                chunk = remaining[:cluster_bytes]
+                write_cluster(cluster, chunk)
+                remaining = remaining[cluster_bytes:]
+                cluster = fat_entries[cluster]
+                if cluster == 0xFFFF:
+                    break
+
+    image = bytearray(total_bytes)
+    cursor = 0
+    image[cursor : cursor + SECTOR_SIZE] = boot_sector
+    cursor += SECTOR_SIZE
+    image[cursor : cursor + len(fat)] = fat
+    cursor += len(fat)
+    image[cursor : cursor + len(fat)] = fat
+    cursor += len(fat)
+    image[cursor : cursor + len(root_dir)] = root_dir
+    cursor += len(root_dir)
+    image[cursor : cursor + len(data)] = data
+    return bytes(image)
+
+
 def build_partition_table(total_sectors: int, partitions: list[dict]) -> tuple[bytes, bytes, bytes]:
     primary_entries = bytearray(128 * 128)
     backup_entries = bytearray(128 * 128)
@@ -293,17 +511,18 @@ def build_partition_table(total_sectors: int, partitions: list[dict]) -> tuple[b
     return bytes(protective_mbr), primary_header + bytes(primary_entries), bytes(backup_entries) + backup_header
 
 
-def create_layout(disk_bytes: int) -> list[dict]:
+def create_layout(disk_bytes: int, esp_bytes: int) -> list[dict]:
     disk_sectors = disk_bytes // SECTOR_SIZE
     sizes = {
-        "esp": 64 * MiB,
+        "esp": max(64 * MiB, align_up(esp_bytes, MiB)),
+        "seed": 64 * MiB,
         "system_a": 96 * MiB,
         "system_b": 96 * MiB,
         "data": 192 * MiB,
     }
     start_lba = 2048
     layout = []
-    for name in ["esp", "system_a", "system_b", "data"]:
+    for name in ["esp", "seed", "system_a", "system_b", "data"]:
         sectors = sizes[name] // SECTOR_SIZE
         first = start_lba
         last = first + sectors - 1
@@ -328,6 +547,8 @@ def create_layout(disk_bytes: int) -> list[dict]:
             "unique_guid": uuid.uuid4(),
         }
     )
+    if layout[-1]["first_lba"] > layout[-1]["last_lba"]:
+        raise RuntimeError("disk image too small for appliance layout")
     return layout
 
 
@@ -371,11 +592,15 @@ def main() -> None:
     parser.add_argument("--bootctrl", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--disk-mib", type=int, default=512)
+    parser.add_argument("--system-image-mib", type=int, default=8)
     parser.add_argument("--active-slot", choices=SLOT_IDS.keys(), default="system_a")
     parser.add_argument("--pending-slot", choices=SLOT_IDS.keys(), default="none")
     parser.add_argument("--auto-login", action="store_true")
     parser.add_argument("--suspend-resume-smoke", action="store_true")
+    parser.add_argument("--update-smoke-request-url")
     parser.add_argument("--pe-smoke-bundle", type=Path)
+    parser.add_argument("--bundle", action="append", type=Path, default=[])
+    parser.add_argument("--esp-extra-file", action="append", default=[])
     args = parser.parse_args()
 
     efi_bytes = args.efi.read_bytes()
@@ -389,9 +614,60 @@ def main() -> None:
             args.suspend_resume_smoke,
         )
     pe_smoke_bundle = args.pe_smoke_bundle.read_bytes() if args.pe_smoke_bundle else None
-    disk_bytes = args.disk_mib * MiB
-    layout = create_layout(disk_bytes)
+    curated_bundles = [path.read_bytes() for path in args.bundle]
+    esp_extra_files: list[tuple[str, bytes]] = []
+    esp_extra_manifest: list[dict[str, str]] = []
+    for spec in args.esp_extra_file:
+        host_text, separator, guest_name = spec.partition("::")
+        host_path = Path(host_text)
+        if separator == "":
+            guest_name = host_path.name
+        if not host_path.is_file():
+            raise RuntimeError(f"ESP extra file not found: {host_path}")
+        if not is_fat83_name(guest_name):
+            raise RuntimeError(
+                f"ESP extra guest name must be FAT 8.3 compatible: {guest_name}"
+            )
+        esp_extra_files.append((guest_name, host_path.read_bytes()))
+        esp_extra_manifest.append({"host_path": str(host_path), "guest_name": guest_name})
+    requested_disk_bytes = args.disk_mib * MiB
+    seed_loop_bytes = build_seed_loop_image(curated_bundles)
+    esp_required_bytes = (
+        len(efi_bytes)
+        + len(bootctrl_bytes)
+        + sum(len(bundle) for bundle in curated_bundles)
+        + (len(pe_smoke_bundle) if pe_smoke_bundle else 0)
+        + sum(len(payload) for _, payload in esp_extra_files)
+        + 16 * MiB
+    )
+    seed_required_bytes = len(seed_loop_bytes) + sum(len(bundle) for bundle in curated_bundles) + 16 * MiB
+    minimum_disk_bytes = (
+        max(64 * MiB, align_up(esp_required_bytes, MiB))
+        + max(64 * MiB, align_up(seed_required_bytes, MiB))
+        + 96 * MiB
+        + 96 * MiB
+        + 192 * MiB
+        + 128 * MiB
+    )
+    disk_bytes = max(requested_disk_bytes, align_up(minimum_disk_bytes, MiB))
     disk_sectors = disk_bytes // SECTOR_SIZE
+    layout = create_layout(disk_bytes, esp_required_bytes)
+    for part in layout:
+        if part["name"] == "seed":
+            part_sectors = max(64 * MiB, align_up(seed_required_bytes, MiB)) // SECTOR_SIZE
+            part["last_lba"] = part["first_lba"] + part_sectors - 1
+            break
+    for index in range(1, len(layout)):
+        prev = layout[index - 1]
+        current = layout[index]
+        if current["first_lba"] <= prev["last_lba"]:
+            current_size = current["last_lba"] - current["first_lba"] + 1
+            current["first_lba"] = align_up(prev["last_lba"] + 1, 2048)
+            current["last_lba"] = current["first_lba"] + current_size - 1
+    recovery = next(part for part in layout if part["name"] == "recovery")
+    recovery["last_lba"] = disk_sectors - 34
+    if recovery["first_lba"] > recovery["last_lba"]:
+        raise RuntimeError("disk image too small after seed partition sizing")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("wb") as image:
@@ -405,6 +681,16 @@ def main() -> None:
         efi_bytes,
         bootctrl_bytes,
         pe_smoke_bundle,
+        curated_bundles,
+        esp_extra_files,
+    )
+    seed = next(part for part in layout if part["name"] == "seed")
+    seed_bytes = (seed["last_lba"] - seed["first_lba"] + 1) * SECTOR_SIZE
+    seed_image = build_seed_fat16_image(seed_bytes, seed["first_lba"], curated_bundles)
+    system_image_bytes = build_system_slot_image(args.system_image_mib * SLOT_IMAGE_MIB)
+    active_system_image_bytes = build_system_slot_image(
+        args.system_image_mib * SLOT_IMAGE_MIB,
+        args.update_smoke_request_url,
     )
     protective_mbr, primary_gpt, backup_gpt = build_partition_table(disk_sectors, layout)
 
@@ -415,6 +701,16 @@ def main() -> None:
         image.write(primary_gpt)
         image.seek(esp["first_lba"] * SECTOR_SIZE)
         image.write(esp_image)
+        image.seek(seed["first_lba"] * SECTOR_SIZE)
+        image.write(seed_image)
+        for part in layout:
+            if part["name"] not in {"system_a", "system_b", "recovery"}:
+                continue
+            image.seek(part["first_lba"] * SECTOR_SIZE)
+            if part["name"] == args.active_slot and args.update_smoke_request_url:
+                image.write(active_system_image_bytes)
+            else:
+                image.write(system_image_bytes)
         image.seek((disk_sectors - 33) * SECTOR_SIZE)
         image.write(backup_gpt)
 
@@ -425,7 +721,10 @@ def main() -> None:
             "pending_slot": args.pending_slot,
             "auto_login": args.auto_login,
             "suspend_resume_smoke": args.suspend_resume_smoke,
+            "update_smoke_request_url": args.update_smoke_request_url,
             "pe_smoke_bundle": str(args.pe_smoke_bundle) if args.pe_smoke_bundle else None,
+            "bundles": [str(path) for path in args.bundle],
+            "esp_extra_files": esp_extra_manifest,
         },
         "partitions": [
             {

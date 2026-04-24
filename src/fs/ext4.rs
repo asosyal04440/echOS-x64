@@ -459,6 +459,8 @@ pub struct Ext4FileSystem {
     pub journal: Option<Arc<Mutex<Journal>>>,
     /// Günlüğün başladığı blok ofseti
     pub journal_offset: u64,
+    /// Journal corruption veya recovery hatasında mount yazmaya kapatılır.
+    pub read_only: bool,
 }
 
 impl Ext4FileSystem {
@@ -472,7 +474,16 @@ impl Ext4FileSystem {
             root_inode: 2,
             journal: None,
             journal_offset: 0,
+            read_only: false,
         }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub fn mark_read_only(&mut self) {
+        self.read_only = true;
     }
 
     /// Aygıt verisinden dosya sistemini başlatır: süper bloğu okur ve doğrular
@@ -501,6 +512,28 @@ impl Ext4FileSystem {
         Ok(())
     }
 
+    pub fn init_from_storage(&mut self, storage: &Ext4Storage) -> Result<(), Ext4Error> {
+        let sb_bytes = storage
+            .read_exact(SUPERBLOCK_OFFSET as usize, 1024)
+            .map_err(|_| Ext4Error::ReadError)?;
+        let sb = Ext4Superblock::parse(sb_bytes.as_slice()).ok_or(Ext4Error::InvalidFormat)?;
+
+        self.superblock = sb;
+        self.block_size = sb.block_size();
+        self.is_64bit = sb.is_64bit();
+        self.group_descriptors.clear();
+        self.load_group_descriptors_from_storage(storage)?;
+
+        crate::serial_println!(
+            "[ext4] Başlatıldı: {} blok, {} inode, {} bayt/blok",
+            sb.total_blocks(),
+            sb.s_inodes_count,
+            self.block_size
+        );
+
+        Ok(())
+    }
+
     /// Blok grubu tanımlayıcılarını diskten okuyup belleğe yükler
     fn load_group_descriptors(&mut self, device_data: &[u8]) -> Result<(), Ext4Error> {
         let gd_offset = self.block_size as usize;
@@ -513,6 +546,28 @@ impl Ext4FileSystem {
             }
 
             if let Some(gd) = Ext4GroupDescriptor::parse_32(&device_data[offset..]) {
+                self.group_descriptors.push(gd);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn load_group_descriptors_from_storage(
+        &mut self,
+        storage: &Ext4Storage,
+    ) -> Result<(), Ext4Error> {
+        let gd_offset = self.block_size as usize;
+        let gds_count = self.superblock.block_groups_count() as usize;
+        let gd_bytes = storage
+            .read_exact(gd_offset, gds_count.saturating_mul(32))
+            .map_err(|_| Ext4Error::ReadError)?;
+
+        for chunk in gd_bytes.chunks(32) {
+            if chunk.len() < 32 {
+                break;
+            }
+            if let Some(gd) = Ext4GroupDescriptor::parse_32(chunk) {
                 self.group_descriptors.push(gd);
             }
         }
@@ -549,6 +604,18 @@ impl Ext4FileSystem {
         }
 
         Ext4Inode::parse(&device_data[offset..]).ok_or(Ext4Error::Corrupted)
+    }
+
+    pub fn read_inode_from_storage(
+        &self,
+        inode: u32,
+        storage: &Ext4Storage,
+    ) -> Result<Ext4Inode, Ext4Error> {
+        let (offset, size) = self.get_inode_location(inode);
+        let inode_bytes = storage
+            .read_exact(offset as usize, size as usize)
+            .map_err(|_| Ext4Error::ReadError)?;
+        Ext4Inode::parse(inode_bytes.as_slice()).ok_or(Ext4Error::Corrupted)
     }
 
     /// Mantıksal blok numarasını fiziksel blok numarasına çevirir (extent veya dolaylı)
@@ -612,6 +679,32 @@ impl Ext4FileSystem {
         Ok(data)
     }
 
+    pub fn read_file_from_storage(
+        &self,
+        inode: &Ext4Inode,
+        storage: &Ext4Storage,
+    ) -> Result<Vec<u8>, Ext4Error> {
+        let size = inode.size() as usize;
+        let mut data = Vec::with_capacity(size);
+        let block_size = self.block_size as usize;
+        let blocks_needed = (size + block_size - 1) / block_size;
+
+        for logical in 0..blocks_needed {
+            let Some(phys_block) = self.map_block(inode, logical as u32) else {
+                break;
+            };
+            let offset = phys_block as usize * block_size;
+            let read_size = block_size.min(size.saturating_sub(data.len()));
+            let block = storage
+                .read_exact(offset, read_size)
+                .map_err(|_| Ext4Error::ReadError)?;
+            data.extend_from_slice(block.as_slice());
+        }
+
+        data.truncate(size);
+        Ok(data)
+    }
+
     /// Dizin inode'undan tüm girişleri okuyup döndürür
     pub fn read_dir(
         &self,
@@ -665,9 +758,63 @@ impl Ext4FileSystem {
         Ok(entries)
     }
 
+    pub fn read_dir_from_storage(
+        &self,
+        inode: &Ext4Inode,
+        storage: &Ext4Storage,
+    ) -> Result<Vec<Ext4DirEntry>, Ext4Error> {
+        if !inode.is_directory() {
+            return Err(Ext4Error::NotSupported);
+        }
+
+        let data = self.read_file_from_storage(inode, storage)?;
+        let mut entries = Vec::new();
+        let mut offset = 0usize;
+
+        while offset + 8 <= data.len() {
+            let inode_num = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+            let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]) as usize;
+            let name_len = data[offset + 6] as usize;
+            let file_type = data[offset + 7];
+
+            if inode_num == 0 || rec_len == 0 {
+                break;
+            }
+
+            if offset + 8 + name_len <= data.len() {
+                let name_bytes = &data[offset + 8..offset + 8 + name_len];
+                let name = String::from_utf8_lossy(name_bytes).to_string();
+                let ext4_type = match file_type {
+                    1 => Ext4FileType::Regular,
+                    2 => Ext4FileType::Directory,
+                    7 => Ext4FileType::Symlink,
+                    _ => Ext4FileType::Unknown,
+                };
+                entries.push(Ext4DirEntry {
+                    name,
+                    inode: inode_num,
+                    file_type: ext4_type,
+                });
+            }
+
+            offset += rec_len;
+        }
+
+        Ok(entries)
+    }
+
     /// Kök dizin inode'unu (inode 2) aygıt verisinden okur
     pub fn root_inode_data(&self, device_data: &[u8]) -> Result<Ext4Inode, Ext4Error> {
         self.read_inode(self.root_inode, device_data)
+    }
+
+    pub fn root_inode_from_storage(&self, storage: &Ext4Storage) -> Result<Ext4Inode, Ext4Error> {
+        self.read_inode_from_storage(self.root_inode, storage)
     }
 
     // ========================================================================
@@ -682,14 +829,22 @@ impl Ext4FileSystem {
         journal_size: u64,
     ) -> Result<(), Ext4Error> {
         let mut journal = Journal::new(self.block_size, journal_offset, journal_size);
-        journal
-            .init(device_data)
-            .map_err(|_| Ext4Error::NotSupported)?;
+        if journal.init(device_data).is_err() {
+            self.journal = None;
+            self.mark_read_only();
+            crate::serial_println!(
+                "[ext4] Journal superblock validation failed; mount forced read-only"
+            );
+            return Ok(());
+        }
 
         // Tamamlanmamış işlemleri kurtar (crash recovery)
-        journal
-            .recover(device_data)
-            .map_err(|_| Ext4Error::Corrupted)?;
+        if journal.recover(device_data).is_err() {
+            self.journal = None;
+            self.mark_read_only();
+            crate::serial_println!("[ext4] Journal recovery failed; mount forced read-only");
+            return Ok(());
+        }
 
         self.journal = Some(Arc::new(Mutex::new(journal)));
         self.journal_offset = journal_offset;
@@ -700,6 +855,9 @@ impl Ext4FileSystem {
 
     /// Yazma işlemleri için yeni bir işlem (transaction) başlatır
     pub fn begin_transaction(&self, credits: usize) -> Result<(), Ext4Error> {
+        if self.read_only {
+            return Err(Ext4Error::WriteError);
+        }
         if let Some(ref journal) = self.journal {
             let mut j = journal.lock();
             j.start_transaction(credits)
@@ -710,6 +868,9 @@ impl Ext4FileSystem {
 
     /// Mevcut işlemi günlüğe kaydeder ve diske yazar
     pub fn commit_transaction(&self) -> Result<(), Ext4Error> {
+        if self.read_only {
+            return Err(Ext4Error::WriteError);
+        }
         if let Some(ref journal) = self.journal {
             let mut j = journal.lock();
             j.commit_transaction().map_err(|_| Ext4Error::WriteError)?;
@@ -725,6 +886,10 @@ impl Ext4FileSystem {
         data: &[u8],
         device_data: &mut [u8],
     ) -> Result<usize, Ext4Error> {
+        if self.read_only {
+            return Err(Ext4Error::WriteError);
+        }
+
         let block_size = self.block_size as u64;
         let start_block = offset / block_size;
         let end_block = (offset + data.len() as u64 + block_size - 1) / block_size;
@@ -796,6 +961,10 @@ impl Ext4FileSystem {
         logical_block: u32,
         device_data: &mut [u8],
     ) -> Result<u64, Ext4Error> {
+        if self.read_only {
+            return Err(Ext4Error::WriteError);
+        }
+
         // Blok bitmap'inden serbest blok bul
         let group = logical_block / self.superblock.s_blocks_per_group;
         let gd = self
@@ -803,7 +972,8 @@ impl Ext4FileSystem {
             .get(group as usize)
             .ok_or(Ext4Error::OutOfMemory)?;
 
-        // Basit tahsis stratejisi (gerçek uygulamada blok bitmap taranır)
+        // Resident-image allocation uses the visible free-block counters; bitmap-backed
+        // allocation is outside this in-memory API surface.
         let new_block =
             self.superblock.total_blocks() - self.superblock.free_blocks() + logical_block as u64;
 
@@ -815,8 +985,7 @@ impl Ext4FileSystem {
 
         // Inode blok göstericilerini güncelle
         if inode.uses_extents() {
-            // Extent ağacı güncellemesi gerekir
-            // Şimdilik yer tutucu
+            return Err(Ext4Error::NotSupported);
         } else {
             let blocks = inode.indirect_blocks();
             if logical_block < 12 {
@@ -864,6 +1033,10 @@ impl Ext4FileSystem {
         file_type: Ext4FileType,
         device_data: &mut [u8],
     ) -> Result<(), Ext4Error> {
+        if self.read_only {
+            return Err(Ext4Error::WriteError);
+        }
+
         // Mevcut dizin verisini oku
         let mut dir_data = self.read_file(parent_inode, device_data)?;
 
@@ -902,6 +1075,10 @@ impl Ext4FileSystem {
 
     /// Dosya sistemini diske eşitler (bekleyen işlemleri tamamlar)
     pub fn sync(&self, device_data: &mut [u8]) -> Result<(), Ext4Error> {
+        if self.read_only {
+            return Err(Ext4Error::WriteError);
+        }
+
         // Bekleyen işlemleri tamamla
         if let Some(ref journal) = self.journal {
             let mut j = journal.lock();
@@ -932,9 +1109,67 @@ lazy_static::lazy_static! {
 }
 
 #[derive(Clone, Debug)]
+pub enum Ext4Storage {
+    Resident(Arc<Vec<u8>>),
+    LoopbackDevice(String),
+}
+
+impl Ext4Storage {
+    pub fn image_len(&self) -> Result<usize, Ext4Error> {
+        match self {
+            Self::Resident(image) => Ok(image.len()),
+            Self::LoopbackDevice(name) => {
+                let device =
+                    crate::drivers::loopback::open(name.as_str()).ok_or(Ext4Error::ReadError)?;
+                let descriptor = device.descriptor();
+                Ok(descriptor.block_count as usize * descriptor.block_size as usize)
+            }
+        }
+    }
+
+    pub fn read_exact(&self, offset: usize, len: usize) -> Result<Vec<u8>, Ext4Error> {
+        match self {
+            Self::Resident(image) => {
+                let end = offset.checked_add(len).ok_or(Ext4Error::ReadError)?;
+                if end > image.len() {
+                    return Err(Ext4Error::ReadError);
+                }
+                Ok(image[offset..end].to_vec())
+            }
+            Self::LoopbackDevice(name) => {
+                let mut device =
+                    crate::drivers::loopback::open(name.as_str()).ok_or(Ext4Error::ReadError)?;
+                let descriptor = device.descriptor();
+                let block_size = descriptor.block_size as usize;
+                let total_len = descriptor.block_count as usize * block_size;
+                let end = offset.checked_add(len).ok_or(Ext4Error::ReadError)?;
+                if end > total_len {
+                    return Err(Ext4Error::ReadError);
+                }
+                let start_block = offset / block_size;
+                let end_block = (end + block_size - 1) / block_size;
+                let mut blocks = Vec::with_capacity((end_block - start_block) * block_size);
+                for lba in start_block..end_block {
+                    let mut block = vec![0u8; block_size];
+                    crate::drivers::block::BlockDevice::read_block(
+                        &mut device,
+                        lba as u64,
+                        block.as_mut_slice(),
+                    )
+                    .map_err(|_| Ext4Error::ReadError)?;
+                    blocks.extend_from_slice(block.as_slice());
+                }
+                let inner_offset = offset % block_size;
+                Ok(blocks[inner_offset..inner_offset + len].to_vec())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct MountedExt4 {
     pub fs: Ext4FileSystem,
-    pub device_data: Arc<Vec<u8>>,
+    pub storage: Ext4Storage,
 }
 
 /// ext4 dosya sistemini bağlar (mount)
@@ -946,9 +1181,20 @@ pub fn mount_ext4(name: &str, device_data: &[u8]) -> Result<(), Ext4Error> {
         name.to_string(),
         MountedExt4 {
             fs,
-            device_data: Arc::new(device_data.to_vec()),
+            storage: Ext4Storage::Resident(Arc::new(device_data.to_vec())),
         },
     );
+    Ok(())
+}
+
+pub fn mount_ext4_loopback(name: &str, device_name: &str) -> Result<(), Ext4Error> {
+    let mut fs = Ext4FileSystem::new();
+    let storage = Ext4Storage::LoopbackDevice(device_name.to_string());
+    fs.init_from_storage(&storage)?;
+
+    EXT4_INSTANCES
+        .lock()
+        .insert(name.to_string(), MountedExt4 { fs, storage });
     Ok(())
 }
 
@@ -973,6 +1219,21 @@ pub fn unmount_ext4(name: &str) -> bool {
 /// ext4 modülünü başlatır
 pub fn init() {
     crate::serial_println!("[ext4] Modül başlatıldı");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_journal_mount_forces_read_only_policy() {
+        let mut fs = Ext4FileSystem::new();
+        let image = vec![0u8; 8192];
+
+        assert_eq!(fs.init_journal(&image, 0, 4096), Ok(()));
+        assert!(fs.is_read_only());
+        assert_eq!(fs.begin_transaction(1), Err(Ext4Error::WriteError));
+    }
 }
 
 // ============================================================================

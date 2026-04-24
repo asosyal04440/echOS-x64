@@ -20,6 +20,7 @@
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -35,6 +36,7 @@ pub enum VfsFsType {
     Xfs,
     Btrfs,
     Fat32,
+    ExFat,
     Ntfs,
     ProcFs,
     DevFs,
@@ -50,6 +52,7 @@ impl VfsFsType {
             Self::Xfs => "xfs",
             Self::Btrfs => "btrfs",
             Self::Fat32 => "vfat",
+            Self::ExFat => "exfat",
             Self::Ntfs => "ntfs",
             Self::ProcFs => "proc",
             Self::DevFs => "devtmpfs",
@@ -66,6 +69,7 @@ impl VfsFsType {
             "xfs" => Some(Self::Xfs),
             "btrfs" => Some(Self::Btrfs),
             "vfat" | "fat32" | "fat" => Some(Self::Fat32),
+            "exfat" => Some(Self::ExFat),
             "ntfs" => Some(Self::Ntfs),
             "proc" | "procfs" => Some(Self::ProcFs),
             "devtmpfs" | "devfs" => Some(Self::DevFs),
@@ -185,8 +189,9 @@ impl VfsUnified {
         source: &str,
         flags: VfsMountFlags,
     ) {
+        let mount_point = normalize_vfs_path(mount_point);
         let entry = VfsMountEntry {
-            mount_point: String::from(mount_point),
+            mount_point: mount_point.clone(),
             fs_type,
             source: String::from(source),
             flags,
@@ -200,13 +205,14 @@ impl VfsUnified {
             fs_type.as_str()
         );
 
-        self.mount_table.insert(String::from(mount_point), entry);
+        self.mount_table.insert(mount_point, entry);
         self.fs_count += 1;
     }
 
     /// Umount
     pub fn umount(&mut self, mount_point: &str) -> Result<(), &'static str> {
-        if self.mount_table.remove(mount_point).is_some() {
+        let mount_point = normalize_vfs_path(mount_point);
+        if self.mount_table.remove(mount_point.as_str()).is_some() {
             self.fs_count -= 1;
             crate::serial_println!("[VFS] umount: {}", mount_point);
             Ok(())
@@ -217,12 +223,13 @@ impl VfsUnified {
 
     /// Path'e göre hangi dosya sisteminin sorumlu olduğunu bulur
     pub fn resolve_fs(&self, path: &str) -> Option<&VfsMountEntry> {
+        let path = normalize_vfs_path(path);
         // En uzun eşleşen mount point'i bul (longest prefix match)
         let mut best_match: Option<&VfsMountEntry> = None;
         let mut best_len = 0;
 
         for (mp, entry) in &self.mount_table {
-            if path.starts_with(mp.as_str()) && mp.len() > best_len {
+            if mount_matches_path(mp.as_str(), path.as_str()) && mp.len() > best_len {
                 best_match = Some(entry);
                 best_len = mp.len();
             }
@@ -233,10 +240,12 @@ impl VfsUnified {
 
     /// Birleşik open — path'e göre doğru dosya sistemine yönlendirir
     pub fn open(&self, path: &str) -> Result<VfsFileInfo, &'static str> {
+        let normalized_path = normalize_vfs_path(path);
         let entry = self
-            .resolve_fs(path)
-            .ok_or("No filesystem mounted for path")?;
-        let relative_path = path.strip_prefix(&entry.mount_point).unwrap_or(path);
+            .resolve_fs(normalized_path.as_str())
+            .ok_or_else(no_filesystem_for_path)?;
+        let relative_path =
+            relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
 
         match entry.fs_type {
             VfsFsType::ProcFs => {
@@ -264,7 +273,10 @@ impl VfsUnified {
                 if is_mount_root(relative_path) {
                     Ok(directory_info(VfsFsType::DevFs))
                 } else {
-                    Err("devfs: unified open requires a device-specific driver path")
+                    Err(unsupported_vfs_capability(
+                        VfsFsType::DevFs,
+                        VfsUnsupportedCapability::Open,
+                    ))
                 }
             }
             VfsFsType::SysFs => {
@@ -288,7 +300,10 @@ impl VfsUnified {
                 if is_mount_root(relative_path) {
                     Ok(directory_info(VfsFsType::TmpFs))
                 } else {
-                    Err("tmpfs: unified tmpfs data path is not wired")
+                    Err(unsupported_vfs_capability(
+                        VfsFsType::TmpFs,
+                        VfsUnsupportedCapability::Open,
+                    ))
                 }
             }
             VfsFsType::Ext4 => {
@@ -299,32 +314,28 @@ impl VfsUnified {
                 // F2FS dispatch - primary filesystem
                 let f2fs_entry = crate::fs::f2fs::open_entry(relative_path)
                     .map_err(|_| "f2fs: file not found")?;
-                Ok(VfsFileInfo {
-                    inode: 1, // F2fsEntry doesn't expose inode number
-                    size: f2fs_entry.size as u64,
-                    mode: if f2fs_entry.is_dir {
-                        0o040755
-                    } else {
-                        0o100644
-                    },
-                    nlink: 1,
-                    uid: 0,
-                    gid: 0,
-                    fs_type: VfsFsType::F2fs,
-                    block_size: 4096,
-                    blocks: (f2fs_entry.size + 4095) / 4096,
-                })
+                Ok(vfs_info_from_f2fs_entry(&f2fs_entry))
             }
             VfsFsType::Fat32 => {
                 let resolved = resolve_fat32_node(&entry.source, relative_path)?;
                 Ok(vfs_info_from_fat32_file(&resolved))
             }
+            VfsFsType::ExFat => {
+                let resolved = resolve_exfat_node(&entry.source, relative_path)?;
+                Ok(vfs_info_from_exfat_file(&resolved))
+            }
             VfsFsType::Ntfs => {
                 let resolved = resolve_ntfs_node(&entry.source, relative_path)?;
                 Ok(vfs_info_from_ntfs_entry(&resolved))
             }
-            VfsFsType::Xfs => Err("xfs: unified VFS open is not wired to a real backend"),
-            VfsFsType::Btrfs => Err("btrfs: unified VFS open is not wired to a real backend"),
+            VfsFsType::Xfs => Err(unsupported_vfs_capability(
+                VfsFsType::Xfs,
+                VfsUnsupportedCapability::Open,
+            )),
+            VfsFsType::Btrfs => {
+                let resolved = resolve_btrfs_node(&entry.source, relative_path)?;
+                Ok(vfs_info_from_btrfs_inode(&resolved))
+            }
         }
     }
 
@@ -389,8 +400,22 @@ impl VfsUnified {
                         result.push((mp.clone(), entry.fs_type, 0, 0, 0));
                     }
                 }
+                VfsFsType::ExFat => {
+                    if let Ok((total, used, free)) = exfat_capacity(&entry.source) {
+                        result.push((mp.clone(), entry.fs_type, total, used, free));
+                    } else {
+                        result.push((mp.clone(), entry.fs_type, 0, 0, 0));
+                    }
+                }
                 VfsFsType::Ntfs => {
                     if let Ok((total, used, free)) = ntfs_capacity(&entry.source) {
+                        result.push((mp.clone(), entry.fs_type, total, used, free));
+                    } else {
+                        result.push((mp.clone(), entry.fs_type, 0, 0, 0));
+                    }
+                }
+                VfsFsType::Btrfs => {
+                    if let Ok((total, used, free)) = btrfs_capacity(&entry.source) {
                         result.push((mp.clone(), entry.fs_type, total, used, free));
                     } else {
                         result.push((mp.clone(), entry.fs_type, 0, 0, 0));
@@ -406,10 +431,12 @@ impl VfsUnified {
     }
 
     pub fn read_bytes(&self, path: &str) -> Result<Vec<u8>, &'static str> {
+        let normalized_path = normalize_vfs_path(path);
         let entry = self
-            .resolve_fs(path)
-            .ok_or("No filesystem mounted for path")?;
-        let relative_path = path.strip_prefix(&entry.mount_point).unwrap_or(path);
+            .resolve_fs(normalized_path.as_str())
+            .ok_or_else(no_filesystem_for_path)?;
+        let relative_path =
+            relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
 
         match entry.fs_type {
             VfsFsType::ProcFs => {
@@ -429,15 +456,21 @@ impl VfsUnified {
                 }
                 read_sysfs_bytes(relative_path)
             }
-            VfsFsType::DevFs => Err("devfs: unified reads require a device-specific driver path"),
-            VfsFsType::TmpFs => Err("tmpfs: unified tmpfs reads are not wired"),
+            VfsFsType::DevFs => Err(unsupported_vfs_capability(
+                VfsFsType::DevFs,
+                VfsUnsupportedCapability::Read,
+            )),
+            VfsFsType::TmpFs => Err(unsupported_vfs_capability(
+                VfsFsType::TmpFs,
+                VfsUnsupportedCapability::Read,
+            )),
             VfsFsType::F2fs => {
-                let mut buf = alloc::vec![0u8; 4096];
-                if let Ok(n) = crate::fs::f2fs::read_f2fs_file_at(relative_path, 0, &mut buf) {
-                    buf.truncate(n);
-                    return Ok(buf);
+                let entry = crate::fs::f2fs::open_entry(relative_path)
+                    .map_err(|_| "f2fs: file not found")?;
+                if entry.is_dir {
+                    return Err("f2fs: path is a directory");
                 }
-                Err("f2fs: failed to read file")
+                read_f2fs_bytes_exact(relative_path, &entry)
             }
             VfsFsType::Ext4 => {
                 let resolved = resolve_ext4_node(&entry.source, relative_path)?;
@@ -447,7 +480,7 @@ impl VfsUnified {
                 resolved
                     .mounted
                     .fs
-                    .read_file(&resolved.inode, &resolved.mounted.device_data)
+                    .read_file_from_storage(&resolved.inode, &resolved.mounted.storage)
                     .map_err(|_| "ext4: failed to read file")
             }
             VfsFsType::Fat32 => {
@@ -456,6 +489,13 @@ impl VfsUnified {
                     return Err("fat32: path is a directory");
                 }
                 fat32_read_file(&resolved)
+            }
+            VfsFsType::ExFat => {
+                let resolved = resolve_exfat_node(&entry.source, relative_path)?;
+                if resolved.file.is_dir {
+                    return Err("exfat: path is a directory");
+                }
+                exfat_read_file(&resolved)
             }
             VfsFsType::Ntfs => {
                 let resolved = resolve_ntfs_node(&entry.source, relative_path)?;
@@ -468,19 +508,33 @@ impl VfsUnified {
                 resolved
                     .mounted
                     .fs
-                    .read_file(&resolved.entry, &resolved.mounted.device_data)
+                    .read_file_from_storage(&resolved.entry, &resolved.mounted.storage)
                     .map_err(|_| "ntfs: failed to read file")
             }
-            VfsFsType::Xfs => Err("xfs: unified reads are not wired to a real backend"),
-            VfsFsType::Btrfs => Err("btrfs: unified reads are not wired to a real backend"),
+            VfsFsType::Xfs => Err(unsupported_vfs_capability(
+                VfsFsType::Xfs,
+                VfsUnsupportedCapability::Read,
+            )),
+            VfsFsType::Btrfs => {
+                let resolved = resolve_btrfs_node(&entry.source, relative_path)?;
+                if resolved.inode.is_directory() {
+                    return Err("btrfs: path is a directory");
+                }
+                resolved
+                    .mounted
+                    .fs
+                    .read_file_from_storage(resolved.inode_num, &resolved.mounted.storage)
+            }
         }
     }
 
     pub fn list_dir(&self, path: &str) -> Result<Vec<VfsDirEntry>, &'static str> {
+        let normalized_path = normalize_vfs_path(path);
         let entry = self
-            .resolve_fs(path)
-            .ok_or("No filesystem mounted for path")?;
-        let relative_path = path.strip_prefix(&entry.mount_point).unwrap_or(path);
+            .resolve_fs(normalized_path.as_str())
+            .ok_or_else(no_filesystem_for_path)?;
+        let relative_path =
+            relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
 
         match entry.fs_type {
             VfsFsType::ProcFs => list_procfs_dir(relative_path),
@@ -490,7 +544,10 @@ impl VfsUnified {
                 if is_mount_root(relative_path) {
                     Ok(Vec::new())
                 } else {
-                    Err("tmpfs: unified tmpfs directory listing is not wired")
+                    Err(unsupported_vfs_capability(
+                        VfsFsType::TmpFs,
+                        VfsUnsupportedCapability::ListDirectory,
+                    ))
                 }
             }
             VfsFsType::F2fs => crate::fs::f2fs::list_dir(relative_path)
@@ -513,11 +570,13 @@ impl VfsUnified {
                 .map_err(|_| "f2fs: failed to list directory"),
             VfsFsType::Ext4 => list_ext4_dir(&entry.source, relative_path),
             VfsFsType::Fat32 => list_fat32_dir(&entry.source, relative_path),
+            VfsFsType::ExFat => list_exfat_dir(&entry.source, relative_path),
             VfsFsType::Ntfs => list_ntfs_dir(&entry.source, relative_path),
-            VfsFsType::Xfs => Err("xfs: unified directory listing is not wired to a real backend"),
-            VfsFsType::Btrfs => {
-                Err("btrfs: unified directory listing is not wired to a real backend")
-            }
+            VfsFsType::Xfs => Err(unsupported_vfs_capability(
+                VfsFsType::Xfs,
+                VfsUnsupportedCapability::ListDirectory,
+            )),
+            VfsFsType::Btrfs => list_btrfs_dir(&entry.source, relative_path),
         }
     }
 }
@@ -563,6 +622,55 @@ fn is_mount_root(relative_path: &str) -> bool {
     relative_path.is_empty() || relative_path == "/"
 }
 
+fn normalize_vfs_path(path: &str) -> String {
+    let mut components: Vec<String> = Vec::new();
+    for raw in path.split(['/', '\\']) {
+        if raw.is_empty() || raw == "." {
+            continue;
+        }
+        if raw == ".." {
+            if !components.is_empty() {
+                components.pop();
+            }
+            continue;
+        }
+        components.push(raw.to_string());
+    }
+
+    if components.is_empty() {
+        return String::from("/");
+    }
+
+    let mut normalized = String::from("/");
+    normalized.push_str(components[0].as_str());
+    for component in components.iter().skip(1) {
+        normalized.push('/');
+        normalized.push_str(component.as_str());
+    }
+    normalized
+}
+
+fn mount_matches_path(mount_point: &str, path: &str) -> bool {
+    if mount_point == "/" {
+        return path.starts_with('/');
+    }
+    if path == mount_point {
+        return true;
+    }
+    path.strip_prefix(mount_point)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn relative_mount_path<'a>(mount_point: &str, path: &'a str) -> &'a str {
+    if mount_point == "/" {
+        return path;
+    }
+    if path == mount_point {
+        return "/";
+    }
+    path.strip_prefix(mount_point).unwrap_or(path)
+}
+
 fn directory_info(fs_type: VfsFsType) -> VfsFileInfo {
     VfsFileInfo {
         inode: 0,
@@ -574,6 +682,79 @@ fn directory_info(fs_type: VfsFsType) -> VfsFileInfo {
         fs_type,
         block_size: 4096,
         blocks: 0,
+    }
+}
+
+fn vfs_info_from_f2fs_entry(entry: &crate::fs::f2fs::F2fsEntry) -> VfsFileInfo {
+    VfsFileInfo {
+        inode: entry.ino,
+        size: entry.size,
+        mode: if entry.is_dir { 0o040755 } else { 0o100644 },
+        nlink: 1,
+        uid: entry.uid,
+        gid: entry.gid,
+        fs_type: VfsFsType::F2fs,
+        block_size: 4096,
+        blocks: (entry.size + 4095) / 4096,
+    }
+}
+
+fn read_f2fs_bytes_exact(
+    relative_path: &str,
+    entry: &crate::fs::f2fs::F2fsEntry,
+) -> Result<Vec<u8>, &'static str> {
+    let mut buf = vec![0u8; f2fs_exact_read_len(entry)?];
+    let read_len = crate::fs::f2fs::read_f2fs_file_at(relative_path, 0, &mut buf)
+        .map_err(|_| "f2fs: failed to read file")?;
+    buf.truncate(read_len);
+    Ok(buf)
+}
+
+fn f2fs_exact_read_len(entry: &crate::fs::f2fs::F2fsEntry) -> Result<usize, &'static str> {
+    usize::try_from(entry.size).map_err(|_| "f2fs: file too large for host buffer")
+}
+
+#[derive(Clone, Copy)]
+enum VfsUnsupportedCapability {
+    Open,
+    Read,
+    ListDirectory,
+}
+
+fn no_filesystem_for_path() -> &'static str {
+    "No filesystem mounted for path"
+}
+
+fn unsupported_vfs_capability(
+    fs_type: VfsFsType,
+    capability: VfsUnsupportedCapability,
+) -> &'static str {
+    match (fs_type, capability) {
+        (VfsFsType::DevFs, VfsUnsupportedCapability::Open) => {
+            "devfs: unified open requires a device-specific driver path"
+        }
+        (VfsFsType::DevFs, VfsUnsupportedCapability::Read) => {
+            "devfs: unified reads require a device-specific driver path"
+        }
+        (VfsFsType::TmpFs, VfsUnsupportedCapability::Open) => {
+            "tmpfs: unified tmpfs data path is not wired"
+        }
+        (VfsFsType::TmpFs, VfsUnsupportedCapability::Read) => {
+            "tmpfs: unified tmpfs reads are not wired"
+        }
+        (VfsFsType::TmpFs, VfsUnsupportedCapability::ListDirectory) => {
+            "tmpfs: unified tmpfs directory listing is not wired"
+        }
+        (VfsFsType::Xfs, VfsUnsupportedCapability::Open) => {
+            "xfs: unified VFS open is not wired to a real backend"
+        }
+        (VfsFsType::Xfs, VfsUnsupportedCapability::Read) => {
+            "xfs: unified reads are not wired to a real backend"
+        }
+        (VfsFsType::Xfs, VfsUnsupportedCapability::ListDirectory) => {
+            "xfs: unified directory listing is not wired to a real backend"
+        }
+        _ => "vfs: unsupported capability",
     }
 }
 
@@ -600,7 +781,7 @@ fn resolve_ext4_node(source: &str, relative_path: &str) -> Result<ResolvedExt4No
     let mut inode_num = mounted.fs.root_inode;
     let mut inode = mounted
         .fs
-        .root_inode_data(&mounted.device_data)
+        .root_inode_from_storage(&mounted.storage)
         .map_err(|_| "ext4: failed to load root inode")?;
 
     for component in path_components(relative_path) {
@@ -609,7 +790,7 @@ fn resolve_ext4_node(source: &str, relative_path: &str) -> Result<ResolvedExt4No
         }
         let entries = mounted
             .fs
-            .read_dir(&inode, &mounted.device_data)
+            .read_dir_from_storage(&inode, &mounted.storage)
             .map_err(|_| "ext4: failed to read directory")?;
         let child = entries
             .into_iter()
@@ -618,7 +799,7 @@ fn resolve_ext4_node(source: &str, relative_path: &str) -> Result<ResolvedExt4No
         inode_num = child.inode;
         inode = mounted
             .fs
-            .read_inode(child.inode, &mounted.device_data)
+            .read_inode_from_storage(child.inode, &mounted.storage)
             .map_err(|_| "ext4: failed to read inode")?;
     }
 
@@ -651,14 +832,14 @@ fn list_ext4_dir(source: &str, relative_path: &str) -> Result<Vec<VfsDirEntry>, 
     let entries = resolved
         .mounted
         .fs
-        .read_dir(&resolved.inode, &resolved.mounted.device_data)
+        .read_dir_from_storage(&resolved.inode, &resolved.mounted.storage)
         .map_err(|_| "ext4: failed to read directory")?;
     let mut result = Vec::new();
     for entry in entries {
         let inode = resolved
             .mounted
             .fs
-            .read_inode(entry.inode, &resolved.mounted.device_data)
+            .read_inode_from_storage(entry.inode, &resolved.mounted.storage)
             .map_err(|_| "ext4: failed to read inode")?;
         result.push(VfsDirEntry {
             name: entry.name,
@@ -684,47 +865,55 @@ fn parse_fat32_source(source: &str) -> Result<usize, &'static str> {
         .map_err(|_| "fat32: source must be a FAT32 mount index")
 }
 
-fn read_fat32_table<'a>(
-    fs: &crate::fs::fat::Fat32Fs,
-    image: &'a [u8],
-) -> Result<&'a [u8], &'static str> {
-    let offset = fs.fat_start as usize * fs.sector_size as usize;
-    let len = fs.fat_size as usize * fs.sector_size as usize;
-    if offset + len > image.len() {
-        return Err("fat32: FAT table exceeds mounted image");
-    }
-    Ok(&image[offset..offset + len])
+fn parse_exfat_source(source: &str) -> Result<usize, &'static str> {
+    source
+        .strip_prefix("exfat:")
+        .unwrap_or(source)
+        .parse::<usize>()
+        .map_err(|_| "exfat: source must be an exFAT mount index")
 }
 
-fn read_fat32_cluster<'a>(
+fn read_fat32_table<'a>(
     fs: &crate::fs::fat::Fat32Fs,
-    image: &'a [u8],
+    mounted: &crate::fs::fat::MountedFat32,
+) -> Result<Vec<u8>, &'static str> {
+    let offset = fs.fat_start as usize * fs.sector_size as usize;
+    let len = fs.fat_size as usize * fs.sector_size as usize;
+    if offset + len > mounted.storage.image_len()? {
+        return Err("fat32: FAT table exceeds mounted image");
+    }
+    mounted.storage.read_exact(offset, len)
+}
+
+fn read_fat32_cluster(
+    fs: &crate::fs::fat::Fat32Fs,
+    mounted: &crate::fs::fat::MountedFat32,
     cluster: u32,
-) -> Result<&'a [u8], &'static str> {
+) -> Result<Vec<u8>, &'static str> {
     if cluster < 2 {
         return Err("fat32: invalid cluster number");
     }
     let offset = fs.cluster_to_sector(cluster) as usize * fs.sector_size as usize;
     let len = fs.cluster_size as usize;
-    if offset + len > image.len() {
+    if offset + len > mounted.storage.image_len()? {
         return Err("fat32: cluster exceeds mounted image");
     }
-    Ok(&image[offset..offset + len])
+    mounted.storage.read_exact(offset, len)
 }
 
 fn read_fat32_chain(
-    fs: &crate::fs::fat::Fat32Fs,
-    image: &[u8],
+    mounted: &crate::fs::fat::MountedFat32,
     start_cluster: u32,
 ) -> Result<Vec<u8>, &'static str> {
-    let fat = read_fat32_table(fs, image)?;
+    let fat = read_fat32_table(&mounted.fs, mounted)?;
     let mut data = Vec::new();
     let mut cluster = start_cluster;
 
-    for _ in 0..fs.total_clusters.max(1) {
-        data.extend_from_slice(read_fat32_cluster(fs, image, cluster)?);
-        let next = fs.read_fat_entry(fat, cluster);
-        if fs.is_eof(next) {
+    for _ in 0..mounted.fs.total_clusters.max(1) {
+        let cluster_data = read_fat32_cluster(&mounted.fs, mounted, cluster)?;
+        data.extend_from_slice(cluster_data.as_slice());
+        let next = mounted.fs.read_fat_entry(fat.as_slice(), cluster);
+        if mounted.fs.is_eof(next) {
             return Ok(data);
         }
         if next < 2 || next == cluster {
@@ -737,11 +926,10 @@ fn read_fat32_chain(
 }
 
 fn read_fat32_dir(
-    fs: &crate::fs::fat::Fat32Fs,
-    image: &[u8],
+    mounted: &crate::fs::fat::MountedFat32,
     cluster: u32,
 ) -> Result<Vec<crate::fs::fat::Fat32File>, &'static str> {
-    let dir_data = read_fat32_chain(fs, image, cluster)?;
+    let dir_data = read_fat32_chain(mounted, cluster)?;
     let mut files = Vec::new();
 
     for chunk in dir_data.chunks_exact(32) {
@@ -784,10 +972,10 @@ fn resolve_fat32_node(
     let mut current_file: Option<crate::fs::fat::Fat32File> = None;
 
     for component in path_components(relative_path) {
-        let entries = read_fat32_dir(&mounted.fs, &mounted.image, current_cluster)?;
+        let entries = read_fat32_dir(&mounted, current_cluster)?;
         let entry = entries
             .into_iter()
-            .find(|entry| entry.name.eq_ignore_ascii_case(component))
+            .find(|entry| entry.name.eq_ignore_ascii_case(&component))
             .ok_or("fat32: file not found")?;
         current_cluster = entry.cluster;
         current_file = Some(entry);
@@ -802,11 +990,7 @@ fn fat32_read_file(resolved: &ResolvedFat32Node) -> Result<Vec<u8>, &'static str
     if resolved.file.size == 0 {
         return Ok(Vec::new());
     }
-    let mut data = read_fat32_chain(
-        &resolved.mounted.fs,
-        &resolved.mounted.image,
-        resolved.file.cluster,
-    )?;
+    let mut data = read_fat32_chain(&resolved.mounted, resolved.file.cluster)?;
     data.truncate(resolved.file.size as usize);
     Ok(data)
 }
@@ -821,7 +1005,7 @@ fn list_fat32_dir(source: &str, relative_path: &str) -> Result<Vec<VfsDirEntry>,
     } else {
         resolved.file.cluster
     };
-    let entries = read_fat32_dir(&resolved.mounted.fs, &resolved.mounted.image, cluster)?;
+    let entries = read_fat32_dir(&resolved.mounted, cluster)?;
     Ok(entries
         .into_iter()
         .map(|entry| VfsDirEntry {
@@ -856,10 +1040,10 @@ fn fat32_capacity(source: &str) -> Result<(u64, u64, u64), &'static str> {
     let index = parse_fat32_source(source)?;
     let mounted = crate::fs::fat::get_mounted_fat32(index)
         .ok_or("fat32: backend not mounted for source index")?;
-    let fat = read_fat32_table(&mounted.fs, &mounted.image)?;
+    let fat = read_fat32_table(&mounted.fs, &mounted)?;
     let mut free_clusters = 0u64;
     for cluster in 2..mounted.fs.total_clusters {
-        if mounted.fs.read_fat_entry(fat, cluster) == 0 {
+        if mounted.fs.read_fat_entry(fat.as_slice(), cluster) == 0 {
             free_clusters += 1;
         }
     }
@@ -867,6 +1051,293 @@ fn fat32_capacity(source: &str) -> Result<(u64, u64, u64), &'static str> {
     let total = total_clusters.saturating_mul(mounted.fs.cluster_size as u64);
     let free = free_clusters.saturating_mul(mounted.fs.cluster_size as u64);
     let used = total.saturating_sub(free);
+    Ok((total, used, free))
+}
+
+#[derive(Clone)]
+struct ResolvedExFatNode {
+    mounted: crate::fs::fat::MountedExFat,
+    file: ExFatFileRecord,
+}
+
+#[derive(Clone, Debug)]
+struct ExFatFileRecord {
+    name: String,
+    cluster: u32,
+    size: u64,
+    is_dir: bool,
+    attributes: u16,
+    no_fat_chain: bool,
+}
+
+const EXFAT_ENTRY_FILE: u8 = 0x85;
+const EXFAT_ENTRY_STREAM: u8 = 0xC0;
+const EXFAT_ENTRY_FILENAME: u8 = 0xC1;
+const EXFAT_ENTRY_END: u8 = 0x00;
+const EXFAT_ATTR_DIRECTORY: u16 = 0x0010;
+const EXFAT_FLAG_NO_FAT_CHAIN: u8 = 0x02;
+
+fn read_exfat_fat(
+    fs: &crate::fs::fat::ExFatFs,
+    mounted: &crate::fs::fat::MountedExFat,
+) -> Result<Vec<u8>, &'static str> {
+    let offset = fs.fat_offset as usize * fs.sector_size as usize;
+    let len = fs.fat_length as usize * fs.sector_size as usize;
+    if offset + len > mounted.storage.image_len()? {
+        return Err("exfat: FAT exceeds mounted image");
+    }
+    mounted.storage.read_exact(offset, len)
+}
+
+fn read_exfat_cluster(
+    fs: &crate::fs::fat::ExFatFs,
+    mounted: &crate::fs::fat::MountedExFat,
+    cluster: u32,
+) -> Result<Vec<u8>, &'static str> {
+    if cluster < 2 {
+        return Err("exfat: invalid cluster number");
+    }
+    let offset = fs.cluster_to_sector(cluster) as usize * fs.sector_size as usize;
+    let len = fs.cluster_size as usize;
+    if offset + len > mounted.storage.image_len()? {
+        return Err("exfat: cluster exceeds mounted image");
+    }
+    mounted.storage.read_exact(offset, len)
+}
+
+fn read_exfat_chain(
+    mounted: &crate::fs::fat::MountedExFat,
+    start_cluster: u32,
+    size_hint: u64,
+    no_fat_chain: bool,
+) -> Result<Vec<u8>, &'static str> {
+    if start_cluster < 2 {
+        return Ok(Vec::new());
+    }
+    let mut data = Vec::new();
+    let cluster_size = mounted.fs.cluster_size as usize;
+    if no_fat_chain {
+        let clusters = if size_hint == 0 {
+            1
+        } else {
+            (size_hint as usize).div_ceil(cluster_size)
+        };
+        for cluster in start_cluster..start_cluster.saturating_add(clusters as u32) {
+            let cluster_data = read_exfat_cluster(&mounted.fs, mounted, cluster)?;
+            data.extend_from_slice(cluster_data.as_slice());
+        }
+        if size_hint > 0 {
+            data.truncate(size_hint as usize);
+        }
+        return Ok(data);
+    }
+
+    let fat = read_exfat_fat(&mounted.fs, mounted)?;
+    let mut cluster = start_cluster;
+    for _ in 0..mounted.fs.cluster_count.max(1) {
+        let cluster_data = read_exfat_cluster(&mounted.fs, mounted, cluster)?;
+        data.extend_from_slice(cluster_data.as_slice());
+        let next = mounted.fs.read_fat_entry(fat.as_slice(), cluster);
+        if mounted.fs.is_eof(next) {
+            break;
+        }
+        if next < 2 || next == cluster {
+            return Err("exfat: corrupted cluster chain");
+        }
+        cluster = next;
+        if size_hint > 0 && data.len() >= size_hint as usize {
+            break;
+        }
+    }
+    if size_hint > 0 {
+        data.truncate(size_hint as usize);
+    }
+    Ok(data)
+}
+
+fn read_exfat_dir(
+    mounted: &crate::fs::fat::MountedExFat,
+    cluster: u32,
+    size_hint: u64,
+    no_fat_chain: bool,
+) -> Result<Vec<ExFatFileRecord>, &'static str> {
+    let dir_data = read_exfat_chain(mounted, cluster, size_hint, no_fat_chain)?;
+    let mut files = Vec::new();
+    let mut index = 0usize;
+
+    while index + 32 <= dir_data.len() {
+        let entry_type = dir_data[index];
+        if entry_type == EXFAT_ENTRY_END {
+            break;
+        }
+        if entry_type != EXFAT_ENTRY_FILE {
+            index += 32;
+            continue;
+        }
+        let primary: crate::fs::fat::ExFatFileAttribute =
+            unsafe { core::ptr::read_unaligned(dir_data[index..].as_ptr() as *const _) };
+        let secondary_count = primary.entry_count as usize;
+        if secondary_count == 0 || index + 32 * (secondary_count + 1) > dir_data.len() {
+            break;
+        }
+        let stream_offset = index + 32;
+        if dir_data[stream_offset] != EXFAT_ENTRY_STREAM {
+            index += 32 * (secondary_count + 1);
+            continue;
+        }
+        let stream: crate::fs::fat::ExFatStreamExtension =
+            unsafe { core::ptr::read_unaligned(dir_data[stream_offset..].as_ptr() as *const _) };
+        let mut name_utf16 = Vec::new();
+        for name_index in 0..secondary_count.saturating_sub(1) {
+            let offset = stream_offset + 32 + name_index * 32;
+            if dir_data[offset] != EXFAT_ENTRY_FILENAME {
+                continue;
+            }
+            let name_entry: crate::fs::fat::ExFatFileName =
+                unsafe { core::ptr::read_unaligned(dir_data[offset..].as_ptr() as *const _) };
+            for code_unit in name_entry.name {
+                if code_unit == 0 {
+                    break;
+                }
+                name_utf16.push(code_unit);
+            }
+        }
+        let name = String::from_utf16_lossy(&name_utf16);
+        files.push(ExFatFileRecord {
+            name,
+            cluster: stream.first_cluster,
+            size: stream.data_length,
+            is_dir: (primary.attributes & EXFAT_ATTR_DIRECTORY) != 0,
+            attributes: primary.attributes,
+            no_fat_chain: (stream.general_secondary_flags & EXFAT_FLAG_NO_FAT_CHAIN) != 0,
+        });
+        index += 32 * (secondary_count + 1);
+    }
+
+    Ok(files)
+}
+
+fn resolve_exfat_node(
+    source: &str,
+    relative_path: &str,
+) -> Result<ResolvedExFatNode, &'static str> {
+    let index = parse_exfat_source(source)?;
+    let mounted = crate::fs::fat::get_mounted_exfat(index)
+        .ok_or("exfat: backend not mounted for source index")?;
+
+    if is_mount_root(relative_path) {
+        return Ok(ResolvedExFatNode {
+            mounted,
+            file: ExFatFileRecord {
+                name: String::from("/"),
+                cluster: 0,
+                size: 0,
+                is_dir: true,
+                attributes: EXFAT_ATTR_DIRECTORY,
+                no_fat_chain: false,
+            },
+        });
+    }
+
+    let mut current = ExFatFileRecord {
+        name: String::from("/"),
+        cluster: mounted.fs.root_cluster,
+        size: 0,
+        is_dir: true,
+        attributes: EXFAT_ATTR_DIRECTORY,
+        no_fat_chain: false,
+    };
+    for component in path_components(relative_path) {
+        if !current.is_dir {
+            return Err("exfat: parent path is not a directory");
+        }
+        let entries = read_exfat_dir(
+            &mounted,
+            current.cluster,
+            current.size,
+            current.no_fat_chain,
+        )?;
+        current = entries
+            .into_iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(&component))
+            .ok_or("exfat: file not found")?;
+    }
+
+    Ok(ResolvedExFatNode {
+        mounted,
+        file: current,
+    })
+}
+
+fn exfat_read_file(resolved: &ResolvedExFatNode) -> Result<Vec<u8>, &'static str> {
+    read_exfat_chain(
+        &resolved.mounted,
+        resolved.file.cluster,
+        resolved.file.size,
+        resolved.file.no_fat_chain,
+    )
+}
+
+fn list_exfat_dir(source: &str, relative_path: &str) -> Result<Vec<VfsDirEntry>, &'static str> {
+    let resolved = resolve_exfat_node(source, relative_path)?;
+    if !resolved.file.is_dir {
+        return Err("exfat: path is not a directory");
+    }
+    let cluster = if resolved.file.cluster == 0 {
+        resolved.mounted.fs.root_cluster
+    } else {
+        resolved.file.cluster
+    };
+    let entries = read_exfat_dir(
+        &resolved.mounted,
+        cluster,
+        resolved.file.size,
+        resolved.file.no_fat_chain,
+    )?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| VfsDirEntry {
+            name: entry.name,
+            size: entry.size,
+            is_directory: entry.is_dir,
+            fs_type: VfsFsType::ExFat,
+        })
+        .collect())
+}
+
+fn vfs_info_from_exfat_file(resolved: &ResolvedExFatNode) -> VfsFileInfo {
+    VfsFileInfo {
+        inode: resolved.file.cluster as u64,
+        size: resolved.file.size,
+        mode: if resolved.file.is_dir {
+            0o040755
+        } else {
+            0o100644
+        },
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        fs_type: VfsFsType::ExFat,
+        block_size: resolved.mounted.fs.cluster_size,
+        blocks: resolved
+            .file
+            .size
+            .div_ceil(resolved.mounted.fs.cluster_size as u64),
+    }
+}
+
+fn exfat_capacity(source: &str) -> Result<(u64, u64, u64), &'static str> {
+    let index = parse_exfat_source(source)?;
+    let mounted = crate::fs::fat::get_mounted_exfat(index)
+        .ok_or("exfat: backend not mounted for source index")?;
+    let total = mounted
+        .fs
+        .cluster_count
+        .saturating_sub(2)
+        .saturating_mul(mounted.fs.cluster_size) as u64;
+    let percent = mounted.fs.boot_sector.percent_in_use.min(100) as u64;
+    let used = total.saturating_mul(percent) / 100;
+    let free = total.saturating_sub(used);
     Ok((total, used, free))
 }
 
@@ -882,7 +1353,7 @@ fn resolve_ntfs_node(source: &str, relative_path: &str) -> Result<ResolvedNtfsNo
         crate::fs::ntfs::get_mounted_ntfs(source).ok_or("ntfs: backend not mounted for source")?;
     let entry = mounted
         .fs
-        .resolve_path(relative_path, &mounted.device_data)
+        .resolve_path_from_storage(relative_path, &mounted.storage)
         .map_err(|_| "ntfs: file not found")?;
     let metadata = mounted.fs.get_metadata(&entry);
     Ok(ResolvedNtfsNode {
@@ -926,7 +1397,7 @@ fn ntfs_capacity(source: &str) -> Result<(u64, u64, u64), &'static str> {
         crate::fs::ntfs::get_mounted_ntfs(source).ok_or("ntfs: backend not mounted for source")?;
     mounted
         .fs
-        .bitmap_usage(&mounted.device_data)
+        .bitmap_usage_from_storage(&mounted.storage)
         .map_err(|_| "ntfs: failed to read allocation bitmap")
 }
 
@@ -941,7 +1412,7 @@ fn list_ntfs_dir(source: &str, relative_path: &str) -> Result<Vec<VfsDirEntry>, 
     let entries = resolved
         .mounted
         .fs
-        .list_directory(resolved.entry.entry_number, &resolved.mounted.device_data)
+        .list_directory_from_storage(resolved.entry.entry_number, &resolved.mounted.storage)
         .map_err(|_| "ntfs: failed to list directory")?;
     Ok(entries
         .into_iter()
@@ -950,6 +1421,82 @@ fn list_ntfs_dir(source: &str, relative_path: &str) -> Result<Vec<VfsDirEntry>, 
             size: entry.size,
             is_directory: matches!(entry.file_type, crate::fs::ntfs::NtfsFileType::Directory),
             fs_type: VfsFsType::Ntfs,
+        })
+        .collect())
+}
+
+#[derive(Clone)]
+struct ResolvedBtrfsNode {
+    mounted: crate::fs::btrfs::MountedBtrfs,
+    inode_num: u64,
+    inode: crate::fs::btrfs::BtrfsInodeItem,
+}
+
+fn resolve_btrfs_node(
+    source: &str,
+    relative_path: &str,
+) -> Result<ResolvedBtrfsNode, &'static str> {
+    let mounted = crate::fs::btrfs::get_mounted_btrfs(source)
+        .ok_or("btrfs: backend not mounted for source")?;
+    let inode_num = mounted
+        .fs
+        .resolve_path(relative_path)
+        .map_err(|_| "btrfs: file not found")?;
+    let inode = mounted.fs.get_inode(inode_num)?;
+    Ok(ResolvedBtrfsNode {
+        mounted,
+        inode_num,
+        inode,
+    })
+}
+
+fn vfs_info_from_btrfs_inode(resolved: &ResolvedBtrfsNode) -> VfsFileInfo {
+    let inode = &resolved.inode;
+    let block_size = resolved.mounted.fs.superblock.sector_size;
+    VfsFileInfo {
+        inode: resolved.inode_num,
+        size: inode.size,
+        mode: inode.mode,
+        nlink: inode.nlink,
+        uid: inode.uid,
+        gid: inode.gid,
+        fs_type: VfsFsType::Btrfs,
+        block_size,
+        blocks: if block_size == 0 {
+            0
+        } else {
+            inode.size.div_ceil(block_size as u64)
+        },
+    }
+}
+
+fn btrfs_capacity(source: &str) -> Result<(u64, u64, u64), &'static str> {
+    let mounted = crate::fs::btrfs::get_mounted_btrfs(source)
+        .ok_or("btrfs: backend not mounted for source")?;
+    let total = mounted.fs.superblock.total_size();
+    let used = mounted.fs.superblock.used_size();
+    let free = mounted.fs.superblock.free_size();
+    Ok((total, used, free))
+}
+
+fn list_btrfs_dir(source: &str, relative_path: &str) -> Result<Vec<VfsDirEntry>, &'static str> {
+    let resolved = resolve_btrfs_node(source, relative_path)?;
+    let entries = resolved.mounted.fs.list_directory(resolved.inode_num)?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            let (size, is_directory) = resolved
+                .mounted
+                .fs
+                .get_inode(entry.inode)
+                .map(|inode| (inode.size, inode.is_directory()))
+                .unwrap_or((0, entry.file_type == crate::fs::btrfs::BTRFS_FT_DIR));
+            VfsDirEntry {
+                name: entry.name,
+                size,
+                is_directory,
+                fs_type: VfsFsType::Btrfs,
+            }
         })
         .collect())
 }
@@ -1018,10 +1565,13 @@ fn list_devfs_dir(relative_path: &str) -> Result<Vec<VfsDirEntry>, &'static str>
         .collect())
 }
 
-fn path_components(path: &str) -> impl Iterator<Item = &str> {
-    path.trim_matches('/')
+fn path_components(path: &str) -> Vec<String> {
+    normalize_vfs_path(path)
+        .trim_matches('/')
         .split('/')
         .filter(|component| !component.is_empty() && *component != ".")
+        .map(|component| component.to_string())
+        .collect()
 }
 
 // ============================================================================
@@ -1062,8 +1612,12 @@ pub fn list_dir(path: &str) -> Result<Vec<VfsDirEntry>, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{VfsFsType, VfsMountFlags, VfsUnified};
+    use super::{
+        f2fs_exact_read_len, no_filesystem_for_path, unsupported_vfs_capability,
+        vfs_info_from_f2fs_entry, VfsFsType, VfsMountFlags, VfsUnified, VfsUnsupportedCapability,
+    };
     use alloc::format;
+    use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -1108,6 +1662,64 @@ mod tests {
             vfs.read_bytes("/proc/definitely-not-real"),
             Err("procfs: entry not found")
         );
+    }
+
+    #[test]
+    fn mount_resolution_normalizes_separators_and_respects_boundaries() {
+        let mut vfs = VfsUnified::new();
+        vfs.mount("/", VfsFsType::TmpFs, "tmpfs", VfsMountFlags::default());
+        vfs.mount(
+            "/mnt",
+            VfsFsType::Ext4,
+            "ext4:test",
+            VfsMountFlags::default(),
+        );
+        vfs.mount(
+            "/mnt-data",
+            VfsFsType::Ntfs,
+            "ntfs:test",
+            VfsMountFlags::default(),
+        );
+
+        let ext4 = vfs
+            .resolve_fs("\\mnt\\folder\\hello.txt")
+            .expect("normalized ext4 route");
+        assert_eq!(ext4.mount_point, "/mnt");
+        assert_eq!(ext4.fs_type, VfsFsType::Ext4);
+
+        let ntfs = vfs.resolve_fs("/mnt-data/report.txt").expect("ntfs route");
+        assert_eq!(ntfs.mount_point, "/mnt-data");
+        assert_eq!(ntfs.fs_type, VfsFsType::Ntfs);
+
+        let root = vfs.resolve_fs("/mntpoint.txt").expect("root fallback");
+        assert_eq!(root.mount_point, "/");
+        assert_eq!(root.fs_type, VfsFsType::TmpFs);
+    }
+
+    #[test]
+    fn normalize_path_collapses_dotdot_without_escaping_root() {
+        assert_eq!(
+            super::normalize_vfs_path("/proc/../etc/shadow"),
+            "/etc/shadow"
+        );
+        assert_eq!(
+            super::normalize_vfs_path("/../../etc/passwd"),
+            "/etc/passwd"
+        );
+        assert_eq!(super::normalize_vfs_path("\\mnt\\..\\tmp\\./a"), "/tmp/a");
+    }
+
+    #[test]
+    fn resolve_path_rejects_mount_boundary_bypass_via_dotdot() {
+        let mut vfs = VfsUnified::new();
+        vfs.mount("/", VfsFsType::TmpFs, "tmpfs", VfsMountFlags::default());
+        vfs.mount("/proc", VfsFsType::ProcFs, "proc", VfsMountFlags::default());
+
+        let resolved = vfs
+            .resolve_fs("/proc/../etc/passwd")
+            .expect("normalized path should resolve");
+        assert_eq!(resolved.mount_point, "/");
+        assert_eq!(resolved.fs_type, VfsFsType::TmpFs);
     }
 
     #[test]
@@ -1156,6 +1768,162 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert!(entries.iter().any(|entry| entry.name == "$Bitmap"));
         assert!(entries.iter().any(|entry| entry.name == "hello.txt"));
+    }
+
+    #[test]
+    fn btrfs_mounted_backend_supports_open_read_list_and_df() {
+        let image = btrfs_test_image();
+        crate::fs::btrfs::mount_named_from_data("btrfs:test", &image, "/btrfs")
+            .expect("btrfs mount");
+        let mut vfs = VfsUnified::new();
+        vfs.mount(
+            "/btrfs",
+            VfsFsType::Btrfs,
+            "btrfs:test",
+            VfsMountFlags::default(),
+        );
+
+        let info = vfs.open("/btrfs/hello.txt").expect("btrfs open");
+        assert_eq!(info.inode, 257);
+        assert_eq!(info.size, 5);
+        assert_eq!(
+            vfs.read_bytes("/btrfs/hello.txt").expect("btrfs read"),
+            b"hello"
+        );
+        assert_eq!(
+            vfs.read_bytes("/btrfs/inline.txt")
+                .expect("btrfs inline read"),
+            b"inline"
+        );
+
+        let entries = vfs.list_dir("/btrfs").expect("btrfs list");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| entry.name == "hello.txt"));
+        assert!(entries.iter().any(|entry| entry.name == "inline.txt"));
+
+        let summary = vfs.df_summary();
+        let (_, fs_type, total, used, free) = summary
+            .into_iter()
+            .find(|(mount_point, _, _, _, _)| mount_point == "/btrfs")
+            .expect("btrfs df row");
+        assert_eq!(fs_type, VfsFsType::Btrfs);
+        assert_eq!(total, 0x40000);
+        assert_eq!(used + free, total);
+    }
+
+    #[test]
+    fn btrfs_mount_rejects_multi_device_image() {
+        let image = btrfs_test_image_with_params(2, 0);
+        let err = crate::fs::btrfs::mount_named_from_data("btrfs:multi", &image, "/btrfs")
+            .expect_err("multi-device mount must fail closed");
+        assert_eq!(err, "btrfs: multi-device volumes are not supported");
+    }
+
+    #[test]
+    fn btrfs_mount_rejects_compressed_extent_image() {
+        let image = btrfs_test_image_with_params(1, 1);
+        let err = crate::fs::btrfs::mount_named_from_data("btrfs:compressed", &image, "/btrfs")
+            .expect_err("compressed extent mount must fail closed");
+        assert_eq!(err, "btrfs: compressed extents are not supported");
+    }
+
+    #[test]
+    fn xfs_unwired_capabilities_share_one_contract_surface() {
+        let mut vfs = VfsUnified::new();
+        vfs.mount("/xfs", VfsFsType::Xfs, "xfs:test", VfsMountFlags::default());
+
+        assert_eq!(
+            vfs.open("/xfs/file.txt").unwrap_err(),
+            unsupported_vfs_capability(VfsFsType::Xfs, VfsUnsupportedCapability::Open)
+        );
+        assert_eq!(
+            vfs.read_bytes("/xfs/file.txt").unwrap_err(),
+            unsupported_vfs_capability(VfsFsType::Xfs, VfsUnsupportedCapability::Read)
+        );
+        assert_eq!(
+            vfs.list_dir("/xfs").unwrap_err(),
+            unsupported_vfs_capability(VfsFsType::Xfs, VfsUnsupportedCapability::ListDirectory)
+        );
+
+        let (_, _, total, used, free) = vfs
+            .df_summary()
+            .into_iter()
+            .find(|(mount_point, _, _, _, _)| mount_point == "/xfs")
+            .expect("xfs df row");
+        assert_eq!((total, used, free), (0, 0, 0));
+    }
+
+    #[test]
+    fn missing_mount_contract_is_shared_across_open_read_and_list() {
+        let vfs = VfsUnified::new();
+        assert_eq!(
+            vfs.open("/missing/file.txt").unwrap_err(),
+            no_filesystem_for_path()
+        );
+        assert_eq!(
+            vfs.read_bytes("/missing/file.txt"),
+            Err(no_filesystem_for_path())
+        );
+        assert_eq!(
+            vfs.list_dir("/missing").unwrap_err(),
+            no_filesystem_for_path()
+        );
+    }
+
+    #[test]
+    fn f2fs_vfs_info_preserves_real_inode_identity() {
+        let info = vfs_info_from_f2fs_entry(&crate::fs::f2fs::F2fsEntry {
+            ino: 77,
+            name: String::from("/demo.txt"),
+            size: 8193,
+            is_dir: false,
+            mode: 0o600,
+            uid: 1000,
+            gid: 1001,
+        });
+        assert_eq!(info.inode, 77);
+        assert_eq!(info.size, 8193);
+        assert_eq!(info.blocks, 3);
+        assert_eq!(info.uid, 1000);
+        assert_eq!(info.gid, 1001);
+    }
+
+    #[test]
+    fn f2fs_exact_read_len_tracks_full_file_size() {
+        let len = f2fs_exact_read_len(&crate::fs::f2fs::F2fsEntry {
+            ino: 88,
+            name: String::from("/large.bin"),
+            size: 8193,
+            is_dir: false,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        })
+        .expect("f2fs read len");
+        assert_eq!(len, 8193);
+    }
+
+    #[test]
+    fn exfat_mounted_backend_supports_open_and_read() {
+        let image = exfat_test_image();
+        let index = crate::fs::fat::mount_exfat(&image).expect("exfat mount");
+        let mut vfs = VfsUnified::new();
+        vfs.mount(
+            "/exfat",
+            VfsFsType::ExFat,
+            &format!("exfat:{}", index),
+            VfsMountFlags::default(),
+        );
+
+        let info = vfs.open("/exfat/HELLO.TXT").expect("exfat open");
+        assert_eq!(info.size, 5);
+        assert_eq!(
+            vfs.read_bytes("/exfat/HELLO.TXT").expect("exfat read"),
+            b"hello"
+        );
+        let entries = vfs.list_dir("/exfat").expect("exfat list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "HELLO.TXT");
     }
 
     fn fat32_test_image() -> Vec<u8> {
@@ -1221,6 +1989,347 @@ mod tests {
         );
 
         image
+    }
+
+    fn exfat_test_image() -> Vec<u8> {
+        let mut image = vec![0u8; 4 * 512];
+        image[3..11].copy_from_slice(b"EXFAT   ");
+        image[80..84].copy_from_slice(&1u32.to_le_bytes()); // fat offset
+        image[84..88].copy_from_slice(&1u32.to_le_bytes()); // fat length
+        image[88..92].copy_from_slice(&2u32.to_le_bytes()); // cluster heap offset
+        image[92..96].copy_from_slice(&4u32.to_le_bytes()); // cluster count
+        image[96..100].copy_from_slice(&2u32.to_le_bytes()); // root cluster
+        image[104..106].copy_from_slice(&0x0100u16.to_le_bytes()); // revision 1.0
+        image[108] = 9; // 512-byte sectors
+        image[109] = 0; // 1 sector per cluster
+        image[110] = 1; // one FAT
+        image[510..512].copy_from_slice(&0xAA55u16.to_le_bytes());
+
+        let fat = 512;
+        image[fat + 8..fat + 12].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // cluster 2 eof
+        image[fat + 12..fat + 16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // cluster 3 eof
+
+        let root = 2 * 512;
+        image[root] = 0x85;
+        image[root + 1] = 2;
+        image[root + 4..root + 6].copy_from_slice(&0x20u16.to_le_bytes());
+        image[root + 32] = 0xC0;
+        image[root + 33] = 0;
+        image[root + 35] = 9;
+        image[root + 52..root + 56].copy_from_slice(&3u32.to_le_bytes());
+        image[root + 56..root + 64].copy_from_slice(&5u64.to_le_bytes());
+        image[root + 64] = 0xC1;
+        let name = "HELLO.TXT".encode_utf16().collect::<Vec<_>>();
+        for (index, code_unit) in name.iter().enumerate() {
+            let offset = root + 66 + index * 2;
+            image[offset..offset + 2].copy_from_slice(&code_unit.to_le_bytes());
+        }
+
+        let file = 3 * 512;
+        image[file..file + 5].copy_from_slice(b"hello");
+        image
+    }
+
+    fn btrfs_test_image() -> Vec<u8> {
+        btrfs_test_image_with_params(1, 0)
+    }
+
+    fn btrfs_test_image_with_params(num_devices: u64, regular_extent_compression: u8) -> Vec<u8> {
+        const IMAGE_LEN: usize = 0x40000;
+        const ROOT_TREE_LOGICAL: u64 = 0x20000;
+        const CHUNK_TREE_LOGICAL: u64 = 0x21000;
+        const FS_TREE_LOGICAL: u64 = 0x22000;
+        const DATA_LOGICAL: u64 = 0x23000;
+        const NODE_SIZE: usize = 4096;
+
+        let fsid = *b"btrfs-test-fsid!";
+        let mut image = vec![0u8; IMAGE_LEN];
+
+        let chunk_key = crate::fs::btrfs::BtrfsKey {
+            objectid: crate::fs::btrfs::BTRFS_FIRST_CHUNK_TREE_OBJECTID,
+            item_type: crate::fs::btrfs::BTRFS_CHUNK_ITEM_KEY,
+            offset: 0,
+        };
+        let chunk_item = chunk_item_bytes(IMAGE_LEN as u64, fsid);
+        let root_item = root_item_bytes(FS_TREE_LOGICAL, 256);
+
+        let root_tree = build_btrfs_leaf(
+            crate::fs::btrfs::BTRFS_ROOT_TREE_OBJECTID,
+            ROOT_TREE_LOGICAL,
+            fsid,
+            vec![(
+                crate::fs::btrfs::BtrfsKey {
+                    objectid: crate::fs::btrfs::BTRFS_FS_TREE_OBJECTID,
+                    item_type: crate::fs::btrfs::BTRFS_ROOT_ITEM_KEY,
+                    offset: 1,
+                },
+                root_item,
+            )],
+        );
+        let chunk_tree = build_btrfs_leaf(
+            crate::fs::btrfs::BTRFS_CHUNK_TREE_OBJECTID,
+            CHUNK_TREE_LOGICAL,
+            fsid,
+            vec![(chunk_key, chunk_item.clone())],
+        );
+        let fs_tree = build_btrfs_leaf(
+            crate::fs::btrfs::BTRFS_FS_TREE_OBJECTID,
+            FS_TREE_LOGICAL,
+            fsid,
+            vec![
+                (
+                    crate::fs::btrfs::BtrfsKey {
+                        objectid: 256,
+                        item_type: crate::fs::btrfs::BTRFS_INODE_ITEM_KEY,
+                        offset: 0,
+                    },
+                    inode_item_bytes(0o040755, 0, 1),
+                ),
+                (
+                    crate::fs::btrfs::BtrfsKey {
+                        objectid: 256,
+                        item_type: crate::fs::btrfs::BTRFS_DIR_INDEX_KEY,
+                        offset: 2,
+                    },
+                    dir_item_bytes(257, "hello.txt", crate::fs::btrfs::BTRFS_FT_REG_FILE),
+                ),
+                (
+                    crate::fs::btrfs::BtrfsKey {
+                        objectid: 256,
+                        item_type: crate::fs::btrfs::BTRFS_DIR_INDEX_KEY,
+                        offset: 3,
+                    },
+                    dir_item_bytes(258, "inline.txt", crate::fs::btrfs::BTRFS_FT_REG_FILE),
+                ),
+                (
+                    crate::fs::btrfs::BtrfsKey {
+                        objectid: 257,
+                        item_type: crate::fs::btrfs::BTRFS_INODE_ITEM_KEY,
+                        offset: 0,
+                    },
+                    inode_item_bytes(0o100644, 5, 1),
+                ),
+                (
+                    crate::fs::btrfs::BtrfsKey {
+                        objectid: 257,
+                        item_type: crate::fs::btrfs::BTRFS_EXTENT_DATA_KEY,
+                        offset: 0,
+                    },
+                    regular_extent_bytes(
+                        DATA_LOGICAL,
+                        NODE_SIZE as u64,
+                        5,
+                        regular_extent_compression,
+                    ),
+                ),
+                (
+                    crate::fs::btrfs::BtrfsKey {
+                        objectid: 258,
+                        item_type: crate::fs::btrfs::BTRFS_INODE_ITEM_KEY,
+                        offset: 0,
+                    },
+                    inode_item_bytes(0o100644, 6, 1),
+                ),
+                (
+                    crate::fs::btrfs::BtrfsKey {
+                        objectid: 258,
+                        item_type: crate::fs::btrfs::BTRFS_EXTENT_DATA_KEY,
+                        offset: 0,
+                    },
+                    inline_extent_bytes(b"inline"),
+                ),
+            ],
+        );
+
+        image[ROOT_TREE_LOGICAL as usize..ROOT_TREE_LOGICAL as usize + NODE_SIZE]
+            .copy_from_slice(&root_tree);
+        image[CHUNK_TREE_LOGICAL as usize..CHUNK_TREE_LOGICAL as usize + NODE_SIZE]
+            .copy_from_slice(&chunk_tree);
+        image[FS_TREE_LOGICAL as usize..FS_TREE_LOGICAL as usize + NODE_SIZE]
+            .copy_from_slice(&fs_tree);
+        image[DATA_LOGICAL as usize..DATA_LOGICAL as usize + 5].copy_from_slice(b"hello");
+
+        let superblock = &mut image[crate::fs::btrfs::BTRFS_SUPER_OFFSET
+            ..crate::fs::btrfs::BTRFS_SUPER_OFFSET + NODE_SIZE];
+        superblock[32..48].copy_from_slice(&fsid);
+        superblock[48..56]
+            .copy_from_slice(&(crate::fs::btrfs::BTRFS_SUPER_OFFSET as u64).to_le_bytes());
+        superblock[64..72].copy_from_slice(&crate::fs::btrfs::BTRFS_MAGIC.to_le_bytes());
+        superblock[72..80].copy_from_slice(&1u64.to_le_bytes());
+        superblock[80..88].copy_from_slice(&ROOT_TREE_LOGICAL.to_le_bytes());
+        superblock[88..96].copy_from_slice(&CHUNK_TREE_LOGICAL.to_le_bytes());
+        superblock[112..120].copy_from_slice(&(IMAGE_LEN as u64).to_le_bytes());
+        superblock[120..128].copy_from_slice(&(5 * NODE_SIZE as u64).to_le_bytes());
+        superblock[128..136].copy_from_slice(&6u64.to_le_bytes());
+        superblock[136..144].copy_from_slice(&num_devices.to_le_bytes());
+        superblock[144..148].copy_from_slice(&(NODE_SIZE as u32).to_le_bytes());
+        superblock[148..152].copy_from_slice(&(NODE_SIZE as u32).to_le_bytes());
+        superblock[152..156].copy_from_slice(&(NODE_SIZE as u32).to_le_bytes());
+        superblock[156..160].copy_from_slice(&(NODE_SIZE as u32).to_le_bytes());
+        superblock[160..164].copy_from_slice(&(17u32 + chunk_item.len() as u32).to_le_bytes());
+        superblock[164..172].copy_from_slice(&1u64.to_le_bytes());
+        superblock[196..198]
+            .copy_from_slice(&crate::fs::btrfs::BTRFS_CSUM_TYPE_SHA256.to_le_bytes());
+        superblock[198] = 0;
+        superblock[199] = 0;
+        superblock[200] = 0;
+        superblock[299..309].copy_from_slice(b"btrfs-test");
+        let sys_chunk = build_sys_chunk_array(IMAGE_LEN as u64, fsid);
+        let sys_chunk_start = 811usize;
+        superblock[sys_chunk_start..sys_chunk_start + sys_chunk.len()].copy_from_slice(&sys_chunk);
+        crate::fs::btrfs::stamp_superblock_checksum(superblock).expect("superblock checksum");
+
+        image
+    }
+
+    fn build_sys_chunk_array(image_len: u64, fsid: [u8; 16]) -> Vec<u8> {
+        let chunk_item = chunk_item_bytes(image_len, fsid);
+        let mut data = Vec::new();
+        write_btrfs_key(
+            &mut data,
+            crate::fs::btrfs::BtrfsKey {
+                objectid: crate::fs::btrfs::BTRFS_FIRST_CHUNK_TREE_OBJECTID,
+                item_type: crate::fs::btrfs::BTRFS_CHUNK_ITEM_KEY,
+                offset: 0,
+            },
+        );
+        data.extend_from_slice(&chunk_item);
+        data
+    }
+
+    fn build_btrfs_leaf(
+        owner: u64,
+        bytenr: u64,
+        fsid: [u8; 16],
+        items: Vec<(crate::fs::btrfs::BtrfsKey, Vec<u8>)>,
+    ) -> Vec<u8> {
+        let mut block = vec![0u8; 4096];
+        block[32..48].copy_from_slice(&fsid);
+        block[48..56].copy_from_slice(&bytenr.to_le_bytes());
+        block[80..88].copy_from_slice(&1u64.to_le_bytes());
+        block[88..96].copy_from_slice(&owner.to_le_bytes());
+        block[96..100].copy_from_slice(&(items.len() as u32).to_le_bytes());
+        block[100] = 0;
+
+        let mut data_cursor = block.len();
+        for (index, (key, payload)) in items.into_iter().enumerate() {
+            data_cursor -= payload.len();
+            block[data_cursor..data_cursor + payload.len()].copy_from_slice(&payload);
+            let slot = 101 + index * 25;
+            write_btrfs_key_into(&mut block[slot..slot + 17], key);
+            block[slot + 17..slot + 21].copy_from_slice(&(data_cursor as u32).to_le_bytes());
+            block[slot + 21..slot + 25].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        }
+
+        block
+    }
+
+    fn chunk_item_bytes(length: u64, fsid: [u8; 16]) -> Vec<u8> {
+        let mut data = vec![0u8; 80];
+        data[0..8].copy_from_slice(&length.to_le_bytes());
+        data[8..16].copy_from_slice(&crate::fs::btrfs::BTRFS_CHUNK_TREE_OBJECTID.to_le_bytes());
+        data[16..24].copy_from_slice(&4096u64.to_le_bytes());
+        data[24..32].copy_from_slice(&1u64.to_le_bytes());
+        data[32..36].copy_from_slice(&4096u32.to_le_bytes());
+        data[36..40].copy_from_slice(&4096u32.to_le_bytes());
+        data[40..44].copy_from_slice(&4096u32.to_le_bytes());
+        data[44..46].copy_from_slice(&1u16.to_le_bytes());
+        data[46..48].copy_from_slice(&0u16.to_le_bytes());
+        data[48..56].copy_from_slice(&1u64.to_le_bytes());
+        data[56..64].copy_from_slice(&0u64.to_le_bytes());
+        data[64..80].copy_from_slice(&fsid);
+        data
+    }
+
+    fn inode_item_bytes(mode: u32, size: u64, nlink: u32) -> Vec<u8> {
+        let mut data = vec![0u8; 160];
+        data[0..8].copy_from_slice(&1u64.to_le_bytes());
+        data[8..16].copy_from_slice(&1u64.to_le_bytes());
+        data[16..24].copy_from_slice(&size.to_le_bytes());
+        data[24..32].copy_from_slice(&size.to_le_bytes());
+        data[40..44].copy_from_slice(&nlink.to_le_bytes());
+        data[52..56].copy_from_slice(&mode.to_le_bytes());
+        data[72..80].copy_from_slice(&1u64.to_le_bytes());
+        data
+    }
+
+    fn root_item_bytes(fs_tree_bytenr: u64, root_dirid: u64) -> Vec<u8> {
+        let mut data = vec![0u8; 239];
+        let inode = inode_item_bytes(0o040755, 0, 1);
+        data[..inode.len()].copy_from_slice(&inode);
+        data[160..168].copy_from_slice(&1u64.to_le_bytes());
+        data[168..176].copy_from_slice(&root_dirid.to_le_bytes());
+        data[176..184].copy_from_slice(&fs_tree_bytenr.to_le_bytes());
+        data[184..192].copy_from_slice(&0u64.to_le_bytes());
+        data[192..200].copy_from_slice(&(4096u64).to_le_bytes());
+        data[200..208].copy_from_slice(&0u64.to_le_bytes());
+        data[208..216].copy_from_slice(&0u64.to_le_bytes());
+        data[216..220].copy_from_slice(&1u32.to_le_bytes());
+        data[238] = 0;
+        data
+    }
+
+    fn dir_item_bytes(inode: u64, name: &str, file_type: u8) -> Vec<u8> {
+        let name_bytes = name.as_bytes();
+        let mut data = vec![0u8; 30 + name_bytes.len()];
+        write_btrfs_key_into(
+            &mut data[..17],
+            crate::fs::btrfs::BtrfsKey {
+                objectid: inode,
+                item_type: crate::fs::btrfs::BTRFS_INODE_ITEM_KEY,
+                offset: 0,
+            },
+        );
+        data[17..25].copy_from_slice(&1u64.to_le_bytes());
+        data[25..27].copy_from_slice(&0u16.to_le_bytes());
+        data[27..29].copy_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        data[29] = file_type;
+        data[30..30 + name_bytes.len()].copy_from_slice(name_bytes);
+        data
+    }
+
+    fn regular_extent_bytes(
+        logical: u64,
+        disk_num_bytes: u64,
+        num_bytes: u64,
+        compression: u8,
+    ) -> Vec<u8> {
+        let mut data = vec![0u8; 53];
+        data[0..8].copy_from_slice(&1u64.to_le_bytes());
+        data[8..16].copy_from_slice(&num_bytes.to_le_bytes());
+        data[16] = compression;
+        data[17] = 0;
+        data[18] = 0;
+        data[20] = 1;
+        data[21..29].copy_from_slice(&logical.to_le_bytes());
+        data[29..37].copy_from_slice(&disk_num_bytes.to_le_bytes());
+        data[37..45].copy_from_slice(&0u64.to_le_bytes());
+        data[45..53].copy_from_slice(&num_bytes.to_le_bytes());
+        data
+    }
+
+    fn inline_extent_bytes(payload: &[u8]) -> Vec<u8> {
+        let mut data = vec![0u8; 21 + payload.len()];
+        data[0..8].copy_from_slice(&1u64.to_le_bytes());
+        data[8..16].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        data[16] = 0;
+        data[17] = 0;
+        data[18] = 0;
+        data[20] = 0;
+        data[21..21 + payload.len()].copy_from_slice(payload);
+        data
+    }
+
+    fn write_btrfs_key(buffer: &mut Vec<u8>, key: crate::fs::btrfs::BtrfsKey) {
+        let mut encoded = [0u8; 17];
+        write_btrfs_key_into(&mut encoded, key);
+        buffer.extend_from_slice(&encoded);
+    }
+
+    fn write_btrfs_key_into(buffer: &mut [u8], key: crate::fs::btrfs::BtrfsKey) {
+        buffer[0..8].copy_from_slice(&key.objectid.to_le_bytes());
+        buffer[8] = key.item_type;
+        buffer[9..17].copy_from_slice(&key.offset.to_le_bytes());
     }
 
     fn write_test_mft_entry(

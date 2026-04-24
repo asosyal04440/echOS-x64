@@ -47,6 +47,21 @@ const PE32_PLUS_MAGIC: u16 = 0x20B;
 /// PE32 (32-bit) isteğe bağlı başlık sihiri
 const PE32_MAGIC: u16 = 0x10B;
 
+/// PE bölüm başlığı sayısı üst sınırı (Windows ekosisteminde pratik limit)
+const MAX_PE_SECTIONS: usize = 96;
+
+/// Tek PE görüntü için kabul edilen en yüksek image size (DoS/OOM sınırı)
+const MAX_PE_IMAGE_SIZE: usize = 256 * 1024 * 1024;
+
+/// PE başlığından gelebilecek per-process stack/heap rezervasyon üst sınırı.
+const MAX_PE_RESERVE_SIZE: u64 = 256 * 1024 * 1024;
+
+/// Parse edilecek import thunk sayısı üst sınırı.
+const MAX_PE_IMPORT_THUNKS: usize = 1024;
+
+/// Parse edilecek x64 runtime-function girişi üst sınırı.
+const MAX_PE_RUNTIME_FUNCTIONS: usize = 65_536;
+
 // Görüntü özellikleri (IMAGE_FILE_CHARACTERISTICS)
 const IMAGE_FILE_EXECUTABLE_IMAGE: u16 = 0x0002; // Çalıştırılabilir dosya
 const IMAGE_FILE_LARGE_ADDRESS_AWARE: u16 = 0x0020; // 2GB üzeri adres kullanabilir
@@ -74,6 +89,11 @@ const IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT: usize = 11; // Bound import tablosu
 const IMAGE_DIRECTORY_ENTRY_IAT: usize = 12; // İçe aktarma adresi tablosu
 const IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT: usize = 13; // Delay-load import tablosu
 
+// x64 UNWIND_INFO bayrakları.
+const UNW_FLAG_EHANDLER: u8 = 0x1;
+const UNW_FLAG_UHANDLER: u8 = 0x2;
+const UNW_FLAG_CHAININFO: u8 = 0x4;
+
 // ============================================================================
 // PE HATA TİPİ
 // ============================================================================
@@ -99,6 +119,132 @@ pub enum PeError {
 fn align_up(value: usize, align: usize) -> usize {
     let mask = align.saturating_sub(1);
     value.saturating_add(mask) & !mask
+}
+
+fn validate_section_count(section_count: u16) -> Result<usize, PeError> {
+    let count = section_count as usize;
+    if count > MAX_PE_SECTIONS {
+        return Err(PeError::InvalidSection);
+    }
+    Ok(count)
+}
+
+fn validate_image_size(size_of_image: u32) -> Result<usize, PeError> {
+    let image_size = size_of_image as usize;
+    if image_size == 0 || image_size > MAX_PE_IMAGE_SIZE {
+        return Err(PeError::MemoryAllocation);
+    }
+    Ok(image_size)
+}
+
+fn checked_u32_range_end(start: u32, size: u32) -> Result<u32, PeError> {
+    start.checked_add(size).ok_or(PeError::InvalidSection)
+}
+
+fn validate_optional_header_limits(optional_header: &ImageOptionalHeader64) -> Result<(), PeError> {
+    let size_of_image = optional_header.size_of_image as u64;
+    let size_of_headers = optional_header.size_of_headers as u64;
+    if size_of_headers == 0 || size_of_headers > size_of_image {
+        return Err(PeError::InvalidOptionalHeader);
+    }
+    if optional_header.section_alignment == 0 || optional_header.file_alignment == 0 {
+        return Err(PeError::InvalidOptionalHeader);
+    }
+    if optional_header.number_of_rva_and_sizes < 16 {
+        return Err(PeError::InvalidOptionalHeader);
+    }
+
+    let stack_reserve = optional_header.size_of_stack_reserve;
+    let stack_commit = optional_header.size_of_stack_commit;
+    let heap_reserve = optional_header.size_of_heap_reserve;
+    let heap_commit = optional_header.size_of_heap_commit;
+    if stack_reserve > MAX_PE_RESERVE_SIZE
+        || stack_commit > MAX_PE_RESERVE_SIZE
+        || heap_reserve > MAX_PE_RESERVE_SIZE
+        || heap_commit > MAX_PE_RESERVE_SIZE
+    {
+        return Err(PeError::MemoryAllocation);
+    }
+    if (stack_reserve != 0 && stack_commit > stack_reserve)
+        || (heap_reserve != 0 && heap_commit > heap_reserve)
+    {
+        return Err(PeError::InvalidOptionalHeader);
+    }
+    Ok(())
+}
+
+fn validate_section_header(
+    section: &ImageSectionHeader,
+    image_size: usize,
+    data_len: usize,
+) -> Result<(), PeError> {
+    let virtual_address = section.virtual_address;
+    let virtual_size = section.virtual_size;
+    let raw_size = section.size_of_raw_data;
+    let raw_offset = section.pointer_to_raw_data;
+    let mapped_size = virtual_size.max(raw_size);
+
+    if mapped_size == 0 {
+        return Ok(());
+    }
+    let virtual_end = checked_u32_range_end(virtual_address, mapped_size)?;
+    if virtual_end as usize > image_size {
+        return Err(PeError::InvalidSection);
+    }
+    if raw_size != 0 {
+        let raw_end = (raw_offset as usize)
+            .checked_add(raw_size as usize)
+            .ok_or(PeError::InvalidSection)?;
+        if raw_end > data_len {
+            return Err(PeError::InvalidSection);
+        }
+    }
+    Ok(())
+}
+
+fn validate_entry_point(
+    sections: &[PeSection],
+    entry_rva: u32,
+    image_size: u32,
+) -> Result<(), PeError> {
+    if entry_rva == 0 {
+        return Ok(());
+    }
+    if entry_rva >= image_size {
+        return Err(PeError::EntryNotFound);
+    }
+    let in_executable_section = sections.iter().any(|section| {
+        let start = section.virtual_address;
+        let len = section.virtual_size.max(section.raw_data.len() as u32);
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        section.is_executable && entry_rva >= start && entry_rva < end
+    });
+    if !in_executable_section {
+        return Err(PeError::EntryNotFound);
+    }
+    Ok(())
+}
+
+fn image_contains_rva_range(optional_header: &ImageOptionalHeader64, rva: u32, size: u32) -> bool {
+    if size == 0 {
+        return rva <= optional_header.size_of_image;
+    }
+    rva.checked_add(size)
+        .map(|end| end <= optional_header.size_of_image)
+        .unwrap_or(false)
+}
+
+fn validate_pe_offset(e_lfanew: u32, data_len: usize) -> Result<usize, PeError> {
+    let pe_offset = e_lfanew as usize;
+    let min_nt_headers = 4 + size_of::<ImageFileHeader>() + size_of::<ImageOptionalHeader64>();
+    if pe_offset < size_of::<ImageDosHeader>()
+        || pe_offset > data_len.saturating_sub(min_nt_headers)
+    {
+        return Err(PeError::InvalidPeSignature);
+    }
+    Ok(pe_offset)
 }
 
 fn choose_user_image_base(
@@ -174,10 +320,7 @@ fn map_kernel_blob_into_user(
     let page_count = align_up(len.max(1), 4096) / 4096;
     for index in 0..page_count {
         let src = unsafe { kernel_ptr.add(index * 4096) } as usize;
-        let phys = kernel_memory::virt_to_phys(src);
-        if phys == 0 {
-            return Err(PeError::MemoryAllocation);
-        }
+        let phys = kernel_memory::try_virt_to_phys(src).ok_or(PeError::MemoryAllocation)?;
         let frame = PhysFrame::<Size4KiB>::containing_address(x86_64::PhysAddr::new(phys as u64));
         let page = Page::containing_address(VirtAddr::new(user_base + (index as u64) * 4096));
         let table_flags =
@@ -1020,10 +1163,7 @@ impl PeLoader {
         }
 
         // e_lfanew'dan PE başlığının ofsetini al
-        let pe_offset = dos_header.e_lfanew as usize;
-        if pe_offset + 4 > data.len() {
-            return Err(PeError::InvalidPeSignature);
-        }
+        let pe_offset = validate_pe_offset(dos_header.e_lfanew, data.len())?;
 
         // PE imzasını doğrula ("PE\0\0")
         let pe_sig = read_u32(&data[pe_offset..]);
@@ -1039,6 +1179,12 @@ impl PeLoader {
 
         let file_header =
             unsafe { &*(data.as_ptr().add(file_header_offset) as *const ImageFileHeader) };
+
+        if file_header.size_of_optional_header as usize
+            != size_of::<ImageOptionalHeader64>() + 16 * 8
+        {
+            return Err(PeError::InvalidOptionalHeader);
+        }
 
         // Makine türünü kontrol et — sadece AMD64 (x86-64) desteklenir
         let machine = MachineType::from_u16(file_header.machine);
@@ -1063,9 +1209,12 @@ impl PeLoader {
             return Err(PeError::NotPe64);
         }
 
+        let image_size = validate_image_size(optional_header.size_of_image)?;
+        validate_optional_header_limits(optional_header)?;
+
         // Bölümleri ayrıştır — isteğe bağlı başlık boyutu kadar ilerle
         let section_offset = optional_offset + file_header.size_of_optional_header as usize;
-        let num_sections = file_header.number_of_sections as usize;
+        let num_sections = validate_section_count(file_header.number_of_sections)?;
         let mut sections = Vec::with_capacity(num_sections);
 
         for i in 0..num_sections {
@@ -1077,13 +1226,15 @@ impl PeLoader {
             let sec_header =
                 unsafe { &*(data.as_ptr().add(sec_offset) as *const ImageSectionHeader) };
 
+            validate_section_header(sec_header, image_size, data.len())?;
+
             // Bölüm ham verisini kopyala — dosya ofsetinden raw_size kadar
             let raw_size = sec_header.size_of_raw_data as usize;
             let raw_offset = sec_header.pointer_to_raw_data as usize;
-            let raw_data = if raw_offset + raw_size <= data.len() {
+            let raw_data = if raw_size != 0 {
                 data[raw_offset..raw_offset + raw_size].to_vec()
             } else {
-                vec![0u8; raw_size]
+                Vec::new()
             };
 
             let section = PeSection {
@@ -1101,6 +1252,11 @@ impl PeLoader {
 
             sections.push(section);
         }
+        validate_entry_point(
+            &sections,
+            optional_header.address_of_entry_point,
+            optional_header.size_of_image,
+        )?;
 
         // İçe aktarma tablosunu ayrıştır (basitleştirilmiş)
         let mut imports = self.parse_imports(data, optional_offset, optional_header)?;
@@ -1142,7 +1298,8 @@ impl PeLoader {
         let mut imports = Vec::new();
 
         // İçe aktarma dizinini gerçek veri dizini indeksinden oku.
-        let import_dir_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_IMPORT * 8;
+        let import_dir_offset =
+            optional_offset + size_of::<ImageOptionalHeader64>() + IMAGE_DIRECTORY_ENTRY_IMPORT * 8;
         if import_dir_offset + size_of::<ImageDataDirectory>() > data.len() {
             return Ok(imports);
         }
@@ -1157,6 +1314,9 @@ impl PeLoader {
         // İçe aktarma dizinini bölümlerde ara
         let import_rva = import_dir.virtual_address;
         let import_size = import_dir.size as usize;
+        if !image_contains_rva_range(optional_header, import_rva, import_dir.size) {
+            return Err(PeError::InvalidOptionalHeader);
+        }
 
         // RVA'yı dosya ofsetine çevir — bölüm tablosundan bul
         let file_offset =
@@ -1204,7 +1364,7 @@ impl PeLoader {
             {
                 let iat_base = optional_header.image_base + desc.first_thunk as u64;
 
-                for j in 0..1024usize {
+                for j in 0..MAX_PE_IMPORT_THUNKS {
                     let entry_offset = thunk_offset + j * 8;
                     if entry_offset + 8 > data.len() {
                         break;
@@ -1260,7 +1420,9 @@ impl PeLoader {
         optional_header: &ImageOptionalHeader64,
     ) -> Result<Vec<ImportEntry>, PeError> {
         let mut imports = Vec::new();
-        let directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * 8;
+        let directory_offset = optional_offset
+            + size_of::<ImageOptionalHeader64>()
+            + IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * 8;
         if directory_offset + size_of::<ImageDataDirectory>() > data.len() {
             return Ok(imports);
         }
@@ -1268,6 +1430,9 @@ impl PeLoader {
             unsafe { &*(data.as_ptr().add(directory_offset) as *const ImageDataDirectory) };
         if delay_dir.virtual_address == 0 || delay_dir.size == 0 {
             return Ok(imports);
+        }
+        if !image_contains_rva_range(optional_header, delay_dir.virtual_address, delay_dir.size) {
+            return Err(PeError::InvalidOptionalHeader);
         }
 
         let Some(file_off) = self.rva_to_file_offset(
@@ -1371,7 +1536,9 @@ impl PeLoader {
         optional_header: &ImageOptionalHeader64,
     ) -> Result<Vec<PeBoundImport>, PeError> {
         let mut bound_imports = Vec::new();
-        let directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT * 8;
+        let directory_offset = optional_offset
+            + size_of::<ImageOptionalHeader64>()
+            + IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT * 8;
         if directory_offset + size_of::<ImageDataDirectory>() > data.len() {
             return Ok(bound_imports);
         }
@@ -1380,6 +1547,9 @@ impl PeLoader {
             unsafe { &*(data.as_ptr().add(directory_offset) as *const ImageDataDirectory) };
         if bound_dir.virtual_address == 0 || bound_dir.size == 0 {
             return Ok(bound_imports);
+        }
+        if !image_contains_rva_range(optional_header, bound_dir.virtual_address, bound_dir.size) {
+            return Err(PeError::InvalidOptionalHeader);
         }
 
         let Some(directory_file_offset) = self.rva_to_file_offset(
@@ -1459,8 +1629,8 @@ impl PeLoader {
         let mut exports = BTreeMap::new();
         let mut forwarders = BTreeMap::new();
 
-        // Dışa aktarma dizinini bul — isteğe bağlı başlık sonrası ilk veri dizini (ofset 96)
-        let export_dir_offset = optional_offset + 96; // İlk veri dizini (dışa aktarma)
+        // Dışa aktarma dizinini bul — PE32+ optional header sonrasındaki ilk veri dizini.
+        let export_dir_offset = optional_offset + size_of::<ImageOptionalHeader64>();
         if export_dir_offset + size_of::<ImageDataDirectory>() > data.len() {
             return Ok((exports, forwarders));
         }
@@ -1470,6 +1640,9 @@ impl PeLoader {
 
         if export_dir.virtual_address == 0 {
             return Ok((exports, forwarders));
+        }
+        if !image_contains_rva_range(optional_header, export_dir.virtual_address, export_dir.size) {
+            return Err(PeError::InvalidOptionalHeader);
         }
 
         // Dışa aktarma dizini yapısını oku
@@ -1592,6 +1765,9 @@ impl PeLoader {
         if directory.virtual_address == 0 || directory.size == 0 {
             return Ok(functions);
         }
+        if !image_contains_rva_range(optional_header, directory.virtual_address, directory.size) {
+            return Err(PeError::InvalidOptionalHeader);
+        }
 
         let Some(file_offset) = self.rva_to_file_offset(
             data,
@@ -1603,7 +1779,7 @@ impl PeLoader {
         };
 
         let entry_size = size_of::<ImageRuntimeFunctionEntry>();
-        let count = (directory.size as usize) / entry_size;
+        let count = ((directory.size as usize) / entry_size).min(MAX_PE_RUNTIME_FUNCTIONS);
         for index in 0..count {
             let offset = file_offset + index * entry_size;
             if offset + entry_size > data.len() {
@@ -1614,6 +1790,7 @@ impl PeLoader {
             if entry.begin_address == 0 && entry.end_address == 0 {
                 continue;
             }
+            self.validate_runtime_function(data, optional_offset, optional_header, entry)?;
             functions.push(PeRuntimeFunction {
                 begin_address: entry.begin_address,
                 end_address: entry.end_address,
@@ -1632,9 +1809,19 @@ impl PeLoader {
         optional_header: &ImageOptionalHeader64,
         rva: u32,
     ) -> Option<usize> {
+        if rva < optional_header.size_of_headers && (rva as usize) < data.len() {
+            return Some(rva as usize);
+        }
+
         // PE başlığından bölüm tablosuna ulaş
+        if data.len() < 0x40 {
+            return None;
+        }
         let pe_offset = read_u32(&data[0x3C..]) as usize;
         let file_header_offset = pe_offset + 4;
+        if file_header_offset + 20 > data.len() {
+            return None;
+        }
         let num_sections = read_u16(&data[file_header_offset + 2..]) as usize;
         let opt_header_size = read_u16(&data[file_header_offset + 16..]) as usize;
         let section_offset = file_header_offset + 20 + opt_header_size;
@@ -1647,18 +1834,87 @@ impl PeLoader {
             let sec = unsafe { &*(data.as_ptr().add(sec_off) as *const ImageSectionHeader) };
 
             let sec_va = sec.virtual_address;
-            let sec_size = if sec.virtual_size > 0 {
-                sec.virtual_size
-            } else {
-                sec.size_of_raw_data
-            };
-
-            if rva >= sec_va && rva < sec_va + sec_size {
+            let sec_size = sec.virtual_size.max(sec.size_of_raw_data);
+            let sec_end = sec_va.checked_add(sec_size)?;
+            if rva >= sec_va && rva < sec_end {
                 let offset_in_section = (rva - sec_va) as usize;
-                return Some(sec.pointer_to_raw_data as usize + offset_in_section);
+                if offset_in_section >= sec.size_of_raw_data as usize {
+                    return None;
+                }
+                let file_offset =
+                    (sec.pointer_to_raw_data as usize).checked_add(offset_in_section)?;
+                if file_offset < data.len() {
+                    return Some(file_offset);
+                }
+                return None;
             }
         }
         None
+    }
+
+    fn validate_runtime_function(
+        &self,
+        data: &[u8],
+        optional_offset: usize,
+        optional_header: &ImageOptionalHeader64,
+        entry: &ImageRuntimeFunctionEntry,
+    ) -> Result<(), PeError> {
+        if entry.begin_address >= entry.end_address
+            || entry.end_address > optional_header.size_of_image
+            || entry.unwind_info_address >= optional_header.size_of_image
+        {
+            return Err(PeError::InvalidOptionalHeader);
+        }
+        let Some(unwind_offset) = self.rva_to_file_offset(
+            data,
+            optional_offset,
+            optional_header,
+            entry.unwind_info_address,
+        ) else {
+            return Err(PeError::InvalidOptionalHeader);
+        };
+        if unwind_offset + size_of::<ImageUnwindInfoHeader>() > data.len() {
+            return Err(PeError::InvalidOptionalHeader);
+        }
+        let header =
+            unsafe { &*(data.as_ptr().add(unwind_offset) as *const ImageUnwindInfoHeader) };
+        let version = header.version_flags & 0x7;
+        if version != 1 {
+            return Err(PeError::InvalidOptionalHeader);
+        }
+        let flags = header.version_flags >> 3;
+        let code_bytes = (header.count_of_codes as usize)
+            .checked_mul(size_of::<ImageUnwindCode>())
+            .ok_or(PeError::InvalidOptionalHeader)?;
+        let aligned_code_bytes = align_up(code_bytes, 4);
+        let payload_offset = unwind_offset
+            .checked_add(size_of::<ImageUnwindInfoHeader>())
+            .and_then(|value| value.checked_add(aligned_code_bytes))
+            .ok_or(PeError::InvalidOptionalHeader)?;
+        if flags & UNW_FLAG_CHAININFO != 0 {
+            if payload_offset + size_of::<ImageRuntimeFunctionEntry>() > data.len() {
+                return Err(PeError::InvalidOptionalHeader);
+            }
+            let chained = unsafe {
+                &*(data.as_ptr().add(payload_offset) as *const ImageRuntimeFunctionEntry)
+            };
+            if chained.begin_address >= chained.end_address
+                || chained.end_address > optional_header.size_of_image
+                || chained.unwind_info_address >= optional_header.size_of_image
+            {
+                return Err(PeError::InvalidOptionalHeader);
+            }
+        }
+        if flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
+            if payload_offset + size_of::<u32>() > data.len() {
+                return Err(PeError::InvalidOptionalHeader);
+            }
+            let handler_rva = read_u32(&data[payload_offset..]);
+            if handler_rva >= optional_header.size_of_image {
+                return Err(PeError::InvalidOptionalHeader);
+            }
+        }
+        Ok(())
     }
 
     fn read_bound_import_name(
@@ -1691,27 +1947,35 @@ impl PeLoader {
         if dos.e_magic != DOS_MAGIC {
             return Err(PeError::InvalidDosHeader);
         }
-        let pe_off = dos.e_lfanew as usize;
-        if pe_off + 4 > data.len() {
-            return Err(PeError::InvalidPeSignature);
-        }
+        let pe_off = validate_pe_offset(dos.e_lfanew, data.len())?;
         if read_u32(&data[pe_off..]) != PE_SIGNATURE {
             return Err(PeError::InvalidPeSignature);
         }
 
         let fh_off = pe_off + 4;
+        if fh_off + size_of::<ImageFileHeader>() > data.len() {
+            return Err(PeError::InvalidPeSignature);
+        }
         let fh = unsafe { &*(data.as_ptr().add(fh_off) as *const ImageFileHeader) };
         if MachineType::from_u16(fh.machine) != MachineType::AMD64 {
             return Err(PeError::NotPe64);
         }
 
+        if fh.size_of_optional_header as usize != size_of::<ImageOptionalHeader64>() + 16 * 8 {
+            return Err(PeError::InvalidOptionalHeader);
+        }
+
         let oh_off = fh_off + size_of::<ImageFileHeader>();
+        if oh_off + size_of::<ImageOptionalHeader64>() > data.len() {
+            return Err(PeError::InvalidOptionalHeader);
+        }
         let oh = unsafe { &*(data.as_ptr().add(oh_off) as *const ImageOptionalHeader64) };
         if oh.magic != PE32_PLUS_MAGIC {
             return Err(PeError::NotPe64);
         }
 
-        let image_size = oh.size_of_image as usize;
+        let image_size = validate_image_size(oh.size_of_image)?;
+        validate_optional_header_limits(oh)?;
         let preferred_base = oh.image_base;
         let entry_rva = oh.address_of_entry_point as u64;
 
@@ -1723,35 +1987,32 @@ impl PeLoader {
 
         // ---- Başlıkları kopyala ---------------------------------------------
         let header_size = oh.size_of_headers as usize;
-        let copy_len = header_size.min(data.len());
+        let copy_len = header_size.min(data.len()).min(image_size);
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), mem, copy_len);
         }
 
         // ---- Bölümleri kopyala ----------------------------------------------
         let sec_table_off = oh_off + fh.size_of_optional_header as usize;
-        let num_secs = fh.number_of_sections as usize;
+        let num_secs = validate_section_count(fh.number_of_sections)?;
         for i in 0..num_secs {
             let sh_off = sec_table_off + i * size_of::<ImageSectionHeader>();
             if sh_off + size_of::<ImageSectionHeader>() > data.len() {
-                break;
+                return Err(PeError::InvalidSection);
             }
             let sh = unsafe { &*(data.as_ptr().add(sh_off) as *const ImageSectionHeader) };
+            validate_section_header(sh, image_size, data.len())?;
             let dst_rva = sh.virtual_address as usize;
             let src_off = sh.pointer_to_raw_data as usize;
             let src_len = sh.size_of_raw_data as usize;
-            if src_off + src_len > data.len() {
-                continue;
-            }
-            if dst_rva + src_len > image_size {
-                continue;
-            }
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    data.as_ptr().add(src_off),
-                    mem.add(dst_rva),
-                    src_len,
-                );
+            if src_len != 0 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        data.as_ptr().add(src_off),
+                        mem.add(dst_rva),
+                        src_len,
+                    );
+                }
             }
         }
 
@@ -1767,8 +2028,14 @@ impl PeLoader {
         self.apply_base_relocations(mem, data, oh, preferred_base, mapped_base);
 
         // ---- IAT çözümü -----------------------------------------------------
-        self.resolve_iat(mem, data, oh)?;
-        self.resolve_delay_iat(mem, data, oh)?;
+        if let Err(err) = self.resolve_iat(mem, data, oh) {
+            win32::win32_dealloc(mem);
+            return Err(err);
+        }
+        if let Err(err) = self.resolve_delay_iat(mem, data, oh) {
+            win32::win32_dealloc(mem);
+            return Err(err);
+        }
 
         let entry_point = mapped_base + entry_rva;
         Ok((mapped_base, entry_point))
@@ -1804,6 +2071,9 @@ impl PeLoader {
         };
 
         if reloc_dir.virtual_address == 0 {
+            return;
+        }
+        if !image_contains_rva_range(oh, reloc_dir.virtual_address, reloc_dir.size) {
             return;
         }
 
@@ -1876,6 +2146,9 @@ impl PeLoader {
         if import_dir.virtual_address == 0 {
             return Ok(());
         }
+        if !image_contains_rva_range(oh, import_dir.virtual_address, import_dir.size) {
+            return Err(PeError::InvalidOptionalHeader);
+        }
 
         let import_rva = import_dir.virtual_address;
         let file_off = match self.rva_to_file_offset_2(data, oh, import_rva) {
@@ -1921,8 +2194,9 @@ impl PeLoader {
 
             // IAT başlangıcı bellekte: first_thunk RVA
             let iat_start_rva = desc.first_thunk as usize;
+            let dll_key = dll_name.to_lowercase();
             let bound_descriptor_match =
-                self.bound_timestamp_matches(&dll_name.to_lowercase(), desc.time_date_stamp);
+                self.bound_timestamp_matches(&dll_key, desc.time_date_stamp);
 
             let mut j = 0usize;
             loop {
@@ -1945,9 +2219,19 @@ impl PeLoader {
                     }
                 };
 
-                let fn_addr = self
-                    .resolve_import(&dll_name.to_lowercase(), &func_name)
-                    .unwrap_or_else(|| win32::get_fn_address(&dll_name, &func_name));
+                let resolved_import = self.resolve_import(&dll_key, &func_name).or_else(|| {
+                    let address = win32::get_fn_address(&dll_name, &func_name);
+                    (address != win32::stub_api as *const () as usize as u64).then_some(address)
+                });
+                if resolved_import.is_none() && !bound_descriptor_match {
+                    serial_println!(
+                        "[PE] Çözümsüz import reddedildi: {}!{}",
+                        dll_name,
+                        func_name
+                    );
+                    return Err(PeError::ImportNotFound);
+                }
+                let fn_addr = resolved_import.unwrap_or(0);
                 if fn_addr == win32::stub_api as *const () as usize as u64 {
                     serial_println!("[PE] Çözümsüz: {}!{}", dll_name, func_name);
                 } else {
@@ -1960,7 +2244,7 @@ impl PeLoader {
                     unsafe {
                         let slot = mem.add(iat_slot_rva) as *mut u64;
                         let current = *slot;
-                        if bound_descriptor_match && current != 0 {
+                        if bound_descriptor_match && current != 0 && fn_addr == 0 {
                             serial_println!(
                                 "[PE] Bound IAT korundu: {}!{} = {:#x}",
                                 dll_name,
@@ -2000,6 +2284,9 @@ impl PeLoader {
         if delay_dir.virtual_address == 0 || delay_dir.size == 0 {
             return Ok(());
         }
+        if !image_contains_rva_range(oh, delay_dir.virtual_address, delay_dir.size) {
+            return Err(PeError::InvalidOptionalHeader);
+        }
 
         let Some(file_off) = self.rva_to_file_offset_2(data, oh, delay_dir.virtual_address) else {
             return Ok(());
@@ -2034,8 +2321,8 @@ impl PeLoader {
                 continue;
             };
             let iat_start_rva = desc.delay_import_address_table as usize;
-            let bound_descriptor_match =
-                self.bound_timestamp_matches(&dll_name.to_lowercase(), desc.time_stamp);
+            let dll_key = dll_name.to_lowercase();
+            let bound_descriptor_match = self.bound_timestamp_matches(&dll_key, desc.time_stamp);
 
             let mut thunk_index = 0usize;
             loop {
@@ -2057,15 +2344,25 @@ impl PeLoader {
                     };
                     read_cstring(data, hint_off + 2, 128)
                 };
-                let fn_addr = self
-                    .resolve_import(&dll_name.to_lowercase(), &func_name)
-                    .unwrap_or_else(|| win32::get_fn_address(&dll_name, &func_name));
+                let resolved_import = self.resolve_import(&dll_key, &func_name).or_else(|| {
+                    let address = win32::get_fn_address(&dll_name, &func_name);
+                    (address != win32::stub_api as *const () as usize as u64).then_some(address)
+                });
+                if resolved_import.is_none() && !bound_descriptor_match {
+                    serial_println!(
+                        "[PE] Çözümsüz delay-import reddedildi: {}!{}",
+                        dll_name,
+                        func_name
+                    );
+                    return Err(PeError::ImportNotFound);
+                }
+                let fn_addr = resolved_import.unwrap_or(0);
                 let iat_slot_rva = iat_start_rva + thunk_index * 8;
                 if iat_slot_rva + 8 <= oh.size_of_image as usize {
                     unsafe {
                         let slot = mem.add(iat_slot_rva) as *mut u64;
                         let current = *slot;
-                        if bound_descriptor_match && current != 0 {
+                        if bound_descriptor_match && current != 0 && fn_addr == 0 {
                             serial_println!(
                                 "[PE] Bound delay-IAT korundu: {}!{} = {:#x}",
                                 dll_name,
@@ -2106,6 +2403,9 @@ impl PeLoader {
         };
         if delay_dir.virtual_address == 0 || delay_dir.size == 0 {
             return Ok(());
+        }
+        if !image_contains_rva_range(oh, delay_dir.virtual_address, delay_dir.size) {
+            return Err(PeError::InvalidOptionalHeader);
         }
 
         let Some(file_off) = self.rva_to_file_offset_2(data, oh, delay_dir.virtual_address) else {
@@ -2194,6 +2494,9 @@ impl PeLoader {
         if import_dir.virtual_address == 0 {
             return Ok(());
         }
+        if !image_contains_rva_range(oh, import_dir.virtual_address, import_dir.size) {
+            return Err(PeError::InvalidOptionalHeader);
+        }
         let Some(file_off) = self.rva_to_file_offset_2(data, oh, import_dir.virtual_address) else {
             return Ok(());
         };
@@ -2269,8 +2572,17 @@ impl PeLoader {
         oh: &ImageOptionalHeader64,
         rva: u32,
     ) -> Option<usize> {
+        if rva < oh.size_of_headers && (rva as usize) < data.len() {
+            return Some(rva as usize);
+        }
+        if data.len() < 0x40 {
+            return None;
+        }
         let pe_off = read_u32(&data[0x3C..]) as usize;
         let fh_off = pe_off + 4;
+        if fh_off + 20 > data.len() {
+            return None;
+        }
         let num_secs = read_u16(&data[fh_off + 2..]) as usize;
         let opt_size = read_u16(&data[fh_off + 16..]) as usize;
         let sec_tab_off = fh_off + 20 + opt_size;
@@ -2287,8 +2599,18 @@ impl PeLoader {
             } else {
                 sh.size_of_raw_data
             };
-            if rva >= va && rva < va + vsz {
-                return Some(sh.pointer_to_raw_data as usize + (rva - va) as usize);
+            let end = va.checked_add(vsz.max(sh.size_of_raw_data))?;
+            if rva >= va && rva < end {
+                let offset_in_section = (rva - va) as usize;
+                if offset_in_section >= sh.size_of_raw_data as usize {
+                    return None;
+                }
+                let file_offset =
+                    (sh.pointer_to_raw_data as usize).checked_add(offset_in_section)?;
+                if file_offset < data.len() {
+                    return Some(file_offset);
+                }
+                return None;
             }
         }
         None
@@ -2307,44 +2629,58 @@ impl PeLoader {
         if dos.e_magic != DOS_MAGIC {
             return Err(PeError::InvalidDosHeader);
         }
-        let pe_off = dos.e_lfanew as usize;
-        if pe_off + 4 > data.len() {
-            return Err(PeError::InvalidPeSignature);
-        }
+        let pe_off = validate_pe_offset(dos.e_lfanew, data.len())?;
         if read_u32(&data[pe_off..]) != PE_SIGNATURE {
             return Err(PeError::InvalidPeSignature);
         }
         let fh_off = pe_off + 4;
+        if fh_off + size_of::<ImageFileHeader>() > data.len() {
+            return Err(PeError::InvalidPeSignature);
+        }
         let fh = unsafe { &*(data.as_ptr().add(fh_off) as *const ImageFileHeader) };
         if MachineType::from_u16(fh.machine) != MachineType::AMD64 {
             return Err(PeError::NotPe64);
         }
+
+        if fh.size_of_optional_header as usize != size_of::<ImageOptionalHeader64>() + 16 * 8 {
+            return Err(PeError::InvalidOptionalHeader);
+        }
+
         let oh_off = fh_off + size_of::<ImageFileHeader>();
+        if oh_off + size_of::<ImageOptionalHeader64>() > data.len() {
+            return Err(PeError::InvalidOptionalHeader);
+        }
         let oh = unsafe { &*(data.as_ptr().add(oh_off) as *const ImageOptionalHeader64) };
         if oh.magic != PE32_PLUS_MAGIC {
             return Err(PeError::NotPe64);
         }
-        let image_size = oh.size_of_image as usize;
+        let image_size = validate_image_size(oh.size_of_image)?;
+        validate_optional_header_limits(oh)?;
         let mem = win32::win32_alloc(image_size, 4096);
         if mem.is_null() {
             return Err(PeError::MemoryAllocation);
         }
+        let header_copy_len = (oh.size_of_headers as usize)
+            .min(data.len())
+            .min(image_size);
         unsafe {
             core::ptr::write_bytes(mem, 0, image_size);
-            core::ptr::copy_nonoverlapping(data.as_ptr(), mem, oh.size_of_headers as usize);
+            core::ptr::copy_nonoverlapping(data.as_ptr(), mem, header_copy_len);
         }
         let sec_table_off = oh_off + fh.size_of_optional_header as usize;
         let mut sections = Vec::new();
-        for i in 0..fh.number_of_sections as usize {
+        let section_count = validate_section_count(fh.number_of_sections)?;
+        for i in 0..section_count {
             let sh_off = sec_table_off + i * size_of::<ImageSectionHeader>();
             if sh_off + size_of::<ImageSectionHeader>() > data.len() {
-                break;
+                return Err(PeError::InvalidSection);
             }
             let sh = unsafe { &*(data.as_ptr().add(sh_off) as *const ImageSectionHeader) };
+            validate_section_header(sh, image_size, data.len())?;
             let dst_rva = sh.virtual_address as usize;
             let src_off = sh.pointer_to_raw_data as usize;
             let src_len = sh.size_of_raw_data as usize;
-            if src_len != 0 && src_off + src_len <= data.len() && dst_rva + src_len <= image_size {
+            if src_len != 0 {
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         data.as_ptr().add(src_off),
@@ -2360,8 +2696,14 @@ impl PeLoader {
             });
         }
         self.apply_base_relocations(mem, data, oh, oh.image_base, user_base);
-        self.resolve_iat_user_abi(mem, data, oh, veneer_map)?;
-        self.resolve_delay_iat_user_abi(mem, data, oh, veneer_map)?;
+        if let Err(err) = self.resolve_iat_user_abi(mem, data, oh, veneer_map) {
+            win32::win32_dealloc(mem);
+            return Err(err);
+        }
+        if let Err(err) = self.resolve_delay_iat_user_abi(mem, data, oh, veneer_map) {
+            win32::win32_dealloc(mem);
+            return Err(err);
+        }
         Ok((
             mem as u64,
             user_base.saturating_add(oh.address_of_entry_point as u64),
@@ -2874,7 +3216,8 @@ mod tests {
             );
         }
 
-        let import_directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_IMPORT * 8;
+        let import_directory_offset =
+            optional_offset + size_of::<ImageOptionalHeader64>() + IMAGE_DIRECTORY_ENTRY_IMPORT * 8;
         let import_directory = ImageDataDirectory {
             virtual_address: 0x1000,
             size: (size_of::<ImageImportDescriptor>() * 2) as u32,
@@ -2966,6 +3309,7 @@ mod tests {
 
     fn make_delay_import_image() -> Vec<u8> {
         let mut data = make_single_import_image(0, 0);
+        data.resize(0x900, 0);
 
         let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
         let file_header_offset = dos.e_lfanew as usize + 4;
@@ -2976,7 +3320,9 @@ mod tests {
             unsafe { &mut *(data.as_mut_ptr().add(optional_offset) as *mut ImageOptionalHeader64) };
         optional.size_of_image = 0x3000;
 
-        let delay_directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * 8;
+        let delay_directory_offset = optional_offset
+            + size_of::<ImageOptionalHeader64>()
+            + IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * 8;
         let delay_directory = ImageDataDirectory {
             virtual_address: 0x10C0,
             size: (size_of::<ImageDelayImportDescriptor>() * 2) as u32,
@@ -3059,6 +3405,181 @@ mod tests {
         data[0x352..0x362].copy_from_slice(b"CreateWindowExA\0");
 
         data
+    }
+
+    #[test]
+    fn load_rejects_section_count_above_limit() {
+        let mut data = make_single_import_image(0, 0);
+        let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
+        let file_header_offset = dos.e_lfanew as usize + 4;
+        let file_header =
+            unsafe { &mut *(data.as_mut_ptr().add(file_header_offset) as *mut ImageFileHeader) };
+        file_header.number_of_sections = (MAX_PE_SECTIONS as u16).saturating_add(1);
+
+        let mut loader = PeLoader::new();
+        assert_eq!(loader.load(&data).unwrap_err(), PeError::InvalidSection);
+    }
+
+    #[test]
+    fn load_rejects_size_of_image_above_limit() {
+        let mut data = make_single_import_image(0, 0);
+        let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
+        let file_header_offset = dos.e_lfanew as usize + 4;
+        let optional_offset = file_header_offset + size_of::<ImageFileHeader>();
+        let optional =
+            unsafe { &mut *(data.as_mut_ptr().add(optional_offset) as *mut ImageOptionalHeader64) };
+        optional.size_of_image = (MAX_PE_IMAGE_SIZE as u32).saturating_add(1);
+
+        let mut loader = PeLoader::new();
+        assert_eq!(loader.load(&data).unwrap_err(), PeError::MemoryAllocation);
+    }
+
+    #[test]
+    fn load_into_memory_rejects_size_of_image_above_limit() {
+        let mut data = make_single_import_image(0, 0);
+        let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
+        let file_header_offset = dos.e_lfanew as usize + 4;
+        let optional_offset = file_header_offset + size_of::<ImageFileHeader>();
+        let optional =
+            unsafe { &mut *(data.as_mut_ptr().add(optional_offset) as *mut ImageOptionalHeader64) };
+        optional.size_of_image = (MAX_PE_IMAGE_SIZE as u32).saturating_add(1);
+
+        let mut loader = PeLoader::new();
+        assert_eq!(
+            loader.load_into_memory(&data).unwrap_err(),
+            PeError::MemoryAllocation
+        );
+    }
+
+    #[test]
+    fn load_rejects_section_virtual_range_overflow() {
+        let mut data = make_single_import_image(0, 0);
+        let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
+        let file_header_offset = dos.e_lfanew as usize + 4;
+        let optional_offset = file_header_offset + size_of::<ImageFileHeader>();
+        let file_header =
+            unsafe { &*(data.as_ptr().add(file_header_offset) as *const ImageFileHeader) };
+        let section_offset = optional_offset + file_header.size_of_optional_header as usize;
+        let section =
+            unsafe { &mut *(data.as_mut_ptr().add(section_offset) as *mut ImageSectionHeader) };
+        section.virtual_address = u32::MAX - 0x10;
+        section.virtual_size = 0x100;
+
+        let mut loader = PeLoader::new();
+        assert_eq!(loader.load(&data).unwrap_err(), PeError::InvalidSection);
+    }
+
+    #[test]
+    fn load_rejects_raw_section_beyond_file() {
+        let mut data = make_single_import_image(0, 0);
+        let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
+        let file_header_offset = dos.e_lfanew as usize + 4;
+        let optional_offset = file_header_offset + size_of::<ImageFileHeader>();
+        let file_header =
+            unsafe { &*(data.as_ptr().add(file_header_offset) as *const ImageFileHeader) };
+        let section_offset = optional_offset + file_header.size_of_optional_header as usize;
+        let section =
+            unsafe { &mut *(data.as_mut_ptr().add(section_offset) as *mut ImageSectionHeader) };
+        section.pointer_to_raw_data = (data.len() as u32).saturating_sub(8);
+        section.size_of_raw_data = 0x100;
+
+        let mut loader = PeLoader::new();
+        assert_eq!(loader.load(&data).unwrap_err(), PeError::InvalidSection);
+    }
+
+    #[test]
+    fn load_rejects_pe_stack_reserve_above_limit() {
+        let mut data = make_single_import_image(0, 0);
+        let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
+        let file_header_offset = dos.e_lfanew as usize + 4;
+        let optional_offset = file_header_offset + size_of::<ImageFileHeader>();
+        let optional =
+            unsafe { &mut *(data.as_mut_ptr().add(optional_offset) as *mut ImageOptionalHeader64) };
+        optional.size_of_stack_reserve = MAX_PE_RESERVE_SIZE + 1;
+
+        let mut loader = PeLoader::new();
+        assert_eq!(loader.load(&data).unwrap_err(), PeError::MemoryAllocation);
+    }
+
+    #[test]
+    fn load_into_memory_rejects_unresolved_import() {
+        let mut data = make_single_import_image(0, 0);
+        data[0x292..0x292 + "DefinitelyMissingApi".len()].copy_from_slice(b"DefinitelyMissingApi");
+        data[0x292 + "DefinitelyMissingApi".len()] = 0;
+
+        let mut loader = PeLoader::new();
+        assert_eq!(
+            loader.load_into_memory(&data).unwrap_err(),
+            PeError::ImportNotFound
+        );
+    }
+
+    #[test]
+    fn load_rejects_exception_handler_outside_image() {
+        let mut data = make_single_import_image(0, 0);
+        let dos = unsafe { &*(data.as_ptr() as *const ImageDosHeader) };
+        let file_header_offset = dos.e_lfanew as usize + 4;
+        let optional_offset = file_header_offset + size_of::<ImageFileHeader>();
+        let exception_directory_offset = optional_offset
+            + size_of::<ImageOptionalHeader64>()
+            + IMAGE_DIRECTORY_ENTRY_EXCEPTION * 8;
+        let directory = ImageDataDirectory {
+            virtual_address: 0x10A0,
+            size: size_of::<ImageRuntimeFunctionEntry>() as u32,
+        };
+        unsafe {
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(exception_directory_offset) as *mut ImageDataDirectory,
+                directory,
+            );
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(0x2A0) as *mut ImageRuntimeFunctionEntry,
+                ImageRuntimeFunctionEntry {
+                    begin_address: 0x1000,
+                    end_address: 0x1010,
+                    unwind_info_address: 0x10B0,
+                },
+            );
+            core::ptr::write_unaligned(
+                data.as_mut_ptr().add(0x2B0) as *mut ImageUnwindInfoHeader,
+                ImageUnwindInfoHeader {
+                    version_flags: 1 | (UNW_FLAG_EHANDLER << 3),
+                    size_of_prolog: 0,
+                    count_of_codes: 0,
+                    frame_register_offset: 0,
+                },
+            );
+        }
+        data[0x2B4..0x2B8].copy_from_slice(&0xFFFF_F000u32.to_le_bytes());
+
+        let mut loader = PeLoader::new();
+        assert_eq!(
+            loader.load(&data).unwrap_err(),
+            PeError::InvalidOptionalHeader
+        );
+    }
+
+    #[test]
+    fn load_rejects_e_lfanew_before_dos_header_end() {
+        let mut data = make_single_import_image(0, 0);
+        let dos = unsafe { &mut *(data.as_mut_ptr() as *mut ImageDosHeader) };
+        dos.e_lfanew = (size_of::<ImageDosHeader>() as u32).saturating_sub(1);
+
+        let mut loader = PeLoader::new();
+        assert_eq!(loader.load(&data).unwrap_err(), PeError::InvalidPeSignature);
+    }
+
+    #[test]
+    fn load_into_memory_rejects_e_lfanew_beyond_min_nt_headers_window() {
+        let mut data = make_single_import_image(0, 0);
+        let dos = unsafe { &mut *(data.as_mut_ptr() as *mut ImageDosHeader) };
+        dos.e_lfanew = (data.len().saturating_sub(4) as u32).max(1);
+
+        let mut loader = PeLoader::new();
+        assert_eq!(
+            loader.load_into_memory(&data).unwrap_err(),
+            PeError::InvalidPeSignature
+        );
     }
 
     #[test]
@@ -3148,7 +3669,9 @@ mod tests {
             );
         }
 
-        let directory_offset = optional_offset + 96 + IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT * 8;
+        let directory_offset = optional_offset
+            + size_of::<ImageOptionalHeader64>()
+            + IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT * 8;
         let directory = ImageDataDirectory {
             virtual_address: 0x1000,
             size: 0x80,
@@ -3281,7 +3804,7 @@ mod tests {
     }
 
     #[test]
-    fn load_into_memory_keeps_bound_iat_when_timestamp_matches_registered_dll() {
+    fn load_into_memory_rewrites_bound_iat_to_registered_export() {
         let mut loader = PeLoader::new();
         let mut target = empty_image();
         target.time_date_stamp = 0x1234_5678;
@@ -3295,7 +3818,7 @@ mod tests {
             .load_into_memory(&image_data)
             .expect("bound import image should load");
         let slot = unsafe { *((mapped_base as *const u8).add(0x1060) as *const u64) };
-        assert_eq!(slot, 0x1111_2222_3333_4444);
+        assert_eq!(slot, 0x55AA_55AA_55AA_55AA);
         unsafe {
             win32::win32_dealloc(mapped_base as *mut u8);
         }
@@ -3371,11 +3894,21 @@ pub fn init_tls_runtime(
         return Ok(tls);
     }
 
-    let Some(tls_dir_rva) = tls_directory_rva(payload) else {
+    let Some((tls_dir_rva, tls_dir_size)) = tls_directory_info(payload) else {
         return Ok(tls);
     };
     if tls_dir_rva == 0 || mapped_base == 0 {
         return Ok(tls);
+    }
+    if tls_dir_size < size_of::<ImageTlsDirectory64>() as u32
+        || !image_va_range_contains(
+            mapped_base,
+            image.image_size,
+            mapped_base + tls_dir_rva as u64,
+            tls_dir_size as u64,
+        )
+    {
+        return Err(PeError::InvalidOptionalHeader);
     }
 
     let dir_ptr = (mapped_base as usize)
@@ -3384,6 +3917,14 @@ pub fn init_tls_runtime(
     let directory = unsafe { &*dir_ptr };
 
     if directory.address_of_index != 0 {
+        if !image_va_range_contains(
+            mapped_base,
+            image.image_size,
+            directory.address_of_index,
+            size_of::<u32>() as u64,
+        ) {
+            return Err(PeError::InvalidOptionalHeader);
+        }
         tls.tls_index_slot = directory.address_of_index;
         unsafe {
             *(directory.address_of_index as *mut u32) = 0;
@@ -3395,7 +3936,7 @@ pub fn init_tls_runtime(
         mapped_base,
         image.image_size,
         &mut tls.callback_addresses,
-    );
+    )?;
 
     Ok(tls)
 }
@@ -4053,7 +4594,23 @@ struct ImageRuntimeFunctionEntry {
     unwind_info_address: u32,
 }
 
-fn tls_directory_rva(payload: &[u8]) -> Option<u32> {
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+struct ImageUnwindInfoHeader {
+    version_flags: u8,
+    size_of_prolog: u8,
+    count_of_codes: u8,
+    frame_register_offset: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+struct ImageUnwindCode {
+    code_offset: u8,
+    unwind_op_info: u8,
+}
+
+fn tls_directory_info(payload: &[u8]) -> Option<(u32, u32)> {
     if payload.len() < 0x40 {
         return None;
     }
@@ -4061,12 +4618,10 @@ fn tls_directory_rva(payload: &[u8]) -> Option<u32> {
     if dos.e_magic != DOS_MAGIC {
         return None;
     }
-    let pe_off = dos.e_lfanew as usize;
-    if pe_off + 4 + size_of::<ImageFileHeader>() + size_of::<ImageOptionalHeader64>()
-        > payload.len()
-    {
-        return None;
-    }
+    let pe_off = match validate_pe_offset(dos.e_lfanew, payload.len()) {
+        Ok(offset) => offset,
+        Err(_) => return None,
+    };
     if read_u32(&payload[pe_off..]) != PE_SIGNATURE {
         return None;
     }
@@ -4079,7 +4634,7 @@ fn tls_directory_rva(payload: &[u8]) -> Option<u32> {
     let dir_base = unsafe { oh_ptr.add(size_of::<ImageOptionalHeader64>()) };
     let directory =
         unsafe { &*(dir_base.add(IMAGE_DIRECTORY_ENTRY_TLS * 8) as *const ImageDataDirectory) };
-    Some(directory.virtual_address)
+    Some((directory.virtual_address, directory.size))
 }
 
 fn collect_tls_callbacks(
@@ -4087,29 +4642,54 @@ fn collect_tls_callbacks(
     mapped_base: u64,
     image_size: u32,
     out: &mut [u64; 8],
-) -> u8 {
+) -> Result<u8, PeError> {
     if callbacks_va == 0 {
-        return 0;
+        return Ok(0);
     }
 
-    let image_end = mapped_base.saturating_add(image_size as u64);
-    if callbacks_va < mapped_base || callbacks_va >= image_end {
-        return 0;
+    if !image_va_range_contains(
+        mapped_base,
+        image_size,
+        callbacks_va,
+        size_of::<u64>() as u64,
+    ) {
+        return Err(PeError::InvalidOptionalHeader);
     }
 
     let mut count = 0u8;
     let mut current = callbacks_va as *const u64;
     while (count as usize) < out.len() {
+        if !image_va_range_contains(
+            mapped_base,
+            image_size,
+            current as u64,
+            size_of::<u64>() as u64,
+        ) {
+            return Err(PeError::InvalidOptionalHeader);
+        }
         let callback = unsafe { *current };
         if callback == 0 {
             break;
         }
-        if callback < mapped_base || callback >= image_end {
-            break;
+        if !image_va_range_contains(mapped_base, image_size, callback, 1) {
+            return Err(PeError::InvalidOptionalHeader);
         }
         out[count as usize] = callback;
         count = count.saturating_add(1);
         current = unsafe { current.add(1) };
     }
-    count
+    if count as usize == out.len() {
+        return Err(PeError::InvalidOptionalHeader);
+    }
+    Ok(count)
+}
+
+fn image_va_range_contains(base: u64, image_size: u32, va: u64, len: u64) -> bool {
+    let Some(end) = va.checked_add(len) else {
+        return false;
+    };
+    let Some(image_end) = base.checked_add(image_size as u64) else {
+        return false;
+    };
+    va >= base && end <= image_end
 }

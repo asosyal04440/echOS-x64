@@ -72,6 +72,16 @@ const CMD_2D_COPY: u32 = 3;
 const PCI_VENDOR_INTEL: u16 = 0x8086;
 const PCI_VENDOR_AMD: u16 = 0x1002;
 const PCI_VENDOR_NVIDIA: u16 = 0x10DE;
+const GPU_MMIO_WINDOW_BYTES: u64 = 0x1000;
+const GPU_MMIO_REQUIRED_BYTES: u64 = (GPU_2D_STATUS + 4) as u64;
+const GPU_MIN_VRAM_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug)]
+struct GpuBarWindow {
+    index: u8,
+    base: u64,
+    size: u64,
+}
 
 /// Pixel formatları
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,10 +134,10 @@ impl DisplayMode {
 pub struct GpuNativeDevice {
     /// Cihaz ismi
     name: String,
-    /// MMIO base address (PCIe BAR0)
-    mmio_base: u64,
-    /// VRAM base address (PCIe BAR2 veya BAR0 offset)
-    vram_base: u64,
+    /// MMIO BAR metadata
+    mmio_bar: GpuBarWindow,
+    /// VRAM BAR metadata
+    vram_bar: GpuBarWindow,
     /// VRAM boyutu
     vram_size: u64,
     /// Aktif display mode
@@ -152,23 +162,25 @@ pub struct GpuNativeDevice {
     pub bus: u8,
     pub device: u8,
     pub function: u8,
+    /// IOMMU DMA domain
+    dma_domain: AtomicU32,
 }
 
 impl GpuNativeDevice {
     /// Yeni GPU native device oluşturur
-    pub fn new(name: &str, mmio_base: u64, vram_base: u64, vram_size: u64) -> Self {
+    fn new(name: &str, mmio_bar: GpuBarWindow, vram_bar: GpuBarWindow) -> Self {
         Self {
             name: String::from(name),
-            mmio_base,
-            vram_base,
-            vram_size,
+            mmio_bar,
+            vram_bar,
+            vram_size: vram_bar.size,
             mode: DisplayMode {
                 width: 1920,
                 height: 1080,
                 refresh_hz: 60,
                 pixel_format: PixelFormat::Xrgb8888,
             },
-            fb_phys: vram_base,
+            fb_phys: vram_bar.base,
             cursor_visible: AtomicBool::new(false),
             cursor_x: AtomicU32::new(0),
             cursor_y: AtomicU32::new(0),
@@ -179,23 +191,98 @@ impl GpuNativeDevice {
             bus: 0,
             device: 0,
             function: 0,
+            dma_domain: AtomicU32::new(0),
         }
     }
 
     #[inline(always)]
     fn write_reg32(&self, offset: usize, value: u32) {
         unsafe {
-            core::ptr::write_volatile((self.mmio_base + offset as u64) as *mut u32, value);
+            core::ptr::write_volatile((self.mmio_bar.base + offset as u64) as *mut u32, value);
         }
     }
 
     #[inline(always)]
     fn read_reg32(&self, offset: usize) -> u32 {
-        unsafe { core::ptr::read_volatile((self.mmio_base + offset as u64) as *const u32) }
+        unsafe { core::ptr::read_volatile((self.mmio_bar.base + offset as u64) as *const u32) }
+    }
+
+    fn with_gpu_domain<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let prev_domain = crate::cpu::smp::current_dma_domain();
+        let domain = self.dma_domain.load(Ordering::Acquire);
+        crate::cpu::smp::set_current_dma_domain(domain);
+        let result = f();
+        crate::cpu::smp::set_current_dma_domain(prev_domain);
+        result
+    }
+
+    fn validate_mode_contract(&self) -> Result<(), &'static str> {
+        if self.mmio_bar.size < GPU_MMIO_REQUIRED_BYTES {
+            return Err("GPU MMIO BAR too small");
+        }
+        if self.vram_bar.size < GPU_MIN_VRAM_BYTES {
+            return Err("GPU VRAM BAR too small");
+        }
+        if self.mode.framebuffer_size() as u64 > self.vram_size {
+            return Err("GPU framebuffer exceeds VRAM BAR");
+        }
+        Ok(())
+    }
+
+    fn validate_dma_range(&self, paddr: u64, len: u64) -> Result<(), &'static str> {
+        if len == 0 {
+            return Err("GPU DMA range is empty");
+        }
+        let end = paddr.checked_add(len).ok_or("GPU DMA range overflow")?;
+        let mmio_end = self
+            .mmio_bar
+            .base
+            .checked_add(self.mmio_bar.size)
+            .ok_or("GPU MMIO BAR overflow")?;
+        if paddr < mmio_end && end > self.mmio_bar.base {
+            return Err("GPU DMA overlaps MMIO BAR");
+        }
+        Ok(())
+    }
+
+    fn validate_blit_geometry(&self, x: u32, y: u32, w: u32, h: u32) -> Result<u64, &'static str> {
+        if w == 0 || h == 0 {
+            return Err("GPU blit dimensions are empty");
+        }
+        let x_end = x.checked_add(w).ok_or("GPU blit width overflow")?;
+        let y_end = y.checked_add(h).ok_or("GPU blit height overflow")?;
+        if x_end > self.mode.width || y_end > self.mode.height {
+            return Err("GPU blit exceeds active mode");
+        }
+        let bpp = self.mode.pixel_format.bytes_per_pixel() as u64;
+        let copied = (w as u64)
+            .checked_mul(h as u64)
+            .and_then(|px| px.checked_mul(bpp))
+            .ok_or("GPU blit byte count overflow")?;
+        let stride = (self.mode.width as u64)
+            .checked_mul(bpp)
+            .ok_or("GPU stride overflow")?;
+        let dst_offset = (y as u64)
+            .checked_mul(stride)
+            .and_then(|row| row.checked_add((x as u64) * bpp))
+            .ok_or("GPU destination offset overflow")?;
+        let dst_end = dst_offset
+            .checked_add(copied)
+            .ok_or("GPU destination end overflow")?;
+        if dst_end > self.vram_size {
+            return Err("GPU blit exceeds VRAM aperture");
+        }
+        Ok(copied)
     }
 
     /// GPU donanımını başlatır
     pub fn init(&self) -> Result<(), &'static str> {
+        self.validate_mode_contract()?;
+        let domain = crate::memory::iommu_register_device(self.bus, self.device, self.function);
+        self.dma_domain.store(domain, Ordering::Release);
         self.write_reg32(GPU_REG_WIDTH, self.mode.width);
         self.write_reg32(GPU_REG_HEIGHT, self.mode.height);
         self.write_reg32(
@@ -209,11 +296,17 @@ impl GpuNativeDevice {
         self.ready.store(true, Ordering::Release);
 
         crate::serial_println!(
-            "[GPU-Native] Initialized: {}x{} @ {}Hz, VRAM={}MB",
+            "[GPU-Native] Initialized: {}x{} @ {}Hz, MMIO=BAR{} 0x{:x}+0x{:x}, VRAM=BAR{} 0x{:x}+0x{:x}, domain={}",
             self.mode.width,
             self.mode.height,
             self.mode.refresh_hz,
-            self.vram_size / (1024 * 1024)
+            self.mmio_bar.index,
+            self.mmio_bar.base,
+            self.mmio_bar.size,
+            self.vram_bar.index,
+            self.vram_bar.base,
+            self.vram_bar.size,
+            domain
         );
 
         Ok(())
@@ -231,6 +324,8 @@ impl GpuNativeDevice {
         if !self.ready.load(Ordering::Acquire) {
             return Err("GPU not ready");
         }
+        let copied = self.validate_blit_geometry(x, y, w, h)?;
+        self.validate_dma_range(src_phys, copied)?;
 
         let stride = self.mode.width * self.mode.pixel_format.bytes_per_pixel();
         let dst_offset = (y * stride + x * self.mode.pixel_format.bytes_per_pixel()) as u64;
@@ -343,7 +438,13 @@ impl AsyncGpuDevice for GpuNativeDevice {
         width: u32,
         height: u32,
     ) -> Result<SubmissionToken, AsyncIoError> {
-        self.hw_blit(src_buf.paddr, x, y, width, height)
+        let required = self
+            .validate_blit_geometry(x, y, width, height)
+            .map_err(|_| AsyncIoError::InvalidParam)?;
+        if src_buf.size < required as usize {
+            return Err(AsyncIoError::InvalidParam);
+        }
+        self.with_gpu_domain(|| self.hw_blit(src_buf.paddr, x, y, width, height))
             .map_err(|_| AsyncIoError::DeviceError)?;
 
         let token = SubmissionToken::next();
@@ -371,7 +472,12 @@ impl AsyncGpuDevice for GpuNativeDevice {
     }
 
     fn submit_page_flip(&self, framebuffer: &DmaBuffer) -> Result<SubmissionToken, AsyncIoError> {
-        self.write_reg32(GPU_REG_FB_ADDR, framebuffer.paddr as u32);
+        if framebuffer.size < self.mode.framebuffer_size() {
+            return Err(AsyncIoError::InvalidParam);
+        }
+        self.validate_dma_range(framebuffer.paddr, self.mode.framebuffer_size() as u64)
+            .map_err(|_| AsyncIoError::InvalidParam)?;
+        self.with_gpu_domain(|| self.write_reg32(GPU_REG_FB_ADDR, framebuffer.paddr as u32));
 
         let token = SubmissionToken::next();
         self.pending_completions.fetch_add(1, Ordering::Relaxed);
@@ -413,6 +519,31 @@ fn supports_native_scanout(dev: &PciDevice) -> bool {
         )
 }
 
+fn gpu_bar_window(dev: &PciDevice, index: u8) -> Option<GpuBarWindow> {
+    let bar = crate::drivers::pci::read_bar_mmio(dev.bus, dev.device, dev.function, index)?;
+    (bar.base != 0 && bar.size != 0).then_some(GpuBarWindow {
+        index,
+        base: bar.base,
+        size: bar.size,
+    })
+}
+
+fn select_vram_bar(dev: &PciDevice, mmio_bar: GpuBarWindow) -> Option<GpuBarWindow> {
+    if let Some(bar2) = gpu_bar_window(dev, 2) {
+        if bar2.base != mmio_bar.base && bar2.size >= GPU_MIN_VRAM_BYTES {
+            return Some(bar2);
+        }
+    }
+    if mmio_bar.size > GPU_MMIO_WINDOW_BYTES + GPU_MIN_VRAM_BYTES {
+        return Some(GpuBarWindow {
+            index: mmio_bar.index,
+            base: mmio_bar.base + GPU_MMIO_WINDOW_BYTES,
+            size: mmio_bar.size - GPU_MMIO_WINDOW_BYTES,
+        });
+    }
+    None
+}
+
 /// GPU native sürücüsünü başlatır
 pub fn init() {
     crate::serial_println!("[GPU-Native] TIER 1 GPU native driver initialized");
@@ -440,12 +571,17 @@ pub fn init() {
                 continue;
             }
 
-            let bar = crate::drivers::pci::read_bar_mmio(dev.bus, dev.device, dev.function, 0);
-            if let Some(bar) = bar {
-                let mut gpu = GpuNativeDevice::new(
-                    "gpu0", bar.base, bar.base, // VRAM often at BAR0 or BAR2
-                    bar.size,
-                );
+            if let Some(mmio_bar) = gpu_bar_window(&dev, 0) {
+                let Some(vram_bar) = select_vram_bar(&dev, mmio_bar) else {
+                    crate::serial_println!(
+                        "[GPU-Native] skipping GPU {:02x}:{:02x}.{}: no validated VRAM BAR",
+                        dev.bus,
+                        dev.device,
+                        dev.function
+                    );
+                    continue;
+                };
+                let mut gpu = GpuNativeDevice::new("gpu0", mmio_bar, vram_bar);
                 gpu.bus = dev.bus;
                 gpu.device = dev.device;
                 gpu.function = dev.function;

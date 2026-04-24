@@ -799,32 +799,15 @@ fn draw_render_object_gpu(
             width,
             height,
             pixels,
-        } => {
-            let offset_x = (render_rect.x - translated.x) as usize;
-            let offset_y = (render_rect.y - translated.y) as usize;
-            for row in 0..render_rect.height as usize {
-                let src_row = (offset_y + row) * *width as usize;
-                let dst_y = render_rect.y.max(0) as usize + row;
-                if dst_y >= *height as usize {
-                    break;
-                }
-                for col in 0..render_rect.width as usize {
-                    let src_idx = src_row + offset_x + col;
-                    if src_idx >= pixels.len() {
-                        break;
-                    }
-                    let dst_x = render_rect.x.max(0) as usize + col;
-                    let source = pixels[src_idx];
-                    if let Some(color) = raster_pixel(
-                        backend.pixel(dst_x as u32, dst_y as u32).unwrap_or(0),
-                        source,
-                        object.opacity,
-                    ) {
-                        backend.plot_pixel(dst_x as u32, dst_y as u32, color);
-                    }
-                }
-            }
-        }
+        } => draw_raster_gpu(
+            backend,
+            translated,
+            render_rect,
+            *width as usize,
+            *height as usize,
+            pixels,
+            object.opacity,
+        ),
         RenderObjectKind::TextRun {
             text,
             color,
@@ -1091,5 +1074,36 @@ mod tests {
         }
 
         assert_eq!(full_fb.front_buffer(), partial_fb.front_buffer());
+    }
+
+    #[test]
+    fn gpu_raster_draws_translated_small_blobs_below_origin() {
+        let mut backend = GpuBackend::Software(SoftwareGal::new(64, 64));
+        let mut text_system = TextSystem::new();
+        let object = RenderObject {
+            object_id: 99,
+            bounds: Rect::new(20, 20, 2, 2),
+            clip: None,
+            z_index: 0,
+            opacity: u8::MAX,
+            lane: DamageLane::Text,
+            kind: RenderObjectKind::Raster {
+                width: 2,
+                height: 2,
+                pixels: vec![0xFFFF_0000; 4],
+            },
+        };
+
+        draw_render_object_gpu(
+            &mut backend,
+            Rect::new(0, 0, 64, 64),
+            0,
+            0,
+            &object,
+            &mut text_system,
+        );
+
+        assert_eq!(GpuPixelBackend::pixel(&backend, 20, 20), Some(0xFFFF_0000));
+        assert_eq!(GpuPixelBackend::pixel(&backend, 21, 21), Some(0xFFFF_0000));
     }
 }

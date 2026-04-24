@@ -2124,7 +2124,12 @@ pub fn process_packet(data: &[u8]) -> Result<(), super::NetError> {
 
     let mut packet = Ipv6Packet::parse(&filtered_buf)?;
     let local = local_ipv6();
-    if packet.header.dst != local && !packet.header.dst.is_multicast() {
+    let has_local_protocol_handler =
+        lookup_next_header_handler(packet.header.next_header).is_some();
+    if packet.header.dst != local
+        && !packet.header.dst.is_multicast()
+        && !has_local_protocol_handler
+    {
         let mut fwd_data = filtered_buf.clone();
         if packet.header.hop_limit <= 1 {
             crate::serial_println!(

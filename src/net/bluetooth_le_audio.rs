@@ -71,7 +71,12 @@ pub struct Lc3Config {
 
 impl Lc3Config {
     pub fn new(freq: u32, duration: u8, octets: u16) -> Self {
-        let bitrate = (octets as u32) * 8 * (10_000 / (duration as u32 * 750 + 2_500));
+        let bits_per_frame = octets as u32 * 8;
+        let bitrate = match duration {
+            LC3_FRAME_DURATION_7_5_MS => bits_per_frame.saturating_mul(400) / 3,
+            LC3_FRAME_DURATION_10_MS => bits_per_frame.saturating_mul(100),
+            _ => 0,
+        };
         Self {
             sampling_frequency: freq,
             frame_duration: duration,

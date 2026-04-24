@@ -13,10 +13,13 @@ use super::super::runtime_layer::launch_contract::{
 };
 use super::super::runtime_layer::service_control::{
     dispatch_directory_command as dispatch_directory_message,
+    dispatch_network_broker_command as dispatch_network_broker_message,
     dispatch_package_registry_command as dispatch_package_registry_message,
-    dispatch_process_broker_command as dispatch_process_broker_message, DirectoryCommand,
-    DirectoryResponse, PackageRegistryCommand, PackageRegistryResponse, ProcessBrokerCommand,
-    ProcessBrokerResponse, ServiceClass, ServiceDescriptor, ServiceParityStatus,
+    dispatch_process_broker_command as dispatch_process_broker_message,
+    dispatch_update_installer_command as dispatch_update_installer_message, DirectoryCommand,
+    DirectoryResponse, NetworkBrokerCommand, NetworkBrokerResponse, PackageRegistryCommand,
+    PackageRegistryResponse, ProcessBrokerCommand, ProcessBrokerResponse, ServiceClass,
+    ServiceDescriptor, ServiceParityStatus, UpdateInstallerCommand, UpdateInstallerResponse,
 };
 use super::super::security::capability::{
     self, CapRights, CapabilityError, UserHandle as RawUserHandle,
@@ -132,6 +135,7 @@ pub enum ServiceError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ServiceId {
     Directory = 0,
+    NetworkBroker = 13,
     EchDisplay = 1,
     EchInput = 2,
     EchAudio = 3,
@@ -143,13 +147,16 @@ pub enum ServiceId {
     EchCapture = 9,
     PackageRegistry = 10,
     ProcessBroker = 11,
+    UpdateInstaller = 12,
 }
 
 #[derive(Clone, Debug)]
 pub enum ServiceMessage {
     DirectoryCommand(DirectoryCommand),
+    NetworkBrokerCommand(NetworkBrokerCommand),
     PackageRegistryCommand(PackageRegistryCommand),
     ProcessBrokerCommand(ProcessBrokerCommand),
+    UpdateInstallerCommand(UpdateInstallerCommand),
     DisplayCommand(DisplayCommand),
     InputCommand(InputCommand),
     AudioCommand(AudioCommand),
@@ -164,8 +171,10 @@ pub enum ServiceMessage {
 #[derive(Clone, Debug)]
 pub enum ServiceResponse {
     DirectoryResponse(DirectoryResponse),
+    NetworkBrokerResponse(NetworkBrokerResponse),
     PackageRegistryResponse(PackageRegistryResponse),
     ProcessBrokerResponse(ProcessBrokerResponse),
+    UpdateInstallerResponse(UpdateInstallerResponse),
     DisplayResponse(DisplayResponse),
     InputResponse(InputResponse),
     AudioResponse(AudioResponse),
@@ -297,12 +306,20 @@ fn dispatch_directory_command(message: ServiceMessage) -> ServiceResponse {
     dispatch_directory_message(message)
 }
 
+fn dispatch_network_broker_command(message: ServiceMessage) -> ServiceResponse {
+    dispatch_network_broker_message(message)
+}
+
 fn dispatch_package_registry_command(message: ServiceMessage) -> ServiceResponse {
     dispatch_package_registry_message(message)
 }
 
 fn dispatch_process_broker_command(message: ServiceMessage) -> ServiceResponse {
     dispatch_process_broker_message(message)
+}
+
+fn dispatch_update_installer_command(message: ServiceMessage) -> ServiceResponse {
+    dispatch_update_installer_message(message)
 }
 
 fn error_response(service: ServiceId, error: ServiceError) -> ServiceResponse {
@@ -323,15 +340,35 @@ fn error_response(service: ServiceId, error: ServiceError) -> ServiceResponse {
         ServiceId::Directory => {
             ServiceResponse::DirectoryResponse(DirectoryResponse::Service(None))
         }
+        ServiceId::NetworkBroker => ServiceResponse::NetworkBrokerResponse(
+            NetworkBrokerResponse::Error(
+                super::super::runtime_layer::service_control::NetworkBrokerError::service_unavailable(
+                    message,
+                ),
+            ),
+        ),
         ServiceId::PackageRegistry => {
-            ServiceResponse::PackageRegistryResponse(PackageRegistryResponse::Entry(None))
+            ServiceResponse::PackageRegistryResponse(PackageRegistryResponse::Error(
+                super::super::runtime_layer::service_control::PackageRegistryError::service_unavailable(
+                    message,
+                ),
+            ))
         }
         ServiceId::ProcessBroker => {
             ServiceResponse::ProcessBrokerResponse(ProcessBrokerResponse::Launch(None))
         }
+        ServiceId::UpdateInstaller => {
+            ServiceResponse::UpdateInstallerResponse(UpdateInstallerResponse::Error(
+                super::super::runtime_layer::service_control::UpdateInstallerError::service_unavailable(
+                    message,
+                ),
+            ))
+        }
         ServiceId::EchDisplay => ServiceResponse::DisplayResponse(DisplayResponse::Error(message)),
         ServiceId::EchInput => ServiceResponse::InputResponse(InputResponse::Error(message)),
-        ServiceId::EchAudio => ServiceResponse::AudioResponse(AudioResponse::Error(message)),
+        ServiceId::EchAudio => ServiceResponse::AudioResponse(AudioResponse::Error(
+            crate::services::AudioError::service_unavailable(message),
+        )),
         ServiceId::EchStore => ServiceResponse::StoreResponse(StoreResponse::Error(message)),
         ServiceId::EchShell => ServiceResponse::ShellResponse(ShellResponse::Error(message)),
         ServiceId::EchNotifications => {
@@ -352,8 +389,10 @@ fn service_unavailable_response(service: ServiceId) -> ServiceResponse {
 pub(super) fn service_mailbox_region_name(service: ServiceId, lane: &str) -> String {
     let slug = match service {
         ServiceId::Directory => "service_directory",
+        ServiceId::NetworkBroker => "network_broker",
         ServiceId::PackageRegistry => "package_registry",
         ServiceId::ProcessBroker => "process_broker",
+        ServiceId::UpdateInstaller => "update_installer",
         ServiceId::EchDisplay => "ech_display",
         ServiceId::EchInput => "ech_input",
         ServiceId::EchAudio => "ech_audio",
@@ -374,9 +413,37 @@ mod tests {
         LaunchIntent, LaunchSource, LoaderDispatch,
     };
     use super::super::super::runtime_layer::service_control::set_full_parity_strict_mode_for_tests;
+    use super::super::super::runtime_layer::service_control::{
+        NetworkBrokerError, NetworkBrokerErrorKind, PackageLifecycleAction, PackageLifecycleReport,
+    };
     use super::*;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::sync::Arc;
+    use echos_manifest::{
+        AppPresentation as ManifestPresentation, AppRuntime, AppStateContract, CompiledAppManifest,
+        DefaultWindow, RestartPolicy, SourceAppManifest, TrustDomain,
+    };
+    use sha2::{Digest, Sha256};
+
+    fn demo_source_manifest(app_id: &str, entry: &str) -> SourceAppManifest {
+        SourceAppManifest {
+            app_id: app_id.to_string(),
+            name: String::from("Service Package Test"),
+            version: String::from("0.1.0"),
+            entry: entry.to_string(),
+            sdk_version: 1,
+            runtime: AppRuntime::Native,
+            presentation: ManifestPresentation::Windowed,
+            capabilities: alloc::vec![echos_manifest::NativeCapability::NotificationsPost],
+            default_window: DefaultWindow {
+                title: String::from("Service Package Test"),
+                width: 640,
+                height: 480,
+            },
+            state_contract: AppStateContract::ColdResume,
+            restart_policy: RestartPolicy::bounded_retry(2),
+        }
+    }
 
     #[test]
     fn directory_lists_core_service_bus_endpoints() {
@@ -398,6 +465,9 @@ mod tests {
         assert!(services
             .iter()
             .any(|entry| entry.id == ServiceId::ProcessBroker));
+        assert!(services
+            .iter()
+            .any(|entry| entry.id == ServiceId::NetworkBroker));
     }
 
     #[test]
@@ -413,6 +483,85 @@ mod tests {
         assert!(entries
             .iter()
             .any(|entry| entry.identity().package_id == "echos.web"));
+    }
+
+    #[test]
+    fn package_registry_service_runs_install_verify_remove_through_control_plane() {
+        let app_id = "org.echos.service.pkg";
+        let _ = request_package_registry_sync(
+            0,
+            PackageRegistryCommand::RemovePackage(app_id.to_string()),
+        );
+
+        let source = demo_source_manifest(app_id, "service-pkg.elf");
+        let entry = b"service-package-binary".to_vec();
+        let entry_digest: [u8; 32] = Sha256::digest(&entry).into();
+        let compiled =
+            CompiledAppManifest::from_source(&source, entry_digest).expect("compiled manifest");
+        let bundle = crate::security::package::build_signed_bundle(
+            &source,
+            &compiled,
+            &entry,
+            TrustDomain::Developer,
+        )
+        .expect("bundle");
+        let install =
+            request_package_registry_sync(0, PackageRegistryCommand::InstallBundle(bundle))
+                .expect("install response");
+        assert!(matches!(
+            install,
+            PackageRegistryResponse::Lifecycle(PackageLifecycleReport {
+                action: PackageLifecycleAction::Install,
+                ..
+            })
+        ));
+
+        let verify = request_package_registry_sync(
+            0,
+            PackageRegistryCommand::VerifyPackage(app_id.to_string()),
+        )
+        .expect("verify response");
+        assert!(matches!(
+            verify,
+            PackageRegistryResponse::Lifecycle(PackageLifecycleReport {
+                action: PackageLifecycleAction::Verify,
+                ..
+            })
+        ));
+
+        let packages = request_package_registry_sync(0, PackageRegistryCommand::ListPackages)
+            .expect("packages response");
+        let PackageRegistryResponse::Packages(packages) = packages else {
+            unreachable!("unexpected package list response");
+        };
+        assert!(packages.iter().any(|record| record.name == app_id));
+
+        let remove = request_package_registry_sync(
+            0,
+            PackageRegistryCommand::RemovePackage(app_id.to_string()),
+        )
+        .expect("remove response");
+        assert!(matches!(
+            remove,
+            PackageRegistryResponse::Lifecycle(PackageLifecycleReport {
+                action: PackageLifecycleAction::Remove,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn network_broker_returns_typed_invalid_url_error() {
+        let response =
+            request_network_broker_sync(0, NetworkBrokerCommand::Download(String::from("http://")))
+                .expect("network broker response");
+        assert!(matches!(
+            response,
+            NetworkBrokerResponse::Error(NetworkBrokerError {
+                kind: NetworkBrokerErrorKind::InvalidUrl,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -535,7 +684,7 @@ mod tests {
     fn async_directory_round_trip_uses_handle_and_token() {
         let ipc = ServiceIpcManager::new();
         let handle = ipc
-            .open_service_handle(7, ServiceId::Directory, CapRights::READ)
+            .open_service_handle(7, ServiceId::Directory, CapRights::READ_WRITE)
             .expect("handle");
         let token = ipc
             .send_request(

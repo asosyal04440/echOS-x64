@@ -211,6 +211,8 @@ pub struct EbpfVm {
     program: Vec<u64>,
     /// Program tipi
     prog_type: u32,
+    /// Program doğrulaması yükleme/ilk çalıştırmada geçti mi?
+    verified: bool,
     /// Çalıştırılan instruction sayısı
     insn_count: AtomicU64,
     /// JIT derlenmiş kod (varsa)
@@ -225,6 +227,7 @@ impl EbpfVm {
             stack: [0; BPF_STACK_SIZE],
             program,
             prog_type,
+            verified: false,
             insn_count: AtomicU64::new(0),
             jit_program: None,
         }
@@ -232,6 +235,11 @@ impl EbpfVm {
 
     /// Programı çalıştır
     pub fn execute(&mut self, ctx: *const u8) -> Result<u64, EbpfError> {
+        if !self.verified {
+            verify_program(&self.program, self.prog_type)?;
+            self.verified = true;
+        }
+
         // Register'ları sıfırla
         self.registers.fill(0);
         self.registers[BPF_REG_10 as usize] = BPF_STACK_SIZE as u64; // Frame pointer
@@ -314,6 +322,76 @@ impl EbpfVm {
                             self.registers[dst as usize] /= divisor;
                         }
                     }
+                    BPF_MOD => {
+                        if uses_src_reg {
+                            let divisor = self.registers[src as usize];
+                            if divisor == 0 {
+                                return Err(EbpfError::CallError);
+                            }
+                            self.registers[dst as usize] %= divisor;
+                        } else {
+                            let divisor = imm as u64;
+                            if divisor == 0 {
+                                return Err(EbpfError::CallError);
+                            }
+                            self.registers[dst as usize] %= divisor;
+                        }
+                    }
+                    BPF_OR => {
+                        let rhs = if uses_src_reg {
+                            self.registers[src as usize]
+                        } else {
+                            imm as u64
+                        };
+                        self.registers[dst as usize] |= rhs;
+                    }
+                    BPF_AND => {
+                        let rhs = if uses_src_reg {
+                            self.registers[src as usize]
+                        } else {
+                            imm as u64
+                        };
+                        self.registers[dst as usize] &= rhs;
+                    }
+                    BPF_XOR => {
+                        let rhs = if uses_src_reg {
+                            self.registers[src as usize]
+                        } else {
+                            imm as u64
+                        };
+                        self.registers[dst as usize] ^= rhs;
+                    }
+                    BPF_LSH => {
+                        let shift = if uses_src_reg {
+                            self.registers[src as usize] as u32
+                        } else {
+                            imm as u32
+                        };
+                        self.registers[dst as usize] =
+                            self.registers[dst as usize].wrapping_shl(shift);
+                    }
+                    BPF_RSH => {
+                        let shift = if uses_src_reg {
+                            self.registers[src as usize] as u32
+                        } else {
+                            imm as u32
+                        };
+                        self.registers[dst as usize] =
+                            self.registers[dst as usize].wrapping_shr(shift);
+                    }
+                    BPF_ARSH => {
+                        let shift = if uses_src_reg {
+                            self.registers[src as usize] as u32
+                        } else {
+                            imm as u32
+                        };
+                        self.registers[dst as usize] =
+                            (self.registers[dst as usize] as i64).wrapping_shr(shift) as u64;
+                    }
+                    BPF_NEG => {
+                        self.registers[dst as usize] =
+                            (-(self.registers[dst as usize] as i64)) as u64;
+                    }
                     BPF_MOV => {
                         if uses_src_reg {
                             self.registers[dst as usize] = self.registers[src as usize];
@@ -350,7 +428,8 @@ impl EbpfVm {
                     match op {
                         BPF_JA => {
                             // Unconditional jump
-                            pc = (pc as i64 + 1 + off as i64) as usize;
+                            pc = checked_jump_target(pc, off, self.program.len())
+                                .ok_or(EbpfError::InvalidOpcode)?;
                             continue;
                         }
                         BPF_JEQ => {
@@ -360,7 +439,8 @@ impl EbpfVm {
                                 imm as u64
                             };
                             if self.registers[dst as usize] == cmp_val {
-                                pc = (pc as i64 + 1 + off as i64) as usize;
+                                pc = checked_jump_target(pc, off, self.program.len())
+                                    .ok_or(EbpfError::InvalidOpcode)?;
                                 continue;
                             }
                         }
@@ -371,7 +451,8 @@ impl EbpfVm {
                                 imm as u64
                             };
                             if self.registers[dst as usize] > cmp_val {
-                                pc = (pc as i64 + 1 + off as i64) as usize;
+                                pc = checked_jump_target(pc, off, self.program.len())
+                                    .ok_or(EbpfError::InvalidOpcode)?;
                                 continue;
                             }
                         }
@@ -382,7 +463,8 @@ impl EbpfVm {
                                 imm as u64
                             };
                             if self.registers[dst as usize] >= cmp_val {
-                                pc = (pc as i64 + 1 + off as i64) as usize;
+                                pc = checked_jump_target(pc, off, self.program.len())
+                                    .ok_or(EbpfError::InvalidOpcode)?;
                                 continue;
                             }
                         }
@@ -393,7 +475,44 @@ impl EbpfVm {
                                 imm as u64
                             };
                             if self.registers[dst as usize] != cmp_val {
-                                pc = (pc as i64 + 1 + off as i64) as usize;
+                                pc = checked_jump_target(pc, off, self.program.len())
+                                    .ok_or(EbpfError::InvalidOpcode)?;
+                                continue;
+                            }
+                        }
+                        BPF_JSET => {
+                            let cmp_val = if uses_src_reg {
+                                self.registers[src as usize]
+                            } else {
+                                imm as u64
+                            };
+                            if (self.registers[dst as usize] & cmp_val) != 0 {
+                                pc = checked_jump_target(pc, off, self.program.len())
+                                    .ok_or(EbpfError::InvalidOpcode)?;
+                                continue;
+                            }
+                        }
+                        BPF_JSGT => {
+                            let cmp_val = if uses_src_reg {
+                                self.registers[src as usize] as i64
+                            } else {
+                                imm as i64
+                            };
+                            if (self.registers[dst as usize] as i64) > cmp_val {
+                                pc = checked_jump_target(pc, off, self.program.len())
+                                    .ok_or(EbpfError::InvalidOpcode)?;
+                                continue;
+                            }
+                        }
+                        BPF_JSGE => {
+                            let cmp_val = if uses_src_reg {
+                                self.registers[src as usize] as i64
+                            } else {
+                                imm as i64
+                            };
+                            if (self.registers[dst as usize] as i64) >= cmp_val {
+                                pc = checked_jump_target(pc, off, self.program.len())
+                                    .ok_or(EbpfError::InvalidOpcode)?;
                                 continue;
                             }
                         }
@@ -437,6 +556,14 @@ impl EbpfVm {
         // Stack erişimi
         if addr >= (BPF_STACK_SIZE as u64 - 512) && addr < BPF_STACK_SIZE as u64 {
             let offset = (addr - (BPF_STACK_SIZE as u64 - 512)) as usize;
+            let access_size = access_size_bytes(size).ok_or(EbpfError::MemoryAccess)?;
+            let end = offset
+                .checked_add(access_size)
+                .ok_or(EbpfError::MemoryAccess)?;
+            if end > BPF_STACK_SIZE {
+                return Err(EbpfError::MemoryAccess);
+            }
+
             match size {
                 BPF_B => Ok(self.stack[offset] as u64),
                 BPF_H => {
@@ -471,6 +598,14 @@ impl EbpfVm {
         // Stack erişimi
         if addr >= (BPF_STACK_SIZE as u64 - 512) && addr < BPF_STACK_SIZE as u64 {
             let offset = (addr - (BPF_STACK_SIZE as u64 - 512)) as usize;
+            let access_size = access_size_bytes(size).ok_or(EbpfError::MemoryAccess)?;
+            let end = offset
+                .checked_add(access_size)
+                .ok_or(EbpfError::MemoryAccess)?;
+            if end > BPF_STACK_SIZE {
+                return Err(EbpfError::MemoryAccess);
+            }
+
             match size {
                 BPF_B => self.stack[offset] = value as u8,
                 BPF_H => {
@@ -557,6 +692,7 @@ fn elf_section_matches_prog_type(name: &str, prog_type: u32) -> bool {
         "lwt_out" => prog_type == BPF_PROG_TYPE_LWT_OUT,
         "lwt_xmit" => prog_type == BPF_PROG_TYPE_LWT_XMIT,
         "lwt_seg6local" => prog_type == BPF_PROG_TYPE_LWT_SEG6LOCAL,
+        "lirc_mode2" => prog_type == BPF_PROG_TYPE_LIRC_MODE2,
         "sock_ops" => prog_type == BPF_PROG_TYPE_SOCK_OPS,
         "sock_msg" => prog_type == BPF_PROG_TYPE_SK_MSG,
         "sk_skb" => prog_type == BPF_PROG_TYPE_SK_SKB,
@@ -784,6 +920,9 @@ fn prog_type_is_registered(prog_type: u32) -> bool {
 
 fn lookup_attach_verifier(attach_point: &str) -> Option<EbpfAttachVerifier> {
     let normalized = normalize_attach_point(attach_point);
+    if normalized == "*" {
+        return Some(generic_attach_accepts_prog_type);
+    }
     if let Some(verifier) = EBPF_ATTACH_REGISTRY.lock().get(normalized).copied() {
         return Some(verifier);
     }
@@ -842,7 +981,8 @@ fn lookup_attached_program_id(
 }
 
 fn generic_attach_accepts_prog_type(prog_type: u32) -> bool {
-    is_supported_packet_prog_type(prog_type)
+    let _ = prog_type;
+    true
 }
 
 pub fn attach_ingress_program(prog_id: &str, program: Vec<u64>) -> Result<(), EbpfError> {
@@ -1030,40 +1170,682 @@ pub fn init() {
     crate::serial_println!("[eBPF] eBPF module initialized");
 }
 
+fn checked_jump_target(pc: usize, off: i16, program_len: usize) -> Option<usize> {
+    let base = pc as i64 + 1;
+    let target = base.checked_add(off as i64)?;
+    if target < 0 || target >= program_len as i64 {
+        return None;
+    }
+    Some(target as usize)
+}
+
+fn access_size_bytes(size: u8) -> Option<usize> {
+    match size {
+        BPF_B => Some(1),
+        BPF_H => Some(2),
+        BPF_W => Some(4),
+        BPF_DW => Some(8),
+        _ => None,
+    }
+}
+
+const VERIFIER_COMPLEXITY_LIMIT: usize = 1_000_000;
+const VERIFIER_CTX_MAX_ACCESS: i16 = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerifierRegKind {
+    Uninit,
+    Scalar,
+    CtxPtr,
+    StackPtr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VerifierRegState {
+    kind: VerifierRegKind,
+    stack_offset: i32,
+}
+
+const VERIFIER_REG_UNINIT: VerifierRegState = VerifierRegState {
+    kind: VerifierRegKind::Uninit,
+    stack_offset: 0,
+};
+
+const VERIFIER_REG_SCALAR: VerifierRegState = VerifierRegState {
+    kind: VerifierRegKind::Scalar,
+    stack_offset: 0,
+};
+
+const VERIFIER_REG_CTX: VerifierRegState = VerifierRegState {
+    kind: VerifierRegKind::CtxPtr,
+    stack_offset: 0,
+};
+
+const VERIFIER_REG_STACK_FP: VerifierRegState = VerifierRegState {
+    kind: VerifierRegKind::StackPtr,
+    stack_offset: 0,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VerifierState {
+    regs: [VerifierRegState; 11],
+    stack_init: [bool; BPF_STACK_SIZE],
+    stack_spill: [Option<VerifierRegState>; BPF_STACK_SIZE / 8],
+}
+
+impl VerifierState {
+    fn entry() -> Self {
+        let mut regs = [VERIFIER_REG_UNINIT; 11];
+        regs[BPF_REG_1 as usize] = VERIFIER_REG_CTX;
+        regs[BPF_REG_10 as usize] = VERIFIER_REG_STACK_FP;
+        Self {
+            regs,
+            stack_init: [false; BPF_STACK_SIZE],
+            stack_spill: [None; BPF_STACK_SIZE / 8],
+        }
+    }
+
+    fn merge_from(&mut self, incoming: &Self) -> bool {
+        let mut changed = false;
+
+        for idx in 0..self.regs.len() {
+            let merged = verifier_merge_reg_state(self.regs[idx], incoming.regs[idx]);
+            if merged != self.regs[idx] {
+                self.regs[idx] = merged;
+                changed = true;
+            }
+        }
+
+        for idx in 0..self.stack_init.len() {
+            let merged = self.stack_init[idx] && incoming.stack_init[idx];
+            if merged != self.stack_init[idx] {
+                self.stack_init[idx] = merged;
+                changed = true;
+            }
+        }
+
+        for slot in 0..self.stack_spill.len() {
+            let merged = match (self.stack_spill[slot], incoming.stack_spill[slot]) {
+                (Some(lhs), Some(rhs)) if lhs == rhs => Some(lhs),
+                _ => None,
+            };
+            if merged != self.stack_spill[slot] {
+                self.stack_spill[slot] = merged;
+                changed = true;
+            }
+        }
+
+        // R10 stack frame pointer olarak salt-okunur ve sabit kalır.
+        if self.regs[BPF_REG_10 as usize] != VERIFIER_REG_STACK_FP {
+            self.regs[BPF_REG_10 as usize] = VERIFIER_REG_STACK_FP;
+            changed = true;
+        }
+
+        if changed {
+            self.invalidate_spills_for_uninitialized_bytes();
+        }
+
+        changed
+    }
+
+    fn reg_readable(&self, reg: usize) -> bool {
+        reg < self.regs.len() && self.regs[reg].kind != VerifierRegKind::Uninit
+    }
+
+    fn mark_stack_write(&mut self, start: usize, size: usize) {
+        for idx in start..start + size {
+            self.stack_init[idx] = true;
+        }
+        self.clear_spills_for_stack_range(start, size);
+    }
+
+    fn stack_bytes_initialized(&self, start: usize, size: usize) -> bool {
+        self.stack_init[start..start + size].iter().all(|bit| *bit)
+    }
+
+    fn clear_spills_for_stack_range(&mut self, start: usize, size: usize) {
+        let first = start / 8;
+        let last = (start + size - 1) / 8;
+        for slot in first..=last {
+            self.stack_spill[slot] = None;
+        }
+    }
+
+    fn invalidate_spills_for_uninitialized_bytes(&mut self) {
+        for slot in 0..self.stack_spill.len() {
+            let start = slot * 8;
+            if !self.stack_init[start..start + 8].iter().all(|bit| *bit) {
+                self.stack_spill[slot] = None;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DecodedInsn {
+    opcode: u8,
+    dst: u8,
+    src: u8,
+    off: i16,
+    imm: i32,
+    class: u8,
+    op: u8,
+    uses_src_reg: bool,
+}
+
+fn decode_instruction(insn: u64) -> DecodedInsn {
+    let opcode = ((insn >> 56) & 0xff) as u8;
+    DecodedInsn {
+        opcode,
+        dst: ((insn >> 48) & 0xff) as u8,
+        src: ((insn >> 40) & 0xff) as u8,
+        off: ((insn >> 32) & 0xffff) as u16 as i16,
+        imm: insn as i32,
+        class: opcode & 0x07,
+        op: opcode & 0xf0,
+        uses_src_reg: (opcode & BPF_SRC_X) == BPF_SRC_X,
+    }
+}
+
+fn verifier_merge_reg_state(lhs: VerifierRegState, rhs: VerifierRegState) -> VerifierRegState {
+    use VerifierRegKind::{CtxPtr, Scalar, StackPtr, Uninit};
+
+    match (lhs.kind, rhs.kind) {
+        (Uninit, _) | (_, Uninit) => VERIFIER_REG_UNINIT,
+        (Scalar, Scalar) => VERIFIER_REG_SCALAR,
+        (CtxPtr, CtxPtr) => VERIFIER_REG_CTX,
+        (StackPtr, StackPtr) if lhs.stack_offset == rhs.stack_offset => lhs,
+        _ => VERIFIER_REG_UNINIT,
+    }
+}
+
+fn verifier_stack_access_start(base_stack_offset: i32, off: i16, size: usize) -> Option<usize> {
+    let base = BPF_STACK_SIZE as i64;
+    let start = base
+        .checked_add(base_stack_offset as i64)?
+        .checked_add(off as i64)?;
+    let end = start.checked_add(size as i64)?;
+    if start < 0 || end > BPF_STACK_SIZE as i64 {
+        return None;
+    }
+    let start = start as usize;
+    if size > 1 && (start % size) != 0 {
+        return None;
+    }
+    Some(start)
+}
+
+fn verifier_ctx_access_valid(off: i16, size: usize, write: bool) -> bool {
+    if write || off < 0 {
+        return false;
+    }
+    let start = off as i64;
+    let end = match start.checked_add(size as i64) {
+        Some(end) => end,
+        None => return false,
+    };
+    if end > VERIFIER_CTX_MAX_ACCESS as i64 {
+        return false;
+    }
+    if size > 1 && (start as usize % size) != 0 {
+        return false;
+    }
+    true
+}
+
+fn verifier_is_supported_helper(helper_id: i32) -> bool {
+    matches!(helper_id, 1..=3)
+}
+
+fn verifier_validate_helper_args(state: &VerifierState, helper_id: i32) -> Result<(), EbpfError> {
+    match helper_id {
+        1 => {
+            if !state.reg_readable(BPF_REG_1 as usize) {
+                return Err(EbpfError::VerifierRejected);
+            }
+        }
+        2 | 3 => {}
+        _ => return Err(EbpfError::CallError),
+    }
+    Ok(())
+}
+
+fn verifier_check_register_bounds(insn: DecodedInsn) -> Result<(), EbpfError> {
+    if insn.dst > BPF_REG_10 || insn.src > BPF_REG_10 {
+        return Err(EbpfError::InvalidRegister);
+    }
+    Ok(())
+}
+
+fn verifier_check_opcode_support(insn: DecodedInsn) -> Result<(), EbpfError> {
+    match insn.class {
+        BPF_ALU => match insn.op {
+            BPF_ADD | BPF_SUB | BPF_MUL | BPF_DIV | BPF_OR | BPF_AND | BPF_LSH | BPF_RSH
+            | BPF_NEG | BPF_MOD | BPF_XOR | BPF_MOV | BPF_ARSH => Ok(()),
+            _ => Err(EbpfError::InvalidOpcode),
+        },
+        BPF_LDX | BPF_STX => {
+            if access_size_bytes(insn.opcode & 0x18).is_none() {
+                return Err(EbpfError::InvalidOpcode);
+            }
+            Ok(())
+        }
+        BPF_JMP => {
+            match insn.op {
+                BPF_JA | BPF_JEQ | BPF_JGT | BPF_JGE | BPF_JSET | BPF_JNE | BPF_JSGT | BPF_JSGE
+                | BPF_CALL | BPF_EXIT => {}
+                _ => return Err(EbpfError::InvalidOpcode),
+            }
+
+            if insn.op == BPF_CALL && insn.off != 0 {
+                return Err(EbpfError::VerifierRejected);
+            }
+
+            if insn.op == BPF_EXIT
+                && (insn.dst != 0 || insn.src != 0 || insn.off != 0 || insn.imm != 0)
+            {
+                return Err(EbpfError::VerifierRejected);
+            }
+
+            Ok(())
+        }
+        _ => Err(EbpfError::InvalidOpcode),
+    }
+}
+
+fn verifier_build_cfg_successors(
+    decoded: &[DecodedInsn],
+) -> Result<Vec<[Option<usize>; 2]>, EbpfError> {
+    let mut successors = vec![[None, None]; decoded.len()];
+
+    for (pc, insn) in decoded.iter().copied().enumerate() {
+        if insn.class == BPF_JMP {
+            match insn.op {
+                BPF_EXIT => {
+                    successors[pc] = [None, None];
+                }
+                BPF_CALL => {
+                    let next = pc.checked_add(1).filter(|idx| *idx < decoded.len());
+                    if next.is_none() {
+                        return Err(EbpfError::VerifierRejected);
+                    }
+                    successors[pc] = [next, None];
+                }
+                BPF_JA => {
+                    let target = checked_jump_target(pc, insn.off, decoded.len())
+                        .ok_or(EbpfError::VerifierRejected)?;
+                    successors[pc] = [Some(target), None];
+                }
+                _ => {
+                    let target = checked_jump_target(pc, insn.off, decoded.len())
+                        .ok_or(EbpfError::VerifierRejected)?;
+                    let fallthrough = pc.checked_add(1).filter(|idx| *idx < decoded.len());
+                    if fallthrough.is_none() {
+                        return Err(EbpfError::VerifierRejected);
+                    }
+                    successors[pc] = [fallthrough, Some(target)];
+                }
+            }
+        } else {
+            let next = pc.checked_add(1).filter(|idx| *idx < decoded.len());
+            if next.is_none() {
+                return Err(EbpfError::VerifierRejected);
+            }
+            successors[pc] = [next, None];
+        }
+    }
+
+    Ok(successors)
+}
+
+fn verifier_reachable_mask(successors: &[[Option<usize>; 2]]) -> Vec<bool> {
+    let mut reachable = vec![false; successors.len()];
+    let mut stack = vec![0usize];
+
+    while let Some(pc) = stack.pop() {
+        if reachable[pc] {
+            continue;
+        }
+        reachable[pc] = true;
+        for next in successors[pc].iter().flatten() {
+            stack.push(*next);
+        }
+    }
+
+    reachable
+}
+
+fn verifier_can_reach_exit_mask(
+    successors: &[[Option<usize>; 2]],
+    reachable: &[bool],
+    exits: &[usize],
+) -> Vec<bool> {
+    let mut reverse = vec![Vec::new(); successors.len()];
+    for (pc, edges) in successors.iter().enumerate() {
+        if !reachable[pc] {
+            continue;
+        }
+        for next in edges.iter().flatten() {
+            if reachable[*next] {
+                reverse[*next].push(pc);
+            }
+        }
+    }
+
+    let mut can_reach_exit = vec![false; successors.len()];
+    let mut stack = exits.to_vec();
+    while let Some(pc) = stack.pop() {
+        if can_reach_exit[pc] {
+            continue;
+        }
+        can_reach_exit[pc] = true;
+        for prev in reverse[pc].iter().copied() {
+            stack.push(prev);
+        }
+    }
+
+    can_reach_exit
+}
+
+fn verifier_apply_alu(insn: DecodedInsn, state: &mut VerifierState) -> Result<(), EbpfError> {
+    let dst = insn.dst as usize;
+    let src = insn.src as usize;
+
+    if dst == BPF_REG_10 as usize {
+        return Err(EbpfError::VerifierRejected);
+    }
+
+    if insn.op == BPF_MOV {
+        if insn.uses_src_reg {
+            if !state.reg_readable(src) {
+                return Err(EbpfError::VerifierRejected);
+            }
+            state.regs[dst] = state.regs[src];
+        } else {
+            state.regs[dst] = VERIFIER_REG_SCALAR;
+        }
+        return Ok(());
+    }
+
+    if !state.reg_readable(dst) {
+        return Err(EbpfError::VerifierRejected);
+    }
+
+    if insn.uses_src_reg {
+        if !state.reg_readable(src) {
+            return Err(EbpfError::VerifierRejected);
+        }
+        if state.regs[dst].kind == VerifierRegKind::StackPtr
+            || state.regs[dst].kind == VerifierRegKind::CtxPtr
+        {
+            return Err(EbpfError::VerifierRejected);
+        }
+    } else if insn.op == BPF_DIV || insn.op == BPF_MOD {
+        if insn.imm == 0 {
+            return Err(EbpfError::VerifierRejected);
+        }
+    }
+
+    match state.regs[dst].kind {
+        VerifierRegKind::StackPtr => {
+            if !matches!(insn.op, BPF_ADD | BPF_SUB) || insn.uses_src_reg {
+                return Err(EbpfError::VerifierRejected);
+            }
+
+            let delta = if insn.op == BPF_ADD {
+                insn.imm as i64
+            } else {
+                -(insn.imm as i64)
+            };
+            let next_offset = (state.regs[dst].stack_offset as i64)
+                .checked_add(delta)
+                .ok_or(EbpfError::VerifierRejected)?;
+            if next_offset < i32::MIN as i64 || next_offset > i32::MAX as i64 {
+                return Err(EbpfError::VerifierRejected);
+            }
+            state.regs[dst].stack_offset = next_offset as i32;
+        }
+        VerifierRegKind::CtxPtr => {
+            return Err(EbpfError::VerifierRejected);
+        }
+        VerifierRegKind::Scalar => {
+            state.regs[dst] = VERIFIER_REG_SCALAR;
+        }
+        VerifierRegKind::Uninit => {
+            return Err(EbpfError::VerifierRejected);
+        }
+    }
+
+    Ok(())
+}
+
+fn verifier_apply_ldx(insn: DecodedInsn, state: &mut VerifierState) -> Result<(), EbpfError> {
+    let dst = insn.dst as usize;
+    let src = insn.src as usize;
+    let size = access_size_bytes(insn.opcode & 0x18).ok_or(EbpfError::InvalidOpcode)?;
+
+    if dst == BPF_REG_10 as usize || !state.reg_readable(src) {
+        return Err(EbpfError::VerifierRejected);
+    }
+
+    match state.regs[src].kind {
+        VerifierRegKind::StackPtr => {
+            let start = verifier_stack_access_start(state.regs[src].stack_offset, insn.off, size)
+                .ok_or(EbpfError::MemoryAccess)?;
+            if !state.stack_bytes_initialized(start, size) {
+                return Err(EbpfError::VerifierRejected);
+            }
+
+            if size == 8 && (start % 8) == 0 {
+                let slot = start / 8;
+                if let Some(spilled) = state.stack_spill[slot] {
+                    state.regs[dst] = spilled;
+                } else {
+                    state.regs[dst] = VERIFIER_REG_SCALAR;
+                }
+            } else {
+                state.regs[dst] = VERIFIER_REG_SCALAR;
+            }
+            Ok(())
+        }
+        VerifierRegKind::CtxPtr => {
+            if !verifier_ctx_access_valid(insn.off, size, false) {
+                return Err(EbpfError::VerifierRejected);
+            }
+            state.regs[dst] = VERIFIER_REG_SCALAR;
+            Ok(())
+        }
+        _ => Err(EbpfError::VerifierRejected),
+    }
+}
+
+fn verifier_apply_stx(insn: DecodedInsn, state: &mut VerifierState) -> Result<(), EbpfError> {
+    let dst = insn.dst as usize;
+    let src = insn.src as usize;
+    let size = access_size_bytes(insn.opcode & 0x18).ok_or(EbpfError::InvalidOpcode)?;
+
+    if !state.reg_readable(src) || !state.reg_readable(dst) {
+        return Err(EbpfError::VerifierRejected);
+    }
+    if state.regs[dst].kind != VerifierRegKind::StackPtr {
+        return Err(EbpfError::VerifierRejected);
+    }
+
+    let start = verifier_stack_access_start(state.regs[dst].stack_offset, insn.off, size)
+        .ok_or(EbpfError::MemoryAccess)?;
+
+    state.mark_stack_write(start, size);
+    if size == 8 && (start % 8) == 0 {
+        state.stack_spill[start / 8] = Some(state.regs[src]);
+    }
+
+    Ok(())
+}
+
+fn verifier_transfer_jump(
+    insn: DecodedInsn,
+    state: &VerifierState,
+    successors: [Option<usize>; 2],
+) -> Result<Vec<(usize, VerifierState)>, EbpfError> {
+    let dst = insn.dst as usize;
+    let src = insn.src as usize;
+
+    match insn.op {
+        BPF_EXIT => {
+            if !state.reg_readable(BPF_REG_0 as usize)
+                || state.regs[BPF_REG_0 as usize].kind != VerifierRegKind::Scalar
+            {
+                return Err(EbpfError::VerifierRejected);
+            }
+            Ok(Vec::new())
+        }
+        BPF_CALL => {
+            if !verifier_is_supported_helper(insn.imm) {
+                return Err(EbpfError::CallError);
+            }
+            verifier_validate_helper_args(state, insn.imm)?;
+
+            let mut next = state.clone();
+            for reg in BPF_REG_1 as usize..=BPF_REG_5 as usize {
+                next.regs[reg] = VERIFIER_REG_UNINIT;
+            }
+            next.regs[BPF_REG_0 as usize] = VERIFIER_REG_SCALAR;
+
+            let next_pc = successors[0].ok_or(EbpfError::VerifierRejected)?;
+            Ok(vec![(next_pc, next)])
+        }
+        BPF_JA | BPF_JEQ | BPF_JGT | BPF_JGE | BPF_JSET | BPF_JNE | BPF_JSGT | BPF_JSGE => {
+            if insn.op != BPF_JA {
+                if !state.reg_readable(dst) {
+                    return Err(EbpfError::VerifierRejected);
+                }
+                if insn.uses_src_reg && !state.reg_readable(src) {
+                    return Err(EbpfError::VerifierRejected);
+                }
+            }
+
+            let mut out = Vec::with_capacity(2);
+            if let Some(next_pc) = successors[0] {
+                out.push((next_pc, state.clone()));
+            }
+            if let Some(next_pc) = successors[1] {
+                out.push((next_pc, state.clone()));
+            }
+            Ok(out)
+        }
+        _ => Err(EbpfError::InvalidOpcode),
+    }
+}
+
+fn verifier_transfer_instruction(
+    insn: DecodedInsn,
+    state: &VerifierState,
+    successors: [Option<usize>; 2],
+) -> Result<Vec<(usize, VerifierState)>, EbpfError> {
+    let mut next = state.clone();
+
+    match insn.class {
+        BPF_ALU => {
+            verifier_apply_alu(insn, &mut next)?;
+            let next_pc = successors[0].ok_or(EbpfError::VerifierRejected)?;
+            Ok(vec![(next_pc, next)])
+        }
+        BPF_LDX => {
+            verifier_apply_ldx(insn, &mut next)?;
+            let next_pc = successors[0].ok_or(EbpfError::VerifierRejected)?;
+            Ok(vec![(next_pc, next)])
+        }
+        BPF_STX => {
+            verifier_apply_stx(insn, &mut next)?;
+            let next_pc = successors[0].ok_or(EbpfError::VerifierRejected)?;
+            Ok(vec![(next_pc, next)])
+        }
+        BPF_JMP => verifier_transfer_jump(insn, state, successors),
+        _ => Err(EbpfError::InvalidOpcode),
+    }
+}
+
 fn verify_program(program: &[u64], prog_type: u32) -> Result<(), EbpfError> {
     if program.is_empty() || program.len() > BPF_MAXINSNS {
         return Err(EbpfError::VerifierRejected);
     }
 
-    if !is_supported_packet_prog_type(prog_type) {
+    let _ = prog_type;
+
+    let mut decoded = Vec::with_capacity(program.len());
+    for raw in program.iter().copied() {
+        let insn = decode_instruction(raw);
+        verifier_check_register_bounds(insn)?;
+        verifier_check_opcode_support(insn)?;
+        decoded.push(insn);
+    }
+
+    let successors = verifier_build_cfg_successors(&decoded)?;
+    let reachable = verifier_reachable_mask(&successors);
+    if reachable.iter().any(|bit| !*bit) {
         return Err(EbpfError::VerifierRejected);
     }
 
-    let mut has_exit = false;
-    for (pc, insn) in program.iter().copied().enumerate() {
-        let opcode = ((insn >> 56) & 0xff) as u8;
-        let dst = ((insn >> 48) & 0x0f) as u8;
-        let src = ((insn >> 40) & 0x0f) as u8;
-        if dst > BPF_REG_10 || src > BPF_REG_10 {
-            return Err(EbpfError::InvalidRegister);
+    let exits: Vec<usize> = decoded
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, insn)| {
+            if reachable[pc] && insn.class == BPF_JMP && insn.op == BPF_EXIT {
+                Some(pc)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if exits.is_empty() {
+        return Err(EbpfError::VerifierRejected);
+    }
+
+    let can_reach_exit = verifier_can_reach_exit_mask(&successors, &reachable, &exits);
+    if reachable
+        .iter()
+        .enumerate()
+        .any(|(pc, is_reachable)| *is_reachable && !can_reach_exit[pc])
+    {
+        return Err(EbpfError::VerifierRejected);
+    }
+
+    let mut in_states: Vec<Option<VerifierState>> = vec![None; decoded.len()];
+    let mut worklist: Vec<(usize, VerifierState)> = vec![(0, VerifierState::entry())];
+    let mut processed = 0usize;
+
+    while let Some((pc, incoming)) = worklist.pop() {
+        processed = processed
+            .checked_add(1)
+            .ok_or(EbpfError::VerifierRejected)?;
+        if processed > VERIFIER_COMPLEXITY_LIMIT {
+            return Err(EbpfError::InfiniteLoop);
         }
 
-        let class = opcode & 0x07;
-        match class {
-            BPF_LD | BPF_LDX | BPF_ST | BPF_STX | BPF_ALU | BPF_JMP | BPF_RET | BPF_MISC => {}
-            _ => return Err(EbpfError::InvalidOpcode),
-        }
+        let current = if let Some(existing) = in_states[pc].as_mut() {
+            if !existing.merge_from(&incoming) {
+                continue;
+            }
+            existing.clone()
+        } else {
+            in_states[pc] = Some(incoming);
+            in_states[pc]
+                .as_ref()
+                .cloned()
+                .ok_or(EbpfError::VerifierRejected)?
+        };
 
-        if opcode == (BPF_JMP | BPF_EXIT) {
-            has_exit = true;
-        }
-
-        if pc == program.len() - 1 && opcode != (BPF_JMP | BPF_EXIT) {
-            return Err(EbpfError::VerifierRejected);
+        let next = verifier_transfer_instruction(decoded[pc], &current, successors[pc])?;
+        for item in next {
+            worklist.push(item);
         }
     }
 
-    if !has_exit {
+    if reachable
+        .iter()
+        .enumerate()
+        .any(|(pc, is_reachable)| *is_reachable && in_states[pc].is_none())
+    {
         return Err(EbpfError::VerifierRejected);
     }
 
@@ -1099,7 +1881,6 @@ fn is_supported_packet_prog_type(prog_type: u32) -> bool {
             | BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE
             | BPF_PROG_TYPE_CGROUP_SOCKOPT
     ) || prog_type_is_registered(prog_type)
-        || prog_type != 0
 }
 
 fn trace_prog_type(prog_type: u32) -> bool {
@@ -1303,52 +2084,9 @@ fn map_jit_error(err: crate::ebpf::BpfError) -> EbpfError {
 /// Örnek eBPF socket-filter programı oluştur
 pub fn create_simple_program() -> Vec<u64> {
     vec![
-        // R0 = len(skb)
-        0x0000000000000085 | ((BPF_LD | BPF_W | BPF_ABS) as u64) << 56 | 0x00 << 32,
-        // if R0 < 14: goto 10
-        0x0000000000000016
-            | ((BPF_JMP | BPF_JGT | BPF_K) as u64) << 56
-            | 0x00 << 48
-            | 0x00 << 40
-            | 0x0e << 32,
-        // R0 = 0
-        0x00000000000000b7
-            | ((BPF_ALU | BPF_MOV | BPF_K) as u64) << 56
-            | 0x00 << 48
-            | 0x00 << 40
-            | 0x00 << 32,
-        // exit
-        0x0000000000000095 | ((BPF_JMP | BPF_EXIT) as u64) << 56,
-        // R1 = *(u8 *)(skb + 12)
-        0x0000000000000071
-            | ((BPF_LDX | BPF_B | BPF_ABS) as u64) << 56
-            | 0x01 << 48
-            | 0x00 << 40
-            | 0x0c << 32,
-        // R1 &= 0x0f
-        0x0000000000000047
-            | ((BPF_ALU | BPF_AND | BPF_K) as u64) << 56
-            | 0x01 << 48
-            | 0x00 << 40
-            | 0x0f << 32,
-        // R1 == 0x06: goto 9
-        0x0000000000000015
-            | ((BPF_JMP | BPF_JEQ | BPF_K) as u64) << 56
-            | 0x01 << 48
-            | 0x00 << 40
-            | 0x06 << 32
-            | 0x01 << 32,
-        // R0 = 0
-        0x00000000000000b7
-            | ((BPF_ALU | BPF_MOV | BPF_K) as u64) << 56
-            | 0x00 << 48
-            | 0x00 << 40
-            | 0x00 << 32,
-        // exit
-        0x0000000000000095 | ((BPF_JMP | BPF_EXIT) as u64) << 56,
-        // R0 = skb->len
-        0x0000000000000085 | ((BPF_LD | BPF_W | BPF_ABS) as u64) << 56 | 0x00 << 32,
-        // exit
+        // allow
+        ((BPF_ALU | BPF_MOV | BPF_K) as u64) << 56 | ((BPF_REG_0 as u64) << 48) | 1,
+        // exit (return non-zero => packet accepted)
         0x0000000000000095 | ((BPF_JMP | BPF_EXIT) as u64) << 56,
     ]
 }
@@ -1376,7 +2114,7 @@ mod tests {
     }
 
     fn encode_imm_insn(opcode: u8, dst: u8, off: i16, imm: i32) -> u64 {
-        encode_insn(opcode, dst, 0, off, imm) | (1u64 << 32)
+        encode_insn(opcode, dst, 0, off, imm)
     }
 
     fn build_minimal_elf_with_program(section_name: &str, program: &[u64]) -> Vec<u8> {
@@ -1844,5 +2582,50 @@ mod tests {
                 .unwrap(),
             31
         );
+    }
+
+    #[test]
+    fn verifier_rejects_unreachable_instruction() {
+        let program = vec![
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let mut loader = EbpfLoader::new();
+        assert!(matches!(
+            loader.load_program("unreachable", program, BPF_PROG_TYPE_SOCKET_FILTER),
+            Err(EbpfError::VerifierRejected)
+        ));
+    }
+
+    #[test]
+    fn verifier_rejects_uninitialized_register_read() {
+        let program = vec![
+            encode_insn(BPF_ALU | BPF_MOV | BPF_SRC_X, BPF_REG_0, BPF_REG_2, 0, 0),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let mut loader = EbpfLoader::new();
+        assert!(matches!(
+            loader.load_program("uninit-read", program, BPF_PROG_TYPE_SOCKET_FILTER),
+            Err(EbpfError::VerifierRejected)
+        ));
+    }
+
+    #[test]
+    fn verifier_rejects_stack_read_before_write() {
+        let program = vec![
+            encode_insn(BPF_ALU | BPF_MOV | BPF_SRC_X, BPF_REG_1, BPF_REG_10, 0, 0),
+            encode_imm_insn(BPF_ALU | BPF_ADD | BPF_K, BPF_REG_1, 0, -8),
+            encode_insn(BPF_LDX | BPF_DW, BPF_REG_0, BPF_REG_1, 0, 0),
+            encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let mut loader = EbpfLoader::new();
+        assert!(matches!(
+            loader.load_program(
+                "stack-read-before-write",
+                program,
+                BPF_PROG_TYPE_SOCKET_FILTER
+            ),
+            Err(EbpfError::VerifierRejected) | Err(EbpfError::MemoryAccess)
+        ));
     }
 }

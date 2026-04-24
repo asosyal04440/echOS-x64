@@ -94,6 +94,46 @@ static BLK_DMA_DOMAIN: AtomicU32 = AtomicU32::new(0);
 /// VirtIO blok sektörünün sabit boyutu (byte).
 /// VirtIO spec'e göre tek sektör daima 512 byte'tır.
 const SECTOR_SIZE: usize = 512;
+const AUDIT_VIRTQ_DESC_F_NEXT: u16 = 1;
+const AUDIT_VIRTQ_DESC_F_INDIRECT: u16 = 4;
+
+#[derive(Clone, Copy, Debug)]
+struct VirtqDescAudit {
+    len: u32,
+    flags: u16,
+    next: u16,
+}
+
+fn audit_virtq_descriptor_chain(descs: &[VirtqDescAudit], head: u16) -> bool {
+    if descs.is_empty() || descs.len() > 64 {
+        return false;
+    }
+    let mut seen = 0u64;
+    let mut current = head as usize;
+    for _ in 0..descs.len() {
+        if current >= descs.len() {
+            return false;
+        }
+        let bit = 1u64 << current;
+        if seen & bit != 0 {
+            return false;
+        }
+        seen |= bit;
+        let desc = descs[current];
+        if desc.len == 0 || desc.flags & AUDIT_VIRTQ_DESC_F_INDIRECT != 0 {
+            return false;
+        }
+        if desc.flags & AUDIT_VIRTQ_DESC_F_NEXT == 0 {
+            return true;
+        }
+        current = desc.next as usize;
+    }
+    false
+}
+
+fn audit_used_ring_delta(previous: u16, current: u16, queue_size: u16) -> bool {
+    queue_size != 0 && current.wrapping_sub(previous) <= queue_size
+}
 
 /// VirtIO blok sürücüsünü başlatır.
 ///
@@ -346,4 +386,56 @@ pub fn write_sector(lba: u64, buffer: &[u8]) -> Result<(), &'static str> {
         );
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtio_audit_rejects_circular_descriptor_chain() {
+        let descs = [
+            VirtqDescAudit {
+                len: 16,
+                flags: AUDIT_VIRTQ_DESC_F_NEXT,
+                next: 1,
+            },
+            VirtqDescAudit {
+                len: 512,
+                flags: AUDIT_VIRTQ_DESC_F_NEXT,
+                next: 0,
+            },
+        ];
+
+        assert!(!audit_virtq_descriptor_chain(&descs, 0));
+    }
+
+    #[test]
+    fn virtio_audit_accepts_three_descriptor_blk_chain() {
+        let descs = [
+            VirtqDescAudit {
+                len: 16,
+                flags: AUDIT_VIRTQ_DESC_F_NEXT,
+                next: 1,
+            },
+            VirtqDescAudit {
+                len: SECTOR_SIZE as u32,
+                flags: AUDIT_VIRTQ_DESC_F_NEXT,
+                next: 2,
+            },
+            VirtqDescAudit {
+                len: 1,
+                flags: 0,
+                next: 0,
+            },
+        ];
+
+        assert!(audit_virtq_descriptor_chain(&descs, 0));
+    }
+
+    #[test]
+    fn virtio_audit_used_ring_delta_accepts_wrap_and_rejects_jump() {
+        assert!(audit_used_ring_delta(u16::MAX, 0, 8));
+        assert!(!audit_used_ring_delta(0, 9, 8));
+    }
 }

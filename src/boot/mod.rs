@@ -31,8 +31,8 @@
 //! `magic` alanı, struct'ın geçerli olduğunu doğrular.
 //! `version` alanı, geriye dönük uyumluluk için kullanılır.
 
-pub mod safety;
 pub mod appliance;
+pub mod safety;
 
 use crate::gop::framebuffer::Framebuffer;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

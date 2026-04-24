@@ -1,0 +1,12 @@
+flowchart TD
+    A[Power On] --> B{Boot Source}
+    B -->|UEFI| C[UEFI firmware entry]
+    B -->|Limine| D[Limine boot protocol]
+    C --> E[BootInfo + framebuffer]
+    D --> F[Memory map + HHDM]
+    E --> G[kernel main init]
+    F --> G
+    G --> H[ACPI and CPU topology init]
+    H --> I[IOMMU init]
+    I --> J[Scheduler and memory init]
+    J --> K[Core services and shell]

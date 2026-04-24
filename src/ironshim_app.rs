@@ -1,9 +1,10 @@
 //! IronShim app personality bridge for packaged PE/ELF runtimes.
 
 use super::ecosystem_exactness;
-use super::gui::launch_pipeline::AbiPersonality;
+use super::gui::launch_pipeline::{AbiPersonality, ExternalDisplayContract};
 use super::runtime_layer::process_broker_contract::{
-    BrokeredLaunch, CapabilityTokenId, ProcessBroker, ProcessBrokerTicket,
+    BrokeredLaunch, CapabilityTokenId, ExternalRuntimeHelperRole, ExternalRuntimeHelperState,
+    ProcessBroker, ProcessBrokerTicket,
 };
 use alloc::vec::Vec;
 use ironshim_rs::{enforce_syscall, AuditEvent, AuditSink, Error, SyscallPolicy, SyscallRequest};
@@ -42,8 +43,11 @@ pub struct IronShimLaunchEnvelope {
     pub capability_token: CapabilityTokenId,
     pub address_space_handle: u64,
     pub session_contract: u64,
+    pub external_display: ExternalDisplayContract,
     pub resume_token: Option<u64>,
     pub adapter: AdapterKind,
+    pub external_runtime_graph:
+        Option<super::runtime_layer::process_broker_contract::ExternalRuntimeGraph>,
 }
 
 pub fn prepare_packaged_bridge(
@@ -55,8 +59,10 @@ pub fn prepare_packaged_bridge(
         capability_token: launch.token.id,
         address_space_handle: launch.address_space_handle,
         session_contract: launch.session_contract,
+        external_display: launch.external_display,
         resume_token: launch.resume_token,
         adapter: AdapterKind::from_personality(personality),
+        external_runtime_graph: launch.external_runtime_graph.clone(),
     }
 }
 
@@ -132,6 +138,9 @@ struct AppBridgePolicy {
 
 impl SyscallPolicy for AppBridgePolicy {
     fn check(&self, request: &SyscallRequest) -> Result<(), Error> {
+        if let Some(role) = browser_helper_role(&self.launch) {
+            return check_browser_helper_policy(role, request);
+        }
         match request.number {
             ABI_REQUEST_CAPABILITY
             | ABI_ATTACH_SESSION
@@ -165,6 +174,79 @@ impl SyscallPolicy for AppBridgePolicy {
     }
 }
 
+fn browser_helper_role(launch: &BrokeredLaunch) -> Option<ExternalRuntimeHelperRole> {
+    let graph = launch.external_runtime_graph.as_ref()?;
+    if graph.kind
+        != super::runtime_layer::process_broker_contract::ExternalRuntimeKind::BrowserHelper
+    {
+        return None;
+    }
+    if launch.identity.package_id.contains(".sandbox") {
+        Some(ExternalRuntimeHelperRole::SandboxBroker)
+    } else if launch.identity.package_id.contains(".gpu") {
+        Some(ExternalRuntimeHelperRole::GpuHelper)
+    } else if launch.identity.package_id.contains(".renderer") {
+        Some(ExternalRuntimeHelperRole::RendererHelper)
+    } else if launch.identity.package_id.contains(".network") {
+        Some(ExternalRuntimeHelperRole::NetworkHelper)
+    } else if launch.identity.package_id.contains(".crash") {
+        Some(ExternalRuntimeHelperRole::CrashReporter)
+    } else {
+        None
+    }
+}
+
+fn check_browser_helper_policy(
+    role: ExternalRuntimeHelperRole,
+    request: &SyscallRequest,
+) -> Result<(), Error> {
+    let allowed = match role {
+        ExternalRuntimeHelperRole::SandboxBroker => matches!(
+            request.number,
+            ABI_REQUEST_CAPABILITY | ABI_EXPORT_LIFECYCLE_STATE
+        ),
+        ExternalRuntimeHelperRole::GpuHelper => matches!(
+            request.number,
+            ABI_REQUEST_CAPABILITY
+                | ABI_ATTACH_SESSION
+                | ABI_CREATE_WINDOW
+                | ABI_COMMIT_SCENE
+                | ABI_POLL_EVENTS
+                | ABI_EXPORT_LIFECYCLE_STATE
+        ),
+        ExternalRuntimeHelperRole::RendererHelper => matches!(
+            request.number,
+            ABI_REQUEST_CAPABILITY
+                | ABI_ATTACH_SESSION
+                | ABI_COMMIT_SCENE
+                | ABI_POLL_EVENTS
+                | ABI_EXPORT_LIFECYCLE_STATE
+        ),
+        ExternalRuntimeHelperRole::NetworkHelper | ExternalRuntimeHelperRole::CrashReporter => {
+            matches!(
+                request.number,
+                ABI_REQUEST_CAPABILITY | ABI_EXPORT_LIFECYCLE_STATE
+            )
+        }
+    };
+    if allowed {
+        Ok(())
+    } else if matches!(
+        request.number,
+        ABI_OPEN_FILE_GRANT
+            | ABI_OPEN_DIALOG
+            | ABI_POST_NOTIFICATION
+            | ABI_ATTACH_SESSION
+            | ABI_POLL_EVENTS
+            | ABI_CREATE_WINDOW
+            | ABI_COMMIT_SCENE
+    ) {
+        Err(Error::AccessDenied)
+    } else {
+        Err(Error::Unsupported)
+    }
+}
+
 #[derive(Default)]
 struct AuditRecorder {
     events: Vec<AuditEvent>,
@@ -187,7 +269,8 @@ mod tests {
     use super::super::runtime_layer::process_broker_contract::{BrokeredLaunch, ProcessBroker};
     use super::{
         enforce_bridge_request, prepare_packaged_bridge, translate_posix_request,
-        translate_win32_request, ABI_OPEN_DIALOG, ABI_OPEN_FILE_GRANT, ABI_UNSUPPORTED,
+        translate_win32_request, ExternalRuntimeHelperRole, ExternalRuntimeHelperState,
+        ABI_EXPORT_LIFECYCLE_STATE, ABI_OPEN_DIALOG, ABI_OPEN_FILE_GRANT, ABI_UNSUPPORTED,
     };
 
     fn brokered_launch(profile: CapabilityProfile) -> BrokeredLaunch {
@@ -240,6 +323,130 @@ mod tests {
         let envelope = prepare_packaged_bridge(&launch, AbiPersonality::Win32);
         assert_eq!(envelope.ticket, launch.ticket);
         assert_eq!(envelope.capability_token, launch.token.id);
+        assert_eq!(envelope.external_display, launch.external_display);
+        assert!(envelope.external_runtime_graph.is_none());
+    }
+
+    #[test]
+    fn bridge_envelope_keeps_browser_runtime_graph_contract() {
+        let mut launch = brokered_launch(CapabilityProfile::file_worker());
+        launch.external_runtime_graph = Some(
+            super::super::runtime_layer::process_broker_contract::ExternalRuntimeGraph {
+                kind: super::super::runtime_layer::process_broker_contract::ExternalRuntimeKind::BrowserShell,
+                stage: super::super::runtime_layer::process_broker_contract::ExternalRuntimeStage::Spawned,
+                import_graph_closed: false,
+                helper_graph_state: super::super::runtime_layer::process_broker_contract::RuntimeGraphBoundaryState::Open,
+                imported_modules: alloc::vec![alloc::string::String::from("browserhelper.dll")],
+                unresolved_imports: alloc::vec![
+                    super::super::runtime_layer::process_broker_contract::ExternalImportBoundary {
+                        dll_name: alloc::string::String::from("browserhelper.dll"),
+                        symbol_name: alloc::string::String::from("CreateSandboxBroker"),
+                    },
+                ],
+                primary_blocker: Some(alloc::string::String::from(
+                    "browserhelper.dll!CreateSandboxBroker",
+                )),
+                boundary_reason: Some(alloc::string::String::from(
+                    "brokered helper-process graph is still incomplete; sandbox closure remains open",
+                )),
+                helpers: alloc::vec![super::super::runtime_layer::process_broker_contract::ExternalRuntimeHelper {
+                    role: ExternalRuntimeHelperRole::SandboxBroker,
+                    state: ExternalRuntimeHelperState::BlockedByImportGraph,
+                    blocker_import: Some(alloc::string::String::from(
+                        "browserhelper.dll!CreateSandboxBroker",
+                    )),
+                    broker_ticket: None,
+                    runtime_id: None,
+                }],
+                workflow: super::super::runtime_layer::process_broker_contract::ExternalRuntimeWorkflow {
+                    image_path: Some(alloc::string::String::from("/downloads/firefox/firefox.exe")),
+                    working_directory: Some(alloc::string::String::from("/downloads/firefox")),
+                    download_root: Some(alloc::string::String::from("/downloads")),
+                    open_folder_root: Some(alloc::string::String::from("/downloads")),
+                    command_line_contract_state: super::super::runtime_layer::process_broker_contract::RuntimeGraphBoundaryState::Open,
+                    environment_contract_state: super::super::runtime_layer::process_broker_contract::RuntimeGraphBoundaryState::Open,
+                },
+            },
+        );
+        let envelope = prepare_packaged_bridge(&launch, AbiPersonality::Win32);
+        let graph = envelope.external_runtime_graph.expect("runtime graph");
+        assert_eq!(
+            graph.workflow.working_directory.as_deref(),
+            Some("/downloads/firefox")
+        );
+        assert!(graph.helpers.iter().any(|helper| {
+            helper.role == ExternalRuntimeHelperRole::SandboxBroker
+                && helper.state == ExternalRuntimeHelperState::BlockedByImportGraph
+        }));
+    }
+
+    #[test]
+    fn browser_sandbox_helper_policy_denies_desktop_apis() {
+        let mut launch = brokered_launch(CapabilityProfile::file_worker());
+        launch.identity.package_id = "org.echos.browser.helper.sandbox";
+        launch.external_runtime_graph = Some(
+            super::super::runtime_layer::process_broker_contract::ExternalRuntimeGraph {
+                kind: super::super::runtime_layer::process_broker_contract::ExternalRuntimeKind::BrowserHelper,
+                stage: super::super::runtime_layer::process_broker_contract::ExternalRuntimeStage::Spawned,
+                import_graph_closed: true,
+                helper_graph_state: super::super::runtime_layer::process_broker_contract::RuntimeGraphBoundaryState::Closed,
+                imported_modules: alloc::vec![],
+                unresolved_imports: alloc::vec![],
+                primary_blocker: None,
+                boundary_reason: Some(alloc::string::String::from("helper bridge attached")),
+                helpers: alloc::vec![],
+                workflow: super::super::runtime_layer::process_broker_contract::ExternalRuntimeWorkflow {
+                    image_path: Some(alloc::string::String::from("/downloads/firefox/browserhelper.dll")),
+                    working_directory: Some(alloc::string::String::from("/downloads/firefox")),
+                    download_root: Some(alloc::string::String::from("/downloads")),
+                    open_folder_root: Some(alloc::string::String::from("/downloads")),
+                    command_line_contract_state: super::super::runtime_layer::process_broker_contract::RuntimeGraphBoundaryState::Closed,
+                    environment_contract_state: super::super::runtime_layer::process_broker_contract::RuntimeGraphBoundaryState::Closed,
+                },
+            },
+        );
+
+        assert!(enforce_bridge_request(&launch, &translate_win32_request(3, 0)).is_err());
+        assert!(enforce_bridge_request(&launch, &translate_win32_request(4, 0)).is_err());
+        assert!(enforce_bridge_request(
+            &launch,
+            &ironshim_rs::SyscallRequest {
+                number: ABI_EXPORT_LIFECYCLE_STATE,
+                args: [0, 0, 0, 0, 0, 0],
+            }
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn browser_gpu_helper_policy_allows_scene_commits_but_denies_dialogs() {
+        let mut launch = brokered_launch(CapabilityProfile::file_worker());
+        launch.identity.package_id = "org.echos.browser.helper.gpu";
+        launch.external_runtime_graph = Some(
+            super::super::runtime_layer::process_broker_contract::ExternalRuntimeGraph {
+                kind: super::super::runtime_layer::process_broker_contract::ExternalRuntimeKind::BrowserHelper,
+                stage: super::super::runtime_layer::process_broker_contract::ExternalRuntimeStage::Spawned,
+                import_graph_closed: true,
+                helper_graph_state: super::super::runtime_layer::process_broker_contract::RuntimeGraphBoundaryState::Closed,
+                imported_modules: alloc::vec![],
+                unresolved_imports: alloc::vec![],
+                primary_blocker: None,
+                boundary_reason: Some(alloc::string::String::from("helper bridge attached")),
+                helpers: alloc::vec![],
+                workflow: super::super::runtime_layer::process_broker_contract::ExternalRuntimeWorkflow {
+                    image_path: Some(alloc::string::String::from("/downloads/firefox/browserhelper.dll")),
+                    working_directory: Some(alloc::string::String::from("/downloads/firefox")),
+                    download_root: Some(alloc::string::String::from("/downloads")),
+                    open_folder_root: Some(alloc::string::String::from("/downloads")),
+                    command_line_contract_state: super::super::runtime_layer::process_broker_contract::RuntimeGraphBoundaryState::Closed,
+                    environment_contract_state: super::super::runtime_layer::process_broker_contract::RuntimeGraphBoundaryState::Closed,
+                },
+            },
+        );
+
+        assert!(enforce_bridge_request(&launch, &translate_win32_request(1, 0)).is_ok());
+        assert!(enforce_bridge_request(&launch, &translate_win32_request(2, 0)).is_ok());
+        assert!(enforce_bridge_request(&launch, &translate_win32_request(3, 0)).is_err());
     }
 
     #[test]

@@ -173,6 +173,7 @@ impl EchStore {
     fn read_file(&self, path: &str) -> StoreResponse {
         // Önce önbellekten kontrol et
         if let Some(data) = self.file_cache.lock().get(path) {
+            emit_read_notifications(path);
             return StoreResponse::FileData(data.clone());
         }
 
@@ -182,6 +183,7 @@ impl EchStore {
                 self.file_cache
                     .lock()
                     .insert(String::from(path), data.clone());
+                emit_read_notifications(path);
                 StoreResponse::FileData(data)
             }
             Err(err) => StoreResponse::Error(String::from(err)),
@@ -196,12 +198,17 @@ impl EchStore {
         }
 
         let normalized = normalize_path(path);
-        let result = match crate::fs::f2fs::open_entry(&normalized) {
-            Ok(entry) if entry.is_dir => Err(String::from("cannot write directory")),
-            Ok(_) => crate::fs::f2fs::write_f2fs_file_at(&normalized, 0, &data)
+        let existing_entry = crate::fs::f2fs::open_entry(&normalized).ok();
+        let created = existing_entry.is_none();
+        let result = match existing_entry.as_ref() {
+            Some(entry) if entry.is_dir => Err(String::from("cannot write directory")),
+            Some(_) => crate::fs::f2fs::write_f2fs_file_at(&normalized, 0, &data)
                 .map(|_| ())
+                .and_then(|_| {
+                    truncate_after_overwrite(&normalized, existing_entry.as_ref(), data.len())
+                })
                 .map_err(fs_error_to_string),
-            Err(_) => {
+            None => {
                 let (parent, name) = match split_parent_name(&normalized) {
                     Ok(parts) => parts,
                     Err(err) => return StoreResponse::Error(err),
@@ -214,6 +221,7 @@ impl EchStore {
         match result {
             Ok(()) => {
                 self.file_cache.lock().insert(normalized, data);
+                emit_write_notifications(path, created);
                 StoreResponse::Success
             }
             Err(err) => StoreResponse::Error(err),
@@ -234,10 +242,17 @@ impl EchStore {
             Ok(parts) => parts,
             Err(err) => return StoreResponse::Error(err),
         };
+        let deleted_target = crate::fs::inotify::watch_target_for_path(&normalized);
 
         match crate::fs::f2fs::unlink_f2fs(&parent, &name) {
             Ok(()) => {
                 self.file_cache.lock().remove(&normalized);
+                crate::fs::inotify::notify_delete_path_with_target(
+                    &parent,
+                    deleted_target.as_ref(),
+                    &name,
+                    false,
+                );
                 StoreResponse::Success
             }
             Err(err) => StoreResponse::Error(fs_error_to_string(err)),
@@ -270,6 +285,17 @@ impl EchStore {
         match crate::fs::f2fs::rename_f2fs(&from_parent, &from_name, &to_name) {
             Ok(()) => {
                 self.file_cache.lock().remove(&from_normalized);
+                let is_dir = crate::fs::f2fs::open_entry(&to_normalized)
+                    .map(|entry| entry.is_dir)
+                    .unwrap_or(false);
+                crate::fs::inotify::notify_move_path(
+                    &from_parent,
+                    &to_parent,
+                    &to_normalized,
+                    &from_name,
+                    &to_name,
+                    is_dir,
+                );
                 StoreResponse::Success
             }
             Err(err) => StoreResponse::Error(fs_error_to_string(err)),
@@ -290,7 +316,10 @@ impl EchStore {
         };
 
         match crate::fs::f2fs::create_f2fs_dir(&parent, &name) {
-            Ok(()) => StoreResponse::Success,
+            Ok(()) => {
+                crate::fs::inotify::notify_create_path(&parent, &name, true);
+                StoreResponse::Success
+            }
             Err(err) => StoreResponse::Error(fs_error_to_string(err)),
         }
     }
@@ -309,9 +338,18 @@ impl EchStore {
             Ok(parts) => parts,
             Err(err) => return StoreResponse::Error(err),
         };
+        let deleted_target = crate::fs::inotify::watch_target_for_path(&normalized);
 
         match crate::fs::f2fs::unlink_f2fs(&parent, &name) {
-            Ok(()) => StoreResponse::Success,
+            Ok(()) => {
+                crate::fs::inotify::notify_delete_path_with_target(
+                    &parent,
+                    deleted_target.as_ref(),
+                    &name,
+                    true,
+                );
+                StoreResponse::Success
+            }
             Err(err) => StoreResponse::Error(fs_error_to_string(err)),
         }
     }
@@ -395,6 +433,33 @@ fn is_virtual_path(path: &str) -> bool {
         || normalized.starts_with("/sys/")
         || normalized.starts_with("/dev/")
         || normalized.starts_with("/tmp/")
+}
+
+fn emit_read_notifications(path: &str) {
+    crate::fs::inotify::notify_store_read_path(path);
+}
+
+fn emit_write_notifications(path: &str, created: bool) {
+    if created {
+        if let Ok((parent, name)) = split_parent_name(path) {
+            crate::fs::inotify::notify_create_path(&parent, &name, false);
+        }
+    }
+    crate::fs::inotify::notify_store_write_path(path);
+}
+
+fn truncate_after_overwrite(
+    path: &str,
+    existing_entry: Option<&crate::fs::f2fs::F2fsEntry>,
+    written_len: usize,
+) -> Result<(), rcore_fs::vfs::FsError> {
+    let Some(existing_entry) = existing_entry else {
+        return Ok(());
+    };
+    if existing_entry.size > written_len as u64 {
+        crate::fs::f2fs::truncate_f2fs(path, written_len as u64)?;
+    }
+    Ok(())
 }
 
 fn real_list_directory(path: &str) -> Result<Vec<FileEntry>, String> {
@@ -533,5 +598,81 @@ pub fn service_task() -> ! {
     svc.run_service();
     loop {
         core::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::String;
+    use alloc::vec;
+
+    fn mount_unwired_xfs(test_name: &str) -> String {
+        let mount_point = format!("/phase6-xfs-{}", test_name);
+        crate::fs::vfs_unified::VFS_UNIFIED.lock().mount(
+            mount_point.as_str(),
+            crate::fs::vfs_unified::VfsFsType::Xfs,
+            &format!("xfs:{}", test_name),
+            crate::fs::vfs_unified::VfsMountFlags::default(),
+        );
+        mount_point
+    }
+
+    #[test]
+    fn store_read_and_metadata_errors_preserve_vfs_contract() {
+        let mount_point = mount_unwired_xfs("read");
+        let store = EchStore::new();
+
+        let read = store.process_command(StoreCommand::ReadFile {
+            path: format!("{}/hello.txt", mount_point),
+        });
+        assert!(matches!(
+            read,
+            StoreResponse::Error(ref err)
+                if err == "xfs: unified reads are not wired to a real backend"
+        ));
+
+        let info = store.process_command(StoreCommand::GetFileInfo {
+            path: format!("{}/hello.txt", mount_point),
+        });
+        assert!(matches!(
+            info,
+            StoreResponse::Error(ref err)
+                if err == "xfs: unified VFS open is not wired to a real backend"
+        ));
+    }
+
+    #[test]
+    fn store_directory_errors_preserve_vfs_contract() {
+        let mount_point = mount_unwired_xfs("list");
+        let store = EchStore::new();
+
+        let list = store.process_command(StoreCommand::ListDirectory { path: mount_point });
+        assert!(matches!(
+            list,
+            StoreResponse::Error(ref err)
+                if err == "xfs: unified directory listing is not wired to a real backend"
+        ));
+    }
+
+    #[test]
+    fn truncate_after_overwrite_only_shrinks_when_needed() {
+        let missing = truncate_after_overwrite("/apps/demo", None, 8);
+        assert!(missing.is_ok());
+
+        let same_size = truncate_after_overwrite(
+            "/apps/demo",
+            Some(&crate::fs::f2fs::F2fsEntry {
+                ino: 7,
+                name: String::from("/apps/demo"),
+                size: 8,
+                is_dir: false,
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+            }),
+            8,
+        );
+        assert!(same_size.is_ok());
     }
 }

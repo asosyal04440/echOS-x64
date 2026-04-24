@@ -551,9 +551,8 @@ impl SemManager {
                 Ok(vals.len() as i32)
             }
             SETALL => {
-                let vals =
-                    unsafe { core::slice::from_raw_parts(arg as *const u16, sem.nsems as usize) };
-                sem.set_all(vals);
+                let vals = read_user_u16_slice(arg as usize, sem.nsems as usize)?;
+                sem.set_all(&vals);
                 Ok(0)
             }
             GETVAL => Ok(sem.get_val(semnum)),
@@ -610,6 +609,7 @@ pub enum SemError {
     InvalidSemNum,
     InvalidCommand,
     PermissionDenied,
+    UserFault,
 }
 
 // ============================================================================
@@ -638,7 +638,43 @@ pub fn sys_semctl(semid: i32, semnum: u16, cmd: i32, arg: u64) -> i32 {
     match SEM_MANAGER.semctl(semid, semnum, cmd, arg) {
         Ok(val) => val,
         Err(SemError::NotFound) => -22,
+        Err(SemError::UserFault) => -14,
         Err(_) => -5,
+    }
+}
+
+fn read_user_u16_slice(ptr: usize, count: usize) -> Result<Vec<u16>, SemError> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let byte_len = count
+        .checked_mul(core::mem::size_of::<u16>())
+        .ok_or(SemError::UserFault)?;
+    let mut raw = alloc::vec![0u8; byte_len];
+    super::copy_from_user(&mut raw, ptr).map_err(|_| SemError::UserFault)?;
+
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = i * 2;
+        out.push(u16::from_ne_bytes([raw[base], raw[base + 1]]));
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sys_semctl, sys_semget, IPC_CREAT, IPC_RMID, SETALL};
+
+    #[test]
+    fn semctl_setall_rejects_null_user_pointer() {
+        let semid = sys_semget(0, 1, IPC_CREAT | 0o600);
+        assert!(semid > 0);
+
+        let ret = sys_semctl(semid, 0, SETALL, 0);
+        assert_eq!(ret, -14);
+
+        assert_eq!(sys_semctl(semid, 0, IPC_RMID, 0), 0);
     }
 }
 

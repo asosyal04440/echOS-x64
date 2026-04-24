@@ -135,11 +135,74 @@ pub struct InotifyEventRaw {
 
 /// A watch on a file/directory
 #[derive(Clone, Debug)]
+pub struct InotifyWatchTarget {
+    /// Filesystem type visible at the VFS boundary
+    pub fs_type: crate::fs::vfs_unified::VfsFsType,
+    /// Mount point that owns this namespace
+    pub mount_point: String,
+    /// Mounted backend/source identifier
+    pub source: String,
+    /// Inode number inside the mounted namespace
+    pub inode: u64,
+}
+
+impl InotifyWatchTarget {
+    pub fn new(
+        fs_type: crate::fs::vfs_unified::VfsFsType,
+        mount_point: &str,
+        source: &str,
+        inode: u64,
+    ) -> Self {
+        Self {
+            fs_type,
+            mount_point: String::from(mount_point),
+            source: String::from(source),
+            inode,
+        }
+    }
+}
+
+impl PartialEq for InotifyWatchTarget {
+    fn eq(&self, other: &Self) -> bool {
+        self.fs_type == other.fs_type
+            && self.mount_point == other.mount_point
+            && self.source == other.source
+            && self.inode == other.inode
+    }
+}
+
+impl Eq for InotifyWatchTarget {}
+
+impl PartialOrd for InotifyWatchTarget {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for InotifyWatchTarget {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        (
+            self.fs_type.as_str(),
+            self.mount_point.as_str(),
+            self.source.as_str(),
+            self.inode,
+        )
+            .cmp(&(
+                other.fs_type.as_str(),
+                other.mount_point.as_str(),
+                other.source.as_str(),
+                other.inode,
+            ))
+    }
+}
+
+/// A watch on a file/directory
+#[derive(Clone, Debug)]
 pub struct InotifyWatch {
     /// Watch descriptor (unique per instance)
     pub wd: i32,
-    /// Inode number being watched
-    pub inode: u64,
+    /// Namespace-aware target identity
+    pub target: InotifyWatchTarget,
     /// Path being watched
     pub path: String,
     /// Event mask (what events to watch)
@@ -151,10 +214,10 @@ pub struct InotifyWatch {
 }
 
 impl InotifyWatch {
-    pub fn new(wd: i32, inode: u64, path: &str, mask: u32) -> Self {
+    pub fn new(wd: i32, target: InotifyWatchTarget, path: &str, mask: u32) -> Self {
         Self {
             wd,
-            inode,
+            target,
             path: String::from(path),
             mask,
             oneshot: (mask & IN_ONESHOT) != 0,
@@ -207,29 +270,33 @@ impl InotifyInstance {
     }
 
     /// Add a watch
-    pub fn add_watch(&self, inode: u64, path: &str, mask: u32) -> i32 {
-        // Check for existing watch on same inode
+    pub fn add_watch(&self, target: InotifyWatchTarget, path: &str, mask: u32) -> i32 {
+        // Check for existing watch on same namespace-visible target.
         let mut watches = self.watches.lock();
 
         for (_, watch) in watches.iter_mut() {
-            if watch.inode == inode {
+            if watch.target == target {
                 // Update existing watch
                 watch.mask = mask;
                 watch.oneshot = (mask & IN_ONESHOT) != 0;
                 watch.active = true;
+                watch.path = String::from(path);
                 return watch.wd;
             }
         }
 
         // Create new watch
         let wd = self.next_wd.fetch_add(1, Ordering::SeqCst);
-        let watch = InotifyWatch::new(wd, inode, path, mask);
+        let watch = InotifyWatch::new(wd, target.clone(), path, mask);
         watches.insert(wd, watch);
 
         crate::serial_println!(
-            "[INOTIFY] Added watch wd={} inode={:#x} mask={:#x}",
+            "[INOTIFY] Added watch wd={} fs={} mount={} source={} inode={:#x} mask={:#x}",
             wd,
-            inode,
+            target.fs_type.as_str(),
+            target.mount_point,
+            target.source,
+            target.inode,
             mask
         );
 
@@ -319,8 +386,8 @@ pub struct InotifyManager {
     instances: Mutex<BTreeMap<i32, Arc<InotifyInstance>>>,
     /// Next instance ID
     next_id: AtomicI32,
-    /// Watch index (inode -> list of wd watching this inode)
-    watch_index: Mutex<BTreeMap<u64, Vec<(i32, i32)>>>, // (instance_id, wd)
+    /// Watch index (namespace-aware target -> watchers)
+    watch_index: Mutex<BTreeMap<InotifyWatchTarget, Vec<(i32, i32)>>>, // (instance_id, wd)
     /// Total watches
     total_watches: AtomicU64,
     /// Total events generated
@@ -370,7 +437,7 @@ impl InotifyManager {
             let mut watch_index = self.watch_index.lock();
             let watches = instance.watches.lock();
             for (wd, watch) in watches.iter() {
-                if let Some(watchers) = watch_index.get_mut(&watch.inode) {
+                if let Some(watchers) = watch_index.get_mut(&watch.target) {
                     watchers.retain(|(iid, w)| *iid != id || *w != *wd);
                 }
             }
@@ -380,29 +447,40 @@ impl InotifyManager {
     }
 
     /// Add watch to index
-    pub fn index_watch(&self, inode: u64, instance_id: i32, wd: i32) {
+    pub fn index_watch(&self, target: InotifyWatchTarget, instance_id: i32, wd: i32) {
         let mut watch_index = self.watch_index.lock();
-        let entry = watch_index.entry(inode).or_insert_with(Vec::new);
+        let entry = watch_index.entry(target).or_insert_with(Vec::new);
         entry.push((instance_id, wd));
         self.total_watches.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Remove watch from index
-    pub fn unindex_watch(&self, inode: u64, instance_id: i32, wd: i32) {
+    pub fn unindex_watch(&self, target: &InotifyWatchTarget, instance_id: i32, wd: i32) {
         let mut watch_index = self.watch_index.lock();
-        if let Some(watchers) = watch_index.get_mut(&inode) {
+        if let Some(watchers) = watch_index.get_mut(target) {
             watchers.retain(|(iid, w)| *iid != instance_id || *w != wd);
         }
         self.total_watches.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Get watchers for an inode
-    pub fn get_watchers(&self, inode: u64) -> Vec<(i32, i32)> {
+    /// Get watchers for a namespace-visible target
+    pub fn get_watchers(&self, target: &InotifyWatchTarget) -> Vec<(i32, i32)> {
         self.watch_index
             .lock()
-            .get(&inode)
+            .get(target)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Legacy broad lookup for callers that only know the inode number.
+    pub fn get_watchers_by_inode(&self, inode: u64) -> Vec<(i32, i32)> {
+        let mut result = Vec::new();
+        for (target, watchers) in self.watch_index.lock().iter() {
+            if target.inode == inode {
+                result.extend_from_slice(watchers.as_slice());
+            }
+        }
+        result
     }
 }
 
@@ -465,13 +543,13 @@ pub fn sys_inotify_add_watch(fd: i32, pathname: &str, mask: u32) -> i32 {
         return -28; // ENOSPC
     }
 
-    let inode = match crate::fs::vfs_unified::VFS_UNIFIED.lock().open(pathname) {
-        Ok(info) => info.inode,
+    let target = match resolve_watch_target_from_path(pathname) {
+        Ok(target) => target,
         Err(_) => return -2, // ENOENT
     };
 
-    let wd = instance.add_watch(inode, pathname, mask);
-    INOTIFY_MANAGER.index_watch(inode, fd, wd);
+    let wd = instance.add_watch(target.clone(), pathname, mask);
+    INOTIFY_MANAGER.index_watch(target, fd, wd);
 
     wd
 }
@@ -484,7 +562,7 @@ pub fn sys_inotify_rm_watch(fd: i32, wd: i32) -> i32 {
     };
 
     if let Some(watch) = instance.get_watch(wd) {
-        INOTIFY_MANAGER.unindex_watch(watch.inode, fd, wd);
+        INOTIFY_MANAGER.unindex_watch(&watch.target, fd, wd);
         instance.remove_watch(wd);
         return 0;
     }
@@ -570,7 +648,7 @@ pub fn sys_inotify_read(fd: i32, buf: &mut [u8]) -> i32 {
 /// Generate inotify event for a file
 /// Called by filesystem when events occur
 pub fn generate_event(inode: u64, mask: u32, cookie: u32, name: &str) {
-    let watchers = INOTIFY_MANAGER.get_watchers(inode);
+    let watchers = INOTIFY_MANAGER.get_watchers_by_inode(inode);
 
     if watchers.is_empty() {
         return;
@@ -581,13 +659,13 @@ pub fn generate_event(inode: u64, mask: u32, cookie: u32, name: &str) {
     for (instance_id, wd) in watchers {
         if let Some(instance) = INOTIFY_MANAGER.get_instance(instance_id) {
             if let Some(watch) = instance.get_watch(wd) {
-                if watch.matches(mask) {
+                if watch.target.inode == inode && watch.matches(mask) {
                     instance.push_event(InotifyEvent::new(wd, mask, cookie, name));
 
                     // Handle oneshot
                     if watch.oneshot {
                         instance.remove_watch(wd);
-                        INOTIFY_MANAGER.unindex_watch(inode, instance_id, wd);
+                        INOTIFY_MANAGER.unindex_watch(&watch.target, instance_id, wd);
                     }
                 }
             }
@@ -595,8 +673,211 @@ pub fn generate_event(inode: u64, mask: u32, cookie: u32, name: &str) {
     }
 
     crate::serial_println!(
-        "[INOTIFY] Event: inode={:#x} mask={:#x} name='{}'",
+        "[INOTIFY] Legacy inode event: inode={:#x} mask={:#x} name='{}'",
         inode,
+        mask,
+        name
+    );
+}
+
+/// Generate inotify event for a VFS path with namespace-aware watch identity.
+pub fn generate_event_for_path(path: &str, mask: u32, cookie: u32, name: &str) {
+    let Ok(target) = resolve_watch_target_from_path(path) else {
+        return;
+    };
+    dispatch_event_for_target(&INOTIFY_MANAGER, &target, mask, cookie, name);
+}
+
+fn dispatch_event_for_existing_path(
+    manager: &InotifyManager,
+    path: &str,
+    mask: u32,
+    cookie: u32,
+    name: &str,
+) {
+    let Ok(target) = resolve_watch_target_from_path(path) else {
+        return;
+    };
+    dispatch_event_for_target(manager, &target, mask, cookie, name);
+}
+
+fn dispatch_child_event_for_parent_path(
+    manager: &InotifyManager,
+    parent_path: &str,
+    mask: u32,
+    name: &str,
+) {
+    let Ok(parent_target) = resolve_watch_target_from_path(parent_path) else {
+        return;
+    };
+    dispatch_event_for_target(manager, &parent_target, mask, 0, name);
+}
+
+fn dispatch_delete_self_for_path(manager: &InotifyManager, path: &str) {
+    dispatch_event_for_existing_path(manager, path, IN_DELETE_SELF, 0, "");
+}
+
+fn dispatch_delete_self_for_target(manager: &InotifyManager, target: &InotifyWatchTarget) {
+    dispatch_event_for_target(manager, target, IN_DELETE_SELF, 0, "");
+}
+
+fn dispatch_move_self_for_path(manager: &InotifyManager, path: &str) {
+    dispatch_event_for_existing_path(manager, path, IN_MOVE_SELF, 0, "");
+}
+
+fn dispatch_move_between_parent_targets(
+    manager: &InotifyManager,
+    old_parent: &InotifyWatchTarget,
+    new_parent: &InotifyWatchTarget,
+    old_name: &str,
+    new_name: &str,
+    is_dir: bool,
+) {
+    let cookie = generate_cookie();
+    let dir_flag = if is_dir { IN_ISDIR } else { 0 };
+
+    dispatch_event_for_target(
+        manager,
+        old_parent,
+        IN_MOVED_FROM | dir_flag,
+        cookie,
+        old_name,
+    );
+    dispatch_event_for_target(
+        manager,
+        new_parent,
+        IN_MOVED_TO | dir_flag,
+        cookie,
+        new_name,
+    );
+}
+
+fn dispatch_move_between_parent_paths(
+    manager: &InotifyManager,
+    old_parent_path: &str,
+    new_parent_path: &str,
+    old_name: &str,
+    new_name: &str,
+    is_dir: bool,
+) {
+    let Ok(old_parent_target) = resolve_watch_target_from_path(old_parent_path) else {
+        return;
+    };
+    let Ok(new_parent_target) = resolve_watch_target_from_path(new_parent_path) else {
+        return;
+    };
+    dispatch_move_between_parent_targets(
+        manager,
+        &old_parent_target,
+        &new_parent_target,
+        old_name,
+        new_name,
+        is_dir,
+    );
+}
+
+fn dispatch_move_self_for_target(manager: &InotifyManager, target: &InotifyWatchTarget) {
+    dispatch_event_for_target(manager, target, IN_MOVE_SELF, 0, "");
+}
+
+fn dispatch_store_read_for_target(manager: &InotifyManager, target: &InotifyWatchTarget) {
+    dispatch_event_for_target(manager, target, IN_OPEN, 0, "");
+    dispatch_event_for_target(manager, target, IN_ACCESS, 0, "");
+    dispatch_event_for_target(manager, target, IN_CLOSE_NOWRITE, 0, "");
+}
+
+fn dispatch_store_write_for_target(manager: &InotifyManager, target: &InotifyWatchTarget) {
+    dispatch_event_for_target(manager, target, IN_OPEN, 0, "");
+    dispatch_event_for_target(manager, target, IN_MODIFY, 0, "");
+    dispatch_event_for_target(manager, target, IN_CLOSE_WRITE, 0, "");
+}
+
+fn dispatch_store_create_for_parent_target(
+    manager: &InotifyManager,
+    parent_target: &InotifyWatchTarget,
+    name: &str,
+    is_dir: bool,
+) {
+    let mask = if is_dir {
+        IN_CREATE | IN_ISDIR
+    } else {
+        IN_CREATE
+    };
+    dispatch_event_for_target(manager, parent_target, mask, 0, name);
+}
+
+fn dispatch_store_delete_for_parent_and_target(
+    manager: &InotifyManager,
+    parent_target: &InotifyWatchTarget,
+    deleted_target: Option<&InotifyWatchTarget>,
+    name: &str,
+    is_dir: bool,
+) {
+    let mask = if is_dir {
+        IN_DELETE | IN_ISDIR
+    } else {
+        IN_DELETE
+    };
+    dispatch_event_for_target(manager, parent_target, mask, 0, name);
+    if let Some(target) = deleted_target {
+        dispatch_delete_self_for_target(manager, target);
+    }
+}
+
+fn dispatch_store_move_for_targets(
+    manager: &InotifyManager,
+    old_parent: &InotifyWatchTarget,
+    new_parent: &InotifyWatchTarget,
+    moved_target: Option<&InotifyWatchTarget>,
+    old_name: &str,
+    new_name: &str,
+    is_dir: bool,
+) {
+    dispatch_move_between_parent_targets(
+        manager, old_parent, new_parent, old_name, new_name, is_dir,
+    );
+    if let Some(target) = moved_target {
+        dispatch_move_self_for_target(manager, target);
+    }
+}
+
+fn dispatch_event_for_target(
+    manager: &InotifyManager,
+    target: &InotifyWatchTarget,
+    mask: u32,
+    cookie: u32,
+    name: &str,
+) {
+    let watchers = manager.get_watchers(target);
+
+    if watchers.is_empty() {
+        return;
+    }
+
+    manager.total_events.fetch_add(1, Ordering::Relaxed);
+
+    for (instance_id, wd) in watchers {
+        if let Some(instance) = manager.get_instance(instance_id) {
+            if let Some(watch) = instance.get_watch(wd) {
+                if watch.target == *target && watch.matches(mask) {
+                    instance.push_event(InotifyEvent::new(wd, mask, cookie, name));
+
+                    // Handle oneshot
+                    if watch.oneshot {
+                        instance.remove_watch(wd);
+                        manager.unindex_watch(&watch.target, instance_id, wd);
+                    }
+                }
+            }
+        }
+    }
+
+    crate::serial_println!(
+        "[INOTIFY] Event: fs={} mount={} source={} inode={:#x} mask={:#x} name='{}'",
+        target.fs_type.as_str(),
+        target.mount_point,
+        target.source,
+        target.inode,
         mask,
         name
     );
@@ -661,6 +942,114 @@ pub fn notify_close(inode: u64, writable: bool) {
     generate_event(inode, mask, 0, "");
 }
 
+pub fn notify_access_path(path: &str) {
+    dispatch_event_for_existing_path(&INOTIFY_MANAGER, path, IN_ACCESS, 0, "");
+}
+
+pub fn notify_modify_path(path: &str) {
+    dispatch_event_for_existing_path(&INOTIFY_MANAGER, path, IN_MODIFY, 0, "");
+}
+
+pub fn notify_attrib_path(path: &str) {
+    dispatch_event_for_existing_path(&INOTIFY_MANAGER, path, IN_ATTRIB, 0, "");
+}
+
+pub fn notify_open_path(path: &str) {
+    dispatch_event_for_existing_path(&INOTIFY_MANAGER, path, IN_OPEN, 0, "");
+}
+
+pub fn notify_close_path(path: &str, writable: bool) {
+    let mask = if writable {
+        IN_CLOSE_WRITE
+    } else {
+        IN_CLOSE_NOWRITE
+    };
+    dispatch_event_for_existing_path(&INOTIFY_MANAGER, path, mask, 0, "");
+}
+
+pub fn notify_create_path(parent_path: &str, name: &str, is_dir: bool) {
+    let Ok(parent_target) = resolve_watch_target_from_path(parent_path) else {
+        return;
+    };
+    dispatch_store_create_for_parent_target(&INOTIFY_MANAGER, &parent_target, name, is_dir);
+}
+
+pub fn notify_delete_path(parent_path: &str, path: &str, name: &str, is_dir: bool) {
+    let Ok(parent_target) = resolve_watch_target_from_path(parent_path) else {
+        return;
+    };
+    let deleted_target = resolve_watch_target_from_path(path).ok();
+    dispatch_store_delete_for_parent_and_target(
+        &INOTIFY_MANAGER,
+        &parent_target,
+        deleted_target.as_ref(),
+        name,
+        is_dir,
+    );
+}
+
+pub fn watch_target_for_path(path: &str) -> Option<InotifyWatchTarget> {
+    resolve_watch_target_from_path(path).ok()
+}
+
+pub fn notify_delete_path_with_target(
+    parent_path: &str,
+    deleted_target: Option<&InotifyWatchTarget>,
+    name: &str,
+    is_dir: bool,
+) {
+    let Ok(parent_target) = resolve_watch_target_from_path(parent_path) else {
+        return;
+    };
+    dispatch_store_delete_for_parent_and_target(
+        &INOTIFY_MANAGER,
+        &parent_target,
+        deleted_target,
+        name,
+        is_dir,
+    );
+}
+
+pub fn notify_move_path(
+    old_parent_path: &str,
+    new_parent_path: &str,
+    new_path: &str,
+    old_name: &str,
+    new_name: &str,
+    is_dir: bool,
+) {
+    let Ok(old_parent_target) = resolve_watch_target_from_path(old_parent_path) else {
+        return;
+    };
+    let Ok(new_parent_target) = resolve_watch_target_from_path(new_parent_path) else {
+        return;
+    };
+    let moved_target = resolve_watch_target_from_path(new_path).ok();
+    dispatch_store_move_for_targets(
+        &INOTIFY_MANAGER,
+        &old_parent_target,
+        &new_parent_target,
+        moved_target.as_ref(),
+        old_name,
+        new_name,
+        is_dir,
+    );
+}
+
+pub fn notify_store_read_path(path: &str) {
+    let Ok(target) = resolve_watch_target_from_path(path) else {
+        return;
+    };
+    dispatch_store_read_for_target(&INOTIFY_MANAGER, &target);
+}
+
+pub fn notify_store_write_path(path: &str) {
+    let Ok(target) = resolve_watch_target_from_path(path) else {
+        return;
+    };
+    dispatch_store_write_for_target(&INOTIFY_MANAGER, &target);
+}
+
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
@@ -669,6 +1058,20 @@ pub fn notify_close(inode: u64, writable: bool) {
 fn generate_cookie() -> u32 {
     static COOKIE: AtomicU32 = AtomicU32::new(1);
     COOKIE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn resolve_watch_target_from_path(pathname: &str) -> Result<InotifyWatchTarget, &'static str> {
+    let vfs = crate::fs::vfs_unified::VFS_UNIFIED.lock();
+    let info = vfs.open(pathname).map_err(|_| "vfs open failed")?;
+    let mount = vfs
+        .resolve_fs(pathname)
+        .ok_or("vfs mount resolution failed")?;
+    Ok(InotifyWatchTarget::new(
+        info.fs_type,
+        mount.mount_point.as_str(),
+        mount.source.as_str(),
+        info.inode,
+    ))
 }
 
 // ============================================================================
@@ -693,5 +1096,337 @@ pub fn get_stats() -> InotifyStats {
         instance_count: INOTIFY_MANAGER.instances.lock().len(),
         total_watches: INOTIFY_MANAGER.total_watches.load(Ordering::Relaxed),
         total_events: INOTIFY_MANAGER.total_events.load(Ordering::Relaxed),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn collect_events(instance: &Arc<InotifyInstance>) -> Vec<InotifyEvent> {
+        let mut events = Vec::new();
+        while let Some(event) = instance.pop_event() {
+            events.push(event);
+        }
+        events
+    }
+
+    #[test]
+    fn namespace_aware_targets_do_not_collapse_same_inode_across_mounts() {
+        let manager = InotifyManager::new();
+        let instance = manager.create_instance(0).expect("instance");
+
+        let ext4_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::Ext4,
+            "/mnt/a",
+            "ext4:a",
+            42,
+        );
+        let ntfs_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::Ntfs,
+            "/mnt/b",
+            "ntfs:b",
+            42,
+        );
+
+        let ext4_wd = instance.add_watch(ext4_target.clone(), "/mnt/a/hello.txt", IN_MODIFY);
+        manager.index_watch(ext4_target.clone(), instance.id, ext4_wd);
+        let ntfs_wd = instance.add_watch(ntfs_target.clone(), "/mnt/b/hello.txt", IN_MODIFY);
+        manager.index_watch(ntfs_target.clone(), instance.id, ntfs_wd);
+
+        assert_eq!(
+            manager.get_watchers(&ext4_target),
+            vec![(instance.id, ext4_wd)]
+        );
+        assert_eq!(
+            manager.get_watchers(&ntfs_target),
+            vec![(instance.id, ntfs_wd)]
+        );
+        assert_eq!(manager.get_watchers_by_inode(42).len(), 2);
+    }
+
+    #[test]
+    fn dispatch_targets_only_matching_namespace_watchers() {
+        let manager = InotifyManager::new();
+        let instance = manager.create_instance(0).expect("instance");
+
+        let ext4_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::Ext4,
+            "/mnt/a",
+            "ext4:a",
+            7,
+        );
+        let ntfs_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::Ntfs,
+            "/mnt/b",
+            "ntfs:b",
+            7,
+        );
+
+        let ext4_wd = instance.add_watch(ext4_target.clone(), "/mnt/a/data.bin", IN_MODIFY);
+        manager.index_watch(ext4_target.clone(), instance.id, ext4_wd);
+        let ntfs_wd = instance.add_watch(ntfs_target.clone(), "/mnt/b/data.bin", IN_MODIFY);
+        manager.index_watch(ntfs_target.clone(), instance.id, ntfs_wd);
+
+        dispatch_event_for_target(&manager, &ext4_target, IN_MODIFY, 0, "data.bin");
+
+        let first = instance.pop_event().expect("ext4 event");
+        assert_eq!(first.wd, ext4_wd);
+        assert!(instance.pop_event().is_none());
+
+        manager.unindex_watch(&ext4_target, instance.id, ext4_wd);
+        manager.unindex_watch(&ntfs_target, instance.id, ntfs_wd);
+    }
+
+    #[test]
+    fn move_events_keep_cookie_and_order_for_parent_watchers() {
+        let manager = InotifyManager::new();
+        let instance = manager.create_instance(0).expect("instance");
+
+        let old_parent = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::Ext4,
+            "/mnt/a",
+            "ext4:a",
+            11,
+        );
+        let new_parent = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::Ext4,
+            "/mnt/a",
+            "ext4:a",
+            12,
+        );
+
+        let old_wd = instance.add_watch(old_parent.clone(), "/mnt/a/old", IN_MOVED_FROM);
+        manager.index_watch(old_parent.clone(), instance.id, old_wd);
+        let new_wd = instance.add_watch(new_parent.clone(), "/mnt/a/new", IN_MOVED_TO);
+        manager.index_watch(new_parent.clone(), instance.id, new_wd);
+
+        dispatch_move_between_parent_targets(
+            &manager,
+            &old_parent,
+            &new_parent,
+            "old.txt",
+            "new.txt",
+            false,
+        );
+
+        let moved_from = instance.pop_event().expect("moved_from");
+        let moved_to = instance.pop_event().expect("moved_to");
+        assert_eq!(moved_from.wd, old_wd);
+        assert_eq!(moved_from.mask, IN_MOVED_FROM);
+        assert_eq!(moved_from.name, "old.txt");
+        assert_eq!(moved_to.wd, new_wd);
+        assert_eq!(moved_to.mask, IN_MOVED_TO);
+        assert_eq!(moved_to.name, "new.txt");
+        assert_ne!(moved_from.cookie, 0);
+        assert_eq!(moved_from.cookie, moved_to.cookie);
+    }
+
+    #[test]
+    fn delete_and_move_self_events_target_only_watched_inode() {
+        let manager = InotifyManager::new();
+        let instance = manager.create_instance(0).expect("instance");
+
+        let file_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::Btrfs,
+            "/btrfs",
+            "btrfs:test",
+            257,
+        );
+        let sibling_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::Btrfs,
+            "/btrfs",
+            "btrfs:test",
+            258,
+        );
+
+        let self_wd = instance.add_watch(
+            file_target.clone(),
+            "/btrfs/hello.txt",
+            IN_DELETE_SELF | IN_MOVE_SELF,
+        );
+        manager.index_watch(file_target.clone(), instance.id, self_wd);
+        let sibling_wd = instance.add_watch(
+            sibling_target.clone(),
+            "/btrfs/other.txt",
+            IN_DELETE_SELF | IN_MOVE_SELF,
+        );
+        manager.index_watch(sibling_target.clone(), instance.id, sibling_wd);
+
+        dispatch_event_for_target(&manager, &file_target, IN_DELETE_SELF, 0, "");
+        dispatch_event_for_target(&manager, &file_target, IN_MOVE_SELF, 0, "");
+
+        let delete_self = instance.pop_event().expect("delete self");
+        let move_self = instance.pop_event().expect("move self");
+        assert_eq!(delete_self.wd, self_wd);
+        assert_eq!(delete_self.mask, IN_DELETE_SELF);
+        assert_eq!(move_self.wd, self_wd);
+        assert_eq!(move_self.mask, IN_MOVE_SELF);
+        assert!(instance.pop_event().is_none());
+
+        manager.unindex_watch(&file_target, instance.id, self_wd);
+        manager.unindex_watch(&sibling_target, instance.id, sibling_wd);
+    }
+
+    #[test]
+    fn same_namespace_different_inodes_do_not_collapse() {
+        let manager = InotifyManager::new();
+        let instance = manager.create_instance(0).expect("instance");
+
+        let alpha_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::F2fs,
+            "/",
+            "f2fs:root",
+            41,
+        );
+        let beta_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::F2fs,
+            "/",
+            "f2fs:root",
+            42,
+        );
+
+        let alpha_wd = instance.add_watch(alpha_target.clone(), "/apps/alpha.txt", IN_OPEN);
+        manager.index_watch(alpha_target.clone(), instance.id, alpha_wd);
+        let beta_wd = instance.add_watch(beta_target.clone(), "/apps/beta.txt", IN_OPEN);
+        manager.index_watch(beta_target.clone(), instance.id, beta_wd);
+
+        dispatch_event_for_target(&manager, &alpha_target, IN_OPEN, 0, "");
+
+        let alpha_event = instance.pop_event().expect("alpha event");
+        assert_eq!(alpha_event.wd, alpha_wd);
+        assert_eq!(alpha_event.mask, IN_OPEN);
+        assert!(instance.pop_event().is_none());
+
+        manager.unindex_watch(&alpha_target, instance.id, alpha_wd);
+        manager.unindex_watch(&beta_target, instance.id, beta_wd);
+    }
+
+    #[test]
+    fn store_style_file_sequences_preserve_parent_and_self_ordering() {
+        let manager = InotifyManager::new();
+        let instance = manager.create_instance(0).expect("instance");
+
+        let parent_target =
+            InotifyWatchTarget::new(crate::fs::vfs_unified::VfsFsType::F2fs, "/", "f2fs:root", 2);
+        let file_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::F2fs,
+            "/",
+            "f2fs:root",
+            99,
+        );
+
+        let parent_wd = instance.add_watch(
+            parent_target.clone(),
+            "/phase6",
+            IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO,
+        );
+        manager.index_watch(parent_target.clone(), instance.id, parent_wd);
+        let file_wd = instance.add_watch(
+            file_target.clone(),
+            "/phase6/alpha.txt",
+            IN_OPEN
+                | IN_ACCESS
+                | IN_CLOSE_NOWRITE
+                | IN_MODIFY
+                | IN_CLOSE_WRITE
+                | IN_MOVE_SELF
+                | IN_DELETE_SELF,
+        );
+        manager.index_watch(file_target.clone(), instance.id, file_wd);
+
+        dispatch_store_create_for_parent_target(&manager, &parent_target, "alpha.txt", false);
+        dispatch_store_read_for_target(&manager, &file_target);
+        dispatch_store_write_for_target(&manager, &file_target);
+        dispatch_store_move_for_targets(
+            &manager,
+            &parent_target,
+            &parent_target,
+            Some(&file_target),
+            "alpha.txt",
+            "beta.txt",
+            false,
+        );
+
+        let events = collect_events(&instance);
+        assert_eq!(events.len(), 10);
+        assert_eq!(events[0].wd, parent_wd);
+        assert_eq!(events[0].mask, IN_CREATE);
+        assert_eq!(events[0].name, "alpha.txt");
+        assert_eq!(events[1].wd, file_wd);
+        assert_eq!(events[1].mask, IN_OPEN);
+        assert_eq!(events[2].mask, IN_ACCESS);
+        assert_eq!(events[3].mask, IN_CLOSE_NOWRITE);
+        assert_eq!(events[4].mask, IN_OPEN);
+        assert_eq!(events[5].mask, IN_MODIFY);
+        assert_eq!(events[6].mask, IN_CLOSE_WRITE);
+        assert_eq!(events[7].wd, parent_wd);
+        assert_eq!(events[7].mask, IN_MOVED_FROM);
+        assert_eq!(events[7].name, "alpha.txt");
+        assert_eq!(events[8].wd, parent_wd);
+        assert_eq!(events[8].mask, IN_MOVED_TO);
+        assert_eq!(events[8].name, "beta.txt");
+        assert_ne!(events[7].cookie, 0);
+        assert_eq!(events[7].cookie, events[8].cookie);
+        assert_eq!(events[9].wd, file_wd);
+        assert_eq!(events[9].mask, IN_MOVE_SELF);
+
+        dispatch_store_delete_for_parent_and_target(
+            &manager,
+            &parent_target,
+            Some(&file_target),
+            "beta.txt",
+            false,
+        );
+        let delete_events = collect_events(&instance);
+        assert_eq!(delete_events.len(), 2);
+        assert_eq!(delete_events[0].wd, parent_wd);
+        assert_eq!(delete_events[0].mask, IN_DELETE);
+        assert_eq!(delete_events[0].name, "beta.txt");
+        assert_eq!(delete_events[1].wd, file_wd);
+        assert_eq!(delete_events[1].mask, IN_DELETE_SELF);
+    }
+
+    #[test]
+    fn store_style_directory_sequences_preserve_isdir_flag() {
+        let manager = InotifyManager::new();
+        let instance = manager.create_instance(0).expect("instance");
+
+        let parent_target =
+            InotifyWatchTarget::new(crate::fs::vfs_unified::VfsFsType::F2fs, "/", "f2fs:root", 2);
+        let dir_target = InotifyWatchTarget::new(
+            crate::fs::vfs_unified::VfsFsType::F2fs,
+            "/",
+            "f2fs:root",
+            120,
+        );
+
+        let parent_wd = instance.add_watch(parent_target.clone(), "/", IN_CREATE | IN_DELETE);
+        manager.index_watch(parent_target.clone(), instance.id, parent_wd);
+        let dir_wd = instance.add_watch(dir_target.clone(), "/child", IN_DELETE_SELF);
+        manager.index_watch(dir_target.clone(), instance.id, dir_wd);
+
+        dispatch_store_create_for_parent_target(&manager, &parent_target, "child", true);
+        let create_events = collect_events(&instance);
+        assert_eq!(create_events.len(), 1);
+        assert_eq!(create_events[0].wd, parent_wd);
+        assert_eq!(create_events[0].mask, IN_CREATE | IN_ISDIR);
+        assert_eq!(create_events[0].name, "child");
+
+        dispatch_store_delete_for_parent_and_target(
+            &manager,
+            &parent_target,
+            Some(&dir_target),
+            "child",
+            true,
+        );
+        let delete_events = collect_events(&instance);
+        assert_eq!(delete_events.len(), 2);
+        assert_eq!(delete_events[0].wd, parent_wd);
+        assert_eq!(delete_events[0].mask, IN_DELETE | IN_ISDIR);
+        assert_eq!(delete_events[0].name, "child");
+        assert_eq!(delete_events[1].wd, dir_wd);
+        assert_eq!(delete_events[1].mask, IN_DELETE_SELF);
     }
 }

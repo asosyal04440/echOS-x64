@@ -1,4 +1,7 @@
 use super::super::super::fs;
+use super::super::super::gui::launch_pipeline::{
+    DpiVirtualizationMode, ExternalDisplayContract, LaunchSession,
+};
 use super::super::super::posix::{self, WindowsRuntimeError};
 use super::super::super::runtime_layer::launch_contract::{self, IsolationDomain};
 use super::super::super::runtime_layer::package_registry_contract::RuntimePackageRegistry;
@@ -7,6 +10,43 @@ use super::*;
 
 impl DesktopSession {
     pub(super) fn activate_app(&mut self, kind: AppKind) -> Result<(), String> {
+        let policy = match kind {
+            AppKind::Terminal => self.resolve_window_launch_policy(
+                self.terminal.client.app_id(),
+                "Terminal",
+                self.terminal.workspace_id,
+                Rect::new(self.screen.x + 86, self.screen.y + 126, 720, 420),
+                true,
+            ),
+            AppKind::Files => self.resolve_window_launch_policy(
+                self.files.client.app_id(),
+                "Files",
+                self.files.workspace_id,
+                Rect::new(self.screen.x + 232, self.screen.y + 168, 580, 360),
+                true,
+            ),
+            AppKind::Browser => self.resolve_window_launch_policy(
+                self.browser.client.app_id(),
+                "Web",
+                self.browser.workspace_id,
+                Rect::new(self.screen.x + 196, self.screen.y + 118, 820, 520),
+                true,
+            ),
+            AppKind::Settings => self.resolve_window_launch_policy(
+                self.settings.client.app_id(),
+                "Settings",
+                self.settings.workspace_id,
+                Rect::new(self.screen.x + 244, self.screen.y + 152, 540, 460),
+                true,
+            ),
+            AppKind::Editor => self.resolve_window_launch_policy(
+                self.editor.client.app_id(),
+                "Editor",
+                self.editor.workspace_id,
+                Rect::new(self.screen.x + 172, self.screen.y + 110, 760, 500),
+                true,
+            ),
+        };
         let has_window = match kind {
             AppKind::Terminal => self.terminal.window.is_some(),
             AppKind::Files => self.files.window.is_some(),
@@ -14,41 +54,31 @@ impl DesktopSession {
             AppKind::Settings => self.settings.window.is_some(),
             AppKind::Editor => self.editor.window.is_some(),
         };
-        let target_workspace = self.app_workspace(kind);
+        let target_workspace = policy.workspace_id;
         if has_window && target_workspace != self.shell.active_workspace {
             self.switch_workspace(target_workspace)?;
         }
 
         let outcome = match kind {
             AppKind::Terminal => {
-                if self.terminal.window.is_none() {
-                    self.terminal.workspace_id = self.shell.active_workspace;
-                }
-                self.terminal.ensure_window(self.screen)?
+                self.terminal.workspace_id = policy.workspace_id;
+                self.terminal.ensure_window(self.screen, &policy)?
             }
             AppKind::Files => {
-                if self.files.window.is_none() {
-                    self.files.workspace_id = self.shell.active_workspace;
-                }
-                self.files.ensure_window(self.screen)?
+                self.files.workspace_id = policy.workspace_id;
+                self.files.ensure_window(self.screen, &policy)?
             }
             AppKind::Browser => {
-                if self.browser.window.is_none() {
-                    self.browser.workspace_id = self.shell.active_workspace;
-                }
-                self.browser.ensure_window(self.screen)?
+                self.browser.workspace_id = policy.workspace_id;
+                self.browser.ensure_window(self.screen, &policy)?
             }
             AppKind::Settings => {
-                if self.settings.window.is_none() {
-                    self.settings.workspace_id = self.shell.active_workspace;
-                }
-                self.settings.ensure_window(self.screen)?
+                self.settings.workspace_id = policy.workspace_id;
+                self.settings.ensure_window(self.screen, &policy)?
             }
             AppKind::Editor => {
-                if self.editor.window.is_none() {
-                    self.editor.workspace_id = self.shell.active_workspace;
-                }
-                self.editor.ensure_window(self.screen)?
+                self.editor.workspace_id = policy.workspace_id;
+                self.editor.ensure_window(self.screen, &policy)?
             }
         };
 
@@ -101,13 +131,18 @@ impl DesktopSession {
         )
     }
 
-    pub(super) fn launch_registry(&self) -> [PackageRecord; 9] {
+    pub(super) fn launch_registry(&self) -> [PackageRecord; 19] {
         desktop_launch_registry()
     }
 
     pub(super) fn launch_resolution(&self, query: &str) -> Option<AppResolution> {
         let registry = self.launch_registry();
-        RuntimePackageRegistry::new(&registry).resolve_with_probe(query, launch_path_exists)
+        peek_launch_resolution(&registry, query)
+    }
+
+    pub(super) fn ensure_launch_resolution(&mut self, query: &str) -> Option<AppResolution> {
+        let registry = self.launch_registry();
+        resolve_launch_resolution_with_seed_install(&registry, query)
     }
 
     pub(super) fn evaluate_launch_policy(&self, intent: &LaunchIntent) -> Result<(), String> {
@@ -133,6 +168,7 @@ impl DesktopSession {
         session: LaunchSession,
         path: Option<&str>,
     ) -> Result<(), String> {
+        let session = self.decorate_external_launch_session(session);
         match session.process.bootstrap {
             RuntimeBootstrap::NativeWindowed => {
                 if let Some(path) = path {
@@ -238,10 +274,96 @@ impl DesktopSession {
         self.evaluate_launch_policy(&intent)?;
         self.dispatch_launch_session(intent.canonical_session(), Some(path))
     }
+
+    fn decorate_external_launch_session(&self, session: LaunchSession) -> LaunchSession {
+        match session.process.bootstrap {
+            RuntimeBootstrap::Win32Bridge | RuntimeBootstrap::PosixBridge => {
+                session.with_external_display_contract(self.external_display_contract_for(&session))
+            }
+            _ => session,
+        }
+    }
+
+    fn external_display_contract_for(&self, session: &LaunchSession) -> ExternalDisplayContract {
+        let profile = self.display_profile();
+        let accessibility = self
+            .shell
+            .client
+            .accessibility_profile()
+            .unwrap_or_default();
+        let output_id = super::output_for_workspace(&profile, session.window.workspace_id);
+        let output = profile
+            .outputs
+            .iter()
+            .find(|output| output.output_id == output_id)
+            .or_else(|| profile.outputs.first());
+        let Some(output) = output else {
+            return ExternalDisplayContract::default();
+        };
+        let text_scale_100x = output
+            .text_scale_100x
+            .max(accessibility.text_scale_100x.max(75));
+        let dpi_virtualization = match session.process.abi {
+            AbiPersonality::Win32 => {
+                if output.scale_100x != 100 || text_scale_100x != 100 {
+                    DpiVirtualizationMode::BitmapScale
+                } else {
+                    DpiVirtualizationMode::SystemAware
+                }
+            }
+            AbiPersonality::Posix => DpiVirtualizationMode::Native,
+            AbiPersonality::Native => DpiVirtualizationMode::Native,
+        };
+        ExternalDisplayContract {
+            output_id: output.output_id,
+            ui_scale_100x: output.scale_100x.max(100),
+            text_scale_100x,
+            cursor_scale_100x: accessibility.cursor_scale_100x.max(100),
+            dpi_virtualization,
+        }
+    }
 }
 
 pub(super) fn launch_path_exists(path: &str) -> bool {
     fs::vfs_open_inode(path).is_ok()
+}
+
+pub(super) fn peek_launch_resolution(
+    registry: &[PackageRecord],
+    query: &str,
+) -> Option<AppResolution> {
+    RuntimePackageRegistry::new(registry).resolve_with_probe(query, launch_path_exists)
+}
+
+pub(super) fn resolve_launch_resolution_with_seed_install(
+    registry: &[PackageRecord],
+    query: &str,
+) -> Option<AppResolution> {
+    let first = peek_launch_resolution(registry, query);
+    let seed_query = match first.as_ref() {
+        Some(AppResolution::MissingExternalPath { descriptor, .. }) => Some(descriptor.package_id),
+        Some(_) => None,
+        None => Some(query),
+    };
+    let Some(seed_query) = seed_query else {
+        return first;
+    };
+    match crate::security::seed_store::install_seed_for_query(seed_query) {
+        Ok(crate::security::seed_store::SeedInstallOutcome::Installed)
+        | Ok(crate::security::seed_store::SeedInstallOutcome::Updated)
+        | Ok(crate::security::seed_store::SeedInstallOutcome::AlreadyInstalled) => {
+            peek_launch_resolution(registry, query)
+        }
+        Ok(crate::security::seed_store::SeedInstallOutcome::NotFound) => first,
+        Err(err) => {
+            crate::serial_println!(
+                "[SEED] on-demand install fail query={} err={}",
+                seed_query,
+                err
+            );
+            first
+        }
+    }
 }
 
 fn load_launch_image(path: &str) -> Result<Vec<u8>, String> {

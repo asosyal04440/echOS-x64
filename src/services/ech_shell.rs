@@ -10,13 +10,154 @@ use spin::Mutex;
 
 const SHELL_COMMAND_QUEUE_CAPACITY: usize = 256;
 const SHELL_RESPONSE_QUEUE_CAPACITY: usize = 256;
+const ACCESSIBILITY_EVENT_CAPACITY: usize = 64;
+const CAPTION_EVENT_CAPACITY: usize = 24;
+const SPEECH_EVENT_CAPACITY: usize = 16;
+const SPEECH_RETRY_BACKOFF_NS: u64 = 250_000_000;
 
 use crate::gui::protocol::{
-    AccessibilityNode, AccessibilityProfile, AppHealth, AppId, DesktopPermission, DisplayProfile,
-    FileGrant, MotionProfile, PermissionEntry, PermissionState, RestoreDisposition,
-    SessionPowerState, SessionSnapshot, ShellAppEntry, ShellDensityProfile, StageSet,
-    StageSetPolicy, WindowId, WindowRule, WorkspaceId, WorkspaceLayout, WorkspaceRule,
+    AccessibilityEvent, AccessibilityEventKind, AccessibilityFocusState, AccessibilityNode,
+    AccessibilityProfile, AccessibilityRole, AppHealth, AppId, CaptionEvent, DesktopPermission,
+    DisplayProfile, FileGrant, MagnifierMode, MotionProfile, PermissionEntry, PermissionState,
+    RestoreDisposition, SessionPowerState, SessionSnapshot, ShellAppEntry, ShellDensityProfile,
+    SpeechEvent, SpeechState, StageSet, StageSetPolicy, WindowId, WindowRule, WorkspaceId,
+    WorkspaceLayout, WorkspaceRule,
 };
+
+#[derive(Default)]
+struct SpeechLane {
+    active: Option<SpeechEvent>,
+    pending: Vec<SpeechEvent>,
+    dropped_count: u32,
+    coalesced_count: u32,
+    active_deadline_ns: u64,
+}
+
+impl SpeechLane {
+    fn state(&self, max_items: usize) -> SpeechState {
+        SpeechState {
+            active: self.active.clone(),
+            pending: self
+                .pending
+                .iter()
+                .take(max_items.max(1))
+                .cloned()
+                .collect(),
+            dropped_count: self.dropped_count,
+            coalesced_count: self.coalesced_count,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeechOutputHealth {
+    Ready,
+    Recovering,
+    FailedClosed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeechOutputErrorKind {
+    AudioInvalidChannel,
+    AudioEmptyPayload,
+    AudioQueueSaturated,
+    AudioUnsupportedFormat,
+    AudioServiceUnavailable,
+    UnsupportedLocale,
+    UnknownVoice,
+    VoiceLocaleMismatch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechOutputError {
+    pub kind: SpeechOutputErrorKind,
+    pub detail: String,
+    pub retryable: bool,
+}
+
+impl SpeechOutputError {
+    fn from_audio_error(error: crate::services::AudioError) -> Self {
+        let kind = match error.kind {
+            crate::services::AudioErrorKind::InvalidChannel => {
+                SpeechOutputErrorKind::AudioInvalidChannel
+            }
+            crate::services::AudioErrorKind::EmptyPayload => {
+                SpeechOutputErrorKind::AudioEmptyPayload
+            }
+            crate::services::AudioErrorKind::QueueSaturated => {
+                SpeechOutputErrorKind::AudioQueueSaturated
+            }
+            crate::services::AudioErrorKind::UnsupportedFormat => {
+                SpeechOutputErrorKind::AudioUnsupportedFormat
+            }
+            crate::services::AudioErrorKind::ServiceUnavailable => {
+                SpeechOutputErrorKind::AudioServiceUnavailable
+            }
+        };
+        Self {
+            kind,
+            detail: error.detail,
+            retryable: error.retryable,
+        }
+    }
+
+    fn from_voice_error(error: crate::audio::tts::VoiceSelectionError) -> Self {
+        let kind = match error.kind {
+            crate::audio::tts::VoiceSelectionErrorKind::UnknownVoice => {
+                SpeechOutputErrorKind::UnknownVoice
+            }
+            crate::audio::tts::VoiceSelectionErrorKind::UnsupportedLocale => {
+                SpeechOutputErrorKind::UnsupportedLocale
+            }
+            crate::audio::tts::VoiceSelectionErrorKind::VoiceLocaleMismatch => {
+                SpeechOutputErrorKind::VoiceLocaleMismatch
+            }
+        };
+        Self {
+            kind,
+            detail: error.detail,
+            retryable: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechOutputStatus {
+    pub channel_id: Option<u32>,
+    pub health: SpeechOutputHealth,
+    pub failure_count: u32,
+    pub retry_after_ns: u64,
+    pub locale: String,
+    pub preferred_voice_id: Option<String>,
+    pub resolved_voice_id: Option<String>,
+    pub last_error: Option<SpeechOutputError>,
+}
+
+impl Default for SpeechOutputStatus {
+    fn default() -> Self {
+        Self {
+            channel_id: None,
+            health: SpeechOutputHealth::Ready,
+            failure_count: 0,
+            retry_after_ns: 0,
+            locale: String::from("en-US"),
+            preferred_voice_id: None,
+            resolved_voice_id: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct SpeechOutputState {
+    status: SpeechOutputStatus,
+}
+
+impl SpeechOutputState {
+    fn snapshot(&self) -> SpeechOutputStatus {
+        self.status.clone()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum ShellCommand {
@@ -91,6 +232,38 @@ pub enum ShellCommand {
         profile: AccessibilityProfile,
     },
     GetAccessibilityProfile,
+    RecordAccessibilityEvent {
+        event: AccessibilityEvent,
+    },
+    ListAccessibilityEvents {
+        max_items: usize,
+    },
+    ClearAccessibilityEvents,
+    PushCaptionEvent {
+        event: CaptionEvent,
+    },
+    ListCaptionEvents {
+        max_items: usize,
+    },
+    ClearCaptionEvents,
+    GetSpeechState {
+        max_items: usize,
+    },
+    SetLocale {
+        locale: String,
+    },
+    GetLocale,
+    SetSpeechVoice {
+        voice_id: Option<String>,
+    },
+    ListSpeechVoices,
+    GetSpeechOutputStatus,
+    TickSpeechLane {
+        now_ns: u64,
+    },
+    AdvanceSpeechLane,
+    ClearSpeechLane,
+    GetAccessibilityFocus,
     NoteNotification {
         app_id: AppId,
     },
@@ -169,6 +342,13 @@ pub enum ShellResponse {
     FileGrants(Vec<FileGrant>),
     AccessibilityTree(Vec<AccessibilityNode>),
     AccessibilityProfile(AccessibilityProfile),
+    AccessibilityEvents(Vec<AccessibilityEvent>),
+    CaptionEvents(Vec<CaptionEvent>),
+    SpeechState(SpeechState),
+    Locale(String),
+    SpeechVoices(Vec<crate::audio::tts::VoiceCatalogEntry>),
+    SpeechOutputStatus(SpeechOutputStatus),
+    AccessibilityFocus(Option<AccessibilityFocusState>),
     DisplayProfile(DisplayProfile),
     ShellDensity(ShellDensityProfile),
     MotionProfile(MotionProfile),
@@ -195,6 +375,11 @@ pub struct EchShell {
     file_grants: Mutex<BTreeMap<AppId, Vec<FileGrant>>>,
     accessibility: Mutex<BTreeMap<AppId, Vec<AccessibilityNode>>>,
     accessibility_profile: Mutex<AccessibilityProfile>,
+    accessibility_events: Mutex<Vec<AccessibilityEvent>>,
+    caption_events: Mutex<Vec<CaptionEvent>>,
+    speech_lane: Mutex<SpeechLane>,
+    speech_output: Mutex<SpeechOutputState>,
+    accessibility_focus: Mutex<Option<AccessibilityFocusState>>,
     display_profile: Mutex<DisplayProfile>,
     shell_density: Mutex<ShellDensityProfile>,
     motion_profile: Mutex<MotionProfile>,
@@ -223,6 +408,11 @@ impl EchShell {
             file_grants: Mutex::new(BTreeMap::new()),
             accessibility: Mutex::new(BTreeMap::new()),
             accessibility_profile: Mutex::new(AccessibilityProfile::default()),
+            accessibility_events: Mutex::new(Vec::new()),
+            caption_events: Mutex::new(Vec::new()),
+            speech_lane: Mutex::new(SpeechLane::default()),
+            speech_output: Mutex::new(SpeechOutputState::default()),
+            accessibility_focus: Mutex::new(None),
             display_profile: Mutex::new(DisplayProfile::default()),
             shell_density: Mutex::new(ShellDensityProfile::Balanced),
             motion_profile: Mutex::new(MotionProfile::Standard),
@@ -246,6 +436,404 @@ impl EchShell {
 
     pub fn receive_response(&self) -> Option<ShellResponse> {
         self.response_queue.pop()
+    }
+
+    fn queue_accessibility_event(&self, event: AccessibilityEvent) {
+        let mut events = self.accessibility_events.lock();
+        if events.last() == Some(&event) {
+            return;
+        }
+        if events.len() >= ACCESSIBILITY_EVENT_CAPACITY {
+            events.remove(0);
+        }
+        events.push(event.clone());
+        drop(events);
+
+        let mut captions = self.caption_events.lock();
+        let spoken_text = event.label.clone();
+        let caption = CaptionEvent {
+            app_id: event.app_id,
+            source_label: match event.kind {
+                AccessibilityEventKind::FocusChanged => String::from("Focus"),
+                AccessibilityEventKind::WindowOpened => String::from("Window"),
+                AccessibilityEventKind::WindowClosed => String::from("Window"),
+                AccessibilityEventKind::DialogOpened => String::from("Dialog"),
+                AccessibilityEventKind::SelectionChanged => String::from("Selection"),
+                AccessibilityEventKind::NotificationPosted => String::from("Notification"),
+                AccessibilityEventKind::ValueChanged => String::from("Value"),
+                AccessibilityEventKind::LiveRegionChanged => String::from("Live Region"),
+            },
+            text: event.label,
+        };
+        self.push_caption_locked(&mut captions, caption);
+        self.queue_speech_event(SpeechEvent {
+            app_id: event.app_id,
+            source_label: match event.kind {
+                AccessibilityEventKind::FocusChanged => String::from("Focus"),
+                AccessibilityEventKind::WindowOpened => String::from("Window"),
+                AccessibilityEventKind::WindowClosed => String::from("Window"),
+                AccessibilityEventKind::DialogOpened => String::from("Dialog"),
+                AccessibilityEventKind::SelectionChanged => String::from("Selection"),
+                AccessibilityEventKind::NotificationPosted => String::from("Notification"),
+                AccessibilityEventKind::ValueChanged => String::from("Value"),
+                AccessibilityEventKind::LiveRegionChanged => String::from("Live"),
+            },
+            text: spoken_text,
+        });
+    }
+
+    fn push_caption_locked(&self, captions: &mut Vec<CaptionEvent>, event: CaptionEvent) {
+        if captions.last() == Some(&event) {
+            return;
+        }
+        if captions.len() >= CAPTION_EVENT_CAPACITY {
+            captions.remove(0);
+        }
+        captions.push(event);
+    }
+
+    fn queue_caption_event(&self, event: CaptionEvent) {
+        let mut captions = self.caption_events.lock();
+        self.push_caption_locked(&mut captions, event);
+    }
+
+    fn queue_speech_event(&self, event: SpeechEvent) {
+        if !self.accessibility_profile.lock().screen_reader {
+            return;
+        }
+
+        let mut speak_now = None;
+        let mut speech = self.speech_lane.lock();
+        if speech.active.as_ref() == Some(&event) {
+            speech.coalesced_count = speech.coalesced_count.saturating_add(1);
+            return;
+        }
+        if speech.pending.last() == Some(&event) {
+            speech.coalesced_count = speech.coalesced_count.saturating_add(1);
+            return;
+        }
+        if let Some(last) = speech.pending.last_mut() {
+            if last.source_label == event.source_label {
+                *last = event.clone();
+                speech.coalesced_count = speech.coalesced_count.saturating_add(1);
+                return;
+            }
+        }
+        if speech.active.is_none() {
+            speech.active = Some(event.clone());
+            speak_now = Some(event);
+        } else {
+            if speech.pending.len() >= SPEECH_EVENT_CAPACITY {
+                speech.pending.remove(0);
+                speech.dropped_count = speech.dropped_count.saturating_add(1);
+            }
+            speech.pending.push(event);
+        }
+        drop(speech);
+        if let Some(event) = speak_now {
+            self.play_speech_event(&event);
+        }
+    }
+
+    fn speech_state(&self, max_items: usize) -> SpeechState {
+        self.speech_lane.lock().state(max_items)
+    }
+
+    fn advance_speech_lane(&self) -> SpeechState {
+        let mut speech = self.speech_lane.lock();
+        speech.active = if speech.pending.is_empty() {
+            None
+        } else {
+            Some(speech.pending.remove(0))
+        };
+        speech.active_deadline_ns = 0;
+        let active = speech.active.clone();
+        let state = speech.state(SPEECH_EVENT_CAPACITY);
+        drop(speech);
+        if let Some(event) = active {
+            self.play_speech_event(&event);
+        }
+        state
+    }
+
+    fn tick_speech_lane(&self, now_ns: u64) -> SpeechState {
+        let mut speak_now = None;
+        {
+            let mut speech = self.speech_lane.lock();
+            let should_advance = speech.active.is_none()
+                || (speech.active_deadline_ns != 0 && now_ns >= speech.active_deadline_ns);
+            if should_advance {
+                speech.active = if speech.pending.is_empty() {
+                    None
+                } else {
+                    Some(speech.pending.remove(0))
+                };
+                speech.active_deadline_ns = 0;
+                speak_now = speech.active.clone();
+            } else if speech.active_deadline_ns == 0 && self.speech_retry_ready(now_ns) {
+                speak_now = speech.active.clone();
+            }
+        }
+        if let Some(event) = speak_now {
+            self.play_speech_event_at_time(&event, now_ns);
+        }
+        self.speech_state(SPEECH_EVENT_CAPACITY)
+    }
+
+    fn play_speech_event(&self, event: &SpeechEvent) {
+        let now = crate::gui::animation::get_time_ns();
+        self.play_speech_event_at_time(event, now);
+    }
+
+    fn play_speech_event_at_time(&self, event: &SpeechEvent, now_ns: u64) {
+        let (locale, preferred_voice_id) = {
+            let output = self.speech_output.lock();
+            (
+                output.status.locale.clone(),
+                output.status.preferred_voice_id.clone(),
+            )
+        };
+        let voice =
+            match crate::audio::tts::select_voice(locale.as_str(), preferred_voice_id.as_deref()) {
+                Ok(voice) => voice,
+                Err(error) => {
+                    self.record_speech_failure(
+                        SpeechOutputError::from_voice_error(error),
+                        None,
+                        now_ns,
+                    );
+                    return;
+                }
+            };
+        let clip = crate::audio::tts::synthesize_with_voice(event.text.as_str(), voice);
+        if clip.pcm16_le.is_empty() {
+            return;
+        }
+        let duration_ns = clip.duration_ns;
+        let channel_id = match self.ensure_speech_channel(clip.sample_rate, clip.channels, now_ns) {
+            Ok(channel_id) => channel_id,
+            Err(error) => {
+                self.record_speech_failure(error, None, now_ns);
+                return;
+            }
+        };
+        match crate::ipc::request_audio_sync(
+            event.app_id,
+            crate::services::AudioCommand::SendAudioData {
+                channel_id,
+                data: clip.pcm16_le,
+            },
+        ) {
+            Some(crate::services::AudioResponse::Success) => {
+                self.record_speech_success(channel_id, voice.id);
+            }
+            Some(crate::services::AudioResponse::Error(error)) => {
+                self.record_speech_failure(
+                    SpeechOutputError::from_audio_error(error),
+                    Some(channel_id),
+                    now_ns,
+                );
+                return;
+            }
+            Some(other) => {
+                self.record_speech_failure(
+                    SpeechOutputError {
+                        kind: SpeechOutputErrorKind::AudioServiceUnavailable,
+                        detail: alloc::format!("unexpected audio response: {:?}", other),
+                        retryable: true,
+                    },
+                    Some(channel_id),
+                    now_ns,
+                );
+                return;
+            }
+            None => {
+                self.record_speech_failure(
+                    SpeechOutputError {
+                        kind: SpeechOutputErrorKind::AudioServiceUnavailable,
+                        detail: String::from("audio service unavailable"),
+                        retryable: true,
+                    },
+                    Some(channel_id),
+                    now_ns,
+                );
+                return;
+            }
+        }
+        let mut speech = self.speech_lane.lock();
+        if speech.active.as_ref() == Some(event) {
+            speech.active_deadline_ns = now_ns
+                .saturating_add(duration_ns)
+                .saturating_add(60_000_000);
+        }
+    }
+
+    fn speech_retry_ready(&self, now_ns: u64) -> bool {
+        let output = self.speech_output.lock();
+        output.status.retry_after_ns == 0 || now_ns >= output.status.retry_after_ns
+    }
+
+    fn record_speech_success(&self, channel_id: u32, resolved_voice_id: &'static str) {
+        let mut output = self.speech_output.lock();
+        output.status.channel_id = Some(channel_id);
+        output.status.health = SpeechOutputHealth::Ready;
+        output.status.retry_after_ns = 0;
+        output.status.resolved_voice_id = Some(String::from(resolved_voice_id));
+        output.status.last_error = None;
+    }
+
+    fn record_speech_failure(
+        &self,
+        error: SpeechOutputError,
+        channel_id: Option<u32>,
+        now_ns: u64,
+    ) {
+        let mut output = self.speech_output.lock();
+        output.status.failure_count = output.status.failure_count.saturating_add(1);
+        output.status.last_error = Some(error.clone());
+        if channel_id.is_some() || matches!(error.kind, SpeechOutputErrorKind::AudioInvalidChannel)
+        {
+            output.status.channel_id = None;
+        }
+        if error.retryable {
+            output.status.health = SpeechOutputHealth::Recovering;
+            output.status.retry_after_ns = now_ns.saturating_add(SPEECH_RETRY_BACKOFF_NS);
+        } else {
+            output.status.health = SpeechOutputHealth::FailedClosed;
+            output.status.retry_after_ns = 0;
+        }
+    }
+
+    fn ensure_speech_channel(
+        &self,
+        sample_rate: u32,
+        channels: u8,
+        now_ns: u64,
+    ) -> Result<u32, SpeechOutputError> {
+        if let Some(channel_id) = self.speech_output.lock().status.channel_id {
+            return Ok(channel_id);
+        }
+        let response = crate::ipc::request_audio_sync(
+            0,
+            crate::services::AudioCommand::CreateChannel {
+                format: crate::services::AudioFormat::PCM16,
+                sample_rate,
+                channels,
+            },
+        )
+        .ok_or_else(|| SpeechOutputError {
+            kind: SpeechOutputErrorKind::AudioServiceUnavailable,
+            detail: String::from("audio service unavailable"),
+            retryable: true,
+        })?;
+        let channel_id = match response {
+            crate::services::AudioResponse::ChannelCreated { channel_id } => channel_id,
+            crate::services::AudioResponse::Error(error) => {
+                return Err(SpeechOutputError::from_audio_error(error));
+            }
+            other => {
+                return Err(SpeechOutputError {
+                    kind: SpeechOutputErrorKind::AudioServiceUnavailable,
+                    detail: alloc::format!("unexpected audio response: {:?}", other),
+                    retryable: true,
+                });
+            }
+        };
+        match crate::ipc::request_audio_sync(
+            0,
+            crate::services::AudioCommand::SetVolume {
+                channel_id,
+                volume: 0.92,
+            },
+        ) {
+            Some(crate::services::AudioResponse::Success) => {}
+            Some(crate::services::AudioResponse::Error(error)) => {
+                return Err(SpeechOutputError::from_audio_error(error));
+            }
+            Some(other) => {
+                return Err(SpeechOutputError {
+                    kind: SpeechOutputErrorKind::AudioServiceUnavailable,
+                    detail: alloc::format!("unexpected audio response: {:?}", other),
+                    retryable: true,
+                });
+            }
+            None => {
+                return Err(SpeechOutputError {
+                    kind: SpeechOutputErrorKind::AudioServiceUnavailable,
+                    detail: String::from("audio service unavailable"),
+                    retryable: true,
+                });
+            }
+        }
+        self.speech_output.lock().status.channel_id = Some(channel_id);
+        Ok(channel_id)
+    }
+
+    fn focused_node_state(
+        &self,
+        app_id: AppId,
+        window_id: Option<WindowId>,
+        nodes: &[AccessibilityNode],
+    ) -> Option<AccessibilityFocusState> {
+        let focused = nodes.iter().find(|node| node.focused)?;
+        Some(AccessibilityFocusState {
+            app_id,
+            window_id,
+            node_id: focused.id,
+            role: focused.role,
+            label: focused.label.clone(),
+            description: focused.description.clone(),
+            bounds: focused.bounds,
+        })
+    }
+
+    fn publish_focus_state(&self, next_focus: Option<AccessibilityFocusState>) {
+        let mut focus = self.accessibility_focus.lock();
+        let previous = focus.clone();
+        if previous == next_focus {
+            return;
+        }
+        *focus = next_focus.clone();
+        drop(focus);
+
+        if let Some(next) = next_focus {
+            self.queue_accessibility_event(AccessibilityEvent {
+                app_id: next.app_id,
+                window_id: next.window_id,
+                node_id: Some(next.node_id),
+                kind: AccessibilityEventKind::FocusChanged,
+                label: next.label.clone(),
+            });
+            if next.role == AccessibilityRole::Dialog {
+                self.queue_accessibility_event(AccessibilityEvent {
+                    app_id: next.app_id,
+                    window_id: next.window_id,
+                    node_id: Some(next.node_id),
+                    kind: AccessibilityEventKind::DialogOpened,
+                    label: next.label,
+                });
+            } else if next.role == AccessibilityRole::ListItem {
+                self.queue_accessibility_event(AccessibilityEvent {
+                    app_id: next.app_id,
+                    window_id: next.window_id,
+                    node_id: Some(next.node_id),
+                    kind: AccessibilityEventKind::SelectionChanged,
+                    label: next.label,
+                });
+            }
+        }
+    }
+
+    fn tail_accessibility_events(&self, max_items: usize) -> Vec<AccessibilityEvent> {
+        let events = self.accessibility_events.lock();
+        let start = events.len().saturating_sub(max_items.max(1));
+        events[start..].to_vec()
+    }
+
+    fn tail_caption_events(&self, max_items: usize) -> Vec<CaptionEvent> {
+        let captions = self.caption_events.lock();
+        let start = captions.len().saturating_sub(max_items.max(1));
+        captions[start..].to_vec()
     }
 
     pub fn process_command(&self, command: ShellCommand) -> ShellResponse {
@@ -278,6 +866,15 @@ impl EchShell {
                 self.permissions.lock().remove(&app_id);
                 self.file_grants.lock().remove(&app_id);
                 self.accessibility.lock().remove(&app_id);
+                if self
+                    .accessibility_focus
+                    .lock()
+                    .as_ref()
+                    .map(|focus| focus.app_id == app_id)
+                    .unwrap_or(false)
+                {
+                    *self.accessibility_focus.lock() = None;
+                }
                 ShellResponse::Ack
             }
             ShellCommand::UpdateAppWindow {
@@ -291,6 +888,10 @@ impl EchShell {
                 let Some(entry) = apps.get_mut(&app_id) else {
                     return ShellResponse::Error(String::from("app not registered"));
                 };
+                let previous_visible = entry.visible;
+                let previous_focused = entry.focused;
+                let previous_window = entry.window_id;
+                let label = entry.name.clone();
                 entry.window_id = window_id;
                 entry.visible = visible;
                 entry.focused = focused;
@@ -305,6 +906,56 @@ impl EchShell {
                     entry.needs_attention = false;
                     if entry.health == AppHealth::Attention {
                         entry.health = AppHealth::Running;
+                    }
+                }
+                let current_focus = if focused {
+                    self.accessibility
+                        .lock()
+                        .get(&app_id)
+                        .and_then(|nodes| self.focused_node_state(app_id, window_id, nodes))
+                } else {
+                    None
+                };
+                drop(apps);
+
+                if !previous_visible && visible {
+                    self.queue_accessibility_event(AccessibilityEvent {
+                        app_id,
+                        window_id,
+                        node_id: None,
+                        kind: AccessibilityEventKind::WindowOpened,
+                        label: label.clone(),
+                    });
+                } else if previous_visible && !visible {
+                    self.queue_accessibility_event(AccessibilityEvent {
+                        app_id,
+                        window_id: previous_window,
+                        node_id: None,
+                        kind: AccessibilityEventKind::WindowClosed,
+                        label: label.clone(),
+                    });
+                }
+                if focused && !previous_focused {
+                    if let Some(focus_state) = current_focus {
+                        self.publish_focus_state(Some(focus_state));
+                    } else {
+                        self.queue_accessibility_event(AccessibilityEvent {
+                            app_id,
+                            window_id,
+                            node_id: None,
+                            kind: AccessibilityEventKind::FocusChanged,
+                            label,
+                        });
+                    }
+                } else if previous_focused && !focused {
+                    let focused_app = self
+                        .accessibility_focus
+                        .lock()
+                        .as_ref()
+                        .map(|focus| focus.app_id == app_id)
+                        .unwrap_or(false);
+                    if focused_app {
+                        *self.accessibility_focus.lock() = None;
                     }
                 }
                 ShellResponse::Ack
@@ -333,6 +984,9 @@ impl EchShell {
                 let Some(entry) = apps.get_mut(&app_id) else {
                     return ShellResponse::Error(String::from("app not registered"));
                 };
+                let label = entry.name.clone();
+                let window_id = entry.window_id;
+                let was_visible = entry.visible;
                 entry.running = false;
                 entry.visible = false;
                 entry.focused = false;
@@ -346,6 +1000,16 @@ impl EchShell {
                     entry.crash_count = entry.crash_count.saturating_add(1);
                 }
                 entry.status_line = status_line;
+                drop(apps);
+                if was_visible {
+                    self.queue_accessibility_event(AccessibilityEvent {
+                        app_id,
+                        window_id,
+                        node_id: None,
+                        kind: AccessibilityEventKind::WindowClosed,
+                        label,
+                    });
+                }
                 ShellResponse::Ack
             }
             ShellCommand::RecordAppFault { app_id, detail } => {
@@ -353,6 +1017,9 @@ impl EchShell {
                 let Some(entry) = apps.get_mut(&app_id) else {
                     return ShellResponse::Error(String::from("app not registered"));
                 };
+                let label = entry.name.clone();
+                let window_id = entry.window_id;
+                let was_visible = entry.visible;
                 entry.running = false;
                 entry.health = AppHealth::Crashed;
                 entry.needs_attention = true;
@@ -361,6 +1028,16 @@ impl EchShell {
                 entry.window_id = None;
                 entry.crash_count = entry.crash_count.saturating_add(1);
                 entry.status_line = detail;
+                drop(apps);
+                if was_visible {
+                    self.queue_accessibility_event(AccessibilityEvent {
+                        app_id,
+                        window_id,
+                        node_id: None,
+                        kind: AccessibilityEventKind::WindowClosed,
+                        label,
+                    });
+                }
                 ShellResponse::Ack
             }
             ShellCommand::ClearAppAttention {
@@ -473,8 +1150,34 @@ impl EchShell {
                 ShellResponse::FileGrants(grants)
             }
             ShellCommand::SetAccessibilityTree { app_id, nodes } => {
-                self.accessibility.lock().insert(app_id, nodes.clone());
+                let previous_nodes = self
+                    .accessibility
+                    .lock()
+                    .insert(app_id, nodes.clone())
+                    .unwrap_or_else(Vec::new);
                 crate::services::at_spi::get_bridge().publish_tree(app_id, &nodes);
+                let window_id = self
+                    .apps
+                    .lock()
+                    .get(&app_id)
+                    .and_then(|entry| entry.window_id);
+                let previous_focus = self.focused_node_state(app_id, window_id, &previous_nodes);
+                let next_focus = self.focused_node_state(app_id, window_id, &nodes);
+                if let (Some(previous), Some(next)) = (previous_focus.clone(), next_focus.clone()) {
+                    if previous.node_id == next.node_id
+                        && previous.window_id == next.window_id
+                        && previous.label != next.label
+                    {
+                        self.queue_accessibility_event(AccessibilityEvent {
+                            app_id,
+                            window_id: next.window_id,
+                            node_id: Some(next.node_id),
+                            kind: AccessibilityEventKind::ValueChanged,
+                            label: next.label.clone(),
+                        });
+                    }
+                }
+                self.publish_focus_state(next_focus);
                 ShellResponse::Ack
             }
             ShellCommand::GetAccessibilityTree { app_id } => {
@@ -488,20 +1191,102 @@ impl EchShell {
             }
             ShellCommand::SetAccessibilityProfile { profile } => {
                 *self.accessibility_profile.lock() = profile;
+                if !profile.screen_reader {
+                    let mut speech = self.speech_lane.lock();
+                    speech.active = None;
+                    speech.pending.clear();
+                    speech.active_deadline_ns = 0;
+                }
                 ShellResponse::Ack
             }
             ShellCommand::GetAccessibilityProfile => {
                 ShellResponse::AccessibilityProfile(*self.accessibility_profile.lock())
             }
+            ShellCommand::RecordAccessibilityEvent { event } => {
+                self.queue_accessibility_event(event);
+                ShellResponse::Ack
+            }
+            ShellCommand::ListAccessibilityEvents { max_items } => {
+                ShellResponse::AccessibilityEvents(self.tail_accessibility_events(max_items))
+            }
+            ShellCommand::ClearAccessibilityEvents => {
+                self.accessibility_events.lock().clear();
+                ShellResponse::Ack
+            }
+            ShellCommand::PushCaptionEvent { event } => {
+                self.queue_caption_event(event);
+                ShellResponse::Ack
+            }
+            ShellCommand::ListCaptionEvents { max_items } => {
+                ShellResponse::CaptionEvents(self.tail_caption_events(max_items))
+            }
+            ShellCommand::ClearCaptionEvents => {
+                self.caption_events.lock().clear();
+                ShellResponse::Ack
+            }
+            ShellCommand::GetSpeechState { max_items } => {
+                ShellResponse::SpeechState(self.speech_state(max_items))
+            }
+            ShellCommand::SetLocale { locale } => {
+                self.speech_output.lock().status.locale = locale;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetLocale => {
+                ShellResponse::Locale(self.speech_output.lock().status.locale.clone())
+            }
+            ShellCommand::SetSpeechVoice { voice_id } => {
+                let mut output = self.speech_output.lock();
+                output.status.preferred_voice_id = voice_id;
+                output.status.resolved_voice_id = None;
+                output.status.last_error = None;
+                output.status.health = SpeechOutputHealth::Ready;
+                output.status.retry_after_ns = 0;
+                ShellResponse::Ack
+            }
+            ShellCommand::ListSpeechVoices => {
+                ShellResponse::SpeechVoices(crate::audio::tts::voice_catalog())
+            }
+            ShellCommand::GetSpeechOutputStatus => {
+                ShellResponse::SpeechOutputStatus(self.speech_output.lock().snapshot())
+            }
+            ShellCommand::TickSpeechLane { now_ns } => {
+                ShellResponse::SpeechState(self.tick_speech_lane(now_ns))
+            }
+            ShellCommand::AdvanceSpeechLane => {
+                ShellResponse::SpeechState(self.advance_speech_lane())
+            }
+            ShellCommand::ClearSpeechLane => {
+                let mut speech = self.speech_lane.lock();
+                speech.active = None;
+                speech.pending.clear();
+                speech.active_deadline_ns = 0;
+                ShellResponse::Ack
+            }
+            ShellCommand::GetAccessibilityFocus => {
+                ShellResponse::AccessibilityFocus(self.accessibility_focus.lock().clone())
+            }
             ShellCommand::NoteNotification { app_id } => {
                 let mut unread = self.unread_notifications.lock();
                 *unread = unread.saturating_add(1);
+                let mut label = String::from("Notification");
                 if let Some(entry) = self.apps.lock().get_mut(&app_id) {
+                    label = entry.name.clone();
                     entry.needs_attention = true;
                     if entry.health != AppHealth::Crashed {
                         entry.health = AppHealth::Attention;
                     }
                 }
+                self.queue_accessibility_event(AccessibilityEvent {
+                    app_id,
+                    window_id: self
+                        .apps
+                        .lock()
+                        .get(&app_id)
+                        .and_then(|entry| entry.window_id),
+                    node_id: None,
+                    kind: AccessibilityEventKind::NotificationPosted,
+                    label,
+                });
                 ShellResponse::Ack
             }
             ShellCommand::ClearNotifications { app_id } => {
@@ -654,6 +1439,7 @@ impl EchShell {
                 };
                 let accessibility_profile = *self.accessibility_profile.lock();
                 let display_profile = self.display_profile.lock().clone();
+                let locale = self.speech_output.lock().status.locale.clone();
                 let output_scale = display_profile
                     .outputs
                     .iter()
@@ -680,7 +1466,7 @@ impl EchShell {
                     motion_profile: *self.motion_profile.lock(),
                     restore_state: *self.restore_state.lock(),
                     stage_set_policy: *self.stage_set_policy.lock(),
-                    locale: String::from("en-US"),
+                    locale,
                     theme_variant: String::from("hybrid-titan"),
                     shell_state,
                 })
@@ -739,5 +1525,167 @@ pub fn service_task() -> ! {
     svc.run_service();
     loop {
         core::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::protocol::Rect;
+    use crate::services::{AudioError, AudioErrorKind};
+
+    #[test]
+    fn accessibility_event_lane_is_bounded_and_feeds_captions() {
+        let shell = EchShell::new();
+        for index in 0..(ACCESSIBILITY_EVENT_CAPACITY + 8) {
+            shell.queue_accessibility_event(AccessibilityEvent {
+                app_id: 1,
+                window_id: Some(7),
+                node_id: Some(index as u64),
+                kind: AccessibilityEventKind::FocusChanged,
+                label: alloc::format!("focus-{}", index),
+            });
+        }
+
+        let events = shell.tail_accessibility_events(ACCESSIBILITY_EVENT_CAPACITY + 8);
+        let captions = shell.tail_caption_events(CAPTION_EVENT_CAPACITY + 8);
+        assert_eq!(events.len(), ACCESSIBILITY_EVENT_CAPACITY);
+        assert_eq!(captions.len(), CAPTION_EVENT_CAPACITY);
+        assert_eq!(
+            events.first().map(|event| event.label.as_str()),
+            Some("focus-8")
+        );
+    }
+
+    #[test]
+    fn focus_publication_emits_dialog_event_and_tracks_focus_state() {
+        let shell = EchShell::new();
+        let focus = AccessibilityFocusState {
+            app_id: 9,
+            window_id: Some(44),
+            node_id: 3,
+            role: AccessibilityRole::Dialog,
+            label: String::from("Quick Settings"),
+            description: String::from("session toggles"),
+            bounds: Rect::new(10, 20, 200, 100),
+        };
+        shell.publish_focus_state(Some(focus.clone()));
+
+        let current = shell.accessibility_focus.lock().clone();
+        let events = shell.tail_accessibility_events(4);
+        assert_eq!(current, Some(focus));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == AccessibilityEventKind::FocusChanged));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == AccessibilityEventKind::DialogOpened));
+    }
+
+    #[test]
+    fn speech_lane_coalesces_and_advances_without_unbounded_growth() {
+        let shell = EchShell::new();
+        *shell.accessibility_profile.lock() = AccessibilityProfile {
+            screen_reader: true,
+            magnifier_mode: MagnifierMode::Docked,
+            ..AccessibilityProfile::default()
+        };
+
+        for index in 0..(SPEECH_EVENT_CAPACITY + 6) {
+            shell.queue_speech_event(SpeechEvent {
+                app_id: 1,
+                source_label: String::from("Focus"),
+                text: alloc::format!("Target {}", index),
+            });
+        }
+
+        let state = shell.speech_state(SPEECH_EVENT_CAPACITY + 8);
+        assert!(state.active.is_some());
+        assert!(state.pending.len() <= SPEECH_EVENT_CAPACITY);
+
+        let advanced = shell.advance_speech_lane();
+        assert!(advanced.pending.len() <= SPEECH_EVENT_CAPACITY);
+    }
+
+    #[test]
+    fn speech_output_status_tracks_locale_voice_catalog_and_preference() {
+        let shell = EchShell::new();
+        assert!(matches!(
+            shell.process_command(ShellCommand::SetLocale {
+                locale: String::from("en-GB"),
+            }),
+            ShellResponse::Ack
+        ));
+        assert!(matches!(
+            shell.process_command(ShellCommand::SetSpeechVoice {
+                voice_id: Some(String::from("gene")),
+            }),
+            ShellResponse::Ack
+        ));
+
+        let ShellResponse::Locale(locale) = shell.process_command(ShellCommand::GetLocale) else {
+            unreachable!("locale response expected")
+        };
+        assert_eq!(locale, "en-GB");
+
+        let ShellResponse::SpeechVoices(voices) =
+            shell.process_command(ShellCommand::ListSpeechVoices)
+        else {
+            unreachable!("voice catalog response expected")
+        };
+        assert!(voices.iter().any(|voice| voice.id == "gene"));
+        assert!(voices.iter().any(|voice| voice.id == "gene"
+            && voice
+                .supported_locales
+                .iter()
+                .any(|locale| locale == "en-gb")));
+
+        let ShellResponse::SpeechOutputStatus(status) =
+            shell.process_command(ShellCommand::GetSpeechOutputStatus)
+        else {
+            unreachable!("speech output status expected")
+        };
+        assert_eq!(status.locale, "en-GB");
+        assert_eq!(status.preferred_voice_id.as_deref(), Some("gene"));
+        assert_eq!(status.health, SpeechOutputHealth::Ready);
+    }
+
+    #[test]
+    fn speech_output_failure_transitions_distinguish_retryable_audio_and_fail_closed_voice_errors()
+    {
+        let shell = EchShell::new();
+
+        shell.record_speech_failure(
+            SpeechOutputError::from_audio_error(AudioError {
+                kind: AudioErrorKind::QueueSaturated,
+                detail: String::from("queue full"),
+                retryable: true,
+            }),
+            Some(7),
+            1_000,
+        );
+        let recovering = shell.speech_output.lock().snapshot();
+        assert_eq!(recovering.health, SpeechOutputHealth::Recovering);
+        assert_eq!(recovering.channel_id, None);
+        assert_eq!(
+            recovering.last_error.as_ref().map(|err| err.kind),
+            Some(SpeechOutputErrorKind::AudioQueueSaturated)
+        );
+        assert!(!shell.speech_retry_ready(1_000));
+        assert!(shell.speech_retry_ready(1_000 + SPEECH_RETRY_BACKOFF_NS));
+
+        shell.record_speech_failure(
+            SpeechOutputError::from_voice_error(
+                crate::audio::tts::select_voice("tr-TR", Some("gene")).unwrap_err(),
+            ),
+            None,
+            2_000,
+        );
+        let failed = shell.speech_output.lock().snapshot();
+        assert_eq!(failed.health, SpeechOutputHealth::FailedClosed);
+        assert_eq!(
+            failed.last_error.as_ref().map(|err| err.kind),
+            Some(SpeechOutputErrorKind::VoiceLocaleMismatch)
+        );
     }
 }

@@ -131,7 +131,7 @@ use alloc::vec::Vec;
 use core::cmp::{max, min};
 use core::ptr;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 #[cfg(not(target_os = "uefi"))]
 use multiboot2::BootInformation;
@@ -304,12 +304,19 @@ impl MemoryManager {
     pub fn free_frames(&self) -> usize {
         self.pmm.free_frames()
     }
-}
 
-/// x86_64 FrameAllocator trait implementasyonu.
-/// Scheduler ve paging sistemi için gerekli.
-unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
-    fn allocate_frame(&mut self) -> Option<PhysFrame> {
+    pub fn allocate_user_frame(&mut self) -> Option<PhysFrame> {
+        self.allocate_frame_with_context(FrameAllocationContext::UserFault)
+    }
+
+    pub fn allocate_kernel_frame(&mut self) -> Option<PhysFrame> {
+        self.allocate_frame_with_context(FrameAllocationContext::KernelCritical)
+    }
+
+    fn allocate_frame_with_context(
+        &mut self,
+        context: FrameAllocationContext,
+    ) -> Option<PhysFrame> {
         // İleri düzey hook'lar (reclaim, cgroup, OOM) yalnızca alt sistemler hazır olduğunda çalışır.
         // Boot sırasında bu yollar UB (aliased &mut) ve hazır olmayan alt sistemlere erişim yapar.
         let hooks_ready = ALLOC_HOOKS_READY.load(Ordering::Relaxed);
@@ -324,15 +331,7 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
             process_writeback_budget(8);
         }
         if let Some(frame) = self.pmm.allocate_frame() {
-            // Cgroup bellek muhasebesi: alloc edilen frame'i mevcut task'ın cgroup'una yükle
-            if hooks_ready {
-                let pid = crate::task::scheduler::current_task_id() as u64;
-                if let Some(cg_id) = cgroup::CGROUP_MANAGER.get_cgroup_for_process(pid) {
-                    if let Some(cg) = cgroup::CGROUP_MANAGER.get_cgroup(cg_id) {
-                        let _ = cg.charge(PAGE_SIZE as u64);
-                    }
-                }
-            }
+            self.account_allocated_frame(hooks_ready, context);
             if hooks_ready {
                 let now = crate::task::scheduler::get_ticks() as u64;
                 let elapsed = now.saturating_sub(stall_start);
@@ -348,6 +347,7 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
         }
         if hooks_ready && reclaim_pages(16) > 0 {
             if let Some(frame) = self.pmm.allocate_frame() {
+                self.account_allocated_frame(hooks_ready, context);
                 let now = crate::task::scheduler::get_ticks() as u64;
                 let elapsed = now.saturating_sub(stall_start).max(1);
                 psi::record_memory_stall(elapsed.min(4), elapsed, false);
@@ -355,10 +355,14 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
             }
         }
 
-        // OOM Killer: Bellek hala yoksa process öldür
-        if hooks_ready && oom::should_trigger_oom(self.free_frames(), self.total_frames()) {
+        // OOM Killer yalnızca user-atfedilebilir tahsislerde devreye girer.
+        if hooks_ready
+            && context.allows_oom_kill()
+            && oom::should_trigger_oom(self.free_frames(), self.total_frames())
+        {
             crate::serial_println!(
-                "[MEM] OOM triggered - free: {} / total: {}",
+                "[MEM] OOM triggered for {:?} allocation - free: {} / total: {}",
+                context,
                 self.free_frames(),
                 self.total_frames()
             );
@@ -366,6 +370,7 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
             // ZSwap writeback dene — OOM öncesi son kurtarma
             let _ = zswap::ZSWAP_MANAGER.writeback_lru();
             if let Some(frame) = self.pmm.allocate_frame() {
+                self.account_allocated_frame(hooks_ready, context);
                 let now = crate::task::scheduler::get_ticks() as u64;
                 let elapsed = now.saturating_sub(stall_start).max(1);
                 psi::record_memory_stall(elapsed.min(8), elapsed, false);
@@ -375,30 +380,67 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
             let elapsed = now.saturating_sub(stall_start).max(1);
             psi::record_memory_stall(elapsed, elapsed, true);
 
-            // Scheduler'dan gerçek task listesi al
             let tasks = crate::task::scheduler::list_tasks();
-            let oom_infos: alloc::vec::Vec<oom::OomProcessInfo> = tasks
-                .iter()
-                .map(|t| {
-                    oom::OomProcessInfo {
-                        pid: t.pid,
-                        name: alloc::string::String::from(t.name),
-                        rss_pages: 256, // Tahmini — gerçek RSS için VMA tracking gerekir
-                        swap_pages: 0,
-                        oom_score_adj: 0,
-                        nice: 0,
-                        runtime_ticks: 0,
-                        is_kernel: t.pid < 2,
-                        is_root: false,
-                        children: 0,
-                        cpu_percent: 0,
-                    }
-                })
-                .collect();
-            oom::oom_kill(&oom_infos);
+            let oom_infos: alloc::vec::Vec<oom::OomProcessInfo> =
+                tasks.iter().map(oom::process_info_from_task).collect();
+            if let Some(estimated_freed) = oom::oom_kill(&oom_infos) {
+                let reclaim_target = estimated_freed.clamp(16, 256);
+                let reclaimed = reclaim_pages_global(reclaim_target);
+                process_writeback_budget(WRITEBACK_BUDGET_FAST);
+                crate::serial_println!(
+                    "[MEM] OOM post-kill reclaim target={} reclaimed={}",
+                    reclaim_target,
+                    reclaimed
+                );
+                if let Some(frame) = self.pmm.allocate_frame() {
+                    self.account_allocated_frame(hooks_ready, context);
+                    let now = crate::task::scheduler::get_ticks() as u64;
+                    let elapsed = now.saturating_sub(stall_start).max(1);
+                    psi::record_memory_stall(elapsed, elapsed, true);
+                    return Some(frame);
+                }
+            }
         }
 
         None
+    }
+
+    fn account_allocated_frame(&self, hooks_ready: bool, context: FrameAllocationContext) {
+        if !hooks_ready || !context.charges_current_cgroup() {
+            return;
+        }
+        let pid = crate::task::scheduler::current_task_id() as u64;
+        if let Some(cg_id) = cgroup::CGROUP_MANAGER.get_cgroup_for_process(pid) {
+            if let Some(cg) = cgroup::CGROUP_MANAGER.get_cgroup(cg_id) {
+                let _ = cg.charge(PAGE_SIZE as u64);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameAllocationContext {
+    KernelCritical,
+    UserFault,
+}
+
+impl FrameAllocationContext {
+    #[inline]
+    const fn allows_oom_kill(self) -> bool {
+        matches!(self, Self::UserFault)
+    }
+
+    #[inline]
+    const fn charges_current_cgroup(self) -> bool {
+        matches!(self, Self::UserFault)
+    }
+}
+
+/// x86_64 FrameAllocator trait implementasyonu.
+/// Scheduler ve paging sistemi için gerekli.
+unsafe impl FrameAllocator<Size4KiB> for MemoryManager {
+    fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        self.allocate_kernel_frame()
     }
 }
 
@@ -498,16 +540,20 @@ unsafe fn global_mb2_frame_allocator_mut(
 pub const PAGE_SIZE: usize = 4096;
 pub const PHYSICAL_MEMORY_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 pub const KERNEL_SPACE_START: u64 = 0xFFFF_FFFF_8000_0000;
+pub const KERNEL_STACK_VIRT_BASE: u64 = 0xFFFF_FE00_0000_0000;
+pub const KERNEL_STACK_VIRT_LIMIT: u64 = 0xFFFF_FE80_0000_0000;
 pub const USER_SPACE_START: u64 = 0x0000_0000_0000_0000;
 pub const USER_SPACE_END: u64 = 0x0000_7fff_ffff_ffff;
 pub const USER_STACK_TOP: u64 = 0x0000_7fff_ffff_f000;
 pub const USER_STACK_PAGES: usize = 16;
 pub const USER_HEAP_BASE: u64 = 0x0000_1000_0000;
 pub const USER_MMAP_BASE: u64 = 0x0000_4000_0000;
-pub const USER_MMAP_RANDOM_RANGE: u64 = 256 * 1024 * 1024;
-pub const USER_STACK_RANDOM_RANGE: u64 = 128 * 1024 * 1024;
+pub const USER_MMAP_RANDOM_RANGE: u64 = 1024 * 1024 * 1024 * 1024;
+pub const USER_STACK_RANDOM_RANGE: u64 = 256 * 1024 * 1024 * 1024;
+pub const USER_HEAP_RANDOM_RANGE: u64 = 1024 * 1024 * 1024;
 static mut ACTIVE_PHYSICAL_MEMORY_OFFSET: u64 = PHYSICAL_MEMORY_OFFSET;
 static KASLR_OFFSET: AtomicUsize = AtomicUsize::new(0);
+static NEXT_KERNEL_STACK_VIRT: AtomicU64 = AtomicU64::new(KERNEL_STACK_VIRT_BASE);
 
 /// Bellek alt sistemleri (reclaim, cgroup, OOM) hazır olduğunda true.
 /// allocate_frame içindeki ileri düzey hook'lar bu bayrak true olmadan çalışmaz.
@@ -1583,6 +1629,21 @@ pub struct AddressSpace {
     stack_top: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AddressSpacePageCounts {
+    pub resident_anon_pages: usize,
+    pub resident_file_pages: usize,
+    pub swapped_pages: usize,
+    pub committed_pages: usize,
+}
+
+impl AddressSpacePageCounts {
+    pub fn resident_pages(&self) -> usize {
+        self.resident_anon_pages
+            .saturating_add(self.resident_file_pages)
+    }
+}
+
 fn image_ref_from_slice(image: &[u8]) -> ImageRef {
     ImageRef {
         base: image.as_ptr() as usize,
@@ -1612,6 +1673,58 @@ static DEFAULT_ADDRESS_SPACE: Mutex<AddressSpace> = Mutex::new(AddressSpace {
     stack_top: 0,
 });
 static ACTIVE_ADDRESS_SPACE: Mutex<Option<Arc<Mutex<AddressSpace>>>> = Mutex::new(None);
+
+fn pages_in_range(start: u64, end: u64) -> usize {
+    if end <= start {
+        return 0;
+    }
+    let bytes = end.saturating_sub(start);
+    ((bytes.saturating_add(PAGE_SIZE as u64 - 1)) / PAGE_SIZE as u64) as usize
+}
+
+pub fn address_space_page_counts(space: &Arc<Mutex<AddressSpace>>) -> AddressSpacePageCounts {
+    let (space_id, committed_pages) = {
+        let guard = space.lock();
+        let committed = guard.vmas.iter().fold(0usize, |acc, region| {
+            acc.saturating_add(pages_in_range(region.start, region.end))
+        });
+        (guard.id, committed)
+    };
+
+    let resident = LRU
+        .lock()
+        .space_counts
+        .get(&space_id)
+        .copied()
+        .unwrap_or_default();
+    let swapped_pages = {
+        let memory_swap = SWAP
+            .lock()
+            .slots
+            .keys()
+            .filter(|(id, _)| *id == space_id)
+            .count();
+        let device_swap = SWAP_DEVICE
+            .lock()
+            .as_ref()
+            .map(|device| {
+                device
+                    .slots
+                    .keys()
+                    .filter(|(id, _)| *id == space_id)
+                    .count()
+            })
+            .unwrap_or(0);
+        memory_swap.saturating_add(device_swap)
+    };
+
+    AddressSpacePageCounts {
+        resident_anon_pages: resident.anon,
+        resident_file_pages: resident.file,
+        swapped_pages,
+        committed_pages,
+    }
+}
 
 fn try_merge_vma(left: &mut Vma, right: &Vma) -> bool {
     if left.end != right.start
@@ -2212,7 +2325,15 @@ fn initial_heap_base(space: &AddressSpace) -> u64 {
     }
     let page_mask = !(PAGE_SIZE as u64 - 1);
     let aligned = (base.saturating_add(PAGE_SIZE as u64 - 1)) & page_mask;
-    aligned.min(limit)
+    let max_offset = limit.saturating_sub(aligned).min(USER_HEAP_RANDOM_RANGE);
+    let max_pages = (max_offset / PAGE_SIZE as u64) as u32;
+    let offset_pages = if max_pages == 0 {
+        0
+    } else {
+        random::next_range(max_pages + 1) as u64
+    };
+    let offset = offset_pages.saturating_mul(PAGE_SIZE as u64);
+    aligned.saturating_add(offset).min(limit)
 }
 
 pub fn user_heap_state() -> (u64, u64) {
@@ -2911,6 +3032,72 @@ pub fn register_file_backed_region(
     })
 }
 
+pub fn user_region_overlaps(start: u64, size: u64) -> bool {
+    if size == 0 {
+        return false;
+    }
+    let page_mask = !(PAGE_SIZE as u64 - 1);
+    let region_start = start & page_mask;
+    let region_end = start
+        .saturating_add(size)
+        .saturating_add(PAGE_SIZE as u64 - 1)
+        & page_mask;
+    if region_end <= region_start {
+        return false;
+    }
+    if !is_user_range(region_start, region_end.saturating_sub(region_start)) {
+        return false;
+    }
+    with_address_space_ref(|space| {
+        space
+            .vmas
+            .iter()
+            .any(|region| region_end > region.start && region_start < region.end)
+    })
+}
+
+pub fn user_stack_guards_region(start: u64, size: u64) -> bool {
+    if size == 0 {
+        return false;
+    }
+    let page_mask = !(PAGE_SIZE as u64 - 1);
+    let region_start = start & page_mask;
+    let region_end = start
+        .saturating_add(size)
+        .saturating_add(PAGE_SIZE as u64 - 1)
+        & page_mask;
+    if region_end <= region_start {
+        return false;
+    }
+    with_address_space_mut(|space| {
+        let (_, stack_top) = ensure_stack_bounds(space, USER_STACK_PAGES);
+        let guard_start = stack_top;
+        let guard_end = USER_STACK_TOP;
+        region_end > guard_start && region_start < guard_end
+    })
+}
+
+pub fn user_heap_guards_region(start: u64, size: u64) -> bool {
+    if size == 0 {
+        return false;
+    }
+    let page_mask = !(PAGE_SIZE as u64 - 1);
+    let region_start = start & page_mask;
+    let region_end = start
+        .saturating_add(size)
+        .saturating_add(PAGE_SIZE as u64 - 1)
+        & page_mask;
+    if region_end <= region_start {
+        return false;
+    }
+    with_address_space_mut(|space| {
+        let mmap_base = ensure_mmap_base(space);
+        let guard_start = mmap_base.saturating_sub(PAGE_SIZE as u64);
+        let guard_end = mmap_base;
+        region_end > guard_start && region_start < guard_end
+    })
+}
+
 pub fn handle_user_page_fault(addr: u64, error: PageFaultErrorCode) -> bool {
     let page_mask = !(PAGE_SIZE as u64 - 1);
     let aligned = addr & page_mask;
@@ -3095,7 +3282,7 @@ fn handle_anon_lazy_fault(addr: u64, region: &Vma) -> bool {
                         Err(_) => false,
                     };
                 }
-                let frame = match frame_allocator.allocate_frame() {
+                let frame = match frame_allocator.allocate_user_frame() {
                     Some(frame) => frame,
                     None => return false,
                 };
@@ -3130,7 +3317,7 @@ fn handle_anon_lazy_fault(addr: u64, region: &Vma) -> bool {
         }
     }
     if let Some(data) = swap_take_page(space_id, page_start / PAGE_SIZE as u64) {
-        let frame = match frame_allocator.allocate_frame() {
+        let frame = match frame_allocator.allocate_user_frame() {
             Some(frame) => frame,
             None => {
                 if !swap_store_page(space_id, page_start / PAGE_SIZE as u64, data) {
@@ -3166,7 +3353,7 @@ fn handle_anon_lazy_fault(addr: u64, region: &Vma) -> bool {
     if try_map_thp_anon(&mut mapper, frame_allocator, addr, region) {
         return true;
     }
-    let frame = match frame_allocator.allocate_frame() {
+    let frame = match frame_allocator.allocate_user_frame() {
         Some(frame) => frame,
         None => return false,
     };
@@ -3209,7 +3396,7 @@ fn handle_image_lazy_fault(addr: u64, region: &Vma) -> bool {
     let Some(frame_allocator) = frame_allocator else {
         return false;
     };
-    let frame = match frame_allocator.allocate_frame() {
+    let frame = match frame_allocator.allocate_user_frame() {
         Some(frame) => frame,
         None => return false,
     };
@@ -3294,7 +3481,7 @@ fn handle_file_lazy_fault(addr: u64, region: &Vma) -> bool {
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
     if !region.shared {
         if let Some(data) = swap_take_page(space_id, page_start / PAGE_SIZE as u64) {
-            let frame = match frame_allocator.allocate_frame() {
+            let frame = match frame_allocator.allocate_user_frame() {
                 Some(frame) => frame,
                 None => {
                     if !swap_store_page(space_id, page_start / PAGE_SIZE as u64, data) {
@@ -3349,7 +3536,7 @@ fn handle_file_lazy_fault(addr: u64, region: &Vma) -> bool {
                 Err(_) => false,
             };
         }
-        let frame = match frame_allocator.allocate_frame() {
+        let frame = match frame_allocator.allocate_user_frame() {
             Some(frame) => frame,
             None => return false,
         };
@@ -3394,7 +3581,7 @@ fn handle_file_lazy_fault(addr: u64, region: &Vma) -> bool {
             }
         };
     }
-    let frame = match frame_allocator.allocate_frame() {
+    let frame = match frame_allocator.allocate_user_frame() {
         Some(frame) => frame,
         None => return false,
     };
@@ -3486,7 +3673,7 @@ fn handle_cow_fault(addr: u64) -> bool {
         }
         return false;
     }
-    let new_frame = match frame_allocator.allocate_frame() {
+    let new_frame = match frame_allocator.allocate_user_frame() {
         Some(frame) => frame,
         None => return false,
     };
@@ -3983,23 +4170,31 @@ pub fn phys_to_virt(paddr: usize) -> usize {
     paddr.saturating_add(active_physical_offset() as usize)
 }
 
+pub fn try_virt_to_phys(vaddr: usize) -> Option<usize> {
+    translate_addr(vaddr as u64).map(|paddr| paddr as usize)
+}
+
+pub fn try_virt_to_phys_u64(vaddr: u64) -> Option<u64> {
+    translate_addr(vaddr)
+}
+
 pub fn virt_to_phys(vaddr: usize) -> usize {
-    match translate_addr(vaddr as u64) {
+    match try_virt_to_phys(vaddr) {
         Some(paddr) => paddr as usize,
         None => {
             crate::serial_println!("[MEMORY] virt_to_phys failed for vaddr={:#x}", vaddr);
-            panic!("virt_to_phys: unmapped virtual address");
+            0
         }
     }
 }
 
 /// u64 sanal adres için aşırı yükleme
 pub fn virt_to_phys_u64(vaddr: u64) -> u64 {
-    match translate_addr(vaddr) {
+    match try_virt_to_phys_u64(vaddr) {
         Some(paddr) => paddr,
         None => {
             crate::serial_println!("[MEMORY] virt_to_phys failed for vaddr={:#x}", vaddr);
-            panic!("virt_to_phys: unmapped virtual address");
+            0
         }
     }
 }
@@ -4141,9 +4336,307 @@ pub fn translate_addr(virt_addr: u64) -> Option<u64> {
     paging::translate_addr(VirtAddr::new(virt_addr)).map(|addr| addr.as_u64())
 }
 
+#[cfg(any(target_os = "none", target_os = "uefi"))]
+fn resolve_user_phys_page_nofault(page_base: u64) -> Option<u64> {
+    let page_mask = !(PAGE_SIZE as u64 - 1);
+    let page_base = page_base & page_mask;
+    if !is_user_address(page_base) {
+        return None;
+    }
+    if let Some(phys) = translate_addr(page_base) {
+        return Some(phys & page_mask);
+    }
+    if !handle_user_page_fault(page_base, PageFaultErrorCode::empty()) {
+        return None;
+    }
+    translate_addr(page_base).map(|phys| phys & page_mask)
+}
+
+#[cfg(any(target_os = "none", target_os = "uefi"))]
+pub fn copy_from_user_nofault(dst: &mut [u8], src_ptr: u64) -> bool {
+    if dst.is_empty() {
+        return true;
+    }
+    if !is_user_range(src_ptr, dst.len() as u64) {
+        return false;
+    }
+    let page_mask = !(PAGE_SIZE as u64 - 1);
+    let mut copied = 0usize;
+    while copied < dst.len() {
+        let virt = src_ptr.saturating_add(copied as u64);
+        let page_base = virt & page_mask;
+        let page_offset = (virt & !page_mask) as usize;
+        let chunk = min(PAGE_SIZE.saturating_sub(page_offset), dst.len() - copied);
+        let Some(phys_page_base) = resolve_user_phys_page_nofault(page_base) else {
+            return false;
+        };
+        let src_phys = active_physical_offset()
+            .saturating_add(phys_page_base)
+            .saturating_add(page_offset as u64);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src_phys as *const u8,
+                dst[copied..].as_mut_ptr(),
+                chunk,
+            );
+        }
+        let Some(current_phys_page) = translate_addr(page_base).map(|phys| phys & page_mask) else {
+            return false;
+        };
+        if current_phys_page != phys_page_base {
+            return false;
+        }
+        copied = copied.saturating_add(chunk);
+    }
+    true
+}
+
+#[cfg(not(any(target_os = "none", target_os = "uefi")))]
+pub fn copy_from_user_nofault(_dst: &mut [u8], _src_ptr: u64) -> bool {
+    false
+}
+
+#[inline]
+pub fn is_kernel_stack_virt_addr(addr: u64) -> bool {
+    addr >= KERNEL_STACK_VIRT_BASE && addr < KERNEL_STACK_VIRT_LIMIT
+}
+
+pub fn map_kernel_stack_pages(phys_addr: u64, pages: usize) -> Option<u64> {
+    if pages == 0 {
+        return None;
+    }
+    let bytes = (pages as u64).checked_mul(PAGE_SIZE as u64)?;
+    let stride = bytes.checked_add(PAGE_SIZE as u64)?;
+    let virt_base = NEXT_KERNEL_STACK_VIRT.fetch_add(stride, Ordering::Relaxed);
+    let virt_end = virt_base.checked_add(bytes)?;
+    if virt_base < KERNEL_STACK_VIRT_BASE || virt_end > KERNEL_STACK_VIRT_LIMIT {
+        crate::serial_println!(
+            "[MEMORY] kernel stack VA exhausted base={:#x} pages={}",
+            virt_base,
+            pages
+        );
+        return None;
+    }
+
+    let frame_allocator = unsafe { global_memory_manager_mut()? };
+    let (level_4_frame, _) = Cr3::read();
+    let table_virt =
+        VirtAddr::new(active_physical_offset() + level_4_frame.start_address().as_u64());
+    let table = unsafe { &mut *(table_virt.as_mut_ptr::<PageTable>()) };
+    let mut mapper =
+        unsafe { OffsetPageTable::new(table, VirtAddr::new(active_physical_offset())) };
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+    for page_idx in 0..pages {
+        let virt = VirtAddr::new(virt_base + (page_idx as u64 * PAGE_SIZE as u64));
+        let phys = PhysAddr::new(phys_addr + (page_idx as u64 * PAGE_SIZE as u64));
+        let page = Page::<Size4KiB>::containing_address(virt);
+        let frame = PhysFrame::<Size4KiB>::containing_address(phys);
+        let result = paging::with_wp_disabled(|| unsafe {
+            mapper.map_to(page, frame, flags, frame_allocator)
+        });
+        match result {
+            Ok(flush) => flush.flush(),
+            Err(err) => {
+                crate::serial_println!(
+                    "[MEMORY] map_kernel_stack_pages failed virt={:#x} phys={:#x} err={:?}",
+                    virt.as_u64(),
+                    phys.as_u64(),
+                    err
+                );
+                let _ = unmap_kernel_stack_pages(virt_base, page_idx);
+                return None;
+            }
+        }
+    }
+    Some(virt_base)
+}
+
+pub fn unmap_kernel_stack_pages(virt_addr: u64, pages: usize) -> bool {
+    if pages == 0 {
+        return true;
+    }
+    let (level_4_frame, _) = Cr3::read();
+    let table_virt =
+        VirtAddr::new(active_physical_offset() + level_4_frame.start_address().as_u64());
+    let table = unsafe { &mut *(table_virt.as_mut_ptr::<PageTable>()) };
+    let mut mapper =
+        unsafe { OffsetPageTable::new(table, VirtAddr::new(active_physical_offset())) };
+    let mut ok = true;
+    for page_idx in 0..pages {
+        let virt = VirtAddr::new(virt_addr + (page_idx as u64 * PAGE_SIZE as u64));
+        if paging::translate_addr(virt).is_none() {
+            continue;
+        }
+        let page = Page::<Size4KiB>::containing_address(virt);
+        match paging::with_wp_disabled(|| mapper.unmap(page)) {
+            Ok((_frame, flush)) => flush.flush(),
+            Err(err) => {
+                crate::serial_println!(
+                    "[MEMORY] unmap_kernel_stack_pages failed virt={:#x} err={:?}",
+                    virt.as_u64(),
+                    err
+                );
+                ok = false;
+            }
+        }
+    }
+    ok
+}
+
+pub fn unmap_kernel_guard_page(virt_addr: u64) -> bool {
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
+    if paging::translate_addr(page.start_address()).is_none() {
+        return true;
+    }
+
+    let frame_allocator = unsafe { global_memory_manager_mut() };
+    let Some(frame_allocator) = frame_allocator else {
+        crate::serial_println!(
+            "[MEMORY] unmap_kernel_guard_page missing allocator virt={:#x}",
+            virt_addr
+        );
+        return false;
+    };
+
+    let (level_4_frame, _) = Cr3::read();
+    let table_virt =
+        VirtAddr::new(active_physical_offset() + level_4_frame.start_address().as_u64());
+    let table = unsafe { &mut *(table_virt.as_mut_ptr::<PageTable>()) };
+    let mut mapper =
+        unsafe { OffsetPageTable::new(table, VirtAddr::new(active_physical_offset())) };
+
+    let result = paging::with_wp_disabled(|| paging::unmap_page(&mut mapper, page.start_address()));
+    match result {
+        Ok(_) => true,
+        Err(UnmapError::ParentEntryHugePage) => {
+            let split_flags =
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+            if !split_huge_page(&mut mapper, frame_allocator, page, split_flags) {
+                return false;
+            }
+            paging::with_wp_disabled(|| paging::unmap_page(&mut mapper, page.start_address()))
+                .is_ok()
+        }
+        Err(err) => {
+            crate::serial_println!(
+                "[MEMORY] unmap_kernel_guard_page failed virt={:#x} err={:?}",
+                virt_addr,
+                err
+            );
+            false
+        }
+    }
+}
+
+pub fn remap_kernel_guard_page(virt_addr: u64, phys_addr: u64) -> bool {
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
+    let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_addr));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+    if paging::translate_addr(page.start_address()) == Some(frame.start_address()) {
+        return paging::with_wp_disabled(|| unsafe {
+            mapper_update_guard_flags(page, frame, flags)
+        });
+    }
+
+    let frame_allocator = unsafe { global_memory_manager_mut() };
+    let Some(frame_allocator) = frame_allocator else {
+        crate::serial_println!(
+            "[MEMORY] remap_kernel_guard_page missing allocator virt={:#x} phys={:#x}",
+            virt_addr,
+            phys_addr
+        );
+        return false;
+    };
+
+    let (level_4_frame, _) = Cr3::read();
+    let table_virt =
+        VirtAddr::new(active_physical_offset() + level_4_frame.start_address().as_u64());
+    let table = unsafe { &mut *(table_virt.as_mut_ptr::<PageTable>()) };
+    let mut mapper =
+        unsafe { OffsetPageTable::new(table, VirtAddr::new(active_physical_offset())) };
+
+    let map_result =
+        paging::with_wp_disabled(|| unsafe { mapper.map_to(page, frame, flags, frame_allocator) });
+    match map_result {
+        Ok(flush) => {
+            flush.flush();
+            true
+        }
+        Err(MapToError::PageAlreadyMapped(_)) => {
+            paging::with_wp_disabled(|| unsafe { mapper.update_flags(page, flags) })
+                .map(|flush| {
+                    flush.flush();
+                    true
+                })
+                .unwrap_or(false)
+        }
+        Err(MapToError::ParentEntryHugePage) => {
+            if !split_huge_page(&mut mapper, frame_allocator, page, flags) {
+                return false;
+            }
+            let retry = paging::with_wp_disabled(|| unsafe {
+                mapper.map_to(page, frame, flags, frame_allocator)
+            });
+            match retry {
+                Ok(flush) => {
+                    flush.flush();
+                    true
+                }
+                Err(MapToError::PageAlreadyMapped(_)) => {
+                    paging::translate_addr(page.start_address()) == Some(frame.start_address())
+                }
+                Err(err) => {
+                    crate::serial_println!(
+                        "[MEMORY] remap_kernel_guard_page retry failed virt={:#x} phys={:#x} err={:?}",
+                        virt_addr,
+                        phys_addr,
+                        err
+                    );
+                    false
+                }
+            }
+        }
+        Err(err) => {
+            crate::serial_println!(
+                "[MEMORY] remap_kernel_guard_page failed virt={:#x} phys={:#x} err={:?}",
+                virt_addr,
+                phys_addr,
+                err
+            );
+            false
+        }
+    }
+}
+
+fn mapper_update_guard_flags(
+    page: Page<Size4KiB>,
+    frame: PhysFrame<Size4KiB>,
+    flags: PageTableFlags,
+) -> bool {
+    let (level_4_frame, _) = Cr3::read();
+    let table_virt =
+        VirtAddr::new(active_physical_offset() + level_4_frame.start_address().as_u64());
+    let table = unsafe { &mut *(table_virt.as_mut_ptr::<PageTable>()) };
+    let mut mapper =
+        unsafe { OffsetPageTable::new(table, VirtAddr::new(active_physical_offset())) };
+    match paging::translate_addr(page.start_address()) {
+        Some(current) if current == frame.start_address() => {
+            unsafe { mapper.update_flags(page, flags) }
+                .map(|flush| {
+                    flush.flush();
+                    true
+                })
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 pub fn create_user_pml4() -> Option<PhysFrame> {
     let frame_allocator = unsafe { global_memory_manager_mut()? };
-    let frame = frame_allocator.allocate_frame()?;
+    let frame = frame_allocator.allocate_user_frame()?;
     let phys_offset = active_physical_offset();
     let new_virt = VirtAddr::new(phys_offset + frame.start_address().as_u64());
     let new_table = unsafe { &mut *(new_virt.as_mut_ptr::<PageTable>()) };

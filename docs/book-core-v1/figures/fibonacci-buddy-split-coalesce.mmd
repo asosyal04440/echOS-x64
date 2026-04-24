@@ -1,0 +1,9 @@
+flowchart TD
+    A[F6 block size 13] --> B[Split to F5 size 8 and F4 size 5]
+    B --> C{Need size 3}
+    C --> D[Split F5 to F4 size 5 and F3 size 3]
+    D --> E[Return F3 allocation]
+    D --> F[Put F4 into free list]
+    E --> G[Free later]
+    G --> H[Find buddy with XOR offset]
+    H --> I[Coalesce recursively to larger block]

@@ -26,14 +26,16 @@ use super::super::gui::launch_pipeline::{
 use super::super::gui::layout::layout_grid;
 use super::super::gui::layout::{layout_flex, EdgeInsets, FlexDirection, FlexItem};
 use super::super::gui::protocol::{
-    AccessibilityNode, AccessibilityProfile, AccessibilityRole, AppHealth, ClipboardPayload,
+    AccessibilityEvent, AccessibilityEventKind, AccessibilityFocusState, AccessibilityNode,
+    AccessibilityProfile, AccessibilityRole, AppHealth, CaptionEvent, ClipboardPayload,
     CommandPaletteAction, DamageLane, DesktopPermission, DialogKind, DialogRequest,
     DialogSelection, DisplayProfile, HdrPolicy, InputEvent, InvalidationReason, InvalidationTarget,
-    KeyState, LayerRole, MotionProfile, NotificationEntry, NotificationLevel, PermissionState,
-    Point, PointerButton, Rect, RenderObjectKind, RestoreDisposition, SceneNodeId, SceneUpdate,
-    SessionPowerState, SessionSnapshot, ShellAppEntry, ShellDensityProfile, ShellShortcut,
-    ShellState, StageSet, StageSetPolicy, VrrPolicy, WindowFlags, WindowId, WindowInfo,
-    WindowInputEvent, WorkspaceLayout, WorkspaceRule, MOD_CTRL,
+    KeyState, LayerRole, MagnifierMode, MonitorPolicy, MotionProfile, NotificationEntry,
+    NotificationLevel, OutputMode, PermissionState, Point, PointerButton, Rect, RenderObjectKind,
+    RestoreDisposition, SceneNodeId, SceneUpdate, ScreenshotEntry, SessionPowerState,
+    SessionSnapshot, ShellAppEntry, ShellDensityProfile, ShellShortcut, ShellState, SnapGroup,
+    SnapTemplate, SpeechState, StageSet, StageSetPolicy, VrrPolicy, WindowFlags, WindowId,
+    WindowInfo, WindowInputEvent, WindowRule, WorkspaceLayout, WorkspaceRule, MOD_CTRL,
 };
 use super::super::gui::scene::SceneGraph;
 use super::super::gui::text::{TextStyle, TextSystem};
@@ -48,6 +50,7 @@ use super::super::personalization::{hybrid_windowing, virtual_desktops};
 use super::super::runtime_layer::package_registry_contract::RuntimePackageRegistry;
 use super::super::security::users::USER_DB;
 use super::super::serial_println;
+use super::super::services::ech_display::get_display;
 use super::super::services::FileEntry;
 use super::super::shell::Shell;
 use super::super::task::scheduler::get_cpu_load;
@@ -61,6 +64,10 @@ use super::shell_scene::{
     raster_surface_scene,
 };
 use super::velvet_glove_registry::{desktop_launch_registry, CEF_BINARY_CANDIDATES};
+use crate::allocator::doctrine::{
+    alloc_snapshot_clone, alloc_surface_pixels, SurfacePixelBuffer, SurfacePixelFormat,
+};
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -69,7 +76,8 @@ use alloc::vec::Vec;
 use app_runtime::*;
 use bootstrap::{
     configure_shell_environment, connect_clients, create_shell_windows, desktop_surface_rect,
-    register_bootstrap_apps, task_strip_window_rect, DesktopBootstrapClients, DesktopShellWindows,
+    lock_window_rect, register_bootstrap_apps, task_strip_window_rect, DesktopBootstrapClients,
+    DesktopShellWindows,
 };
 use core::cmp::{max, min};
 use htmlparser::{ElementEnd as HtmlElementEnd, Token as HtmlToken, Tokenizer as HtmlTokenizer};
@@ -85,8 +93,8 @@ const BROWSER_APP_ID: u32 = 14;
 const RECYCLE_SHORTCUT_APP_ID: u32 = 15;
 const WORKSPACE_COUNT: u8 = 8;
 const SCRATCHPAD_WORKSPACE: u8 = WORKSPACE_COUNT;
-const DESKTOP_SHORTCUT_ICON_SIZE: i32 = 56;
-const DESKTOP_SHORTCUT_STEP_Y: i32 = 102;
+const DESKTOP_SHORTCUT_ICON_SIZE: i32 = 72;
+const DESKTOP_SHORTCUT_STEP_Y: i32 = 126;
 const FONT_WIDTH: i32 = 8;
 const FONT_HEIGHT: i32 = 16;
 const WINDOW_BG: u32 = 0xFF131C27;
@@ -101,7 +109,7 @@ const ACCENT_BLUE: u32 = 0xFF5AB3FF;
 const ACCENT_GOLD: u32 = 0xFFFFB84D;
 const ACCENT_CORAL: u32 = 0xFFFF7866;
 const ACCENT_SOFT: u32 = 0xFF7FE6A6;
-
+const MAGNIFIER_SAMPLE_SCALE_100X: u32 = 250;
 fn shell_layer_flags() -> WindowFlags {
     WindowFlags::layer_shell()
 }
@@ -461,6 +469,324 @@ impl SessionWindow {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct WindowLaunchPolicy {
+    workspace_id: u8,
+    output_id: u32,
+    layer_role: LayerRole,
+    flags: WindowFlags,
+    snap_template: Option<SnapTemplate>,
+    restore: RestoreDisposition,
+    rect: Rect,
+    work_area: Rect,
+}
+
+impl WindowLaunchPolicy {
+    fn new(
+        workspace_id: u8,
+        output_id: u32,
+        layer_role: LayerRole,
+        flags: WindowFlags,
+        restore: RestoreDisposition,
+        rect: Rect,
+        work_area: Rect,
+    ) -> Self {
+        Self {
+            workspace_id,
+            output_id,
+            layer_role,
+            flags,
+            snap_template: None,
+            restore,
+            rect,
+            work_area,
+        }
+    }
+}
+
+fn output_rects_for_profile(screen: Rect, profile: &DisplayProfile) -> Vec<(u32, Rect)> {
+    if profile.outputs.is_empty() {
+        return vec![(0, screen)];
+    }
+
+    let count = profile.outputs.len().max(1);
+    let tile_width = max(screen.width / count as u32, 1);
+    profile
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| {
+            let x = screen.x + (tile_width as i32 * index as i32);
+            let width = if index + 1 == count {
+                screen.right().saturating_sub(x).max(1) as u32
+            } else {
+                tile_width
+            };
+            (
+                output.output_id,
+                Rect::new(x, screen.y, width, screen.height),
+            )
+        })
+        .collect()
+}
+
+fn output_rect_for_policy(screen: Rect, profile: &DisplayProfile, output_id: u32) -> Rect {
+    let rects = output_rects_for_profile(screen, profile);
+    rects
+        .iter()
+        .find(|(id, _)| *id == output_id)
+        .map(|(_, rect)| *rect)
+        .unwrap_or(screen)
+}
+
+fn work_area_rect_for_output(screen: Rect, profile: &DisplayProfile, output_id: u32) -> Rect {
+    let output = output_rect_for_policy(screen, profile, output_id);
+    let top = output.y + 18 + Theme::HALO_BAR_HEIGHT as i32 + 32;
+    let dock_height = Theme::PULSE_DOCK_HEIGHT as i32 + 22;
+    let bottom = output.bottom().saturating_sub(dock_height);
+    Rect::new(
+        output.x + 18,
+        top,
+        output.width.saturating_sub(36),
+        bottom.saturating_sub(top).max(120) as u32,
+    )
+}
+
+fn output_for_workspace(profile: &DisplayProfile, workspace_id: u8) -> u32 {
+    profile
+        .outputs
+        .iter()
+        .find(|output| output.workspace_binding == Some(workspace_id))
+        .map(|output| output.output_id)
+        .unwrap_or(profile.primary_output)
+}
+
+fn reanchor_rect_to_output(base: Rect, screen: Rect, target_output: Rect) -> Rect {
+    let dx = base.x.saturating_sub(screen.x);
+    let dy = base.y.saturating_sub(screen.y);
+    let x = target_output.x + dx;
+    let y = target_output.y + dy;
+    Rect::new(
+        x.clamp(
+            target_output.x,
+            target_output.right().saturating_sub(base.width as i32),
+        ),
+        y.clamp(
+            target_output.y,
+            target_output.bottom().saturating_sub(base.height as i32),
+        ),
+        base.width.min(target_output.width),
+        base.height.min(target_output.height),
+    )
+}
+
+fn matches_window_rule(
+    rule: &WindowRule,
+    app_id: u32,
+    title: &str,
+    workspace_id: u8,
+    output_id: u32,
+) -> bool {
+    rule.app_id
+        .map(|candidate| candidate == app_id)
+        .unwrap_or(true)
+        && rule
+            .title_contains
+            .as_ref()
+            .map(|needle| title.contains(needle))
+            .unwrap_or(true)
+        && rule
+            .workspace_id
+            .map(|candidate| candidate == workspace_id)
+            .unwrap_or(true)
+        && rule
+            .monitor_id
+            .map(|candidate| candidate == output_id)
+            .unwrap_or(true)
+}
+
+fn restore_flag_enabled(
+    restore: RestoreDisposition,
+    flags: WindowFlags,
+    shell_owned: bool,
+) -> bool {
+    match restore {
+        RestoreDisposition::NoRestore => false,
+        RestoreDisposition::RestoreIfClean => true,
+        RestoreDisposition::RestoreIfPinned => flags.pinned,
+        RestoreDisposition::ForceRestoreShellOwned => shell_owned,
+    }
+}
+
+fn snap_rect_for_template(template: SnapTemplate, work_area: Rect) -> Rect {
+    let half_w = max(work_area.width / 2, MIN_CONTENT_WIDTH);
+    let half_h = max(work_area.height / 2, MIN_CONTENT_HEIGHT);
+    let third_w = max(work_area.width / 3, MIN_CONTENT_WIDTH);
+    match template {
+        SnapTemplate::LeftHalf => Rect::new(work_area.x, work_area.y, half_w, work_area.height),
+        SnapTemplate::RightHalf => Rect::new(
+            work_area.right().saturating_sub(half_w as i32),
+            work_area.y,
+            half_w,
+            work_area.height,
+        ),
+        SnapTemplate::TopHalf => Rect::new(work_area.x, work_area.y, work_area.width, half_h),
+        SnapTemplate::BottomHalf => Rect::new(
+            work_area.x,
+            work_area.bottom().saturating_sub(half_h as i32),
+            work_area.width,
+            half_h,
+        ),
+        SnapTemplate::TopLeftQuarter => Rect::new(work_area.x, work_area.y, half_w, half_h),
+        SnapTemplate::TopRightQuarter => Rect::new(
+            work_area.right().saturating_sub(half_w as i32),
+            work_area.y,
+            half_w,
+            half_h,
+        ),
+        SnapTemplate::BottomLeftQuarter => Rect::new(
+            work_area.x,
+            work_area.bottom().saturating_sub(half_h as i32),
+            half_w,
+            half_h,
+        ),
+        SnapTemplate::BottomRightQuarter => Rect::new(
+            work_area.right().saturating_sub(half_w as i32),
+            work_area.bottom().saturating_sub(half_h as i32),
+            half_w,
+            half_h,
+        ),
+        SnapTemplate::LeftThird => Rect::new(work_area.x, work_area.y, third_w, work_area.height),
+        SnapTemplate::CenterThird => Rect::new(
+            work_area.x + third_w as i32,
+            work_area.y,
+            third_w,
+            work_area.height,
+        ),
+        SnapTemplate::RightThird => Rect::new(
+            work_area.right().saturating_sub(third_w as i32),
+            work_area.y,
+            third_w,
+            work_area.height,
+        ),
+    }
+}
+
+fn detect_snap_template(frame: Rect, work_area: Rect) -> Option<SnapTemplate> {
+    let tolerance = 24i32;
+    let close = |a: i32, b: i32| (a - b).abs() <= tolerance;
+    let half_w = work_area.width as i32 / 2;
+    let half_h = work_area.height as i32 / 2;
+    let third_w = work_area.width as i32 / 3;
+    if close(frame.x, work_area.x)
+        && close(frame.y, work_area.y)
+        && close(frame.width as i32, half_w)
+        && close(frame.height as i32, work_area.height as i32)
+    {
+        return Some(SnapTemplate::LeftHalf);
+    }
+    if close(frame.right(), work_area.right())
+        && close(frame.y, work_area.y)
+        && close(frame.width as i32, half_w)
+        && close(frame.height as i32, work_area.height as i32)
+    {
+        return Some(SnapTemplate::RightHalf);
+    }
+    if close(frame.x, work_area.x)
+        && close(frame.y, work_area.y)
+        && close(frame.width as i32, work_area.width as i32)
+        && close(frame.height as i32, half_h)
+    {
+        return Some(SnapTemplate::TopHalf);
+    }
+    if close(frame.x, work_area.x)
+        && close(frame.bottom(), work_area.bottom())
+        && close(frame.width as i32, work_area.width as i32)
+        && close(frame.height as i32, half_h)
+    {
+        return Some(SnapTemplate::BottomHalf);
+    }
+    if close(frame.x, work_area.x)
+        && close(frame.y, work_area.y)
+        && close(frame.width as i32, half_w)
+        && close(frame.height as i32, half_h)
+    {
+        return Some(SnapTemplate::TopLeftQuarter);
+    }
+    if close(frame.right(), work_area.right())
+        && close(frame.y, work_area.y)
+        && close(frame.width as i32, half_w)
+        && close(frame.height as i32, half_h)
+    {
+        return Some(SnapTemplate::TopRightQuarter);
+    }
+    if close(frame.x, work_area.x)
+        && close(frame.bottom(), work_area.bottom())
+        && close(frame.width as i32, half_w)
+        && close(frame.height as i32, half_h)
+    {
+        return Some(SnapTemplate::BottomLeftQuarter);
+    }
+    if close(frame.right(), work_area.right())
+        && close(frame.bottom(), work_area.bottom())
+        && close(frame.width as i32, half_w)
+        && close(frame.height as i32, half_h)
+    {
+        return Some(SnapTemplate::BottomRightQuarter);
+    }
+    if close(frame.x, work_area.x)
+        && close(frame.width as i32, third_w)
+        && close(frame.height as i32, work_area.height as i32)
+    {
+        return Some(SnapTemplate::LeftThird);
+    }
+    if close(frame.x, work_area.x + third_w)
+        && close(frame.width as i32, third_w)
+        && close(frame.height as i32, work_area.height as i32)
+    {
+        return Some(SnapTemplate::CenterThird);
+    }
+    if close(frame.right(), work_area.right())
+        && close(frame.width as i32, third_w)
+        && close(frame.height as i32, work_area.height as i32)
+    {
+        return Some(SnapTemplate::RightThird);
+    }
+    None
+}
+
+fn build_snap_groups(
+    windows: &[WindowInfo],
+    workspace_id: u8,
+    monitor_id: u32,
+    work_area: Rect,
+    restore: RestoreDisposition,
+) -> Vec<SnapGroup> {
+    let mut groups: Vec<SnapGroup> = Vec::new();
+    for window in windows.iter().filter(|window| {
+        window.workspace_id == workspace_id
+            && window.visible
+            && window.layer_role == LayerRole::Window
+            && !window.flags.scratchpad
+    }) {
+        let Some(template) = detect_snap_template(window.frame_rect, work_area) else {
+            continue;
+        };
+        if let Some(existing) = groups.iter_mut().find(|group| group.template == template) {
+            existing.window_ids.push(window.id);
+        } else {
+            groups.push(SnapGroup {
+                id: ((workspace_id as u64) << 32) | ((monitor_id as u64) << 16) | template as u64,
+                template,
+                monitor_id,
+                window_ids: vec![window.id],
+                restore,
+            });
+        }
+    }
+    groups
+}
+
 fn animation_window_id(window_id: WindowId) -> u32 {
     window_id as u32
 }
@@ -593,6 +919,11 @@ struct ShellRuntime {
     notifications: SessionWindow,
     quick_settings: SessionWindow,
     command_palette: SessionWindow,
+    clipboard_history: SessionWindow,
+    capture_history: SessionWindow,
+    seed_catalog: SessionWindow,
+    magnifier: SessionWindow,
+    captions: SessionWindow,
     stage_rail: SessionWindow,
     dialog: SessionWindow,
     context_menu: SessionWindow,
@@ -611,6 +942,9 @@ struct ShellRuntime {
     context_target: Option<AppKind>,
     switcher_index: usize,
     notification_index: usize,
+    clipboard_index: usize,
+    capture_index: usize,
+    seed_catalog_index: usize,
     auth_input: String,
     logged_in: bool,
     selected_shortcut: Option<DesktopShortcutKind>,
@@ -636,6 +970,7 @@ struct FilesApp {
     workspace_id: u8,
     current_path: String,
     entries: Vec<FileEntry>,
+    thumbnail_cache: BTreeMap<String, ThumbnailBitmap>,
     selected: usize,
     status: String,
     dirty: bool,
@@ -668,6 +1003,13 @@ struct BrowserApp {
 struct BrowserLink {
     label: String,
     url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThumbnailBitmap {
+    width: u32,
+    height: u32,
+    pixels: Vec<u32>,
 }
 
 struct EditorApp {
@@ -705,8 +1047,10 @@ struct DesktopSession {
     editor: EditorApp,
     appliance_auto_login_pending: bool,
     suspend_resume_smoke_pending: bool,
+    update_smoke_attempted: bool,
     desktop_ready_published: bool,
     app_basket_committed: bool,
+    last_shell_recovery_ns: u64,
     last_tick_ns: u64,
 }
 
@@ -797,6 +1141,7 @@ impl DesktopSession {
         } else if self.shell.quick_settings.visible
             || self.shell.command_palette.visible
             || self.shell.stage_rail.visible
+            || self.shell.seed_catalog.visible
             || self.shell.dialog.visible
             || self.shell.context_menu.visible
             || self.shell.switcher.visible
@@ -805,6 +1150,60 @@ impl DesktopSession {
         } else {
             ShellState::DesktopReady
         }
+    }
+
+    fn display_profile(&self) -> DisplayProfile {
+        self.shell.client.display_profile().unwrap_or_default()
+    }
+
+    fn resolve_window_launch_policy(
+        &self,
+        app_id: u32,
+        title: &str,
+        workspace_id: u8,
+        base_rect: Rect,
+        _shell_owned: bool,
+    ) -> WindowLaunchPolicy {
+        let profile = self.display_profile();
+        let output_id = output_for_workspace(&profile, workspace_id);
+        let output_rect = output_rect_for_policy(self.screen, &profile, output_id);
+        let work_area = work_area_rect_for_output(self.screen, &profile, output_id);
+        let mut policy = WindowLaunchPolicy::new(
+            workspace_id,
+            output_id,
+            LayerRole::Window,
+            WindowFlags::default(),
+            self.shell
+                .client
+                .restore_disposition()
+                .unwrap_or(RestoreDisposition::RestoreIfClean),
+            reanchor_rect_to_output(base_rect, self.screen, output_rect),
+            work_area,
+        );
+
+        if let Ok(rules) = self.shell.client.window_rules() {
+            for rule in rules
+                .iter()
+                .filter(|rule| matches_window_rule(rule, app_id, title, workspace_id, output_id))
+            {
+                policy.flags.floating |= rule.force_floating;
+                policy.flags.pinned |= rule.pin;
+                policy.flags.scratchpad |= rule.scratchpad;
+                policy.flags.pseudotile |= rule.pseudotile;
+                if rule.snap_template.is_some() {
+                    policy.flags.floating = true;
+                    policy.snap_template = rule.snap_template;
+                }
+                if rule.scratchpad {
+                    policy.workspace_id = SCRATCHPAD_WORKSPACE;
+                    policy.layer_role = LayerRole::WorkspaceScratchpad;
+                    policy.flags.floating = true;
+                }
+                policy.restore = rule.restore;
+            }
+        }
+
+        policy
     }
 
     fn commit_shell_surface(&self, window: &SessionWindow, pixels: Vec<u32>) -> Result<(), String> {
@@ -824,6 +1223,11 @@ impl DesktopSession {
             notifications_window,
             quick_settings_window,
             command_palette_window,
+            clipboard_history_window,
+            capture_history_window,
+            seed_catalog_window,
+            magnifier_window,
+            captions_window,
             stage_rail_window,
             dialog_window,
             context_menu_window,
@@ -854,6 +1258,11 @@ impl DesktopSession {
                 notifications: SessionWindow::from_client_window(notifications_window),
                 quick_settings: SessionWindow::from_client_window(quick_settings_window),
                 command_palette: SessionWindow::from_client_window(command_palette_window),
+                clipboard_history: SessionWindow::from_client_window(clipboard_history_window),
+                capture_history: SessionWindow::from_client_window(capture_history_window),
+                seed_catalog: SessionWindow::from_client_window(seed_catalog_window),
+                magnifier: SessionWindow::from_client_window(magnifier_window),
+                captions: SessionWindow::from_client_window(captions_window),
                 stage_rail: SessionWindow::from_client_window(stage_rail_window),
                 dialog: SessionWindow::from_client_window(dialog_window),
                 context_menu: SessionWindow::from_client_window(context_menu_window),
@@ -861,7 +1270,7 @@ impl DesktopSession {
                 lock_screen: SessionWindow::from_client_window(lock_window),
                 notices: vec![
                     String::from("Session shell ready"),
-                    String::from("Launcher uses click or keys 1-4"),
+                    String::from("Use dock, palette, or shortcuts 1-5"),
                 ],
                 active_workspace: 0,
                 theme_mode: Theme::default_mode(),
@@ -875,6 +1284,9 @@ impl DesktopSession {
                 context_target: None,
                 switcher_index: 0,
                 notification_index: 0,
+                clipboard_index: 0,
+                capture_index: 0,
+                seed_catalog_index: 0,
                 auth_input: String::new(),
                 logged_in: false,
                 selected_shortcut: None,
@@ -902,6 +1314,7 @@ impl DesktopSession {
                 workspace_id: 0,
                 current_path: String::from("/"),
                 entries: Vec::new(),
+                thumbnail_cache: BTreeMap::new(),
                 selected: 0,
                 status: String::from("Ready"),
                 dirty: true,
@@ -943,16 +1356,24 @@ impl DesktopSession {
             },
             appliance_auto_login_pending: auto_login_requested(),
             suspend_resume_smoke_pending: suspend_resume_smoke_requested(),
+            update_smoke_attempted: false,
             desktop_ready_published: false,
             app_basket_committed: false,
+            last_shell_recovery_ns: 0,
             last_tick_ns: get_time_ns(),
         };
+        session.shell.launcher.visible = false;
+        session.shell.launcher.desired_visible = false;
+        session.shell.launcher.opacity = 0.0;
+        session.shell.launcher.fading_out = false;
         session.shell.dialog.visible = false;
         session.shell.context_menu.visible = false;
         session.shell.switcher.visible = false;
         session.shell.notifications.visible = false;
         session.shell.quick_settings.visible = false;
         session.shell.command_palette.visible = false;
+        session.shell.magnifier.visible = false;
+        session.shell.captions.visible = false;
         session.shell.stage_rail.visible = false;
         session.shell.lock_screen.visible = true;
         for window in [
@@ -962,6 +1383,10 @@ impl DesktopSession {
             &mut session.shell.switcher,
             &mut session.shell.quick_settings,
             &mut session.shell.command_palette,
+            &mut session.shell.clipboard_history,
+            &mut session.shell.capture_history,
+            &mut session.shell.magnifier,
+            &mut session.shell.captions,
             &mut session.shell.stage_rail,
         ] {
             window.opacity = 0.0;
@@ -1018,6 +1443,7 @@ impl DesktopSession {
         self.enforce_desktop_visibility_contract();
 
         self.publish_accessibility();
+        self.sync_accessibility_overlays();
         let _ = self.render_shell();
         let _ = self.render_apps();
         self.evaluate_boot_readiness();
@@ -1028,8 +1454,8 @@ impl DesktopSession {
         // Root-cause: EchDisplay::run_service() is spawned at Priority::Low but the
         // VelvetGlove main loop never calls schedule() or preemptible_schedule(), so
         // the service task never receives a CPU time-slice. Without this call, damage
-        // marked by update_cursor() (driven by mouse IRQ12 → drain_raw_input →
-        // PointerMove → dispatch_input_event) accumulates in the DamageTracker but is
+        // marked by update_cursor() (driven by mouse IRQ12 â†’ drain_raw_input â†’
+        // PointerMove â†’ dispatch_input_event) accumulates in the DamageTracker but is
         // never consumed; the cursor stays frozen at its initial (24, 24) position for
         // the entire session. present() exits immediately when there is no damage, so
         // the overhead on quiet frames is a single Mutex::lock + is_empty() check.
@@ -1046,6 +1472,30 @@ impl DesktopSession {
         if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.command_palette) {
             self.invalidate_shell(
                 InvalidationTarget::CommandPalette,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.clipboard_history) {
+            self.invalidate_shell(
+                InvalidationTarget::ClipboardHistory,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.capture_history) {
+            self.invalidate_shell(
+                InvalidationTarget::CaptureHistory,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.magnifier) {
+            self.invalidate_shell(
+                InvalidationTarget::Magnifier,
+                InvalidationReason::AnimationAdvanced,
+            );
+        }
+        if refresh_shell_surface_animation(&self.shell.client, &mut self.shell.captions) {
+            self.invalidate_shell(
+                InvalidationTarget::Captions,
                 InvalidationReason::AnimationAdvanced,
             );
         }
@@ -1299,7 +1749,7 @@ impl DesktopSession {
                             if let Some(index) = quick_settings_hit(
                                 local,
                                 self.shell.quick_settings.content_rect.width as usize,
-                                5,
+                                8,
                             ) {
                                 self.apply_quick_settings_toggle(index, commands);
                             }
@@ -1314,8 +1764,224 @@ impl DesktopSession {
                     Some(3) => self.apply_quick_settings_toggle(2, commands),
                     Some(4) => self.apply_quick_settings_toggle(3, commands),
                     Some(5) => self.apply_quick_settings_toggle(4, commands),
+                    Some(6) => self.apply_quick_settings_toggle(5, commands),
+                    Some(7) => self.apply_quick_settings_toggle(6, commands),
+                    Some(8) => self.apply_quick_settings_toggle(7, commands),
                     _ if is_escape_key(input) => self.toggle_quick_settings(),
                     _ => {}
+                }
+            }
+
+            if event.window_id == self.shell.clipboard_history.window_id {
+                let entries = self
+                    .shell
+                    .client
+                    .clipboard_history(6)
+                    .unwrap_or_else(|_| Vec::new());
+                match input {
+                    InputEvent::PointerButton {
+                        button: PointerButton::Left,
+                        state: KeyState::Pressed,
+                        ..
+                    } => {
+                        if let Some(local) = event.local_position {
+                            if let Some(index) = clipboard_history_hit(
+                                local,
+                                self.shell.clipboard_history.content_rect.width as usize,
+                                entries.len(),
+                            ) {
+                                self.shell.clipboard_index = index;
+                                if let Some(payload) = entries.get(index).cloned() {
+                                    match self.shell.client.clipboard_set(payload) {
+                                        Ok(()) => self.push_notice(String::from(
+                                            "Clipboard entry promoted to current",
+                                        )),
+                                        Err(err) => self.push_notice(format!(
+                                            "Clipboard promote failed: {}",
+                                            err
+                                        )),
+                                    }
+                                }
+                                self.invalidate_shell(
+                                    InvalidationTarget::ClipboardHistory,
+                                    InvalidationReason::StateChanged,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if key_scan_pressed(input, 0x24) {
+                    self.shell.clipboard_index = self
+                        .shell
+                        .clipboard_index
+                        .saturating_add(1)
+                        .min(entries.len().saturating_sub(1));
+                    self.invalidate_shell(
+                        InvalidationTarget::ClipboardHistory,
+                        InvalidationReason::StateChanged,
+                    );
+                } else if key_scan_pressed(input, 0x25) {
+                    self.shell.clipboard_index = self.shell.clipboard_index.saturating_sub(1);
+                    self.invalidate_shell(
+                        InvalidationTarget::ClipboardHistory,
+                        InvalidationReason::StateChanged,
+                    );
+                } else if is_enter_key(input) {
+                    if let Some(payload) = entries
+                        .get(
+                            self.shell
+                                .clipboard_index
+                                .min(entries.len().saturating_sub(1)),
+                        )
+                        .cloned()
+                    {
+                        match self.shell.client.clipboard_set(payload) {
+                            Ok(()) => self.push_notice(String::from("Clipboard current updated")),
+                            Err(err) => {
+                                self.push_notice(format!("Clipboard update failed: {}", err))
+                            }
+                        }
+                    }
+                } else if key_scan_pressed(input, 0x2E) {
+                    match self.shell.client.clipboard_clear() {
+                        Ok(()) => self.push_notice(String::from("Clipboard history cleared")),
+                        Err(err) => self.push_notice(format!("Clipboard clear failed: {}", err)),
+                    }
+                    self.invalidate_shell(
+                        InvalidationTarget::ClipboardHistory,
+                        InvalidationReason::StateChanged,
+                    );
+                } else if is_escape_key(input) {
+                    self.close_clipboard_history();
+                }
+            }
+
+            if event.window_id == self.shell.capture_history.window_id {
+                let entries = self
+                    .shell
+                    .client
+                    .list_captures(6)
+                    .unwrap_or_else(|_| Vec::new());
+                match input {
+                    InputEvent::PointerButton {
+                        button: PointerButton::Left,
+                        state: KeyState::Pressed,
+                        ..
+                    } => {
+                        if let Some(local) = event.local_position {
+                            if let Some(index) = capture_history_hit(
+                                local,
+                                self.shell.capture_history.content_rect.width as usize,
+                                entries.len(),
+                            ) {
+                                self.shell.capture_index = index;
+                                if let Some(entry) = entries.get(index) {
+                                    let path = capture_export_path(entry);
+                                    match self.shell.client.save_capture_ppm(entry.id, &path) {
+                                        Ok(()) => self.push_notice(format!("Saved {}", path)),
+                                        Err(err) => self
+                                            .push_notice(format!("Capture save failed: {}", err)),
+                                    }
+                                }
+                                self.invalidate_shell(
+                                    InvalidationTarget::CaptureHistory,
+                                    InvalidationReason::StateChanged,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if key_scan_pressed(input, 0x24) {
+                    self.shell.capture_index = self
+                        .shell
+                        .capture_index
+                        .saturating_add(1)
+                        .min(entries.len().saturating_sub(1));
+                    self.invalidate_shell(
+                        InvalidationTarget::CaptureHistory,
+                        InvalidationReason::StateChanged,
+                    );
+                } else if key_scan_pressed(input, 0x25) {
+                    self.shell.capture_index = self.shell.capture_index.saturating_sub(1);
+                    self.invalidate_shell(
+                        InvalidationTarget::CaptureHistory,
+                        InvalidationReason::StateChanged,
+                    );
+                } else if is_enter_key(input) {
+                    if let Some(entry) = entries.get(
+                        self.shell
+                            .capture_index
+                            .min(entries.len().saturating_sub(1)),
+                    ) {
+                        let path = capture_export_path(entry);
+                        match self.shell.client.save_capture_ppm(entry.id, &path) {
+                            Ok(()) => self.push_notice(format!("Saved {}", path)),
+                            Err(err) => self.push_notice(format!("Capture save failed: {}", err)),
+                        }
+                    }
+                } else if key_scan_pressed(input, 0x19) {
+                    if let Ok(entry) = self.shell.client.capture_screen("shelf") {
+                        self.push_notice(format!("Captured screen {}", entry.id));
+                    }
+                    self.invalidate_shell(
+                        InvalidationTarget::CaptureHistory,
+                        InvalidationReason::StateChanged,
+                    );
+                } else if is_escape_key(input) {
+                    self.close_capture_history();
+                }
+            }
+
+            if event.window_id == self.shell.seed_catalog.window_id {
+                let entries = crate::security::seed_store::catalog_entries();
+                match input {
+                    InputEvent::PointerButton {
+                        button: PointerButton::Left,
+                        state: KeyState::Pressed,
+                        ..
+                    } => {
+                        if let Some(local) = event.local_position {
+                            if let Some(index) = seed_catalog_hit(
+                                local,
+                                self.shell.seed_catalog.content_rect.width as usize,
+                                entries.len(),
+                            ) {
+                                self.shell.seed_catalog_index = index;
+                                self.apply_seed_catalog_install(index);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if key_scan_pressed(input, 0x24) {
+                    self.shell.seed_catalog_index = self
+                        .shell
+                        .seed_catalog_index
+                        .saturating_add(1)
+                        .min(entries.len().saturating_sub(1));
+                    self.invalidate_shell(
+                        InvalidationTarget::SeedCatalog,
+                        InvalidationReason::StateChanged,
+                    );
+                } else if key_scan_pressed(input, 0x25) {
+                    self.shell.seed_catalog_index = self.shell.seed_catalog_index.saturating_sub(1);
+                    self.invalidate_shell(
+                        InvalidationTarget::SeedCatalog,
+                        InvalidationReason::StateChanged,
+                    );
+                } else if is_enter_key(input) {
+                    self.apply_seed_catalog_install(self.shell.seed_catalog_index);
+                } else if matches!(printable_key(input), Some('r' | 'R')) {
+                    self.retry_seed_catalog_entry(self.shell.seed_catalog_index);
+                } else if key_scan_pressed(input, 0x2E) {
+                    self.clear_seed_catalog_failure(self.shell.seed_catalog_index);
+                } else if is_escape_key(input) {
+                    self.close_seed_catalog();
                 }
             }
 
@@ -1679,6 +2345,10 @@ impl DesktopSession {
         set_shell_surface_visibility(&self.shell.client, &mut self.shell.notifications, false);
         set_shell_surface_visibility(&self.shell.client, &mut self.shell.quick_settings, false);
         set_shell_surface_visibility(&self.shell.client, &mut self.shell.command_palette, false);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.clipboard_history, false);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.capture_history, false);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.magnifier, false);
+        set_shell_surface_visibility(&self.shell.client, &mut self.shell.captions, false);
         set_shell_surface_visibility(
             &self.shell.client,
             &mut self.shell.stage_rail,
@@ -1694,6 +2364,22 @@ impl DesktopSession {
         );
         self.invalidate_shell(
             InvalidationTarget::CommandPalette,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::ClipboardHistory,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::CaptureHistory,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Magnifier,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Captions,
             InvalidationReason::StateChanged,
         );
         self.invalidate_shell(
@@ -1814,6 +2500,63 @@ impl DesktopSession {
                 bounds: self.shell.command_palette.content_rect,
             });
         }
+        if self.shell.clipboard_history.visible {
+            nodes.push(AccessibilityNode {
+                id: 8,
+                app_id: SHELL_APP_ID,
+                role: AccessibilityRole::Dialog,
+                label: String::from("Clipboard History"),
+                description: String::from("recent clipboard payloads"),
+                focused: self.shell.clipboard_history.focused,
+                bounds: self.shell.clipboard_history.content_rect,
+            });
+        }
+        if self.shell.capture_history.visible {
+            nodes.push(AccessibilityNode {
+                id: 9,
+                app_id: SHELL_APP_ID,
+                role: AccessibilityRole::Dialog,
+                label: String::from("Screenshot Shelf"),
+                description: String::from("recent desktop captures"),
+                focused: self.shell.capture_history.focused,
+                bounds: self.shell.capture_history.content_rect,
+            });
+        }
+        if self.shell.seed_catalog.visible {
+            nodes.push(AccessibilityNode {
+                id: 10,
+                app_id: SHELL_APP_ID,
+                role: AccessibilityRole::Dialog,
+                label: String::from("Seed Catalog"),
+                description: String::from("available curated packages and install state"),
+                focused: self.shell.seed_catalog.focused,
+                bounds: self.shell.seed_catalog.content_rect,
+            });
+        }
+        if self.shell.magnifier.visible {
+            nodes.push(AccessibilityNode {
+                id: 11,
+                app_id: SHELL_APP_ID,
+                role: AccessibilityRole::Dialog,
+                label: String::from("Accessibility Magnifier"),
+                description: String::from(
+                    "framebuffer magnifier with docked, lens and fullscreen modes",
+                ),
+                focused: self.shell.magnifier.focused,
+                bounds: self.shell.magnifier.content_rect,
+            });
+        }
+        if self.shell.captions.visible {
+            nodes.push(AccessibilityNode {
+                id: 12,
+                app_id: SHELL_APP_ID,
+                role: AccessibilityRole::Dialog,
+                label: String::from("Live Captions"),
+                description: String::from("live captions plus queued screen-reader speech lane"),
+                focused: self.shell.captions.focused,
+                bounds: self.shell.captions.content_rect,
+            });
+        }
         if self.shell.lock_screen.visible {
             nodes.push(AccessibilityNode {
                 id: 7,
@@ -1840,6 +2583,21 @@ impl DesktopSession {
                 .client
                 .notify("Session", &notice, NotificationLevel::Info);
         }
+        let _ = self
+            .shell
+            .client
+            .record_accessibility_event(AccessibilityEvent {
+                app_id: SHELL_APP_ID,
+                window_id: Some(self.shell.notifications.window_id),
+                node_id: None,
+                kind: AccessibilityEventKind::LiveRegionChanged,
+                label: notice.clone(),
+            });
+        let _ = self.shell.client.push_caption_event(CaptionEvent {
+            app_id: SHELL_APP_ID,
+            source_label: String::from("Session"),
+            text: notice.clone(),
+        });
         self.shell.notices.push(notice);
         while self.shell.notices.len() > 8 {
             self.shell.notices.remove(0);
@@ -1849,7 +2607,23 @@ impl DesktopSession {
             InvalidationReason::StateChanged,
         );
         self.invalidate_shell(
+            InvalidationTarget::ClipboardHistory,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::CaptureHistory,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
             InvalidationTarget::Launcher,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Magnifier,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Captions,
             InvalidationReason::StateChanged,
         );
         self.invalidate_shell(InvalidationTarget::TopBar, InvalidationReason::StateChanged);
@@ -1929,6 +2703,22 @@ impl DesktopSession {
             InvalidationReason::StateChanged,
         );
         self.invalidate_shell(
+            InvalidationTarget::ClipboardHistory,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::CaptureHistory,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Magnifier,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
+            InvalidationTarget::Captions,
+            InvalidationReason::StateChanged,
+        );
+        self.invalidate_shell(
             InvalidationTarget::Overview,
             InvalidationReason::StateChanged,
         );
@@ -1947,7 +2737,13 @@ impl DesktopSession {
         self.close_context_menu();
         self.close_switcher();
         self.close_command_palette();
+        self.close_clipboard_history();
+        self.close_capture_history();
+        self.close_seed_catalog();
         self.shell.active_workspace = workspace_id.min(WORKSPACE_COUNT.saturating_sub(1));
+        let _ = virtual_desktops()
+            .lock()
+            .switch_to(self.shell.active_workspace);
         self.shell
             .client
             .set_workspace(self.shell.active_workspace)?;
@@ -1958,6 +2754,17 @@ impl DesktopSession {
             .position(|set| set.id as u8 == self.shell.active_workspace)
         {
             self.shell.active_stage_set = index;
+        }
+        let current_policy = self.shell.client.stage_set_policy().unwrap_or_default();
+        if current_policy.follow_workspace {
+            let _ = self.shell.client.set_stage_set_policy(StageSetPolicy {
+                active_stage_set: self
+                    .shell
+                    .stage_sets
+                    .get(self.shell.active_stage_set)
+                    .map(|set| set.id),
+                ..current_policy
+            });
         }
 
         apply_workspace_visibility(
@@ -1993,10 +2800,7 @@ impl DesktopSession {
         let _ = self.relayout_active_workspace();
         self.rebuild_stage_sets();
 
-        let _ = self
-            .shell
-            .client
-            .focus_window(self.shell.launcher.window_id);
+        let _ = self.shell.client.focus_window(self.shell.top_bar.window_id);
         self.push_notice(format!(
             "Workspace {} active",
             self.shell.active_workspace.saturating_add(1)
@@ -2028,6 +2832,9 @@ impl DesktopSession {
     fn cycle_switcher(&mut self) {
         self.close_context_menu();
         self.close_command_palette();
+        self.close_clipboard_history();
+        self.close_capture_history();
+        self.close_seed_catalog();
         let candidates = self.switcher_candidates();
         if candidates.is_empty() {
             return;
@@ -2090,6 +2897,9 @@ impl DesktopSession {
         }
         self.close_switcher();
         self.close_context_menu();
+        self.close_clipboard_history();
+        self.close_capture_history();
+        self.close_seed_catalog();
         if self.shell.command_palette.desired_visible {
             self.close_command_palette();
             return;
@@ -2135,6 +2945,9 @@ impl DesktopSession {
             return;
         }
         self.close_command_palette();
+        self.close_clipboard_history();
+        self.close_capture_history();
+        self.close_seed_catalog();
         let next_visible = !self.shell.quick_settings.desired_visible;
         animate_shell_surface(
             &self.shell.client,
@@ -2160,6 +2973,9 @@ impl DesktopSession {
             return;
         }
         self.close_command_palette();
+        self.close_clipboard_history();
+        self.close_capture_history();
+        self.close_seed_catalog();
         let next_visible = !self.shell.notifications.desired_visible;
         animate_shell_surface(
             &self.shell.client,
@@ -2178,6 +2994,286 @@ impl DesktopSession {
             InvalidationTarget::NotificationCenter,
             InvalidationReason::StateChanged,
         );
+    }
+
+    fn toggle_clipboard_history(&mut self) {
+        if self.is_locked() {
+            return;
+        }
+        self.close_command_palette();
+        self.close_switcher();
+        self.close_context_menu();
+        self.toggle_quick_settings_if_stale();
+        self.close_capture_history();
+        self.close_seed_catalog();
+        self.toggle_notifications_center_if_stale();
+        let next_visible = !self.shell.clipboard_history.desired_visible;
+        animate_shell_surface(
+            &self.shell.client,
+            &mut self.shell.clipboard_history,
+            next_visible,
+            self.settings.animations,
+            0.14,
+        );
+        if next_visible {
+            let _ = self
+                .shell
+                .client
+                .focus_window(self.shell.clipboard_history.window_id);
+            self.shell.clipboard_index = 0;
+        }
+        self.invalidate_shell(
+            InvalidationTarget::ClipboardHistory,
+            InvalidationReason::StateChanged,
+        );
+    }
+
+    fn close_clipboard_history(&mut self) {
+        if self.shell.clipboard_history.visible || self.shell.clipboard_history.desired_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.clipboard_history,
+                false,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(
+                InvalidationTarget::ClipboardHistory,
+                InvalidationReason::StateChanged,
+            );
+        }
+    }
+
+    fn toggle_capture_history(&mut self) {
+        if self.is_locked() {
+            return;
+        }
+        self.close_command_palette();
+        self.close_switcher();
+        self.close_context_menu();
+        self.toggle_quick_settings_if_stale();
+        self.close_clipboard_history();
+        self.close_seed_catalog();
+        self.toggle_notifications_center_if_stale();
+        let next_visible = !self.shell.capture_history.desired_visible;
+        animate_shell_surface(
+            &self.shell.client,
+            &mut self.shell.capture_history,
+            next_visible,
+            self.settings.animations,
+            0.14,
+        );
+        if next_visible {
+            let _ = self
+                .shell
+                .client
+                .focus_window(self.shell.capture_history.window_id);
+            self.shell.capture_index = 0;
+        }
+        self.invalidate_shell(
+            InvalidationTarget::CaptureHistory,
+            InvalidationReason::StateChanged,
+        );
+    }
+
+    fn close_capture_history(&mut self) {
+        if self.shell.capture_history.visible || self.shell.capture_history.desired_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.capture_history,
+                false,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(
+                InvalidationTarget::CaptureHistory,
+                InvalidationReason::StateChanged,
+            );
+        }
+    }
+
+    fn toggle_seed_catalog(&mut self) {
+        if self.is_locked() {
+            return;
+        }
+        self.close_command_palette();
+        self.close_switcher();
+        self.close_context_menu();
+        self.toggle_quick_settings_if_stale();
+        self.close_clipboard_history();
+        self.close_capture_history();
+        self.close_seed_catalog();
+        self.toggle_notifications_center_if_stale();
+        let next_visible = !self.shell.seed_catalog.desired_visible;
+        animate_shell_surface(
+            &self.shell.client,
+            &mut self.shell.seed_catalog,
+            next_visible,
+            self.settings.animations,
+            0.14,
+        );
+        if next_visible {
+            let _ = self
+                .shell
+                .client
+                .focus_window(self.shell.seed_catalog.window_id);
+            self.shell.seed_catalog_index = 0;
+        }
+        self.invalidate_shell(
+            InvalidationTarget::SeedCatalog,
+            InvalidationReason::StateChanged,
+        );
+    }
+
+    fn close_seed_catalog(&mut self) {
+        if self.shell.seed_catalog.visible || self.shell.seed_catalog.desired_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.seed_catalog,
+                false,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(
+                InvalidationTarget::SeedCatalog,
+                InvalidationReason::StateChanged,
+            );
+        }
+    }
+
+    fn apply_seed_catalog_install(&mut self, index: usize) {
+        let entries = crate::security::seed_store::catalog_entries();
+        let Some(entry) = entries
+            .get(index.min(entries.len().saturating_sub(1)))
+            .cloned()
+        else {
+            self.push_notice(String::from("Seed catalog empty"));
+            return;
+        };
+        if matches!(
+            entry.state,
+            crate::security::seed_store::SeedCatalogState::Installed
+        ) {
+            self.launch_seed_catalog_entry(entry.package_id.as_str());
+            return;
+        }
+        match crate::security::seed_store::install_seed_for_identity(entry.identity.as_str()) {
+            Ok(crate::security::seed_store::SeedInstallOutcome::Installed) => {
+                self.push_notice(format!("Installed {}", entry.title));
+            }
+            Ok(crate::security::seed_store::SeedInstallOutcome::Updated) => {
+                self.push_notice(format!("Updated {}", entry.title));
+            }
+            Ok(crate::security::seed_store::SeedInstallOutcome::AlreadyInstalled) => {
+                self.launch_seed_catalog_entry(entry.package_id.as_str());
+            }
+            Ok(crate::security::seed_store::SeedInstallOutcome::NotFound) => {
+                self.push_notice(String::from("Seed entry disappeared"));
+            }
+            Err(err) => self.push_notice(format!("Seed install failed: {}", err)),
+        }
+        self.invalidate_shell(
+            InvalidationTarget::SeedCatalog,
+            InvalidationReason::StateChanged,
+        );
+    }
+
+    fn launch_seed_catalog_entry(&mut self, query: &str) {
+        let Some(resolution) = self.ensure_launch_resolution(query) else {
+            self.push_notice(format!("Seed launch target missing: {}", query));
+            return;
+        };
+        if let Some(candidates) = resolution.missing_candidates() {
+            self.push_notice(format!(
+                "{} binary not found; searched {}",
+                resolution.descriptor().title,
+                candidates.join(", ")
+            ));
+            return;
+        }
+        let intent = resolution.launch_intent(ExecutionContext::new(
+            LaunchSource::CommandPalette,
+            self.shell.active_workspace,
+            "seed-catalog-launch",
+        ));
+        let result = if let Some(path) = resolution.path() {
+            self.dispatch_external_launch_intent(intent, path)
+        } else {
+            self.dispatch_launch_intent(intent)
+        };
+        if let Err(err) = result {
+            self.push_notice(format!("Seed launch failed: {}", err));
+        }
+    }
+
+    fn clear_seed_catalog_failure(&mut self, index: usize) {
+        let entries = crate::security::seed_store::catalog_entries();
+        let Some(entry) = entries
+            .get(index.min(entries.len().saturating_sub(1)))
+            .cloned()
+        else {
+            return;
+        };
+        if crate::security::seed_store::clear_seed_quarantine(entry.identity.as_str()) {
+            self.push_notice(format!("Seed state reset: {}", entry.title));
+        } else {
+            self.push_notice(format!("No seed failure state for {}", entry.title));
+        }
+        self.invalidate_shell(
+            InvalidationTarget::SeedCatalog,
+            InvalidationReason::StateChanged,
+        );
+    }
+
+    fn retry_seed_catalog_entry(&mut self, index: usize) {
+        let entries = crate::security::seed_store::catalog_entries();
+        let Some(entry) = entries
+            .get(index.min(entries.len().saturating_sub(1)))
+            .cloned()
+        else {
+            return;
+        };
+        if crate::security::seed_store::retry_seed_identity(entry.identity.as_str()) {
+            self.push_notice(format!("Retry armed for {}", entry.title));
+        } else {
+            self.push_notice(format!("Retry unavailable for {}", entry.title));
+        }
+        self.invalidate_shell(
+            InvalidationTarget::SeedCatalog,
+            InvalidationReason::StateChanged,
+        );
+    }
+
+    fn toggle_notifications_center_if_stale(&mut self) {
+        if self.shell.notifications.desired_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.notifications,
+                false,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(
+                InvalidationTarget::NotificationCenter,
+                InvalidationReason::StateChanged,
+            );
+        }
+    }
+
+    fn toggle_quick_settings_if_stale(&mut self) {
+        if self.shell.quick_settings.desired_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.quick_settings,
+                false,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(
+                InvalidationTarget::QuickSettings,
+                InvalidationReason::StateChanged,
+            );
+        }
     }
 
     fn cycle_motion_profile(&mut self) {
@@ -2233,24 +3329,135 @@ impl DesktopSession {
         }
     }
 
-    fn toggle_screen_reader(&mut self) {
+    fn cycle_accessibility_lane(&mut self) {
         let mut profile = self
             .shell
             .client
             .accessibility_profile()
             .unwrap_or_default();
-        profile.screen_reader = !profile.screen_reader;
+        if !profile.screen_reader {
+            profile.screen_reader = true;
+        } else if !profile.magnifier {
+            profile.screen_reader = false;
+            profile.magnifier = true;
+            profile.magnifier_mode = MagnifierMode::Docked;
+        } else if profile.magnifier_mode != MagnifierMode::Lens {
+            profile.magnifier_mode = MagnifierMode::Lens;
+        } else if profile.magnifier_mode != MagnifierMode::Fullscreen {
+            profile.magnifier_mode = MagnifierMode::Fullscreen;
+        } else if !profile.captions_enabled {
+            profile.magnifier = false;
+            profile.magnifier_mode = MagnifierMode::Docked;
+            profile.captions_enabled = true;
+        } else if !profile.reduced_motion {
+            profile.captions_enabled = false;
+            profile.reduced_motion = true;
+        } else if !profile.sticky_keys {
+            profile.reduced_motion = false;
+            profile.sticky_keys = true;
+        } else if !profile.slow_keys {
+            profile.sticky_keys = false;
+            profile.slow_keys = true;
+        } else {
+            profile = AccessibilityProfile::default();
+        }
         if self.shell.client.set_accessibility_profile(profile).is_ok() {
             self.push_notice(format!(
-                "Screen reader {}",
-                if profile.screen_reader {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
+                "Accessibility {}",
+                accessibility_profile_label(profile)
             ));
             self.settings.dirty = true;
             self.mark_shell_dirty();
+        }
+    }
+
+    fn sync_accessibility_overlays(&mut self) {
+        let profile = self
+            .shell
+            .client
+            .accessibility_profile()
+            .unwrap_or_default();
+        let magnifier_visible = !self.is_locked() && profile.magnifier;
+        let captions_visible = !self.is_locked() && profile.captions_enabled;
+
+        if self.shell.magnifier.desired_visible != magnifier_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.magnifier,
+                magnifier_visible,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(
+                InvalidationTarget::Magnifier,
+                InvalidationReason::StateChanged,
+            );
+        }
+        if self.shell.captions.desired_visible != captions_visible {
+            animate_shell_surface(
+                &self.shell.client,
+                &mut self.shell.captions,
+                captions_visible,
+                self.settings.animations,
+                0.12,
+            );
+            self.invalidate_shell(
+                InvalidationTarget::Captions,
+                InvalidationReason::StateChanged,
+            );
+        }
+
+        if magnifier_visible {
+            let focus = self.shell.client.accessibility_focus().unwrap_or(None);
+            let target_rect =
+                magnifier_target_rect(self.screen, profile.magnifier_mode, focus.as_ref());
+            let current = self.shell.magnifier.content_rect;
+            if current.x != target_rect.x
+                || current.y != target_rect.y
+                || current.width != target_rect.width
+                || current.height != target_rect.height
+            {
+                let _ = self.shell.client.move_window(
+                    self.shell.magnifier.window_id,
+                    target_rect.x,
+                    target_rect.y,
+                );
+                let _ = self.shell.client.resize_window(
+                    self.shell.magnifier.window_id,
+                    target_rect.width,
+                    target_rect.height,
+                );
+                if let Ok(info) = self
+                    .shell
+                    .client
+                    .window_info(self.shell.magnifier.window_id)
+                {
+                    self.shell.magnifier.update_from_info(&info);
+                }
+            }
+            self.invalidate_shell(
+                InvalidationTarget::Magnifier,
+                InvalidationReason::FocusChanged,
+            );
+        }
+        if captions_visible {
+            self.invalidate_shell(
+                InvalidationTarget::Captions,
+                InvalidationReason::TextChanged,
+            );
+        }
+        if profile.screen_reader {
+            let now = get_time_ns();
+            let _ = self.shell.client.tick_speech_lane(now);
+            self.invalidate_shell(
+                InvalidationTarget::Captions,
+                InvalidationReason::TextChanged,
+            );
+        } else if self.shell.client.clear_speech_lane().is_ok() {
+            self.invalidate_shell(
+                InvalidationTarget::Captions,
+                InvalidationReason::TextChanged,
+            );
         }
     }
 
@@ -2289,7 +3496,10 @@ impl DesktopSession {
             }
             2 => self.cycle_motion_profile(),
             3 => self.cycle_primary_display_scale(),
-            4 => self.toggle_screen_reader(),
+            4 => self.cycle_accessibility_lane(),
+            5 => self.toggle_clipboard_history(),
+            6 => self.toggle_capture_history(),
+            7 => self.toggle_seed_catalog(),
             _ => {}
         }
         let _ = commands;
@@ -2413,7 +3623,7 @@ impl DesktopSession {
         });
         actions.push(CommandPaletteAction {
             id: 29,
-            title: String::from("Toggle Screen Reader"),
+            title: String::from("Cycle Accessibility Lane"),
             category: String::from("Accessibility"),
             shortcut: String::from("QS-5"),
             enabled: true,
@@ -2423,6 +3633,41 @@ impl DesktopSession {
             title: String::from("Cycle Shell Density"),
             category: String::from("Appearance"),
             shortcut: String::from("Settings-3"),
+            enabled: true,
+        });
+        actions.push(CommandPaletteAction {
+            id: 31,
+            title: String::from("Open Clipboard History"),
+            category: String::from("Shell"),
+            shortcut: String::from("QS-6"),
+            enabled: true,
+        });
+        actions.push(CommandPaletteAction {
+            id: 32,
+            title: String::from("Open Screenshot Shelf"),
+            category: String::from("Tools"),
+            shortcut: String::from("QS-7"),
+            enabled: true,
+        });
+        actions.push(CommandPaletteAction {
+            id: 33,
+            title: String::from("Clear Clipboard History"),
+            category: String::from("Shell"),
+            shortcut: String::from("Del"),
+            enabled: true,
+        });
+        actions.push(CommandPaletteAction {
+            id: 34,
+            title: String::from("Save Latest Screenshot"),
+            category: String::from("Tools"),
+            shortcut: String::from("Enter"),
+            enabled: true,
+        });
+        actions.push(CommandPaletteAction {
+            id: 35,
+            title: String::from("Open Seed Catalog"),
+            category: String::from("Packages"),
+            shortcut: String::from("QS-8"),
             enabled: true,
         });
         actions
@@ -2522,16 +3767,36 @@ impl DesktopSession {
             26 => self.toggle_terminal_scratchpad(),
             27 => self.cycle_motion_profile(),
             28 => self.cycle_primary_display_scale(),
-            29 => self.toggle_screen_reader(),
+            29 => self.cycle_accessibility_lane(),
             30 => self.cycle_shell_density_profile(),
+            31 => self.toggle_clipboard_history(),
+            32 => self.toggle_capture_history(),
+            33 => match self.shell.client.clipboard_clear() {
+                Ok(()) => self.push_notice(String::from("Clipboard history cleared")),
+                Err(err) => self.push_notice(format!("Clipboard clear failed: {}", err)),
+            },
+            34 => {
+                if let Ok(entries) = self.shell.client.list_captures(1) {
+                    if let Some(entry) = entries.first() {
+                        let path = capture_export_path(entry);
+                        match self.shell.client.save_capture_ppm(entry.id, &path) {
+                            Ok(()) => self.push_notice(format!("Saved {}", path)),
+                            Err(err) => self.push_notice(format!("Capture save failed: {}", err)),
+                        }
+                    } else {
+                        self.push_notice(String::from("No screenshots to save"));
+                    }
+                }
+            }
+            35 => self.toggle_seed_catalog(),
             24 => {
                 if let Ok(entry) = self.shell.client.capture_screen("palette") {
                     self.push_notice(format!("Captured screen {}", entry.id));
                 }
             }
             90 => {
-                let query = self.shell.command_query.trim();
-                if let Some(resolution) = self.launch_resolution(query) {
+                let query = self.shell.command_query.trim().to_string();
+                if let Some(resolution) = self.ensure_launch_resolution(query.as_str()) {
                     if let Some(candidates) = resolution.missing_candidates() {
                         self.push_notice(format!(
                             "{} binary not found; searched {}",
@@ -2560,6 +3825,13 @@ impl DesktopSession {
 
     fn rebuild_stage_sets(&mut self) {
         let snapshots = self.app_snapshots();
+        let windows = self.shell.client.list_windows().unwrap_or_default();
+        let profile = self.display_profile();
+        let restore = self
+            .shell
+            .client
+            .restore_disposition()
+            .unwrap_or(RestoreDisposition::RestoreIfClean);
         let mut sets = Vec::new();
         for workspace_id in 0..WORKSPACE_COUNT {
             let mut window_ids = Vec::new();
@@ -2568,6 +3840,14 @@ impl DesktopSession {
                     window_ids.push(window_id);
                 }
             }
+            let monitor_id = output_for_workspace(&profile, workspace_id);
+            let snap_groups = build_snap_groups(
+                &windows,
+                workspace_id,
+                monitor_id,
+                work_area_rect_for_output(self.screen, &profile, monitor_id),
+                restore,
+            );
             sets.push(StageSet {
                 id: workspace_id as u64,
                 name: self
@@ -2576,8 +3856,17 @@ impl DesktopSession {
                     .workspace_rule(workspace_id)
                     .map(|rule| rule.default_name_str())
                     .unwrap_or_else(|_| format!("Workspace {}", workspace_id.saturating_add(1))),
+                workspace_id,
+                monitor_id,
                 window_ids,
-                pinned: workspace_id == self.shell.active_workspace,
+                snap_groups,
+                pinned: workspace_id == self.shell.active_workspace
+                    || windows.iter().any(|window| {
+                        window.workspace_id == workspace_id
+                            && window.layer_role == LayerRole::Window
+                            && window.flags.pinned
+                    }),
+                restore,
             });
         }
 
@@ -2589,6 +3878,19 @@ impl DesktopSession {
                 .iter()
                 .position(|set| set.id as u8 == self.shell.active_workspace)
                 .unwrap_or(0);
+            let _ = self
+                .shell
+                .client
+                .set_stage_sets(self.shell.stage_sets.clone());
+            let _ = self.shell.client.set_stage_set_policy(StageSetPolicy {
+                active_stage_set: self
+                    .shell
+                    .stage_sets
+                    .get(self.shell.active_stage_set)
+                    .map(|set| set.id),
+                restore_on_login: true,
+                follow_workspace: true,
+            });
             self.invalidate_shell(
                 InvalidationTarget::Overview,
                 InvalidationReason::StateChanged,
@@ -2626,11 +3928,16 @@ impl DesktopSession {
         let Some(stage) = selected else {
             return;
         };
-        let _ = self.switch_workspace(stage.id as u8);
+        let _ = self.switch_workspace(stage.workspace_id);
         if let Some(window_id) = stage.window_ids.first().copied() {
             let _ = self.shell.client.focus_window(window_id);
         }
         self.shell.active_stage_set = index.min(self.shell.stage_sets.len().saturating_sub(1));
+        let _ = self.shell.client.set_stage_set_policy(StageSetPolicy {
+            active_stage_set: Some(stage.id),
+            restore_on_login: true,
+            follow_workspace: true,
+        });
         self.invalidate_shell(
             InvalidationTarget::Overview,
             InvalidationReason::StateChanged,
@@ -2641,6 +3948,9 @@ impl DesktopSession {
         if self.is_locked() {
             return;
         }
+        self.close_clipboard_history();
+        self.close_capture_history();
+        self.close_seed_catalog();
         let visible = self.shell.client.toggle_overview().unwrap_or(false);
         animate_shell_surface(
             &self.shell.client,
@@ -2731,6 +4041,8 @@ impl DesktopSession {
     fn open_context_menu(&mut self, kind: AppKind) {
         self.close_switcher();
         self.close_command_palette();
+        self.close_clipboard_history();
+        self.close_capture_history();
         self.shell.context_target = Some(kind);
         if !self.shell.context_menu.desired_visible {
             animate_shell_surface(
@@ -2945,15 +4257,9 @@ impl DesktopSession {
     }
 
     fn work_area_rect(&self) -> Rect {
-        let top = self.screen.y + 18 + Theme::HALO_BAR_HEIGHT as i32 + 32;
-        let dock_top = task_strip_window_rect(self.screen).y;
-        let bottom = dock_top - 22;
-        Rect::new(
-            self.screen.x + 18,
-            top,
-            self.screen.width.saturating_sub(36),
-            bottom.saturating_sub(top).max(120) as u32,
-        )
+        let profile = self.display_profile();
+        let output_id = output_for_workspace(&profile, self.shell.active_workspace);
+        work_area_rect_for_output(self.screen, &profile, output_id)
     }
 
     fn relayout_active_workspace(&mut self) -> Result<(), String> {
@@ -2983,7 +4289,13 @@ impl DesktopSession {
             let Some(window) = windows.iter().find(|window| window.id == plan.window_id) else {
                 continue;
             };
-            self.apply_window_plan(window.app_id, plan.window_id, plan.workspace_id, plan.rect)?;
+            self.apply_window_plan(
+                window.app_id,
+                plan.window_id,
+                plan.workspace_id,
+                plan.rect,
+                plan.flags,
+            )?;
         }
         Ok(())
     }
@@ -2994,6 +4306,7 @@ impl DesktopSession {
         window_id: WindowId,
         workspace_id: u8,
         rect: Rect,
+        flags: WindowFlags,
     ) -> Result<(), String> {
         let client = match app_kind_from_id(app_id) {
             Some(AppKind::Terminal) => &self.terminal.client,
@@ -3004,12 +4317,7 @@ impl DesktopSession {
             None => return Ok(()),
         };
         client.move_window_to_workspace(window_id, workspace_id)?;
-        client.set_window_meta(
-            window_id,
-            workspace_id,
-            LayerRole::Window,
-            WindowFlags::default(),
-        )?;
+        client.set_window_meta(window_id, workspace_id, LayerRole::Window, flags)?;
         client.move_window(window_id, rect.x, rect.y)?;
         client.resize_window(window_id, rect.width, rect.height)?;
         Ok(())
@@ -3092,7 +4400,15 @@ impl DesktopSession {
             }
         }
 
-        if sync_shell_window(&self.shell.client, &mut self.shell.launcher).is_none() {
+        if sync_shell_window(&self.shell.client, &mut self.shell.launcher).is_some() {
+            if !self.shell.launcher.desired_visible && self.shell.launcher.visible {
+                set_shell_surface_visibility(&self.shell.client, &mut self.shell.launcher, false);
+            }
+        } else if self.shell.launcher.desired_visible
+            || self.shell.launcher.visible
+            || self.shell.launcher.fading_out
+        {
+            let launcher_should_be_visible = self.shell.launcher.desired_visible;
             if restore_shell_window(
                 &self.shell.client,
                 &mut self.shell.launcher,
@@ -3105,7 +4421,7 @@ impl DesktopSession {
                 ),
                 0,
                 LayerRole::Overlay,
-                true,
+                launcher_should_be_visible,
             )
             .is_ok()
             {
@@ -3113,7 +4429,6 @@ impl DesktopSession {
                     InvalidationTarget::Launcher,
                     InvalidationReason::StateChanged,
                 );
-                self.push_notice(String::from("Session Shell restored"));
             }
         }
 
@@ -3179,6 +4494,116 @@ impl DesktopSession {
                     InvalidationReason::StateChanged,
                 );
                 self.push_notice(String::from("Command Palette restored"));
+            }
+        }
+
+        if sync_shell_window(&self.shell.client, &mut self.shell.clipboard_history).is_none() {
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.clipboard_history,
+                "Clipboard History",
+                Rect::new(self.screen.right() - 364, self.screen.y + 108, 320, 248),
+                0,
+                LayerRole::Overlay,
+                false,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(
+                    InvalidationTarget::ClipboardHistory,
+                    InvalidationReason::StateChanged,
+                );
+                self.push_notice(String::from("Clipboard History restored"));
+            }
+        }
+
+        if sync_shell_window(&self.shell.client, &mut self.shell.capture_history).is_none() {
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.capture_history,
+                "Screenshot Shelf",
+                Rect::new(self.screen.right() - 364, self.screen.y + 108, 320, 264),
+                0,
+                LayerRole::Overlay,
+                false,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(
+                    InvalidationTarget::CaptureHistory,
+                    InvalidationReason::StateChanged,
+                );
+                self.push_notice(String::from("Screenshot Shelf restored"));
+            }
+        }
+
+        if sync_shell_window(&self.shell.client, &mut self.shell.seed_catalog).is_none() {
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.seed_catalog,
+                "Seed Catalog",
+                Rect::new(
+                    self.screen.x + (self.screen.width as i32 / 2) - 220,
+                    self.screen.y + 108,
+                    440,
+                    320,
+                ),
+                0,
+                LayerRole::Overlay,
+                false,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(
+                    InvalidationTarget::SeedCatalog,
+                    InvalidationReason::StateChanged,
+                );
+                self.push_notice(String::from("Seed Catalog restored"));
+            }
+        }
+
+        if sync_shell_window(&self.shell.client, &mut self.shell.magnifier).is_none() {
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.magnifier,
+                "Accessibility Magnifier",
+                Rect::new(self.screen.x + 18, self.screen.y + 108, 320, 164),
+                0,
+                LayerRole::Overlay,
+                false,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(
+                    InvalidationTarget::Magnifier,
+                    InvalidationReason::StateChanged,
+                );
+                self.push_notice(String::from("Accessibility Magnifier restored"));
+            }
+        }
+
+        if sync_shell_window(&self.shell.client, &mut self.shell.captions).is_none() {
+            if restore_shell_window(
+                &self.shell.client,
+                &mut self.shell.captions,
+                "Live Captions",
+                Rect::new(
+                    self.screen.x + (self.screen.width as i32 / 2) - 260,
+                    self.screen.bottom() - 188,
+                    520,
+                    112,
+                ),
+                0,
+                LayerRole::Overlay,
+                false,
+            )
+            .is_ok()
+            {
+                self.invalidate_shell(
+                    InvalidationTarget::Captions,
+                    InvalidationReason::StateChanged,
+                );
+                self.push_notice(String::from("Live Captions restored"));
             }
         }
 
@@ -3282,12 +4707,7 @@ impl DesktopSession {
                 &self.shell.client,
                 &mut self.shell.lock_screen,
                 "Login",
-                Rect::new(
-                    self.screen.x + (self.screen.width as i32 / 2) - 240,
-                    self.screen.y + (self.screen.height as i32 / 2) - 160,
-                    480,
-                    320,
-                ),
+                lock_window_rect(self.screen),
                 0,
                 LayerRole::Modal,
                 lock_visible,
@@ -3335,17 +4755,13 @@ impl DesktopSession {
             let height = self.shell.desktop.content_rect.height as usize;
             self.shell.client.commit_scene(
                 self.shell.desktop.window_id,
-                raster_surface_scene(
+                build_desktop_shortcuts_scene(
                     self.shell.desktop.window_id,
+                    &mut self.text_system,
                     width,
                     height,
-                    paint_desktop_shortcuts_surface(
-                        width,
-                        height,
-                        theme_mode,
-                        self.shell.selected_shortcut,
-                    ),
-                    DamageLane::Shell,
+                    theme_mode,
+                    self.shell.selected_shortcut,
                 ),
             )?;
         }
@@ -3353,9 +4769,11 @@ impl DesktopSession {
         if frame_plan.touches(InvalidationTarget::TopBar) {
             let width = self.shell.top_bar.content_rect.width as usize;
             let height = self.shell.top_bar.content_rect.height as usize;
-            self.commit_shell_surface(
-                &self.shell.top_bar,
-                paint_top_bar_surface(
+            self.shell.client.commit_scene(
+                self.shell.top_bar.window_id,
+                build_top_bar_scene(
+                    self.shell.top_bar.window_id,
+                    &mut self.text_system,
                     width,
                     height,
                     self.shell.active_workspace,
@@ -3463,6 +4881,117 @@ impl DesktopSession {
                     self.shell.command_selection,
                     theme_mode,
                 ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::ClipboardHistory)
+            && self.shell.clipboard_history.visible
+        {
+            let entries = self
+                .shell
+                .client
+                .clipboard_history(6)
+                .unwrap_or_else(|_| Vec::new());
+            let width = self.shell.clipboard_history.content_rect.width as usize;
+            let height = self.shell.clipboard_history.content_rect.height as usize;
+            self.commit_shell_surface(
+                &self.shell.clipboard_history,
+                paint_clipboard_history_surface(
+                    width,
+                    height,
+                    &entries,
+                    self.shell.clipboard_index,
+                    theme_mode,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::CaptureHistory)
+            && self.shell.capture_history.visible
+        {
+            let entries = self
+                .shell
+                .client
+                .list_captures(6)
+                .unwrap_or_else(|_| Vec::new());
+            let width = self.shell.capture_history.content_rect.width as usize;
+            let height = self.shell.capture_history.content_rect.height as usize;
+            self.commit_shell_surface(
+                &self.shell.capture_history,
+                paint_capture_history_surface(
+                    width,
+                    height,
+                    &entries,
+                    self.shell.capture_index,
+                    theme_mode,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::SeedCatalog) && self.shell.seed_catalog.visible {
+            let entries = crate::security::seed_store::catalog_entries();
+            let width = self.shell.seed_catalog.content_rect.width as usize;
+            let height = self.shell.seed_catalog.content_rect.height as usize;
+            self.commit_shell_surface(
+                &self.shell.seed_catalog,
+                paint_seed_catalog_surface(
+                    width,
+                    height,
+                    &entries,
+                    self.shell.seed_catalog_index,
+                    theme_mode,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::Magnifier) && self.shell.magnifier.visible {
+            let width = self.shell.magnifier.content_rect.width as usize;
+            let height = self.shell.magnifier.content_rect.height as usize;
+            let focus = self.shell.client.accessibility_focus().unwrap_or(None);
+            let events = self
+                .shell
+                .client
+                .accessibility_events(4)
+                .unwrap_or_default();
+            let profile = self
+                .shell
+                .client
+                .accessibility_profile()
+                .unwrap_or_default();
+            let pixels = capture_magnifier_surface_pixels(
+                self.screen,
+                self.shell.magnifier.content_rect,
+                profile.magnifier_mode,
+                focus.as_ref(),
+                self.shell.magnifier.window_id,
+            );
+            self.commit_shell_surface(
+                &self.shell.magnifier,
+                paint_accessibility_magnifier_surface(
+                    width,
+                    height,
+                    pixels.as_deref(),
+                    focus.as_ref(),
+                    &events,
+                    profile.magnifier_mode,
+                    theme_mode,
+                ),
+            )?;
+        }
+
+        if frame_plan.touches(InvalidationTarget::Captions) && self.shell.captions.visible {
+            let width = self.shell.captions.content_rect.width as usize;
+            let height = self.shell.captions.content_rect.height as usize;
+            let captions = self.shell.client.caption_events(4).unwrap_or_default();
+            let speech = self.shell.client.speech_state(4).unwrap_or(SpeechState {
+                active: None,
+                pending: Vec::new(),
+                dropped_count: 0,
+                coalesced_count: 0,
+            });
+            self.commit_shell_surface(
+                &self.shell.captions,
+                paint_live_captions_surface(width, height, &captions, &speech, theme_mode),
             )?;
         }
 
@@ -3617,22 +5146,24 @@ fn ensure_window_visible(
     client: &DesktopClient,
     window: &mut Option<SessionWindow>,
     title: &str,
-    rect: Rect,
-    workspace_id: u8,
+    policy: WindowLaunchPolicy,
 ) -> Result<LaunchResult, String> {
     if let Some(current) = window.as_mut() {
         if let Ok(info) = client.window_info(current.window_id) {
             let was_visible = info.visible;
             current.update_from_info(&info);
-            let _ = client.move_window_to_workspace(current.window_id, workspace_id);
+            let _ = client.move_window_to_workspace(current.window_id, policy.workspace_id);
             let _ = client.set_window_meta(
                 current.window_id,
-                workspace_id,
-                LayerRole::Window,
-                WindowFlags::default(),
+                policy.workspace_id,
+                policy.layer_role,
+                policy.flags,
             );
+            let _ =
+                client.set_auto_restore(restore_flag_enabled(policy.restore, policy.flags, true));
             if !was_visible {
                 client.set_visibility(current.window_id, true)?;
+                apply_window_launch_geometry(client, current.window_id, policy)?;
             }
             client.focus_window(current.window_id)?;
             if let Ok(info) = client.window_info(current.window_id) {
@@ -3642,7 +5173,7 @@ fn ensure_window_visible(
                 Some(current.window_id),
                 current.visible,
                 current.focused,
-                workspace_id,
+                policy.workspace_id,
             );
             let _ = client.clear_app_attention(Some("window restored"));
             return Ok(if was_visible {
@@ -3656,19 +5187,48 @@ fn ensure_window_visible(
 
     let created = client.create_layer_window(
         title,
-        rect.x,
-        rect.y,
-        rect.width,
-        rect.height,
-        workspace_id,
-        LayerRole::Window,
-        WindowFlags::default(),
+        policy.rect.x,
+        policy.rect.y,
+        policy.rect.width,
+        policy.rect.height,
+        policy.workspace_id,
+        policy.layer_role,
+        policy.flags,
     )?;
+    let _ = client.set_auto_restore(restore_flag_enabled(policy.restore, policy.flags, true));
+    apply_window_launch_geometry(client, created.window_id, policy)?;
     client.focus_window(created.window_id)?;
     *window = Some(SessionWindow::from_client_window(created));
     let _ = client.mark_app_launched(title);
-    let _ = client.update_shell_window(Some(created.window_id), true, true, workspace_id);
+    let _ = client.update_shell_window(Some(created.window_id), true, true, policy.workspace_id);
     Ok(LaunchResult::Launched)
+}
+
+fn apply_window_launch_geometry(
+    client: &DesktopClient,
+    window_id: WindowId,
+    policy: WindowLaunchPolicy,
+) -> Result<(), String> {
+    let rect = policy
+        .snap_template
+        .map(|template| snap_rect_for_template(template, policy.work_area))
+        .unwrap_or(policy.rect);
+    let (width, height) = if policy.snap_template.is_some() {
+        let chrome_height = TITLEBAR_HEIGHT.saturating_add(BORDER_THICKNESS);
+        (
+            rect.width
+                .saturating_sub(BORDER_THICKNESS.saturating_mul(2))
+                .max(MIN_CONTENT_WIDTH),
+            rect.height
+                .saturating_sub(chrome_height)
+                .max(MIN_CONTENT_HEIGHT),
+        )
+    } else {
+        (rect.width, rect.height)
+    };
+    client.move_window(window_id, rect.x, rect.y)?;
+    client.resize_window(window_id, width, height)?;
+    Ok(())
 }
 
 fn sync_window_state(
@@ -3684,7 +5244,8 @@ fn sync_window_state(
     match client.window_info(current.window_id) {
         Ok(info) => {
             let changed = current.update_from_info(&info);
-            let visible = current.visible && workspace_id == active_workspace;
+            let visible =
+                current.visible && (workspace_id == active_workspace || info.flags.pinned);
             if changed {
                 let _ = client.update_shell_window(
                     Some(current.window_id),
@@ -3757,7 +5318,11 @@ fn apply_workspace_visibility(
         return Ok(());
     };
 
-    let should_be_visible = workspace_id == active_workspace;
+    let pinned = client
+        .window_info(current.window_id)
+        .map(|info| info.flags.pinned)
+        .unwrap_or(false);
+    let should_be_visible = pinned || workspace_id == active_workspace;
     if current.visible != should_be_visible {
         client.set_visibility(current.window_id, should_be_visible)?;
         if let Ok(info) = client.window_info(current.window_id) {
@@ -3824,13 +5389,12 @@ fn move_app_workspace(
 ) -> Result<(), String> {
     *workspace_id = (*workspace_id + 1) % WORKSPACE_COUNT;
     if let Some(current) = window.as_ref() {
+        let flags = client
+            .window_info(current.window_id)
+            .map(|info| info.flags)
+            .unwrap_or_default();
         client.move_window_to_workspace(current.window_id, *workspace_id)?;
-        client.set_window_meta(
-            current.window_id,
-            *workspace_id,
-            LayerRole::Window,
-            WindowFlags::default(),
-        )?;
+        client.set_window_meta(current.window_id, *workspace_id, LayerRole::Window, flags)?;
     }
     apply_workspace_visibility(client, window, *workspace_id, active_workspace)
 }
@@ -3844,6 +5408,10 @@ fn snap_app_window(
     let Some(current) = window.as_mut() else {
         return Ok(());
     };
+    let info = client.window_info(current.window_id).ok();
+    let mut flags = info.as_ref().map(|info| info.flags).unwrap_or_default();
+    let workspace_id = info.as_ref().map(|info| info.workspace_id).unwrap_or(0);
+    flags.floating = true;
 
     let target_frame = match layout {
         SnapLayout::Left => Rect::new(
@@ -3871,6 +5439,7 @@ fn snap_app_window(
         .saturating_sub(chrome_height)
         .max(MIN_CONTENT_HEIGHT);
 
+    let _ = client.set_window_meta(current.window_id, workspace_id, LayerRole::Window, flags);
     client.move_window(current.window_id, target_frame.x, target_frame.y)?;
     client.resize_window(current.window_id, content_width, content_height)?;
     if let Ok(info) = client.window_info(current.window_id) {
@@ -4319,6 +5888,43 @@ fn notification_level_label(level: NotificationLevel) -> &'static str {
     }
 }
 
+fn clipboard_payload_label(payload: &ClipboardPayload) -> (&'static str, String) {
+    match payload {
+        ClipboardPayload::Empty => ("empty", String::from("Clipboard is empty")),
+        ClipboardPayload::Text(text) => {
+            let mut preview = text.replace('\n', " ");
+            if preview.len() > 28 {
+                preview.truncate(28);
+                preview.push_str("...");
+            }
+            ("text", preview)
+        }
+        ClipboardPayload::Files(paths) => {
+            if let Some(path) = paths.first() {
+                let mut preview = path.clone();
+                if preview.len() > 24 {
+                    preview.truncate(24);
+                    preview.push_str("...");
+                }
+                (
+                    "files",
+                    format!("{} (+{})", preview, paths.len().saturating_sub(1)),
+                )
+            } else {
+                ("files", String::from("No file paths"))
+            }
+        }
+    }
+}
+
+fn capture_entry_label(entry: &ScreenshotEntry) -> String {
+    format!("{}  {}x{}", entry.label, entry.width, entry.height)
+}
+
+fn capture_export_path(entry: &ScreenshotEntry) -> String {
+    format!("/workspace/capture-{}.ppm", entry.id)
+}
+
 fn power_state_label(state: SessionPowerState) -> &'static str {
     match state {
         SessionPowerState::Active => "active",
@@ -4535,9 +6141,36 @@ fn desktop_shortcut_hit(local: Point, width: usize, height: usize) -> Option<Des
 fn quick_settings_row_rect(index: usize, width: usize) -> Rect {
     Rect::new(
         18,
-        86 + index as i32 * 58,
+        74 + index as i32 * 42,
+        width.saturating_sub(36) as u32,
+        36,
+    )
+}
+
+fn clipboard_history_row_rect(index: usize, width: usize) -> Rect {
+    Rect::new(
+        18,
+        76 + index as i32 * 52,
+        width.saturating_sub(36) as u32,
+        42,
+    )
+}
+
+fn capture_history_row_rect(index: usize, width: usize) -> Rect {
+    Rect::new(
+        18,
+        82 + index as i32 * 56,
         width.saturating_sub(36) as u32,
         46,
+    )
+}
+
+fn seed_catalog_row_rect(index: usize, width: usize) -> Rect {
+    Rect::new(
+        18,
+        76 + index as i32 * 52,
+        width.saturating_sub(36) as u32,
+        42,
     )
 }
 
@@ -4594,6 +6227,33 @@ fn notification_hit(local: Point) -> Option<usize> {
 fn quick_settings_hit(local: Point, width: usize, item_count: usize) -> Option<usize> {
     for index in 0..item_count {
         if quick_settings_row_rect(index, width).contains(local) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn clipboard_history_hit(local: Point, width: usize, item_count: usize) -> Option<usize> {
+    for index in 0..item_count {
+        if clipboard_history_row_rect(index, width).contains(local) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn capture_history_hit(local: Point, width: usize, item_count: usize) -> Option<usize> {
+    for index in 0..item_count {
+        if capture_history_row_rect(index, width).contains(local) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn seed_catalog_hit(local: Point, width: usize, item_count: usize) -> Option<usize> {
+    for index in 0..item_count.min(5) {
+        if seed_catalog_row_rect(index, width).contains(local) {
             return Some(index);
         }
     }
@@ -4698,16 +6358,110 @@ fn accessibility_profile_label(profile: AccessibilityProfile) -> String {
     if profile.screen_reader {
         String::from("Screen reader")
     } else if profile.magnifier {
-        String::from("Magnifier")
+        format!(
+            "Magnifier {}",
+            match profile.magnifier_mode {
+                MagnifierMode::Docked => "Docked",
+                MagnifierMode::Lens => "Lens",
+                MagnifierMode::Fullscreen => "Fullscreen",
+            }
+        )
     } else if profile.captions_enabled {
         String::from("Captions")
     } else if profile.reduced_motion {
         String::from("Reduced motion")
+    } else if profile.sticky_keys {
+        String::from("Sticky keys")
+    } else if profile.slow_keys {
+        String::from("Slow keys")
     } else if profile.contrast_theme {
         String::from("Contrast")
     } else {
         String::from("Standard")
     }
+}
+
+fn magnifier_target_rect(
+    screen: Rect,
+    mode: MagnifierMode,
+    focus: Option<&AccessibilityFocusState>,
+) -> Rect {
+    let top_bar_height = 44;
+    let task_strip_height = 92;
+    let work_area = Rect::new(
+        screen.x,
+        screen.y + top_bar_height,
+        screen.width,
+        screen
+            .height
+            .saturating_sub((top_bar_height + task_strip_height) as u32),
+    );
+    match mode {
+        MagnifierMode::Docked => Rect::new(
+            work_area.x + 18,
+            work_area.y + 18,
+            work_area.width.min(420),
+            work_area.height.min(260),
+        ),
+        MagnifierMode::Lens => {
+            let lens_width = work_area.width.min(280);
+            let lens_height = work_area.height.min(220);
+            let anchor = focus.map(|state| state.bounds).unwrap_or_else(|| {
+                let (x, y) = crate::drivers::mouse::get_position();
+                Rect::new(x, y, 1, 1)
+            });
+            let mut x = anchor.x + anchor.width as i32 + 18;
+            let mut y = anchor.y - 12;
+            if x + lens_width as i32 > work_area.right() {
+                x = anchor.x.saturating_sub(lens_width as i32 + 18);
+            }
+            if y + lens_height as i32 > work_area.bottom() {
+                y = work_area.bottom().saturating_sub(lens_height as i32);
+            }
+            x = x.clamp(
+                work_area.x,
+                work_area.right().saturating_sub(lens_width as i32),
+            );
+            y = y.clamp(
+                work_area.y,
+                work_area.bottom().saturating_sub(lens_height as i32),
+            );
+            Rect::new(x, y, lens_width, lens_height)
+        }
+        MagnifierMode::Fullscreen => work_area,
+    }
+}
+
+fn magnifier_capture_rect(
+    screen: Rect,
+    mode: MagnifierMode,
+    target_rect: Rect,
+    focus: Option<&AccessibilityFocusState>,
+) -> Rect {
+    let anchor = focus.map(|state| state.bounds).unwrap_or_else(|| {
+        let (x, y) = crate::drivers::mouse::get_position();
+        Rect::new(x, y, 1, 1)
+    });
+    let target_w = target_rect.width.max(1);
+    let target_h = target_rect.height.max(1);
+    let source_w = max(
+        48,
+        ((target_w.saturating_mul(100)) / MAGNIFIER_SAMPLE_SCALE_100X).max(1),
+    );
+    let source_h = max(
+        48,
+        ((target_h.saturating_mul(100)) / MAGNIFIER_SAMPLE_SCALE_100X).max(1),
+    );
+    let desired_center_x = anchor.x.saturating_add((anchor.width / 2) as i32);
+    let desired_center_y = anchor.y.saturating_add((anchor.height / 2) as i32);
+    let mut x = desired_center_x.saturating_sub((source_w / 2) as i32);
+    let mut y = desired_center_y.saturating_sub((source_h / 2) as i32);
+    if matches!(mode, MagnifierMode::Docked) {
+        y = y.saturating_sub(18);
+    }
+    x = x.clamp(screen.x, screen.right().saturating_sub(source_w as i32));
+    y = y.clamp(screen.y, screen.bottom().saturating_sub(source_h as i32));
+    Rect::new(x, y, source_w, source_h)
 }
 
 fn next_supported_scale(scales: &[u16], current: u16) -> u16 {
@@ -5439,12 +7193,8 @@ fn build_quick_settings_scene(
             palette.accent_soft,
         ),
         (
-            "Screen Reader",
-            if snapshot.accessibility_profile.screen_reader {
-                String::from("On")
-            } else {
-                String::from("Off")
-            },
+            "Accessibility",
+            accessibility_profile_label(snapshot.accessibility_profile),
             palette.text_secondary,
         ),
     ];
@@ -5579,14 +7329,14 @@ fn build_stage_rail_scene(
             rect.y + 42,
             rect.width.saturating_sub(32),
             &format!(
-                "{} · layout: {}{}",
+                "{} Â· layout: {}{}",
                 stage.name,
                 workspace_layout_label(if selected {
                     WorkspaceLayout::Overview
                 } else {
                     WorkspaceLayout::Dwindle
                 }),
-                if stage.pinned { " · pinned" } else { "" }
+                if stage.pinned { " Â· pinned" } else { "" }
             ),
             palette.text_secondary,
         );
@@ -6089,18 +7839,26 @@ fn build_lock_scene(
     let mut scene = SceneGraph::new(bounds);
     scene.set_semantic_root(Some(window_id));
     let root = scene.root();
-    push_scene_rect(&mut scene, root, bounds, palette.window_bg);
+    push_scene_panel(
+        &mut scene,
+        root,
+        bounds,
+        0xF20B1520,
+        palette.border,
+        18,
+        Some(palette.accent_mint),
+    );
     push_scene_rect(
         &mut scene,
         root,
         Rect::new(0, 0, width as u32, 64),
-        palette.panel_bg,
+        0xFF09131E,
     );
     push_scene_rect(
         &mut scene,
         root,
         Rect::new(0, 64, width as u32, 1),
-        palette.border,
+        palette.accent_blue,
     );
     push_scene_text(
         &mut scene,
@@ -6120,17 +7878,24 @@ fn build_lock_scene(
         40,
         width.saturating_sub(48) as u32,
         "Native session authentication gate",
-        palette.text_muted,
+        palette.text_secondary,
     );
-    let panel = Rect::new(40, 100, (width as u32).saturating_sub(80), 136);
-    push_scene_rect(&mut scene, root, panel, palette.panel_bg);
-    push_scene_outline(&mut scene, root, panel, palette.accent_blue);
+    let panel = Rect::new(40, 96, (width as u32).saturating_sub(80), 190);
+    push_scene_panel(
+        &mut scene,
+        root,
+        panel,
+        0xF50E1A27,
+        palette.accent_blue,
+        14,
+        Some(palette.accent_blue),
+    );
     push_scene_text(
         &mut scene,
         text_system,
         root,
         60,
-        126,
+        122,
         panel.width.saturating_sub(120),
         "User: operator",
         palette.text_secondary,
@@ -6140,13 +7905,21 @@ fn build_lock_scene(
         text_system,
         root,
         60,
-        152,
+        150,
         panel.width.saturating_sub(120),
         "Password",
         palette.text_primary,
     );
-    let input_rect = Rect::new(60, 176, panel.width.saturating_sub(120), 34);
-    push_scene_rect(&mut scene, root, input_rect, palette.window_bg);
+    let input_rect = Rect::new(60, 174, panel.width.saturating_sub(120), 42);
+    push_scene_panel(
+        &mut scene,
+        root,
+        input_rect,
+        0xFF07111B,
+        palette.accent_mint,
+        8,
+        None,
+    );
     push_scene_outline(&mut scene, root, input_rect, palette.accent_mint);
     let masked = "*".repeat(auth_input.len().max(1));
     push_scene_text(
@@ -6154,7 +7927,7 @@ fn build_lock_scene(
         text_system,
         root,
         74,
-        186,
+        187,
         input_rect.width.saturating_sub(20),
         &masked,
         palette.text_primary,
@@ -6164,17 +7937,17 @@ fn build_lock_scene(
         text_system,
         root,
         60,
-        224,
+        232,
         panel.width.saturating_sub(120),
         "Enter = unlock, Backspace = delete",
-        palette.text_muted,
+        palette.text_secondary,
     );
     push_scene_text(
         &mut scene,
         text_system,
         root,
         60,
-        246,
+        256,
         panel.width.saturating_sub(120),
         "Default password: echos",
         palette.accent_gold,
@@ -6640,6 +8413,93 @@ fn paint_desktop_shortcuts_surface(
     canvas.into_pixels()
 }
 
+fn build_desktop_shortcuts_scene(
+    window_id: WindowId,
+    text_system: &mut TextSystem,
+    width: usize,
+    height: usize,
+    theme_mode: ThemeMode,
+    selected: Option<DesktopShortcutKind>,
+) -> SceneUpdate {
+    let palette = hybrid_titan_palette(theme_mode);
+    let bounds = Rect::new(0, 0, width as u32, height as u32);
+    let mut scene = SceneGraph::new(bounds);
+    scene.set_semantic_root(Some(window_id));
+    let root = scene.root();
+
+    for entry in desktop_shortcut_entries(width, height) {
+        let active = selected == Some(entry.kind);
+        let tile = entry.icon_rect.inset(-8, -8, -8, -8);
+        let label_card = Rect::new(
+            entry.hit_rect.x,
+            entry.label_y - 6,
+            entry.hit_rect.width,
+            (FONT_HEIGHT + 12) as u32,
+        );
+        if active {
+            push_scene_round_rect(&mut scene, root, entry.hit_rect, 0x5A122130, 10);
+            push_scene_outline(&mut scene, root, entry.hit_rect, palette.accent_blue);
+        }
+        push_scene_round_rect(
+            &mut scene,
+            root,
+            tile,
+            if active { 0xFF173049 } else { 0xD20A1420 },
+            12,
+        );
+        push_scene_outline(
+            &mut scene,
+            root,
+            tile,
+            if active {
+                palette.text_primary
+            } else {
+                entry.kind.accent()
+            },
+        );
+
+        let glyph_rect = entry.icon_rect.inset(12, 12, 12, 12).inset(0, 0, 0, 0);
+        emit_desktop_icon_rects(entry.kind.icon(), glyph_rect, |segment| {
+            push_scene_round_rect(
+                &mut scene,
+                root,
+                segment,
+                if active {
+                    palette.text_primary
+                } else {
+                    entry.kind.accent()
+                },
+                2,
+            );
+        });
+        push_scene_round_rect(
+            &mut scene,
+            root,
+            label_card,
+            if active { 0xE0182B40 } else { 0xA0081018 },
+            7,
+        );
+        push_scene_text(
+            &mut scene,
+            text_system,
+            root,
+            entry.label_x,
+            entry.label_y,
+            entry.hit_rect.width.max(1),
+            entry.kind.label(),
+            if active {
+                palette.text_primary
+            } else {
+                0xFFD8E6F2
+            },
+        );
+    }
+
+    let mut update = scene.snapshot(window_id);
+    update.damage_hint = vec![bounds];
+    update
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6658,6 +8518,49 @@ mod tests {
         assert!(!rects_overlap(layout.apps_rect, layout.workspace_rect));
         assert!(!rects_overlap(layout.command_rect, layout.status_rects[0]));
         assert!(!rects_overlap(layout.status_rects[4], layout.time_rect));
+    }
+
+    #[test]
+    fn top_bar_scene_marks_full_window_damage_for_retained_commit() {
+        let snapshot = SessionSnapshot {
+            workspace_id: 0,
+            workspace_layout: WorkspaceLayout::Dwindle,
+            power_state: SessionPowerState::Active,
+            unread_notifications: 0,
+            apps_running: 0,
+            apps_crashed: 0,
+            overview_active: false,
+            scratchpad_visible: false,
+            shell_ready: true,
+            boot_clean_desktop: true,
+            output_scale: 1,
+            text_scale: 1,
+            clipboard_history_len: 0,
+            accessibility_profile: AccessibilityProfile::default(),
+            display_profile: DisplayProfile::default(),
+            shell_density: ShellDensityProfile::Balanced,
+            motion_profile: MotionProfile::Standard,
+            restore_state: RestoreDisposition::RestoreIfClean,
+            stage_set_policy: StageSetPolicy::default(),
+            locale: String::from("en-US"),
+            theme_variant: String::from("hybrid-titan"),
+            shell_state: ShellState::DesktopReady,
+        };
+        let mut text_system = TextSystem::new();
+        let update = build_top_bar_scene(
+            44,
+            &mut text_system,
+            1600,
+            Theme::HALO_BAR_HEIGHT as usize,
+            0,
+            &snapshot,
+            ThemeMode::Dark,
+        );
+        assert_eq!(
+            update.damage_hint,
+            vec![Rect::new(0, 0, 1600, Theme::HALO_BAR_HEIGHT as u32)]
+        );
+        assert!(!update.render_objects.is_empty());
     }
 
     #[test]
@@ -6905,6 +8808,137 @@ mod tests {
     }
 
     #[test]
+    fn shell_row_layouts_preserve_even_vertical_rhythm() {
+        let quick_a = quick_settings_row_rect(0, 360);
+        let quick_b = quick_settings_row_rect(1, 360);
+        let palette_a = command_palette_row_rect(0, 520);
+        let palette_b = command_palette_row_rect(1, 520);
+        let clipboard_a = clipboard_history_row_rect(0, 320);
+        let clipboard_b = clipboard_history_row_rect(1, 320);
+
+        assert_eq!(quick_b.y - quick_a.y, 42);
+        assert_eq!(quick_a.height, 36);
+        assert_eq!(palette_b.y - palette_a.y, 54);
+        assert_eq!(palette_a.height, 44);
+        assert_eq!(clipboard_b.y - clipboard_a.y, 52);
+        assert_eq!(clipboard_a.height, 42);
+    }
+
+    #[test]
+    fn magnifier_capture_budget_and_viewport_stay_bounded_per_mode() {
+        let screen = Rect::new(0, 0, 1920, 1080);
+        let focus = AccessibilityFocusState {
+            app_id: 7,
+            window_id: Some(9),
+            node_id: 12,
+            role: AccessibilityRole::Button,
+            label: String::from("Install"),
+            description: String::from("primary action"),
+            bounds: Rect::new(840, 420, 120, 44),
+        };
+
+        for mode in [
+            MagnifierMode::Docked,
+            MagnifierMode::Lens,
+            MagnifierMode::Fullscreen,
+        ] {
+            let target = magnifier_target_rect(screen, mode, Some(&focus));
+            let capture = magnifier_capture_rect(screen, mode, target, Some(&focus));
+            let viewport =
+                magnifier_viewport_rect(target.width as usize, target.height as usize, mode);
+            assert!(screen.intersection(&target).is_some());
+            assert!(screen.intersection(&capture).is_some());
+            assert!(viewport.width > 0 && viewport.height > 0);
+            assert!(capture.width <= target.width.max(1));
+            assert!(capture.height <= target.height.max(1));
+        }
+    }
+
+    #[test]
+    fn output_rects_partition_screen_across_outputs() {
+        let mut profile = DisplayProfile::default();
+        profile.outputs = vec![
+            MonitorPolicy::single_output(OutputMode::new(1920, 1080, 60)),
+            MonitorPolicy {
+                output_id: 1,
+                ..MonitorPolicy::single_output(OutputMode::new(1920, 1080, 60))
+            },
+        ];
+        let rects = output_rects_for_profile(Rect::new(0, 0, 1920, 1080), &profile);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].1.width, 960);
+        assert_eq!(rects[1].1.x, 960);
+    }
+
+    #[test]
+    fn build_snap_groups_detects_split_layouts() {
+        let work_area = Rect::new(0, 0, 1200, 800);
+        let windows = vec![
+            WindowInfo {
+                id: 10,
+                app_id: 10,
+                surface_id: 10,
+                title: String::from("Left"),
+                frame_rect: Rect::new(0, 0, 600, 800),
+                content_rect: Rect::new(0, 34, 600, 766),
+                visible: true,
+                focused: false,
+                minimized: false,
+                maximized: false,
+                z_index: 1,
+                workspace_id: 0,
+                layer_role: LayerRole::Window,
+                flags: WindowFlags {
+                    floating: true,
+                    ..WindowFlags::default()
+                },
+                scene_node_id: 0,
+                scene_root: None,
+                semantic_root: None,
+                buffer_mode: crate::gui::protocol::WindowBufferMode::Pixels,
+            },
+            WindowInfo {
+                id: 11,
+                app_id: 11,
+                surface_id: 11,
+                title: String::from("Right"),
+                frame_rect: Rect::new(600, 0, 600, 800),
+                content_rect: Rect::new(600, 34, 600, 766),
+                visible: true,
+                focused: false,
+                minimized: false,
+                maximized: false,
+                z_index: 2,
+                workspace_id: 0,
+                layer_role: LayerRole::Window,
+                flags: WindowFlags {
+                    floating: true,
+                    ..WindowFlags::default()
+                },
+                scene_node_id: 0,
+                scene_root: None,
+                semantic_root: None,
+                buffer_mode: crate::gui::protocol::WindowBufferMode::Pixels,
+            },
+        ];
+
+        let groups = build_snap_groups(
+            &windows,
+            0,
+            0,
+            work_area,
+            RestoreDisposition::RestoreIfClean,
+        );
+        assert_eq!(groups.len(), 2);
+        assert!(groups
+            .iter()
+            .any(|group| group.template == SnapTemplate::LeftHalf));
+        assert!(groups
+            .iter()
+            .any(|group| group.template == SnapTemplate::RightHalf));
+    }
+
+    #[test]
     fn launcher_quick_settings_and_palette_raster_surfaces_emit_visible_text_pixels() {
         let snapshot = SessionSnapshot {
             workspace_id: 0,
@@ -7002,6 +9036,77 @@ mod tests {
         assert!(
             count_non_background_pixels(&palette, 520, Rect::new(0, 0, 520, 320), background) > 800,
             "command palette raster should paint visible glyphs and rows"
+        );
+    }
+
+    #[test]
+    fn clipboard_and_capture_history_surfaces_emit_visible_rows() {
+        let clipboard = paint_clipboard_history_surface(
+            320,
+            248,
+            &[
+                ClipboardPayload::Text(String::from("echo hello world")),
+                ClipboardPayload::Files(vec![String::from("/workspace/readme.txt")]),
+            ],
+            0,
+            ThemeMode::Dark,
+        );
+        let capture = paint_capture_history_surface(
+            320,
+            264,
+            &[ScreenshotEntry {
+                id: 7,
+                app_id: SHELL_APP_ID,
+                label: String::from("palette"),
+                width: 1280,
+                height: 720,
+            }],
+            0,
+            ThemeMode::Dark,
+        );
+        let background = hybrid_titan_palette(ThemeMode::Dark).window_bg;
+
+        assert!(
+            count_non_background_pixels(&clipboard, 320, Rect::new(0, 0, 320, 248), background)
+                > 500,
+            "clipboard history surface should paint visible text and rows"
+        );
+        assert!(
+            count_non_background_pixels(&capture, 320, Rect::new(0, 0, 320, 264), background) > 500,
+            "capture history surface should paint visible text and rows"
+        );
+    }
+
+    #[test]
+    fn seed_catalog_surface_emits_visible_rows() {
+        let pixels = paint_seed_catalog_surface(
+            440,
+            320,
+            &[crate::security::seed_store::SeedCatalogEntry {
+                origin: crate::security::seed_store::SeedBundleOrigin::SeedPartition,
+                identity: String::from("/seed/apps/helix.bhd"),
+                package_id: String::from("helix"),
+                manifest_app_id: String::from("helix"),
+                title: String::from("Helix"),
+                seed_version: String::from("1.0.0"),
+                installed_version: None,
+                source_title: String::from("Helix"),
+                entry_rel_path: String::from("hx.exe"),
+                state: crate::security::seed_store::SeedCatalogState::Available,
+                failure_count: 0,
+                last_error: None,
+                retry_after_ns: None,
+                bundle_size: 32 * 1024,
+                source_size: 32 * 1024,
+                locator: crate::security::seed_store::SeedBundleLocator::ResidentBytes(Vec::new()),
+            }],
+            0,
+            ThemeMode::Dark,
+        );
+        let background = hybrid_titan_palette(ThemeMode::Dark).window_bg;
+        assert!(
+            count_non_background_pixels(&pixels, 440, Rect::new(0, 0, 440, 320), background) > 600,
+            "seed catalog surface should paint visible text and rows"
         );
     }
 
@@ -7405,7 +9510,7 @@ fn paint_quick_settings_surface(
     canvas.fill_rect(Rect::new(0, 0, width as u32, 48), palette.panel_bg);
     canvas.fill_rect(Rect::new(0, 48, width as u32, 1), palette.border);
     canvas.draw_text(18, 14, "Quick Settings", palette.text_primary);
-    canvas.draw_text(18, 30, "1-5 or click to toggle", palette.text_muted);
+    canvas.draw_text(18, 30, "1-8 or click to toggle", palette.text_muted);
 
     let rows = [
         (
@@ -7437,19 +9542,25 @@ fn paint_quick_settings_surface(
         ),
         (
             format!(
-                "Screen Reader {}",
-                if snapshot.accessibility_profile.screen_reader {
-                    "On"
-                } else {
-                    "Off"
-                }
+                "Accessibility {}",
+                accessibility_profile_label(snapshot.accessibility_profile)
             ),
-            if snapshot.accessibility_profile.screen_reader {
+            if snapshot.accessibility_profile != AccessibilityProfile::default() {
                 palette.accent_coral
             } else {
                 palette.border
             },
         ),
+        (
+            format!("Clipboard {} items", snapshot.clipboard_history_len),
+            if snapshot.clipboard_history_len > 0 {
+                palette.accent_blue
+            } else {
+                palette.border
+            },
+        ),
+        (String::from("Screenshot shelf"), palette.accent_gold),
+        (String::from("Seed catalog"), palette.accent_mint),
     ];
 
     for (index, (label, accent)) in rows.iter().enumerate() {
@@ -7468,9 +9579,690 @@ fn paint_quick_settings_surface(
     canvas.draw_text(
         18,
         max(height as i32 - 16, 0),
-        "Super+, toggles this panel",
+        "Super+, panel  6 clipboard  7 screenshots  8 seeds",
         palette.text_muted,
     );
+    canvas.into_pixels()
+}
+
+fn paint_clipboard_history_surface(
+    width: usize,
+    height: usize,
+    entries: &[ClipboardPayload],
+    selected_index: usize,
+    theme_mode: ThemeMode,
+) -> Vec<u32> {
+    let palette = hybrid_titan_palette(theme_mode);
+    let mut canvas = Canvas::new(width, height, palette.window_bg);
+    canvas.fill_rect(Rect::new(0, 0, width as u32, 50), palette.panel_bg);
+    canvas.fill_rect(Rect::new(0, 50, width as u32, 1), palette.border);
+    canvas.draw_text(18, 16, "Clipboard History", palette.text_primary);
+    canvas.draw_text(
+        18,
+        32,
+        "Enter promotes, Del clears, Esc closes",
+        palette.text_muted,
+    );
+
+    if entries.is_empty() {
+        canvas.draw_text(18, 84, "No clipboard items", palette.text_secondary);
+    }
+
+    for (index, entry) in entries.iter().take(6).enumerate() {
+        let rect = clipboard_history_row_rect(index, width);
+        let selected = index == selected_index.min(entries.len().saturating_sub(1));
+        let (kind, preview) = clipboard_payload_label(entry);
+        canvas.fill_rect(rect, palette.panel_bg);
+        canvas.stroke_rect(
+            rect,
+            if selected {
+                palette.accent_blue
+            } else {
+                palette.border
+            },
+        );
+        canvas.draw_text(
+            rect.x + 10,
+            rect.y + 8,
+            &(index + 1).to_string(),
+            palette.text_muted,
+        );
+        canvas.draw_text(rect.x + 30, rect.y + 8, kind, palette.accent_mint);
+        canvas.draw_text(rect.x + 82, rect.y + 8, &preview, palette.text_secondary);
+    }
+
+    canvas.draw_text(
+        18,
+        max(height as i32 - 16, 0),
+        "Clipboard service-backed history lane",
+        palette.text_muted,
+    );
+    canvas.into_pixels()
+}
+
+fn paint_capture_history_surface(
+    width: usize,
+    height: usize,
+    entries: &[ScreenshotEntry],
+    selected_index: usize,
+    theme_mode: ThemeMode,
+) -> Vec<u32> {
+    let palette = hybrid_titan_palette(theme_mode);
+    let mut canvas = Canvas::new(width, height, palette.window_bg);
+    canvas.fill_rect(Rect::new(0, 0, width as u32, 50), palette.panel_bg);
+    canvas.fill_rect(Rect::new(0, 50, width as u32, 1), palette.border);
+    canvas.draw_text(18, 16, "Screenshot Shelf", palette.text_primary);
+    canvas.draw_text(
+        18,
+        32,
+        "Enter saves, P captures, Esc closes",
+        palette.text_muted,
+    );
+
+    if entries.is_empty() {
+        canvas.draw_text(
+            18,
+            88,
+            "No screenshots captured yet",
+            palette.text_secondary,
+        );
+    }
+
+    for (index, entry) in entries.iter().take(6).enumerate() {
+        let rect = capture_history_row_rect(index, width);
+        let selected = index == selected_index.min(entries.len().saturating_sub(1));
+        canvas.fill_rect(rect, palette.panel_bg);
+        canvas.stroke_rect(
+            rect,
+            if selected {
+                palette.accent_gold
+            } else {
+                palette.border
+            },
+        );
+        canvas.draw_text(
+            rect.x + 10,
+            rect.y + 8,
+            &(index + 1).to_string(),
+            palette.text_muted,
+        );
+        canvas.draw_text(
+            rect.x + 30,
+            rect.y + 8,
+            &capture_entry_label(entry),
+            palette.text_primary,
+        );
+        canvas.draw_text(
+            rect.x + 30,
+            rect.y + 24,
+            &capture_export_path(entry),
+            palette.text_muted,
+        );
+    }
+
+    canvas.draw_text(
+        18,
+        max(height as i32 - 16, 0),
+        "Desktop capture backlog with direct export",
+        palette.text_muted,
+    );
+    canvas.into_pixels()
+}
+
+fn seed_catalog_state_label(state: crate::security::seed_store::SeedCatalogState) -> &'static str {
+    match state {
+        crate::security::seed_store::SeedCatalogState::HashPending => "Pending",
+        crate::security::seed_store::SeedCatalogState::Available => "Available",
+        crate::security::seed_store::SeedCatalogState::Installed => "Installed",
+        crate::security::seed_store::SeedCatalogState::UpdateAvailable => "Update",
+        crate::security::seed_store::SeedCatalogState::Retryable => "Retryable",
+        crate::security::seed_store::SeedCatalogState::Quarantined => "Quarantined",
+    }
+}
+
+fn seed_catalog_state_color(
+    palette: UiPalette,
+    state: crate::security::seed_store::SeedCatalogState,
+) -> u32 {
+    match state {
+        crate::security::seed_store::SeedCatalogState::HashPending => palette.accent_blue,
+        crate::security::seed_store::SeedCatalogState::Available => palette.accent_mint,
+        crate::security::seed_store::SeedCatalogState::Installed => palette.accent_soft,
+        crate::security::seed_store::SeedCatalogState::UpdateAvailable => palette.accent_gold,
+        crate::security::seed_store::SeedCatalogState::Retryable => palette.accent_gold,
+        crate::security::seed_store::SeedCatalogState::Quarantined => palette.accent_coral,
+    }
+}
+
+fn paint_seed_catalog_surface(
+    width: usize,
+    height: usize,
+    entries: &[crate::security::seed_store::SeedCatalogEntry],
+    selected_index: usize,
+    theme_mode: ThemeMode,
+) -> Vec<u32> {
+    let palette = hybrid_titan_palette(theme_mode);
+    let mut canvas = Canvas::new(width, height, palette.window_bg);
+    let pending = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.state,
+                crate::security::seed_store::SeedCatalogState::HashPending
+            )
+        })
+        .count();
+    let available = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.state,
+                crate::security::seed_store::SeedCatalogState::Available
+            )
+        })
+        .count();
+    let installed = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.state,
+                crate::security::seed_store::SeedCatalogState::Installed
+            )
+        })
+        .count();
+    let updates = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.state,
+                crate::security::seed_store::SeedCatalogState::UpdateAvailable
+            )
+        })
+        .count();
+    let quarantined = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.state,
+                crate::security::seed_store::SeedCatalogState::Quarantined
+            )
+        })
+        .count();
+    canvas.fill_rect(Rect::new(0, 0, width as u32, 52), palette.panel_bg);
+    canvas.fill_rect(Rect::new(0, 52, width as u32, 1), palette.border);
+    canvas.draw_text(18, 16, "Seed Catalog", palette.text_primary);
+    canvas.draw_text(
+        18,
+        34,
+        "Enter install/open/update, R retry, Del clear, Esc closes",
+        palette.text_muted,
+    );
+    canvas.draw_text(
+        width.saturating_sub(258) as i32,
+        16,
+        &format!(
+            "P:{} A:{} I:{} U:{} Q:{}",
+            pending, available, installed, updates, quarantined
+        ),
+        palette.text_secondary,
+    );
+
+    if entries.is_empty() {
+        canvas.draw_text(18, 88, "No seed bundles discovered", palette.text_secondary);
+    }
+
+    for (index, entry) in entries.iter().take(5).enumerate() {
+        let rect = seed_catalog_row_rect(index, width);
+        let selected = index == selected_index.min(entries.len().saturating_sub(1));
+        let accent = seed_catalog_state_color(palette, entry.state);
+        canvas.fill_rect(rect, palette.panel_bg);
+        canvas.stroke_rect(
+            rect,
+            if selected {
+                palette.accent_blue
+            } else {
+                accent
+            },
+        );
+        canvas.draw_text(
+            rect.x + 10,
+            rect.y + 8,
+            &(index + 1).to_string(),
+            palette.text_muted,
+        );
+        canvas.draw_text(rect.x + 30, rect.y + 8, &entry.title, palette.text_primary);
+        canvas.draw_text(
+            rect.x + 30,
+            rect.y + 24,
+            &format!(
+                "{} {}{} Â· {} Â· {} KiB",
+                seed_catalog_state_label(entry.state),
+                entry.seed_version,
+                entry
+                    .installed_version
+                    .as_ref()
+                    .filter(|installed| *installed != &entry.seed_version)
+                    .map(|installed| format!(" (installed {})", installed))
+                    .unwrap_or_default(),
+                entry.origin.as_str(),
+                entry.bundle_size / 1024
+            ),
+            palette.text_secondary,
+        );
+        if let Some(retry_after_ns) = entry.retry_after_ns {
+            let now = get_time_ns();
+            if retry_after_ns > now {
+                canvas.draw_text(
+                    rect.x + 30,
+                    rect.y + 38,
+                    &format!(
+                        "retry in {}s",
+                        ((retry_after_ns - now) / 1_000_000_000).max(1)
+                    ),
+                    palette.text_muted,
+                );
+            }
+        } else if let Some(err) = entry.last_error.as_ref() {
+            let detail = if err.len() > 34 {
+                &err[..34]
+            } else {
+                err.as_str()
+            };
+            canvas.draw_text(rect.x + 30, rect.y + 38, detail, palette.text_muted);
+        }
+        if entry.failure_count > 0 {
+            canvas.draw_text(
+                rect.right() - 110,
+                rect.y + 8,
+                &format!("fail x{}", entry.failure_count),
+                palette.accent_coral,
+            );
+        }
+    }
+
+    canvas.draw_text(
+        18,
+        max(height as i32 - 16, 0),
+        "Curated seed store availability and install lane",
+        palette.text_muted,
+    );
+    canvas.into_pixels()
+}
+
+fn focus_role_label(role: AccessibilityRole) -> &'static str {
+    match role {
+        AccessibilityRole::Window => "Window",
+        AccessibilityRole::Button => "Button",
+        AccessibilityRole::List => "List",
+        AccessibilityRole::ListItem => "List Item",
+        AccessibilityRole::Text => "Text",
+        AccessibilityRole::Input => "Input",
+        AccessibilityRole::Notification => "Notification",
+        AccessibilityRole::Dialog => "Dialog",
+        AccessibilityRole::Toolbar => "Toolbar",
+    }
+}
+
+fn accessibility_event_label(kind: AccessibilityEventKind) -> &'static str {
+    match kind {
+        AccessibilityEventKind::FocusChanged => "Focus",
+        AccessibilityEventKind::WindowOpened => "Opened",
+        AccessibilityEventKind::WindowClosed => "Closed",
+        AccessibilityEventKind::DialogOpened => "Dialog",
+        AccessibilityEventKind::SelectionChanged => "Selection",
+        AccessibilityEventKind::NotificationPosted => "Notification",
+        AccessibilityEventKind::ValueChanged => "Value",
+        AccessibilityEventKind::LiveRegionChanged => "Live",
+    }
+}
+
+fn clamp_label(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let shortened: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() && max_chars > 1 {
+        format!(
+            "{}...",
+            shortened.chars().take(max_chars - 1).collect::<String>()
+        )
+    } else {
+        shortened
+    }
+}
+
+fn magnifier_mode_label(mode: MagnifierMode) -> &'static str {
+    match mode {
+        MagnifierMode::Docked => "Docked",
+        MagnifierMode::Lens => "Lens",
+        MagnifierMode::Fullscreen => "Fullscreen",
+    }
+}
+
+fn magnifier_viewport_rect(width: usize, height: usize, mode: MagnifierMode) -> Rect {
+    match mode {
+        MagnifierMode::Fullscreen => Rect::new(0, 0, width as u32, height as u32),
+        MagnifierMode::Docked => Rect::new(
+            14,
+            52,
+            width.saturating_sub(28) as u32,
+            height.saturating_sub(106) as u32,
+        ),
+        MagnifierMode::Lens => Rect::new(
+            10,
+            34,
+            width.saturating_sub(20) as u32,
+            height.saturating_sub(78) as u32,
+        ),
+    }
+}
+
+fn scale_argb_nearest(
+    src: &[u32],
+    src_width: usize,
+    src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+) -> Vec<u32> {
+    if src_width == 0 || src_height == 0 || dst_width == 0 || dst_height == 0 {
+        return Vec::new();
+    }
+    let mut out = alloc_surface_pixels(dst_width, dst_height, SurfacePixelFormat::Argb8888)
+        .unwrap_or_else(|_| {
+            SurfacePixelBuffer::Heap(vec![0; dst_width.saturating_mul(dst_height)])
+        });
+    let out_pixels = out.as_mut_slice();
+    for dy in 0..dst_height {
+        let sy = (dy * src_height) / dst_height;
+        let src_row = sy.min(src_height - 1) * src_width;
+        let dst_row = dy * dst_width;
+        for dx in 0..dst_width {
+            let sx = (dx * src_width) / dst_width;
+            out_pixels[dst_row + dx] = src[src_row + sx.min(src_width - 1)];
+        }
+    }
+    out.snapshot_vec("a11y.magnifier.scale")
+        .unwrap_or_else(|_| out.as_slice().to_vec())
+}
+
+fn capture_magnifier_surface_pixels(
+    screen: Rect,
+    target_rect: Rect,
+    mode: MagnifierMode,
+    focus: Option<&AccessibilityFocusState>,
+    exclude_window: WindowId,
+) -> Option<Vec<u32>> {
+    let viewport = magnifier_viewport_rect(
+        target_rect.width as usize,
+        target_rect.height as usize,
+        mode,
+    );
+    if viewport.is_empty() {
+        return None;
+    }
+    let capture_rect = magnifier_capture_rect(screen, mode, target_rect, focus);
+    let display = get_display().lock().clone()?;
+    let pixels = display.capture_composed_region(capture_rect, &[exclude_window], true);
+    if pixels.is_empty() {
+        return None;
+    }
+    Some(scale_argb_nearest(
+        &pixels,
+        capture_rect.width as usize,
+        capture_rect.height as usize,
+        viewport.width as usize,
+        viewport.height as usize,
+    ))
+}
+
+fn paint_accessibility_magnifier_surface(
+    width: usize,
+    height: usize,
+    sampled_pixels: Option<&[u32]>,
+    focus: Option<&AccessibilityFocusState>,
+    events: &[AccessibilityEvent],
+    mode: MagnifierMode,
+    theme_mode: ThemeMode,
+) -> Vec<u32> {
+    let palette = hybrid_titan_palette(theme_mode);
+    let mut canvas = Canvas::new(width, height, palette.window_bg);
+    let viewport = magnifier_viewport_rect(width, height, mode);
+    let header_height = if matches!(mode, MagnifierMode::Fullscreen) {
+        34
+    } else {
+        48
+    };
+    let footer_height = match mode {
+        MagnifierMode::Fullscreen => 42,
+        MagnifierMode::Lens => 44,
+        MagnifierMode::Docked => 48,
+    };
+    let header_rect = Rect::new(0, 0, width as u32, header_height);
+    let footer_top = max(height as i32 - footer_height, 0);
+    let footer_rect = Rect::new(
+        0,
+        footer_top,
+        width as u32,
+        height.saturating_sub(footer_top as usize) as u32,
+    );
+
+    if let Some(sampled) = sampled_pixels {
+        canvas.draw_argb_bitmap(
+            viewport.x,
+            viewport.y,
+            viewport.width,
+            viewport.height,
+            sampled,
+        );
+    } else {
+        canvas.fill_rect(viewport, palette.panel_bg);
+    }
+    if !matches!(mode, MagnifierMode::Fullscreen) {
+        canvas.stroke_rect(viewport, palette.accent_gold);
+    }
+
+    canvas.fill_rect(
+        header_rect,
+        if matches!(mode, MagnifierMode::Fullscreen) {
+            0xD1111823
+        } else {
+            palette.panel_bg
+        },
+    );
+    canvas.fill_rect(
+        footer_rect,
+        if matches!(mode, MagnifierMode::Fullscreen) {
+            0xD1111823
+        } else {
+            palette.panel_bg
+        },
+    );
+    if !matches!(mode, MagnifierMode::Fullscreen) {
+        canvas.fill_rect(
+            Rect::new(0, header_height as i32, width as u32, 1),
+            palette.border,
+        );
+        canvas.fill_rect(
+            Rect::new(0, footer_top - 1, width as u32, 1),
+            palette.border,
+        );
+    }
+
+    canvas.draw_text(
+        18,
+        if matches!(mode, MagnifierMode::Fullscreen) {
+            10
+        } else {
+            16
+        },
+        &format!(
+            "Magnifier {} {}%",
+            magnifier_mode_label(mode),
+            MAGNIFIER_SAMPLE_SCALE_100X
+        ),
+        palette.text_primary,
+    );
+    canvas.draw_text(
+        18,
+        if matches!(mode, MagnifierMode::Fullscreen) {
+            22
+        } else {
+            32
+        },
+        &format!(
+            "{} mode | framebuffer capture zoom",
+            magnifier_mode_label(mode)
+        ),
+        palette.text_muted,
+    );
+
+    if let Some(focus) = focus {
+        let primary_y = if matches!(mode, MagnifierMode::Fullscreen) {
+            footer_top + 6
+        } else {
+            footer_top + 8
+        };
+        let secondary_y = if matches!(mode, MagnifierMode::Fullscreen) {
+            footer_top + 20
+        } else {
+            footer_top + 22
+        };
+        canvas.draw_text(
+            18,
+            primary_y,
+            &clamp_label(
+                &focus.label,
+                if matches!(mode, MagnifierMode::Fullscreen) {
+                    52
+                } else {
+                    40
+                },
+            ),
+            palette.text_primary,
+        );
+        canvas.draw_text(
+            18,
+            secondary_y,
+            &format!(
+                "{} | {}x{} @ {},{}",
+                focus_role_label(focus.role),
+                focus.bounds.width,
+                focus.bounds.height,
+                focus.bounds.x,
+                focus.bounds.y
+            ),
+            palette.text_secondary,
+        );
+    } else {
+        canvas.draw_text(
+            18,
+            footer_top + 14,
+            "No focused accessibility target",
+            palette.text_secondary,
+        );
+    }
+
+    let event_x = max(width as i32 - 250, 18);
+    for (index, event) in events.iter().rev().take(2).enumerate() {
+        let y = if matches!(mode, MagnifierMode::Fullscreen) {
+            max(header_rect.height as i32 + 8 + (index as i32 * 12), 0)
+        } else {
+            max(footer_top + 6 + (index as i32 * 12), 0)
+        };
+        canvas.draw_text(
+            event_x,
+            y,
+            &format!(
+                "{} | {}",
+                accessibility_event_label(event.kind),
+                clamp_label(&event.label, 28)
+            ),
+            palette.text_muted,
+        );
+    }
+
+    canvas.into_pixels()
+}
+
+fn paint_live_captions_surface(
+    width: usize,
+    height: usize,
+    events: &[CaptionEvent],
+    speech: &SpeechState,
+    theme_mode: ThemeMode,
+) -> Vec<u32> {
+    let palette = hybrid_titan_palette(theme_mode);
+    let mut canvas = Canvas::new(width, height, palette.window_bg);
+    canvas.fill_rect(Rect::new(0, 0, width as u32, 40), palette.panel_bg);
+    canvas.fill_rect(Rect::new(0, 40, width as u32, 1), palette.border);
+    canvas.draw_text(18, 14, "Live Captions + Speech", palette.text_primary);
+    canvas.draw_text(
+        18,
+        30,
+        "Caption mirror and queued screen-reader utterances",
+        palette.text_muted,
+    );
+
+    if let Some(active) = speech.active.as_ref() {
+        canvas.fill_rect(
+            Rect::new(14, 50, width.saturating_sub(28) as u32, 20),
+            palette.panel_bg,
+        );
+        canvas.stroke_rect(
+            Rect::new(14, 50, width.saturating_sub(28) as u32, 20),
+            palette.accent_blue,
+        );
+        canvas.draw_text(
+            22,
+            56,
+            &format!(
+                "Speaking | {}: {}",
+                clamp_label(&active.source_label, 10),
+                clamp_label(&active.text, 50)
+            ),
+            palette.text_primary,
+        );
+    } else {
+        canvas.draw_text(18, 60, "Speech queue idle", palette.text_secondary);
+    }
+    canvas.draw_text(
+        18,
+        80,
+        &format!(
+            "Pending {} | coalesced {} | dropped {}",
+            speech.pending.len(),
+            speech.coalesced_count,
+            speech.dropped_count
+        ),
+        palette.text_muted,
+    );
+
+    if events.is_empty() {
+        canvas.draw_text(18, 104, "No captions queued", palette.text_secondary);
+    }
+
+    for (index, event) in events.iter().rev().take(3).enumerate() {
+        let rect = Rect::new(
+            14,
+            98 + (index as i32 * 18),
+            width.saturating_sub(28) as u32,
+            16,
+        );
+        canvas.fill_rect(rect, palette.window_bg);
+        canvas.draw_text(
+            rect.x + 6,
+            rect.y + 3,
+            &format!(
+                "{}: {}",
+                clamp_label(&event.source_label, 10),
+                clamp_label(&event.text, 54)
+            ),
+            if index == 0 {
+                palette.text_primary
+            } else {
+                palette.text_secondary
+            },
+        );
+    }
+
     canvas.into_pixels()
 }
 
@@ -7594,27 +10386,91 @@ fn paint_stage_rail_surface(
         );
         canvas.draw_text(rect.x + 10, rect.y + 8, &set.name, palette.text_primary);
         canvas.draw_text(
+            rect.right() - 106,
+            rect.y + 8,
+            &format!("M{}", set.monitor_id.saturating_add(1)),
+            palette.text_muted,
+        );
+        canvas.draw_text(
             rect.x + 10,
             rect.y + 24,
             &format!(
-                "{}",
+                "{}{}",
                 if set.window_ids.is_empty() {
                     String::from("empty workspace")
                 } else {
                     format!("{} windows", set.window_ids.len())
-                }
+                },
+                if set.snap_groups.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Â· {} snap", set.snap_groups.len())
+                },
             ),
             palette.text_secondary,
         );
         if set.pinned {
             canvas.draw_text(rect.right() - 56, rect.y + 8, "Pin", palette.accent_gold);
         }
+        let preview = Rect::new(rect.right() - 138, rect.y + 10, 70, 36);
+        canvas.fill_rect(preview, palette.window_bg);
+        canvas.stroke_rect(
+            preview,
+            if selected {
+                palette.accent_blue
+            } else {
+                palette.border
+            },
+        );
+        if set.snap_groups.is_empty() {
+            let count = set.window_ids.len().min(3);
+            for slot in 0..count {
+                let ghost = Rect::new(
+                    preview.x + 8 + slot as i32 * 10,
+                    preview.y + 8 + slot as i32 * 4,
+                    20,
+                    14,
+                );
+                canvas.fill_rect(ghost, 0xFF223244);
+                canvas.stroke_rect(ghost, palette.border);
+            }
+        } else {
+            for group in set.snap_groups.iter().take(3) {
+                let mini = match group.template {
+                    SnapTemplate::LeftHalf => Rect::new(preview.x + 4, preview.y + 4, 28, 28),
+                    SnapTemplate::RightHalf => {
+                        Rect::new(preview.right() - 32, preview.y + 4, 28, 28)
+                    }
+                    SnapTemplate::TopHalf => Rect::new(preview.x + 4, preview.y + 4, 62, 12),
+                    SnapTemplate::BottomHalf => {
+                        Rect::new(preview.x + 4, preview.bottom() - 16, 62, 12)
+                    }
+                    SnapTemplate::TopLeftQuarter => Rect::new(preview.x + 4, preview.y + 4, 28, 12),
+                    SnapTemplate::TopRightQuarter => {
+                        Rect::new(preview.right() - 32, preview.y + 4, 28, 12)
+                    }
+                    SnapTemplate::BottomLeftQuarter => {
+                        Rect::new(preview.x + 4, preview.bottom() - 16, 28, 12)
+                    }
+                    SnapTemplate::BottomRightQuarter => {
+                        Rect::new(preview.right() - 32, preview.bottom() - 16, 28, 12)
+                    }
+                    SnapTemplate::LeftThird => Rect::new(preview.x + 4, preview.y + 4, 18, 28),
+                    SnapTemplate::CenterThird => Rect::new(preview.x + 26, preview.y + 4, 18, 28),
+                    SnapTemplate::RightThird => {
+                        Rect::new(preview.right() - 22, preview.y + 4, 18, 28)
+                    }
+                };
+                canvas.fill_rect(mini, palette.accent_mint);
+                canvas.stroke_rect(mini, palette.text_primary);
+            }
+        }
     }
 
     canvas.draw_text(
         14,
         max(height as i32 - 20, 0),
-        "Click or 1-8 to activate",
+        "Click or 1-8 to activate Â· live layout preview",
         palette.text_muted,
     );
     canvas.into_pixels()
@@ -7622,15 +10478,18 @@ fn paint_stage_rail_surface(
 struct Canvas {
     width: usize,
     height: usize,
-    pixels: Vec<u32>,
+    pixels: SurfacePixelBuffer,
 }
 
 impl Canvas {
     fn new(width: usize, height: usize, background: u32) -> Self {
+        let mut pixels = alloc_surface_pixels(width, height, SurfacePixelFormat::Argb8888)
+            .unwrap_or_else(|_| SurfacePixelBuffer::Heap(vec![0; width.saturating_mul(height)]));
+        pixels.as_mut_slice().fill(background);
         Self {
             width,
             height,
-            pixels: vec![background; width.saturating_mul(height)],
+            pixels,
         }
     }
 
@@ -7639,10 +10498,11 @@ impl Canvas {
         let Some(clipped) = rect.intersection(&clip) else {
             return;
         };
+        let pixels = self.pixels.as_mut_slice();
         for y in clipped.y.max(0) as usize..clipped.bottom().max(0) as usize {
             let row = y * self.width;
             for x in clipped.x.max(0) as usize..clipped.right().max(0) as usize {
-                self.pixels[row + x] = color;
+                pixels[row + x] = color;
             }
         }
     }
@@ -7676,6 +10536,46 @@ impl Canvas {
                     self.draw_char(cursor_x, cursor_y, ch, color);
                     cursor_x += FONT_WIDTH;
                 }
+            }
+        }
+    }
+
+    fn draw_argb_bitmap(&mut self, x: i32, y: i32, width: u32, height: u32, pixels: &[u32]) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let expected = width as usize * height as usize;
+        if pixels.len() != expected {
+            return;
+        }
+
+        for row in 0..height as usize {
+            let dst_y = y + row as i32;
+            if dst_y < 0 || dst_y >= self.height as i32 {
+                continue;
+            }
+            let src_row = row * width as usize;
+            for col in 0..width as usize {
+                let dst_x = x + col as i32;
+                if dst_x < 0 || dst_x >= self.width as i32 {
+                    continue;
+                }
+                let src = pixels[src_row + col];
+                let alpha = ((src >> 24) & 0xFF) as u32;
+                if alpha == 0 {
+                    continue;
+                }
+                let index = dst_y as usize * self.width + dst_x as usize;
+                if alpha == 0xFF {
+                    self.pixels.as_mut_slice()[index] = src;
+                    continue;
+                }
+                let dst = self.pixels.as_slice()[index];
+                let inv = 255 - alpha;
+                let r = (((src >> 16) & 0xFF) * alpha + ((dst >> 16) & 0xFF) * inv) / 255;
+                let g = (((src >> 8) & 0xFF) * alpha + ((dst >> 8) & 0xFF) * inv) / 255;
+                let b = ((src & 0xFF) * alpha + (dst & 0xFF) * inv) / 255;
+                self.pixels.as_mut_slice()[index] = 0xFF00_0000 | (r << 16) | (g << 8) | b;
             }
         }
     }
@@ -7719,13 +10619,34 @@ impl Canvas {
                     continue;
                 }
                 let index = py as usize * self.width + px as usize;
-                self.pixels[index] = color;
+                self.pixels.as_mut_slice()[index] = color;
             }
         }
     }
 
+    fn pixels(&self) -> &[u32] {
+        self.pixels.as_slice()
+    }
+
     fn into_pixels(self) -> Vec<u32> {
-        self.pixels
+        match self.pixels {
+            SurfacePixelBuffer::Heap(pixels) => pixels,
+            SurfacePixelBuffer::PageBacked(pixels) => {
+                let bytes = pixels.len().saturating_mul(core::mem::size_of::<u32>());
+                if alloc_snapshot_clone(bytes, "gfx.canvas.into_vec").is_err() {
+                    crate::serial_println!(
+                        "[ALLOC_DOCTRINE] forced bounded canvas snapshot fallback bytes={}",
+                        bytes
+                    );
+                }
+                let mut cloned = Vec::new();
+                if cloned.try_reserve_exact(pixels.len()).is_err() {
+                    return Vec::new();
+                }
+                cloned.extend_from_slice(pixels.as_slice());
+                cloned
+            }
+        }
     }
 }
 

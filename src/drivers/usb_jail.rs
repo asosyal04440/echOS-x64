@@ -422,7 +422,9 @@ impl XhciJailController {
 
         let _setup = XhciTrb::setup(request_type, request, value, index, buffer.len() as u16);
         let _data = if !buffer.is_empty() {
-            let buf_phys = crate::memory::virt_to_phys_u64(buffer.as_ptr() as u64);
+            let vaddr = buffer.as_ptr() as u64;
+            let buf_phys = crate::memory::try_virt_to_phys_u64(vaddr)
+                .ok_or("Control transfer buffer is not mapped for DMA")?;
             Some(XhciTrb::data(buf_phys, buffer.len() as u32, true))
         } else {
             None

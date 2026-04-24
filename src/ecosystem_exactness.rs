@@ -132,38 +132,41 @@ mod tests {
         record_posix_unsupported("pread64");
         record_ironshim_unsupported(String::from("win32:req=99"));
         let snapshot = snapshot();
-        assert!(
-            snapshot
-                .runtime_counters
-                .iter()
-                .any(|entry| entry.kind == ExactnessSurfaceKind::Win32StubExport
-                    && entry.subject == "kernel32!CreateFile2"
-                    && entry.count == 2)
-        );
-        assert!(
-            snapshot
-                .runtime_counters
-                .iter()
-                .any(|entry| entry.kind == ExactnessSurfaceKind::PosixUnsupported
-                    && entry.subject == "pread64")
-        );
-        assert!(
-            snapshot
-                .runtime_counters
-                .iter()
-                .any(|entry| entry.kind == ExactnessSurfaceKind::IronShimUnsupported
-                    && entry.subject == "win32:req=99")
-        );
+        assert!(snapshot
+            .runtime_counters
+            .iter()
+            .any(|entry| entry.kind == ExactnessSurfaceKind::Win32StubExport
+                && entry.subject == "kernel32!CreateFile2"
+                && entry.count == 2));
+        assert!(snapshot
+            .runtime_counters
+            .iter()
+            .any(|entry| entry.kind == ExactnessSurfaceKind::PosixUnsupported
+                && entry.subject == "pread64"));
+        assert!(snapshot.runtime_counters.iter().any(|entry| entry.kind
+            == ExactnessSurfaceKind::IronShimUnsupported
+            && entry.subject == "win32:req=99"));
     }
 
     #[test]
-    fn strict_snapshot_is_green_when_runtime_counters_are_clear() {
+    fn strict_snapshot_fails_closed_on_declared_behavior_boundaries() {
         reset_runtime_counters();
         let snapshot = snapshot();
         assert_eq!(snapshot.declared_win32_stub_exports, 0);
-        assert!(snapshot.known_behavior_boundaries.is_empty());
+        assert!(snapshot
+            .known_behavior_boundaries
+            .iter()
+            .any(|entry| entry.starts_with("browser-runtime-graph:")));
+        assert!(snapshot
+            .known_behavior_boundaries
+            .iter()
+            .any(|entry| entry.starts_with("dxgi-present-completion:")));
+        assert!(snapshot
+            .known_behavior_boundaries
+            .iter()
+            .any(|entry| entry.starts_with("dxgi-translation-profile:")));
         assert!(snapshot.runtime_counters.is_empty());
-        assert!(snapshot.strict_ready);
+        assert!(!snapshot.strict_ready);
     }
 
     #[test]
@@ -172,14 +175,12 @@ mod tests {
         record_posix_unsupported("poll");
         let snapshot = snapshot();
         assert!(!snapshot.strict_ready);
-        assert!(
-            snapshot
-                .runtime_counters
-                .iter()
-                .any(|entry| entry.kind == ExactnessSurfaceKind::PosixUnsupported
-                    && entry.subject == "poll"
-                    && entry.count == 1)
-        );
+        assert!(snapshot
+            .runtime_counters
+            .iter()
+            .any(|entry| entry.kind == ExactnessSurfaceKind::PosixUnsupported
+                && entry.subject == "poll"
+                && entry.count == 1));
         reset_runtime_counters();
     }
 }

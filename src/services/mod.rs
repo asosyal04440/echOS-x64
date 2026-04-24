@@ -31,7 +31,8 @@ pub mod ech_store;
 
 pub use at_spi::{get_bridge as get_at_spi_bridge, AtSpiBridge, AtSpiEvent};
 pub use ech_audio::{
-    AudioChannel, AudioCommand, AudioEffect, AudioFormat, AudioResponse, EchAudio,
+    AudioChannel, AudioCommand, AudioEffect, AudioError, AudioErrorKind, AudioFormat,
+    AudioResponse, EchAudio,
 };
 pub use ech_capture::{CaptureCommand, CaptureResponse, EchCapture};
 pub use ech_clipboard::{ClipboardCommand, ClipboardResponse, EchClipboard};

@@ -168,7 +168,9 @@ impl LockedTlsf {
         if lock.is_none() {
             *lock = Some(Tlsf::new());
         }
-        let tlsf = lock.as_mut().unwrap();
+        let Some(tlsf) = lock.as_mut() else {
+            return;
+        };
 
         let slice_ptr = core::ptr::slice_from_raw_parts_mut(ptr, size);
         if let Some(nonnull_slice) = NonNull::new(slice_ptr) {
@@ -296,7 +298,9 @@ impl LockedTlsf {
         if lock.is_none() {
             *lock = Some(Tlsf::new());
         }
-        let tlsf = lock.as_mut().unwrap();
+        let Some(tlsf) = lock.as_mut() else {
+            return core::ptr::null_mut();
+        };
         match tlsf.allocate(layout) {
             Some(ptr) => ptr.as_ptr(),
             None => core::ptr::null_mut(),

@@ -38,8 +38,8 @@
 //!  └──────────────────────────────────────────┘
 //! ```
 
-use alloc::collections::BTreeMap;
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -315,13 +315,9 @@ impl AddressWaitManager {
             }
         }
 
-        self.wake_records.lock().insert(
-            waiter.task_id,
-            WakeRecord {
-                reason,
-                addr,
-            },
-        );
+        self.wake_records
+            .lock()
+            .insert(waiter.task_id, WakeRecord { reason, addr });
 
         if let Some(task) = waiter.task.take() {
             wake_blocked_task(task);
@@ -455,10 +451,12 @@ fn block_on_addresses(addresses: &[u64], bitset: u32, deadline_tick: Option<u64>
     };
     ADDRESS_WAIT_MANAGER.enqueue(task_id, task, addresses, bitset, deadline_tick);
     schedule();
-    ADDRESS_WAIT_MANAGER.take_record(task_id).unwrap_or(WakeRecord {
-        reason: WakeReason::TimedOut,
-        addr: addresses.first().copied().unwrap_or(0),
-    })
+    ADDRESS_WAIT_MANAGER
+        .take_record(task_id)
+        .unwrap_or(WakeRecord {
+            reason: WakeReason::TimedOut,
+            addr: addresses.first().copied().unwrap_or(0),
+        })
 }
 
 // ============================================================================
@@ -835,8 +833,9 @@ pub fn sys_futex_waitv(waiters_ptr: u64, waiters_len: u32, flags: u32, timeout_n
         return -22;
     }
 
-    let waiters =
-        unsafe { core::slice::from_raw_parts(waiters_ptr as *const FutexWaitV, waiters_len as usize) };
+    let waiters = unsafe {
+        core::slice::from_raw_parts(waiters_ptr as *const FutexWaitV, waiters_len as usize)
+    };
     let mut addresses = Vec::with_capacity(waiters.len());
     for waiter in waiters {
         let expected = waiter.val as u32;

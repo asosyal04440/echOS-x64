@@ -164,13 +164,7 @@ impl Ed25519PublicKey {
         let s_check = s_hasher.finalize();
         expected_s.copy_from_slice(&s_check[..32]);
 
-        // Sabit zamanlı karşılaştırma
-        let mut diff = 0u8;
-        for i in 0..32 {
-            diff |= s_bytes[i] ^ expected_s[i];
-        }
-
-        diff == 0
+        crate::crypto::constant_time_eq(s_bytes, &expected_s)
     }
 }
 

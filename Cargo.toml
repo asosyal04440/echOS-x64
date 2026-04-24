@@ -60,6 +60,8 @@ embedded-graphics = "0.8"
 embedded-graphics-core = "0.4"
 cosmic-text = { version = "0.18.2", default-features = false, features = ["no_std", "shape-run-cache", "monospace_fallback"] }
 swash = { version = "0.2.6", default-features = false, features = ["render", "libm"] }
+qoi = { version = "0.4.1", default-features = false, features = ["alloc"] }
+tinybmp = { version = "0.7.0", default-features = false }
 # PS/2 fare protokolü sürücüsü - fare hareketini ve tıklamalarını okur
 ps2-mouse = "0.1"
 # RLSF (Real-time Lock-free memory allocator) - no_std ortamında heap yönetimi
@@ -175,6 +177,12 @@ simics = []
 ##   cargo build --features valkyrie
 ## Enables direct integration with Valkyrie-V Type-1 hypervisor.
 valkyrie = []
+## Legacy weak IPsec ciphers (DES/3DES) are disabled by default.
+## Enable only for controlled interoperability/testing environments.
+ipsec_legacy_weak_crypto = []
+## Legacy local RSA private-op lane (BigInt mod_pow/CRT signing) is disabled by default.
+## Keep off in production builds; active sign lane remains RustCrypto rsa crate.
+rsa_legacy_private_ops = []
 heap_stats = []
 serial_debug = []
 stress_test = []

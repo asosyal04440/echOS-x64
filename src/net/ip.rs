@@ -124,7 +124,9 @@ pub fn reassemble_fragment(header: &Ipv4Header, payload: &[u8]) -> Option<Vec<u8
     });
 
     // Parça verisini tampona kopyala
-    let end = offset_bytes + payload.len();
+    let Some(end) = offset_bytes.checked_add(payload.len()) else {
+        return None;
+    };
     if end > entry.buffer.len() {
         return None; // Tampon sınırı aşıldı
     }
@@ -132,7 +134,10 @@ pub fn reassemble_fragment(header: &Ipv4Header, payload: &[u8]) -> Option<Vec<u8
 
     // Alınan ofsetleri işaretle (8 byte bloklar halinde)
     let block_start = offset_bytes / 8;
-    let block_end = (end + 7) / 8;
+    let block_end = match end.checked_add(7) {
+        Some(value) => value / 8,
+        None => return None,
+    };
     for i in block_start..block_end.min(entry.received_mask.len()) {
         entry.received_mask[i] = true;
     }
@@ -255,8 +260,13 @@ impl Ipv4Header {
         let dst = Ipv4Addr::from_bytes([data[16], data[17], data[18], data[19]]);
 
         // Verify checksum
-        let header_len = (ihl as usize) * 4;
+        let Some(header_len) = (ihl as usize).checked_mul(4) else {
+            return Err(NetError::InvalidPacket);
+        };
         if data.len() < header_len {
+            return Err(NetError::InvalidPacket);
+        }
+        if total_length < header_len as u16 || total_length as usize > data.len() {
             return Err(NetError::InvalidPacket);
         }
 
@@ -336,7 +346,7 @@ impl Ipv4Header {
 
     /// Başlık uzunluğunu bayt cinsinden döner (IHL × 4).
     pub fn header_len(&self) -> usize {
-        (self.ihl as usize) * 4
+        (self.ihl as usize).saturating_mul(4)
     }
 
     /// Yük (payload) uzunluğunu döner (toplam_uzunluk - başlık_uzunluğu).
@@ -875,4 +885,57 @@ pub fn icmp_process(packet: &Ipv4Packet) -> Result<(), NetError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ipv4_header_with_total(total_length: u16, ihl: u8) -> Vec<u8> {
+        let header_len = (ihl as usize).saturating_mul(4).max(Ipv4Header::MIN_SIZE);
+        let mut packet = vec![0u8; header_len];
+        packet[0] = (4 << 4) | ihl;
+        packet[2..4].copy_from_slice(&total_length.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = IpProtocol::UDP as u8;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        packet[16..20].copy_from_slice(&[192, 0, 2, 2]);
+        let checksum = compute_checksum(&packet[..header_len]);
+        packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn ipv4_parse_rejects_total_length_smaller_than_header() {
+        let packet = ipv4_header_with_total(19, 5);
+
+        assert_eq!(
+            Ipv4Header::parse(&packet).unwrap_err(),
+            NetError::InvalidPacket
+        );
+    }
+
+    #[test]
+    fn ipv4_parse_rejects_header_length_beyond_buffer() {
+        let packet = ipv4_header_with_total(60, 15);
+
+        assert_eq!(
+            Ipv4Header::parse(&packet[..Ipv4Header::MIN_SIZE]).unwrap_err(),
+            NetError::InvalidPacket
+        );
+    }
+
+    #[test]
+    fn reassemble_fragment_rejects_offset_payload_past_ipv4_limit() {
+        let mut header = Ipv4Header::new(
+            Ipv4Addr::new(192, 0, 2, 1),
+            Ipv4Addr::new(192, 0, 2, 2),
+            IpProtocol::UDP,
+            20,
+        );
+        header.fragment_offset = 8191;
+        header.flags = 0;
+
+        assert!(reassemble_fragment(&header, &[0u8; 16]).is_none());
+    }
 }

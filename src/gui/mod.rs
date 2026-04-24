@@ -31,4 +31,5 @@ pub mod scroll_physics;
 pub mod shell;
 pub mod text;
 pub mod theme;
+pub mod wallpaper;
 pub mod widgets;

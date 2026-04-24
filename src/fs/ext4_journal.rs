@@ -57,6 +57,77 @@ const JBD2_LOCKED: u32 = 1;
 const JBD2_FLUSHING: u32 = 2;
 const JBD2_COMMITTING: u32 = 3;
 const JBD2_FINISHED: u32 = 4;
+const JOURNAL_CHECKSUM_TYPE_CRC32: u8 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JournalCommitPhase {
+    Idle,
+    DescriptorsWritten,
+    DataWritten,
+    CommitWritten,
+    Checkpointed,
+}
+
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn checksum_slot(block_size: usize) -> Option<usize> {
+    block_size.checked_sub(4)
+}
+
+fn journal_block_checksum(block: &[u8], block_size: usize) -> Option<u32> {
+    let slot = checksum_slot(block_size)?;
+    if block.len() < block_size || slot + 4 > block.len() {
+        return None;
+    }
+    let mut scratch = Vec::with_capacity(block_size);
+    scratch.extend_from_slice(&block[..block_size]);
+    scratch[slot..slot + 4].fill(0);
+    Some(crc32_ieee(&scratch))
+}
+
+fn stamp_journal_block_checksum(block: &mut [u8], block_size: usize) -> Result<u32, JournalError> {
+    let slot = checksum_slot(block_size).ok_or(JournalError::ChecksumError)?;
+    if block.len() < block_size || slot + 4 > block.len() {
+        return Err(JournalError::ChecksumError);
+    }
+    block[slot..slot + 4].fill(0);
+    let checksum = crc32_ieee(&block[..block_size]);
+    block[slot..slot + 4].copy_from_slice(&checksum.to_be_bytes());
+    Ok(checksum)
+}
+
+fn verify_journal_block_checksum(block: &[u8], block_size: usize) -> Result<(), JournalError> {
+    let slot = checksum_slot(block_size).ok_or(JournalError::ChecksumError)?;
+    if block.len() < block_size || slot + 4 > block.len() {
+        return Err(JournalError::ChecksumError);
+    }
+    let stored = u32::from_be_bytes([
+        block[slot],
+        block[slot + 1],
+        block[slot + 2],
+        block[slot + 3],
+    ]);
+    if stored == 0 {
+        return Ok(());
+    }
+    let calculated =
+        journal_block_checksum(block, block_size).ok_or(JournalError::ChecksumError)?;
+    if calculated == stored {
+        Ok(())
+    } else {
+        Err(JournalError::ChecksumError)
+    }
+}
 
 // ============================================================================
 // GÜNLÜK SÜPER BLOĞU
@@ -150,6 +221,14 @@ impl JournalSuperblock {
         Some(sb)
     }
 
+    pub fn parse_checked(data: &[u8], block_size: usize) -> Result<Self, JournalError> {
+        if data.len() < block_size {
+            return Err(JournalError::InvalidSuperblock);
+        }
+        verify_journal_block_checksum(&data[..block_size], block_size)?;
+        Self::parse(&data[..block_size]).ok_or(JournalError::InvalidSuperblock)
+    }
+
     /// Süper bloğu bayt dizisine serileştirir (big-endian format)
     pub fn serialize(&self) -> Vec<u8> {
         let mut data = vec![0u8; core::mem::size_of::<JournalSuperblock>()];
@@ -176,6 +255,17 @@ impl JournalSuperblock {
         data[88..92].copy_from_slice(&self.s_nr_revokes.to_be_bytes());
 
         data
+    }
+
+    pub fn serialize_block_checked(&self, block_size: usize) -> Result<Vec<u8>, JournalError> {
+        if block_size < core::mem::size_of::<JournalSuperblock>().saturating_add(4) {
+            return Err(JournalError::InvalidSuperblock);
+        }
+        let mut data = vec![0u8; block_size];
+        let sb = self.serialize();
+        data[..sb.len()].copy_from_slice(&sb);
+        stamp_journal_block_checksum(&mut data, block_size)?;
+        Ok(data)
     }
 }
 
@@ -308,7 +398,7 @@ impl CommitBlock {
                 h_blocktype: JBD2_COMMIT_BLOCK,
                 h_sequence: sequence,
             },
-            h_chksum_type: 1, // CRC32
+            h_chksum_type: JOURNAL_CHECKSUM_TYPE_CRC32,
             h_chksum_size: 4,
             h_padding: [0; 2],
             h_chksum: [0; 32],
@@ -326,6 +416,12 @@ impl CommitBlock {
         data[16..48].copy_from_slice(&self.h_chksum);
 
         data
+    }
+
+    pub fn serialize_checked(&self, block_size: usize) -> Result<Vec<u8>, JournalError> {
+        let mut data = self.serialize(block_size);
+        stamp_journal_block_checksum(&mut data, block_size)?;
+        Ok(data)
     }
 }
 
@@ -490,8 +586,8 @@ impl JournalHandle {
 
 impl Drop for JournalHandle {
     fn drop(&mut self) {
-        // Kullanılmayan kredileri serbest bırak
-        // Gerçek uygulamada günlük durumu güncellenirdi
+        // JournalHandle is an ownership marker; the live transaction state is updated
+        // through Journal::commit_transaction/abort_transaction.
     }
 }
 
@@ -516,6 +612,8 @@ pub struct Journal {
     pub running_trans: u32,
     /// Günlük tamponu
     buffer: Vec<u8>,
+    /// Commit/checkpoint sırası için son tamamlanan faz.
+    commit_phase: JournalCommitPhase,
 }
 
 impl Journal {
@@ -537,6 +635,7 @@ impl Journal {
             sequence: 1,
             running_trans: 0,
             buffer: vec![0u8; block_size as usize],
+            commit_phase: JournalCommitPhase::Idle,
         }
     }
 
@@ -548,8 +647,8 @@ impl Journal {
             return Err(JournalError::InvalidOffset);
         }
 
-        let sb = JournalSuperblock::parse(&device_data[offset..])
-            .ok_or(JournalError::InvalidSuperblock)?;
+        let sb =
+            JournalSuperblock::parse_checked(&device_data[offset..], self.block_size as usize)?;
 
         self.superblock = sb;
         self.sequence = sb.s_sequence as u64;
@@ -566,8 +665,6 @@ impl Journal {
     /// Yeni bir işlem başlatır; çalışan işlem varsa hata döner
     pub fn start_transaction(&mut self, credits: usize) -> Result<JournalHandle, JournalError> {
         if self.running_trans > 0 {
-            // Mevcut işlemin tamamlanmasını bekle
-            // Gerçek uygulamada bloklanırdı
             return Err(JournalError::TransactionRunning);
         }
 
@@ -651,36 +748,95 @@ impl Journal {
 
     /// Tanımlayıcı bloklarını günlük bölgesine yazar
     fn write_descriptors(&mut self, trans: &Transaction) -> Result<(), JournalError> {
-        // Gerçek uygulamada günlük bölgesine yazılırdı
-        let _ = trans;
+        self.commit_phase = JournalCommitPhase::Idle;
+        let block_size = self.block_size as usize;
+        self.buffer.clear();
+        let mut descriptor = vec![0u8; block_size];
+        let header = JournalHeader {
+            h_magic: JBD2_MAGIC,
+            h_blocktype: JBD2_DESCRIPTOR_BLOCK,
+            h_sequence: trans.tid as u32,
+        };
+        descriptor[0..12].copy_from_slice(&header.serialize());
+        let mut offset = 12usize;
+        for block in trans.blocks.iter().take(16) {
+            if offset + 8 > block_size.saturating_sub(4) {
+                break;
+            }
+            descriptor[offset..offset + 4].copy_from_slice(&block.block_nr.to_be_bytes());
+            descriptor[offset + 4..offset + 6].copy_from_slice(&0u16.to_be_bytes());
+            let tag_checksum = crc32_ieee(&block.data).to_be_bytes();
+            descriptor[offset + 6..offset + 8].copy_from_slice(&tag_checksum[2..4]);
+            offset += 8;
+        }
+        stamp_journal_block_checksum(&mut descriptor, block_size)?;
+        self.buffer.extend_from_slice(&descriptor);
+        self.commit_phase = JournalCommitPhase::DescriptorsWritten;
         Ok(())
     }
 
     /// Veri bloklarını günlüğe yazar
     fn write_data_blocks(&mut self, trans: &Transaction) -> Result<(), JournalError> {
-        // Gerçek uygulamada bloklar günlüğe yazılırdı
-        let _ = trans;
+        if self.commit_phase != JournalCommitPhase::DescriptorsWritten {
+            return Err(JournalError::WriteError);
+        }
+        let block_size = self.block_size as usize;
+        for block in &trans.blocks {
+            if block.data.len() > block_size.saturating_sub(4) {
+                return Err(JournalError::WriteError);
+            }
+            let mut journal_block = vec![0u8; block_size];
+            journal_block[..block.data.len()].copy_from_slice(&block.data);
+            stamp_journal_block_checksum(&mut journal_block, block_size)?;
+            self.buffer.extend_from_slice(&journal_block);
+        }
+        self.commit_phase = JournalCommitPhase::DataWritten;
         Ok(())
     }
 
     /// Teslim bloğunu yazar (crash-safe nokta)
     fn write_commit_block(&mut self, trans: &Transaction) -> Result<(), JournalError> {
+        if self.commit_phase != JournalCommitPhase::DataWritten {
+            return Err(JournalError::WriteError);
+        }
         let commit = CommitBlock::new(trans.tid as u32);
-        let _data = commit.serialize(self.block_size as usize);
-        // Günlüğe yazılacak
+        let data = commit.serialize_checked(self.block_size as usize)?;
+        self.buffer.extend_from_slice(&data);
+        self.commit_phase = JournalCommitPhase::CommitWritten;
         Ok(())
     }
 
     /// Checkpoint - blokları dosya sistemindeki asıl konumlarına yazar
     fn checkpoint(&mut self, trans: &Transaction) -> Result<(), JournalError> {
-        // Gerçek uygulamada bloklar dosya sistemine yazılırdı
-        let _ = trans;
+        if self.commit_phase != JournalCommitPhase::CommitWritten {
+            return Err(JournalError::WriteError);
+        }
+        if trans
+            .blocks
+            .iter()
+            .any(|block| block.data.len() > self.block_size as usize)
+        {
+            return Err(JournalError::WriteError);
+        }
+        self.commit_phase = JournalCommitPhase::Checkpointed;
         Ok(())
     }
 
     /// Süper bloğu güncel sıralı numara ile günceller
     fn update_superblock(&mut self) -> Result<(), JournalError> {
+        if self.commit_phase != JournalCommitPhase::Checkpointed {
+            return Err(JournalError::WriteError);
+        }
         self.superblock.s_sequence = self.sequence as u32;
+        self.superblock.s_start = 0;
+        let sb_block = self
+            .superblock
+            .serialize_block_checked(self.block_size as usize)?;
+        if self.buffer.len() < sb_block.len() {
+            self.buffer.resize(sb_block.len(), 0);
+        }
+        self.buffer[..sb_block.len()].copy_from_slice(&sb_block);
+        self.commit_phase = JournalCommitPhase::Idle;
         Ok(())
     }
 
@@ -693,6 +849,7 @@ impl Journal {
 
     /// Mount sırasında günlüğü kurtarır: tamamlanmış işlemleri tekrar oynatır
     pub fn recover(&mut self, device_data: &[u8]) -> Result<(), JournalError> {
+        self.validate_superblock_bounds(device_data)?;
         let start = self.superblock.s_start;
         let sequence = self.superblock.s_sequence;
 
@@ -713,8 +870,10 @@ impl Journal {
             }
 
             let block_data = &device_data[offset as usize..];
+            let block = &block_data[..self.block_size as usize];
+            verify_journal_block_checksum(block, self.block_size as usize)?;
 
-            if let Some(header) = JournalHeader::parse(block_data) {
+            if let Some(header) = JournalHeader::parse(block) {
                 match header.h_blocktype {
                     JBD2_DESCRIPTOR_BLOCK => {
                         // İşlem başlangıcı bulundu
@@ -759,6 +918,26 @@ impl Journal {
         Ok(())
     }
 
+    fn validate_superblock_bounds(&self, device_data: &[u8]) -> Result<(), JournalError> {
+        if self.superblock.s_blocksize != self.block_size {
+            return Err(JournalError::InvalidSuperblock);
+        }
+        if self.superblock.s_maxlen == 0 {
+            return Err(JournalError::InvalidSuperblock);
+        }
+        let start = self.journal_offset as usize;
+        let bytes = (self.superblock.s_maxlen as usize)
+            .checked_mul(self.block_size as usize)
+            .ok_or(JournalError::InvalidSuperblock)?;
+        let end = start
+            .checked_add(bytes)
+            .ok_or(JournalError::InvalidSuperblock)?;
+        if end > device_data.len() {
+            return Err(JournalError::InvalidSuperblock);
+        }
+        Ok(())
+    }
+
     /// Günlüğü klonlar (Arc<Mutex<Journal>> için gerekli)
     fn clone(&self) -> Self {
         Self {
@@ -769,6 +948,7 @@ impl Journal {
             sequence: self.sequence,
             running_trans: self.running_trans,
             buffer: self.buffer.clone(),
+            commit_phase: self.commit_phase,
         }
     }
 }
@@ -884,9 +1064,12 @@ pub fn replay_journal(journal_data: &[u8], block_size: usize) -> RecoveryResult 
     }
 
     // 1. Süperblok oku
-    let sb = match JournalSuperblock::parse(&journal_data[..block_size.min(journal_data.len())]) {
-        Some(sb) => sb,
-        None => {
+    let sb = match JournalSuperblock::parse_checked(
+        &journal_data[..block_size.min(journal_data.len())],
+        block_size,
+    ) {
+        Ok(sb) => sb,
+        Err(_) => {
             result.error_msg = String::from("Geçersiz journal superblock");
             return result;
         }
@@ -903,18 +1086,34 @@ pub fn replay_journal(journal_data: &[u8], block_size: usize) -> RecoveryResult 
     let mut offset = block_size; // İlk bloktan sonra başla
 
     while offset + block_size <= journal_data.len() {
+        let block = &journal_data[offset..offset + block_size];
+        if verify_journal_block_checksum(block, block_size).is_err() {
+            result.error_msg = String::from("Journal checksum uyumsuzluğu");
+            return result;
+        }
+
         // Header oku
-        if let Some(header) = JournalHeader::parse(&journal_data[offset..]) {
+        if let Some(header) = JournalHeader::parse(block) {
             match header.h_blocktype {
                 1 => {
                     // Descriptor Block
                     if header.h_sequence == current_seq {
-                        if let Some(desc) =
-                            DescriptorBlock::parse(&journal_data[offset..offset + block_size])
-                        {
+                        if let Some(desc) = DescriptorBlock::parse(block) {
                             for tag in &desc.block_tags {
+                                if tag.t_blocknr == 0 {
+                                    continue;
+                                }
                                 let data_offset = offset + block_size;
                                 if data_offset + block_size <= journal_data.len() {
+                                    let data_block =
+                                        &journal_data[data_offset..data_offset + block_size];
+                                    if verify_journal_block_checksum(data_block, block_size)
+                                        .is_err()
+                                    {
+                                        result.error_msg =
+                                            String::from("Journal data checksum uyumsuzluğu");
+                                        return result;
+                                    }
                                     replay_blocks.push((tag.t_blocknr, data_offset));
                                 }
                             }
@@ -930,9 +1129,7 @@ pub fn replay_journal(journal_data: &[u8], block_size: usize) -> RecoveryResult 
                 }
                 5 => {
                     // Revoke Block
-                    if let Some(revoke) =
-                        RevokeBlock::parse(&journal_data[offset..offset + block_size])
-                    {
+                    if let Some(revoke) = RevokeBlock::parse(block) {
                         for &blk in &revoke.r_entries {
                             revoked_blocks.push(blk);
                         }
@@ -951,15 +1148,9 @@ pub fn replay_journal(journal_data: &[u8], block_size: usize) -> RecoveryResult 
     replay_blocks.retain(|(blk, _)| !revoked_blocks.contains(blk));
     result.blocks_revoked = revoked_blocks.len() as u32;
 
-    // 4. REPLAY aşaması — blokları hedef konumlara yaz
+    // 4. REPLAY aşaması — buffer-only scanner hedef blok adaylarını raporlar
     result.phase = RecoveryPhase::Replay;
     result.blocks_replayed = replay_blocks.len() as u32;
-
-    // Gerçek disk yazımı burada yapılır
-    // (Simülasyon: sadece sayaçları güncelle)
-    for (_target_blk, _journal_offset) in &replay_blocks {
-        // disk_write(target_blk * block_size, &journal_data[journal_offset..journal_offset+block_size]);
-    }
 
     result.phase = RecoveryPhase::Complete;
     result.success = true;
@@ -991,17 +1182,110 @@ pub fn needs_recovery(journal_data: &[u8]) -> bool {
 /// Journal alanını geri kazanmak için tamamlanmış and diske yazılmış
 /// transaction'lar silinir.
 pub fn checkpoint(journal_data: &mut [u8], block_size: usize, up_to_seq: u32) {
-    if let Some(mut sb) = JournalSuperblock::parse(journal_data) {
+    if let Ok(mut sb) = JournalSuperblock::parse_checked(journal_data, block_size) {
         if sb.s_sequence <= up_to_seq {
             sb.s_start = 0; // Temiz işaretle
             sb.s_sequence = up_to_seq + 1;
 
             // Superblock'u geri yaz
-            let sb_data = sb.serialize();
+            let sb_data = match sb.serialize_block_checked(block_size) {
+                Ok(data) => data,
+                Err(_) => return,
+            };
             let len = sb_data.len().min(block_size);
             journal_data[..len].copy_from_slice(&sb_data[..len]);
 
             crate::serial_println!("[JBD2] Checkpoint: seq {} kadar temizlendi", up_to_seq);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checked_superblock_block(block_size: usize, sequence: u32, start: u32) -> Vec<u8> {
+        let mut sb: JournalSuperblock = unsafe { mem::zeroed() };
+        sb.s_header_h_magic = JBD2_MAGIC;
+        sb.s_header_h_blocktype = JBD2_SUPERBLOCK_V2;
+        sb.s_blocksize = block_size as u32;
+        sb.s_maxlen = 8;
+        sb.s_sequence = sequence;
+        sb.s_start = start;
+        sb.serialize_block_checked(block_size)
+            .expect("journal superblock checksum")
+    }
+
+    fn checked_descriptor_block(block_size: usize, sequence: u32, block_nr: u32) -> Vec<u8> {
+        let mut data = vec![0u8; block_size];
+        let header = JournalHeader {
+            h_magic: JBD2_MAGIC,
+            h_blocktype: JBD2_DESCRIPTOR_BLOCK,
+            h_sequence: sequence,
+        };
+        data[0..12].copy_from_slice(&header.serialize());
+        data[12..16].copy_from_slice(&block_nr.to_be_bytes());
+        stamp_journal_block_checksum(&mut data, block_size).expect("descriptor checksum");
+        data
+    }
+
+    fn checked_data_block(block_size: usize, seed: u8) -> Vec<u8> {
+        let mut data = vec![seed; block_size];
+        stamp_journal_block_checksum(&mut data, block_size).expect("data checksum");
+        data
+    }
+
+    fn checked_commit_block(block_size: usize, sequence: u32) -> Vec<u8> {
+        CommitBlock::new(sequence)
+            .serialize_checked(block_size)
+            .expect("commit checksum")
+    }
+
+    #[test]
+    fn journal_superblock_checksum_rejects_mutation() {
+        let block_size = 4096;
+        let mut block = checked_superblock_block(block_size, 7, 1);
+        assert!(JournalSuperblock::parse_checked(&block, block_size).is_ok());
+
+        block[20] ^= 0x55;
+        assert_eq!(
+            JournalSuperblock::parse_checked(&block, block_size).unwrap_err(),
+            JournalError::ChecksumError
+        );
+    }
+
+    #[test]
+    fn replay_journal_fails_on_data_checksum_mismatch() {
+        let block_size = 4096;
+        let mut image = Vec::new();
+        image.extend_from_slice(&checked_superblock_block(block_size, 1, 1));
+        image.extend_from_slice(&checked_descriptor_block(block_size, 1, 42));
+        image.extend_from_slice(&checked_data_block(block_size, 0xA5));
+        image.extend_from_slice(&checked_commit_block(block_size, 1));
+
+        let corrupt_at = block_size * 2 + 128;
+        image[corrupt_at] ^= 0x10;
+
+        let result = replay_journal(&image, block_size);
+        assert!(!result.success);
+        assert!(result.error_msg.contains("checksum"));
+    }
+
+    #[test]
+    fn commit_updates_superblock_only_after_checkpoint_phase() {
+        let block_size = 4096;
+        let mut journal = Journal::new(block_size as u32, 0, (block_size * 8) as u64);
+        journal.start_transaction(1).expect("start transaction");
+        journal
+            .add_block(11, &[0x5A; 128], true)
+            .expect("add journal block");
+        journal.commit_transaction().expect("commit transaction");
+
+        assert_eq!(journal.commit_phase, JournalCommitPhase::Idle);
+        assert_eq!(journal.superblock.s_start, 0);
+        assert_eq!(journal.superblock.s_sequence, 2);
+        assert!(
+            JournalSuperblock::parse_checked(&journal.buffer[..block_size], block_size).is_ok()
+        );
     }
 }

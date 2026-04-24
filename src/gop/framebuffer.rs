@@ -1,20 +1,65 @@
 //! echOS GOP framebuffer wrapper.
 
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::allocator::doctrine::{alloc_surface_pixels, SurfacePixelBuffer, SurfacePixelFormat};
 #[cfg(test)]
 use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::font;
 use uefi::proto::console::gop::GraphicsOutput;
 
-#[derive(Clone)]
 pub struct Framebuffer {
     pub base_addr: usize,
     pub width: usize,
     pub height: usize,
     pub pixels_per_scan_line: usize,
-    shadow_buffer: Option<Vec<u32>>,
+    shadow_buffer: Option<SurfacePixelBuffer>,
+}
+
+impl Clone for Framebuffer {
+    fn clone(&self) -> Self {
+        let shadow_buffer = self.shadow_buffer.as_ref().map(|shadow| {
+            match alloc_surface_pixels(
+                self.pixels_per_scan_line.max(1),
+                self.height.max(1),
+                SurfacePixelFormat::Argb8888,
+            ) {
+                Ok(mut cloned) => {
+                    let copy_len = cloned.len().min(shadow.len());
+                    cloned.as_mut_slice()[..copy_len]
+                        .copy_from_slice(&shadow.as_slice()[..copy_len]);
+                    cloned
+                }
+                Err(error) => {
+                    crate::serial_println!(
+                        "[GOP] framebuffer clone doctrine fallback len={} err={:?}",
+                        shadow.len(),
+                        error
+                    );
+                    let snapshot = match shadow.snapshot_vec("gop.framebuffer.clone") {
+                        Ok(snapshot) => snapshot,
+                        Err(snapshot_error) => {
+                            crate::serial_println!(
+                                "[GOP] framebuffer clone snapshot fallback len={} err={:?}",
+                                shadow.len(),
+                                snapshot_error
+                            );
+                            shadow.as_slice().to_vec()
+                        }
+                    };
+                    SurfacePixelBuffer::Heap(snapshot)
+                }
+            }
+        });
+        Self {
+            base_addr: self.base_addr,
+            width: self.width,
+            height: self.height,
+            pixels_per_scan_line: self.pixels_per_scan_line,
+            shadow_buffer,
+        }
+    }
 }
 
 impl Framebuffer {
@@ -31,6 +76,31 @@ impl Framebuffer {
             height,
             pixels_per_scan_line: stride,
             shadow_buffer: None,
+        }
+    }
+
+    pub fn new_offscreen(width: usize, height: usize) -> Self {
+        let stride = width.max(1);
+        let mut backing =
+            match alloc_surface_pixels(stride, height.max(1), SurfacePixelFormat::Argb8888) {
+                Ok(backing) => backing,
+                Err(error) => {
+                    crate::serial_println!(
+                        "[GOP] offscreen framebuffer doctrine fallback width={} height={} err={:?}",
+                        stride,
+                        height.max(1),
+                        error
+                    );
+                    SurfacePixelBuffer::Heap(vec![0; stride.saturating_mul(height.max(1))])
+                }
+            };
+        let base_addr = backing.as_mut_ptr() as usize;
+        Self {
+            base_addr,
+            width: width.max(1),
+            height: height.max(1),
+            pixels_per_scan_line: stride,
+            shadow_buffer: Some(backing),
         }
     }
 
@@ -61,7 +131,7 @@ impl Framebuffer {
 
         let offset = self.offset(x, y);
         if let Some(shadow) = self.shadow_buffer.as_mut() {
-            shadow[offset] = color;
+            shadow.as_mut_slice()[offset] = color;
             return;
         }
 
@@ -72,7 +142,7 @@ impl Framebuffer {
 
     pub fn clear(&mut self, color: u32) {
         if let Some(shadow) = self.shadow_buffer.as_mut() {
-            for pixel in shadow.iter_mut() {
+            for pixel in shadow.as_mut_slice().iter_mut() {
                 *pixel = color;
             }
             return;
@@ -120,7 +190,7 @@ impl Framebuffer {
 
         let offset = self.offset(x, y);
         if let Some(shadow) = self.shadow_buffer.as_ref() {
-            return shadow[offset];
+            return shadow.as_slice()[offset];
         }
 
         unsafe { *((self.base_addr as *const u32).add(offset)) }
@@ -158,9 +228,13 @@ impl Framebuffer {
             for row in 0..visible_rows {
                 let dst = row * row_len;
                 let src = (row + scroll_rows) * row_len;
-                shadow.copy_within(src..src + row_len, dst);
+                shadow.as_mut_slice().copy_within(src..src + row_len, dst);
             }
-            for pixel in shadow.iter_mut().skip(visible_rows * row_len) {
+            for pixel in shadow
+                .as_mut_slice()
+                .iter_mut()
+                .skip(visible_rows * row_len)
+            {
                 *pixel = 0x000000;
             }
             return;
@@ -184,10 +258,12 @@ impl Framebuffer {
     }
 
     pub fn buffer_mut(&mut self) -> &mut [u32] {
-        if self.shadow_buffer.is_none() {
-            return self.front_buffer_mut();
+        if let Some(shadow) = self.shadow_buffer.as_mut() {
+            return shadow.as_mut_slice();
         }
-        self.shadow_buffer.as_mut().unwrap().as_mut_slice()
+
+        let len = self.pixels_per_scan_line.saturating_mul(self.height);
+        unsafe { core::slice::from_raw_parts_mut(self.base_addr as *mut u32, len) }
     }
 
     pub fn front_buffer(&self) -> &[u32] {
@@ -205,8 +281,26 @@ impl Framebuffer {
             return;
         }
 
-        let len = self.pixels_per_scan_line.saturating_mul(self.height);
-        let mut shadow = vec![0; len];
+        let mut shadow = match alloc_surface_pixels(
+            self.pixels_per_scan_line.max(1),
+            self.height.max(1),
+            SurfacePixelFormat::Argb8888,
+        ) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                crate::serial_println!(
+                    "[GOP] framebuffer shadow doctrine fallback width={} height={} stride={} err={:?}",
+                    self.width,
+                    self.height,
+                    self.pixels_per_scan_line,
+                    error
+                );
+                SurfacePixelBuffer::Heap(vec![
+                    0;
+                    self.pixels_per_scan_line.saturating_mul(self.height)
+                ])
+            }
+        };
         shadow.copy_from_slice(self.front_buffer());
         self.shadow_buffer = Some(shadow);
     }

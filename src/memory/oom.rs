@@ -72,7 +72,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
-use crate::task::scheduler::{current_task_id, get_ticks};
+use crate::task::scheduler::{current_task_id, get_ticks, TaskInfo};
 use crate::task::task::TaskId;
 
 // ============================================================================
@@ -251,6 +251,11 @@ impl OomState {
         now.saturating_sub(last)
     }
 
+    fn can_attempt_kill(&self) -> bool {
+        self.total_kills.load(Ordering::SeqCst) == 0
+            || self.ticks_since_last_kill() >= OOM_RECOVERY_WAIT_TICKS
+    }
+
     /// Kill geçmişini al
     pub fn get_kill_history(&self) -> Vec<OomKillRecord> {
         self.kill_history.lock().clone()
@@ -284,7 +289,12 @@ pub fn calculate_oom_score(info: &OomProcessInfo) -> u64 {
     }
 
     // OOM score adjustment uygula
-    let adj = OOM_STATE.get_oom_score_adj(info.pid);
+    let adj = if info.oom_score_adj == OOM_SCORE_ADJ_ROOT {
+        OOM_STATE.get_oom_score_adj(info.pid)
+    } else {
+        info.oom_score_adj
+    }
+    .clamp(OOM_SCORE_ADJ_MIN, OOM_SCORE_ADJ_MAX);
     let multiplier = 1000i64 + adj as i64;
 
     // Negatif adj düşük skor, pozitif adj yüksek skor
@@ -361,6 +371,33 @@ pub fn select_oom_victim(processes: &[OomProcessInfo]) -> Option<OomCandidate> {
     candidates.into_iter().next()
 }
 
+pub fn process_info_from_task(task: &TaskInfo) -> OomProcessInfo {
+    let measured_pages = task.rss_pages.saturating_add(task.swap_pages);
+    let committed_fallback = if measured_pages == 0 {
+        task.committed_pages.min(64)
+    } else {
+        0
+    };
+    OomProcessInfo {
+        pid: task.pid,
+        name: String::from(task.name),
+        rss_pages: task.rss_pages.max(committed_fallback),
+        swap_pages: task.swap_pages,
+        oom_score_adj: OOM_STATE.get_oom_score_adj(task.pid),
+        nice: match task.priority {
+            crate::task::Priority::High => -10,
+            crate::task::Priority::Normal => 0,
+            crate::task::Priority::Low => 10,
+            crate::task::Priority::Idle => 19,
+        },
+        runtime_ticks: task.runtime_ticks,
+        is_kernel: task.is_kernel,
+        is_root: task.pid <= 1,
+        children: task.children,
+        cpu_percent: task.cpu_usage as u64,
+    }
+}
+
 /// OOM killer'ı tetikle
 ///
 /// Bellek kritik seviyede olduğunda çağrılır.
@@ -371,7 +408,7 @@ pub fn select_oom_victim(processes: &[OomProcessInfo]) -> Option<OomCandidate> {
 /// - `None`: Öldürülecek process bulunamadı
 pub fn oom_kill(processes: &[OomProcessInfo]) -> Option<usize> {
     // Son kill'den sonra yeterli süre geçti mi?
-    if OOM_STATE.ticks_since_last_kill() < OOM_RECOVERY_WAIT_TICKS {
+    if !OOM_STATE.can_attempt_kill() {
         return None;
     }
 
@@ -385,8 +422,16 @@ pub fn oom_kill(processes: &[OomProcessInfo]) -> Option<usize> {
         victim.rss_pages
     );
 
-    // Process'i öldür
-    // Not: Gerçek implementation task manager ile entegre olmalı
+    // Process'i terminate et (SIGKILL)
+    if let Err(error) = crate::task::scheduler::kill_task(victim.pid, 9) {
+        crate::serial_println!(
+            "[OOM] Kill candidate PID {} disappeared before SIGKILL: {}",
+            victim.pid,
+            error
+        );
+        return None;
+    }
+
     let freed_pages = victim.rss_pages;
 
     // Kill kaydı tut
@@ -398,9 +443,6 @@ pub fn oom_kill(processes: &[OomProcessInfo]) -> Option<usize> {
         tick: get_ticks() as u64,
         freed_pages,
     });
-
-    // Process'i terminate et (SIGKILL)
-    let _ = crate::task::scheduler::kill_task(victim.pid, 9);
 
     Some(freed_pages)
 }
@@ -452,19 +494,7 @@ pub fn oom_kill_cgroup(cgroup_name: &str, process_pids: &[u64]) -> Option<usize>
     let oom_infos: alloc::vec::Vec<OomProcessInfo> = tasks
         .iter()
         .filter(|t| process_pids.contains(&(t.pid as u64)))
-        .map(|t| OomProcessInfo {
-            pid: t.pid,
-            name: alloc::string::String::from(t.name),
-            rss_pages: 256,
-            swap_pages: 0,
-            oom_score_adj: 0,
-            nice: 0,
-            runtime_ticks: 0,
-            is_kernel: t.pid < 2,
-            is_root: false,
-            children: 0,
-            cpu_percent: 0,
-        })
+        .map(process_info_from_task)
         .collect();
 
     crate::serial_println!(
@@ -558,5 +588,63 @@ pub fn get_oom_stats() -> OomStats {
         exempt_count: OOM_STATE.oom_exempt.lock().len(),
         psi_some_avg10: psi.some_avg10,
         psi_full_avg10: psi.full_avg10,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::{Priority, TaskState};
+
+    #[test]
+    fn first_oom_kill_attempt_is_not_rate_limited() {
+        OOM_STATE.total_kills.store(0, Ordering::SeqCst);
+        OOM_STATE
+            .last_kill_tick
+            .store(get_ticks() as u64, Ordering::SeqCst);
+        assert!(OOM_STATE.can_attempt_kill());
+    }
+
+    #[test]
+    fn task_info_conversion_uses_measured_rss_before_committed_fallback() {
+        let task = TaskInfo {
+            pid: 42,
+            name: "user",
+            state: TaskState::Ready,
+            priority: Priority::Normal,
+            cpu_usage: 7,
+            rss_pages: 11,
+            swap_pages: 3,
+            committed_pages: 4096,
+            runtime_ticks: 99,
+            is_kernel: false,
+            children: 2,
+        };
+        let info = process_info_from_task(&task);
+        assert_eq!(info.rss_pages, 11);
+        assert_eq!(info.swap_pages, 3);
+        assert_eq!(info.runtime_ticks, 99);
+        assert!(!info.is_kernel);
+        assert_eq!(info.children, 2);
+    }
+
+    #[test]
+    fn task_info_conversion_caps_committed_fallback_when_resident_unknown() {
+        let task = TaskInfo {
+            pid: 43,
+            name: "lazy-user",
+            state: TaskState::Ready,
+            priority: Priority::Low,
+            cpu_usage: 0,
+            rss_pages: 0,
+            swap_pages: 0,
+            committed_pages: 4096,
+            runtime_ticks: 0,
+            is_kernel: false,
+            children: 0,
+        };
+        let info = process_info_from_task(&task);
+        assert_eq!(info.rss_pages, 64);
+        assert_eq!(info.nice, 10);
     }
 }

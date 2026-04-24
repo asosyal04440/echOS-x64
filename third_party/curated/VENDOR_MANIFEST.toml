@@ -1,0 +1,202 @@
+[vendor_set]
+name = "echOS curated app/tool seed sources"
+imported_at = "2026-04-19"
+policy = "Permissive-license, low-dependency sources only. Keep upstream files unmodified; put echOS adapters outside imported files."
+
+[[components]]
+name = "kilo"
+role = "Text editor seed for ech-edit"
+source_repository = "https://github.com/antirez/kilo"
+source_commit = "323d93b29bd89a2cb446de90c4ed4fea1764176e"
+license = "BSD-2-Clause"
+license_file = "third_party/curated/kilo/LICENSE"
+imported_files = ["LICENSE", "README.md", "kilo.c"]
+mutation_scope = "none"
+verification = "license file imported; upstream README states no curses dependency and BSD-2-Clause license"
+
+[[components]]
+name = "jsmn"
+role = "JSON tokenizer/parser for manifests and small tools"
+source_repository = "https://github.com/zserge/jsmn"
+source_commit = "25647e692c7906b96ffd2b05ca54c097948e879c"
+license = "MIT"
+license_file = "third_party/curated/jsmn/LICENSE"
+imported_files = ["LICENSE", "README.md", "jsmn.h"]
+mutation_scope = "none"
+verification = "license file imported; upstream README states C89, no dependencies, no dynamic allocation"
+
+[[components]]
+name = "miniz"
+role = "Compression core for zlib/deflate/ZIP tooling"
+source_repository = "https://github.com/richgel999/miniz"
+source_commit = "4b9fcf1df525114484be49f3216169b061c07ac6"
+license = "MIT"
+license_file = "third_party/curated/miniz/LICENSE"
+imported_files = ["LICENSE", "readme.md", "miniz.c", "miniz.h"]
+mutation_scope = "none"
+verification = "license file imported; selected source/header pair from pinned upstream commit"
+
+[[components]]
+name = "stb"
+role = "Image decode/write/resize source for ech-view tooling"
+source_repository = "https://github.com/nothings/stb"
+source_commit = "31c1ad37456438565541f4919958214b6e762fb4"
+license = "Public-Domain OR MIT"
+license_file = "third_party/curated/stb/LICENSE"
+imported_files = ["LICENSE", "README.md", "stb_image.h", "stb_image_write.h", "stb_image_resize2.h", "stb_truetype.h", "stb_sprintf.h", "stb_textedit.h", "stb_vorbis.c"]
+mutation_scope = "none"
+verification = "license file imported; upstream README documents single-file integration model and public-domain/MIT dual license"
+
+[[components]]
+name = "qoi"
+role = "QOI image format core and conversion seed"
+source_repository = "https://github.com/phoboslab/qoi"
+source_commit = "6fff9b70dd79b12f808b0acc5cb44fde9998725e"
+license = "MIT"
+license_file = "third_party/curated/qoi/LICENSE"
+imported_files = ["LICENSE", "README.md", "qoi.h", "qoiconv.c"]
+mutation_scope = "none"
+verification = "license file imported; upstream README states single-file MIT library"
+
+[[components]]
+name = "tomlc17"
+role = "TOML parser for host/user configuration tooling"
+source_repository = "https://github.com/cktan/tomlc17"
+source_commit = "32972cec29cf90cbc8b3fb74ab7be6d379657697"
+license = "MIT"
+license_file = "third_party/curated/tomlc17/LICENSE"
+imported_files = ["LICENSE", "README.md", "tomlc17.c", "tomlc17.h"]
+mutation_scope = "none"
+verification = "license file imported; upstream README states direct include of tomlc17.c/h and C99 compatibility"
+
+[[components]]
+name = "dr_libs"
+role = "Single-file WAV, FLAC, and MP3 codec sources for future audio decode tooling"
+source_repository = "https://github.com/mackron/dr_libs"
+source_commit = "3a7644aacd8fb1f1dafb6201c581234a80ede120"
+license = "MIT-0 OR Unlicense"
+license_file = "third_party/curated/dr_libs/LICENSE"
+imported_files = ["LICENSE", "README.md", "dr_wav.h", "dr_flac.h", "dr_mp3.h"]
+mutation_scope = "none"
+verification = "license file imported; upstream README describes public-domain single-file audio decoding libraries; no echOS audio path wiring in this import"
+
+[[components]]
+name = "microtar"
+role = "Minimal tar archive read/write source for package tooling"
+source_repository = "https://github.com/rxi/microtar"
+source_commit = "27076e1b9290e9c7842bb7890a54fcf172406c84"
+license = "MIT"
+license_file = "third_party/curated/microtar/LICENSE"
+imported_files = ["LICENSE", "README.md", "microtar.c", "microtar.h"]
+mutation_scope = "none"
+verification = "license file imported; upstream README identifies ANSI C tar library; adapters and corpus tests remain outside upstream files"
+
+[[components]]
+name = "ini"
+role = "Small INI parser source for user and host configuration tooling"
+source_repository = "https://github.com/rxi/ini"
+source_commit = "13a254c9e38def8924a83badfea5eda5a01b9295"
+license = "MIT"
+license_file = "third_party/curated/ini/LICENSE"
+imported_files = ["LICENSE", "README.md", "ini.c", "ini.h"]
+mutation_scope = "none"
+verification = "license file imported; upstream README states ANSI C drop-in ini.c/ini.h model"
+
+[[components]]
+name = "linenoise"
+role = "Line editing, history, completion, and hints source for future shell/REPL tooling"
+source_repository = "https://github.com/antirez/linenoise"
+source_commit = "452e3793858a15cc006bb3aa3ea06378eb98c5b5"
+license = "BSD-2-Clause"
+license_file = "third_party/curated/linenoise/LICENSE"
+imported_files = ["LICENSE", "README.markdown", "linenoise.c", "linenoise.h"]
+mutation_scope = "none"
+verification = "license file imported; upstream README states BSD-licensed readline replacement; echOS tty, fd, history, and allocator adapters not wired in this import"
+
+[[components]]
+name = "sqlite"
+role = "Embedded SQL database core and CLI seed for package metadata, settings, and structured state"
+source_repository = "https://www.sqlite.org/download.html"
+source_archive = "https://www.sqlite.org/2026/sqlite-amalgamation-3530000.zip"
+source_release = "3.53.0"
+source_sha3_256 = "c2325c53b3b41761469f91cfb078e96882ac5d85bac10c11b0bd8f253b031e5b"
+license = "Public-Domain"
+license_file = "third_party/curated/sqlite/LICENSE.html"
+imported_files = ["LICENSE.html", "shell.c", "sqlite3.c", "sqlite3.h", "sqlite3ext.h"]
+mutation_scope = "none"
+verification = "official SQLite download metadata pinned release 3.53.0 amalgamation with matching SHA3-256; sqlite3.h carries SQLite's public-domain blessing; echOS VFS/allocator shims remain outside imported files"
+
+[[components]]
+name = "lua"
+role = "Embeddable scripting language source tree for shell scripting and extension runtime work"
+source_repository = "https://www.lua.org/ftp/"
+source_archive = "https://www.lua.org/ftp/lua-5.4.8.tar.gz"
+source_release = "5.4.8"
+license = "MIT"
+license_file = "third_party/curated/lua/doc/readme.html"
+imported_files = ["Makefile", "README", "doc/*", "src/*"]
+mutation_scope = "none"
+verification = "official Lua FTP release 5.4.8 imported with upstream README/doc tree; upstream doc/readme.html carries the MIT license text; echOS-specific stdlib pruning and allocator hooks remain outside imported files"
+
+[[components]]
+name = "toybox"
+role = "Selected 0BSD terminal utility source subset for ech-tools"
+source_repository = "https://github.com/landley/toybox"
+source_commit = "a61f9fe68fafdabf2913b9498ce9ae1a086ed11d"
+source_tag = "0.8.13"
+license = "0BSD"
+license_file = "third_party/curated/toybox/LICENSE"
+imported_files = [
+  "LICENSE",
+  "README",
+  "main.c",
+  "toys.h",
+  "lib/*.c",
+  "lib/*.h",
+  "toys/posix/cat.c",
+  "toys/posix/cp.c",
+  "toys/posix/echo.c",
+  "toys/posix/grep.c",
+  "toys/posix/head.c",
+  "toys/posix/ls.c",
+  "toys/posix/mkdir.c",
+  "toys/posix/rm.c",
+  "toys/posix/tail.c",
+  "toys/posix/wc.c",
+  "tests/cat.test",
+  "tests/cp.test",
+  "tests/echo.test",
+  "tests/grep.test",
+  "tests/head.test",
+  "tests/ls.test",
+  "tests/mkdir.test",
+  "tests/mv.test",
+  "tests/rm.test",
+  "tests/tail.test",
+  "tests/wc.test",
+  "tests/README.txt",
+]
+mutation_scope = "none; imported subset excludes upstream kconfig GPLv2 build configurator and non-selected command trees"
+verification = "license file imported; official license page and upstream LICENSE identify 0BSD; local GPL/LGPL/AGPL scan over imported toybox subset returned no hits"
+
+[[components]]
+name = "sbase"
+role = "MIT portable Unix command source set for ech-tools core user commands"
+source_repository = "https://git.suckless.org/sbase"
+source_commit = "c1341583c96307cb0e6152c963ed23c4d56a4278"
+license = "MIT"
+license_file = "third_party/curated/sbase/LICENSE"
+imported_files = ["upstream repository contents excluding .git"]
+mutation_scope = "none"
+verification = "license file imported; upstream Makefile BIN list contains 100 commands; local GPL/LGPL/AGPL scan over imported sbase returned no hits"
+
+[[components]]
+name = "ubase"
+role = "MIT/X Consortium system utility source set for ech-tools privileged/system command candidates"
+source_repository = "https://git.suckless.org/ubase"
+source_commit = "e8249b49ca3e02032dece5e0cdac3d236667a6d9"
+license = "MIT/X Consortium"
+license_file = "third_party/curated/ubase/LICENSE"
+imported_files = ["upstream repository contents excluding .git"]
+mutation_scope = "none"
+verification = "license file imported; upstream Makefile BIN list contains 52 commands; local GPL/LGPL/AGPL scan over imported ubase returned no hits"

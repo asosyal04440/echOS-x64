@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use libm::{expf, sqrtf};
 use spin::Mutex;
 
+use crate::allocator::doctrine::{alloc_surface_pixels, SurfacePixelBuffer, SurfacePixelFormat};
 use crate::gop::framebuffer::Framebuffer;
 use crate::gui::theme::{Color, Theme};
 
@@ -377,8 +378,8 @@ impl KawaseBlur {
             return;
         }
 
-        let mut src = vec![0u32; width * height];
-        let mut dst = vec![0u32; width * height];
+        let mut src = alloc_effect_pixels(width, height, "kawase-src");
+        let mut dst = alloc_effect_pixels(width, height, "kawase-dst");
 
         for py in 0..height {
             for px in 0..width {
@@ -388,7 +389,7 @@ impl KawaseBlur {
                     let ptr = unsafe {
                         (fb.base_addr as *const u32).add(sy * fb.pixels_per_scan_line + sx)
                     };
-                    src[py * width + px] = unsafe { *ptr };
+                    src.as_mut_slice()[py * width + px] = unsafe { *ptr };
                 }
             }
         }
@@ -397,16 +398,21 @@ impl KawaseBlur {
             let offset = ((pass + 1) * self.step).min(self.radius) as isize;
             for py in 0..height {
                 for px in 0..width {
-                    let p1 = sample_rgb(&src, width, height, px as isize + offset, py as isize);
-                    let p2 = sample_rgb(&src, width, height, px as isize - offset, py as isize);
-                    let p3 = sample_rgb(&src, width, height, px as isize, py as isize + offset);
-                    let p4 = sample_rgb(&src, width, height, px as isize, py as isize - offset);
-                    let p5 = sample_rgb(&src, width, height, px as isize, py as isize);
+                    let src_pixels = src.as_slice();
+                    let p1 =
+                        sample_rgb(src_pixels, width, height, px as isize + offset, py as isize);
+                    let p2 =
+                        sample_rgb(src_pixels, width, height, px as isize - offset, py as isize);
+                    let p3 =
+                        sample_rgb(src_pixels, width, height, px as isize, py as isize + offset);
+                    let p4 =
+                        sample_rgb(src_pixels, width, height, px as isize, py as isize - offset);
+                    let p5 = sample_rgb(src_pixels, width, height, px as isize, py as isize);
 
                     let r = (p1.0 + p2.0 + p3.0 + p4.0 + p5.0) / 5;
                     let g = (p1.1 + p2.1 + p3.1 + p4.1 + p5.1) / 5;
                     let b = (p1.2 + p2.2 + p3.2 + p4.2 + p5.2) / 5;
-                    dst[py * width + px] = (r << 16) | (g << 8) | b;
+                    dst.as_mut_slice()[py * width + px] = (r << 16) | (g << 8) | b;
                 }
             }
             core::mem::swap(&mut src, &mut dst);
@@ -421,7 +427,7 @@ impl KawaseBlur {
                         (fb.base_addr as *mut u32).add(sy * fb.pixels_per_scan_line + sx)
                     };
                     unsafe {
-                        *ptr = src[py * width + px];
+                        *ptr = src.as_slice()[py * width + px];
                     }
                 }
             }
@@ -461,7 +467,7 @@ impl BlurEffect {
         }
 
         // Geçici tampon oluştur
-        let mut temp = vec![0u32; width * height];
+        let mut temp = alloc_effect_pixels(width, height, "gauss-temp");
 
         // Kaynağı geçici tampona kopyala
         for py in 0..height {
@@ -473,26 +479,26 @@ impl BlurEffect {
                     let ptr = unsafe {
                         (fb.base_addr as *const u32).add(src_y * fb.pixels_per_scan_line + src_x)
                     };
-                    temp[py * width + px] = unsafe { *ptr };
+                    temp.as_mut_slice()[py * width + px] = unsafe { *ptr };
                 }
             }
         }
 
         // Yatay bulanıklık uygula
-        let mut h_blur = vec![0u32; width * height];
+        let mut h_blur = alloc_effect_pixels(width, height, "gauss-horizontal");
         for py in 0..height {
             for px in 0..width {
-                let (r, g, b, count) = self.blur_row(&temp, py * width, width, px);
+                let (r, g, b, count) = self.blur_row(temp.as_slice(), py * width, width, px);
 
                 let idx = py * width + px;
-                h_blur[idx] = ((r / count) << 16) | ((g / count) << 8) | (b / count);
+                h_blur.as_mut_slice()[idx] = ((r / count) << 16) | ((g / count) << 8) | (b / count);
             }
         }
 
         // Dikey bulanıklık uygula
         for py in 0..height {
             for px in 0..width {
-                let (r, g, b, count) = self.blur_col(&h_blur, width, px, py, height);
+                let (r, g, b, count) = self.blur_col(h_blur.as_slice(), width, px, py, height);
 
                 let dst_x = x + px;
                 let dst_y = y + py;
@@ -1251,6 +1257,22 @@ fn sample_rgb(buf: &[u32], width: usize, height: usize, x: isize, y: isize) -> (
     let sy = y.clamp(0, (height.saturating_sub(1)) as isize) as usize;
     let px = buf[sy * width + sx];
     ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF)
+}
+
+fn alloc_effect_pixels(width: usize, height: usize, tag: &'static str) -> SurfacePixelBuffer {
+    match alloc_surface_pixels(width.max(1), height.max(1), SurfacePixelFormat::Argb8888) {
+        Ok(buffer) => buffer,
+        Err(error) => {
+            crate::serial_println!(
+                "[EFFECTS] doctrine fallback tag={} width={} height={} err={:?}",
+                tag,
+                width,
+                height,
+                error
+            );
+            SurfacePixelBuffer::Heap(vec![0u32; width.saturating_mul(height)])
+        }
+    }
 }
 
 fn blend_argb(bg: u32, fg_rgb: u32, alpha: f32) -> u32 {

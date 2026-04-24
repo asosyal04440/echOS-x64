@@ -1,0 +1,9 @@
+flowchart LR
+    A[CFS] --> A1[pick min vruntime]
+    A1 --> A2[good fairness]
+
+    B[EEVDF] --> B1[eligible_vtime and virtual_deadline]
+    B1 --> B2[better wakeup behavior]
+
+    C[EDF and CBS] --> C1[pick earliest abs_deadline]
+    C1 --> C2[runtime budget and replenish]

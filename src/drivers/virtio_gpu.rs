@@ -74,6 +74,7 @@ const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1; // Ortak yapılandırma
 const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2; // Bildirim (doorbell)
 const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3; // Interrupt durum
 const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4; // Aygıta özgü yapılandırma
+const VIRTIO_PCI_MAX_CAP_CHAIN: usize = 48;
 
 // ---------------------------------------------------------------------------
 // VirtIO Durum Biti Sabitleri
@@ -131,6 +132,8 @@ const VIRGL_CCMD_SET_FRAMEBUFFER_STATE: u32 = 2; // Framebuffer'ı ayarla
 const VIRGL_CCMD_CLEAR: u32 = 3; // Renk tamponu temizle
 const VIRGL_OBJECT_SURFACE: u32 = 1; // Nesne türü: yüzey
 const VIRGL_CLEAR_COLOR: u32 = 1; // Renk tamponu temizleme maskesi
+const VIRTQ_DESC_F_NEXT: u16 = 1;
+const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 /// VirtIO PCI Ortak Yapılandırma Register'ları
 ///
@@ -366,6 +369,15 @@ struct VirtQueue {
     notify_off: u16,        // Bildirim register ofseti (çarpan uygulanmadan önce)
 }
 
+struct VirtioGpuPciCaps {
+    common: *mut VirtioPciCommonCfg,
+    notify: *mut u8,
+    notify_len: u32,
+    notify_off_multiplier: u32,
+    isr: *mut u8,
+    device_cfg: *mut u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VirtioGpuDoorbellSnapshot {
     pub queue_index: u16,
@@ -384,6 +396,7 @@ pub struct VirtioGpuDoorbellSnapshot {
 struct VirtioGpuDevice {
     common: *mut VirtioPciCommonCfg, // Ortak VirtIO register'ları
     notify: *mut u8,                 // Bildirim (doorbell) tabanı
+    notify_len: u32,                 // Bildirim MMIO penceresi boyutu
     notify_off_multiplier: u32,      // Bildirim ofseti çarpanı
     isr: *mut u8,                    // Interrupt durumu
     device_cfg: *mut u8,             // GPU'ya özgü yapılandırma
@@ -419,16 +432,17 @@ pub unsafe fn init_from_pci(dev: *mut PciDev) -> bool {
     if dev.is_null() {
         return false;
     }
-    let (common, notify, notify_mul, isr, device_cfg) = match read_pci_caps(dev) {
+    let caps = match read_pci_caps(dev) {
         Some(data) => data,
         None => return false,
     };
     let mut gpu = VirtioGpuDevice {
-        common,
-        notify,
-        notify_off_multiplier: notify_mul,
-        isr,
-        device_cfg,
+        common: caps.common,
+        notify: caps.notify,
+        notify_len: caps.notify_len,
+        notify_off_multiplier: caps.notify_off_multiplier,
+        isr: caps.isr,
+        device_cfg: caps.device_cfg,
         features: 0,
         virgl: false,
         capset_id: 0,
@@ -475,15 +489,17 @@ fn queue_doorbell_snapshot(gpu: &VirtioGpuDevice, queue_index: u16) -> VirtioGpu
         queue_index,
         queue_notify_off: q.notify_off,
         notify_off_multiplier: gpu.notify_off_multiplier,
-        notify_mmio_offset: q.notify_off as u32 * gpu.notify_off_multiplier,
+        notify_mmio_offset: notify_mmio_offset(gpu, q.notify_off).unwrap_or(0),
         avail_idx,
         used_idx,
     }
 }
 
 fn ring_queue_notify(gpu: &VirtioGpuDevice, snapshot: VirtioGpuDoorbellSnapshot) {
-    let notify_ptr = unsafe { gpu.notify.add(snapshot.notify_mmio_offset as usize) as *mut u16 };
-    unsafe { write_volatile(notify_ptr, snapshot.queue_index) };
+    if let Some(offset) = notify_mmio_offset(gpu, snapshot.queue_notify_off) {
+        let notify_ptr = unsafe { gpu.notify.add(offset as usize) as *mut u16 };
+        unsafe { write_volatile(notify_ptr, snapshot.queue_index) };
+    }
 }
 
 pub fn gpu_doorbell_snapshot() -> Option<VirtioGpuDoorbellSnapshot> {
@@ -503,9 +519,7 @@ pub fn gpu_doorbell_snapshot() -> Option<VirtioGpuDoorbellSnapshot> {
 /// config[cap_ptr + 4] = bar      (hangi BAR'dan)
 /// config[cap_ptr + 8] = offset   (BAR içi ofset)
 /// ```
-unsafe fn read_pci_caps(
-    dev: *mut PciDev,
-) -> Option<(*mut VirtioPciCommonCfg, *mut u8, u32, *mut u8, *mut u8)> {
+unsafe fn read_pci_caps(dev: *mut PciDev) -> Option<VirtioGpuPciCaps> {
     let (bus, device, function) = unsafe {
         let priv_ptr = (*dev).driver_data as *const crate::linux_glue::LinuxPciPriv;
         if priv_ptr.is_null() {
@@ -519,45 +533,82 @@ unsafe fn read_pci_caps(
         return None;
     }
     let mut cap_ptr = read_config_u8(bus, device, function, 0x34);
+    let mut visited = [false; 256];
+    let mut depth = 0usize;
     let mut common = None;
     let mut notify = None;
+    let mut notify_len = 0u32;
     let mut notify_mul = 0u32;
     let mut isr = None;
     let mut device_cfg = None;
     while cap_ptr != 0 {
+        let cap_index = cap_ptr as usize;
+        if cap_index < 0x40 || cap_index >= visited.len() || visited[cap_index] {
+            return None;
+        }
+        visited[cap_index] = true;
+        depth += 1;
+        if depth > VIRTIO_PCI_MAX_CAP_CHAIN {
+            return None;
+        }
         let cap_id = read_config_u8(bus, device, function, cap_ptr);
+        let cap_len = read_config_u8(bus, device, function, cap_ptr + 2);
         let next = read_config_u8(bus, device, function, cap_ptr + 1);
         if cap_id == VIRTIO_PCI_CAP_ID {
+            if cap_len < 16 {
+                return None;
+            }
             let cfg_type = read_config_u8(bus, device, function, cap_ptr + 3);
             let bar = read_config_u8(bus, device, function, cap_ptr + 4);
             let offset = read_config_u32(bus, device, function, cap_ptr + 8);
             let length = read_config_u32(bus, device, function, cap_ptr + 12);
-            let bar_base = get_bar_base(dev, bar)?;
-            let base = (bar_base + offset as u64) as usize;
+            let (base, window_len) = resolve_pci_cap_window(dev, bar, offset, length)?;
             match cfg_type {
                 VIRTIO_PCI_CAP_COMMON_CFG => {
+                    if window_len < core::mem::size_of::<VirtioPciCommonCfg>() as u32 {
+                        return None;
+                    }
                     common = Some(base as *mut VirtioPciCommonCfg);
                 }
                 VIRTIO_PCI_CAP_NOTIFY_CFG => {
+                    if cap_len < 20 || window_len < 2 {
+                        return None;
+                    }
+                    let multiplier = read_config_u32(bus, device, function, cap_ptr + 16);
+                    if multiplier == 0 {
+                        return None;
+                    }
                     notify = Some(base as *mut u8);
-                    // notify_off_multiplier: her kuyruğun bildirim register'ı
-                    // adres = notify_base + queue_notify_off * notify_off_multiplier
-                    notify_mul = read_config_u32(bus, device, function, cap_ptr + 16);
+                    notify_len = window_len;
+                    notify_mul = multiplier;
                 }
                 VIRTIO_PCI_CAP_ISR_CFG => {
-                    if length > 0 {
+                    if window_len >= 1 {
                         isr = Some(base as *mut u8);
                     }
                 }
                 VIRTIO_PCI_CAP_DEVICE_CFG => {
+                    if window_len == 0 {
+                        return None;
+                    }
                     device_cfg = Some(base as *mut u8);
                 }
                 _ => {}
             }
         }
+        if next != 0 && next < 0x40 {
+            return None;
+        }
         cap_ptr = next;
     }
-    Some((common?, notify?, notify_mul, isr?, device_cfg?))
+    Some(VirtioGpuPciCaps {
+        common: common?,
+        notify: notify?,
+        notify_len,
+        notify_off_multiplier: notify_mul,
+        isr: isr?,
+        device_cfg: device_cfg?,
+    })
 }
 
 /// VirtIO özelliklerini müzakere eder.
@@ -621,7 +672,7 @@ unsafe fn setup_ctrl_queue(gpu: &mut VirtioGpuDevice) -> bool {
     if size == 0 {
         return false;
     }
-    // Maksimum 8 girdi kullan (basit implementasyon için yeterli)
+    // Bu sürücünün sabit iki-descriptor kontrol zincirleri için 8 halka girişi ayır.
     let queue_size = 8u16.min(size);
     let (desc, avail, used) = match allocate_queue(queue_size) {
         Some(queue) => queue,
@@ -642,7 +693,7 @@ unsafe fn setup_ctrl_queue(gpu: &mut VirtioGpuDevice) -> bool {
         last_used: 0,
         notify_off,
     };
-    true
+    notify_mmio_offset(gpu, notify_off).is_some()
 }
 
 /// Virtqueue için bellek tahsis eder.
@@ -716,7 +767,7 @@ unsafe fn create_context(gpu: &mut VirtioGpuDevice) -> bool {
 /// GPU'da 3D kaynak (texture/buffer) oluşturur.
 ///
 /// `format`: B8G8R8A8_UNORM → her piksel 4 byte (BGRA sırası)
-/// `depth=1, array_size=1`: basit 2D texture
+/// `depth=1, array_size=1`: tek yüzeyli 2D kaynak
 unsafe fn create_resource_3d(gpu: &mut VirtioGpuDevice, width: u32, height: u32) -> bool {
     let req = VirtioGpuResourceCreate3d {
         hdr: VirtioGpuCtrlHdr {
@@ -1203,18 +1254,30 @@ unsafe fn submit_ctrl(
     resp: *mut u8,
     resp_len: usize,
 ) -> bool {
+    let notify_off = gpu.ctrl_queue.notify_off;
+    let Some(notify_offset) = notify_mmio_offset(gpu, notify_off) else {
+        return false;
+    };
     let q = &mut gpu.ctrl_queue;
+    if q.size < 2
+        || req.is_null()
+        || resp.is_null()
+        || req_len > u32::MAX as usize
+        || resp_len > u32::MAX as usize
+    {
+        return false;
+    }
     let desc = &mut *q.desc;
     let desc1 = q.desc.add(1);
     // desc[0]: istek tamponu (cihaz okur)
     (*desc).addr = req as u64;
     (*desc).len = req_len as u32;
-    (*desc).flags = 0x0002; // NEXT bayrağı: zincir devam ediyor
+    (*desc).flags = VIRTQ_DESC_F_NEXT;
     (*desc).next = 1;
     // desc[1]: yanıt tamponu (cihaz yazar)
     (*desc1).addr = resp as u64;
     (*desc1).len = resp_len as u32;
-    (*desc1).flags = 0x0002 | 0x0001; // WRITE | NEXT (WRITE = cihaz yazar)
+    (*desc1).flags = VIRTQ_DESC_F_WRITE;
     (*desc1).next = 0;
 
     let avail = &mut *q.avail;
@@ -1225,7 +1288,6 @@ unsafe fn submit_ctrl(
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
     // Kapı zili: cihaza yeni iş var diye bildir
-    let notify_offset = q.notify_off as u32 * gpu.notify_off_multiplier;
     let notify_ptr = gpu.notify.add(notify_offset as usize) as *mut u16;
     write_volatile(notify_ptr, 0);
 
@@ -1257,6 +1319,47 @@ unsafe fn get_bar_base(dev: *mut PciDev, index: u8) -> Option<u64> {
         return None;
     }
     Some(res.start)
+}
+
+unsafe fn get_bar_region(dev: *mut PciDev, index: u8) -> Option<(u64, u64)> {
+    if dev.is_null() || index >= 6 {
+        return None;
+    }
+    let res = (*dev).resource.get(index as usize)?;
+    if res.start == 0 || res.end < res.start {
+        return None;
+    }
+    Some((
+        res.start,
+        res.end.saturating_sub(res.start).saturating_add(1),
+    ))
+}
+
+unsafe fn resolve_pci_cap_window(
+    dev: *mut PciDev,
+    bar: u8,
+    offset: u32,
+    length: u32,
+) -> Option<(usize, u32)> {
+    let (bar_base, bar_len) = get_bar_region(dev, bar)?;
+    if length == 0 {
+        return None;
+    }
+    let window_end = (offset as u64).checked_add(length as u64)?;
+    if window_end > bar_len {
+        return None;
+    }
+    let base = bar_base.checked_add(offset as u64)?;
+    Some((base as usize, length))
+}
+
+fn notify_mmio_offset(gpu: &VirtioGpuDevice, queue_notify_off: u16) -> Option<u32> {
+    let offset = (queue_notify_off as u64).checked_mul(gpu.notify_off_multiplier as u64)?;
+    let end = offset.checked_add(core::mem::size_of::<u16>() as u64)?;
+    if end > gpu.notify_len as u64 {
+        return None;
+    }
+    Some(offset as u32)
 }
 
 /// Değeri yukarı doğru belirtilen hizaya (alignment) yuvarlar.

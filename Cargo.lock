@@ -353,6 +353,7 @@ dependencies = [
  "pc-keyboard",
  "pic8259",
  "ps2-mouse",
+ "qoi",
  "rand",
  "rcore-fs",
  "rlsf",
@@ -363,6 +364,7 @@ dependencies = [
  "smoltcp",
  "spin",
  "swash",
+ "tinybmp",
  "typenum",
  "uefi",
  "virtio-drivers",
@@ -1029,6 +1031,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qoi"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1555,6 +1566,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tinybmp"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acb540c3e6f049f914d9c3eaf86ca415e264cf42d2b25bb5c24241af1a1e3aea"
+dependencies = [
+ "embedded-graphics",
 ]
 
 [[package]]

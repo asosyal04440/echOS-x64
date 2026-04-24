@@ -818,6 +818,7 @@ fn uefi_variable_attributes(_name: &str) -> VariableAttributes {
     VariableAttributes::NON_VOLATILE
         | VariableAttributes::BOOTSERVICE_ACCESS
         | VariableAttributes::RUNTIME_ACCESS
+        | VariableAttributes::TIME_BASED_AUTHENTICATED_WRITE_ACCESS
 }
 
 #[cfg(target_os = "uefi")]
@@ -832,9 +833,12 @@ fn read_uefi_variable(
     let mut buf = vec![0u16; name.encode_utf16().count() + 1];
     let var_name =
         CStr16::from_str_with_buf(name, &mut buf).map_err(|_| SecureBootError::Invalid)?;
-    let (data, _) = runtime_services
+    let (data, attrs) = runtime_services
         .get_variable_boxed(var_name, &vendor)
         .map_err(|_| SecureBootError::MissingDb)?;
+    if !validate_uefi_variable_attributes(name, attrs) {
+        return Err(SecureBootError::Invalid);
+    }
     Ok(data.into_vec())
 }
 
@@ -857,6 +861,24 @@ fn write_uefi_variable(
         .set_variable(var_name, &vendor, attributes, data)
         .map_err(|_| SecureBootError::Invalid)?;
     Ok(())
+}
+
+#[cfg(target_os = "uefi")]
+fn validate_uefi_variable_attributes(name: &str, attrs: VariableAttributes) -> bool {
+    let required = VariableAttributes::NON_VOLATILE
+        | VariableAttributes::BOOTSERVICE_ACCESS
+        | VariableAttributes::RUNTIME_ACCESS;
+    if !attrs.contains(required) {
+        return false;
+    }
+    if matches!(name, "PK" | "KEK" | "db" | "dbx") {
+        let authenticated = VariableAttributes::TIME_BASED_AUTHENTICATED_WRITE_ACCESS
+            | VariableAttributes::ENHANCED_AUTHENTICATED_ACCESS
+            | VariableAttributes::AUTHENTICATED_WRITE_ACCESS;
+        return attrs.intersects(authenticated)
+            && !attrs.contains(VariableAttributes::APPEND_WRITE);
+    }
+    true
 }
 
 #[cfg(not(target_os = "uefi"))]

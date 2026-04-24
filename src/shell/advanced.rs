@@ -650,6 +650,26 @@ pub struct Completer {
     pub builtins: Vec<&'static str>,
 }
 
+const FALLBACK_PATH_ENTRIES: &[&str] = &[
+    "bin",
+    "boot",
+    "dev",
+    "etc",
+    "home",
+    "lib",
+    "mnt",
+    "proc",
+    "root",
+    "sbin",
+    "sys",
+    "tmp",
+    "usr",
+    "var",
+    "config.txt",
+    "readme.md",
+    "test.sh",
+];
+
 impl Completer {
     pub fn new() -> Self {
         Self {
@@ -713,6 +733,14 @@ impl Completer {
             }
         }
 
+        if completions.is_empty() {
+            for entry in FALLBACK_PATH_ENTRIES {
+                if entry.starts_with(prefix) {
+                    completions.insert((*entry).to_string());
+                }
+            }
+        }
+
         completions.into_iter().collect()
     }
 
@@ -752,29 +780,9 @@ impl Completer {
 
         // Fallback: mock data
         if completions.is_empty() {
-            let mock_files = [
-                "bin",
-                "boot",
-                "dev",
-                "etc",
-                "home",
-                "lib",
-                "mnt",
-                "proc",
-                "root",
-                "sbin",
-                "sys",
-                "tmp",
-                "usr",
-                "var",
-                "config.txt",
-                "readme.md",
-                "test.sh",
-            ];
-
-            for file in &mock_files {
-                if file.starts_with(prefix) {
-                    completions.push(file.to_string());
+            for entry in FALLBACK_PATH_ENTRIES {
+                if entry.starts_with(prefix) {
+                    completions.push((*entry).to_string());
                 }
             }
         }

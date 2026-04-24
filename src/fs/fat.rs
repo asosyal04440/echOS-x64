@@ -27,7 +27,7 @@
 //! ```
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -495,26 +495,80 @@ impl ExFatFs {
             return None;
         }
 
-        let boot: ExFatBootSector =
-            unsafe { core::ptr::read(data.as_ptr() as *const ExFatBootSector) };
-
-        // İmzayı doğrula
-        if boot.signature != 0xAA55 {
+        if data[3..11] != *b"EXFAT   " {
+            return None;
+        }
+        let signature = u16::from_le_bytes([data[510], data[511]]);
+        if signature != 0xAA55 {
             return None;
         }
 
-        let sector_size = 1u32 << boot.bytes_per_sector_shift;
-        let cluster_size = sector_size << boot.sectors_per_cluster_shift;
+        let bytes_per_sector_shift = data[108];
+        let sectors_per_cluster_shift = data[109];
+        if bytes_per_sector_shift > 20 || sectors_per_cluster_shift > 25 {
+            return None;
+        }
+        let sector_size = 1u32.checked_shl(bytes_per_sector_shift as u32)?;
+        let sectors_per_cluster = 1u32.checked_shl(sectors_per_cluster_shift as u32)?;
+        let cluster_size = sector_size.checked_mul(sectors_per_cluster)?;
+        if sector_size < 512 || cluster_size == 0 {
+            return None;
+        }
+
+        let fat_offset = u32::from_le_bytes([data[80], data[81], data[82], data[83]]);
+        let fat_length = u32::from_le_bytes([data[84], data[85], data[86], data[87]]);
+        let cluster_heap_offset = u32::from_le_bytes([data[88], data[89], data[90], data[91]]);
+        let cluster_count = u32::from_le_bytes([data[92], data[93], data[94], data[95]]);
+        let root_cluster = u32::from_le_bytes([data[96], data[97], data[98], data[99]]);
+        if fat_length == 0 || cluster_count == 0 || root_cluster < 2 {
+            return None;
+        }
+
+        let mut jump_boot = [0u8; 3];
+        jump_boot.copy_from_slice(&data[0..3]);
+        let mut file_system_name = [0u8; 8];
+        file_system_name.copy_from_slice(&data[3..11]);
+        let mut boot_code = [0u8; 390];
+        boot_code.copy_from_slice(&data[120..510]);
+
+        let boot = ExFatBootSector {
+            jump_boot,
+            file_system_name,
+            partition_offset: u64::from_le_bytes([
+                data[64], data[65], data[66], data[67], data[68], data[69], data[70], data[71],
+            ]),
+            volume_length: u64::from_le_bytes([
+                data[72], data[73], data[74], data[75], data[76], data[77], data[78], data[79],
+            ]),
+            fat_offset,
+            fat_length,
+            cluster_heap_offset,
+            cluster_count,
+            first_cluster_of_root_dir: root_cluster,
+            volume_serial_number: u32::from_le_bytes([data[100], data[101], data[102], data[103]]),
+            file_system_revision: u16::from_le_bytes([data[104], data[105]]),
+            volume_flags: u16::from_le_bytes([data[106], data[107]]),
+            bytes_per_sector_shift,
+            sectors_per_cluster_shift,
+            number_of_fats: data[110],
+            drive_select: data[111],
+            percent_in_use: data[112],
+            reserved: [
+                data[113], data[114], data[115], data[116], data[117], data[118], data[119],
+            ],
+            boot_code,
+            signature,
+        };
 
         Some(ExFatFs {
             boot_sector: boot,
             sector_size,
             cluster_size,
-            fat_offset: boot.fat_offset,
-            fat_length: boot.fat_length,
-            cluster_heap_offset: boot.cluster_heap_offset,
-            cluster_count: boot.cluster_count,
-            root_cluster: boot.first_cluster_of_root_dir,
+            fat_offset,
+            fat_length,
+            cluster_heap_offset,
+            cluster_count,
+            root_cluster,
         })
     }
 
@@ -587,11 +641,73 @@ use spin::Mutex;
 #[derive(Clone, Debug)]
 pub struct MountedFat32 {
     pub fs: Fat32Fs,
-    pub image: Arc<Vec<u8>>,
+    pub storage: Fat32Storage,
 }
 
-static FAT32_INSTANCES: Mutex<Vec<MountedFat32>> = Mutex::new(Vec::new());
-static EXFAT_INSTANCES: Mutex<Vec<ExFatFs>> = Mutex::new(Vec::new());
+#[derive(Clone, Debug)]
+pub struct MountedExFat {
+    pub fs: ExFatFs,
+    pub storage: Fat32Storage,
+}
+
+#[derive(Clone, Debug)]
+pub enum Fat32Storage {
+    Resident(Arc<Vec<u8>>),
+    LoopbackDevice(String),
+}
+
+impl Fat32Storage {
+    pub fn image_len(&self) -> Result<usize, &'static str> {
+        match self {
+            Self::Resident(image) => Ok(image.len()),
+            Self::LoopbackDevice(name) => {
+                let device = crate::drivers::loopback::open(name.as_str())
+                    .ok_or("fat32: loopback device not found")?;
+                Ok(device.descriptor().block_count as usize
+                    * device.descriptor().block_size as usize)
+            }
+        }
+    }
+
+    pub fn read_exact(&self, offset: usize, len: usize) -> Result<Vec<u8>, &'static str> {
+        match self {
+            Self::Resident(image) => {
+                if offset.checked_add(len).ok_or("fat32: offset overflow")? > image.len() {
+                    return Err("fat32: read exceeds mounted image");
+                }
+                Ok(image[offset..offset + len].to_vec())
+            }
+            Self::LoopbackDevice(name) => {
+                let mut device = crate::drivers::loopback::open(name.as_str())
+                    .ok_or("fat32: loopback device not found")?;
+                let descriptor = device.descriptor();
+                let block_size = descriptor.block_size as usize;
+                let total_len = descriptor.block_count as usize * block_size;
+                if offset.checked_add(len).ok_or("fat32: offset overflow")? > total_len {
+                    return Err("fat32: read exceeds mounted image");
+                }
+                let start_block = offset / block_size;
+                let end_block = (offset + len + block_size - 1) / block_size;
+                let mut blocks = Vec::with_capacity((end_block - start_block) * block_size);
+                for lba in start_block..end_block {
+                    let mut block = vec![0u8; block_size];
+                    crate::drivers::block::BlockDevice::read_block(
+                        &mut device,
+                        lba as u64,
+                        &mut block,
+                    )
+                    .map_err(|_| "fat32: loopback block read failed")?;
+                    blocks.extend_from_slice(block.as_slice());
+                }
+                let inner_offset = offset % block_size;
+                Ok(blocks[inner_offset..inner_offset + len].to_vec())
+            }
+        }
+    }
+}
+
+static FAT32_INSTANCES: Mutex<Vec<Option<MountedFat32>>> = Mutex::new(Vec::new());
+static EXFAT_INSTANCES: Mutex<Vec<Option<MountedExFat>>> = Mutex::new(Vec::new());
 
 /// Önyükleme sektöründen dosya sistemi türünü tespit eder
 pub fn detect_filesystem(data: &[u8]) -> Option<FilesystemType> {
@@ -631,19 +747,84 @@ pub fn init() {
 pub fn mount_fat32(data: &[u8]) -> Option<usize> {
     let fs = Fat32Fs::parse(data)?;
     let mut instances = FAT32_INSTANCES.lock();
-    instances.push(MountedFat32 {
+    let mounted = MountedFat32 {
         fs,
-        image: Arc::new(data.to_vec()),
-    });
-    Some(instances.len() - 1)
+        storage: Fat32Storage::Resident(Arc::new(data.to_vec())),
+    };
+    if let Some(index) = instances.iter().position(|entry| entry.is_none()) {
+        instances[index] = Some(mounted);
+        Some(index)
+    } else {
+        instances.push(Some(mounted));
+        Some(instances.len() - 1)
+    }
+}
+
+/// Loopback block device üstünden FAT32 backend bağlar.
+pub fn mount_fat32_loopback(device_name: &str) -> Option<usize> {
+    let mut device = crate::drivers::loopback::open(device_name)?;
+    let descriptor = device.descriptor();
+    let sector_size = descriptor.block_size as usize;
+    if sector_size < 512 {
+        return None;
+    }
+    let mut sector0 = vec![0u8; sector_size];
+    crate::drivers::block::BlockDevice::read_block(&mut device, 0, &mut sector0).ok()?;
+    let fs = Fat32Fs::parse(&sector0)?;
+    let mut instances = FAT32_INSTANCES.lock();
+    let mounted = MountedFat32 {
+        fs,
+        storage: Fat32Storage::LoopbackDevice(device_name.to_string()),
+    };
+    if let Some(index) = instances.iter().position(|entry| entry.is_none()) {
+        instances[index] = Some(mounted);
+        Some(index)
+    } else {
+        instances.push(Some(mounted));
+        Some(instances.len() - 1)
+    }
 }
 
 /// exFAT dosya sistemini bağlar ve örnekler listesine ekler
 pub fn mount_exfat(data: &[u8]) -> Option<usize> {
     let fs = ExFatFs::parse(data)?;
     let mut instances = EXFAT_INSTANCES.lock();
-    instances.push(fs);
-    Some(instances.len() - 1)
+    let mounted = MountedExFat {
+        fs,
+        storage: Fat32Storage::Resident(Arc::new(data.to_vec())),
+    };
+    if let Some(index) = instances.iter().position(|entry| entry.is_none()) {
+        instances[index] = Some(mounted);
+        Some(index)
+    } else {
+        instances.push(Some(mounted));
+        Some(instances.len() - 1)
+    }
+}
+
+/// Loopback block device üstünden exFAT backend bağlar.
+pub fn mount_exfat_loopback(device_name: &str) -> Option<usize> {
+    let mut device = crate::drivers::loopback::open(device_name)?;
+    let descriptor = device.descriptor();
+    let sector_size = descriptor.block_size as usize;
+    if sector_size < 512 {
+        return None;
+    }
+    let mut sector0 = vec![0u8; sector_size];
+    crate::drivers::block::BlockDevice::read_block(&mut device, 0, &mut sector0).ok()?;
+    let fs = ExFatFs::parse(&sector0)?;
+    let mut instances = EXFAT_INSTANCES.lock();
+    let mounted = MountedExFat {
+        fs,
+        storage: Fat32Storage::LoopbackDevice(device_name.to_string()),
+    };
+    if let Some(index) = instances.iter().position(|entry| entry.is_none()) {
+        instances[index] = Some(mounted);
+        Some(index)
+    } else {
+        instances.push(Some(mounted));
+        Some(instances.len() - 1)
+    }
 }
 
 /// İndekse göre FAT32 örneğini döndürür
@@ -651,15 +832,44 @@ pub fn get_fat32(index: usize) -> Option<Fat32Fs> {
     FAT32_INSTANCES
         .lock()
         .get(index)
-        .map(|mounted| mounted.fs.clone())
+        .and_then(|mounted| mounted.as_ref().map(|mounted| mounted.fs.clone()))
 }
 
 /// Indekse gore imaj destekli FAT32 ornegini dondurur
 pub fn get_mounted_fat32(index: usize) -> Option<MountedFat32> {
-    FAT32_INSTANCES.lock().get(index).cloned()
+    FAT32_INSTANCES
+        .lock()
+        .get(index)
+        .and_then(|entry| entry.clone())
 }
 
 /// İndekse göre exFAT örneğini döndürür
 pub fn get_exfat(index: usize) -> Option<ExFatFs> {
-    EXFAT_INSTANCES.lock().get(index).cloned()
+    EXFAT_INSTANCES
+        .lock()
+        .get(index)
+        .and_then(|mounted| mounted.as_ref().map(|mounted| mounted.fs.clone()))
+}
+
+pub fn get_mounted_exfat(index: usize) -> Option<MountedExFat> {
+    EXFAT_INSTANCES
+        .lock()
+        .get(index)
+        .and_then(|entry| entry.clone())
+}
+
+pub fn unmount_fat32(index: usize) -> bool {
+    let mut instances = FAT32_INSTANCES.lock();
+    let Some(entry) = instances.get_mut(index) else {
+        return false;
+    };
+    entry.take().is_some()
+}
+
+pub fn unmount_exfat(index: usize) -> bool {
+    let mut instances = EXFAT_INSTANCES.lock();
+    let Some(entry) = instances.get_mut(index) else {
+        return false;
+    };
+    entry.take().is_some()
 }

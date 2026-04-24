@@ -12,6 +12,8 @@
 #![no_std]
 
 pub mod processing_pipeline;
+pub mod tts;
 
 // Re-export commonly used items
 pub use processing_pipeline::*;
+pub use tts::*;

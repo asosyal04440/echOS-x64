@@ -367,11 +367,7 @@ impl ChaCha20Poly1305 {
 
     /// Sabit zamanlı 16 bayt karşılaştırması — zamanlama yan kanalını önler.
     fn constant_time_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
-        let mut result = 0u8;
-        for i in 0..16 {
-            result |= a[i] ^ b[i];
-        }
-        result == 0
+        crate::crypto::constant_time_eq(a, b)
     }
 }
 

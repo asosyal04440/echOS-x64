@@ -38,6 +38,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use super::{copy_from_user, validate_user_range, write_user_bytes};
+
 /// Send-safe raw pointer wrapper.
 /// CompletionRing tüm alanları atomik olduğu için
 /// farklı thread'lerden erişim güvenlidir.
@@ -625,29 +627,37 @@ impl LockFreeIoUring {
                                     if off != 0 { off as usize } else { state.offset };
                                 let read_len = (len as usize).min(65536); // Güvenlik limiti
                                 drop(file_table);
-                                // Buffer'ı oluştur ve VFS'den oku
-                                let mut tmp_buf = alloc::vec![0u8; read_len];
-                                match crate::fs::vfs_read_at(&inode, read_offset, &mut tmp_buf) {
-                                    Ok(bytes_read) => {
-                                        // addr != 0 ise kullanıcı buffer'ına kopyala
-                                        if addr != 0 {
-                                            let dst = addr as *mut u8;
-                                            unsafe {
-                                                core::ptr::copy_nonoverlapping(
-                                                    tmp_buf.as_ptr(),
-                                                    dst,
-                                                    bytes_read.min(read_len),
-                                                );
+                                if read_len == 0 {
+                                    0i32
+                                } else if addr == 0
+                                    || validate_user_range(addr as usize, read_len).is_err()
+                                {
+                                    -14i32 // EFAULT
+                                } else {
+                                    // Buffer'ı oluştur ve VFS'den oku
+                                    let mut tmp_buf = alloc::vec![0u8; read_len];
+                                    match crate::fs::vfs_read_at(&inode, read_offset, &mut tmp_buf)
+                                    {
+                                        Ok(bytes_read) => {
+                                            if bytes_read > 0
+                                                && write_user_bytes(
+                                                    addr as usize,
+                                                    &tmp_buf[..bytes_read],
+                                                )
+                                                .is_err()
+                                            {
+                                                -14i32 // EFAULT
+                                            } else {
+                                                // FILE_TABLE offset güncelle
+                                                let mut ft = crate::posix::FILE_TABLE.lock();
+                                                if let Some(Some(st)) = ft.get_mut(fd_idx) {
+                                                    st.offset = read_offset + bytes_read;
+                                                }
+                                                bytes_read as i32
                                             }
                                         }
-                                        // FILE_TABLE offset güncelle
-                                        let mut ft = crate::posix::FILE_TABLE.lock();
-                                        if let Some(Some(st)) = ft.get_mut(fd_idx) {
-                                            st.offset = read_offset + bytes_read;
-                                        }
-                                        bytes_read as i32
+                                        Err(_) => -5i32, // EIO
                                     }
-                                    Err(_) => -5i32, // EIO
                                 }
                             }
                             _ => {
@@ -674,24 +684,33 @@ impl LockFreeIoUring {
                                     if off != 0 { off as usize } else { state.offset };
                                 let write_len = (len as usize).min(65536);
                                 drop(file_table);
-                                // Kaynak veriyi oku
-                                if addr != 0 {
-                                    let src = addr as *const u8;
-                                    let src_slice =
-                                        unsafe { core::slice::from_raw_parts(src, write_len) };
-                                    match crate::fs::vfs_write_at(&inode, write_offset, src_slice) {
-                                        Ok(bytes_written) => {
-                                            // FILE_TABLE offset güncelle
-                                            let mut ft = crate::posix::FILE_TABLE.lock();
-                                            if let Some(Some(st)) = ft.get_mut(fd_idx) {
-                                                st.offset = write_offset + bytes_written;
-                                            }
-                                            bytes_written as i32
-                                        }
-                                        Err(_) => -5i32, // EIO
-                                    }
+                                if write_len == 0 {
+                                    0i32
+                                } else if addr == 0
+                                    || validate_user_range(addr as usize, write_len).is_err()
+                                {
+                                    -14i32 // EFAULT
                                 } else {
-                                    -14i32 // EFAULT — null buffer
+                                    let mut src_buf = alloc::vec![0u8; write_len];
+                                    if copy_from_user(&mut src_buf, addr as usize).is_err() {
+                                        -14i32 // EFAULT
+                                    } else {
+                                        match crate::fs::vfs_write_at(
+                                            &inode,
+                                            write_offset,
+                                            &src_buf,
+                                        ) {
+                                            Ok(bytes_written) => {
+                                                // FILE_TABLE offset güncelle
+                                                let mut ft = crate::posix::FILE_TABLE.lock();
+                                                if let Some(Some(st)) = ft.get_mut(fd_idx) {
+                                                    st.offset = write_offset + bytes_written;
+                                                }
+                                                bytes_written as i32
+                                            }
+                                            Err(_) => -5i32, // EIO
+                                        }
+                                    }
                                 }
                             }
                             _ => {

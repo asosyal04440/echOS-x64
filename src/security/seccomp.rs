@@ -214,29 +214,54 @@ impl BpfInstruction {
 
     /// A = k (anında 32-bit sabit değer yükle)
     pub fn ld_imm(k: u32) -> Self {
-        Self::new((BPF_CLASS_LD as u16) | (BPF_SIZE_W as u16) | (BPF_MODE_IMM as u16), 0, 0, k)
+        Self::new(
+            (BPF_CLASS_LD as u16) | (BPF_SIZE_W as u16) | (BPF_MODE_IMM as u16),
+            0,
+            0,
+            k,
+        )
     }
 
     /// A = seccomp_data[k] (seccomp veri yapısından mutlak ofsetle oku)
     ///
     /// Ofset 0 = syscall numarası (nr), ofset 4 = mimari (arch)
     pub fn ld_abs(offset: u32) -> Self {
-        Self::new((BPF_CLASS_LD as u16) | (BPF_SIZE_W as u16) | (BPF_MODE_ABS as u16), 0, 0, offset)
+        Self::new(
+            (BPF_CLASS_LD as u16) | (BPF_SIZE_W as u16) | (BPF_MODE_ABS as u16),
+            0,
+            0,
+            offset,
+        )
     }
 
     /// A == k ise jt kadar ilerle, değilse jf kadar ilerle
     pub fn jeq(k: u32, jt: u8, jf: u8) -> Self {
-        Self::new((BPF_CLASS_JMP as u16) | BPF_JMP_JEQ | (BPF_SRC_K as u16), jt, jf, k)
+        Self::new(
+            (BPF_CLASS_JMP as u16) | BPF_JMP_JEQ | (BPF_SRC_K as u16),
+            jt,
+            jf,
+            k,
+        )
     }
 
     /// A > k ise jt kadar ilerle, değilse jf kadar ilerle
     pub fn jgt(k: u32, jt: u8, jf: u8) -> Self {
-        Self::new((BPF_CLASS_JMP as u16) | BPF_JMP_JGT | (BPF_SRC_K as u16), jt, jf, k)
+        Self::new(
+            (BPF_CLASS_JMP as u16) | BPF_JMP_JGT | (BPF_SRC_K as u16),
+            jt,
+            jf,
+            k,
+        )
     }
 
     /// A >= k ise jt kadar ilerle, değilse jf kadar ilerle
     pub fn jge(k: u32, jt: u8, jf: u8) -> Self {
-        Self::new((BPF_CLASS_JMP as u16) | BPF_JMP_JGE | (BPF_SRC_K as u16), jt, jf, k)
+        Self::new(
+            (BPF_CLASS_JMP as u16) | BPF_JMP_JGE | (BPF_SRC_K as u16),
+            jt,
+            jf,
+            k,
+        )
     }
 
     /// BPF programından k değerini döndür (aksiyon kodu)
@@ -1116,9 +1141,15 @@ impl DynamicSeccompPolicy {
                     ArgFilterType::Ge => (BPF_CLASS_JMP as u16) | BPF_JMP_JGE | (BPF_SRC_K as u16),
                     ArgFilterType::Lt => (BPF_CLASS_JMP as u16) | BPF_JMP_JGT | (BPF_SRC_K as u16),
                     ArgFilterType::Le => (BPF_CLASS_JMP as u16) | BPF_JMP_JGE | (BPF_SRC_K as u16),
-                    ArgFilterType::MaskedEq => (BPF_CLASS_JMP as u16) | BPF_JMP_JEQ | (BPF_SRC_K as u16),
-                    ArgFilterType::BitSet => (BPF_CLASS_JMP as u16) | BPF_JMP_JSET | (BPF_SRC_K as u16),
-                    ArgFilterType::BitClear => (BPF_CLASS_JMP as u16) | BPF_JMP_JSET | (BPF_SRC_K as u16),
+                    ArgFilterType::MaskedEq => {
+                        (BPF_CLASS_JMP as u16) | BPF_JMP_JEQ | (BPF_SRC_K as u16)
+                    }
+                    ArgFilterType::BitSet => {
+                        (BPF_CLASS_JMP as u16) | BPF_JMP_JSET | (BPF_SRC_K as u16)
+                    }
+                    ArgFilterType::BitClear => {
+                        (BPF_CLASS_JMP as u16) | BPF_JMP_JSET | (BPF_SRC_K as u16)
+                    }
                 };
 
                 let jt = if filter.filter_type == ArgFilterType::Ne
@@ -1289,7 +1320,9 @@ impl SeccompAuditSystem {
         for log in logs.iter() {
             *syscall_counts.entry(log.syscall_nr).or_insert(0) += 1;
             *action_counts.entry(log.action).or_insert(0) += 1;
-            *policy_counts.entry(format!("policy_{}", log.filter_id)).or_insert(0) += 1;
+            *policy_counts
+                .entry(format!("policy_{}", log.filter_id))
+                .or_insert(0) += 1;
         }
 
         SeccompAuditReport {
