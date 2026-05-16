@@ -121,6 +121,9 @@ pub mod jail;
 /// Jail↔Core Dispatcher: Otomatik TIER 1/TIER 2 sürücü yönlendirme
 pub mod dispatcher;
 
+/// Linux Driver Onboarding: Sürücü profilleme, ABI çeviri, yaşam döngüsü
+pub mod linux_onboarding;
+
 /// TIER 1 NIC Native Driver: Lock-free ağ kartı sürücüsü
 pub mod nic_native;
 
@@ -146,11 +149,17 @@ pub mod audio_jail;
 /// Wi-Fi Jail sürücüsü (TIER 2)
 pub mod wifi_jail;
 
+/// TIER 2 Bluetooth Jail: HCI transport, LE advertising, scanning
+pub mod bluetooth_jail;
+
 /// Watchdog — donanım/yazılım gözcüsü (NMI + soft watchdog)
 pub mod watchdog;
 
 /// PCI Express Hot-Plug — Native hot-plug ve surprise removal protokolü
 pub mod pci_hotplug;
+
+/// DMA Ownership Contract — unified lifecycle, bounce buffer, cache coherency
+pub mod dma;
 
 // Sık kullanılan blok cihaz türlerini doğrudan dışa aktar
 pub use block::{BlockDevice, BlockDeviceError, BlockDeviceType};
@@ -347,6 +356,13 @@ pub mod linux {
     /// Başarılı bağlamaların (attachment) listesini döner
     pub fn list_attachments() -> Vec<LinuxAttachment> {
         ATTACHMENTS.lock().clone()
+    }
+
+    pub const PHASE5_KICKOFF_FIDELITY_BOUNDARY: &str =
+        "phase5_kickoff=host-corpus-green pcie_msi=partial iommu=partial virtio_rw_completion=partial boundary=real-hardware-trace-open";
+
+    pub fn phase5_kickoff_fidelity_boundary() -> &'static str {
+        PHASE5_KICKOFF_FIDELITY_BOUNDARY
     }
 
     /// Uygun blok cihazı seçer: önce VirtIO, bulamazsa ATA'ya düşer.
@@ -811,8 +827,9 @@ pub mod linux {
                     if bar.base != 0 {
                         virtio_ffi::init(dev.bus, dev.device, dev.function, bar.base as u16);
                         crate::serial_println!(
-                            "VIRTIO BLK: init via legacy io base=0x{:x}",
-                            bar.base
+                            "VIRTIO BLK: init via legacy io base=0x{:x} state={}",
+                            bar.base,
+                            virtio_ffi::path_state_str()
                         );
                     } else {
                         crate::serial_println!("VIRTIO BLK: io bar base is zero");
@@ -919,5 +936,24 @@ pub mod linux {
         register_driver(Box::new(XhciPciDriver));
         // Probe+attach döngüsünü çalıştır ve başarılı bağlama sayısını döndür
         probe_and_attach()
+    }
+}
+
+#[cfg(test)]
+mod phase5_kickoff_tests {
+    #[test]
+    fn phase5_kickoff_corpus_is_green() {
+        assert!(
+            super::pci::phase5_kickoff_contract_green(),
+            "PCIe/MSI kickoff corpus not green"
+        );
+        assert!(
+            super::iommu::phase5_kickoff_contract_green(),
+            "IOMMU kickoff corpus not green"
+        );
+        assert!(
+            super::virtio_blk::phase5_kickoff_contract_green(),
+            "VirtIO kickoff corpus not green"
+        );
     }
 }

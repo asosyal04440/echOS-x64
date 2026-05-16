@@ -52,6 +52,71 @@ function Wait-FileMarker {
     return $false
 }
 
+function Get-FileContentLength {
+    param(
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return 0
+    }
+    $content = Get-Content $Path -Raw -ErrorAction SilentlyContinue
+    if (-not $content) {
+        return 0
+    }
+    return $content.Length
+}
+
+function Wait-FileMarkerAfterOffset {
+    param(
+        [string]$Path,
+        [string]$Marker,
+        [int]$Offset,
+        [int]$TimeoutSec
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path $Path) {
+            $content = Get-Content $Path -Raw -ErrorAction SilentlyContinue
+            if ($content -and $content.Length -gt $Offset) {
+                $tail = $content.Substring($Offset)
+                if ($tail.Contains($Marker)) {
+                    return $true
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+function Wait-FileAnyMarkerAfterOffset {
+    param(
+        [string]$Path,
+        [string[]]$Markers,
+        [int]$Offset,
+        [int]$TimeoutSec
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path $Path) {
+            $content = Get-Content $Path -Raw -ErrorAction SilentlyContinue
+            if ($content -and $content.Length -gt $Offset) {
+                $tail = $content.Substring($Offset)
+                foreach ($marker in $Markers) {
+                    if ($tail.Contains($marker)) {
+                        return $marker
+                    }
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return ""
+}
+
 function Wait-FileMarkerOrProcessExit {
     param(
         [string]$Path,
@@ -74,6 +139,79 @@ function Wait-FileMarkerOrProcessExit {
         Start-Sleep -Milliseconds 250
     }
     return $false
+}
+
+function Wait-ProcessExitOrTimeout {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$TimeoutSec
+    )
+
+    if ($null -eq $Process) {
+        return $true
+    }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if ($Process.HasExited) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $Process.HasExited
+}
+
+function New-StageTimer {
+    [System.Diagnostics.Stopwatch]::StartNew()
+}
+
+function Write-StageElapsed {
+    param(
+        [string]$Name,
+        [System.Diagnostics.Stopwatch]$Timer
+    )
+
+    if ($Timer) {
+        $Timer.Stop()
+        Write-Host ("[TIME] {0}: {1:n3}s" -f $Name, $Timer.Elapsed.TotalSeconds) -ForegroundColor DarkCyan
+    }
+}
+
+function Invoke-HostCargoBuild {
+    param(
+        [string[]]$CargoArgs
+    )
+
+    $savedCc = $env:CC
+    $savedHostCc = $env:HOST_CC
+    try {
+        Remove-Item Env:CC -ErrorAction SilentlyContinue
+        Remove-Item Env:HOST_CC -ErrorAction SilentlyContinue
+        cargo @CargoArgs
+        return $LASTEXITCODE
+    } finally {
+        if ($null -ne $savedCc) { $env:CC = $savedCc } else { Remove-Item Env:CC -ErrorAction SilentlyContinue }
+        if ($null -ne $savedHostCc) { $env:HOST_CC = $savedHostCc } else { Remove-Item Env:HOST_CC -ErrorAction SilentlyContinue }
+    }
+}
+
+function Test-OutputFresh {
+    param(
+        [string]$OutputPath,
+        [string[]]$InputPaths
+    )
+
+    if (-not (Test-Path $OutputPath)) {
+        return $false
+    }
+    $outputTime = (Get-Item -LiteralPath $OutputPath).LastWriteTimeUtc
+    foreach ($inputPath in $InputPaths) {
+        if ($inputPath -and (Test-Path $inputPath)) {
+            if ((Get-Item -LiteralPath $inputPath).LastWriteTimeUtc -gt $outputTime) {
+                return $false
+            }
+        }
+    }
+    return $true
 }
 
 function Send-MonitorCommand {
@@ -178,6 +316,7 @@ function Test-ApplianceImageFresh {
     if ([bool]$seed.suspend_resume_smoke) { return $false }
     if ($null -ne $seed.update_smoke_request_url) { return $false }
     if ($null -ne $seed.pe_smoke_bundle) { return $false }
+    if ($manifest.esp_fat -ne "fat32") { return $false }
     if (-not (Test-StringArrayEqual -Left @($seed.bundles) -Right $BundlePaths)) { return $false }
     if (@($seed.esp_extra_files).Count -ne 0) { return $false }
 
@@ -244,9 +383,10 @@ $accelArgs = if ($whpxEnabled) {
 }
 # WHPX aktifken host CPU talimatları (AES-NI, RDRAND, SHA-NI) doğrudan kullanılır.
 # WHPX başarısız olursa TCG fallback devreye girer.
-$cpuModel = if ($whpxEnabled) { "host" } else { "Haswell,+smep,+smap,+pcid" }
+$tcgCpuModel = "Haswell,+smep,+smap"
+$cpuModel = if ($whpxEnabled) { "host" } else { $tcgCpuModel }
 $storageController = "nvme"
-$nicModel = "e1000e"
+$nicModel = "virtio-net-pci,disable-legacy=on,disable-modern=off"
 $videoArgs = @(
     "-vga", "none",
     "-device", "VGA,xres=$DisplayWidth,yres=$DisplayHeight,edid=on"
@@ -291,9 +431,12 @@ if (-not (Test-Path $qemu)) {
     }
 }
 
-$python = Get-Command python -ErrorAction SilentlyContinue
-if (-not $python) {
-    throw "python bulunamadı"
+$python = $null
+if ($MixedUpdateSmoke) {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) {
+        throw "python bulunamadı; mixed-update HTTP server için gerekli"
+    }
 }
 
 $isoPath = Join-Path $projectRoot "echOS_multiboot.iso"
@@ -348,7 +491,7 @@ if ($useIso) {
     }
     $imagePath = Join-Path $artifactDir "echos_vm.raw"
     $manifestPath = Join-Path $artifactDir "echos_vm.json"
-    $builderPath = Join-Path $projectRoot "scripts\build_vm_appliance.py"
+    $builderPath = Join-Path $projectRoot "target\x86_64-pc-windows-msvc\debug\echos_appliance.exe"
     $peSmokeBundlePath = $null
     $mixedUpdateArtifactDir = $null
     $mixedUpdateIndexUrl = $null
@@ -376,10 +519,27 @@ if ($useIso) {
 
     if (($EfiPath -eq "") -and (-not $NoBuild)) {
         Write-Host "Building echOS (UEFI)..." -ForegroundColor Yellow
+        $stageTimer = New-StageTimer
         cargo build --quiet --target x86_64-unknown-uefi
         if ($LASTEXITCODE -ne 0) { throw "UEFI build failed" }
+        Write-StageElapsed "UEFI cargo build" $stageTimer
     }
     if (-not (Test-Path $efiPath)) { throw "EFI binary not found at $efiPath" }
+
+    $applianceToolInputs = @(
+        (Join-Path $projectRoot "Cargo.toml"),
+        (Join-Path $projectRoot "src\bin\echos_appliance.rs")
+    )
+    if (Test-OutputFresh -OutputPath $builderPath -InputPaths $applianceToolInputs) {
+        Write-Host "Reusing fresh Rust appliance tool." -ForegroundColor DarkGray
+    } else {
+        Write-Host "Building Rust appliance tool..." -ForegroundColor Yellow
+        $stageTimer = New-StageTimer
+        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echos_appliance", "--target", "x86_64-pc-windows-msvc")
+        if ($hostBuildExit -ne 0) { throw "echos_appliance host build failed" }
+        Write-StageElapsed "echos_appliance build" $stageTimer
+    }
+    if (-not (Test-Path $builderPath)) { throw "echos_appliance host tool not found at $builderPath" }
 
     if ($PackagedPeSmoke) {
         if ($NoAutoLogin) {
@@ -391,12 +551,12 @@ if ($useIso) {
         $peSmokeBundlePath = Join-Path $artifactDir "pe_smoke_windowed.bhd"
 
         Write-Host "Building packaged PE smoke sample..." -ForegroundColor Yellow
-        cargo build --quiet --release --target x86_64-pc-windows-msvc --manifest-path $peSmokeManifest
-        if ($LASTEXITCODE -ne 0) { throw "PE smoke sample build failed" }
+        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--release", "--target", "x86_64-pc-windows-msvc", "--manifest-path", $peSmokeManifest)
+        if ($hostBuildExit -ne 0) { throw "PE smoke sample build failed" }
 
         Write-Host "Building echosdk host tool..." -ForegroundColor Yellow
-        cargo build --quiet --bin echsdk --target x86_64-pc-windows-msvc
-        if ($LASTEXITCODE -ne 0) { throw "echsdk host build failed" }
+        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc")
+        if ($hostBuildExit -ne 0) { throw "echsdk host build failed" }
         if (-not (Test-Path $echsdkPath)) { throw "echsdk host tool not found at $echsdkPath" }
 
         & $echsdkPath sign $peSmokeRoot developer $peSmokeBundlePath
@@ -408,7 +568,6 @@ if ($useIso) {
             throw "Mixed update smoke auto-login gerektirir"
         }
         $echsdkPath = Join-Path $projectRoot "target\\x86_64-pc-windows-msvc\\debug\\echsdk.exe"
-        $slotImageBuilderPath = Join-Path $projectRoot "scripts\\build_f2fs_slot_image.py"
         $mixedUpdateArtifactDir = Join-Path $artifactDir "mixed_update_smoke"
         $platformImagePath = Join-Path $mixedUpdateArtifactDir "platform-system_b.img"
         $serviceArtifactPath = Join-Path $mixedUpdateArtifactDir "service-reboot.bhd"
@@ -435,13 +594,17 @@ if ($useIso) {
         New-Item -ItemType Directory -Force -Path $mixedUpdateArtifactDir | Out-Null
 
         Write-Host "Building echosdk host tool..." -ForegroundColor Yellow
-        cargo build --quiet --bin echsdk --target x86_64-pc-windows-msvc
-        if ($LASTEXITCODE -ne 0) { throw "echsdk host build failed" }
+        $stageTimer = New-StageTimer
+        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc")
+        if ($hostBuildExit -ne 0) { throw "echsdk host build failed" }
+        Write-StageElapsed "echsdk build" $stageTimer
         if (-not (Test-Path $echsdkPath)) { throw "echsdk host tool not found at $echsdkPath" }
 
         Write-Host "Building mixed update platform image..." -ForegroundColor Yellow
-        & $python.Source $slotImageBuilderPath --output $platformImagePath --image-mib 8
+        $stageTimer = New-StageTimer
+        & $builderPath slot-image --output $platformImagePath --image-mib 8
         if ($LASTEXITCODE -ne 0) { throw "mixed update slot image build failed" }
+        Write-StageElapsed "mixed update slot image" $stageTimer
 
         Copy-Item $sourceServiceBundle $serviceArtifactPath -Force
         @(
@@ -456,11 +619,13 @@ if ($useIso) {
         if ($LASTEXITCODE -ne 0) { throw "mixed update index publish failed" }
 
         Write-Host "Starting mixed update HTTP server..." -ForegroundColor Yellow
+        $stageTimer = New-StageTimer
         $httpServerProc = Start-Process -FilePath $python.Source -ArgumentList @("-m", "http.server", "$requestPort", "--bind", "0.0.0.0", "--directory", $mixedUpdateArtifactDir) -PassThru -RedirectStandardOutput $httpServerStdoutPath -RedirectStandardError $httpServerStderrPath
         Start-Sleep -Seconds 2
         if ($httpServerProc.HasExited) {
             throw "mixed update HTTP server exited early"
         }
+        Write-StageElapsed "mixed update HTTP server start" $stageTimer
     }
 
     $bundleDir = if ($CuratedBundleDir -ne "") {
@@ -477,12 +642,12 @@ if ($useIso) {
     }
 
     $builderArgs = @(
-        $builderPath,
         "--efi", $efiPath,
         "--output", $imagePath,
         "--active-slot", "system_a",
         "--pending-slot", $PendingSlot,
-        "--system-image-mib", "8"
+        "--system-image-mib", "8",
+        "--esp-fat", "fat32"
     )
     if (-not $NoAutoLogin) {
         $builderArgs += "--auto-login"
@@ -523,8 +688,10 @@ if ($useIso) {
         Write-Host "Reusing fresh raw GPT appliance disk. Use -RebuildAppliance to force rebuild." -ForegroundColor DarkGray
     } else {
         Write-Host "Building raw GPT appliance disk..." -ForegroundColor Yellow
-        & $python.Source @builderArgs
+        $stageTimer = New-StageTimer
+        & $builderPath @builderArgs
         if ($LASTEXITCODE -ne 0) { throw "Appliance image build failed" }
+        Write-StageElapsed "raw GPT appliance disk" $stageTimer
     }
 
     Write-Host "Disk image: $imagePath" -ForegroundColor DarkGray
@@ -570,10 +737,13 @@ if ($useIso) {
         "-monitor", $monitorEndpoint,
         "-no-reboot",
         "-no-shutdown",
-        # Ağ: virtio-net (birincil) + e1000e (donanım davranış testi)
+        # Ag: guest init path VirtIO-Net'e bind eder; TCG smoke'ta e1000e log gürültüsü üretmez.
         "-netdev", "user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::4443-:443",
-        "-device", "e1000e,netdev=net0"
+        "-device", "$nicModel,netdev=net0,mac=52:54:00:12:34:56"
     ) + $displayArgs + $videoArgs + $accelArgs
+    if ($SuspendResumeSmoke) {
+        $qemuArgs += @("-global", "ICH9-LPC.disable_s3=0")
+    }
     if ($traceEnabled) {
         $qemuArgs += @("-d", "int,guest_errors,unimp,pcall,mmu,cpu_reset", "-D", $traceLogPath)
     }
@@ -620,7 +790,7 @@ function Convert-ToTcgFallbackArgs {
         }
         if ($arg -eq "-cpu") {
             $fallback += "-cpu"
-            $fallback += "Haswell,+smep,+smap,+pcid"
+            $fallback += $tcgCpuModel
             $i++
             continue
         }
@@ -707,6 +877,10 @@ try {
             }
             if (-not (Wait-FileMarker -Path $phase1.SerialLogPath -Marker "[SMOKE] mixed-update reboot arm" -TimeoutSec 120)) {
                 throw "Mixed update phase-1 reboot marker gorulmedi"
+            }
+            if (-not (Wait-ProcessExitOrTimeout -Process $phase1.Process -TimeoutSec 30)) {
+                Write-Host "Mixed update phase-1 reboot marker goruldu; QEMU cikmadi, faz gecisi icin durduruluyor." -ForegroundColor DarkYellow
+                try { $phase1.Process.Kill() } catch {}
             }
             $phase1.Process.WaitForExit()
             Write-Host "`nQEMU exited ($($phase1.Name))." -ForegroundColor Magenta
@@ -812,7 +986,7 @@ try {
                 $qemuStdoutPath = $fallbackStdoutPath
                 $qemuStderrPath = $fallbackStderrPath
                 $accelMode = "tcg-fallback"
-                $cpuModel = "Haswell,+smep,+smap,+pcid"
+                $cpuModel = $tcgCpuModel
                 $qemuCpuCount = $fallbackCpuCount
                 $qemuSmpArg = "sockets=1,cores=$qemuCpuCount,threads=1,maxcpus=$qemuCpuCount"
                 $proc = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru -RedirectStandardOutput $qemuStdoutPath -RedirectStandardError $qemuStderrPath
@@ -855,11 +1029,29 @@ if (-not $useIso) {
             throw "Suspend/resume smoke arm marker not observed"
         }
         Start-Sleep -Seconds 2
-        Send-MonitorCommand -MonitorHost $monitorHost -Port $monitorPort -Command "system_wakeup"
-        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SMOKE] suspend-resume ok" -TimeoutSec 120)) {
+        $preWakeContent = if (Test-Path $serialLogPath) { Get-Content $serialLogPath -Raw } else { "" }
+        if ($preWakeContent.Contains("[SMOKE] suspend-resume fail:")) {
             try { $proc.Kill() } catch {}
-            throw "Suspend/resume smoke did not complete"
+            throw "Suspend/resume smoke failed before host wake"
         }
+        $resumeOffset = Get-FileContentLength -Path $serialLogPath
+        Send-MonitorCommand -MonitorHost $monitorHost -Port $monitorPort -Command "system_wakeup"
+        $healthMarker = Wait-FileAnyMarkerAfterOffset -Path $serialLogPath -Markers @("[SMOKE] resume-health ok", "[SMOKE] resume-health fail", "[SMOKE] suspend-resume fail:") -Offset $resumeOffset -TimeoutSec 120
+        if ($healthMarker -ne "[SMOKE] resume-health ok") {
+            try { $proc.Kill() } catch {}
+            if ([string]::IsNullOrEmpty($healthMarker)) {
+                Write-Host "[FAIL] suspend-resume health marker missing after host wake" -ForegroundColor Red
+                throw "Suspend/resume smoke did not complete after host wake"
+            }
+            Write-Host "[FAIL] suspend-resume health marker reported: $healthMarker" -ForegroundColor Red
+            throw "Suspend/resume smoke health failed: $healthMarker"
+        }
+        if (-not (Wait-FileMarkerAfterOffset -Path $debugLogPath -Marker "S3R" -Offset 0 -TimeoutSec 10)) {
+            try { $proc.Kill() } catch {}
+            Write-Host "[FAIL] suspend-resume debugcon S3R marker missing" -ForegroundColor Red
+            throw "Suspend/resume debugcon marker missing"
+        }
+        Write-Host "[PASS] suspend-resume smoke: serial health + debugcon S3R observed" -ForegroundColor Green
         if ($Headless -and -not $proc.HasExited) {
             try { $proc.Kill() } catch {}
         }
@@ -922,7 +1114,10 @@ if (-not $useIso) {
         )
     }
     if ($SuspendResumeSmoke) {
-        $requiredMarkers += "[SMOKE] suspend-resume ok"
+        $requiredMarkers += @(
+            "[SMOKE] suspend-resume ok",
+            "[SMOKE] resume-health ok"
+        )
     }
     if ($PackagedPeSmoke) {
         $requiredMarkers += @(

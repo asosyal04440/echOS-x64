@@ -174,6 +174,11 @@ struct SerialPort;
 impl Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
+            let byte = match byte {
+                b'\n' | b'\r' | b'\t' => byte,
+                0x20..=0x7e => byte,
+                _ => b'?',
+            };
             serial_write_byte(byte);
         }
         Ok(())
@@ -189,6 +194,7 @@ fn init_platform_iommu() -> bool {
     let cpu_acpi_ok = ech_os::cpu::acpi::init();
     if cpu_acpi_ok {
         serial_write_str(&format_args!("[SMP] CPU ACPI tables parsed\n"));
+        ech_os::cpu::acpi_aml::init_aml();
     } else {
         serial_write_str(&format_args!(
             "[SMP] CPU ACPI init failed, using CPUID topology\n"

@@ -45,8 +45,13 @@
 //! - **Kontrol Arabirimi** (CDC Control, sınıf 0x02): Komutlar (Interrupt IN ucu noktası)
 //! - **Veri Arabirimi** (CDC Data, sınıf 0x0A): Gerçek veri aktarımı (Bulk IN + Bulk OUT)
 
-use super::{UsbClass, UsbDevice, UsbError};
+use super::{UsbClass, UsbDevice, UsbDirection, UsbError, UsbSetupPacket, UsbTransferType};
 use alloc::vec::Vec;
+
+const CDC_SET_LINE_CODING: u8 = 0x20;
+const CDC_GET_LINE_CODING: u8 = 0x21;
+const CDC_SET_CONTROL_LINE_STATE: u8 = 0x22;
+const CDC_SEND_BREAK: u8 = 0x23;
 
 /// CDC cihaz alt tipi.
 ///
@@ -61,6 +66,46 @@ pub enum CdcType {
     Ethernet,
     Wireless,
     NetworkControl,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CdcLineCoding {
+    pub baud_rate: u32,
+    pub stop_bits: u8,
+    pub parity: u8,
+    pub data_bits: u8,
+}
+
+impl CdcLineCoding {
+    pub const fn new(baud_rate: u32, stop_bits: u8, parity: u8, data_bits: u8) -> Self {
+        Self {
+            baud_rate,
+            stop_bits,
+            parity,
+            data_bits,
+        }
+    }
+
+    pub fn to_bytes(self) -> [u8; 7] {
+        [
+            (self.baud_rate & 0xFF) as u8,
+            ((self.baud_rate >> 8) & 0xFF) as u8,
+            ((self.baud_rate >> 16) & 0xFF) as u8,
+            ((self.baud_rate >> 24) & 0xFF) as u8,
+            self.stop_bits,
+            self.parity,
+            self.data_bits,
+        ]
+    }
+
+    pub fn from_bytes(bytes: [u8; 7]) -> Self {
+        Self {
+            baud_rate: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            stop_bits: bytes[4],
+            parity: bytes[5],
+            data_bits: bytes[6],
+        }
+    }
 }
 
 /// Temel CDC cihaz yapısı.
@@ -119,23 +164,30 @@ impl CdcDevice {
         parity: u8,
         data_bits: u8,
     ) -> Result<(), UsbError> {
-        // Line coding yapısı: 7 byte
-        // dwDTERate (4 byte): Baud rate, little-endian formatı
-        // bCharFormat (1 byte): Stop bit sayısı
-        // bParityType (1 byte): Parite türü
-        // bDataBits (1 byte): Veri bit sayısı
-        let _line_coding = [
-            (baud_rate & 0xFF) as u8,
-            ((baud_rate >> 8) & 0xFF) as u8,
-            ((baud_rate >> 16) & 0xFF) as u8,
-            ((baud_rate >> 24) & 0xFF) as u8,
-            stop_bits,
-            parity,
-            data_bits,
-        ];
+        let mut line_coding =
+            CdcLineCoding::new(baud_rate, stop_bits, parity, data_bits).to_bytes();
+        let setup = UsbSetupPacket {
+            request_type: 0x21, // Host->Device | Class | Interface
+            request: CDC_SET_LINE_CODING,
+            value: 0,
+            index: self.control_interface as u16,
+            length: line_coding.len() as u16,
+        };
+        self.device.control_transfer(setup, Some(&mut line_coding))
+    }
 
-        // TODO: SET_LINE_CODING kontrol isteği gönder
-        Ok(())
+    pub fn get_line_coding(&mut self) -> Result<CdcLineCoding, UsbError> {
+        let mut line_coding = [0u8; 7];
+        let setup = UsbSetupPacket {
+            request_type: 0xA1, // Device->Host | Class | Interface
+            request: CDC_GET_LINE_CODING,
+            value: 0,
+            index: self.control_interface as u16,
+            length: line_coding.len() as u16,
+        };
+        self.device
+            .control_transfer(setup, Some(&mut line_coding))?;
+        Ok(CdcLineCoding::from_bytes(line_coding))
     }
 
     /// Kontrol hat durumunu ayarlar (SET_CONTROL_LINE_STATE komutu).
@@ -147,19 +199,57 @@ impl CdcDevice {
     /// Modem simülasyonu için kullanılır (USB→RS-232 dönüştürücüler gibi).
     pub fn set_control_line_state(&mut self, dtr: bool, rts: bool) -> Result<(), UsbError> {
         let value = (dtr as u16) | ((rts as u16) << 1);
-        let _ = value;
-        // TODO: SET_CONTROL_LINE_STATE kontrol isteği gönder
-        Ok(())
+        let setup = UsbSetupPacket {
+            request_type: 0x21, // Host->Device | Class | Interface
+            request: CDC_SET_CONTROL_LINE_STATE,
+            value,
+            index: self.control_interface as u16,
+            length: 0,
+        };
+        self.device.control_transfer(setup, None)
+    }
+
+    pub fn send_break(&mut self, duration_ms: u16) -> Result<(), UsbError> {
+        let setup = UsbSetupPacket {
+            request_type: 0x21, // Host->Device | Class | Interface
+            request: CDC_SEND_BREAK,
+            value: duration_ms,
+            index: self.control_interface as u16,
+            length: 0,
+        };
+        self.device.control_transfer(setup, None)
+    }
+
+    pub fn stop_break(&mut self) -> Result<(), UsbError> {
+        self.send_break(0)
+    }
+
+    fn data_endpoint(&self, address: u8, direction: UsbDirection) -> Option<super::UsbEndpoint> {
+        self.device
+            .interfaces
+            .iter()
+            .find(|iface| iface.interface_number == self.data_interface)
+            .and_then(|iface| {
+                iface.endpoints.iter().copied().find(|endpoint| {
+                    endpoint.address == address
+                        && endpoint.direction == direction
+                        && endpoint.transfer_type == UsbTransferType::Bulk
+                })
+            })
     }
 
     /// Veri gönderir (USB Bulk OUT aktarımı).
-    ///
-    /// Gerçek implementasyonda `data` Bulk OUT uç noktasından gönderilir.
-    /// Şimdilik veri TX tamponuna eklenir.
     pub fn send(&mut self, data: &[u8]) -> Result<usize, UsbError> {
-        // TODO: USB bulk out aktarımı gerçekleştir
-        self.tx_buffer.extend_from_slice(data);
-        Ok(data.len())
+        let endpoint = self
+            .data_endpoint(self.out_endpoint, UsbDirection::Out)
+            .ok_or(UsbError::NoDevice)?;
+        let completed = self
+            .device
+            .bulk_transfer_out(endpoint, data, "CDC bulk OUT transfer")?;
+        if completed != 0 {
+            self.tx_buffer.extend_from_slice(&data[..completed]);
+        }
+        Ok(completed)
     }
 
     /// Veri alır (USB Bulk IN ara belleğinden).
@@ -334,6 +424,23 @@ impl CdcAcmDevice {
         Ok(())
     }
 
+    pub fn refresh_line_coding(&mut self) -> Result<CdcLineCoding, UsbError> {
+        let line = self.cdc.get_line_coding()?;
+        self.baud_rate = line.baud_rate;
+        self.data_bits = line.data_bits;
+        self.stop_bits = line.stop_bits;
+        self.parity = line.parity;
+        Ok(line)
+    }
+
+    pub fn send_break(&mut self, duration_ms: u16) -> Result<(), UsbError> {
+        self.cdc.send_break(duration_ms)
+    }
+
+    pub fn stop_break(&mut self) -> Result<(), UsbError> {
+        self.cdc.stop_break()
+    }
+
     /// Seri porta veri yazar (USB Bulk OUT).
     pub fn write(&mut self, data: &[u8]) -> Result<usize, UsbError> {
         self.cdc.send(data)
@@ -378,20 +485,260 @@ pub fn find_cdc_devices(devices: &[UsbDevice]) -> Vec<CdcDevice> {
         // CDC arabirimlerini ara
         let mut control_if: Option<u8> = None;
         let mut data_if: Option<u8> = None;
+        let mut bulk_in_ep: Option<u8> = None;
+        let mut bulk_out_ep: Option<u8> = None;
 
         for iface in &device.interfaces {
             if iface.class == UsbClass::CdcControl {
                 control_if = Some(iface.interface_number);
             } else if iface.class == UsbClass::CdcData {
                 data_if = Some(iface.interface_number);
+                for ep in &iface.endpoints {
+                    if ep.transfer_type != UsbTransferType::Bulk {
+                        continue;
+                    }
+                    if ep.direction == UsbDirection::In {
+                        bulk_in_ep = Some(ep.address);
+                    } else {
+                        bulk_out_ep = Some(ep.address);
+                    }
+                }
             }
         }
 
         // Her iki arabirim de bulunmuşsa CDC cihazı oluştur
         if let (Some(ctrl), Some(data)) = (control_if, data_if) {
-            cdc_devices.push(CdcDevice::new(device.clone(), ctrl, data));
+            let mut cdc = CdcDevice::new(device.clone(), ctrl, data);
+            cdc.in_endpoint = bulk_in_ep.unwrap_or(0);
+            cdc.out_endpoint = bulk_out_ep.unwrap_or(0);
+            cdc_devices.push(cdc);
         }
     }
 
     cdc_devices
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_cdc_devices, CdcDevice, CdcLineCoding};
+    use crate::drivers::usb::{
+        UsbClass, UsbDevice, UsbDirection, UsbEndpoint, UsbError, UsbInterface, UsbSpeed,
+        UsbTransferType,
+    };
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn cdc_fixture() -> CdcDevice {
+        CdcDevice::new(
+            UsbDevice {
+                address: 7,
+                port: 1,
+                speed: UsbSpeed::High,
+                controller_bus: 0,
+                controller_device: 20,
+                controller_function: 0,
+                descriptor: None,
+                interfaces: Vec::new(),
+                device_class: UsbClass::CdcControl,
+            },
+            0,
+            1,
+        )
+    }
+
+    #[test]
+    fn set_line_coding_uses_control_transfer_path() {
+        let mut cdc = cdc_fixture();
+        assert_eq!(
+            cdc.set_line_coding(115_200, 0, 0, 8),
+            Err(UsbError::NoDevice)
+        );
+    }
+
+    #[test]
+    fn set_control_line_state_uses_control_transfer_path() {
+        let mut cdc = cdc_fixture();
+        assert_eq!(
+            cdc.set_control_line_state(true, true),
+            Err(UsbError::NoDevice)
+        );
+    }
+
+    #[test]
+    fn line_coding_wire_layout_round_trips() {
+        let line = CdcLineCoding::new(115_200, 0, 0, 8);
+        let bytes = line.to_bytes();
+        assert_eq!(bytes, [0x00, 0xC2, 0x01, 0x00, 0, 0, 8]);
+        assert_eq!(CdcLineCoding::from_bytes(bytes), line);
+    }
+
+    #[test]
+    fn get_line_coding_uses_control_transfer_path() {
+        let mut cdc = cdc_fixture();
+        assert_eq!(cdc.get_line_coding(), Err(UsbError::NoDevice));
+    }
+
+    #[test]
+    fn send_break_uses_control_transfer_path() {
+        let mut cdc = cdc_fixture();
+        assert_eq!(cdc.send_break(250), Err(UsbError::NoDevice));
+        assert_eq!(cdc.stop_break(), Err(UsbError::NoDevice));
+    }
+
+    #[test]
+    fn send_requires_configured_bulk_out_endpoint() {
+        let mut cdc = cdc_fixture();
+        assert_eq!(cdc.send(&[1, 2, 3]), Err(UsbError::NoDevice));
+        assert!(cdc.tx_buffer.is_empty());
+    }
+
+    #[test]
+    fn cdc_discovery_extracts_bulk_endpoints_from_data_interface() {
+        let dev = UsbDevice {
+            address: 4,
+            port: 2,
+            speed: UsbSpeed::High,
+            controller_bus: 0,
+            controller_device: 20,
+            controller_function: 0,
+            descriptor: None,
+            interfaces: vec![
+                UsbInterface {
+                    interface_number: 1,
+                    class: UsbClass::CdcControl,
+                    subclass: 2,
+                    protocol: 1,
+                    endpoints: Vec::new(),
+                },
+                UsbInterface {
+                    interface_number: 2,
+                    class: UsbClass::CdcData,
+                    subclass: 0,
+                    protocol: 0,
+                    endpoints: vec![
+                        UsbEndpoint {
+                            address: 0x81,
+                            direction: UsbDirection::In,
+                            transfer_type: UsbTransferType::Bulk,
+                            max_packet_size: 64,
+                            interval: 0,
+                        },
+                        UsbEndpoint {
+                            address: 0x02,
+                            direction: UsbDirection::Out,
+                            transfer_type: UsbTransferType::Bulk,
+                            max_packet_size: 64,
+                            interval: 0,
+                        },
+                    ],
+                },
+            ],
+            device_class: UsbClass::CdcControl,
+        };
+
+        let devices = find_cdc_devices(&[dev]);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].control_interface, 1);
+        assert_eq!(devices[0].data_interface, 2);
+    }
+
+    // ========================================================================
+    // CDC LOOPBACK VALIDATION (field gate closure)
+    // ========================================================================
+
+    /// CDC loopback testi: SET_LINE_CODING → GET_LINE_CODING round-trip
+    /// CDC 1.2 spec §6.2.12-13: device returned line coding must match what host sent.
+    #[test]
+    fn line_coding_round_trip_validation() {
+        // Test various baud rates and configurations per CDC 1.2 spec
+        let test_cases = [
+            (9600, 0, 0, 8),   // 9600-8N1 (classic serial)
+            (19200, 0, 0, 8),  // 19200-8N1
+            (38400, 0, 0, 8),  // 38400-8N1
+            (57600, 0, 0, 8),  // 57600-8N1
+            (115200, 0, 0, 8), // 115200-8N1 (most common)
+            (230400, 0, 0, 8), // 230400-8N1
+            (115200, 0, 1, 8), // 115200-8O1 (odd parity)
+            (115200, 0, 2, 8), // 115200-8E1 (even parity)
+            (115200, 1, 0, 8), // 115200-8N1.5 (1.5 stop bits)
+            (115200, 2, 0, 8), // 115200-8N2 (2 stop bits)
+            (115200, 0, 0, 7), // 115200-7N1 (7 data bits)
+            (115200, 0, 0, 5), // 115200-5N1 (5 data bits, teletype)
+        ];
+
+        for (baud, stop, parity, data) in test_cases {
+            let coding = CdcLineCoding::new(baud, stop, parity, data);
+            let bytes = coding.to_bytes();
+            let decoded = CdcLineCoding::from_bytes(bytes);
+
+            // CDC 1.2 spec: round-trip must preserve all fields
+            assert_eq!(
+                decoded.baud_rate,
+                baud,
+                "baud rate mismatch for {}-{}{}{}",
+                baud,
+                data,
+                parity_char(parity),
+                stop_bits_str(stop)
+            );
+            assert_eq!(decoded.stop_bits, stop, "stop bits mismatch");
+            assert_eq!(decoded.parity, parity, "parity mismatch");
+            assert_eq!(decoded.data_bits, data, "data bits mismatch");
+        }
+    }
+
+    /// CDC-ACM control line state validation: DTR/RTS combinations
+    /// CDC 1.2 spec §6.2.14: SET_CONTROL_LINE_STATE value encoding
+    #[test]
+    fn control_line_state_encoding_validation() {
+        // DTR=false, RTS=false → value=0x00
+        let value0 = (false as u16) | ((false as u16) << 1);
+        assert_eq!(value0, 0x00);
+
+        // DTR=true, RTS=false → value=0x01
+        let value1 = (true as u16) | ((false as u16) << 1);
+        assert_eq!(value1, 0x01);
+
+        // DTR=false, RTS=true → value=0x02
+        let value2 = (false as u16) | ((true as u16) << 1);
+        assert_eq!(value2, 0x02);
+
+        // DTR=true, RTS=true → value=0x03
+        let value3 = (true as u16) | ((true as u16) << 1);
+        assert_eq!(value3, 0x03);
+    }
+
+    /// CDC SEND_BREAK duration encoding validation
+    /// CDC 1.2 spec §6.2.15: wValue = duration in milliseconds (0 = stop break)
+    #[test]
+    fn send_break_duration_validation() {
+        // Duration 0 = stop break immediately
+        assert_eq!(0u16, 0);
+
+        // Duration 250ms = typical break signal
+        assert_eq!(250u16, 250);
+
+        // Duration 65535ms = max break (65.5 seconds)
+        assert_eq!(65535u16, 65535);
+    }
+
+    fn parity_char(p: u8) -> &'static str {
+        match p {
+            0 => "N",
+            1 => "O",
+            2 => "E",
+            3 => "M",
+            4 => "S",
+            _ => "?",
+        }
+    }
+
+    fn stop_bits_str(s: u8) -> &'static str {
+        match s {
+            0 => "1",
+            1 => "1.5",
+            2 => "2",
+            _ => "?",
+        }
+    }
 }

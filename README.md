@@ -1,3 +1,9 @@
+# echOS-x64
+
+**echOS-x64 is a Rust `no_std` x86-64 operating system kernel for UEFI, Multiboot2, Limine, SMP scheduling, memory management, filesystems, networking, and GUI/compositor research.**
+
+[Türkçe README](README.tr.md) · [Technical report](echOS_teknik_rapor.pdf) · [Build and run](#building)
+
 <div align="center">
 
 ```
@@ -9,16 +15,14 @@
  ╚══════╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ╚═╝  ╚═╝ ╚═════╝      ╚═╝
 ```
 
-**A modern, bare-metal x86-64 operating system — crafted entirely in Rust.**
+**Rust `no_std` x86-64 operating system research kernel.**
 
 [![CI: Simics Zero-Tolerance](https://img.shields.io/badge/CI-Simics%20Zero--Tolerance-blueviolet?style=flat-square&logo=github-actions)](/.github/workflows/simics-zero-tolerance.yml)
 [![Rust: nightly](https://img.shields.io/badge/Rust-nightly-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
 [![Target: x86_64-unknown-none](https://img.shields.io/badge/target-x86__64--unknown--none-lightgrey?style=flat-square)]()
-[![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)](LICENSE)
 [![no_std](https://img.shields.io/badge/no__std-✓-blue?style=flat-square)]()
 [![Boot: UEFI](https://img.shields.io/badge/boot-UEFI%20%7C%20Multiboot2%20%7C%20Limine-informational?style=flat-square)]()
-
-> *Runs Doom. Speaks TLS 1.3. Boots from UEFI. — All in Rust, with zero C standard library.*
 
 </div>
 
@@ -28,7 +32,7 @@
 
 1. [Overview](#overview)
 2. [Architecture](#architecture)
-3. [Feature Highlights](#feature-highlights)
+3. [Current Status](#current-status)
 4. [Module Tree](#module-tree)
 5. [Building](#building)
 6. [Running](#running)
@@ -41,9 +45,9 @@
 
 ## Overview
 
-**echOS-x64** is a fully featured, research-grade operating system kernel built from the ground up in **Rust** (`#![no_std]`). It targets the `x86_64` architecture and boots via **UEFI**, **Multiboot2**, or the **Limine** protocol.
+**echOS-x64** is a Rust `no_std` x86-64 operating-system research kernel. The current public repository focuses on boot flow, kernel architecture, memory/scheduler/driver experiments, host-side tooling, and reproducible local validation paths.
 
-The project is not a toy kernel. It implements production-class subsystems including a CFS/RT/Deadline scheduler, TLS 1.3 networking stack, TPM 2.0 Secure Boot, ext4 journaling, IronShim Windows-driver compatibility, a tile-based GPU compositor, and a POSIX/Win32 API emulation layer — all in safe + unsafe Rust, with no external libc.
+This README is intentionally conservative: `✅` means the capability has a concrete implementation or repository workflow visible in this tree; `⏳` means the subsystem is under active development, partially integrated, target-specific, or still needs stronger validation before it should be presented as complete.
 
 ---
 
@@ -57,9 +61,9 @@ The project is not a toy kernel. It implements production-class subsystems inclu
 │                         SYSTEM CALL INTERFACE                        │
 ├────────────┬─────────────┬──────────────┬───────────────────────────┤
 │  SCHEDULER │   MEMORY    │  FILESYSTEM  │       NETWORKING           │
-│  CFS/RT/DL │  PMM + VMM  │ FAT/ext4/    │  TCP/UDP/TLS1.3/QUIC/     │
-│  SMP 8192  │  TLSF/Buddy │ NTFS/f2fs/   │  WireGuard/IPSec/HTTP2    │
-│  Work-Steal│  THP/zswap  │ NFS/FUSE     │  DNS-over-HTTPS/DoT       │
+│  CFS/RT/DL │  PMM + VMM  │ FAT/ext/VFS  │  smoltcp-backed stack     │
+│  SMP/AP    │  Allocators │ image tools  │  protocol experiments     │
+│  Work-Steal│  paging     │ validation   │  packet/device plumbing   │
 ├────────────┴─────────────┴──────────────┴───────────────────────────┤
 │                            KERNEL CORE                               │
 │   GDT │ IDT │ APIC │ IOAPIC │ IRQ Domains │ Softirq │ RCU │ Preempt │
@@ -84,7 +88,7 @@ UEFI/Multiboot2/Limine
   GOP Framebuffer init  →  Splash screen
         │
         ▼
-  ACPI parse  →  APIC / IOMMU init  →  SMP AP bringup (up to 8192 CPUs)
+  ACPI parse  →  APIC / IOMMU init  →  SMP AP bringup path
         │
         ▼
   PMM + Paging  →  TLSF Heap  →  Security (SMEP/SMAP/NX)  →  TPM Secure Boot
@@ -93,143 +97,30 @@ UEFI/Multiboot2/Limine
   Drivers (PCI / NVMe / VirtIO / USB)  →  Filesystem mount
         │
         ▼
-  Network stack  →  GUI compositor  →  Shell / Desktop
+  Network experiments  →  GUI/compositor experiments  →  shell/tooling
 ```
 
 ---
 
-## Feature Highlights
+## Current Status
 
-### 🧠 Memory Management
-| Feature | Details |
-|---------|---------|
-| Physical Memory Manager | Fibonacci Buddy + PMM (O(1) alloc) |
-| Virtual Memory | 4-level page tables, 2 MiB hugepages |
-| Heap Allocator | **TLSF** (Two-Level Segregated Fit) + Bump + Linked-List fallback |
-| Transparent Huge Pages | THP coalescing daemon |
-| Memory Compression | `zswap`-style compressed swap |
-| cgroups v2 | Per-task memory limits and accounting |
-| OOM Killer | Priority-based victim selection |
-| NUMA | Topology-aware allocation |
-
-### ⚡ Scheduler
-| Feature | Details |
-|---------|---------|
-| CFS | Completely Fair Scheduler with virtual runtime (Linux-style) |
-| RT Scheduler | SCHED_FIFO / SCHED_RR for real-time tasks |
-| Deadline Scheduler | EDF-based (SCHED_DEADLINE) |
-| Ghost Scheduler | Google-style in-kernel agent scheduling |
-| SMP | Work-stealing Chase-Lev deque, up to **8 192 CPUs** |
-| Timer | High-resolution TSC-based timer wheel |
-| Futex | Userspace fast-path mutex |
-| CPU Affinity | NUMA-aware task pinning |
-
-### 🌐 Networking
-| Protocol | Status |
-|----------|--------|
-| Ethernet / ARP / IPv4 / IPv6 | ✅ |
-| TCP / UDP | ✅ (smoltcp-backed) |
-| DHCP | ✅ |
-| DNS / DNSSEC | ✅ |
-| DNS-over-HTTPS (DoH) | ✅ |
-| DNS-over-TLS (DoT) | ✅ |
-| **TLS 1.3** (from scratch) | ✅ HKDF + ChaCha20 + SHA-2 |
-| HTTP/1.1 + HTTP/2 | ✅ |
-| WebSocket | ✅ |
-| **QUIC** | ✅ |
-| **WireGuard** | ✅ |
-| IPSec | ✅ |
-| Netfilter / iptables-style | ✅ |
-| Network Namespaces | ✅ |
-| `io_uring`-style async I/O | ✅ |
-| Zero-copy networking | ✅ |
-| x.509 / PKI | ✅ |
-
-### 📁 File Systems
-| FS | Features |
-|----|---------|
-| **FAT32** | Read/write |
-| **ext4** | Journaling (ext4_journal), ACL, xattr, quotas, inotify |
-| **NTFS** | Read support |
-| **F2FS** | Flash-friendly FS |
-| **NFS** | Network file system client |
-| **FUSE** | Userspace filesystem protocol |
-| File locking | POSIX advisory + mandatory |
-| Zero-copy splice | `sendfile`-style |
-
-### 🔒 Security
-| Feature | Details |
-|---------|---------|
-| SMEP / SMAP | CR4 hardware enforcement |
-| NX / DEP | W^X page table policy |
-| Stack Canary | Per-task canary values |
-| ASLR | Randomised kernel & user VA layout |
-| **TPM 2.0** | PCR extend, measured boot |
-| **UEFI Secure Boot** | PK/KEK/db/dbx chain-of-trust |
-| Capability-based Security | POSIX capabilities |
-| MAC (SELinux-like) | Mandatory Access Control framework |
-| seccomp | Syscall filter policies |
-| IMA / EVM | Integrity Measurement Architecture |
-| Audit | Kernel audit log |
-| Keyring | In-kernel key storage |
-
-### 🔐 Cryptography (hardware-accelerated, no_std)
-- **AES-NI** — hardware AES-128/256
-- **SHA-256 / SHA-3** — SHA-NI accelerated
-- **Blake3** — fast hashing
-- **ChaCha20-Poly1305** — AEAD cipher
-- **Ed25519** — digital signatures
-- **RSA** — asymmetric crypto
-- **Argon2** — password hashing
-- **HKDF** — TLS 1.3 key derivation
-
-### 🎮 GUI & Graphics
-- **Tile-based compositor** with SIMD-accelerated blending
-- **VirtIO GPU** + **DRM** backend
-- Full **Window Manager** (`echOS-WM`): windows, focus, z-ordering
-- **Desktop**, Dock, Spotlight, Mission Control, Spaces (virtual desktops)
-- **Font rendering** (TrueType rasterizer, glyph atlas, text layout)
-- Built-in apps: Terminal, File Explorer, Text Editor, Image Viewer, Browser, Music Player, Activity Monitor, Settings
-- Drag-and-drop, clipboard, notifications, wallpaper
-
-### 🪟 Compatibility Layers
-| Layer | Details |
-|-------|---------|
-| **Win32 API** | Emulation layer for Windows applications |
-| **IronShim** | Windows kernel driver compatibility (ironshim-rs) |
-| **POSIX** | `pipe`, `msgq`, `semaphore`, `dlopen` |
-| **Linux Glue** | Partial Linux kernel ABI compatibility |
-| **ELF Loader** | Execute Linux ELF binaries |
-| **PE/COFF Loader** | Load Windows PE executables |
-| **VDSO** | Virtual DSO for fast syscalls |
-
-### 🛠 Hardware Drivers
-- **Storage**: NVMe, ATA/AHCI, VirtIO-blk
-- **Network**: VirtIO-net, smoltcp NIC driver
-- **Display**: VirtIO-GPU, VirGL (3D), framebuffer DRM
-- **Input**: PS/2 keyboard+mouse, USB HID
-- **USB**: EHCI/XHCI, HID, CDC, Mass Storage, Hub
-- **Bus**: PCI/PCIe (ECAM), I²C, SPI
-- **Audio**: AC97/HDA framework
-- **Bluetooth**: HCI transport layer
-- **Thermal**: ACPI thermal zones
-- **Watchdog**: Hardware watchdog timer
-- **IOMMU**: VT-d / AMD-Vi
-
-### 🧩 ACPI
-- Full ACPI table parsing (MADT, FADT, DSDT, SSDT)
-- AML interpreter
-- GPE (General Purpose Events)
-- ACPI power states (S0–S5)
-- Embedded Controller (EC) protocol
-
-### 💀 Fault Tolerance
-- **Checkpoint & recovery** — kernel state snapshots
-- **Fault injection** — testing subsystem resilience
-- **Monitors** — per-subsystem health monitors (CPU, memory, scheduler, IRQ, FS, SMP, driver)
-- **Degradation modes** — graceful service degradation
-- **Emergency handlers** — last-resort crash recovery
-- **Watchdog** — hardware + software watchdog
+| Area | Status | Notes |
+|------|--------|-------|
+| Rust `no_std` kernel crate | ✅ | Primary kernel code is Rust with explicit bare-metal targets. |
+| UEFI build target | ✅ | `x86_64-unknown-uefi` build path and `.efi` artifact are documented. |
+| QEMU/OVMF launch path | ✅ | `run_qemu.ps1` is the local smoke-run entrypoint. |
+| Shareable UEFI VM ISO | ✅ | `scripts/build_vm_iso.ps1` emits `build/appliance/echOS-uefi.iso`. |
+| AGPL-3.0 project licensing | ✅ | Root `LICENSE`, manifest metadata, and README badge agree. |
+| Simics gate tooling | ✅ | Gate scripts and log/verdict locations are part of the repository workflow. |
+| Limine / Multiboot2 paths | ⏳ | Present in the code and docs, but UEFI is the primary public run path. |
+| SMP / AP bring-up | ⏳ | Active kernel path; VirtualBox smoke profile is intentionally single-vCPU. |
+| Memory manager stack | ⏳ | PMM, paging, and allocator work exists; broader invariants still need tighter public proof coverage. |
+| Scheduler stack | ⏳ | CFS/RT/deadline/work-stealing work is in-tree; end-to-end workload validation is still ongoing. |
+| Filesystems | ⏳ | FAT/ext-style/VFS work is in-tree; treat non-smoke paths as under validation. |
+| Networking | ⏳ | smoltcp-backed work is in-tree; protocol matrix is not presented as complete. |
+| GUI/compositor | ⏳ | Framebuffer, graphics, and UI experiments are in-tree; not a finished desktop environment. |
+| Win32/POSIX/IronShim compatibility | ⏳ | Compatibility work exists, but public support should be treated as experimental. |
+| Hardware driver surface | ⏳ | VirtIO/PCI/storage/input/display work is active; bare-metal hardware coverage varies by target. |
 
 ---
 
@@ -283,10 +174,7 @@ src/
 ├── ironshim_bridge.rs   # IronShim Windows-driver bridge
 ├── vdso.rs              # Virtual DSO
 ├── virt.rs              # VMX/SVM virtualisation
-├── gpu3d.rs             # 3D GPU API (Vulkan-like)
-│
-├── doom.rs              # 🎮 Doom port
-└── doom_launcher.rs     # Doom launcher
+└── gpu3d.rs             # 3D GPU API experiments
 ```
 
 ---
@@ -331,6 +219,22 @@ cargo build --target x86_64-unknown-none --release
 .\run_qemu.ps1
 ```
 
+### Shareable UEFI VM ISO
+
+```powershell
+.\scripts\build_vm_iso.ps1
+# Output: build\appliance\echOS-uefi.iso
+```
+
+Attach this ISO as optical media in a VM configured for UEFI/OVMF firmware.
+Legacy BIOS boot is outside this artifact contract; select EFI/UEFI firmware in
+VirtualBox, VMware, or QEMU.
+
+VirtualBox test profile: `Other/Unknown (64-bit)`, EFI enabled, `1` CPU, and
+disk/optical media first in the boot order. VirtualBox 7.2.x currently trips the
+AP bring-up path on the second vCPU while loading the TSS, so SMP is disabled for
+the VirtualBox smoke profile; QEMU/Simics SMP validation is a separate gate.
+
 Or manually:
 
 ```bash
@@ -354,7 +258,7 @@ qemu-system-x86_64 \
 Simics\echos-simics\bin\run-gate.bat
 ```
 
-### Multiboot2 ISO
+### Legacy Multiboot2 ISO
 
 ```bash
 # ISO is pre-built at:
@@ -426,9 +330,9 @@ echOS_teknik_rapor.pdf
 
 ## License
 
-This project is distributed under the **MIT License** — see [`LICENSE`](LICENSE) for details.
+echOS-x64 project code is distributed under the **GNU Affero General Public License v3.0 only** — see [`LICENSE`](LICENSE) for details.
 
-Certain subsystems (IronShim, Simics gate internals) remain **confidential** and are not included in this public repository.
+Third-party components keep their own upstream licenses as listed above and in their vendored manifests.
 
 ---
 

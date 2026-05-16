@@ -6,6 +6,13 @@
 name = "ech_os"
 version = "0.1.0"
 edition = "2021"
+description = "Rust no_std x86-64 operating system kernel for UEFI, SMP scheduling, memory management, filesystems, networking, and GUI research."
+license = "AGPL-3.0-only"
+readme = "README.md"
+repository = "https://github.com/asosyal04440/echOS-x64"
+homepage = "https://github.com/asosyal04440/echOS-x64"
+keywords = ["operating-system", "kernel", "no-std", "x86_64", "rust"]
+categories = ["embedded", "no-std"]
 
 [workspace]
 members = [
@@ -138,6 +145,12 @@ required-features = ["host_smoke"]
 [[bin]]
 name = "echsdk"
 path = "src/bin/echsdk.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "echos_appliance"
+path = "src/bin/echos_appliance.rs"
 test = false
 bench = false
 

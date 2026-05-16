@@ -506,6 +506,20 @@ pub fn poll_aux_burst(max_bytes: usize) -> usize {
     count
 }
 
+/// VMware Workstation's virtual i8042 can deliver mouse bytes without reliably
+/// setting the AUX status bit. Use this only as a GUI-service fallback after the
+/// AUX-bounded path found nothing.
+pub fn poll_vmware_compat_burst(max_bytes: usize) -> usize {
+    let mut count = 0usize;
+    while count < max_bytes {
+        if !poll() {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
 /// Bir kare içinde sınırlı sayıda AUX byte'ı tüketir.
 /// Yoğun mouse hareketi sırasında tampon dolmasını önler.
 /// Döner: işlenen toplam byte sayısı.

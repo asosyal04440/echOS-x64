@@ -1,3 +1,9 @@
+# echOS-x64
+
+**echOS-x64; Rust `no_std` ile geliştirilen, UEFI, Multiboot2, Limine, SMP zamanlayıcı, bellek yönetimi, dosya sistemleri, ağ yığını ve GUI/compositor araştırmasına odaklanan x86-64 işletim sistemi çekirdeğidir.**
+
+[English README](README.md) · [Teknik rapor](echOS_teknik_rapor.pdf) · [Derleme ve çalıştırma](#derleme)
+
 <div align="center">
 
 ```
@@ -9,16 +15,14 @@
  ╚══════╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ╚═╝  ╚═╝ ╚═════╝      ╚═╝
 ```
 
-**Tamamen Rust ile yazılmış, modern bir x86-64 bare-metal işletim sistemi.**
+**Rust `no_std` x86-64 işletim sistemi araştırma çekirdeği.**
 
 [![CI: Simics Zero-Tolerance](https://img.shields.io/badge/CI-Simics%20Zero--Tolerance-blueviolet?style=flat-square&logo=github-actions)](/.github/workflows/simics-zero-tolerance.yml)
 [![Rust: nightly](https://img.shields.io/badge/Rust-nightly-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
 [![Hedef: x86_64-unknown-none](https://img.shields.io/badge/hedef-x86__64--unknown--none-lightgrey?style=flat-square)]()
-[![Lisans: MIT](https://img.shields.io/badge/lisans-MIT-green?style=flat-square)](LICENSE)
+[![Lisans: AGPL-3.0](https://img.shields.io/badge/lisans-AGPL--3.0-green?style=flat-square)](LICENSE)
 [![no_std](https://img.shields.io/badge/no__std-✓-blue?style=flat-square)]()
 [![Boot: UEFI](https://img.shields.io/badge/boot-UEFI%20%7C%20Multiboot2%20%7C%20Limine-informational?style=flat-square)]()
-
-> *Doom çalıştırır. TLS 1.3 konuşur. UEFI'den önyüklenir. — Tamamı Rust, sıfır C standart kütüphanesi.*
 
 </div>
 
@@ -28,7 +32,7 @@
 
 1. [Genel Bakış](#genel-bakış)
 2. [Mimari](#mimari)
-3. [Öne Çıkan Özellikler](#öne-çıkan-özellikler)
+3. [Mevcut Durum](#mevcut-durum)
 4. [Modül Ağacı](#modül-ağacı)
 5. [Derleme](#derleme)
 6. [Çalıştırma](#çalıştırma)
@@ -41,9 +45,9 @@
 
 ## Genel Bakış
 
-**echOS-x64**, tamamen **Rust** (`#![no_std]`) ile sıfırdan inşa edilmiş, araştırma düzeyinde tam özellikli bir işletim sistemi çekirdeğidir. `x86_64` mimarisini hedefler ve **UEFI**, **Multiboot2** veya **Limine** protokolüyle önyükleme yapar.
+**echOS-x64**, Rust `no_std` ile geliştirilen x86-64 işletim sistemi araştırma çekirdeğidir. Mevcut public repo; boot akışı, çekirdek mimarisi, bellek/zamanlayıcı/sürücü deneyleri, host-side araçlar ve yeniden üretilebilir yerel doğrulama yollarına odaklanır.
 
-Bu proje bir oyuncak çekirdek değildir. CFS/RT/Deadline zamanlayıcı, TLS 1.3 ağ yığını, TPM 2.0 Güvenli Önyükleme, ext4 günlükleme, IronShim Windows sürücü uyumluluğu, tile tabanlı GPU compositor ve POSIX/Win32 API öykünme katmanı gibi üretim kalitesinde alt sistemler içerir — tamamı güvenli + güvensiz Rust ile, harici libc kullanılmadan.
+Bu README bilinçli olarak konservatiftir: `✅` somut implementasyonu veya repo workflow'u bu ağaçta görünen alanı, `⏳` ise aktif geliştirme, kısmi entegrasyon, hedefe bağlı destek veya daha güçlü doğrulama bekleyen alanı gösterir.
 
 ---
 
@@ -57,9 +61,9 @@ Bu proje bir oyuncak çekirdek değildir. CFS/RT/Deadline zamanlayıcı, TLS 1.3
 │                        SİSTEM ÇAĞRISI ARAYÜZÜ                        │
 ├────────────┬─────────────┬──────────────┬───────────────────────────┤
 │ ZAMANLAYIC │   BELLEK    │  DOSYA SİS.  │          AĞ               │
-│  CFS/RT/DL │  PMM + VMM  │ FAT/ext4/    │  TCP/UDP/TLS1.3/QUIC/     │
-│  SMP 8192  │  TLSF/Buddy │ NTFS/f2fs/   │  WireGuard/IPSec/HTTP2    │
-│  Work-Steal│  THP/zswap  │ NFS/FUSE     │  DNS-over-HTTPS/DoT       │
+│  CFS/RT/DL │  PMM + VMM  │ FAT/ext/VFS  │  smoltcp destekli yığın   │
+│  SMP/AP    │  Allocator  │ imaj araçları│  protokol deneyleri       │
+│  Work-Steal│  paging     │ validasyon   │  paket/cihaz bağlantısı   │
 ├────────────┴─────────────┴──────────────┴───────────────────────────┤
 │                          ÇEKİRDEK KATMAN                             │
 │   GDT │ IDT │ APIC │ IOAPIC │ IRQ Domains │ Softirq │ RCU │ Preempt │
@@ -84,7 +88,7 @@ UEFI/Multiboot2/Limine
   GOP Framebuffer başlatma  →  Açılış ekranı
         │
         ▼
-  ACPI ayrıştırma  →  APIC / IOMMU başlatma  →  SMP AP bringup (8192 CPU'ya kadar)
+  ACPI ayrıştırma  →  APIC / IOMMU başlatma  →  SMP AP bringup yolu
         │
         ▼
   PMM + Sayfalama  →  TLSF Heap  →  Güvenlik (SMEP/SMAP/NX)  →  TPM Güvenli Önyükleme
@@ -93,143 +97,30 @@ UEFI/Multiboot2/Limine
   Sürücüler (PCI / NVMe / VirtIO / USB)  →  Dosya sistemi bağlama
         │
         ▼
-  Ağ yığını  →  GUI compositor  →  Kabuk / Masaüstü
+  Ağ deneyleri  →  GUI/compositor deneyleri  →  kabuk/araçlar
 ```
 
 ---
 
-## Öne Çıkan Özellikler
+## Mevcut Durum
 
-### 🧠 Bellek Yönetimi
-| Özellik | Detay |
-|---------|-------|
-| Fiziksel Bellek Yöneticisi | Fibonacci Buddy + PMM (O(1) tahsis) |
-| Sanal Bellek | 4 seviyeli sayfa tabloları, 2 MiB büyük sayfalar |
-| Heap Ayrıştırıcı | **TLSF** (Two-Level Segregated Fit) + Bump + Linked-List yedek |
-| Şeffaf Büyük Sayfalar | THP birleştirme arka plan işlemi |
-| Bellek Sıkıştırma | `zswap` tarzı sıkıştırılmış takas |
-| cgroups v2 | Görev başına bellek sınırı ve muhasebe |
-| OOM Killer | Öncelik tabanlı kurban seçimi |
-| NUMA | Topoloji farkında bellek tahsisi |
-
-### ⚡ Zamanlayıcı
-| Özellik | Detay |
-|---------|-------|
-| CFS | Sanal çalışma süreli Tam Adil Zamanlayıcı (Linux tarzı) |
-| RT Zamanlayıcı | Gerçek zamanlı görevler için SCHED_FIFO / SCHED_RR |
-| Deadline Zamanlayıcı | EDF tabanlı (SCHED_DEADLINE) |
-| Ghost Zamanlayıcı | Google tarzı çekirdek içi ajan zamanlama |
-| SMP | Chase-Lev iş çalma kuyruğu, **8.192 CPU**'ya kadar |
-| Zamanlayıcı | TSC tabanlı yüksek çözünürlüklü zamanlayıcı tekerleği |
-| Futex | Kullanıcı alanı hızlı yol mutex |
-| CPU Benzitimi | NUMA farkında görev sabitleme |
-
-### 🌐 Ağ
-| Protokol | Durum |
-|----------|-------|
-| Ethernet / ARP / IPv4 / IPv6 | ✅ |
-| TCP / UDP | ✅ (smoltcp destekli) |
-| DHCP | ✅ |
-| DNS / DNSSEC | ✅ |
-| DNS-over-HTTPS (DoH) | ✅ |
-| DNS-over-TLS (DoT) | ✅ |
-| **TLS 1.3** (sıfırdan) | ✅ HKDF + ChaCha20 + SHA-2 |
-| HTTP/1.1 + HTTP/2 | ✅ |
-| WebSocket | ✅ |
-| **QUIC** | ✅ |
-| **WireGuard** | ✅ |
-| IPSec | ✅ |
-| Netfilter / iptables tarzı | ✅ |
-| Ağ Ad Alanları | ✅ |
-| `io_uring` tarzı asenkron G/Ç | ✅ |
-| Sıfır-kopya ağ | ✅ |
-| x.509 / PKI | ✅ |
-
-### 📁 Dosya Sistemleri
-| DS | Özellikler |
-|----|-----------|
-| **FAT32** | Okuma/yazma |
-| **ext4** | Günlükleme (ext4_journal), ACL, xattr, kotalar, inotify |
-| **NTFS** | Okuma desteği |
-| **F2FS** | Flash dostu dosya sistemi |
-| **NFS** | Ağ dosya sistemi istemcisi |
-| **FUSE** | Kullanıcı alanı dosya sistemi protokolü |
-| Dosya kilitleme | POSIX danışma + zorunlu kilitleme |
-| Sıfır-kopya splice | `sendfile` tarzı |
-
-### 🔒 Güvenlik
-| Özellik | Detay |
-|---------|-------|
-| SMEP / SMAP | CR4 donanım zorlaması |
-| NX / DEP | W^X sayfa tablosu politikası |
-| Yığın Canary | Görev başına canary değerleri |
-| ASLR | Rastgele çekirdek & kullanıcı sanal adres düzeni |
-| **TPM 2.0** | PCR genişletme, ölçümlü önyükleme |
-| **UEFI Güvenli Önyükleme** | PK/KEK/db/dbx güven zinciri |
-| Kapasite Tabanlı Güvenlik | POSIX yetenekleri |
-| MAC (SELinux benzeri) | Zorunlu Erişim Kontrolü çerçevesi |
-| seccomp | Sistem çağrısı filtre politikaları |
-| IMA / EVM | Bütünlük Ölçüm Mimarisi |
-| Denetim | Çekirdek denetim günlüğü |
-| Anahtar Halkası | Çekirdek içi anahtar deposu |
-
-### 🔐 Kriptografi (donanım hızlandırmalı, no_std)
-- **AES-NI** — donanım AES-128/256
-- **SHA-256 / SHA-3** — SHA-NI hızlandırmalı
-- **Blake3** — hızlı özetleme
-- **ChaCha20-Poly1305** — AEAD şifresi
-- **Ed25519** — dijital imzalar
-- **RSA** — asimetrik kriptografi
-- **Argon2** — parola özetleme
-- **HKDF** — TLS 1.3 anahtar türetme
-
-### 🎮 GUI ve Grafik
-- **Tile tabanlı compositor** — SIMD hızlandırmalı harmanlama
-- **VirtIO GPU** + **DRM** arka ucu
-- Tam **Pencere Yöneticisi** (`echOS-WM`): pencereler, odak, z-sıralaması
-- **Masaüstü**, Dock, Spotlight, Mission Control, Spaces (sanal masaüstleri)
-- **Font rendering** (TrueType rasterizör, glyph atlası, metin düzeni)
-- Dahili uygulamalar: Terminal, Dosya Gezgini, Metin Editörü, Resim Görüntüleyici, Tarayıcı, Müzik Çalar, Etkinlik Monitörü, Ayarlar
-- Sürükle-bırak, pano, bildirimler, duvar kağıdı
-
-### 🪟 Uyumluluk Katmanları
-| Katman | Detay |
-|--------|-------|
-| **Win32 API** | Windows uygulamaları için öykünme katmanı |
-| **IronShim** | Windows çekirdek sürücü uyumluluğu (ironshim-rs) |
-| **POSIX** | `pipe`, `msgq`, `semaphore`, `dlopen` |
-| **Linux Glue** | Kısmi Linux çekirdek ABI uyumluluğu |
-| **ELF Yükleyici** | Linux ELF ikili dosyaları çalıştırma |
-| **PE/COFF Yükleyici** | Windows PE çalıştırılabilir dosyaları yükleme |
-| **VDSO** | Hızlı sistem çağrıları için Sanal DSO |
-
-### 🛠 Donanım Sürücüleri
-- **Depolama**: NVMe, ATA/AHCI, VirtIO-blk
-- **Ağ**: VirtIO-net, smoltcp NIC sürücüsü
-- **Görüntü**: VirtIO-GPU, VirGL (3D), framebuffer DRM
-- **Giriş**: PS/2 klavye+fare, USB HID
-- **USB**: EHCI/XHCI, HID, CDC, Yığın Depolama, Hub
-- **Veri Yolu**: PCI/PCIe (ECAM), I²C, SPI
-- **Ses**: AC97/HDA çerçevesi
-- **Bluetooth**: HCI taşıma katmanı
-- **Termal**: ACPI ısıl bölgeleri
-- **Watchdog**: Donanım izleme zamanlayıcısı
-- **IOMMU**: VT-d / AMD-Vi
-
-### 🧩 ACPI
-- Tam ACPI tablo ayrıştırma (MADT, FADT, DSDT, SSDT)
-- AML yorumlayıcısı
-- GPE (Genel Amaçlı Olaylar)
-- ACPI güç durumları (S0–S5)
-- Gömülü Denetleyici (EC) protokolü
-
-### 💀 Hata Toleransı
-- **Checkpoint & kurtarma** — çekirdek durum anlık görüntüleri
-- **Hata enjeksiyonu** — alt sistem dayanıklılık testleri
-- **Monitörler** — alt sistem başına sağlık monitörleri (CPU, bellek, zamanlayıcı, IRQ, DS, SMP, sürücü)
-- **Bozulma modları** — zarif hizmet bozulması
-- **Acil durum işleyicileri** — son çare kilitlenme kurtarma
-- **Watchdog** — donanım + yazılım izleme
+| Alan | Durum | Not |
+|------|-------|-----|
+| Rust `no_std` çekirdek crate'i | ✅ | Ana çekirdek kodu Rust ve bare-metal hedeflere ayrılmış durumda. |
+| UEFI build hedefi | ✅ | `x86_64-unknown-uefi` build yolu ve `.efi` artifact'i dokümante edildi. |
+| QEMU/OVMF çalıştırma yolu | ✅ | `run_qemu.ps1` yerel smoke-run giriş noktasıdır. |
+| Paylaşılabilir UEFI VM ISO | ✅ | `scripts/build_vm_iso.ps1`, `build/appliance/echOS-uefi.iso` üretir. |
+| AGPL-3.0 proje lisansı | ✅ | Kök `LICENSE`, manifest metadata ve README rozeti aynı lisansı gösterir. |
+| Simics gate araçları | ✅ | Gate script'leri ve log/verdict yolları repo workflow'una dahil. |
+| Limine / Multiboot2 yolları | ⏳ | Kodda ve dokümanda var; public çalıştırma yolu olarak UEFI birincil. |
+| SMP / AP bring-up | ⏳ | Aktif çekirdek yolu; VirtualBox smoke profili bilinçli olarak tek vCPU. |
+| Bellek yönetimi | ⏳ | PMM, paging ve allocator işleri ağaçta var; daha güçlü public proof coverage gerekiyor. |
+| Zamanlayıcı | ⏳ | CFS/RT/deadline/work-stealing çalışmaları ağaçta; uçtan uca workload doğrulaması sürüyor. |
+| Dosya sistemleri | ⏳ | FAT/ext tarzı/VFS işleri ağaçta; smoke dışı yollar validasyon altında. |
+| Ağ | ⏳ | smoltcp destekli çalışma ağaçta; protokol matrisi tamamlanmış gibi sunulmuyor. |
+| GUI/compositor | ⏳ | Framebuffer, grafik ve UI deneyleri ağaçta; bitmiş masaüstü ortamı değil. |
+| Win32/POSIX/IronShim uyumluluğu | ⏳ | Uyumluluk çalışmaları var; public destek deneysel kabul edilmeli. |
+| Donanım sürücü yüzeyi | ⏳ | VirtIO/PCI/depolama/giriş/görüntü işleri aktif; bare-metal donanım kapsamı hedefe göre değişir. |
 
 ---
 
@@ -283,10 +174,7 @@ src/
 ├── ironshim_bridge.rs   # IronShim Windows sürücü köprüsü
 ├── vdso.rs              # Sanal DSO
 ├── virt.rs              # VMX/SVM sanallaştırma
-├── gpu3d.rs             # 3D GPU API'si (Vulkan benzeri)
-│
-├── doom.rs              # 🎮 Doom portu
-└── doom_launcher.rs     # Doom başlatıcı
+└── gpu3d.rs             # 3D GPU API deneyleri
 ```
 
 ---
@@ -331,6 +219,22 @@ cargo build --target x86_64-unknown-none --release
 .\run_qemu.ps1
 ```
 
+### Paylaşılabilir UEFI VM ISO
+
+```powershell
+.\scripts\build_vm_iso.ps1
+# Çıktı: build\appliance\echOS-uefi.iso
+```
+
+Bu ISO, UEFI/OVMF kullanan VM'lerde optik medya olarak takılır. Legacy BIOS
+önyükleme bu artifact'in sözleşmesi değildir; VirtualBox/VMware/QEMU tarafında
+EFI/UEFI firmware seçilmelidir.
+
+VirtualBox test profili: `Other/Unknown (64-bit)`, EFI açık, CPU sayısı `1`,
+boot sırası disk/optik medya. Mevcut VirtualBox 7.2.x profilinde AP bring-up
+ikinci vCPU üzerinde TSS yükleme sırasında triple fault ürettiği için SMP
+VirtualBox smoke'ta kapalı tutulur; QEMU/Simics SMP doğrulaması ayrı kapıdır.
+
 Ya da manuel olarak:
 
 ```bash
@@ -354,7 +258,7 @@ qemu-system-x86_64 \
 Simics\echos-simics\bin\run-gate.bat
 ```
 
-### Multiboot2 ISO
+### Eski Multiboot2 ISO
 
 ```bash
 # ISO önceden oluşturulmuş:
@@ -426,9 +330,9 @@ echOS_teknik_rapor.pdf
 
 ## Lisans
 
-Bu proje **MIT Lisansı** kapsamında dağıtılmaktadır — ayrıntılar için [`LICENSE`](LICENSE) dosyasına bakınız.
+echOS-x64 proje kodu **GNU Affero General Public License v3.0 only** kapsamında dağıtılır — ayrıntılar için [`LICENSE`](LICENSE) dosyasına bakınız.
 
-Belirli alt sistemler (IronShim, Simics kapı iç kısımları) **gizli** olmaya devam etmekte ve bu genel depoya dahil edilmemektedir.
+Üçüncü taraf bileşenler yukarıdaki tabloda ve vendored manifestlerde belirtilen kendi upstream lisanslarını korur.
 
 ---
 

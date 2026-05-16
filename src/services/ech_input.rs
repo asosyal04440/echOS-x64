@@ -247,7 +247,10 @@ impl EchInput {
 
         // QEMU/UEFI GUI yolunda IRQ12 teslimi kaçsa bile AUX-buffer'daki fare verisini
         // klavye scancode'larına dokunmadan toparla.
-        let _ = crate::drivers::mouse::poll_aux_burst(64);
+        let aux_bytes = crate::drivers::mouse::poll_aux_burst(64);
+        if aux_bytes == 0 {
+            let _ = crate::drivers::mouse::poll_vmware_compat_burst(64);
+        }
 
         while let Some(raw) = crate::drivers::input::pop_event() {
             let events = self.translate_raw_event(raw);

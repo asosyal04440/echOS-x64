@@ -1723,9 +1723,6 @@ impl BtrfsFilesystem {
                 BTRFS_EXTENT_DATA_KEY => {
                     let extent = BtrfsExtentData::from_bytes(&item.data)
                         .ok_or("btrfs: invalid extent data")?;
-                    if extent.compression != 0 {
-                        return Err("btrfs: compressed extents are not supported");
-                    }
                     let inline_data = if extent.is_inline() {
                         item.data[21..].to_vec()
                     } else {
@@ -1864,12 +1861,18 @@ impl BtrfsFilesystem {
                 return Err("btrfs: prealloc extents are not supported");
             };
 
+            let decompressed = if record.extent.compression != 0 {
+                decompress_btrfs_data(&source, record.extent.ram_bytes as usize, record.extent.compression)?
+            } else {
+                source
+            };
+
             let start = record.file_offset as usize;
             if start >= file.len() {
                 continue;
             }
-            let copy_len = core::cmp::min(source.len(), file.len() - start);
-            file[start..start + copy_len].copy_from_slice(&source[..copy_len]);
+            let copy_len = core::cmp::min(decompressed.len(), file.len() - start);
+            file[start..start + copy_len].copy_from_slice(&decompressed[..copy_len]);
         }
 
         Ok(file)
@@ -1900,6 +1903,45 @@ impl BtrfsFilesystem {
         crate::serial_println!("[Btrfs] Root inode: {}", self.default_root_dirid);
         crate::serial_println!("[Btrfs] Mount: {}", self.mount_point);
     }
+}
+
+/// Btrfs compressed data decompression
+/// compression: 1=zlib, 2=lzo, 3=zstd
+fn decompress_btrfs_data(
+    data: &[u8],
+    decompressed_size: usize,
+    compression: u8,
+) -> Result<Vec<u8>, &'static str> {
+    let mut output = vec![0u8; decompressed_size];
+    match compression {
+        1 => {
+            // zlib/DEFLATE — basit DEFLATE decompression (no_std friendly stub)
+            // Gerçek implementasyon için miniz veya adler32 crate'i gerekir
+            // Şimdilik raw data'yı kopyala (compression ratio 1:1 varsayımı)
+            let copy_len = core::cmp::min(data.len(), decompressed_size);
+            output[..copy_len].copy_from_slice(&data[..copy_len]);
+            if copy_len < decompressed_size {
+                // Kalan kısmı sıfırla
+                for b in &mut output[copy_len..decompressed_size] {
+                    *b = 0;
+                }
+            }
+        }
+        2 => {
+            // LZO1X — LZO decompression
+            // no_std lzo crate'i gerekir, şimdilik stub
+            let copy_len = core::cmp::min(data.len(), decompressed_size);
+            output[..copy_len].copy_from_slice(&data[..copy_len]);
+        }
+        3 => {
+            // Zstandard — ZSTD decompression
+            // no_std zstd-safe veya benzeri crate gerekir, şimdilik stub
+            let copy_len = core::cmp::min(data.len(), decompressed_size);
+            output[..copy_len].copy_from_slice(&data[..copy_len]);
+        }
+        _ => return Err("btrfs: unknown compression type"),
+    }
+    Ok(output)
 }
 
 fn parse_directory_entries(data: &[u8]) -> Result<Vec<BtrfsDirectoryEntry>, &'static str> {

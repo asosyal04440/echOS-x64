@@ -13,6 +13,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
@@ -48,6 +49,7 @@ const IST_STACK_COUNT: usize = 7;
 /// CPU başına GDT işaretçilerinin global listesi.
 /// Her eleman, ilgili CPU'nun PerCpuGdt yapısına ham pointer içerir.
 static PER_CPU_GDTS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+static S3_RESUME_BSP_GDT: AtomicUsize = AtomicUsize::new(0);
 
 /// GDT segment selector'ları.
 /// Her selector, GDT'deki ilgili tanımlayıcıya işaret eder.
@@ -64,32 +66,51 @@ pub struct Selectors {
 /// Önyükleme CPU'su (BSP) için GDT'yi başlatır.
 /// Segmentleri yükler ve TSS'yi aktif eder.
 pub fn init() {
-    use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
-    use x86_64::instructions::tables::load_tss;
     let gdt = ensure_per_cpu_gdt(0, VirtAddr::new(0));
     unsafe {
-        (*gdt).gdt.load();
-        CS::set_reg((*gdt).selectors.code_selector);
-        DS::set_reg((*gdt).selectors.data_selector);
-        ES::set_reg((*gdt).selectors.data_selector);
-        SS::set_reg((*gdt).selectors.data_selector);
-        load_tss((*gdt).selectors.tss_selector);
+        load_per_cpu_gdt(gdt);
     }
+}
+
+/// Reload the BSP descriptor tables after an S3 firmware wake.
+///
+/// The resume trampoline uses a small private GDT while switching back to long
+/// mode. The next interrupt must see echOS' kernel code selector and a valid
+/// TSS/IST set, so S3 uses a fresh BSP GDT image instead of reusing a descriptor
+/// whose TSS entry may have been marked busy by the pre-suspend `ltr`.
+pub fn reload_bsp_after_resume() {
+    let mut gdt = S3_RESUME_BSP_GDT.swap(0, Ordering::AcqRel) as *mut PerCpuGdt;
+    {
+        let mut list = PER_CPU_GDTS.lock();
+        if list.is_empty() {
+            list.resize(1, 0);
+        }
+        if gdt.is_null() {
+            gdt = list[0] as *mut PerCpuGdt;
+        } else {
+            list[0] = gdt as usize;
+        }
+    }
+    if gdt.is_null() {
+        return;
+    }
+    unsafe {
+        load_per_cpu_gdt(gdt);
+    }
+}
+
+/// Prepare a fresh BSP GDT/TSS image while the allocator is still fully live.
+pub fn prepare_bsp_resume_gdt() {
+    let gdt = allocate_per_cpu_gdt(VirtAddr::new(0));
+    S3_RESUME_BSP_GDT.store(gdt as usize, Ordering::Release);
 }
 
 /// Belirtilen CPU için GDT'yi başlatır (AP — Application Processor).
 /// SMP başlatma sırasında her ikincil CPU için çağrılır.
 pub fn init_for_cpu(cpu_id: u32, stack_top: VirtAddr) {
-    use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
-    use x86_64::instructions::tables::load_tss;
     let gdt = ensure_per_cpu_gdt(cpu_id, stack_top);
     unsafe {
-        (*gdt).gdt.load();
-        CS::set_reg((*gdt).selectors.code_selector);
-        DS::set_reg((*gdt).selectors.data_selector);
-        ES::set_reg((*gdt).selectors.data_selector);
-        SS::set_reg((*gdt).selectors.data_selector);
-        load_tss((*gdt).selectors.tss_selector);
+        load_per_cpu_gdt(gdt);
     }
 }
 
@@ -180,6 +201,12 @@ fn ensure_per_cpu_gdt(cpu_id: u32, stack_top: VirtAddr) -> *mut PerCpuGdt {
     if list[idx] != 0 {
         return list[idx] as *mut PerCpuGdt;
     }
+    let ptr = allocate_per_cpu_gdt(stack_top) as usize;
+    list[idx] = ptr;
+    ptr as *mut PerCpuGdt
+}
+
+fn allocate_per_cpu_gdt(stack_top: VirtAddr) -> *mut PerCpuGdt {
     let ist_stacks: [Box<[u8; IST_STACK_SIZE]>; IST_STACK_COUNT] =
         core::array::from_fn(|_| Box::new([0u8; IST_STACK_SIZE]));
     let tss = Box::leak(Box::new(TaskStateSegment::new()));
@@ -211,7 +238,17 @@ fn ensure_per_cpu_gdt(cpu_id: u32, stack_top: VirtAddr) -> *mut PerCpuGdt {
         tss: tss_ptr,
         ist_stacks,
     });
-    let ptr = Box::into_raw(per_cpu) as usize;
-    list[idx] = ptr;
-    ptr as *mut PerCpuGdt
+    Box::into_raw(per_cpu)
+}
+
+unsafe fn load_per_cpu_gdt(gdt: *mut PerCpuGdt) {
+    use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
+    use x86_64::instructions::tables::load_tss;
+
+    (*gdt).gdt.load();
+    CS::set_reg((*gdt).selectors.code_selector);
+    DS::set_reg((*gdt).selectors.data_selector);
+    ES::set_reg((*gdt).selectors.data_selector);
+    SS::set_reg((*gdt).selectors.data_selector);
+    load_tss((*gdt).selectors.tss_selector);
 }

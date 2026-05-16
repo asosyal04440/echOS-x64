@@ -62,6 +62,130 @@ const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
 const ATTR_INDEX_ALLOCATION: u32 = 0xA0;
 const ATTR_BITMAP: u32 = 0xB0;
+
+const INDEX_ENTRY_NODE: u8 = 0x01;
+const INDEX_ENTRY_END: u8 = 0x02;
+
+/// $INDEX_ROOT header — resident attribute içinde
+#[derive(Clone, Copy, Debug)]
+pub struct IndexRootHeader {
+    pub attr_type: u32,
+    pub collation_rule: u32,
+    pub bytes_per_index_record: u32,
+    pub clusters_per_index_record: u8,
+}
+
+impl IndexRootHeader {
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < 16 {
+            return None;
+        }
+        Some(IndexRootHeader {
+            attr_type: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+            collation_rule: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+            bytes_per_index_record: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+            clusters_per_index_record: data[12],
+        })
+    }
+}
+
+/// Index node header — hem $INDEX_ROOT hem de index record'larda
+#[derive(Clone, Copy, Debug)]
+pub struct IndexNodeHeader {
+    pub entries_offset: u32,
+    pub entries_length: u32,
+    pub allocated_size: u32,
+    pub has_children: bool,
+}
+
+impl IndexNodeHeader {
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < 16 {
+            return None;
+        }
+        Some(IndexNodeHeader {
+            entries_offset: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+            entries_length: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+            allocated_size: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+            has_children: data[12] != 0,
+        })
+    }
+}
+
+/// Index entry — $INDEX_ROOT veya index record içinde
+#[derive(Clone, Debug)]
+pub struct IndexEntry {
+    pub file_reference: u64,
+    pub entry_length: u16,
+    pub stream_length: u16,
+    pub flags: u8,
+    pub filename_attr: Option<FileNameAttr>,
+    pub sub_node_vcn: Option<u64>,
+}
+
+impl IndexEntry {
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < 16 {
+            return None;
+        }
+        let file_reference = u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]);
+        let entry_length = u16::from_le_bytes([data[8], data[9]]);
+        let stream_length = u16::from_le_bytes([data[10], data[11]]);
+        let flags = data[12];
+
+        if entry_length == 0 || entry_length as usize > data.len() {
+            return None;
+        }
+
+        // $FILE_NAME stream parse (eğer END flag yoksa)
+        let filename_attr = if (flags & INDEX_ENTRY_END) == 0 && stream_length >= 66 {
+            FileNameAttr::parse(&data[16..])
+        } else {
+            None
+        };
+
+        // Sub-node VCN (eğer NODE flag varsa, entry sonundaki 8 byte)
+        let sub_node_vcn = if (flags & INDEX_ENTRY_NODE) != 0 {
+            let vcn_offset = entry_length as usize - 8;
+            if vcn_offset + 8 <= data.len() && vcn_offset >= 16 {
+                Some(u64::from_le_bytes([
+                    data[vcn_offset],
+                    data[vcn_offset + 1],
+                    data[vcn_offset + 2],
+                    data[vcn_offset + 3],
+                    data[vcn_offset + 4],
+                    data[vcn_offset + 5],
+                    data[vcn_offset + 6],
+                    data[vcn_offset + 7],
+                ]))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Some(IndexEntry {
+            file_reference,
+            entry_length,
+            stream_length,
+            flags,
+            filename_attr,
+            sub_node_vcn,
+        })
+    }
+
+    pub fn is_end(&self) -> bool {
+        (self.flags & INDEX_ENTRY_END) != 0
+    }
+
+    pub fn has_sub_node(&self) -> bool {
+        (self.flags & INDEX_ENTRY_NODE) != 0
+    }
+}
+
 const ATTR_REPARSE_POINT: u32 = 0xC0;
 const ATTR_EA_INFORMATION: u32 = 0xD0;
 const ATTR_EA: u32 = 0xE0;
@@ -1002,6 +1126,190 @@ impl NtfsFileSystem {
         name: &str,
         device_data: &[u8],
     ) -> Result<MftEntry, NtfsError> {
+        // Önce $INDEX_ROOT üzerinden dene
+        let parent = self.read_mft_entry(parent_entry, device_data)?;
+        if let Some(index_attr) = parent.get_attribute(ATTR_INDEX_ROOT) {
+            if let Some(entry) = self.find_via_index_root(index_attr, name, device_data)? {
+                return Ok(entry);
+            }
+        }
+        // Fallback: MFT scan
+        self.find_via_mft_scan(parent_entry, name, device_data)
+    }
+
+    fn find_child_entry_from_storage(
+        &self,
+        parent_entry: u64,
+        name: &str,
+        storage: &NtfsStorage,
+    ) -> Result<MftEntry, NtfsError> {
+        let parent = self.read_mft_entry_from_storage(parent_entry, storage)?;
+        if let Some(index_attr) = parent.get_attribute(ATTR_INDEX_ROOT) {
+            if let Some(entry) = self.find_via_index_root_from_storage(index_attr, name, storage)? {
+                return Ok(entry);
+            }
+        }
+        self.find_via_mft_scan_from_storage(parent_entry, name, storage)
+    }
+
+    /// $INDEX_ROOT üzerinden child bul (resident attribute)
+    fn find_via_index_root(
+        &self,
+        index_attr: &NtfsAttribute,
+        name: &str,
+        device_data: &[u8],
+    ) -> Result<Option<MftEntry>, NtfsError> {
+        if index_attr.non_resident {
+            return Ok(None);
+        }
+        let data = &index_attr.resident_data;
+        if data.len() < 32 {
+            return Ok(None);
+        }
+
+        let _root_header = IndexRootHeader::parse(data).ok_or(NtfsError::InvalidFormat)?;
+        let node_header = IndexNodeHeader::parse(&data[16..]).ok_or(NtfsError::InvalidFormat)?;
+
+        let entries_start = 32usize;
+        let entries_end = entries_start + node_header.entries_length as usize;
+        if entries_end > data.len() {
+            return Ok(None);
+        }
+
+        let mut offset = entries_start;
+        while offset + 16 <= data.len() {
+            if let Some(entry) = IndexEntry::parse(&data[offset..]) {
+                if entry.is_end() {
+                    break;
+                }
+                if let Some(ref fname) = entry.filename_attr {
+                    if ntfs_name_matches(&fname.name, name) {
+                        let entry_num = entry.file_reference & 0xFFFFFFFFFFFF;
+                        return self
+                            .read_mft_entry(entry_num, device_data)
+                            .map(Some)
+                            .or(Ok(None));
+                    }
+                }
+                offset += entry.entry_length as usize;
+            } else {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_via_index_root_from_storage(
+        &self,
+        index_attr: &NtfsAttribute,
+        name: &str,
+        storage: &NtfsStorage,
+    ) -> Result<Option<MftEntry>, NtfsError> {
+        if index_attr.non_resident {
+            return Ok(None);
+        }
+        let data = &index_attr.resident_data;
+        if data.len() < 32 {
+            return Ok(None);
+        }
+
+        let _root_header = IndexRootHeader::parse(data).ok_or(NtfsError::InvalidFormat)?;
+        let node_header = IndexNodeHeader::parse(&data[16..]).ok_or(NtfsError::InvalidFormat)?;
+
+        let entries_start = 32usize;
+        let entries_end = entries_start + node_header.entries_length as usize;
+        if entries_end > data.len() {
+            return Ok(None);
+        }
+
+        let mut offset = entries_start;
+        while offset + 16 <= data.len() {
+            if let Some(entry) = IndexEntry::parse(&data[offset..]) {
+                if entry.is_end() {
+                    if entry.has_sub_node() {
+                        // $INDEX_ALLOCATION'dan devam et
+                    }
+                    break;
+                }
+                if let Some(ref fname) = entry.filename_attr {
+                    if ntfs_name_matches(&fname.name, name) {
+                        return self
+                            .read_mft_entry_from_storage(entry.file_reference & 0xFFFFFFFFFFFF, storage)
+                            .map(Some)
+                            .or(Ok(None));
+                    }
+                }
+                offset += entry.entry_length as usize;
+            } else {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
+    /// $INDEX_ALLOCATION üzerinden child bul (non-resident, data runs)
+    fn find_via_index_allocation(
+        &self,
+        index_alloc_attr: Option<&NtfsAttribute>,
+        name: &str,
+        device_data: &[u8],
+    ) -> Result<Option<MftEntry>, NtfsError> {
+        let attr = match index_alloc_attr {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        if !attr.non_resident {
+            return Ok(None);
+        }
+
+        let data = self.read_non_resident_data(attr, device_data)?;
+        if data.is_empty() {
+            return Ok(None);
+        }
+
+        // Index record'ları parse et (her record INDX header ile başlar)
+        let mut offset = 0;
+        while offset + 32 <= data.len() {
+            // INDX magic kontrolü (opsiyonel, bazı implementasyonlarda yok)
+            let node_header = IndexNodeHeader::parse(&data[offset + 24..]);
+            if let Some(nh) = node_header {
+                let entries_start = offset + 24 + 16;
+                let entries_end = entries_start + nh.entries_length as usize;
+                if entries_end <= data.len() {
+                    let mut eoffset = entries_start;
+                    while eoffset + 16 <= data.len() {
+                        if let Some(entry) = IndexEntry::parse(&data[eoffset..]) {
+                            if entry.is_end() {
+                                break;
+                            }
+                            if let Some(ref fname) = entry.filename_attr {
+                                if ntfs_name_matches(&fname.name, name) {
+                                    return self
+                                        .read_mft_entry(entry.file_reference & 0xFFFFFFFFFFFF, device_data)
+                                        .map(Some)
+                                        .or(Ok(None));
+                                }
+                            }
+                            eoffset += entry.entry_length as usize;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Sonraki index record'a atla (genellikle 4KB)
+            offset += 4096;
+        }
+        Ok(None)
+    }
+
+    /// Fallback: tüm MFT'yi scan et (mevcut O(n) davranış)
+    fn find_via_mft_scan(
+        &self,
+        parent_entry: u64,
+        name: &str,
+        device_data: &[u8],
+    ) -> Result<MftEntry, NtfsError> {
         for entry_num in 0..self.max_mft_entries(device_data) {
             let Ok(entry) = self.read_mft_entry(entry_num, device_data) else {
                 continue;
@@ -1022,7 +1330,7 @@ impl NtfsFileSystem {
         Err(NtfsError::NotFound)
     }
 
-    fn find_child_entry_from_storage(
+    fn find_via_mft_scan_from_storage(
         &self,
         parent_entry: u64,
         name: &str,
@@ -1046,6 +1354,35 @@ impl NtfsFileSystem {
             }
         }
         Err(NtfsError::NotFound)
+    }
+
+    fn read_non_resident_data(
+        &self,
+        attr: &NtfsAttribute,
+        device_data: &[u8],
+    ) -> Result<Vec<u8>, NtfsError> {
+        if let AttributeContent::NonResident { data_runs, .. } = &attr.content {
+            let mut result = Vec::new();
+            let mut current_lcn = 0i64;
+            for run in data_runs {
+                if run.length == 0 {
+                    current_lcn = 0;
+                    continue;
+                }
+                current_lcn += run.lcn;
+                if current_lcn < 0 {
+                    continue;
+                }
+                let offset = current_lcn as u64 * self.cluster_size;
+                let length = (run.length * self.cluster_size) as usize;
+                if offset as usize + length <= device_data.len() {
+                    result.extend_from_slice(&device_data[offset as usize..offset as usize + length]);
+                }
+            }
+            Ok(result)
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 

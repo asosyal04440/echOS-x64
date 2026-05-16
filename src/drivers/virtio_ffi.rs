@@ -49,19 +49,81 @@
 //!               └─ veri buradan kopyalanır
 //! ```
 
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use rcore_fs::dev::{DevError, Device, Result as DevResult};
 use spin::Mutex;
 use virtio_drivers::transport::pci::bus::DeviceFunction;
 use virtio_drivers::transport::pci::PciTransport;
 
 const INVALID_PHYS_ADDR: u64 = u64::MAX;
+const LEGACY_STATUS_OFFSET: u16 = 18;
+const STATUS_ACKNOWLEDGE: u8 = 1;
+const STATUS_DRIVER: u8 = 2;
+const STATUS_DRIVER_OK: u8 = 4;
+const STATUS_FEATURES_OK: u8 = 8;
+const STATUS_FAILED: u8 = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LegacyStatusSequence {
+    reset: u8,
+    acknowledge: u8,
+    driver: u8,
+    features_ok: u8,
+    driver_ok: u8,
+}
+
+const fn legacy_status_sequence() -> LegacyStatusSequence {
+    LegacyStatusSequence {
+        reset: 0,
+        acknowledge: STATUS_ACKNOWLEDGE,
+        driver: STATUS_ACKNOWLEDGE | STATUS_DRIVER,
+        features_ok: STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
+        driver_ok: STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
+    }
+}
+
+const fn legacy_status_failed(current: u8) -> u8 {
+    current | STATUS_FAILED
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtioIoError {
     DeviceNotInitialized,
     BackendUnavailable,
     AddressTranslationFailed,
+    Timeout,
+    CompletionMismatch,
+    InvalidBuffer,
+    IoPathFault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VirtioPathState {
+    Uninitialized = 0,
+    TransportVisible = 1,
+    BackendReady = 2,
+    IoReady = 3,
+}
+
+impl VirtioPathState {
+    fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::TransportVisible,
+            2 => Self::BackendReady,
+            3 => Self::IoReady,
+            _ => Self::Uninitialized,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Uninitialized => "uninitialized",
+            Self::TransportVisible => "transport-visible",
+            Self::BackendReady => "backend-ready",
+            Self::IoReady => "io-ready",
+        }
+    }
 }
 
 impl VirtioIoError {
@@ -72,7 +134,27 @@ impl VirtioIoError {
                 "virtio-ffi: transport visible but data path backend is unavailable"
             }
             Self::AddressTranslationFailed => "virtio-ffi: virtual address translation failed",
+            Self::Timeout => "virtio-ffi: request timed out while waiting completion",
+            Self::CompletionMismatch => {
+                "virtio-ffi: used-ring completion token mismatch on single-flight request"
+            }
+            Self::InvalidBuffer => "virtio-ffi: invalid sector buffer contract",
+            Self::IoPathFault => "virtio-ffi: backend reported generic I/O path fault",
         }
+    }
+}
+
+fn map_blk_error(err: &'static str) -> VirtioIoError {
+    match err {
+        "Timeout" => VirtioIoError::Timeout,
+        "CompletionMismatch" => VirtioIoError::CompletionMismatch,
+        "Invalid buffer size" => VirtioIoError::InvalidBuffer,
+        "Device not initialized" => VirtioIoError::DeviceNotInitialized,
+        "DmaAllocFailed" => VirtioIoError::IoPathFault,
+        "DmaLayoutOverflow" => VirtioIoError::IoPathFault,
+        "QueueSubmitFailed" => VirtioIoError::IoPathFault,
+        "CompletionIoError" => VirtioIoError::IoPathFault,
+        _ => VirtioIoError::IoPathFault,
     }
 }
 
@@ -86,26 +168,74 @@ fn virtio_disk_init(base_port: u16) {
         "VIRTIO FFI: Initializing virtio-blk at port {:#x}",
         base_port
     );
+    let status_seq = legacy_status_sequence();
     // VirtIO cihaz başlatma:
     // 1. Status yazmacını sıfırla (reset)
     unsafe {
         use x86_64::instructions::port::Port;
-        let mut status_port = Port::<u8>::new(base_port + 18);
-        status_port.write(0); // Reset
-                              // 2. ACKNOWLEDGE bit ayarla
-        status_port.write(1);
+        let mut status_port = Port::<u8>::new(base_port + LEGACY_STATUS_OFFSET);
+        status_port.write(status_seq.reset); // Reset
+                                             // 2. ACKNOWLEDGE bit ayarla
+        status_port.write(status_seq.acknowledge);
         // 3. DRIVER bit ayarla
-        status_port.write(1 | 2);
+        status_port.write(status_seq.driver);
         // 4. Feature negotiation (basitleştirilmiş)
         let mut features_port = Port::<u32>::new(base_port as u16 + 4);
         let features = features_port.read();
         crate::serial_println!("VIRTIO FFI: Device features: {:#x}", features);
         // 5. FEATURES_OK ayarla
-        status_port.write(1 | 2 | 8);
-        // 6. DRIVER_OK ayarla
-        status_port.write(1 | 2 | 8 | 4);
+        status_port.write(status_seq.features_ok);
+        // 6. Per VirtIO spec §3.1 step 6: re-read status to verify device accepted features
+        // If device rejected, FAILED bit will be set
+        for _ in 0..100 {
+            let status = status_port.read();
+            if (status & STATUS_FAILED) != 0 {
+                crate::serial_println!("VIRTIO FFI: device rejected features (status={:#x})", status);
+                return; // Device set FAILED — abort initialization
+            }
+            if (status & STATUS_FEATURES_OK) != 0 {
+                break; // Device accepted
+            }
+            core::hint::spin_loop();
+        }
+        // 7. DRIVER_OK ayarla
+        status_port.write(status_seq.driver_ok);
     }
     crate::serial_println!("VIRTIO FFI: virtio-blk initialized at {:#x}", base_port);
+}
+
+#[cfg(not(any(test, target_os = "windows")))]
+fn read_legacy_status(base_port: u16) -> u8 {
+    unsafe {
+        use x86_64::instructions::port::Port;
+        let mut status_port = Port::<u8>::new(base_port + LEGACY_STATUS_OFFSET);
+        status_port.read()
+    }
+}
+
+#[cfg(not(any(test, target_os = "windows")))]
+fn write_legacy_status(base_port: u16, status: u8) {
+    unsafe {
+        use x86_64::instructions::port::Port;
+        let mut status_port = Port::<u8>::new(base_port + LEGACY_STATUS_OFFSET);
+        status_port.write(status);
+    }
+}
+
+#[cfg(not(any(test, target_os = "windows")))]
+fn mark_device_failed(base_port: u16, reason: &'static str) {
+    if base_port == 0 {
+        return;
+    }
+    let current = read_legacy_status(base_port);
+    let failed = legacy_status_failed(current);
+    write_legacy_status(base_port, failed);
+    crate::serial_println!(
+        "VIRTIO FFI: status->FAILED (reason={}, old={:#x}, new={:#x})",
+        reason,
+        current,
+        failed
+    );
 }
 
 fn virtio_disk_rw(
@@ -122,7 +252,7 @@ fn virtio_disk_rw(
     if buf.is_null() {
         return Err(VirtioIoError::AddressTranslationFailed);
     }
-    if !BACKEND_READY.load(Ordering::Acquire) {
+    if !BACKEND_READY.v.load(Ordering::Acquire) {
         let op = if write != 0 { "write" } else { "read" };
         crate::serial_println!(
             "VIRTIO FFI: disk {} sector={} buf={:p} rejected: backend not ready",
@@ -132,15 +262,31 @@ fn virtio_disk_rw(
         );
         return Err(VirtioIoError::BackendUnavailable);
     }
+    if !IO_PATH_READY.v.load(Ordering::Acquire) && !refresh_io_path_state() {
+        return Err(VirtioIoError::IoPathFault);
+    }
 
     let sector_buf = unsafe { core::slice::from_raw_parts_mut(buf, 512) };
-    if write != 0 {
-        super::virtio_blk::write_sector(sector, sector_buf)
-            .map_err(|_| VirtioIoError::BackendUnavailable)
+    let io_result = if write != 0 {
+        super::virtio_blk::write_sector(sector, sector_buf).map_err(map_blk_error)
     } else {
-        super::virtio_blk::read_sector(sector, sector_buf)
-            .map_err(|_| VirtioIoError::BackendUnavailable)
+        super::virtio_blk::read_sector(sector, sector_buf).map_err(map_blk_error)
+    };
+    if io_result.is_ok() {
+        IO_PATH_READY.v.store(true, Ordering::Release);
+        set_path_state(VirtioPathState::IoReady);
+    } else {
+        #[cfg(not(any(test, target_os = "windows")))]
+        if matches!(
+            io_result,
+            Err(VirtioIoError::CompletionMismatch | VirtioIoError::IoPathFault)
+        ) {
+            mark_device_failed(base_port, "io-path-fatal");
+        }
+        IO_PATH_READY.v.store(false, Ordering::Release);
+        set_path_state(VirtioPathState::BackendReady);
     }
+    io_result
 }
 
 fn translate_phys_addr(ptr: *const u8) -> Result<u64, VirtioIoError> {
@@ -162,8 +308,111 @@ fn translate_phys_addr(ptr: *const u8) -> Result<u64, VirtioIoError> {
 // ---------------------------------------------------------------------------
 
 static LOCK: Mutex<()> = Mutex::new(());
-static BASE_PORT: AtomicU16 = AtomicU16::new(0);
-static BACKEND_READY: AtomicBool = AtomicBool::new(false);
+#[repr(align(64))]
+struct CacheLineAtomicU16 {
+    v: AtomicU16,
+}
+
+impl CacheLineAtomicU16 {
+    const fn new(value: u16) -> Self {
+        Self {
+            v: AtomicU16::new(value),
+        }
+    }
+}
+
+#[repr(align(64))]
+struct CacheLineAtomicBool {
+    v: AtomicBool,
+}
+
+impl CacheLineAtomicBool {
+    const fn new(value: bool) -> Self {
+        Self {
+            v: AtomicBool::new(value),
+        }
+    }
+}
+
+#[repr(align(64))]
+struct CacheLineAtomicU8 {
+    v: AtomicU8,
+}
+
+impl CacheLineAtomicU8 {
+    const fn new(value: u8) -> Self {
+        Self {
+            v: AtomicU8::new(value),
+        }
+    }
+}
+
+static BASE_PORT: CacheLineAtomicU16 = CacheLineAtomicU16::new(0);
+static BACKEND_READY: CacheLineAtomicBool = CacheLineAtomicBool::new(false);
+static IO_PATH_READY: CacheLineAtomicBool = CacheLineAtomicBool::new(false);
+static PATH_STATE: CacheLineAtomicU8 = CacheLineAtomicU8::new(VirtioPathState::Uninitialized as u8);
+
+fn set_path_state(state: VirtioPathState) {
+    PATH_STATE.v.store(state as u8, Ordering::Release);
+}
+
+pub fn path_state() -> VirtioPathState {
+    VirtioPathState::from_u8(PATH_STATE.v.load(Ordering::Acquire))
+}
+
+pub fn path_state_str() -> &'static str {
+    path_state().as_str()
+}
+
+#[cfg(test)]
+pub(crate) fn phase5_virtio_ffi_contract_green() -> bool {
+    let seq = legacy_status_sequence();
+    let status_handshake = seq.reset == 0
+        && seq.acknowledge == STATUS_ACKNOWLEDGE
+        && seq.driver == (STATUS_ACKNOWLEDGE | STATUS_DRIVER)
+        && seq.features_ok == (STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK)
+        && seq.driver_ok
+            == (STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
+    let failed_is_or_only = legacy_status_failed(seq.driver_ok) == (seq.driver_ok | STATUS_FAILED)
+        && legacy_status_failed(STATUS_FAILED) == STATUS_FAILED;
+    let typed_error_map = map_blk_error("Timeout") == VirtioIoError::Timeout
+        && map_blk_error("CompletionMismatch") == VirtioIoError::CompletionMismatch
+        && map_blk_error("DmaAllocFailed") == VirtioIoError::IoPathFault
+        && map_blk_error("CompletionIoError") == VirtioIoError::IoPathFault;
+    let cacheline_state = core::mem::align_of::<CacheLineAtomicU16>() == 64
+        && core::mem::align_of::<CacheLineAtomicBool>() == 64
+        && core::mem::align_of::<CacheLineAtomicU8>() == 64;
+
+    status_handshake && failed_is_or_only && typed_error_map && cacheline_state
+}
+
+fn probe_io_path() -> Result<(), VirtioIoError> {
+    #[cfg(any(test, target_os = "windows"))]
+    {
+        Err(VirtioIoError::BackendUnavailable)
+    }
+    #[cfg(not(any(test, target_os = "windows")))]
+    {
+        let mut probe = [0u8; 512];
+        super::virtio_blk::read_sector(0, &mut probe).map_err(map_blk_error)
+    }
+}
+
+fn refresh_io_path_state() -> bool {
+    match probe_io_path() {
+        Ok(()) => {
+            IO_PATH_READY.v.store(true, Ordering::Release);
+            set_path_state(VirtioPathState::IoReady);
+            true
+        }
+        Err(err) => {
+            IO_PATH_READY.v.store(false, Ordering::Release);
+            set_path_state(VirtioPathState::BackendReady);
+            crate::serial_println!("VIRTIO FFI: io probe failed: {}", err.as_str());
+            false
+        }
+    }
+}
 
 /// Sanal adresi fiziksel adrese çeviren C-ABI fonksiyon.
 ///
@@ -206,7 +455,7 @@ fn init_transport_backend(bus: u8, device: u8, function: u8) -> Result<(), Virti
         let transport = PciTransport::new::<super::virtio_hal::VirtioHal>(&mut root, df)
             .map_err(|_| VirtioIoError::BackendUnavailable)?;
         if super::virtio_blk::init(transport) {
-            BACKEND_READY.store(true, Ordering::Release);
+            BACKEND_READY.v.store(true, Ordering::Release);
             Ok(())
         } else {
             Err(VirtioIoError::BackendUnavailable)
@@ -224,11 +473,18 @@ fn init_transport_backend(bus: u8, device: u8, function: u8) -> Result<(), Virti
 /// Bu en güçlü sıralamadır; tüm CPU çekirdekleri aynı sırayı görür.
 pub fn init(bus: u8, device: u8, function: u8, base_port: u16) {
     crate::serial_println!("VIRTIO FFI: init base_port=0x{:x}", base_port);
+    super::virtio_blk::reset();
+    BACKEND_READY.v.store(false, Ordering::Release);
+    IO_PATH_READY.v.store(false, Ordering::Release);
     #[cfg(any(test, target_os = "windows"))]
     {
         let _ = (bus, device, function);
-        BASE_PORT.store(base_port, Ordering::SeqCst);
-        BACKEND_READY.store(false, Ordering::Release);
+        BASE_PORT.v.store(base_port, Ordering::SeqCst);
+        if base_port == 0 {
+            set_path_state(VirtioPathState::Uninitialized);
+        } else {
+            set_path_state(VirtioPathState::TransportVisible);
+        }
         crate::serial_println!("VIRTIO FFI: host test target, port I/O disabled");
         return;
     }
@@ -237,16 +493,34 @@ pub fn init(bus: u8, device: u8, function: u8, base_port: u16) {
         unsafe {
             virtio_disk_init(base_port);
         }
-        BASE_PORT.store(base_port, Ordering::SeqCst);
+        BASE_PORT.v.store(base_port, Ordering::SeqCst);
+        if base_port == 0 {
+            set_path_state(VirtioPathState::Uninitialized);
+        } else {
+            set_path_state(VirtioPathState::TransportVisible);
+        }
         match init_transport_backend(bus, device, function) {
-            Ok(()) => crate::serial_println!(
-                "VIRTIO FFI: queue/DMA backend ready at {:02x}:{:02x}.{}",
-                bus,
-                device,
-                function
-            ),
+            Ok(()) => {
+                set_path_state(VirtioPathState::BackendReady);
+                crate::serial_println!(
+                    "VIRTIO FFI: queue/DMA backend ready at {:02x}:{:02x}.{}",
+                    bus,
+                    device,
+                    function
+                );
+                if refresh_io_path_state() {
+                    crate::serial_println!("VIRTIO FFI: io path verified via sector probe");
+                } else {
+                    crate::serial_println!(
+                        "VIRTIO FFI: backend ready but io path probe failed (fail-closed)"
+                    );
+                }
+            }
             Err(err) => {
-                BACKEND_READY.store(false, Ordering::Release);
+                #[cfg(not(any(test, target_os = "windows")))]
+                mark_device_failed(base_port, "backend-init-failed");
+                BACKEND_READY.v.store(false, Ordering::Release);
+                IO_PATH_READY.v.store(false, Ordering::Release);
                 crate::serial_println!(
                     "VIRTIO FFI: queue/DMA backend unavailable at {:02x}:{:02x}.{}: {}",
                     bus,
@@ -266,16 +540,34 @@ pub fn init(bus: u8, device: u8, function: u8, base_port: u16) {
 /// Bu `Option<T>` kalıbı, Rust'ta null pointer kullanımından kaçınmanın
 /// idiomatik (deyimsel) yoludur.
 pub fn device() -> Option<VirtioBlock> {
-    let base_port = BASE_PORT.load(Ordering::SeqCst);
+    let base_port = BASE_PORT.v.load(Ordering::SeqCst);
     if base_port == 0 {
+        set_path_state(VirtioPathState::Uninitialized);
         None
     } else {
         crate::serial_println!(
-            "VIRTIO FFI: transport visible at base_port=0x{:x}; data path requires a real backend",
-            base_port
+            "VIRTIO FFI: transport visible at base_port=0x{:x}; path_state={}",
+            base_port,
+            path_state_str()
         );
         Some(VirtioBlock { base_port })
     }
+}
+
+pub fn reset() {
+    let _lock = LOCK.lock();
+    #[cfg(not(any(test, target_os = "windows")))]
+    {
+        let base_port = BASE_PORT.v.load(Ordering::Acquire);
+        if base_port != 0 {
+            write_legacy_status(base_port, 0);
+        }
+    }
+    BASE_PORT.v.store(0, Ordering::SeqCst);
+    BACKEND_READY.v.store(false, Ordering::Release);
+    IO_PATH_READY.v.store(false, Ordering::Release);
+    set_path_state(VirtioPathState::Uninitialized);
+    super::virtio_blk::reset();
 }
 
 /// VirtIO blok cihazını temsil eden yapı.
@@ -371,14 +663,21 @@ impl Device for VirtioBlock {
 #[cfg(test)]
 mod tests {
     use core::sync::atomic::Ordering;
+    use spin::Mutex;
 
-    use super::{virt_to_phys_c, VirtioBlock, VirtioIoError, BACKEND_READY, INVALID_PHYS_ADDR};
+    use super::{
+        path_state, reset, virt_to_phys_c, VirtioBlock, VirtioIoError, VirtioPathState,
+        BACKEND_READY, BASE_PORT, INVALID_PHYS_ADDR,
+    };
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn sector_io_reports_missing_backend() {
+        let _guard = TEST_LOCK.lock();
         let block = VirtioBlock { base_port: 0x1000 };
         let mut buf = [0u8; 512];
-        BACKEND_READY.store(false, Ordering::SeqCst);
+        BACKEND_READY.v.store(false, Ordering::SeqCst);
         assert_eq!(
             block.read_sector(0, &mut buf),
             Err(VirtioIoError::BackendUnavailable)
@@ -391,7 +690,68 @@ mod tests {
 
     #[test]
     fn virt_to_phys_returns_invalid_sentinel_when_unmapped() {
+        let _guard = TEST_LOCK.lock();
         let bogus = usize::MAX as *const u8;
         assert_eq!(virt_to_phys_c(bogus), INVALID_PHYS_ADDR);
+    }
+
+    #[test]
+    fn reset_clears_transport_and_state() {
+        let _guard = TEST_LOCK.lock();
+        BASE_PORT.v.store(0x1000, Ordering::SeqCst);
+        BACKEND_READY.v.store(false, Ordering::SeqCst);
+        reset();
+        assert_eq!(BASE_PORT.v.load(Ordering::SeqCst), 0);
+        assert_eq!(path_state(), VirtioPathState::Uninitialized);
+    }
+
+    #[test]
+    fn host_init_marks_transport_visible_when_port_present() {
+        let _guard = TEST_LOCK.lock();
+        super::init(0, 0, 0, 0x1000);
+        assert_eq!(path_state(), VirtioPathState::TransportVisible);
+        reset();
+    }
+
+    #[test]
+    fn host_init_keeps_uninitialized_when_port_missing() {
+        let _guard = TEST_LOCK.lock();
+        super::init(0, 0, 0, 0);
+        assert_eq!(path_state(), VirtioPathState::Uninitialized);
+    }
+
+    #[test]
+    fn map_blk_error_typed_io_faults_collapse_to_iopathfault() {
+        let _guard = TEST_LOCK.lock();
+        assert_eq!(
+            super::map_blk_error("DmaAllocFailed"),
+            VirtioIoError::IoPathFault
+        );
+        assert_eq!(
+            super::map_blk_error("DmaLayoutOverflow"),
+            VirtioIoError::IoPathFault
+        );
+        assert_eq!(
+            super::map_blk_error("QueueSubmitFailed"),
+            VirtioIoError::IoPathFault
+        );
+        assert_eq!(
+            super::map_blk_error("CompletionIoError"),
+            VirtioIoError::IoPathFault
+        );
+    }
+
+    #[test]
+    fn cacheline_wrappers_are_64byte_aligned() {
+        let _guard = TEST_LOCK.lock();
+        assert_eq!(core::mem::align_of::<super::CacheLineAtomicU16>(), 64);
+        assert_eq!(core::mem::align_of::<super::CacheLineAtomicBool>(), 64);
+        assert_eq!(core::mem::align_of::<super::CacheLineAtomicU8>(), 64);
+    }
+
+    #[test]
+    fn phase5_virtio_ffi_contract_is_green() {
+        let _guard = TEST_LOCK.lock();
+        assert!(super::phase5_virtio_ffi_contract_green());
     }
 }

@@ -321,6 +321,26 @@ impl CommandBlockWrapper {
         cbw.cb[4] = 4; // Ayrılan boyut
         cbw
     }
+
+    pub fn to_bot_bytes(&self) -> [u8; 31] {
+        let signature = self.signature;
+        let tag = self.tag;
+        let transfer_length = self.transfer_length;
+        let flags = self.flags;
+        let lun = self.lun;
+        let cb_length = self.cb_length;
+        let cb = self.cb;
+
+        let mut bytes = [0u8; 31];
+        bytes[0..4].copy_from_slice(&signature.to_le_bytes());
+        bytes[4..8].copy_from_slice(&tag.to_le_bytes());
+        bytes[8..12].copy_from_slice(&transfer_length.to_le_bytes());
+        bytes[12] = flags;
+        bytes[13] = lun & 0x0F;
+        bytes[14] = cb_length.min(16);
+        bytes[15..31].copy_from_slice(&cb);
+        bytes
+    }
 }
 
 // ============================================================================
@@ -363,6 +383,18 @@ pub enum CswStatus {
 }
 
 impl CommandStatusWrapper {
+    pub fn signature(&self) -> u32 {
+        self.signature
+    }
+
+    pub fn tag(&self) -> u32 {
+        self.tag
+    }
+
+    pub fn data_residue(&self) -> u32 {
+        self.data_residue
+    }
+
     /// Komut geçti mi? (status == 0)
     pub fn passed(&self) -> bool {
         self.status == CswStatus::Passed as u8
@@ -381,6 +413,34 @@ impl CommandStatusWrapper {
             _ => CswStatus::PhaseError,
         }
     }
+}
+
+fn parse_csw_bytes(
+    bytes: &[u8; 13],
+    expected_tag: u32,
+    expected_transfer_length: u32,
+) -> Result<CommandStatusWrapper, UsbError> {
+    let signature = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let tag = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let data_residue = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let status = bytes[12];
+
+    if signature != CSW_SIGNATURE || tag != expected_tag {
+        return Err(UsbError::TransferError);
+    }
+    if data_residue > expected_transfer_length {
+        return Err(UsbError::DataOverrun);
+    }
+    if status > CswStatus::PhaseError as u8 {
+        return Err(UsbError::TransferError);
+    }
+
+    Ok(CommandStatusWrapper {
+        signature,
+        tag,
+        data_residue,
+        status,
+    })
 }
 
 // ============================================================================
@@ -670,6 +730,11 @@ pub struct MassStorageDriver {
     inquiry_data: Mutex<Option<ScsiInquiry>>,
 }
 
+enum BotDataBuffer<'a> {
+    In(&'a mut [u8]),
+    Out(&'a [u8]),
+}
+
 impl MassStorageDriver {
     /// Yeni sürücü örneği oluşturur.
     ///
@@ -811,13 +876,15 @@ impl MassStorageDriver {
             index: self.interface as u16,
             length: 0,
         };
+        self.device.control_transfer(setup, None)?;
 
-        // Kontrol aktarımı gönder (TODO: gerçek uygulama)
-        let _ = setup; // Yer tutucu
-
-        // Bulk endpoint HALT durumlarını temizle
-        // Gerçek uygulamada CLEAR_FEATURE(ENDPOINT_HALT) gönderilmeli
-
+        // BOT reset sonrası Bulk IN/Bulk OUT halt clear (CLEAR_FEATURE ENDPOINT_HALT).
+        if let Some(ep) = self.bulk_in {
+            self.clear_endpoint_halt(ep.address)?;
+        }
+        if let Some(ep) = self.bulk_out {
+            self.clear_endpoint_halt(ep.address)?;
+        }
         Ok(())
     }
 
@@ -837,12 +904,24 @@ impl MassStorageDriver {
             index: self.interface as u16,
             length: 1,
         };
+        let mut max_lun = [0u8; 1];
+        match self.device.control_transfer(setup, Some(&mut max_lun)) {
+            Ok(()) => Ok(max_lun[0]),
+            // BOT spesinde bazı cihazlar GET_MAX_LUN'u desteklemez ve STALL döner.
+            Err(UsbError::Stall) => Ok(0),
+            Err(err) => Err(err),
+        }
+    }
 
-        // Kontrol aktarımı ve 1 byte oku (TODO: gerçek uygulama)
-        let _ = setup; // Yer tutucu
-
-        // Varsayılan: 0 döndür (1 LUN)
-        Ok(0)
+    fn clear_endpoint_halt(&self, endpoint_address: u8) -> Result<(), UsbError> {
+        let setup = UsbSetupPacket {
+            request_type: 0x02, // Host->Device | Standard | Endpoint
+            request: 0x01,      // CLEAR_FEATURE
+            value: 0,           // ENDPOINT_HALT
+            index: endpoint_address as u16,
+            length: 0,
+        };
+        self.device.control_transfer(setup, None)
     }
 
     /// CBW gönderir, veri transferi yapar ve CSW alır.
@@ -859,35 +938,55 @@ impl MassStorageDriver {
     fn execute_command(
         &self,
         cbw: &CommandBlockWrapper,
-        data: Option<&mut [u8]>,
+        data: Option<BotDataBuffer<'_>>,
     ) -> Result<CommandStatusWrapper, UsbError> {
-        // 1. CBW'yi Bulk OUT endpoint üzerinden gönder (gerçek: 31 byte)
-        // self.send_bulk_out(cbw as *const _ as *const u8, 31)?;
+        let bulk_out = self.bulk_out.ok_or(UsbError::NoDevice)?;
+        let bulk_in = self.bulk_in.ok_or(UsbError::NoDevice)?;
+        let transfer_length = cbw.transfer_length;
+        let transfer_len = transfer_length as usize;
+        let data_in = (cbw.flags & 0x80) != 0;
+        let tag = cbw.tag;
 
-        // 2. Veri aktarımı (isteğe bağlı)
-        if let Some(buf) = data {
-            if cbw.transfer_length > 0 {
-                if cbw.flags & 0x80 != 0 {
-                    // Data IN: Cihazdan veri al
-                    // self.receive_bulk_in(buf, cbw.transfer_length as usize)?;
-                } else {
-                    // Data OUT: Cihaza veri gönder
-                    // self.send_bulk_out(buf.as_ptr(), buf.len())?;
+        let cbw_bytes = cbw.to_bot_bytes();
+        let cbw_sent = self
+            .device
+            .bulk_transfer_out(bulk_out, &cbw_bytes, "MSC BOT CBW")?;
+        if cbw_sent != cbw_bytes.len() {
+            return Err(UsbError::DataUnderrun);
+        }
+
+        if transfer_len != 0 {
+            match (data_in, data) {
+                (true, Some(BotDataBuffer::In(buf))) if buf.len() >= transfer_len => {
+                    let _ = self.device.bulk_transfer_in(
+                        bulk_in,
+                        &mut buf[..transfer_len],
+                        "MSC BOT data IN",
+                    )?;
                 }
+                (false, Some(BotDataBuffer::Out(buf))) if buf.len() >= transfer_len => {
+                    let _ = self.device.bulk_transfer_out(
+                        bulk_out,
+                        &buf[..transfer_len],
+                        "MSC BOT data OUT",
+                    )?;
+                }
+                _ => return Err(UsbError::DataUnderrun),
             }
         }
 
-        // 3. CSW'yi Bulk IN endpoint üzerinden al (gerçek: 13 byte)
-        let csw = CommandStatusWrapper {
-            signature: CSW_SIGNATURE,
-            tag: cbw.tag,
-            data_residue: 0,
-            status: CswStatus::Passed as u8,
-        };
-
-        // self.receive_bulk_in(&csw as *const _ as *mut u8, 13)?;
-
-        let _ = cbw;
+        let mut csw_bytes = [0u8; 13];
+        let csw_len = self
+            .device
+            .bulk_transfer_in(bulk_in, &mut csw_bytes, "MSC BOT CSW")?;
+        if csw_len != csw_bytes.len() {
+            return Err(UsbError::DataUnderrun);
+        }
+        let csw = parse_csw_bytes(&csw_bytes, tag, transfer_length)?;
+        if csw.status() == CswStatus::PhaseError {
+            let _ = self.reset();
+            return Err(UsbError::TransferError);
+        }
         Ok(csw)
     }
 
@@ -936,7 +1035,7 @@ impl MassStorageDriver {
             )
         };
 
-        let csw = self.execute_command(&cbw, Some(sense_buf))?;
+        let csw = self.execute_command(&cbw, Some(BotDataBuffer::In(sense_buf)))?;
 
         if csw.passed() {
             *self.last_sense.lock() = sense;
@@ -972,7 +1071,7 @@ impl MassStorageDriver {
             )
         };
 
-        let csw = self.execute_command(&cbw, Some(inquiry_buf))?;
+        let csw = self.execute_command(&cbw, Some(BotDataBuffer::In(inquiry_buf)))?;
 
         if csw.passed() {
             Ok(inquiry)
@@ -998,7 +1097,7 @@ impl MassStorageDriver {
             )
         };
 
-        let csw = self.execute_command(&cbw, Some(cap_buf))?;
+        let csw = self.execute_command(&cbw, Some(BotDataBuffer::In(cap_buf)))?;
 
         if csw.passed() {
             // Big-endian → little-endian dönüşümü
@@ -1035,9 +1134,9 @@ impl MassStorageDriver {
             return Err(UsbError::Unknown);
         };
 
-        let csw = self.execute_command(&cbw, Some(buf))?;
+        let csw = self.execute_command(&cbw, Some(BotDataBuffer::In(buf)))?;
 
-        if csw.passed() {
+        if csw.passed() && csw.data_residue() == 0 {
             Ok(expected_len)
         } else {
             Err(UsbError::Unknown)
@@ -1066,10 +1165,9 @@ impl MassStorageDriver {
             return Err(UsbError::Unknown);
         };
 
-        // execute_command değiştirilebilir dilim bekliyor
-        let csw = self.execute_command(&cbw, None)?;
+        let csw = self.execute_command(&cbw, Some(BotDataBuffer::Out(&data[..expected_len])))?;
 
-        if csw.passed() {
+        if csw.passed() && csw.data_residue() == 0 {
             Ok(expected_len)
         } else {
             Err(UsbError::Unknown)
@@ -1190,4 +1288,231 @@ pub fn get_all_msc() -> Vec<(u8, ScsiReadCapacity10)> {
     }
 
     devices
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_csw_bytes, CommandBlockWrapper, CswStatus, MassStorageDriver, CSW_SIGNATURE,
+    };
+    use crate::drivers::usb::{UsbClass, UsbDevice, UsbError, UsbSpeed};
+    use alloc::vec::Vec;
+
+    fn driver_fixture() -> MassStorageDriver {
+        MassStorageDriver::new(
+            UsbDevice {
+                address: 11,
+                port: 1,
+                speed: UsbSpeed::High,
+                controller_bus: 0,
+                controller_device: 20,
+                controller_function: 0,
+                descriptor: None,
+                interfaces: Vec::new(),
+                device_class: UsbClass::MassStorage,
+            },
+            0,
+        )
+    }
+
+    #[test]
+    fn reset_uses_control_transfer_path() {
+        let driver = driver_fixture();
+        assert_eq!(driver.reset(), Err(UsbError::NoDevice));
+    }
+
+    #[test]
+    fn get_max_lun_uses_control_transfer_path() {
+        let driver = driver_fixture();
+        assert_eq!(driver.get_max_lun(), Err(UsbError::NoDevice));
+    }
+
+    #[test]
+    fn cbw_serialization_matches_bot_wire_layout() {
+        let mut cbw = CommandBlockWrapper::inquiry(0xAABB_CCDD, 3);
+        cbw.cb[15] = 0xEE;
+        let bytes = cbw.to_bot_bytes();
+
+        assert_eq!(bytes.len(), 31);
+        assert_eq!(&bytes[0..4], &0x4342_5355u32.to_le_bytes());
+        assert_eq!(&bytes[4..8], &0xAABB_CCDDu32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &36u32.to_le_bytes());
+        assert_eq!(bytes[12], 0x80);
+        assert_eq!(bytes[13], 3);
+        assert_eq!(bytes[14], 6);
+        assert_eq!(bytes[15], 0x12);
+        assert_eq!(bytes[30], 0xEE);
+    }
+
+    #[test]
+    fn csw_parser_rejects_bad_signature_and_tag() {
+        let mut csw = [0u8; 13];
+        csw[0..4].copy_from_slice(&CSW_SIGNATURE.to_le_bytes());
+        csw[4..8].copy_from_slice(&7u32.to_le_bytes());
+        csw[8..12].copy_from_slice(&0u32.to_le_bytes());
+        csw[12] = CswStatus::Passed as u8;
+
+        assert!(parse_csw_bytes(&csw, 7, 0).unwrap().passed());
+        csw[0] ^= 0xFF;
+        assert_eq!(
+            parse_csw_bytes(&csw, 7, 0).unwrap_err(),
+            UsbError::TransferError
+        );
+        csw[0..4].copy_from_slice(&CSW_SIGNATURE.to_le_bytes());
+        assert_eq!(
+            parse_csw_bytes(&csw, 8, 0).unwrap_err(),
+            UsbError::TransferError
+        );
+    }
+
+    #[test]
+    fn csw_parser_rejects_impossible_residue() {
+        let mut csw = [0u8; 13];
+        csw[0..4].copy_from_slice(&CSW_SIGNATURE.to_le_bytes());
+        csw[4..8].copy_from_slice(&9u32.to_le_bytes());
+        csw[8..12].copy_from_slice(&37u32.to_le_bytes());
+        csw[12] = CswStatus::Passed as u8;
+
+        assert_eq!(
+            parse_csw_bytes(&csw, 9, 36).unwrap_err(),
+            UsbError::DataOverrun
+        );
+    }
+
+    #[test]
+    fn execute_command_requires_real_bulk_endpoints() {
+        let driver = driver_fixture();
+        let cbw = CommandBlockWrapper::test_unit_ready(1, 0);
+        assert_eq!(
+            driver.execute_command(&cbw, None).unwrap_err(),
+            UsbError::NoDevice
+        );
+    }
+
+    // ========================================================================
+    // MSC MEDIA SMOKE TEST (field gate closure)
+    // MSC BOT spec: INQUIRY → READ_CAPACITY → READ_10 sequence
+    // ========================================================================
+
+    #[test]
+    fn cbw_inquiry_command_serialization() {
+        // INQUIRY command per SPC-4: opcode=0x12, allocation_length=36
+        let cbw = CommandBlockWrapper::inquiry(0xDEAD_BEEF, 0);
+        let bytes = cbw.to_bot_bytes();
+
+        assert_eq!(bytes.len(), 31);
+        // CBW signature
+        assert_eq!(&bytes[0..4], &0x4342_5355u32.to_le_bytes());
+        // Tag
+        assert_eq!(&bytes[4..8], &0xDEAD_BEEFu32.to_le_bytes());
+        // Data transfer length = 36 bytes
+        assert_eq!(&bytes[8..12], &36u32.to_le_bytes());
+        // Direction = Device-to-Host (bit 7 set)
+        assert_eq!(bytes[12], 0x80);
+        // LUN = 0
+        assert_eq!(bytes[13] & 0x0F, 0);
+        // CBWCB length = 6 (INQUIRY)
+        assert_eq!(bytes[14], 6);
+        // SCSI INQUIRY opcode
+        assert_eq!(bytes[15], 0x12);
+        // Allocation length
+        assert_eq!(bytes[19], 36);
+    }
+
+    #[test]
+    fn cbw_read_capacity_command_serialization() {
+        // READ CAPACITY (10) per SBC-4: opcode=0x25
+        let cbw = CommandBlockWrapper::read_capacity10(0xCAFE_BABE, 0);
+        let bytes = cbw.to_bot_bytes();
+
+        assert_eq!(bytes.len(), 31);
+        assert_eq!(&bytes[4..8], &0xCAFE_BABEu32.to_le_bytes());
+        // Data transfer length = 8 bytes (LBA + block size)
+        assert_eq!(&bytes[8..12], &8u32.to_le_bytes());
+        // Direction = Device-to-Host
+        assert_eq!(bytes[12], 0x80);
+        // CBWCB length = 10
+        assert_eq!(bytes[14], 10);
+        // SCSI READ CAPACITY (10) opcode
+        assert_eq!(bytes[15], 0x25);
+    }
+
+    #[test]
+    fn cbw_read10_command_serialization() {
+        // READ (10) per SBC-4: opcode=0x28
+        let cbw = CommandBlockWrapper::read10(0xFACE_FEED, 0, 0x1000, 8);
+        let bytes = cbw.to_bot_bytes();
+
+        assert_eq!(bytes.len(), 31);
+        assert_eq!(&bytes[4..8], &0xFACE_FEEDu32.to_le_bytes());
+        // Data transfer length = 8 sectors * 512 bytes = 4096
+        assert_eq!(&bytes[8..12], &4096u32.to_le_bytes());
+        // Direction = Device-to-Host
+        assert_eq!(bytes[12], 0x80);
+        // CBWCB length = 10
+        assert_eq!(bytes[14], 10);
+        // SCSI READ (10) opcode
+        assert_eq!(bytes[15], 0x28);
+        // LBA = 0x1000 (big-endian in CDB)
+        assert_eq!(bytes[17], 0x00);
+        assert_eq!(bytes[18], 0x00);
+        assert_eq!(bytes[19], 0x10);
+        assert_eq!(bytes[20], 0x00);
+        // Transfer length = 8
+        assert_eq!(bytes[22], 0x00);
+        assert_eq!(bytes[23], 8);
+    }
+
+    #[test]
+    fn csw_status_all_variants() {
+        // Test all CSW status values per MSC BOT spec
+        let mut csw = [0u8; 13];
+        csw[0..4].copy_from_slice(&CSW_SIGNATURE.to_le_bytes());
+
+        // CswStatus::Passed = 0x00
+        csw[4..8].copy_from_slice(&1u32.to_le_bytes());
+        csw[8..12].copy_from_slice(&0u32.to_le_bytes());
+        csw[12] = 0x00;
+        let result = parse_csw_bytes(&csw, 1, 0).unwrap();
+        assert!(result.passed());
+
+        // CswStatus::Failed = 0x01
+        csw[12] = 0x01;
+        let result = parse_csw_bytes(&csw, 1, 0).unwrap();
+        assert!(!result.passed());
+
+        // CswStatus::PhaseError = 0x02
+        csw[12] = 0x02;
+        let result = parse_csw_bytes(&csw, 1, 0).unwrap();
+        assert!(!result.passed());
+    }
+
+    #[test]
+    fn media_enumeration_sequence_wire_format() {
+        // Simulate full media enumeration: INQUIRY → READ_CAPACITY → READ_10
+        // This validates the wire format of each command in sequence
+
+        // Step 1: INQUIRY (36 bytes response)
+        let inquiry_cbw = CommandBlockWrapper::inquiry(1, 0);
+        let inquiry_bytes = inquiry_cbw.to_bot_bytes();
+        assert_eq!(inquiry_bytes[15], 0x12); // INQUIRY opcode
+        assert_eq!(inquiry_bytes[19], 36); // Allocation length
+
+        // Step 2: READ CAPACITY (8 bytes response)
+        let read_cap_cbw = CommandBlockWrapper::read_capacity10(2, 0);
+        let read_cap_bytes = read_cap_cbw.to_bot_bytes();
+        assert_eq!(read_cap_bytes[15], 0x25); // READ CAPACITY opcode
+        assert_eq!(&read_cap_bytes[8..12], &8u32.to_le_bytes());
+
+        // Step 3: READ (10) - read first sector
+        let read_cbw = CommandBlockWrapper::read10(3, 0, 0, 1);
+        let read_bytes = read_cbw.to_bot_bytes();
+        assert_eq!(read_bytes[15], 0x28); // READ (10) opcode
+        assert_eq!(&read_bytes[8..12], &512u32.to_le_bytes()); // 1 sector * 512 bytes
+
+        // Verify tag uniqueness across sequence
+        assert_ne!(&inquiry_bytes[4..8], &read_cap_bytes[4..8]);
+        assert_ne!(&read_cap_bytes[4..8], &read_bytes[4..8]);
+        assert_ne!(&inquiry_bytes[4..8], &read_bytes[4..8]);
+    }
 }

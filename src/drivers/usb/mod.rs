@@ -36,10 +36,11 @@ pub mod hid;
 pub mod hub;
 pub mod mass_storage;
 
-pub use cdc::{find_cdc_devices, CdcAcmDevice, CdcDevice, CdcEcmDevice, CdcType};
+pub use cdc::{find_cdc_devices, CdcAcmDevice, CdcDevice, CdcEcmDevice, CdcLineCoding, CdcType};
 pub use hid::{
-    has_key, hid_to_ascii, read_key, try_read_key, HidDeviceState, HidDeviceType, HidDriver,
-    HidEvent, KeyboardBootReport, KeyboardModifier, MouseBootReport, KEYBOARD_QUEUE,
+    has_key, hid_poll_interval_ms, hid_to_ascii, parse_hid_report_descriptor, read_key,
+    try_read_key, HidDeviceState, HidDeviceType, HidDriver, HidEvent, HidReportType,
+    KeyboardBootReport, KeyboardModifier, MouseBootReport, KEYBOARD_QUEUE,
 };
 pub use mass_storage::{
     get_all_msc, get_msc_driver, init_all_msc, register_msc_driver, CommandBlockWrapper,
@@ -203,6 +204,8 @@ const PORTSC_OCC: u32 = 1 << 20; // Over-current Change
 const PORTSC_PRC: u32 = 1 << 21; // Port Reset Change
 const PORTSC_PLC: u32 = 1 << 22; // Port Link State Change
 const PORTSC_CEC: u32 = 1 << 23; // Port Config Error Change
+const PORTSC_CHANGE_BITS: u32 =
+    PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | PORTSC_OCC | PORTSC_PRC | PORTSC_PLC | PORTSC_CEC;
 
 // USB Command Register bits
 const USBCMD_RS: u32 = 1 << 0; // Run/Stop
@@ -793,14 +796,15 @@ impl Ring {
         self.segment.trbs.len()
     }
 
-    pub fn push(&mut self, mut trb: Trb) {
+    pub fn push(&mut self, mut trb: Trb) -> Result<(), UsbError> {
         if self.is_full() {
-            return;
+            return Err(UsbError::TransferError);
         }
         let cycle_bit = if self.producer_cycle { 1u32 } else { 0u32 };
         trb.dword3 = (trb.dword3 & !1) | cycle_bit;
         self.segment.trbs[self.enqueue] = trb;
         self.advance_enqueue();
+        Ok(())
     }
 
     pub fn pop(&mut self) -> Option<Trb> {
@@ -808,6 +812,16 @@ impl Ring {
             return None;
         }
         let trb = self.segment.trbs[self.dequeue];
+        let trb_cycle = (trb.dword3 & 1) != 0;
+        if trb_cycle != self.consumer_cycle {
+            return None;
+        }
+        self.advance_dequeue();
+        Some(trb)
+    }
+
+    pub fn pop_event(&mut self) -> Option<Trb> {
+        let trb = unsafe { read_volatile(&self.segment.trbs[self.dequeue]) };
         let trb_cycle = (trb.dword3 & 1) != 0;
         if trb_cycle != self.consumer_cycle {
             return None;
@@ -890,7 +904,8 @@ impl XhciRings {
     }
 
     pub fn resolve_event_resources(&mut self) -> Result<(), UsbError> {
-        self.event_phys = usb_dma_phys(self.event.segment.trbs.as_ptr(), "xHCI event ring segment")?;
+        self.event_phys =
+            usb_dma_phys(self.event.segment.trbs.as_ptr(), "xHCI event ring segment")?;
         Ok(())
     }
 }
@@ -1031,6 +1046,12 @@ impl EndpointContext {
             reserved: [0; 4],
         }
     }
+
+    /// Set max burst size (dword1 bits 8:15) for SuperSpeed endpoints.
+    /// Per xHCI spec §6.2.3: MAX_BURST = bMaxBurst from SS Endpoint Companion Descriptor.
+    pub fn set_max_burst(&mut self, max_burst: u8) {
+        self.dword1 = (self.dword1 & !(0xFF << 8)) | ((max_burst as u32) << 8);
+    }
 }
 
 // ============================================================================
@@ -1060,12 +1081,10 @@ impl TransferRing {
     }
 
     /// Enqueue a TRB and return the TRB's physical address
-    pub fn enqueue(&mut self, trb: Trb) -> u64 {
+    pub fn enqueue(&mut self, trb: Trb) -> Result<u64, UsbError> {
         let idx = self.ring.enqueue;
-        self.ring.push(trb);
-        // Return physical address of the TRB
-        // In real implementation, this would be the actual physical address
-        self.phys + (idx * core::mem::size_of::<Trb>()) as u64
+        self.ring.push(trb)?;
+        Ok(self.phys + (idx * core::mem::size_of::<Trb>()) as u64)
     }
 }
 
@@ -1089,7 +1108,8 @@ impl DeviceContext {
 // USB DEVICE ENUMERATION
 // ============================================================================
 
-/// USB device descriptor
+/// USB device descriptor (USB 2.0/3.0 spec Table 9-8, 18 bytes)
+#[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct UsbDeviceDescriptor {
     pub bLength: u8,
@@ -1106,6 +1126,27 @@ pub struct UsbDeviceDescriptor {
     pub iProduct: u8,
     pub iSerialNumber: u8,
     pub bNumConfigurations: u8,
+}
+
+/// USB BOS (Binary Object Store) descriptor header (USB 3.0 spec §9.6.2)
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+pub struct BosDescriptor {
+    pub bLength: u8,
+    pub bDescriptorType: u8, // 0x0F = BOS
+    pub wTotalLength: u16,
+    pub bNumDeviceCaps: u8,
+}
+
+/// USB SS Endpoint Companion descriptor (USB 3.0 spec §9.6.7)
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+pub struct SsEndpointCompanion {
+    pub bLength: u8,
+    pub bDescriptorType: u8, // 0x30 = SS Endpoint Companion
+    pub bMaxBurst: u8,
+    pub bmAttributes: u8,
+    pub wBytesPerInterval: u16,
 }
 
 /// USB device class codes
@@ -1189,7 +1230,7 @@ impl Default for UsbDevice {
 impl UsbDevice {
     /// Perform a control transfer via xHCI Setup/Data/Status TRBs
     pub fn control_transfer(
-        &mut self,
+        &self,
         setup: UsbSetupPacket,
         buffer: Option<&mut [u8]>,
     ) -> Result<(), UsbError> {
@@ -1212,6 +1253,73 @@ impl UsbDevice {
             setup.value
         );
         Ok(())
+    }
+
+    pub fn bulk_transfer_out(
+        &self,
+        endpoint: UsbEndpoint,
+        data: &[u8],
+        label: &str,
+    ) -> Result<usize, UsbError> {
+        if endpoint.transfer_type != UsbTransferType::Bulk
+            || endpoint.direction != UsbDirection::Out
+        {
+            return Err(UsbError::PipeError);
+        }
+        if data.is_empty() {
+            return Ok(0);
+        }
+        if data.len() > u32::MAX as usize {
+            return Err(UsbError::DataOverrun);
+        }
+
+        let ctrl = controller_for_device(self)?;
+        let data_phys = usb_dma_phys(data.as_ptr(), label)?;
+        let (slot_id, endpoint_id, trb_phys) = submit_normal_endpoint_transfer(
+            &ctrl,
+            self.address,
+            endpoint,
+            data_phys,
+            data.len() as u32,
+            label,
+        )?;
+        ctrl.ring_doorbell(slot_id, endpoint_id);
+        let completion =
+            wait_for_transfer_completion(&ctrl, trb_phys, slot_id, endpoint_id, label)?;
+        transfer_completed_len(data.len(), completion.residual_len)
+    }
+
+    pub fn bulk_transfer_in(
+        &self,
+        endpoint: UsbEndpoint,
+        buffer: &mut [u8],
+        label: &str,
+    ) -> Result<usize, UsbError> {
+        if endpoint.transfer_type != UsbTransferType::Bulk || endpoint.direction != UsbDirection::In
+        {
+            return Err(UsbError::PipeError);
+        }
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        if buffer.len() > u32::MAX as usize {
+            return Err(UsbError::DataOverrun);
+        }
+
+        let ctrl = controller_for_device(self)?;
+        let data_phys = usb_dma_phys(buffer.as_mut_ptr(), label)?;
+        let (slot_id, endpoint_id, trb_phys) = submit_normal_endpoint_transfer(
+            &ctrl,
+            self.address,
+            endpoint,
+            data_phys,
+            buffer.len() as u32,
+            label,
+        )?;
+        ctrl.ring_doorbell(slot_id, endpoint_id);
+        let completion =
+            wait_for_transfer_completion(&ctrl, trb_phys, slot_id, endpoint_id, label)?;
+        transfer_completed_len(buffer.len(), completion.residual_len)
     }
 
     pub fn interrupt_transfer_in(
@@ -1238,17 +1346,23 @@ impl UsbDevice {
                 completed = Some(done.data);
             } else if endpoint_state.pending_in.is_none() {
                 if endpoint_state.ring.phys == 0 {
-                    endpoint_state.ring.resolve_phys("USB interrupt endpoint ring")?;
+                    endpoint_state
+                        .ring
+                        .resolve_phys("USB interrupt endpoint ring")?;
                 }
                 let transfer_len = endpoint.max_packet_size.max(1) as usize;
                 let buffer = vec![0u8; transfer_len].into_boxed_slice();
-                let data_phys = usb_dma_phys(
-                    buffer.as_ptr(),
-                    "USB interrupt IN transfer buffer",
-                )?;
+                let data_phys = usb_dma_phys(buffer.as_ptr(), "USB interrupt IN transfer buffer")?;
                 let mut trb = Trb::normal(data_phys, transfer_len as u32, true);
                 trb.dword3 |= 1 << 5;
-                let trb_phys = endpoint_state.ring.enqueue(trb);
+                let trb_phys = endpoint_state.ring.enqueue(trb)?;
+                endpoint_state
+                    .active_transfers
+                    .push_back(ActiveTransferRecord {
+                        trb_phys,
+                        slot_id: slot.slot_id,
+                        endpoint_id: endpoint_state.endpoint_id,
+                    });
                 endpoint_state.pending_in = Some(PendingInterruptInTransfer {
                     trb_phys,
                     expected_len: transfer_len,
@@ -1320,6 +1434,24 @@ pub enum UsbTransferType {
     Interrupt = 3,
 }
 
+fn xhci_interval_for_endpoint(endpoint: &UsbEndpoint, speed: UsbSpeed) -> u8 {
+    if endpoint.transfer_type != UsbTransferType::Interrupt {
+        return endpoint.interval;
+    }
+
+    match speed {
+        // HS/SS: interval = 2^(bInterval-1) microframes, encoded as bInterval-1 in EP context
+        UsbSpeed::High | UsbSpeed::Super | UsbSpeed::SuperPlus => {
+            endpoint.interval.clamp(1, 16) - 1
+        }
+        // FS/LS: encode the 1ms-frame bInterval as a 125us-microframe exponent.
+        UsbSpeed::Low | UsbSpeed::Full | UsbSpeed::Unknown => {
+            let microframes = (endpoint.interval.max(1) as u32).saturating_mul(8);
+            (31 - microframes.leading_zeros()) as u8
+        }
+    }
+}
+
 // ============================================================================
 // USB HID DRIVER
 // ============================================================================
@@ -1356,12 +1488,30 @@ pub struct HidDevice {
 
 impl HidDevice {
     pub fn new(device: UsbDevice, interface: u8) -> Self {
+        let mut input_endpoint = None;
+        let mut output_endpoint = None;
+        if let Some(iface) = device
+            .interfaces
+            .iter()
+            .find(|iface| iface.interface_number == interface)
+        {
+            for endpoint in &iface.endpoints {
+                if endpoint.transfer_type != UsbTransferType::Interrupt {
+                    continue;
+                }
+                match endpoint.direction {
+                    UsbDirection::In => input_endpoint = Some(endpoint.address),
+                    UsbDirection::Out => output_endpoint = Some(endpoint.address),
+                }
+            }
+        }
+
         HidDevice {
             device,
             interface,
             report_descriptor: None,
-            input_endpoint: None,
-            output_endpoint: None,
+            input_endpoint,
+            output_endpoint,
             input_buffer: [0u8; 64],
             input_len: 0,
         }
@@ -1375,8 +1525,22 @@ impl HidDevice {
         }
     }
 
-    pub fn send_output(&mut self, _data: &[u8]) -> Result<(), UsbError> {
-        Ok(())
+    pub fn send_output(&mut self, data: &mut [u8]) -> Result<(), UsbError> {
+        if data.is_empty() {
+            return Err(UsbError::DataUnderrun);
+        }
+        if data.len() > u16::MAX as usize {
+            return Err(UsbError::DataOverrun);
+        }
+
+        let setup = UsbSetupPacket {
+            request_type: 0x21,
+            request: 0x09,
+            value: hid::HidReportType::Output.setup_value(0),
+            index: self.interface as u16,
+            length: data.len() as u16,
+        };
+        self.device.control_transfer(setup, Some(data))
     }
 }
 
@@ -1627,10 +1791,12 @@ pub enum UsbError {
     PipeError,
     BandwidthError,
     TransferError,
+    TransferCancelled,
     InvalidPort,
     DescriptorError,
     AddressTranslationFailed,
     SlotUnavailable,
+    CommandFailed,
     Unknown,
 }
 
@@ -1647,6 +1813,37 @@ static MASS_STORAGE_DEVICES: Mutex<Vec<MassStorageDevice>> = Mutex::new(Vec::new
 /// Global xHCI controller reference (set during discovery)
 static XHCI_CONTROLLER: Mutex<Option<XhciController>> = Mutex::new(None);
 static XHCI_RUNTIMES: Mutex<Vec<XhciControllerRuntime>> = Mutex::new(Vec::new());
+static PENDING_PORT_CHANGES: Mutex<VecDeque<PendingPortChange>> = Mutex::new(VecDeque::new());
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingPortChange {
+    bus: u8,
+    device: u8,
+    function: u8,
+    port_index: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsbPortRecoveryAction {
+    NoChange,
+    Removed,
+    Enumerate,
+    Reenumerate,
+    Fault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsbPortChangeSnapshot {
+    pub port_index: u8,
+    pub port_id: u8,
+    pub connected: bool,
+    pub enabled: bool,
+    pub over_current: bool,
+    pub speed: UsbSpeed,
+    pub change_bits: u32,
+    pub had_slot: bool,
+    pub action: UsbPortRecoveryAction,
+}
 
 #[derive(Debug)]
 struct XhciControllerRuntime {
@@ -1657,12 +1854,14 @@ struct XhciControllerRuntime {
     dcbaa_phys: u64,
     erst: Box<[ErstEntry]>,
     rings: XhciRings,
+    command_completions: VecDeque<CommandCompletionRecord>,
+    transfer_completions: VecDeque<TransferCompletionRecord>,
+    transfer_cancellations: VecDeque<ActiveTransferRecord>,
 }
 
 impl XhciControllerRuntime {
     fn event_dequeue_phys(&self) -> u64 {
-        self.rings.event_phys
-            + (self.rings.event.dequeue * core::mem::size_of::<Trb>()) as u64
+        self.rings.event_phys + (self.rings.event.dequeue * core::mem::size_of::<Trb>()) as u64
     }
 }
 
@@ -1733,9 +1932,34 @@ pub struct DeviceSlot {
     pub controller_device: u8,
     pub controller_function: u8,
     pub input_context: Box<InputContext>,
+    pub device_context: Box<DeviceContext>,
+    pub device_context_phys: u64,
     pub control_ring: TransferRing,
     pub endpoint_rings: Vec<EndpointTransferState>,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandCompletionRecord {
+    pub command_trb_phys: u64,
+    pub slot_id: u8,
+    pub completion_code: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferCompletionRecord {
+    pub trb_phys: u64,
+    pub slot_id: u8,
+    pub endpoint_id: u8,
+    pub residual_len: u32,
+    pub completion_code: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveTransferRecord {
+    pub trb_phys: u64,
+    pub slot_id: u8,
+    pub endpoint_id: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -1755,6 +1979,7 @@ pub struct EndpointTransferState {
     pub endpoint: UsbEndpoint,
     pub endpoint_id: u8,
     pub ring: TransferRing,
+    pub active_transfers: VecDeque<ActiveTransferRecord>,
     pub pending_in: Option<PendingInterruptInTransfer>,
     pub completed_in: VecDeque<CompletedInterruptInTransfer>,
 }
@@ -1765,6 +1990,7 @@ impl EndpointTransferState {
             endpoint,
             endpoint_id,
             ring,
+            active_transfers: VecDeque::new(),
             pending_in: None,
             completed_in: VecDeque::new(),
         }
@@ -1774,8 +2000,38 @@ impl EndpointTransferState {
 fn usb_dma_phys<T>(ptr: *const T, label: &str) -> Result<u64, UsbError> {
     let vaddr = ptr as u64;
     crate::memory::try_virt_to_phys_u64(vaddr).ok_or_else(|| {
-        crate::serial_println!("[USB] DMA translation failed for {} vaddr={:#x}", label, vaddr);
+        crate::serial_println!(
+            "[USB] DMA translation failed for {} vaddr={:#x}",
+            label,
+            vaddr
+        );
         UsbError::AddressTranslationFailed
+    })
+}
+
+fn publish_slot_output_context(
+    ctrl: &XhciController,
+    slot_id: u8,
+    device_context_phys: u64,
+) -> Result<(), UsbError> {
+    with_controller_runtime_mut(ctrl, |runtime| {
+        let idx = slot_id as usize;
+        if idx == 0 || idx >= runtime.dcbaa.len() {
+            return Err(UsbError::SlotUnavailable);
+        }
+        runtime.dcbaa[idx] = device_context_phys;
+        Ok(())
+    })
+}
+
+fn clear_slot_output_context(ctrl: &XhciController, slot_id: u8) -> Result<(), UsbError> {
+    with_controller_runtime_mut(ctrl, |runtime| {
+        let idx = slot_id as usize;
+        if idx == 0 || idx >= runtime.dcbaa.len() {
+            return Err(UsbError::SlotUnavailable);
+        }
+        runtime.dcbaa[idx] = 0;
+        Ok(())
     })
 }
 
@@ -1816,8 +2072,79 @@ fn slot_matches_controller(slot: &DeviceSlot, ctrl: &XhciController) -> bool {
         && slot.controller_function == ctrl.function
 }
 
+fn device_matches_controller_port(device: &UsbDevice, ctrl: &XhciController, port_id: u8) -> bool {
+    device.controller_bus == ctrl.bus
+        && device.controller_device == ctrl.device
+        && device.controller_function == ctrl.function
+        && device.port == port_id
+}
+
 fn runtime_matches_controller(runtime: &XhciControllerRuntime, ctrl: &XhciController) -> bool {
     runtime.bus == ctrl.bus && runtime.device == ctrl.device && runtime.function == ctrl.function
+}
+
+fn port_status_change_event_port_index(trb: &Trb) -> Option<u8> {
+    let port_id = ((trb.dword0 >> 24) & 0xFF) as u8;
+    port_id.checked_sub(1)
+}
+
+fn controller_port_has_slot(ctrl: &XhciController, port_id: u8) -> bool {
+    DEVICE_SLOTS
+        .lock()
+        .iter()
+        .any(|slot| slot.enabled && slot_matches_controller(slot, ctrl) && slot.port == port_id)
+}
+
+fn port_speed_from_portsc(portsc: u32) -> UsbSpeed {
+    match (portsc & PORTSC_SPEED_MASK) >> 10 {
+        1 => UsbSpeed::Full,
+        2 => UsbSpeed::Low,
+        3 => UsbSpeed::High,
+        4 => UsbSpeed::Super,
+        _ => UsbSpeed::Unknown,
+    }
+}
+
+fn classify_port_recovery_action(
+    portsc: u32,
+    change_bits: u32,
+    had_slot: bool,
+) -> UsbPortRecoveryAction {
+    if change_bits == 0 {
+        return UsbPortRecoveryAction::NoChange;
+    }
+    if (portsc & PORTSC_OCA) != 0 || (change_bits & (PORTSC_OCC | PORTSC_CEC)) != 0 {
+        return UsbPortRecoveryAction::Fault;
+    }
+    if (portsc & PORTSC_CCS) == 0 {
+        return UsbPortRecoveryAction::Removed;
+    }
+    if had_slot {
+        UsbPortRecoveryAction::Reenumerate
+    } else {
+        UsbPortRecoveryAction::Enumerate
+    }
+}
+
+fn port_change_snapshot_from_portsc(
+    ctrl: &XhciController,
+    port_index: u8,
+    portsc: u32,
+) -> UsbPortChangeSnapshot {
+    let port_id = port_index.saturating_add(1);
+    let change_bits = portsc & PORTSC_CHANGE_BITS;
+    let had_slot = controller_port_has_slot(ctrl, port_id);
+    UsbPortChangeSnapshot {
+        port_index,
+        port_id,
+        connected: (portsc & PORTSC_CCS) != 0,
+        enabled: (portsc & PORTSC_PED) != 0,
+        over_current: (portsc & PORTSC_OCA) != 0,
+        speed: port_speed_from_portsc(portsc),
+        change_bits,
+        had_slot,
+        action: classify_port_recovery_action(portsc, change_bits, had_slot),
+    }
 }
 
 fn slot_matches_device_id(slot: &DeviceSlot, ctrl: &XhciController, device_id: u8) -> bool {
@@ -1852,10 +2179,96 @@ fn controller_for_device(device: &UsbDevice) -> Result<XhciController, UsbError>
 
 fn endpoint_id_from_address(endpoint: &UsbEndpoint) -> u8 {
     let ep_num = endpoint.address & 0x0F;
-    (ep_num << 1) | if endpoint.direction == UsbDirection::In { 1 } else { 0 }
+    (ep_num << 1)
+        | if endpoint.direction == UsbDirection::In {
+            1
+        } else {
+            0
+        }
 }
 
-fn bind_slot_usb_address(ctrl: &XhciController, slot_id: u8, usb_address: u8) -> Result<(), UsbError> {
+fn submit_normal_endpoint_transfer(
+    ctrl: &XhciController,
+    device_id: u8,
+    endpoint: UsbEndpoint,
+    data_phys: u64,
+    len: u32,
+    label: &str,
+) -> Result<(u8, u8, u64), UsbError> {
+    let mut slots = DEVICE_SLOTS.lock();
+    submit_normal_endpoint_transfer_on_slots(
+        &mut slots, ctrl, device_id, endpoint, data_phys, len, label,
+    )
+}
+
+fn submit_normal_endpoint_transfer_on_slots(
+    slots: &mut [DeviceSlot],
+    ctrl: &XhciController,
+    device_id: u8,
+    endpoint: UsbEndpoint,
+    data_phys: u64,
+    len: u32,
+    label: &str,
+) -> Result<(u8, u8, u64), UsbError> {
+    let expected_endpoint_id = endpoint_id_from_address(&endpoint);
+    let slot = slots
+        .iter_mut()
+        .find(|slot| slot_matches_device_id(slot, ctrl, device_id))
+        .ok_or(UsbError::NoDevice)?;
+    let endpoint_state = slot
+        .endpoint_rings
+        .iter_mut()
+        .find(|state| {
+            state.endpoint.address == endpoint.address || state.endpoint_id == expected_endpoint_id
+        })
+        .ok_or(UsbError::NoDevice)?;
+
+    if endpoint_state.endpoint.transfer_type != UsbTransferType::Bulk {
+        return Err(UsbError::PipeError);
+    }
+    if endpoint_state.ring.phys == 0 {
+        endpoint_state.ring.resolve_phys(label)?;
+    }
+
+    let mut trb = Trb::normal(data_phys, len, true);
+    trb.dword3 |= 1 << 5;
+    let trb_phys = endpoint_state.ring.enqueue(trb)?;
+    endpoint_state
+        .active_transfers
+        .push_back(ActiveTransferRecord {
+            trb_phys,
+            slot_id: slot.slot_id,
+            endpoint_id: endpoint_state.endpoint_id,
+        });
+    Ok((slot.slot_id, endpoint_state.endpoint_id, trb_phys))
+}
+
+fn transfer_completed_len(requested_len: usize, residual_len: u32) -> Result<usize, UsbError> {
+    let residual = residual_len as usize;
+    if residual > requested_len {
+        return Err(UsbError::DataOverrun);
+    }
+    Ok(requested_len - residual)
+}
+
+fn completion_to_error(code: u8) -> UsbError {
+    match code {
+        1 => UsbError::Unknown,
+        3 => UsbError::Stall,
+        4 => UsbError::DataOverrun,
+        5 => UsbError::DataUnderrun,
+        10 | 11 => UsbError::TransactionError,
+        13 | 14 | 15 => UsbError::BandwidthError,
+        19 => UsbError::DeviceNotResponding,
+        _ => UsbError::CommandFailed,
+    }
+}
+
+fn bind_slot_usb_address(
+    ctrl: &XhciController,
+    slot_id: u8,
+    usb_address: u8,
+) -> Result<(), UsbError> {
     let mut slots = DEVICE_SLOTS.lock();
     let slot = slots
         .iter_mut()
@@ -1895,6 +2308,9 @@ fn ensure_controller_runtime(ctrl: &XhciController) -> Result<(), UsbError> {
         dcbaa_phys,
         erst,
         rings,
+        command_completions: VecDeque::new(),
+        transfer_completions: VecDeque::new(),
+        transfer_cancellations: VecDeque::new(),
     });
     Ok(())
 }
@@ -1911,10 +2327,7 @@ fn with_controller_runtime_mut<R>(
     f(runtime)
 }
 
-fn build_control_transfer_trbs(
-    setup: &UsbSetupPacket,
-    data_stage: Option<(u64, u32)>,
-) -> Vec<Trb> {
+fn build_control_transfer_trbs(setup: &UsbSetupPacket, data_stage: Option<(u64, u32)>) -> Vec<Trb> {
     let mut trbs = Vec::with_capacity(if data_stage.is_some() { 3 } else { 2 });
     let data_in = (setup.request_type & 0x80) != 0;
     let trt = match data_stage {
@@ -1936,7 +2349,8 @@ fn build_control_transfer_trbs(
     if let Some((data_phys, data_len)) = data_stage {
         trbs.push(Trb::data_stage(data_phys, data_len, data_in, true));
     }
-    let mut status_trb = Trb::status_stage(if data_stage.is_some() { !data_in } else { true }, true);
+    let mut status_trb =
+        Trb::status_stage(if data_stage.is_some() { !data_in } else { true }, true);
     status_trb.dword3 |= 1 << 5;
     trbs.push(status_trb);
     trbs
@@ -1949,10 +2363,8 @@ fn submit_command_trb(ctrl: &XhciController, trb: Trb, label: &str) -> Result<u6
             runtime.rings.command_ring_ptr()?;
         }
         let idx = runtime.rings.command.enqueue;
-        runtime.rings.command.push(trb);
-        Ok(
-            runtime.rings.command_phys + (idx * core::mem::size_of::<Trb>()) as u64,
-        )
+        runtime.rings.command.push(trb)?;
+        Ok(runtime.rings.command_phys + (idx * core::mem::size_of::<Trb>()) as u64)
     })?;
     ctrl.ring_doorbell(0, 0);
     crate::serial_println!(
@@ -1961,6 +2373,212 @@ fn submit_command_trb(ctrl: &XhciController, trb: Trb, label: &str) -> Result<u6
         trb_phys
     );
     Ok(trb_phys)
+}
+
+fn take_command_completion(
+    runtime: &mut XhciControllerRuntime,
+    command_trb_phys: u64,
+) -> Option<CommandCompletionRecord> {
+    let pos = runtime
+        .command_completions
+        .iter()
+        .position(|completion| completion.command_trb_phys == command_trb_phys)?;
+    runtime.command_completions.remove(pos)
+}
+
+fn take_transfer_completion(
+    runtime: &mut XhciControllerRuntime,
+    trb_phys: u64,
+) -> Option<TransferCompletionRecord> {
+    let pos = runtime
+        .transfer_completions
+        .iter()
+        .position(|completion| completion.trb_phys == trb_phys)?;
+    runtime.transfer_completions.remove(pos)
+}
+
+fn take_transfer_cancellation(
+    runtime: &mut XhciControllerRuntime,
+    trb_phys: u64,
+) -> Option<ActiveTransferRecord> {
+    let pos = runtime
+        .transfer_cancellations
+        .iter()
+        .position(|record| record.trb_phys == trb_phys)?;
+    runtime.transfer_cancellations.remove(pos)
+}
+
+fn record_transfer_cancellations(
+    ctrl: &XhciController,
+    records: &[ActiveTransferRecord],
+) -> Result<(), UsbError> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    with_controller_runtime_mut(ctrl, |runtime| {
+        for record in records {
+            runtime.transfer_cancellations.push_back(*record);
+        }
+        Ok(())
+    })
+}
+
+fn clear_active_transfer(ctrl: &XhciController, slot_id: u8, endpoint_id: u8, trb_phys: u64) {
+    let mut slots = DEVICE_SLOTS.lock();
+    let Some(slot) = slots.iter_mut().find(|slot| {
+        slot.enabled && slot_matches_controller(slot, ctrl) && slot.slot_id == slot_id
+    }) else {
+        return;
+    };
+    let Some(endpoint_state) = slot
+        .endpoint_rings
+        .iter_mut()
+        .find(|state| state.endpoint_id == endpoint_id)
+    else {
+        return;
+    };
+    if let Some(pos) = endpoint_state
+        .active_transfers
+        .iter()
+        .position(|record| record.trb_phys == trb_phys)
+    {
+        endpoint_state.active_transfers.remove(pos);
+    }
+}
+
+fn wait_for_command_completion(
+    ctrl: &XhciController,
+    command_trb_phys: u64,
+    label: &str,
+) -> Result<CommandCompletionRecord, UsbError> {
+    if ctrl.mmio_base == 0 {
+        return Ok(CommandCompletionRecord {
+            command_trb_phys,
+            slot_id: 0,
+            completion_code: 1,
+        });
+    }
+
+    let timeout = 100_000u64;
+    let start = crate::task::scheduler::get_ticks() as u64;
+    loop {
+        let _ = drain_controller_events(ctrl);
+        if let Some(completion) = with_controller_runtime_mut(ctrl, |runtime| {
+            Ok(take_command_completion(runtime, command_trb_phys))
+        })? {
+            if completion.completion_code == 1 {
+                return Ok(completion);
+            }
+            crate::serial_println!(
+                "[USB] {} command failed: cmd={:#x} slot={} code={}",
+                label,
+                command_trb_phys,
+                completion.slot_id,
+                completion.completion_code
+            );
+            return Err(completion_to_error(completion.completion_code));
+        }
+        if crate::task::scheduler::get_ticks() as u64 - start > timeout {
+            crate::serial_println!(
+                "[USB] {} command completion timeout: cmd={:#x}",
+                label,
+                command_trb_phys
+            );
+            return Err(UsbError::Timeout);
+        }
+        core::hint::spin_loop();
+    }
+}
+
+fn wait_for_transfer_completion(
+    ctrl: &XhciController,
+    trb_phys: u64,
+    expected_slot_id: u8,
+    expected_endpoint_id: u8,
+    label: &str,
+) -> Result<TransferCompletionRecord, UsbError> {
+    if ctrl.mmio_base == 0 {
+        clear_active_transfer(ctrl, expected_slot_id, expected_endpoint_id, trb_phys);
+        return Ok(TransferCompletionRecord {
+            trb_phys,
+            slot_id: expected_slot_id,
+            endpoint_id: expected_endpoint_id,
+            residual_len: 0,
+            completion_code: 1,
+        });
+    }
+
+    let timeout = 100_000u64;
+    let start = crate::task::scheduler::get_ticks() as u64;
+    loop {
+        let _ = drain_controller_events(ctrl);
+        if let Some(cancelled) = with_controller_runtime_mut(ctrl, |runtime| {
+            Ok(take_transfer_cancellation(runtime, trb_phys))
+        })? {
+            if cancelled.slot_id == expected_slot_id
+                && cancelled.endpoint_id == expected_endpoint_id
+            {
+                crate::serial_println!(
+                    "[USB] {} transfer cancelled: trb={:#x} slot={} ep={}",
+                    label,
+                    trb_phys,
+                    cancelled.slot_id,
+                    cancelled.endpoint_id
+                );
+                return Err(UsbError::TransferCancelled);
+            }
+            crate::serial_println!(
+                "[USB] {} cancellation identity mismatch: got slot={} ep={} expected slot={} ep={}",
+                label,
+                cancelled.slot_id,
+                cancelled.endpoint_id,
+                expected_slot_id,
+                expected_endpoint_id
+            );
+            return Err(UsbError::TransferError);
+        }
+        if let Some(completion) = with_controller_runtime_mut(ctrl, |runtime| {
+            Ok(take_transfer_completion(runtime, trb_phys))
+        })? {
+            if completion.slot_id != expected_slot_id
+                || completion.endpoint_id != expected_endpoint_id
+            {
+                crate::serial_println!(
+                    "[USB] {} completion identity mismatch: got slot={} ep={} expected slot={} ep={}",
+                    label,
+                    completion.slot_id,
+                    completion.endpoint_id,
+                    expected_slot_id,
+                    expected_endpoint_id
+                );
+                return Err(UsbError::TransferError);
+            }
+            if completion.completion_code == 1 {
+                clear_active_transfer(ctrl, expected_slot_id, expected_endpoint_id, trb_phys);
+                return Ok(completion);
+            }
+            crate::serial_println!(
+                "[USB] {} transfer failed: trb={:#x} slot={} ep={} code={}",
+                label,
+                trb_phys,
+                completion.slot_id,
+                completion.endpoint_id,
+                completion.completion_code
+            );
+            let err = completion_to_error(completion.completion_code);
+            clear_active_transfer(ctrl, expected_slot_id, expected_endpoint_id, trb_phys);
+            return Err(err);
+        }
+        if crate::task::scheduler::get_ticks() as u64 - start > timeout {
+            crate::serial_println!(
+                "[USB] {} transfer completion timeout: trb={:#x}",
+                label,
+                trb_phys
+            );
+            return Err(UsbError::Timeout);
+        }
+        core::hint::spin_loop();
+    }
 }
 
 fn parse_configuration_interfaces(config_desc: &[u8]) -> Vec<UsbInterface> {
@@ -2062,6 +2680,13 @@ fn complete_interrupt_transfer(
             .completed_in
             .push_back(CompletedInterruptInTransfer { data });
     }
+    if let Some(pos) = endpoint_state
+        .active_transfers
+        .iter()
+        .position(|record| record.trb_phys == trb_phys)
+    {
+        endpoint_state.active_transfers.remove(pos);
+    }
 
     true
 }
@@ -2072,7 +2697,7 @@ fn submit_ep0_transfer(
     trbs: &[Trb],
     label: &str,
 ) -> Result<u8, UsbError> {
-    let slot_id = {
+    let (slot_id, completion_trb_phys) = {
         let mut slots = DEVICE_SLOTS.lock();
         let slot = slots
             .iter_mut()
@@ -2081,12 +2706,16 @@ fn submit_ep0_transfer(
         if slot.control_ring.phys == 0 {
             slot.control_ring.resolve_phys("USB EP0 transfer ring")?;
         }
+        let mut last_trb_phys = 0;
         for trb in trbs {
-            slot.control_ring.enqueue(*trb);
+            last_trb_phys = slot.control_ring.enqueue(*trb)?;
         }
-        slot.slot_id
+        (slot.slot_id, last_trb_phys)
     };
     ctrl.ring_doorbell(slot_id, 1);
+    if completion_trb_phys != 0 {
+        let _ = wait_for_transfer_completion(ctrl, completion_trb_phys, slot_id, 1, label)?;
+    }
     crate::serial_println!(
         "[USB] {} queued on slot={} device_id={} trbs={}",
         label,
@@ -2100,7 +2729,7 @@ fn submit_ep0_transfer(
 fn drain_controller_events(ctrl: &XhciController) -> Result<usize, UsbError> {
     with_controller_runtime_mut(ctrl, |runtime| {
         let mut drained = 0usize;
-        while let Some(trb) = runtime.rings.event.pop() {
+        while let Some(trb) = runtime.rings.event.pop_event() {
             drained += 1;
             match trb.trb_type() {
                 x if x == TrbType::TransferEvent as u8 => {
@@ -2109,6 +2738,15 @@ fn drain_controller_events(ctrl: &XhciController) -> Result<usize, UsbError> {
                     let endpoint_id = ((trb.dword3 >> 16) & 0x1F) as u8;
                     let completion_code = ((trb.dword2 >> 24) & 0xFF) as u8;
                     let residual_len = trb.dword2 & 0x00FF_FFFF;
+                    runtime
+                        .transfer_completions
+                        .push_back(TransferCompletionRecord {
+                            trb_phys: event_trb_phys,
+                            slot_id,
+                            endpoint_id,
+                            residual_len,
+                            completion_code,
+                        });
                     let mut slots = DEVICE_SLOTS.lock();
                     let completed = complete_interrupt_transfer(
                         &mut slots,
@@ -2130,8 +2768,16 @@ fn drain_controller_events(ctrl: &XhciController) -> Result<usize, UsbError> {
                     );
                 }
                 x if x == TrbType::CommandCompletion as u8 => {
+                    let command_trb_phys = (trb.dword0 as u64) | ((trb.dword1 as u64) << 32);
                     let slot_id = (trb.dword3 >> 24) as u8;
                     let completion_code = ((trb.dword2 >> 24) & 0xFF) as u8;
+                    runtime
+                        .command_completions
+                        .push_back(CommandCompletionRecord {
+                            command_trb_phys,
+                            slot_id,
+                            completion_code,
+                        });
                     crate::serial_println!(
                         "[USB] Command completion: slot={} code={} cmd={:#x}:{:#x}",
                         slot_id,
@@ -2141,8 +2787,23 @@ fn drain_controller_events(ctrl: &XhciController) -> Result<usize, UsbError> {
                     );
                 }
                 x if x == TrbType::PortStatusChange as u8 => {
-                    let port_id = (trb.dword0 & 0xFF) as u8;
-                    crate::serial_println!("[USB] Port status change event: port={}", port_id);
+                    if let Some(port_index) = port_status_change_event_port_index(&trb) {
+                        PENDING_PORT_CHANGES.lock().push_back(PendingPortChange {
+                            bus: ctrl.bus,
+                            device: ctrl.device,
+                            function: ctrl.function,
+                            port_index,
+                        });
+                        crate::serial_println!(
+                            "[USB] Port status change event: port={}",
+                            port_index.saturating_add(1)
+                        );
+                    } else {
+                        crate::serial_println!(
+                            "[USB] Port status change event with invalid port id: raw={:#x}",
+                            trb.dword0
+                        );
+                    }
                 }
                 other => {
                     crate::serial_println!(
@@ -2170,9 +2831,12 @@ pub fn enable_slot(ctrl: &XhciController, port: u8) -> Result<u8, UsbError> {
         dword3: (TrbType::EnableSlot as u32) << 10 | 1, // Cycle bit
     };
 
-    submit_command_trb(ctrl, trb, "USB ENABLE_SLOT")?;
+    let command_phys = submit_command_trb(ctrl, trb, "USB ENABLE_SLOT")?;
+    let completion = wait_for_command_completion(ctrl, command_phys, "USB ENABLE_SLOT")?;
 
-    let slot_id = {
+    let slot_id = if ctrl.mmio_base != 0 && completion.slot_id != 0 {
+        completion.slot_id
+    } else {
         let slots = DEVICE_SLOTS.lock();
         controller_slot_id(&slots, ctrl, port)?
     };
@@ -2185,7 +2849,6 @@ pub fn enable_slot(ctrl: &XhciController, port: u8) -> Result<u8, UsbError> {
         port,
         slot_id
     );
-    let _ = trb;
     Ok(slot_id)
 }
 
@@ -2198,6 +2861,12 @@ pub fn address_device(
 ) -> Result<(), UsbError> {
     // Create input context
     let mut input_ctx = Box::new(InputContext::default());
+    let device_context = Box::new(DeviceContext::new());
+    let device_context_phys = usb_dma_phys(
+        device_context.as_ref() as *const DeviceContext,
+        "USB output device context",
+    )?;
+    publish_slot_output_context(ctrl, slot_id, device_context_phys)?;
 
     // Set add context flags: slot context (bit 0) + EP0 context (bit 1)
     input_ctx.control.add_flags = 0x3;
@@ -2233,7 +2902,8 @@ pub fn address_device(
         dword3: (TrbType::AddressDevice as u32) << 10 | (slot_id as u32) << 24 | 1,
     };
 
-    submit_command_trb(ctrl, trb, "USB ADDRESS_DEVICE")?;
+    let command_phys = submit_command_trb(ctrl, trb, "USB ADDRESS_DEVICE")?;
+    wait_for_command_completion(ctrl, command_phys, "USB ADDRESS_DEVICE")?;
 
     // Store slot info
     let slot = DeviceSlot {
@@ -2245,6 +2915,8 @@ pub fn address_device(
         controller_device: ctrl.device,
         controller_function: ctrl.function,
         input_context: input_ctx,
+        device_context,
+        device_context_phys,
         control_ring,
         endpoint_rings: Vec::new(),
         enabled: true,
@@ -2257,7 +2929,6 @@ pub fn address_device(
         port,
         speed
     );
-    let _ = trb;
     Ok(())
 }
 
@@ -2266,13 +2937,16 @@ pub fn configure_device(
     ctrl: &XhciController,
     slot_id: u8,
     config_desc: &[u8],
+    bos_data: Option<&[u8]>,
 ) -> Result<(), UsbError> {
     let interfaces = parse_configuration_interfaces(config_desc);
     let input_ctx_phys = {
         let mut slots = DEVICE_SLOTS.lock();
         let slot = slots
             .iter_mut()
-            .find(|slot| slot.enabled && slot_matches_controller(slot, ctrl) && slot.slot_id == slot_id)
+            .find(|slot| {
+                slot.enabled && slot_matches_controller(slot, ctrl) && slot.slot_id == slot_id
+            })
             .ok_or(UsbError::NoDevice)?;
 
         slot.endpoint_rings.clear();
@@ -2302,7 +2976,7 @@ pub fn configure_device(
                     endpoint.address
                 ))?;
 
-                let endpoint_context = match endpoint.transfer_type {
+                let mut endpoint_context = match endpoint.transfer_type {
                     UsbTransferType::Bulk => EndpointContext::bulk_endpoint(
                         endpoint.max_packet_size,
                         tr_dequeue,
@@ -2312,12 +2986,11 @@ pub fn configure_device(
                         endpoint.max_packet_size,
                         tr_dequeue,
                         endpoint.direction == UsbDirection::In,
-                        endpoint.interval,
+                        xhci_interval_for_endpoint(endpoint, slot.speed),
                     ),
-                    UsbTransferType::Control => EndpointContext::control_endpoint(
-                        endpoint.max_packet_size,
-                        tr_dequeue,
-                    ),
+                    UsbTransferType::Control => {
+                        EndpointContext::control_endpoint(endpoint.max_packet_size, tr_dequeue)
+                    }
                     UsbTransferType::Isochronous => {
                         crate::serial_println!(
                             "[USB] Endpoint addr={:#x} ignored: isoch not wired",
@@ -2326,6 +2999,14 @@ pub fn configure_device(
                         continue;
                     }
                 };
+
+                // For SuperSpeed devices, set max burst from BOS/SS companion descriptor
+                if slot.speed == UsbSpeed::Super || slot.speed == UsbSpeed::SuperPlus {
+                    if let Some(bos) = bos_data {
+                        let max_burst = parse_ss_companion_for_endpoint(bos, endpoint.address);
+                        endpoint_context.set_max_burst(max_burst);
+                    }
+                }
 
                 slot.input_context.endpoints[(endpoint_id - 1) as usize] = endpoint_context;
                 slot.input_context.control.add_flags |= 1u32 << endpoint_id;
@@ -2357,7 +3038,8 @@ pub fn configure_device(
         dword2: 0,
         dword3: (TrbType::ConfigureEndpoint as u32) << 10 | (slot_id as u32) << 24 | 1,
     };
-    submit_command_trb(ctrl, trb, "USB CONFIGURE_ENDPOINT")?;
+    let command_phys = submit_command_trb(ctrl, trb, "USB CONFIGURE_ENDPOINT")?;
+    wait_for_command_completion(ctrl, command_phys, "USB CONFIGURE_ENDPOINT")?;
 
     let mut slots = DEVICE_SLOTS.lock();
     if let Some(slot) = slots
@@ -2367,6 +3049,229 @@ pub fn configure_device(
         slot.input_context.control.drop_flags = 0;
     }
     Ok(())
+}
+
+/// Disable a device slot through the xHCI command ring.
+pub fn disable_slot(ctrl: &XhciController, slot_id: u8) -> Result<(), UsbError> {
+    if slot_id == 0 {
+        return Err(UsbError::SlotUnavailable);
+    }
+    let trb = Trb {
+        dword0: 0,
+        dword1: 0,
+        dword2: 0,
+        dword3: (TrbType::DisableSlot as u32) << 10 | (slot_id as u32) << 24 | 1,
+    };
+    let command_phys = submit_command_trb(ctrl, trb, "USB DISABLE_SLOT")?;
+    wait_for_command_completion(ctrl, command_phys, "USB DISABLE_SLOT")?;
+    Ok(())
+}
+
+fn remove_port_slots_local(ctrl: &XhciController, port_id: u8) -> usize {
+    let mut slots = DEVICE_SLOTS.lock();
+    let before = slots.len();
+    slots.retain(|slot| {
+        !(slot.enabled && slot_matches_controller(slot, ctrl) && slot.port == port_id)
+    });
+    before.saturating_sub(slots.len())
+}
+
+fn purge_port_device_lists(ctrl: &XhciController, port_id: u8) -> usize {
+    let mut removed = 0usize;
+    {
+        let mut devices = USB_DEVICES.lock();
+        let before = devices.len();
+        devices.retain(|device| !device_matches_controller_port(device, ctrl, port_id));
+        removed += before.saturating_sub(devices.len());
+    }
+    {
+        let mut hid = HID_DEVICES.lock();
+        let before = hid.len();
+        hid.retain(|device| !device_matches_controller_port(&device.device, ctrl, port_id));
+        removed += before.saturating_sub(hid.len());
+    }
+    {
+        let mut msc = MASS_STORAGE_DEVICES.lock();
+        let before = msc.len();
+        msc.retain(|device| !device_matches_controller_port(&device.device, ctrl, port_id));
+        removed += before.saturating_sub(msc.len());
+    }
+    removed
+}
+
+fn collect_port_active_transfers(ctrl: &XhciController, port_id: u8) -> Vec<ActiveTransferRecord> {
+    let slots = DEVICE_SLOTS.lock();
+    let mut records = Vec::new();
+    for slot in slots
+        .iter()
+        .filter(|slot| slot.enabled && slot_matches_controller(slot, ctrl) && slot.port == port_id)
+    {
+        for endpoint_state in &slot.endpoint_rings {
+            records.extend(endpoint_state.active_transfers.iter().copied());
+        }
+    }
+    records
+}
+
+fn refresh_usb_class_device_caches() {
+    let hid_devices = find_hid_devices();
+    let ms_devices = find_mass_storage_devices();
+    *HID_DEVICES.lock() = hid_devices;
+    *MASS_STORAGE_DEVICES.lock() = ms_devices;
+}
+
+fn publish_reenumerated_device(ctrl: &XhciController, port_id: u8, device: UsbDevice) {
+    {
+        let mut devices = USB_DEVICES.lock();
+        devices.retain(|existing| !device_matches_controller_port(existing, ctrl, port_id));
+        devices.push(device);
+    }
+    refresh_usb_class_device_caches();
+}
+
+/// Tear down all software and xHCI slot state owned by a root-hub port.
+pub fn teardown_usb_port(ctrl: &XhciController, port_id: u8) -> Result<usize, UsbError> {
+    let active_transfers = collect_port_active_transfers(ctrl, port_id);
+    let slot_ids = {
+        let slots = DEVICE_SLOTS.lock();
+        slots
+            .iter()
+            .filter(|slot| {
+                slot.enabled && slot_matches_controller(slot, ctrl) && slot.port == port_id
+            })
+            .map(|slot| slot.slot_id)
+            .collect::<Vec<_>>()
+    };
+
+    let mut first_error = None;
+    if let Err(err) = record_transfer_cancellations(ctrl, &active_transfers) {
+        crate::serial_println!(
+            "[USB] Port {} transfer cancellation publication failed: err={:?}",
+            port_id,
+            err
+        );
+        first_error = Some(err);
+    }
+    for slot_id in slot_ids {
+        if let Err(err) = disable_slot(ctrl, slot_id) {
+            crate::serial_println!(
+                "[USB] DISABLE_SLOT failed during port {} teardown: slot={} err={:?}",
+                port_id,
+                slot_id,
+                err
+            );
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+        if let Err(err) = clear_slot_output_context(ctrl, slot_id) {
+            crate::serial_println!(
+                "[USB] DCBAA clear failed during port {} teardown: slot={} err={:?}",
+                port_id,
+                slot_id,
+                err
+            );
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+    }
+
+    let removed_slots = remove_port_slots_local(ctrl, port_id);
+    let removed_devices = purge_port_device_lists(ctrl, port_id);
+    crate::serial_println!(
+        "[USB] Port {} teardown: slots={} cached_devices={} cancelled_transfers={}",
+        port_id,
+        removed_slots,
+        removed_devices,
+        active_transfers.len()
+    );
+
+    if let Some(err) = first_error {
+        Err(err)
+    } else {
+        Ok(removed_slots + removed_devices)
+    }
+}
+
+/// Enumerate exactly one connected root-hub port.
+pub fn enumerate_connected_port(
+    ctrl: &XhciController,
+    port_index: u8,
+) -> Result<Option<UsbDevice>, UsbError> {
+    let port_id = port_index.saturating_add(1);
+    if !ctrl.port_has_device(port_index) {
+        return Ok(None);
+    }
+
+    crate::serial_println!("[USB] Device detected on port {}", port_id);
+    ctrl.reset_port(port_index)?;
+
+    let speed = ctrl.get_port_speed(port_index);
+    crate::serial_println!("[USB] Port {} speed: {:?}", port_id, speed);
+
+    let slot_id = enable_slot(ctrl, port_id)?;
+    address_device(ctrl, slot_id, port_id, speed)?;
+
+    let descriptor = get_device_descriptor(ctrl, slot_id)?;
+    let vid = descriptor.idVendor;
+    let pid = descriptor.idProduct;
+    let dev_class = descriptor.bDeviceClass;
+    let num_configs = descriptor.bNumConfigurations;
+    crate::serial_println!(
+        "[USB] Device: VID={:04x} PID={:04x} Class={:02x} Configs={}",
+        vid,
+        pid,
+        dev_class,
+        num_configs
+    );
+
+    // For USB 3.0+ devices, fetch BOS descriptor for SS endpoint companion data
+    let bos_data = if descriptor.bcdUSB >= 0x0300 {
+        get_bos_descriptor(ctrl, slot_id).unwrap_or(None)
+    } else {
+        None
+    };
+
+    let usb_address = NEXT_DEVICE_ADDRESS.fetch_add(1, Ordering::SeqCst) as u8;
+    bind_slot_usb_address(ctrl, slot_id, usb_address)?;
+
+    let config_desc = get_configuration_descriptor(ctrl, slot_id, 0)?;
+    configure_device(ctrl, slot_id, &config_desc, bos_data.as_deref())?;
+    set_configuration(ctrl, slot_id, 1)?;
+
+    let device = UsbDevice {
+        address: usb_address,
+        port: port_id,
+        speed,
+        controller_bus: ctrl.bus,
+        controller_device: ctrl.device,
+        controller_function: ctrl.function,
+        descriptor: Some(descriptor),
+        interfaces: parse_configuration_interfaces(&config_desc),
+        device_class: UsbClass::from_u8(descriptor.bDeviceClass),
+    };
+
+    crate::serial_println!(
+        "[USB] Device enumerated: addr={} interfaces={}",
+        device.address,
+        device.interfaces.len()
+    );
+    Ok(Some(device))
+}
+
+/// Crash-only recovery for one root-hub port: local teardown, slot release, fresh enum.
+pub fn reenumerate_usb_port(
+    ctrl: &XhciController,
+    port_index: u8,
+) -> Result<Option<UsbDevice>, UsbError> {
+    let port_id = port_index.saturating_add(1);
+    let _ = teardown_usb_port(ctrl, port_id);
+    let device = enumerate_connected_port(ctrl, port_index)?;
+    if let Some(device) = device.clone() {
+        publish_reenumerated_device(ctrl, port_id, device);
+    }
+    Ok(device)
 }
 
 /// Full device enumeration flow
@@ -2399,106 +3304,16 @@ pub fn enumerate_devices_full() -> Vec<UsbDevice> {
         );
 
         // Check each port
-        for port in 0..ctrl.max_ports {
-            // Check if device is connected
-            if !ctrl.port_has_device(port) {
-                continue;
-            }
-
-            crate::serial_println!("[USB] Device detected on port {}", port);
-
-            // Step 1: Reset port
-            if ctrl.reset_port(port).is_err() {
-                crate::serial_println!("[USB] Port {} reset failed", port);
-                continue;
-            }
-
-            // Step 2: Get device speed
-            let speed = ctrl.get_port_speed(port);
-            crate::serial_println!("[USB] Port {} speed: {:?}", port, speed);
-
-            // Step 3: Enable slot
-            let slot_id = match enable_slot(&ctrl, port) {
-                Ok(id) => id,
-                Err(e) => {
-                    crate::serial_println!("[USB] Enable slot failed: {:?}", e);
-                    continue;
-                }
-            };
-
-            // Step 4: Address device
-            if address_device(&ctrl, slot_id, port, speed).is_err() {
-                crate::serial_println!("[USB] Address device failed");
-                continue;
-            }
-
-            // Step 5: Get device descriptor
-            let descriptor = match get_device_descriptor(&ctrl, slot_id) {
-                Ok(desc) => desc,
-                Err(e) => {
-                    crate::serial_println!("[USB] Get device descriptor failed: {:?}", e);
-                    continue;
-                }
-            };
-
-            crate::serial_println!(
-                "[USB] Device: VID={:04x} PID={:04x} Class={:02x} Configs={}",
-                descriptor.idVendor,
-                descriptor.idProduct,
-                descriptor.bDeviceClass,
-                descriptor.bNumConfigurations
-            );
-
-            // Allocate USB address
-            let usb_address = NEXT_DEVICE_ADDRESS.fetch_add(1, Ordering::SeqCst) as u8;
-            if let Err(err) = bind_slot_usb_address(&ctrl, slot_id, usb_address) {
-                crate::serial_println!(
-                    "[USB] Failed to bind slot {} to usb address {}: {:?}",
-                    slot_id,
-                    usb_address,
+        for port_index in 0..ctrl.max_ports {
+            match enumerate_connected_port(&ctrl, port_index) {
+                Ok(Some(device)) => devices.push(device),
+                Ok(None) => {}
+                Err(err) => crate::serial_println!(
+                    "[USB] Port {} enumeration failed: {:?}",
+                    port_index.saturating_add(1),
                     err
-                );
+                ),
             }
-
-            // Step 6: Get configuration descriptor
-            let config_desc = match get_configuration_descriptor(&ctrl, slot_id, 0) {
-                Ok(desc) => desc,
-                Err(e) => {
-                    crate::serial_println!("[USB] Get config descriptor failed: {:?}", e);
-                    continue;
-                }
-            };
-
-            // Step 7: Configure device
-            if configure_device(&ctrl, slot_id, &config_desc).is_err() {
-                crate::serial_println!("[USB] Configure device failed");
-            }
-
-            // Step 8: Set configuration
-            if set_configuration(&ctrl, slot_id, 1).is_err() {
-                crate::serial_println!("[USB] Set configuration failed");
-            }
-
-            // Create device structure
-            let mut device = UsbDevice {
-                address: usb_address,
-                port,
-                speed,
-                controller_bus: ctrl.bus,
-                controller_device: ctrl.device,
-                controller_function: ctrl.function,
-                descriptor: Some(descriptor),
-                interfaces: parse_configuration_interfaces(&config_desc),
-                device_class: UsbClass::from_u8(descriptor.bDeviceClass),
-            };
-
-            crate::serial_println!(
-                "[USB] Device enumerated: addr={} interfaces={}",
-                device.address,
-                device.interfaces.len()
-            );
-
-            devices.push(device);
         }
     }
 
@@ -2606,14 +3421,92 @@ pub fn get_device_descriptor(
         bNumConfigurations: if buf[17] > 0 { buf[17] } else { 1 },
     };
 
+    let v = desc.idVendor;
+    let p = desc.idProduct;
+    let c = desc.bDeviceClass;
     crate::serial_println!(
         "[USB] GET_DEVICE_DESCRIPTOR addr={} vid={:#06x} pid={:#06x} class={}",
         address,
-        desc.idVendor,
-        desc.idProduct,
-        desc.bDeviceClass
+        v,
+        p,
+        c
     );
     Ok(desc)
+}
+
+/// Get BOS (Binary Object Store) descriptor (USB 3.0 spec §9.6.2).
+/// Returns the full BOS descriptor including all device capability descriptors.
+/// For USB 2.0 devices this returns None (no BOS).
+pub fn get_bos_descriptor(ctrl: &XhciController, address: u8) -> Result<Option<Vec<u8>>, UsbError> {
+    // BOS descriptor type = 0x0F
+    let setup = UsbSetupPacket {
+        request_type: 0x80,
+        request: GET_DESCRIPTOR,
+        value: (0x0Fu16) << 8, // BOS descriptor index 0
+        index: 0,
+        length: 5, // BOS header size
+    };
+
+    let mut header_buf = [0u8; 5];
+    let header_phys = usb_dma_phys(header_buf.as_mut_ptr(), "USB BOS descriptor header buffer")?;
+    let header_trbs = build_control_transfer_trbs(&setup, Some((header_phys, 5)));
+    let result = submit_ep0_transfer(ctrl, address, &header_trbs, "USB GET_BOS_DESCRIPTOR header");
+
+    // If device doesn't support BOS (USB 2.0), it will STALL — return None
+    if result.is_err() {
+        return Ok(None);
+    }
+
+    let total_length = u16::from_le_bytes([header_buf[2], header_buf[3]]) as usize;
+    let total_length = if total_length > 5 { total_length } else { 5 };
+    let total_length = total_length.min(256);
+
+    let setup2 = UsbSetupPacket {
+        request_type: 0x80,
+        request: GET_DESCRIPTOR,
+        value: (0x0Fu16) << 8,
+        index: 0,
+        length: total_length as u16,
+    };
+
+    let mut buf = vec![0u8; total_length];
+    let buf_phys = usb_dma_phys(buf.as_mut_ptr(), "USB BOS descriptor buffer")?;
+    let trbs = build_control_transfer_trbs(&setup2, Some((buf_phys, total_length as u32)));
+    let _slot_id = submit_ep0_transfer(ctrl, address, &trbs, "USB GET_BOS_DESCRIPTOR full")?;
+
+    Ok(Some(buf))
+}
+
+/// Parse SS Endpoint Companion descriptors from BOS data.
+/// Returns max burst size for the given endpoint address, or 0 if not found.
+pub fn parse_ss_companion_for_endpoint(bos_data: &[u8], ep_addr: u8) -> u8 {
+    // BOS header: bLength(1), bDescriptorType(1), wTotalLength(2), bNumDeviceCaps(1)
+    if bos_data.len() < 5 {
+        return 0;
+    }
+    let num_caps = bos_data[4] as usize;
+    let mut offset = 5;
+    for _ in 0..num_caps {
+        if offset + 2 > bos_data.len() {
+            break;
+        }
+        let cap_len = bos_data[offset] as usize;
+        let cap_type = bos_data[offset + 1];
+        // SS Device Capability = 0x03, contains SS Endpoint Companion descriptors
+        // The SS companion descriptors follow the endpoint descriptors in the config,
+        // but for USB 3.0 devices they may also be embedded in capability descriptors.
+        // For simplicity, we look for SS Endpoint Companion (type 0x30) within BOS.
+        if cap_type == 0x30 && cap_len >= 6 {
+            // Check if this companion is for our endpoint
+            // (In practice, SS companion is found in config descriptor, not BOS)
+            let max_burst = bos_data[offset + 2];
+            if offset + 3 < bos_data.len() && bos_data[offset + 3] == ep_addr {
+                return max_burst;
+            }
+        }
+        offset = offset.saturating_add(cap_len);
+    }
+    0
 }
 
 /// Get configuration descriptor
@@ -2659,10 +3552,7 @@ pub fn get_configuration_descriptor(
         index: 0,
         length: total_length as u16,
     };
-    let full_phys = usb_dma_phys(
-        full_buf.as_mut_ptr(),
-        "USB configuration descriptor buffer",
-    )?;
+    let full_phys = usb_dma_phys(full_buf.as_mut_ptr(), "USB configuration descriptor buffer")?;
     let full_trbs = build_control_transfer_trbs(&setup2, Some((full_phys, total_length as u32)));
     let _slot_id = submit_ep0_transfer(
         ctrl,
@@ -2754,6 +3644,33 @@ pub fn find_mass_storage_devices() -> Vec<MassStorageDevice> {
     ms_devices
 }
 
+fn process_pending_port_changes(ctrl: &XhciController) -> Result<usize, UsbError> {
+    let mut matching = Vec::new();
+    {
+        let mut pending = PENDING_PORT_CHANGES.lock();
+        let len = pending.len();
+        for _ in 0..len {
+            if let Some(change) = pending.pop_front() {
+                if change.bus == ctrl.bus
+                    && change.device == ctrl.device
+                    && change.function == ctrl.function
+                {
+                    matching.push(change.port_index);
+                } else {
+                    pending.push_back(change);
+                }
+            }
+        }
+    }
+
+    let mut processed = 0usize;
+    for port_index in matching {
+        handle_port_change(ctrl, port_index)?;
+        processed += 1;
+    }
+    Ok(processed)
+}
+
 /// Event ring polling and processing
 pub fn process_events(ctrl: &XhciController) {
     let mut should_drain = false;
@@ -2771,12 +3688,19 @@ pub fn process_events(ctrl: &XhciController) {
     }
 
     if !should_drain {
+        let _ = process_pending_port_changes(ctrl);
         return;
     }
 
     if let Ok(drained) = drain_controller_events(ctrl) {
         if drained > 0 {
             crate::serial_println!("[USB] Drained {} event TRBs", drained);
+        }
+    }
+
+    if let Ok(processed) = process_pending_port_changes(ctrl) {
+        if processed > 0 {
+            crate::serial_println!("[USB] Processed {} pending port change(s)", processed);
         }
     }
 
@@ -2795,32 +3719,33 @@ pub fn process_events(ctrl: &XhciController) {
 pub fn handle_port_change(ctrl: &XhciController, port: u8) -> Result<(), UsbError> {
     let port_regs = ctrl.get_port_regs(port).ok_or(UsbError::NoDevice)?;
     let portsc = unsafe { read_volatile(&port_regs.portsc) };
-
-    // Clear change bits by writing 1
-    let change_bits =
-        PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | PORTSC_OCC | PORTSC_PRC | PORTSC_PLC | PORTSC_CEC;
+    let snapshot = port_change_snapshot_from_portsc(ctrl, port, portsc);
 
     crate::serial_println!(
-        "[USB] Port {} change: CCS={} PED={} speed={}",
-        port,
-        (portsc & PORTSC_CCS) != 0,
-        (portsc & PORTSC_PED) != 0,
-        (portsc & PORTSC_SPEED_MASK) >> 10
+        "[USB] Port {} change: connected={} enabled={} speed={:?} changes={:#x} action={:?}",
+        snapshot.port_id,
+        snapshot.connected,
+        snapshot.enabled,
+        snapshot.speed,
+        snapshot.change_bits,
+        snapshot.action
     );
 
-    // Clear change bits
-    unsafe {
-        let port_regs_mut = ctrl.get_port_regs_mut(port).unwrap();
-        write_volatile(&mut port_regs_mut.portsc, portsc | change_bits);
+    if snapshot.change_bits != 0 {
+        unsafe {
+            let port_regs_mut = ctrl.get_port_regs_mut(port).unwrap();
+            write_volatile(&mut port_regs_mut.portsc, portsc | snapshot.change_bits);
+        }
     }
 
-    // If device connected and not enabled, trigger enumeration
-    if (portsc & PORTSC_CCS) != 0 && (portsc & PORTSC_PED) == 0 {
-        crate::serial_println!(
-            "[USB] Port {}: device connected, triggering enumeration",
-            port
-        );
-        // Re-enumerate would happen here
+    match snapshot.action {
+        UsbPortRecoveryAction::NoChange => {}
+        UsbPortRecoveryAction::Removed | UsbPortRecoveryAction::Fault => {
+            teardown_usb_port(ctrl, snapshot.port_id)?;
+        }
+        UsbPortRecoveryAction::Enumerate | UsbPortRecoveryAction::Reenumerate => {
+            let _ = reenumerate_usb_port(ctrl, snapshot.port_index)?;
+        }
     }
 
     Ok(())
@@ -2894,19 +3819,9 @@ pub fn init_devices() {
         *usb_devices = devices.clone();
     }
 
-    let hid_devices = find_hid_devices();
-    let hid_count = hid_devices.len();
-    {
-        let mut hid = HID_DEVICES.lock();
-        *hid = hid_devices;
-    }
-
-    let ms_devices = find_mass_storage_devices();
-    let ms_count = ms_devices.len();
-    {
-        let mut ms = MASS_STORAGE_DEVICES.lock();
-        *ms = ms_devices;
-    }
+    refresh_usb_class_device_caches();
+    let hid_count = HID_DEVICES.lock().len();
+    let ms_count = MASS_STORAGE_DEVICES.lock().len();
 
     crate::serial_println!(
         "[USB] Found {} devices, {} HID, {} mass storage",
@@ -2946,8 +3861,9 @@ pub fn poll_events() {
         // Check for port status changes
         if let Some(port) = ctrl.check_port_change() {
             crate::serial_println!("[USB] Port {} status change detected", port);
-            // Re-enumerate devices
-            // init_devices();
+            if let Err(err) = handle_port_change(&ctrl, port) {
+                crate::serial_println!("[USB] Port {} recovery failed: {:?}", port, err);
+            }
         }
 
         // Check for event ring completions
@@ -2974,23 +3890,21 @@ pub fn get_mass_storage_devices() -> Vec<MassStorageDevice> {
 mod tests {
     use super::{
         build_control_transfer_trbs, complete_interrupt_transfer, controller_slot_id,
-        endpoint_id_from_address, parse_configuration_interfaces, submit_ep0_transfer, DeviceSlot,
-        EndpointTransferState, InputContext, TransferRing, TrbType, UsbDirection, UsbEndpoint,
-        UsbDevice, UsbSetupPacket, UsbSpeed, UsbTransferType, XhciController,
+        endpoint_id_from_address, parse_configuration_interfaces, port_change_snapshot_from_portsc,
+        port_status_change_event_port_index, submit_ep0_transfer,
+        submit_normal_endpoint_transfer_on_slots, teardown_usb_port, transfer_completed_len,
+        xhci_interval_for_endpoint, DeviceContext, DeviceSlot, EndpointTransferState, HidDevice,
+        InputContext, TransferRing, TrbType, UsbClass, UsbDevice, UsbDirection, UsbEndpoint,
+        UsbError, UsbInterface, UsbPortRecoveryAction, UsbSetupPacket, UsbSpeed, UsbTransferType,
+        XhciController,
     };
     use alloc::boxed::Box;
+    use alloc::collections::VecDeque;
     use alloc::vec;
     use alloc::vec::Vec;
     use core::mem;
 
-    fn slot(
-        slot_id: u8,
-        bus: u8,
-        device: u8,
-        function: u8,
-        port: u8,
-        enabled: bool,
-    ) -> DeviceSlot {
+    fn slot(slot_id: u8, bus: u8, device: u8, function: u8, port: u8, enabled: bool) -> DeviceSlot {
         DeviceSlot {
             slot_id,
             usb_address: 0,
@@ -3000,6 +3914,8 @@ mod tests {
             controller_device: device,
             controller_function: function,
             input_context: Box::new(InputContext::default()),
+            device_context: Box::new(DeviceContext::new()),
+            device_context_phys: 0,
             control_ring: TransferRing::new(16),
             endpoint_rings: Vec::new(),
             enabled,
@@ -3091,6 +4007,8 @@ mod tests {
                 controller_device: ctrl.device,
                 controller_function: ctrl.function,
                 input_context: Box::new(InputContext::default()),
+                device_context: Box::new(DeviceContext::new()),
+                device_context_phys: 0,
                 control_ring,
                 endpoint_rings: Vec::new(),
                 enabled: true,
@@ -3144,6 +4062,321 @@ mod tests {
     }
 
     #[test]
+    fn xhci_interrupt_interval_encoding_follows_speed_rules() {
+        let mut endpoint = UsbEndpoint {
+            address: 0x81,
+            direction: UsbDirection::In,
+            transfer_type: UsbTransferType::Interrupt,
+            max_packet_size: 8,
+            interval: 1,
+        };
+        assert_eq!(xhci_interval_for_endpoint(&endpoint, UsbSpeed::Full), 3);
+        endpoint.interval = 4;
+        assert_eq!(xhci_interval_for_endpoint(&endpoint, UsbSpeed::Low), 5);
+        endpoint.interval = 10;
+        assert_eq!(xhci_interval_for_endpoint(&endpoint, UsbSpeed::Full), 6);
+        assert_eq!(xhci_interval_for_endpoint(&endpoint, UsbSpeed::High), 9);
+        endpoint.interval = 16;
+        assert_eq!(xhci_interval_for_endpoint(&endpoint, UsbSpeed::Super), 15);
+    }
+
+    #[test]
+    fn hid_device_discovers_interrupt_endpoint_addresses() {
+        let device = UsbDevice {
+            address: 4,
+            port: 2,
+            speed: UsbSpeed::Full,
+            controller_bus: 0,
+            controller_device: 20,
+            controller_function: 0,
+            descriptor: None,
+            interfaces: vec![UsbInterface {
+                interface_number: 1,
+                class: UsbClass::Hid,
+                subclass: 1,
+                protocol: 1,
+                endpoints: vec![
+                    UsbEndpoint {
+                        address: 0x81,
+                        direction: UsbDirection::In,
+                        transfer_type: UsbTransferType::Interrupt,
+                        max_packet_size: 8,
+                        interval: 10,
+                    },
+                    UsbEndpoint {
+                        address: 0x02,
+                        direction: UsbDirection::Out,
+                        transfer_type: UsbTransferType::Interrupt,
+                        max_packet_size: 1,
+                        interval: 10,
+                    },
+                ],
+            }],
+            device_class: UsbClass::Hid,
+        };
+
+        let hid = HidDevice::new(device, 1);
+        assert_eq!(hid.input_endpoint, Some(0x81));
+        assert_eq!(hid.output_endpoint, Some(0x02));
+    }
+
+    #[test]
+    fn hid_send_output_uses_control_transfer_and_fails_without_controller() {
+        let mut hid = HidDevice::new(
+            UsbDevice {
+                address: 4,
+                port: 2,
+                speed: UsbSpeed::Full,
+                controller_bus: 0,
+                controller_device: 20,
+                controller_function: 0,
+                descriptor: None,
+                interfaces: Vec::new(),
+                device_class: UsbClass::Hid,
+            },
+            1,
+        );
+
+        let mut empty = [];
+        let mut report = [0x02];
+        assert_eq!(hid.send_output(&mut empty), Err(UsbError::DataUnderrun));
+        assert_eq!(hid.send_output(&mut report), Err(UsbError::NoDevice));
+    }
+
+    #[test]
+    fn port_status_change_event_decodes_xhci_port_id_field() {
+        let trb = super::Trb {
+            dword0: 3u32 << 24,
+            dword1: 0,
+            dword2: 1 << 24,
+            dword3: (TrbType::PortStatusChange as u32) << 10 | 1,
+        };
+        assert_eq!(port_status_change_event_port_index(&trb), Some(2));
+
+        let invalid = super::Trb {
+            dword0: 0,
+            dword1: 0,
+            dword2: 1 << 24,
+            dword3: (TrbType::PortStatusChange as u32) << 10 | 1,
+        };
+        assert_eq!(port_status_change_event_port_index(&invalid), None);
+    }
+
+    #[test]
+    fn port_recovery_snapshot_classifies_remove_and_reenumerate() {
+        let ctrl = ctrl();
+        {
+            let mut slots = super::DEVICE_SLOTS.lock();
+            slots.clear();
+            slots.push(slot(4, ctrl.bus, ctrl.device, ctrl.function, 2, true));
+        }
+
+        let disconnected = super::PORTSC_CSC;
+        let snap = port_change_snapshot_from_portsc(&ctrl, 1, disconnected);
+        assert_eq!(snap.port_id, 2);
+        assert!(snap.had_slot);
+        assert_eq!(snap.action, UsbPortRecoveryAction::Removed);
+
+        let reconnected =
+            super::PORTSC_CCS | super::PORTSC_PED | super::PORTSC_CSC | super::PORTSC_SPEED_HIGH;
+        let snap = port_change_snapshot_from_portsc(&ctrl, 1, reconnected);
+        assert_eq!(snap.speed, UsbSpeed::High);
+        assert_eq!(snap.action, UsbPortRecoveryAction::Reenumerate);
+    }
+
+    #[test]
+    fn teardown_usb_port_purges_slot_and_class_caches() {
+        let ctrl = ctrl();
+        {
+            let mut runtimes = super::XHCI_RUNTIMES.lock();
+            runtimes.clear();
+            let mut rings = super::XhciRings::new(16, 16);
+            rings.command_phys = 0x8000;
+            let mut dcbaa = vec![0u64; 9].into_boxed_slice();
+            dcbaa[4] = 0xDEAD_BEEF;
+            runtimes.push(super::XhciControllerRuntime {
+                bus: ctrl.bus,
+                device: ctrl.device,
+                function: ctrl.function,
+                dcbaa,
+                dcbaa_phys: 0,
+                erst: vec![super::ErstEntry::default(); 1].into_boxed_slice(),
+                rings,
+                command_completions: VecDeque::new(),
+                transfer_completions: VecDeque::new(),
+                transfer_cancellations: VecDeque::new(),
+            });
+        }
+        {
+            let mut slots = super::DEVICE_SLOTS.lock();
+            slots.clear();
+            let mut removed_slot = slot(4, ctrl.bus, ctrl.device, ctrl.function, 2, true);
+            let endpoint = UsbEndpoint {
+                address: 0x02,
+                direction: UsbDirection::Out,
+                transfer_type: UsbTransferType::Bulk,
+                max_packet_size: 512,
+                interval: 0,
+            };
+            let mut endpoint_state = EndpointTransferState::new(
+                endpoint,
+                endpoint_id_from_address(&endpoint),
+                TransferRing::new(16),
+            );
+            endpoint_state
+                .active_transfers
+                .push_back(super::ActiveTransferRecord {
+                    trb_phys: 0x4400,
+                    slot_id: 4,
+                    endpoint_id: endpoint_id_from_address(&endpoint),
+                });
+            removed_slot.endpoint_rings.push(endpoint_state);
+            slots.push(removed_slot);
+            slots.push(slot(5, ctrl.bus, ctrl.device, ctrl.function, 3, true));
+        }
+
+        let hid_device = UsbDevice {
+            address: 7,
+            port: 2,
+            speed: UsbSpeed::Full,
+            controller_bus: ctrl.bus,
+            controller_device: ctrl.device,
+            controller_function: ctrl.function,
+            descriptor: None,
+            interfaces: vec![UsbInterface {
+                interface_number: 1,
+                class: UsbClass::Hid,
+                subclass: 1,
+                protocol: 1,
+                endpoints: Vec::new(),
+            }],
+            device_class: UsbClass::Hid,
+        };
+        let other_device = UsbDevice {
+            address: 8,
+            port: 3,
+            speed: UsbSpeed::Full,
+            controller_bus: ctrl.bus,
+            controller_device: ctrl.device,
+            controller_function: ctrl.function,
+            descriptor: None,
+            interfaces: Vec::new(),
+            device_class: UsbClass::Unknown,
+        };
+        *super::USB_DEVICES.lock() = vec![hid_device.clone(), other_device.clone()];
+        *super::HID_DEVICES.lock() = vec![HidDevice::new(hid_device, 1)];
+        super::MASS_STORAGE_DEVICES.lock().clear();
+
+        assert_eq!(teardown_usb_port(&ctrl, 2).unwrap(), 3);
+        let slots = super::DEVICE_SLOTS.lock();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].port, 3);
+        drop(slots);
+        let devices = super::USB_DEVICES.lock();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].address, other_device.address);
+        assert!(super::HID_DEVICES.lock().is_empty());
+        let runtimes = super::XHCI_RUNTIMES.lock();
+        assert_eq!(runtimes[0].dcbaa[4], 0);
+        assert_eq!(
+            runtimes[0].transfer_cancellations.front().copied(),
+            Some(super::ActiveTransferRecord {
+                trb_phys: 0x4400,
+                slot_id: 4,
+                endpoint_id: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn normal_bulk_transfer_submission_queues_ioc_trb_on_endpoint_ring() {
+        let ctrl = ctrl();
+        let endpoint = UsbEndpoint {
+            address: 0x02,
+            direction: UsbDirection::Out,
+            transfer_type: UsbTransferType::Bulk,
+            max_packet_size: 512,
+            interval: 0,
+        };
+        let mut ring = TransferRing::new(16);
+        ring.phys = 0x8000;
+        let mut slot = slot(5, ctrl.bus, ctrl.device, ctrl.function, 1, true);
+        slot.usb_address = 9;
+        slot.endpoint_rings.push(EndpointTransferState::new(
+            endpoint,
+            endpoint_id_from_address(&endpoint),
+            ring,
+        ));
+        let mut slots = vec![slot];
+
+        let (slot_id, endpoint_id, trb_phys) = submit_normal_endpoint_transfer_on_slots(
+            &mut slots,
+            &ctrl,
+            9,
+            endpoint,
+            0x4000,
+            31,
+            "unit-test",
+        )
+        .unwrap();
+
+        assert_eq!(slot_id, 5);
+        assert_eq!(endpoint_id, 4);
+        assert_eq!(trb_phys, 0x8000);
+        let trb = slots[0].endpoint_rings[0].ring.ring.segment.trbs[0];
+        assert_eq!(trb.trb_type(), TrbType::Normal as u8);
+        assert!(trb.interrupt_on_completion());
+        assert_eq!(trb.dword0, 0x4000);
+        assert_eq!(trb.dword2 & 0x00FF_FFFF, 31);
+        assert_eq!(slots[0].endpoint_rings[0].active_transfers.len(), 1);
+        assert_eq!(
+            slots[0].endpoint_rings[0].active_transfers[0].trb_phys,
+            0x8000
+        );
+    }
+
+    #[test]
+    fn transfer_wait_reports_port_teardown_cancellation() {
+        let mut ctrl = ctrl();
+        ctrl.mmio_base = 0x1000;
+        {
+            let mut runtimes = super::XHCI_RUNTIMES.lock();
+            runtimes.clear();
+            runtimes.push(super::XhciControllerRuntime {
+                bus: ctrl.bus,
+                device: ctrl.device,
+                function: ctrl.function,
+                dcbaa: vec![0u64; 9].into_boxed_slice(),
+                dcbaa_phys: 0,
+                erst: vec![super::ErstEntry::default(); 1].into_boxed_slice(),
+                rings: super::XhciRings::new(16, 16),
+                command_completions: VecDeque::new(),
+                transfer_completions: VecDeque::new(),
+                transfer_cancellations: VecDeque::from([super::ActiveTransferRecord {
+                    trb_phys: 0x4400,
+                    slot_id: 5,
+                    endpoint_id: 4,
+                }]),
+            });
+        }
+
+        assert_eq!(
+            super::wait_for_transfer_completion(&ctrl, 0x4400, 5, 4, "unit-test"),
+            Err(super::UsbError::TransferCancelled)
+        );
+    }
+
+    #[test]
+    fn transfer_residual_is_subtracted_from_requested_length() {
+        assert_eq!(transfer_completed_len(512, 0), Ok(512));
+        assert_eq!(transfer_completed_len(512, 12), Ok(500));
+        assert_eq!(
+            transfer_completed_len(512, 513),
+            Err(super::UsbError::DataOverrun)
+        );
+    }
+
+    #[test]
     fn complete_interrupt_transfer_moves_buffer_to_completed_queue() {
         let ctrl = ctrl();
         let endpoint = UsbEndpoint {
@@ -3153,8 +4386,11 @@ mod tests {
             max_packet_size: 8,
             interval: 10,
         };
-        let mut endpoint_state =
-            EndpointTransferState::new(endpoint, endpoint_id_from_address(&endpoint), TransferRing::new(16));
+        let mut endpoint_state = EndpointTransferState::new(
+            endpoint,
+            endpoint_id_from_address(&endpoint),
+            TransferRing::new(16),
+        );
         endpoint_state.pending_in = Some(super::PendingInterruptInTransfer {
             trb_phys: 0x2000,
             expected_len: 8,
@@ -3169,18 +4405,14 @@ mod tests {
             controller_device: ctrl.device,
             controller_function: ctrl.function,
             input_context: Box::new(InputContext::default()),
+            device_context: Box::new(DeviceContext::new()),
+            device_context_phys: 0,
             control_ring: TransferRing::new(16),
             endpoint_rings: vec![endpoint_state],
             enabled: true,
         }];
         assert!(complete_interrupt_transfer(
-            &mut slots,
-            &ctrl,
-            5,
-            3,
-            0x2000,
-            4,
-            1
+            &mut slots, &ctrl, 5, 3, 0x2000, 4, 1
         ));
         let completed = slots[0].endpoint_rings[0].completed_in.pop_front().unwrap();
         assert_eq!(completed.data, vec![1, 2, 3, 4]);
@@ -3197,8 +4429,11 @@ mod tests {
             max_packet_size: 8,
             interval: 10,
         };
-        let mut endpoint_state =
-            EndpointTransferState::new(endpoint, endpoint_id_from_address(&endpoint), TransferRing::new(16));
+        let mut endpoint_state = EndpointTransferState::new(
+            endpoint,
+            endpoint_id_from_address(&endpoint),
+            TransferRing::new(16),
+        );
         endpoint_state
             .completed_in
             .push_back(super::CompletedInterruptInTransfer {
@@ -3216,6 +4451,8 @@ mod tests {
                 controller_device: ctrl.device,
                 controller_function: ctrl.function,
                 input_context: Box::new(InputContext::default()),
+                device_context: Box::new(DeviceContext::new()),
+                device_context_phys: 0,
                 control_ring: TransferRing::new(16),
                 endpoint_rings: vec![endpoint_state],
                 enabled: true,
@@ -3236,6 +4473,100 @@ mod tests {
         assert_eq!(report, vec![0, 0, 4, 0, 0, 0, 0, 0]);
         let slots = super::DEVICE_SLOTS.lock();
         assert!(slots[0].endpoint_rings[0].pending_in.is_none());
+    }
+
+    #[test]
+    fn event_ring_consumes_hardware_written_command_completion() {
+        let ctrl = ctrl();
+        {
+            let mut runtimes = super::XHCI_RUNTIMES.lock();
+            runtimes.clear();
+            let mut rings = super::XhciRings::new(16, 16);
+            rings.event_phys = 0x4000;
+            rings.event.segment.trbs[0] = super::Trb {
+                dword0: 0x2000,
+                dword1: 0,
+                dword2: 1 << 24,
+                dword3: (super::TrbType::CommandCompletion as u32) << 10 | (7 << 24) | 1,
+            };
+            runtimes.push(super::XhciControllerRuntime {
+                bus: ctrl.bus,
+                device: ctrl.device,
+                function: ctrl.function,
+                dcbaa: vec![0u64; 9].into_boxed_slice(),
+                dcbaa_phys: 0,
+                erst: vec![super::ErstEntry::default(); 1].into_boxed_slice(),
+                rings,
+                command_completions: VecDeque::new(),
+                transfer_completions: VecDeque::new(),
+                transfer_cancellations: VecDeque::new(),
+            });
+        }
+
+        assert_eq!(super::drain_controller_events(&ctrl).unwrap(), 1);
+        let mut runtimes = super::XHCI_RUNTIMES.lock();
+        let runtime = runtimes.first_mut().unwrap();
+        let completion = super::take_command_completion(runtime, 0x2000).unwrap();
+        assert_eq!(completion.slot_id, 7);
+        assert_eq!(completion.completion_code, 1);
+    }
+
+    #[test]
+    fn transfer_completion_wait_rejects_wrong_endpoint_identity() {
+        let mut ctrl = ctrl();
+        ctrl.mmio_base = 0x1000;
+        {
+            let mut runtimes = super::XHCI_RUNTIMES.lock();
+            runtimes.clear();
+            runtimes.push(super::XhciControllerRuntime {
+                bus: ctrl.bus,
+                device: ctrl.device,
+                function: ctrl.function,
+                dcbaa: vec![0u64; 9].into_boxed_slice(),
+                dcbaa_phys: 0,
+                erst: vec![super::ErstEntry::default(); 1].into_boxed_slice(),
+                rings: super::XhciRings::new(16, 16),
+                command_completions: VecDeque::new(),
+                transfer_completions: VecDeque::from([super::TransferCompletionRecord {
+                    trb_phys: 0x3000,
+                    slot_id: 5,
+                    endpoint_id: 3,
+                    residual_len: 0,
+                    completion_code: 1,
+                }]),
+                transfer_cancellations: VecDeque::new(),
+            });
+        }
+
+        assert_eq!(
+            super::wait_for_transfer_completion(&ctrl, 0x3000, 5, 1, "unit-test"),
+            Err(super::UsbError::TransferError)
+        );
+    }
+
+    #[test]
+    fn publish_slot_output_context_updates_dcbaa_slot_entry() {
+        let ctrl = ctrl();
+        {
+            let mut runtimes = super::XHCI_RUNTIMES.lock();
+            runtimes.clear();
+            runtimes.push(super::XhciControllerRuntime {
+                bus: ctrl.bus,
+                device: ctrl.device,
+                function: ctrl.function,
+                dcbaa: vec![0u64; 9].into_boxed_slice(),
+                dcbaa_phys: 0,
+                erst: vec![super::ErstEntry::default(); 1].into_boxed_slice(),
+                rings: super::XhciRings::new(16, 16),
+                command_completions: VecDeque::new(),
+                transfer_completions: VecDeque::new(),
+                transfer_cancellations: VecDeque::new(),
+            });
+        }
+
+        super::publish_slot_output_context(&ctrl, 5, 0x9000).unwrap();
+        let runtimes = super::XHCI_RUNTIMES.lock();
+        assert_eq!(runtimes[0].dcbaa[5], 0x9000);
     }
 
     #[test]

@@ -24,6 +24,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+/// POSIX MAXSYMLINKS limiti — symlink zincirinde maksimum takip sayısı
+const MAXSYMLINKS: usize = 40;
+
 // ============================================================================
 // VFS Filesystem Type Registry
 // ============================================================================
@@ -197,16 +200,37 @@ impl VfsUnified {
             flags,
             readonly: false,
         };
-
-        crate::serial_println!(
-            "[VFS] mount: {} -> {} (type={})",
-            source,
-            mount_point,
-            fs_type.as_str()
-        );
-
         self.mount_table.insert(mount_point, entry);
         self.fs_count += 1;
+    }
+
+    /// Mount flag'lerini uygula: nosuid ise SUID/SGID bitlerini temizle
+    fn apply_mount_flags(&self, path: &str, info: VfsFileInfo) -> VfsFileInfo {
+        let normalized = normalize_vfs_path(path);
+        if let Some(entry) = self.resolve_fs(&normalized) {
+            let mut info = info;
+            if entry.flags.nosuid {
+                // SUID (0o4000) ve SGID (0o2000) bitlerini temizle
+                info.mode &= !(0o4000 | 0o2000);
+            }
+            info
+        } else {
+            info
+        }
+    }
+
+    /// noexec kontrolü: mount noexec ise ve dosya executable ise reddet
+    fn check_noexec(&self, path: &str, mode: u32) -> Result<(), &'static str> {
+        let normalized = normalize_vfs_path(path);
+        if let Some(entry) = self.resolve_fs(&normalized) {
+            if entry.flags.noexec {
+                // Execute bitleri kontrol et (owner/group/other execute)
+                if mode & 0o111 != 0 {
+                    return Err("operation not permitted: mount has noexec flag");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Umount
@@ -244,20 +268,20 @@ impl VfsUnified {
         let entry = self
             .resolve_fs(normalized_path.as_str())
             .ok_or_else(no_filesystem_for_path)?;
+
         let relative_path =
             relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
 
-        match entry.fs_type {
+        let info = match entry.fs_type {
             VfsFsType::ProcFs => {
                 if is_mount_root(relative_path) {
                     return Ok(directory_info(VfsFsType::ProcFs));
                 }
-                // procfs read dispatch
                 let content = generate_proc_content(relative_path);
                 if content.is_empty() {
                     return Err("procfs: entry not found");
                 }
-                Ok(VfsFileInfo {
+                VfsFileInfo {
                     inode: 0,
                     size: content.len() as u64,
                     mode: 0o100444,
@@ -267,16 +291,16 @@ impl VfsUnified {
                     fs_type: VfsFsType::ProcFs,
                     block_size: 4096,
                     blocks: 0,
-                })
+                }
             }
             VfsFsType::DevFs => {
                 if is_mount_root(relative_path) {
-                    Ok(directory_info(VfsFsType::DevFs))
+                    return Ok(directory_info(VfsFsType::DevFs));
                 } else {
-                    Err(unsupported_vfs_capability(
+                    return Err(unsupported_vfs_capability(
                         VfsFsType::DevFs,
                         VfsUnsupportedCapability::Open,
-                    ))
+                    ));
                 }
             }
             VfsFsType::SysFs => {
@@ -284,7 +308,7 @@ impl VfsUnified {
                     return Ok(directory_info(VfsFsType::SysFs));
                 }
                 let content = read_sysfs_bytes(relative_path)?;
-                Ok(VfsFileInfo {
+                VfsFileInfo {
                     inode: 0,
                     size: content.len() as u64,
                     mode: 0o100444,
@@ -294,49 +318,57 @@ impl VfsUnified {
                     fs_type: VfsFsType::SysFs,
                     block_size: 4096,
                     blocks: ((content.len() as u64) + 4095) / 4096,
-                })
+                }
             }
             VfsFsType::TmpFs => {
                 if is_mount_root(relative_path) {
-                    Ok(directory_info(VfsFsType::TmpFs))
+                    return Ok(directory_info(VfsFsType::TmpFs));
                 } else {
-                    Err(unsupported_vfs_capability(
+                    return Err(unsupported_vfs_capability(
                         VfsFsType::TmpFs,
                         VfsUnsupportedCapability::Open,
-                    ))
+                    ));
                 }
             }
             VfsFsType::Ext4 => {
                 let resolved = resolve_ext4_node(&entry.source, relative_path)?;
-                Ok(vfs_info_from_ext4_inode(&resolved))
+                vfs_info_from_ext4_inode(&resolved)
             }
             VfsFsType::F2fs => {
-                // F2FS dispatch - primary filesystem
                 let f2fs_entry = crate::fs::f2fs::open_entry(relative_path)
                     .map_err(|_| "f2fs: file not found")?;
-                Ok(vfs_info_from_f2fs_entry(&f2fs_entry))
+                vfs_info_from_f2fs_entry(&f2fs_entry)
             }
             VfsFsType::Fat32 => {
                 let resolved = resolve_fat32_node(&entry.source, relative_path)?;
-                Ok(vfs_info_from_fat32_file(&resolved))
+                vfs_info_from_fat32_file(&resolved)
             }
             VfsFsType::ExFat => {
                 let resolved = resolve_exfat_node(&entry.source, relative_path)?;
-                Ok(vfs_info_from_exfat_file(&resolved))
+                vfs_info_from_exfat_file(&resolved)
             }
             VfsFsType::Ntfs => {
                 let resolved = resolve_ntfs_node(&entry.source, relative_path)?;
-                Ok(vfs_info_from_ntfs_entry(&resolved))
+                vfs_info_from_ntfs_entry(&resolved)
             }
-            VfsFsType::Xfs => Err(unsupported_vfs_capability(
+            VfsFsType::Xfs => return Err(unsupported_vfs_capability(
                 VfsFsType::Xfs,
                 VfsUnsupportedCapability::Open,
             )),
             VfsFsType::Btrfs => {
                 let resolved = resolve_btrfs_node(&entry.source, relative_path)?;
-                Ok(vfs_info_from_btrfs_inode(&resolved))
+                vfs_info_from_btrfs_inode(&resolved)
             }
+        };
+
+        // Mount flag enforcement after open
+        if entry.flags.nodev && (info.mode & 0x6000) != 0 {
+            return Err("operation not permitted: mount has nodev flag");
         }
+        if entry.flags.noexec && (info.mode & 0o111) != 0 {
+            return Err("operation not permitted: mount has noexec flag");
+        }
+        Ok(self.apply_mount_flags(path, info))
     }
 
     /// Mount tablosunu listeler (mount komutu çıktısı)
@@ -344,12 +376,33 @@ impl VfsUnified {
         self.mount_table
             .values()
             .map(|e| {
+                let mut opts = Vec::new();
+                if e.readonly {
+                    opts.push("ro");
+                } else {
+                    opts.push("rw");
+                }
+                if e.flags.noexec {
+                    opts.push("noexec");
+                }
+                if e.flags.nosuid {
+                    opts.push("nosuid");
+                }
+                if e.flags.nodev {
+                    opts.push("nodev");
+                }
+                if e.flags.noatime {
+                    opts.push("noatime");
+                }
+                if e.flags.relatime {
+                    opts.push("relatime");
+                }
                 format!(
                     "{} on {} type {} ({})",
                     e.source,
                     e.mount_point,
                     e.fs_type.as_str(),
-                    if e.readonly { "ro" } else { "rw" }
+                    opts.join(",")
                 )
             })
             .collect()
@@ -775,7 +828,63 @@ struct ResolvedExt4Node {
     inode: crate::fs::ext4::Ext4Inode,
 }
 
+/// Symlink hedefini çözer: absolute ise doğrudan kullanır,
+/// relative ise parent directory'ye göre birleştirir.
+/// Kalan path component'lerini ekler.
+fn resolve_symlink_target(
+    target: &str,
+    original_path: &str,
+    consumed_components: usize,
+    source: &str,
+    _fs_type: VfsFsType,
+    depth: usize,
+) -> Result<String, &'static str> {
+    if depth >= MAXSYMLINKS {
+        return Err("too many symbolic links encountered (ELOOP)");
+    }
+
+    let remaining_count = path_components(original_path).len().saturating_sub(consumed_components);
+    let remaining: Vec<String> = path_components(original_path)
+        .into_iter()
+        .skip(consumed_components)
+        .take(remaining_count)
+        .collect();
+
+    let mut resolved = if target.starts_with('/') {
+        // Absolute symlink: root'tan başla
+        target.to_string()
+    } else {
+        // Relative symlink: parent directory'ye göre çöz
+        let parent = parent_path(original_path);
+        if parent == "/" {
+            format!("/{}", target)
+        } else {
+            format!("{}/{}", parent, target)
+        }
+    };
+
+    // Kalan component'leri ekle
+    for comp in remaining {
+        resolved.push('/');
+        resolved.push_str(&comp);
+    }
+
+    Ok(normalize_vfs_path(&resolved))
+}
+
 fn resolve_ext4_node(source: &str, relative_path: &str) -> Result<ResolvedExt4Node, &'static str> {
+    resolve_ext4_node_with_depth(source, relative_path, 0)
+}
+
+fn resolve_ext4_node_with_depth(
+    source: &str,
+    relative_path: &str,
+    depth: usize,
+) -> Result<ResolvedExt4Node, &'static str> {
+    if depth >= MAXSYMLINKS {
+        return Err("ext4: too many symbolic links encountered (ELOOP)");
+    }
+
     let mounted =
         crate::fs::ext4::get_mounted_ext4(source).ok_or("ext4: backend not mounted for source")?;
     let mut inode_num = mounted.fs.root_inode;
@@ -784,23 +893,64 @@ fn resolve_ext4_node(source: &str, relative_path: &str) -> Result<ResolvedExt4No
         .root_inode_from_storage(&mounted.storage)
         .map_err(|_| "ext4: failed to load root inode")?;
 
-    for component in path_components(relative_path) {
+    let components: Vec<String> = path_components(relative_path);
+    let mut i = 0;
+
+    while i < components.len() {
+        let component = &components[i];
+
         if !inode.is_directory() {
+            // Symlink ise takip et
+            if inode.is_symlink() {
+                let target = mounted
+                    .fs
+                    .read_symlink_from_storage(&inode, &mounted.storage)
+                    .map_err(|_| "ext4: failed to read symlink target")?;
+                // Symlink hedefini çöz
+                let resolved = resolve_symlink_target(
+                    &target,
+                    relative_path,
+                    i,
+                    source,
+                    VfsFsType::Ext4,
+                    depth + 1,
+                )?;
+                return resolve_ext4_node_with_depth(source, &resolved, depth + 1);
+            }
             return Err("ext4: parent path is not a directory");
         }
+
         let entries = mounted
             .fs
             .read_dir_from_storage(&inode, &mounted.storage)
             .map_err(|_| "ext4: failed to read directory")?;
         let child = entries
             .into_iter()
-            .find(|entry| entry.name == component)
+            .find(|entry| entry.name == *component)
             .ok_or("ext4: file not found")?;
         inode_num = child.inode;
         inode = mounted
             .fs
             .read_inode_from_storage(child.inode, &mounted.storage)
             .map_err(|_| "ext4: failed to read inode")?;
+        i += 1;
+    }
+
+    // Son component de symlink ise takip et
+    if inode.is_symlink() {
+        let target = mounted
+            .fs
+            .read_symlink_from_storage(&inode, &mounted.storage)
+            .map_err(|_| "ext4: failed to read symlink target")?;
+        let resolved = resolve_symlink_target(
+            &target,
+            relative_path,
+            components.len(),
+            source,
+            VfsFsType::Ext4,
+            depth + 1,
+        )?;
+        return resolve_ext4_node_with_depth(source, &resolved, depth + 1);
     }
 
     Ok(ResolvedExt4Node {
@@ -932,16 +1082,17 @@ fn read_fat32_dir(
     let dir_data = read_fat32_chain(mounted, cluster)?;
     let mut files = Vec::new();
 
-    for chunk in dir_data.chunks_exact(32) {
-        let entry: crate::fs::fat::Fat32DirEntry =
-            unsafe { core::ptr::read_unaligned(chunk.as_ptr() as *const _) };
-        if entry.is_empty() {
-            break;
-        }
-        if entry.is_deleted() || entry.is_long_name() || entry.is_volume_label() {
+    let entries = crate::fs::fat::parse_dir_entries_with_lfn(&dir_data);
+    for (entry, long_name) in entries {
+        if entry.is_empty() || entry.is_deleted() || entry.is_volume_label() {
             continue;
         }
-        files.push(crate::fs::fat::Fat32File::from_entry(&entry));
+        let mut file = crate::fs::fat::Fat32File::from_entry_with_lfn(&entry, long_name);
+        // LFN varsa onu name olarak kullan
+        if let Some(ref lfn) = file.long_name {
+            file.name.clone_from(lfn);
+        }
+        files.push(file);
     }
 
     Ok(files)
@@ -960,6 +1111,7 @@ fn resolve_fat32_node(
             mounted,
             file: crate::fs::fat::Fat32File {
                 name: String::from("/"),
+                long_name: None,
                 cluster: 0,
                 size: 0,
                 is_dir: true,
@@ -1572,6 +1724,20 @@ fn path_components(path: &str) -> Vec<String> {
         .filter(|component| !component.is_empty() && *component != ".")
         .map(|component| component.to_string())
         .collect()
+}
+
+fn parent_path(path: &str) -> String {
+    let normalized = normalize_vfs_path(path);
+    if normalized == "/" {
+        return "/".to_string();
+    }
+    let trimmed = normalized.trim_end_matches('/');
+    let last_slash = trimmed.rfind('/').unwrap_or(0);
+    if last_slash == 0 {
+        "/".to_string()
+    } else {
+        trimmed[..last_slash].to_string()
+    }
 }
 
 // ============================================================================

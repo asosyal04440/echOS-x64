@@ -47,7 +47,7 @@
 //! ```
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use x86_64::registers::model_specific::Msr;
 
 use crate::memory::active_physical_offset;
@@ -63,6 +63,9 @@ const APIC_REG_TPR: u32 = 0x080;
 const APIC_REG_EOI: u32 = 0x0B0;
 /// Spurious Interrupt Vector kaydı — bit 8: APIC etkinleştirme; bit 7..0: yalın-kesme vektörü
 const APIC_REG_SPURIOUS: u32 = 0x0F0;
+const APIC_ISR_BASE: u32 = 0x100;
+const APIC_ISR_REGS: u32 = 8;
+const APIC_ISR_DRAIN_LIMIT: usize = 256;
 
 /// LVT Timer kaydı — hangi vektörün tetikleneceği ve mod belirlenir
 const APIC_LVT_TIMER: u32 = 0x320;
@@ -94,6 +97,8 @@ const LVT_TIMER_TSC_DEADLINE: u32 = 0x40000;
 static TSC_DEADLINE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Kalibre edilmiş TSC frekansı (Hz)
 static TSC_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
+/// Periodic LAPIC timer reload count measured for a 10ms scheduler tick.
+static LAST_PERIODIC_INIT_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// LAPIC çalışma modu.
 ///
@@ -221,6 +226,85 @@ fn common_init() {
     init_timer();
 }
 
+/// Re-arm LAPIC delivery after firmware S3 wake.
+///
+/// Firmware may return with the local APIC timer masked, deadline MSR cleared,
+/// or the APIC software-enable bit reset. Replaying the common LAPIC setup is
+/// idempotent for the BSP and restores scheduler tick delivery without sending
+/// AP startup IPIs from the firmware-continuation path.
+pub fn rearm_after_resume() -> Result<(), ApicInitError> {
+    match mode() {
+        ApicMode::X2Apic => {
+            let apic_base = unsafe { Msr::new(IA32_APIC_BASE_MSR).read() };
+            let phys_base = apic_base & 0xFFFF_F000;
+            if phys_base == 0 {
+                return Err(ApicInitError::InvalidBase);
+            }
+            unsafe {
+                Msr::new(IA32_APIC_BASE_MSR).write(apic_base | (1 << 11) | (1 << 10));
+            }
+        }
+        ApicMode::XApic => {
+            let apic_base = unsafe { Msr::new(IA32_APIC_BASE_MSR).read() };
+            let phys_base = apic_base & 0xFFFF_F000;
+            if phys_base == 0 {
+                return Err(ApicInitError::InvalidBase);
+            }
+            if XAPIC_MMIO_BASE.load(Ordering::SeqCst) == 0 {
+                let mapped = crate::memory::map_mmio(phys_base, 0x1000);
+                let virt_base = if mapped.is_null() {
+                    active_physical_offset() + phys_base
+                } else {
+                    mapped as u64
+                };
+                XAPIC_MMIO_BASE.store(virt_base, Ordering::SeqCst);
+            }
+            unsafe {
+                Msr::new(IA32_APIC_BASE_MSR).write((apic_base | (1 << 11)) & !(1 << 10));
+            }
+        }
+        ApicMode::Disabled => return Err(ApicInitError::NoApic),
+    }
+    write_reg(APIC_REG_SPURIOUS, 0xFF | (1 << 8));
+    write_reg(APIC_REG_TPR, 0);
+    drain_isr_after_resume();
+    write_reg(APIC_LVT_TIMER, 32 | (1 << 16));
+    write_reg(APIC_TIMER_INIT, 0);
+    write_reg(APIC_TIMER_DIV, 0xB);
+    if TSC_DEADLINE_ACTIVE.swap(false, Ordering::SeqCst) {
+        unsafe {
+            Msr::new(IA32_TSC_DEADLINE_MSR).write(0);
+        }
+    }
+    let init_count = match LAST_PERIODIC_INIT_COUNT.load(Ordering::SeqCst) {
+        0..=9_999 => 100_000,
+        count => count,
+    };
+    write_reg(APIC_LVT_TIMER, 32 | 0x20000);
+    write_reg(APIC_TIMER_INIT, init_count);
+    crate::serial_println!(
+        "[LAPIC] Resume periodic timer re-armed (count={})",
+        init_count
+    );
+    Ok(())
+}
+
+fn drain_isr_after_resume() {
+    for _ in 0..APIC_ISR_DRAIN_LIMIT {
+        let mut in_service = false;
+        for idx in 0..APIC_ISR_REGS {
+            if read_reg(APIC_ISR_BASE + idx * 0x10) != 0 {
+                in_service = true;
+                break;
+            }
+        }
+        if !in_service {
+            break;
+        }
+        write_reg(APIC_REG_EOI, 0);
+    }
+}
+
 /// LAPIC timer'ını başlatır.
 /// TSC-Deadline destekliyorsa onu tercih eder; yoksa periyodik moda geçer.
 ///
@@ -285,8 +369,14 @@ fn init_timer() {
             10_000_000u32 // Kalibrasyon başarısız, varsayılan
         };
 
-        write_reg(APIC_TIMER_INIT, init_count);
+        let _ = LAST_PERIODIC_INIT_COUNT.compare_exchange(
+            0,
+            init_count,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
         write_reg(APIC_LVT_TIMER, 32 | 0x20000); // Periodic, vector 32
+        write_reg(APIC_TIMER_INIT, init_count);
         crate::serial_println!(
             "[LAPIC] Periodic timer active (calibrated: {} ticks/10ms)",
             init_count
@@ -339,7 +429,7 @@ fn calibrate_tsc() {
         let mut gate = x86_64::instructions::port::Port::<u8>::new(0x61);
         let val = gate.read();
         gate.write((val & 0xFC) | 0x01); // Höparlör kapısını etkinleştir (speaker gate)
-                                         // Basit spin-wait döngüsü
+                                         // PIT channel-2 one-shot calibration window.
         for _ in 0..10_000_000 {
             core::hint::spin_loop();
         }

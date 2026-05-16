@@ -6537,11 +6537,11 @@ fn top_bar_status_summary(power_state: SessionPowerState) -> TopBarStatusSummary
         } else {
             format!("VOL {}", mixer.master_volume.min(99))
         }
-    } else if let Some((volume, muted)) = primary_controller_status() {
-        if muted {
+    } else if let Some(status) = primary_controller_status() {
+        if status.muted {
             String::from("MUTED")
         } else {
-            format!("VOL {}", volume.min(99))
+            format!("VOL {}", status.volume.min(99))
         }
     } else {
         String::from("AUD --")

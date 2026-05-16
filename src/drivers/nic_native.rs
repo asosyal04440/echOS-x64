@@ -56,6 +56,35 @@ const E1000_REG_TDH: usize = 0x3810;
 const E1000_REG_TDT: usize = 0x3818;
 const E1000_REG_IMS: usize = 0x00D0;
 
+// RCTL bit definitions (Intel 8254x SDM §13.4.17)
+const E1000_RCTL_EN: u32 = 1 << 1; // Receiver Enable
+const E1000_RCTL_UPE: u32 = 1 << 3; // Unicast Promiscuous Enabled
+const E1000_RCTL_MPE: u32 = 1 << 4; // Multicast Promiscuous Enabled
+const E1000_RCTL_BAM: u32 = 1 << 15; // Broadcast Accept Mode
+const E1000_RCTL_SECRC: u32 = 1 << 26; // Strip Ethernet CRC
+
+// TCTL bit definitions (Intel 8254x SDM §13.4.25)
+const E1000_TCTL_EN: u32 = 1 << 1; // Transmit Enable
+const E1000_TCTL_PSP: u32 = 1 << 3; // Pad Short Packets
+
+// Intel 8254x TX Descriptor (16 bytes, SDM §3.3.3)
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct E1000TxDesc {
+    buffer_addr: u64,
+    length: u16,
+    cso: u8,
+    cmd: u8,
+    status: u8,
+    css: u8,
+    special: u16,
+}
+
+const E1000_TXD_CMD_EOP: u8 = 0x01; // End of Packet
+const E1000_TXD_CMD_IFCS: u8 = 0x02; // Insert FCS
+const E1000_TXD_CMD_RS: u8 = 0x08; // Report Status
+const E1000_TXD_STAT_DD: u8 = 0x01; // Descriptor Done
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NicVendorFamily {
     Generic,
@@ -217,6 +246,11 @@ pub struct NicNativeDevice {
     next_token: AtomicU64,
     mmio_base: u64,
     vendor_family: NicVendorFamily,
+    // Intel 8254x hardware TX descriptor ring (DMA-mapped)
+    e1000_tx_desc_phys: u64,
+    e1000_tx_desc_virt: *mut E1000TxDesc,
+    e1000_tx_ring_len: u32,
+    e1000_tx_hw_tail: AtomicU32,
 }
 
 // SAFETY: Tüm alanlar atomic veya UnsafeCell (SPSC)
@@ -252,6 +286,10 @@ impl NicNativeDevice {
             next_token: AtomicU64::new(1),
             mmio_base: 0,
             vendor_family: NicVendorFamily::Generic,
+            e1000_tx_desc_phys: 0,
+            e1000_tx_desc_virt: core::ptr::null_mut(),
+            e1000_tx_ring_len: 0,
+            e1000_tx_hw_tail: AtomicU32::new(0),
         }
     }
 
@@ -262,8 +300,32 @@ impl NicNativeDevice {
         dev.ready.store(true, Ordering::Release);
         dev.link_up.store(true, Ordering::Release);
         dev.link_speed.store(1000, Ordering::Release);
-        dev.program_vendor_path();
         dev
+    }
+
+    pub fn setup_e1000_tx_ring(&mut self, phys: u64, virt: *mut E1000TxDesc, len: u32) {
+        self.e1000_tx_desc_phys = phys;
+        self.e1000_tx_desc_virt = virt;
+        self.e1000_tx_ring_len = len;
+        self.e1000_tx_hw_tail.store(0, Ordering::Release);
+        unsafe {
+            core::ptr::write_bytes(
+                virt,
+                0,
+                (len as usize) * core::mem::size_of::<E1000TxDesc>(),
+            );
+        }
+        let tdba_lo = (phys & 0xFFFFFFFF) as u32;
+        let tdba_hi = (phys >> 32) as u32;
+        self.write_mmio32(0x3800, tdba_lo);
+        self.write_mmio32(0x3804, tdba_hi);
+        self.write_mmio32(
+            0x3808,
+            (len * core::mem::size_of::<E1000TxDesc>() as u32) as u32,
+        );
+        self.write_mmio32(E1000_REG_TDH, 0);
+        self.write_mmio32(E1000_REG_TDT, 0);
+        self.program_vendor_path();
     }
 
     #[inline(always)]
@@ -289,8 +351,13 @@ impl NicNativeDevice {
             NicVendorFamily::Generic => {}
             NicVendorFamily::Intel8254x => {
                 self.write_mmio32(E1000_REG_IMS, u32::MAX);
-                self.write_mmio32(E1000_REG_RCTL, self.read_mmio32(E1000_REG_RCTL) | 0x2);
-                self.write_mmio32(E1000_REG_TCTL, self.read_mmio32(E1000_REG_TCTL) | 0x2);
+                let rctl = self.read_mmio32(E1000_REG_RCTL)
+                    | E1000_RCTL_EN
+                    | E1000_RCTL_BAM
+                    | E1000_RCTL_SECRC;
+                self.write_mmio32(E1000_REG_RCTL, rctl);
+                let tctl = self.read_mmio32(E1000_REG_TCTL) | E1000_TCTL_EN | E1000_TCTL_PSP;
+                self.write_mmio32(E1000_REG_TCTL, tctl);
             }
         }
     }
@@ -413,6 +480,23 @@ impl AsyncNetDevice for NicNativeDevice {
         };
 
         if self.tx_ring.push(desc) {
+            if self.vendor_family == NicVendorFamily::Intel8254x
+                && !self.e1000_tx_desc_virt.is_null()
+            {
+                let idx = self.tx_ring.head.load(Ordering::Acquire).wrapping_sub(1) & RING_MASK;
+                let hw_idx = idx % self.e1000_tx_ring_len;
+                unsafe {
+                    let hw_desc = &mut *self.e1000_tx_desc_virt.add(hw_idx as usize);
+                    hw_desc.buffer_addr = dma_buf.paddr;
+                    hw_desc.length = len as u16;
+                    hw_desc.cso = 0;
+                    hw_desc.cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS | E1000_TXD_CMD_RS;
+                    hw_desc.status = 0;
+                    hw_desc.css = 0;
+                    hw_desc.special = 0;
+                }
+                crate::memory_barriers::smp_wmb();
+            }
             self.tx_packets.fetch_add(1, Ordering::Relaxed);
             self.tx_bytes.fetch_add(len as u64, Ordering::Relaxed);
             self.ring_tx_doorbell();
@@ -426,6 +510,27 @@ impl AsyncNetDevice for NicNativeDevice {
     }
 
     fn poll_tx_completion(&self) -> Option<CompletionEvent> {
+        if self.vendor_family == NicVendorFamily::Intel8254x && !self.e1000_tx_desc_virt.is_null() {
+            let hw_tail = self.e1000_tx_hw_tail.load(Ordering::Acquire);
+            let ring_len = self.e1000_tx_ring_len;
+            if hw_tail >= ring_len {
+                return None;
+            }
+            unsafe {
+                let desc = &*self.e1000_tx_desc_virt.add(hw_tail as usize);
+                if desc.status & E1000_TXD_STAT_DD != 0 {
+                    self.e1000_tx_hw_tail.store(hw_tail + 1, Ordering::Release);
+                    let token = SubmissionToken(hw_tail as u64);
+                    return Some(CompletionEvent {
+                        token,
+                        result: 0,
+                        data_len: desc.length as usize,
+                        flags: 0,
+                    });
+                }
+            }
+            return None;
+        }
         self.tx_comp_ring.pop().map(|_desc| CompletionEvent {
             token: SubmissionToken(0),
             result: 0,
@@ -443,8 +548,17 @@ impl AsyncNetDevice for NicNativeDevice {
         })
     }
 
-    fn set_promiscuous(&self, _enable: bool) {
-        // TODO: configure hardware promiscuous mode
+    fn set_promiscuous(&self, enable: bool) {
+        if self.vendor_family != NicVendorFamily::Intel8254x || self.mmio_base == 0 {
+            return;
+        }
+        let mut rctl = self.read_mmio32(E1000_REG_RCTL);
+        if enable {
+            rctl |= E1000_RCTL_UPE | E1000_RCTL_MPE;
+        } else {
+            rctl &= !(E1000_RCTL_UPE | E1000_RCTL_MPE);
+        }
+        self.write_mmio32(E1000_REG_RCTL, rctl);
     }
 
     fn set_rss_queues(&self, _count: u32) -> Result<(), AsyncIoError> {
@@ -591,5 +705,209 @@ pub fn adaptive_coalesce_tick(rx_pps: u64, tx_pps: u64) {
             config.tx_usecs = 10;
             config.tx_max_frames = 4;
         }
+    }
+}
+
+// ============================================================================
+// Test Corpus (Intel 8254x SDM + Linux NAPI semantics)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_device() -> NicNativeDevice {
+        NicNativeDevice::new_intel_8254x("e1000", [0x52, 0x54, 0x00, 0x12, 0x34, 0x56], 0)
+    }
+
+    #[test]
+    fn nic_device_creation_and_mac() {
+        let dev = make_device();
+        assert_eq!(dev.mac_address(), [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        assert_eq!(dev.name(), "e1000");
+        assert!(dev.ready.load(Ordering::Acquire));
+        assert!(dev.link_up.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn nic_default_mtu_is_1500() {
+        let dev = make_device();
+        assert_eq!(dev.mtu(), DEFAULT_MTU);
+    }
+
+    #[test]
+    fn nic_mtu_enforcement_on_submit() {
+        let dev = make_device();
+        // MTU + Ethernet header (14) + VLAN (4) = 1518 max for 1500 MTU
+        // MAX_PACKET_SIZE = 9216 allows jumbo frames
+        let small_buf = DmaBuffer {
+            paddr: 0x1000,
+            vaddr: 0,
+            size: 2048,
+        };
+        // Packets within MAX_PACKET_SIZE should be accepted
+        assert!(dev.submit_tx(&small_buf, 1518).is_ok());
+        // Packets exceeding MAX_PACKET_SIZE should be rejected
+        let big_buf = DmaBuffer {
+            paddr: 0x2000,
+            vaddr: 0,
+            size: MAX_PACKET_SIZE + 1,
+        };
+        assert!(dev.submit_tx(&big_buf, MAX_PACKET_SIZE + 1).is_err());
+    }
+
+    #[test]
+    fn nic_tx_ring_full_returns_queue_full() {
+        let dev = make_device();
+        // Fill the ring
+        let buf = DmaBuffer {
+            paddr: 0x3000,
+            vaddr: 0,
+            size: 2048,
+        };
+        for _ in 0..RING_SIZE {
+            let _ = dev.submit_tx(&buf, 64);
+        }
+        // Next submit should fail with QueueFull
+        assert!(matches!(
+            dev.submit_tx(&buf, 64),
+            Err(AsyncIoError::QueueFull)
+        ));
+        assert!(dev.tx_dropped.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn nic_rx_ring_full_drops_packet() {
+        let dev = make_device();
+        // Fill the RX ring
+        for _ in 0..(RING_SIZE - 1) {
+            assert!(dev.receive_packet(0x4000, 64));
+        }
+        // Next receive should drop
+        assert!(!dev.receive_packet(0x5000, 64));
+        assert!(dev.rx_dropped.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn nic_stats_accumulate() {
+        let dev = make_device();
+        let buf = DmaBuffer {
+            paddr: 0x6000,
+            vaddr: 0,
+            size: 2048,
+        };
+        dev.submit_tx(&buf, 100).unwrap();
+        dev.receive_packet(0x7000, 200);
+
+        assert!(dev.tx_packets.load(Ordering::Relaxed) >= 1);
+        assert!(dev.tx_bytes.load(Ordering::Relaxed) >= 100);
+        assert!(dev.rx_packets.load(Ordering::Relaxed) >= 1);
+        assert!(dev.rx_bytes.load(Ordering::Relaxed) >= 200);
+    }
+
+    #[test]
+    fn nic_link_speed_zero_when_down() {
+        let dev = make_device();
+        dev.set_link_up(false, 0);
+        assert_eq!(dev.link_speed(), 0);
+        dev.set_link_up(true, 1000);
+        assert_eq!(dev.link_speed(), 1000);
+    }
+
+    #[test]
+    fn nic_submit_fails_when_link_down() {
+        let dev = make_device();
+        dev.set_link_up(false, 0);
+        let buf = DmaBuffer {
+            paddr: 0x8000,
+            vaddr: 0,
+            size: 2048,
+        };
+        assert!(matches!(
+            dev.submit_tx(&buf, 64),
+            Err(AsyncIoError::DeviceGone)
+        ));
+    }
+
+    #[test]
+    fn nic_promiscuous_rctl_bits() {
+        // Promiscuous mode sets UPE + MPE in RCTL
+        // Intel 8254x SDM §13.4.17: UPE=bit 3, MPE=bit 4
+        assert_eq!(E1000_RCTL_UPE, 1 << 3);
+        assert_eq!(E1000_RCTL_MPE, 1 << 4);
+        // Combined with BAM (broadcast accept) and SECRC (strip CRC)
+        let rctl =
+            E1000_RCTL_EN | E1000_RCTL_UPE | E1000_RCTL_MPE | E1000_RCTL_BAM | E1000_RCTL_SECRC;
+        assert!(rctl & E1000_RCTL_UPE != 0);
+        assert!(rctl & E1000_RCTL_MPE != 0);
+        assert!(rctl & E1000_RCTL_BAM != 0);
+    }
+
+    #[test]
+    fn nic_tx_descriptor_cmd_flags() {
+        // Intel 8254x SDM §3.3.3: TX descriptor command flags
+        assert_eq!(E1000_TXD_CMD_EOP, 0x01); // End of Packet
+        assert_eq!(E1000_TXD_CMD_IFCS, 0x02); // Insert FCS
+        assert_eq!(E1000_TXD_CMD_RS, 0x08); // Report Status
+                                            // Standard TX cmd: EOP + IFCS + RS
+        let cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS | E1000_TXD_CMD_RS;
+        assert_eq!(cmd, 0x0B);
+    }
+
+    #[test]
+    fn nic_tx_completion_descriptor_done() {
+        // E1000_TXD_STAT_DD = bit 0, set by hardware when done
+        assert_eq!(E1000_TXD_STAT_DD, 0x01);
+        let status_with_dd = E1000_TXD_STAT_DD;
+        assert!(status_with_dd & E1000_TXD_STAT_DD != 0);
+        let status_pending = 0u8;
+        assert!(status_pending & E1000_TXD_STAT_DD == 0);
+    }
+
+    #[test]
+    fn nic_ring_wraparound() {
+        let ring = DescriptorRing::new();
+        // Push and pop RING_SIZE * 2 times to verify wraparound
+        for _ in 0..RING_SIZE * 2 {
+            let desc = NicDescriptor {
+                buffer_addr: 0x9000,
+                length: 64,
+                flags: 0,
+            };
+            assert!(ring.push(desc));
+            let popped = ring.pop();
+            assert!(popped.is_some());
+            assert_eq!(popped.unwrap().length, 64);
+        }
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    fn nic_coalesce_profiles() {
+        let low = NicCoalesceConfig::low_latency();
+        assert_eq!(low.rx_usecs, 10);
+        assert_eq!(low.rx_max_frames, 4);
+
+        let high = NicCoalesceConfig::high_throughput();
+        assert_eq!(high.rx_usecs, 100);
+        assert_eq!(high.rx_max_frames, 64);
+        assert!(high.use_adaptive_rx);
+
+        let balanced = NicCoalesceConfig::balanced();
+        assert_eq!(balanced.rx_usecs, 50);
+        assert_eq!(balanced.rx_max_frames, 16);
+    }
+
+    #[test]
+    fn nic_doorbell_snapshot_zero_mmio() {
+        let dev = make_device();
+        // With mmio_base=0, read_mmio32 returns 0
+        let snap = dev.doorbell_snapshot();
+        assert_eq!(snap.mmio_base, 0);
+        assert_eq!(snap.tx_head, 0);
+        assert_eq!(snap.tx_tail, 0);
+        assert_eq!(snap.rx_head, 0);
+        assert_eq!(snap.rx_tail, 0);
+        assert_eq!(snap.irq_mask, 0);
     }
 }

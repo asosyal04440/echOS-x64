@@ -7358,11 +7358,11 @@ fn handle_windows_runtime_command(
 
 /// Linux cihaz ve sürücü yönetim komutlarını işler.
 ///
-/// Alt komutlar: `status`, `devices`, `drivers`
+/// Alt komutlar: `status`, `devices`, `drivers`, `capability`, `abi`
 fn handle_linux_command(_shell: &Shell, parts: &[&str]) -> Option<String> {
     if parts.len() < 2 {
         return Some(String::from(
-            "Kullanim: linux status | linux devices | linux drivers",
+            "Kullanim: linux status | linux devices | linux drivers | linux capability | linux abi",
         ));
     }
     match parts[1] {
@@ -7370,11 +7370,13 @@ fn handle_linux_command(_shell: &Shell, parts: &[&str]) -> Option<String> {
             let devices = crate::drivers::linux::list_devices();
             let drivers = crate::drivers::linux::list_drivers();
             let attachments = crate::drivers::linux::list_attachments();
+            let kickoff_boundary = crate::drivers::linux::phase5_kickoff_fidelity_boundary();
             Some(format!(
-                "linux status devices={} drivers={} attached={}",
+                "linux status devices={} drivers={} attached={} {}",
                 devices.len(),
                 drivers.len(),
-                attachments.len()
+                attachments.len(),
+                kickoff_boundary
             ))
         }
         "devices" => {
@@ -7413,8 +7415,37 @@ fn handle_linux_command(_shell: &Shell, parts: &[&str]) -> Option<String> {
             }
             Some(out.trim_end().to_string())
         }
+        "capability" => {
+            // Linux driver capability matrix (compile vs working distinction)
+            Some(crate::drivers::linux_onboarding::linux_capability_report())
+        }
+        "abi" => {
+            // Linux → echOS ABI translation table
+            let mut out = String::from("=== Linux → echOS ABI Translation Table ===\n\n");
+            out.push_str(&format!(
+                "{:<40} {:<40} {}\n",
+                "Linux API", "echOS Equivalent", "Notes"
+            ));
+            out.push_str(&"-".repeat(100));
+            out.push('\n');
+            for t in crate::drivers::linux_onboarding::LINUX_ABI_TRANSLATIONS {
+                out.push_str(&format!(
+                    "{:<40} {:<40} {}\n",
+                    t.linux_api, t.echos_equivalent, t.notes
+                ));
+            }
+            out.push_str(&format!(
+                "\nTotal translations: {}\n",
+                crate::drivers::linux_onboarding::LINUX_ABI_TRANSLATIONS.len()
+            ));
+            Some(out)
+        }
+        "lifecycle" => {
+            // Driver lifecycle report
+            Some(crate::drivers::linux_onboarding::lifecycle_report())
+        }
         _ => Some(String::from(
-            "Kullanim: linux status | linux devices | linux drivers",
+            "Kullanim: linux status | linux devices | linux drivers | linux capability | linux abi | linux lifecycle",
         )),
     }
 }

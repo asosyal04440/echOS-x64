@@ -360,6 +360,7 @@ impl Fat32Fs {
 #[derive(Clone, Debug)]
 pub struct Fat32File {
     pub name: String,
+    pub long_name: Option<String>,
     pub cluster: u32,
     pub size: u32,
     pub is_dir: bool,
@@ -371,12 +372,128 @@ impl Fat32File {
     pub fn from_entry(entry: &Fat32DirEntry) -> Self {
         Fat32File {
             name: entry.name_str(),
+            long_name: None,
             cluster: entry.cluster(),
             size: entry.file_size(),
             is_dir: entry.is_directory(),
             attributes: entry.attr,
         }
     }
+
+    /// LFN ile birlikte dosya bilgisi oluşturur
+    pub fn from_entry_with_lfn(entry: &Fat32DirEntry, long_name: Option<String>) -> Self {
+        Fat32File {
+            name: entry.name_str(),
+            long_name,
+            cluster: entry.cluster(),
+            size: entry.file_size(),
+            is_dir: entry.is_directory(),
+            attributes: entry.attr,
+        }
+    }
+}
+
+// ============================================================================
+// FAT32 LFN (VFAT) PARSING
+// ============================================================================
+
+/// LFN entry'sinden 13 UTF-16LE karakteri çıkarır
+fn parse_lfn_chunk(data: &[u8]) -> [u16; 13] {
+    let mut chars = [0u16; 13];
+    // Bytes 1..11: ilk 5 karakter (5 * 2 = 10 bytes)
+    for i in 0..5 {
+        chars[i] = u16::from_le_bytes([data[1 + i * 2], data[2 + i * 2]]);
+    }
+    // Bytes 14..25: sonraki 6 karakter (6 * 2 = 12 bytes)
+    for i in 0..6 {
+        chars[5 + i] = u16::from_le_bytes([data[14 + i * 2], data[15 + i * 2]]);
+    }
+    // Bytes 28..31: son 2 karakter (2 * 2 = 4 bytes)
+    for i in 0..2 {
+        chars[11 + i] = u16::from_le_bytes([data[28 + i * 2], data[29 + i * 2]]);
+    }
+    chars
+}
+
+/// LFN checksum hesapla (short name'den)
+fn lfn_checksum(short_name: &[u8; 11]) -> u8 {
+    let mut sum: u8 = 0;
+    for i in 0..11 {
+        sum = ((sum & 1) << 7) + (sum >> 1) + short_name[i];
+    }
+    sum
+}
+
+/// Raw directory data'dan LFN chain'leri parse eder ve short entry'lerle eşleştirir
+/// Returns: Vec<(Fat32DirEntry, Option<String>)>
+pub fn parse_dir_entries_with_lfn(data: &[u8]) -> Vec<(Fat32DirEntry, Option<String>)> {
+    let mut results = Vec::new();
+    let mut pending_lfn: Option<(Vec<[u16; 13]>, u8)> = None; // (chunks, checksum)
+
+    for chunk in data.chunks_exact(32) {
+        let entry: Fat32DirEntry = unsafe { core::ptr::read_unaligned(chunk.as_ptr() as *const _) };
+
+        if entry.is_empty() {
+            break;
+        }
+        if entry.is_deleted() {
+            pending_lfn = None;
+            continue;
+        }
+        if entry.is_volume_label() {
+            pending_lfn = None;
+            continue;
+        }
+
+        if entry.is_long_name() {
+            // LFN entry: ord = data[0], checksum = data[13]
+            let ord = chunk[0];
+            let checksum = chunk[13];
+            let is_last = (ord & 0x40) != 0;
+            let seq = ord & 0x3F;
+
+            if is_last {
+                // Yeni LFN zinciri başlıyor
+                let chars = parse_lfn_chunk(chunk);
+                pending_lfn = Some((vec![chars], checksum));
+            } else if let Some((ref mut chunks, cksum)) = pending_lfn {
+                if cksum == checksum {
+                    let chars = parse_lfn_chunk(chunk);
+                    chunks.push(chars);
+                } else {
+                    // Checksum uyuşmazlığı, zinciri iptal et
+                    pending_lfn = None;
+                }
+            }
+        } else {
+            // Short entry: varsa pending LFN'i çöz
+            let long_name = pending_lfn.take().and_then(|(mut chunks, cksum)| {
+                let expected = lfn_checksum(&entry.name);
+                if cksum != expected {
+                    return None;
+                }
+                // LFN entries sondan başa doğru sıralı (yüksek seq önce)
+                chunks.reverse();
+                // UTF-16LE -> String, 0x0000 veya 0xFFFF'e kadar
+                let mut name = String::new();
+                for chunk in &chunks {
+                    for &ch in chunk {
+                        if ch == 0x0000 || ch == 0xFFFF {
+                            return Some(name);
+                        }
+                        // Basit UTF-16 -> char dönüşümü (BMP için)
+                        if let Some(c) = char::from_u32(ch as u32) {
+                            name.push(c);
+                        }
+                    }
+                }
+                Some(name)
+            });
+            results.push((entry, long_name));
+        }
+    }
+
+    results
 }
 
 // ============================================================================

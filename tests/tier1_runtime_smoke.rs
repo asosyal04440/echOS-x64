@@ -314,12 +314,28 @@ fn nvme_async_smoke() {
     println!("smoke:nvme:ok");
 }
 
+fn nvme_controller_smoke() {
+    println!("smoke:nvme_ctrl:start");
+    let mut mmio = vec![0u32; 1024].into_boxed_slice();
+    mmio[0x1c / 4] = 1; // CSTS_RDY = 1
+    let mut ctrl = ech_os::drivers::nvme::NvmeController::new(0, 0, 0);
+    ctrl.mmio_base = mmio.as_mut_ptr() as u64;
+    ctrl.timeout_ms = 1; // Hızlı timeout
+    ctrl.capabilities.nvm_subsystem_reset = true;
+    
+    // reset expects RDY to drop, but our mock MMIO keeps it at 1, so it should TIMEOUT
+    let res = ctrl.controller_reset();
+    assert_eq!(res, Err(ech_os::drivers::nvme::NvmeError::Timeout));
+    println!("smoke:nvme_ctrl:ok");
+}
+
 fn main() {
     scheduler_policy_smoke();
     iommu_smoke();
     drm_smoke();
     io_uring_smoke();
     nvme_async_smoke();
+    nvme_controller_smoke();
     nic_vendor_doorbell_smoke();
     println!("tier1_runtime_smoke: OK");
 }

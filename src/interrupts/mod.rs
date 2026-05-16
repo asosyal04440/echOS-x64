@@ -356,6 +356,16 @@ pub fn init_per_cpu() {
     idt.load();
 }
 
+/// Reload the BSP IDT after firmware S3 wake without reading the LAPIC ID.
+///
+/// The APIC mode itself is restored later in the resume path. Using CPU0 here
+/// avoids x2APIC MSR reads while firmware may still have IA32_APIC_BASE bits in
+/// a non-kernel state.
+pub fn reload_bsp_idt_after_resume() {
+    let idt = init_idt_for_cpu(0);
+    idt.load();
+}
+
 pub fn enable_ioapic() -> bool {
     if !crate::acpi::init() {
         crate::serial_println!("ACPI init failed");

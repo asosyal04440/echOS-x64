@@ -723,11 +723,17 @@ impl PowerManager {
             }
         }
 
-        // 3. Gerçek ACPI S3 durumuna gir (drivers::power üzerinden)
-        let _ =
-            crate::drivers::power::PM_MANAGER.enter_sleep(crate::drivers::power::SleepState::S3);
+        // 3. Gerçek ACPI S3 döngüsünü drivers::power üzerinden tamamla.
+        crate::drivers::power::PM_MANAGER
+            .enter_sleep(crate::drivers::power::SleepState::S3)
+            .map_err(|_| PowerError::InvalidStateTransition)?;
 
-        crate::serial_println!("Power: System suspended");
+        if crate::cpu::s3_resume::take_continuation_resume() {
+            self.system_resume_from_firmware_wake()?;
+        } else {
+            self.system_resume()?;
+        }
+        crate::serial_println!("Power: System suspend/resume cycle completed");
         Ok(())
     }
 
@@ -766,6 +772,19 @@ impl PowerManager {
         }
 
         crate::serial_println!("Power: System resumed");
+        Ok(())
+    }
+
+    pub fn system_resume_from_firmware_wake(&self) -> Result<(), PowerError> {
+        crate::serial_println!("Power: Firmware wake CPU resume...");
+        self.pm_enabled.store(true, Ordering::Release);
+        crate::cpu::s3_resume::restore_bsp_descriptor_tables_after_resume();
+        crate::interrupts::mark_bsp_init_complete();
+        crate::task::scheduler::mark_ready_after_resume();
+        crate::apic::lapic::rearm_after_resume().map_err(|_| PowerError::InvalidStateTransition)?;
+        x86_64::instructions::interrupts::enable();
+        smp_wmb();
+        crate::serial_println!("Power: Firmware wake CPU resume complete");
         Ok(())
     }
 }
@@ -853,6 +872,11 @@ pub fn system_suspend() -> Result<(), PowerError> {
 pub fn system_resume() -> Result<(), PowerError> {
     let manager = get_manager().ok_or(PowerError::PowerManagementDisabled)?;
     manager.system_resume()
+}
+
+pub fn system_resume_from_firmware_wake() -> Result<(), PowerError> {
+    let manager = get_manager().ok_or(PowerError::PowerManagementDisabled)?;
+    manager.system_resume_from_firmware_wake()
 }
 
 #[cfg(test)]

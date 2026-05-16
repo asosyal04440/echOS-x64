@@ -271,9 +271,9 @@ impl NetInterface for VirtioNetInterface {
                 self.stats.tx_packets += 1;
                 self.stats.tx_bytes += data.len() as u64;
             }
-            Err(_) => {
+            Err(err) => {
                 self.stats.tx_errors += 1;
-                return Err(NetError::BufferFull);
+                return Err(err);
             }
         }
 

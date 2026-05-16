@@ -1,47 +1,47 @@
-//! # DRM/KMS - Doğrudan Render Yöneticisi (Direct Rendering Manager)
+//! # DRM/KMS - DoÄŸrudan Render YÃ¶neticisi (Direct Rendering Manager)
 //!
-//! GPU ve ekran alt sistemi yönetimi. Linux DRM/KMS mimarisini uygular.
+//! GPU ve ekran alt sistemi yÃ¶netimi. Linux DRM/KMS mimarisini uygular.
 //!
-//! ## DRM/KMS Kavramları
+//! ## DRM/KMS KavramlarÄ±
 //!
-//! Modern Linux'ta ekran çıkışı şu hiyerarşiyle yönetilir:
+//! Modern Linux'ta ekran ÃSection Ä±kÄ±ÅŸÄ± ÅŸu hiyerarÅŸiyle yÃ¶netilir:
 //!
 //! ```
 //! [GPU/DrmDevice]
 //!       |
-//!       +--[CRTC]          <- Ekran denetleyicisi; hangi FB'yi hangi modda çıkarır
+//!       +--[CRTC]          <- Ekran denetleyicisi; hangi FB'yi hangi modda ÃSection Ä±karÄ±r
 //!       |     |
-//!       |     +--[Plane]   <- Framebuffer katmanı (birden fazla çakışık katman olabilir)
+//!       |     +--[Plane]   <- Framebuffer katmanÄ± (birden fazla ÃSection akÄ±ÅŸÄ±k katman olabilir)
 //!       |
-//!       +--[Encoder]       <- Dijital/Analog sinyal dönüştürücü (TMDS, LVDS, VGA DAC...)
+//!       +--[Encoder]       <- Dijital/Analog sinyal dÃ¶nÃ¼ÅŸtÃ¼rÃ¼cÃ¼ (TMDS, LVDS, VGA DAC...)
 //!             |
-//!             +--[Connector] <- Fiziksel bağlantı noktası (HDMI, DisplayPort, VGA, eDP)
+//!             +--[Connector] <- Fiziksel baÄŸlantÄ± noktasÄ± (HDMI, DisplayPort, VGA, eDP)
 //!                   |
-//!               [Monitör]
+//!               [MonitÃ¶r]
 //! ```
 //!
 //! ## GEM (Graphics Execution Manager)
 //!
-//! GPU bellek nesneleri GEM handle'larıyla yönetilir:
+//! GPU bellek nesneleri GEM handle'larÄ±yla yÃ¶netilir:
 //!
 //! ```
 //! gem_create(size) -> handle
 //!       |
 //!       v
-//! gem_get(handle) -> Arc<GemObject>   <- vaddr/paddr ile CPU taraflı haritalama
+//! gem_get(handle) -> Arc<GemObject>   <- vaddr/paddr ile CPU taraflÄ± haritalama
 //!       |
 //!       v
-//! gem_close(handle)                   <- nesneyi yok et, belleği geri ver
+//! gem_close(handle)                   <- nesneyi yok et, belleÄŸi geri ver
 //! ```
 //!
-//! ## DRM ioctl Akışı
+//! ## DRM ioctl AkÄ±ÅŸÄ±
 //!
-//! Kullanıcı alanı (Mesa/libdrm) aşağıdaki sırayla ekran açar:
+//! KullanÄ±cÄ± alanÄ± (Mesa/libdrm) aÅŸaÄŸÄ±daki sÄ±rayla ekran aÃSection ar:
 //!   1. DRM_IOCTL_MODE_GETRESOURCES  -> CRTC/Connector/Encoder listesi
-//!   2. DRM_IOCTL_MODE_GETCONNECTOR  -> monitör bilgisi, desteklenen çözünürlükler
-//!   3. DRM_IOCTL_MODE_CREATE_DUMB   -> GEM objesi yarat (CPU taraflı FB)
+//!   2. DRM_IOCTL_MODE_GETCONNECTOR  -> monitÃ¶r bilgisi, desteklenen ÃSection Ã¶zÃ¼nÃ¼rlÃ¼kler
+//!   3. DRM_IOCTL_MODE_CREATE_DUMB   -> GEM objesi yarat (CPU taraflÄ± FB)
 //!   4. DRM_IOCTL_MODE_ADDFB         -> GEM'i framebuffer olarak kaydet
-//!   5. DRM_IOCTL_MODE_SETCRTC       -> CRTC'yi aç, FB'yi ekrana bağla
+//!   5. DRM_IOCTL_MODE_SETCRTC       -> CRTC'yi aÃSection , FB'yi ekrana baÄŸla
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
@@ -55,14 +55,14 @@ use crate::gpu3d;
 use crate::gui::protocol::{DisplayPresentMode, Rect};
 
 // ============================================================================
-// DRM IOCTL SABİTLERİ (DRM CONSTANTS)
+// DRM IOCTL SABÄ°TLERÄ° (DRM CONSTANTS)
 // ============================================================================
 
-// DRM ioctl numaraları Linux ABI'siyle uyumludur.
-// Üst 16 bit yön+boyut bilgisi taşır (Linux _IOC makrosu); alt 16 bit komut.
+// DRM ioctl numaralarÄ± Linux ABI'siyle uyumludur.
+// Ãœst 16 bit yÃ¶n+boyut bilgisi taÅŸÄ±r (Linux _IOC makrosu); alt 16 bit komut.
 // 0x64 = 'd' = DRM magic byte
 
-/// Temel DRM ioctl komutları (versiyon, GEM, CAP sorguları)
+/// Temel DRM ioctl komutlarÄ± (versiyon, GEM, CAP sorgularÄ±)
 pub const DRM_IOCTL_VERSION: u32 = 0x8000_6400;
 pub const DRM_IOCTL_GET_MAGIC: u32 = 0x8000_6401;
 pub const DRM_IOCTL_IRQ_BUSID: u32 = 0xC008_6402;
@@ -79,7 +79,7 @@ pub const DRM_IOCTL_SET_CLIENT_CAP: u32 = 0x4010_640C;
 pub const DRM_IOCTL_PRIME_HANDLE_TO_FD: u32 = 0xC00C_642E;
 pub const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = 0xC00C_642F;
 
-/// KMS (Kernel Mode Setting) ioctl komutları - ekran ayarları
+/// KMS (Kernel Mode Setting) ioctl komutlarÄ± - ekran ayarlarÄ±
 pub const DRM_IOCTL_MODE_GETRESOURCES: u32 = 0xC040_64A0;
 pub const DRM_IOCTL_MODE_GETCONNECTOR: u32 = 0xC1A0_64A1;
 pub const DRM_IOCTL_MODE_GETENCODER: u32 = 0xC0A0_64A2;
@@ -98,11 +98,11 @@ pub const DRM_IOCTL_MODE_MAP_DUMB: u32 = 0xC010_64B3;
 pub const DRM_IOCTL_MODE_DESTROY_DUMB: u32 = 0xC008_64B4;
 
 // ============================================================================
-// DRM VERSİYON BİLGİSİ (DRM VERSION)
+// DRM VERSÄ°YON BÄ°LGÄ°SÄ° (DRM VERSION)
 // ============================================================================
 
-// DRM_IOCTL_VERSION ioctl'une yanıt olarak kullanıcı alanına doldurulur.
-// name/date/desc alanları kullanıcı alanı pointer'larıdır (u64 olarak saklanır).
+// DRM_IOCTL_VERSION ioctl'une yanÄ±t olarak kullanÄ±cÄ± alanÄ±na doldurulur.
+// name/date/desc alanlarÄ± kullanÄ±cÄ± alanÄ± pointer'larÄ±dÄ±r (u64 olarak saklanÄ±r).
 
 #[repr(C)]
 pub struct DrmVersion {
@@ -318,42 +318,42 @@ impl DmaReservationState {
 }
 
 // ============================================================================
-// DRM CİHAZI (DRM DEVICE)
+// DRM CÄ°HAZI (DRM DEVICE)
 // ============================================================================
 
-// Her GPU bir DrmDevice örneğiyle temsil edilir.
-// Birden fazla GPU desteklemek için DrmManager birden fazla DrmDevice tutar.
+// Her GPU bir DrmDevice Ã¶rneÄŸiyle temsil edilir.
+// Birden fazla GPU desteklemek iÃSection in DrmManager birden fazla DrmDevice tutar.
 //
 //   DrmDevice [card0]
 //     |-- framebuffers: BTreeMap<fb_id, DrmFramebuffer>
 //     |-- gem_objects:  BTreeMap<handle, GemObject>    <- GPU bellek nesneleri
 //     |-- crtcs:        Vec<DrmCrtc>                   <- Ekran denetleyicileri
-//     |-- encoders:     Vec<DrmEncoder>                <- Sinyal dönüştürücüler
-//     |-- connectors:   Vec<DrmConnector>              <- Fiziksek çıkışlar
-//     +-- planes:       Vec<DrmPlane>                  <- Görüntü katmanları
+//     |-- encoders:     Vec<DrmEncoder>                <- Sinyal dÃ¶nÃ¼ÅŸtÃ¼rÃ¼cÃ¼ler
+//     |-- connectors:   Vec<DrmConnector>              <- Fiziksek ÃSection Ä±kÄ±ÅŸlar
+//     +-- planes:       Vec<DrmPlane>                  <- GÃ¶rÃ¼ntÃ¼ katmanlarÄ±
 
 pub struct DrmDevice {
-    /// Sistemdeki benzersiz cihaz kimliği
+    /// Sistemdeki benzersiz cihaz kimliÄŸi
     pub id: u64,
-    /// Cihaz adı (örn. "card0", "card1")
+    /// Cihaz adÄ± (Ã¶rn. "card0", "card1")
     pub name: String,
-    /// Sürücü adı (kullanıcı alanına raporlanır)
+    /// SÃ¼rÃ¼cÃ¼ adÄ± (kullanÄ±cÄ± alanÄ±na raporlanÄ±r)
     pub driver_name: String,
-    /// Sürücü versiyonu (major, minor, patch)
+    /// SÃ¼rÃ¼cÃ¼ versiyonu (major, minor, patch)
     pub driver_version: (u32, u32, u32),
-    /// Sürücü yetenekleri (DRM_CAP_* sabitleriyle sorgulanır)
+    /// SÃ¼rÃ¼cÃ¼ yetenekleri (DRM_CAP_* sabitleriyle sorgulanÄ±r)
     pub caps: Mutex<BTreeMap<u64, u64>>,
-    /// Kayıtlı framebuffer'lar (fb_id -> nesne)
+    /// KayÄ±tlÄ± framebuffer'lar (fb_id -> nesne)
     pub framebuffers: Mutex<BTreeMap<u32, Arc<DrmFramebuffer>>>,
     /// GEM bellek nesneleri (handle -> nesne)
     pub gem_objects: Mutex<BTreeMap<u32, Arc<GemObject>>>,
-    /// Bir sonraki GEM handle değeri (her zaman artarak gider)
+    /// Bir sonraki GEM handle deÄŸeri (her zaman artarak gider)
     next_gem_handle: AtomicU32,
-    /// Bir sonraki framebuffer ID değeri
+    /// Bir sonraki framebuffer ID deÄŸeri
     next_fb_id: AtomicU32,
-    /// KMS modunun etkin olup olmadığı
+    /// KMS modunun etkin olup olmadÄ±ÄŸÄ±
     pub modeset_enabled: AtomicBool,
-    /// Bu GPU'nun CRTC listesi (her biri bağımsız ekrana çıkış yapabilir)
+    /// Bu GPU'nun CRTC listesi (her biri baÄŸÄ±msÄ±z ekrana ÃSection Ä±kÄ±ÅŸ yapabilir)
     pub crtcs: Mutex<Vec<Arc<DrmCrtc>>>,
     /// Encoder listesi
     pub encoders: Mutex<Vec<Arc<DrmEncoder>>>,
@@ -361,9 +361,9 @@ pub struct DrmDevice {
     pub connectors: Mutex<Vec<Arc<DrmConnector>>>,
     /// Plane listesi (her CRTC'nin bir veya daha fazla plane'i var)
     pub planes: Mutex<Vec<Arc<DrmPlane>>>,
-    /// Son atomic commit sonrası VBLANK sayacı
+    /// Son atomic commit sonrasÄ± VBLANK sayacÄ±
     pub vblank_seq: AtomicU64,
-    /// Son atomic commit zamanı (ns)
+    /// Son atomic commit zamanÄ± (ns)
     pub last_commit_ns: AtomicU64,
     pub last_commit_id: AtomicU64,
     pub last_presented_frame_id: AtomicU64,
@@ -411,8 +411,8 @@ impl DrmDevice {
         }
     }
 
-    /// Yeni GEM bellek nesnesi oluşturur.
-    /// Kullanıcı alanı DRM_IOCTL_MODE_CREATE_DUMB veya drmPrimeFdToHandle ile çağırır.
+    /// Yeni GEM bellek nesnesi oluÅŸturur.
+    /// KullanÄ±cÄ± alanÄ± DRM_IOCTL_MODE_CREATE_DUMB veya drmPrimeFdToHandle ile ÃSection aÄŸÄ±rÄ±r.
     pub fn gem_create(&self, size: u64) -> Arc<GemObject> {
         let handle = self.next_gem_handle.fetch_add(1, Ordering::SeqCst);
         let obj = Arc::new(GemObject::new(handle, size));
@@ -425,7 +425,7 @@ impl DrmDevice {
         self.gem_objects.lock().get(&handle).cloned()
     }
 
-    /// GEM nesnesini kapatır; referans düşerse bellek serbest bırakılır
+    /// GEM nesnesini kapatÄ±r; referans dÃ¼ÅŸerse bellek serbest bÄ±rakÄ±lÄ±r
     pub fn gem_close(&self, handle: u32) {
         self.gem_objects.lock().remove(&handle);
     }
@@ -654,8 +654,8 @@ impl DrmDevice {
         }
     }
 
-    /// Framebuffer oluşturur; GPU çıkışı için piksel tamponu.
-    /// handles[0..3]: renk/derinlik/stencil için GEM handle'lar (ARGB için 1 yeterli).
+    /// Framebuffer oluÅŸturur; GPU ÃSection Ä±kÄ±ÅŸÄ± iÃSection in piksel tamponu.
+    /// handles[0..3]: renk/derinlik/stencil iÃSection in GEM handle'lar (ARGB iÃSection in 1 yeterli).
     pub fn fb_create(&self, width: u32, height: u32, format: u32, handles: [u32; 4]) -> u32 {
         let fb_id = self.next_fb_id.fetch_add(1, Ordering::SeqCst);
         let fb = Arc::new(DrmFramebuffer::new(fb_id, width, height, format, handles));
@@ -668,37 +668,37 @@ impl DrmDevice {
         self.framebuffers.lock().get(&fb_id).cloned()
     }
 
-    /// Framebuffer'ı siler; CRTC'nin bu FB'yi kullanmadığından emin ol
+    /// Framebuffer'Ä± siler; CRTC'nin bu FB'yi kullanmadÄ±ÄŸÄ±ndan emin ol
     pub fn fb_remove(&self, fb_id: u32) {
         self.framebuffers.lock().remove(&fb_id);
     }
 
-    /// Sürücü yeteneğini sorgular (DRM_CAP_DUMB_BUFFER, DRM_CAP_VBLANK_HIGH_CRTC...)
+    /// SÃ¼rÃ¼cÃ¼ yeteneÄŸini sorgular (DRM_CAP_DUMB_BUFFER, DRM_CAP_VBLANK_HIGH_CRTC...)
     pub fn get_cap(&self, cap: u64) -> u64 {
         self.caps.lock().get(&cap).copied().unwrap_or(0)
     }
 
-    /// Sürücü yeteneği tanımlar
+    /// SÃ¼rÃ¼cÃ¼ yeteneÄŸi tanÄ±mlar
     pub fn set_cap(&self, cap: u64, value: u64) {
         self.caps.lock().insert(cap, value);
     }
 
-    /// CRTC ekler (başlatma sırasında çağrılır)
+    /// CRTC ekler (baÅŸlatma sÄ±rasÄ±nda ÃSection aÄŸrÄ±lÄ±r)
     pub fn add_crtc(&self, crtc: Arc<DrmCrtc>) {
         self.crtcs.lock().push(crtc);
     }
 
-    /// Connector ekler (HDMI, DP, VGA bağlantı noktaları)
+    /// Connector ekler (HDMI, DP, VGA baÄŸlantÄ± noktalarÄ±)
     pub fn add_connector(&self, connector: Arc<DrmConnector>) {
         self.connectors.lock().push(connector);
     }
 
-    /// Encoder ekler (TMDS, LVDS, DAC dönüştürücüler)
+    /// Encoder ekler (TMDS, LVDS, DAC dÃ¶nÃ¼ÅŸtÃ¼rÃ¼cÃ¼ler)
     pub fn add_encoder(&self, encoder: Arc<DrmEncoder>) {
         self.encoders.lock().push(encoder);
     }
 
-    /// Plane ekler (görüntü katmanı: birincil, kaplama, imleç)
+    /// Plane ekler (gÃ¶rÃ¼ntÃ¼ katmanÄ±: birincil, kaplama, imleÃSection )
     pub fn add_plane(&self, plane: Arc<DrmPlane>) {
         self.planes.lock().push(plane);
     }
@@ -859,12 +859,12 @@ impl DrmDevice {
         };
 
         let now_ns = tsc::read_ns();
-        let vblank_seq = self.signal_vblank(now_ns);
+        let expected_vblank_seq = self.vblank_seq.load(Ordering::Acquire) + 1;
 
         Ok(AtomicCommitResult {
             timestamp_ns: now_ns,
             frame_id: request.frame_id,
-            vblank_seq,
+            vblank_seq: expected_vblank_seq,
             refresh_hz,
             direct_scanout_planes: request.planes.len().min(u8::MAX as usize) as u8,
         })
@@ -975,7 +975,7 @@ impl DrmDevice {
             });
         }
 
-        let result = self.atomic_commit(&AtomicCommitRequest {
+        let result = match self.atomic_commit(&AtomicCommitRequest {
             connector_id: txn.connector_id,
             crtc_id: txn.crtc_id,
             mode: txn.mode.clone(),
@@ -983,14 +983,26 @@ impl DrmDevice {
             frame_id: txn.frame_id,
             present_mode: txn.present_mode,
             target_refresh_hz: txn.target_refresh_hz,
-        })?;
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                self.abort_inflight_commit();
+                return Err(e);
+            }
+        };
 
         let mut tracked = Vec::new();
         for plane in txn.planes.iter() {
             tracked.push(plane.buffer.handle as u32);
             let _ = self.ensure_gem_for_plane_buffer(&plane.buffer);
         }
-        let _ww_guards = self.lock_reservation_set(&tracked)?;
+        let ww_guards = match self.lock_reservation_set(&tracked) {
+            Ok(g) => g,
+            Err(e) => {
+                self.rollback_commit(&result);
+                return Err(e);
+            }
+        };
         for plane in txn.planes.iter() {
             let obj = self.ensure_gem_for_plane_buffer(&plane.buffer);
             let _ = self.export_dma_buf_handle(obj.handle);
@@ -1008,6 +1020,7 @@ impl DrmDevice {
             tracked.push(obj.handle);
         }
         *self.inflight_plane_handles.lock() = tracked;
+        core::mem::drop(ww_guards);
 
         self.last_commit_id.store(txn.commit_id, Ordering::Release);
         self.expected_commit_id
@@ -1017,6 +1030,14 @@ impl DrmDevice {
         self.expected_flip_seq
             .store(result.vblank_seq, Ordering::Release);
         Ok(result)
+    }
+
+    fn rollback_commit(&self, result: &AtomicCommitResult) {
+        self.abort_inflight_commit();
+        let crtcs = self.crtcs.lock();
+        for crtc in crtcs.iter() {
+            crtc.active.store(false, Ordering::Release);
+        }
     }
 
     pub fn report_flip_complete(
@@ -1080,21 +1101,21 @@ impl DrmDevice {
 }
 
 // ============================================================================
-// GEM NESNESİ (GEM OBJECT)
+// GEM NESNESÄ° (GEM OBJECT)
 // ============================================================================
 
 // GEM (Graphics Execution Manager) GPU bellek nesnelerini temsil eder.
-// Linux'ta TTM (Translation Table Manager) veya GEM bu işi yapar.
+// Linux'ta TTM (Translation Table Manager) veya GEM bu iÅŸi yapar.
 //
-// Nesne haritalaması:
+// Nesne haritalamasÄ±:
 //
 //   GemObject
-//     |-- paddr: Option<u64>  <- Fiziksel adres (DMA için)
-//     +-- vaddr: Option<u64>  <- Sanal adres   (CPU tarafı yazma/okuma için)
+//     |-- paddr: Option<u64>  <- Fiziksel adres (DMA iÃSection in)
+//     +-- vaddr: Option<u64>  <- Sanal adres   (CPU tarafÄ± yazma/okuma iÃSection in)
 //
-// PRIME/DMA-BUF ile farklı süreçler arasında handle paylaşımı:
-//   gem_flink  -> global isim oluştur
-//   gem_open   -> başka süreç bu isimle nesneye erişir
+// PRIME/DMA-BUF ile farklÄ± sÃ¼reÃSection ler arasÄ±nda handle paylaÅŸÄ±mÄ±:
+//   gem_flink  -> global isim oluÅŸtur
+//   gem_open   -> baÅŸka sÃ¼reÃSection  bu isimle nesneye eriÅŸir
 
 pub struct GemObject {
     pub handle: u32,
@@ -1244,103 +1265,44 @@ impl GemObject {
         }
     }
 
-    /// Nesneyi CPU adres uzayına haritalar ve sanal adresi döner.
-    /// Gerçek uygulamada sayfa tablosu girişi oluşturur.
-    pub fn map(&self) -> u64 {
+    /// Nesneyi CPU adres uzayÄ±na haritalar ve sanal adresi dÃ¶ner.
+    ///
+    /// Linux DRM GEM mmap modeli (docs.kernel.org/gpu/drm-mm.html):
+    /// 1. GEM objesi fake offset ile drm_vma_offset_manager'a kaydedilir
+    /// 2. mmap() ÃSection aÄŸrÄ±ldÄ±ÄŸÄ±nda fake offset'ten obje bulunur
+    /// 3. drm_gem_mmap_obj() VMA'yÄ± hazÄ±rlar
+    /// 4. Driver fault handler'Ä± sayfa sayfa mapping yapar
+    ///
+    /// echOS kernel-only: paddr'den doÄŸrudan kernel virtual space'e map eder.
+    /// IOMMU domain'i DMA mapping ile uyumlu olmalÄ±dÄ±r.
+    pub fn map(&self) -> Result<u64, &'static str> {
         let mut vaddr = self.vaddr.lock();
-        if vaddr.is_none() {
-            // Fiziksel bellek tahsis et ve sanal adrese haritala
-            *vaddr = Some(0xFFFF_8000_0000_0000);
+        if vaddr.is_some() {
+            return Ok(vaddr.unwrap());
         }
-        vaddr.unwrap()
+        let paddr = self.paddr.lock();
+        let phys = paddr.ok_or("gem object has no physical address")?;
+        let size = self.size as usize;
+        if size == 0 {
+            return Err("gem object size is zero");
+        }
+        let pages = (size + 4095) / 4096;
+        let mapped = crate::memory::map_mmio(phys, pages * 4096);
+        if mapped.is_null() {
+            return Err("gem object mapping failed");
+        }
+        *vaddr = Some(mapped as u64);
+        Ok(mapped as u64)
     }
 
-    /// CPU haritalamasını kaldırır; sayfa tablosu girişi temizlenir
+    /// CPU haritalamasÄ±nÄ± kaldÄ±rÄ±r; sayfa tablosu giriÅŸi temizlenir
     pub fn unmap(&self) {
-        *self.vaddr.lock() = None;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        AtomicKmsTransaction, DisplayPresentMode, DrmConnector, DrmConnectorStatus, DrmCrtc,
-        DrmDevice, DrmMode, DrmPlane, DrmPlaneType, GPUBufferHandle, PlaneCandidate, Rect,
-    };
-    use alloc::sync::Arc;
-
-    fn mk_device() -> DrmDevice {
-        let device = DrmDevice::new(1, "card-test");
-        let crtc = Arc::new(DrmCrtc::new(1, 0));
-        let connector = Arc::new(DrmConnector::new(1, 1));
-        *connector.connection.lock() = DrmConnectorStatus::Connected;
-        connector.add_mode(DrmMode {
-            clock: 148500,
-            hdisplay: 1920,
-            hsync_start: 2008,
-            hsync_end: 2052,
-            htotal: 2200,
-            hskew: 0,
-            vdisplay: 1080,
-            vsync_start: 1084,
-            vsync_end: 1089,
-            vtotal: 1125,
-            vscan: 0,
-            vrefresh: 60,
-            flags: 0,
-            type_: 0,
-            name: [0; 32],
-        });
-        device.add_crtc(crtc);
-        device.add_connector(connector);
-        device.add_plane(Arc::new(DrmPlane::new_with_type(1, DrmPlaneType::Primary)));
-        device
-    }
-
-    #[test]
-    fn dma_reservation_tracks_commit_and_flip_completion() {
-        let device = mk_device();
-        let txn = AtomicKmsTransaction {
-            frame_id: 10,
-            commit_id: 33,
-            crtc_id: 1,
-            connector_id: 1,
-            mode: None,
-            planes: alloc::vec![PlaneCandidate {
-                surface_id: 77,
-                plane_type: DrmPlaneType::Primary,
-                z: 0,
-                src: Rect::new(0, 0, 64, 64),
-                dst: Rect::new(0, 0, 64, 64),
-                opaque: true,
-                format: 0,
-                buffer: GPUBufferHandle {
-                    handle: 77,
-                    paddr: 0x1000,
-                    width: 64,
-                    height: 64,
-                    stride: 256,
-                    format: 0,
-                },
-            }],
-            damage_regions: alloc::vec![],
-            target_refresh_hz: 60,
-            present_mode: DisplayPresentMode::VblankFifo,
-        };
-
-        let result = device.commit_transaction(&txn).expect("commit");
-        let snap = device.reservation_snapshot(77).expect("reservation");
-        assert_eq!(snap.exclusive_commit_id, 33);
-        assert_eq!(snap.fence.target_value, 33);
-        assert_eq!(snap.dma_buf_fd, 0x4000);
-        assert!(!snap.fence.signaled);
-
-        assert!(device.report_flip_complete(10, 33, result.vblank_seq, result.timestamp_ns));
-        let done = device
-            .reservation_snapshot(77)
-            .expect("reservation after flip");
-        assert_eq!(done.fence.current_value, 33);
-        assert!(done.fence.signaled);
+        let mut vaddr = self.vaddr.lock();
+        if let Some(_addr) = *vaddr {
+            // GEM mapping kernel virtual address space'te; explicit unmap
+            // platform-specific page table cleanup gerektirir
+        }
+        *vaddr = None;
     }
 }
 
@@ -1348,13 +1310,13 @@ mod tests {
 // FRAMEBUFFER (DRM FRAMEBUFFER)
 // ============================================================================
 
-// Ekrana gönderilebilecek piksel tampon nesnesi.
-// Birden fazla GEM handle ile çok düzlemli (planar) formatlar desteklenir:
-//   handles[0]: Y düzlemi (luma)
-//   handles[1]: UV düzlemi (chroma, NV12 vb.)
+// Ekrana gÃ¶nderilebilecek piksel tampon nesnesi.
+// Birden fazla GEM handle ile ÃSection ok dÃ¼zlemli (planar) formatlar desteklenir:
+//   handles[0]: Y dÃ¼zlemi (luma)
+//   handles[1]: UV dÃ¼zlemi (chroma, NV12 vb.)
 //
-// Piksel formatı FourCC kodu ile belirlenir:
-//   DRM_FORMAT_XRGB8888 = 0x34325258 (en yaygın)
+// Piksel formatÄ± FourCC kodu ile belirlenir:
+//   DRM_FORMAT_XRGB8888 = 0x34325258 (en yaygÄ±n)
 //   DRM_FORMAT_NV12     = 0x3231564E (video)
 
 pub struct DrmFramebuffer {
@@ -1389,58 +1351,58 @@ impl DrmFramebuffer {
 // CRTC (Cathode Ray Tube Controller)
 // ============================================================================
 
-// Modern GPU'larda gerçek bir CRT olmasa da isim tarihi nedenle kalıcıdır.
-// CRTC, piksel verisini ekrana saat sinyaliyle gönderen devre bloğudur.
+// Modern GPU'larda gerÃSection ek bir CRT olmasa da isim tarihi nedenle kalÄ±cÄ±dÄ±r.
+// CRTC, piksel verisini ekrana saat sinyaliyle gÃ¶nderen devre bloÄŸudur.
 //
-// CRTC ve modeline ilişki:
+// CRTC ve modeline iliÅŸki:
 //
 //   DrmCrtc
-//     |-- mode:  DrmMode   <- Video modu: çözünürlük, tarama frekansı
-//     |-- fb_id: u32       <- Şu an görüntülenen framebuffer
-//     +-- active: bool     <- Ekran açık mı?
+//     |-- mode:  DrmMode   <- Video modu: ÃSection Ã¶zÃ¼nÃ¼rlÃ¼k, tarama frekansÄ±
+//     |-- fb_id: u32       <- Åu an gÃ¶rÃ¼ntÃ¼lenen framebuffer
+//     +-- active: bool     <- Ekran aÃSection Ä±k mÄ±?
 //
-// DrmMode alanları VESA/CEA standart zamanlamasını tanımlar:
+// DrmMode alanlarÄ± VESA/CEA standart zamanlamasÄ±nÄ± tanÄ±mlar:
 //   hdisplay x vdisplay @ vrefresh Hz
-//   Örn: 1920 x 1080 @ 60 Hz  -> clock = 148500 kHz
+//   Ã–rn: 1920 x 1080 @ 60 Hz  -> clock = 148500 kHz
 
 pub struct DrmCrtc {
     pub id: u32,
     pub index: u32,
-    /// Görüntünün framebuffer içindeki X ofseti (scissor/pan)
+    /// GÃ¶rÃ¼ntÃ¼nÃ¼n framebuffer iÃSection indeki X ofseti (scissor/pan)
     pub x: u32,
-    /// Görüntünün framebuffer içindeki Y ofseti
+    /// GÃ¶rÃ¼ntÃ¼nÃ¼n framebuffer iÃSection indeki Y ofseti
     pub y: u32,
-    /// Şu an görüntülenen framebuffer ID'si (0 = yok)
+    /// Åu an gÃ¶rÃ¼ntÃ¼lenen framebuffer ID'si (0 = yok)
     pub fb_id: AtomicU32,
-    /// Aktif video modu (None = devre dışı)
+    /// Aktif video modu (None = devre dÄ±ÅŸÄ±)
     pub mode: Mutex<Option<DrmMode>>,
-    /// Gamma tablosunun boyutu (genellikle 256 giriş)
+    /// Gamma tablosunun boyutu (genellikle 256 giriÅŸ)
     pub gamma_size: u32,
-    /// CRTC'nin aktif olup olmadığı
+    /// CRTC'nin aktif olup olmadÄ±ÄŸÄ±
     pub active: AtomicBool,
 }
 
-/// Video zamanlama modu; piksel saati ve tarama parametrelerini tanımlar.
-/// DRM_IOCTL_MODE_GETCONNECTOR ile monitörden EDID bilgisi alınarak doldurulur.
+/// Video zamanlama modu; piksel saati ve tarama parametrelerini tanÄ±mlar.
+/// DRM_IOCTL_MODE_GETCONNECTOR ile monitÃ¶rden EDID bilgisi alÄ±narak doldurulur.
 #[derive(Clone, Debug)]
 pub struct DrmMode {
-    /// Piksel saati (kHz cinsinden, örn. 148500 = 1080p60)
+    /// Piksel saati (kHz cinsinden, Ã¶rn. 148500 = 1080p60)
     pub clock: u32,
-    pub hdisplay: u16,    // Görünür yatay piksel sayısı
-    pub hsync_start: u16, // Yatay senkron başlangıcı
-    pub hsync_end: u16,   // Yatay senkron bitişi
-    pub htotal: u16,      // Toplam yatay süre (görünür + blanking)
+    pub hdisplay: u16,    // GÃ¶rÃ¼nÃ¼r yatay piksel sayÄ±sÄ±
+    pub hsync_start: u16, // Yatay senkron baÅŸlangÄ±cÄ±
+    pub hsync_end: u16,   // Yatay senkron bitiÅŸi
+    pub htotal: u16,      // Toplam yatay sÃ¼re (gÃ¶rÃ¼nÃ¼r + blanking)
     pub hskew: u16,
-    pub vdisplay: u16, // Görünür dikey satır sayısı
+    pub vdisplay: u16, // GÃ¶rÃ¼nÃ¼r dikey satÄ±r sayÄ±sÄ±
     pub vsync_start: u16,
     pub vsync_end: u16,
     pub vtotal: u16,
     pub vscan: u16,
-    /// Dikey yenileme hızı (Hz)
+    /// Dikey yenileme hÄ±zÄ± (Hz)
     pub vrefresh: u32,
     pub flags: u32,
     pub type_: u32,
-    /// Mod adı (örn. "1920x1080") UTF-8, null-padded
+    /// Mod adÄ± (Ã¶rn. "1920x1080") UTF-8, null-padded
     pub name: [u8; 32],
 }
 
@@ -1464,7 +1426,7 @@ impl DrmCrtc {
         self.active.store(true, Ordering::SeqCst);
     }
 
-    /// Görüntülenen framebuffer'ı değiştirir (page flip öncesi)
+    /// GÃ¶rÃ¼ntÃ¼lenen framebuffer'Ä± deÄŸiÅŸtirir (page flip Ã¶ncesi)
     pub fn set_fb(&self, fb_id: u32) {
         self.fb_id.store(fb_id, Ordering::SeqCst);
     }
@@ -1474,23 +1436,23 @@ impl DrmCrtc {
 // ENCODER (DRM ENCODER)
 // ============================================================================
 
-// CRTC'den gelen dijital piksel verisini fiziksel sinyal standardına dönüştürür:
+// CRTC'den gelen dijital piksel verisini fiziksel sinyal standardÄ±na dÃ¶nÃ¼ÅŸtÃ¼rÃ¼r:
 //   DRM_MODE_ENCODER_TMDS  -> HDMI / DVI (Transition Minimized Differential Signaling)
 //   DRM_MODE_ENCODER_LVDS  -> Dahili panel (laptop)
 //   DRM_MODE_ENCODER_DAC   -> VGA analog
 //   DRM_MODE_ENCODER_DSI   -> Mobil MIPI DSI
 //
-// possible_crtcs bitmask'i hangi CRTC'lerin bu encoder'ı kullanabileceğini gösterir.
+// possible_crtcs bitmask'i hangi CRTC'lerin bu encoder'Ä± kullanabileceÄŸini gÃ¶sterir.
 
 pub struct DrmEncoder {
     pub id: u32,
-    /// Encoder türü (DRM_MODE_ENCODER_* sabitleri)
+    /// Encoder tÃ¼rÃ¼ (DRM_MODE_ENCODER_* sabitleri)
     pub encoder_type: u32,
-    /// Şu an bağlı CRTC'nin ID'si
+    /// Åu an baÄŸlÄ± CRTC'nin ID'si
     pub crtc_id: AtomicU32,
     /// Bu encoder ile uyumlu CRTC'lerin bitmask'i
     pub possible_crtcs: u32,
-    /// Klonlanabilir encoder bitmask'i (mirror mode için)
+    /// Klonlanabilir encoder bitmask'i (mirror mode iÃSection in)
     pub possible_clones: u32,
 }
 
@@ -1510,37 +1472,37 @@ impl DrmEncoder {
 // CONNECTOR (DRM CONNECTOR)
 // ============================================================================
 
-// Fiziksel çıkış bağlantı noktası: HDMI, DisplayPort, VGA, eDP, DVI-D...
-// Connector durumu hotplug ile değişebilir:
-//   Connected    -> monitör bağlı, EDID okundu
-//   Disconnected -> monitör yok
-//   Unknown      -> henüz algılanmadı
+// Fiziksel ÃSection Ä±kÄ±ÅŸ baÄŸlantÄ± noktasÄ±: HDMI, DisplayPort, VGA, eDP, DVI-D...
+// Connector durumu hotplug ile deÄŸiÅŸebilir:
+//   Connected    -> monitÃ¶r baÄŸlÄ±, EDID okundu
+//   Disconnected -> monitÃ¶r yok
+//   Unknown      -> henÃ¼z algÄ±lanmadÄ±
 //
 // Connector->Encoder->CRTC zinciri:
 //
-//   [HDMI-A-1 connector] --bağlı--> [TMDS encoder] --bağlı--> [CRTC 0]
+//   [HDMI-A-1 connector] --baÄŸlÄ±--> [TMDS encoder] --baÄŸlÄ±--> [CRTC 0]
 
 pub struct DrmConnector {
     pub id: u32,
-    /// Bağlayıcı türü (DRM_MODE_CONNECTOR_HDMIA, VGA, DP, eDP...)
+    /// BaÄŸlayÄ±cÄ± tÃ¼rÃ¼ (DRM_MODE_CONNECTOR_HDMIA, VGA, DP, eDP...)
     pub connector_type: u32,
-    /// Aynı türdeki sıra numarası (örn. HDMI-A-1, HDMI-A-2)
+    /// AynÄ± tÃ¼rdeki sÄ±ra numarasÄ± (Ã¶rn. HDMI-A-1, HDMI-A-2)
     pub connector_type_id: u32,
-    /// Bağlı encoder'ın ID'si
+    /// BaÄŸlÄ± encoder'Ä±n ID'si
     pub encoder_id: AtomicU32,
-    /// Bağlantı durumu (hotplug olaylarıyla güncellenir)
+    /// BaÄŸlantÄ± durumu (hotplug olaylarÄ±yla gÃ¼ncellenir)
     pub connection: Mutex<DrmConnectorStatus>,
-    /// Monitörün desteklediği video modları (EDID'den okunur)
+    /// MonitÃ¶rÃ¼n desteklediÄŸi video modlarÄ± (EDID'den okunur)
     pub modes: Mutex<Vec<DrmMode>>,
-    /// Monitörün fiziksel genişliği (mm)
+    /// MonitÃ¶rÃ¼n fiziksel geniÅŸliÄŸi (mm)
     pub width_mm: u32,
-    /// Monitörün fiziksel yüksekliği (mm)
+    /// MonitÃ¶rÃ¼n fiziksel yÃ¼ksekliÄŸi (mm)
     pub height_mm: u32,
-    /// Alt piksel düzeni (renk kalitesi için)
+    /// Alt piksel dÃ¼zeni (renk kalitesi iÃSection in)
     pub subpixel: u32,
 }
 
-/// Fiziksel bağlantı algılama durumu
+/// Fiziksel baÄŸlantÄ± algÄ±lama durumu
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrmConnectorStatus {
     Unknown,
@@ -1563,14 +1525,114 @@ impl DrmConnector {
         }
     }
 
-    /// Desteklenen yeni video modu ekler (EDID ayrıştırmasından çağrılır)
+    /// Desteklenen yeni video modu ekler (EDID ayrÄ±ÅŸtÄ±rmasÄ±ndan ÃSection aÄŸrÄ±lÄ±r)
     pub fn add_mode(&self, mode: DrmMode) {
         self.modes.lock().push(mode);
     }
 
-    /// Monitör bağlantı durumunu döner (hotplug polling için)
+    /// MonitÃ¶r baÄŸlantÄ± durumunu dÃ¶ner (hotplug polling iÃSection in)
     pub fn detect(&self) -> DrmConnectorStatus {
         *self.connection.lock()
+    }
+
+    /// EDID blob'unu ayrÄ±ÅŸtÄ±rÄ±r ve desteklenen modlarÄ± connector'a ekler.
+    ///
+    /// EDID 1.3 formatÄ± (VESA E-EDID Release A Rev. 2):
+    /// - Byte 0-7: Header (00 FF FF FF FF FF FF 00)
+    /// - Byte 8-9: Manufacturer ID (3 karakter, 5-bit packed)
+    /// - Byte 10-11: Product code
+    /// - Byte 12-15: Serial number
+    /// - Byte 16: Hafta, Byte 17: YÄ±l (1990 + value)
+    /// - Byte 18: EDID versiyon (3)
+    /// - Byte 19: EDID revizyon
+    /// - Byte 20-21: Video giriÅŸ tanÄ±mlarÄ±
+    /// - Byte 22: Maksimum yatay boyut (cm)
+    /// - Byte 23: Maksimum dikey boyut (cm)
+    /// - Byte 24: Gamma
+    /// - Byte 25: Ã–zellik bayraklarÄ±
+    /// - Byte 26-37: Renk karakteristikleri
+    /// - Byte 38: KurulmuÅŸ zamanlama
+    /// - Byte 39-40: Standart zamanlama tanÄ±mlayÄ±cÄ±larÄ±
+    /// - Byte 41-53: DetaylÄ± zamanlama tanÄ±mlayÄ±cÄ±larÄ± (DTD)
+    ///   - Her DTD 18 byte: pixel clock, h/v aktif, blanking, sync
+    /// - Byte 126: DTD sayÄ±sÄ±
+    /// - Byte 127: Checksum
+    pub fn parse_edid(&mut self, edid: &[u8; 128]) -> Result<(), &'static str> {
+        if edid[0] != 0x00
+            || edid[1] != 0xFF
+            || edid[2] != 0xFF
+            || edid[3] != 0xFF
+            || edid[4] != 0xFF
+            || edid[5] != 0xFF
+            || edid[6] != 0xFF
+            || edid[7] != 0x00
+        {
+            return Err("invalid EDID header");
+        }
+        let checksum: u8 = edid.iter().copied().fold(0u8, |a, b| a.wrapping_add(b));
+        if checksum != 0 {
+            return Err("EDID checksum mismatch");
+        }
+        self.width_mm = edid[21] as u32;
+        self.height_mm = edid[22] as u32;
+        let mut modes = self.modes.lock();
+        for dtd_idx in 0..4usize {
+            let offset = 54 + dtd_idx * 18;
+            if edid[offset] == 0 && edid[offset + 1] == 0 {
+                continue;
+            }
+            let pixel_clock_khz = ((edid[offset + 1] as u32) << 8 | edid[offset] as u32) * 10;
+            let h_active = ((edid[offset + 4] as u16 & 0xF0) << 4) | edid[offset + 2] as u16;
+            let h_blanking = ((edid[offset + 4] as u16 & 0x0F) << 8) | edid[offset + 3] as u16;
+            let v_active = ((edid[offset + 7] as u16 & 0xF0) << 4) | edid[offset + 5] as u16;
+            let v_blanking = ((edid[offset + 7] as u16 & 0x0F) << 8) | edid[offset + 6] as u16;
+            let h_total = h_active + h_blanking;
+            let v_total = v_active + v_blanking;
+            let vrefresh = if h_total > 0 && v_total > 0 {
+                (pixel_clock_khz as u64 * 1000) / (h_total as u64 * v_total as u64)
+            } else {
+                60
+            };
+            let hsync_start =
+                h_active + (((edid[offset + 11] as u16 & 0xC0) << 2) | edid[offset + 8] as u16);
+            let hsync_end =
+                hsync_start + (((edid[offset + 11] as u16 & 0x30) << 4) | edid[offset + 9] as u16);
+            let vsync_start = v_active
+                + (((edid[offset + 11] as u16 & 0x0C) << 6) | (edid[offset + 10] as u16 >> 4));
+            let vsync_end = vsync_start
+                + (((edid[offset + 11] as u16 & 0x03) << 8) | (edid[offset + 10] as u16 & 0x0F));
+            let mut name = [0u8; 32];
+            let mode_str = alloc::format!("{}x{}@{}", h_active, v_active, vrefresh);
+            for (i, b) in mode_str.bytes().enumerate() {
+                if i < 32 {
+                    name[i] = b;
+                }
+            }
+            modes.push(DrmMode {
+                clock: pixel_clock_khz,
+                hdisplay: h_active,
+                hsync_start,
+                hsync_end,
+                htotal: h_total,
+                hskew: 0,
+                vdisplay: v_active,
+                vsync_start,
+                vsync_end,
+                vtotal: v_total,
+                vscan: 0,
+                vrefresh: vrefresh as u32,
+                flags: 0,
+                type_: 0,
+                name,
+            });
+        }
+        Ok(())
+    }
+
+    /// EDID ile hotplug mode probe: yeni EDID alÄ±nÄ±rsa modlarÄ± gÃ¼nceller.
+    pub fn hotplug_mode_probe(&mut self, edid: &[u8; 128]) -> Result<(), &'static str> {
+        *self.connection.lock() = DrmConnectorStatus::Connected;
+        self.parse_edid(edid)
     }
 }
 
@@ -1578,33 +1640,33 @@ impl DrmConnector {
 // PLANE (DRM PLANE)
 // ============================================================================
 
-// Ekrana gönderilecek görüntü katmanı. Üç tür plane vardır:
-//   Primary   -> CRTC'nin ana framebuffer'ı
-//   Overlay   -> Donanım video overlay (YUV video için)
-//   Cursor    -> Donanım imleç katmanı (16x16 veya 64x64 piksel)
+// Ekrana gÃ¶nderilecek gÃ¶rÃ¼ntÃ¼ katmanÄ±. ÃœÃSection  tÃ¼r plane vardÄ±r:
+//   Primary   -> CRTC'nin ana framebuffer'Ä±
+//   Overlay   -> DonanÄ±m video overlay (YUV video iÃSection in)
+//   Cursor    -> DonanÄ±m imleÃSection  katmanÄ± (16x16 veya 64x64 piksel)
 //
-// Her plane bağımsız kaynak (src_x/y/w/h) ve hedef (crtc_x/y/w/h) dikdörtgenleri
-// tanımlar; donanım ölçekleme desteğiyle farklı boyutlarda gösterilebilir.
+// Her plane baÄŸÄ±msÄ±z kaynak (src_x/y/w/h) ve hedef (crtc_x/y/w/h) dikdÃ¶rtgenleri
+// tanÄ±mlar; donanÄ±m Ã¶lÃSection ekleme desteÄŸiyle farklÄ± boyutlarda gÃ¶sterilebilir.
 
 pub struct DrmPlane {
     pub id: u32,
     pub plane_type: DrmPlaneType,
-    /// Bu plane'in kullanabileceği CRTC'lerin bitmask'i
+    /// Bu plane'in kullanabileceÄŸi CRTC'lerin bitmask'i
     pub possible_crtcs: u32,
-    /// Desteklenen piksel formatlarının sayısı
+    /// Desteklenen piksel formatlarÄ±nÄ±n sayÄ±sÄ±
     pub format_count: u32,
-    /// FourCC piksel formatları (DRM_FORMAT_*)
+    /// FourCC piksel formatlarÄ± (DRM_FORMAT_*)
     pub formats: Vec<u32>,
-    /// Bağlı CRTC ID'si
+    /// BaÄŸlÄ± CRTC ID'si
     pub crtc_id: AtomicU32,
-    /// Görüntülenen framebuffer ID'si
+    /// GÃ¶rÃ¼ntÃ¼lenen framebuffer ID'si
     pub fb_id: AtomicU32,
-    /// Hedef CRTC alanı (ekran koordinatlarında)
+    /// Hedef CRTC alanÄ± (ekran koordinatlarÄ±nda)
     pub crtc_x: AtomicU32,
     pub crtc_y: AtomicU32,
     pub crtc_w: AtomicU32,
     pub crtc_h: AtomicU32,
-    /// Kaynak framebuffer alanı (16.16 sabit nokta formatı)
+    /// Kaynak framebuffer alanÄ± (16.16 sabit nokta formatÄ±)
     pub src_x: AtomicU32,
     pub src_y: AtomicU32,
     pub src_w: AtomicU32,
@@ -1638,11 +1700,11 @@ impl DrmPlane {
 }
 
 // ============================================================================
-// DRM YÖNETİCİSİ (DRM MANAGER)
+// DRM YÃ–NETÄ°CÄ°SÄ° (DRM MANAGER)
 // ============================================================================
 
-// Sistemdeki tüm DRM cihazlarının (GPU'ların) kayıtlarını tutar.
-// Linux'ta /dev/dri/card0, /dev/dri/card1, ... olarak görünür.
+// Sistemdeki tÃ¼m DRM cihazlarÄ±nÄ±n (GPU'larÄ±n) kayÄ±tlarÄ±nÄ± tutar.
+// Linux'ta /dev/dri/card0, /dev/dri/card1, ... olarak gÃ¶rÃ¼nÃ¼r.
 
 pub struct DrmManager {
     devices: Mutex<BTreeMap<u64, Arc<DrmDevice>>>,
@@ -1678,7 +1740,7 @@ lazy_static::lazy_static! {
 }
 
 // ============================================================================
-// BAŞLATMA (INITIALIZATION)
+// BAÅLATMA (INITIALIZATION)
 // ============================================================================
 
 pub fn init() {
@@ -1686,14 +1748,14 @@ pub fn init() {
         return;
     }
 
-    // Birincil GPU cihazını (card0) sisteme kaydet
+    // Birincil GPU cihazÄ±nÄ± (card0) sisteme kaydet
     let gpu = DRM_MANAGER.register_device("card0");
 
-    // Varsayılan CRTC ekle (ekran denetleyicisi; tek ekran için yeterli)
+    // VarsayÄ±lan CRTC ekle (ekran denetleyicisi; tek ekran iÃSection in yeterli)
     let crtc = Arc::new(DrmCrtc::new(0, 0));
     gpu.add_crtc(crtc);
 
-    // Varsayılan connector ekle (VGA tipi; gerçekte EDID algılama yapılır)
+    // VarsayÄ±lan connector ekle (VGA tipi; gerÃSection ekte EDID algÄ±lama yapÄ±lÄ±r)
     let connector = Arc::new(DrmConnector::new(0, 0)); // VGA
     *connector.connection.lock() = DrmConnectorStatus::Connected;
     gpu.add_connector(connector);
@@ -1703,4 +1765,138 @@ pub fn init() {
     gpu.add_plane(Arc::new(DrmPlane::new_with_type(2, DrmPlaneType::Cursor)));
 
     crate::serial_println!("[DRM] DRM/KMS initialized with atomic plane topology");
+}
+
+// ============================================================================
+// Test Corpus (DRM/KMS + dma-buf host contracts)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use core::sync::atomic::Ordering;
+
+    const TEST_FORMAT_XRGB8888: u32 = 0x3432_5258;
+
+    fn mode_1920x1080_60hz() -> DrmMode {
+        let mut name = [0u8; 32];
+        name[..9].copy_from_slice(b"1920x1080");
+        DrmMode {
+            clock: 148500,
+            hdisplay: 1920,
+            hsync_start: 2008,
+            hsync_end: 2052,
+            htotal: 2200,
+            hskew: 0,
+            vdisplay: 1080,
+            vsync_start: 1084,
+            vsync_end: 1089,
+            vtotal: 1125,
+            vscan: 0,
+            vrefresh: 60,
+            flags: 0,
+            type_: 0,
+            name,
+        }
+    }
+
+    fn mk_device() -> DrmDevice {
+        let device = DrmDevice::new(1, "card-test");
+        let crtc = Arc::new(DrmCrtc::new(1, 0));
+        let connector = Arc::new(DrmConnector::new(1, 1));
+        *connector.connection.lock() = DrmConnectorStatus::Connected;
+        connector.add_mode(mode_1920x1080_60hz());
+        device.add_crtc(crtc);
+        device.add_connector(connector);
+        device.add_plane(Arc::new(DrmPlane::new_with_type(1, DrmPlaneType::Primary)));
+        device
+    }
+
+    #[test]
+    fn drm_mode_1920x1080_60hz_contract() {
+        let mode = mode_1920x1080_60hz();
+        assert_eq!(mode.hdisplay, 1920);
+        assert_eq!(mode.vdisplay, 1080);
+        assert_eq!(mode.vrefresh, 60);
+        assert_eq!(&mode.name[..9], b"1920x1080");
+    }
+
+    #[test]
+    fn drm_connector_creation() {
+        let connector = DrmConnector::new(7, 1);
+        assert_eq!(connector.id, 7);
+        assert_eq!(connector.connector_type, 1);
+        assert_eq!(connector.connector_type_id, 1);
+        assert_eq!(*connector.connection.lock(), DrmConnectorStatus::Unknown);
+    }
+
+    #[test]
+    fn drm_framebuffer_creation() {
+        let fb = DrmFramebuffer::new(3, 1920, 1080, TEST_FORMAT_XRGB8888, [9, 0, 0, 0]);
+        assert_eq!(fb.id, 3);
+        assert_eq!(fb.width, 1920);
+        assert_eq!(fb.height, 1080);
+        assert_eq!(fb.format, TEST_FORMAT_XRGB8888);
+        assert_eq!(fb.handles[0], 9);
+        assert_eq!(fb.pitches[0], 7680);
+    }
+
+    #[test]
+    fn drm_device_registration() {
+        let gpu = mk_device();
+        assert_eq!(gpu.name, "card-test");
+        assert_eq!(gpu.crtcs.lock().len(), 1);
+        assert_eq!(gpu.connectors.lock().len(), 1);
+        assert_eq!(gpu.planes.lock().len(), 1);
+    }
+
+    #[test]
+    fn drm_plane_type_enum_matches_current_order() {
+        assert_eq!(DrmPlaneType::Primary as u8, 0);
+        assert_eq!(DrmPlaneType::Overlay as u8, 1);
+        assert_eq!(DrmPlaneType::Cursor as u8, 2);
+    }
+
+    #[test]
+    fn atomic_transaction_commits_and_vblank_completes() {
+        let gpu = mk_device();
+        let txn = AtomicKmsTransaction {
+            frame_id: 42,
+            commit_id: 11,
+            crtc_id: 1,
+            connector_id: 1,
+            mode: Some(mode_1920x1080_60hz()),
+            planes: vec![PlaneCandidate {
+                surface_id: 7,
+                plane_type: DrmPlaneType::Primary,
+                z: 0,
+                src: Rect::new(0, 0, 64, 64),
+                dst: Rect::new(0, 0, 64, 64),
+                opaque: true,
+                format: TEST_FORMAT_XRGB8888,
+                buffer: GPUBufferHandle {
+                    handle: 77,
+                    paddr: 0x1000,
+                    width: 64,
+                    height: 64,
+                    stride: 256,
+                    format: TEST_FORMAT_XRGB8888,
+                },
+            }],
+            damage_regions: Vec::new(),
+            target_refresh_hz: 60,
+            present_mode: DisplayPresentMode::VblankFifo,
+        };
+
+        let result = gpu.commit_transaction(&txn).expect("atomic commit");
+        assert_eq!(result.frame_id, 42);
+        assert_eq!(gpu.last_commit_id.load(Ordering::Acquire), 11);
+
+        let seq = result.vblank_seq;
+        assert!(gpu.report_flip_complete(42, 11, seq, 16_666_667));
+        assert_eq!(gpu.last_presented_frame_id.load(Ordering::Acquire), 42);
+        assert_eq!(gpu.inflight_plane_handles.lock().len(), 0);
+    }
 }

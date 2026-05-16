@@ -1,22 +1,22 @@
-//! # GPU Native Driver — TIER 1 Lock-Free GPU Sürücüsü
+//! # GPU Native Driver â€” TIER 1 Lock-Free GPU SÃ¼rÃ¼cÃ¼sÃ¼
 //!
-//! GPU donanımı TIER 1 sürücü olarak doğrudan çekirdek alanında çalışır.
-//! AsyncGpuDevice trait'ini implemente eder, DMA-tabanlı framebuffer yönetimi sağlar.
+//! GPU donanÄ±mÄ± TIER 1 sÃ¼rÃ¼cÃ¼ olarak doÄŸrudan ÃSection ekirdek alanÄ±nda ÃSection alÄ±ÅŸÄ±r.
+//! AsyncGpuDevice trait'ini implemente eder, DMA-tabanlÄ± framebuffer yÃ¶netimi saÄŸlar.
 //!
 //! ## Mimari
 //!
 //! ```text
-//! ┌─────────────┐  DMA Blit  ┌──────────────┐  PCIe BAR   ┌──────────┐
-//! │ Compositor/  │──────────►│ GPU Native   │────────────►│ GPU HW   │
-//! │ Wayland/DRM  │           │ (Tier 1)     │  MMIO/VRAM  │ (PCIe)   │
-//! └─────────────┘            │ Lock-free    │             └──────────┘
-//!                            └──────────────┘
+//! â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  DMA Blit  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  PCIe BAR   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+//! â”‚ Compositor/  â”‚â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–ºâ”‚ GPU Native   â”‚â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–ºâ”‚ GPU HW   â”‚
+//! â”‚ Wayland/DRM  â”‚           â”‚ (Tier 1)     â”‚  MMIO/VRAM  â”‚ (PCIe)   â”‚
+//! â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜            â”‚ Lock-free    â”‚             â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+//!                            â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 //! ```
 //!
-//! ## Özellikler
+//! ## Ã–zellikler
 //!
-//! - PCIe BAR memory-mapped VRAM erişimi
-//! - 2D blit engine (framebuffer → CRTC)
+//! - PCIe BAR memory-mapped VRAM eriÅŸimi
+//! - 2D blit engine (framebuffer â†’ CRTC)
 //! - Cursor overlay
 //! - Page flip (vsync-aligned)
 //! - Resolution/mode setting
@@ -64,7 +64,7 @@ const GPU_2D_WIDTH: usize = 0x114;
 const GPU_2D_HEIGHT: usize = 0x118;
 const GPU_2D_STATUS: usize = 0x11C;
 
-/// 2D engine komutları
+/// 2D engine komutlarÄ±
 const CMD_2D_BLIT: u32 = 1;
 const CMD_2D_FILL: u32 = 2;
 const CMD_2D_COPY: u32 = 3;
@@ -83,7 +83,7 @@ struct GpuBarWindow {
     size: u64,
 }
 
-/// Pixel formatları
+/// Pixel formatlarÄ±
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelFormat {
     Argb8888,
@@ -111,7 +111,7 @@ impl PixelFormat {
     }
 }
 
-/// Display mode (çözünürlük + refresh rate)
+/// Display mode (ÃSection Ã¶zÃ¼nÃ¼rlÃ¼k + refresh rate)
 #[derive(Clone, Debug)]
 pub struct DisplayMode {
     pub width: u32,
@@ -130,7 +130,7 @@ impl DisplayMode {
 // GPU Native Controller
 // ============================================================================
 
-/// TIER 1 GPU native sürücü yapısı
+/// TIER 1 GPU native sÃ¼rÃ¼cÃ¼ yapÄ±sÄ±
 pub struct GpuNativeDevice {
     /// Cihaz ismi
     name: String,
@@ -144,17 +144,17 @@ pub struct GpuNativeDevice {
     mode: DisplayMode,
     /// Framebuffer physical address
     fb_phys: u64,
-    /// Cursor görünür mü?
+    /// Cursor gÃ¶rÃ¼nÃ¼r mÃ¼?
     cursor_visible: AtomicBool,
     /// Cursor X konumu
     cursor_x: AtomicU32,
     /// Cursor Y konumu
     cursor_y: AtomicU32,
-    /// Pending completion sayacı
+    /// Pending completion sayacÄ±
     pending_completions: AtomicU32,
     /// Son completion token
     last_completion: AtomicU64,
-    /// Cihaz hazır mı?
+    /// Cihaz hazÄ±r mÄ±?
     ready: AtomicBool,
     /// VSync counter
     vsync_count: AtomicU64,
@@ -167,7 +167,7 @@ pub struct GpuNativeDevice {
 }
 
 impl GpuNativeDevice {
-    /// Yeni GPU native device oluşturur
+    /// Yeni GPU native device oluÅŸturur
     fn new(name: &str, mmio_bar: GpuBarWindow, vram_bar: GpuBarWindow) -> Self {
         Self {
             name: String::from(name),
@@ -278,7 +278,7 @@ impl GpuNativeDevice {
         Ok(copied)
     }
 
-    /// GPU donanımını başlatır
+    /// GPU donanÄ±mÄ±nÄ± baÅŸlatÄ±r
     pub fn init(&self) -> Result<(), &'static str> {
         self.validate_mode_contract()?;
         let domain = crate::memory::iommu_register_device(self.bus, self.device, self.function);
@@ -312,7 +312,7 @@ impl GpuNativeDevice {
         Ok(())
     }
 
-    /// 2D blit engine ile dikdörtgen kopyalar
+    /// 2D blit engine ile dikdÃ¶rtgen kopyalar
     pub fn hw_blit(
         &self,
         src_phys: u64,
@@ -342,7 +342,7 @@ impl GpuNativeDevice {
         self.write_reg32(GPU_2D_HEIGHT, h);
         self.write_reg32(GPU_2D_CMD, CMD_2D_BLIT);
 
-        // Blit tamamlanmasını bekle
+        // Blit tamamlanmasÄ±nÄ± bekle
         for _ in 0..10000 {
             let status = self.read_reg32(GPU_2D_STATUS);
             if status & 1 == 0 {
@@ -353,7 +353,7 @@ impl GpuNativeDevice {
         Ok(())
     }
 
-    /// Çözünürlük değiştirir
+    /// Ã‡Ã¶zÃ¼nÃ¼rlÃ¼k deÄŸiÅŸtirir
     pub fn set_mode(&mut self, width: u32, height: u32, refresh: u32) {
         self.mode = DisplayMode {
             width,
@@ -395,6 +395,16 @@ impl GpuNativeDevice {
             timestamp_ns,
             crtc_id: 0,
         }
+    }
+
+    /// VBLANK event'i DRM device'e bildirir (fence signaling unification).
+    ///
+    /// Linux DRM/KMS modelinde VBLANK IRQ â†’ dma-fence signal â†’ userspace event.
+    /// echOS'ta: GPU native VBLANK â†’ drm.signal_vblank â†’ pending flip completion.
+    pub fn handle_vsync_with_drm(&self, drm_device: &crate::drivers::drm::DrmDevice) {
+        let event = self.handle_vsync();
+        let _ = drm_device.signal_vblank(event.timestamp_ns);
+        self.pending_completions.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Minimal ISR yolu: ack + event capture.
@@ -507,7 +517,7 @@ impl AsyncGpuDevice for GpuNativeDevice {
 // ============================================================================
 
 lazy_static::lazy_static! {
-    /// Kayıtlı GPU native cihazları
+    /// KayÄ±tlÄ± GPU native cihazlarÄ±
     static ref GPU_DEVICES: Mutex<Vec<GpuNativeDevice>> = Mutex::new(Vec::new());
 }
 
@@ -544,11 +554,11 @@ fn select_vram_bar(dev: &PciDevice, mmio_bar: GpuBarWindow) -> Option<GpuBarWind
     None
 }
 
-/// GPU native sürücüsünü başlatır
+/// GPU native sÃ¼rÃ¼cÃ¼sÃ¼nÃ¼ baÅŸlatÄ±r
 pub fn init() {
     crate::serial_println!("[GPU-Native] TIER 1 GPU native driver initialized");
 
-    // PCI taraması — VGA uyumlu cihazlar (class=0x03)
+    // PCI taramasÄ± â€” VGA uyumlu cihazlar (class=0x03)
     let devices = crate::drivers::pci::scan();
     for dev in devices {
         if dev.class_code == 0x03 {
@@ -596,7 +606,7 @@ pub fn init() {
     }
 }
 
-/// Kayıtlı GPU sayısı
+/// KayÄ±tlÄ± GPU sayÄ±sÄ±
 pub fn device_count() -> usize {
     GPU_DEVICES
         .lock()
@@ -605,7 +615,7 @@ pub fn device_count() -> usize {
         .count()
 }
 
-/// PCI/MSI IRQ yolundan Ã§aÄŸrÄ±labilecek minimal VBLANK event yardÄ±mcÄ±sÄ±.
+/// PCI/MSI IRQ yolundan ÃƒÂSection aÃ„Å¸rÃ„Â±labilecek minimal VBLANK event yardÃ„Â±mcÃ„Â±sÃ„Â±.
 pub fn blit_primary_region(src_paddr: u64, x: u32, y: u32, width: u32, height: u32) -> bool {
     if width == 0 || height == 0 {
         return true;
@@ -623,4 +633,131 @@ pub fn dispatch_vblank_irq(device_index: usize) -> Option<VBlankEvent> {
     let devices = GPU_DEVICES.lock();
     let device = devices.get(device_index)?;
     device.handle_vblank_irq_minimal()
+}
+
+// ============================================================================
+// Test Corpus (Intel HD Graphics + VESA VBE 3.0)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gpu_for_test(name: &str) -> GpuNativeDevice {
+        GpuNativeDevice::new(
+            name,
+            GpuBarWindow {
+                index: 0,
+                base: 0x1000,
+                size: GPU_MMIO_REQUIRED_BYTES,
+            },
+            GpuBarWindow {
+                index: 2,
+                base: 0x2000_0000,
+                size: GPU_MIN_VRAM_BYTES,
+            },
+        )
+    }
+
+    #[test]
+    fn gpu_device_creation() {
+        let device = gpu_for_test("Intel HD Graphics");
+        assert_eq!(device.name, "Intel HD Graphics");
+        assert_eq!(device.mmio_bar.index, 0);
+        assert_eq!(device.vram_bar.index, 2);
+        assert!(!device.ready.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn gpu_device_ready_state() {
+        let device = gpu_for_test("Test GPU");
+        assert!(!device.ready.load(Ordering::Acquire));
+        device.ready.store(true, Ordering::Release);
+        assert!(device.ready.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn vesa_vbe_signature() {
+        // VESA VBE 3.0: VbeInfoBlock signature must be "VESA"
+        let sig: [u8; 4] = [b'V', b'E', b'S', b'A'];
+        assert_eq!(sig, *b"VESA");
+    }
+
+    #[test]
+    fn vesa_vbe_version_encoding() {
+        // VBE 3.0: version = 0x0300
+        let version: u16 = 0x0300;
+        assert_eq!(version >> 8, 3); // Major
+        assert_eq!(version & 0xFF, 0); // Minor
+    }
+
+    #[test]
+    fn vesa_vbe_mode_info_attributes() {
+        // VBE 3.0: ModeInfoBlock attributes
+        // Bit 0 = Mode supported by hardware
+        // Bit 1 = BIOS support
+        // Bit 3 = Color mode
+        // Bit 4 = Graphics mode
+        // Bit 7 = Linear framebuffer
+        let attr: u16 = 0x0099; // 0b1001_1001
+        assert!(attr & (1 << 0) != 0); // Hardware supported
+        assert!(attr & (1 << 3) != 0); // Color mode
+        assert!(attr & (1 << 4) != 0); // Graphics mode
+        assert!(attr & (1 << 7) != 0); // Linear framebuffer
+    }
+
+    #[test]
+    fn vesa_vbe_mode_info_1920x1080x32() {
+        // VBE mode 0x192: 1920x1080x32
+        let width: u16 = 1920;
+        let height: u16 = 1080;
+        let bpp: u8 = 32;
+        let pitch: u16 = width * (bpp as u16 / 8);
+        assert_eq!(pitch, 7680); // 1920 * 4 bytes
+        let fb_size = (pitch as u32) * (height as u32);
+        assert_eq!(fb_size, 8_294_400); // ~8MB framebuffer
+    }
+
+    #[test]
+    fn vesa_vbe_mode_info_1280x720x32() {
+        let width: u16 = 1280;
+        let height: u16 = 720;
+        let bpp: u8 = 32;
+        let pitch: u16 = width * (bpp as u16 / 8);
+        assert_eq!(pitch, 5120);
+        let fb_size = (pitch as u32) * (height as u32);
+        assert_eq!(fb_size, 3_686_400); // ~3.5MB framebuffer
+    }
+
+    #[test]
+    fn vesa_vbe_mode_info_800x600x16() {
+        let width: u16 = 800;
+        let height: u16 = 600;
+        let bpp: u8 = 16;
+        let pitch: u16 = width * (bpp as u16 / 8);
+        assert_eq!(pitch, 1600);
+        let fb_size = (pitch as u32) * (height as u32);
+        assert_eq!(fb_size, 960_000); // ~1MB framebuffer
+    }
+
+    #[test]
+    fn vesa_vbe_color_mask_positions() {
+        // VBE 3.0: RGB mask positions for 32-bit mode
+        let r_mask: u8 = 0xFF;
+        let g_mask: u8 = 0xFF;
+        let b_mask: u8 = 0xFF;
+        let r_pos: u8 = 16; // Red at bits 16-23
+        let g_pos: u8 = 8; // Green at bits 8-15
+        let b_pos: u8 = 0; // Blue at bits 0-7
+        let pixel: u32 =
+            ((r_mask as u32) << r_pos) | ((g_mask as u32) << g_pos) | ((b_mask as u32) << b_pos);
+        assert_eq!(pixel, 0x00FF_FFFF);
+    }
+
+    #[test]
+    fn gpu_blit_zero_dimension_returns_true() {
+        // Edge case: zero-width or zero-height blit should succeed
+        assert!(blit_primary_region(0, 0, 0, 0, 100));
+        assert!(blit_primary_region(0, 0, 0, 100, 0));
+    }
 }

@@ -84,6 +84,7 @@ const TX_QUEUE_SIZE: usize = 256;
 const RX_QUEUE_SIZE: usize = 256;
 /// Maksimum paket boyutu: standart Ethernet MTU (1500) + başlık (14) = 1514
 const MAX_PACKET_SIZE: usize = 1514;
+const VIRTIO_NET_RX_BUFFER_SIZE: usize = 2048;
 /// IEEE 802.3 minimumu: 64 byte (padding ile)
 const MIN_PACKET_SIZE: usize = 64;
 /// FCS hariÃ§ minimum anlamlÄ± Ethernet Ã§erÃ§evesi
@@ -363,10 +364,12 @@ impl VirtioNetDevice {
 
         crate::serial_println!("[VIRTIO-NET] Using DMA domain 0");
 
-        let driver = VirtIONet::<VirtioHal, PciTransport, 16>::new(transport, 16).map_err(|e| {
-            crate::serial_println!("[VIRTIO-NET] Init failed: {:?}", e);
-            NetError::NoInterface
-        })?;
+        let driver =
+            VirtIONet::<VirtioHal, PciTransport, 16>::new(transport, VIRTIO_NET_RX_BUFFER_SIZE)
+                .map_err(|e| {
+                    crate::serial_println!("[VIRTIO-NET] Init failed: {:?}", e);
+                    NetError::NoInterface
+                })?;
 
         // MAC adresini cihazdan oku (VIRTIO_NET_F_MAC özelliği ile)
         let mac_bytes = driver.mac_address();

@@ -277,13 +277,18 @@ fn pci_config_address(_segment: u16, bus: u8, device: u8, function: u8, offset: 
 /// 3. Tüm SSDT tablolarını sırayla parse et (cihaz ve P-state tanımları burada)
 /// 4. `initialize_objects()` ile _INI, _STA gibi namespace nesnelerini başlat
 pub fn init_aml() {
+    if is_initialized() {
+        crate::serial_println!("[AML] Interpreter already initialized");
+        return;
+    }
+
     crate::serial_println!("[AML] Initializing AML interpreter...");
 
     // FADT'den DSDT adresini al
     let state = crate::cpu::acpi::ACPI_STATE.lock();
 
     if state.fadt_address == 0 {
-        crate::serial_println!("[AML] FADT not found — cannot initialize AML");
+        crate::serial_println!("[AML] FADT not found; AML init deferred");
         return;
     }
 
@@ -325,7 +330,8 @@ pub fn init_aml() {
         return;
     }
 
-    let dsdt_bytes = unsafe { core::slice::from_raw_parts(dsdt_virt as *const u8, dsdt_len) };
+    let dsdt_table = unsafe { core::slice::from_raw_parts(dsdt_virt as *const u8, dsdt_len) };
+    let dsdt_bytes = &dsdt_table[36..];
     crate::serial_println!("[AML] DSDT size: {} bytes", dsdt_len);
 
     // AmlContext oluştur — DebugVerbosity::None ile ayrıntılı AML log'u kapatılır
@@ -355,8 +361,9 @@ pub fn init_aml() {
             let ssdt_len = table.length as usize;
 
             if ssdt_len >= 36 && ssdt_len <= 4 * 1024 * 1024 {
-                let ssdt_bytes =
+                let ssdt_table =
                     unsafe { core::slice::from_raw_parts(ssdt_virt as *const u8, ssdt_len) };
+                let ssdt_bytes = &ssdt_table[36..];
 
                 match context.parse_table(ssdt_bytes) {
                     Ok(()) => {
@@ -437,8 +444,14 @@ pub fn invoke_method(path: &str, args: &[AmlValue]) -> Result<AmlValue, AmlError
 /// ACPI namespace'teki bir nesneyi okur.
 /// Belirtilen yol bir metot ise çalıştırır; değer ise doğrudan döndürür.
 pub fn lookup(path: &str) -> Result<AmlValue, AmlError> {
-    // invoke_method ile deneriz — metot ise çalıştırılır, değer ise namespace'ten döner
-    invoke_method(path, &[])
+    let mut ctx = AML_CONTEXT.lock();
+    let context = ctx.as_mut().ok_or(AmlError::AmlNotInitialized)?;
+    let name = AmlName::from_str(path).map_err(|_| AmlError::InvalidPath)?;
+    context
+        .namespace
+        .get_by_path(&name)
+        .cloned()
+        .map_err(AmlError::AmlCrateError)
 }
 
 /// Namespace'teki bilinen tüm kök nesneleri seri porta yazdırır (hata ayıklama için).
@@ -477,22 +490,23 @@ pub fn debug_dump_namespace() {
 // Yardımcı: Uyku Durumu Değerlendirmesi
 // ============================================================================
 
-/// ACPI S5 (Soft Off) uyku türü değerlerini AML namespace üzerinden okur.
-/// Bu değerler PM1_CNT kaydına yazılarak sistemin S5 durumuna girmesi sağlanır.
-/// AML başlatılmamışsa `None` döner; çağıran kod statik parse sonucuna geri döner.
-pub fn get_s5_sleep_type() -> Option<(u16, u16)> {
+fn get_sleep_type(path: &str, fallback: u16) -> Option<(u16, u16)> {
     if !is_initialized() {
         return None;
     }
 
-    // \_S5 paketi değerlendir — paket iki tam sayı içermelidir: [SLP_TYP_A, SLP_TYP_B]
-    match invoke_method("\\_S5", &[]) {
+    // \_Sx is usually a named Package object, not a control method. Read the
+    // namespace value first; only fall back to method invocation for firmware
+    // that implements it as executable AML.
+    let value = lookup(path).or_else(|_| invoke_method(path, &[]));
+    match value {
         Ok(AmlValue::Package(elements)) => {
             if elements.len() >= 2 {
-                let slp_a = aml_value_to_u64(&elements[0]).unwrap_or(5);
+                let slp_a = aml_value_to_u64(&elements[0]).unwrap_or(fallback as u64);
                 let slp_b = aml_value_to_u64(&elements[1]).unwrap_or(slp_a);
                 crate::serial_println!(
-                    "[AML] \\_S5 evaluated: SLP_TYP_A={} SLP_TYP_B={}",
+                    "[AML] {} evaluated: SLP_TYP_A={} SLP_TYP_B={}",
+                    path,
                     slp_a,
                     slp_b
                 );
@@ -501,14 +515,31 @@ pub fn get_s5_sleep_type() -> Option<(u16, u16)> {
             None
         }
         Ok(val) => {
-            crate::serial_println!("[AML] \\_S5 unexpected type: {:?}", val);
+            crate::serial_println!("[AML] {} unexpected type: {:?}", path, val);
             None
         }
         Err(e) => {
-            crate::serial_println!("[AML] \\_S5 evaluation failed: {:?}", e);
+            crate::serial_println!("[AML] {} evaluation failed: {:?}", path, e);
             None
         }
     }
+}
+
+/// ACPI S3 (Suspend to RAM) uyku türü değerlerini AML namespace üzerinden okur.
+pub fn get_s3_sleep_type() -> Option<(u16, u16)> {
+    get_sleep_type("\\_S3", 3)
+}
+
+/// ACPI S4 (Hibernate) uyku türü değerlerini AML namespace üzerinden okur.
+pub fn get_s4_sleep_type() -> Option<(u16, u16)> {
+    get_sleep_type("\\_S4", 4)
+}
+
+/// ACPI S5 (Soft Off) uyku türü değerlerini AML namespace üzerinden okur.
+/// Bu değerler PM1_CNT kaydına yazılarak sistemin S5 durumuna girmesi sağlanır.
+/// AML başlatılmamışsa `None` döner; çağıran kod statik parse sonucuna geri döner.
+pub fn get_s5_sleep_type() -> Option<(u16, u16)> {
+    get_sleep_type("\\_S5", 5)
 }
 
 /// AmlValue'yu u64 tam sayısına dönüştürür.

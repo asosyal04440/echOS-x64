@@ -97,6 +97,11 @@ static SMAP_ENABLED: AtomicBool = AtomicBool::new(false);
 /// talimat çekemez; böylece "ret2user" ve JIT-spray saldırıları engellenir.
 pub fn enable_smep() {
     use x86_64::registers::control::{Cr4, Cr4Flags};
+    if !crate::cpu::smep_supported() {
+        SMEP_ENABLED.store(false, Ordering::SeqCst);
+        sec_serial_println!("[SEC] SMEP unavailable in current CPU profile");
+        return;
+    }
     unsafe {
         x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'X');
         Cr4::update(|cr4| cr4.insert(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION));
@@ -115,6 +120,11 @@ pub fn enable_smep() {
 /// okumaları önlenir.
 pub fn enable_smap() {
     use x86_64::registers::control::{Cr4, Cr4Flags};
+    if !crate::cpu::smap_supported() {
+        SMAP_ENABLED.store(false, Ordering::SeqCst);
+        sec_serial_println!("[SEC] SMAP unavailable in current CPU profile");
+        return;
+    }
     unsafe {
         // SMAP'ı etkinleştirmeden önce debugcon üzerinden izleme yapılıyor
         x86_64::instructions::port::PortWriteOnly::<u8>::new(0xE9).write(b'A');

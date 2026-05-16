@@ -224,13 +224,19 @@ pub struct Ext4GroupDescriptor {
     pub bg_inode_table_lo: u32,
     pub bg_free_blocks_count_lo: u16,
     pub bg_free_inodes_count_lo: u16,
+    pub bg_used_dirs_lo: u16,
+    pub bg_flags: u16,
     pub bg_block_bitmap_hi: u32,
     pub bg_inode_bitmap_hi: u32,
     pub bg_inode_table_hi: u32,
+    pub bg_free_blocks_count_hi: u16,
+    pub bg_free_inodes_count_hi: u16,
+    pub bg_used_dirs_hi: u16,
+    pub bg_checksum: u16,
 }
 
 impl Ext4GroupDescriptor {
-    /// 32-baytlık disk formatından tanımlayıcıyı çözümler
+    /// 32-baytlık disk formatından tanımlayıcıyı çözümler (64-bit feature yoksa)
     pub fn parse_32(data: &[u8]) -> Option<Self> {
         if data.len() < 32 {
             return None;
@@ -242,9 +248,39 @@ impl Ext4GroupDescriptor {
             bg_inode_table_lo: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
             bg_free_blocks_count_lo: u16::from_le_bytes([data[12], data[13]]),
             bg_free_inodes_count_lo: u16::from_le_bytes([data[14], data[15]]),
+            bg_used_dirs_lo: u16::from_le_bytes([data[16], data[17]]),
+            bg_flags: u16::from_le_bytes([data[18], data[19]]),
             bg_block_bitmap_hi: 0,
             bg_inode_bitmap_hi: 0,
             bg_inode_table_hi: 0,
+            bg_free_blocks_count_hi: 0,
+            bg_free_inodes_count_hi: 0,
+            bg_used_dirs_hi: 0,
+            bg_checksum: u16::from_le_bytes([data[28], data[29]]),
+        })
+    }
+
+    /// 64-baytlık disk formatından tanımlayıcıyı çözümler (64-bit feature varsa)
+    pub fn parse_64(data: &[u8]) -> Option<Self> {
+        if data.len() < 64 {
+            return None;
+        }
+
+        Some(Ext4GroupDescriptor {
+            bg_block_bitmap_lo: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+            bg_inode_bitmap_lo: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+            bg_inode_table_lo: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+            bg_free_blocks_count_lo: u16::from_le_bytes([data[12], data[13]]),
+            bg_free_inodes_count_lo: u16::from_le_bytes([data[14], data[15]]),
+            bg_used_dirs_lo: u16::from_le_bytes([data[16], data[17]]),
+            bg_flags: u16::from_le_bytes([data[18], data[19]]),
+            bg_block_bitmap_hi: u32::from_le_bytes([data[32], data[33], data[34], data[35]]),
+            bg_inode_bitmap_hi: u32::from_le_bytes([data[36], data[37], data[38], data[39]]),
+            bg_inode_table_hi: u32::from_le_bytes([data[40], data[41], data[42], data[43]]),
+            bg_free_blocks_count_hi: u16::from_le_bytes([data[44], data[45]]),
+            bg_free_inodes_count_hi: u16::from_le_bytes([data[46], data[47]]),
+            bg_used_dirs_hi: u16::from_le_bytes([data[48], data[49]]),
+            bg_checksum: u16::from_le_bytes([data[60], data[61]]),
         })
     }
 
@@ -257,12 +293,48 @@ impl Ext4GroupDescriptor {
         }
     }
 
-    /// Inode tablosunun diskdeki başlangıç bloğunu döndürür
+    /// Inode bitmap'in diskdeki bloğunu döndürür (64-bit moda göre)
+    pub fn inode_bitmap(&self, is_64bit: bool) -> u64 {
+        if is_64bit {
+            ((self.bg_inode_bitmap_hi as u64) << 32) | self.bg_inode_bitmap_lo as u64
+        } else {
+            self.bg_inode_bitmap_lo as u64
+        }
+    }
+
+    /// Inode tablosunun diskdeki başlangıç bloğunu döndürür (64-bit moda göre)
     pub fn inode_table(&self, is_64bit: bool) -> u64 {
         if is_64bit {
             ((self.bg_inode_table_hi as u64) << 32) | self.bg_inode_table_lo as u64
         } else {
             self.bg_inode_table_lo as u64
+        }
+    }
+
+    /// Serbest blok sayısını döndürür (64-bit moda göre)
+    pub fn free_blocks_count(&self, is_64bit: bool) -> u32 {
+        if is_64bit {
+            (self.bg_free_blocks_count_hi as u32) << 16 | self.bg_free_blocks_count_lo as u32
+        } else {
+            self.bg_free_blocks_count_lo as u32
+        }
+    }
+
+    /// Serbest inode sayısını döndürür (64-bit moda göre)
+    pub fn free_inodes_count(&self, is_64bit: bool) -> u32 {
+        if is_64bit {
+            (self.bg_free_inodes_count_hi as u32) << 16 | self.bg_free_inodes_count_lo as u32
+        } else {
+            self.bg_free_inodes_count_lo as u32
+        }
+    }
+
+    /// Kullanılmış dizin sayısını döndürür (64-bit moda göre)
+    pub fn used_dirs_count(&self, is_64bit: bool) -> u32 {
+        if is_64bit {
+            (self.bg_used_dirs_hi as u32) << 16 | self.bg_used_dirs_lo as u32
+        } else {
+            self.bg_used_dirs_lo as u32
         }
     }
 }
@@ -338,6 +410,11 @@ impl Ext4Inode {
     /// Inode'un bir dizin olup olmadığını kontrol eder
     pub fn is_directory(&self) -> bool {
         (self.i_mode & 0xF000) == EXT4_S_IFDIR
+    }
+
+    /// Inode'un bir sembolik link olup olmadığını kontrol eder
+    pub fn is_symlink(&self) -> bool {
+        (self.i_mode & 0xF000) == EXT4_S_IFLNK
     }
 
     /// Inode'un extent ağacı kullanıp kullanmadığını kontrol eder
@@ -443,6 +520,26 @@ impl Ext4Extent {
     }
 }
 
+/// Extent index girdisi - internal node'da child block'a işaret eder
+#[derive(Clone, Copy, Debug)]
+pub struct Ext4ExtentIdx {
+    pub ei_block: u32,
+    pub ei_leaf: u64,
+}
+
+impl Ext4ExtentIdx {
+    /// Extent index girişini ham baytlardan çözümler (12 bytes)
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < 12 {
+            return None;
+        }
+        Some(Ext4ExtentIdx {
+            ei_block: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+            ei_leaf: u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as u64,
+        })
+    }
+}
+
 // ============================================================================
 // ext4 DOSYA SİSTEMİ
 // ============================================================================
@@ -538,14 +635,20 @@ impl Ext4FileSystem {
     fn load_group_descriptors(&mut self, device_data: &[u8]) -> Result<(), Ext4Error> {
         let gd_offset = self.block_size as usize;
         let gds_count = self.superblock.block_groups_count() as usize;
+        let gd_size = if self.is_64bit { 64 } else { 32 };
 
         for i in 0..gds_count {
-            let offset = gd_offset + i * 32;
-            if offset + 32 > device_data.len() {
+            let offset = gd_offset + i * gd_size;
+            if offset + gd_size > device_data.len() {
                 break;
             }
 
-            if let Some(gd) = Ext4GroupDescriptor::parse_32(&device_data[offset..]) {
+            let gd = if self.is_64bit {
+                Ext4GroupDescriptor::parse_64(&device_data[offset..])
+            } else {
+                Ext4GroupDescriptor::parse_32(&device_data[offset..])
+            };
+            if let Some(gd) = gd {
                 self.group_descriptors.push(gd);
             }
         }
@@ -559,15 +662,22 @@ impl Ext4FileSystem {
     ) -> Result<(), Ext4Error> {
         let gd_offset = self.block_size as usize;
         let gds_count = self.superblock.block_groups_count() as usize;
+        let gd_size = if self.is_64bit { 64 } else { 32 };
+        let total_bytes = gds_count.saturating_mul(gd_size);
         let gd_bytes = storage
-            .read_exact(gd_offset, gds_count.saturating_mul(32))
+            .read_exact(gd_offset, total_bytes)
             .map_err(|_| Ext4Error::ReadError)?;
 
-        for chunk in gd_bytes.chunks(32) {
-            if chunk.len() < 32 {
+        for chunk in gd_bytes.chunks(gd_size) {
+            if chunk.len() < gd_size {
                 break;
             }
-            if let Some(gd) = Ext4GroupDescriptor::parse_32(chunk) {
+            let gd = if self.is_64bit {
+                Ext4GroupDescriptor::parse_64(chunk)
+            } else {
+                Ext4GroupDescriptor::parse_32(chunk)
+            };
+            if let Some(gd) = gd {
                 self.group_descriptors.push(gd);
             }
         }
@@ -618,57 +728,247 @@ impl Ext4FileSystem {
         Ext4Inode::parse(inode_bytes.as_slice()).ok_or(Ext4Error::Corrupted)
     }
 
-    /// Mantıksal blok numarasını fiziksel blok numarasına çevirir (extent veya dolaylı)
+    /// Mantıksal blok numarasını fiziksel blok numarasına çevirir
+    /// extent tree (multi-level) veya indirect block mapping
     pub fn map_block(&self, inode: &Ext4Inode, logical_block: u32) -> Option<u64> {
         if inode.uses_extents() {
-            // i_block alanından extent başlığını çözümle
-            let header = Ext4ExtentHeader::parse(&inode.i_block[12..])?;
+            self.map_block_extent_tree(inode, logical_block)
+        } else {
+            // Indirect mapping — storage gerektirir, caller storage-aware versiyonu kullanmalı
+            self.map_block_indirect_stub(inode, logical_block)
+        }
+    }
 
-            if !header.is_leaf() {
-                return None; // Çok seviyeli extent ağaçları henüz desteklenmiyor
+    /// Storage-aware map_block — indirect block resolution için
+    pub fn map_block_with_storage(
+        &self,
+        inode: &Ext4Inode,
+        logical_block: u32,
+        storage: &Ext4Storage,
+    ) -> Option<u64> {
+        if inode.uses_extents() {
+            self.map_block_extent_tree_with_storage(inode, logical_block, storage)
+        } else {
+            self.map_block_indirect(inode, logical_block, storage)
+        }
+    }
+
+    /// Extent tree ile blok mapping — multi-level (depth > 0) destekli
+    fn map_block_extent_tree(&self, inode: &Ext4Inode, logical_block: u32) -> Option<u64> {
+        let header = Ext4ExtentHeader::parse(&inode.i_block[12..])?;
+        if header.eh_depth == 0 {
+            self.find_extent_in_leaf_data(&inode.i_block, logical_block, 12)
+        } else {
+            // Depth > 0: child block okumak için storage lazım, stub
+            None
+        }
+    }
+
+    fn map_block_extent_tree_with_storage(
+        &self,
+        inode: &Ext4Inode,
+        logical_block: u32,
+        storage: &Ext4Storage,
+    ) -> Option<u64> {
+        let header = Ext4ExtentHeader::parse(&inode.i_block[12..])?;
+        if header.eh_depth == 0 {
+            self.find_extent_in_leaf_data(&inode.i_block, logical_block, 12)
+        } else {
+            self.traverse_extent_tree_with_storage(inode, &inode.i_block, 12, &header, logical_block, storage)
+        }
+    }
+
+    /// Extent tree'de recursive descent — internal node'dan leaf'e in
+    fn traverse_extent_tree_with_storage(
+        &self,
+        inode: &Ext4Inode,
+        parent_data: &[u8],
+        header_offset: usize,
+        parent_header: &Ext4ExtentHeader,
+        logical_block: u32,
+        storage: &Ext4Storage,
+    ) -> Option<u64> {
+        if parent_header.eh_depth == 0 {
+            return self.find_extent_in_leaf_data(parent_data, logical_block, header_offset);
+        }
+
+        let idx_offset = header_offset + 12;
+        let mut child_block: Option<u64> = None;
+
+        for i in 0..parent_header.eh_entries as usize {
+            let offset = idx_offset + i * 12;
+            if offset + 12 > parent_data.len() {
+                break;
             }
-
-            // Extent'leri tarayarak mantıksal bloğu bul
-            for i in 0..header.eh_entries as usize {
-                let offset = 12 + i * 12;
-                if offset + 12 > inode.i_block.len() {
+            if let Some(idx) = Ext4ExtentIdx::parse(&parent_data[offset..]) {
+                if logical_block >= idx.ei_block {
+                    child_block = Some(idx.ei_leaf);
+                } else {
                     break;
                 }
+            }
+        }
 
-                if let Some(extent) = Ext4Extent::parse(&inode.i_block[offset..]) {
-                    let start = extent.ee_block;
-                    let len = extent.ee_len as u32;
+        let child_blk = child_block?;
+        let block_size = self.block_size as usize;
+        let child_offset = (child_blk as usize) * block_size;
+        let child_data = storage.read_exact(child_offset, block_size).ok()?;
 
-                    if logical_block >= start && logical_block < start + len {
-                        let offset = logical_block - start;
-                        return Some(extent.ee_start + offset as u64);
-                    }
+        if let Some(child_header) = Ext4ExtentHeader::parse(&child_data) {
+            if child_header.eh_magic != Ext4ExtentHeader::MAGIC {
+                return None;
+            }
+            self.traverse_extent_tree_with_storage(inode, &child_data, 0, &child_header, logical_block, storage)
+        } else {
+            None
+        }
+    }
+
+    /// Leaf level'de extent bul
+    fn find_extent_in_leaf_data(
+        &self,
+        data: &[u8],
+        logical_block: u32,
+        header_offset: usize,
+    ) -> Option<u64> {
+        let extent_offset = header_offset + 12;
+        let mut i = 0;
+        loop {
+            let offset = extent_offset + i * 12;
+            if offset + 12 > data.len() {
+                break;
+            }
+            if let Some(extent) = Ext4Extent::parse(&data[offset..]) {
+                if logical_block >= extent.ee_block && logical_block < extent.ee_block + extent.ee_len as u32 {
+                    let off = logical_block - extent.ee_block;
+                    return Some(extent.ee_start + off as u64);
+                }
+                if extent.ee_block > logical_block {
+                    break;
                 }
             }
-        } else {
-            // Dolaylı blok göstericileri (eski yöntem)
-            let blocks = inode.indirect_blocks();
-            if logical_block < 12 {
-                return Some(blocks[logical_block as usize] as u64);
+            i += 1;
+        }
+        None
+    }
+
+    /// Indirect block mapping stub (storage olmadan)
+    fn map_block_indirect_stub(&self, inode: &Ext4Inode, logical_block: u32) -> Option<u64> {
+        let blocks = inode.indirect_blocks();
+        if logical_block < 12 {
+            let blk = blocks[logical_block as usize];
+            if blk == 0 {
+                return None;
             }
+            return Some(blk as u64);
+        }
+        // Single/double/triple indirect — storage gerekir
+        None
+    }
+
+    /// Indirect block mapping — storage ile full resolution
+    fn map_block_indirect(
+        &self,
+        inode: &Ext4Inode,
+        logical_block: u32,
+        storage: &Ext4Storage,
+    ) -> Option<u64> {
+        let blocks = inode.indirect_blocks();
+        let block_size = self.block_size as usize;
+        let ptrs = block_size / 4;
+
+        if logical_block < 12 {
+            let blk = blocks[logical_block as usize];
+            if blk == 0 {
+                return None;
+            }
+            return Some(blk as u64);
+        }
+
+        let mut remaining = logical_block - 12;
+
+        if remaining < ptrs as u32 {
+            let indirect_blk = blocks[12];
+            if indirect_blk == 0 {
+                return None;
+            }
+            let offset = (indirect_blk as usize) * block_size + (remaining as usize) * 4;
+            return self.read_u32_from_storage(storage, offset).map(|v| v as u64);
+        }
+        remaining -= ptrs as u32;
+
+        let double_blocks = (ptrs * ptrs) as u32;
+        if remaining < double_blocks {
+            let double_blk = blocks[13];
+            if double_blk == 0 {
+                return None;
+            }
+            let idx1 = remaining / ptrs as u32;
+            let idx2 = remaining % ptrs as u32;
+            let offset1 = (double_blk as usize) * block_size + (idx1 as usize) * 4;
+            let indirect_blk = self.read_u32_from_storage(storage, offset1)?;
+            if indirect_blk == 0 {
+                return None;
+            }
+            let offset2 = (indirect_blk as usize) * block_size + (idx2 as usize) * 4;
+            return self.read_u32_from_storage(storage, offset2).map(|v| v as u64);
+        }
+        remaining -= double_blocks;
+
+        let triple_blocks = (ptrs * ptrs * ptrs) as u32;
+        if remaining < triple_blocks {
+            let triple_blk = blocks[14];
+            if triple_blk == 0 {
+                return None;
+            }
+            let idx1 = remaining / (ptrs * ptrs) as u32;
+            let rem1 = remaining % (ptrs * ptrs) as u32;
+            let idx2 = rem1 / ptrs as u32;
+            let idx3 = rem1 % ptrs as u32;
+            let offset1 = (triple_blk as usize) * block_size + (idx1 as usize) * 4;
+            let double_blk = self.read_u32_from_storage(storage, offset1)?;
+            if double_blk == 0 {
+                return None;
+            }
+            let offset2 = (double_blk as usize) * block_size + (idx2 as usize) * 4;
+            let indirect_blk = self.read_u32_from_storage(storage, offset2)?;
+            if indirect_blk == 0 {
+                return None;
+            }
+            let offset3 = (indirect_blk as usize) * block_size + (idx3 as usize) * 4;
+            return self.read_u32_from_storage(storage, offset3).map(|v| v as u64);
         }
 
         None
     }
 
-    /// Dosyanın tüm içeriğini aygıt verisinden okur
+    fn read_u32_from_storage(&self, storage: &Ext4Storage, offset: usize) -> Option<u32> {
+        let block_size = self.block_size as usize;
+        let block_offset = offset & !((block_size) - 1);
+        let inner_offset = offset & (block_size - 1);
+        let data = storage.read_exact(block_offset, block_size).ok()?;
+        if inner_offset + 4 > data.len() {
+            return None;
+        }
+        Some(u32::from_le_bytes([
+            data[inner_offset],
+            data[inner_offset + 1],
+            data[inner_offset + 2],
+            data[inner_offset + 3],
+        ]))
+    }
+
+    /// Dosyanın tüm içeriğini aygıt verisinden okur (device_data slice ile)
     pub fn read_file(&self, inode: &Ext4Inode, device_data: &[u8]) -> Result<Vec<u8>, Ext4Error> {
         let size = inode.size() as usize;
         let mut data = Vec::with_capacity(size);
         let block_size = self.block_size as usize;
-
         let blocks_needed = (size + block_size - 1) / block_size;
 
         for i in 0..blocks_needed {
             if let Some(phys_block) = self.map_block(inode, i as u32) {
                 let offset = phys_block as usize * block_size;
-                let read_size = block_size.min(size - data.len());
-
+                let read_size = block_size.min(size.saturating_sub(data.len()));
                 if offset + read_size <= device_data.len() {
                     data.extend_from_slice(&device_data[offset..offset + read_size]);
                 }
@@ -690,7 +990,7 @@ impl Ext4FileSystem {
         let blocks_needed = (size + block_size - 1) / block_size;
 
         for logical in 0..blocks_needed {
-            let Some(phys_block) = self.map_block(inode, logical as u32) else {
+            let Some(phys_block) = self.map_block_with_storage(inode, logical as u32, storage) else {
                 break;
             };
             let offset = phys_block as usize * block_size;
@@ -703,6 +1003,29 @@ impl Ext4FileSystem {
 
         data.truncate(size);
         Ok(data)
+    }
+
+    /// Sembolik link hedefini okur (fast symlink veya regular symlink)
+    pub fn read_symlink_from_storage(
+        &self,
+        inode: &Ext4Inode,
+        storage: &Ext4Storage,
+    ) -> Result<String, Ext4Error> {
+        if !inode.is_symlink() {
+            return Err(Ext4Error::NotSupported);
+        }
+        let size = inode.size() as usize;
+        // Fast symlink: hedef i_block içinde saklanır (size <= 60)
+        if size <= 60 {
+            let target = core::str::from_utf8(&inode.i_block[..size])
+                .map_err(|_| Ext4Error::InvalidFormat)?;
+            return Ok(target.to_string());
+        }
+        // Regular symlink: hedef data block'larda saklanır
+        let data = self.read_file_from_storage(inode, storage)?;
+        let target =
+            core::str::from_utf8(&data).map_err(|_| Ext4Error::InvalidFormat)?;
+        Ok(target.to_string())
     }
 
     /// Dizin inode'undan tüm girişleri okuyup döndürür

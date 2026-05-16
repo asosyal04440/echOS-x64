@@ -56,6 +56,7 @@ pub const MAX_INFLIGHT: usize = 1024;
 
 /// Varsayılan NVMe blok boyutu
 pub const DEFAULT_BLOCK_SIZE: u32 = 512;
+const PAGE_SIZE: u64 = 4096;
 
 // ============================================================================
 // NVMe Komut Yapısı (sıfır kopya köprüsü)
@@ -232,6 +233,25 @@ impl BridgeStats {
     }
 }
 
+fn prp_for_contiguous_phys(buffer_phys: u64, length: u32) -> Result<(u64, u64), i32> {
+    if length == 0 {
+        return Err(-22);
+    }
+    let offset = buffer_phys & (PAGE_SIZE - 1);
+    let total = offset.saturating_add(length as u64);
+    let pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+    if pages > 2 {
+        return Err(-22);
+    }
+    let prp1 = buffer_phys;
+    let prp2 = if pages == 2 {
+        (buffer_phys & !(PAGE_SIZE - 1)).saturating_add(PAGE_SIZE)
+    } else {
+        0
+    };
+    Ok((prp1, prp2))
+}
+
 // ============================================================================
 // io_uring ↔ NVMe Köprüsü
 // ============================================================================
@@ -351,7 +371,8 @@ impl IoUringNvmeBridge {
         }
 
         let cmd_id = self.next_cmd_id.fetch_add(1, Ordering::Relaxed);
-        let _cmd = NvmeIoCmd::read(self.nsid, slba, nlb.saturating_sub(1), buffer_phys, 0);
+        let (prp1, prp2) = prp_for_contiguous_phys(buffer_phys, length)?;
+        let _cmd = NvmeIoCmd::read(self.nsid, slba, nlb.saturating_sub(1), prp1, prp2);
 
         // TSC zaman damgası
         let tsc = unsafe { core::arch::x86_64::_rdtsc() };
@@ -411,7 +432,8 @@ impl IoUringNvmeBridge {
         }
 
         let cmd_id = self.next_cmd_id.fetch_add(1, Ordering::Relaxed);
-        let _cmd = NvmeIoCmd::write(self.nsid, slba, nlb.saturating_sub(1), buffer_phys, 0);
+        let (prp1, prp2) = prp_for_contiguous_phys(buffer_phys, length)?;
+        let _cmd = NvmeIoCmd::write(self.nsid, slba, nlb.saturating_sub(1), prp1, prp2);
 
         let tsc = unsafe { core::arch::x86_64::_rdtsc() };
 

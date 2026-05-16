@@ -1,6 +1,11 @@
-This project contains code derived from:
+echOS-x64 is distributed under the GNU Affero General Public License v3.0 only.
+
+This repository also contains or references third-party components with their
+own notices, including code derived from:
 - https://github.com/phip1611/blog_os
   Licensed under MIT or Apache-2.0 at your option.
   Copyright (c) 2016-2023 Philipp Oppermann and contributors.
 
-See the original repository for full license texts.
+See the original repositories and vendored component manifests for third-party
+license texts. Third-party notices do not change the AGPL-3.0-only license of
+echOS-x64 project code.

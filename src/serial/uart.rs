@@ -177,7 +177,12 @@ impl SerialPort {
         while self.line_sts() & 0x20 == 0 {
             core::hint::spin_loop();
         }
-        unsafe { self.data.write(data) }
+        let byte = match data {
+            b'\n' | b'\r' | b'\t' => data,
+            0x20..=0x7e => data,
+            _ => b'?',
+        };
+        unsafe { self.data.write(byte) }
     }
 }
 

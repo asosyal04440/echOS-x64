@@ -82,6 +82,8 @@ pub struct AcpiState {
     pub xsdt_address: u64,
     /// FADT (Fixed ACPI Description Table) fiziksel adresi — güç kayıtları burada
     pub fadt_address: u64,
+    /// FACS (Firmware ACPI Control Structure) fiziksel adresi — S3 wake vector burada
+    pub facs_address: u64,
     /// MADT (Multiple APIC Description Table) fiziksel adresi — CPU APIC ID'leri burada
     pub madt_address: u64,
     /// SRAT (System Resource Affinity Table) fiziksel adresi — NUMA node haritası
@@ -104,6 +106,18 @@ pub struct AcpiState {
     pub pm1a_cnt_blk: u16,
     /// PM1b Kontrol Bloğu I/O port adresi (0 = bu blok yok)
     pub pm1b_cnt_blk: u16,
+    /// ACPI S3 (Suspend to RAM) uyku türü A değeri — DSDT \_S3 nesnesinden okunur
+    pub slp_typ_s3_a: u16,
+    /// ACPI S3 uyku türü B değeri — PM1b_CNT'ye yazılır
+    pub slp_typ_s3_b: u16,
+    /// DSDT içinde \_S3 paketi bulundu mu
+    pub slp_typ_s3_valid: bool,
+    /// ACPI S4 (Hibernate) uyku türü A değeri — DSDT \_S4 nesnesinden okunur
+    pub slp_typ_s4_a: u16,
+    /// ACPI S4 uyku türü B değeri — PM1b_CNT'ye yazılır
+    pub slp_typ_s4_b: u16,
+    /// DSDT içinde \_S4 paketi bulundu mu
+    pub slp_typ_s4_valid: bool,
     /// ACPI S5 (Soft Off / kapatma) uyku türü A değeri — DSDT \_S5 nesnesinden okunur
     pub slp_typ_s5_a: u16,
     /// ACPI S5 uyku türü B değeri — PM1b_CNT'ye yazılır
@@ -219,6 +233,7 @@ impl AcpiState {
             rsdp_address: 0,
             xsdt_address: 0,
             fadt_address: 0,
+            facs_address: 0,
             madt_address: 0,
             srat_address: 0,
             slit_address: 0,
@@ -238,6 +253,12 @@ impl AcpiState {
             dmar_units: Vec::new(),
             pm1a_cnt_blk: 0,
             pm1b_cnt_blk: 0,
+            slp_typ_s3_a: 0,
+            slp_typ_s3_b: 0,
+            slp_typ_s3_valid: false,
+            slp_typ_s4_a: 0,
+            slp_typ_s4_b: 0,
+            slp_typ_s4_valid: false,
             slp_typ_s5_a: 0,
             slp_typ_s5_b: 0,
             acpi_enable_cmd: 0,
@@ -888,20 +909,34 @@ fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
     let acpi_enable = fadt.acpi_enable;
     let sci_int = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.sci_interrupt)) };
     let flags = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.flags)) };
+    let firmware_ctrl =
+        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.firmware_ctrl)) } as u64;
+    let fadt_base = phys_to_virt(fadt_addr);
+    let x_firmware_ctrl = if fadt_len >= 0x8C {
+        unsafe { core::ptr::read_unaligned((fadt_base + 0x84) as *const u64) }
+    } else {
+        0
+    };
 
     state.pm1a_cnt_blk = pm1a as u16;
     state.pm1b_cnt_blk = pm1b as u16;
     state.pm1a_evt_blk = pm1a_evt as u16;
+    state.facs_address = if x_firmware_ctrl != 0 {
+        x_firmware_ctrl
+    } else {
+        firmware_ctrl
+    };
     state.smi_cmd_port = smi_cmd;
     state.acpi_enable_cmd = acpi_enable;
     state.sci_interrupt = sci_int;
     state.fadt_flags = flags;
 
     crate::serial_println!(
-        "ACPI: FADT PM1a_CNT=0x{:X} PM1b_CNT=0x{:X} PM1a_EVT=0x{:X} SCI={}",
+        "ACPI: FADT PM1a_CNT=0x{:X} PM1b_CNT=0x{:X} PM1a_EVT=0x{:X} FACS=0x{:X} SCI={}",
         pm1a,
         pm1b,
         pm1a_evt,
+        state.facs_address,
         sci_int
     );
     crate::serial_println!(
@@ -932,26 +967,26 @@ fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
         );
     }
 
-    // DSDT'yi oku ve içindeki \_S5 (Soft Off) paketi için AML bayt dizisini tara
+    // DSDT'yi oku ve içindeki \_S3/\_S4/\_S5 paketleri için AML bayt dizisini tara
     let dsdt_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.dsdt)) } as u64;
     if dsdt_addr != 0 && is_canonical_lower_half(dsdt_addr) {
-        parse_dsdt_s5(dsdt_addr, state);
+        parse_dsdt_sleep_states(dsdt_addr, state);
     }
 
     state.fadt_parsed = true;
     crate::serial_println!("ACPI: FADT parsed OK — shutdown/reboot ready");
 }
 
-/// DSDT AML bayt dizisini doğrusal tarayarak `\_S5` paketini bulur ve S5 uyku türü
-/// değerlerini çıkarır. Bu değerler kapatma sırasında PM1_CNT kaydına yazılır.
+/// DSDT AML bayt dizisini doğrusal tarayarak `\_S3`, `\_S4` ve `\_S5` paketlerini
+/// bulur ve uyku türü değerlerini çıkarır. Bu değerler PM1_CNT kaydına yazılır.
 ///
-/// DSDT içinde \_S5 şu formatta saklanır:
+/// DSDT içinde uyku paketleri şu formatta saklanır:
 /// ```text
-/// "_S5_"  0x12  <PkgLength>  <ElemSayısı>  [0x0A <SLP_TYP_A>]  [0x0A <SLP_TYP_B>]
+/// "_Sx_"  0x12  <PkgLength>  <ElemSayısı>  [0x0A <SLP_TYP_A>]  [0x0A <SLP_TYP_B>]
 ///  ^imza   ^DefPackage opkodu  ^paket uzunluğu  ^eleman sayısı  ^BytePrefix
 /// ```
 /// `0x0A` = BytePrefix (8-bit değer), `0x0B` = WordPrefix (16-bit değer)
-fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
+fn parse_dsdt_sleep_states(dsdt_addr: u64, state: &mut AcpiState) {
     let header_ptr = phys_to_virt_ptr::<SdtHeader>(dsdt_addr);
     let dsdt_len = read_sdt_length(header_ptr) as usize;
 
@@ -971,80 +1006,37 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
     let data_slice =
         unsafe { core::slice::from_raw_parts(data_start as *const u8, data_end - data_start) };
 
-    for i in 0..data_slice.len().saturating_sub(20) {
-        if data_slice[i..i + 4] == s5_sig {
-            // `_S5_` bulundu — paket içeriğini parse et
-            // Format: _S5_ 0x12 PkgLen ElemSayısı 0x0A SLP_TYP_A [0x0A SLP_TYP_B] ...
-            let mut offset = i + 4;
+    if let Some((slp_a, slp_b)) = find_dsdt_sleep_package(data_slice, [b'_', b'S', b'3', b'_']) {
+        state.slp_typ_s3_a = slp_a;
+        state.slp_typ_s3_b = slp_b;
+        state.slp_typ_s3_valid = true;
+        crate::serial_println!(
+            "ACPI: DSDT \\_S3 found — SLP_TYP_A={} SLP_TYP_B={}",
+            slp_a,
+            slp_b
+        );
+    }
 
-            // DefPackage opkodu (0x12) doğrulaması
-            if offset < data_slice.len() && data_slice[offset] == 0x12 {
-                offset += 1;
+    if let Some((slp_a, slp_b)) = find_dsdt_sleep_package(data_slice, [b'_', b'S', b'4', b'_']) {
+        state.slp_typ_s4_a = slp_a;
+        state.slp_typ_s4_b = slp_b;
+        state.slp_typ_s4_valid = true;
+        crate::serial_println!(
+            "ACPI: DSDT \\_S4 found — SLP_TYP_A={} SLP_TYP_B={}",
+            slp_a,
+            slp_b
+        );
+    }
 
-                // PkgLength alanı 1-4 bayt kodlanabilir; basit 1-bayt versiyonu işlenir
-                if offset < data_slice.len() {
-                    let pkg_len_byte = data_slice[offset];
-                    if (pkg_len_byte & 0xC0) == 0 {
-                        offset += 1; // 1 bayt uzunluk kodlaması
-                    } else {
-                        // Üst 2 bit, arkasından kaç bayt daha olduğunu belirtir
-                        let following = ((pkg_len_byte >> 6) & 3) as usize;
-                        offset += 1 + following;
-                    }
-                }
-
-                // Eleman sayısı baytını atla
-                if offset < data_slice.len() {
-                    offset += 1;
-                }
-
-                // SLP_TYP_A değerini oku (0x0A = BytePrefix, 0x0B = WordPrefix)
-                if offset + 1 < data_slice.len() {
-                    let slp_a = if data_slice[offset] == 0x0A {
-                        offset += 1;
-                        let v = data_slice[offset] as u16;
-                        offset += 1;
-                        v
-                    } else if data_slice[offset] == 0x0B {
-                        // WordPrefix: iki bayt, little-endian
-                        offset += 1;
-                        let v = u16::from_le_bytes([data_slice[offset], data_slice[offset + 1]]);
-                        offset += 2;
-                        v
-                    } else {
-                        let v = data_slice[offset] as u16;
-                        offset += 1;
-                        v
-                    };
-
-                    // SLP_TYP_B değerini oku (PM1b_CNT için; bazı platformlarda aynıdır)
-                    let slp_b = if offset + 1 < data_slice.len() {
-                        if data_slice[offset] == 0x0A {
-                            offset += 1;
-                            data_slice[offset] as u16
-                        } else if data_slice[offset] == 0x0B {
-                            offset += 1;
-                            u16::from_le_bytes([data_slice[offset], data_slice[offset + 1]])
-                        } else {
-                            data_slice[offset] as u16
-                        }
-                    } else {
-                        slp_a
-                    };
-
-                    state.slp_typ_s5_a = slp_a;
-                    state.slp_typ_s5_b = slp_b;
-                    found = true;
-
-                    crate::serial_println!(
-                        "ACPI: DSDT \\_S5 found — SLP_TYP_A={} SLP_TYP_B={}",
-                        slp_a,
-                        slp_b
-                    );
-                    break;
-                }
-            }
-        }
+    if let Some((slp_a, slp_b)) = find_dsdt_sleep_package(data_slice, s5_sig) {
+        state.slp_typ_s5_a = slp_a;
+        state.slp_typ_s5_b = slp_b;
+        found = true;
+        crate::serial_println!(
+            "ACPI: DSDT \\_S5 found — SLP_TYP_A={} SLP_TYP_B={}",
+            slp_a,
+            slp_b
+        );
     }
 
     if !found {
@@ -1054,6 +1046,164 @@ fn parse_dsdt_s5(dsdt_addr: u64, state: &mut AcpiState) {
         state.slp_typ_s5_b = 5;
         crate::serial_println!("ACPI: DSDT \\_S5 not found — using QEMU default SLP_TYP=5");
     }
+}
+
+fn find_dsdt_sleep_package(data: &[u8], signature: [u8; 4]) -> Option<(u16, u16)> {
+    for i in 0..data.len().saturating_sub(20) {
+        if data[i..i + 4] != signature {
+            continue;
+        }
+
+        let mut offset = i + 4;
+        if offset >= data.len() || data[offset] != 0x12 {
+            continue;
+        }
+        offset += 1;
+        offset = skip_aml_pkg_length(data, offset)?;
+        if offset >= data.len() {
+            continue;
+        }
+        offset += 1;
+
+        let (slp_a, next) = read_aml_integer(data, offset)?;
+        let (slp_b, _) = read_aml_integer(data, next).unwrap_or((slp_a, next));
+        return Some((slp_a & 0x7, slp_b & 0x7));
+    }
+
+    None
+}
+
+fn skip_aml_pkg_length(data: &[u8], offset: usize) -> Option<usize> {
+    let first = *data.get(offset)?;
+    let following = ((first >> 6) & 0x3) as usize;
+    offset
+        .checked_add(1 + following)
+        .filter(|next| *next <= data.len())
+}
+
+fn read_aml_integer(data: &[u8], offset: usize) -> Option<(u16, usize)> {
+    match *data.get(offset)? {
+        0x00 => Some((0, offset + 1)),
+        0x01 => Some((1, offset + 1)),
+        0x0A => Some((*data.get(offset + 1)? as u16, offset + 2)),
+        0x0B => Some((
+            u16::from_le_bytes([*data.get(offset + 1)?, *data.get(offset + 2)?]),
+            offset + 3,
+        )),
+        0x0C => Some((
+            u32::from_le_bytes([
+                *data.get(offset + 1)?,
+                *data.get(offset + 2)?,
+                *data.get(offset + 3)?,
+                *data.get(offset + 4)?,
+            ]) as u16,
+            offset + 5,
+        )),
+        value => Some((value as u16, offset + 1)),
+    }
+}
+
+pub fn dsdt_sleep_type(sleep_state: u8) -> Option<(u16, u16)> {
+    let state = ACPI_STATE.lock();
+    match sleep_state {
+        3 if state.slp_typ_s3_valid => Some((state.slp_typ_s3_a, state.slp_typ_s3_b)),
+        4 if state.slp_typ_s4_valid => Some((state.slp_typ_s4_a, state.slp_typ_s4_b)),
+        5 if state.fadt_parsed => Some((state.slp_typ_s5_a, state.slp_typ_s5_b)),
+        _ => None,
+    }
+}
+
+pub fn arm_s3_resume_vector() -> bool {
+    let facs_address = {
+        let state = ACPI_STATE.lock();
+        state.facs_address
+    };
+    if facs_address == 0 || !is_canonical_lower_half(facs_address) {
+        crate::serial_println!("[ACPI] S3 blocked: FACS address unavailable");
+        return false;
+    }
+
+    if !crate::cpu::s3_resume::prepare() {
+        crate::serial_println!("[ACPI] S3 blocked: resume trampoline not ready");
+        return false;
+    }
+
+    let facs_base = phys_to_virt(facs_address);
+    let signature = unsafe { core::slice::from_raw_parts(facs_base as *const u8, 4) };
+    if signature != b"FACS" {
+        crate::serial_println!(
+            "[ACPI] S3 blocked: invalid FACS signature at 0x{:X}",
+            facs_address
+        );
+        return false;
+    }
+
+    let length = unsafe { core::ptr::read_unaligned((facs_base + 4) as *const u32) };
+    if length < 16 {
+        crate::serial_println!("[ACPI] S3 blocked: FACS length too small ({})", length);
+        return false;
+    }
+
+    unsafe {
+        core::ptr::write_unaligned(
+            (facs_base + 12) as *mut u32,
+            crate::cpu::s3_resume::resume_vector_phys(),
+        );
+        if length >= 32 {
+            core::ptr::write_unaligned((facs_base + 24) as *mut u64, 0);
+        }
+        if length >= 40 {
+            let ospm_flags = core::ptr::read_unaligned((facs_base + 36) as *const u32);
+            core::ptr::write_unaligned((facs_base + 36) as *mut u32, ospm_flags & !1);
+        }
+    }
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    crate::serial_println!(
+        "[ACPI] S3 FACS FirmwareWakingVector armed FACS=0x{:X} vector=0x{:X}",
+        facs_address,
+        crate::cpu::s3_resume::resume_vector_phys()
+    );
+    true
+}
+
+pub fn s3_resume_vector_ready() -> bool {
+    let facs_address = {
+        let state = ACPI_STATE.lock();
+        state.facs_address
+    };
+    if facs_address == 0 || !is_canonical_lower_half(facs_address) {
+        crate::serial_println!("[ACPI] S3 blocked: FACS address unavailable");
+        return false;
+    }
+
+    let facs_base = phys_to_virt(facs_address);
+    let signature = unsafe { core::slice::from_raw_parts(facs_base as *const u8, 4) };
+    if signature != b"FACS" {
+        crate::serial_println!(
+            "[ACPI] S3 blocked: invalid FACS signature at 0x{:X}",
+            facs_address
+        );
+        return false;
+    }
+
+    let length = unsafe { core::ptr::read_unaligned((facs_base + 4) as *const u32) };
+    let firmware_waking_vector =
+        unsafe { core::ptr::read_unaligned((facs_base + 12) as *const u32) };
+    let x_firmware_waking_vector = if length >= 32 {
+        unsafe { core::ptr::read_unaligned((facs_base + 24) as *const u64) }
+    } else {
+        0
+    };
+
+    if firmware_waking_vector == 0 && x_firmware_waking_vector == 0 {
+        crate::serial_println!(
+            "[ACPI] S3 blocked: FACS wake vector is not armed (FACS=0x{:X})",
+            facs_address
+        );
+        return false;
+    }
+
+    true
 }
 
 /// MADT'yi parse eder; Local APIC, IO-APIC ve kesme yönlendirme bilgilerini çıkarır.
@@ -1180,8 +1330,8 @@ fn parse_mcfg(mcfg_addr: u64, state: &mut AcpiState) {
 /// Bu bilgi, bellek yöneticisinin lokal NUMA düğümünden bellek ayırmasını sağlar.
 fn parse_srat(srat_addr: u64, _state: &mut AcpiState) {
     crate::serial_println!("ACPI: Found SRAT at 0x{:X}", srat_addr);
-    // NUMA düğüm bilgilerini parse et
-    // Şimdilik basit implementasyon — gelecekte genişletilecek
+    // SRAT table discovery is logged here; NUMA affinity extraction is owned by
+    // the topology path and must not be inferred from an unparsed table.
 }
 
 /// SLIT (System Locality Information Table) parse eder.
@@ -1189,8 +1339,8 @@ fn parse_srat(srat_addr: u64, _state: &mut AcpiState) {
 /// Değer düşükse erişim hızlı (lokal), yüksekse yavaştır (uzak).
 fn parse_slit(slit_addr: u64, _state: &mut AcpiState) {
     crate::serial_println!("ACPI: Found SLIT at 0x{:X}", slit_addr);
-    // NUMA mesafe bilgilerini parse et
-    // Şimdilik basit implementasyon — gelecekte genişletilecek
+    // SLIT table discovery is logged here; locality distance extraction remains
+    // disabled until the NUMA topology owner consumes the matrix explicitly.
 }
 
 /// MADT parse sonucuna göre CPU bilgilerini tamamlar.
@@ -1509,8 +1659,8 @@ pub struct BatteryInfo {
 /// ACPI pil durumunu okur.
 /// Gerçek implementasyonda ACPI\_SB.BAT0._BST AML metodu çağrılır.
 pub fn get_battery_info() -> Option<BatteryInfo> {
-    // ACPI pil aygıtlarını kontrol et
-    // Şimdilik basit implementasyon — sistemde pil yok
+    // No BAT-class ACPI namespace walker is registered in this boot profile.
+    // Report "no battery present" instead of fabricating charge telemetry.
     Some(BatteryInfo {
         present: false,
         charging: false,

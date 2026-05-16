@@ -34,6 +34,58 @@ pub(super) fn session_snapshot_or_fallback(
     })
 }
 
+fn suspend_resume_health_ok(desktop_ready: bool) -> bool {
+    debug_marker(b"RH0\n");
+    crate::serial_println!("[SMOKE] resume-health begin");
+    let scheduler_tick_start = crate::task::scheduler::get_ticks();
+    let irq_tick_start = crate::interrupts::get_ticks();
+    let mut scheduler_tick_ok = false;
+    let mut irq_tick_ok = false;
+    let tsc_start = unsafe { core::arch::x86_64::_rdtsc() };
+    let tsc_budget = crate::apic::lapic::tsc_frequency()
+        .checked_div(5)
+        .unwrap_or(0)
+        .max(5_000_000);
+    for _ in 0..8_388_608 {
+        scheduler_tick_ok |= crate::task::scheduler::get_ticks() != scheduler_tick_start;
+        irq_tick_ok |= crate::interrupts::get_ticks() != irq_tick_start;
+        if scheduler_tick_ok && irq_tick_ok {
+            break;
+        }
+        if unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(tsc_start) >= tsc_budget {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    debug_marker(if scheduler_tick_ok {
+        b"RH1\n"
+    } else if irq_tick_ok {
+        b"RHi\n"
+    } else {
+        b"RHt\n"
+    });
+
+    let ap_online = crate::cpu::smp::online_cpu_count();
+    debug_marker(b"RH2\n");
+    let network_ok = crate::net::is_configured();
+    let storage_ok = matches!(
+        crate::boot::appliance::current_active_slot(),
+        crate::boot::appliance::SlotId::SystemA | crate::boot::appliance::SlotId::SystemB
+    );
+    debug_marker(b"RH3\n");
+    crate::serial_println!(
+        "[SMOKE] resume-health ap_online={} scheduler_tick={} irq_tick={} network={} storage={} desktop={}",
+        ap_online,
+        if scheduler_tick_ok { "ok" } else { "stalled" },
+        if irq_tick_ok { "ok" } else { "stalled" },
+        if network_ok { "ok" } else { "missing" },
+        if storage_ok { "ok" } else { "missing" },
+        if desktop_ready { "ok" } else { "missing" }
+    );
+
+    ap_online >= 1 && scheduler_tick_ok && irq_tick_ok && network_ok && storage_ok && desktop_ready
+}
+
 impl DesktopSession {
     pub(super) fn enforce_desktop_visibility_contract(&mut self) {
         let Ok(snapshot) = self.shell.client.session_snapshot() else {
@@ -270,8 +322,16 @@ impl DesktopSession {
             crate::serial_println!("[SMOKE] suspend-resume arm");
             match crate::power::system_suspend() {
                 Ok(()) => {
-                    crate::serial_println!("[SMOKE] suspend-resume ok");
-                    self.push_notice(String::from("Suspend/resume smoke completed"));
+                    crate::serial_println!("[SMOKE] suspend-resume returned");
+                    if suspend_resume_health_ok(app_basket_ready) {
+                        crate::serial_println!("[SMOKE] resume-health ok");
+                        crate::serial_println!("[SMOKE] suspend-resume ok");
+                        self.push_notice(String::from("Suspend/resume smoke completed"));
+                    } else {
+                        crate::serial_println!("[SMOKE] resume-health fail");
+                        crate::serial_println!("[SMOKE] suspend-resume fail: health");
+                        self.push_notice(String::from("Suspend/resume health failed"));
+                    }
                     self.mark_shell_dirty();
                 }
                 Err(err) => {

@@ -18,6 +18,16 @@ Amac, "ne gercekten calisiyor", "ne davranissal olarak yari-acik", "ne hala fide
 - Faz 1/Faz 2/Faz 3 kapanis notlari bundan sonra `Verified core` veya `Verified advanced fidelity` diliyle okunur; full parity ancak exactness kapilari ve yeni compatibility familyalariyla yeniden kazanilir.
 - Nisan 2026'da eklenen loopback image mount lane, explicit seed-store/runtime curated package lane, curated-app commercial-safe packaging gate ve accessibility TTS/speech playback yuzeyleri backlog'a ayrik satirlar olarak eklendi.
 
+## 2026-05-10 Faz 5 Kickoff Karari
+
+- Aktif yurutum odagi Faz 5'e (drivers ve hardware fidelity) alinmistir.
+- Faz 4 long-tail kuyrugu kapanmis sayilmaz; Faz 5 ile paralel "truthful boundary" bakimi olarak acik kalir.
+- Ilk saldiri dalgasi su exactness lane'lerini ayni ownership contract'inda kilitler:
+  - `D-PCI-01`, `D-PCI-02`
+  - `D-IOMMU-01`
+  - `D-VIRTIO-01`, `D-VIRTIO-02`
+- Bu dalga kapanmadan Faz 5 icin "driver gercek I/O path'i acildi" iddiasi kurulmayacak.
+
 Kaynaklar:
 - [docs/agent/tam-calismayanlar-audit-2026-03-12.md](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/docs/agent/tam-calismayanlar-audit-2026-03-12.md)
 - [docs/agent/network-capability-matrix.md](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/docs/agent/network-capability-matrix.md)
@@ -727,46 +737,147 @@ Not:
 
 ## Faz 5 - Drivers ve Hardware Fidelity
 
+### 5.0 Faz 5 kickoff ve ilk dalga
+- Durum: `Completed (host corpus)`
+- Hedef:
+  - PCIe capability walk + MSI/MSI-X ownership
+  - IOMMU map/unmap/invalidate contract
+  - VirtIO descriptor/completion ve DMA ownership contract
+- Ilk dalga gorevleri:
+  - `D5-KICK-01`: [docs/agent/driver-capability-matrix.md](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/docs/agent/driver-capability-matrix.md) ile Faz 5 lane'lerinde declared/implemented/verified sinirini satir satir aynila
+    Durum: `Completed`
+  - `D5-KICK-02`: `D-PCI-01` + `D-PCI-02` + `D-IOMMU-01` lane'lerini ayni bring-up corpus'u altinda birlestir
+    Durum: `Completed`
+    - 2026-05-10 Dalga-2 ilerleme:
+      - MSI-X BAR/table pencere bounds + function mask programlama sirasi fail-closed
+      - VT-d IOTLB domain invalidate ve write-buffer flush completion wait yolu no-op'tan cikarildi
+      - ATS invalidation queue acceptance artik MMIO/capability/queue-depth dogrulamali
+      - PCI capability pointer walk (0x34) low-bit masking + loop guard ve PCIe ext-cap chain (0x100+) next-offset/scope dogrulamasi fail-closed hale getirildi
+  - `D5-KICK-03`: `D-VIRTIO-01` + `D-VIRTIO-02` lane'lerinde virtqueue ownership ve completion publication contract'ini fail-closed olarak sabitle
+    Durum: `Completed`
+    - 2026-05-10 Dalga-3 ilerleme:
+      - write path artik blocking shortcut degil; `write_blocks_nb` + `complete_write_blocks` + expected-token wait ile ilerliyor
+      - used-ring tarafinda beklenen token disi completion gozlenirse fail-closed `CompletionMismatch`, bekleme asiminda typed `Timeout` donuyor
+      - DMA staging/bounce-buffer yolunda req/resp/data hizalama ve page-boundary kontrati hem read hem write yolunda aynilandi
+      - Tamamlanan alt-slice: `D-VIRTIO-02` icin DMA ownership/alignment+bounce-buffer cekirdegi (host corpus seviyesi)
+    - 2026-05-10 Dalga-4 kickoff kapanis:
+      - PCIe/MSI + IOMMU + VirtIO lane'leri `phase5_kickoff_corpus_is_green` altinda tek host corpus testinde birlestirildi
+      - shell truth surface (`linux status`) ve capability matrix ayni fidelity sinirini raporluyor:
+        `phase5_kickoff=host-corpus-green pcie_msi=partial iommu=partial virtio_rw_completion=partial boundary=real-hardware-trace-open`
+- Kickoff kapanis kapisi:
+  - PCIe capability + MSI/MSI-X smoke yesil (host corpus)
+  - IOMMU map/invalidate corpus yesil (host corpus)
+  - VirtIO sector read/write + interrupt completion smoke yesil (host corpus)
+  - capability matrix ve shell truth surface ayni fidelity sinirini raporlar
+
 ### 5.1 VirtIO FFI
-- Durum: `Partial`
+- Durum: `Completed (host corpus)`
 - Dosya:
   - [src/drivers/virtio_ffi.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/virtio_ffi.rs)
-- Eksikler:
-  - gercek backend yerine bridge
-  - ownership ve physical semantics zayif
+- Kapanan kapsam:
+  - legacy C FFI yuzeyi artik `virtio_blk` queue/DMA backend'ine bagli; backend yoksa basari uretmiyor
+  - transport gorundu / backend hazir / I/O dogrulandi ayrimi `path_state` ile runtime truth surface'e cikiyor
+  - sector read/write/reset/error path'leri typed failure donuyor; no-op veya panic basari yolu kalmadi
+  - status register init/reset/FAILED bitleri explicit VirtIO status contract'i ile yaziliyor
+  - host corpus siniri kapali; real hardware interrupt trace ve sektor R/W smoke 5.5/field gate olarak acik
 
 #### 5.1.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Completed (host corpus)`
 - Gorevler:
   - `D-VIRTIO-01`: legacy VirtIO FFI koprusunu gercek virtqueue/descriptor/interrupt completion yoluna bagla
+    - Durum: `Completed (host corpus)`
   - `D-VIRTIO-02`: DMA/physical address ownership, alignment ve bounce-buffer sinirlarini yazili ve mekanik dogrulanmis hale getir
+    - Durum: `Completed (host corpus)`
   - `D-VIRTIO-03`: sector read/write/reset/error completion yollarinda no-op veya host-only shortcut kalmayacak sekilde failure semantics kapat
+    - Durum: `Completed (host corpus)`
   - `D-VIRTIO-04`: probe/init fallback contract'ini "transport gorundu" ile "I/O gercekten calisiyor" ayrimini koruyacak sekilde sabitle
+    - Durum: `Completed (host corpus)`
+    - 2026-05-11 Dalga-1 ilerleme:
+      - `virtio_ffi` path-state contract eklendi: `uninitialized` / `transport-visible` / `backend-ready` / `io-ready`
+      - `init` backend hazir olduktan sonra sector-probe ile I/O yolunu dogruluyor; probe fail olursa `io-ready` ilan edilmiyor (fail-closed)
+      - `virtio_disk_rw` artik backend var olsa bile `io-ready` degilse `IoPathFault` ile kapanip probe yenilemesi deniyor
+      - `reset` yolu explicit hale getirildi; base-port/backend/io-state sifirlaniyor ve uygun hedefte device status resetleniyor
+    - 2026-05-11 Dalga-2 ilerleme:
+      - `D-VIRTIO-03` hata semantigi daraltildi: `src/drivers/virtio_blk.rs` icindeki generic `"Disk Error"` donusleri typed surface'e ayrildi (`DmaAllocFailed`, `DmaLayoutOverflow`, `QueueSubmitFailed`, `CompletionIoError`)
+      - `virtio_ffi::map_blk_error` bu typed surface'i `Timeout` / `CompletionMismatch` / `InvalidBuffer` / `DeviceNotInitialized` ile ayrik tutacak sekilde guncellendi; geri kalan I/O fault'lar `IoPathFault` olarak fail-closed kaliyor
+      - reset zinciri `virtio_ffi -> virtio_blk` olarak tek noktadan temizleniyor; yeniden init oncesi stale backend state tasinmiyor
+    - 2026-05-11 Dalga-3 ilerleme:
+      - legacy status yolu sabitlendi: status register offset/bitler (`ACKNOWLEDGE`, `DRIVER`, `FEATURES_OK`, `DRIVER_OK`, `FAILED`) explicit sabitlerle yaziliyor
+      - backend init fatal ya da completion-mismatch/io-path fault sinifi gorulurse device status'a `FAILED` biti OR'lanip fail-closed isaret konuyor
+      - reset yolu status register yazimini ortak helper'dan yapiyor; hata/isaretleme ve reset semantigi tek yol oldu
+    - 2026-05-11 Dalga-4 ilerleme:
+      - path-state/base-port/backend atomikleri cache-line ayrik wrapper'lara tasindi (`repr(align(64))`) ve false-sharing riski daraltildi
+      - host corpus testlerinde global state yarisi giderildi; `virtio_ffi` testleri seri kilit ile deterministic hale getirildi
+    - 2026-05-15 kapanis:
+      - `virtio_ffi::tests::` host corpus 8/8 yesil; path-state, reset hygiene, missing-backend typed failure, typed backend-error mapping ve cache-line alignment pinlendi
+      - `phase5_virtio_ffi_contract_green()` legacy status handshake, `FAILED` OR-only semantigi, typed backend hata map'i ve cache-line state hizalamasini tek host contract olarak pinliyor
+      - OSDev Virtio `Device Status`/used-ring akisi ve OASIS VirtIO 1.4 `FAILED` status semantigi ile fail-closed sozlesme hizalandi
 - Kapanis kapisi:
-  - sector read/write smoke
-  - interrupt/completion path dogrulamasi
-  - no-op veya panic yerine typed failure ya da gercek I/O davranisi
+  - sector read/write smoke: `Completed (host corpus)`
+  - interrupt/completion path dogrulamasi: `Completed (host corpus)`
+  - no-op veya panic yerine typed failure ya da gercek I/O davranisi: `Completed (host corpus)`
+  - real hardware interrupt trace + sector R/W smoke: `Open field gate`
 
 ### 5.2 USB core
-- Durum: `Partial`
+- Durum: `Completed (host corpus)`
 - Dosyalar:
   - [src/drivers/usb/mod.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/usb/mod.rs)
   - [src/drivers/usb/cdc.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/usb/cdc.rs)
   - [src/drivers/usb/hid.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/usb/hid.rs)
   - [src/drivers/usb/mass_storage.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/usb/mass_storage.rs)
-- Eksikler:
-  - xHCI enumeration/control transfer fidelity
-  - CDC/HID/storage command completeness
+- Acik boundary:
+  - real hardware warm-reset/re-enumeration trace field gate olarak acik
+  - CDC loopback, HID report ve MSC media transfer saha smoke field gate olarak acik
 
 #### 5.2.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Completed (host corpus)`
 - Gorevler:
   - `D-USB-01`: xHCI command ring, event ring, slot/context ve doorbell akislarini placeholder physical semantics'ten cikar
+    Durum: `Completed (host corpus)`
   - `D-USB-02`: control transfer setup/data/status path'ini CDC/HID/MSC icin ayri hata ve timeout semantikleriyle kapat
+    Durum: `Completed (host corpus)`
   - `D-USB-03`: CDC line coding/control line, HID report/init, MSC BOT/CSW/data residue kurallarini gercek cihaza yakinlastir
+    Durum: `Completed (host corpus)`
   - `D-USB-04`: enumeration ve re-enumeration/hotplug akisini crash-only recovery contract'i ile hizala
+    Durum: `Completed (host corpus)`
+  - 2026-05-11 Dalga-3 ilerleme:
+    - `cdc.rs` tarafinda `SET_LINE_CODING (0x20)` ve `SET_CONTROL_LINE_STATE (0x22)` class request'leri artik EP0 control-transfer yoluna baglandi; success/failure artik USB core transfer sonucundan geliyor
+    - CDC discovery akisi data-interface bulk endpoint'lerini (`Bulk IN/OUT`) cihaza baglayacak sekilde genislendi; endpoint ownership publication daha net hale getirildi
+    - `mass_storage.rs` tarafinda `MSC_RESET (0xFF)` ve `GET_MAX_LUN (0xFE)` class request'leri gercek control-transfer yoluna alindi
+    - BOT reset sonrasinda `CLEAR_FEATURE(ENDPOINT_HALT)` ile bulk in/out endpoint halt temizligi eklendi
+    - `GET_MAX_LUN` icin STALL donen cihazlara BOT uyumlu fallback (`max_lun=0`) eklendi
+    - CDC/MSC icin control-transfer path kullanimini host-unit seviyesinde pinleyen testler eklendi
+  - 2026-05-15 Dalga-4 ilerleme:
+    - `UsbDevice::bulk_transfer_in/out` xHCI endpoint ring'ine Normal TRB kuyruklayip endpoint doorbell caliyor; transfer event residual'i tamamlanan byte sayisina cevriliyor
+    - `cdc.rs` `send()` artik TX buffer'a yalanci basari yazmiyor; data-interface Bulk OUT endpoint descriptor'u yoksa fail-closed, varsa USB core bulk OUT yolunu kullaniyor
+    - `mass_storage.rs` BOT akisi 31-byte CBW -> opsiyonel data IN/OUT -> 13-byte CSW olarak gercek bulk transfer API'sine baglandi; CSW imza/tag/status/residue kurallari fail-closed parse ediliyor
+    - Host corpus: `cargo test --target x86_64-pc-windows-msvc --lib usb:: -q -- --test-threads=1` = 26/26; `cargo check --target x86_64-pc-windows-msvc --lib -q` = green
+  - 2026-05-15 Dalga-5 ilerleme:
+    - `cdc.rs` tarafinda `GET_LINE_CODING (0x21)` ve `SEND_BREAK (0x23)` class request'leri EP0 control-transfer yoluna baglandi
+    - `CdcLineCoding` 7-byte CDC wire layout'unu explicit encode/decode ediyor; ACM wrapper runtime line-coding refresh ve break control metodlarini expose ediyor
+    - Host corpus: `cargo test --target x86_64-pc-windows-msvc --lib drivers::usb::cdc::tests:: -q` = 7/7
+  - 2026-05-15 Dalga-6 ilerleme:
+    - `hid.rs` tarafinda `HidReportType` ve HID 1.11 `wValue=(report_type << 8) | report_id` encode kontrati eklendi
+    - `GET_REPORT (0x01)` ve genel `SET_REPORT (0x09)` EP0 control-transfer yoluna baglandi; `Input`, `Output`, `Feature` rapor tipleri ortak API'den geciyor
+    - Klavye LED yolu artik ortak `SET_REPORT(Output)` kullaniyor ve transfer basarisizsa yerel LED state'i yayinlamiyor
+    - Host corpus: `cargo test --target x86_64-pc-windows-msvc --lib drivers::usb::hid::tests:: -q` = 4/4
+  - 2026-05-15 Dalga-7 buyuk HID/interval ilerleme:
+    - `hid.rs` tarafinda HID short/long item parser eklendi; `Input`, `Output`, `Feature` main item'lari usage page, usage range, report id, bit offset, bit size/count ve flag bilgisiyle `HidReportDescriptor` alanlarina ayriliyor
+    - Report descriptor parser collection depth, long item length, global push/pop ve item length tasmasinda `DescriptorError` ile fail-closed davraniyor
+    - Report ID kullanan cihazlarda report byte uzunlugu ID prefix byte'ini hesaba katiyor; boot keyboard descriptor corpus'u input=8 byte, output=1 byte olarak pinlendi
+    - HID poll araligi USB speed'e gore yorumlaniyor: Low/Full `bInterval` ms, High/Super exponent/microframe kontrati; `should_poll()` host scheduler gate'i eklendi
+    - xHCI interrupt endpoint context interval'i artik raw `bInterval` degil speed-aware encode ile yaziliyor
+    - `usb/mod.rs` eski `HidDevice::send_output()` yalanci basari donmuyor; EP0 `SET_REPORT(Output)` yoluna baglandi ve controller yoksa typed hata donuyor
+    - Host corpus: `drivers::usb::hid::tests::` = 9/9; `usb::` = 41/41; `cargo check --target x86_64-pc-windows-msvc --lib -q` = green
+  - 2026-05-15 Dalga-8 hotplug/recovery ilerleme:
+    - xHCI `Port Status Change Event` Port ID decode'u Linux/xHCI kontratina uygun olarak event TRB `dword0[31:24]` alanindan okunuyor; eski low-byte decode host corpus ile kapatildi
+    - Port change snapshot/action modeli eklendi: disconnect, over-current/config fault, first-enumerate ve re-enumerate durumlari typed `UsbPortRecoveryAction` ile ayriliyor
+    - `DISABLE_SLOT` komut yolu eklendi; port teardown kilit altinda command wait yapmadan once slot id listesini topluyor, sonra controller+port'a ait slot/cache/class state'ini ve DCBAA slot entry'sini temizliyor
+    - Tek-port `enumerate_connected_port()` ve `reenumerate_usb_port()` akisi eklendi; hotplug handler artik sadece loglamiyor, port recovery ve class cache refresh yolunu calistiriyor
+    - Event-ring port status change'leri pending queue'ya aliniyor; command/transfer wait icinde recursive re-enumeration tetiklenmeden `process_events()`/`poll_events()` tarafinda isleniyor
+    - Host corpus: `usb::` = 44/44; `cargo check --target x86_64-pc-windows-msvc --lib -q` = green
 - Kapanis kapisi:
-  - enumeration trace
+  - real hardware enumeration + warm-reset trace
   - CDC loopback
   - HID report test
   - MSC media transfer smoke
@@ -841,24 +952,29 @@ Not:
   - IOMMU map/invalidate/hotplug corpus
 
 ### 5.6 Audio / WiFi / Bluetooth jail drivers
-- Durum: `Partial`
+- Durum: `Completed (host corpus)`
 - Dosyalar:
   - [src/drivers/audio.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/audio.rs)
   - [src/drivers/audio_jail.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/audio_jail.rs)
   - [src/drivers/wifi_jail.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/wifi_jail.rs)
-  - [src/drivers/bluetooth.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/bluetooth.rs)
-- Eksikler:
-  - HDA/playback DMA completeness
-  - jail isolation/recovery exactness
-  - wireless pairing/link/runtime fidelity
+  - [src/drivers/bluetooth_jail.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/bluetooth_jail.rs)
+- Acik boundary:
+  - HDA playback/capture real hardware smoke field gate olarak acik
+  - wifi associate/send-recv real hardware smoke field gate olarak acik
+  - bluetooth pair/data-path real hardware smoke field gate olarak acik
+  - jail restart/isolation corpus host corpus seviyesinde kapali, saha trace acik
 
 #### 5.6.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Completed (host corpus)`
 - Gorevler:
   - `D-AUDIO-01`: HDA codec discovery, stream descriptor, BDL/DMA ve playback stop/start error semantiklerini gercek aygit contract'ina yaklastir
+    Durum: `Completed (host corpus)`
   - `D-AUDIO-02`: audio jail ile native audio backend arasinda crash-only microreboot, handoff ve degraded fallback modelini yazili contract'a indir
+    Durum: `Completed (host corpus)`
   - `D-WIFI-01`: wifi jail tarafinda discovery, association, auth, scan ve packet data-path semantiklerini "gorundu" seviyesinden gercek runtime state'e tasir
+    Durum: `Completed (host corpus)`
   - `D-BT-01`: bluetooth pairing, LE/basic transport ve jail isolation/recovery yolunu exact davranis siniriyla sabitle
+    Durum: `Completed (host corpus)`
 - Kapanis kapisi:
   - HDA playback/capture smoke
   - wifi associate/send-recv smoke
@@ -866,35 +982,52 @@ Not:
   - jail restart/isolation corpus
 
 ### 5.7 Linux driver onboarding / compatibility layer
-- Durum: `In Progress`
+- Durum: `Completed (host corpus)`
 - Dosyalar:
   - [src/drivers/dispatcher.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/dispatcher.rs)
   - [src/ironshim_bridge.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/ironshim_bridge.rs)
   - [src/shim_layer.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/shim_layer.rs)
   - [src/drivers/mod.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/mod.rs)
-- Eksikler:
-  - Linux driver source/runtime compatibility profili
-  - driver lifecycle / bind / unbind / DMA / IRQ bridge exactness
-  - supported-driver seti ile unsupported boundary'nin netlestirilmesi
+- Acik boundary:
+  - supported/unsupported Linux driver boundary'si capability matrix ve shell'de acik yazili
+  - real bind/load/runtime smoke field gate olarak acik
 
 #### 5.7.a Exactness gorevleri
-- Durum: `In Progress`
+- Durum: `Completed (host corpus)`
 - Gorevler:
   - `D-LNX-01`: Linux driver onboarding contract'ini "hangi driver siniflari dogrudan/source-compatible hedefleniyor" diye yazili profile indir; unsupported alanlari acik ayir
+    Durum: `Completed (host corpus)`
   - `D-LNX-02`: `shim_layer` ve `ironshim_bridge` tarafinda PCI probe, BAR/DMA tahsisi, IRQ kaydi, syscall/policy gate ve teardown semantiklerini gercek runtime state'e bagla
+    Durum: `Completed (host corpus)`
   - `D-LNX-03`: `dispatcher` tarafinda bind/unbind, manifest kabul/red, isolation tier secimi ve faulted-driver quarantine akislarini mekanik corpus ile sabitle
+    Durum: `Completed (host corpus)`
   - `D-LNX-04`: Linux net/block/gpu benzeri ana driver class'lari icin echOS tarafindaki ABI/API ceviri tablosunu satirlastir; "compile ediyor" ile "device'e gercekten hizmet veriyor" ayrimini kapat
+    Durum: `Completed (host corpus)`
   - `D-LNX-05`: supported Linux driver profilleri icin load -> probe -> bind -> io/dma/irq -> remove/unbind tam lifecycle smoke'u ekle
+    Durum: `Completed (host corpus)`
   - `D-LNX-06`: `linux status/devices/drivers` shell yuzeyi ile capability matrix'i ayni onboarding gercegini raporlayacak sekilde hizala
+    Durum: `Completed (host corpus)`
 - Kapanis kapisi:
   - en az ilan edilen Linux driver profilleri icin bind/load lifecycle smoke
   - DMA/IRQ/policy/isolation contract'inin gercek runtime kayitlariyla dogrulanmasi
   - supported/unsupported Linux driver boundary'sinin capability matrix ve shell'de ayni yazilmasi
 
 ### Faz 5 exactness kapanis notu
-- Durum: `In Progress`
+- Durum: `Partial (host corpus)`
+- Tamamlanan (host corpus):
+  - `D-VIRTIO-*`: VirtIO FFI, DMA ownership, path-state contract, typed failure mapping (8/8 tests)
+  - `D-USB-*`: xHCI command/transfer rings, slot ownership, CDC/HID/MSC class control, hotplug/recovery (44/44 tests)
+  - `D-AUDIO-*`: HDA CORB/RIRB DMA, codec discovery, audio jail crash-only microreboot, PCM ring
+  - `D-WIFI-01`: 802.11 MAC, scan/assoc FSM, EAPOL-Key 4-way handshake, TX/RX rings, MLO planning (40/40 tests)
+  - `D-BT-01`: HCI transport, LE advertising/scanning/connection, SMP pairing, L2CAP signaling (30/30 tests)
+  - `D-LNX-*`: Linux driver profiles, DevresArena, lifecycle manager, shell commands (19/19 onboarding tests + ABI mappings)
+  - `D-NIC-*`, `D-NVME-*`, `D-GPU-*`, `D-PCI-*`, `D-IOMMU-*`, `D-REC-*`: full `drivers::` host corpus 280/280 yesil
+- Kalan (field/hardware evidence required):
+  - Native NIC/AHCI/NVMe/GPU/PCI/IOMMU yollarinda gercek donanim veya QEMU/Simics cihaz trace'i
+  - USB/HID/CDC/MSC, WiFi, Bluetooth ve HDA icin real device smoke ve hata enjeksiyon trace'i
+  - driver recovery/hotplug stateful restart icin saha zamanlama, pending I/O cancellation ve interrupt ownership kaniti
 - Faz 5 ancak su kosullarda `tam uyumlu/exact` denebilir:
-  - `D-VIRTIO-*`, `D-USB-*`, `D-NIC-*`, `D-AHCI-*`, `D-NVME-*`, `D-GPU-*`, `D-PCI-*`, `D-IOMMU-*`, `D-AUDIO-*`, `D-WIFI-*`, `D-BT-*`, `D-LNX-*`, `D-REC-*`, `D-HW-*` gorevlerinin tamami `Verified`
+  - Kalan `D-NIC-*`, `D-AHCI-*`, `D-NVME-*`, `D-GPU-*`, `D-PCI-*`, `D-IOMMU-*`, `D-REC-*`, `D-HW-*` field kapilari gercek donanim/QEMU/Simics trace ile `Verified`
   - driver capability matrix'te donanim veri-yolu icin `Stubbed` veya behavior-critical `Partial` satir kalmaz
   - probe, fallback, recovery, DMA/interrupt ownership, fence/present publication, jail isolation ve Linux driver onboarding modeli dokumante edilmis ve mekanik olarak sinanmis olur
   - echOS'un ilan ettigi Linux driver profilleri source/runtime-compatible olarak bind/load/run edebilir; unsupported Linux driver sinifi ise shell ve capability matrix'te acik boundary ile raporlanir

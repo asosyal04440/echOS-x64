@@ -432,39 +432,39 @@ impl PowerManager {
     fn enter_acpi_state(&self, state: SleepState) -> Result<(), PmError> {
         *self.system_state.lock() = state;
 
-        // ACPI PM1a kontrol yazmacına yaz
-        // PM1a_CNT tipik adresi: 0x404 (FADT tablosundan okunmalı)
-        let pm1a_cnt_addr = 0x404u16;
+        let (pm1a_cnt_addr, pm1b_cnt_addr) = acpi_pm1_control_blocks()?;
+        if state == SleepState::S3 {
+            if !crate::cpu::acpi::arm_s3_resume_vector()
+                || !crate::cpu::acpi::s3_resume_vector_ready()
+            {
+                return Err(PmError::InvalidState);
+            }
+        }
+        let (sleep_type_a, sleep_type_b) = acpi_sleep_type(state)?;
+        let sleep_value_a = pm1_sleep_value(sleep_type_a);
+        let sleep_value_b = pm1_sleep_value(sleep_type_b);
 
         match state {
             SleepState::S1 => {
-                // S1: CPU halt, c haz w/o power loss
                 crate::serial_println!("[PM] Entering S1 (Power On Suspend)");
-                unsafe {
-                    use x86_64::instructions::port::Port;
-                    let mut port = Port::<u16>::new(pm1a_cnt_addr);
-                    // SLP_TYP = S1 (0x00) | SLP_EN = bit 13
-                    port.write((0x00 << 10) | (1 << 13));
-                }
+                write_pm1_control(pm1a_cnt_addr, pm1b_cnt_addr, sleep_value_a, sleep_value_b);
             }
             SleepState::S3 => {
-                // S3: RAM'e askıya al
                 crate::serial_println!("[PM] Entering S3 (Suspend to RAM)");
-                unsafe {
-                    use x86_64::instructions::port::Port;
-                    let mut port = Port::<u16>::new(pm1a_cnt_addr);
-                    // SLP_TYP = S3 (0x05) | SLP_EN = bit 13
-                    port.write((0x05 << 10) | (1 << 13));
+                if !crate::cpu::s3_resume::enter_pm1_sleep(
+                    pm1a_cnt_addr,
+                    pm1b_cnt_addr,
+                    sleep_value_a,
+                    sleep_value_b,
+                ) {
+                    crate::serial_println!("[PM] S3 continuation did not resume from firmware wake");
+                    return Err(PmError::InvalidState);
                 }
+                crate::serial_println!("[PM] S3 continuation resumed from firmware wake");
             }
             SleepState::S4 => {
-                // S4: Diske askıya al
                 crate::serial_println!("[PM] Entering S4 (Hibernate)");
-                unsafe {
-                    use x86_64::instructions::port::Port;
-                    let mut port = Port::<u16>::new(pm1a_cnt_addr);
-                    port.write((0x06 << 10) | (1 << 13));
-                }
+                write_pm1_control(pm1a_cnt_addr, pm1b_cnt_addr, sleep_value_a, sleep_value_b);
             }
             SleepState::S5 => {
                 // Sistemi kapat
@@ -475,8 +475,7 @@ impl PowerManager {
                     let mut qemu_port = Port::<u16>::new(0x604);
                     qemu_port.write(0x2000);
                     // Fallback: PM1a_CNT
-                    let mut port = Port::<u16>::new(pm1a_cnt_addr);
-                    port.write((0x07 << 10) | (1 << 13));
+                    write_pm1_control(pm1a_cnt_addr, pm1b_cnt_addr, sleep_value_a, sleep_value_b);
                 }
             }
             _ => {}
@@ -496,6 +495,31 @@ impl PowerManager {
     /// DRAM içeriği korunur, diğer donanım kapatılır.
     pub fn suspend_to_ram(&self) -> Result<(), PmError> {
         self.enter_sleep(SleepState::S3)
+    }
+
+    pub fn resume_from_firmware_wake(&self, state: SleepState) -> Result<(), PmError> {
+        crate::serial_println!("[PM] Firmware wake resume begin {:?}", state);
+
+        let devices: Vec<Arc<PowerManageable>> = self.devices.lock().values().cloned().collect();
+        for device in devices.iter() {
+            device.resume()?;
+            if let Some(cb) = device.complete_cb {
+                cb(device.device_id);
+            }
+        }
+
+        let mut stats = self.stats.lock();
+        stats.suspend_count += 1;
+        stats.resume_count += 1;
+        stats.last_suspend_time = 0;
+        if state as u32 > stats.deepest_state as u32 {
+            stats.deepest_state = state;
+        }
+
+        *self.system_state.lock() = SleepState::S0;
+        self.suspending.store(false, Ordering::SeqCst);
+        crate::serial_println!("[PM] Firmware wake resume complete {:?}", state);
+        Ok(())
     }
 
     /// Sistemi S5 (Yumuşak Kapatma) durumuna sokar.
@@ -519,6 +543,45 @@ impl PowerManager {
     /// Sistemin şu an askıya alım sürecinde olup olmadığını döner.
     pub fn is_suspending(&self) -> bool {
         self.suspending.load(Ordering::SeqCst)
+    }
+}
+
+fn acpi_pm1_control_blocks() -> Result<(u16, u16), PmError> {
+    let state = crate::cpu::acpi::ACPI_STATE.lock();
+    if !state.fadt_parsed || state.pm1a_cnt_blk == 0 {
+        crate::serial_println!("[PM] FADT PM1 control block unavailable");
+        return Err(PmError::InvalidState);
+    }
+    Ok((state.pm1a_cnt_blk, state.pm1b_cnt_blk))
+}
+
+fn acpi_sleep_type(state: SleepState) -> Result<(u16, u16), PmError> {
+    match state {
+        SleepState::S1 => Ok((0, 0)),
+        SleepState::S3 => crate::cpu::acpi_aml::get_s3_sleep_type()
+            .or_else(|| crate::cpu::acpi::dsdt_sleep_type(3))
+            .ok_or(PmError::InvalidState),
+        SleepState::S4 => crate::cpu::acpi_aml::get_s4_sleep_type()
+            .or_else(|| crate::cpu::acpi::dsdt_sleep_type(4))
+            .ok_or(PmError::InvalidState),
+        SleepState::S5 => Ok(crate::cpu::acpi_aml::get_s5_sleep_type()
+            .or_else(|| crate::cpu::acpi::dsdt_sleep_type(5))
+            .unwrap_or((5, 5))),
+        SleepState::S0 => Ok((0, 0)),
+    }
+}
+
+fn pm1_sleep_value(sleep_type: u16) -> u16 {
+    ((sleep_type & 0x7) << 10) | (1 << 13)
+}
+
+fn write_pm1_control(pm1a: u16, pm1b: u16, value_a: u16, value_b: u16) {
+    unsafe {
+        use x86_64::instructions::port::Port;
+        Port::<u16>::new(pm1a).write(value_a);
+        if pm1b != 0 {
+            Port::<u16>::new(pm1b).write(value_b);
+        }
     }
 }
 
@@ -547,6 +610,8 @@ pub enum PmError {
     SuspendFailed,
     /// Devam ettirme aşamasında hata
     ResumeFailed,
+    /// ACPI/FADT durumu uyku geçişi için yeterli değil
+    InvalidState,
 }
 
 // ============================================================================

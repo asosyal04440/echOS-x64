@@ -47,6 +47,7 @@ Tarih: 2026-04-10
 - Vendor-spesifik kapalı GPU queue formatları ve firmware-only DMA yüzeyleri hâlâ cihaz datasheet/errata erişimi gerektiriyor; repo-visible generic native GPU ve VirtIO-GPU BAR/DMA metadata sözleşmesi ise fail-closed kapanmış durumda.
 - DNS lane'inde DNSSEC doğrulama/corpus koşusu hâlâ ayrı doğrulama işi; port ve query-id tahmini kapandı ama doğrulama zinciri için negatif/bozuk imza korpusu koşulmadı.
 - Kernel stack lane'inde gerçek guard page + containment var, ancak task başına kernel stack boyutu hâlâ 16 KiB; derin VFS/loader zincirlerinde boyut artırımı veya daha agresif corpus/smoke hâlâ ayrı dayanıklılık işi.
+- NVMe/AHCI/PCIe/MSI/IOMMU exactness ve gerçek cihaz davranışı hâlâ tam kapanmamış durumda; repo-visible yapısal düzeltmeler sağlandı ancak gerçek NVMe cold/warm reset, CAP.TO timeout davranışı, live namespace discovery, controller-specific I/O queue timing ve power-loss smoke gibi fiziksel/metal doğrulama adımları ayrı dayanıklılık işi olarak kalmaya devam ediyor.
 
 ### Gerçek Öncelik Sırası
 

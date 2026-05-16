@@ -3842,7 +3842,25 @@ fn is_kernel_range(start: u64, len: u64) -> bool {
         return false;
     }
     let end = start.saturating_add(len.saturating_sub(1));
-    start >= KERNEL_SPACE_START && end >= KERNEL_SPACE_START && !is_user_range(start, len)
+    let hhdm = active_physical_offset();
+    let in_kernel_text = start >= KERNEL_SPACE_START && end >= KERNEL_SPACE_START;
+    let in_hhdm = hhdm != 0 && start >= hhdm && end >= hhdm;
+    if in_kernel_text || in_hhdm {
+        return true;
+    }
+    let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(start));
+    let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end));
+    for page in Page::range_inclusive(start_page, end_page) {
+        let Some(flags) = paging::translate_effective_flags(page.start_address()) else {
+            return false;
+        };
+        if !flags.contains(PageTableFlags::PRESENT)
+            || flags.contains(PageTableFlags::USER_ACCESSIBLE)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(any(target_os = "none", target_os = "uefi"))]
@@ -3944,20 +3962,24 @@ pub fn dma_share(buffer: NonNull<[u8]>) -> Option<usize> {
     let end = start.saturating_add(len as u64 - 1);
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(start));
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end));
-    let mut expected: Option<u64> = None;
+    let mut base_phys: Option<u64> = None;
+    let mut expected_next: Option<u64> = None;
     for page in Page::range_inclusive(start_page, end_page) {
         let phys = translate_addr(page.start_address().as_u64())?;
-        match expected {
-            None => expected = Some(phys),
-            Some(prev) => {
-                if phys != prev.saturating_add(PAGE_SIZE as u64) {
+        match expected_next {
+            None => {
+                base_phys = Some(phys);
+                expected_next = Some(phys.saturating_add(PAGE_SIZE as u64));
+            }
+            Some(expected) => {
+                if phys != expected {
                     return None;
                 }
-                expected = Some(phys);
+                expected_next = Some(phys.saturating_add(PAGE_SIZE as u64));
             }
         }
     }
-    let base = expected?;
+    let base = base_phys?;
     let offset = start & (PAGE_SIZE as u64 - 1);
     let dma_base = base.saturating_add(offset) as usize;
     let mapping = DmaMapping {
@@ -5227,6 +5249,46 @@ struct Dma32FrameAllocator<'a> {
 }
 
 #[cfg(target_os = "uefi")]
+fn uefi_enable_nxe_if_supported() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::__cpuid;
+        use x86_64::registers::model_specific::Msr;
+
+        const CPUID_EXTENDED_MAX: u32 = 0x8000_0000;
+        const CPUID_EXTENDED_FEATURES: u32 = 0x8000_0001;
+        const CPUID_NX_EDX_BIT: u32 = 1 << 20;
+        const MSR_EFER: u32 = 0xC000_0080;
+        const EFER_NXE: u64 = 1 << 11;
+
+        let max_extended = unsafe { __cpuid(CPUID_EXTENDED_MAX).eax };
+        if max_extended < CPUID_EXTENDED_FEATURES {
+            crate::serial_println!("[HHDM] NXE unavailable: extended CPUID leaf missing");
+            return false;
+        }
+        let features = unsafe { __cpuid(CPUID_EXTENDED_FEATURES) };
+        if (features.edx & CPUID_NX_EDX_BIT) == 0 {
+            crate::serial_println!("[HHDM] NXE unavailable: CPUID NX bit clear");
+            return false;
+        }
+
+        unsafe {
+            let mut efer = Msr::new(MSR_EFER);
+            let current = efer.read();
+            if (current & EFER_NXE) == 0 {
+                efer.write(current | EFER_NXE);
+                crate::serial_println!("[HHDM] EFER.NXE enabled before NX page-table entries");
+            }
+        }
+        true
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "uefi")]
 unsafe impl FrameAllocator<Size4KiB> for Dma32FrameAllocator<'_> {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         self.inner
@@ -5250,6 +5312,7 @@ pub fn init_uefi_hhdm(
             Cr0::write(cr0);
         }
     }
+    let nxe_enabled = uefi_enable_nxe_if_supported();
     let descriptors: Vec<MemoryDescriptor> = frame_allocator.get_memory_map().map(|d| *d).collect();
     let mut map_count: usize = 0;
     for desc in descriptors.iter() {
@@ -5277,7 +5340,7 @@ pub fn init_uefi_hhdm(
                 | MemoryType::BOOT_SERVICES_CODE
                 | MemoryType::LOADER_CODE
         );
-        if !exec_allowed {
+        if !exec_allowed && nxe_enabled {
             flags |= PageTableFlags::NO_EXECUTE;
         }
         let start = desc.phys_start;
@@ -5306,11 +5369,13 @@ pub fn init_uefi_hhdm(
         (0xFED0_0000, 0x1000, "HPET"),   // HPET Timer
         (0xFEE0_0000, 0x1000, "LAPIC"),  // Local APIC MMIO
     ];
-    let mmio_flags = PageTableFlags::PRESENT
+    let mut mmio_flags = PageTableFlags::PRESENT
         | PageTableFlags::WRITABLE
-        | PageTableFlags::NO_EXECUTE
         | PageTableFlags::NO_CACHE
         | PageTableFlags::WRITE_THROUGH;
+    if nxe_enabled {
+        mmio_flags |= PageTableFlags::NO_EXECUTE;
+    }
     for (phys_base, size, name) in &device_mmio_regions {
         let mut dma32_alloc = Dma32FrameAllocator {
             inner: frame_allocator,

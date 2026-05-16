@@ -1380,7 +1380,7 @@ pub fn create_hardlink(parent_path: &str, name: &str, target_path: &str) -> Resu
     Ok(())
 }
 
-/// Dosya boyutunu değiştirir (truncate)
+/// Dosya boyutunu değiştirir (truncate) — grow ve shrink destekler
 pub fn truncate_f2fs(path: &str, new_size: u64) -> Result<(), FsError> {
     let mut drive = match crate::drivers::linux::select_block_device() {
         Ok(value) => value,
@@ -1394,21 +1394,77 @@ pub fn truncate_f2fs(path: &str, new_size: u64) -> Result<(), FsError> {
         return Err(FsError::IsDir);
     }
 
-    // Büyütme: yeni bloklar allocate et ve sıfırla
-    if new_size > inode.size {
-        let block_size = ctx.block_size as u64;
-        if block_size == 0 {
-            return Err(FsError::DeviceError);
+    let block_size = ctx.block_size as u64;
+    if block_size == 0 {
+        return Err(FsError::DeviceError);
+    }
+
+    // Küçültme (shrink): son blokları serbest bırak — Linux kernel truncate_blocks semantics
+    if new_size < inode.size {
+        let old_blocks = (inode.size + block_size - 1) / block_size;
+        let new_blocks = if new_size == 0 {
+            0
+        } else {
+            (new_size + block_size - 1) / block_size
+        };
+
+        // Inline data durumu: target inline capacity içindeyse inline'a dön
+        if inode.inline && new_size <= inline_data_capacity(ctx.block_size)? as u64 {
+            let nat_entry = read_nat_entry(&mut *drive, &ctx, inode.ino)?;
+            if nat_entry.block_addr != 0 {
+                let mut block = read_block(&mut *drive, &ctx, nat_entry.block_addr)?;
+                write_u64(&mut block, INODE_I_SIZE_DISK_OFFSET, new_size)?;
+                write_block(&mut *drive, &ctx, nat_entry.block_addr, &block)?;
+            }
+        } else if !inode.inline {
+            // Regular file: blokları sondan başa doğru deallocate et
+            for blk_idx in (new_blocks..old_blocks).rev() {
+                if blk_idx > u16::MAX as u64 {
+                    break;
+                }
+                let addr = get_data_block_addr(&mut *drive, &ctx, inode.ino, blk_idx as usize)?;
+                if addr != 0 {
+                    update_inode_block_addr(
+                        &mut *drive,
+                        &ctx,
+                        inode.ino,
+                        blk_idx as usize,
+                        0,
+                    )?;
+                    set_sit_valid(&mut *drive, &ctx, addr, false)?;
+                }
+            }
+
+            // Son bloğun içindeki kısmi veriyi sıfırla (POSIX semantics)
+            if new_size > 0 {
+                let last_block_idx = new_blocks - 1;
+                let block_offset_in_file = last_block_idx * block_size;
+                let valid_bytes_in_last_block = new_size - block_offset_in_file;
+                if valid_bytes_in_last_block < block_size {
+                    let addr = get_data_block_addr(
+                        &mut *drive,
+                        &ctx,
+                        inode.ino,
+                        last_block_idx as usize,
+                    )?;
+                    if addr != 0 {
+                        let mut block = read_block(&mut *drive, &ctx, addr)?;
+                        for i in (valid_bytes_in_last_block as usize)..(block_size as usize) {
+                            block[i] = 0;
+                        }
+                        write_block(&mut *drive, &ctx, addr, &block)?;
+                    }
+                }
+            }
         }
+    } else if new_size > inode.size {
+        // Büyütme: yeni bloklar allocate et ve sıfırla
         let old_blocks = (inode.size + block_size - 1) / block_size;
         let new_blocks = (new_size + block_size - 1) / block_size;
-        // Yeni blok adresleri için sıfırlanmış blok yaz
         let zero_block = alloc::vec![0u8; block_size as usize];
         for blk_idx in old_blocks..new_blocks {
-            // allocate_data_block ile yeni blok tahsis et
             if let Ok(new_addr) = allocate_data_block(&mut *drive, &ctx, inode.ino, blk_idx as u16)
             {
-                // Inode block addr’ı güncelle
                 let _ = update_inode_block_addr(
                     &mut *drive,
                     &ctx,
@@ -1416,7 +1472,6 @@ pub fn truncate_f2fs(path: &str, new_size: u64) -> Result<(), FsError> {
                     blk_idx as usize,
                     new_addr,
                 );
-                // Yeni bloğu sıfırla
                 let _ = write_block(&mut *drive, &ctx, new_addr, &zero_block);
             }
         }
@@ -1427,6 +1482,15 @@ pub fn truncate_f2fs(path: &str, new_size: u64) -> Result<(), FsError> {
 
     // mtime güncelle
     update_inode_mtime(&mut *drive, &ctx, inode.ino)?;
+
+    // Checkpoint sync — metadata değişikliklerini kalıcı yap
+    let _ = update_checkpoint(
+        &mut *drive,
+        &ctx,
+        ctx.nat_ver_bitmap.as_deref(),
+        ctx.sit_ver_bitmap.as_deref(),
+        Some(CP_SYNC_FLAG),
+    );
 
     crate::serial_println!("[FS] Truncated: {} -> {} bytes", path, new_size);
     Ok(())

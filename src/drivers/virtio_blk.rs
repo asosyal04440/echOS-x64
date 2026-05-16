@@ -94,8 +94,17 @@ static BLK_DMA_DOMAIN: AtomicU32 = AtomicU32::new(0);
 /// VirtIO blok sektörünün sabit boyutu (byte).
 /// VirtIO spec'e göre tek sektör daima 512 byte'tır.
 const SECTOR_SIZE: usize = 512;
+const VIRTIO_COMPLETION_SPIN_LIMIT: u32 = 5_000_000;
 const AUDIT_VIRTQ_DESC_F_NEXT: u16 = 1;
 const AUDIT_VIRTQ_DESC_F_INDIRECT: u16 = 4;
+const ERR_TIMEOUT: &str = "Timeout";
+const ERR_COMPLETION_MISMATCH: &str = "CompletionMismatch";
+const ERR_INVALID_BUFFER_SIZE: &str = "Invalid buffer size";
+const ERR_DEVICE_NOT_INITIALIZED: &str = "Device not initialized";
+const ERR_DMA_ALLOC_FAILED: &str = "DmaAllocFailed";
+const ERR_DMA_LAYOUT_OVERFLOW: &str = "DmaLayoutOverflow";
+const ERR_QUEUE_SUBMIT_FAILED: &str = "QueueSubmitFailed";
+const ERR_COMPLETION_IO_FAILED: &str = "CompletionIoError";
 
 #[derive(Clone, Copy, Debug)]
 struct VirtqDescAudit {
@@ -133,6 +142,80 @@ fn audit_virtq_descriptor_chain(descs: &[VirtqDescAudit], head: u16) -> bool {
 
 fn audit_used_ring_delta(previous: u16, current: u16, queue_size: u16) -> bool {
     queue_size != 0 && current.wrapping_sub(previous) <= queue_size
+}
+
+fn wait_for_expected_completion_with_probe<F>(
+    expected_token: u16,
+    spin_limit: u32,
+    mut probe: F,
+) -> Result<(), &'static str>
+where
+    F: FnMut() -> Option<u16>,
+{
+    let mut spins = 0u32;
+    loop {
+        match probe() {
+            Some(token) if token == expected_token => return Ok(()),
+            Some(_) => return Err(ERR_COMPLETION_MISMATCH),
+            None => {
+                if spins >= spin_limit {
+                    return Err(ERR_TIMEOUT);
+                }
+                spins = spins.wrapping_add(1);
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
+fn wait_for_expected_used_token(
+    device: &mut VirtIOBlk<VirtioHal, PciTransport>,
+    expected_token: u16,
+) -> Result<(), &'static str> {
+    let queue_size = device.virt_queue_size();
+    if queue_size == 0 || expected_token >= queue_size {
+        return Err(ERR_COMPLETION_MISMATCH);
+    }
+    wait_for_expected_completion_with_probe(expected_token, VIRTIO_COMPLETION_SPIN_LIMIT, || {
+        device.peek_used()
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn phase5_kickoff_contract_green() -> bool {
+    let descs = [
+        VirtqDescAudit {
+            len: 16,
+            flags: AUDIT_VIRTQ_DESC_F_NEXT,
+            next: 1,
+        },
+        VirtqDescAudit {
+            len: SECTOR_SIZE as u32,
+            flags: AUDIT_VIRTQ_DESC_F_NEXT,
+            next: 2,
+        },
+        VirtqDescAudit {
+            len: 1,
+            flags: 0,
+            next: 0,
+        },
+    ];
+
+    let descriptor_contract = audit_virtq_descriptor_chain(&descs, 0);
+    let used_ring_contract =
+        audit_used_ring_delta(u16::MAX, 0, 8) && !audit_used_ring_delta(0, 9, 8);
+
+    let mut ok_seq = [None, Some(4u16)].into_iter();
+    let completion_ok =
+        wait_for_expected_completion_with_probe(4, 8, || ok_seq.next().flatten()).is_ok();
+
+    let mut mismatch_seq = [None, Some(3u16)].into_iter();
+    let completion_fail_closed = matches!(
+        wait_for_expected_completion_with_probe(4, 8, || mismatch_seq.next().flatten()),
+        Err("CompletionMismatch")
+    );
+
+    descriptor_contract && used_ring_contract && completion_ok && completion_fail_closed
 }
 
 /// VirtIO blok sürücüsünü başlatır.
@@ -180,6 +263,15 @@ pub fn init(transport: PciTransport) -> bool {
     true
 }
 
+/// VirtIO blok aygıt durumunu resetler.
+///
+/// Bu fonksiyon yalnızca sürücü sahipliğindeki yazılım durumunu temizler;
+/// donanım reseti transport katmanında yönetilir.
+pub fn reset() {
+    *BLK_DEV.lock() = None;
+    BLK_DMA_DOMAIN.store(0, Ordering::Release);
+}
+
 /// Blok aygıtının DMA domain'ini geçici olarak etkinleştirir; kapatır F bitince geri yükler.
 ///
 /// IOMMU yalıtımı için DMA işlemleri doğru domain'de yapılmalıdır.
@@ -222,13 +314,13 @@ pub fn read_sector(lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
         // Tampon boyutu kontrolü: boş veya 512'nin katı olmalı
         if buffer.is_empty() || buffer.len() % SECTOR_SIZE != 0 {
             crate::serial_println!("VIRTIO BLK: gecersiz tampon boyutu");
-            return Err("Invalid buffer size");
+            return Err(ERR_INVALID_BUFFER_SIZE);
         }
 
         let mut guard = BLK_DEV.lock();
         let Some(device) = guard.as_mut() else {
             crate::serial_println!("VIRTIO BLK: aygit baslatilmamis");
-            return Err("Device not initialized");
+            return Err(ERR_DEVICE_NOT_INITIALIZED);
         };
 
         let sectors = buffer.len() / SECTOR_SIZE;
@@ -237,7 +329,7 @@ pub fn read_sector(lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
         let (paddr, vaddr) = <VirtioHal as Hal>::dma_alloc(1, BufferDirection::Both);
         if paddr == 0 {
             crate::serial_println!("VIRTIO BLK: DMA tahsis hatasi");
-            return Err("Disk Error");
+            return Err(ERR_DMA_ALLOC_FAILED);
         }
 
         let base = vaddr.as_ptr() as usize;
@@ -261,7 +353,7 @@ pub fn read_sector(lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
         if offset + SECTOR_SIZE > crate::memory::PAGE_SIZE {
             unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
             crate::serial_println!("VIRTIO BLK: DMA tamponu cok kucuk");
-            return Err("Disk Error");
+            return Err(ERR_DMA_LAYOUT_OVERFLOW);
         }
 
         // Veri tamponu slice'ı oluştur (DMA tamponundaki ham bellek alanı)
@@ -289,22 +381,21 @@ pub fn read_sector(lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
                 Err(_) => {
                     unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
                     crate::serial_println!("VIRTIO BLK: okuma hatasi lba={}", lba + i as u64);
-                    return Err("Disk Error");
+                    return Err(ERR_QUEUE_SUBMIT_FAILED);
                 }
             };
 
-            // Token kullanıldı bildirimini bekle (spin loop, max 5_000_000 döngü)
-            // peek_used(): completed (used ring) kuyruğunu kontrol eder
-            let mut spins: u32 = 0;
-            while device.peek_used() != Some(token) {
-                if spins > 5_000_000 {
-                    // Zaman aşımı: DMA tamponu serbest bırak ve hata döndür
-                    unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
-                    crate::serial_println!("VIRTIO BLK: zaman asimi lba={}", lba + i as u64);
-                    return Err("Timeout");
-                }
-                spins = spins.wrapping_add(1);
-                core::hint::spin_loop();
+            // Yalnızca beklenen token kabul edilir; başka token görürsek
+            // completion publication contract ihlali olarak fail-closed davran.
+            if let Err(wait_err) = wait_for_expected_used_token(device, token) {
+                unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
+                crate::serial_println!(
+                    "VIRTIO BLK: completion bekleme hatasi lba={} token={} err={}",
+                    lba + i as u64,
+                    token,
+                    wait_err
+                );
+                return Err(wait_err);
             }
 
             // İsteği tamamla: yanıt ve veri doğrulanır
@@ -314,7 +405,7 @@ pub fn read_sector(lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
                     .map_err(|_| {
                         unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
                         crate::serial_println!("VIRTIO BLK: okuma hatasi lba={}", lba + i as u64);
-                        "Disk Error"
+                        ERR_COMPLETION_IO_FAILED
                     })?;
             }
 
@@ -355,29 +446,93 @@ pub fn write_sector(lba: u64, buffer: &[u8]) -> Result<(), &'static str> {
         // Tampon boyutu kontrolü
         if buffer.is_empty() || buffer.len() % SECTOR_SIZE != 0 {
             crate::serial_println!("VIRTIO BLK: gecersiz tampon boyutu");
-            return Err("Invalid buffer size");
+            return Err(ERR_INVALID_BUFFER_SIZE);
         }
 
         let mut guard = BLK_DEV.lock();
         let Some(device) = guard.as_mut() else {
             crate::serial_println!("VIRTIO BLK: aygit baslatilmamis");
-            return Err("Device not initialized");
+            return Err(ERR_DEVICE_NOT_INITIALIZED);
         };
 
         let sectors = buffer.len() / SECTOR_SIZE;
+        // DMA staging tamponu: req/resp/data tek sayfada hizali tutulur.
+        let (paddr, vaddr) = <VirtioHal as Hal>::dma_alloc(1, BufferDirection::Both);
+        if paddr == 0 {
+            crate::serial_println!("VIRTIO BLK: DMA tahsis hatasi");
+            return Err(ERR_DMA_ALLOC_FAILED);
+        }
 
-        // Her sektörü ayrı ayrı doğrudan yaz (blocking)
+        let base = vaddr.as_ptr() as usize;
+        let mut offset = 0usize;
+        offset =
+            (offset + core::mem::align_of::<BlkReq>() - 1) & !(core::mem::align_of::<BlkReq>() - 1);
+        let req_ptr = (base + offset) as *mut BlkReq;
+        offset += core::mem::size_of::<BlkReq>();
+
+        offset = (offset + core::mem::align_of::<BlkResp>() - 1)
+            & !(core::mem::align_of::<BlkResp>() - 1);
+        let resp_ptr = (base + offset) as *mut BlkResp;
+        offset += core::mem::size_of::<BlkResp>();
+
+        if offset + SECTOR_SIZE > crate::memory::PAGE_SIZE {
+            unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
+            crate::serial_println!("VIRTIO BLK: DMA tamponu cok kucuk");
+            return Err(ERR_DMA_LAYOUT_OVERFLOW);
+        }
+
+        let dma_buf =
+            unsafe { core::slice::from_raw_parts_mut((base + offset) as *mut u8, SECTOR_SIZE) };
+
+        // Her sektörü descriptor/token/completion doğrulamasıyla yaz.
         for i in 0..sectors {
+            unsafe {
+                core::ptr::write(req_ptr, BlkReq::default());
+                core::ptr::write(resp_ptr, BlkResp::default());
+            }
             let start = i * SECTOR_SIZE;
             let end = start + SECTOR_SIZE;
+            dma_buf.copy_from_slice(&buffer[start..end]);
 
-            device
-                .write_blocks(lba as usize + i, &buffer[start..end])
-                .map_err(|_| {
+            let token = match unsafe {
+                device.write_blocks_nb(
+                    lba as usize + i,
+                    &mut *req_ptr,
+                    dma_buf,
+                    &mut *resp_ptr,
+                )
+            } {
+                Ok(value) => value,
+                Err(_) => {
+                    unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
                     crate::serial_println!("VIRTIO BLK: yazma hatasi lba={}", lba + i as u64);
-                    "Disk Error"
-                })?;
+                    return Err(ERR_QUEUE_SUBMIT_FAILED);
+                }
+            };
+
+            if let Err(wait_err) = wait_for_expected_used_token(device, token) {
+                unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
+                crate::serial_println!(
+                    "VIRTIO BLK: completion bekleme hatasi lba={} token={} err={}",
+                    lba + i as u64,
+                    token,
+                    wait_err
+                );
+                return Err(wait_err);
+            }
+
+            unsafe {
+                device
+                    .complete_write_blocks(token, &*req_ptr, dma_buf, &mut *resp_ptr)
+                    .map_err(|_| {
+                        unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
+                        crate::serial_println!("VIRTIO BLK: yazma hatasi lba={}", lba + i as u64);
+                        ERR_COMPLETION_IO_FAILED
+                    })?;
+            }
         }
+
+        unsafe { <VirtioHal as Hal>::dma_dealloc(paddr, vaddr, 1) };
 
         crate::serial_println!(
             "VIRTIO BLK: yazma tamamlandi lba={} sektor={}",
@@ -437,5 +592,28 @@ mod tests {
     fn virtio_audit_used_ring_delta_accepts_wrap_and_rejects_jump() {
         assert!(audit_used_ring_delta(u16::MAX, 0, 8));
         assert!(!audit_used_ring_delta(0, 9, 8));
+    }
+
+    #[test]
+    fn completion_wait_accepts_expected_token() {
+        let mut seq = [None, None, Some(4u16)].into_iter();
+        assert_eq!(
+            wait_for_expected_completion_with_probe(4, 8, || seq.next().flatten()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn completion_wait_rejects_unexpected_token() {
+        let mut seq = [None, Some(3u16)].into_iter();
+        assert_eq!(
+            wait_for_expected_completion_with_probe(4, 8, || seq.next().flatten()),
+            Err("CompletionMismatch")
+        );
+    }
+
+    #[test]
+    fn phase5_kickoff_contract_is_green() {
+        assert!(phase5_kickoff_contract_green());
     }
 }

@@ -344,7 +344,7 @@ pub struct MsixCapability {
 
 /// Konfigürasyon alanından 16-bit (word) değer okur.
 /// İçeride `read_config_dword` çağrısı yapar, uygun biti maskeler.
-fn read_config_word(bus: u8, device: u8, function: u8, offset: u16) -> u16 {
+pub fn read_config_word(bus: u8, device: u8, function: u8, offset: u16) -> u16 {
     let value = read_config_dword(bus, device, function, offset);
     let shift = ((offset & 2) * 8) as u32;
     ((value >> shift) & 0xFFFF) as u16
@@ -360,13 +360,53 @@ fn read_config_byte(bus: u8, device: u8, function: u8, offset: u16) -> u8 {
 
 /// Konfigürasyon alanına 16-bit (word) değer yazar.
 /// Önce mevcut dword okunur, hedef word güncellenerek geri yazılır (RMW).
-fn write_config_word(bus: u8, device: u8, function: u8, offset: u16, value: u16) {
+pub fn write_config_word(bus: u8, device: u8, function: u8, offset: u16, value: u16) {
     let aligned = offset & 0xFFFC;
     let current = read_config_dword(bus, device, function, aligned);
     let shift = ((offset & 2) * 8) as u32;
     let mask = 0xFFFFu32 << shift;
     let new_value = (current & !mask) | ((value as u32) << shift);
     write_config_dword(bus, device, function, aligned, new_value);
+}
+
+const PCI_CAP_PTR_MIN: u8 = 0x40;
+const PCI_CAP_PTR_MAX: u8 = 0xFC;
+const PCI_EXT_CAP_START: u16 = 0x100;
+const PCI_EXT_CAP_LAST_DWORD: u16 = 0xFFC;
+const PCI_EXT_CAP_MAX_STEPS: usize = 256;
+
+#[inline]
+fn sanitize_cap_ptr(raw: u8) -> u8 {
+    raw & 0xFC
+}
+
+#[inline]
+fn valid_cap_ptr(ptr: u8) -> bool {
+    ptr >= PCI_CAP_PTR_MIN && ptr <= PCI_CAP_PTR_MAX && (ptr & 0x3) == 0
+}
+
+#[inline]
+fn decode_ext_cap_next(header: u32) -> u16 {
+    (((header >> 20) & 0xFFF) as u16) & !0x3
+}
+
+#[inline]
+fn valid_ext_cap_offset(offset: u16) -> bool {
+    offset >= PCI_EXT_CAP_START && offset <= PCI_EXT_CAP_LAST_DWORD && (offset & 0x3) == 0
+}
+
+#[cfg(test)]
+pub(crate) fn phase5_kickoff_contract_green() -> bool {
+    let cap_ptr_contract = sanitize_cap_ptr(0x47) == 0x44
+        && valid_cap_ptr(0x40)
+        && !valid_cap_ptr(0x3C);
+    let ext_cap_contract = decode_ext_cap_next((0x123u32 << 20) | 0x0001) == 0x120
+        && valid_ext_cap_offset(0x100)
+        && !valid_ext_cap_offset(0x0FC);
+    let msix_window_contract = msix_table_window_fits(0x1000, 0x0F00, 0, 16)
+        && !msix_table_window_fits(0x1000, 0x0FF0, 2, 2)
+        && !msix_table_window_fits(0x1000, 0, 0, 0);
+    cap_ptr_contract && ext_cap_contract && msix_window_contract
 }
 
 /// PCI Yetenekler listesini yürütür (walk).
@@ -381,16 +421,22 @@ where
     if (status & (1 << 4)) == 0 {
         return;
     }
-    let mut ptr = read_config_byte(bus, device, function, 0x34);
+    let mut ptr = sanitize_cap_ptr(read_config_byte(bus, device, function, 0x34));
     let mut guard = 0u8;
-    while ptr >= 0x40 && ptr != 0 && guard < 64 {
+    let mut seen = [false; 64];
+    while valid_cap_ptr(ptr) && guard < 64 {
+        let slot = (ptr >> 2) as usize;
+        if seen[slot] {
+            break;
+        }
+        seen[slot] = true;
         let cap_id = read_config_byte(bus, device, function, ptr as u16);
         if cap_id == 0 || cap_id == 0xFF {
             break;
         }
-        let next = read_config_byte(bus, device, function, ptr as u16 + 1);
+        let next = sanitize_cap_ptr(read_config_byte(bus, device, function, ptr as u16 + 1));
         f(cap_id, ptr);
-        if next == 0 || next == ptr {
+        if next == 0 {
             break;
         }
         ptr = next;
@@ -610,6 +656,11 @@ pub fn configure_msix(
         Some(bar) => bar,
         None => return false,
     };
+    if !msix_table_window_fits(bar.size, msix.table_offset, table_index, 1) {
+        return false;
+    }
+    // Programlama sırasında function-level mask kullanılır.
+    write_config_word(bus, device, function, offset + 2, control | (1 << 14));
     let mapped = crate::memory::map_mmio(bar.base, bar.size as usize);
     let base = if mapped.is_null() {
         crate::memory::active_physical_offset() + bar.base
@@ -620,6 +671,7 @@ pub fn configure_msix(
     let address = msi_message_address(apic_id);
     let data = msi_message_data(vector) as u32;
     unsafe {
+        write_volatile((entry_addr + 12) as *mut u32, 1);
         write_volatile(entry_addr as *mut u32, address as u32);
         write_volatile((entry_addr + 4) as *mut u32, (address >> 32) as u32);
         write_volatile((entry_addr + 8) as *mut u32, data);
@@ -654,7 +706,11 @@ pub fn configure_msix_table(
     let offset = caps.msix_offset as u16;
     let control = read_config_word(bus, device, function, offset + 2);
     let table_size = (control & 0x07FF) as u16 + 1;
-    if table_base + vectors.len() as u16 > table_size {
+    let entries_u16 = vectors.len() as u16;
+    let Some(table_end) = table_base.checked_add(entries_u16) else {
+        return false;
+    };
+    if table_end > table_size {
         return false;
     }
     let msix = match read_msix(bus, device, function) {
@@ -665,6 +721,10 @@ pub fn configure_msix_table(
         Some(bar) => bar,
         None => return false,
     };
+    if !msix_table_window_fits(bar.size, msix.table_offset, table_base, vectors.len()) {
+        return false;
+    }
+    write_config_word(bus, device, function, offset + 2, control | (1 << 14));
     let mapped = crate::memory::map_mmio(bar.base, bar.size as usize);
     let base = if mapped.is_null() {
         crate::memory::active_physical_offset() + bar.base
@@ -677,6 +737,7 @@ pub fn configure_msix_table(
         let entry_addr = base + msix.table_offset as u64 + entry * 16;
         let data = msi_message_data(vector) as u32;
         unsafe {
+            write_volatile((entry_addr + 12) as *mut u32, 1);
             write_volatile(entry_addr as *mut u32, address as u32);
             write_volatile((entry_addr + 4) as *mut u32, (address >> 32) as u32);
             write_volatile((entry_addr + 8) as *mut u32, data);
@@ -858,6 +919,10 @@ pub fn read_bar_mmio(bus: u8, device: u8, function: u8, bar_index: u8) -> Option
     let mut base = (original & 0xFFFF_FFF0) as u64;
     let mut size = (!masked_low + 1) as u64;
     if is_64 {
+        if bar_index == 5 {
+            // 64-bit BAR iki register tüketir; BAR5 üst dword için alan yok.
+            return None;
+        }
         let offset_high = offset + 4;
         let original_high = read_config_dword(bus, device, function, offset_high);
         write_config_dword(bus, device, function, offset_high, 0xFFFF_FFFF);
@@ -873,6 +938,22 @@ pub fn read_bar_mmio(bus: u8, device: u8, function: u8, bar_index: u8) -> Option
         size &= 0xFFFF_FFF0;
     }
     Some(PciBar { base, size, is_64 })
+}
+
+fn msix_table_window_fits(bar_size: u64, table_offset: u32, table_base: u16, entry_count: usize) -> bool {
+    if entry_count == 0 {
+        return false;
+    }
+    let Some(byte_len) = (entry_count as u64).checked_mul(16) else {
+        return false;
+    };
+    let Some(start) = (table_offset as u64).checked_add((table_base as u64).saturating_mul(16)) else {
+        return false;
+    };
+    let Some(end) = start.checked_add(byte_len) else {
+        return false;
+    };
+    end <= bar_size
 }
 
 /// I/O Space BAR'ını okuyarak port taban adresini ve boyutunu döner.
@@ -1303,26 +1384,28 @@ impl AerErrorInfo {
 /// Find PCIe Extended Capability offset
 /// PCIe extended capabilities start at offset 0x100 and use a linked list
 pub fn find_ext_capability(bus: u8, device: u8, function: u8, cap_id: u16) -> Option<u16> {
-    let mut offset = 0x100u16;
-
-    while offset >= 0x100 {
+    let mut offset = PCI_EXT_CAP_START;
+    let mut guard = 0usize;
+    let mut seen = [false; PCI_EXT_CAP_MAX_STEPS];
+    while valid_ext_cap_offset(offset) && guard < PCI_EXT_CAP_MAX_STEPS {
+        let slot = (offset >> 2) as usize;
+        if seen[slot] {
+            break;
+        }
+        seen[slot] = true;
         let header = read_config_dword(bus, device, function, offset);
-        if header == 0xFFFFFFFF {
+        if header == 0 || header == 0xFFFF_FFFF {
             return None;
         }
-
         let curr_cap_id = (header & 0xFFFF) as u16;
         if curr_cap_id == cap_id {
             return Some(offset);
         }
-
-        // Next capability offset is in bits 20-28
-        offset = ((header >> 20) & 0xFFC) as u16;
-
-        // Check version (bits 16-19), must be valid
+        offset = decode_ext_cap_next(header);
         if offset == 0 {
             break;
         }
+        guard += 1;
     }
     None
 }
@@ -1483,4 +1566,64 @@ pub fn init_aer() {
     }
 
     crate::serial_println!("[PCI] AER initialized for {} devices", aer_count);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        decode_ext_cap_next, msix_table_window_fits, phase5_kickoff_contract_green,
+        sanitize_cap_ptr, valid_cap_ptr, valid_ext_cap_offset,
+    };
+
+    #[test]
+    fn msix_table_window_fits_accepts_exact_bar_boundary() {
+        assert!(msix_table_window_fits(0x1000, 0x0F00, 0, 16));
+    }
+
+    #[test]
+    fn msix_table_window_fits_rejects_overflowing_window() {
+        assert!(!msix_table_window_fits(0x1000, 0x0FF0, 2, 2));
+    }
+
+    #[test]
+    fn msix_table_window_fits_rejects_zero_entries() {
+        assert!(!msix_table_window_fits(0x1000, 0, 0, 0));
+    }
+
+    #[test]
+    fn sanitize_cap_ptr_masks_low_two_bits() {
+        assert_eq!(sanitize_cap_ptr(0x47), 0x44);
+        assert_eq!(sanitize_cap_ptr(0xFC), 0xFC);
+        assert_eq!(sanitize_cap_ptr(0x03), 0x00);
+    }
+
+    #[test]
+    fn valid_cap_ptr_checks_range_and_alignment() {
+        assert!(!valid_cap_ptr(0x00));
+        assert!(!valid_cap_ptr(0x3C));
+        assert!(valid_cap_ptr(0x40));
+        assert!(valid_cap_ptr(0xFC));
+        assert!(!valid_cap_ptr(0xFD));
+    }
+
+    #[test]
+    fn decode_ext_cap_next_extracts_and_aligns() {
+        let header = (0x123u32 << 20) | 0x0001;
+        assert_eq!(decode_ext_cap_next(header), 0x120);
+        let end_header = 0x0000_0001;
+        assert_eq!(decode_ext_cap_next(end_header), 0);
+    }
+
+    #[test]
+    fn valid_ext_cap_offset_enforces_pcie_window() {
+        assert!(!valid_ext_cap_offset(0x0FC));
+        assert!(valid_ext_cap_offset(0x100));
+        assert!(valid_ext_cap_offset(0xFFC));
+        assert!(!valid_ext_cap_offset(0xFFE));
+    }
+
+    #[test]
+    fn phase5_kickoff_contract_is_green() {
+        assert!(phase5_kickoff_contract_green());
+    }
 }

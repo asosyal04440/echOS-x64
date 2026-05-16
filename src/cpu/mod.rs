@@ -11,6 +11,9 @@ pub mod tsc;
 /// SMP (Symmetric Multi-Processing) desteği
 pub mod smp;
 
+/// ACPI S3 wake vector trampoline and firmware resume entry
+pub mod s3_resume;
+
 /// CPU Durum Makinesi (State Machine) ve İşlemci Benzeşimi (Affinity) yönetimi
 pub mod smp_state;
 
@@ -258,8 +261,7 @@ pub fn init() {
         has_x2apic
     );
 
-    // AML interpreter — DSDT/SSDT parse et, ACPI namespace oluştur
-    acpi_aml::init_aml();
+    // AML namespace is initialized after FADT/DSDT discovery in the UEFI boot pipeline.
 }
 
 /// Secondary CPU feature bringup.
@@ -320,11 +322,17 @@ pub fn has_sse41() -> bool {
 }
 
 pub fn smep_supported() -> bool {
+    if !cpuid_leaf_available(7) {
+        return false;
+    }
     let features = cpuid(7, 0);
     (features.ebx & (1 << 7)) != 0
 }
 
 pub fn smap_supported() -> bool {
+    if !cpuid_leaf_available(7) {
+        return false;
+    }
     let features = cpuid(7, 0);
     (features.ebx & (1 << 20)) != 0
 }
@@ -448,7 +456,7 @@ fn detect_amd_topology(info: &mut CpuInfo) {
 
 /// Generic topoloji tespiti
 fn detect_generic_topology(info: &mut CpuInfo) {
-    // Basit varsayımlar
+    // CPUID topology leaves unavailable: publish a single logical/core/package CPU.
     info.topology.logical_count = 1;
     info.topology.core_count = 1;
     info.topology.package_count = 1;
@@ -712,6 +720,15 @@ fn cpuid(leaf: u32, subleaf: u32) -> CpuidResult {
         ecx: result.ecx,
         edx: result.edx,
     }
+}
+
+fn cpuid_leaf_available(leaf: u32) -> bool {
+    let max_leaf = if leaf >= 0x8000_0000 {
+        unsafe { core::arch::x86_64::__cpuid_count(0x8000_0000, 0).eax }
+    } else {
+        unsafe { core::arch::x86_64::__cpuid_count(0, 0).eax }
+    };
+    leaf <= max_leaf
 }
 
 unsafe fn xgetbv() -> u64 {

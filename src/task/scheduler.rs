@@ -599,6 +599,10 @@ pub fn is_ready() -> bool {
     SCHEDULER_READY.load(Ordering::Acquire)
 }
 
+pub fn mark_ready_after_resume() {
+    SCHEDULER_READY.store(true, Ordering::Release);
+}
+
 /// Timer interrupt'tan çağrılır. Her tick'te:
 /// 1. Tick sayacını artırır
 /// 2. Uyuyan task'ları kontrol eder

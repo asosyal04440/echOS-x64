@@ -102,6 +102,63 @@ pub const VTD_GCMD_WBF: u32 = 1 << 27; // Yazma tamponu temizleme (Write Buffer 
 pub const VTD_GCMD_QIE: u32 = 1 << 26; // Geçersiz kılma kuyruğunu etkinleştir
 pub const VTD_GCMD_IRE: u32 = 1 << 25; // Kesme yeniden yönlendirmeyi etkinleştir
 pub const VTD_GCMD_EAFL: u32 = 1 << 24; // Gelişmiş hata kaydını etkinleştir
+pub const VTD_GSTS_WBFS: u64 = 1 << 27; // Write Buffer Flush Status
+pub const VTD_GSTS_QIES: u64 = 1 << 26; // Queued Invalidation Enable Status
+pub const VTD_CAP_RWBF: u64 = 1 << 4; // Required Write Buffer Flush (CAP.RWBF)
+pub const VTD_IOTLB_IVT: u64 = 1 << 63; // IOTLB invalidation request valid bit
+pub const VTD_IOTLB_IIRG_DOMAIN: u64 = 0b010 << 60; // Domain-selective invalidation
+pub const VTD_IOTLB_DR: u64 = 1 << 49; // Drain reads
+pub const VTD_IOTLB_DW: u64 = 1 << 48; // Drain writes
+pub const VTD_IOTLB_DID_SHIFT: u64 = 32;
+
+// VT-d PASID Table Entry constants (Scalable Mode, VT-d Spec Rev 4.0 §9.6)
+pub const VTD_PASID_ENTRY_PRESENT: u64 = 1 << 0;
+pub const VTD_PASID_ENTRY_PASID_EN: u64 = 1 << 3;
+pub const VTD_PASID_ENTRY_FLPM_4LVL: u64 = 0 << 1; // 4-level first-level page tables
+pub const VTD_PASID_ENTRY_FLPM_5LVL: u64 = 1 << 1; // 5-level first-level page tables
+pub const VTD_PASID_ENTRY_FLPTP_MASK: u64 = 0x000F_FFFF_FFFF_F000; // bits 51:12
+pub const VTD_PASID_ENTRY_AW_48: u64 = 0 << 7; // 48-bit address width
+pub const VTD_PASID_ENTRY_AW_57: u64 = 1 << 7; // 57-bit address width
+pub const VTD_PASID_ENTRY_SRE: u64 = 1 << 62; // Supervisor Request Enable
+pub const VTD_PASID_ENTRY_EAFE: u64 = 1 << 61; // Extended Access Enable
+pub const VTD_PASID_PDIR_PRESENT: u64 = 1 << 0; // PASID Directory Entry Present
+
+// VT-d Fault Status Register (FSTS) bits (§10.4.14)
+pub const VTD_FSTS_PPF: u32 = 1 << 0; // Primary Pending Fault
+pub const VTD_FSTS_PFO: u32 = 1 << 1; // Primary Fault Overflow
+pub const VTD_FSTS_APF: u32 = 1 << 2; // Advanced Pending Fault
+pub const VTD_FSTS_AFO: u32 = 1 << 3; // Advanced Fault Overflow
+pub const VTD_FSTS_IPF: u32 = 1 << 4; // Invalidate Request Pending Fault
+pub const VTD_FSTS_ICE: u32 = 1 << 5; // Invalidation Completion Error
+pub const VTD_FSTS_ITE: u32 = 1 << 6; // Invalidation Timeout Error
+pub const VTD_FSTS_FLF: u32 = 1 << 7; // First-Level Fault
+
+// VT-d Queued Invalidation constants (§6.5)
+pub const VTD_QI_CMD_SHIFT: u64 = 4;
+pub const VTD_QI_CC: u64 = 0x01; // Context-cache Invalidate
+pub const VTD_QI_IOTLB: u64 = 0x02; // IOTLB Invalidate
+pub const VTD_QI_PASID: u64 = 0x03; // PASID-cache Invalidate
+pub const VTD_QI_GRAN_CC_GLOBAL: u64 = 0 << 4;
+pub const VTD_QI_GRAN_IOTLB_GLOBAL: u64 = 0 << 4;
+pub const VTD_QI_GRAN_IOTLB_DOMAIN: u64 = 1 << 4;
+pub const VTD_QI_DID_SHIFT: u64 = 16;
+pub const VTD_QI_IF_IIG: u64 = 1 << 11; // Interrupt if Invalidation Gate
+
+// AMD IOMMU DTE constants (AMD IOMMU Spec 48882, §2.2.2)
+pub const DTE_FLAG_V: u64 = 1 << 0; // Valid
+pub const DTE_FLAG_TV: u64 = 1 << 1; // Translation Valid
+pub const DTE_FLAG_IR: u64 = 1 << 61; // Interrupt Read
+pub const DTE_FLAG_IW: u64 = 1 << 62; // Interrupt Write
+pub const DTE_FLAG_GV: u64 = 1 << 55; // Guest Valid (PASID/GCR3)
+pub const DTE_FLAG_GIOV: u64 = 1 << 54; // Guest I/O Valid
+pub const DTE_GLX: u64 = 3 << 56; // GCR3 Level mask (GLX shift)
+pub const DTE_GCR3_14_12_SHIFT: u64 = 58;
+pub const DTE_GCR3_30_15_SHIFT: u64 = 16;
+pub const DTE_GCR3_51_31_SHIFT: u64 = 43;
+pub const DTE_GPT_LEVEL_SHIFT: u64 = 54;
+pub const DTE_FLAG_IOTLB: u64 = 1 << 32; // IOTLB invalidate needed
+pub const AMDVI_DTE_SIZE: usize = 32; // 256-bit = 4x64-bit
+const VTD_MMIO_POLL_SPINS: usize = 100_000;
 
 // AMD-Vi yazmaç ofseti haritası
 pub const AMDVI_CONTROL_REG: u32 = 0x00;
@@ -1591,9 +1648,38 @@ impl IommuUnit {
         device: u8,
         function: u8,
     ) -> Result<(), IommuError> {
-        // Gerçek uygulamada: IOMMU'nun geçersiz kılma kuyruğunu
-        // PCIe cihazının QDEP değeriyle eşleştirmek gerekir
-        Ok(())
+        let mmio_ok = self.mmio.lock().is_some();
+        if !mmio_ok {
+            return Err(IommuError::HardwareError);
+        }
+
+        let ats = self
+            .probe_pci_ats(bus, device, function)
+            .ok_or(IommuError::NotSupported)?;
+        let requested_depth = (ats.qdep as u32).saturating_add(1);
+
+        let mut prq = self.page_request_queue.lock();
+        let queue = prq.as_mut().ok_or(IommuError::InitFailed)?;
+        if !queue.programmed {
+            return Err(IommuError::InitFailed);
+        }
+        if requested_depth > queue.entry_count {
+            return Err(IommuError::NoMemory);
+        }
+
+        match self.vendor {
+            IommuVendor::Intel => {
+                let mut gcmd = self.read_mmio_reg(VTD_GCMD_REG) as u32;
+                gcmd |= VTD_GCMD_QIE;
+                self.write_mmio_reg(VTD_GCMD_REG, gcmd as u64);
+                if !self.wait_mmio_bit_set(VTD_GSTS_REG, VTD_GSTS_QIES) {
+                    return Err(IommuError::HardwareError);
+                }
+                Ok(())
+            }
+            IommuVendor::Amd => Ok(()),
+            _ => Err(IommuError::UnsupportedVendor),
+        }
     }
 
     /// SMMUv3 stream table entry oluşturur
@@ -1747,25 +1833,74 @@ impl IommuUnit {
 
     /// IOTLB (I/O TLB) geçersiz kılar: çeviri önbelleğini temizler.
     /// Eşleme değişikliklerinden sonra çağrılmalıdır.
-    pub fn flush_iotlb(&self, domain_id: u32, addr: u64) {
-        // Gerçek uygulamada: VTD_IOTLB_REG'e geçersiz kılma komutu yazılır
+    pub fn flush_iotlb(&self, domain_id: u32, _addr: u64) -> Result<(), IommuError> {
+        if self.mmio.lock().is_none() {
+            return Err(IommuError::HardwareError);
+        }
+        if self.get_domain(domain_id).is_none() {
+            return Err(IommuError::DomainNotFound);
+        }
+
+        match self.vendor {
+            IommuVendor::Intel => {
+                let request = vtd_domain_iotlb_request(domain_id);
+                self.write_mmio_reg(VTD_IOTLB_REG, request);
+
+                if self.wait_mmio_bit_clear(VTD_IOTLB_REG, VTD_IOTLB_IVT) {
+                    Ok(())
+                } else {
+                    Err(IommuError::HardwareError)
+                }
+            }
+            _ => Err(IommuError::UnsupportedVendor),
+        }
     }
 
     /// Yazma tamponunu temizler: askıdaki DMA yazmaları tamamlanır
-    pub fn flush_write_buffer(&self) {
-        // Gerçek uygulamada: VTD_GCMD_WBF biti ayarlanır ve GSTS beklenir
+    pub fn flush_write_buffer(&self) -> Result<(), IommuError> {
+        if self.mmio.lock().is_none() {
+            return Err(IommuError::HardwareError);
+        }
+        match self.vendor {
+            IommuVendor::Intel => {
+                let cap = self.read_mmio_reg(VTD_CAP_REG);
+                let rwbf_required = (cap & VTD_CAP_RWBF) != 0;
+
+                let mut gcmd = self.read_mmio_reg(VTD_GCMD_REG) as u32;
+                gcmd |= VTD_GCMD_WBF;
+                self.write_mmio_reg(VTD_GCMD_REG, gcmd as u64);
+
+                if !rwbf_required {
+                    return Ok(());
+                }
+                if self.wait_mmio_bit_clear(VTD_GSTS_REG, VTD_GSTS_WBFS) {
+                    Ok(())
+                } else {
+                    Err(IommuError::HardwareError)
+                }
+            }
+            _ => Err(IommuError::UnsupportedVendor),
+        }
     }
 
-    /// IOMMU hata kesmesini işler ve hatayı kaydeder
-    pub fn handle_fault(&self) {
-        let fault = IommuFault {
-            source_id: 0,
-            domain_id: 0,
-            address: 0,
-            fault_type: IommuFaultType::TranslationFailed,
-            timestamp: crate::task::scheduler::get_ticks() as u64,
-        };
-        self.fault_recording.lock().push(fault);
+    fn wait_mmio_bit_set(&self, offset: u32, bit: u64) -> bool {
+        for _ in 0..VTD_MMIO_POLL_SPINS {
+            if (self.read_mmio_reg(offset) & bit) != 0 {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
+    }
+
+    fn wait_mmio_bit_clear(&self, offset: u32, bit: u64) -> bool {
+        for _ in 0..VTD_MMIO_POLL_SPINS {
+            if (self.read_mmio_reg(offset) & bit) == 0 {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
     }
 
     pub fn assign_device_to_domain(
@@ -1807,6 +1942,214 @@ impl IommuUnit {
         let domains = self.domains.lock();
         let domain = domains.get(&domain_id).ok_or(IommuError::DomainNotFound)?;
         domain.map_gpu_virtual_address(pasid, gpu_va, phys_addr, size, read, write, dma_buf_fd)
+    }
+
+    // ========================================================================
+    // VT-d PASID TABLE ENTRY PROGRAMMING (Scalable Mode, §9.6)
+    // ========================================================================
+
+    /// VT-d Scalable-Mode PASID Table Entry oluşturur.
+    /// VT-d Spec Rev 4.0 §9.6: 128-bit entry format.
+    /// - lo[0] = Present
+    /// - lo[3] = PASID Enable
+    /// - lo[9:7] = Address Width (0=48-bit, 1=57-bit)
+    /// - lo[11:10] = FLPM (0=4-level, 1=5-level)
+    /// - lo[51:12] = First-Level Page Table Pointer (FLPTP)
+    /// - hi[62] = SRE, hi[61] = EAFE
+    pub fn create_pasid_entry(
+        page_table_root: u64,
+        address_width_57: bool,
+        five_level: bool,
+        supervisor_requests: bool,
+    ) -> (u64, u64) {
+        let mut lo: u64 = VTD_PASID_ENTRY_PRESENT | VTD_PASID_ENTRY_PASID_EN;
+        if address_width_57 {
+            lo |= VTD_PASID_ENTRY_AW_57;
+        } else {
+            lo |= VTD_PASID_ENTRY_AW_48;
+        }
+        if five_level {
+            lo |= VTD_PASID_ENTRY_FLPM_5LVL;
+        } else {
+            lo |= VTD_PASID_ENTRY_FLPM_4LVL;
+        }
+        lo |= page_table_root & VTD_PASID_ENTRY_FLPTP_MASK;
+
+        let mut hi: u64 = 0;
+        if supervisor_requests {
+            hi |= VTD_PASID_ENTRY_SRE;
+        }
+
+        (lo, hi)
+    }
+
+    /// PASID table'ye entry yazar.
+    /// PASID table, ECAP.PSS ile belirlenen boyutta, page-aligned olmalı.
+    /// Her entry 128-bit (2x u64).
+    pub fn write_pasid_entry(
+        &self,
+        pasid_table_base: u64,
+        pasid_index: u32,
+        lo: u64,
+        hi: u64,
+    ) {
+        let entry_offset = (pasid_index as u64) * 16; // 128-bit per entry
+        let addr_lo = pasid_table_base + entry_offset;
+        let addr_hi = pasid_table_base + entry_offset + 8;
+        unsafe {
+            (addr_lo as *mut u64).write_volatile(lo);
+            (addr_hi as *mut u64).write_volatile(hi);
+        }
+    }
+
+    /// PASID-cache invalidate (VT-d §6.2.3).
+    /// PASID table entry değiştikten sonra çağrılmalı.
+    pub fn invalidate_pasid_cache(&self, pasid: u32, domain_id: u16) {
+        // Queued Invalidation: PASID-cache invalidate descriptor
+        // Format: qw0 = [PASID[19:0] | DID[15:0] | index=3 (PASID inv)], qw1 = [gran=0 | IF=1]
+        let qw0 = (pasid as u64) << 32 | (domain_id as u64) << 16 | VTD_QI_PASID;
+        let qw1 = VTD_QI_IF_IIG;
+        self.write_mmio_reg(0x180, qw0); // IQH (Invalidation Queue Head)
+        self.write_mmio_reg(0x188, qw1); // IQT (Invalidation Queue Tail) — trigger
+    }
+
+    // ========================================================================
+    // AMD IOMMU DTE PROGRAMMING (§2.2.2, 256-bit entry)
+    // ========================================================================
+
+    /// AMD IOMMU Device Table Entry oluşturur.
+    /// AMD IOMMU Spec 48882: 256-bit (4x64-bit) entry.
+    /// DTE[0]: V, TV, domain ID, IR, IW
+    /// DTE[1]: GCR3 table root pointer (bits 51:12 split across fields)
+    /// DTE[2]: GPT level, GIOV, GV
+    pub fn create_amd_dte(
+        domain_id: u16,
+        enable_interrupt: bool,
+        gcr3_table_root: u64,
+        gcr3_levels: u8, // 1-3 (GLX field)
+    ) -> [u64; 4] {
+        let mut data = [0u64; 4];
+
+        // data[0]: V=1, TV=1, domain_id, IR/IW
+        data[0] |= DTE_FLAG_V;
+        data[0] |= DTE_FLAG_TV;
+        data[0] |= domain_id as u64;
+        if enable_interrupt {
+            data[0] |= DTE_FLAG_IR;
+            data[0] |= DTE_FLAG_IW;
+        }
+
+        // data[0]: GCR3 table root pointer (split into 3 fields)
+        if gcr3_table_root != 0 {
+            let gcr3 = gcr3_table_root >> 12; // bits 51:12
+            data[0] |= (gcr3 & 0x7) << DTE_GCR3_14_12_SHIFT; // bits 14:12
+            data[1] |= (gcr3 >> 3) & 0xFFFF; // bits 30:15 → data[1][31:16]
+            data[0] |= ((gcr3 >> 19) & 0x1FFFFF) << DTE_GCR3_51_31_SHIFT; // bits 51:31
+            data[0] |= DTE_FLAG_GV;
+        }
+
+        // data[2]: GPT level (GLX)
+        let glx = (gcr3_levels.saturating_sub(1) as u64) & 0x3;
+        data[2] |= glx << DTE_GPT_LEVEL_SHIFT;
+
+        data
+    }
+
+    /// AMD DTE'yi 256-bit atomic write ile günceller.
+    /// Linux kernel pattern: DTE[V] son yazılır (set), ilk silinir (clear).
+    pub fn write_amd_dte(&self, dev_table_base: u64, devid: u16, dte: [u64; 4]) {
+        let base = dev_table_base + (devid as u64) * AMDVI_DTE_SIZE as u64;
+        unsafe {
+            // Lower 128-bit first, then upper 128-bit
+            // V bit is in data[0], so it's written last naturally
+            (base as *mut u64).write_volatile(dte[0]);
+            (base.wrapping_add(8) as *mut u64).write_volatile(dte[1]);
+            (base.wrapping_add(16) as *mut u64).write_volatile(dte[2]);
+            (base.wrapping_add(24) as *mut u64).write_volatile(dte[3]);
+        }
+        // IOMMU DTE sync — hardware'a görünür olması için
+        core::sync::atomic::fence(Ordering::SeqCst);
+    }
+
+    // ========================================================================
+    // VT-d FAULT HANDLING (FSTS/FEDATA/FEADDR, §10.4.14-18)
+    // ========================================================================
+
+    /// IOMMU fault event register'larını okur ve hatayı kaydeder.
+    /// VT-d Spec §10.4: Fault recording via FSTS + FEDATA + FEADDR.
+    pub fn handle_fault(&self) {
+        let fsts = self.read_mmio_reg(VTD_FSTS_REG) as u32;
+        if fsts == 0 {
+            return;
+        }
+
+        let fedata = self.read_mmio_reg(VTD_FEDATA_REG);
+        let feaddr = self.read_mmio_reg(VTD_FEADDR_REG);
+
+        // Fault source ID: FEDATA[31:16] = Source ID (BDF)
+        let source_id = ((fedata >> 16) & 0xFFFF) as u16;
+        // Fault type: FEDATA[3:0] = Fault Reason
+        let fault_reason = (fedata & 0xF) as u8;
+        // Fault address: FEADDR (or FEUADDR for 64-bit)
+
+        let fault_type = match fault_reason {
+            0 => IommuFaultType::ReadViolation,
+            1 => IommuFaultType::WriteViolation,
+            2 => IommuFaultType::TranslationFailed,
+            _ => IommuFaultType::AccessViolation,
+        };
+
+        let fault = IommuFault {
+            source_id,
+            domain_id: ((fedata >> 8) & 0xFF) as u32,
+            address: feaddr,
+            fault_type,
+            timestamp: crate::task::scheduler::get_ticks() as u64,
+        };
+
+        crate::serial_println!(
+            "[IOMMU] Fault: src={:#06x} dom={} addr={:#x} reason={} type={:?}",
+            source_id, fault.domain_id, feaddr, fault_reason, fault_type
+        );
+
+        self.fault_recording.lock().push(fault);
+
+        // Clear fault status — write 1 to clear
+        self.write_mmio_reg(VTD_FSTS_REG, fsts as u64);
+    }
+
+    // ========================================================================
+    // ATS INVALIDATE WITH DEVICE IOTLB (VT-d §6.2, PCIe ATS Spec)
+    // ========================================================================
+
+    /// ATS Invalidate — device IOTLB'yi temizler.
+    /// Cihaz ATS enabled olduğunda kendi IOTLB'sini tutar;
+    /// IOMMU mapping değişince device IOTLB de invalidate edilmeli.
+    pub fn ats_invalidate(&self, requester_id: u16, address: u64, size_pages: u32) {
+        if !self.ats_supported {
+            return;
+        }
+
+        // ATS Invalidate Request: 64-bit message to device
+        // Format: [Address[63:12] | Size[5:0] | Reserved[3:0] | Type=0]
+        let ats_msg_lo = (address & !0xFFF) as u32;
+        let ats_msg_hi = ((address >> 32) as u32) & 0xFFFFF;
+        let size_field = (size_pages.saturating_sub(1) as u32) & 0x3F;
+
+        // Device'e ATS Invalidate mesajı gönder (MMIO through PCIe config)
+        let bus = (requester_id >> 8) as u8;
+        let device = ((requester_id >> 3) & 0x1F) as u8;
+        let function = (requester_id & 0x7) as u8;
+
+        // ATS Capability offset'ini bul ve Invalidate mesajı yaz
+        if let Some(ats_cap) = self.probe_pci_ats(bus, device, function) {
+            let ctrl_reg = ats_cap.offset + 4;
+            // ATS Invalidate: address + size through device's ATS interface
+            self.write_pci_config(bus, device, function, ctrl_reg, ats_msg_lo);
+        }
+
+        // IOMMU tarafında da IOTLB flush
+        let _ = self.flush_iotlb(0, address);
     }
 }
 
@@ -1983,6 +2326,8 @@ pub enum IommuError {
     InvalidAddress, // Geçersiz DMA adresi
     DeviceNotFound, // Belirtilen PCI cihazı bulunamadı
     DomainNotFound, // Belirtilen domain bulunamadı
+    HardwareError,
+    UnsupportedVendor,
 }
 
 // ============================================================================
@@ -2117,4 +2462,78 @@ fn run_self_test() -> bool {
     let cleared = domain.translate(TEST_DMA).is_none();
 
     mapped && unmapped_neighbor && unmapped && cleared
+}
+
+fn vtd_domain_iotlb_request(domain_id: u32) -> u64 {
+    VTD_IOTLB_IVT
+        | VTD_IOTLB_IIRG_DOMAIN
+        | VTD_IOTLB_DR
+        | VTD_IOTLB_DW
+        | ((domain_id as u64) << VTD_IOTLB_DID_SHIFT)
+}
+
+#[cfg(test)]
+pub(crate) fn phase5_kickoff_contract_green() -> bool {
+    const TEST_DMA: u64 = 0x4000_0000;
+    const TEST_PHYS: u64 = 0x0020_0000;
+    const TEST_SIZE: u64 = 0x1000;
+
+    let domain = IommuDomain::new(7);
+    if domain
+        .map(TEST_DMA, TEST_PHYS, TEST_SIZE, true, true)
+        .is_err()
+    {
+        return false;
+    }
+
+    let map_contract = matches!(
+        domain.translate(TEST_DMA),
+        Some(translation) if translation.present
+            && translation.phys_addr == TEST_PHYS
+            && translation.size == TEST_SIZE
+            && translation.read_perm
+            && translation.write_perm
+    ) && domain.translate(TEST_DMA + TEST_SIZE).is_none();
+
+    let invalidate_contract = {
+        let req = vtd_domain_iotlb_request(0x1234);
+        (req & VTD_IOTLB_IVT) != 0
+            && (req & VTD_IOTLB_IIRG_DOMAIN) == VTD_IOTLB_IIRG_DOMAIN
+            && (req & VTD_IOTLB_DR) != 0
+            && (req & VTD_IOTLB_DW) != 0
+            && (((req >> VTD_IOTLB_DID_SHIFT) & 0xFFFF) as u32 == 0x1234)
+    };
+
+    map_contract && invalidate_contract && domain.unmap(TEST_DMA) && domain.translate(TEST_DMA).is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vtd_domain_iotlb_request_encodes_domain_and_granularity() {
+        let value = vtd_domain_iotlb_request(0x1234);
+        assert_ne!(value & VTD_IOTLB_IVT, 0);
+        assert_eq!(value & (0b111 << 60), VTD_IOTLB_IIRG_DOMAIN);
+        assert_ne!(value & VTD_IOTLB_DR, 0);
+        assert_ne!(value & VTD_IOTLB_DW, 0);
+        assert_eq!(((value >> VTD_IOTLB_DID_SHIFT) & 0xFFFF) as u32, 0x1234);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn flush_iotlb_rejects_unsupported_vendor_even_with_mmio_and_domain() {
+        let unit = IommuUnit::new(0, IommuVendor::Amd, 0);
+        let mut regs = [0u64; 64];
+        unit.bind_verification_mmio(regs.as_mut_ptr() as u64);
+        let domain_id = unit.create_domain();
+        let result = unit.flush_iotlb(domain_id, 0);
+        assert_eq!(result, Err(IommuError::UnsupportedVendor));
+    }
+
+    #[test]
+    fn phase5_kickoff_contract_is_green() {
+        assert!(phase5_kickoff_contract_green());
+    }
 }

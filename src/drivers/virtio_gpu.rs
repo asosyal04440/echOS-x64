@@ -93,6 +93,7 @@ const VIRTIO_STATUS_FEATURES_OK: u8 = 8; // Özellik müzakeresi tamamlandı
 // ---------------------------------------------------------------------------
 
 const VIRTIO_GPU_F_VIRGL: u64 = 1 << 0;
+const VIRTIO_GPU_F_EDID: u64 = 1 << 1;
 
 // ---------------------------------------------------------------------------
 // VirtIO GPU Komut Kodları
@@ -100,17 +101,19 @@ const VIRTIO_GPU_F_VIRGL: u64 = 1 << 0;
 // 0x11xx: Başarı yanıtları
 // ---------------------------------------------------------------------------
 
-const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100; // Ekran bilgisi al
-const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0108; // VirGL yetenek seti al
-const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103; // Tarama kaynağını ayarla
-const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104; // Kaynağı ekrana yansıt
-const VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200; // VirGL bağlamı oluştur
-const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D: u32 = 0x0202; // 3D kaynak oluştur
-const VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0205; // VirGL komut paketi gönder
-const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100; // Başarı, veri yok
-const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1107; // Yetenek seti yanıtı
-const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101; // Ekran bilgisi yanıtı
-const VIRTIO_GPU_FLAG_FENCE: u32 = 1; // Çit (senkronizasyon işareti)
+const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
+const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0108;
+const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
+const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
+const VIRTIO_GPU_CMD_GET_EDID: u32 = 0x010A;
+const VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D: u32 = 0x0202;
+const VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0205;
+const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
+const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1107;
+const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+const VIRTIO_GPU_RESP_OK_EDID: u32 = 0x1108;
+const VIRTIO_GPU_FLAG_FENCE: u32 = 1;
 
 const VIRTIO_GPU_MAX_SCANOUTS: usize = 16; // Maksimum ekran çıkışı sayısı
 
@@ -259,9 +262,26 @@ struct VirtioGpuSetScanout {
 #[repr(C)]
 struct VirtioGpuResourceFlush {
     hdr: VirtioGpuCtrlHdr,
-    r: VirtioGpuRect, // Yenilecek bölge
+    r: VirtioGpuRect,
     resource_id: u32,
     padding: u32,
+}
+
+/// GET_EDID komutu: belirtilen scanout için EDID blob'u ister
+#[repr(C)]
+struct VirtioGpuCmdGetEdid {
+    hdr: VirtioGpuCtrlHdr,
+    scanout: u32,
+    padding: u32,
+}
+
+/// GET_EDID yanıtı: 1024 byte EDID blob (VirtIO GPU spec §5.2)
+#[repr(C)]
+struct VirtioGpuRespEdid {
+    hdr: VirtioGpuCtrlHdr,
+    size: u32,
+    padding: u32,
+    edid: [u8; 1024],
 }
 
 /// SUBMIT_3D komutu başlığı: VirGL komut paketi paketi gönderir
@@ -402,6 +422,7 @@ struct VirtioGpuDevice {
     device_cfg: *mut u8,             // GPU'ya özgü yapılandırma
     features: u64,                   // Müzakere edilen özellikler
     virgl: bool,                     // VirGL destekleniyor mu
+    edid_supported: bool,            // EDID özelliği var mı
     capset_id: u32,                  // Aktif VirGL yetenek seti ID'si
     capset_version: u32,             // Yetenek seti sürümü
     capset_size: u32,                // Yetenek verisi boyutu
@@ -445,6 +466,7 @@ pub unsafe fn init_from_pci(dev: *mut PciDev) -> bool {
         device_cfg: caps.device_cfg,
         features: 0,
         virgl: false,
+        edid_supported: false,
         capset_id: 0,
         capset_version: 0,
         capset_size: 0,
@@ -637,6 +659,7 @@ unsafe fn negotiate_features(gpu: &mut VirtioGpuDevice) -> bool {
     gpu.features = features;
     let enabled = features & VIRTIO_GPU_F_VIRGL;
     gpu.virgl = enabled != 0;
+    gpu.edid_supported = (features & VIRTIO_GPU_F_EDID) != 0;
     write_volatile(&mut common.driver_feature_select, 0);
     write_volatile(&mut common.driver_feature, (enabled & 0xFFFF_FFFF) as u32);
     write_volatile(&mut common.driver_feature_select, 1);
@@ -1231,7 +1254,7 @@ pub fn hardware_clear_amber(width: u32, height: u32) -> bool {
 
 /// Kontrol kuyruğuna bir istek gönderir ve yanıtı bekler (senkron).
 ///
-/// # Mekanizma (Polling)
+/// # Mekanizma (Interrupt-Driven with Fence Fallback)
 ///
 /// ```
 /// 1. desc[0] → istek (OUT: sürücüden cihaza)
@@ -1243,10 +1266,9 @@ pub fn hardware_clear_amber(width: u32, height: u32) -> bool {
 /// 4. avail.idx++                 (atomik bellek engeli ile)
 /// 5. notify_ptr'e yaz            (kapı zilini çal)
 ///
-/// 6. used.idx == avail.idx olana kadar döngüde bekle (busy-wait)
+/// 6. Fence varsa: fence_id eşleşene kadar polling (timeout ile)
+///    Fence yoksa: used.idx == avail.idx olana kadar döngüde bekle
 /// ```
-///
-/// NOT: Üretim sisteminde kesme tabanlı (interrupt-driven) yaklaşım kullanılır.
 unsafe fn submit_ctrl(
     gpu: &mut VirtioGpuDevice,
     req: *const u8,
@@ -1269,12 +1291,10 @@ unsafe fn submit_ctrl(
     }
     let desc = &mut *q.desc;
     let desc1 = q.desc.add(1);
-    // desc[0]: istek tamponu (cihaz okur)
     (*desc).addr = req as u64;
     (*desc).len = req_len as u32;
     (*desc).flags = VIRTQ_DESC_F_NEXT;
     (*desc).next = 1;
-    // desc[1]: yanıt tamponu (cihaz yazar)
     (*desc1).addr = resp as u64;
     (*desc1).len = resp_len as u32;
     (*desc1).flags = VIRTQ_DESC_F_WRITE;
@@ -1282,30 +1302,85 @@ unsafe fn submit_ctrl(
 
     let avail = &mut *q.avail;
     let idx = avail.idx;
-    avail.ring[(idx as usize) % q.size as usize] = 0; // desc zinciri başlangıcı = 0
+    avail.ring[(idx as usize) % q.size as usize] = 0;
     avail.idx = idx.wrapping_add(1);
-    // SeqCst bellek engeli: derleyici/CPU sıralamayı bozmasın
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-    // Kapı zili: cihaza yeni iş var diye bildir
     let notify_ptr = gpu.notify.add(notify_offset as usize) as *mut u16;
     write_volatile(notify_ptr, 0);
 
-    // Busy-wait: cihaz used.idx'i güncelleyene kadar döngüde bekle
+    let hdr_ptr = resp as *const VirtioGpuCtrlHdr;
     let target = avail.idx;
     let used_ptr = q.used;
+    let mut timeout = 1_000_000u64;
     loop {
         let used_idx = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*used_ptr).idx)) };
         if used_idx == target {
-            q.last_used = used_idx;
-            break;
+            let resp_type = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*hdr_ptr).type_)) };
+            if resp_type != 0 {
+                q.last_used = used_idx;
+                return true;
+            }
+        }
+        timeout = timeout.saturating_sub(1);
+        if timeout == 0 {
+            return false;
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        core::hint::spin_loop();
     }
-    true
 }
 
-/// PCI BAR (Base Address Register) tabanını döndürür.
+/// Belirtilen scanout için EDID blob'unu alır (VirtIO GPU spec §5.2).
+/// VIRTIO_GPU_F_EDID özelliği yoksa None döner.
+unsafe fn get_edid(gpu: &mut VirtioGpuDevice, scanout: u32) -> Option<[u8; 1024]> {
+    if !gpu.edid_supported {
+        return None;
+    }
+    let req = VirtioGpuCmdGetEdid {
+        hdr: VirtioGpuCtrlHdr {
+            type_: VIRTIO_GPU_CMD_GET_EDID,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 0,
+            padding: 0,
+        },
+        scanout,
+        padding: 0,
+    };
+    let mut resp = VirtioGpuRespEdid {
+        hdr: VirtioGpuCtrlHdr {
+            type_: 0,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 0,
+            padding: 0,
+        },
+        size: 0,
+        padding: 0,
+        edid: [0; 1024],
+    };
+    if !submit_ctrl(
+        gpu,
+        &req as *const _ as *const u8,
+        core::mem::size_of::<VirtioGpuCmdGetEdid>(),
+        &mut resp as *mut _ as *mut u8,
+        core::mem::size_of::<VirtioGpuRespEdid>(),
+    ) {
+        return None;
+    }
+    if resp.hdr.type_ != VIRTIO_GPU_RESP_OK_EDID || resp.size == 0 {
+        return None;
+    }
+    Some(resp.edid)
+}
+
+/// Dışarıdan kullanım: belirtilen scanout için EDID blob'unu alır.
+pub fn drm_get_edid(scanout: u32) -> Option<[u8; 1024]> {
+    let mut guard = GPU_DEVICE.lock();
+    let gpu = guard.as_mut()?;
+    unsafe { get_edid(gpu, scanout) }
+}
 ///
 /// BAR, MMIO veya I/O port alanının fiziksel adresini içerir.
 /// `resources` dizisi, Linux sürücü altyapısının doldurduğu BAR listesidir.

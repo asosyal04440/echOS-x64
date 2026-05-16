@@ -48,7 +48,7 @@ def dir_entry(name_83: bytes, attr: int, first_cluster: int, size: int) -> bytes
         0,
         0,
         0,
-        0,
+        (first_cluster >> 16) & 0xFFFF,
         0,
         0,
         first_cluster & 0xFFFF,
@@ -105,7 +105,7 @@ def build_fat16_image(
             data_sectors = total_sectors - reserved_sectors - fat_count * fat_sectors - root_dir_sectors
             cluster_count = data_sectors // sectors_per_cluster
             next_fat_sectors = math.ceil(((cluster_count + 2) * 2) / SECTOR_SIZE)
-            if next_fat_sectors == fat_sectors:
+            if next_fat_sectors <= fat_sectors:
                 break
             fat_sectors = next_fat_sectors
         if cluster_count <= 0xFFF5:
@@ -257,6 +257,219 @@ def build_fat16_image(
     cursor += len(root_dir)
     image[cursor : cursor + len(data)] = data
     return bytes(image)
+
+
+def build_fat32_image(
+    total_bytes: int,
+    hidden_sectors: int,
+    efi_bytes: bytes,
+    bootctrl_bytes: bytes,
+    pe_smoke_bundle: bytes | None,
+    curated_bundles: list[bytes],
+    esp_extra_files: list[tuple[str, bytes]],
+) -> bytes:
+    total_sectors = total_bytes // SECTOR_SIZE
+    reserved_sectors = 32
+    fat_count = 2
+    root_cluster = 2
+
+    sectors_per_cluster = 1
+    while True:
+        fat_sectors = 1
+        while True:
+            data_sectors = total_sectors - reserved_sectors - fat_count * fat_sectors
+            cluster_count = data_sectors // sectors_per_cluster
+            next_fat_sectors = math.ceil(((cluster_count + 2) * 4) / SECTOR_SIZE)
+            if next_fat_sectors <= fat_sectors:
+                break
+            fat_sectors = next_fat_sectors
+        if cluster_count >= 0xFFF5:
+            break
+        sectors_per_cluster *= 2
+        if sectors_per_cluster > 128:
+            raise RuntimeError("ESP FAT32 geometry cannot reach FAT32 cluster range")
+
+    cluster_bytes = sectors_per_cluster * SECTOR_SIZE
+    root = FatNode("ROOT", True)
+    efi = FatNode("EFI", True)
+    boot = FatNode("BOOT", True)
+    boot.children.append(FatNode("BOOTX64.EFI", False, efi_bytes))
+    boot.children.append(FatNode("BOOTCTRL.BIN", False, bootctrl_bytes))
+    if pe_smoke_bundle:
+        boot.children.append(FatNode("PESMOKE.BHD", False, pe_smoke_bundle))
+    for index, bundle in enumerate(curated_bundles, start=1):
+        boot.children.append(FatNode(f"APP{index:04d}.BHD", False, bundle))
+    for guest_name, payload in esp_extra_files:
+        boot.children.append(FatNode(guest_name, False, payload))
+    boot.children.append(
+        FatNode(
+            "APPLINFO.TXT",
+            False,
+            b"echOS appliance image\nboot target: EFI/BOOT/BOOTX64.EFI\n",
+        )
+    )
+    efi.children.append(boot)
+    root.children.append(efi)
+
+    nodes: list[FatNode] = []
+
+    def collect(node: FatNode) -> None:
+        nodes.append(node)
+        for child in node.children:
+            if child.directory:
+                collect(child)
+            else:
+                nodes.append(child)
+
+    collect(root)
+
+    fat_entries = [0x00000000] * (cluster_count + 2)
+    fat_entries[0] = 0x0FFFFFF8
+    fat_entries[1] = 0x0FFFFFFF
+    next_cluster = root_cluster
+
+    def allocate(node: FatNode) -> None:
+        nonlocal next_cluster
+        needed_clusters = 1 if node.directory else max(1, math.ceil(len(node.data) / cluster_bytes))
+        node.first_cluster = next_cluster
+        for idx in range(needed_clusters):
+            cluster = next_cluster + idx
+            fat_entries[cluster] = 0x0FFFFFFF if idx == needed_clusters - 1 else cluster + 1
+        next_cluster += needed_clusters
+
+    for node in nodes:
+        allocate(node)
+
+    if root.first_cluster != root_cluster:
+        raise RuntimeError("FAT32 root cluster allocation invariant failed")
+    if next_cluster > len(fat_entries):
+        raise RuntimeError("ESP FAT32 cluster budget exhausted")
+
+    boot_sector = bytearray(SECTOR_SIZE)
+    boot_sector[0:3] = b"\xEB\x58\x90"
+    boot_sector[3:11] = b"ECHOSF32"
+    struct.pack_into("<H", boot_sector, 11, SECTOR_SIZE)
+    boot_sector[13] = sectors_per_cluster
+    struct.pack_into("<H", boot_sector, 14, reserved_sectors)
+    boot_sector[16] = fat_count
+    struct.pack_into("<H", boot_sector, 17, 0)
+    struct.pack_into("<H", boot_sector, 19, 0)
+    boot_sector[21] = 0xF8
+    struct.pack_into("<H", boot_sector, 22, 0)
+    struct.pack_into("<H", boot_sector, 24, 32)
+    struct.pack_into("<H", boot_sector, 26, 64)
+    struct.pack_into("<I", boot_sector, 28, hidden_sectors)
+    struct.pack_into("<I", boot_sector, 32, total_sectors)
+    struct.pack_into("<I", boot_sector, 36, fat_sectors)
+    struct.pack_into("<H", boot_sector, 40, 0)
+    struct.pack_into("<H", boot_sector, 42, 0)
+    struct.pack_into("<I", boot_sector, 44, root_cluster)
+    struct.pack_into("<H", boot_sector, 48, 1)
+    struct.pack_into("<H", boot_sector, 50, 6)
+    boot_sector[64] = 0x80
+    boot_sector[66] = 0x29
+    struct.pack_into("<I", boot_sector, 67, 0xEC71A132)
+    boot_sector[71:82] = b"ECHOS_ESP  "
+    boot_sector[82:90] = b"FAT32   "
+    boot_sector[510:512] = b"\x55\xAA"
+
+    fsinfo = bytearray(SECTOR_SIZE)
+    struct.pack_into("<I", fsinfo, 0, 0x41615252)
+    struct.pack_into("<I", fsinfo, 484, 0x61417272)
+    struct.pack_into("<I", fsinfo, 488, 0xFFFFFFFF)
+    struct.pack_into("<I", fsinfo, 492, 0xFFFFFFFF)
+    fsinfo[510:512] = b"\x55\xAA"
+
+    fat = bytearray(fat_sectors * SECTOR_SIZE)
+    for index, entry in enumerate(fat_entries[: (fat_sectors * SECTOR_SIZE) // 4]):
+        struct.pack_into("<I", fat, index * 4, entry)
+
+    data = bytearray(data_sectors * SECTOR_SIZE)
+
+    def write_cluster(cluster: int, payload: bytes) -> None:
+        start = (cluster - 2) * cluster_bytes
+        data[start : start + len(payload)] = payload
+
+    def build_directory(node: FatNode, parent_cluster: int) -> bytes:
+        directory = bytearray(cluster_bytes)
+        offset = 0
+        directory[offset : offset + 32] = dir_entry(b".          ", 0x10, node.first_cluster, 0)
+        offset += 32
+        directory[offset : offset + 32] = dir_entry(b"..         ", 0x10, parent_cluster, 0)
+        offset += 32
+        for child in node.children:
+            directory[offset : offset + 32] = dir_entry(
+                short_name(child.name),
+                0x10 if child.directory else 0x20,
+                child.first_cluster,
+                child.size,
+            )
+            offset += 32
+        return bytes(directory)
+
+    def write_node(node: FatNode, parent_cluster: int) -> None:
+        if node.directory:
+            write_cluster(node.first_cluster, build_directory(node, parent_cluster))
+            for child in node.children:
+                write_node(child, node.first_cluster)
+            return
+        remaining = node.data
+        cluster = node.first_cluster
+        while remaining:
+            chunk = remaining[:cluster_bytes]
+            write_cluster(cluster, chunk)
+            remaining = remaining[cluster_bytes:]
+            cluster = fat_entries[cluster]
+            if cluster >= 0x0FFFFFF8:
+                break
+
+    write_node(root, root_cluster)
+
+    image = bytearray(total_bytes)
+    image[0:SECTOR_SIZE] = boot_sector
+    image[SECTOR_SIZE : SECTOR_SIZE * 2] = fsinfo
+    image[SECTOR_SIZE * 6 : SECTOR_SIZE * 7] = boot_sector
+    image[SECTOR_SIZE * 7 : SECTOR_SIZE * 8] = fsinfo
+    cursor = reserved_sectors * SECTOR_SIZE
+    image[cursor : cursor + len(fat)] = fat
+    cursor += len(fat)
+    image[cursor : cursor + len(fat)] = fat
+    cursor = (reserved_sectors + fat_count * fat_sectors) * SECTOR_SIZE
+    image[cursor : cursor + len(data)] = data
+    return bytes(image)
+
+
+def build_esp_image(
+    filesystem: str,
+    total_bytes: int,
+    hidden_sectors: int,
+    efi_bytes: bytes,
+    bootctrl_bytes: bytes,
+    pe_smoke_bundle: bytes | None,
+    curated_bundles: list[bytes],
+    esp_extra_files: list[tuple[str, bytes]],
+) -> bytes:
+    if filesystem == "fat16":
+        return build_fat16_image(
+            total_bytes,
+            hidden_sectors,
+            efi_bytes,
+            bootctrl_bytes,
+            pe_smoke_bundle,
+            curated_bundles,
+            esp_extra_files,
+        )
+    if filesystem == "fat32":
+        return build_fat32_image(
+            total_bytes,
+            hidden_sectors,
+            efi_bytes,
+            bootctrl_bytes,
+            pe_smoke_bundle,
+            curated_bundles,
+            esp_extra_files,
+        )
+    raise RuntimeError(f"unsupported ESP filesystem: {filesystem}")
 
 
 def build_seed_loop_image(curated_bundles: list[bytes]) -> bytes:
@@ -601,6 +814,7 @@ def main() -> None:
     parser.add_argument("--pe-smoke-bundle", type=Path)
     parser.add_argument("--bundle", action="append", type=Path, default=[])
     parser.add_argument("--esp-extra-file", action="append", default=[])
+    parser.add_argument("--esp-fat", choices=("fat16", "fat32"), default="fat32")
     args = parser.parse_args()
 
     efi_bytes = args.efi.read_bytes()
@@ -675,7 +889,8 @@ def main() -> None:
 
     esp = next(part for part in layout if part["name"] == "esp")
     esp_bytes = (esp["last_lba"] - esp["first_lba"] + 1) * SECTOR_SIZE
-    esp_image = build_fat16_image(
+    esp_image = build_esp_image(
+        args.esp_fat,
         esp_bytes,
         esp["first_lba"],
         efi_bytes,
@@ -716,6 +931,7 @@ def main() -> None:
 
     manifest = {
         "disk_bytes": disk_bytes,
+        "esp_fat": args.esp_fat,
         "boot_control_seed": {
             "active_slot": args.active_slot,
             "pending_slot": args.pending_slot,
